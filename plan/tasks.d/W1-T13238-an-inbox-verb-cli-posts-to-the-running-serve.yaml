@@ -19,7 +19,7 @@
     - src/lib/inbox-cli-serve.ts
     - "src/lib/config-schema.ts"
     - "src/lib/panel-graph.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With a serve reachable at the configured local address and a write token in state/service-tokens.json, `rmd archive <id>` sends POST /v1/inbox/archive with the bearer write token and prints the route's answer; no in-process classification, ghGateway or resolveOwnerRepo call runs"

@@ -1,0 +1,172 @@
+- id: W1-T14153
+  title: "Every tsc run, warm or cold, asks the memory admission for its measured peak, and a worker tree's memory peak leaves tsc out, so a fix is charged for its agent tree and tsc is charged once by its own admission"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes the memory admission of all four tsc spawn sites and lowers what the fix class learns, so more fixes are admitted on the same headroom
+  origin: "operator-session#fix-memory-estimate-2026-11-21"
+  plan_refs:
+    - W1-T14002
+    - W1-T13842
+    - W1-T13879
+    - W1-T13869
+    - W1-T9951
+    - W1-T7392
+    - W1-T11344
+  files:
+    - src/lib/typecheck-buildinfo.ts
+    - src/lib/typecheck-run.ts
+    - src/lib/commit-message.ts
+    - src/lib/worker-provider.ts
+    - src/lib/merge-probe.ts
+    - src/lib/host-memory-learning.ts
+    - test/memory/a-typecheck-is-charged-by-its-own-admission-not-its-tree.test.ts
+    - test/a-worker-typecheck-starts-warm-in-a-memory-sized-slot-pool.test.ts
+    - test/a-cold-fleet-typecheck-waits-for-a-slot.test.ts
+    - test/npm-run-typecheck-is-incremental-and-slotted.test.ts
+    - test/a-tight-typecheck-runs-fewer-checkers-with-the-same-diagnostics.test.ts
+    - test/ci/gates/every-typecheck-spawn-runs-under-the-go-memory-limit.test.ts
+    - "src/lib/test-slot.ts"
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "A warm `npm run typecheck` (usable buildinfo) asks the admission for TYPECHECK_WARM_PEAK_BYTES once before tsc starts, and starts tsc only after the admission allows it"
+      proof: "grep: W1-T14153 criterion 1: in test/memory/a-typecheck-is-charged-by-its-own-admission-not-its-tree.test.ts"
+    - claim: "A warm `npm run typecheck` whose admission does not allow execution never starts tsc, writes a typecheck.not_run line and exits 75, the same as a cold one"
+      proof: "grep: W1-T14153 criterion 2: in test/memory/a-typecheck-is-charged-by-its-own-admission-not-its-tree.test.ts"
+    - claim: "The warm peak is the measured warm peak, which equals the cold one"
+      proof: "grep: export const TYPECHECK_WARM_PEAK_BYTES = TYPECHECK_COLD_PEAK_BYTES; in src/lib/typecheck-buildinfo.ts"
+    - claim: "The author preflight's warm typecheck is admitted through admitStaticWork at the warm peak: with a usable buildinfo it holds a static admission naming the warm peak while tsc runs, and when that admission does not allow execution (private coordination, a live peer and a headroom reading below the peak at wait bound 0) it returns typecheck NOT_RUN and its spawn port is never called"
+      proof: "grep: W1-T14153 criterion 4: in test/memory/a-typecheck-is-charged-by-its-own-admission-not-its-tree.test.ts"
+    - claim: "The sandboxed worker check asks its admission for typecheckPeakBytes whether or not the buildinfo is usable"
+      proof: "grep: acquireTestSlotAsync(\"typecheck:bwrap\", { memoryBytes: typecheckPeakBytes( in src/lib/worker-provider.ts"
+    - claim: "The merge probe's typecheck asks its admission for typecheckPeakBytes whether or not the buildinfo is usable"
+      proof: "grep: memoryBytes: typecheckPeakBytes( in src/lib/merge-probe.ts"
+    - claim: "A sampled tree of a node member at 500 MiB, a claude member at 200 MiB and a tsc member at 3,500 MiB records a peak of 700 MiB on both the concurrent and the legacy basis, and its sample carries tsc_p 3500"
+      proof: "grep: W1-T14153 criterion 7: in test/memory/a-typecheck-is-charged-by-its-own-admission-not-its-tree.test.ts"
+    - claim: "invariant:tsc-still-bounded — a tsc member left out of the tree's peak is still handed to the tree's onMember hook, so the W1-T11344 descendant memory bound still stops it"
+      kind: guard
+      proof: "grep: W1-T14153 criterion 8: in test/memory/a-typecheck-is-charged-by-its-own-admission-not-its-tree.test.ts"
+    - claim: "invariant:test-runs-unchanged — a node --test runner inside a fix tree still opens its nested test reservation and its members still count in that run's peak and not in the fix peak; a tsc below that runner counts in neither"
+      kind: guard
+      proof: "grep: W1-T14153 criterion 9: in test/memory/a-typecheck-is-charged-by-its-own-admission-not-its-tree.test.ts"
+    - claim: "parseSamples reads tsc_p back, and compaction keeps it"
+      proof: "grep: W1-T14153 criterion 10: in test/memory/a-typecheck-is-charged-by-its-own-admission-not-its-tree.test.ts"
+  rationale: |
+    WHY: fix rounds wait for hours with "NOT DISPATCHED this pass: live host capacity exhausted
+    for this light pass (headroom 4659 MiB ... a fix needs 6492 MiB (measured; typical 960))".
+    The 6492 MiB is mostly one tsc run inside each fix tree. That tsc is charged nowhere of its
+    own: a warm check takes no admission, and its memory is learned into the fix class. So the
+    fix estimate is too high to admit fixes by the normal rung, and the typical rungs then admit
+    fixes whose tsc runs nobody accounted for. Both effects were live on 2026-11-21.
+    OBSERVED, read-only, Azure host, 2026-11-21 12:50-13:10Z:
+    - How the number is made. classEstimate("fix") is a decayed weighted p90 (half-life 24 h,
+      prior 2048 MiB at weight 1) of every instance's fix tree peaks
+      (src/lib/host-memory-learning.ts:61-74, :101-120, :375-391), read from the last 256 KiB of
+      each file in /mnt/scratch/rmd/test-slots/host-memory/estimates. The typical is the p50 of the
+      same samples. A replay of the learner on the store gave p90 6492 and p50 675 from 241
+      samples; the capacity row of 12:23:51Z says 6492 and 960.
+    - Why measured and typical are far apart. The population mixes two kinds of tree. The console
+      daemon (remudero-console-state.ndjson, 192 fix samples in the read window) fixes a small
+      repo: 0 of 208 fix samples above 4000 MiB, p50 about 350. The fleet daemon (state2.ndjson,
+      172 fix samples) fixes this repo: 89 of 172 above 2000 MiB and 67 above 4000. Of state2's
+      samples, 65 of 111 legacy-hwm rows are above 4000 and 2 of 61 concurrent-rss rows are. The
+      p50 comes from the small trees, the p90 from the big ones. It is not a few outliers.
+    - What the big trees are. Four fix trees were live, each running `npm run typecheck`
+      (scripts/typecheck.mjs -> runTypecheck, src/lib/typecheck-run.ts:98): tsc with --noEmit,
+      --incremental, a buildinfo and GOMEMLIMIT 3GiB. tsc RSS was 3789, 3378, 2804 and 1644 MiB;
+      the rest of each tree was 820, 390, 450 and 850 MiB. No slot or static record was held
+      (no slot-*.json or static-*.json in the slot dir), so runTypecheck had judged all four warm:
+      it admits only a cold check (src/lib/typecheck-run.ts:104). A warm check is assumed to peak
+      at half a cold one (TYPECHECK_WARM_PEAK_BYTES, src/lib/typecheck-buildinfo.ts:25-33, measured
+      1.6-1.7 GB on 2026-10-20). Three of the four ran above the 3.25 GiB cold peak. The same
+      "warm only if cold" rule is at src/lib/commit-message.ts:584-589,
+      src/lib/worker-provider.ts:5553-5561 and src/lib/merge-probe.ts:305-328.
+    - What that did. The fix admission had admitted these fixes on the typical rungs (W1-T13879
+      typical-beside-live, src/lib/sweep.ts:20946-20960) and the W1-T13869 retry, sized by a
+      typical of 690-960 MiB and by live residents read before tsc started. The four tsc runs all
+      began between 12:20 and 12:22Z. The daemon container then held 23.5 GB against memory.high
+      15.1 GiB (16,256,073,728 bytes), with swap full at 4.0 GiB, memory PSI full avg10 97.8% and
+      CPU PSI some avg10 1.7%. 41 tasks were in D state and 2 runnable, so load 220 on 8 cores is
+      tasks stalled in memory reclaim, not CPU demand. After 43 minutes each tsc had used only 65
+      to 171 CPU seconds. The daemon wrote no sweep, dispatch, review or worker row after 12:26Z
+      (daemon.pulse quiet_ms 836046 at 12:40Z), and the reservation files were last verified at
+      12:25:40Z.
+    - Reservations are not double counted. A node --test runner inside a fix tree gets its own
+      test reservation and its members leave the fix peak (src/lib/host-memory-learning.ts:546-552,
+      :652-690). tsc has no such treatment, so its memory is in the fix peak. 15 of the 22 open
+      reservations carried holdReason incomplete-process-walk, which c4f92f771 (#19426) releases
+      once the tree is verified gone; that verification stopped with the daemon loop.
+    HISTORY: W1-T7392 (#10612, #10645) made warm checks free on purpose, when a warm check was
+    measured at half a cold one. W1-T9951 made a cold check a memory cost admitted by headroom
+    alone, never by a slot count. This task keeps both mechanisms and every site's own admission
+    call. It drops only the "warm is free" exception, because the warm peak is no longer half.
+    W1-T14002 (queued, operator-approved 2026-11-19) learns the fix class from concurrent-rss
+    samples only. Those samples are almost all trees without a tsc run (2 of 61 above 4000 MiB),
+    so without this task it would charge about 1.1 GiB for trees that reach 2.5-4.6 GiB once tsc
+    starts. With this task the two agree: tsc leaves the tree peak, and a fix tree without tsc is
+    0.4-0.9 GiB (the four live trees above).
+  design: |
+    INVARIANT tsc-still-bounded: a tsc member left out of a tree's peak still reaches the tree's onMember hook.
+    INVARIANT test-runs-unchanged: nested test runs open, measure and release exactly as before.
+    NO NEW CEILING: no count, slot number, constant, env var or config key. Every tsc is admitted
+    by the memory headroom against named peaks, as a cold one already is, so as many run at once
+    as the headroom holds.
+    1. src/lib/typecheck-buildinfo.ts: set TYPECHECK_WARM_PEAK_BYTES = TYPECHECK_COLD_PEAK_BYTES,
+       with its comment giving the 2026-11-21 OBSERVED values (warm runs at 1644-3789 MiB RSS,
+       2026-10-20's 1.6-1.7 GB is history). Export typecheckPeakBytes(warm: boolean): number, which
+       returns the warm or the cold peak.
+    2. src/lib/typecheck-run.ts runTypecheck: always acquire the slot it acquires today for a cold
+       check (same label, same acquireTestSlot call), with memoryBytes typecheckPeakBytes(!cold).
+       A refusal returns 75 with typecheck.not_run, as now. Keep the typecheck.cold line for a cold
+       check; a warm one logs typecheck.warm with where, seed and the slot outcome.
+    3. src/lib/commit-message.ts (preflight typecheck): always call admitStaticWork("typecheck:preflight",
+       { memoryBytes: typecheckPeakBytes(warm), ...testSlot }). Keep the W1-T9951 comment and rule.
+    4. src/lib/worker-provider.ts and src/lib/merge-probe.ts: their existing acquireTestSlotAsync
+       call runs whether or not the buildinfo is usable, with memoryBytes typecheckPeakBytes(warm).
+       lowMemoryTypecheckArgs keeps its current inputs.
+    5. src/lib/host-memory-learning.ts tree sampler: argvOf also marks a member whose argv[0]
+       basename is "tsc" (tsc: true). peakOf leaves such a member out of kb and legacyKb, still
+       calls memberHook for it, and keeps the largest summed tsc VmHWM of a sample as
+       entry.tscPeakMib. finishMeasurement and a nested run's finish return it; recordPeak writes it
+       as tsc_p (like cli_p); parseSamples reads it back; lineOf and compaction keep it. Nothing
+       else in the learner changes.
+    6. test/a-worker-typecheck-starts-warm-in-a-memory-sized-slot-pool.test.ts: its first test now
+       asserts that the warm first check asks for the warm peak and does not run cold (no
+       typecheck.cold line). Other tests in that file are unchanged.
+    6b. Four existing tests assert the old "warm is free" rule and change with it, nothing else in
+       them: test/a-cold-fleet-typecheck-waits-for-a-slot.test.ts (the preflight, merge-probe and
+       bwrap warm checks now hold their admission too), test/npm-run-typecheck-is-incremental-and-slotted.test.ts
+       (a warm npm run typecheck now holds typecheck:npm), and
+       test/a-tight-typecheck-runs-fewer-checkers-with-the-same-diagnostics.test.ts and
+       test/ci/gates/every-typecheck-spawn-runs-under-the-go-memory-limit.test.ts (the warm peak
+       equals the cold one, not half). A plain admitStaticWork never refuses on memory alone (past
+       its wait bound it runs anyway), so criterion 4's refusal is driven through private coordination.
+    7. test/memory/a-typecheck-is-charged-by-its-own-admission-not-its-tree.test.ts, titled
+       "W1-T14153 criterion N: ...", with injected ports (acquireSlot, spawn, testSlot readings,
+       sampler listProcesses/readFile). Load test/setup/tmp-hygiene.ts; never read the real host
+       slot dir or start a real tsc.
+  falsifier: |
+    Leave the warm path unadmitted in runTypecheck: criterion 1 sees no admission call, and
+    criterion 2's refused warm check still starts tsc. Keep the warm peak at half the cold one:
+    criterion 3's grep fails. Leave the preflight's admission behind the cold test: criterion 4's
+    spawn runs. Keep the hasUsableTypecheckBuildInfo condition around the worker or merge-probe
+    call: criteria 5 and 6 find no typecheckPeakBytes call. Keep tsc in peakOf's sums: criterion 7
+    records 4200. Skip memberHook for tsc: criterion 8's hook never sees it. Drop tsc from the
+    nested run as well as the fix tree, or put the runner's members back in the fix peak:
+    criterion 9 fails. Drop tsc_p from parseSamples or lineOf: criterion 10 fails.
+  note: |
+    Id reserved for run-unfiled-1795266565131 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-21. Filing only; not built.
+    Builders: load test/setup/tmp-hygiene.ts in every test run; never run a real tsc or a real
+    slot wait against the host to try it.
+    W1-T14002 (queued) also edits src/lib/host-memory-learning.ts; file overlap orders the two.
+    Not in scope: the fix admission rungs in src/lib/sweep.ts, the learning quantiles and half-life,
+    the memory floor and memory.high, and W1-T14002's choice of basis.
+    After deploy, check on the Azure host: new fix rows in estimates/state2.ndjson carry tsc_p;
+    within 48 h the sweep.fix_capacity fix_estimate_mib is below 2048; and while three or more fix
+    trees are live the daemon container's memory.current stays below memory.high.

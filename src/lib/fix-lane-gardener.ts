@@ -369,33 +369,39 @@ export function defectEventsOf(records: readonly LedgerRecord[], now: number, so
     events.push({ pr, at: tsOf(r), key, evidence, elapsedMs: elapsedMs ?? (typeof r.elapsed_ms === "number" ? r.elapsed_ms : undefined) });
   const pushed = new Map<string, { pr: number; done: LedgerRecord }>();
   const previousRound = new Map<number, LedgerRecord>();
-  const lastSet = new Map<number, string>(), lastFlake = new Map<number, string>(), lastWasFixed = new Map<number, boolean>();
+  const seenDispatches = new Set<string>(), lastFlake = new Map<number, string>();
   for (const r of rows) {
     const pr = prOfRow(r, byHead, byRound);
     const done = typeof r.round_id === "string" ? doneByRound.get(r.round_id) : undefined;
     if (r.step === "fix.dispatch") {
       const coverage = unseamedCoverage(r, sources);
       if (coverage !== undefined) add(r, "coverage-unseamed-catch", coverage);
+      if (pr > 0 && typeof r.round_id === "string") {
+        const key = `${pr}:${r.round_id}`;
+        if (seenDispatches.has(key)) continue;
+        seenDispatches.add(key);
+      }
       const previous = previousRound.get(pr);
       const priorDone = previous && typeof previous.round_id === "string" ? doneByRound.get(previous.round_id) : undefined;
+      const priorFixed = priorDone?.fix_outcome === "FIXED" && prOfRow(priorDone, byHead, byRound) === pr &&
+        tsOf(priorDone) <= tsOf(r);
       const oldReds = previous ? failuresOf(previous) : [], newReds = failuresOf(r);
       if (pr > 0 && previous && typeof r.round_id === "string" && r.round_id !== previous.round_id &&
-          priorDone && prOfRow(priorDone, byHead, byRound) === pr && tsOf(priorDone) >= tsOf(previous) &&
-          tsOf(priorDone) <= tsOf(r) && priorDone.fix_outcome === "FIXED" &&
+          priorFixed && tsOf(priorDone) >= tsOf(previous) &&
           typeof r.head_sha === "string" && priorDone.pushed_head_sha === r.head_sha && r.head_sha !== previous.head_sha &&
           oldReds.length > 0 && newReds.length > 0 && newReds.every(isCensus) &&
           !oldReds.some(a => newReds.some(b => a.check === b.check && a.signature === b.signature))) {
         add(r, "fix-swapped-red-for-census", `round ${String(previous.round_id)} cleared ${checkSet(previous)}; round ${r.round_id} sees ${checkSet(r)} at pushed head ${r.head_sha}`);
       }
-      if (pr > 0) previousRound.set(pr, r);
-      const set = checkSet(r);
-      if (set && pr > 0) {
-        if (lastSet.get(pr) === set && lastWasFixed.get(pr) !== true) add(r, "same-red-set", `the same red set ${set} across consecutive rounds${roundShape(done)}`);
-        lastSet.set(pr, set);
+      if (pr > 0) {
+        const set = checkSet(r);
+        if (set && previous && !priorFixed && checkSet(previous) === set) {
+          add(r, "same-red-set", `the same red set ${set} across consecutive rounds${roundShape(done)}`);
+        }
+        previousRound.set(pr, r);
       }
     } else if (r.step === "fix.done") {
       const outcome = String(r.fix_outcome ?? "");
-      if (pr > 0) lastWasFixed.set(pr, outcome === "FIXED");
       if (outcome === "unstated" && tsOf(r) >= GLOSS_PARSER_FIX_AT) add(r, "fix-outcome:unstated", `the worker's FIX_OUTCOME line was not recognised${roundShape(r)}${quote(r.worker_tail)}`);
       if (outcome === "FIXED" && typeof r.pushed_head_sha === "string") pushed.set(r.pushed_head_sha, { pr, done: r });
       if (outcome === "FLAKE" && pr > 0) {

@@ -65,6 +65,7 @@ import { parse as parseYaml } from "yaml";
 import { readQueuedFeedbackRecords } from "./feedback-landing.js";
 import {
   ASK_TYPE_LABEL,
+  escalationBodyInLegacyOrder,
   escalationTaskId,
   escalationIssueTitle,
   ghIssueGatewayAsync,
@@ -370,7 +371,7 @@ export function isOwnerReaction(r: EscalationIssueReaction, ownerLogin: string):
 /** The option labels an issue's own `## Options` section names, in the exact form {@link
  *  "./escalate.js".renderIssueBody} rendered them (`- **label** — detail`). */
 function parseOptionLabels(issueBody: string): string[] {
-  const section = /##\s*Options\s*\n([\s\S]*?)(?=\n##\s|$)/i.exec(issueBody)?.[1] ?? "";
+  const section = /##\s*Options\s*\n([\s\S]*?)(?=\n##\s|$)/i.exec(escalationBodyInLegacyOrder(issueBody))?.[1] ?? "";
   return [...section.matchAll(/^-\s*\*\*(.+?)\*\*/gm)].map((m) => m[1].trim());
 }
 
@@ -380,7 +381,7 @@ function parseOptionLabels(issueBody: string): string[] {
  *  runs to the body's end, unlike {@link parseOptionLabels}'s `## Options`, since Recommendation
  *  is renderIssueBody's LAST heading — reading to "the next `##`" would swallow the footer too). */
 function parseRecommendation(issueBody: string): string {
-  return /##\s*Recommendation\s*\n([^\n]*)/i.exec(issueBody)?.[1]?.trim() ?? "";
+  return /##\s*Recommendation\s*\n([^\n]*)/i.exec(escalationBodyInLegacyOrder(issueBody))?.[1]?.trim() ?? "";
 }
 
 /**

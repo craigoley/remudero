@@ -2739,9 +2739,12 @@ export function runReadModelWorker(
     ...(data.slowLane ? { instanceInboxes: data.instances.flatMap(i => i.inbox ? [i.inbox] : []),
       codeHealth: data.slowLane.codeHealth ?? { stateDir: data.stateDir, instances: data.instances.map(i => ({ name: i.name, stateDir: i.ledgerDir, repository: i.repo })) },
       analytics: data.slowLane.analytics ?? { instances: data.instances.map(i => ({ name: i.name, stateDir: i.ledgerDir, repository: i.repo })) } } : {}),
-    ...(dailyProgress ? { dailyProgress } : {}) } : undefined;
+    ...(dailyProgress ? { dailyProgress } : {}),
+    // W1-T14114: the slow lane's inbox units ask for the ops catalog over this worker's own bridge to serve.
+    ...(data.catalogBridgeVersion === undefined ? {} : { catalogBridgeVersion: data.catalogBridgeVersion }) } : undefined;
   let snapshotWrites = Promise.resolve();
-  if (slowLaneConfig) slowLane = threadSlowLane({ config: slowLaneConfig, log, onBodies: (built) => views.accept(built), onSnapshot: (write) => {
+  if (slowLaneConfig) slowLane = threadSlowLane({ config: slowLaneConfig, log, onBodies: (built) => views.accept(built),
+    onCatalogRequest: (request) => port.postMessage(request), onSnapshot: (write) => {
     snapshotWrites = snapshotWrites.then(async () => {
       if (stopRequested()) return;
       const instance = data.instances.find(i => i.name === write.instance);
@@ -2796,7 +2799,10 @@ export function runReadModelWorker(
     timer = setTimeout(loop, data.tickMs);
   };
   port.on("message", (msg) => {
-    if (isBoardCatalogReply(msg)) return void views.catalog(msg);
+    if (isBoardCatalogReply(msg)) {
+      slowLane?.catalog(msg);
+      return void views.catalog(msg);
+    }
     if (answerThreadHeaps(port, msg, threads, views.holdsOf)) return;
     if (msg.type === "shadow") return void views.shadow(msg as unknown as ShadowRequest);
     if (msg.type === "want") return void views.want((msg as unknown as { view: string }).view, (msg as unknown as { key: string }).key);

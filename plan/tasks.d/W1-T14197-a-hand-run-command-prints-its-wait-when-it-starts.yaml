@@ -1,0 +1,88 @@
+- id: W1-T14197
+  title: "A hand-run command prints a wait line when its first GitHub read pause starts, not only after it ends, so `rmd review` is never silent for 180 s"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing (four test or source surfaces): one extra stderr line in planGhReadCadence's addPause, and three test files; no change to any wait, refusal, queue, stamp or mode
+  origin: "operator-session#merged-pr-gap-check-2026-11-21"
+  plan_refs:
+    - W1-T12058
+    - W1-T7957
+  files:
+    - src/lib/github-transport.ts
+    - test/github/a-hand-run-command-waits-for-its-read-turn.test.ts
+    - test/next-task-id-waits-for-the-shared-read-floor.test.ts
+    - test/check-test-test-next-task-id-waits-for-the-shared-read-floor-test-ts.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:start-line-before-sleep — a wait-mode read whose stamp is 5 s old prints a line `gh read cadence (wait, W1-T7957): waiting 175s for the 180s floor ...` before its first sleep starts: in one ordered list of warn and sleep events, the start line comes first"
+      kind: guard
+      proof: "grep: W1-T14197 criterion 1: in test/github/a-hand-run-command-waits-for-its-read-turn.test.ts"
+    - claim: "The async twin (applyGhReadCadenceAsync) prints the same start line before its first awaited sleep"
+      proof: "grep: W1-T14197 criterion 2: in test/github/a-hand-run-command-waits-for-its-read-turn.test.ts"
+    - claim: "A read prints one start line and one closing line however many pauses it takes: with one live ticket ahead, the start line states only the first pause, and the closing `waited <total>s` line states the sum of every sleep, as today"
+      proof: "grep: W1-T14197 criterion 3: in test/github/a-hand-run-command-waits-for-its-read-turn.test.ts"
+    - claim: "A read that takes no pause prints neither line, and a loop wait that loopSafeGhSleep refuses prints no start line"
+      proof: "grep: W1-T14197 criterion 4: in test/github/a-hand-run-command-waits-for-its-read-turn.test.ts"
+    - claim: "An advisory read prints no wait line, checked by matching each line against /^gh read cadence \\(wait/, which both the start and the closing line match"
+      proof: "grep: W1-T14197 criterion 5: in test/github/a-hand-run-command-waits-for-its-read-turn.test.ts"
+    - claim: "The W1-T7957 stamp-during-the-wait test pins one start line stating 60s and one closing line stating 210s"
+      proof: "grep: waiting 60s for the 180s floor in test/next-task-id-waits-for-the-shared-read-floor.test.ts"
+  rationale: |
+    WHY: W1-T12058 criterion 3 says "the person sees why the command paused". As merged in #19924, the
+    person sees it only after the pause ends. A hand-run `rmd review` can be silent for 180 s or more, so
+    the operator can think it is hung and press Ctrl-C, which throws the wait away.
+    READ FROM THE CODE (origin/main f80f72841, src/lib/github-transport.ts):
+    - evaluate() (line 1941): "a wait-mode read prints nothing here; `reportWait` prints when its turn
+      comes". The up-front line was removed in review round 3 of #19924, because a total printed up
+      front is a forecast that a foreign stamp or an expired ticket can make wrong.
+    - addPause (line 1894) only adds to pausedMs. reportWait (line 1905) prints the one "waited Ns" line.
+    - applyGhReadCadence calls plan.reportWait() at line 2108, after the do/while sleep loop ends.
+      applyGhReadCadenceAsync calls it at line 2147, also after its loop. So nothing is printed while
+      the command waits.
+    TEST WEAKNESS: test/github/a-hand-run-command-waits-for-its-read-turn.test.ts line 97 asserts that
+    no advisory warning contains "waiting". The code prints "waited", never "waiting", so that assert
+    passes whatever the advisory path prints. It cannot fail.
+  design: |
+    INVARIANT start-line-before-sleep: the first pause of a read is printed before that pause is slept.
+    KEEP: the closing line, its text and its total (the sum of the real sleeps). The start line states
+    only the first pause and its reason, never a total, so review round 3's objection does not apply.
+    1. src/lib/github-transport.ts planGhReadCadence: in addPause, when mode is "wait", ms > 0 and no
+       pause is recorded yet for this read (pausedMs === 0 and pauseWhy is empty), print once
+       `gh read cadence (wait, W1-T7957): waiting ${pauseS(ms)}s for <reason> on <stampPath>; the
+       closing line states the whole wait`. <reason> is the same text addPause puts in pauseWhy.
+       addPause is already called before blockingSleep and, on the loop, after loopSafeGhSleep's
+       refusal check, so no other call site changes. reportWait resets the state so a later read in
+       the same burst gets its own start line.
+    2. Update the line 1941 comment and the W1-T12058 comment above pauseReason to say a start line
+       and a closing line are printed.
+    3. Tests in test/github/a-hand-run-command-waits-for-its-read-turn.test.ts, titled
+       "W1-T14197 criterion N: ...". Use the existing fixture with warn and sleepSync/sleep writing to
+       one ordered events list. Existing W1-T12058 criterion 3 tests that count lines starting with
+       "gh read cadence (wait" now count closing lines (match "waited"), and each also sees one start
+       line. Replace the line 97 assert with the criterion 5 regex.
+    4. test/next-task-id-waits-for-the-shared-read-floor.test.ts line 93 test: pin the start line
+       ("waiting 60s for the 180s floor") and the closing line ("waited 210s for the 180s floor").
+    5. PINNED: test/check-test-test-next-task-id-waits-for-the-shared-read-floor-test-ts.test.ts asserts
+       exactly one warning for a wait-mode read. With the start line a wait-mode read prints two, so the
+       test asserts two lines in wait mode and one in advisory mode, each naming its mode.
+    Load test/setup/tmp-hygiene.ts in every test run.
+  falsifier: |
+    On origin/main criterion 1 fails: the first warn event comes after every sleep event. Print the
+    start line from reportWait or after the loop: criteria 1 and 2 still see it after the sleeps. Print
+    it on every pause: criterion 3 sees two start lines. Print the sum so far or a forecast total in the
+    start line: criterion 3's one-ticket-ahead case states more than the first pause. Print it before
+    loopSafeGhSleep's refusal check: criterion 4 sees a start line on a refused loop wait. Make the
+    advisory path print a "waited" line: criterion 5 fails, where the old "waiting" assert passed.
+  note: |
+    Id reserved for run-unfiled-1795296839941 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-21. Filing only; not built.
+    Gap found by checking merged PR #19924 against W1-T12058 criterion 3, read-only on origin/main.
+    Builders: run tests only as `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`.
+    No test calls the real GitHub API or sleeps for real.
+    Not in scope: the cadence window, the default modes, the queue and the shared read gap.

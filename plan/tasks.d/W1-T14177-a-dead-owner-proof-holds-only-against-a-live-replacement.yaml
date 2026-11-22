@@ -1,0 +1,51 @@
+- id: W1-T14177
+  title: A dead review owner's proof is superseded only by a live replacement, and the action-time re-check reads the live review status before admitting another review
+  repo: remudero
+  depends_on: [W1-T14035]
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: high # the review re-run decision on every PR whose review owner died
+  band_meaning: span
+  origin: operator-session#pr-backlog-sweep-2026-11-21
+  plan_refs: [W1-T14035, W1-T14120]
+  files:
+    - src/lib/sweep.ts
+    - src/cli/commands/review.ts
+    - src/cli/commands/sweep.ts # amended 2026-11-21 for PR 20070: the one-shot sweep path wires the act-time re-reader the other two paths already pass
+    - src/lib/tick-read-worker.ts # amended 2026-11-21 for PR 20070: a recognisable claim in /status bypasses the status history there, so the act-time re-check must read the history's newest id
+    - test/review/a-dead-owner-proof-holds-only-against-a-live-replacement.test.ts
+    - test/review-status-pending.test.ts # amended 2026-11-22 for PR 20070: its dead-owner fixture must carry the live status id the act-time re-check now reads
+    - test/sweep/a-dead-review-claim-is-rerun-while-checks-are-pending.test.ts # amended 2026-11-22 for PR 20070: its sweep fixture must wire the act-time re-reader and the live status id
+  status: queued
+  attempts: 0
+  rationale: |
+    Two findings from W1-T14035's round-11 review (#19922, merged 2026-11-21 19:03:35Z on 66e66ab89) that the merged
+    build left unfixed.
+    c1: deadOwnerProofSuperseded treats a COMPLETED pending hold, which promise-harvest records under a different
+    run id, as a live replacement. The green-CI harvest retry then keeps answering wait even after the claim ages
+    out, so the PR waits on a review that is already over.
+    c3: the action-time re-check reads only the ledger. A live takeover that GitHub accepted before its ledger append
+    is missed, and another review is admitted on the old owner's death proof.
+  design: |
+    c1: in src/lib/sweep.ts, deadOwnerProofSuperseded counts a pending hold as a replacement only while it is live:
+    a hold whose promise-harvest row records completion, under any run id, does not supersede the dead owner's proof.
+    c3: before admitting a review on a dead owner's proof (src/cli/commands/review.ts and the sweep's admission),
+    re-read the live remudero-review status id. If it differs from the history's newest entry id (the W1-T14035
+    binding), a takeover is live and no second review is admitted.
+
+    INVARIANT one-live-review-owner: a review is admitted on a dead owner's proof only when no live replacement exists, read from both the ledger and the live status.
+  acceptance:
+    - claim: "A completed pending hold recorded under another run id does not supersede a dead owner's proof, so the green-CI harvest retry stops answering wait once the claim ages out"
+      proof: "grep: W1-T14177 criterion 1: in test/review/a-dead-owner-proof-holds-only-against-a-live-replacement.test.ts"
+    - claim: "invariant:one-live-review-owner — a takeover that GitHub accepted before its ledger append blocks a second admission, because the action-time re-check reads the live status id"
+      kind: guard
+      proof: "grep: W1-T14177 criterion 2: in test/review/a-dead-owner-proof-holds-only-against-a-live-replacement.test.ts"
+  falsifier: |
+    Let any pending hold supersede the proof: criterion 1's completed hold keeps the retry waiting. Re-check the
+    ledger only: criterion 2's GitHub-only takeover admits a second review.
+  note: |
+    files: amendment 2026-11-21 (PR 20070 review round 1): criterion 2 asks the act-time re-check to fail closed when no re-reader is wired. The daemon and light sweep pass buildRereadPrAtAct; the one-shot rmd sweep path in src/cli/commands/sweep.ts does not, so failing closed there would hold every dead-owner retry that path admits. The build wires the same re-reader into that path. No criterion changes.
+    files: second amendment 2026-11-21 (PR 20070 review round 2 at 213568bb8): the board read in src/lib/tick-read-worker.ts takes a recognisable /status claim without reading /statuses history, so a takeover GitHub accepted before its ledger append still reads as the dead owner's claim. The build reads the history's newest id there. No criterion changes.
+    files: third amendment 2026-11-22 (PR 20070 at 9eaae8af0): two existing tests built dead-owner fixtures without a live status id or an act-time re-reader, so the fail-closed re-check now holds them. The build updates those fixtures only. No criterion changes.

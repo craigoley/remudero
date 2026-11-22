@@ -21,7 +21,7 @@
     - "src/lib/ledger.ts"
     - test/a-proposal-that-can-never-be-ready-is-never-drafted.test.ts
     - test/a-cash-inbox-draft-that-cannot-finish-spends-nothing.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Every inbox.draft_synthesized and inbox.drafted row records draft_input_key: the proposal's anchor fingerprint and reframe count, without the lane identity"
@@ -56,10 +56,13 @@
     (anchor fingerprint plus reframe count); a new input always drafts.
     1. inbox.ts: draftInputKey(proposal) = anchorFingerprint plus reframe count. Write it as draft_input_key on
        inbox.draft_synthesized and inbox.drafted rows.
-    2. cleanDraftInputKeys(ledgerRows) maps proposal id to the draft_input_key of its newest lint_clean
-       inbox.drafted row. draftsDueOnDaemon takes it and leaves out a proposal whose current draftInputKey is in it,
+    2. cleanDraftInputKeys(ledgerRows) maps proposal id to the set of every draft_input_key that has a lint_clean
+       inbox.drafted row for it. draftsDueOnDaemon takes it and leaves out a proposal whose current draftInputKey is in it,
        whether or not the cache or the attempt key still holds that draft. A missing cache entry for such a proposal
        is logged once as inbox.draft_cache_missing (declared in ledger-steps.ts) and is not redrafted.
+       A proposal that returns to an input it already had (a retired proposal recreated under its stable id at the
+       same anchors and reframe count) is not a new input and is not drafted again. Row order and ts do not decide
+       which keys count, so a clock rollback cannot bring an input back.
     3. The lane identity stays in draftAttemptKey for failed attempts only; a clean draft is never redone for a lane
        change. The manual rmd inbox force path is unchanged.
   falsifier: |
@@ -77,6 +80,11 @@
     the ledger for clean draft receipts, so that fixture breaks the receipt read as well. The test now injects a
     failing main-commit read, writes a real ledger with one clean inbox.drafted row, and asserts that the new
     proposal is still drafted while the clean one is not.
+    AMENDED (2026-11-21, design item 2): the item said "newest lint_clean row" while the INVARIANT says at most one
+    clean draft is paid for per proposal and input. They disagree when a proposal comes back to an earlier input
+    (a retired proposal recreated at reframe count 0, or a clean receipt written with an earlier ts after a clock
+    rollback), and #19786's reviews alternated between the two readings. Item 2 now follows the INVARIANT: every
+    clean input stays retired. This only tightens: a new anchor set or a new reframe round still drafts (criterion 4).
     AMENDED (2026-11-21): test/a-cash-inbox-draft-that-cannot-finish-spends-nothing.test.ts joins files. W1-T13863
     (#19766) merged its criterion 4 test with an attempt key left for the one fitting proposal. Under this task a
     clean draft retires its failed-attempt key, so after merging main the build expects no attempt keys and asserts

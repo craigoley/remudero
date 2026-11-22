@@ -1558,8 +1558,8 @@ export interface DaemonDeps {
   readOrphanRunBranchEvidence?: () => OrphanRunBranchEvidence | undefined;
   /** Same contract as `DrainDeps.readClosedRunBranchPrs` (W1-T1207): raw `<head-ref>\t<unmerged>` rows, parsed by
    *  `closedUnmergedRunBranchRefs`. W1-T9482: the daemon arm reads it too, lazily, only for a task holding a pushed
-   *  ref. Absent or throwing keeps every ref blocking. */
-  readClosedRunBranchPrs?: () => string;
+   *  ref. W1-T14233: a promise is resolved before selection. Absent, throwing or rejecting keeps every ref blocking. */
+  readClosedRunBranchPrs?: () => string | Promise<string>;
   /** The same {@link ObservedScopeByTask} `DrainDeps.observedByTask` takes, threaded to both the
    *  pack step and the partition call below so the two never disagree about a candidate's effective
    *  scope. Optional — omitted, both fall back to the empty union (W1-T2286). */
@@ -2201,6 +2201,20 @@ export function lazyClosedUnmerged(read: (() => string) | undefined): (() => Rea
     }
     return set;
   };
+}
+
+/** W1-T14233: does a task this pass could dispatch hold a pushed run branch? Only then is the closed-PR listing read. */
+export function aCandidateHoldsARunBranch(
+  listing: string | undefined, plan: Plan, isMerged: MergedSet, isOpenPr: ((taskId: string) => number | undefined) | undefined,
+): boolean {
+  if (!listing) return false;
+  try {
+    return parsePushedRunRefs(listing).some(({ taskId }) =>
+      plan.byId.has(taskId) && !isMerged(taskId) && isOpenPr?.(taskId) === undefined);
+  } catch (error) {
+    void error; // an unreadable board: selection reads it next and reports it, and the unread refs keep blocking
+    return false;
+  }
 }
 
 /** The epoch-ms suffix of a `run-<id>-<epochMs>` branch; NaN (never older) when it has none. */
@@ -4807,6 +4821,7 @@ export async function runDaemon(
         trailing_opened_count: verdict.result.trailingOpenedCount,
         base_wip_limit: verdict.result.baseWipLimit ?? verdict.result.wipLimit,
         stuck_owned_count: verdict.result.stuckOwnedCount ?? 0,
+        ...(verdict.result.movableStuckOwnedCount === undefined ? {} : { movable_stuck_owned_count: verdict.result.movableStuckOwnedCount }),
         headroom_fraction: verdict.result.headroomFraction ?? null,
         poll_interval_ms: pollIntervalMs,
       });
@@ -8396,9 +8411,20 @@ export async function runDaemon(
       // W1-T4002 — the most recent completed full sweep already proved these (W1-T4998); see
       // `SweepCycleOutcome.planOnlyRunBranchReceipts`'s doc for why no second GitHub read happens.
       const planOnlyReceiptsThisTick: readonly PlanOnlyRunBranchReceipt[] = sweepCycleOutcome?.planOnlyRunBranchReceipts ?? [];
+      // W1-T14233: the closed-PR read is resolved here, once per selection pass, because the predicate is synchronous.
+      // A failed read yields no rows, so every ref keeps blocking.
+      const readClosedRowsFor = (site: "tick" | "lane-refill", listing: string | undefined, passPlan: Plan, passMerged: MergedSet) =>
+        aCandidateHoldsARunBranch(listing, passPlan, passMerged, deps.isOpenPr)
+          ? readRunBranchListing(deps.readClosedRunBranchPrs, (error) => {
+            log("dispatch.run_branch_read_failed", { site: `${site}:closed-prs`, error: String((error as Error)?.message ?? error) });
+            return undefined;
+          })
+          : undefined;
+      const tickClosedRead = readClosedRowsFor("tick", tickRunBranchListing, planForBatch, isMerged);
+      const tickClosedRows = tickClosedRead instanceof Promise ? await tickClosedRead : tickClosedRead;
       const runBranchStateThisTick = runBranchStateFrom(
         tickRunBranchListing, readRunBranchEvidence(), resumableHandoffs,
-        lazyClosedUnmerged(deps.readClosedRunBranchPrs),
+        lazyClosedUnmerged(tickClosedRows === undefined ? undefined : () => tickClosedRows),
       );
       const tickMachineShareRows = await machineShareRowsFor(tickLedgerLines);
       const prefetchLive = (passPlan: Plan, passMerged: MergedSet) =>
@@ -9142,13 +9168,14 @@ export async function runDaemon(
         let refillEligible: Task[] = [];
         let refillContext: DispatchValueContext | undefined;
         let boardUnreadable = false;
-        const decide = (snapshot: { plan: Plan; isMerged: MergedSet }, live?: Awaited<ReturnType<typeof prefetchLive>>): void => {
+        const decide = (snapshot: { plan: Plan; isMerged: MergedSet }, live: Awaited<ReturnType<typeof prefetchLive>> | undefined,
+          closedRows: string | undefined): void => {
           let openPrCount: number | undefined;
           try { openPrCount = deps.openPrCount?.(); } catch (e) { boardUnreadable = true; throw e; }
           const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount, queueAdmission: deps.readQueueAdmission?.() });
           const runBranchState = runBranchStateFrom(
             runBranchListing, readRunBranchEvidence(), resumableHandoffs,
-            lazyClosedUnmerged(deps.readClosedRunBranchPrs),
+            lazyClosedUnmerged(closedRows === undefined ? undefined : () => closedRows),
           );
           const selection = captureDispatchFrontier(snapshot.plan, {
             ...dispatchOpts,
@@ -9183,8 +9210,22 @@ export async function runDaemon(
         const readFailed = (e: unknown): void => {
           reason = `refill read failed: ${String((e as Error)?.message ?? e)}`;
         };
+        // W1-T14233: only a promised closed-PR read makes a refill wait.
+        const decideWithClosed = (snapshot: { plan: Plan; isMerged: MergedSet },
+          live?: Awaited<ReturnType<typeof prefetchLive>>): void | Promise<void> => {
+          const closed = readClosedRowsFor("lane-refill", runBranchListing, snapshot.plan, snapshot.isMerged);
+          if (closed instanceof Promise) return closed.then((rows) => decide(snapshot, live, rows));
+          decide(snapshot, live, closed);
+        };
+        const decideThenConclude = (snapshot: { plan: Plan; isMerged: MergedSet }): Task | undefined | Promise<Task | undefined> => {
+          try {
+            const decided = decideWithClosed(snapshot);
+            if (decided) return decided.then(conclude, (e) => { readFailed(e); return conclude(); });
+          } catch (e) { /* the failure is carried as the held reason */ readFailed(e); }
+          return conclude();
+        };
         const decideLive = (refillPlan: Plan, isMerged: MergedSet): Promise<Task | undefined> =>
-          prefetchLive(refillPlan, isMerged).then((live) => decide({ plan: refillPlan, isMerged }, live))
+          prefetchLive(refillPlan, isMerged).then((live) => decideWithClosed({ plan: refillPlan, isMerged }, live))
             .then(conclude, (e) => { readFailed(e); return conclude(); });
         const conclude = (): Task | undefined | Promise<Task | undefined> => {
           if (boardUnreadable && inFlightTasks.size > 0) return grow ? holdGrow(lane, reason!) : parkLane(lane, finished!, reason!, phaseAgeMs);
@@ -9229,15 +9270,14 @@ export async function runDaemon(
               return deps.refreshMergedAsync(refillPlan).then(
                 (isMerged) => {
                   if (deps.readLiveState) return decideLive(refillPlan, isMerged);
-                  try { decide({ plan: refillPlan, isMerged }); } catch (e) { /* the failure is carried as the held reason */ readFailed(e); }
-                  return conclude();
+                  return decideThenConclude({ plan: refillPlan, isMerged });
                 },
                 (e) => { readFailed(e); return conclude(); },
               );
             }
             const isMerged = deps.refreshMerged(refillPlan);
             if (deps.readLiveState) return decideLive(refillPlan, isMerged);
-            decide({ plan: refillPlan, isMerged });
+            return decideThenConclude({ plan: refillPlan, isMerged });
           } catch (e) {
             // The failure is carried as the reason: an unreadable board parks the lane (W1-T13283), any other read holds it.
             readFailed(e);

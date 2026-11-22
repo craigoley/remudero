@@ -1,0 +1,94 @@
+- id: W1-T14173
+  title: "rmd mcp stays up until its stdin closes and answers initialize, tools/list and tools/call, where today the CLI exits as soon as the server connects"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: the verb's lifetime in operator-mcp.ts plus a child-process CLI entry fixture; no route, token or tool changes
+  origin: "operator-session#operator-mcp-exits-2026-11-21"
+  plan_refs:
+    - W1-T4679
+    - W1-T10079
+    - W1-T4063
+  files:
+    - src/lib/operator-mcp.ts
+    - test/rmd-mcp-stays-up-until-its-stdin-closes.test.ts
+    - test/fixtures/operator-mcp-cli-entry.ts
+    - test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts
+  status: merged
+  attempts: 0
+  acceptance:
+    - claim: "invariant:mcp-lives-until-stdin-ends — operatorMcpCommand with injected stdin and stdout streams (PassThrough) and a fixture service-tokens.json returns a promise that is still pending after it has answered an initialize request. It resolves to 0 only after stdin ends, and it closes the server before it resolves"
+      kind: guard
+      proof: "grep: W1-T14173 criterion 1: in test/rmd-mcp-stays-up-until-its-stdin-closes.test.ts"
+    - claim: "invariant:answers-over-real-stdio — a child process (test/fixtures/operator-mcp-cli-entry.ts) runs operatorMcpCommand on its real process.stdin and process.stdout and then flushThenExit with its code, as run-task.ts main does. The test writes initialize, notifications/initialized, tools/list and a tools/call for inbox to the child's stdin, with RMD_OPERATOR_MCP_URL pointed at a local fake server that answers GET /v1/inbox. It reads three JSON-RPC responses from stdout (serverInfo name remudero-operator, a tools list holding inbox, ledger_grep and case_file, and the fake inbox text), then ends stdin and sees exit code 0"
+      kind: guard
+      proof: "grep: W1-T14173 criterion 2: in test/rmd-mcp-stays-up-until-its-stdin-closes.test.ts"
+    - claim: "The child in criterion 2 sends the fake server one GET /v1/inbox with the read token and no write route, and it is still running between the tools/list response and the end of stdin"
+      proof: "grep: W1-T14173 criterion 3: in test/rmd-mcp-stays-up-until-its-stdin-closes.test.ts"
+    - claim: "A bad argument still throws the usage error, and --enable-write without a write token still throws, before any transport starts"
+      proof: "grep: W1-T14173 criterion 4: in test/rmd-mcp-stays-up-until-its-stdin-closes.test.ts"
+    - claim: "operatorMcpCommand waits for the end of its input before it returns"
+      proof: "grep: const code = await Promise.race in src/lib/operator-mcp.ts"
+  rationale: |
+    WHY: `rmd mcp` cannot be used. It exits at once and answers nothing.
+    MEASURED on the Azure host, 2026-11-21: a JSON-RPC initialize request piped into
+    `docker exec -i -w /app remudero-serve timeout 30 ./bin/rmd mcp`, with stdin held open for 15 s, gave
+    exit code 0, no stdout at all, and only the github_app.token_refreshed line on stderr.
+    CAUSE (origin/main 0bfbe2161, read from the code):
+    - src/lib/operator-mcp.ts:100-109 operatorMcpCommand ends with `await server.connect(new
+      StdioServerTransport()); return 0;`.
+    - The SDK's StdioServerTransport.start() (node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js)
+      only adds the stdin 'data' and 'error' listeners and returns. So connect resolves at once, and the
+      transport never listens for the end of stdin.
+    - src/run-task.ts:45615 maps the mcp verb to that function. main() then calls
+      flushThenExit(await dispatch(...)) (run-task.ts:45971-45975), and flushThenExit
+      (src/lib/flush-exit.ts:55-58) calls process.exit(0) once stdout and stderr drain. The process ends
+      before stdin is read.
+    - test/the-operator-reaches-the-fleet-over-mcp.test.ts drives createOperatorMcpServer only through
+      InMemoryTransport, and calls operatorMcpCommand only for its argument errors. No test runs the verb
+      over stdio, so this was not seen.
+  design: |
+    INVARIANT mcp-lives-until-stdin-ends: operatorMcpCommand returns only after its input has ended or the server has closed.
+    INVARIANT answers-over-real-stdio: the CLI's exit path (flushThenExit) runs after the session, not after connect.
+    CHOICE: make the verb's own promise last as long as the session. Rejected:
+    - A special case in run-task.ts main() that skips flushThenExit for mcp: the exit path must stay one path
+      for every verb (W1-T2893, W1-T4063).
+    - Keeping the event loop alive and never returning: the code is then never reported, and a closed stdin
+      leaves the process running.
+    1. src/lib/operator-mcp.ts: operatorMcpCommand gains an optional last argument
+       io: { stdin: Readable; stdout: Writable } = { stdin: process.stdin, stdout: process.stdout }, and builds
+       new StdioServerTransport(io.stdin, io.stdout). After `await server.connect(transport)` it awaits one
+       promise that resolves on the first of: io.stdin 'end', io.stdin 'close', or server.onclose. Then it
+       awaits server.close() (a second close is harmless) and returns 0. A stdin 'error' closes the server
+       and returns 1. The argument and token checks stay before the transport is built.
+    2. test/fixtures/operator-mcp-cli-entry.ts: a tiny entry that reads a root path from argv, calls
+       operatorMcpCommand([], { root }, process.cwd()) and then flushThenExit(code).
+    3. Tests in test/rmd-mcp-stays-up-until-its-stdin-closes.test.ts, titled "W1-T14173 criterion N: ...".
+       Criterion 1 uses PassThrough streams. Criteria 2 and 3 spawn `node --import tsx` on the fixture with
+       a temp root holding state/service-tokens.json ({ "read": "r-token" }), and a node:http fake server on
+       127.0.0.1 port 0. Each child read has a 10 s bound, so a hang fails the test and does not stall the run.
+       Load test/setup/tmp-hygiene.ts.
+    4. test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts stubs server.connect and awaits operatorMcpCommand on the
+       default process.stdin, which a test runner child may hold open. Once the verb waits for the end of its input that
+       test would hang, so it passes the new io argument with stdin already ended. Its assertions do not change.
+    MEASURE AFTER DEPLOY: the same docker exec pipe as above prints an initialize result on stdout and the
+    process stays up until stdin closes.
+  falsifier: |
+    On origin/main operatorMcpCommand resolves right after connect: criterion 1 sees the promise settle
+    before stdin ends, and criterion 2's child exits 0 with no stdout. Return without closing the server:
+    criterion 1 sees the server still connected. Wait only for server.onclose: stdin ending never closes the
+    stdio transport, so criterion 2's child never exits and hits its 10 s bound. Special-case mcp in main() instead:
+    criterion 2's fixture, which uses flushThenExit as main does, still fails.
+  note: |
+    Id reserved for run-unfiled-1795278840539 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-21. Filing only; not built.
+    Builders: run tests only as `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`.
+    Never point a test at the live serve; the write route stays off in every test.
+    Not in scope: new MCP tools, the tokens, and the control-server routes.
+    Proof amended 2026-11-21 (operator session): criterion 5's proof wrapped "end" in quotes, which the
+    acceptance-author gate refuses (proof-shape), and a bare end matches main too. It now greps the race
+    line the build adds, which main lacks.
