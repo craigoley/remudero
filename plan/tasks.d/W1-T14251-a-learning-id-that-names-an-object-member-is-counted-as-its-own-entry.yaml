@@ -13,7 +13,7 @@
   files:
     - src/lib/knowledge-value.ts
     - test/learning/a-learning-id-that-names-an-object-member-is-counted-as-its-own-entry.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at origin/main 86455aa29 (2026-11-22). Found in the review of #20041 (W1-T11115), where knowledge-value.ts was
