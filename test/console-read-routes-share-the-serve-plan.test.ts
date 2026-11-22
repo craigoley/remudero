@@ -185,6 +185,8 @@ const READY_FRAGMENT = `
   attempts: 0
   origin: architect
   files: [src/lib/plan.ts]
+  design: |
+    NO-INVARIANTS: This fixture adds a new task to exercise approval against the target ref.
   acceptance:
     - claim: "the candidate does the thing"
       proof: "unit test: fixture X -> observable Y"
