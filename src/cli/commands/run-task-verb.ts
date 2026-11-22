@@ -6512,7 +6512,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         return hostWorktreeGit(worktreePath, ["rev-parse", "HEAD"]).trim() || undefined;
       } catch (error) {
         // An unreadable base renders "child base unavailable" in the block, never a guessed SHA.
-        log("prerequisite_context.base_unreadable", { reason: String((error as Error)?.message ?? error) });
+        say(`prerequisite context: child base unreadable (${String((error as Error)?.message ?? error)})`);
         return undefined;
       }
     })();
