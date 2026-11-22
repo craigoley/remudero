@@ -1810,6 +1810,7 @@ export const PR_PENDING_PLACEHOLDER = { taskId: "PR-pending", branch: /^run-PR-p
 export function usesUntaskedReviewMetadata(taskId: string | undefined, headRefName: string): boolean {
   if (taskId === undefined || taskId === UNFILED_RUN_SENTINEL || /^PR-[1-9]\d*$/.test(taskId)) return true;
   if (taskId === PR_PENDING_PLACEHOLDER.taskId) return PR_PENDING_PLACEHOLDER.branch.test(headRefName);
+  if (headRefName === `run-${taskId}` && /^RETRO-\d+$/.test(taskId)) return true;
   return taskIdFromRunBranch(headRefName) === taskId &&
     /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+|main-repair-(?:(?:ratchet|revert)-)?[0-9a-f]{12})$/.test(taskId);
 }

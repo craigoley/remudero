@@ -346,13 +346,24 @@ test("W1-T10269: the healed reviewer follows origin/main and escalates a conflic
   assert.equal(await route("208", [], {}, async () => { normal++; return 0; }), 0);
   assert.equal(normal, 2);
   const filed = h.calls.issues.slice(before);
-  assert.equal(filed.length, 1, "escalated once per incident and origin/main");
+  assert.equal(filed.length, 1, "escalated once per incident");
   assert.match(filed[0]!.body, /does not apply/);
   assert.match(filed[0]!.body, /src\/lib\/required-semantic-review\.ts/);
   assert.ok(logs.includes("reviewer.healed_tree_unavailable"));
   const rememberedConflict = logRows.filter((row) => row.step === "reviewer.healed_tree_unavailable").at(-1)!;
   assert.equal(rememberedConflict.extra.remembered, true, "the route exposes the same-main conflict memo");
   assert.deepEqual(rememberedConflict.extra.conflict_paths, ["src/lib/required-semantic-review.ts"]);
+  // W1-T13393: once per INCIDENT — a main advance that still conflicts, and a restart, raise nothing more.
+  pushMain(f, { "docs/more.md": "more\n" }, "docs: a main advance that still conflicts (#105)");
+  assert.equal(await route("217", [], {}, async () => { normal++; return 0; }), 0);
+  health.resetHealedReviewerTrees();
+  const restarted = buildReviewerHealthRoute(f.daemon.dir, { root: f.root } as Config, h.ledgerPath,
+    (step, extra = {}) => { logs.push(step); logRows.push({ step, extra }); },
+    freshTree(f, async () => { throw new Error("no healed tree exists to spawn"); }), h.issues, h.lane);
+  assert.equal(await restarted("218", [], {}, async () => { normal++; return 0; }), 0);
+  assert.equal(normal, 4);
+  assert.equal(h.calls.issues.length - before, 1, "escalated once per incident: not again on a main advance or after a restart");
+  assert.equal(health.loadReviewerHealthState(h.statePath).incident?.healedTree?.state, "conflict", "the conflict is recorded on the incident");
   // When main itself reverts the offending merge, the healed patch is empty: the healed tree IS origin/main.
   f.work.git("revert", "--no-edit", m4);
   f.work.git("revert", "--no-edit", f.m2);
@@ -375,7 +386,8 @@ test("W1-T10269: the incident opens one revert PR of the offending merge", async
   await route("210", [], {}, async () => 0);
   // More regressed rows, at the same sha and a later one, never open a second revert.
   const m2b = fake("m2b");
-  h.write(withheld(f.m2, 211), withheld(m2b, 212), withheld(m2b, 213), refused(m2b, 214));
+  // W1-T13392: 4 of 4 at m2b, the fewest the exact bound reads regressed against this 0 of 105 (3 of 3 does not).
+  h.write(withheld(f.m2, 211), withheld(m2b, 212), withheld(m2b, 213), refused(m2b, 214), refused(m2b, 215));
   await route("215", [], {}, async () => 0);
   assert.equal(h.calls.reverts.length, 1, "one revert PR, through the red-main repair lane");
   const request = h.calls.reverts[0]!;
@@ -429,7 +441,8 @@ test("W1-T10269: the incident closes when the current reviewer returns to baseli
     "src/lib/required-semantic-review.ts": 'export const refusal = () => "required-semantic-incomplete-verdicts";\n',
   }, "fix(review): regress required semantic behavior (#104)");
   f.daemon.git("fetch", "origin");
-  h.queue.push(refused(later, 400), refused(later, 401));
+  // W1-T13392: 4 refusals, the fewest the exact bound reads regressed here (measured: 2 and 3 do not reopen).
+  h.queue.push(refused(later, 400), refused(later, 401), refused(later, 402), refused(later, 403));
   await h.evaluate(later);
   const reopened = health.loadReviewerHealthState(h.statePath).incident!;
   assert.equal(reopened.reopenedFrom, "reviewer-regression-" + f.m2.slice(0, 12));

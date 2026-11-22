@@ -7,9 +7,27 @@
  *
  * This module measures the reviewer's own outcome mix per REVIEWER CODE SHA (the HEAD the judging
  * process loaded: the boot head in-process, the tree's sha in a fresh-tree child) and judges a
- * departure from its own history the way model-drift.ts judges drift: the current sha's Wilson
- * interval against the pooled interval of the shas before it, at a family alpha split over every sha
- * judged. No count, rate or time constant decides; a thin sample reads `insufficient`, never healthy.
+ * departure from its own history: the current sha's interval against the pooled interval of the shas
+ * before it, at a family alpha split over every sha judged. No count, rate or time constant decides; a
+ * thin sample reads `insufficient`, never healthy.
+ *
+ * W1-T13392 — THE STATISTICAL CONTRACT. Both intervals are EXACT binomial (Clopper-Pearson) bounds, each
+ * side at the one-sided family tail REVIEWER_HEALTH_FAMILY_ALPHA / (2 * family); `z` is that tail's normal
+ * quantile, reported only. Regressed: the sha's lower bound lies above the baseline's upper bound. Healthy:
+ * not regressed, and an all-failing sample of the same size would have read regressed. The Wilson bound
+ * this replaced puts ONE failure in one unit at 0.0455 against a clean baseline's 0.00397 (0 of 5267 at a
+ * family of 2152), so a single unposted review opened an incident, and the same refused PR head re-read
+ * regressed at every main commit; the exact lower bound of 1 of n is about tail / n (2.3e-6 at 1 of 1
+ * against the exact upper 0.00246), which no lone failure crosses. For OPENING, a sha that does not read
+ * regressed on its own sample is also judged on its RUN OF UNPROVEN SHAS: it is pooled with every
+ * non-healed, non-regressed sha after the newest one whose own sample reads healthy, against the history
+ * before that run, so a total outage spread thinly over a fast-moving main adds up. The replay numbers
+ * this record's acceptance pins: 30 shas of 2 refused units each open at k=3 n=3 on the run and never per
+ * sha; 200 shas of 7 posted reviews with one head refused at each, or one new head refused every 25 shas,
+ * open nothing, where the Wilson bound judged 200 and 8 regressed; the 10-20 storm still opens at k=3 n=3.
+ * Closing is not redesigned here (W1-T13393): returnedToBaseline and blameCleared judge
+ * the current or healed pool through judgeCounts, so by the exact bound, and still compare it against the
+ * regressed level's Wilson interval at the same tail's z, as before.
  *
  * A departure opens ONE incident naming the boot head at onset, the regressed reviewer code sha (they
  * differ: the 10-20 onset rows came from a fresh tree at the offending sha while the boot head predated
@@ -110,6 +128,9 @@ export interface ReviewerShaRecord {
   firstFailHost?: string;
   /** A regression judgment is final once made. */
   regressedAt?: string;
+  /** W1-T13393: the run of unproven shas this sha read regressed on (its judgment's `run`), whose level a close is
+   *  measured against; absent when its own sample read regressed, or in a file written before it. */
+  regressedRun?: { k: number; n: number; shas: number; since: string | null };
   /** W1-T13850: per evaluator model, each posted code-PR decision and whether it passed or failed. Keyed by
    *  the PR head and the posted review's own identity (its decision digest, else its attempt id), so a
    *  replayed row counts once and a FAIL and a later PASS at one head both count. Absent in a file written
@@ -184,7 +205,17 @@ export interface ReviewerIncident {
   revertPrUrl?: string;
   revertRefused?: { reason: string; paths: string[] };
   reopenedFrom?: string;
+  /** W1-T13393: the healed tree could not be built for THIS incident — its patch conflicts on origin/main, or main has
+   *  already reverted the blamed merge — as the review route last met it ({@link noteHealedTreeOutcome}); cleared when
+   *  the healed tree builds again. With no revert PR open and no operator heal, no heal is in effect. */
+  healedTree?: { state: "conflict" | "empty"; originMainSha: string; reason: string; paths: string[]; at: string };
+  /** W1-T13393: when this incident's healed-tree conflict was escalated: once per incident, across main advances and restarts. */
+  conflictEscalatedAt?: string;
 }
+
+/** Why an incident closed. `no-heal-not-regressed` (W1-T13393): no heal was in effect and today's reviewer did not read
+ *  regressed on its run. Absent on a record written before W1-T13902: returned to baseline. */
+export type ReviewerIncidentCloseReason = "returned-to-baseline" | "blame-cleared" | "no-heal-not-regressed";
 
 export interface ReviewerHealthCursor {
   /** The newest rotation already read whole. */
@@ -208,7 +239,7 @@ export interface ReviewerHealthState {
    *  on the same key is a second hold, which the review gate never writes while its ledger read works. */
   holds: Record<string, { sha: string; at: string }>;
   incident: ReviewerIncident | null;
-  closed: Array<ReviewerIncident & { closedAt: string; closedReason?: "returned-to-baseline" | "blame-cleared" }>;
+  closed: Array<ReviewerIncident & { closedAt: string; closedReason?: ReviewerIncidentCloseReason }>;
   /** The operator's explicit choice of a fix PR to heal with (reviewerHealCommand --with-pr <n>). */
   operatorHeal: { withPr: number; at: string } | null;
   coverage: { rows: number; unattributed: number };
@@ -510,7 +541,11 @@ export interface ReviewerShaJudgment {
   baseline: { k: number; n: number };
   interval: { lower: number; upper: number } | null;
   baselineInterval: { lower: number; upper: number } | null;
+  /** The normal quantile of the family tail the exact bounds were read at: reported, it decides nothing. */
   z: number | null;
+  /** W1-T13392: present when the sha read regressed on its run of unproven shas rather than its own sample: k and n
+   *  pool `shas` shas, and `since` is the newest earlier sha whose own sample read healthy (null: none tracked). */
+  run?: { shas: number; since: string | null };
 }
 
 /** k = units not posted though the reviewer ran or was refused by setup; n adds the posted units.
@@ -526,9 +561,51 @@ export function shaCounts(rec: ReviewerShaRecord): { k: number; n: number } {
   return { k, n };
 }
 
-function familyZ(state: ReviewerHealthState): number {
+/** The one-sided tail each bound is read at: the family alpha split (Bonferroni) over every sha with outcomes. */
+function familyTail(state: ReviewerHealthState): number {
   const family = Object.values(state.shas).filter((rec) => shaCounts(rec).n > 0).length + state.pooled.shas;
-  return upperNormalQuantile(REVIEWER_HEALTH_FAMILY_ALPHA / (2 * Math.max(1, family)));
+  return REVIEWER_HEALTH_FAMILY_ALPHA / (2 * Math.max(1, family));
+}
+
+/** P(X <= k) for X ~ Binomial(n, p). Each term is carried in log space, so a large n cannot underflow the sum. */
+function binomialAtMost(k: number, n: number, p: number): number {
+  if (k < 0) return 0;
+  if (k >= n || p <= 0) return 1;
+  if (p >= 1) return 0;
+  const ratio = Math.log(p) - Math.log1p(-p);
+  let term = n * Math.log1p(-p);
+  let sum = Math.exp(term);
+  for (let i = 1; i <= k; i += 1) {
+    term += Math.log((n - i + 1) / i) + ratio;
+    sum += Math.exp(term);
+  }
+  return Math.min(1, sum);
+}
+
+/** P(X >= k), summed over the shorter side: past the middle, the upper tail by symmetry. */
+const binomialAtLeast = (k: number, n: number, p: number): number =>
+  (k - 1 <= n - k ? 1 - binomialAtMost(k - 1, n, p) : binomialAtMost(n - k, n, 1 - p));
+
+/** The p in (0, 1) at which a monotone `f` crosses `target`; `rising` says which way `f` runs. */
+function solveProbability(f: (p: number) => number, target: number, rising: boolean): number {
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 100; i += 1) {
+    const mid = (lo + hi) / 2;
+    if ((f(mid) < target) === rising) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+/**
+ * W1-T13392 — the exact (Clopper-Pearson) interval of `k` in `n`, each side at the one-sided `tail`: the lower bound
+ * is the p at which P(X >= k) = tail, the upper the p at which P(X <= k) = tail. Unlike Wilson's, its lower bound
+ * for one failure is about tail / n whatever n is, so a lone failure cannot read far above a clean baseline.
+ */
+export function clopperPearsonInterval(k: number, n: number, tail: number): { lower: number; upper: number } {
+  const lower = k <= 0 ? 0 : k >= n ? Math.exp(Math.log(tail) / n) : solveProbability((p) => binomialAtLeast(k, n, p), tail, true);
+  const upper = k >= n ? 1 : k <= 0 ? -Math.expm1(Math.log(tail) / n) : solveProbability((p) => binomialAtMost(k, n, p), tail, false);
+  return { lower, upper };
 }
 
 /** The pooled outcomes of the non-healed shas before `rec` that were never judged regressed, and
@@ -545,19 +622,23 @@ function baselineFor(state: ReviewerHealthState, rec: ReviewerShaRecord): { k: n
   return { k, n };
 }
 
-/** Judge outcomes {k, n} against a baseline. Regressed: the interval lies wholly above the
- *  baseline's. Healthy: not regressed, AND the sample could have shown a regression — had every unit
- *  failed, that interval would lie above the baseline's. Anything else is insufficient. */
+/** Judge outcomes {k, n} against a baseline, both by the exact bound at the family tail. Regressed: the
+ *  interval lies wholly above the baseline's. Healthy: not regressed, AND the sample could have shown a
+ *  regression — had every unit failed, that interval would lie above the baseline's. Anything else is
+ *  insufficient. */
 function judgeCounts(state: ReviewerHealthState, sha: string, k: number, n: number, baseline: { k: number; n: number }, regressedAt?: string): ReviewerShaJudgment {
+  return judgeAtTail(familyTail(state), sha, k, n, baseline, regressedAt);
+}
+
+function judgeAtTail(tail: number, sha: string, k: number, n: number, baseline: { k: number; n: number }, regressedAt?: string): ReviewerShaJudgment {
   const counted = { sha, k, n, baseline, interval: null, baselineInterval: null, z: null };
   if (n === 0) return { ...counted, state: regressedAt ? "regressed" : "insufficient", reason: "no-outcomes" };
   if (baseline.n === 0) return { ...counted, state: regressedAt ? "regressed" : "insufficient", reason: "no-baseline" };
-  const z = familyZ(state);
-  const interval = wilsonInterval(k, n, z);
-  const baselineInterval = wilsonInterval(baseline.k, baseline.n, z);
-  const judged = { ...counted, interval, baselineInterval, z };
+  const interval = clopperPearsonInterval(k, n, tail);
+  const baselineInterval = clopperPearsonInterval(baseline.k, baseline.n, tail);
+  const judged = { ...counted, interval, baselineInterval, z: upperNormalQuantile(tail) };
   if (regressedAt !== undefined || interval.lower > baselineInterval.upper) return { ...judged, state: "regressed", reason: null };
-  if (wilsonInterval(n, n, z).lower <= baselineInterval.upper) return { ...judged, state: "insufficient", reason: "thin-sample" };
+  if (clopperPearsonInterval(n, n, tail).lower <= baselineInterval.upper) return { ...judged, state: "insufficient", reason: "thin-sample" };
   return { ...judged, state: "healthy", reason: null };
 }
 
@@ -569,6 +650,64 @@ export function judgeReviewerSha(state: ReviewerHealthState, sha: string): Revie
   }
   const { k, n } = shaCounts(rec);
   return judgeCounts(state, sha, k, n, baselineFor(state, rec), rec.regressedAt);
+}
+
+/**
+ * W1-T13392 — the judgment that opens or extends an incident: `sha`'s own sample, and when that does not read
+ * regressed, its RUN OF UNPROVEN SHAS — it is pooled with every non-healed, non-regressed sha after the newest earlier
+ * one whose own sample reads healthy, judged against the history before that run. Many thin shas of a total outage
+ * add up; a sha whose own sample already reads regressed is never diluted by the thin clean shas before it.
+ */
+function judgeForOpening(state: ReviewerHealthState, sha: string): ReviewerShaJudgment {
+  return judgeRun(state, sha, false);
+}
+
+/**
+ * W1-T13393 — the judgment that keeps an unhealed incident open: `sha`'s run as {@link judgeForOpening} reads it, except
+ * that the incident's regressed shas stay IN the run (pooled, never a stop), so a storm that moves main on every
+ * failure is not judged on one fresh sha's single outcome.
+ */
+function judgeForClosing(state: ReviewerHealthState, sha: string): ReviewerShaJudgment {
+  return judgeRun(state, sha, true);
+}
+
+function judgeRun(state: ReviewerHealthState, sha: string, keepRegressed: boolean): ReviewerShaJudgment {
+  const own = judgeReviewerSha(state, sha);
+  const rec = state.shas[sha];
+  if (rec === undefined || rec.healed || own.state === "regressed") return own;
+  const tail = familyTail(state);
+  const incidentFrom = state.incident?.regressedSeq ?? Number.POSITIVE_INFINITY;
+  const earlier = Object.values(state.shas).filter((other) => other.seq < rec.seq && !other.healed).sort((a, b) => a.seq - b.seq);
+  // baselineFor(other) for each earlier sha, in one forward pass.
+  const before: Array<{ k: number; n: number }> = [];
+  const pooled = { k: state.pooled.k, n: state.pooled.n };
+  for (const other of earlier) {
+    before.push({ ...pooled });
+    if (other.regressedAt !== undefined || other.seq >= incidentFrom) continue;
+    const c = shaCounts(other);
+    pooled.k += c.k;
+    pooled.n += c.n;
+  }
+  let { k, n } = shaCounts(rec);
+  let shas = 1;
+  let baseline = own.baseline;
+  let since: string | null = null;
+  for (let i = earlier.length - 1; i >= 0; i -= 1) {
+    const other = earlier[i]!;
+    if (other.regressedAt !== undefined && !keepRegressed) continue;
+    const c = shaCounts(other);
+    if (other.regressedAt === undefined && judgeAtTail(tail, other.sha, c.k, c.n, before[i]!).state === "healthy") {
+      since = other.sha;
+      break;
+    }
+    k += c.k;
+    n += c.n;
+    if (c.n > 0) shas += 1;
+    baseline = before[i]!;
+  }
+  if (shas === 1) return own;
+  const run = judgeAtTail(tail, sha, k, n, baseline);
+  return run.state === "regressed" || keepRegressed ? { ...run, run: { shas, since } } : own;
 }
 
 /** The incident's regressed shas, newest last. */
@@ -601,9 +740,42 @@ export function returnedToBaseline(state: ReviewerHealthState, incident: Reviewe
   if (judgment.state !== "healthy" || judgment.z === null || judgment.interval === null) return { returned: false, judgment };
   // Against the NEWEST regressed sha, the reviewer's most recent failure level: a total outage closes
   // on a few clean reviews after its fix; a partial one (one PR refused in a handful) needs more.
-  const newest = regressed.at(-1);
-  const level = newest === undefined ? { k: incident.evidence.k, n: incident.evidence.n } : shaCounts(newest);
+  // W1-T13393: a sha that read regressed on its RUN is measured at that run's level, never its own thin sample (2 of 2
+  // would set a bar a thin outage's fix never clears). The level keeps its Wilson interval at the family tail's z: the
+  // exact one moves the W1-T11448 reopened incident's close from 22 clean reviews to 31, past the 30 it must close on.
+  const level = regressedLevel(incident, regressed.at(-1));
   return { returned: level.n > 0 && judgment.interval.upper < wilsonInterval(level.k, level.n, judgment.z).lower, judgment };
+}
+
+/** W1-T13393 — the failure level a close is measured against: the newest regressed sha's run when it read regressed on
+ *  one, else its own sample; with none tracked, the incident's opening evidence (its run's, when it opened on one). */
+function regressedLevel(incident: ReviewerIncident, newest: ReviewerShaRecord | undefined): { k: number; n: number } {
+  if (newest === undefined) return { k: incident.evidence.k, n: incident.evidence.n };
+  if (newest.regressedRun !== undefined) return { k: newest.regressedRun.k, n: newest.regressedRun.n };
+  if (newest.sha === incident.regressedSha && incident.evidence.run !== undefined) return { k: incident.evidence.k, n: incident.evidence.n };
+  return shaCounts(newest);
+}
+
+/**
+ * W1-T13393 — no heal is in effect for `incident`: no revert PR is open (`revertPr` is its read state, null with none),
+ * no operator heal is chosen, and the review route recorded that its healed tree cannot be built (a conflicting or
+ * empty revert). Such an incident is not healing anything, so it closes once today's reviewer is not regressed.
+ * INVARIANT a-healed-incident-keeps-its-route: an incident whose blamed merge still reverts cleanly never is.
+ */
+export function noHealInEffect(state: ReviewerHealthState, incident: ReviewerIncident, revertPr: "open" | "closed" | "merged" | "unread" | null): boolean {
+  return incident.healedTree !== undefined && state.operatorHeal === null && (revertPr === null || revertPr === "closed" || revertPr === "merged");
+}
+
+/**
+ * W1-T13393 — has today's reviewer stopped reading regressed? Its run judgment ({@link judgeForClosing}: W1-T13392's run,
+ * with the incident's regressed shas kept in it) is anything but regressed. A sha with no outcomes, a healed sha or one
+ * itself judged regressed is no evidence of today's reviewer.
+ */
+export function todaysReviewerNotRegressed(state: ReviewerHealthState, sha: string): { notRegressed: boolean; judgment: ReviewerShaJudgment } {
+  const rec = state.shas[sha];
+  if (rec === undefined || rec.healed || rec.regressedAt !== undefined || shaCounts(rec).n === 0) return { notRegressed: false, judgment: judgeReviewerSha(state, sha) };
+  const judgment = judgeForClosing(state, sha);
+  return { notRegressed: judgment.state !== "regressed", judgment };
 }
 
 /** The pooled outcomes of every healed sha recorded since the incident opened, and of its regressed shas. */
@@ -617,7 +789,8 @@ export interface ReviewerBlameEvidence {
 /**
  * W1-T13902 — INVARIANT healing-keeps-its-incident: has the healed tree failed no less often than the
  * code it was healed from? The healed pool is judged against the incident's pre-onset baseline with
- * judgeCounts (Wilson at the family z), and is `insufficient` too when even all-posted healed reviews could not
+ * judgeCounts (the exact bound at the family tail since W1-T13392; the regressed pool keeps its Wilson interval
+ * at that tail's z), and is `insufficient` too when even all-posted healed reviews could not
  * have read clearly better than the regressed pool: `insufficient` never clears. When it is sufficient and its
  * interval's upper bound is not below the regressed pool's lower bound, reverting the blamed merge did
  * not help, so the blame was wrong and the incident closes. A healed reviewer clearly better than the
@@ -1065,6 +1238,45 @@ export function resetHealedReviewerTrees(): void {
   healedMemo.clear();
   healedConflictMemo.clear();
   escalatedHealedDeaths.clear();
+  unrecordedConflictEscalations.clear();
+}
+
+/** W1-T13393 — incidents whose conflict this process escalated while the state file could not record it. */
+const unrecordedConflictEscalations = new Set<string>();
+
+/**
+ * W1-T13393 — the review route's record of a healed tree it built, or could not. A conflict or an empty patch is recorded
+ * on `state.incident` (its reason, paths and origin/main sha) when that is still this incident, and a ready tree clears
+ * it. The first conflict of an incident is escalated, and never again for it: not on a main advance, not after a restart,
+ * since the claim is on the state file. When the file cannot be written the claim falls back to this process.
+ */
+export async function noteHealedTreeOutcome(statePath: string, incident: ReviewerIncident, healed: HealedTree,
+  escalation: EscalateDeps<AsyncIssueGateway>, log: ReviewerHealthLog, clock: Pick<Clock, "iso">): Promise<void> {
+  if (healed.state === "unavailable") return;
+  let escalate = false;
+  try {
+    escalate = withReviewerHealthStateLock(statePath, () => {
+      const state = loadReviewerHealthState(statePath);
+      const open = state.incident;
+      if (open === null || open.id !== incident.id) return false;
+      const before = JSON.stringify([open.healedTree?.state, open.healedTree?.originMainSha, open.conflictEscalatedAt]);
+      const at = clock.iso();
+      if (healed.state === "ready") delete open.healedTree;
+      else open.healedTree = { state: healed.state, originMainSha: healed.originMainSha,
+        reason: healed.state === "conflict" ? healed.reason : "origin/main already reverts the blamed merge",
+        paths: healed.state === "conflict" ? [...healed.paths] : [], at };
+      const claim = healed.state === "conflict" && open.conflictEscalatedAt === undefined;
+      if (claim) open.conflictEscalatedAt = at;
+      if (JSON.stringify([open.healedTree?.state, open.healedTree?.originMainSha, open.conflictEscalatedAt]) !== before) saveReviewerHealthState(statePath, state);
+      return claim;
+    });
+  } catch (error) {
+    log("reviewer.health_unavailable", { phase: "healed-tree-record", incident_id: incident.id, state: healed.state, error: String((error as Error)?.message ?? error) });
+    escalate = healed.state === "conflict" && !unrecordedConflictEscalations.has(incident.id);
+    if (escalate) unrecordedConflictEscalations.add(incident.id);
+  }
+  // tryEscalateAsync never rejects; a failed filing is ledgered as escalation.failed.
+  if (escalate && healed.state === "conflict") await tryEscalateAsync(reviewerRegressionEscalation(incident, healed), escalation);
 }
 
 /** The outcome-mix evidence, as the revert PR body and the issue name it. */
@@ -1074,7 +1286,8 @@ export function reviewerRegressionEvidenceText(incident: ReviewerIncident): stri
   const range = (i: { lower: number; upper: number } | null) => (i === null ? "n/a" : `[${pct(i.lower)}, ${pct(i.upper)}]`);
   return [
     `Reviewer code ${incident.regressedSha.slice(0, 12)} ended ${e.k} of ${e.n} code-PR reviews not posted though the reviewer ran or setup refused it ` +
-      `(Wilson ${range(e.interval)} at z=${e.z === null ? "n/a" : e.z.toFixed(2)}), against ${e.baseline.k} of ${e.baseline.n} ` +
+      `${e.run === undefined ? "" : `over its run of ${e.run.shas} unproven reviewer code shas `}` +
+      `(exact ${range(e.interval)} at the family tail, z=${e.z === null ? "n/a" : e.z.toFixed(2)}), against ${e.baseline.k} of ${e.baseline.n} ` +
       `for the reviewer code before it (${range(e.baselineInterval)}).`,
     `Failure signature: ${incident.signature.join(", ") || "(none named)"}.`,
     `Boot head at onset: ${incident.bootHeadSha?.slice(0, 12) ?? "unknown"}; last healthy reviewer code: ${incident.lastHealthySha?.slice(0, 12) ?? "none judged"}.`,
@@ -1358,9 +1571,10 @@ export async function evaluateReviewerHealthNow(
     const prior = [...state.closed].reverse().find((c) => c.signature.some((s) => signature.includes(s)));
     let incident: ReviewerIncident;
     if (prior !== undefined) {
-      const { closedAt: _closedAt, revertPrUrl: _url, revertRefused: _refused,
-        offendingUnavailable: _oldUnavailable, ...rest } = prior;
-      void [_closedAt, _url, _refused, _oldUnavailable];
+      // W1-T13393: the healed-tree record and its escalation belong to the closed incident, never its reopening.
+      const { closedAt: _closedAt, closedReason: _closedReason, revertPrUrl: _url, revertRefused: _refused,
+        offendingUnavailable: _oldUnavailable, healedTree: _healedTree, conflictEscalatedAt: _escalated, ...rest } = prior;
+      void [_closedAt, _closedReason, _url, _refused, _oldUnavailable, _healedTree, _escalated];
       const blame = await findBlame(rec);
       const priorOffenderInRange = prior.offending !== null && blame.lastHealthy !== undefined
         && await isAncestor(blame.lastHealthy.sha, prior.offending.sha) && await isAncestor(prior.offending.sha, rec.sha);
@@ -1409,11 +1623,12 @@ export async function evaluateReviewerHealthNow(
       reason: incident.revertRefused.reason, conflict_paths: incident.revertRefused.paths });
   };
 
-  const closeIncident = async (judgment: ReviewerShaJudgment, live: boolean, cleared?: ReviewerBlameEvidence): Promise<void> => {
+  const closeIncident = async (judgment: ReviewerShaJudgment, live: boolean, cleared?: ReviewerBlameEvidence, unhealed?: true): Promise<void> => {
     const incident = state.incident!;
+    const closedReason: ReviewerIncidentCloseReason | undefined = cleared !== undefined ? "blame-cleared" : unhealed ? "no-heal-not-regressed" : undefined;
     // The closed record keeps its signature either way, so a recurrence is matched as before.
     state.closed = [...state.closed, { ...incident, closedAt: clock.iso(),
-      ...(cleared === undefined ? {} : { closedReason: "blame-cleared" as const }) }].slice(-MAX_CLOSED_REVIEWER_INCIDENTS);
+      ...(closedReason === undefined ? {} : { closedReason }) }].slice(-MAX_CLOSED_REVIEWER_INCIDENTS);
     state.incident = null;
     if (!live) return;
     let revertPr: "open" | "closed" | "merged" | "unread" | null = null;
@@ -1428,6 +1643,11 @@ export async function evaluateReviewerHealthNow(
       ? `The healed reviewer (origin/main with ${incident.offending?.sha.slice(0, 12) ?? "the blamed merge"} reverted) failed no less often than ` +
         `the regressed reviewer code: ${cleared.healed.k} of ${cleared.healed.n} not posted against ${cleared.regressed.k} of ${cleared.regressed.n}, ` +
         "so the blamed merge is not the cause and the blame is cleared (W1-T13902)."
+      : unhealed
+        ? `No heal is in effect: the healed reviewer cannot be built (${incident.healedTree?.reason ?? "no healed tree"}), and no revert PR or ` +
+          `operator heal is open. Reviewer code ${judgment.sha.slice(0, 12)} (origin/main) no longer reads regressed: ${judgment.k} of ${judgment.n} ` +
+          `not posted${judgment.run === undefined ? "" : ` over its run of ${judgment.run.shas} reviewer code shas`} against ${judgment.baseline.k} of ` +
+          `${judgment.baseline.n} before, so the incident closes and the detector keeps measuring (W1-T13393).`
       : `Reviewer code ${judgment.sha.slice(0, 12)} (origin/main) is back inside its baseline: ${judgment.k} of ${judgment.n} ` +
         `not posted against ${judgment.baseline.k} of ${judgment.baseline.n} before (W1-T10269).`;
     if (incident.revertPrUrl !== undefined && revertPr === "open" && lane.closePr) {
@@ -1445,7 +1665,19 @@ export async function evaluateReviewerHealthNow(
       }
     }
     log("reviewer.regression_closed", { incident_id: incident.id, current_reviewer_code_sha: judgment.sha, k: judgment.k, n: judgment.n,
-      baseline_k: judgment.baseline.k, baseline_n: judgment.baseline.n, revert_pr: incident.revertPrUrl ?? null, revert_pr_state: revertPr });
+      baseline_k: judgment.baseline.k, baseline_n: judgment.baseline.n, revert_pr: incident.revertPrUrl ?? null, revert_pr_state: revertPr,
+      closed_reason: closedReason ?? "returned-to-baseline" });
+  };
+
+  /** W1-T13393 — the incident's revert PR as the no-heal close reads it: null with none; one it cannot read may be open. */
+  const revertPrState = async (incident: ReviewerIncident): Promise<"open" | "closed" | "merged" | "unread" | null> => {
+    if (!incident.revertPrUrl) return null;
+    if (!lane.readPr) return "unread";
+    try {
+      return (await lane.readPr(incident.revertPrUrl)).state;
+    } catch {
+      return "unread"; // deliberate: an unread revert PR may be open, so the incident stays
+    }
   };
 
   const readJson: EvidenceJsonReader = input.readEvidenceJson ?? ((args, options) => ghJsonAsync(args, undefined, undefined, options));
@@ -1573,9 +1805,11 @@ export async function evaluateReviewerHealthNow(
       .filter((rec): rec is ReviewerShaRecord => rec !== undefined && !rec.healed && rec.regressedAt === undefined)
       .sort((a, b) => a.seq - b.seq);
     for (const rec of candidates) {
-      const judgment = judgeReviewerSha(state, rec.sha);
+      // W1-T13392: its own sample, else its run of unproven shas, by the exact bound.
+      const judgment = judgeForOpening(state, rec.sha);
       if (judgment.state !== "regressed") continue;
       rec.regressedAt = clock.iso();
+      if (judgment.run !== undefined) rec.regressedRun = { k: judgment.k, n: judgment.n, ...judgment.run };
       if (state.incident === null) {
         await openIncident(rec, judgment, live);
         if (live) await raiseIncident(state.incident!);
@@ -1590,6 +1824,13 @@ export async function evaluateReviewerHealthNow(
     if (state.incident !== null && current !== null) {
       const back = returnedToBaseline(state, state.incident, current);
       if (back.returned) await closeIncident(back.judgment, live);
+    }
+    // W1-T13393: an incident with no heal in effect closes once today's reviewer is not regressed on its run.
+    if (state.incident !== null && current !== null && state.incident.healedTree !== undefined && state.operatorHeal === null) {
+      const today = todaysReviewerNotRegressed(state, current);
+      if (today.notRegressed && noHealInEffect(state, state.incident, await revertPrState(state.incident))) {
+        await closeIncident(today.judgment, live, undefined, true);
+      }
     }
     if (state.incident !== null) {
       const blame = blameCleared(state, state.incident);
@@ -1641,6 +1882,15 @@ export async function evaluateReviewerHealthNow(
     try {
       disk = loadReviewerHealthForEvaluation(statePath);
       state.modelIncidents = disk.modelIncidents;
+      // W1-T13393: the review route owns the incident's healed-tree record (noteHealedTreeOutcome) and may have written
+      // it since this evaluation loaded the file; the file's copy stands, so a restart still knows it escalated.
+      if (state.incident !== null && disk.incident?.id === state.incident.id) {
+        const { healedTree, conflictEscalatedAt } = disk.incident;
+        delete state.incident.healedTree;
+        delete state.incident.conflictEscalatedAt;
+        Object.assign(state.incident, healedTree === undefined ? {} : { healedTree },
+          conflictEscalatedAt === undefined ? {} : { conflictEscalatedAt });
+      }
     } catch (error) {
       // Keep the initially loaded incidents and save the SHA decision even if that refresh fails.
       reportModelHealthFailure(error, log);

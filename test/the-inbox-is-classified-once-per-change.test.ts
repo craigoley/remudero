@@ -91,6 +91,8 @@ function fragment(taskId: string, deps: string[]): string {
   attempts: 0
   origin: architect
   files: [src/lib/plan.ts]
+  design: |
+    NO-INVARIANTS: the fixture drafts one new candidate task only; no prior behavior changes.
   acceptance:
     - claim: "the drafted task does its thing"
       proof: "unit test: drafted ${taskId} does its thing"

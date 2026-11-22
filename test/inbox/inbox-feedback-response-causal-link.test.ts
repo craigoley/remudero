@@ -371,7 +371,7 @@ test("inbox causal composition preserves approval hold supersession and recorded
 
 const draftText = ["=== FRAGMENT START ===", "- id: W1-T900", "  title: drafted candidate", "  repo: remudero",
   "  depends_on: []", "  type: implement", "  verify: auto", "  risk: high", "  band_meaning: span",
-  "  files: [src/lib/plan.ts, test/plan/drafted-candidate.test.ts]", "  origin: feedback#P1", "  acceptance:",
+  "  files: [src/lib/plan.ts, test/plan/drafted-candidate.test.ts]", "  origin: feedback#P1", "  design: |", "    NO-INVARIANTS: the fixture drafts one new candidate task only; no prior behavior changes.", "  acceptance:",
   '    - claim: "the drafted candidate does the thing"', '      proof: "unit test: test/plan/drafted-candidate.test.ts"',
   "  status: queued", "=== FRAGMENT END ===", "STAMP: Improve the requested evidence."].join("\n");
 const draftPlan = "- id: W1-T1\n  title: Existing fixture ground\n  status: merged\n";
@@ -607,7 +607,7 @@ test("real daemon reply to redraft composition preserves one input through CLI q
     let providerCalls = 0;
     const cleanText = ["=== FRAGMENT START ===", "- id: NEW-1", "  title: Clarify the held task evidence without releasing it", "  repo: remudero-site",
       "  depends_on: []", "  type: implement", "  verify: auto", "  risk: medium", "  files: [README.md]",
-      "  origin: architect", "  acceptance:", '    - claim: "README documents the clarified hold rationale"',
+      "  origin: architect", "  design: |", "    NO-INVARIANTS: the fixture drafts one README clarification only; no prior behavior changes.", "  acceptance:", '    - claim: "README documents the clarified hold rationale"',
       '      proof: "grep: clarified-hold-rationale-v2 in README.md"', "  status: queued", "  attempts: 0",
       "=== FRAGMENT END ===", "STAMP: Clarify the evidence while preserving the explicit hold."].join("\n");
     const outcomes = await draftProposalBatch([current], { root: f.root, claudeBin: "/bin/false", installRoot: source }, "owner", "site", "private-causal-draft", log,
