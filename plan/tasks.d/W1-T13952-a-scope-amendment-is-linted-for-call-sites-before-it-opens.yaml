@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  budget_usd: 12.00
+  budget_usd: 4.50
   risk: medium # the amendment writer refuses or completes more amendments; hosted lint-plan is unchanged
   origin: "operator-session#unstick-pr-backlog-2026-11-20"
   plan_refs:
