@@ -296,3 +296,47 @@ test("W1-T12415: a deleted fixture's source map that the repair cannot drop from
   assert.doesNotMatch(run.output, /FLAKE-RETRY-RECOVERED: dropped the source maps of deleted fixture module/, "a repair that dropped nothing is not announced");
   assert.notEqual(run.code, 0, "the run stays failed");
 });
+
+test("the coverage shard's runner and each file child run without concurrent Sparkplug or recompilation, so its force-exit cannot deadlock on Node 24.22.3", (t) => {
+  const workaround = tier.NODE_EXIT_DEADLOCK_WORKAROUND_ARGS as readonly string[];
+  assert.deepEqual([...workaround], ["--no-concurrent-sparkplug", "--no-concurrent-recompilation"]);
+  const coverageManifest = JSON.parse(readFileSync(join(REPO_ROOT, "scripts/test-tier-coverage-manifest.json"), "utf8")) as Manifest;
+  const file = "test/operator-agent-gets-read-the-read-model.test.ts";
+  for (const flag of workaround) {
+    assert.ok(boundArgs([file], coverageManifest).includes(flag), `the coverage bound carries ${flag}`);
+    assert.ok(withBound(["--test", file], "scripts/test-tier-coverage-manifest.json", REPO_ROOT).includes(flag), `and the shard command gets ${flag}`);
+    assert.ok(!(tier.slowTierHangBoundArgs as () => string[])().includes(flag), "the slow tier, which never reached this exit, is unchanged");
+  }
+  // NODE_OPTIONS refuses these V8 flags, which is why the bound puts them on the runner's command line.
+  const viaEnv = spawnSync(process.execPath, ["-e", "0"], { encoding: "utf8", env: childEnv({ NODE_OPTIONS: workaround[0]! }) });
+  assert.equal(viaEnv.status, 9, `NODE_OPTIONS rejects ${workaround[0]}\n${viaEnv.stderr}`);
+  assert.match(viaEnv.stderr, /is not allowed in NODE_OPTIONS/);
+
+  // The shard's own wrapper, exactly as ci.yml calls it: a file child inherits only the runner's own flags.
+  const dir = ownedFixtureDir(t, "coverage-exit-deadlock-flags").dir;
+  const seen = join(dir, "exec-argv.json");
+  writeFileSync(join(dir, "touched.mjs"), "export const touched = () => 1;\n");
+  writeFileSync(join(dir, "records-its-flags.test.mjs"), [
+    'import { writeFileSync } from "node:fs";',
+    'import { test } from "node:test";',
+    `import { touched } from ${JSON.stringify(pathToFileURL(join(dir, "touched.mjs")).href)};`,
+    `test("a file child records its flags", () => { touched(); writeFileSync(${JSON.stringify(seen)}, JSON.stringify(process.execArgv)); });`,
+    "",
+  ].join("\n"));
+  writeFileSync(join(dir, "durations.json"), JSON.stringify({ thresholdMs: 5000, files: {} }));
+  const lcov = join(dir, "lcov.info");
+  const run = spawnSync(process.execPath, [
+    join(REPO_ROOT, "scripts/test-with-retry.mjs"), "--coverage-first-pass", join(dir, "raw"),
+    process.execPath, "--enable-source-maps", "--experimental-test-coverage",
+    "--test-reporter=tap", "--test-reporter-destination=stdout",
+    "--test-reporter=lcov", `--test-reporter-destination=${lcov}`,
+    "--test", "records-its-flags.test.mjs",
+  ], { cwd: dir, encoding: "utf8", timeout: 240_000, killSignal: "SIGKILL", env: childEnv({ [MANIFEST_ENV]: join(dir, "durations.json"), GITHUB_STEP_SUMMARY: "" }) });
+  assert.equal(run.signal, null, `the run ended by itself\n${run.stdout}\n${run.stderr}`);
+  assert.equal(run.status, 0, `the bounded run passes\n${run.stdout}\n${run.stderr}`);
+  assert.match(run.stdout, /^ok \d+ - a file child records its flags$/m);
+  const childArgv = JSON.parse(readFileSync(seen, "utf8")) as string[];
+  for (const flag of workaround) assert.ok(childArgv.includes(flag), `the file child ran with ${flag}: ${childArgv.join(" ")}`);
+  assert.ok(existsSync(lcov) && statSync(lcov).size > 0, "the run still wrote its lcov file");
+  assert.match(readFileSync(lcov, "utf8"), /^SF:.*touched\.mjs$/m, "and the coverage of the code the test ran");
+});

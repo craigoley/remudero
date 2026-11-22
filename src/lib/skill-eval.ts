@@ -8,7 +8,8 @@
  * A sealed, never-pushed attempt of an unapproved draft is not a release.
  *
  * The selector is pure. The draft is frozen first, because its sha256 seeds the draw. The runner
- * spends, so it refuses unless the operator passed --confirm-spend and the fleet is idle, and it
+ * spends, so it refuses unless the operator passed --confirm-spend (or the fleet passed the operator's standing
+ * approval, W1-T13861) and the fleet is idle, and it
  * dispatches only through an injected sealed dispatcher. Every refusal is a value the caller sees,
  * never an empty success. The drafter (skill-workshop.ts, workflow-mining.ts) must never import this
  * module or golden-corpus.ts; the dependency-cruiser rule `drafter-never-sees-held-out-set` refuses that edge.
@@ -17,11 +18,13 @@ import { createHash } from "node:crypto";
 import { heldOutLeaks, replayIdleGate, type CorpusProofOutcome, type GoldenCorpusItem, type ReplayIdleSignal } from "./golden-corpus.js";
 import { gradeHeadWithReviewerExecutor, PAIRED_ATTEMPT_MAX_BUDGET_USD, type PairedAttemptDispatch, type PairedAttemptRequest,
   type PairedAttemptResult, type PairedGrade, type PairedGrader } from "./paired-trial.js";
+import { promotionFloor } from "./promotion-bars.js";
 import { replayOptIn } from "./replay-harness.js";
 import { createSkillEvalControl, type SkillEvalControl, type SkillEvalControlInput } from "./skill-eval-control.js";
 
-/** K: held-out tasks per draft, per the operator's 2026-10-13 ruling. */
-export const SKILL_EVAL_HELD_OUT_TASKS = 3;
+/** K: held-out tasks per draft, per the operator's 2026-10-13 ruling. A promotion bar: scripts/promotion-floors-baseline.json's
+ *  `skillEvalHeldOutTasks` (src/lib/promotion-bars.ts), like {@link SKILL_EVAL_TRIALS_PER_ARM} and {@link SKILL_EVAL_MIN_MEAN_GAIN}. */
+export const SKILL_EVAL_HELD_OUT_TASKS = promotionFloor("skillEvalHeldOutTasks");
 
 /** Task types a held-out attempt can run: the sealed attempt path renders `renderImplementPrompt`. */
 export const SKILL_EVAL_ATTEMPTABLE_TASK_TYPES: readonly string[] = ["implement"];
@@ -119,7 +122,10 @@ export function selectHeldOutTasks(opts: HeldOutSelectionInput): HeldOutSelectio
 }
 
 /** R: trials per arm per held-out task, per the operator's 2026-10-13 ruling. */
-export const SKILL_EVAL_TRIALS_PER_ARM = 2;
+export const SKILL_EVAL_TRIALS_PER_ARM = promotionFloor("skillEvalTrialsPerArm");
+
+/** The mean with-skill minus without-skill pass rate a draft must EXCEED; at 0 any gain passes and none refuses. */
+export const SKILL_EVAL_MIN_MEAN_GAIN = promotionFloor("skillEvalMinMeanGain");
 
 /** The two arms. They share one pinned stack; the draft in the prompt's skills part is the only difference. */
 export const SKILL_EVAL_ARMS = ["with-skill", "without-skill"] as const;
@@ -214,11 +220,18 @@ export function skillEvalVerdict(attempts: readonly Pick<SkillEvalAttempt, "task
   if (delta === null || diffs.length < SKILL_EVAL_HELD_OUT_TASKS) {
     return refuse("too-few-measurable-tasks", `${diffs.length} of ${SKILL_EVAL_HELD_OUT_TASKS} held-out tasks were measurable`);
   }
-  if (delta <= 0) return refuse("no-benefit", `the mean with-skill minus without-skill pass rate is ${delta}`);
+  if (delta <= SKILL_EVAL_MIN_MEAN_GAIN) return refuse("no-benefit", `the mean with-skill minus without-skill pass rate is ${delta}`);
   const regressed = diffs.filter((d) => d.diff < 0).map((d) => d.taskId);
   if (regressed.length > 0) return refuse("per-task-regression", `the draft lowers the pass rate on ${regressed.join(", ")}`);
   return { verdict: "pass", reason: "held-out-benefit", detail: `mean pass-rate gain ${delta} with no task regressed`, ...base };
 }
+
+/**
+ * W1-T13861: the operator's standing approval (2026-11-19) for the fleet to run a held-out eval by itself, inside the
+ * spend limits that already exist. It is a value in code only: {@link runSkillEval} accepts exactly this object, by
+ * identity, so no argv, environment variable or config file can produce it, not even a copy with the same text.
+ */
+export const SKILL_EVAL_STANDING_APPROVAL: Readonly<{ ref: string }> = Object.freeze({ ref: "operator-session#skill-eval-runs-itself-2026-11-19" });
 
 export interface SkillEvalRunInput {
   selection: HeldOutSelected;
@@ -230,8 +243,11 @@ export interface SkillEvalRunInput {
   stack: Pick<PairedAttemptRequest<SkillEvalArm>, "pin" | "revisions" | "stackEvidence">;
   /** Absent: the item's proofs through the reviewer's own executor. */
   grade?: PairedGrader;
-  /** The invocation's argv: the run spends only with `--confirm-spend` (`replayOptIn`). */
+  /** The invocation's argv: the run spends only with `--confirm-spend` (`replayOptIn`), or with the standing approval. */
   argv: readonly string[];
+  /** W1-T13861: in place of `--confirm-spend`, only when it is {@link SKILL_EVAL_STANDING_APPROVAL} itself. Every other
+   *  check (the quiet fleet, the draft, the held-out task count, the spend ceiling) still applies unchanged. */
+  standingApproval?: Readonly<{ ref: string }>;
   idle: ReplayIdleSignal;
   log: (step: string, row: Record<string, unknown>) => void;
   /** Default OFF. A fixed whole-loop cancellation control, never capacity-release authority. */
@@ -309,7 +325,7 @@ async function skillEvalRun(input: SkillEvalRunInput, control?: SkillEvalControl
     input.log(SKILL_EVAL_STEPS.refused, { ...tag, reason, detail });
     return { state: "refused", reason, detail, dispatched: 0 };
   };
-  const optIn = replayOptIn(input.argv);
+  const optIn = spendApproval(input);
   if (!optIn.enabled) return refuse("spend-not-confirmed", optIn.reason);
   const idle = replayIdleGate(input.idle);
   if (!idle.enabled) return refuse("fleet-not-idle", idle.reason);
@@ -357,11 +373,17 @@ async function skillEvalRun(input: SkillEvalRunInput, control?: SkillEvalControl
   return { state: "evaluated", verdict, attempts };
 }
 
+/** Consent to spend: `--confirm-spend` in argv, or the standing approval passed as the code value itself. */
+function spendApproval(input: Pick<SkillEvalRunInput, "argv" | "standingApproval">): { enabled: boolean; reason: string } {
+  if (input.standingApproval === SKILL_EVAL_STANDING_APPROVAL) return { enabled: true, reason: `standing approval ${SKILL_EVAL_STANDING_APPROVAL.ref}` };
+  return replayOptIn(input.argv);
+}
+
 /** Optional fixed whole-loop control is inert when absent and cannot bypass quiet/spend gates.
  * Synchronous setup/grading and escaped descendants still require an independently qualified
  * whole-process boundary. No successful or cancelled return here releases a capacity lease. */
 export async function runSkillEval(input: SkillEvalRunInput): Promise<SkillEvalRun> {
-  if (!replayOptIn(input.argv).enabled) return skillEvalRun(input);
+  if (!spendApproval(input).enabled) return skillEvalRun(input);
   let control: SkillEvalControl | undefined;
   try { control = createSkillEvalControl(input.control); }
   catch (error) {

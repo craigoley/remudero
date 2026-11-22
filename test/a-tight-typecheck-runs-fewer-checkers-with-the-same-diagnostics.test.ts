@@ -45,7 +45,7 @@ function project(t: TestContext): string {
 test("tsc gets fewer checkers under low injected headroom, scaled to the shortfall, and nothing extra with room", () => {
   assert.equal(TSC_DEFAULT_CHECKERS, 4);
   assert.equal(TSC_LOW_MEMORY_MIN_CHECKERS, 2);
-  assert.equal(TYPECHECK_WARM_PEAK_BYTES, TYPECHECK_COLD_PEAK_BYTES / 2);
+  assert.equal(TYPECHECK_WARM_PEAK_BYTES, TYPECHECK_COLD_PEAK_BYTES, "W1-T14153: a warm check peaks as high as a cold one");
   assert.deepEqual(lowMemoryTypecheckArgs(undefined, TYPECHECK_COLD_PEAK_BYTES), [], "no reading (macOS) changes nothing");
   assert.deepEqual(lowMemoryTypecheckArgs(8 * GiB, TYPECHECK_COLD_PEAK_BYTES), [], "a roomy host (CI) changes nothing");
   assert.deepEqual(lowMemoryTypecheckArgs(TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_COLD_PEAK_BYTES), []);

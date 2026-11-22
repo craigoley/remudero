@@ -7,13 +7,14 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # changes which retention value makes a Codex result incomplete, at one line of the spawn; the cap, the retention evidence and the Claude worker's rule are unchanged
+  risk: high  # Rule 19 span: widened to a-codex-worker-over-its-output-budget-keeps-its-run by a scope amendment; one line of the spawn changes, and that test pins the old rule
   origin: "operator-session#audit-small-findings-2026-11-21"
   plan_refs:
     - W1-T13951
   files:
     - src/lib/worker-provider.ts
     - test/worker/a-reviewer-whose-earlier-messages-were-reclaimed-keeps-its-verdict.test.ts
+    - test/a-codex-worker-over-its-output-budget-keeps-its-run.test.ts # amended 2026-11-22: pins the old rule (design step 5)
   status: queued
   attempts: 0
   acceptance:
@@ -57,6 +58,14 @@
     4. Tests in test/worker/a-reviewer-whose-earlier-messages-were-reclaimed-keeps-its-verdict.test.ts, titled
        "W1-T14207 criterion N: ...". Drive spawnCodexWorker with an injected child stream as the W1-T13951 suite does,
        and call reviewerOutcome from src/lib/review.ts for criterion 1. Load test/setup/tmp-hygiene.ts.
+    5. W1-T13960 (#19891) landed first: the spawn's test is now codexResultRetentionComplete. Leave blocks out of
+       its first check only. Its narrow upgrade for a truncated stdout still asks blocks to read complete, so every
+       stdout case decides as on origin/main, and test/worker/spawn/a-codex-run-whose-stream-completed-is-not-marked-
+       incomplete-by-a-spilled-line.test.ts passes unchanged.
+       PINNED: test/a-codex-worker-over-its-output-budget-keeps-its-run.test.ts. Its test "W1-T6352: retained output
+       never exceeds the budget" streams 40 earlier messages and a short final one; only blocks reads truncated, and
+       it asserts isError true and error_incomplete_output. With this task that run returns success and isError
+       false. Flip those two assertions; keep its blocks-truncated and byte-bound assertions.
     MEASURE AFTER DEPLOY: on the host ledger, count review.reviewer rows with output_retention.blocks truncated
     and text complete, by subtype. Expect success, not error_incomplete_output.
   falsifier: |

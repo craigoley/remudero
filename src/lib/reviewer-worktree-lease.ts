@@ -104,3 +104,24 @@ export async function withReviewerWorktreeLease<T>(worktree: string, action: () 
   if (releaseFailure !== undefined) throw releaseFailure.error;
   return outcome.value;
 }
+
+/** W1-T14148: the reaper removes a reviewer tree only while it holds the tree's lease. A borrow in this
+ *  process or a live holder in another one answers "leased"; a corrupt or contested lock rethrows. */
+export async function removeUnderReviewerLease(worktree: string, remove: () => Promise<void>): Promise<"removed" | "leased"> {
+  const path = resolve(worktree);
+  if (borrowers.has(path)) return "leased";
+  let held: { owner: ReviewerLease; raw: string; count: number };
+  try { held = claim(path); }
+  catch (error) {
+    if (error instanceof ReviewerWorktreeLeasedError) return "leased";
+    throw error;
+  }
+  try { await remove(); }
+  finally {
+    const released = reclaimStaleLock(`${path}.lock`, { parseHolder: parseLease,
+      isStale: (owner) => owner.run_id === held.owner.run_id && owner.pid === held.owner.pid,
+      onReclaim: () => {}, onLostReclaim: () => {} });
+    if (released.outcome !== "reclaimed") throw new Error("reviewer tree removal did not release its own claim");
+  }
+  return "removed";
+}

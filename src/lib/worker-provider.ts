@@ -54,8 +54,8 @@ import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWind
 import type { ModelApproval } from "./config-schema.js";
 import { cashDeploymentEndpoint, cashDeploymentTarget } from "./config-schema.js";
 import {
-  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, seedFromCanonical, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYTES,
-  TYPECHECK_WARM_PEAK_BYTES, typecheckEnv,
+  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, seedFromCanonical, TYPECHECK_BUILDINFO_NAME,
+  typecheckEnv, typecheckPeakBytes,
 } from "./typecheck-buildinfo.js";
 import { acquireTestSlotAsync, defaultTestSlots, readHostLoad, readMemoryHeadroom, testRunConcurrency, testSlotExecutionAllowed, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { selectFromRoutingPool, type RoutingPoolDecision, type RoutingPoolRequest, type RoutingPoolSnapshot } from "./model-pool.js";
@@ -116,7 +116,6 @@ interface CodexSpawnArgs {
     ) => ContainedProcess;
     teardown?: (pgid: number) => void;
   };
-  fixtureSpawn?: boolean;
   onSpawnError?: (error: NodeJS.ErrnoException) => void;
   /** W1-T10763: a codex tool call also carries `toolName`/`toolInput`/`cwd`, the fields the run-task observer signs. */
   streamObserver?: (event: {
@@ -133,107 +132,8 @@ interface CodexSpawnArgs {
  * no SDK throw. It is never read as exit 0. Re-exported by worker.ts beside `WorkerResult.exit`. */
 export type WorkerExit = { kind: "exit"; code: number } | { kind: "signal"; signal: string } | { kind: "unobserved" };
 
-const HARNESS_CAPABILITIES = ["preToolInterception", "resume", "configuredCompaction", "servedModelIdentity",
-  "toolResultLineage", "billingProvenance", "filesystemIsolation", "networkIsolation"] as const;
-type HarnessCapability = typeof HARNESS_CAPABILITIES[number];
-type HarnessSupport = "supported" | "unsupported" | "unknown";
-type HarnessOutcome = HarnessSupport | "NOT_RUN" | "SKIPPED";
-type HarnessAdapter = "claude" | "codex";
-type HarnessEnvironment = "linux-host" | "linux-container" | "darwin-host" | "windows-host";
-
-interface HarnessRuntimeBinding {
-  adapter: HarnessAdapter;
-  adapterRevision: string;
-  executableSha256: string;
-  policySha256: string;
-  environment: HarnessEnvironment;
-}
-
-const HARNESS_EVIDENCE_CLASSES = Object.freeze({ declared: "declared", tested: "deterministic-adapter-test",
-  installed: "observed-installed-runtime" } as const);
-
-export interface WorkerHarnessContract {
-  version: 1;
-  adapter: HarnessAdapter | "unknown";
-  binding: HarnessRuntimeBinding | null;
-  evidenceClasses: typeof HARNESS_EVIDENCE_CLASSES;
-  capabilities: Record<HarnessCapability, { declared: HarnessSupport; tested: HarnessOutcome; installed: HarnessOutcome }>;
-  preToolInterception: "denied" | "nonblocking" | "unknown" | "NOT_RUN";
-}
-
-function harnessRecord(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown> : undefined;
-}
-
-function harnessBinding(value: unknown): HarnessRuntimeBinding | null {
-  const record = harnessRecord(value);
-  if (!record) return null;
-  const { adapter, adapterRevision, executableSha256, policySha256, environment } = record;
-  if ((adapter !== "claude" && adapter !== "codex") || typeof adapterRevision !== "string"
-    || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(adapterRevision)
-    || typeof executableSha256 !== "string" || !/^[0-9a-f]{64}$/.test(executableSha256)
-    || typeof policySha256 !== "string" || !/^[0-9a-f]{64}$/.test(policySha256)
-    || (environment !== "linux-host" && environment !== "linux-container" && environment !== "darwin-host" && environment !== "windows-host")) return null;
-  return { adapter, adapterRevision, executableSha256, policySha256, environment };
-}
-
-function installedHarnessOutcome(capability: HarnessCapability, value: unknown, current: HarnessRuntimeBinding | null): HarnessOutcome {
-  if (value === undefined) return "NOT_RUN";
-  const evidence = harnessRecord(value);
-  if (evidence?.outcome === "NOT_RUN" || evidence?.outcome === "SKIPPED") return evidence.outcome;
-  const observed = harnessBinding(evidence?.binding);
-  if (evidence?.class !== "observed-installed-runtime" || !current || !observed
-    || observed.adapter !== current.adapter || observed.adapterRevision !== current.adapterRevision
-    || observed.executableSha256 !== current.executableSha256 || observed.policySha256 !== current.policySha256
-    || observed.environment !== current.environment) return "unknown";
-  if (capability === "preToolInterception" && evidence.source !== (evidence.outcome === "supported"
-    ? "pre-tool-hook-denial" : "pre-tool-attempt-not-denied")) return "unknown";
-  return evidence.outcome === "supported" || evidence.outcome === "unsupported" ? evidence.outcome : "unknown";
-}
-
-function harnessSupport(flag: boolean | undefined): HarnessSupport {
-  return flag === undefined ? "unknown" : flag ? "supported" : "unsupported";
-}
-
-/** The optional installed evidence belongs to a separately admitted observation producer. Ordinary
- * worker calls supply neither that evidence nor a binding to an immutable executable. */
-export function buildWorkerHarnessContract(provider: string, facts: {
-  resume?: boolean;
-  compactionConfigured?: boolean;
-  preToolInterception?: WorkerHarnessContract["preToolInterception"];
-  tested?: Partial<Record<HarnessCapability, HarnessSupport>>;
-}, installed?: { binding: unknown; capabilities: Partial<Record<HarnessCapability, unknown>> }): WorkerHarnessContract {
-  const adapter = provider === "claude" || provider === "codex" ? provider : "unknown";
-  const bound = harnessBinding(installed?.binding);
-  const binding = bound?.adapter === adapter ? bound : null;
-  const declared: Record<HarnessCapability, HarnessSupport> = {
-    preToolInterception: "supported",
-    resume: harnessSupport(facts.resume),
-    configuredCompaction: harnessSupport(facts.compactionConfigured),
-    servedModelIdentity: adapter === "claude" ? "supported" : "unknown",
-    toolResultLineage: "supported",
-    billingProvenance: "supported",
-    filesystemIsolation: "supported",
-    networkIsolation: "supported",
-  };
-  const capabilities = Object.fromEntries(HARNESS_CAPABILITIES.map(capability => {
-    const tested = adapter === "unknown" ? undefined : facts.tested?.[capability];
-    return [capability, {
-      declared: adapter === "unknown" ? "unknown" : declared[capability],
-      tested: tested === "supported" || tested === "unsupported" || tested === "unknown" ? tested : "NOT_RUN",
-      installed: installedHarnessOutcome(capability, installed?.capabilities[capability], binding),
-    }];
-  })) as WorkerHarnessContract["capabilities"];
-  const interception = facts.preToolInterception;
-  return { version: 1, adapter, binding, evidenceClasses: HARNESS_EVIDENCE_CLASSES, capabilities,
-    preToolInterception: adapter === "claude" && (interception === "denied" || interception === "nonblocking" || interception === "unknown")
-      ? interception : "NOT_RUN" };
-}
-
 interface CodexWorkerResult {
   provider: "codex";
-  harnessContract: WorkerHarnessContract;
   /** W1-T6148: what the harness did with a codex writer's edits; absent when its caller commits them. */
   harnessCommit?: CodexHarnessCommit;
   sessionId: string;
@@ -309,10 +209,21 @@ export interface ProviderCapacity {
   resetCredits?: { availableCount: number; earliestExpiresAt?: number };
   /** W1-T10382: the Codex bucket's prepaid credits as read; see {@link codexCreditsSpendable}. */
   credits?: CodexCredits;
-  /** W1-T3718: `readable: false` because the provider ANSWERED and every candidate sat below the
-   *  reserve, not because the probe failed. See {@link providerRefusalCondition}. */
+  /** Subscription quota answered below the reserve. Spendable Codex credits can still admit
+   *  an exhausted candidate. See {@link providerRefusalCondition}. */
   exhausted?: boolean;
-  carriedForward?: { readAt: number; ageMs: number; failure: string };
+  carriedForward?: { readAt: number; ageMs: number; failure: string; failureKind?: "timeout" | "starved" };
+  creditsRescue?: CodexCreditsRescue;
+  probeFailure?: "timeout" | "starved" | "terminal";
+}
+
+/** W1-T13855: credits from a last-good reading or the generic pool carried past the reserve. */
+export interface CodexCreditsRescue {
+  path: "carried" | "generic-bucket";
+  /** Projected spendable balance, possibly null for unlimited credits. */
+  projectedBalance: number | null;
+  ageMs?: number;
+  failureKind?: "timeout" | "starved";
 }
 
 /** W1-T10382: the lane a Codex account past its reserve is admitted on when its prepaid credits can carry it. */
@@ -588,8 +499,12 @@ export function providerEligibility(capacity: ProviderCapacity, reservePercent: 
   // `below-reserve` with the tightest window it still carries, not `unreadable`.
   if (capacity.exhausted === true) {
     const carried = providerAllocationWindows(capacity).filter(validCapacityWindow);
-    return { eligible: false, reason: "below-reserve",
-      headroomPercent: carried.length > 0 ? Math.min(...carried.map((window) => 100 - window.usedPercent)) : null };
+    const headroomPercent = carried.length > 0 ? Math.min(...carried.map((window) => 100 - window.usedPercent)) : null;
+    if (capacity.provider === "codex" && capacity.windows.length > 0 && capacity.windows.every(validCapacityWindow) &&
+        codexCreditsSpendable(capacity.credits)) {
+      return { eligible: true, lane: "codex-credits", headroomPercent };
+    }
+    return { eligible: false, reason: "below-reserve", headroomPercent };
   }
   const remaining = tightestRemaining(capacity);
   const headroomPercent = Number.isFinite(remaining) ? remaining : null;
@@ -691,8 +606,8 @@ export function selectWorkerProvider(
   // W1-T10382: subscription headroom wins; a credits lane is drawn only when no subscription has any.
   const headroom = admitted.filter((entry) => entry.lane.lane === undefined);
   const eligible = (headroom.length > 0 ? headroom : admitted)
-    .map(({ capacity, lane: { lane } }) => {
-      const tightestRemainingPercent = tightestRemaining(capacity);
+    .map(({ capacity, lane: { lane, headroomPercent } }) => {
+      const tightestRemainingPercent = headroomPercent ?? Number.NEGATIVE_INFINITY;
       return {
         provider: capacity.provider,
         capacity,
@@ -878,6 +793,8 @@ interface CodexRateLimitWindow {
   resetsAt?: unknown;
 }
 
+const projectedCodexCreditsBalance = Symbol("projected Codex credits balance");
+
 interface CodexRateLimitBucket {
   limitId?: unknown;
   limitName?: unknown;
@@ -887,6 +804,7 @@ interface CodexRateLimitBucket {
   spendControlReached?: unknown;
   /** W1-T10382: prepaid credits, spelled as the app-server's `CreditsSnapshot`; `balance` is a decimal string. */
   credits?: { hasCredits?: unknown; unlimited?: unknown; balance?: unknown } | null;
+  [projectedCodexCreditsBalance]?: number;
 }
 
 interface CodexRateLimitResult {
@@ -1428,11 +1346,25 @@ export function selectOpenWeightModel(
     ...(capacityShortfalls.length > 0 ? { capacityShortfalls } : {}) };
 }
 
+function namedCodexBucket(buckets: CodexRateLimitBucket[], model: CodexModelInfo): CodexRateLimitBucket | undefined {
+  const names = new Set([model.id, model.model, model.displayName].map(normalizedModelName).filter(Boolean));
+  return buckets.find((bucket) => names.has(normalizedModelName(bucket.limitName)));
+}
+
 function codexBucketForModel(result: CodexRateLimitResult, model: CodexModelInfo): CodexRateLimitBucket | undefined {
   const buckets = Object.values(result.rateLimitsByLimitId ?? {});
-  const names = new Set([model.id, model.model, model.displayName].map(normalizedModelName).filter(Boolean));
-  const named = buckets.find((bucket) => names.has(normalizedModelName(bucket.limitName)));
-  return named ?? buckets.find((bucket) => bucket.limitId === "codex") ?? result.rateLimits ?? undefined;
+  return namedCodexBucket(buckets, model) ?? buckets.find((bucket) => bucket.limitId === "codex") ?? result.rateLimits ?? undefined;
+}
+
+function visibleCodexModels(models: CodexModelInfo[]): Map<string, CodexModelInfo> {
+  const visible = new Map<string, CodexModelInfo>();
+  for (const model of models) {
+    const id = canonicalCodexModelId(model);
+    if (model.hidden || !id || visible.has(id)) continue;
+    visible.set(id, model);
+    if (visible.size === 100) break;
+  }
+  return visible;
 }
 
 function capacityFromBucket(bucket: CodexRateLimitBucket | undefined, accountLabel?: string): ProviderCapacity {
@@ -1462,15 +1394,45 @@ const UNSIGNED_DECIMAL = /^\d+(?:\.\d+)?$/;
 function parseCodexCredits(bucket: CodexRateLimitBucket): CodexCredits | undefined {
   const block = bucket.credits;
   if (!block || typeof block !== "object" || typeof block.hasCredits !== "boolean" || typeof block.unlimited !== "boolean") return undefined;
-  const parsed = typeof block.balance === "string" && UNSIGNED_DECIMAL.test(block.balance) ? Number(block.balance) : Number.NaN;
+  const parsed = bucket[projectedCodexCreditsBalance] ??
+    (typeof block.balance === "string" && UNSIGNED_DECIMAL.test(block.balance) ? Number(block.balance) : Number.NaN);
+  const blocked = codexCreditsBlock(bucket);
+  return { hasCredits: block.hasCredits, unlimited: block.unlimited, balance: Number.isFinite(parsed) ? parsed : null,
+    ...(blocked ? { blocked } : {}) };
+}
+
+function codexCreditsBlock(bucket: CodexRateLimitBucket): string | undefined {
   const reached = bucket.rateLimitReachedType;
-  const blocked = bucket.spendControlReached === true
+  return bucket.spendControlReached === true
     ? "spend-control-reached"
     : reached == null || reached === CREDITS_CARRIED_REACHED_TYPE
       ? undefined
       : typeof reached === "string" && /^[a-z_]{1,64}$/.test(reached) ? reached : "rate-limit-reached";
-  return { hasCredits: block.hasCredits, unlimited: block.unlimited, balance: Number.isFinite(parsed) ? parsed : null,
-    ...(blocked ? { blocked } : {}) };
+}
+
+function genericCodexBucket(reading: CodexRateLimitResult | undefined): CodexRateLimitBucket | undefined {
+  return reading?.rateLimits ?? reading?.rateLimitsByLimitId?.codex ?? undefined;
+}
+
+/** Inherit shared credits only if the block is absent. Honor either spend block. */
+function codexCreditsFor(bucket: CodexRateLimitBucket | undefined, reading: CodexRateLimitResult | undefined):
+  { credits?: CodexCredits; borrowed: boolean } {
+  if (!bucket) return { borrowed: false };
+  if (bucket.credits != null) return { credits: parseCodexCredits(bucket), borrowed: false };
+  const generic = genericCodexBucket(reading);
+  const shared = generic && generic !== bucket ? parseCodexCredits(generic) : undefined;
+  if (!shared) return { borrowed: false };
+  const blocked = codexCreditsBlock(bucket) ?? shared.blocked;
+  return { credits: { hasCredits: shared.hasCredits, unlimited: shared.unlimited, balance: shared.balance,
+    ...(blocked ? { blocked } : {}) }, borrowed: true };
+}
+
+function codexModelCapacity(reading: CodexRateLimitResult, model: CodexModelInfo): { capacity: ProviderCapacity; borrowed: boolean } {
+  const bucket = codexBucketForModel(reading, model);
+  const capacity = capacityFromBucket(bucket);
+  const { credits, borrowed } = codexCreditsFor(bucket, reading);
+  if (!capacity.readable || !borrowed || !credits) return { capacity, borrowed: false };
+  return { capacity: { ...capacity, credits }, borrowed: true };
 }
 
 function codexAllocationWindows(reading: CodexRateLimitResult, modelCapacity: ProviderCapacity): ProviderCapacityWindow[] {
@@ -1499,16 +1461,10 @@ export function codexCapacityFromRateLimits(result: unknown): ProviderCapacity {
 }
 
 /**
- * Pick an account-visible model for the requested Remudero mount and attach only
- * that model's quota bucket. Independent model buckets must not veto each other.
- *
- * `capabilities` (W1-T2573) is the `.remudero/mounts.yaml` capability ladder — see
- * {@link codexCapabilityForRequestedModel} / {@link codexCandidatesForCapability}. It resolves
- * BOTH the capability tier (a table lookup on the Claude model name, never a substring match)
- * and, keyed also on `requestedEffort`, the ordered default candidates for that tier — so effort
- * now genuinely reaches the candidate pool instead of being dropped at the provider boundary. An
- * operator's `workerProviders.codexModels` override, when present, still wins outright per tier
- * (unchanged — it is not effort-keyed) exactly as it did before this axis existed.
+ * Pick an account-visible model using its own quota bucket. W1-T2573 resolves the Claude
+ * model's tier through {@link codexCapabilityForRequestedModel} and uses the requested
+ * effort in {@link codexCandidatesForCapability}. The operator's per-tier
+ * `workerProviders.codexModels` override takes precedence regardless of effort.
  */
 export function selectCodexModel(
   models: CodexModelInfo[],
@@ -1521,15 +1477,7 @@ export function selectCodexModel(
     switchback?: { window: VersionSwitchbackWindow; taskId: string; at: string } } = {},
 ): ProviderCapacity {
   const reading = rateLimits && typeof rateLimits === "object" ? rateLimits as CodexRateLimitResult : {};
-  const visible: CodexModelInfo[] = [];
-  const visibleIds = new Set<string>();
-  for (const model of models) {
-    const id = canonicalCodexModelId(model);
-    if (model.hidden || !id || visibleIds.has(id)) continue;
-    visibleIds.add(id);
-    visible.push(model);
-    if (visible.length === 100) break;
-  }
+  const visible = [...visibleCodexModels(models).values()];
   const forced = config.workerProviders?.codexModel;
   const { tier, fallbackReason: capabilityFallbackReason } = resolveCodexCapability(capabilities, requestedModel);
   const preferred = forced
@@ -1549,19 +1497,19 @@ export function selectCodexModel(
       .map((entry) => entry.reasoningEffort)
       .filter((effort): effort is string => typeof effort === "string" && SAFE_CODEX_EFFORT.test(effort)))].slice(0, 8);
     const mapped = mappedIds.has(model.id) || (typeof model.model === "string" && mappedIds.has(model.model));
-    const capacity = capacityFromBucket(codexBucketForModel(reading, model));
+    const { capacity } = codexModelCapacity(reading, model);
     const effortSupported = !requestedEffort || supportedEfforts.includes(requestedEffort);
     const measured = capacity.readable && capacity.windows.length > 0 && capacity.windows.every(validCapacityWindow);
-    const hasHeadroom = measured && capacity.windows.every((window) => window.usedPercent < 100 - reserve);
-    // W1-T10382: past the reserve, prepaid credits keep the model eligible as the credits lane.
-    const creditsLane = measured && !hasHeadroom && codexCreditsSpendable(capacity.credits);
+    const exhausted = measured && capacity.windows.some((window) => window.usedPercent >= 100 - reserve);
+    // Classify the measured subscription before checking whether credits can admit this model.
+    const quota = providerEligibility(exhausted ? { ...capacity, readable: false, exhausted: true } : capacity, reserve);
     const reason: CodexModelIneligibleReason | undefined = !mapped
       ? "unmapped"
       : !effortSupported
         ? "unsupported-effort"
         : !capacity.readable
           ? "quota-unreadable"
-          : !hasHeadroom && !creditsLane
+          : !quota.eligible
             ? "below-reserve"
             : undefined;
     return {
@@ -1574,13 +1522,13 @@ export function selectCodexModel(
       selected: false,
       windows: capacity.windows.map((window) => ({ ...window })),
       ...(reason ? { reason } : {}),
-      ...(reason === undefined && creditsLane ? { lane: "codex-credits" as const } : {}),
+      ...(reason === undefined && quota.lane ? { lane: quota.lane } : {}),
     };
   });
   const ranked = candidates.map((model, preference) => {
     const option = options.find((candidate) => candidate.id === canonicalCodexModelId(model));
-    const capacity = capacityFromBucket(codexBucketForModel(reading, model));
-    return { model, capacity, option, preference, remaining: tightestRemaining(capacity) };
+    const { capacity, borrowed } = codexModelCapacity(reading, model);
+    return { model, capacity, borrowed, option, preference, remaining: tightestRemaining(capacity) };
   }).sort((a, b) => b.remaining - a.remaining || a.preference - b.preference);
   const admitted = ranked.filter((candidate) => candidate.option?.eligible);
   // W1-T10382: a model with subscription headroom is always chosen over one its credits carry.
@@ -1617,17 +1565,12 @@ export function selectCodexModel(
     ...(capabilityFallbackReason ? { capabilityFallbackReason } : {}),
   };
   if (!selected) {
-    // Preserve W1-T2573's fail-closed attribution contract: when mapped models are visible but
-    // their quota cannot authorize dispatch, return the first ranked concrete model alongside
-    // `readable:false`. The provider selector still refuses Codex (there is no proved headroom),
-    // while callers that explain the capability mapping do not lose which candidate the table
-    // resolved to. It is deliberately NOT marked selected in `modelDecision`: no worker can run.
+    // W1-T2573: retain the first ranked model for attribution even when quota refuses dispatch.
     const fallback = ranked[0];
     if (fallback) {
       const fallbackEfforts = fallback.option?.supportedEfforts ?? [];
       const fallbackEffort = requestedEffort ?? fallback.model.defaultReasoningEffort ?? fallbackEfforts[0] ?? "default";
-      // W1-T3718: the detail names WHY. It said "no reserved headroom" for every cause, a quota
-      // that was never readable included -- so an unanswerable probe read as a full subscription.
+      // W1-T3718: distinguish exhausted windows from unreadable quota.
       const reason = fallback.option?.reason;
       return {
         ...fallback.capacity,
@@ -1657,8 +1600,12 @@ export function selectCodexModel(
   const effort = requestedEffort ?? selected.model.defaultReasoningEffort ?? efforts[0] ?? "default";
   const selectedModel = canonicalCodexModelId(selected.model)!;
   for (const option of options) option.selected = option.id === selectedModel;
+  const borrowedRescue = selected.borrowed && selected.option?.lane === "codex-credits"
+    ? { creditsRescue: { path: "generic-bucket" as const, projectedBalance: selected.capacity.credits?.balance ?? null } }
+    : {};
   return {
     ...selected.capacity,
+    ...borrowedRescue,
     allocationWindows: codexAllocationWindows(reading, selected.capacity),
     model: selectedModel,
     effort,
@@ -1704,6 +1651,8 @@ function selectCodexAttributionModel(
 
 export interface CodexCapacityDeps {
   now?: () => number;
+  /** Deadline clock for an injected app-server spawn. */
+  monotonicNow?: () => number;
   spawn?: (command: string, args: string[], options: { env: NodeJS.ProcessEnv }) => ChildProcessWithoutNullStreams;
   timeoutMs?: number;
   requestedModel?: string;
@@ -1823,12 +1772,9 @@ function codexControlEnv(config: Config): NodeJS.ProcessEnv {
 export async function readCodexRuntime(
   config: Config,
   bin: string,
-  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & {
+  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs" | "monotonicNow"> & {
     signal?: AbortSignal;
     onHedgeEligibility?: (eligible: boolean) => void;
-    /** Real-time source for the deadline-overrun check. Injected ONLY by tests: a fake clock in
-     *  production would defeat the very stall this measurement exists to detect. */
-    monotonicNow?: () => number;
     /** Receives each spawned app-server's exit, so an off-thread probe can let it be reaped before its thread ends. */
     onChildSpawned?: (exited: Promise<void>) => void;
   },
@@ -1975,7 +1921,7 @@ function codexCapacityHedgeDelay(timeoutMs: number): number {
 export async function readCodexRuntimeWithTimeoutHedge(
   config: Config,
   bin: string,
-  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs"> & { clock: Pick<Clock, "now">; onChildSpawned?: (exited: Promise<void>) => void },
+  deps: Pick<CodexCapacityDeps, "spawn" | "timeoutMs" | "monotonicNow"> & { clock: Pick<Clock, "now">; onChildSpawned?: (exited: Promise<void>) => void },
 ): Promise<CodexRuntimeResult> {
   const timeoutMs = deps.timeoutMs ?? 10_000;
   const hedgeDelayMs = codexCapacityHedgeDelay(timeoutMs);
@@ -2171,7 +2117,12 @@ function selectCodexRuntime(
       reservePercent: deps.reservePercent,
       switchback: deps.switchback,
     });
-  const selected = pooled && read.modelDecision ? { ...read, modelDecision: { ...read.modelDecision, routingPool: pooled } } : read;
+  const capacity: ProviderCapacity = !deps.selectedModel && !read.readable && !read.exhausted
+    ? { ...read, probeFailure: "terminal" }
+    : read;
+  const selected = pooled && capacity.modelDecision
+    ? { ...capacity, modelDecision: { ...capacity.modelDecision, routingPool: pooled } }
+    : capacity;
   if (!value.retryDetail) return selected;
   return {
     ...selected,
@@ -2260,16 +2211,55 @@ function rememberCodexRuntime(config: Config, bin: string, value: CodexRuntimeRe
   }
 }
 
+/** W1-T13855: project observed credit burn over the reading's age. */
+function projectedCreditsBalance(current: { readAt: number; credits: CodexCredits },
+  previous: { readAt: number; credits: CodexCredits | undefined } | undefined, ageMs: number): number | null {
+  const balance = current.credits.balance;
+  if (current.credits.unlimited || balance === null) return balance;
+  const before = previous?.credits?.balance;
+  const intervalMs = previous ? current.readAt - previous.readAt : 0;
+  const burn = typeof before === "number" && intervalMs > 0 && before > balance ? (before - balance) / intervalMs : 0;
+  return balance - burn * ageMs;
+}
+
 function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps, capabilities: CapabilityLadder | undefined,
   failure: ProviderCapacity, failureKind: CodexRuntimeFailure["failureKind"], now: number): ProviderCapacity {
-  if (deps.forceRefresh || (failureKind !== "timeout" && failureKind !== "starved")) return failure;
+  if (deps.forceRefresh || (failureKind !== "timeout" && failureKind !== "starved")) return { ...failure, probeFailure: failureKind };
   try {
     const saved = decodeCodexLastGood(readCodexLastGoodText(config), config, bin), current = saved.current, previous = saved.previous;
     if (current.invalidated) throw new Error("last-good invalidated by terminal probe evidence");
     const ageMs = now - current.readAt, reserve = deps.reservePercent ?? config.workerProviders?.reservePercent ?? 5;
     if (!Number.isFinite(ageMs) || ageMs < 0 || !Number.isFinite(reserve) || reserve < 0 || reserve >= 100) throw new Error("invalid clock or reserve");
-    let windows = 0;
-    const project = (w: CodexRateLimitWindow | null | undefined, old: CodexRateLimitWindow | null | undefined): CodexRateLimitWindow | null => {
+    const currentRates = current.value.rateLimits as CodexRateLimitResult, previousRates = previous?.value.rateLimits as CodexRateLimitResult | undefined;
+    const visible = visibleCodexModels(current.value.models);
+    const previousModels = visibleCodexModels(previous?.value.models ?? []);
+    const currentBuckets = Object.values(currentRates.rateLimitsByLimitId ?? {});
+    // A named bucket follows the model's prior reading, including a prior generic fallback.
+    const previousByNamedBucket = new Map<CodexRateLimitBucket, CodexRateLimitBucket | undefined>();
+    for (const [id, model] of visible) {
+      const currentBucket = namedCodexBucket(currentBuckets, model);
+      if (!currentBucket || previousByNamedBucket.has(currentBucket)) continue;
+      const previousModel = previousModels.get(id);
+      previousByNamedBucket.set(currentBucket, previousRates && previousModel ? codexBucketForModel(previousRates, previousModel) : undefined);
+    }
+    const carryBalance = <T extends CodexRateLimitBucket | null | undefined>(b: T, old: CodexRateLimitBucket | null | undefined): T => {
+      if (b == null) return b;
+      const credits = parseCodexCredits(b);
+      if (!credits) return b;
+      const before = codexCreditsFor(old ?? undefined, previousRates).credits;
+      const balance = projectedCreditsBalance({ readAt: current.readAt, credits },
+        previous ? { readAt: previous.readAt, credits: before } : undefined, ageMs);
+      return balance === null ? b : { ...b, [projectedCodexCreditsBalance]: balance };
+    };
+    const previousGeneric = genericCodexBucket(previousRates);
+    const carriedRates = { ...currentRates, rateLimits: carryBalance(currentRates.rateLimits, previousGeneric),
+      rateLimitsByLimitId: currentRates.rateLimitsByLimitId && Object.fromEntries(Object.entries(currentRates.rateLimitsByLimitId)
+        .map(([id, b]) => [id, carryBalance(b, previousByNamedBucket.has(b) ? previousByNamedBucket.get(b) :
+          previousRates?.rateLimitsByLimitId?.[id] ?? (id === "codex" ? previousGeneric : undefined))])) };
+    let hasUnresetWindow = false;
+    let rejectedWindow: string | undefined;
+    const project = (w: CodexRateLimitWindow | null | undefined, old: CodexRateLimitWindow | null | undefined,
+      creditsSpendable: boolean): CodexRateLimitWindow | string | null => {
       if (!w) return null;
       const used = w.usedPercent, duration = w.windowDurationMins, reset = w.resetsAt;
       if (typeof duration !== "number" || !Number.isFinite(duration) || duration <= 0 ||
@@ -2282,24 +2272,54 @@ function carryCodexCapacity(config: Config, bin: string, deps: CodexCapacityDeps
           typeof old.usedPercent === "number" && Number.isFinite(old.usedPercent) && old.usedPercent >= 0 && old.usedPercent <= used)
         burn = Math.max(burn, (used - old.usedPercent) / (current.readAt - previous.readAt));
       const projected = used + burn * ageMs;
-      if (!Number.isFinite(projected) || projected >= 100 - reserve) throw new Error("projected burn reaches the reserve");
-      windows++;
-      return { usedPercent: projected, windowDurationMins: duration, resetsAt: reset };
+      if (!Number.isFinite(projected)) throw new Error("projected burn reaches the reserve");
+      if (projected >= 100 - reserve && !creditsSpendable) return "projected burn reaches the reserve";
+      return { usedPercent: Math.min(projected, 100), windowDurationMins: duration, resetsAt: reset };
     };
-    const currentRates = current.value.rateLimits as CodexRateLimitResult, previousRates = previous?.value.rateLimits as CodexRateLimitResult | undefined;
-    const bucket = (b: CodexRateLimitBucket | null | undefined, old: CodexRateLimitBucket | null | undefined) => b == null ? b
-      : { ...b, primary: project(b.primary, old?.primary), secondary: project(b.secondary, old?.secondary) };
-    const rateLimits = { ...currentRates, rateLimits: bucket(currentRates.rateLimits, previousRates?.rateLimits),
-      rateLimitsByLimitId: currentRates.rateLimitsByLimitId && Object.fromEntries(Object.entries(currentRates.rateLimitsByLimitId)
+    const bucket = <T extends CodexRateLimitBucket | null | undefined>(b: T, old: CodexRateLimitBucket | null | undefined): T => {
+      if (b == null) return b;
+      const creditsSpendable = codexCreditsSpendable(codexCreditsFor(b, carriedRates).credits);
+      const primary = project(b.primary, old?.primary, creditsSpendable);
+      const secondary = project(b.secondary, old?.secondary, creditsSpendable);
+      if (typeof primary !== "string" && typeof secondary !== "string") {
+        hasUnresetWindow ||= primary !== null || secondary !== null;
+        return { ...b, primary, secondary };
+      }
+      rejectedWindow ??= [primary, secondary].find((result) => typeof result === "string");
+      // Keep the refused bucket and its credits block so the model stays unavailable.
+      return { ...b, primary: null, secondary: null };
+    };
+    const rateLimits: CodexRateLimitResult = { ...carriedRates, rateLimits: bucket(carriedRates.rateLimits, previousRates?.rateLimits),
+      rateLimitsByLimitId: carriedRates.rateLimitsByLimitId && Object.fromEntries(Object.entries(carriedRates.rateLimitsByLimitId)
         .map(([id, b]) => [id, bucket(b, previousRates?.rateLimitsByLimitId?.[id])])) };
-    if (windows === 0) throw new Error("no unreset quota window with a duration");
-    const selected = selectCodexRuntime({ rateLimits, models: current.value.models }, config, deps, capabilities);
-    if (!selected.readable) throw new Error(selected.detail ?? "projected model is unavailable");
-    return { ...selected, carriedForward: { readAt: current.readAt, ageMs, failure: failure.detail ?? "probe unavailable" },
+    if (!hasUnresetWindow) throw new Error(rejectedWindow ?? "no unreset quota window with a duration");
+    const runtime = { rateLimits, models: current.value.models };
+    const selected = selectCodexRuntime(runtime, config, deps, capabilities);
+    if (rejectedWindow) {
+      const decision = selected.modelDecision ?? (deps.selectedModel
+        ? selectCodexRuntime(runtime, config, { ...deps, selectedModel: undefined }, capabilities).modelDecision
+        : undefined);
+      const carriedByCredits = decision?.options.some((option) => {
+        if (!option.eligible) return false;
+        const modelBucket = codexBucketForModel(rateLimits, visible.get(option.id)!);
+        const { credits, borrowed } = codexCreditsFor(modelBucket, rateLimits);
+        return codexCreditsSpendable(credits) && [modelBucket, borrowed ? genericCodexBucket(rateLimits) : undefined]
+          .some((source) => [source?.primary?.usedPercent, source?.secondary?.usedPercent]
+            .some((used) => typeof used === "number" && used >= 100 - reserve));
+      });
+      if (!carriedByCredits) throw new Error(rejectedWindow);
+    }
+    if (!selected.readable) {
+      throw new Error([selected.detail ?? "projected model is unavailable", rejectedWindow].filter(Boolean).join("; "));
+    }
+    const onCredits = providerEligibility(selected, reserve).lane === "codex-credits";
+    const rescued = onCredits
+      ? { creditsRescue: { path: "carried" as const, projectedBalance: selected.credits?.balance ?? null, ageMs, failureKind } } : {};
+    return { ...selected, ...rescued, carriedForward: { readAt: current.readAt, ageMs, failure: failure.detail ?? "probe unavailable", failureKind },
       detail: `Codex capacity carried forward ${ageMs}ms from ${fixedClock(current.readAt).iso()}; ${failure.detail ?? "probe unavailable"}` };
   } catch (error) {
     const reason = String((error as Error).message).slice(0, 256);
-    return { ...failure, detail: `${failure.detail}; last-good unavailable: ${reason}` };
+    return { ...failure, probeFailure: failureKind, detail: `${failure.detail}; last-good unavailable: ${reason}` };
   }
 }
 
@@ -2310,7 +2330,7 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
     bin = resolveCodexBin(config, deps.resolveEnv);
   } catch (error) {
     // Toolchain absence is a named unreadable capacity, so routing can still use Claude.
-    return { provider: "codex", readable: false, windows: [], detail: (error as Error).message };
+    return { provider: "codex", readable: false, windows: [], detail: (error as Error).message, probeFailure: "terminal" };
   }
   const capabilities = resolveCapabilityLadder(config, deps);
   const now = deps.now ?? Date.now;
@@ -2540,7 +2560,8 @@ export function codexResultRetentionComplete(
   parsed: Pick<ParsedCodexEvents, "retentionLoss" | "outputTruncation">,
 ): boolean {
   const notComplete = (values: object) => Object.values(values).some(value => typeof value === "object" && value.state !== "complete");
-  if (!notComplete(retention)) return true;
+  const { blocks: _blocks, ...judged } = retention;
+  if (!notComplete(judged)) return true;
   const loss = parsed.retentionLoss;
   const { stdout, ...rest } = retention;
   if (loss.rebuiltLines === 0 || retention.originalSubtype !== "success" || notComplete(rest)) return false;
@@ -3584,10 +3605,6 @@ export function codexReadOnly(args: Pick<CodexSpawnArgs, "sandboxIntent" | "tool
     !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
 }
 
-function codexCanResume(args: CodexSpawnArgs): boolean {
-  return codexReadOnly(args) || args.sandboxIntent === "disposable-review";
-}
-
 /**
  * W1-T6148 — WHO COMMITS A CODEX WRITER'S EDITS. The worker cannot (no gitdir write), so: its CALLER when
  * the caller told it the harness owns git (a shell-less bound, or a declared cash surface — the coherence
@@ -3759,7 +3776,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   // containment arguments. A resumed writer must therefore start fresh through the ordinary
   // contained path below; the prompt already carries its predecessor's repair evidence. Read-only
   // and disposable-review continuations retain the CLI resume form byte-for-byte.
-  if (args.resumeSessionId && codexCanResume(args)) {
+  if (args.resumeSessionId && (readOnly || disposableReview)) {
     return ["exec", "resume", ...shared, args.resumeSessionId, "-"];
   }
   // W1-T6148: NO `--add-dir` for the tree's git dir or common dir. A writer that could write either could
@@ -6016,15 +6033,16 @@ async function executeOpenWeightTool(
         suites = plan.suites.length;
       }
       const scoped = suites === null ? {} : { suites };
-      const slot = args.check === "typecheck" &&
-        !hasUsableTypecheckBuildInfo(join(workerHome, TYPECHECK_BUILDINFO_NAME), installedTypescriptVersion(cwd))
-        ? await acquireTestSlotAsync("typecheck:bwrap", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES }) : undefined;
+      const warm = args.check === "typecheck" &&
+        hasUsableTypecheckBuildInfo(join(workerHome, TYPECHECK_BUILDINFO_NAME), installedTypescriptVersion(cwd));
+      const slot = args.check === "typecheck"
+        ? await acquireTestSlotAsync("typecheck:bwrap", { memoryBytes: typecheckPeakBytes(warm) }) : undefined;
       if (slot && !testSlotExecutionAllowed(slot)) {
         slot.release();
         ledgerRunCheck(ledger, { check: args.check, outcome: "refused", suites, startedAt, reason: slot.note, scopeRule });
         return { check: args.check, ran: false, refused: `NOT_RUN (${slot.note})` };
       }
-      if (args.check === "typecheck") argv = [...argv, ...lowMemoryTypecheckArgs(readMemoryHeadroom(), slot ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES)];
+      if (args.check === "typecheck") argv = [...argv, ...lowMemoryTypecheckArgs(readMemoryHeadroom(), typecheckPeakBytes(warm))];
       try {
         const stdout = await (runCheck ?? runOpenWeightCheck)({
           argv,
@@ -7011,9 +7029,8 @@ async function spawnCodexWorkerInPrivateTemp(
     if (pidRef.pid !== undefined) teardownOnce(pidRef.pid);
   };
   const childEnv = { ...codexSpawnEnv(config, args, nativeCacheRoot), TMPDIR: privateTmpDir };
-  const execArgs = codexExecArgs(args, config, selection, privateProfile, nativeCacheRoot);
   const contained = spawn(
-    { command: bin, args: execArgs, cwd: args.cwd, env: childEnv },
+    { command: bin, args: codexExecArgs(args, config, selection, privateProfile, nativeCacheRoot), cwd: args.cwd, env: childEnv },
     (chunk, failure) => {
       if (outputLimit || timedOut) return;
       if (failure) stderrFailure = failure;
@@ -7119,17 +7136,6 @@ async function spawnCodexWorkerInPrivateTemp(
     lineageEnd = isError ? "interrupted" : "stream-ended";
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
     const notionalCostUsd = parsed.tokenUsageState === "observed" ? codexNotionalCostUsd(model, parsed.tokens) : undefined;
-    const served = codexServedModel(parsed.reroutes ?? []);
-    const fixtureSpawn = args.fixtureSpawn ?? (args.containment?.spawn !== undefined);
-    const harnessContract = buildWorkerHarnessContract("codex", {
-      resume: privateProfile === undefined && codexCanResume(args), compactionConfigured: false,
-      tested: fixtureSpawn ? {
-        resume: !isError && execArgs[1] === "resume" && parsed.sessionId === args.resumeSessionId ? "supported" : undefined,
-        configuredCompaction: "unsupported",
-        servedModelIdentity: served.servedModel === null ? "unknown" : "supported",
-        billingProvenance: notionalCostUsd === undefined ? "unknown" : "supported",
-      } : undefined,
-    });
     const harnessCommit = harnessCommits && !isError ? commitCodexWriterEdits(args.cwd, parsed.text) : undefined;
     if (harnessCommit && args.runId) appendLedger(ledgerPathFor(config), {
       run_id: args.runId,
@@ -7163,13 +7169,12 @@ async function spawnCodexWorkerInPrivateTemp(
       childEnvKeys: Object.keys(childEnv),
       accountLabel: undefined,
       provider: "codex",
-      harnessContract,
       model,
       effort: selection?.effort ?? args.effort ?? "default",
       tokens: parsed.tokens,
       tokenUsageState: parsed.tokenUsageState,
       modelUsage: {},
-      ...served,
+      ...codexServedModel(parsed.reroutes ?? []),
       compactionEvents: [],
       compactionFailures: [],
       compactionConfigured: false,

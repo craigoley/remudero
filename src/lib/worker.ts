@@ -226,7 +226,6 @@ import {
   codexCandidatesForCapability,
   type WorkerExit,
   type CodexCompletionEvidence,
-  buildWorkerHarnessContract, type WorkerHarnessContract,
   withObservedServedModel, forgetReturnedServedModel, observeReturnedServedModel,
 } from "./worker-provider.js";
 import {
@@ -288,7 +287,6 @@ export function workerExitOfError(e: unknown): WorkerExit {
 }
 
 export interface WorkerResult {
-  harnessContract?: WorkerHarnessContract;
   /** Characters in the rendered prompt supplied to the provider adapter. */
   promptChars?: number;
   /** Internal producer receipt for W1-T11119; created only from a terminal provider stream. */
@@ -486,17 +484,18 @@ function providerExclusionCandidates(
   if (excluded.length === 0) return { capacities, excludeProviders: [] };
   const considered = routableProviders === undefined ? capacities
     : capacities.filter((capacity) => routableProviders.includes(capacity.provider));
-  const eligibleAlternative = considered.some((capacity) => !excluded.includes(capacity.provider) &&
-    providerEligibility(capacity, reservePercent).eligible);
-  if (eligibleAlternative) {
+  const eligible = considered.map((capacity) => ({ provider: capacity.provider, ...providerEligibility(capacity, reservePercent) }))
+    .filter((candidate) => candidate.eligible);
+  // Re-admission may change the provider within the best available tier.
+  const subscriptions = eligible.filter((candidate) => candidate.lane === undefined);
+  const tier = subscriptions.length > 0 ? subscriptions : eligible;
+  if (tier.some((candidate) => !excluded.includes(candidate.provider))) {
     return { capacities: capacities.filter((capacity) => !excluded.includes(capacity.provider)), excludeProviders: excluded };
   }
-  const eligibleExcluded = considered.some((capacity) => excluded.includes(capacity.provider) &&
-    providerEligibility(capacity, reservePercent).eligible);
   return {
     capacities,
     excludeProviders: excluded,
-    ...(eligibleExcluded ? { exclusion_unhonoured: { reason: "no-eligible-alternative", excludedProviders: excluded } } : {}),
+    ...(tier.length > 0 ? { exclusion_unhonoured: { reason: "no-eligible-alternative", excludedProviders: excluded } } : {}),
   };
 }
 
@@ -615,6 +614,17 @@ export interface RoutingDecision {
     lane?: ProviderLane;
     /** W1-T10382: the Codex credit balance this read saw; `null` when the balance was unreadable. */
     creditsBalance?: number | null;
+    /** W1-T13855: how credits rescued this capacity: the path, the tier chosen, the projected balance and, for a
+     *  carried reading, its age and the probe failure it was carried over. */
+    creditsRescue?: {
+      path: "carried" | "generic-bucket";
+      tier: ProviderLane;
+      projectedBalance: number | null;
+      ageMs?: number;
+      failureKind?: "timeout" | "starved";
+    };
+    /** W1-T13855: why an unreadable Codex read could not be asked: the probe's failure kind. */
+    failureKind?: "timeout" | "starved" | "terminal";
   }>;
   /** Tightest remaining window per subscription read for this decision; `null` means unreadable. */
   headroomPercent: Partial<Record<WorkerProviderId, number | null>>;
@@ -681,7 +691,6 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * max_turns records the cap; stderr_excerpt requires r.isError. Always emit served_model,
  * null when unknown; unreportable models never fail runs (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
-  harness_contract?: WorkerHarnessContract;
   output_retention?: WorkerResult["outputRetention"];
   continuation?: WorkerContinuationReceipt;
   execution_evidence?: WorkerExecutionEvidenceV1;
@@ -743,7 +752,6 @@ export function workerLedgerFields(r: WorkerResult): {
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
-    ...(r.harnessContract ? { harness_contract: r.harnessContract } : {}),
     ...(r.outputRetention && Object.values(r.outputRetention)
       .some((output) => typeof output === "object" && output.state !== "complete") ? { output_retention: r.outputRetention } : {}),
     ...(r.mcpIsolation ? { mcp_isolation: r.mcpIsolation } : {}),
@@ -1263,7 +1271,7 @@ export interface SpawnWorkerArgs {
       // The Codex spawn REQUIRES the redirected per-spawn worker home, threaded explicitly rather than inferred from
       // `process.env.HOME` or `args.env` ordering, so a test double is held to the contract the real `spawnCodexWorker` is
       // (W1-T2800).
-      args: SpawnWorkerArgs & { workerHome: string; zdotdir?: string; fixtureSpawn?: boolean },
+      args: SpawnWorkerArgs & { workerHome: string; zdotdir?: string },
       config: Config,
       selection?: Pick<ProviderCapacity, "model" | "effort">,
     ) => Promise<WorkerResult>;
@@ -1870,6 +1878,14 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
       ...(verdict.reason ? { reason: verdict.reason } : {}),
       ...(verdict.lane ? { lane: verdict.lane } : {}),
       ...(capacity.credits ? { creditsBalance: capacity.credits.balance } : {}),
+      ...(verdict.lane && capacity.creditsRescue ? { creditsRescue: {
+        path: capacity.creditsRescue.path,
+        tier: verdict.lane,
+        projectedBalance: capacity.creditsRescue.projectedBalance,
+        ...(capacity.creditsRescue.ageMs !== undefined ? { ageMs: capacity.creditsRescue.ageMs } : {}),
+        ...(capacity.creditsRescue.failureKind ? { failureKind: capacity.creditsRescue.failureKind } : {}),
+      } } : {}),
+      ...(verdict.reason === "unreadable" && capacity.probeFailure ? { failureKind: capacity.probeFailure } : {}),
     };
   });
   if (!considered.some((entry) => entry.selected)) {
@@ -2878,6 +2894,16 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       };
       // W1-T13672: a deferred cash-mount spawn returns to its own cash route, never to a squeeze or overflow fallback.
       const deferred = args.cashDeferred !== undefined || subscriptionRetry;
+      // A fallback can still serve the work. Retire the previous credits signal without changing the review's quota reading.
+      const spawnFallback = (mountProvider: WorkerProviderId, fallback: Pick<SpawnWorkerArgs,
+        "cashSqueezed" | "cashOpusEmergency" | "cashSonnetEmergency" | "routingFallback" | "tools">) => {
+        publishProviderRoutingStatus({ ...statusBase, state: "invalidate-credits" });
+        return spawnWorker({
+          ...args,
+          ...fallback,
+          mountProvider,
+        });
+      };
       if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly && !deferred) {
         const divertTools = args.cashTools ?? args.tools;
         const env = args.env ?? process.env;
@@ -2890,9 +2916,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           allowanceRefusal(["claude-opus-5-5"]);
         if (refusal === undefined) {
           console.error(JSON.stringify({ event: "worker.provider.cash_opus_fallback", reason: "both subscriptions blocked", requested_model: args.model }));
-          return await spawnWorker({
-            ...args,
-            mountProvider: "cash",
+          return await spawnFallback("cash", {
             cashSqueezed: true,
             cashOpusEmergency: true,
             routingFallback: { rule: "cash-opus-fallback", capacities },
@@ -2928,9 +2952,12 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             : allowanceRefusal([...new Set(eligible)]);
           if (held !== undefined) {
             console.error(JSON.stringify({ event: "worker.provider.cash_fallback_refused", refusal: held }));
-            publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
-            if (eligible.length === 0 && candidates.length > 0) throw new CashDraftResumeBlockedError();
+            if (eligible.length === 0 && candidates.length > 0) {
+              publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
+              throw new CashDraftResumeBlockedError();
+            }
             error.message += `; ${held}`;
+            publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
             throw error;
           }
         }
@@ -2940,9 +2967,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             reason: "no subscription had readable headroom",
             requested_model: args.model,
           }));
-          return await spawnWorker({
-            ...args,
-            mountProvider: "cash" as WorkerProviderId,
+          return await spawnFallback("cash", {
             cashSqueezed: true,
             cashSonnetEmergency: true,
             routingFallback: { rule: "cash-sonnet-fallback", capacities },
@@ -2956,13 +2981,10 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             tools: divertTools,
             blocked: capacities.map((c) => `${c.provider}=${c.readable ? "readable" : c.detail ?? "unreadable"}`),
           }));
-          // NO routing status is written here. The auction really did block, and there is no
-          // ProviderSelection to report -- inventing one to satisfy the "selected" shape would be
-          // the fabricated telemetry this whole design refuses. The cash spawn below publishes its
-          // own status through the mount-affinity path.
-          return await spawnWorker({
-            ...args,
-            mountProvider: "cash" as WorkerProviderId,
+          // No "selected" status is written here: the auction really did block, and there is no
+          // ProviderSelection to report -- inventing one would be the fabricated telemetry this
+          // design refuses.
+          return await spawnFallback("cash", {
             // this is the ONLY place the squeeze ceiling is claimed. Reaching cash here
             // means every subscription was unreadable or exhausted, which is exactly the day the
             // operator raised the cap for.
@@ -2990,9 +3012,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           // Setting `mountProvider` makes the retry SKIP the auction rather than re-enter it, and it
           // is the SAME structural recursion bound the cash arm relies on: the outer guard requires
           // `args.mountProvider === undefined`, so neither arm can fire twice.
-          return await spawnWorker({
-            ...args,
-            mountProvider: "claude" as WorkerProviderId,
+          return await spawnFallback("claude", {
             routingFallback: { rule: "overflow-fallback", capacities },
           });
         }
@@ -3044,8 +3064,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         args.providerRouting?.spawnCodex ?? spawnCodexWorker;
       const execution = executionFor("codex");
       const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
-        spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
-          containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
+        spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId, containment: boundContainment }, workerConfig, capacity);
       if (args.providerRouting?.spawnCodex === undefined) {
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
@@ -3138,8 +3157,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       args.providerRouting?.spawnCodex ?? spawnCodexWorker;
     const execution = executionFor("codex");
     const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
-      spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
-        containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
+      spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId, containment: boundContainment }, workerConfig, capacity);
     if (args.providerRouting?.spawnCodex === undefined) {
       assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -3546,7 +3564,6 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       env: childEnv,
       settings: (privateSettings as Options["settings"]) ?? args.settingsFile,
       settingSources: WORKER_SETTING_SOURCES, // real value: settingSources: [] (see WORKER_SPAWN_ISOLATION above)
-      includeHookEvents: true,
       // Run the CLI DETACHED into its own process group and session, so teardown reaches every descendant — including one
       // outliving the CLI's own exit — with a single group signal. This REPLACES the SDK's default local spawn, so
       // `stderrOutput` is fed from THIS closure rather than an `Options.stderr` callback, which the SDK never invokes for a
@@ -3707,7 +3724,6 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         () =>
           collectWorkerResult(liveQuery, {
             childEnvKeys: Object.keys(childEnv).sort(),
-            harness: { fixture: args.queryFn !== undefined || args.containment?.spawn !== undefined, resume: options.resume !== undefined },
             stderrOutput,
             stderrFailure: () => stderrFailure,
             settleOutput: async () => {
@@ -4220,7 +4236,6 @@ export async function collectWorkerResult(
   messages: AsyncIterable<unknown>,
   opts: {
     childEnvKeys: string[];
-    harness?: { fixture: boolean; resume: boolean };
     providerExchangeBinding?: ProviderExchangeBindingV1;
     root?: string;
     runId?: string;
@@ -4297,7 +4312,6 @@ export async function collectWorkerResult(
   let servedModel: string | undefined;
   let providerExchangeDetail: Omit<ProviderExchangeReceiptV1, "version" | keyof ProviderExchangeBindingV1> | undefined;
   let initSummary: WorkerInitSummary | undefined;
-  let preToolInterception: WorkerHarnessContract["preToolInterception"] = "NOT_RUN";
   const compactionEvents: CompactionEvent[] = [];
   const compactionFailures: CompactionFailure[] = [];
   const nowFn = opts.now ?? Date.now;
@@ -4307,16 +4321,6 @@ export async function collectWorkerResult(
       observeWorkerToolLineage(toolLineage, raw);
       const msg = raw as { type?: string; message?: unknown };
       if (msg.type === "system") {
-        const hook = raw as { subtype?: string; hook_event?: string; exit_code?: number; outcome?: string; stdout?: string };
-        if (opts.harness && (hook.subtype === "hook_started" || hook.subtype === "hook_progress" || hook.subtype === "hook_response")
-          && hook.hook_event !== "SessionStart" && hook.hook_event !== "Setup") {
-          if (hook.subtype === "hook_response" && hook.hook_event === "PreToolUse" && preToolInterception !== "denied") {
-            if (hook.exit_code === 2) preToolInterception = "denied";
-            else if (hook.exit_code === 0 && hook.outcome === "success" && hook.stdout === "") preToolInterception = "nonblocking";
-            else if (preToolInterception === "NOT_RUN") preToolInterception = "unknown";
-          }
-          continue;
-        }
         // First init wins: later system/status events cannot erase the original inventory or make unknown become empty.
         initSummary ??= workerInitSummaryFromMessage(raw);
         // Detect a compaction event LIVE off the SDK's own `compact_boundary` system message, reusing the same detector a
@@ -4573,16 +4577,6 @@ export async function collectWorkerResult(
   };
   if (sawResult && providerExchangeDetail && opts.providerExchangeBinding)
     result.providerExchange = sealProviderExchange(opts.providerExchangeBinding, providerExchangeDetail);
-  if (opts.harness) result.harnessContract = buildWorkerHarnessContract("claude", {
-    resume: true, compactionConfigured: result.compactionConfigured, preToolInterception,
-    tested: opts.harness.fixture ? {
-      preToolInterception: preToolInterception === "NOT_RUN" ? undefined : preToolInterception === "unknown" ? "unknown" : "supported",
-      resume: !result.isError && opts.harness.resume ? "supported" : undefined,
-      configuredCompaction: result.compactionConfigured ? "supported" : "unsupported",
-      servedModelIdentity: servedModel === undefined ? "unknown" : "supported",
-      billingProvenance: sdkReportedUsageRatedUsd === undefined ? "unknown" : "supported",
-    } : undefined,
-  });
   return result;
 }
 
@@ -5150,6 +5144,18 @@ export function taskInputAnswerWithLedger(repoRoot: string, ledgerPath: string):
     if (read.answersUnreadable === undefined && read.ledgerUnreadable === undefined) publishAnswers(ledgerPath, store.filter((line) => line.source !== "ledger" && !answerHeld(rows, line)), [...published]);
     const row = newestLedgerTaskAnswer(read.rows(taskId), taskId);
     return newestTaskAnswer([...store, ...published, ...(row ? [{ task: taskId, answer: row.answer, ts: row.ts }] : [])], taskId);
+  };
+}
+
+/** W1-T14172: the answer {@link taskInputAnswerWithLedger} decides, read from the same store, rows and published lines,
+ * with no copy and no publish: serve's needs-you list reads held answers through it on its main thread. */
+export function readTaskInputAnswer(repoRoot: string, ledgerPath: string): TaskInputAnswer {
+  const evidence = sharedAnswerEvidence(ledgerPath);
+  return (taskId) => {
+    const read = evidence();
+    const row = newestLedgerTaskAnswer(read.rows(taskId), taskId);
+    return newestTaskAnswer([...answerRecords(questionStoreLines(repoRoot) ?? [], taskId), ...answerRecords(read.lines, taskId),
+      ...(row ? [{ task: taskId, answer: row.answer, ts: row.ts }] : [])], taskId);
   };
 }
 
