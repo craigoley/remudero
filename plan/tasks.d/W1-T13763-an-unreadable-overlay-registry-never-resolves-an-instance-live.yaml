@@ -15,6 +15,7 @@
     - src/lib/overlay-home.ts
     - src/lib/instance-mode.ts
     - test/daemon/an-unreadable-overlay-registry-is-never-live.test.ts
+    - test/plan/an-overlay-home-pointer-parses-and-nothing-reads-it.test.ts # amended 2026-11-22 for PR 20131: admits instance-mode as the pointer's one reader
   status: queued
   attempts: 0
   acceptance:
@@ -38,3 +39,7 @@
   note: |
     Id reserved for run-unfiled-1795050000009 with ~/rmd-work/bin/reserve-id.sh.
     reservation hand-off: run-unfiled-1795050000009 -> claude/project-thread-eatx1y
+    files: amendment 2026-11-22 (PR 20131 at dc3018bd5): W1-T13757's test pins zero readers of the pointer, and its
+    design says the parser lands with its first reader, this task. The build may change that test's criterion 2 only,
+    to an exact list of that one reader (src/lib/instance-mode.ts). Any other reader must still fail it. No criterion,
+    proof or falsifier of this task changes.
