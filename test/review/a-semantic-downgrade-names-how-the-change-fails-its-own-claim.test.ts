@@ -667,9 +667,16 @@ test("W1-T13849 guard: a second hold on the same head and input digest counts fa
   assert.equal(state.shas[S]!.units[unit], "withheld-success", "the second hold on head and digest input-a fails");
   assert.deepEqual(state.shas[S]!.reasons, { [outcomeClass.DOWNGRADE_UNCLASSIFIED]: 1 }, "its reason is recorded though it replaced a pending unit");
   assert.equal(state.shas[S]!.firstFailHost, "core");
+  // W1-T13392: one unposted review opens nothing by the exact bound; a second head held twice at its input does.
+  assert.deepEqual(health.shaCounts(state.shas[S]!), { k: 1, n: 1 });
+  assert.deepEqual(h.steps.filter(step => step === "reviewer.regression_opened"), [], "a lone failing unit opens no incident");
+  h.queue.push(holdRow(S, 8, { digest: "input-a" }), holdRow(S, 8, { digest: "input-a" }));
+  await h.evaluate(S);
+  const opened = h.state();
+  assert.deepEqual(health.shaCounts(opened.shas[S]!), { k: 2, n: 2 });
   assert.deepEqual(h.steps.filter(step => step === "reviewer.regression_opened"), ["reviewer.regression_opened"]);
-  assert.deepEqual(state.incident?.signature, [outcomeClass.DOWNGRADE_UNCLASSIFIED]);
-  assert.equal(state.incident?.regressedSha, S);
+  assert.deepEqual(opened.incident?.signature, [outcomeClass.DOWNGRADE_UNCLASSIFIED]);
+  assert.equal(opened.incident?.regressedSha, S);
 });
 
 test("W1-T13849 guard: every other withheld reason and outcome classes and counts as on origin/main", async (t) => {
@@ -691,6 +698,12 @@ test("W1-T13849 guard: every other withheld reason and outcome classes and count
   await h.evaluate(S);
   const state = h.state();
   assert.deepEqual(health.shaCounts(state.shas[S]!), { k: 1, n: 1 });
-  assert.deepEqual(state.incident?.signature, ["required-semantic-incomplete-verdicts"], "one other-reason hold regresses the sha as before");
+  // W1-T13392: one unposted review opens nothing by the exact bound; a second other-reason hold does.
+  assert.equal(state.incident, null, "a lone failing unit opens no incident");
+  h.queue.push(holdRow(S, 10, { reason: "required-semantic-incomplete-verdicts" }));
+  await h.evaluate(S);
+  const opened = h.state();
+  assert.deepEqual(health.shaCounts(opened.shas[S]!), { k: 2, n: 2 });
+  assert.deepEqual(opened.incident?.signature, ["required-semantic-incomplete-verdicts"], "other-reason holds regress the sha as before");
   assert.deepEqual(h.steps.filter(step => step === "reviewer.regression_opened"), ["reviewer.regression_opened"]);
 });
