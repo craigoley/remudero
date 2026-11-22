@@ -2530,6 +2530,7 @@ export const SWEEP_EFFECT_SURFACE = [
   "parkedPr",
   // W1-T5349: the plan-repair rung's fact read and its renumber/retitle effect.
   "readPlanRepairFacts",
+  "readPrFileStatuses", // W1-T13994
   // W1-T11171: the dependents term of a conflict's blocked cost.
   "conflictDependents",
   "repairPlanPr",
@@ -2818,6 +2819,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   | "repairMissingTaskTrailer"
   | "repairMetadata"
   | "readPlanRepairFacts"
+  | "readPrFileStatuses"
   | "conflictDependents"
   | "repairPlanPr"
   | "dispatchPlanGateRound"
@@ -6390,6 +6392,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       facts.gardenRecordRefusal = gardenRecordRefusalFromSource(pr, Buffer.from(source.content, "base64").toString("utf8"));
       return facts;
     },
+    readPrFileStatuses: (pr) => prFileStatusesFromPullFiles(
+      ghJsonForBuild(["api", "--paginate", "--slurp", `repos/${owner}/${repo}/pulls/${pr.prNumber}/files?per_page=${PR_FILES_PAGE}`])),
     repairPlanPr: async (pr, decision) => {
       const pulls = `repos/${owner}/${repo}/pulls/${pr.prNumber}`;
       if (decision.action === "retitle") {
@@ -7765,6 +7769,16 @@ export function prAddedLinesFromPullFiles(pages: unknown): Record<string, number
     if (lines !== undefined) added[filename] = lines;
   }
   return added;
+}
+
+/** W1-T13994: fold `GET pulls/{n}/files` (one page, or `--paginate --slurp`'s pages) into each row's
+ *  name and status. A response that is not an array is an unreadable read and throws. */
+export function prFileStatusesFromPullFiles(pages: unknown): PrFileStatus[] {
+  if (!Array.isArray(pages)) throw new Error("pulls/{n}/files did not return an array");
+  return pages.flat().flatMap((file) => {
+    const { filename, status } = (file ?? {}) as { filename?: unknown; status?: unknown };
+    return typeof filename === "string" && typeof status === "string" ? [{ filename, status }] : [];
+  });
 }
 
 /** The sources {@link CiFailure.logTail} can come from, in preference order. */
@@ -17191,6 +17205,8 @@ export interface SweepDeps {
   ) => boolean | void | Promise<boolean | void>;
   /** W1-T5349 — the PR's author and live title, read only for a red plan-only PR on a machine-lane head. */
   readPlanRepairFacts?: (pr: OpenPrView, handoffJobId?: string) => PlanRepairFacts | Promise<PlanRepairFacts>;
+  /** W1-T13994 — the PR's changed files with their `pulls/{n}/files` status, read only for a scope refusal. */
+  readPrFileStatuses?: (pr: OpenPrView) => readonly PrFileStatus[] | Promise<readonly PrFileStatus[]>;
   /** W1-T11171: the queued plan tasks that wait, transitively, on this PR's task; a conflict's blocked cost reads it. */
   conflictDependents?: (pr: OpenPrView) => number;
   /** W1-T5349 — renumber a held id or retitle, on the lane's own branch; refresh uses `updateBranch`. */
@@ -19751,12 +19767,141 @@ export function metadataRedRuledOut(lines: ReadonlyArray<Record<string, unknown>
  *  repair found no body cure and escalated, and no fix worker was ever sent to ship the suite. */
 const FILE_DEFECT_AUTHOR_GATE_RED = /acceptance-author-gate: REFUSED \(credited-test-path\)/;
 
+/** W1-T13994: the gate's own refusal line, `acceptance-author-gate: REFUSED (<class>) — <message>`. */
+const AUTHOR_GATE_REFUSAL_LINE = /acceptance-author-gate: REFUSED \(([a-z0-9-]+)\)([^\n]*)/;
+
+/** W1-T13994: the refusal a scope amendment or a revert cures, never a title or body edit: the head changes paths
+ *  outside the task's merge-base `files:`. Repairing it as metadata found no cure and escalated every time. */
+export const SCOPE_EXCEEDED_GATE_REFUSAL = "canonical-task-scope-exceeded";
+
+/** W1-T13994: the refusal class the acceptance-author-gate failure's log tail names, or undefined when the check
+ *  is not red or its log carries no refusal line. */
+export function gateRefusalClass(pr: Pick<OpenPrView, "ciFailures">): string | undefined {
+  for (const failure of pr.ciFailures ?? []) {
+    if (failure.name !== "acceptance-author-gate") continue;
+    const refusal = AUTHOR_GATE_REFUSAL_LINE.exec(failure.logTail ?? "")?.[1];
+    if (refusal !== undefined) return refusal;
+  }
+  return undefined;
+}
+
+/** W1-T13994: the undeclared paths a canonical-task-scope-exceeded refusal quotes, in the gate's order. */
+export function gateScopeExceededPaths(pr: Pick<OpenPrView, "ciFailures">): string[] {
+  if (gateRefusalClass(pr) !== SCOPE_EXCEEDED_GATE_REFUSAL) return [];
+  const failure = (pr.ciFailures ?? []).find((f) => f.name === "acceptance-author-gate" &&
+    AUTHOR_GATE_REFUSAL_LINE.exec(f.logTail ?? "")?.[1] === SCOPE_EXCEEDED_GATE_REFUSAL);
+  const message = AUTHOR_GATE_REFUSAL_LINE.exec(failure?.logTail ?? "")?.[2] ?? "";
+  const listed = message.split(/ outside its merge-base scope: /)[1] ?? "";
+  const paths: string[] = [];
+  for (const quoted of listed.matchAll(/"(?:[^"\\]|\\.)*"/g)) {
+    try {
+      const path = JSON.parse(quoted[0]) as unknown;
+      if (typeof path === "string" && path.length > 0 && !paths.includes(path)) paths.push(path);
+    } catch {
+      // A quoted string JSON cannot read (an escape the gate never writes) names no path; the rest are still named.
+    }
+  }
+  return paths;
+}
+
+/** W1-T13994: one `pulls/{n}/files` row; `added` means the path is absent at the PR's merge base. */
+export interface PrFileStatus {
+  filename: string;
+  status: string;
+}
+
+/** W1-T13994: the undeclared paths split by whether the merge base holds them. A path the file list does not show,
+ *  or a list that could not be read, counts as existing at base: an existing test edit is never added to scope. */
+export interface ScopeExceededPaths {
+  newOnHead: string[];
+  existingAtBase: string[];
+}
+
+export function splitScopeExceededPaths(paths: readonly string[],
+  statuses: readonly PrFileStatus[] | undefined): ScopeExceededPaths {
+  const added = new Set((statuses ?? []).filter((row) => row.status === "added" || row.status === "copied").map((row) => row.filename));
+  return { newOnHead: paths.filter((path) => added.has(path)), existingAtBase: paths.filter((path) => !added.has(path)) };
+}
+
+const isTestPath = (path: string) => path.startsWith("test/");
+
+/** W1-T13994: the kind each undeclared path is handled as. An existing test file and any plan path go to
+ *  revert-or-justify and are never fleet-amended; every other path (new on the head, or an existing non-test file)
+ *  goes to the scope-amendment request, which applies its own refusals. */
+export type ScopeExceededPathKind = "existing-test" | "plan" | "new-on-head" | "existing-non-test";
+
+export function scopeExceededPathKind(split: ScopeExceededPaths, path: string): ScopeExceededPathKind {
+  if (path.startsWith("plan/")) return "plan";
+  if (split.newOnHead.includes(path)) return "new-on-head";
+  return isTestPath(path) ? "existing-test" : "existing-non-test";
+}
+
+const REVERT_OR_JUSTIFY_KINDS: ReadonlySet<ScopeExceededPathKind> = new Set(["existing-test", "plan"]);
+
+/** W1-T13994: the fix round's prompt line for each undeclared path, by its kind. */
+export function scopeExceededFixConstraint(split: ScopeExceededPaths): string {
+  const paths = [...split.newOnHead, ...split.existingAtBase];
+  const scopePaths = paths.filter((path) => !REVERT_OR_JUSTIFY_KINDS.has(scopeExceededPathKind(split, path)));
+  const lines = [`acceptance-author-gate refused this head (${SCOPE_EXCEEDED_GATE_REFUSAL}): it changes paths outside the ` +
+    `task's merge-base files:. No title or body edit cures it. Handle each path by its kind:`];
+  const revertOrJustify = (path: string, why: string) => `revert-or-justify. ${why}: restore its merge-base content ` +
+    `(delete it if it is new on this head), or, if the task cannot pass without the edit, leave it uncommitted and report ` +
+    `FIX_OUTCOME: NEEDS_DESIGN naming ${path} and why the edit is required.`;
+  for (const path of paths) {
+    const kind = scopeExceededPathKind(split, path);
+    lines.push(kind === "new-on-head"
+      ? `- ${path} (new on this head): if the task needs it, keep it and request a scope amendment for it; ` +
+        `otherwise delete it from the head.`
+      : kind === "existing-non-test"
+      ? `- ${path} (exists at the merge base): if the task needs the edit, keep it and request a scope amendment ` +
+        `for it; otherwise restore its merge-base content.`
+      : kind === "existing-test"
+      ? `- ${path} (a test file that exists at the merge base): ${revertOrJustify(path, "The fleet never adds an edit " +
+        "to an existing test file to scope, because a sibling-suite edit can weaken an assertion")}`
+      : `- ${path} (a plan path): ${revertOrJustify(path, "The fleet never amends a task's scope to take a plan path; " +
+        "a plan record changes in its own plan PR")}`);
+  }
+  if (scopePaths.length > 0) {
+    lines.push(`To request the scope amendment, leave the kept paths saved and report FIX_OUTCOME: NEEDS_SCOPE ${scopePaths.join(",")}`);
+  }
+  return lines.join("\n");
+}
+
+const SCOPE_EXCEEDED_KIND_TEXT: Record<ScopeExceededPathKind, string> = {
+  "new-on-head": "new on this head", "existing-non-test": "exists at the merge base",
+  "existing-test": "a test file that exists at the merge base", plan: "a plan path",
+};
+const describeScopeExceededPath = (split: ScopeExceededPaths, path: string) =>
+  `${path} (${SCOPE_EXCEEDED_KIND_TEXT[scopeExceededPathKind(split, path)]})`;
+
+/** W1-T13994: an operator-authored head's escalation for the scope refusal: the paths and the two cures, never a
+ *  title and body repair. */
+export function scopeExceededClarificationQuestion(pr: OpenPrView, split: ScopeExceededPaths): ClarificationQuestion {
+  const paths = [...split.newOnHead, ...split.existingAtBase];
+  const named = paths.map((path) => describeScopeExceededPath(split, path)).join(", ");
+  const reason = `acceptance-author-gate refused head ${pr.headSha} (${SCOPE_EXCEEDED_GATE_REFUSAL}): it changes ` +
+    `paths outside the task's merge-base files: (${named || "paths the log did not name"})`;
+  const resolutions: readonly [ClarificationResolution, ClarificationResolution] = [
+    { label: "amend the scope", detail: `merge a separate scope amendment adding ${paths.join(", ") || "the paths"} to ` +
+      `${pr.taskId ?? "the task"}'s files:, then re-run the gate` },
+    { label: "revert the edits", detail: `restore ${paths.join(", ") || "the paths"} to their merge-base content on the ` +
+      `head (delete the paths that are new on it)` },
+  ];
+  const base = renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []);
+  const question = `Task ${pr.taskId}, PR #${pr.prNumber} (${pr.prUrl}): ${reason}. No title or body edit can cure this ` +
+    `refusal, and an operator-authored head gets no fleet fix round. Which is right — (1) ${resolutions[0].label}: ` +
+    `${resolutions[0].detail}, or (2) ${resolutions[1].label}: ${resolutions[1].detail}`;
+  return { ...base, question, reviewerRequirement: reason, resolutions };
+}
+
 export function metadataOnlyRed(pr: OpenPrView): string[] | undefined {
   if (!isBlockedCi(pr) || pr.reviewState === "failure") return undefined;
   const checks = redCheckNames(pr);
   if (pr.ciFailures?.some((failure) => failure.name === "acceptance-author-gate" && FILE_DEFECT_AUTHOR_GATE_RED.test(failure.logTail))) {
     return undefined;
   }
+  // W1-T13994: a scope refusal is cured by a commit or an amendment, so it leaves the metadata route like a missing suite.
+  if (gateRefusalClass(pr) === SCOPE_EXCEEDED_GATE_REFUSAL) return undefined;
   return checks.length > 0 && checks.every((name) => METADATA_RED_CHECKS.has(name)) ? checks : undefined;
 }
 
@@ -27148,6 +27293,49 @@ export async function runSweep(
                   standDownReason = `metadata-only red ${outcome}: ${result.reason}; no fix worker dispatched`;
                   break;
                 }
+              }
+              // W1-T13994: the gate's scope refusal is routed by its class. A fleet-authored head takes a fix round
+              // whose prompt names each undeclared path by its kind; any other head (an unreadable author reads as
+              // not-fleet) escalates once per head, naming the paths and the two cures.
+              if (gateRefusalClass(pr) === SCOPE_EXCEEDED_GATE_REFUSAL) {
+                const undeclared = gateScopeExceededPaths(pr);
+                let statuses: readonly PrFileStatus[] | undefined;
+                // The read errors ride this pass's own sweep.disposed row, never a step of their own.
+                const readErrors: string[] = [];
+                if (undeclared.length > 0 && deps.readPrFileStatuses) {
+                  try {
+                    statuses = await deps.readPrFileStatuses(pr);
+                  } catch (e) {
+                    // Not erased: the error rides this PR's sweep.disposed row as read_errors, and no split is claimed.
+                    readErrors.push(`file statuses: ${String((e as Error)?.message ?? e)}`);
+                  }
+                }
+                const split = splitScopeExceededPaths(undeclared, statuses);
+                let fleetHead = false;
+                if (deps.readPlanRepairFacts) {
+                  try {
+                    fleetHead = isFleetAppAuthor((await deps.readPlanRepairFacts(pr)).authorLogin);
+                  } catch (e) {
+                    // Not erased: recorded as read_errors; an unread author is treated as not the fleet's, so it escalates.
+                    readErrors.push(`author: ${String((e as Error)?.message ?? e)}`);
+                  }
+                }
+                const scopePaths = { new_on_head: split.newOnHead, existing_at_base: split.existingAtBase,
+                  ...(readErrors.length > 0 ? { read_errors: readErrors } : {}) };
+                if (!fleetHead) {
+                  const asked = ledgerLines.some((line) => line.step === "sweep.disposed" && line.pr_number === pr.prNumber &&
+                    line.head_sha === pr.headSha && line.scope_refusal_outcome === "escalated");
+                  extraDisposedFields = { ...extraDisposedFields, scope_refusal_paths: scopePaths, scope_refusal_outcome: "escalated" };
+                  const question = scopeExceededClarificationQuestion(pr, split);
+                  if (!asked) await deps.escalate(pr, question.reviewerRequirement, question);
+                  acted = false;
+                  standDownReason = `${question.reviewerRequirement}; an operator-authored head is escalated, no fix worker dispatched`;
+                  break;
+                }
+                extraDisposedFields = { ...extraDisposedFields, scope_refusal_paths: scopePaths, scope_refusal_outcome: "fix-round" };
+                const constraint = scopeExceededFixConstraint(split);
+                pr.pendingAnswer = { ...pr.pendingAnswer,
+                  constraint: [pr.pendingAnswer?.constraint, constraint].filter(Boolean).join("\n\n") };
               }
               const roundHold = await readSweepPriorRoundHold(pr);
               const refusedSameRed = sameHeadRedFixRefusal(ledgerLines, pr);
