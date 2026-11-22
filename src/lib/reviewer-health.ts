@@ -1500,6 +1500,7 @@ export async function evaluateReviewerHealthNow(
       try {
         log("reviewer.health_save_superseded", { cursor: state.cursor, saved_cursor: disk.cursor });
       } catch (error) {
+        // The superseded-save row is lost: report it, and still return, since the newer file already stands.
         reportModelHealthFailure(error, log);
       }
       return;
