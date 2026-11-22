@@ -18,6 +18,7 @@ import {
   renderPrerequisiteOutcomeBlock,
   renderPrerequisitePrPrompt,
   renderReconPrompt,
+  withPrerequisiteOutcomes,
   type PrerequisiteEvidence,
 } from "#src/lib/prompt-render.js";
 import { assertProvenance } from "#src/lib/provenance.js";
@@ -472,7 +473,7 @@ test("prerequisite outcome context is deterministic bounded and reuses prepared 
   // no dependencies: nothing at all, and the recon/implement renders are byte-identical to before
   assert.equal(renderPrerequisiteOutcomeBlock({ taskId: "T", repo: REPO, dependsOn: [], evidenceFor: () => { throw new Error("read"); }, snapshotFor: () => { throw new Error("read"); } }), "");
   assert.equal(renderPrerequisiteOutcomeBlock({ taskId: "T", repo: REPO, dependsOn: undefined, evidenceFor: () => undefined, snapshotFor: () => undefined }), "");
-  assert.equal(renderReconPrompt("(idx)", "", TASK, undefined, ""), renderReconPrompt("(idx)", "", TASK, undefined));
+  assert.equal(withPrerequisiteOutcomes(renderReconPrompt("(idx)", "", TASK, undefined), ""), renderReconPrompt("(idx)", "", TASK, undefined));
   assert.equal(renderImplementPrompt(TASK, "ctx", "run-1", "", "", "", "", false, "", ""), renderImplementPrompt(TASK, "ctx", "run-1"));
 
   // deterministic ordering regardless of declared order, duplicates collapsed
@@ -495,8 +496,8 @@ test("prerequisite outcome context is deterministic bounded and reuses prepared 
   assert.equal(bounded.split("\n").filter((l) => l.startsWith("- Prerequisite ")).length, 3);
 
   // the real recon producer and the implement producer both place it, and an empty block adds nothing
-  const recon = renderReconPrompt("(idx)", "(notes)", TASK, "plan/x.yaml", bounded);
-  assert.ok(recon.includes(bounded) && recon.indexOf(bounded) < recon.indexOf("(idx)"));
+  const recon = withPrerequisiteOutcomes(renderReconPrompt("(idx)", "(notes)", TASK, "plan/x.yaml"), bounded);
+  assert.ok(recon.endsWith(bounded) && recon.indexOf("(idx)") < recon.indexOf(bounded));
   const impl = renderImplementPrompt(TASK, "ctx", "run-1", "", "", "", "", false, "", bounded);
   assert.ok(impl.includes(bounded));
   assert.ok(impl.indexOf("ctx") < impl.indexOf(bounded) && impl.indexOf(bounded) < impl.indexOf("# TASK"), "inside CONTEXT, before the task body");

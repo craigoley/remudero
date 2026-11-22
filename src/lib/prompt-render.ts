@@ -1010,7 +1010,9 @@ export interface PrerequisiteEvidence {
  *  pinned snapshot does not carry the task at all. */
 export type PrerequisiteSnapshotEntry = { repo: string } | undefined;
 
+/** PRIMARY CONTROL: how many declared prerequisites one prompt lists; the rest are named by id as omitted. */
 export const PREREQUISITE_MAX_ENTRIES = 6;
+/** PRIMARY CONTROL: how much of one prerequisite's untrusted outcome text a prompt carries; the clip is stated. */
 export const PREREQUISITE_MAX_OUTCOME_CHARS = 200;
 
 const oneLine = (text: string): string => text.replace(/\s+/g, " ").trim();
@@ -1103,6 +1105,14 @@ export function renderPrerequisiteOutcomeBlock(args: {
 }
 
 /**
+ * W1-T11396: attach {@link renderPrerequisiteOutcomeBlock}'s output to a rendered recon prompt. An
+ * empty block returns the prompt untouched, so a task with no dependencies renders byte-identically.
+ */
+export function withPrerequisiteOutcomes(reconPrompt: string, prerequisiteOutcomeBlock: string): string {
+  return prerequisiteOutcomeBlock === "" ? reconPrompt : `${reconPrompt}\n\n${prerequisiteOutcomeBlock}`;
+}
+
+/**
  * Render the RECON worker's prompt (W1-T37, W1-T2632): fixed read-only instructions, optional
  * task identity, optional task-record pointer, the generated PLAN INDEX, and operator notes.
  *
@@ -1115,9 +1125,6 @@ export function renderReconPrompt(
   operatorNotesBlock = "",
   task?: Pick<Task, "id" | "title">,
   recordPath?: string,
-  // W1-T11396: `renderPrerequisiteOutcomeBlock`'s output — "" for a task with no dependencies, so
-  // every existing caller renders byte-identically.
-  prerequisiteOutcomeBlock = "",
 ): string {
   return [
     // W1-T3656: NAME WHAT TO OBSERVE, NEVER WHICH BINARY TO RUN. This used to say "git remote
@@ -1142,7 +1149,6 @@ export function renderReconPrompt(
       ? `YOUR TASK'S OWN RECORD IS AT ${recordPath} — the design, rationale and acceptance ` +
         "criteria for the task above live there, one `Read` away; this recon need not guess them."
       : "",
-    prerequisiteOutcomeBlock,
     planIndexBlock,
     operatorNotesBlock,
   ]
