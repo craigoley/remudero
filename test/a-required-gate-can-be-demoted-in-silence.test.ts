@@ -35,14 +35,22 @@ const SCRIPT = join(REPO_ROOT, "scripts", "gate-monotonic-check.mjs");
 // typed one. A dynamic specifier is not statically resolved, so this loads the REAL module.
 type GateLists = { required: Set<string>; rationale: string | undefined };
 type Verdict = { ok: boolean; demoted: string[]; status: string; detail: string };
+/** What a reference may name: baseline-monotonic-check.mjs's planTasks/knownPrs shape. */
+type Known = { has: (ref: string) => boolean; unreadable?: string };
 const gate = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "gate-monotonic-check.mjs")).href)) as {
-  evaluateGateMonotonic: (base: GateLists, head: GateLists) => Verdict;
+  evaluateGateMonotonic: (base: GateLists, head: GateLists, plan?: Known, prs?: Known) => Verdict;
   readGateLists: (yamlText: string) => GateLists;
   gateRationaleNamesAPr: (r: unknown) => boolean;
+  main: (argv: string[]) => number;
   CI_GATE_REL: string;
 };
 
 const lists = (required: string[], rationale?: string): GateLists => ({ required: new Set(required), rationale });
+/** A fixed set of references that name something real, standing in for a plan or a merged-PR history. */
+const known = (...refs: string[]): Known => ({ has: (ref) => refs.includes(ref) });
+/** The plan and PRs every pure verdict below is judged against: one filed task and one merged PR. */
+const PLAN = known("W1-T3519");
+const PRS = known("#5379");
 
 test("W1-T3519: a context that leaves REQUIRED with no rationale is REFUSED", () => {
   const v = gate.evaluateGateMonotonic(lists(["ci", "head-identity-gate"]), lists(["ci"]));
@@ -64,6 +72,8 @@ test("W1-T3519: a FRESH rationale naming a PR or task lets a reviewed demotion t
   const v = gate.evaluateGateMonotonic(
     lists(["ci", "old-gate"], "#1200: earlier, unrelated demotion"),
     lists(["ci"], "#5379: old-gate is superseded by ci-shard"),
+    PLAN,
+    PRS,
   );
   assert.equal(v.ok, true, "a reviewed demotion is an ordinary outcome, not a defeat — the queue must not stall");
   assert.equal(v.status, "reviewed");
@@ -71,7 +81,7 @@ test("W1-T3519: a FRESH rationale naming a PR or task lets a reviewed demotion t
 
 test("W1-T3519: a rationale carried over from an EARLIER demotion does not review this one", () => {
   const stale = "#1200: some demotion reviewed long ago";
-  const v = gate.evaluateGateMonotonic(lists(["ci", "old-gate"], stale), lists(["ci"], stale));
+  const v = gate.evaluateGateMonotonic(lists(["ci", "old-gate"], stale), lists(["ci"], stale), PLAN, known("#1200"));
   assert.equal(v.ok, false);
   assert.equal(v.status, "stale-rationale", "identical to the base's ⇒ it reviewed the base, not this change");
 });
@@ -134,12 +144,15 @@ function git(cwd: string, ...args: string[]): string {
 /** `required`/`rationale` become `origin/main`'s `ci-gate.yml`; the working tree then gets a
  *  second commit (an unpushed local change, exactly like an open PR's branch) carrying
  *  `headRequired`/`headRationale` -- or, when `headRequired` is `undefined`, the file is removed
- *  from the working tree entirely, to drive `main()`'s own "cannot read the head file" arm. */
+ *  from the working tree entirely, to drive `main()`'s own "cannot read the head file" arm.
+ *  `baseSubject` is the base commit's subject, so a squash subject ending `(#<n>)` puts a merged PR
+ *  in `origin/main`'s history; each of `tasks` gets a `plan/tasks.d/<id>-filed.yaml` shard. */
 function ciGateFixture(
   required: string[],
   rationale: string | undefined,
   headRequired: string[] | undefined,
   headRationale?: string,
+  { baseSubject = "base", tasks = [] }: { baseSubject?: string; tasks?: string[] } = {},
 ): string {
   const outer = mkdtempSync(join(tmpdir(), "rmd-gate-monotonic-"));
   const remote = join(outer, "origin.git");
@@ -151,8 +164,10 @@ function ciGateFixture(
   mkdirSync(join(repo, ".github", "workflows"), { recursive: true });
   const ciGatePath = join(repo, ".github", "workflows", "ci-gate.yml");
   writeFileSync(ciGatePath, ciGateYaml(required, rationale));
+  if (tasks.length > 0) mkdirSync(join(repo, "plan", "tasks.d"), { recursive: true });
+  for (const id of tasks) writeFileSync(join(repo, "plan", "tasks.d", `${id}-filed.yaml`), `- id: ${id}\n`);
   git(repo, "add", ".");
-  git(repo, "commit", "-m", "base");
+  git(repo, "commit", "-m", baseSubject);
   git(repo, "remote", "add", "origin", remote);
   git(repo, "push", "-u", "origin", "main");
 
@@ -172,8 +187,13 @@ function ciGateYaml(required: string[], rationale?: string): string {
   return lines.join("\n") + "\n";
 }
 
-function run(root: string, extraArgs: string[] = []) {
-  return spawnSync(process.execPath, [SCRIPT, "--repo-root", root, ...extraArgs], { cwd: root, encoding: "utf8" });
+/** GITHUB_REF is emptied so the PR a CI run is checking never becomes a PR these fixtures' rationales name. */
+function run(root: string, extraArgs: string[] = [], githubRef = "") {
+  return spawnSync(process.execPath, [SCRIPT, "--repo-root", root, ...extraArgs], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, GITHUB_REF: githubRef },
+  });
 }
 
 test("main(): a clean tree (no demotion) exits 0 and reports OK", () => {
@@ -193,7 +213,7 @@ test("main(): a demotion with no rationale exits 1 and names the gate (THE FALSI
 
 test("main(): a reviewed demotion (fresh GATE_RATIONALE) exits 0", () => {
   const repo = ciGateFixture(["ci", "old-gate"], undefined, ["ci"], "#5379: old-gate is superseded by ci-shard");
-  const result = run(repo);
+  const result = run(repo, ["--pr", "5379"]);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /gate-monotonic: OK/);
 });
@@ -225,4 +245,134 @@ test("main(): an unrecognised CLI argument exits 2, never a silent OK", () => {
   const result = run(repo, ["--bogus"]);
   assert.equal(result.status, 2);
   assert.match(result.stderr, /MEASUREMENT FAILED -- invalid arguments/);
+});
+
+// ── W1-T14304: a reference counts only when it names a real review ─────────────────────────────
+//
+// Until W1-T14304 a demotion was reviewed by any `#<n>` or `W1-T<n>` SUBSTRING, and stale only when
+// its text equalled the base's. REPRODUCED at 8923f5635: `#999999999999999999999999`,
+// `W1-T2906bogus` and `#0: nothing` each reviewed a demotion of `head-identity-gate`, and the base
+// rationale plus one trailing space read fresh. The check now shares baseline-monotonic-check.mjs's
+// reference rule (#20033): a whole word, compared as a number, naming a merged PR, this PR or a
+// filed task that the base rationale did not.
+//
+// INVARIANT a-demotion-names-a-real-review: a REQUIRED context leaves the gate set only under a
+// rationale naming a merged PR, this PR or a filed task that the base rationale did not name.
+
+test("W1-T14304 criterion 1: a demotion whose rationale names only a number no PR held, a task with no shard, a zero, or a reference glued to a word is REFUSED", () => {
+  const base = lists(["ci", "head-identity-gate"], "#1200: an earlier demotion");
+  const refused = [
+    "#999999999999999999999999: superseded", // a number no PR held
+    "W1-T999999: superseded", // a task with no shard
+    "#0: nothing", // a zero
+    "W1-T0: nothing",
+    "W1-T3519bogus: superseded", // glued to a word, though W1-T3519 is filed
+    "x#5379: superseded", // glued to a word, though #5379 merged
+    "#5379abc: superseded",
+    "W1-T3519_x: superseded",
+  ];
+  for (const rationale of refused) {
+    const v = gate.evaluateGateMonotonic(base, lists(["ci"], rationale), PLAN, PRS);
+    assert.equal(v.ok, false, `${JSON.stringify(rationale)} must not review a demotion`);
+    assert.deepEqual(v.demoted, ["head-identity-gate"], "the refusal names the gate");
+  }
+  for (const glued of ["#0: nothing", "W1-T0", "W1-T3519bogus", "x#5379", "#5379abc", "W1-T3519_x"]) {
+    assert.equal(gate.gateRationaleNamesAPr(glued), false, `${JSON.stringify(glued)} names no reference at all`);
+  }
+  // The refusal says why a reference that parses still cannot count.
+  assert.match(
+    gate.evaluateGateMonotonic(base, lists(["ci"], refused[0]), PLAN, PRS).detail,
+    /#999999999999999999999999 cannot count: neither a merged PR in the base's history nor this PR/,
+  );
+  assert.match(
+    gate.evaluateGateMonotonic(base, lists(["ci"], refused[1]), PLAN, PRS).detail,
+    /W1-T999999 cannot count: no plan\/tasks\.d shard declares it/,
+  );
+  // POSITIVE CONTROL: the same references standing as their own words do review it ...
+  assert.equal(gate.evaluateGateMonotonic(base, lists(["ci"], "W1-T3519: superseded"), PLAN, PRS).status, "reviewed");
+  assert.equal(gate.evaluateGateMonotonic(base, lists(["ci"], "(#5379) superseded"), PLAN, PRS).status, "reviewed");
+  // ... and with no plan or PR record given, none does.
+  assert.equal(gate.evaluateGateMonotonic(base, lists(["ci"], "#5379: superseded")).ok, false);
+
+  // Through main() on a git fixture whose history holds no PR: exit 1, naming the reference.
+  const unheld = ciGateFixture(["ci", "old-gate"], undefined, ["ci"], refused[0]);
+  const result = run(unheld);
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stderr, /gate-monotonic: REFUSED -- .*#999999999999999999999999 cannot count/);
+  // A fixture with no plan/tasks.d counts no task, and says why rather than reporting OK.
+  const noPlan = ciGateFixture(["ci", "old-gate"], undefined, ["ci"], "W1-T3519: superseded");
+  const planless = run(noPlan);
+  assert.equal(planless.status, 1, planless.stdout);
+  assert.match(planless.stderr, /W1-T3519 cannot count: cannot list plan\/tasks\.d/);
+});
+
+test("W1-T14304 criterion 2: a demotion whose rationale names this PR's own number, or a filed task the base rationale did not, exits 0 through main() on a git fixture", () => {
+  const ownPr = ciGateFixture(["ci", "old-gate"], "#1200: an earlier demotion", ["ci"], "#5379: old-gate is superseded by ci-shard");
+  // This PR's own number, passed with --pr ...
+  const viaFlag = run(ownPr, ["--pr", "5379"]);
+  assert.equal(viaFlag.status, 0, viaFlag.stderr);
+  assert.match(viaFlag.stdout, /gate-monotonic: OK -- .*naming #5379/);
+  // ... or read from a pull_request run's GITHUB_REF.
+  const viaRef = run(ownPr, [], "refs/pull/5379/merge");
+  assert.equal(viaRef.status, 0, viaRef.stderr);
+  // POSITIVE CONTROL: with neither, the fixture's history holds no PR, so the same rationale is refused.
+  const neither = run(ownPr);
+  assert.equal(neither.status, 1, neither.stdout);
+  assert.match(neither.stderr, /#5379 cannot count/);
+
+  // A filed task the base rationale did not name.
+  const filed = ciGateFixture(["ci", "old-gate"], "W1-T204: the gate set", ["ci"], "W1-T3519: old-gate is superseded", {
+    tasks: ["W1-T204", "W1-T3519"],
+  });
+  const taskRun = run(filed);
+  assert.equal(taskRun.status, 0, taskRun.stderr);
+  assert.match(taskRun.stdout, /naming W1-T3519/);
+  // A PR the base's history records as merged.
+  const merged = ciGateFixture(["ci", "old-gate"], undefined, ["ci"], "#4242: old-gate is superseded", {
+    baseSubject: "feat(ci): supersede old-gate (#4242)",
+  });
+  const mergedRun = run(merged);
+  assert.equal(mergedRun.status, 0, mergedRun.stderr);
+
+  // In-process, so main()'s own lines are measured: --pr, GITHUB_REF, and a --pr that is no PR number.
+  const saved = process.env.GITHUB_REF;
+  try {
+    process.env.GITHUB_REF = "refs/pull/5379/merge";
+    assert.equal(gate.main(["--repo-root", ownPr]), 0);
+    process.env.GITHUB_REF = "";
+    assert.equal(gate.main(["--repo-root", ownPr, "--pr", "5379"]), 0);
+    assert.equal(gate.main(["--repo-root", ownPr]), 1);
+    assert.equal(gate.main(["--repo-root", filed]), 0);
+    for (const bad of ["0", "-1", "abc", "05379"]) {
+      assert.equal(gate.main(["--repo-root", ownPr, "--pr", bad]), 2, `--pr ${bad} cannot measure`);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.GITHUB_REF;
+    else process.env.GITHUB_REF = saved;
+  }
+});
+
+test("W1-T14304 criterion 3: a rationale that pads, re-spells or zero-pads the base rationale's references reads stale-rationale", () => {
+  const prior = "#5379: old-gate is superseded by ci-shard (W1-T3519)";
+  const base = lists(["ci", "old-gate"], prior);
+  for (const rationale of [
+    `${prior} `, // padded by one space
+    `  ${prior}\n`,
+    "W1-T3519 and #5379 superseded old-gate", // re-spelled: the same references, reworded
+    "#05379: old-gate is superseded by ci-shard (W1-T03519)", // zero-padded
+    "#5379 #5379",
+  ]) {
+    const v = gate.evaluateGateMonotonic(base, lists(["ci"], rationale), PLAN, PRS);
+    assert.equal(v.ok, false, `${JSON.stringify(rationale)} reviews nothing new`);
+    assert.equal(v.status, "stale-rationale", JSON.stringify(rationale));
+  }
+  // POSITIVE CONTROL: one new reference that names something real makes it fresh.
+  const fresh = gate.evaluateGateMonotonic(base, lists(["ci"], `${prior}; reviewed again in #7000`), PLAN, known("#5379", "#7000"));
+  assert.equal(fresh.status, "reviewed");
+
+  // Through main(): a copy of origin/main's rationale padded by one space exits 1.
+  const repo = ciGateFixture(["ci", "old-gate"], prior, ["ci"], `${prior} `, { tasks: ["W1-T3519"] });
+  const result = run(repo, ["--pr", "5379"]);
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stderr, /gate-monotonic: REFUSED -- .*names no PR or task origin\/main's did not/);
 });

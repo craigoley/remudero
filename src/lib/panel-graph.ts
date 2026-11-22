@@ -109,7 +109,7 @@ import { InflightLockError, withInflightLock } from "./inflight-lock.js";
 import { classificationSnapshotPath, fleetLaneDecisions, fleetLaneStorePath, persistedInboxPath, readClassificationSnapshot, readFleetLaneStore, readPersistedInbox, validInboxSnapshot, type ClassificationEvidence, type DecisionStore, type FleetLaneDecision, type InboxAttentionEvidence, type InboxSourceIdentity, type PersistedInbox, type PersistedInboxContent } from "./fleet-lane.js";
 import { classifiedInboxOwner, hasUnansweredInboxQuestion, inboxSender, isAgeOnlyInboxInformation, latestInstant, type InboxSender } from "./inbox-owner.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { mergeVerdictReceipts, proposalVerdictsWithReceipts, readVerdictReceipts, verdictReceiptOf, PROPOSAL_VERDICT_RECEIPT_STEPS, type VerdictReceipt } from "./inbox-verdict-receipts.js";
+import { inboxVerdictReceiptsPath, mergeVerdictReceipts, proposalVerdictsWithReceipts, readVerdictReceipts, verdictReceiptOf, PROPOSAL_VERDICT_RECEIPT_STEPS, type VerdictReceipt } from "./inbox-verdict-receipts.js";
 import { judgementFamily } from "./machine-filing-judge.js";
 import { currentVerifyHumanRulings, currentDeclineState, declineLapse, observedStateOfProposalSummary } from "./verify-human-judge.js";
 import { foldedTwinAsks, projectProposalHumanGates } from "./ask-classification.js";
@@ -2031,6 +2031,12 @@ function inboxInputPaths(deps: PanelGraphDeps): { registryPath: string; draftsPa
   };
 }
 
+type InboxMemoEntry = Pick<InboxFingerprint, "key" | "writeKey" | "plan" | "planKey" | "readPlanSnapshot"> & {
+  result: ClassifiedInbox;
+  /** Epoch millis when the pass that made `result` completed. */
+  at: number;
+};
+
 /** Per-deps classifier state. A WeakMap keyed by the deps object holds ONE memo entry per deps (the gateway builds
  *  one), so it cannot grow with requests and goes when its routes go. */
 interface InboxClassifyState {
@@ -2038,7 +2044,7 @@ interface InboxClassifyState {
   fragments: FragmentMemo;
   /** The last ledger read, reused while the ledger's stamp is unchanged. */
   ledger?: { stamp: string | null; receiptsKey?: string; lines: LedgerLines; verdictDigest: string };
-  last?: { key: string; plan: Plan; planKey?: string; result: ClassifiedInbox; /** Epoch millis the pass that made `result` completed. */ at: number };
+  last?: InboxMemoEntry;
   generation?: object;
   /** A sliced refresh in progress, so a second caller with the same inputs awaits it instead of starting another. */
   pending?: { key: string; plan: Plan; generation: object; promise: Promise<ClassifiedInbox> };
@@ -2246,7 +2252,7 @@ function withOpsOwnTaskReferents(deps: Pick<PanelGraphDeps, "inboxReferentPlan">
 }
 
 /**
- * Shared read + classify step every /v1/inbox* WRITE route needs, recomputed on every call. `loadPlanFn` defaults to
+ * Live classification for Inbox writes. `loadPlanFn` defaults to
  * {@link loadPlan}'s torn-read-guarded read (W1-T2220 remedy (a)); `POST /v1/inbox/approve` passes {@link
  * loadPlanAtRef} instead (remedy (c)) since only it gates an irreversible action here. The read routes go through
  * {@link classifyAllProposalsMemo}; this path shares only the per-commit anchor grep and the per-plan-object fragment
@@ -2269,6 +2275,10 @@ function planFilesStamp(planPath: string, stat: (path: string) => string | undef
   const shardDir = join(dirname(planPath), "tasks.d");
   const shards = listDir(shardDir) ?? [];
   return JSON.stringify([stat(planPath), shards.map((name) => [name, stat(join(shardDir, name))])]);
+}
+
+function inboxPlanKey(deps: PanelGraphDeps): string {
+  return planFilesStamp(deps.planPath, deps.inboxStatFile ?? statStamp, deps.inboxListDir ?? listDirOrUndefined) + threadPlanPin(deps.planPath);
 }
 
 /** What classifyProposal reads: task credit, unavailable dependencies and observed board referents. */
@@ -2299,14 +2309,30 @@ function ledgerVerdictDigest(lines: LedgerLines, receipts: readonly VerdictRecei
 /** One pass's fingerprint and the inputs it was taken over. */
 interface InboxFingerprint {
   key: string;
+  writeKey?: string;
   sha?: string;
   plan: Plan;
   planKey?: string;
+  readPlanSnapshot?: () => Plan;
   projection: Map<string, StatusProjection>;
   boardReferents: ReturnType<typeof inboxBoardReferents>;
   ledgerLines: LedgerLines;
   archiveReleases?: ReadonlyMap<string, string>;
   verdictReceipts: readonly VerdictReceipt[];
+}
+
+function stampInboxInputs(deps: PanelGraphDeps) {
+  const stat = deps.inboxStatFile ?? statStamp;
+  const stateDir = join(deps.inboxRoot, "state");
+  const { registryPath, draftsPath, inflightPath, adoptionPath } = inboxInputPaths(deps);
+  const stamps = [registryPath, draftsPath, inflightPath, adoptionPath, inboxGardenerPath(stateDir), inboxThreadStorePath(deps.inboxRoot)].map(p => stat(p) ?? null);
+  return { stamps, sha: (deps.inboxMainSha ?? readOriginMainSha)(deps.root), ledgerStamp: stat(deps.ledgerPath) ?? null,
+    receiptsStamp: stat(inboxVerdictReceiptsPath(stateDir)) ?? null };
+}
+
+/** Writes can check the raw ledger and receipts stamps before deciding, with no ledger read. */
+function inboxWriteKey({ stamps, sha, ledgerStamp, receiptsStamp }: ReturnType<typeof stampInboxInputs>): string | undefined {
+  return sha === undefined ? undefined : JSON.stringify([stamps, sha, ledgerStamp, receiptsStamp]);
 }
 
 /**
@@ -2315,14 +2341,9 @@ interface InboxFingerprint {
  * merged facts), never its raw stamp: the daemon appends to it continuously, and a stamp would recompute on every
  * unrelated row.
  */
-function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readPlanSnapshot?: () => Plan, archiveReleases?: ReadonlyMap<string, string>,
+function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readPlanSnapshot?: () => Plan, archiveReleases?: ReadonlyMap<string, string>, inputs = stampInboxInputs(deps),
   verdictReceipts: readonly VerdictReceipt[] = readVerdictReceipts(join(deps.inboxRoot, "state"))): InboxFingerprint {
-  const stat = deps.inboxStatFile ?? statStamp;
-  const { registryPath, draftsPath, inflightPath, adoptionPath } = inboxInputPaths(deps);
-  const stamps = [registryPath, draftsPath, inflightPath, adoptionPath, inboxGardenerPath(join(deps.inboxRoot, "state")), inboxThreadStorePath(deps.inboxRoot)].map((p) => stat(p) ?? null);
-  const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
-
-  const ledgerStamp = stat(deps.ledgerPath) ?? null;
+  const { stamps, sha, ledgerStamp } = inputs;
   const receiptsKey = createHash("sha256").update(JSON.stringify(verdictReceipts)).digest("hex");
   if (state.ledger === undefined || state.ledger.stamp !== ledgerStamp || state.ledger.receiptsKey !== receiptsKey) {
     const lines = state.ledger?.stamp === ledgerStamp ? state.ledger.lines : readLedgerLines(deps.ledgerPath);
@@ -2336,14 +2357,14 @@ function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readP
   if (snapshot !== undefined) {
     plan = snapshot;
   } else {
-    planKey = planFilesStamp(deps.planPath, stat, deps.inboxListDir ?? listDirOrUndefined) + threadPlanPin(deps.planPath);
+    planKey = inboxPlanKey(deps);
     const last = state.last;
     plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : inboxPlan(deps);
   }
   const { projection, boardReferents } = projectInboxPlan(deps, plan, ledgerLines);
   const archiveKey = archiveReleases?.size ? [...archiveReleases].sort(([a], [b]) => a.localeCompare(b)) : null;
   const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(projection, boardReferents), archiveKey]);
-  return { key, sha, plan, planKey, projection, boardReferents, ledgerLines, archiveReleases, verdictReceipts };
+  return { key, writeKey: inboxWriteKey(inputs), sha, plan, planKey, readPlanSnapshot, projection, boardReferents, ledgerLines, archiveReleases, verdictReceipts };
 }
 
 /**
@@ -2365,6 +2386,12 @@ function reusableResult(state: InboxClassifyState, fp: InboxFingerprint): Classi
   return last.result.ledgerLines === fp.ledgerLines ? last.result : { ...last.result, ledgerLines: fp.ledgerLines };
 }
 
+function holdInboxResult(state: InboxClassifyState, generation: object, fp: InboxFingerprint, result: ClassifiedInbox): void {
+  if (state.generation !== generation) return;
+  const { key, writeKey, plan, planKey, readPlanSnapshot } = fp;
+  state.last = { key, writeKey, plan, planKey, readPlanSnapshot, result, at: systemClock.now() };
+}
+
 /**
  * W1-T4261 — THE READ ROUTES' CLASSIFIER. MEASURED 2026-09-23 on the fleet gateway: every GET /v1/inbox pass
  * reclassified 693 proposals synchronously (81% of the serve process's CPU; /v1/status timed out at 15 s on an idle
@@ -2381,7 +2408,7 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   const generation = state.generation = {};
   const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
   const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(p => pass.classifyOne(p)), ledgerLines: fp.ledgerLines, projection: fp.projection };
-  if (state.generation === generation) state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
+  holdInboxResult(state, generation, fp, result);
   return result;
 }
 
@@ -2394,6 +2421,24 @@ export function peekClassifiedInbox(deps: PanelGraphDeps): ClassifiedInbox | und
 export function peekClassifiedInboxStamped(deps: PanelGraphDeps): { result: ClassifiedInbox; classifiedAtMs: number } | undefined {
   const last = inboxClassifyStates.get(deps)?.last;
   return last === undefined ? undefined : { result: last.result, classifiedAtMs: last.at };
+}
+
+const INBOX_WRITE_CLASSIFICATION_MAX_AGE_MS = 30_000;
+
+function classifyInboxDecision(deps: PanelGraphDeps, proposalId: string, lapseDeclines = true): ClassifiedInbox {
+  // Terminal verdicts judge the recorded decline, while the read memo can show it as reopened.
+  const held = lapseDeclines ? peekClassifiedInboxStamped(deps) : undefined;
+  if (held) {
+    const age = systemClock.now() - held.classifiedAtMs;
+    const last = inboxClassifyStates.get(deps)?.last;
+    if (age >= 0 && age < INBOX_WRITE_CLASSIFICATION_MAX_AGE_MS && last?.writeKey !== undefined
+      && held.result.classifications.some(c => c.proposalId === proposalId)
+      && last.writeKey === inboxWriteKey(stampInboxInputs(deps))
+      && (last.planKey === undefined ? last.readPlanSnapshot?.() === last.plan : last.planKey === inboxPlanKey(deps))) {
+      return held.result;
+    }
+  }
+  return classifyAllProposals(deps, undefined, proposalId, lapseDeclines);
 }
 
 /** PRIMARY CONTROL on how long one inbox recompute holds the event loop: proposals classified between yields. Each can
@@ -2412,8 +2457,10 @@ export async function classifyAllProposalsSliced(
 ): Promise<ClassifiedInbox> {
   const state = inboxClassifyState(deps);
   const retained = await readRetainedHumanReleases(deps);
+  const inputs = stampInboxInputs(deps);
   const stored = readVerdictReceipts(join(deps.inboxRoot, "state"));
-  const fp = inboxFingerprint(deps, state, readPlanSnapshot, retained.receipts, retained.verdictReceiptsRead ? mergeVerdictReceipts(stored, retained.verdictReceipts) : stored);
+  const fp = inboxFingerprint(deps, state, readPlanSnapshot, retained.receipts, inputs,
+    retained.verdictReceiptsRead ? mergeVerdictReceipts(stored, retained.verdictReceipts) : stored);
   const attentionEvidence = attentionEvidenceFor(retained, fp.ledgerLines, fp.plan, fp.projection);
   // Only a complete archive read may replace the store; a partial one keeps what the store already holds.
   const receipts = retained.verdictReceiptsRead ? { verdictReceipts: mergeVerdictReceipts(fp.verdictReceipts, fp.ledgerLines.flatMap((row) => verdictReceiptOf(row) ?? [])) } : {};
@@ -2443,7 +2490,7 @@ export async function classifyAllProposalsSliced(
       for (const proposal of pass.proposals.slice(i, i + INBOX_CLASSIFY_SLICE)) classifications.push(pass.classifyOne(proposal));
     }
     const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications, ledgerLines: fp.ledgerLines, projection: fp.projection, attentionEvidence, ...receipts };
-    if (state.generation === generation) state.last = { key: fp.key, plan: fp.plan, planKey: fp.planKey, result, at: systemClock.now() };
+    holdInboxResult(state, generation, fp, result);
     return result;
   };
   const promise = run().finally(() => {
@@ -4031,7 +4078,7 @@ function validateDeclineProposal(body: unknown): { error: string } | DeclineProp
   return { proposalId: body.proposalId, reason: body.reason };
 }
 
-/** Both inbox verdict routes: classify live, let {@link applyProposalVerdict} decide and record, answer in HTTP. */
+/** Both inbox verdict routes classify the proposal, then let {@link applyProposalVerdict} decide and record. */
 function proposalVerdictResponse(
   kind: ProposalVerdictKind,
   deps: PanelGraphDeps,
@@ -4039,7 +4086,7 @@ function proposalVerdictResponse(
   actor: ProposalVerdictActor,
   respond: InboxVerbRespond,
 ): void {
-  const { proposals, classifications } = classifyAllProposals(deps, undefined, input.proposalId, !actor.terminalVerdict);
+  const { proposals, classifications } = classifyInboxDecision(deps, input.proposalId, !actor.terminalVerdict);
   if (refuseInformationalProposal(proposals, classifications, input.proposalId, respond)) return;
   const found = {
     exists: proposals.some((p) => p.id === input.proposalId),
@@ -4253,7 +4300,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
     }),
     reframe: validatedInboxAction(validateReframeProposal, (input, actor, respond) => {
       if (improvementReviewRequired(input.proposalId, respond)) return;
-      const { proposals, classifications } = classifyAllProposals(deps, undefined, input.proposalId);
+      const { proposals, classifications } = classifyInboxDecision(deps, input.proposalId);
       if (!proposals.some((p) => p.id === input.proposalId)) {
         respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
         return;
@@ -4273,7 +4320,7 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       if (fields.reason !== undefined && typeof fields.reason !== "string") return { error: "reason must be a string" };
       return { ...id, kept: fields.kept !== false, reason: fields.reason as string | undefined };
     }, (input, actor, respond) => {
-      const classified = classifyAllProposals(deps, undefined, input.proposalId);
+      const classified = classifyInboxDecision(deps, input.proposalId);
       const proposal = classified.proposals.find(p => p.id === input.proposalId);
       if (!proposal) { respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` }); return; }
       const classification = classified.classifications.find(c => c.proposalId === input.proposalId);

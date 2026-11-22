@@ -142,6 +142,7 @@ import {
 } from "./cli/commands/run-task-verb.js";
 export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_BRANCH_FILED_FORM, RUN_BRANCH_UNFILED_FORM, WORKER_ACTIVITY_LEDGER_STEP, WORKER_RUNAWAY_TURNS_LEDGER_STEP, FALLBACK_PUSH_EVIDENCE_ABSENT, ALREADY_SATISFIED_VERIFY_ATTEMPTS, ImplementBudgetBreach, PLAN_RECORD_ABSENT, RECON_MAX_TURNS, ManagedCheckoutRefreshRefusedError };
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
+import { newPublicTaskRecords, readCatalogNewTasksRow } from "./cli/commands/lint-plan.js";
 import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
 import { daemonBoot } from "./lib/daemon.js";
 import { describeProcessCwdProbe, pathIsAtOrBelow, readBoundedProcessCwdCensus as readProcessCwdCensus, type ProcessCwdCensus, type ProcessCwdCensusDeps, type UnreadableCwdDetail } from "./lib/process-cwd-census.js";
@@ -1899,7 +1900,7 @@ import {
   type GithubPostureGateway,
 } from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
-import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, type LedgerIndex, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, projectTask, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, readMergeCreditedTaskIdsAsync, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
+import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, COMMIT_TRAILER_LOG_MAX_BYTES, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, type LedgerIndex, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, projectTask, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, readMergeCreditedTaskIdsAsync, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
 import { readyDraftPullRequest, readTaskContractAtHeadViaGit, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { fixRoundsInFlight, reviewOnlyStandDownReason } from "./lib/sweep.js";
@@ -15280,14 +15281,16 @@ export function reportPrChecks(
 }
 
 /**
- * `rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]` (W1-T5533) — the worktree a hand build
+ * `rmd hand-worktree <taskId|unfiled> [--parent <abs dir>] [--no-claim]` (W1-T5533) — the worktree a hand build
  * works in, cut from fresh origin/main by `createHandWorktree` (src/lib/hand-worktree.ts). The
  * parent defaults to /mnt/scratch/hand when scratch exists, otherwise beside this checkout.
+ * W1-T14307: for a filed id it takes the dispatch claim through {@link dispatchClaimReserverFor}, the reserver
+ * `rmd claim` uses, and pushes the run branch; `--no-claim` skips both for an offline host.
  */
 export function handWorktreeCommand(rest: string[], opts: { repoDir?: string; clock?: Clock; minFreeBytes?: number; scratchRoot?: string; exists?: (path: string) => boolean } = {}): number {
   const taskId = rest[0];
   const badArg = taskId === undefined || taskId.startsWith("--") ? "rmd hand-worktree: <taskId> (or `unfiled`) must come first"
-    : rest.at(-1) === "--parent" ? "rmd hand-worktree: --parent needs a directory" : unknownArgError("hand-worktree", rest.slice(1), ["--parent"]);
+    : rest.at(-1) === "--parent" ? "rmd hand-worktree: --parent needs a directory" : unknownArgError("hand-worktree", rest.slice(1), ["--parent"], ["--no-claim"]);
   if (badArg) {
     console.error(`${badArg}\nusage: ${commandSyntax("hand-worktree")}`);
     return 2;
@@ -15300,7 +15303,9 @@ export function handWorktreeCommand(rest: string[], opts: { repoDir?: string; cl
   const reason = explicitParent !== undefined ? "explicit --parent" : scratchDefault
     ? `scratch root ${scratchRoot} is a directory` : `scratch root ${scratchRoot} is not a directory; using checkout parent`;
   console.log(`parent: ${parent} (${reason})`);
-  const result = createHandWorktree({ repoDir, taskId, parent, createParent: scratchDefault, clock: opts.clock, minFreeBytes: opts.minFreeBytes });
+  const noClaim = rest.includes("--no-claim");
+  const result = createHandWorktree({ repoDir, taskId, parent, createParent: scratchDefault, clock: opts.clock, minFreeBytes: opts.minFreeBytes,
+    noClaim, claimReserver: noClaim ? undefined : dispatchClaimReserverFor(repoDir) });
   if (result.status === "refused") {
     console.error(`rmd hand-worktree: refused — ${result.reason}`);
     return 1;
@@ -19830,6 +19835,9 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // silently does nothing in the mode people run by hand is a check nobody notices is broken.
     console.log("### rmd lint-plan: no --base given — the monolith-filing check is SKIPPED (it needs a base ref to know which ids are new).");
   }
+  // W1-T14343: the ids this diff adds that the public catalog never held, while its committed row is closed.
+  const publicCatalog = newTaskIds && scopeBase ? newPublicTaskRecords({ checkoutRoot, planRel, policyFile: join(dirname(planPath), "policy.yaml"), base: scopeBase, addedIds: newTaskIds }) : undefined;
+  if (publicCatalog?.state === "unknown") console.warn(`  ⚠ lint-plan: [new-public-task-record] not checked: ${publicCatalog.reason}`);
 
   // W1-T324: the whole-plan (no --base) scope filter. `--base` mode is untouched — `scope`
   // above already defines its bounds and this block never runs alongside it in a way that
@@ -20067,6 +20075,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         // W1-T11746/W1-T12832: only this pass demands INVARIANT/NO-INVARIANTS, and only of a task that is new, re-authored
         // against `oldTask` or already declaring; a metadata-only edit, whole-plan and dispatch leave history valid.
         requireDesignInvariantDeclaration: designContractChanged(oldTask, task) || declaresDesignInvariant(task),
+        ...(publicCatalog?.state === "checked" ? { newPublicTaskRecordIds: publicCatalog.newIds } : {}),
       };
     }
     // impl-DO: the CALL-SITE check needs to know whether a module already exists, and the linter
@@ -20233,6 +20242,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   if (existsSync(policyFile)) {
     try {
       loadPolicy(policyFile);
+      readCatalogNewTasksRow(policyFile); // W1-T14343: a malformed catalog row fails here, never reads as open
     } catch (e) {
       failing++;
       const message = e instanceof PolicyError ? e.message : String((e as Error)?.message ?? e);
@@ -21246,7 +21256,7 @@ export async function retroShippedGithubGatewayAsync(
   const commitTimeoutMs = opts.commitTimeoutMs ?? RETRO_MERGED_COMMITS_TIMEOUT_MS;
   const ghServerRetryAttempts = 3;
   const ghServerRetryDelayMs = 250;
-  const commitGit = asyncGit(opts.commitCwd ?? process.cwd(), { maxBuffer: 1 << 24 });
+  const commitGit = asyncGit(opts.commitCwd ?? process.cwd(), { maxBuffer: COMMIT_TRAILER_LOG_MAX_BYTES });
   // boundGitCall aborts the signal it hands the runner exactly when the bound fires, so an aborted one names a timeout.
   let commitSignal: AbortSignal | undefined;
   const boundedGit: AsyncGitRunner = (args, signal, env) => ((commitSignal = signal), commitGit(args, signal, env));
@@ -44213,9 +44223,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "hand-worktree",
-    syntax: "rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]",
+    syntax: "rmd hand-worktree <taskId|unfiled> [--parent <abs dir>] [--no-claim]",
     summary: "Create a hand build's run-<taskId>-<epochMs> worktree from origin/main with linked node_modules.",
-    detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before adding a worktree when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent wins; otherwise defaults to /mnt/scratch/hand when /mnt/scratch is a directory, creating hand if needed, or beside the checkout when scratch is absent; avoids the janitor sweep root /mnt/scratch/worktrees) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. Prints the chosen parent and why, the path and branch; exits 0 created, 1 refused, 2 bad usage.",
+    detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before adding a worktree when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent wins; otherwise defaults to /mnt/scratch/hand when /mnt/scratch is a directory, creating hand if needed, or beside the checkout when scratch is absent; avoids the janitor sweep root /mnt/scratch/worktrees) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. W1-T14307: for a filed id it also refuses when origin holds `refs/rmd-dispatch/<taskId>`, and after the cut it takes that dispatch claim through `rmd claim`'s reserver and pushes the run branch to origin at its base sha, so the fleet reads the task as in flight from the first minute; a refused push, a failed listing or another run-<taskId>-* branch appearing undoes the worktree, the branch and the claim it made, and refuses. `--no-claim` skips both pushes for an offline host and says so; `unfiled` pushes nothing. Prints the chosen parent and why, the path and branch, and the claim it holds; exits 0 created, 1 refused, 2 bad usage.",
   },
   {
     name: "worktree",

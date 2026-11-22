@@ -16,7 +16,7 @@
     - test/a-test-slot-holder-whose-heartbeat-stopped-is-reclaimed.test.ts
     - test/ci/suites/a-dead-test-slot-owner-is-proven-ended-by-its-scope.test.ts
     - test/ci/suites/a-dead-owner-slot-is-released-without-a-dedicated-cgroup-scope.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at origin/main 86455aa29 (2026-11-22). OPERATOR REVIEW: this changes a safety guard, so its evidence rule is

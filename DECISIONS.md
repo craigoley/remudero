@@ -3685,3 +3685,56 @@ follow the bake-off and the controlled trial, not this entry.
 - Consent: set `revoked: true` on a repository's entry in the consent file.
 - Open-weight arms: delete the deployments.
 - Prior ledger rows and experiment epochs are never rewritten.
+
+## 2026-11-22 — OPERATOR RULING: an automated gate demotion names its review with `#this-pr`
+
+Status: accepted
+
+*Operator-authored direction, given in chat on 2026-11-22 at 15:33Z as the answer to the operator
+session's question below (https://claude.ai/code/session_01AQgx7Mj9ZpVfRmWQ9ysduE). The operator
+session recorded it; it did not originate it. #20269 was narrowed at ccb1fc36b because no record of
+this ruling could be found; this entry is that record.*
+
+**Why this exists.** W1-T14304 (#20255) counts a required-gate demotion as reviewed only when
+`GATE_RATIONALE` names a real PR or task that the base rationale did not. The gate gardener
+(W1-T4116, `src/lib/gate-gardener.ts`) checks its own demotion with the same rule:
+- every gardener rationale names W1-T4116;
+- main's rationale already names it, from the gardener's merged demotion in #16171;
+- the gardener cannot name its own PR number before the PR exists.
+
+So under the strict rule, every later gardener demotion reads as stale. The earlier ruling it rests
+on is recorded in `test/the-gates-tend-themselves.test.ts`: "Operator ruling 2026-09-24: a demotion
+is never held or drafted — it is judged by whether it merges." That test comment is its only
+record.
+
+**The question, as asked:** "How should an automated demotion name its review?" The four options
+were:
+- a 'this PR' token;
+- the gardener naming its #N after opening;
+- freshness by gate, not by reference;
+- dropping W1-T14304.
+
+**The answer:** "Accept a 'this PR' token (Recommended)". That option read: "The rule accepts a
+symbolic reference meaning the PR under check, the same strength as naming its own #N, which
+already counts. The gardener writes it, so its demotion is reviewed by its own merge, per your
+2026-09-24 ruling."
+
+**Ruled:**
+1. `scripts/gate-monotonic-check.mjs` accepts the token `#this-pr` in `GATE_RATIONALE` as naming
+   the PR under check. It has the same strength as that PR's own `#<n>`, which the strict rule
+   already counts.
+2. The gate gardener's demotion rationale ends with the token, so its demotion is reviewed by its
+   own merge.
+
+**Added by the building session, not ruled:** the token counts only when the rationale names
+every demoted context by its exact name, and is not origin/main's rationale carried over (compared
+with whitespace collapsed). These checks keep a rationale copied from main, or padded from it,
+from reviewing a demotion it does not describe.
+
+**Not ruled here:**
+- Whether scanner gates such as `scan-pr / osv-scan` should be exempt from automated demotion.
+- The plan change that puts the token in W1-T14304's design. That is a separate plan PR.
+
+**Rollback:** remove the token from `evaluateGateMonotonic` and from the gardener's rationale. The
+gardener's demotions then read as stale again, and every gate stays REQUIRED, which is the safe
+direction.

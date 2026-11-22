@@ -461,6 +461,18 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
     verb: "rmd drain (feedback-landing sweep rung)",
     note: "Scoped to a branch the fleet alone owns (comment: force-push is safe here); no ledger step name confirmed by grep, reported as unmapped.",
   },
+  // ── src/lib/hand-worktree.ts ─────────────────────────────────────────────────────────────
+  {
+    id: "hand-worktree-run-branch-push",
+    action: "push a filed hand build's new run-<id>-<epochMs> branch to origin at its base sha, and delete it again when that claim is refused",
+    module: "src/lib/hand-worktree.ts",
+    symbol: "claimHandWorktree / undoHandWorktree",
+    boundary: "git-push",
+    gate: "operator-verb",
+    ledgerSteps: [],
+    verb: "rmd hand-worktree",
+    note: "W1-T14307: an operator's hand build publishes its run branch the moment the worktree is cut, so the drain reads the task as in flight; --no-claim skips it. Both pushes run through the hardened leaf (hostWorktreeGit). The dispatch claim it also takes is dispatch-claim-ref-push's row. No dedicated ledger step.",
+  },
   // ── src/lib/git-push.ts ──────────────────────────────────────────────────────────────────
   {
     id: "push-run-branch",

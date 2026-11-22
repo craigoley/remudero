@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { systemClock, type Clock } from "./clock.js";
+import { acquireDrainLock, defaultIsPidAlive } from "./drain-lock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghTextAsync } from "./github-transport.js";
 import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
@@ -25,6 +26,7 @@ import {
 import type { ProductRepositoryProvider } from "./product-repository.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { parseOwnerRepoFromRemoteUrl } from "./onboard/inventory.js";
+import { parseRegisteredWorktrees, readRunLock } from "./worker.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 export const PRODUCT_PLAN_OPERATION_VERSION = "product-plan-operation-v1" as const;
@@ -437,6 +439,71 @@ export async function verifyProductPlanCheckout(checkout: string, repository: Pl
   } catch (error) {
     if (error instanceof Fault) throw error;
     throw Object.assign(new Fault("target_unreadable"), { cause: error });
+  }
+}
+
+/** What {@link refreshProductPlanCheckout} did. `left` names why the checkout was not moved; the verify after it decides the refusal. */
+export type ProductPlanCheckoutRefresh = { kind: "current" | "fast_forwarded"; reason?: never } | { kind: "left"; reason: string };
+
+/**
+ * W1-T14301 INVARIANT only-a-clean-behind-checkout-moves: serve moves a target checkout only by a fast-forward of a clean,
+ * unborrowed default branch to the verified live head, and only for a fresh proposal (the caller runs this from the checkout
+ * port, which a replay never reaches). Every git call is the hardened, awaited {@link hostWorktreeGitAsync}. The checkout must
+ * name the verified repository as its origin, be its own top level, sit on the default branch with no change and no commit
+ * its origin lacks, and be a strict ancestor of `targetHead`. It moves under the managed-checkout lock run-task's
+ * `refreshManagedCheckout` takes ({@link acquireDrainLock} on `lockPath`), and only while no registered worktree holds a live
+ * or unreadable run lock (that refresh's borrower test). Never an install, reset, force, clone or branch switch. Anything
+ * else, a failed fetch included, leaves the checkout as it is, and {@link verifyProductPlanCheckout} then refuses it as before.
+ */
+export async function refreshProductPlanCheckout(checkout: string, repository: PlanRepository, targetHead: string,
+  lockPath: string): Promise<ProductPlanCheckoutRefresh> {
+  const git = async (args: string[], timeout = 20_000) => (await hostWorktreeGitAsync(checkout, args,
+    { timeout, maxBuffer: 1024 * 1024, env: { GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" } })).trim();
+  const left = (reason: string): ProductPlanCheckoutRefresh => ({ kind: "left", reason });
+  // `merge-base A B` equals A exactly when A is an ancestor of B; a missing object or no common history throws.
+  const ancestor = async (a: string, b: string) => (await git(["merge-base", a, b])) === a;
+  try {
+    if (!sha.test(targetHead)) return left("the live head is not a commit id");
+    const before = await git(["rev-parse", "--verify", "HEAD^{commit}"]);
+    if (before === targetHead) return { kind: "current" };
+    const identity = parseOwnerRepoFromRemoteUrl(await git(["config", "--get", "remote.origin.url"]));
+    if (!identity || identity.owner.toLowerCase() !== repository.owner.toLowerCase() || identity.repo.toLowerCase() !== repository.name.toLowerCase())
+      return left("its origin is not the verified repository");
+    if (realpathSync(await git(["rev-parse", "--show-toplevel"])) !== realpathSync(checkout)) return left("it is not its own top level");
+    const branch = await git(["rev-parse", "--abbrev-ref", "HEAD"]);
+    if (branch !== repository.defaultBranch) return left(`it is on ${branch}, not ${repository.defaultBranch}`);
+    if (await git(["status", "--porcelain", "--untracked-files=all"])) return left("it is dirty");
+    const published = await git(["for-each-ref", "--format=%(objectname)", `refs/remotes/origin/${branch}`]);
+    if (published && !(await ancestor(before, published))) return left(`it has commits origin/${branch} lacks`);
+    let lock: { release(): void };
+    try { lock = acquireDrainLock(lockPath); }
+    catch (error) {
+      // A held lock is a peer moving this tree: the checkout is left, the result carries the holder, the verify refuses it.
+      return left(`another dispatch holds ${lockPath} (${String((error as Error)?.message ?? error)})`);
+    }
+    try {
+      const self = realpathSync(checkout);
+      const borrower = parseRegisteredWorktrees(await git(["worktree", "list", "--porcelain"])).find(({ path }) => {
+        if (existsSync(path) && realpathSync(path) === self) return false;
+        const held = readRunLock(path);
+        return held.kind === "corrupt" || (held.kind === "live" && defaultIsPidAlive(held.info.pid));
+      });
+      if (borrower) return left(`a live worker borrows it (${borrower.path})`);
+      try { await git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", `refs/heads/${branch}`], 120_000); }
+      catch (error) {
+        // A failed fetch moves nothing: the result carries git's message, and the verify after it refuses the stale tree.
+        return left(`could not fetch origin (${String((error as Error)?.message ?? error).slice(0, 512)})`);
+      }
+      // Re-read under the lock: only the tree this call checked moves, and only forward onto the live head.
+      if (await git(["rev-parse", "--verify", "HEAD^{commit}"]) !== before || await git(["status", "--porcelain", "--untracked-files=all"]))
+        return left("it changed while it was fetched");
+      if (!(await ancestor(before, targetHead))) return left("it has diverged from the live head");
+      await git(["merge", "--ff-only", "--quiet", targetHead], 120_000);
+      return { kind: "fast_forwarded" };
+    } finally { lock.release(); }
+  } catch (error) {
+    // Unreadable is no refusal of its own: the checkout is left, the result names why, and the verify after it refuses.
+    return left(`it is unreadable (${String((error as Error)?.message ?? error).slice(0, 512)})`);
   }
 }
 const runnerConfigRefusal = {
