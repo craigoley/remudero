@@ -16,6 +16,7 @@
   files:
     - src/lib/reviewer-health.ts
     - test/review/a-healed-tree-that-fails-the-same-way-clears-the-blame.test.ts
+    - scripts/write-only-ledger-step-baseline.json # amended 2026-11-22: operator approved reviewer.regression_blame_cleared as record-only, with a reason
   status: queued
   attempts: 0
   acceptance:
