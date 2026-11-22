@@ -186,7 +186,62 @@ export interface ProductPlanObservation {
   operationId: string; state: ProductPlanState; mode: "create" | "clarify"; planEvidenceId: string;
   repository: { id: number; owner: string; name: string }; targetHead: string;
   revision: number; objectiveRevision: number; briefDigest: string; requestedAt: string; proposal?: string;
+  /** Observational only: never read by verification, product-case admission or build admission. */
+  requirementCoverage?: ProductPlanRequirementCoverage;
 }
+// ── observational requirement coverage (W1-T11394) ───────────────────────────────────────────────────────────
+
+export const PRODUCT_PLAN_COVERAGE_VERSION = "product-plan-requirement-coverage-v1" as const;
+export const PRODUCT_PLAN_COVERAGE_MAP_VERSION = "product-plan-requirement-map-v1" as const;
+/** PRIMARY CONTROL: bounds on one coverage report; excerpts are untrusted text and every read is capped. */
+export const PRODUCT_PLAN_COVERAGE_LIMITS = { items: 64, excerptChars: 240, entries: 64, rationaleChars: 300, referenceChars: 500,
+  mapBytes: 64 * 1024, shardBytes: 256 * 1024, tasks: 32, taskNameChars: 80 } as const;
+/** Where a proposing plan run may commit its one optional mapping report. */
+export const productPlanCoveragePath = (planEvidenceId: string) => `plan/requirement-coverage/${planEvidenceId}.json`;
+
+export type ProductPlanCoverageItemKind = "idea" | "constraint" | "decision";
+export interface ProductPlanCoverageItem { pointer: string; kind: ProductPlanCoverageItemKind; excerpt: string; textDigest: string }
+export type ProductPlanCoverageMappingReason = "no-proposal" | "brief-unavailable" | "transport-unreadable" | "report-absent"
+  | "report-invalid" | "report-incompatible" | "snapshot-unresolved";
+export type ProductPlanCoverageEntryState = "linked" | "unmapped" | "deferred" | "coverage-unavailable" | "reference-unresolved";
+export interface ProductPlanCoverageEntry { pointer: string; state: ProductPlanCoverageEntryState; taskId?: string; proof?: string; rationale?: string }
+export interface ProductPlanRequirementCoverage {
+  version: typeof PRODUCT_PLAN_COVERAGE_VERSION;
+  /** Structure only: no link is tested, implemented, exhaustive or semantically reviewed. */
+  basis: "structural-unreviewed";
+  reportId: string;
+  binding: { operationId: string; briefDigest: string; objectiveRevision: number; targetHead: string };
+  source: { state: "available" | "source-unavailable" };
+  inventory: { state: "available" | "inventory-unavailable"; exhaustive: false; digest?: string; itemCount: number; items: ProductPlanCoverageItem[] };
+  mapping: { state: "available" | "mapping-unavailable"; reason?: ProductPlanCoverageMappingReason; head?: string; snapshotDigest?: string; reportDigest?: string };
+  entries: ProductPlanCoverageEntry[];
+  counts: { linked: number; unmapped: number; deferred: number; unresolved: number };
+}
+
+const excerptOf = (value: string) => value.length > PRODUCT_PLAN_COVERAGE_LIMITS.excerptChars
+  ? `${value.slice(0, PRODUCT_PLAN_COVERAGE_LIMITS.excerptChars - 1)}…` : value;
+/** The brief's explicit typed fields, source-relative. Free-form idea text stays ONE nonexhaustive item; nothing is extracted from prose. */
+export function productPlanCoverageInventory(brief: ProductBrief): ProductPlanCoverageItem[] {
+  const item = (pointer: string, kind: ProductPlanCoverageItemKind, text: string): ProductPlanCoverageItem =>
+    ({ pointer, kind, excerpt: excerptOf(text), textDigest: digest(text) });
+  return [item("/idea", "idea", brief.idea),
+    ...(brief.constraints ?? []).map((text, index) => item(`/constraints/${index}`, "constraint", text)),
+    ...(brief.decisions ?? []).map((entry, index) => item(`/decisions/${index}`, "decision", `${entry.key}: ${entry.value}`))]
+    .slice(0, PRODUCT_PLAN_COVERAGE_LIMITS.items);
+}
+const inventoryDigest = (items: ProductPlanCoverageItem[]) => digest({ version: PRODUCT_PLAN_COVERAGE_VERSION, items: items.map((entry) => [entry.pointer, entry.textDigest]) });
+
+const coverageMapSchema = z.object({
+  version: z.literal(PRODUCT_PLAN_COVERAGE_MAP_VERSION), operationId: hex64Schema(), briefDigest: hex64Schema(), objectiveRevision: revision,
+  targetHead: z.string().regex(sha), inventoryDigest: hex64Schema(),
+  entries: z.array(z.object({
+    source: z.string().min(1).max(64), status: z.enum(["linked", "deferred"]),
+    taskId: z.string().min(1).max(PRODUCT_PLAN_COVERAGE_LIMITS.taskNameChars).regex(/^[A-Za-z0-9_.-]+$/).optional(),
+    proof: z.string().min(1).max(PRODUCT_PLAN_COVERAGE_LIMITS.referenceChars).optional(),
+    rationale: z.string().min(1).max(PRODUCT_PLAN_COVERAGE_LIMITS.rationaleChars).optional(),
+  }).strict()).max(PRODUCT_PLAN_COVERAGE_LIMITS.entries),
+}).strict();
+function hex64Schema() { return z.string().regex(/^[a-f0-9]{64}$/); }
 export type ProductPlanOperationCode = ProductStoreCode
   | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable"
   | "target_not_enrolled" | "target_unreadable" | "runner_missing" | "bootstrap_unverified"
@@ -401,7 +456,7 @@ export class ProductPlanOperationService {
         if (config.state !== "present") throw new Fault(runnerConfigRefusal[config.state]);
         const mode = await this.planMode(subject, head);
         const planEvidenceId = `pplan-${operationId.slice(0, 24)}`;
-        const brief = this.briefArgument(product, planEvidenceId, operationId);
+        const brief = this.briefArgument(product, planEvidenceId, operationId, head);
         if (Buffer.byteLength(brief) > PRODUCT_PLAN_OPERATION_LIMITS.briefBytes) throw new Fault("invalid_input");
         record = { operationId, productId: product.id, revision: product.revision, objectiveRevision: product.objectiveRevision, briefDigest,
           repository: { id: subject.id, owner: subject.owner, name: subject.name }, targetHead: head, mode, planEvidenceId,
@@ -427,7 +482,106 @@ export class ProductPlanOperationService {
     product = this.readProduct(actor, input.productId);
     const observation = this.observe(record, product, head);
     product = this.settle(actor, product, observation);
-    return { observation: this.observe(record, product, head), replayed };
+    const settled = this.observe(record, product, head);
+    // Observation only: whatever the report does, the operation, its state and its journal are already decided above.
+    return { observation: { ...settled, requirementCoverage: await this.coverage(record, product, settled) }, replayed };
+  }
+
+  /**
+   * The structural coverage report for this operation. The frozen record holds only a brief digest, so the source is read ONLY
+   * from the current product brief and ONLY when it still matches that digest; otherwise it is source-unavailable and today's
+   * brief is never substituted. A mapping is read from the exact proposal head, and any failure leaves entries unavailable.
+   */
+  private async coverage(record: Record_, product: StoredProduct, observation: ProductPlanObservation): Promise<ProductPlanRequirementCoverage> {
+    const binding = { operationId: record.operationId, briefDigest: record.briefDigest, objectiveRevision: record.objectiveRevision, targetHead: record.targetHead };
+    const exact = product.objectiveRevision === record.objectiveRevision && digest(productCasePlanText(product.brief)) === record.briefDigest;
+    const items = exact ? productPlanCoverageInventory(product.brief) : [];
+    const invDigest = exact ? inventoryDigest(items) : undefined;
+    let mapping: ProductPlanRequirementCoverage["mapping"];
+    let entries: ProductPlanCoverageEntry[] = [];
+    if (!exact) mapping = { state: "mapping-unavailable", reason: "brief-unavailable" };
+    else {
+      let read: { mapping: ProductPlanRequirementCoverage["mapping"]; entries: ProductPlanCoverageEntry[] };
+      try { read = await this.coverageMapping(record, observation, items, invDigest!); }
+      catch (error) {
+        // A report that cannot be read is an explicit unavailable state, never a coverage claim and never an operation failure.
+        void error;
+        read = { mapping: { state: "mapping-unavailable", reason: "transport-unreadable" }, entries: items.map((entry) => ({ pointer: entry.pointer, state: "coverage-unavailable" as const })) };
+      }
+      ({ mapping, entries } = read);
+    }
+    const counts = { linked: 0, unmapped: 0, deferred: 0, unresolved: 0 };
+    for (const entry of entries) {
+      if (entry.state === "linked") counts.linked += 1;
+      else if (entry.state === "unmapped") counts.unmapped += 1;
+      else if (entry.state === "deferred") counts.deferred += 1;
+      else counts.unresolved += 1;
+    }
+    return { version: PRODUCT_PLAN_COVERAGE_VERSION, basis: "structural-unreviewed",
+      reportId: digest({ binding, inventory: invDigest ?? null, mapping, entries }), binding,
+      source: { state: exact ? "available" : "source-unavailable" },
+      inventory: { state: exact ? "available" : "inventory-unavailable", exhaustive: false, ...(invDigest ? { digest: invDigest } : {}), itemCount: items.length, items },
+      mapping, entries, counts };
+  }
+
+  private async coverageMapping(record: Record_, observation: ProductPlanObservation, items: ProductPlanCoverageItem[], invDigest: string):
+    Promise<{ mapping: ProductPlanRequirementCoverage["mapping"]; entries: ProductPlanCoverageEntry[] }> {
+    const refuse = (reason: ProductPlanCoverageMappingReason, extra: { head?: string } = {}) => ({
+      mapping: { state: "mapping-unavailable" as const, reason, ...extra },
+      entries: items.map((entry) => ({ pointer: entry.pointer, state: "coverage-unavailable" as const })) });
+    const match = observation.proposal === undefined ? null : /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)$/.exec(observation.proposal);
+    if (observation.state !== "proposed" || !match) return refuse("no-proposal");
+    const text = this.options.text ?? ghTextAsync;
+    const slug = `repos/${record.repository.owner}/${record.repository.name}`;
+    const api = (path: string, raw: boolean, maxBuffer: number) => text(["api", path, ...(raw ? ["-H", "Accept: application/vnd.github.raw+json"] : [])], { maxBuffer, timeout: 20_000 });
+    const pull = z.object({ number: revision, base: z.object({ repo: z.object({ id: revision }) }), head: z.object({ sha: z.string().regex(sha) }) })
+      .parse(JSON.parse(await api(`${slug}/pulls/${match[1]}`, false, 1024 * 1024)));
+    if (pull.number !== Number(match[1]) || pull.base.repo.id !== record.repository.id) return refuse("snapshot-unresolved");
+    const head = pull.head.sha;
+    let body: string;
+    try { body = await api(`${slug}/contents/${productPlanCoveragePath(record.planEvidenceId)}?ref=${head}`, true, PRODUCT_PLAN_COVERAGE_LIMITS.mapBytes); }
+    catch (error) {
+      // Only an ABSENT report is "no report"; an unreadable one is a different, retryable state.
+      if (/404|not found/i.test(String((error as Error)?.message ?? error))) return refuse("report-absent", { head });
+      throw error;
+    }
+    if (Buffer.byteLength(body) > PRODUCT_PLAN_COVERAGE_LIMITS.mapBytes) return refuse("report-invalid", { head });
+    let parsed: z.infer<typeof coverageMapSchema>;
+    try { parsed = coverageMapSchema.parse(JSON.parse(body)); }
+    catch (error) { void error; /* malformed untrusted report text: explicit invalid state */ return refuse("report-invalid", { head }); }
+    if (parsed.operationId !== record.operationId || parsed.briefDigest !== record.briefDigest || parsed.objectiveRevision !== record.objectiveRevision ||
+      parsed.targetHead !== record.targetHead || parsed.inventoryDigest !== invDigest) return refuse("report-incompatible", { head });
+    const pointers = new Set(items.map((entry) => entry.pointer));
+    const seen = new Set<string>();
+    for (const entry of parsed.entries) {
+      const complete = entry.status === "linked" ? entry.taskId !== undefined && entry.proof !== undefined : entry.rationale !== undefined;
+      if (!pointers.has(entry.source) || seen.has(entry.source) || !complete) return refuse("report-invalid", { head });
+      seen.add(entry.source);
+    }
+    // The candidate task/proof snapshot: only tasks the report names, read from the same exact head, shard by shard.
+    const taskIds = [...new Set(parsed.entries.flatMap((entry) => entry.taskId === undefined ? [] : [entry.taskId]))].sort();
+    if (taskIds.length > PRODUCT_PLAN_COVERAGE_LIMITS.tasks) return refuse("report-invalid", { head });
+    const proofs = new Map<string, string[] | null>();
+    if (taskIds.length > 0) {
+      const names = z.array(z.object({ name: z.string().regex(/^[A-Za-z0-9_.-]+$/) })).parse(JSON.parse(await api(`${slug}/contents/${shardDirectory}?ref=${head}`, false, 1024 * 1024)));
+      for (const taskId of taskIds) {
+        const shard = names.find((entry) => entry.name.startsWith(`${taskId}-`) && entry.name.endsWith(".yaml"));
+        if (!shard) { proofs.set(taskId, null); continue; }
+        const raw = await api(`${slug}/contents/${shardDirectory}/${shard.name}?ref=${head}`, true, PRODUCT_PLAN_COVERAGE_LIMITS.shardBytes);
+        const tasks = z.array(z.object({ id: z.string(), acceptance: z.array(z.object({ proof: z.string().optional() }).passthrough()).optional() }).passthrough()).parse(parseYaml(raw));
+        const task = tasks.find((entry) => entry.id === taskId);
+        proofs.set(taskId, task === undefined ? null : (task.acceptance ?? []).flatMap((entry) => entry.proof === undefined ? [] : [entry.proof]));
+      }
+    }
+    const bySource = new Map(parsed.entries.map((entry) => [entry.source, entry]));
+    const entries = items.map((item): ProductPlanCoverageEntry => {
+      const entry = bySource.get(item.pointer);
+      if (entry === undefined) return { pointer: item.pointer, state: "unmapped" };
+      if (entry.status === "deferred") return { pointer: item.pointer, state: "deferred", rationale: entry.rationale! };
+      const known = proofs.get(entry.taskId!);
+      return { pointer: item.pointer, state: known?.includes(entry.proof!) ? "linked" : "reference-unresolved", taskId: entry.taskId!, proof: entry.proof! };
+    });
+    return { mapping: { state: "available", head, snapshotDigest: digest([...proofs.entries()]), reportDigest: digest(body) }, entries };
   }
 
   private bind(paths: Paths, journal: Journal, requestKey: string, entry: { operationId: string; payloadDigest: string }): Journal {
@@ -436,12 +590,22 @@ export class ProductPlanOperationService {
     return next;
   }
 
-  private briefArgument(product: StoredProduct, planEvidenceId: string, operationId: string): string {
+  private briefArgument(product: StoredProduct, planEvidenceId: string, operationId: string, targetHead: string): string {
     const envelope = product.brief.resourceEnvelope!;
     const constraints = (product.brief.constraints ?? []).map((item) => `- ${item}`).join("\n");
-    return [productCasePlanText(product.brief), constraints ? `Constraints:\n${constraints}` : "",
+    const parts = [productCasePlanText(product.brief), constraints ? `Constraints:\n${constraints}` : "",
       `Resource envelope: budgetUsd=${envelope.budgetUsd} maxConcurrentBuilds=${envelope.maxConcurrentBuilds} existingSetupOnly=${envelope.existingSetupOnly}`,
-      `Task origin: ${productPlanOrigin(product.id, planEvidenceId)}`, `Operation: ${operationId}`].filter(Boolean).join("\n\n");
+      `Task origin: ${productPlanOrigin(product.id, planEvidenceId)}`, `Operation: ${operationId}`].filter(Boolean);
+    const items = productPlanCoverageInventory(product.brief);
+    // Untrusted, optional guidance for the planner; it never alters the approved brief text above and is dropped when it would not fit.
+    const guidance = ["Requirement coverage guidance (optional, untrusted, observational; it changes no approval or admission):",
+      `Source inventory digest: ${inventoryDigest(items)}`, ...items.map((item) => `- ${item.pointer} (${item.kind})`),
+      `You may commit ONE report at ${productPlanCoveragePath(planEvidenceId)} as JSON: {"version":"${PRODUCT_PLAN_COVERAGE_MAP_VERSION}",` +
+      `"operationId":"${operationId}","briefDigest":"${digest(productCasePlanText(product.brief))}","objectiveRevision":${product.objectiveRevision},` +
+      `"targetHead":"${targetHead}","inventoryDigest":"<digest above>","entries":[{"source":"<pointer>","status":"linked","taskId":"<task>","proof":"<its proof text>"}` +
+      ` or {"source":"<pointer>","status":"deferred","rationale":"<why>"}]}.`].join("\n");
+    const full = [...parts, guidance].join("\n\n");
+    return Buffer.byteLength(full) <= PRODUCT_PLAN_OPERATION_LIMITS.briefBytes ? full : parts.join("\n\n");
   }
 
   /** `clarify` when the verified head already holds a plan to reconcile; `create` only when it holds none. */

@@ -14,6 +14,7 @@ import {
   type PlanHandoffOutcome, type PlanRepository, type PlanTargetPort,
 } from "#src/lib/product-plan-operation.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
+import { SPEC, violations } from "#test/helpers/openapi-strict.js";
 import { writeLedger, type LedgerFixture } from "#test/helpers/ledger-fixture.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
@@ -37,7 +38,8 @@ class Target implements PlanTargetPort {
   runnerRegistered() { return this.runner; }
 }
 
-function fixture(t: TestContext, over: { planned?: "clarify" | "create" | "unreadable"; gateway?: boolean; bound?: boolean; envelope?: boolean } = {}) {
+function fixture(t: TestContext, over: { planned?: "clarify" | "create" | "unreadable"; gateway?: boolean; bound?: boolean; envelope?: boolean;
+  serve?: (path: string) => string | undefined } = {}) {
   const root = ownedFixtureDir(t, "product-plan-operation").dir;
   const store = new ProductIntentStore({ root });
   const saved = store.write(actor, { version: "product-intent-v1", requestId: "seed-product-00001", expectedRevision: 0,
@@ -68,6 +70,8 @@ function fixture(t: TestContext, over: { planned?: "clarify" | "create" | "unrea
     },
   };
   const text = async (args: string[]) => {
+    const served = over.serve?.(args.join(" "));
+    if (served !== undefined) return served;
     if (over.planned === "unreadable") throw new Error("gh: server error (HTTP 502)");
     if (over.planned === "create") throw new Error("gh: Not Found (HTTP 404)");
     assert.match(args.join(" "), /contents\/plan\/tasks\.d\?ref=/);
@@ -598,4 +602,159 @@ test("W1-T13719: a refused plan does not block a fresh request once the target h
   assert.notEqual(fresh.observation.operationId, first.observation.operationId);
   assert.equal(fresh.observation.targetHead, MOVED);
   assert.equal(f.calls.length, 2);
+});
+
+// ── W1-T11394: observational requirement coverage ────────────────────────────────────────────────────────────
+
+const PR_HEAD = "c".repeat(40);
+const PROOF = "unit test: the first task proof";
+/** What the proposing plan run committed at the PR head; each field is mutable so a case can break exactly one thing. */
+function coverageServer(over: { map?: () => string | Error; shard?: string } = {}) {
+  const served = { map: over.map ?? ((): string | Error => new Error("gh: Not Found (HTTP 404)")), pull: true };
+  const serve = (path: string): string | undefined => {
+    if (/repos\/craigoley\/wreckterra\/pulls\/42$/.test(path)) return JSON.stringify({ number: 42, base: { repo: { id: ID } }, head: { sha: PR_HEAD } });
+    if (path.includes(`requirement-coverage/`) && path.includes(`ref=${PR_HEAD}`)) { const v = served.map(); if (v instanceof Error) throw v; return v; }
+    if (path.endsWith(`plan/tasks.d?ref=${PR_HEAD}`)) return JSON.stringify([{ name: "WRECK-T2-second.yaml" }]);
+    if (path.includes(`plan/tasks.d/WRECK-T2-second.yaml?ref=${PR_HEAD}`)) return over.shard ?? `- id: WRECK-T2\n  acceptance:\n    - claim: c\n      proof: "${PROOF}"\n`;
+    return undefined;
+  };
+  return { served, serve };
+}
+const mapFor = (observation: { operationId: string; briefDigest: string; objectiveRevision: number; targetHead: string },
+  inventory: string, entries: unknown[]) => JSON.stringify({ version: "product-plan-requirement-map-v1", operationId: observation.operationId,
+  briefDigest: observation.briefDigest, objectiveRevision: observation.objectiveRevision, targetHead: observation.targetHead, inventoryDigest: inventory, entries });
+const GOOD_ENTRIES = [{ source: "/constraints/0", status: "linked", taskId: "WRECK-T2", proof: PROOF }, { source: "/idea", status: "deferred", rationale: "needs a human read" }];
+/** Plans once, lets the native run open its PR, and returns the proposed observation read with `map` served at the PR head. */
+async function proposedWith(t: TestContext, build: (pending: { operationId: string; briefDigest: string; objectiveRevision: number; targetHead: string }, inventory: string) => string | Error,
+  over: { shard?: string } = {}) {
+  const server = coverageServer(over);
+  const f = fixture(t, { serve: server.serve });
+  const pending = await ok(f.service().execute(actor, f.command()));
+  const coverage = pending.observation.requirementCoverage!;
+  server.served.map = () => build(pending.observation, coverage.inventory.digest!);
+  f.release("queued");
+  nativeRun(f, pending.observation.operationId, { pr: PR_URL, exit: true });
+  const proposed = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  return { f, pending, proposed, server };
+}
+
+test("W1-T11394: product plan coverage observation binds source inventory and mapping identity", async (t) => {
+  const { f, proposed } = await proposedWith(t, (pending, inventory) => mapFor(pending, inventory, GOOD_ENTRIES));
+  assert.equal(proposed.observation.state, "proposed");
+  const coverage = proposed.observation.requirementCoverage!;
+  assert.deepEqual([coverage.version, coverage.basis, coverage.source.state, coverage.inventory.state, coverage.mapping.state],
+    ["product-plan-requirement-coverage-v1", "structural-unreviewed", "available", "available", "available"]);
+  assert.deepEqual(coverage.binding, { operationId: proposed.observation.operationId, briefDigest: proposed.observation.briefDigest,
+    objectiveRevision: 1, targetHead: HEAD }, "the report binds the frozen operation, brief, objective and target head");
+  assert.deepEqual(coverage.inventory.items.map((item) => [item.pointer, item.kind]), [["/idea", "idea"], ["/constraints/0", "constraint"]]);
+  assert.equal(coverage.inventory.exhaustive, false, "free-form idea text is never claimed exhaustively extracted");
+  assert.match(coverage.inventory.digest!, /^[a-f0-9]{64}$/);
+  assert.equal(coverage.mapping.head, PR_HEAD, "the mapping is read from the exact proposal head");
+  assert.match(coverage.mapping.snapshotDigest!, /^[a-f0-9]{64}$/);
+  assert.deepEqual(coverage.entries, [{ pointer: "/idea", state: "deferred", rationale: "needs a human read" },
+    { pointer: "/constraints/0", state: "linked", taskId: "WRECK-T2", proof: PROOF }]);
+  assert.deepEqual(coverage.counts, { linked: 1, unmapped: 0, deferred: 1, unresolved: 0 });
+  assert.ok(!JSON.stringify(coverage).match(/implemented|tested|complete/), "no link is labelled implemented, tested or complete");
+  assert.match(coverage.reportId, /^[a-f0-9]{64}$/);
+  // The native handoff carries the bounded inventory guidance beside the canonical approved brief.
+  const handed = f.calls[0]!.brief;
+  assert.ok(handed.includes(productCasePlanText(brief)));
+  assert.ok(handed.includes(`Source inventory digest: ${coverage.inventory.digest}`) && handed.includes("- /constraints/0 (constraint)"));
+});
+
+test("W1-T11394: product plan coverage observation preserves source inventory and mapping unknown states", async (t) => {
+  const unavailable = (c: { mapping: { state: string; reason?: string }; entries: { state: string }[] }, reason: string, entryState: string) => {
+    assert.deepEqual([c.mapping.state, c.mapping.reason], ["mapping-unavailable", reason]);
+    assert.ok(c.entries.length > 0 && c.entries.every((entry) => entry.state === entryState));
+  };
+  // Pending: no proposal exists, so nothing is mapped and nothing is claimed.
+  const first = await proposedWith(t, () => new Error("gh: Not Found (HTTP 404)"));
+  unavailable(first.pending.observation.requirementCoverage!, "no-proposal", "coverage-unavailable");
+  unavailable(first.proposed.observation.requirementCoverage!, "report-absent", "coverage-unavailable");
+  const bad = await proposedWith(t, () => "{ not json");
+  unavailable(bad.proposed.observation.requirementCoverage!, "report-invalid", "coverage-unavailable");
+  const foreign = await proposedWith(t, (pending, inventory) => mapFor({ ...pending, operationId: "f".repeat(64) }, inventory, GOOD_ENTRIES));
+  unavailable(foreign.proposed.observation.requirementCoverage!, "report-incompatible", "coverage-unavailable");
+  const stale = await proposedWith(t, (pending) => mapFor(pending, "0".repeat(64), GOOD_ENTRIES));
+  unavailable(stale.proposed.observation.requirementCoverage!, "report-incompatible", "coverage-unavailable");
+  const unreadable = await proposedWith(t, () => new Error("gh: server error (HTTP 502)"));
+  unavailable(unreadable.proposed.observation.requirementCoverage!, "transport-unreadable", "coverage-unavailable");
+  const unknownPointer = await proposedWith(t, (pending, inventory) => mapFor(pending, inventory, [{ source: "/constraints/9", status: "deferred", rationale: "x" }]));
+  unavailable(unknownPointer.proposed.observation.requirementCoverage!, "report-invalid", "coverage-unavailable");
+  // A proof the candidate task does not carry is an explicit unresolved reference; an unlisted source stays unmapped.
+  const unresolved = await proposedWith(t, (pending, inventory) => mapFor(pending, inventory,
+    [{ source: "/constraints/0", status: "linked", taskId: "WRECK-T2", proof: "unit test: invented proof" }]));
+  const entries = unresolved.proposed.observation.requirementCoverage!.entries;
+  assert.deepEqual(entries.map((entry) => [entry.pointer, entry.state]), [["/idea", "unmapped"], ["/constraints/0", "reference-unresolved"]]);
+  assert.deepEqual(unresolved.proposed.observation.requirementCoverage!.counts, { linked: 0, unmapped: 1, deferred: 0, unresolved: 1 });
+  // A changed brief is source-unavailable: today's brief is never mapped as if it were the frozen one.
+  const c = fixture(t);
+  const pending = await ok(c.service().execute(actor, c.command()));
+  assert.ok(c.store.write(actor, { version: "product-intent-v1", requestId: "brief-changed-000011", id: c.productId, expectedRevision: revisionOf(c),
+    brief: { ...brief, idea: "a different original idea" } }).ok);
+  const changed = (await ok(c.service({ gateway: false }).execute(actor, c.command()))).observation;
+  assert.equal(changed.state, "changed-brief");
+  const coverage = changed.requirementCoverage!;
+  assert.deepEqual([coverage.source.state, coverage.inventory.state, coverage.inventory.items, coverage.entries, coverage.inventory.digest],
+    ["source-unavailable", "inventory-unavailable", [], [], undefined], "absent inventory is never a zero-requirement success");
+  assert.equal(coverage.mapping.reason, "brief-unavailable");
+  assert.ok(!JSON.stringify(coverage).includes("a different original idea"));
+  assert.equal(coverage.binding.briefDigest, pending.observation.briefDigest, "the frozen digest is reported, never today's");
+});
+
+test("W1-T11394: product plan coverage observation preserves operation and admission behavior", async (t) => {
+  const { f, pending, proposed } = await proposedWith(t, (observation, inventory) => mapFor(observation, inventory, GOOD_ENTRIES));
+  const strip = (o: object) => { const { requirementCoverage, ...rest } = o as { requirementCoverage?: unknown }; void requirementCoverage; return rest; };
+  const journalFile = () => readFileSync(join(f.journalDirectory, readdirSync(f.journalDirectory).find((name) => name.endsWith(".json"))!), "utf8");
+  // Same-input replay is stable: identical report, journal and evidence.
+  const journalBefore = journalFile();
+  const evidenceBefore = evidenceIds(f);
+  const again = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.equal(again.observation.requirementCoverage!.reportId, proposed.observation.requirementCoverage!.reportId);
+  assert.deepEqual(again.observation, proposed.observation);
+  assert.equal(journalFile(), journalBefore, "reporting never rewrites the journal");
+  assert.deepEqual(evidenceIds(f), evidenceBefore);
+  assert.equal(f.calls.length, 1);
+  assert.equal(pending.observation.operationId, again.observation.operationId);
+  // Reporting failure changes neither the state nor the evidence, nor the journal.
+  const broken = fixture(t, { serve: (path) => { if (path.includes("/pulls/42")) throw new Error("gh: server error (HTTP 500)"); return undefined; } });
+  const first = await ok(broken.service().execute(actor, broken.command()));
+  broken.release("queued");
+  nativeRun(broken, first.observation.operationId, { pr: PR_URL, exit: true });
+  const failing = await ok(broken.service({ gateway: false }).execute(actor, broken.command()));
+  assert.equal(failing.observation.state, "proposed");
+  assert.equal(failing.observation.proposal, PR_URL);
+  assert.equal(failing.observation.requirementCoverage!.mapping.reason, "transport-unreadable");
+  assert.ok(evidenceIds(broken).includes(`pplan-op:${first.observation.operationId.slice(0, 32)}:proposed`), "the proposed evidence is still recorded");
+  // The healthy and failing runs agree on everything but the report.
+  assert.deepEqual(strip(failing.observation), { ...strip(proposed.observation), operationId: failing.observation.operationId,
+    planEvidenceId: failing.observation.planEvidenceId });
+});
+
+test("W1-T11394: product plan coverage observation reaches the bounded served response contract", async (t) => {
+  const { proposed, pending } = await proposedWith(t, (observation, inventory) => mapFor(observation, inventory, GOOD_ENTRIES));
+  const schema = SPEC.components.schemas.ProductPlanOperation!;
+  assert.deepEqual(violations(proposed.observation, schema), [], "the real proposed observation satisfies the strict contract");
+  assert.deepEqual(violations(pending.observation, schema), [], "so does the unavailable-mapping observation");
+  // Optional for legacy servers: an observation without the field is still valid.
+  const { requirementCoverage, ...legacy } = proposed.observation; void requirementCoverage;
+  assert.deepEqual(violations(legacy, schema), []);
+  // The contract is bounded and strict: an undeclared key, an overlong excerpt or a non-structural basis is refused.
+  const coverage = proposed.observation.requirementCoverage!;
+  assert.notDeepEqual(violations({ ...proposed.observation, requirementCoverage: { ...coverage, extra: 1 } }, schema), []);
+  assert.notDeepEqual(violations({ ...proposed.observation, requirementCoverage: { ...coverage, basis: "complete" } }, schema), []);
+  const long = { ...coverage, inventory: { ...coverage.inventory, items: [{ ...coverage.inventory.items[0]!, excerpt: "x".repeat(241) }] } };
+  assert.notDeepEqual(violations({ ...proposed.observation, requirementCoverage: long }, schema), []);
+  // Output is bounded by construction: a maximal brief never exceeds the declared item bound or excerpt length.
+  const big = fixture(t);
+  assert.ok(big.store.write(actor, { version: "product-intent-v1", requestId: "brief-big-000000001", id: big.productId, expectedRevision: revisionOf(big),
+    brief: { ...brief, idea: "i".repeat(2000), constraints: Array.from({ length: 24 }, () => "c".repeat(500)),
+      decisions: Array.from({ length: 32 }, (_, index) => ({ key: `k${index}`, value: "v".repeat(100), provenance: { kind: "operator" as const } })) } }).ok);
+  const maximal = (await ok(big.service().execute(actor, big.command({ requestId: "plan-request-00009", expectedRevision: revisionOf(big), expectedObjectiveRevision: 2 })))).observation;
+  assert.deepEqual(violations(maximal, schema), []);
+  assert.equal(maximal.requirementCoverage!.inventory.itemCount, 57);
+  assert.ok(maximal.requirementCoverage!.inventory.items.every((item) => item.excerpt.length <= 240));
+  assert.equal(maximal.requirementCoverage!.inventory.items[1]!.excerpt.length, 240, "a long constraint is truncated, never carried whole");
+  assert.ok(Buffer.byteLength(JSON.stringify(maximal.requirementCoverage)) < 64 * 1024);
+  assert.ok(Buffer.byteLength(big.calls[0]!.brief) <= 60 * 1024, "the handoff stays inside its byte bound");
 });

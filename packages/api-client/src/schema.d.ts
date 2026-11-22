@@ -877,6 +877,56 @@ export interface components {
       requestedAt: string;
       /** The correlated plan pull request */
       proposal?: string;
+      /** An optional, bounded, observational structural report. It is never tested, implemented, exhaustive or semantically reviewed, and no verification, product-case or build admission reads it. Excerpts are untrusted text. Absent on a response from a server that predates it. */
+      requirementCoverage?: {
+        version: "product-plan-requirement-coverage-v1";
+        basis: "structural-unreviewed";
+        reportId: string;
+        binding: {
+          operationId: string;
+          briefDigest: string;
+          objectiveRevision: number;
+          targetHead: string;
+        };
+        source: {
+          state: "available" | "source-unavailable";
+        };
+        inventory: {
+          state: "available" | "inventory-unavailable";
+          exhaustive: false;
+          digest?: string;
+          itemCount: number;
+          items: ({
+            pointer: string;
+            kind: "idea" | "constraint" | "decision";
+            /** Untrusted brief text */
+            excerpt: string;
+            textDigest: string;
+          })[];
+        };
+        mapping: {
+          state: "available" | "mapping-unavailable";
+          reason?: "no-proposal" | "brief-unavailable" | "transport-unreadable" | "report-absent" | "report-invalid" | "report-incompatible" | "snapshot-unresolved";
+          head?: string;
+          snapshotDigest?: string;
+          reportDigest?: string;
+        };
+        entries: ({
+          pointer: string;
+          state: "linked" | "unmapped" | "deferred" | "coverage-unavailable" | "reference-unresolved";
+          taskId?: string;
+          /** Untrusted proof text named by the proposal. */
+          proof?: string;
+          /** Untrusted deferral rationale. */
+          rationale?: string;
+        })[];
+        counts: {
+          linked: number;
+          unmapped: number;
+          deferred: number;
+          unresolved: number;
+        };
+      };
     };
     ProductCaseDeploymentObservation: {
       productId: ProductId;
