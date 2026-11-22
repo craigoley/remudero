@@ -10,6 +10,7 @@ import { aCandidateHoldsARunBranch, runDaemon, type DaemonDeps, type DaemonSumma
 import { loadPlan } from "#src/lib/plan.js";
 import type { RunResult } from "#src/lib/run-result.js";
 import { daemonCommand } from "#src/run-task.js";
+import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const A = "W1-T9001";
@@ -68,6 +69,7 @@ async function selectOnce(t: TestContext, ids: string[], extra: Partial<DaemonDe
   const merged = new Set<string>();
   let stop = false;
   await runDaemon(planOf(t, ids), {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => (id: string) => merged.has(id),
     checkStop: () => (stop ? "test done" : undefined),
     log: (step, fields) => { rows.push({ step, extra: fields }); },
@@ -179,6 +181,7 @@ for (const [name, extra] of refillPaths) {
     const releases = new Map<string, (value: RunResult) => void>();
     let cleanup = false;
     const run = runDaemon(planOf(t, [A, B, C]), {
+      ...hostIndependentDaemonDeps(),
       refreshMerged: () => (id: string) => merged.has(id),
       readPushedRunBranches: () => listing(held),
       readClosedRunBranchPrs: read,
