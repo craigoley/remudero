@@ -86,6 +86,7 @@ export const PRODUCER_IDENTITIES: Readonly<Record<string, ProducerIdentity>> = O
   RELAY: producer("relay", "Relay"),
   BATCH: producer("batch", "Batch Approve"),
   CLI: producer("cli", "CLI"),
+  unattributed: producer("unattributed", "Unattributed"),
   OPS: producer("ops", "Ops"),
   PANEL: producer("panel", "Console Panel"),
   DEPLOY: producer("deploy", "Deploy Supervisor"),
