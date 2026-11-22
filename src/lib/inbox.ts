@@ -1819,11 +1819,11 @@ export function inboxDraftExampleFragmentYaml(): string {
     "  files:",
     "    - src/lib/plan.ts",
     "  design: |",
-    "    INVARIANT a-valid-input-parses-as-before: every non-empty input parses to the same tasks it did before the guard.",
+    "    INVARIANT a-valid-input-parses-as-before: every non-empty input parses as before.",
     "  acceptance:",
     '    - claim: "parseTasksFromYaml rejects an empty input instead of throwing a TypeError"',
     '      proof: "unit test: parseTasksFromYaml rejects an empty input instead of throwing a TypeError"',
-    '    - claim: "invariant:a-valid-input-parses-as-before — every non-empty input parses to the same tasks it did before the guard"',
+    '    - claim: "invariant:a-valid-input-parses-as-before — every non-empty input parses as before"',
     '      proof: "unit test: parseTasksFromYaml parses a non-empty input to the same tasks"',
     '  origin: "architect"',
   ].join("\n");
