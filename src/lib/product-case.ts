@@ -8,7 +8,7 @@ import {
   type ProductBuildCode, type ProductBuildOptions, type ProductBuildReceipt, type ProductBuildExecution,
 } from "./product-build.js";
 import {
-  productCasePlanText, productPlanAssociationReferences, productPlanProposalSchema, ProductPlanOperationService, verifyProductPlanCheckout, verifyProductPlanEvidence,
+  productCasePlanText, productPlanAssociationReferences, productPlanProposalSchema, ProductPlanOperationService, refreshProductPlanCheckout, verifyProductPlanCheckout, verifyProductPlanEvidence,
   type PlanHandoffPort, type PlanRepository, type ProductPlanObservation, type ProductPlanOperationCode,
 } from "./product-plan-operation.js";
 import { ProductIntentStore } from "./product-intent-store.js";
@@ -108,7 +108,11 @@ export class ProductCaseService {
         if (daemon.state === "found" && daemon.instance === admission.instance) root = daemon.root;
       }
       if (root === undefined) return undefined;
-      return verifyProductPlanCheckout(join(root, "repos", repository.name), repository, targetHead);
+      const managed = join(root, "repos", repository.name);
+      // W1-T14301: the port runs only for a fresh proposal. A clean checkout only behind the live head moves forward first,
+      // under run-task's managed-checkout lock; one it leaves is refused below exactly as before, so its reason is not read.
+      await refreshProductPlanCheckout(managed, repository, targetHead, join(root, "state", `managed-checkout-${repository.name}.lock`));
+      return verifyProductPlanCheckout(managed, repository, targetHead);
     };
     this.plans = new ProductPlanOperationService({ root: options.root, store: this.store, provider: options.provider ?? ghProductRepositoryProvider(),
       target: options.target ?? ghProductBuildTarget({ repoRoot: options.repoRoot, text: options.planText }), bootstrapConfirmed, gateway: options.planGateway,
