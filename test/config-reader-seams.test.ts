@@ -376,7 +376,9 @@ test("CALIBRATION: the detection finds the readers recon-EJ measured, and no mor
   // `src/lib/skill-eval-command.ts`.
   // THIRTY-SIX since the retro trigger's cadence history (run-task.ts, W1-T9119) learned the retro's interval, falling back
   // to `retro.daysThreshold`. SEAMED from the start (`policy ?? loadPolicy(...)`), so NOT allowlisted; the file set is UNCHANGED.
-  assert.equal(readers.length, 36, `expected 36 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
+  // THIRTY-SEVEN since the skill-eval auto pass's spend reading (skill-eval-command.ts, W1-T13861) resolves the effective
+  // daily cost ceiling. SEAMED from the start (`policy ?? loadDefaultPolicy()`), so NOT allowlisted; the file set is UNCHANGED.
+  assert.equal(readers.length, 37, `expected 37 unredirectable policy reads; saw:\n${readers.map((r) => `  ${r.file}:${r.line} ${r.text}`).join("\n")}`);
 
   // `symbolise` labels the LAST bare `const policy = loadPolicy(...)` as daemonCommand's, because that
   // reader carries no distinctive identifier of its own. Today exactly ONE such line survives —

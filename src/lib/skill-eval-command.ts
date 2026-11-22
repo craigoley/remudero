@@ -35,7 +35,7 @@ import { loadMounts, mountsPath, resolveMount, type Mount } from "./mounts.js";
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, sealedPairedAttemptDispatcher, type PairedAttemptDispatch, type PairedAttemptRequest,
   type PairedGrader } from "./paired-trial.js";
 import { loadPlan, type Task } from "./plan.js";
-import { loadDefaultPolicy, resolveDailyCostCeiling } from "./policy.js";
+import { loadDefaultPolicy, resolveDailyCostCeiling, type Policy } from "./policy.js";
 import { replayOptIn } from "./replay-harness.js";
 import type { SkillEvalSpendFit } from "./skill-eval-auto.js";
 import { runSkillEval, selectHeldOutTasks, SKILL_EVAL_ATTEMPTABLE_TASK_TYPES, SKILL_EVAL_STEPS, type SkillEvalRunInput,
@@ -273,12 +273,12 @@ export async function evaluateStagedSkillDraft(proposalId: string, approval: Ski
  * bills cash, and observing it reserves nothing.
  */
 export function readSkillEvalSpendFit(config: Config, pin: Pick<SkillEvalRunInput["stack"]["pin"], "billing" | "model">,
-  clock: Clock): SkillEvalSpendFit {
+  clock: Clock, policy?: Policy): SkillEvalSpendFit {
   const nowMs = clock.now();
   // ledger-read-intent: live
   const lines = readLedgerLines(ledgerPathFor(config));
   const fit: SkillEvalSpendFit = { dayCostUsd: deriveDayCostUsd(lines, nowMs), unpricedRows: deriveDayUnpricedRows(lines, nowMs),
-    ceilingUsd: resolveDailyCostCeiling(config.root, loadDefaultPolicy()).usd };
+    ceilingUsd: resolveDailyCostCeiling(config.root, policy ?? loadDefaultPolicy()).usd };
   if (pin.billing !== "api") return fit;
   try {
     return { ...fit, cash: { remainingUsd: readOpenWeightAllowance(config, { deployments: [pin.model], atIso: clock.iso() }).deployments[0]!.remainingUsd } };
@@ -317,7 +317,7 @@ export function skillEvalStack(pins: RuntimePins, mount: Pick<Mount, "model" | "
  */
 export function skillEvalProductionInput(repoRoot: string, harnessRevision: BenchmarkStackEvidence["harnessRevision"],
   readHeadroom: (config: Config) => Promise<UsageSnapshot | undefined>,
-  options: { loadConfig?: () => Config; clock?: Clock; workerAbandonMs?: number } = {}): SkillEvalCommandInput {
+  options: { loadConfig?: () => Config; clock?: Clock; workerAbandonMs?: number; policy?: Policy } = {}): SkillEvalCommandInput {
   let loaded: Config | undefined;
   const config = (): Config => (loaded ??= (options.loadConfig ?? loadConfig)());
   const clock = options.clock ?? systemClock;
@@ -339,7 +339,7 @@ export function skillEvalProductionInput(repoRoot: string, harnessRevision: Benc
         headroom: await readHeadroom(config()) };
     },
     log: (row) => appendLedger(ledgerPathFor(config()), row, { clock }),
-    readSpendFit: () => readSkillEvalSpendFit(config(), input.stack().pin, clock),
+    readSpendFit: () => readSkillEvalSpendFit(config(), input.stack().pin, clock, options.policy),
     clock,
   };
   return input;

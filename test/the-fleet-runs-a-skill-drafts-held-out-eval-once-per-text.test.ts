@@ -4,26 +4,26 @@ import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, stat
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { test } from "node:test";
-import { fixedClock } from "../src/lib/clock.js";
-import type { Config } from "../src/lib/config.js";
-import { UNIT_TEST_DISCRIMINATES_NOTE, type ReplayIdleSignal } from "../src/lib/golden-corpus.js";
-import { classifyProposal, loadProposalRegistry, renderInbox, type Proposal, type SkillEvalRecord } from "../src/lib/inbox.js";
-import type { LedgerLine } from "../src/lib/ledger.js";
-import { meaningOfStep } from "../src/lib/ledger-steps.js";
-import type { PairedGrader } from "../src/lib/paired-trial.js";
-import { inboxLanes, type InboxReadyItem } from "../src/lib/panel-graph.js";
-import { loadDefaultPolicy, resolveDailyCostCeiling } from "../src/lib/policy.js";
-import type { Plan, Task } from "../src/lib/plan.js";
-import { replayOptIn } from "../src/lib/replay-harness.js";
-import { runSkillEval, SKILL_EVAL_MAX_SPEND_USD, SKILL_EVAL_STANDING_APPROVAL, type HeldOutSelected } from "../src/lib/skill-eval.js";
-import { autoEvaluateSkillDrafts as autoPass, reportSkillEvalAuto, SKILL_EVAL_AUTO_STEPS, type SkillEvalSpendFit } from "../src/lib/skill-eval-auto.js";
+import { fixedClock } from "#src/lib/clock.js";
+import type { Config } from "#src/lib/config.js";
+import { UNIT_TEST_DISCRIMINATES_NOTE, type ReplayIdleSignal } from "#src/lib/golden-corpus.js";
+import { classifyProposal, loadProposalRegistry, renderInbox, type Proposal, type SkillEvalRecord } from "#src/lib/inbox.js";
+import type { LedgerLine } from "#src/lib/ledger.js";
+import { meaningOfStep } from "#src/lib/ledger-steps.js";
+import type { PairedGrader } from "#src/lib/paired-trial.js";
+import { inboxLanes, type InboxReadyItem } from "#src/lib/panel-graph.js";
+import { loadDefaultPolicy, resolveDailyCostCeiling } from "#src/lib/policy.js";
+import type { Plan, Task } from "#src/lib/plan.js";
+import { replayOptIn } from "#src/lib/replay-harness.js";
+import { runSkillEval, SKILL_EVAL_MAX_SPEND_USD, SKILL_EVAL_STANDING_APPROVAL, type HeldOutSelected } from "#src/lib/skill-eval.js";
+import { autoEvaluateSkillDrafts as autoPass, reportSkillEvalAuto, SKILL_EVAL_AUTO_STEPS, type SkillEvalSpendFit } from "#src/lib/skill-eval-auto.js";
 import { evaluateStagedSkillDraft, readSkillEvalSpendFit, skillEvalCommand, skillEvalProductionInput,
-  type SkillEvalCommandInput } from "../src/lib/skill-eval-command.js";
-import { skillEvalInboxStatus } from "../src/lib/skill-eval-gate.js";
-import { outcomeOnlyDraftRefusal, PROCEDURAL_STEP_TEXT } from "../src/lib/skill-workshop.js";
-import { deriveDayCostUsd, deriveDayUnpricedRows } from "../src/lib/sweep.js";
-import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
-import { writeLedger } from "./helpers/ledger-fixture.js";
+  type SkillEvalCommandInput } from "#src/lib/skill-eval-command.js";
+import { skillEvalInboxStatus } from "#src/lib/skill-eval-gate.js";
+import { outcomeOnlyDraftRefusal, PROCEDURAL_STEP_TEXT } from "#src/lib/skill-workshop.js";
+import { deriveDayCostUsd, deriveDayUnpricedRows } from "#src/lib/sweep.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // W1-T13861: the fleet runs a staged skill draft's held-out eval by itself, once per text, inside the spend limits
