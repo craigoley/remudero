@@ -70,3 +70,13 @@
     trailer entries, so it outranks the shard's own `pr: 1392`. Removing it lets rung (b)
     credit #1392 (a1f067c), which changed src/lib/deployer.ts and test/deployer.test.ts.
   author_class: operator
+- task: W1-T11112
+  pr: 20049
+  action: remove-credit
+  reason: >
+    Operator ruling, 2026-11-22. PR 20049 (3a6fe5dd57) merged W1-T11112, then broke main's
+    typecheck with PR 20077 at test/a-paired-dispatch-trial-shares-one-grader.test.ts:836. The
+    fleet reverted it on main in PR 20136 (b17638178d) and PR 20134. Its code is no longer on main,
+    but the status reconcile in PR 20154 still credited the task from PR 20049's trailer. This row
+    takes back that one pairing so the task is rebuilt. W1-T14302 makes a revert do this by itself.
+  author_class: operator

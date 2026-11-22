@@ -1,0 +1,59 @@
+- id: W1-T14308
+  title: "reviewer_tree.reaped is declared record-only in the write-only ledger step baseline with its reason, so a plain run of the write-only-ledger-step check on main reports no unrecorded step"
+  repo: remudero
+  depends_on: []
+  priority: 3
+  type: implement
+  verify: auto
+  risk: low # one entry in a baseline map; it changes no code path, and the ratchet still refuses every other new write-only step
+  origin: "operator-session#reviewer-tree-reaped-write-only-2026-11-22"
+  plan_refs:
+    - W1-T14148
+    - W1-T14149
+  files:
+    - scripts/write-only-ledger-step-baseline.json
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "scripts/write-only-ledger-step-baseline.json has a recordOnly entry for reviewer_tree.reaped whose reason says the reaper decides each pass from the disk and the tree leases, and that the row is an operator record of freed bytes and kept trees"
+      proof: "grep: \"reviewer_tree\\.reaped\": \"An operator record of one reviewer-tree reaper pass in scripts/write-only-ledger-step-baseline.json"
+  rationale: |
+    WHAT IS WRONG (origin/main 8923f5635f, 2026-11-22). W1-T14148 (#20153) added the reviewer-tree
+    reaper. It writes one ledger row per pass that removed a tree or kept one for a reason that is not
+    quiet: log("reviewer_tree.reaped", { ...summary }) at src/lib/reviewer-tree-reaper.ts:93. The
+    summary has root, removed[] with bytes, bytes_freed and kept[] with a reason.
+    W1-T14149 (#20045) added the write-only-ledger-step check. A plain `npm run write-only-ledger-step`
+    on main prints "BLOCKED — 1 unrecorded" and lists reviewer_tree.reaped: no src/ file other than
+    its writer reads it, and the baseline does not name it. CI runs the check against the merge base,
+    so the step is inherited and blocks no PR. But the plain run on main is red, so an operator or a
+    builder who runs it cannot tell a new write-only step from this one.
+    THE HONEST REMEDY IS A RECORD, NOT A READER.
+    - The reaper decides each pass from the disk: the tree name, the registering repository's
+      origin/main, the tree's mtime and its lease (reviewer-tree-reaper.ts:62-91). No decision reads
+      the row, so no loop can stop silently on it. That is the case the check exists to catch.
+    - A reader would need a report that shows freed bytes. None exists: the other reapers' rows
+      (worktree.reaped, disk_artifact.sweep.reclaimed, run.disk_reclaim, engine.pruned) are all in
+      the writeOnly debt list. A disk report is its own task.
+    - The baseline already has two recordOnly entries of the same kind (config.randomised_finding,
+      config.randomised_recommendations_unread), each with a one-line reason.
+    No filed task covers this (grep of plan/tasks.d for reviewer_tree.reaped finds only W1-T14148).
+  design: |
+    NO-INVARIANTS: one baseline entry; no code changes, and the ratchet's rule stays the same.
+    1. scripts/write-only-ledger-step-baseline.json: add to "recordOnly", in key order:
+       "reviewer_tree.reaped": "An operator record of one reviewer-tree reaper pass: the trees it
+       removed with their bytes, and the trees it kept for a reason an operator may need to act on.
+       The reaper decides each pass from the disk and the tree leases, never from this row."
+       Keep the reason on one JSON line. Do not add the step to "writeOnly".
+    2. Run `npm run write-only-ledger-step` on the branch. It must print 0 unrecorded. If main has
+       gained another unrecorded step by then, name it in the PR body and leave it alone.
+    3. Run test/ci/gates/a-new-ledger-step-nothing-reads-fails-ci.test.ts: it must still pass.
+  falsifier: |
+    On origin/main, `npm run write-only-ledger-step` prints "BLOCKED — 1 unrecorded" with
+    reviewer_tree.reaped. With the entry it prints 0 unrecorded. Give the entry an empty reason: the
+    check reports 1 empty reason.
+  note: |
+    Id minted with `rmd next-task-id --no-reserve` on branch run-unfiled-1795352828000. The filer did
+    not push a reservation; the shipper reserves it.
+    Filed by the operator session on 2026-11-22. Filing only; not built.
+    If a disk report that shows freed bytes is built later, it can read this row; then move the step
+    out of recordOnly.
