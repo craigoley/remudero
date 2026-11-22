@@ -119,7 +119,7 @@ import { refreshCanonicalSeed } from "./typecheck-buildinfo.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { ghExec, ghJson } from "./github-transport.js";
 import type { ClosingReferenceGuardResult } from "./closing-reference-guard.js";
-import { loadLayeredLearnings, loadLearningsCorpus, lookupWorkerRule, type LayeredLearningsHomes } from "./learnings.js";
+import { loadLayeredLearnings, loadLearningsCorpus, lookupWorkerRule, resolveSelectedLearning, type LayeredLearningsHomes, type SelectedLearningHandle, type SelectedLearningUnavailable } from "./learnings.js";
 // W1-T2896 acceptance grep token for this shared transport import: github-transport"
 export {
   GH_RATE_LIMIT_BUCKET_UNKNOWN,
@@ -484,17 +484,18 @@ function providerExclusionCandidates(
   if (excluded.length === 0) return { capacities, excludeProviders: [] };
   const considered = routableProviders === undefined ? capacities
     : capacities.filter((capacity) => routableProviders.includes(capacity.provider));
-  const eligibleAlternative = considered.some((capacity) => !excluded.includes(capacity.provider) &&
-    providerEligibility(capacity, reservePercent).eligible);
-  if (eligibleAlternative) {
+  const eligible = considered.map((capacity) => ({ provider: capacity.provider, ...providerEligibility(capacity, reservePercent) }))
+    .filter((candidate) => candidate.eligible);
+  // Re-admission may change the provider within the best available tier.
+  const subscriptions = eligible.filter((candidate) => candidate.lane === undefined);
+  const tier = subscriptions.length > 0 ? subscriptions : eligible;
+  if (tier.some((candidate) => !excluded.includes(candidate.provider))) {
     return { capacities: capacities.filter((capacity) => !excluded.includes(capacity.provider)), excludeProviders: excluded };
   }
-  const eligibleExcluded = considered.some((capacity) => excluded.includes(capacity.provider) &&
-    providerEligibility(capacity, reservePercent).eligible);
   return {
     capacities,
     excludeProviders: excluded,
-    ...(eligibleExcluded ? { exclusion_unhonoured: { reason: "no-eligible-alternative", excludedProviders: excluded } } : {}),
+    ...(tier.length > 0 ? { exclusion_unhonoured: { reason: "no-eligible-alternative", excludedProviders: excluded } } : {}),
   };
 }
 
@@ -613,6 +614,17 @@ export interface RoutingDecision {
     lane?: ProviderLane;
     /** W1-T10382: the Codex credit balance this read saw; `null` when the balance was unreadable. */
     creditsBalance?: number | null;
+    /** W1-T13855: how credits rescued this capacity: the path, the tier chosen, the projected balance and, for a
+     *  carried reading, its age and the probe failure it was carried over. */
+    creditsRescue?: {
+      path: "carried" | "generic-bucket";
+      tier: ProviderLane;
+      projectedBalance: number | null;
+      ageMs?: number;
+      failureKind?: "timeout" | "starved";
+    };
+    /** W1-T13855: why an unreadable Codex read could not be asked: the probe's failure kind. */
+    failureKind?: "timeout" | "starved" | "terminal";
   }>;
   /** Tightest remaining window per subscription read for this decision; `null` means unreadable. */
   headroomPercent: Partial<Record<WorkerProviderId, number | null>>;
@@ -1194,8 +1206,8 @@ export interface SpawnWorkerArgs {
   logWorkerSpawnWithheld?: (row: Record<string, unknown>) => void;
   /** Enables the implement lane's read-only rule lookup, with a ledger sink for every call. */
   ruleLookup?: {
-    onPulled: (id: string, status: "found" | "missing" | "error") => void;
-    learningLookup?: { homes: LayeredLearningsHomes; allowedIds: readonly string[] };
+    onPulled: WorkerRulePulledSink;
+    learningLookup?: WorkerLearningLookup;
   };
   /** Tool names this spawn is never offered, threaded to the SDK's `Options.disallowedTools`. Deliberately NOT the settings
    * `deny` list: that floor is hook-enforced, and {@link DenyFloorVerdict} exists because the block can LEAK under
@@ -1506,17 +1518,60 @@ export const IMPLEMENT_CLAUDE_TOOLS: readonly string[] = ["Read", "Write", "Edit
 /** W1-T4094: the in-process rule tool, added to a declared bound only when a spawn carries `ruleLookup`. */
 export const WORKER_RULE_TOOL_NAME = "mcp__knowledge__rule";
 
+/** W1-T11159: how one `learnings#` request ended. Fixed vocabulary; `unselected` is a request outside the run's selection. */
+export type WorkerRulePullOutcome = "delivered" | "unselected" | SelectedLearningUnavailable;
+
+/** Nonsecret metadata beside a pull: the outcome and, for a selected learning, its store and a digest prefix. Never content. */
+export interface WorkerRulePullMeta {
+  outcome: WorkerRulePullOutcome;
+  source?: string;
+  revision?: string;
+}
+
+export type WorkerRulePulledSink = (id: string, status: "found" | "missing" | "error", meta?: WorkerRulePullMeta) => void;
+
+/** `selected`, when present, is the run-bound contract: only those handles are served, each from its own store. Without it,
+ *  `allowedIds` gates a lookup against the merged layered corpus (the legacy/ad-hoc shape, unchanged). */
+export interface WorkerLearningLookup {
+  homes: LayeredLearningsHomes;
+  allowedIds: readonly string[];
+  selected?: readonly SelectedLearningHandle[];
+}
+
+function pulledStatusOf(outcome: WorkerRulePullOutcome): "found" | "missing" | "error" {
+  return outcome === "delivered" ? "found" : outcome === "unreadable" ? "error" : "missing";
+}
+
 /** The tool's only checkout operations are reads; its ledger sink is supplied by the run. */
 export function createWorkerRuleTool(
   cwd: string,
-  onPulled: (id: string, status: "found" | "missing" | "error") => void,
-  learningLookup?: { homes: LayeredLearningsHomes; allowedIds: readonly string[] },
+  onPulled: WorkerRulePulledSink,
+  learningLookup?: WorkerLearningLookup,
 ) {
+  const homes = learningLookup === undefined ? undefined : Object.freeze({ ...learningLookup.homes });
+  const selected = learningLookup?.selected === undefined ? undefined : Object.freeze([...learningLookup.selected]);
   return tool(
     "rule",
     "Read a repository doctrine rule by stable id or headline phrase, or a learning's fact and evidence by learnings#id.",
     { query: z.string().trim().min(1).max(200) },
     async ({ query: requested }) => {
+      if (selected !== undefined && homes !== undefined && requested.startsWith("learnings#")) {
+        const slug = requested.slice("learnings#".length);
+        const bound = selected.filter((handle) => handle.id === slug);
+        if (bound.length === 0) {
+          onPulled(requested, "missing", { outcome: "unselected" });
+          return { isError: true, content: [{ type: "text" as const, text: `No rule matches "${requested}".` }] };
+        }
+        const handle = bound[0];
+        const resolution = bound.length > 1 ? { status: "ambiguous" as const } : resolveSelectedLearning(handle, homes);
+        const meta = { source: handle.source, revision: handle.payloadRevision.slice(0, 16) };
+        if (resolution.status !== "delivered") {
+          onPulled(requested, pulledStatusOf(resolution.status), { outcome: resolution.status, ...meta });
+          return { isError: true, content: [{ type: "text" as const, text: `Learning "${requested}" is unavailable (${resolution.status}).` }] };
+        }
+        onPulled(`learnings#${slug}`, "found", { outcome: "delivered", ...meta });
+        return { content: [{ type: "text" as const, text: [resolution.entry.fact, resolution.entry.evidence].filter(Boolean).join("\n\n") }] };
+      }
       let found: ReturnType<typeof lookupWorkerRule>;
       try {
         found = lookupWorkerRule(
@@ -1866,6 +1921,14 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
       ...(verdict.reason ? { reason: verdict.reason } : {}),
       ...(verdict.lane ? { lane: verdict.lane } : {}),
       ...(capacity.credits ? { creditsBalance: capacity.credits.balance } : {}),
+      ...(verdict.lane && capacity.creditsRescue ? { creditsRescue: {
+        path: capacity.creditsRescue.path,
+        tier: verdict.lane,
+        projectedBalance: capacity.creditsRescue.projectedBalance,
+        ...(capacity.creditsRescue.ageMs !== undefined ? { ageMs: capacity.creditsRescue.ageMs } : {}),
+        ...(capacity.creditsRescue.failureKind ? { failureKind: capacity.creditsRescue.failureKind } : {}),
+      } } : {}),
+      ...(verdict.reason === "unreadable" && capacity.probeFailure ? { failureKind: capacity.probeFailure } : {}),
     };
   });
   if (!considered.some((entry) => entry.selected)) {
@@ -2874,6 +2937,16 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       };
       // W1-T13672: a deferred cash-mount spawn returns to its own cash route, never to a squeeze or overflow fallback.
       const deferred = args.cashDeferred !== undefined || subscriptionRetry;
+      // A fallback can still serve the work. Retire the previous credits signal without changing the review's quota reading.
+      const spawnFallback = (mountProvider: WorkerProviderId, fallback: Pick<SpawnWorkerArgs,
+        "cashSqueezed" | "cashOpusEmergency" | "cashSonnetEmergency" | "routingFallback" | "tools">) => {
+        publishProviderRoutingStatus({ ...statusBase, state: "invalidate-credits" });
+        return spawnWorker({
+          ...args,
+          ...fallback,
+          mountProvider,
+        });
+      };
       if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly && !deferred) {
         const divertTools = args.cashTools ?? args.tools;
         const env = args.env ?? process.env;
@@ -2886,9 +2959,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           allowanceRefusal(["claude-opus-5-5"]);
         if (refusal === undefined) {
           console.error(JSON.stringify({ event: "worker.provider.cash_opus_fallback", reason: "both subscriptions blocked", requested_model: args.model }));
-          return await spawnWorker({
-            ...args,
-            mountProvider: "cash",
+          return await spawnFallback("cash", {
             cashSqueezed: true,
             cashOpusEmergency: true,
             routingFallback: { rule: "cash-opus-fallback", capacities },
@@ -2924,9 +2995,12 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             : allowanceRefusal([...new Set(eligible)]);
           if (held !== undefined) {
             console.error(JSON.stringify({ event: "worker.provider.cash_fallback_refused", refusal: held }));
-            publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
-            if (eligible.length === 0 && candidates.length > 0) throw new CashDraftResumeBlockedError();
+            if (eligible.length === 0 && candidates.length > 0) {
+              publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
+              throw new CashDraftResumeBlockedError();
+            }
             error.message += `; ${held}`;
+            publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
             throw error;
           }
         }
@@ -2936,9 +3010,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             reason: "no subscription had readable headroom",
             requested_model: args.model,
           }));
-          return await spawnWorker({
-            ...args,
-            mountProvider: "cash" as WorkerProviderId,
+          return await spawnFallback("cash", {
             cashSqueezed: true,
             cashSonnetEmergency: true,
             routingFallback: { rule: "cash-sonnet-fallback", capacities },
@@ -2952,13 +3024,10 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             tools: divertTools,
             blocked: capacities.map((c) => `${c.provider}=${c.readable ? "readable" : c.detail ?? "unreadable"}`),
           }));
-          // NO routing status is written here. The auction really did block, and there is no
-          // ProviderSelection to report -- inventing one to satisfy the "selected" shape would be
-          // the fabricated telemetry this whole design refuses. The cash spawn below publishes its
-          // own status through the mount-affinity path.
-          return await spawnWorker({
-            ...args,
-            mountProvider: "cash" as WorkerProviderId,
+          // No "selected" status is written here: the auction really did block, and there is no
+          // ProviderSelection to report -- inventing one would be the fabricated telemetry this
+          // design refuses.
+          return await spawnFallback("cash", {
             // this is the ONLY place the squeeze ceiling is claimed. Reaching cash here
             // means every subscription was unreadable or exhausted, which is exactly the day the
             // operator raised the cap for.
@@ -2986,9 +3055,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           // Setting `mountProvider` makes the retry SKIP the auction rather than re-enter it, and it
           // is the SAME structural recursion bound the cash arm relies on: the outer guard requires
           // `args.mountProvider === undefined`, so neither arm can fire twice.
-          return await spawnWorker({
-            ...args,
-            mountProvider: "claude" as WorkerProviderId,
+          return await spawnFallback("claude", {
             routingFallback: { rule: "overflow-fallback", capacities },
           });
         }
@@ -5120,6 +5187,18 @@ export function taskInputAnswerWithLedger(repoRoot: string, ledgerPath: string):
     if (read.answersUnreadable === undefined && read.ledgerUnreadable === undefined) publishAnswers(ledgerPath, store.filter((line) => line.source !== "ledger" && !answerHeld(rows, line)), [...published]);
     const row = newestLedgerTaskAnswer(read.rows(taskId), taskId);
     return newestTaskAnswer([...store, ...published, ...(row ? [{ task: taskId, answer: row.answer, ts: row.ts }] : [])], taskId);
+  };
+}
+
+/** W1-T14172: the answer {@link taskInputAnswerWithLedger} decides, read from the same store, rows and published lines,
+ * with no copy and no publish: serve's needs-you list reads held answers through it on its main thread. */
+export function readTaskInputAnswer(repoRoot: string, ledgerPath: string): TaskInputAnswer {
+  const evidence = sharedAnswerEvidence(ledgerPath);
+  return (taskId) => {
+    const read = evidence();
+    const row = newestLedgerTaskAnswer(read.rows(taskId), taskId);
+    return newestTaskAnswer([...answerRecords(questionStoreLines(repoRoot) ?? [], taskId), ...answerRecords(read.lines, taskId),
+      ...(row ? [{ task: taskId, answer: row.answer, ts: row.ts }] : [])], taskId);
   };
 }
 

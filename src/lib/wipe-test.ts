@@ -1,17 +1,24 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
+  budgetLearningSourceChangeNotes,
   candidateShardFiles,
+  DEFAULT_KNOWLEDGE_BUDGET_CHARS,
   loadLayeredLearningsForTaskFiles,
+  observeLearningSourceChanges,
   renderMatchedLearnings,
+  selectedLearningHandle,
   selectLearnings,
+  type LearningSourceChangeInput,
+  type LearningSourceChangeSummary,
 } from "./learnings.js";
 import { appendLedger } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { readLedgerLines } from "./status.js";
 import type { Config } from "./config.js";
-import type { LayeredLearningsHomes, LearningsIndex, LearningsSelectionContext, LearningMatchCounts } from "./learnings.js";
+import type { LayeredLearningsHomes, SelectedLearningHandle, LearningsIndex, LearningsSelectionContext, LearningMatchCounts } from "./learnings.js";
 import type { RunResult } from "./run-result.js";
 import type { ProofExecOutcome } from "./review.js";
 
@@ -87,6 +94,7 @@ export interface MatchedLearningsInput {
   taskFiles: string[] | undefined;
   selectionContext?: LearningsSelectionContext;
   budgetChars?: number;
+  source?: LearningSourceChangeInput;
 }
 
 /** What one arm's learnings-injection step produced — the fields `run-task.ts`'s
@@ -94,15 +102,19 @@ export interface MatchedLearningsInput {
 export interface MatchedLearningsResult {
   matchedLearnings: string;
   selectedIds: string[];
+  /** W1-T11159: one frozen store+slug+payload handle per selected record, in `selectedIds` order. The rule tool serves from these, never from the bare ids. */
+  selectedLearnings: readonly SelectedLearningHandle[];
   droppedIds: string[];
   matchedBy: LearningMatchCounts;
   globalRefusedReason?: string;
   propensity?: Record<string, number>;
+  sourceChangeSummary?: LearningSourceChangeSummary;
 }
 
 const MASKED_RESULT: MatchedLearningsResult = {
   matchedLearnings: "",
   selectedIds: [],
+  selectedLearnings: Object.freeze([]),
   droppedIds: [],
   matchedBy: { file: 0, symbol: 0, error: 0 },
 };
@@ -111,13 +123,13 @@ const MASKED_RESULT: MatchedLearningsResult = {
  *  without calling `deps` — masking the text, never touching the store. Arm "A" runs the
  *  real chain `runTaskBody` uses for a normal run. Why:
  *  docs/forensics/wipe-test.md#computematchedlearningsforarm. */
-export function computeMatchedLearningsForArm(
+export async function computeMatchedLearningsForArm(
   arm: WipeTestArm,
   input: MatchedLearningsInput,
   deps: LearningsInjectionDeps = REAL_LEARNINGS_INJECTION_DEPS,
-): MatchedLearningsResult {
+): Promise<MatchedLearningsResult> {
   if (arm === "B") return MASKED_RESULT;
-  const { entries, globalRefusedReason } = deps.loadLayeredLearningsForTaskFiles(
+  const { entries, globalRefusedReason, sources, projectEntries } = deps.loadLayeredLearningsForTaskFiles(
     input.homes,
     input.taskFiles,
     input.selectionContext,
@@ -128,13 +140,30 @@ export function computeMatchedLearningsForArm(
     input.budgetChars,
     input.selectionContext,
   );
-  return {
-    matchedLearnings: deps.renderMatchedLearnings(selected),
+  const baseText = deps.renderMatchedLearnings(selected);
+  const result: MatchedLearningsResult = {
+    matchedLearnings: baseText,
     selectedIds: selected.map((e) => e.id),
+    selectedLearnings: Object.freeze(selected.map((e) => selectedLearningHandle(e, sources))),
     droppedIds: dropped.map((e) => e.id),
     matchedBy,
     globalRefusedReason,
     ...(propensity ? { propensity } : {}),
+  };
+  if (!input.source || selected.length === 0) return result;
+
+  const applicability = createHash("sha256").update(JSON.stringify([input.taskFiles, input.source.applicability]));
+  for (const entry of entries) applicability.update(JSON.stringify(entry)).update("\0");
+  const observation = await observeLearningSourceChanges(selected, {
+    ...input.source, projectEntries, applicability: applicability.digest("hex"),
+  });
+  const { notes, summary } = budgetLearningSourceChangeNotes(
+    selected, observation, Buffer.byteLength(baseText), input.budgetChars ?? DEFAULT_KNOWLEDGE_BUDGET_CHARS,
+  );
+  return {
+    ...result,
+    matchedLearnings: notes.size === 0 ? baseText : deps.renderMatchedLearnings(selected, notes),
+    sourceChangeSummary: summary,
   };
 }
 

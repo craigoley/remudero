@@ -56,8 +56,8 @@ function codeHistory(): { dir: string; code: string; immaterial: string; materia
 }
 const HISTORY = codeHistory();
 
-function judgeAt(mainSha: string): (sha: unknown) => Promise<ReviewerCodeFreshness> {
-  return reviewerCodeJudge(() => ({ status: "fresh", codeSha: mainSha, originMainSha: mainSha, advance: "none" }), HISTORY.dir);
+function judgeAt(mainSha: string, history: { dir: string } = HISTORY): (sha: unknown) => Promise<ReviewerCodeFreshness> {
+  return reviewerCodeJudge(() => ({ status: "fresh", codeSha: mainSha, originMainSha: mainSha, advance: "none" }), history.dir);
 }
 
 function verdict(state: "success" | "failure" = "success"): ReviewVerdict {
@@ -81,9 +81,10 @@ function shim(t: TestContext, over: { lifecycle?: "open" | "closed"; liveState?:
   return { posts };
 }
 
-function sweepFixture(t: TestContext, mainSha: string, over: Partial<OpenPrView> = {}) {
-  const dir = makeTempDir("t11847-sweep");
-  const ledgerPath = join(dir, "ledger.ndjson");
+function sweepFixture(t: TestContext, mainSha: string, over: Partial<OpenPrView> = {},
+  at: { history?: { dir: string; code: string }; ledgerPath?: string } = {}) {
+  const history = at.history ?? HISTORY;
+  const ledgerPath = at.ledgerPath ?? join(makeTempDir("t11847-sweep"), "ledger.ndjson");
   const now = Date.parse("2026-11-11T13:30:00Z");
   const pr: OpenPrView = {
     prNumber: PR, prUrl: URL, taskId: TASK, headSha: HEAD, reviewInputDigest: DIGEST, reviewState: "success",
@@ -93,7 +94,7 @@ function sweepFixture(t: TestContext, mainSha: string, over: Partial<OpenPrView>
   const reviews: ReviewDispatchMode[] = [];
   const armed: number[] = [];
   let onReview: () => void = () => undefined;
-  const advance = reviewerCodeAdvanceFor({ owner: OWNER, repo: REPO, ledgerPath, runId: "sweep-t11847" }, judgeAt(mainSha));
+  const advance = reviewerCodeAdvanceFor({ owner: OWNER, repo: REPO, ledgerPath, runId: "sweep-t11847" }, judgeAt(mainSha, history));
   const deps: SweepDeps = {
     ledgerPath, runId: "sweep-t11847", now: () => now, reviewerCodeAdvance: advance,
     arm: (view) => { armed.push(view.prNumber); }, close: () => assert.fail("unexpected close"),
@@ -102,7 +103,7 @@ function sweepFixture(t: TestContext, mainSha: string, over: Partial<OpenPrView>
   };
   const deliver = (row: Record<string, unknown> = {}) => appendLedger(ledgerPath, {
     run_id: "review-original", task_id: TASK, step: "review.posted", state: "success", pr_url: URL, head_sha: HEAD,
-    review_input_digest: DIGEST, decision_verdict: verdict(), reviewer_code_sha: HISTORY.code, ...row,
+    review_input_digest: DIGEST, decision_verdict: verdict(), reviewer_code_sha: history.code, reviewer_outcome: "success", ...row,
   });
   const run = async (view: OpenPrView = pr) => {
     await withLiveWritesAllowed(() => runSweep([view], deps, DEFAULT_SWEEP_POLICY));
@@ -264,7 +265,7 @@ function adapterFixture(t: TestContext, row: Record<string, unknown>, mainSha: s
   const ledgerPath = join(root, "ledger.ndjson");
   const gh = shim(t);
   appendLedger(ledgerPath, { run_id: "review-original", task_id: TASK, step: "review.posted", state: "success", pr_url: URL,
-    head_sha: HEAD, review_input_digest: DIGEST, decision_verdict: verdict(), ...row });
+    head_sha: HEAD, review_input_digest: DIGEST, decision_verdict: verdict(), reviewer_outcome: "success", ...row });
   const calls: string[] = [];
   const unexpected = (): never => { throw new Error("the adapter made an unexpected host call"); };
   const host = {
@@ -297,6 +298,7 @@ function outboxEntry(ledgerPath: string, codeSha: string | undefined): void {
     run_id: "review-outboxed", evidence: "executed", review_decision_digest: "decision", decision_verdict: verdict(),
     description: codeSha === undefined ? "remudero-review: PASS" : reviewDescriptionWithCodeProvenance("remudero-review: PASS", codeSha),
     ...(codeSha === undefined ? {} : { reviewer_code_sha: codeSha }), written_at: "2026-11-11T12:00:00.000Z",
+    reviewer_outcome: "success", // W1-T14235: a settled code pass records the semantic judgement it came from
   })}\n`);
 }
 
@@ -343,4 +345,87 @@ test("W1-T11847: a reused, restored or outboxed verdict carries current reviewer
   assert.deepEqual([drained.stale?.outcome, drained.stale?.posts], ["discarded", 0]);
   assert.deepEqual([drained.current?.outcome, drained.current?.posts], ["posted", 1]);
   assert.equal(drained.current?.row?.reviewer_code_sha, HISTORY.code);
+});
+
+/** W1-T14152: reviewer code, then a #19940-shaped advance (only tree-placement units of src/run-task.ts and the lease
+ *  file), then a src/lib/review.ts change. The judge is the production reviewerCodeJudge over this real history. */
+function placementHistory(): { dir: string; code: string; placement: string; material: string } {
+  const repo = gitRepo({ kind: "t14152-code" });
+  const write = (path: string, text: string) => {
+    mkdirSync(join(repo.dir, path, ".."), { recursive: true });
+    writeFileSync(join(repo.dir, path), text);
+  };
+  const commit = (message: string): string => {
+    repo.git("add", "-A");
+    repo.git("commit", "--quiet", "-m", message);
+    return repo.git("rev-parse", "HEAD");
+  };
+  // The fixture's own specifiers are location-relative, but this file's text must not carry one (W1-T9864).
+  const here = ".";
+  const runTask = [
+    `import { judge } from "${here}/lib/review.js";`,
+    `import { withReviewerWorktreeLease } from "${here}/lib/reviewer-worktree-lease.js";`,
+    "",
+    "async function runReview(pr: string): Promise<string> {",
+    "  return judge(pr);",
+    "}",
+    "",
+    "async function reviewCommand(pr: string): Promise<number> {",
+    "  return (await runReview(pr)).length + (await buildFreshTreeReviewRunner(pr)());",
+    "}",
+    "",
+    "function prepareFreshOriginMainTree(sha: string): string {",
+    "  return `/wt/reviewer-${sha}`;",
+    "}",
+    "",
+    "export function buildFreshTreeReviewRunner(pr: string) {",
+    "  return async () => withReviewerWorktreeLease(prepareFreshOriginMainTree(pr), () => spawnRmdReviewForFreshTree([pr]));",
+    "}",
+    "",
+    "export function spawnRmdReviewForFreshTree(args: string[]): number {",
+    "  return args.length;",
+    "}",
+    "",
+  ].join("\n");
+  const lease = "export function withReviewerWorktreeLease<T>(path: string, action: () => T): T {\n  return action();\n}\n";
+  write("src/run-task.ts", runTask);
+  write("src/lib/review.ts", "export const judge = (pr: string) => pr;\n");
+  write("src/lib/reviewer-worktree-lease.ts", lease);
+  const code = commit("reviewer code");
+  write("src/run-task.ts", runTask
+    .replace("import { withReviewerWorktreeLease }", "import { ReviewerWorktreeLeasedError, withReviewerWorktreeLease }")
+    .replace("`/wt/reviewer-${sha}`", "`/wt/reviewer-${sha}-${process.pid}`")
+    .replace("spawnRmdReviewForFreshTree([pr]));", "spawnRmdReviewForFreshTree([pr])).catch((err) => {\n" +
+      "    if (err instanceof ReviewerWorktreeLeasedError) return 0;\n    throw err;\n  });"));
+  write("src/lib/reviewer-worktree-lease.ts", `${lease}export class ReviewerWorktreeLeasedError extends Error {}\n`);
+  const placement = commit("tree placement only");
+  write("src/lib/review.ts", "export const judge = (pr: string) => pr.trim();\n");
+  const material = commit("verdict logic");
+  return { dir: repo.dir, code, placement, material };
+}
+
+test("W1-T14152 criterion 6: the sweep requeues for a verdict-logic advance, never for a tree-placement advance", async (t) => {
+  const history = placementHistory();
+  const gh = shim(t);
+  const placed = sweepFixture(t, history.placement, {}, { history });
+  placed.deliver();
+  const first = await placed.run();
+  assert.equal(first?.disposition, "mergeable", JSON.stringify(first));
+  assert.equal(placed.requeues().length, 0, "a placement-only advance requeues nothing");
+  assert.equal(readLedgerLines(placed.ledgerPath).some((row) => row.step === REVIEW_REQUEUED_STEP), false);
+  assert.equal(placed.reviews.length, 0);
+  assert.equal(gh.posts().length, 0, "no pending status is posted for a placement-only advance");
+
+  const advanced = sweepFixture(t, history.material, {}, { history, ledgerPath: placed.ledgerPath });
+  advanced.setOnReview(() => appendLedger(advanced.ledgerPath, { run_id: "review-fresh", task_id: TASK, step: "review.posted",
+    state: "pending", pr_url: URL, head_sha: HEAD, review_input_digest: DIGEST, decision_verdict: { ...verdict(), state: "pending" } }));
+  await advanced.run();
+  const rows = advanced.requeues();
+  assert.equal(rows.length, 1, JSON.stringify(rows));
+  assert.equal(rows[0]?.judged_reviewer_code_sha, history.code);
+  assert.equal(rows[0]?.origin_main_sha, history.material);
+  assert.ok((rows[0]?.changed_paths as string[] | undefined)?.includes("src/lib/review.ts"), JSON.stringify(rows[0]));
+  assert.deepEqual(advanced.reviews.map((mode) => mode.kind), ["full-review"]);
+  await advanced.run({ ...advanced.pr, reviewState: "pending" });
+  assert.equal(advanced.requeues().length, 1, "a second pass at the same main writes no second row");
 });

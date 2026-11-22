@@ -149,7 +149,7 @@ test("semantic mode with no head-resolved task metadata refuses before pending, 
 
 for (const required of [false, true]) test(required
   ? "a required semantic provider failure withholds verdict publication and every merge effect"
-  : "a semantic provider failure still posts the binding deterministic verdict", async () => {
+  : "a semantic provider failure holds the deterministic pass as pending", async () => {
   const root = mkdtempSync(join(tmpdir(), "rmd-event-semantic-provider-"));
   const bin = mkdtempSync(join(tmpdir(), "rmd-event-semantic-bin-"));
   const oldPath = process.env.PATH;
@@ -220,7 +220,12 @@ esac
 
     assert.equal(providerInvoked, true, "the fixture must reach the injected worker boundary: " + providerErrors.join("; "));
     assert.ok(steps.includes("review.reviewer.error"), "the semantic failure must be explicit");
-    assert.equal(steps.includes("review.posted"), !required, "only the advisory policy may publish a deterministic fallback");
+    // W1-T14235: on a code diff no policy publishes the deterministic fallback's pass; the advisory policy holds it as pending.
+    assert.equal(steps.includes("review.posted"), false, "a deterministic fallback never publishes a code pass");
+    if (!required) {
+      assert.equal(verdict.state, "pending");
+      assert.match(verdict.verdictWithheld ?? "", /semantic-review-not-run: spawn_error/);
+    }
     if (required) {
       assert.equal(verdict.state, "failure");
       assert.equal(verdict.verdictWithheld, "required-semantic-spawn_error");

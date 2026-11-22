@@ -190,5 +190,10 @@ test("every consumer of the shared changed-file list is enumerated, so a new one
   // `src/` change beside an instrument still blocks, unchanged (measured: #2934 pre-split, whose
   // own split commit calls it "a true positive"). The second argument is OPTIONAL and omitting it
   // reproduces the path-only reading byte for byte, so a caller that forgets fails CLOSED.
-  assert.match(src, /detectInstrumentEntanglement\(diffFiles, evidence\.diff\)/);
+  //
+  // ITS SECOND VERDICT CHANGE (#20033): the rule also receives the review's two checkouts, so an
+  // instrument number the diff cut from its key is read from both sides' parsed JSON. A raise then
+  // reads as tightening and no longer blocks; a drop still reads as loosening and blocks. The third
+  // argument is OPTIONAL too, and an unreadable side keeps the diff-only answer, which stays blocking.
+  assert.match(src, /detectInstrumentEntanglement\(diffFiles, evidence\.diff, evidence\)/);
 });

@@ -57,7 +57,7 @@ function sweepFixture(t: TestContext, over: Partial<OpenPrView> = {}) {
   };
   const deliver = (over2: Record<string, unknown> = {}) => appendLedger(ledgerPath, {
     run_id: "review-original", task_id: "W1-T11596", step: "review.posted", state: "success", pr_url: URL, head_sha: HEAD,
-    review_input_digest: DIGEST, decision_verdict: verdict(), ...over2,
+    review_input_digest: DIGEST, decision_verdict: verdict(), reviewer_outcome: "success", ...over2,
   });
   const run = async (view: OpenPrView = pr) => {
     await runSweep([view], deps, DEFAULT_SWEEP_POLICY);
@@ -133,7 +133,7 @@ function adapterFixture(t: TestContext, postStatus: "ok" | "fail") {
   process.env.PATH = `${shim.dir}:${oldPath}`;
   t.after(() => { process.env.PATH = oldPath; rmSync(root, { recursive: true, force: true }); });
   appendLedger(ledgerPath, { run_id: "review-original", task_id: "W1-T11596", step: "review.posted", state: "success", pr_url: URL,
-    head_sha: HEAD, review_input_digest: DIGEST, decision_verdict: verdict(), reviewer_code_sha: CODE });
+    head_sha: HEAD, review_input_digest: DIGEST, decision_verdict: verdict(), reviewer_code_sha: CODE, reviewer_outcome: "success", });
   const calls: string[] = [];
   const unexpected = (): never => { throw new Error("the restore path made an unexpected host call"); };
   const host = {

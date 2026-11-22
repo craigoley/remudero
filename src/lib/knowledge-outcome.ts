@@ -1,3 +1,4 @@
+import { AMBIGUOUS_LEARNING_CONTENT, LEARNING_CONTENT_IDENTITY_RE, learningIdRecord } from "./learnings.js";
 import { fixDispatchCountByRun } from "./retro.js";
 
 /**
@@ -18,6 +19,18 @@ import { fixDispatchCountByRun } from "./retro.js";
  *
  * SURFACE, DO NOT ACT: nothing here feeds ranking or retirement. Below the per-arm floor the answer
  * is `unmeasurable` with its counts, never a favourable zero.
+ *
+ * W1-T11115 — ONE COHORT PER CONTENT REVISION. An edit keeps the id, so grouping by id alone pooled
+ * different interventions, and an edit inherited its predecessor's verdict. The producer now ledgers
+ * `content_ids` (learnings.ts's `learningContentIdentity`) for every contested entry, and the fold
+ * groups by {id, revision}. An observation whose revision cannot be named is excluded and counted in
+ * `excludedRevision`. It is never given the current corpus's bytes: this fold reads the ledger only.
+ * A learning id is free corpus text (`__proto__` and `constructor` load), so every id-keyed lookup
+ * here is a Map or an own-property read, and a produced id-keyed record has no prototype.
+ * An id is not unique across layers either: a project and a user-overall copy of one id can both
+ * match a task. The producer counts the draw per copy, so such an id keeps its share and its
+ * `ambiguous` marker, and the fold reads an id listed in BOTH arms as an exposure it counts and
+ * never credits (see {@link foldLearningOutcomes}).
  */
 
 /** Propensities outside [TRIM, 1 - TRIM] are excluded: an inverse weight of 20+ lets one run
@@ -32,6 +45,8 @@ export type LearningOutcomeVerdict = "helps" | "hurts" | "no-detectable-effect" 
 
 export interface LearningOutcome {
   id: string;
+  /** W1-T11115: the exact content revision these observations exposed (`lc1:<16 hex>`). */
+  contentId: string;
   injected: number;
   dropped: number;
   /** Hajek-weighted clean-merge rate difference, injected minus dropped (absent when unmeasurable). */
@@ -43,20 +58,50 @@ export interface LearningOutcome {
 export interface LearningOutcomeReport {
   /** Earliest and latest `ts` among the runs that contributed an observation. */
   window?: { from: string; to: string };
-  /** Runs with contested propensities and a terminal verdict. */
+  /** Runs with a terminal verdict whose row ledgered shares or listed an id in both arms. */
   runs: number;
   excludedNoVerdict: number;
   excludedMasked: number;
-  /** Entry observations outside the propensity trim. */
+  /** Entry observations outside the propensity trim. Only an observation whose revision and arm both
+   *  resolve can land here: see {@link foldLearningOutcomes}'s counting rule. */
   excludedTrimmed: number;
+  /** W1-T11115: entry observations that name no single revision, by reason. Every reason is checked
+   *  BEFORE the trim, so a trimmed observation is counted here under its reason, never only as
+   *  trimmed, and `ambiguous: 0` means no contested row named an ambiguous identity. */
+  excludedRevision: RevisionExclusions;
   learnings: LearningOutcome[];
 }
 
-/** Keep only the entries the budget cut decided (0 < p < 1); `undefined` when none were. */
-export function contestedPropensities(propensity: Record<string, number> | undefined): Record<string, number> | undefined {
+/** W1-T11115: why an observation names no single content revision. Each is excluded and counted. */
+export interface RevisionExclusions {
+  /** The row predates content identities: it carries no `content_ids` field. */
+  legacy: number;
+  /** `content_ids` is not an object, or this entry's value is neither an identity nor `ambiguous`. */
+  malformed: number;
+  /** The draw's snapshot held this id more than once with different content. */
+  ambiguous: number;
+  /** One run's rows for the same entry name more than one claim: two different revisions, or a
+   *  revision beside a row that names none. The check reads EVERY row of the run that exposes the
+   *  entry, before the trim and every other exclusion, so a trimmed row still voids the exposure. */
+  conflicting: number;
+  /** No identity for the exposed entry, no ledgered share for it, or it is not listed in exactly one of
+   *  selected and dropped. An id listed in both arms always lands here, or in an earlier reason. */
+  unresolved: number;
+}
+
+/** Keep only the entries the budget cut decided; `undefined` when none were. An entry is decided when
+ *  its share is strictly between 0 and 1, or when the draw names it in `contestedIds` (learnings.ts's
+ *  `selectLearnings`): an id whose copies split the draw is contested even at a pooled share of 1,
+ *  and keeps that share here. The result is a learnings.ts `learningIdRecord` (no prototype), so an
+ *  id such as `__proto__` stays a key. */
+export function contestedPropensities(
+  propensity: Record<string, number> | undefined,
+  contestedIds: Iterable<string> = [],
+): Record<string, number> | undefined {
   if (propensity === undefined) return undefined;
-  const contested = Object.entries(propensity).filter(([, p]) => p > 0 && p < 1);
-  return contested.length > 0 ? Object.fromEntries(contested) : undefined;
+  const decided = new Set(contestedIds);
+  const contested = Object.entries(propensity).filter(([id, p]) => (p > 0 && p < 1) || decided.has(id));
+  return contested.length > 0 ? learningIdRecord(contested) : undefined;
 }
 
 interface Observation {
@@ -77,11 +122,11 @@ function hajek(obs: Observation[], weight: (o: Observation) => number): { mean: 
   return { mean, variance };
 }
 
-export function estimateLearningOutcome(id: string, obs: Observation[], floor = OUTCOME_ARM_FLOOR): LearningOutcome {
+export function estimateLearningOutcome(id: string, contentId: string, obs: Observation[], floor = OUTCOME_ARM_FLOOR): LearningOutcome {
   const inj = obs.filter((o) => o.injected);
   const drop = obs.filter((o) => !o.injected);
   if (inj.length < floor || drop.length < floor) {
-    return { id, injected: inj.length, dropped: drop.length, verdict: "unmeasurable" };
+    return { id, contentId, injected: inj.length, dropped: drop.length, verdict: "unmeasurable" };
   }
   const a = hajek(inj, (o) => 1 / o.propensity);
   const b = hajek(drop, (o) => 1 / (1 - o.propensity));
@@ -89,11 +134,88 @@ export function estimateLearningOutcome(id: string, obs: Observation[], floor = 
   const se = Math.sqrt(a.variance + b.variance);
   const verdict: LearningOutcomeVerdict =
     Math.abs(effect) > OUTCOME_Z * se ? (effect > 0 ? "helps" : "hurts") : "no-detectable-effect";
-  return { id, injected: inj.length, dropped: drop.length, effect, se, verdict };
+  return { id, contentId, injected: inj.length, dropped: drop.length, effect, se, verdict };
 }
 
-/** Fold ledger rows (read through the ledger union by the caller) into a per-learning outcome
- *  report. A run's outcome is its LAST `verdict` row; a run with none is excluded and counted. */
+type Revision = { contentId: string } | { excluded: Exclude<keyof RevisionExclusions, "conflicting"> };
+
+/** The revision one row's `content_ids` names for `id`, or why it names none. It reads an OWN
+ *  property only: a parsed row has `Object.prototype`, so `content_ids["__proto__"]` or
+ *  `["constructor"]` would otherwise read an inherited member, and a missing digest would read as
+ *  `malformed` instead of `unresolved`. */
+function revisionOf(contentIds: unknown, id: string): Revision {
+  if (contentIds === undefined) return { excluded: "legacy" };
+  if (contentIds === null || typeof contentIds !== "object" || Array.isArray(contentIds)) return { excluded: "malformed" };
+  const value = Object.hasOwn(contentIds, id) ? (contentIds as Record<string, unknown>)[id] : undefined;
+  if (value === undefined) return { excluded: "unresolved" };
+  if (value === AMBIGUOUS_LEARNING_CONTENT) return { excluded: "ambiguous" };
+  return typeof value === "string" && LEARNING_CONTENT_IDENTITY_RE.test(value) ? { contentId: value } : { excluded: "malformed" };
+}
+
+const order = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/** The claim a row without a single revision makes in an exposure's census. It is not an `lc1:`
+ *  identity, so it can never collide with one. */
+const NO_SINGLE_REVISION = "\u0000none";
+
+/** A ledgered share: in (0, 1]. The producer ledgers only contested entries, and an id whose copies
+ *  split the draw is contested at a pooled share of 1 (learnings.ts's `selectLearnings`). */
+const isLedgeredShare = (p: unknown): p is number => typeof p === "number" && p > 0 && p <= 1;
+
+/** One run's draws of one entry. */
+const exposureKey = (runId: string, id: string): string => `${runId}\u0000${id}`;
+
+/** The exposures one `learnings.injected` row records, each id with its ledgered share: every entry
+ *  the row ledgers a share for, and every id the row lists in BOTH arms, with or without a share. A
+ *  both-arms id is one id whose copies split the draw: one reached the prompt and another did not.
+ *  The fold can never credit it, so it is an exposure only to be COUNTED, never silently dropped.
+ *  `undefined` when the row records no draw at all: no share record and no both-arms id. */
+function exposuresOf(r: Record<string, unknown>): Map<string, number | undefined> | undefined {
+  const propensity = r.propensity;
+  const hasShares = propensity !== null && typeof propensity === "object";
+  const dropped = new Set(stringList(r.dropped));
+  const bothArms = stringList(r.matched_ids).filter((id) => dropped.has(id));
+  if (!hasShares && bothArms.length === 0) return undefined;
+  const exposures = new Map<string, number | undefined>();
+  if (hasShares) {
+    for (const [id, p] of Object.entries(propensity as Record<string, unknown>)) if (isLedgeredShare(p)) exposures.set(id, p);
+  }
+  for (const id of bothArms) if (!exposures.has(id)) exposures.set(id, undefined);
+  return exposures;
+}
+
+/** Every revision claim each exposure (one run's draws of one entry) received, from EVERY
+ *  `learnings.injected` row that exposes the entry: trimmed, masked or verdict-less alike. Read
+ *  before any observation is withheld, so a conflict on a row the trim drops is still seen. */
+function revisionClaimsByExposure(all: readonly Record<string, unknown>[]): Map<string, Set<string>> {
+  const claims = new Map<string, Set<string>>();
+  for (const r of all) {
+    if (r.step !== "learnings.injected" || typeof r.run_id !== "string") continue;
+    for (const id of exposuresOf(r)?.keys() ?? []) {
+      const revision = revisionOf(r.content_ids, id);
+      const exposure = exposureKey(r.run_id, id);
+      const seen = claims.get(exposure) ?? new Set<string>();
+      seen.add("contentId" in revision ? revision.contentId : NO_SINGLE_REVISION);
+      claims.set(exposure, seen);
+    }
+  }
+  return claims;
+}
+
+/** Fold ledger rows (read through the ledger union by the caller) into a per-revision outcome
+ *  report. A run's outcome is its LAST `verdict` row; a run with none is excluded and counted.
+ *
+ *  THE COUNTING RULE: each exposure of an unmasked run with a verdict (an entry its row ledgers a
+ *  share for, or an id its row lists in both arms: see `exposuresOf`) lands in exactly ONE place,
+ *  the first of these that applies:
+ *  1. `excludedRevision.conflicting`: the exposure (over EVERY row of the run) names more than one claim;
+ *  2. `excludedRevision.{legacy, malformed, ambiguous, unresolved}`: the row names no single revision;
+ *  3. `excludedRevision.unresolved`: the row ledgers no share for it, or does not list it in exactly
+ *     one of selected and dropped. A both-arms id never passes this step;
+ *  4. `excludedTrimmed`: its propensity is outside [trim, 1 - trim];
+ *  5. its {id, revision} cohort.
+ *  Identity comes before the trim, so a trimmed row can never hide an unresolved identity, and an
+ *  id in both arms is counted under its own reason: `ambiguous` when its copies differ. */
 export function foldLearningOutcomes(
   rows: Iterable<Record<string, unknown>>,
   opts: { floor?: number; trim?: number } = {},
@@ -108,14 +230,23 @@ export function foldLearningOutcomes(
     all.flatMap((r) => (r.step === "fix.dispatch" && typeof r.run_id === "string" ? [{ step: r.step, run_id: r.run_id }] : [])),
   );
 
-  const byLearning = new Map<string, Observation[]>();
-  const report: LearningOutcomeReport = { runs: 0, excludedNoVerdict: 0, excludedMasked: 0, excludedTrimmed: 0, learnings: [] };
+  const report: LearningOutcomeReport = {
+    runs: 0,
+    excludedNoVerdict: 0,
+    excludedMasked: 0,
+    excludedTrimmed: 0,
+    excludedRevision: { legacy: 0, malformed: 0, ambiguous: 0, conflicting: 0, unresolved: 0 },
+    learnings: [],
+  };
+  // An exposure is one run's draws of one entry. Its claims are taken over every row first.
+  const claimsByExposure = revisionClaimsByExposure(all);
+  const byRevision = new Map<string, { id: string; contentId: string; obs: Observation[] }>();
   let from: string | undefined;
   let to: string | undefined;
   for (const r of all) {
     if (r.step !== "learnings.injected" || typeof r.run_id !== "string") continue;
-    const propensity = r.propensity;
-    if (propensity === null || typeof propensity !== "object") continue;
+    const exposures = exposuresOf(r);
+    if (exposures === undefined) continue;
     if (r.masked === true) {
       report.excludedMasked++;
       continue;
@@ -132,20 +263,35 @@ export function foldLearningOutcomes(
     }
     const clean = verdict === "merged" && (fixes.get(r.run_id) ?? 0) === 0;
     const selected = new Set(stringList(r.matched_ids));
-    for (const [id, p] of Object.entries(propensity as Record<string, unknown>)) {
-      if (typeof p !== "number" || p <= 0 || p >= 1) continue;
+    const dropped = new Set(stringList(r.dropped));
+    for (const [id, p] of exposures) {
+      if (claimsByExposure.get(exposureKey(r.run_id, id))!.size > 1) {
+        report.excludedRevision.conflicting++;
+        continue;
+      }
+      const revision = revisionOf(r.content_ids, id);
+      if ("excluded" in revision) {
+        report.excludedRevision[revision.excluded]++;
+        continue;
+      }
+      const { contentId } = revision;
+      if (p === undefined || selected.has(id) === dropped.has(id)) {
+        report.excludedRevision.unresolved++;
+        continue;
+      }
       if (p < trim || p > 1 - trim) {
         report.excludedTrimmed++;
         continue;
       }
-      const list = byLearning.get(id) ?? [];
-      list.push({ injected: selected.has(id), propensity: p, clean });
-      byLearning.set(id, list);
+      const key = `${id}\u0000${contentId}`;
+      const cohort = byRevision.get(key) ?? { id, contentId, obs: [] };
+      cohort.obs.push({ injected: selected.has(id), propensity: p, clean });
+      byRevision.set(key, cohort);
     }
   }
   if (from !== undefined && to !== undefined) report.window = { from, to };
-  report.learnings = [...byLearning.entries()]
-    .map(([id, obs]) => estimateLearningOutcome(id, obs, opts.floor))
-    .sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  report.learnings = [...byRevision.values()]
+    .map((c) => estimateLearningOutcome(c.id, c.contentId, c.obs, opts.floor))
+    .sort((x, y) => order(x.id, y.id) || order(x.contentId, y.contentId));
   return report;
 }
