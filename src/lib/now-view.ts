@@ -471,7 +471,7 @@ export function assembleNowView(input: {
   const tasks = byRecency(snapshot.tasks.filter((t) => shown.has(t.taskId)).map((t) => {
     const row: BoardRow = { ...t };
     const at = activity.get(t.taskId);
-    if (at) row.lastActivityAt = at;
+    if (at && row.catalog !== "ops") row.lastActivityAt = at;
     else delete row.lastActivityAt;
     return row;
   })).map(nowTask);
@@ -1073,7 +1073,9 @@ export function createNowView(opts: NowViewOptions): {
         return { ...archived, torn: tornLines.length, tornLines };
       }) });
     pass.complete();
-    if (read.archiveCount > 0) log("read_model.now_gate_digests", { instance: instance.name, ...digests.counts() });
+    // W1-T14341: a row only when the digests did something; a build the memo answered would log itself into the ledger it reads.
+    const counts = digests.counts();
+    if (counts.hits + counts.parsed + counts.writeFailed + counts.pruned > 0) log("read_model.now_gate_digests", { instance: instance.name, ...counts });
     const complete = read.ok && read.liveFileRead && read.torn === 0 && read.unclassified.length === 0;
     const rows = keepNewestTokenRefreshRows(read.rows);
     if (complete) {
@@ -1366,6 +1368,8 @@ export function createNowView(opts: NowViewOptions): {
       // The fact store keeps only the steps a reader decides on; a task's newest row of any step is legacy's sort time.
       const activity = readTaskActivity(b.db);
       for (const t of b.snapshot.tasks) {
+        // An ops row is publicOpsTaskFields' whitelist (W1-T12211): no join may add a field, or a sort key, to it.
+        if (t.catalog === "ops") continue;
         const at = activity.get(t.taskId);
         if (at) t.lastActivityAt = at;
       }

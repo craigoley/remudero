@@ -52,6 +52,7 @@ import { withLiveSpawnAllowed } from "#src/lib/spawn-guard.js";
 import type { CapabilityLadder } from "#src/lib/mounts.js";
 import { DatabaseSync } from "node:sqlite";
 import { fixedClock } from "#src/lib/clock.js";
+import { buildDefaultHeadroomPolicy } from "#src/lib/headroom.js";
 import { CASH_WEB_SEARCH_KEY_ENV } from "#src/lib/cash-web-bridge.js";
 import { issueCanaryPilotBudgetCapability, withCanaryPilotBudget } from "#src/lib/model-canary-pilot-budget.js";
 
@@ -1197,6 +1198,8 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and p
     queueMicrotask(() => proc.emit("exit", 0));
   });
   const root = mkdtempSync(join(tmpdir(), "rmd-codex-route-"));
+  // W1-T14200: an injected clock (the real instant, so freshness reads are unchanged) the routing timing names.
+  const routeNowMs = Date.now();
   const result = await withLiveSpawnAllowed(() =>
     spawnWorker({
       cwd: process.cwd(),
@@ -1229,6 +1232,7 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and p
         },
         draw: 0,
         writeStatus: (_root, input) => writeProviderRoutingStatus(root, input),
+        now: () => routeNowMs,
       },
       onSelectionAssignment: (assignment) => assignments.push(assignment),
       containment: {
@@ -1269,7 +1273,8 @@ test("spawnWorker routes an opted-in call to Codex, preserves containment, and p
   assert.equal(workerLedgerFields(result).selection_assignment_id, assignments[0]?.id);
   assert.equal(workerLedgerFields(result).served_model, null, "assignment remains distinct from an unreported provider receipt");
   assert.deepEqual(codexCapacityRequests, [
-    { requestedModel: undefined, requestedEffort: undefined, reservePercent: 5 },
+    { requestedModel: undefined, requestedEffort: undefined, reservePercent: 5,
+      headroomTiming: { nowMs: routeNowMs, policy: buildDefaultHeadroomPolicy() } },
     { requestedModel: undefined, requestedEffort: undefined, forceRefresh: true, selectedModel: "gpt-5.6-terra" },
     { requestedModel: undefined, requestedEffort: undefined, forceRefresh: true, selectedModel: "gpt-5.6-terra" },
   ]);

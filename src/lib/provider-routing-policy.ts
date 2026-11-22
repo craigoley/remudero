@@ -8,11 +8,14 @@
 import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { enabledWorkerProviders, isWorkerProviderId, WORKER_PROVIDER_IDS, type Config, type WorkerProviderId } from "./config.js";
+import { buildDefaultHeadroomPolicy, headroomPolicyFromCurve, type HeadroomPolicy } from "./headroom.js";
+import { loadPolicy, policyPath } from "./policy.js";
 import {
   ProviderCapacityBlockedError,
   providerEligibility,
   selectWorkerProvider,
   type ProviderCapacity,
+  type ProviderHeadroomTiming,
   type CodexModelPreference,
   type ProviderSelection,
   type RoutingDrawSeed,
@@ -493,23 +496,42 @@ export function selectWorkerProviderForPolicy(
   capacities: ProviderCapacity[],
   policy: EffectiveProviderRoutingPolicy,
   draw: number | RoutingDrawSeed = 0,
+  timing?: ProviderHeadroomTiming,
 ): ProviderRoutingPolicySelection {
   const effective = capacities.filter((capacity) => policy.routableProviders.includes(capacity.provider));
-  const automatic = () => selectWorkerProvider(effective, policy.reservePercent, draw);
+  const automatic = () => selectWorkerProvider(effective, policy.reservePercent, draw, undefined, timing);
   if (policy.preference === "automatic") return { selection: automatic() };
   const preferred = effective.find((capacity) => capacity.provider === policy.preference);
   const subscriptionHeadroom = effective.some((capacity) => {
-    const verdict = providerEligibility(capacity, policy.reservePercent);
+    const verdict = providerEligibility(capacity, policy.reservePercent, timing);
     return verdict.eligible && verdict.lane === undefined;
   });
-  if (preferred && !(subscriptionHeadroom && providerEligibility(preferred, policy.reservePercent).lane === "codex-credits")) {
+  if (preferred && !(subscriptionHeadroom && providerEligibility(preferred, policy.reservePercent, timing).lane === "codex-credits")) {
     try {
-      return { selection: selectWorkerProvider([preferred], policy.reservePercent, draw) };
+      return { selection: selectWorkerProvider([preferred], policy.reservePercent, draw, undefined, timing) };
     } catch (error) {
       if (!(error instanceof ProviderCapacityBlockedError)) throw error;
     }
   }
   const selection = automatic();
-  const reason = preferred ? providerEligibility(preferred, policy.reservePercent).reason ?? "below-reserve" : "unreadable";
+  const reason = preferred ? providerEligibility(preferred, policy.reservePercent, timing).reason ?? "below-reserve" : "unreadable";
   return { selection, preferenceBypass: { provider: policy.preference, reason } };
+}
+
+/**
+ * W1-T14200: the one clock and reset curve a routing decision judges every window with. The curve is
+ * `root`'s plan/policy.yaml `headroom.curve`, the row the daemon loads for its dispatch gate; a policy that
+ * cannot be loaded falls back to the same filesystem-free curve the daemon uses, and says so on stderr.
+ */
+export function providerHeadroomTiming(
+  nowMs: number,
+  root: string,
+  loadCurve: () => HeadroomPolicy = () => headroomPolicyFromCurve(loadPolicy(policyPath(root)).values.headroom.curve),
+): ProviderHeadroomTiming {
+  try {
+    return { nowMs, policy: loadCurve() };
+  } catch (error) {
+    console.error(JSON.stringify({ event: "worker.provider_headroom_policy_fallback", reason: String((error as Error)?.message ?? error).slice(0, 300) }));
+    return { nowMs, policy: buildDefaultHeadroomPolicy() };
+  }
 }

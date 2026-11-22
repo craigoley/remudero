@@ -386,3 +386,54 @@ export function headroomExhausted(
 export function hasDualWeeklyCaps(snap: UsageSnapshot): boolean {
   return snap.weekly.length >= 2;
 }
+
+/** One rung of the headroom ceiling's time-to-reset curve — policy data rather than a code
+ *  constant (operator ruling, 2026-07-21, rule 2). Ordered narrowest bound first;
+ *  {@link resolveHeadroomLimitPct} picks the first rung covering a window's hours-to-reset.
+ *  W1-T14200: lives here, beside {@link HEADROOM_LIMIT_PCT}, so the provider auction
+ *  (worker-provider.ts) reads the same curve as the dispatch gate without importing daemon.ts. */
+export interface HeadroomPolicyRule {
+  /** This rung applies when hours-to-reset is <= this bound. */
+  maxHoursToReset: number;
+  /** The ceiling (percent used) that binds under this rung. */
+  limitPct: number;
+}
+
+/** A time-to-reset → ceiling curve, DATA rather than a single constant. */
+export type HeadroomPolicy = HeadroomPolicyRule[];
+
+/** Final-day headroom expires at reset, so allow 100% then; otherwise hold the operator reserve.
+ * This is plan/policy.yaml's filesystem-free fallback (W1-T253; operator 2026-07-21).
+ * Expiring reserves once parked the fleet: docs/forensics/daemon.md (2026-07-20). */
+export function buildDefaultHeadroomPolicy(holdLimitPct: number = HEADROOM_LIMIT_PCT): HeadroomPolicy {
+  return [
+    { maxHoursToReset: 24, limitPct: 100 },
+    { maxHoursToReset: Infinity, limitPct: holdLimitPct },
+  ];
+}
+
+/** Resolve the ceiling that binds for a window `hoursToReset` away. A null or non-finite
+ *  hours-to-reset resolves to the last, widest rung: uncertainty is never read as "we must be in
+ *  the final day", so the ceiling only relaxes on a confirmed close reset. */
+export function resolveHeadroomLimitPct(hoursToReset: number | null, policy: HeadroomPolicy = buildDefaultHeadroomPolicy()): number {
+  // Past resets indicate upstream lag; use the strict unknown fallback, never the relaxed rung.
+  // Hardening: the production caller rolls forward. Forensics: docs/forensics/daemon.md.
+  if (hoursToReset === null || !Number.isFinite(hoursToReset) || hoursToReset < 0) {
+    return policy[policy.length - 1]?.limitPct ?? HEADROOM_LIMIT_PCT;
+  }
+  const rule = policy.find((r) => hoursToReset <= r.maxHoursToReset);
+  return rule?.limitPct ?? HEADROOM_LIMIT_PCT;
+}
+
+/**
+ * `plan/policy.yaml`'s `headroom.curve` (its `maxHoursToReset: number | null` catch-all)
+ * converted into the {@link HeadroomPolicy} shape (`Infinity` catch-all,
+ * `buildDefaultHeadroomPolicy`'s own convention) — W1-T253 (P37 CONSUMERS). This module does no
+ * I/O: the daemon command and the worker auction load the policy and pass its curve here.
+ */
+export function headroomPolicyFromCurve(curve: ReadonlyArray<{ maxHoursToReset: number | null; limitPct: number }>): HeadroomPolicy {
+  return curve.map((rung) => ({
+    maxHoursToReset: rung.maxHoursToReset === null ? Infinity : rung.maxHoursToReset,
+    limitPct: rung.limitPct,
+  }));
+}

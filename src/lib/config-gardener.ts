@@ -43,6 +43,7 @@ import {
   type AdoptMountRecommendation,
   type MountHeadroomCell,
   type MountRecommendation,
+  type RandomisedFinding,
   type RandomisedMountRecommendation,
   type RandomisedRow,
 } from "./mount-recommender.js";
@@ -592,7 +593,8 @@ const findingKey = (step: unknown, id: unknown, day: unknown, setting: unknown):
  * `routing.experiment.result` row of each experiment and `routing.policy.estimate` row of each cell, streamed from
  * the ledger union as routing-policy-estimate.ts's recorder streams it, and mapped by
  * `randomisedMountRecommendations` (mount-recommender.ts). A winner the table cannot express is logged as
- * {@link RANDOMISED_FINDING_STEP} naming the setting that can, once per evidence day. An unread archive, live file
+ * {@link RANDOMISED_FINDING_STEP} naming the setting that can, once per evidence day, and so (W1-T14305) is a winner
+ * no covered routes row can take, naming those rows ({@link randomisedNoEditFindings}). An unread archive, live file
  * or directory refuses the read: a missing file could hold an experiment's newest row and let a superseded one
  * propose. A failed read is logged and proposes nothing.
  */
@@ -617,7 +619,9 @@ export function randomisedRecommendationSource(opts: {
       if (unread.length > 0) throw new Error(`incomplete ledger union: ${unread.join(", ")}`);
       const outcomes = randomisedMountRecommendations(rows, loadMounts(opts.mountsFile), opts.experiments ?? ROUTING_EXPERIMENTS, { codexModel: opts.codexModel });
       const written = new Set(rows.filter((r) => r.step === RANDOMISED_FINDING_STEP).map((r) => findingKey(r.evidence_step, r.evidence_id, r.day, r.setting)));
-      for (const f of outcomes.findings) {
+      // W1-T14305: a winner no covered row can take is a finding too, through the same once-per-evidence-day key.
+      const noEdit = randomisedNoEditFindings(outcomes.recommendations, readFileSync(opts.mountsFile, "utf8"));
+      for (const f of [...outcomes.findings, ...noEdit]) {
         if (written.has(findingKey(f.step, f.id, f.day, f.setting))) continue;
         opts.log(RANDOMISED_FINDING_STEP, { evidence_step: f.step, evidence_id: f.id, day: f.day, setting: f.setting, detail: f.detail });
       }
@@ -767,6 +771,71 @@ function withProvider(line: string, provider: string): string {
   return `${line.slice(0, close).trimEnd()}, provider: ${provider} ${line.slice(close)}`;
 }
 
+/** A routes row's name as a finding or a reason names it: `routes.<type>.<risk>.<class>`. */
+const routesRowName = (row: RandomisedRow): string => `routes.${row.type}.${row.risk}.${row.taskClass}`;
+
+/**
+ * W1-T12143, W1-T14305: which routes rows `rec` covers that one exact edit can name in the mounts table `text`, as
+ * edits without their path, and each other row with why it was left alone. {@link randomisedMountCandidate} reads it
+ * with the lines open canaries hold; {@link randomisedNoEditFindings} with none, so a row is reported only for the
+ * table's own shape.
+ */
+function randomisedRowEdits(rec: RandomisedMountRecommendation, text: string, held: ReadonlySet<string>): {
+  edits: Array<{ from: string; to: string; occurrences?: number }>;
+  cells: RandomisedRow[];
+  left: Array<{ row: string; reason: string }>;
+} {
+  const lines = text.split("\n");
+  const byFrom = new Map<string, { to: string; rows: RandomisedRow[] }>();
+  const left: Array<{ row: string; reason: string }> = [];
+  for (const row of rec.rows) {
+    const edit = providerEdit(lines, row, rec.randomised.winner.provider);
+    if (typeof edit === "string") left.push({ row: routesRowName(row), reason: edit });
+    else if (held.has(edit.from)) left.push({ row: routesRowName(row), reason: "an open canary holds its line" });
+    else byFrom.set(edit.from, { to: edit.to, rows: [...(byFrom.get(edit.from)?.rows ?? []), row] });
+  }
+  const edits: Array<{ from: string; to: string; occurrences?: number }> = [];
+  const cells: RandomisedRow[] = [];
+  const count = (line: string, within: readonly string[]) => within.filter((l) => l === line).length;
+  for (const [from, { to, rows }] of byFrom) {
+    const occurrences = spanStarts(lines, from).length;
+    const own = from.split("\n");
+    // The revert proves a restored block by a line of it no other row holds.
+    const witnessed = own.some((line) => count(line, lines) === occurrences * count(line, own));
+    if (occurrences !== rows.length || lines.includes(to) || !witnessed) {
+      left.push(...rows.map((row) => ({ row: routesRowName(row), reason: "its line is not one this edit can name exactly" })));
+      continue;
+    }
+    edits.push({ from, to, ...(occurrences > 1 ? { occurrences } : {}) });
+    cells.push(...rows);
+  }
+  return { edits, cells, left };
+}
+
+/**
+ * W1-T14305, invariant no-silent-randomised-winner: each randomised recommendation that no covered routes row of the
+ * mounts table `text` can take, as one finding on its evidence (step, id and day). `setting` names every covered row,
+ * comma-joined, and `detail` each row's reason, so a winner the table could express never proposes nothing in silence.
+ * A recommendation with one editable row is a candidate ({@link randomisedMountCandidate}) and no finding.
+ */
+export function randomisedNoEditFindings(recs: readonly RandomisedMountRecommendation[], text: string): RandomisedFinding[] {
+  const findings: RandomisedFinding[] = [];
+  for (const rec of recs) {
+    const { edits, left } = randomisedRowEdits(rec, text, new Set());
+    if (edits.length > 0 || left.length === 0) continue;
+    const e = rec.randomised;
+    findings.push({
+      step: e.step,
+      id: e.id,
+      day: e.day,
+      setting: left.map((l) => l.row).join(","),
+      detail: `${rec.cellKey} concluded ${e.winner.label} on ${e.winner.provider}, but no routes row it covers is one exact edit can ` +
+        `name: ${left.map((l) => `${l.row} (${l.reason})`).join("; ")}. Write a covered row as a one-line flow map, or move it by hand.`,
+    });
+  }
+  return findings;
+}
+
 /**
  * W1-T12143: one randomised winner as one canary: the winner's provider on every routes row it covers that one
  * exact edit can name ({@link providerEdit}). A row an open canary holds (either side of its edit) is left alone, so
@@ -776,33 +845,12 @@ function withProvider(line: string, provider: string): string {
  */
 function randomisedMountCandidate(rec: RandomisedMountRecommendation, inv: ConfigInventory, text: string, path: string): ConfigGardenAction | undefined {
   const e = rec.randomised;
-  const lines = text.split("\n");
   const held = new Set(inv.active.flatMap((c) => c.edits.filter((edit) => edit.path === path).flatMap((edit) => [edit.from, edit.to])));
-  const byFrom = new Map<string, { to: string; rows: RandomisedRow[] }>();
-  const left: string[] = [];
-  const name = (row: RandomisedRow) => `routes.${row.type}.${row.risk}.${row.taskClass}`;
-  for (const row of rec.rows) {
-    const edit = providerEdit(lines, row, e.winner.provider);
-    if (typeof edit === "string") left.push(`${name(row)} (${edit})`);
-    else if (held.has(edit.from)) left.push(`${name(row)} (an open canary holds its line)`);
-    else byFrom.set(edit.from, { to: edit.to, rows: [...(byFrom.get(edit.from)?.rows ?? []), row] });
-  }
-  const edits: ConfigEdit[] = [];
-  const cells: RandomisedRow[] = [];
-  const count = (line: string, within: readonly string[]) => within.filter((l) => l === line).length;
-  for (const [from, { to, rows }] of byFrom) {
-    const occurrences = spanStarts(lines, from).length;
-    const own = from.split("\n");
-    // The revert proves a restored block by a line of it no other row holds.
-    const witnessed = own.some((line) => count(line, lines) === occurrences * count(line, own));
-    if (occurrences !== rows.length || lines.includes(to) || !witnessed) {
-      left.push(...rows.map((row) => `${name(row)} (its line is not one this edit can name exactly)`));
-      continue;
-    }
-    edits.push({ path, from, to, ...(occurrences > 1 ? { occurrences } : {}) });
-    cells.push(...rows);
-  }
-  if (edits.length === 0) return undefined;
+  const rowEdits = randomisedRowEdits(rec, text, held);
+  if (rowEdits.edits.length === 0) return undefined;
+  const edits: ConfigEdit[] = rowEdits.edits.map((edit) => ({ path, ...edit }));
+  const cells = rowEdits.cells;
+  const left = rowEdits.left.map((l) => `${l.row} (${l.reason})`);
   const cohort: ConfigCohort = { kind: "cells", cells };
   const where = `${e.capability}/${e.effort}${e.taskClass === undefined ? "" : `/${e.taskClass}`}`;
   return {

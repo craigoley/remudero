@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 1.33
+  # refusal-amendment (W1-T11840, run W1-T11840-1795363007631, 2026-11-22T16:18:22.431Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The recorded failures require changes to author preflight, deployment code, or test fixtures, while `src/lib/affected-suites.ts` selects suites and has no control over those failures or fix dispatch.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine

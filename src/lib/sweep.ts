@@ -3,7 +3,7 @@ import { FIX_CLAIM_YIELDED_STEP } from "./adaptive-wip.js";
 import { registerProcessExitLatch } from "./process-exit-latches.js";
 import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
 import { clearanceBound, fixDispatchCauseProbe, fixDispatchRefusalClass } from "./stuck-state-gardener.js";
-import { planDestinationRepository, type PlanDestinationRepository } from "./plan-destination.js";
+import { planDestinationRepository, resolvePlanDestination, type PlanDestinationRepository } from "./plan-destination.js";
 import { decideLoopOutcome } from "./loop-decision.js";
 import { CI_REFRESH_GUARD_VERSION } from "./ci-refresh-prevention.js";
 import { createSelectedModeQualification, observeSelectedMode, readInstanceRegistryText } from "./instance-mode.js";
@@ -32,6 +32,7 @@ import { execFileRouted } from "./spawn-helper.js";
 import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { runDeploymentBakeoff, type DeploymentBakeoffInput } from "./bakeoff-trigger.js";
 import { setTimeout as delay } from "node:timers/promises";
+import { hostname } from "node:os";
 import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import type { AdmissionPorts } from "./host-memory-admission.js";
 import fs, { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
@@ -107,7 +108,7 @@ import {
 import { diagnoseBodyDefects, type BodyRepairDeps } from "./body-repair.js";
 import { RATCHET_JUDGE_DECIDED_STEP, armedRejudgeHold, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetReadsAnyPath, withheldRatchetFixRoute, type MergedRatchetJudgement, type SweepFixRoute } from "./merged-ratchet-verdict.js";
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
-import { DEFAULT_ESTIMATE_MIB, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
+import { DEFAULT_ESTIMATE_MIB, defaultProbe as probeProcess, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
 import { ESTIMATE_LEARNING, classEstimate, classSurvival, classTypical, type LearnedEstimate, type Survival } from "./host-memory-learning.js";
 import {
   loadHostMemoryBudgetPolicy, ownContainerWorkLive, readContainerMemoryHeadroom, residentsOf, type ContainerMemoryHeadroom,
@@ -137,10 +138,12 @@ import { distanceRefreshCause, type BaseChangedFiles } from "./plan-pr-merge-saf
 import { armedBodyNeedsGuard, rememberCleanArmedBody, type ClosingReferenceGuardResult } from "./closing-reference-guard.js";
 import { observeAdmissionDisposition } from "./action-executor.js";
 import { runIsolatedLocalMergeRoute, localMergeRouteForCheck, type IsolatedMergeRouteResult } from "./ci-parity.js";
-import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, readInflightLock, type InflightLockHandle } from "./inflight-lock.js";
-import { reclaimStaleLock, writeAtomic } from "./fs-race-safe.js";
+import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflightLockInfo, readInflightLock, type InflightLockHandle, type InflightLockInfo } from "./inflight-lock.js";
+import { sameHost } from "./host-identity.js";
+import { reclaimStaleLock, realWriteAtomicIo, writeAtomic } from "./fs-race-safe.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
 import { appendLedger, isRealStrike, type LedgerLine } from "./ledger.js";
+import { LEDGER_SECURITY_PRODUCER_LOCK_SUFFIX } from "./ledger-path.js";
 import { appendOperatorNote, loadOperatorNoteRows, loadOperatorNotesForTask, operatorNoteStore, type OperatorNoteEntry } from "./operator-notes.js";
 import {
   capStrikeLadderNote, decideStrikeLadderRung, firstFailingTestTitle, hasUnspentLadderRefresh,
@@ -305,6 +308,7 @@ import {
   releaseReviewWorktree,
   worktreesDir,
   writeRunLock,
+  runLockRecord,
   type QuestionEntry,
   type SpawnWorkerArgs,
   type WorkerResult,
@@ -366,6 +370,7 @@ import {
   rollupFromRest,
   rollupForAsync,
   needsWorkflowIdentity,
+  singlePrRestArgs,
   runsForHeadRestArgs,
   fetchWorkflowRunObservations,
   fetchBoardPrsRestAsync,
@@ -2551,6 +2556,9 @@ export const SWEEP_EFFECT_SURFACE = [
   "readMainChangedPaths",
   "readOpenEscalations",
   "reconcilePrimaryShadowAlert",
+  "deferToLiveFixRound", // W1-T13991
+  "fixAdmissionLockDir", // W1-T13991
+  "fixRoundHoldsBranch", // W1-T13991
 ] as const;
 
 export function productionFixProgressJudge(opts: {
@@ -2741,6 +2749,9 @@ type BaseRequiredChecks = { checks: ReadonlyMap<string, number | null>; complete
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
   | "readerAgreement"
+  | "deferToLiveFixRound"
+  | "fixAdmissionLockDir"
+  | "fixRoundHoldsBranch"
   | "fixProgressJudge"
   | "readHostedProofResults"
   | "reproduceFailingTestsOnMain"
@@ -3535,6 +3546,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     } } : {}),
   });
   return {
+    fixAdmissionLockDir: join(config.root, "state", "fix-admission"),
+    // W1-T13991: a caller that wires no branch-claim key takes no branch claims, so it has no live round to defer to.
+    deferToLiveFixRound: deps.fixBranchClaimKeyImpl === undefined ? undefined : (pr, lines) => deferToLiveFixRound(pr, lines, {
+      inflightDir, stateRoot: config.root, claimKeyFor: (branch) => fixBranchClaimKey(owner, repo, branch), nowMs: nowMsImpl(),
+      boundMs: spawnWallClockBoundMs, isPidAlive: defaultIsPidAlive, hostname: hostname() }),
+    fixRoundHoldsBranch: deps.fixBranchClaimKeyImpl === undefined ? undefined : (pr, lines) => fixRoundHoldsBranch(pr, lines, {
+      inflightDir, claimKeyFor: (branch) => fixBranchClaimKey(owner, repo, branch), nowMs: nowMsImpl(),
+      boundMs: spawnWallClockBoundMs, isPidAlive: defaultIsPidAlive, hostname: hostname() }),
     readerAgreement: { owner, repo, plan, readJson: readJsonImpl },
     readReviewEvidenceRecord: pr => readReviewEvidenceRecord(pr, readJsonImpl),
     fixDispatchFleetHold: () => checkSharedPause(config.root, { run: pauseGit.run, mintAnchor: pauseGit.mintAnchor }),
@@ -4646,8 +4665,17 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // this round's whole checkout→commit→push window (acquired just before the worktree is
       // created, released once `runFixRung` returns/throws), never a narrower slice.
       let branchClaim: FixRoundBranchClaim | undefined;
-      const roundEnded = (claimRunId: string): boolean => fixRoundClaimEnded(ledgerPath, claimRunId);
+      // W1-T13991: a holder waiting on CI for this head, live on this host, has not ended, whatever this dispatch would
+      // repair: a conflict on the waiting round's own head is that round's to take.
+      let roundClaimKey: string | undefined;
+      const liveProbe = (holder: InflightLockInfo | null | undefined): FixRoundLiveProbe | undefined =>
+        !holder ? undefined : { headSha: pr.headSha, holder, nowMs: nowMsImpl(),
+          boundMs: spawnWallClockBoundMs, isPidAlive: defaultIsPidAlive, hostname: hostname() };
+      const roundEnded = (claimRunId: string, holder?: InflightLockInfo): boolean => fixRoundClaimEnded(ledgerPath, claimRunId,
+        liveProbe(holder ?? (roundClaimKey === undefined ? undefined : readInflightLock(inflightDir, roundClaimKey))));
       let recycleTaskId: string | undefined;
+      let liveHandoff: FixRoundHandoff | undefined;
+      const handoffPaths = new Map<string, string>();
       // W1-T1127: TRUE only once `runFixRung` has demonstrably spent a real strike — i.e. its
       // OWN `fix.dispatch` line below has been written. `runSweep`'s `sweep.disposed` dedup seed
       // (`prior.fixed`, sweep.ts) is keyed off THAT line's later effect (an `acted:true` row),
@@ -4865,7 +4893,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               expectedRemoteSha: pr.headSha,
               observedRemoteSha: headRef.headRefOid,
               inflightDir,
-              claimKey: fixBranchClaimKey(owner, repo, realBranch),
+              claimKey: (roundClaimKey = fixBranchClaimKey(owner, repo, realBranch)),
               claimRoundEnded: roundEnded,
               idleBoundMs: registeredFixOwnerIdleBoundMs(readLedgerLines(ledgerPath), spawnWallClockBoundMs), // ledger-read-intent: live
             });
@@ -5249,6 +5277,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // DECLINES this poll — ledgered exactly like `sweep.fix.uncreditable_head` above — and
         // the sweep is level-triggered, so the next pass simply retries it.
         const claimKey = fixBranchClaimKey(owner, repo, realBranch);
+        roundClaimKey = claimKey;
         try {
           const taken = acquireFixRoundClaim(inflightDir, claimKey, fixRoundClaimId(runId, pr.prNumber, nowMsImpl()), roundEnded);
           if (taken.endedRunId) {
@@ -5259,14 +5288,26 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               holder_run_id: taken.endedRunId,
             });
           }
-          // W1-T5955: re-taken by `runFixRung` after each `fix.done` released it.
-          branchClaim = fixRoundBranchClaim(taken.handle, () => reclaimFixRoundBranch({
+          // W1-T5955: re-taken by `runFixRung` after each `fix.done` released it. W1-T13991: and held through its CI wait.
+          const retake = () => reclaimFixRoundBranch({
             inflightDir,
             claimKey,
             claimRunId: fixRoundClaimId(runId, pr.prNumber, nowMsImpl()),
             roundEnded,
             ownsWorktree: () => existsSync(worktreePath) && registeredWorktreeOwnerImpl(repoDir, branchRef) === realpathSync(worktreePath),
-          }));
+          });
+          // The claim is never free between fix.done and the wait: the round keeps it, and its fix.done names the wait.
+          // A conflict round too: it waits on CI for the resolution it pushed, so a new failure on that head is its own.
+          const keepForWait = (held: InflightLockHandle) => {
+            const processStart = fixRoundProcessStart(process.pid);
+            if (processStart === undefined) return "this round's process start is unreadable";
+            const path = fixRoundHandoffPath(config.root, held.info.run_id);
+            // The hand-off directory exists before fix.done, so a sweep that reads the live round can hand it a failure.
+            mkdirSync(dirname(path), { recursive: true });
+            handoffPaths.set(path, pr.headSha);
+            return { process_start: processStart };
+          };
+          branchClaim = fixRoundBranchClaim(taken.handle, retake, keepForWait);
         } catch (e) {
           if (e instanceof InflightLockError) {
             log("sweep.fix.checkout_claim_declined", {
@@ -5287,7 +5328,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         worktreePath = join(worktreesDir(config), `sweep-${task.id}-${dispatchNowMs}`);
         // W1-T12537: the run lane's lock, before the add, so another run's start-up prune keeps it.
         mkdirSync(worktreePath, { recursive: true });
-        writeRunLock(worktreePath, { pid: process.pid, run_id: runId, startedAt: clockFromMillisFn(() => dispatchNowMs).iso() });
+        writeRunLock(worktreePath, runLockRecord({ pid: process.pid, run_id: runId, startedAt: clockFromMillisFn(() => dispatchNowMs).iso() }));
         try {
           const recoveredHead = await createFixRungWorktree(repoDir, worktreePath, realBranch);
           if (recoveredHead) {
@@ -5398,6 +5439,88 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // A rotation can become unreadable during checkout and setup; recheck right before the rung.
         const checkoutHistoryHold = terminalHistoryHold(true);
         if (checkoutHistoryHold) return { roundNotRun: true, reason: checkoutHistoryHold };
+        const waitForFixCi = async (prUrl: string, waitLog: (step: string, extra?: Record<string, unknown>) => void, ownHead?: string) => {
+          onPhase?.("ci-wait");
+          const externalWaitRecycle = () => recyclePauseDetail(config.root);
+          try {
+            if (ownHead === undefined || prUrl !== pr.prUrl) {
+              const ci = await waitForCiGreen(prUrl, waitLog, 6, { externalWaitRecycle });
+              if (ci.state === "freshness_handoff" && ci.recycle) recycleTaskId = task.id;
+              return ci;
+            }
+            const handoffSignal = new Error("the sweep handed this round a new failure on its head");
+            const prEndpoint = singlePrRestArgs(owner, repo, pr.prNumber)[1];
+            let polledHead: string | undefined;
+            let waitingHandoffPath: string | undefined;
+            const readHandoff = (head: string | undefined): FixRoundHandoff | undefined => {
+              if (waitingHandoffPath === undefined || head !== ownHead) return undefined;
+              try {
+                const handed = readFixRoundHandoff(waitingHandoffPath);
+                if (handed?.claim_run_id === branchClaim?.id() && handed?.round_run_id === runId && handed.head_sha === head) return handed;
+              } catch (error) {
+                log("sweep.fix.handoff_unreadable", { pr_number: pr.prNumber, head_sha: head, error: String(error) });
+              }
+              return undefined;
+            };
+            const checkHandoff = () => {
+              liveHandoff = readHandoff(polledHead);
+              if (liveHandoff) throw handoffSignal;
+            };
+            // The wait reads the round live, and takes a hand-off, only on a poll that reads the round's own head. The
+            // first poll's wait row is written once per wait, so a wait whose first poll read another head writes its own
+            // wait row on the first later poll that reads its own head again.
+            let waitStarted = false;
+            const waitOnOwnHead = (): boolean => {
+              if (waitingHandoffPath !== undefined) return false;
+              const candidate = branchClaim?.last().info.run_id;
+              if (candidate === undefined) return false;
+              const path = fixRoundHandoffPath(config.root, candidate);
+              mkdirSync(dirname(path), { recursive: true });
+              handoffPaths.set(path, ownHead);
+              waitingHandoffPath = path;
+              return true;
+            };
+            try {
+              const ci = await waitForCiGreen(prUrl, (step: string, extra?: Record<string, unknown>) => {
+                if (step !== "run.awaiting_external") return waitLog(step, extra);
+                waitStarted = true;
+                polledHead ??= typeof extra?.head_sha === "string" ? extra.head_sha : undefined;
+                if (polledHead === ownHead) waitOnOwnHead();
+                waitLog(step, { ...extra, head_sha: polledHead, process_start: fixRoundProcessStart(process.pid) });
+              }, 6, {
+                externalWaitRecycle,
+                sleep: async (ms: number) => {
+                  checkHandoff();
+                  await delay(ms);
+                  checkHandoff();
+                },
+                readJson: async (args: string[]) => {
+                  const read = await readJsonImpl(args);
+                  if (args[0] === "api" && args[1] === prEndpoint) {
+                    polledHead = (read as { head?: { sha?: string } })?.head?.sha;
+                    if (waitStarted && polledHead === ownHead && waitOnOwnHead()) {
+                      waitLog("run.awaiting_external", { waiting_on: "ci", head_sha: ownHead, own_head_restored: true,
+                        process_start: fixRoundProcessStart(process.pid) });
+                    }
+                  }
+                  return read;
+                },
+              });
+              if (ci.state === "freshness_handoff") {
+                if (ci.recycle) recycleTaskId = task.id;
+              } else {
+                // A hand-off can arrive during the terminal poll's GitHub reads.
+                liveHandoff = readHandoff(ci.sha ?? polledHead);
+              }
+              return ci;
+            } catch (error) {
+              if (error !== handoffSignal || liveHandoff === undefined) throw error;
+              return { state: "timeout" as const, sha: liveHandoff.head_sha };
+            }
+          } finally {
+            onPhase?.("worker");
+          }
+        };
         const rung = await runFixRung({
           guardRoundHead: true,
           ...(ownedConflictPushGuard === undefined ? {} : { ownedConflictPushGuard }),
@@ -5430,6 +5553,19 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           // the function), so a SHIPS-UNWIRED marker on a PR this rung fixes is FLAGGED rather
           // than honoured off stale yaml — the safe direction.
           openTaskIds: openTaskIdsFromPlan(plan),
+          waitForOwnHeadCi: waitForFixCi,
+          liveRoundHandoff: (): LiveRoundHandoff | undefined => {
+            const handed = liveHandoff;
+            liveHandoff = undefined;
+            if (handed === undefined) return undefined;
+            const review = handed.failure !== "review" ? undefined : buildFixRungDispatchArgs({ task, runId, prUrl: pr.prUrl, branch: realBranch,
+              worktreePath, mount: fixMount, settingsFile, config, budgetUsd, strikeCap, evidence: { unmetCriteria: handed.unmet_criteria },
+              pr: { ...pr, headSha: handed.head_sha, reviewSummary: handed.review_summary },
+              reviewBase: { owner, repo, headCheckoutDir: worktreePath, reviewerMount } });
+            return { headSha: handed.head_sha, failure: handed.failure, review: review?.initialReview,
+              criterionIndices: review?.initialCriterionIndices, actionableGateFailures: handed.actionable_gate_failures,
+              ...(handed.ci_failures === undefined ? {} : { ciFailures: handed.ci_failures }) };
+          },
           deps: {
             fixProgressJudge: evidence.progressJudge ?? effectsProgressJudge,
             // Fresh-spawn adapter: an empty resumeSessionId (cold PR) becomes a
@@ -5454,16 +5590,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               },
               { config, log: (s: string, extra?: Record<string, unknown>) => log(s, { task_id: task.id, ...extra }) },
             ),
-            waitForCiGreen: async (prUrl: string, waitLog: (step: string, extra?: Record<string, unknown>) => void) => {
-              onPhase?.("ci-wait");
-              try {
-                const ci = await waitForCiGreen(prUrl, waitLog, 6, { externalWaitRecycle: () => recyclePauseDetail(config.root) });
-                if (ci.state === "freshness_handoff" && ci.recycle) recycleTaskId = task.id;
-                return ci;
-              } finally {
-                onPhase?.("worker");
-              }
-            },
+            waitForCiGreen: waitForFixCi,
             // W1-T138: refresh the ci-log evidence whenever a strike leaves CI
             // non-green — see runFixRung's own doc for why this must happen on
             // every strike, not just the first.
@@ -5517,7 +5644,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               // rethrow meant for a dispatch that never got this far.
               if (s === "fix.dispatch" || s === "fix.retrigger") dispatchStarted = true;
               // The next sweep compares main to this revision. The worker's task above came from the PR head.
-              log(s, { task_id: task.id, ...extra,
+              log(s, { task_id: task.id, pr_number: pr.prNumber, ...extra,
                 ...(s === "fix.done" && extra?.fix_outcome === "NEEDS_SCOPE"
                   ? { contract_revision: contractRevisionFor(pr).contractRevision } : {}) });
             },
@@ -5610,16 +5737,25 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             /* best-effort cleanup */
           }
         }
-        if (worktreePath) removeRunLock(worktreePath);
-        // W1-T2609: release the branch claim LAST, on every exit path (return, decline, throw) —
+        // W1-T2609: release the branch claim after checkout cleanup, on every exit path —
         // symmetric with the worktree cleanup just above, so a lost race or a mid-round crash
         // never strands the claim past this round's own dispatch.
         try {
+          if (worktreePath) removeRunLock(worktreePath);
           if (branchClaim && recycleTaskId) log("inflight.recycle_yield", {
             lock_key: basename(branchClaim.last().path, ".lock"), task_id: recycleTaskId, run_id: runId, waiting_on: "ci",
           });
         } finally {
           branchClaim?.release();
+          // Keep each marker until the invocation ends so a sweep racing the end of the wait
+          // can still see the signal it already delivered for that claim.
+          for (const [path, headSha] of handoffPaths) {
+            try {
+              retireFixRoundHandoff(path);
+            } catch (error) {
+              log("sweep.fix.handoff_cleanup_failed", { pr_number: pr.prNumber, head_sha: headSha, error: String(error) });
+            }
+          }
         }
       }
     },
@@ -5752,6 +5888,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // ops catalog, so it is refused as destination-unreadable; nothing falls back to the public repository.
     parkedPr: {
       planFilingTarget: publicTaskRepository,
+      // W1-T14344 (the W1-T12200 rule): a NEW held task file follows the switch for kind task, read on each call; an edit
+      // stays in the repository that holds its file (readTaskShard).
+      resolveTaskDestination: () => resolvePlanDestination("task", join(config.root, "state"), publicTaskRepository),
       readTaskShard: async (taskId) => {
         const resolved = await taskFileRepository(taskId, (reloadPlanForFix() ?? plan).byId);
         const unknownCatalog = resolved.outcome === "resolved" && resolved.task === undefined &&
@@ -15512,9 +15651,354 @@ export function fixRoundClaimId(runId: string, prNumber: number, nowMs: number):
 }
 
 /** W1-T5955 — true once the round holding `claimRunId` wrote its `fix.done`. A rotated row reads false;
- *  a thrown round needs no row, its `finally` releases the claim. */
-export function fixRoundClaimEnded(ledgerPath: string, claimRunId: string): boolean {
-  return readLedgerLines(ledgerPath).some((row) => row.step === "fix.done" && row.branch_claim_run_id === claimRunId); // ledger-read-intent: live
+ *  a thrown round needs no row, its `finally` releases the claim. W1-T13991: a holder `live` reads as
+ *  waiting on CI for the PR's head ({@link fixRoundIsLiveOnHead}) has not ended. */
+export function fixRoundClaimEnded(ledgerPath: string, claimRunId: string, live?: FixRoundLiveProbe): boolean {
+  return fixRoundClaimEndedIn(readLedgerLines(ledgerPath), claimRunId, live); // ledger-read-intent: live
+}
+
+/** {@link fixRoundClaimEnded} over rows already read. */
+export function fixRoundClaimEndedIn(lines: ReadonlyArray<Record<string, unknown>>, claimRunId: string, live?: FixRoundLiveProbe): boolean {
+  if (!lines.some((row) => row.step === "fix.done" && row.branch_claim_run_id === claimRunId)) return false;
+  return live === undefined || live.holder.run_id !== claimRunId || !fixRoundIsLiveOnHead(lines, live);
+}
+
+/** W1-T13991 — what reads a branch claim's holder as a round still waiting on CI for a head. */
+export interface FixRoundLiveProbe {
+  /** The PR head a new round would be dispatched on. */
+  headSha: string;
+  holder: Pick<InflightLockInfo, "pid" | "run_id"> & { host?: string };
+  nowMs: number;
+  /** The round's own spawn bound: a CI wait older than this reads ended. */
+  boundMs: number;
+  isPidAlive: (pid: number) => boolean;
+  processStart?: (pid: number) => string | undefined;
+  hostname: string;
+}
+
+function fixRoundProcessStart(pid: number): string | undefined {
+  const probe = probeProcess(pid);
+  return probe.state === "alive" ? probe.start : undefined;
+}
+
+/**
+ * W1-T13991 — true when the claim's holder pushed `headSha` itself and its `fix.done` (the newest naming the claim)
+ * says the round kept that claim, never released, into its CI wait for that head; when that round has since written a
+ * `run.awaiting_external` row for that same head under the same claim and process (the wait itself, not the intent to
+ * wait: a CI read that returns red or green at once writes none); when it has written nothing since that ends the wait;
+ * and when it has the same process identity on this host within its spawn bound. Before that wait row the round reads
+ * ended, as on origin/main. A `fix.done` that released its claim reads ended, as before.
+ */
+export function fixRoundIsLiveOnHead(lines: ReadonlyArray<Record<string, unknown>>, probe: FixRoundLiveProbe): boolean {
+  const doneIndex = lines.findLastIndex((row) => row.step === "fix.done" && row.branch_claim_run_id === probe.holder.run_id);
+  const done = lines[doneIndex];
+  if (typeof done?.run_id !== "string" || typeof done.round_id !== "string" || typeof done.pr_number !== "number" ||
+    typeof done.ts !== "string" || done.pushed_head_sha !== probe.headSha || done.ci_wait_holds_claim !== true ||
+    typeof done.round_started_at_ms !== "number" || typeof done.process_start !== "string" ||
+    probe.holder.host === undefined || !sameHost(probe.holder.host, probe.hostname)) return false;
+  let waiting = false;
+  for (let i = doneIndex + 1; i < lines.length; i++) {
+    const row = lines[i];
+    if (row.run_id !== done.run_id || row.pr_number !== done.pr_number) continue;
+    if (row.step === "run.awaiting_external" && row.waiting_on === "ci" && row.head_sha === probe.headSha &&
+      row.round_id === done.round_id && row.branch_claim_run_id === probe.holder.run_id &&
+      row.process_start === done.process_start) waiting = true;
+    if (row.step === "fix.ci_not_green" || row.step === "fix.stood_down" || row.step === "fix.commit_refused" ||
+      row.step === "fix.review" || row.step === "fix.dispatch" || row.step === "fix.done" || row.step === "fix.exhausted" ||
+      row.step === "sweep.fix.error" || row.step === "run.freshness_handoff" || row.step === "fix.live_round_resumed") return false;
+  }
+  if (!waiting) return false;
+  const ageMs = probe.nowMs - done.round_started_at_ms;
+  const doneAt = Date.parse(done.ts);
+  if (!(done.round_started_at_ms <= doneAt && doneAt <= probe.nowMs && ageMs <= probe.boundMs)) return false;
+  const pid = probe.holder.pid;
+  return Number.isSafeInteger(pid) && pid > 0 && probe.isPidAlive(pid) &&
+    (probe.processStart ?? fixRoundProcessStart)(pid) === done.process_start;
+}
+
+/** W1-T13991 — what failed on the live round's own head. */
+export type FixRoundHandoffFailure = "check" | "review" | "conflict";
+
+/** W1-T13991 — the new failure the sweep hands the live round on its own head, one file per claim identity. */
+export interface FixRoundHandoff {
+  claim_run_id: string;
+  round_run_id: string;
+  head_sha: string;
+  /** `conflict`: main moved and the round's own head no longer merges; the round re-reads mergeability in its worktree. */
+  failure: FixRoundHandoffFailure;
+  unmet_criteria: CriterionVerdict[];
+  review_summary?: string;
+  actionable_gate_failures?: ActionableGateFailure[];
+  /** A red check's failures as the sweep read them on this head, so the round's next strike never waits on a lagging rollup. */
+  ci_failures?: CiFailure[];
+  ts: string;
+}
+
+/** W1-T13991 — what the round's next strike starts on: a red check it re-reads, or the failing review it was handed. */
+export interface LiveRoundHandoff {
+  headSha: string;
+  failure: FixRoundHandoffFailure;
+  review?: ReviewVerdict & { headSha: string; reviewerOutcome: string };
+  criterionIndices?: readonly number[];
+  actionableGateFailures?: ActionableGateFailure[];
+  /** The red checks the sweep saw on the handed head: the next strike targets these. */
+  ciFailures?: CiFailure[];
+}
+
+export function fixRoundHandoffPath(stateRoot: string, claimRunId: string): string {
+  const file = createHash("sha256").update(claimRunId).digest("hex");
+  return join(stateRoot, "state", "fix-round-handoff", file, "failure.json");
+}
+
+function retireFixRoundHandoff(path: string): void {
+  const directory = dirname(path);
+  const retired = `${directory}.retired-${randomUUID()}`;
+  fs.renameSync(directory, retired);
+  fs.rmSync(retired, { recursive: true, force: true });
+}
+
+/** The hand-off at `path`, or `undefined` when there is none or it does not parse as one. */
+export function readFixRoundHandoff(path: string): FixRoundHandoff | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  let parsed: Partial<FixRoundHandoff> | null;
+  try {
+    parsed = JSON.parse(raw) as Partial<FixRoundHandoff> | null;
+  } catch (error) {
+    if (error instanceof SyntaxError) return undefined;
+    throw error;
+  }
+  return typeof parsed?.claim_run_id === "string" && typeof parsed.round_run_id === "string" && typeof parsed.head_sha === "string" &&
+    (parsed.failure === "check" || parsed.failure === "review" || parsed.failure === "conflict") && Array.isArray(parsed.unmet_criteria) &&
+    (parsed.ci_failures === undefined || Array.isArray(parsed.ci_failures))
+    ? parsed as FixRoundHandoff : undefined;
+}
+
+/** W1-T13991 — the live round a new dispatch on `pr`'s head defers to, handing it the failure once per head. */
+export interface LiveFixRoundDeferral {
+  liveRoundRunId: string;
+  claimRunId: string;
+  failure: FixRoundHandoffFailure;
+  /** True only on the pass that wrote the hand-off. */
+  handedOff: boolean;
+}
+
+/** Publish completed bytes once. Linking the stage keeps readers from seeing a partial record. */
+function publishFixRoundFile(
+  path: string,
+  content: string,
+  waitOwner?: () => boolean,
+): boolean {
+  try {
+    return writeAtomic(path, content, {
+      beforeRename: waitOwner,
+      io: {
+        ...realWriteAtomicIo,
+        // Only the waiting round creates its directory. Once it retires the directory, even a
+        // sweep that staged the file and checked ownership earlier can no longer publish.
+        ...(waitOwner === undefined ? {} : { mkdirSync: () => {} }),
+        renameSync: (stage, destination) => {
+          fs.linkSync(stage, destination);
+          fs.rmSync(stage, { force: true });
+        },
+      },
+    });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EEXIST" || (code === "ENOENT" && waitOwner !== undefined)) return false;
+    throw error;
+  }
+}
+
+function sameFixClaim(first: InflightLockInfo | null, second: InflightLockInfo): boolean {
+  return first !== null && first.run_id === second.run_id && first.pid === second.pid &&
+    !!first.host && first.host === second.host && !!first.startedAt && first.startedAt === second.startedAt;
+}
+
+function releaseOwnedFixClaim(path: string, owner: InflightLockInfo): void {
+  reclaimStaleLock(path, {
+    parseHolder: (raw) => parseInflightLockInfo(raw) ?? "unreadable",
+    isStale: (candidate) => candidate !== "unreadable" && sameFixClaim(candidate, owner),
+    onReclaim: () => {},
+  });
+}
+
+/** W1-T13991 — the lock that serializes one PR's fix memory charge on one host. The charge is that host's memory, so a
+ *  holder on another host (shared state) never blocks this host's admission, and its abandoned lock never needs a reclaim
+ *  this host cannot judge. */
+export function fixAdmissionLockPath(dir: string, pr: Pick<OpenPrView, "prUrl">, host: string = hostname()): string {
+  const target = mergeTargetFromPrUrl(pr.prUrl);
+  const key = target ? `${target.owner}/${target.repo}#${target.prNumber}`.toLowerCase() : pr.prUrl;
+  return inflightLockPath(dir, createHash("sha256").update(`${host.toLowerCase()}\0${key}`).digest("hex"));
+}
+
+/** W1-T13991 — the holder of a PR's admission lock. `head_sha` is the head it was charged for; `settler_*` names the
+ *  dispatching sweep that settles a hosted child, so a child the kernel reaps before that settlement keeps the lock;
+ *  `charge_released` says the holder's own memory charge has gone back (its CI wait), so a head moved under it may be
+ *  charged in its place. */
+export interface FixAdmissionHolder extends InflightLockInfo {
+  head_sha?: string;
+  settler_pid?: number;
+  settler_started_at?: string;
+  charge_released?: true;
+}
+
+/** W1-T13991 — a PR's fix admission: the charge, and the per-PR lock that holds it. */
+interface FixAdmissionLock { path: string; owner: FixAdmissionHolder }
+type PrFixAdmission =
+  /** `adopted`: the lock is the dispatching sweep's, which frees it at the hosted child's settlement; `release` then frees
+   *  only the charge. */
+  | { admitted: true; release?: () => void; releaseCharge?: () => void; lock?: FixAdmissionLock; adopted?: true }
+  | { admitted: false; reason: string };
+
+function readFixAdmissionHolder(path: string): FixAdmissionHolder | null {
+  try {
+    return parseInflightLockInfo(readFileSync(path, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+/** W1-T13991 — a holder frees the PR only when no process can still settle it: its own process is gone and so is the
+ *  sweep that settles it. A reaped child whose sweep is alive still holds the PR until that sweep settles it. */
+export function fixAdmissionHolderStale(holder: FixAdmissionHolder, isPidAlive: (pid: number) => boolean = defaultIsPidAlive): boolean {
+  if (!isHolderStale(holder, { isPidAlive })) return false;
+  if (holder.settler_pid === undefined) return true;
+  return isHolderStale({ pid: holder.settler_pid, host: holder.host, startedAt: holder.settler_started_at }, { isPidAlive });
+}
+
+/** W1-T13991 — a head moved under the holder replaces it, rather than adding a second charge, once the holder's own charge
+ *  has gone back and its round no longer holds the branch for the new head (`roundHoldsBranch`, false once the old round
+ *  ended or the head was moved by anyone else): the dispatch for the new head then proceeds as on origin/main. */
+function fixAdmissionSuperseded(holder: FixAdmissionHolder, pr: OpenPrView, roundHoldsBranch?: () => boolean): boolean {
+  return roundHoldsBranch !== undefined && holder.charge_released === true && typeof holder.head_sha === "string" &&
+    holder.head_sha !== pr.headSha && !roundHoldsBranch();
+}
+
+/** W1-T13991 — record on the lock that its holder's memory charge went back; the lock itself stays held. */
+function markFixAdmissionChargeReleased(lock: FixAdmissionLock): void {
+  const { path, owner } = lock;
+  const ours = () => sameFixClaim(readFixAdmissionHolder(path), owner);
+  if (!ours()) return;
+  writeAtomic(path, JSON.stringify({ ...readFixAdmissionHolder(path), charge_released: true }), { beforeRename: ours });
+}
+
+/** Serialize the memory charge on the PR itself, across heads and sweep processes. `inherited` is the dispatching sweep's
+ *  holder, which a hosted child adopts in place: the lock is never free between the sweep's charge and the child's. */
+function claimFixAdmissionForPr(
+  dir: string | undefined,
+  pr: OpenPrView,
+  charge: NonNullable<SweepDeps["claimFixAdmission"]>,
+  inherited?: InflightLockInfo,
+  roundHoldsBranch?: () => boolean,
+): PrFixAdmission {
+  if (dir === undefined) return charge(pr);
+  const path = fixAdmissionLockPath(dir, pr);
+  const current = inherited === undefined ? null : readFixAdmissionHolder(path);
+  let adopted = inherited !== undefined && sameFixClaim(current, inherited);
+  // An adopted lock keeps the sweep's run id, so the sweep frees it at settlement; its pid becomes this process's, and the
+  // sweep's pid is kept as its settler, so the lock reads live while either can still settle it.
+  const owner: FixAdmissionHolder = { run_id: adopted ? inherited!.run_id : randomUUID(), pid: process.pid, host: hostname(),
+    startedAt: systemClock.iso(), head_sha: pr.headSha,
+    ...(adopted ? { settler_pid: inherited!.pid, settler_started_at: inherited!.startedAt } : {}) };
+  if (adopted) {
+    adopted = writeAtomic(path, JSON.stringify(owner), { beforeRename: () => sameFixClaim(readFixAdmissionHolder(path), inherited!) });
+    if (!adopted) return { admitted: false, reason: "a fix round already holds admission for this pull request" };
+  } else {
+    const stale = reclaimStaleLock(path, {
+      parseHolder: (raw) => parseInflightLockInfo(raw) as FixAdmissionHolder | null,
+      isStale: (holder) => fixAdmissionHolderStale(holder) || fixAdmissionSuperseded(holder, pr, roundHoldsBranch),
+    });
+    if (stale.outcome === "live" || !publishFixRoundFile(path, JSON.stringify(owner))) {
+      return { admitted: false, reason: "a fix round already holds admission for this pull request" };
+    }
+  }
+  const release = () => releaseOwnedFixClaim(path, owner);
+  let grant: ReturnType<NonNullable<SweepDeps["claimFixAdmission"]>> | undefined;
+  try {
+    grant = charge(pr);
+    if (!grant.admitted) return grant;
+    const releaseCapacity = grant.release;
+    if (adopted) return { admitted: true, releaseCharge: releaseCapacity, lock: { path, owner }, adopted: true, release: () => releaseCapacity?.() };
+    return { admitted: true, releaseCharge: releaseCapacity, lock: { path, owner }, release: () => {
+      try { releaseCapacity?.(); }
+      finally { release(); }
+    } };
+  } finally {
+    if (grant?.admitted !== true && !adopted) release();
+  }
+}
+
+/** W1-T13991 — free a PR's admission lock this sweep took, whichever process now holds it under that run id: the hosted
+ *  child adopts it in place, and the sweep frees it once the host has settled the child and released its reservation. */
+function releaseFixAdmissionLineage(path: string, owner: InflightLockInfo): void {
+  reclaimStaleLock(path, {
+    parseHolder: (raw) => parseInflightLockInfo(raw) ?? "unreadable",
+    isStale: (candidate) => candidate !== "unreadable" && candidate.run_id === owner.run_id && !!candidate.host && candidate.host === owner.host,
+    onReclaim: () => {},
+  });
+}
+
+/** W1-T13991 — true while `pr`'s branch claim is held by a live process whose round has not ended for `pr`'s head: no
+ *  `fix.done` yet (it is still working), or a CI wait on that head ({@link fixRoundIsLiveOnHead}). A round that ended, a
+ *  dead holder, or a head moved by anyone but the waiting round reads false, as origin/main reclaims each. */
+export function fixRoundHoldsBranch(
+  pr: OpenPrView,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  io: { inflightDir: string; claimKeyFor: (branch: string) => string; nowMs: number; boundMs: number;
+    isPidAlive: (pid: number) => boolean; processStart?: FixRoundLiveProbe["processStart"]; hostname: string },
+): boolean {
+  if (!pr.headRefName) return true;
+  const holder = readInflightLock(io.inflightDir, io.claimKeyFor(pr.headRefName));
+  if (!holder) return false;
+  if (isHolderStale(holder, { isPidAlive: io.isPidAlive })) return false;
+  return !fixRoundClaimEndedIn(lines, holder.run_id, { headSha: pr.headSha, holder, nowMs: io.nowMs, boundMs: io.boundMs,
+    isPidAlive: io.isPidAlive, processStart: io.processStart, hostname: io.hostname });
+}
+
+export function deferToLiveFixRound(
+  pr: OpenPrView,
+  lines: ReadonlyArray<Record<string, unknown>>,
+  io: { inflightDir: string; stateRoot: string; claimKeyFor: (branch: string) => string; nowMs: number; boundMs: number;
+    isPidAlive: (pid: number) => boolean; processStart?: FixRoundLiveProbe["processStart"]; hostname: string;
+    beforePublish?: () => void },
+): LiveFixRoundDeferral | undefined {
+  // A conflicted head is still the live round's own head: main moved under it, so the round takes the conflict too.
+  if (!pr.headRefName) return undefined;
+  const claimKey = io.claimKeyFor(pr.headRefName);
+  const holder = readInflightLock(io.inflightDir, claimKey);
+  if (!holder || !fixRoundIsLiveOnHead(lines, { headSha: pr.headSha, holder, nowMs: io.nowMs, boundMs: io.boundMs,
+    isPidAlive: io.isPidAlive, processStart: io.processStart, hostname: io.hostname })) return undefined;
+  const liveRoundRunId = String(lines.findLast((row) => row.step === "fix.done" && row.branch_claim_run_id === holder.run_id)?.run_id);
+  const failure: FixRoundHandoffFailure = pr.mergeState === "dirty" ? "conflict" : isBlockedCi(pr) ? "check" : "review";
+  if (failure === "review" && pr.unmetCriteria.length === 0 && (pr.actionableGateFailures?.length ?? 0) === 0) return undefined;
+  const path = fixRoundHandoffPath(io.stateRoot, holder.run_id);
+  const prior = readFixRoundHandoff(path);
+  const stillHeld = () => sameFixClaim(readInflightLock(io.inflightDir, claimKey), holder);
+  if (prior?.claim_run_id === holder.run_id && prior.round_run_id === liveRoundRunId && prior.head_sha === pr.headSha && stillHeld()) {
+    return { liveRoundRunId, claimRunId: holder.run_id, failure: prior.failure, handedOff: false };
+  }
+  const handoff: FixRoundHandoff = { claim_run_id: holder.run_id, round_run_id: liveRoundRunId, head_sha: pr.headSha, failure,
+    ...(failure === "review" ? { review_summary: pr.reviewSummary, actionable_gate_failures: pr.actionableGateFailures }
+      : failure === "check" ? { ci_failures: pr.ciFailures ?? [] } : {}),
+    unmet_criteria: failure === "review" ? pr.unmetCriteria : [], ts: clockFromMillisFn(() => io.nowMs).iso() };
+  if (publishFixRoundFile(path, JSON.stringify(handoff), () => {
+    io.beforePublish?.();
+    return stillHeld();
+  })) {
+    return { liveRoundRunId, claimRunId: holder.run_id, failure, handedOff: true };
+  }
+  if (!stillHeld()) return undefined;
+  const published = readFixRoundHandoff(path);
+  return published?.claim_run_id === holder.run_id && published.round_run_id === liveRoundRunId && published.head_sha === pr.headSha
+    ? { liveRoundRunId, claimRunId: holder.run_id, failure: published.failure, handedOff: false }
+    : undefined;
 }
 
 /** W1-T7719: nearest-rank p95 of live-ledger claim-to-end spans. W1-T7998: with no history it is
@@ -15609,13 +16093,13 @@ export function acquireFixRoundClaim(
   inflightDir: string,
   claimKey: string,
   claimRunId: string,
-  roundEnded: (claimRunId: string) => boolean,
+  roundEnded: (claimRunId: string, holder?: InflightLockInfo) => boolean,
 ): { handle: InflightLockHandle; endedRunId?: string } {
   let endedRunId: string | undefined;
   const cleared = reclaimStaleLock(inflightLockPath(inflightDir, claimKey), {
     parseHolder: parseInflightLockInfo,
     isStale: (held) => {
-      if (roundEnded(held.run_id)) endedRunId = held.run_id;
+      if (roundEnded(held.run_id, held)) endedRunId = held.run_id;
       return endedRunId !== undefined;
     },
   });
@@ -15629,7 +16113,7 @@ export function reclaimFixRoundBranch(opts: {
   inflightDir: string;
   claimKey: string;
   claimRunId: string;
-  roundEnded: (claimRunId: string) => boolean;
+  roundEnded: (claimRunId: string, holder?: InflightLockInfo) => boolean;
   ownsWorktree: () => boolean;
 }): InflightLockHandle | string {
   let owns: boolean;
@@ -15656,14 +16140,21 @@ export interface FixRoundBranchClaim {
   last(): InflightLockHandle;
   /** Positive current lock identity; absent on an older adapter means UNKNOWN. */
   verify?(): string | undefined;
+  /** W1-T13991: keep the held claim, unreleased, through this round's `fix.done` into its CI wait. The fields name the
+   *  wait on that `fix.done` row; a string is why the claim cannot be kept, and the caller then releases it as before. */
+  keepForWait?(): Record<string, unknown> | string;
 }
 
-export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => InflightLockHandle | string): FixRoundBranchClaim {
+/** W1-T13991: `keep` readies a held claim for its CI wait and returns the fields that read the wait live; without it no
+ *  claim is held through a CI wait. */
+export function fixRoundBranchClaim(
+  first: InflightLockHandle, retake: () => InflightLockHandle | string, keep?: (held: InflightLockHandle) => Record<string, unknown> | string,
+): FixRoundBranchClaim {
   let held: InflightLockHandle | undefined = first;
   let last = first;
   let verificationRequired = false;
-  const verify = () => {
-    verificationRequired = true;
+  let heldForWait = false;
+  const identity = () => {
     if (!held) return "branch claim is not held";
     try {
       const fd = fs.openSync(held.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -15676,22 +16167,46 @@ export function fixRoundBranchClaim(first: InflightLockHandle, retake: () => Inf
         raw = bytes.subarray(0, length).toString("utf8");
       } finally { fs.closeSync(fd); }
       const info = parseInflightLockInfo(raw);
-      if (!info || !info.host || !info.startedAt || info.run_id !== held.info.run_id || info.pid !== held.info.pid ||
-          info.host !== held.info.host || info.startedAt !== held.info.startedAt) return "branch claim belongs to another owner";
+      if (!sameFixClaim(info, held.info)) return "branch claim belongs to another owner";
       return undefined;
     } catch {
       const reason = "branch claim identity is unavailable";
       return reason;
     }
   };
+  const verify = () => {
+    verificationRequired = true;
+    return identity();
+  };
+  const releaseHeld = () => {
+    if (held === undefined) return;
+    if (!heldForWait && !verificationRequired) {
+      held.release();
+      return;
+    }
+    if (identity() === undefined) releaseOwnedFixClaim(held.path, held.info);
+  };
   return {
     id: () => held?.info.run_id,
     release: () => {
-      // A refresh that verified ownership must not later unlink an unknown or replacement holder.
-      if (!verificationRequired || verify() === undefined) held?.release();
+      releaseHeld();
       held = undefined;
+      heldForWait = false;
     },
+    ...(keep === undefined ? {} : { keepForWait: () => {
+      if (!held) return "branch claim is not held";
+      const live = keep(held);
+      if (typeof live === "string") return live;
+      heldForWait = true;
+      return live;
+    } }),
     reacquire: () => {
+      // W1-T13991: a claim held through the wait is handed back after it; a replacement holder is never unlinked.
+      if (held && heldForWait) {
+        releaseHeld();
+        held = undefined;
+        heldForWait = false;
+      }
       if (held) return undefined;
       const next = retake();
       if (typeof next === "string") return next;
@@ -17230,6 +17745,14 @@ export interface SweepDeps {
   claimFixAdmission?: (pr: OpenPrView) =>
     | { admitted: true; release?: () => void }
     | { admitted: false; reason: string };
+  /** Shared by the sweep and its hosted children before either charges a fix admission. */
+  fixAdmissionLockDir?: string;
+  /** W1-T13991 — the live fix round already waiting on CI for this PR's head, which takes its new failure
+   *  instead of a second round. Read under the fix-dispatch claim, before any fix admission. */
+  deferToLiveFixRound?: (pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>) => LiveFixRoundDeferral | undefined;
+  /** W1-T13991 — true while the PR's branch claim is held by a round that has not ended for this PR's head
+   *  ({@link fixRoundHoldsBranch}). Absent: a head moved under a held admission waits for it. */
+  fixRoundHoldsBranch?: (pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>) => boolean;
   /** W1-T3202 — identifies the one shared host-budget controller that admitted this pass's
    *  detached repairs. Full sweeps build it inside {@link runSweep}; light sweeps share one across
    *  their per-PR calls. Omission preserves every direct/test caller's previous behavior. */
@@ -18574,7 +19097,7 @@ export async function observeCodeqlConfigurationWarning(deps: SweepDeps, lines: 
     try {
       if (!lines.some(alreadyDispatched)) {
         mkdirSync(dirname(deps.ledgerPath), { recursive: true });
-        const lock = new DatabaseSync(`${deps.ledgerPath}.security-producer.lock.sqlite`, { timeout: 0 });
+        const lock = new DatabaseSync(`${deps.ledgerPath}${LEDGER_SECURITY_PRODUCER_LOCK_SUFFIX}`, { timeout: 0 });
         try {
           // Serialize receipt lookup and append across processes. Closing releases the lock before GitHub I/O.
           lock.exec("BEGIN IMMEDIATE");
@@ -20103,6 +20626,7 @@ const inFlightReviewKeys = new Set<string>();
  *  {@link claimFixDispatch} RE-READS the ledger the instant the claim is taken. A SEPARATE Set from
  *  the review mutex. // Why: 13 dispatches across two PRs against a cap of 2. */
 const inFlightFixKeys = new Set<string>();
+const hostedFixGrants = new Set<string>();
 
 /** W1-T5032 — a proof amendment's `fix.dispatch` identity row is an idempotency record, never a strike;
  *  hidden from the strike tally here, while `lookupIdentity` still reads it. */
@@ -20813,11 +21337,14 @@ export interface FixDispatchEnvelope {
   schema: 1;
   pr: OpenPrView;
   evidence: Omit<FixDispatchEvidence, "progressJudge">;
-  /** The in-process mutex key the sweep held when it decided; the child's registration holds it until the child settles. */
+  /** The head-specific key the sweep held when it decided; the child's registration holds it until the child settles. */
   fixKey: string;
   decidedAtMs: number;
   /** The original admission wait survives retries and daemon restarts. */
   admissionSinceMs?: number;
+  fixAdmissionLockDir?: string;
+  /** W1-T13991: the dispatching sweep's holder of the PR's admission lock, which the child adopts in place. */
+  fixAdmissionOwner?: InflightLockInfo;
   /** The canonical task context the sweep saw (`planContextDigestFor`); a child that reads another one refuses. */
   planContextDigest?: string;
   dedupeKey?: string;
@@ -20826,7 +21353,8 @@ export interface FixDispatchEnvelope {
 /** The envelope for a decision, as plain JSON. Throws when the view or the evidence is not serializable: the dispatch then stays in process. */
 export function buildFixDispatchEnvelope(
   pr: OpenPrView, evidence: FixDispatchEvidence, facts: {
-    fixKey: string; decidedAtMs: number; admissionSinceMs?: number; planContextDigest?: string; dedupeKey?: string;
+    fixKey: string; decidedAtMs: number; admissionSinceMs?: number; fixAdmissionLockDir?: string; fixAdmissionOwner?: InflightLockInfo;
+    planContextDigest?: string; dedupeKey?: string;
   },
 ): FixDispatchEnvelope {
   const serializable: Omit<FixDispatchEvidence, "progressJudge"> & { progressJudge?: FixProgressJudge } = { ...evidence };
@@ -20840,6 +21368,9 @@ export function readFixDispatchEnvelope(raw: unknown): FixDispatchEnvelope | und
   const e = raw as Partial<FixDispatchEnvelope>;
   if (e.schema !== 1 || typeof e.fixKey !== "string" || typeof e.decidedAtMs !== "number") return undefined;
   if (e.admissionSinceMs !== undefined && (typeof e.admissionSinceMs !== "number" || !Number.isFinite(e.admissionSinceMs))) return undefined;
+  if (e.fixAdmissionLockDir !== undefined && typeof e.fixAdmissionLockDir !== "string") return undefined;
+  if (e.fixAdmissionOwner !== undefined && (typeof e.fixAdmissionOwner !== "object" || e.fixAdmissionOwner === null ||
+    typeof e.fixAdmissionOwner.run_id !== "string" || typeof e.fixAdmissionOwner.pid !== "number")) return undefined;
   const { pr, evidence } = e;
   if (typeof pr !== "object" || pr === null || typeof pr.prNumber !== "number" || typeof pr.prUrl !== "string" || typeof pr.headSha !== "string") return undefined;
   if (typeof evidence !== "object" || evidence === null || !Array.isArray(evidence.unmetCriteria)) return undefined;
@@ -20964,7 +21495,12 @@ export async function recheckFixDispatch(
  * lost, never as success), not a quiet return.
  */
 export async function runFixDispatchChild(inputs: Record<string, unknown>, deps: FixDispatchChildPorts): Promise<void> {
-  const decided = readFixDispatchEnvelope(inputs.envelope);
+  // W1-T13991: an admission lock the dispatching sweep handed this child is never freed here, adopted or not. The host keeps
+  // this child's memory reservation until it settles the child, and the sweep frees the lock only then.
+  await runAdmittedFixDispatchChild(readFixDispatchEnvelope(inputs.envelope), deps);
+}
+
+async function runAdmittedFixDispatchChild(decided: FixDispatchEnvelope | undefined, deps: FixDispatchChildPorts): Promise<void> {
   if (decided === undefined) throw new Error("fix dispatch refused: the spec carries no readable decision envelope");
   const rechecked = await recheckFixDispatch(decided, deps);
   if (!rechecked.ok) {
@@ -20991,16 +21527,25 @@ export async function runFixDispatchChild(inputs: Record<string, unknown>, deps:
     throw new Error(`fix dispatch refused: ${reason}`);
   };
   refuseOnHold("before the admission grant");
-  let grant: ReturnType<FixDispatchChildPorts["claimFixAdmission"]>;
-  try {
-    grant = timedFixStage(deps.log, deps.stageClock, envelope.pr, "child-admission", () => deps.claimFixAdmission(envelope.pr));
-    if (grant?.admitted !== true) throw new Error(grant?.reason ?? "no readable admission grant");
-  } catch (error) {
-    const reason = `worker admission refused (${String((error as Error)?.message ?? error)})`;
+  const grantKey = envelope.fixKey;
+  if (hostedFixGrants.has(grantKey)) {
+    const reason = "a hosted fix round already holds admission for this pull request";
     deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason });
     throw new Error(`fix dispatch refused: ${reason}`);
   }
+  hostedFixGrants.add(grantKey);
+  let grant: PrFixAdmission | undefined;
+  let chargeHeld = true;
   try {
+    try {
+      grant = timedFixStage(deps.log, deps.stageClock, envelope.pr, "child-admission", () =>
+        (grant = claimFixAdmissionForPr(envelope.fixAdmissionLockDir, envelope.pr, deps.claimFixAdmission, envelope.fixAdmissionOwner)));
+      if (grant?.admitted !== true) throw new Error(grant?.reason ?? "no readable admission grant");
+    } catch (error) {
+      const reason = `worker admission refused (${String((error as Error)?.message ?? error)})`;
+      deps.log("sweep.fix.child_refused", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, reason });
+      throw new Error(`fix dispatch refused: ${reason}`);
+    }
     let effects: ReturnType<FixDispatchChildPorts["dispatcher"]>;
     try {
       effects = timedFixStage(deps.log, deps.stageClock, envelope.pr, "child-effects", () => deps.dispatcher());
@@ -21013,6 +21558,13 @@ export async function runFixDispatchChild(inputs: Record<string, unknown>, deps:
     const outcome = await effects.dispatchFix(
       envelope.pr, { ...envelope.evidence, ...(effects.fixProgressJudge === undefined ? {} : { progressJudge: effects.fixProgressJudge }) },
       (phase) => {
+        // W1-T13991: the CI wait frees the charge only. The PR's admission lock stays held, so no second round on this PR,
+        // on any head, is admitted while this child still holds the host's memory reservation.
+        if (phase === "ci-wait" && grant?.admitted && grant.lock !== undefined && chargeHeld) {
+          chargeHeld = false;
+          grant.releaseCharge?.();
+          markFixAdmissionChargeReleased(grant.lock);
+        }
         deps.onPhase?.(phase);
         deps.log("sweep.fix.child_phase", { pr_number: envelope.pr.prNumber, head_sha: envelope.pr.headSha, phase });
       },
@@ -21021,7 +21573,13 @@ export async function runFixDispatchChild(inputs: Record<string, unknown>, deps:
     const declined = fixClaimDeclinedReason(outcome);
     if (declined !== undefined) throw new Error(`fix dispatch refused: ${declined}`);
   } finally {
-    grant.release?.();
+    try {
+      if (grant?.admitted && (chargeHeld || grant.lock === undefined)) grant.release?.();
+      // A lock this child claimed itself (no sweep handed it one) is its own to free, after its charge.
+      else if (grant?.admitted && grant.lock !== undefined && !grant.adopted) releaseOwnedFixClaim(grant.lock.path, grant.lock.owner);
+    } finally {
+      hostedFixGrants.delete(grantKey);
+    }
   }
 }
 
@@ -22702,8 +23260,7 @@ export async function runSweep(
         return sweepDeps.dispatchFix(pr,
           { ...withDispatchCauseProgress(pr, evidence), progressJudge: evidence.progressJudge ?? sweepDeps.fixProgressJudge }, (phase, wait) => {
             if (phase === "ci-wait") {
-              fixCapacityReleases.get(pr.prNumber)?.();
-              fixCapacityReleases.delete(pr.prNumber);
+              releaseFixCapacity(pr);
             }
             onPhase?.(phase, wait);
           }, control);
@@ -23426,12 +23983,23 @@ export async function runSweep(
         dispatchCauseHolds.delete(prNumber);
     }
   }
-  const fixCapacityReleases = new Map<number, () => void>();
+  const fixCapacityReleases = new Map<string, () => void>();
+  // W1-T13991: the per-PR admission lock each held charge carries, handed to a hosted child in place.
+  const fixAdmissionLocks = new Map<string, { lock: FixAdmissionLock; releaseCharge?: () => void }>();
+  const fixCapacityKey = (pr: OpenPrView) => `${pr.prNumber}@${pr.headSha}`;
   const capacityClaim = deps.claimFixAdmission ?? countedYieldingFixClaim("full", fullRepairAdmission?.claim, ledgerLines, now, log, fullReviewCandidates ?? [], fullReviewQueue);
   const claimFixAdmission = capacityClaim ? (pr: OpenPrView) => {
-    const claim = capacityClaim(pr);
-    if (claim.admitted && claim.release) fixCapacityReleases.set(pr.prNumber, claim.release);
-    return claim;
+    try {
+      // W1-T13991: a head moved under a round that no longer holds the branch replaces that round's spent charge.
+      const roundHoldsBranch = deps.fixRoundHoldsBranch === undefined ? undefined
+        : () => deps.fixRoundHoldsBranch!(pr, readLedger(deps.ledgerPath));
+      const claim = claimFixAdmissionForPr(deps.fixAdmissionLockDir, pr, capacityClaim, undefined, roundHoldsBranch);
+      if (claim.admitted && claim.release) fixCapacityReleases.set(fixCapacityKey(pr), claim.release);
+      if (claim.admitted && claim.lock) fixAdmissionLocks.set(fixCapacityKey(pr), { lock: claim.lock, releaseCharge: claim.releaseCharge });
+      return claim.admitted ? { admitted: true as const, ...(claim.release ? { release: claim.release } : {}) } : claim;
+    } catch (error) {
+      return { admitted: false as const, reason: `fix admission failed: ${String(error)}` };
+    }
   } : undefined;
   const repairAdmissionTelemetry = deps.repairAdmissionTelemetry ?? fullRepairAdmission?.snapshot;
   // W1-T1223 (design ii) — read fresh every pass, off the SAME ledger read above; never held in
@@ -24373,14 +24941,19 @@ export async function runSweep(
     const host = installedWorkHost;
     if (deps.dryRun || host?.spawnFix === undefined || host.mode() !== "on") return false;
     let envelope: FixDispatchEnvelope;
+    const capacityKey = fixCapacityKey(pr);
+    const heldAdmission = deps.fixAdmissionLockDir === undefined ? undefined : fixAdmissionLocks.get(capacityKey);
     try {
       envelope = buildFixDispatchEnvelope(pr, withDispatchCauseProgress(pr, evidence), { fixKey: claim.fixKey, decidedAtMs: deps.now?.() ?? systemClock.now(),
-        admissionSinceMs: claim.control.admissionSinceMs, planContextDigest: deps.planContextDigestFor?.(pr), dedupeKey });
+        admissionSinceMs: claim.control.admissionSinceMs, fixAdmissionLockDir: deps.fixAdmissionLockDir,
+        ...(heldAdmission === undefined ? {} : { fixAdmissionOwner: heldAdmission.lock.owner }),
+        planContextDigest: deps.planContextDigestFor?.(pr), dedupeKey });
     } catch (error) {
       log("sweep.fix.child_envelope_refused", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
       return false;
     }
     let hosted: FixChildLaunch | undefined;
+    let launched = false;
     try {
       // W1-T13440: while the run child waits for admission this pass holds the key; record who holds it, and ledger it once.
       const onPending = ({ runId, abort }: { runId: string; abort: () => Promise<void> }) => {
@@ -24390,12 +24963,31 @@ export async function runSweep(
           pr_number: pr.prNumber, head_sha: pr.headSha, fix_key: claim.fixKey, child_run_id: runId,
         });
       };
+      if (heldAdmission !== undefined) {
+        // W1-T13991: the host charges the child's memory itself, so this pass's charge goes back now. The PR's admission lock
+        // does not: it is held through the host's reservation until the child adopts it, so no second round reserves.
+        fixCapacityReleases.delete(capacityKey);
+        fixAdmissionLocks.delete(capacityKey);
+        heldAdmission.releaseCharge?.();
+        markFixAdmissionChargeReleased(heldAdmission.lock);
+      } else if (deps.fixAdmissionLockDir !== undefined) releaseFixCapacity(pr);
       hosted = await host.spawnFix({ pr: { prNumber: pr.prNumber, headSha: pr.headSha, taskId: escalationTaskIdFor(pr) }, fixKey: claim.fixKey, envelope, onPending });
+      launched = hosted !== undefined && !("abandoned" in hosted);
     } catch (error) {
       log("sweep.fix.child_spawn_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
       return false;
     } finally {
       queuedHostFixes.delete(claim.fixKey);
+      // No child launched: free the lock now. A launched child may adopt it in place, but never frees it: the host holds the
+      // child's memory reservation until it settles the child, so the lock is freed at that settlement, whoever holds it.
+      if (heldAdmission !== undefined) {
+        const { path, owner } = heldAdmission.lock;
+        if (!launched) releaseFixAdmissionLineage(path, owner);
+        else if (hosted !== undefined && !("abandoned" in hosted)) void hosted.settled.finally(() => releaseFixAdmissionLineage(path, owner)).catch((error: unknown) => {
+          // A failed release leaves the lock for the stale-holder check; record it so the leak is visible.
+          log("sweep.fix.admission_release_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
+        });
+      }
     }
     if (hosted === undefined) return false;
     if ("abandoned" in hosted) {
@@ -24423,8 +25015,15 @@ export async function runSweep(
   /** The detached fix dispatch: hosted as a run child when the installed host takes it (`evidence` names the decision to carry),
    *  otherwise started in this process and handed to the registry a restart drains. */
   async function detachFixDispatch(pr: OpenPrView, work: (onPhase: DetachedFixPhaseObserver) => Promise<unknown>, claim: DetachedFixClaim,
-    dedupeKey?: string, evidence?: FixDispatchEvidence): Promise<void> {
+    dedupeKey?: string, evidence?: FixDispatchEvidence): Promise<string | undefined> {
     if (evidence !== undefined && await hostFixDispatch(pr, evidence, claim, dedupeKey)) return;
+    if (deps.fixAdmissionLockDir !== undefined && !fixCapacityReleases.has(fixCapacityKey(pr))) {
+      const admission = claimFixAdmission?.(pr);
+      if (admission && !admission.admitted) {
+        claim.release();
+        return admission.reason;
+      }
+    }
     detachPassFix(
       (onPhase) => work(onPhase).catch((e: unknown) => appendLine(deps.ledgerPath, {
         run_id: deps.runId,
@@ -24440,6 +25039,14 @@ export async function runSweep(
     );
   }
 
+  function releaseFixCapacity(pr: OpenPrView): void {
+    const key = fixCapacityKey(pr);
+    const release = fixCapacityReleases.get(key);
+    fixCapacityReleases.delete(key);
+    fixAdmissionLocks.delete(key);
+    release?.();
+  }
+
   /** W1-T2520 — CLAIM THIS PR'S FIX-DISPATCH KEY, or refuse: the fix-rung twin of the review claim
    *  above. Refuses in exactly two shapes, both SYNCHRONOUS — no `await` ever separates the check
    *  from the claim: a genuinely concurrent second claim, or a strike count RE-READ off the ledger
@@ -24451,34 +25058,41 @@ export async function runSweep(
   ): ({ ok: true } & DetachedFixClaim) | { ok: false; reason: string } {
     const fixTaskId = fixLedgerTaskIdFor(pr);
     const fixKey = `${fixTaskId ?? ""}@${pr.headSha}`;
-    if (inFlightFixKeys.has(fixKey)) {
+    // The current owner can receive a hand-off even while it still holds admission for the PR.
+    const freshLines = readLedger(deps.ledgerPath);
+    const live = deps.deferToLiveFixRound?.(pr, freshLines);
+    if (live !== undefined) {
+      if (live.handedOff) log("sweep.fix.deferred_to_live_round", { pr_number: pr.prNumber, head_sha: pr.headSha, task_id: fixTaskId,
+        live_round_run_id: live.liveRoundRunId, claim_run_id: live.claimRunId, failure: live.failure });
+      return { ok: false, reason: `deferred to the live fix round ${live.liveRoundRunId} waiting on CI for ${pr.headSha}` };
+    }
+    // The dispatch and strike budget stay keyed by head. The memory charge follows the PR.
+    const heldKey =
+      [...childWork.values()].find((work) => work.kind === "fix-dispatch" && work.fixKey === fixKey)?.fixKey ??
+      (inFlightFixKeys.has(fixKey) ? fixKey : undefined);
+    if (heldKey !== undefined) {
       const nowMs = deps.now?.() ?? systemClock.now();
-      const queued = queuedHostFixHolder(fixKey, nowMs);
+      const queued = queuedHostFixHolder(heldKey, nowMs);
       if (queued && !queued.queued.releasing && queued.ageMs >= QUEUED_FIX_ADMISSION_RELEASE_MS) {
         // W1-T13440: past the bound, abandon the wait. The awaiting pass's abandoned path releases the key and ledgers
         // `sweep.fix.dispatch_failed`; this row says why it was abandoned.
         queued.queued.releasing = true;
         appendLine(deps.ledgerPath, {
           run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: "sweep.fix.child_admission_released",
-          pr_number: pr.prNumber, head_sha: pr.headSha, fix_key: fixKey, child_run_id: queued.queued.runId,
+          pr_number: queued.queued.prNumber, head_sha: queued.queued.headSha, fix_key: heldKey, child_run_id: queued.queued.runId,
           waited_ms: queued.ageMs, bound_ms: QUEUED_FIX_ADMISSION_RELEASE_MS,
         });
         void queued.queued.abort().catch((error: unknown) => log("sweep.fix.child_admission_release_failed", {
-          pr_number: pr.prNumber, head_sha: pr.headSha, fix_key: fixKey, child_run_id: queued.queued.runId,
+          pr_number: queued.queued.prNumber, head_sha: queued.queued.headSha, fix_key: heldKey, child_run_id: queued.queued.runId,
           error: String((error as Error)?.message ?? error),
         }));
       }
       return {
         ok: false,
-        reason: detachedFixHolder(fixKey, nowMs)?.reason ??
-          `duplicate fix-dispatch key (${fixKey}) already claimed this pass — a concurrent sweep is already dispatching this PR's fix rung`,
+        reason: detachedFixHolder(heldKey, nowMs)?.reason ??
+          `duplicate fix-dispatch key (${heldKey}) already claimed this pass — a concurrent sweep is already dispatching this PR's fix rung`,
       };
     }
-    inFlightFixKeys.add(fixKey);
-    // READ UNDER THE CLAIM: taken only now the claim is held, so a `fix.dispatch` row a concurrent
-    // caller wrote before this instant is counted here even though this pass's own `ledgerLines`,
-    // read before any claim existed, predates it.
-    const freshLines = readLedger(deps.ledgerPath);
     const freshTally = fixRoundTally(freshLines, fixTaskId, pr.headSha);
     // W1-T5542 + W1-T7096: a stale view reaching the claim at (or past) the former ceiling, or on a
     // repeated refusal, was never ruled by the progress judge — refuse it here exactly as before; a PR
@@ -24486,7 +25100,6 @@ export async function runSweep(
     const ceiling = fixCeilingInForce(pr, policy.strikeCap, policy.clarify);
     if (pr.progressContinue === undefined &&
         (freshTally.strikes >= ceiling || (freshTally.repeatedRefusal !== undefined && !planFlagRung))) {
-      inFlightFixKeys.delete(fixKey);
       return {
         ok: false,
         reason: freshTally.repeatedRefusal !== undefined
@@ -24497,7 +25110,6 @@ export async function runSweep(
     const history = (lines: readonly Record<string, unknown>[]) => JSON.stringify(lines.filter(row =>
       row.task_id === fixTaskId && ["fix.dispatch", "fix.retrigger", "fix.done", "fix.commit_refused"].includes(String(row.step))));
     if (history(freshLines) !== history(ledgerLines)) {
-      inFlightFixKeys.delete(fixKey);
       return {
         ok: false,
         reason: "fix round history changed during judgment — re-derive and re-ask next pass",
@@ -24511,14 +25123,14 @@ export async function runSweep(
       fixAdmissionSince.set(fixKey, lastDone.admission_since_ms);
     }
     const abandon = new AbortController();
+    inFlightFixKeys.add(fixKey);
     let released = false;
     const release = () => {
       if (released) return;
       released = true;
       inFlightFixKeys.delete(fixKey);
       if (!abandon.signal.aborted) fixAdmissionSince.delete(fixKey);
-      fixCapacityReleases.get(pr.prNumber)?.();
-      fixCapacityReleases.delete(pr.prNumber);
+      releaseFixCapacity(pr);
     };
     return {
       ok: true,
@@ -26725,7 +27337,8 @@ export async function runSweep(
                 extraDisposedFields = fixRoute.disposed;
                 const fixEvidence = { unmetCriteria: [], ciFailures: fixRoute.ciFailures };
                 if (deps.detachFixWait) {
-                  await detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase, fixClaim.control)), fixClaim, undefined, fixEvidence);
+                  const refusal = await detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase, fixClaim.control)), fixClaim, undefined, fixEvidence);
+                  if (refusal) [acted, standDownReason] = [false, refusal];
                   break;
                 }
                 const fixOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
@@ -27227,7 +27840,8 @@ export async function runSweep(
                 const judgedCodeqlEvidence: FixDispatchEvidence = { ...codeqlEvidence, progressDecision,
                   progressApproach: progressDecision?.verdict === "change-approach" ? progressDecision.approach : undefined };
                 if (deps.detachFixWait) {
-                  await detachFixDispatch(pr, (onPhase) => codeqlClaim.run(() => deps.dispatchFix(pr, judgedCodeqlEvidence, onPhase, codeqlClaim.control)), codeqlClaim, dedupeKey, judgedCodeqlEvidence);
+                  const refusal = await detachFixDispatch(pr, (onPhase) => codeqlClaim.run(() => deps.dispatchFix(pr, judgedCodeqlEvidence, onPhase, codeqlClaim.control)), codeqlClaim, dedupeKey, judgedCodeqlEvidence);
+                  if (refusal) [acted, standDownReason] = [false, refusal];
                   break;
                 }
                 const codeqlOutcome = await codeqlClaim.run(() => deps.dispatchFix(pr, judgedCodeqlEvidence));
@@ -27998,7 +28612,8 @@ export async function runSweep(
                 standDownReason = `flake claim refuted at ${pr.headSha} — dispatching a real fix round`;
               }
               if (deps.detachFixWait) {
-                await detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase, fixClaim.control)), fixClaim, undefined, fixEvidence);
+                const refusal = await detachFixDispatch(pr, (onPhase) => fixClaim.run(() => deps.dispatchFix(pr, fixEvidence, onPhase, fixClaim.control)), fixClaim, undefined, fixEvidence);
+                if (refusal) [acted, standDownReason] = [false, refusal];
                 break;
               }
               const dispatchOutcome = await fixClaim.run(() => deps.dispatchFix(pr, fixEvidence));
@@ -28211,7 +28826,8 @@ export async function runSweep(
               };
               // W1-T2379: the conflicted twin of the blocked-fixable arm above, same reasoning.
               if (deps.detachFixWait) {
-                await detachFixDispatch(pr, (onPhase) => conflictedFixClaim.run(ownedDispatch(onPhase, conflictedFixClaim.control)), conflictedFixClaim, undefined, conflictedEvidence);
+                const refusal = await detachFixDispatch(pr, (onPhase) => conflictedFixClaim.run(ownedDispatch(onPhase, conflictedFixClaim.control)), conflictedFixClaim, undefined, conflictedEvidence);
+                if (refusal) [acted, standDownReason] = [false, refusal];
                 break;
               }
               const conflictedDispatchOutcome = await conflictedFixClaim.run(ownedDispatch());
