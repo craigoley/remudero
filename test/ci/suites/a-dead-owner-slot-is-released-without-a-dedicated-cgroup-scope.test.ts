@@ -14,7 +14,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -53,9 +53,12 @@ function holder(fields: Partial<TestSlotHolder> = {}): TestSlotHolder {
     heartbeatIntervalMs: CADENCE, workIdentity: "reservation-marker-v1", concurrency: 1, ...fields };
 }
 
+/** A shared (not private) slot record: created group- and world-readable whatever the runner's umask is. A rewrite
+ *  of an existing record keeps the mode it was created with. */
 function writeHolder(path: string, held: TestSlotHolder): void {
-  writeFileSync(path, JSON.stringify(held));
-  chmodSync(path, 0o644);
+  const prior = process.umask(0o022);
+  try { writeFileSync(path, JSON.stringify(held), { mode: 0o644 }); }
+  finally { process.umask(prior); }
 }
 
 type Entry = { start: number; environ?: string | Error };

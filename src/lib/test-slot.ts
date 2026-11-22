@@ -470,12 +470,12 @@ interface QuiescentScanRecord { reservation: TestSlotReservationIdentity; firstS
 function readQuiescentScan(path: string): QuiescentScanRecord | undefined {
   let fd: number;
   try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
-  catch { return undefined; }
+  catch { return undefined; /* absent, a link or unopenable: no kept scan, so this poll keeps a fresh first one */ }
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.uid !== process.getuid?.() || st.size > 4096) return undefined;
     return JSON.parse(readFileSync(fd, "utf8")) as QuiescentScanRecord;
-  } catch { return undefined; }
+  } catch { return undefined; /* unreadable or not JSON: no kept scan, which delays a release and never makes one */ }
   finally { closeSync(fd); }
 }
 
