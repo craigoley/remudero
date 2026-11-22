@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 40.00
+  budget_usd: 4.50
   rationale: "evidence-coverage-v1 over benchmark-quality-v1 reports lane `ci-judge`, field `cost`: 7/37 joined worker calls (18.9%) against the field's 90.0% floor, first seen 2026-10-08T16:51:25Z. A reading under the floor is a chronic gap no baseline excuses (W1-T4640). The CI judge spawns via benchmarkNonDispatchSpawn('ci-judge') in src/lib/ci-escalation-judge.ts; src/lib/benchmark-evidence.ts names what cost reads (terminal.costUsd, classified by billingMode). Sibling gaps: W1-T8953 (isolation cost), W1-T8448 (daemon cost)."
   design: |
     DIAGNOSE FIRST. Find which ci-judge worker calls land without cost_usd: compare the worker.attempt rows written by benchmarkNonDispatchSpawn (src/lib/benchmark-run.ts) with the WorkerResult costUsd the judge logs as ci_judge.spend. Candidates: failed or malformed-reply attempts whose terminal row is written without the WorkerResult accounting, or a billing mode that reports no cost.

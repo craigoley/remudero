@@ -234,6 +234,7 @@ import {
   policyForCapability,
   providerHeadroomTiming,
   selectWorkerProviderForPolicy,
+  type CapabilityPreferenceStandAside,
   type EffectiveProviderRoutingPolicy,
   type ProviderRoutingPreference,
 } from "./provider-routing-policy.js";
@@ -552,8 +553,9 @@ export interface WorkerSelectionAssignment {
     tightestRemainingPercent?: number;
     allocationSharePercent?: number;
     preferenceBypass?: { provider: WorkerProviderId; reason: string };
-    /** Present when the requested capability's declared preference governed an automatic auction. */
-    capabilityPreference?: { capability: string; provider: WorkerProviderId };
+    /** Present when the requested capability's declared preference governed an automatic auction. W1-T14298:
+     * `stoodAside` names why it returned the spawn to the headroom auction instead. */
+    capabilityPreference?: { capability: string; provider: WorkerProviderId; stoodAside?: CapabilityPreferenceStandAside };
     /** W1-T12172: present when the worker role's declared preference governed an automatic auction. */
     rolePreference?: { role: string; provider: WorkerProviderId };
     /** WHY: the rule that fired, what it weighed, and each subscription's headroom at that moment. */
@@ -1835,7 +1837,7 @@ export function workerSelectionAssignment(
     exclusion_unhonoured?: { reason: "no-eligible-alternative"; excludedProviders: WorkerProviderId[] };
     selection?: ProviderSelection;
     preferenceBypass?: { provider: WorkerProviderId; reason: string };
-    capabilityPreference?: { capability: string; provider: WorkerProviderId };
+    capabilityPreference?: { capability: string; provider: WorkerProviderId; stoodAside?: CapabilityPreferenceStandAside };
     rolePreference?: { role: string; provider: WorkerProviderId };
     /** Further models the provider's own ladder held in reserve (the cash walk's alternatives). */
     alternatives?: readonly string[];
@@ -1911,7 +1913,7 @@ function routingRule(args: SpawnWorkerArgs, input: Parameters<typeof workerSelec
   if (input.selection?.lane === "codex-credits") return "codex-credits";
   if (input.preferenceBypass) return "preference-bypassed";
   if (input.rolePreference) return "role-preference";
-  if (input.capabilityPreference) return "capability-preference";
+  if (input.capabilityPreference && !input.capabilityPreference.stoodAside) return "capability-preference";
   return input.policy.preference === "automatic" ? "headroom-auction" : "operator-preference";
 }
 
@@ -2805,7 +2807,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   let routedClaudeSelection: ProviderSelection | undefined;
   let routedClaudeCapacities: ProviderCapacity[] | undefined;
   let routedClaudePreferenceBypass: { provider: WorkerProviderId; reason: string } | undefined;
-  let routedCapabilityPreference: { capability: string; provider: WorkerProviderId } | undefined;
+  let routedCapabilityPreference: WorkerSelectionAssignment["routing"]["capabilityPreference"];
   let routedRolePreference: { role: string; provider: WorkerProviderId } | undefined;
   if (providers.length === 1 && providers[0] === "claude" && claudeHealthRoute && !claudeHealthRoute.eligible) {
     const capacity = unavailableClaudeCapacity(claudeHealthRoute);
@@ -2891,6 +2893,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         capabilities?.providerPreference,
         // W1-T12172: the disposable review sandbox is the one spawn whose worker role the router can tell apart.
         { role: args.sandboxIntent === "disposable-review" ? "reviewer" : undefined, preferences: capabilities?.rolePreference },
+        // W1-T14298: judged on this decision's capacities, exclusions and W1-T14200's clock and curve.
+        { capacities, timing: headroomTiming, ...(args.excludeProviders ? { excludeProviders: args.excludeProviders } : {}) },
       );
       routedCapabilityPreference = auction.capabilityPreference;
       routedRolePreference = auction.rolePreference;

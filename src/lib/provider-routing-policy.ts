@@ -14,6 +14,7 @@ import {
   ProviderCapacityBlockedError,
   providerEligibility,
   selectWorkerProvider,
+  windowReserveCeiling,
   type ProviderCapacity,
   type ProviderHeadroomTiming,
   type CodexModelPreference,
@@ -461,19 +462,43 @@ export function resolveProviderRoutingPolicy(
   };
 }
 
+/** W1-T14298: why a capability preference returned its spawn to the headroom auction. */
+export type CapabilityPreferenceStandAside = "expiring-budget";
+
+/** W1-T14298: what a capability preference is judged against: this decision's capacities, exclusions and timing. */
+export interface ExpiringBudgetInput {
+  capacities: readonly ProviderCapacity[];
+  timing?: ProviderHeadroomTiming;
+  excludeProviders?: readonly WorkerProviderId[];
+}
+
+/**
+ * W1-T14298: a subscription whose budget expires inside the reset curve's final rung. It must take work on its own
+ * subscription headroom (credits are not expiring budget), and EVERY window it reports must have a readable reset on
+ * a rung whose relaxed ceiling exceeds `100 - reserve` (W1-T14200's {@link windowReserveCeiling}). A five-hour
+ * window always resets inside the rung, so it alone never qualifies; an unreadable reset never relaxes.
+ */
+function inFinalRungWithBudget(capacity: ProviderCapacity, reservePercent: number, timing: ProviderHeadroomTiming): boolean {
+  const verdict = providerEligibility(capacity, reservePercent, timing);
+  if (!verdict.eligible || verdict.lane !== undefined) return false;
+  return capacity.windows.every((window) => windowReserveCeiling(window, reservePercent, timing) > 100 - reservePercent);
+}
+
 /**
  * An operator's explicit preference wins; only an `automatic` policy takes a declared one. W1-T12172: the worker
  * role's preference is applied before the capability's, so one role can prefer a provider while the other roles
- * that share its capability stay in the headroom auction.
+ * that share its capability stay in the headroom auction. W1-T14298: a CAPABILITY preference stands aside, leaving
+ * the policy automatic, while another routable, unexcluded provider is in its final rung with budget left.
  */
 export function policyForCapability(
   policy: EffectiveProviderRoutingPolicy,
   capability: string | undefined,
   preferences: Record<string, WorkerProviderId> | undefined,
   role?: { role: string | undefined; preferences: Readonly<Record<string, WorkerProviderId | undefined>> | undefined },
+  budget?: ExpiringBudgetInput,
 ): {
   policy: EffectiveProviderRoutingPolicy;
-  capabilityPreference?: { capability: string; provider: WorkerProviderId };
+  capabilityPreference?: { capability: string; provider: WorkerProviderId; stoodAside?: CapabilityPreferenceStandAside };
   rolePreference?: { role: string; provider: WorkerProviderId };
 } {
   if (policy.preference !== "automatic") return { policy };
@@ -485,6 +510,11 @@ export function policyForCapability(
   }
   const provider = capability === undefined ? undefined : preferences?.[capability];
   if (provider === undefined || !policy.routableProviders.includes(provider)) return { policy };
+  const timing = budget?.timing;
+  const expiring = timing !== undefined && budget!.capacities.some((other) => other.provider !== provider &&
+    policy.routableProviders.includes(other.provider) && !budget!.excludeProviders?.includes(other.provider) &&
+    inFinalRungWithBudget(other, policy.reservePercent, timing));
+  if (expiring) return { policy, capabilityPreference: { capability: capability!, provider, stoodAside: "expiring-budget" } };
   return { policy: { ...policy, preference: provider }, capabilityPreference: { capability: capability!, provider } };
 }
 

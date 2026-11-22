@@ -30,7 +30,7 @@ function draft(fragmentYaml: string): DraftedCandidate {
   };
 }
 
-const ACCEPTANCE = '  acceptance:\n    - claim: "the anchor is re-read"\n      proof: "unit test: the anchor is re-read"\n';
+const ACCEPTANCE = '  design: |\n    NO-INVARIANTS: the fixture drafts a new anchor re-read only; no prior behavior changes.\n  acceptance:\n    - claim: "the anchor is re-read"\n      proof: "unit test: the anchor is re-read"\n';
 const ONE_TASK = '- id: W1-T2451\n  title: "Evidence anchors expire and nothing re-reads them"\n  repo: remudero\n  type: implement\n  origin: architect\n  files: [src/lib/inbox.ts]\n' + ACCEPTANCE;
 const TWO_TASKS =
   ONE_TASK + '- id: W1-T2452\n  title: "The second drafted task, filed beside the first"\n  repo: remudero\n  type: implement\n  origin: architect\n  files: [src/lib/inbox.ts]\n' + ACCEPTANCE;

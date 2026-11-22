@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 8.00
+  budget_usd: 4.50
   risk: low
   origin: "proof-debt:W1-T3591"
   plan_refs: ["W1-T33", "W1-T2477", "W1-T3591"]

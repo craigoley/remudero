@@ -2062,6 +2062,8 @@ function* triageRoute(
   e: Escalation,
   deps: EscalateDeps<AsyncIssueGateway>,
   allowAsyncJudge = false,
+  /** W1-T14350: set when the route awaited a judge or an auto-resolve executor, the only span another process can open the same issue in. */
+  awaited?: { ran: boolean },
 ): Steps<TriageRoute> {
   let cfg: EscalateTriageSettings | undefined;
   let mode: EscalationTriageMode = "shadow";
@@ -2075,6 +2077,7 @@ function* triageRoute(
       : { classTier: ledgerClassTier(e, deps.ledgerPath), ...supplied };
     outcome = triageEscalation(e, evidence);
     if (allowAsyncJudge && cfg?.judge && outcome.kind === "deliver" && outcome.decidedBy === "default") {
+      if (awaited) awaited.ran = true;
       const verdict = yield* step(() => judgeEscalation(e, { judge: cfg!.judge! }));
       appendLedger(deps.ledgerPath, {
         run_id: deps.runId, task_id: e.taskId, step: ESCALATION_JUDGED_STEP,
@@ -2128,6 +2131,7 @@ function* triageRoute(
     class: e.class, triage_action: action, head_sha: e.headSha, contract_revision: e.contractRevision,
   });
   let effect: string;
+  if (awaited) awaited.ran = true;
   try {
     effect = yield* step(() => execute(e));
     if (typeof effect !== "string" || !effect.trim()) throw new Error("executor supplied no effect receipt");
@@ -2145,6 +2149,41 @@ function* triageRoute(
   };
 }
 
+/** W1-T14350: the escalations this process has in flight, by dedup key, each settling to its issue URL
+ *  ("" when it opened none). A second async caller with a key in flight waits here, so a slow judge cannot
+ *  let it open a sibling. The key reads every field the dedup match reads, plus the ledger it writes to. */
+const escalationsInFlight = new Map<string, Promise<string>>();
+
+function escalationInFlightKey(e: Escalation, deps: Pick<EscalateDeps<AsyncIssueGateway>, "ledgerPath">): string {
+  return JSON.stringify([
+    deps.ledgerPath, e.taskId, e.class, extractPrRef(`${e.summary}\n${e.detail}`) ?? null, e.headSha ?? null,
+    e.headDedup ?? null, e.cause ?? null, e.contractRevision ?? null, e.summary,
+  ]);
+}
+
+/** Hold this escalation's key while `body` runs; a caller whose key is held waits and is handed the holder's
+ *  issue, and a holder that opened none (or failed) releases the key so the waiter raises its own. */
+function* escalateOncePerKey(
+  e: Escalation, deps: EscalateDeps<AsyncIssueGateway>, body: () => Steps<string>,
+): Steps<string> {
+  const key = escalationInFlightKey(e, deps);
+  for (let held = escalationsInFlight.get(key); held !== undefined; held = escalationsInFlight.get(key)) {
+    const url = yield* step(() => held);
+    if (url) return yield* recordDuplicateEscalation(e, { number: 0, url }, deps);
+  }
+  let release!: (url: string) => void;
+  const mine = new Promise<string>((resolve) => { release = resolve; });
+  escalationsInFlight.set(key, mine);
+  let url = "";
+  try {
+    url = yield* body();
+    return url;
+  } finally {
+    if (escalationsInFlight.get(key) === mine) escalationsInFlight.delete(key);
+    release(url);
+  }
+}
+
 function* escalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>, allowAsyncJudge = false): Steps<string> {
   if (allowAsyncJudge) {
     const asyncIssues = asyncIssueTwins.get(deps.issues as IssueGateway);
@@ -2156,11 +2195,23 @@ function* escalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>, al
   validateEscalationOptionKinds(e);
   const resolved = withExplicitConsequence(refuseUnlessResolvable(e));
   recordThreadMessage(resolved, deps);
+  if (!allowAsyncJudge) return yield* raiseEscalation(resolved, deps, allowAsyncJudge);
+  return yield* escalateOncePerKey(resolved, deps, () => raiseEscalation(resolved, deps, allowAsyncJudge));
+}
+
+function* raiseEscalation(resolved: Escalation, deps: EscalateDeps<AsyncIssueGateway>, allowAsyncJudge: boolean): Steps<string> {
   const dedup = yield* lookupDuplicateEscalation(resolved, deps);
   if (dedup.kind === "found") return yield* recordDuplicateEscalation(resolved, dedup.issue, deps);
   if (dedup.kind === "unreadable") return recordUnreadableDedup(resolved, dedup.error, deps);
   const messageCheck = checkOperatorMessageSafe(resolved);
-  const route = yield* triageRoute(resolved, deps, allowAsyncJudge);
+  const awaited = { ran: false };
+  const route = yield* triageRoute(resolved, deps, allowAsyncJudge, awaited);
+  // W1-T14350: only an awaited judge or executor can outlast another process's open, so only then read the list again.
+  if (awaited.ran) {
+    const again = yield* lookupDuplicateEscalation(resolved, deps);
+    if (again.kind === "found") return yield* recordDuplicateEscalation(resolved, again.issue, deps);
+    if (again.kind === "unreadable") return recordUnreadableDedup(resolved, again.error, deps);
+  }
   const url = yield* createEscalationIssue(resolved, deps, {
     queueLabel: route?.queueLabel ?? NEEDS_HUMAN_LABEL,
     step: route?.step ?? "escalation.issue_opened",

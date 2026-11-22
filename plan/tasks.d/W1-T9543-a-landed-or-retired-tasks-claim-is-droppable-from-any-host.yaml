@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 15.00
+  budget_usd: 4.50
   risk: high  # Rule 19: one concern — releasing a dispatch claim on plan evidence that its task is finished or abandoned; a wrong release reopens a double dispatch
   band_meaning: blast-radius
   origin: "operator session 2026-10-14: `rmd claim W1-T8171 --drop` refused the operator's own claim as another host's (hostname drift, W1-T9541); a claim on a finished task should drop whatever the host"

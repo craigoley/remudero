@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  dispatch_hold: true # reverses W1-T3471's deliberate fail-open on the merge path; the operator releases it
+  dispatch_hold: false # released: operator 2026-11-22T14:12:49Z "Release W1-T14317 after W1-T14314 is live"; live in daemon and serve at 56be1697c, 20:24Z
   risk: high # decides whether a PR may be armed to merge
   band_meaning: blast-radius
   origin: "operator-session#automation-root-causes-2026-11-22"

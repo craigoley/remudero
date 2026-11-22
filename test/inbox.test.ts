@@ -93,6 +93,8 @@ const CLEAN_FRAGMENT = `
   attempts: 0
   origin: architect
   files: [src/lib/plan.ts]
+  design: |
+    NO-INVARIANTS: the fixture drafts one new candidate task only; no prior behavior changes.
   acceptance:
     - claim: "the candidate does the thing"
       proof: "unit test: fixture X -> observable Y"
@@ -109,6 +111,8 @@ const DEP_UNMET_FRAGMENT = `
   status: queued
   attempts: 0
   origin: architect
+  design: |
+    NO-INVARIANTS: the fixture drafts one new candidate task only; no prior behavior changes.
   acceptance:
     - claim: "the candidate does the thing"
       proof: "unit test: fixture X -> observable Y"
@@ -125,6 +129,8 @@ const LINT_UNCLEAN_FRAGMENT = `
   status: queued
   attempts: 0
   origin: architect
+  design: |
+    NO-INVARIANTS: the fixture drafts one new candidate task only; no prior behavior changes.
   acceptance:
     - claim: "the operator is happy"
       proof: "operator confirms it works"
@@ -292,6 +298,8 @@ test("a drafted task depending on a SIBLING task in the same fragment is exempt 
   attempts: 0
   origin: architect
   files: [src/lib/plan.ts]
+  design: |
+    NO-INVARIANTS: the fixture drafts one new candidate task only; no prior behavior changes.
   acceptance: [{claim: "a", proof: "unit test: fixture -> observable"}]
 - id: W1-T911
   title: "sibling B, depends on sibling A"
@@ -304,6 +312,8 @@ test("a drafted task depending on a SIBLING task in the same fragment is exempt 
   attempts: 0
   origin: architect
   files: [src/lib/plan.ts]
+  design: |
+    NO-INVARIANTS: the fixture drafts one new candidate task only; no prior behavior changes.
   acceptance: [{claim: "b", proof: "unit test: fixture -> observable"}]
 `;
   const anchor: EvidenceAnchor = { description: "x", pattern: "landed", path: "MASTER-PLAN.md" };
@@ -917,6 +927,8 @@ const VALID_DRAFT_TEXT = [
   "  band_meaning: span",
   "  files: [src/lib/plan.ts, test/plan/drafted-candidate.test.ts]",
   "  origin: feedback#P1",
+  "  design: |",
+  "    NO-INVARIANTS: the fixture drafts one new candidate task only; no prior behavior changes.",
   "  acceptance:",
   '    - claim: "the drafted candidate does the thing"',
   '      proof: "unit test: test/plan/drafted-candidate.test.ts"',
@@ -1061,6 +1073,8 @@ const SIZING_DIRTY_DRAFT = [
   "  risk: medium",
   "  files: [src/lib/inbox.ts, src/lib/retro.ts]",
   "  origin: feedback#P1",
+  "  design: |",
+  "    NO-INVARIANTS: the fixture drafts one new candidate task only; no prior behavior changes.",
   "  acceptance:",
   '    - claim: "it does the cross-subsystem thing"',
   '      proof: "unit test: test/x.test.ts"',
@@ -1070,9 +1084,9 @@ const SIZING_DIRTY_DRAFT = [
 ].join("\n");
 
 test("lintDraftedFragment: a risk:medium two-subsystem task is a BLOCK sizing violation; a clean task is empty; unparseable ⇒ draft-parse", () => {
-  const dirty = lintDraftedFragment("- id: W1-T901\n  title: x\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: medium\n  files: [src/lib/inbox.ts, src/lib/retro.ts]\n  origin: feedback#P1\n  acceptance:\n    - claim: \"c\"\n      proof: \"unit test: test/x.test.ts\"\n  status: queued\n", "P1");
+  const dirty = lintDraftedFragment("- id: W1-T901\n  title: x\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: medium\n  files: [src/lib/inbox.ts, src/lib/retro.ts]\n  origin: feedback#P1\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n  acceptance:\n    - claim: \"c\"\n      proof: \"unit test: test/x.test.ts\"\n  status: queued\n", "P1");
   assert.ok(dirty.some((v) => v.check === "sizing" && v.severity === "block"), "medium-risk multi-subsystem ⇒ Rule-19 sizing block");
-  assert.deepEqual(lintDraftedFragment("- id: W1-T900\n  title: x\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: high\n  band_meaning: span\n  files: [src/lib/plan.ts, test/plan/x.test.ts]\n  origin: feedback#P1\n  acceptance:\n    - claim: \"c\"\n      proof: \"unit test: test/plan/x.test.ts\"\n  status: queued\n", "P1"), []);
+  assert.deepEqual(lintDraftedFragment("- id: W1-T900\n  title: x\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: high\n  band_meaning: span\n  files: [src/lib/plan.ts, test/plan/x.test.ts]\n  origin: feedback#P1\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n  acceptance:\n    - claim: \"c\"\n      proof: \"unit test: test/plan/x.test.ts\"\n  status: queued\n", "P1"), []);
   const parse = lintDraftedFragment("this: is: not: valid: yaml: [", "P1");
   assert.equal(parse[0]?.check, "draft-parse");
 });
