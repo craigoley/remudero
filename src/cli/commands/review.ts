@@ -56,6 +56,7 @@ import { taskTargetsRepo } from "../../lib/drain.js";
 import { checkReviewerCodeFreshnessAsync, type ReviewerCodeFreshness } from "../../lib/self-sync.js";
 import { acquireInflightLock } from "../../lib/inflight-lock.js";
 import { repoRoot, resolveOwnerRepo } from "../../lib/repo-location.js";
+import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
 import { fetchPrDiff, prDiffSourceAsync } from "../../lib/pr-diff.js";
 import { asOwnerRepoUnresolvable } from "../../lib/owner-repo.js";
 import { flagValue } from "../../lib/cli-args.js";
@@ -703,6 +704,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   reservationHomeDir?: string;
   /** Injectable arm (impl-BG), awaited (W1-T9549). Default: the awaited {@link armAutoMergeDetailedAsync}. */
   arm?: (prUrl: string, taskId: string) => ArmOutcome | Promise<ArmOutcome>;
+  /** W1-T13698: the repository's instance mode. Absent ⇒ read from the instance registry (unknown ⇒ live). */
+  repoMode?: "shadow" | "live";
   /**
    * W1-T178 (verdict stability): the run's ledger path, so a semantic-lane
    * downgrade on an UNCHANGED head sha whose deterministic floor still passes
@@ -1767,7 +1770,14 @@ export async function runReview(host: ReviewCommandHost, args: {
   const armCtx = { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, headRefName: args.headRefName, log,
     readChecksGreenReviewed: (_url: string, head: string) => readChecksGreenReviewedAtHead(owner, repo, head) };
   // W1-T9549: AWAITED. The daemon runs this review (`trackInFlightReview`), so the arm's gh and git leave its loop free.
-  await armIfVerdictPermitsAsync(verdict, armCtx, { arm: args.arm });
+  // W1-T13698: a shadow instance reviews and posts exactly as live does, but arms and merges nothing —
+  // the sweep's refusal (`automerge.shadow_refused`), now on the review lane's arm as well.
+  const repoMode = args.repoMode ?? instanceMode(`${owner}/${repo}`, readInstanceRegistryText(repoRoot));
+  const shadowRefusal = (): ArmOutcome => {
+    log("automerge.shadow_refused", { pr_url: prUrl, task_id: task.id, reason: "shadow instance cannot arm or merge" });
+    return "shadow-refused";
+  };
+  await armIfVerdictPermitsAsync(verdict, armCtx, { arm: repoMode === "shadow" ? shadowRefusal : args.arm });
   // Record after both authoritative posting and auto-merge eligibility. The recorder
   // swallows telemetry write failures; replay returns above before reaching this call.
   if (planOnlySkip) log("review.plan_only_phases", { head_sha: headSha, ...planOnlyPhaseFields(phases, systemClock.now(), args.materializeMs) });

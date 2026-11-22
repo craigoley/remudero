@@ -1083,7 +1083,9 @@ export type ArmOutcome =
   // W1-T4581: a declared stack parent is unmerged or its state could not be read.
   | "stack-parent-refused"
   // W1-T5615: a plan-touching PR whose checks are not green, or whose facts were unreadable.
-  | "plan-pr-held";
+  | "plan-pr-held"
+  // W1-T13698: a shadow instance arms and merges nothing on any lane, the review lane's arm included.
+  | "shadow-refused";
 
 /**
  * W1-T1079: {@link attemptArm}'s outcome PLUS the raw failure text it captured, when there was
@@ -2692,6 +2694,8 @@ export function armOutcomeReason(outcome: ArmOutcome | "skipped", decisionReason
       return "the PR declares stacked parents that are not all merged, or their state could not be read (W1-T4581) — arm and direct merge both refused";
     case "plan-pr-held":
       return "a plan PR (or one whose file list was unreadable) is never armed for GitHub auto-merge (W1-T5615) — its mergeability was unknown or unsettled, or its merge facts were unreadable; held unarmed for a later pass, which merges it directly or updates it first";
+    case "shadow-refused":
+      return "a shadow instance (W1-T4265) never arms or merges a pull request on any lane — the review is posted, the arm is refused";
     case "skipped":
       return "the semantic gate refused before any arm was attempted";
   }
