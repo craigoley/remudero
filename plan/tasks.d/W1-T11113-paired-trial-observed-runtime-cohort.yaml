@@ -21,7 +21,7 @@
     - src/lib/paired-trial.ts
     - test/benchmark-run.test.ts
     - test/a-paired-dispatch-trial-shares-one-grader.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: "OBSERVED: benchmark-run.ts already pins harnessRevision, promptRevision, toolRevision, scorerRevision and environmentRevision. executingHarnessRevision attests Remudero source, not necessarily the external Claude/Codex executable. pairedStackEvidence imports four protocol pins. Omnigent advertises cross-harness agents but tests adapter conformance separately; identical model/prompt/source is insufficient when installed runtime or actual policy differs. Sources: https://github.com/omnigent-ai/omnigent/blob/42ab304337a27c995f0875c681b4a85b811364ee/omnigent/harness_capabilities.py ; https://github.com/omnigent-ai/omnigent/blob/42ab304337a27c995f0875c681b4a85b811364ee/tests/harness_bench/README.md . This extends existing trials rather than adding another optimizer."
   design: |-
