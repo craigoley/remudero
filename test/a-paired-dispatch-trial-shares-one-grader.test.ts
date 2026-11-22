@@ -3,10 +3,12 @@
 // grep-only grader: nothing here reads a real ledger, spawns a real worker or spends.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { buildBenchmarkAaReport, parseAaTrialManifest, type AaLedgerEvidence, type AaRow,
   type BenchmarkAaReport } from "../src/lib/benchmark-aa.js";
 import {
@@ -20,10 +22,10 @@ import type { Config } from "../src/lib/config.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import {
   buildPairedPilotReport, gradeHeadWithReviewerExecutor, mcnemarExact, pairedAttemptOrder, pairedDifference, pairedPilotReportView,
-  pairedStackEvidence, runPairedTrial, type GradedPair, type PairedAttemptRequest, type PairedAttemptResult, type PairedGrade,
+  pairedStackEvidence, runPairedTrial, sealedPairedAttemptDispatcher, type GradedPair, type PairedAttemptRequest, type PairedAttemptResult, type PairedGrade,
   type PairedTrialInput, type PairedTrialResult,
-} from "../src/lib/paired-trial.js";
-import type { AcceptanceCriterion } from "../src/lib/plan.js";
+} from "#src/lib/paired-trial.js";
+import type { AcceptanceCriterion, Task } from "#src/lib/plan.js";
 import type { TaskCaseFile } from "../src/lib/task-case-file.js";
 import type { spawnWorker, WorkerResult, WorkerSelectionAssignment } from "../src/lib/worker.js";
 import { HANDLERS, runTask } from "../src/run-task.js";
@@ -40,6 +42,15 @@ const PAID_PIN = { provider: "cash", model: "gpt-oss-120b", effort: "medium" };
 const CONTROL_PIN = { provider: "claude", model: "claude-sonnet-5", effort: "high" };
 const REVISION_NAMES = ["harnessRevision", "promptRevision", "toolRevision", "scorerRevision", "environmentRevision"];
 const HARNESS = { source: "executing-module-git" as const, revision: SHA };
+const RUNTIME_DIRECTIVE = "paired-runtime-cohort-v1:";
+const RUNTIME_DIGEST = "a".repeat(64);
+const OTHER_DIGEST = "c".repeat(64);
+const RUNTIME_CONTEXT = {
+  executableRevision: RUNTIME_DIGEST, adapterRevision: RUNTIME_DIGEST, policyDigest: RUNTIME_DIGEST,
+  settingsDigest: RUNTIME_DIGEST, environmentDigest: RUNTIME_DIGEST,
+};
+const treatmentText = (axes: Record<string, unknown>) => `${RUNTIME_DIRECTIVE} ${JSON.stringify(axes)}`;
+const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const CRITERIA: AcceptanceCriterion[] = [
   { claim: "the visible marker ships", proof: "grep: PAIRED-OK in notes.txt" },
   { claim: "the hidden marker ships", proof: "grep: HOLDOUT-OK in holdout.txt", holdout: true },
@@ -57,7 +68,7 @@ function pilotRequest(changes: Record<string, unknown> = {}, taskIds: string[] =
     strataRevision: "strata-v1",
     population: taskIds.map((taskId, i) => ({ taskId, repo: CONSENTED[i % 3], taskClass: "fix", risk: "low" })),
     primaryOutcome: "verified-completion", maturityDays: 14,
-    protocolText: "Paired pilot: McNemar on discordant pairs, task unit, fixed horizon.\n",
+    protocolText: `Paired pilot: McNemar on discordant pairs, task unit, fixed horizon.\n${treatmentText({ model: true, provider: true, effort: true })}`,
     design: "paired", paired: { samplingRate: 1, maxPairs: 10, shadow: false },
     ...changes,
   };
@@ -118,8 +129,8 @@ async function verb(args: string[], nowIso: string, withPairedReport = true): Pr
 }
 
 /** A temp state dir holding an empty live ledger, plus the activated protocol when `request` is given. */
-async function stateWith(request?: Record<string, unknown>): Promise<{ dir: string; stateDir: string; protocol: PaidPilotProtocol | null }> {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-paired-trial-"));
+async function stateWith(request?: Record<string, unknown>, scope?: TestContext): Promise<{ dir: string; stateDir: string; protocol: PaidPilotProtocol | null }> {
+  const dir = scope === undefined ? mkdtempSync(join(tmpdir(), "rmd-paired-trial-")) : ownedFixtureDir(scope, "paired-trial").dir;
   const stateDir = join(dir, "state");
   mkdirSync(stateDir, { recursive: true });
   writeFileSync(join(stateDir, "ledger.ndjson"), "");
@@ -148,12 +159,22 @@ function rowWriter(stateDir: string) {
   return { rows, now, write };
 }
 
+function runtimeContract(request: PairedAttemptRequest, contextOverrides = {}, enforcementDigest = RUNTIME_DIGEST) {
+  const context = { ...RUNTIME_CONTEXT, ...contextOverrides };
+  return { version: "worker-harness-contract-v1", evidenceClass: "observed-installed-runtime",
+    runId: request.runtimeRun?.id, observedAt: new Date(request.runtimeRun?.startedAt ?? Date.parse(DURING)).toISOString(),
+    provider: request.pin.provider, effort: request.pin.effort, context,
+    conformance: { state: "conformant", evidenceClass: "observed-installed-runtime", enforcementDigest,
+      contextDigest: digest(JSON.stringify([request.pin.provider, request.pin.effort, ...Object.values(context)])) } };
+}
+
 function recordingDispatch(calls: PairedAttemptRequest[], overrides: Partial<Record<PaidPilotArm, Partial<PairedAttemptResult>>> = {},
-  heads: Partial<Record<PaidPilotArm, string>> = {}) {
+  heads: Partial<Record<PaidPilotArm, string>> = {}, contractFor: (request: PairedAttemptRequest) => unknown = runtimeContract) {
   return async (request: PairedAttemptRequest): Promise<PairedAttemptResult> => {
     calls.push(request);
     return { headDir: heads[request.arm] ?? `/heads/${request.arm}`, headSha: SHA, servedModel: request.pin.model,
       billingMode: request.arm === "paid" ? "api" : "subscription", costUsd: request.arm === "paid" ? 1.25 : 0.8,
+      harnessContract: contractFor(request),
       ...overrides[request.arm] };
   };
 }
@@ -175,6 +196,110 @@ function trialInput(stateDir: string, writer: ReturnType<typeof rowWriter>, task
 const clockAt = (iso: () => string): Clock => ({ iso, now: () => Date.parse(iso()), date: () => new Date(iso()) });
 const stepRows = (rows: Row[], step: string) => rows.filter((row) => row.step === step);
 const trialOf = (row: Row | undefined) => (row?.paired_trial ?? {}) as Record<string, unknown>;
+
+const passPaid = byHead({ "/heads/paid": "pass", "/heads/control": "fail" });
+
+test("paired trial excludes unplanned external runtime or policy differences", async (t) => {
+  const { stateDir, protocol } = await stateWith(pilotRequest({ protocolText: treatmentText({}) }), t);
+  // The current paid-pilot CLI requires different models. Exercise the consumer with equal pins.
+  const { digest: _, ...body } = protocol!;
+  const pinned = { ...body, arms: { ...body.arms, paid: { ...body.arms.control, billing: "api" as const } } };
+  const sameModel: PaidPilotProtocol = { ...pinned, digest: digest(JSON.stringify(pinned)) };
+  const writer = rowWriter(stateDir);
+  const fields = ["executableRevision", "adapterRevision", "policyDigest", "settingsDigest", "environmentDigest", "enforcementDigest"] as const;
+  for (const [index, field] of fields.entries()) {
+    const result = await runPairedTrial(trialInput(stateDir, writer, `PP-T${index + 1}`, {
+      protocols: () => [sameModel], grade: passPaid, dispatchAttempt: recordingDispatch([], {}, {}, (request) => {
+        if (request.arm === "control") return runtimeContract(request);
+        return field === "enforcementDigest" ? runtimeContract(request, {}, OTHER_DIGEST) : runtimeContract(request, { [field]: OTHER_DIGEST });
+      }),
+    }));
+    assert.ok("runtimeCohort" in result);
+    assert.deepEqual(result.runtimeCohort, { state: "unmeasurable", exclusions: [`runtime-difference:${field}`] });
+    assert.deepEqual(result.outcomes, { paid: "pass", control: "fail" });
+  }
+  const report = buildPairedPilotReport({ protocol: sameModel, nowIso: AFTER_ANALYSIS, evidence: await readPaidPilotEvidence(stateDir, sameModel) });
+  assert.deepEqual(report.runtimeCohort, { comparable: 0, completed: fields.length,
+    exclusions: Object.fromEntries(fields.map((field) => [`runtime-difference:${field}`, 1])) });
+  assert.equal(report.mcnemar.paidOnly, 0);
+  assert.equal(report.winnerDeclared, false);
+});
+
+test("paired trial permits declared treatment axes while binding nuisance context", async (t) => {
+  const treatment = { model: true, provider: true, effort: true,
+    executableRevision: { paid: OTHER_DIGEST, control: RUNTIME_DIGEST },
+    policyDigest: { paid: OTHER_DIGEST, control: RUNTIME_DIGEST } };
+  const { stateDir, protocol } = await stateWith(pilotRequest({ protocolText: treatmentText(treatment) }), t);
+  const writer = rowWriter(stateDir);
+  const dispatch = (extra = {}) => recordingDispatch([], {}, {}, (request) => runtimeContract(request, request.arm === "paid"
+    ? { executableRevision: OTHER_DIGEST, policyDigest: OTHER_DIGEST, ...extra } : {}));
+  const run = (id: string, options: Partial<PairedTrialInput>) => runPairedTrial(trialInput(stateDir, writer, id, { grade: passPaid, ...options }));
+  const eligible = await run("PP-T1", { dispatchAttempt: dispatch() });
+  assert.ok("runtimeCohort" in eligible);
+  assert.deepEqual(eligible.runtimeCohort, { state: "comparable", exclusions: [] });
+  const nuisance = await run("PP-T2", { dispatchAttempt: dispatch({ environmentDigest: OTHER_DIGEST }) });
+  assert.ok("runtimeCohort" in nuisance);
+  assert.deepEqual(nuisance.runtimeCohort.exclusions, ["runtime-difference:environmentDigest"]);
+  const offPin = await run("PP-T3", { dispatchAttempt: dispatch({ policyDigest: RUNTIME_DIGEST }) });
+  assert.ok("runtimeCohort" in offPin);
+  assert.deepEqual(offPin.runtimeCohort.exclusions, ["runtime-treatment-off-pin:policyDigest"]);
+  const wrongModel = await run("PP-T4", { dispatchAttempt: recordingDispatch([], { paid: { servedModel: CONTROL_PIN.model } }) });
+  assert.ok("runtimeCohort" in wrongModel && wrongModel.runtimeCohort.exclusions.includes("runtime-arm-off-pin"));
+  const offStack = await run("PP-T5", { dispatchAttempt: dispatch(),
+    harnessRevision: { source: "executing-module-git", revision: OTHER_SHA } });
+  assert.ok("runtimeCohort" in offStack && offStack.runtimeCohort.exclusions.includes("runtime-stack-off-pin"));
+  const unknownModel = await run("PP-T6", { dispatchAttempt: recordingDispatch([], { paid: { servedModel: null } }) });
+  assert.ok("runtimeCohort" in unknownModel && unknownModel.runtimeCohort.exclusions.includes("runtime-arm-unresolved"));
+  const report = buildPairedPilotReport({ protocol: protocol!, nowIso: AFTER_ANALYSIS, evidence: await readPaidPilotEvidence(stateDir, protocol!) });
+  assert.equal(report.runtimeCohort.completed, 6);
+  assert.equal(report.runtimeCohort.comparable, 1);
+  assert.equal(report.mcnemar.paidOnly, 1);
+});
+
+test("paired trial counts unresolved runtime evidence without inventing a comparable pair", async (t) => {
+  const { stateDir, protocol } = await stateWith(pilotRequest(), t);
+  const writer = rowWriter(stateDir);
+  const cases: [string, (request: PairedAttemptRequest) => unknown][] = [
+    ["runtime-evidence-missing", () => undefined],
+    ["runtime-evidence-stale", (request) => ({ ...runtimeContract(request), observedAt: ACT })],
+    ["runtime-evidence-wrong-run", (request) => ({ ...runtimeContract(request), runId: "previous-run" })],
+    ["runtime-evidence-not-observed", (request) => ({ ...runtimeContract(request), evidenceClass: "deterministic-adapter-test" })],
+    ["runtime-evidence-invalid", (request) => ({ ...runtimeContract(request), context: { executableRevision: "/private/raw-value" } })],
+    ["runtime-conformance-unresolved", (request) => ({ ...runtimeContract(request), conformance: { evidenceClass: "declared" } })],
+    ["runtime-conformance-context-mismatch", (request) => {
+      const receipt = runtimeContract(request);
+      return { ...receipt, conformance: { ...receipt.conformance, contextDigest: OTHER_DIGEST } };
+    }],
+  ];
+  for (const [index, [reason, contractFor]] of cases.entries()) {
+    const result = await runPairedTrial(trialInput(stateDir, writer, `PP-T${index + 1}`,
+      { grade: passPaid, dispatchAttempt: recordingDispatch([], {}, {}, contractFor) }));
+    assert.ok("runtimeCohort" in result);
+    assert.deepEqual(result.runtimeCohort, { state: "unmeasurable", exclusions: [reason] });
+  }
+  writer.write("PP-T8")("paired_trial.pair", { paired_trial: { pilot_id: protocol!.pilotId, pair_id: "legacy-pair",
+    status: "measured", outcomes: { paid: "pass", control: "fail" } } });
+  const report = buildPairedPilotReport({ protocol: protocol!, nowIso: AFTER_ANALYSIS, evidence: await readPaidPilotEvidence(stateDir, protocol!) });
+  assert.deepEqual(report.runtimeCohort, { comparable: 0, completed: cases.length + 1,
+    exclusions: { ...Object.fromEntries(cases.map(([reason]) => [reason, 1])), "legacy-runtime-evidence": 1 } });
+  assert.deepEqual(report.counts, { measured: 0, unmeasurable: cases.length + 1 });
+  assert.equal(report.mcnemar.discordant, 0);
+  assert.doesNotMatch(JSON.stringify(writer.rows), /private\/raw-value/);
+});
+
+test("paired runtime protocol refuses absent or malformed treatment declarations", async (t) => {
+  const texts = ["No directive", "paired-runtime-cohort-v2: {}", `${RUNTIME_DIRECTIVE} {`, `${RUNTIME_DIRECTIVE} []`,
+    treatmentText({ model: false }), treatmentText({ executableRevision: { paid: RUNTIME_DIGEST } }),
+    treatmentText({ policyDigest: { paid: "wrong", control: RUNTIME_DIGEST } }), `${treatmentText({})}\n${treatmentText({})}`];
+  for (const [index, protocolText] of texts.entries()) {
+    const { stateDir } = await stateWith(pilotRequest({ protocolText }), t);
+    const result = await runPairedTrial(trialInput(stateDir, rowWriter(stateDir), "PP-T1",
+      { grade: passPaid, dispatchAttempt: recordingDispatch([]) }));
+    assert.ok("runtimeCohort" in result);
+    assert.deepEqual(result.runtimeCohort, { state: "unmeasurable",
+      exclusions: [index === 0 ? "runtime-protocol-unregistered" : "runtime-protocol-invalid"] }, protocolText);
+  }
+});
 
 test("inert without a protocol: no row, no read of a pilot, no spawn", async () => {
   const empty = await stateWith();
@@ -492,7 +617,8 @@ test("McNemar is checked on hand-computed discordant counts", () => {
     revisionsUnpinned: 0, servedModel: null, billingMode: null, cost: { state: "missing" }, ...extra,
     paired: { pairId: `pair-${n}`, arm: null, shadow: false, sampled: true, admitted: true, order: ["paid", "control"], reasons: [],
       deviations: [], outcome: null, outcomes: null, status: null, ...fields } });
-  const measured = pairs.map((pair, i) => row("paired_trial.pair", { pairId: `p${i}`, status: "measured", outcomes: pair }));
+  const cohort = { reasons: [`${RUNTIME_DIRECTIVE}${protocol.digest}`] };
+  const measured = pairs.map((pair, i) => row("paired_trial.pair", { ...cohort, pairId: `p${i}`, status: "measured", outcomes: pair }));
   const evidence: PaidPilotEvidence = { state: "observed", forms: { gzip: 0, plain: 0, live: 1 }, unreadSources: [], malformedRows: 0,
     duplicateRows: 0, newestTs: null, rows: [...measured, row("paired_trial.decision", { pairId: "p0", admitted: false, reasons: ["pair-in-flight"] }),
       row("paired_trial.decision", { pairId: "p0" }), row("paired_trial.pair", { pairId: "p-odd", status: "unmeasurable", outcomes: null })] };
@@ -505,7 +631,7 @@ test("McNemar is checked on hand-computed discordant counts", () => {
   assert.equal(late.evalCard.kind, "paired-pilot");
   assert.equal(late.evalCard.version, "eval-card-v1");
   const decisive = buildPairedPilotReport({ protocol, nowIso: AFTER_ANALYSIS, evidence: { ...evidence,
-    rows: make("pass", "fail", 12).map((pair, i) => row("paired_trial.pair", { pairId: `d${i}`, status: "measured", outcomes: pair })) } });
+    rows: make("pass", "fail", 12).map((pair, i) => row("paired_trial.pair", { ...cohort, pairId: `d${i}`, status: "measured", outcomes: pair })) } });
   assert.deepEqual([decisive.conclusion, decisive.winnerDeclared], [{ state: "difference-observed", favors: "paid" }, true]);
   const none = buildPairedPilotReport({ protocol, nowIso: AFTER_ANALYSIS, evidence: { ...evidence, rows: [] } });
   assert.deepEqual(none.conclusion, { state: "inconclusive", reason: "no-measured-pairs" });
@@ -600,10 +726,10 @@ test("paired report verb refuses without a builder and keeps printing when it ca
 });
 
 /** A throwaway origin, seed and plan for driving the REAL runTask through recon and implement. */
-function dispatchFixture(taskId: string) {
-  const root = mkdtempSync(join(tmpdir(), "rmd-paired-dispatch-"));
-  const origin = gitRepo({ bare: true, kind: "paired-dispatch-origin" });
-  const seed = gitRepo({ kind: "paired-dispatch-seed" });
+function dispatchFixture(taskId: string, scope?: TestContext) {
+  const root = scope === undefined ? mkdtempSync(join(tmpdir(), "rmd-paired-dispatch-")) : ownedFixtureDir(scope, "paired-dispatch").dir;
+  const origin = gitRepo({ bare: true, kind: "paired-dispatch-origin", scope });
+  const seed = gitRepo({ kind: "paired-dispatch-seed", scope });
   seed.addRemote("origin", origin.dir);
   seed.git("push", "--quiet", "origin", "main");
   mkdirSync(join(root, "repos"), { recursive: true });
@@ -658,7 +784,7 @@ async function normalDispatch(taskId: string, pairedTrial: Partial<PairedTrialIn
   }
 }
 
-test("normal dispatch is unchanged whether a pair is sampled or not", async () => {
+test("normal dispatch is unchanged whether a pair is sampled or not: paired runtime cohort metadata preserves inert and sealed trial behavior", async (t) => {
   const taskId = "T-PAIRED-DISPATCH";
   const protocol = pairedProtocol({}, [taskId, "PP-T2"]);
   const observed: PaidPilotEvidence = { state: "observed", forms: { gzip: 0, plain: 0, live: 1 }, unreadSources: [], malformedRows: 0,
@@ -679,4 +805,49 @@ test("normal dispatch is unchanged whether a pair is sampled or not", async () =
   assert.equal(assignments(sampled.rows), assignments(unsampled.rows), "the side attempts wrote no worker.assignment of their own");
   assert.ok(sampled.rows.some((row) => row.step === "paired_trial.decision" && trialOf(row).admitted === true));
   assert.ok(!unsampled.rows.some((row) => String(row.step).startsWith("paired_trial.")), "an inert trial wrote nothing into the run");
+  assert.ok("runtimeCohort" in sampled.trial);
+  assert.deepEqual(sampled.trial.runtimeCohort, { state: "comparable", exclusions: [] });
+  for (const request of sideCalls) {
+    assert.deepEqual(request.isolation, { worktree: "fresh-detached", push: false, openPr: false, merge: false });
+  }
+  assert.equal(stepRows(sampled.rows, "paired_trial.attempt").length, 2);
+  assert.equal(stepRows(unsampled.rows, "paired_trial.attempt").length, 0);
+
+  const fixture = dispatchFixture(taskId, t);
+  const { stateDir, protocol: sealedProtocol } = await stateWith(pilotRequest({}, [taskId, "PP-T2"]), t);
+  const writer = rowWriter(stateDir);
+  const trees: string[] = [];
+  const task = { id: taskId, title: "Sealed cohort fixture", repo: "remudero", depends_on: [], type: "implement", verify: "auto",
+    origin: "fixture", files: ["notes.txt", "holdout.txt"], risk: "low", status: "queued", attempts: 0, acceptance: CRITERIA } satisfies Task;
+  const requests = new Map<string, PairedAttemptRequest>();
+  const dispatch = sealedPairedAttemptDispatcher({ task, repoDir: join(fixture.root, "repos", "remudero"),
+    config: { root: fixture.root, installRoot: process.cwd() } as Config,
+    spawn: async (args) => {
+      const request = requests.get(args.runId!);
+      assert.ok(request && args.mountProvider);
+      trees.push(args.cwd);
+      writeFileSync(join(args.cwd, "notes.txt"), "PAIRED-OK\n");
+      writeFileSync(join(args.cwd, "holdout.txt"), "HOLDOUT-OK\n");
+      const worker: WorkerResult & { harnessContract: unknown } = {
+        provider: args.mountProvider, sessionId: "fixture-session", costUsd: 1, numTurns: 1, text: "", blocks: [], stderr: "",
+        subtype: "success", apiError: false, isError: false, permissionDenials: [], childEnvKeys: [],
+        model: request.pin.model, servedModel: request.pin.model, effort: request.pin.effort,
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
+        harnessContract: runtimeContract(request),
+      };
+      return worker;
+    },
+  });
+  const result = await runPairedTrial(trialInput(stateDir, writer, taskId, { dispatchAttempt: (request) => {
+    assert.ok(request.runtimeRun);
+    requests.set(request.runtimeRun.id, request);
+    return dispatch(request);
+  } }));
+  assert.ok("runtimeCohort" in result);
+  assert.deepEqual(result.runtimeCohort, { state: "comparable", exclusions: [] });
+  assert.equal(trees.length, 2);
+  assert.ok(trees.every((dir) => !existsSync(dir)), "both detached worktrees were cleaned up");
+  const report = buildPairedPilotReport({ protocol: sealedProtocol!, nowIso: AFTER_ANALYSIS,
+    evidence: await readPaidPilotEvidence(stateDir, sealedProtocol!) });
+  assert.equal(report.mcnemar.bothPass, 1);
 });

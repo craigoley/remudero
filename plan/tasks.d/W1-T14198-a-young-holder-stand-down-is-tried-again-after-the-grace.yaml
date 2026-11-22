@@ -1,0 +1,87 @@
+- id: W1-T14198
+  title: "A plan hand-off that stands down only because the reservation is younger than 2 h is tried again at the same head once the 2 h pass, so the #19604 case is handed off near 07:24Z"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the sweep pushes a plan note to a pull request head; this changes when the once-per-head bound is spent, so a defect could retry a hand-off at one head without bound
+  origin: "operator-session#merged-pr-gap-check-2026-11-21"
+  plan_refs:
+    - W1-T13829
+    - W1-T6026
+    - W1-T5349
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-held-id-whose-holder-branch-is-gone-gets-the-gates-hand-off-line.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:young-holder-not-spent — at head H, a sweep at 05:40Z for a reservation started 05:24:07Z stands down for youth. The ledger row is outcome stood-down with retry_at 07:24:07.232Z, planRepairHistoryFromLedger does not hold `<pr>@<H>@held-task-id-handoff`, and no plan-handoff-attempts claim file for H is left after the pass"
+      kind: guard
+      proof: "grep: W1-T14198 criterion 1: in test/sweep/a-held-id-whose-holder-branch-is-gone-gets-the-gates-hand-off-line.test.ts"
+    - claim: "A sweep at H before retry_at does not call repairPlanPr and writes no second plan repair row"
+      proof: "grep: W1-T14198 criterion 2: in test/sweep/a-held-id-whose-holder-branch-is-gone-gets-the-gates-hand-off-line.test.ts"
+    - claim: "The first sweep at H after retry_at calls repairPlanPr once, and with the holder still absent the real handOffHeldPlanPrIds hands off (outcome handed-off), with no new head pushed in between"
+      proof: "grep: W1-T14198 criterion 3: in test/sweep/a-held-id-whose-holder-branch-is-gone-gets-the-gates-hand-off-line.test.ts"
+    - claim: "invariant:once-per-head — a failed push, a holder-branch-on-origin stand-down and every other stand-down still spend H, and two sweeps after retry_at attempt the hand-off once"
+      kind: guard
+      proof: "grep: W1-T14198 criterion 4: in test/sweep/a-held-id-whose-holder-branch-is-gone-gets-the-gates-hand-off-line.test.ts"
+    - claim: "handOffHeldPlanPrIds on a 30-minute-old reservation returns stood-down with retryAtMs equal to its started_at plus RESERVATION_PUSH_GRACE_MS, and pushes nothing"
+      proof: "grep: W1-T14198 criterion 5: in test/sweep/a-held-id-whose-holder-branch-is-gone-gets-the-gates-hand-off-line.test.ts"
+  rationale: |
+    WHY: the W1-T13829 hand-off (#19701) does not act in the case it was filed for.
+    READ FROM THE CODE (origin/main f80f72841, src/lib/sweep.ts):
+    - tryPlanRepair (line 23231) writes the lasting per-head claim (claimPlanHandoff, line 12218, a
+      plan-handoff-attempts file opened with flag wx) at lines 23264-23266, before repairPlanPr runs.
+    - The holder checks run later, inside handOffHeldPlanPrIds -> handoffStandDown. The age check is at
+      line 12315: "the reservation of <id> started at <t>; it must be older than 2 h".
+    - A stand-down for a hand-off spends the head: tryPlanRepair adds `<head>@held-task-id-handoff`
+      for any hand-off stand-down (line 23291), and planRepairHistoryFromLedger (line 12068) does not
+      `continue` for a held-task-id-handoff stand-down, so the next pass reads the head as spent.
+    - The test pins this: "W1-T13829 criterion 4: a failed push and a stand-down each spend one attempt
+      at their head" (test line 616), and its stand-down reason is a reservation younger than 2 h.
+    THE MOTIVATING CASE (#19604, from the W1-T13829 shard): the holder reservation started
+    2026-11-19T05:24:07.232Z, the PR opened at 05:32:43Z and went red on task-id-existence soon after.
+    The first sweep after that is inside the 2 h grace, so it stands down for youth and spends the
+    head. The PR head does not change, so no later sweep tries again. The shard says "On #19604 it would
+    have acted near 07:24Z"; with this code it never acts.
+  design: |
+    INVARIANT young-holder-not-spent: a stand-down whose only reason is a reservation younger than
+    RESERVATION_PUSH_GRACE_MS does not spend the head; the next try is no earlier than started_at plus
+    RESERVATION_PUSH_GRACE_MS.
+    INVARIANT once-per-head: every other outcome still spends the head, and each try still goes
+    through claimPlanHandoff, so two sweeps cannot act on one head at once.
+    CHOICE: a dated deferral, not a pre-claim age check. Rejected: reading the reservation age in
+    tryPlanRepair before the claim, which copies handoffStandDown's fetch and parse outside its
+    fail-closed checks.
+    1. handoffStandDown returns the youth result as { reason, retryAtMs } (retryAtMs = the latest
+       started_at plus RESERVATION_PUSH_GRACE_MS over the young handoffs). handOffHeldPlanPrIds passes
+       retryAtMs up in its stood-down outcome. Every other stand-down has no retryAtMs.
+    2. tryPlanRepair: on a hand-off stand-down with retryAtMs, ledger the row with retry_at (ISO) once,
+       remove this pass's claim file for the head, and do not add `<head>@held-task-id-handoff`.
+       Before claiming, skip the hand-off while now is before the newest retry_at ledgered for the head.
+    3. planRepairHistoryFromLedger: a held-task-id-handoff stand-down row with retry_at adds its
+       stood-down keys and a `<head>@held-task-id-handoff@retry-at@<iso>` key, and `continue`s, so the
+       head is not spent. Rows without retry_at keep today's behaviour.
+    4. Change the criterion 4 test at line 616: its stand-down example becomes "holder branch <b> of
+       <id> is on origin", which still spends the head. Add the new tests in the same file, titled
+       "W1-T14198 criterion N: ...", with the injected now and ledger the file already uses. Load
+       test/setup/tmp-hygiene.ts.
+  falsifier: |
+    On origin/main criterion 1 fails: planRepairHistoryFromLedger holds the head after the youth
+    stand-down, and criterion 3's later sweep never calls repairPlanPr. Keep the claim file: criterion 1
+    finds it and criterion 3 is refused by claimPlanHandoff. Drop the retry_at wait: criterion 2's early
+    sweep calls repairPlanPr again. Stop spending the head on every stand-down: criterion 4's
+    holder-on-origin case is retried. Skip claimPlanHandoff on the retry: criterion 4's two sweeps act
+    twice.
+  note: |
+    Id reserved for run-unfiled-1795296839941 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-21. Filing only; not built.
+    Gap found by checking merged PR #19701 against W1-T13829, read-only on origin/main.
+    Builders: run tests only as `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`.
+    No test calls the real GitHub API or pushes to a real remote.
+    Not in scope: the 2 h grace itself, the gate's printed line, and retries for a holder branch that
+    is on origin or heads an open PR.

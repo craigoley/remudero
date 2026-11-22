@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Readable, Writable } from "node:stream";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -98,12 +99,26 @@ export function createOperatorMcpServer(deps: OperatorMcpConfig): Server {
 }
 
 export async function operatorMcpCommand(args: string[], config: { root: string }, repoRoot: string,
-  factory: typeof createOperatorMcpServer = createOperatorMcpServer): Promise<number> {
+  factory: typeof createOperatorMcpServer = createOperatorMcpServer,
+  io: { stdin: Readable; stdout: Writable } = { stdin: process.stdin, stdout: process.stdout }): Promise<number> {
   if (args.some((arg) => arg !== "--enable-write")) throw new Error("usage: rmd mcp [--enable-write]; RMD_OPERATOR_MCP_URL selects the existing control-server origin");
   const tokens = JSON.parse(readFileSync(join(config.root, "state", "service-tokens.json"), "utf8"));
   if (args.includes("--enable-write") && !tokens.write) throw new Error("--enable-write needs the existing write-scope token");
   const server = factory({ url: process.env.RMD_OPERATOR_MCP_URL ?? "http://127.0.0.1:4317", readToken: tokens.read,
     ...(args.includes("--enable-write") ? { writeToken: tokens.write } : {}), repoRoot });
-  await server.connect(new StdioServerTransport());
-  return 0;
+  // W1-T14173: the session lasts until the input ends or the server closes, so the CLI exit path runs after it.
+  const ended = new Promise<number>((resolve) => {
+    if (io.stdin.readableEnded || io.stdin.destroyed) return resolve(0);
+    io.stdin.once("end", () => resolve(0));
+    io.stdin.once("close", () => resolve(0));
+    io.stdin.once("error", () => resolve(1));
+  });
+  const closed = new Promise<number>((resolve) => {
+    const prior = server.onclose;
+    server.onclose = () => { prior?.(); resolve(0); };
+  });
+  await server.connect(new StdioServerTransport(io.stdin, io.stdout));
+  const code = await Promise.race([ended, closed]);
+  await server.close();
+  return code;
 }

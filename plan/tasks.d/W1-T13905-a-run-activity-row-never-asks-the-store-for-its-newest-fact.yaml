@@ -1,5 +1,5 @@
 - id: W1-T13905
-  title: "The board keeps each run's newest fact time in memory, so a run activity row no longer scans a task's whole fact history"
+  title: "The fact store indexes rows by task and run, so a run activity row's newest-fact read no longer scans a task's whole fact history"
   repo: remudero
   depends_on: []
   priority: 1
@@ -7,46 +7,49 @@
   verify: auto
   principles:
     tdd: strict
-  risk: high # how the board decides a run activity stand-in; which stand-ins it holds is unchanged
+  risk: high # one new index on the projector's fact table; no query text or board logic changes
   origin: "operator-session#now-view-serve-2026-11-17"
   plan_refs:
     - W1-T9436
     - W1-T13840
   files:
-    - src/lib/board-projection.ts
-    - test/a-run-activity-row-never-asks-the-store-for-its-newest-fact.test.ts
-  status: queued
+    - src/lib/ledger-projector.ts
+    - test/a-run-newest-fact-read-uses-a-task-run-index.test.ts
+  status: merged
   attempts: 0
   acceptance:
-    - claim: "After the cold load, ingesting run activity rows runs no per-run MAX(ts_ms) read of the fact store"
-      proof: "grep: W1-T13905 criterion 1 in test/a-run-activity-row-never-asks-the-store-for-its-newest-fact.test.ts"
-    - claim: "invariant:same-stand-ins — a board extended by new facts and run activity holds the stand-ins a fresh cold load of the same store holds"
+    - claim: "The projector's store carries the fact_task_run index, and the board's per-run newest-fact statement uses it"
+      proof: "grep: W1-T13905 criterion 1 in test/a-run-newest-fact-read-uses-a-task-run-index.test.ts"
+    - claim: "A store made before the index gains it when the projector opens it"
+      proof: "grep: W1-T13905 criterion 2 in test/a-run-newest-fact-read-uses-a-task-run-index.test.ts"
+    - claim: "invariant:same-answer — the per-run newest-fact read answers the same with and without the index"
       kind: guard
-      proof: "grep: W1-T13905 criterion 2 in test/a-run-activity-row-never-asks-the-store-for-its-newest-fact.test.ts"
-    - claim: "A fact row dropped under the board rebuilds the newest fact times in one grouped read, and the stand-ins then equal a fresh cold load's"
-      proof: "grep: W1-T13905 criterion 3 in test/a-run-activity-row-never-asks-the-store-for-its-newest-fact.test.ts"
-    - claim: "The step cache reset rebuilds the map"
-      proof: "grep: newestFactMs = readNewestFactMs() in src/lib/board-projection.ts"
+      proof: "grep: W1-T13905 criterion 3 in test/a-run-newest-fact-read-uses-a-task-run-index.test.ts"
+    - claim: "The projector's schema declares the index"
+      proof: "grep: CREATE INDEX IF NOT EXISTS fact_task_run ON fact(task_id, run_id, seq) in src/lib/ledger-projector.ts"
   rationale: |
     WHY: the now view still cannot serve core. MEASURED on the Azure host 2026-11-20 01:33-02:07Z in shadow mode, with
-    W1-T13840 live: core's board stage took 2.4 to 6.2 s of CPU every build (about one build every 10 s). PROFILED on
-    the Mac by replaying 6,000 live core ledger rows into a copy of core.v1.sqlite in 60 chunks: steady builds took
-    1.4 to 4.6 s, and 84% of the time was ingestActivity -> newestFactMsOf -> newestStoredFactMs, the runNewestFact
-    statement. Its only usable index is fact_task (task_id, seq), so a DAEMON run's MAX(ts_ms) reads all 706,926 DAEMON
-    fact rows: 1.7 s for one lookup on the copy. The board already builds this map exactly during its cold load
-    (bulkNewestFactMs, every fact row since seq 0) and dropped it after (W1-T9436). The store holds 159,476 task/run
-    pairs. With the map kept, replaying 4,000 newer live rows in 40 chunks: steady builds took a median 391 ms of CPU
-    (p90 530 ms, max 797 ms), board stage median 40 ms.
+    W1-T13840 live: core's board stage took 2.4 to 6.2 s of CPU every build. PROFILED on the Mac by replaying live core
+    ledger rows into a copy of core.v1.sqlite: 84% of a steady build was ingestActivity -> newestStoredFactMs, the
+    board's runNewestFact statement. Its only usable index was fact_task (task_id, seq), so one DAEMON run's
+    MAX(ts_ms) read all 706,926 DAEMON fact rows (1.7 s per lookup on the copy).
+    AMENDED 2026-11-20 (operator session): the first design kept an in-memory per-run map in the board. #19812 failed
+    review five times: each round found another way an extended board differs from a fresh cold load (deletions
+    between reads, equal stamps, sweep repeats). Most of those differences come from the board's retention rules, not
+    from this change, and the fixes grew the PR to 421 lines. An index answers the same statement with no change to
+    board logic. MEASURED on the copy: building fact_task_run took 8.6 s and adds 171 MB; the query planner picks it
+    unprompted; a lookup takes 0.2 ms (82 ms for the largest run, 5,126 rows); replaying 3,000 live rows in 30 chunks
+    on unchanged main code gave steady core builds a median 573 ms of CPU (p90 670 ms, max 1,158 ms), board median
+    203 ms. The retention differences the reviewer found are filed separately.
   design: |
-    INVARIANT same-stand-ins: an extended board holds the same run activity stand-ins as a fresh cold load of the same
-    store.
-    1. bulkNewestFactMs becomes newestFactMs: filled by the ingest from seq 0 as before, and kept after the cold load.
-       newestFactMsOf reads only the map.
-    2. checkStepCache, when it finds the store dropped a cached step's row or went behind, rebuilds the map with one
-       GROUP BY task_id, run_id read under the same filters as runNewestFact (unread steps excluded, task_id and run_id
-       text). runNewestFact stays for the byTaskSteps read as of an older seq.
+    INVARIANT same-answer: every query of the fact table answers what it answered before; only its plan changes.
+    1. LEDGER_PROJECTOR_DDL in src/lib/ledger-projector.ts adds
+       CREATE INDEX IF NOT EXISTS fact_task_run ON fact(task_id, run_id, seq) WHERE task_id IS NOT NULL AND run_id IS NOT NULL.
+       openReadModel runs the DDL on every writable open, so an existing store gains the index once (8.6 s on a copy of
+       core's 4.5 GB store), in the read-model worker that opens it.
+    2. No statement text and no board code changes.
   falsifier: |
-    Answer newestFactMsOf from runNewestFact again: criterion 1 fails. Drop the rebuild in checkStepCache: criterion 3
-    fails (no grouped read after the drop).
+    Remove the index from the DDL: criteria 1, 2 and 3 fail.
   note: |
-    Id reserved for run-unfiled-1795140380379 with ~/rmd-work/bin/reserve-id.sh.
+    Id reserved for run-unfiled-1795140380379 with ~/rmd-work/bin/reserve-id.sh. Amended 2026-11-20: the in-memory map
+    design (#19812) is replaced by the index.
