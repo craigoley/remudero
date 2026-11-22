@@ -6,14 +6,15 @@
 // nothing reads is how a loop silently stops: `routing.experiment.result` was written daily and
 // read only by its own writer.
 //
-// EMITTED: `log("a.b"`, a `step:` property holding a dotted literal or a bound constant, and the `step` of
-// any object handed to a ledger append call (`appendLedger`, `appendLine`, `ledger(...)`), dotted or not.
-// A constant resolves through its declaration, an import, or a destructured binding of the host object
-// that carries it (`const { X_STEP } = host`).
-// READ: equality and switch cases on a step, step membership and Map lookups (`.has` / `.includes` /
-// `.get`, the step possibly behind a `?? ""` or `|| ""` fallback), read-step collections, step prefixes
-// and suffixes, and raw JSON step patterns. Read evidence must be in a different file from the emission.
-// Comments, console output and incidental literals do not read a step.
+// EMITTED: `log("a.b"` or a `step:` property holding a literal or a constant: lexically bound,
+// imported, or destructured from a host by its exported name. An undotted literal counts on a
+// ledger row only. Both operands of `a ?? "x.y"` and both branches of a conditional count, and a
+// call to a function whose parameter reaches an emit (a step helper) emits its argument.
+// READ: equality and switch cases on a step, step membership checks and Map lookups (`.has`,
+// `.includes`, `.get`), read-step collections, step prefixes and suffixes, and raw JSON step
+// patterns; `row.step ?? ""` reads `row.step`.
+// Read evidence must be in a different file from the emission. Comments, console output and
+// incidental literals do not read a step.
 //
 // THE RATCHET: the baseline's `writeOnly` list is today's debt and only shrinks against the merge
 // base; an entry that gained a reader must leave it. A new write-only step needs a reader, or a
@@ -41,22 +42,25 @@ export const REGISTRY_FILES = new Set(["src/lib/ledger-steps.ts"]);
 
 const SOURCE_RE = /^src\/.+\.(?:ts|mts|mjs)$/;
 const STEP_RE = /^[a-z][a-z0-9_]*(?:[.:-][a-z0-9_]+)*$/;
-/** A `step:` property literal must be dotted: `{ step: "copy" }` is far more often a plain object than a ledger row. */
+/**
+ * A `step:` literal on an object that is not a ledger row must be dotted. The undotted ones off a
+ * row are printed actions (`{ step: "copy" }` in src/lib/plan-task-move.ts), a run's phase table
+ * (`{ step: "fix_rung", owner }` in src/run-task.ts) and a review exit (`{ step: "view" }`); on a
+ * row an undotted step is as real as a dotted one (`step: "dispatch_wip_observed"`).
+ */
 const DOTTED_STEP_RE = /^(?=[^.]*\.)[a-z][a-z0-9_]*(?:[.:-][a-z0-9_]+)*$/;
+/** LedgerLine (src/lib/ledger.ts) requires both: an object carrying either is shaped as a ledger row. */
+const ROW_IDENTITY_KEYS = ["run_id", "task_id"];
+/** A call that appends its object argument to a ledger: append, appendLedger, appendLine, writeLedger, `opts.ledger?.(row)`. */
+const LEDGER_APPEND_RE = /^(?:append\w*|write\w*Ledger\w*|ledger)$/;
+/** `a ?? b` and `a || b` evaluate to `a` whenever it is set: a read of `a` with a fallback. */
+const FALLBACK_OPERATORS = new Set(["??", "||"]);
 const RAW_STEP_RE = /"step"\s*:\s*"((?:[a-z0-9_.:-]|\\\.)+)"/g;
 const RAW_STEP_ALTERNATIVES_RE = /"step"\s*:\s*"\((?:\?:)?((?:[a-z0-9_:|-]|\\\.)+)\)"/g;
 const REGEX_PREFIX_RE = /^\^((?:[a-z0-9_:-]|\\\.)+)(\$)?$/;
 const READ_STEPS_NAME_RE = /(?:^|_)READ_STEPS?$/;
 const CONSTANT_NAME_RE = /^[A-Z][A-Z0-9_]*$/;
 const EQUALITY = new Set(["===", "!==", "==", "!="]);
-/** `row.step ?? ""` and `row.step || ""` still hand the step to whatever consumes the expression. */
-const FALLBACK = new Set(["??", "||"]);
-/**
- * A ledger append site: `appendLedger(path, { step })`, `appendLine(...)`, `append(...)`, `opts.ledger?.({ step })`.
- * An object handed to one is a ledger row, so its `step` is written whether or not the name carries a dot;
- * a helper such as `queueGovernorGateFor` writes through the append call inside it.
- */
-const APPEND_CALLEE_RE = /^(?:append[A-Za-z]*|ledger)$/;
 const MATCH_METHODS = new Set(["includes", "startsWith", "endsWith", "indexOf", "match", "matchAll", "search"]);
 const PREDICATE_METHODS = new Set(["some", "every", "find", "findIndex", "filter"]);
 const READER_QUERY_KEYS = new Set([
@@ -99,10 +103,17 @@ function visitNodes(node, visit) {
 }
 
 function unwrap(node) {
-  while (node && (WRAPPERS.has(node.type) || node.type === "OptionalChainingExpression")) {
-    node = node.expression ?? node.base;
+  for (;;) {
+    if (node && (WRAPPERS.has(node.type) || node.type === "OptionalChainingExpression")) node = node.expression ?? node.base;
+    else if (node?.type === "BinaryExpression" && FALLBACK_OPERATORS.has(node.operator)) node = node.left;
+    else return node;
   }
-  return node;
+}
+
+/** The callee's own name: `appendLedger` for `appendLedger(...)`, `ledger` for `opts.ledger?.(...)`. */
+function calleeName(callee) {
+  const node = unwrap(callee);
+  return node?.type === "Identifier" ? node.value : memberName(node);
 }
 
 function propertyName(node) {
@@ -114,13 +125,14 @@ function memberName(node) {
   return node?.type === "MemberExpression" ? propertyName(node.property) : undefined;
 }
 
-function isStep(node) {
-  node = unwrap(node);
-  if (node?.type === "CallExpression" && node.callee.type === "Identifier" && node.callee.value === "String") {
-    return isStep(node.arguments[0]?.expression);
-  }
-  if (node?.type === "BinaryExpression" && FALLBACK.has(node.operator)) return isStep(node.left) || isStep(node.right);
-  return memberName(node) === "step" || (node?.type === "Identifier" && node.value === "step");
+/** `row.step`, `String(row.step)`, or either operand of a fallback (`row.step ?? ""`) or a conditional. */
+function isStep(expr) {
+  return alternatives(expr).some((node) => {
+    if (node?.type === "CallExpression" && node.callee.type === "Identifier" && node.callee.value === "String") {
+      return isStep(node.arguments[0]?.expression);
+    }
+    return memberName(node) === "step" || (node?.type === "Identifier" && node.value === "step");
+  });
 }
 
 // SWC assigns a syntax context to each binding and its references. The context is local to a file;
@@ -147,10 +159,18 @@ function collection(node) {
   return undefined;
 }
 
+/** The expressions a value can be: both operands of a fallback (`a ?? "x.y"`) and both branches of a conditional. */
+function alternatives(expr) {
+  let node = expr;
+  while (node && WRAPPERS.has(node.type)) node = node.expression;
+  if (node?.type === "BinaryExpression" && FALLBACK_OPERATORS.has(node.operator)) return [...alternatives(node.left), ...alternatives(node.right)];
+  if (node?.type === "ConditionalExpression") return [...alternatives(node.consequent), ...alternatives(node.alternate)];
+  return [unwrap(node)];
+}
+
 function isStatic(expr) {
-  const node = unwrap(expr);
-  return node && (node.type === "Identifier" || node.type === "StringLiteral" || node.type === "RegExpLiteral" ||
-    (node.type === "TemplateLiteral" && node.expressions.length === 0) || collection(node) !== undefined);
+  return alternatives(expr).some((node) => node && (node.type === "Identifier" || node.type === "StringLiteral" ||
+    node.type === "RegExpLiteral" || (node.type === "TemplateLiteral" && node.expressions.length === 0) || collection(node) !== undefined));
 }
 
 function collectEvidence(node, rec) {
@@ -162,27 +182,25 @@ function collectEvidence(node, rec) {
     for (const { test } of node.cases) if (test) rec.reads.push(["exact", test]);
   } else if (type === "ObjectExpression") {
     const keys = new Set(node.properties.map((prop) => propertyName(prop.key ?? prop)));
-    const query = !keys.has("run_id") && !keys.has("task_id") && [...keys].some((key) => READER_QUERY_KEYS.has(key));
+    const identified = ROW_IDENTITY_KEYS.some((key) => keys.has(key));
+    const query = !identified && [...keys].some((key) => READER_QUERY_KEYS.has(key));
+    const row = identified || rec.appended.has(node);
     for (const prop of node.properties) {
-      if (prop.type !== "KeyValueProperty") continue;
-      const key = propertyName(prop.key);
-      if (key === "step" && query) rec.reads.push(["exact", prop.value]);
-      else if (key === "step") rec.emits.push([DOTTED_STEP_RE, prop.value]);
-      else if (key === "pattern" || key === "markers") rec.reads.push(["raw", prop.value]);
+      if (prop.type !== "KeyValueProperty" && prop.type !== "Identifier") continue;
+      // `{ step }` is shorthand for `{ step: step }`.
+      const [key, value] = prop.type === "Identifier" ? [prop.value, prop] : [propertyName(prop.key), prop.value];
+      if (key === "step" && query) rec.reads.push(["exact", value]);
+      else if (key === "step") rec.emits.push([row ? STEP_RE : DOTTED_STEP_RE, value]);
+      else if (key === "pattern" || key === "markers") rec.reads.push(["raw", value]);
     }
   } else if (type === "CallExpression") {
+    if (LEDGER_APPEND_RE.test(calleeName(node.callee) ?? "")) {
+      // A parent is visited before its children, so the row argument is marked before it is read.
+      for (const { expression } of node.arguments) if (unwrap(expression)?.type === "ObjectExpression") rec.appended.add(unwrap(expression));
+    }
     const callee = unwrap(node.callee);
     const method = memberName(callee);
-    const calleeName = callee.type === "Identifier" ? callee.value : method;
-    if (calleeName !== undefined && APPEND_CALLEE_RE.test(calleeName)) {
-      for (const { expression } of node.arguments) {
-        const row = unwrap(expression);
-        if (row?.type !== "ObjectExpression") continue;
-        for (const prop of row.properties) {
-          if (prop.type === "KeyValueProperty" && propertyName(prop.key) === "step") rec.emits.push([STEP_RE, prop.value]);
-        }
-      }
-    }
+    if (callee?.type === "Identifier" && node.arguments.length > 0) rec.calls.push({ callee, args: node.arguments });
     const arg = node.arguments[0];
     if (!arg || arg.spread) return;
     const value = arg.expression;
@@ -223,29 +241,12 @@ function readPredicate(receiver, predicate, rec) {
   });
 }
 
-/**
- * `const { WORKER_STATE_LEDGER_STEP } = host` and `({ X_STEP: local }) =>` bind a local to a property of a host
- * object. The property name is the constant's name, so the local resolves as that exported constant would.
- * Recorded by binding and by bare name: the name alone resolves the binding when its syntax context differs.
- */
-function collectDestructured(pattern, rec) {
-  for (const prop of pattern.properties) {
-    let local;
-    let source;
-    if (prop.type === "AssignmentPatternProperty") {
-      local = prop.key;
-      source = prop.key.value;
-    } else if (prop.type === "KeyValuePatternProperty") {
-      const target = prop.value.type === "AssignmentPattern" ? prop.value.left : prop.value;
-      if (target.type === "Identifier") {
-        local = target;
-        source = propertyName(prop.key);
-      }
-    }
-    if (local === undefined || typeof source !== "string") continue;
-    rec.destructured.set(bindingKey(local), source);
-    rec.destructuredNames.set(local.value, source);
-  }
+/** `[name, params]` of a function declaration or of a declarator bound to a function, else undefined. */
+function functionOf(node) {
+  if (node.type === "FunctionDeclaration") return [node.identifier, node.params];
+  const init = node.type === "VariableDeclarator" && node.id.type === "Identifier" ? unwrap(node.init) : undefined;
+  if (init?.type === "ArrowFunctionExpression" || init?.type === "FunctionExpression") return [node.id, init.params];
+  return undefined;
 }
 
 /** A module specifier resolved to a source path, or undefined for a package or an unknown file. */
@@ -259,9 +260,9 @@ function resolveSpecifier(from, specifier, known) {
 function analyzeFile({ path, text }) {
   const tree = parseSource(path, text);
   const rec = {
-    path, bindings: new Map(), exports: new Map(), imports: new Map(), emits: [], reads: [],
-    destructured: new Map(), destructuredNames: new Map(),
-    lits: new Set(), prefixes: new Set(), suffixes: new Set(),
+    path, bindings: new Map(), exports: new Map(), imports: new Map(), destructured: new Map(), appended: new WeakSet(),
+    functions: new Set(), topFunctions: new Map(), params: new Map(), calls: [],
+    emits: [], reads: [], lits: new Set(), prefixes: new Set(), suffixes: new Set(),
   };
   for (const stmt of tree.body) {
     if (stmt.type === "ImportDeclaration" && !stmt.typeOnly) {
@@ -275,16 +276,38 @@ function analyzeFile({ path, text }) {
         if (id.type === "Identifier") rec.exports.set(id.value, id);
       }
     }
+    const declaration = stmt.type === "ExportDeclaration" ? stmt.declaration : stmt;
+    for (const node of declaration.type === "VariableDeclaration" ? declaration.declarations : [declaration]) {
+      const [id] = functionOf(node) ?? [];
+      if (id) rec.topFunctions.set(id.value, bindingKey(id));
+    }
   }
   visitNodes(tree, (node) => {
+    const fn = functionOf(node);
+    if (fn) {
+      const [id, params] = fn;
+      rec.functions.add(bindingKey(id));
+      params.forEach((param, index) => {
+        const pat = param.pat ?? param;
+        const local = pat.type === "AssignmentPattern" ? pat.left : pat;
+        if (local.type === "Identifier") rec.params.set(bindingKey(local), { fn: bindingKey(id), index });
+      });
+    }
     if (node.type === "VariableDeclaration" && node.kind === "const") {
       for (const { id, init } of node.declarations) {
         if (id.type !== "Identifier" || !isStatic(init)) continue;
         rec.bindings.set(bindingKey(id), init);
         if (READ_STEPS_NAME_RE.test(id.value) && collection(unwrap(init))) rec.reads.push(["exact", init]);
       }
+    } else if (node.type === "ObjectPattern") {
+      // `const { WORKER_STATE_LEDGER_STEP } = host` and `({ X_STEP }: Deps) => ...`: a host object
+      // hands over the exported constant of the same name, so the local resolves through that name.
+      for (const prop of node.properties) {
+        const name = propertyName(prop.key);
+        const local = prop.type === "AssignmentPatternProperty" ? prop.key : prop.value?.left ?? prop.value;
+        if (local?.type === "Identifier" && CONSTANT_NAME_RE.test(name ?? "")) rec.destructured.set(bindingKey(local), name);
+      }
     }
-    if (node.type === "ObjectPattern") collectDestructured(node, rec);
     collectEvidence(node, rec);
   });
   rec.reads = rec.reads.filter(([, expr]) => isStatic(expr));
@@ -327,7 +350,9 @@ export function scanLedgerSteps(sources) {
   }
 
   function values(rec, expr, emit = false, seen = new Set()) {
-    const node = unwrap(expr);
+    const options = alternatives(expr);
+    if (options.length > 1) return options.flatMap((option) => values(rec, option, emit, seen));
+    const node = options[0];
     if (!node || seen.has(node)) return [];
     const next = new Set(seen).add(node);
     if (node.type === "StringLiteral") return [node.value];
@@ -343,9 +368,8 @@ export function scanLedgerSteps(sources) {
       const target = byPath.get(resolveSpecifier(rec.path, imported.from, byPath));
       return target ? values(target, target.exports.get(imported.name), emit, next) : [];
     }
-    const source = rec.destructured.get(key) ?? rec.destructuredNames.get(node.value);
-    if (source !== undefined && CONSTANT_NAME_RE.test(source)) {
-      return (declarers.get(source) ?? []).flatMap(([other, id]) => values(other, id, emit, next));
+    if (rec.destructured.has(key)) {
+      return (declarers.get(rec.destructured.get(key)) ?? []).flatMap(([other, id]) => values(other, id, emit, next));
     }
     if (emit && node.ctxt === 1 && CONSTANT_NAME_RE.test(node.value)) {
       return (declarers.get(node.value) ?? []).flatMap(([other, id]) => values(other, id, true, next));
@@ -353,14 +377,60 @@ export function scanLedgerSteps(sources) {
     return [];
   }
 
-  const writers = new Map();
+  // A STEP HELPER is a function whose parameter reaches an emit, directly (`log(step)`, `{ step }`)
+  // or through another helper's step argument; each call passes it the step, so the call emits it
+  // and its writers are the caller's file and every file down the chain.
+  const helpers = new Map();
+  const paramOf = (rec, expr) => alternatives(expr).map((leaf) => leaf?.type === "Identifier" && rec.params.get(bindingKey(leaf))).find(Boolean);
+  const mark = (rec, { fn, index }, shape, files) => {
+    const key = `${rec.path}#${fn}`;
+    const at = helpers.get(key) ?? new Map();
+    helpers.set(key, at);
+    if (at.has(index)) return false;
+    at.set(index, { shape, files: new Set(files).add(rec.path) });
+    return true;
+  };
+  function helperOf(rec, callee) {
+    const key = bindingKey(callee);
+    if (rec.functions.has(key)) return helpers.get(`${rec.path}#${key}`);
+    const imported = rec.imports.get(key);
+    const target = imported && byPath.get(resolveSpecifier(rec.path, imported.from, byPath));
+    return target?.topFunctions.has(imported.name) ? helpers.get(`${target.path}#${target.topFunctions.get(imported.name)}`) : undefined;
+  }
   for (const rec of recs) {
     for (const [shape, expr] of rec.emits) {
+      const param = paramOf(rec, expr);
+      if (param) mark(rec, param, shape, []);
+    }
+  }
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const rec of recs) {
+      for (const { callee, args } of rec.calls) {
+        for (const [index, { shape, files }] of helperOf(rec, callee) ?? []) {
+          const param = args[index] && !args[index].spread && paramOf(rec, args[index].expression);
+          if (param && mark(rec, param, shape, files)) grew = true;
+        }
+      }
+    }
+  }
+  for (const rec of recs) {
+    for (const { callee, args } of rec.calls) {
+      for (const [index, { shape, files }] of helperOf(rec, callee) ?? []) {
+        const arg = args[index];
+        if (arg && !arg.spread && isStatic(arg.expression)) rec.emits.push([shape, arg.expression, files]);
+      }
+    }
+  }
+
+  const writers = new Map();
+  for (const rec of recs) {
+    for (const [shape, expr, files = []] of rec.emits) {
       for (const step of values(rec, expr, true)) {
         const literal = unwrap(expr).type !== "Identifier";
         if (!(literal ? shape : STEP_RE).test(step)) continue;
         if (!writers.has(step)) writers.set(step, new Set());
-        writers.get(step).add(rec.path);
+        for (const path of [rec.path, ...files]) writers.get(step).add(path);
       }
     }
     for (const [mode, expr] of rec.reads) {

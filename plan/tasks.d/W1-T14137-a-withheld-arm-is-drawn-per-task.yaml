@@ -19,6 +19,7 @@
     - test/a-skill-is-withheld-on-a-seeded-share-of-runs.test.ts
     - test/the-fix-lane-is-offered-its-skills-under-seeded-withholding.test.ts
     - test/learning/a-skill-that-costs-more-than-it-saves-stops-being-offered.test.ts
+    - test/a-staged-skill-reaches-the-worker-prompt.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -34,6 +35,12 @@
     - The report reads each row's recorded arm (skill-workshop.ts:1196-1199), so changing the key breaks no report, but rows
       drawn before and after the change are two designs and must not be pooled.
     The fix-lane knowledge shadow (W1-T14138) and the fix-prompt lesson canary (W1-T14151) need the same task-keyed draw.
+    SCOPE AMENDED for the report's legacy fence (fleet review of #20042 at 933aa272d, READ at origin/main b5da9011c):
+    - A legacy run whose CI polling throws ends through endThrownRun (src/cli/commands/run-task-verb.ts) with a verdict that has
+      no pr_url. Only its pr.opened row names its PR, so the report must read pr.opened to fence that PR's later merge, which
+      the sweep logs as a pr.terminal row under its own pass run id (src/lib/sweep.ts).
+    - The report reads its rows through SKILL_EFFECTIVENESS_LEDGER_STEPS, and the W1-T3379 report-command test pins that step list
+      literally in test/a-staged-skill-reaches-the-worker-prompt.test.ts, so adding pr.opened moves one expected list there.
   design: |
     1. Add src/lib/task-arm.ts with a pure `taskArmWithheld({ taskId, unit, share, epoch })`: the first 4 bytes of
        sha256(["task-arm/v1", epoch, unit, taskId].join("\0")) over 2^32, below share, means withheld. Export the epoch

@@ -1135,6 +1135,8 @@ type CachedPlanBlob = {
 /** One path's current pin only. A merge replaces the entries after validation succeeds. */
 export class PlanBlobCache {
   entries = new Map<string, CachedPlanBlob>();
+  /** W1-T13969: {@link loadPlanAtRefAsync}'s parses by content hash, kept across ref changes (see {@link retainParsedBlobs}). */
+  retained = new Map<string, CachedPlanBlob>();
   parsedBlobs = 0;
   reusedBlobs = 0;
 }
@@ -1145,11 +1147,14 @@ function cachedBlobParser(
   counts: { parsedBlobs: number; reusedBlobs: number },
   // Ref labels are `<ref>:<repo-relative path>`; changing the ref must not invalidate unchanged content.
   pathForLabel = (label: string) => label.slice(label.indexOf(":") + 1),
+  /** W1-T13969: answer a blob this path no longer pins from any parse of the same content kept by `retained`. */
+  acrossRefs = false,
 ): typeof parseTasksFromYaml {
   return (text, label, onDuplicate) => {
     const path = pathForLabel(label);
     const hash = createHash("sha256").update(text, "utf8").digest("hex");
     let entry = cache.entries.get(path);
+    if (entry?.hash !== hash && acrossRefs) entry = cache.retained.get(hash);
     if (entry?.hash === hash) {
       counts.reusedBlobs++;
       if (entry.label !== label) entry = { ...entry, label, tasks: entry.tasks.map((task) => ({ ...task, sourcePath: label })) };
@@ -1416,6 +1421,7 @@ export async function loadPlanAtRefAsync(
   ref = "HEAD",
   runGit: (args: string[], stdin?: string) => Promise<string> = defaultGitRunnerAsync(repoRoot),
   keepsUnseenDependency?: KeepsUnseenDependency,
+  parseCache: PlanBlobCache = planAtRefParseCache(planRelPath),
 ): Promise<Plan> {
   let monolithBlob: string;
   try {
@@ -1438,7 +1444,50 @@ export async function loadPlanAtRefAsync(
   } catch (err) {
     throw new PlanError(`cannot read plan shard at ${ref} in ${repoRoot}: ${String(err)}`);
   }
-  return mergePlanBlobs(withShardBlobs(blobs, ref, shardRelPaths, shardBlobs), {}, { keepsUnseenDependency });
+  return mergePlanBlobsReusingParses(withShardBlobs(blobs, ref, shardRelPaths, shardBlobs), parseCache, keepsUnseenDependency);
+}
+
+const planAtRefParseCaches = new Map<string, PlanBlobCache>();
+
+/** W1-T13969: {@link loadPlanAtRefAsync}'s parses for one plan path, kept for the process's lifetime. Each shard's entry
+ *  is keyed by its content hash, so an unchanged blob is parsed once and a changed one again; one plan's shards at most. */
+function planAtRefParseCache(planRelPath: string): PlanBlobCache {
+  let cache = planAtRefParseCaches.get(planRelPath);
+  if (cache === undefined) planAtRefParseCaches.set(planRelPath, cache = new PlanBlobCache());
+  return cache;
+}
+
+/** W1-T13969: {@link mergePlanBlobs} under its default parse, answering each blob whose content `cache` holds from that
+ *  parse. MEASURED 2026-11-20: re-parsing every shard on each load held the daemon loop 85.5 s in a day. */
+function mergePlanBlobsReusingParses(blobs: Array<{ label: string; text: string }>, cache: PlanBlobCache,
+  keepsUnseenDependency?: KeepsUnseenDependency): Plan {
+  const next = new Map<string, CachedPlanBlob>();
+  const counts = { parsedBlobs: 0, reusedBlobs: 0 };
+  try {
+    const plan = validatedPlan(mergeBlobTasks(blobs, undefined, undefined,
+      cachedBlobParser(cache, next, counts, undefined, true)), undefined, keepsUnseenDependency);
+    cache.entries = next;
+    Object.assign(cache, counts);
+    return plan;
+  } finally {
+    // A parse is a function of the blob's text alone, so a refused tree's parses are as reusable as an accepted tree's.
+    retainParsedBlobs(cache, next, blobs.length);
+  }
+}
+
+/** The parses a load used, newest last, bounded to twice the load's own blob count plus a margin: the sweep reads each
+ *  PR's head in turn, so a tree seen before (A, B, then A) finds its shards, and a daemon's plan history cannot grow
+ *  without limit, only keep the neighbouring trees' differing blobs. */
+function retainParsedBlobs(cache: PlanBlobCache, used: Map<string, CachedPlanBlob>, blobCount: number): void {
+  for (const entry of used.values()) {
+    cache.retained.delete(entry.hash);
+    cache.retained.set(entry.hash, entry);
+  }
+  const capacity = 2 * blobCount + 256;
+  for (const hash of cache.retained.keys()) {
+    if (cache.retained.size <= capacity) break;
+    cache.retained.delete(hash);
+  }
 }
 
 /** Git invoker with optional stdin for `cat-file --batch`; old `(args) => string` fakes still work. */
