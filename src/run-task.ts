@@ -1549,6 +1549,7 @@ import { judgeInstanceLiveness, readLivenessRows, LIVENESS_WINDOW_MS } from "./l
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount, type Mounts } from "./lib/mounts.js";
+import { runFixSelfCheckWith, type FixSelfCheckRunArgs } from "./lib/fix-self-check.js";
 import { resolveMountExplorationDispatch as exploreMount } from "./lib/mount-exploration.js";
 import {
   RULING_JUDGED_STEP,
@@ -46452,6 +46453,10 @@ function runTaskCommandHost(): RunTaskCommandHost {
   };
 }
 
+function runFixSelfCheck(args: FixSelfCheckRunArgs) {
+  return runFixSelfCheckWith(ledgeredNonDispatchSpawn("review"), args);
+}
+
 export function fixCommandHost(): FixCommandHost {
   return cachedFixCommandHost ??= {
     get ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK() { return ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK; },
@@ -46512,6 +46517,7 @@ export function fixCommandHost(): FixCommandHost {
     get workerChangedPaths() { return workerChangedPaths; },
     get workerCreatedCurrentHead() { return workerCreatedCurrentHead; },
     get worktreeHasUncommittedChanges() { return worktreeHasUncommittedChanges; },
+    get runFixSelfCheck() { return isTestRunner() ? undefined : runFixSelfCheck; },
   };
 }
 
