@@ -12,7 +12,7 @@
   plan_refs: [W1-T12457]
   files:
     - test/shadow-instance-safety.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at origin/main 86455aa29 (2026-11-22).

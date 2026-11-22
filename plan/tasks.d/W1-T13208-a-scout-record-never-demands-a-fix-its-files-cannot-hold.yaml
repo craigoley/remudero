@@ -18,7 +18,7 @@
   files:
     - src/lib/scout-gardener.ts
     - test/gardeners/a-scout-record-never-demands-a-fix-its-files-cannot-hold.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A symptom whose writer the scout cannot locate is filed as an investigation: its one claim is that the code that writes the step is located and named, its title and rationale say it is an investigation, and no claim in it asks for the cause to be fixed"
