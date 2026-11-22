@@ -22,7 +22,7 @@
     - "src/lib/escalation-answers.ts"
     - "src/lib/issue-revalidation-garden.ts"
     - "src/lib/sweep.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The issue body opens with the summary, then the options and the recommendation, and the machine fields (class, task, host, run, head, cause) follow under their own heading"
