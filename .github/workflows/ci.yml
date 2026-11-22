@@ -1408,6 +1408,19 @@ jobs:
           mkdir -p "$RUNNER_TEMP/gate-reports"
           npm run --silent console-parity 2>&1 | tee "$RUNNER_TEMP/gate-reports/console-parity.log"
 
+      - name: Write-only ledger step ratchet (every new ledger step has a reader or a stated record-only reason)
+        id: write-only-ledger-step
+        if: steps.classify.outputs.class == 'SOURCE'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/gate-reports"
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then
+            npm run --silent write-only-ledger-step -- --base "$GATE_BASE" 2>&1 | tee "$RUNNER_TEMP/gate-reports/write-only-ledger-step.log"
+          else
+            npm run --silent write-only-ledger-step 2>&1 | tee "$RUNNER_TEMP/gate-reports/write-only-ledger-step.log"
+          fi
+
       - name: baseline-monotonic (no SCORE_TABLE floor/ceiling regresses against origin/main without a reviewed bumpRationale)
         id: baseline-monotonic
         continue-on-error: true
@@ -1468,6 +1481,7 @@ jobs:
           OUTCOME_COMMENT_LOAD_RATCHET: ${{ steps.comment-load-ratchet.outcome }}
           OUTCOME_EXPIRING_FIXTURE_CENSUS: ${{ steps.expiring-fixture-census.outcome }}
           OUTCOME_CONSOLE_PARITY: ${{ steps.console-parity.outcome }}
+          OUTCOME_WRITE_ONLY_LEDGER_STEP: ${{ steps.write-only-ledger-step.outcome }}
           OUTCOME_BASELINE_MONOTONIC: ${{ steps.baseline-monotonic.outcome }}
         run: |
           set -euo pipefail
@@ -1539,7 +1553,7 @@ jobs:
           report "prompt-surface-gate" "${OUTCOME_PROMPT_SURFACE_GATE}"
           report "task-id-existence" "${OUTCOME_TASK_ID_EXISTENCE}"
           report "source-size" "${OUTCOME_SOURCE_SIZE}"
-          report "comment-load-ratchet" "comment-load-ratchet=${OUTCOME_COMMENT_LOAD_RATCHET}" "expiring-fixture-census=${OUTCOME_EXPIRING_FIXTURE_CENSUS}" "console-parity=${OUTCOME_CONSOLE_PARITY}"
+          report "comment-load-ratchet" "comment-load-ratchet=${OUTCOME_COMMENT_LOAD_RATCHET}" "expiring-fixture-census=${OUTCOME_EXPIRING_FIXTURE_CENSUS}" "console-parity=${OUTCOME_CONSOLE_PARITY}" "write-only-ledger-step=${OUTCOME_WRITE_ONLY_LEDGER_STEP}"
           report "baseline-monotonic" "${OUTCOME_BASELINE_MONOTONIC}"
 
   leak-grep:
