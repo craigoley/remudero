@@ -9187,6 +9187,13 @@ export function proofRepairRefusal(input: {
   checkProofStatus: (proof: string) => number | null;
 }): { reason: string; undeclared: string[] } | undefined {
   if (input.changedFiles.length === 0) {
+    // An empty round is only a worker failure when a proof still needs repair; when every named proof already
+    // discriminates at the PR head the evidence was stale and no edit was owed.
+    const allDiscriminate =
+      input.proofs.length > 0 && input.proofs.every((proof) => input.checkProofStatus(proof) === CHECK_PROOF_EXIT.pass);
+    // No refusal at all: the caller sets `harnessCommitRefused` (and logs `fix.commit_refused`) only on a defined
+    // result, so returning one — even renamed — would still dispatch/record a refused round.
+    if (allDiscriminate) return undefined;
     return { reason: "proof-repair round committed no test edit — nothing was pushed", undeclared: [] };
   }
   const outside = input.changedFiles.filter((file) => !input.stageable.includes(file));

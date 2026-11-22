@@ -16,6 +16,7 @@
     - package.json
     - test/every-ci-script-ratchet-has-a-pre-push-verdict.test.ts
     - test/ci/gates/a-ci-gate-run-through-an-npm-script-gets-a-pre-push-verdict.test.ts
+    - test/ci/the-author-preflight-is-advisory-and-its-static-step-runs-only-checks-ci-does-not.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -32,6 +33,13 @@
     - MEASURED: following each `npm run` step to the script file package.json runs finds no gate hidden this way on
       origin/main, and exactly this one on #20045's head. The fix grows the population by that one gate.
     The cause is the rule, not the one gate: a gate's census membership depends on how its step is named.
+    SCOPE AMENDED for the W1-T12511 counts-only fixture (read at origin/main 5a6cf3204 on the build branch):
+    - test/ci/the-author-preflight-is-advisory-and-its-static-step-runs-only-checks-ci-does-not.test.ts runs the
+      census CLI over a fixture tree that adds a `widget-ratchet` step to ci.yml and has no package.json. With design
+      step 2, a tree whose package.json cannot be read fails the census, so that fixture stops as not measured (exit 2)
+      before naming the step (exit 1).
+    - The fixture gains a package.json for its one script; the test's assertions do not change. No criterion, proof or
+      falsifier changes.
   design: |
     1. ciScriptRatchetPopulation reads package.json's scripts beside ci.yml. A `npm run [--silent] <name>` step joins
        the population when its step id, its npm script name, or the scripts/*.mjs file that npm script runs matches

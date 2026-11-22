@@ -98,6 +98,7 @@ import {
   readLedgerUnionBounded,
 } from "./status.js";
 import { taskCardRuns } from "./task-card.js";
+import { latestSpendPerMergedRow, renderSpendPerMergedLine, SPEND_PER_MERGED_DAILY_STEP, type LatestSpendPerMerged } from "./spend-per-merged.js";
 import { colourEnabled, paint, sectionRule } from "./tty.js";
 
 export type ServiceName = "daemon" | "serve" | "deploy-supervisor";
@@ -569,6 +570,7 @@ export interface StatusBoardModel {
   learningsInjection: LearningsInjectionSection;
   /** W1-T4939. Optional so a model assembled before this section existed still renders; `buildStatusBoard` always sets it. */
   idleLane?: IdleLaneSection;
+  spendPerMerged?: LatestSpendPerMerged;
   needsMe: NeedsMeSection;
 }
 
@@ -2493,6 +2495,8 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
 
   // ── W1-T4939: IDLE LANE — the same `lines` window, one more pure fold, no second ledger read. ──
   const idleLane = deriveIdleLane(lines, nowMs);
+  const spendPerMerged = latestSpendPerMergedRow(deps.readLedger ? lines : readLedgerUnionBounded(ledgerPath, {
+    keep: (line) => line.includes(`"${SPEND_PER_MERGED_DAILY_STEP}"`) }));
 
   // W1-T931: NEEDS ME is another pure fold of that window, without another ledger read.
   const operatorReleases = readOperatorReleaseRecordsForBoard(root, plan, lines);
@@ -2520,6 +2524,7 @@ export function buildStatusBoard(root: string, ledgerPath: string, deps: StatusB
     cacheHit,
     learningsInjection,
     idleLane,
+    ...(spendPerMerged ? { spendPerMerged } : {}),
     needsMe,
   };
 }
@@ -3060,6 +3065,8 @@ export function renderStatusBoardText(model: StatusBoardModel, opts: { colourEna
       rendered: renderLearningsInjectionBlock(model.learningsInjection),
     },
     ...(model.idleLane ? [{ label: "idle lane", section: model.idleLane, rendered: renderIdleLaneBlock(model.idleLane) }] : []),
+    ...(model.spendPerMerged ? [{ label: "spend per merged", section: model.spendPerMerged,
+      rendered: [renderSpendPerMergedLine(model.spendPerMerged, Date.parse(model.generatedAt))] }] : []),
     { label: "needs me", section: model.needsMe, rendered: renderNeedsMeBlock(model.needsMe) },
   ];
   const lines: string[] = [`### rmd status — ${model.generatedAt}`, ""];

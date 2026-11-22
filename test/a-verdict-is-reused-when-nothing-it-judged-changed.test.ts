@@ -164,6 +164,8 @@ test("W1-T3798 production adapter posts reuse and routes discrimination through 
     proof_exec: ["executed_pass"],
     // W1-T11847: a reused verdict posts only while the reviewer code that judged it is current at origin/main.
     reviewer_code_sha: "c".repeat(40),
+    // W1-T14235: a reused code pass records the semantic judgement it came from.
+    reviewer_outcome: "success",
   });
   process.env.PATH = `${bin}:${oldPath}`;
   try {

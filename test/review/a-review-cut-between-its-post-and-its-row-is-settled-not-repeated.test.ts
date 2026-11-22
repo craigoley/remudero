@@ -32,6 +32,7 @@ import type { ReviewerCodeFreshness } from "#src/lib/self-sync.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -70,6 +71,8 @@ function terminal(ledgerPath: string, post: PostReviewStatusGuardedOpts["post"])
     reviewDecisionDigest: DECISION, outboxBeforePost: true, reviewerCodeFreshness: FRESH_CODE,
     readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
     fetchLifecycle: () => lifecycle(HEAD), post,
+    // W1-T14235: the verdict rests on a semantic judgement that ran; the outbox entry records it.
+    semanticJudgement: { planOnly: false, reviewerOutcome: "success" },
   };
 }
 
@@ -181,7 +184,7 @@ if (CHILD_DIR === undefined) {
       assert.equal(atPost.includes(SECRET), false, "no credential reaches the outbox");
       assert.deepEqual(Object.keys(entry).sort(), [
         "comment_body", "decision_verdict", "description", "evidence", "head_sha", "input_key", "owner", "posting", "pr_url", "repo",
-        "review_decision_digest", "reviewer_code_sha", "run_id", "state", "task_id", "version", "written_at",
+        "review_decision_digest", "reviewer_code_sha", "reviewer_outcome", "run_id", "state", "task_id", "version", "written_at",
       ]);
       // A caller that does not ask for the entry gets none, as before.
       const plain = fixture("t12251-plain");
@@ -202,8 +205,17 @@ if (CHILD_DIR === undefined) {
   test("W1-T12251 criterion 2: the review command keeps the entry until its review.posted row is written, then removes it", async () => {
     // The real review command with a `gh` on PATH that answers from a table. Its status post takes 1 s.
     const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t12251-command-root-`));
-    const checkout = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t12251-command-head-`));
-    const head = "abc1234def5678abc1234def5678abc1234def56";
+    // W1-T14235: a code pass publishes only on a semantic judgement that ran, and the reviewer judges a snapshot of the
+    // PR head, so the head is a real repository and the review's reviewer passes its one criterion.
+    const headRepo = gitRepo({ kind: "t12251-command-head" });
+    const checkout = headRepo.dir;
+    mkdirSync(join(checkout, "tests"), { recursive: true });
+    writeFileSync(join(checkout, "package.json"), '{"type":"module"}\n', "utf8");
+    writeFileSync(join(checkout, "tests", "site-target.test.ts"),
+      "import { test, expect } from 'vitest';\ntest('the proof runs', () => {\n  expect(1 + 1).toBe(2);\n});", "utf8");
+    headRepo.git("add", "package.json", "tests/site-target.test.ts");
+    headRepo.git("commit", "-qm", "the proof");
+    const head = headRepo.git("rev-parse", "HEAD");
     const prUrl = "https://github.com/craigoley/remudero-site/pull/7";
     const ledgerPath = join(root, "state", "ledger.ndjson");
     const oldPath = process.env.PATH;
@@ -227,14 +239,10 @@ if (CHILD_DIR === undefined) {
     }, 20);
     try {
       mkdirSync(join(root, "state"), { recursive: true });
-      mkdirSync(join(checkout, "tests"), { recursive: true });
       writeFileSync(join(root, "settings.json"), "{}", "utf8");
-      writeFileSync(join(checkout, "package.json"), '{"type":"module"}\n', "utf8");
       mkdirSync(join(checkout, "node_modules", "vitest"), { recursive: true });
       writeFileSync(join(checkout, "node_modules", "vitest", "vitest.mjs"),
         'process.stdout.write("TAP version 13\\n1..1\\nok 1 - the proof runs\\n");\n', "utf8");
-      writeFileSync(join(checkout, "tests", "site-target.test.ts"),
-        "import { test, expect } from 'vitest';\ntest('the proof runs', () => {\n  expect(1 + 1).toBe(2);\n});", "utf8");
       process.env.PATH = `${gh.dir}:${oldPath}`;
       process.env.HOME = root;
       // The host carries what the review command takes from its caller. None of it is on the post path.
@@ -244,6 +252,7 @@ if (CHILD_DIR === undefined) {
         lintPlanForReview: async () => ({ ran: false, reason: "the fixture changes no plan file" }),
         readHeadShaRest,
         reviewPostedDescription: (posted: ReviewVerdict) => posted.summary,
+        reviewerClockBoundMs: () => 60_000,
       } as unknown as ReviewCommandHost;
       const verdict = await runReview(host, {
         owner: "craigoley", repo: "remudero-site", prUrl,
@@ -252,7 +261,11 @@ if (CHILD_DIR === undefined) {
         report: "The body has no proof keywords.",
         settingsFile: join(root, "settings.json"), config: { claudeBin: "/bin/true", root } as Config,
         log: (step, extra = {}) => appendLedger(ledgerPath, { run_id: "REVIEW-T12251", task_id: "W1-T3529", step, ...extra }),
-        say: () => {}, account: (r: WorkerResult) => r, spawnReviewer: false,
+        say: () => {}, account: (r: WorkerResult) => r,
+        reviewerSpawnWorker: async () => ({ sessionId: "t12251-reviewer", text: "REVIEW_VERDICT 1: PASS", blocks: [], stderr: "",
+          exit: { kind: "exit", code: 0 }, costUsd: 0, numTurns: 1, permissionDenials: [], childEnvKeys: [], model: "sonnet",
+          effort: "medium", provider: "claude", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {},
+          compactionEvents: [], qualitySuspect: false, subtype: "success", isError: false, apiError: false }) as WorkerResult,
         reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 } as Mount,
         headCheckoutDir: checkout, ledgerPath, runId: "REVIEW-T12251", disarm: () => "not-armed" as const, arm: () => "armed" as const,
       });
