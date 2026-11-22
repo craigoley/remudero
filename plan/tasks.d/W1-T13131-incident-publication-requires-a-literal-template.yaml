@@ -20,6 +20,12 @@
     - test/sre/incident-template-publication.test.ts
     - test/incident-events.test.ts
     - test/sre-lane.test.ts
+    - test/a-landed-incident-is-never-re-captured-with-new-bytes.test.ts # amended 2026-11-22 for PR 20179: fixture event must carry a source template id
+    - test/sre-runbooks.test.ts # amended 2026-11-22 for PR 20179: fixture event must carry a source template id
+    - test/sre/an-intervention-is-routed-to-the-sre-lane-once-however-late-its-row-was-written.test.ts # amended 2026-11-22 for PR 20179: fixture event must carry a source template id
+    - test/the-sre-lane-files-incidents-off-the-daemon-loop.test.ts # amended 2026-11-22 for PR 20179: fixture event must carry a source template id
+    - test/the-sre-lanes-landed-entry-read-runs-its-git-off-the-daemon-loop.test.ts # amended 2026-11-22 for PR 20179: fixture event must carry a source template id
+    - test/the-sre-lanes-suspect-commit-read-runs-off-the-loop.test.ts # amended 2026-11-22 for PR 20179: fixture event must carry a source template id
   status: queued
   attempts: 0
   rationale: |
@@ -108,3 +114,7 @@
     values change the basis or appear in the temporary feedback YAML, failing the regression.
     Remove the no-template guard: a legacy direct-ledger row files feedback and fails the test.
     A refuse-everything implementation fails the valid-template positive control.
+  note: |
+    files: amendment 2026-11-22 (PR 20179 at f83b142c8): six existing tests feed the SRE lane events
+    without a template id, which the fail-closed boundary now refuses. The build may update those
+    fixture events only; their assertions and every criterion of this task are unchanged.
