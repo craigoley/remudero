@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 2.00
+  budget_usd: 4.50
   risk: medium  # Rule 19: one concern — what the sweep's prior-fixed fold counts as a dispatch
   band_meaning: blast-radius
   origin: "operator session 2026-10-06: stall audit 07:16-11:30Z (signature 7 residual on #9505)"

@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  budget_usd: 14.00
+  budget_usd: 4.50
   risk: high # spans reviewer-worktree-lease and run-child (Rule 19 sizing): who may hold the reviewer tree at once, and how a failed borrow settles
   band_meaning: span
   origin: "operator-session#pr-backlog-round6-2026-11-20"
