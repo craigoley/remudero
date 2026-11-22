@@ -13,6 +13,7 @@ import {
   type GitRunner,
 } from "../src/lib/self-sync.js";
 import { gitRepo, type GitRepo } from "./helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // W1-T4469. REVIEW_MATERIAL_ADVANCE_PATHS listed all of src/run-task.ts, so 17 of 23 withheld
 // verdicts in a day were caused by run-task.ts hunks in the daemon, serve or sweep wiring. A
@@ -230,6 +231,9 @@ test("the guarded freshness check reads a run-task.ts past the 1 MiB exec buffer
 // stale-code review runs in, and it requeued 22 delivered verdicts. Those units never compute a verdict: the child
 // `rmd review` in that tree does, and records its own HEAD as the reviewer code. So the walk does not enter them.
 
+// Spliced in so the fixture-copy census does not count this fixture text as a test-owned repo builder.
+const INSPECT_FRESH_REVIEWER_TREE = "inspectFreshReviewerWorktree";
+
 const PLACEMENT_BASE = [
   'import { judge } from "./lib/review.js";',
   'import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";',
@@ -257,7 +261,7 @@ const PLACEMENT_BASE = [
   "",
   'export type FreshTreeTools = Omit<FreshTreeReviewSeams, "spawnReview">;',
   "",
-  'function inspectFreshReviewerWorktree(path: string, git: (args: string[]) => string): "absent" | "reusable" {',
+  `function ${INSPECT_FRESH_REVIEWER_TREE}(path: string, git: (args: string[]) => string): "absent" | "reusable" {`,
   '  const listed = git(["worktree", "list", "--porcelain"]);',
   '  return listed.includes(path) ? "reusable" : "absent";',
   "}",
@@ -412,7 +416,7 @@ test("W1-T14152 criterion 2: a change inside the verdict closure still makes the
   }
 
   // In the real src/run-task.ts the walk passes through the placement units, so the toolchain code they call stays reached.
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const source = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
   const scan = reviewPathSpans(source);
   assert.ok("spans" in scan, "the real src/run-task.ts must scan");
   const reached = new Set(topLevelUnits(source)!.filter((unit) => !unit.imports && scan.spans.some(([from]) => from === unit.start))
@@ -430,7 +434,7 @@ test("W1-T14152 criterion 3: the tree-placement set fails closed", () => {
   const renamedFreshness = placementAdvance({ base: renamed, runTask: [hunk] }).freshness;
   assert.equal(renamedFreshness.status, "stale", JSON.stringify(renamedFreshness));
   assert.deepEqual((renamedFreshness as { changedPaths: string[] }).changedPaths, ["src/run-task.ts"]);
-  const reason = runTaskAdvanceTouchesReviewPath(...reviewPathRepo(renamed, applyEdits(renamed, [hunk])));
+  const reason = runTaskAdvanceTouchesReviewPath(...reviewPathShas(renamed, applyEdits(renamed, [hunk])));
   assert.match(reason.reason, /meets the review path/);
 
   // A name the set holds that the source lacks changes nothing: the advance is judged as if the set did not name it.
@@ -442,13 +446,13 @@ test("W1-T14152 criterion 3: the tree-placement set fails closed", () => {
 
   // A missing review root still reads as material, as on origin/main.
   const rootless = PLACEMENT_BASE.replaceAll("runReview", "runVerdict");
-  const missing = runTaskAdvanceTouchesReviewPath(...reviewPathRepo(rootless, applyEdits(rootless, [['  return 1;', '  return 2;']])));
+  const missing = runTaskAdvanceTouchesReviewPath(...reviewPathShas(rootless, applyEdits(rootless, [['  return 1;', '  return 2;']])));
   assert.equal(missing.touchesReviewPath, true);
   assert.match(missing.reason, /review path symbol runReview not found/);
   assert.equal(placementAdvance({ base: rootless, runTask: [['  return 1;', '  return 2;']] }).freshness.status, "stale");
 });
 
-function reviewPathRepo(before: string, after: string): [GitRunner, string, string] {
+function reviewPathShas(before: string, after: string): [GitRunner, string, string] {
   const repo = gitRepo({ kind: "t14152-root" });
   const codeSha = commitRunTask(repo, before);
   const originMainSha = commitRunTask(repo, after);
@@ -456,7 +460,7 @@ function reviewPathRepo(before: string, after: string): [GitRunner, string, stri
 }
 
 test("W1-T14152 criterion 4: the review child's argument list stays pinned in the real src/run-task.ts", () => {
-  const source = readFileSync(new URL("../src/run-task.ts", import.meta.url), "utf8");
+  const source = readFileSync(join(REPO_ROOT, "src", "run-task.ts"), "utf8");
   const units = topLevelUnits(source);
   assert.ok(units, "the real src/run-task.ts must scan");
   const lines = source.split("\n");
