@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { test } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
+import { dispatchClaimRef, parseClaimAnchorMessage, type DispatchClaimReserver } from "#src/lib/dispatch-claim.js";
 import {
   HAND_WORKTREE_TASK_ID_RE,
   createHandWorktree,
@@ -18,14 +19,24 @@ import {
   renderHandWorktree,
 } from "#src/lib/hand-worktree.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { handWorktreeCommand } from "#src/run-task.js";
-import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
+import { dispatchClaimReserverFor, handWorktreeCommand } from "#src/run-task.js";
+import { GIT_REPO_FIXTURE_IDENTITY, gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
+
+// W1-T14307: the dispatch-claim reserver mints its anchor with `commit-tree` through the inherited environment, so
+// the fixture's identity must be in process.env for a stripped CI runner (no git identity) to mint it.
+Object.assign(process.env, {
+  GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+  GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+  GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
+  GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email,
+});
 
 const NOW = 1_791_000_000_000;
 const PKG = '{"name":"fixture","version":"1.0.0","private":true}\n';
 const LOCK = '{"name":"fixture","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"fixture","version":"1.0.0"}}}\n';
 
 interface Fleet {
+  origin: GitRepo;
   seed: GitRepo;
   core: GitRepo;
   parent: string;
@@ -41,7 +52,39 @@ function fleet(): Fleet {
   seed.addRemote("origin", origin.dir);
   seed.git("push", "-q", "origin", "main");
   const core = gitRepo({ cloneFrom: origin.dir, kind: "hw-core" });
-  return { seed, core, parent: mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hw-parent-`)) };
+  return { origin, seed, core, parent: mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hw-parent-`)) };
+}
+
+/** The sha `ref` names on the fixture's bare origin, or "" when origin holds no such ref. */
+function originRef(f: Fleet, ref: string): string {
+  const r = spawnSync("git", ["-C", f.origin.dir, "for-each-ref", "--format=%(objectname)", ref], { encoding: "utf8" });
+  return (r.stdout ?? "").trim();
+}
+
+/** A server-side hook in the fixture's bare origin; the hardened leaf disables only the CLIENT's hooks. */
+function originHook(f: Fleet, name: "pre-receive" | "post-receive", body: string): void {
+  writeFileSync(join(f.origin.dir, "hooks", name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+}
+
+/** A refused claim leaves no new worktree, no local branch, and (when origin is readable) no branch on origin. */
+function nothingLeft(f: Fleet, branch: string, { originReadable = true } = {}): void {
+  const path = join(f.parent, branch);
+  assert.equal(existsSync(path), false, `${path} must be removed`);
+  assert.doesNotMatch(f.core.git("worktree", "list"), new RegExp(branch), "git must not list the removed worktree");
+  assert.equal(f.core.git("branch", "--list", branch), "", `the local branch ${branch} must be deleted`);
+  if (originReadable) assert.equal(originRef(f, `refs/heads/${branch}`), "", `origin must not keep ${branch}`);
+}
+
+/** A reserver standing in for one whose push the host refuses (a proxy that refuses `refs/rmd-*`) or that loses a race. */
+function scriptedReserver(over: Partial<DispatchClaimReserver>): DispatchClaimReserver {
+  return {
+    mintAnchor: () => "a".repeat(40),
+    attempt: () => "unreachable",
+    holder: () => undefined,
+    drop: () => true,
+    lastAttemptStderr: () => "fatal: unable to access 'https://github.com/x/y.git/': The requested URL returned error: 403",
+    ...over,
+  };
 }
 
 function donor(f: Fleet, name: string, opts: { lock?: string; pkg?: string; bin?: boolean } = {}): string {
@@ -106,7 +149,7 @@ test("hand-worktree uses enabled dependency seeds and preserves an occupied dest
     const outcome = hardLinkNodeModules(lender, target);
     assert.equal(outcome.kind, "seeded");
     assert.ok(lstatSync(join(target, "node_modules")).isDirectory());
-    const result = { status: "created" as const, path: target, branch: "seed-consumer", freeBytes: 2 * 1024 ** 3, nodeModules: outcome };
+    const result = { status: "created" as const, path: target, branch: "seed-consumer", freeBytes: 2 * 1024 ** 3, nodeModules: outcome, claim: { kind: "not-applicable" as const } };
     assert.match(renderHandWorktree(result), /validated dependency seed/);
     assert.deepEqual(hardLinkNodeModules(lender, target), { kind: "npm-ci-needed", reasons: ["dependency destination is already occupied"] });
     const invalid = join(f.parent, "invalid"); mkdirSync(invalid);
@@ -257,4 +300,111 @@ test("each donor and link failure is named, never read as a clean miss", () => {
   assert.equal(miss.kind, "npm-ci-needed");
   assert.match(miss.kind === "npm-ci-needed" ? miss.reasons[0] : "", /cp -al from .*absent failed/);
   assert.equal(formatGiB(1.5 * 1024 ** 3), "1.5 GiB");
+});
+
+// ── W1-T14307: a filed hand worktree is published before it is built ───────────────────────────────────────────
+//
+// The drain dispatches a task unless an open PR or a pushed run branch exists, and before W1-T14307 a hand worktree
+// published nothing until its builder's first push: on 2026-11-22 the fleet built W1-T14147 again (#20129) beside an
+// unpushed hand worktree. Every case below drives the REAL reserver `rmd claim` uses, the real hardened-leaf push and
+// listing, and a real bare origin; the origin's own server hooks stage a race, a refused push and a lost origin.
+//
+// INVARIANT a-hand-build-is-published-before-it-is-built: a filed hand worktree exists only with its run branch on
+// origin, or with the operator's explicit --no-claim.
+
+test("W1-T14307 criterion 1: for a filed id, rmd hand-worktree leaves run-<id>-<epochMs> at the worktree's base sha and refs/rmd-dispatch/<id> on a bare origin", () => {
+  const f = fleet();
+  const r = command(["W1-T9", "--parent", f.parent], { repoDir: f.core.dir, clock: fixedClock(NOW) });
+  assert.equal(r.code, 0, r.err);
+  const branch = `run-W1-T9-${NOW}`;
+  const base = spawnSync("git", ["-C", join(f.parent, branch), "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+  assert.equal(base, f.core.git("rev-parse", "origin/main"), "the worktree is cut at origin/main");
+  assert.equal(originRef(f, `refs/heads/${branch}`), base, "the run branch is on origin at the worktree's base sha");
+  const claim = originRef(f, dispatchClaimRef("W1-T9"));
+  assert.match(claim, /^[0-9a-f]{40}$/, "the fleet's own dispatch claim is on origin");
+  const anchor = parseClaimAnchorMessage(spawnSync("git", ["-C", f.origin.dir, "log", "-1", "--format=%B", claim], { encoding: "utf8" }).stdout.trim());
+  assert.equal(anchor?.pid, process.pid, "the claim is the reserver's own anchor, naming this process");
+  assert.match(r.out, new RegExp(`claim:  ${branch} pushed to origin at ${base}; refs/rmd-dispatch/W1-T9 taken`));
+  // POSITIVE CONTROL: a second hand worktree for the same id now sees the first one's claim and refuses.
+  const again = command(["W1-T9", "--parent", f.parent], { repoDir: f.core.dir, clock: fixedClock(NOW + 1) });
+  assert.equal(again.code, 1);
+  assert.match(again.err, new RegExp(`origin holds refs/rmd-dispatch/W1-T9 at ${claim} \\(rmd-dispatch claim ${process.pid}@`));
+});
+
+test("W1-T14307 criterion 2: a dispatch claim on origin for the id, a second run branch for the id appearing during the push, or a failed push refuses and leaves no new worktree or branch behind", () => {
+  const branch = `run-W1-T9-${NOW}`;
+  // A dispatch claim already on origin is read with the branches, before anything is cut.
+  const held = fleet();
+  held.seed.git("push", "-q", "origin", "HEAD:refs/rmd-dispatch/W1-T9");
+  const heldSha = held.seed.git("rev-parse", "HEAD");
+  const a = command(["W1-T9", "--parent", held.parent], { repoDir: held.core.dir, clock: fixedClock(NOW) });
+  assert.equal(a.code, 1, a.out);
+  assert.match(a.err, new RegExp(`origin holds refs/rmd-dispatch/W1-T9 at ${heldSha} \\(seed\\) — the fleet or another hand build has claimed W1-T9`));
+  nothingLeft(held, branch);
+
+  // A second run branch for the id reaches origin during the push: both builders must not proceed.
+  const raced = fleet();
+  // Only on the create: the cleanup's own delete of our branch reaches this hook too, with an all-zero sha.
+  originHook(raced, "post-receive", `while read old new ref; do [ "$ref" = "refs/heads/${branch}" ] && [ "$old" = "${"0".repeat(40)}" ] && git update-ref refs/heads/run-W1-T9-5 "$new"; done; exit 0`);
+  const b = command(["W1-T9", "--parent", raced.parent], { repoDir: raced.core.dir, clock: fixedClock(NOW) });
+  assert.equal(b.code, 1, b.out);
+  assert.match(b.err, /another branch for W1-T9 reached origin during the push: refs\/heads\/run-W1-T9-5 — two builders must never both proceed; removed the new worktree and branch/);
+  nothingLeft(raced, branch);
+  assert.notEqual(originRef(raced, "refs/heads/run-W1-T9-5"), "", "the other builder's branch is not ours to remove");
+  assert.equal(originRef(raced, dispatchClaimRef("W1-T9")), "", "the dispatch claim it took is dropped");
+
+  // A failed push refuses, and drops the dispatch claim it had taken.
+  const closed = fleet();
+  originHook(closed, "pre-receive", `while read old new ref; do case "$ref" in refs/heads/run-*) echo "run branches are closed" >&2; exit 1;; esac; done; exit 0`);
+  const c = command(["W1-T9", "--parent", closed.parent], { repoDir: closed.core.dir, clock: fixedClock(NOW) });
+  assert.equal(c.code, 1, c.out);
+  assert.match(c.err, new RegExp(`could not push ${branch} to origin: .*; removed the new worktree and branch`));
+  nothingLeft(closed, branch);
+  assert.equal(originRef(closed, dispatchClaimRef("W1-T9")), "", "the dispatch claim it took is dropped");
+
+  // A failed listing after the push refuses too; what it cannot remove on the lost origin is NAMED, never silent.
+  const lost = fleet();
+  originHook(lost, "post-receive", `while read old new ref; do [ "$ref" = "refs/heads/${branch}" ] && git config core.repositoryformatversion 99; done; exit 0`);
+  const d = createHandWorktree({ repoDir: lost.core.dir, taskId: "W1-T9", parent: lost.parent, clock: fixedClock(NOW), claimReserver: dispatchClaimReserverFor(lost.core.dir) });
+  assert.equal(d.status, "refused", JSON.stringify(d));
+  const reason = d.status === "refused" ? d.reason : "";
+  assert.match(reason, new RegExp(`pushed ${branch}, then could not list origin's run-W1-T9-\\* branches: `));
+  assert.match(reason, new RegExp(`could not remove origin's ${branch} \\(.*\\), origin's refs/rmd-dispatch/W1-T9 — remove them by hand`));
+  nothingLeft(lost, branch, { originReadable: false });
+
+  // A claim another lane takes between the read and the attempt refuses, naming its holder, before anything is pushed.
+  const late = fleet();
+  const e = createHandWorktree({ repoDir: late.core.dir, taskId: "W1-T9", parent: late.parent, clock: fixedClock(NOW),
+    claimReserver: scriptedReserver({ attempt: () => "taken", holder: () => "b".repeat(40) }) });
+  assert.match(e.status === "refused" ? e.reason : "", new RegExp(`refs/rmd-dispatch/W1-T9 was taken while the worktree was cut: .*held by ${"b".repeat(40)}.*; removed the new worktree and branch`));
+  nothingLeft(late, branch);
+});
+
+test("W1-T14307 criterion 3: --no-claim and unfiled cut the worktree with no push, a refused dispatch-claim push keeps the run branch as the claim, and the output says which claim it holds", () => {
+  const f = fleet();
+  const skipped = command(["W1-T9", "--parent", f.parent, "--no-claim"], { repoDir: f.core.dir, clock: fixedClock(NOW) });
+  assert.equal(skipped.code, 0, skipped.err);
+  assert.ok(existsSync(join(f.parent, `run-W1-T9-${NOW}`)), "--no-claim still cuts the worktree");
+  assert.match(skipped.out, /claim:  skipped \(--no-claim\) — nothing on origin says this task is held, so the fleet may dispatch it/);
+  assert.equal(originRef(f, `refs/heads/run-W1-T9-${NOW}`), "", "--no-claim pushes no run branch");
+  assert.equal(originRef(f, dispatchClaimRef("W1-T9")), "", "--no-claim takes no dispatch claim");
+
+  const unfiled = command(["unfiled", "--parent", f.parent], { repoDir: f.core.dir, clock: fixedClock(NOW + 1) });
+  assert.equal(unfiled.code, 0, unfiled.err);
+  assert.match(unfiled.out, /claim:  not applicable \(unfiled\)/);
+  assert.equal(originRef(f, `refs/heads/run-unfiled-${NOW + 1}`), "", "unfiled pushes nothing");
+
+  // The host refuses the dispatch-claim push: the run branch alone is the claim, and the line says why.
+  const kept = created(createHandWorktree({ repoDir: f.core.dir, taskId: "W1-T8", parent: f.parent, clock: fixedClock(NOW + 2), claimReserver: scriptedReserver({}) }));
+  assert.equal(kept.claim.kind, "pushed");
+  const keptSha = originRef(f, `refs/heads/run-W1-T8-${NOW + 2}`);
+  assert.match(keptSha, /^[0-9a-f]{40}$/, "the run branch is pushed");
+  assert.match(renderHandWorktree(kept), new RegExp(`claim:  run-W1-T8-${NOW + 2} pushed to origin at ${keptSha}; dispatch claim not taken \\(cannot reach origin to claim refs/rmd-dispatch/W1-T8 .*error: 403\\); the run branch alone is the claim`));
+
+  // An anchor that cannot be minted is not an attempt; a library caller with no reserver still pushes the branch.
+  const unminted = created(createHandWorktree({ repoDir: f.core.dir, taskId: "W1-T7", parent: f.parent, clock: fixedClock(NOW + 3), claimReserver: scriptedReserver({ mintAnchor: () => "" }) }));
+  assert.match(renderHandWorktree(unminted), /dispatch claim not taken \(could not mint an anchor for refs\/rmd-dispatch\/W1-T7\); the run branch alone is the claim/);
+  const bare = created(createHandWorktree({ repoDir: f.core.dir, taskId: "W1-T6", parent: f.parent, clock: fixedClock(NOW + 4) }));
+  assert.match(renderHandWorktree(bare), /dispatch claim not taken \(no dispatch-claim reserver was given\); the run branch alone is the claim/);
+  assert.match(originRef(f, `refs/heads/run-W1-T6-${NOW + 4}`), /^[0-9a-f]{40}$/);
 });

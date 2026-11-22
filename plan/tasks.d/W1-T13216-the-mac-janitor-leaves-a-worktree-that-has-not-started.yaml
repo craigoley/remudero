@@ -16,6 +16,7 @@
     - deploy/mac/remudero-janitor.sh
     - deploy/workspace-retirement-guard.sh
     - test/deploy/the-mac-janitor-leaves-a-worktree-that-has-not-started.test.ts
+    - test/deploy/the-mac-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -66,4 +67,10 @@
     Ask the pull-request question of a head that main holds and criterion 1 must fail. Retire a held not-started worktree at six hours, or keep one whose claim is gone, and criterion 2 must fail. Drop the reason from the kept line and criterion 3 must fail. Keep a worktree whose own pull request merged, or remove a dirty one, and criterion 4 must fail, as must W1-T12255's suite. Restore and all pass.
   note: |
     reservation hand-off: run-unfiled-1794847949786 -> run-unfiled-1794847949786
-    Reserved on the filing branch by the operator session. The test folder is the one rmd test-place computed (test/deploy/, high) for a stub using the janitor suites' helpers (test/helpers/host-cleanup-fixture.ts, test/helpers/gh-shim.ts). The suites that already drive this script: test/deploy/the-mac-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts (W1-T12255; it must stay green unchanged) and test/workspace-retirement-safety.test.ts. The script must pass under the Mac's own bash 3.2 and under Linux bash. The installed copies refresh themselves from the checkout (test/deploy/the-installed-mac-janitor-copies-refresh-themselves.test.ts), so a merge reaches the operator Mac at its next pull. Until then the operator session keeps an untracked marker file in each working worktree, because the janitor skips a dirty one.
+    Reserved on the filing branch by the operator session. The test folder is the one rmd test-place computed (test/deploy/, high) for a stub using the janitor suites' helpers (test/helpers/host-cleanup-fixture.ts, test/helpers/gh-shim.ts). The suites that already drive this script: test/deploy/the-mac-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts (W1-T12255; every assertion stays as it is, and only its finished-worktree fixtures gain a published commit of their own, because criterion 1 makes a head that main already holds not started) and test/workspace-retirement-safety.test.ts. The script must pass under the Mac's own bash 3.2 and under Linux bash. The installed copies refresh themselves from the checkout (test/deploy/the-installed-mac-janitor-copies-refresh-themselves.test.ts), so a merge reaches the operator Mac at its next pull. Until then the operator session keeps an untracked marker file in each working worktree, because the janitor skips a dirty one.
+  amendment: |
+    2026-11-22, scope: test/deploy/the-mac-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts joins files:.
+    Its fixtures make every finished worktree with `git worktree add --detach <path> main`, so each head is one that
+    main already holds, which criterion 1 now keeps as not started. PR #20293 then fails W1-T12255 criteria 2, 3, 4 and 7.
+    The fix gives those fixtures a published commit of their own. No assertion changes, and the INVARIANT
+    finished-work-still-retires already names that case.
