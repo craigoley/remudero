@@ -17,7 +17,7 @@
     - deploy/workspace-retirement-guard.sh
     - test/deploy/the-mac-janitor-leaves-a-worktree-that-has-not-started.test.ts
     - test/deploy/the-mac-janitor-retires-a-finished-worktree-at-its-next-pass.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A clean worktree whose head commit origin/main already holds is not retired as pull-request-finished, on a new branch and detached alike: it is not started, it keeps the six-hour rule, and a recent one is skipped for recent activity as any other worktree is"

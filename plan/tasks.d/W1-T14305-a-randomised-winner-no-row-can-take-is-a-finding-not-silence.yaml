@@ -13,7 +13,7 @@
   files:
     - src/lib/config-gardener.ts
     - test/gardeners/a-randomised-winner-no-row-can-take-is-a-finding-not-silence.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at origin/main 8923f5635 (2026-11-22). Found in the fleet review of #20120 (W1-T12143).
