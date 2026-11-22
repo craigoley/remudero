@@ -34,7 +34,7 @@ function fragment(files: string[], proof = "unit test: the directory draft is re
   // Keep the companion test as this fixture task's own falsifier while varying directory inputs.
   task.title = files.includes("test/plan/future.test.ts") ? "Future" : "Example";
   task.files = files;
-  task.design = "CREATES: test/plan/future.test.ts";
+  task.design = "CREATES: test/plan/future.test.ts\nNO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.";
   task.acceptance = [{ claim: "the directory draft is refused", proof }];
   return stringify([task]);
 }

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { join, relative, sep } from "node:path";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { OPS_CATALOG_MAX_SHARDS, OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_TOTAL_BYTES, OPS_CATALOG_MAX_TREE_ENTRIES } from "./ops-catalog-source.js";
+import { OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_TREE_ENTRIES, opsCatalogBoundRefusal, type OpsCatalogBoundsIo } from "./ops-catalog-source.js";
 import { parse as parseYaml } from "yaml";
 import { defaultGitRunnerAsync, readBlobsAtRefAsync, type Plan } from "./plan.js";
 import { createPlanRevisionStore } from "./plan-revision-store.js";
@@ -9,6 +9,7 @@ import { dispatchOrder } from "./drain.js";
 import { taskIdFromRunBranch, creditsByAnchoredTrailer } from "./status.js";
 import { ghJsonAsync } from "./github-transport.js";
 import { RmdError } from "./errors.js";
+import { systemClock } from "./clock.js";
 
 type Json = Record<string, unknown>;
 export type MigrationOptions = { publicRoot: string; publicCommit: string; publicRepo: string; opsRoot: string; opsCommit: string; opsRepo: string };
@@ -41,7 +42,9 @@ export function migrationOptions(args: readonly string[]): Options | undefined {
   const o = Object.fromEntries(names.map((key) => [key.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase()), values.get(key)!])) as Options;
   return sha(o.publicCommit) && sha(o.opsCommit) && repository(o.publicRepo) && repository(o.opsRepo) && o.publicRepo !== o.opsRepo && o.publicRepo.split("/")[1] === "remudero" ? o : undefined;
 }
-export async function catalog(root: string, commit: string, external = false): Promise<{ plan: Plan; originals: Map<string, Original> }> {
+/** W1-T14368: what an ops copy is judged on: the read catalog's sizes, as the API reader counts them. */
+export interface OpsCatalogSize { shards: number; bytes: number; treeEntries: number; shardDir: boolean }
+export async function catalog(root: string, commit: string, external = false): Promise<{ plan: Plan; originals: Map<string, Original>; size?: OpsCatalogSize }> {
   const git = defaultGitRunnerAsync(root);
   if ((await git(["rev-parse", `${commit}^{commit}`])).trim() !== commit) return unknown("catalog_unreadable");
   const within = (path: string): string => {
@@ -74,25 +77,27 @@ export async function catalog(root: string, commit: string, external = false): P
     if (!m) return unknown("catalog_unreadable");
     const size = Number(m[2]), path = m[3]!;
     declaredBytes += size;
-    // Refuse known oversized inputs before materializing their payloads. The private limits are
-    // the actual reader's exported contract, not a larger public-preview budget or a host override.
+    // Refuse known oversized inputs before materializing their payloads. The private per-blob limit is the
+    // actual reader's exported contract; the catalog's own size is judged on the copy (W1-T14368).
     if (!Number.isSafeInteger(size) || declaredBytes > MAX_CATALOG_BYTES) return unknown("catalog_unreadable");
-    if (external && (declaredBytes > OPS_CATALOG_MAX_TOTAL_BYTES || size > OPS_CATALOG_MAX_BLOB_BYTES)) return unknown("catalog_incompatible");
+    if (external && size > OPS_CATALOG_MAX_BLOB_BYTES) return unknown("catalog_incompatible");
     const shard = path.startsWith(shardDir) && !path.slice(shardDir.length).includes("/") && /\.ya?ml$/.test(path);
     return path === monolith || shard ? { path, blob: m[1]!, size, shard } : unknown("catalog_unreadable");
   });
   if (!files.some(f => f.path === monolith) || files.length > 10_000) return unknown("catalog_unreadable");
+  let size: OpsCatalogSize | undefined;
   if (external) {
-    if (files.filter(file => file.shard).length > OPS_CATALOG_MAX_SHARDS) return unknown("catalog_incompatible");
     // The API reader counts each visited immediate tree, including entries outside the selected
     // blobs. Mirror those same three populations without fetching or interpreting unrelated files.
+    const hasShards = files.some(file => file.shard);
     const trees = [commit, `${commit}:${within(layout.planDir)}`];
-    if (files.some(file => file.shard)) trees.push(`${commit}:${shardDir.slice(0, -1)}`);
+    if (hasShards) trees.push(`${commit}:${shardDir.slice(0, -1)}`);
     let treeEntries = 0;
     for (const tree of trees) {
       treeEntries += (await git(["ls-tree", "-z", tree])).split("\0").filter(Boolean).length;
       if (treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) return unknown("catalog_incompatible");
     }
+    size = { shards: files.filter(file => file.shard).length, bytes: declaredBytes, treeEntries, shardDir: hasShards };
   }
   const texts = await readBlobsAtRefAsync(git, commit, files.map(f => f.path));
   let bytes = 0;
@@ -110,7 +115,24 @@ export async function catalog(root: string, commit: string, external = false): P
   for (const task of plan.tasks) counts.set(task.sourcePath!, (counts.get(task.sourcePath!) ?? 0) + 1);
   const originals = new Map<string, Original>(plan.tasks.map(task => [task.id,
     { ...byPath.get(task.sourcePath!)!, single: counts.get(task.sourcePath!) === 1 }]));
-  return { plan, originals };
+  return { plan, originals, ...(size ? { size } : {}) };
+}
+
+/**
+ * W1-T14368: the ops catalog a copy would produce, judged on the API reader's own bounds: the read catalog plus one
+ * shard of the copy's bytes (the original and its one moved_from line), grown from the catalog it read. A copy the
+ * reader would refuse is refused here, before it lands and stops ops dispatch.
+ */
+export function judgeOpsCopy(size: OpsCatalogSize, original: string, publicCommit: string, io: OpsCatalogBoundsIo = {}): void {
+  const indent = /\n([ \t]+)\S/.exec(original)?.[1] ?? "";
+  const copyBytes = Buffer.byteLength(original) + Buffer.byteLength(`${indent}moved_from: remudero@${publicCommit}\n`);
+  // The copy adds one shard-tree entry, and the shard tree's own entry in the plan tree when it starts one.
+  const treeEntries = size.treeEntries + 1 + (size.shardDir ? 0 : 1);
+  if (copyBytes > OPS_CATALOG_MAX_BLOB_BYTES || treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) return unknown("catalog_incompatible");
+  const clock = io.clock ?? systemClock;
+  if (opsCatalogBoundRefusal({ shards: size.shards + 1, bytes: size.bytes + copyBytes }, { at: clock.now(), shards: size.shards, bytes: size.bytes }, { ...io, clock })) {
+    return unknown("catalog_incompatible");
+  }
 }
 function alreadyMoved(original: Original): boolean {
   // Only otherwise eligible candidates need this raw metadata; strict parsing already validated all bytes.
@@ -249,7 +271,9 @@ export interface MigrationSelection {
 
 /** The selection the preview verb prints (W1-T13680 exports it for `rmd move-task`): pinned catalogs, ownership, the
  *  merge-credit search and a stable re-read. It throws {@link PreviewUnknown} on any unread or changed evidence. */
-export async function selectPlanTaskMigration(o: Options, reader: MigrationGraphqlReader = graphqlRead): Promise<MigrationSelection> {
+export async function selectPlanTaskMigration(
+  o: Options, reader: MigrationGraphqlReader = graphqlRead, bounds: OpsCatalogBoundsIo = {},
+): Promise<MigrationSelection> {
   const publicRefs = await refs(o.publicRoot, o.publicRepo), opsRefs = await refs(o.opsRoot, o.opsRepo);
   const pub = await catalog(o.publicRoot, o.publicCommit), ops = await catalog(o.opsRoot, o.opsCommit, true);
   if (ops.plan.tasks.some(t => pub.plan.byId.has(t.id) || t.depends_on.some(id => !ops.plan.byId.has(id) && !pub.plan.byId.has(id)))) return unknown("catalog_conflict");
@@ -277,6 +301,8 @@ export async function selectPlanTaskMigration(o: Options, reader: MigrationGraph
     const checked = await readState(o, publicRefs, opsRefs, { id: task.id, control, reader }); stable(initial, checked);
     if (moveRefused(checked, task.id, original.blob)) { refused.push({ id: task.id, reason: "move_refused" }); continue; }
     if (searchedMerged(checked, task.id, control)) { refused.push({ id: task.id, reason: "merged" }); continue; }
+    // W1-T14368: the bounds judge the ops catalog this copy would produce, not the one it read.
+    if (ops.size) judgeOpsCopy(ops.size, original.text, o.publicCommit, bounds);
     candidate = { id: task.id, sourcePath: original.path, sourceCommit: o.publicCommit, sourceBlob: original.blob, yaml: original.text, originalBytesBase64: Buffer.from(original.text).toString("base64"), prospectiveMovedFrom: `remudero@${o.publicCommit}` };
     break;
   }

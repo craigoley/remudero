@@ -1,8 +1,3 @@
-/**
- * W1-T14326: a board projection stamped each task by hashing the whole parsed object, `sourcePath` included. Serve's
- * plan pin labels every blob `<ref>:<path>` and plan.ts copies that label onto each reused task, so every adopted ref
- * moved every stamp: all 6,220 of core's tasks re-derived on each merge to main, about 20 s of CPU on the Azure host.
- */
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -63,13 +58,16 @@ function world(t: { after: (fn: () => void) => void }) {
   };
 }
 
-test("W1-T14326 criterion 1: a plan adopted at a new ref with the same content re-derives no task", (t) => {
+test("W1-T14326 criterion 1: a stamp ignores the read label, so a plan adopted at a new ref with the same content re-derives no task", (t) => {
   const w = world(t);
   const board = w.board();
   assert.equal(board.update({ force: true }).full, true, "control: the first derive derives every task");
   w.adopt("b".repeat(40));
   w.later();
-  assert.deepEqual(board.update({ force: true }).rederived, []);
+  const update = board.update({ force: true });
+  assert.equal(update.derived, true, "the forced update ran the derive pass");
+  assert.equal(update.reused, IDS.length, "the new read label preserves every task projection");
+  assert.deepEqual(update.rederived, []);
 });
 
 test("W1-T14326 criterion 2: invariant:content-still-moves — a changed task at a new ref re-derives, only that task does, and the board equals a full derive", (t) => {

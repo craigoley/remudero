@@ -273,11 +273,11 @@ test("SITE approve reads the arm outcome rather than discarding it", () => {
 
 // ── 9: the SIXTH site the brief did not name — #968 was inert without it ────────────
 test("every gate that reviews a destination plan PR checks for a self-merge before it arms", () => {
-  const sites = [...SRC.matchAll(/const reviewCode = await reviewCommand\(([^)]*prUrl[^)]*)\);\n([^\n]*)\n/g)];
-  assert.deepEqual(sites.map((m) => m[1]), [
-    "view === undefined ? prNum : prUrl", "isPublic ? prNum : prUrl",
-    "filing.destination ? result.prUrl : prNum", "filing.destination ? result.prUrl : prNum",
-  ], "the triage, plan, approve and approve-batch gates");
+  // W1-T14311: each gate hands the review the arguments of planPrReviewInvocation, so a destination PR is read
+  // from its own repository. Every one of the four sites is still followed by the self-merge check.
+  const sites = [...SRC.matchAll(/const reviewAs = planPrReviewInvocation\(([^\n]*)\);\n\s*const reviewCode = await reviewCommand\(reviewAs\.prArg, reviewAs\.rest\);\n([^\n]*)\n/g)];
+  assert.equal(sites.length, 4, "the triage, plan, approve and approve-batch gates");
+  assert.deepEqual(sites.map((m) => m[1]!.split(", ").slice(-2).join(", ")), ["prUrl, prNum", "prUrl, prNum", "result.prUrl, prNum", "result.prUrl, prNum"]);
   for (const site of sites) assert.match(site[2]!, /^\s*if \(await mergedBeforeGate\((result\.)?prUrl, reviewCode, log\)\) \{$/, site[0]);
 });
 

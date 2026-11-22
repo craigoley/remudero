@@ -27,19 +27,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmodSync, closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { z } from "zod";
 import { loadConfig, type Config } from "./config.js";
 import { cashDeploymentEndpoint } from "./config-schema.js";
 import { withTempDir } from "./tmp.js";
 import { verifyReviewerCaseEvidence } from "./review-finding-evidence.js";
-import { CashResponsesConversation } from "./cash-responses.js";
+import { CASH_RESPONSES_DEPLOYMENTS, CashResponsesConversation } from "./cash-responses.js";
 import { OPENWEIGHT_MAX_COMPLETION_TOKENS, OPENWEIGHT_OUTPUT_CONTRACT, openWeightReservationUsd,
   spawnOpenWeightWorker } from "./worker-provider.js";
-import { TRIAL_ID_RE } from "./benchmark-aa.js";
+import { exactBinomialHalfPValue, TRIAL_ID_RE } from "./benchmark-aa.js";
 import { loadPaidPilotProtocol, paidArmPauseReasons, readPaidPilotControls, readPaidPilotEvidence,
-  reviewerReplayExclusivityReason,
+  reviewerReplayExclusivityReason, BENCHMARK_PAID_PILOT_VERSION,
   REVIEWER_REPLAY_STEPS, PAID_PILOT_AA_RECEIPT_MAX_AGE_MS, PAID_PILOT_CASH_CEILING_USD,
   type PaidPilotProtocol, type ReviewerReplayScope } from "./benchmark-paid-pilot.js";
 import { systemClock } from "./clock.js";
@@ -190,20 +190,34 @@ const reviewerOutputSchema = z.object({ verdict: z.enum(["pass", "fail", "unknow
   findings: z.array(z.object({ id: z.string().min(1), path: z.string().min(1), line: z.number().int().positive(),
     mechanism: z.string().min(1), remedy: z.string().min(1).nullable() }).strict()).max(100) }).strict();
 
-export function reviewerReplayStack(config: Config): PinnedReviewStack {
+const DEFAULT_REVIEWER_MODEL = "gpt-6.1-sol";
+const REVIEWER_EFFORTS = new Map<string, readonly string[]>([
+  [DEFAULT_REVIEWER_MODEL, ["low", "medium", "high", "xhigh", "max"]],
+  ["gpt-6.2-sol", CASH_RESPONSES_DEPLOYMENTS["gpt-6.2-sol"] ?? []],
+]);
+
+function supportsReviewerEffort(model: string, effort: string): boolean {
+  return REVIEWER_EFFORTS.get(model)?.includes(effort) === true;
+}
+
+// Alias this exact harness revision to its predecessor for active 6.1 protocols. The comparison
+// omits the alias key itself from the hash so edits to any other source bytes still repin the stack.
+const REVIEWER_61_COMPATIBLE_HARNESS = "413924c28e07f7c77b874e7bc0f6216f07be2ac4385677fb7aeedd8d1fb61b9c";
+const REVIEWER_61_PREVIOUS_HARNESS = "87917ecfd63653237ae08680575a27b092c45bcc04b5bab4499aa59d788ac344";
+
+export function reviewerReplayStack(config: Config, model = DEFAULT_REVIEWER_MODEL): PinnedReviewStack {
+  if (!REVIEWER_EFFORTS.has(model)) throw new Error("reviewer-provider-or-effort-unsupported");
   const source = (file: string) => readFileSync(new URL(file, import.meta.url), "utf8");
-  // W1-T10837: the sealed reviewer always rides "gpt-6.1-sol" (sealedReviewer refuses any other
-  // `arm.requestedModel`), so the environment pin resolves THAT deployment's own endpoint through
-  // the one resolver -- a mapped reviewer account changing its endpoint must invalidate this pin,
-  // exactly as the default account changing cashEndpoint always has. Endpoint only: a fingerprint
-  // must stay computable with no key present (unlike a live spawn), so this never calls the
-  // key-requiring `cashDeploymentTarget`.
-  const endpoint = cashDeploymentEndpoint(config, "gpt-6.1-sol");
-  return { harness: digest([source("./replay-harness.ts"), source("./paired-review-eval.ts"), source("../run-task.ts")]),
+  const sources = [source("./replay-harness.ts"), source("./paired-review-eval.ts"), source("../run-task.ts")] as const;
+  const legacyModel = model === DEFAULT_REVIEWER_MODEL;
+  const compatible = legacyModel && digest([sources[0].replace(REVIEWER_61_COMPATIBLE_HARNESS, ""), sources[1], sources[2]])
+    === REVIEWER_61_COMPATIBLE_HARNESS;
+  const endpoint = cashDeploymentEndpoint(config, model);
+  return { harness: compatible ? REVIEWER_61_PREVIOUS_HARNESS : digest(sources),
     prompt: digest([REVIEWER_PROMPT, OPENWEIGHT_OUTPUT_CONTRACT]), tool: digest(REVIEWER_TOOLS),
     scorer: digest(source("./review-finding-evidence.ts")),
     environment: digest([process.version, process.platform, process.arch, source("./worker-provider.ts"),
-      source("./cash-responses.ts"), endpoint]) };
+      source("./cash-responses.ts"), endpoint, ...(legacyModel ? [] : [model])]) };
 }
 
 function sourceGit(sourceDir: string, args: string[]): string {
@@ -238,7 +252,8 @@ function snapshotFiles(sourceDir: string, headSha: string): { path: string; cont
 
 type ReviewerProvider = (args: Parameters<typeof spawnOpenWeightWorker>[0], config: Config,
   selection: Parameters<typeof spawnOpenWeightWorker>[2]) => Promise<Pick<Awaited<ReturnType<typeof spawnOpenWeightWorker>>,
-    "isError" | "apiError" | "text" | "sessionId" | "servedModel" | "effort" | "workerDurationMs" | "costUsd"> & {
+    "isError" | "apiError" | "text" | "sessionId" | "servedModel" | "effort" | "workerDurationMs"> & {
+      costUsd?: number;
       tokens: { input: number; output: number } }>;
 
 const liveCashReviewer: ReviewerProvider = async (args, config, selection) => {
@@ -251,7 +266,8 @@ const liveCashReviewer: ReviewerProvider = async (args, config, selection) => {
     }
     return response;
   } }, config, selection);
-  return { ...result, effort: servedEffort ?? "unknown" };
+  return { ...result, effort: servedEffort ?? "unknown",
+    costUsd: selection.model === DEFAULT_REVIEWER_MODEL ? result.costUsd : result.usageEstimateUsd ?? undefined };
 };
 export interface SealedReviewerInput {
   config: Config;
@@ -303,9 +319,10 @@ export function sealedReviewer(input: SealedReviewerInput): (arm: BlindedReviewI
     const source = input.sources.get(arm.repo);
     const context = input.contexts.get(arm.taskContextDigest);
     if (!source || !context || digest(context) !== arm.taskContextDigest) throw new Error("reviewer-source-or-context-missing");
-    if (arm.requestedModel !== "gpt-6.1-sol" || !["low", "medium", "high", "xhigh", "max"].includes(arm.requestedEffort ?? ""))
+    const { requestedModel, requestedEffort } = arm;
+    if (!requestedModel || !requestedEffort || !supportsReviewerEffort(requestedModel, requestedEffort))
       throw new Error("reviewer-provider-or-effort-unsupported");
-    const actualStack = reviewerReplayStack(input.config);
+    const actualStack = reviewerReplayStack(input.config, requestedModel);
     if (digest(actualStack) !== digest(arm.stack)) throw new Error("reviewer-stack-deviation");
     sourceIdentity(source, arm.repo);
     const files = snapshotFiles(source, arm.headSha).sort((a, b) => a.path.localeCompare(b.path));
@@ -326,21 +343,21 @@ export function sealedReviewer(input: SealedReviewerInput): (arm: BlindedReviewI
       const prompt = `${REVIEWER_PROMPT}\n${JSON.stringify({ context, baseSha: arm.baseSha, headSha: arm.headSha, diff, files })}`;
       if (Buffer.byteLength(prompt) > REVIEWER_SNAPSHOT_BYTES) throw new Error("reviewer-snapshot-too-large");
       const body = new CashResponsesConversation(OPENWEIGHT_OUTPUT_CONTRACT, prompt)
-        .body(arm.requestedModel, arm.requestedEffort!, OPENWEIGHT_MAX_COMPLETION_TOKENS, []);
-      if (openWeightReservationUsd(arm.requestedModel, Buffer.byteLength(body)) > input.reserveUsd)
+        .body(requestedModel, requestedEffort, OPENWEIGHT_MAX_COMPLETION_TOKENS, []);
+      if (openWeightReservationUsd(requestedModel, Buffer.byteLength(body)) > input.reserveUsd)
         throw new Error("reviewer-call-exceeds-reserve");
       if (digest(inspectSnapshot(cwd)) !== digest(files)) throw new Error("reviewer-isolation-breach");
       const result = await (input.provider ?? liveCashReviewer)({ cwd, prompt, workerHome: join(root, "home"),
         tools: [], maxTurns: 1, runId: randomUUID() },
         { ...input.config, workerProviders: { ...input.config.workerProviders, cashWebSearch: false } },
-        { model: arm.requestedModel, effort: arm.requestedEffort! });
+        { model: requestedModel, effort: requestedEffort });
       if (digest(inspectSnapshot(cwd)) !== digest(files)) throw new Error("reviewer-isolation-breach");
       if (result.isError || result.apiError) throw new Error("reviewer-provider-outcome-unknown");
       const parsed = reviewerOutputSchema.safeParse(JSON.parse(result.text));
       if (!parsed.success) throw new Error("reviewer-finding-extraction-unknown");
       return { ...parsed.data, findings: parsed.data.findings.map((finding) => ({ ...finding,
         anchorSupported: files.some((file) => file.path === finding.path && finding.line <= file.content.split("\n").length) })),
-        requestedModel: arm.requestedModel, servedModel: result.servedModel ?? undefined,
+        requestedModel, servedModel: result.servedModel ?? undefined,
         servedEffort: result.effort === "unknown" ? undefined : result.effort,
         assignmentId: randomUUID(), observedStack: actualStack, billingMode: "api", costUsd: result.costUsd,
         elapsedMs: result.workerDurationMs, inputTokens: result.tokens.input, outputTokens: result.tokens.output };
@@ -360,6 +377,95 @@ export interface ReviewerReplayCommandInput {
   provider?: ReviewerProvider;
 }
 
+const comparisonCost = z.number().nonnegative().nullish();
+const comparisonCount = z.number().int().nonnegative();
+const comparisonReport = z.object({ version: z.literal("paid-reviewer-report-v1"), protocolDigest: z.string(),
+  report: z.object({ totalPairs: comparisonCount, gradedPairs: comparisonCount, incompletePairs: comparisonCount,
+    ungradablePairs: comparisonCount, cashCostUsd: comparisonCost, costMissingArms: comparisonCount,
+    pairs: z.array(z.object({ caseId: z.string(), sealedManifestDigest: z.string(), baseSha: z.string(),
+      bugHeadSha: z.string(), benignHeadSha: z.string(), state: z.string(), missing: z.array(z.string()),
+      bugDetected: z.boolean().nullable(), benignFalseComments: comparisonCount.nullable(), cashCostUsd: comparisonCost,
+      models: z.object({ bug: z.string().nullable(), benign: z.string().nullable() }) })) }) });
+
+function readReviewerComparisonReport(stateDir: string, path: string, protocols: ReadonlyMap<string, PaidPilotProtocol>) {
+  const name = basename(path);
+  const refuse = (reason: string): never => { throw new Error(`reviewer-comparison-${reason}:${name}`); };
+  let raw: unknown;
+  try { raw = JSON.parse(readFileSync(path === name ? join(stateDir, name) : resolve(path), "utf8")); }
+  catch (error) { throw new Error(`reviewer-comparison-report-unreadable:${name}`, { cause: error }); }
+  const parsed = comparisonReport.safeParse(raw);
+  if (!parsed.success) return refuse("report-invalid");
+  const protocol = protocols.get(parsed.data.protocolDigest);
+  if (protocol?.activation !== "operator-command" || protocol.arms?.paid?.provider !== "cash"
+    || !REVIEWER_EFFORTS.has(protocol.arms.paid.model)) return refuse("protocol-mismatch");
+  const scope = protocol.reviewerReplay;
+  if (scope?.version !== "paid-reviewer-replay-v1" || !Array.isArray(scope.cases) || scope.cases.length === 0)
+    return refuse("scope-mismatch");
+  const model = protocol.arms.paid.model;
+  const report = parsed.data.report;
+  if (report.cashCostUsd == null || report.costMissingArms !== 0 || report.pairs.some((pair) => pair.cashCostUsd == null))
+    return refuse("cost-missing");
+  if (report.totalPairs !== scope.cases.length || report.pairs.length !== report.totalPairs || report.gradedPairs !== report.totalPairs
+    || report.incompletePairs !== 0 || report.ungradablePairs !== 0) return refuse("incomplete");
+
+  const scopedCases = new Map(scope.cases.map((pair) => [pair.id, pair]));
+  const detections = new Map<string, boolean>();
+  let benignFalseComments = 0;
+  let cashCostUsd = 0;
+  let defectsDetected = 0;
+  for (const pair of report.pairs) {
+    const scoped = scopedCases.get(pair.caseId);
+    if (!scoped || detections.has(pair.caseId) || scoped.sealedManifestDigest !== pair.sealedManifestDigest
+      || scoped.baseSha !== pair.baseSha || scoped.bugHeadSha !== pair.bugHeadSha || scoped.benignHeadSha !== pair.benignHeadSha)
+      return refuse("scope-mismatch");
+    if (pair.state !== "graded" || pair.missing.length > 0 || pair.bugDetected === null || pair.benignFalseComments === null)
+      return refuse("incomplete");
+    if (pair.models.bug !== model || pair.models.benign !== model) return refuse("model-mismatch");
+    detections.set(pair.caseId, pair.bugDetected);
+    defectsDetected += Number(pair.bugDetected);
+    benignFalseComments += pair.benignFalseComments;
+    cashCostUsd += pair.cashCostUsd!;
+  }
+  if (cashCostUsd !== report.cashCostUsd) return refuse("cost-mismatch");
+  return { name, scopeDigest: digest(scope), detections, summary: { model, gradedPairs: detections.size, defectsDetected,
+    benignFalseComments, cashCostUsd, cashCostPerDetectedDefectUsd: defectsDetected ? cashCostUsd / defectsDetected : null } };
+}
+
+function compareReviewerReports(stateDir: string, first: string, second: string): string {
+  // V1 reports identify their pilot by protocol digest. Resolve the sealed scope from the saved protocol.
+  const protocols = new Map<string, PaidPilotProtocol>();
+  const prefix = `${BENCHMARK_PAID_PILOT_VERSION}.`;
+  const suffix = ".protocol.json";
+  for (const file of readdirSync(stateDir)) {
+    if (!file.startsWith(prefix) || !file.endsWith(suffix)) continue;
+    const id = file.slice(prefix.length, -suffix.length);
+    if (!TRIAL_ID_RE.test(id)) continue;
+    const loaded = loadPaidPilotProtocol(stateDir, id);
+    if (!loaded.ok) continue;
+    const { digest: identity, ...body } = loaded.protocol;
+    if (digest(body) === identity) protocols.set(identity, loaded.protocol);
+  }
+  const a = readReviewerComparisonReport(stateDir, first, protocols);
+  const b = readReviewerComparisonReport(stateDir, second, protocols);
+  if (a.scopeDigest !== b.scopeDigest) throw new Error(`reviewer-comparison-scope-mismatch:${b.name}`);
+  if (a.summary.model === b.summary.model) throw new Error(`reviewer-comparison-same-model:${b.name}`);
+  let aOnly = 0;
+  let bOnly = 0;
+  for (const [id, aDetected] of a.detections) {
+    const bDetected = b.detections.get(id);
+    if (aDetected && !bDetected) aOnly++;
+    if (!aDetected && bDetected) bOnly++;
+  }
+  const sharedCases = a.detections.size;
+  const paired = { sharedCases, aOnly, bOnly, difference: (aOnly - bOnly) / sharedCases,
+    exactMcNemarPValue: exactBinomialHalfPValue(aOnly, aOnly + bOnly) };
+  const name = `${prefix}${a.summary.model}.vs.${b.summary.model}.reviewer-comparison.${systemClock.now()}.json`;
+  const path = join(stateDir, name);
+  writeFileSync(path, JSON.stringify({ version: "paid-reviewer-comparison-v1", scopeDigest: a.scopeDigest,
+    reports: [a.name, b.name], byModel: [a.summary, b.summary], paired }), { flag: "wx", mode: 0o600 });
+  return path;
+}
+
 export async function pairedReviewerReplayCommand(rest: string[], replay: typeof replayPairedReviews,
   input: ReviewerReplayCommandInput): Promise<number> {
   const print = input.print ?? console.log;
@@ -369,12 +475,20 @@ export async function pairedReviewerReplayCommand(rest: string[], replay: typeof
       throw new Error("reviewer-operator-command-required");
     const { values } = parseArgs({ args: rest, strict: true, allowPositionals: false, options: {
       pilot: { type: "string" }, phase: { type: "string" }, cases: { type: "string" }, trust: { type: "string" },
+      compare: { type: "string" }, with: { type: "string" }, model: { type: "string" },
       "state-dir": { type: "string" }, "confirm-spend": { type: "boolean" }, "describe-stack": { type: "boolean" } } });
+    if (values.compare !== undefined || values.with !== undefined) {
+      if (!values.compare || !values.with || Object.keys(values).some((key) => !["compare", "with", "state-dir"].includes(key)))
+        throw new Error("reviewer-comparison-arguments-invalid");
+      const stateDir = values["state-dir"] ?? join((input.config ?? loadConfig()).root, "state");
+      const file = compareReviewerReports(stateDir, values.compare, values.with);
+      print(JSON.stringify({ state: "compared", file, visibility: "private" }));
+      return 0;
+    }
     if (!values["confirm-spend"] && !values["describe-stack"]) throw new Error("reviewer-explicit-spend-confirmation-required");
     const config = input.config ?? loadConfig();
-    const stack = reviewerReplayStack(config);
-    if (values["describe-stack"]) { print(JSON.stringify(stack)); return 0; }
-    if (!values.pilot || !TRIAL_ID_RE.test(values.pilot) || !values.cases || !values.trust
+    if (values["describe-stack"]) { print(JSON.stringify(reviewerReplayStack(config, values.model))); return 0; }
+    if (values.model !== undefined || !values.pilot || !TRIAL_ID_RE.test(values.pilot) || !values.cases || !values.trust
       || (values.phase !== "aa" && values.phase !== "comparison")) throw new Error("reviewer-replay-arguments-invalid");
     const stateDir = values["state-dir"] ?? join(config.root, "state");
     const loaded = loadPaidPilotProtocol(stateDir, values.pilot);
@@ -382,6 +496,9 @@ export async function pairedReviewerReplayCommand(rest: string[], replay: typeof
     const protocol = loaded.protocol;
     if (protocol.activation !== "operator-command" || !protocol.reviewerReplay || protocol.arms.paid.provider !== "cash")
       throw new Error("reviewer-activated-scope-required");
+    const { model, effort } = protocol.arms.paid;
+    if (!supportsReviewerEffort(model, effort)) throw new Error("reviewer-provider-or-effort-unsupported");
+    const stack = reviewerReplayStack(config, model);
     const raw = JSON.parse(readFileSync(values.cases, "utf8")) as { version: string; cases: {
       pair: PairedReviewCase; corpus: GoldenCorpusItem; sourceDir: string; evidence: unknown }[] };
     const keys: unknown = JSON.parse(readFileSync(values.trust, "utf8"));

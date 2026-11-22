@@ -71,6 +71,7 @@ function draft(shape: DraftShape): string {
     `  risk: ${shape.risk ?? "medium"}`,
     `  status: ${shape.status ?? "queued"}`,
     ...(shape.extra ?? []),
+    ...((shape.extra ?? []).some((l) => l.includes("design:")) ? [] : ["  design: |", "    NO-INVARIANTS: the fixture drafts a new ledger-row actor lookup only; no prior behavior changes."]),
     "  attempts: 0",
     "  files:",
     ...shape.files.map((f) => `    - ${f}`),
@@ -83,7 +84,7 @@ function draft(shape: DraftShape): string {
 
 /** The ledgerRowActor proposal's cached draft: a NEW module whose only call proof greps the new file itself. */
 const UNCALLED_MODULE = draft({
-  extra: ["  design: |", "    CREATES: src/lib/ledgerCaller.ts"],
+  extra: ["  design: |", "    CREATES: src/lib/ledgerCaller.ts", "    NO-INVARIANTS: ledgerCaller.ts is a new module only; no prior behavior changes."],
   files: ["src/lib/ledgerCaller.ts", OWN_TEST],
   proofs: [
     ["the caller names the actor", "unit test: the caller names the actor on a ledger row"],
@@ -92,7 +93,7 @@ const UNCALLED_MODULE = draft({
 });
 const CALLED_MODULE = draft({
   risk: "high",
-  extra: ["  band_meaning: span", "  design: |", "    CREATES: src/lib/ledgerCaller.ts"],
+  extra: ["  band_meaning: span", "  design: |", "    CREATES: src/lib/ledgerCaller.ts", "    NO-INVARIANTS: ledgerCaller.ts is a new module only; no prior behavior changes."],
   files: ["src/lib/ledgerCaller.ts", "src/lib/panel.ts", OWN_TEST],
   proofs: [
     ["the caller names the actor", "unit test: the caller names the actor on a ledger row"],
@@ -256,7 +257,7 @@ test("W1-T9039: the approve relint applies the draft floor repo facts", () => {
   assert.doesNotThrow(() => inbox.assertRatificationDraftFileable(CALLED_MODULE, PROPOSAL_ID, stamp, KNOWN, ROOT));
   // A repair that leaves YAML the parser refuses is a draft-parse refusal, never a filing.
   const flow = "- {id: NEW-1, title: t, repo: remudero, depends_on: [], type: implement, verify: auto, risk: high, status: queued, " +
-    "attempts: 0, files: [src/lib/ledger.ts], acceptance: [{claim: c, proof: \"unit test: c holds\"}], origin: architect}\n";
+    "design: \"NO-INVARIANTS: the fixture drafts a new ledger lookup only; no prior behavior changes.\", attempts: 0, files: [src/lib/ledger.ts], acceptance: [{claim: c, proof: \"unit test: c holds\"}], origin: architect}\n";
   const broken = relintRatificationFragment(flow, PROPOSAL_ID, facts);
   assert.match(broken.ok ? "" : broken.reason, /^draft-parse: /);
 });
