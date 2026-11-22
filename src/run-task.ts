@@ -15269,14 +15269,16 @@ export function reportPrChecks(
 }
 
 /**
- * `rmd hand-worktree <taskId|unfiled> [--parent <abs dir>]` (W1-T5533) — the worktree a hand build
+ * `rmd hand-worktree <taskId|unfiled> [--parent <abs dir>] [--no-claim]` (W1-T5533) — the worktree a hand build
  * works in, cut from fresh origin/main by `createHandWorktree` (src/lib/hand-worktree.ts). The
  * parent defaults to /mnt/scratch/hand when scratch exists, otherwise beside this checkout.
+ * W1-T14307: for a filed id it takes the dispatch claim through {@link dispatchClaimReserverFor}, the reserver
+ * `rmd claim` uses, and pushes the run branch; `--no-claim` skips both for an offline host.
  */
 export function handWorktreeCommand(rest: string[], opts: { repoDir?: string; clock?: Clock; minFreeBytes?: number; scratchRoot?: string; exists?: (path: string) => boolean } = {}): number {
   const taskId = rest[0];
   const badArg = taskId === undefined || taskId.startsWith("--") ? "rmd hand-worktree: <taskId> (or `unfiled`) must come first"
-    : rest.at(-1) === "--parent" ? "rmd hand-worktree: --parent needs a directory" : unknownArgError("hand-worktree", rest.slice(1), ["--parent"]);
+    : rest.at(-1) === "--parent" ? "rmd hand-worktree: --parent needs a directory" : unknownArgError("hand-worktree", rest.slice(1), ["--parent"], ["--no-claim"]);
   if (badArg) {
     console.error(`${badArg}\nusage: ${commandSyntax("hand-worktree")}`);
     return 2;
@@ -15289,7 +15291,9 @@ export function handWorktreeCommand(rest: string[], opts: { repoDir?: string; cl
   const reason = explicitParent !== undefined ? "explicit --parent" : scratchDefault
     ? `scratch root ${scratchRoot} is a directory` : `scratch root ${scratchRoot} is not a directory; using checkout parent`;
   console.log(`parent: ${parent} (${reason})`);
-  const result = createHandWorktree({ repoDir, taskId, parent, createParent: scratchDefault, clock: opts.clock, minFreeBytes: opts.minFreeBytes });
+  const noClaim = rest.includes("--no-claim");
+  const result = createHandWorktree({ repoDir, taskId, parent, createParent: scratchDefault, clock: opts.clock, minFreeBytes: opts.minFreeBytes,
+    noClaim, claimReserver: noClaim ? undefined : dispatchClaimReserverFor(repoDir) });
   if (result.status === "refused") {
     console.error(`rmd hand-worktree: refused — ${result.reason}`);
     return 1;
