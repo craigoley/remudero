@@ -80,6 +80,7 @@ export function corpus(): Array<Record<string, unknown>> {
   rows.push({ step: "ci.polling", run_id: "daemon", attempt: 1, ts: at(m++) }, { step: "followup.harvested", run_id: "daemon", body: "y".repeat(200), ts: at(m++) });
   fallback(["review.history_guarded"], "pr_url", 400);
   fallback(["followup.filed"], "pr_url", 500);
+  fallback(["review.semantic_pass_refused"], "pr_url", 600);
   // W1-T12187: one judge-shadow row of each step, each under its own role, so each step moves the summary.
   JUDGE_SHADOW_STEPS.forEach((step, i) => rows.push({ step, run_id: "sweep-1", role: `role-${i}`, cost_usd: 0.0002, ts: at(m++) }));
   return rows;

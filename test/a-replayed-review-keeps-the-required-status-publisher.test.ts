@@ -16,7 +16,7 @@ const PR = "https://github.com/acme/portal/pull/8";
 const BODY = "## Acceptance\n- works — grep: x in src/app.ts\n";
 const INPUT = review.reviewInputDigest(HEAD, BODY);
 const verdict = {
-  state: "success", headSha: HEAD, reviewerOutcome: "reviewer_completed", keywordOnly: false,
+  state: "success", headSha: HEAD, reviewerOutcome: "success", keywordOnly: false,
   criteria: [{ claim: "works", proof: "grep: x in src/app.ts", met: true, reason: "executed", proof_exec: "executed_pass" }],
   testTheater: false, summary: "immutable verdict", floorDegraded: false,
   capped: false, planOnly: false, decisionDisposition: "replayed", reviewDecisionDigest: "v2:decision",

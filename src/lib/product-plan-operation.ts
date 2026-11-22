@@ -1,16 +1,21 @@
+import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync,
-  renameSync, unlinkSync, writeFileSync,
+  readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
+import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { systemClock, type Clock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghTextAsync } from "./github-transport.js";
 import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { LEDGER_ROTATION_LOCK_SUFFIX } from "./ledger-path.js";
+import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRawLinesAsync } from "./ledger-union.js";
 import { isHumanHoldCandidate, type GhApiFetcher } from "./open-prs-rest.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import { readTargetRunnerConfig, type TargetRunnerConfig } from "./product-target-config.js";
@@ -20,12 +25,13 @@ import {
 import type { ProductRepositoryProvider } from "./product-repository.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { parseOwnerRepoFromRemoteUrl } from "./onboard/inventory.js";
-import { readReviewStatusEntry, resolveReviewProvenance, REVIEWER_IDENTITY_ENV } from "./review.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 export const PRODUCT_PLAN_OPERATION_VERSION = "product-plan-operation-v1" as const;
+/** W1-T13875 PRIMARY CONTROL: the longest an operation's ledger evidence read may take before it answers "no evidence" (state unknown). */
+export const PRODUCT_PLAN_LEDGER_READ_BOUND_MS = 15_000;
 /** PRIMARY CONTROL: maintained quotas on the plan-operation journal; none of it grants spend or planning authority. */
-export const PRODUCT_PLAN_OPERATION_LIMITS = { operations: 256, stateBytes: 2 * 1024 * 1024, briefBytes: 60 * 1024 } as const;
+export const PRODUCT_PLAN_OPERATION_LIMITS = { operations: 256, stateBytes: 2 * 1024 * 1024, briefBytes: 60 * 1024, evidenceBytes: 256 * 1024 } as const;
 
 /** Names a durable, reviewed handoff: the target task's `origin:` must carry exactly this (or an explicit association). */
 export const productPlanOrigin = (productId: string, planEvidenceId: string) => `product-plan#${productId}/${planEvidenceId}`;
@@ -128,6 +134,7 @@ export async function verifyProductPlanEvidence(input: ProductPlanVerification):
         pull.base.ref !== repo.defaultBranch || [...latest.values()].some((review) => review.state === "CHANGES_REQUESTED")) return refuse("plan_not_approved");
       const files = z.array(z.object({ filename: z.string() })).parse(JSON.parse(await api(`${slug}/pulls/${input.pullRequest}/files?per_page=100`)));
       // Manual approval can withdraw a human hold; it never substitutes for the filed native plan protocol.
+      const { readReviewStatusEntry, resolveReviewProvenance, REVIEWER_IDENTITY_ENV } = await import("./review.js");
       const trusted = (input.trustedReviewer ?? process.env[REVIEWER_IDENTITY_ENV] ?? "").trim();
       if (!trusted || files.length >= 100 || !files.every((file) => file.filename.startsWith("plan/") || file.filename === masterPlanFile)) return refuse("plan_not_approved");
       const fetcher: GhApiFetcher = async (args) => JSON.parse(await text(args, { maxBuffer: 1024 * 1024, timeout: 20_000 })) as unknown;
@@ -186,7 +193,62 @@ export interface ProductPlanObservation {
   operationId: string; state: ProductPlanState; mode: "create" | "clarify"; planEvidenceId: string;
   repository: { id: number; owner: string; name: string }; targetHead: string;
   revision: number; objectiveRevision: number; briefDigest: string; requestedAt: string; proposal?: string;
+  /** Observational only: never read by verification, product-case admission or build admission. */
+  requirementCoverage?: ProductPlanRequirementCoverage;
 }
+// ── observational requirement coverage (W1-T11394) ───────────────────────────────────────────────────────────
+
+export const PRODUCT_PLAN_COVERAGE_VERSION = "product-plan-requirement-coverage-v1" as const;
+export const PRODUCT_PLAN_COVERAGE_MAP_VERSION = "product-plan-requirement-map-v1" as const;
+/** PRIMARY CONTROL: bounds on one coverage report; excerpts are untrusted text and every read is capped. */
+export const PRODUCT_PLAN_COVERAGE_LIMITS = { items: 64, excerptChars: 240, entries: 64, rationaleChars: 300, referenceChars: 500,
+  mapBytes: 64 * 1024, shardBytes: 256 * 1024, tasks: 32, taskNameChars: 80 } as const;
+/** Where a proposing plan run may commit its one optional mapping report. */
+export const productPlanCoveragePath = (planEvidenceId: string) => `plan/requirement-coverage/${planEvidenceId}.json`;
+
+export type ProductPlanCoverageItemKind = "idea" | "constraint" | "decision";
+export interface ProductPlanCoverageItem { pointer: string; kind: ProductPlanCoverageItemKind; excerpt: string; textDigest: string }
+export type ProductPlanCoverageMappingReason = "no-proposal" | "brief-unavailable" | "transport-unreadable" | "report-absent"
+  | "report-invalid" | "report-incompatible" | "snapshot-unresolved";
+export type ProductPlanCoverageEntryState = "linked" | "unmapped" | "deferred" | "coverage-unavailable" | "reference-unresolved";
+export interface ProductPlanCoverageEntry { pointer: string; state: ProductPlanCoverageEntryState; taskId?: string; proof?: string; rationale?: string }
+export interface ProductPlanRequirementCoverage {
+  version: typeof PRODUCT_PLAN_COVERAGE_VERSION;
+  /** Structure only: no link is tested, implemented, exhaustive or semantically reviewed. */
+  basis: "structural-unreviewed";
+  reportId: string;
+  binding: { operationId: string; briefDigest: string; objectiveRevision: number; targetHead: string };
+  source: { state: "available" | "source-unavailable" };
+  inventory: { state: "available" | "inventory-unavailable"; exhaustive: false; digest?: string; itemCount: number; items: ProductPlanCoverageItem[] };
+  mapping: { state: "available" | "mapping-unavailable"; reason?: ProductPlanCoverageMappingReason; head?: string; snapshotDigest?: string; reportDigest?: string };
+  entries: ProductPlanCoverageEntry[];
+  counts: { linked: number; unmapped: number; deferred: number; unresolved: number };
+}
+
+const excerptOf = (value: string) => value.length > PRODUCT_PLAN_COVERAGE_LIMITS.excerptChars
+  ? `${value.slice(0, PRODUCT_PLAN_COVERAGE_LIMITS.excerptChars - 1)}…` : value;
+/** The brief's explicit typed fields, source-relative. Free-form idea text stays ONE nonexhaustive item; nothing is extracted from prose. */
+export function productPlanCoverageInventory(brief: ProductBrief): ProductPlanCoverageItem[] {
+  const item = (pointer: string, kind: ProductPlanCoverageItemKind, text: string): ProductPlanCoverageItem =>
+    ({ pointer, kind, excerpt: excerptOf(text), textDigest: digest(text) });
+  return [item("/idea", "idea", brief.idea),
+    ...(brief.constraints ?? []).map((text, index) => item(`/constraints/${index}`, "constraint", text)),
+    ...(brief.decisions ?? []).map((entry, index) => item(`/decisions/${index}`, "decision", `${entry.key}: ${entry.value}`))]
+    .slice(0, PRODUCT_PLAN_COVERAGE_LIMITS.items);
+}
+const inventoryDigest = (items: ProductPlanCoverageItem[]) => digest({ version: PRODUCT_PLAN_COVERAGE_VERSION, items: items.map((entry) => [entry.pointer, entry.textDigest]) });
+
+const coverageMapSchema = z.object({
+  version: z.literal(PRODUCT_PLAN_COVERAGE_MAP_VERSION), operationId: hex64Schema(), briefDigest: hex64Schema(), objectiveRevision: revision,
+  targetHead: z.string().regex(sha), inventoryDigest: hex64Schema(),
+  entries: z.array(z.object({
+    source: z.string().min(1).max(64), status: z.enum(["linked", "deferred"]),
+    taskId: z.string().min(1).max(PRODUCT_PLAN_COVERAGE_LIMITS.taskNameChars).regex(/^[A-Za-z0-9_.-]+$/).optional(),
+    proof: z.string().min(1).max(PRODUCT_PLAN_COVERAGE_LIMITS.referenceChars).optional(),
+    rationale: z.string().min(1).max(PRODUCT_PLAN_COVERAGE_LIMITS.rationaleChars).optional(),
+  }).strict()).max(PRODUCT_PLAN_COVERAGE_LIMITS.entries),
+}).strict();
+function hex64Schema() { return z.string().regex(/^[a-f0-9]{64}$/); }
 export type ProductPlanOperationCode = ProductStoreCode
   | "repository_missing" | "repository_not_found" | "repository_conflict" | "provider_unreadable"
   | "target_not_enrolled" | "target_unreadable" | "runner_missing" | "bootstrap_unverified"
@@ -205,6 +267,8 @@ export interface PlanTargetPort {
 export type PlanHandoffOutcome = "queued" | "refused" | "unknown";
 export interface PlanHandoffPort {
   productPlan?(target: { operationId: string; mode: "create" | "clarify"; brief: string; repoRoot: string }): Promise<{ outcome: PlanHandoffOutcome }>;
+  /** Accepted calls register synchronously under their ledger task id before returning their promise. */
+  inFlight?(taskId: string): boolean;
 }
 
 export interface ProductPlanOperationOptions {
@@ -224,18 +288,32 @@ export interface ProductPlanOperationOptions {
   text?: GhText;
   clock?: Clock;
   isAlive?: (pid: number) => boolean;
+  /** W1-T13875: overrides PRODUCT_PLAN_LEDGER_READ_BOUND_MS; a test seam for the bounded evidence read. */
+  ledgerReadBoundMs?: number;
+  /** W1-T13875: test seam for the evidence reader. */
+  readLedgerLines?: (stateDir: string, opts: { sinceTs: string; untilMs?: number; refuseIncomplete: true; keep: (line: string) => boolean }) =>
+    Promise<{ ok: boolean; rawLines: readonly string[] }>;
   sync?: (fd: number) => void;
 }
 
 const hex64 = z.string().regex(/^[a-f0-9]{64}$/);
 const modeSchema = z.enum(["create", "clarify"]);
+// `settled`: a legacy refusal whose hand-off window shows no run, so nothing ran.
+const finalEvidenceSchema = z.object({
+  exited: z.boolean(), failed: z.boolean(), opened: z.string().max(512).optional(), settled: z.literal(true).optional(),
+}).strict().refine((seen) => seen.exited || seen.failed || seen.opened !== undefined || seen.settled === true);
+type LedgerEvidence = z.infer<typeof finalEvidenceSchema> & { pid?: number };
+type LedgerRead = LedgerEvidence | "unread";
+type EvidenceRead = LedgerRead | "expired";
 const recordSchema = z.object({
   operationId: hex64, productId: productIdSchema, revision, objectiveRevision: revision, briefDigest: hex64,
   repository: z.object({ id: revision, owner: z.string().min(1).max(64), name: z.string().min(1).max(128) }).strict(),
   targetHead: z.string().regex(sha), mode: modeSchema, planEvidenceId: z.string().min(1).max(80).regex(/^[A-Za-z0-9_-]+$/),
   command: z.object({ verb: z.literal("plan"), mode: modeSchema, repoRoot: z.string().min(1).max(1024), briefBytes: z.number().int().positive(), briefDigest: hex64 }).strict(),
   requestedAt: z.string().datetime(),
-  handoff: z.object({ outcome: z.enum(["queued", "refused", "unknown"]), at: z.string().datetime() }).strict().optional(),
+  // "exited" is a nonzero child exit, which the gateway reports as refused. `beforeLaunch` marks a refusal where nothing
+  // ran; a "refused" saved before this marker existed may be either, so only its hand-off window is read, once.
+  handoff: z.object({ outcome: z.enum(["queued", "refused", "exited", "unknown"]), at: z.string().datetime(), beforeLaunch: z.literal(true).optional() }).strict().optional(),
 }).strict();
 type Record_ = z.infer<typeof recordSchema>;
 const journalSchema = z.object({
@@ -243,7 +321,92 @@ const journalSchema = z.object({
   operations: z.record(hex64, recordSchema), requests: z.record(hex64, z.object({ operationId: hex64, payloadDigest: hex64 }).strict()),
 }).strict();
 type Journal = z.infer<typeof journalSchema>;
-interface Paths { directory: string; state: string; ownerKey: string }
+/** Final evidence lives beside the journal, so a journal at its byte limit still keeps what was read. */
+const keptSchema = z.object({
+  version: z.literal(PRODUCT_PLAN_OPERATION_VERSION), ownerKey: hex64, evidence: z.record(hex64, finalEvidenceSchema),
+}).strict();
+type Kept = z.infer<typeof keptSchema>;
+interface Paths { directory: string; state: string; kept: string; ownerKey: string }
+
+type LedgerSubject = Pick<Record_, "operationId" | "mode" | "repository" | "requestedAt"> & { briefDigest: string; untilTs?: string };
+const keepEvidenceLine = (taskId: string) => (line: string) =>
+  line.includes(taskId) || line.includes("plan.start") || line.includes("pr.opened");
+const runLedgerReader = promisify(execFile);
+// Resolved on use, not at load: a CommonJS bundle of this module shims import.meta.url but not import.meta.resolve.
+const ledgerReaderLoader = (): string => import.meta.resolve("tsx");
+const ledgerReaderEntry = fileURLToPath(import.meta.url);
+const ledgerReaderArg = "--read-product-plan-evidence";
+
+/**
+ * Subprocess entry. Rotation publishes an archive before replacing the live inode. Check both sides of that swap. After
+ * the swap, rows written to the replaced inode reach the new live file only when the rotation drains it, under the
+ * rotation lock: the new file can already hold the child's exit while the old one still holds its `pr.opened`. A view
+ * taken while that lock is held is never an answer; the parent's deadline bounds the wait.
+ */
+async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSubject): Promise<LedgerRead> {
+  const livePath = ledgerLivePath(stateDir);
+  const liveIdentity = () => {
+    const stat = statSync(livePath, { bigint: true, throwIfNoEntry: false });
+    return stat && `${stat.dev}:${stat.ino}`;
+  };
+  const rotationLock = `${livePath}${LEDGER_ROTATION_LOCK_SUFFIX}`;
+  const rotating = () => lstatSync(rotationLock, { throwIfNoEntry: false }) !== undefined;
+  const taskId = productPlanLedgerTaskId(subject.operationId);
+  for (;;) {
+    if (rotating()) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      continue;
+    }
+    const before = liveIdentity();
+    const read = await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: subject.requestedAt, untilTs: subject.untilTs,
+      refuseIncomplete: true, keep: keepEvidenceLine(taskId) });
+    if (read.unread.includes(stateDir)) return "unread";
+    const after = liveIdentity();
+    const archives = ledgerRotationEntries(readdirSync(stateDir), stateDir);
+    if (rotating() || before !== after || archives.length !== read.archiveFiles.length ||
+      archives.some((entry, index) => entry.path !== read.archiveFiles[index])) continue;
+    return read.ok ? correlateLedger(subject, taskId, parseEvidenceLines(read.rawLines)) : "unread";
+  }
+}
+
+function parseEvidenceLines(rawLines: readonly string[]): Array<Record<string, unknown>> {
+  return rawLines.flatMap((line): Array<Record<string, unknown>> => {
+    try { return [JSON.parse(line) as Record<string, unknown>]; } catch (error) { void error; return []; /* a torn line is no evidence */ }
+  });
+}
+
+/**
+ * What the core ledger shows for THIS operation: the gateway's `ratify.cli_started` row (bound by the operation id it
+ * carries), the native `plan.start` whose complete brief and mode match the frozen command, and that run's own `pr.opened`.
+ * The maintained tsx launcher can have a different PID from its inner native runtime. Its PID remains a liveness hint,
+ * never the correlation key. Ambiguous native runs or a pull request outside the target are never this proposal.
+ */
+function correlateLedger(record: LedgerSubject, taskId: string, parsed: readonly Record<string, unknown>[]): LedgerEvidence {
+  const at = (row: Record<string, unknown>) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
+  // Only rows inside the operation's window: from its request, and for a legacy refusal up to that refusal.
+  const from = Date.parse(record.requestedAt);
+  const until = record.untilTs === undefined ? Number.POSITIVE_INFINITY : Date.parse(record.untilTs);
+  const rows = parsed.filter((row) => at(row) >= from && at(row) <= until).sort((a, b) => at(a) - at(b));
+  const mine = rows.filter((row) => row.task_id === taskId);
+  const started = mine.find((row) => row.step === "ratify.cli_started" && typeof row.pid === "number");
+  const pid = started?.pid as number | undefined;
+  const exited = mine.some((row) => row.step === "ratify.cli_exited");
+  const failed = mine.some((row) => row.step === "ratify.handoff_failed");
+  const candidates = started === undefined ? [] : rows.filter((row) => row.step === "plan.start" && row.lane === "plan" &&
+    row.task_id === `PLAN-${record.mode}` && row.mode === record.mode && typeof row.run_id === "string" &&
+    typeof row.brief === "string" && digest(row.brief) === record.briefDigest && at(row) >= Date.parse(record.requestedAt));
+  const runs = new Map(candidates.map((row) => [row.run_id, row]));
+  // Native starts can share a timestamp-based run id; conflicting identities are ambiguous.
+  const conflictingStart = rows.some((row) => row.step === "plan.start" && typeof row.run_id === "string" && runs.has(row.run_id) &&
+    (row.lane !== "plan" || row.task_id !== `PLAN-${record.mode}` || row.mode !== record.mode ||
+      typeof row.brief !== "string" || digest(row.brief) !== record.briefDigest));
+  if (conflictingStart) return { exited: false, failed: true };
+  const run = runs.size === 1 ? [...runs.values()][0] : undefined;
+  const pull = run === undefined ? undefined : rows.find((row) => row.step === "pr.opened" && row.run_id === run.run_id && typeof row.pr_url === "string");
+  const url = pull?.pr_url as string | undefined;
+  const own = url !== undefined && url.startsWith(`https://github.com/${record.repository.owner}/${record.repository.name}/pull/`) && /^\d+$/.test(url.slice(url.lastIndexOf("/") + 1));
+  return { pid, exited: exited && runs.size < 2, failed: failed || runs.size > 1, opened: own ? url : undefined };
+}
 
 // Service instances share one actor journal. Order in-process writers before taking the real cross-process lock.
 const journalChains = new Map<string, Promise<unknown>>();
@@ -290,7 +453,7 @@ const processAlive = (pid: number) => {
 /**
  * Turns a saved, verified product brief into ONE native `rmd plan` run against the managed target checkout, through the
  * maintained gateway port and never a launcher of its own. The operation is journaled (private, fsynced) BEFORE the hand-off;
- * every later request, reload or restart reads the same record and the correlated ledger rows, never a branch name.
+ * later requests read the same record and its correlated evidence, which the journal keeps once final.
  */
 export class ProductPlanOperationService {
   private readonly store: ProductIntentStore;
@@ -358,6 +521,7 @@ export class ProductPlanOperationService {
     if (known && !record) throw new Fault("corrupt");
     let replayed = known !== undefined;
     let head: string | undefined;
+    let selectedEvidence: EvidenceRead | undefined;
     if (!record) {
       // A fresh request: everything the operation will freeze is verified against the live target first.
       if (!repository) throw new Fault("repository_missing");
@@ -382,11 +546,16 @@ export class ProductPlanOperationService {
         entry.objectiveRevision === product.objectiveRevision && entry.briefDigest === briefDigest);
       // The same product, objective and brief never gets a second plan while one is in flight or its fate is unknown.
       // A refused operation is resolved: once the target head moves, a fresh request plans again at the new head.
-      const reusable = journal.operations[operationId] ?? sameBrief.find((entry) => {
-        const state = this.state(entry, product, head);
-        if (state === "stale-target") return this.state(entry, product, undefined) !== "refused";
-        return state === "pending" || state === "unknown";
-      });
+      let reusable = journal.operations[operationId];
+      for (const entry of reusable ? [] : sameBrief) {
+        const seen = await this.readEvidence(paths, entry);
+        const state = this.observeWith(entry, product, head, seen).state;
+        if (state === "stale-target" ? this.observeWith(entry, product, undefined, seen).state !== "refused" : state === "pending" || state === "unknown") {
+          reusable = entry;
+          selectedEvidence = seen;
+          break;
+        }
+      }
       if (reusable) {
         record = reusable;
         replayed = true;
@@ -401,7 +570,7 @@ export class ProductPlanOperationService {
         if (config.state !== "present") throw new Fault(runnerConfigRefusal[config.state]);
         const mode = await this.planMode(subject, head);
         const planEvidenceId = `pplan-${operationId.slice(0, 24)}`;
-        const brief = this.briefArgument(product, planEvidenceId, operationId);
+        const brief = this.briefArgument(product, planEvidenceId, operationId, head);
         if (Buffer.byteLength(brief) > PRODUCT_PLAN_OPERATION_LIMITS.briefBytes) throw new Fault("invalid_input");
         record = { operationId, productId: product.id, revision: product.revision, objectiveRevision: product.objectiveRevision, briefDigest,
           repository: { id: subject.id, owner: subject.owner, name: subject.name }, targetHead: head, mode, planEvidenceId,
@@ -424,10 +593,110 @@ export class ProductPlanOperationService {
         void error; head = undefined;
       }
     }
+    const seen = selectedEvidence ?? await this.readEvidence(paths, record);
+    // The evidence read yields (up to its bound): an objective edit may commit meanwhile, so settle against the revision read AFTER it.
     product = this.readProduct(actor, input.productId);
-    const observation = this.observe(record, product, head);
+    const observation = this.observeWith(record, product, head, seen);
     product = this.settle(actor, product, observation);
-    return { observation: this.observe(record, product, head), replayed };
+    // Observation only: whatever the report does, the operation, its state and its journal are already decided above.
+    return { observation: { ...observation, requirementCoverage: await this.coverage(record, product, observation) }, replayed };
+  }
+
+  /**
+   * The structural coverage report for this operation. The frozen record holds only a brief digest, so the source is read ONLY
+   * from the current product brief and ONLY when it still matches that digest; otherwise it is source-unavailable and today's
+   * brief is never substituted. A mapping is read from the exact proposal head, and any failure leaves entries unavailable.
+   */
+  private async coverage(record: Record_, product: StoredProduct, observation: ProductPlanObservation): Promise<ProductPlanRequirementCoverage> {
+    const binding = { operationId: record.operationId, briefDigest: record.briefDigest, objectiveRevision: record.objectiveRevision, targetHead: record.targetHead };
+    const exact = product.objectiveRevision === record.objectiveRevision && digest(productCasePlanText(product.brief)) === record.briefDigest;
+    const items = exact ? productPlanCoverageInventory(product.brief) : [];
+    const invDigest = exact ? inventoryDigest(items) : undefined;
+    let mapping: ProductPlanRequirementCoverage["mapping"];
+    let entries: ProductPlanCoverageEntry[] = [];
+    if (!exact) mapping = { state: "mapping-unavailable", reason: "brief-unavailable" };
+    else {
+      let read: { mapping: ProductPlanRequirementCoverage["mapping"]; entries: ProductPlanCoverageEntry[] };
+      try { read = await this.coverageMapping(record, observation, items, invDigest!); }
+      catch (error) {
+        // A report that cannot be read is an explicit unavailable state, never a coverage claim and never an operation failure.
+        void error;
+        read = { mapping: { state: "mapping-unavailable", reason: "transport-unreadable" }, entries: items.map((entry) => ({ pointer: entry.pointer, state: "coverage-unavailable" as const })) };
+      }
+      ({ mapping, entries } = read);
+    }
+    const counts = { linked: 0, unmapped: 0, deferred: 0, unresolved: 0 };
+    for (const entry of entries) {
+      if (entry.state === "linked") counts.linked += 1;
+      else if (entry.state === "unmapped") counts.unmapped += 1;
+      else if (entry.state === "deferred") counts.deferred += 1;
+      else counts.unresolved += 1;
+    }
+    return { version: PRODUCT_PLAN_COVERAGE_VERSION, basis: "structural-unreviewed",
+      reportId: digest({ binding, inventory: invDigest ?? null, mapping, entries }), binding,
+      source: { state: exact ? "available" : "source-unavailable" },
+      inventory: { state: exact ? "available" : "inventory-unavailable", exhaustive: false, ...(invDigest ? { digest: invDigest } : {}), itemCount: items.length, items },
+      mapping, entries, counts };
+  }
+
+  private async coverageMapping(record: Record_, observation: ProductPlanObservation, items: ProductPlanCoverageItem[], invDigest: string):
+    Promise<{ mapping: ProductPlanRequirementCoverage["mapping"]; entries: ProductPlanCoverageEntry[] }> {
+    const refuse = (reason: ProductPlanCoverageMappingReason, extra: { head?: string } = {}) => ({
+      mapping: { state: "mapping-unavailable" as const, reason, ...extra },
+      entries: items.map((entry) => ({ pointer: entry.pointer, state: "coverage-unavailable" as const })) });
+    const match = observation.proposal === undefined ? null : /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)$/.exec(observation.proposal);
+    if (observation.state !== "proposed" || !match) return refuse("no-proposal");
+    const text = this.options.text ?? ghTextAsync;
+    const slug = `repos/${record.repository.owner}/${record.repository.name}`;
+    const api = (path: string, raw: boolean, maxBuffer: number) => text(["api", path, ...(raw ? ["-H", "Accept: application/vnd.github.raw+json"] : [])], { maxBuffer, timeout: 20_000 });
+    const pull = z.object({ number: revision, base: z.object({ repo: z.object({ id: revision }) }), head: z.object({ sha: z.string().regex(sha) }) })
+      .parse(JSON.parse(await api(`${slug}/pulls/${match[1]}`, false, 1024 * 1024)));
+    if (pull.number !== Number(match[1]) || pull.base.repo.id !== record.repository.id) return refuse("snapshot-unresolved");
+    const head = pull.head.sha;
+    let body: string;
+    try { body = await api(`${slug}/contents/${productPlanCoveragePath(record.planEvidenceId)}?ref=${head}`, true, PRODUCT_PLAN_COVERAGE_LIMITS.mapBytes); }
+    catch (error) {
+      // Only an ABSENT report is "no report"; an unreadable one is a different, retryable state.
+      if (/404|not found/i.test(String((error as Error)?.message ?? error))) return refuse("report-absent", { head });
+      throw error;
+    }
+    if (Buffer.byteLength(body) > PRODUCT_PLAN_COVERAGE_LIMITS.mapBytes) return refuse("report-invalid", { head });
+    let parsed: z.infer<typeof coverageMapSchema>;
+    try { parsed = coverageMapSchema.parse(JSON.parse(body)); }
+    catch (error) { void error; /* malformed untrusted report text: explicit invalid state */ return refuse("report-invalid", { head }); }
+    if (parsed.operationId !== record.operationId || parsed.briefDigest !== record.briefDigest || parsed.objectiveRevision !== record.objectiveRevision ||
+      parsed.targetHead !== record.targetHead || parsed.inventoryDigest !== invDigest) return refuse("report-incompatible", { head });
+    const pointers = new Set(items.map((entry) => entry.pointer));
+    const seen = new Set<string>();
+    for (const entry of parsed.entries) {
+      const complete = entry.status === "linked" ? entry.taskId !== undefined && entry.proof !== undefined : entry.rationale !== undefined;
+      if (!pointers.has(entry.source) || seen.has(entry.source) || !complete) return refuse("report-invalid", { head });
+      seen.add(entry.source);
+    }
+    // The candidate task/proof snapshot: only tasks the report names, read from the same exact head, shard by shard.
+    const taskIds = [...new Set(parsed.entries.flatMap((entry) => entry.taskId === undefined ? [] : [entry.taskId]))].sort();
+    if (taskIds.length > PRODUCT_PLAN_COVERAGE_LIMITS.tasks) return refuse("report-invalid", { head });
+    const proofs = new Map<string, string[] | null>();
+    if (taskIds.length > 0) {
+      const names = z.array(z.object({ name: z.string().regex(/^[A-Za-z0-9_.-]+$/) })).parse(JSON.parse(await api(`${slug}/contents/${shardDirectory}?ref=${head}`, false, 1024 * 1024)));
+      for (const taskId of taskIds) {
+        const shard = names.find((entry) => entry.name.startsWith(`${taskId}-`) && entry.name.endsWith(".yaml"));
+        if (!shard) { proofs.set(taskId, null); continue; }
+        const raw = await api(`${slug}/contents/${shardDirectory}/${shard.name}?ref=${head}`, true, PRODUCT_PLAN_COVERAGE_LIMITS.shardBytes);
+        const tasks = z.array(z.object({ id: z.string(), acceptance: z.array(z.object({ proof: z.string().optional() }).passthrough()).optional() }).passthrough()).parse(parseYaml(raw));
+        const task = tasks.find((entry) => entry.id === taskId);
+        proofs.set(taskId, task === undefined ? null : (task.acceptance ?? []).flatMap((entry) => entry.proof === undefined ? [] : [entry.proof]));
+      }
+    }
+    const bySource = new Map(parsed.entries.map((entry) => [entry.source, entry]));
+    const entries = items.map((item): ProductPlanCoverageEntry => {
+      const entry = bySource.get(item.pointer);
+      if (entry === undefined) return { pointer: item.pointer, state: "unmapped" };
+      if (entry.status === "deferred") return { pointer: item.pointer, state: "deferred", rationale: entry.rationale! };
+      const known = proofs.get(entry.taskId!);
+      return { pointer: item.pointer, state: known?.includes(entry.proof!) ? "linked" : "reference-unresolved", taskId: entry.taskId!, proof: entry.proof! };
+    });
+    return { mapping: { state: "available", head, snapshotDigest: digest([...proofs.entries()]), reportDigest: digest(body) }, entries };
   }
 
   private bind(paths: Paths, journal: Journal, requestKey: string, entry: { operationId: string; payloadDigest: string }): Journal {
@@ -436,12 +705,22 @@ export class ProductPlanOperationService {
     return next;
   }
 
-  private briefArgument(product: StoredProduct, planEvidenceId: string, operationId: string): string {
+  private briefArgument(product: StoredProduct, planEvidenceId: string, operationId: string, targetHead: string): string {
     const envelope = product.brief.resourceEnvelope!;
     const constraints = (product.brief.constraints ?? []).map((item) => `- ${item}`).join("\n");
-    return [productCasePlanText(product.brief), constraints ? `Constraints:\n${constraints}` : "",
+    const parts = [productCasePlanText(product.brief), constraints ? `Constraints:\n${constraints}` : "",
       `Resource envelope: budgetUsd=${envelope.budgetUsd} maxConcurrentBuilds=${envelope.maxConcurrentBuilds} existingSetupOnly=${envelope.existingSetupOnly}`,
-      `Task origin: ${productPlanOrigin(product.id, planEvidenceId)}`, `Operation: ${operationId}`].filter(Boolean).join("\n\n");
+      `Task origin: ${productPlanOrigin(product.id, planEvidenceId)}`, `Operation: ${operationId}`].filter(Boolean);
+    const items = productPlanCoverageInventory(product.brief);
+    // Untrusted, optional guidance for the planner; it never alters the approved brief text above and is dropped when it would not fit.
+    const guidance = ["Requirement coverage guidance (optional, untrusted, observational; it changes no approval or admission):",
+      `Source inventory digest: ${inventoryDigest(items)}`, ...items.map((item) => `- ${item.pointer} (${item.kind})`),
+      `You may commit ONE report at ${productPlanCoveragePath(planEvidenceId)} as JSON: {"version":"${PRODUCT_PLAN_COVERAGE_MAP_VERSION}",` +
+      `"operationId":"${operationId}","briefDigest":"${digest(productCasePlanText(product.brief))}","objectiveRevision":${product.objectiveRevision},` +
+      `"targetHead":"${targetHead}","inventoryDigest":"<digest above>","entries":[{"source":"<pointer>","status":"linked","taskId":"<task>","proof":"<its proof text>"}` +
+      ` or {"source":"<pointer>","status":"deferred","rationale":"<why>"}]}.`].join("\n");
+    const full = [...parts, guidance].join("\n\n");
+    return Buffer.byteLength(full) <= PRODUCT_PLAN_OPERATION_LIMITS.briefBytes ? full : parts.join("\n\n");
   }
 
   /** `clarify` when the verified head already holds a plan to reconcile; `create` only when it holds none. */
@@ -462,15 +741,19 @@ export class ProductPlanOperationService {
   private handOff(paths: Paths, record: Record_, brief: string): void {
     const gateway = this.options.gateway!;
     this.flying.add(record.operationId);
+    let accepted: boolean | undefined;
     const finished = (outcome: PlanHandoffOutcome) => this.enqueue(async () => {
       // Completion is known in memory even if another writer prevents persisting its outcome.
-      // With no durable result or ledger row, observe() must report unknown instead of pending.
+      // With no durable result or ledger row, observeWith() must report unknown instead of pending.
       this.flying.delete(record.operationId);
       await this.mutate(paths, async () => {
         const journal = this.readJournal(paths);
         const stored = journal.operations[record.operationId];
         if (!stored) return;
-        this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...stored, handoff: { outcome, at: this.clock.iso() } } } });
+        // The gateway reports a nonzero child exit as refused too. Keep it eligible for proposal recovery.
+        const handoff = { outcome: outcome === "refused" && accepted ? "exited" as const : outcome, at: this.clock.iso(),
+          ...(outcome === "refused" && accepted === false ? { beforeLaunch: true as const } : {}) };
+        this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...stored, handoff } } });
       });
     }).catch((error: unknown) => { void error; /* the journal keeps its last durable state; the ledger rows still say what ran */ });
     let started: Promise<{ outcome: PlanHandoffOutcome }>;
@@ -479,66 +762,197 @@ export class ProductPlanOperationService {
       // A gateway that throws before returning a promise has handed nothing off; the outcome is recorded unknown, never retried.
       void error; started = Promise.resolve({ outcome: "unknown" as const });
     }
+    accepted = gateway.inFlight?.(productPlanLedgerTaskId(record.operationId));
     void started.then((result) => finished(result.outcome), () => finished("unknown"));
   }
 
-  /** The state this record is in NOW: the ledger's correlated rows first, the live brief and target head only on top. */
-  private state(record: Record_, product: StoredProduct, liveHead: string | undefined): ProductPlanState {
-    return this.observe(record, product, liveHead).state;
+  private inFlight(operationId: string): boolean {
+    return this.flying.has(operationId) || this.options.gateway?.inFlight?.(productPlanLedgerTaskId(operationId)) === true;
   }
 
-  private observe(record: Record_, product: StoredProduct, liveHead: string | undefined): ProductPlanObservation {
-    const seen = this.ledger(record);
-    let state: ProductPlanState;
-    if (seen.opened !== undefined) state = "proposed";
-    else if (seen.exited) state = "refused";
-    else if (seen.failed) state = "unknown";
-    else if (seen.pid !== undefined) state = (this.options.isAlive ?? processAlive)(seen.pid) ? "pending" : "unknown";
-    else if (this.flying.has(record.operationId)) state = "pending";
-    else state = record.handoff?.outcome === "refused" ? "refused" : "unknown";
-    // A late proposal is historical evidence for its frozen brief, never for a newer objective.
-    if (product.objectiveRevision !== record.objectiveRevision || digest(productCasePlanText(product.brief)) !== record.briefDigest) state = "changed-brief";
-    // An opened plan can itself advance the target when merged; do not relabel that normal completion as stale.
-    else if (state !== "proposed" && liveHead !== undefined && liveHead !== record.targetHead) state = "stale-target";
+  /** The observation for evidence already read; every caller reads the ledger once, off the request loop. */
+  private observeWith(record: Record_, product: StoredProduct, liveHead: string | undefined, seen: EvidenceRead): ProductPlanObservation {
+    let state: ProductPlanState = "unknown";
+    const proposal = typeof seen === "string" ? undefined : seen.opened;
+    if (typeof seen !== "string") {
+      if (proposal !== undefined) state = "proposed";
+      else if (seen.exited) state = "refused";
+      else if (seen.failed) state = "unknown";
+      else if (seen.settled) state = "refused";
+      else if (seen.pid !== undefined) state = (this.options.isAlive ?? processAlive)(seen.pid) ? "pending" : "unknown";
+      else if (this.inFlight(record.operationId)) state = "pending";
+      else if (record.handoff?.outcome === "refused") state = "refused";
+    }
+    if (seen !== "expired") {
+      // A late proposal is historical evidence for its frozen brief, never for a newer objective.
+      if (product.objectiveRevision !== record.objectiveRevision || digest(productCasePlanText(product.brief)) !== record.briefDigest) state = "changed-brief";
+      // An opened plan can itself advance the target when merged; do not relabel that normal completion as stale.
+      else if (state !== "proposed" && liveHead !== undefined && liveHead !== record.targetHead) state = "stale-target";
+    }
     return { operationId: record.operationId, state, mode: record.mode, planEvidenceId: record.planEvidenceId, repository: record.repository,
       targetHead: record.targetHead, revision: record.revision, objectiveRevision: record.objectiveRevision, briefDigest: record.briefDigest,
-      requestedAt: record.requestedAt, ...(seen.opened !== undefined ? { proposal: seen.opened } : {}) };
+      requestedAt: record.requestedAt, ...(proposal !== undefined ? { proposal } : {}) };
   }
 
   /**
-   * What the core ledger shows for THIS operation: the gateway's `ratify.cli_started` row (bound by the operation id it
-   * carries), the native `plan.start` whose complete brief and mode match the frozen command, and that run's own `pr.opened`.
-   * The maintained tsx launcher can have a different PID from its inner native runtime. Its PID remains a liveness hint,
-   * never the correlation key. Ambiguous native runs or a pull request outside the target are never this proposal.
+   * Final evidence is read once and kept beside the journal, never read again. The bound covers the WHOLE lookup, from
+   * its first filesystem call: the kept file is opened asynchronously under the same timer as the ledger read, and an
+   * answer that arrives past the deadline is "expired" whatever it holds. Evidence is answered as final only once it is
+   * durably kept: a failed write refuses the request instead of answering from memory a restart would not have.
    */
-  private ledger(record: Record_): { pid?: number; exited: boolean; failed: boolean; opened?: string } {
+  private async readEvidence(paths: Paths, record: Record_): Promise<EvidenceRead> {
+    const handoff = this.inFlight(record.operationId) ? undefined : record.handoff;
+    if (handoff?.outcome === "refused" && handoff.beforeLaunch) {
+      return { exited: false, failed: false };
+    }
+    // The gateway saves these outcomes after a refused hand-off or a nonzero child exit.
+    const untilTs = handoff?.outcome === "refused" || handoff?.outcome === "exited" ? handoff.at : undefined;
+    const bound = this.options.ledgerReadBoundMs ?? PRODUCT_PLAN_LEDGER_READ_BOUND_MS;
+    const deadline = performance.now() + bound;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let deadlineReached = false;
+    const expired = new Promise<"expired">((resolve) => {
+      timer = setTimeout(() => { deadlineReached = true; resolve("expired"); }, bound);
+    });
+    const pastDeadline = () => deadlineReached || performance.now() >= deadline;
+    try {
+      const kept = await Promise.race([this.readKept(paths, record.operationId), expired]);
+      if (kept === "expired" || pastDeadline()) return "expired";
+      if (kept) return kept;
+      const seen = await this.ledger(record, untilTs, expired, pastDeadline);
+      if (pastDeadline()) return "expired";
+      if (typeof seen === "string") return seen;
+      // W1-T13875: a journaled nonzero exit is final even when the gateway could not append its ratify.cli_exited row.
+      const { opened, failed } = seen;
+      const exited = seen.exited || (!failed && handoff?.outcome === "exited");
+      const final = opened !== undefined || exited || failed ? { exited, failed, ...(opened !== undefined ? { opened } : {}) }
+        : handoff?.outcome === "refused" ? { exited: false, failed: false, settled: true as const } : undefined;
+      if (final === undefined) return seen;
+      const saved = await Promise.race([this.publishKept(paths, record.operationId, final, pastDeadline), expired]);
+      return pastDeadline() ? "expired" : saved;
+    } catch (error) {
+      // A failure that lands past the deadline, even before the timer's callback has run, is past the bound: unknown.
+      if (pastDeadline()) return "expired";
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private evidenceDirectory(paths: Paths, operationId: string): string {
+    return join(paths.directory, `${paths.ownerKey}.${operationId}.evidence`);
+  }
+
+  private async readKept(paths: Paths, operationId: string): Promise<LedgerEvidence | undefined> {
+    const directory = this.evidenceDirectory(paths, operationId);
+    const info = await lstat(directory).catch((error: unknown) => {
+      if (errno(error, "ENOENT")) return undefined;
+      throw error;
+    });
+    if (!info) return (await this.readEvidenceFile(paths, paths.kept))?.evidence[operationId];
+    if (!info.isDirectory() || (info.mode & 0o077) !== 0) throw new Fault("unavailable");
+    const kept = (await this.readEvidenceFile(paths, join(directory, "evidence.json")))?.evidence[operationId];
+    if (!kept) throw new Fault("corrupt");
+    // A reader can find an entry after its rename and before its publisher syncs the parent.
+    await this.syncEvidenceDirectory(paths.directory);
+    return kept;
+  }
+
+  private async readEvidenceFile(paths: Paths, file: string): Promise<Kept | undefined> {
+    let handle: Awaited<ReturnType<typeof open>>;
+    try {
+      handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch (error) {
+      if (errno(error, "ENOENT")) return undefined;
+      // An unreadable kept file is never "nothing kept": reading the ledger again, then rewriting it, would drop it.
+      throw Object.assign(new Fault("unavailable"), { cause: error });
+    }
+    try {
+      const info = await handle.stat();
+      const limit = PRODUCT_PLAN_OPERATION_LIMITS.evidenceBytes;
+      if (!info.isFile() || info.nlink > 1 || (info.mode & 0o077) !== 0 || info.size > limit) throw new Fault("unavailable");
+      const buffer = Buffer.alloc(info.size);
+      let size = 0;
+      while (size < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, size, buffer.length - size, null);
+        if (bytesRead === 0) break;
+        size += bytesRead;
+      }
+      if (size !== info.size) throw new Fault("corrupt");
+      let raw: unknown;
+      try { raw = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer)); }
+      catch (error) { void error; throw new Fault("corrupt"); }
+      const parsed = keptSchema.safeParse(raw);
+      if (!parsed.success || parsed.data.ownerKey !== paths.ownerKey) throw new Fault("corrupt");
+      return parsed.data;
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private async syncEvidenceDirectory(path: string): Promise<void> {
+    const directory = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try { await directory.sync(); } finally { await directory.close(); }
+  }
+
+  /** Rename a nonempty directory so even a delayed publisher cannot replace an existing result for this operation. */
+  private async publishKept(paths: Paths, operationId: string, final: LedgerEvidence, pastDeadline: () => boolean):
+    Promise<LedgerEvidence | "expired"> {
+    const body = JSON.stringify({ version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, evidence: { [operationId]: final } });
+    if (Buffer.byteLength(body) > PRODUCT_PLAN_OPERATION_LIMITS.evidenceBytes) throw new Fault("capacity");
+    const temporary = join(paths.directory, `.${paths.ownerKey}.${randomUUID()}.pending`);
+    let staged = false;
+    let renamed = false;
+    try {
+      await mkdir(temporary, { mode: 0o700 });
+      staged = true;
+      const handle = await open(join(temporary, "evidence.json"), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+      try { await handle.chmod(0o600); await handle.writeFile(body, "utf8"); await handle.sync(); }
+      finally { await handle.close(); }
+      await this.syncEvidenceDirectory(temporary);
+      if (pastDeadline()) return "expired";
+      await rename(temporary, this.evidenceDirectory(paths, operationId));
+      renamed = true;
+      await this.syncEvidenceDirectory(paths.directory);
+      return final;
+    } catch (error) {
+      if (errno(error, "EEXIST") || errno(error, "ENOTEMPTY")) {
+        if (pastDeadline()) return "expired";
+        const winner = await this.readKept(paths, operationId);
+        if (winner) return winner;
+      }
+      throw Object.assign(new Fault(renamed ? "outcome_unknown" : "unavailable"), { cause: error });
+    } finally {
+      if (staged && !renamed) {
+        try { await rm(temporary, { recursive: true }); } catch (error) { void error; /* a private stage can be reaped later */ }
+      }
+    }
+  }
+
+  private async ledger(record: Record_, untilTs: string | undefined, expired: Promise<"expired">, pastDeadline: () => boolean): Promise<EvidenceRead> {
     const none = { exited: false, failed: false };
-    if (this.options.ledgerPath === undefined) return none;
+    const ledgerPath = this.options.ledgerPath;
+    if (ledgerPath === undefined) return none;
     const taskId = productPlanLedgerTaskId(record.operationId);
-    const read = readLedgerUnionRecordsSync(dirname(this.options.ledgerPath), { sinceTs: record.requestedAt, refuseIncomplete: true,
-      keep: (line) => line.includes(taskId) || line.includes("plan.start") || line.includes("pr.opened") });
-    if (!read.ok) return none;
-    const at = (row: Record<string, unknown>) => (typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
-    const rows = read.rows.filter((row) => Number.isFinite(at(row))).sort((a, b) => at(a) - at(b));
-    const mine = rows.filter((row) => row.task_id === taskId);
-    const started = mine.find((row) => row.step === "ratify.cli_started" && typeof row.pid === "number");
-    const pid = started?.pid as number | undefined;
-    const exited = mine.some((row) => row.step === "ratify.cli_exited");
-    const failed = mine.some((row) => row.step === "ratify.handoff_failed");
-    const candidates = started === undefined ? [] : rows.filter((row) => row.step === "plan.start" && row.lane === "plan" &&
-      row.task_id === `PLAN-${record.mode}` && row.mode === record.mode && typeof row.run_id === "string" &&
-      typeof row.brief === "string" && digest(row.brief) === record.command.briefDigest && at(row) >= Date.parse(record.requestedAt));
-    const runs = new Map(candidates.map((row) => [row.run_id, row]));
-    // Native starts can share a timestamp-based run id; conflicting identities are ambiguous.
-    const conflictingStart = rows.some((row) => row.step === "plan.start" && typeof row.run_id === "string" && runs.has(row.run_id) &&
-      (row.lane !== "plan" || row.task_id !== `PLAN-${record.mode}` || row.mode !== record.mode ||
-        typeof row.brief !== "string" || digest(row.brief) !== record.command.briefDigest));
-    if (conflictingStart) return { ...(pid !== undefined ? { pid } : {}), exited: false, failed: true };
-    const run = runs.size === 1 ? [...runs.values()][0] : undefined;
-    const pull = run === undefined ? undefined : rows.find((row) => row.step === "pr.opened" && row.run_id === run.run_id && typeof row.pr_url === "string");
-    const url = pull?.pr_url as string | undefined;
-    const own = url !== undefined && url.startsWith(`https://github.com/${record.repository.owner}/${record.repository.name}/pull/`) && /^\d+$/.test(url.slice(url.lastIndexOf("/") + 1));
-    return { ...(pid !== undefined ? { pid } : {}), exited: exited && runs.size < 2, failed: failed || runs.size > 1, ...(own ? { opened: url } : {}) };
+    const controller = new AbortController();
+    try {
+      const { operationId, mode, repository, requestedAt } = record;
+      const subject: LedgerSubject = { operationId, mode, repository, requestedAt, briefDigest: record.command.briefDigest, untilTs };
+      const stateDir = dirname(ledgerPath);
+      return await Promise.race([
+        expired,
+        this.options.readLedgerLines
+          ? this.options.readLedgerLines(stateDir, { sinceTs: requestedAt, ...(untilTs !== undefined ? { untilMs: Date.parse(untilTs) } : {}), refuseIncomplete: true,
+            keep: keepEvidenceLine(taskId) })
+            .then((read): LedgerRead => read.ok && !pastDeadline() ? correlateLedger(subject, taskId, parseEvidenceLines(read.rawLines)) : "unread")
+          // Directory enumeration and correlation run outside serve. The deadline need not wait for the child to exit.
+          : runLedgerReader(process.execPath, ["--import", ledgerReaderLoader(), ledgerReaderEntry, ledgerReaderArg, stateDir, JSON.stringify(subject)],
+            { signal: controller.signal, killSignal: "SIGKILL" })
+            .then(({ stdout }): LedgerRead => JSON.parse(stdout) as LedgerRead),
+      ]);
+    } finally {
+      controller.abort();
+    }
   }
 
   /** Terminal fates become the product's own supported stage evidence, once each. */
@@ -569,7 +983,7 @@ export class ProductPlanOperationService {
     if (!this.options.root || !isAbsolute(this.options.root)) throw new Fault("unavailable");
     const ownerKey = digest(actor);
     const directory = join(realpathSync(this.options.root), "state", "products", "v1", "plan-operations");
-    return { directory, state: join(directory, `${ownerKey}.json`), ownerKey };
+    return { directory, state: join(directory, `${ownerKey}.json`), kept: join(directory, `${ownerKey}.evidence.json`), ownerKey };
   }
 
   private ensureDirectory(paths: Paths): void {
@@ -585,11 +999,20 @@ export class ProductPlanOperationService {
   }
 
   private readJournal(paths: Paths): Journal {
+    const raw = this.readPrivate(paths.state, PRODUCT_PLAN_OPERATION_LIMITS.stateBytes);
+    if (raw === undefined) return { version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, operations: {}, requests: {} };
+    const parsed = journalSchema.safeParse(raw);
+    if (!parsed.success || parsed.data.ownerKey !== paths.ownerKey) throw new Fault("corrupt");
+    return parsed.data;
+  }
+
+  /** One private (owner-only, single-link, bounded) JSON file; undefined when it does not exist. */
+  private readPrivate(file: string, limit: number): unknown {
     let fd: number | undefined;
     try {
-      fd = openSync(paths.state, constants.O_RDONLY | constants.O_NOFOLLOW);
+      fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
       const info = fstatSync(fd);
-      if (!info.isFile() || info.nlink > 1 || (info.mode & 0o077) !== 0 || info.size > PRODUCT_PLAN_OPERATION_LIMITS.stateBytes) throw new Fault("unavailable");
+      if (!info.isFile() || info.nlink > 1 || (info.mode & 0o077) !== 0 || info.size > limit) throw new Fault("unavailable");
       const buffer = Buffer.alloc(info.size);
       let size = 0;
       while (size < buffer.length) {
@@ -597,22 +1020,22 @@ export class ProductPlanOperationService {
         if (count === 0) break;
         size += count;
       }
-      let raw: unknown;
-      try { raw = size === info.size ? JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer)) : undefined; }
+      if (size !== info.size) throw new Fault("corrupt");
+      try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer)) as unknown; }
       catch (error) { void error; throw new Fault("corrupt"); }
-      const parsed = journalSchema.safeParse(raw);
-      if (!parsed.success || parsed.data.ownerKey !== paths.ownerKey) throw new Fault("corrupt");
-      return parsed.data;
     } catch (error) {
-      if (errno(error, "ENOENT")) return { version: PRODUCT_PLAN_OPERATION_VERSION, ownerKey: paths.ownerKey, operations: {}, requests: {} };
+      if (errno(error, "ENOENT")) return undefined;
       throw error;
     } finally { if (fd !== undefined) closeSync(fd); }
   }
 
   /** Atomic replace. A failure before the rename is `unavailable`; after it the outcome is unknowable. */
   private commit(paths: Paths, journal: Journal): void {
-    const body = JSON.stringify(journal);
-    if (Buffer.byteLength(body) > PRODUCT_PLAN_OPERATION_LIMITS.stateBytes) throw new Fault("capacity");
+    this.writePrivate(paths, paths.state, JSON.stringify(journal), PRODUCT_PLAN_OPERATION_LIMITS.stateBytes);
+  }
+
+  private writePrivate(paths: Paths, file: string, body: string, limit: number): void {
+    if (Buffer.byteLength(body) > limit) throw new Fault("capacity");
     this.ensureDirectory(paths);
     const temporary = join(paths.directory, `.${paths.ownerKey}.${randomUUID()}.pending`);
     let renamed = false;
@@ -620,7 +1043,7 @@ export class ProductPlanOperationService {
       const fd = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
       try { fchmodSync(fd, 0o600); writeFileSync(fd, body, "utf8"); this.sync(fd); }
       finally { closeSync(fd); }
-      renameSync(temporary, paths.state);
+      renameSync(temporary, file);
       renamed = true;
       this.syncDirectory(paths.directory);
     } catch (error) {
@@ -629,4 +1052,11 @@ export class ProductPlanOperationService {
       throw new Fault(renamed ? "outcome_unknown" : "unavailable");
     }
   }
+}
+
+if (import.meta.main && process.argv[2] === ledgerReaderArg) {
+  void readProductPlanLedgerEvidence(process.argv[3]!, JSON.parse(process.argv[4]!) as LedgerSubject).then(
+    (evidence) => process.stdout.write(JSON.stringify(evidence)),
+    (error: unknown) => { process.stderr.write(`${String(error)}\n`); process.exitCode = 1; },
+  );
 }

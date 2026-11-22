@@ -79,7 +79,7 @@ function laggingHost(): LaggingHost {
 /** `count` rows of one fingerprint inside one hour, so its burn is `count` an hour. */
 function events(fingerprint: string, count: number): IncidentLedgerEvent[] {
   return Array.from({ length: count }, (_, i) => ({
-    fingerprint, ts: Date.parse("2026-11-17T12:00:00.000Z") + i * 60_000, kind: "exception", name: "TypeError", message: "boom", instance: "core",
+    fingerprint, ts: Date.parse("2026-11-17T12:00:00.000Z") + i * 60_000, kind: "http_5xx", templateId: "service.internal-error", name: "TypeError", message: "boom", instance: "core",
   }));
 }
 
@@ -136,7 +136,7 @@ test("W1-T13368 criterion 1: invariant:no-synchronous-git-in-a-pass — the daem
   const host = laggingHost();
   const stateRoot = scratch("home");
   const ledger = writeLedger(
-    events(fp("a"), 2).map((e) => ({ task_id: "INCIDENT", step: "incident.event", fingerprint: e.fingerprint, kind: e.kind, name: e.name, message: e.message, ts: new Date(e.ts).toISOString() })),
+    events(fp("a"), 2).map((e) => ({ task_id: "INCIDENT", step: "incident.event", fingerprint: e.fingerprint, template_id: e.templateId, kind: e.kind, name: e.name, message: e.message, ts: new Date(e.ts).toISOString() })),
     { dir: join(stateRoot, "state") },
   );
   const logged: string[] = [];

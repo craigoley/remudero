@@ -2,18 +2,27 @@
  * lib/incident-events.ts — `POST /v1/incidents/events` (W1-T4383, the SRE gardener's phase 1).
  *
  * The console and the gateway throw into logs nobody reads. This route SCRUBS each reported error,
- * GROUPS it by a fingerprint of the error type plus its IN-APP frames (Sentry's model: never a
- * library frame or a line number), and ledgers one `incident.event` row; past the per-fingerprint
- * per-minute cap a burst collapses to ONE `incident.sampled` row. The ingest-only token that can
- * reach this route and nothing else is wired in serve.ts (`ingestTokenProvider`, service.ts).
+ * resolves its `template_id` against the source-owned catalog (incident-templates.ts, W1-T13131),
+ * GROUPS it by a fingerprint of that template — never of the rendered message, a frame or a name —
+ * and ledgers one `incident.event` row; past the per-fingerprint per-minute cap a burst collapses
+ * to ONE `incident.sampled` row. An event whose template is missing, unknown, malformed or
+ * mismatched is refused BEFORE it is fingerprinted, with one payload-free `incident.refused` row.
+ * The ingest-only token that can reach this route and nothing else is wired in serve.ts
+ * (`ingestTokenProvider`, service.ts).
  */
 
-import { createHash } from "node:crypto";
 import type { Route } from "./service.js";
 import { RawBodyTooLargeError, readBoundedRawBody } from "./service.js";
 import { sendJson, type PanelActionDeps } from "./panel-actions.js";
 import { appendLedger } from "./ledger.js";
 import { systemClock, type Clock } from "./clock.js";
+import {
+  INCIDENT_TEMPLATE_CONTRACT,
+  incidentTemplateFingerprint,
+  resolveIncidentTemplate,
+  type IncidentTemplate,
+  type IncidentTemplateRefusalReason,
+} from "./incident-templates.js";
 
 /** Exported so serve.ts's ingest-token scoping and this route can never name it twice. */
 export const INCIDENT_INGEST_ROUTE_PATH = "/v1/incidents/events";
@@ -41,9 +50,11 @@ export interface IncidentEventInput {
   route?: string;
   sha?: string;
   at: string;
+  /** The emitter's catalog template id, unchecked: {@link resolveIncidentTemplate} decides it. */
+  template_id?: unknown;
 }
 
-/** {@link IncidentEventInput} after {@link scrubIncidentEvent}; `message` feeds the fingerprint only. */
+/** {@link IncidentEventInput} after {@link scrubIncidentEvent}; `message` is never fingerprinted, ledgered or published. */
 export interface ScrubbedIncidentEvent {
   source: IncidentSource;
   kind: IncidentKind;
@@ -58,7 +69,6 @@ export interface ScrubbedIncidentEvent {
 export const INCIDENT_MESSAGE_MAX_CHARS = 500;
 // PRIMARY CONTROL: the design's scrub cap on frames, applied before fingerprinting.
 export const INCIDENT_FRAMES_MAX = 20;
-export const INCIDENT_FINGERPRINT_FRAME_COUNT = 3;
 // PRIMARY CONTROL: the design's per-fingerprint-per-minute sampling rate itself.
 export const INCIDENT_SAMPLE_CAP_PER_MINUTE = 20;
 // PRIMARY CONTROL: bounds a public, low-trust body read far above a capped event.
@@ -102,28 +112,12 @@ export function scrubIncidentEvent(input: IncidentEventInput): ScrubbedIncidentE
 
 // ── fingerprint ───────────────────────────────────────────────────────────────────────────────
 
-function isAppFrame(frame: IncidentEventFrame): boolean {
-  return !frame.file.includes("node_modules");
-}
-
-/** Hex ids (6+) then digit runs collapse to `#`, so line numbers and ids never split a group. */
-function normalizeIdsAndDigits(value: string): string {
-  return value.replace(/[0-9a-fA-F]{6,}/g, "#").replace(/\d+/g, "#");
-}
-
-/** sha256(kind, name, normalised message, the first 3 IN-APP frames as `file:fn`). Library frames
- *  are dropped BEFORE the cut, so one never shifts which app frames are counted. */
-export function fingerprintIncidentEvent(
-  event: Pick<ScrubbedIncidentEvent, "kind" | "name" | "message" | "frames">,
-): string {
-  const normalizedMessage = normalizeIdsAndDigits(event.message);
-  const frameKey = event.frames
-    .filter(isAppFrame)
-    .slice(0, INCIDENT_FINGERPRINT_FRAME_COUNT)
-    .map((f) => `${f.file}:${f.fn}`)
-    .join("|");
-  const basis = [event.kind, event.name, normalizedMessage, frameKey].join("\u0000");
-  return createHash("sha256").update(basis, "utf8").digest("hex");
+/** W1-T13131: sha256 of the resolved template's identity and literal plus the kind
+ *  ({@link incidentTemplateFingerprint}). The rendered message, its interpolation values, the
+ *  name, route and frames are never part of the basis: two values of one template share an
+ *  incident, two templates never do. */
+export function fingerprintIncidentEvent(event: Pick<ScrubbedIncidentEvent, "kind">, template: IncidentTemplate): string {
+  return incidentTemplateFingerprint(template, event.kind);
 }
 
 // ── validate ──────────────────────────────────────────────────────────────────────────────────
@@ -181,6 +175,7 @@ export function validateIncidentEventBody(body: unknown): IncidentEventValidatio
       route: b.route as string | undefined,
       sha: b.sha as string | undefined,
       at: b.at,
+      template_id: b.template_id,
     },
   };
 }
@@ -188,20 +183,48 @@ export function validateIncidentEventBody(body: unknown): IncidentEventValidatio
 // ── route ─────────────────────────────────────────────────────────────────────────────────────
 
 /** One ledger row: exactly the design's fields — `message`/`frames` never leave this process. */
-function ledgerFields(fingerprint: string, event: ScrubbedIncidentEvent): Record<string, unknown> {
-  return { fingerprint, source: event.source, kind: event.kind, name: event.name, route: event.route, sha: event.sha };
+function ledgerFields(fingerprint: string, event: ScrubbedIncidentEvent, template: IncidentTemplate): Record<string, unknown> {
+  return {
+    fingerprint, template_id: template.id, template_contract: INCIDENT_TEMPLATE_CONTRACT,
+    source: event.source, kind: event.kind, name: event.name, route: event.route, sha: event.sha,
+  };
 }
 
-/** `POST /v1/incidents/events` (write, tier low): validate -> scrub -> fingerprint -> ledger. Within
- *  one 60s window a fingerprint ledgers up to `sampleCapPerMinute` `incident.event` rows, then ONE
- *  `incident.sampled` row; later events in that window answer `sampled: true` and write nothing. */
+/** W1-T13131: a refusal row carries only bounded labels — the reason and the validated source/kind enums. */
+function refusalFields(reason: IncidentTemplateRefusalReason, event: IncidentEventInput): Record<string, unknown> {
+  return { reason, source: event.source, kind: event.kind };
+}
+
+/** One per-minute counter, cleared at each window rollover — the accepted and refused paths each keep one. */
+function windowCounter(): (key: string, nowMs: number) => number {
+  let windowStart = Number.NaN;
+  const counts = new Map<string, number>();
+  return (key, nowMs) => {
+    const window = Math.floor(nowMs / SAMPLE_WINDOW_MS) * SAMPLE_WINDOW_MS;
+    if (window !== windowStart) {
+      // Only the current window is ever consulted, so a rollover forgets every older count.
+      windowStart = window;
+      counts.clear();
+    }
+    const count = (counts.get(key) ?? 0) + 1;
+    counts.set(key, count);
+    return count;
+  };
+}
+
+/** `POST /v1/incidents/events` (write, tier low): validate -> resolve template -> scrub -> fingerprint
+ *  -> ledger. Within one 60s window a fingerprint ledgers up to `sampleCapPerMinute` `incident.event`
+ *  rows, then ONE `incident.sampled` row; later events in that window answer `sampled: true` and write
+ *  nothing. W1-T13131: an unresolved template answers 422 `template_refused` and ledgers one
+ *  `incident.refused` row per refused input, under the same per-minute cap per reason/source/kind
+ *  (then ONE `incident.refused_sampled` row), and is never fingerprinted. */
 export function buildIncidentEventsRoute(
   deps: Pick<PanelActionDeps, "ledgerPath">,
   clock: Clock = systemClock,
   sampleCapPerMinute: number = INCIDENT_SAMPLE_CAP_PER_MINUTE,
 ): Route {
-  let windowStart = Number.NaN;
-  const counts = new Map<string, number>();
+  const acceptedCount = windowCounter();
+  const refusedCount = windowCounter();
 
   return {
     method: INCIDENT_INGEST_ROUTE_METHOD,
@@ -234,18 +257,27 @@ export function buildIncidentEventsRoute(
         return;
       }
 
-      const scrubbed = scrubIncidentEvent(validated.value);
-      const fingerprint = fingerprintIncidentEvent(scrubbed);
-
       const nowMs = clock.now();
-      const window = Math.floor(nowMs / SAMPLE_WINDOW_MS) * SAMPLE_WINDOW_MS;
-      if (window !== windowStart) {
-        // Only the current window is ever consulted, so a rollover forgets every older count.
-        windowStart = window;
-        counts.clear();
+      const resolved = resolveIncidentTemplate({ templateId: validated.value.template_id, kind: validated.value.kind, source: validated.value.source });
+      if (!resolved.ok) {
+        const count = refusedCount([resolved.reason, validated.value.source, validated.value.kind].join("\u0000"), nowMs);
+        const sampled = count > sampleCapPerMinute;
+        if (count <= sampleCapPerMinute + 1) {
+          appendLedger(deps.ledgerPath, {
+            run_id: `INCIDENT-${nowMs}`,
+            task_id: "INCIDENT",
+            step: sampled ? "incident.refused_sampled" : "incident.refused",
+            ...refusalFields(resolved.reason, validated.value),
+          });
+        }
+        sendJson(res, 422, { error: "template_refused", reason: resolved.reason, accepted: false, sampled });
+        return;
       }
-      const count = (counts.get(fingerprint) ?? 0) + 1;
-      counts.set(fingerprint, count);
+
+      const scrubbed = scrubIncidentEvent(validated.value);
+      const fingerprint = fingerprintIncidentEvent(scrubbed, resolved.template);
+
+      const count = acceptedCount(fingerprint, nowMs);
       const sampled = count > sampleCapPerMinute;
 
       if (count <= sampleCapPerMinute + 1) {
@@ -253,7 +285,7 @@ export function buildIncidentEventsRoute(
           run_id: `INCIDENT-${nowMs}`,
           task_id: "INCIDENT",
           step: sampled ? "incident.sampled" : "incident.event",
-          ...ledgerFields(fingerprint, scrubbed),
+          ...ledgerFields(fingerprint, scrubbed, resolved.template),
         });
       }
 
