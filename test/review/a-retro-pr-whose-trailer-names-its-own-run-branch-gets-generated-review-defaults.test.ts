@@ -5,14 +5,35 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { ReviewCommandDeps } from "#src/cli/commands/review.js";
+import { reviewCommand, type ReviewCommandDeps, type ReviewCommandHost } from "#src/cli/commands/review.js";
 import type { Config } from "#src/lib/config.js";
 import { UNTASKED_REVIEW_BUDGET_USD, usesUntaskedReviewMetadata } from "#src/lib/tick-read-worker.js";
-import { reviewCommand } from "#src/run-task.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const retroId = "RETRO-1794737755052";
 const retroHead = "run-RETRO-1794737755052";
+
+function unexpected(): never {
+  throw new Error("unexpected review fixture dependency");
+}
+
+const reviewHost: ReviewCommandHost = {
+  GIT_UNTRACKED_FILES_ALL: "--untracked-files=all",
+  JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
+  acceptedReviewAttemptId: () => undefined,
+  attributeWorkerStreamEvent: unexpected,
+  ledgeredNonDispatchSpawn: unexpected,
+  lintPlanForReview: unexpected,
+  liveWorkerRunIds: new Set(),
+  materializeReviewWorktree: unexpected,
+  readHeadShaRest: unexpected,
+  readMainPlanTreeSha: unexpected,
+  realDeps: () => ({ reviewWorktree: { fetch: unexpected } }) as unknown as ReturnType<ReviewCommandHost["realDeps"]>,
+  reviewPostedDescription: (verdict) => verdict.summary,
+  reviewWorkerLockId: (runId) => runId,
+  reviewerClockBoundMs: unexpected,
+  reviewSubjectGit: unexpected,
+};
 
 test("W1-T12883 criterion 1: a numeric retro trailer matches its own run branch", () => {
   assert.equal(usesUntaskedReviewMetadata(retroId, retroHead), true);
@@ -66,7 +87,7 @@ test("W1-T12883 criterion 3: semantic review records generated defaults for the 
     },
     executionMode: "semantic",
   };
-  const code = await reviewCommand(retroHead, ["--repo", "craigoley/remudero"], deps);
+  const code = await reviewCommand(reviewHost, retroHead, ["--repo", "craigoley/remudero"], deps);
 
   const ledger = readFileSync(ledgerPath, "utf8").trim().split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
