@@ -30808,6 +30808,30 @@ export function selectReviewAdmissions(
 /** W1-T14073 — when one review input joined the queue, or undefined to keep its PR's createdAt. */
 export type ReviewQueuedAt = (pr: OpenPrView) => string | undefined;
 
+/** W1-T14243 — THE LIGHT PASS'S EARLY-BATCH SPLIT RANKS ON ADMISSION'S KEY: {@link reviewInputQueuedAt} folded from the
+ *  live ledger view the light pass selects from, so the split never delays an input behind a PR eligible after it. */
+export function lightPassReviewQueuedAt(deps: Pick<SweepDeps, "ledgerPath" | "readLedger" | "now">): ReviewQueuedAt {
+  const now = deps.now ? deps.now() : systemClock.now();
+  return reviewInputQueuedAt((deps.readLedger ?? readLiveLedgerRows)(deps.ledgerPath), now);
+}
+
+/** W1-T14243 — the early candidates that start before the refresh: each one queued ahead of the first delayed review
+ *  candidate in admission's order. With no delayed candidate every early candidate starts and no ledger is read. */
+export function lightPassEarlyReviewBatch(
+  reviewCandidates: readonly OpenPrView[],
+  earlyCandidates: readonly OpenPrView[],
+  deps: Pick<SweepDeps, "ledgerPath" | "readLedger" | "now">,
+): OpenPrView[] {
+  const early = new Set(earlyCandidates.map((pr) => pr.prNumber));
+  const delayed = reviewCandidates.filter((pr) => !early.has(pr.prNumber));
+  if (delayed.length === 0) return [...earlyCandidates];
+  const queuedAt = lightPassReviewQueuedAt(deps);
+  const inQueueOrder = (prs: readonly OpenPrView[]): OpenPrView[] =>
+    orderPendingReviewsNeedsPersonLast(prs.map((pr) => ({ pr })), undefined, queuedAt).map(({ pr }) => pr);
+  const oldestDelayed = inQueueOrder(delayed)[0]!;
+  return earlyCandidates.filter((pr) => inQueueOrder([pr, oldestDelayed])[0] === pr);
+}
+
 /** W1-T14073 — A RE-ENTERED REVIEW INPUT QUEUES FROM WHEN IT BECAME ELIGIBLE, NOT FROM ITS PR'S AGE. Generalizes
  *  W1-T12534's absent-repush map, folded from the ledger view the pass already holds (no second scan). A head
  *  absent-repush minted keeps W1-T12534's key (its first eligible ts, else its mint ts). A PR that was eligible at an
