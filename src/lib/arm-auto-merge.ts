@@ -27,7 +27,7 @@ import { registerProcessExitLatch } from "./process-exit-latches.js";
 import { systemClock, type Clock } from "./clock.js";
 import { RmdError } from "./errors.js";
 import { securityMergeHead, securityMergeHeadAsync, securityMetadataGhArgs } from "./security-merge-admission.js";
-import { observeSelectedMode, type SelectedModeQualification } from "./instance-mode.js";
+import { instanceMode, observeSelectedMode, readInstanceRegistryText, type SelectedModeQualification } from "./instance-mode.js";
 import { createHash } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
@@ -579,6 +579,10 @@ type MaybeAsync<T, A extends boolean> = A extends true ? T | Promise<T> : T;
  *  calls and retry sleep may be awaited by {@link attemptArmAsync}. */
 export interface ArmDeps<A extends boolean = false> {
   contributorAdmission?: (prUrl: string, expectedHead?: string) => MaybeAsync<void, A>;
+  /** W1-T13698 — OPTIONAL. True when the running instance's registry declares this PR's repository `shadow`:
+   *  a shadow instance arms and merges nothing, so every arm path refuses (`shadow-refused`) before its first
+   *  gh call. Absent keeps every arm path byte-for-byte; {@link realArmDeps} reads the registry. */
+  shadowInstance?: (prUrl: string) => MaybeAsync<boolean, A>;
   /** W1-T2347 — see {@link REAL_ARM_DEPS_MARKER}'s own doc. Optional and never set by a fixture. */
   [REAL_ARM_DEPS_MARKER]?: true;
   /** The PR's live head sha — read over REST, never `gh --json`. */
@@ -656,6 +660,7 @@ export function realArmDeps(
   return {
     contributorAdmission: (prUrl, head) => runStepsSync(armAdmissionSteps(prUrl, head, loadConfigImpl,
       (path) => readAdmissionRest(path, runGh))),
+    shadowInstance: (prUrl) => runningInstanceIsShadow(prUrl, loadConfigImpl),
     [REAL_ARM_DEPS_MARKER]: true,
     headSha: (prUrl) => readHeadShaRest(prUrl),
     ledgerLines: () => {
@@ -787,6 +792,45 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig,
       }, prUrl);
     },
   };
+}
+
+/**
+ * W1-T13698 — does the running instance's registry declare `prUrl`'s repository `shadow`? The sweep's
+ * `instanceMode(owner/repo, registry)` read, made at the arm's own choke point so EVERY lane (operator, review,
+ * plan, approve, triage, retro, sweep) is refused alike. A PR URL that names no repository, an unreadable config
+ * or a missing/malformed registry is live: unknown text never invents a shadow declaration (instance-mode.ts).
+ */
+function runningInstanceIsShadow(prUrl: string, getConfig: typeof loadConfig): boolean {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target) return false;
+  let root: string | undefined;
+  try {
+    root = getConfig().root;
+  } catch (e) {
+    // No config means no registry path to read: the documented absent-mode policy (live) applies; the selected
+    // runtime registry, which needs no root, is still consulted by instanceMode below.
+    void e;
+    root = undefined;
+  }
+  return instanceMode(`${target.owner}/${target.repo}`, root === undefined ? undefined : readInstanceRegistryText(root)) === "shadow";
+}
+
+/** W1-T13698 — the shadow refusal both arm entry points run FIRST: no read, no ledger lookup, no write. */
+function* shadowInstanceRefusalSteps(
+  prUrl: string,
+  deps: Pick<ArmDeps<true>, "say"> & Partial<Pick<ArmDeps<true>, "shadowInstance">>,
+): Steps<ArmAttemptResult | undefined> {
+  if (!deps.shadowInstance) return undefined;
+  let shadow: boolean;
+  try {
+    shadow = (yield* step(() => deps.shadowInstance!(prUrl))) === true;
+  } catch (e) {
+    deps.say(`automerge.shadow_mode_unreadable (W1-T13698): ${String((e as Error)?.message ?? e)} — treated as live: ${prUrl}`);
+    return undefined;
+  }
+  if (!shadow) return undefined;
+  deps.say(`automerge.shadow_refused (W1-T13698): a shadow instance arms and merges nothing — arm and direct merge withheld: ${prUrl}`);
+  return { outcome: "shadow-refused" };
 }
 
 function* armAdmissionSteps(prUrl: string, head: string | undefined, getConfig: typeof loadConfig, read: AdmissionRead): Steps<void> {
@@ -1197,9 +1241,12 @@ export async function armAutoMergeDetailedAsync(
 function* armDetailedSteps(
   prUrl: string,
   taskId: string | undefined,
-  deps: Pick<ArmDeps<true>, "headSha" | "ledgerLines"> & Parameters<typeof attemptArmSteps>[1],
+  deps: Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "say"> & Parameters<typeof attemptArmSteps>[1],
   isDraft?: boolean,
 ): Steps<ArmAttemptResult> {
+  // W1-T13698: before the head read, so a shadow instance spends no gh call on an arm it will refuse.
+  const shadowRefused = yield* shadowInstanceRefusalSteps(prUrl, deps);
+  if (shadowRefused) return shadowRefused;
   if (!taskId) {
     deps.say(`automerge.ledger_refused (W1-T230): no task id resolvable for this PR — arming withheld: ${prUrl}`);
     return { outcome: "no-task-id" };
@@ -1616,7 +1663,7 @@ function operatorHoldRefusal(
 export function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps<false>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">>,
   priorHeadSha?: string,
   // W1-T3551: read off `OpenPrView.isDraft` (POSITIVE match only — `undefined`/`false` both fall
   // through unchanged). This is the ONE shared call site {@link armAutoMergeDetailed} (ledger-gated
@@ -1633,7 +1680,7 @@ export function attemptArm(
 export function attemptArmAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Promise<ArmAttemptResult> {
@@ -1643,11 +1690,15 @@ export function attemptArmAsync(
 function* attemptArmSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "checksGreenReviewed" | "readChecksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "checksGreenReviewed" | "readChecksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Steps<ArmAttemptResult> {
   deps = withSubmittedMark(deps);
+  // SHADOW (W1-T13698): checked before everything, the draft read included — every arm and direct-merge write below
+  // sits behind this, so a ratchet-judge decision, a quota fallback or a clean-status merge never reaches a write.
+  const shadowRefused = yield* shadowInstanceRefusalSteps(prUrl, deps);
+  if (shadowRefused) return shadowRefused;
   // DRAFT (W1-T3551): checked FIRST, before the ledger-hold read, so a draft never depends on
   // ledger I/O to stay unarmed. GitHub refuses `gh pr merge --auto` (and any direct-merge
   // fallback) on a draft PR — this is a GitHub-owned signal, never a ledger row.
@@ -2318,7 +2369,7 @@ function* attemptQueueArmSteps(
 export function armAutoMergeAtOpen(
   prUrl: string,
   deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "sleepSync" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>) = realArmDeps(),
+    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "sleepSync" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">>) = realArmDeps(),
   irreversible = false,
   // W1-T3551: threaded straight through to {@link attemptArm}'s shared gate — see that function's
   // own doc. Defaults false, so every existing call site (which predates this parameter and never
@@ -2334,7 +2385,7 @@ export function armAutoMergeAtOpen(
 export async function armAutoMergeAtOpenAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">> = realArmDepsAsync(),
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">> = realArmDepsAsync(),
   irreversible = false,
   isDraft = false,
 ): Promise<ArmOutcome> {
@@ -2345,7 +2396,7 @@ export async function armAutoMergeAtOpenAsync(
 function* armAtOpenSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">>,
   irreversible: boolean,
   isDraft: boolean,
 ): Steps<ArmOutcome> {
@@ -2485,6 +2536,10 @@ export function logArmAttribution(
         ...(directMergePreflight.mainChangedOwnFiles !== undefined ? { main_changed_own_files: directMergePreflight.mainChangedOwnFiles } : {}),
       }
     : {};
+  // W1-T13698: the sweep's own ledger step, written for every lane that reaches this one attribution site.
+  if (outcome === "shadow-refused") {
+    log("automerge.shadow_refused", { task_id: taskId, pr_number: prNumber, pr_url: prUrl, lane, reason: "shadow instance cannot arm or merge" });
+  }
   log(armOutcomeArmed(outcome) ? "automerge.armed" : armSkipStepName(outcome), {
     ...extra,
     ...ghFields,
@@ -2546,9 +2601,9 @@ type VerdictArmCtx = {
   repoMode?: "shadow" | "live";
 };
 
-/** W1-T13698: the sweep's shadow refusal, on the review lane's arm too — the row, then the `shadow-refused` outcome. */
-function shadowArmRefusal(ctx: VerdictArmCtx): ArmOutcome {
-  ctx.log("automerge.shadow_refused", { pr_url: ctx.prUrl, task_id: ctx.taskId, reason: "shadow instance cannot arm or merge" });
+/** W1-T13698: the review lane's shadow refusal, before any effector. {@link logArmAttribution} writes the
+ *  `automerge.shadow_refused` row (PR and lane) when {@link logVerdictArmResult} ledgers this outcome. */
+function shadowArmRefusal(): ArmOutcome {
   return "shadow-refused";
 }
 
@@ -2643,7 +2698,7 @@ export function armIfVerdictPermits(
   if (gate === "skipped") return "skipped";
   // W1-T230's own gate still applies inside: it re-reads the live head and refuses a stale
   // verdict. Its OUTCOME is read (impl-BC) rather than discarded, so a refusal is visible.
-  if (ctx.repoMode === "shadow") return logVerdictArmResult(ctx, gate.reason, shadowArmRefusal(ctx));
+  if (ctx.repoMode === "shadow") return logVerdictArmResult(ctx, gate.reason, shadowArmRefusal());
   return logVerdictArmResult(ctx, gate.reason, (deps.arm ?? armAutoMergeDetailed)(ctx.prUrl, ctx.taskId));
 }
 
@@ -2657,7 +2712,7 @@ export async function armIfVerdictPermitsAsync(
 ): Promise<ArmOutcome | "skipped"> {
   const gate = verdictArmGate(verdict, ctx, deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)));
   if (gate === "skipped") return "skipped";
-  if (ctx.repoMode === "shadow") return logVerdictArmResult(ctx, gate.reason, shadowArmRefusal(ctx));
+  if (ctx.repoMode === "shadow") return logVerdictArmResult(ctx, gate.reason, shadowArmRefusal());
   const arm = deps.arm ?? ((prUrl: string, taskId: string) => armAutoMergeDetailedAsync(prUrl, taskId, verdictArmDeps(ctx)));
   return logVerdictArmResult(ctx, gate.reason, await arm(ctx.prUrl, ctx.taskId));
 }
