@@ -1,5 +1,5 @@
 {
-  "_comment": "W1-T14149: initial debt measured on merge-base 4c4187268e31c882f5463dd3477fe64c473f2091 (2331 emitted, 949 read outside their writers, 1382 write-only). \"writeOnly\" is pre-existing debt and only shrinks. Remove an entry when it gains a reader or stops being emitted. A new write-only step needs an external reader or a \"recordOnly\" entry with a non-empty reason.",
+  "_comment": "W1-T14149: initial debt measured on merge-base 2c579dc733421836fd1193d2c8a64bd04062d36d (2335 emitted, 953 read outside their writers, 1382 write-only). \"writeOnly\" is pre-existing debt and only shrinks. Remove an entry when it gains a reader or stops being emitted. A new write-only step needs an external reader or a \"recordOnly\" entry with a non-empty reason.",
   "writeOnly": [
     "acceptance.fallback.diff_anchor_unavailable",
     "acceptance.repair.error",
@@ -394,6 +394,7 @@
     "focus.exited",
     "focus.flag_failed",
     "focus.released",
+    "focus.rounds_unread",
     "followup.filing_gate_error",
     "followup.head_unreadable",
     "followup.retired",
@@ -1111,7 +1112,6 @@
     "sweep.fix.synthetic_task",
     "sweep.fix.uncreditable_head",
     "sweep.fix.uncreditable_head_escalated",
-    "sweep.fix_capacity",
     "sweep.fold_debt_pull.error",
     "sweep.full_prelude",
     "sweep.garden_record.read_failed",

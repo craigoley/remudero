@@ -842,7 +842,7 @@ const CRUDE_LITERAL_FORMS = [
 const CRUDE_CONSTANT_FORMS = [/\bstep\s*:\s*([A-Z][A-Z0-9_]*)\b(?!\s*[.[(])/g, /(?<!console\.)\blog\(\s*([A-Z][A-Z0-9_]*)\b(?!\s*[.[(])/g];
 const CRUDE_DECLARATION = new RegExp(`\\bconst\\s+([A-Z][A-Z0-9_]*)\\s*(?::[^=\\n]+)?=\\s*${QUOTE}(${STEP_TEXT})${QUOTE}`, "g");
 /**
- * The unexplained difference measured on 4c4187268 (this branch's merge base; the branch changes no
+ * The unexplained difference measured on 2c579dc73 (this branch's merge base; the branch changes no
  * emit in src/), 24 entries, none a ledger emit: run-task.ts's run phase table off any row (12,
  * `{ step: "fix_rung", owner }`), plan-task-move.ts's printed actions (5, `copy` ... `unknown`),
  * review.ts's `view` exit, two type annotations (`commitlint`, `outside`), a reader query for a step
