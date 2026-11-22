@@ -25122,7 +25122,8 @@ export async function runSweep(
         }));
       }
       const holder = detachedFixHolder(heldKey, nowMs) ?? fixChildHolder(heldKey, nowMs, child);
-      return { ok: false, holder, reason: holder?.reason ?? `duplicate fix-dispatch key (${heldKey}) already claimed this pass` };
+      return { ok: false, holder, reason: holder?.reason ??
+        `duplicate fix-dispatch key (${heldKey}) already claimed this pass — a concurrent sweep is already dispatching this PR's fix rung` };
     }
     const freshTally = fixRoundTally(freshLines, fixTaskId, pr.headSha);
     // W1-T5542 + W1-T7096: a stale view reaching the claim at (or past) the former ceiling, or on a

@@ -144,11 +144,14 @@ test("W1-T13287 criterion 4: disposal distinguishes a detached holder from a bar
     await inlineEntered.promise;
     await f.pass(18857);
     const row = f.disposed();
-    assert.equal(row?.stand_down_reason, `duplicate fix-dispatch key (${fixKey}) already claimed this pass`);
+    assert.equal(row?.stand_down_reason,
+      `duplicate fix-dispatch key (${fixKey}) already claimed this pass — a concurrent sweep is already dispatching this PR's fix rung`);
     assert.deepEqual(Object.keys(row ?? {}).filter(key => key.startsWith("in_flight_")), []);
     assert.deepEqual(f.rounds(), ["fix.dispatch", "fix.dispatch"]);
   } finally {
     inlineRound.resolve();
     await first;
   }
+  await f.pass(18857);
+  assert.deepEqual(f.rounds(), ["fix.dispatch", "fix.dispatch", "fix.dispatch"]);
 });
