@@ -60,7 +60,7 @@ import { gitOrThrow } from "./lib/git.mjs";
 import { newTestCoverage, renderCoverageSummary } from "./coverage-merge-ratchet.mjs";
 import { topLevelTapFailures } from "../src/lib/base-reproduction.ts";
 import { closeJudgedRun, judgedNodeTestArgs, POOL_ISOLATION_FLAG, prepareJudgedRun, testFilesInArgv, unreportedFilesIn } from "./pure-test-pool.mjs";
-import { boundedNodeTestArgs, COVERAGE_HANG_MANIFEST_ENV, withCoverageHangBound } from "./test-tier-manifest.mjs";
+import { boundedNodeTestArgs, COVERAGE_HANG_MANIFEST_ENV, NODE_EXIT_DEADLOCK_WORKAROUND_ARGS, withCoverageHangBound } from "./test-tier-manifest.mjs";
 
 /**
  * W1-T2715 — A TEST THAT WRITES INTO THE TRACKED TREE IS OBSERVED BY EVERY OTHER WORKER, and the
@@ -441,6 +441,15 @@ function coverageOptions(args) {
   };
 }
 
+/** W1-T14306: the argv of the `--rebuild-coverage` repair child, built in one place for both repair sites. The
+ *  child builds the whole coverage summary and then exits through process.exit, the shape that can deadlock on
+ *  Node 24.22.3 while a concurrent Sparkplug or Maglev compile job waits for a GC (nodejs/node#64274), so it runs
+ *  with the shard runner's own NODE_EXIT_DEADLOCK_WORKAROUND_ARGS (#20139). Drop the flags here together with the
+ *  shard runner's, once the pinned Node carries the upstream fix 77fdeb6. */
+export function rebuildCoverageChildArgs(rawDir, args) {
+  return [...NODE_EXIT_DEADLOCK_WORKAROUND_ARGS, "--expose-internals", fileURLToPath(import.meta.url), "--rebuild-coverage", rawDir, ...args];
+}
+
 function rebuildCoverage(rawDir, args) {
   try {
     const { output, ...options } = coverageOptions(args);
@@ -519,7 +528,7 @@ async function recoverEmptyCoverage(treeBefore, first, cmd, args, rawDir) {
   if (dropped.length === 0 || !coverageOptions(args).output) return reportTrackedTreeDirt(treeBefore, first.code);
   const env = coverageChildEnvironment({ ...process.env, NODE_V8_COVERAGE: "" });
   // The rebuild is this script, not a test run, even though the coverage command's own args ride along.
-  const rebuilt = await runChild(process.execPath, ["--expose-internals", fileURLToPath(import.meta.url), "--rebuild-coverage", rawDir, ...args], env);
+  const rebuilt = await runChild(process.execPath, rebuildCoverageChildArgs(rawDir, args), env);
   let code = rebuilt.code;
   if (code === 1) {
     console.log(`FLAKE-RETRY: coverage rebuild failed — retrying the coverage shard once — ${dropped.join(", ")}`);
@@ -605,7 +614,7 @@ async function repairFixtureSourceMaps(firstOutput, args, rawDir) {
       return false;
     }
     for (const script of scripts) dropped.add(script);
-    const rebuilt = await runChild(process.execPath, ["--expose-internals", fileURLToPath(import.meta.url), "--rebuild-coverage", rawDir, ...args], env);
+    const rebuilt = await runChild(process.execPath, rebuildCoverageChildArgs(rawDir, args), env);
     if (rebuilt.code === 0) {
       const line = `FLAKE-RETRY-RECOVERED: dropped the source maps of deleted fixture module(s) outside the tree and rebuilt lcov — ${[...dropped].join(", ")}`;
       console.log(line);
