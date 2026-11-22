@@ -59,6 +59,7 @@ import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
 import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type OpsTaskDispatchRead, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe, type PauseInFlightUnit } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktreesAsync } from "../../lib/review-worktree-reclaim.js";
+import { reapRetiredReviewerTreesAsync } from "../../lib/reviewer-tree-reaper.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
 import { readGhRateLimitBuckets } from "../../lib/daemon-health.js";
 import { defaultListCandidates, defaultReadMarkers, killProcessGroup, sweepOrphanWorkers, workerInstallationScope } from "../../lib/worker-containment.js";
@@ -70,7 +71,7 @@ import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
 import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
 import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
-import { createGhCallPacer, prStateFromRest, singlePrRestArgs } from "../../lib/open-prs-rest.js";
+import { boardPrsRestArgs, createGhCallPacer, prStateFromRest, singlePrRestArgs } from "../../lib/open-prs-rest.js";
 import { buildMainHealthRung } from "../../lib/main-health-rung.js";
 import { ghEscalationAnswerGateway } from "../../lib/escalation-answers.js";
 import { feedbackLandingSweepRungs, type LandingReviewRequest } from "../../lib/feedback-landing.js";
@@ -829,6 +830,26 @@ export async function readPushedRunBranchesOutputAsync(
   }
 }
 
+/** The drain reader's page bound; W1-T9243 owns replacing it. */
+const CLOSED_RUN_BRANCH_PR_MAX_PAGES = 8;
+
+/** W1-T14233: the daemon's closed-PR listing for `readClosedRunBranchPrs`, awaited so the loop never blocks on gh.
+ *  REJECTS on any failed or malformed page, so the daemon ledgers it and every ref keeps blocking. */
+export async function readClosedRunBranchPrsOutputAsync(
+  owner: string, repo: string, fetch: (args: string[]) => Promise<unknown> = (args) => ghJsonAsync(args),
+): Promise<string> {
+  const lines: string[] = [];
+  for (let page = 1; page <= CLOSED_RUN_BRANCH_PR_MAX_PAGES; page++) {
+    const rows = await fetch(boardPrsRestArgs(owner, repo, "closed", page, 100));
+    if (!Array.isArray(rows)) throw new Error(`closed pull-request page ${page} of ${owner}/${repo} is not a list`);
+    for (const row of rows as Array<{ head?: { ref?: string }; merged_at?: string | null }>) {
+      if (row.head?.ref) lines.push(`${row.head.ref}\t${row.merged_at == null}`);
+    }
+    if (rows.length < 100) break;
+  }
+  return lines.join("\n");
+}
+
 /** Render a {@link DaemonSummary} — "what happened, or is happening" — at a glance. */
 function renderDaemonSummary(s: DaemonSummary): string {
   return [
@@ -1097,6 +1118,8 @@ export async function daemonCommand(
      *  self-target only) is exercised without spawning a real, unbounded daemon. Production never
      *  passes this. */
     runDaemon?: typeof runDaemon;
+    /** W1-T14233: the transport under the closed-PR reader; production uses the async gh transport. */
+    closedRunBranchPrFetch?: (args: string[]) => Promise<unknown>;
     runTask?: DaemonCommandHost["runTask"];
     readRunChildMode?: () => RunChildMode;
     /** Stand-in for `sweep.observedOverlap.mode` (policy.ts); absent reads the installation's policy. */
@@ -2407,6 +2430,8 @@ export async function daemonCommand(
         // daemon awaits it, at each tick and lane refill, and ledgers the failure.
         // W1-T10897: the TARGET repo's origin — the engine checkout's lists only the engine's run branches.
         readPushedRunBranches: () => readPushedRunBranchesOutputAsync(targetCheckoutRoot),
+        // W1-T14233: without it the W1-T1207 closed-unmerged exemption never applies in the daemon.
+        readClosedRunBranchPrs: () => readClosedRunBranchPrsOutputAsync(target.owner, target.repo, deps.closedRunBranchPrFetch),
         readOrphanRunBranchEvidence: orphanRunBranchEvidenceReader(
           join(config.root, "state", automaticBranchReapStateFileName(target.repo)),
           () => liveInflightRuns(inflightDir).map((r) => r.taskId),
@@ -2579,7 +2604,10 @@ export async function daemonCommand(
         // W1-T3378: the daemon core owns the tick; this command owns the real filesystem/git
         // effect. Supplying the closure here makes the reviewed `review-PR*` reclaimer reachable
         // on every live daemon rather than leaving an optional DaemonDeps hook dead.
-        sweepStrandedReviewWorktrees: async () => { await sweepStrandedReviewWorktreesAsync(config, log); },
+        sweepStrandedReviewWorktrees: async () => {
+          await sweepStrandedReviewWorktreesAsync(config, log);
+          await reapRetiredReviewerTreesAsync(config, log); // W1-T14148: retired engines/worktrees reviewer trees
+        },
         // W1-T3528: same reasoning, different unit — this one frees regenerable build output
         // inside checkouts that must be kept, which every whole-tree rung is right to refuse.
         sweepReclaimableArtifacts: () => sweepReclaimableArtifacts(config, log),

@@ -30,6 +30,7 @@
     - test/npm-run-typecheck-is-incremental-and-slotted.test.ts
     - test/a-tight-typecheck-runs-fewer-checkers-with-the-same-diagnostics.test.ts
     - test/ci/gates/every-typecheck-spawn-runs-under-the-go-memory-limit.test.ts
+    - "src/lib/test-slot.ts"
   status: queued
   attempts: 0
   acceptance:

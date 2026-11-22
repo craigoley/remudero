@@ -721,7 +721,8 @@ export async function resolveFixProgress(input: FixProgressInput, ledger: readon
   return { decision, receipt: { step: "fix.progress_judged", input_key: inputKey, ...witness } };
 }
 
-/** W1-T13865: a NEEDS_SCOPE or FLAKE round waits on an input; the next round at the same head waits for it too. */
+/** W1-T13865: a NEEDS_SCOPE or FLAKE round waits on an input; the next round at the same head waits for it too.
+ *  W1-T14201: a FLAKE round whose flake_claim is refuted or repeated waits on nothing, so it holds nothing. */
 export interface PriorRoundHold { hold: "NEEDS_SCOPE" | "FLAKE"; since: string; roundId?: string; contractRevision?: string; reason: string;
   /** A merged-amendment receipt newer than the ruling that no merge time dates: it releases nothing (fail closed). */
   undatedAmendmentReceipt?: true }
@@ -767,6 +768,7 @@ export function priorRoundHold(ledger: readonly Record<string, unknown>[], facts
   const roundId = stringValue(done.round_id);
   const head = facts.headSha.slice(0, 7);
   if (outcome === "FLAKE") {
+    if (done.flake_claim === "refuted" || done.flake_claim === "repeated") return undefined;
     if (facts.checkCompletions?.some(check => after(check.completedAt))) return undefined;
     return { hold: "FLAKE", since, roundId, reason: `the last fix round at ${head} ruled FLAKE at ${since} and no required ` +
       "check has completed on this head since — no fix round until one does" };
