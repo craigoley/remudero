@@ -60,6 +60,8 @@ const CLEAN_FRAGMENT = `
   attempts: 0
   origin: architect
   files: [src/lib/plan.ts]
+  design: |
+    NO-INVARIANTS: the fixture drafts one new candidate task only; no prior behavior changes.
   acceptance:
     - claim: "the candidate does the thing"
       proof: "unit test: fixture X -> observable Y"
@@ -76,6 +78,8 @@ const DEP_UNMET_FRAGMENT = `
   status: queued
   attempts: 0
   origin: architect
+  design: |
+    NO-INVARIANTS: the fixture drafts one new candidate task only; no prior behavior changes.
   acceptance:
     - claim: "the candidate does the thing"
       proof: "unit test: fixture X -> observable Y"

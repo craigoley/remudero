@@ -168,7 +168,7 @@ function approveThroughShardWriter(fragmentYaml: string) {
 test("an approved draft with a shared file-path proof files one title proof per criterion", () => {
   const fragment = [
     "- id: W1-T900", "  title: proof repair", "  repo: remudero", "  type: implement",
-    "  origin: architect", "  files: [src/lib/inbox.ts]", "  acceptance:",
+    "  origin: architect", "  design: |", "    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.", "  files: [src/lib/inbox.ts]", "  acceptance:",
     '    - claim: "first action works"', '      proof: "unit test: test/inbox-approve.test.ts"',
     '    - claim: "second action works"', '      proof: "unit test: test/inbox-approve.test.ts"', "",
   ].join("\n");
@@ -184,7 +184,7 @@ test("an approved draft with a shared file-path proof files one title proof per 
 test("an approved draft below the sizing bar files at risk high with a declared span", () => {
   const fragment = [
     "- id: W1-T901", "  title: broad task", "  repo: remudero", "  type: implement",
-    "  origin: architect", "  risk: medium", "  files: [src/lib/inbox.ts, src/lib/plan.ts]",
+    "  origin: architect", "  design: |", "    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.", "  risk: medium", "  files: [src/lib/inbox.ts, src/lib/plan.ts]",
     "  acceptance:", '    - claim: "the broad task works"', '      proof: "unit test: the broad task works"', "",
   ].join("\n");
   const approval = approveThroughShardWriter(fragment);
@@ -202,9 +202,9 @@ test("an approved draft below the sizing bar files at risk high with a declared 
 test("an approved draft with any other lint violation is refused before a PR opens", () => {
   const fragment = [
     "- id: W1-T901", "  title: valid sibling", "  repo: remudero", "  type: implement",
-    "  origin: architect", "  files: [src/lib/inbox.ts]",
+    "  origin: architect", "  design: |", "    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.", "  files: [src/lib/inbox.ts]",
     "- id: W1-T902", "  title: invalid proof", "  repo: remudero", "  type: implement",
-    "  origin: architect", "  files: [src/lib/inbox.ts]", "  acceptance:",
+    "  origin: architect", "  design: |", "    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.", "  files: [src/lib/inbox.ts]", "  acceptance:",
     '    - claim: "the action works"', '      proof: "some prose without a dialect"', "",
   ].join("\n");
   const approval = approveThroughShardWriter(fragment);
@@ -214,7 +214,7 @@ test("an approved draft with any other lint violation is refused before a PR ope
 
   const missingBand = approveThroughShardWriter([
     "- id: W1-T903", "  title: high risk without meaning", "  repo: remudero", "  type: implement",
-    "  origin: architect", "  risk: high", "  files: [src/lib/inbox.ts]", "",
+    "  origin: architect", "  design: |", "    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.", "  risk: high", "  files: [src/lib/inbox.ts]", "",
   ].join("\n"));
   // W1-T8714: an already-high draft with no band is repaired to band_meaning: span at approve, so it is refused only
   // for the violation it really carries (no acceptance criterion), never for the band.
@@ -227,7 +227,7 @@ test("an approved draft whose sizing repair leaves unparseable YAML is refused a
   // so the re-parse after repair throws (duplicate map key) and must refuse, not file a broken shard.
   const approval = approveThroughShardWriter([
     "- id: W1-T904", "  title: broad task with a meaning but no risk", "  repo: remudero", "  type: implement",
-    "  origin: architect", "  band_meaning: span", "  files: [src/lib/inbox.ts, src/lib/plan.ts]", "",
+    "  origin: architect", "  design: |", "    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.", "  band_meaning: span", "  files: [src/lib/inbox.ts, src/lib/plan.ts]", "",
   ].join("\n"));
   assert.throws(() => approval.run(), /refusing to file .* draft-parse: .*unique/i);
   assert.equal(approval.prCalls(), 0);
@@ -677,7 +677,7 @@ test("integration: two ratification PRs filed together share no file — two app
     const branch = `run-approve-${proposalId}`;
     const payload: RatificationPayload = {
       proposalId,
-      fragmentYaml: `- id: ${taskId}\n  title: ${title}\n  repo: remudero\n  type: implement\n  origin: architect\n  files: [src/lib/inbox.ts]\n  acceptance:\n    - claim: "${title} works"\n      proof: "unit test: ${title} works"\n`,
+      fragmentYaml: `- id: ${taskId}\n  title: ${title}\n  repo: remudero\n  type: implement\n  origin: architect\n  files: [src/lib/inbox.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n  acceptance:\n    - claim: "${title} works"\n      proof: "unit test: ${title} works"\n`,
       stampLine: `- ${proposalId} (codeql) — RATIFIED 2026-09-23 -> ${taskId}.`,
     };
     const draft: DraftedCandidate = { ...payload, anchorFingerprint: "landed::MASTER-PLAN.md" };
