@@ -27,6 +27,7 @@
     - test/prompt-render.test.ts
     - test/recon-names-its-task.test.ts
     - test/recon-gaps-relayed.test.ts
+    - test/run-task.test.ts # amended 2026-11-22: its recon-prompt wiring pin matched the literal 'prompt: renderReconPrompt(', which the prerequisite-outcome wrapper changes; it still requires the render call after the recon worker
   rationale: "OBSERVED at 1438f25d780f8119342dbc36dc8715f9c6670e26: scheduler prerequisites gate readiness, while renderReconPrompt and renderImplementPromptWithParts receive the task context but do not hydrate depends_on with bounded verified predecessor outcomes. Dex exposes parent and blocker context/results to a new agent. Remudero already has continuation/session recovery, task-card/case-file/trace surfaces and provider handoffs; a new resume capsule or task store would duplicate them. The missing seam is input to the real recon and implementation prompt calls in run-task-verb.ts. Sources: https://dex.rip/skills ; https://dex.rip/guide ; https://github.com/craigoley/remudero/blob/1438f25d780f8119342dbc36dc8715f9c6670e26/src/lib/prompt-render.ts ; https://github.com/craigoley/remudero/blob/1438f25d780f8119342dbc36dc8715f9c6670e26/src/cli/commands/run-task-verb.ts . Reuse canonical merge evidence and committed snapshots, not advisory Dex blockers or plan status labels. W1-T9785 owns
     the implement prompt base-check instruction. This follow-up adds predecessor PR evidence and unknown/base-applicability metadata in recon and implement preparation, without changing that base-check instruction."
   design: >-
