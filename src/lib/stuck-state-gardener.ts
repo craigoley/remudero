@@ -29,7 +29,7 @@ import { execFileRouted } from "./spawn-helper.js";
 import { ledgerRowsFor } from "./ledger-union.js";
 import { defaultOpsCatalogApi, readBranchSha, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
 import { planDestinationRepository } from "./plan-destination.js";
-import { PlanError, RELEASE_LEDGER_STEP, type Plan, type Task } from "./plan.js";
+import { MOVED_FROM_VALUE, PlanError, RELEASE_LEDGER_STEP, type Plan, type Task } from "./plan.js";
 import { composeSecondaryPlan, compositionHoldEdge, findApproveReleasePlan, findReleasePlanInCatalogs, loadLocalReleasePlan, loadPublicPlanWithDeferredDependencies, publicReleaseDependencyError, readReleasePublicPlan, type TaskLookupOptions, type TaskReleasePlan } from "./task-lookup.js";
 
 type Row = Record<string, unknown>;
@@ -417,21 +417,26 @@ async function stuckStatePass(ports: StuckStatePorts): Promise<void> {
 
 const NO_KEYS: ReadonlySet<string> = new Set();
 /**
- * A record with keys sorted, without the top-level keys `drop` names (the lookup's provenance stamps). W1-T13785: only
- * the record's own top level carries those stamps; a nested field of the same name (principles.sourcePath) is the record.
+ * A record with keys sorted, without the keys `drop` names (the lookup's provenance stamps). W1-T13785: `deep` drops them
+ * at every depth (the digest the ops refusal rows already carry); otherwise only the record's own top level carries those
+ * stamps, and a nested field of the same name (principles.sourcePath) is the record.
  */
-function stableRecord(value: unknown, drop: ReadonlySet<string> = NO_KEYS): string {
-  if (Array.isArray(value)) return `[${value.map((item) => stableRecord(item)).join(",")}]`;
+function stableRecord(value: unknown, drop: ReadonlySet<string> = NO_KEYS, deep = false): string {
+  const below = deep ? drop : NO_KEYS;
+  if (Array.isArray(value)) return `[${value.map((item) => stableRecord(item, below, deep)).join(",")}]`;
   if (value !== null && typeof value === "object") {
     const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).filter((k) => record[k] !== undefined && !drop.has(k)).sort().map((k) => `${JSON.stringify(k)}:${stableRecord(record[k])}`).join(",")}}`;
+    return `{${Object.keys(record).filter((k) => record[k] !== undefined && !drop.has(k)).sort().map((k) => `${JSON.stringify(k)}:${stableRecord(record[k], below, deep)}`).join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
 }
 
-/** The ops record's digest: the record as its catalog holds it, keys sorted, without the lookup's provenance stamp. */
+/**
+ * The ops record's digest: the record as its catalog holds it, keys sorted, without any `catalog` key. The deployed
+ * algorithm, kept as it was: refusal rows written before W1-T13785 still digest the same unchanged record.
+ */
 export function opsRecordDigest(task: Task): string {
-  return createHash("sha256").update(stableRecord(task, new Set(["catalog"]))).digest("hex");
+  return createHash("sha256").update(stableRecord(task, new Set(["catalog"]), true)).digest("hex");
 }
 
 const PUBLIC_RECORD_PROVENANCE = new Set(["catalog", "sourcePath"]);
@@ -451,11 +456,13 @@ function publicWorkingTreeDigest(plan: Plan): string {
 type RefusalRow = Row & { run_id: string; task_id: string; step: string };
 
 /**
- * A public record held by its own edge on origin/main stays held in any view. W1-T13785 (operator ruling 2026-11-21):
- * any other hold beside an unloadable ref, a dependant's on a public edge included, is decided by the strict fallback.
+ * A public record held by an edge on a public record of origin/main stays held in any view: its own edge, or the edge of
+ * a public record it depends on (a public dependant inherits that hold, so it is never released beside it). W1-T13785
+ * (operator ruling 2026-11-21): any other hold beside an unloadable ref, an ops dependant's on a public edge included,
+ * is decided by the strict fallback.
  */
 function heldOnItsOwnPublicRecord(taskId: string, release: TaskReleasePlan | undefined, plan?: Plan): boolean {
-  return release?.outcome === "held" && release.hold.task === taskId && plan?.byId.has(taskId) === true;
+  return release?.outcome === "held" && plan?.byId.has(taskId) === true && (release.hold.task === taskId || plan.byId.has(release.hold.task));
 }
 
 /**
@@ -615,6 +622,13 @@ async function readPublicReplay(
     // A recovered ref can still hold the task, while the working tree owns the replay's record and pin.
     const current = publicReplayPlan(taskId, view.plan, read);
     if (current.outcome === "held") return { ...result, release: current };
+  }
+  if (workingTree && view.read === "origin/main" && !view.plan.byId.has(taskId) && read.outcome === "ok") {
+    // A completed move-task: the recovered ref lacks the id and ops holds it with the move's provenance, so ordinary
+    // approve resolves the id as the ops record. A stale working-tree copy is a different record, whose digest never
+    // matches the refused public one. An ops copy without that provenance is a duplicate, which the ref merely predates.
+    const moved = read.plan?.byId.get(taskId);
+    if (moved?.moved_from !== undefined && MOVED_FROM_VALUE.test(moved.moved_from)) return { ...result, digest: opsRecordDigest(moved) };
   }
   return result;
 }

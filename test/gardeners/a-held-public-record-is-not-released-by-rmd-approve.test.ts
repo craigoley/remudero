@@ -856,3 +856,81 @@ test("W1-T13785 criterion 5: an ops task on a public record that origin/main giv
   assert.deepEqual(await ports.probe(item), { present: false, digest: item.digest }, "the probe reads the cause gone");
   assert.equal((await approve("PUB-EDGED"))?.outcome, "held", "the public record whose own edge fails origin/main stays held");
 });
+
+test("W1-T13785 criterion 5: a public dependant of a public record held on a public edge of origin/main stays held beside the unloadable ref, by approve and by the probe", async t => {
+  // Review 2026-11-22: the detached boot plan still has the parent without its public-to-ops edge, so the strict fallback
+  // alone would release the dependant while its parent's own hold is kept. Every public record the composition holds,
+  // whether by its own edge or an inherited one, is held in any view.
+  const bootText = PUBLIC_TEXT + record("PUB-EDGE") + record("PUB-EDGE-CHILD", ["PUB-EDGE"]) + record("PUB-EDGE-GRANDCHILD", ["PUB-EDGE-CHILD"]);
+  const main = publicMain(t, bootText);
+  main.publish(PUBLIC_TEXT + record("PUB-EDGE", ["OPS-GOOD"]) + record("PUB-EDGE-CHILD", ["PUB-EDGE"]) + record("PUB-EDGE-GRANDCHILD", ["PUB-EDGE-CHILD"]));
+  const fx = opsCatalog(t, SOUND_OPS);
+  const opsSnapshot = await fx.read();
+  assert.equal(opsSnapshot.outcome, "ok");
+  const bootPlan = loadPlan(main.planPath);
+  const deferred = await readReleasePublicPlan(main.dir, { keepUnseenDependencies: true });
+  assert.equal(deferred.read, "origin/main");
+  assert.equal(publicRecordDigest(bootPlan.byId.get("PUB-EDGE-CHILD")!), publicRecordDigest(deferred.plan.byId.get("PUB-EDGE-CHILD")!), "the dependant is the same record in both views");
+  const edge = { reason: BAD_EDGE, task: "PUB-EDGE", dependsOn: "OPS-GOOD" };
+  const rows: Row[] = [];
+  const ports = productionStuckStatePorts({
+    stateDir: fx.stateDir, api: fx.api, publicRoot: main.dir, publicMainCommit: main.head, gardenNames: [],
+    log: () => undefined, escalate: () => null, destinationRead: async () => undefined, approve: async () => 1,
+  });
+  for (const id of ["PUB-EDGE", "PUB-EDGE-CHILD", "PUB-EDGE-GRANDCHILD"]) {
+    const before = rows.length;
+    const answer = await readApproveRelease(id, bootPlan, main.dir, { ...fx.lookup, opsSnapshot }, row => rows.push({ ts: iso(NOW), ...row }));
+    assert.deepEqual(answer, { outcome: "held", hold: edge }, `${id} is held by the edge of PUB-EDGE`);
+    const written = rows.slice(before);
+    assert.equal(written.length, 1, `${id}: one approve.release_refused row`);
+    assert.equal(written[0]!.public_record_digest, publicRecordDigest(deferred.plan.byId.get(id)!), `${id}: the row carries the public record's digest`);
+    const [item] = scanStuckState(written).open;
+    assert.deepEqual(await ports.probe(item!), { present: true, digest: publicRecordDigest(deferred.plan.byId.get(id)!), reason: "held" });
+  }
+  assert.equal(await readApproveRelease("PUB-1", bootPlan, main.dir, { ...fx.lookup, opsSnapshot }, () => undefined), undefined, "a sound neighbour keeps its local plan");
+});
+
+/** An ops copy of a record with fields the plan parser keeps, among them a nested `catalog` key. */
+const withNestedCatalog = (id: string, catalog?: string) => {
+  const text = record(id).replace(`  title: held public fixture ${id}\n`,
+    `  title: held public fixture ${id}\n  principles:\n    tdd: strict\n${catalog === undefined ? "" : `    catalog: ${catalog}\n`}`);
+  return parseTasksFromYaml(text, "ops.yaml")[0]!;
+};
+
+test("W1-T13785 criterion 4: the ops record digest is the deployed one, so a refusal row written before this change still matches an unchanged ops record with a nested catalog key", () => {
+  const plain = withNestedCatalog("OPS-NESTED"), nested = withNestedCatalog("OPS-NESTED", "private"), other = withNestedCatalog("OPS-NESTED", "elsewhere");
+  assert.deepEqual((nested.principles as Record<string, unknown>).catalog, "private", "the parser keeps the nested field");
+  assert.equal(opsRecordDigest(nested), opsRecordDigest(plain), "no catalog key, at any depth, is part of the ops digest");
+  assert.equal(opsRecordDigest(nested), opsRecordDigest(other));
+  assert.equal(opsRecordDigest({ ...nested, catalog: "ops" } as typeof nested), opsRecordDigest(plain), "nor is the lookup's top-level stamp");
+  // The public digest keeps the nested field and drops only the lookup's top-level stamps.
+  assert.notEqual(publicRecordDigest(nested), publicRecordDigest(plain), "a nested catalog key is part of a public record");
+  assert.equal(publicRecordDigest({ ...nested, catalog: "public" } as typeof nested), publicRecordDigest(nested));
+  assert.notEqual(publicRecordDigest(plain), opsRecordDigest(plain), "the two catalogs never digest alike");
+});
+
+test("W1-T13785 criterion 4: a working-tree refusal whose id left origin/main for the ops catalog by a completed move reads as record_changed, never as the stale public copy", async t => {
+  const { fx, main, ports, rows, pass, approved } = await refusalFixture(t, "main", record("PUB-1"));
+  main.unpublish();
+  writeFileSync(main.planPath, PUBLIC_TEXT);
+  rows.length = 0;
+  const task = loadPlan(main.planPath).byId.get("PUB-2")!;
+  assert.deepEqual(await readApproveRelease(task.id, loadPlan(main.planPath), main.dir, fx.lookup, row => rows.push({ ts: iso(NOW), ...row })), { outcome: "held", hold: DUP_HOLD });
+  const [item] = scanStuckState(rows).open;
+  assert.equal(item?.digest, publicRecordDigest(task));
+  await pass();
+
+  // origin/main is recovered at a commit that lacks the id, and the ops catalog now holds it as the move's copy.
+  main.restoreBootRef();
+  assert.equal((await readReleasePublicPlan(main.dir)).plan.byId.has(task.id), false);
+  const movedText = record("PUB-2") + `  moved_from: remudero@${"a".repeat(40)}\n` + record("OPS-GOOD");
+  fx.set(movedText);
+  const moved = (await fx.read()).plan!.byId.get(task.id)!;
+  assert.deepEqual(await ports.probe(item!), { present: false, digest: opsRecordDigest(moved) }, "the id resolves as the ops record");
+  assert.deepEqual(await readApproveRelease(task.id, undefined, main.dir, fx.lookup, () => undefined, item!.digest, true),
+    { outcome: "unreadable", reason: "public-replay-record-unverified" }, "the retry refuses the stale public copy");
+  await pass();
+  await pass();
+  assert.deepEqual(approved, [], "the stale public copy is never released on the operator's behalf");
+  assert.deepEqual(steps(rows, "stuck_state.record_changed").map(row => [row.recorded_digest, row.current_digest]), [[item!.digest, opsRecordDigest(moved)]]);
+});
