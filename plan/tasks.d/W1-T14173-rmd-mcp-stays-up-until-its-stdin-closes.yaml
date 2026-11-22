@@ -18,7 +18,7 @@
     - test/rmd-mcp-stays-up-until-its-stdin-closes.test.ts
     - test/fixtures/operator-mcp-cli-entry.ts
     - test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:mcp-lives-until-stdin-ends — operatorMcpCommand with injected stdin and stdout streams (PassThrough) and a fixture service-tokens.json returns a promise that is still pending after it has answered an initialize request. It resolves to 0 only after stdin ends, and it closes the server before it resolves"

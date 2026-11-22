@@ -90,6 +90,7 @@
     "comment-load-signal": "node scripts/comment-load-ratchet.mjs --no-record",
     "comment-load": "node scripts/comment-load-ratchet.mjs --print",
     "console-parity": "node --import tsx scripts/console-parity-ratchet.mjs",
+    "write-only-ledger-step": "node scripts/write-only-ledger-step-ratchet.mjs",
     "census:bound-kind": "node scripts/native-test-run.mjs --test --test-reporter=tap --import tsx --import ./test/setup/tmp-hygiene.ts test/bound-kind-declared.test.ts",
     "census:ledger-literal": "node scripts/native-test-run.mjs --test --test-reporter=tap --import tsx --import ./test/setup/tmp-hygiene.ts test/ledger-literal-census.test.ts",
     "census:catch-erasure": "node scripts/native-test-run.mjs --test --test-reporter=tap --import tsx --import ./test/setup/tmp-hygiene.ts test/catch-erasure-ratchet.test.ts",

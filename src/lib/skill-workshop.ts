@@ -539,8 +539,9 @@ function skillProcedureSteps(markdown: string, descriptions: readonly string[]):
 
 const SIGNAL_TABLE_STEP_LINES: ReadonlySet<string> = new Set(Object.values(PROCEDURAL_STEP_TEXT));
 
-/** W1-T13858: the #7833 whole-draft check, beside the W1-T4283 per-line check. */
-function outcomeOnlyDraftRefusal(markdown: string): string | undefined {
+/** W1-T13858: the #7833 whole-draft check, beside the W1-T4283 per-line check. Pure over the stored markdown:
+ *  {@link stageSkillDraft} applies it before staging and the fleet's auto eval (W1-T13861) before it spends. */
+export function outcomeOnlyDraftRefusal(markdown: string): string | undefined {
   const steps = procedureStepLines(markdown);
   if (steps.length === 0 || !steps.every((line) => SIGNAL_TABLE_STEP_LINES.has(line))) return undefined;
   return "outcome-only: every Procedure step restates the signal the runs were mined on, so the draft names no step a worker could take";
@@ -554,7 +555,7 @@ function storedSkillSha256(proposal: Proposal): string {
 }
 
 /** True when the workshop already closed this entry's stored text. An operator restore keeps the record. */
-function workshopClosedSkillDraft(proposal: Proposal): boolean {
+export function workshopClosedSkillDraft(proposal: Proposal): boolean {
   return proposal.skillDraftClose?.skillSha256 === storedSkillSha256(proposal);
 }
 
