@@ -730,11 +730,13 @@ test("W1-T12143 criterion 2: a block-mapping routes row is edited as one exact e
   assert.deepEqual(loadMounts(join(h.root, MOUNTS)).routes.diagnose!.high!.src, { ...before, provider: "claude" }, "the row, with its provider");
   assert.ok(!h.table().includes(DIAGNOSE_BLOCK) && h.table().split("\n").filter((l) => l === diagnoseFlow("claude")).length === 1);
 
-  // A blank line after the block ends it; a comment inside it, or a quoted value, leaves it alone and named.
+  // A blank line after the block ends it; a comment or a blank line inside it, or a quoted value, leaves it named.
   const variants: Array<[string, string, boolean]> = [
     ["a trailing blank line", TABLE.replace(`${DIAGNOSE_BLOCK}\n  fix:`, `${DIAGNOSE_BLOCK}\n\n  fix:`), true],
     ["a comment inside", TABLE.replace("        model: sonnet\n        effort: high\n        max_turns: 400\n        context_budget: 180000",
       "        model: sonnet\n        # measured on diagnose work\n        effort: high\n        max_turns: 400\n        context_budget: 180000"), false],
+    ["a blank line inside", TABLE.replace("        effort: high\n        max_turns: 400\n        context_budget: 180000",
+      "        effort: high\n\n        max_turns: 400\n        context_budget: 180000"), false],
     ["a quoted value", TABLE.replace("        model: sonnet\n        effort: high\n        max_turns: 400\n        context_budget: 180000",
       "        model: \"sonnet\"\n        effort: high\n        max_turns: 400\n        context_budget: 180000"), false],
   ];
