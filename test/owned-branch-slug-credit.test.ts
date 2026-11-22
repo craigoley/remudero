@@ -76,6 +76,10 @@ function deps(github: GitHub, over: Partial<DeriveDeps> = {}): DeriveDeps {
     github,
     readLedger: () => [],
     mergedHeadBranches: () => [],
+    // The credit store is machine-local state too. Its default path sits beside the ledger path, so a run as root
+    // would create /nonexistent/merge-credit.json, and a later test or run would read its credits back as merges.
+    readCreditStore: () => ({}),
+    writeCreditStore: () => {},
     ...over,
   };
 }
