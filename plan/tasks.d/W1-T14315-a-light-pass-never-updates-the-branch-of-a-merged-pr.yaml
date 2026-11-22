@@ -1,0 +1,49 @@
+- id: W1-T14315
+  title: "The light pass's ready-overlap refresh re-reads the PR before it writes, so it never tries to update a PR that already merged"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # the one write of the light pass's refresh slot
+  band_meaning: span
+  origin: "operator-session#automation-root-causes-2026-11-22"
+  plan_refs: [W1-T7214, W1-T10944]
+  files:
+    - src/lib/sweep.ts
+    - test/sweep/a-light-pass-never-updates-a-merged-pr.test.ts
+    - test/a-ready-pr-main-moved-under-is-refreshed-on-the-light-pass.test.ts
+    - test/a-main-merge-refresh-is-taken-only-when-it-is-worth-a-ci-run.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    WHY: the light pass has one refresh slot, and it spends it on PRs that are already merged.
+    OBSERVED 2026-11-20..22 in the core ledger: 52 sweep.update_branch.error rows with source light_pass. I checked 19
+    of them against GitHub, spread over the three days. All 19 PRs had merged before the attempt, by 35 seconds to 8
+    minutes. Examples: #20224 merged 13:25:28Z, attempt 13:28:08Z; #20227 merged 13:38:38Z, attempt 13:39:16Z.
+    CAUSE: the open-PR snapshot is older than the base facts. Once the PR merges, its own files are on main, so
+    ready-overlap reads them as main moving under the PR (matching_base_files is the PR's own task file) and selects
+    it. runLightPassReadyRefresh (src/lib/sweep.ts:29297-29372) writes without reading the PR again. W1-T10944 fixed
+    this class for another sweep action.
+  design: |
+    INVARIANT open-heads-still-refresh: an open PR at the selected head is refreshed exactly as on origin/main, and an unreadable live state keeps today's behaviour.
+    1. runLightPassReadyRefresh reads the selected PR's live state through the sweep's existing readLiveState port
+       after selection and before the attempted row.
+    2. A merged or closed PR, or a moved head, writes one sweep.update_branch.skipped_not_open row with the reason,
+       calls no update, and leaves the slot to the next eligible candidate in the same pass.
+    3. The new step gets a reader or follows the write-only-ledger-step gate's own remedy.
+    NOT IN SCOPE: the full pass's refresh and the ready-overlap predicate.
+  acceptance:
+    - claim: "A selected PR that merged after the snapshot gets no update-branch call and no attempted or error row, and the next eligible candidate is refreshed in the same pass"
+      proof: "grep: W1-T14315 criterion 1 in test/sweep/a-light-pass-never-updates-a-merged-pr.test.ts"
+    - claim: "invariant:open-heads-still-refresh — an open PR at the selected head, and a PR whose live state cannot be read, are refreshed as on origin/main"
+      kind: guard
+      proof: "grep: W1-T14315 criterion 2 in test/sweep/a-light-pass-never-updates-a-merged-pr.test.ts"
+  falsifier: |
+    Drop the re-read and criterion 1 fails. Treat an unreadable state as closed and criterion 2 fails.
+  note: |
+    reservation hand-off: run-unfiled-1795355533924 -> run-unfiled-1795355533924
+    Filed by an operator session from read-only ledger and source evidence, 2026-11-22. Line numbers are at 51105aaa3.
+    Pinning tests: the two suites that drive runLightPassReadyRefresh are in files. Suites that only inject readLiveState do not change.
