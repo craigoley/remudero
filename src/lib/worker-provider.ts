@@ -196,8 +196,7 @@ function harnessSupport(flag: boolean | undefined): HarnessSupport {
   return flag === undefined ? "unknown" : flag ? "supported" : "unsupported";
 }
 
-/** The optional installed evidence belongs to a separately admitted observation producer. Ordinary
- * worker calls supply neither that evidence nor a binding to an immutable executable. */
+/** Only a separately admitted observer supplies installed evidence and its immutable executable binding. */
 export function buildWorkerHarnessContract(provider: string, facts: {
   resume?: boolean;
   compactionConfigured?: boolean;

@@ -32,7 +32,11 @@ function snapshot(source: string) {
 test("W1-T10918: current provider retains the maintained comment reduction", () => {
   const actual = snapshot(readFileSync(join(REPO_ROOT, "src/lib/worker-provider.ts"), "utf8"));
   assert.ok(actual.commentLines < 1357, "comment lines must decrease from the pre-compression source");
-  assert.ok(actual.commentBytes < 104858, "comment bytes must decrease; rewrapping alone is insufficient");
+});
+
+test("worker provider comment bytes stay below the pre-compression baseline", () => {
+  const { commentBytes } = snapshot(readFileSync(join(REPO_ROOT, "src/lib/worker-provider.ts"), "utf8"));
+  assert.ok(commentBytes < 104858, `expected fewer than 104858 comment bytes, found ${commentBytes}`);
 });
 
 // Historical fingerprint assertions are retained in the historical suite.
