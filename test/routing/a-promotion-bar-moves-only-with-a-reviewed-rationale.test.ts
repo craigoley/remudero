@@ -15,7 +15,7 @@ import {
   PROMOTION_BARS_ROOT, PROMOTION_CEILING_FIELDS, PROMOTION_CEILINGS_PATH, PROMOTION_FLOOR_FIELDS, PROMOTION_FLOORS_PATH, readPromotionBars,
 } from "#src/lib/promotion-bars.js";
 import { localPrDiffAsync } from "#src/lib/pr-diff.js";
-import { INSTRUMENT_ALIGN_CELLS, JSON_NUMBER_RE, classifyInstrumentChange } from "#src/lib/review.js";
+import { INSTRUMENT_ALIGN_CELLS, JSON_NUMBER_RE, classifyInstrumentChange, judgeReview } from "#src/lib/review.js";
 import { SKILL_EVAL_HELD_OUT_TASKS, SKILL_EVAL_MIN_MEAN_GAIN, SKILL_EVAL_TRIALS_PER_ARM } from "#src/lib/skill-eval.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -198,6 +198,13 @@ test("loosening a promotion bar without a fresh rationale is refused by the base
   assert.equal(run("--pr", "4343"), 0, `--pr names the PR under check\n${errors.join("\n")}`);
   process.env.GITHUB_REF = "refs/pull/4343/merge";
   assert.equal(run(), 0, `a pull_request run names it through GITHUB_REF\n${errors.join("\n")}`);
+  // A merge_group run (ci.yml passes it --base "$GATE_BASE" and no --pr): its ref is the queue branch, as this repo's
+  // queue runs record it, e.g. head_branch gh-readonly-queue/main/pr-9391-9fd00cc1e8bf96b9dab5d35a549ba8f1d293e400.
+  process.env.GITHUB_REF = `refs/heads/gh-readonly-queue/main/pr-4343-${"a".repeat(40)}`;
+  assert.equal(run(), 0, `a merge_group run names it through its queue branch\n${errors.join("\n")}`);
+  assert.deepEqual([`refs/heads/gh-readonly-queue/main/pr-12-${"b".repeat(40)}`, `refs/heads/gh-readonly-queue/main/pr-0-${"b".repeat(40)}`,
+    `refs/heads/feature/pr-12-${"b".repeat(40)}`, "refs/heads/gh-readonly-queue/main/pr-12"].map(check.currentPrFromRef),
+  ["12", undefined, undefined, undefined]);
   assert.equal(run("--pr", "43x"), 2, "a --pr that is not a PR number is a measurement failure");
   assert.deepEqual(["refs/pull/12/merge", "refs/pull/12/head", "refs/heads/main", "refs/pull/0/merge", undefined].map(check.currentPrFromRef),
     ["12", "12", undefined, undefined, undefined]);
@@ -365,6 +372,72 @@ test("raising a promotion floor reads as tightening to the reviewer, lowering on
     assert.equal(await reviewerReads(base(text), head(moveTo("0.90"))), "loosening", `0.98 -> 0.90 with ${layout}`);
     assert.equal(await reviewerReads(base(text), head(text)), "undetermined", `${layout} alone moves no bar, so tightens none`);
   }
+
+  // PR #20033's fifth review, through the reviewer's own call (judgeReview -> detectInstrumentEntanglement) with the two
+  // checkouts a review holds: the PR head and a real worktree of its merge base. Where git's context cut the key from its
+  // value, both sides' parsed JSON keys it, so the raise tightens (and is no entanglement) and the drop loosens.
+  const reviewerJudges = async (base: string, head: string, withCheckouts: boolean) => {
+    writeFileSync(join(repo.dir, PROMOTION_FLOORS_PATH), base);
+    mkdirSync(join(repo.dir, "src"), { recursive: true });
+    writeFileSync(join(repo.dir, "src", "widget.ts"), "export const widget = 1;\n");
+    repo.git("add", ".");
+    repo.git("commit", "--quiet", "--allow-empty", "-m", "base");
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    const baseRoot = mkdtempSync(join(tmpdir(), "rmd-promotion-floor-base-"));
+    t.after(() => rmSync(baseRoot, { recursive: true, force: true }));
+    repo.git("worktree", "add", "--quiet", "--detach", join(baseRoot, "base"), "HEAD");
+    writeFileSync(join(repo.dir, PROMOTION_FLOORS_PATH), head);
+    writeFileSync(join(repo.dir, "src", "widget.ts"), "export const widget = 2;\n");
+    repo.git("commit", "--quiet", "-am", "head");
+    const diff = await localPrDiffAsync(repo.dir, repo.git("rev-parse", "HEAD"));
+    const checkouts = withCheckouts ? { headCheckoutDir: repo.dir, baseCheckoutDir: join(baseRoot, "base") } : {};
+    return {
+      direction: classifyInstrumentChange(diff, [PROMOTION_FLOORS_PATH, "src/widget.ts"], PROMOTION_FLOORS_PATH, checkouts),
+      entangled: judgeReview([{ claim: "the widget changed", proof: "widget changed" }], { diff, report: "REPORT\n- widget changed.", ...checkouts })
+        .instrumentEntangled,
+    };
+  };
+  const commaMoved = (value: string) => text.replace(agree, `  "judgeMinAgreeShare":\n\n\n\n\n    ${value}\n    ,\n`);
+  assert.deepEqual(await reviewerJudges(split("0.98"), split("0.99"), true), { direction: "tightening", entangled: false }, "a split key's raise");
+  assert.deepEqual(await reviewerJudges(split("0.98"), split("0.90"), true), { direction: "loosening", entangled: true }, "a split key's drop");
+  assert.deepEqual(await reviewerJudges(split("0.98"), commaMoved("0.99"), true), { direction: "tightening", entangled: false }, "the raise, comma moved");
+  assert.deepEqual(await reviewerJudges(split("0.98"), commaMoved("0.90"), true), { direction: "loosening", entangled: true }, "the drop, comma moved");
+  // Without the checkouts the diff alone decides: the drop's block reads as one, so it loosens; the raise stays unkeyed.
+  assert.deepEqual(await reviewerJudges(split("0.98"), commaMoved("0.90"), false), { direction: "loosening", entangled: true }, "diff only: the drop");
+  assert.deepEqual(await reviewerJudges(split("0.98"), split("0.99"), false), { direction: "undetermined", entangled: true }, "diff only: the raise");
+
+  // The parsed reading's rules, one at a time, over an unkeyed raise the diff alone cannot read.
+  const sidesOf = (base: unknown, head: unknown) => {
+    const root = mkdtempSync(join(tmpdir(), "rmd-promotion-floor-sides-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    for (const [side, value] of [["base", base], ["head", head]] as const) {
+      mkdirSync(join(root, side, "scripts"), { recursive: true });
+      if (value !== undefined) writeFileSync(join(root, side, PROMOTION_FLOORS_PATH), typeof value === "string" ? value : JSON.stringify(value));
+    }
+    return { headCheckoutDir: join(root, "head"), baseCheckoutDir: join(root, "base") };
+  };
+  const unkeyedRaise = diffOf(PROMOTION_FLOORS_PATH, "-    0.98,\n+    0.99,\n");
+  const judged = (base: unknown, head: unknown, extra: { baseUnreadablePaths?: ReadonlySet<string> } = {},
+    files = [PROMOTION_FLOORS_PATH], diff = unkeyedRaise) => classifyInstrumentChange(diff, files, PROMOTION_FLOORS_PATH, { ...sidesOf(base, head), ...extra });
+  const bars = { judgeMinAgreeShare: 0.98, judgeMinPaired: 200, bumpRationale: "W1-T1", list: [], nested: {} };
+  const raised = { ...bars, judgeMinAgreeShare: 0.99 };
+  assert.equal(judged(bars, raised), "tightening");
+  assert.equal(judged(bars, { ...raised, bumpRationale: "W1-T2" }), "tightening", "a provenance string may change");
+  assert.equal(judged(bars, { ...raised, judgeMinPaired: 100 }), "loosening", "one lowered floor loosens the file");
+  assert.equal(judged(bars, { ...raised, judgeMinPaired: "200" }), "undetermined", "a number turned to text is unaccountable");
+  assert.equal(judged(bars, { ...raised, judgeMinNew: 5 }), "undetermined", "a new key that names no added source file");
+  const { judgeMinPaired: _removed, ...fewer } = bars;
+  assert.equal(judged(bars, fewer), "tightening", "a removed entry is one allowance fewer, as the keyed reading counts it");
+  assert.equal(judged(bars, { ...bars, list: [1] }), "undetermined", "an empty array that gained a member");
+  assert.equal(judged(bars, bars), "undetermined", "unchanged sides move no bar");
+  const addsSource = `${unkeyedRaise}\ndiff --git a/src/new.ts b/src/new.ts\nnew file mode 100644\n--- /dev/null\n+++ b/src/new.ts\n@@ -0,0 +1 @@\n+export const n = 1;\n`;
+  assert.equal(judged(bars, { ...raised, "src/new.ts": 10 }, {}, [PROMOTION_FLOORS_PATH, "src/new.ts"], addsSource), "tightening",
+    "a new key for a source file this diff adds has no prior bound");
+  assert.equal(judged(bars, "{ not json"), "undetermined", "an unparsable side keeps the diff's reading");
+  assert.equal(judged(bars, undefined), "undetermined", "a missing side keeps the diff's reading");
+  assert.equal(judged(bars, raised, { baseUnreadablePaths: new Set([PROMOTION_FLOORS_PATH]) }), "undetermined", "an unreadable base blob");
+  assert.equal(classifyInstrumentChange(unkeyedRaise, [PROMOTION_FLOORS_PATH], PROMOTION_FLOORS_PATH, { headCheckoutDir: sidesOf(bars, raised).headCheckoutDir }),
+    "undetermined", "no base checkout keeps the diff's reading");
 });
 
 test("an instrument diff pairs each value with its own key, whatever the hunk's layout", () => {

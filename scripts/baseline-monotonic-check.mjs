@@ -96,10 +96,12 @@ export const NO_PRS = Object.freeze({ has: () => false, unreadable: "no PR recor
 
 const MERGED_PR_SUBJECT_RE = /\(#(\d+)\)\s*$|^Merge pull request #(\d+)\b/;
 
-/** The PR number `GITHUB_REF` names on a pull_request run (`refs/pull/<n>/merge` or `/head`), else undefined. */
+/** The PR number `GITHUB_REF` names: a pull_request run's `refs/pull/<n>/merge` or `/head`, or a merge_group run's
+ *  queue branch `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>`. Else undefined. */
 export function currentPrFromRef(ref) {
-  const m = /^refs\/pull\/(\d+)\/(?:merge|head)$/.exec(ref ?? "");
-  return m && BigInt(m[1]) > 0n ? m[1] : undefined;
+  const m = /^refs\/pull\/(\d+)\/(?:merge|head)$|^refs\/heads\/gh-readonly-queue\/.+\/pr-(\d+)-[0-9a-f]+$/.exec(ref ?? "");
+  const pr = m?.[1] ?? m?.[2];
+  return pr !== undefined && BigInt(pr) > 0n ? pr : undefined;
 }
 
 /**

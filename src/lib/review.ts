@@ -6221,7 +6221,7 @@ export function judgeReview(
 
   // W1-T297 (Standing rule 25): see {@link ReviewVerdict.instrumentEntangled}'s doc. Reuses the SAME `diffFiles`
   // every other structural check above already computed — no new diff walk.
-  const instrumentEntanglement = detectInstrumentEntanglement(diffFiles, evidence.diff);
+  const instrumentEntanglement = detectInstrumentEntanglement(diffFiles, evidence.diff, evidence);
   // ADVISORY: folds into neither rollup below (MASTER-PLAN.md §12 rule 25 says why).
   const instrumentEntangled = instrumentEntanglement.entangled;
 
@@ -11045,11 +11045,14 @@ export function unkeyedLoosening(diff: string, file: string, direction: "lower" 
     const [gone, came] = [dels, adds].map((side) => side.filter((text) => text.trim() !== ""));
     dels = [];
     adds = [];
-    return gone!.length > 0 && gone!.length === came!.length && gone!.some((text, k) => {
-      const [a, b] = [numberSkeleton(text), numberSkeleton(came![k]!)];
+    const loosens = (from: string, to: string) => {
+      const [a, b] = [numberSkeleton(from), numberSkeleton(to)];
       return a !== undefined && b !== undefined && a.skeleton === b.skeleton && a.numbers.length === b.numbers.length &&
         a.numbers.some((was, n) => looser(was, b.numbers[n]!));
-    });
+    };
+    // The whole block too: a comma moved to its own line splits one line in two (PR #20033's fifth review).
+    return gone!.length > 0 && came!.length > 0 &&
+      ((gone!.length === came!.length && gone!.some((text, k) => loosens(text, came![k]!))) || loosens(gone!.join("\n"), came!.join("\n")));
   };
   for (const raw of diff.split("\n")) {
     if (raw.startsWith("diff --git")) {
@@ -11073,7 +11076,7 @@ export function unkeyedLoosening(diff: string, file: string, direction: "lower" 
  * direction. Added entries, opposite movement or any unaccounted hunk make the whole file `undetermined`.
  * Exception: a new key for a source file this diff also adds has no prior bound to loosen. A key for a pre-existing
  * file still disqualifies tightening, preventing generous ceilings from hiding growth. */
-export function classifyInstrumentChange(diff: string, diffFiles: string[], file: string): InstrumentChangeDirection {
+function classifyInstrumentDiff(diff: string, diffFiles: string[], file: string): InstrumentChangeDirection {
   if (fileIsNewInDiff(diff, file)) {
     const stem = scriptStem(file);
     const readerChanged = diffFiles.some(
@@ -11125,6 +11128,71 @@ export function classifyInstrumentChange(diff: string, diffFiles: string[], file
   return sawTightening ? "tightening" : "undetermined";
 }
 
+/** The two checkouts a review already holds: the PR head and its merge base ({@link ReviewEvidence}). */
+export interface InstrumentSides {
+  headCheckoutDir?: string;
+  baseCheckoutDir?: string;
+  baseUnreadablePaths?: ReadonlySet<string>;
+}
+
+/** One instrument's change: the diff's reading, or, where the diff cannot key a value (git's context cut the key
+ *  away; PR #20033's fifth review), both sides' parsed JSON. A side that cannot be read leaves the diff's reading. */
+export function classifyInstrumentChange(diff: string, diffFiles: string[], file: string, sides?: InstrumentSides): InstrumentChangeDirection {
+  const fromDiff = classifyInstrumentDiff(diff, diffFiles, file);
+  const direction = stricterDirectionFor(file);
+  if (fromDiff !== "undetermined" || direction === undefined || fileIsNewInDiff(diff, file) ||
+    sides?.baseUnreadablePaths?.has(file)) return fromDiff;
+  const [base, head] = [sides?.baseCheckoutDir, sides?.headCheckoutDir].map((dir) => readJsonSide(dir, file));
+  return base === undefined || head === undefined ? fromDiff : parsedInstrumentChange(base, head, direction, diff, diffFiles);
+}
+
+/** `undefined` for no checkout, an unreadable file or invalid JSON: the caller keeps the diff's own reading. */
+function readJsonSide(dir: string | undefined, file: string): { value: unknown } | undefined {
+  if (dir === undefined) return undefined;
+  try {
+    return { value: JSON.parse(readFileSync(join(dir, file), "utf8")) as unknown };
+  } catch {
+    return undefined; // deliberate: unread is not unchanged, so the diff's reading stands
+  }
+}
+
+const EMPTY_ARRAY = Symbol("[]");
+const EMPTY_OBJECT = Symbol("{}");
+
+/** Every leaf of a parsed JSON value, by its key path; an empty array or object is a leaf of its own. */
+function jsonLeaves(value: unknown, path: ReadonlyArray<string | number> = [], out = new Map<string, { key: string | number | undefined; value: unknown }>()) {
+  if (value !== null && typeof value === "object") {
+    const entries: Array<[string | number, unknown]> = Array.isArray(value) ? value.map((v, i) => [i, v]) : Object.entries(value);
+    if (entries.length === 0) out.set(JSON.stringify(path), { key: path.at(-1), value: Array.isArray(value) ? EMPTY_ARRAY : EMPTY_OBJECT });
+    for (const [key, child] of entries) jsonLeaves(child, [...path, key], out);
+  } else out.set(JSON.stringify(path), { key: path.at(-1), value });
+  return out;
+}
+
+/** The keyed reading's rules over the parsed sides: a number moved its stricter way tightens, the other way loosens; a
+ *  removed entry tightens; a provenance string may change; a new key is admissible only for a source file this diff
+ *  adds; anything else is unaccountable. A looser move outranks an unaccountable one. */
+function parsedInstrumentChange(base: { value: unknown }, head: { value: unknown }, direction: "lower" | "higher", diff: string,
+  diffFiles: string[]): InstrumentChangeDirection {
+  const [before, after] = [jsonLeaves(base.value), jsonLeaves(head.value)];
+  let sawTightening = [...before.keys()].some((path) => !after.has(path));
+  let unaccountable = false;
+  for (const [path, { key, value }] of after) {
+    const prior = before.get(path);
+    if (prior === undefined) {
+      if (typeof key !== "string" || !diffFiles.includes(key) || !fileIsNewInDiff(diff, key)) unaccountable = true;
+    } else if (prior.value === value || (typeof value === "string" && typeof key === "string" && isInstrumentProvenanceKey(key) &&
+      typeof prior.value === "string")) {
+      continue;
+    } else if (typeof value !== "number" || typeof prior.value !== "number") {
+      unaccountable = true;
+    } else if (direction === "lower" ? value < prior.value : value > prior.value) {
+      sawTightening = true;
+    } else return "loosening";
+  }
+  return unaccountable || !sawTightening ? "undetermined" : "tightening";
+}
+
 /** INSTRUMENT ISOLATION (W1-T297, Standing rule 25): true when `diffFiles` holds at least one {@link
  *  INSTRUMENT_SURFACE} path AND at least one {@link isProductPath} src/ path — the ENTANGLEMENT predicate, not mere
  *  instrument-touching. An instrument-only diff, optionally with its own `test/` falsifier or a `docs/` update, is the
@@ -11134,6 +11202,7 @@ export function classifyInstrumentChange(diff: string, diffFiles: string[], file
 export function detectInstrumentEntanglement(
   diffFiles: string[],
   diff?: string,
+  sides?: InstrumentSides,
 ): { entangled: boolean; instrumentPaths: string[]; srcPaths: string[] } {
   const surfacePaths = diffFiles.filter((f) => INSTRUMENT_SURFACE_RE.test(f));
   const nonSrcSurfacePaths = surfacePaths.filter((f) => !isProductPath(f));
@@ -11179,7 +11248,7 @@ export function detectInstrumentEntanglement(
     diff === undefined
       ? []
       : instrumentPaths.filter((f) => {
-          const d = classifyInstrumentChange(diff, diffFiles, f);
+          const d = classifyInstrumentChange(diff, diffFiles, f, sides);
           return d === "tightening" || d === "introduced";
         });
   // W1-T3171: subtract a CI job registration two bidirectional censuses make UNAVOIDABLE. Unlike
