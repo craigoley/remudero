@@ -26,9 +26,9 @@ export const FIX_LEARNINGS_UNIT = "fix-learnings";
 export const FIX_LEARNINGS_EPOCH = "fix-learnings-shadow-v1";
 /** Predeclared share of tasks drawn into the withheld arm. */
 export const FIX_LEARNINGS_SHARE = 0.25;
-/** The most log text one failing check contributes to the selection text: its tail, where the error is. */
+/** BACKSTOP: the most log text one failing check contributes to the selection text: its tail, where the error is. */
 export const FIX_LEARNINGS_LOG_TAIL_CHARS = 4000;
-/** The most failing checks one round reads, so a pathological rollup cannot grow the selection text. */
+/** BACKSTOP: the most failing checks one round reads, so a pathological rollup cannot grow the selection text. */
 export const FIX_LEARNINGS_MAX_CHECKS = 20;
 
 export type FixLearningsArm = "offered" | "withheld";

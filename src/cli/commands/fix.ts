@@ -4472,7 +4472,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // At the first prompt assembly, as the implement lane does — emitted even at zero selection.
     if (!fixSkillSelectionLogged) deps.log("skills.selection", fixSkillSelection.observation);
     fixSkillSelectionLogged = true;
-    // W1-T14138: what this round's failure would match, recorded under a task-keyed arm. Neither arm injects
+    // W1-T14138: one `fix.learnings_shadow` row per round: what its failure would match, under a task-keyed arm. Neither arm injects
     // anything: `prompt` below is assembled from the same parts with or without this row.
     recordFixLearningsShadow({
       runId: opts.runId, taskId: opts.taskId, pr: prNumber, attempt, round,
