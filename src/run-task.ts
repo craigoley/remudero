@@ -402,7 +402,7 @@ import { queueJudgeGardenSpec, queueJudgeRouteWindow, type QueueJudgeSources } f
 import { redesignGardenSpec } from "./lib/redesign-gardener.js";
 import { SCOUT_WINDOW_MS, scoutGardenSpec } from "./lib/scout-gardener.js";
 import { gateGardenSpec, loadGateProbes } from "./lib/gate-gardener.js";
-import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
+import { CONFIG_GARDEN_NAME, configCanariesDue, configGardenSpec, mountRecommendationSource, randomisedRecommendationSource, runConfigGarden } from "./lib/config-gardener.js";
 import { loadTestManifestProbe, refreshTestManifestProposalAsync, testGardenSpec, testManifestProposalPath, type TestProposalFeed } from "./lib/test-gardener.js";
 import { exportGardenSpec } from "./lib/export-gardener.js";
 import { CI_FRICTION_HALF_LIFE_MS, ciFrictionCauseKey, ciFrictionRoundMatchesCause, ciFrictionRoundsFromLedger, ciFailureLedgerEntry, ciFrictionGardenSpec, readCiFrictionHandFixes, readCiFrictionLedgerRecords, readGateFireRateReport, gitCiFrictionOwnerSearch, readCiFrictionPlanState, readCiFrictionPlanTimeline, renderCiFrictionReplay, replayCiFriction, type CiFrictionGardenSources, type CiFrictionGit } from "./lib/ci-friction-gardener.js";
@@ -29233,7 +29233,10 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         (): RegisteredGardenPass => {
           const workerEnv = buildWorkerEnv({}, process.env, { allowApiKey: config.overflow === "api_key" });
           // Leave the build seam absent: production must use the heap-bounded measurement worker.
-          const mountRecommendations = mountRecommendationSource({ sweepScript: join(repoRoot, "scripts", "mount-headroom-sweep.mjs"), stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
+          const sweep = mountRecommendationSource({ sweepScript: join(repoRoot, "scripts", "mount-headroom-sweep.mjs"), stateDir, mountsFile: mountsPath(repoRoot), billingMode: billingMode(Object.keys(workerEnv)), log });
+          // W1-T12143: a concluded randomised winner is read first; the observational sweep's recommendations follow it.
+          const randomised = randomisedRecommendationSource({ stateDir, mountsFile: mountsPath(repoRoot), log });
+          const mountRecommendations = async () => (await Promise.all([randomised(), sweep()])).flat();
           return withDue(async () => {
             try {
               await runConfigGarden(configGardenSpec(d, { mountRecommendations }), d, { mountRecommendations });

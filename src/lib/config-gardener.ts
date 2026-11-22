@@ -31,14 +31,25 @@ import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedMode
 import { gardenNeedsInventory, gardenPassDue, landedPrUrl, gardenStatePath, judgeGardenDecision, readGardenState, runGardenAsync, type GardenAction, type GardenCheckout, type GardenPassResult, type GardenSpec, type GardenerDeps, type PrState } from "./gardener.js";
 import { buildEntryWeightIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLearningsCorpus } from "./learnings.js";
 import type { LedgerLine } from "./ledger.js";
-import { ledgerRotationEntries, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { ledgerRotationEntries, openLedgerUnion, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import type { BillingMode } from "./env.js";
-import { recommendMounts, type MountHeadroomCell, type MountRecommendation } from "./mount-recommender.js";
+import {
+  RANDOMISED_ESTIMATE_STEP,
+  RANDOMISED_EXPERIMENT_STEP,
+  randomisedMountRecommendations,
+  recommendMounts,
+  type AdoptMountRecommendation,
+  type MountHeadroomCell,
+  type MountRecommendation,
+  type RandomisedMountRecommendation,
+  type RandomisedRow,
+} from "./mount-recommender.js";
 import { loadMounts, mountsPath, type JudgeShadowOnlyRole } from "./mounts.js";
 import { loadPlan } from "./plan.js";
 import { planShards } from "./plan-gardener.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { ROUTING_EXPERIMENTS, type RoutingExperiment } from "./routing-experiments.js";
 import { GATHER_RUNS_LEDGER_STEPS, gatherRuns, type LedgerRecord, type RunSummary } from "./retro.js";
 import { loadCreditStore } from "./status.js";
 import { deriveTaskClass } from "./task-class.js";
@@ -53,7 +64,8 @@ import { deriveTaskClass } from "./task-class.js";
  *   - RECALIBRATE-BUDGET: queued shards of one task class get `budget_usd` from that class's observed
  *     implement cost distribution (p90 with headroom for the between-turn overshoot) — no fixed floor.
  *   - ADOPT-MOUNT: a mount recommendation that cleared the recommender's evidence gates is written into
- *     its route in the mounts table (mounts.ts's `mountsPath`).
+ *     its route in the mounts table (mounts.ts's `mountsPath`). W1-T12143: so is a concluded randomised
+ *     winner ({@link randomisedRecommendationSource}): its provider on every auctioned routes row it covers.
  *   - RE-DERIVE-CAP: the learnings character cap is re-derived from the spawns measured UNDER the
  *     current cap, with the same two functions that derived it (digest.ts).
  *   - MOVE-JUDGE-TO-CASH (W1-T12187): a judge whose cash shadow cleared {@link JUDGE_CASH_BAR} gets `provider: cash`
@@ -81,11 +93,17 @@ export interface ConfigEdit {
   path: string;
   from: string;
   to: string;
+  /** W1-T12143: how many identical `from` lines the edit replaces, every one of them; absent, exactly one. Two
+   *  routes rows with identical lines name the same class, model, effort and provider, so evidence covers both or
+   *  neither, and one edit replaces both or neither. */
+  occurrences?: number;
 }
 
 /** Who a canary exposes. `tasks`: named shards against the same class's other tasks, concurrently.
- *  `cell`/`all`: every run it routes, against the same population over the equal window before. */
-export type ConfigCohort = { kind: "tasks"; taskClass: string; taskIds: string[] } | { kind: "cell"; type: string; risk: string; taskClass: string } | { kind: "all" };
+ *  `cell`/`cells`/`all`: every run it routes, against the same population over the equal window before.
+ *  `cells` (W1-T12143) is the routes rows one randomised candidate edits. */
+export type ConfigCohort = { kind: "tasks"; taskClass: string; taskIds: string[] } | { kind: "cell"; type: string; risk: string; taskClass: string }
+  | { kind: "cells"; cells: RandomisedRow[] } | { kind: "all" };
 
 export interface ConfigGardenAction extends GardenAction<ConfigGardenClass> {
   scope: string;
@@ -129,7 +147,7 @@ export interface ConfigInventory {
   nowIso: string;
   runs: RunSummary[];
   queued: QueuedBudget[];
-  recommendations: MountRecommendation[];
+  recommendations: AdoptMountRecommendation[];
   cap?: { current: number; derivation: KnowledgeBudgetDerivation };
   /** W1-T12187: each judge role's cash shadow record over {@link JUDGE_CASH_BAR}'s window. */
   judgeShadows?: JudgeShadowRoleSummary[];
@@ -146,7 +164,7 @@ export interface ConfigInventory {
 /** Where the gardener reads. Every field has a production default; a test supplies its own. */
 export interface ConfigGardenSources {
   ledgerRows?: () => Array<Record<string, unknown>> | Promise<Array<Record<string, unknown>>>;
-  mountRecommendations?: () => MountRecommendation[] | Promise<MountRecommendation[]>;
+  mountRecommendations?: () => AdoptMountRecommendation[] | Promise<AdoptMountRecommendation[]>;
   entryWeights?: () => Record<string, number> | Promise<Record<string, number>>;
 }
 
@@ -303,7 +321,8 @@ export function splitCohort(cohort: ConfigCohort, runs: RunSummary[], exposedAt:
     const after = runs.filter((r) => settledImplement(r) && r.taskClass === cohort.taskClass && at(r) >= since);
     return inWindow(after.filter((r) => ids.has(r.taskId)), after.filter((r) => !ids.has(r.taskId)));
   }
-  const inScope = (r: RunSummary) => cohort.kind === "all" ? r.type === "implement" : r.type === cohort.type && r.risk === cohort.risk && r.taskClass === cohort.taskClass;
+  const cells = cohort.kind === "cells" ? cohort.cells : cohort.kind === "cell" ? [cohort] : [];
+  const inScope = (r: RunSummary) => cohort.kind === "all" ? r.type === "implement" : cells.some((c) => r.type === c.type && r.risk === c.risk && r.taskClass === c.taskClass);
   const before = since - Math.max(0, Date.parse(nowIso) - since);
   const scoped = runs.filter((r) => inScope(r) && r.verdict !== "incomplete");
   return inWindow(scoped.filter((r) => at(r) >= since), scoped.filter((r) => at(r) >= before && at(r) < since));
@@ -312,6 +331,7 @@ export function splitCohort(cohort: ConfigCohort, runs: RunSummary[], exposedAt:
 function population(cohort: ConfigCohort): string {
   if (cohort.kind === "tasks") return `implement tasks of class ${cohort.taskClass}`;
   if (cohort.kind === "cell") return `${cohort.type} runs at ${cohort.risk} risk of class ${cohort.taskClass}`;
+  if (cohort.kind === "cells") return `runs of the routes rows ${cohort.cells.map((c) => `${c.type}/${c.risk}/${c.taskClass}`).join(", ")}`;
   return "implement runs";
 }
 
@@ -393,7 +413,7 @@ interface InventoryMeasurement {
   nowMs: number;
   rows?: Array<Record<string, unknown>>;
   weights?: Record<string, number>;
-  recommendations: MountRecommendation[];
+  recommendations: AdoptMountRecommendation[];
 }
 
 type ConfigMeasurement = InventoryMeasurement | { kind: "mount"; stateDir: string; sweepScript: string };
@@ -533,6 +553,54 @@ export function mountRecommendationSource(opts: {
   };
 }
 
+/** W1-T12143: the ledger row a randomised winner the mounts table cannot express is reported as, once per evidence day. */
+export const RANDOMISED_FINDING_STEP = `${CONFIG_GARDEN_NAME}.randomised_finding`;
+/** Both producers write one row per experiment or cell per UTC day, a terminal result unchanged on each later day,
+ *  so the newest row of every live one is days old at most; the inventory's own read spans the same 60 days. */
+const RANDOMISED_EVIDENCE_DAYS = 60;
+
+const findingKey = (step: unknown, id: unknown, day: unknown, setting: unknown): string => JSON.stringify([step, id, day, setting]);
+
+/**
+ * W1-T12143: the second source of adopt-mount candidates, beside {@link mountRecommendationSource}: the newest
+ * `routing.experiment.result` row of each experiment and `routing.policy.estimate` row of each cell, streamed from
+ * the ledger union as routing-policy-estimate.ts's recorder streams it, and mapped by
+ * `randomisedMountRecommendations` (mount-recommender.ts). A winner the table cannot express is logged as
+ * {@link RANDOMISED_FINDING_STEP} naming the setting that can, once per evidence day. An unread archive, live file
+ * or directory refuses the read: a missing file could hold an experiment's newest row and let a superseded one
+ * propose. A failed read is logged and proposes nothing.
+ */
+export function randomisedRecommendationSource(opts: {
+  stateDir: string;
+  mountsFile: string;
+  log: GardenerDeps["log"];
+  /** The experiments a result's arms are mapped through; the live list when absent. */
+  experiments?: readonly RoutingExperiment[];
+}): () => Promise<RandomisedMountRecommendation[]> {
+  return async () => {
+    try {
+      const unread: string[] = [];
+      const rows: Array<Record<string, unknown>> = [];
+      const sinceTs = fixedClock(systemClock.now() - RANDOMISED_EVIDENCE_DAYS * 24 * 3600 * 1000).iso();
+      for await (const row of openLedgerUnion(opts.stateDir, {
+        step: [RANDOMISED_EXPERIMENT_STEP, RANDOMISED_ESTIMATE_STEP, RANDOMISED_FINDING_STEP], sinceTs,
+        onUnreadArchive: (path) => unread.push(path), onUnreadLive: (path) => unread.push(path), onUnreadDirectory: (path) => unread.push(path),
+      })) rows.push(row);
+      if (unread.length > 0) throw new Error(`incomplete ledger union: ${unread.join(", ")}`);
+      const outcomes = randomisedMountRecommendations(rows, loadMounts(opts.mountsFile), opts.experiments ?? ROUTING_EXPERIMENTS);
+      const written = new Set(rows.filter((r) => r.step === RANDOMISED_FINDING_STEP).map((r) => findingKey(r.evidence_step, r.evidence_id, r.day, r.setting)));
+      for (const f of outcomes.findings) {
+        if (written.has(findingKey(f.step, f.id, f.day, f.setting))) continue;
+        opts.log(RANDOMISED_FINDING_STEP, { evidence_step: f.step, evidence_id: f.id, day: f.day, setting: f.setting, detail: f.detail });
+      }
+      return outcomes.recommendations;
+    } catch (e) {
+      opts.log(`${CONFIG_GARDEN_NAME}.randomised_recommendations_unread`, { error: String((e as Error)?.message ?? e) });
+      return [];
+    }
+  };
+}
+
 // ── Candidates ───────────────────────────────────────────────────────────────────────────────
 
 const usd = (n: number) => n.toFixed(2);
@@ -603,15 +671,74 @@ export function routeLine(text: string, type: string, risk: string, taskClass: s
   return c < 0 || !/\{.*\bmodel:.*\beffort:.*\}/.test(lines[c]!) ? undefined : lines[c];
 }
 
-/** The first recommendation whose route exists and would change, adopted on the same provider only —
- *  a provider switch changes more than the one line this edits. */
+/** `line`, a one-line flow-map row, with `provider: <provider>` as its last key, ahead of any trailing comment. */
+function withProvider(line: string, provider: string): string {
+  const close = line.replace(/\s+#.*$/, "").lastIndexOf("}");
+  return `${line.slice(0, close).trimEnd()}, provider: ${provider} ${line.slice(close)}`;
+}
+
+/**
+ * W1-T12143: one randomised winner as one canary: the winner's provider on every routes row it covers whose line
+ * one exact edit can name. A row an open canary holds (either side of its edit) is left alone, so two canaries
+ * never edit one line; so is a row whose line is not a one-line flow map, or whose identical lines are not all
+ * covered, or whose edited line is already in the file — each would leave a revert that cannot tell its line
+ * apart. The shadow guard is the winner's own advantage bound, above zero by its producer's decision.
+ */
+function randomisedMountCandidate(rec: RandomisedMountRecommendation, inv: ConfigInventory, text: string, path: string): ConfigGardenAction | undefined {
+  const e = rec.randomised;
+  const lines = text.split("\n");
+  const held = new Set(inv.active.flatMap((c) => c.edits.filter((edit) => edit.path === path).flatMap((edit) => [edit.from, edit.to])));
+  const byLine = new Map<string, RandomisedRow[]>();
+  const left: string[] = [];
+  const name = (row: RandomisedRow) => `routes.${row.type}.${row.risk}.${row.taskClass}`;
+  for (const row of rec.rows) {
+    const from = routeLine(text, row.type, row.risk, row.taskClass);
+    if (from === undefined) left.push(`${name(row)} (not a one-line row)`);
+    else if (held.has(from)) left.push(`${name(row)} (an open canary holds its line)`);
+    else byLine.set(from, [...(byLine.get(from) ?? []), row]);
+  }
+  const edits: ConfigEdit[] = [];
+  const cells: RandomisedRow[] = [];
+  for (const [from, rows] of byLine) {
+    const to = withProvider(from, e.winner.provider);
+    const occurrences = lines.filter((line) => line === from).length;
+    if (occurrences !== rows.length || lines.includes(to)) {
+      left.push(...rows.map((row) => `${name(row)} (its line is not one this edit can name exactly)`));
+      continue;
+    }
+    edits.push({ path, from, to, ...(occurrences > 1 ? { occurrences } : {}) });
+    cells.push(...rows);
+  }
+  if (edits.length === 0) return undefined;
+  const cohort: ConfigCohort = { kind: "cells", cells };
+  const where = `${e.capability}/${e.effort}${e.taskClass === undefined ? "" : `/${e.taskClass}`}`;
+  return {
+    class: "adopt-mount",
+    target: rec.cellKey,
+    scope: `mount:${rec.cellKey}`,
+    reason: `${rec.note} Each auctioned routes row it covers takes provider ${e.winner.provider}.${left.length > 0 ? ` Left alone: ${left.join("; ")}.` : ""}`,
+    edits,
+    cohort,
+    candidate: `provider ${e.winner.provider} on ${cells.length} routes row(s) at ${where}`,
+    baseline: `the headroom auction between claude and codex on those rows`,
+    exposure: 1,
+    shadowMetrics: [{ metricName: "randomised_advantage_low", unit: "fraction", direction: "min", abortThreshold: 0 }],
+    shadowObservations: [{ metricName: "randomised_advantage_low", value: e.advantageLow, denominator: e.minTasks, freshness: "verified", comparisonPopulation: population(cohort), observedAt: inv.nowIso }],
+  };
+}
+
+/** The first recommendation whose route exists and would change. The sweep's is adopted on the same provider only —
+ *  a provider switch changes more than the one line it edits; a randomised winner (W1-T12143) is a provider switch,
+ *  written on every row it covers ({@link randomisedMountCandidate}). */
 export function mountCandidate(inv: ConfigInventory, repoRoot: string): ConfigGardenAction | undefined {
   const full = mountsPath(repoRoot);
   const path = relative(repoRoot, full).split(sep).join("/");
   if (!existsSync(full) || inv.recommendations.length === 0) return undefined;
   const text = readFileSync(full, "utf8");
   for (const rec of inv.recommendations) {
-    if (rec.recommendedArm.provider !== rec.currentArm.provider) continue;
+    const randomised = "randomised" in rec ? randomisedMountCandidate(rec, inv, text, path) : undefined;
+    if (randomised) return randomised;
+    if ("randomised" in rec || rec.recommendedArm.provider !== rec.currentArm.provider) continue;
     const from = routeLine(text, rec.type, rec.risk, rec.taskClass);
     if (!from) continue;
     const to = from.replace(/\bmodel:\s*[^,}\s]+/, `model: ${rec.recommendedArm.servedModel}`).replace(/\beffort:\s*[^,}\s]+/, `effort: ${rec.recommendedArm.effort}`);
@@ -923,9 +1050,10 @@ export function configCandidates(inv: ConfigInventory, repoRoot: string, rng: ()
 // ── Apply and roll back ──────────────────────────────────────────────────────────────────────
 
 /** Apply `edits` under `root`; returns the paths changed. An edit whose `from` line is not present
- *  exactly once is skipped — the file moved on, and a guess would edit the wrong line. The read is
- *  one ENOENT-guarded `readFileIfExists` and the write a temp-then-rename `writeAtomic`, so no
- *  separate existence check opens a window between checking the path and writing it. */
+ *  exactly once (exactly `occurrences` times, W1-T12143) is skipped — the file moved on, and a guess
+ *  would edit the wrong line. The read is one ENOENT-guarded `readFileIfExists` and the write a
+ *  temp-then-rename `writeAtomic`, so no separate existence check opens a window between checking
+ *  the path and writing it. */
 export function applyConfigEdits(root: string, edits: ConfigEdit[]): string[] {
   const changed = new Set<string>();
   for (const e of edits) {
@@ -934,15 +1062,15 @@ export function applyConfigEdits(root: string, edits: ConfigEdit[]): string[] {
     if (raw === undefined) continue;
     const lines = raw.split("\n");
     const hits = lines.flatMap((l, i) => (l === e.from ? [i] : []));
-    if (hits.length !== 1) continue;
-    lines[hits[0]!] = e.to;
+    if (hits.length !== (e.occurrences ?? 1)) continue;
+    for (const i of hits) lines[i] = e.to;
     writeAtomic(path, lines.join("\n"));
     changed.add(e.path);
   }
   return [...changed].sort();
 }
 
-export const reverseEdits = (edits: ConfigEdit[]): ConfigEdit[] => edits.map((e) => ({ path: e.path, from: e.to, to: e.from }));
+export const reverseEdits = (edits: ConfigEdit[]): ConfigEdit[] => edits.map((e) => ({ ...e, from: e.to, to: e.from }));
 
 /** Check every rollback line in memory before writing any file. A line already at its baseline is
  * safe to leave alone and is not one of the `applied` edits; a missing or ambiguous line refuses the
@@ -957,9 +1085,10 @@ function applyExactConfigRollback(root: string, edits: ConfigEdit[]): { paths: s
     const lines = raw.split("\n");
     const from = lines.flatMap((line, i) => line === edit.from ? [i] : []);
     const to = lines.flatMap((line, i) => line === edit.to ? [i] : []);
-    if (from.length === 0 && to.length === 1) continue;
-    if (from.length !== 1 || to.length !== 0) throw new Error(`config gardener: rollback line changed or ambiguous: ${edit.path}`);
-    lines[from[0]!] = edit.to;
+    const count = edit.occurrences ?? 1;
+    if (from.length === 0 && to.length === count) continue;
+    if (from.length !== count || to.length !== 0) throw new Error(`config gardener: rollback line changed or ambiguous: ${edit.path}`);
+    for (const i of from) lines[i] = edit.to;
     staged.set(edit.path, lines.join("\n"));
     applied.push(edit);
   }
@@ -1030,7 +1159,7 @@ function prBody(action: ConfigGardenAction): string {
     "",
     `Exposure: ${action.cohort.kind === "tasks" ? `${action.cohort.taskIds.length} shard(s) — ${action.cohort.taskIds.join(", ")}` : "every run this route/cap reaches"}. Once merged, the gardener compares the cohort with the rest by merge rate and cost per merged task; a guardrail breach opens a PR reverting exactly these lines and debits the class, a promotion credits it.`,
     "",
-    ...action.edits.map((e) => `- \`${e.path}\`: \`${e.from.trim()}\` → \`${e.to.trim()}\``),
+    ...action.edits.map((e) => `- \`${e.path}\`: \`${e.from.trim()}\` → \`${e.to.trim()}\`${e.occurrences === undefined ? "" : ` (${e.occurrences} identical rows)`}`),
     "",
     ...acceptance(action.edits),
   ].join("\n");

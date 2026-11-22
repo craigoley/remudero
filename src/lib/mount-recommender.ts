@@ -1,5 +1,8 @@
-import type { Mounts } from "./mounts.js";
+import type { Mount, Mounts } from "./mounts.js";
 import type { BillingMode } from "./env.js";
+import type { RoutingExperimentResult } from "./routing-experiment-result.js";
+import type { RoutingExperiment } from "./routing-experiments.js";
+import type { RoutingPolicyEstimate } from "./routing-policy-estimate.js";
 import { pooledPriorFor, type PoolableEvidence } from "./routing-prior.js";
 import { routingObjectiveFor, type ArmWindowShare, type RoutingObjectiveKind } from "./routing-objective.js";
 
@@ -588,4 +591,343 @@ export function mountRecommendationProposalCandidate(rec: MountRecommendation): 
       `mounts.yaml PR, gated behind the golden suite like every other routing change (§9).`,
     evidenceAnchors: [],
   };
+}
+
+// ── Randomised evidence (W1-T12143) ──────────────────────────────────────────────────────────
+
+/**
+ * Randomised evidence for the adopt-mount class (W1-T12143): the source beside the observational sweep above.
+ *
+ * Two producers report randomised evidence on which provider should serve a capability at an effort:
+ * `routing.experiment.result` (W1-T12142, one row per experiment per UTC day, each task assigned its arm at
+ * random) and `routing.policy.estimate` (W1-T14146, one row per capability/effort/class cell per day, weighted
+ * by the headroom auction's logged draw probabilities). Each producer sets its own status and winner.
+ *
+ * Invariant: {@link randomisedMountRecommendations} reads the newest row of each experiment and cell and never
+ * re-decides it. Only a row marked concluded with a winner proposes; running, underpowered and no-difference
+ * propose nothing. A cell inside a concluded experiment's capability and effort uses the experiment's result.
+ *
+ * A candidate covers the auctioned routes rows (no `provider:`) whose model resolves to the capability and whose
+ * effort matches (and, for a cell, whose class matches). A routes row's schema takes a `provider` (mounts.ts
+ * `parseMount`), so the winner is written there. A routes row cannot pick a provider's model; the candidate lists
+ * `capabilities.claude_candidates` and `capabilities.codex` do. A result whose arm is not the model the table
+ * serves first is a finding naming that list, and a winner with no routes row is a finding naming
+ * `capabilities.provider_preference`.
+ *
+ * The recommender's Tier Invariant gate ({@link tierInvariantViolation}) runs on every row a candidate edits.
+ * Falsifier: test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts.
+ */
+export const RANDOMISED_EXPERIMENT_STEP = "routing.experiment.result";
+export const RANDOMISED_ESTIMATE_STEP = "routing.policy.estimate";
+export type RandomisedStep = typeof RANDOMISED_EXPERIMENT_STEP | typeof RANDOMISED_ESTIMATE_STEP;
+export type RandomisedProvider = "claude" | "codex";
+
+/** One arm of one pipeline as its producer reported it: the label, its provider, its positive rate and its tasks. */
+export interface RandomisedArm {
+  label: string;
+  provider: RandomisedProvider;
+  rate: number;
+  tasks: number;
+}
+
+/** One active pipeline's comparison, quoted from its producer: `difference` is the second arm minus the first,
+ *  with that producer's own interval at its own confidence. For `review` the positive outcome is a FAILED review. */
+export interface RandomisedPipeline {
+  pipeline: string;
+  first: RandomisedArm;
+  second: RandomisedArm;
+  difference: number;
+  lower: number;
+  upper: number;
+  confidence: number;
+}
+
+/** What a concluded randomised row says, as {@link RandomisedMountRecommendation} carries it. */
+export interface RandomisedEvidence {
+  /** `randomised`: an experiment assigned each task its arm. `randomised-by-auction`: the auction's logged draws. */
+  kind: "randomised" | "randomised-by-auction";
+  step: RandomisedStep;
+  /** The experiment id, or the estimate's cell key. */
+  id: string;
+  day: string;
+  capability: string;
+  effort: string;
+  /** A cell's class; absent for an experiment, which covers every class at its capability and effort. */
+  taskClass?: string;
+  winner: { label: string; provider: RandomisedProvider };
+  loser: { label: string; provider: RandomisedProvider };
+  pipelines: RandomisedPipeline[];
+  /** The smallest bound, over the pipelines, of the winner's advantage interval: above 0 whenever its producer
+   *  declared the winner, so it is the candidate's shadow guard and never a second decision. */
+  advantageLow: number;
+  /** The fewest tasks either arm has in any pipeline. */
+  minTasks: number;
+}
+
+export interface RandomisedRow {
+  type: string;
+  risk: string;
+  taskClass: string;
+}
+
+/** A concluded randomised winner in the recommendation shape `mountCandidate` reads beside {@link MountRecommendation}:
+ *  `cellKey` names the evidence (`experiment:<id>` or `estimate:<cell>`), `rows` the routes rows it covers. */
+export interface RandomisedMountRecommendation {
+  kind: "recommendation";
+  cellKey: string;
+  rows: RandomisedRow[];
+  randomised: RandomisedEvidence;
+  note: string;
+}
+
+/** Either source's recommendation, as the config gardener's adopt-mount class reads them. */
+export type AdoptMountRecommendation = MountRecommendation | RandomisedMountRecommendation;
+
+/** A winner the table cannot express, and the setting that can. */
+export interface RandomisedFinding {
+  step: RandomisedStep;
+  id: string;
+  day: string;
+  setting: string;
+  detail: string;
+}
+
+export type RandomisedRefusalReason =
+  | "unknown-experiment"
+  | "running"
+  | "underpowered"
+  | "no-difference"
+  | "experiment-decides"
+  | "tier-invariant"
+  | "nothing-to-change";
+
+export interface RandomisedRefusal {
+  step: RandomisedStep;
+  id: string;
+  day: string;
+  reason: RandomisedRefusalReason;
+  detail: string;
+}
+
+export interface RandomisedOutcomes {
+  recommendations: RandomisedMountRecommendation[];
+  findings: RandomisedFinding[];
+  refusals: RandomisedRefusal[];
+}
+
+type EvidenceRow = Record<string, unknown>;
+const RANDOMISED_PIPELINES = ["build", "fix", "review"] as const;
+const PIPELINE_RATE: Readonly<Record<string, string>> = { build: "merge rate", fix: "accepted-fix rate", review: "failed-review rate" };
+const isEvidenceRecord = (value: unknown): value is EvidenceRow => value !== null && typeof value === "object" && !Array.isArray(value);
+const evidenceText = (value: unknown): string => (typeof value === "string" ? value : "");
+/** Code-unit order: locale-independent. */
+const codeUnitOrder = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+/** A table record read with a key from a ledger row: only the record's own entries, never its prototype's. */
+const ownEntry = <T>(record: Readonly<Record<string, T>> | undefined, key: string): T | undefined =>
+  record !== undefined && Object.hasOwn(record, key) ? record[key] : undefined;
+
+/** The newest row of `step` per `keyField`: the latest `day`, then the latest `ts`, then the greater serialisation.
+ *  A total order, so the union's read order never decides which row wins and a superseded row never does. */
+function newestEvidence(rows: readonly EvidenceRow[], step: RandomisedStep, keyField: string, payloadField: string): Map<string, { day: string; payload: EvidenceRow }> {
+  const best = new Map<string, { day: string; ts: string; serial: string; payload: EvidenceRow }>();
+  for (const row of rows) {
+    const key = evidenceText(row[keyField]);
+    const day = evidenceText(row.day);
+    const payload = row[payloadField];
+    if (row.step !== step || key === "" || day === "" || !isEvidenceRecord(payload)) continue;
+    const candidate = { day, ts: evidenceText(row.ts), serial: JSON.stringify(row), payload };
+    const held = best.get(key);
+    const order = held === undefined ? 1
+      : codeUnitOrder(candidate.day, held.day) || codeUnitOrder(candidate.ts, held.ts) || codeUnitOrder(candidate.serial, held.serial);
+    if (order > 0) best.set(key, candidate);
+  }
+  return new Map([...best].sort(([a], [b]) => codeUnitOrder(a, b)).map(([key, { day, payload }]) => [key, { day, payload }]));
+}
+
+/** The model the table serves FIRST for `provider` at `capability`/`effort`, and the setting that lists it. */
+function servedFirst(mounts: Mounts, provider: RandomisedProvider, capability: string, effort: string): { setting: string; model: string | undefined } {
+  return provider === "claude"
+    ? { setting: `capabilities.claude_candidates.${capability}`, model: ownEntry(mounts.capabilities?.claudeCandidates, capability)?.[0] }
+    : { setting: `capabilities.codex.${capability}.${effort}`, model: ownEntry(ownEntry(mounts.capabilities?.codex, capability), effort)?.[0] };
+}
+
+/** The result's two arms mapped to their providers through the experiment's own `arms`, in the result's order
+ *  (`differences` are its second arm minus its first); undefined unless one is Claude and the other Codex. */
+function experimentArms(experiment: RoutingExperiment, result: Partial<RoutingExperimentResult>): [RandomisedEvidence["winner"], RandomisedEvidence["winner"]] | undefined {
+  const providerOf = new Map(Object.entries(experiment.arms).map(([provider, label]) => [label, provider]));
+  const arms = (Array.isArray(result.arms) ? result.arms : []).map((arm) => ({ label: evidenceText(arm?.arm), provider: providerOf.get(evidenceText(arm?.arm)) }));
+  const [first, second] = arms;
+  if (arms.length !== 2 || first?.provider === second?.provider || !arms.every((arm) => arm.provider === "claude" || arm.provider === "codex")) return undefined;
+  return arms as [RandomisedEvidence["winner"], RandomisedEvidence["winner"]];
+}
+
+/** The first arm whose treatment is not the model the table serves first: the measured comparison is not the
+ *  one the table now makes, and a routes row cannot pick a provider's model. */
+function staleTreatment(mounts: Mounts, experiment: RoutingExperiment, arms: readonly RandomisedEvidence["winner"][]): { setting: string; detail: string } | undefined {
+  for (const arm of arms) {
+    const served = servedFirst(mounts, arm.provider, experiment.capability, experiment.effort);
+    const treatment = arm.provider === "claude" ? experiment.claudeModel : experiment.codexModel;
+    if (served.model !== undefined && treatment.test(served.model)) continue;
+    return {
+      setting: served.setting,
+      detail: `${experiment.id} measured its ${arm.label} arm on ${arm.provider} as /${treatment.source}/, but ${served.setting} ` +
+        `serves ${served.model ?? "no model"} first; a routes row can name a provider, not its model, so it cannot carry the ` +
+        `measured choice — ${served.setting} is the setting that holds it.`,
+    };
+  }
+  return undefined;
+}
+
+function experimentPipelines(result: Partial<RoutingExperimentResult>, arms: readonly RandomisedEvidence["winner"][]): RandomisedPipeline[] {
+  return RANDOMISED_PIPELINES.flatMap((pipeline) => {
+    const interval = result.differences?.[pipeline]?.rate;
+    const first = result.arms?.[0]?.pipelines?.[pipeline];
+    const second = result.arms?.[1]?.pipelines?.[pipeline];
+    if (!interval || typeof first?.rate !== "number" || typeof second?.rate !== "number") return [];
+    return [{ pipeline, first: { ...arms[0]!, rate: first.rate, tasks: first.tasks }, second: { ...arms[1]!, rate: second.rate, tasks: second.tasks },
+      difference: interval.difference, lower: interval.lower, upper: interval.upper, confidence: interval.confidence }];
+  });
+}
+
+function estimatePipelines(estimate: Partial<RoutingPolicyEstimate>): RandomisedPipeline[] {
+  return RANDOMISED_PIPELINES.flatMap((pipeline) => {
+    const entry = estimate.pipelines?.[pipeline];
+    const claude = entry?.policies?.["always-claude"];
+    const codex = entry?.policies?.["always-codex"];
+    const d = entry?.difference;
+    if (!d || typeof claude?.estimate !== "number" || typeof codex?.estimate !== "number") return [];
+    return [{ pipeline, first: { label: "always-claude", provider: "claude" as const, rate: claude.estimate, tasks: claude.tasks },
+      second: { label: "always-codex", provider: "codex" as const, rate: codex.estimate, tasks: codex.tasks },
+      difference: d.estimate, lower: d.lower, upper: d.upper, confidence: d.confidence }];
+  });
+}
+
+/** The lower bound of `winner`'s advantage in one pipeline: the producer's interval on second minus first, turned
+ *  so the winner's side is positive (for `review` a lower failed-review rate is the better one). */
+function advantageBound(p: RandomisedPipeline, winner: RandomisedProvider): number {
+  const favoursSecond = (p.second.provider === winner) === (p.pipeline !== "review");
+  return favoursSecond ? p.lower : -p.upper;
+}
+
+const percent = (rate: number): string => `${(rate * 100).toFixed(1)}%`;
+
+/** The evidence quoted for a reviewer: per pipeline, both rates with their tasks, the difference and its interval. */
+export function randomisedEvidenceNote(e: RandomisedEvidence): string {
+  const source = e.kind === "randomised"
+    ? `Randomised experiment ${e.id} (${e.step}, ${e.day})`
+    : `Randomised by the headroom auction: the inverse-propensity estimate of cell ${e.id} (${e.step}, ${e.day})`;
+  const pipelines = e.pipelines.map((p) =>
+    `${p.pipeline} ${PIPELINE_RATE[p.pipeline] ?? "rate"}: ${p.first.label} ${percent(p.first.rate)} of ${p.first.tasks} tasks, ` +
+    `${p.second.label} ${percent(p.second.rate)} of ${p.second.tasks} tasks; ${p.second.label} minus ${p.first.label} ` +
+    `${p.difference.toFixed(3)}, ${Math.round(p.confidence * 1000) / 10}% interval ${p.lower.toFixed(3)} to ${p.upper.toFixed(3)}`);
+  return `${source} concluded ${e.winner.label} (${e.winner.provider}) over ${e.loser.label} (${e.loser.provider}) at ` +
+    `${e.capability}/${e.effort}${e.taskClass === undefined ? "" : `/${e.taskClass}`}. ${pipelines.join(". ")}.`;
+}
+
+/** The routes rows at `capability`/`effort` (and `taskClass`, when given), in table order. */
+function routeRowsAt(mounts: Mounts, capability: string, effort: string, taskClass: string | undefined): Array<RandomisedRow & { mount: Mount }> {
+  const rows: Array<RandomisedRow & { mount: Mount }> = [];
+  for (const [type, byRisk] of Object.entries(mounts.routes)) {
+    for (const [risk, byClass] of Object.entries(byRisk)) {
+      for (const [cls, mount] of Object.entries(byClass)) {
+        if (mounts.capabilities?.claude[mount.model] !== capability || mount.effort !== effort || (taskClass !== undefined && cls !== taskClass)) continue;
+        rows.push({ type, risk, taskClass: cls, mount });
+      }
+    }
+  }
+  return rows;
+}
+
+/** The candidate for one concluded winner over the auctioned rows it covers, or the finding or refusal instead. */
+function proposeRandomised(out: RandomisedOutcomes, mounts: Mounts, e: Omit<RandomisedEvidence, "advantageLow" | "minTasks">): void {
+  const evidence: RandomisedEvidence = {
+    ...e,
+    advantageLow: Math.min(...e.pipelines.map((p) => advantageBound(p, e.winner.provider))),
+    minTasks: Math.min(...e.pipelines.flatMap((p) => [p.first.tasks, p.second.tasks])),
+  };
+  const where = `${e.capability}/${e.effort}${e.taskClass === undefined ? "" : `/${e.taskClass}`}`;
+  const at = routeRowsAt(mounts, e.capability, e.effort, e.taskClass);
+  if (at.length === 0) {
+    const setting = `capabilities.provider_preference.${e.capability}`;
+    out.findings.push({ step: e.step, id: e.id, day: e.day, setting,
+      detail: `${e.id} concluded ${e.winner.label} (${e.winner.provider}) at ${where}, and no routes row rides ${where} to carry it; ` +
+        `${setting} is the setting that holds the provider choice, for every effort of ${e.capability}.` });
+    return;
+  }
+  const rows: RandomisedRow[] = [];
+  for (const row of at) {
+    if (row.mount.provider !== undefined) continue;
+    const violation = tierInvariantViolation(mounts, row.mount.model);
+    if (violation === undefined) rows.push({ type: row.type, risk: row.risk, taskClass: row.taskClass });
+    else out.refusals.push({ step: e.step, id: e.id, day: e.day, reason: "tier-invariant", detail: `routes.${row.type}.${row.risk}.${row.taskClass}: ${violation}` });
+  }
+  if (rows.length === 0) {
+    out.refusals.push({ step: e.step, id: e.id, day: e.day, reason: "nothing-to-change",
+      detail: `every routes row at ${where} already names a provider or is refused by the Tier Invariant` });
+    return;
+  }
+  out.recommendations.push({ kind: "recommendation", cellKey: `${e.kind === "randomised" ? "experiment" : "estimate"}:${e.id}`, rows, randomised: evidence,
+    note: randomisedEvidenceNote(evidence) });
+}
+
+/**
+ * The newest `routing.experiment.result` row of each experiment and the newest `routing.policy.estimate` row of
+ * each cell, as candidates, findings and refusals (see this section's header). `experiments` maps a result's arm
+ * labels to providers; a result naming no listed experiment is refused. PURE, like {@link recommendMounts}.
+ */
+export function randomisedMountRecommendations(rows: Iterable<Record<string, unknown>>, mounts: Mounts, experiments: readonly RoutingExperiment[]): RandomisedOutcomes {
+  const all = [...rows];
+  const out: RandomisedOutcomes = { recommendations: [], findings: [], refusals: [] };
+  const decided = new Set<string>();
+  for (const [id, { day, payload }] of newestEvidence(all, RANDOMISED_EXPERIMENT_STEP, "experiment_id", "result")) {
+    const result = payload as Partial<RoutingExperimentResult>;
+    const refuse = (reason: RandomisedRefusalReason, detail: string) => out.refusals.push({ step: RANDOMISED_EXPERIMENT_STEP, id, day, reason, detail });
+    const experiment = experiments.find((candidate) => candidate.id === id);
+    const arms = experiment === undefined ? undefined : experimentArms(experiment, result);
+    if (experiment === undefined || arms === undefined) {
+      refuse("unknown-experiment", `no listed experiment named ${id} maps its two arms to claude and codex`);
+      continue;
+    }
+    if (result.status !== "concluded") {
+      refuse(result.status === "underpowered" ? "underpowered" : "running", `${id} is ${evidenceText(result.status) || "unreadable"} on ${day}`);
+      continue;
+    }
+    const stale = staleTreatment(mounts, experiment, arms);
+    if (stale !== undefined) {
+      out.findings.push({ step: RANDOMISED_EXPERIMENT_STEP, id, day, ...stale });
+      continue;
+    }
+    decided.add(`${experiment.capability}/${experiment.effort}`);
+    const pipelines = experimentPipelines(result, arms);
+    const winner = arms.find((arm) => arm.label === result.winner);
+    const loser = arms.find((arm) => arm.label !== result.winner)!;
+    if (result.conclusion !== "winner" || winner === undefined || pipelines.length === 0) {
+      refuse("no-difference", `${id} concluded with no difference on ${day}`);
+      continue;
+    }
+    proposeRandomised(out, mounts, { kind: "randomised", step: RANDOMISED_EXPERIMENT_STEP, id, day, capability: experiment.capability,
+      effort: experiment.effort, winner, loser, pipelines });
+  }
+  for (const [id, { day, payload }] of newestEvidence(all, RANDOMISED_ESTIMATE_STEP, "cell_key", "estimate")) {
+    const estimate = payload as Partial<RoutingPolicyEstimate>;
+    const refuse = (reason: RandomisedRefusalReason, detail: string) => out.refusals.push({ step: RANDOMISED_ESTIMATE_STEP, id, day, reason, detail });
+    const cell = isEvidenceRecord(estimate.cell) && [estimate.cell.capability, estimate.cell.effort, estimate.cell.taskClass].every((part) => typeof part === "string")
+      ? estimate.cell : undefined;
+    const winner = estimate.winner;
+    const pipelines = estimatePipelines(estimate);
+    if (estimate.status !== "concluded" || estimate.concluded !== true || (winner !== "claude" && winner !== "codex") || cell === undefined || pipelines.length === 0) {
+      refuse(estimate.status === "underpowered" ? "underpowered" : estimate.status === "concluded" ? "no-difference" : "running",
+        `${id} is ${evidenceText(estimate.status) || "unreadable"} on ${day}`);
+      continue;
+    }
+    if (decided.has(`${cell.capability}/${cell.effort}`)) {
+      refuse("experiment-decides", `a concluded experiment at ${cell.capability}/${cell.effort} decides ${id}`);
+      continue;
+    }
+    const loser = winner === "claude" ? "codex" : "claude";
+    proposeRandomised(out, mounts, { kind: "randomised-by-auction", step: RANDOMISED_ESTIMATE_STEP, id, day, capability: cell.capability,
+      effort: cell.effort, taskClass: cell.taskClass, winner: { label: `always-${winner}`, provider: winner },
+      loser: { label: `always-${loser}`, provider: loser }, pipelines });
+  }
+  return out;
 }
