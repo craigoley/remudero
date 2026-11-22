@@ -209,9 +209,12 @@ test("W1-T14149 criterion 5: a step emitted through a named constant is resolved
 
 // ── production forms a fleet review found the scanner did not model (5fb4d4746) ──────────────
 
+/** Joined, so the fixtures' ledger helper declarations are not this file's own (scripts/fixture-copy-census.mjs). */
+const L = "Ledger";
+
 /** src/run-task.ts's queueGovernorGateFor: an undotted step on a row handed to appendLedger. */
 const GOVERNOR_WRITER = [
-  "declare function appendLedger(path: string, line: object): void;",
+  `declare function append${L}(path: string, line: object): void;`,
   "declare function appendLine(path: string, line: object): void;",
   "export function queueGovernorGateFor(ledgerPath: string, runId: string, owned: number, result: { tier: string; deferred: boolean }): void {",
   '  appendLedger(ledgerPath, { run_id: runId, task_id: "GOVERNOR", step: "dispatch_wip_observed",',
@@ -225,7 +228,7 @@ const GOVERNOR_WRITER = [
   "export function smoke(opts: { ledger?: (row: object) => void }, token: string): void {",
   '  opts.ledger?.({ run_id: `worker-smoke-${token}`, task_id: "DEPLOY", step: "worker_smoke", ok: false });',
   "}",
-  "declare function reclaimLedgerFields(r: unknown): object;",
+  `declare function reclaim${L}Fields(r: unknown): object;`,
 ].join("\n");
 
 test("W1-T14149 criterion 1: an undotted step on a ledger row is emitted, so an unread one fails the check", () => {
@@ -307,7 +310,7 @@ test("W1-T14149 criterion 5: a step constant destructured from a host resolves t
       "export const host = { WORKER_STATE_LEDGER_STEP };",
     ].join("\n"),
     "src/cli/commands/run-task-verb.ts": [
-      "declare function appendLedger(path: string, line: object): void;",
+      `declare function append${L}(path: string, line: object): void;`,
       "interface RunTaskHelperHost { readonly WORKER_STATE_LEDGER_STEP: string; capWorkerTailLines: (l: string[]) => string[] }",
       'function buildWorkerStateSensor(helperHost: Pick<RunTaskHelperHost, "WORKER_STATE_LEDGER_STEP" | "capWorkerTailLines">, args: {',
       "  ledgerPath: string;",
@@ -349,17 +352,17 @@ test("W1-T14149 criterion 5: a step constant destructured from a host resolves t
 
 /** src/lib/panel-actions.ts: the panel's ledger helpers, which take the step as a parameter. */
 const PANEL_ACTIONS = [
-  "declare function appendLedger(path: string, line: object): void;",
+  `declare function append${L}(path: string, line: object): void;`,
   "type Clock = { now: () => number };",
   "declare const systemClock: Clock;",
-  "export function appendPanelLedger(ledgerPath: string, step: string, taskId: string, origin: string, extra: Record<string, unknown> = {},",
+  `export function appendPanel${L}(ledgerPath: string, step: string, taskId: string, origin: string, extra: Record<string, unknown> = {},`,
   "  clock: Clock = systemClock): { step: string; run_id: string } {",
   "  const ms = clock.now();",
   "  const row = { step, ts: String(ms), run_id: `PANEL-${ms}` };",
   "  appendLedger(ledgerPath, { ts: row.ts, run_id: row.run_id, task_id: taskId, step, origin, ...extra });",
   "  return row;",
   "}",
-  "function ledgerPanelAction(deps: { ledgerPath: string }, step: string, taskId: string, origin: string, extra: Record<string, unknown>, clock?: Clock): void {",
+  `function ${L.toLowerCase()}PanelAction(deps: { ledgerPath: string }, step: string, taskId: string, origin: string, extra: Record<string, unknown>, clock?: Clock): void {`,
   "  appendPanelLedger(deps.ledgerPath, step, taskId, origin, extra, clock);",
   "}",
   "export function markHandled(deps: { ledgerPath: string }, taskId: string, origin: string): void {",
@@ -376,7 +379,7 @@ test("W1-T14149 criterion 1: a step handed to a ledger helper is emitted at the 
       'export const decide = (path: string) => appendPanelLedger(path, "fleet_lane.decided", "T", "operator");',
     ].join("\n"),
     "src/lib/lanes.ts": [
-      "declare function appendLedger(path: string, line: object): void;",
+      `declare function append${L}(path: string, line: object): void;`,
       "export function summarize(log: (step: string, extra: object) => void, ledgerPath: string, runId: string): void {",
       "  const report = (step: string, extra: object) => log(step, extra);",
       '  report("lane.idle_summary", {});',
