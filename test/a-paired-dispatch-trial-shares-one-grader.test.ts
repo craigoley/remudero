@@ -828,14 +828,15 @@ test("normal dispatch is unchanged whether a pair is sampled or not: paired runt
       trees.push(args.cwd);
       writeFileSync(join(args.cwd, "notes.txt"), "PAIRED-OK\n");
       writeFileSync(join(args.cwd, "holdout.txt"), "HOLDOUT-OK\n");
-      const worker: WorkerResult & { harnessContract: unknown } = {
+      // WorkerResult.harnessContract is the capability record (#20049); this boundary returns the observed runtime receipt.
+      const worker: Omit<WorkerResult, "harnessContract"> & { harnessContract: unknown } = {
         provider: args.mountProvider, sessionId: "fixture-session", costUsd: 1, numTurns: 1, text: "", blocks: [], stderr: "",
         subtype: "success", apiError: false, isError: false, permissionDenials: [], childEnvKeys: [],
         model: request.pin.model, servedModel: request.pin.model, effort: request.pin.effort,
         tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [], qualitySuspect: false,
         harnessContract: runtimeContract(request),
       };
-      return worker;
+      return worker as WorkerResult;
     },
   });
   const result = await runPairedTrial(trialInput(stateDir, writer, taskId, { dispatchAttempt: (request) => {
