@@ -5123,6 +5123,18 @@ export function taskInputAnswerWithLedger(repoRoot: string, ledgerPath: string):
   };
 }
 
+/** W1-T14172: the answer {@link taskInputAnswerWithLedger} decides, read from the same store, rows and published lines,
+ * with no copy and no publish: serve's needs-you list reads held answers through it on its main thread. */
+export function readTaskInputAnswer(repoRoot: string, ledgerPath: string): TaskInputAnswer {
+  const evidence = sharedAnswerEvidence(ledgerPath);
+  return (taskId) => {
+    const read = evidence();
+    const row = newestLedgerTaskAnswer(read.rows(taskId), taskId);
+    return newestTaskAnswer([...answerRecords(questionStoreLines(repoRoot) ?? [], taskId), ...answerRecords(read.lines, taskId),
+      ...(row ? [{ task: taskId, answer: row.answer, ts: row.ts }] : [])], taskId);
+  };
+}
+
 /** W1-T12715: the answer to a held task's question, as one cited line for the build prompt's operator notes. */
 export function renderTaskInputAnswer(task: Pick<Task, "id" | "needs_input">, answer: string | undefined): string {
   if (task.needs_input === undefined || answer === undefined || answer.trim() === "") return "";
