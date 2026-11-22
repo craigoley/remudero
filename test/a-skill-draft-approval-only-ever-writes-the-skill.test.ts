@@ -28,7 +28,7 @@ const tmp = (prefix: string) => mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}${p
 const DRAFT: SkillDraft = {
   name: "implement-clean-single-strike",
   description: "d",
-  markdown: "---\nname: implement-clean-single-strike\ndescription: d\napplies-to: implement\n---\n\n## Procedure\n- step\n",
+  markdown: "---\nname: implement-clean-single-strike\ndescription: d\napplies-to: implement\n---\n\n## Procedure\n- Run `npm test`.\n",
   candidateHash: "c0ffee",
   procedureKey: "proc-1",
   supportingRuns: 3,

@@ -2,7 +2,7 @@ import { operatorReleaseContractChanged, qualifyReleaseEvidence, releaseContract
 import { appendFileSync, closeSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { execFile, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml, type DocumentOptions } from "yaml";
 import { RmdError } from "./errors.js";
@@ -1343,8 +1343,8 @@ export function loadPlanAtRef(
   repoRoot: string,
   planRelPath: string,
   ref = "HEAD",
-  runGit: GitBlobRunner = (args, stdin) =>
-    execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 1 << 26, input: stdin }),
+  runGit: GitBlobRunner = (args, stdin, opts) =>
+    execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: opts?.maxBuffer ?? 1 << 26, input: stdin }),
 ): Plan {
   let monolithBlob: string;
   try {
@@ -1396,11 +1396,11 @@ function withShardBlobs(
   return blobs;
 }
 
-/** `git -C <repoRoot> <args>` as an awaited child (never `execFileSync`), `stdin` piped, the sync default's 64 MiB buffer. */
-export function defaultGitRunnerAsync(repoRoot: string): (args: string[], stdin?: string) => Promise<string> {
-  return (args, stdin) =>
+/** `git -C <repoRoot> <args>` as an awaited child (never `execFileSync`), `stdin` piped, the given bound or 64 MiB. */
+export function defaultGitRunnerAsync(repoRoot: string): AsyncGitBlobRunner {
+  return (args, stdin, opts) =>
     new Promise((resolve, reject) => {
-      const child = execFile("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 1 << 26 }, (err, stdout) => {
+      const child = execFile("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: opts?.maxBuffer ?? 1 << 26 }, (err, stdout) => {
         if (err) reject(err);
         else resolve(stdout);
       });
@@ -1419,7 +1419,7 @@ export async function loadPlanAtRefAsync(
   repoRoot: string,
   planRelPath: string,
   ref = "HEAD",
-  runGit: (args: string[], stdin?: string) => Promise<string> = defaultGitRunnerAsync(repoRoot),
+  runGit: AsyncGitBlobRunner = defaultGitRunnerAsync(repoRoot),
   keepsUnseenDependency?: KeepsUnseenDependency,
   parseCache: PlanBlobCache = planAtRefParseCache(planRelPath),
 ): Promise<Plan> {
@@ -1490,8 +1490,9 @@ function retainParsedBlobs(cache: PlanBlobCache, used: Map<string, CachedPlanBlo
   }
 }
 
-/** Git invoker with optional stdin for `cat-file --batch`; old `(args) => string` fakes still work. */
-export type GitBlobRunner = (args: string[], stdin?: string) => string;
+/** Git invoker with optional stdin and output bound for `cat-file --batch`; old `(args) => string` fakes still work. */
+export type GitBlobRunner = (args: string[], stdin?: string, opts?: { maxBuffer?: number }) => string;
+type AsyncGitBlobRunner = (...args: Parameters<GitBlobRunner>) => Promise<string>;
 
 /** Read blobs in `relPaths` order through one `git cat-file --batch`.
  *  Measured 2026-09-05: 1,079 per-shard spawns took 4,258 ms versus 208 ms batched, on every
@@ -1502,49 +1503,63 @@ export type GitBlobRunner = (args: string[], stdin?: string) => string;
  *  retain their PlanError/GitFetchError wrappers. */
 export function readBlobsAtRef(runGit: GitBlobRunner, ref: string, relPaths: string[]): string[] {
   if (relPaths.length === 0) return [];
-  const request = blobBatchRequest(ref, relPaths, runGit(blobIdListingArgs(ref, relPaths)));
-  return parseBlobBatch(runGit(["cat-file", "--batch"], request), ref, relPaths);
+  const { request, maxBuffer } = blobBatchRequest(ref, relPaths, runGit(blobIdListingArgs(ref, relPaths)));
+  return parseBlobBatch(runGit(["cat-file", "--batch"], request, { maxBuffer }), ref, relPaths);
 }
 
 /** {@link readBlobsAtRef} through an AWAITED runner: the same listing, one `cat-file --batch`, request and framing. */
 export async function readBlobsAtRefAsync(
-  runGit: (args: string[], stdin?: string) => Promise<string>,
+  runGit: AsyncGitBlobRunner,
   ref: string,
   relPaths: string[],
 ): Promise<string[]> {
   if (relPaths.length === 0) return [];
-  const request = await blobBatchRequestAsync(runGit, ref, relPaths);
-  return parseBlobBatch(await runGit(["cat-file", "--batch"], request), ref, relPaths);
+  const { request, maxBuffer } = await blobBatchRequestAsync(runGit, ref, relPaths);
+  return parseBlobBatch(await runGit(["cat-file", "--batch"], request, { maxBuffer }), ref, relPaths);
 }
 
 /**
  * The `cat-file --batch` request for `relPaths` at `ref`, each path asked by its blob id. A `<ref>:<path>` line makes
  * git resolve the path through its directory's tree once per line: over plan/tasks.d's 4,577 entries that cost about
  * 2 ms a shard, 9.86 s for the plan against 0.36 s by id (measured 2026-10-28; #15230). One `git ls-tree` over the
- * paths' directories names every id; a path it does not list as a blob is still asked by path, so git itself
- * answers `missing` for it.
+ * paths' directories names every id and size; a path it does not list as a blob is still asked by path, so git
+ * itself answers `missing` for it, and that batch has no bound of its own.
  */
 export async function blobBatchRequestAsync(
-  runGit: (args: string[], stdin?: string) => Promise<string>,
+  runGit: AsyncGitBlobRunner,
   ref: string,
   relPaths: string[],
-): Promise<string> {
+): Promise<{ request: string; maxBuffer: number | undefined }> {
   return blobBatchRequest(ref, relPaths, await runGit(blobIdListingArgs(ref, relPaths)));
 }
 
-/** `git ls-tree <ref> -- <dir>/...`: every entry in each directory that holds one of `relPaths`. */
+/** `git ls-tree -l --full-tree <ref> -- <dir>/...`: every entry, with its size, in each directory that holds one of
+ *  `relPaths`, named from the repository root wherever git runs. */
 function blobIdListingArgs(ref: string, relPaths: string[]): string[] {
-  const dirs = new Set(relPaths.map((p) => (dirname(p) === "." ? p : `${dirname(p)}/`)));
-  return ["ls-tree", ref, "--", ...[...dirs].sort()];
+  const dirs = new Set(relPaths.map((p) => posix.normalize(p)).map((p) => (dirname(p) === "." ? p : `${dirname(p)}/`)));
+  return ["ls-tree", "-l", "--full-tree", ref, "--", ...[...dirs].sort()];
 }
 
-function blobBatchRequest(ref: string, relPaths: string[], listing: string): string {
-  const ids = new Map<string, string>();
+function blobBatchRequest(ref: string, relPaths: string[], listing: string): { request: string; maxBuffer: number | undefined } {
+  const blobs = new Map<string, { oid: string; size: number | undefined }>();
   for (const line of listing.split("\n")) {
-    const entry = /^\d{6} blob ([0-9a-f]{40,64})\t(.+)$/.exec(line);
-    if (entry) ids.set(entry[2]!, entry[1]!);
+    const entry = /^\d{6} blob ([0-9a-f]{40,64})(?: +(\d+))?\t(.+)$/.exec(line);
+    if (entry) blobs.set(entry[3]!, { oid: entry[1]!, size: entry[2] === undefined ? undefined : Number(entry[2]) });
   }
-  return relPaths.map((p) => ids.get(p) ?? `${ref}:${p}`).join("\n") + "\n";
+  const asked = relPaths.map((p) => blobs.get(posix.normalize(p)));
+  const request = relPaths.map((p, i) => asked[i]?.oid ?? `${ref}:${p}`).join("\n") + "\n";
+  return { request, maxBuffer: blobBatchMaxBuffer(asked) };
+}
+
+/** The bytes `cat-file --batch` writes for blobs asked by id: `<oid> blob <size>\n<contents>\n` each. Undefined when a
+ *  path was asked by path or listed without a size, so the runner keeps its present bound. */
+function blobBatchMaxBuffer(asked: ReadonlyArray<{ oid: string; size: number | undefined } | undefined>): number | undefined {
+  let bytes = 0;
+  for (const blob of asked) {
+    if (blob?.size === undefined) return undefined;
+    bytes += blob.oid.length + " blob ".length + String(blob.size).length + 1 + blob.size + 1;
+  }
+  return bytes;
 }
 
 /** Frame the bytes one `cat-file --batch` printed for `relPaths`, in order; the contract {@link readBlobsAtRef} states. */
