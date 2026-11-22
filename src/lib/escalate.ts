@@ -1126,8 +1126,9 @@ const LAYOUT_SECTIONS = ["options", "recommendation", "details", "tail", "fields
 
 /** Open with the decision summary or the producer's summary, then Options, Recommendation, the raw
  * detail under Details, the footer and notices, and the machine fields last under their own heading.
- * A body that would not fit GitHub's body limit in this order is rendered in the fields-first order
- * instead, byte for byte as before (see {@link renderLegacyIssueBody}): no detail is shortened.
+ * A body that would not fit GitHub's body limit with its hidden lines is rendered in the same order
+ * without them; one that still would not fit is rendered in the fields-first order, byte for byte as
+ * before (see {@link renderLegacyIssueBody}): no detail is shortened either way.
  * W1-T972: always name Host.
  * TRAP: without Host, operators followed crash-loop reports to healthy machines.
  * Why: docs/forensics/escalate.md. */
@@ -1150,10 +1151,13 @@ export function renderIssueBody(e: Escalation, notices: readonly string[] = []):
   const nonce = createHash("sha256").update(JSON.stringify(sections)).digest("hex").slice(0, 16);
   const body = sections.map(([name, text]) =>
     text + `${name === "details" ? "\n\n" : "\n"}<!-- rmd-escalation-layout:v1:${nonce}:${name} -->`).join("");
-  // The new order's headings and hidden lines are longer than the fields-first body. Rather than
-  // cut the detail (and with it, say, the only link to the PR the escalation is about), a body
-  // over the limit keeps the order and the exact bytes it had before this layout existed.
-  return body.length > GITHUB_ISSUE_BODY_LIMIT ? renderLegacyIssueBody(e, notices) : body;
+  if (body.length <= GITHUB_ISSUE_BODY_LIMIT) return body;
+  // The hidden lines are most of the new order's overhead, and they only harden the readers. Rather
+  // than cut the detail (and with it, say, the only link to the PR the escalation is about), a body
+  // over the limit first drops them and keeps the order: the readers find each section by its own
+  // heading. Only a body that still does not fit keeps the exact bytes it had before this layout.
+  const unmarked = sections.map(([, text]) => text).join("");
+  return unmarked.length <= GITHUB_ISSUE_BODY_LIMIT ? unmarked : renderLegacyIssueBody(e, notices);
 }
 
 function escalationFieldLines(e: Escalation): string[] {
@@ -1226,10 +1230,30 @@ const SECTION_OPENERS: readonly { re: RegExp; last: boolean }[] = [
  *  share the last marker's nonce); a section whose marker was deleted ends where the next section's
  *  opening line begins, so deleting any marker, or all of them, still finds the machine fields.
  *  Undefined unless the lead (the text before Options) has the shape renderIssueBody writes: any
- *  fields-first body is then read as before, whatever new-order issue its later prose pastes. */
-function layoutOf(body: string): { eol: string; card: boolean; texts: string[]; fieldsStart: number; fieldsBody: number; fieldsAt: number; rest: string } | undefined {
+ *  fields-first body is then read as before, whatever new-order issue its later prose pastes.
+ *  The body's own markers are those of the first nonce, in order of appearance, whose layout is
+ *  complete and opens the body; a quoted or pasted issue's markers come later or fail the lead
+ *  check, so the last marker never decides which issue the readers believe. With no valid marker
+ *  set, the sections are found by their headings alone (a body whose markers were all deleted). */
+type EscalationLayout = { eol: string; card: boolean; texts: string[]; fieldsStart: number; fieldsBody: number; fieldsAt: number; rest: string };
+function layoutOf(body: string): EscalationLayout | undefined {
+  const nonces = [...new Set([...body.matchAll(LAYOUT_MARKER_RE)].map((m) => m[1]!))];
+  for (const nonce of [...nonces, undefined]) {
+    const layout = layoutWithNonce(body, nonce);
+    if (layout !== undefined) return layout;
+  }
+  return undefined;
+}
+
+/** A card lead is the decision card exactly as renderIssueBody writes it, and never carries a
+ *  fields-first header: an operator note under that heading above a legacy header is not a card. */
+const CARD_LEAD_RE = /^## Decision Summary\r?\n[\s\S]{1,400}?\r?\n\r?\n[\s\S]{1,1200}\r?\n\r?\n\*\*Decision:\*\* [\s\S]{1,600}$/;
+function holdsFieldsHeader(lead: string): boolean {
+  return /^\*\*Class:\*\*/m.test(lead) && /^\*\*Task:\*\*/m.test(lead);
+}
+
+function layoutWithNonce(body: string, nonce: string | undefined): EscalationLayout | undefined {
   const markers = [...body.matchAll(LAYOUT_MARKER_RE)];
-  const nonce = markers.at(-1)?.[1];
   const own = markers.filter((m) => m[1] === nonce);
   const names = ["lead", ...LAYOUT_SECTIONS] as const;
   const slot = (m: RegExpMatchArray) => (m[2] === "card" || m[2] === "summary" ? 0 : names.indexOf(m[2] as typeof names[number]));
@@ -1272,7 +1296,7 @@ function layoutOf(body: string): { eol: string; card: boolean; texts: string[]; 
   // A fields-first body's text before Options is neither, whatever issue its later prose pastes.
   const lead = bySlot.get(0)?.[2];
   const card = lead ? lead === "card" : texts[0]!.startsWith(`## Decision Summary${eol}`);
-  if (card ? !texts[0]!.startsWith(`## Decision Summary${eol}`) : /[\r\n]/.test(texts[0]!)) return undefined;
+  if (card ? !CARD_LEAD_RE.test(texts[0]!) || holdsFieldsHeader(texts[0]!) : /[\r\n]/.test(texts[0]!)) return undefined;
   const heading = /^(?:[ \t]*\r?\n)*## Machine fields[ \t]*\r?\n/.exec(body.slice(fieldsStart, fieldsAt));
   if (!heading || !body.startsWith("**Class:**", fieldsStart + heading[0].length)) return undefined;
   return { eol, card, texts, fieldsStart, fieldsBody: fieldsStart + heading[0].length, fieldsAt, rest };

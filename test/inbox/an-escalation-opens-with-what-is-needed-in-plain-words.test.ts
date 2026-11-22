@@ -765,6 +765,64 @@ test("W1-T12041 criterion 3: a fields-first issue with a loose header and a past
   }
 });
 
+const cardOf = (e: Escalation) => ({
+  headline: "The release needs a decision", what_happened: "The release checks failed twice.",
+  decision: "Choose whether to retry the checks.",
+  options: e.options.map(({ label, detail }) => ({ label, consequence: detail })),
+});
+
+test("W1-T12041 criterion 1: a long body that fits in the fields-first order keeps the new order, with every word of its detail", async (t) => {
+  // Review of the GRILL body from src/lib/triage.ts: 65,309 bytes in the fields-first order fit the
+  // limit, but the hidden layout lines pushed the new order over it, so the body opened with Class.
+  const limit = 65_536;
+  for (const card of [false, true]) {
+    const base = card ? { ...escalation, decisionSummary: cardOf(escalation) } : escalation;
+    const subject = { ...base, detail: `${escalation.detail}\n\n` };
+    subject.detail += "z".repeat(65_309 - legacyRender(subject).length);
+    assert.equal(legacyRender(subject).length, 65_309);
+    const body = renderIssueBody(subject);
+    assert.ok(body.length <= limit);
+    assert.ok(body.startsWith(card ? "## Decision Summary\n" : `${subject.summary}\n\n## Options\n`));
+    assert.ok(body.includes(subject.detail), "no word of the detail is shortened");
+    assert.ok(body.endsWith(["## Machine fields", ...fields].join("\n")));
+    assert.ok(body.indexOf("## Recommendation") < body.indexOf("## Machine fields"));
+    assert.equal(escalationBodyInLegacyOrder(body), legacyRender(subject));
+    await assertReaders(t, body, subject, "OPEN");
+  }
+});
+
+test("W1-T12041 criterion 2: a new-order issue pasted below an intact new-order body leaves the original Task and answer", async (t) => {
+  // Review: the last marker chose the layout, so the pasted raw Markdown's PR-54321 and `pause` were read.
+  for (const card of [false, true]) {
+    const original = card ? { ...escalation, decisionSummary: cardOf(escalation) } : escalation;
+    const pasted = renderIssueBody({ ...escalation, taskId: "PR-54321", headSha: "quoted-head", recommendation: "pause",
+      ...(card ? { decisionSummary: cardOf(escalation) } : {}) });
+    for (const separator of ["\n\n", "\n", "\n\n---\n\n"]) {
+      const body = `${renderIssueBody(original)}${separator}${pasted}`;
+      assert.equal(escalationTaskId(body), "W1-T12041");
+      assert.equal(escalationBodyInLegacyOrder(body).startsWith(fields.join("\n")), true);
+      await assertReaders(t, body, original, "OPEN");
+    }
+  }
+});
+
+test("W1-T12041 criterion 3: an operator's Decision Summary note above a legacy header, with a new layout pasted below, reads as before", async (t) => {
+  // Review: a leading `## Decision Summary` heading was enough to accept the appended layout's Task.
+  for (const card of [false, true]) {
+    const pasted = renderIssueBody({ ...escalation, taskId: "PR-54321", headSha: "quoted-head", recommendation: "pause",
+      ...(card ? { decisionSummary: cardOf(escalation) } : {}) });
+    const legacy = legacyRender(escalation);
+    for (const note of ["## Decision Summary\nHold the release.\n\nOperator note.\n\n**Decision:** wait", "## Decision Summary\nNote"]) {
+      for (const body of [`${note}\n\n${legacy}\n\n${pasted}`, `${note}\n\n${legacy}\n\n${pasted}`.replaceAll("\n", "\r\n")]) {
+        assert.equal(escalationBodyInLegacyOrder(body), body);
+        assert.equal(editEscalationMachineFields(body, (text) => text.replace(/^\*\*Head:\*\*.*$/m, "**Head:** moved")),
+          body.replace(/^\*\*Head:\*\*.*$/m, "**Head:** moved"));
+        await assertReaders(t, body, escalation, "OPEN");
+      }
+    }
+  }
+});
+
 test("the layout marker grammar accepts only a writer marker: v1, a 16-hex nonce and a section name", () => {
   const marker = "<!-- rmd-escalation-layout:v1:0123456789abcdef:fields -->";
   LAYOUT_MARKER_RE.lastIndex = 0;
