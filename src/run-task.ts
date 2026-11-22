@@ -640,7 +640,7 @@ import { readRestartHistoryLines, type RetroCheckCompanions, type RetroReadProje
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { ReviewerWorktreeLeasedError, withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
-import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, gitIn, readReviewerHealthRows, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
+import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, claimHealedDeathEscalation, evaluateReviewerHealth, gitIn, healedChildDiedBeforeJudging, healedChildLedgerMark, healedChildStartedJudging, readReviewerHealthRows, reviewerHealedChildDiedEscalation, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
 // buckets off one exec call for runDaemon's own `readGhQuota` dep, wired below.
@@ -2506,13 +2506,25 @@ export function buildReviewerHealthRoute(
         ...(why === undefined ? {} : { failure: why }) });
     }
     let failure: string | undefined;
+    let exit: FreshTreeExit | undefined;
     let code: number;
+    const mark = healedChildLedgerMark(ledgerPath);
     try {
       code = await (tree.withWorktreeLease ?? withReviewerWorktreeLease)(healed.path, () =>
-        tree.spawnReview(healed.path, [prArg, ...childArgs, REVIEWER_INCIDENT_FLAG, incident.id], (why) => { failure = why; }));
+        tree.spawnReview(healed.path, [prArg, ...childArgs, REVIEWER_INCIDENT_FLAG, incident.id], (why) => { failure = why; },
+          undefined, undefined, undefined, (ended) => { exit = ended; }));
     } catch (error) {
       // COULD NOT RUN: today's path reviews, as it would with no incident; never an older reviewer.
       log("reviewer.healed_review_failed", { incident_id: incident.id, pr: prArg, healed_sha: healed.sha, error: String((error as Error)?.message ?? error) });
+      return normal();
+    }
+    // W1-T14283: a child that died before it could judge also COULD NOT RUN; one that judged, refused or was signalled never falls back.
+    if (healedChildDiedBeforeJudging(code, exit, () => healedChildStartedJudging(ledgerPath, mark, reviewPrNumber(prArg)))) {
+      const why = freshTreeFailureText(failure ?? "");
+      log("reviewer.healed_review_failed", { incident_id: incident.id, pr: prArg, healed_sha: healed.sha, origin_main_sha: healed.originMainSha,
+        offending_sha: incident.offending!.sha, exit_code: code, exit_cause: "not-reported", failure: why });
+      // tryEscalateAsync never rejects; a failed filing is ledgered as escalation.failed.
+      if (claimHealedDeathEscalation(incident)) await tryEscalateAsync(reviewerHealedChildDiedEscalation(incident, why), escalation);
       return normal();
     }
     log("review.ran_from_healed_tree", { incident_id: incident.id, pr: prArg, healed_sha: healed.sha, origin_main_sha: healed.originMainSha,
