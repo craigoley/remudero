@@ -7,7 +7,7 @@
  * a dozen by task_id. A rotated archive never changes, so the set of task ids, PR numbers, run ids and
  * steps it holds, and its time range, can be learned ONCE and kept beside it. The manifest lives in the
  * same durable store as the per-reader rotation digests (cache/rotation-digests/<holder>/<archive>.json),
- * keyed the same way (archive name, size, mtime, reducer version), and a stale, damaged or foreign one is
+ * keyed the same way (archive name, size, mtime, reducer version). A stale, damaged or foreign one is
  * rebuilt, never trusted.
  */
 import { createReadStream, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -221,7 +221,7 @@ export interface LedgerKeyManifestFs {
   unlinkSync: (path: string) => void;
   mkdirSync: (path: string, opts: { recursive: true; mode: number }) => void;
   readdirSync: (path: string) => string[];
-  statSync: (path: string) => { size: number; mtimeMs: number };
+  statSync: (path: string) => { size: number; mtimeMs: number; ctimeMs: number; dev: number; ino: number };
   gunzipSync: (buf: Buffer) => Buffer;
 }
 
@@ -251,13 +251,13 @@ function validManifest(value: unknown): value is LedgerKeyManifest {
   return isStringArray(m.taskIds) && isStringArray(m.runIds) && isStringArray(m.steps) &&
     typeof m.hasInvalidStringTs === "boolean" &&
     Array.isArray(m.prNumbers) && m.prNumbers.every((n) => Number.isSafeInteger(n)) &&
-    Number.isSafeInteger(m.rows) && (m.minTs === undefined || typeof m.minTs === "string") &&
-    (m.maxTs === undefined || typeof m.maxTs === "string");
+    Number.isSafeInteger(m.rows) && ((m.minTs === undefined && m.maxTs === undefined) ||
+      (typeof m.minTs === "string" && typeof m.maxTs === "string" && Date.parse(m.minTs) <= Date.parse(m.maxTs)));
 }
 
 type CachedVerdict = { kind: "hit"; manifest: LedgerKeyManifest } | { kind: "missing" | "stale" | "damaged" | "foreign" | "version" };
 
-function readCached(path: string, archive: string, key: string, fs: LedgerKeyManifestFs): CachedVerdict {
+function readCached(path: string, archive: string, key: string, fs: LedgerKeyManifestFs, coverageKey?: string): CachedVerdict {
   let raw: Buffer;
   try {
     raw = fs.readFileSync(path);
@@ -275,16 +275,17 @@ function readCached(path: string, archive: string, key: string, fs: LedgerKeyMan
   if (digest === null || typeof digest !== "object" || digest.schema !== 1) return { kind: "damaged" };
   if (digest.holder !== LEDGER_KEY_MANIFEST_HOLDER || digest.archive !== archive) return { kind: "foreign" };
   if (digest.reducerVersion !== LEDGER_KEY_MANIFEST_VERSION) return { kind: "version" };
-  if (digest.key !== key) return { kind: "stale" };
+  if (digest.key !== key || (coverageKey !== undefined && digest.coverageKey !== coverageKey)) return { kind: "stale" };
   return validManifest(digest.manifest) ? { kind: "hit", manifest: digest.manifest } : { kind: "damaged" };
 }
 
-function writeManifest(directory: string, path: string, archive: string, key: string, manifest: LedgerKeyManifest, fs: LedgerKeyManifestFs): boolean {
+function writeManifest(id: ReturnType<typeof identity>, manifest: LedgerKeyManifest, fs: LedgerKeyManifestFs): boolean {
+  const { directory, path, archive, key, coverageKey } = id;
   const temp = `${path}.${randomUUID()}.tmp`;
   try {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     fs.writeFileSync(temp, JSON.stringify({ schema: 1, holder: LEDGER_KEY_MANIFEST_HOLDER, reducerVersion: LEDGER_KEY_MANIFEST_VERSION,
-      archive, key, manifest }), { flag: "wx", mode: 0o600 });
+      archive, key, coverageKey, manifest }), { flag: "wx", mode: 0o600 });
     fs.renameSync(temp, path);
     return true;
   } catch {
@@ -294,11 +295,24 @@ function writeManifest(directory: string, path: string, archive: string, key: st
   }
 }
 
-function identity(entry: LedgerManifestEntry, stateDir: string, fs: LedgerKeyManifestFs): { directory: string; path: string; archive: string; key: string } {
+function identity(entry: LedgerManifestEntry, stateDir: string, fs: LedgerKeyManifestFs) {
   const stat = fs.statSync(entry.path);
   const archive = basename(entry.path);
   const directory = ledgerKeyManifestDirectory(stateDir);
-  return { directory, path: join(directory, `${archive}.json`), archive, key: `${stat.size}:${stat.mtimeMs}` };
+  return { directory, path: join(directory, `${archive}.json`), archive,
+    key: `${stat.size}:${stat.mtimeMs}`, coverageKey: `${stat.dev}:${stat.ino}:${stat.ctimeMs}` };
+}
+
+/** Inspect a current manifest without opening its archive on a cache miss. */
+export function readCachedLedgerKeyManifest(stateDir: string, entry: LedgerManifestEntry): LedgerKeyManifest | undefined {
+  try {
+    const id = identity(entry, stateDir, realLedgerKeyManifestFs);
+    const cached = readCached(id.path, id.archive, id.key, realLedgerKeyManifestFs, id.coverageKey);
+    return cached.kind === "hit" ? cached.manifest : undefined;
+  } catch (error) {
+    void error; // An archive that cannot be identified has no verified coverage.
+    return undefined;
+  }
 }
 
 /** The manifest of one rotated archive: read from the store when it is current, else built from the
@@ -308,6 +322,7 @@ export async function readLedgerKeyManifest(
   stateDir: string,
   entry: LedgerManifestEntry,
   fs: LedgerKeyManifestFs = realLedgerKeyManifestFs,
+  options: { verifyCoverage?: boolean } = {},
 ): Promise<LedgerKeyManifestRead> {
   let id: ReturnType<typeof identity>;
   try {
@@ -315,15 +330,17 @@ export async function readLedgerKeyManifest(
   } catch (error) {
     return { kind: "unbuildable", error: (error as NodeJS.ErrnoException).code ?? (error as Error).name };
   }
-  const cached = readCached(id.path, id.archive, id.key, fs);
+  const cached = readCached(id.path, id.archive, id.key, fs, options.verifyCoverage ? id.coverageKey : undefined);
   if (cached.kind === "hit") return cached;
   let manifest: LedgerKeyManifest;
   try {
     manifest = await buildStreamed(entry);
+    const after = identity(entry, stateDir, fs);
+    if (after.key !== id.key || after.coverageKey !== id.coverageKey) return { kind: "unbuildable", error: "archive_changed" };
   } catch (error) {
     return { kind: "unbuildable", error: (error as NodeJS.ErrnoException).code ?? (error as Error).name };
   }
-  const written = writeManifest(id.directory, id.path, id.archive, id.key, manifest, fs);
+  const written = writeManifest(id, manifest, fs);
   return { kind: "built", manifest, rebuiltBecause: cached.kind, writeFailed: !written };
 }
 
@@ -345,10 +362,12 @@ export function readLedgerKeyManifestSync(
   try {
     const buf = fs.readFileSync(entry.path);
     manifest = buildFromBuffer(entry.form === "gzip" ? fs.gunzipSync(buf) : buf);
+    const after = identity(entry, stateDir, fs);
+    if (after.key !== id.key || after.coverageKey !== id.coverageKey) return { kind: "unbuildable", error: "archive_changed" };
   } catch (error) {
     return { kind: "unbuildable", error: (error as NodeJS.ErrnoException).code ?? (error as Error).name };
   }
-  const written = writeManifest(id.directory, id.path, id.archive, id.key, manifest, fs);
+  const written = writeManifest(id, manifest, fs);
   return { kind: "built", manifest, rebuiltBecause: cached.kind, writeFailed: !written };
 }
 

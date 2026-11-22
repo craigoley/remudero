@@ -20,6 +20,7 @@ import {
   ledgerManifestMayHold,
   ledgerRowMatchesKeys,
   pruneLedgerKeyManifests,
+  readCachedLedgerKeyManifest,
   readLedgerKeyManifest,
   readLedgerKeyManifestSync,
   type LedgerKeyQuery,
@@ -1008,12 +1009,19 @@ export function readLedgerUnionRawLinesSync(
 /** Yields the event loop between slices of one file's lines. */
 const yieldTurn = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve));
 
+/** Build coverage independently of any closed-window read, including for existing compacted archives. */
+export async function refreshLedgerArchiveCoverage(stateDir: string): Promise<void> {
+  const archives = ledgerRotationEntries(await nodeReaddir(stateDir), stateDir);
+  for (const entry of archives) await readLedgerKeyManifest(stateDir, entry, undefined, { verifyCoverage: true });
+}
+
 /**
  * {@link readLedgerUnionRawLinesSync} off the event loop: the same files in the same order, the same filters and
  * dedupe ({@link rawLineCollector}) and the same `unread`/`ok` contract. Each file is read and decompressed by
  * libuv's pool, and its lines are scanned {@link LEDGER_ROTATION_LOAD_LINES_PER_TURN} at a time with the loop
  * yielded between slices, so a corpus of hundreds of rotations never holds the loop for one whole file.
- * `untilTs` selects archives by verified row coverage for a closed window. Callers still filter individual rows.
+ * `untilTs` selects archives by cached row coverage for a closed window. Missing coverage is unread.
+ * Callers still filter individual rows.
  */
 export async function readLedgerUnionRawLinesAsync(
   stateDir: string, opts: LedgerUnionRawReadOptions & { untilTs?: string } = {},
@@ -1038,16 +1046,6 @@ export async function readLedgerUnionRawLinesAsync(
   };
 
   const readEntry = async (entry: LedgerCorpusEntry): Promise<void> => {
-    if (maximumTs === undefined) {
-      if (rotationBeforeWindow(entry, minimumTs)) return;
-    } else {
-      // Compaction combines nonadjacent rotations. Only verified row coverage can exclude a closed window.
-      const read = await readLedgerKeyManifest(stateDir, entry);
-      if (read.kind !== "unbuildable") {
-        const { minTs, maxTs } = read.manifest;
-        if (Date.parse(minTs ?? "") > maximumTs || (minimumTs !== undefined && Date.parse(maxTs ?? "") < minimumTs)) return;
-      }
-    }
     let buf: Buffer;
     try {
       const raw = await nodeReadFile(entry.path);
@@ -1079,10 +1077,23 @@ export async function readLedgerUnionRawLinesAsync(
     return { stateDir, archiveFiles, archiveCount: 0, liveFileRead, unread, unclassified, auxiliary, ok: false, rawLines: [], filesRead };
   }
 
-  const rotationsToRead = orderedEntries(rotations, opts);
-  if (opts.liveFirst) await readLive();
-  for (const entry of rotationsToRead) await readEntry(entry);
-  if (!opts.liveFirst) await readLive();
+  const rotationsToRead = orderedEntries(rotations, opts).filter((entry) => {
+    if (maximumTs === undefined) return !rotationBeforeWindow(entry, minimumTs);
+    // Compaction combines nonadjacent rotations. Only verified row coverage can exclude a closed window.
+    const coverage = readCachedLedgerKeyManifest(stateDir, entry);
+    if (!coverage) {
+      unread.push(entry.path);
+      return false;
+    }
+    const { minTs, maxTs } = coverage;
+    return minTs !== undefined && maxTs !== undefined && Date.parse(minTs) <= maximumTs &&
+      (minimumTs === undefined || Date.parse(maxTs) >= minimumTs);
+  });
+  if (maximumTs === undefined || !(opts.refuseIncomplete && unread.length > 0)) {
+    if (opts.liveFirst) await readLive();
+    for (const entry of rotationsToRead) await readEntry(entry);
+    if (!opts.liveFirst) await readLive();
+  }
 
   const ok = !(opts.refuseIncomplete && unread.length > 0);
   return {

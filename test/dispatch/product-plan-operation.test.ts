@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, fstatSync, fsyncSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import fsPromises, { watch } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
+import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
@@ -11,12 +12,13 @@ import { repoRoot } from "#test/helpers/repo-root.js";
 import { test, type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import { compactRotations } from "#src/lib/ledger.js";
-import { readLedgerKeyManifest } from "#src/lib/ledger-key-manifest.js";
+import { refreshLedgerArchiveCoverage } from "#src/lib/ledger-union.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { bootstrapConfirmed } from "#src/lib/product-build.js";
 import { ratifyCliGateway } from "#src/lib/panel-graph.js";
 import {
   PRODUCT_PLAN_OPERATION_LIMITS, productCasePlanText, productPlanLedgerTaskId, productPlanOrigin, ProductPlanOperationService,
+  startProductPlanLedgerArchiveIndex,
   type PlanHandoffOutcome, type PlanHandoffPort, type PlanRepository, type PlanTargetPort,
 } from "#src/lib/product-plan-operation.js";
 import type { ProductRepositoryProvider, ProviderRead } from "#src/lib/product-repository.js";
@@ -334,7 +336,7 @@ test("W1-T10823: the maintained gateway's product plan port validates its target
   const good = { operationId: "a".repeat(64), mode: "create" as const, brief: "Approved product brief:\n{}", repoRoot: root };
   for (const bad of [{ operationId: "short" }, { repoRoot: "relative/path" }, { mode: "expand" as unknown as "create" }, { brief: "   " },
     { brief: "x".repeat(64 * 1024 + 1) }]) {
-    assert.deepEqual(await gateway.productPlan!({ ...good, ...bad }), { outcome: "refused" });
+    assert.deepEqual(await gateway.productPlan!({ ...good, ...bad }), { outcome: "refused", beforeLaunch: true });
   }
   assert.equal(trees, 0, "a refused target never reaches the fresh-source runner");
   assert.ok(!existsSync(ledgerPath), "and writes no ledger row");
@@ -669,31 +671,25 @@ function preloadChildModule(t: TestContext, f: Fixture, source: string) {
 
 test("W1-T13875: a resume of a refused hand-off reads no ledger evidence", async (t) => {
   const f = fixture(t);
-  let launches = 0;
-  let deliveredBrief: string | undefined;
-  const gateway = ratifyCliGateway(f.root, join(f.root, "logs"), { ledgerPath: f.ledgerPath,
-    freshTree: async (action) => { launches++; return action({ path: f.root, sha: HEAD }); } });
-  const first = await ok(f.service({ gateway: { inFlight: gateway.inFlight, productPlan: (call) => {
-    deliveredBrief = call.brief;
-    // Exercise the gateway's validation at its boundary. The service itself only constructs valid commands.
-    return gateway.productPlan!({ ...call, repoRoot: "relative" });
-  } } }).execute(actor, f.command()));
+  let prepares = 0;
+  const gateway = ratifyCliGateway(f.root, join(f.root, "logs"), {
+    ledgerPath: f.ledgerPath,
+    freshTree: async () => { prepares++; throw new Error("fresh target tree is unavailable"); },
+    spawn: () => assert.fail("a failed preparation never launches a child"),
+  });
+  const first = await ok(f.service({ gateway }).execute(actor, f.command()));
   const operationId = first.observation.operationId;
   await new Promise<void>((resolve) => setImmediate(resolve));
   const journal = JSON.parse(readFileSync(journalPath(f), "utf8"));
   assert.deepEqual(journal.operations[operationId].handoff, { outcome: "refused", at: REQUESTED, beforeLaunch: true });
 
-  // Ledger rows that would read as a proposal: a refusal where nothing ran must not even look.
-  const evidence = reader(() => proposalLines(f, operationId).map((line) => {
-    const row = JSON.parse(line);
-    return row.step === "plan.start" ? JSON.stringify({ ...row, brief: deliveredBrief }) : line;
-  }));
+  const evidence = reader(() => assert.fail("a pre-launch refusal never reads the ledger"));
   for (let resume = 0; resume < 2; resume++) {
     const again = await ok(f.service({ gateway: false, readLedgerLines: evidence.read }).execute(actor, f.command()));
     assert.deepEqual([again.replayed, again.observation.operationId, again.observation.state], [true, operationId, "refused"]);
   }
   assert.equal(evidence.reads.length, 0);
-  assert.equal(launches, 0);
+  assert.equal(prepares, 1, "the real gateway refused a valid plan when its fresh tree could not be prepared");
 });
 
 test("W1-T13875: a resume of a refused hand-off reads no ledger evidence once a legacy refusal's window is read", async (t) => {
@@ -746,11 +742,14 @@ test("W1-T13875: a legacy refusal retries an incomplete archive scan without kee
   ] });
   const archive = join(dir, `ledger.${later.replace(/[:.]/g, "-")}.ndjson.gz`);
   const saved = readFileSync(archive);
+  await refreshLedgerArchiveCoverage(dir);
   writeFileSync(archive, "unreadable later archive");
+  await refreshLedgerArchiveCoverage(dir);
   const incomplete = await ok(f.service({ gateway: false }).execute(actor, f.command()));
   assert.deepEqual([incomplete.observation.state, incomplete.observation.proposal], ["unknown", undefined]);
 
   writeFileSync(archive, saved);
+  await refreshLedgerArchiveCoverage(dir);
   const resumed = await ok(f.service({ gateway: false }).execute(actor, f.command()));
   assert.deepEqual([resumed.observation.state, resumed.observation.proposal], ["proposed", PR_URL]);
 });
@@ -1245,6 +1244,7 @@ test("W1-T13875: a resume of a refused hand-off reads no ledger evidence once a 
       { ts: ts(REFUSED_OFFSET - 100), task_id: productPlanLedgerTaskId(operationId), step: "ratify.cli_exited", code: 1 },
       { ts: ts(REFUSED_OFFSET + 3_000), step: "daemon.heartbeat" }] },
   ] });
+  await refreshLedgerArchiveCoverage(dirname(f.ledgerPath));
   const resumed = await ok(f.service({ gateway: false }).execute(actor, f.command()));
   assert.deepEqual([resumed.observation.state, resumed.observation.proposal], ["proposed", PR_URL],
     "the proposal opened before the nonzero exit is recovered from the archive after the first cut");
@@ -1332,6 +1332,22 @@ test("W1-T13875 criterion 3: a view taken while rotation drains the replaced liv
   assert.equal(evidence.reads.length, 0, "the proposal was kept for later resumes");
 });
 
+test("W1-T13875: a proposal's evidence is read once and kept with an abandoned rotation lock", async (t) => {
+  const f = fixture(t);
+  const first = await ok(f.service().execute(actor, f.command()));
+  nativeRun(f, first.observation.operationId, { pr: PR_URL });
+  const lock = `${f.ledgerPath}.rotate.lock`;
+  const holder = JSON.stringify({ pid: 2_147_483_647, host: hostname(), startedAt: new Date().toISOString() });
+  writeFileSync(lock, holder);
+
+  const resumed = await ok(f.service({ gateway: false, ledgerReadBoundMs: 5_000 }).execute(actor, f.command()));
+  assert.deepEqual([resumed.observation.state, resumed.observation.proposal], ["proposed", PR_URL]);
+  assert.equal(readFileSync(lock, "utf8"), holder, "the reader never clears a writer's lock");
+  const unused = reader(() => assert.fail("the saved proposal never reads the stable ledger again"));
+  const replayed = await ok(f.service({ gateway: false, readLedgerLines: unused.read }).execute(actor, f.command()));
+  assert.equal(replayed.observation.proposal, PR_URL);
+});
+
 // ── W1-T13875 review round 2026-11-21: the production window read, a stalled publish, a journaled nonzero exit ─────
 
 test("W1-T13875: a resume of a refused hand-off reads no ledger evidence after keeping a proposal recovered from nonadjacent compacted rotations", async (t) => {
@@ -1360,20 +1376,56 @@ test("W1-T13875: a resume of a refused hand-off reads no ledger evidence after k
   });
   assert.equal(compacted.archiveName, `ledger.${cut(later - 1_000).replace(/[:.]/g, "-")}.ndjson.gz`);
   const excludedPath = `${rotation(excluded)}.gz`;
-  assert.equal((await readLedgerKeyManifest(dir, { path: excludedPath, form: "gzip" })).kind, "built");
+  const trace = join(f.root, "archive-opens");
+  const indexTrace = join(f.root, "index-opens");
+  const indexed = join(f.root, "index-completed");
   preloadChildModule(t, f, `
     import fs from "node:fs";
     import { syncBuiltinESMExports } from "node:module";
-    const read = fs.promises.readFile;
-    fs.promises.readFile = (path, ...args) => {
-      if (path === ${JSON.stringify(excludedPath)}) throw new Error("archive outside the verified window was opened");
-      return read(path, ...args);
+    const indexing = process.argv[2] === "--index-product-plan-ledger";
+    if (indexing) process.on("exit", (code) => {
+      const marker = ${JSON.stringify(indexed)};
+      fs.writeFileSync(marker + ".tmp", String(code));
+      fs.renameSync(marker + ".tmp", marker);
+    });
+    const trace = indexing ? ${JSON.stringify(indexTrace)} : ${JSON.stringify(trace)};
+    const record = (path) => {
+      if (typeof path === "string" && path.startsWith(${JSON.stringify(join(dir, "ledger."))}) &&
+          /\\.ndjson(?:\\.gz)?$/.test(path) && path !== ${JSON.stringify(f.ledgerPath)}) {
+        fs.appendFileSync(trace, path + "\\n");
+      }
     };
+    const stream = fs.createReadStream;
+    const read = fs.promises.readFile;
+    fs.createReadStream = (path, ...args) => { record(path); return stream(path, ...args); };
+    fs.promises.readFile = (path, ...args) => { record(path); return read(path, ...args); };
     syncBuiltinESMExports();
   `);
+  const cold = await ok(f.service({ gateway: false }).execute(actor, f.command()));
+  assert.deepEqual([cold.observation.state, cold.observation.proposal], ["unknown", undefined]);
+  assert.ok(!existsSync(trace), "cold resume never opens an archive to discover its coverage");
+  assert.ok(!existsSync(keptPath(f, operationId)), "missing coverage never settles the refusal");
+
+  const indexFinished = (async () => {
+    for await (const change of watch(f.root, { signal: AbortSignal.timeout(8_000) })) {
+      if (change.filename === "index-completed") return;
+    }
+  })();
+  const stopIndex = startProductPlanLedgerArchiveIndex(f.ledgerPath);
+  try {
+    await indexFinished;
+  } finally {
+    stopIndex();
+  }
+  assert.equal(readFileSync(indexed, "utf8"), "0");
+  assert.ok(readFileSync(indexTrace, "utf8").split("\n").includes(excludedPath),
+    "serve's independent indexer, rather than the resume reader, discovers the excluded archive's bounds");
   const resumed = await ok(f.service({ gateway: false }).execute(actor, f.command()));
   assert.deepEqual([resumed.observation.state, resumed.observation.proposal], ["proposed", PR_URL],
     "the compacted archive still covers the refusal window despite sorting after an out-of-window archive");
+  const openedPaths = readFileSync(trace, "utf8").trim().split("\n");
+  assert.deepEqual(openedPaths, [rotation(cut(2_500)), join(dir, compacted.archiveName)]);
+  assert.ok(!openedPaths.includes(excludedPath));
   const reread = reader(() => []);
   const restarted = await ok(f.service({ gateway: false, readLedgerLines: reread.read }).execute(actor, f.command()));
   assert.equal(restarted.observation.proposal, PR_URL);

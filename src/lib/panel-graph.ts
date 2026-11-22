@@ -3759,7 +3759,7 @@ export interface RatifyCliGateway {
   /** Available only with the owned fresh-source runner; never falls back to an unowned child. */
   improvement?(target: { operationId: string; stateDir: string; repoRoot: string }): Promise<RatifyCliHandoff>;
   /** W1-T10823: ONE typed `rmd plan` run against a verified managed target checkout (`--repo-root`). Same owned runner. */
-  productPlan?(target: RatifyProductPlanTarget): Promise<RatifyCliHandoff>;
+  productPlan?(target: RatifyProductPlanTarget): Promise<RatifyCliHandoff & { beforeLaunch?: true }>;
   approve(proposalId: string): void;
   reframe(proposalId: string, feedback: string, input?: InboxInputReference): void;
 }
@@ -3817,8 +3817,10 @@ export function ratifyCliGateway(repoRoot: string, logDir: string, seams?: Ratif
     }
   };
   const running = new Map<string, number>();
-  const handOff = (s: RatifyCliTree, proposalId: string, args: string[], label: string): Promise<RatifyCliHandoff> => {
+  const handOff = (s: RatifyCliTree, proposalId: string, args: string[], label: string):
+    Promise<RatifyCliHandoff & { beforeLaunch?: true }> => {
     running.set(proposalId, (running.get(proposalId) ?? 0) + 1);
+    let launched = false;
     const record = (step: string, extra: Record<string, unknown>) => {
       try {
         appendPanelLedger(s.ledgerPath, step, proposalId, "ratify-gateway", { verb: args[0], ...extra });
@@ -3833,6 +3835,7 @@ export function ratifyCliGateway(repoRoot: string, logDir: string, seams?: Ratif
         child = (s.spawn ?? spawn)(join(tree.path, "bin", "rmd"), args, {
           cwd: tree.path, detached: true, stdio: ["ignore", log.fd, log.fd], env: { ...process.env, RMD_SELF_SYNC_DONE: "1" },
         });
+        launched = child.pid !== undefined;
       } finally {
         closeSync(log.fd);
       }
@@ -3845,8 +3848,9 @@ export function ratifyCliGateway(repoRoot: string, logDir: string, seams?: Ratif
       child.unref();
     });
     return s.freshTree(runChild)
-      .catch((err: unknown): RatifyCliHandoff => {
+      .catch((err: unknown): RatifyCliHandoff & { beforeLaunch?: true } => {
         record("ratify.handoff_failed", { reason: String((err as Error)?.message ?? err) });
+        if (args[0] === "plan" && !launched) return { outcome: "refused", beforeLaunch: true };
         return { outcome: "unknown" };
       })
       .finally(() => {
@@ -3863,7 +3867,7 @@ export function ratifyCliGateway(repoRoot: string, logDir: string, seams?: Ratif
     ...(seams ? { productPlan(target: RatifyProductPlanTarget) {
       const refused = !/^[a-f0-9]{64}$/.test(target.operationId) || !isAbsolute(target.repoRoot) || (target.mode !== "create" && target.mode !== "clarify") ||
         target.brief.trim().length === 0 || Buffer.byteLength(target.brief) > RATIFY_PRODUCT_PLAN_BRIEF_BYTES;
-      if (refused) return Promise.resolve<RatifyCliHandoff>({ outcome: "refused" });
+      if (refused) return Promise.resolve({ outcome: "refused" as const, beforeLaunch: true as const });
       return handOff(seams, ratifyProductPlanTaskId(target.operationId), ["plan", `--mode=${target.mode}`, target.brief, "--repo-root", target.repoRoot], `product-plan-${target.operationId}`);
     } } : {}),
     approve(proposalId) {

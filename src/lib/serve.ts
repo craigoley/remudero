@@ -150,6 +150,7 @@ import { buildRecordJudgeLabelRoute, fileJudgeLabelStore } from "./judge-calibra
 import { createOperatorAgentRowsSource } from "./operator-agent-read-model.js";
 import { buildOperatorAgentRoutes, createOperatorAgentMemorySource, prewarmOperatorAgentReads, type OperatorAgentMemorySource } from "./operator-agent.js";
 import { buildContextControlsRoutes } from "./context-controls.js";
+import { startProductPlanLedgerArchiveIndex } from "./product-plan-operation.js";
 import type { ProductResearchProvider } from "./product-research.js";
 import { buildProductCaseRoutes, buildProductBuildRoutes, buildProductDeploymentRoutes, buildProductEvaluationRoutes, buildProductRepositoryRoutes, buildProductResearchRoutes, buildProductRoutes } from "./product-routes.js";
 import { automationTriggerLedgerJournal, buildAutomationTriggerRoutes, createAutomationTriggerRegistry, submitAutomationTrigger, type AutomationTriggerRegistry } from "./automation-trigger.js";
@@ -3938,6 +3939,9 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
   server.prependListener("request", (req, res) => recordServeRequest(demand, req, res));
   serveDrain.attach(server);
   viewEventsHandover = routeAssembly.viewEvents.handover;
+  if (deps.panelGraph.ratify?.productPlan) {
+    server.once("listening", () => server.once("close", startProductPlanLedgerArchiveIndex(deps.ledgerPath, deps.log)));
+  }
   if (readModel) {
     serveReadModels.set(server, readModel);
     server.once("listening", readModel.start);

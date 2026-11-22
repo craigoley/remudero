@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readSync, realpathSync,
-  readdirSync, renameSync, statSync, unlinkSync, writeFileSync,
+  closeSync, constants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync,
+  readdirSync, renameSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher,
 } from "node:fs";
 import { lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -11,11 +11,13 @@ import { promisify } from "node:util";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { systemClock, type Clock } from "./clock.js";
+import { parseDrainLockInfo } from "./drain-lock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { ghTextAsync } from "./github-transport.js";
 import { acquireInflightLock, InflightLockError } from "./inflight-lock.js";
+import { isRotationLockHolderStale } from "./ledger.js";
 import { LEDGER_ROTATION_LOCK_SUFFIX } from "./ledger-path.js";
-import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRawLinesAsync } from "./ledger-union.js";
+import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRawLinesAsync, refreshLedgerArchiveCoverage } from "./ledger-union.js";
 import { isHumanHoldCandidate, type GhApiFetcher } from "./open-prs-rest.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import { readTargetRunnerConfig, type TargetRunnerConfig } from "./product-target-config.js";
@@ -210,8 +212,9 @@ export interface PlanTargetPort {
   runnerRegistered(repository: PlanRepository): boolean;
 }
 export type PlanHandoffOutcome = "queued" | "refused" | "unknown";
+export type PlanHandoffResult = { outcome: PlanHandoffOutcome; beforeLaunch?: true };
 export interface PlanHandoffPort {
-  productPlan?(target: { operationId: string; mode: "create" | "clarify"; brief: string; repoRoot: string }): Promise<{ outcome: PlanHandoffOutcome }>;
+  productPlan?(target: { operationId: string; mode: "create" | "clarify"; brief: string; repoRoot: string }): Promise<PlanHandoffResult>;
   /** Accepted calls register synchronously under their ledger task id before returning their promise. */
   inFlight?(taskId: string): boolean;
 }
@@ -281,12 +284,72 @@ const runLedgerReader = promisify(execFile);
 const ledgerReaderLoader = (): string => import.meta.resolve("tsx");
 const ledgerReaderEntry = fileURLToPath(import.meta.url);
 const ledgerReaderArg = "--read-product-plan-evidence";
+const ledgerIndexArg = "--index-product-plan-ledger";
+const archiveIndexIntervalMs = 60_000;
+
+/** Maintain coverage in an off-loop subprocess while serve is listening. Resume only consumes the index. */
+export function startProductPlanLedgerArchiveIndex(ledgerPath: string, log?: (message: string) => void): () => void {
+  const stateDir = dirname(ledgerPath);
+  let active: AbortController | undefined;
+  let changed = false;
+  let stopped = false;
+  const refresh = () => {
+    if (active || stopped) return;
+    changed = false;
+    const controller = new AbortController();
+    active = controller;
+    void Promise.resolve().then(() => {
+      if (controller.signal.aborted) return;
+      return runLedgerReader(process.execPath, ["--import", ledgerReaderLoader(), ledgerReaderEntry, ledgerIndexArg, stateDir],
+        { signal: controller.signal, timeout: archiveIndexIntervalMs, killSignal: "SIGKILL" });
+    })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted && log) log(`product plan ledger archive index: ${String(error)}`);
+      })
+      .finally(() => {
+        active = undefined;
+        if (changed) refresh();
+      });
+  };
+  let watcher: FSWatcher | undefined;
+  try {
+    watcher = watch(stateDir, { persistent: false }, (_event, name) => {
+      if (name !== null && ledgerRotationEntries([name], stateDir).length === 0) return;
+      changed = true;
+      refresh();
+    });
+    watcher.on("error", () => watcher?.close()); // The interval also covers missed change events.
+  } catch (error) {
+    void error; // The first index pass and interval still run if the directory cannot be watched.
+  }
+  const interval = setInterval(refresh, archiveIndexIntervalMs).unref();
+  refresh();
+  return () => { stopped = true; watcher?.close(); clearInterval(interval); active?.abort(); };
+}
+
+function rotationLockSnapshot(path: string): { identity?: string; active: boolean } {
+  const info = lstatSync(path, { bigint: true, throwIfNoEntry: false });
+  if (!info) return { active: false };
+  const identity = `${info.dev}:${info.ino}:${info.ctimeNs}`;
+  if (!info.isFile()) return { identity, active: true };
+  try {
+    const holder = parseDrainLockInfo(readFileSync(path, "utf8"));
+    const stale = holder !== null && Number.isSafeInteger(holder.pid) && holder.pid > 0 &&
+      typeof holder.host === "string" && Number.isFinite(Date.parse(holder.startedAt)) &&
+      isRotationLockHolderStale(holder);
+    // An incomplete lock can belong to a writer between its exclusive open and its first write.
+    return { identity, active: !stale };
+  } catch (error) {
+    if (errno(error, "ENOENT")) return { identity, active: true };
+    throw error;
+  }
+}
 
 /**
  * Subprocess entry. Rotation publishes an archive before replacing the live inode. Check both sides of that swap. After
  * the swap, rows written to the replaced inode reach the new live file only when the rotation drains it, under the
  * rotation lock: the new file can already hold the child's exit while the old one still holds its `pr.opened`. A view
- * taken while that lock is held is never an answer; the parent's deadline bounds the wait.
+ * with a live holder is never an answer; the parent's deadline bounds the wait.
  */
 async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSubject): Promise<LedgerRead> {
   const livePath = ledgerLivePath(stateDir);
@@ -295,21 +358,38 @@ async function readProductPlanLedgerEvidence(stateDir: string, subject: LedgerSu
     return stat && `${stat.dev}:${stat.ino}`;
   };
   const rotationLock = `${livePath}${LEDGER_ROTATION_LOCK_SUFFIX}`;
-  const rotating = () => lstatSync(rotationLock, { throwIfNoEntry: false }) !== undefined;
+  const archiveSnapshot = () => {
+    try {
+      return ledgerRotationEntries(readdirSync(stateDir), stateDir).map(({ path }) => {
+        const stat = statSync(path, { bigint: true, throwIfNoEntry: false });
+        return { path, identity: stat && `${stat.dev}:${stat.ino}:${stat.size}:${stat.ctimeNs}` };
+      });
+    } catch (error) {
+      void error; // An unenumerated or unidentified archive corpus cannot establish evidence.
+      return undefined;
+    }
+  };
   const taskId = productPlanLedgerTaskId(subject.operationId);
   for (;;) {
-    if (rotating()) {
+    const lockBefore = rotationLockSnapshot(rotationLock);
+    if (lockBefore.active) {
       await new Promise<void>((resolve) => setTimeout(resolve, 25));
       continue;
     }
     const before = liveIdentity();
+    const archivesBefore = archiveSnapshot();
+    if (!archivesBefore) return "unread";
     const read = await readLedgerUnionRawLinesAsync(stateDir, { sinceTs: subject.requestedAt, untilTs: subject.untilTs,
       refuseIncomplete: true, keep: keepEvidenceLine(taskId) });
     if (read.unread.includes(stateDir)) return "unread";
+    const archivesAfter = archiveSnapshot();
+    if (!archivesAfter) return "unread";
     const after = liveIdentity();
-    const archives = ledgerRotationEntries(readdirSync(stateDir), stateDir);
-    if (rotating() || before !== after || archives.length !== read.archiveFiles.length ||
-      archives.some((entry, index) => entry.path !== read.archiveFiles[index])) continue;
+    const lockAfter = rotationLockSnapshot(rotationLock);
+    if (lockAfter.active || lockBefore.identity !== lockAfter.identity || before !== after ||
+      archivesBefore.length !== read.archiveFiles.length || archivesBefore.length !== archivesAfter.length ||
+      archivesBefore.some((entry, index) => entry.path !== read.archiveFiles[index] ||
+        entry.path !== archivesAfter[index]!.path || entry.identity !== archivesAfter[index]!.identity)) continue;
     return read.ok ? correlateLedger(subject, taskId, parseEvidenceLines(read.rawLines)) : "unread";
   }
 }
@@ -578,7 +658,7 @@ export class ProductPlanOperationService {
     const gateway = this.options.gateway!;
     this.flying.add(record.operationId);
     let accepted: boolean | undefined;
-    const finished = (outcome: PlanHandoffOutcome) => this.enqueue(async () => {
+    const finished = ({ outcome, beforeLaunch }: PlanHandoffResult) => this.enqueue(async () => {
       // Completion is known in memory even if another writer prevents persisting its outcome.
       // With no durable result or ledger row, observeWith() must report unknown instead of pending.
       this.flying.delete(record.operationId);
@@ -587,19 +667,20 @@ export class ProductPlanOperationService {
         const stored = journal.operations[record.operationId];
         if (!stored) return;
         // The gateway reports a nonzero child exit as refused too. Keep it eligible for proposal recovery.
-        const handoff = { outcome: outcome === "refused" && accepted ? "exited" as const : outcome, at: this.clock.iso(),
-          ...(outcome === "refused" && accepted === false ? { beforeLaunch: true as const } : {}) };
+        const refusedBeforeLaunch = outcome === "refused" && beforeLaunch === true;
+        const handoff = { outcome: outcome === "refused" && !refusedBeforeLaunch && accepted ? "exited" as const : outcome, at: this.clock.iso(),
+          ...(refusedBeforeLaunch ? { beforeLaunch: true as const } : {}) };
         this.commit(paths, { ...journal, operations: { ...journal.operations, [record.operationId]: { ...stored, handoff } } });
       });
     }).catch((error: unknown) => { void error; /* the journal keeps its last durable state; the ledger rows still say what ran */ });
-    let started: Promise<{ outcome: PlanHandoffOutcome }>;
+    let started: Promise<PlanHandoffResult>;
     try { started = gateway.productPlan!({ operationId: record.operationId, mode: record.mode, brief, repoRoot: record.command.repoRoot }); }
     catch (error) {
       // A gateway that throws before returning a promise has handed nothing off; the outcome is recorded unknown, never retried.
       void error; started = Promise.resolve({ outcome: "unknown" as const });
     }
     accepted = gateway.inFlight?.(productPlanLedgerTaskId(record.operationId));
-    void started.then((result) => finished(result.outcome), () => finished("unknown"));
+    void started.then(finished, () => finished({ outcome: "unknown" }));
   }
 
   private inFlight(operationId: string): boolean {
@@ -890,9 +971,12 @@ export class ProductPlanOperationService {
   }
 }
 
-if (import.meta.main && process.argv[2] === ledgerReaderArg) {
-  void readProductPlanLedgerEvidence(process.argv[3]!, JSON.parse(process.argv[4]!) as LedgerSubject).then(
-    (evidence) => process.stdout.write(JSON.stringify(evidence)),
-    (error: unknown) => { process.stderr.write(`${String(error)}\n`); process.exitCode = 1; },
-  );
+if (import.meta.main) {
+  const fail = (error: unknown) => { process.stderr.write(`${String(error)}\n`); process.exitCode = 1; };
+  if (process.argv[2] === ledgerReaderArg) {
+    void readProductPlanLedgerEvidence(process.argv[3]!, JSON.parse(process.argv[4]!) as LedgerSubject)
+      .then((evidence) => process.stdout.write(JSON.stringify(evidence)), fail);
+  } else if (process.argv[2] === ledgerIndexArg) {
+    void refreshLedgerArchiveCoverage(process.argv[3]!).catch(fail);
+  }
 }

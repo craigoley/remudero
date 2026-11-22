@@ -1,6 +1,6 @@
-import { createIncrementalLedgerUnion, readLedgerUnionRawLinesAsync, readLedgerUnionRawLinesSync, realLedgerFs } from "#src/lib/ledger-union.js";
+import { createIncrementalLedgerUnion, readLedgerUnionRawLinesAsync, readLedgerUnionRawLinesSync, realLedgerFs, refreshLedgerArchiveCoverage } from "#src/lib/ledger-union.js";
 import assert from "node:assert/strict";
-import { appendFileSync, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, createReadStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -406,6 +406,34 @@ test("strict ledger readers distinguish a readable empty directory from an actua
       assert.deepEqual("rows" in result ? result.rows : result.rawLines, []);
     }
   }
+});
+
+test("a closed archive window requires current coverage even after same-size, same-mtime replacement", async (t) => {
+  const dir = tmpStateDir();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const archive = join(dir, "ledger.2026-01-04T00-00-00-000Z.ndjson");
+  const replacement = join(dir, "replacement");
+  const mtime = new Date("2026-01-04T00:00:00Z");
+  const line = (day: string) => JSON.stringify({ ts: `2026-01-${day}T00:00:00.000Z`, step: "plan.start" });
+  const read = () => readLedgerUnionRawLinesAsync(dir, {
+    sinceTs: "2026-01-02T00:00:00.000Z", untilTs: "2026-01-03T00:00:00.000Z", refuseIncomplete: true,
+  });
+
+  writeFileSync(archive, line("04") + "\n");
+  utimesSync(archive, mtime, mtime);
+  assert.deepEqual((await read()).unread, [archive]);
+  await refreshLedgerArchiveCoverage(dir);
+  const skipped = await read();
+  assert.deepEqual([skipped.ok, skipped.filesRead, skipped.rawLines], [true, 0, []]);
+
+  writeFileSync(replacement, line("02") + "\n");
+  utimesSync(replacement, mtime, mtime);
+  renameSync(replacement, archive);
+  const cold = await read();
+  assert.deepEqual([cold.ok, cold.filesRead, cold.unread], [false, 0, [archive]]);
+  await refreshLedgerArchiveCoverage(dir);
+  const covered = await read();
+  assert.deepEqual([covered.ok, covered.filesRead, covered.rawLines], [true, 1, [line("02")]]);
 });
 
 
