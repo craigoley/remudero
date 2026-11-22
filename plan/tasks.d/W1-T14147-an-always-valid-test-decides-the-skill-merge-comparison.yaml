@@ -20,6 +20,7 @@
     - test/learning/a-skill-that-costs-more-than-it-saves-stops-being-offered.test.ts
     - test/learning/a-stale-skill-retirement-is-withdrawn-not-approved.test.ts
     - test/skill-lifecycle.test.ts
+    - test/learning/a-withheld-arm-is-drawn-per-task.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -37,6 +38,12 @@
       Pekelis, Walsh, "Always Valid Inference: Continuous Monitoring of A/B Tests", arXiv 1512.04922) and runs in production A/B
       platforms.
     - The reviewer known-answer pass (W1-T12145) reuses this module to stop spending once a comparison is decided.
+    SCOPE AMENDED for a seventh pinned suite (read at origin/main 77d91a0c2 against #20129's head a5f09565d):
+    - test/learning/a-withheld-arm-is-drawn-per-task.test.ts (W1-T14137) pins the `pending-shipment` basis and builds
+      ten-run comparisons that the confidence sequence leaves undecided. Design step 4 names this change for six suites;
+      this is a seventh, and acceptance-author-gate refuses #20129 for it (canonical-task-scope-exceeded).
+    - Only its fixtures and expected basis text change, as step 4 allows, and every test title stays verbatim. No
+      criterion, proof or falsifier changes.
   design: |
     1. Add src/lib/sequential-test.ts, a pure module. It holds an mSPRT for a difference of two proportions with a normal mixing
        distribution, whose variance τ² is a declared constant. It returns:
