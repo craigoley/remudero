@@ -9,7 +9,12 @@ import { readFileSync } from "node:fs";
 import { cpus, loadavg } from "node:os";
 import { join } from "node:path";
 import { cpuWeightShare, publishedLaneCpuBound, readCpuWeightShare } from "./lane-governor.js";
-import { readProviderRoutingStatus, type ProviderRoutingStatus } from "./provider-routing-status.js";
+import {
+  creditsLaneRoom,
+  PROVIDER_ROUTING_READING_MAX_AGE_MS,
+  readProviderRoutingStatus,
+  type ProviderRoutingStatus,
+} from "./provider-routing-status.js";
 
 /** W1-T11129 — the share now lives beside its reader in lane-governor.ts; re-exported for this module's callers. */
 export { cpuWeightShare };
@@ -45,6 +50,9 @@ export interface ReviewProviderCapacityObservation {
   /** The router's 60 s cache had lapsed, but the reading was recent enough to be judged fresh by
    *  {@link REVIEW_PROVIDER_READING_MAX_AGE_MS}. Diagnostic only: nothing branches on it. */
   cacheLapsed?: boolean;
+  /** W1-T13855: the squeeze is carried by the Codex credits lane ({@link creditsLaneRoom}), so a raw
+   *  headroom below the reserve is not a shortage of provider room. */
+  creditsLane?: boolean;
 }
 
 export interface ReviewSettlementObservation {
@@ -190,6 +198,8 @@ export interface ReviewCapacityEvidence {
   providerHeadroomPct?: number;
   providerReservePct?: number;
   providerStatusAgeMs?: number;
+  /** W1-T13855: present when the Codex credits lane carried the provider squeeze this sample. */
+  providerCreditsLane?: true;
   reviewSuccesses: number;
   reviewFailures: number;
   reviewTimeouts: number;
@@ -592,6 +602,8 @@ export function selectAdaptiveReviewWidth(
       reason = notReviewsCpu ? "cpu-pressure-not-review" : "backlog-not-sustained";
       restoreBase();
     } else if (
+      // W1-T13855: a squeeze the credits lane carries is provider room; host bounds above still decide.
+      observation.provider.creditsLane !== true &&
       observation.provider.headroomPct! < observation.provider.reservePct! + policy.providerAllowancePct
     ) {
       healthySamples = 0;
@@ -643,6 +655,7 @@ export function selectAdaptiveReviewWidth(
     ...(finite(observation.provider.headroomPct) ? { providerHeadroomPct: observation.provider.headroomPct } : {}),
     ...(finite(observation.provider.reservePct) ? { providerReservePct: observation.provider.reservePct } : {}),
     ...(finite(observation.provider.ageMs) ? { providerStatusAgeMs: observation.provider.ageMs } : {}),
+    ...(observation.provider.creditsLane === true ? { providerCreditsLane: true as const } : {}),
     reviewSuccesses: observation.settlements.successes,
     reviewFailures: observation.settlements.failures,
     reviewTimeouts: observation.settlements.timeouts,
@@ -753,7 +766,7 @@ export function readReviewHostObservation(
  *  commonest `review.capacity` reason (142 of 316 rows) at provider_status_age_ms ~500-800 s, so
  *  the lane above base could almost never be earned. KIND: PRIMARY CONTROL — every sample consults
  *  it to decide whether a lapsed reading may authorise the lane above base. */
-export const REVIEW_PROVIDER_READING_MAX_AGE_MS = 900_000;
+export const REVIEW_PROVIDER_READING_MAX_AGE_MS = PROVIDER_ROUTING_READING_MAX_AGE_MS;
 
 export function reviewProviderObservation(status: ProviderRoutingStatus, nowMs: number): ReviewProviderCapacityObservation {
   const observedMs = status.observedAt ? Date.parse(status.observedAt) : Number.NaN;
@@ -780,6 +793,7 @@ export function reviewProviderObservation(status: ProviderRoutingStatus, nowMs: 
     ...(ageMs !== undefined ? { ageMs } : {}),
     ...(status.state === "blocked" ? { refused: true } : {}),
     ...(cacheLapsed ? { cacheLapsed: true } : {}),
+    ...(creditsLaneRoom(status, nowMs) ? { creditsLane: true } : {}),
   };
 }
 
@@ -1002,6 +1016,7 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
       provider_headroom_pct: result.decision.evidence.providerHeadroomPct ?? null,
       provider_reserve_pct: result.decision.evidence.providerReservePct ?? null,
       provider_status_age_ms: result.decision.evidence.providerStatusAgeMs ?? null,
+      provider_credits_lane: result.decision.evidence.providerCreditsLane === true,
       review_successes: result.decision.evidence.reviewSuccesses,
       review_failures: result.decision.evidence.reviewFailures,
       review_timeouts: result.decision.evidence.reviewTimeouts,

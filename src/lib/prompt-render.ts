@@ -137,7 +137,11 @@ export type FixReviewFinding = { criterionIndex: number; path: string; line: num
 
 export interface FixEvidence {
   planGateFindings?: readonly { check: string; firstLine: string }[];
-  review?: { unmetCriteria: (CriterionVerdict & { criterionIndex?: number })[]; summary: string; findings?: FixReviewFinding[] };
+  review?: {
+    unmetCriteria: (CriterionVerdict & { criterionIndex?: number })[]; summary: string; findings?: FixReviewFinding[];
+    /** W1-T14136: the visible criteria the last review passed; the reviewer-unmet prompt lists them under KEEP MET. */
+    metCriteria?: readonly { criterionIndex: number; claim: string; proof: string }[];
+  };
   ciFailures?: CiFailure[];
   /** W1-T106: the merge-conflict mode's ONLY input — conflicting files + both sides' log since merge-base. */
   mergeConflict?: MergeConflictEvidence;
@@ -245,6 +249,12 @@ function renderUnmetCriteria(review: NonNullable<FixEvidence["review"]>): string
       ].join("\n");
     })
     .join("\n");
+}
+
+function keepMetLines(met: NonNullable<NonNullable<FixEvidence["review"]>["metCriteria"]>): string[] {
+  if (met.length === 0) return [];
+  return ["", "KEEP MET: these criteria passed the last review. Keep them passing; the self-check judges all of them before the push.",
+    ...met.map((c) => `${c.criterionIndex}. claim: ${c.claim}\n   proof: ${c.proof}`)];
 }
 
 /** W1-T10661: a paste-ready Acceptance block naming each unmet claim and proof verbatim, so a
@@ -896,6 +906,7 @@ export function renderFixPrompt(opts: {
     `${summary}`,
     "",
     list,
+    ...keepMetLines(opts.evidence.review?.metCriteria ?? []),
     ...(n > 0 ? ["", ...FIX_CLASS_NOT_PROBE_LINES] : []),
     ...footer,
   ].join("\n");

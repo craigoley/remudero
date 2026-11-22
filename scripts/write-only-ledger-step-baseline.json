@@ -994,8 +994,6 @@
     "reviewer_replay.result",
     "risk_judge.parse_attempt",
     "risk_judge.typed_shadow",
-    "routing.experiment.result",
-    "routing.policy.estimate",
     "run.agent_wait_heap",
     "run.disk_reclaim",
     "run.handoff_declined",
@@ -1429,5 +1427,8 @@
     "worktree_retire.read_failed",
     "worktree_retire.would_retire"
   ],
-  "recordOnly": {}
+  "recordOnly": {
+    "config.randomised_finding": "An operator-facing finding naming the routing setting that can carry a randomised winner the mounts table cannot express; the config gardener re-reads it only to write each finding once per evidence day.",
+    "config.randomised_recommendations_unread": "A diagnostic for a failed read of the randomised evidence; it records the error and changes no candidate."
+  }
 }

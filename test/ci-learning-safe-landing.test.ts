@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -21,6 +21,7 @@ import {
   CI_LEARNING_LESSONS_FILE,
   type CiLearningShardDraft,
 } from "../src/lib/measurement-cadence.js";
+import { readMergedCiLessons, readMergedCiLessonsAsync } from "#src/lib/ci-lesson-recurrence.js";
 
 const GIT_ENV = {
   ...process.env,
@@ -522,11 +523,11 @@ test("W1-T3542 criterion 3: generated CLI and operator docs describe queue-backe
 /** A checkout whose WORKING TREE is behind origin/main, where origin/main already carries a shard
  *  with `origin` — the daemon's operator checkout between self-syncs, after yesterday's landing PR
  *  merged and acknowledgeMergedCiLearningShards emptied the pending queue. */
-function checkoutBehindMainCarrying(origin: string): { bareOrigin: string; checkout: string } {
+function checkoutBehindMainCarrying(origin: string, prs = [4321]): { bareOrigin: string; checkout: string } {
   const bareOrigin = makeBareOrigin();
   const checkout = cloneRoot(bareOrigin);
   mkdirSync(join(checkout, "plan", "tasks.d"), { recursive: true });
-  writeFileSync(join(checkout, "plan", "tasks.d", "W1-T9020-merged.yaml"), ciLearningShardYaml(draft(origin), "W1-T9020"), "utf8");
+  writeFileSync(join(checkout, "plan", "tasks.d", "W1-T9020-merged.yaml"), ciLearningShardYaml({ ...draft(origin), prs }, "W1-T9020"), "utf8");
   git(checkout, "add", "-A");
   git(checkout, "commit", "--quiet", "-m", "chore(ci-learning): land pending lessons");
   git(checkout, "push", "--quiet", "origin", "main");
@@ -591,4 +592,73 @@ test("W1-T4190: an unreadable origin/main is reported, not read as no merged fin
   }
   assert.equal(errors.length, 1, "the unreadable read is named once");
   assert.match(errors[0], /origin\/main's filed origins are unreadable.*bad revision/);
+});
+
+test("W1-T14140 criterion 6: the scheduled rung and the hand-run verb read the filed lessons, so a recurred gate reopens live", async (t) => {
+  const root = stateRoot();
+  const base = "ci-learning:4200:ci-gate";
+  const { checkout } = checkoutBehindMainCarrying(base, [4200, 4300]);
+  assert.deepEqual(ciLearningPlanOrigins(checkout), []);
+  const cadence = async (checkoutRoot: string, pending: string[] = []) => {
+    const filed: string[] = [];
+    await buildCiLearningCadenceRunner({
+      root, checkoutRoot, loadWindow: () => repairedWindow(), pendingOrigins: () => pending,
+      handFixInput: (at) => ({ rows: [], now: at }), recordFire: () => {}, recordAttempt: () => {},
+      fileShards: (drafts) => { filed.push(...drafts.map((d) => d.findingId)); return { filed: [], skipped: [], refused: [] }; },
+      mintTaskId: () => "W1-T900006", windowDays: 1,
+    })();
+    return filed;
+  };
+  const expected = ["ci-learning:4321#r1:ci-gate"];
+  assert.deepEqual(await cadence(checkout), expected, "the scheduled rung reopens using the merged watermark");
+  assert.deepEqual(await cadence(checkout, expected), [], "a newer queued reopen is held until it can be judged");
+
+  const logs = t.mock.method(console, "log", () => {});
+  const manual = (checkoutRoot: string) => {
+    const landed: string[] = [];
+    const code = ciLearningCommand(["--force"], {
+      root, checkoutRoot, loadWindow: () => repairedWindow(),
+      landShards: (drafts) => { landed.push(...drafts.map((d) => d.findingId)); return { filed: [], skipped: [], refused: [] }; },
+    });
+    assert.equal(code, 0);
+    return landed;
+  };
+  assert.deepEqual(manual(checkout), expected, "the manual verb reopens using the merged watermark");
+
+  const latest = "ci-learning:4290#r2:ci-gate";
+  const { checkout: twiceReopened } = checkoutBehindMainCarrying(latest, [4290, 4300]);
+  mkdirSync(join(twiceReopened, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(twiceReopened, "plan", "tasks.d", "W1-T9021-local.yaml"),
+    ciLearningShardYaml({ ...draft(base), prs: [4200, 4300] }, "W1-T9021"));
+  assert.deepEqual(ciLearningPlanOrigins(twiceReopened), [base]);
+  assert.deepEqual(await cadence(twiceReopened), []);
+  assert.deepEqual(manual(twiceReopened), []);
+  assert.ok(logs.mock.calls.some((c) => String(c.arguments[0]).includes("HANDED TO THE FLOW LADDER ci-gate")), "the hand-off is named");
+  const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(ledger.filter((r) => r.step === "ci_learning.ladder_handoff").map((r) => r.finding_id), [latest, latest]);
+
+  git(checkout, "update-ref", "-d", "refs/remotes/origin/main");
+  mkdirSync(join(checkout, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(checkout, "plan", "tasks.d", "W1-T9021-local.yaml"),
+    ciLearningShardYaml({ ...draft(base), prs: [4200, 4300] }, "W1-T9021"));
+  assert.deepEqual(await cadence(checkout), [], "an unreadable fetched plan does not authorize a reopen from a partial view");
+  assert.deepEqual(manual(checkout), []);
+});
+
+test("W1-T14140 criterion 6: both lesson reads of origin/main find no lesson where main files none, and read unknown when the grep itself fails", async (t) => {
+  // Both callers' reads really shell out to git: the scheduled rung's async read and the hand-run verb's sync one.
+  const checkout = cloneRoot(makeBareOrigin());
+  // origin/main holds no lesson shard: `git grep -l` exits 1, which is an empty set, never an unreadable one.
+  assert.deepEqual(readMergedCiLessons(checkout), { status: "measured", lessons: [] });
+  assert.deepEqual(await readMergedCiLessonsAsync(checkout), { status: "measured", lessons: [] });
+
+  // Any other grep failure is not an empty set: a shard directory outside the repository makes git refuse the pathspec.
+  const outside = mkdtempSync(join(tmpdir(), "rmd-ci-learning-outside-plan-"));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  mkdirSync(join(checkout, ".remudero"), { recursive: true });
+  writeFileSync(join(checkout, ".remudero", "layout.json"), JSON.stringify({ planDir: outside }));
+  for (const read of [readMergedCiLessons(checkout), await readMergedCiLessonsAsync(checkout)]) {
+    assert.equal(read.status, "unreadable");
+    assert.match(read.status === "unreadable" ? read.reason ?? "" : "", /outside repository/);
+  }
 });

@@ -94,7 +94,8 @@ import { deriveTaskClass, implementRouteClass } from "../../lib/task-class.js";
 import { readFixRoutingRows } from "../../lib/fix-routing-learner.js";
 import { DEFAULT_RISK_POLICY, readRiskPolicy, realRiskJudge, resolveRiskJudgeRoleMount, riskJudgeDiffInputBudget, riskJudgePlanContext, riskJudgePlanContextDigest, riskJudgeSpendCollector, runRiskJudge, type RiskJudgeChangeView, type RiskJudgeInput, type RiskJudgeVerdict, withoutRiskJudgePatches } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
-import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, skillsInjectedEvent, skillWithheldUnderRetirement, stagedSkillRetirements, type ObservedSkillSelection } from "../../lib/skill-workshop.js";
+import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_WITHHOLDING_SHARE, skillsInjectedEvent, skillWithheldUnderRetirement, stagedSkillRetirements, type ObservedSkillSelection } from "../../lib/skill-workshop.js";
+import { SKILL_ARM_EPOCH, TASK_ARM_UNIT, taskArmWithheld } from "../../lib/task-arm.js";
 import { ContainmentError, probeContainment, type ProbeExecutor } from "../../lib/containment.js";
 import { ProviderCapacityBlockedError, assertOpenWeightToolBoundary } from "../../lib/worker-provider.js";
 import { IsolationError, probeIsolation, type ProbeExecutor as IsolationProbeExecutor } from "../../lib/isolation.js";
@@ -112,7 +113,7 @@ import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { buildBatchedGithub, classifyGhFailure, deriveStatus, dispatchesWithoutNewOwnedPr, ghGateway, ghRequiredStatusCheckContexts, projectPlan, readLedgerLines, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type StatusProjection, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "../../lib/status.js";
 import { dedupeRollupByLatestAttempt, buildFixProgressInput, terminalStateReason, type ActionableGateFailure, type CiFailure, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MergeConflictEvidence, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type RedBaseRefreshFacts, type SweepDeps, type RegistrationChange, trackRepairLadder, type FixRoundBranchClaim } from "../../lib/sweep.js";
 import { classifyNoPrShape } from "../../lib/fix-rung-classify.js";
-import { DEFAULT_PRUNE_GRACE_MS, JUDGE_SHADOW_TRIAL_ID, appendQuestion, ghJson, parseDecisionRequest, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, cacheTokenLedgerFields, capStderrExcerpt, STDERR_EXCERPT_CAP, noPrReportExcerpt, listRegisteredWorktrees, readRunLock, workerLedgerFields, workerTranscript, resolveCommitAssignment, linkWorktreeNodeModules, reprovisionWorktreeDependencies, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, deliverOperatorAnswerToRunningWorker, workerContinuation, renderTaskInputAnswer, taskInputAnswerWithLedger } from "../../lib/worker.js";
+import { DEFAULT_PRUNE_GRACE_MS, JUDGE_SHADOW_TRIAL_ID, appendQuestion, ghJson, parseDecisionRequest, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, cacheTokenLedgerFields, capStderrExcerpt, STDERR_EXCERPT_CAP, noPrReportExcerpt, listRegisteredWorktrees, readRunLock, workerLedgerFields, workerTranscript, resolveCommitAssignment, linkWorktreeNodeModules, reprovisionWorktreeDependencies, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type WorkerRulePullMeta, type SpawnWorkerArgs, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, deliverOperatorAnswerToRunningWorker, workerContinuation, renderTaskInputAnswer, taskInputAnswerWithLedger } from "../../lib/worker.js";
 import { QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions, runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge } from "../../lib/quiet-worker-watchdog.js";
 import { isCodexWorkerOutputLimitError } from "../../lib/worker-provider.js";
 import { type AddedTestAliasRewrite, type TestAliasRewriter } from "../../lib/added-test-alias-rewrite.js";
@@ -5322,16 +5323,20 @@ async function pinCoreCriteriaAtOpen(planPath: string, task: Task, targetReposit
   }
 }
 
-/** The implement lane's skill selection: each eligible skill withheld on its seeded share of runs, and a skill
- *  with a staged retirement offered only on that share. */
-export function selectImplementSkills(stateRoot: string, repoRoot: string, task: Pick<Task, "type" | "files">, runId: string): ObservedSkillSelection {
+/** The implement lane's skill selection: each eligible skill withheld on its seeded share of tasks, and a skill
+ *  with a staged retirement offered only on that share. W1-T14137: drawn per task, so every run of the task, and
+ *  its fix rounds, land in one arm. */
+export function selectImplementSkills(stateRoot: string, repoRoot: string, task: Pick<Task, "id" | "type" | "files">): ObservedSkillSelection {
   const staged = stagedSkillRetirements(join(stateRoot, "state", "inbox-proposals.json"));
   return observeSkillSelection(
     loadInjectableSkills(join(repoRoot, ".claude", "skills")),
     task.type,
     DEFAULT_KNOWLEDGE_BUDGET_CHARS,
     task.files,
-    (skillName) => skillWithheldUnderRetirement(runId, skillName, staged),
+    (skillName) => skillWithheldUnderRetirement(
+      taskArmWithheld({ taskId: task.id, unit: skillName, share: SKILL_WITHHOLDING_SHARE, epoch: SKILL_ARM_EPOCH }),
+      skillName, staged),
+    { unit: TASK_ARM_UNIT, epoch: SKILL_ARM_EPOCH },
   );
 }
 
@@ -6740,10 +6745,12 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // W1-T4094: only the Claude implement bound gets the rule tool; cash and review/manual keep theirs.
     const ruleLookup = implementTools === IMPLEMENT_CLAUDE_TOOLS
       ? {
-          onPulled: (id: string, status: "found" | "missing" | "error") => log("knowledge.pulled", { id, status }),
+          onPulled: (id: string, status: "found" | "missing" | "error", meta?: WorkerRulePullMeta) =>
+            log("knowledge.pulled", { id, status, ...(meta === undefined ? {} : meta) }),
           learningLookup: {
             homes: { projectDir: learningsDir, userOverallDir: userOverallLearningsHome(config), globalArtifactPath: globalArtifactPath(config) },
             allowedIds: preparedLearnings.selectedIds,
+            selected: preparedLearnings.selectedLearnings,
           },
         }
       : undefined;
@@ -6790,9 +6797,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       "CLAUDE.md",
     );
     // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
-    // matchedLearnings already spends. Each eligible skill is withheld on a seeded share of runs
-    // (skillWithheldForRun), so buildSkillEffectivenessReport has a randomized control cohort.
-    const skillSelection = selectImplementSkills(config.root, repoRoot, task, runId);
+    // matchedLearnings already spends. Each eligible skill is withheld on a seeded share of tasks
+    // (taskArmWithheld, W1-T14137), so buildSkillEffectivenessReport has a randomized control cohort.
+    const skillSelection = selectImplementSkills(config.root, repoRoot, task);
     const injectableSkills = skillSelection.selected;
     const skillsPart = renderSkillsPart(injectableSkills);
     // W1-T3379: unlike skills.injected this is emitted even at zero selection, preserving the

@@ -1,0 +1,6 @@
+- claim: the security-merge-policy lesson carries its own check name as an error signature
+  proof: 'grep: error_signatures: ."security-merge-policy". in learnings/ci.yaml'
+- claim: the leak-grep lesson keeps its existing signature and gains the bare check name beside it
+  proof: 'grep: - "leak-grep"$ in learnings/ci.yaml'
+- claim: a check name holding commas stays one error signature
+  proof: 'grep: error_signatures: ."clock-sweep-report (merge the shards, classify, deliver)". in learnings/ci.yaml'
