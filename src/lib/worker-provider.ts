@@ -54,8 +54,8 @@ import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWind
 import type { ModelApproval } from "./config-schema.js";
 import { cashDeploymentEndpoint, cashDeploymentTarget } from "./config-schema.js";
 import {
-  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, seedFromCanonical, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYTES,
-  TYPECHECK_WARM_PEAK_BYTES, typecheckEnv,
+  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, seedFromCanonical, TYPECHECK_BUILDINFO_NAME,
+  typecheckEnv, typecheckPeakBytes,
 } from "./typecheck-buildinfo.js";
 import { acquireTestSlotAsync, defaultTestSlots, readHostLoad, readMemoryHeadroom, testRunConcurrency, testSlotExecutionAllowed, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { selectFromRoutingPool, type RoutingPoolDecision, type RoutingPoolRequest, type RoutingPoolSnapshot } from "./model-pool.js";
@@ -5912,15 +5912,16 @@ async function executeOpenWeightTool(
         suites = plan.suites.length;
       }
       const scoped = suites === null ? {} : { suites };
-      const slot = args.check === "typecheck" &&
-        !hasUsableTypecheckBuildInfo(join(workerHome, TYPECHECK_BUILDINFO_NAME), installedTypescriptVersion(cwd))
-        ? await acquireTestSlotAsync("typecheck:bwrap", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES }) : undefined;
+      const warm = args.check === "typecheck" &&
+        hasUsableTypecheckBuildInfo(join(workerHome, TYPECHECK_BUILDINFO_NAME), installedTypescriptVersion(cwd));
+      const slot = args.check === "typecheck"
+        ? await acquireTestSlotAsync("typecheck:bwrap", { memoryBytes: typecheckPeakBytes(warm) }) : undefined;
       if (slot && !testSlotExecutionAllowed(slot)) {
         slot.release();
         ledgerRunCheck(ledger, { check: args.check, outcome: "refused", suites, startedAt, reason: slot.note, scopeRule });
         return { check: args.check, ran: false, refused: `NOT_RUN (${slot.note})` };
       }
-      if (args.check === "typecheck") argv = [...argv, ...lowMemoryTypecheckArgs(readMemoryHeadroom(), slot ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES)];
+      if (args.check === "typecheck") argv = [...argv, ...lowMemoryTypecheckArgs(readMemoryHeadroom(), typecheckPeakBytes(warm))];
       try {
         const stdout = await (runCheck ?? runOpenWeightCheck)({
           argv,

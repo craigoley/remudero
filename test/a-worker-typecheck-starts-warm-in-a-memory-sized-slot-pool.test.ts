@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { typecheckStep, type PreflightSpawn } from "#src/lib/commit-message.js";
 import { acquireTestSlot, readMemoryHeadroom } from "#src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { refreshCanonicalSeed, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYTES } from "#src/lib/typecheck-buildinfo.js";
+import { refreshCanonicalSeed, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_WARM_PEAK_BYTES } from "#src/lib/typecheck-buildinfo.js";
 import { NPM_TYPECHECK_SLOT_LABEL, runTypecheck, WORKTREE_BUILDINFO_NAME } from "#src/lib/typecheck-run.js";
 import { worktreeAdd } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -105,7 +105,7 @@ function fleetHost(t: TestContext): { root: string; install: string; managed: st
   return { root, install, managed };
 }
 
-test("cutting a worktree from the managed clone publishes the install root's typecheck seed, so a sandboxed worker's first check runs warm and takes no slot", (t) => {
+test("cutting a worktree from the managed clone publishes the install root's typecheck seed, so a sandboxed worker's first check runs warm at the warm peak", (t) => {
   const slots = slotPool(t);
   const host = fleetHost(t);
   // The install root's own check writes the only buildinfo on the host, as the sweep's merge probe does on the fleet.
@@ -125,12 +125,16 @@ test("cutting a worktree from the managed clone publishes the install root's typ
   const canWrite = (dir: string) => realpathSync(dir) === realpathSync(wt);
   const lines: string[] = [];
   const seen: string[][] = [];
+  const held: Array<Array<{ label: string; memoryBytes?: number }>> = [];
+  const tsc = realTsc(seen);
   const code = runTypecheck(wt, [], {
-    spawn: realTsc(seen), canWrite, testSlot: ROOMY, log: (line) => lines.push(line),
-    acquireSlot: () => assert.fail("a warm first check must not wait for a slot"),
+    spawn: (file, args, cwd) => { held.push(heldRecords(slots)); return tsc(file, args, cwd); },
+    canWrite, testSlot: { ...ROOMY, dir: slots }, log: (line) => lines.push(line),
   });
   assert.equal(code, 0, lines.join("\n"));
-  assert.deepEqual(lines, [], "no typecheck.cold line: the first check started warm");
+  assert.deepEqual(lines.map((line) => JSON.parse(line).step), ["typecheck.warm"], "no typecheck.cold line: the first check started warm");
+  assert.deepEqual(held.map((rows) => rows.map((r) => [r.label, r.memoryBytes])), [[[NPM_TYPECHECK_SLOT_LABEL, TYPECHECK_WARM_PEAK_BYTES]]],
+    "W1-T14153: the warm check asked for the warm peak");
   assert.deepEqual(seen, [["-p", "tsconfig.json", "--noEmit", "--incremental", "--tsBuildInfoFile", join(wt, WORKTREE_BUILDINFO_NAME)]]);
   assert.ok(!existsSync(join(wtGitDir, TYPECHECK_BUILDINFO_NAME)), "nothing was written into the read-only git dir");
   assert.deepEqual(heldRecords(slots), []);
