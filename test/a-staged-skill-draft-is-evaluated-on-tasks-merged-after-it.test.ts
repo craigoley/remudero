@@ -170,8 +170,8 @@ function draft(steps: string[]): SkillDraft {
   return { name: DRAFT_NAME, description: "d", candidateHash: "c0ffee", procedureKey: "proc-stamp", supportingRuns: 3,
     markdown: `---\nname: ${DRAFT_NAME}\ndescription: d\napplies-to: implement\n---\n\n## Procedure\n${steps.map((s) => `- ${s}`).join("\n")}\n` };
 }
-const ONE_STEP = draft(["Run the type checker before the tests."]);
-const TWO_STEPS = draft(["Run the type checker before the tests.", "Rebuild the fixture after every schema change."]);
+const ONE_STEP = draft(["Run `npm run typecheck` before the tests."]);
+const TWO_STEPS = draft(["Run `npm run typecheck` before the tests.", "Rerun `npm run fixtures` after every schema change."]);
 const stampedAt = (registryPath: string): string | undefined =>
   loadProposalRegistry(registryPath).find((p) => p.id === skillDraftProposalId("proc-stamp"))?.skillFileStagedAt;
 const seed = (proposal: Partial<Proposal>): string => {
