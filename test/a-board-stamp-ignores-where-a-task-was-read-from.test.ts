@@ -64,7 +64,10 @@ test("W1-T14326 criterion 1: a stamp ignores the read label, so a plan adopted a
   assert.equal(board.update({ force: true }).full, true, "control: the first derive derives every task");
   w.adopt("b".repeat(40));
   w.later();
-  assert.deepEqual(board.update({ force: true }).rederived, []);
+  const update = board.update({ force: true });
+  assert.equal(update.derived, true, "the forced update ran the derive pass");
+  assert.equal(update.reused, IDS.length, "the new read label preserves every task projection");
+  assert.deepEqual(update.rederived, []);
 });
 
 test("W1-T14326 criterion 2: invariant:content-still-moves — a changed task at a new ref re-derives, only that task does, and the board equals a full derive", (t) => {
