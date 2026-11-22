@@ -26,24 +26,32 @@ export function instanceMode(ownerRepo: string, registryText: string | undefined
   }
 }
 
-function overlayRegistryDeclared(repoRoot: string): boolean {
+/** W1-T13763: the two reads of the overlay pointer, a seam so a test can stage an EACCES on any uid, root included. */
+export interface OverlayPointerIO {
+  readIfExists(path: string): string | undefined;
+  lstat(path: string): unknown;
+}
+
+const OVERLAY_POINTER_FS: OverlayPointerIO = { readIfExists: readFileIfExists, lstat: lstatSync };
+
+function overlayRegistryDeclared(repoRoot: string, io: OverlayPointerIO): boolean {
   try {
-    const text = readFileIfExists(join(repoRoot, ".remudero", "overlay-home.json"));
+    const text = io.readIfExists(join(repoRoot, ".remudero", "overlay-home.json"));
     return text !== undefined
       && parseOverlayHome(text).paths.includes(posix.join(".remudero", DAEMON_INSTANCE_REGISTRY_BASENAME));
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOTDIR") return false;
-    if ((code === "EACCES" || code === "EPERM") && !overlayPointerPresent(repoRoot)) return false;
+    if ((code === "EACCES" || code === "EPERM") && !overlayPointerPresent(repoRoot, io)) return false;
     // The pointer's contents and host path can appear in the underlying error.
     throw new InstanceRegistryRuntimeError("overlay_pointer_unreadable");
   }
 }
 
 /** True only when the pointer is demonstrably there: a denied search of `.remudero` proves nothing exists to honour. */
-function overlayPointerPresent(repoRoot: string): boolean {
+function overlayPointerPresent(repoRoot: string, io: OverlayPointerIO): boolean {
   try {
-    lstatSync(join(repoRoot, ".remudero", "overlay-home.json"));
+    io.lstat(join(repoRoot, ".remudero", "overlay-home.json"));
     return true;
   } catch {
     // ENOENT/ENOTDIR/EACCES/EPERM on the stat: no pointer can be shown, so the legacy live default stands.
@@ -52,14 +60,14 @@ function overlayPointerPresent(repoRoot: string): boolean {
 }
 
 /** A selected registry takes precedence, with the core copy in use until cutover. */
-export function readInstanceRegistryText(repoRoot: string): string | undefined {
+export function readInstanceRegistryText(repoRoot: string, io: OverlayPointerIO = OVERLAY_POINTER_FS): string | undefined {
   const selected = runtimeInstanceRegistryText();
   if (selected !== undefined) return selected;
   try {
     return readFileSync(daemonInstanceRegistryPath(repoRoot), "utf8");
   } catch {
     // A typed refusal stops callers that interpret every mode other than shadow as live.
-    if (overlayRegistryDeclared(repoRoot)) throw new InstanceRegistryRuntimeError("overlay_registry_unreadable");
+    if (overlayRegistryDeclared(repoRoot, io)) throw new InstanceRegistryRuntimeError("overlay_registry_unreadable");
     return undefined;
   }
 }

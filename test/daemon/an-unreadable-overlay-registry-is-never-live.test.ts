@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { instanceMode, readInstanceRegistryText } from "#src/lib/instance-mode.js";
+import { instanceMode, readInstanceRegistryText, type OverlayPointerIO } from "#src/lib/instance-mode.js";
+import { readFileIfExists } from "#src/lib/fs-race-safe.js";
 import { InstanceRegistryRuntimeError, withInstanceRegistryRuntime } from "#src/lib/instance-registry-selection.js";
 
 function fixture(t: TestContext) {
@@ -41,32 +42,42 @@ test("W1-T13763 criterion 2: a missing registry without a pointer still resolves
   assert.equal(instanceMode(ownerRepo, readInstanceRegistryText(root)), "live");
 });
 
-test("W1-T13763 criterion 2: a denied search of .remudero with no pointer still resolves live",
-  { skip: process.getuid?.() === 0 ? "root bypasses permission bits" : false }, (t) => {
+/** An errno error as node:fs throws it, so the reader's code check sees what a real denial carries. */
+function denied(code: "EACCES" | "EPERM", path: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`${code}: permission denied, open '${path}'`), { code });
+}
+
+/** The real reads, with the pointer read (and, when `searchDenied`, its stat) replaced by a staged denial. Uid-independent. */
+function deniedPointerIO(code: "EACCES" | "EPERM", searchDenied: boolean): OverlayPointerIO {
+  return {
+    readIfExists: (path) => { throw denied(code, path); },
+    lstat: (path) => { if (searchDenied) throw denied(code, path); return lstatSync(path); },
+  };
+}
+
+for (const code of ["EACCES", "EPERM"] as const) {
+  test(`W1-T13763 criterion 2: a denied search of .remudero with no pointer still resolves live (${code})`, (t) => {
     const { root } = fixture(t);
-    const stateDir = join(root, ".remudero");
-    chmodSync(stateDir, 0o000);
-    // Restore inside the body: the fixture's rmSync hook is registered first and would run first.
-    try {
-      const text = readInstanceRegistryText(root);
-      assert.equal(text, undefined);
-      assert.equal(instanceMode(ownerRepo, text), "live");
-    } finally {
-      chmodSync(stateDir, 0o700);
-    }
+    const text = readInstanceRegistryText(root, deniedPointerIO(code, true));
+    assert.equal(text, undefined);
+    assert.equal(instanceMode(ownerRepo, text), "live");
   });
 
-test("an unreadable pointer file that is present still refuses even though its directory is searchable",
-  { skip: process.getuid?.() === 0 ? "root bypasses permission bits" : false }, (t) => {
+  test(`an unreadable pointer file that is present still refuses even though its directory is searchable (${code})`, (t) => {
     const { root, pointer: pointerPath } = fixture(t);
     writeFileSync(pointerPath, pointer([registryPath]));
-    chmodSync(pointerPath, 0o000);
-    try {
-      assert.throws(() => readInstanceRegistryText(root), new InstanceRegistryRuntimeError("overlay_pointer_unreadable"));
-    } finally {
-      chmodSync(pointerPath, 0o600);
-    }
+    assert.throws(() => readInstanceRegistryText(root, deniedPointerIO(code, false)),
+      new InstanceRegistryRuntimeError("overlay_pointer_unreadable"));
   });
+}
+
+test("the real pointer reads are the default seam", (t) => {
+  const { root, pointer: pointerPath } = fixture(t);
+  writeFileSync(pointerPath, pointer([registryPath]));
+  const real: OverlayPointerIO = { readIfExists: readFileIfExists, lstat: lstatSync };
+  assert.throws(() => readInstanceRegistryText(root, real), new InstanceRegistryRuntimeError("overlay_registry_unreadable"));
+  assert.throws(() => readInstanceRegistryText(root), new InstanceRegistryRuntimeError("overlay_registry_unreadable"));
+});
 
 test("a pointer for other files leaves the missing registry on the legacy path", (t) => {
   const { root, pointer: pointerPath } = fixture(t);
