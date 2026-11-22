@@ -63,8 +63,8 @@ function probeTree(t: TestContext, root: string): string {
   return lane.dir;
 }
 
-test("W1-T7392: a cold fleet typecheck takes a host test slot and a warm one does not", async (t) => {
-  await t.test("preflight owns a lease during cold tsc and releases it before the warm check", (t) => {
+test("W1-T7392: a cold fleet typecheck takes a host test slot, and W1-T14153: a warm one takes one too", async (t) => {
+  await t.test("preflight owns a lease during cold tsc, releases it, and takes another for the warm check", (t) => {
     const fx = fixture(t);
     tree(fx.root);
     const observed: string[][] = [];
@@ -76,9 +76,9 @@ test("W1-T7392: a cold fleet typecheck takes a host test slot and a warm one doe
     assert.equal(run().ok, true);
     assert.deepEqual(labels(fx.slots), []);
     assert.equal(run().ok, true);
-    assert.deepEqual(observed, [["typecheck:preflight"], []]);
+    assert.deepEqual(observed, [["typecheck:preflight"], ["typecheck:preflight"]]);
   });
-  await t.test("merge-probe owns a cold lease and bypasses it after publishing a seed", async (t) => {
+  await t.test("merge-probe owns a cold lease and a warm one after publishing a seed", async (t) => {
     const fx = fixture(t);
     const lane = probeTree(t, fx.root);
     const observed: string[][] = [];
@@ -90,9 +90,9 @@ test("W1-T7392: a cold fleet typecheck takes a host test slot and a warm one doe
       assert.equal(result.outcome, "passes", JSON.stringify(result));
       assert.deepEqual(labels(fx.slots), []);
     }
-    assert.deepEqual(observed, [["typecheck:merge-probe"], []]);
+    assert.deepEqual(observed, [["typecheck:merge-probe"], ["typecheck:merge-probe"]]);
   });
-  await t.test("bwrap's tool loop owns the cold lease at the runner boundary and bypasses it warm", async (t) => {
+  await t.test("bwrap's tool loop owns the lease at the runner boundary, cold and warm", async (t) => {
     const fx = fixture(t);
     tree(fx.root);
     const observed: string[][] = [];
@@ -115,7 +115,7 @@ test("W1-T7392: a cold fleet typecheck takes a host test slot and a warm one doe
       },
     }, { root: fx.root, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } } as Config,
     { model: "gpt-oss-120b", effort: "low" });
-    assert.deepEqual(observed, [["typecheck:bwrap"], []]);
+    assert.deepEqual(observed, [["typecheck:bwrap"], ["typecheck:bwrap"]]);
     assert.deepEqual(labels(fx.slots), []);
   });
 });

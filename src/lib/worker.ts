@@ -226,7 +226,6 @@ import {
   codexCandidatesForCapability,
   type WorkerExit,
   type CodexCompletionEvidence,
-  buildWorkerHarnessContract, type WorkerHarnessContract,
   withObservedServedModel, forgetReturnedServedModel, observeReturnedServedModel,
 } from "./worker-provider.js";
 import {
@@ -288,7 +287,6 @@ export function workerExitOfError(e: unknown): WorkerExit {
 }
 
 export interface WorkerResult {
-  harnessContract?: WorkerHarnessContract;
   /** Characters in the rendered prompt supplied to the provider adapter. */
   promptChars?: number;
   /** Internal producer receipt for W1-T11119; created only from a terminal provider stream. */
@@ -681,7 +679,6 @@ export function noPrReportExcerpt(r: Pick<WorkerResult, "text" | "blocks">): str
  * max_turns records the cap; stderr_excerpt requires r.isError. Always emit served_model,
  * null when unknown; unreportable models never fail runs (W1-T6, W1-T36, W1-T2245, W1-T303, W1-T238, W1-T2572). */
 export function workerLedgerFields(r: WorkerResult): {
-  harness_contract?: WorkerHarnessContract;
   output_retention?: WorkerResult["outputRetention"];
   continuation?: WorkerContinuationReceipt;
   execution_evidence?: WorkerExecutionEvidenceV1;
@@ -743,7 +740,6 @@ export function workerLedgerFields(r: WorkerResult): {
 } {
   const stderrExcerpt = workerFailureExcerpt(r);
   return {
-    ...(r.harnessContract ? { harness_contract: r.harnessContract } : {}),
     ...(r.outputRetention && Object.values(r.outputRetention)
       .some((output) => typeof output === "object" && output.state !== "complete") ? { output_retention: r.outputRetention } : {}),
     ...(r.mcpIsolation ? { mcp_isolation: r.mcpIsolation } : {}),
@@ -1263,7 +1259,7 @@ export interface SpawnWorkerArgs {
       // The Codex spawn REQUIRES the redirected per-spawn worker home, threaded explicitly rather than inferred from
       // `process.env.HOME` or `args.env` ordering, so a test double is held to the contract the real `spawnCodexWorker` is
       // (W1-T2800).
-      args: SpawnWorkerArgs & { workerHome: string; zdotdir?: string; fixtureSpawn?: boolean },
+      args: SpawnWorkerArgs & { workerHome: string; zdotdir?: string },
       config: Config,
       selection?: Pick<ProviderCapacity, "model" | "effort">,
     ) => Promise<WorkerResult>;
@@ -3044,8 +3040,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         args.providerRouting?.spawnCodex ?? spawnCodexWorker;
       const execution = executionFor("codex");
       const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
-        spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
-          containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
+        spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId, containment: boundContainment }, workerConfig, capacity);
       if (args.providerRouting?.spawnCodex === undefined) {
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
@@ -3138,8 +3133,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       args.providerRouting?.spawnCodex ?? spawnCodexWorker;
     const execution = executionFor("codex");
     const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
-      spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
-        containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
+      spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId, containment: boundContainment }, workerConfig, capacity);
     if (args.providerRouting?.spawnCodex === undefined) {
       assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -3546,7 +3540,6 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       env: childEnv,
       settings: (privateSettings as Options["settings"]) ?? args.settingsFile,
       settingSources: WORKER_SETTING_SOURCES, // real value: settingSources: [] (see WORKER_SPAWN_ISOLATION above)
-      includeHookEvents: true,
       // Run the CLI DETACHED into its own process group and session, so teardown reaches every descendant — including one
       // outliving the CLI's own exit — with a single group signal. This REPLACES the SDK's default local spawn, so
       // `stderrOutput` is fed from THIS closure rather than an `Options.stderr` callback, which the SDK never invokes for a
@@ -3707,7 +3700,6 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         () =>
           collectWorkerResult(liveQuery, {
             childEnvKeys: Object.keys(childEnv).sort(),
-            harness: { fixture: args.queryFn !== undefined || args.containment?.spawn !== undefined, resume: options.resume !== undefined },
             stderrOutput,
             stderrFailure: () => stderrFailure,
             settleOutput: async () => {
@@ -4220,7 +4212,6 @@ export async function collectWorkerResult(
   messages: AsyncIterable<unknown>,
   opts: {
     childEnvKeys: string[];
-    harness?: { fixture: boolean; resume: boolean };
     providerExchangeBinding?: ProviderExchangeBindingV1;
     root?: string;
     runId?: string;
@@ -4297,7 +4288,6 @@ export async function collectWorkerResult(
   let servedModel: string | undefined;
   let providerExchangeDetail: Omit<ProviderExchangeReceiptV1, "version" | keyof ProviderExchangeBindingV1> | undefined;
   let initSummary: WorkerInitSummary | undefined;
-  let preToolInterception: WorkerHarnessContract["preToolInterception"] = "NOT_RUN";
   const compactionEvents: CompactionEvent[] = [];
   const compactionFailures: CompactionFailure[] = [];
   const nowFn = opts.now ?? Date.now;
@@ -4307,16 +4297,6 @@ export async function collectWorkerResult(
       observeWorkerToolLineage(toolLineage, raw);
       const msg = raw as { type?: string; message?: unknown };
       if (msg.type === "system") {
-        const hook = raw as { subtype?: string; hook_event?: string; exit_code?: number; outcome?: string; stdout?: string };
-        if (opts.harness && (hook.subtype === "hook_started" || hook.subtype === "hook_progress" || hook.subtype === "hook_response")
-          && hook.hook_event !== "SessionStart" && hook.hook_event !== "Setup") {
-          if (hook.subtype === "hook_response" && hook.hook_event === "PreToolUse" && preToolInterception !== "denied") {
-            if (hook.exit_code === 2) preToolInterception = "denied";
-            else if (hook.exit_code === 0 && hook.outcome === "success" && hook.stdout === "") preToolInterception = "nonblocking";
-            else if (preToolInterception === "NOT_RUN") preToolInterception = "unknown";
-          }
-          continue;
-        }
         // First init wins: later system/status events cannot erase the original inventory or make unknown become empty.
         initSummary ??= workerInitSummaryFromMessage(raw);
         // Detect a compaction event LIVE off the SDK's own `compact_boundary` system message, reusing the same detector a
@@ -4573,16 +4553,6 @@ export async function collectWorkerResult(
   };
   if (sawResult && providerExchangeDetail && opts.providerExchangeBinding)
     result.providerExchange = sealProviderExchange(opts.providerExchangeBinding, providerExchangeDetail);
-  if (opts.harness) result.harnessContract = buildWorkerHarnessContract("claude", {
-    resume: true, compactionConfigured: result.compactionConfigured, preToolInterception,
-    tested: opts.harness.fixture ? {
-      preToolInterception: preToolInterception === "NOT_RUN" ? undefined : preToolInterception === "unknown" ? "unknown" : "supported",
-      resume: !result.isError && opts.harness.resume ? "supported" : undefined,
-      configuredCompaction: result.compactionConfigured ? "supported" : "unsupported",
-      servedModelIdentity: servedModel === undefined ? "unknown" : "supported",
-      billingProvenance: sdkReportedUsageRatedUsd === undefined ? "unknown" : "supported",
-    } : undefined,
-  });
   return result;
 }
 
@@ -5150,6 +5120,18 @@ export function taskInputAnswerWithLedger(repoRoot: string, ledgerPath: string):
     if (read.answersUnreadable === undefined && read.ledgerUnreadable === undefined) publishAnswers(ledgerPath, store.filter((line) => line.source !== "ledger" && !answerHeld(rows, line)), [...published]);
     const row = newestLedgerTaskAnswer(read.rows(taskId), taskId);
     return newestTaskAnswer([...store, ...published, ...(row ? [{ task: taskId, answer: row.answer, ts: row.ts }] : [])], taskId);
+  };
+}
+
+/** W1-T14172: the answer {@link taskInputAnswerWithLedger} decides, read from the same store, rows and published lines,
+ * with no copy and no publish: serve's needs-you list reads held answers through it on its main thread. */
+export function readTaskInputAnswer(repoRoot: string, ledgerPath: string): TaskInputAnswer {
+  const evidence = sharedAnswerEvidence(ledgerPath);
+  return (taskId) => {
+    const read = evidence();
+    const row = newestLedgerTaskAnswer(read.rows(taskId), taskId);
+    return newestTaskAnswer([...answerRecords(questionStoreLines(repoRoot) ?? [], taskId), ...answerRecords(read.lines, taskId),
+      ...(row ? [{ task: taskId, answer: row.answer, ts: row.ts }] : [])], taskId);
   };
 }
 
