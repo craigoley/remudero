@@ -8,10 +8,12 @@
  * injected recording fake: nothing here posts a status, an issue or a PR.
  */
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import fs, { readFileSync, writeFileSync } from "node:fs";
+import fs, { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { test, type TestContext } from "node:test";
 import * as health from "#src/lib/reviewer-health.js";
 import { upperNormalQuantile, wilsonInterval } from "#src/lib/model-drift.js";
@@ -23,6 +25,7 @@ import { DOWNGRADE_UNCLASSIFIED } from "#src/lib/review-outcome-class.js";
 import { runEscalationReconcile } from "#src/lib/sweep.js";
 import { buildEscalationReconcileCandidatesAsync } from "#src/lib/tick-read-worker.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Row = Record<string, unknown>;
 const PULL = "https://github.com/acme/remudero/pull";
@@ -1216,4 +1219,159 @@ test("W1-T13850 criterion 5: invariant:observe-only — a slow model issue looku
   assert.equal(slow.created.length, 1, "the model judgment completes after the route");
   assert.equal(health.loadReviewerHealthState(slow.statePath).modelIncidents["gpt-6.2-sol"]?.issueUrl, "https://github.com/acme/remudero/issues/1");
   assert.equal(health.loadReviewerHealthState(slow.statePath).incident?.id, incident.id, "the merge keeps the sha incident");
+});
+
+test("W1-T13850 criterion 4: a FAIL whose evidence publishes before the first overlapping evaluation has its clause added before the incident closes", async (t) => {
+  // Review finding (head 5fc1351ee): runReview logs a public FAIL before it publishes the evidence comment. When the
+  // comment was on the PR by the first evaluation whose intervals overlapped, that evaluation skipped the evidence
+  // read and closed the issue, so the 29 of 31 incident closed without ever quoting its latest FAIL's clause.
+  const { rows, claudeShas, solShas } = elevenNineteen();
+  const current = claudeShas.at(-1)!;
+  const latest = rows.at(-1)!;
+  const prUrl = String(latest.pr_url);
+  const headSha = String(latest.head_sha);
+  const digest = `v2:${headSha.padEnd(64, "0")}`;
+  const clause = "the clause published just before the model recovered";
+  const reasons = [`proof executed and PASSED on the PR head (grep: x) — NOTE: reviewer judged the proof non-responsive (semantic downgrade): ${clause}`];
+  Object.assign(latest, { task_id: "W1-T98851", review_input_digest: digest, reasons });
+  const record = renderReviewEvidenceRecord({ pr_url: prUrl, head_sha: headSha, review_input_digest: digest, state: "failure",
+    reviewer_code_sha: String(latest.reviewer_code_sha), capped: false, plan_only: false, partially_executed: false,
+    decision_verdict: { criteria: [] }, unmet_criteria: [], reasons }, "public");
+  const at = "2026-11-19T12:00:00.000Z";
+  let published = false;
+  const readJson: NonNullable<Parameters<typeof readReviewEvidenceRecord>[1]> = async (args) => {
+    if (!String(args[1]).includes(`/issues/${prUrl.split("/").at(-1)}/comments?`)) return [[]];
+    return [published ? [{ id: 501, body: record, created_at: at, updated_at: at, user: { login: "remudero-fleet[bot]", type: "Bot" } }] : []];
+  };
+  const h = harness(t, undefined, readJson);
+  const events: string[] = [];
+  h.issues.comment = async (url, body) => { events.push(`comment ${url} ${body.includes(clause) ? "with-clause" : "without-clause"}`); };
+  const close = h.issues.closeWithComment!;
+  h.issues.closeWithComment = async (url, comment) => { events.push(`close ${url}`); await close(url, comment); };
+  await h.evaluate(null);
+  h.queue.push(...rows);
+
+  await h.evaluate(current);
+  assert.equal(h.created.length, 1, "the divergence opens its one incident");
+  assert.doesNotMatch(h.created[0]!.body, new RegExp(clause), "the record is not on the PR yet");
+  assert.match(h.created[0]!.body, /pending publication/);
+
+  // The comment publishes, and by the next evaluation enough passes accrued that the intervals overlap.
+  published = true;
+  h.queue.push(...repeat(300, () => verdict(solShas[0]!, SOL, "success")));
+  await h.evaluate(current);
+  const sol = divergenceRows(h).at(-1)!.models.find((j) => j.model === SOL.model)!;
+  const [own, base] = [sol.interval as { lower: number; upper: number }, sol.baseline_interval as { lower: number; upper: number }];
+  assert.ok(own.lower <= base.upper && base.lower <= own.upper, "this evaluation's intervals overlap");
+  const issueUrl = "https://github.com/acme/remudero/issues/1";
+  assert.deepEqual(events, [`comment ${issueUrl} with-clause`, `close ${issueUrl}`], "the clause is quoted on the issue, then it closes");
+  assert.equal(health.loadReviewerHealthState(h.statePath).modelIncidents[SOL.model], undefined, "the incident closed on the intervals alone");
+  assert.equal(h.created.length, 1);
+});
+
+test("W1-T13850 criterion 5: a second process's newer cursor and sha judgment survive the background model save", async (t) => {
+  // Review finding (head 5fc1351ee): the daemon and rmd sweep evaluate one state file. With two real writers, the
+  // background model save wrote a copy read before the other process saved, so cursor 3 went back to cursor 2 and a
+  // newer SHA's judgment was erased. Here the second writer is a real second process running the same evaluation.
+  const h = harness(t);
+  await h.evaluate(null);
+  const { rows, claudeShas } = elevenNineteen();
+  h.queue.push(...rows);
+  const dir = join(h.statePath, "..");
+  const newer = fake("newer-reviewer-code-of-the-other-process");
+  const otherRows = repeat(40, () => verdict(newer, SONNET, "success"));
+  const rowsPath = join(dir, "other-rows.json");
+  writeFileSync(rowsPath, JSON.stringify(otherRows));
+  const marker = join(dir, "other-process");
+  const moduleUrl = pathToFileURL(join(REPO_ROOT, "src/lib/reviewer-health.ts")).href;
+  const code = `
+    import { writeFileSync, readFileSync } from "node:fs";
+    const [moduleUrl, statePath, rowsPath, marker, ledgerPath] = process.argv.slice(1);
+    const health = await import(moduleUrl);
+    const rows = JSON.parse(readFileSync(rowsPath, "utf8"));
+    const issues = { create: async () => "https://github.com/acme/remudero/issues/99", listOpen: async () => [],
+      ensureLabel: async () => true, closeWithComment: async () => undefined, comment: async () => undefined };
+    const lane = { openFixPr: async () => { throw new Error("no fix PR"); }, openRevertPr: async () => ({ prUrl: "x" }),
+      readPr: async () => ({ state: "open" }), closePr: async () => undefined };
+    writeFileSync(marker + ".started", "");
+    await health.evaluateReviewerHealthNow({ originMainSha: null, readEvidenceJson: async () => [[]] }, statePath,
+      async () => ({ rows, cursor: { liveOffset: 3 } }), async () => { throw new Error("no git"); },
+      { issues, ledgerPath, runId: "other-process" }, lane,
+      () => undefined, { iso: () => new Date().toISOString() });
+    await health.settleReviewerModelJudgment(statePath);
+    writeFileSync(marker + ".done", "");
+  `;
+  let child: ReturnType<typeof spawn> | undefined;
+  let childExit: Promise<number | null> | undefined;
+  let armed = false;
+  const write = realWriteAtomicIo.writeFileSync;
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  const waitFor = (path: string, ms: number) => {
+    for (const end = Date.now() + ms; !existsSync(path) && Date.now() < end;) Atomics.wait(pause, 0, 0, 20);
+    return existsSync(path);
+  };
+  t.mock.method(realWriteAtomicIo, "writeFileSync", (path: string, content: string | Buffer, mode: number | undefined) => {
+    if (armed && String(path).startsWith(`${h.statePath}.reviewer-health`)) {
+      armed = false;
+      // The background save has read the file and is about to write it: the other process evaluates now.
+      child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code, moduleUrl, h.statePath, rowsPath, marker, h.ledgerPath],
+        { stdio: ["ignore", "ignore", "inherit"] });
+      childExit = new Promise((resolve) => child!.on("exit", (status) => resolve(status)));
+      assert.ok(waitFor(`${marker}.started`, 120_000), "the other process started");
+      // Give its evaluation the time it needs to finish; under the state file's lock it waits for this write instead.
+      waitFor(`${marker}.done`, 3_000);
+    }
+    write(path, content, mode);
+  });
+
+  await h.evaluateRouteOnly(claudeShas.at(-1)!);
+  assert.equal(health.loadReviewerHealthState(h.statePath).cursor?.liveOffset, 2, "this process saved cursor 2");
+  armed = true;
+  await health.settleReviewerModelJudgment(h.statePath);
+  assert.ok(child !== undefined, "the background model save wrote the state file");
+  assert.equal(await childExit, 0, "the other process's evaluation succeeded");
+
+  const saved = health.loadReviewerHealthState(h.statePath);
+  assert.equal(saved.cursor?.liveOffset, 3, "the cursor never moves back");
+  assert.ok(saved.shas[newer] !== undefined, "the other process's newer sha is kept");
+  assert.equal(health.judgeReviewerSha(saved, newer).state, "healthy", "its judgment reads as that process saved it");
+  assert.equal(saved.modelIncidents[SOL.model]?.issueUrl, "https://github.com/acme/remudero/issues/1", "and this process's incident receipt is kept");
+});
+
+test("W1-T13850 criterion 5: an evaluation whose copy is older than the saved file leaves the newer cursor and sha in place", async (t) => {
+  const h = harness(t);
+  await h.evaluate(null);
+  const newer = fake("saved-further-by-another-process");
+  const logs: string[] = [];
+  const decision = await health.evaluateReviewerHealthNow({ originMainSha: null }, h.statePath, async (cursor) => {
+    // While this evaluation reads its rows, another process reads further and saves first.
+    health.withReviewerHealthStateLock(h.statePath, () => {
+      const other = health.loadReviewerHealthState(h.statePath);
+      health.ingestReviewerHealthRows(other, repeat(3, () => verdict(newer, SONNET, "success")));
+      health.saveReviewerHealthState(h.statePath, { ...other, cursor: { liveOffset: 9 } });
+    });
+    return { rows: [verdict(fake("this-evaluation"), SONNET, "success")], cursor: { liveOffset: (cursor?.liveOffset ?? 0) + 1 } };
+  }, async () => { throw new Error("no git"); }, { issues: h.issues, ledgerPath: h.ledgerPath, runId: "t" },
+  { openFixPr: async () => { throw new Error("no"); }, openRevertPr: async () => ({ prUrl: "x" }), readPr: async () => ({ state: "open" as const }), closePr: async () => undefined },
+  (step) => { logs.push(step); }, { iso: () => new Date(clock).toISOString() });
+  await health.settleReviewerModelJudgment(h.statePath);
+  assert.equal(decision.route, "normal");
+  const saved = health.loadReviewerHealthState(h.statePath);
+  assert.equal(saved.cursor?.liveOffset, 9, "the newer cursor stays");
+  assert.ok(saved.shas[newer] !== undefined, "the newer sha stays");
+  assert.ok(logs.includes("reviewer.health_save_superseded"));
+});
+
+test("W1-T13850 criterion 5: a state lock that cannot be opened still saves the sha state and keeps the healed route", async (t) => {
+  const h = harness(t);
+  const incident = writeHealedState(h.statePath);
+  fs.mkdirSync(`${h.statePath}.lock.sqlite`);
+  const sha = fake("no-lock-reviewer");
+  h.queue.push(verdict(sha, SOL, "failure"));
+  const decision = await h.evaluateOuter(sha);
+  assert.deepEqual([decision.route, decision.route === "healed" ? decision.incident.id : null], ["healed", incident.id]);
+  const saved = health.loadReviewerHealthState(h.statePath);
+  assert.equal(saved.cursor?.liveOffset, 1, "the cursor is saved without the lock");
+  assert.ok(saved.shas[sha] !== undefined);
+  assert.ok(h.steps("reviewer.model_divergence_failed").length > 0, "the lock failure is reported");
 });

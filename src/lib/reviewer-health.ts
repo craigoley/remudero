@@ -29,8 +29,9 @@
  * incident per diverged model and changes no route, verdict or sha judgment.
  */
 import { createHash } from "node:crypto";
-import { closeSync, createReadStream, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { closeSync, createReadStream, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
+import { createRequire } from "node:module";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Clock } from "./clock.js";
 import { escalationTaskId, NEEDS_HUMAN_LABEL, renderIssueBody, tryEscalateAsync, type AsyncIssueGateway, type EscalateDeps, type Escalation } from "./escalate.js";
@@ -1095,6 +1096,43 @@ export function saveReviewerHealthState(path: string, state: ReviewerHealthState
   writeAtomic(path, `${JSON.stringify(state)}\n`, { tmpTag: "reviewer-health" });
 }
 
+const requireBuiltin = createRequire(import.meta.url);
+
+/**
+ * W1-T13850 — the daemon and an `rmd sweep` process evaluate one state file at once. Each write re-reads
+ * the file and writes it while this lock is held, so no process writes a copy it read before another
+ * process's write. SQLite's BEGIN IMMEDIATE on a sidecar file is the process boundary, as in
+ * src/lib/cash-allowance-lock.ts: a crashed holder releases its OS lock. The holder only reads and
+ * writes the one file, so the wait is short.
+ */
+export function withReviewerHealthStateLock<T>(statePath: string, action: () => T): T {
+  const { DatabaseSync } = requireBuiltin("node:sqlite") as typeof import("node:sqlite");
+  mkdirSync(dirname(statePath), { recursive: true });
+  const db = new DatabaseSync(`${statePath}.lock.sqlite`, { timeout: 10_000 });
+  let begun = false;
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    begun = true;
+    const result = action();
+    db.exec("COMMIT");
+    begun = false;
+    return result;
+  } finally {
+    if (begun) {
+      try { db.exec("ROLLBACK"); } catch { /* deliberate: keep the action's own error */ }
+    }
+    db.close();
+  }
+}
+
+/** True when `disk` has read the same ledger file further than `ours`: writing ours would move the cursor back. */
+function cursorIsAhead(disk: ReviewerHealthState, ours: ReviewerHealthState): boolean {
+  const a = disk.cursor;
+  const b = ours.cursor;
+  return a !== null && b !== null && disk.seededAt === ours.seededAt && a.afterRotation === b.afterRotation &&
+    a.liveIno === b.liveIno && a.liveOffset > b.liveOffset;
+}
+
 // A full model payload can fail to fit on disk even when the SHA checkpoint fits. Retain it for
 // the next write in this process, keyed to the checkpoint that actually made it to disk.
 const unsavedModelStates = new Map<string, ReviewerHealthState>();
@@ -1306,20 +1344,22 @@ export async function evaluateReviewerHealthNow(
 
   /** Reconcile this evaluation's evidence with the incidents left by earlier evaluations. */
   const reconcileModels = async (judged: EvaluatorModelJudgment[], failsByModel: ReviewerHealthState["modelFails"]): Promise<void> => {
-    const previous = loadReviewerHealthForEvaluation(statePath).modelIncidents;
+    const previous = loadReviewerHealthForEvaluation(statePath).modelIncidents ?? {};
+    const before = new Map(Object.entries(previous).map(([model, incident]) => [model, JSON.stringify(incident)]));
     let modelIncidents = previous;
     for (const j of judged) {
       const pending = modelValue(modelIncidents, j.model);
       const diverged = j.state === "diverged";
       const overlap = j.interval !== null && j.baselineInterval !== null && intervalsOverlap(j.interval, j.baselineInterval);
-      if (pending?.issueUrl && (diverged || !overlap)) {
-        // The issue stays open this evaluation, so its quoted evidence catches up with what has since published.
+      if (pending?.issueUrl) {
+        // Whether the issue stays open or closes below, its quoted evidence first catches up with what has
+        // since published: a FAIL logged before its evidence comment still has its clauses on the issue.
         const caughtUp = await catchUpPublishedEvidence(pending as EvaluatorModelIncident & { issueUrl: string });
         if (caughtUp !== undefined) modelIncidents = { ...modelIncidents, [j.model]: caughtUp };
       }
       if (diverged && pending?.issueUrl) continue;
       if (!diverged && (pending === undefined || !overlap)) continue;
-      const incident: EvaluatorModelIncident = pending ?? { id: `reviewer-model-divergence-${j.model}`, model: j.model,
+      const incident: EvaluatorModelIncident = modelValue(modelIncidents, j.model) ?? { id: `reviewer-model-divergence-${j.model}`, model: j.model,
         provider: j.provider, openedAt: clock.iso(), evidence: j };
       modelIncidents = { ...modelIncidents, [j.model]: incident };
 
@@ -1360,17 +1400,30 @@ export async function evaluateReviewerHealthNow(
       delete modelIncidents[j.model];
       if (issueUrl) log("reviewer.model_divergence_closed", { incident_id: incident.id, ...evaluatorModelFields(j), issue_url: issueUrl });
     }
-    if (modelIncidents === previous) return;
-    const latest = loadReviewerHealthForEvaluation(statePath);
-    latest.modelIncidents = modelIncidents;
-    try {
-      saveReviewerHealthState(statePath, latest);
-      unsavedModelStates.delete(statePath);
-    } catch (error) {
-      // The SHA checkpoint is already committed. Retain the delivery receipt or closure for retry.
-      unsavedModelStates.set(statePath, latest);
-      throw error;
-    }
+    const changed = [...new Set([...Object.keys(previous), ...Object.keys(modelIncidents)])]
+      .filter((model) => JSON.stringify(modelValue(modelIncidents, model)) !== before.get(model));
+    if (changed.length === 0) return;
+    // Another process (the daemon, or rmd sweep) may have written the file since this job began. Re-read it
+    // under the state file's lock and change only the incidents this job changed: the cursor, the sha
+    // judgments and the other models' incidents stay as that process wrote them.
+    withReviewerHealthStateLock(statePath, () => {
+      const latest = loadReviewerHealthForEvaluation(statePath);
+      const incidents = new Map(Object.entries(latest.modelIncidents ?? {}));
+      for (const model of changed) {
+        const next = modelValue(modelIncidents, model);
+        if (next === undefined) incidents.delete(model);
+        else incidents.set(model, next);
+      }
+      latest.modelIncidents = Object.fromEntries(incidents);
+      try {
+        saveReviewerHealthState(statePath, latest);
+        unsavedModelStates.delete(statePath);
+      } catch (error) {
+        // The SHA checkpoint is already committed. Retain the delivery receipt or closure for retry.
+        unsavedModelStates.set(statePath, latest);
+        throw error;
+      }
+    });
   };
 
   /** Ingest `rows`, judge the shas they touched (oldest first, so the onset departs first), then test the
@@ -1430,21 +1483,47 @@ export async function evaluateReviewerHealthNow(
     await step(read.rows, input.originMainSha, true);
   }
   state.cursor = read.cursor;
-  // An earlier model job may have saved an incident while this evaluation was reading rows.
+  const commit = (): void => {
+    // An earlier model job, in this process or another, may have saved an incident while this evaluation
+    // was reading rows; and another process may have read the ledger further and saved first.
+    let disk: ReviewerHealthState | undefined;
+    try {
+      disk = loadReviewerHealthForEvaluation(statePath);
+      state.modelIncidents = disk.modelIncidents;
+    } catch (error) {
+      // Keep the initially loaded incidents and save the SHA decision even if that refresh fails.
+      reportModelHealthFailure(error, log);
+    }
+    if (disk !== undefined && cursorIsAhead(disk, state)) {
+      // That file already holds every row this evaluation read, and more: writing this copy would move
+      // the cursor back and replace a newer sha judgment.
+      try {
+        log("reviewer.health_save_superseded", { cursor: state.cursor, saved_cursor: disk.cursor });
+      } catch (error) {
+        reportModelHealthFailure(error, log);
+      }
+      return;
+    }
+    try {
+      saveReviewerHealthState(statePath, state);
+      unsavedModelStates.delete(statePath);
+    } catch (error) {
+      // Commit the cursor and SHA judgment at their original size, then report and retain the model write.
+      saveReviewerShaCheckpoint(statePath, state);
+      unsavedModelStates.set(statePath, state);
+      reportModelHealthFailure(error, log);
+    }
+  };
+  let entered = false;
+  let saved = false;
   try {
-    state.modelIncidents = loadReviewerHealthForEvaluation(statePath).modelIncidents;
+    withReviewerHealthStateLock(statePath, () => { entered = true; commit(); saved = true; });
   } catch (error) {
-    // Keep the initially loaded incidents and save the SHA decision even if that refresh fails.
+    if (entered && !saved) throw error;
+    // The lock failed (its sidecar cannot be opened or released): report it, and when it never held,
+    // save as before the lock existed, so the route and the sha judgment stand.
     reportModelHealthFailure(error, log);
-  }
-  try {
-    saveReviewerHealthState(statePath, state);
-    unsavedModelStates.delete(statePath);
-  } catch (error) {
-    // Commit the cursor and SHA judgment at their original size, then report and retain the model write.
-    saveReviewerShaCheckpoint(statePath, state);
-    unsavedModelStates.set(statePath, state);
-    reportModelHealthFailure(error, log);
+    if (!entered) commit();
   }
   const current = input.originMainSha === null ? null : judgeReviewerSha(state, input.originMainSha);
   const incident = state.incident;
