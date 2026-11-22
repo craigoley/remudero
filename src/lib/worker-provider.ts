@@ -54,8 +54,8 @@ import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWind
 import type { ModelApproval } from "./config-schema.js";
 import { cashDeploymentEndpoint, cashDeploymentTarget } from "./config-schema.js";
 import {
-  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, seedFromCanonical, TYPECHECK_BUILDINFO_NAME, TYPECHECK_COLD_PEAK_BYTES,
-  TYPECHECK_WARM_PEAK_BYTES, typecheckEnv,
+  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, seedFromCanonical, TYPECHECK_BUILDINFO_NAME,
+  typecheckEnv, typecheckPeakBytes,
 } from "./typecheck-buildinfo.js";
 import { acquireTestSlotAsync, defaultTestSlots, readHostLoad, readMemoryHeadroom, testRunConcurrency, testSlotExecutionAllowed, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { selectFromRoutingPool, type RoutingPoolDecision, type RoutingPoolRequest, type RoutingPoolSnapshot } from "./model-pool.js";
@@ -2423,6 +2423,40 @@ export interface ParsedCodexEvents {
   completion: CodexCompletionEvidence;
   /** W1-T13868: each turn's reroute target, in order; present only when codex reported one. */
   reroutes?: string[];
+  retentionLoss: CodexRetentionLoss;
+}
+
+export interface CodexRetentionLoss {
+  finalMessageSealed: boolean;
+  rebuiltLines: number;
+  rebuiltDroppedBytes: number;
+  unaccountedSpills: number;
+  invalidRebuiltLines: number;
+}
+
+/** W1-T13960: main's rule, else a success losing only valid rebuilt lines before its sealed final message. */
+export function codexResultRetentionComplete(
+  retention: NonNullable<CodexWorkerResult["outputRetention"]>,
+  parsed: Pick<ParsedCodexEvents, "retentionLoss" | "outputTruncation">,
+): boolean {
+  const notComplete = (values: object) => Object.values(values).some(value => typeof value === "object" && value.state !== "complete");
+  if (!notComplete(retention)) return true;
+  const loss = parsed.retentionLoss;
+  const { stdout, ...rest } = retention;
+  if (loss.rebuiltLines === 0 || retention.originalSubtype !== "success" || notComplete(rest)) return false;
+  return stdout?.state === "truncated" && loss.finalMessageSealed && loss.unaccountedSpills === 0
+    && loss.invalidRebuiltLines === 0 && loss.rebuiltDroppedBytes === (parsed.outputTruncation?.droppedBytes ?? 0);
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** W1-T13960: a rebuilt line's required shape. */
+export function isCodexEventEnvelope(event: unknown): boolean {
+  if (!isRecord(event) || typeof event.type !== "string") return false;
+  if (!event.type.startsWith("item.")) return event.item === undefined || isRecord(event.item);
+  if (!isRecord(event.item) || typeof event.item.type !== "string") return false;
+  return event.item.type !== "agent_message" || typeof event.item.text === "string";
 }
 
 export interface CodexOutputTruncation {
@@ -2587,7 +2621,7 @@ const CODEX_EVENT_BYTE_KIND_KEYS = [
 ] as const;
 type CodexEventByteKind = (typeof CODEX_EVENT_BYTE_KIND_KEYS)[number];
 
-/** W1-T13951: a spilled line's top-level `type` and `item.type`, by one streaming pass in any key order. */
+/** W1-T13951: stream spill types in any key order. */
 function spilledLineTypes(file: string): { type?: string; itemType?: string; textBytes?: number } {
   const out: { type?: string; itemType?: string; textBytes?: number } = {};
   const keys: Array<string | undefined> = [];
@@ -2597,8 +2631,9 @@ function spilledLineTypes(file: string): { type?: string; itemType?: string; tex
   let escaped = false;
   let captured: number[] = [];
   let start = 0;
-  const fd = openSync(file, "r");
+  const fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   try {
+    if (!fstatSync(fd).isFile()) return out;
     const buf = Buffer.alloc(64 * 1024);
     for (let pos = 0, read = 0; (read = readSync(fd, buf, 0, buf.length, pos)) > 0; pos += read) {
       for (let k = 0; k < read; k++) {
@@ -2750,6 +2785,30 @@ function withoutDanglingJsonEscape(text: string): string {
   return backslashesAtEnd(text) % 2 === 1 ? text.slice(0, -1) : text;
 }
 
+function readCodexSpill(file: string, lineBytes: number): {
+  tail: FileTail;
+  agentPayload?: number;
+  reconstruction?: { head: string; skip: number };
+} {
+  let tail: FileTail | undefined;
+  try {
+    const types = lineBytes <= CODEX_WORKER_STDOUT_MAX_BYTES + 320 * 1024 ? spilledLineTypes(file) : {};
+    // W1-T13951: the cap binds the retained payload. Read the whole line when the ends could overlap.
+    const payload = types.textBytes ?? Infinity;
+    const agent = types.type === "item.completed" && types.itemType === "agent_message"
+      && payload <= CODEX_WORKER_STDOUT_MAX_BYTES && lineBytes - payload <= 320 * 1024;
+    tail = readBoundedFileTail(file, agent || lineBytes <= 320 * 1024 ? lineBytes : 256 * 1024);
+    if (tail.state !== "truncated") return { tail, agentPayload: agent ? payload : undefined };
+    const head = withoutDanglingJsonEscape(readSpillHead(file, 64 * 1024));
+    const skip = escapeSkipAt(file, tail.fileBytes! - Buffer.byteLength(tail.text), tail.text);
+    return { tail, reconstruction: { head, skip } };
+  } catch (error) {
+    const state = !tail && (error as NodeJS.ErrnoException)?.code === "ENOENT" ? "absent" : "unreadable";
+    return { tail: { ...tail, state, text: "", bytesRead: tail?.bytesRead ?? 0,
+      reason: String((error as Error)?.message ?? error) } };
+  }
+}
+
 /** Incrementally reduce Codex JSONL without retaining the complete transcript. */
 export class CodexJsonlAccumulator {
   private sessionId = "";
@@ -2790,6 +2849,13 @@ export class CodexJsonlAccumulator {
   private lastBlockTruncated = false;
   private retainedTruncated = false;
   private failed = false;
+  private rebuiltLines = 0;
+  private rebuiltDroppedBytes = 0;
+  private unaccountedSpills = 0;
+  private invalidRebuiltLines = 0;
+  /** W1-T13960: a rebuilt line resets both: it could be the final message. */
+  private messageOpen = false;
+  private messageSealed = false;
   private readonly eventBytes: Record<CodexEventByteKind, number> = Object.fromEntries(
     CODEX_EVENT_BYTE_KIND_KEYS.map((key) => [key, 0]),
   ) as Record<CodexEventByteKind, number>;
@@ -2830,28 +2896,25 @@ export class CodexJsonlAccumulator {
     let cut: { at: number; marker: string } | undefined;
     if (this.spilling) {
       const lineBytes = this.spilledBytes - this.spillStart;
-      const types = lineBytes <= CODEX_WORKER_STDOUT_MAX_BYTES + 320 * 1024 ? spilledLineTypes(this.pendingFile!) : {};
-      // W1-T13951: the cap binds the payload retained, not its envelope.
-      const payload = types.textBytes ?? Infinity;
-      const agent = types.type === "item.completed" && types.itemType === "agent_message"
-        && payload <= CODEX_WORKER_STDOUT_MAX_BYTES && lineBytes - payload <= 320 * 1024;
-      if (agent) this.reclaimFor(payload);
-      // W1-T13951: a head and a tail that could overlap are never joined; such a line is read whole.
-      const whole = agent || lineBytes <= 320 * 1024;
-      const tail = readBoundedFileTail(this.pendingFile!, whole ? lineBytes : 256 * 1024);
+      const { tail, agentPayload, reconstruction } = readCodexSpill(this.pendingFile!, lineBytes);
+      if (agentPayload !== undefined) this.reclaimFor(agentPayload);
+      // W1-T13960: a veto only.
+      if (tail.fileBytes !== lineBytes) this.unaccountedSpills += 1;
       const { text, ...evidence } = tail;
       sourceBytes = tail.fileBytes === undefined ? undefined : tail.fileBytes + 1;
-      if (tail.state === "truncated") {
+      if (reconstruction) {
         // Reconstruct only when the omitted bytes lie inside a JSON string. Parsing still
         // validates the envelope; a partial line can never certify a complete report.
         // W1-T13951: never cut inside an escape.
-        const head = withoutDanglingJsonEscape(readSpillHead(this.pendingFile!, 64 * 1024));
-        const skip = escapeSkipAt(this.pendingFile!, tail.fileBytes! - Buffer.byteLength(text), text);
+        const { head, skip } = reconstruction;
         const omitted = Math.max(0, tail.fileBytes! - Buffer.byteLength(head) - Buffer.byteLength(text) + skip);
         const marker = JSON.stringify(this.truncationMarker(omitted)).slice(1, -1);
         line = head + marker + text.slice(skip);
         cut = { at: head.length, marker };
         this.droppedBytes += omitted;
+        this.rebuiltDroppedBytes += omitted;
+        this.rebuiltLines += 1;
+        this.messageOpen = this.messageSealed = false;
       } else {
         line = text;
       }
@@ -2882,6 +2945,13 @@ export class CodexJsonlAccumulator {
     if (this.spilling || this.pending) this.consumePending();
     for (const held of [this.blocks, this.errors]) held.splice(0, held.length, ...held.map(raw => JSON.parse(`"${raw}"`) as string));
     const text = this.blocks.at(-1) ?? "";
+    const retentionLoss: CodexRetentionLoss = {
+      finalMessageSealed: this.messageSealed,
+      rebuiltLines: this.rebuiltLines,
+      rebuiltDroppedBytes: this.rebuiltDroppedBytes,
+      unaccountedSpills: this.unaccountedSpills,
+      invalidRebuiltLines: this.invalidRebuiltLines,
+    };
     if (this.droppedBytes > 0 && this.blocks.length > 1) this.blocks.splice(1, 0, this.truncationMarker(this.droppedBytes));
     else if (this.spilledBytes > 0 && this.droppedBytes === 0) {
       const note = `\n[Codex stdout buffer truncated: ${this.spilledBytes} bytes spilled to disk]\n`;
@@ -2914,6 +2984,7 @@ export class CodexJsonlAccumulator {
         droppedBytes: this.droppedBytes,
         spilledBytes: this.spilledBytes,
       } } : {}),
+      retentionLoss,
     };
   }
 
@@ -3080,6 +3151,7 @@ export class CodexJsonlAccumulator {
       return "malformed";
     }
     this.observeToolLineage?.(event);
+    if (cut !== undefined && !isCodexEventEnvelope(event)) this.invalidRebuiltLines += 1;
     const eventType = typeof event.type === "string" ? event.type : undefined;
     const itemType = typeof event.item?.type === "string" ? event.item.type : undefined;
     const combined = itemType && eventType ? `${eventType}:${itemType}` : eventType;
@@ -3091,6 +3163,7 @@ export class CodexJsonlAccumulator {
     if (event.type === "turn.started") {
       this.numTurns += 1;
       this.turnInProgress = true;
+      this.messageOpen = this.messageSealed = false;
     }
     if (event.type === "item.completed" && event.item?.type === "agent_message" && typeof event.item.text === "string") {
       const { raw, marks } = rawPayload(line, ["item", "text"], event.item.text, cut);
@@ -3099,6 +3172,7 @@ export class CodexJsonlAccumulator {
       this.blockStreamUnit.push(marks.length > 0);
       this.lastBlockTruncated = cut !== undefined;
       if (cut !== undefined) this.retainedTruncated = true;
+      if (cut === undefined) [this.messageOpen, this.messageSealed] = [true, false];
       this.keptBytes += Buffer.byteLength(raw);
       this.observeMessage?.(event.item.text, this.nowMs);
     }
@@ -3112,6 +3186,7 @@ export class CodexJsonlAccumulator {
     const eventModel = cashResponseModel(event.model);
     if (eventModel !== undefined) this.observeModel(eventModel);
     if (event.type === "turn.completed") {
+      if (this.messageOpen) [this.messageOpen, this.messageSealed] = [false, true];
       this.turnInProgress = false;
       this.completedTurns += 1;
       const input = event.usage?.input_tokens;
@@ -5837,15 +5912,16 @@ async function executeOpenWeightTool(
         suites = plan.suites.length;
       }
       const scoped = suites === null ? {} : { suites };
-      const slot = args.check === "typecheck" &&
-        !hasUsableTypecheckBuildInfo(join(workerHome, TYPECHECK_BUILDINFO_NAME), installedTypescriptVersion(cwd))
-        ? await acquireTestSlotAsync("typecheck:bwrap", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES }) : undefined;
+      const warm = args.check === "typecheck" &&
+        hasUsableTypecheckBuildInfo(join(workerHome, TYPECHECK_BUILDINFO_NAME), installedTypescriptVersion(cwd));
+      const slot = args.check === "typecheck"
+        ? await acquireTestSlotAsync("typecheck:bwrap", { memoryBytes: typecheckPeakBytes(warm) }) : undefined;
       if (slot && !testSlotExecutionAllowed(slot)) {
         slot.release();
         ledgerRunCheck(ledger, { check: args.check, outcome: "refused", suites, startedAt, reason: slot.note, scopeRule });
         return { check: args.check, ran: false, refused: `NOT_RUN (${slot.note})` };
       }
-      if (args.check === "typecheck") argv = [...argv, ...lowMemoryTypecheckArgs(readMemoryHeadroom(), slot ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES)];
+      if (args.check === "typecheck") argv = [...argv, ...lowMemoryTypecheckArgs(readMemoryHeadroom(), typecheckPeakBytes(warm))];
       try {
         const stdout = await (runCheck ?? runOpenWeightCheck)({
           argv,
@@ -6932,7 +7008,7 @@ async function spawnCodexWorkerInPrivateTemp(
       completion: parsed.completion,
       originalSubtype: parsed.subtype,
     };
-    const incomplete = Object.values(outputRetention).some(value => typeof value === "object" && value.state !== "complete");
+    const incomplete = !codexResultRetentionComplete(outputRetention, parsed);
     // A signal is an error whatever the stream parsed, so is an end with no code: only an observed exit 0 is clean.
     const exitCode = exit.kind === "exit" ? exit.code : null;
     const isError = parsed.isError || exitCode !== 0 || incomplete;

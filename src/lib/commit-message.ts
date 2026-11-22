@@ -4,7 +4,7 @@ import {
   type OperatorMessageSlot,
 } from "./operator-message.js";
 import {
-  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, TYPECHECK_COLD_PEAK_BYTES, TYPECHECK_WARM_PEAK_BYTES, typecheckEnv,
+  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, typecheckEnv, typecheckPeakBytes,
 } from "./typecheck-buildinfo.js";
 import { dirIsWritable, prepareTypecheckRun } from "./typecheck-run.js";
 import { admitStaticWork, readMemoryHeadroom, type StaticAdmission, type TestSlotOptions } from "./test-slot.js";
@@ -581,12 +581,11 @@ export function typecheckStep(
   try {
     const tsc = join(repoRoot, "node_modules", ".bin", "tsc");
     const prepared = prepareTypecheckRun(repoRoot, canWrite);
-    if (!hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(repoRoot))) {
-      // W1-T9951: a cold tsc is a memory cost, admitted by headroom alone — never behind a suite ticket or slot.
-      slot = admitStaticWork("typecheck:preflight", { memoryBytes: TYPECHECK_COLD_PEAK_BYTES, ...testSlot });
-      if (!slot.executionAllowed) return { name: "typecheck", ok: false, detail: `typecheck: NOT_RUN (${slot.note})` };
-    }
-    const tight = lowMemoryTypecheckArgs((testSlot.memoryHeadroom ?? readMemoryHeadroom)(), slot ? TYPECHECK_COLD_PEAK_BYTES : TYPECHECK_WARM_PEAK_BYTES);
+    const peak = typecheckPeakBytes(hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(repoRoot)));
+    // W1-T9951: a tsc is a memory cost, admitted by headroom alone — never behind a suite ticket or slot. W1-T14153: warm too.
+    slot = admitStaticWork("typecheck:preflight", { memoryBytes: peak, ...testSlot });
+    if (!slot.executionAllowed) return { name: "typecheck", ok: false, detail: `typecheck: NOT_RUN (${slot.note})` };
+    const tight = lowMemoryTypecheckArgs((testSlot.memoryHeadroom ?? readMemoryHeadroom)(), peak);
     const res = spawn(tsc, [...prepared.args, ...tight], { cwd: repoRoot, env: typecheckEnv(process.env) });
     const spawnFailed = spawnFailureDetail("typecheck", res);
     if (spawnFailed) return { name: "typecheck", ok: false, detail: spawnFailed };

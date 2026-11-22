@@ -264,7 +264,9 @@ test("W1-T12836 criterion 4: a PR intervention incident keys on cause class and 
   mkdirSync(join(root, "state"), { recursive: true });
   const fp = sweep.fingerprint;
   const events = (n: number): IncidentLedgerEvent[] => Array.from({ length: n }, (_, i) =>
-    ({ fingerprint: fp, ts: Date.parse(T("06:00")) + i * 60_000, kind: "intervention", name: sweep.name as string, message: "m", instance: "core" }));
+    ({ fingerprint: fp, ts: Date.parse(T("06:00")) + i * 60_000, kind: "intervention", name: sweep.name as string,
+      // Each synthetic event is a distinct intervention, so each names its own (a real routing message names its row).
+      message: `m${i}`, instance: "core" }));
   let count = 4;
   let accepted = false;
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];

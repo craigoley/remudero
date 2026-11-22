@@ -1,6 +1,6 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
 import { fileEligibleFollowups, followupFilingPresentation, type FollowupFinalizer } from "./lib/followup-filing.js";
-import { compositionHoldEdge, findTaskInCatalogs, catalogTaskContract, type TaskLookupOptions } from "./lib/task-lookup.js";
+import { compositionHoldEdge, findTaskInCatalogs, catalogTaskContract, loadLocalReleasePlan, type TaskLookupOptions } from "./lib/task-lookup.js";
 import type { OpsCatalogApi } from "./lib/ops-catalog-source.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
@@ -53,6 +53,7 @@ import {
   reviewSubjectFallbackAllowed as reviewSubjectFallbackAllowedFromModule,
   planTreeIsBehindMain as planTreeIsBehindMainFromModule,
   reviewCommand as reviewCommandFromModule,
+  operatorReviewArgs,
   REVIEW_EXIT_CAUSE_FLAG,
   whileWorkerRunLive as whileWorkerRunLiveFromModule,
   type ReviewCommandHost,
@@ -180,7 +181,7 @@ import { createOperatorMcpServer, operatorMcpCommand } from "./lib/operator-mcp.
 import { runInboxGardener } from "./lib/inbox-gardener.js";
 import { inboxSemanticDigest, proofDebtPopulationPermit } from "./lib/inbox-retirement.js";
 import { GARDEN_PLAN_FLAG, GARDEN_REPO_FLAG, issueRevalidationPolicyForTarget, registeredGardenEnabled } from "./lib/garden-registry.js";
-import { approveInChild, productionStuckStatePorts, readApproveRelease, runStuckStateGardener } from "./lib/stuck-state-gardener.js";
+import { APPROVE_PUBLIC_REPLAY_FLAG, APPROVE_WORKING_TREE_REPLAY_FLAG, approveInChild, productionStuckStatePorts, readApproveRelease, runStuckStateGardener } from "./lib/stuck-state-gardener.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
 import { addCowWorktree, linkDonorNodeModules, mainWorktreeOf, renderCowWorktree } from "./lib/cow-worktree.js";
@@ -914,6 +915,7 @@ import {
   type AffectedSelection,
   type AffectedSuitesInput,
 } from "./lib/affected-suites.js";
+import { pinningTestsApply, pinningTestViolations, runPinningTests } from "./lib/pinning-tests.js";
 // W1-T4797 — the tier manifest's own measured durations bound the pre-push coverage precheck.
 // @ts-expect-error a plain .mjs script with no declaration file, as the satisfied-task census import above.
 import { DEFAULT_MANIFEST_RELATIVE_PATH, DURATION_STALENESS_FACTOR, loadManifest, tierFiles, weightedDurationMs } from "../scripts/test-tier-manifest.mjs";
@@ -1063,6 +1065,7 @@ import {
   classifyProposal,
   SKILL_DRAFT_ID_PREFIX,
   draftsDueOnDaemon,
+  indexInboxDraftReceipts,
   resolvedInboxDraftLane,
   inboxDraftLaneForMount,
   decideDraftDeferral,
@@ -1358,6 +1361,7 @@ import {
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
 import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
+import { recordRoutingPolicyEstimates } from "./lib/routing-policy-estimate.js";
 import { cashInvoiceAccounts, costExportDigest, newestCostExportAsync, readCashInvoiceReceipts, readCashInvoiceReceiptsAsync, reconcileCashInvoice, recordCashInvoiceFailure,
   recordCashInvoiceVerdicts, type CashInvoiceReconciliation, type CostExportSource } from "./lib/cash-invoice-reconcile.js";
 import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
@@ -1395,7 +1399,8 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { codexBalancedTrialCommand, registerCodexBalancedTrial } from "./lib/codex-balanced-trial.js";
-import { skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { evaluateStagedSkillDraft, skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { autoEvaluateSkillDrafts, reportSkillEvalAuto } from "./lib/skill-eval-auto.js";
 import { proceduresCommand, proceduresProductionInput } from "./lib/procedures-command.js";
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
 import { GhReadBroker, ghBrokerCommand, ghBrokerLoginStatus, ghCommand, serveGhReadBroker } from "./lib/gh-read-broker.js";
@@ -1416,7 +1421,7 @@ import {
 import { prStateCommand } from "./lib/pr-state.js";
 import { previewPlanTaskMigration } from "./lib/plan-task-migration.js";
 import { movePlanTask } from "./lib/plan-task-move.js";
-import { auditLedgerUnion, createIncrementalLedgerUnion, createSizedMemo, ledgerRowsFor, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
+import { auditLedgerUnion, createIncrementalLedgerUnion, createLedgerRotationMemo, createSizedMemo, ledgerRowsFor, listedLedgerFiles, readLedgerUnionRawLinesAsync, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, readValidatedRotationDigest, realLedgerFs, type LedgerUnionRecordRead } from "./lib/ledger-union.js";
 // meaningOfStep: only ledgerGrepCommand read it, and it moved to src/lib/report-commands.ts
 // (W1-T2888), which imports it directly.
 import { escalateRepeatingRules, ruleEfficacyReport, type RuleSignature } from "./lib/rule-efficacy.js";
@@ -13543,7 +13548,7 @@ const REMOTE_PLAN_ID_DECL_PATTERN = '^[[:space:]]*(-[[:space:]]*)?id:[[:space:]]
 /** Host-only reads for the already selected catalog. No second reservation namespace is introduced. */
 export interface TaskIdDestinationChecks {
   destinationStateDir?: () => string | undefined;
-  destinationGit?: (cwd: string, args: string[], input?: string) => string | Promise<string>;
+  destinationGit?: (cwd: string, args: string[], input?: string, opts?: { maxBuffer?: number }) => string | Promise<string>;
   destinationPrFetch?: (args: string[]) => unknown | Promise<unknown>;
 }
 interface TaskIdDestinationSnapshot {
@@ -13551,10 +13556,6 @@ interface TaskIdDestinationSnapshot {
   ids: readonly string[];
   openPrTexts: readonly string[];
 }
-
-/** BACKSTOP: the destination plan is read in one `cat-file --batch`. Exceeding this buffer refuses the snapshot.
- *  The ops plan outgrew Node's 1 MiB default on 2026-11-18. This matches the other plan readers' bound. */
-export const TASK_ID_DESTINATION_MAX_BUFFER = 1 << 27;
 
 /** A fetched, commit-pinned ID population. Dirty checkout bytes never replace the fetched plan. */
 export async function taskIdDestinationSnapshot(
@@ -13566,8 +13567,8 @@ export async function taskIdDestinationSnapshot(
     if (destination.outcome === "off") return undefined;
     if (destination.outcome === "unreadable") throw new Error("unreadable host switch");
     if (offline) { stage = "offline"; throw new Error("selected catalog requires a fresh read"); }
-    const run = async (cwd: string, args: string[], input?: string): Promise<string> =>
-      checks.destinationGit ? await checks.destinationGit(cwd, args, input) : await hostWorktreeGitAsync(cwd, args, { timeout: DEFAULT_GH_CALL_TIMEOUT_MS, maxBuffer: TASK_ID_DESTINATION_MAX_BUFFER, ...(input === undefined ? {} : { input }) });
+    const run = async (cwd: string, args: string[], input?: string, opts?: { maxBuffer?: number }): Promise<string> =>
+      checks.destinationGit ? await checks.destinationGit(cwd, args, input, opts) : await hostWorktreeGitAsync(cwd, args, { timeout: DEFAULT_GH_CALL_TIMEOUT_MS, ...(opts?.maxBuffer === undefined ? {} : { maxBuffer: opts.maxBuffer }), ...(input === undefined ? {} : { input }) });
     stage = "fetch";
     await run(destination.checkoutDir, ["fetch", "--no-tags", "origin", "main"]);
     stage = "plan";
@@ -13576,7 +13577,7 @@ export async function taskIdDestinationSnapshot(
     const paths = (await run(destination.checkoutDir, ["ls-tree", "-r", "--name-only", commit, "--", "plan/tasks.yaml", "plan/tasks.d/"]))
       .split("\n").filter(path => path === "plan/tasks.yaml" || /^plan\/tasks\.d\/[^/]+\.ya?ml$/.test(path));
     if (!paths.includes("plan/tasks.yaml")) throw new Error("missing plan");
-    const texts = await readBlobsAtRefAsync((args, input) => run(destination.checkoutDir, args, input), commit, paths);
+    const texts = await readBlobsAtRefAsync((args, input, opts) => run(destination.checkoutDir, args, input, opts), commit, paths);
     const tasks = texts.flatMap(text => parseTasksFromYaml(text, "plan destination", undefined, {}, "preserve-external"));
     const ids = tasks.map(task => task.id);
     if (new Set(ids).size !== ids.length) throw new Error("duplicate task id");
@@ -20139,7 +20140,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // WARN-only (never blocks), so appending it here changes nothing about `assertLintClean` or
     // the pre-dispatch gate — it only ever adds to `warned` below, on this one changed-tasks pass.
     const violations = scope
-      ? [...lintViolations, ...proofGrepUnmatchableViolations(task, opts), ...proofGrepSelfCertifyingViolations(task, opts)]
+      ? [...lintViolations, ...proofGrepUnmatchableViolations(task, opts), ...proofGrepSelfCertifyingViolations(task, opts),
+        // W1-T14230: warn-only, appended after the plan-only promotion above, so it never blocks.
+        ...(pinningTestsApply(task, oldById?.get(task.id))
+          ? pinningTestViolations(task, runPinningTests(task, codeRoot, systemClock)) : [])]
       : lintViolations;
     const blocking = violations.filter((v) => v.severity === "block");
     const soft = violations.filter((v) => v.severity === "warn");
@@ -22821,6 +22825,8 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       if (deps.recordFire !== false) recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), cadenceClock.date(), 24 * 60 * 60 * 1000);
       const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
       await recordRoutingExperimentResults({ stateDir: join(root, "state"), today: cadenceClock.iso().slice(0, 10) });
+      // W1-T14146: the same provider choice, estimated from the auction's logged probabilities over all routed traffic.
+      await recordRoutingPolicyEstimates({ stateDir: join(root, "state"), today: cadenceClock.iso().slice(0, 10) });
       await reconcileNewestCostExport(config, cadenceClock);
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       // `repoRoot`, NOT `root` (which is `config.root`, the state volume) — see this function's own
@@ -24417,6 +24423,12 @@ async function retroCommand(
     log,
     say,
   );
+  // W1-T13861: after staging and expiry, the fleet runs at most one staged draft's held-out eval, once per text and
+  // inside the existing spend limits, so the Inbox shows a verdict. A throw is printed and never fails the retro.
+  const skillEvalInput = skillEvalProductionInput(checkoutRoot, workerBoundaryStack.harnessRevision, readUsageSnapshotPreferSdk,
+    { loadConfig: () => config });
+  await reportSkillEvalAuto(() => autoEvaluateSkillDrafts(skillEvalInput,
+    (proposalId, approval, runId) => evaluateStagedSkillDraft(proposalId, approval, skillEvalInput, runId)), say);
   // W1-T2601: THE RETIREMENT ARM'S ONE CALL SITE. `retireSettledFollowups` (lib/retro.ts) shipped
   // with W1-T2563, tested, and with ZERO production callers — the producer above was wired and its
   // counterpart was not, so the registry could only ever GROW. MEASURED 2026-09-01: 351 proposals,
@@ -29151,12 +29163,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
       return gardenPass(backlogGardenSpec(d), d);
     }
     // W1-T13750: held work is re-probed on the events its refusal class names; the operator's own refused release
-    // re-runs as `rmd approve <id>` (approveCommand, in a child) with that id and nothing else, and only while the ops
-    // record it refused is unchanged.
+    // re-runs as `rmd approve <id>` (approveCommand, in a child) while the refused record is unchanged.
     case "stuck-state": {
       const publicRoot = instanceVerbPlanRoot(() => stateDir).root;
-      const ports = productionStuckStatePorts({ stateDir, log, escalate: raiseDuplicate, publicRoot, publicMainCommit: () => readOriginMainSha(publicRoot),
-        destinationRead: () => taskIdDestinationSnapshot({ destinationStateDir: () => stateDir }), approve: approveInChild(),
+      const ports = productionStuckStatePorts({ stateDir, log, escalate: raiseDuplicate, publicRoot, publicMainCommit: readOriginMainSha,
+        destinationRead: () => taskIdDestinationSnapshot({ destinationStateDir: () => stateDir }), approve: approveInChild({ publicRoot }),
         gardenNames: REGISTERED_GARDEN_NAMES });
       return () => runStuckStateGardener(ports);
     }
@@ -37925,17 +37936,9 @@ function createInboxBakeoffReplay(
  * The daemon's per-poll DRAFT rung (W1-T192, ratifies P25's autonomous half). Reachable from
  * the daemon's OWN `deps.sweep()` seam (daemon.ts:274) — wired into {@link buildSweepHook}
  * below, riding the SAME slot the W1-T150 credit-backfill rung already occupies, never a
- * second, separately-scheduled loop. Selects candidates via {@link draftsDueOnDaemon}: the
- * SAME {@link proposalsNeedingDraft} predicate `rmd inbox` classifies against, further
- * throttled so a 300s poll cadence never re-spawns the Architect for the SAME cause (one
- * invalidation ⇒ one attempt — see lib/inbox.ts's `draftAttemptKey` doc). Every attempted
- * proposal's key is recorded in `state/inbox-draft-attempts.json` regardless of outcome —
- * a FAILED attempt is also throttled, or a stuck cause would re-spawn every poll forever
- * (the exact spend leak W1-T177 exists to prevent). Wrapped in its own try/catch so a
- * registry-read hiccup or a worktree failure is logged (`inbox.draft_rung.error`) and
- * skipped, never thrown up into the sweep/daemon loop — an un-drafted proposal is the status
- * quo, not a regression; `rmd inbox` remains available to force a draft on demand in the
- * meantime.
+ * second, separately-scheduled loop. {@link draftsDueOnDaemon} skips inputs with clean
+ * receipts and throttles failures per input and lane using `state/inbox-draft-attempts.json`.
+ * Errors are recorded as `inbox.draft_rung.error`. `rmd inbox` can still force a draft.
  */
 // Exported, with `draftBatch` an injectable seam defaulting to the real draftProposalBatch
 // (logic UNCHANGED — same mirrors runTask's opts.github escape hatch, drainCommand's
@@ -37974,7 +37977,14 @@ export function buildInboxDraftHook(
   // W1-T9443: the orphan prune's shard population, held for this daemon's life like the anchor cache above, so a
   // full sweep reads, off the loop, only the shard files that changed since the one before.
   const inboxRoot = planningStore?.root ?? config.root;
+  const inboxState = join(inboxRoot, "state");
   const shardReader = createProposalShardReader(proposalShardDir(join(inboxRoot, "state", "inbox-proposals.json")), { log });
+  const receiptSteps = ["inbox.drafted", "inbox.draft_cache_missing"];
+  const draftHistory = createLedgerRotationMemo(rows => rows.filter(row => typeof row.step === "string" && receiptSteps.includes(row.step)), {
+    pattern: /"inbox\.(?:drafted|draft_cache_missing)"/,
+    holder: "inbox-clean-drafts",
+    durableDigest: { reducerVersion: "1" },
+  });
   return async () => {
     try {
       const registryPath = join(inboxRoot, "state", "inbox-proposals.json");
@@ -37987,6 +37997,76 @@ export function buildInboxDraftHook(
       const draftsPath = join(inboxRoot, "state", "inbox-drafts.json");
       const pruned = await pruneOrphanedDraftsAsync(draftsPath, registryPath, shardReader);
       if (pruned && pruned.count > 0) log("inbox.drafts_pruned", { count: pruned.count, bytes_before: pruned.bytesBefore, bytes_after: pruned.bytesAfter });
+      // ── W1-T2569: THE RE-ENTRANCY GUARD ───────────────────────────────────────────────────
+      // THE BOUND STOPS AWAITING; IT DOES NOT CANCEL. `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS`
+      // (559_000, lib/daemon.ts) abandons `await deps.sweep()` at 9.3 minutes, but the sweep — and
+      // this rung inside it — KEEPS RUNNING DETACHED. A draft batch is 3 sequential drafts at a
+      // measured 316s median, ~948s end to end, so it is un-awaited EVERY time and the next loop
+      // iteration starts a fresh sweep carrying a fresh batch.
+      //
+      // MEASURED 2026-09-01, six consecutive cycles, perfect alternation:
+      //   batch 17:38:13 -> abandoned 17:46:45 (+512s) -> batch 17:53:01 -> abandoned 18:01:15 ...
+      // with `daemon.sweep.abandoned` carrying `elapsed_ms: 559000, bound_ms: 559000` exactly.
+      // Cost: 16 Architect spawns across 5 distinct proposals, $123.30, drafts cache frozen at 62.
+      //
+      // THIS IS WHY `buildInboxDraftHook`'s OWN DOC WAS WRONG to say the hook is "awaited to
+      // completion by the daemon's serial sweep tick" — corrected at that doc; see it for the
+      // wider class, which is NOT confined to this rung.
+      //
+      // O_EXCL + reclaimStaleLock, REUSED not reinvented: `acquireDrainLock` is already
+      // path-parameterised and already applies the pid+host staleness rule (`isHolderStale`) that
+      // W1-T1067 settled for `drain.lock`. A SECOND staleness rule here would be a second thing to
+      // drift. The staleness bound is load-bearing in the other direction too: without it a killed
+      // daemon strands the lock and this rung never runs again — the exact W1-T1067 failure, one
+      // file over.
+      // ── W1-T2590: DO NOT RETRY INTO A SHUT DOOR ───────────────────────────────────────────
+      // Checked before the lock and receipt selection so a deferred poll skips both.
+      // The instant comes from
+      // the provider's OWN refusal text (`detectUsageLimitRefusal`, lib/classify.ts), which on the
+      // measured real string was more accurate than the headroom governor's belief at that moment.
+      //
+      // THIS IS WHAT MAKES RAISING `DAEMON_DRAFT_BATCH_CAP` SAFE LATER. W1-T2564 correctly stopped
+      // a refusal from writing an attempt key, so a refused draft now stays due and retries next
+      // poll; that left the cap as the ONLY bound on a retry storm during a live outage — the exact
+      // condition that produced 494 refusals in seven hours. Bounding the retry by the account's
+      // own stated window is the prerequisite, not a nicety.
+      // A repository-specific planning store cannot bypass either provider refusal window.
+      const deferralPath = join(config.root, "state", "inbox-draft-deferred-until.json");
+      const deferralPaths = [...new Set([deferralPath, join(inboxRoot, "state", "inbox-draft-deferred-until.json")])];
+      for (const path of deferralPaths) {
+        const deferral = decideDraftDeferral(parseDraftDeferralCache(readFileIfExists(path)), Date.now());
+        if (deferral.defer) {
+          log("inbox.draft_batch.deferred", {
+            until: new Date(deferral.untilMs).toISOString(), remaining_ms: deferral.remainingMs, matched: deferral.matched,
+          });
+          return;
+        }
+      }
+
+      const draftLockPath = join(config.root, "state", "inbox-draft.lock");
+      let draftLock: DrainLockHandle;
+      try {
+        draftLock = acquireDrainLock(draftLockPath);
+      } catch (e) {
+        // A LIVE holder is the expected, healthy outcome of an abandoned-but-still-running batch —
+        // it is a SKIP, never an error. Ledgered so a stuck lock is visible rather than looking
+        // like a rung that quietly stopped firing.
+        log("inbox.draft_batch.skipped", {
+          reason: "another draft batch holds the lock",
+          detail: String((e as Error)?.message ?? e),
+        });
+        return;
+      }
+      try {
+      // Hold the fleet lock first, then the selected store's native lock. A live holder of
+      // either keeps its slot; failure to acquire the second releases only our first lock.
+      let storeLock: DrainLockHandle | undefined;
+      const storeLockPath = join(inboxRoot, "state", "inbox-draft.lock");
+      if (resolve(storeLockPath) !== resolve(draftLockPath)) {
+        try { storeLock = acquireDrainLock(storeLockPath); }
+        catch (error) { log("inbox.draft_batch.skipped", { reason: "another draft batch holds the repository lock", detail: String(error) }); return; }
+      }
+      try {
       const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
       const attemptsPath = join(inboxRoot, "state", "inbox-draft-attempts.json");
       const attempts: DraftAttemptCache = parseDraftAttemptCache(readFileIfExists(attemptsPath));
@@ -38033,28 +38113,69 @@ export function buildInboxDraftHook(
       const lifecycleContext = inboxRetirementContext(join(config.root, "state"), { instance: process.env.RMD_INSTANCE_NAME ?? "core", repository: `${owner}/${repo}`, root: config.root });
       let draftSelection: DraftSelectionContext = { retirement: lifecycleContext, isRatified: () => false,
         grepAnchorTrue: () => true, openProposalIds: new Set(proposals.map(p => p.id)) };
+      let ledgerLines: Record<string, unknown>[] | undefined;
+      let liveReadFailure: { error: string } | undefined;
       try {
-        const ledgerLines = readLedgerLines(ledgerPath);
+        // ledger-read-intent: union — seed receipts before listing archives so rotation cannot hide a receipt.
+        ledgerLines = readLedgerLines(ledgerPath);
+      } catch (error) {
+        log("inbox.draft_readiness_unavailable", { error: String((error as Error)?.message ?? error) });
+        try {
+          ledgerLines = await readLiveLedgerRowsOffLoop(ledgerPath);
+        } catch (retryError) {
+          liveReadFailure = { error: String(retryError) };
+        }
+      }
+      const liveRows = ledgerLines;
+      if (liveRows) try {
         const sha = mainSha();
         const anchors = proposals.flatMap((p) => p.evidenceAnchors);
         const grepFailures = await warmAnchorGrepCache(anchorGrepCache, sha, anchors, grepAnchorWarm);
         draftSelection = {
-          retirement: lifecycleContext,
+          ...draftSelection,
           grepAnchorTrue: (a: EvidenceAnchor) => warmedAnchorGrep(anchorGrepCache, sha, grepFailures, a, grepAnchorSync),
-          openProposalIds: new Set(proposals.map((p) => p.id)),
-          isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
-          isDeclined: declinedWithReceipts(ledgerLines, join(inboxRoot, "state")),
+          isRatified: (id) => isRatifiedInLedger(liveRows, id),
+          isDeclined: declinedWithReceipts(liveRows, inboxState),
         };
       } catch (e) {
         log("inbox.draft_readiness_unavailable", { error: String((e as Error)?.message ?? e) });
       }
+
+      const historyDir = dirname(ledgerPath);
+      const unread: string[] = liveReadFailure ? [ledgerPath] : [];
+      const corpusSnapshot = listedLedgerFiles(historyDir, realLedgerFs, path => unread.push(path));
+      const liveDraftRows = liveRows?.filter(row => typeof row?.step === "string" && receiptSteps.includes(row.step));
+      const draftReceipts = await readLedgerUnionRecordsMemoized(historyDir, draftHistory, {
+        step: receiptSteps,
+        corpusSnapshot,
+        readLiveRecords: () => liveDraftRows ?? [],
+      });
+      unread.push(...draftReceipts.unread);
+      if (unread.length > 0) log("inbox.draft_history_partial", { unread, repository: causalScope.repository, ...liveReadFailure });
+      const draftLedgerRows = indexInboxDraftReceipts(inboxState, causalScope.repository, draftReceipts.rows, log);
+      const reportedMissing = new Set<string>();
+      for (const row of draftLedgerRows) {
+        if (row.step === "inbox.draft_cache_missing" && typeof row.proposal_id === "string" && typeof row.draft_input_key === "string") {
+          reportedMissing.add(JSON.stringify([row.proposal_id, row.draft_input_key]));
+        }
+      }
+      const newMisses: Record<string, unknown>[] = [];
+      const onMissingCleanDraft = (proposalId: string, inputKey: string) => {
+        const key = JSON.stringify([proposalId, inputKey]);
+        if (reportedMissing.has(key)) return;
+        const fields = { proposal_id: proposalId, draft_input_key: inputKey, repository: causalScope.repository };
+        log("inbox.draft_cache_missing", fields);
+        newMisses.push({ step: "inbox.draft_cache_missing", ...fields });
+        reportedMissing.add(key);
+      };
 
       const draftLane = resolvedInboxDraftLane(repoRoot);
       // Explicit saved-conversation drafting narrows selection; every cadence, retry, ownership and spend guard stays the same.
       // The ordinary cadence never selects a saved improvement: only its daemon-owned handoff names it here.
       const population = onlyProposalId === undefined ? proposals.filter(proposal => !isImprovementBoundProposal(proposal))
         : proposals.filter(proposal => proposal.id === onlyProposalId);
-      const eligible = draftsDueOnDaemon(population, drafts, attempts, 0, draftSelection, draftLane);
+      const eligible = draftsDueOnDaemon(population, drafts, attempts, 0, { ...draftSelection, draftLedgerRows, onMissingCleanDraft }, draftLane);
+      if (newMisses.length > 0) indexInboxDraftReceipts(inboxState, causalScope.repository, newMisses, log);
       const eligibleIds = new Set(eligible.map(proposal => proposal.id));
       for (const id of cashDeferred.keys()) if (!eligibleIds.has(id)) cashDeferred.delete(id);
       // Keep fit refusals due, behind fresh work and in least-recently-refused order.
@@ -38065,13 +38186,7 @@ export function buildInboxDraftHook(
       const due = selected.map(({ proposal }) => proposal);
       if (due.length === 0) return;
 
-      // W1-T2561: NAME THE DEFERRAL, NEVER CAP SILENTLY. `draftsDueOnDaemon` now returns at most
-      // DAEMON_DRAFT_BATCH_CAP proposals per poll, so on a large registry `due` is a SLICE and the
-      // rest are still due. A cap that shows up nowhere is the "tested, inert" shape this repo has
-      // shipped before: the queue would drain at a bounded rate with no way to see the backlog or
-      // tell a paced drain from a wedged one. This is a pure observation — a count of a set already
-      // computed above, spawning nothing — and `deferred: 0` on an uncapped poll is a real reading,
-      // not silence, so the row is written unconditionally.
+      // W1-T2561: report how much eligible work the cap leaves for a later poll.
       log("inbox.draft_batch", {
         eligible: eligible.length,
         drafting: due.length,
@@ -38079,83 +38194,7 @@ export function buildInboxDraftHook(
         cap: DAEMON_DRAFT_BATCH_CAP,
       });
 
-      // W1-T193: the console must render a proposal as DRAFTING (with its spawn time) for the
-      // whole window an Architect worker is actually running for it — "never lies about its
-      // own state", the same bar W1-T156 set for liveness. Written BEFORE the batch spawns and
-      // cleared in the `finally` below regardless of outcome, so a crash mid-draft is the only
-      // way this file can go stale (self-corrects: a stuck entry is overwritten the next time
-      // ANY draft batch runs, since this rung always writes its own full `due` set, never
-      // merges onto a stale one).
-      // ── W1-T2569: THE RE-ENTRANCY GUARD ───────────────────────────────────────────────────
-      // THE BOUND STOPS AWAITING; IT DOES NOT CANCEL. `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS`
-      // (559_000, lib/daemon.ts) abandons `await deps.sweep()` at 9.3 minutes, but the sweep — and
-      // this rung inside it — KEEPS RUNNING DETACHED. A draft batch is 3 sequential drafts at a
-      // measured 316s median, ~948s end to end, so it is un-awaited EVERY time and the next loop
-      // iteration starts a fresh sweep carrying a fresh batch.
-      //
-      // MEASURED 2026-09-01, six consecutive cycles, perfect alternation:
-      //   batch 17:38:13 -> abandoned 17:46:45 (+512s) -> batch 17:53:01 -> abandoned 18:01:15 ...
-      // with `daemon.sweep.abandoned` carrying `elapsed_ms: 559000, bound_ms: 559000` exactly.
-      // Cost: 16 Architect spawns across 5 distinct proposals, $123.30, drafts cache frozen at 62.
-      //
-      // THIS IS WHY `buildInboxDraftHook`'s OWN DOC WAS WRONG to say the hook is "awaited to
-      // completion by the daemon's serial sweep tick" — corrected at that doc; see it for the
-      // wider class, which is NOT confined to this rung.
-      //
-      // O_EXCL + reclaimStaleLock, REUSED not reinvented: `acquireDrainLock` is already
-      // path-parameterised and already applies the pid+host staleness rule (`isHolderStale`) that
-      // W1-T1067 settled for `drain.lock`. A SECOND staleness rule here would be a second thing to
-      // drift. The staleness bound is load-bearing in the other direction too: without it a killed
-      // daemon strands the lock and this rung never runs again — the exact W1-T1067 failure, one
-      // file over.
-      // ── W1-T2590: DO NOT RETRY INTO A SHUT DOOR ───────────────────────────────────────────
-      // Checked FIRST — before the lock, before the registry is even consulted — so a deferred
-      // poll costs nothing: no lock churn, no `deps.spawn`, no Architect. The instant comes from
-      // the provider's OWN refusal text (`detectUsageLimitRefusal`, lib/classify.ts), which on the
-      // measured real string was more accurate than the headroom governor's belief at that moment.
-      //
-      // THIS IS WHAT MAKES RAISING `DAEMON_DRAFT_BATCH_CAP` SAFE LATER. W1-T2564 correctly stopped
-      // a refusal from writing an attempt key, so a refused draft now stays due and retries next
-      // poll; that left the cap as the ONLY bound on a retry storm during a live outage — the exact
-      // condition that produced 494 refusals in seven hours. Bounding the retry by the account's
-      // own stated window is the prerequisite, not a nicety.
-      // A repository-specific planning store cannot bypass either provider refusal window.
-      const deferralPath = join(config.root, "state", "inbox-draft-deferred-until.json");
-      const deferralPaths = [...new Set([deferralPath, join(inboxRoot, "state", "inbox-draft-deferred-until.json")])];
-      for (const path of deferralPaths) {
-        const deferral = decideDraftDeferral(parseDraftDeferralCache(readFileIfExists(path)), Date.now());
-        if (deferral.defer) {
-          log("inbox.draft_batch.deferred", {
-            until: new Date(deferral.untilMs).toISOString(), remaining_ms: deferral.remainingMs, matched: deferral.matched,
-          });
-          return;
-        }
-      }
-
-      const draftLockPath = join(config.root, "state", "inbox-draft.lock");
-      let draftLock: DrainLockHandle;
-      try {
-        draftLock = acquireDrainLock(draftLockPath);
-      } catch (e) {
-        // A LIVE holder is the expected, healthy outcome of an abandoned-but-still-running batch —
-        // it is a SKIP, never an error. Ledgered so a stuck lock is visible rather than looking
-        // like a rung that quietly stopped firing.
-        log("inbox.draft_batch.skipped", {
-          reason: "another draft batch holds the lock",
-          detail: String((e as Error)?.message ?? e),
-        });
-        return;
-      }
-      try {
-      // Hold the fleet lock first, then the selected store's native lock. A live holder of
-      // either keeps its slot; failure to acquire the second releases only our first lock.
-      let storeLock: DrainLockHandle | undefined;
-      const storeLockPath = join(inboxRoot, "state", "inbox-draft.lock");
-      if (resolve(storeLockPath) !== resolve(draftLockPath)) {
-        try { storeLock = acquireDrainLock(storeLockPath); }
-        catch (error) { log("inbox.draft_batch.skipped", { reason: "another draft batch holds the repository lock", detail: String(error) }); return; }
-      }
-      try {
+      // W1-T193: expose DRAFTING before spawn and clear it when the batch exits.
       const inflightPath = join(inboxRoot, "state", "inbox-draft-inflight.json");
       const spawnedAt = new Date().toISOString();
       writeFileSync(inflightPath, JSON.stringify(Object.fromEntries(due.map((p) => [p.id, spawnedAt])), null, 2), "utf8");
@@ -38185,15 +38224,6 @@ export function buildInboxDraftHook(
       for (const outcome of outcomes) {
         const proposal = due.find((p) => p.id === outcome.proposalId);
         if (!proposal) continue; // unreachable — outcomes are 1:1 with `due`
-        // IDEMPOTENCE (W1-T192): mark this cause ATTEMPTED whether it succeeded or failed —
-        // see this function's own doc for why a failed attempt must be throttled too.
-        //
-        // W1-T2564: EXCEPT A REFUSAL, WHICH IS NOT AN ATTEMPT. W1-T192's argument is that a cause
-        // which was TRIED and failed must not be retried every poll. A run the account turned away
-        // was never tried, so keying it does not throttle a failure — it retires work that never
-        // ran, permanently, because a routed follow-up's key is the literal `::0` and can never
-        // change. This is the ONLY arm that skips the write; an ordinary failure still keys, so
-        // W1-T192's throttle is untouched (its own test pins that).
         if (!outcome.ok && outcome.refused) {
           refusedThisBatch.push(outcome.proposalId);
         }
@@ -39990,16 +40020,17 @@ export async function approveCommand(
   const bareTokens = rest.filter((t, i) => !t.startsWith("--") && !(i > 0 && rest[i - 1] === "--note"));
   if (proposalId && bareTokens.length === 1 && namesATask(proposalId)) {
     const config = deps.config ?? loadConfig();
-    // W1-T10925: a consumer task's id is found in the instance's target plan, not the engine's.
-    const located = deps.planPath === undefined ? verbTaskPlan(proposalId, () => join(config.root, "state")) : undefined;
-    // W1-T13386: a local miss asks the catalog this host names before the id is called unknown. An ops task
-    // is released against the plan the daemon's tick composes, so both read the same pin.
-    // W1-T13749: that composition reads the checkout's origin/main, the ref the daemon's plan reloader reads, never
-    // its working tree (on the host, the boot's detached HEAD); a local id origin/main moved out goes to the catalogs.
-    const localPlan = located?.ok ? located.plan : loadPlan(planPath);
+    const stateDir = join(config.root, "state");
+    const replayArg = rest.find((arg, index) => rest[index - 1] !== "--note" && arg.startsWith(APPROVE_PUBLIC_REPLAY_FLAG));
+    const expectedPublicDigest = replayArg?.slice(APPROVE_PUBLIC_REPLAY_FLAG.length);
+    const workingTreeReplay = rest.some((arg, index) => rest[index - 1] !== "--note" && arg === APPROVE_WORKING_TREE_REPLAY_FLAG);
+    // Keep the strict checkout search so an invalid cwd cannot mask a valid daemon target (W1-T10925).
+    const located = deps.planPath === undefined && expectedPublicDigest === undefined ? verbTaskPlan(proposalId, () => stateDir) : undefined;
+    // After a miss, the default plan can still surface a public hold through its deferred edges.
+    const localPlan = expectedPublicDigest === undefined ? located?.ok ? located.plan : loadLocalReleasePlan(planPath, stateDir) : undefined;
     const checkoutRoot = located?.ok ? located.root : dirname(dirname(planPath));
-    const held = await readApproveRelease(proposalId, localPlan, checkoutRoot, { ...deps.taskLookup, stateDir: join(config.root, "state") },
-      row => appendLedger(ledgerPathFor(config), row));
+    const held = await readApproveRelease(proposalId, localPlan, checkoutRoot, { ...deps.taskLookup, stateDir },
+      row => appendLedger(ledgerPathFor(config), row), expectedPublicDigest, workingTreeReplay);
     if (held?.outcome === "unreadable") {
       console.error(`rmd approve: cannot release '${proposalId}': the task catalogs cannot be read as the daemon composes them (${held.reason}) — nothing released`);
       return 1;
@@ -40009,12 +40040,13 @@ export async function approveCommand(
       console.error(`rmd approve: cannot release '${proposalId}': it is held by ${whose} (${held.hold.reason}: ${compositionHoldEdge(held.hold)}) — nothing released`);
       return 1;
     }
-    if (located && !located.ok && held?.outcome !== "found") {
-      console.error(`rmd approve: unknown task '${proposalId}' (${located.error})`);
+    const releasePlan = held?.outcome === "found" ? held.plan : localPlan;
+    if (releasePlan === undefined || (located && !located.ok && held?.outcome !== "found")) {
+      console.error(`rmd approve: unknown task '${proposalId}'${located?.ok === false ? ` (${located.error})` : ""}`);
       return 2;
     }
     const outcome = approveParkedTask(proposalId, {
-      plan: held?.outcome === "found" ? held.plan : localPlan,
+      plan: releasePlan,
       ledgerPath: ledgerPathFor(config),
       // Clock-free BY CONSTRUCTION — and the comment may not NAME the shape it avoids, because
       // clock-signature-census.test.ts counts by SOURCE TEXT, comments included. The row is already
@@ -45487,7 +45519,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
       }
       /* c8 ignore next 2 -- dispatch glue enters GitHub-backed reviewCommand; reviewCommand has injectable tests */
       await loadHeavyVerb("review");
-      return await withGhTransportFloor(() => reviewCommand(arg, rest.slice(1)));
+      return await withGhTransportFloor(() => reviewCommand(arg, operatorReviewArgs(rest.slice(1))));
     },
   ],
   ["merge-hold", (rest) => mergeHoldCommand(rest)],

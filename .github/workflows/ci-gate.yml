@@ -37,6 +37,9 @@ on:
     types: [edited]
 
 permissions:
+  # W1-T14176: `actions: read` lets the step list the workflow runs on the head commit, so it
+  # can tell this PR's own check runs from another PR's on the same commit.
+  actions: read
   checks: read
   contents: read
 
@@ -57,6 +60,10 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       SHA: ${{ github.event.pull_request.head.sha }}
+      # W1-T14176: the event and this PR's head branch. The step reads only the check runs of this
+      # branch's own workflow runs (see runs_json). ci.yml's ci-gate job sets the same two values.
+      GATE_EVENT: ${{ github.event_name }}
+      HEAD_REF: ${{ github.event.pull_request.head.ref }}
       # The check-run names that always appear on a PR. The gate WAITS for every one to reach a
       # terminal state before deciding, so a slow-to-register check can never let it pass early
       # (the registration race).
@@ -280,6 +287,47 @@ jobs:
           RETRY_ATTEMPTS="${RETRY_ATTEMPTS:-3}"
           RETRY_BACKOFF_SECONDS="${RETRY_BACKOFF_SECONDS:-2}"
 
+          # W1-T14176: A CHECK RUN FROM ANOTHER PR ON THE SAME COMMIT NEVER BLOCKS. Two PRs can share
+          # one head commit (#20014 and #20016, 2026-11-21). The commit's check-runs list holds both
+          # PRs' runs, so #20016's later commitlint failure was the latest row and held #20014. On a
+          # PR event the gate now reads only the check runs of workflow runs whose head_branch is
+          # HEAD_REF. The event comes from the job's GATE_EVENT, never the ambient
+          # GITHUB_EVENT_NAME: the suites run this step with the CI runner's own env. An empty
+          # GATE_EVENT is the old read with no branch filter, and merge_group has no filter. Any
+          # other event with no HEAD_REF fails closed: the gate cannot tell whose runs it reads.
+          GATE_EVENT="${GATE_EVENT:-}"
+          HEAD_REF="${HEAD_REF:-}"
+          branch_filter=0
+          if [ -n "${GATE_EVENT}" ] && [ "${GATE_EVENT}" != "merge_group" ]; then
+            if [ -z "${HEAD_REF}" ]; then
+              echo "::error::ci-gate: HEAD_REF is EMPTY on a ${GATE_EVENT} event -- the gate cannot tell this PR's check runs from another PR's on the same commit, so it fails closed."
+              exit 1
+            fi
+            branch_filter=1
+          fi
+
+          # The workflow runs on SHA, split by branch: the ids of HEAD_REF's own runs, and the run
+          # ids and check-suite ids of every other branch's runs. Same retry rule as the check-runs
+          # read below. Exit 1 after the last failed attempt, never an empty split that reads as
+          # "no other branch".
+          workflow_runs_json() {
+            local wf_raw wf_attempt=1
+            while [ "${wf_attempt}" -le "${RETRY_ATTEMPTS}" ]; do
+              if wf_raw="$(gh api "repos/${REPO}/actions/runs?head_sha=${SHA}&per_page=100" --paginate --slurp)"; then
+                jq -c --arg ref "${HEAD_REF}" '[ .[].workflow_runs[]? ] as $all
+                  | { own: [ $all[] | select(.head_branch == $ref) | .id ],
+                      foreign_runs: [ $all[] | select(.head_branch != $ref) | .id ],
+                      foreign_suites: [ $all[] | select(.head_branch != $ref)
+                                        | .check_suite_id | select(. != null) ] }' <<< "${wf_raw}" || return 1
+                return 0
+              fi
+              echo "ci-gate: workflow-runs read FAILED (attempt ${wf_attempt}/${RETRY_ATTEMPTS}) -- retrying in ${RETRY_BACKOFF_SECONDS}s" >&2
+              wf_attempt=$((wf_attempt + 1))
+              [ "${wf_attempt}" -le "${RETRY_ATTEMPTS}" ] && sleep "${RETRY_BACKOFF_SECONDS}"
+            done
+            return 1
+          }
+
           runs_json() {
             # All check runs on the PR head SHA, across every workflow + app, merged across pages,
             # THEN DEDUPED BY NAME (W1-T123): a SHA accumulates one check-run PER ATTEMPT, so a
@@ -296,9 +344,24 @@ jobs:
             # A newer check can lack started_at before its attempt begins. Its newer id must
             # remain visible rather than borrowing an old timestamped success.
             # (`--slurp` can't combine with `-q`, so flatten the page array with a separate jq.)
-            local raw attempt=1
+            # W1-T14176: before the dedupe, a row of another branch's workflow run is left out. A
+            # posted row (external_id run:<run>:...) is judged by <run>, because the checks API can
+            # file a posted row in any suite. Every other row is judged by its check suite. A row
+            # that names no known run and whose suite is no workflow run's (another app) is kept.
+            # The check runs are read first, so each one read has its workflow run in the next read.
+            local raw split attempt=1
             while [ "${attempt}" -le "${RETRY_ATTEMPTS}" ]; do
               if raw="$(gh api "repos/${REPO}/commits/${SHA}/check-runs?per_page=100&filter=all" --paginate --slurp)"; then
+                if [ "${branch_filter}" = 1 ]; then
+                  split="$(workflow_runs_json)" || return 2
+                  raw="$(jq -c --argjson split "${split}" 'map(.check_runs |= (. // [] | map(
+                          (.check_suite.id // null) as $suite
+                          | ((.external_id // "") | [match("^run:([0-9]+):[0-9]+:job:[0-9]+$").captures[0].string
+                                                     | tonumber] | first) as $run
+                          | select(if $run != null and ($split.own + $split.foreign_runs | any(. == $run))
+                                   then ($split.own | any(. == $run))
+                                   else ($split.foreign_suites | any(. == $suite)) | not end))))' <<< "${raw}")" || return 1
+                fi
                 jq -c '[ .[].check_runs[] | {id, name, status, conclusion, started_at, external_id}
                           | .producer = (if ((.external_id // "")
                                              | test("^(run:[0-9]+:[0-9]+:)?job:[0-9]+$"))
@@ -327,6 +390,10 @@ jobs:
           # an empty `runs` -- which reads as "no checks exist" and is exactly the silent pass this
           # must never produce.
           unreadable_die() {
+            if [ "${1:-1}" = 2 ]; then
+              echo "::error::ci-gate: could NOT READ the workflow-runs API after ${RETRY_ATTEMPTS} attempt(s) -- without it the gate cannot tell this PR's check runs from another PR's on the same commit, so it fails closed. Re-running THIS sha is the remedy."
+              exit 1
+            fi
             echo "::error::ci-gate: could NOT READ the check-runs API after ${RETRY_ATTEMPTS} attempt(s) -- this is NOT a check failure and says NOTHING about the checks themselves; the gate has no data, so it fails closed. Re-running THIS sha is the remedy (unlike the wait-cap timeout below, which needs a NEW sha)."
             exit 1
           }
@@ -339,7 +406,7 @@ jobs:
           wait_started_at="$(date +%s)"
           deadline=$(( wait_started_at + WAIT_CAP_SECONDS ))
           while :; do
-            runs="$(runs_json)" || unreadable_die
+            runs="$(runs_json)" || unreadable_die "$?"
             not_ready="$(jq -r --argjson req "${REQUIRED}" '
               (([ .[] | select(.status=="completed") | .name ] | unique)
                 - [ .[] | select(.status!="completed") | .name ]) as $done
@@ -410,7 +477,7 @@ jobs:
             printf '%s\n' "${fails}" | sed 's/^/  - /'
             while [ -n "${fails}" ] && [ "$(date +%s)" -lt "${grace_deadline}" ]; do
               sleep "${GRACE_POLL_INTERVAL_SECONDS}"
-              runs="$(runs_json)" || unreadable_die
+              runs="$(runs_json)" || unreadable_die "$?"
               not_ready="$(jq -r --argjson req "${REQUIRED}" '
                 (([ .[] | select(.status=="completed") | .name ] | unique)
                   - [ .[] | select(.status!="completed") | .name ]) as $done

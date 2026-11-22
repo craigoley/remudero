@@ -19,7 +19,7 @@
     - scripts/census-precheck.mjs
     - test/ci/gates/a-run-that-ends-leaves-no-capture-directory-behind.test.ts
     - test/ci/a-rejected-census-measurement-retains-its-complete-capture.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A precheck child that completes leaves no capture directory behind"
