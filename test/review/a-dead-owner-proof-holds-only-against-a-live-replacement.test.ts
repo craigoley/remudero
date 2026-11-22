@@ -7,13 +7,15 @@
  * re-check read only the ledger, so a takeover GitHub accepted before its ledger append was missed.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import childProcess, { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import os, { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { reviewCommand, type ReviewCommandDeps, type ReviewCommandHost } from "#src/cli/commands/review.js";
-import type { Config } from "#src/lib/config.js";
+import { sweepCommand } from "#src/cli/commands/sweep.js";
+import { configPath, type Config } from "#src/lib/config.js";
 import { appendLedger, type LedgerLine } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { postReviewPending, reviewInputDigest } from "#src/lib/review.js";
@@ -348,14 +350,47 @@ test("W1-T14177 criterion 2: rmd review returns another reviewer's claim refusal
   }
 });
 
-test("W1-T14177 criterion 2: the one-shot rmd sweep passes the act-time re-reader to its sweep, as the daemon's passes do", () => {
-  const source = readFileSync(join(REPO_ROOT, "src/cli/commands/sweep.ts"), "utf8");
-  const start = source.indexOf("export async function sweepCommand(");
-  assert.ok(start >= 0, "the one-shot command is in the source");
-  const oneShot = source.slice(start, source.indexOf("\nexport ", start + 1));
-  const call = oneShot.slice(oneShot.indexOf("runOneShotSweep("));
-  assert.match(call.slice(0, call.indexOf("DEFAULT_SWEEP_POLICY")), /\brereadPrAtAct: buildRereadPrAtAct\(owner, repo, ledgerPath,/,
-    "the one-shot runSweep deps carry a live re-reader");
+test("W1-T14177 criterion 2: the one-shot rmd sweep passes the act-time re-reader to its sweep, as the daemon's passes do", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-t14177-oneshot-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const config = { root, claudeBin: "/bin/true" } as Config;
+  // The real config reader and owner parser run against a private home and a fixed origin, with no git history.
+  t.mock.method(os, "homedir", () => root);
+  t.mock.method(childProcess, "execFileSync", (file: string, args: string[]) => {
+    assert.equal(file, "git");
+    if (args.includes("remote.origin.url")) return "https://github.com/acme/fixture.git\n";
+    throw new Error("fixture has no git history");
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  mkdirSync(join(configPath(), ".."), { recursive: true });
+  writeFileSync(configPath(), JSON.stringify(config));
+  t.mock.method(console, "log", () => {});
+  const calls: Array<{ name: string; args: unknown[] }> = [];
+  const record = (name: string, result?: unknown) => (...args: unknown[]) => { calls.push({ name, args }); return result; };
+  const reread = async (pr: OpenPrView) => pr;
+  const host = {
+    USAGE: "sweep fixture usage", DEFAULT_WORKER_STALL_MS: 1,
+    buildSweepEffects: record("effects", { readLedger: () => [], appendLine: () => {}, readOpenEscalations: () => [],
+      reviewerCodeStaleThisPass: () => undefined }),
+    createPlanFilingClassificationTelemetry: () => record("classification"),
+    buildEscalationTriageRuntime: record("triageRuntime"), refreshEscalationTriageEvidence: record("refreshEvidence"),
+    sweepPostFixReverification: record("reverify", { results: [], total: 0, redriven: 0 }),
+    updatedForWorkflowFromLedger: record("workflow", () => false),
+    buildRereadPrAtAct: record("reread", reread),
+    handedOffHeadRiskJudge: record("judge", undefined), codeScanningJudgeDeps: record("codeScanning", {}),
+    sweepEscalationReconcile: record("reconcile", {}), sweepEscalationTriage: record("triage"),
+    sweepPrTerminalRung: record("terminal"), runAutomaticBranchReapRung: record("branchReap"),
+    runTmpSweepRung: record("tmp"), runWorkerTailSweepRung: record("tails"), runInflightLockSweepRung: record("locks"),
+    runWorkerStallDetectorRung: record("stalls"), runMountRecommenderRung: record("mounts"),
+    renderEscalationReconcileSummary: () => "escalations: none",
+    commandViews: () => [],
+    runOneShotSweep: async (run: (pool: undefined) => Promise<unknown>) => run(undefined),
+  } as unknown as Parameters<typeof sweepCommand>[0];
+  assert.equal(await sweepCommand(host, ["--repo", "other", "--dry-run"]), 0);
+  const built = calls.filter((call) => call.name === "reread");
+  assert.equal(built.length, 1, "the one-shot pass builds one act-time re-reader");
+  assert.deepEqual(built[0]!.args.slice(0, 3), ["acme", "other", join(root, "state", "ledger.ndjson")]);
 });
 
 test("W1-T14177 criterion 2: a claim the combined status still serves proves nothing once the history has a newer post", async (t) => {
