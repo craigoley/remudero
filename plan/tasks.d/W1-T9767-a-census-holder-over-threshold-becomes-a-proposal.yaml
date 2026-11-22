@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 8.00
+  budget_usd: 4.50
   risk: high  # Rule 19: one concern, routing census proposals into the existing proposal path; nothing is minted without operator review
   band_meaning: span
   origin: 'operator approval 2026-10-15 (verbatim: "go ahead - do as much as you can in parallel"; earlier: "innovate; lean into automation and self improvement"): W1-T9647 memory census (PR 12231), item Z5; W1-T9647 design step 5 names it as a follow-up'
