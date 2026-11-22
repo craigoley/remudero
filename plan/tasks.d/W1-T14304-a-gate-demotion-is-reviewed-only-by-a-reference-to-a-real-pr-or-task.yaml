@@ -37,9 +37,9 @@
       src/lib/gate-gardener.ts applyGateActions checks its own demotion through evaluateGateMonotonic(base, head), and
       every gardener rationale names the same task ("W1-T4116 gate gardener: <gate> refused 0 …"). main's GATE_RATIONALE
       already names W1-T4116 (the gardener's merged demotion, #16171), so under step 2 its next demotion is stale, and the
-      gardener cannot name its own PR number before the PR exists. Operator ruling 2026-11-22 (this session): an
-      automated demotion names its review with a token meaning the PR under check, as strong as naming its own `#<n>`,
-      which step 2 already counts. Design step 5 adds it; no criterion, proof or falsifier changes.
+      gardener cannot name its own PR number before the PR exists. The suite is in scope so its fixtures can follow the
+      new evaluateGateMonotonic signature. No new pass route is added: how the gardener's own demotion names a review
+      awaits an operator ruling (2026-11-22) and is not part of this amendment.
   design: |
     1. gate-monotonic-check.mjs imports rationaleReferences, freshReviewReferences, knownPrs, planTasks and currentPrFromRef
        from baseline-monotonic-check.mjs, so the two gates share one reference rule. gateRationaleNamesAPr delegates to it.
@@ -51,13 +51,6 @@
        counts no reference and says why; it never reports OK.
     4. The existing W1-T3519 tests keep their titles verbatim; only their fixtures change, to name a PR their git
        fixture's history holds or the PR passed with `--pr`.
-    5. Besides step 2, a demotion passes when its rationale holds the token `#this-pr` as a whole word, names every
-       demoted context by its exact name, AND is not origin/main's rationale carried over (identical once whitespace is
-       collapsed). The token names the PR under check, the one whose merge decides, so it needs no plan or PR record;
-       naming each demoted context keeps a rationale carried over from main, or one padded from it, from reviewing a
-       demotion it does not mention, and the carried-over test keeps main's own rationale from reviewing one it does. The gate gardener's demotion rationale (gate-gardener.ts, W1-T4116)
-       ends with the token, and its own check reads the result the way the CI gate does. The W1-T4116 suite keeps its
-       titles; it gains a case where main's rationale already names W1-T4116 and the gardener's next demotion still lands.
 
     INVARIANT a-demotion-names-a-real-review: a REQUIRED context leaves the gate set only under a rationale naming a merged PR, this PR or a filed task that the base rationale did not name.
   acceptance:
