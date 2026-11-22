@@ -279,6 +279,7 @@ const PR_ARGV: Record<string, string[]> = {
   "comment-load-ratchet": ["npm run --silent comment-load-signal"],
   "expiring-fixture-census": ["node scripts/expiring-fixture-census.mjs"],
   "console-parity": ["npm run --silent console-parity"],
+  "write-only-ledger-step": ["npm run --silent write-only-ledger-step"], // W1-T14149
   "baseline-monotonic": ["node scripts/baseline-monotonic-check.mjs"],
 };
 
@@ -295,6 +296,7 @@ test("W1-T5522: a group commit runs the ratchets against the queue base", () => 
   assert.deepEqual(at("dependency-evidence"), [`git rev-parse --verify ${QUEUE_BASE}^{commit}`, `git archive ${QUEUE_BASE}`], "the simulated source archive is absent and the producer must retain UNKNOWN");
   assert.deepEqual(at("task-id-existence"), [`node scripts/task-id-existence-check.mjs --base ${QUEUE_BASE}`]);
   assert.deepEqual(at("source-size"), [`npm run --silent source-size-signal -- --base ${QUEUE_BASE}`]);
+  assert.deepEqual(at("write-only-ledger-step"), [`npm run --silent write-only-ledger-step -- --base ${QUEUE_BASE}`]); // W1-T14149
   // The diff-reading steps and the CLAUDE.md net-byte comparand read it too.
   assert.equal(at("classify")[0], `git diff --name-only ${QUEUE_BASE}...HEAD`);
   assert.equal(at("containment-probe")[0], `git diff --name-only ${QUEUE_BASE}...HEAD`);
@@ -346,7 +348,7 @@ test("W1-T5522: the pull_request steps are unchanged and the PR-only steps skip"
   // The title lint left this job (W1-T5695): nothing here posts `commitlint`, on either event.
   assert.ok(!reportLines().some((l) => l.name === "commitlint"));
   // The merge_group arms leave every OTHER step's argv identical to pull_request.
-  const rebased = new Set(["dependency-evidence", "classify", "claude-md-budget-ratchet", "lint-plan", "containment-probe", "prompt-surface-gate", "task-id-existence", "source-size", "comment-load-ratchet", "expiring-fixture-census", "baseline-monotonic"]);
+  const rebased = new Set(["dependency-evidence", "classify", "claude-md-budget-ratchet", "lint-plan", "containment-probe", "prompt-surface-gate", "task-id-existence", "source-size", "comment-load-ratchet", "expiring-fixture-census", "write-only-ledger-step", "baseline-monotonic"]);
   for (const [id, argv] of Object.entries(PR_ARGV)) if (!rebased.has(id)) assert.deepEqual(group.calls.get(id), argv, id);
 });
 

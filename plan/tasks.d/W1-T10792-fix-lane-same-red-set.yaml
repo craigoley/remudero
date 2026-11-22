@@ -10,7 +10,7 @@
   #   worker evidence: Operator-free recovery requires changing repair execution beyond the declared gardener and test files.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
   # redesign: signature=f443c04689d65226
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "fix-lane:same-red-set"

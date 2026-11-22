@@ -915,6 +915,7 @@ import {
   type AffectedSelection,
   type AffectedSuitesInput,
 } from "./lib/affected-suites.js";
+import { pinningTestsApply, pinningTestViolations, runPinningTests } from "./lib/pinning-tests.js";
 // W1-T4797 — the tier manifest's own measured durations bound the pre-push coverage precheck.
 // @ts-expect-error a plain .mjs script with no declaration file, as the satisfied-task census import above.
 import { DEFAULT_MANIFEST_RELATIVE_PATH, DURATION_STALENESS_FACTOR, loadManifest, tierFiles, weightedDurationMs } from "../scripts/test-tier-manifest.mjs";
@@ -20138,7 +20139,10 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // WARN-only (never blocks), so appending it here changes nothing about `assertLintClean` or
     // the pre-dispatch gate — it only ever adds to `warned` below, on this one changed-tasks pass.
     const violations = scope
-      ? [...lintViolations, ...proofGrepUnmatchableViolations(task, opts), ...proofGrepSelfCertifyingViolations(task, opts)]
+      ? [...lintViolations, ...proofGrepUnmatchableViolations(task, opts), ...proofGrepSelfCertifyingViolations(task, opts),
+        // W1-T14230: warn-only, appended after the plan-only promotion above, so it never blocks.
+        ...(pinningTestsApply(task, oldById?.get(task.id))
+          ? pinningTestViolations(task, runPinningTests(task, codeRoot, systemClock)) : [])]
       : lintViolations;
     const blocking = violations.filter((v) => v.severity === "block");
     const soft = violations.filter((v) => v.severity === "warn");

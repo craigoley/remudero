@@ -34,7 +34,7 @@
     - test/a-skill-draft-approval-only-ever-writes-the-skill.test.ts
     - test/skill-draft-ratification.test.ts
     - test/a-staged-skill-draft-is-evaluated-on-tasks-merged-after-it.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at origin/main 53fc266d9 (2026-11-19). Measured read-only over the fleet ledger on the Azure host
