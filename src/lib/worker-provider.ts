@@ -116,7 +116,6 @@ interface CodexSpawnArgs {
     ) => ContainedProcess;
     teardown?: (pgid: number) => void;
   };
-  fixtureSpawn?: boolean;
   onSpawnError?: (error: NodeJS.ErrnoException) => void;
   /** W1-T10763: a codex tool call also carries `toolName`/`toolInput`/`cwd`, the fields the run-task observer signs. */
   streamObserver?: (event: {
@@ -133,107 +132,8 @@ interface CodexSpawnArgs {
  * no SDK throw. It is never read as exit 0. Re-exported by worker.ts beside `WorkerResult.exit`. */
 export type WorkerExit = { kind: "exit"; code: number } | { kind: "signal"; signal: string } | { kind: "unobserved" };
 
-const HARNESS_CAPABILITIES = ["preToolInterception", "resume", "configuredCompaction", "servedModelIdentity",
-  "toolResultLineage", "billingProvenance", "filesystemIsolation", "networkIsolation"] as const;
-type HarnessCapability = typeof HARNESS_CAPABILITIES[number];
-type HarnessSupport = "supported" | "unsupported" | "unknown";
-type HarnessOutcome = HarnessSupport | "NOT_RUN" | "SKIPPED";
-type HarnessAdapter = "claude" | "codex";
-type HarnessEnvironment = "linux-host" | "linux-container" | "darwin-host" | "windows-host";
-
-interface HarnessRuntimeBinding {
-  adapter: HarnessAdapter;
-  adapterRevision: string;
-  executableSha256: string;
-  policySha256: string;
-  environment: HarnessEnvironment;
-}
-
-const HARNESS_EVIDENCE_CLASSES = Object.freeze({ declared: "declared", tested: "deterministic-adapter-test",
-  installed: "observed-installed-runtime" } as const);
-
-export interface WorkerHarnessContract {
-  version: 1;
-  adapter: HarnessAdapter | "unknown";
-  binding: HarnessRuntimeBinding | null;
-  evidenceClasses: typeof HARNESS_EVIDENCE_CLASSES;
-  capabilities: Record<HarnessCapability, { declared: HarnessSupport; tested: HarnessOutcome; installed: HarnessOutcome }>;
-  preToolInterception: "denied" | "nonblocking" | "unknown" | "NOT_RUN";
-}
-
-function harnessRecord(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown> : undefined;
-}
-
-function harnessBinding(value: unknown): HarnessRuntimeBinding | null {
-  const record = harnessRecord(value);
-  if (!record) return null;
-  const { adapter, adapterRevision, executableSha256, policySha256, environment } = record;
-  if ((adapter !== "claude" && adapter !== "codex") || typeof adapterRevision !== "string"
-    || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(adapterRevision)
-    || typeof executableSha256 !== "string" || !/^[0-9a-f]{64}$/.test(executableSha256)
-    || typeof policySha256 !== "string" || !/^[0-9a-f]{64}$/.test(policySha256)
-    || (environment !== "linux-host" && environment !== "linux-container" && environment !== "darwin-host" && environment !== "windows-host")) return null;
-  return { adapter, adapterRevision, executableSha256, policySha256, environment };
-}
-
-function installedHarnessOutcome(capability: HarnessCapability, value: unknown, current: HarnessRuntimeBinding | null): HarnessOutcome {
-  if (value === undefined) return "NOT_RUN";
-  const evidence = harnessRecord(value);
-  if (evidence?.outcome === "NOT_RUN" || evidence?.outcome === "SKIPPED") return evidence.outcome;
-  const observed = harnessBinding(evidence?.binding);
-  if (evidence?.class !== "observed-installed-runtime" || !current || !observed
-    || observed.adapter !== current.adapter || observed.adapterRevision !== current.adapterRevision
-    || observed.executableSha256 !== current.executableSha256 || observed.policySha256 !== current.policySha256
-    || observed.environment !== current.environment) return "unknown";
-  if (capability === "preToolInterception" && evidence.source !== (evidence.outcome === "supported"
-    ? "pre-tool-hook-denial" : "pre-tool-attempt-not-denied")) return "unknown";
-  return evidence.outcome === "supported" || evidence.outcome === "unsupported" ? evidence.outcome : "unknown";
-}
-
-function harnessSupport(flag: boolean | undefined): HarnessSupport {
-  return flag === undefined ? "unknown" : flag ? "supported" : "unsupported";
-}
-
-/** The optional installed evidence belongs to a separately admitted observation producer. Ordinary
- * worker calls supply neither that evidence nor a binding to an immutable executable. */
-export function buildWorkerHarnessContract(provider: string, facts: {
-  resume?: boolean;
-  compactionConfigured?: boolean;
-  preToolInterception?: WorkerHarnessContract["preToolInterception"];
-  tested?: Partial<Record<HarnessCapability, HarnessSupport>>;
-}, installed?: { binding: unknown; capabilities: Partial<Record<HarnessCapability, unknown>> }): WorkerHarnessContract {
-  const adapter = provider === "claude" || provider === "codex" ? provider : "unknown";
-  const bound = harnessBinding(installed?.binding);
-  const binding = bound?.adapter === adapter ? bound : null;
-  const declared: Record<HarnessCapability, HarnessSupport> = {
-    preToolInterception: "supported",
-    resume: harnessSupport(facts.resume),
-    configuredCompaction: harnessSupport(facts.compactionConfigured),
-    servedModelIdentity: adapter === "claude" ? "supported" : "unknown",
-    toolResultLineage: "supported",
-    billingProvenance: "supported",
-    filesystemIsolation: "supported",
-    networkIsolation: "supported",
-  };
-  const capabilities = Object.fromEntries(HARNESS_CAPABILITIES.map(capability => {
-    const tested = adapter === "unknown" ? undefined : facts.tested?.[capability];
-    return [capability, {
-      declared: adapter === "unknown" ? "unknown" : declared[capability],
-      tested: tested === "supported" || tested === "unsupported" || tested === "unknown" ? tested : "NOT_RUN",
-      installed: installedHarnessOutcome(capability, installed?.capabilities[capability], binding),
-    }];
-  })) as WorkerHarnessContract["capabilities"];
-  const interception = facts.preToolInterception;
-  return { version: 1, adapter, binding, evidenceClasses: HARNESS_EVIDENCE_CLASSES, capabilities,
-    preToolInterception: adapter === "claude" && (interception === "denied" || interception === "nonblocking" || interception === "unknown")
-      ? interception : "NOT_RUN" };
-}
-
 interface CodexWorkerResult {
   provider: "codex";
-  harnessContract: WorkerHarnessContract;
   /** W1-T6148: what the harness did with a codex writer's edits; absent when its caller commits them. */
   harnessCommit?: CodexHarnessCommit;
   sessionId: string;
@@ -3584,10 +3484,6 @@ export function codexReadOnly(args: Pick<CodexSpawnArgs, "sandboxIntent" | "tool
     !args.tools.some((tool) => ["Write", "Edit", "NotebookEdit", "MultiEdit"].includes(tool));
 }
 
-function codexCanResume(args: CodexSpawnArgs): boolean {
-  return codexReadOnly(args) || args.sandboxIntent === "disposable-review";
-}
-
 /**
  * W1-T6148 — WHO COMMITS A CODEX WRITER'S EDITS. The worker cannot (no gitdir write), so: its CALLER when
  * the caller told it the harness owns git (a shell-less bound, or a declared cash surface — the coherence
@@ -3759,7 +3655,7 @@ function codexExecArgs(args: CodexSpawnArgs, config: Config, selection?: Pick<Pr
   // containment arguments. A resumed writer must therefore start fresh through the ordinary
   // contained path below; the prompt already carries its predecessor's repair evidence. Read-only
   // and disposable-review continuations retain the CLI resume form byte-for-byte.
-  if (args.resumeSessionId && codexCanResume(args)) {
+  if (args.resumeSessionId && (readOnly || disposableReview)) {
     return ["exec", "resume", ...shared, args.resumeSessionId, "-"];
   }
   // W1-T6148: NO `--add-dir` for the tree's git dir or common dir. A writer that could write either could
@@ -7011,9 +6907,8 @@ async function spawnCodexWorkerInPrivateTemp(
     if (pidRef.pid !== undefined) teardownOnce(pidRef.pid);
   };
   const childEnv = { ...codexSpawnEnv(config, args, nativeCacheRoot), TMPDIR: privateTmpDir };
-  const execArgs = codexExecArgs(args, config, selection, privateProfile, nativeCacheRoot);
   const contained = spawn(
-    { command: bin, args: execArgs, cwd: args.cwd, env: childEnv },
+    { command: bin, args: codexExecArgs(args, config, selection, privateProfile, nativeCacheRoot), cwd: args.cwd, env: childEnv },
     (chunk, failure) => {
       if (outputLimit || timedOut) return;
       if (failure) stderrFailure = failure;
@@ -7119,17 +7014,6 @@ async function spawnCodexWorkerInPrivateTemp(
     lineageEnd = isError ? "interrupted" : "stream-ended";
     const model = selection?.model ?? config.workerProviders?.codexModel ?? "codex-default";
     const notionalCostUsd = parsed.tokenUsageState === "observed" ? codexNotionalCostUsd(model, parsed.tokens) : undefined;
-    const served = codexServedModel(parsed.reroutes ?? []);
-    const fixtureSpawn = args.fixtureSpawn ?? (args.containment?.spawn !== undefined);
-    const harnessContract = buildWorkerHarnessContract("codex", {
-      resume: privateProfile === undefined && codexCanResume(args), compactionConfigured: false,
-      tested: fixtureSpawn ? {
-        resume: !isError && execArgs[1] === "resume" && parsed.sessionId === args.resumeSessionId ? "supported" : undefined,
-        configuredCompaction: "unsupported",
-        servedModelIdentity: served.servedModel === null ? "unknown" : "supported",
-        billingProvenance: notionalCostUsd === undefined ? "unknown" : "supported",
-      } : undefined,
-    });
     const harnessCommit = harnessCommits && !isError ? commitCodexWriterEdits(args.cwd, parsed.text) : undefined;
     if (harnessCommit && args.runId) appendLedger(ledgerPathFor(config), {
       run_id: args.runId,
@@ -7163,13 +7047,12 @@ async function spawnCodexWorkerInPrivateTemp(
       childEnvKeys: Object.keys(childEnv),
       accountLabel: undefined,
       provider: "codex",
-      harnessContract,
       model,
       effort: selection?.effort ?? args.effort ?? "default",
       tokens: parsed.tokens,
       tokenUsageState: parsed.tokenUsageState,
       modelUsage: {},
-      ...served,
+      ...codexServedModel(parsed.reroutes ?? []),
       compactionEvents: [],
       compactionFailures: [],
       compactionConfigured: false,
