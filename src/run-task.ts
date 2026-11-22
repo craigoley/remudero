@@ -1359,6 +1359,7 @@ import {
 import { routingAbCommand } from "./lib/routing-experiments.js";
 import { attributeAttemptOutcome } from "./lib/attempt-outcome-attribution.js";
 import { recordRoutingExperimentResults } from "./lib/routing-experiment-result.js";
+import { recordRoutingPolicyEstimates } from "./lib/routing-policy-estimate.js";
 import { cashInvoiceAccounts, costExportDigest, newestCostExportAsync, readCashInvoiceReceipts, readCashInvoiceReceiptsAsync, reconcileCashInvoice, recordCashInvoiceFailure,
   recordCashInvoiceVerdicts, type CashInvoiceReconciliation, type CostExportSource } from "./lib/cash-invoice-reconcile.js";
 import { askDecisionModel, decisionsCommand } from "./lib/decision-model.js";
@@ -22822,6 +22823,8 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
       if (deps.recordFire !== false) recordMeasurementCadenceFire(measurementCadenceMarkerPath(root), cadenceClock.date(), 24 * 60 * 60 * 1000);
       const coverageRunId = `MEASUREMENT-CADENCE-${cadenceClock.now()}`;
       await recordRoutingExperimentResults({ stateDir: join(root, "state"), today: cadenceClock.iso().slice(0, 10) });
+      // W1-T14146: the same provider choice, estimated from the auction's logged probabilities over all routed traffic.
+      await recordRoutingPolicyEstimates({ stateDir: join(root, "state"), today: cadenceClock.iso().slice(0, 10) });
       await reconcileNewestCostExport(config, cadenceClock);
       const verifyHumanRunId = `VERIFY-HUMAN-CADENCE-${cadenceClock.iso()}`;
       // `repoRoot`, NOT `root` (which is `config.root`, the state volume) — see this function's own
