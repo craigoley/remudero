@@ -360,8 +360,8 @@ function placementHistory(): { dir: string; code: string; placement: string; mat
     return repo.git("rev-parse", "HEAD");
   };
   const runTask = [
-    'import { judge } from "./lib/review.js";',
-    'import { withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";',
+    `import { judge } from ${JSON.stringify("./lib/review.js")};`,
+    `import { withReviewerWorktreeLease } from ${JSON.stringify("./lib/reviewer-worktree-lease.js")};`,
     "",
     "async function runReview(pr: string): Promise<string> {",
     "  return judge(pr);",
