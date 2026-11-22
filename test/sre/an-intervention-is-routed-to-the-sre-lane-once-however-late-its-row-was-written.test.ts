@@ -160,7 +160,7 @@ test("W1-T14005 criterion 2: the lane's evidence counts distinct interventions, 
 
   // The rule directly: one key read many times is one; a row with no key counts by itself, as it always did.
   const keyed = (ts: number, key: string): IncidentLedgerEvent => ({ fingerprint: fp, ts, kind: "intervention", name: CAUSE, message: "m", instance: "core", interventionKey: key });
-  const plain = (ts: number): IncidentLedgerEvent => ({ fingerprint: "e".repeat(64), ts, kind: "exception", name: "TypeError", message: "m", instance: "core" });
+  const plain = (ts: number): IncidentLedgerEvent => ({ fingerprint: "e".repeat(64), ts, kind: "http_5xx", templateId: "service.internal-error", name: "TypeError", message: "m", instance: "core" });
   const [one] = aggregateIncidents([keyed(NOW, "k1"), keyed(NOW + HOUR, "k1"), keyed(NOW + 5 * HOUR, "k1")]);
   assert.deepEqual([one.count, one.firstSeenMs, one.lastSeenMs, one.burnPerHour], [1, NOW, NOW, 1]);
   assert.equal(aggregateIncidents([keyed(NOW, "k1"), keyed(NOW + HOUR, "k2")])[0].count, 2);
@@ -606,7 +606,7 @@ test("W1-T14005 criterion 4: an unreadable routing history defers only the rows 
   book.add(late, NOW - DAY);
   book.rows.push({ ts: iso(NOW - MIN), step: "fleet.pause", scope: "instance", instance: "core", reason: "hand hold", actor: "operator_human", run_id: "FLEET-9" });
   const [pause] = deriveControlInterventions(book.rows);
-  const exception: IncidentLedgerEvent = { fingerprint: "e".repeat(64), ts: NOW - 30 * MIN, kind: "exception", name: "TypeError", message: "boom", instance: "core" };
+  const exception: IncidentLedgerEvent = { fingerprint: "e".repeat(64), ts: NOW - 30 * MIN, kind: "http_5xx", templateId: "service.internal-error", name: "TypeError", message: "boom", instance: "core" };
   const ran: string[] = [];
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const over = (): Partial<SreLaneInput> => ({

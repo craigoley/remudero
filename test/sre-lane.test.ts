@@ -7,7 +7,7 @@
 //   - the daemon starts the SRE lane among its gardens (grep: startSreLane( in src/run-task.ts)
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -15,6 +15,14 @@ import { test } from "node:test";
 import { listFeedback } from "../src/lib/feedback.js";
 import { overlayQueuedFeedbackEntries } from "../src/lib/feedback-landing.js";
 import {
+  INCIDENT_TEMPLATE_CATALOG,
+  incidentTemplateCatalogProblems,
+  laneOwnedIncidentTemplateId,
+  renderIncidentPublication,
+  resolveIncidentTemplate,
+} from "../src/lib/incident-templates.js";
+import {
+  admitTemplatedEvents,
   aggregateIncidents,
   daemonSreLaneInput,
   fingerprintAlreadyOpen,
@@ -25,6 +33,7 @@ import {
   runSreLanePass,
   sreLaneRoom,
   sreLaneStorePath,
+  sreLaneTemplateRefusalsPath,
   startSreLane,
   suspectPullRequests,
   worstOpenIncident,
@@ -46,7 +55,9 @@ function event(fingerprint: string, atIso: string, extra: Partial<IncidentLedger
   return {
     fingerprint,
     ts: Date.parse(atIso),
-    kind: "exception",
+    // W1-T13131: an eligible event names a catalog template declared for its kind.
+    kind: "http_5xx",
+    templateId: "service.internal-error",
     name: "TypeError",
     message: "boom",
     instance: "core",
@@ -224,7 +235,10 @@ test("a failing SRE lane pass is logged, never thrown out of the timer", async (
 test("the daemon's SRE lane reads only the INCIDENT rows of this instance's own ledger", async () => {
   const root = tmpRoot();
   const ledgerPath = join(root, "ledger.jsonl");
-  const incident = { task_id: "INCIDENT", step: "incident.event", fingerprint: FP_A, kind: "exception", name: "TypeError", message: "boom", sha: "dep1" };
+  const incident = {
+    task_id: "INCIDENT", step: "incident.event", fingerprint: FP_A, template_id: "service.internal-error", kind: "http_5xx",
+    name: "TypeError", message: "boom", sha: "dep1",
+  };
   writeFileSync(ledgerPath, [
     { ...incident, ts: "2026-09-23T10:00:00.000Z" },
     { ...incident, step: "incident.sampled", ts: "2026-09-23T10:05:00.000Z" },
@@ -248,6 +262,74 @@ test("the daemon's SRE lane reads only the INCIDENT rows of this instance's own 
   const entries = overlayQueuedFeedbackEntries(listFeedback(root), root);
   assert.deepEqual(entries.map((e) => e.origin), [incidentFeedbackOrigin(FP_A)], "only the INCIDENT rows count");
   assert.ok(entries[0].raw.includes("Count: 2"), "both incident steps are read, the torn row is not");
-  assert.ok(entries[0].raw.includes("Instance(s): r"));
+  // W1-T13131: the body is the template's literal and the named safe fields, never the ledgered message or name.
+  assert.ok(entries[0].raw.includes("Message template: internal_error"));
+  assert.ok(!entries[0].raw.includes("boom") && !entries[0].raw.includes("TypeError"), "no ledgered free text is published");
   assert.deepEqual(logged, ["sre_lane.filed"]);
+});
+
+test("W1-T13131: the template gate's unreadable memory, pruning and contested identity", async () => {
+  const root = tmpRoot();
+  const stateDir = join(root, "state");
+  const legacy = (atIso: string) => event(FP_B, atIso, { templateId: undefined });
+  const logged: Array<[string, Record<string, unknown> | undefined]> = [];
+  const log = (step: string, extra?: Record<string, unknown>) => { logged.push([step, extra]); };
+
+  // An unreadable memory is logged with its reason and counts nothing, so a torn store never re-counts an input.
+  writeFileSync(sreLaneTemplateRefusalsPath(stateDir), "{ torn");
+  const torn = admitTemplatedEvents([legacy("2026-09-23T10:00:00.000Z")], { stateDir, nowMs: Date.parse("2026-09-23T11:00:00.000Z"), log });
+  assert.equal(torn.newlyCounted, 0);
+  assert.deepEqual(torn.refused, { missing: 1, malformed: 0, unknown: 0, mismatched: 0 });
+  assert.equal(logged.length, 1);
+  assert.equal(logged[0][0], "sre_lane.template_refusals_unread");
+  assert.match(String(logged[0][1]?.error), /JSON/);
+
+  // A remembered refusal older than every read window is pruned on the next write; a non-number entry is dropped.
+  writeFileSync(sreLaneTemplateRefusalsPath(stateDir), JSON.stringify({ counted: { old: Date.parse("2026-09-01T00:00:00.000Z"), bad: "x" } }));
+  const fresh = admitTemplatedEvents([legacy("2026-09-23T10:00:00.000Z")], { stateDir, nowMs: Date.parse("2026-09-23T11:00:00.000Z"), log });
+  assert.equal(fresh.newlyCounted, 1);
+  const memory = JSON.parse(readFileSync(sreLaneTemplateRefusalsPath(stateDir), "utf8")) as { counted: Record<string, number> };
+  assert.deepEqual(Object.values(memory.counted), [Date.parse("2026-09-23T10:00:00.000Z")], "only the fresh refusal is kept");
+
+  // A fingerprint two templates claim is contested: every one of its events is refused, and a valid sibling still passes.
+  const contested = admitTemplatedEvents([
+    event(FP_A, "2026-09-23T10:00:00.000Z"),
+    event(FP_A, "2026-09-23T10:01:00.000Z", { templateId: "board.status-unavailable" }),
+    event("c".repeat(64), "2026-09-23T10:02:00.000Z"),
+    event("not-hex", "2026-09-23T10:03:00.000Z"),
+  ], { stateDir, nowMs: Date.parse("2026-09-23T11:00:00.000Z"), log });
+  assert.deepEqual(contested.events.map((e) => e.fingerprint), ["c".repeat(64)]);
+  assert.deepEqual(contested.refused, { missing: 0, malformed: 1, unknown: 0, mismatched: 2 });
+  assert.deepEqual([...contested.admitted.keys()], ["c".repeat(64)]);
+});
+
+test("W1-T13131: the catalog, resolver and publication policies refuse what they do not declare", () => {
+  const internal = INCIDENT_TEMPLATE_CATALOG.find((t) => t.id === "service.internal-error")!;
+  assert.deepEqual(resolveIncidentTemplate({ templateId: null, kind: "http_5xx" }), { ok: false, reason: "missing" });
+  assert.deepEqual(resolveIncidentTemplate({ templateId: "x".repeat(129), kind: "http_5xx" }), { ok: false, reason: "malformed" });
+  assert.deepEqual(resolveIncidentTemplate({ templateId: internal.id, kind: "http_5xx", source: "console" }), { ok: false, reason: "mismatched" });
+  assert.equal(resolveIncidentTemplate({ templateId: internal.id, kind: "http_5xx", source: "daemon" }).ok, true);
+  assert.equal(laneOwnedIncidentTemplateId("gateway", "flow"), undefined, "only this lane's own producers are bound by kind");
+  assert.equal(laneOwnedIncidentTemplateId("sre-lane", "toString"), undefined, "an inherited key binds nothing");
+  assert.equal(laneOwnedIncidentTemplateId("sre-lane", "intervention"), "sre-lane.intervention");
+
+  assert.deepEqual(incidentTemplateCatalogProblems([
+    { ...internal, id: "Bad Id" },
+    { ...internal, id: "p.literal", literal: "a {b}", placeholders: [] },
+    { ...internal, id: "p.kinds", kinds: [] },
+    internal,
+    internal,
+  ]), ["Bad Id: malformed id", "p.literal: placeholders do not match the literal", "p.kinds: declares no kind or source",
+    "service.internal-error: declared twice"]);
+
+  const facts = {
+    fingerprint: FP_A, template: internal, kind: "latency", sources: ["console", "gateway"], count: Number.NaN, firstSeenMs: 0, lastSeenMs: 0,
+    burnPerHour: Number.POSITIVE_INFINITY, deployShas: ["main", "abcdef1"], suspectPrs: ["https://github.com/o/r/pull/1", "http://x/pull/2"],
+  };
+  const body = renderIncidentPublication(facts);
+  assert.ok(body.startsWith(`Incident ${FP_A.slice(0, 12)}: withheld template service.internal-error`), "an undeclared kind is withheld");
+  assert.ok(body.includes("Source(s): gateway\n") && body.includes("Count: 0, burn: 0.00/hr") && body.includes("Deploy sha(s): abcdef1\n"));
+  assert.ok(body.includes("https://github.com/o/r/pull/1") && !body.includes("http://x/pull/2"));
+  assert.ok(renderIncidentPublication({ ...facts, sources: ["console"], suspectPrs: [] }).includes("Source(s): withheld"));
+  assert.throws(() => renderIncidentPublication({ ...facts, fingerprint: "not-hex" }), /not publishable/);
 });

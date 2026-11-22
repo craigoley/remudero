@@ -25,6 +25,16 @@ import { readLiveLedgerRows } from "./sweep.js";
 import { appendLedger, type LedgerLine } from "./ledger.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, type LedgerUnionRecordRead } from "./ledger-union.js";
+import { createHash } from "node:crypto";
+import {
+  INCIDENT_TEMPLATE_REFUSAL_REASONS,
+  isPublishableIncidentFingerprint,
+  laneOwnedIncidentTemplateId,
+  renderIncidentPublication,
+  resolveIncidentTemplate,
+  type IncidentTemplate,
+  type IncidentTemplateRefusalReason,
+} from "./incident-templates.js";
 import {
   CONTROL_INTERVENTION_STEPS,
   deriveControlInterventions,
@@ -64,6 +74,14 @@ export const SRE_LANE_DETECTORS: readonly FleetFlowDetector[] = [idleCapacityDet
  *
  * FALSIFIER: test/sre-lane.test.ts; {@link suspectPullRequests} is proven there with injected
  * frames, ready the day a frame store lands.
+ *
+ * W1-T13131 — TEMPLATE BOUNDARY: every event this lane considers must resolve a source-owned template
+ * (incident-templates.ts) before it is aggregated, handed to a runbook or published. An unresolved
+ * one is refused and counted once per input across passes ({@link admitTemplatedEvents}); the filed
+ * body is the template's literal plus named safe fields ({@link renderIncidentPublication}), never a
+ * ledgered message, name or route. Producers that write no template id stay refused until converted:
+ * ci-incidents.ts (test_failure/flake), cost-anomaly.ts (anomaly) and incident-invariants.ts, and any
+ * legacy `incident.event` row. This lane's own flow and intervention producers are bound by kind.
  */
 
 // ── evidence ──────────────────────────────────────────────────────────────────────────────────
@@ -83,6 +101,10 @@ export interface IncidentLedgerEvent {
   instance: string;
   /** W1-T14005: the {@link interventionKey} an intervention row was routed under; {@link aggregateIncidents} counts each once. */
   interventionKey?: string;
+  /** W1-T13131: the row's catalog template id, unchecked — {@link resolveIncidentTemplate} decides it. */
+  templateId?: unknown;
+  /** W1-T13131: the reporting source the row names; a template must declare it. */
+  source?: string;
 }
 
 /** One `incident.event`/`incident.sampled` ledger row (loosely typed like the rest of this repo's
@@ -103,7 +125,10 @@ export function incidentEventFromLedgerRow(row: Record<string, unknown>, instanc
   const route = typeof row.route === "string" ? row.route : undefined;
   const sha = typeof row.sha === "string" ? row.sha : undefined;
   const key = typeof row.intervention_key === "string" ? { interventionKey: row.intervention_key } : {};
-  return { fingerprint, ts, kind, name, message, route, sha, instance, ...key };
+  // W1-T13131: the row's own template id, unchecked; admitTemplatedEvents resolves it (or binds this lane's own kinds).
+  const template = row.template_id === undefined ? {} : { templateId: row.template_id };
+  const source = typeof row.source === "string" ? { source: row.source } : {};
+  return { fingerprint, ts, kind, name, message, route, sha, instance, ...key, ...template, ...source };
 }
 
 /** One reported in-app frame — mirrors {@link import("./incident-events.js").IncidentEventFrame}
@@ -337,20 +362,125 @@ export function readSreLaneStore(stateDir: string): SreLaneStore {
 
 // ── the feedback body ────────────────────────────────────────────────────────────────────────
 
-function incidentFeedbackRaw(evidence: IncidentEvidence, suspectPrs: readonly string[]): string {
-  const lines = [
-    `Incident ${evidence.fingerprint.slice(0, 12)}: ${evidence.kind} ${evidence.name}`,
-    `First seen: ${fixedClock(evidence.firstSeenMs).iso()}`,
-    `Last seen: ${fixedClock(evidence.lastSeenMs).iso()}`,
-    `Count: ${evidence.count}, burn: ${evidence.burnPerHour.toFixed(2)}/hr`,
-    `Deploy sha(s): ${evidence.deployShas.length ? evidence.deployShas.join(", ") : "unknown"}`,
-    `Instance(s): ${evidence.instances.join(", ")}`,
-    "Sample events:",
-    ...(evidence.sampleMessages.length ? evidence.sampleMessages.map((m) => `  - ${m}`) : ["  (no message sampled)"]),
-    "Suspect commits (merged pull requests touching the incident's in-app frames):",
-    ...(suspectPrs.length ? suspectPrs.map((p) => `  - ${p}`) : ["  (none found)"]),
-  ];
-  return lines.join("\n");
+/** W1-T13131: the body is built from the resolved template and named safe fields only, never a sampled message. */
+function incidentFeedbackRaw(evidence: IncidentEvidence, admitted: AdmittedIncident, suspectPrs: readonly string[]): string {
+  return renderIncidentPublication({
+    fingerprint: evidence.fingerprint,
+    template: admitted.template,
+    kind: evidence.kind,
+    sources: [...admitted.sources],
+    count: evidence.count,
+    firstSeenMs: evidence.firstSeenMs,
+    lastSeenMs: evidence.lastSeenMs,
+    burnPerHour: evidence.burnPerHour,
+    deployShas: evidence.deployShas,
+    suspectPrs,
+  });
+}
+
+// ── the template gate (W1-T13131) ────────────────────────────────────────────────────────────
+
+/** One fingerprint's resolved template and the declared sources its admitted events named. */
+export interface AdmittedIncident {
+  template: IncidentTemplate;
+  sources: Set<string>;
+}
+
+export interface TemplateAdmission {
+  events: IncidentLedgerEvent[];
+  admitted: Map<string, AdmittedIncident>;
+  /** Refused inputs this pass saw, by reason, whether or not an earlier pass counted them. */
+  refused: Record<IncidentTemplateRefusalReason, number>;
+  /** How many of those no earlier pass had counted. */
+  newlyCounted: number;
+}
+
+export function sreLaneTemplateRefusalsPath(stateDir: string): string {
+  return join(stateDir, "sre-lane-template-refusals.json");
+}
+
+/** A refused input's counting key: a hash, so the store holds no ledgered value. Two rows identical in every field it
+ *  reads (instance, fingerprint, ts, kind, template id, intervention key) are one input. */
+function refusalKey(event: IncidentLedgerEvent): string {
+  const basis = JSON.stringify([event.instance, event.fingerprint, event.ts, event.kind, typeof event.templateId === "string" ? event.templateId : null,
+    event.interventionKey ?? null]);
+  return createHash("sha256").update(basis, "utf8").digest("hex");
+}
+
+/** How long a counted refusal is remembered: longer than any window this lane reads an incident row over. */
+const REFUSAL_MEMORY_MS = 8 * DAY_MS;
+
+function readRefusalMemory(path: string): Map<string, number> {
+  if (!existsSync(path)) return new Map();
+  const parsed = JSON.parse(readFileSync(path, "utf8")) as { counted?: unknown };
+  const counted = typeof parsed === "object" && parsed !== null && typeof parsed.counted === "object" && parsed.counted !== null ? parsed.counted : {};
+  return new Map(Object.entries(counted).filter((entry): entry is [string, number] => typeof entry[1] === "number" && Number.isFinite(entry[1])));
+}
+
+/**
+ * W1-T13131: the template gate. Each event resolves its template ({@link resolveIncidentTemplate}); one that does not, or
+ * names an unpublishable fingerprint, is refused, and so is every event of a fingerprint whose events name two different
+ * templates (its identity is contested). Refused events are dropped BEFORE aggregation, so a refused worst never hides a
+ * later valid candidate, and never reaches a runbook or a filing. Each refused input is counted once: its
+ * {@link refusalKey} is kept, at the row's own instant, until it is older than every read window. A pass that counts any
+ * input logs one `sre_lane.template_refused` row of bounded counts by reason. An unreadable memory is logged and counts
+ * nothing that pass, so a torn store can never re-count an input.
+ */
+export function admitTemplatedEvents(
+  events: readonly IncidentLedgerEvent[],
+  input: { stateDir: string; nowMs: number; log: SreLaneInput["log"] },
+): TemplateAdmission {
+  const zero = () => Object.fromEntries(INCIDENT_TEMPLATE_REFUSAL_REASONS.map((r) => [r, 0])) as Record<IncidentTemplateRefusalReason, number>;
+  const resolutions = events.map((event) => {
+    const templateId = event.templateId !== undefined ? event.templateId : laneOwnedIncidentTemplateId(event.source, event.kind);
+    const resolved = resolveIncidentTemplate({ templateId, kind: event.kind, source: event.source });
+    return resolved.ok && !isPublishableIncidentFingerprint(event.fingerprint) ? { ok: false as const, reason: "malformed" as const } : resolved;
+  });
+  const templatesOf = new Map<string, Set<string>>();
+  events.forEach((event, i) => {
+    const resolved = resolutions[i];
+    if (resolved.ok) templatesOf.set(event.fingerprint, (templatesOf.get(event.fingerprint) ?? new Set()).add(resolved.template.id));
+  });
+  const admitted = new Map<string, AdmittedIncident>();
+  const eligible: IncidentLedgerEvent[] = [];
+  const refusals: Array<{ event: IncidentLedgerEvent; reason: IncidentTemplateRefusalReason }> = [];
+  events.forEach((event, i) => {
+    const resolved = resolutions[i];
+    if (!resolved.ok) return void refusals.push({ event, reason: resolved.reason });
+    if (templatesOf.get(event.fingerprint)!.size > 1) return void refusals.push({ event, reason: "mismatched" });
+    const bound = admitted.get(event.fingerprint) ?? { template: resolved.template, sources: new Set<string>() };
+    if (event.source !== undefined) bound.sources.add(event.source);
+    admitted.set(event.fingerprint, bound);
+    eligible.push(event);
+  });
+  const refused = zero();
+  for (const { reason } of refusals) refused[reason] += 1;
+  let newlyCounted = 0;
+  if (refusals.length) {
+    const path = sreLaneTemplateRefusalsPath(input.stateDir);
+    let counted: Map<string, number> | undefined;
+    try {
+      counted = readRefusalMemory(path);
+    } catch (error) {
+      input.log("sre_lane.template_refusals_unread", { error: String((error as Error)?.message ?? error) });
+    }
+    if (counted) {
+      const reasons = zero();
+      for (const { event, reason } of refusals) {
+        const key = refusalKey(event);
+        if (counted.has(key)) continue;
+        counted.set(key, event.ts);
+        newlyCounted += 1;
+        reasons[reason] += 1;
+      }
+      if (newlyCounted) {
+        for (const [key, ts] of counted) if (ts < input.nowMs - REFUSAL_MEMORY_MS) counted.delete(key);
+        writeAtomic(path, JSON.stringify({ counted: Object.fromEntries(counted) }) + "\n");
+        input.log("sre_lane.template_refused", { refused: newlyCounted, ...reasons });
+      }
+    }
+  }
+  return { events: eligible, admitted, refused, newlyCounted };
 }
 
 // ── one pass ─────────────────────────────────────────────────────────────────────────────────
@@ -443,7 +573,9 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   for (const routing of keyedRoutingEvidence(deps.stateDir, deps.log)) {
     events.push({ ...routing, instance: instanceOf.get(routing.fingerprint) ?? deps.root });
   }
-  const evidence = aggregateIncidents(events);
+  // W1-T13131: no event reaches aggregation, a runbook or a filing without a resolved template.
+  const admission = admitTemplatedEvents(events, { stateDir: deps.stateDir, nowMs: now, log: deps.log });
+  const evidence = aggregateIncidents(admission.events);
   const readLanded = deps.readLandedEntry ?? ((id: string) => readLandedFeedbackEntryAsync(deps.root, id));
   const byFingerprint = new Map(evidence.map((e) => [e.fingerprint, e]));
   const doubled = (fp: string) => interventionCountDoubled(byFingerprint.get(fp)!, store[fp]);
@@ -464,7 +596,7 @@ export async function runSreLanePass(deps: SreLaneInput): Promise<SreLanePass> {
   const frameFiles = deps.framesFor(worst.fingerprint).map((f) => f.file);
   const suspectPrs = suspectPullRequests(await deps.mergedPrsSince(worst.deployShas[0]), frameFiles);
   const staged = await stageFeedbackCaptureAsync(deps.root, deps.landingStateRoot, {
-    raw: incidentFeedbackRaw(worst, suspectPrs),
+    raw: incidentFeedbackRaw(worst, admission.admitted.get(worst.fingerprint)!, suspectPrs),
     origin: incidentFeedbackOrigin(worst.fingerprint),
     // A re-filing is its own entry: the first one's id still names the filing that is open or accepted.
     id: refiled ? `${incidentFeedbackId(worst.fingerprint)}-n${worst.count}` : incidentFeedbackId(worst.fingerprint),
@@ -858,8 +990,10 @@ function keyedRoutingEvidence(stateDir: string, log: SreLaneInput["log"]): Incid
     log("sre_lane.routing_memory_unread", { error: String((error as Error)?.message ?? error) });
     return [];
   }
+  // W1-T13131: the memory holds only this lane's own routings, so each names that producer's source.
   return [...memory.routings].map(([interventionKey, r]) => ({
     fingerprint: r.fingerprint, ts: r.atMs, kind: INTERVENTION_INCIDENT_KIND, name: r.name, message: r.message, instance: stateDir, interventionKey,
+    source: "sre-lane",
   }));
 }
 
