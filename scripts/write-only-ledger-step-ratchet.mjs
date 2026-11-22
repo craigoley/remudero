@@ -10,8 +10,9 @@
 // imported, or destructured from a host by its exported name. An undotted literal counts on a
 // ledger row only. Both operands of `a ?? "x.y"` and both branches of a conditional count, and a
 // call to a function whose parameter reaches an emit (a step helper) emits its argument.
-// READ: equality and switch cases on a step, step membership checks, read-step collections,
-// step prefixes and suffixes, and raw JSON step patterns; `row.step ?? ""` reads `row.step`.
+// READ: equality and switch cases on a step, step membership checks and Map lookups (`.has`,
+// `.includes`, `.get`), read-step collections, step prefixes and suffixes, and raw JSON step
+// patterns; `row.step ?? ""` reads `row.step`.
 // Read evidence must be in a different file from the emission. Comments, console output and
 // incidental literals do not read a step.
 //
@@ -47,8 +48,8 @@ const STEP_RE = /^[a-z][a-z0-9_]*(?:[.:-][a-z0-9_]+)*$/;
 const DOTTED_STEP_RE = /^(?=[^.]*\.)[a-z][a-z0-9_]*(?:[.:-][a-z0-9_]+)*$/;
 /** LedgerLine (src/lib/ledger.ts) requires both: an object carrying either is shaped as a ledger row. */
 const ROW_IDENTITY_KEYS = ["run_id", "task_id"];
-/** A call that appends its object argument to a ledger: appendLedger, appendLine, writeLedger, `opts.ledger?.(row)`. */
-const LEDGER_APPEND_RE = /^(?:append\w*(?:Ledger|Line|Row)\w*|write\w*Ledger\w*|ledger)$/;
+/** A call that appends its object argument to a ledger: append, appendLedger, appendLine, writeLedger, `opts.ledger?.(row)`. */
+const LEDGER_APPEND_RE = /^(?:append\w*|write\w*Ledger\w*|ledger)$/;
 /** `a ?? b` and `a || b` evaluate to `a` whenever it is set: a read of `a` with a fallback. */
 const FALLBACK_OPERATORS = new Set(["??", "||"]);
 const RAW_STEP_RE = /"step"\s*:\s*"((?:[a-z0-9_.:-]|\\\.)+)"/g;
@@ -121,12 +122,14 @@ function memberName(node) {
   return node?.type === "MemberExpression" ? propertyName(node.property) : undefined;
 }
 
-function isStep(node) {
-  node = unwrap(node);
-  if (node?.type === "CallExpression" && node.callee.type === "Identifier" && node.callee.value === "String") {
-    node = unwrap(node.arguments[0]?.expression);
-  }
-  return memberName(node) === "step" || (node?.type === "Identifier" && node.value === "step");
+/** `row.step`, `String(row.step)`, or either operand of a fallback (`row.step ?? ""`) or a conditional. */
+function isStep(expr) {
+  return alternatives(expr).some((node) => {
+    if (node?.type === "CallExpression" && node.callee.type === "Identifier" && node.callee.value === "String") {
+      return isStep(node.arguments[0]?.expression);
+    }
+    return memberName(node) === "step" || (node?.type === "Identifier" && node.value === "step");
+  });
 }
 
 // SWC assigns a syntax context to each binding and its references. The context is local to a file;
@@ -137,6 +140,15 @@ function collection(node) {
   if (node.type === "ArrayExpression") return node.elements;
   if (node.type === "NewExpression" && node.callee.type === "Identifier" && node.callee.value === "Set") {
     return node.arguments?.slice(0, 1) ?? [];
+  }
+  if (node.type === "NewExpression" && node.callee.type === "Identifier" && node.callee.value === "Map") {
+    // A Map's members are its keys: the first element of each `[key, value]` entry.
+    const entries = unwrap(node.arguments?.[0]?.expression);
+    if (entries?.type !== "ArrayExpression") return [];
+    return entries.elements.flatMap((entry) => {
+      const tuple = unwrap(entry?.expression);
+      return tuple?.type === "ArrayExpression" && tuple.elements[0] ? [tuple.elements[0]] : [];
+    });
   }
   if (node.type === "CallExpression" && memberName(node.callee) === "freeze" && node.callee.object.value === "Object") {
     return node.arguments.slice(0, 1);
@@ -193,7 +205,7 @@ function collectEvidence(node, rec) {
     if (!method) return;
     const receiver = unwrap(callee.object);
     if (method === "log" && receiver.value !== "console" && memberName(receiver) !== "console") rec.emits.push([STEP_RE, value]);
-    if ((method === "has" || method === "includes") && isStep(value)) rec.reads.push(["exact", receiver]);
+    if ((method === "has" || method === "includes" || method === "get") && isStep(value)) rec.reads.push(["exact", receiver]);
     if (node.arguments.length === 1 && isStep(receiver)) {
       if (method === "startsWith") rec.reads.push(["prefix", value]);
       if (method === "endsWith") rec.reads.push(["suffix", value]);
