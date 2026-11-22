@@ -512,6 +512,7 @@ export const GATE_POSTURE_DECLARATIONS: Readonly<Record<string, GatePostureDecla
   "script:scripts/mutation-ratchet.mjs": repair(true, "mutation regressions are repaired by behavior tests or reviewed baseline movement"),
   "script:scripts/source-size-ratchet.mjs": repair(true, "source-size output names the reviewed baseline outcome when recording is intended"),
   "script:scripts/workflow-guard-mutation-ratchet.mjs": repair(true, "workflow-guard mutation drift is repaired by a workflow test or baseline"),
+  "script:scripts/write-only-ledger-step-ratchet.mjs": repair(true, "an unread ledger step names its reader or a stated record-only reason"),
 
   "ci:api-client-drift": repair(true, "generated client drift is repaired by regenerating the client"),
   "ci:assertion-discrimination": repair(true, "assertion failures name the behavioral assertion to repair"),
