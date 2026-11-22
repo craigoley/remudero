@@ -224,14 +224,20 @@ export interface OpsCatalogShadowInput {
   readonly httpStatusClass?: OpsCatalogHttpStatusClass;
   /** W1-T14368: present only when a derived bound refused the read; see {@link OpsCatalogBoundRefusal}. Non-enumerable. */
   readonly bound?: OpsCatalogBoundRefusal;
+  /** W1-T14374: the snapshot's shard and byte counts, when a catalog read produced them. Non-enumerable. */
+  readonly counts?: OpsCatalogShadowCounts;
 }
+/** W1-T14374: the two counts a refresh row carries. Numbers only. */
+export interface OpsCatalogShadowCounts { shards: number; bytes: number }
 
 /** W1-T13705: attach the refresh diagnostics without changing the input's own enumerable shape. */
 function withDiagnostics(input: OpsCatalogShadowInput, kind: "full" | "revalidate",
-  httpStatusClass: OpsCatalogHttpStatusClass | undefined, bound?: OpsCatalogBoundRefusal): OpsCatalogShadowInput {
+  httpStatusClass: OpsCatalogHttpStatusClass | undefined, bound?: OpsCatalogBoundRefusal,
+  counts?: OpsCatalogShadowCounts): OpsCatalogShadowInput {
   Object.defineProperty(input, "kind", { value: kind });
   if (httpStatusClass !== undefined) Object.defineProperty(input, "httpStatusClass", { value: httpStatusClass });
   if (bound !== undefined) Object.defineProperty(input, "bound", { value: bound });
+  if (counts !== undefined) Object.defineProperty(input, "counts", { value: counts });
   return input;
 }
 
@@ -1000,11 +1006,13 @@ export function createOpsCatalogShadowSource(
   opts: OpsCatalogReadOptions = {},
 ): { refresh(): Promise<OpsCatalogShadowInput> } {
   let everOk = false;
-  let kept: { plan?: Plan; binding: OpsCatalogBinding; identityDigest?: string } | undefined;
+  let kept: { plan?: Plan; binding: OpsCatalogBinding; identityDigest?: string; counts: OpsCatalogShadowCounts } | undefined;
   const store = createPlanRevisionStore({ strict: true, retainLatest: true, yamlLogLevel: "error", dependencyMode: "preserve-external" });
   const treeCache: ShadowTreeCache = {};
-  const answer = (snap: { plan?: Plan; binding?: OpsCatalogBinding; identityDigest?: string }, kind: "full" | "revalidate"): OpsCatalogShadowInput =>
-    privateHandles({ outcome: "ok" as const, identityDigest: snap.identityDigest }, { plan: snap.plan, opsCommit: snap.binding?.commit, kind });
+  const answer = (snap: { plan?: Plan; binding?: OpsCatalogBinding; identityDigest?: string; counts: OpsCatalogShadowCounts },
+    kind: "full" | "revalidate"): OpsCatalogShadowInput =>
+    privateHandles({ outcome: "ok" as const, identityDigest: snap.identityDigest },
+      { plan: snap.plan, opsCommit: snap.binding?.commit, kind, counts: snap.counts });
   let revalidateClass: OpsCatalogHttpStatusClass | undefined;
   const revalidate = async (k: NonNullable<typeof kept>): Promise<"same" | "moved" | "failed"> => {
     revalidateClass = undefined;
@@ -1028,11 +1036,11 @@ export function createOpsCatalogShadowSource(
       const snap = await readSnapshot(target, api, store, treeCache, blobStateDir(api, opts), opts.bounds);
       if (snap.outcome === "ok" && snap.binding) {
         everOk = true;
-        kept = { plan: snap.plan, binding: snap.binding, identityDigest: snap.identityDigest };
+        kept = { plan: snap.plan, binding: snap.binding, identityDigest: snap.identityDigest, counts: { shards: snap.counts.shards, bytes: snap.counts.bytes } };
         return answer(kept, "full");
       }
       return withDiagnostics({ outcome: everOk ? "stale" : snap.outcome, ...(snap.refusalStage ? { refusalStage: snap.refusalStage } : {}) },
-        "full", snap.httpStatusClass, snap.bound);
+        "full", snap.httpStatusClass, snap.bound, { shards: snap.counts.shards, bytes: snap.counts.bytes });
     },
   };
 }
