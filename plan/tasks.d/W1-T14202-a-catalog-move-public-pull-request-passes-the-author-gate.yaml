@@ -1,0 +1,39 @@
+- id: W1-T14202
+  title: A catalog move's public pull request passes core's acceptance-author-gate on its own, with a migration receipt and an Acceptance block, so a move cannot stall half-done
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles: {tdd: strict}
+  risk: medium
+  origin: operator-session#console-update-failed-2026-11-21
+  plan_refs: [W1-T13680, W1-T14196]
+  files:
+    - src/lib/plan-task-move.ts
+    - test/plan/a-catalog-move-public-pull-request-passes-the-author-gate.test.ts
+  status: queued
+  attempts: 0
+  rationale: |
+    OBSERVED 2026-11-21: #20072, the first live public move PR the move verb opened (core half of W1-T13601's move to
+    ops), failed ci-gate only on acceptance-author-gate (run 44947934777, job 136979272918): "REFUSED (no-header): no
+    ## Acceptance header and no Remudero-Task: trailer". The mover's public PR body (src/lib/plan-task-move.ts
+    createPull, about :256-272) carries only Remudero-Moved-To and Remudero-Move-Reservation, and W1-T13680 forbids a
+    Remudero-Task line on a mover PR, so such a body can never pass. The move sat half-done, and with the id in both
+    catalogs the board and the Inbox lost the whole ops catalog (W1-T14196). It was fixed by hand by adding
+    plan/notes/migration-W1-T13601.md and an Acceptance line, as #19512 did for W1-T12223.
+  design: |
+    The public half of a move writes plan/notes/migration-<id>.md with "Source blob: <blob>" and "Ops landing:
+    <repo>@<commit>", and its PR body adds an ## Acceptance block whose one-line proof greps that exact source blob
+    line in the receipt. The Remudero-Moved-To and Remudero-Move-Reservation trailers stay byte-identical, and no
+    Remudero-Task line is added (W1-T13680). The move's recovery reader keeps reading trailers only.
+
+    INVARIANT mover-pr-self-passes: a public move PR carries a receipt and an Acceptance block that acceptance-author-gate accepts, and no Remudero-Task line.
+  acceptance:
+    - claim: "invariant:mover-pr-self-passes — the public move PR body the mover builds passes the acceptance-author-gate parser, and its proof greps the receipt's exact source blob line"
+      kind: guard
+      proof: "grep: W1-T14202 criterion 1: in test/plan/a-catalog-move-public-pull-request-passes-the-author-gate.test.ts"
+    - claim: "The body still carries the Moved-To and Move-Reservation trailers byte for byte and no Remudero-Task line"
+      proof: "grep: W1-T14202 criterion 2: in test/plan/a-catalog-move-public-pull-request-passes-the-author-gate.test.ts"
+  falsifier: |
+    Build the body without the receipt or the Acceptance block: criterion 1's gate parse refuses it with no-header.
