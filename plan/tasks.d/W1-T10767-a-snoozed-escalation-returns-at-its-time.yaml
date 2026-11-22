@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: { tdd: strict }
-  budget_usd: 10.00
+  budget_usd: 4.50
   risk: high  # Rule 19: one concern spanning the route, the now view and its contract: what a snoozed_until mark-handled does to the issue and to the now view's decisions; no other disposition, route, tier or precision rule changes
   band_meaning: span
   priority: 2
