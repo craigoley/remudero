@@ -207,8 +207,8 @@ export interface ProviderCapacity {
   resetCredits?: { availableCount: number; earliestExpiresAt?: number };
   /** W1-T10382: the Codex bucket's prepaid credits as read; see {@link codexCreditsSpendable}. */
   credits?: CodexCredits;
-  /** W1-T3718: `readable: false` because the provider ANSWERED and every candidate sat below the
-   *  reserve, not because the probe failed. See {@link providerRefusalCondition}. */
+  /** Subscription quota answered below the reserve. Spendable Codex credits can still admit
+   *  an exhausted candidate. See {@link providerRefusalCondition}. */
   exhausted?: boolean;
   carriedForward?: { readAt: number; ageMs: number; failure: string; failureKind?: "timeout" | "starved" };
   creditsRescue?: CodexCreditsRescue;
@@ -1498,17 +1498,16 @@ export function selectCodexModel(
     const { capacity } = codexModelCapacity(reading, model);
     const effortSupported = !requestedEffort || supportedEfforts.includes(requestedEffort);
     const measured = capacity.readable && capacity.windows.length > 0 && capacity.windows.every(validCapacityWindow);
-    const hasHeadroom = measured && capacity.windows.every((window) => window.usedPercent < 100 - reserve);
-    // W1-T10382: past the reserve, prepaid credits keep the model eligible as the credits lane.
-    const creditsLane = measured && !hasHeadroom && codexCreditsSpendable(capacity.credits);
-    const quotaEligible = hasHeadroom || creditsLane;
+    const exhausted = measured && capacity.windows.some((window) => window.usedPercent >= 100 - reserve);
+    // Classify the measured subscription before checking whether credits can admit this model.
+    const quota = providerEligibility(exhausted ? { ...capacity, readable: false, exhausted: true } : capacity, reserve);
     const reason: CodexModelIneligibleReason | undefined = !mapped
       ? "unmapped"
       : !effortSupported
         ? "unsupported-effort"
         : !capacity.readable
           ? "quota-unreadable"
-          : !quotaEligible
+          : !quota.eligible
             ? "below-reserve"
             : undefined;
     return {
@@ -1521,7 +1520,7 @@ export function selectCodexModel(
       selected: false,
       windows: capacity.windows.map((window) => ({ ...window })),
       ...(reason ? { reason } : {}),
-      ...(reason === undefined && creditsLane ? { lane: "codex-credits" as const } : {}),
+      ...(reason === undefined && quota.lane ? { lane: quota.lane } : {}),
     };
   });
   const ranked = candidates.map((model, preference) => {

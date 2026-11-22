@@ -133,12 +133,14 @@ function codexResult(): WorkerResult {
 
 /** The real spawnWorker with measured Claude capacity, real Codex carry, and counted cash spawns. */
 async function routeSpawn(account: ReturnType<typeof codexAccount>, claudeUsed = 99,
-  status: { root: string; write: true } | undefined = undefined) {
+  status: { root: string; write: true } | undefined = undefined,
+  request: Pick<SpawnWorkerArgs, "mountProvider" | "excludeProviders" | "sandboxIntent"> = {}) {
   const root = status?.root ?? scratchRoot();
   const assignments: WorkerSelectionAssignment[] = [];
   let cashSpawns = 0, codexSpawns = 0;
   try {
     const result = await spawnWorker({
+      ...request,
       cwd: root, permissionMode: "bypassPermissions" as const, settingsFile: join(REPO_ROOT, "settings", "worker.json"),
       prompt: "work", env: {}, model: "sonnet", effort: "high", tools: ["Read", "Grep", "Glob", "RunCheck"],
       config: { claudeBin: "/unused", root, dailyCapUsd: 20, workerProviders: { enabled: ["claude", "codex", "cash"],
@@ -434,18 +436,15 @@ const CONFIG = { claudeBin: "/unused", root: REPO_ROOT, workerProviders: { enabl
 test("W1-T13855 criterion 2: a model bucket without a credits block is carried by the generic bucket's credits", () => {
   const capacity = selectCodexModel([SOL], splitReading(), CONFIG, "sonnet", "high", CAPABILITIES);
   assert.equal(capacity.readable, true, `origin/main returned below-reserve and exhausted: ${capacity.detail}`);
-  assert.equal(capacity.exhausted, undefined);
+  assert.equal(capacity.exhausted, undefined, "credits admitted the model and cleared the subscription refusal");
   assert.equal(capacity.model, SOL.id);
   assert.deepEqual(capacity.windows.map((window) => window.usedPercent), [99], "the model's own bucket still supplies the windows");
   assert.deepEqual(capacity.credits, { hasCredits: true, unlimited: false, balance: 38997.8437045 });
   assert.equal(capacity.modelDecision?.options.find((option) => option.id === SOL.id)?.lane, "codex-credits");
   assert.deepEqual(providerEligibility(capacity, 5), { eligible: true, lane: "codex-credits", headroomPercent: 1 });
 
-  // An exhausted capacity that carries spendable credits is the credits lane; without them it stays below-reserve.
-  const exhausted: ProviderCapacity = { provider: "codex", readable: false, exhausted: true, model: SOL.id,
-    windows: [{ name: "gpt-6.2-sol primary 10080m", usedPercent: 99 }], credits: { hasCredits: true, unlimited: false, balance: 10 } };
-  assert.deepEqual(providerEligibility(exhausted, 5), { eligible: true, lane: "codex-credits", headroomPercent: 1 });
-  const { credits: _spent, ...dry } = exhausted;
+  const dry = selectCodexModel([SOL], splitReading({}, { credits: undefined }), CONFIG, "sonnet", "high", CAPABILITIES);
+  assert.equal(dry.exhausted, true);
   assert.deepEqual(providerEligibility(dry, 5), { eligible: false, reason: "below-reserve", headroomPercent: 1 });
 
   // A model bucket whose own reached type or spend control blocks credits is not rescued by the generic bucket.
@@ -462,6 +461,27 @@ test("W1-T13855 criterion 2: a model bucket without a credits block is carried b
   assert.equal(providerEligibility(incomplete, 5).reason, "below-reserve");
 });
 
+test("W1-T13855 criterion 2: the worker auction admits a funded exhausted model from the live rate-limit parser", async (t) => {
+  const account = codexAccount(t);
+  account.state.buckets.sol = { limitId: SOL.id, limitName: SOL.id, primary: { usedPercent: 99 } };
+  for (const source of ["top-level", "by-id"] as const) {
+    account.state.genericSource = source;
+    account.state.now += 5_000;
+    const capacity = await account.read();
+    assert.equal(capacity.readable, true, source);
+    assert.equal(capacity.model, SOL.id, source);
+    assert.equal(capacity.credits?.balance, Number(BALANCE), source);
+    const routed = await routeSpawn(account, 95, { root: account.cfg.root, write: true });
+    const assignment = routed.assignments.at(-1);
+    assert.equal(assignment?.selected.model, SOL.id, source);
+    assert.equal(routed.decision?.rule, "codex-credits", source);
+    assert.equal(routed.codexSpawns, 1, source);
+    assert.equal(routed.cashSpawns, 0, source);
+    assert.deepEqual(routed.decision?.considered.find((entry) => entry.provider === "codex")?.creditsRescue,
+      { path: "generic-bucket", tier: "codex-credits", projectedBalance: Number(BALANCE) }, source);
+  }
+});
+
 function statusFor(root: string, nowMs: number, capacities: ProviderCapacity[], state: "selected" | "blocked" = "selected"): ProviderRoutingStatus {
   const base = { enabledProviders: ["claude", "codex"] as const, reservePercent: 5, observedAtMs: nowMs, cacheValidMs: 60_000 };
   if (state === "blocked") writeProviderRoutingStatus(root, { ...base, enabledProviders: [...base.enabledProviders], state, capacities });
@@ -476,6 +496,8 @@ test("W1-T13855 criterion 3: the routing status marks a credits-lane codex row a
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const nowMs = START;
   const status = statusFor(root, nowMs, [claudeAt(95), creditsCodex()]);
+  assert.equal(status.selected?.provider, "codex");
+  assert.equal(status.selected?.tightestRemainingPercent, 1);
   const raw = readFileSync(providerRoutingStatusPath(root), "utf8");
   const rows = (JSON.parse(raw) as { providers: Array<Record<string, unknown>> }).providers;
   assert.equal(rows.find((row) => row.provider === "codex")?.creditsLane, true);
@@ -489,13 +511,6 @@ test("W1-T13855 criterion 3: the routing status marks a credits-lane codex row a
   statusFor(root, nowMs, [claudeAt(95), healthy]);
   const plain = JSON.parse(readFileSync(providerRoutingStatusPath(root), "utf8")) as { providers: Array<Record<string, unknown>> };
   assert.ok(plain.providers.every((row) => row.creditsLane === undefined));
-
-  const exhausted: ProviderCapacity = { ...creditsCodex(), readable: false, exhausted: true };
-  const selected = statusFor(root, nowMs, [claudeAt(95), exhausted]);
-  assert.equal(selected.selected?.provider, "codex");
-  assert.equal(selected.selected?.tightestRemainingPercent, 1);
-  assert.equal(selected.providers?.find((row) => row.provider === "codex")?.creditsLane, true);
-  assert.doesNotMatch(readFileSync(providerRoutingStatusPath(root), "utf8"), /38997|"balance"|creditsBalance/);
 });
 
 const POLICY: ReviewCapacityPolicy = {
@@ -567,6 +582,45 @@ test("W1-T13855 criterion 4: the review widener does not hold base for provider-
   selectRuntimeReviewWidth({ root, ...BOUNDS, queueDepth: 12, activeWorkers: 2, nowMs: START, ledgerLines: [], policy: POLICY,
     cpuWeightShare: 1, laneCpuBound: 8, log: (_step, extra = {}) => rows.push(extra) });
   assert.equal(rows.at(-1)?.provider_credits_lane, true);
+});
+
+test("W1-T13855 criterion 4: a pinned Claude policy refresh cannot hide a quota publish completed during its write", async (t) => {
+  const account = codexAccount(t);
+  const root = account.cfg.root;
+  const blocked = statusFor(root, START, [claudeAt(95)], "blocked");
+  assert.equal(reviewProviderObservation(blocked, START).refused, true);
+  const selectedAt = START + 1_000;
+  account.state.now = START + 2_000;
+  const write = fs.writeFileSync as (file: PathLike, ...rest: unknown[]) => void;
+  let completedDuringRefresh: ProviderRoutingStatus | undefined;
+  const hook = t.mock.method(fs, "writeFileSync", (file: PathLike, ...rest: unknown[]) => {
+    if (String(file).startsWith(join(root, "state", "provider-routing-")) && String(file).includes(".tmp-") && !completedDuringRefresh) {
+      hook.mock.restore();
+      syncBuiltinESMExports();
+      completedDuringRefresh = statusFor(root, selectedAt, [claudeAt(95), creditsCodex()]);
+    }
+    write(file, ...rest);
+  });
+  syncBuiltinESMExports();
+  try {
+    const pinned = await routeSpawn(account, 95, { root, write: true }, { mountProvider: "claude" });
+    assert.equal(pinned.assignments.at(-1)?.selected.provider, "claude");
+  } finally {
+    hook.mock.restore();
+    syncBuiltinESMExports();
+  }
+  assert.equal(completedDuringRefresh?.selected?.provider, "codex");
+  const status = readProviderRoutingStatus(root, { now: () => account.state.now });
+  assert.equal(status.state, "selected");
+  assert.equal(status.observedAt, completedDuringRefresh?.observedAt);
+  assert.equal(status.freshUntil, completedDuringRefresh?.freshUntil);
+  assert.deepEqual(status.providers, completedDuringRefresh?.providers);
+  assert.equal(status.modelHealth?.state, "healthy");
+  assert.deepEqual(status.policy?.routableProviders, ["claude", "codex", "cash"]);
+  const decision = selectAdaptiveReviewWidth(initialReviewCapacityState(BOUNDS.baseWidth), POLICY,
+    hostHealthy(account.state.now, status), BOUNDS).decision;
+  assert.equal(decision.reason, "healthy-window");
+  assert.equal(decision.evidence.providerCreditsLane, true);
 });
 
 const PLAN_YAML = `
@@ -807,6 +861,35 @@ test("W1-T13855 criterion 9: subscription headroom first, credits next, and cash
     await a.read(); a.state.now += 61_000; a.state.mode = "rpc"; await a.read(); clearCodexCapacityCache(); a.fail();
   });
   await refused("absent", async (a) => { await a.read(); rmSync(a.lastGood); clearCodexCapacityCache(); a.fail(); });
+});
+
+test("W1-T13855 criterion 9: a re-admitted review tries subscription alternatives before carried credits", async (t) => {
+  const account = codexAccount(t);
+  await account.read();
+  account.fail();
+  const carried = await account.read();
+  assert.equal(carried.carriedForward?.failureKind, "timeout");
+  assert.equal(providerEligibility(carried, 5).lane, "codex-credits");
+  const review = { mountProvider: "claude", excludeProviders: ["claude"], sandboxIntent: "disposable-review" } as const;
+  const recovered = await routeSpawn(account, 60, undefined, review);
+  const assignment = recovered.assignments.at(-1);
+  assert.equal(assignment?.selected.provider, "claude");
+  assert.deepEqual(assignment?.routing.exclusion_unhonoured,
+    { reason: "no-eligible-alternative", excludedProviders: ["claude"] });
+  assert.equal(recovered.codexSpawns, 0);
+  assert.equal(recovered.cashSpawns, 0);
+
+  const squeezed = await routeSpawn(account, 95, undefined, review);
+  assert.equal(squeezed.assignments.at(-1)?.selected.provider, "codex");
+  assert.equal(squeezed.decision?.rule, "codex-credits");
+  assert.equal(squeezed.assignments.at(-1)?.routing.exclusion_unhonoured, undefined);
+
+  const alternative = codexAccount(t);
+  alternative.state.used = 90;
+  const withSubscriptionAlternative = await routeSpawn(alternative, 60, undefined, review);
+  assert.equal(withSubscriptionAlternative.assignments.at(-1)?.selected.provider, "codex");
+  assert.notEqual(withSubscriptionAlternative.decision?.rule, "codex-credits");
+  assert.equal(withSubscriptionAlternative.assignments.at(-1)?.routing.exclusion_unhonoured, undefined);
 });
 
 test("W1-T13855 criterion 9: the by-ID generic bucket keeps its own credit history when the top-level reading falls", async (t) => {

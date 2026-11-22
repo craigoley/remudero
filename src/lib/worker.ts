@@ -483,17 +483,18 @@ function providerExclusionCandidates(
   if (excluded.length === 0) return { capacities, excludeProviders: [] };
   const considered = routableProviders === undefined ? capacities
     : capacities.filter((capacity) => routableProviders.includes(capacity.provider));
-  const eligibleAlternative = considered.some((capacity) => !excluded.includes(capacity.provider) &&
-    providerEligibility(capacity, reservePercent).eligible);
-  if (eligibleAlternative) {
+  const eligible = considered.map((capacity) => ({ provider: capacity.provider, ...providerEligibility(capacity, reservePercent) }))
+    .filter((candidate) => candidate.eligible);
+  // Re-admission may change the provider within the best available tier.
+  const subscriptions = eligible.filter((candidate) => candidate.lane === undefined);
+  const tier = subscriptions.length > 0 ? subscriptions : eligible;
+  if (tier.some((candidate) => !excluded.includes(candidate.provider))) {
     return { capacities: capacities.filter((capacity) => !excluded.includes(capacity.provider)), excludeProviders: excluded };
   }
-  const eligibleExcluded = considered.some((capacity) => excluded.includes(capacity.provider) &&
-    providerEligibility(capacity, reservePercent).eligible);
   return {
     capacities,
     excludeProviders: excluded,
-    ...(eligibleExcluded ? { exclusion_unhonoured: { reason: "no-eligible-alternative", excludedProviders: excluded } } : {}),
+    ...(tier.length > 0 ? { exclusion_unhonoured: { reason: "no-eligible-alternative", excludedProviders: excluded } } : {}),
   };
 }
 

@@ -1,6 +1,6 @@
 /**
  * Durable, bounded projection of the provider-routing decision most recently made by the
- * daemon. The daemon/worker is the only writer; the console only reads this file. Capacity
+ * daemon. The daemon and workers publish it; the console reads the projection. Capacity
  * probes and provider credentials therefore never cross into the console process.
  */
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -170,6 +170,10 @@ export type ProviderRoutingWriteInput = ProviderRoutingWriteBase &
 
 export function providerRoutingStatusPath(root: string): string {
   return join(root, "state", "provider-routing-status.json");
+}
+
+function policyRefreshPath(root: string): string {
+  return join(root, "state", "provider-routing-policy-status.json");
 }
 
 function safeLabel(value: unknown): string | undefined {
@@ -436,17 +440,6 @@ function projectWrite(input: Exclude<ProviderRoutingWriteInput, { state: "invali
   };
 }
 
-function storedRecord(target: string): Record<string, unknown> | undefined {
-  try {
-    const parsed = JSON.parse(readFileSync(target, "utf8")) as Record<string, unknown> | null;
-    return parsed?.version === PROVIDER_ROUTING_STATUS_VERSION &&
-      (parsed.state === "selected" || parsed.state === "blocked" || parsed.state === "not-probed") ? parsed : undefined;
-  } catch {
-    // An absent, unreadable or malformed snapshot has no reading to retain.
-    return undefined;
-  }
-}
-
 /**
  * W1-T13855: the credits-invalidation cutoff lives BESIDE the snapshot, as the NAME of an empty file, so
  * recording it needs no read-modify-write of the snapshot and no lock. A cash fallback that ran out of
@@ -498,27 +491,16 @@ function recordCreditsInvalidation(root: string, observedAtMs: number): void {
 
 let temporarySequence = 0;
 
-/** Write one fixed, mode-0600 snapshot atomically. Throws so callers can record a bounded failure.
- *  Lock-free: every publish is a whole-file replace through a uniquely named staging file, so no
- *  publisher can block, refuse or drop another and the last completed rename is the one on disk.
- *  W1-T4445: a `not-probed` write (a pinned Claude spawn) never replaces a probed reading. It refreshes
- *  only the policy and model health on it; the reading keeps its own instant and the reader ages it. */
+/** Atomically publish quota observations and policy refreshes to separate mode-0600 files.
+ *  W1-T4445: a pinned Claude spawn refreshes policy and model health independently of quota.
+ *  The last completed quota rename remains visible while a policy refresh publishes. */
 export function writeProviderRoutingStatus(root: string, input: ProviderRoutingWriteInput): void {
   if (input.state === "invalidate-credits") {
     recordCreditsInvalidation(root, input.observedAtMs);
     return;
   }
-  publishStatus(providerRoutingStatusPath(root), input);
-}
-
-function publishStatus(target: string, input: Exclude<ProviderRoutingWriteInput, { state: "invalidate-credits" }>): void {
-  const projected = projectWrite(input);
-  const stored = input.state === "not-probed" ? storedRecord(target) : undefined;
-  const kept = stored?.state === "selected" || stored?.state === "blocked" ? stored : undefined;
-  const record: ProviderRoutingStatus | Record<string, unknown> = kept
-    ? { ...kept, ...(projected.policy ? { policy: projected.policy } : {}), ...(projected.modelHealth ? { modelHealth: projected.modelHealth } : {}) }
-    : projected;
-  const payload = `${JSON.stringify(record)}\n`;
+  const target = input.state === "not-probed" ? policyRefreshPath(root) : providerRoutingStatusPath(root);
+  const payload = `${JSON.stringify(projectWrite(input))}\n`;
   if (Buffer.byteLength(payload) > MAX_PROVIDER_ROUTING_SNAPSHOT_BYTES) {
     throw new Error("provider routing snapshot exceeds its fixed size bound");
   }
@@ -853,9 +835,32 @@ export function readProviderRoutingStatus(
   root: string,
   deps: { now?: () => number; readFile?: (path: string, encoding: BufferEncoding) => string } = {},
 ): ProviderRoutingStatus {
+  const readFile = deps.readFile ?? readFileSync;
+  const nowMs = (deps.now ?? Date.now)();
+  const status = readSnapshot(providerRoutingStatusPath(root), nowMs, readFile);
+  const refresh = readSnapshot(policyRefreshPath(root), nowMs, readFile);
+  if (refresh.state === "not-probed" && (status.state === "unknown" || status.state === "not-probed")) return refresh;
+  if (refresh.state === "not-probed" && refresh.observedAt !== undefined &&
+      status.observedAt !== undefined && Date.parse(refresh.observedAt) >= Date.parse(status.observedAt)) {
+    if (refresh.policy) status.policy = refresh.policy;
+    if (refresh.modelHealth) status.modelHealth = refresh.modelHealth;
+  }
+  if (status.providers?.some((row) => row.creditsLane) && status.observedAt !== undefined &&
+      Date.parse(status.observedAt) <= creditsCutoffMs(root)) {
+    // A reading observed at or before a recorded invalidation no longer vouches for credits.
+    return { ...status, providers: status.providers.map(({ creditsLane: _lane, ...row }) => row) };
+  }
+  return status;
+}
+
+function readSnapshot(
+  path: string,
+  nowMs: number,
+  readFile: (path: string, encoding: BufferEncoding) => string,
+): ProviderRoutingStatus {
   let raw: string;
   try {
-    raw = (deps.readFile ?? readFileSync)(providerRoutingStatusPath(root), "utf8");
+    raw = readFile(path, "utf8");
   } catch (error) {
     // ENOENT is absence; every other read failure is explicitly unreadable.
     return unknown((error as NodeJS.ErrnoException)?.code === "ENOENT" ? "absent" : "unreadable");
@@ -864,15 +869,9 @@ export function readProviderRoutingStatus(
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     if (parsed.version !== PROVIDER_ROUTING_STATUS_VERSION) return unknown("unsupported-version");
-    const status = parseSnapshot(parsed, (deps.now ?? Date.now)()) ?? unknown("malformed");
-    // A reading observed at or before a recorded credits invalidation no longer vouches for the credits lane.
-    if (status.providers?.some((row) => row.creditsLane) && status.observedAt !== undefined &&
-        Date.parse(status.observedAt) <= creditsCutoffMs(root)) {
-      return { ...status, providers: status.providers.map(({ creditsLane: _lane, ...row }) => row) };
-    }
-    return status;
+    return parseSnapshot(parsed, nowMs) ?? unknown("malformed");
   } catch {
-    // JSON/schema/clock failures are malformed, distinct from absent and unreadable state.
+    // JSON and schema failures are distinct from absent and unreadable state.
     return unknown("malformed");
   }
 }
