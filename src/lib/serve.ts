@@ -57,7 +57,7 @@ import {
   type WriteTier,
   verifiedActor,
 } from "./service.js";
-import { isCanonicalRepoPath, loadPlanFromYaml, taskIntentDigest, validNewPathApprovalIssuerOrigin, type NewPathApprovalFacts, type NewPathApprovalIssuerBinding, type Task } from "./plan.js";
+import { isCanonicalRepoPath, loadPlanFromYaml, sharedAnswersPath, taskIntentDigest, validNewPathApprovalIssuerOrigin, type NewPathApprovalFacts, type NewPathApprovalIssuerBinding, type Task } from "./plan.js";
 import {
   buildIncidentEventsRoute,
   INCIDENT_INGEST_ROUTE_METHOD,
@@ -90,7 +90,8 @@ import { HOST_VIEW_NAME, hostLegacyView, providerPolicyConfigFromStatus, provide
 import { FEEDBACK_VIEW_NAME, feedbackLegacyView } from "./feedback-view.js";
 import { INBOX_VIEW_NAME, inboxLegacyView } from "./inbox-view.js";
 import { INBOX_THREADS_VIEW_NAME, validateInboxThreadsRequest } from "./inbox-threads-view.js";
-import { NEEDS_YOU_VIEW_NAME, withNeedsYouView, type NeedsYouData } from "./needs-you-view.js";
+import { NEEDS_YOU_VIEW_NAME, planHeldTasks, withNeedsYouView, type NeedsYouData } from "./needs-you-view.js";
+import { questionStorePath } from "./now-decisions.js";
 import { WORKSTREAMS_VIEW_NAME, WORKSTREAMS_VIEW_VERSION, type WorkstreamsData } from "./workstreams-view.js";
 import { ACTIONS_VIEW_NAME, ACTIONS_VIEW_VERSION, type ActionsData } from "./actions-view.js";
 import { INBOX_THREAD_VIEW_NAME } from "./inbox-thread-view.js";
@@ -280,7 +281,7 @@ import {
   type ProviderAuthProfile,
 } from "./provider-auth-sessions.js";
 import { setWorkerEntryLog } from "./child-entry-argv.js";
-import { createClaudeExecutableCache, resolveClaudeExecutable } from "./worker.js";
+import { createClaudeExecutableCache, readTaskInputAnswer, resolveClaudeExecutable } from "./worker.js";
 
 /**
  * W1-T2273: render-ready {@link EscalationOption}: button route/payload/tier or operator-only.
@@ -3906,7 +3907,10 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
     childHeapArgs,
     selectedRegistryObservation: deps.selectedRegistryObservation,
     registry: { repoPath: deps.registry?.repoRegistryPath ?? daemonInstanceRegistryPath(deps.questionsRoot), hostPath: deps.registry?.hostRegistryPath ?? DEFAULT_HOST_INSTANCE_REGISTRY_PATH },
-    ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel, modelApprovalConfig }));
+    ...(keepWarm ? { github: { serve: keepWarm, ...walk } } : {}), ...deps.readModel, modelApprovalConfig }), systemClock, {
+    // W1-T14172: held task questions from the plan, for when core's now body is switched off or absent.
+    heldTasks: planHeldTasks(() => deps.board.plan, readTaskInputAnswer(deps.questionsRoot, deps.ledgerPath),
+      [deps.ledgerPath, sharedAnswersPath(deps.ledgerPath), questionStorePath(deps.questionsRoot)]) });
   const staleExit = gateStaleCodeExit({
     bootSha: consoleSha,
     pinBootPlan: deps.generation !== undefined,
