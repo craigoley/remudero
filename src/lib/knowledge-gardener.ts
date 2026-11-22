@@ -1,4 +1,4 @@
-import { learningsSourceFiles } from "./learnings.js";
+import { learningContentIdentities, learningIdRecord, learningsSourceFiles, loadLearningsCorpus, projectLearningsHome } from "./learnings.js";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
@@ -36,6 +36,8 @@ import {
   type PrState,
 } from "./gardener.js";
 import { learningValue, readLearningUsage, sampleBeta, type LearningUsage } from "./knowledge-value.js";
+import { KNOWLEDGE_MEASURED_STEP } from "./knowledge-gaps.js";
+import { measuredHarm, newestMeasuredLearningOutcomes, type LearningOutcome } from "./knowledge-outcome.js";
 import { lintMemoryDir, textContainment } from "./memory-lint.js";
 
 /**
@@ -49,7 +51,8 @@ import { lintMemoryDir, textContainment } from "./memory-lint.js";
  * EACH PASS: inventory every knowledge item (knowledge-inventory.ts) and each learning's offered/used
  * history (knowledge-value.ts); let ONE action class act — the one with the best draw from its Beta
  * record — among MERGE (a near-duplicate learning is superseded by the older), RETIRE (a learning its
- * posterior says is worse than the corpus's typical one, a relative bar, not a threshold) and REFRESH
+ * posterior says is worse than the corpus's typical one, a relative bar, not a threshold, or one whose
+ * current revision the newest `knowledge.measured` row reads as `hurts`: W1-T14141) and REFRESH
  * (re-run every `assertion:`); land the reversible changes as ONE reviewed PR that edits knowledge
  * paths only, with a dated garden-log entry; write a `knowledge.scorecard` row. That class is judged
  * only by its PR ({@link judgePending}): closed is a debit; after a merge, only a used-share change
@@ -202,6 +205,54 @@ function retireCertainties(usage: LearningUsage, activeIds: string[], rng: () =>
     let below = 0;
     for (let k = 0; k < draws; k++) if (sampleBeta(value, rng) < median) below++;
     if (below / draws >= confidence) out.push({ id, certainty: below / draws });
+  }
+  return out;
+}
+
+/** W1-T14141: the newest `knowledge.measured` learnings ({@link newestMeasuredLearningOutcomes}), read
+ *  through the ledger union bounded to that one step. An incomplete or unreadable union is
+ *  `unreadable`, never a partial answer: a newer row the read missed could have withdrawn an older
+ *  `hurts`, so no measured retirement is proposed from it. */
+export function readMeasuredLearningOutcomes(
+  stateDir: string,
+  reader: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+): { outcomes: LearningOutcome[] } | { unreadable: string } {
+  try {
+    const read = reader(stateDir, { step: KNOWLEDGE_MEASURED_STEP, refuseIncomplete: true });
+    if (!read.ok) return { unreadable: `incomplete ledger union: ${read.unread.join(", ")}` };
+    return { outcomes: newestMeasuredLearningOutcomes(read.rows) };
+  } catch (error) {
+    return { unreadable: String(error) };
+  }
+}
+
+/** W1-T14141: each of `ids`' current content revision in the project corpus this gardener edits, by
+ *  the producer's own identity (learnings.ts's `learningContentIdentities`). A corpus that does not
+ *  load throws, and fails the pass exactly as `buildKnowledgeInventory`'s own read of it does. */
+export function currentLearningRevisions(repoRoot: string, ids: readonly string[]): Record<string, string> {
+  return learningContentIdentities(loadLearningsCorpus(projectLearningsHome(repoRoot)), ids);
+}
+
+/** W1-T14141 — INVARIANT only-measured-harm-acts: one `retire` for each active learning whose CURRENT
+ *  revision the measurement reads as harm ({@link measuredHarm}). A cohort of an earlier revision, a
+ *  legacy or ambiguous identity, or an id whose current revision is unknown proposes nothing, so an
+ *  edit never inherits its predecessor's verdict. `helps`, `no-detectable-effect` and `unmeasurable`
+ *  never act. Certainty is |effect| / se, in standard errors, so a measured harm (beyond
+ *  knowledge-outcome.ts's `OUTCOME_Z`) outranks a usage retirement (a probability) under the per-pass cap. */
+export function measuredHarmRetirements(
+  outcomes: readonly LearningOutcome[],
+  revisions: Readonly<Record<string, string>>,
+  activeIds: readonly string[],
+): Array<{ action: GardenAction; certainty: number }> {
+  const active = new Set(activeIds);
+  const out: Array<{ action: GardenAction; certainty: number }> = [];
+  for (const o of outcomes) {
+    if (!measuredHarm(o) || !active.has(o.id)) continue;
+    if (!Object.hasOwn(revisions, o.id) || revisions[o.id] !== o.contentId) continue;
+    const reason =
+      `Measured to hurt: its current revision ${o.contentId} changes the clean-merge rate by ${o.effect.toFixed(2)} ` +
+      `(standard error ${o.se.toFixed(2)}), from ${o.injected} run(s) that injected it and ${o.dropped} that dropped it.`;
+    out.push({ action: { class: "retire", target: o.id, reason }, certainty: o.se > 0 ? -o.effect / o.se : Number.MAX_VALUE });
   }
   return out;
 }
@@ -739,6 +790,8 @@ export function planGardenPass(opts: {
   testPins?: Record<string, string>;
   revertedRunIds?: ReadonlySet<string>;
   revertedPrNumbers?: ReadonlySet<number>;
+  measuredOutcomes?: readonly LearningOutcome[];
+  currentRevisions?: Readonly<Record<string, string>>;
 }): GardenPlan {
   return planGarden({ classes: GARDEN_ACTION_CLASSES, state: toGeneric(opts.state), rng: opts.rng, switchedOff: opts.switchedOff, candidates: () => candidateActions({ ...opts, declined: opts.state.declinedTargets }).actions });
 }
@@ -755,6 +808,8 @@ function candidateActions(opts: {
   testPins?: Record<string, string>;
   revertedRunIds?: ReadonlySet<string>;
   revertedPrNumbers?: ReadonlySet<number>;
+  measuredOutcomes?: readonly LearningOutcome[];
+  currentRevisions?: Readonly<Record<string, string>>;
   declined?: readonly Declined[];
 }): { actions: GardenAction[]; kept: GardenAction[]; declined: ReturnType<typeof withoutDeclined>["kept"]; deferred: GardenAction[] } {
   const certainty = new Map<GardenAction, number>();
@@ -768,6 +823,17 @@ function candidateActions(opts: {
     const a: GardenAction = { class: "retire", target: id, reason: "Workers offered it have rarely used it, compared with other learnings." };
     certainty.set(a, c);
     actions.push(a);
+  }
+  // W1-T14141: one retire per target. A learning both rules name keeps the stronger certainty and both reasons.
+  for (const { action, certainty: c } of measuredHarmRetirements(opts.measuredOutcomes ?? [], opts.currentRevisions ?? {}, active)) {
+    const same = actions.find((a) => a.class === "retire" && a.target === action.target);
+    if (same === undefined) {
+      certainty.set(action, c);
+      actions.push(action);
+      continue;
+    }
+    same.reason = `${same.reason} ${action.reason}`;
+    certainty.set(same, Math.max(certainty.get(same)!, c));
   }
   actions.push({ class: "refresh", target: "", reason: "Re-check every learning's assertion." });
   for (const [newer, older] of doctrineDuplicatePairs(opts.items)) {
@@ -1176,6 +1242,9 @@ interface KnowledgeInventory {
   approvedSkills: InjectableSkill[];
   guardZeroStreak: Record<string, number>;
   testPins: Record<string, string>;
+  /** W1-T14141: the newest measurement's learnings, and the current revision of each one it reads as harm. */
+  measuredOutcomes: LearningOutcome[];
+  currentRevisions: Record<string, string>;
 }
 
 /** The candidates the cap deferred, keyed by the pass's own inventory: `candidates` sees the cut,
@@ -1205,8 +1274,15 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
       const items = buildKnowledgeInventory(deps.repoRoot, { memoryDirs: deps.memoryDirs });
       const learningIds = items.filter((i) => i.kind === "learning").map((i) => bare(i.id));
       const approvedSkills = loadInjectableSkills(approvedSkillsDir);
+      const measured = readMeasuredLearningOutcomes(deps.stateDir);
+      if ("unreadable" in measured) deps.log("knowledge.gardener_failed", { phase: "measured-outcomes", error: measured.unreadable });
+      const measuredOutcomes = "outcomes" in measured ? measured.outcomes : [];
+      // The corpus is parsed again only when a measured harm needs its current revision named.
+      const harmed = measuredOutcomes.filter(measuredHarm).map((o) => o.id);
       return {
         items,
+        measuredOutcomes,
+        currentRevisions: harmed.length > 0 ? currentLearningRevisions(deps.repoRoot, harmed) : learningIdRecord<string>(),
         testPins: testPinnedLearnings(deps.repoRoot, learningIds),
         usage: readLearningUsage(`${deps.stateDir}/learnings-usage.json`),
         skillUsage: readSkillUsage(usagePath),
