@@ -15,6 +15,9 @@ import { createTaskView, readRunTail, taskViewKey, type ReadModelInstanceState, 
 import { makeTempDir } from "../src/lib/tmp.js";
 import { TASK_VIEW_NAME, createDemandBook } from "../src/lib/view-demand.js";
 import { switchViewsOn } from "./helpers/read-model-switches.js";
+import { ACTIVITY_RING_PROJECTION, ledgerLineIdentity } from "#src/lib/ledger-projector.js";
+import { TASK_ACTIVITY_KEYS_PER_TASK, TASK_ACTIVITY_PAGE_EVENTS, TASK_ACTIVITY_PASS_KEYS, type TaskActivity } from "#src/lib/task-view.js";
+import { encodeTaskActivityCursor, viewKey } from "#src/lib/views.js";
 
 const T0 = Date.parse("2026-10-02T12:00:00.000Z");
 const ID = "W1-T1";
@@ -337,4 +340,207 @@ test("task-view retirement waits for real diagnostic publication before director
   f.releases.length = 0;
   await flushReadModelTransactions();
   assert.equal(existsSync(f.root), false, "diagnostic writes cannot recreate the retired directory");
+});
+
+
+// ---- W1-T11395: the per-run activity cursor, over a REAL activity_ring written by the projector's own apply/settle ----
+
+interface RingRow { ms: number; task?: string; run?: string; step?: string; extra?: Record<string, unknown> }
+
+/** A projector store whose activity ring is built, and a writer that applies rows through the ring projection itself. */
+function ringStore(f: Fixture): { db: ReadModelDb; add: (rows: RingRow[]) => void; seqOf: (ms: number, step: string) => number } {
+  const db = openProjectorReadModel(f.stateDir, "core");
+  f.releases.push(() => db.close());
+  db.exec(ACTIVITY_RING_PROJECTION.ddl);
+  const add = (rows: RingRow[]): void => {
+    for (const row of rows) {
+      const line = JSON.stringify({ ts: new Date(T0 + row.ms).toISOString(), step: row.step ?? "worker.event", task_id: row.task ?? ID, run_id: row.run ?? RUN, ...row.extra });
+      ACTIVITY_RING_PROJECTION.apply(db, line, ledgerLineIdentity(line), () => JSON.parse(line) as Record<string, unknown>);
+    }
+    ACTIVITY_RING_PROJECTION.settle?.(db);
+  };
+  const seqOf = (ms: number, step: string): number => Number(db.prepare("SELECT seq FROM activity_ring WHERE ts_ms = ? AND json_extract(body, '$.step') = ?").get(T0 + ms, step)?.seq);
+  return { db, add, seqOf };
+}
+
+/** The activity of one key, built by the view's own materialize over `db`. */
+function activityOf(f: Fixture, db: ReadModelDb | undefined, query: { id?: string; run: string; cursor?: string }, state: ReadModelInstanceState = STATE): TaskActivity {
+  const id = query.id ?? ID;
+  const params = new URLSearchParams({ instance: "core", id, activityRun: query.run, ...(query.cursor ? { activityCursor: query.cursor } : {}) });
+  const clock = mutableClock();
+  const demand = createDemandBook({ clock });
+  demand.want(TASK_VIEW_NAME, viewKey(params));
+  const view = createTaskView({ instances: [{ name: "core", ledgerDir: f.ledgerDir, repo: "o/r" }], ledgerSource, demand, clock, readTask: () => ({ source: { asOf: clock.iso(), state: "fresh" } }) });
+  const entry = view.materialize({ now: T0, instances: [{ state, ...(db ? { db } : {}) }] })[0]!;
+  assert.ok(entry.data.activity, "a key that names activityRun carries an activity page");
+  return entry.data.activity;
+}
+
+function drain(f: Fixture, db: ReadModelDb, id = ID, run = RUN): { pages: TaskActivity[]; ids: string[] } {
+  const pages: TaskActivity[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = activityOf(f, db, { id, run, ...(cursor ? { cursor } : {}) });
+    pages.push(page);
+    cursor = page.hasMore ? page.cursor : undefined;
+  } while (cursor && pages.length < 20);
+  return { pages, ids: pages.flatMap((page) => page.events.map((event) => event.id)) };
+}
+
+test("task activity cursor pages preserve exact task run and sequence identity", (t) => {
+  const f = fixture(t);
+  const ring = ringStore(f);
+  const mine: RingRow[] = Array.from({ length: TASK_ACTIVITY_PAGE_EVENTS + 10 }, (_, n) => ({ ms: 10 + n * 2, step: `mine.${n}` }));
+  const noise: RingRow[] = [
+    ...Array.from({ length: 12 }, (_, n) => ({ ms: 11 + n * 2, step: `other-run.${n}`, run: `${ID}-2000` })),
+    ...Array.from({ length: 12 }, (_, n) => ({ ms: 12 + n * 2, step: `other-task.${n}`, task: "W1-T2" })),
+    // the same run id under another task is a different run: it must not leak in.
+    ...Array.from({ length: 4 }, (_, n) => ({ ms: 40 + n, step: `same-run-other-task.${n}`, task: "W1-T2" })),
+    { ms: 50, step: "no-run", run: undefined, extra: { run_id: null } },
+  ];
+  ring.add([...mine, ...noise].sort((a, b) => a.ms - b.ms));
+  const { pages, ids } = drain(f, ring.db);
+  assert.equal(pages.length, 2, "sixty events are a full page then a short one");
+  assert.equal(pages[0]!.events.length, TASK_ACTIVITY_PAGE_EVENTS);
+  assert.equal(pages[0]!.hasMore, true);
+  assert.equal(pages[1]!.hasMore, false);
+  const steps = pages.flatMap((page) => page.events.map((event) => event.step));
+  assert.deepEqual(steps, mine.map((row) => row.step), "exactly this task's and this run's events, in order");
+  assert.equal(new Set(ids).size, ids.length, "no event twice");
+  for (const event of pages[0]!.events) assert.equal(event.seq, ring.seqOf(Number(event.id.split(":")[0]) - T0, event.step), "an event carries the ring's own sequence");
+  assert.deepEqual(pages[0]!.events.map((e) => e.seq), [...pages[0]!.events.map((e) => e.seq)].sort((a, b) => a - b));
+  assert.equal(pages[0]!.ring?.capacity, 500);
+  assert.ok(pages.every((page) => page.state === "available" && !page.retentionGap && !page.reset && page.runId === RUN));
+  const otherRun = activityOf(f, ring.db, { run: `${ID}-2000` });
+  assert.deepEqual(otherRun.events.map((e) => e.step), Array.from({ length: 12 }, (_, n) => `other-run.${n}`), "another run of the same task reads only its own events");
+  const otherTask = activityOf(f, ring.db, { id: "W1-T2", run: RUN });
+  assert.deepEqual(otherTask.events.map((e) => e.step), [...Array.from({ length: 12 }, (_, n) => `other-task.${n}`), ...Array.from({ length: 4 }, (_, n) => `same-run-other-task.${n}`)],
+    "the same run id under another task is that task's run and reads only its events");
+  assert.ok(![...otherTask.events, ...otherRun.events].some((e) => e.step.startsWith("mine.")));
+});
+
+test("task activity cursor handles equal timestamps replay and foreign scope", (t) => {
+  const f = fixture(t);
+  const ring = ringStore(f);
+  // every row lands in the SAME millisecond, mine interleaved with another task's: only the ring's sequence tells them apart.
+  const rows: RingRow[] = Array.from({ length: 70 }, (_, n) => (n % 3 === 2 ? { ms: 5, step: `foreign.${n}`, task: "W1-T2" } : { ms: 5, step: `same-ms.${n}` }));
+  ring.add(rows);
+  const mine = rows.filter((row) => row.task === undefined).map((row) => row.step);
+  const first = activityOf(f, ring.db, { run: RUN });
+  const replay = activityOf(f, ring.db, { run: RUN });
+  assert.deepEqual(replay, first, "re-reading the same position repeats the same page");
+  const second = activityOf(f, ring.db, { run: RUN, cursor: first.cursor });
+  const secondAgain = activityOf(f, ring.db, { run: RUN, cursor: first.cursor });
+  assert.deepEqual(secondAgain, second, "a replayed continuation repeats too");
+  assert.deepEqual([...first.events, ...second.events].map((e) => e.step), mine, "equal-millisecond events neither skip nor repeat across the page boundary");
+  assert.ok(![...first.events, ...second.events].some((e) => e.step.startsWith("foreign")), "another task's same-millisecond rows never appear");
+  assert.equal(new Set([...first.events, ...second.events].map((e) => e.id)).size, mine.length);
+  // a cursor issued for another task or another run is refused, never read as this one's position.
+  const theirs = activityOf(f, ring.db, { id: "W1-T2", run: RUN });
+  assert.ok(theirs.events.length > 0 && theirs.cursor);
+  const foreign = activityOf(f, ring.db, { run: RUN, cursor: theirs.cursor });
+  assert.equal(foreign.state, "unavailable");
+  assert.deepEqual(foreign.events, []);
+  assert.match(String(foreign.reason), /another instance or task/);
+  const wrongRun = activityOf(f, ring.db, { run: `${ID}-2000`, cursor: first.cursor });
+  assert.equal(wrongRun.state, "unavailable");
+  assert.match(String(wrongRun.reason), /another run/);
+});
+
+test("task activity cursor distinguishes caught up gaps resets and unavailable history", (t) => {
+  const f = fixture(t);
+  const ring = ringStore(f);
+  ring.add([{ ms: 1, step: "a" }, { ms: 2, step: "b" }, { ms: 3, step: "other", task: "W1-T2" }]);
+  const head = activityOf(f, ring.db, { run: RUN });
+  assert.deepEqual(head.events.map((e) => e.step), ["a", "b"], "the healthy nonempty page is the positive control");
+  // caught up: an empty AVAILABLE page that still names the validated corpus position.
+  const caught = activityOf(f, ring.db, { run: RUN, cursor: head.cursor });
+  assert.equal(caught.state, "available");
+  assert.deepEqual(caught.events, []);
+  assert.equal(caught.hasMore, false);
+  assert.equal(caught.retentionGap || caught.reset, false);
+  assert.ok(caught.cursor, "caught up carries the exact validated ring tail");
+  // a new event after the cursor arrives as the next page, not as a gap.
+  ring.add([{ ms: 4, step: "c" }]);
+  assert.deepEqual(activityOf(f, ring.db, { run: RUN, cursor: caught.cursor }).events.map((e) => e.step), ["c"]);
+
+  // a cursor from the FUTURE of this store (a higher generation) is a reset.
+  const future = activityOf(f, ring.db, { run: RUN, cursor: encodeTaskActivityCursor({ i: "core", t: ID, r: RUN, g: STATE.generation + 5, s: 2, m: T0 + 2, h: "1" }) });
+  assert.equal(future.reset, true);
+  assert.equal(future.state, "available");
+  assert.ok(future.events.length > 0, "a reset restarts at the oldest retained event");
+  // a position inside the retained window whose row is not the one named is a reset too.
+  const forged = activityOf(f, ring.db, { run: RUN, cursor: encodeTaskActivityCursor({ i: "core", t: ID, r: RUN, g: 1, s: 2, m: T0 + 2, h: "12345" }) });
+  assert.equal(forged.reset, true);
+  assert.equal(forged.retentionGap, false);
+  assert.match(String(forged.reason), /does not belong/);
+
+  // ring rollover: more than the ring's capacity of newer rows pushes the cursor's row out.
+  ring.add(Array.from({ length: 520 }, (_, n) => ({ ms: 100 + n, step: `later.${n}`, task: "W1-T2" })));
+  const rolled = activityOf(f, ring.db, { run: RUN, cursor: head.cursor });
+  assert.equal(rolled.state, "available");
+  assert.equal(rolled.retentionGap, true, "the ring rolled past the cursor: events may be lost");
+  assert.equal(rolled.reset, false);
+  assert.match(String(rolled.reason), /rolled past/);
+  assert.deepEqual(rolled.events, [], "the rolled-off events are simply not retained; the gap flag, not the empty list, is what says so");
+
+  // unreadable history is UNAVAILABLE, never an empty page.
+  const closed = activityOf(f, undefined, { run: RUN });
+  assert.equal(closed.state, "unavailable");
+  assert.deepEqual([closed.events, closed.hasMore, closed.retentionGap, closed.reset], [[], false, false, false]);
+  const bare = ringStore({ ...f, stateDir: join(f.root, "bare-state") });
+  bare.db.exec("DROP TABLE activity_ring");
+  assert.match(String(activityOf(f, bare.db, { run: RUN }).reason), /ring is not built/);
+  const logs: Array<[string, Record<string, unknown>]> = [];
+  const broken = { inTransaction: () => false, exec: () => {}, prepare: () => { throw new Error("database disk image is malformed"); } } as unknown as ReadModelDb;
+  const clock = mutableClock();
+  const demand = createDemandBook({ clock });
+  demand.want(TASK_VIEW_NAME, viewKey(new URLSearchParams({ instance: "core", id: ID, activityRun: RUN })));
+  const view = createTaskView({ instances: [{ name: "core", ledgerDir: f.ledgerDir }], ledgerSource, demand, clock, log: (step, extra) => void logs.push([step, extra]), readTask: () => ({ source: { asOf: clock.iso(), state: "fresh" } }) });
+  const unreadable = view.materialize({ now: T0, instances: [{ state: STATE, db: broken }] })[0]!.data.activity!;
+  assert.equal(unreadable.state, "unavailable");
+  assert.match(String(unreadable.reason), /could not be read: database disk image is malformed/);
+  assert.deepEqual(unreadable.events, []);
+  assert.ok(logs.some(([step, extra]) => step === "read_model.task_view_failed" && extra.activity === true));
+});
+
+test("task activity cursor bounds demand cardinality and total materialization work", (t) => {
+  const f = fixture(t);
+  const ring = ringStore(f);
+  ring.add([{ ms: 1, step: "a" }]);
+  const statements: string[] = [];
+  const counting = new Proxy(ring.db, {
+    get: (target, name) => name === "prepare" ? (sql: string) => (statements.push(sql), target.prepare(sql)) : Reflect.get(target, name).bind?.(target) ?? Reflect.get(target, name),
+  });
+  const clock = mutableClock();
+  const demand = createDemandBook({ clock });
+  const logs: Array<[string, Record<string, unknown>]> = [];
+  const key = (id: string, cursor: string): string => viewKey(new URLSearchParams({ instance: "core", id, activityRun: RUN, activityCursor: cursor }));
+  const cursorFor = (id: string, n: number): string => encodeTaskActivityCursor({ i: "core", t: id, r: RUN, g: 1, s: n + 1, m: T0 + n, h: String(n) });
+  // 3 distinct cursors for each of 30 tasks, then 100 distinct cursors on ONE task read last.
+  for (let task = 0; task < 30; task++) for (let n = 0; n < 3; n++) demand.want(TASK_VIEW_NAME, key(`W1-T${100 + task}`, cursorFor(`W1-T${100 + task}`, n)));
+  for (let n = 0; n < 100; n++) demand.want(TASK_VIEW_NAME, key(ID, cursorFor(ID, n)));
+  demand.want(TASK_VIEW_NAME, taskViewKey("core", ID));
+  const view = createTaskView({ instances: [{ name: "core", ledgerDir: f.ledgerDir, repo: "o/r" }], ledgerSource, demand, clock, log: (step, extra) => void logs.push([step, extra]), readTask: () => ({ source: { asOf: clock.iso(), state: "fresh" } }) });
+  const built = view.materialize({ now: T0, instances: [{ state: STATE, db: counting }] });
+  const withActivity = built.filter((entry) => entry.data.activity);
+  const worked = withActivity.filter((entry) => !/demand bound/.test(String(entry.data.activity?.reason)));
+  assert.equal(withActivity.length, 190, "every key still answers, none is dropped silently");
+  assert.equal(worked.length, TASK_ACTIVITY_PASS_KEYS, "the pass's budget is spent, not exceeded");
+  assert.ok(worked.length <= TASK_ACTIVITY_PASS_KEYS, `at most ${TASK_ACTIVITY_PASS_KEYS} activity keys do ring work in a pass, saw ${worked.length}`);
+  const perTask = new Map<string, number>();
+  for (const entry of worked) perTask.set(entry.data.id, (perTask.get(entry.data.id) ?? 0) + 1);
+  assert.ok([...perTask.values()].every((count) => count <= TASK_ACTIVITY_KEYS_PER_TASK), "and at most four per task");
+  const ringStatements = statements.filter((sql) => /activity_ring/.test(sql)).length;
+  assert.ok(ringStatements > 0 && ringStatements <= TASK_ACTIVITY_PASS_KEYS * 5, `the pass's ring work is bounded, ${ringStatements} statements`);
+  const heldBack = withActivity.filter((entry) => entry.data.activity?.state === "unavailable" && /demand bound/.test(String(entry.data.activity.reason)));
+  assert.equal(heldBack.length, 190 - worked.length);
+  assert.ok(heldBack.every((entry) => entry.data.activity!.events.length === 0 && entry.data.found === false));
+  // the most recently read keys of the one-task flood are the ones admitted: the oldest cursors give way.
+  const admittedOfFlood = worked.filter((entry) => entry.data.id === ID).map((entry) => new URLSearchParams(entry.key).get("activityCursor"));
+  assert.deepEqual(admittedOfFlood.sort(), [96, 97, 98, 99].map((n) => cursorFor(ID, n)).sort());
+  // the plain task key is untouched by the activity bound, and carries no activity.
+  const plain = built.find((entry) => entry.key === taskViewKey("core", ID))!;
+  assert.equal(plain.data.activity, undefined);
+  assert.equal(demand.keys(TASK_VIEW_NAME).length, 191, "the demand book itself holds the keys it always did");
 });

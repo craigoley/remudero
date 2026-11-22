@@ -2209,6 +2209,9 @@ function rotateLedgerLocked(
   for (const p of repushKept) {
     if (typeof p.json?.new_head === "string") repushHeads.add(`${String(p.json.pr_number)}@${p.json.new_head}`);
   }
+  // W1-T14203: each PR with a kept sweep.disposed row keeps its first review_eligible row (re-entry key).
+  const disposedPrs = new Set((byStep.get("sweep.disposed") ?? []).flatMap((p) =>
+    (typeof p.json?.pr_number === "number" ? [String(p.json.pr_number)] : [])));
   for (const [step, group] of byStep.entries()) {
     if (
       step === "sweep.disposed" ||
@@ -2223,11 +2226,13 @@ function rotateLedgerLocked(
     const excess = group.length - (step === "review.posted" ? REVIEW_POSTED_RETAINED_ROWS : MAX_RETAINED_LINES_PER_STEP);
     const dropped = group.slice(0, excess);
     const rescued = new Set<ParsedLedgerLine>();
-    if (step === "sweep.review_eligible" && repushHeads.size > 0) {
+    if (step === "sweep.review_eligible" && (repushHeads.size > 0 || disposedPrs.size > 0)) {
       const seen = new Set<string>();
       for (const p of dropped) {
-        const key = `${String(p.json?.pr_number)}@${String(p.json?.head_sha)}`;
+        const pr = String(p.json?.pr_number);
+        const key = `${pr}@${String(p.json?.head_sha)}`;
         if (repushHeads.has(key) && !seen.has(key)) { seen.add(key); rescued.add(p); }
+        if (disposedPrs.has(pr) && !seen.has(pr)) { seen.add(pr); rescued.add(p); } // W1-T14203
       }
     }
     archivedLineCount += excess - rescued.size;
