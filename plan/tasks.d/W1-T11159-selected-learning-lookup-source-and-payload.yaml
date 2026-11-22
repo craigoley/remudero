@@ -11,7 +11,7 @@
   band_meaning: span
   author_class: machine
   origin: research:infoq-context-memory-2026-11-02
-  status: queued
+  status: merged
   attempts: 0
   title: A worker learning lookup binds the selected source and payload while honoring current eligibility
   plan_refs:

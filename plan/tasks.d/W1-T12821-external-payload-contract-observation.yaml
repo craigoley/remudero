@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   risk: medium
-  budget_usd: 60.00
+  budget_usd: 4.50
   origin: feedback#automation-external-payload-contracts-20261029
   plan_refs: ["§7B", "§5C", "W1-T528", "W1-T1280", "W1-T10270"]
   files:

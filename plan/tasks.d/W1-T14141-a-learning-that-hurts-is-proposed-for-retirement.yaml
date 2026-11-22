@@ -14,7 +14,7 @@
     - src/lib/knowledge-gardener.ts
     - src/lib/knowledge-outcome.ts
     - test/learning/a-learning-that-hurts-is-proposed-for-retirement.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at origin/main dd829e355 (2026-11-21).

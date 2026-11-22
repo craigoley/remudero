@@ -16,7 +16,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-reviewer-code-requeue-posts-pending-only-on-a-pass-that-admits-its-review.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Replaying 2026-11-18 13:00Z, a pass that does not admit a requeued plan PR's review posts no pending and leaves the delivered verdict showing; its row says the requeue waits for an admitting pass"
