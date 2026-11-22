@@ -381,7 +381,7 @@ export {
   mergeDirectViaRest,
 };
 export type { ArmDeps, ArmOutcome, ArmAttemptResult, DirectMergePreflightEvidence, DisarmOutcome, ArmLane };
-import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
+import { providerHeadroomTiming, resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, readOpenBoardSnapshot, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
@@ -637,11 +637,11 @@ import {
   resolveReleasedIds,
   type ReleaseReaders,
 } from "./lib/drain.js";
-import { daemonExitCode, readRestartHistoryLines, type RetroCheckCompanions, type RetroReadProjection, restartWorkHistory, type DaemonFreshness, type HeadroomPolicy, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, lightPassFixAdmitted, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
+import { readRestartHistoryLines, type RetroCheckCompanions, type RetroReadProjection, restartWorkHistory, type DaemonFreshness, type IntakeRungDecision, type IntakeRungRunResult, type LightPassScope, type ReviewAdmissionGate, type StarvationCensus, type StarvationClearedInfo, type SweepCycleOutcome, pendingWorkerBoundaryHandoffs, v8HeapStatistics } from "./lib/daemon.js";
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { ReviewerWorktreeLeasedError, withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
-import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, evaluateReviewerHealth, gitIn, readReviewerHealthRows, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
+import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, claimHealedDeathEscalation, evaluateReviewerHealth, gitIn, healedChildDiedBeforeJudging, healedChildLedgerMark, healedChildStartedJudging, readReviewerHealthRows, reviewerHealedChildDiedEscalation, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
 // W1-T372: the daemon-tick counterpart to daemon-health.ts's own pull-only rate-limit display
 // (readGhRateLimitRemaining, unrelated cadence, unchanged) — reads BOTH gh api rate_limit
 // buckets off one exec call for runDaemon's own `readGhQuota` dep, wired below.
@@ -1166,7 +1166,7 @@ import {
   writeFeedbackDocketMarker,
   type FeedbackDocket,
 } from "./lib/feedback-docket.js";
-import { parseUsage, usageOutputShape, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
+import { headroomPolicyFromCurve, parseUsage, usageOutputShape, usageSnapshotFromSdk, type SdkUsageReading, type UsageSnapshot } from "./lib/headroom.js";
 import {
   aggregateCitationEvidence,
   assertArchitectAboveWorker,
@@ -1578,7 +1578,6 @@ import {
   type IntakeCadenceRung,
   type IntakeCadenceRungPolicy,
   type Policy,
-  type PolicyHeadroomRung,
 } from "./lib/policy.js";
 import {
   buildRatificationRow,
@@ -2508,13 +2507,25 @@ export function buildReviewerHealthRoute(
         ...(why === undefined ? {} : { failure: why }) });
     }
     let failure: string | undefined;
+    let exit: FreshTreeExit | undefined;
     let code: number;
+    const mark = healedChildLedgerMark(ledgerPath);
     try {
       code = await (tree.withWorktreeLease ?? withReviewerWorktreeLease)(healed.path, () =>
-        tree.spawnReview(healed.path, [prArg, ...childArgs, REVIEWER_INCIDENT_FLAG, incident.id], (why) => { failure = why; }));
+        tree.spawnReview(healed.path, [prArg, ...childArgs, REVIEWER_INCIDENT_FLAG, incident.id], (why) => { failure = why; },
+          undefined, undefined, undefined, (ended) => { exit = ended; }));
     } catch (error) {
       // COULD NOT RUN: today's path reviews, as it would with no incident; never an older reviewer.
       log("reviewer.healed_review_failed", { incident_id: incident.id, pr: prArg, healed_sha: healed.sha, error: String((error as Error)?.message ?? error) });
+      return normal();
+    }
+    // W1-T14283: a child that died before it could judge also COULD NOT RUN; one that judged, refused or was signalled never falls back.
+    if (healedChildDiedBeforeJudging(code, exit, () => healedChildStartedJudging(ledgerPath, mark, reviewPrNumber(prArg)))) {
+      const why = freshTreeFailureText(failure ?? "");
+      log("reviewer.healed_review_failed", { incident_id: incident.id, pr: prArg, healed_sha: healed.sha, origin_main_sha: healed.originMainSha,
+        offending_sha: incident.offending!.sha, exit_code: code, exit_cause: "not-reported", failure: why });
+      // tryEscalateAsync never rejects; a failed filing is ledgered as escalation.failed.
+      if (claimHealedDeathEscalation(incident)) await tryEscalateAsync(reviewerHealedChildDiedEscalation(incident, why), escalation);
       return normal();
     }
     log("review.ran_from_healed_tree", { incident_id: incident.id, pr: prArg, healed_sha: healed.sha, origin_main_sha: healed.originMainSha,
@@ -27300,19 +27311,13 @@ async function drainCommand(
  */
 
 /**
- * `plan/policy.yaml`'s `headroom.curve` (its `maxHoursToReset: number | null` catch-all)
- * converted into `daemon.ts`'s {@link HeadroomPolicy} shape (`Infinity` catch-all,
- * `buildDefaultHeadroomPolicy`'s own convention) — W1-T253 (P37 CONSUMERS). `daemon.ts`
- * itself cannot load the policy (its file header: "this pure module never touches the
- * filesystem", Rule 16), so THIS is the one place that does, threaded into
- * `DaemonOpts.headroomPolicy` explicitly on every real `rmd daemon` invocation below.
+ * `plan/policy.yaml`'s `headroom.curve` converted into the `HeadroomPolicy` shape — W1-T253
+ * (P37 CONSUMERS). `daemon.ts` itself cannot load the policy (its file header: "this pure module
+ * never touches the filesystem", Rule 16), so the `rmd daemon` command loads it and threads the
+ * converted curve into `DaemonOpts.headroomPolicy` on every real invocation. W1-T14200 moved the
+ * conversion to headroom.ts so the worker auction converts the same curve the same way.
  */
-export function headroomPolicyFromCurve(curve: PolicyHeadroomRung[]): HeadroomPolicy {
-  return curve.map((rung) => ({
-    maxHoursToReset: rung.maxHoursToReset === null ? Infinity : rung.maxHoursToReset,
-    limitPct: rung.limitPct,
-  }));
-}
+export { headroomPolicyFromCurve };
 
 /**
  * The boot rung for {@link reapStaleClones} (impl-EK): survey the scratch roots for abandoned
@@ -37593,7 +37598,8 @@ export async function spawnEscalatedInboxDraft(
   const policy = resolveProviderRoutingPolicy(args.config.root, args.config);
   if (!policy.routableProviders.includes("claude")) return undefined;
   const capacity = await readCapacity(args.config);
-  if (!providerEligibility(capacity, policy.reservePercent).eligible) return undefined;
+  // W1-T14200: judged on the same reset curve as the auction, so a final-rung reserve admits the rescue too.
+  if (!providerEligibility(capacity, policy.reservePercent, providerHeadroomTiming(systemClock.now(), args.config.root)).eligible) return undefined;
   const spawnArgs = {
     ...buildInboxDraftSpawnArgs({
       ...args,

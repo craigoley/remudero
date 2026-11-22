@@ -39,7 +39,7 @@ import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSu
 import { hashInstallInputs } from "../../lib/install-hash.js";
 import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, type PreopenGateResult } from "../../lib/preopen-gate.js";
 import { readPreopenGateRows } from "../../lib/preopen-gate-health.js";
-import { implementPromptParts, renderDiagnosePrompt, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts, renderReconPrompt, scopeGuardOutOfScopeFiles, type PriorPartialWork } from "../../lib/prompt-render.js";
+import { implementPromptParts, renderDiagnosePrompt, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts, renderPrerequisiteOutcomeBlock, renderReconPrompt, scopeGuardOutOfScopeFiles, withPrerequisiteOutcomes, type PriorPartialWork } from "../../lib/prompt-render.js";
 import type { RunResult } from "../../lib/run-result.js";
 import { dropTierRowsBeforePush, prePushGateRefusal } from "../../lib/pre-push-refusal.js";
 import type { Tier } from "../../lib/tier.js";
@@ -1132,6 +1132,8 @@ export interface RunTaskContext {
   opts: RunTaskBodyOptions;
   owner: string;
   plan: Plan;
+  /** W1-T11396: the canonical merged-task projection the run already prepared (read-only reuse). */
+  projection?: ReadonlyMap<string, StatusProjection>;
   planPath: string;
   recordDecisionFn: typeof recordDecision | typeof recordDecisionAsync;
   repoRoot: string;
@@ -5231,6 +5233,7 @@ export async function runTask(
       opts,
       owner,
       plan,
+      projection,
       planPath,
       recordDecisionFn,
       repoRoot,
@@ -6500,6 +6503,34 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // this is a `Map.get` rather than the walk-and-reparse-every-shard fallback — the cost this
     // task exists to stop paying once per dispatch prompt.
     const recordPath = workerVisibleRecordPath(planPath, taskRecordPath(planPath, taskId, ctx.plan));
+    // W1-T11396: the bounded prerequisite-outcome block for DECLARED depends_on only, built ONCE
+    // from the projection and plan snapshot this run already prepared (no per-dependency read) and
+    // bound to the frozen child base. The projection carries no merge commit SHA, so base
+    // applicability renders unknown rather than inferred. Shared by recon AND implement below.
+    // Awaits the async leaf: the daemon loop must not block on a synchronous worktree git call.
+    const childBaseSha = await (async (): Promise<string | undefined> => {
+      try {
+        return (await hostWorktreeGitAsync(worktreePath, ["rev-parse", "HEAD"])).trim() || undefined;
+      } catch (error) {
+        // An unreadable base renders "child base unavailable" in the block, never a guessed SHA.
+        say(`prerequisite context: child base unreadable (${String((error as Error)?.message ?? error)})`);
+        return undefined;
+      }
+    })();
+    const prerequisiteOutcomeBlock = renderPrerequisiteOutcomeBlock({
+      taskId: task.id,
+      repo: `${owner}/${task.repo}`,
+      dependsOn: task.depends_on,
+      evidenceFor: (id) => {
+        const p = ctx.projection?.get(id);
+        return p === undefined ? undefined : { merged: p.merged, prNumber: p.prNumber, prUrl: p.prUrl, prState: p.prState, source: p.source };
+      },
+      snapshotFor: (id) => {
+        const dep = ctx.plan.byId.get(id);
+        return dep === undefined ? undefined : { repo: `${owner}/${dep.repo}` };
+      },
+      childBaseSha,
+    });
     ctx.releasePlan?.();
     // impl-BP: model/effort come from the RECON row of the mount table (task_type "recon" ×
     // risk × class, §9) — the same discipline the implement spawn ~100 lines below states as
@@ -6533,7 +6564,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
         maxTurns: RECON_MAX_TURNS,
         maxBudgetUsd: budgetUsd, // dollars are the real backstop (WS-0 knob a).
         config,
-        prompt: renderReconPrompt(planIndexBlock, operatorNotesBlock, task, recordPath),
+        prompt: renderReconPrompt(planIndexBlock, operatorNotesBlock, task, recordPath) + withPrerequisiteOutcomes("", prerequisiteOutcomeBlock),
       });
 
     let recon: WorkerResult | undefined;
@@ -6831,7 +6862,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // manifest disagree with the prompt (see renderImplementPromptWithParts).
     const { prompt: renderedImplementPrompt, parts: implementParts } = renderImplementPromptWithParts(
       task, reconContext, runId, matchedLearnings, operatorNotesBlock, ruleHeadlinesPart, skillsPart,
-      harnessOwnsGit,
+      harnessOwnsGit, "", prerequisiteOutcomeBlock,
     );
     // This is an output-only contract, deliberately outside `# CONTEXT`; the provenance manifest
     // still hashes the exact prompt sent to the worker below. The companion anchor append keeps a

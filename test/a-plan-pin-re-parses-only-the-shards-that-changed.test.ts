@@ -170,8 +170,13 @@ test("readers and the board's identity-keyed plan hash agree for frozen reused T
   plan = read(at("second", blobs.map((blob) => blob.text)), cache, 0, 2).plan;
   plan.tasks.forEach(freeze);
   now += 1_000;
-  assert.deepEqual(board.update().rederived, ["A", "B"], "new labels are hashed under the shallow copies' new identities");
+  assert.deepEqual(board.update().rederived, [], "a new label alone moves no stamp (W1-T14326)");
   assert.equal(board.oracle().mismatches.length, 0, "shallow-copied Tasks agree with a fresh derivation at the new ref");
+  plan = read(at("third", [blobs[0]!.text.replace("A task", "edited A task"), blobs[1]!.text]), cache, 1, 1).plan;
+  plan.tasks.forEach(freeze);
+  now += 1_000;
+  assert.deepEqual(board.update().rederived, ["A"], "changed content is hashed under the new Task's identity, and only it");
+  assert.equal(board.oracle().mismatches.length, 0, "the edited Task agrees with a fresh derivation at its ref");
   assert.equal(before.byId.get("A")!.sourcePath, "first:plan/tasks.yaml");
 });
 

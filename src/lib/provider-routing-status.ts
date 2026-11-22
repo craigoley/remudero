@@ -14,7 +14,7 @@ import type {
   ProviderRoutingPolicyFallbackReason,
   ProviderRoutingPreference,
 } from "./provider-routing-policy.js";
-import { providerEligibility, type ProviderCapacity, type ProviderSelection } from "./worker-provider.js";
+import { providerEligibility, type ProviderCapacity, type ProviderHeadroomTiming, type ProviderSelection } from "./worker-provider.js";
 
 export const PROVIDER_ROUTING_STATUS_VERSION = 1;
 /** BACKSTOP: field-count and string-length projection limits are the normal size controls. */
@@ -158,6 +158,8 @@ interface ProviderRoutingWriteBase {
   policy?: EffectiveProviderRoutingPolicy;
   modelHealth?: ClaudeModelHealthRoute;
   preferenceBypass?: ProviderRoutingPreferenceBypass;
+  /** W1-T14200: the routing decision's clock and reset curve; absent, the projection keeps the flat reserve. */
+  headroomTiming?: ProviderHeadroomTiming;
 }
 
 export type ProviderRoutingWriteInput = ProviderRoutingWriteBase &
@@ -306,10 +308,12 @@ function projectResetCredits(capacity: ProviderCapacity): ProviderRoutingResetCr
   return usable ? { availableCount: count, earliestExpiresAt: expiresAt } : { availableCount: count };
 }
 
-function projectCapacity(capacity: ProviderCapacity, reservePercent: number): ProviderRoutingProviderStatus | undefined {
+function projectCapacity(capacity: ProviderCapacity, reservePercent: number,
+  timing?: ProviderHeadroomTiming): ProviderRoutingProviderStatus | undefined {
   const provider = providerId(capacity.provider);
   if (!provider) return undefined;
-  const creditsLane = providerEligibility(capacity, reservePercent).lane === "codex-credits";
+  // W1-T14200: judged with the auction's own clock and reset curve, so the published lane is the one it drew.
+  const creditsLane = providerEligibility(capacity, reservePercent, timing).lane === "codex-credits";
   const windows = projectWindows(capacity.windows);
   const allocationWindows = capacity.allocationWindows ? projectWindows(capacity.allocationWindows) : undefined;
   const modelDecision = projectModelDecision(capacity);
@@ -329,11 +333,12 @@ function projectCapacity(capacity: ProviderCapacity, reservePercent: number): Pr
   };
 }
 
-function projectCapacities(capacities: readonly ProviderCapacity[], reservePercent: number): ProviderRoutingProviderStatus[] {
+function projectCapacities(capacities: readonly ProviderCapacity[], reservePercent: number,
+  timing?: ProviderHeadroomTiming): ProviderRoutingProviderStatus[] {
   const seen = new Set<WorkerProviderId>();
   const projected: ProviderRoutingProviderStatus[] = [];
   for (const capacity of capacities) {
-    const row = projectCapacity(capacity, reservePercent);
+    const row = projectCapacity(capacity, reservePercent, timing);
     if (!row || seen.has(row.provider)) continue;
     seen.add(row.provider);
     projected.push(row);
@@ -413,11 +418,11 @@ function projectWrite(input: Exclude<ProviderRoutingWriteInput, { state: "invali
   if (input.state === "not-probed") {
     return { ...base, state: "not-probed", freshness: "not-probed", providers: [] };
   }
-  const providers = projectCapacities(input.capacities, reservePercent);
+  const providers = projectCapacities(input.capacities, reservePercent, input.headroomTiming);
   if (input.state === "blocked") {
     return { ...base, state: "blocked", freshness: "fresh", providers, blockedReason: "no-provider-headroom" };
   }
-  const selectedCapacity = projectCapacity(input.selection.capacity, reservePercent);
+  const selectedCapacity = projectCapacity(input.selection.capacity, reservePercent, input.headroomTiming);
   const tightestRemainingPercent = safePercent(input.selection.tightestRemainingPercent);
   if (tightestRemainingPercent === undefined) throw new Error("provider routing selection headroom is invalid");
   const hasAllocation = input.selection.allocationWeight !== undefined || input.selection.allocationSharePercent !== undefined;

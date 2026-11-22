@@ -2,6 +2,7 @@
   title: A test slot held by a killed preflight is reclaimed when its pid is dead on the same boot
   repo: remudero
   depends_on: []
+  dispatch_hold: true # overlaps merged W1-T14253 and is looser (one scan frees a slot, which W1-T14253 criterion 3 refuses); the operator releases or retires it
   priority: 1
   type: implement
   verify: auto
