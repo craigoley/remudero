@@ -37,7 +37,7 @@ function deadClaimView(over: Partial<OpenPrView> = {}): OpenPrView {
     reviewState: "pending", reviewPendingSince: minutesAgo(23), reviewPendingOwnerDead: true,
     reviewVerdictPostedAt: new Date(NOW - 23 * 60_000 - 400).toISOString(),
     // The live status and the dead ledger row name the same run, as the view producer reads them.
-    reviewPendingOwnerRunId: DEAD_RUN, reviewPendingStatusRunId: DEAD_RUN,
+    reviewPendingOwnerRunId: DEAD_RUN, reviewPendingStatusRunId: DEAD_RUN, reviewPendingStatusId: LIVE_STATUS_ID,
     priorReviewAttemptsForInput: 0,
     // The producer always reads the input's digest and loop facts; the backstop needs both to bound a re-run.
     reviewInputDigest: "e".repeat(64),
@@ -144,6 +144,7 @@ function sweepHarness(t: TestContext) {
   const posted: OpenPrView[] = [];
   const deps: SweepDeps = {
     ledgerPath, runId: "sweep-t14035", now: () => NOW,
+    rereadPrAtAct: (pr) => ({ ...pr, reviewPendingOwnerGone: "owner-pid-dead" }),
     arm: () => assert.fail("pending review cannot arm"), close: () => assert.fail("unexpected close"),
     dispatchFix: () => assert.fail("unexpected fix"), escalate: () => assert.fail("unexpected escalation"),
     postReview: (candidate) => { posted.push(candidate); },

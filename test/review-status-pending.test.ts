@@ -876,7 +876,9 @@ test("W1-T2844: buildOpenPrViews carries a dead-owner fact only for the current 
         return { check_runs: [{ name: "ci-gate", status: "completed", conclusion: "success", started_at: "2026-09-04T20:25:00.000Z" }] };
       }
       if (/commits\/.+\/status/.test(path)) {
-        return { statuses: [{ context: "remudero-review", state: "pending", created_at: "2026-09-04T20:30:00.000Z" }] };
+        const status = { context: "remudero-review", state: "pending", id: 2844, created_at: "2026-09-04T20:30:00.000Z",
+          description: "remudero-review: review in progress (owned by run run-owner)" };
+        return path.includes("/statuses") ? [status] : { statuses: [status] };
       }
       if (/\/pulls\/2844$/.test(path)) return { mergeable: true, mergeable_state: "clean" };
       return [];
