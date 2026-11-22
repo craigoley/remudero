@@ -91,8 +91,39 @@ export function bumpRationaleNamesAPr(rationale) {
 /** No plan to check a task reference against, so none counts. The default for a caller that passes no plan. */
 export const NO_PLAN = Object.freeze({ has: () => false, unreadable: "no plan was given to check task references against" });
 
+/** No record to check a PR reference against, so none counts. The default for a caller that passes no PRs. */
+export const NO_PRS = Object.freeze({ has: () => false, unreadable: "no PR record was given to check PR references against" });
+
+const MERGED_PR_SUBJECT_RE = /\(#(\d+)\)\s*$|^Merge pull request #(\d+)\b/;
+
+/** The PR number `GITHUB_REF` names on a pull_request run (`refs/pull/<n>/merge` or `/head`), else undefined. */
+export function currentPrFromRef(ref) {
+  const m = /^refs\/pull\/(\d+)\/(?:merge|head)$/.exec(ref ?? "");
+  return m && BigInt(m[1]) > 0n ? m[1] : undefined;
+}
+
+/**
+ * The PRs a `#<n>` reference may name: every PR `base`'s history records as merged (a squash subject ending
+ * `(#<n>)`, or a `Merge pull request #<n>` subject) and `current`, the PR under check. A number no PR ever held,
+ * such as `#999999999999999999999999999999`, names nothing (PR #20033's fourth review). A history that cannot be
+ * read counts no PR, and `unreadable` says why.
+ */
+export function knownPrs(root, base, current) {
+  const res = git(["log", "--format=%s", base], { cwd: root });
+  if (res.status !== 0 || res.error) {
+    return { has: () => false, unreadable: `cannot read the merged PRs in ${base}'s history (${String(res.error?.message ?? res.stderr ?? "").trim()})` };
+  }
+  const prs = new Set();
+  for (const subject of res.stdout.split("\n")) {
+    const m = MERGED_PR_SUBJECT_RE.exec(subject);
+    if (m) prs.add(`#${BigInt(m[1] ?? m[2])}`);
+  }
+  if (current !== undefined) prs.add(`#${BigInt(current)}`);
+  return { has: (ref) => prs.has(ref) };
+}
+
 /** The tasks a `W1-T<n>` reference may name: one per `<root>/plan/tasks.d/W1-T<n>-*.yaml` (either case). A plan
- *  directory that cannot be listed counts no task, and `unreadable` says why. A `#<n>` PR cannot be proven offline. */
+ *  directory that cannot be listed counts no task, and `unreadable` says why. */
 export function planTasks(root) {
   let names;
   try {
@@ -109,28 +140,30 @@ export function planTasks(root) {
 }
 
 /** The references in `newRationale` that review THIS move: absent from `oldRationale` as numbers, and, for a task,
- *  a shard in `plan`. A padded, re-spelled or zero-padded copy of an old reference reviews nothing new.
- *  `unknownTasks` are the new task references `plan` does not hold. */
-export function freshReviewReferences(newRationale, oldRationale, plan = NO_PLAN) {
+ *  a shard in `plan`; for a PR, one `prs` holds. A padded, re-spelled or zero-padded copy of an old reference
+ *  reviews nothing new. `unknownTasks` and `unknownPrs` are the new references that name nothing. */
+export function freshReviewReferences(newRationale, oldRationale, plan = NO_PLAN, prs = NO_PRS) {
   const previous = rationaleReferences(oldRationale);
   const fresh = [];
   const unknownTasks = [];
+  const unknownPrs = [];
   for (const ref of rationaleReferences(newRationale)) {
     if (previous.has(ref)) continue;
     if (ref.startsWith("W1-T") && !plan.has(ref)) unknownTasks.push(ref);
+    else if (ref.startsWith("#") && !prs.has(ref)) unknownPrs.push(ref);
     else fresh.push(ref);
   }
-  return { fresh, unknownTasks };
+  return { fresh, unknownTasks, unknownPrs };
 }
 
 /**
  * Pure verdict for one {@link SCORE_TABLE} row. `oldJson` is `undefined` when the file did not
  * exist at the base ref -- a brand-new baseline has nothing to regress against and always passes.
  * A regression passes only when `newJson.bumpRationale` names a PR or task the previous rationale
- * did not ({@link freshReviewReferences}; a task must be in `plan`) -- a stale rationale, carried
- * over from an earlier reviewed move, must not cover a fresh one, however its text is padded.
+ * did not ({@link freshReviewReferences}; a task must be in `plan`, a PR in `prs`) -- a stale rationale,
+ * carried over from an earlier reviewed move, must not cover a fresh one, however its text is padded.
  */
-export function evaluateRow(entry, oldJson, newJson, plan = NO_PLAN) {
+export function evaluateRow(entry, oldJson, newJson, plan = NO_PLAN, prs = NO_PRS) {
   const { path, field, direction } = entry;
   if (oldJson === undefined) {
     return { ...entry, status: "new", ok: true, detail: `${path}: new baseline file, nothing at origin/main to compare against` };
@@ -146,7 +179,7 @@ export function evaluateRow(entry, oldJson, newJson, plan = NO_PLAN) {
   if (!isRegression(oldValue, newValue, direction)) {
     return { ...entry, status: "ok", ok: true, oldValue, newValue, detail: `${path}: ${field} ${oldValue} -> ${newValue}, not a regression` };
   }
-  const { fresh, unknownTasks } = freshReviewReferences(newJson.bumpRationale, oldJson.bumpRationale, plan);
+  const { fresh, unknownTasks, unknownPrs } = freshReviewReferences(newJson.bumpRationale, oldJson.bumpRationale, plan, prs);
   if (fresh.length > 0) {
     return {
       ...entry,
@@ -158,8 +191,10 @@ export function evaluateRow(entry, oldJson, newJson, plan = NO_PLAN) {
     };
   }
   const kind = direction === "increase" ? "floor" : "ceiling";
-  const unknown = unknownTasks.length === 0 ? "" :
-    ` ${unknownTasks.join(", ")} cannot count: ${plan.unreadable ?? "no plan/tasks.d shard declares it"}.`;
+  const unknown = (unknownTasks.length === 0 ? "" :
+    ` ${unknownTasks.join(", ")} cannot count: ${plan.unreadable ?? "no plan/tasks.d shard declares it"}.`) +
+    (unknownPrs.length === 0 ? "" :
+      ` ${unknownPrs.join(", ")} cannot count: ${prs.unreadable ?? "neither a merged PR in the base's history nor this PR"}.`);
   return {
     ...entry,
     status: "regressed",
@@ -214,6 +249,8 @@ export function main(argv) {
         // Test seam only (mirrors comment-load-ratchet.mjs's `--baseline` override): a fixture
         // pair of baselines is what the falsifier drives, never a second production table.
         table: { type: "string" },
+        // The PR under check, which a rationale may name before it merges. Defaults to GITHUB_REF's.
+        pr: { type: "string" },
       },
     }));
   } catch (e) {
@@ -231,13 +268,18 @@ export function main(argv) {
       return 2;
     }
   }
+  if (values.pr !== undefined && !/^[1-9][0-9]*$/.test(values.pr)) {
+    console.error(`baseline-monotonic-check: MEASUREMENT FAILED -- --pr must be a positive PR number, not ${JSON.stringify(values.pr)}`);
+    return 2;
+  }
   const results = [];
   const plan = planTasks(root);
+  const prs = knownPrs(root, values.base, values.pr ?? currentPrFromRef(process.env.GITHUB_REF));
   try {
     for (const entry of table) {
       const oldJson = readJsonAtRef(root, values.base, entry.path);
       const newJson = readJsonFromWorkingTree(root, entry.path);
-      results.push(evaluateRow(entry, oldJson, newJson, plan));
+      results.push(evaluateRow(entry, oldJson, newJson, plan, prs));
     }
   } catch (e) {
     console.error(String(e.message ?? e));

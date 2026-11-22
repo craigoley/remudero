@@ -27,12 +27,16 @@ type Plan = { has: (ref: string) => boolean; unreadable?: string };
 // @ts-expect-error The script is outside the repository's TypeScript project.
 const check = await import("#scripts/baseline-monotonic-check.mjs") as {
   SCORE_TABLE: Row[];
-  evaluateRow: (entry: Row, oldJson: Record<string, unknown> | undefined, newJson: Record<string, unknown>, plan?: Plan) => { status: string; detail: string };
+  evaluateRow: (entry: Row, oldJson: Record<string, unknown> | undefined, newJson: Record<string, unknown>, plan?: Plan, prs?: Plan) => { status: string; detail: string };
   planTasks: (root: string) => Plan;
+  knownPrs: (root: string, base: string, current?: string) => Plan;
+  currentPrFromRef: (ref: string | undefined) => string | undefined;
   main: (argv: string[]) => number;
 };
 /** This checkout's plan: W1-T2906 (the baseline-monotonic task) is a real task no promotion rationale cites yet. */
 const PLAN = check.planTasks(REPO_ROOT);
+/** A PR record holding #20999, the PR the fixtures below cite as the reviewed one. */
+const PRS: Plan = { has: (ref) => ref === "#20999" };
 
 const readJson = (path: string): Record<string, unknown> => JSON.parse(readFileSync(join(REPO_ROOT, path), "utf8")) as Record<string, unknown>;
 const FILES: Array<{ path: string; fields: readonly string[]; direction: Direction }> = [
@@ -100,12 +104,19 @@ test("loosening a promotion bar without a fresh rationale is refused by the base
     "Restated: W1-T4113, W1-T12187 and W1-T12417."]) {
     assert.equal(check.evaluateRow(agree, floors, { ...lowered, bumpRationale: stale }).status, "regressed", JSON.stringify(stale));
   }
-  assert.equal(check.evaluateRow(agree, floors, { ...lowered, bumpRationale: `${previous} Lowered by #20999 after a reviewed replay.` }).status,
+  assert.equal(check.evaluateRow(agree, floors, { ...lowered, bumpRationale: `${previous} Lowered by #20999 after a reviewed replay.` }, PLAN, PRS).status,
     "reviewed-bump", "appending a reference the previous rationale did not name is a fresh review");
+  // A PR reference must name a PR (PR #20033's fourth review: `#999999999999999999999999999999` passed as a review).
+  const bogus = check.evaluateRow(agree, floors, { ...lowered, bumpRationale: "No review was performed. #999999999999999999999999999999" }, PLAN, PRS);
+  assert.equal(bogus.status, "regressed", "a number no PR ever held reviews nothing");
+  assert.match(bogus.detail, /#999999999999999999999999999999 cannot count: neither a merged PR in the base's history nor this PR/);
+  const noRecord = check.evaluateRow(agree, floors, { ...lowered, bumpRationale: `${previous} Lowered by #20999.` }, PLAN);
+  assert.equal(noRecord.status, "regressed", "with no PR record to check it against, a PR reference fails closed");
+  assert.match(noRecord.detail, /#20999 cannot count: no PR record was given/);
 
   // References compare as NUMBERS, and a task must exist (PR #20033's second review: `W1-T012187` and `#0` passed).
   const verdict = (old: Record<string, unknown>, bumpRationale: string, plan: Plan = PLAN) =>
-    check.evaluateRow(agree, old, { ...old, judgeMinAgreeShare: 0.9, bumpRationale }, plan);
+    check.evaluateRow(agree, old, { ...old, judgeMinAgreeShare: 0.9, bumpRationale }, plan, PRS);
   assert.ok(PLAN.has("W1-T12187") && PLAN.has("W1-T2906"), "positive control: the plan holds the cited task and the fresh one");
   for (const stale of [`${previous} W1-T012187`, `${previous} W1-T0012187.`, `${previous} #0`, `${previous} #00 and W1-T0.`]) {
     assert.equal(verdict(floors, stale).status, "regressed", JSON.stringify(stale));
@@ -165,6 +176,34 @@ test("loosening a promotion bar without a fresh rationale is refused by the base
   errors.length = 0;
   assert.equal(check.main(["--root", repo.dir, "--base", "HEAD", "--table", table]), 1);
   assert.deepEqual(errors.filter((line) => line.includes("BLOCKED")).map((line) => /: (\w+) moved/.exec(line)?.[1]), ["judgeMinAgreeShare"]);
+
+  // A PR reference through the same CLI counts only for a PR the base's history merged, or the PR under check.
+  const ref = process.env.GITHUB_REF;
+  t.after(() => { if (ref === undefined) delete process.env.GITHUB_REF; else process.env.GITHUB_REF = ref; });
+  delete process.env.GITHUB_REF;
+  repo.git("commit", "--quiet", "--allow-empty", "-m", "fix(scripts): a merged change (#4242)");
+  const cite = (rationale: string) =>
+    writeFileSync(join(repo.dir, PROMOTION_FLOORS_PATH), JSON.stringify({ ...floors, judgeMinAgreeShare: 0.9, bumpRationale: rationale }));
+  const run = (...extra: string[]) => {
+    errors.length = 0;
+    return check.main(["--root", repo.dir, "--base", "HEAD", "--table", table, ...extra]);
+  };
+  cite("No review was performed. #999999999999999999999999999999");
+  assert.equal(run(), 1, "the reviewed case: a number no PR held");
+  assert.match(errors.join("\n"), /#999999999999999999999999999999 cannot count: neither a merged PR/);
+  cite("Lowered after the replay reviewed in #4242.");
+  assert.equal(run(), 0, `a PR the base's history merged\n${errors.join("\n")}`);
+  cite("Lowered by #4343, this PR.");
+  assert.equal(run(), 1, "an open PR is unknown until the run names it");
+  assert.equal(run("--pr", "4343"), 0, `--pr names the PR under check\n${errors.join("\n")}`);
+  process.env.GITHUB_REF = "refs/pull/4343/merge";
+  assert.equal(run(), 0, `a pull_request run names it through GITHUB_REF\n${errors.join("\n")}`);
+  assert.equal(run("--pr", "43x"), 2, "a --pr that is not a PR number is a measurement failure");
+  assert.deepEqual(["refs/pull/12/merge", "refs/pull/12/head", "refs/heads/main", "refs/pull/0/merge", undefined].map(check.currentPrFromRef),
+    ["12", "12", undefined, undefined, undefined]);
+  const unreadPrs = check.knownPrs(repo.dir, "no-such-ref");
+  assert.equal(unreadPrs.has("#4242"), false, "an unreadable history counts no PR");
+  assert.match(String(unreadPrs.unreadable), /cannot read the merged PRs in no-such-ref's history/);
 });
 
 test("the promotion bars the gardener, judge shadow pool and skill eval use are the baseline values", (t) => {
@@ -265,9 +304,12 @@ test("raising a promotion floor reads as tightening to the reviewer, lowering on
   const ceilingBelow = (to: string) => `   "judgeMaxBrier"\n-    : 0.1,\n+    : ${to},\n`;
   assert.equal(classify(PROMOTION_CEILINGS_PATH, ceilingBelow("0.05")), "tightening");
   assert.equal(classify(PROMOTION_CEILINGS_PATH, ceilingBelow("0.2")), "loosening");
-  // The key outside the hunk (git cut it from the context): nothing pairs the number, so the file stays undetermined.
+  // The key outside the hunk (git cut it from the context; PR #20033's fourth review). Every number in a floors file is
+  // a floor, so a lowered one loosens whatever key holds it. A raise proves nothing without its key: still undetermined.
   assert.equal(classify(PROMOTION_FLOORS_PATH, "-    0.98,\n+    0.99,\n"), "undetermined");
-  assert.equal(classify(PROMOTION_FLOORS_PATH, "-    0.98,\n+    0.90,\n"), "undetermined");
+  assert.equal(classify(PROMOTION_FLOORS_PATH, "-    0.98,\n+    0.90,\n"), "loosening");
+  assert.equal(classify(PROMOTION_CEILINGS_PATH, "-    0.1,\n+    0.2,\n"), "loosening");
+  assert.equal(classify(PROMOTION_FLOORS_PATH, '-    "0.98",\n+    "0.90",\n'), "undetermined", "a digit inside a string is text");
 
   // Real git hunks between two real versions of the floors file, read through the reviewer's own diff source
   // (src/lib/pr-diff.ts). A line holding no JSON token, or a change that moves tokens without changing one, cannot
@@ -288,6 +330,10 @@ test("raising a promotion floor reads as tightening to the reviewer, lowering on
   const agree = '  "judgeMinAgreeShare": 0.98,\n';
   assert.ok(text.includes(agree), "positive control: the floor the edits below move");
   const moveTo = (value: string) => text.replace(agree, `  "judgeMinAgreeShare": ${value},\n`);
+  // The reviewer's layout: the key split from its value by four blank lines, so git's three-line context drops the key.
+  const split = (value: string) => text.replace(agree, `  "judgeMinAgreeShare":\n\n\n\n\n    ${value},\n`);
+  assert.equal(await reviewerReads(split("0.98"), split("0.90")), "loosening", "a split key's lowered floor loosens");
+  assert.notEqual(await reviewerReads(split("0.98"), split("0.99")), "loosening", "a split key's raised floor is no loosening");
   assert.equal(await reviewerReads(text, moveTo("0.99")), "tightening", "control: the raise alone");
   assert.equal(await reviewerReads(text, moveTo("0.90")), "loosening", "control: the lowering alone");
   const reorder = (s: string, ...order: string[]) => {
@@ -319,8 +365,10 @@ test("an instrument diff pairs each value with its own key, whatever the hunk's 
   // The key and the colon both changed, the value a context line: the rename is a new key, judged at the added line.
   assert.equal(classify('-  "judgeMinPaired":\n+  "judgeMinPairedX":\n     200,\n'), "undetermined");
   assert.equal(classify('-  "judgeMinPaired"\n+  "judgeMinPaired"\n   :\n-  200\n+  300\n'), "tightening");
-  // A key never pairs across a hunk boundary.
-  assert.equal(classify('   "judgeMinPaired":\n', "-    200,\n+    100,\n"), "undetermined");
+  // A key never pairs across a hunk boundary, so a raise there proves no tightening. A lowered number in a floors file
+  // still loosens, whatever key holds it (PR #20033's fourth review).
+  assert.equal(classify('   "judgeMinPaired":\n', "-    200,\n+    300,\n"), "undetermined");
+  assert.equal(classify('   "judgeMinPaired":\n', "-    200,\n+    100,\n"), "loosening");
   // Prose over two lines is still prose; any other string, container or literal value is unaccountable.
   assert.equal(classify('-  "capturedAt":\n+  "capturedAt":\n+    "2026-12-01",\n-    "2026-11-21",\n-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 250,\n'), "tightening");
   assert.equal(classify('+  "path":\n+    "src/lib/x.ts",\n-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 250,\n'), "undetermined");
@@ -332,8 +380,10 @@ test("an instrument diff pairs each value with its own key, whatever the hunk's 
   // A key moved into another object, or out of an unwrapped one, is a new key there, never a reordering.
   assert.equal(classify('-  "a": { "legacy": 9 },\n-  "b": { },\n+  "a": { },\n+  "b": { "legacy": 9 },\n-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 250,\n'), "undetermined");
   assert.equal(classify('-  "x": { "judgeMinPaired": 200 },\n+  "judgeMinPaired": 200,\n-  "judgeMinAgreeShare": 0.98\n+  "judgeMinAgreeShare": 0.99\n'), "undetermined");
-  // One path with two removed values (two hunks, each cut below its parent) cannot say which one an added value replaces.
-  assert.equal(classify('-    "legacy": 9,\n+    "legacy": 3,\n', '-    "legacy": 1,\n+    "legacy": 2,\n'), "undetermined");
+  // One path with two removed values (two hunks, each cut below its parent) cannot say which one an added value replaces,
+  // so two raises there prove no tightening. A line lowered in place still loosens (PR #20033's fourth review).
+  assert.equal(classify('-    "legacy": 1,\n+    "legacy": 3,\n', '-    "legacy": 2,\n+    "legacy": 4,\n'), "undetermined");
+  assert.equal(classify('-    "legacy": 9,\n+    "legacy": 3,\n', '-    "legacy": 1,\n+    "legacy": 2,\n'), "loosening");
   // A structural line re-indented or an array re-flowed moves no token; reordering an array's entries moves some.
   assert.equal(classify('   "nested": {\n-    "judgeMinPaired": 200\n-  },\n+      "judgeMinPaired": 250\n+    },\n'), "tightening");
   const exempt = (from: string, to: string) => `-  "exempt": ${from},\n+  "exempt": ${to},\n-  "judgeMinPaired": 200,\n+  "judgeMinPaired": 250,\n`;

@@ -10999,6 +10999,73 @@ function instrumentDiffPairs(diff: string, file: string): {
   return { lines, removed, added, events, dropped };
 }
 
+const JSON_NUMBER_RE = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+
+/** One diff line as its JSON numbers and the text around them, whitespace dropped. A string stays whole in the
+ *  skeleton, so a digit inside it is text. `undefined` for a line holding an unterminated string. */
+function numberSkeleton(line: string): { skeleton: string; numbers: number[] } | undefined {
+  let skeleton = "";
+  const numbers: number[] = [];
+  for (let i = 0; i < line.length;) {
+    const ch = line[i]!;
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < line.length && line[j] !== '"') j += line[j] === "\\" ? 2 : 1;
+      if (j >= line.length) return undefined;
+      skeleton += line.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+    JSON_NUMBER_RE.lastIndex = i;
+    const m = ch === "-" || (ch >= "0" && ch <= "9") ? JSON_NUMBER_RE.exec(line) : null;
+    if (m) {
+      numbers.push(Number(m[0]));
+      skeleton += "\u0000";
+      i += m[0].length;
+      continue;
+    }
+    if (!/\s/.test(ch)) skeleton += ch;
+    i++;
+  }
+  return { skeleton, numbers };
+}
+
+/** PR #20033's fourth review: blank lines between a key and its value push the key out of git's context, so the
+ *  changed number pairs with nothing and the file read `undetermined`. A file's stricter direction holds for every
+ *  number in it (as {@link classifyInstrumentChange} reads a keyed one), so a removed line and the added line in its
+ *  place that differ only in their JSON numbers moved those numbers, and one moved the looser way loosens the file,
+ *  whatever key it belongs to. A stricter move proves nothing without its key and is left to the keyed reading. */
+export function unkeyedLoosening(diff: string, file: string, direction: "lower" | "higher"): boolean {
+  let current = "";
+  let dels: string[] = [];
+  let adds: string[] = [];
+  const looser = (was: number, now: number) => (direction === "lower" ? now > was : now < was);
+  const flush = (): boolean => {
+    const [gone, came] = [dels, adds].map((side) => side.filter((text) => text.trim() !== ""));
+    dels = [];
+    adds = [];
+    return gone!.length > 0 && gone!.length === came!.length && gone!.some((text, k) => {
+      const [a, b] = [numberSkeleton(text), numberSkeleton(came![k]!)];
+      return a !== undefined && b !== undefined && a.skeleton === b.skeleton && a.numbers.length === b.numbers.length &&
+        a.numbers.some((was, n) => looser(was, b.numbers[n]!));
+    });
+  };
+  for (const raw of diff.split("\n")) {
+    if (raw.startsWith("diff --git")) {
+      if (current === file && flush()) return true;
+      current = raw.match(/\sb\/(\S+)\s*$/)?.[1] ?? "";
+      continue;
+    }
+    if (current !== file || raw.startsWith("+++ ") || raw.startsWith("--- ")) continue;
+    if (raw.startsWith("-")) {
+      if (adds.length > 0 && flush()) return true;
+      dels.push(raw.slice(1));
+    } else if (raw.startsWith("+")) adds.push(raw.slice(1));
+    else if (flush()) return true; // a context line or a hunk header ends the block
+  }
+  return current === file && flush();
+}
+
 /** W1-T3133: classify one instrument's change. `introduced` requires a new file and an added/changed reader
  * in the same diff (W1-T2521): an unread baseline has no grading power and cannot pre-place a lax bound.
  * `tightening` requires every changed line to remove a grandfather entry or move a number in its declared stricter
@@ -11020,6 +11087,7 @@ export function classifyInstrumentChange(diff: string, diffFiles: string[], file
 
   const { lines, removed, added, events, dropped } = instrumentDiffPairs(diff, file);
   if (lines === 0) return "undetermined";
+  if (unkeyedLoosening(diff, file, direction)) return "loosening";
 
   const net = new Map<string, number>();
   const removedAt = new Map<string, InstrumentPair[]>();
