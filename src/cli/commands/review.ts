@@ -1132,9 +1132,11 @@ export async function runReview(host: ReviewCommandHost, args: {
         const reviewerClockBoundMs =
           host.reviewerClockBoundMs(args.reviewerClockBoundMs);
         const reviewerClockBound = { clockBound: { boundMs: reviewerClockBoundMs } };
-        const reviewerSpawnWorker = args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review");
-        // W1-T14146: each reviewer call carries the reviewed work, so its assignment receipt records the plan task's class.
+        const reviewerSpawn = args.reviewerSpawnWorker ?? ledgeredNonDispatchSpawn("review");
+        // W1-T14146: every reviewer call, the judge's and its shadow's, carries the reviewed work, so its assignment
+        // receipt records the plan task's class.
         const reviewedWork = reviewedTaskWork(task, replayInput);
+        const reviewerSpawnWorker: typeof spawnWorker = (spawnArgs) => reviewerSpawn(withReceiptWork(spawnArgs, reviewedWork));
         // W1-T4615: assigned before the provider call, so every later stream event names the routed model.
         let reviewerAssignment: WorkerSelectionAssignment | undefined;
         try {
@@ -1142,7 +1144,7 @@ export async function runReview(host: ReviewCommandHost, args: {
           for (;;) {
             reviewerAssignment = undefined as WorkerSelectionAssignment | undefined;
             reviewer = args.account(
-              await reviewerSpawnWorker(withReceiptWork({
+              await reviewerSpawnWorker({
                 cwd: snapshot.cwd,
                 permissionMode: "bypassPermissions",
                 settingsFile: args.settingsFile,
@@ -1177,7 +1179,7 @@ export async function runReview(host: ReviewCommandHost, args: {
                 onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
                 streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
                 prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
-              }, reviewedWork)),
+              }),
             );
             assertReviewerSnapshotIntegrity(host, snapshot.cwd, headSha);
             if (priorSignal !== undefined && reviewer.exit?.kind === "signal") {
@@ -1236,7 +1238,7 @@ export async function runReview(host: ReviewCommandHost, args: {
           mounts: () => [args.reviewerMount!, resolveRiskJudgeMount(loadMounts(mountsPath(repoRoot)))],
           log,
           judge: async (mount) => {
-            const shadow = args.account(await reviewerSpawnWorker(withReceiptWork({
+            const shadow = args.account(await reviewerSpawnWorker({
               cwd: snapshot.cwd, permissionMode: "bypassPermissions", settingsFile: args.settingsFile,
               model: mount.model, mountProvider: mount.provider, effort: mount.effort,
               maxTurns: Math.min(mount.maxTurns, 12), maxBudgetUsd: SHADOW_JUDGE_MAX_BUDGET_USD,
@@ -1246,7 +1248,7 @@ export async function runReview(host: ReviewCommandHost, args: {
               runId: args.runId, taskId: task.id,
               clockBound: { boundMs: Math.min(reviewerClockBoundMs, 60_000) },
               prompt,
-            }, reviewedWork)));
+            }));
             assertReviewerSnapshotIntegrity(host, snapshot.cwd, headSha);
             return {
               decision: reviewerSemanticVerdicts(shadow, criteria.length),
