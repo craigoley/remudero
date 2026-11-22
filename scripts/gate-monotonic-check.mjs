@@ -42,6 +42,24 @@ export function gateRationaleNamesAPr(rationale) {
   return rationaleReferences(rationale).size > 0;
 }
 
+/** W1-T14384 (operator ruling 2026-11-22, DECISIONS.md): the token naming the PR under check, the one whose merge decides. It is as
+ *  strong as that PR's own `#<n>`, which a reviewer may always write once the PR exists; an automated demotion (the
+ *  gate gardener's, W1-T4116) writes the token because it cannot know its number before the PR does. */
+export const THIS_PR_TOKEN = "#this-pr";
+const WORD_EDGE = "[\\p{L}\\p{M}\\p{N}\\p{Pc}\\p{Cf}-]";
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** `text` holds `phrase` as its own word: no letter, digit, joiner or hyphen on either side. */
+const namesWord = (text, phrase) => new RegExp(`(?<!${WORD_EDGE})${escapeRegExp(phrase)}(?!${WORD_EDGE})`, "u").test(text);
+const collapsed = (text) => (typeof text === "string" ? text.replace(/\s+/g, " ").trim() : "");
+
+/** The demoted contexts a `#this-pr` rationale fails to name, or why the token cannot review at all: absent, or the
+ *  base's own rationale carried over (identical once whitespace is collapsed). `[]` when the token reviews the move. */
+function selfReviewGaps(head, base, demoted) {
+  if (typeof head.rationale !== "string" || !namesWord(head.rationale, THIS_PR_TOKEN)) return [`no ${THIS_PR_TOKEN} token`];
+  if (collapsed(head.rationale) === collapsed(base.rationale)) return ["the rationale is origin/main's, carried over"];
+  return demoted.filter((name) => !namesWord(head.rationale, name)).map((name) => `it does not name ${name}`);
+}
+
 /** The `ci-gate` job's REQUIRED set plus its GATE_RATIONALE, from one ci-gate.yml's text.
  *  Throws on anything it cannot read -- the caller turns that into exit 2, never into a pass. */
 export function readGateLists(yamlText) {
@@ -75,12 +93,25 @@ function uncountedReferences(unknownTasks, unknownPrs, plan, prs) {
  * ({@link freshReviewReferences}: a task must be in `plan`, a PR in `prs`), so a rationale left over
  * from an earlier reviewed demotion cannot cover a fresh one, however its text is padded. With no
  * `plan` or `prs` given, no reference of that kind counts.
+ *
+ * It also passes when the rationale holds {@link THIS_PR_TOKEN}, names every demoted context by its exact name, and is
+ * not origin/main's own rationale carried over: the PR under check is then its own review, as its `#<n>` would be.
  */
 export function evaluateGateMonotonic(base, head, plan = NO_PLAN, prs = NO_PRS) {
   const demoted = [...base.required].filter((name) => !head.required.has(name)).sort();
   if (demoted.length === 0) {
     return { ok: true, demoted, status: "clean", detail: "no context left REQUIRED" };
   }
+  const gaps = selfReviewGaps(head, base, demoted);
+  if (gaps.length === 0) {
+    return {
+      ok: true,
+      demoted,
+      status: "reviewed",
+      detail: `${demoted.length} reviewed demotion(s): ${demoted.join(", ")}, under a GATE_RATIONALE naming ${THIS_PR_TOKEN} and each of them`,
+    };
+  }
+  const tokenNote = namesWord(head.rationale ?? "", THIS_PR_TOKEN) ? ` ${THIS_PR_TOKEN} cannot review it: ${gaps.join("; ")}.` : "";
   if (!gateRationaleNamesAPr(head.rationale)) {
     return {
       ok: false,
@@ -90,7 +121,8 @@ export function evaluateGateMonotonic(base, head, plan = NO_PLAN, prs = NO_PRS) 
         `${demoted.length} context(s) left REQUIRED with no reviewed GATE_RATIONALE: ${demoted.join(", ")}. ` +
         "Add `GATE_RATIONALE` to ci-gate.yml's `ci-gate` job env naming the PR or task that reviewed " +
         "this (e.g. \"#1234: <job> is superseded by <x>\"), as a \"#<n>\" or \"W1-T<n>\" reference standing as " +
-        "its own word. Demoting a gate is an ordinary reviewed outcome, not a defeat -- what it must not be is silent.",
+        `its own word, or ${THIS_PR_TOKEN} with each demoted context named. Demoting a gate is an ordinary reviewed ` +
+        `outcome, not a defeat -- what it must not be is silent.${tokenNote}`,
     };
   }
   const { fresh, unknownTasks, unknownPrs } = freshReviewReferences(head.rationale, base.rationale, plan, prs);
@@ -103,7 +135,7 @@ export function evaluateGateMonotonic(base, head, plan = NO_PLAN, prs = NO_PRS) 
         `${demoted.length} context(s) left REQUIRED (${demoted.join(", ")}) under a GATE_RATIONALE that names ` +
         "no PR or task origin/main's did not. A rationale carried over from an earlier reviewed demotion does " +
         "not review this one, and rewording, padding or zero-padding its references does not count -- write a " +
-        `fresh one naming THIS change: a merged PR, this PR, or a filed task.${uncountedReferences(unknownTasks, unknownPrs, plan, prs)}`,
+        `fresh one naming THIS change: a merged PR, this PR, or a filed task.${uncountedReferences(unknownTasks, unknownPrs, plan, prs)}${tokenNote}`,
     };
   }
   return {
