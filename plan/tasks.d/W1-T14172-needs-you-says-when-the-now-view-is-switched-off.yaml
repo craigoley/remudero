@@ -20,7 +20,7 @@
     - src/lib/serve.ts
     - src/lib/worker.ts
     - test/needs-you-says-when-the-now-view-is-switched-off.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:no-old-body-as-current — with views.now off in read-model/switches.json and a held core now body (generatedAt 2026-11-20T02:07:39Z, 13 decisions), the needs-you composite has a core now source with state unavailable and a reason that names views.now, the word off and that generatedAt. data.decisions holds none of the 13 decisions, data.instances[core] has no counts, and the body is stale"

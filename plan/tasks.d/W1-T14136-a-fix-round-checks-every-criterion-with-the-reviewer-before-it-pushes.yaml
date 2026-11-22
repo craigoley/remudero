@@ -23,7 +23,7 @@
     - src/run-task.ts
     - src/lib/ledger.ts
     - test/a-fix-round-checks-every-criterion-with-the-reviewer-before-it-pushes.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:self-check-judges-every-criterion — buildFixSelfCheckPrompt (src/lib/fix-self-check.ts) renders buildReviewPrompt's criteria block and reviewerVerdictContract for EVERY acceptance criterion of the task (met and unmet, holdout included, as the real review does), never only the unmet ones. With a 4-criterion fixture whose last review left only criterion 2 unmet, the prompt holds 4 numbered CLAIM lines and the contract asks for REVIEW_VERDICT 1..4, and it names the fix commit sha it judges"

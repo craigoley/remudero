@@ -18,7 +18,7 @@
     - src/lib/fix-progress-judge.ts
     - test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts
     - test/a-refuted-flake-never-holds-its-head.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:refuted-flake-never-holds — priorRoundHold returns undefined when the task's newest fix.done at the head ruled FLAKE with flake_claim refuted or repeated, with no checkCompletions, and with only completions dated before that fix.done"
