@@ -857,7 +857,7 @@ import {
   type TaskFilesLandingResult,
 } from "./lib/feedback-landing.js";
 export { readStandingDecisions };
-import { PLAN_DESTINATION_KINDS, resolvePlanDestination, planDestinationRepository, type PlanDestinationKind, type PlanDestination, type PlanDestinationRepository } from "./lib/plan-destination.js";
+import { PLAN_DESTINATION_KINDS, resolvePlanDestination, resolvePlanDestinationForTarget, planDestinationRepository, type PlanDestinationKind, type PlanDestination, type PlanDestinationRepository } from "./lib/plan-destination.js";
 import {
   reconcileFeedbackLanding,
   type FeedbackReconcileRoot,
@@ -36869,10 +36869,12 @@ function setTreeWritable(dir: string, writable: boolean): void {
 }
 
 /** W1-T12213: resolve the `task` kind before the lane worktree is cut. `off` and `not_listed` keep today's lane.
- * With the kind on, the public view is a run worktree of the public clone, made read-only for the worker. */
+ * With the kind on, the public view is a run worktree of the public clone, made read-only for the worker.
+ * W1-T14320: only for the instance's own repository. A lane for another repository keeps today's lane in it. */
 async function openArchitectFilingTarget(config: Config, owner: string, repo: string, repoDir: string, runId: string,
   log: (step: string, extra?: Record<string, unknown>) => void): Promise<ArchitectFilingTarget | { refused: string }> {
-  const destination = resolvePlanDestination("task", join(config.root, "state"), { owner, repo, checkoutDir: repoDir });
+  const destination = resolvePlanDestinationForTarget("task", join(config.root, "state"), { owner, repo, checkoutDir: repoDir },
+    () => resolveOwnerRepoAt(PUBLIC_CHECKOUT));
   if (destination.outcome === "unreadable") return { refused: destination.reason };
   if (destination.outcome !== "destination") return { owner, repo, checkoutDir: repoDir };
   if (!existsSync(destination.checkoutDir)) return { refused: "the plan destination checkout is missing" };

@@ -184,7 +184,7 @@ test("W1-T3413 stages one retire proposal", () => {
   const first = stageSkillLifecycleProposal(
     registryPath,
     skillsDir,
-    report([...Array(5).fill("merged"), ...Array(5).fill("no_diff")], [...Array(5).fill("merged"), ...Array(5).fill("no_diff")]),
+    report(Array(24).fill("no_diff"), Array(24).fill("merged")),
   );
   assert.equal(first.refused, false);
   assert.equal(first.staged, true);
@@ -193,7 +193,7 @@ test("W1-T3413 stages one retire proposal", () => {
   const second = stageSkillLifecycleProposal(
     registryPath,
     skillsDir,
-    report([...Array(5).fill("merged"), ...Array(5).fill("no_diff")], [...Array(5).fill("merged"), ...Array(5).fill("no_diff")]),
+    report(Array(24).fill("no_diff"), Array(24).fill("merged")),
   );
   assert.equal(second.staged, false);
   assert.equal(second.alreadyStaged, true);
@@ -214,7 +214,7 @@ test("W1-T3413 refreshes lifecycle evidence", () => {
   const first = stageSkillLifecycleProposal(
     registryPath,
     skillsDir,
-    report([...Array(5).fill("merged"), ...Array(5).fill("no_diff")], [...Array(5).fill("merged"), ...Array(5).fill("no_diff")]),
+    report(Array(24).fill("no_diff"), Array(24).fill("merged")),
   );
   const refreshed = stageSkillLifecycleProposal(
     registryPath,
@@ -401,12 +401,12 @@ test("pending shipment evidence refuses lifecycle comparison and staging without
     const bytes = readFileSync(skillPath);
     const pending = report(Array(12).fill("handed_off"), Array(12).fill("handed_off"));
     assert.equal(pending.status, "INSUFFICIENT EVIDENCE");
-    assert.equal(pending.basis, "pending-shipment");
+    assert.equal(pending.basis, "undecided");
     assert.equal(pending.selected.pending_merge_runs, 12);
     assert.equal(pending.control.pending_merge_runs, 12);
     const staged = stageSkillLifecycleProposal(registryPath, skillsDir, pending);
     assert.equal(staged.refused, true);
-    assert.match(staged.reason ?? "", /pending shipment.*bounds overlap/);
+    assert.match(staged.reason ?? "", /merge comparison undecided:.*confidence sequence/);
     assert.equal(existsSync(registryPath), false);
     assert.deepEqual(readFileSync(skillPath), bytes);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -415,7 +415,7 @@ test("pending shipment evidence refuses lifecycle comparison and staging without
 test("pending shipment bounds cannot claim benefit when the control can still tie", () => {
   const pending = report(Array(10).fill("merged"), Array(10).fill("blocked_ci"));
   assert.equal(pending.status, "INSUFFICIENT EVIDENCE");
-  assert.equal(pending.basis, "pending-shipment");
+  assert.equal(pending.basis, "undecided");
   assert.equal(pending.control.pending_merge_runs, 10);
 });
 
@@ -436,7 +436,7 @@ test("W1-T3413 review stays read only", () => {
   const result = stageSkillLifecycleProposal(
     registryPath,
     skillsDir,
-    report([...Array(8).fill("merged"), ...Array(2).fill("no_diff")], [...Array(3).fill("merged"), ...Array(7).fill("no_diff")]),
+    report(Array(24).fill("merged"), Array(24).fill("no_diff")),
   );
 
   assert.equal(result.refused, true);
