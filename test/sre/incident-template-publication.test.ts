@@ -2,6 +2,7 @@
 // source-owned literal template; an untemplated event fails closed with a counted refusal. Each criterion drives the
 // production route (buildIncidentEventsRoute over a real service) and the production pass (runSreLanePass writing a real
 // temporary plan/feedback directory), never a stand-in for either.
+// @census-reads: src/lib/service.ts src/lib/board.ts src/lib/incident-invariants.ts src/lib/fleet-flow-detectors.ts src/lib/operator-interventions.ts — the files each catalog literal is quoted from.
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
