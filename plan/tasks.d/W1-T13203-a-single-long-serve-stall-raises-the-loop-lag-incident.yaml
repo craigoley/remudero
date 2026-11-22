@@ -18,7 +18,7 @@
     - test/a-single-long-serve-stall-raises-the-loop-lag-incident.test.ts
     - "src/lib/loop-stall-profiler.ts"
     - "src/lib/serve.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With runtime.loop_lag rows whose p99Ms stays at 108 ms and one row with maxMs 887,447, the loop-lag rule's bad() reports bad, and its message names the max stall in ms beside the p99"

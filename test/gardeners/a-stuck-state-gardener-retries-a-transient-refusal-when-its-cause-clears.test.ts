@@ -13,7 +13,7 @@ import { readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "#src/lib/ops-ca
 import { loadPlan, mergePlanBlobs, RELEASE_LEDGER_STEP, type Plan } from "#src/lib/plan.js";
 import {
   APPROVE_RELEASE_REFUSED_STEP, approveInChild, clearanceBound, fixDispatchCauseProbe, opsMainCommit, opsRecordDigest, productionStuckStatePorts,
-  productionStuckStateProbe, readApproveRelease, readStuckStateRows, recordApproveReleaseRefusal, runStuckStateGardener, scanStuckState,
+  productionStuckStateProbe, publicRecordDigest, readApproveRelease, readStuckStateRows, recordApproveReleaseRefusal, runStuckStateGardener, scanStuckState,
   type HeldItem, type ProbeResult, type StuckStatePorts,
 } from "#src/lib/stuck-state-gardener.js";
 import { buildSweepEffects, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
@@ -482,8 +482,13 @@ test("W1-T13750 production ports: the ledger union, the events, each class's pro
   const released = await probe(holding)(item("release-compose", { taskId: "W1-T13610" }));
   assert.equal(released.present, false);
   assert.match(String(released.digest), /^[0-9a-f]{64}$/);
-  assert.deepEqual(await probe(planOf(shard("W1-T13733", { verify: "auto" }), shard("W1-T13611")))(item("release-compose", { taskId: "W1-T13611" })), { present: false },
-    "a task now in the public plan has no ops record: its digest is absent, so it is never replayed");
+  // Amended in place by W1-T13785: a release found public names the public record's digest, which is never the ops digest an
+  // ops refusal row recorded, so a task now in the public plan is still never replayed on that refusal.
+  const nowPublic = planOf(shard("W1-T13733", { verify: "auto" }), shard("W1-T13611"));
+  const foundPublic = await probe(nowPublic)(item("release-compose", { taskId: "W1-T13611" }));
+  assert.deepEqual(foundPublic, { present: false, digest: publicRecordDigest(nowPublic.byId.get("W1-T13611")!) },
+    "a task now in the public plan has no ops record: the probe names its public record's digest");
+  assert.notEqual(foundPublic.digest, opsRecordDigest(nowPublic.byId.get("W1-T13611")!), "so it is never replayed on an ops record's refusal");
   writeFileSync(join(fx.stateDir, "plan-destination.json"), "{not json");
   assert.deepEqual(await probe(lacking)(item("fix-dispatch-catalog-unreadable")), { present: true, reason: "ops-destination-unreadable" });
 

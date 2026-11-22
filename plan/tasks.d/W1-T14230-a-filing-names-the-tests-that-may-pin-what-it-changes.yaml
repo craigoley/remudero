@@ -1,0 +1,191 @@
+- id: W1-T14230
+  title: "lint-plan --base names the existing tests that import a src file a new or changed implement task declares and name a symbol its design changes, as an advisory pinning-tests finding, so the filer adds them to files: before the build instead of in a scope amendment after it"
+  repo: remudero
+  depends_on: []
+  priority: 2
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # Rule 19 sizing: three concerns (a new warn-only check module, one LintCheck member, its wiring in lintPlanCommand's --base pass) on the lint every plan PR runs; it can never refuse a filing or change the exit code
+  origin: "operator-session#filing-scope-misses-pinning-tests-2026-11-21"
+  plan_refs:
+    - W1-T2676
+    - W1-T4404
+    - W1-T13243
+    - W1-T14152
+    - W1-T14153
+    - W1-T14173
+    - W1-T13944
+    - W1-T120
+  files:
+    - src/lib/pinning-tests.ts
+    - src/lib/task-linter.ts
+    - src/run-task.ts
+    - test/a-filing-names-the-tests-that-may-pin-what-it-changes.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:pinning-tests-never-blocks — for a fixture checkout where src/lib/a.ts defines FOO_LIMIT, test/x.test.ts imports ../src/lib/a.ts and names FOO_LIMIT, and a new implement task declares src/lib/a.ts and test/new.test.ts and its design names FOO_LIMIT, pinningTestViolations returns one violation with check pinning-tests and severity warn. Its message names test/x.test.ts and FOO_LIMIT, and the task's lint result stays ok"
+      kind: guard
+      proof: "grep: W1-T14230 criterion 1: in test/a-filing-names-the-tests-that-may-pin-what-it-changes.test.ts"
+    - claim: "Precision filters: in the same fixture, a test that imports src/lib/a.ts but names no token of the design is not listed. A test that names FOO_LIMIT but reaches src/lib/a.ts only through another src module is not listed. A design token that src/lib/a.ts does not contain is not used"
+      proof: "grep: W1-T14230 criterion 2: in test/a-filing-names-the-tests-that-may-pin-what-it-changes.test.ts"
+    - claim: "A test already in files:, or whose path the task's design or note names, is not listed. A task whose type is not implement, or whose files:, design and rationale are the same as at the base, gets no pinning-tests finding"
+      proof: "grep: W1-T14230 criterion 3: in test/a-filing-names-the-tests-that-may-pin-what-it-changes.test.ts"
+    - claim: "With 14 candidate tests the message names 10 of them, highest score first (score is the sum over matched tokens of 1 / the number of candidate tests that name the token), and ends with 'and 4 more'"
+      proof: "grep: W1-T14230 criterion 4: in test/a-filing-names-the-tests-that-may-pin-what-it-changes.test.ts"
+    - claim: "lintPlanCommand with --base on a temp git repo whose head adds that task prints the pinning-tests warning and returns 0, and writes one lint_plan.pinning_tests JSON line on stderr with task, listed (every candidate path, not only the 10 named), tokens and ms. The same plan linted without --base prints no pinning-tests warning and no such line"
+      proof: "grep: W1-T14230 criterion 5: in test/a-filing-names-the-tests-that-may-pin-what-it-changes.test.ts"
+    - claim: "invariant:pinning-tests-bounded — when the injected clock passes 10000 ms before the candidates are scored, the check stops, returns one warn that says pinning-tests did not run and gives the time, writes a lint_plan.pinning_tests line with outcome over_budget, and lintPlanCommand still returns 0"
+      kind: guard
+      proof: "grep: W1-T14230 criterion 6: in test/a-filing-names-the-tests-that-may-pin-what-it-changes.test.ts"
+    - claim: "The check is a lint check name"
+      proof: "grep: | \"pinning-tests\" in src/lib/task-linter.ts"
+    - claim: "lintPlanCommand's --base pass calls the check in production"
+      proof: "grep: pinningTestViolations( in src/run-task.ts"
+  rationale: |
+    WHY: on 2026-11-21 all four hand builds needed a plan-only scope amendment before their code could
+    ship. In each case an existing test outside the task's files: asserted the old behaviour. The build
+    had to change that test, and the acceptance-author gate refused the change
+    (scripts/acceptance-author-gate.mjs canonicalScopeRefusal, defect canonical-task-scope-exceeded:
+    every changed path must be in the task's files: at the merge base) until the amendment merged.
+    Each amendment cost a full quick check and a merge cycle, about 30-90 min under load. The fleet's
+    fix lane meets the same refusal and files scope-amendment/* branches itself
+    (src/lib/proof-amendment.ts:672).
+    EVIDENCE, the four amendments on main:
+    - #20094 (4d866cfa9) W1-T14152: test/reviewer-worktree-lease.test.ts.
+    - #20093 (c61dc2815) W1-T14153: four tests of the "warm typecheck is free" rule:
+      test/a-cold-fleet-typecheck-waits-for-a-slot.test.ts,
+      test/npm-run-typecheck-is-incremental-and-slotted.test.ts,
+      test/a-tight-typecheck-runs-fewer-checkers-with-the-same-diagnostics.test.ts and
+      test/ci/gates/every-typecheck-spawn-runs-under-the-go-memory-limit.test.ts.
+    - #20092 (938de6c66) W1-T14173: test/every-inbox-verb-has-a-cli-and-mcp-path.test.ts.
+    - #20046 (cb8436e98) W1-T13944:
+      test/sweep/a-parked-pr-remedy-files-in-the-catalog-that-holds-the-task.test.ts.
+    REPLAY, measured on the Azure host on 2026-11-21 (origin/main 2c579dc73, read-only, a scratch
+    script in a hand worktree). For each task, the shard as it was before its amendment (the
+    amendment commit's parent), and the rule in the design below:
+    - W1-T14152: 59 tests import its src file; 6 listed; the amended test is one of them (rank 5).
+    - W1-T14153: 286 import its six src files; 34 listed; all four amended tests are listed
+      (ranks 1, 3, 5 and 9).
+    - W1-T14173: 4 import; 2 listed; the amended test is rank 1.
+    - W1-T13944: 568 import; 11 listed; the amended test is rank 10 (it matched only parkedPr).
+    So the rule found 5 of 5 amended tests, inside a top-10 cut, in 53 listings. The other 48 were not
+    proven to be wrong: no build needed them, but they were not checked one by one. Without the
+    token filter (import alone) the lists were 59, 285, 4 and 566 long, which nobody would read.
+    Variants that were worse:
+    - The import graph through any src module (affected-suites' reach): 2448 to 4169 tests per task.
+    - Only tokens that a declared module DECLARES (function, const, class, type): it lost 3 of the 7
+      amended tests (W1-T14152's and W1-T13944's tests name symbols the module uses, not declares).
+    - A "drop a token named by more than 5% of all tests" rule: it dropped nothing useful (readFile
+      is in 145 of 5099 tests), and it needs every test file read and comment-stripped, which took
+      11-13 s under load 71 on 8 cores.
+    A KNOWN WEAK CASE: a task that declares a big module lists many tests. This task itself
+    (src/run-task.ts and src/lib/task-linter.ts) lists 71 of 1304 importers, on words such as
+    lintPlanCommand and LintOpts. The message names 10 and counts the rest; the precision count
+    after deploy decides whether that is too noisy.
+    COST, same host and load: `git grep -l -F -e <dir>/<stem> -- ':(glob)test/**/*.test.ts'` took
+    0.08-0.88 s per module (lib/sweep: 613 files; src/run-task: 1313; lib/task-linter: 173;
+    lib/reviewer-worktree-lease: 2). Reading and scoring only those files took 0.6-12.5 s per task in
+    the replay, the slow end on the big modules. So under that load the 10 s budget can stop the check
+    on a big module; it then says so and the event counts it (outcome over_budget).
+    HOW THE CODE WORKS TODAY (origin/main 2c579dc73):
+    - lintPlanCommand (src/run-task.ts:19595) builds per-task LintOpts. Only the --base pass (the
+      changed-tasks pass that lint-plan:fast runs, package.json "lint-plan:fast") gets checkout reads
+      such as readGrepProofFile (src/run-task.ts:20090), and it appends extra warn-only checks at
+      :20142 (proofGrepUnmatchableViolations). The whole-plan pass stays offline and cheap (W1-T367,
+      W1-T497).
+    - The duplicate-surface advisory (src/lib/task-linter.ts:3082-3165, W1-T2676) is the style to
+      copy: severity warn, a message that says why it is ADVISORY and how TO CLEAR IT.
+    - src/lib/affected-suites.ts buildAffectedSuitesGraph(files, extraTargets, aliasSource) is the
+      selector's comment-free import graph (W1-T4404). Its dependencies map holds a test's direct
+      imports and named-path edges, with the #src/* aliases resolved; stripComments is exported too.
+      This task reuses both and adds no second resolver.
+    OVERLAP: W1-T120 (a gate proves it read the file under test) also declares src/lib/task-linter.ts
+    and src/run-task.ts. It is about proof of reading; this task adds a new advisory check and does
+    not change W1-T120's behaviour.
+  design: |
+    INVARIANT pinning-tests-never-blocks: the pinning-tests check only ever returns warn violations; it never changes a lint result's ok or lintPlanCommand's exit code.
+    INVARIANT pinning-tests-bounded: the check stops at its time budget and says so; it never makes lint-plan:fast wait without limit.
+    CHOICE: an advisory list in lint-plan --base, from direct imports plus a token match. Rejected:
+    - Blocking: the replay listed 48 tests no build needed. Precision matters more than recall here.
+    - Selecting through the whole import graph (affected-suites' reach): 2448-4169 tests per task.
+    - Letting the gate accept test/ paths outside files:: that weakens the merge-base scope rule the
+      gate exists for, and is a separate decision.
+    - Running the suites at filing time: far too slow for a filing check.
+    1. src/lib/pinning-tests.ts (new):
+       - pinningTestCandidates(task, input): input is { tests: ReadonlyMap<string, string> (path ->
+         text of each test file the prefilter found), srcText: (path) => string | undefined, aliasRoot: string,
+         now: () => number, budgetMs?: number }. Pure over its input.
+       - Declared src modules: the task's files: under src/ that srcText can read.
+       - Tokens: from title, design and rationale, each word of 6 or more characters that is
+         camelCase or PascalCase with an inner capital, or UPPER_SNAKE with an underscore, plus each
+         double-quoted string of 8-80 characters in the design. Keep a token only when the
+         comment-free text (stripComments) of a declared src module contains it.
+       - Prefilter (done by the reader, below): a test whose text contains "<parent dir>/<stem>" of a
+         declared module (for src/lib/sweep.ts "lib/sweep", for src/run-task.ts "src/run-task"). On
+         those, buildAffectedSuitesGraph(prefiltered tests, the declared modules as extraTargets,
+         { root: aliasRoot }); a candidate's dependencies include a declared module.
+       - Leave out a test in files: and a test whose path the design or note names (the filer
+         already said why it does not change).
+       - Keep a candidate whose comment-free text names at least one kept token (word boundary).
+         Score: the sum over its matched tokens of 1 / (number of candidates that name that token).
+       - Returns { outcome: "ran", listed: [{ path, tokens, score }] sorted by score then path, tokens,
+         ms } or { outcome: "over_budget", ms } when now() passes budgetMs (default 10000) between steps.
+       - pinningTestViolations(task, candidates): no listed test -> []. Otherwise one violation,
+         check "pinning-tests", severity "warn". Message, in the duplicate-surface style:
+         "task <id> declares <modules>. These existing tests import it and name what its design
+         changes: <path> (<tokens>), ... [and N more]. They may pin the old behaviour. A build that
+         changes a test outside files: is refused by the acceptance-author gate
+         (canonical-task-scope-exceeded) until a scope amendment merges. This is ADVISORY, never
+         blocking, because a test can name a symbol without pinning the changed behaviour. TO CLEAR
+         IT: add each test that pins the old behaviour to files:, or name its path in design or note
+         and say why it does not change. Copy this list into the filing PR body." At most 10 paths
+         are named. over_budget gives one warn: "pinning-tests did not run: over its 10000 ms budget
+         after <ms> ms".
+       - readPinningTestInput(codeRoot, declaredModules): one `git grep -l -F -e <dir>/<stem> ... --
+         ':(glob)test/**/*.test.ts'` through hostWorktreeGit (exit 1, no match, is an empty list), then
+         reads only the files it names. srcText reads from codeRoot. It never reads every test file.
+    2. src/lib/task-linter.ts: add "pinning-tests" to LintCheck. Nothing else changes there.
+    3. src/run-task.ts lintPlanCommand, --base pass only, beside :20142: for a task whose type is
+       implement and that is new in the diff or whose files:, design or rationale differ from oldTask,
+       build the input for that task's declared modules (the clock starts before the read), call pinningTestCandidates and
+       pinningTestViolations, and append the result to the task's violations. Write one stderr line
+       { event: "lint_plan.pinning_tests", task, outcome, listed: every candidate path, tokens, ms }
+       per checked task, also when listed is empty (the denominator for precision). A read failure
+       writes the event with outcome unreadable and the reason, and adds no violation.
+    4. Tests in test/a-filing-names-the-tests-that-may-pin-what-it-changes.test.ts, titled
+       "W1-T14230 criterion N: ...". Criteria 1-4 and 6 call pinningTestCandidates and
+       pinningTestViolations on in-memory fixtures with an injected clock. Criterion 5 runs
+       lintPlanCommand on a temp git repo with --base, as test/lint-plan-fast-scopes-to-the-merge-base.test.ts
+       does. Load test/setup/tmp-hygiene.ts. No network.
+    MEASURE AFTER DEPLOY (precision first):
+    - Source: the lint_plan.pinning_tests lines in the lint-plan CI job logs and in hand ship logs,
+      and git history of plan/tasks.d.
+    - Precision: over the first 30 implement tasks with a non-empty list, the share of listed tests
+      that the task's merged code PR, or a later scope amendment of the task, changed.
+    - Recall: over every later scope amendment that adds a test/ path to an implement task's files:
+      (plan-only commits like #20046, #20092, #20093, #20094, and the fleet's scope-amendment/*
+      branches), the share of added tests that the task's listing named.
+    - Rule: if precision is under 10% after 30 listings, narrow the token rule or retire the check
+      through a new task. If recall is under 50% after 10 amendments, file a task with the missed
+      cases.
+  falsifier: |
+    On origin/main no pinning-tests check exists: criterion 1 finds no violation and the LintCheck
+    grep fails. Give the finding severity block: criterion 1's ok is false and criterion 5 returns 1.
+    Use affected-suites' transitive reach instead of direct dependencies: criterion 2's
+    through-another-module test is listed. Drop the owned-token rule: criterion 2's foreign token
+    lists a test. Ignore files: or the design's named paths:
+    criterion 3 lists them. Name every candidate: criterion 4 names 14. Wire the check into the
+    whole-plan pass too: criterion 5's run without --base prints the warning. Leave out the
+    budget: criterion 6's clock never stops the check. Wire it only in tests: the
+    pinningTestViolations( grep in src/run-task.ts finds nothing.
+  note: |
+    Id reserved for run-unfiled-1795307242495 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-21. Filing only; not built.
+    Builders: run tests only as `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`.
+    No test reads the real repo's history or calls GitHub.
+    Not in scope: the acceptance-author gate's scope rule, the fleet's scope-amendment lane, the
+    machine filers' own PR bodies, and the hand tool that writes hand filing PR bodies (outside this
+    repo). The lint warning asks the filer to copy the list into the PR body.
