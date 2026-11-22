@@ -218,6 +218,19 @@ const DECLARED: readonly Declared[] = [
       "directory proves this uid is refused; under uid 0 the tests skip with that stated reason, never pass unrun.",
   },
   {
+    kind: "chmod", file: "daemon/an-unreadable-overlay-registry-is-never-live.test.ts", key: "0o000", count: 2,
+    reason:
+      "W1-T13763: the subject IS a permission denial. The overlay-pointer reader branches on EACCES/EPERM, telling a " +
+      "denied search of .remudero (no pointer, legacy live) from a present-but-unreadable pointer (refusal); an " +
+      "EISDIR/ENOTDIR substitute takes the other arm. Both tests skip under uid 0 with a stated reason, never pass unrun.",
+  },
+  {
+    kind: "chmod", file: "daemon/an-unreadable-overlay-registry-is-never-live.test.ts", key: "0o600", count: 1,
+    reason:
+      "W1-T13763: restores the pointer fixture to owner read/write after its staged EACCES denial, so cleanup can " +
+      "remove it. It is the restore half of the denial above and asserts nothing about permissions; the test skips under uid 0.",
+  },
+  {
     kind: "chmod", file: "review/evidence-storage.test.ts", key: "0o644", count: 1,
     reason: "The evidence policy rejects group/world-readable metadata explicitly before parsing; this checks stat mode, not an OS access denial, and is therefore uid-independent.",
   },
