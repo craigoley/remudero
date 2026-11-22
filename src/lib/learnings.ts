@@ -2167,6 +2167,16 @@ function matchCounts(
   };
 }
 
+/** W1-T14138: the per-kind match counts {@link selectLearnings} ranks one entry by, for a caller that must
+ *  say WHY an entry matched (file, symbol, error) instead of recomputing the three tests a second way. */
+export function learningMatchCounts(
+  entry: LearningEntry,
+  taskFiles: string[] | undefined,
+  context?: LearningsSelectionContext,
+): LearningMatchCounts {
+  return matchCounts(entry, taskFiles ?? [], selectionHaystack(context), context?.knownSymbols);
+}
+
 // W1-T4093 FILL BY STRENGTH (see selectLearnings): weights mirror error>symbol>file precedence.
 const ERROR_MATCH_WEIGHT = 3;
 const SYMBOL_MATCH_WEIGHT = 2;

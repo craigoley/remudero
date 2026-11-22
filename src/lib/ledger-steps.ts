@@ -688,6 +688,25 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["spend-not-measured", "fleet-not-idle", "daily-cost-unpriced", "daily-cost-ceiling", "cash-allowance-unreadable", "cash-allowance"],
   },
   {
+    step: "fix.learnings_shadow",
+    meaning:
+      "A fix round measured which learnings its failing checks, unmet criteria and findings would match, and injected " +
+      "none of them in either arm. `arm` is the task-keyed draw (`offered` or `withheld`, never per run), `matched` lists " +
+      "each selected learning with its match kind (symbol, error or both; a file-only match is never admitted). " +
+      "`state: unreadable` means the learnings could not be read, which is not the same as nothing matching.",
+    writer: ["recordFixLearningsShadow"],
+    outcomes: ["ok", "unreadable"],
+  },
+  {
+    step: "fix.learnings_outcome",
+    meaning:
+      "What became of one fix round, written when the next round starts or the rung ends: `conclusion` is the CI result " +
+      "on the head the round pushed (green or red), `no_push` when nothing landed, or `unknown` when CI could not be read. " +
+      "A rung that ends any other way leaves its last round without this row.",
+    writer: ["recordFixLearningsOutcome"],
+    outcomes: ["green", "red", "no_push", "unknown"],
+  },
+  {
     step: "skill_eval.auto_claimed",
     meaning:
       "The fleet claimed one staged skill draft's text (`draft_sha256`) for its held-out eval, with every gate open, " +

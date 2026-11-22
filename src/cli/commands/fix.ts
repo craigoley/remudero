@@ -19,7 +19,7 @@ import { ghExec, ghJsonAsync } from "../../lib/github-transport.js";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
-import { loadConfig, type Config } from "../../lib/config.js";
+import { globalArtifactPath, loadConfig, userOverallLearningsHome, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { isPrMergedNow, mergeTargetFromPrUrl } from "../../lib/arm-auto-merge.js";
 import { ciFailureLedgerEntry } from "../../lib/ci-friction-gardener.js";
@@ -48,7 +48,8 @@ import { loadMounts, mountsPath, type Mount } from "../../lib/mounts.js";
 import { fixArmEvidence, fixRoutingWeights, readFixRoutingRows, type FixLearnedArms } from "../../lib/fix-routing-learner.js";
 import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, SKILL_WITHHOLDING_SHARE, skillWithheldUnderRetirement, stagedSkillRetirements } from "../../lib/skill-workshop.js";
 import { SKILL_ARM_EPOCH, TASK_ARM_UNIT, taskArmWithheld } from "../../lib/task-arm.js";
-import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../../lib/learnings.js";
+import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, projectLearningsHome } from "../../lib/learnings.js";
+import { recordFixLearningsOutcome, recordFixLearningsShadow } from "../../lib/fix-learnings-shadow.js";
 import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockRegion, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
@@ -2791,8 +2792,23 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     { unit: TASK_ARM_UNIT, epoch: SKILL_ARM_EPOCH },
   );
   let fixSkillSelectionLogged = false;
+  // W1-T14138: the round whose `fix.learnings_outcome` is still owed. Set where the round's fix.done is written,
+  // settled at the top of the next round (CI has then been re-read against the head the round pushed) and once
+  // the loop ends green. A rung that exits any other way leaves its last round unsettled: no row, never a guess.
+  let unsettledRound: { attempt: number; roundId: string; pushedHeadSha: string | undefined } | undefined;
+  const settleLearningsRound = (): void => {
+    if (!unsettledRound) return;
+    const settled = unsettledRound;
+    unsettledRound = undefined;
+    const ci = noReviewYet
+      ? (currentCiFailures === undefined ? "unknown" : currentCiFailures.length > 0 ? "red" : "green")
+      : "green";
+    recordFixLearningsOutcome({ runId: opts.runId, taskId: opts.taskId, pr: prNumber, attempt: settled.attempt,
+      roundId: settled.roundId, pushedHeadSha: settled.pushedHeadSha, ci }, deps.log);
+  };
   while (review.state !== "success" || proofDiscriminationStillNeedsRepair()) {
     consultedThisRound = false;
+    settleLearningsRound();
     // A wired judge rules every round itself (below); only the stand-in stops at the former bounds here.
     if (judgeIsStandIn && (strikes - needsDesignRefunds >= opts.strikeCap || retriggers >= retriggerCap || consecutiveMergeRefusalReasons.length >= 2)) {
       const bound = consecutiveMergeRefusalReasons.length >= 2
@@ -4456,6 +4472,19 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // At the first prompt assembly, as the implement lane does — emitted even at zero selection.
     if (!fixSkillSelectionLogged) deps.log("skills.selection", fixSkillSelection.observation);
     fixSkillSelectionLogged = true;
+    // W1-T14138: what this round's failure would match, recorded under a task-keyed arm. Neither arm injects
+    // anything: `prompt` below is assembled from the same parts with or without this row.
+    recordFixLearningsShadow({
+      runId: opts.runId, taskId: opts.taskId, pr: prNumber, attempt, round,
+      failingChecks: (evidence.ciFailures ?? []).map((f) => ({ name: f.name, title: f.title, logTail: f.logTail })),
+      unmetClaims: (evidence.review?.unmetCriteria ?? []).map((c) => c.claim),
+      findings: (evidence.review?.findings ?? []).map((f) => `${f.path} ${f.mechanism} ${f.remedy ?? ""}`),
+      homes: {
+        projectDir: projectLearningsHome(opts.worktreePath),
+        ...(typeof opts.config.root === "string"
+          ? { userOverallDir: userOverallLearningsHome(opts.config), globalArtifactPath: globalArtifactPath(opts.config) } : {}),
+      },
+    }, deps.log);
     const prompt = [
       renderFixPrompt({
         harnessCommits: fixHarnessOwnsGit,
@@ -5051,37 +5080,40 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     };
     let workerProofResults: FixProgressWorkerProofResult[] = [];
     let selfCheckCostUsd = 0;
-    const logFixDoneRow = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding) => deps.log("fix.done", {
-      ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
-      round_id: roundId,
-      ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() ?? releasedClaimId } : {}),
-      fix_outcome: fixOutcome?.kind ?? "unstated",
-      ...(harnessCommitRefused && fixOutcome?.kind === "FIXED" ? { fix_outcome: "NOT_LANDED", worker_fix_outcome: "FIXED" } : {}),
-      ...fixClaimFields,
-      head_sha: priorHeadSha,
-      pushed_head_sha: pushedHeadSha,
-      ...(workerProofResults.length > 0 ? { worker_proof_results: workerProofResults } : {}),
-      strike: attempt,
-      round,
-      session_id: fixResult.sessionId,
-      subtype: subtype ?? (harnessCommitRefused || fixAction.kind === "scope-needed" ? "commit_refused" : fixResult.subtype),
-      ...(harnessCommitRefused || fixAction.kind === "scope-needed" ? { worker_subtype: fixResult.subtype } : {}),
-      ...(fixWorkerEndedBySignal(fixResult)
-        ? { worker_exit: "signal", worker_exit_signal: fixResult.exit.signal } : {}),
-      ...fixRoundLandingFields(landing, fixResult.subtype, fixOutcome?.kind ?? "unstated"),
-      cost_usd: selfCheckCostUsd > 0 ? (fixResult.costUsd ?? 0) + selfCheckCostUsd : fixResult.costUsd,
-      billing_mode: billingMode(fixResult.childEnvKeys),
-      account_label: fixResult.accountLabel,
-      num_turns: fixResult.numTurns,
-      // W1-T2383 (rank 2): THE CAP BESIDE THE COUNT. Absent on 233 of 233 `fix.done` rows as
-      // measured 2026-08-27, against $629.99 of fix-rung spend on a surface verdict rows do not
-      // contain at all (only 16 of 109 fix run ids also carry a verdict) — so nobody could tell
-      // an EXHAUSTED fix run from a merely long one. `WorkerResult.maxTurns` is the W1-T303
-      // INPUT (`SpawnWorkerArgs.maxTurns`, itself `opts.mount.maxTurns`), never a read-back off
-      // the envelope, which is what keeps this row checkable after `mounts.yaml` moves. Omitted
-      // rather than `undefined` when the spawn configured no cap.
-      ...(fixResult.maxTurns === undefined ? {} : { max_turns: fixResult.maxTurns }),
-    });
+    const logFixDoneRow = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding): void => {
+      unsettledRound = { attempt, roundId, pushedHeadSha }; // W1-T14138: this round's outcome row is owed
+      deps.log("fix.done", {
+        ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
+        round_id: roundId,
+        ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() ?? releasedClaimId } : {}),
+        fix_outcome: fixOutcome?.kind ?? "unstated",
+        ...(harnessCommitRefused && fixOutcome?.kind === "FIXED" ? { fix_outcome: "NOT_LANDED", worker_fix_outcome: "FIXED" } : {}),
+        ...fixClaimFields,
+        head_sha: priorHeadSha,
+        pushed_head_sha: pushedHeadSha,
+        ...(workerProofResults.length > 0 ? { worker_proof_results: workerProofResults } : {}),
+        strike: attempt,
+        round,
+        session_id: fixResult.sessionId,
+        subtype: subtype ?? (harnessCommitRefused || fixAction.kind === "scope-needed" ? "commit_refused" : fixResult.subtype),
+        ...(harnessCommitRefused || fixAction.kind === "scope-needed" ? { worker_subtype: fixResult.subtype } : {}),
+        ...(fixWorkerEndedBySignal(fixResult)
+          ? { worker_exit: "signal", worker_exit_signal: fixResult.exit.signal } : {}),
+        ...fixRoundLandingFields(landing, fixResult.subtype, fixOutcome?.kind ?? "unstated"),
+        cost_usd: selfCheckCostUsd > 0 ? (fixResult.costUsd ?? 0) + selfCheckCostUsd : fixResult.costUsd,
+        billing_mode: billingMode(fixResult.childEnvKeys),
+        account_label: fixResult.accountLabel,
+        num_turns: fixResult.numTurns,
+        // W1-T2383 (rank 2): THE CAP BESIDE THE COUNT. Absent on 233 of 233 `fix.done` rows as
+        // measured 2026-08-27, against $629.99 of fix-rung spend on a surface verdict rows do not
+        // contain at all (only 16 of 109 fix run ids also carry a verdict) — so nobody could tell
+        // an EXHAUSTED fix run from a merely long one. `WorkerResult.maxTurns` is the W1-T303
+        // INPUT (`SpawnWorkerArgs.maxTurns`, itself `opts.mount.maxTurns`), never a read-back off
+        // the envelope, which is what keeps this row checkable after `mounts.yaml` moves. Omitted
+        // rather than `undefined` when the spawn configured no cap.
+        ...(fixResult.maxTurns === undefined ? {} : { max_turns: fixResult.maxTurns }),
+      });
+    };
     // W1-T5955: the round ends here, so its branch claim does too; the CI wait holds none.
     const logFixDone = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding): void => {
       logFixDoneRow(pushedHeadSha, subtype, landing);
@@ -6016,6 +6048,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       return { outcome: "escalated", review, strikes, retriggers, reason: "false_block", issueUrl };
     }
   }
+
+  settleLearningsRound(); // W1-T14138: the last round's outcome, read from the state the loop ended in
 
   if (review.state === "success" && !proofDiscriminationStillNeedsRepair()) {
     deps.log("fix.resolved", { strikes, reason: "review passed" });
