@@ -484,17 +484,18 @@ function providerExclusionCandidates(
   if (excluded.length === 0) return { capacities, excludeProviders: [] };
   const considered = routableProviders === undefined ? capacities
     : capacities.filter((capacity) => routableProviders.includes(capacity.provider));
-  const eligibleAlternative = considered.some((capacity) => !excluded.includes(capacity.provider) &&
-    providerEligibility(capacity, reservePercent).eligible);
-  if (eligibleAlternative) {
+  const eligible = considered.map((capacity) => ({ provider: capacity.provider, ...providerEligibility(capacity, reservePercent) }))
+    .filter((candidate) => candidate.eligible);
+  // Re-admission may change the provider within the best available tier.
+  const subscriptions = eligible.filter((candidate) => candidate.lane === undefined);
+  const tier = subscriptions.length > 0 ? subscriptions : eligible;
+  if (tier.some((candidate) => !excluded.includes(candidate.provider))) {
     return { capacities: capacities.filter((capacity) => !excluded.includes(capacity.provider)), excludeProviders: excluded };
   }
-  const eligibleExcluded = considered.some((capacity) => excluded.includes(capacity.provider) &&
-    providerEligibility(capacity, reservePercent).eligible);
   return {
     capacities,
     excludeProviders: excluded,
-    ...(eligibleExcluded ? { exclusion_unhonoured: { reason: "no-eligible-alternative", excludedProviders: excluded } } : {}),
+    ...(tier.length > 0 ? { exclusion_unhonoured: { reason: "no-eligible-alternative", excludedProviders: excluded } } : {}),
   };
 }
 
@@ -613,6 +614,17 @@ export interface RoutingDecision {
     lane?: ProviderLane;
     /** W1-T10382: the Codex credit balance this read saw; `null` when the balance was unreadable. */
     creditsBalance?: number | null;
+    /** W1-T13855: how credits rescued this capacity: the path, the tier chosen, the projected balance and, for a
+     *  carried reading, its age and the probe failure it was carried over. */
+    creditsRescue?: {
+      path: "carried" | "generic-bucket";
+      tier: ProviderLane;
+      projectedBalance: number | null;
+      ageMs?: number;
+      failureKind?: "timeout" | "starved";
+    };
+    /** W1-T13855: why an unreadable Codex read could not be asked: the probe's failure kind. */
+    failureKind?: "timeout" | "starved" | "terminal";
   }>;
   /** Tightest remaining window per subscription read for this decision; `null` means unreadable. */
   headroomPercent: Partial<Record<WorkerProviderId, number | null>>;
@@ -1866,6 +1878,14 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
       ...(verdict.reason ? { reason: verdict.reason } : {}),
       ...(verdict.lane ? { lane: verdict.lane } : {}),
       ...(capacity.credits ? { creditsBalance: capacity.credits.balance } : {}),
+      ...(verdict.lane && capacity.creditsRescue ? { creditsRescue: {
+        path: capacity.creditsRescue.path,
+        tier: verdict.lane,
+        projectedBalance: capacity.creditsRescue.projectedBalance,
+        ...(capacity.creditsRescue.ageMs !== undefined ? { ageMs: capacity.creditsRescue.ageMs } : {}),
+        ...(capacity.creditsRescue.failureKind ? { failureKind: capacity.creditsRescue.failureKind } : {}),
+      } } : {}),
+      ...(verdict.reason === "unreadable" && capacity.probeFailure ? { failureKind: capacity.probeFailure } : {}),
     };
   });
   if (!considered.some((entry) => entry.selected)) {
@@ -2874,6 +2894,16 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       };
       // W1-T13672: a deferred cash-mount spawn returns to its own cash route, never to a squeeze or overflow fallback.
       const deferred = args.cashDeferred !== undefined || subscriptionRetry;
+      // A fallback can still serve the work. Retire the previous credits signal without changing the review's quota reading.
+      const spawnFallback = (mountProvider: WorkerProviderId, fallback: Pick<SpawnWorkerArgs,
+        "cashSqueezed" | "cashOpusEmergency" | "cashSonnetEmergency" | "routingFallback" | "tools">) => {
+        publishProviderRoutingStatus({ ...statusBase, state: "invalidate-credits" });
+        return spawnWorker({
+          ...args,
+          ...fallback,
+          mountProvider,
+        });
+      };
       if (error instanceof ProviderCapacityBlockedError && args.mountProvider === undefined && subscriptionOnly && !deferred) {
         const divertTools = args.cashTools ?? args.tools;
         const env = args.env ?? process.env;
@@ -2886,9 +2916,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           allowanceRefusal(["claude-opus-5-5"]);
         if (refusal === undefined) {
           console.error(JSON.stringify({ event: "worker.provider.cash_opus_fallback", reason: "both subscriptions blocked", requested_model: args.model }));
-          return await spawnWorker({
-            ...args,
-            mountProvider: "cash",
+          return await spawnFallback("cash", {
             cashSqueezed: true,
             cashOpusEmergency: true,
             routingFallback: { rule: "cash-opus-fallback", capacities },
@@ -2924,9 +2952,12 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             : allowanceRefusal([...new Set(eligible)]);
           if (held !== undefined) {
             console.error(JSON.stringify({ event: "worker.provider.cash_fallback_refused", refusal: held }));
-            publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
-            if (eligible.length === 0 && candidates.length > 0) throw new CashDraftResumeBlockedError();
+            if (eligible.length === 0 && candidates.length > 0) {
+              publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
+              throw new CashDraftResumeBlockedError();
+            }
             error.message += `; ${held}`;
+            publishProviderRoutingStatus({ ...statusBase, state: "blocked", capacities });
             throw error;
           }
         }
@@ -2936,9 +2967,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             reason: "no subscription had readable headroom",
             requested_model: args.model,
           }));
-          return await spawnWorker({
-            ...args,
-            mountProvider: "cash" as WorkerProviderId,
+          return await spawnFallback("cash", {
             cashSqueezed: true,
             cashSonnetEmergency: true,
             routingFallback: { rule: "cash-sonnet-fallback", capacities },
@@ -2952,13 +2981,10 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             tools: divertTools,
             blocked: capacities.map((c) => `${c.provider}=${c.readable ? "readable" : c.detail ?? "unreadable"}`),
           }));
-          // NO routing status is written here. The auction really did block, and there is no
-          // ProviderSelection to report -- inventing one to satisfy the "selected" shape would be
-          // the fabricated telemetry this whole design refuses. The cash spawn below publishes its
-          // own status through the mount-affinity path.
-          return await spawnWorker({
-            ...args,
-            mountProvider: "cash" as WorkerProviderId,
+          // No "selected" status is written here: the auction really did block, and there is no
+          // ProviderSelection to report -- inventing one would be the fabricated telemetry this
+          // design refuses.
+          return await spawnFallback("cash", {
             // this is the ONLY place the squeeze ceiling is claimed. Reaching cash here
             // means every subscription was unreadable or exhausted, which is exactly the day the
             // operator raised the cap for.
@@ -2986,9 +3012,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
           // Setting `mountProvider` makes the retry SKIP the auction rather than re-enter it, and it
           // is the SAME structural recursion bound the cash arm relies on: the outer guard requires
           // `args.mountProvider === undefined`, so neither arm can fire twice.
-          return await spawnWorker({
-            ...args,
-            mountProvider: "claude" as WorkerProviderId,
+          return await spawnFallback("claude", {
             routingFallback: { rule: "overflow-fallback", capacities },
           });
         }

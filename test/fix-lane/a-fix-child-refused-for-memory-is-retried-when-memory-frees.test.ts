@@ -224,7 +224,7 @@ test("W1-T13869 criterion 3: the production probe matches a child admission clai
   for (const peak of [1600, 1600, 1600, 1600, 1600, 1600, 6400, 6400, 6400]) {
     assert.equal(recordPeak("fix", peak, { root }), true);
   }
-  assert.deepEqual(classEstimate("fix"), { estimateMib: 6400, samples: 9 });
+  assert.deepEqual(classEstimate("fix"), { estimateMib: 6400, samples: 9, basis: "legacy-hwm-fallback" });
   assert.deepEqual(classTypical("fix"), { estimateMib: 1600, samples: 9 });
 
   async function compare(headroom: number | undefined, rung: FixAdmissionRung | undefined, activeWorkers: number, admitted: boolean) {

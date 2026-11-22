@@ -1,9 +1,9 @@
 /**
  * Durable, bounded projection of the provider-routing decision most recently made by the
- * daemon. The daemon/worker is the only writer; the console only reads this file. Capacity
+ * daemon. The daemon and workers publish it; the console reads the projection. Capacity
  * probes and provider credentials therefore never cross into the console process.
  */
-import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { WorkerProviderId } from "./config.js";
 import { WORKER_PROVIDER_IDS } from "./config-schema.js";
@@ -14,7 +14,7 @@ import type {
   ProviderRoutingPolicyFallbackReason,
   ProviderRoutingPreference,
 } from "./provider-routing-policy.js";
-import type { ProviderCapacity, ProviderSelection } from "./worker-provider.js";
+import { providerEligibility, type ProviderCapacity, type ProviderSelection } from "./worker-provider.js";
 
 export const PROVIDER_ROUTING_STATUS_VERSION = 1;
 /** BACKSTOP: field-count and string-length projection limits are the normal size controls. */
@@ -22,6 +22,11 @@ export const MAX_PROVIDER_ROUTING_SNAPSHOT_BYTES = 16 * 1024;
 const MAX_WINDOWS_PER_PROVIDER = 8;
 const MAX_CODEX_MODEL_OPTIONS = 32;
 const SAFE_LABEL = /^[A-Za-z0-9][A-Za-z0-9 ._()+:@-]{0,95}$/;
+/** How old a lapsed provider-routing reading may be and still be judged: three of the daemon's own
+ *  headroom sampling intervals (`3 * HEADROOM_SAMPLE_MAX_AGE_MS`, src/lib/daemon.ts), the bound the
+ *  review widener pins as `REVIEW_PROVIDER_READING_MAX_AGE_MS`. A test pins the relationship.
+ *  KIND: PRIMARY CONTROL — every {@link creditsLaneRoom} read consults it to decide whether a lapsed cache counts. */
+export const PROVIDER_ROUTING_READING_MAX_AGE_MS = 900_000;
 
 export type ProviderRoutingUnknownReason = "absent" | "unreadable" | "malformed" | "unsupported-version";
 export type ProviderRoutingFreshness = "fresh" | "stale" | "not-probed" | "unknown";
@@ -44,6 +49,9 @@ export interface ProviderRoutingProviderStatus {
   modelDecision?: CodexModelDecisionStatus;
   /** Manual reset readiness. Count and earliest expiry ONLY — see {@link projectResetCredits}. */
   resetCredits?: ProviderRoutingResetCreditsStatus;
+  /** W1-T13855: admitted past its reserve on prepaid Codex credits at the status's reserve. Never a balance:
+   *  this file is served by `/v1/provider-routing`. */
+  creditsLane?: true;
 }
 
 /**
@@ -157,10 +165,17 @@ export type ProviderRoutingWriteInput = ProviderRoutingWriteBase &
     | { state: "not-probed" }
     | { state: "selected"; capacities: readonly ProviderCapacity[]; selection: ProviderSelection }
     | { state: "blocked"; capacities: readonly ProviderCapacity[] }
+    | { state: "invalidate-credits" }
   );
 
 export function providerRoutingStatusPath(root: string): string {
   return join(root, "state", "provider-routing-status.json");
+}
+
+/** A `not-probed` write publishes only the policy and model health here, apart from the probed
+ *  reading in {@link providerRoutingStatusPath}, so a policy refresh cannot overwrite a selection. */
+export function policyRefreshPath(root: string): string {
+  return join(root, "state", "provider-routing-policy-status.json");
 }
 
 function safeLabel(value: unknown): string | undefined {
@@ -291,9 +306,10 @@ function projectResetCredits(capacity: ProviderCapacity): ProviderRoutingResetCr
   return usable ? { availableCount: count, earliestExpiresAt: expiresAt } : { availableCount: count };
 }
 
-function projectCapacity(capacity: ProviderCapacity): ProviderRoutingProviderStatus | undefined {
+function projectCapacity(capacity: ProviderCapacity, reservePercent: number): ProviderRoutingProviderStatus | undefined {
   const provider = providerId(capacity.provider);
   if (!provider) return undefined;
+  const creditsLane = providerEligibility(capacity, reservePercent).lane === "codex-credits";
   const windows = projectWindows(capacity.windows);
   const allocationWindows = capacity.allocationWindows ? projectWindows(capacity.allocationWindows) : undefined;
   const modelDecision = projectModelDecision(capacity);
@@ -309,14 +325,15 @@ function projectCapacity(capacity: ProviderCapacity): ProviderRoutingProviderSta
     ...(safeLabel(capacity.effort) ? { effort: safeLabel(capacity.effort) } : {}),
     ...(modelDecision ? { modelDecision } : {}),
     ...(resetCredits ? { resetCredits } : {}),
+    ...(creditsLane ? { creditsLane: true as const } : {}),
   };
 }
 
-function projectCapacities(capacities: readonly ProviderCapacity[]): ProviderRoutingProviderStatus[] {
+function projectCapacities(capacities: readonly ProviderCapacity[], reservePercent: number): ProviderRoutingProviderStatus[] {
   const seen = new Set<WorkerProviderId>();
   const projected: ProviderRoutingProviderStatus[] = [];
   for (const capacity of capacities) {
-    const row = projectCapacity(capacity);
+    const row = projectCapacity(capacity, reservePercent);
     if (!row || seen.has(row.provider)) continue;
     seen.add(row.provider);
     projected.push(row);
@@ -371,7 +388,7 @@ function projectModelHealth(value: unknown): ProviderRoutingModelHealthStatus | 
   };
 }
 
-function projectWrite(input: ProviderRoutingWriteInput): ProviderRoutingStatus {
+function projectWrite(input: Exclude<ProviderRoutingWriteInput, { state: "invalidate-credits" }>): ProviderRoutingStatus {
   if (!Number.isFinite(input.observedAtMs)) throw new Error("provider routing observation time is invalid");
   if (!Number.isFinite(input.cacheValidMs) || input.cacheValidMs <= 0) {
     throw new Error("provider routing freshness bound is invalid");
@@ -396,11 +413,11 @@ function projectWrite(input: ProviderRoutingWriteInput): ProviderRoutingStatus {
   if (input.state === "not-probed") {
     return { ...base, state: "not-probed", freshness: "not-probed", providers: [] };
   }
-  const providers = projectCapacities(input.capacities);
+  const providers = projectCapacities(input.capacities, reservePercent);
   if (input.state === "blocked") {
     return { ...base, state: "blocked", freshness: "fresh", providers, blockedReason: "no-provider-headroom" };
   }
-  const selectedCapacity = projectCapacity(input.selection.capacity);
+  const selectedCapacity = projectCapacity(input.selection.capacity, reservePercent);
   const tightestRemainingPercent = safePercent(input.selection.tightestRemainingPercent);
   if (tightestRemainingPercent === undefined) throw new Error("provider routing selection headroom is invalid");
   const hasAllocation = input.selection.allocationWeight !== undefined || input.selection.allocationSharePercent !== undefined;
@@ -425,33 +442,73 @@ function projectWrite(input: ProviderRoutingWriteInput): ProviderRoutingStatus {
   };
 }
 
-/** The record on disk when it holds a probed reading (`selected` or `blocked`) with its provider windows. */
-function probedRecord(target: string): Record<string, unknown> | undefined {
+/**
+ * W1-T13855: the credits-invalidation cutoff lives BESIDE the snapshot, as the NAME of an empty file, so
+ * recording it needs no read-modify-write of the snapshot and no lock. A cash fallback that ran out of
+ * credits records the instant it observed; the READER then drops the codex credits-lane flag from any
+ * snapshot observed at or before it. A funded publish racing the fallback therefore cannot resurrect
+ * the flag whichever rename lands last, and no publish is ever refused or dropped on the cutoff's account.
+ * Several processes may record at once: each writes its own uniquely named file and prunes only the
+ * strictly older ones, so the largest cutoff always survives.
+ */
+const CREDITS_CUTOFF_PREFIX = "provider-routing-credits-cutoff-";
+
+function creditsCutoffEntries(dir: string): Array<{ name: string; ms: number }> {
+  let names: string[];
   try {
-    const parsed = JSON.parse(readFileSync(target, "utf8")) as Record<string, unknown>;
-    return parsed.state === "selected" || parsed.state === "blocked" ? parsed : undefined;
+    names = readdirSync(dir);
   } catch {
-    // Absent, unreadable or malformed holds no reading worth keeping, so the not-probed write lands.
-    return undefined;
+    // An absent or unreadable state directory carries no cutoff: the reading is then trusted as written.
+    return [];
+  }
+  const entries: Array<{ name: string; ms: number }> = [];
+  for (const name of names) {
+    if (!name.startsWith(CREDITS_CUTOFF_PREFIX)) continue;
+    const ms = Number(name.slice(CREDITS_CUTOFF_PREFIX.length));
+    if (Number.isSafeInteger(ms)) entries.push({ name, ms });
+  }
+  return entries;
+}
+
+function creditsCutoffMs(root: string): number {
+  return creditsCutoffEntries(dirname(providerRoutingStatusPath(root))).reduce((max, entry) => Math.max(max, entry.ms), Number.NEGATIVE_INFINITY);
+}
+
+function recordCreditsInvalidation(root: string, observedAtMs: number): void {
+  if (!Number.isFinite(observedAtMs)) throw new Error("provider routing observation time is invalid");
+  const dir = dirname(providerRoutingStatusPath(root));
+  const ms = Math.trunc(observedAtMs);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (creditsCutoffEntries(dir).some((entry) => entry.ms >= ms)) return; // an equal or newer cutoff already covers it
+  writeFileSync(join(dir, `${CREDITS_CUTOFF_PREFIX}${ms}`), "", { mode: 0o600 });
+  for (const entry of creditsCutoffEntries(dir)) {
+    if (entry.ms >= ms) continue;
+    try {
+      unlinkSync(join(dir, entry.name));
+    } catch {
+      // Another process already pruned it; a leftover older cutoff never lowers the maximum.
+    }
   }
 }
 
-/** Write one fixed, mode-0600 snapshot atomically. Throws so callers can record a bounded failure.
- *  W1-T4445: a `not-probed` write (a pinned Claude spawn) never replaces a probed reading. It refreshes
- *  only the policy and model health on it; the reading keeps its own instant and the reader ages it. */
+let temporarySequence = 0;
+
+/** Atomically publish quota observations and policy refreshes to separate mode-0600 files.
+ *  W1-T4445: a pinned Claude spawn refreshes policy and model health independently of quota.
+ *  The last completed quota rename remains visible while a policy refresh publishes. */
 export function writeProviderRoutingStatus(root: string, input: ProviderRoutingWriteInput): void {
-  const target = providerRoutingStatusPath(root);
-  const projected = projectWrite(input);
-  const kept = input.state === "not-probed" ? probedRecord(target) : undefined;
-  const record = kept
-    ? { ...kept, ...(projected.policy ? { policy: projected.policy } : {}), ...(projected.modelHealth ? { modelHealth: projected.modelHealth } : {}) }
-    : projected;
-  const payload = `${JSON.stringify(record)}\n`;
+  if (input.state === "invalidate-credits") {
+    recordCreditsInvalidation(root, input.observedAtMs);
+    return;
+  }
+  const target = input.state === "not-probed" ? policyRefreshPath(root) : providerRoutingStatusPath(root);
+  const payload = `${JSON.stringify(projectWrite(input))}\n`;
   if (Buffer.byteLength(payload) > MAX_PROVIDER_ROUTING_SNAPSHOT_BYTES) {
     throw new Error("provider routing snapshot exceeds its fixed size bound");
   }
   mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
-  const temporary = `${target}.tmp-${process.pid}-${Date.now()}`;
+  temporarySequence += 1;
+  const temporary = `${target}.tmp-${process.pid}-${Date.now()}-${temporarySequence}`;
   try {
     writeFileSync(temporary, payload, { encoding: "utf8", mode: 0o600 });
     renameSync(temporary, target);
@@ -714,6 +771,7 @@ function parseSnapshot(value: unknown, nowMs: number): ProviderRoutingStatus | u
       ...(safeLabel(row.model) ? { model: safeLabel(row.model) } : {}),
       ...(safeLabel(row.effort) ? { effort: safeLabel(row.effort) } : {}),
       ...(modelDecision ? { modelDecision } : {}),
+      ...(row.creditsLane === true ? { creditsLane: true as const } : {}),
     });
   }
   const freshness: ProviderRoutingFreshness =
@@ -779,9 +837,36 @@ export function readProviderRoutingStatus(
   root: string,
   deps: { now?: () => number; readFile?: (path: string, encoding: BufferEncoding) => string } = {},
 ): ProviderRoutingStatus {
+  const readFile = deps.readFile ?? readFileSync;
+  const nowMs = (deps.now ?? Date.now)();
+  const status = readSnapshot(providerRoutingStatusPath(root), nowMs, readFile);
+  const refresh = readSnapshot(policyRefreshPath(root), nowMs, readFile);
+  if (refresh.state === "not-probed" && (status.state === "unknown" || status.state === "not-probed")) return refresh;
+  // A refresh file that exists but cannot be trusted is refused as what it is (malformed, unreadable,
+  // unsupported-version); it is never hidden behind the probed file's mere absence.
+  if (status.state === "unknown" && status.reason === "absent" &&
+      refresh.state === "unknown" && refresh.reason !== "absent") return refresh;
+  if (refresh.state === "not-probed" && refresh.observedAt !== undefined &&
+      status.observedAt !== undefined && Date.parse(refresh.observedAt) >= Date.parse(status.observedAt)) {
+    if (refresh.policy) status.policy = refresh.policy;
+    if (refresh.modelHealth) status.modelHealth = refresh.modelHealth;
+  }
+  if (status.providers?.some((row) => row.creditsLane) && status.observedAt !== undefined &&
+      Date.parse(status.observedAt) <= creditsCutoffMs(root)) {
+    // A reading observed at or before a recorded invalidation no longer vouches for credits.
+    return { ...status, providers: status.providers.map(({ creditsLane: _lane, ...row }) => row) };
+  }
+  return status;
+}
+
+function readSnapshot(
+  path: string,
+  nowMs: number,
+  readFile: (path: string, encoding: BufferEncoding) => string,
+): ProviderRoutingStatus {
   let raw: string;
   try {
-    raw = (deps.readFile ?? readFileSync)(providerRoutingStatusPath(root), "utf8");
+    raw = readFile(path, "utf8");
   } catch (error) {
     // ENOENT is absence; every other read failure is explicitly unreadable.
     return unknown((error as NodeJS.ErrnoException)?.code === "ENOENT" ? "absent" : "unreadable");
@@ -790,9 +875,33 @@ export function readProviderRoutingStatus(
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     if (parsed.version !== PROVIDER_ROUTING_STATUS_VERSION) return unknown("unsupported-version");
-    return parseSnapshot(parsed, (deps.now ?? Date.now)()) ?? unknown("malformed");
+    return parseSnapshot(parsed, nowMs) ?? unknown("malformed");
   } catch {
-    // JSON/schema/clock failures are malformed, distinct from absent and unreadable state.
+    // JSON and schema failures are distinct from absent and unreadable state.
     return unknown("malformed");
   }
+}
+
+/**
+ * W1-T13855: whether the routing status shows a squeeze the Codex credits lane is carrying — the one
+ * case the review widener may treat as provider room. It holds only for
+ * a selected reading the router still vouches for, or a lapsed one within
+ * {@link PROVIDER_ROUTING_READING_MAX_AGE_MS}, whose codex row is on the credits lane while no
+ * provider row has subscription headroom at the status's reserve. A blocked, unknown, not-probed or
+ * older status never counts: an old reading must not quietly authorise anything.
+ */
+export function creditsLaneRoom(status: ProviderRoutingStatus, nowMs: number): boolean {
+  if (status.state !== "selected" || status.reservePercent === undefined) return false;
+  const observedMs = status.observedAt ? Date.parse(status.observedAt) : Number.NaN;
+  const ageMs = Number.isFinite(observedMs) ? Math.max(0, nowMs - observedMs) : Number.POSITIVE_INFINITY;
+  if (status.freshness !== "fresh" && !(status.freshness === "stale" && ageMs <= PROVIDER_ROUTING_READING_MAX_AGE_MS)) return false;
+  // A policy-only write can leave windows from disabled providers in the retained reading.
+  const routable = status.policy?.routableProviders ?? status.enabledProviders;
+  if (routable === undefined || !routable.includes("codex")) return false;
+  const providers = status.providers ?? [];
+  const ceiling = 100 - status.reservePercent;
+  const subscriptionHeadroom = providers.some((row) => routable.includes(row.provider) &&
+    row.readable && row.creditsLane !== true && row.windows.length > 0 &&
+    row.windows.every((window) => window.usedPercent < ceiling));
+  return !subscriptionHeadroom && providers.some((row) => row.provider === "codex" && row.creditsLane === true);
 }

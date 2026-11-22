@@ -20,6 +20,7 @@
     - src/lib/mount-recommender.ts
     - src/run-task.ts
     - test/gardeners/a-concluded-experiment-proposes-its-change-to-the-mounts-table.test.ts
+    - scripts/write-only-ledger-step-baseline.json
   status: queued
   attempts: 0
   acceptance:
@@ -40,6 +41,15 @@
     - The config gardener's adopt-mount path takes one kind of evidence: the mount headroom sweep, read by `recommendMounts`. That sweep is observational, and its own notice says so.
     - `mountCandidate` skips a recommendation whose two arms are on different providers. Every live experiment compares two providers.
     - A randomised result is stronger evidence than the sweep, and it has no path to the table.
+    SCOPE AMENDED for the write-only ledger-step ratchet (W1-T14149, #20045), read at origin/main e5b163730 on #20120's merge:
+    - The ratchet's baseline lists `routing.experiment.result` and `routing.policy.estimate` as write-only debt. This task is
+      their first reader outside their writers, so both entries go stale, and the ratchet requires the PR that adds the
+      reader to remove them (the debt list only shrinks).
+    - The task writes two steps nothing else reads: `config.randomised_finding`, the operator-facing finding (the gardener
+      re-reads it only to write each once), and `config.randomised_recommendations_unread`, the diagnostic for an evidence
+      read that failed. Each is a record, so each needs a `recordOnly` entry with its reason.
+    - Both edits are in scripts/write-only-ledger-step-baseline.json, so the file joins the task's scope. No criterion, proof
+      or falsifier changes.
   design: |
     Add a second source beside `mountRecommendationSource`: the newest `routing.experiment.result` row for each experiment, from W1-T12142.
     Map a concluded result to the `MountRecommendation` shape so `mountCandidate` and the canary code stay one path. Mark its evidence as randomised, and leave out the observational notice for it.

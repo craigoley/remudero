@@ -102,6 +102,8 @@ export interface SettledOpsFiling {
 /**
  * The W1-T7744 prefetch shape for the ops history: selection is synchronous, so a read answers the last settled
  * read and starts one awaited read behind it when the binding has moved. A new commit is seen one selection later.
+ * W1-T14218: `refresh` answers a binding whose last read settled ready from that read: a commit's filing dates never
+ * change, so the daemon's warm-up at each ops source refresh reads git only for a new or refused commit.
  */
 export function prefetchedOpsFilingReader(
   read: (checkoutDir: string, commit: string) => Promise<OpsFilingAnswer>,
@@ -114,6 +116,7 @@ export function prefetchedOpsFilingReader(
     const key = keyOf(binding);
     const running = inFlight.get(key);
     if (running) return running;
+    if (settledKey === key && settled?.answer.kind === "ready") return Promise.resolve(settled.answer);
     // An injected read that rejects is answered as a refusal, so it never escapes `void refresh` unhandled.
     const next = read(binding.checkoutDir, binding.commit).then(
       (answer) => answer,

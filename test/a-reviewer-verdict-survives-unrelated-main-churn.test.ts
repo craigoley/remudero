@@ -117,3 +117,13 @@ test("W1-T12824: the c79f9fd5b shape, an unused name added to a used import line
   assert.equal(freshnessOver(["src/run-task.ts"], servedGit({ "src/run-task.ts": [before, used] }, usedDiff)).status, "stale",
     "a new name the review path uses still withholds");
 });
+
+test("W1-T14152 criterion 5: the lease file is not a material path, and the verdict paths still are", () => {
+  const listed = new Set<string>(REVIEW_MATERIAL_ADVANCE_PATHS);
+  assert.equal(listed.has("src/lib/reviewer-worktree-lease.ts"), false, "the lease decides which tree a child runs in, never a verdict");
+  for (const p of ["src/lib/review.ts", "src/run-task.ts", "src/lib/plan.ts", "src/lib/task-linter.ts", "package.json", "package-lock.json"]) {
+    assert.ok(listed.has(p), `${p} must stay listed`);
+  }
+  assert.equal(reviewAdvanceIsMaterial(["src/lib/reviewer-worktree-lease.ts"]), false);
+  assert.equal(reviewAdvanceIsMaterial(["src/lib/reviewer-worktree-lease.ts", "src/lib/review.ts"]), true);
+});
