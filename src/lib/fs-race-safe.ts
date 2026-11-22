@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
+import fs, { closeSync, existsSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { hostname } from "node:os";
+import { getEnvironmentData, isMainThread, setEnvironmentData } from "node:worker_threads";
+import { systemClock } from "./clock.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { sameHost } from "./host-identity.js";
 
@@ -402,13 +404,131 @@ export function isHolderStale(held: HolderIdentity, opts: IsHolderStaleOpts): bo
   return false;
 }
 
-/** The one syscall {@link defaultGetProcessStartTime} makes, injectable so a test can drive its
- *  parsing/error handling without a real subprocess (mirrors {@link FsRaceSyscalls}). */
+/** The syscalls {@link defaultGetProcessStartTime} makes, injectable so a test can drive its
+ *  parsing/error handling without a real subprocess or a real /proc (mirrors {@link FsRaceSyscalls}). */
 export interface ProcessStartTimeSyscalls {
   execFileSync: typeof execFileSync;
+  /** W1-T11457: the platform the /proc reader keys on. Absent ⇒ the `ps` path, so a parse-only seam
+   *  (inbox.ts hands over `ps` stdout it already holds) never reads /proc. */
+  platform?: NodeJS.Platform;
+  /** W1-T11457: reads one procfs file whole. Absent ⇒ `fs.readFileSync`, looked up at each call. */
+  readFileSync?: (path: string) => Buffer;
 }
 
-const defaultProcessStartTimeSyscalls: ProcessStartTimeSyscalls = { execFileSync };
+const defaultProcessStartTimeSyscalls: ProcessStartTimeSyscalls = { execFileSync, platform: process.platform };
+
+const CLOCK_RATE_KEY = "remudero.processStartTime.clockTicks";
+const CLOCK_RATE_UNSET = 0n;
+const CLOCK_RATE_FAILED = -1n;
+// The daemon's synchronous process probes have stalled for over eight seconds under load.
+const CLOCK_RATE_LOOKUP_GRACE_NS = 10_000_000_000n;
+
+function inheritClockRateCache(): BigInt64Array | undefined {
+  if (process.platform !== "linux") return undefined;
+  const inherited = getEnvironmentData(CLOCK_RATE_KEY);
+  if (inherited instanceof SharedArrayBuffer) return new BigInt64Array(inherited);
+  if (!isMainThread) return undefined;
+  const buffer = new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT);
+  setEnvironmentData(CLOCK_RATE_KEY, buffer);
+  return new BigInt64Array(buffer);
+}
+
+// Serve loads this module before starting the board worker. Each replacement inherits the same
+// backing memory, and the first valid holder record triggers the lookup in whichever thread reads it.
+const processClockRate = inheritClockRateCache();
+const clockTicksBySeam = new WeakMap<ProcessStartTimeSyscalls, number | null>();
+
+function readClockTicks(readClockRate: () => string): number | null {
+  try {
+    const raw = readClockRate().trim();
+    const hz = /^\d+$/.test(raw) ? Number(raw) : NaN;
+    return Number.isSafeInteger(hz) && hz > 0 ? hz : null;
+  } catch {
+    return null; // getconf failed, so future lookups rely on the portable ps probe.
+  }
+}
+
+function sharedClockTicks(cache: BigInt64Array, readClockRate: () => string): number | null | undefined {
+  let ticks = Atomics.load(cache, 0);
+  if (ticks === CLOCK_RATE_UNSET) {
+    // Store the negative monotonic deadline together with the claim so a terminating worker cannot
+    // leave a claim without an expiry. Only the thread that claimed the slot runs getconf.
+    const pending = -(process.hrtime.bigint() + CLOCK_RATE_LOOKUP_GRACE_NS);
+    ticks = Atomics.compareExchange(cache, 0, CLOCK_RATE_UNSET, pending);
+    if (ticks === CLOCK_RATE_UNSET) {
+      const rate = readClockTicks(readClockRate);
+      Atomics.store(cache, 0, rate === null ? CLOCK_RATE_FAILED : BigInt(rate));
+      return rate;
+    }
+  }
+  // While the lookup is in flight, give no start evidence without blocking or spawning ps. If the
+  // initializer exits before publishing, the expired claim takes the portable fallback.
+  if (ticks < CLOCK_RATE_FAILED && process.hrtime.bigint() < -ticks) return undefined;
+  return ticks > 0n ? Number(ticks) : null;
+}
+
+function clockTicksPerSecond(sysImpl: ProcessStartTimeSyscalls, readClockRate: () => string): number | null | undefined {
+  if (sysImpl === defaultProcessStartTimeSyscalls && processClockRate) return sharedClockTicks(processClockRate, readClockRate);
+  const cached = clockTicksBySeam.get(sysImpl);
+  if (cached !== undefined) return cached;
+  const value = readClockTicks(readClockRate);
+  clockTicksBySeam.set(sysImpl, value);
+  return value;
+}
+
+/** `/proc/<pid>/stat` has 52 fields since Linux 3.5: pid, (comm), then these 50, a one-letter state first. */
+const PROC_PID_STAT_FIELDS_AFTER_COMM = 50;
+
+/** Read `/proc/stat`'s btime and `/proc/<pid>/stat`'s start ticks (field 22).
+ *  A missing PID stat file returns `null`. Other failures return `undefined` for the ps fallback. */
+function readProcStartFields(pid: number, sysImpl: ProcessStartTimeSyscalls): { btimeSec: number; startTicks: number } | null | undefined {
+  const read = sysImpl.readFileSync ?? fs.readFileSync;
+  let btimeSec: number;
+  try {
+    btimeSec = Number(/^btime (\d+)$/m.exec(read("/proc/stat").toString("utf8"))?.[1]);
+  } catch {
+    return undefined; // procfs unreadable here; ps still answers
+  }
+  if (!Number.isSafeInteger(btimeSec)) return undefined;
+  let stat: string;
+  try {
+    stat = read(`/proc/${pid}/stat`).toString("utf8");
+  } catch (err) {
+    // No stat file is no such pid, the answer ps gives; any other failure asks ps.
+    return (err as NodeJS.ErrnoException).code === "ENOENT" ? null : undefined;
+  }
+  const startTicks = parseProcStartTicks(pid, stat);
+  if (startTicks === undefined) return undefined;
+  // The leader's task stat reports the same starttime. A missing field plus numeric padding can
+  // preserve the layout and make vsize look like valid ticks, so confirm field 22 before using it.
+  try {
+    const leaderStat = read(`/proc/${pid}/task/${pid}/stat`).toString("utf8");
+    return parseProcStartTicks(pid, leaderStat) === startTicks ? { btimeSec, startTicks } : undefined;
+  } catch {
+    return undefined; // Even ENOENT here is a failed confirmation after the PID stat was read.
+  }
+}
+
+function parseProcStartTicks(pid: number, stat: string): number | undefined {
+  // comm (field 2) is parenthesised and may hold spaces and ") (", so fields count from after the LAST ")".
+  const prefix = `${pid} (`;
+  const close = stat.lastIndexOf(")");
+  if (!stat.startsWith(prefix) || close < prefix.length || stat[close + 1] !== " ") return undefined;
+  // Strip one final newline and split on spaces so a second line cannot supply a missing field.
+  const fields = stat.slice(close + 2, stat.endsWith("\n") ? -1 : undefined).split(" ");
+  if (fields.length !== PROC_PID_STAT_FIELDS_AFTER_COMM || !/^[A-Ztx]$/.test(fields[0])) return undefined;
+  // Linux prints every field after the state as a decimal integer (nice may be negative): any other is a misread.
+  if (!fields.slice(1).every((field) => /^-?\d+$/.test(field))) return undefined;
+  // RSS (field 24) is a signed long. A shifted unsigned rsslim can overflow it even on 64-bit Linux.
+  const rssPages = BigInt(fields[21]);
+  if (BigInt.asIntN(64, rssPages) !== rssPages) return undefined;
+  // Linux emits zero for itrealvalue (field 21). A shift can put start ticks here with an in-range RSS.
+  if (fields[18] !== "0") return undefined;
+  const startTicksText = fields[19];
+  if (!/^\d+$/.test(startTicksText)) return undefined;
+  const startTicks = Number(startTicksText);
+  return Number.isSafeInteger(startTicks) ? startTicks : undefined;
+}
 
 /** `ps -o etime=`'s `[[DD-]HH:]MM:SS` elapsed-time format, in ms — or `null` for anything that
  *  doesn't match (never thrown: an unrecognized shape is indeterminate, not an error). */
@@ -422,8 +542,9 @@ function parseEtimeToMs(etime: string): number | null {
   return (((days * 24 + hours) * 60 + minutes) * 60 + seconds) * 1000;
 }
 
-/** Default {@link IsHolderStaleOpts.getProcessStartTime}: shells to `ps -o etime=`, the one
- *  process-age mechanism both this repo's platforms (BSD `ps` on macOS, GNU `ps` in CI) support.
+/** Default {@link IsHolderStaleOpts.getProcessStartTime}. On Linux it reads /proc (W1-T11457: each `ps`
+ *  forked the multi-GB daemon on its event loop); elsewhere, or when /proc fails, it shells to `ps -o etime=`,
+ *  the one process-age mechanism both this repo's platforms (BSD `ps` on macOS, GNU `ps` in CI) support.
  *  Returns `null` — indeterminate, NOT "dead" — for a pid `ps` can't find or output it can't
  *  parse; {@link isHolderStale} already treats `null` as no evidence either way.
  *  Why: why elapsed time was chosen over wall-clock start time — docs/forensics/fs-race-safe.md#defaultgetprocessstarttime. */
@@ -431,9 +552,22 @@ export function defaultGetProcessStartTime(
   pid: number,
   sysImpl: ProcessStartTimeSyscalls = defaultProcessStartTimeSyscalls,
 ): number | null {
+  const run = (command: string, args: string[]): string => sysImpl.execFileSync(command, args, { encoding: "utf8" });
+  if (sysImpl.platform === "linux") {
+    const fields = readProcStartFields(pid, sysImpl);
+    if (fields === null) return null;
+    if (fields !== undefined) {
+      const hz = clockTicksPerSecond(sysImpl, () => run("getconf", ["CLK_TCK"]));
+      if (hz === undefined) return null; // Another thread is resolving the clock rate.
+      // Whole-second btime can put the answer up to 1 s before the true start.
+      const startMs = hz === null ? NaN : fields.btimeSec * 1000 + (fields.startTicks * 1000) / hz;
+      // A start after now or before boot is a misread record, not a process: ask ps.
+      if (startMs <= systemClock.now() && startMs >= fields.btimeSec * 1000) return startMs;
+    }
+  }
   let raw: string;
   try {
-    raw = sysImpl.execFileSync("ps", ["-o", "etime=", "-p", String(pid)], { encoding: "utf8" }) as string;
+    raw = run("ps", ["-o", "etime=", "-p", String(pid)]);
   } catch {
     return null;
   }

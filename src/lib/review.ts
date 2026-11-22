@@ -11682,10 +11682,13 @@ export function reviewerOutcome(opts: {
    *  criteria exist and a reviewer would have been dispatched, but the diff has no code for the advisory lane to
    *  judge. Folding it in would make the ledger unable to answer how often the skip fires. */
   planOnlySkip?: boolean;
+  /** W1-T14156: the caller chose a deterministic-only review (spawnReviewer false). */
+  deterministicMode?: boolean;
 }): string {
   // Checked BEFORE `attempted` so the plan-only skip is never reported as the generic
   // "never dispatched" case it would otherwise be indistinguishable from.
   if (opts.planOnlySkip) return "not_attempted_plan_only";
+  if (opts.deterministicMode) return "not_attempted_deterministic_mode";
   if (!opts.attempted) return "not_attempted";
   if (opts.spawnError) return "spawn_error";
   if (opts.exit?.kind === "signal") return "signal_terminated";

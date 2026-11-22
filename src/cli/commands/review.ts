@@ -116,6 +116,11 @@ export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]):
   };
 }
 
+/** W1-T14156: the `rmd review` verb runs the model reviewer unless its caller chose a mode. */
+export function operatorReviewArgs(rest: string[]): string[] {
+  return rest.includes("--execution-mode") ? rest : [...rest, "--execution-mode", "semantic"];
+}
+
 export const REVIEW_EXIT_CAUSE_FLAG = "--exit-cause-file";
 const REVIEW_EXIT_STEPS = ["view", "setup", "materialize", "review", "publish"] as const;
 export const REVIEW_EXIT_CAUSES = [
@@ -1273,6 +1278,9 @@ export async function runReview(host: ReviewCommandHost, args: {
     // spawn still reported `not_attempted_plan_only`, i.e. the ledger lied in the one direction
     // this outcome exists to prevent.
     planOnlySkip: planOnlySkip && !attemptReviewer,
+    // Only when criteria exist: a review with none has no semantic work to skip, so it keeps the
+    // bare `not_attempted` ("no criteria") value it always reported.
+    deterministicMode: args.spawnReviewer === false && criteria.length > 0,
   });
   replayInput = { ...replayInput, stage: "semantic", plan_only: planOnlySkip,
     criteria_count: criteria.length, reviewer_outcome: outcome,
@@ -1971,7 +1979,7 @@ export interface ReviewCommandDeps {
    *  ordering guarantee rather than a second network cost. Injectable so a test can drive the
    *  unfetched-sha case without a network. */
   fetchHead?: (repoDir: string, prNumber: number, headSha?: string) => unknown;
-  /** Operator CLI remains deterministic; only internal unattended callers opt in. */
+  /** The CLI verb defaults to semantic through operatorReviewArgs; internal callers that pass no flag stay deterministic. */
   executionMode?: "deterministic" | "semantic";
   /** Providers to avoid on a re-admitted review after a reviewer-unavailable result. */
   excludeProviders?: SpawnWorkerArgs["excludeProviders"];

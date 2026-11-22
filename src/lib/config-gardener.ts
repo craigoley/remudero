@@ -24,6 +24,8 @@ import {
 } from "./experiment-promotion.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { promotionCeiling, promotionFloor } from "./promotion-bars.js";
+import { escapeGrepLiteral, renderAcceptanceBlock } from "./plan-pr-emitter.js";
+import { parseWhitelistedProof } from "./review.js";
 import { JUDGE_SHADOW_STEPS, judgeShadowSummary, type JudgeShadowRoleSummary } from "./judge-shadow.js";
 import { scoreTypedAnswers, type TypedAnswer, type TypedAnswerRow, type TypedAnswerScoreGroup } from "./typed-answer-scores.js";
 import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedModel, type ModelSurface } from "./worker-provider.js";
@@ -947,10 +949,12 @@ export function applyConfigEdits(root: string, edits: ConfigEdit[]): string[] {
 export const reverseEdits = (edits: ConfigEdit[]): ConfigEdit[] => edits.map((e) => ({ path: e.path, from: e.to, to: e.from }));
 
 /** Check every rollback line in memory before writing any file. A line already at its baseline is
- * safe to leave alone; a missing or ambiguous line refuses the whole rollback PR. */
-function applyExactConfigRollback(root: string, edits: ConfigEdit[]): string[] {
+ * safe to leave alone and is not one of the `applied` edits; a missing or ambiguous line refuses the
+ * whole rollback PR. `applied` is exactly the set of lines this revert puts back, so its proofs are
+ * chosen by the same rule that chose its writes. */
+function applyExactConfigRollback(root: string, edits: ConfigEdit[]): { paths: string[]; applied: ConfigEdit[] } {
   const staged = new Map<string, string>();
-  const changed = new Set<string>();
+  const applied: ConfigEdit[] = [];
   for (const edit of edits) {
     const raw = staged.get(edit.path) ?? readFileIfExists(join(root, edit.path));
     if (raw === undefined) throw new Error(`config gardener: rollback source unreadable: ${edit.path}`);
@@ -961,14 +965,67 @@ function applyExactConfigRollback(root: string, edits: ConfigEdit[]): string[] {
     if (from.length !== 1 || to.length !== 0) throw new Error(`config gardener: rollback line changed or ambiguous: ${edit.path}`);
     lines[from[0]!] = edit.to;
     staged.set(edit.path, lines.join("\n"));
-    changed.add(edit.path);
+    applied.push(edit);
   }
-  for (const path of changed) writeAtomic(join(root, path), staged.get(path)!);
-  return [...changed].sort();
+  for (const [path, text] of staged) writeAtomic(join(root, path), text);
+  return { paths: [...staged.keys()].sort(), applied };
 }
 
+/** One code point of a proven line. A control character other than tab, such as a CRLF file's carriage return, is
+ *  `[[:cntrl:]]`, because a PR body cannot carry the byte. Every other character, `|` and `"` included, is the house
+ *  literal escape ({@link escapeGrepLiteral}): the renderer quotes a proof holding `|` and reads it back verbatim, and a
+ *  bare `|` is literal in the executor's basic regex. */
+type LineAtom = { kind: "char"; ch: string } | { kind: "cntrl" };
+const isBodyUnsafeControl = (ch: string): boolean => ch !== "\t" && /[\0-\x1f\x7f]/.test(ch);
+/** POSIX `[:cntrl:]`, which grep matches: every C0 control character and DEL, tab included. */
+const isPosixControl = (ch: string | undefined): boolean => ch !== undefined && /[\0-\x1f\x7f]/.test(ch);
+
+function lineAtoms(line: string): LineAtom[] {
+  return [...line].map((ch): LineAtom => (isBodyUnsafeControl(ch) ? { kind: "cntrl" } : { kind: "char", ch }));
+}
+
+function linePattern(line: string): string {
+  return `^${lineAtoms(line).map((a) => (a.kind === "cntrl" ? "[[:cntrl:]]" : escapeGrepLiteral(a.ch))).join("")}$`;
+}
+
+/** The `grep:` proof that `path` holds `line` as one whole line, anchored at both ends, so `budget_usd: 5` never matches
+ *  `budget_usd: 50.00` and the line's own leading and trailing spaces stay part of what it must equal. */
+export function exactLineProof(path: string, line: string): string {
+  return `grep: ${linePattern(line)} in ${path}`;
+}
+
+/** What the executor's `grep -arn -- <pattern> <path>` answers for {@link exactLineProof}: some line of `text` matches every
+ *  atom of `line` (the same character, or a control character for a control character). */
+export function holdsExactLine(text: string, line: string): boolean {
+  const atoms = lineAtoms(line);
+  return text.split("\n").some((candidate) => {
+    const chars = [...candidate];
+    return chars.length === atoms.length &&
+      atoms.every((a, i) => (a.kind === "cntrl" ? isPosixControl(chars[i]) : chars[i] === a.ch));
+  });
+}
+
+/** The revert's Acceptance block: one proof per line it put back, and none for a line already at its baseline.
+ *  Preflight runs each body proof through check-proof and refuses one that already holds on the tree before the
+ *  revert, so the canary would keep its edits and its class would stay pending. So each proof is checked here the
+ *  way the executor will run it: it must parse to the argv this pattern names, hold after the revert and not before.
+ *  `renderAcceptanceBlock` refuses a block the reviewer's parser would not read back verbatim. A proof that would already
+ *  hold before the revert, such as a `|` widened to `.` beside a look-alike line, refuses the revert before any PR opens. */
+function rollbackAcceptance(applied: readonly ConfigEdit[], before: ReadonlyMap<string, string>, root: string): string {
+  for (const e of applied) {
+    const parsed = parseWhitelistedProof(exactLineProof(e.path, e.to));
+    const after = readFileIfExists(join(root, e.path)) ?? "";
+    const runs = parsed?.kind === "grep" && parsed.args.join("\0") === ["-arn", "--", linePattern(e.to), e.path].join("\0");
+    if (!runs || !holdsExactLine(after, e.to) || holdsExactLine(before.get(e.path) ?? "", e.to)) {
+      throw new Error(`config gardener: the rollback proof for ${e.path} would not tell the revert from the tree before it`);
+    }
+  }
+  return renderAcceptanceBlock(applied.map((e) => ({ claim: `${e.path} is back at its line from before the canary`, proof: exactLineProof(e.path, e.to) })));
+}
+
+/** The canary PR's own Acceptance block: each edited file carries the canary's line. */
 function acceptance(edits: ConfigEdit[]): string[] {
-  return ["## Acceptance", ...edits.flatMap((e) => [`- claim: ${e.path} carries the canary's value`, `  proof: grep: ${e.to.trim()} in ${e.path}`])];
+  return ["## Acceptance", ...edits.flatMap((e) => [`- claim: ${e.path} carries the canary's value`, `  proof: ${exactLineProof(e.path, e.to)}`])];
 }
 
 function prBody(action: ConfigGardenAction): string {
@@ -1042,7 +1099,9 @@ export interface TendResult {
  * ends it with nothing exposed and debits the class — a person declined it; a merged one is exposed —
  * its shadow guard is re-read and the canary begins, or, refused, it is reverted at once. Canary and
  * observing: the cohort against the rest, one guarded step ({@link stepCanary}). A breach lands a
- * revert of exactly the canary's lines and debits the class; a promotion credits it.
+ * revert of exactly the canary's lines and debits the class; a promotion credits it. An expiry — the
+ * cohort never cleared its floor in time — lands the same revert, so an unvalidated change never stays
+ * on main, and releases the class unjudged: a change nobody measured is not evidence of harm.
  */
 /** Whether {@link tendConfigCanaries} would tend anything now: an active canary whose tend interval has
  *  elapsed. Read the same way, writing nothing, so a parent can skip a config pass that would do nothing. */
@@ -1060,9 +1119,11 @@ export async function tendConfigCanaries(deps: GardenerDeps, runs: () => Promise
   if (file.lastTendMs !== undefined && nowMs - file.lastTendMs < CONFIG_TEND_INTERVAL_MS) return [];
   const nowIso = fixedClock(nowMs).iso();
   const results: TendResult[] = [];
+  const failures: unknown[] = [];
   let measured: RunSummary[] | undefined;
   for (const [i, c] of canaries.entries()) {
     if (!isPromotionActive(c.promotion.state)) continue;
+    const untended = structuredClone(c);
     // A pre-exposure refusal can be persisted if the shadow snapshot predates a later clock
     // reading. Its PR may already have merged, so the edits must be reconciled before release.
     const refusedBeforeExposure = c.exposedAt === undefined &&
@@ -1092,7 +1153,18 @@ export async function tendConfigCanaries(deps: GardenerDeps, runs: () => Promise
     }
     c.promotion = { ...c.promotion, state: step.state };
     c.reason = step.reason ?? c.reason;
-    if (step.verdict === "rolled_back" && exposed) c.rollbackPrUrl = await rollBack(deps, c);
+    if ((step.verdict === "rolled_back" || step.verdict === "expired") && exposed) {
+      try {
+        c.rollbackPrUrl = await rollBack(deps, c);
+      } catch (error) {
+        // A revert that cannot land leaves this canary exactly as it was, so a later pass steps it again and its class
+        // stays pending. The pass still tends the rest and records them before it fails, so a revert another canary
+        // opened in this pass is kept and never opened twice.
+        canaries[i] = untended;
+        failures.push(error);
+        continue;
+      }
+    }
     if (step.verdict === "rolled_back") settlePending(deps.stateDir, c.prUrl, "debit");
     if (step.verdict === "promoted") settlePending(deps.stateDir, c.prUrl, "credit");
     if (step.verdict === "expired") settlePending(deps.stateDir, c.prUrl, "release");
@@ -1101,6 +1173,8 @@ export async function tendConfigCanaries(deps: GardenerDeps, runs: () => Promise
     results.push({ canary: c, step });
   }
   writeConfigCanaries(deps.stateDir, canaries, nowMs);
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new Error(failures.map((f) => (f instanceof Error ? f.message : String(f))).join("; "));
   return results;
 }
 
@@ -1109,13 +1183,16 @@ async function rollBack(deps: GardenerDeps, c: ConfigCanary): Promise<string | u
   const ws = await deps.openWorkspace();
   try {
     const edits = reverseEdits(c.edits);
-    const paths = applyExactConfigRollback(ws.root, edits);
+    const before = new Map([...new Set(edits.map((e) => e.path))].map((path) => [path, readFileIfExists(join(ws.root, path)) ?? ""]));
+    const { paths, applied } = applyExactConfigRollback(ws.root, edits);
     if (paths.length === 0) {
       deps.log(`${CONFIG_GARDEN_NAME}.rollback_nothing_to_revert`, { scope: c.promotion.scope.policyScope, pr_url: c.prUrl });
       return undefined;
     }
-    const body = [`The config gardener (W1-T4113) rolls back its \`${c.actionClass}\` canary from ${c.prUrl}: ${c.reason ?? "a cohort guardrail breach"}.`, "", ...acceptance(edits)].join("\n");
-    const prUrl = landedPrUrl(await ws.land({ paths, title: `revert(config): the config gardener rolls back its ${c.actionClass} canary`, body }), "config gardener");
+    const body = [`The config gardener (W1-T4113) rolls back its \`${c.actionClass}\` canary from ${c.prUrl}: ${c.reason ?? "a cohort guardrail breach"}.`, "", rollbackAcceptance(applied, before, ws.root)].join("\n");
+    // A revert keeps its own PR. The shared task-files landing counts a path its open PR already holds as carried,
+    // whatever that PR's content, so a budget revert riding it could be recorded while the canary's values stay.
+    const prUrl = landedPrUrl(await ws.land({ paths, title: `revert(config): the config gardener rolls back its ${c.actionClass} canary`, body, sealedLanding: false }), "config gardener");
     if (!prUrl) throw new Error(`config gardener: rollback PR was not opened for ${c.prUrl}`);
     return prUrl;
   } finally {
