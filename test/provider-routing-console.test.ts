@@ -30,7 +30,7 @@ function capacity(
   return {
     provider,
     readable: true,
-    windows: [{ name: provider === "claude" ? "session (5h)" : "Codex primary 300m", usedPercent, resetsAt: NOW / 1000 + 3600 }],
+    windows: [{ name: provider === "claude" ? "session (5h)" : "Codex primary 300m", usedPercent, resetsAt: NOW / 1000 + 30 * 3600 }],
     ...(provider === "codex" ? { accountLabel: "chatgpt-team", model: "gpt-5.6-terra", effort: "high" } : {}),
     ...over,
   };
