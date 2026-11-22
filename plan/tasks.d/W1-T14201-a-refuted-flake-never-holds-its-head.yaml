@@ -1,0 +1,90 @@
+- id: W1-T14201
+  title: "A FLAKE round whose rerun came back red, or that repeated a refuted claim, never holds its head, so the next fix round runs at that head with the refutation in its input"
+  repo: remudero
+  depends_on: []
+  priority: 1
+  type: implement
+  verify: auto
+  principles:
+    tdd: strict
+  risk: high # changes when the sweep spawns a fix worker (it releases a hold it applies today); Rule 19 sizing: one branch in priorRoundHold in fix-progress-judge.ts, one changed loop in the W1-T13865 test, one new test file; no change to sweep.ts or fix.ts
+  origin: "operator-session#refuted-flake-holds-its-head-2026-11-21"
+  plan_refs:
+    - W1-T13865
+    - W1-T7449
+    - W1-T5920
+    - W1-T13944
+  files:
+    - src/lib/fix-progress-judge.ts
+    - test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts
+    - test/a-refuted-flake-never-holds-its-head.test.ts
+  status: queued
+  attempts: 0
+  acceptance:
+    - claim: "invariant:refuted-flake-never-holds — priorRoundHold returns undefined when the task's newest fix.done at the head ruled FLAKE with flake_claim refuted or repeated, with no checkCompletions, and with only completions dated before that fix.done"
+      kind: guard
+      proof: "grep: W1-T14201 criterion 1: in test/a-refuted-flake-never-holds-its-head.test.ts"
+    - claim: "A FLAKE round with flake_claim requeue_deferred, confirmed or no flake_claim still holds its head until a required check completes after its fix.done, as on origin/main"
+      proof: "grep: W1-T14201 criterion 2: in test/a-refuted-flake-never-holds-its-head.test.ts"
+    - claim: "A refuted FLAKE ruling releases only its own head and task: a refuted fix.done of another task, or at another head, does not release a FLAKE hold at this head, and a newer FLAKE fix.done at the head that is not refuted holds again"
+      proof: "grep: W1-T14201 criterion 3: in test/a-refuted-flake-never-holds-its-head.test.ts"
+    - claim: "invariant:refuted-round-runs — in a sweep fixture whose last round at the head ruled FLAKE with flake_claim refuted and whose requeue key for that check is spent, the sweep dispatches one fix round at the same head, writes no prior_round_hold field, and the round's progress input has signals.refutedFlakeClaims 1"
+      kind: guard
+      proof: "grep: W1-T14201 criterion 4: in test/a-refuted-flake-never-holds-its-head.test.ts"
+    - claim: "The W1-T13865 test no longer expects a refuted FLAKE ruling to hold"
+      proof: "grep: for (const flake_claim of [\"requeue_deferred\", \"confirmed\"]) in test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts"
+  rationale: |
+    WHY: since W1-T13865 (#19767, merged 2026-11-21 03:06Z), a FLAKE round whose rerun comes back red stops
+    every later fix round at that head. The PR stays red and nothing works on it until someone pushes.
+    HOW IT FAILS (origin/main f80f72841, read-only):
+    - src/cli/commands/fix.ts:5150-5205. A FLAKE round requeues each failing check (key head@check, spent
+      once), waits for CI with deps.waitForCiGreen, and only then writes fix.done. When CI is still red it
+      writes flake_claim "refuted" (:5202). When the worker says FLAKE again after a refutation it writes
+      flake_claim "repeated" without a rerun (:5151-5155).
+    - src/lib/fix-progress-judge.ts:769-772. priorRoundHold releases a FLAKE hold only when a required
+      check completes after fix.done's ts. The rerun's red completed before fix.done was written, so it
+      never counts. The requeue key is spent, so no new completion comes either. The hold never ends.
+    - The sweep applies this hold on every path to a fix worker (sweep.ts:4728, :16328-16346, :23115,
+      :25044, :26157).
+    - test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts:147-148 pins it: the loop asserts
+      that requeue_deferred, refuted and confirmed rulings all hold.
+    - Before W1-T13865 the sweep treated a refuted or repeated flake as stalled (sweep.ts:19049) and ran a
+      round whose progress input carried refutedFlakeClaims and repeatedFlakeClaims (sweep.ts:19283-19301,
+      W1-T7449). The worker prompt then says "this red reproduced on a rerun; it is not a flake. Make a
+      real fix" (fix.ts:4477). That path is dead at the same head today.
+    PRODUCTION: none seen yet. The live ledger (tail -c, 2026-11-19 08:01Z to 2026-11-21 21:33Z) has four
+    FLAKE fix.done rows, all requeue_deferred, and no refuted or repeated row. Rotated ledgers were not read.
+    The gap is in the code, and it will trigger on the first FLAKE round whose rerun is red.
+    Found by an independent audit of #19767. The nineteen held follow-ups of W1-T13865 criterion 3
+    (W1-T14001 to W1-T14110) are withdrawn in the same PR as this filing and name this task.
+  design: |
+    INVARIANT refuted-flake-never-holds: a FLAKE ruling whose flake_claim is refuted or repeated never holds its head.
+    The input that ruling waits for (a rerun of the red check) has already arrived, and it was red.
+    INVARIANT refuted-round-runs: after a refuted FLAKE round, the sweep runs the next round at the same head,
+    with the refutation in the progress input, as W1-T7449 designed.
+    1. src/lib/fix-progress-judge.ts priorRoundHold: in the FLAKE branch, before the completion check, return
+       undefined when done.flake_claim is "refuted" or "repeated". Keep the hold for requeue_deferred (the
+       requeue never ran; W1-T5920 retries it and its completion releases the hold), confirmed and absent.
+       Update the PriorRoundHold doc comment to say so.
+    2. test/a-fix-round-does-not-restart-on-an-unchanged-ruling.test.ts: the criterion 2 loop lists only
+       requeue_deferred and confirmed. Do not weaken any other assertion.
+    3. test/a-refuted-flake-never-holds-its-head.test.ts, titled "W1-T14201 criterion N: ...": criteria 1 to 3
+       call priorRoundHold on ledger fixtures. Criterion 4 drives the sweep with fixture rows and fakes, as
+       the W1-T13865 criterion 4 test does, and reads the progress input through buildFixProgressInput. No
+       network and no real worker. Load test/setup/tmp-hygiene.ts.
+    BOUND: releasing the hold does not make rounds run without end. A repeated round counts as a no-commit
+    round in fixRoundTally (sweep.ts:19753), and the progress judge sees refutedFlakeClaims and
+    repeatedFlakeClaims. Both are unchanged here.
+    Rejected: counting the rerun's own completion by moving fix.done's ts earlier. That changes a ledger
+    field many readers use, and repeated rounds have no rerun at all.
+  falsifier: |
+    On origin/main, criterion 1 fails: priorRoundHold returns a FLAKE hold for a refuted ruling. Release
+    requeue_deferred as well: criterion 2 fails. Check flake_claim on any fix.done instead of the newest one
+    at the head: criterion 3 fails. Release the hold in the judge but keep a separate FLAKE stand-down in the
+    sweep: criterion 4 dispatches no round.
+  note: |
+    Id reserved for run-unfiled-1795297049359 with ~/rmd-work/bin/reserve-id.sh.
+    Filed by the operator session on 2026-11-21. Filing only; not built.
+    Builders: run tests only as `node --test --import tsx --import ./test/setup/tmp-hygiene.ts <file>`.
+    Not in scope: the duplicate follow-up filing itself (W1-T13944), the NEEDS_SCOPE hold, and the
+    requeue_deferred retry.
