@@ -1727,20 +1727,20 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   }
 
   const unswitched = new Map<string, { builds: number; ms: number }>();
-  const viewBuilds = new Map<ViewUnit, { calls: number; builds: number; skipped: number; notSkipped: Record<string, number>; ms: number; maxMs: number; cpuUs?: number }>();
+  const viewBuilds = new Map<ViewUnit, { calls: number; builds: number; skipped: number; notSkipped: Record<string, number>; ms: number; maxMs: number; cpuUs?: number; stageMs?: Record<string, number> }>();
   let viewBuildsFrom = clock.now();
   function reportViewBuilds(): void {
     const now = clock.now();
     if (now - viewBuildsFrom < 10 * 60_000) return;
     for (const [unit, tally] of viewBuilds) {
       if (tally.calls === 0 && tally.ms === 0) continue;
-      const { skipped, notSkipped, cpuUs, ...counts } = tally;
+      const { skipped, notSkipped, cpuUs, stageMs, ...counts } = tally;
       log("read_model.view_builds", {
         view: unit.view.name,
         ...(unit.slot ? { instance: unit.slot.instance.name } : {}),
         thread: viewsOnly ? "views" : "projector",
         ...(opts.lane ? { lane: opts.lane } : {}),
-        ...counts, ...(cpuUs === undefined ? {} : { cpuMs: Math.round(cpuUs / 1000) }), ...(skipped > 0 ? { skipped } : {}), ...(Object.keys(notSkipped).length > 0 ? { not_skipped: notSkipped } : {}), window: [viewBuildsFrom, now],
+        ...counts, ...(cpuUs === undefined ? {} : { cpuMs: Math.round(cpuUs / 1000) }), ...(stageMs ? { stageMs } : {}), ...(skipped > 0 ? { skipped } : {}), ...(Object.keys(notSkipped).length > 0 ? { not_skipped: notSkipped } : {}), window: [viewBuildsFrom, now],
       });
     }
     viewBuilds.clear();
@@ -1917,6 +1917,9 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     counts.ms += elapsedMs;
     counts.maxMs = Math.max(counts.maxMs, elapsedMs);
     if (cpuUs !== undefined) counts.cpuUs = (counts.cpuUs ?? 0) + cpuUs;
+    // W1-T14380: every worker call's stage times, so the usual build's dominant stage shows, not only a slow pass's.
+    const stages = live?.stages?.(scoped);
+    if (stages) for (const [stage, ms] of Object.entries(stages)) (counts.stageMs ??= {})[stage] = (counts.stageMs[stage] ?? 0) + ms;
     viewBuilds.set(unit, counts);
     const peakMs = (unit.peakMs = Math.max(unit.peakMs ?? 0, unit.costMs));
     if (unit.cold && succeeded) {
@@ -1940,7 +1943,6 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
     if (viewsOnly && opts.lane && ready) reportHolds(opts.lane);
     if (viewsOnly) opts.post({ type: "view_unit", ...named, phase: "end" });
-    const stages = elapsedMs > passMs ? live?.stages?.(scoped) : undefined;
     const tally = switches.views[view.name] === undefined ? unswitched.get(view.name) ?? { builds: 0, ms: 0 } : undefined;
     if (tally) unswitched.set(view.name, { builds: tally.builds + (yielded > 0 ? 1 : 0), ms: tally.ms + elapsedMs });
     if (elapsedMs > passMs) log("read_model.slow_view", { ...named, ms: elapsedMs, ...(cpuUs === undefined ? {} : { cpuMs: Math.round(cpuUs / 1000) }), passMs, thread: viewsOnly ? "views" : "projector", ...(stages ? { stages } : {}), ...(tally ? { unswitched: unswitched.get(view.name) } : {}) });
