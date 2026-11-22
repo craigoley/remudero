@@ -217,6 +217,7 @@ function undoHandWorktree(
     try {
       if (act() === false) left.push(what);
     } catch (error) {
+      // Not erased: the failure's first line joins `left`, and the refusal names it ("could not remove …").
       left.push(`${what} (${firstLine(error)})`);
     }
   };
