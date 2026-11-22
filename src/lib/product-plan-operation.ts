@@ -538,8 +538,9 @@ export class ProductPlanOperationService {
         void error; head = undefined;
       }
     }
-    product = this.readProduct(actor, input.productId);
     const seen = selectedEvidence ?? await this.readEvidence(paths, record);
+    // The evidence read yields (up to its bound): an objective edit may commit meanwhile, so settle against the revision read AFTER it.
+    product = this.readProduct(actor, input.productId);
     const observation = this.observeWith(record, product, head, seen);
     product = this.settle(actor, product, observation);
     return { observation: this.observeWith(record, product, head, seen), replayed };

@@ -914,6 +914,28 @@ test("W1-T13875: invariant:bounded-read preserves stale-target and changed-brief
   assert.equal(never.reads.length, 1, "the expired read could not report either changed state");
 });
 
+test("W1-T13875: invariant:bounded-read settles against the product revision read after an edit committed during the evidence read", async (t) => {
+  for (const proposal of [false, true]) {
+    const f = fixture(t);
+    const first = await ok(f.service().execute(actor, f.command()));
+    const operationId = first.observation.operationId;
+    seedLegacyRefusal(f, operationId);
+    let edits = 0;
+    // A Console brief save lands while the (up to 15 s) read is awaited.
+    const read: EvidenceReader = async () => {
+      edits++;
+      assert.ok(f.store.write(actor, { version: "product-intent-v1", requestId: "brief-during-read-001", id: f.productId,
+        expectedRevision: revisionOf(f), brief: { ...brief, idea: "an idea saved while the evidence was read" } }).ok);
+      return { ok: true, rawLines: proposal ? proposalLines(f, operationId) : [] };
+    };
+    const resumed = await f.service({ gateway: false, readLedgerLines: read }).execute(actor, f.command());
+    assert.equal(edits, 1);
+    assert.ok(resumed.ok, `a brief saved during the read is not a stale revision (proposal: ${proposal}): ${JSON.stringify(resumed)}`);
+    assert.equal(resumed.value.observation.state, "changed-brief");
+    assert.ok(!evidenceIds(f).some((id) => id.endsWith(":proposed") || id.endsWith(":refused")), "a plan for the old brief is never settled onto the new one");
+  }
+});
+
 test("W1-T13875: a proposal's evidence is read once and kept", async (t) => {
   const f = fixture(t);
   const first = await ok(f.service().execute(actor, f.command()));

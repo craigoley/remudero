@@ -17,6 +17,9 @@ import {
 } from "./ledger-path.js";
 import { NEVER_ROTATE_FILENAME } from "./log-rotation.js";
 import {
+  LEDGER_KEY_MANIFEST_HOLDER,
+  LEDGER_KEY_MANIFEST_VERSION,
+  ledgerKeyManifestDirectory,
   ledgerManifestMayHold,
   ledgerRowMatchesKeys,
   pruneLedgerKeyManifests,
@@ -1018,6 +1021,57 @@ export function readLedgerUnionRawLinesSync(
   };
 }
 
+/** Whether a ledger row is stamped inside [minimumTs, maximumTs]; a row with no readable stamp is outside any window. */
+function lineStampedWithin(line: string, minimumTs: number | undefined, maximumTs: number): boolean {
+  let ts: unknown;
+  try { ts = (JSON.parse(line) as { ts?: unknown } | null)?.ts; } catch { return false; /* deliberate: a torn line is no evidence */ }
+  const at = typeof ts === "string" ? Date.parse(ts) : Number.NaN;
+  return !Number.isNaN(at) && at <= maximumTs && (minimumTs === undefined || at >= minimumTs);
+}
+
+/**
+ * The time range of one rotated archive from a manifest already stored and current for it, or undefined when there is
+ * none: unlike {@link readLedgerKeyManifest} this never builds one, so a window read streams no archive it will not read.
+ */
+async function cachedArchiveCoverage(stateDir: string, entry: LedgerCorpusEntry): Promise<{ minTs?: string; maxTs?: string } | undefined> {
+  try {
+    const archive = basename(entry.path);
+    const stat = nodeStatSync(entry.path);
+    const stored = JSON.parse(await nodeReadFile(join(ledgerKeyManifestDirectory(stateDir), `${archive}.json`), "utf8")) as Record<string, unknown> | null;
+    if (stored === null || typeof stored !== "object" || stored.schema !== 1 || stored.holder !== LEDGER_KEY_MANIFEST_HOLDER ||
+      stored.archive !== archive || stored.reducerVersion !== LEDGER_KEY_MANIFEST_VERSION || stored.key !== `${stat.size}:${stat.mtimeMs}`) return undefined;
+    const manifest = stored.manifest as { minTs?: unknown; maxTs?: unknown } | null;
+    if (manifest === null || typeof manifest !== "object" ||
+      (manifest.minTs !== undefined && typeof manifest.minTs !== "string") || (manifest.maxTs !== undefined && typeof manifest.maxTs !== "string")) return undefined;
+    return { minTs: manifest.minTs, maxTs: manifest.maxTs };
+  } catch {
+    // deliberate: no current manifest (or an unreadable one) means the archive is read, never skipped.
+    return undefined;
+  }
+}
+
+/** Whether the live ledger's first row is stamped after `maximumTs`; false whenever that cannot be told. */
+function liveOpensAfter(livePath: string, maximumTs: number): boolean {
+  let fd: number | undefined;
+  try {
+    fd = nodeOpenSync(livePath, "r");
+    const head = Buffer.alloc(65_536);
+    const length = nodeReadSync(fd, head, 0, head.length, 0);
+    const end = head.indexOf(0x0a);
+    if (end === -1 && length === head.length) return false;
+    const first = head.toString("utf8", 0, end === -1 ? length : end).trim();
+    if (first === "") return false;
+    const ts = (JSON.parse(first) as { ts?: unknown } | null)?.ts;
+    const at = typeof ts === "string" ? Date.parse(ts) : Number.NaN;
+    return !Number.isNaN(at) && at > maximumTs;
+  } catch {
+    // deliberate: an unreadable or unparsable first row cannot place the file after the window, so it is read.
+    return false;
+  } finally {
+    if (fd !== undefined) try { nodeCloseSync(fd); } catch { /* deliberate: nothing further to release */ }
+  }
+}
+
 /** Yields the event loop between slices of one file's lines. */
 const yieldTurn = (): Promise<void> => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -1040,7 +1094,14 @@ export async function readLedgerUnionRawLinesAsync(
   const liveFileRead = nodeExistsSync(livePath);
   const minimumTs = sinceMs(opts);
   const maximumTs = opts.untilTs === undefined ? undefined : Date.parse(opts.untilTs);
-  const { rawLines, scan } = rawLineCollector(opts);
+  // A closed window answers rows inside it and nothing else, whichever file they came from: a row stamped outside
+  // the window (or with no readable stamp) is dropped here, so a post-window row in the live file or in an archive
+  // read for want of a manifest never reaches the caller.
+  const keepInWindow = opts.keep;
+  const { rawLines, scan } = rawLineCollector(maximumTs === undefined ? opts : {
+    ...opts,
+    keep: (line: string) => (keepInWindow?.(line) ?? true) && lineStampedWithin(line, minimumTs, maximumTs),
+  });
   let filesRead = 0;
 
   const scanInSlices = async (buf: Buffer): Promise<void> => {
@@ -1054,10 +1115,14 @@ export async function readLedgerUnionRawLinesAsync(
     if (maximumTs === undefined) {
       if (rotationBeforeWindow(entry, minimumTs)) return;
     } else {
-      // Compaction combines nonadjacent rotations. Only verified row coverage can exclude a closed window.
-      const read = await readLedgerKeyManifest(stateDir, entry);
-      if (read.kind !== "unbuildable") {
-        const { minTs, maxTs } = read.manifest;
+      // A rotation cut before the window opened holds no row of it (the name is the cut's time, as for the open read).
+      if (rotationBeforeWindow(entry, minimumTs)) return;
+      // Compaction combines nonadjacent rotations, so a later-stamped archive can hold earlier rows: only verified row
+      // coverage can exclude one from the window's far side. Coverage already built is used; none is built here.
+      // An archive with no current manifest is read once (rows filtered above), never streamed whole to build one first.
+      const coverage = await cachedArchiveCoverage(stateDir, entry);
+      if (coverage !== undefined) {
+        const { minTs, maxTs } = coverage;
         if (Date.parse(minTs ?? "") > maximumTs || (minimumTs !== undefined && Date.parse(maxTs ?? "") < minimumTs)) return;
       }
     }
@@ -1076,6 +1141,8 @@ export async function readLedgerUnionRawLinesAsync(
 
   const readLive = async (): Promise<void> => {
     if (!liveFileRead) return;
+    // The live file is append-ordered: one that opens after the window closed holds nothing of it.
+    if (maximumTs !== undefined && liveOpensAfter(livePath, maximumTs)) return;
     let buf: Buffer;
     try {
       filesRead += 1;
