@@ -273,12 +273,12 @@ export async function evaluateStagedSkillDraft(proposalId: string, approval: Ski
  * bills cash, and observing it reserves nothing.
  */
 export function readSkillEvalSpendFit(config: Config, pin: Pick<SkillEvalRunInput["stack"]["pin"], "billing" | "model">,
-  clock: Clock, policy?: Policy): SkillEvalSpendFit {
+  clock: Clock, policy: Policy): SkillEvalSpendFit {
   const nowMs = clock.now();
   // ledger-read-intent: live
   const lines = readLedgerLines(ledgerPathFor(config));
   const fit: SkillEvalSpendFit = { dayCostUsd: deriveDayCostUsd(lines, nowMs), unpricedRows: deriveDayUnpricedRows(lines, nowMs),
-    ceilingUsd: resolveDailyCostCeiling(config.root, policy ?? loadDefaultPolicy()).usd };
+    ceilingUsd: resolveDailyCostCeiling(config.root, policy).usd };
   if (pin.billing !== "api") return fit;
   try {
     return { ...fit, cash: { remainingUsd: readOpenWeightAllowance(config, { deployments: [pin.model], atIso: clock.iso() }).deployments[0]!.remainingUsd } };
@@ -321,6 +321,8 @@ export function skillEvalProductionInput(repoRoot: string, harnessRevision: Benc
   let loaded: Config | undefined;
   const config = (): Config => (loaded ??= (options.loadConfig ?? loadConfig)());
   const clock = options.clock ?? systemClock;
+  // The file's one policy read, seamed and read on first use: the attempt bound and the spend reading share it.
+  const policy = (): Policy => options.policy ?? loadDefaultPolicy();
   const stateDir = (): string => join(config().root, "state");
   const input: SkillEvalCommandInput = {
     registryPath: () => join(stateDir(), "inbox-proposals.json"),
@@ -329,7 +331,7 @@ export function skillEvalProductionInput(repoRoot: string, harnessRevision: Benc
     loadPlanTasks: () => loadPlan(join(repoRoot, "plan", "tasks.yaml")).tasks,
     dispatcherFor: (task, item, skillsPartFor) => sealedPairedAttemptDispatcher({ task, config: config(),
       repoDir: join(config().root, "repos", task.repo), baseRef: item.baseSha, maxBudgetUsd: PAIRED_ATTEMPT_MAX_BUDGET_USD,
-      clockBoundMs: options.workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon, clock, skillsPartFor }),
+      clockBoundMs: options.workerAbandonMs ?? policy().values.workerAbandon, clock, skillsPartFor }),
     stack: () => skillEvalStack(deriveRuntimePins({ harnessRevision, installRoot: resolveInstallRoot(config()) }),
       resolveMount(loadMounts(mountsPath(repoRoot)), SKILL_EVAL_MOUNT_ROUTE.taskType, SKILL_EVAL_MOUNT_ROUTE.risk)),
     readIdle: async () => {
@@ -339,7 +341,7 @@ export function skillEvalProductionInput(repoRoot: string, harnessRevision: Benc
         headroom: await readHeadroom(config()) };
     },
     log: (row) => appendLedger(ledgerPathFor(config()), row, { clock }),
-    readSpendFit: () => readSkillEvalSpendFit(config(), input.stack().pin, clock, options.policy),
+    readSpendFit: () => readSkillEvalSpendFit(config(), input.stack().pin, clock, policy()),
     clock,
   };
   return input;

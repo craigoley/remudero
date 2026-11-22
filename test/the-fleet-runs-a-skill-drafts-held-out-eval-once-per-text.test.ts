@@ -348,9 +348,9 @@ test("W1-T13861 criterion 4: the production spend reading is the day's ledgered 
   assert.equal(fit.ceilingUsd, resolveDailyCostCeiling(root, loadDefaultPolicy()).usd);
   assert.equal(fit.cash, undefined, "the implement/medium mount runs on the Claude subscription");
   const cashPin = { billing: "api" as const, model: "cash-model" };
-  const noCap = readSkillEvalSpendFit(config, cashPin, fixedClock(NOW_MS));
+  const noCap = readSkillEvalSpendFit(config, cashPin, fixedClock(NOW_MS), loadDefaultPolicy());
   assert.ok(noCap.cash !== undefined && "unreadable" in noCap.cash && /dailyCapUsd/.test(noCap.cash.unreadable));
-  const capped = readSkillEvalSpendFit({ root, dailyCapUsd: 50 } as Config, cashPin, fixedClock(NOW_MS));
+  const capped = readSkillEvalSpendFit({ root, dailyCapUsd: 50 } as Config, cashPin, fixedClock(NOW_MS), loadDefaultPolicy());
   assert.deepEqual(capped.cash, { remainingUsd: 50 });
 });
 
