@@ -4,7 +4,7 @@ import { takePlanReconcileBatch } from "./plan-reconcile-batch.js";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
 import { promisify } from "node:util";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { getHeapStatistics } from "node:v8";
 import { basename, dirname, join, posix, relative } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
@@ -2399,6 +2399,7 @@ export function runKnowledgeMeasurement(opts: KnowledgeMeasurementOpts): Knowled
 const SPEND_PER_MERGED_DAYS = 7;
 
 export async function writeSpendPerMergedDays(opts: MeasurementCadenceReportOpts, now: Date): Promise<string[]> {
+  if (statSync(opts.stateDir, { throwIfNoEntry: false })?.isDirectory() === false) return [];
   const days = finishedUtcDays(now.getTime(), SPEND_PER_MERGED_DAYS);
   const sinceTs = `${days.at(-1)!}T00:00:00.000Z`;
   let unread = 0;
