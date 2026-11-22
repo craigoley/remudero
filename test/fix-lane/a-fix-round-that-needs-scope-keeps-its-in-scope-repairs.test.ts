@@ -5,7 +5,7 @@ import { test } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { buildFixProgressInput } from "#src/lib/fix-progress-judge.js";
 import { isUngrantableInstrumentPath } from "#src/lib/proof-amendment.js";
-import { REGENERABLE_ARTIFACT_GENERATORS } from "#src/lib/sweep.js";
+import { COMMAND_REGISTRY, REGENERABLE_ARTIFACT_GENERATORS } from "#src/lib/sweep.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { runFixRung } from "#test/helpers/run-task-test.js";
@@ -16,7 +16,10 @@ const branch = `run-${taskId}-1795370113977`;
 const declared = "src/declared.ts";
 const refused = "src/refused.ts";
 const instrument = "scripts/comment-load-baseline.json";
+const verbRegistration = "scripts/console-parity-ratchet.mjs";
 const workflow = ".github/workflows/ci.yml";
+const registry = COMMAND_REGISTRY.path;
+const registrySource = 'const COMMANDS = [\n  { name: "existing-verb", summary: "Original" },\n];\n';
 const original = "original\n";
 const repair = "repaired\n";
 const mount = { model: "sonnet", effort: "medium", maxTurns: 20, contextBudget: 120000 } as const;
@@ -32,6 +35,8 @@ async function fixScope(requested: string, edits: Record<string, string>, fault?
     writeFileSync(file, text);
   };
   for (const path of [declared, refused, instrument, workflow]) write(path, original);
+  write(registry, registrySource);
+  write(verbRegistration, original);
   repo.git("add", "-A");
   repo.git("commit", "-qm", "main");
   repo.addRemote("origin", remote.dir);
@@ -50,7 +55,7 @@ async function fixScope(requested: string, edits: Record<string, string>, fault?
       reason: "red", proof_exec: "not_executable" }], summary: "red", headSha: start, reviewerOutcome: "failure",
     capped: false, floorDegraded: false, keywordOnly: false, planOnly: false, testTheater: false,
   } satisfies Run["initialReview"];
-  const task = { id: taskId, title: "repair declared surface", files: [declared], catalog: "ops" as const };
+  const task = { id: taskId, title: "repair declared surface", files: [declared, registry], catalog: "ops" as const };
   const writeAmendment = () => assert.fail("the scope amendment should be refused before a write");
   const result = await runFixRung({
     taskId, runId: "partial-scope-fixture", task,
@@ -146,6 +151,24 @@ test("W1-T13377 criterion 2: a normal commit refusal leaves the branch tip untou
   assert.equal(pushes, 0);
   assert.equal(head, start);
   assert.deepEqual(rows.find((row) => row.step === "implement.harness_commit_refused")?.conflict_marker_files, [declared]);
+});
+
+test("a partial repair holds a worker-added verb with its refused registrations", async () => {
+  const addedVerb = registrySource.replace("];", '  { name: "worker-verb", summary: "New" },\n];');
+  const editedVerb = registrySource.replace("Original", "Repaired");
+  for (const [registryEdit, keepRegistry] of [[addedVerb, false], [editedVerb, true]] as const) {
+    const { repo, remote, start, head, pushes, issues } = await fixScope(verbRegistration, {
+      [declared]: repair, [registry]: registryEdit, [verbRegistration]: repair,
+    });
+    assert.equal(pushes, 1);
+    assert.deepEqual(remote.git("diff", "--name-only", start, head).split("\n"), keepRegistry ? [declared, registry] : [declared]);
+    assert.equal(remote.git("show", `${head}:${registry}`), (keepRegistry ? registryEdit : registrySource).trimEnd());
+    assert.equal(readFileSync(join(repo.dir, registry), "utf8"), registryEdit);
+    assert.equal(readFileSync(join(repo.dir, verbRegistration), "utf8"), repair);
+    assert.equal(issues.length, 1);
+    assert.ok(issues[0].includes(head));
+    assert.equal(issues[0].includes(`- ${registry}\n`), !keepRegistry);
+  }
 });
 
 test("W1-T13377 criterion 2: a push that cannot be verified names no repair commit in the scope issue", async () => {

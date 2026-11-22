@@ -55,7 +55,7 @@ import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockReg
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
 import { ghRequiredStatusCheckContexts, readLedgerLines, taskIdFromRunBranch } from "../../lib/status.js";
-import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, actionableGateFailuresFromReasons, dispatchFixSpent, fixRoundNotRunReason, checksStateFromRollup, earlyRedEvidenceRollup, checksPendingSinceFromRollup, deriveDisposition, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, renderClarificationQuestion, redQualityGateNames, stillRedRequiredNames, terminalStateReason, type ActionableGateFailure, type CiFailure, type LiveStateResult, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type SweepDeps, type SweepPolicy, proofDiscriminationEvidenceFromCriteria, ADDITIVE_REGISTRATION_SURFACES, type RegistrationChange, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, withPrAddedVerbs, isVerbRegistrationPath, ownVerbRegistrationPaths, VERB_REGISTRATION_PATHS } from "../../lib/sweep.js";
+import { withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, actionableGateFailuresFromReasons, dispatchFixSpent, fixRoundNotRunReason, checksStateFromRollup, earlyRedEvidenceRollup, checksPendingSinceFromRollup, deriveDisposition, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, renderClarificationQuestion, redQualityGateNames, stillRedRequiredNames, terminalStateReason, type ActionableGateFailure, type CiFailure, type LiveStateResult, type OpenPrView, type RollupCheckEntry, type ProofDiscriminationEvidence, type SweepDeps, type SweepPolicy, proofDiscriminationEvidenceFromCriteria, ADDITIVE_REGISTRATION_SURFACES, type RegistrationChange, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, withPrAddedVerbs, isVerbRegistrationPath, ownVerbRegistrationPaths, VERB_REGISTRATION_PATHS, COMMAND_REGISTRY, commandVerbsAddedByDiff } from "../../lib/sweep.js";
 import { forcedRefreshFields, REFRESH_DECIDED_STEP } from "../../lib/refresh-value.js";
 import { detectReviewFalseBlock, detectCiLogVerdictUnchanged, shouldSelfHealNothingChanged } from "../../lib/fix-rung-classify.js";
 import { readCiGateRequiredNames, resolveCiGateRequiredSource } from "../../lib/ci-gate-required.js";
@@ -1829,8 +1829,10 @@ const isWorkflowPath = (path: string): boolean => path.startsWith(".github/workf
 async function commitPartialScopeRepair(
   worktree: string, base: string, expectedBranch: string | undefined, scopePaths: readonly string[],
   commit: (branch: string) => string | undefined,
-): Promise<string | undefined> {
-  const git = (args: string[]) => hostWorktreeGitAsync(worktree, args, { env: { GIT_OPTIONAL_LOCKS: "0", GIT_LITERAL_PATHSPECS: "1" } });
+): Promise<{ head?: string; blocked: string[] } | undefined> {
+  const git = (args: string[]) => hostWorktreeGitAsync(worktree, args, {
+    maxBuffer: 1 << 26, env: { GIT_OPTIONAL_LOCKS: "0", GIT_LITERAL_PATHSPECS: "1" },
+  });
   const branch = (await git(["symbolic-ref", "HEAD"])).trim();
   if ((expectedBranch !== undefined && branch !== `refs/heads/${expectedBranch}`) || (await git(["rev-parse", branch])).trim() !== base) {
     throw new Error("the fix branch moved before the partial commit");
@@ -1849,21 +1851,27 @@ async function commitPartialScopeRepair(
     try {
       const candidate = commit(candidateBranch);
       if (candidate === undefined) return undefined;
-      const changed = await git(["diff", "--name-only", "--no-renames", "-z", base, candidate]);
-      const blocked = changed.split("\0").filter((path) => path !== "" &&
-        (scopePaths.some((scopePath) => path === scopePath || path.startsWith(`${scopePath}/`)) ||
-          isWorkflowPath(path) || isUngrantableInstrumentPath(path)));
+      const changed = (await git(["diff", "--name-only", "--no-renames", "-z", base, candidate])).split("\0").filter(Boolean);
+      const blocked = changed.filter((path) =>
+        scopePaths.some((scopePath) => path === scopePath || path.startsWith(`${scopePath}/`)) ||
+        isWorkflowPath(path) || isUngrantableInstrumentPath(path));
+      const registry = COMMAND_REGISTRY.path;
+      // A worker-added verb depends on the refused registrations. Keep that registry edit with them.
+      if (scopePaths.some(isVerbRegistrationPath) && changed.includes(registry) && !blocked.includes(registry)) {
+        const added = commandVerbsAddedByDiff(await git(["show", `${base}:${registry}`]), await git(["show", `${candidate}:${registry}`]));
+        if (added?.length !== 0) blocked.push(registry);
+      }
       let head = candidate;
       if (blocked.length > 0) {
         await git(["restore", "--source", base, "--staged", "--", ...blocked]);
         const tree = (await git(["write-tree"])).trim();
-        if (tree === (await git(["rev-parse", `${base}^{tree}`])).trim()) return undefined;
+        if (tree === (await git(["rev-parse", `${base}^{tree}`])).trim()) return { blocked };
         const message = (await git(["show", "-s", "--format=%B", candidate])).trimEnd();
         head = (await git(["commit-tree", tree, "-p", base, "-m", message])).trim();
       }
       await git(["update-ref", branch, head, base]);
       installed = true;
-      return head;
+      return { head, blocked };
     } finally {
       try {
         if (!installed) await copyFile(savedIndex, index);
@@ -5423,15 +5431,18 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       const instrumentPaths = fixAction.paths.filter(isUngrantableInstrumentPath);
       const paths = [...new Set(fixAction.paths)].sort();
       let landing: FixRoundLanding | undefined;
+      let heldPaths: string[] = [];
       const pushScopeRepair = async (): Promise<string | undefined> => {
         if (roundStartSha === undefined || currentMergeConflict !== undefined || harnessCommitRefused || !fixLeftEdits()) return undefined;
         const base = roundStartSha;
         let partialHead: string | undefined;
         try {
-          partialHead = await commitPartialScopeRepair(opts.worktreePath, base, opts.guardRoundHead ? opts.branch : undefined, paths, (branch) => {
+          const repair = await commitPartialScopeRepair(opts.worktreePath, base, opts.guardRoundHead ? opts.branch : undefined, paths, (branch) => {
             harnessCommit(fixReport, { ...firstOptions, derivedCommit: derivedFirst ?? derivedFixCommit(opts.task.title, opts.prUrl) }, { branch, base });
             return harnessCommittedSha;
           });
+          if (repair) heldPaths = repair.blocked.filter((path) => !paths.includes(path)).sort();
+          partialHead = repair?.head;
           if (partialHead === undefined) return undefined;
           expectedHeadShaForPush = partialHead;
           const lease = opts.guardRoundHead && ownedSessionPushGuard === undefined ? roundPushBaseSha : undefined;
@@ -5464,6 +5475,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         let deliveryError: { error: string } | undefined;
         const repairNote = repairedHead === undefined ? undefined : `The in-scope repairs were pushed in commit ${repairedHead}.`;
         const neededPaths = `needs a scope decision for these exact paths:\n${paths.map((path) => `- ${path}`).join("\n")}`;
+        const heldNote = heldPaths.length === 0 ? "" : `\n\nAdditional edits held in the worktree:\n${heldPaths.map((path) => `- ${path}`).join("\n")}`;
         if (!issueUrl) try {
           issueUrl = await escalateForTask({ class: "BLOCKED", taskId: opts.taskId, runId: opts.runId,
             headSha: scopeHead, cause: escalationCause(currentMergeConflict !== undefined, noReviewYet), contractRevision: identityKey,
@@ -5477,7 +5489,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
               ? `needs workflow edits that the fix lane cannot amend or commit: ${workflowPaths.join(", ")}.`
               : scopeKind === "instrument" ? `needs instrument edits a scope amendment always refuses (instrument-path): ${instrumentPaths.join(", ")}.`
               : scopeKind === "unfiled" ? "has no plan record to amend." : `scope amendment was refused (${refusal}).`) +
-              (repairNote ? ` ${repairNote}` : "") + ` Round ${roundId} ${neededPaths}\n\n` +
+              (repairNote ? ` ${repairNote}` : "") + ` Round ${roundId} ${neededPaths}${heldNote}\n\n` +
               `Worker's NEEDS_SCOPE diagnosis (including any main-inherited cause):\n${fixReport}\n\n` +
               `Failing check signature:\n${(priorCiFailures ?? []).map((failure) => `- ${summarizeCiFailure(failure)}`).join("\n")}` +
               (scopeKind === "workflow" ? `\n\nBaked-closure catalog:\n${bakedClosureCatalogDetails((priorCiFailures ?? []).map((failure) => failure.logTail ?? "").join("\n"))}` : ""),
@@ -5487,7 +5499,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
                 : "revise this PR's scope explicitly, then resume its fix lane" }],
             recommendation: "route-repair", consequence: "this fix lane stays down at this head until its scope is resolved" },
           { issues: deps.escalationIssues ?? deps.issues, ledgerPath: deps.ledgerPath, runId: opts.runId, judge: escalationJudge },
-          repairNote ? `${repairNote} This PR ${neededPaths}` : undefined);
+          repairNote ? `${repairNote} This PR ${neededPaths}${heldNote}` : undefined);
         } catch (error) {
           deliveryError = { error: String(error) };
         }
