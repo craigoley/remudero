@@ -13546,7 +13546,7 @@ const REMOTE_PLAN_ID_DECL_PATTERN = '^[[:space:]]*(-[[:space:]]*)?id:[[:space:]]
 /** Host-only reads for the already selected catalog. No second reservation namespace is introduced. */
 export interface TaskIdDestinationChecks {
   destinationStateDir?: () => string | undefined;
-  destinationGit?: (cwd: string, args: string[], input?: string) => string | Promise<string>;
+  destinationGit?: (cwd: string, args: string[], input?: string, opts?: { maxBuffer?: number }) => string | Promise<string>;
   destinationPrFetch?: (args: string[]) => unknown | Promise<unknown>;
 }
 interface TaskIdDestinationSnapshot {
@@ -13554,10 +13554,6 @@ interface TaskIdDestinationSnapshot {
   ids: readonly string[];
   openPrTexts: readonly string[];
 }
-
-/** BACKSTOP: the destination plan is read in one `cat-file --batch`. Exceeding this buffer refuses the snapshot.
- *  The ops plan outgrew Node's 1 MiB default on 2026-11-18. This matches the other plan readers' bound. */
-export const TASK_ID_DESTINATION_MAX_BUFFER = 1 << 27;
 
 /** A fetched, commit-pinned ID population. Dirty checkout bytes never replace the fetched plan. */
 export async function taskIdDestinationSnapshot(
@@ -13569,8 +13565,8 @@ export async function taskIdDestinationSnapshot(
     if (destination.outcome === "off") return undefined;
     if (destination.outcome === "unreadable") throw new Error("unreadable host switch");
     if (offline) { stage = "offline"; throw new Error("selected catalog requires a fresh read"); }
-    const run = async (cwd: string, args: string[], input?: string): Promise<string> =>
-      checks.destinationGit ? await checks.destinationGit(cwd, args, input) : await hostWorktreeGitAsync(cwd, args, { timeout: DEFAULT_GH_CALL_TIMEOUT_MS, maxBuffer: TASK_ID_DESTINATION_MAX_BUFFER, ...(input === undefined ? {} : { input }) });
+    const run = async (cwd: string, args: string[], input?: string, opts?: { maxBuffer?: number }): Promise<string> =>
+      checks.destinationGit ? await checks.destinationGit(cwd, args, input, opts) : await hostWorktreeGitAsync(cwd, args, { timeout: DEFAULT_GH_CALL_TIMEOUT_MS, ...(opts?.maxBuffer === undefined ? {} : { maxBuffer: opts.maxBuffer }), ...(input === undefined ? {} : { input }) });
     stage = "fetch";
     await run(destination.checkoutDir, ["fetch", "--no-tags", "origin", "main"]);
     stage = "plan";
@@ -13579,7 +13575,7 @@ export async function taskIdDestinationSnapshot(
     const paths = (await run(destination.checkoutDir, ["ls-tree", "-r", "--name-only", commit, "--", "plan/tasks.yaml", "plan/tasks.d/"]))
       .split("\n").filter(path => path === "plan/tasks.yaml" || /^plan\/tasks\.d\/[^/]+\.ya?ml$/.test(path));
     if (!paths.includes("plan/tasks.yaml")) throw new Error("missing plan");
-    const texts = await readBlobsAtRefAsync((args, input) => run(destination.checkoutDir, args, input), commit, paths);
+    const texts = await readBlobsAtRefAsync((args, input, opts) => run(destination.checkoutDir, args, input, opts), commit, paths);
     const tasks = texts.flatMap(text => parseTasksFromYaml(text, "plan destination", undefined, {}, "preserve-external"));
     const ids = tasks.map(task => task.id);
     if (new Set(ids).size !== ids.length) throw new Error("duplicate task id");
