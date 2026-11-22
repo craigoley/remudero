@@ -187,8 +187,6 @@ const parseOrigin = (kind: LadderKind, origin: string) =>
 export const reasonClass = (reason: string) => reason.split(" — ")[0]!
   .replace(/\b[0-9a-f]{7,40}\b/gi, "<sha>")
   .replace(/\/pull\/\d+/g, "/pull/<n>").replace(/\b\d+(?:\.\d+)?\b/g, "<n>").trim();
-/** The `origin:` a ladder's remedy for `key` carries at `rung`, for a rung that hands a cause to the ladder. */
-export const ladderOrigin = (kind: LadderKind, key: string, rung = 1): string => originOf(kind, key, rung);
 /** A recurring check and its observed red heads, read beside the sweep's disposition rows. */
 export const CI_LESSON_HANDOFF_STEP = "ci_learning.ladder_handoff";
 /** The fleet App as REST (`remudero-fleet[bot]`), `gh` (`app/remudero-fleet`) and GraphQL (`remudero-fleet`) spell it —
