@@ -1734,7 +1734,11 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
 
   function hashTask(task: Task): string {
     let h = planHash.get(task);
-    if (h === undefined) planHash.set(task, (h = sha1(JSON.stringify(task))));
+    if (h === undefined) {
+      // W1-T14326: `sourcePath` is the label a task was read under (`<ref>:<path>` from a plan pin), not what it says.
+      const { sourcePath: _label, ...content } = task;
+      planHash.set(task, (h = sha1(JSON.stringify(content))));
+    }
     return h;
   }
 

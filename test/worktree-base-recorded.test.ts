@@ -229,10 +229,11 @@ test("REGRESSION: a widowed .lock alone (no .base sibling) is still swept exactl
     // directory-removal branch, confirming this task's suffix widening left it untouched.
     const reapedDirWt = join(root, "run-W1-T2628-reaped-dir-probe");
     mkdirSync(reapedDirWt, { recursive: true });
-    writeRunLock(reapedDirWt, { pid: 97514, run_id: "W1-T2628-reaped-dir-probe", startedAt: "2026-08-01T00:00:00Z" });
+    writeRunLock(reapedDirWt, { pid: 97514, run_id: "W1-T2628-reaped-dir-probe", startedAt: "2026-08-01T00:00:00Z", pidNs: "pid:[1]" });
     recordWorktreeBase(reapedDirWt, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 
-    const summary = reapStaleWorktrees(root, { isPidAlive: () => false });
+    // W1-T14319: a dead pid counts as confirmed dead only when the lock names the reaper's own pid namespace.
+    const summary = reapStaleWorktrees(root, { isPidAlive: () => false, pidNamespace: () => "pid:[1]" });
 
     assert.ok(!existsSync(runLockPath(lockOnlyWt)), "the widowed-lock-alone case is still swept");
     assert.ok(summary.reapedLocks.includes("run-W1-T2628-lock-only-probe.lock"));

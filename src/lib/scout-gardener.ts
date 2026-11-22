@@ -11,7 +11,11 @@ import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter, type
 import { readMainHistory } from "./hot-file-gardener.js";
 import { ghTextAsync } from "./github-transport.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
-import { machineShardFilingRefusal, machineShardLandingGuard, renderMachineShard, withoutRulingBlock } from "./machine-filing.js";
+import {
+  machineShardDesign, machineShardFilingRefusal, machineShardInvariantClaims, machineShardLandingGuard,
+  machineShardLintRefusal, renderMachineShard, withoutRulingBlock, type MachineShardInvariant, type MachineShardPaths,
+} from "./machine-filing.js";
+import { INVARIANT_DECL_RE, NO_INVARIANTS_RE } from "./task-linter.js";
 import { planCheapFingerprint, planInventory, type PlanInventory } from "./plan-gardener.js";
 import { parseOwnerRepoFromRemoteUrl } from "./onboard/inventory.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -80,16 +84,20 @@ export interface ScoutSymptom {
   total: number;
   /** Repo paths the rows themselves name in `file` or `module`, when they exist. */
   files: string[];
+  /** W1-T13208: `files` came from a merged investigation of this step, not from the rows. */
+  investigated?: boolean;
 }
 
 export interface ScoutAction extends GardenAction<ScoutClass> {
   symptom: ScoutSymptom;
   origin: string;
-  draft?: { id: string; path: string; files: string[] };
+  draft?: { id: string; path: string; files: string[]; investigation?: boolean };
 }
 
 export interface ScoutInventory {
   rederive: ScoutAction[];
+  /** W1-T13208: the queued fix drafts that declare only a test file, by why each was left alone. */
+  testOnlyDrafts: ScoutLeftDrafts;
   symptoms: ScoutSymptom[];
   covered: string[];
   uncovered: ScoutSymptom[];
@@ -101,7 +109,7 @@ export interface ScoutInventory {
   unprioritizedShare: number;
   blocked: boolean;
   survival: Outcome;
-  tracked: Array<{ step: string; task: string; verdict: "credit" | "debit" | "pending" | "unmerged"; before?: number; after?: number }>;
+  tracked: Array<{ step: string; task: string; verdict: "credit" | "debit" | "pending" | "unmerged" | "investigation"; before?: number; after?: number }>;
 }
 
 export interface ScoutSources {
@@ -179,28 +187,158 @@ function requireScoutRuns(sources: ScoutSources): ReadonlySet<string> {
   return sources.openRunTasks();
 }
 
-function isTestOnlyScout(t: Task): boolean {
+/** W1-T13208: an investigation's one claim; a record whose first claim reads so asks for no fix. */
+const investigationClaim = (step: string): string => `the code that writes ${step} is located and named`;
+export const isScoutInvestigation = (t: Task): boolean => /^the code that writes \S+ is located and named$/.test(t.acceptance?.[0]?.claim ?? "");
+const INVESTIGATION_NOTE = "Filed by the scout gardener (W1-T5454) as an INVESTIGATION (W1-T13208): its builder locates and names the code that writes this step and changes no source. The scout files the fix record from the writer it names once this merges, and never debits an investigation for rows that continued. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person.";
+const NO_WRITER_LINE = "The rows name no file of their own: locate the code that writes this step first, then fix its cause.";
+const investigationTitle = (step: string): string => `THE SCOUT'S INVESTIGATION OF AN UNCOVERED RECURRING SYMPTOM — ${step}: locate and name the code that writes it, with no fix`;
+const investigationLine = (step: string): string =>
+  `This record is an INVESTIGATION: the code that writes ${step} was not located, so a builder delivers a test that drives the located writer and names its file as a line \`scout-writer: <path>\`, and no fix. The scout files the fix record from that file once this merges.`;
+
+const symptomInvariant = (step: string, taskId: string, testPath: string): MachineShardInvariant => ({
+  slug: "symptom-still-recorded",
+  statement: `${step} is still written to the ledger whenever its failure really occurs; the fix ends the cause, not the record of it.`,
+  claim: `${step} is still written to the ledger when its failure occurs`,
+  proof: `grep: test("${taskId}: the symptom is still recorded when its failure occurs" in ${testPath}`,
+});
+
+/** The queued, unretired, never-attempted machine draft whose one declared file is its own scout test. */
+function isTestOnlyScoutShape(t: Task): boolean {
   return t.status === "queued" && t.attempts === 0 && !t.retirement &&
-    t.risk_ruling?.verdict !== "operator" && t.risk_ruling?.operator_release_pin === undefined &&
     t.author_class === "machine" && t.origin?.startsWith("scout:") === true && t.files?.length === 1 &&
     /^test\/(?:[\w-]+\/){0,2}scout-[\w.-]+\.test\.ts$/.test(t.files[0]!);
 }
+const operatorRuled = (t: Task): boolean => t.risk_ruling?.verdict === "operator" || t.risk_ruling?.operator_release_pin !== undefined;
 
-function scoutRederivations(sources: ScoutSources, plan: PlanInventory): ScoutAction[] {
+/** A test-only scout draft the scout may rewrite: an operator-ruled draft is left as it is. */
+function isTestOnlyScout(t: Task): boolean {
+  return isTestOnlyScoutShape(t) && !operatorRuled(t);
+}
+
+/** The files a merged investigation of `step` named, as `scout-writer: <path>` lines in its own test. */
+function scoutInvestigatedWriters(sources: ScoutSources, plan: PlanInventory, merged: ReadonlyMap<string, number>, step: string): string[] {
+  const named = new Set<string>();
+  for (const t of plan.all) {
+    const test = t.files?.[0];
+    if (t.origin !== scoutOrigin(step) || !isScoutInvestigation(t) || test === undefined) continue;
+    if (!(merged.has(t.id) || t.status === "merged" || t.status === "done") || !sources.fileExists(test)) continue;
+    for (const m of readFileSync(join(sources.repoRoot, test), "utf8").matchAll(/^\s*(?:\/\/|#|\*)?\s*scout-writer:\s*((?:src|scripts)\/[\w./@-]+)\s*$/gm)) {
+      if (sources.fileExists(m[1]!)) named.add(m[1]!);
+    }
+  }
+  return [...named].slice(0, 3);
+}
+
+/** Replace (or insert before `before`, else append) one top-level `  key:` field of a single-record shard. */
+function setField(lines: string[], key: string, block: string[], before?: string): string[] {
+  const isField = (l: string): boolean => /^ {2}[A-Za-z_]+:/.test(l);
+  const start = lines.findIndex((l) => l.startsWith(`  ${key}:`));
+  if (start >= 0) {
+    let end = start + 1;
+    while (end < lines.length && !isField(lines[end]!)) end++;
+    return [...lines.slice(0, start), ...block, ...lines.slice(end)];
+  }
+  const at = before === undefined ? -1 : lines.findIndex((l) => l.startsWith(`  ${before}:`));
+  return at >= 0 ? [...lines.slice(0, at), ...block, ...lines.slice(at)] : [...lines, ...block];
+}
+
+type DraftSpec = NonNullable<ScoutAction["draft"]> & { step: string; origin: string };
+type DraftRewrite = { text: string } | { refused: string } | { skipped: true };
+
+/** The text a queued test-only fix draft becomes: its writers declared, or, with none located, an investigation. */
+function scoutDraftRewrite(original: string, draft: DraftSpec, paths: MachineShardPaths): DraftRewrite {
+  const task = loadPlanFromYaml(original, draft.path).tasks;
+  const only = task[0]!;
+  if (task.length !== 1 || only.id !== draft.id || !isTestOnlyScout(only) || only.origin !== draft.origin || only.files![0] !== draft.files.at(-1)) return { skipped: true };
+  const q = (v: string): string => JSON.stringify(v);
+  const testPath = draft.files.at(-1)!;
+  let lines = withoutRulingBlock(original.trimEnd().split("\n"))
+    .map((l) => (/^ {2}verify:/.test(l) ? "  verify: human" : l));
+  lines = setField(lines, "files", ["  files:", ...draft.files.map((f) => `    - ${f}`)]);
+  const declared = INVARIANT_DECL_RE.test(only.design ?? "") || NO_INVARIANTS_RE.test(only.design ?? "");
+  const invariants = { declared: [symptomInvariant(draft.step, draft.id, testPath)] };
+  if (!declared) lines = setField(lines, "design", [`  design: ${q(machineShardDesign(only.design, invariants))}`], "acceptance");
+  const kept = only.acceptance ?? [];
+  const acceptance = [
+    ...(draft.investigation ? [{ claim: investigationClaim(draft.step), proof: `grep: test("${draft.id}: the writer of ${draft.step} is located and named" in ${testPath}` },
+      ...kept.filter((c) => /^invariant:/.test(c.claim))] : kept),
+    ...(declared ? [] : machineShardInvariantClaims(invariants)),
+  ];
+  if (draft.investigation || !declared) {
+    lines = setField(lines, "acceptance", ["  acceptance:", ...acceptance.flatMap((c) => [`    - claim: ${q(c.claim)}`, `      proof: ${q(c.proof)}`])]);
+  }
+  const found = draft.files.slice(0, -1);
+  const prose = (only.rationale ?? "").split("\n").filter((l, i, all) => l !== "" || i < all.length - 1);
+  const rationale = draft.investigation ? [...prose.filter((l) => l !== NO_WRITER_LINE), investigationLine(draft.step)]
+    : prose.map((l) => (l === NO_WRITER_LINE ? `The rows name no file; tracked source literals locate this step in: ${found.join(", ")}. Start there.` : l));
+  if (draft.investigation) {
+    lines = setField(lines, "title", [`  title: ${q(investigationTitle(draft.step))}`]);
+    lines = setField(lines, "note", [`  note: ${q(INVESTIGATION_NOTE)}`]);
+  }
+  if (draft.investigation || prose.includes(NO_WRITER_LINE)) {
+    const style = /^[ \t]/.test(rationale.find((l) => l !== "") ?? "") ? "|2" : "|";
+    lines = setField(lines, "rationale", [`  rationale: ${style}`, ...rationale.map((l) => (l === "" ? "" : `    ${l}`))]);
+  }
+  const text = lines.join("\n");
+  const refused = machineShardFilingRefusal(text, draft.path, paths) ?? machineShardLintRefusal(text, draft.path);
+  return refused === undefined ? { text } : { refused };
+}
+
+/** W1-T13208: the queued fix drafts that declare only a test, by the reason each is left alone. */
+export interface ScoutLeftDrafts {
+  total: number;
+  operator_ruled: number;
+  no_shard: number;
+  open_run: number;
+  /** Passes every record-side condition and is rewritten by this pass. */
+  rewritable: number;
+  /** The rewrite was tried and refused: the refusing checks, by name. */
+  rewrite_refused: Record<string, number>;
+}
+
+/** The checks that refused a rewrite, by name, without the task ids or messages that vary per draft. */
+const refusalReason = (refused: string): string =>
+  [...new Set(refused.split("; ").map((r) => r.replace(/^W\d+-T\d+: /, "").split(":")[0]!.trim()))].join(", ");
+
+function scoutDrafts(sources: ScoutSources, plan: PlanInventory, merged: ReadonlyMap<string, number>): { rederive: ScoutAction[]; left: ScoutLeftDrafts } {
+  const left: ScoutLeftDrafts = { total: 0, operator_ruled: 0, no_shard: 0, open_run: 0, rewritable: 0, rewrite_refused: {} };
+  const demanding = plan.open.filter((t) => isTestOnlyScoutShape(t) && !isScoutInvestigation(t));
+  left.total = demanding.length;
+  left.operator_ruled = demanding.filter(operatorRuled).length;
   const drafts = plan.open.filter((t) => isTestOnlyScout(t) && plan.shards.has(t.id));
-  if (drafts.length === 0) return [];
+  left.no_shard = demanding.filter((t) => !operatorRuled(t) && !plan.shards.has(t.id)).length;
+  if (drafts.length === 0) return { rederive: [], left };
   const active = requireScoutRuns(sources);
   let corpus: ReturnType<typeof scoutSourceTexts> | undefined;
-  return drafts.flatMap((task): ScoutAction[] => {
-    if (active.has(task.id)) return [];
+  const paths: MachineShardPaths = { pathExists: (path) => existsSync(join(sources.repoRoot, path)) };
+  const rederive = drafts.flatMap((task): ScoutAction[] => {
+    // An investigation keeps its claim: it is rewritten only to declare a writer the source now locates.
+    const investigating = isScoutInvestigation(task);
+    if (active.has(task.id)) { if (!investigating) left.open_run++; return []; }
     const step = task.origin!.slice("scout:".length);
-    const files = scoutWriters(sources.repoRoot, step, corpus ??= scoutSourceTexts(sources.repoRoot));
-    if (files.length === 0) return [];
+    const located = scoutWriters(sources.repoRoot, step, corpus ??= scoutSourceTexts(sources.repoRoot));
+    const files = located.length > 0 ? located : scoutInvestigatedWriters(sources, plan, merged, step);
+    if (investigating && files.length === 0) return [];
+    const draft: DraftSpec = { id: task.id, path: plan.shards.get(task.id)!, files: [...files, task.files![0]!], investigation: files.length === 0, step, origin: task.origin! };
+    let reason: string | undefined;
+    try {
+      const rewrite = scoutDraftRewrite(readFileSync(join(sources.repoRoot, draft.path), "utf8"), draft, paths);
+      if ("refused" in rewrite) reason = refusalReason(rewrite.refused);
+    } catch (error) {
+      reason = `unreadable: ${error instanceof Error ? error.name : "error"}`;
+    }
+    if (investigating) { /* an investigation is no fix demand: it is not counted */ }
+    else if (reason === undefined) left.rewritable++;
+    else left.rewrite_refused[reason] = (left.rewrite_refused[reason] ?? 0) + 1;
     return [{ class: "file-uncovered-symptom", target: step, origin: task.origin!,
-      reason: `${task.id} declares only its test; return its writer scope to the machine-filing judge.`,
+      reason: files.length === 0
+        ? `${task.id} declares only its test and its writer is not located; return it as an investigation to the machine-filing judge.`
+        : `${task.id} declares only its test; return its writer scope to the machine-filing judge.`,
       symptom: { step, older: 0, newer: 0, total: 0, files },
-      draft: { id: task.id, path: plan.shards.get(task.id)!, files: [...files, task.files![0]!] } }];
+      draft: { id: task.id, path: draft.path, files: draft.files, investigation: draft.investigation } }];
   });
+  return { rederive, left };
 }
 
 const iso = (ms: number): string => clockFromMillisFn(() => ms).iso();
@@ -266,6 +404,8 @@ export function scoutSurvival(
   for (const task of plan.all) {
     if (typeof task.origin !== "string" || !task.origin.startsWith("scout:")) continue;
     const step = task.origin.slice("scout:".length);
+    // An investigation was never asked to stop the rows: it is neither credited nor debited (W1-T13208).
+    if (isScoutInvestigation(task)) { tracked.push({ step, task: task.id, verdict: "investigation" }); continue; }
     const at = merged.get(task.id);
     if (at === undefined) { tracked.push({ step, task: task.id, verdict: "unmerged" }); continue; }
     // The symptom is judged only once a full window has passed since the merge.
@@ -285,7 +425,11 @@ export function scoutInventory(sources: ScoutSources): ScoutInventory {
   const nowMs = sources.clock.now();
   const plan = sources.plan();
   const merged = sources.mergedTasks(iso(nowMs - Math.max(SCOUT_MERGED_COVERAGE_MS, 4 * SCOUT_SURVIVAL_WINDOW_MS)));
-  const symptoms = scoutSymptoms(sources.ledger(iso(nowMs - SCOUT_WINDOW_MS)), nowMs, sources.fileExists);
+  const symptoms = scoutSymptoms(sources.ledger(iso(nowMs - SCOUT_WINDOW_MS)), nowMs, sources.fileExists).map((s) => {
+    if (s.files.length > 0) return s;
+    const files = scoutInvestigatedWriters(sources, plan, merged, s.step);
+    return files.length > 0 ? { ...s, files, investigated: true } : s;
+  });
   const covered = scoutCoveredSteps(plan, merged, nowMs, sources.pricedSteps());
   const uncovered = symptoms.filter((s) => !covered.has(s.step));
   const budget = Math.max(0, Math.floor(sources.mergedLastDay()));
@@ -297,7 +441,8 @@ export function scoutInventory(sources: ScoutSources): ScoutInventory {
   const scoutSteps = [...new Set(plan.all.flatMap((t) => (typeof t.origin === "string" && t.origin.startsWith("scout:") ? [t.origin.slice("scout:".length)] : [])))];
   const survivalRows = scoutSteps.length === 0 ? [] : sources.ledger(iso(nowMs - 4 * SCOUT_SURVIVAL_WINDOW_MS - SCOUT_SURVIVAL_WINDOW_MS), scoutSteps);
   const { outcome, tracked } = scoutSurvival(plan, merged, survivalRows, nowMs);
-  return { rederive: scoutRederivations(sources, plan), symptoms, covered: symptoms.filter((s) => covered.has(s.step)).map((s) => s.step), uncovered, selected, budget, openQueue: plan.open.length, unprioritizedShare, blocked, survival: outcome, tracked };
+  const { rederive, left } = scoutDrafts(sources, plan, merged);
+  return { rederive, testOnlyDrafts: left, symptoms, covered: symptoms.filter((s) => covered.has(s.step)).map((s) => s.step), uncovered, selected, budget, openQueue: plan.open.length, unprioritizedShare, blocked, survival: outcome, tracked };
 }
 
 /** The test a filed record's acceptance proof names, one per symptom. */
@@ -307,31 +452,35 @@ const scoutTestPath = (step: string, files: readonly string[]): string => newTes
 export function scoutShard(symptom: ScoutSymptom, taskId: string, population: readonly number[], repoRoot?: string): { text: string; refused?: string } {
   const files = symptom.files.length > 0 || repoRoot === undefined ? symptom.files : scoutWriters(repoRoot, symptom.step);
   const testPath = scoutTestPath(symptom.step, files);
-  const recon = symptom.files.length === 0;
+  const recon = symptom.files.length === 0 && !symptom.investigated;
+  const investigation = files.length === 0;
+  const acceptance = investigation
+    ? [{ claim: investigationClaim(symptom.step), proof: `grep: test("${taskId}: the writer of ${symptom.step} is located and named" in ${testPath}` }]
+    : [{
+      claim: `${symptom.step} stops recurring: its cause is fixed rather than its rows hidden`,
+      proof: `grep: test("${taskId}: ${symptom.step} no longer recurs" in ${testPath}`,
+    }];
   return renderMachineShard({
     taskId,
-    title: `THE SCOUT'S UNCOVERED RECURRING SYMPTOM — ${symptom.step} landed ${symptom.total} ledger rows across the trailing window and no task cites it`,
+    title: investigation
+      ? investigationTitle(symptom.step)
+      : `THE SCOUT'S UNCOVERED RECURRING SYMPTOM — ${symptom.step} landed ${symptom.total} ledger rows across the trailing window and no task cites it`,
     origin: scoutOrigin(symptom.step),
     files: [...files, testPath],
     cost: symptom.total,
     costPopulation: population,
-    acceptance: [{
-      claim: `${symptom.step} stops recurring: its cause is fixed rather than its rows hidden`,
-      proof: `grep: test("${taskId}: ${symptom.step} no longer recurs" in ${testPath}`,
-    }],
-    invariants: { declared: [{ slug: "symptom-still-recorded",
-      statement: `${symptom.step} is still written to the ledger whenever its failure really occurs; the fix ends the cause, not the record of it.`,
-      claim: `${symptom.step} is still written to the ledger when its failure occurs`,
-      proof: `grep: test("${taskId}: the symptom is still recorded when its failure occurs" in ${testPath}`,
-    }] },
-    note: `Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person.`,
+    acceptance,
+    invariants: { declared: [symptomInvariant(symptom.step, taskId, testPath)] },
+    note: investigation ? INVESTIGATION_NOTE
+      : `Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person.`,
     rationale: [
       `The ledger step ${symptom.step} carries a failure shape and landed rows in both halves of the trailing ${SCOUT_WINDOW_MS / 86_400_000} days: ${symptom.older} in the older half, ${symptom.newer} in the newer.`,
       "No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.",
-      recon
-        ? files.length > 0 ? `The rows name no file; tracked source literals locate this step in: ${files.join(", ")}. Start there.`
-          : "The rows name no file of their own: locate the code that writes this step first, then fix its cause."
-        : `The rows themselves name these files: ${symptom.files.join(", ")}. Start there.`,
+      ...(investigation ? [investigationLine(symptom.step)] : [
+        symptom.investigated ? `A merged investigation of this step named its writer: ${files.join(", ")}. Start there.`
+          : recon ? `The rows name no file; tracked source literals locate this step in: ${files.join(", ")}. Start there.`
+            : `The rows themselves name these files: ${symptom.files.join(", ")}. Start there.`,
+      ]),
     ],
   });
 }
@@ -426,6 +575,8 @@ export function scoutGardenSpec(
       symptoms: i.symptoms.length, covered: i.covered.length, uncovered: i.uncovered.length, proposed: i.selected.length,
       merge_budget: i.budget, open: i.openQueue, unprioritized_share: Math.round(i.unprioritizedShare * 1000) / 1000, blocked: i.blocked,
       survival: i.tracked,
+      // Absent while the plan holds no such draft, so a scorecard with none is the one it always was.
+      ...(i.testOnlyDrafts.total > 0 ? { test_only_fix_drafts: i.testOnlyDrafts } : {}),
     }),
     prepare: (ws, plan, async) => {
       const count = plan.actions.filter((a) => !a.draft).length;
@@ -454,21 +605,16 @@ export function scoutGardenSpec(
       for (const draft of drafts) {
         if (active.has(draft.id)) continue;
         const path = join(ws.root, draft.path);
-        const original = readFileSync(path, "utf8");
-        const tasks = loadPlanFromYaml(original, draft.path).tasks;
-        if (tasks.length !== 1 || tasks[0]!.id !== draft.id || !isTestOnlyScout(tasks[0]!) ||
-            tasks[0]!.origin !== draft.origin || tasks[0]!.files![0] !== draft.files.at(-1)) continue;
-        const text = withoutRulingBlock(original.trimEnd().split("\n")).join("\n")
-          .replace(/^  verify:.*$/m, "  verify: human")
-          .replace(/^  files:\s*\n(?:    -[^\n]*\n?)*/m, `  files:\n${draft.files.map((f) => `    - ${f}`).join("\n")}\n`);
-        const refused = machineShardFilingRefusal(text, draft.path, {
+        const rewrite = scoutDraftRewrite(readFileSync(path, "utf8"), draft, {
           pathExists: path => existsSync(join(ws.root, path)),
           pathExistsAtBase: path => existsSync(join(deps.repoRoot, path)),
         });
-        if (refused !== undefined) {
-          deps.log("scout.record_refused", { symptom_step: draft.step, refused_task_id: draft.id, reason: refused });
+        if ("skipped" in rewrite) continue;
+        if ("refused" in rewrite) {
+          deps.log("scout.record_refused", { symptom_step: draft.step, refused_task_id: draft.id, reason: rewrite.refused });
           continue;
         }
+        const text = rewrite.text;
         writeFileSync(path, text + "\n");
         written.push({ rel: draft.path, step: draft.step, origin: draft.origin });
       }

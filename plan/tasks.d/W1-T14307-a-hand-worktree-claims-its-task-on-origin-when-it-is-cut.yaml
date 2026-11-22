@@ -14,6 +14,9 @@
     - src/lib/hand-worktree.ts
     - src/run-task.ts
     - test/a-hand-build-worktree-is-one-command.test.ts
+    - src/lib/authority.ts
+    - test/authority-table.test.ts
+    - docs/cli-reference.md
   status: queued
   attempts: 0
   rationale: |
@@ -39,6 +42,14 @@
     - A pushed run branch reaches the drain too (hasPushedRunBranch), and dispatch-claim.ts claimLastSignOfLife counts its
       newest commit as a claim's sign of life. The web session's proxy cannot push `refs/rmd-id/*` (docs/operator-guide.md
       "Minting a task id"); whether it accepts a `refs/rmd-dispatch/*` push is UNVERIFIED. A branch push works from every host.
+    - SCOPE AMENDED for the authority row its push needs (read while building, at origin/main dc3ab78e6).
+      test/authority-ratchet.test.ts enumerates every raw `git push` argv in src/ and fails a module with no
+      AUTHORITY_TABLE row (src/lib/authority.ts): the build read "AUTHORITY_TABLE is missing a row for:
+      src/lib/hand-worktree.ts (["git-push-argv"])". Design step 3's undo deletes the branch this build pushed when a
+      claim is refused, and no existing row covers that delete, so the push gets its own `operator-verb` row (an
+      operator's `rmd hand-worktree`, nothing the fleet runs alone). test/authority-table.test.ts pins each row's
+      report digest, and docs/cli-reference.md is generated from the command registry and compared byte for byte, so
+      `--no-claim` reaches the usage line only with it in scope. No criterion, proof, falsifier or design step changes.
   design: |
     1. duplicateWork also refuses when origin holds `refs/rmd-dispatch/<id>`, naming the claim and its holder. A failed
        read refuses, never reads as free.

@@ -13,7 +13,7 @@
   files:
     - scripts/gate-monotonic-check.mjs
     - test/a-required-gate-can-be-demoted-in-silence.test.ts
-    - src/lib/gate-gardener.ts
+    - "src/lib/gate-gardener.ts"
     - test/the-gates-tend-themselves.test.ts
   status: queued
   attempts: 0
