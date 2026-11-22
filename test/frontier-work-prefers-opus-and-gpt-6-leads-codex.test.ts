@@ -52,7 +52,7 @@ function capacity(provider: "claude" | "codex", usedPercent: number, model?: str
   return {
     provider,
     readable: true,
-    windows: [{ name: `${provider} primary`, usedPercent, resetsAt: NOW / 1000 + 3600 }],
+    windows: [{ name: `${provider} primary`, usedPercent, resetsAt: NOW / 1000 + 30 * 3600 }],
     ...(model ? { model, effort: "high", accountLabel: "assigned-subscription" } : {}),
   };
 }
@@ -132,11 +132,15 @@ test("without GPT-6 Sol on the account, balanced falls to older Sol and never to
 
 test("an automatic policy takes the frontier preference and nothing else changes", () => {
   const preferences = ladder().providerPreference;
-  assert.deepEqual(preferences, { frontier: "claude" });
+  // W1-T14297 (operator option A, 2026-11-22) adds balanced: codex; the frontier row and economy are unchanged.
+  assert.deepEqual(preferences, { frontier: "claude", balanced: "codex" });
   const frontier = policyForCapability(policy(), "frontier", preferences);
   assert.equal(frontier.policy.preference, "claude");
   assert.deepEqual(frontier.capabilityPreference, { capability: "frontier", provider: "claude" });
-  for (const capability of ["balanced", "economy", undefined]) {
+  const balanced = policyForCapability(policy(), "balanced", preferences);
+  assert.equal(balanced.policy.preference, "codex");
+  assert.deepEqual(balanced.capabilityPreference, { capability: "balanced", provider: "codex" });
+  for (const capability of ["economy", undefined]) {
     const other = policyForCapability(policy(), capability, preferences);
     assert.equal(other.policy.preference, "automatic", String(capability));
     assert.equal(other.capabilityPreference, undefined);
@@ -170,18 +174,20 @@ test("frontier work takes Claude with headroom even when Codex has far more, and
 
 test("the loader refuses a preference for cash or for a capability the ladder does not declare", () => {
   const raw = readFileSync(mountsPath(REPO_ROOT), "utf8");
-  assert.ok(raw.includes("  provider_preference:\n    frontier: claude\n"));
+  // W1-T14297: the block now ends with balanced: codex, so a replacement of the whole key takes that row with it.
+  const block = "  provider_preference:\n    frontier: claude\n    balanced: codex\n";
+  assert.ok(raw.includes(block));
   const root = mkdtempSync(join(tmpdir(), "rmd-provider-preference-"));
   try {
     writeFileSync(join(root, "cash.yaml"), raw.replace("    frontier: claude\n", "    frontier: cash\n"));
     assert.throws(() => loadMounts(join(root, "cash.yaml")), /must be "claude" or "codex"/);
     writeFileSync(join(root, "unknown.yaml"), raw.replace("    frontier: claude\n", "    genius: claude\n"));
     assert.throws(() => loadMounts(join(root, "unknown.yaml")), MountsError);
-    writeFileSync(join(root, "scalar.yaml"), raw.replace("  provider_preference:\n    frontier: claude\n", "  provider_preference: claude\n"));
+    writeFileSync(join(root, "scalar.yaml"), raw.replace(block, "  provider_preference: claude\n"));
     assert.throws(() => loadMounts(join(root, "scalar.yaml")), /must be a mapping of capability -> provider/);
-    writeFileSync(join(root, "list.yaml"), raw.replace("  provider_preference:\n    frontier: claude\n", "  provider_preference:\n    - claude\n"));
+    writeFileSync(join(root, "list.yaml"), raw.replace(block, "  provider_preference:\n    - claude\n"));
     assert.throws(() => loadMounts(join(root, "list.yaml")), /must be a mapping of capability -> provider/);
-    writeFileSync(join(root, "absent.yaml"), raw.replace("  provider_preference:\n    frontier: claude\n", ""));
+    writeFileSync(join(root, "absent.yaml"), raw.replace(block, ""));
     assert.equal(loadMounts(join(root, "absent.yaml")).capabilities?.providerPreference, undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });

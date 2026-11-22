@@ -11,6 +11,7 @@ import { netStateAdvisorySectionFor, openTaskIdsFromPlan, runReview, scopeGuardO
 import type { Config } from "../src/lib/config.js";
 import type { WorkerResult } from "../src/lib/worker.js";
 import type { StatusProjection } from "../src/lib/status.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 // W1-T322 — SHIPS-UNWIRED advisory floor. ONE reachability scan (lib/reachability.ts),
@@ -591,6 +592,10 @@ test("runReview ledgers one review.unwired_advisory line per advisory, and none 
     head.git("add", "src/lib/stranded.ts");
     head.git("commit", "-qm", "stranded export");
     const headSha = head.git("rev-parse", "HEAD");
+    // W1-T14241: the fixture's prose proof never executes, so this code review is CAPPED, and a capped code pass now
+    // posts pending unless an operator override is recorded for its PR and head — so the fixture records one.
+    appendLedger(ledgerPath, { run_id: "operator", task_id: "W1-T322", step: "automerge.capped_override_granted",
+      by: "operator", reason: "fixture: release the capped pass", pr_url: "https://github.com/acme/remudero/pull/1292", head_sha: headSha });
     const diff = [
       "diff --git a/src/lib/stranded.ts b/src/lib/stranded.ts",
       "+++ b/src/lib/stranded.ts",
@@ -660,6 +665,8 @@ esac
         // `disarmAutoMerge` default, which armAutoMergeDetailed's own new seam requirement (see
         // requireExplicitArmSeam) now refuses to reach from a test with no seam.
         disarm: () => "not-armed" as const,
+        // W1-T14241: the override above releases the capped pass, so runReview now reaches its arm; the seam keeps it inert.
+        arm: () => "armed" as const,
       });
       return {
         advised: lines.filter((l) => l.step === "review.unwired_advisory"),

@@ -803,13 +803,14 @@ test("real tree: at least one test/ call site of runReview omits `arm:` entirely
   assert.ok(sites.length > 8, "sanity: real runReview call sites were found across test/");
   const gaps = sites.filter((s) => !/\barm\s*:/.test(s.argsText));
   assert.ok(gaps.length > 0, "at least one runReview call in test/ never supplies the arm seam at all");
-  // A STABLE pin: ships-unwired-floor.test.ts exists to test the SHIPS-unwired advisory, has
-  // nothing to do with arming, and is exceedingly unlikely to ever be the file that adds an
-  // `arm:` override — a durable witness that the population is real, not an artefact of one
-  // fragile fixture.
+  // A STABLE pin: a-held-review-names-the-claim-it-stood-down-for.test.ts drives reviews that stand
+  // down before any verdict is published, so it never reaches the arm and never needs an `arm:`
+  // override — a durable witness that the population is real, not an artefact of one fragile
+  // fixture. (W1-T14241 moved the pin: ships-unwired-floor's capped pass is now released by a
+  // recorded override, so it reaches the arm and must supply the seam.)
   assert.ok(
-    gaps.some((g) => g.file === "test/ships-unwired-floor.test.ts"),
-    `expected test/ships-unwired-floor.test.ts among the runReview call sites omitting arm: ${gaps.map((g) => `${g.file}:${g.line}`).join(", ")}`,
+    gaps.some((g) => g.file === "test/a-held-review-names-the-claim-it-stood-down-for.test.ts"),
+    `expected test/a-held-review-names-the-claim-it-stood-down-for.test.ts among the runReview call sites omitting arm: ${gaps.map((g) => `${g.file}:${g.line}`).join(", ")}`,
   );
 });
 

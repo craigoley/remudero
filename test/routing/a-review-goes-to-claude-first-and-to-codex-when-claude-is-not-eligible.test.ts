@@ -26,7 +26,12 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 const NOW = Date.parse("2026-11-10T19:00:00.000Z");
 const ROLE_ROW = "  role_preference:\n    reviewer: claude\n";
 const EXPERIMENT = ROUTING_EXPERIMENTS.find((experiment) => experiment.id === "sol61-vs-sonnet55")!;
-const COMMITTED = readFileSync(mountsPath(REPO_ROOT), "utf8");
+// W1-T14297 added `balanced: codex` beside the role row. The fixtures strip only that row, so the role row is still
+// proven alone; the routing of builds and fixes under it is test/routing/build-and-fix-work-prefers-codex-while-reviews-keep-claude.test.ts.
+const BALANCED_ROW = "    balanced: codex\n";
+const COMMITTED_FILE = readFileSync(mountsPath(REPO_ROOT), "utf8");
+assert.ok(COMMITTED_FILE.includes(BALANCED_ROW), "the committed table carries the W1-T14297 row the fixtures strip");
+const COMMITTED = COMMITTED_FILE.replace(BALANCED_ROW, "");
 
 type Role = "reviewer" | "implementer" | "fixer";
 
@@ -34,7 +39,7 @@ function capacity(provider: "claude" | "codex", usedPercent: number, model?: str
   return {
     provider,
     readable: true,
-    windows: [{ name: `${provider} primary`, usedPercent, resetsAt: NOW / 1000 + 3600 }],
+    windows: [{ name: `${provider} primary`, usedPercent, resetsAt: NOW / 1000 + 30 * 3600 }],
     ...(model ? { model, effort: "high", accountLabel: "assigned-subscription" } : {}),
   };
 }
@@ -172,10 +177,8 @@ function decided(assignment: WorkerSelectionAssignment) {
 }
 
 test("W1-T12172 criterion 1: the mounts file names a preferred provider for a worker role, and the committed file names Claude for the reviewer", () => {
-  const committed = loadMounts(mountsPath(REPO_ROOT)).capabilities;
-  assert.deepEqual(committed?.rolePreference, { reviewer: "claude" });
-  assert.deepEqual(committed?.providerPreference, { frontier: "claude" }, "the capability preference is unchanged");
-  assert.ok(COMMITTED.includes(ROLE_ROW));
+  assert.deepEqual(loadMounts(mountsPath(REPO_ROOT)).capabilities?.rolePreference, { reviewer: "claude" });
+  assert.ok(COMMITTED_FILE.includes(ROLE_ROW));
 
   const root = mkdtempSync(join(tmpdir(), "rmd-role-preference-"));
   try {
@@ -183,6 +186,10 @@ test("W1-T12172 criterion 1: the mounts file names a preferred provider for a wo
       writeFileSync(join(root, name), raw);
       return loadMounts(join(root, name));
     };
+    const committed = load("committed.yaml", COMMITTED).capabilities;
+    assert.deepEqual(committed?.rolePreference, { reviewer: "claude" });
+    assert.deepEqual(committed?.providerPreference, { frontier: "claude" }, "the capability preference is unchanged");
+    assert.ok(COMMITTED.includes(ROLE_ROW));
     assert.deepEqual(load("codex.yaml", COMMITTED.replace("    reviewer: claude\n", "    reviewer: codex\n")).capabilities?.rolePreference,
       { reviewer: "codex" });
     assert.throws(() => load("cash.yaml", COMMITTED.replace("    reviewer: claude\n", "    reviewer: cash\n")),

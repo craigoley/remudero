@@ -3,7 +3,7 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: auto
   risk: low
   priority: 1.43
   # refusal-amendment (W1-T10408, run DAEMON-1793320452557@00b9992df18a1eba330d4abe3d187e12553228f8, 2026-10-30T03:16:31.172Z): the worker refused criterion 1 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
@@ -74,10 +74,12 @@
     verify is set to human so the machine-filing judge re-rules the amended record (its ruling pin
     is stale once the claim changes); the judge's ruling, not this edit, releases it.
   risk_ruling:
-    verdict: "high"
-    action: escalate
-    confidence: 0.94
+    verdict: "low"
+    action: proceed
+    confidence: 0.75
     reasons:
-      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The cited failures report specific unmapped commands—review-replay, keep and reply—but provide no evidence establishing the filed “flaky” diagnosis.; on the change's description/files alone, no diff was read — The plan requires preventing or self-healing fix-round dispatch through src/run-task.ts without specifying a remedy for those missing classifications. Its only acceptance proof greps for a test declaration; it does not verify the promised behavior. The proposed remedy’s correctness cannot be verified from the supplied evidence."
-    judged_at: "2026-10-30T01:15:35.307Z"
-    pin: "bd63d2a8fecc4a19718ff4b02cace4cbda438fb20962f2fa77d6df830de3715a"
+      - "Declared files are only src/run-task.ts and a new test file. The description shows no contact with secrets, auth, deletion, merge/deploy/review policy, or irreversible actions."
+      - "The task needs no operator-only decision. Its acceptance is auto-verifiable by a grep for a named test in the new file."
+      - "The family track record is weak (152 declined vs 82 merged), and the failure cited (unmapped verbs) may belong in the parity registry rather than run-task.ts. This is a quality concern that CI and review would catch, not a danger signal."
+    judged_at: "2026-11-22T15:38:00.896Z"
+    pin: "456d178e6cb095a79139e2fa3273dc9b6de56670d32b628c0fed36952d2197ef"
