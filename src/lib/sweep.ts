@@ -27284,6 +27284,7 @@ export async function runSweep(
                   try {
                     statuses = await deps.readPrFileStatuses(pr);
                   } catch (e) {
+                    // Not erased: the error rides this PR's sweep.disposed row as read_errors, and no split is claimed.
                     readErrors.push(`file statuses: ${String((e as Error)?.message ?? e)}`);
                   }
                 }
@@ -27293,6 +27294,7 @@ export async function runSweep(
                   try {
                     fleetHead = isFleetAppAuthor((await deps.readPlanRepairFacts(pr)).authorLogin);
                   } catch (e) {
+                    // Not erased: recorded as read_errors; an unread author is treated as not the fleet's, so it escalates.
                     readErrors.push(`author: ${String((e as Error)?.message ?? e)}`);
                   }
                 }
