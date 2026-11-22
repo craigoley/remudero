@@ -531,7 +531,8 @@ function gitText(root, args, what) {
 function readTreeSources(root, rev) {
   const paths = gitText(root, ["ls-tree", "-r", "-z", "--name-only", rev, "--", "src"], `cannot list src/ at ${rev}`)
     .split("\0").filter((p) => SOURCE_RE.test(p));
-  const input = paths.map((path) => `${rev}:${path}\n`).join("");
+  // spawnSync encodes a string input with `encoding`, and "buffer" names no text encoding: pass bytes.
+  const input = Buffer.from(paths.map((path) => `${rev}:${path}\n`).join(""), "utf8");
   const res = git(["cat-file", "--batch"], { cwd: root, input, encoding: "buffer", maxBuffer: 1024 * 1024 * 1024 });
   if (res.status !== 0) throw new Error(`cannot read src/ at ${rev}: ${String(res.stderr).trim()}`);
   let at = 0;
