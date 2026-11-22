@@ -14,7 +14,7 @@
     - W1-T13187
   files:
     - test/no-serve-route-path-reaches-a-synchronous-spawn.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The census seeds the shared name-based walk (loopReachable) from buildServeRoutes, counts every reachable top-level function that calls or hands over a synchronous spawn primitive (the same primitive patterns as the W1-T5689 census), and holds them in an exact SERVE_SYNC_SPAWN_ROUTE_BASELINE table recorded at build time"

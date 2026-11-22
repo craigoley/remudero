@@ -391,7 +391,9 @@ test("W1-T11443 criteria 1/2: direct sweep and dependency publishers guard exact
           } else {
             const prior = { ...sharedComputed, criteria: [{ ...sharedComputed.criteria[0], proof: "grep: laneTarget in src/changed.ts" }] };
             ledger.append([{ run_id: "prior", task_id: "W1-T11443", step: "review.posted", state: "success",
-              head_sha: "older-head", pr_url: prUrl, decision_verdict: prior, reviewer_code_sha: sharedReviewerCode }]);
+              head_sha: "older-head", pr_url: prUrl, decision_verdict: prior, reviewer_code_sha: sharedReviewerCode,
+              // W1-T14235: a reused code pass rests on a recorded semantic judgement.
+              reviewer_outcome: "success" }]);
             const effects = buildSweepEffects({ owner: "acme", repo: "remudero", localRepoName: "other",
               config: { root: ledger.dir } as never, ledgerPath: ledger.path, runId: "direct-history",
               plan: { tasks: [], byId: new Map() } as never, log: () => {},

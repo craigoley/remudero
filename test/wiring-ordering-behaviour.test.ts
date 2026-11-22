@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { appendLedger } from "#src/lib/ledger.js";
+import type { WorkerResult } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import type { RubricInput } from "#src/lib/review.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { runReview } from "#src/run-task.js";
@@ -115,6 +117,19 @@ async function withStubbedGh<T>(binDir: string, run: () => Promise<T>): Promise<
 }
 
 const REVIEWER_MOUNT = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
+
+/** W1-T14235: a code pass publishes only on a semantic judgement that ran. Where a test is about what follows a
+ *  published code pass, its review judges a real head (the reviewer works on a snapshot of it) and the reviewer
+ *  passes every criterion; the head's sha is the sha the review posts to. */
+function semanticPassHead(t: TestContext, kind: string): { sha: string; seams: Record<string, unknown> } {
+  const repo = gitRepo({ scope: t, kind });
+  const sha = repo.git("rev-parse", "HEAD");
+  const reviewerSpawnWorker = async (): Promise<WorkerResult> => ({ sessionId: `${kind}-reviewer`, text: "REVIEW_VERDICT 1: PASS",
+    blocks: [], stderr: "", exit: { kind: "exit", code: 0 }, costUsd: 0, numTurns: 1, permissionDenials: [], childEnvKeys: [],
+    model: "sonnet", effort: "medium", provider: "claude", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {}, compactionEvents: [], qualitySuspect: false, subtype: "success", isError: false, apiError: false }) as WorkerResult;
+  return { sha, seams: { headCheckoutDir: repo.dir, reviewerSpawnWorker } };
+}
 
 /** `runReview`'s `log` callback is CALLER-OWNED — production callers append each step to the
  *  REAL ledger file themselves (see arm-ordering.test.ts's own harness); `runReview` never
@@ -255,8 +270,9 @@ test("judgeRubric independence: the binding verdict and the non-advisory part of
   );
 });
 
-test("judgeRubric's advisory section is a top-level disjunct of the comment gate — it posts even on an otherwise-passing review with no unmet criteria", async () => {
-  const h = harness("rubric-gate-disjunct", "cafe000000000000000000000000000000000004", [
+test("judgeRubric's advisory section is a top-level disjunct of the comment gate — it posts even on an otherwise-passing review with no unmet criteria", async (t) => {
+  const semanticPass = semanticPassHead(t, "wob-rubric-gate-head");
+  const h = harness("rubric-gate-disjunct", semanticPass.sha, [
     "diff --git a/src/lib/alpha.ts b/src/lib/alpha.ts",
     "+++ b/src/lib/alpha.ts",
     "@@",
@@ -283,7 +299,7 @@ test("judgeRubric's advisory section is a top-level disjunct of the comment gate
       log: () => {},
       say: () => {},
       account: (r: never) => r,
-      spawnReviewer: false,
+      ...semanticPass.seams,
       reviewerMount: REVIEWER_MOUNT,
       ledgerPath: h.ledgerPath,
       runId: "WOB-GATE-1",
@@ -415,8 +431,9 @@ test("TRAP 2 preserved: the withdrawal beats the status POST to GitHub — obser
   );
 });
 
-test("THE FIX preserved: the arm follows the review.posted ledger write — observed through the injected arm reading the real ledger file at call time", async () => {
-  const sha = "cafe000000000000000000000000000000000008";
+test("THE FIX preserved: the arm follows the review.posted ledger write — observed through the injected arm reading the real ledger file at call time", async (t) => {
+  const semanticPass = semanticPassHead(t, "wob-arm-after-ledger-head");
+  const sha = semanticPass.sha;
   const diff = [
     "diff --git a/src/lib/beta.ts b/src/lib/beta.ts",
     "+++ b/src/lib/beta.ts",
@@ -447,7 +464,7 @@ test("THE FIX preserved: the arm follows the review.posted ledger write — obse
       log: ledgerLog(h.ledgerPath, "WOB-ARM-1", "W1-T2232-ARM"),
       say: () => {},
       account: (r: never) => r,
-      spawnReviewer: false,
+      ...semanticPass.seams,
       reviewerMount: REVIEWER_MOUNT,
       ledgerPath: h.ledgerPath,
       runId: "WOB-ARM-1",

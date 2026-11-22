@@ -22,7 +22,7 @@ import { withMainHealthOnLightPass } from "../../lib/main-health-rung.js";
 import { lightPassArmAdmitted, lightPassFixAdmitted, type LightPassScope, type ReviewAdmissionGate, type SweepCycleOutcome } from "../../lib/daemon.js";
 import type { BoardSnapshotCache } from "../../lib/board-snapshot-cache.js";
 import type { PanelGraphDeps } from "../../lib/panel-graph.js";
-import { createGhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, type GhCallPacer } from "../../lib/open-prs-rest.js";
+import { createGhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, type GhApiFetcher, type GhCallPacer } from "../../lib/open-prs-rest.js";
 import { configureEscalationTriage, ghIssueGateway, tryEscalate } from "../../lib/escalate.js";
 import { createSweepStageWatch, escalatePostReviewStall, SWEEP_STAGE_STREAK_SLICE, type SweepStageOutcome } from "../../lib/escalation-catalogue.js";
 import { ghPrDiffAsync } from "../../lib/pr-diff.js";
@@ -37,13 +37,18 @@ import type { FullPassServe } from "../../lib/read-plane.js";
 import { createLightPassOpenPrList, headReadOrStandDown, LIGHT_PASS_VIEWS_DEADLINE_MS, LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS, mergeAtListHead } from "../../lib/light-pass-open-pr-list.js";
 import { buildBehindMainByPr, buildBehindMainByPrAsync, createDistanceProbeSequence, buildCreditCandidates, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createOpenPrStageReuse, fetchCiFailuresAsync, type TickReadFacts } from "../../lib/tick-read-worker.js";
 import { DEFAULT_SWEEP_POLICY, REVIEW_STATUS_RESTORED_STEP, restorableDeliveredVerdict, buildSweepEffects as buildSweepEffectsFromLib, dispatchFixCatchOutcome, fixRungTaskFor, discriminateReviewReuseAsync, projectMergedTaskCandidates, runSweep, runSweepLightPass, runCreditBackfill, renderSweepSummary, planOnlyRunBranchReceipts, withFullSweepRepairAdmission, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, createFullPreludeTimer, LightPassPreReviewTiming, observeLightPassReviewEligibility, runLightPassReadyRefresh, selectLightPassReadyOverlap, refreshAdmissionWaiters, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, isReviewLaneDisposition, deriveDisposition, lightPassEarlyReviewBatch, type BuildSweepEffectsDeps, type ReviewerCodeAdvance, type SweepDeps, type OpenPrView, type ReviewDispatchMode, type ReviewReuseInputs, type BaseChangedFiles, type Disposition } from "../../lib/sweep.js";
-import { missingReviewReuseFact, priorPostedReviewRow, reviewLedgerKeyFor, REVIEW_ENGINE_REVISION, REVIEW_CONTEXT, reviewEvidenceStrength, type ProofExecutor, type ReviewVerdict } from "../../lib/review.js";
+import { missingReviewReuseFact, priorPostedReviewRow, reviewLedgerKeyFor, semanticJudgementRefusal, REVIEW_ENGINE_REVISION, REVIEW_CONTEXT, reviewEvidenceStrength, type ProofExecutor, type ReviewVerdict } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { failureRecordingPoster, reviewCommand as reviewCommandFromModule, runReview as runReviewFromModule, type ReviewCommandDeps, type ReviewCommandHost } from "./review.js";
 import { runFixRung as runFixRungFromModule, type FixCommandHost } from "./fix.js";
 import type { RunTaskCommandHost } from "./run-task-verb.js";
 
 type HostFn = (...args: any[]) => any;
+
+/** W1-T14177: the action-time proof must revalidate both commit status endpoints through the broker. */
+const readSweepPrAtAct: GhApiFetcher = (args, onRateLimit) => ghJsonAsync(args, undefined, onRateLimit,
+  /\/commits\/[^/]+\/status(?:es\?|$)/.test(args[1] ?? "") ? { fresh: true } : {});
+
 export interface SweepCommandHost {
   readonly freshTreeGit?: (args: string[]) => string;
   readonly commandViews?: HostFn;
@@ -334,6 +339,14 @@ export function buildSweepEffects(
         mode.regressionKey.slice(0, mode.regressionKey.lastIndexOf("|")));
       if (!("row" in delivered) || delivered.regressionKey !== mode.regressionKey) return 1;
       const verdict = delivered.row.decision_verdict as ReviewVerdict;
+      // W1-T14235 (invariant no-semantic-no-code-pass): a delivered code pass no recorded semantic judgement certified is
+      // never restored; the head gets a full semantic review instead.
+      const restoreHold = verdict.state === "success"
+        ? semanticJudgementRefusal({ planOnly: verdict.planOnly, reviewerOutcome: delivered.row.reviewer_outcome }) : undefined;
+      if (restoreHold !== undefined) {
+        deps.log("sweep.review_restore_withheld", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: restoreHold });
+        return reviewFallbackRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, onPhase, pr.excludeProviders);
+      }
       const deliveredCode = await judgeReviewerCode(delivered.row.reviewer_code_sha);
       if (deliveredCode.status !== "fresh") {
         deps.log("sweep.review_restore_withheld", { pr_number: pr.prNumber, head_sha: pr.headSha, reviewer_code_freshness: deliveredCode.status });
@@ -406,6 +419,9 @@ export function buildSweepEffects(
       const prior = priorRow?.decision_verdict as ReviewVerdict | undefined;
       const missing = missingReviewReuseFact(prior, reuseInputs);
       if (!prior || missing !== undefined) return fallbackToFullReview(missing ?? "no-prior-verdict");
+      // W1-T14235: a proof-only re-judgement carries the prior semantic judgement, so it needs one that ran.
+      const discriminateHold = semanticJudgementRefusal({ planOnly: prior.planOnly, reviewerOutcome: priorRow?.reviewer_outcome });
+      if (discriminateHold !== undefined) return fallbackToFullReview(discriminateHold);
       const priorCode = await judgeReviewerCode(priorRow?.reviewer_code_sha);
       if (priorCode.status !== "fresh") return fallbackToFullReview(`prior-reviewer-code-${priorCode.status}`);
 
@@ -495,6 +511,7 @@ export function buildSweepEffects(
                   discriminated_from_head_sha: mode.judgedHeadSha,
                   discrimination_result: verdict.state,
                   reviewer_code_sha: priorCode.codeSha,
+                  reviewer_outcome: priorRow?.reviewer_outcome,
                   ...(pr.reviewInputDigest === undefined ? {} : { review_input_digest: pr.reviewInputDigest }),
                   proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
                   ...reviewLedgerLegibilityFields(verdict),
@@ -554,6 +571,10 @@ export function buildSweepEffects(
       const lintReason = priorLint === undefined ? "no plan lint recorded" : !priorLint.ran ? priorLint.reason : "plan lint unreadable";
       return fallbackToFullReview(`prior-plan-lint-did-not-run: ${lintReason}`);
     }
+    // W1-T14235: a reused code pass needs the semantic judgement it was published on.
+    const reuseHold = verdict.state === "success"
+      ? semanticJudgementRefusal({ planOnly: verdict.planOnly, reviewerOutcome: reusedRow?.reviewer_outcome }) : undefined;
+    if (reuseHold !== undefined) return fallbackToFullReview(reuseHold);
     const reusedCode = await judgeReviewerCode(reusedRow?.reviewer_code_sha);
     if (reusedCode.status !== "fresh") return fallbackToFullReview(`prior-reviewer-code-${reusedCode.status}`);
     const poster = failureRecordingPoster();
@@ -595,6 +616,7 @@ export function buildSweepEffects(
       effective_review_mode: "verdict-reuse",
       reused_from_head_sha: mode.judgedHeadSha,
       reviewer_code_sha: reusedCode.codeSha,
+      reviewer_outcome: reusedRow?.reviewer_outcome,
       ...(pr.reviewInputDigest === undefined ? {} : { review_input_digest: pr.reviewInputDigest }),
       proof_exec: verdict.criteria?.map((criterion) => criterion.proof_exec) ?? [],
       ...reviewLedgerLegibilityFields(verdict),
@@ -723,7 +745,7 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
     updatedForWorkflowFromLedger, runOneShotSweep,
     handedOffHeadRiskJudge, codeScanningJudgeDeps,
     sweepEscalationReconcile, sweepEscalationTriage, runAutomaticBranchReapRung,
-    renderEscalationReconcileSummary,
+    renderEscalationReconcileSummary, buildRereadPrAtAct,
   } = host;
   const badArg = unknownArgError("sweep", rest, ["--repo"], ["--dry-run"]);
   if (badArg) {
@@ -755,11 +777,11 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
   }
 
   let openPrs: OpenPrView[];
+  const planFilingFileCache = createPlanFilingFileCache();
+  const onPlanFilingClassification = createPlanFilingClassificationTelemetry(log);
   try {
     openPrs = buildOpenPrViews(owner, repo, ledgerPath, {
-      ciGateSource, log,
-      planFilingFileCache: createPlanFilingFileCache(),
-      onPlanFilingClassification: createPlanFilingClassificationTelemetry(log),
+      ciGateSource, log, planFilingFileCache, onPlanFilingClassification,
     });
   } catch (e) {
     console.error(`### rmd sweep — could not list open PRs for ${owner}/${repo}: ${String((e as Error)?.message ?? e)}`);
@@ -821,6 +843,12 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
       updatedForWorkflow,
       behindMainByPr,
       baseChangedFilesByPr,
+      // W1-T14177: the act-time re-check of a dead owner's proof reads GitHub's live status through this re-reader, as the
+      // daemon's two passes do; without one the re-check fails closed.
+      rereadPrAtAct: buildRereadPrAtAct(owner, repo, ledgerPath, {
+        fetchAsync: readSweepPrAtAct,
+        views: { planFilingFileCache, onPlanFilingClassification, ciGateSource, log },
+      }),
       judgeHandedOffHead: handedOffHeadRiskJudge(owner, repo, config, plan, ledgerPath, runId, log),
       planContextDigestFor: riskJudgePlanContextDigestFor(plan),
       handedOffHeadJudgments,
@@ -1155,6 +1183,7 @@ export function buildSweepHook(
           // W1-T7734: a head that moved under this pass is re-read (paced) and re-derived in this pass.
           rereadPrAtAct: buildRereadPrAtAct(owner, repo, ledgerPath, {
             pacer,
+            fetchAsync: readSweepPrAtAct,
             views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,
               readMainPlan: resolvedReadMainPlan, ciGateSource, log },
           }),
@@ -1435,6 +1464,7 @@ export function buildSweepLightHook(
             return (await readViews("refill")).views.filter((pr) => owned.has(pr.prNumber) || !snapshot.has(pr.prNumber));
           },
           rereadPrAtAct: effects.rereadPrAtAct ?? buildRereadPrAtAct(owner, repo, ledgerPath, {
+            fetchAsync: readSweepPrAtAct,
             views: { planFilingFileCache, onPlanFilingClassification: reportPlanFilingClassification, isMerged,
               readMainPlan: resolvedReadMainPlan, ciGateSource, log },
           }),

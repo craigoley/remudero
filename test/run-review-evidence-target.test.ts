@@ -108,8 +108,11 @@ async function reviewSiteProof(options: { delayProofMs?: number; onProofTicks?: 
 
 test("W1-T3529: runReview passes its owner/repo target through to judgeReview evidence", async () => {
   const verdict = await reviewSiteProof();
-  assert.equal(verdict.state, "success", "the remudero-site registered tests/ proof must execute");
-  assert.equal(verdict.criteria[0]?.proof_exec, "executed_pass");
+  // W1-T14235: this deterministic review's floor passes, but a code pass needs a semantic judgement that ran, so the
+  // pass is held as pending; the executed proof below is the evidence that the target reached judgeReview.
+  assert.equal(verdict.state, "pending", "the deterministic code pass is held, never published");
+  assert.equal(verdict.reviewerOutcome, "not_attempted_deterministic_mode");
+  assert.equal(verdict.criteria[0]?.proof_exec, "executed_pass", "the remudero-site registered tests/ proof must execute");
   assert.match(verdict.criteria[0]?.reason ?? "", /tests\/site-target\.test\.ts/);
 });
 

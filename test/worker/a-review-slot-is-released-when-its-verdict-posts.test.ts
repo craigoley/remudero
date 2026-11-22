@@ -91,6 +91,8 @@ describe("test/worker/a-review-slot-is-released-when-its-verdict-posts.test.ts",
         });
         appendLedger(ledgerPath, { run_id: "prior", task_id: subject.taskId!, step: "review.posted",
           head_sha: "prior-head", pr_url: subject.prUrl, reviewer_code_sha: REVIEWER_CODE,
+          // W1-T14235: a reused code pass rests on a recorded semantic judgement.
+          reviewer_outcome: "success",
           decision_verdict: publication.endsWith("fallback") ? { ...prior, state: "pending" } : prior });
         const shim = ghShim([
           // W1-T11443: a SUCCESS reads the head's status history first; this head has no prior FAILURE.

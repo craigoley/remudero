@@ -17,7 +17,7 @@
     - .github/workflows/ci.yml
     - test/a-check-run-from-another-pr-on-the-same-commit-never-blocks.test.ts
     - test/the-ci-gate-does-not-hold-a-runner.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:foreign-run-never-blocks — the real runs_json step from ci-gate.yml, run with a fake gh and HEAD_REF=this-branch, sees a commitlint success from a workflow run of this-branch and a later commitlint failure from a workflow run of other-branch on the same SHA. The gate exits 0 and its gated list shows commitlint as success"

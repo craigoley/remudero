@@ -8,7 +8,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
-import { parseReviewerHistoryEvidence, parseWhitelistedProof, resolveProofTestPath, resolveNameFilteredCandidatesAsync } from "../../lib/review.js";
+import { parseReviewerHistoryEvidence, parseWhitelistedProof, reviewRowNamesPr, resolveProofTestPath, resolveNameFilteredCandidatesAsync } from "../../lib/review.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -34,7 +34,7 @@ import { classifyReviewOutcome, DOWNGRADE_UNCLASSIFIED, recordedReviewVerdictLin
 import { type AdmissionObserver } from "../../lib/contributor-admission.js";
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
 import { observeAdmissionDisposition } from "../../lib/action-executor.js";
-import { listedLedgerFiles, readLedgerUnionRawLinesAsync } from "../../lib/ledger-union.js";
+import { listedLedgerFiles, readLedgerUnionRawLinesAsync, readLedgerUnionRecords } from "../../lib/ledger-union.js";
 import { visibleCriteria, type AcceptanceCriterion, DEFAULT_RISK, type TaskRisk } from "../../lib/plan.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/mounts.js";
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
@@ -47,6 +47,7 @@ import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib
 import { isDispatchedRunBranch } from "../../lib/sweep.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "../../lib/sweep.js";
 import { readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest } from "../../lib/sweep.js";
+import { REVIEW_RUN_SETTLED_STEPS } from "../../lib/sweep.js";
 import { ghJson, renderWorkerSettings, cashDivertSpawnFields, spawnWorker, workerLedgerFields, workerTranscript, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment, WorkerAbandonedError, worktreeRemoveAsync } from "../../lib/worker.js";
 import { hostWorktreeGit } from "../../lib/worktree-git.js";
 import { releaseReviewWorktree } from "../../lib/review-worktree-reclaim.js";
@@ -62,7 +63,7 @@ import { asOwnerRepoUnresolvable } from "../../lib/owner-repo.js";
 import { flagValue } from "../../lib/cli-args.js";
 import { resolveReviewTarget, reviewTaskIdFromBody, reviewPrNumber, reviewViewArgs } from "../../lib/report-commands.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "../../lib/staged-install.js";
-import { UNTASKED_REVIEW_BUDGET_USD, isPlanOnlyFilingPr, resolveReviewTaskId, reviewStateFromRollup, usesUntaskedReviewMetadata } from "../../lib/tick-read-worker.js";
+import { UNTASKED_REVIEW_BUDGET_USD, isPlanOnlyFilingPr, resolveReviewTaskId, reviewStateFromRollup, reviewStatusHistoryFromRest, usesUntaskedReviewMetadata } from "../../lib/tick-read-worker.js";
 
 export interface ReviewCommandHost {
   readonly GIT_UNTRACKED_FILES_ALL: string;
@@ -119,6 +120,50 @@ export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]):
   };
 }
 
+/** The run-id shape of a reviewer's own claim (`rmd review`'s `review-PR<n>-<ms>`, and the dependency reviewer's). */
+const REVIEWER_RUN_ID = /^(?:dep-)?review-PR\d+-/;
+
+/** W1-T14177 (INVARIANT one-live-review-owner) — postReviewPending's refusal because ANOTHER live REVIEWER holds this
+ *  head's claim. These are not this refusal:
+ *  - this run's own idempotent no-op;
+ *  - a closed lifecycle;
+ *  - a drained outbox;
+ *  - a claim a dispatching lane posted for the review it hands off (the sweep's reviewer-code advance posts under its
+ *    own SWEEP-* run, then admits this review);
+ *  - a holder whose run already settled this head: its newest claim or settle row here is a settle row
+ *    ({@link REVIEW_RUN_SETTLED_STEPS}), e.g. a completed hold it published. A holder with no row at all is a takeover
+ *    GitHub accepted before its ledger append, so it is still live.
+ *  `ledger` is the command's ledger snapshot at admission. Returns a fixed reason naming the sanitised holder,
+ *  which the caller returns instead of reviewing or posting. */
+export function pendingClaimHeldByAnotherRun(
+  result: { posted: boolean; reason?: string; lifecycle?: unknown; outbox?: unknown }, runId: string,
+  ledger: ReadonlyArray<Record<string, unknown>>, headSha: string,
+): string | undefined {
+  if (result.posted || result.lifecycle !== undefined || result.outbox !== undefined) return undefined;
+  const holder = /\(owned by run ([^)]+)\)/.exec(result.reason ?? "")?.[1];
+  if (holder === undefined || holder === runId || !REVIEWER_RUN_ID.test(holder)) return undefined;
+  const newest = ledger.findLast((line) => line.run_id === holder && line.head_sha === headSha &&
+    (line.step === "review.pending_posted" || (typeof line.step === "string" && REVIEW_RUN_SETTLED_STEPS.has(line.step))));
+  if (newest !== undefined && newest.step !== "review.pending_posted") return undefined;
+  // The holder id is read from GitHub and the ledger: only run-id characters reach a log line.
+  return `another reviewer run (${holder.replace(/[^A-Za-z0-9._:-]/g, "")}) holds this head's remudero-review claim`;
+}
+
+/** W1-T14177: check the current post against history before invoking the takeover publisher. */
+async function readBoundPendingClaimStatus(owner: string, repo: string, sha: string, read: GhApiFetcher):
+  Promise<{ combined: unknown; reason?: never } | { reason: string; combined?: never }> {
+  try {
+    const combined = await read(combinedStatusRestArgs(owner, repo, sha)) as { statuses?: unknown } | null;
+    const current = reviewStatusEntryFromCombined(combined);
+    const live = reviewStatusHistoryFromRest(combined?.statuses)?.[0];
+    const newest = reviewStatusHistoryFromRest(await read(["api", `repos/${owner}/${repo}/commits/${sha}/statuses?per_page=100`]))?.[0];
+    if (current && live?.id !== undefined && live.id === newest?.id) return { combined };
+    return { reason: "GitHub's live remudero-review status id does not match its newest history entry" };
+  } catch (error) {
+    return { reason: `GitHub's live remudero-review status could not be verified: ${String(error)}` };
+  }
+}
+
 /** W1-T14156: the `rmd review` verb runs the model reviewer unless its caller chose a mode. */
 export function operatorReviewArgs(rest: string[]): string[] {
   return rest.includes("--execution-mode") ? rest : [...rest, "--execution-mode", "semantic"];
@@ -130,7 +175,7 @@ export const REVIEW_EXIT_CAUSES = [
   "repo-unresolvable", "closed-before-review", "subject-refused", "task-narrative-unavailable",
   "task-metadata-unavailable", "semantic-setup-unavailable", "own-task-record-missing",
   "shadow-verdict-withheld", "replayed-verdict-withheld", "verdict-not-posted",
-  "verdict-failure", "verdict-pending", "verdict-not-success",
+  "verdict-failure", "verdict-pending", "verdict-not-success", "review-claim-held",
   ...REVIEW_EXIT_STEPS.map((step) => `threw-in-${step}` as const),
 ] as const;
 export type ReviewExitCause = (typeof REVIEW_EXIT_CAUSES)[number];
@@ -1558,6 +1603,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     fetchLifecycle: () => fetchPrLifecycleAsync(prUrl),
     readRequiredContexts: readRequiredStatusCheckContextsAsync,
     cannotEvaluateEscalation: (e, issues) => tryEscalate(task.catalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath: args.ledgerPath, runId: args.runId }),
+    // W1-T14235 (invariant no-semantic-no-code-pass): a code pass publishes only on this run's own semantic judgement.
+    semanticJudgement: { planOnly: planOnlySkip, reviewerOutcome: outcome },
   });
   phases.post = systemClock.now();
   // W1-T11151: `posted` releases admission once the outcome is terminal: posted, refused (review.post_refused) or a
@@ -1565,6 +1612,13 @@ export async function runReview(host: ReviewCommandHost, args: {
   if (!poster.failed()) (args.onPhase ?? reportReviewPhase)("posted");
   decisionDigest = posted.effectiveReviewDecisionDigest ?? decisionDigest;
   if (posted.effectiveVerdict) verdict = { ...verdict, ...posted.effectiveVerdict, state: posted.effectiveState ?? posted.effectiveVerdict.state };
+  if (posted.semanticHold !== undefined) {
+    // W1-T14235: the pass was held (pending, or a standing failure left standing), so an arm taken at open is withdrawn.
+    withdrawArmIfVerdictRefuses(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
+    say(`remudero-review: PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${posted.reason ?? posted.semanticHold}`);
+    return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.reason ?? posted.semanticHold,
+      reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+  }
   if (posted.effectiveState === "pending") {
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.reason,
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
@@ -2008,6 +2062,8 @@ export interface ReviewCommandDeps {
   /** W1-T913: injectable so a test can observe the pending post without a real `gh` spawn — see
    *  `postReviewPending`'s call site below. Defaults to the real {@link postReviewPending}. */
   postReviewPending?: typeof postReviewPending;
+  /** REST reader for the pending claim's combined status and newest history entry. */
+  fetchPendingStatus?: GhApiFetcher;
   /** W1-T2511: the head-sha fetch, hoisted ABOVE criteria resolution. Same signature and same
    *  default implementation as {@link ReviewWorktreeDeps.fetch}, deliberately — the materializer
    *  still runs its own, and a second fetch of an already-fetched ref is a no-op, so this adds an
@@ -2655,8 +2711,19 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     });
   }
   const publicationFreshness = reviewerFreshnessForPublication(startFreshness, reviewerCodeFreshnessDep);
+  let claimHeld: string | undefined;
   if (!shadow) try {
-    await postReviewPendingDep({
+    const claimLedger = await readLedgerUnionRecords(dirname(ledgerPath), {
+      selectRotation: () => false,
+      step: ["review.pending_posted", ...REVIEW_RUN_SETTLED_STEPS],
+      where: (row) => row.head_sha === view.headRefOid && reviewRowNamesPr(row, reviewKey, view.url),
+      onUnreadLive: () => { claimHeld = "the action-time review ledger could not be read"; },
+    });
+    const hasClaim = claimLedger.some(row => row.step === "review.pending_posted");
+    const checkedStatus = hasClaim ? await readBoundPendingClaimStatus(owner, repo, view.headRefOid,
+      deps.fetchPendingStatus ?? ((args) => ghJsonAsync(args, undefined, undefined, { fresh: true }))) : undefined;
+    claimHeld ??= checkedStatus?.reason;
+    claimHeld ??= pendingClaimHeldByAnotherRun(await postReviewPendingDep({
       owner,
       repo,
       sha: view.headRefOid,
@@ -2667,9 +2734,17 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       reviewInputDigest: inputDigest,
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
       fetchLifecycle: () => fetchPrLifecycleAsync(view.url),
-    });
+      fetchStatus: checkedStatus === undefined ? undefined : () => checkedStatus.combined,
+    }), runId, claimLedger, view.headRefOid);
   } catch (e) {
     log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
+  }
+  // W1-T14177: a claim refusal is returned, never discarded — another run's live claim holds this head.
+  if (claimHeld !== undefined) {
+    log("review.stood_down", { pr_url: view.url, head_sha: view.headRefOid, review_input_digest: inputDigest, reason: claimHeld });
+    console.log(`rmd review: PR #${view.number} not reviewed — ${claimHeld}`);
+    exit.as("review-claim-held");
+    return 2;
   }
 
   // W1-T9232: the pending status just posted STANDS — no verdict is judged on a plan that lacks the task's own record.
@@ -2820,12 +2895,18 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       fetchPublisher: deps.fetchView,
       readRequiredContexts: readRequiredStatusCheckContextsAsync,
       cannotEvaluateEscalation: (e, issues) => tryEscalate(taskCatalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+      // W1-T14235: a replayed decision re-publishes a code pass only when its recorded judgement was semantic.
+      semanticJudgement: { planOnly: verdict.planOnly, reviewerOutcome: verdict.reviewerOutcome },
     });
     verdict.reviewDecisionDigest = restored.effectiveReviewDecisionDigest ?? verdict.reviewDecisionDigest;
     if (restored.effectiveVerdict) verdict = { ...verdict, ...restored.effectiveVerdict, state: restored.effectiveState ?? restored.effectiveVerdict.state };
     if (restoringState === "success" && verdict.state === "failure") withdrawArmIfVerdictRefuses(verdict,
       { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
-    if (restored.posted) {
+    if (restored.semanticHold !== undefined) {
+      if (verdict.state === "pending") withdrawArmIfVerdictRefuses(verdict,
+        { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
+      verdict.verdictWithheld = restored.reason ?? restored.semanticHold;
+    } else if (restored.posted) {
       replayStatusAction = "restored";
       const { unmetClaims, reasons } = reviewUnmetFields(verdict);
       const reviewPostedRow = {
