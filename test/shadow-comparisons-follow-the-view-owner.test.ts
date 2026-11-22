@@ -6,7 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { createReadModelTicker, createReadModelWorker, READ_MODEL_SWITCH_RECHECK_MS, threadViews, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { shadowReadiness, viewShadowPath, withViewShadow } from "#src/lib/view-shadow.js";
-import { readShadowCounters } from "#src/lib/view-shadow-store.js";
+import { readShadowCounters, saveShadowCounter, shadowCounterPath } from "#src/lib/view-shadow-store.js";
 import { trackWorkerThreads } from "#src/lib/worker-heaps.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
@@ -136,11 +136,25 @@ test("shadow owner: captured inputs stay paired and failed preparation grants no
   assert.equal(JSON.stringify(persisted()), bytes, "missing and failed preparation cannot manufacture a sample");
 });
 
-test("shadow owner: native heavy worker accrues parity for unchanged values without promoting", async (t) => {
+function nativeShadowDir(t: TestContext): string {
   const dir = readModelFixtureDir(t, "shadow-native-owner").dir;
   mkdirSync(join(dir, "read-model"));
   writeFileSync(join(dir, "read-model", "switches.json"), JSON.stringify({ projector: "on", views: { "paired-worker": "auto" } }));
   writeFileSync(join(dir, "ledger.ndjson"), JSON.stringify({ ts: new Date().toISOString(), step: "run.start", task_id: "W1-T1", run_id: "fixture" }) + "\n");
+  return dir;
+}
+
+function initializeNativeShadowCounters(dir: string): void {
+  // The heavy lane reads readiness on every cold pass. Finish creating the store before any worker can read it.
+  saveShadowCounter(viewShadowPath(dir), {}, "paired-worker", {
+    requests: 0, firstRequestMs: null, samples: 0, diffs: { legacy_horizon: 0, timing: 0, dedupe: 0, real: 0 },
+    streakSamples: 0, streakSinceMs: null, lastRealMs: null, streakKeys: [],
+  });
+}
+
+test("shadow owner: native heavy worker accrues parity for unchanged values without promoting", async (t) => {
+  const dir = nativeShadowDir(t);
+  initializeNativeShadowCounters(dir);
   const modulePath = join(dir, "views.mjs");
   const marks = join(dir, "marks.ndjson");
   writeFileSync(modulePath, `import { appendFileSync } from "node:fs";
@@ -173,16 +187,7 @@ export default [{ name: "paired-worker", version: 1, materialize: () => {
     worker.stop(); await book.stop();
   });
   worker.start();
-  const state = () => {
-    try { return readShadowCounters(viewShadowPath(dir), true)?.states["paired-worker"]; }
-    catch (error) {
-      // A reader can see the new SQLite file before its first schema transaction commits.
-      // This is UNKNOWN, never an old receipt or a sample. Wait for the real committed control.
-      if ((error as { code?: string }).code === "ERR_SQLITE_ERROR" && /no such table: meta/.test(String(error))) return undefined;
-      if (String(error) === "Error: shadow counter migration is not committed") return undefined;
-      throw error;
-    }
-  };
+  const state = () => readShadowCounters(viewShadowPath(dir), true)?.states["paired-worker"];
   // Native threads load the application under the flake screen's CPU contention before building.
   await until(() => logs.some((row) => row.step === "read_model.view_lane_moved" && row.extra.view === "paired-worker" && row.extra.to === "heavy"), 60_000);
   await until(() => existsSync(marks) && readFileSync(marks, "utf8").includes('"lane":"heavy"'), 60_000);
@@ -202,4 +207,36 @@ export default [{ name: "paired-worker", version: 1, materialize: () => {
   assert.equal(worker.autoMode?.("paired-worker"), "shadow");
   assert.deepEqual(worker.body("paired-worker")?.body.data, { value: 1 });
   assert.equal(logs.some((row) => row.step === "view.auto_promoted"), false, "actual default workers preserve the sustained readiness gate");
+});
+
+test("W1-T12296 pins the cause of the intermittent failure", (t) => {
+  const dir = nativeShadowDir(t);
+  const holder = "shadow-initialization";
+  const instances = [{ name: "core", ledgerDir: dir }];
+  const bodies: ReadModelWorkerMessage[] = [];
+  const heavy = createReadModelTicker({
+    stateDir: dir, instances, holder, viewsOnly: true, lane: "heavy", oracle: "off",
+    views: [{ name: "paired-worker", version: 1, materialize: () => [{ key: "", data: { value: 1 }, sources: [] }] }],
+    post: (message) => { if (message.type === "body") bodies.push(message); },
+  });
+  const projector = createReadModelTicker({
+    stateDir: dir, instances, holder, oracle: "off", views: [],
+    post: (message) => { if (message.type === "state") heavy.observe(message.instances); },
+  });
+  onReadModelClose(t, () => { projector.release(); });
+  onReadModelClose(t, () => { heavy.release(); });
+  projector.start();
+  heavy.start();
+  heavy.lane({ view: "paired-worker", heavy: true, dueAt: 0 });
+
+  // Force the tick into the window between SQLite creating the file and committing its schema.
+  const path = viewShadowPath(dir);
+  writeFileSync(shadowCounterPath(path), "");
+  assert.throws(() => heavy.tick(), /no such table: meta/);
+  assert.equal(bodies.length, 0);
+
+  initializeNativeShadowCounters(dir);
+  heavy.tick();
+  assert.equal(bodies.length, 1, "a committed store lets the heavy lane build before any comparison");
+  assert.equal(readShadowCounters(path, true)?.states["paired-worker"]?.samples, 0);
 });
