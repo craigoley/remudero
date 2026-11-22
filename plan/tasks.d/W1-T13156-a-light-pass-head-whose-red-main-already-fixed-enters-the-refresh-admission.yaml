@@ -18,7 +18,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-light-pass-head-whose-red-main-already-fixed-enters-the-refresh-admission.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "In the daemon's light pass a head whose failing test files are already fixed on main, with the reproduction clear, enters the pass's whole-snapshot refresh selection, and its disposition no longer reads that the branch refresh is unwired"

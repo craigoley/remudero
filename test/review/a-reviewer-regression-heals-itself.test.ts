@@ -375,7 +375,8 @@ test("W1-T10269: the incident opens one revert PR of the offending merge", async
   await route("210", [], {}, async () => 0);
   // More regressed rows, at the same sha and a later one, never open a second revert.
   const m2b = fake("m2b");
-  h.write(withheld(f.m2, 211), withheld(m2b, 212), withheld(m2b, 213), refused(m2b, 214));
+  // W1-T13392: 4 of 4 at m2b, the fewest the exact bound reads regressed against this 0 of 105 (3 of 3 does not).
+  h.write(withheld(f.m2, 211), withheld(m2b, 212), withheld(m2b, 213), refused(m2b, 214), refused(m2b, 215));
   await route("215", [], {}, async () => 0);
   assert.equal(h.calls.reverts.length, 1, "one revert PR, through the red-main repair lane");
   const request = h.calls.reverts[0]!;
@@ -429,7 +430,8 @@ test("W1-T10269: the incident closes when the current reviewer returns to baseli
     "src/lib/required-semantic-review.ts": 'export const refusal = () => "required-semantic-incomplete-verdicts";\n',
   }, "fix(review): regress required semantic behavior (#104)");
   f.daemon.git("fetch", "origin");
-  h.queue.push(refused(later, 400), refused(later, 401));
+  // W1-T13392: 4 refusals, the fewest the exact bound reads regressed here (measured: 2 and 3 do not reopen).
+  h.queue.push(refused(later, 400), refused(later, 401), refused(later, 402), refused(later, 403));
   await h.evaluate(later);
   const reopened = health.loadReviewerHealthState(h.statePath).incident!;
   assert.equal(reopened.reopenedFrom, "reviewer-regression-" + f.m2.slice(0, 12));

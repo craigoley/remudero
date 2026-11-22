@@ -21,7 +21,7 @@
     - test/learning/a-stale-skill-retirement-is-withdrawn-not-approved.test.ts
     - test/skill-lifecycle.test.ts
     - test/learning/a-withheld-arm-is-drawn-per-task.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at origin/main dd829e355 (2026-11-21).

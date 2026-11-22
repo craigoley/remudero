@@ -4066,6 +4066,10 @@ function originRepoSlug(url: string): string {
   return url.replace(/\.git$/, "").replace(/^.*[:/]([^/]+\/[^/]+)$/, "$1").toLowerCase();
 }
 
+/** W1-T14364 BACKSTOP on buffered `git log` output for both commit trailer readers. The 256 MiB cap matches the
+ *  reviewer's git reads and aborts an oversized read. The buffer grows with actual output. */
+export const COMMIT_TRAILER_LOG_MAX_BYTES = 256 * 1024 * 1024;
+
 /** W1-T2387: union machine-written commit trailers after hand-written body trailers miss; add credit only,
  *  never compare surfaces or fetch again. Failed read returns null, never [].
  *  W1-T2447: admin-only `squash_merge_commit_message` must remain `COMMIT_MESSAGES` for trailers to survive.
@@ -4090,7 +4094,7 @@ export function buildCommitTrailerIndex(opts: {
         // NOT OPTIONAL HARDENING — MEASURED: this repo's history renders 3.6 MB through this format and Node's
         // default `maxBuffer` is 1 MiB, so the default throws ENOBUFS and the index reads `null` on every real
         // repository. The first probe against the live corpus returned exactly that.
-        maxBuffer: 1 << 24,
+        maxBuffer: COMMIT_TRAILER_LOG_MAX_BYTES,
       }));
   return () => {
     // THE CHECKOUT MUST BE THIS GATEWAY'S OWN REPO, AND THIS IS A DEFECT THIS TASK SHIPPED ONCE AND CAUGHT. A

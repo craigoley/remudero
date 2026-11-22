@@ -85,3 +85,8 @@ test("WORKSTREAMS_BUILT_ROW_WINDOW_MS is not exported from workstreams-view", as
   const module = await import("#src/lib/workstreams-view.js");
   assert.equal(Object.hasOwn(module, "WORKSTREAMS_BUILT_ROW_WINDOW_MS"), false);
 });
+
+test("ladderOrigin is not exported from flow-remedy-gardener", async () => {
+  const module = await import("#src/lib/flow-remedy-gardener.js");
+  assert.equal(Object.hasOwn(module, "ladderOrigin"), false);
+});

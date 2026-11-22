@@ -1880,3 +1880,16 @@ freshnessRestart:
   minLifetimeMs: { value: 10800000, origin: "lifted:src/lib/deploy-judge.ts (FRESHNESS_MIN_LIFETIME_MS)", min: 0, max: 21600000 }
   likelyFraction: { value: 0.5, origin: "lifted:src/lib/deploy-judge.ts (FRESHNESS_LIKELY_FRACTION)", min: 0.25, max: 0.9 }
   maxDrainWaitMs: { value: 1800000, origin: "lifted:src/lib/deploy-judge.ts (FRESHNESS_MAX_DRAIN_WAIT_MS)", min: 559000, max: 3600000 }
+
+# W1-T14343: THE PUBLIC CATALOG TAKES NO NEW TASK RECORD. Since 2026-11-17 a new task record is filed in the plan
+# destination (`rmd plan-destination task`), yet that switch is host state, so hosted CI could not see it and 542 new
+# records reached this catalog in the 7 days to 2026-11-22. `lint-plan`'s changed-task pass reads THIS row from the
+# linted plan's own policy.yaml: while it is closed, and the linted checkout's origin is `repository`, a pull request
+# adding a record whose id no commit of the base's history ever held is refused (new-public-task-record). An edit, a
+# removal, or a restore of an id history holds is not. `open` turns the check off. Read by
+# src/cli/commands/lint-plan.ts, never by validatePolicy.
+catalog:
+  newTasks:
+    value: closed
+    repository: craigoley/remudero
+    origin: "net-new: W1-T14343, a new task record is filed in the plan destination"

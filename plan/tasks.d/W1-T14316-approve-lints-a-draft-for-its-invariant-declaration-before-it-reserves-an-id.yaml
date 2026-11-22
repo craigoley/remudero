@@ -47,6 +47,7 @@
   falsifier: |
     Leave the option unset and criterion 1 fails. Insert a NO-INVARIANTS line for the drafter and criterion 2 fails.
   note: |
+    AMENDED 2026-11-22 by the operator session: build AFTER W1-T14310 (ops catalog; a public depends_on cannot name it). W1-T14310 passes requireDesignInvariantDeclaration through DRAFT_FILING_LINT_OPTIONS, approve's relint included, and edits 31 draft-fixture suites, several of them this task's. What remains here is refusing before an id is reserved; re-measure on main first.
     reservation hand-off: run-unfiled-1795355533924 -> run-unfiled-1795355533924
     Filed by an operator session from read-only ledger and source evidence, 2026-11-22. Line numbers are at 51105aaa3.
     Pinning tests: their draft fixtures may state no declaration. The build may add one to those fixtures only; every assertion stays.

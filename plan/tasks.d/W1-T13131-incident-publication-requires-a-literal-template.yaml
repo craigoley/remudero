@@ -26,7 +26,7 @@
     - test/the-sre-lane-files-incidents-off-the-daemon-loop.test.ts # amended 2026-11-22 for PR 20179: an existing fixture builds an untemplated event, which now fails closed
     - test/the-sre-lanes-landed-entry-read-runs-its-git-off-the-daemon-loop.test.ts # amended 2026-11-22 for PR 20179: an existing fixture builds an untemplated event, which now fails closed
     - test/the-sre-lanes-suspect-commit-read-runs-off-the-loop.test.ts # amended 2026-11-22 for PR 20179: an existing fixture builds an untemplated event, which now fails closed
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     W1-T4383 specifies denylist scrubbing and normalized free text in the fingerprint; W1-T4385

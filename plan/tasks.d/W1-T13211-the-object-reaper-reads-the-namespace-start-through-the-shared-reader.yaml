@@ -17,7 +17,7 @@
   files:
     - src/lib/object-reaper.ts
     - test/daemon/repository-maintenance-escalation-heals-itself.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The reaper's own start is the value the shared namespace-start reader gives: on a host with no /proc that the reader can answer for (macOS), boot evidence is a finite number and the existing W1-T10750 boot-evidence test passes there"

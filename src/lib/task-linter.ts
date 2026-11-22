@@ -96,6 +96,7 @@ export type LintCheck =
   | "human-only-report"
   | "shard-shape"
   | "unminted-task-id"
+  | "new-public-task-record"
   | "superseded-by"
   | "doctrine-citation-unresolved"
   | "design-invariant-proof"
@@ -3452,6 +3453,25 @@ export function unmintedTaskIdViolations(task: Task, opts: LintOpts = {}): LintV
   ];
 }
 
+/**
+ * W1-T14343 — THE PUBLIC CATALOG TAKES NO NEW TASK RECORD. A new task is filed in the plan destination; this blocks a
+ * record the caller found new to the public catalog ({@link LintOpts.newPublicTaskRecordIds}). Pure: the row, the
+ * origin and the history are read by the caller. The message names the verbs that file it, never a repository.
+ */
+export function newPublicTaskRecordViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const newIds = opts.newPublicTaskRecordIds;
+  if (newIds === undefined || !newIds.has(String(task.id))) return [];
+  return [{
+    check: "new-public-task-record",
+    severity: "block",
+    message:
+      `${String(task.id)} is a new task record, and this catalog takes none (plan/policy.yaml catalog.newTasks is closed). ` +
+      "File it in the plan destination: `rmd plan-destination task` names the repository and checkout that take a new task, " +
+      "`rmd next-task-id --branch <filing branch>` reserves its id there, and this record leaves this pull request. " +
+      "An edit to an existing record, or a restore of an id this catalog's history holds, is not refused.",
+  }];
+}
+
 export interface LintOpts {
   /** W1-T11746 — require a new/changed implementation task's design to declare `INVARIANT <slug>:` lines
    *  or `NO-INVARIANTS: <reason>`, with each slug mapped to its own `invariant:<slug>` acceptance claim.
@@ -3500,6 +3520,10 @@ export interface LintOpts {
    *  unminted id in the set BLOCKS, any other unminted id WARNS. Supplied only by `lint-plan` (empty without a base);
    *  absent ⇒ that check is silent. */
   addedTaskIds?: ReadonlySet<string>;
+  /** W1-T14343 — ids this diff adds that the public catalog's history never held, while that catalog's committed row
+   *  (`catalog.newTasks` in plan/policy.yaml) is closed. Supplied only by `lint-plan --base` for a checkout whose origin
+   *  is the catalog's repository (src/cli/commands/lint-plan.ts); absent ⇒ {@link newPublicTaskRecordViolations} is silent. */
+  newPublicTaskRecordIds?: ReadonlySet<string>;
   /** Severity for {@link monolithFilingViolations}. Default "block" — retrofit cost is zero. */
   monolithFiling?: LintSeverity;
   /** Severity for {@link proofScopeViolations}. Default "warn" — see that check's section comment
@@ -3812,6 +3836,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...blockedRecordUnruledViolations(task));
   violations.push(...callSiteViolations(task, opts));
   violations.push(...monolithFilingViolations(task, opts));
+  violations.push(...newPublicTaskRecordViolations(task, opts));
   violations.push(...duplicateTitleViolations(task, opts));
   violations.push(...unansweredDuplicateTitleViolations(task, opts));
   violations.push(...duplicateSurfaceViolations(task, opts));

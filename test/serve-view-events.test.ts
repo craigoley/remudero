@@ -90,12 +90,21 @@ async function stream(t: TestCtx, url: string): Promise<{ frames: Frame[]; ended
   return { frames, ended: () => done };
 }
 
-async function until(check: () => boolean, ms: number, what: string): Promise<void> {
+async function until<T>(check: () => T | undefined, ms: number, what: string): Promise<T> {
   const deadline = Date.now() + ms;
-  while (!check()) {
+  for (;;) {
+    const result = check();
+    if (result) return result;
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
     await sleep(10);
   }
+}
+
+function waitForRefetchedViewEvent(frames: readonly Frame[], seen: number, etag: string | null): Promise<Frame> {
+  assert.ok(etag, "the refetch returned a view etag");
+  // GET re-judges freshness immediately. The stream may announce that etag on a later sweep.
+  return until(() => frames.slice(seen).find((f) => f.event === "view" && f.data.etag === etag),
+    5_000, "an event carrying the refetch's etag");
 }
 
 test("a ledger row reaches an events subscriber of the assembled serve over real HTTP", async (t) => {
@@ -123,11 +132,18 @@ test("a ledger row reaches an events subscriber of the assembled serve over real
   assert.equal(event.data.view, "read-model");
   assert.equal(event.data.cause, "body");
   const res = await fetch(`${url}/v1/views/read-model`, { headers: READ });
-  // The sweep re-judges on the clock, so a source can age to stale between the body event and the refetch;
-  // the refetch's etag is then the one the sweep's later "judge" event carries, never one no event announced.
-  const refetched = res.headers.get("etag");
-  await until(() => frames.slice(seen).some((f) => f.event === "view" && f.data.etag === refetched), 5_000, "an event carrying the refetch's etag");
+  await waitForRefetchedViewEvent(frames, seen, res.headers.get("etag"));
   t.diagnostic(`ledger append -> SSE view event: ${Math.round(event.at - appendedAt)} ms (tick 20 ms)`);
+});
+
+test("W1-T12032 pins the cause of the intermittent failure", async () => {
+  const fresh = '"read-model-fresh"';
+  const stale = '"read-model-stale"';
+  const frames: Frame[] = [{ event: "view", data: { cause: "body", etag: fresh }, at: 0 }];
+  const announced = waitForRefetchedViewEvent(frames, 0, stale);
+  const judge = { event: "view", data: { cause: "judge", etag: stale }, at: 1 };
+  frames.push(judge);
+  assert.equal(await announced, judge);
 });
 
 test("an events subscriber alone does not extend recycle patience", async (t) => {
