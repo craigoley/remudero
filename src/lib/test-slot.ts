@@ -469,7 +469,8 @@ interface QuiescentScanRecord { reservation: TestSlotReservationIdentity; firstS
  *  does not parse, is no kept scan: the poll then keeps a new first scan, so a bad record only delays a release. */
 function readQuiescentScan(path: string): QuiescentScanRecord | undefined {
   let fd: number;
-  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  // Owner-only mode, as readTestSlotRecordText: no O_CREAT, so it creates nothing (CodeQL js/insecure-temporary-file).
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600); }
   catch { return undefined; /* absent, a link or unopenable: no kept scan, so this poll keeps a fresh first one */ }
   try {
     const st = fstatSync(fd);
