@@ -21,7 +21,7 @@
     - test/a-re-run-review-takes-over-a-dead-owners-pending.test.ts # amended 2026-11-22 for PR 20070 at aa62f68ca: an existing dead-owner fixture the fail-closed re-check holds
     - test/an-aborted-review-posts-no-binding-verdict.test.ts # amended 2026-11-22 for PR 20070 at aa62f68ca: an existing dead-owner fixture the fail-closed re-check holds
     - test/ledger/a-reproduced-fail-is-not-overturned-on-the-same-head.test.ts # amended 2026-11-22 for PR 20070 at aa62f68ca: an existing dead-owner fixture the fail-closed re-check holds
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Two findings from W1-T14035's round-11 review (#19922, merged 2026-11-21 19:03:35Z on 66e66ab89) that the merged

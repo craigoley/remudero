@@ -26,7 +26,7 @@
     - test/fixtures/golden-verdicts/ci-lessons-carry-their-gate/golden.yaml
     - test/fixtures/golden-verdicts/ci-lessons-carry-their-gate/checkout/learnings/ci.yaml
     - test/golden-verdicts.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at origin/main dd829e355 (2026-11-21).

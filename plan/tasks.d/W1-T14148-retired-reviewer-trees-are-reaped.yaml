@@ -21,7 +21,7 @@
     - src/lib/reviewer-worktree-lease.ts
     - src/cli/commands/daemon.ts
     - test/review/retired-reviewer-trees-are-reaped.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:never-reap-a-leased-tree — a reviewer tree at an old sha, idle past the grace, whose <path>.lock names a live pid of another process (a spawned child) is kept with reason \"leased\" and still exists after the pass; the same holds for a tree this process is borrowing through withReviewerWorktreeLease when the pass runs inside the borrow's action"

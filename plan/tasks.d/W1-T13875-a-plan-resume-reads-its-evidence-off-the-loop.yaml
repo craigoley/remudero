@@ -19,7 +19,7 @@
     - test/dispatch/product-plan-operation.test.ts
     - src/lib/ledger-union.ts
     - test/ledger-union.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A resume of a refused hand-off reads no ledger evidence and answers refused; a legacy refusal (saved before refusals said whether anything ran) reads only its request-to-refusal window, once, and keeps the result"

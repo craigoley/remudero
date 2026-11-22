@@ -24,7 +24,7 @@
     - test/the-fleet-runs-a-skill-drafts-held-out-eval-once-per-text.test.ts
     - "src/lib/fleet-liveness.ts"
     - "src/lib/instance-gateway.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "autoEvaluateSkillDrafts runs the held-out eval for a staged skill draft that is open (not ratified, not declined, not closed by the workshop), passes the W1-T13858 whole-draft check on its stored text, and has no eval and no auto-eval claim for the sha256 of that text. No argv carries --confirm-spend. It writes the claim on the registry entry and one skill_eval.auto_claimed row before the first attempt, and it records the verdict on the proposal the same way skillEvalCommand does."
