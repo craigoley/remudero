@@ -279,7 +279,7 @@ test("W1-T13991 criterion 1: a merge into main that conflicts the live round's o
 
 /** A round DISPATCHED for a merge conflict, through the sweep's real dispatchFix and its real claim wiring: it pushes a
  *  resolution (PUSHED), ends its fix.done keeping its claim into its CI wait, and a sweep pass then finds a new failure
- *  on that head. The fix rung is the one seam replaced: it stands in for the round's own `fix.done` and wait rows. */
+ *  on that head. The stubbed fix rung supplies the round's own `fix.done` and wait rows. */
 async function conflictRoundWaitingOnCi(t: TestContext) {
   const root = scratch(t, "conflict-round");
   for (const dir of ["state/inflight", "repos/fixture", "tmp"]) mkdirSync(join(root, dir), { recursive: true });
@@ -306,6 +306,7 @@ async function conflictRoundWaitingOnCi(t: TestContext) {
     registeredOwnerRecovery: { capture: () => undefined, remove: () => undefined },
     dispatchFixPreflightStandDownImpl: async () => undefined, fixBranchClaimKeyImpl: fixBranchClaimKey,
     createFixRungWorktreeImpl: () => undefined, captureWorktreeSnapshotImpl: () => ({ headSha: "3179eb03" }),
+    resolveTaskContractAtHeadImpl: () => ({ criteria: task.acceptance, taskDeclaredFiles: task.files }),
     buildFixRungDispatchArgsImpl: () => ({}), openTaskIdsFromPlanImpl: () => new Set([task.id]),
     readPackageScriptsImpl: () => ({}), worktreeRemoveImpl: () => {},
     ghJsonImpl: () => ({ headRefName: BRANCH, headRefOid: "3179eb03", body: "", files: [] }),
@@ -351,7 +352,8 @@ async function conflictRoundWaitingOnCi(t: TestContext) {
       // A failing review on that same head, after the conflict is taken, is the same live round's to take.
       rmSync(dirname(fixRoundHandoffPath(root, claimId)), { recursive: true, force: true });
       mkdirSync(dirname(fixRoundHandoffPath(root, claimId)), { recursive: true });
-      const review = await runSweep([reviewGatePr(PUSHED)], sweepDeps("SWEEP-PEER-2"), policy);
+      const reviewPr = { ...reviewGatePr(PUSHED), prUrl: view(PUSHED).prUrl, mergeState: "clean" } as const;
+      const review = await runSweep([reviewPr], sweepDeps("SWEEP-PEER-2"), policy);
       seen.reviewPass = review.actions.find((a) => a.prNumber === PR)?.reason;
       seen.reviewMarker = readFixRoundHandoff(fixRoundHandoffPath(root, claimId));
       return { outcome: "stood_down", strikes: 0, retriggers: 0 };

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { systemClock } from "#src/lib/clock.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, spawnWorker } from "#src/lib/worker.js";
 import { ledgeredNonDispatchSpawn, runReview } from "#src/run-task.js";
@@ -160,6 +161,10 @@ async function driveReview(diffText: string, controlledClock = false): Promise<D
     process.env[CLAUDE_BIN_ENV_OVERRIDE] = fakeClaude;
 
     const ledgerPath = join(root, "ledger.ndjson");
+    // W1-T14241: this fixture's code-review control is CAPPED (its proof never executes), and a capped code pass now
+    // posts pending unless an operator override is recorded for its PR and head — so the control records one.
+    appendLedger(ledgerPath, { run_id: "operator", task_id: "W1-T2472", step: "automerge.capped_override_granted",
+      by: "operator", reason: "fixture: release the capped control", pr_url: "https://github.com/acme/remudero/pull/1", head_sha: HEAD });
     const diffFile = join(root, "diff.txt");
     writeFileSync(diffFile, diffText, "utf8");
     writeFileSync(

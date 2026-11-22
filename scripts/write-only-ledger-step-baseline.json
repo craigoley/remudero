@@ -1439,6 +1439,7 @@
     "reviewer.model_divergence_failed": "A diagnostic for a per-model health evaluation that threw; it records the error, and the sha-level reviewer health is unaffected.",
     "reviewer.model_divergence_issue_close_failed": "A diagnostic for a failed close of a model-divergence issue; it records the error and the issue URL for the operator.",
     "reviewer.model_divergence_opened": "An operator-facing record that a model-divergence incident opened with its issue; the incident state carries the decision, so nothing re-reads the row.",
+    "reviewer.regression_blame_cleared": "An operator-facing record of why a reviewer-regression incident closed (the healed and regressed k/n and the offending sha); the closed incident in reviewer-health.json carries the decision, so nothing re-reads the row.",
     "reviewer_tree.reaped": "A janitor's receipt from the retired reviewer-tree reaper: it names the trees it removed, the bytes freed and any tree kept for an unexpected reason, and nothing decides on it.",
     "sweep.fix.admission_release_failed": "A diagnostic for a failed release of a fix round's admission lock; the lock is left to the stale-holder check, and the row makes the leak visible.",
     "sweep.fix.deferred_to_live_round": "An operator-facing record that a new failure was handed to the live fix round instead of a second round; the hand-off file carries the decision, so nothing re-reads the row.",
