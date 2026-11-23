@@ -1068,6 +1068,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T5903: runSweep reads this row back to write ONE skipped_queue row per PR and head; dropping
   // it on rotation would re-log the same stand-down every pass.
   "sweep.update_branch.skipped_queue",
+  // W1-T14315: a light-pass slot that found its PR merged, closed or moved writes this row instead of
+  // an update. It is kept beside its siblings so rotation cannot erase the evidence that no update ran.
+  "sweep.update_branch.skipped_not_open",
   // W1-T7735: the refresh value test reads its own decision rows back. Judge rulings are spent once
   // per head, a repeated skip writes no second row, and a request is consumed once. Outcomes join
   // decisions to derive the benefit weight. Each row dropped on rotation would re-spend a judge call

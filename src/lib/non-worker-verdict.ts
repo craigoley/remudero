@@ -47,12 +47,45 @@ const HARNESS_CHECKPOINT_NO_PR_REASONS: ReadonlySet<string> = new Set(["restart_
  *  restart, a lost claim race, a fetch or infrastructure refusal, or the harness failing its own checkpoint
  *  is excluded by name. MEASURED 2026-10-11: W1-T7742 tripped at 5 with not one of its seven runs a worker
  *  failure (two node_modules refusals, a claim race, a refused checkpoint push, two restart yields). */
-export function streakRefusal(line: Record<string, unknown>): string | undefined {
+export function streakRefusal(line: Record<string, unknown>, runRows?: Iterable<Record<string, unknown>>): string | undefined {
   return lifetimeInfrastructureRefusal(line) ??
     (line.verdict === "no_pr" && typeof line.reason === "string" && HARNESS_CHECKPOINT_NO_PR_REASONS.has(line.reason) ? line.reason : undefined) ??
     (inconclusiveProofRefusal(line) ? PROOF_INCONCLUSIVE : undefined) ??
     (collectedNothingRefusal(line) ? PROOF_COLLECTED_NOTHING : undefined) ??
-    (pushAuthRefusal(line) ? PUSH_AUTH_REFUSED : undefined);
+    (pushAuthRefusal(line) ? PUSH_AUTH_REFUSED : undefined) ??
+    (harnessRunErrorBeforeWorker(line, runRows) ? HARNESS_RUN_ERROR_BEFORE_WORKER : undefined);
+}
+
+export const HARNESS_RUN_ERROR_BEFORE_WORKER = "harness_run_error_before_worker";
+
+/** A worker row of a run: a row of the run whose step is in a worker family. */
+const WORKER_ROW_STEP = /^(?:worker|recon|implement|fix)\./;
+
+/** A harness failure before any worker row is not charged to the task as a worker failure: true only for a
+ *  `failed` verdict at `run.error` whose run's rows hold its `run.start` and no worker row. With no run rows
+ *  (undefined), or rows without the run's start, it is false and the run counts as before. */
+export function harnessRunErrorBeforeWorker(
+  verdict: Record<string, unknown>, runRows: Iterable<Record<string, unknown>> | undefined,
+): boolean {
+  if (verdict.verdict !== "failed" || verdict.stage !== "run.error" || runRows === undefined || typeof verdict.run_id !== "string") return false;
+  let started = false;
+  for (const row of runRows) {
+    if (row.run_id !== verdict.run_id) continue;
+    if (typeof row.step === "string" && WORKER_ROW_STEP.test(row.step)) return false;
+    if (row.step === "run.start") started = true;
+  }
+  return started;
+}
+
+/** The rows of each run that has a `failed` verdict at `run.error`, read in two passes: a Map from run_id. */
+export function runErrorRunRows(rows: Iterable<Record<string, unknown>>): Map<string, Array<Record<string, unknown>>> {
+  const byRun = new Map<string, Array<Record<string, unknown>>>();
+  for (const row of rows) {
+    if (row.step === "verdict" && row.verdict === "failed" && row.stage === "run.error" && typeof row.run_id === "string") byRun.set(row.run_id, []);
+  }
+  if (byRun.size === 0) return byRun;
+  for (const row of rows) if (typeof row.run_id === "string") byRun.get(row.run_id)?.push(row);
+  return byRun;
 }
 
 export const PUSH_AUTH_REFUSED = "push_auth_refused";

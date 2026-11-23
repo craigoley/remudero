@@ -3,7 +3,7 @@ import { withGuardrailAttempt } from "./benchmark-run.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { loadPlan, parseTasksFromYaml } from "./plan.js";
+import { loadPlanKeepingUnseenDependencies, parseTasksFromYaml } from "./plan.js";
 import { lintTask, type LintOpts } from "./task-linter.js";
 import { resolveOwnerRepoAt } from "./owner-repo.js";
 
@@ -128,15 +128,20 @@ export function newMonolithIdsAgainstBase(worktreeRoot: string, baseRef = "origi
  * A plan that will not LOAD is itself one blocking violation, so a malformed filing drives a
  * redraft rather than falling through to a PR that every plan-loading check rejects — the same
  * treatment inbox gives an unparseable fragment.
+ *
+ * W1-T14556: an EXISTING record keeps a depends_on edge to a task only the other catalog holds
+ * ("preserve-external", as the other cross-catalog readers load), so one such edge does not fail
+ * every triage. A record THIS RUN filed stays strict: its own unknown edge is still a plan-load block.
  */
 export function lintFiledTasks(
   worktreeRoot: string,
   filedIds: ReadonlyArray<string>,
   opts: LintOpts = {},
 ): RelintViolation[] {
+  const wanted = new Set(filedIds);
   let plan;
   try {
-    plan = loadPlan(join(worktreeRoot, "plan", "tasks.yaml"));
+    plan = loadPlanKeepingUnseenDependencies(join(worktreeRoot, "plan", "tasks.yaml"), (task) => !wanted.has(task.id));
   } catch (e) {
     return [
       {
@@ -146,7 +151,6 @@ export function lintFiledTasks(
       },
     ];
   }
-  const wanted = new Set(filedIds);
   const out: RelintViolation[] = [];
   let localRepoName = opts.localRepoName;
   if (!localRepoName) {

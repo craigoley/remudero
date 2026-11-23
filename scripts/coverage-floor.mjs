@@ -20,10 +20,11 @@ export const PIN_SCHEMA = 1;
 export const MAX_AGE_HOURS = 24;
 /** Future-dated measurements cannot authorize narrowing. */
 export const CLOCK_SKEW_MS = 0;
-/** coverage-nightly.yml's matrix width: 12 since W1-T13275 design 3 moved its premap into the shards (run 44033818223). */
-export const NIGHTLY_SHARD_COUNT = 12;
+/** coverage-nightly.yml's matrix width: ci.yml's coverage width since W1-T13275 design 3 moved its premap into the shards
+ * (run 44033818223); 16 since W1-T14558. */
+export const NIGHTLY_SHARD_COUNT = 16;
 /** W1-T13270: ci.yml's coverage-shard matrix width, equal to src/lib/ci-parity.ts CI_COVERAGE_SHARD_COUNT. */
-export const CI_COVERAGE_SHARD_COUNT = 12;
+export const CI_COVERAGE_SHARD_COUNT = 16;
 /** Candidates listed per producer (created at or before the as-of time), and downloaded per producer. */
 const LIST_LIMIT = 20;
 const DOWNLOAD_LIMIT = 2;
