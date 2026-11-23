@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runDaemon, type DaemonDeps, type OpsTaskDispatchRead } from "#src/lib/daemon.js";
 import { mergePlanBlobs } from "#src/lib/plan.js";
+import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
 import { drainDetachedSweepActions } from "#src/lib/sweep.js";
 import type { MoveRun, PlanTaskMover, PlanTaskMovePorts } from "#src/lib/plan-task-move-janitor.js";
 
@@ -48,6 +49,7 @@ async function iterate(mover: PlanTaskMover, cycles: number, reads: (cycle: numb
   const rows: Row[] = [];
   let cycle = 0, read = 0;
   await runDaemon(PLAN, {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => () => true, targetRepo: "remudero",
     runOne: async (id: string) => ({ taskId: id, runId: id, merged: true, costUsd: 0, verdict: "merged" }),
     checkPause: () => undefined,
