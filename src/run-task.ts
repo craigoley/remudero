@@ -1562,7 +1562,7 @@ import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, typ
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount, type Mounts } from "./lib/mounts.js";
 import { runFixSelfCheckWith, type FixSelfCheckRunArgs } from "./lib/fix-self-check.js";
-import { resolveMountExplorationDispatch as exploreMount } from "./lib/mount-exploration.js";
+import { loadMountHeadroomCells, resolveMountExplorationDispatch as exploreMount } from "./lib/mount-exploration.js";
 import {
   RULING_JUDGED_STEP,
   judgeRulingRisk,
@@ -34247,14 +34247,11 @@ export async function runMountRecommenderRung(
     }
     writeFeedbackDocketMarker(markerPath, { lastFireIso: now.toISOString() });
 
-    let buildMountHeadroomSweep = deps.buildMountHeadroomSweep;
-    if (!buildMountHeadroomSweep) {
-      const scriptUrl = pathToFileURL(join(root, "scripts", "mount-headroom-sweep.mjs")).href;
-      ({ buildMountHeadroomSweep } = (await import(scriptUrl)) as {
-        buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
-      });
-    }
-    const sweep = buildMountHeadroomSweep(stateDir);
+    // W1-T13791's loader, not a plain import(): this rung runs in the bundled run child, which has no tsx loader, and
+    // the sweep imports src/*.ts that Node's strip-only mode refuses (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX).
+    const sweep = deps.buildMountHeadroomSweep
+      ? deps.buildMountHeadroomSweep(stateDir)
+      : { cells: await loadMountHeadroomCells(root, stateDir) };
     const mounts = loadMounts(mountsPath(root));
     // Derive the objective from the SAME sanctioned environment boundary a real worker crosses:
     // API only when config opts in AND the key is materially present; otherwise subscription.
