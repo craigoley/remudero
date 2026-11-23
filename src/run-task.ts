@@ -2481,8 +2481,25 @@ export function buildReviewerHealthRoute(
   const readRows = (cursor: Parameters<typeof readReviewerHealthRows>[1]) => readReviewerHealthRows(dirname(ledgerPath), cursor);
   const healthLog = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "REVIEWER-HEALTH", step, lane: "review", ...extra });
-  const { cut, remove } = healedReviewerTreeTools(repoDir, tree.worktreeRoot,
+  const { cut: cutShared, remove } = healedReviewerTreeTools(repoDir, tree.worktreeRoot,
     (prefix, sha) => prepareFreshOriginMainTree(repoDir, tree, prefix, sha));
+  const cut = async (prefix: string, sha: string): Promise<string> => {
+    try {
+      return await cutShared(prefix, sha);
+    } catch (error) {
+      // A registered checkout can be locked against recovery. Build from the same main on a sibling.
+      if (!(error instanceof UnprovenFreshTreeError)) throw error;
+      const path = perAttemptTreePath(tree, prefix, sha);
+      tree.addWorktree(repoDir, path, sha);
+      try {
+        makeTreeRunnable(repoDir, tree, prefix, path);
+        return path;
+      } catch (preparationError) {
+        await removePerAttemptTree(repoDir, tree, path);
+        throw preparationError;
+      }
+    }
+  };
   return async (prArg, rest, reviewDeps, normal) => {
     // An unreadable origin/main still ingests; no current reviewer is judged this call.
     const originMainSha = await git(["rev-parse", "origin/main"]).then((text) => text.trim(), () => null);
