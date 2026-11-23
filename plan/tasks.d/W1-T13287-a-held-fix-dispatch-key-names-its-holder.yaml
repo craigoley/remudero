@@ -18,7 +18,7 @@
     - src/lib/sweep.ts
     - test/a-held-fix-dispatch-key-names-its-holder.test.ts
     - test/sweep/a-queued-host-fix-dispatch-never-holds-its-key-unexplained.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When a registered fix run child (registerChildWork with a fixKey) holds the key, claimFixDispatch refuses with a reason that names the child's run id and how long it has run, and the refusal fields carry in_flight_action fix-child, in_flight_run_id and in_flight_age_ms; the reason never says 'already claimed this pass' or 'a concurrent sweep'"
