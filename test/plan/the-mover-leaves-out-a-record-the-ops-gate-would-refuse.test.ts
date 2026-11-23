@@ -162,9 +162,10 @@ const INVARIANT: Record<string, string> = {
   "W1-T407": at("W1-T407", 3),
   "W1-T408": bare("W1-T408", '  risk: high\n  attempts: 1\n  acceptance:\n    - claim: "met before"\n      satisfied_by: "#99"\n').replace("priority: 1", "priority: 2"),
 };
-const EXPECTED_BATCH = ["W1-T402", "W1-T405", "W1-T407", "W1-T408"];
+// W1-T14425 replaces the W1-T14424 contract that refused the verify:human W1-T401 (verify_human): it is admitted, first by priority.
+const EXPECTED_BATCH = ["W1-T401", "W1-T402", "W1-T405", "W1-T407", "W1-T408"];
 const EXPECTED_REFUSED = [
-  { id: "W1-T401", reason: "verify_human" }, { id: "W1-T403", reason: "not_open" }, { id: "W1-T404", reason: "reservation_absent" }, { id: "W1-T406", reason: "public_dependants" },
+  { id: "W1-T403", reason: "not_open" }, { id: "W1-T404", reason: "reservation_absent" }, { id: "W1-T406", reason: "public_dependants" },
 ];
 const prepare = (w: ReturnType<typeof moveWorld>) => { w.pub.origin.git("update-ref", "-d", "refs/rmd-id/W1-T404"); };
 

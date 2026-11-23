@@ -20,7 +20,7 @@
     - test/daemon/ops-catalog-shadow-enabled.test.ts
     - test/quiet-hours-dispatch-gate.test.ts
     - test/plan/ops-catalog-shadow-real-reader.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Each tick selection and lane refill writes one row with its total time and the time spent per eligibility check, summed over the candidates it examined, and the number of candidates examined"
