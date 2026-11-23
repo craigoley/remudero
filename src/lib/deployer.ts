@@ -2752,6 +2752,55 @@ const IMAGE_BUILD_ACTIVE_STATUSES: readonly string[] = ["queued", "in_progress",
 /** How many of the newest `image/*` tags are checked for one that contains the baked change. */
 const IMAGE_TAG_SCAN_LIMIT = 10;
 
+/**
+ * W1-T14360 — each pending commit's own `Remudero-Task:` lines, read from its body (`%b`, never the subject), anchored
+ * to a whole line the way every other Remudero reader of the trailer is. Not git's `%(trailers)`: that parses only the
+ * LAST paragraph, and a squash merge appends `Co-authored-by:` after the PR body, so it found the task on 39 of the last
+ * 400 src/ or scripts/ commits on main where this read finds 381 (measured 2026-11-22).
+ */
+const PENDING_COMMIT_TASKS_FORMAT = "--format=%x1e%H%x1f%b";
+const TASK_TRAILER_LINE = /^Remudero-Task:\s*(\S+)\s*$/gm;
+
+export function parsePendingCommitTasks(text: string): Map<string, string[]> {
+  const tasks = new Map<string, string[]>();
+  for (const record of text.split("\x1e")) {
+    const split = record.indexOf("\x1f");
+    if (split < 0) continue;
+    const ids = [...new Set([...record.slice(split + 1).matchAll(TASK_TRAILER_LINE)].map((match) => match[1]!))];
+    if (ids.length > 0) tasks.set(record.slice(0, split).trim(), ids);
+  }
+  return tasks;
+}
+
+/**
+ * Tags each change with the tasks its commit names. Commits never change, so a sha read once is not read again while
+ * it stays pending. An unreadable log tags nothing: the minimum lifetime then holds as it would without the trailer.
+ */
+export function pendingCommitTaskReader(git: (args: string[]) => Promise<string>) {
+  let known = new Map<string, readonly string[] | undefined>();
+  return async <C extends DeployWorthChange>(changes: readonly C[]): Promise<C[]> => {
+    const unread = changes.map((change) => change.sha).filter((sha) => !known.has(sha));
+    const read = new Map(known);
+    if (unread.length > 0) {
+      let text: string;
+      try {
+        text = await git(["log", "--no-walk=unsorted", PENDING_COMMIT_TASKS_FORMAT, ...unread]);
+      } catch (error) {
+        // Fail closed and uncached: an unreadable trailer names no task, and the next reading tries again.
+        void error;
+        return [...changes];
+      }
+      const parsed = parsePendingCommitTasks(text);
+      for (const sha of unread) read.set(sha, parsed.get(sha));
+    }
+    known = new Map(changes.map((change) => [change.sha, read.get(change.sha)]));
+    return changes.map((change) => {
+      const tasks = known.get(change.sha);
+      return tasks ? { ...change, tasks } : change;
+    });
+  };
+}
+
 /** `owner/name` of a github.com remote URL (https or ssh), else undefined. */
 export function githubSlugOf(remoteUrl: string): string | undefined {
   return /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\s*$/.exec(remoteUrl.trim())?.[1];

@@ -171,6 +171,10 @@ export interface Task {
    *  `compareDispatch` (lib/drain.ts); the §5C linter warns on a value outside [0, 99].
    *  Why: docs/forensics/plan.md#taskpriority. */
   priority?: number;
+  /** W1-T14360: why this task's merged fix may pass the freshness restart's minimum lifetime, set only when it is filed
+   *  as the fix for a live leak or storm. Read only by the expedite fast path (deploy-judge.ts `pendingExpedite`);
+   *  a blank value declares nothing. Unlike `priority`, it is an urgency signal. */
+  expedite?: string;
   /** Decorative/initial-state only — real merge state is derived from GitHub (`deriveStatus` in
    *  lib/status.ts) and never written back here; see CLAUDE.md on why this is not a completion signal. */
   status: TaskStatus;
@@ -917,6 +921,8 @@ export function parseTasksFromYaml(
       risk,
       band_meaning: bandMeaning,
       priority: typeof e.priority === "number" ? e.priority : undefined,
+      // W1-T14360: only a string declares an expedite; any other value is none, so the floor holds.
+      ...(typeof e.expedite === "string" ? { expedite: e.expedite } : {}),
       status,
       dispatch_hold: e.dispatch_hold as boolean | undefined,
       new_path_approval_ref: e.new_path_approval_ref as string | undefined,

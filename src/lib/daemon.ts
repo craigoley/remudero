@@ -48,7 +48,7 @@ import {
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
-import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_RATE_CEILING_MS, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, FRESHNESS_LIKELY_FRACTION, FRESHNESS_MAX_DRAIN_WAIT_MS, FRESHNESS_MIN_LIFETIME_MS, INSTALL_INPUTS_RELEASE, MIN_LIFETIME_HOLD, timeToLikelyFreshnessRestart, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
+import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_RATE_CEILING_MS, DEPLOY_RESTART_SCORE_THRESHOLD, EXPEDITE_RELEASE, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, FRESHNESS_LIKELY_FRACTION, FRESHNESS_MAX_DRAIN_WAIT_MS, FRESHNESS_MIN_LIFETIME_MS, INSTALL_INPUTS_RELEASE, MIN_LIFETIME_HOLD, pendingExpedite, timeToLikelyFreshnessRestart, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -1758,6 +1758,9 @@ export interface DaemonDeps {
    *  closes admission; admitted lanes settle before the existing drain and stale exit (W1-T5308). A
    *  promise is awaited at the tick's own boundaries; a lane's sync refill reads the latest settled one (W1-T5282). */
   checkFreshness?: () => DaemonFreshness | Promise<DaemonFreshness>;
+  /** W1-T14360: a task's declared `expedite` reason from the catalogs the daemon already holds, or undefined. Asked only
+   *  for the tasks a pending commit's own Remudero-Task line names (`DeployWorthChange.tasks`); absent, no expedite. */
+  taskExpedite?: (taskId: string) => string | undefined;
   /** W1-T9631: the sha the boot checkout could not reach; defaults to the entrypoint's RMD_BOOT_CHECKOUT_BLOCKED. */
   bootCheckoutBlocked?: string;
   /** Consulted only when freshness reports an install is needed. Runs before the loop stops for
@@ -5832,19 +5835,25 @@ export async function runDaemon(
     freshnessOutlook = { weight: decision.weight, staleSinceMs: staleAtMs };
     // OPERATOR RULING 2026-10-17: this lifetime began when the loop did (the boot gate's start); every release but the
     // fast paths waits until it is FRESHNESS_MIN_LIFETIME_MS old. Both rows carry it, so the hold is measurable.
+    const expedite = deps.taskExpedite ? pendingExpedite(freshness.changes, deps.taskExpedite) : undefined;
     const coalesced = coalesceFreshnessRestart({
       decision, newSha: freshness.newSha, lastAdvanceAtMs: lastAdvanceAtMs!,
       staleSinceMs: staleAtMs, nowMs, window: freshnessQuietWindow, installInputsChanged: changesInstallInputs(freshness.changes),
       threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs,
       lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: freshnessMinLifetimeMs,
+      ...(expedite ? { expedite } : {}),
     });
     const lifetimeEvidence = {
       lifetime_ms: Math.max(0, nowMs - bootGateStartedAtMs), min_lifetime_ms: freshnessMinLifetimeMs,
       ...(coalesced.reason === MIN_LIFETIME_HOLD ? { held_by: MIN_LIFETIME_HOLD } : {}),
+      // W1-T14360: the expedite fast path names the task and its declared reason on both rows.
+      ...(coalesced.expedite
+        ? { fast_path: EXPEDITE_RELEASE, expedite_task_id: coalesced.expedite.taskId, expedite_reason: coalesced.expedite.reason }
+        : {}),
     };
     const action = coalesced.action === "hold" ? "defer" : coalesced.action;
     if (action === "restart") freshnessDecidedAtMs ??= nowMs;
-    const released = ["window_quiet", "upper_age", INSTALL_INPUTS_RELEASE].includes(coalesced.reason);
+    const released = ["window_quiet", "upper_age", INSTALL_INPUTS_RELEASE, EXPEDITE_RELEASE].includes(coalesced.reason);
     if (coalesced.action === "hold" || freshnessHeld || released) {
       log("daemon.freshness_coalesced", {
         action: coalesced.action,

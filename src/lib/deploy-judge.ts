@@ -60,6 +60,9 @@ export interface DeployWorthChange {
   sha: string;
   subject?: string;
   files: readonly string[];
+  /** W1-T14360: the task ids this commit's own `Remudero-Task:` lines name, read from its body, never its subject.
+   *  Absent when it names none or could not be read. */
+  tasks?: readonly string[];
 }
 
 export interface DeployWorthVerdict {
@@ -469,11 +472,51 @@ export function changesInstallInputs(changes: readonly DeployWorthChange[] | und
  * OPERATOR RULING 2026-10-17: a daemon lifetime runs at least 90 minutes before a freshness restart takes it. On
  * 2026-10-17 the daemon read stale ~20 min after each boot and upper_age released it 30 min later, so it restarted
  * about every 75 min (18.2 freshness restarts/day over 10-12..10-17); replaying those 1406 commits with this floor
- * gave 10.9/day. Only the fast paths pass it: install inputs, withheld reviews and an unreadable advance.
+ * gave 10.9/day. Only the fast paths pass it: install inputs, withheld reviews, an unreadable advance, and (W1-T14360)
+ * a declared expedite.
  */
 export const FRESHNESS_MIN_LIFETIME_MS = 90 * 60_000;
 /** The coalesce reason, and the ledger's `held_by`, for a restart held by {@link FRESHNESS_MIN_LIFETIME_MS}. */
 export const MIN_LIFETIME_HOLD = "min_lifetime";
+
+/**
+ * W1-T14360 — the expedite fast path. 2026-11-22: #20230, a fix for a live cost leak, merged nine minutes into a
+ * lifetime and waited out the floor although the pressure (21) was over the score limit (18). A task record may declare
+ * `expedite: <reason>` when it is filed as the fix for a live leak or storm; a pending commit whose own Remudero-Task
+ * line names such a task passes the minimum lifetime, and only while the pressure is already over the limit. Priority
+ * is never read: 47 records sit at priority 0, and 14 of 44 measured holds held one (operator ruling 2026-11-23).
+ */
+export const EXPEDITE_RELEASE = "expedite";
+
+export interface FreshnessExpedite {
+  taskId: string;
+  /** The record's own `expedite` text, verbatim. */
+  reason: string;
+}
+
+/**
+ * The first pending commit's task whose record declares a non-blank expedite, or undefined. `expediteOf` reads the
+ * catalogs; one that throws is an unreadable catalog, which holds like a task with no expedite.
+ */
+export function pendingExpedite(
+  changes: readonly DeployWorthChange[] | undefined,
+  expediteOf: (taskId: string) => string | undefined,
+): FreshnessExpedite | undefined {
+  for (const change of changes ?? []) {
+    for (const taskId of change.tasks ?? []) {
+      let reason: unknown;
+      try {
+        reason = expediteOf(taskId);
+      } catch (error) {
+        // Fail closed: an unreadable catalog declares nothing, so the minimum lifetime holds as it would without it.
+        void error;
+        continue;
+      }
+      if (typeof reason === "string" && reason.trim() !== "") return { taskId, reason };
+    }
+  }
+  return undefined;
+}
 
 export function coalesceFreshnessRestart(input: {
   decision: FreshnessDecision;
@@ -489,7 +532,9 @@ export function coalesceFreshnessRestart(input: {
   lifetimeStartedAtMs: number;
   /** Defaults to {@link FRESHNESS_MIN_LIFETIME_MS}. */
   minLifetimeMs?: number;
-}): { action: "restart" | "hold" | "defer"; reason: string; heldMs?: number; windowEndsAtMs?: number } {
+  /** W1-T14360: the pending commit's declared expedite ({@link pendingExpedite}); absent, the floor holds as before. */
+  expedite?: FreshnessExpedite;
+}): { action: "restart" | "hold" | "defer"; reason: string; heldMs?: number; windowEndsAtMs?: number; expedite?: FreshnessExpedite } {
   const { decision } = input;
   if (decision.action === "defer") return decision;
   const windowEndsAtMs = input.lastAdvanceAtMs + input.window.value;
@@ -500,9 +545,12 @@ export function coalesceFreshnessRestart(input: {
   const heldMs = Math.max(0, input.nowMs - input.staleSinceMs);
   // Every other release (change, age, idle; window_quiet and upper_age below) waits out the minimum lifetime.
   if (input.nowMs - input.lifetimeStartedAtMs < (input.minLifetimeMs ?? FRESHNESS_MIN_LIFETIME_MS)) {
-    return input.installInputsChanged
-      ? { action: "restart", reason: INSTALL_INPUTS_RELEASE, heldMs, windowEndsAtMs }
-      : { action: "hold", reason: MIN_LIFETIME_HOLD, heldMs, windowEndsAtMs };
+    if (input.installInputsChanged) return { action: "restart", reason: INSTALL_INPUTS_RELEASE, heldMs, windowEndsAtMs };
+    // W1-T14360: a declared expedite passes only a pressure already over the limit; at or under it, the floor holds.
+    if (input.expedite && decision.pressure > (input.threshold ?? DEPLOY_RESTART_SCORE_THRESHOLD).value) {
+      return { action: "restart", reason: EXPEDITE_RELEASE, heldMs, windowEndsAtMs, expedite: input.expedite };
+    }
+    return { action: "hold", reason: MIN_LIFETIME_HOLD, heldMs, windowEndsAtMs };
   }
   if (decision.restartTrigger !== "change") return { action: "restart", reason: decision.reason, heldMs: 0, windowEndsAtMs };
   if (input.installInputsChanged) return { action: "restart", reason: INSTALL_INPUTS_RELEASE, heldMs, windowEndsAtMs };
