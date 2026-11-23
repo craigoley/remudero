@@ -1,4 +1,5 @@
 import { threadName } from "./thread-names.js";
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -49,6 +50,7 @@ import {
 } from "./mount-recommender.js";
 import { loadMounts, mountsPath, type JudgeShadowOnlyRole } from "./mounts.js";
 import { loadPlan } from "./plan.js";
+import { policyPath } from "./policy.js";
 import { planShards } from "./plan-gardener.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { ROUTING_EXPERIMENTS, type RoutingExperiment } from "./routing-experiments.js";
@@ -88,8 +90,8 @@ import { deriveTaskClass } from "./task-class.js";
  * classes never moves on its own — the canary is the judge, never a second opinion.
  */
 
-export type ConfigGardenClass = "recalibrate-budget" | "adopt-mount" | "re-derive-cap" | "move-judge-to-cash";
-export const CONFIG_GARDEN_CLASSES: readonly ConfigGardenClass[] = ["recalibrate-budget", "adopt-mount", "re-derive-cap", "move-judge-to-cash"];
+export type ConfigGardenClass = "recalibrate-budget" | "adopt-mount" | "re-derive-cap" | "move-judge-to-cash" | "retune-restart";
+export const CONFIG_GARDEN_CLASSES: readonly ConfigGardenClass[] = ["recalibrate-budget", "adopt-mount", "re-derive-cap", "move-judge-to-cash", "retune-restart"];
 
 /** One whole-line replacement in a repo file. A rollback swaps `from` and `to`. */
 export interface ConfigEdit {
@@ -163,6 +165,8 @@ export interface ConfigInventory {
   judgeShadowScores?: TypedAnswerScoreGroup[];
   /** W1-T12417: the least top-option probability each decision model clears the bar at, per role ({@link judgeShadowThresholds}). */
   judgeShadowThresholds?: JudgeShadowThreshold[];
+  /** W1-T12232: the complete `daemon.restart_cycle` rows the retune reads, and when its two policy rows last changed. */
+  restart?: RestartCycleSample;
   active: ConfigCanary[];
   /** Scopes whose canary was rolled back or declined within {@link CANARY_TTL_MS}: re-proposing the same
    *  change on the next pass would only repeat the verdict. */
@@ -197,6 +201,19 @@ export const CANARY_TTL_MS = 21 * 24 * 3600 * 1000;
 export const CONFIG_GARDEN_BUCKET_MS = 6 * 3600 * 1000;
 /** How often the open canaries are judged. */
 export const CONFIG_TEND_INTERVAL_MS = 3600 * 1000;
+/** W1-T12232: complete `daemon.restart_cycle` rows the retune reads before it proposes anything. Fewer are noise:
+ *  the 2026-11-04/11 hand count took 36 restarts to separate the two costs at all. */
+export const RESTART_TUNE_SAMPLE = 20;
+/** W1-T12232: how many times one median cost must exceed the other before either row moves. The hand count's own
+ *  ratio was 1.0 (median 39 min waiting against 41 min restarting), so this factor would have proposed nothing. */
+export const RESTART_TUNE_FACTOR = 1.5;
+/** W1-T12232: the share of its current value a proposed row moves by. One canary, one step. */
+export const RESTART_TUNE_STEP = 0.25;
+/** W1-T12232: the ledger step W1-T12229 writes once per freshness restart cycle. */
+export const RESTART_CYCLE_STEP = "daemon.restart_cycle";
+/** W1-T12232: the two `freshnessRestart` rows the retune can move, as plan/policy.yaml names them. */
+export const RESTART_TUNE_ROWS = ["scoreLimit", "stalenessHorizonMs"] as const;
+export type RestartTuneRow = (typeof RESTART_TUNE_ROWS)[number];
 /** W1-T12187: what a judge's cash shadow must show before its row moves to cash. The three numbers are new and
  *  unmeasured (2026-11-17): the sample floor, the least agreement and the most calls with no usable answer. They are
  *  promotion bars, read from scripts/promotion-{floors,ceilings}-baseline.json (src/lib/promotion-bars.ts). */
@@ -398,6 +415,8 @@ export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
   "followup.filed",
   // W1-T12187: the judges' cash shadow rows, for judgeShadowSummary.
   ...JUDGE_SHADOW_STEPS,
+  // W1-T12232: one row per freshness restart cycle, with what the waiting and the restart cost (restartCycleSample).
+  RESTART_CYCLE_STEP,
 ];
 
 /** W1-T5474: the 60-day union read bounded to {@link CONFIG_GARDEN_LEDGER_STEPS}. An incomplete union fails
@@ -517,6 +536,8 @@ function buildConfigInventory(input: InventoryMeasurement): ConfigInventory {
     judgeShadows: judgeShadowSummary(rows, input.nowMs - JUDGE_CASH_BAR.windowMs),
     judgeShadowScores: scoreTypedAnswers(judgeShadowTypedAnswers(rows, input.nowMs - JUDGE_CASH_BAR.windowMs)).groups,
     judgeShadowThresholds: judgeShadowThresholds(rows, input.nowMs - JUDGE_CASH_BAR.windowMs),
+    // W1-T12232: off the loop with the rest of the measurement — the pickaxe is one `git log -1` per pass.
+    restart: restartCycleSample(rows, freshnessRowsChangedAt(input.repoRoot)),
     active: canaries.filter((c) => isPromotionActive(c.promotion.state)),
     cooling: canaries.filter((c) => c.promotion.state === "rolled_back" && input.nowMs - Date.parse(c.promotion.createdAt) < CANARY_TTL_MS).map((c) => c.promotion.scope.policyScope),
   };
@@ -1152,6 +1173,190 @@ function cashPrimaryEdit(g: TypedAnswerScoreGroup, mounts: ReturnType<typeof loa
 }
 
 /** A draft promotion for `action`, approved by the gardener's own draw and not yet exposed. */
+const readIfPresent = (path: string): string => (existsSync(path) ? readFileSync(path, "utf8") : "");
+
+// ── Retune restart (W1-T12232) ───────────────────────────────────────────────────────────────
+
+/** One complete restart cycle, as the retune reads it. Both costs are present: W1-T12229 writes a part the
+ *  ledger cannot give as null and names it, and a null is never read as 0. */
+export interface RestartCycleCost {
+  waitingCostMs: number;
+  restartCostMs: number;
+  /** Staleness, not a change, released this restart ({@link stalenessReleasedRestart}). */
+  stalenessReleased: boolean;
+}
+
+/** The restart cycles one pass reads: at most {@link RESTART_TUNE_SAMPLE} complete ones, how many rows carried a
+ *  null cost part, and the change the window starts after. */
+export interface RestartCycleSample {
+  /** The newest complete cycles, oldest first. */
+  cycles: RestartCycleCost[];
+  /** Rows in the window with a null cost part or no first verdict: counted, never read as 0. */
+  incomplete: number;
+  /** When either policy row last changed, or null when the history could not say ({@link freshnessRowsChangedAt}). */
+  since: string | null;
+}
+
+/**
+ * W1-T12232: did staleness alone release this restart? The row's `trigger` is the freshness decision's own reason
+ * (restart-cycle.ts): `upper_age` when the held quiet window was released because the change had aged, and otherwise
+ * the pressure sentence `change W + staleness A ... >= L`, where staleness released the restart when the change
+ * weight alone stayed under the limit. An idle restart cost only a boot and is released by neither.
+ */
+export function stalenessReleasedRestart(trigger: unknown): boolean {
+  const text = typeof trigger === "string" ? trigger : "";
+  if (text.includes("upper_age")) return true;
+  const m = /change (\d+) \+ staleness (\d+)[^>]*>= (\d+)/.exec(text);
+  return m !== null && Number(m[2]) > 0 && Number(m[1]) < Number(m[3]);
+}
+
+/**
+ * W1-T12232: the committer date of the last commit that changed either row the retune can move. A cycle at or
+ * before it was measured under the old values, so it is not read. A history that cannot answer — no git, no
+ * checkout, a row the pickaxe never saw — is null, a third value the caller sees: the pass row carries
+ * `restart_cycle_since: null` and the sample then spans every row read, which the reason says.
+ */
+export function freshnessRowsChangedAt(repoRoot: string, spawn: typeof spawnSync = spawnSync): string | null {
+  const args = ["log", "-1", "--format=%cI", "-E", `-G^ *(${RESTART_TUNE_ROWS.join("|")}): \\{`, "--", "plan/policy.yaml"];
+  const run = spawn("git", args, { cwd: repoRoot, encoding: "utf8", maxBuffer: 1 << 20 });
+  if (run.status !== 0 || typeof run.stdout !== "string") return null;
+  const iso = run.stdout.trim().split("\n")[0] ?? "";
+  return iso !== "" && Number.isFinite(Date.parse(iso)) ? iso : null;
+}
+
+/** W1-T12232: the complete restart cycles of `rows` later than `since`, newest {@link RESTART_TUNE_SAMPLE} kept. */
+export function restartCycleSample(rows: ReadonlyArray<Record<string, unknown>>, since: string | null): RestartCycleSample {
+  const sinceMs = since === null ? undefined : Date.parse(since);
+  const timed: Array<{ row: Record<string, unknown>; ms: number }> = [];
+  for (const row of rows) {
+    if (row.step !== RESTART_CYCLE_STEP) continue;
+    const ms = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+    // An untimed row cannot be placed against the policy change, so it is read neither way.
+    if (!Number.isFinite(ms) || (sinceMs !== undefined && Number.isFinite(sinceMs) && ms <= sinceMs)) continue;
+    timed.push({ row, ms });
+  }
+  timed.sort((a, b) => a.ms - b.ms);
+  const cycles: RestartCycleCost[] = [];
+  let incomplete = 0;
+  for (const { row } of timed) {
+    const waiting = row.waiting_cost_ms;
+    const restart = row.restart_cost_ms;
+    if (typeof waiting !== "number" || typeof restart !== "number" || typeof row.first_verdict_at !== "string") { incomplete += 1; continue; }
+    cycles.push({ waitingCostMs: waiting, restartCostMs: restart, stalenessReleased: stalenessReleasedRestart(row.trigger) });
+  }
+  return { cycles: cycles.slice(-RESTART_TUNE_SAMPLE), incomplete, since };
+}
+
+/** W1-T12232: one `freshnessRestart` row of `policyText`, with the value and bounds its one line carries. */
+export function freshnessRestartRowLine(policyText: string, row: RestartTuneRow): { line: string; value: number; min: number; max: number } | undefined {
+  const lines = policyText.split("\n");
+  const start = lines.indexOf("freshnessRestart:");
+  if (start < 0) return undefined;
+  const pattern = new RegExp(`^ {2}${row}: \\{ value: (-?[0-9.]+), .*min: (-?[0-9.]+), max: (-?[0-9.]+) \\}$`);
+  for (let i = start + 1; i < lines.length && /^ {2}\S/.test(lines[i]!); i += 1) {
+    const m = pattern.exec(lines[i]!);
+    if (m) return { line: lines[i]!, value: Number(m[1]), min: Number(m[2]), max: Number(m[3]) };
+  }
+  return undefined;
+}
+
+/** W1-T12232: the row's value one {@link RESTART_TUNE_STEP} away, a whole number for `scoreLimit` and whole minutes
+ *  for `stalenessHorizonMs`, held inside the bounds its own line declares. At a bound it is the bound itself, which
+ *  is the current value: {@link restartTuneReading} proposes nothing and says which bound it sits on. */
+export function steppedRestartValue(row: RestartTuneRow, bounded: { value: number; min: number; max: number }, direction: "lower" | "higher"): number {
+  const unit = row === "stalenessHorizonMs" ? 60_000 : 1;
+  const raw = bounded.value * (direction === "lower" ? 1 - RESTART_TUNE_STEP : 1 + RESTART_TUNE_STEP);
+  return Math.min(bounded.max, Math.max(bounded.min, Math.round(raw / unit) * unit));
+}
+
+/** What one pass read, and the proposal it points at. `reason` is what the pass row carries either way. */
+export interface RestartTuneReading {
+  /** Complete cycles read, at most {@link RESTART_TUNE_SAMPLE}. */
+  cycles: number;
+  incomplete: number;
+  since: string | null;
+  waitingMedianMs: number | null;
+  restartMedianMs: number | null;
+  /** How many of `cycles` staleness released. */
+  stalenessReleased: number;
+  /** The row the sample points at, once there is a full sample. */
+  row: RestartTuneRow | null;
+  reason: string;
+  proposal?: { row: RestartTuneRow; current: number; proposed: number; from: string; to: string };
+}
+
+/**
+ * W1-T12232: read the restart cycles and say what, if anything, to propose. The two medians decide the direction —
+ * waiting dominant means the daemon should restart sooner (a lower value), restarting dominant means later (a higher
+ * one) — and between the two factors nothing is proposed. Which row moves comes from the cycles themselves: when
+ * staleness released more than half of them, the horizon is what they waited on; otherwise it is the score limit.
+ */
+export function restartTuneReading(inv: ConfigInventory, policyText: string): RestartTuneReading {
+  const sample = inv.restart ?? { cycles: [], incomplete: 0, since: null };
+  const cycles = sample.cycles;
+  const stalenessReleased = cycles.filter((c) => c.stalenessReleased).length;
+  const read = { cycles: cycles.length, incomplete: sample.incomplete, since: sample.since, stalenessReleased };
+  const counted = `over ${cycles.length} complete cycle(s) since ${sample.since ?? "the oldest row read"}, ` +
+    `${sample.incomplete} row(s) with a null cost part left out, staleness released ${stalenessReleased}`;
+  if (cycles.length < RESTART_TUNE_SAMPLE) {
+    return { ...read, waitingMedianMs: null, restartMedianMs: null, row: null,
+      reason: `${RESTART_TUNE_SAMPLE} complete restart cycles are needed and there are ${cycles.length} (${counted}): no proposal` };
+  }
+  const waiting = nearestRank(cycles.map((c) => c.waitingCostMs), 50);
+  const restart = nearestRank(cycles.map((c) => c.restartCostMs), 50);
+  const row: RestartTuneRow = stalenessReleased * 2 > cycles.length ? "stalenessHorizonMs" : "scoreLimit";
+  const measured = { ...read, waitingMedianMs: waiting, restartMedianMs: restart, row };
+  const medians = `median waiting cost ${waiting} ms against median restart cost ${restart} ms ${counted}`;
+  // Two zero medians clear every ratio and no direction: nothing was measured, so nothing is proposed.
+  if (waiting === 0 && restart === 0) return { ...measured, reason: `both median costs are 0 ms ${counted}: no proposal` };
+  const direction = waiting >= restart * RESTART_TUNE_FACTOR ? "lower" as const
+    : restart >= waiting * RESTART_TUNE_FACTOR ? "higher" as const : undefined;
+  if (direction === undefined) return { ...measured, reason: `${medians}: within ${RESTART_TUNE_FACTOR}x of each other, so no proposal` };
+  const bounded = freshnessRestartRowLine(policyText, row);
+  if (bounded === undefined) return { ...measured, reason: `${medians}: plan/policy.yaml carries no one-line freshnessRestart.${row} row` };
+  const proposed = steppedRestartValue(row, bounded, direction);
+  if (proposed === bounded.value) {
+    const bound = direction === "lower" ? `min ${bounded.min}` : `max ${bounded.max}`;
+    return { ...measured, reason: `${medians}: freshnessRestart.${row} is at its ${bound}, so there is nothing to propose` };
+  }
+  return {
+    ...measured,
+    reason: `${medians}: freshnessRestart.${row} ${direction} by ${RESTART_TUNE_STEP * 100}%, ${bounded.value} -> ${proposed}`,
+    proposal: { row, current: bounded.value, proposed, from: bounded.line, to: bounded.line.replace(/value: [^,]+,/, `value: ${proposed},`) },
+  };
+}
+
+/** W1-T12232: the retune as a canary action — one edit of the row's one line in plan/policy.yaml. The cohort is
+ *  `all`: a policy row reaches every restart. Its shadow evidence is the two medians and the count of cycles. */
+export function restartTuneCandidate(inv: ConfigInventory, repoRoot: string): ConfigGardenAction | undefined {
+  const full = policyPath(repoRoot);
+  const reading = restartTuneReading(inv, readIfPresent(full));
+  const p = reading.proposal;
+  if (p === undefined) return undefined;
+  const ratio = Math.max(reading.waitingMedianMs!, reading.restartMedianMs!) / Math.max(1, Math.min(reading.waitingMedianMs!, reading.restartMedianMs!));
+  const cohort: ConfigCohort = { kind: "all" };
+  const observed = { denominator: reading.cycles, freshness: "verified" as const, comparisonPopulation: population(cohort), observedAt: inv.nowIso };
+  return {
+    class: "retune-restart",
+    target: p.row,
+    scope: `restart:${p.row}`,
+    reason: reading.reason,
+    edits: [{ path: relative(repoRoot, full).split(sep).join("/"), from: p.from, to: p.to }],
+    cohort,
+    candidate: `freshnessRestart.${p.row} ${p.proposed}`,
+    baseline: `freshnessRestart.${p.row} ${p.current}`,
+    exposure: 1,
+    shadowMetrics: [
+      { metricName: "restart_cost_ratio", unit: "ratio", direction: "min", abortThreshold: RESTART_TUNE_FACTOR },
+      { metricName: "restart_cycles_measured", unit: "cycles", direction: "min", abortThreshold: RESTART_TUNE_SAMPLE },
+    ],
+    shadowObservations: [
+      { metricName: "restart_cost_ratio", value: ratio, ...observed },
+      { metricName: "restart_cycles_measured", value: reading.cycles, ...observed },
+    ],
+  };
+}
+
 export function configPromotion(action: ConfigGardenAction, nowIso: string, repo = "remudero"): PromotionRecord {
   const now = Date.parse(nowIso);
   const expiresAt = fixedClock(now + CANARY_TTL_MS).iso();
@@ -1174,8 +1379,6 @@ export function configPromotion(action: ConfigGardenAction, nowIso: string, repo
   };
 }
 
-const readIfPresent = (path: string): string => (existsSync(path) ? readFileSync(path, "utf8") : "");
-
 /** Every change any class could make now, each already clear of its shadow guard and of any scope an
  *  active canary holds. */
 export function configCandidates(inv: ConfigInventory, repoRoot: string, rng: () => number): ConfigGardenAction[] {
@@ -1183,7 +1386,7 @@ export function configCandidates(inv: ConfigInventory, repoRoot: string, rng: ()
   // source, whatever else the inventory read. The observational sweep's recommendations change no mount.
   const randomised = inv.recommendations.filter((rec): rec is RandomisedMountRecommendation => "randomised" in rec);
   const all = [budgetCandidate(inv, rng), mountCandidate({ ...inv, recommendations: randomised }, repoRoot), capCandidate(inv, readIfPresent(join(repoRoot, "scripts", "knowledge-budget-baseline.json"))), judgeCashCandidate(inv, repoRoot),
-    judgeShadowSwitchCandidate(inv, repoRoot)].filter((a): a is ConfigGardenAction => a !== undefined);
+    judgeShadowSwitchCandidate(inv, repoRoot), restartTuneCandidate(inv, repoRoot)].filter((a): a is ConfigGardenAction => a !== undefined);
   const held = inv.active.map((c) => ({ promotionId: c.promotion.promotionId, scope: c.promotion.scope, state: c.promotion.state }));
   return all.filter((a) => {
     const p = configPromotion(a, inv.nowIso);
@@ -1316,6 +1519,7 @@ const titles: Record<ConfigGardenClass, string> = {
   "adopt-mount": "chore(mounts): the config gardener canaries a recommended mount",
   "re-derive-cap": "chore(learnings): the config gardener canaries a re-derived learnings cap",
   "move-judge-to-cash": "chore(mounts): the config gardener canaries a judge's primary on a candidate model",
+  "retune-restart": "chore(policy): the config gardener canaries a retuned freshness restart row",
 };
 
 /** Modification times of the plan and mounts, and the current read bucket: an idle tick costs a few stats. */
@@ -1333,12 +1537,23 @@ export function configGardenSpec(deps: GardenerDeps, sources: ConfigGardenSource
     cheapFingerprint: () => configCheapFingerprint(deps.repoRoot, (deps.clock ?? systemClock).now()),
     inventory: () => configInventory(deps, sources),
     fingerprint: (inv) => [inv.queued.map((q) => `${q.id}=${q.budgetUsd}`).join(","), inv.recommendations.map((r) => r.cellKey).join(","), inv.cap?.derivation.recommendedCapChars, inv.runs.length, (inv.judgeShadows ?? []).filter(judgeClearsCashBar).map((s) => s.role).join(","),
-      (inv.judgeShadowScores ?? []).filter(judgeShadowModelClears).map((g) => `${g.role}/${g.model}/${g.modelSurface}`).join(",")].join("|"),
+      (inv.judgeShadowScores ?? []).filter(judgeShadowModelClears).map((g) => `${g.role}/${g.model}/${g.modelSurface}`).join(","),
+      // W1-T12232: one more complete restart cycle is a new sample, so the pass plans afresh.
+      `${inv.restart?.cycles.length ?? 0}/${inv.restart?.incomplete ?? 0}@${inv.restart?.since ?? "-"}`].join("|"),
     // The canary judges these classes (tendConfigCanaries settles the pending class), so the framework's
     // own metric is held still: it never credits or debits on a number the canary did not produce.
     metric: () => ({ trials: 0, successes: 0 }),
     candidates: (inv, rng) => configCandidates(inv, deps.repoRoot, rng),
-    scorecard: (inv, plan) => ({ runs: inv.runs.length, queued_budgets: inv.queued.length, recommendations: inv.recommendations.length, active_canaries: inv.active.length, proposed: plan.actions.map((a) => a.scope) }),
+    scorecard: (inv, plan) => {
+      // W1-T12232: the pass row says how many complete cycles it read, how many rows carried a null cost part, and
+      // why it proposed nothing when it did not — the whole reading, whether or not a proposal came out of it.
+      const restart = restartTuneReading(inv, readIfPresent(policyPath(deps.repoRoot)));
+      return { runs: inv.runs.length, queued_budgets: inv.queued.length, recommendations: inv.recommendations.length, active_canaries: inv.active.length,
+        restart_cycles: restart.cycles, restart_cycles_incomplete: restart.incomplete, restart_cycle_since: restart.since,
+        restart_waiting_median_ms: restart.waitingMedianMs, restart_restart_median_ms: restart.restartMedianMs,
+        restart_staleness_released: restart.stalenessReleased, restart_row: restart.row, restart_tune: restart.reason,
+        proposed: plan.actions.map((a) => a.scope) };
+    },
     apply: (ws, plan) => {
       const action = plan.actions[0];
       if (!action) return undefined;
