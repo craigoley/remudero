@@ -12,6 +12,11 @@ const PRIOR_RATE_EPSILON = 1e-3;
 /** The trailing window the estimate reads. Policy data for the estimate, never a gate on dispatch. */
 export const DISPATCH_VALUE_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
+/** A start spends a dispatch stride only inside the dispatch-value window, measured from `nowMs`. */
+export function startSpendsAStride(startAtMs: number, nowMs: number): boolean {
+  return nowMs - startAtMs <= DISPATCH_VALUE_WINDOW_MS;
+}
+
 /** Pseudo-attempts of fleet-wide evidence each class starts from (the Beta prior's weight). */
 export const DISPATCH_VALUE_PRIOR_WEIGHT = 2;
 
@@ -629,7 +634,7 @@ function costOfDelayContext(
     // stride: the breaker's own set, {@link streakRefusal}. MEASURED 2026-10-11: W1-T7742's 7 starts were all
     // non-worker, so its pass was 8/score and every fresh priority-1 task outranked it.
     const verdict = lastVerdicts.get(runId);
-    if ((!verdict || streakRefusal(verdict.row) === undefined) && !orphans.has(runId)) counts.set(start.id, (counts.get(start.id) ?? 0) + 1);
+    if ((!verdict || streakRefusal(verdict.row) === undefined) && !orphans.has(runId) && startSpendsAStride(start.at, nowMs)) counts.set(start.id, (counts.get(start.id) ?? 0) + 1);
     const filedAt = snapshot.filedAtByTaskId.get(start.id);
     const outcome = outcomes.get(runId);
     if (filedAt === undefined || !Number.isFinite(filedAt) || filedAt > start.at || !outcome || outcome.at < start.at) continue;
@@ -734,8 +739,9 @@ function costOfDelayContext(
     const score = factor * (urgency + dependent_value);
     const open_dependents = context.openDependentFanoutByTaskId.get(task.id) ?? 0;
     if (open_dependents > 0) costOfDelayDependentValues.push({ id: task.id, open_dependents, own_urgency: urgency, dependent_value });
-    // Each unique dispatch consumes one stride. Rebuilding from all starts survives restarts
-    // and keeps a frequently selected high-score task from monopolizing a fixed frontier.
+    // Each start inside the window spends one stride, so an often-picked high-score task cannot hold the head.
+    // The count is rebuilt from the ledger each selection, so it survives restarts. An old start stops
+    // spending a stride, so a task that failed long ago is not ranked behind every new filing for ever.
     const strides = 1 + (counts.get(task.id) ?? 0);
     const pass0 = strides / score0, passF = strides / score;
     if (![score0, score, pass0, passF].every(Number.isFinite) || score0 <= 0) return { kind: "refused", reasons: [`${task.id}:unmeasured-score`] };

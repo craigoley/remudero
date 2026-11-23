@@ -620,7 +620,7 @@ export interface RunTaskCommandHost {
     fixOutcome?: TypedFixOutcome["kind"];
     subjectSource?: "worker-authored" | "re-asked" | "harness-derived";
     derivedCommit?: { subject: string; reason: string };
-    
+    leftEdits?: () => boolean;
     assignmentId?: string;
     requireMergeHead?: boolean;
     log: (step: string, extra?: Record<string, unknown>) => void;
@@ -1336,6 +1336,10 @@ export function createProbeVerdictCache(): ProbeVerdictCache {
     },
   };
 }
+
+/** W1-T12152: the placeholder task the implement template is rendered over; every task slot is a named marker. */
+const IMPLEMENT_TEMPLATE_TASK = { id: "${TASK_ID}", title: "${TASK_TITLE}", prompt: "${TASK_BODY}" } as Task;
+
 
 export const IMPLEMENT_REFUSAL_REPORT_CONTRACT = [
   "",
@@ -6873,7 +6877,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     const publicationRestriction = task.catalog === "ops"
       ? "\nFor this ops task, copy only the title and acceptance criteria from the task contract into a commit, a pull request or a comment. Keep every other task field private and host-side."
       : "";
-    const prompt = `${renderedImplementPrompt}${reconcilePrompt}${scopeRecoveryPrompt}${ruleToolPointer}\n${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}${publicationRestriction}`;
+    const implementContractTail = `${IMPLEMENT_REFUSAL_REPORT_CONTRACT}\n${IMPLEMENT_WAIT_TARGET_CONTRACT}\n${BRANCH_NAME_CONTRACT_PART}\n${SELF_FORECAST_REPORT_CONTRACT}`;
+    const prompt = `${renderedImplementPrompt}${reconcilePrompt}${scopeRecoveryPrompt}${ruleToolPointer}\n${implementContractTail}${publicationRestriction}`;
+    // W1-T12152: the assignment's prompt revision hashes this template, never the filled prompt above.
+    const implementTemplate = implementPromptTemplate(harnessOwnsGit, implementContractTail);
     assertProvenance(prompt); // throws ProvenanceError on any uncited CONTEXT claim
     // W1-T71: the ONE new emission this task makes — a sha256 of the fully-rendered prompt this
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
@@ -6984,6 +6991,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           // W1-T3573: `undefined` for `implement`/`diagnose`/`recon` — byte-identical
           // unrestricted behavior. Only `review`/`manual` carry a declared bound (above).
           tools: implementTools === undefined ? undefined : [...implementTools],
+          promptTemplate: implementTemplate,
           ...(ruleLookup === undefined ? {} : { ruleLookup }),
           ...(implementCashTools === undefined ? {} : { cashTools: implementCashTools }),
           ...(attemptMount === implementMount ? cashTrialSpawn : {}),
@@ -7468,6 +7476,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       declaredPaths: task.files ?? [],
       acceptance: task.acceptance,
       assignmentId: impl.selectionAssignmentId,
+      leftEdits: () => worktreeHasUncommittedChanges(worktreePath),
       log,
       say,
       onRefusal: createHarnessCommitRefusalRecorder(harnessCommitRefusalState),
@@ -8838,3 +8847,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
   }
 } // ── end runTaskBody
 
+/** W1-T12152: the implement lane's prompt template — {@link renderImplementPrompt} over a placeholder task, with every
+ *  task, run and context slot a named marker, then the contract tail the real prompt ends with. It is rendered before
+ *  any task text is filled in, so two tasks under one renderer and one contract record one prompt revision. */
+export function implementPromptTemplate(harnessOwnsGit: boolean, contractTail: string): string {
+  return `${renderImplementPrompt(IMPLEMENT_TEMPLATE_TASK, "${RECON}", "${RUN_ID}", "${MATCHED_LEARNINGS}", "${OPERATOR_NOTES}",
+    "${RULE_HEADLINES}", "${SKILLS}", harnessOwnsGit)}\n${contractTail}`;
+}
