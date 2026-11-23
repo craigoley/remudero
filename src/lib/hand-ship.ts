@@ -5,7 +5,7 @@ import { hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 // @ts-ignore The executable author preflight currently has no declaration file.
-import { authorPushEligibility, failingTestsFromTap } from "../../scripts/preflight-author.mjs";
+import { authorPushEligibility, failingTestsFromTap } from "../../scripts/lib/author-push-eligibility.mjs";
 // @ts-ignore The author admission module currently has no declaration file.
 import { macPressureState } from "../../scripts/lib/mac-author-admission.mjs";
 import { type Clock, loopAvailableDeadline, systemClock } from "./clock.js";
