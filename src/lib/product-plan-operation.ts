@@ -38,6 +38,19 @@ export const PRODUCT_PLAN_OPERATION_LIMITS = { operations: 256, stateBytes: 2 * 
 /** Names a durable, reviewed handoff: the target task's `origin:` must carry exactly this (or an explicit association). */
 export const productPlanOrigin = (productId: string, planEvidenceId: string) => `product-plan#${productId}/${planEvidenceId}`;
 
+/** W1-T14524: the fleet's own review publisher, trusted when no reviewer login is configured (reviewer-health.ts does the same). */
+export const DEFAULT_PRODUCT_PLAN_REVIEWER_LOGIN = "remudero-fleet[bot]";
+
+/**
+ * W1-T14524: the one login whose `remudero-review` status a product plan check trusts. An explicit value wins, and an
+ * explicit "" trusts no one. Otherwise the configured reviewer login, else {@link DEFAULT_PRODUCT_PLAN_REVIEWER_LOGIN}:
+ * with no login configured (the documented "dark" default) the check used to trust nobody and refused every plan.
+ */
+export function productPlanTrustedReviewer(explicit: string | undefined, configured: string | undefined): string {
+  if (explicit !== undefined) return explicit.trim();
+  return configured?.trim() || DEFAULT_PRODUCT_PLAN_REVIEWER_LOGIN;
+}
+
 /** The reviewed task's design must carry the complete approved input the implementation worker consumes. */
 export const productCasePlanText = (brief: ProductBrief) => `Approved product brief:\n${JSON.stringify(brief, (_key, value: unknown) =>
   value !== null && typeof value === "object" && !Array.isArray(value)
@@ -137,7 +150,7 @@ export async function verifyProductPlanEvidence(input: ProductPlanVerification):
       const files = z.array(z.object({ filename: z.string() })).parse(JSON.parse(await api(`${slug}/pulls/${input.pullRequest}/files?per_page=100`)));
       // Manual approval can withdraw a human hold; it never substitutes for the filed native plan protocol.
       const { readReviewStatusEntry, resolveReviewProvenance, REVIEWER_IDENTITY_ENV } = await import("./review.js");
-      const trusted = (input.trustedReviewer ?? process.env[REVIEWER_IDENTITY_ENV] ?? "").trim();
+      const trusted = productPlanTrustedReviewer(input.trustedReviewer, process.env[REVIEWER_IDENTITY_ENV]);
       if (!trusted || files.length >= 100 || !files.every((file) => file.filename.startsWith("plan/") || file.filename === masterPlanFile)) return refuse("plan_not_approved");
       const fetcher: GhApiFetcher = async (args) => JSON.parse(await text(args, { maxBuffer: 1024 * 1024, timeout: 20_000 })) as unknown;
       const entry = await readReviewStatusEntry(repo.owner, repo.name, pull.head.sha, fetcher);
