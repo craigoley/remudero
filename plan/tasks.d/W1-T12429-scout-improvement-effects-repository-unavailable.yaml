@@ -12,8 +12,8 @@
   origin: "scout:improvement_effects.repository_unavailable"
   files:
     - src/lib/opportunity-outcomes.ts
-    - test/triage/scout-improvement-effects-repository-unavailable.test.ts
     - test/inbox/improvement-thread.test.ts
+    - test/triage/scout-improvement-effects-repository-unavailable.test.ts
   acceptance:
     - claim: "improvement_effects.repository_unavailable stops recurring: its cause is fixed rather than its rows hidden"
       proof: "grep: test(\"W1-T12429: improvement_effects.repository_unavailable no longer recurs\" in test/triage/scout-improvement-effects-repository-unavailable.test.ts"
