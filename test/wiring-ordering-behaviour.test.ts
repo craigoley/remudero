@@ -136,6 +136,11 @@ function semanticPassHead(t: TestContext, kind: string): { sha: string; seams: R
  *  writes `ledgerPath` on `log`'s behalf. Tests that observe an effect through the real
  *  ledger file (TRAP 2's withdrawal, THE FIX's arm) need a `log` that does what every
  *  production caller already does. */
+/** W1-T14179: each run's comment names its own writer on one hidden line; two runs differ only by it. */
+function withoutWriterMarker(body: string): string {
+  return body.replace(/\n*<!-- remudero-review writer run=\S+ input=\S+ code=\S+ -->\n?/g, "");
+}
+
 function ledgerLog(ledgerPath: string, runId: string, taskId: string): (step: string, extra?: Record<string, unknown>) => void {
   return (step, extra = {}) => {
     appendLedger(ledgerPath, { run_id: runId, task_id: taskId, step, ...extra });
@@ -250,8 +255,8 @@ test("judgeRubric independence: the binding verdict and the non-advisory part of
   assert.equal(violatingCalls, 1, "reached-ness: the violating run's judgeRubricFn must fire");
   assert.equal(resultViolating.state, resultClean.state, "the rubric result must never change the binding verdict's state");
 
-  const postedClean = readFileSync(clean.commentFile, "utf8");
-  const postedViolating = readFileSync(violating.commentFile, "utf8");
+  const postedClean = withoutWriterMarker(readFileSync(clean.commentFile, "utf8"));
+  const postedViolating = withoutWriterMarker(readFileSync(violating.commentFile, "utf8"));
   const rubricHeader = "**Rubric (advisory";
   const separator = "\n\n---\n\n";
   assert.equal(postedClean.includes(rubricHeader), false, "a clean rubric adds nothing to the posted comment");
@@ -357,8 +362,8 @@ test("judgeRubric fail-open: a throwing judgeRubricFn is ledgered and degrades t
   assert.ok(throwingSteps.includes("review.rubric.error"), "a thrown judgeRubricFn must be ledgered, never swallowed silently");
   assert.equal(baselineSteps.includes("review.rubric.error"), false, "the non-throwing baseline never logs the error step");
 
-  const postedBaseline = readFileSync(baseline.commentFile, "utf8");
-  const postedThrowing = readFileSync(throwing.commentFile, "utf8");
+  const postedBaseline = withoutWriterMarker(readFileSync(baseline.commentFile, "utf8"));
+  const postedThrowing = withoutWriterMarker(readFileSync(throwing.commentFile, "utf8"));
   assert.equal(
     postedThrowing.trimEnd(),
     postedBaseline.trimEnd(),
