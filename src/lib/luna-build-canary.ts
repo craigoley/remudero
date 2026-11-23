@@ -128,7 +128,12 @@ export function readLunaBuildCanaryRows(stateDir: string, windowMs: number, nowM
   const rows: Row[] = [];
   for (const line of read.rawLines) {
     let row: Row;
-    try { row = JSON.parse(line) as Row; } catch { return { rows: [], unavailableReason: "a ledger row is not valid JSON" }; }
+    try {
+      row = JSON.parse(line) as Row;
+    } catch {
+      // A corrupt row is not an absent one: the caller holds the Luna arm on this reason.
+      return { rows: [], unavailableReason: "a ledger row is not valid JSON" };
+    }
     const tsMs = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
     if (Number.isFinite(tsMs) && tsMs >= startMs) rows.push(row);
   }
