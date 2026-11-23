@@ -24,7 +24,7 @@ import type { ReviewerCodeFreshness } from "#src/lib/self-sync.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import type { StoreBuildResult } from "#src/lib/child-entry-store.js";
 import {
-  buildFreshTreeReviewRunner, buildRequiredFixReviewRunner, buildReviewerCodeFreshnessGate, reviewCommand,
+  buildFreshTreeReviewRunner, buildRequiredFixReviewRunner, buildReviewerCodeFreshnessGate, gatedDetachedReviewCommand, reviewCommand,
   spawnRmdReviewForFreshTree, type FreshTreeStore, type ReviewRunResult,
 } from "#src/run-task.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -92,6 +92,9 @@ test("W1-T12227 criterion 2: runDetachedReview through buildReviewerCodeFreshnes
   assert.deepEqual(freshTreeCalls.map((call) => [call.pr, call.sha]), [["7", FIRST_MAIN]]);
   const ran = stale.rows.find((row) => row.step === "review.ran_from_fresh_tree");
   assert.equal(ran?.admission_path, "run-child", "the row names the path that admitted the review");
+
+  // Production builds the run child's command over that same gate, naming its path, with no I/O until a review runs.
+  assert.equal(typeof gatedDetachedReviewCommand(REPO_ROOT, () => {}), "function");
 
   const fresh = countingGate([FRESH], recordingFreshTree([]), "run-child");
   await runDetachedReview(work, ctx, (pr, rest, opts) => fresh.gate.call(pr, rest, opts));
@@ -345,6 +348,28 @@ test("W1-T12227 criterion 7: a store miss for the shared fresh tree starts one u
     assert.equal(await own("7", [], { originMainSha: FIRST_MAIN }), 0);
     assert.deepEqual(perAttempt, [undefined]);
   } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T12227 criterion 7: a store build that cannot be requested leaves the review on its entry and says why", async () => {
+  const f = reviewerFixture();
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  const stderr: string[] = [];
+  process.stderr.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+    stderr.push(String(chunk));
+    return (originalWrite as (...args: unknown[]) => boolean)(chunk, ...rest);
+  }) as typeof process.stderr.write;
+  try {
+    let entry = "";
+    await spawnRmdReviewForFreshTree(f.tree, ["7"], undefined, { ...process.env, NODE_V8_COVERAGE: "" },
+      (value) => { entry = `${value.kind}|${value.reason}`; },
+      { storeRoot: f.store, fillOnMiss: true, daemonOwned: true, build: () => { throw new Error("build script unavailable"); } });
+    assert.match(entry, /^tsx\|.*store-empty$/, "no fill is reported when none was requested");
+    assert.ok(stderr.some((line) => /no store build requested for .*build script unavailable/.test(line)), stderr.join(""));
+    assert.equal(existsSync(f.store), false, "nothing was built");
+  } finally {
+    process.stderr.write = originalWrite;
     rmSync(f.root, { recursive: true, force: true });
   }
 });
