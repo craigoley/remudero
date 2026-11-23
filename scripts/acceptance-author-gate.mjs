@@ -46,6 +46,8 @@ import { parseArgs } from "node:util";
 import { isMainModule } from "./lib/argv.mjs";
 import {
   acceptanceAuthorTimeCheck,
+  MOVER_BRANCH_PREFIX,
+  acceptanceBlockDiagnostics,
   extractTaskTrailerId,
   explainGrepProofRefusal,
   explainUnitTestProofRefusal,
@@ -54,6 +56,7 @@ import {
   parseWhitelistedProof,
   resolvePlanCriteriaAtHead,
   resolveTestPath,
+  verifyMoverRemovalPublic,
   wrappedGrepPattern,
 } from "../src/lib/review.ts";
 import { rule15SplitViolation } from "../src/lib/ci-parity.ts";
@@ -202,6 +205,42 @@ export function changedPathsAtRange({ baseSha, headSha, root = REPO_ROOT, git } 
   } catch {
     return undefined;
   }
+}
+
+/**
+ * W1-T14195 — the PUBLIC inputs of a mover removal, read from local git: the commit messages beyond the merge base, the
+ * merge-base-to-head name-status entries, and the blob the merge base holds at a path. Any unreadable read leaves its
+ * field `undefined`/empty so the verifier refuses by name rather than passing on absent evidence. NO API CALL.
+ * @param {{ baseSha?: string, headSha?: string, root?: string, git?: (args: string[]) => string }} opts
+ * @returns {{ message: string, entries: { status: string, path: string }[] | undefined, baseBlobAt: (path: string) => string | undefined } | undefined}
+ */
+export function moverPublicAtRange({ baseSha, headSha, root = REPO_ROOT, git } = {}) {
+  if (!baseSha || !headSha) return undefined;
+  const run =
+    git ??
+    ((args) => execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }));
+  const attempt = (args) => {
+    try {
+      return String(run(args));
+    } catch {
+      return undefined;
+    }
+  };
+  const log = attempt(["log", "-z", "--format=%B", `${baseSha}..${headSha}`]);
+  const status = attempt(["diff", "--name-status", "-z", "--no-renames", `${baseSha}...${headSha}`]);
+  const mergeBase = attempt(["merge-base", baseSha, headSha])?.trim();
+  const fields = status === undefined ? undefined : status.split("\0").filter(Boolean);
+  /** @type {{ status: string, path: string }[] | undefined} */
+  let entries;
+  if (fields !== undefined && fields.length % 2 === 0) {
+    entries = [];
+    for (let index = 0; index < fields.length; index += 2) entries.push({ status: fields[index], path: fields[index + 1] });
+  }
+  return {
+    message: log === undefined ? "" : log.split("\0").join("\n"),
+    entries,
+    baseBlobAt: (path) => (mergeBase ? attempt(["rev-parse", "--verify", `${mergeBase}:${path}`])?.trim() : undefined),
+  };
 }
 
 /**
@@ -624,9 +663,9 @@ export function bodyWithRecoveredIdentity(body, identity) {
  * plan passes — leaves the verdict byte for byte what it was before this wiring.
  * `root` (W1-T3675): the checkout {@link bodyProofTargetMissing} stats a `grep:` target against —
  * real callers omit it and get {@link REPO_ROOT}; a test seeds a tmp dir instead.
- * @param {{ body: string, authorLogin?: string, headRefName?: string, trailerResolves?: (taskId: string) => boolean, criteriaFromHeadPlan?: boolean, introducedTaskIds?: string[], trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined, taskAcceptanceForId?: (taskId: string) => readonly { claim: string, proof: string }[] | undefined, canonicalScopeForId?: (taskId: string) => CanonicalTaskScope, rule15Verdict?: import("../src/lib/ci-parity.ts").Rule15SplitVerdict, root?: string }} input
+ * @param {{ body: string, authorLogin?: string, headRefName?: string, moverPublic?: Omit<import("../src/lib/review.ts").MoverRemovalPublicInput, "headRefName">, trailerResolves?: (taskId: string) => boolean, criteriaFromHeadPlan?: boolean, introducedTaskIds?: string[], trailerCommits?: readonly { sha: string, subject: string, taskId: string }[], changedPaths?: readonly string[], taskFilesForId?: (taskId: string) => readonly string[] | undefined, taskAcceptanceForId?: (taskId: string) => readonly { claim: string, proof: string }[] | undefined, canonicalScopeForId?: (taskId: string) => CanonicalTaskScope, rule15Verdict?: import("../src/lib/ci-parity.ts").Rule15SplitVerdict, root?: string }} input
  */
-export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, criteriaFromHeadPlan = false, introducedTaskIds = [], trailerCommits, changedPaths, taskFilesForId, taskAcceptanceForId, canonicalScopeForId, rule15Verdict, root = REPO_ROOT }) {
+export function evaluateGate({ body, authorLogin, headRefName, moverPublic, trailerResolves, criteriaFromHeadPlan = false, introducedTaskIds = [], trailerCommits, changedPaths, taskFilesForId, taskAcceptanceForId, canonicalScopeForId, rule15Verdict, root = REPO_ROOT }) {
   if (authorLogin !== undefined && EXEMPT_BOT_LOGINS.has(authorLogin)) {
     return {
       ok: true,
@@ -673,6 +712,21 @@ export function evaluateGate({ body, authorLogin, headRefName, trailerResolves, 
         { creditedBuild: true, moduleExists: (path) => existsSync(join(root, path)) || "path" in resolveTestPath(path, { root }) },
       ).violations.filter((violation) => violation.check === "credited-test-path");
       if (violations.length > 0) return { ok: false, defect: "credited-test-path", message: violations.map((v) => v.message).join(" ") };
+    }
+  }
+  // W1-T14195: the mover's REMOVE pull request carries no trailer and no Acceptance block on purpose (W1-T13680). Its
+  // PUBLIC half is checked here, off the pull request alone; the OPS half needs a credential Actions does not hold, so
+  // `remudero-review` runs it and this message says so. Reached only by a body with no trailer and no header, so every
+  // other shape takes the path below unchanged, and a refused public half falls through to the same `no-header` refusal.
+  if (moverPublic !== undefined && identity.taskId === undefined && !acceptanceBlockDiagnostics(body ?? "").headerFound) {
+    const mover = verifyMoverRemovalPublic({ ...moverPublic, headRefName });
+    if (mover.ok) {
+      return {
+        ok: true,
+        message:
+          `mover removal of ${mover.receipts.map((receipt) => receipt.id).join(", ")} (receipts name ${mover.receipts[0].repository}@${mover.receipts[0].commit.slice(0, 7)}): ` +
+          "the public half verified here; the ops check is deferred to remudero-review",
+      };
     }
   }
   const judged = bodyWithRecoveredIdentity(body, identity);
@@ -828,6 +882,9 @@ export function main(argv, { root = REPO_ROOT } = {}) {
       body: payload.body,
       authorLogin: payload.authorLogin,
       headRefName: payload.headRefName,
+      // Read only for a mover-shaped head ref, so no other pull request pays for (or is changed by) the extra git reads.
+      moverPublic: String(payload.headRefName ?? "").startsWith(MOVER_BRANCH_PREFIX)
+        ? moverPublicAtRange({ baseSha: effectiveBaseSha, headSha: payload.headSha, root }) : undefined,
       trailerResolves: planTrailerResolver(root),
       criteriaFromHeadPlan: criteriaResolveAtHead({
         body: bodyWithRecoveredIdentity(payload.body, resolveTaskIdentity({ body: payload.body, headRefName: payload.headRefName, planOnly: isPlanOnlyDiff(changedPaths) })),
