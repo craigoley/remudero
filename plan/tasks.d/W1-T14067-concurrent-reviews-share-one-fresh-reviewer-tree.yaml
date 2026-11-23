@@ -54,3 +54,4 @@
     Revert step 1 and criterion 1's second borrower throws "reviewer worktree is leased by another owner".
   note: |
     Id reserved for run-unfiled-1795201470701 with rmd next-task-id on the host.
+    Held 2026-11-23: superseded by merged W1-T14066 (#19940). A leased shared tree now sends the review to its own per-attempt tree, and shared borrowing would reverse W1-T14066 criterion 3.
