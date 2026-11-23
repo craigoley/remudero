@@ -1070,6 +1070,14 @@ const ASSERTION_RE = /\b(assert|expect|should)\b|\.(is|ok|equal|deepEqual|match|
  *  `.each`. This is what makes "added tests" something to judge at all; see {@link detectTestTheater} for why its
  *  absence must not fire the no-assertion arm. Matches the CALL, so a variable named `test` smuggles nothing past. */
 const TEST_DECLARATION_RE = /\b(?:test|it|describe)\s*(?:\.\w+)?\s*\(/;
+/** A declaration's callee and LITERAL title. `describe.each([…])(…)` or `test(name, …)` has no literal title here. */
+export const TEST_DECLARATION_TITLE_RE = /\b(test|it|describe)\s*(?:\.\w+)?\s*\(\s*(["'`])((?:\\.|(?!\2)[^\\])*)\2/;
+
+/** The identity a declaration line names (`test:<title>`), or undefined when its first argument is not a literal. */
+function testDeclarationKey(line: string): string | undefined {
+  const m = TEST_DECLARATION_TITLE_RE.exec(line);
+  return m ? `${m[1]}:${m[3]}` : undefined;
+}
 
 const NOOP_ASSERTION_RE =
   /assert(\.\w+)?\(\s*true\s*[),]|assert\.equal\(\s*true\s*,\s*true|expect\(\s*true\s*\)/;
@@ -1087,22 +1095,34 @@ function isFixtureDataPath(path: string): boolean {
  *  a real assertion is added. */
 export function detectTestTheater(diff: string): boolean {
   let inTestFile = false;
+  let file = "";
   const addedTestLines: string[] = [];
+  const addedDeclarations: { file: string; key: string | undefined }[] = [];
+  const removedDeclarations = new Set<string>();
   for (const line of diff.split("\n")) {
     // File headers (`+++ b/path`) precede their `+`-prefixed body lines.
     if (line.startsWith("+++ ")) {
-      const path = line.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
-      inTestFile = isTestPath(path) && !isFixtureDataPath(path);
+      file = line.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
+      inTestFile = isTestPath(file) && !isFixtureDataPath(file);
       continue;
     }
     if (line.startsWith("diff --git")) {
       // A `diff --git a/x b/y` header names both paths; use the `b/` side.
       const m = line.match(/\sb\/(\S+)\s*$/);
+      file = m ? m[1] : "";
       inTestFile = m ? isTestPath(m[1]) && !isFixtureDataPath(m[1]) : false;
       continue;
     }
     if (line.startsWith("+++") || line.startsWith("---")) continue;
-    if (inTestFile && line.startsWith("+")) addedTestLines.push(line.slice(1));
+    if (!inTestFile) continue;
+    const body = line.slice(1);
+    if (line.startsWith("+")) {
+      addedTestLines.push(body);
+      if (TEST_DECLARATION_RE.test(body)) addedDeclarations.push({ file, key: testDeclarationKey(body) });
+    } else if (line.startsWith("-") && TEST_DECLARATION_RE.test(body)) {
+      const key = testDeclarationKey(body);
+      if (key !== undefined) removedDeclarations.add(`${file}\0${key}`);
+    }
   }
   if (addedTestLines.length === 0) return false;
   // THE PLANTED-TAUTOLOGY ARM IS UNCONDITIONAL AND STAYS ABOVE THE GUARD BELOW. `assert(true)` is a deliberate act,
@@ -1115,7 +1135,15 @@ export function detectTestTheater(diff: string): boolean {
   // `testTheater = true`, 36 green checks). STATED COST: lines appended INSIDE an existing case, with no assertion
   // added, no longer trip the arm — the operator ruled for the declaration gate over an unreliable pairing
   // (2026-09-04).
-  if (!addedTestLines.some((l) => TEST_DECLARATION_RE.test(l))) return false;
+  // A REWRITTEN DECLARATION IS NOT A NEW CASE. Making an existing case async (`(t) =>` → `async (t) =>`) puts its
+  // own `test(` line on the `+` side, which read as an added case asserting nothing (#20336). A `+` declaration
+  // whose callee and literal title match a `-` declaration in the SAME file is that case rewritten. This pairs
+  // DECLARATIONS by identity, never lines by position, which is the pairing the ruling above declined. A
+  // declaration with no literal title cannot be paired and still counts as new. STATED COST: deleting a case and
+  // adding an assertion-free one under the same callee and title in the same file reads as a rewrite; the
+  // operator accepted that (2026-11-22).
+  const declaresNewCase = addedDeclarations.some(({ file: path, key }) => key === undefined || !removedDeclarations.has(`${path}\0${key}`));
+  if (!declaresNewCase) return false;
   const hasRealAssertion = addedTestLines.some((l) => ASSERTION_RE.test(l));
   return !hasRealAssertion;
 }

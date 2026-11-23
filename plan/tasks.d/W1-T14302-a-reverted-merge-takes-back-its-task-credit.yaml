@@ -31,6 +31,7 @@
     - src/run-task.ts
     - src/lib/ledger-steps.ts
     - src/lib/tick-read-worker.ts
+    - src/cli/commands/sweep.ts
     - src/cli/commands/daemon.ts
     - scripts/write-only-ledger-step-baseline.json
     - test/a-reverted-merge-takes-back-its-task-credit.test.ts
@@ -89,6 +90,10 @@
       proof: "grep: planCreditOverridePath( in src/cli/commands/daemon.ts"
     - claim: "The reconcile credit read reads the checkout's override rows"
       proof: "grep: planCreditOverridePath( in src/run-task.ts"
+    - claim: "The leftover close honours a removed credit. In a fixture where the target checkout's plan/credit-overrides.yaml removes PR 101 for W1-T1 and config.root holds no plan/, the credit candidates that sweepCommand and the daemon sweep's fallback build (src/cli/commands/sweep.ts, when no tick read supplies them) give no merged candidate for W1-T1, so projectMergedTaskCandidates leaves taskMergedBy unset on an open W1-T1 PR and the sweep does not close it as a leftover. Without the row the same PR is stamped with taskMergedBy 101 as today. The test lives in test/a-reverted-merge-takes-back-its-task-credit.test.ts with W1-T14302 criterion 11 in its title"
+      proof: "grep: W1-T14302 criterion 11: in test/a-reverted-merge-takes-back-its-task-credit.test.ts"
+    - claim: "The sweep's own credit read reads the target checkout's override rows"
+      proof: "grep: planCreditOverridePath( in src/cli/commands/sweep.ts"
   rationale: |
     WHAT HAPPENED (2026-11-22). W1-T11112 merged as #20049 (3a6fe5dd57). With #20077 it broke main's
     typecheck at test/a-paired-dispatch-trial-shares-one-grader.test.ts:836 (TS2739). The fleet's
@@ -225,6 +230,12 @@
     10. The claim sweep needs no special case. Its isMerged is the projection's merged field, so
        steps 2 and 8 make it false for a reverted or overridden pairing. Do not read shard status
        in releaseLandedDispatchClaims or in releaseLandedClaims, and do not add a per-task list.
+    11. src/cli/commands/sweep.ts calls buildCreditCandidates at two places that omit creditIo: the
+       sweepCommand pass and the daemon sweep's fallback when tickRead.creditCandidates is absent.
+       Pass creditOverridePath: planCreditOverridePath(<the target checkout root>) in both. These
+       candidates set taskMergedBy (sweep.ts projectMergedTaskCandidates), which closes an open PR
+       as a leftover; on 2026-11-22 17:17Z that close took rebuild PR #20283 for W1-T11112 while its
+       override row was inert.
     AFTER THE BUILD MERGES: the first reconcile pass re-queues W1-T11112 and writes one
     plan.reconcile.reverted_requeue row for it (the revert and the override name the same pairing;
     one row, either cause). The other override rows (PORTAL-T19 107, W1-T5016 8212, W1-T5017 8213,

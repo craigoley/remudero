@@ -905,7 +905,22 @@ test("W1-T10618: the served product case operation matches the authenticated API
   assert.ok(!shim.calls().some((call) => call.includes("-X POST")));
 });
 
-test("W1-T10823: the served plan proposal reaches the maintained native handoff; served product proposal uses the verified managed checkout default", async (t) => {
+/** W1-T14388 — when the served handler reads its evidence, relative to the planner child it just handed off to. */
+type PlanChildTiming = "prompt" | "late-response" | "released-before-response";
+
+/** W1-T14388 — a loaded runner, made deterministic: longer than the 1000 ms the fixture child once waited before writing. */
+const LATE_RESPONSE_MS = 1_500;
+
+/** Blocks this thread, and the served handler on it, for `ms`. The planner child is another process and keeps running. */
+const holdThread = (ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+
+/**
+ * W1-T10823's served plan proposal, end to end. W1-T14388: the planner child holds its rows until the test creates
+ * `releaseFile`, after it has asserted "pending". A 1000 ms timer decided that race instead, and on a loaded runner the
+ * first response read "unknown" (#20311) or "proposed" (#20287). `timing` places the handler's evidence read at once,
+ * late, or after a release that came first.
+ */
+async function servedPlanProposal(t: TestContext, timing: PlanChildTiming): Promise<void> {
   const fixture = ownedFixtureDir(t, "product-plan-http");
   const root = fixture.dir;
   const repoRoot = join(root, "immutable-generation", "remudero");
@@ -942,31 +957,45 @@ test("W1-T10823: the served plan proposal reaches the maintained native handoff;
   const ledgerPath = join(root, "state/ledger.ndjson");
   const argsFile = join(root, "child-args.txt");
   const countFile = join(root, "child-count.txt");
-  const release = join(root, "release");
+  const releaseFile = join(root, "child-release");
+  // Bound the child's wait in case the test never releases it.
   writeFileSync(join(tree, "bin", "rmd"), String.raw`#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(countFile)}, "invoked\n");
 fs.writeFileSync(${JSON.stringify(argsFile)}, args.join("\n") + "\n");
-const timer = setInterval(() => {
-  if (!fs.existsSync(${JSON.stringify(release)})) return;
-  clearInterval(timer);
+const deadline = Date.now() + 15000;
+const poll = () => {
+  if (!fs.existsSync(${JSON.stringify(root)})) process.exit(0);
+  if (!fs.existsSync(${JSON.stringify(releaseFile)})) {
+    if (Date.now() < deadline) return void setTimeout(poll, 25);
+    process.stderr.write("fixture planner child: never released\n");
+    process.exit(3);
+  }
   const mode = args[1].slice("--mode=".length), run_id = "PLAN-" + mode + "-fixture", task_id = "PLAN-" + mode;
   const rows = [
     { ts: new Date().toISOString(), run_id, task_id, step: "plan.start", lane: "plan", actor_pid: process.pid, mode, brief: args[2] },
     { ts: new Date().toISOString(), run_id, task_id, step: "pr.opened", lane: "plan", pr_url: "https://github.com/craigoley/wreckterra/pull/42" }
   ];
   fs.appendFileSync(${JSON.stringify(ledgerPath)}, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
-}, 20);
-setTimeout(() => process.exit(2), 30000).unref();
+};
+poll();
 `);
   chmodSync(join(tree, "bin", "rmd"), 0o755);
   mkdirSync(join(root, "state"), { recursive: true });
   writeFileSync(ledgerPath, "");
+  const childRows = () => readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+  // The gateway spawns the child inside this call, before the handler reads its evidence, so holding here holds that read.
   const gateway = ratifyCliGateway(repoRoot, join(root, "logs"), { ledgerPath, freshTree: (action) => {
-    const completed = action({ path: tree, sha: "f".repeat(40) });
-    fixture.until(completed);
-    return completed;
+    const handedOff = action({ path: tree, sha: "f".repeat(40) });
+    fixture.until(handedOff);
+    if (timing === "late-response") holdThread(LATE_RESPONSE_MS);
+    if (timing === "released-before-response") {
+      writeFileSync(releaseFile, "");
+      const until = Date.now() + 15_000;
+      while (!childRows().some((row) => row.step === "pr.opened") && Date.now() < until) holdThread(25);
+    }
+    return handedOff;
   } });
   const panelGraph = { root: repoRoot, planPath: join(root, "plan/tasks.yaml"), ledgerPath, github: { prView: () => null }, statusGithub: fakeGitHub(), ratify: gateway };
   const products = assembled(root);
@@ -984,7 +1013,6 @@ setTimeout(() => process.exit(2), 30000).unref();
     assert.match(response.headers.get("cache-control") ?? "", /no-store/);
     return { status: response.status, body: reply };
   };
-  const childRows = () => readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
   const saved = await send("alice", { version: "product-case-v1", action: "import", command });
   const productId = saved.body.productId;
   assert.equal((await send("alice", { version: "product-case-v1", action: "adopt", command: adopt(productId) })).status, 200);
@@ -999,14 +1027,19 @@ setTimeout(() => process.exit(2), 30000).unref();
   assert.equal((await send("alice", propose({ expectedRevision: 1 }))).body.error, "stale_revision");
   assert.equal(readFileSync(ledgerPath, "utf8"), "", "no refusal reached the gateway");
 
-  // Keep the child in flight until the first response has been read, even when the ledger reader is slow.
-  const pending = await send("alice", propose()).finally(() => writeFileSync(release, "release\n"));
-  assert.equal(pending.status, 200, JSON.stringify(pending.body));
-  assert.equal(pending.body.planOperation?.state, "pending", "the response is a truthful pending observation, not a wait for the child");
-  assert.equal(pending.body.planOperation?.mode, "clarify");
-  assert.equal(pending.body.planOperation?.targetHead, head);
-  assert.equal(pending.body.replayed, false);
-  const operationId = pending.body.planOperation!.operationId;
+  let operationId: string;
+  try {
+    const pending = await send("alice", propose());
+    assert.equal(pending.status, 200, JSON.stringify(pending.body));
+    assert.equal(pending.body.planOperation?.state, "pending", "the response is a truthful pending observation, not a wait for the child");
+    assert.equal(pending.body.planOperation?.mode, "clarify");
+    assert.equal(pending.body.planOperation?.targetHead, head);
+    assert.equal(pending.body.replayed, false);
+    operationId = pending.body.planOperation!.operationId;
+    assert.deepEqual(childRows().filter((row) => row.step === "plan.start"), [], "the child writes no row before the test has observed pending");
+  } finally {
+    writeFileSync(releaseFile, "");
+  }
   // The maintained gateway starts the real child and records its own rows; wait for its exit row.
   const deadline = Date.now() + 20_000;
   while (!childRows().some((row) => row.step === "ratify.cli_exited") && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1031,6 +1064,21 @@ setTimeout(() => process.exit(2), 30000).unref();
   assert.ok(readFileSync(argsFile, "utf8").includes(productCasePlanText(command.brief)));
   assert.equal(readFileSync(countFile, "utf8").trim().split("\n").length, 1, "repeated requests spent exactly one native plan child");
   assert.ok(!shim.calls().some((call) => call.includes("-X POST")));
+}
+
+test("W1-T10823: the served plan proposal reaches the maintained native handoff; served product proposal uses the verified managed checkout default", (t) =>
+  servedPlanProposal(t, "prompt"));
+
+test("W1-T14388 criterion 1: the fixture child writes its rows only after the test has observed pending, however late the response is", (t) =>
+  servedPlanProposal(t, "late-response"));
+
+test("W1-T14388 criterion 2: a child released before the response makes the pending assertion fail", async (t) => {
+  await assert.rejects(servedPlanProposal(t, "released-before-response"), (error: unknown) => {
+    assert.ok(error instanceof assert.AssertionError, String(error));
+    assert.match(error.message, /truthful pending observation/);
+    assert.notEqual(error.actual, "pending", "the released child's rows reached the evidence read");
+    return true;
+  });
 });
 
 /** This repository's own validated runner configuration, the table a real product target commits. */

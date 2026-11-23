@@ -30,6 +30,7 @@
  */
 
 import { appendLedger, type LedgerLine, type LedgerWriterDeps } from "./ledger.js";
+import type { TokenUsage } from "./worker.js";
 
 /** The three workflow classes {@link SEEDED_GOLDENS} spans (design note, verbatim). */
 export type GoldenClass = "plan-filing" | "src-fix" | "doc-fix-rung";
@@ -91,6 +92,10 @@ export interface ReplayResult {
   class: GoldenClass;
   passed: boolean;
   mismatches: string[];
+  model?: string;
+  verdict?: "pass" | "fail" | "unmeasurable";
+  tokens?: TokenUsage;
+  notionalCostUsd?: number;
 }
 
 /** True iff `a` and `b` contain the same set of paths, ORDER-independent —
@@ -173,8 +178,12 @@ export function replayResultLine(runId: string, taskId: string, result: ReplayRe
     step: REPLAY_RESULT_STEP,
     golden_id: result.goldenId,
     class: result.class,
-    passed: result.passed,
+    ...(result.verdict === "unmeasurable" ? {} : { passed: result.passed }),
     ...(result.mismatches.length ? { mismatches: result.mismatches } : {}),
+    ...(result.model === undefined ? {} : { model: result.model }),
+    ...(result.verdict === undefined ? {} : { verdict: result.verdict }),
+    ...(result.tokens === undefined ? {} : { tokens: result.tokens }),
+    ...(result.notionalCostUsd === undefined ? {} : { notional_cost_usd: result.notionalCostUsd }),
   };
 }
 
