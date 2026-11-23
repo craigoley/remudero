@@ -176,8 +176,6 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "review.finding": AFTER_PR_OPENED,
   "review.plan_lint_retry": AFTER_PR_OPENED, // W1-T11390: an explicit retry of a review that already ran
   "review.post_failed": AFTER_PR_OPENED,
-  // W1-T12227: the stale-code defect row, written right after the same run's review.post_refused (which is read).
-  "review.refused_after_finished_review": AFTER_PR_OPENED,
   "review.posted_reappended": AFTER_PR_OPENED,
   "review.skipped_closed_lifecycle": AFTER_PR_OPENED,
   "review.verdict_conflict": AFTER_PR_OPENED,
