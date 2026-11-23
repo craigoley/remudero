@@ -171,16 +171,18 @@ test("an operator-released ruling that differs from main in any field but judged
     for (const d of edited.dirs) rmSync(d, { recursive: true, force: true });
   }
 
-  // A machine verdict on main: the operator's release replaces it.
+  // A machine verdict on main: the judge's proceed moved it to verify: auto, so a release approved against the
+  // lagging verify: human copy approved a different contract (W1-T12224) and lands nothing.
   const machine = fixture("operator-release-verdict");
   try {
     await machine.pass({ stateDir: machine.stateDir, clock: EARLIER });
     assert.equal(loadPlan(join(machine.main, "plan", "tasks.yaml")).byId.get("W1-T9600")!.risk_ruling?.verdict, "low");
     const released = await machine.pass({ stateDir: machine.stateDir, clock: LATER, released: ["W1-T9600"] });
-    assert.deepEqual(released.report.proceeded, ["W1-T9600"]);
-    assert.deepEqual(released.report.settled, []);
-    assert.equal(machine.lands(), 2);
-    assert.equal(loadPlan(join(machine.main, "plan", "tasks.yaml")).byId.get("W1-T9600")!.risk_ruling?.verdict, "operator");
+    assert.deepEqual(released.report.proceeded, []);
+    assert.deepEqual(released.report.refused, ["W1-T9600"]);
+    assert.match(String(released.logs.find((l) => l.step === "machine_judge.refused")?.extra?.reason), /operator-approved contract changed/);
+    assert.equal(machine.lands(), 1);
+    assert.equal(loadPlan(join(machine.main, "plan", "tasks.yaml")).byId.get("W1-T9600")!.risk_ruling?.verdict, "low");
   } finally {
     for (const d of machine.dirs) rmSync(d, { recursive: true, force: true });
   }

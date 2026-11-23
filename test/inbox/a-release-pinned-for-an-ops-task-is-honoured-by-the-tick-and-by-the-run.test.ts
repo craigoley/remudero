@@ -101,8 +101,8 @@ test("W1-T13386 criterion 2: a release pinned for an ops task is honoured by the
 });
 
 test("W1-T13386 criterion 2: a record with no provenance stamp hashes as it did before the stamp was left out", () => {
-  // The pre-change algorithm, written out: sorted keys, undefined dropped, verify forced to auto,
-  // and only sourcePath, attempts and risk_ruling left out.
+  // The pre-change algorithm, written out: sorted keys, undefined dropped, and only sourcePath, attempts
+  // and risk_ruling left out. W1-T12224: verify is hashed as written, no longer forced to auto.
   const stable = (value: unknown): string => {
     if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
     if (value !== null && typeof value === "object") {
@@ -113,7 +113,7 @@ test("W1-T13386 criterion 2: a record with no provenance stamp hashes as it did 
   };
   const before = (task: Record<string, unknown>): string => {
     const { sourcePath: _source, attempts: _attempts, risk_ruling: _ruling, ...contract } = task;
-    return createHash("sha256").update(stable({ ...contract, verify: "auto" })).digest("hex");
+    return createHash("sha256").update(stable(contract)).digest("hex");
   };
   const record = publicPlan(shard(PUBLIC_ID)).byId.get(PUBLIC_ID)!;
   assert.equal(operatorReleasePin(record), before(record as unknown as Record<string, unknown>));

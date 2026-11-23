@@ -18,7 +18,7 @@ import { gzipSync } from "node:zlib";
 import { GARDENER_ORIGIN_ENV } from "../src/lib/worker-containment.js";
 
 import { fixedClock } from "../src/lib/clock.js";
-import { dispatchOrder, runnableCandidates } from "../src/lib/drain.js";
+import { dispatchOrder, resolveReleases, runnableCandidates } from "../src/lib/drain.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { costPriority, deterministicEscalation, machineShardHeaderLines, machineShardRisk, renderMachineShard, UNPRICED_PRIORITY } from "../src/lib/machine-filing.js";
 import { ciFrictionShardYaml } from "../src/lib/ci-friction-gardener.js";
@@ -911,9 +911,12 @@ test("rmd approve becomes a pinned operator ruling that no ledger rotation can s
     const plan = readPlan(root);
     for (const id of ["W1-T9110", "W1-T9111"]) {
       assert.equal(plan.byId.get(id)!.risk_ruling?.verdict, "operator");
-      assert.equal(plan.byId.get(id)!.verify, "auto");
+      assert.equal(plan.byId.get(id)!.verify, "human", "W1-T12224: a release authorizes dispatch, never verify: auto");
     }
-    assert.deepEqual(dispatchable(plan).sort(), ["W1-T9110", "W1-T9111"], "released with an empty ledger");
+    assert.deepEqual(dispatchable(plan), [], "control: no release is read, so the verify: human records stay held");
+    const releasedIds = resolveReleases({ readDurableReleases: () => readOperatorReleaseRecords(state) }, plan).ids;
+    assert.deepEqual(runnableCandidates(plan, () => false, 50, { releasedIds }).map((t) => t.id).sort(), ["W1-T9110", "W1-T9111"],
+      "released with an empty ledger");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
