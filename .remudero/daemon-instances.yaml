@@ -102,3 +102,14 @@ instances:
     codex_dir: /home/craigoleyagent/.codex
     container_config_dir: /home/craigoleyagent/.config/remudero-container
     image: synthwatcholey0620.azurecr.io/remudero:latest
+  oleyarcade:
+    repo: oley-arcade
+    project: remudero
+    github_repo: craigoley/oley-arcade
+    mode: shadow
+    container_name: remudero-oleyarcade-daemon
+    state_dir: /mnt/rmd/remudero-oleyarcade-state
+    claude_dir: /home/craigoleyagent/.claude
+    codex_dir: /home/craigoleyagent/.codex
+    container_config_dir: /home/craigoleyagent/.config/remudero-container
+    image: synthwatcholey0620.azurecr.io/remudero:latest
