@@ -241,6 +241,18 @@ export const WORKTREE_SITE_REGISTRY: WorktreeSiteRow[] = [
     },
   },
   {
+    file: "src/lib/hand-ship.ts",
+    site: "hosts",
+    creates: "a DETACHED worktree at the recorded main sha on the hand-ship preflight host, for rerunning failed tests on unchanged main",
+    disposition: {
+      kind: "exempt",
+      because:
+        "it cuts unchanged main on the preflight host, possibly remote over ssh, where worktreeAdd cannot reach: " +
+        "the command runs inside the host's own scratch clone of the hand bundle, at the exact base sha the " +
+        "author receipt recorded, so a failure can be compared on the same host (W1-T12169). Operator-approved 2026-11-23.",
+    },
+  },
+  {
     file: "src/lib/paired-trial.ts",
     site: "cutSealedAttemptTree",
     creates: "a DETACHED worktree at a paired trial's base, for one sealed side attempt that is graded and discarded",

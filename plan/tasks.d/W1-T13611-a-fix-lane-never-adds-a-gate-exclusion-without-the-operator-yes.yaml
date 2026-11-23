@@ -18,7 +18,9 @@
     - src/cli/commands/fix.ts
     - src/lib/prompt-render.ts
     - test/a-fix-round-never-adds-a-gate-exclusion-without-the-operator-yes.test.ts
-  status: queued
+  status: blocked
+  retirement: retired
+  # 2026-11-23 operator session (Craig's red list): #20450 was closed by the sweep for a held rebuild; W1-T14449 carries the rebuild, so the fleet must not build this task too. Superseded by ops-catalog task named here (not in this plan, so no superseded_by field).
   attempts: 0
   acceptance:
     - claim: "A fix round whose diff from the PR head adds an entry to an exclusion or baseline file (scripts/*-baseline.json in any repo, osv-scanner.toml, .github/semgrep/**, or any INSTRUMENT_SURFACE path) that classifyInstrumentChange does not judge tightening is not pushed: landRoundPush writes fix.commit_refused with reason gate-loosening and the file list, writes fix.done subtype commit_refused, and the rung stands down with a reason that asks for the operator's yes"
