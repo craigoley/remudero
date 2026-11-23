@@ -16,7 +16,7 @@
     - src/lib/instance-mode.ts
     - test/daemon/an-unreadable-overlay-registry-is-never-live.test.ts
     - test/plan/an-overlay-home-pointer-parses-and-nothing-reads-it.test.ts # amended 2026-11-22 for PR 20131: admits instance-mode as the pointer's one reader
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "With the overlay pointer set, core's registry absent and the overlay unreadable, instanceMode does not return live"

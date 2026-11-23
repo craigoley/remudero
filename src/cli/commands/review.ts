@@ -8,7 +8,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
-import { parseReviewerHistoryEvidence, parseWhitelistedProof, reviewRowNamesPr, resolveProofTestPath, resolveNameFilteredCandidatesAsync } from "../../lib/review.js";
+import { MOVER_BRANCH_PREFIX, movedFromCommit, parseMoverReceipts, verifyMoverRemoval, type MoverOpsRead, verifyMoverRemovalPublic, type MoverRemovalVerdict, parseReviewerHistoryEvidence, parseWhitelistedProof, reviewRowNamesPr, resolveProofTestPath, resolveNameFilteredCandidatesAsync } from "../../lib/review.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -36,7 +36,9 @@ import { type AdmissionObserver } from "../../lib/contributor-admission.js";
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
 import { observeAdmissionDisposition } from "../../lib/action-executor.js";
 import { listedLedgerFiles, readLedgerUnionRawLinesAsync, readLedgerUnionRecords } from "../../lib/ledger-union.js";
-import { visibleCriteria, type AcceptanceCriterion, DEFAULT_RISK, type TaskRisk } from "../../lib/plan.js";
+import { defaultGitRunnerAsync, visibleCriteria, type AcceptanceCriterion, DEFAULT_RISK, type TaskRisk } from "../../lib/plan.js";
+import { planDestinationRepository } from "../../lib/plan-destination.js";
+import { defaultOpsCatalogApi, type OpsCatalogApi } from "../../lib/ops-catalog-source.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/mounts.js";
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
@@ -755,6 +757,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   /** Head ref of the PR under review — used ONLY to exclude `dependabot/` heads from the
    *  post-verdict arm, which the dep-review lane owns. Absent ⇒ not a dependabot PR. */
   headRefName?: string;
+  /** W1-T14195: the verified-or-refused mover removal this head is, when it is mover-shaped and carries no criteria. */
+  moverRemoval?: MoverRemovalVerdict;
   /** W1-T13817: core's checkout when the PR is a satellite's; its origin holds W1 reservations the satellite's lacks. */
   reservationHomeDir?: string;
   /** Injectable arm (impl-BG), awaited (W1-T9549). Default: the awaited {@link armAutoMergeDetailedAsync}. */
@@ -942,7 +946,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     args.reservationHomeDir && args.headCheckoutDir ? satelliteReservationRead(args.headCheckoutDir, args.reservationHomeDir) : undefined);
   const ownership = taskIdEvidence.ownership;
   const preparedDecision = await preparePromisedReviewDecision({
-    input: { headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership,
+    input: { headSha, diff, report, implementationReport: args.implementationReport, body: inputBody, acceptance: criteria, declaredFiles: task.files, ownership, moverRemoval: args.moverRemoval,
       sharedReviewHistory: initialStatusHistory.kind === "readable" ? {
         failureIds: initialStatusHistory.failures.filter((finding) => finding.headSha === headSha).map((finding) => finding.id),
         revision: initialStatusHistory.revision,
@@ -1143,6 +1147,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     // W1-T322: advisory-only inputs — see ReviewEvidence's own doc for both fields.
     taskDeclaredFiles: task.files,
     openTaskIds: args.openTaskIds,
+    moverRemoval: args.moverRemoval,
   };
   // The proofs run here when a reviewer follows, else in the binding judge below; either way the CPU work starts now.
   reportPhase("proofs");
@@ -2044,6 +2049,64 @@ export function reviewLedgerReasonFields(args: {
 }
 
 /**
+ * W1-T14195: read both halves of a mover removal and verify them (see lib/review.ts). The public half is local git in
+ * the subject checkout (merge base to head); the ops half is three GETs against the configured plan destination: the
+ * record at the receipt's commit, that commit's reachability from ops main, and then the public blob at the record's
+ * moved_from commit. Every read that fails is the refusal `ops-read-unreadable` or a named public one, never a pass.
+ */
+export async function readMoverRemoval(args: {
+  headRefName: string; headRefOid: string; repoDir: string; stateDir: string;
+  /** Test seams: the git runner over the subject checkout, the ops API, and the base ref the merge base is cut from. */
+  git?: (args: string[]) => Promise<string>; api?: OpsCatalogApi; baseRef?: string;
+}): Promise<MoverRemovalVerdict> {
+  const run = args.git ?? defaultGitRunnerAsync(args.repoDir);
+  const attempt = (gitArgs: string[]): Promise<string | undefined> => run(gitArgs).then(out => out, () => undefined);
+  const mergeBase = (await attempt(["merge-base", args.baseRef ?? "origin/main", args.headRefOid]))?.trim();
+  const log = mergeBase ? await attempt(["log", "-z", "--format=%B", `${mergeBase}..${args.headRefOid}`]) : undefined;
+  const status = mergeBase ? await attempt(["diff", "--name-status", "-z", "--no-renames", mergeBase, args.headRefOid]) : undefined;
+  const message = (log ?? "").split("\0").join("\n");
+  const fields = status === undefined ? undefined : status.split("\0").filter(Boolean);
+  const entries = fields !== undefined && fields.length % 2 === 0
+    ? Array.from({ length: fields.length / 2 }, (_, i) => ({ status: fields[2 * i]!, path: fields[2 * i + 1]! })) : undefined;
+  const parsed = parseMoverReceipts(message);
+  // One merge-base blob read per receipt, taken before the sync verifier runs.
+  const baseBlobs = new Map<string, string | undefined>();
+  if ("receipts" in parsed && mergeBase) {
+    for (const receipt of parsed.receipts) baseBlobs.set(receipt.path, (await attempt(["rev-parse", "--verify", `${mergeBase}:${receipt.path}`]))?.trim());
+  }
+  const publicHalf = { headRefName: args.headRefName, message, entries, baseBlobAt: (path: string) => baseBlobs.get(path) };
+  const pub = verifyMoverRemovalPublic(publicHalf);
+  if (!pub.ok) return { verified: false, reason: pub.reason, ...(pub.id === undefined ? {} : { id: pub.id }) };
+  const destination = planDestinationRepository(args.stateDir);
+  const named = destination.outcome === "named" ? `${destination.owner}/${destination.repo}` : undefined;
+  // Every receipt must name the plan destination; only then is the ops repository read at all.
+  if (pub.receipts.some(receipt => receipt.repository !== named)) return verifyMoverRemoval({ public: publicHalf, ops: { destination: named } });
+  const api = args.api ?? defaultOpsCatalogApi();
+  const reads: Record<string, MoverOpsRead> = {};
+  const reachable = new Map<string, boolean>();
+  for (const receipt of pub.receipts) {
+    try {
+      const file = await api(`repos/${named}/contents/${receipt.path}?ref=${receipt.commit}`) as { type?: unknown; encoding?: unknown; content?: unknown; sha?: unknown };
+      if (!reachable.has(receipt.commit)) {
+        const compare = await api(`repos/${named}/compare/${receipt.commit}...main`) as { status?: unknown };
+        reachable.set(receipt.commit, compare.status === "ahead" || compare.status === "identical");
+      }
+      const isFile = file.type === "file" && file.encoding === "base64" && typeof file.content === "string";
+      const text = isFile ? new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(Buffer.from(file.content as string, "base64")) : undefined;
+      if (text !== undefined && createHash("sha1").update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest("hex") !== file.sha) throw new Error("ops blob differs from its sha");
+      const movedFrom = text === undefined ? undefined : movedFromCommit(text);
+      const publicBlob = movedFrom === undefined ? undefined : (await attempt(["rev-parse", "--verify", `${movedFrom}:${receipt.path}`]))?.trim();
+      reads[receipt.id] = { text, reachableFromMain: reachable.get(receipt.commit) === true, publicBlobAtMovedFrom: publicBlob };
+    } catch (error) {
+      // Any failed read is `ops-read-unreadable`, a refusal: the error text may carry private ops paths, so it is not kept.
+      void error;
+      reads[receipt.id] = "unreadable";
+    }
+  }
+  return verifyMoverRemoval({ public: publicHalf, ops: { destination: named, reads } });
+}
+
+/**
  * Injectable seams for `reviewCommand` (W1-T70): each defaults to the real `gh`/config/
  * worktree/review plumbing, so a test can drive the taskId/criteria-resolution codepath
  * this task fixed — the exact block that used to read as 0 lcov hits inside a function no
@@ -2058,6 +2121,8 @@ export function reviewLedgerReasonFields(args: {
  */
 export interface ReviewCommandDeps {
   taskLookup?: TaskLookupOptions;
+  /** W1-T14195: the mover-removal read; the real two-repository read by default. */
+  readMoverRemoval?: typeof readMoverRemoval;
   disarm?: (prUrl: string) => DisarmOutcome | void;
   onPhase?: (phase: string) => void;
   planLintRetryHead?: string;
@@ -2304,6 +2369,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     executionMode,
     planOnlyFiling,
     excludeProviders,
+    readMoverRemoval: readMoverRemovalDep,
   } = {
     fetchView: ghJson,
     loadConfig,
@@ -2316,6 +2382,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     postReviewPending,
     fetchHead: host.reviewWorktreeAsync?.fetch ?? realDeps().reviewWorktree.fetch,
     executionMode: "deterministic" as const,
+    readMoverRemoval,
     ...deps,
   };
 
@@ -2609,6 +2676,16 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       criteria = fromBody;
       source = `PR body Acceptance: block (${fromBody.length} criteria)`;
     }
+  }
+  // W1-T14195: the mover's REMOVE pull request carries neither a trailer nor an Acceptance block on purpose. A head that
+  // is mover-shaped and still has no criteria is verified against both repositories; any failure leaves the no-criteria
+  // refusal in place, and the reason is ledgered, never posted.
+  let moverRemoval: MoverRemovalVerdict | undefined;
+  if (criteria.length === 0 && !taskId && view.headRefName.startsWith(MOVER_BRANCH_PREFIX)) {
+    moverRemoval = await readMoverRemovalDep({ headRefName: view.headRefName, headRefOid: view.headRefOid,
+      repoDir: subjectRepoDir, stateDir: join(config.root, "state") });
+    log("review.mover_removal", moverRemoval.verified ? { verified: true, tasks: moverRemoval.receipts.map(r => r.id) } : { verified: false, reason: moverRemoval.reason, task: moverRemoval.id ?? null });
+    if (moverRemoval.verified) source = `verified mover removal of ${moverRemoval.receipts.map(r => r.id).join(", ")}`;
   }
 
   writeStartPhases(ledgerPath, reviewKey);
@@ -2914,6 +2991,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
           ledgerPath,
           runId,
           openTaskIds,
+          ...(moverRemoval === undefined ? {} : { moverRemoval }),
           ...(shadow ? { shadow: true } : {}),
           ...(calibrationCase ? { calibrationCase: true } : {}),
         }), join(config.root, "state", "inflight")),

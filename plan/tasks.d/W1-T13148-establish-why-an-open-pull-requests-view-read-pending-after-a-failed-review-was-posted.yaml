@@ -18,7 +18,7 @@
     - src/lib/tick-read-worker.ts
     - src/lib/sweep.ts
     - test/sweep/a-view-reads-the-review-state-github-holds-for-its-head.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The cause is established from rows and code, not assumed: the test replays the recorded sequence of #18701 (a refusal, a pending post, a failure post, then three passes) through the real view producer and shows which input made the view read pending with a pending stamp at or before the refusal"

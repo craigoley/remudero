@@ -158,6 +158,23 @@ test("W1-T4116: a demotion is only proposed for operator review", async () => {
   assert.deepEqual(readGardenState(gardenStatePath(join(root, "state"), "gate"), GATE_GARDEN_CLASSES).classes.demote, { alpha: 3, beta: 2 });
 });
 
+test("W1-T14384 criterion 3: when main's rationale already names W1-T4116, the gardener's next demotion still lands, and the rationale it writes ends with the token", async () => {
+  // OBSERVED on origin/main e52d660fb: ci-gate.yml's GATE_RATIONALE is the gardener's own, from #16171. Every gardener
+  // rationale names W1-T4116, so by references alone the next one is stale; `#this-pr` names the PR under check.
+  const mainRationale = "W1-T4116 gate gardener: scan-pr / osv-scan refused 0 of 115 runs on 75 pull requests (measured 2026-11-01T13:17:28.924Z, 74.6 min).";
+  const probes = await probesPromise;
+  const root = seededGates({ ciGate: CI_GATE(mainRationale) });
+  off(root, "tighten", "refresh");
+  const landed: Landed[] = [];
+  const base = readFileSync(join(root, CI_GATE_YML), "utf8");
+  runGarden(gateGardenSpec(deps(root, landed), probes), deps(root, landed));
+  assert.equal(landed.length, 1, "the demotion lands instead of failing its own gate-monotonic check");
+  const head = readFileSync(join(root, CI_GATE_YML), "utf8");
+  assert.match(head, /GATE_RATIONALE: "W1-T4116 gate gardener: quiet-gate refused 0 .*#this-pr\."/);
+  const verdict = probes.gm.evaluateGateMonotonic(probes.gm.readGateLists(base), probes.gm.readGateLists(head)) as unknown as { ok: boolean; status: string };
+  assert.deepEqual([verdict.ok, verdict.status], [true, "reviewed"]);
+});
+
 test("W1-T4116: a stale row is refreshed and the learnings headroom is left alone", async () => {
   const probes = await probesPromise;
   const root = seededGates();
@@ -202,14 +219,19 @@ test("W1-T4116: edits refuse what they cannot do exactly", async () => {
   assert.throws(() => editBaselineRow(escaped, "missing", 1), /no numeric row/);
   assert.throws(() => editBaselineRow(escaped, "n", null), /cannot remove/);
   assert.throws(() => demoteInCiGate(CI_GATE(), "dashboard", "W1-T4116 x"), /not in a readable REQUIRED list/);
-  // Rewording a rationale that names the same filed task does not review a new demotion.
-  const root = seededGates({ ciGate: CI_GATE("W1-T4116: earlier reviewed demotion") });
+  // A rationale identical to the one already on main would be refused by gate-monotonic, so the pass fails: it names
+  // the same filed task, and `#this-pr` never reviews origin/main's own rationale carried over (W1-T14384 design step
+  // 1). A gardener rationale for a gate main's does not name lands; W1-T14384 criterion 3 pins that.
+  const rationale = demotionCandidate(REPORT, new Set(["quiet-gate"]))!.edit;
+  assert.equal(rationale.kind, "demote");
+  const root = seededGates({ ciGate: CI_GATE(rationale.kind === "demote" ? rationale.rationale : "") });
   off(root, "tighten", "refresh");
   // A refused filing lands nothing and is ledgered with its reason, to be retried after a backoff.
   const failures: string[] = [];
   const refusing = { ...deps(root, []), log: (step: string, e?: Record<string, unknown>) => void (step === "gate.garden_filing_failed" && failures.push(String(e?.reason))) };
   assert.equal(runGarden(gateGardenSpec(refusing, probes), refusing).prUrl, undefined);
   assert.match(failures.join("\n"), /gate-monotonic would refuse: .*names no PR or task origin\/main's did not/);
+  assert.match(failures.join("\n"), /#this-pr cannot review it: the rationale is origin\/main's, carried over/);
   assert.ok(!existsSync(join(root, "docs/gate-garden-log.md")));
 });
 

@@ -74,8 +74,8 @@ const RECORDS: readonly CallerRecord[] = [
   },
   {
     file: "src/lib/paired-trial.ts", helper: "gitProbe", via: ["sealedPairedAttemptDispatcher", "probeSealedIsolation"],
-    callers: ["src/cli/commands/run-task-verb.ts", "src/lib/skill-eval-command.ts", "src/run-task.ts"],
-    tree: "WORKTREE: the sealed attempt tree a worker just ran in (and the fleet clone it was cut from; both callers pass <root>/repos/<repo>)",
+    callers: ["src/cli/commands/run-task-verb.ts", "src/lib/replay-harness.ts", "src/lib/skill-eval-command.ts", "src/run-task.ts"],
+    tree: "WORKTREE: the worker's sealed attempt tree and its fleet clone at <root>/repos/<repo>; golden replay cuts the attempt at the recorded base SHA",
     decision: "leaf",
   },
   {

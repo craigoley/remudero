@@ -4756,6 +4756,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               : readJsonImpl(["api", `repos/${owner}/${repo}/pulls/${pr.prNumber}`]),
             readRollup: (sha) => restRollupFor(owner, repo, sha, readJsonImpl),
             readRequiredContexts: () => (deps.readRequiredContextsImpl ?? ghRequiredStatusCheckContexts)(owner, repo),
+            requiredQualityChecks: requiredChecks,
             readFailures: (rollup) => fetchCiFailures(owner, repo, rollup),
           });
           if ("deferred" in moved) {
@@ -5553,6 +5554,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           // the function), so a SHIPS-UNWIRED marker on a PR this rung fixes is FLAGGED rather
           // than honoured off stale yaml — the safe direction.
           openTaskIds: openTaskIdsFromPlan(plan),
+          ...earlyFixRoundCheckReader(pr, evidence,
+            (sha) => restRollupFor(owner, repo, sha, (args: string[]) => readJsonImpl(args, { fresh: true })),
+            (rollup) => fetchCiFailures(owner, repo, rollup)),
           waitForOwnHeadCi: waitForFixCi,
           liveRoundHandoff: (): LiveRoundHandoff | undefined => {
             const handed = liveHandoff;
@@ -10307,6 +10311,17 @@ export function earlyRedEvidenceRollup<T extends RollupCheckEntry>(
     const name = check.name ?? check.context ?? "";
     return red.has(name) || shards.some((p) => p.test(name));
   });
+}
+
+export function earlyFixRoundCheckReader(
+  pr: Pick<OpenPrView, "checksState" | "pendingRequiredChecks">,
+  evidence: Pick<FixDispatchEvidence, "ciFailures">,
+  readRollup: (sha: string) => Promise<RollupCheckEntry[]>,
+  readFailures: (rollup: RollupCheckEntry[]) => CiFailure[] | Promise<CiFailure[]>,
+): { readEarlyCiFailures?: (sha: string) => Promise<CiFailure[]> } {
+  const partial = pr.checksState === "pending" || (pr.pendingRequiredChecks?.length ?? 0) > 0;
+  if (!partial || (evidence.ciFailures?.length ?? 0) === 0) return {};
+  return { readEarlyCiFailures: async (sha) => withoutDownstreamGateFailure(await readFailures(await readRollup(sha))) };
 }
 
 /** W1-T1275 — the ONE (head, sibling-transition) shape that makes `ci-gate`'s concluded verdict
@@ -17128,6 +17143,7 @@ export async function adoptMovedFixHead(
     readPr: () => Promise<unknown>;
     readRollup: (sha: string) => Promise<RollupCheckEntry[]>;
     readRequiredContexts: () => Iterable<string> | undefined | Promise<Iterable<string> | undefined>;
+    requiredQualityChecks?: Iterable<string>;
     readFailures: (rollup: RollupCheckEntry[]) => CiFailure[] | Promise<CiFailure[]>;
   },
 ): Promise<MovedFixHeadOutcome> {
@@ -17144,18 +17160,20 @@ export async function adoptMovedFixHead(
   if (live.head?.sha !== headRef.headRefOid) return { deferred: "head_moved_again" };
   if (live.mergeable_state === "dirty") return { deferred: "merge_conflict" };
   let failures: CiFailure[];
+  let pendingRequiredChecks: string[];
   try {
     const rollup = await reads.readRollup(headRef.headRefOid);
     const requiredContexts = await reads.readRequiredContexts();
     const checks = checksStateFromRollup(rollup, requiredContexts);
     if (checks !== "red") return { deferred: `checks_${checks}` };
+    pendingRequiredChecks = pendingQualityGateNames(rollup, reads.requiredQualityChecks ?? requiredContexts);
     failures = await reads.readFailures(rollup);
   } catch (e) {
     const reason = `checks_unreadable: ${String((e as Error)?.message ?? e)}`;
     return { deferred: reason };
   }
   if (failures.length === 0) return { deferred: "failures_unreadable" };
-  const adopted: OpenPrView = { ...pr, headSha: headRef.headRefOid, checksState: "red", ciFailures: failures };
+  const adopted: OpenPrView = { ...pr, headSha: headRef.headRefOid, checksState: "red", ciFailures: failures, pendingRequiredChecks };
   adoptedMovedFixHeads.add(adopted);
   return { adopted, evidence: { ...evidence, ciFailures: failures } };
 }
