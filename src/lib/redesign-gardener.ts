@@ -2,20 +2,23 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, posix } from "node:path";
 
-import { backlogLandingGuard } from "./backlog-gardener.js";
+import { backlogEvidence, backlogLandingGuard, judgeBacklog, ownProofsHoldOnMain, satisfiedByMainFromRows, type BacklogDisposition } from "./backlog-gardener.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { gardenLedgerBucket, gardenStatePath, readGardenState, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
+import { readMainHistory } from "./hot-file-gardener.js";
+import { readOriginMainSha } from "./inbox.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { machineShardFilingRefusal, reparkStaleRuling } from "./machine-filing.js";
 import { parseTasksFromYaml, type Task } from "./plan.js";
-import { planCheapFingerprint, planInventory, type PlanInventory } from "./plan-gardener.js";
+import { grepProofHeldAt, planCheapFingerprint, planInventory, type PlanInventory } from "./plan-gardener.js";
+import { PR_OPEN_SATISFIED_BY_MAIN_STEP } from "./pr-open.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import { INSTRUMENT_SURFACE, commentOnlyGrepProofRefusal, isDialectPrefixed } from "./review.js";
 import { lintTask } from "./task-linter.js";
 
 /**
- * The redesign gardener: the plan Architect amends a task its fix lane could not build (operator ruling 2026-10-30).
+ * The redesign gardener lets the plan Architect amend a held task or propose retirement backed by main.
  *
  * A fix round that stands down ("fix needs design at this exact head", a refused criterion whose refusal-amendment
  * pointer says "an Architect must make the change above") holds its PR until the task's record changes. Nothing made
@@ -28,8 +31,8 @@ import { lintTask } from "./task-linter.js";
  * PR stays on the SLO ladder (HELD_ESCALATION_SLO_MS in sweep.ts), which judges a rebuild or a digest.
  */
 
-export type RedesignClass = "amend";
-export const REDESIGN_CLASSES: readonly RedesignClass[] = ["amend"];
+export type RedesignClass = "amend" | "retire";
+export const REDESIGN_CLASSES: readonly RedesignClass[] = ["amend", "retire"];
 export const REDESIGN_NAME = "redesign";
 export const REDESIGN_JUDGED_STEP = "redesign.judged";
 const REDESIGN_SCORECARD_STEP = `${REDESIGN_NAME}.scorecard`;
@@ -50,7 +53,7 @@ const POINTER = /^ {2}# refusal-amendment \(.*(?:\n {2}# {3}.*)*/gm;
 /** The stamp refusal-amendment.ts writes into the pointer's head: `(<task>, run <run>, <iso>)`. */
 export const POINTER_STAMP_RE = /^ {2}# refusal-amendment \([^,]+, run [^,]+, (\d{4}-\d\d-\d\dT[\d:.]+Z)\)/;
 const MARKER = (signature: string) => `  # redesign: signature=${signature}`;
-/** One shard line recording that the Architect already amended the task for this evidence signature. */
+/** One shard line recording the Architect's decision for this evidence signature. */
 export const REDESIGN_MARKER_RE = /^ {2}# redesign: signature=([a-f0-9]{16})$/;
 const FORBIDDEN_PREFIXES = [".github/", "deploy/", "plan/", "state/", "hooks/"];
 
@@ -64,13 +67,20 @@ export interface RedesignEdit {
   reason: string;
 }
 
-export interface RedesignAction extends GardenAction<RedesignClass> {
+interface RedesignRetirement {
+  retirement: Extract<BacklogDisposition, { kind: "retire" }>["retirement"];
+  reason: string;
+}
+
+export type RedesignAction = GardenAction<RedesignClass> & {
   shard: string;
   signature: string;
   /** One key per evidence line ({@link RedesignCandidate.keys}), recorded with every verdict and landing. */
   keys: string[];
-  edit: RedesignEdit;
-}
+} & (
+  | { class: "amend"; edit: RedesignEdit }
+  | { class: "retire"; edit: RedesignRetirement; confirmation: string; original: string }
+);
 
 export interface RedesignCandidate {
   id: string;
@@ -85,7 +95,7 @@ export interface RedesignCandidate {
 export interface RedesignInventory {
   candidates: number;
   actions: RedesignAction[];
-  outcomes: Array<{ task_id: string; outcome: "amend" | "grill" | "refused" | "unparseable"; reason: string }>;
+  outcomes: Array<{ task_id: string; outcome: RedesignClass | "grill" | "refused" | "unparseable"; reason: string }>;
 }
 
 export interface RedesignSources {
@@ -177,8 +187,9 @@ export function redesignCandidates(sources: RedesignSources): RedesignCandidate[
   // A verdict is never windowed: an unchanged pointer is the same evidence a week later, and is not asked again. It is
   // kept per evidence line, because the set of lines is windowed: a hold row leaving the seven days changes the set,
   // and a set that only lost lines, or reordered them, holds no line a verdict has not already seen.
-  const judged = new Set(sources.ledger([REDESIGN_JUDGED_STEP], fixedClock(0).iso()).flatMap((r) => rowKeys(r, r.signature)));
-  // An amend is recorded by its landing, not by its answer: the open PR holds it, a merge marks the shard, a close
+  const judged = new Set(sources.ledger([REDESIGN_JUDGED_STEP], fixedClock(0).iso())
+    .filter((r) => r.retryable !== true).flatMap((r) => rowKeys(r, r.signature)));
+  // An accepted decision is recorded by its landing: the open PR holds it, a merge marks the shard, a close
   // declines it, and a filing that failed leaves it free to be asked again.
   const settled = sources.settled();
   const out: RedesignCandidate[] = [];
@@ -203,17 +214,22 @@ export function redesignPrompt(candidate: RedesignCandidate): string {
     "Standing rule 16: the Architect may correct a mis-specified task through a plan PR, and NO criterion is dropped or",
     "weakened. You may: add paths to `files:` (never remove one), restate a criterion's proof so it tests that SAME claim",
     "more directly, and write an `amendment:` that tells the next builder what changed and how to approach the work.",
-    "You may NOT change, reorder, add or remove any claim, and may not touch status, priority, verify or depends_on.",
+    "An amendment must preserve every claim in order and leave status, priority, verify and depends_on untouched.",
     "Never add a path under .github/, deploy/, plan/, state/ or hooks/, nor a CI instrument (a ratchet, baseline or gate",
     "script, src/lib/review.ts): those grants are the operator's alone. If the fix needs one of them, a credential, a policy",
-    "or security decision, or a claim that is itself wrong, answer GRILL.",
+    "or security decision, answer GRILL.",
     "The amended record must pass the plan linter as it lands: every added path stays inside the task's one concern",
     "(Rule 19 sizing at its risk), and a record with `author_class: machine` may declare only paths that already exist.",
+    "Answer RETIRE if the work is already done or overtaken on main. Use closed for completed work and withdrawn for a",
+    "superseded task. Code must confirm the retirement through the task's proofs, a build satisfied by main, or a merged",
+    "replacement that covers the declared files and satisfies the proofs. Give a one-sentence reason. Otherwise GRILL",
+    "when the claims cannot be preserved by an amendment.",
     "",
     ...ACCEPTANCE_PROOF_GRAMMAR,
     "",
     "Answer with exactly one line starting `REDESIGN:` followed by a JSON object:",
     '{"verdict":"amend"|"grill","reason":"one sentence","files_add":["path"],"proofs":[{"criterion":1,"proof":"unit test: ..."}],"amendment":"plain text"}',
+    '{"verdict":"retire","retirement":"closed"|"withdrawn","reason":"one sentence"}',
     "",
     `TASK ${candidate.id} (shard ${candidate.shard}):`,
     candidate.text.trimEnd(),
@@ -223,7 +239,10 @@ export function redesignPrompt(candidate: RedesignCandidate): string {
   ].join("\n");
 }
 
-type Parsed = { verdict: "amend"; edit: RedesignEdit } | { verdict: "grill"; reason: string } | { verdict: "unparseable"; reason: string };
+type Parsed =
+  | { verdict: "amend"; edit: RedesignEdit }
+  | { verdict: "retire"; edit: RedesignRetirement }
+  | { verdict: "grill" | "unparseable"; reason: string };
 
 export function parseRedesignAnswer(text: string): Parsed {
   const line = text.split("\n").find((l) => l.trim().startsWith("REDESIGN:"));
@@ -231,8 +250,15 @@ export function parseRedesignAnswer(text: string): Parsed {
   let value: Record<string, unknown>;
   try { value = JSON.parse(line.trim().slice("REDESIGN:".length)) as Record<string, unknown>; }
   catch (error) { return { verdict: "unparseable", reason: `REDESIGN: is not JSON (${String(error)})` }; }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return { verdict: "unparseable", reason: "REDESIGN: needs a JSON object" };
   const reason = typeof value.reason === "string" ? value.reason.trim() : "";
   if (value.verdict === "grill") return { verdict: "grill", reason: reason || "no reason given" };
+  if (value.verdict === "retire") {
+    const { retirement } = value;
+    return (retirement === "closed" || retirement === "withdrawn") && reason
+      ? { verdict: "retire", edit: { retirement, reason: reason.replace(/\s+/g, " ") } }
+      : { verdict: "unparseable", reason: "retire needs a closed or withdrawn retirement and a reason" };
+  }
   if (value.verdict !== "amend") return { verdict: "unparseable", reason: `verdict ${JSON.stringify(value.verdict)}` };
   const filesAdd = Array.isArray(value.files_add) ? value.files_add : [];
   const proofs = Array.isArray(value.proofs) ? value.proofs : [];
@@ -316,29 +342,64 @@ export function applyRedesignEdit(text: string, rel: string, edit: RedesignEdit,
   return { text: reparkStaleRuling(next, rel) };
 }
 
+function applyRedesignRetirement(text: string, rel: string, edit: RedesignRetirement, signature: string): { text: string; task: Task } | { refused: string } {
+  const [task, ...others] = parseTasksFromYaml(text, rel);
+  const queued = /^( {2}status:[ \t]+)(queued|'queued'|"queued")([ \t]*(?:#[^\r\n]*)?)(\r?)$/m;
+  if (others.length > 0 || task?.status !== "queued" || task.retirement || !queued.test(text)) {
+    return { refused: "retirement needs one queued task with a status line and no retirement" };
+  }
+  const next = text.replace(queued, (_, key, status, comment, cr) =>
+    [`${key}${status.replace("queued", "blocked")}${comment}`, `  retirement: ${edit.retirement}`, MARKER(signature), `  # redesign Architect: ${edit.reason}`].join(`${cr}\n`) + cr);
+  return { text: reparkStaleRuling(next, rel), task };
+}
+
+function retirementConfirmation(task: Task, shard: string, sources: RedesignSources, repoRoot: string): string | undefined {
+  const satisfied = satisfiedByMainFromRows(sources.ledger([PR_OPEN_SATISFIED_BY_MAIN_STEP], fixedClock(0).iso())).get(task.id);
+  if (satisfied) return `Build ${satisfied.branch} (${satisfied.headSha.slice(0, 12)}) was recorded satisfied by main.`;
+  const main = readOriginMainSha(repoRoot);
+  const acceptance = task.acceptance;
+  if (main === undefined || acceptance === undefined || !ownProofsHoldOnMain(repoRoot, task, shard) ||
+      !acceptance.every(({ proof }) => grepProofHeldAt(repoRoot, main, proof) === true)) return undefined;
+  const history = readMainHistory(repoRoot, fixedClock(sources.clock.now() - EVIDENCE_WINDOW_MS).iso());
+  const evidence = backlogEvidence(task, repoRoot, new Map(), [], history, sources.clock.date(), () => false, false, undefined, () => true);
+  return evidence.overtaken ? judgeBacklog(evidence).reason : `Every acceptance proof holds on origin/main (${main.slice(0, 12)}).`;
+}
+
 export async function redesignInventory(sources: RedesignSources, deps: GardenerDeps): Promise<RedesignInventory> {
   const candidates = redesignCandidates(sources);
   const plan = sources.plan();
   const actions: RedesignAction[] = [];
   const outcomes: RedesignInventory["outcomes"] = [];
   for (const candidate of candidates.slice(0, REDESIGN_MAX_PER_PASS)) {
-    const task = plan.open.find((t) => t.id === candidate.id)!;
     const parsed = parseRedesignAnswer(await sources.judgeText(redesignPrompt(candidate)));
+    const action = { target: candidate.id, shard: candidate.shard, signature: candidate.signature, keys: candidate.keys };
     let outcome: RedesignInventory["outcomes"][number];
     if (parsed.verdict === "amend") {
+      const task = plan.open.find((t) => t.id === candidate.id)!;
       const dryRun = applyRedesignEdit(candidate.text, candidate.shard, parsed.edit, candidate.signature, "0000-00-00");
       const refused = redesignEditRefusal(task, parsed.edit, sources.pathKind, sources.readTarget) ??
         ("refused" in dryRun ? dryRun.refused : sources.landingRefusal(candidate.shard, dryRun.text));
       outcome = refused === undefined
         ? { task_id: candidate.id, outcome: "amend", reason: parsed.edit.reason }
         : { task_id: candidate.id, outcome: "refused", reason: refused };
-      if (refused === undefined) actions.push({ class: "amend", target: candidate.id, reason: parsed.edit.reason, shard: candidate.shard, signature: candidate.signature, keys: candidate.keys, edit: parsed.edit });
+      if (refused === undefined) actions.push({ ...action, class: "amend", reason: parsed.edit.reason, edit: parsed.edit });
+    } else if (parsed.verdict === "retire") {
+      const draft = applyRedesignRetirement(candidate.text, candidate.shard, parsed.edit, candidate.signature);
+      const confirmation = "refused" in draft ? undefined : retirementConfirmation(draft.task, candidate.shard, sources, deps.repoRoot);
+      const refused = "refused" in draft ? draft.refused : confirmation === undefined
+        ? "origin/main does not confirm the task is done or overtaken" : sources.landingRefusal(candidate.shard, draft.text);
+      if (refused === undefined && confirmation !== undefined) {
+        actions.push({ ...action, class: "retire", reason: parsed.edit.reason, edit: parsed.edit, confirmation, original: candidate.text });
+      }
+      outcome = refused === undefined
+        ? { task_id: candidate.id, outcome: "retire", reason: parsed.edit.reason }
+        : { task_id: candidate.id, outcome: "refused", reason: refused };
     } else {
       outcome = { task_id: candidate.id, outcome: parsed.verdict, reason: parsed.reason };
     }
     outcomes.push(outcome);
     // A judged signature is never asked again: new evidence (a new hold, a new pointer) is a new signature.
-    if (outcome.outcome !== "amend") deps.log(REDESIGN_JUDGED_STEP, { ...outcome, signature: candidate.signature, evidence_keys: candidate.keys });
+    if (outcome.outcome !== "amend" && outcome.outcome !== "retire") deps.log(REDESIGN_JUDGED_STEP, { ...outcome, signature: candidate.signature, evidence_keys: candidate.keys });
   }
   return { candidates: candidates.length, actions, outcomes };
 }
@@ -405,7 +466,10 @@ export function redesignGardenSpec(
   return {
     name: REDESIGN_NAME,
     classes: REDESIGN_CLASSES,
-    review: { amend: "a task amendment is the Architect's judgement call; close this PR to decline it." },
+    review: {
+      amend: "a task amendment is the Architect's judgement call; close this PR to decline it.",
+      retire: "a task retirement is the Architect's judgement call backed by main; close this PR to decline it.",
+    },
     landingRefusal: backlogLandingGuard(deps),
     cheapFingerprint: () => `${planCheapFingerprint(deps.repoRoot, deps.stateDir)}:${gardenLedgerBucket(sources.clock)}`,
     inventory: () => { throw new Error("the redesign Architect answers asynchronously: drive it with runGardenAsync"); },
@@ -416,7 +480,7 @@ export function redesignGardenSpec(
       const no = new Set(declined.map((d) => d.target));
       return i.actions.filter((a) => !no.has(a.signature) && !a.keys.every((k) => no.has(k)));
     },
-    pendingTargets: (plan) => plan.actions.flatMap((a) => [a.signature, ...a.keys].map((target) => ({ class: "amend" as const, target }))),
+    pendingTargets: (plan) => plan.actions.flatMap((a) => [a.signature, ...a.keys].map((target) => ({ class: a.class, target }))),
     scorecard: (i, plan) => {
       const card = { candidates: i.candidates, outcomes: i.outcomes, acting: plan.acting, signatures: plan.actions.map((a) => a.signature),
         evidence_keys: plan.actions.flatMap((a) => a.keys) };
@@ -428,27 +492,43 @@ export function redesignGardenSpec(
       const landed: RedesignAction[] = [];
       for (const action of plan.actions) {
         const abs = join(ws.root, action.shard);
-        const edited = applyRedesignEdit(readFileSync(abs, "utf8"), action.shard, action.edit, action.signature, date);
+        const original = readFileSync(abs, "utf8");
+        if (action.class === "retire" && original !== action.original) {
+          deps.log(REDESIGN_JUDGED_STEP, { task_id: action.target, outcome: "refused", reason: "the shard changed after retirement was confirmed",
+            signature: action.signature, evidence_keys: action.keys, retryable: true });
+          continue;
+        }
+        const edited = action.class === "retire"
+          ? applyRedesignRetirement(original, action.shard, action.edit, action.signature)
+          : applyRedesignEdit(original, action.shard, action.edit, action.signature, date);
         if ("refused" in edited) { deps.log(REDESIGN_JUDGED_STEP, { task_id: action.target, outcome: "refused", reason: edited.refused, signature: action.signature, evidence_keys: action.keys }); continue; }
         writeAtomic(abs, edited.text);
         landed.push(action);
       }
       if (landed.length === 0) return undefined;
+      const retiring = landed[0]!.class === "retire";
       return {
         paths: landed.map((a) => a.shard),
-        title: `docs(plan): the Architect amends ${landed.map((a) => a.target).join(", ")} after its fix lane stood down`,
+        title: `docs(plan): the Architect ${retiring ? "retires" : "amends"} ${landed.map((a) => a.target).join(", ")} after its fix lane stood down`,
         body: [
-          "The redesign gardener's Architect amends tasks whose fix lane stood down and held a PR on a person. Every claim",
-          "is unchanged (standing rule 16, checked in code); `files:` only grows; no workflow, deploy, plan or CI-instrument",
-          "path is granted. A merged amendment changes the task's contract revision, which releases the held PR's next fix round.",
-          "Close this PR to decline an amendment.", "",
+          ...(retiring ? [
+            "The redesign Architect proposes retiring held tasks after checking main. Each record keeps its acceptance criteria",
+            "and records the retirement and the Architect's reason. Close this PR to decline a retirement.",
+          ] : [
+            "The redesign gardener's Architect amends tasks whose fix lane stood down and held a PR on a person. Every claim",
+            "is unchanged (standing rule 16, checked in code); `files:` only grows; no workflow, deploy, plan or CI-instrument",
+            "path is granted. A merged amendment changes the task's contract revision, which releases the held PR's next fix round.",
+            "Close this PR to decline an amendment.",
+          ]), "",
           ...landed.map((a) => [
             `- **${a.target}** (\`${a.shard}\`): ${a.reason}`,
-            ...(a.edit.filesAdd.length ? [`  - files added: ${a.edit.filesAdd.map((p) => `\`${p}\``).join(", ")}`] : []),
-            ...a.edit.proofs.map((p) => `  - criterion ${p.criterion}'s proof is now \`${p.proof}\``),
+            ...(a.class === "retire" ? [`  - ${a.edit.retirement}: ${a.confirmation}`] : [
+              ...(a.edit.filesAdd.length ? [`  - files added: ${a.edit.filesAdd.map((p) => `\`${p}\``).join(", ")}`] : []),
+              ...a.edit.proofs.map((p) => `  - criterion ${p.criterion}'s proof is now \`${p.proof}\``),
+            ]),
           ].join("\n")),
           "", "## Acceptance",
-          ...landed.map((a) => `- claim: ${a.target} carries the Architect's amendment\n  proof: "grep: # redesign: signature=${a.signature} in ${a.shard}"`),
+          ...landed.map((a) => `- claim: ${a.target} carries the Architect's ${a.class === "retire" ? "retirement" : "amendment"}\n  proof: "grep: # redesign: signature=${a.signature} in ${a.shard}"`),
         ].join("\n"),
       };
     },
