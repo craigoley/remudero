@@ -1113,6 +1113,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "plan.move.janitor_step",
   "plan.move.stand_down",
   "plan.move.step",
+  // W1-T14536: plan.move.tick_in_flight (PLAN_TASK_MOVE_IN_FLIGHT_STEP, daemon.ts) names the phase and age of a tick
+  // that has not settled.
+  "plan.move.tick_in_flight",
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: test/ledger-rotation.test.ts
   // anchors its mutation check on those three lines followed by `]);` and asserts the needle occurs
   // EXACTLY once. A block appended after them silently breaks that anchor.

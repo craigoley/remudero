@@ -1446,7 +1446,6 @@
     "sweep.fix.deferred_to_live_round": "An operator-facing record that a new failure was handed to the live fix round instead of a second round; the hand-off file carries the decision, so nothing re-reads the row.",
     "sweep.fix.handoff_cleanup_failed": "A diagnostic for a hand-off file that could not be removed after its round ended; it records the error, and the stale file is ignored because its claim and round ids no longer match.",
     "sweep.fix.handoff_unreadable": "A diagnostic for a hand-off file that could not be parsed; the round treats it as no hand-off and records the error.",
-    "plan.move.tick_in_flight": "W1-T14532: a diagnostic, at most hourly, naming the age of a move tick that has not settled; nothing reads it, and it changes no move decision.",
     "plan.reconcile.reverted_requeue": "An audit row for each shard the plan reconcile re-queues after a revert or a remove-credit override; the landing PR and the projection carry the state, so nothing re-reads the row.",
     "queue_judge.noop_skipped": "A receipt that the queue judge dropped an action whose base shard already carries its priority and exact marker; nothing decides from it, and the next pass judges the task afresh.",
     "task_files_landing.refusal_remembered": "A receipt that the task-files landing wrote a record-intrinsic refusal of a blob to its state-dir memory; the landing answers later offers of those bytes from that memory, never from this row.",
