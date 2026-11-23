@@ -6,7 +6,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 24.00
+  budget_usd: 4.50
   risk: high
   band_meaning: span
   origin: "re-filed 2026-10-01 from the never-filed W1-T3455 shard (branch plan/W1-T3455-log-proven-ratchet-admission, 2026-09-12), re-verified against origin/main 1247a5663; operator ruling 2026-10-01 (verify, file real ones)"
