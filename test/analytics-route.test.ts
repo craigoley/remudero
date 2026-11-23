@@ -572,6 +572,16 @@ test("W1-T13376 criterion 1: deriveAnalyticsSnapshotFromStream does not retain a
   );
 });
 
+test("W1-T13057 pins the cause of the intermittent failure", (t) => {
+  const coverageDir = tmpStateDir("rmd-analytics-heap-coverage-");
+  t.after(() => rmSync(coverageDir, { recursive: true, force: true }));
+  t.mock.property(process, "env", { ...process.env, NODE_V8_COVERAGE: coverageDir });
+
+  const run = runAnalyticsHeapChild(false);
+  assert.ifError(run.error);
+  assert.equal(run.status, 0, `the heap-bound fold must complete with parent coverage configured\n${run.stderr}`);
+});
+
 test("W1-T13376 criterion 2: retaining the same corpus exceeds the heap cap", () => {
   const run = runAnalyticsHeapChild(true);
   assert.ifError(run.error);
