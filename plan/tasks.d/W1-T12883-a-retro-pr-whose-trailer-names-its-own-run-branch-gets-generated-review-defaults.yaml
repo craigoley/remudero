@@ -16,7 +16,7 @@
   files:
     - src/lib/tick-read-worker.ts
     - test/review/a-retro-pr-whose-trailer-names-its-own-run-branch-gets-generated-review-defaults.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "usesUntaskedReviewMetadata returns true for task id RETRO-1794737755052 on head run-RETRO-1794737755052, the exact shape the retro lane opens (PR #18670)"
