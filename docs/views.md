@@ -84,7 +84,7 @@ reads no file and no SQLite.
 - **Keys.** The query string, sorted by parameter name, selects the body (`?instance=console`); an
   unkeyed view has the empty key.
 - **Switches: dark by default.** `state/read-model/switches.json` holds `{"projector": "on"|"off", "push"?: "on"|"off", "views":
-  {"<name>": "serve"|"shadow"|"off"}}`, and serve re-reads it every 5 s off the request path. A view
+  {"<name>": "serve"|"shadow"|"off"|"auto"}}`, and serve re-reads it every 5 s off the request path. A view
   with no entry, or no file at all, is **dark**: it answers as `off`. Only the `read-model` status view
   serves without an entry. An absent file writes one `read_model.switch_absent` row and an unreadable
   one a `read_model.switch_unreadable` row (once per distinct reason); an unreadable file turns every
@@ -105,6 +105,10 @@ reads no file and no SQLite.
     deallocate keeps the streak; an older DB's `view_shadow` table is read until its first save.
   - `serve`: the read-model body answers. A view with no body yet answers from its Phase 0
     computation, or **404 `view_not_ready`**.
+  - `auto`: the view answers as `serve` while its shadow readiness (`data.shadow` in
+    `/v1/views/read-model`) reads `ready`, and as `shadow` otherwise, unknown readiness included.
+    The comparator keeps sampling it while it is served, so a real diff demotes it. Each change of
+    its effective mode writes one `view.auto_promoted` or `view.auto_demoted` row with the reason.
 - **GitHub fetcher (Phase 1 cutover).** `"github"?: "serve"|"worker"` in the same file picks who keeps
   serve's GitHub gateway warm. Absent or `serve`, serve does. `worker` hands the keep-warm to the
   read-model worker only while its thread is heard from and holds the core lease; otherwise serve's
@@ -275,9 +279,12 @@ answers from memory. Schema: `InboxView` in `openapi/daemon.yaml`.
 `NowView` in `openapi/daemon.yaml`.
 - A request without `instance` answers 400 `invalid_request`.
 - An instance the worker does not project answers 404 `view_not_ready`.
-- The worker materializes it unless `now` is `off`, and serve answers only under `serve`. Otherwise it
-  answers 404 (`view_disabled`, or `view_shadow` under `shadow`), and the console reads `/v1/status` and
-  `/v1/recent` as before.
+- The worker materializes it unless `now` is `off`, and serve answers only under `serve`, or under `auto` while
+  its readiness reads `ready`. Otherwise it answers 404 (`view_disabled`, or `view_shadow` under `shadow`
+  and a not-ready `auto`), and the console reads `/v1/status` and `/v1/recent` as before.
+- While `now` is switched `serve` or `auto`, the worker's heavy view lane is never ended for idleness, so the
+  board is never rebuilt cold under a served view (W1-T14444, `heavyLaneKeptWarm`). Under `shadow` and `off`, the
+  lane still ends after 10 minutes with no read (`READ_MODEL_HEAVY_IDLE_MS`).
 
 `data`: `{ instance, board{ counts, spendTodayUsd, taskProjection, tasks[], groups{ running,
 needsYou, blocked, queued } }, prQueue, actions[], recent{ entries[], mergedToday{ count, day } }, health{

@@ -20,7 +20,7 @@
     - deploy/install-host-units.sh
     - test/daemon/the-host-watchdog-reads-free-disk-on-the-root-and-state-volumes.test.ts
     - test/the-watchdog-tick-skips-git-and-node-work-when-nothing-changed.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Each tick reads the percent used and the free space of `/` and of the volume that holds the state directory, with one `df` call for each"
