@@ -993,6 +993,79 @@ watchdog_healthy() {
   case "$PROGRESS_STATE" in PROGRESSING|IDLE) return 0 ;; *) return 1 ;; esac
 }
 
+# W1-T12260: a healthy line reads free disk on / and the state volume, with one `df` each, at the
+# janitor's marks (HIGH_WATER, RMD_CLEANUP_WATCH_FS; one device takes the stricter mark). It prints
+# only: no verdict, snapshot or action reads it, and an unreadable volume prints no number.
+WATCHDOG_DISK_HEALTHY=""; WATCHDOG_DISK_PROBLEM=""; WATCHDOG_DISK_LOW=0
+watchdog_disk_kb() {
+  if [ "$1" -ge 1048576 ]; then printf '%sG' "$(( $1 / 1048576 ))"
+  elif [ "$1" -ge 1024 ]; then printf '%sM' "$(( $1 / 1024 ))"; else printf '%sK' "$1"; fi
+}
+watchdog_disk_df() {
+  local out line fs blocks used avail cap mount
+  out="$(df -Pk "$1" 2>/dev/null)" || return 1
+  case "$out" in *$'\n'*) line="${out#*$'\n'}"; line="${line%%$'\n'*}" ;; *) return 1 ;; esac
+  read -r fs blocks used avail cap mount <<< "$line" || return 1
+  cap="${cap%\%}"
+  case "$cap" in ''|*[!0-9]*|????*) return 1 ;; esac
+  case "$avail" in ''|*[!0-9]*|?????????????????*) return 1 ;; esac
+  [ -n "$fs" ] && [ -n "$mount" ] || return 1
+  printf '%s|%s|%s|%s\n' "$fs" "$((10#$cap))" "$((10#$avail))" "$mount"
+}
+watchdog_disk_mark() {
+  local entry path pct mark=""
+  for entry in ${RMD_CLEANUP_WATCH_FS-/mnt/rmd:85 /mnt/scratch:90/40G}; do
+    path="${entry%:*}"; pct="${entry##*:}"; pct="${pct%%/*}"
+    [ "$path" = "$1" ] && [ "$entry" != "$path" ] && mark="$pct"
+  done
+  if [ -z "$mark" ] && [ "$1" = / ]; then mark="${HIGH_WATER:-85}"; fi
+  case "$mark" in ''|*[!0-9]*|????*) mark=85 ;; esac
+  mark=$((10#$mark))
+  if [ "$mark" -gt 100 ]; then mark=85; fi
+  printf '%s' "$mark"
+}
+watchdog_disk_judge() {
+  local label="$1" reading="$2" mark="$3" fs pct avail mount
+  if [ -z "$reading" ]; then
+    WATCHDOG_DISK_HEALTHY="${WATCHDOG_DISK_HEALTHY:+$WATCHDOG_DISK_HEALTHY, }$label unreadable"
+    WATCHDOG_DISK_PROBLEM="${WATCHDOG_DISK_PROBLEM:+$WATCHDOG_DISK_PROBLEM; }$label unreadable"
+    return 0
+  fi
+  IFS='|' read -r fs pct avail mount <<< "$reading"
+  WATCHDOG_DISK_HEALTHY="${WATCHDOG_DISK_HEALTHY:+$WATCHDOG_DISK_HEALTHY, }$label $pct% $(watchdog_disk_kb "$avail") free"
+  if [ "$pct" -ge "$mark" ]; then
+    WATCHDOG_DISK_LOW=1
+    WATCHDOG_DISK_PROBLEM="${WATCHDOG_DISK_PROBLEM:+$WATCHDOG_DISK_PROBLEM; }$label $pct% used, $(watchdog_disk_kb "$avail") free, mark $mark%"
+  fi
+  return 0
+}
+watchdog_disk_reading() {
+  local root state root_mark state_mark
+  WATCHDOG_DISK_HEALTHY=""; WATCHDOG_DISK_PROBLEM=""; WATCHDOG_DISK_LOW=0
+  root="$(watchdog_disk_df /)" || root=""
+  state="$(watchdog_disk_df "$STATE_DIR")" || state=""
+  root_mark="$(watchdog_disk_mark /)"
+  state_mark=85
+  if [ -n "$state" ]; then state_mark="$(watchdog_disk_mark "${state##*|}")"; fi
+  if [ -n "$root" ] && [ -n "$state" ] && [ "${root%%|*}" = "${state%%|*}" ]; then
+    if [ "$state_mark" -lt "$root_mark" ]; then root_mark="$state_mark"; else state_mark="$root_mark"; fi
+  fi
+  watchdog_disk_judge / "$root" "$root_mark"
+  watchdog_disk_judge state "$state" "$state_mark"
+}
+# Prints the tick's healthy line with both readings, or, past a mark or unreadable, a line without it.
+watchdog_healthy_line() {
+  local container="$1" healthy="$2" next="$3" state=progressing word=unreadable
+  watchdog_disk_reading
+  if [ -z "$WATCHDOG_DISK_PROBLEM" ]; then
+    echo "rmd-relaunch: $container $healthy -- $next disk $WATCHDOG_DISK_HEALTHY"
+    return 0
+  fi
+  if [ "${PROGRESS_STATE:-}" = IDLE ]; then state=idle; fi
+  if [ "$WATCHDOG_DISK_LOW" = 1 ]; then word=low; fi
+  echo "rmd-relaunch: $container $state, disk $word: $WATCHDOG_DISK_PROBLEM -- $next"
+}
+
 watchdog_save_snapshot() {
   local tmp
   [ "$WATCHDOG_PROBE_OK" = 1 ] && watchdog_healthy || return 0
@@ -1040,7 +1113,7 @@ watchdog_unchanged_tick() {
     watchdog_healthy || return 1
   fi
   watchdog_save_snapshot
-  echo "rmd-relaunch: $container unchanged and healthy -- skipping checkout and deploy work."
+  watchdog_healthy_line "$container" "unchanged and healthy" "skipping checkout and deploy work."
   return 0
 }
 WATCHDOG_TICK_SNAPSHOT
@@ -1550,7 +1623,7 @@ $(render_serve_memory_tuning)
       refresh_deploy_code '${CONTAINER_NAME}' || deploy_code_busy_handoff '${CONTAINER_NAME}' || exit 0
     fi
     if watchdog_healthy; then
-      echo "rmd-relaunch: ${CONTAINER_NAME} healthy -- asking the supervisor whether a RECYCLE is due."
+      watchdog_healthy_line '${CONTAINER_NAME}' healthy "asking the supervisor whether a RECYCLE is due."
     else
       echo "rmd-relaunch: ${CONTAINER_NAME} \${PROGRESS_STATE:-UNKNOWN} action=\${PROGRESS_ACTION:-none} -- \$(verdict_field reason)"
     fi
