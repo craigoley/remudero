@@ -267,12 +267,15 @@ const SYNC_SPAWN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   writePrBodyRest: 1,
 };
 
-/** W1-T12753: loop-reachable functions that still scan the ledger synchronously (readLedgerUnionRecordsSync,
- *  ledgerRowsForSync, readLedgerLines), with the count recorded at build time (2026-11-15, on c602c5cea). Exact,
- *  like the table above: a new name or a higher count fails, and a converter lowers its row in the same PR. */
+/** W1-T12753 / W1-T13416: exact counts of synchronous ledger readers and zlib primitives
+ *  called or handed over by loop-reachable functions, measured on efd1e7a710.
+ *  A converter lowers its row in the same PR. */
 const SYNC_LEDGER_SCAN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   armIfVerdictPermitsAsync: 1,
   assertConfiguredMergeUnheld: 1,
+  backlogGardenSpec: 1,
+  buildBaseReproductionProbe: 1,
+  buildCreditCandidates: 1,
   buildHeadroomRecoveryCandidates: 1,
   buildInboxDraftHook: 1,
   buildMainHealthRung: 6,
@@ -280,16 +283,25 @@ const SYNC_LEDGER_SCAN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   buildRedesignSources: 1,
   buildSweepEffects: 10,
   buildSweepLightHook: 2,
+  claimLedgerText: 1,
   closeRecoveredEscalation: 1,
+  compactWindow: 2,
+  compareSnapshot: 1,
+  computeBoardSnapshot: 1,
   costGovernorGateFor: 1,
   createIncrementalLedgerUnion: 2,
+  createLedgerProjector: 1,
   createLiveLedgerTail: 3,
+  createRepoLedgerIndex: 1,
+  createTickReadProducer: 1,
   daemonBreakerRunbookHost: 1,
   daemonCommand: 3,
   daemonCrashSentinel: 2,
   daemonDefaultBuildSweepHook: 1,
   daemonEvidenceCoverageInput: 1,
+  decompressedSizeOf: 1,
   depReviewCommand: 1,
+  deriveStatus: 1,
   disposeDisarm: 1,
   escalateCircuitBreak: 1,
   escalateCrashLoop: 1,
@@ -308,32 +320,50 @@ const SYNC_LEDGER_SCAN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   inboxCommand: 1,
   judgeDispatchBreak: 1,
   ledgerClassTier: 1,
+  ledgerRotationDigests: 1,
+  lightPassHeadContractRefresh: 1,
   memoryReadTrackerFor: 1,
   mergeAtListHead: 1,
   observeAdmissionFlow: 1,
   openPrViewSteps: 1,
+  pollAlerts: 1,
   probeOpenPrMerges: 1,
   productionGardenerOverseerPorts: 2,
   productionIssueRevalidationPorts: 1,
   productionMachineFilingJudgePorts: 2,
-  productionMechanicalPort: 1,
+  productionMechanicalPort: 2,
   productionOpportunityOutcomePorts: 1,
+  projectPlan: 1,
   queueGovernorGateFor: 1,
+  readBacklogLedgerRecords: 1,
+  readCiFrictionLedgerRecords: 1,
+  readConfigGardenLedgerRows: 1,
   readDocketLedgerCorpus: 1,
   readFixRoundArchiveRows: 1,
   readFlakeIncidentRows: 1,
   readFlowLedger: 2,
   readLadderRecords: 1,
   readLedgerUnionBounded: 2,
+  readLedgerUnionRawLinesSync: 1,
   readLedgerUnionRecordsMemoized: 1,
+  readLedgerUnionRecordsSync: 2,
   readLiveLedgerRecords: 1,
+  readMeasuredLearningOutcomes: 1,
   readMergeCreditedTaskIds: 2,
   readMergeCreditedTaskIdsAsync: 1,
+  readOnlyInspectionCommand: 1,
   readOperatorAgentUnion: 1,
   readRestartHistoryLines: 1,
+  readReviewReplaySample: 1,
+  readRunChildModeUnion: 1,
   readSelectorShadowObservations: 1,
   readTargetExecution: 1,
+  realArchiveFs: 1,
   realArmDeps: 1,
+  realFs: 2,
+  realLedgerFs: 1,
+  realLedgerKeyManifestFs: 1,
+  reappendLostReviewPosted: 2,
   reapBranchesSteps: 1,
   receiptOrphanedAssignments: 1,
   recordRoutingExperimentResults: 1,
@@ -341,26 +371,37 @@ const SYNC_LEDGER_SCAN_LOOP_BASELINE: Readonly<Record<string, number>> = {
   registryThreadItems: 1,
   releaseBreaker: 1,
   reportSilentHostLocks: 1,
+  resolveLedgerUnion: 1,
   reviewCommand: 1,
-  runDaemon: 2,
+  rowsToRecarry: 1,
+  runAlertLane: 1,
+  runDaemon: 8,
   runDeploymentBakeoff: 1,
   runDigestCadenceReport: 1,
   runFixRung: 13,
+  runPostFixReverification: 1,
   runReview: 1,
   runTaskBody: 2,
   runWipeTestPair: 2,
   runWorkerStallDetectorRung: 1,
+  scoutGardenSpec: 1,
+  settleRunChildBacklog: 1,
   stageSkillLifecycleForAction: 1,
   staleBodyFindingsForTick: 1,
+  statusLedgerUnionFsDeps: 2,
   terminalKeysInArchives: 1,
   terminalUncreditableHeads: 1,
   triageClaimSweepForPass: 1,
   triageCommandLocked: 1,
   updatedForWorkflowFromLedger: 1,
   verifyStalledTask: 1,
+  windowedRows: 1,
   withRequeueReceipts: 1,
   withdrawArmIfVerdictRefuses: 1,
   withheldReviewsSince: 1,
+  writeArchive: 1,
+  zipEntryData: 1,
+  zipTextMembers: 1,
 };
 
 /** A synchronous spawn or block: the node primitives, the sync gh wrappers (`ghJsonAsync`/`ghExecAsync`
@@ -393,15 +434,30 @@ function population(fns: Fn[], count: (fn: Fn) => number = syncSpawnCalls): Map<
   return pop;
 }
 
-/** W1-T12753: a synchronous ledger scan — the whole live file read at once, or a sync union read over the archives.
- *  The async readers (`ledgerRowsFor`, `readLedgerUnionRecords`) do not match: the `(` must follow the name. */
-const SYNC_LEDGER_SCAN_PRIMITIVES = "readLedgerUnionRecordsSync|ledgerRowsForSync|readLedgerLines";
-const SYNC_LEDGER_SCAN_CALL = new RegExp(`\\b(?:${SYNC_LEDGER_SCAN_PRIMITIVES})\\(`, "g");
+/** Whole-file or union readers and the synchronous zlib operations that can block the loop. */
+const SYNC_LEDGER_SCAN_PRIMITIVES = [
+  "readLedgerUnionRecordsSync",
+  "ledgerRowsForSync",
+  "readLedgerLines",
+  "readLedgerUnionRawLinesSync",
+  "gunzipSync|nodeGunzipSync|gzipSync|unzipSync",
+  "(?:in|de)flate(?:Raw)?Sync",
+  "(?:brotli|zstd)(?:Compress|Decompress)Sync",
+].join("|");
+const SYNC_LEDGER_SCAN_CALL = new RegExp(`(?<![\\w$])(?:${SYNC_LEDGER_SCAN_PRIMITIVES})\\s*\\(`, "g");
+const SYNC_LEDGER_SCAN_DEFINITION =
+  new RegExp(`^(?:export\\s+)?function\\s+(?:${SYNC_LEDGER_SCAN_PRIMITIVES})\\s*\\(`);
+// Defaults, fallbacks, arguments, returns and object members can hand a primitive to a later caller.
+const SYNC_LEDGER_SCAN_VALUE = new RegExp(
+  `(?:(?<![=!<>])=|\\?\\?|\\|\\||[(,:\\[{]|\\breturn\\b)\\s*(?:[\\w$]+\\s*\\.\\s*)*` +
+    `(?:${SYNC_LEDGER_SCAN_PRIMITIVES})(?![\\w$])(?!\\s*(?:[(:.]|\\?\\.|[!=]=))`,
+  "g",
+);
 
-/** Sync ledger scans in one body; a reader's own definition is not a call site. */
+/** Count calls and handoffs in a code-only body. */
 function syncScanCalls(fn: Fn): number {
-  const defines = new RegExp(`^(?:export\\s+)?function\\s+(?:${SYNC_LEDGER_SCAN_PRIMITIVES})\\(`).test(fn.body) ? 1 : 0;
-  return (fn.body.match(SYNC_LEDGER_SCAN_CALL) ?? []).length - defines;
+  const defines = SYNC_LEDGER_SCAN_DEFINITION.test(fn.body) ? 1 : 0;
+  return (fn.body.match(SYNC_LEDGER_SCAN_CALL) ?? []).length + (fn.body.match(SYNC_LEDGER_SCAN_VALUE) ?? []).length - defines;
 }
 
 /** One exact census: what it counts, the table it is held to, and how its refusals read. */
@@ -900,6 +956,91 @@ test("W1-T12753 criterion 5: the census counts synchronous ledger scans and name
   for (const [name, count] of Object.entries(SYNC_LEDGER_SCAN_LOOP_BASELINE)) {
     assert.ok(Number.isInteger(count) && count > 0, `${name} must carry a positive count`);
   }
+});
+
+test("W1-T13416: the ledger census counts the raw-lines union reader", () => {
+  const count = (body: string) => syncScanCalls({ name: "fixture", file: "fixture.ts", body: codeOnly(body) });
+  const reader = "readLedgerUnionRawLinesSync";
+  assert.equal(count(`${reader}(stateDir)`), 1);
+  assert.equal(count(`export function ${reader}(stateDir) {}`), 0);
+  assert.equal(count("await readLedgerUnionRawLinesAsync(stateDir)"), 0);
+  assert.equal(count('log("readLedgerUnionRawLinesSync(stateDir)"); // readLedgerUnionRawLinesSync(stateDir)'), 0);
+
+  const pop = population(loopCensusFunctions(), syncScanCalls);
+  assert.equal(pop.get("resolveLedgerUnion"), 1);
+});
+
+test("W1-T13416: the ledger census counts synchronous zlib", () => {
+  const count = (body: string) => syncScanCalls({ name: "fixture", file: "fixture.ts", body: codeOnly(body) });
+  for (const call of [
+    "fsDeps.gunzipSync(buffer)",
+    "nodeGunzipSync(buffer)",
+    "zlib.inflateRawSync(buffer)",
+    "zlib.gzipSync(buffer)",
+  ]) {
+    assert.equal(count(call), 1, call);
+  }
+  for (const source of [
+    "zlib.gunzip(buffer, done)",
+    "createGunzip()",
+    'log("gunzipSync(buffer)"); // gunzipSync(buffer)',
+  ]) {
+    assert.equal(count(source), 0, source);
+  }
+
+  const pop = population(loopCensusFunctions(), syncScanCalls);
+  assert.equal(pop.get("readLedgerUnionRawLinesSync"), 1);
+});
+
+test("W1-T13416: the ledger census counts a reader handed over as a value", () => {
+  const count = (body: string) => syncScanCalls({ name: "fixture", file: "fixture.ts", body: codeOnly(body) });
+  for (const source of [
+    "function read(reader = readLedgerUnionRecordsSync) {}",
+    "const read = deps.read ?? ledgerRowsForSync;",
+    "buildReader(readLedgerLines);",
+    "const deps = { read: readLedgerUnionRawLinesSync };",
+    "const deps = { readLedgerUnionRawLinesSync };",
+    "const unzip = fsDeps.gunzipSync;",
+    "return readLedgerUnionRawLinesSync;",
+    "(deps.read ?? readLedgerUnionRawLinesSync)(stateDir);",
+  ]) {
+    assert.equal(count(source), 1, source);
+  }
+  for (const source of [
+    "type Read = typeof readLedgerUnionRawLinesSync;",
+    "const same = deps.read === readLedgerUnionRawLinesSync;",
+    "const same = readLedgerUnionRawLinesSync === deps.read;",
+    "if (unavailable || readLedgerUnionRawLinesSync === undefined) return;",
+    "const deps = { readLedgerUnionRawLinesSync: asyncRead };",
+    'const name = "ledgerRowsForSync";',
+    "buildReader(readLedgerUnionRawLinesSyncForTest);",
+  ]) {
+    assert.equal(count(source), 0, source);
+  }
+
+  const pop = population(loopCensusFunctions(), syncScanCalls);
+  assert.equal(pop.get("readConfigGardenLedgerRows"), 1);
+});
+
+test("W1-T13416: the ledger census names a new loop-reachable caller of a whole-corpus reader", () => {
+  const fns = loopCensusFunctions();
+  const caller = {
+    name: "readWholeLedgerForTick",
+    file: "fixture.ts",
+    body: "return readLedgerUnionRawLinesSync(stateDir);",
+  };
+  const offLoop = [...fns, caller];
+  assert.ok(!loopReachable(offLoop, "daemonCommand").has(caller.name));
+  assert.deepEqual(refusals(offLoop, SYNC_LEDGER_SCAN_LOOP_BASELINE, LEDGER_SCAN_CENSUS), []);
+
+  const onLoop = offLoop.map((fn) => fn.name === "routeAdaptiveLifetimePressure"
+    ? { ...fn, body: `${fn.body}\n  readWholeLedgerForTick(stateDir);` }
+    : fn);
+  assert.ok(loopReachable(onLoop, "daemonCommand").has(caller.name));
+  const named = refusals(onLoop, SYNC_LEDGER_SCAN_LOOP_BASELINE, LEDGER_SCAN_CENSUS);
+  assert.deepEqual(named, [
+    "readWholeLedgerForTick makes 1 synchronous ledger scan(s) and is reachable from the daemon loop (daemonCommand), but is not in SYNC_LEDGER_SCAN_LOOP_BASELINE — await an async ledger reader instead",
+  ]);
 });
 
 test("W1-T12753 criterion 4: the daemon's verify-human cadence reads its ledger rows through the async readers", () => {
