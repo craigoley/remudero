@@ -178,7 +178,7 @@ export const REVIEW_EXIT_CAUSES = [
   "repo-unresolvable", "closed-before-review", "subject-refused", "task-narrative-unavailable",
   "task-metadata-unavailable", "semantic-setup-unavailable", "own-task-record-missing",
   "shadow-verdict-withheld", "replayed-verdict-withheld", "verdict-not-posted",
-  "verdict-failure", "verdict-pending", "verdict-not-success", "review-claim-held",
+  "verdict-failure", "verdict-pending", "verdict-not-success", "review-claim-held", "reviewer-stale-at-start",
   ...REVIEW_EXIT_STEPS.map((step) => `threw-in-${step}` as const),
 ] as const;
 export type ReviewExitCause = (typeof REVIEW_EXIT_CAUSES)[number];
@@ -2822,9 +2822,10 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     }
   }
   if (taskId && publicTaskAbsent) {
-    const found = await findTaskInCatalogs(taskId, {
-      ...deps.taskLookup, stateDir: join(config.root, "state"), byId: new Map(),
-    });
+    const lookUp = () => findTaskInCatalogs(taskId, { ...deps.taskLookup, stateDir: join(config.root, "state"), byId: new Map() });
+    let found = await lookUp();
+    // W1-T12226: a push to the ops branch during the read refuses it; the next read sees the new commit. One retry only.
+    if (found.outcome === "unreadable" && found.reason === "ops-ref_moved") found = await lookUp();
     if (found.outcome === "unreadable") {
       log("review.catalog.unreadable", { reason: found.reason });
       console.error("rmd review: task catalog unreadable; no body fallback or review effect");
@@ -3286,7 +3287,9 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   if (cappedHoldWithheld && !(overrideBy && overrideReason) && cappedWordingApplies(verdict)) {
     console.log(cappedOverrideHint(view.number));
   }
-  if (verdict.verdictWithheld) exit.as("verdict-not-posted");
+  // W1-T12226: main moved between the cut of this child's tree and its start; its gate retries in a newer tree.
+  const staleAtOwnStart = deps.reviewStartFreshness === undefined && startFreshness?.status === "stale";
+  if (verdict.verdictWithheld) exit.as(staleAtOwnStart ? "reviewer-stale-at-start" : "verdict-not-posted");
   if (verdict.verdictWithheld) return 2;
 
   if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(host, source, subjectRepoDir)) {

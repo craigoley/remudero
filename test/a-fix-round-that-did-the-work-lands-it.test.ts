@@ -137,13 +137,12 @@ test("W1-T4450: the fix lane re-asks once for a missing commit line", async () =
   assert.ok(asked.lines.some((l) => l.step === "fix.commit_line_requested"));
   assert.equal(asked.lines.some((l) => l.step === "fix.commit_refused"), false, "the answered line lands the round");
   assert.match(asked.reports[1]!, /the edit is saved[\s\S]*COMMIT_MESSAGE: fix\(ci\)/, "the answer is appended to the original report");
-  // Still absent after the one ask: refused once, never looped, and the parsed tail is ledgered.
+  // W1-T8524: still absent after the one ask: never looped, and committed under a harness-derived subject.
   const silent = fixRung({ answer: "still no line" });
   await runFixRung(silent.run);
   assert.equal(silent.spawns.length, 2);
-  const refusal = silent.lines.find((l) => l.step === "fix.commit_refused");
-  assert.equal(refusal?.reason, "no anchored COMMIT_MESSAGE line in the report");
-  assert.match(String(silent.lines.filter((l) => l.step === "implement.harness_commit_refused").at(-1)?.report_tail), /still no line/);
+  assert.equal(silent.lines.some((l) => l.step === "fix.commit_refused"), false);
+  assert.equal(silent.lines.find((l) => l.step === "implement.harness_commit")?.subject_source, "harness-derived");
   // The control: a round that left no edits is not asked for a line it has nothing to commit.
   const idle = fixRung({ edits: false });
   await runFixRung(idle.run);

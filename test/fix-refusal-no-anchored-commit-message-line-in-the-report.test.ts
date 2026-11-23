@@ -167,13 +167,14 @@ test("a legacy writer without provider identity re-asks its session once", async
   assert.equal(rows.find((row) => row.step === "implement.harness_commit")?.subject_source, "re-asked");
 });
 
-test("a legacy writer still missing its commit line is refused after one re-ask", async (t) => {
+test("a legacy writer still missing its commit line commits under a derived subject after one re-ask", async (t) => {
   const { outcome, prompts, messages, rows } = await fixRound(t, {
     legacy: true, answer: "REPORT\nThe commit line is still missing.",
   });
-  assert.equal(outcome.outcome, "stood_down");
+  assert.equal(outcome.outcome, "fixed");
   assert.equal(prompts.length, 2);
-  assert.deepEqual(messages, []);
-  assert.equal(rows.find((row) => row.step === "fix.commit_refused")?.reason,
-    "no anchored COMMIT_MESSAGE line in the report");
+  assert.equal(messages.length, 1);
+  assert.match(messages[0]!, /^fix: repair ci-gate on #5325\n\nHarness-derived subject:/);
+  assert.equal(rows.some((row) => row.step === "fix.commit_refused"), false);
+  assert.equal(rows.find((row) => row.step === "implement.harness_commit")?.subject_source, "harness-derived");
 });
