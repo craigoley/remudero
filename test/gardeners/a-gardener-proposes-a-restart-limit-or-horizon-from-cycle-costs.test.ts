@@ -99,7 +99,7 @@ test("W1-T12232 criterion 1: the gardener reads the last 20 complete restart_cyc
   assert.match(String(passRow(unknown).reason), /^the last change of the policy rows is unknown: fixture$/);
 });
 
-test("W1-T12232 criterion 1: the last change of the two rows is the newest committer time git blame gives their lines, and a checkout git cannot blame gives a reason, not a time", (t) => {
+test("W1-T12232 criterion 1: the last change of the two rows is the newest committer time git blame gives their lines, and a checkout git cannot blame gives a reason, not a time", async (t) => {
   const dir = root(t);
   execFileSync("git", ["-C", dir, "init", "-q"], { env: GIT_ENV });
   commit(dir, "2026-11-01T00:00:00Z");
@@ -107,10 +107,10 @@ test("W1-T12232 criterion 1: the last change of the two rows is the newest commi
   commit(dir, "2026-11-03T00:00:00Z");
   const lines = restartPolicyRows(readFileSync(join(dir, "plan", "policy.yaml"), "utf8")).map((r) => r.lineNumber);
   assert.deepEqual(lines, [3, 4]);
-  assert.deepEqual(restartPolicyChangedAt(dir, lines), { ms: Date.parse("2026-11-01T00:00:00Z") }, "a change of another line is not a change of the rows");
+  assert.deepEqual(await restartPolicyChangedAt(dir, lines), { ms: Date.parse("2026-11-01T00:00:00Z") }, "a change of another line is not a change of the rows");
   writeFileSync(join(dir, "plan", "policy.yaml"), policyText(SCORE_LINE.replace("value: 18", "value: 14")).replace("other: 1", "other: 2"));
   commit(dir, "2026-11-05T00:00:00Z");
-  assert.deepEqual(restartPolicyChangedAt(dir, lines), { ms: Date.parse("2026-11-05T00:00:00Z") });
+  assert.deepEqual(await restartPolicyChangedAt(dir, lines), { ms: Date.parse("2026-11-05T00:00:00Z") });
 
   // The measurement worker's own ledger read takes the restart_cycle rows, beside the priced steps, and the inventory
   // carries them with the last change.
@@ -118,20 +118,19 @@ test("W1-T12232 criterion 1: the last change of the two rows is the newest commi
   writeLedger([{ step: "run.start", run_id: "r" }, ...cycles(2, HOUR, HOUR, NOT_STALE, Date.parse("2026-11-05T00:00:00Z") - CHANGED_MS)], { dir: stateDir });
   assert.ok(CONFIG_GARDEN_READ_STEPS.includes(RESTART_CYCLE_STEP));
   let reply: unknown;
-  return serveConfigMeasurement({ kind: "inventory", stateDir, repoRoot: dir, nowMs: Date.parse(ISO), weights: {}, recommendations: [] },
-    { postMessage: (r) => { reply = r; } }).then(() => {
-    assert.equal((reply as { ok: boolean }).ok, true, JSON.stringify(reply));
-    const inv = (reply as { ok: true; value: ConfigInventory }).value;
-    assert.equal(inv.restart?.changedAtMs, Date.parse("2026-11-05T00:00:00Z"));
-    assert.equal(inv.restart?.cycles.length, 2);
-    assert.equal(restartTuneEvidence(inv).rows, 2);
+  await serveConfigMeasurement({ kind: "inventory", stateDir, repoRoot: dir, nowMs: Date.parse(ISO), weights: {}, recommendations: [] },
+    { postMessage: (r) => { reply = r; } });
+  assert.equal((reply as { ok: boolean }).ok, true, JSON.stringify(reply));
+  const inv = (reply as { ok: true; value: ConfigInventory }).value;
+  assert.equal(inv.restart?.changedAtMs, Date.parse("2026-11-05T00:00:00Z"));
+  assert.equal(inv.restart?.cycles.length, 2);
+  assert.equal(restartTuneEvidence(inv).rows, 2);
 
-    const bare = root(t);
-    const failed = restartPolicyChangedAt(bare, [3]);
-    assert.ok("error" in failed && /^git blame of plan\/policy\.yaml failed: /.test(failed.error), JSON.stringify(failed));
-    assert.deepEqual(restartPolicyChangedAt(bare, [], () => { throw new Error("never run"); }), { error: "plan/policy.yaml holds no one-line freshnessRestart row" });
-    assert.deepEqual(restartPolicyChangedAt(bare, [3], () => "abc\n"), { error: "git blame of plan/policy.yaml named no committer time" });
-  });
+  const bare = root(t);
+  const failed = await restartPolicyChangedAt(bare, [3]);
+  assert.ok("error" in failed && /^git blame of plan\/policy\.yaml failed: /.test(failed.error), JSON.stringify(failed));
+  assert.deepEqual(await restartPolicyChangedAt(bare, [], () => { throw new Error("never run"); }), { error: "plan/policy.yaml holds no one-line freshnessRestart row" });
+  assert.deepEqual(await restartPolicyChangedAt(bare, [3], async () => "abc\n"), { error: "git blame of plan/policy.yaml named no committer time" });
 });
 
 test("W1-T12232 criterion 2: median waiting at 1.5 times median restart or more proposes 25% lower, median restart at 1.5 times waiting or more proposes 25% higher, and between the two nothing", () => {

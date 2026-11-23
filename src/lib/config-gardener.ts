@@ -1,5 +1,5 @@
 import { threadName } from "./thread-names.js";
-import { execFileSync } from "node:child_process";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -477,17 +477,18 @@ export function restartPolicyRows(text: string): RestartPolicyRow[] {
   return RESTART_POLICY_ROWS.flatMap((name) => (found.get(name)?.length === 1 ? found.get(name)! : []));
 }
 
-export type GitRun = (args: string[]) => string;
-const defaultGit = (repoRoot: string): GitRun => (args) =>
-  execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] });
+export type GitRun = (args: string[]) => Promise<string>;
+/** The hardened leaf (W1-T6123), awaited: the inventory runs on the measurement worker, yet a synchronous call here would
+ *  count against the daemon loop (W1-T12952). A checkout it cannot pin throws, and the caller keeps that as the reason. */
+const blameGit = (repoRoot: string): GitRun => (args) => hostWorktreeGitAsync(repoRoot, args, { timeout: 60_000, log: () => {} });
 
 /** When the last commit changed any of `lineNumbers` in plan/policy.yaml, from `git blame`. A line with uncommitted
  *  edits blames to now, so no cycle is later than it. A checkout git cannot blame gives no time and its reason. */
-export function restartPolicyChangedAt(repoRoot: string, lineNumbers: readonly number[], git: GitRun = defaultGit(repoRoot)): { ms: number } | { error: string } {
+export async function restartPolicyChangedAt(repoRoot: string, lineNumbers: readonly number[], git: GitRun = blameGit(repoRoot)): Promise<{ ms: number } | { error: string }> {
   if (lineNumbers.length === 0) return { error: `${RESTART_POLICY_PATH} holds no one-line freshnessRestart row` };
   let out: string;
   try {
-    out = git(["blame", "--porcelain", ...lineNumbers.flatMap((n) => ["-L", `${n},${n}`]), "--", RESTART_POLICY_PATH]);
+    out = await git(["blame", "--porcelain", ...lineNumbers.flatMap((n) => ["-L", `${n},${n}`]), "--", RESTART_POLICY_PATH]);
   } catch (error) {
     return { error: `git blame of ${RESTART_POLICY_PATH} failed: ${String((error as Error)?.message ?? error).split("\n")[0]}` };
   }
@@ -495,9 +496,9 @@ export function restartPolicyChangedAt(repoRoot: string, lineNumbers: readonly n
   return times.length ? { ms: Math.max(...times) } : { error: `git blame of ${RESTART_POLICY_PATH} named no committer time` };
 }
 
-function restartTuneInput(repoRoot: string, ledgerRows: readonly Record<string, unknown>[], git?: GitRun): RestartTuneInput {
+async function restartTuneInput(repoRoot: string, ledgerRows: readonly Record<string, unknown>[]): Promise<RestartTuneInput> {
   const rows = restartPolicyRows(readFileIfExists(join(repoRoot, RESTART_POLICY_PATH)) ?? "");
-  const changed = restartPolicyChangedAt(repoRoot, rows.map((r) => r.lineNumber), git);
+  const changed = await restartPolicyChangedAt(repoRoot, rows.map((r) => r.lineNumber));
   return { rows, ...("ms" in changed ? { changedAtMs: changed.ms } : { unknownChange: changed.error }), cycles: ledgerRows.filter((r) => r.step === RESTART_CYCLE_STEP) };
 }
 
@@ -583,7 +584,7 @@ export function configMeasurementOffLoop<T>(input: ConfigMeasurement, workerUrl:
 export async function serveConfigMeasurement(input: ConfigMeasurement, port: { postMessage(reply: MeasurementReply): void }): Promise<void> {
   try {
     let value: ConfigInventory | MountSweep;
-    if (input.kind === "inventory") value = buildConfigInventory(input);
+    if (input.kind === "inventory") value = await buildConfigInventory(input);
     else {
       const m = await tsImport(pathToFileURL(input.sweepScript).href, import.meta.url) as { buildMountHeadroomSweep: (stateDir: string) => MountSweep };
       value = await cachedMountHeadroomSweep(input.stateDir, input.sweepScript, m.buildMountHeadroomSweep);
@@ -608,7 +609,7 @@ function withMountClass(runs: RunSummary[], rows: readonly Record<string, unknow
   return runs.map((r) => (mountClass.has(r.runId) ? { ...r, mountClass: mountClass.get(r.runId)! } : r));
 }
 
-function buildConfigInventory(input: InventoryMeasurement): ConfigInventory {
+async function buildConfigInventory(input: InventoryMeasurement): Promise<ConfigInventory> {
   // The worker's own read is the production one, and it adds the restart cycle rows (W1-T12232); injected rows are used as given.
   const rows = input.rows ?? readConfigGardenLedgerRows(input.stateDir, readLedgerUnionRecordsSync, CONFIG_GARDEN_READ_STEPS);
   const weights = input.weights ?? buildEntryWeightIndex(loadLearningsCorpus(resolveRepoLayout(input.repoRoot).learningsDir));
@@ -622,7 +623,7 @@ function buildConfigInventory(input: InventoryMeasurement): ConfigInventory {
     judgeShadows: judgeShadowSummary(rows, input.nowMs - JUDGE_CASH_BAR.windowMs),
     judgeShadowScores: scoreTypedAnswers(judgeShadowTypedAnswers(rows, input.nowMs - JUDGE_CASH_BAR.windowMs)).groups,
     judgeShadowThresholds: judgeShadowThresholds(rows, input.nowMs - JUDGE_CASH_BAR.windowMs),
-    restart: restartTuneInput(input.repoRoot, rows),
+    restart: await restartTuneInput(input.repoRoot, rows),
     active: canaries.filter((c) => isPromotionActive(c.promotion.state)),
     cooling: canaries.filter((c) => c.promotion.state === "rolled_back" && input.nowMs - Date.parse(c.promotion.createdAt) < CANARY_TTL_MS).map((c) => c.promotion.scope.policyScope),
   };
