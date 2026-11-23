@@ -7,9 +7,10 @@ import { dirname, join, resolve, sep } from "node:path";
 import { proofChildEnv } from "./review.js";
 import { readLedgerLines } from "./status.js";
 import {
-  canonicalBuildInfo, hasUsableTypecheckBuildInfo, lowMemoryTypecheckArgs, publishBuildInfo, seedBuildInfo, typecheckEnv,
-  typecheckPeakBytes,
+  canonicalBuildInfo, hasUsableTypecheckBuildInfo, lowMemoryTypecheckArgs, publishBuildInfo, recordTypecheckPeak, seedBuildInfo,
+  typecheckEnv, typecheckPeakBytes, watchTypecheckRss, type TypecheckPeakRow,
 } from "./typecheck-buildinfo.js";
+import { typecheckPeakWriter } from "./typecheck-run.js";
 import { acquireTestSlotAsync, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotOptions } from "./test-slot.js";
 import { pinWorktreeGit } from "./worktree-git.js";
 import { hasCapturedMergeConflictEvidence, lastKnownMergeStateFromLedger, mergeInheritanceRefused, type OpenPrView } from "./sweep.js";
@@ -288,7 +289,8 @@ export function mergedTypecheckArgv(tsc: string, buildInfo: string, config: stri
 }
 
 function harnessTypecheck(
-  tsc: string, scratch: string, spawnChild: TypecheckSpawn, state: ProbeBuildInfo, testSlot?: Omit<TestSlotOptions, "sleep">,
+  tsc: string, scratch: string, spawnChild: TypecheckSpawn, state: ProbeBuildInfo,
+  writePeak: (row: TypecheckPeakRow) => void, testSlot?: Omit<TestSlotOptions, "sleep">,
 ): (dir: string, nodeModules: string) => Promise<TypecheckRun> {
   let n = 0;
   let previous = state.canonical;
@@ -311,10 +313,12 @@ function harnessTypecheck(
         let timedOut = false;
         let settled = false;
         let timer: ReturnType<typeof setTimeout> | undefined;
+        let stopWatching: (() => number | undefined) | undefined;
         const finish = (status: number | null, extra = "") => {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
+          recordTypecheckPeak(writePeak, "merge-probe", warm, { peak: stopWatching?.() }, output);
           if (status !== null && !timedOut) {
             previous = self;
             if (!published && state.canonical !== undefined) {
@@ -330,6 +334,7 @@ function harnessTypecheck(
           const child = spawnChild(process.execPath, [...mergedTypecheckArgv(tsc, self.buildInfo, config), ...tight], {
             cwd: dir, stdio: ["ignore", "pipe", "pipe"], env: typecheckEnv(proofChildEnv(home), process.env.GOMEMLIMIT),
           });
+          stopWatching = watchTypecheckRss(child.pid);
           timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, MERGED_TYPECHECK_TIMEOUT_MS);
           const take = (chunk: Buffer) => { if (output.length < 1_000_000) output += chunk.toString("utf8"); };
           child.stdout?.on("data", take);
@@ -399,7 +404,7 @@ export async function mergedHeadTypechecks(wt: string, ports: MergedTypecheckPor
     scratch = root;
     const typecheck = ports.typecheck ?? harnessTypecheck(harness.tsc, root, ports.spawn ?? spawn, {
       canonical: canonicalBuildInfo(wt), tsVersion: harness.version,
-    }, ports.testSlot);
+    }, typecheckPeakWriter(wt), ports.testSlot);
     const materialise = async (treeish: string, name: string): Promise<string | undefined> => {
       const tar = join(root, `${name}.tar`);
       const dir = join(root, name);

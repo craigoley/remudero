@@ -8,6 +8,7 @@
   band_meaning: blast-radius
   priority: 1.1
   status: queued
+  attempts: 0
   files:
     - src/lib/machine-filing.ts
     - test/gardeners/a-token-identical-compression-is-not-parked.test.ts

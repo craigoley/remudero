@@ -297,7 +297,8 @@ function boardReferentResolved(proposal: Proposal, state: BoardReferentState): b
   return proposal.id.startsWith("board-review:escalation:") && state.unhandledEscalations === 0;
 }
 
-type BoardReferentLookup = { kind: "live" } | { kind: "resolved"; referentId: string } | { kind: "unreadable" };
+type BoardReferentUnverifiedReason = "board-unreadable" | "referent-missing" | "escalation-count-unverified";
+type BoardReferentLookup = { kind: "live" } | { kind: "resolved"; referentId: string } | { kind: "unreadable"; reason: BoardReferentUnverifiedReason };
 
 /** W1-T2460: parse legacy board-review:<kind>:<id> at read, never backfill; unknown shapes stay live. */
 function deriveLegacyReferent(proposalId: string): string | undefined {
@@ -342,10 +343,12 @@ function taskReferentMerged(proposal: Proposal, ctx: ReadinessContext): string |
 function resolveBoardReferent(proposal: Proposal, read: BoardReferentRead | undefined): BoardReferentLookup {
   const referentId = proposal.originatingItemId ?? deriveLegacyReferent(proposal.id);
   if (!referentId) return { kind: "live" };
-  if (!read || read.kind === "unreadable") return { kind: "unreadable" };
+  if (!read || read.kind === "unreadable") return { kind: "unreadable", reason: "board-unreadable" };
   const state = read.states.get(referentId);
-  if (!state) return { kind: "unreadable" };
-  if (state.status === "open" && proposal.id.startsWith("board-review:escalation:") && state.unhandledEscalations === undefined) return { kind: "unreadable" };
+  if (!state) return { kind: "unreadable", reason: "referent-missing" };
+  if (state.status === "open" && proposal.id.startsWith("board-review:escalation:") && state.unhandledEscalations === undefined) {
+    return { kind: "unreadable", reason: "escalation-count-unverified" };
+  }
   const referentResolved = boardReferentResolved(proposal, state);
   return referentResolved ? { kind: "resolved", referentId } : { kind: "live" };
 }
@@ -866,6 +869,7 @@ export interface InboxClassification {
   /** W1-T2451: true iff this proposal's referent could not be read this pass. `state` is otherwise computed as if
    *  referent tracking did not exist — cannot-observe means WAIT (W1-T130). */
   referentUnverified?: boolean;
+  referentUnverifiedReason?: BoardReferentUnverifiedReason;
 }
 
 export interface ReadinessContext {
@@ -1563,7 +1567,9 @@ export function classifyProposal(
         `never deleted`,
     };
   }
-  const referentUnverified = referent.kind === "unreadable" ? { referentUnverified: true as const } : {};
+  const referentUnverified = referent.kind === "unreadable"
+    ? { referentUnverified: true as const, referentUnverifiedReason: referent.reason }
+    : {};
   // W1-T193: an Architect currently drafting is checked before the ordinary predicates, since a proposal mid-draft
   // for minutes must never render "not ready" — indistinguishable from broken.
   const draftSpawnedAt = ctx.draftSpawnedAt?.(proposal.id);

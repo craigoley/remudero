@@ -153,7 +153,12 @@ test("C5: the oracle child carries its own heap ceiling, not its parent's", () =
     ["--expose-gc", "--import", "tsx", `--max-old-space-size=${READ_MODEL_ORACLE_HEAP_MB}`]);
 });
 
-test("C5: the oracle child body says it is ready, answers one slice with its peak resident size, then exits", () => {
+test("C5: the oracle child body says it is ready, answers one slice with its peak resident size, then exits", (t) => {
+  // A store under a regular file cannot be opened by any user. "/nonexistent.sqlite" could: run as root, the attach
+  // created it, and its .transactions sidecar, at the filesystem root before failing on the missing schema.
+  const notADirectory = join(scratch(t, "rmo-child-body"), "not-a-directory");
+  writeFileSync(notADirectory, "");
+  const dbPath = join(notADirectory, "read-model.sqlite");
   const sent: Array<Record<string, unknown>> = [];
   let onMessage: ((msg: { type?: string; id?: number; request?: OracleSliceRequest }) => void) | undefined;
   let onDisconnect: (() => void) | undefined;
@@ -162,10 +167,11 @@ test("C5: the oracle child body says it is ready, answers one slice with its pea
     send: (message, done) => { sent.push(message as Record<string, unknown>); done(); } }, "", () => exits++);
   assert.deepEqual([...sent], [{ type: "ready" }]);
   assert.equal(exits, 0, "ready is not an answer");
-  onMessage!({ type: "check", id: 7, request: request() });
+  onMessage!({ type: "check", id: 7, request: request({ dbPath }) });
   assert.equal(sent[1]?.type, "done");
   assert.equal(sent[1]?.id, 7);
-  assert.match(String((sent[1]?.result as { error?: string }).error), /the oracle could not attach to \/nonexistent\.sqlite/);
+  assert.equal(String((sent[1]?.result as { error?: string }).error), `the oracle could not attach to ${dbPath}: unable to open database file`,
+    "the same failure for every user, root included");
   assert.ok(Number(sent[1]?.maxRssBytes) > 0);
   assert.equal(exits, 1);
   onDisconnect!();

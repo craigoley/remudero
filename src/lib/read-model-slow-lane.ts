@@ -118,9 +118,14 @@ function instanceInboxUnit(config: NonNullable<SlowLaneConfig["instanceInboxes"]
     inboxSourceIdentity: config, ...(catalog ? { inboxReferentPlan: (plan: Plan) => catalog.referentPlan(plan, catalogRoot) } : {}) };
   const memo: InboxRefreshMemo = {};
   return { name: `inbox:${config.instance}`, instance: config.instance, run: async () => {
-    deps.inboxMayPersist = captureOwnership();
+    const mayPersist = captureOwnership();
     deps.statusGithub = snapshot().github;
-    await catalog?.settle(catalogRoot);
+    const pendingCatalog = catalog?.settle(catalogRoot);
+    if (pendingCatalog) {
+      await pendingCatalog;
+      if (!mayPersist()) return { views: [] };
+    }
+    deps.inboxMayPersist = mayPersist;
     const refreshed = await refreshInboxClassification(deps, memo, clock);
     if (refreshed.written) log("inbox.classification_written", { instance: config.instance, repository: config.repository,
       proposals: refreshed.proposals, pruned: refreshed.pruned, at: refreshed.generatedAt });
@@ -144,7 +149,7 @@ export const SLOW_LANE_CATALOG_WAIT_MS = 2_000;
  * while the catalog read is ok.
  */
 export interface SlowLaneCatalog {
-  settle(root: string): Promise<void>;
+  settle(root: string): Promise<void> | undefined;
   referentPlan(plan: Plan, root: string): Plan | undefined;
   accept(reply: BoardCatalogReply): void;
 }
@@ -154,9 +159,9 @@ export function createSlowLaneCatalog(enabled: boolean, post: (request: BoardCat
   const client = createWorkerBoardCatalogClient(enabled, post, clock);
   const waiters = new Set<() => void>();
   return {
-    settle: async (root) => {
+    settle: (root) => {
       if (!enabled || !client.revision(root).endsWith(":pending")) return;
-      await new Promise<void>((resolve) => {
+      return new Promise<void>((resolve) => {
         const done = (): void => { clearTimeout(timer); waiters.delete(done); resolve(); };
         const timer = setTimeout(done, waitMs);
         timer.unref?.();

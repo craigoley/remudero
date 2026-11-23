@@ -1112,15 +1112,20 @@ export interface LandedClaimSweepInputs {
   localHost?: string;
   reportedRerun?: Set<string>;
   log: (step: string, fields: Record<string, unknown>) => void;
+  /** W1-T13356: a listing the caller already started, so selection and this sweep share one `ls-remote`. */
+  listing?: Promise<DispatchClaimListing>;
+}
+
+/** The held-claims listing the tick sweep reads: one `ls-remote` of `refs/rmd-dispatch/*`, or why there is none. */
+export async function listHeldDispatchClaims(reserver: DispatchClaimReserverAsync): Promise<DispatchClaimListing> {
+  return reserver.listHeld ? await reserver.listHeld() : { ok: false, stderr: "this reserver cannot list claims with their holders" };
 }
 
 export async function releaseLandedDispatchClaims(
   reserver: DispatchClaimReserverAsync,
   deps: LandedClaimSweepInputs,
 ): Promise<Array<DispatchClaimReleaseResult & ListedDispatchClaim>> {
-  const listing: DispatchClaimListing = reserver.listHeld
-    ? await reserver.listHeld()
-    : { ok: false, stderr: "this reserver cannot list claims with their holders" };
+  const listing: DispatchClaimListing = await (deps.listing ?? listHeldDispatchClaims(reserver));
   if (!listing.ok) {
     deps.log("dispatch.claim_sweep_failed", { surface: "tick-sweep", error: listing.stderr.slice(0, 300) });
     return [];

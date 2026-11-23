@@ -11,7 +11,7 @@ import { Worker, isMainThread, parentPort, workerData } from "node:worker_thread
 import fs from "node:fs";
 import { readFileSync as nodeReadFileSync } from "node:fs";
 import { gunzipSync as nodeGunzipSync } from "node:zlib";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
 import { PLAN_ONLY_REVIEW_MARKER_STEP } from "./ledger-carry.js";
@@ -49,6 +49,8 @@ import { preDispatchContractRevision } from "./dispatch-repair.js";
 import { DEFAULT_LIVENESS_BOUND_MS, infrastructureRefusal, lifetimeInfrastructureRefusal, provenOrphanRunIds, streakRefusal } from "./non-worker-verdict.js";
 import { startWorker } from "./child-entry-argv.js";
 import { hostWorktreeGit } from "./worktree-git.js";
+import { resolveRepoLayout } from "./repo-layout.js";
+import { prNumberFromSquashSubject, revertRestored, revertedMergesFromLog, type MainHistoryRecord, type RevertedMerge } from "./reverted-merges.js";
 
 /** Host-private inputs for one status pass. Only the finite outcome is enumerable. */
 export interface CatalogStatusContext {
@@ -251,6 +253,8 @@ export interface StatusProjection {
   processUnevidenced?: true;
   /** W1-T2970: operator's reason for subtracting this pairing's credit; absent when no override applied. */
   creditOverride?: { reason: string; pr: number };
+  /** W1-T14302: a later commit on main reverted this pairing's squash merge; absent when no revert applied. */
+  revertedCredit?: { pr: number; revertSha: string; revertPr?: number };
   /** An OPEN escalation no LATER `run.start` has superseded. Omitted, not `false`, once superseded or merged. */
   needsHuman?: true;
   /** An independent-failure block, derived from `dispatch.blocked_independent` and cleared by a later dispatch. */
@@ -314,6 +318,8 @@ export interface GitHub {
   prBody(prUrl: string): string | undefined;
   /** W1-T2387: same memoized index; preserve creditsByAnchoredTrailer's exact lines/run-id grammar, fail closed. */
   creditedByCommitTrailer?(taskId: string, prUrl: string): boolean;
+  /** W1-T14302: the standing revert of this PR's squash merge on the local main; undefined when none or unreadable. */
+  revertedMergePr?(prNumber: number): RevertedMerge | undefined;
   /** Changed paths of a squash merge in the gateway's local origin/main. Missing means unknown. */
   localMergedPaths?(prNumber: number): readonly string[] | undefined;
   /** W1-T413: changed paths for rung (c)'s plan-only refusal. undefined means unavailable, not no files:
@@ -438,6 +444,9 @@ export interface DeriveDeps {
   creditOverridePath?: string;
   /** W1-T2970 — test seam: read the override record's text. Production reads the real file. */
   readCreditOverrideFile?: () => string;
+  /** W1-T14302: whether a later task restored a reverted pairing. projectPlan sets it from its plan; absent, no
+   *  revert takes credit back, so a caller without the whole plan keeps today's answer. */
+  revertRestoration?: (revertedTaskId: string, revert: RevertedMerge) => boolean;
   /** Override rows shared once/projectPlan pass; absent=load per derivation, as standalone deriveStatus does. */
   creditOverrideRows?: () => readonly CreditOverrideRow[];
   /** Reader for the durable credit store; defaults to {@link loadCreditStore}. Injectable so a test
@@ -580,6 +589,19 @@ export type CreditReadState = { state: "present" } | { state: "missing" | "unava
 /** Derive <root>/plan/credit-overrides.yaml from ledgerPath for all callers; keep corrections in reviewed plan/. */
 export function defaultCreditOverridePath(ledgerPath: string): string {
   return `${dirname(dirname(ledgerPath))}/plan/credit-overrides.yaml`;
+}
+
+/** W1-T14302: the override record of the checkout whose plan a projection projects. */
+export function planCreditOverridePath(checkoutRoot: string): string {
+  let planDir: string;
+  try {
+    planDir = resolveRepoLayout(checkoutRoot).planDir;
+  } catch (error) {
+    // A malformed layout override keeps the house plan directory; the override read itself never throws.
+    void error;
+    planDir = join(checkoutRoot, "plan");
+  }
+  return join(planDir, "credit-overrides.yaml");
 }
 
 /** Parse the override record. NEVER throws: any read or parse failure yields no rows, which is the
@@ -2560,18 +2582,33 @@ function isPlanOnlyReviewEvidence(l: Record<string, unknown>): boolean {
  *  W1-T2970 shape), the durable rung's overridden entry returned first and masked every later legitimate
  *  merge of the same task, forever. */
 interface CreditOverrideExclusion {
-  /** Whether (task, prNumber) is overridden. Remembers the FIRST row that excluded a pairing. */
-  excludes(prNumber: number | undefined): boolean;
+  /** Whether (task, prNumber) is overridden or reverted. Remembers the FIRST row and revert that excluded one. */
+  excludes(prNumber: number | undefined, prUrl?: string): boolean;
   /** The row that excluded a pairing in this derivation, if any — the board's "why". */
   excludedBy(): CreditOverrideRow | undefined;
+  /** W1-T14302: the revert that excluded a pairing in this derivation, if any. */
+  revertedBy(): NonNullable<StatusProjection["revertedCredit"]> | undefined;
   /** The row naming this pairing, with no side effect. */
   rowFor(prNumber: number | undefined): CreditOverrideRow | undefined;
+  /** W1-T14302: the standing, unrestored revert of this pairing, with no side effect. */
+  revertFor(prNumber: number | undefined, prUrl?: string): NonNullable<StatusProjection["revertedCredit"]> | undefined;
 }
 
 /** Loads the override rows LAZILY and at most ONCE per derivation: a task no rung ever asks about pays no read. */
-function creditOverrideExclusion(taskId: string, deps: DeriveDeps): CreditOverrideExclusion {
+function creditOverrideExclusion(task: Pick<Task, "id" | "repo">, deps: DeriveDeps): CreditOverrideExclusion {
+  const taskId = task.id;
   let rows: readonly CreditOverrideRow[] | undefined;
   let first: CreditOverrideRow | undefined;
+  let firstRevert: NonNullable<StatusProjection["revertedCredit"]> | undefined;
+  // A revert names a PR of the gateway's own repository; a declared credit in another repository is not it.
+  const revertFor = (prNumber: number | undefined, prUrl?: string): NonNullable<StatusProjection["revertedCredit"]> | undefined => {
+    if (prNumber === undefined || !deps.revertRestoration || !deps.github.revertedMergePr) return undefined;
+    const urlRepo = prUrl === undefined ? undefined : /github\.com\/[^/]+\/([^/]+)\/pull\//i.exec(prUrl)?.[1];
+    if (urlRepo !== undefined && urlRepo.toLowerCase() !== String(task.repo).toLowerCase()) return undefined;
+    const revert = deps.github.revertedMergePr(prNumber);
+    if (!revert || deps.revertRestoration(taskId, revert)) return undefined;
+    return { pr: prNumber, revertSha: revert.revertSha, ...(revert.revertPr === undefined ? {} : { revertPr: revert.revertPr }) };
+  };
   const rowFor = (prNumber: number | undefined): CreditOverrideRow | undefined => {
     if (prNumber === undefined) return undefined;
     rows ??= deps.creditOverrideRows?.() ?? loadCreditOverrides(
@@ -2582,12 +2619,16 @@ function creditOverrideExclusion(taskId: string, deps: DeriveDeps): CreditOverri
   };
   return {
     rowFor,
-    excludes(prNumber) {
+    revertFor,
+    excludes(prNumber, prUrl) {
       const row = rowFor(prNumber);
       if (row && !first) first = row;
-      return row !== undefined;
+      const reverted = revertFor(prNumber, prUrl);
+      if (reverted && !firstRevert) firstRevert = reverted;
+      return row !== undefined || reverted !== undefined;
     },
     excludedBy: () => first,
+    revertedBy: () => firstRevert,
   };
 }
 
@@ -2600,10 +2641,17 @@ function creditOverrideExclusion(taskId: string, deps: DeriveDeps): CreditOverri
 function applyCreditOverride(p: StatusProjection, overrides: CreditOverrideExclusion): StatusProjection {
   if (!p.merged) {
     const excluded = overrides.excludedBy();
-    return excluded ? { ...p, creditOverride: { reason: excluded.reason, pr: excluded.pr } } : p;
+    const reverted = overrides.revertedBy();
+    if (!excluded && !reverted) return p;
+    return {
+      ...p,
+      ...(excluded ? { creditOverride: { reason: excluded.reason, pr: excluded.pr } } : {}),
+      ...(reverted ? { revertedCredit: reverted } : {}),
+    };
   }
   const row = overrides.rowFor(p.prNumber);
-  if (!row) return p;
+  const reverted = overrides.revertFor(p.prNumber, p.prUrl);
+  if (!row && !reverted) return p;
   return {
     ...p,
     status: "queued",
@@ -2611,7 +2659,8 @@ function applyCreditOverride(p: StatusProjection, overrides: CreditOverrideExclu
     // `none` is the honest source once the credit is refused: no evidence stands. The finer fact
     // rides the sparse field, the taxonomy convention this file states for StatusProjection.
     source: "none",
-    creditOverride: { reason: row.reason, pr: row.pr },
+    ...(row ? { creditOverride: { reason: row.reason, pr: row.pr } } : {}),
+    ...(reverted ? { revertedCredit: reverted } : {}),
   };
 }
 
@@ -2642,7 +2691,7 @@ function derivePrPrecedence(
   }
   const correctedUrl = liveCorrection ?? creditStore[task.id]?.correction?.prUrl;
   // W1-T5353: every crediting rung below skips an OVERRIDDEN (task, PR) pairing and lets the next rung answer.
-  if (correctedUrl && !overrides.excludes(prNumberFromRef(correctedUrl))) {
+  if (correctedUrl && !overrides.excludes(prNumberFromRef(correctedUrl), correctedUrl)) {
     return {
       taskId: task.id,
       source: "correction",
@@ -2727,7 +2776,7 @@ function derivePrPrecedence(
   // cannot express: a PR in ANOTHER repository, and a completion with NO PR. DECLARED credit, never re-verified
   // (there is no live read this rung COULD perform), checked BEFORE (a)/(b) and reversible by a correction.
   const manualCompletion = latestManualCompletion(ledgerLines, task.id, ledgerIndex);
-  if (manualCompletion && !(manualCompletion.prUrl && overrides.excludes(prNumberFromRef(manualCompletion.prUrl)))) {
+  if (manualCompletion && !(manualCompletion.prUrl && overrides.excludes(prNumberFromRef(manualCompletion.prUrl), manualCompletion.prUrl))) {
     return {
       taskId: task.id,
       source: "manual-completion",
@@ -3735,7 +3784,7 @@ export function deriveStatus(task: Task, deps: DeriveDeps): StatusProjection {
   // It only ever SUBTRACTS: there is no path here that can turn an uncredited task into a merged one. The
   // backstop below runs ABOVE the merged-is-terminal return, because that return is exactly what an override
   // exists to prevent.
-  const overrides = creditOverrideExclusion(task.id, deps);
+  const overrides = creditOverrideExclusion(task, deps);
   const credited = derivePrPrecedence(task, deps, ledgerLines, overrides);
   const base = applyCreditOverride(credited, overrides);
 
@@ -4017,13 +4066,6 @@ export function buildGitLogSupersessionSearch(opts: {
  *  Why: this rejects 0 of 921 plan ids and 170 of 740 commit tokens, every rejected one a run id */
 export const TASK_ID_TRAILER_RE = /^W[0-9]+-T[0-9]+[A-Za-z]?$/;
 
-/** A squash merge's own PR number, off the `(#N)` suffix in the subject. A commit whose subject names no PR is
- *  skipped rather than guessed at: without a number there is no {@link PrRef} to return. */
-function prNumberFromSquashSubject(subject: string): number | undefined {
-  const m = /\(#(\d+)\)\s*$/.exec(subject);
-  return m ? Number(m[1]) : undefined;
-}
-
 /** The per-task gateway used by plan lint has no daemon path snapshot. Index squash commits once,
  * then read and cache only the diffs for the PRs the projection considers. */
 function localMergedPathsReader(slug: string, cwd: string): NonNullable<GitHub["localMergedPaths"]> {
@@ -4070,6 +4112,12 @@ function originRepoSlug(url: string): string {
  *  reviewer's git reads and aborts an oversized read. The buffer grows with actual output. */
 export const COMMIT_TRAILER_LOG_MAX_BYTES = 256 * 1024 * 1024;
 
+/** The commit trailer index read; W1-T14302 adds `reverts`, the same walk's standing reverts keyed by PR number. */
+export type CommitTrailerIndexReader = (() => Map<string, PrRef[]> | null) & {
+  /** Re-walks only when the ref's sha moved. Empty for a foreign checkout; null for a failed read. */
+  reverts?: () => ReadonlyMap<number, RevertedMerge> | null;
+};
+
 /** W1-T2387: union machine-written commit trailers after hand-written body trailers miss; add credit only,
  *  never compare surfaces or fetch again. Failed read returns null, never [].
  *  W1-T2447: admin-only `squash_merge_commit_message` must remain `COMMIT_MESSAGES` for trailers to survive.
@@ -4081,7 +4129,7 @@ export function buildCommitTrailerIndex(opts: {
   ref?: string;
   cwd?: string;
   exec?: (args: string[]) => string;
-}): () => Map<string, PrRef[]> | null {
+}): CommitTrailerIndexReader {
   const slug = opts.slug;
   const ref = opts.ref ?? "origin/main";
   const exec =
@@ -4096,7 +4144,7 @@ export function buildCommitTrailerIndex(opts: {
         // repository. The first probe against the live corpus returned exactly that.
         maxBuffer: COMMIT_TRAILER_LOG_MAX_BYTES,
       }));
-  return () => {
+  const read = () => {
     // THE CHECKOUT MUST BE THIS GATEWAY'S OWN REPO, AND THIS IS A DEFECT THIS TASK SHIPPED ONCE AND CAUGHT. A
     // gateway is constructed for an explicit owner and repo, but `git log` reads whatever checkout the PROCESS
     // sits in, and the first draft consulted it unconditionally, so a fixture asking about one repo was
@@ -4136,6 +4184,37 @@ export function buildCommitTrailerIndex(opts: {
     }
     return out;
   };
+  let revertMemo: { sha: string; map: ReadonlyMap<number, RevertedMerge> } | undefined;
+  const reverts = (): ReadonlyMap<number, RevertedMerge> | null => {
+    let originUrl: string;
+    try {
+      originUrl = exec(["config", "--get", "remote.origin.url"]).trim();
+    } catch {
+      return new Map(); // no origin: not shown to be this repo, so no revert is known (W1-T14302)
+    }
+    if (originRepoSlug(originUrl) !== slug.toLowerCase()) return new Map();
+    let sha: string;
+    let raw: string;
+    try {
+      sha = exec(["rev-parse", "--verify", `${ref}^{commit}`]).trim();
+      if (revertMemo?.sha === sha) return revertMemo.map;
+      raw = exec(["log", sha, "--format=%H%x00%s%x00%b%x1e"]);
+    } catch {
+      return null; // unreadable history: no revert takes credit back (W1-T14302)
+    }
+    const records: MainHistoryRecord[] = [];
+    for (const record of raw.split("\x1e")) {
+      const trimmed = record.replace(/^\n+/, "");
+      if (!trimmed.trim()) continue;
+      const [commit, subject, body] = trimmed.split("\x00");
+      if (!commit || subject === undefined) continue;
+      const token = (body ?? "").match(TRAILER_RE)?.[1];
+      records.push({ sha: commit, subject, body: body ?? "", ...(token && TASK_ID_TRAILER_RE.test(token) ? { taskId: token } : {}) });
+    }
+    revertMemo = { sha, map: revertedMergesFromLog(records) };
+    return revertMemo.map;
+  };
+  return Object.assign(read, { reverts });
 }
 
 /** W1-T13662: {@link projectPlan} over a plan of the one named task, with the same deps; an id not in the plan
@@ -4143,7 +4222,17 @@ export function buildCommitTrailerIndex(opts: {
 export function projectTask(plan: Plan, taskId: string, deps: DeriveDeps): Map<string, StatusProjection> {
   const task = plan.byId.get(taskId);
   if (task === undefined) return new Map();
-  return projectPlan({ tasks: [task], byId: new Map([[taskId, task]]) }, { ...deps, skipTasklessEscalations: true });
+  return projectPlan({ tasks: [task], byId: new Map([[taskId, task]]) },
+    { ...deps, skipTasklessEscalations: true, revertRestoration: deps.revertRestoration ?? planRevertRestoration(plan) });
+}
+
+/** W1-T14302: the restoration check over a whole plan's shards (see {@link revertRestored}). */
+function planRevertRestoration(plan: Plan): NonNullable<DeriveDeps["revertRestoration"]> {
+  let byId: ReadonlyMap<string, Task> | undefined;
+  return (taskId, revert) => {
+    byId ??= plan.byId ?? new Map(plan.tasks.map((t) => [t.id, t]));
+    return revertRestored(revert, taskId, (id) => byId!.get(id));
+  };
 }
 
 /** Derive every task in a plan and cache the projection to `cachePath` (state/status.json). Returns a taskId ->
@@ -4189,6 +4278,7 @@ export function projectPlan(
   effectiveDeps = {
     ...effectiveDeps,
     creditOverrideRows,
+    revertRestoration: passDeps.revertRestoration ?? planRevertRestoration(plan),
     readCreditStore: () => creditStoreLive,
     writeCreditStore: (store: CreditStore) => {
       creditStoreLive = store;
@@ -4453,7 +4543,7 @@ export function ghGateway(
     /** Checkout for local changed-path evidence. Required when injecting a GitHub transport. */
     cwd?: string;
     /** W1-T2387: injectable stand-in for {@link buildCommitTrailerIndex}'s real `git log` read. */
-    commitTrailerIndex?: () => Map<string, PrRef[]> | null;
+    commitTrailerIndex?: CommitTrailerIndexReader;
   } = {},
 ): GitHub {
   const slug = `${owner}/${repo}`;
@@ -4461,11 +4551,15 @@ export function ghGateway(
   // W1-T2387 — THE COMMIT SURFACE, MEMOIZED AND LAZY: built at most ONCE per gateway instance and only once a
   // task has missed on the body surface. NOT TTL'd, commits being append-only, so a stale index can only LACK a
   // very recent merge — the case the body surface answers.
+  const trailerSource = opts.commitTrailerIndex ?? buildCommitTrailerIndex({ slug });
   let commitIndex: Map<string, PrRef[]> | null | undefined;
   const commitTrailerFallback = (taskId: string): PrRef[] => {
-    if (commitIndex === undefined) commitIndex = (opts.commitTrailerIndex ?? buildCommitTrailerIndex({ slug }))();
+    if (commitIndex === undefined) commitIndex = trailerSource();
     return commitIndex?.get(taskId) ?? [];
   };
+  // W1-T14302: one revert read per gateway; this gateway lives for one command.
+  let revertIndex: ReadonlyMap<number, RevertedMerge> | null | undefined;
+  const revertSource = trailerSource.reverts;
   // W1-T2387: the re-verify half, over the SAME memoised index — never a second `git` call.
   const commitCreditsFor = (taskId: string, prUrl: string): boolean =>
     commitTrailerFallback(taskId).some((r) => r.url === prUrl);
@@ -4628,6 +4722,7 @@ export function ghGateway(
     creditedByCommitTrailer(taskId, prUrl) {
       return commitCreditsFor(taskId, prUrl);
     },
+    ...(revertSource ? { revertedMergePr: (prNumber: number) => (revertIndex === undefined ? (revertIndex = revertSource()) : revertIndex)?.get(prNumber) } : {}),
     localMergedPaths: localPathsCwd === undefined ? undefined : localMergedPathsReader(slug, localPathsCwd),
     changedFiles(prUrl) {
       // W1-T413. The files endpoint has no field-selection story, so filenames come straight off `--jq`.
@@ -4918,7 +5013,7 @@ export function buildBatchedGithub(
      *  without shelling out, and without bypassing the default's parse and byte-size-log wrapper. */
     exec?: (args: string[]) => string;
     /** W1-T2387: injectable stand-in for the real `git log` read; mirrors {@link ghGateway}'s own seam. */
-    commitTrailerIndex?: () => Map<string, PrRef[]> | null;
+    commitTrailerIndex?: CommitTrailerIndexReader;
     /** Observability hook: changes and failures keep full rows; every successful read is counted
      *  in a five-minute rollup (W1-T4480). */
     log?: (event: string, extra?: Record<string, unknown>) => void;
@@ -5134,7 +5229,7 @@ export function buildBatchedGithub(
       // half's proven stop test over rather than a second mechanism.
       let bytes = 0;
       const fetchJson = (args: string[]): unknown => {
-        const raw = run(args);
+        const raw = runBoardApiRead(() => run(args), pacer.sleepSync);
         bytes += Buffer.byteLength(raw, "utf8");
         return JSON.parse(raw);
       };
@@ -5426,13 +5521,18 @@ export function buildBatchedGithub(
   // W1-T2387 — the COMMIT surface, memoized and lazy; mirrors {@link ghGateway}'s own fallback exactly, same
   // doc and same precedence. Built at most ONCE per gateway and only after a task has missed on the body index,
   // so a board whose PRs all carry the body trailer never shells out. Deliberately NOT TTL'd.
+  const trailerSource = opts.commitTrailerIndex ?? buildCommitTrailerIndex({ slug: `${owner}/${repo}` });
   let commitIndex: Map<string, PrRef[]> | null | undefined;
   const commitTrailerFallback = (taskId: string): PrRef[] => {
     if (commitIndex === undefined) {
-      commitIndex = (opts.commitTrailerIndex ?? buildCommitTrailerIndex({ slug: `${owner}/${repo}` }))();
+      commitIndex = trailerSource();
     }
     return commitIndex?.get(taskId) ?? [];
   };
+  // W1-T14302: the standing reverts, read again after each resetFailureFlags() so a gateway that lives across
+  // ticks sees a new revert; the source re-walks main only when its sha moved.
+  let revertIndex: ReadonlyMap<number, RevertedMerge> | null | undefined;
+  const revertSource = trailerSource.reverts;
   // W1-T2387: the re-verify half, over the SAME memoised index — never a second `git` call.
   const commitCreditsFor = (taskId: string, prUrl: string): boolean =>
     commitTrailerFallback(taskId).some((r) => r.url === prUrl);
@@ -5754,6 +5854,7 @@ export function buildBatchedGithub(
     creditedByCommitTrailer(taskId, prUrl) {
       return commitCreditsFor(taskId, prUrl);
     },
+    ...(revertSource ? { revertedMergePr: (prNumber: number) => (revertIndex === undefined ? (revertIndex = revertSource()) : revertIndex)?.get(prNumber) } : {}),
     changedFiles(prUrl, snapshotPr) {
       // W1-T413, AND THE O(N) QUESTION ANSWERED RATHER THAN DODGED. The REST PR *list* does not carry changed
       // files at any page size, so this cannot ride the one fetch the way body, head ref and title do. It is
@@ -5878,6 +5979,7 @@ export function buildBatchedGithub(
     // it at the top of every tick for free. See `resetFailureFlags`'s own doc above.
     resetFailureFlags() {
       resetFailureFlags();
+      revertIndex = undefined;
     },
     issueReadFailed() {
       issueIndex();

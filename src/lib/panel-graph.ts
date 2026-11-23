@@ -2031,6 +2031,11 @@ function inboxInputPaths(deps: PanelGraphDeps): { registryPath: string; draftsPa
   };
 }
 
+function inboxProposalReader(deps: PanelGraphDeps): () => Proposal[] {
+  let proposals: Proposal[] | undefined;
+  return () => proposals ??= parseProposalRegistry(readFileIfExists(inboxInputPaths(deps).registryPath));
+}
+
 type InboxMemoEntry = Pick<InboxFingerprint, "key" | "writeKey" | "plan" | "planKey" | "readPlanSnapshot"> & {
   result: ClassifiedInbox;
   /** Epoch millis when the pass that made `result` completed. */
@@ -2104,6 +2109,7 @@ interface InboxPass {
  */
 function prepareInboxPass(
   deps: PanelGraphDeps,
+  proposals: Proposal[],
   plan: Plan,
   projection: Map<string, StatusProjection>,
   ledgerLines: LedgerLines,
@@ -2113,7 +2119,6 @@ function prepareInboxPass(
   verdictReceipts: readonly VerdictReceipt[] = readVerdictReceipts(join(deps.inboxRoot, "state")),
 ): InboxPass {
   const { registryPath, draftsPath, inflightPath, adoptionPath } = inboxInputPaths(deps);
-  const proposals = parseProposalRegistry(readFileIfExists(registryPath));
   const drafts: DraftCache = parseDraftCache(readFileIfExists(draftsPath));
   const inflight = parseDraftInFlightCache(readFileIfExists(inflightPath));
   // `?? false` is dead code on a present entry, not an absent-as-unmerged conflation (W1-T510):
@@ -2196,46 +2201,53 @@ function prepareInboxPass(
 }
 
 /** The Inbox's projection and board referents for one plan read. */
-export function projectInboxPlan(deps: Pick<PanelGraphDeps, "ledgerPath" | "statusGithub" | "inboxReferentPlan">, plan: Plan, ledgerLines?: LedgerLines) {
+export function projectInboxPlan(deps: Pick<PanelGraphDeps, "ledgerPath" | "statusGithub" | "inboxReferentPlan">, plan: Plan,
+  ledgerLines?: LedgerLines, readProposals?: () => readonly Proposal[]) {
   let openPrs: readonly PrRef[] | undefined;
-  const statusDeps = { ledgerPath: deps.ledgerPath, github: deps.statusGithub,
+  let mergedPrs: PrRef[] | null | undefined;
+  const source = deps.statusGithub;
+  const github = readProposals && deps.inboxReferentPlan && source.listMergedHeadBranches
+    ? { ...source, listMergedHeadBranches: () => mergedPrs === undefined ? (mergedPrs = source.listMergedHeadBranches!()) : mergedPrs }
+    : source;
+  const statusDeps = { ledgerPath: deps.ledgerPath, github,
     writeCreditStore: SERVE_KEEPS_CREDITS_IN_MEMORY, ...(ledgerLines === undefined ? {} : { readLedger: () => ledgerLines }) };
   const projection = projectPlan(plan, { ...statusDeps, observeOpenPrCount: rows => { openPrs = rows; } });
-  return { projection, boardReferents: withOpsOwnTaskReferents(deps, plan, projection, openPrs, statusDeps) };
+  return { projection, boardReferents: withOpsOwnTaskReferents(deps, plan, projection, openPrs, mergedPrs ?? [], statusDeps, readProposals) };
 }
 
-/** W1-T14114: an ops-only task verifies only the one open PR that owns it unambiguously (W1-T130), outside the
- *  projection inboxBoardReferents walks and the classifier's (W1-T12211). */
+/** Ops-only rows can verify their own board referent and stay local to this pass (W1-T12211). */
 function withOpsOwnTaskReferents(deps: Pick<PanelGraphDeps, "inboxReferentPlan">, plan: Plan, projection: Map<string, StatusProjection>,
-  openPrs: readonly PrRef[] | undefined, statusDeps: Parameters<typeof projectPlan>[1]): ReturnType<typeof inboxBoardReferents> {
+  openBatch: readonly PrRef[] | undefined, mergedPrs: readonly PrRef[], statusDeps: Parameters<typeof projectPlan>[1],
+  readProposals?: () => readonly Proposal[]): ReturnType<typeof inboxBoardReferents> {
+  const openPrs = openBatch ?? [];
   const referents = inboxBoardReferents(projection, openPrs);
-  const combined = openPrs?.length ? deps.inboxReferentPlan?.(plan) : undefined;
-  if (!combined || combined === plan) return referents;
-  const claimsOf = (pr: PrRef): Set<string> => {
-    const ids = new Set<string>();
-    const head = taskIdFromRunBranch(pr.headRefName);
-    if (head) ids.add(head);
-    for (const match of (pr.body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)) ids.add(match[1]);
-    return ids;
-  };
-  const claimants = new Map<string, number>();
-  for (const pr of openPrs!) for (const id of claimsOf(pr)) claimants.set(id, (claimants.get(id) ?? 0) + 1);
-  const owners = new Map<string, PrRef>();
-  for (const pr of openPrs!) {
-    const state = referents.states.get(`#${pr.number}`);
-    if (pr.body === undefined || state?.status !== "open") continue;
-    const ids = claimsOf(pr);
-    if (ids.size !== 1) continue;
-    const [id] = ids;
-    if (claimants.get(id) !== 1 || plan.byId.has(id)) continue;
-    const task = combined.byId.get(id);
-    if (task) owners.set(id, pr);
+  if (!deps.inboxReferentPlan) return referents;
+  const proposals = mergedPrs.length ? readProposals?.() ?? [] : [];
+  const mergedKeys = new Set<string>();
+  for (const proposal of proposals) {
+    const key = proposal.originatingItemId ?? /^board-review:(?:stale|escalation):(.+)$/.exec(proposal.id)?.[1];
+    if (key?.startsWith("#") && !referents.states.has(key)) mergedKeys.add(key);
   }
-  if (owners.size === 0) return referents;
-  const tasks = [...owners.keys()].map(id => combined.byId.get(id)!);
-  const rows = projectPlan({ tasks, byId: new Map(tasks.map(task => [task.id, task])) }, { ...statusDeps, skipTasklessEscalations: true });
+  // A missing state can be a contradiction the public pass rejected. Preserve any public PR evidence.
+  if (mergedKeys.size > 0) {
+    for (const row of projection.values()) if (row.prNumber !== undefined) mergedKeys.delete(`#${row.prNumber}`);
+    for (const pr of openPrs) mergedKeys.delete(`#${pr.number}`);
+  }
+  const mergedCandidates = mergedKeys.size === 0 ? [] : mergedPrs.filter(pr =>
+    pr.state === "MERGED" && Number.isSafeInteger(pr.number) && pr.number > 0 && mergedKeys.has(`#${pr.number}`));
+  const combined = openPrs.length || mergedCandidates.length ? deps.inboxReferentPlan(plan) : undefined;
+  if (!combined || combined === plan) return referents;
+  const openOwners = opsReferentOwners(openPrs, openPrs.filter(pr => referents.states.get(`#${pr.number}`)?.status === "open"), plan, combined);
+  const mergedOwners = opsReferentOwners([...mergedPrs, ...openPrs], mergedCandidates, plan, combined);
+  const tasks = [...new Set([...openOwners.keys(), ...mergedOwners.keys()])].map(id => combined.byId.get(id)!);
+  if (tasks.length === 0) return referents;
+  const github = { ...statusDeps.github,
+    ...(statusDeps.github.listOpenHeadBranches ? { listOpenHeadBranches: () => openBatch ? [...openBatch] : null } : {}) };
+  const rows = projectPlan({ tasks, byId: new Map(tasks.map(task => [task.id, task])) }, {
+    ...statusDeps, github, skipTasklessEscalations: true, skipUncreditedBuildWarning: true,
+  });
   const states = new Map(referents.states);
-  for (const [id, pr] of owners) {
+  for (const [id, pr] of openOwners) {
     const key = `#${pr.number}`;
     const prior = states.get(key)!;
     const row = rows.get(id);
@@ -2248,7 +2260,31 @@ function withOpsOwnTaskReferents(deps: Pick<PanelGraphDeps, "inboxReferentPlan">
     }
     states.set(key, { status: "open", unhandledEscalations: Math.max(prior.unhandledEscalations ?? 0, row.needsHuman ? 1 : 0) });
   }
+  for (const [id, pr] of mergedOwners) {
+    const row = rows.get(id);
+    if (row?.merged && row.taskId === id && row.prNumber === pr.number && row.prUrl === pr.url && row.prState === "MERGED"
+      && !row.indeterminate && !row.githubUnobservableSince) states.set(`#${pr.number}`, { status: "merged" });
+  }
   return { kind: "ok", states };
+}
+
+function opsReferentOwners(prs: readonly PrRef[], candidates: readonly PrRef[], plan: Plan, combined: Plan): Map<string, PrRef> {
+  const owners = new Map<string, PrRef>();
+  if (candidates.length === 0) return owners;
+  const eligible = new Set(candidates);
+  const claimants = new Map<string, number>();
+  for (const pr of prs) {
+    const ids = new Set(Array.from((pr.body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm), match => match[1]));
+    const hasTrailer = ids.size > 0;
+    const head = taskIdFromRunBranch(pr.headRefName);
+    if (head) ids.add(head);
+    for (const id of ids) claimants.set(id, (claimants.get(id) ?? 0) + 1);
+    if (!eligible.has(pr) || pr.body === undefined || ids.size !== 1 || (pr.state === "MERGED" && !hasTrailer)) continue;
+    const [id] = ids;
+    if (!plan.byId.has(id) && combined.byId.has(id)) owners.set(id, pr);
+  }
+  for (const id of owners.keys()) if (claimants.get(id) !== 1) owners.delete(id);
+  return owners;
 }
 
 /**
@@ -2261,10 +2297,11 @@ function withOpsOwnTaskReferents(deps: Pick<PanelGraphDeps, "inboxReferentPlan">
 function classifyAllProposals(deps: PanelGraphDeps, loadPlanFn: (planPath: string) => Plan = deps.readPlanSnapshot ?? loadPlan,
   only?: string, lapseDeclines = true): ClassifiedInbox {
   const plan = loadPlanFn(deps.planPath);
-  const { projection, boardReferents } = projectInboxPlan(deps, plan);
+  const readProposals = inboxProposalReader(deps);
   const ledgerLines = readLedgerLines(deps.ledgerPath);
+  const { projection, boardReferents } = projectInboxPlan(deps, plan, ledgerLines, readProposals);
   const sha = (deps.inboxMainSha ?? readOriginMainSha)(deps.root);
-  const pass = prepareInboxPass(deps, plan, projection, ledgerLines, anchorGrepFor(deps, sha), boardReferents);
+  const pass = prepareInboxPass(deps, readProposals(), plan, projection, ledgerLines, anchorGrepFor(deps, sha), boardReferents);
   // W1-T13188: a write classifies only the proposal it acts on; `proposals` stays whole for existence checks.
   const classified = only === undefined ? pass.proposals : pass.proposals.filter((p) => p.id === only);
   return { plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: classified.map(p => pass.classifyOne(p, lapseDeclines)), ledgerLines, projection };
@@ -2314,6 +2351,7 @@ interface InboxFingerprint {
   plan: Plan;
   planKey?: string;
   readPlanSnapshot?: () => Plan;
+  readProposals: () => Proposal[];
   projection: Map<string, StatusProjection>;
   boardReferents: ReturnType<typeof inboxBoardReferents>;
   ledgerLines: LedgerLines;
@@ -2361,10 +2399,11 @@ function inboxFingerprint(deps: PanelGraphDeps, state: InboxClassifyState, readP
     const last = state.last;
     plan = last?.planKey !== undefined && last.planKey === planKey ? last.plan : inboxPlan(deps);
   }
-  const { projection, boardReferents } = projectInboxPlan(deps, plan, ledgerLines);
+  const readProposals = inboxProposalReader(deps);
+  const { projection, boardReferents } = projectInboxPlan(deps, plan, ledgerLines, readProposals);
   const archiveKey = archiveReleases?.size ? [...archiveReleases].sort(([a], [b]) => a.localeCompare(b)) : null;
   const key = JSON.stringify([stamps, sha ?? null, verdictDigest, projectionDigest(projection, boardReferents), archiveKey]);
-  return { key, writeKey: inboxWriteKey(inputs), sha, plan, planKey, readPlanSnapshot, projection, boardReferents, ledgerLines, archiveReleases, verdictReceipts };
+  return { key, writeKey: inboxWriteKey(inputs), sha, plan, planKey, readPlanSnapshot, readProposals, projection, boardReferents, ledgerLines, archiveReleases, verdictReceipts };
 }
 
 /**
@@ -2406,7 +2445,7 @@ export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?
   const reused = reusableResult(state, fp);
   if (reused !== undefined) return reused;
   const generation = state.generation = {};
-  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
+  const pass = prepareInboxPass(deps, fp.readProposals(), fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
   const result = { plan: fp.plan, registryPath: pass.registryPath, proposals: pass.proposals, classifications: pass.proposals.map(p => pass.classifyOne(p)), ledgerLines: fp.ledgerLines, projection: fp.projection };
   holdInboxResult(state, generation, fp, result);
   return result;
@@ -2481,7 +2520,7 @@ export async function classifyAllProposalsSliced(
   const generation = state.generation = {};
   const warmFailures = new Map<string, unknown>();
   const answers = new Map<string, boolean>();
-  const pass = prepareInboxPass(deps, fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha, warmFailures, answers), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
+  const pass = prepareInboxPass(deps, fp.readProposals(), fp.plan, fp.projection, fp.ledgerLines, anchorGrepFor(deps, fp.sha, warmFailures, answers), fp.boardReferents, fp.archiveReleases, fp.verdictReceipts);
   const run = async (): Promise<ClassifiedInbox> => {
     await warmInboxAnchors(deps, fp.sha, pass.proposals, warmFailures, answers);
     const classifications: InboxClassification[] = [];
@@ -3270,8 +3309,23 @@ const INBOX_THREAD_LIST_WARM_MS = 60_000;
 export type { ThreadListInbox };
 
 export function inboxClassificationEvidence(classified: Pick<ClassifiedInbox, "projection" | "classifications">): ClassificationEvidence {
-  const partial = [...classified.projection.values()].some((value) => value.indeterminate) || classified.classifications.some((value) => value.referentUnverified);
-  return partial ? { complete: false, incompleteReason: "the GitHub projection or a proposal referent is indeterminate" } : { complete: true };
+  const proposals = classified.classifications.filter(value => value.referentUnverified)
+    .sort((a, b) => a.proposalId === b.proposalId ? 0 : a.proposalId < b.proposalId ? -1 : 1)
+    .map(value => `${value.proposalId} (${value.referentUnverifiedReason ?? "reason unavailable"})`);
+  const tasks = [...classified.projection.values()].filter(value => value.indeterminate).map(value => value.taskId).sort();
+  const names = [...proposals, ...tasks];
+  if (names.length === 0) return { complete: true };
+
+  const prefix = "the GitHub projection or a proposal referent is indeterminate";
+  const shown = names.slice(0, 10);
+  while (shown.length > 0) {
+    const remaining = names.length - shown.length;
+    const overflow = remaining === 0 ? "" : `, and ${remaining} more`;
+    const incompleteReason = `${prefix}: ${shown.join(", ")}${overflow}`;
+    if (incompleteReason.length <= 1_000) return { complete: false, incompleteReason };
+    shown.pop();
+  }
+  return { complete: false, incompleteReason: `${prefix}: and ${names.length} more` };
 }
 
 const slowLaneClassifications = new WeakMap<PanelGraphDeps, { stamp: string; held: ThreadListClassification<ThreadListInbox> | undefined }>();

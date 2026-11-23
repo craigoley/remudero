@@ -194,13 +194,15 @@ test("W1-T13681 criterion 2: no new pick while a move is pending (only its conve
   // A move is pending (the copied id in both catalogs): with every pick gate closed, only its converging step runs.
   m.set({ catalog: "ref_moved" });
   assert.deepEqual(await tick(mover, rows, "duplicate_task_id"), { outcome: "step", step: "remove" });
-  const pending = copy!.head.replace(/^plan-move-|-\d+$/g, "");
-  assert.deepEqual(sharedIds(w, [A, B]), [pending], "positive control: the removal ran while the copied id was pending");
+  // W1-T14345: one copy carries the whole batch, so the whole batch is pending, and only its converging step runs.
+  assert.deepEqual(copy!.files, [shard(A), shard(B)]);
+  assert.deepEqual(sharedIds(w, [A, B]), [A, B], "positive control: the removal ran while the copied batch was pending");
   assert.equal(w.pulls.filter(pr => pr.repository === "ops").length, 1, "and no new copy was picked");
   const [, removal] = w.pulls;
   m.merge(removal!);
-  assert.deepEqual(await tick(mover, rows), { outcome: "stand_down", reason: "ops_catalog_unavailable", detail: "ref_moved" },
-    "the next pick waits for the ops catalog read again");
+  // W1-T14345: the batch carried both records, so no pick is left to wait for the ops catalog read.
+  assert.deepEqual(await tick(mover, rows), { outcome: "stand_down", reason: "nothing_to_move" },
+    "the batch moved every record: nothing is left to pick");
 
   // A mover pull request another writer opened: the mover's own WAIT holds the pick.
   m.set({ catalog: "ok" });
@@ -216,8 +218,9 @@ test("W1-T13681 criterion 2: no new pick while a move is pending (only its conve
   assert.deepEqual(await tick(mover, rows), { outcome: "stand_down", reason: "preview_unknown", detail: "api_unreadable" });
   assert.deepEqual(await tick(mover, rows), { outcome: "stand_down", reason: "preview_unknown", detail: "api_unreadable" });
   m.set({ apiDown: false });
-  assert.deepEqual(await tick(mover, rows), { outcome: "step", step: "copy" }, "resumed on the first tick after the condition cleared");
-  assert.deepEqual(openMovers(w).map(pr => pr.repository), ["ops"]);
+  // W1-T14345: the read answers again on the first tick; with the batch moved, its answer is that nothing is left.
+  assert.deepEqual(await tick(mover, rows), { outcome: "stand_down", reason: "nothing_to_move" }, "resumed on the first tick after the condition cleared");
+  assert.deepEqual(openMovers(w).map(pr => pr.repository), []);
   assert.equal(standDowns(rows).filter(([reason]) => reason === "preview_unknown").length, 1, "one row for a repeated unknown");
   assert.deepEqual(m.readsWrote, [], "no read port wrote a ref");
 
@@ -397,7 +400,8 @@ test("W1-T13681 criterion 5: a tick cut off mid-step leaves a state the next tic
   assert.deepEqual(await hostTick(), { outcome: "stand_down", reason: "mover_pull_request_open" });
   pullRow = { state: "closed", merged: true, merge_commit_sha: head };
   assert.deepEqual(await hostTick(), { outcome: "step", step: "copy" }, "the landed step frees the next, through the same verb");
-  assert.deepEqual([...new Set(argv.git.map(args => args[0]))].sort(), ["cat-file", "fetch", "ls-remote", "merge-base"], "read-only git verbs");
+  assert.deepEqual([...new Set(argv.git.map(args => args[0]))].sort(), ["cat-file", "fetch", "ls-remote", "merge-base", "rev-parse"],
+    "read-only git verbs: the canned tracking ref names no commit, so the public side's fast-forward writes nothing");
   assert.ok(argv.git.filter(args => args[0] === "fetch").every(args => args.includes("--no-write-fetch-head")), "a fetch writes no FETCH_HEAD");
   assert.deepEqual(argv.gh, [["api", `repos/${OPS}/pulls/3`], ["api", `repos/${OPS}/pulls/3`]], "one direct REST read per tick, no write method");
   assert.equal(argv.exec.length, 4, "a dry run and an --apply step per step taken");
@@ -413,11 +417,13 @@ test("W1-T13681 criterion 6: no new pick while any id is held by both catalogs o
   const rows: Row[] = [];
   // GitHub's search lags every mover pull request throughout: only the janitor's own gates hold the picks.
   m.set({ lag: true });
+  // W1-T14345: one copy carries a batch, so the transient state holds at most the one batch the open step copied.
   const copied: string[] = [];
+  let batch: string[] = [];
   for (let round = 0; round < 30 && w.pulls.filter(pr => pr.state === "MERGED").length < 2 * ids.length; round++) {
     const outcome = await tick(mover, rows);
-    if (outcome.outcome === "step" && outcome.step === "copy") copied.push(String(w.pulls.at(-1)!.head.replace(/^plan-move-|-\d+$/g, "")));
-    assert.ok(sharedIds(w, ids).length <= 1, `at most one id in both catalogs (round ${round})`);
+    if (outcome.outcome === "step" && outcome.step === "copy") { batch = ids.filter(id => w.pulls.at(-1)!.files.includes(shard(id))); copied.push(...batch); }
+    assert.ok(sharedIds(w, ids).every(id => batch.includes(id)), `only the one copied batch in both catalogs (round ${round})`);
     assert.ok(openMovers(w).length <= 1, `at most one mover pull request open (round ${round})`);
     // A second tick before any merge: nothing more.
     const again = await tick(mover, rows);

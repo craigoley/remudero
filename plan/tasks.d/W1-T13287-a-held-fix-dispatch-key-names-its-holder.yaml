@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: low # changes only the refusal reason and its ledger fields; the mutex check, the claim and every release stay as they are
+  risk: high # changes only the refusal reason and its ledger fields; the mutex check, the claim and every release stay as they are. Raised 2026-11-23: the scope amendment spans 2 concerns (Rule 19)
   origin: "operator-session#dispatch-oddities-2026-11-17"
   plan_refs:
     - W1-T2520
@@ -17,6 +17,7 @@
   files:
     - src/lib/sweep.ts
     - test/a-held-fix-dispatch-key-names-its-holder.test.ts
+    - test/sweep/a-queued-host-fix-dispatch-never-holds-its-key-unexplained.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -29,6 +30,13 @@
     - claim: "invariant:one-fix-round-per-key — in every holder shape (detached in-process dispatch, pending child launch, registered child) a second claim of the same key is refused and no second fix.dispatch or sweep.fix.child row is written; the key is free again only when its holder settles, and the text 'already claimed this pass' is written only when no detached action, no pending launch and no registered child holds the key"
       kind: guard
       proof: "grep: W1-T13287 criterion 4 in test/a-held-fix-dispatch-key-names-its-holder.test.ts"
+  amendment: |
+    2026-11-23, scope: test/sweep/a-queued-host-fix-dispatch-never-holds-its-key-unexplained.test.ts joins files:,
+    as the worker's refusal (run work-fix-dispatch-W1-T13287-1795392104551-4bfb) proposed. Its W1-T13440
+    criterion 4 test pins the generic "already claimed this pass" text for a host launch that reports no
+    admission wait. That launch is the pending launch criterion 2 must name, so the test cannot stay as written.
+    Criterion 4 here already keeps the generic text for a key with no detached action, pending launch or
+    registered child, and W1-T13440's invariant keeps its criterion 4 title on an inline claim. No acceptance change.
   rationale: |
     WHY: the stand-down for a held fix-dispatch key tells the operator that "a concurrent sweep is already
     dispatching this PR's fix rung" when in fact a run child owns the key. On 2026-11-16 at 18:58:14Z the sweep

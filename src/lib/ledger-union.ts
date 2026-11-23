@@ -2087,6 +2087,8 @@ interface IncrementalUnionState {
   live?: IncrementalLiveState;
   /** Normally aliases the parts; only an uncommitted fragment or an unstattable part adds rows. */
   last?: { signature: string; result: LedgerUnionRecordRead; extraSizes: MemoSize[] };
+  /** Rotation path to the strict stat key at which this reader last hashed its bytes and found them unchanged. */
+  verified?: Map<string, string>;
 }
 
 /** Size only newly parsed/projected rows. Strip JSON's empty-array syntax so ignored appends add zero;
@@ -2176,16 +2178,25 @@ export function createIncrementalLedgerUnion(
     const finish = (result: LedgerUnionRecordRead): LedgerUnionRecordRead => {
       if (result.ok && opts.verifyRotationContents) {
         // Check the source bytes after cache lookup. A successful read can still return corrupt gzip.
+        const verified = new Map<string, string>();
         const unread = result.archiveFiles.filter((path) => {
           const part = state.rotations.get(path);
           if (part === undefined) return false; // The union read this rotation uncached.
+          const key = opts.strictFileIdentity && part.key === keys.get(path) ? part.key : undefined;
+          if (key !== undefined && state.verified?.get(path) === key) {
+            verified.set(path, key);
+            return false;
+          }
           try {
-            return hash("sha256", fsDeps.readFileSync(path)) !== part.read.archiveFingerprint;
+            if (hash("sha256", fsDeps.readFileSync(path)) !== part.read.archiveFingerprint) return true;
           } catch {
             // A failed verification read makes this rotation unread even when its cached rows are available.
             return true;
           }
+          if (key !== undefined) verified.set(path, key);
+          return false;
         });
+        state.verified = verified;
         if (unread.length > 0) return { ...result, unread, ok: false, rows: [] };
       }
       if (result.ok && state.rotations.size === result.archiveCount) onKeptRotations?.(state.rotations);

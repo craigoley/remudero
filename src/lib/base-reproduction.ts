@@ -32,6 +32,8 @@ const CI_LINE_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z /;
 const TAP_TOP_LEVEL_FAILURE = /^not ok \d+ - (.*)$/;
 const TAP_FAILURE_LOCATION = /^ {2}location: (['"])(.+?):\d+:\d+\1$/;
 const FLAKE_RETRY_FILES_LINE = /^FLAKE-RETRY-FILES: retrying \d+ failed file\(s\)(?: uninstrumented)? — (.+)$/;
+/** A column-0 line of TAP's own grammar. Any other column-0 line comes from another output stream. */
+const TAP_COLUMN_ZERO_LINE = /^(?:(?:not )?ok \d|#|1\.\.\d|TAP version |Bail out!)/;
 export type TapFailure = { test: string; location?: string; lines: string[] };
 
 /** W1-T13790 — the column-0 TAP failures in runner output, each with the `location:` key two spaces into its own
@@ -39,15 +41,26 @@ export type TapFailure = { test: string; location?: string; lines: string[] };
 export function topLevelTapFailures(output: string): TapFailure[] {
   const failures: TapFailure[] = [];
   let open: TapFailure | undefined;
+  let bodyStarted = false;
   for (const raw of output.split(/\r?\n/)) {
     const line = raw.replace(CI_LINE_TIMESTAMP, "").trimEnd();
     const head = TAP_TOP_LEVEL_FAILURE.exec(line);
     if (head) {
       open = { test: head[1]!.trim(), lines: [line] };
       failures.push(open);
+      bodyStarted = false;
+    } else if (open && !bodyStarted && /^\S/.test(line) && !TAP_COLUMN_ZERO_LINE.test(line)) {
+      // Node's TAP reporter writes a failure's head and its `  ---` body as two separate writes, so a runner that
+      // merges stdout and stderr can put another stream's line between them. On #20279's coverage-shard 11/12 the
+      // spec reporter's `✖ <title>` landed there, closed the block before its `location:`, and the retry wrapper
+      // named no failed file. Before the body begins, such a line is skipped and the block stays open. The body is
+      // one write, so once it begins any column-0 line still ends the block. STATED COST: a failure with no body
+      // keeps collecting indented lines past a non-TAP column-0 line, which only its no-location fallback reads.
+      continue;
     } else if (open && (line === "  ..." || /^\S/.test(line))) {
       open = undefined;
     } else if (open) {
+      if (line === "  ---") bodyStarted = true;
       open.lines.push(line);
       const key = open.location === undefined ? TAP_FAILURE_LOCATION.exec(line) : null;
       if (key) open.location = key[2]!;

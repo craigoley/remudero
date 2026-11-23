@@ -41,7 +41,7 @@ async function drive(plan: Plan, snapshot?: Awaited<ReturnType<typeof readOpsCat
   const deps: DaemonDeps = {
     refreshMerged: () => id => merged.has(id), targetRepo: "remudero",
     runOne: async id => { claims.push(id); workers.push(id); merged.add(id); return { taskId: id, runId: id, merged: true, costUsd: 0, verdict: "merged" }; },
-    sleep: async () => {}, now: () => new Date("2026-01-01T00:00:00Z"), bootCheckoutBlocked: "",
+    sleep: async () => {}, now: () => new Date("2026-01-01T00:00:00Z"), selectionTimingNow: () => 0, bootCheckoutBlocked: "",
     memoryGovernor: createDaemonMemoryGovernor({ read: () => ({ rss_bytes: 1 }), heapUsed: () => 1, setFlags: () => {} }),
     heapStatistics: () => ({ used_heap_size: 1, heap_size_limit: 1_000_000_000 }),
     log: (step, extra = {}) => { if (step === "dispatch.secondary_catalog_shadow") rows.push(extra); else other.push([step, extra]); },
