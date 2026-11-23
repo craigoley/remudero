@@ -434,10 +434,10 @@ export async function selectPlanTaskMigration(
       continue;
     }
     // W1-T13680: only an open, machine-verified task whose public reservation exists may move. W1-T14345: open is
-    // queued or blocked. A verify:human release is pinned to the record's contract, which its moved_from line changes,
-    // so a released task would need approving again in the destination: that exclusion stays. W1-T14424: an open record
+    // queued or blocked. W1-T14425: a verify:human record is open like any other, since W1-T14408 made its release pin
+    // exclude the mover's moved_from line, so a release survives the move. W1-T14424: an open record
     // the ops gate's moved-live rules refuse would fail the whole batch's copy, so it is left out before any lookup.
-    const unmovable = !OPEN_STATUSES.has(task.status) ? "not_open" : opsGateShapeRefused(original) ? "ops_gate_shape" : task.verify === "human" ? "verify_human" :
+    const unmovable = !OPEN_STATUSES.has(task.status) ? "not_open" : opsGateShapeRefused(original) ? "ops_gate_shape" :
       !publicRefs.has(`refs/rmd-id/${task.id}`) ? "reservation_absent" : undefined;
     if (unmovable) { refused.push({ id: task.id, reason: unmovable }); continue; }
     if (!control) return unknown("merge_credit_control_unreadable");
