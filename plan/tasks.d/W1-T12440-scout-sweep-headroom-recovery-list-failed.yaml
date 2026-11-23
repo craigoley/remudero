@@ -6,7 +6,9 @@
   verify: auto
   risk: low
   priority: 3.21
-  status: queued
+  status: blocked
+  retirement: retired
+  # 2026-11-23 operator session (Craig's red list): #20427 was closed; W1-T14450 (#20478) fixes the same recurring failure from its own module. Superseded by ops-catalog task named here (not in this plan, so no superseded_by field).
   attempts: 0
   author_class: machine
   origin: "scout:sweep.headroom_recovery.list_failed"
