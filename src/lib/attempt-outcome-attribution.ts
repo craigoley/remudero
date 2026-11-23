@@ -34,6 +34,7 @@ function invocationEvidence(row: Readonly<Record<string, unknown>>): boolean {
   const reason = row.served_model_reason;
   return (typeof row.served_model === "string" && row.served_model.length > 0)
     || reason === CASH_SERVED_MODEL_REASONS.unnamed
+    // The mixed reason is no longer produced; kept so that older rows still read.
     || (typeof reason === "string" && reason.startsWith(`${CASH_SERVED_MODEL_REASONS.mixed}: `))
     || Object.values(record(row.tokens) ?? {}).some(positive) || positive(row.total_cost_usd);
 }

@@ -16,6 +16,7 @@
   origin: "followup#5317-feedback-landing-review-2026-09-21"
   plan_refs: [W1-T530, W1-T913, W1-T3990]
   status: blocked
+  attempts: 0
   retirement: closed
   priority: 1
   rationale: |

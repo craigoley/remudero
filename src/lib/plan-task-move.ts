@@ -15,6 +15,12 @@
  *   COMPLETE  only ops holds an id with moved_from and public history names its removal: nothing opens, and the
  *             reservation ref is confirmed unchanged.
  *
+ * W1-T14345: one step carries a batch. COPY adds every task of the preview's batch in one commit; CONVERGE takes every
+ * id both mains hold at once, rolling back each owned one in one ops pull request, then removing the rest in one public
+ * pull request (one Remudero-Moved-To receipt per removed record, the shape the review admits); RESTORE restores every
+ * id neither holds in one. An id held (its ops copy differs, its reservation is gone) is left out rather than holding
+ * the rest. A batch of one writes exactly the branch, commit, receipts and pull request a one-task move always wrote.
+ *
  * The mover never deletes a record it has not first found byte-identical in the other catalog, never uses a run-
  * branch or a Remudero-Task line (so neither merge credits the task as built), and pushes, deletes and mints no
  * refs/rmd-id reservation. Any unreadable or incomplete read is UNKNOWN and takes no step. Without --apply it prints
@@ -30,6 +36,7 @@ import {
 } from "./plan-task-migration.js";
 import { planPrPreflightAllows, planPrPreflightAtCommitAsync, ratifyPrCreateRestArgs, type PlanPrPreflightResult } from "./plan-pr-emitter.js";
 import { ghJsonAsync } from "./github-transport.js";
+import type { OpsCatalogBoundsIo } from "./ops-catalog-source.js";
 import { taskIdFromRunBranch } from "./status.js";
 
 export const MOVE_STEP = "plan.move.step";
@@ -55,15 +62,37 @@ export interface MovePorts {
   preflight?: Preflight;
   /** The epoch milliseconds a mover branch is named with. */
   clock?: Clock;
+  /** W1-T14345: the readings the ops catalog's derived bounds take; the live ones by default. */
+  bounds?: OpsCatalogBoundsIo;
   print?: (line: string) => void;
 }
 
 /** What one public mover commit in history says it did. */
 interface MoverEvent { kind: "removed" | "restored"; id: string; commit: string; path: string; blob: string; reservation?: string }
+type StepKind = Exclude<MoveStep, "wait" | "complete" | "none" | "held" | "unknown">;
+/** One task's part of a step: the path it writes (`text`) or removes (no `text`), and the receipt lines it adds. */
 interface Planned {
-  step: Exclude<MoveStep, "wait" | "complete" | "none" | "held" | "unknown">;
+  step: StepKind;
   id: string; repository: "public" | "ops"; path: string; blob?: string; text?: string; reason?: string;
   title: string; message: string; evidence: Json;
+}
+/** W1-T14345: one step's whole write: one commit of every member's change, one branch, one pull request. */
+interface PlannedStep { step: StepKind; repository: "public" | "ops"; members: Planned[]; title: string; message: string }
+
+/** A batch of one is the member's own step, byte for byte; a batch names its count and carries every member's lines. */
+function stepOf(members: Planned[]): PlannedStep {
+  const [first] = members as [Planned, ...Planned[]];
+  if (members.length === 1) return { step: first.step, repository: first.repository, members, title: first.title, message: first.message };
+  const lines = (m: Planned) => m.message.slice(m.message.lastIndexOf("\n\n") + 2);
+  const what: Record<StepKind, [string, string]> = {
+    copy: [`move ${members.length} tasks into the ops catalog`, "Each public record, byte for byte, plus one moved_from line after its id line."],
+    remove: [`move ${members.length} tasks to the ops catalog`, "The ops catalog holds each of these records byte for byte plus its moved_from line."],
+    rollback: [`roll back the move of ${members.length} tasks into the ops catalog`, "Each public copy is owned, so it stays and its ops copy is removed."],
+    restore: [`restore ${members.length} tasks after an interrupted move`, "Neither catalog holds these records, and public history names each one's mover removal."],
+  };
+  const [subject, prose] = what[first.step];
+  return { step: first.step, repository: first.repository, members, title: `chore(plan): ${subject}`,
+    message: `chore(plan): ${subject}\n\n${prose}\n\n${members.map(lines).join("")}` };
 }
 
 const defaultCreatePull = async (repository: string, pr: PullRequest): Promise<{ number: number; url: string }> => {
@@ -128,8 +157,8 @@ async function readBytes(root: string, spec: string): Promise<string | undefined
   return kind === "blob" ? git(root, ["cat-file", "blob", spec]) : undefined;
 }
 
-/** The tree of `commit` with `path` set to `blob`, or removed when `blob` is undefined, built with mktree only. */
-async function treeWith(root: string, commit: string, path: string, blob: string | undefined): Promise<string> {
+/** The tree `treeish` names with `path` set to `blob`, or removed when `blob` is undefined, built with mktree only. */
+async function treeWith(root: string, treeish: string, path: string, blob: string | undefined): Promise<string> {
   const edit = async (tree: string | undefined, parts: string[]): Promise<string | undefined> => {
     const entries = tree === undefined ? [] : (await git(root, ["ls-tree", "-z", tree])).split("\0").filter(Boolean);
     const [name, ...rest] = parts as [string, ...string[]];
@@ -144,7 +173,7 @@ async function treeWith(root: string, commit: string, path: string, blob: string
     const next = [...kept, ...(child === undefined ? [] : [child])];
     return next.length === 0 ? undefined : (await git(root, ["mktree", "-z"], next.map(entry => `${entry}\0`).join(""))).trim();
   };
-  return (await edit(`${commit}^{tree}`, path.split("/"))) ?? unknown("tree_shape");
+  return (await edit(treeish, path.split("/"))) ?? unknown("tree_shape");
 }
 
 async function commitOn(root: string, parent: string, tree: string, message: string): Promise<string> {
@@ -187,7 +216,7 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
     print(JSON.stringify({ step, applied: false, publicCommit: o.publicCommit, opsCommit: o.opsCommit, ...extra }));
     return step === "unknown" ? 1 : 0;
   };
-  let planned: Planned;
+  let planned: PlannedStep;
   try {
     const publicRefs = await refs(o.publicRoot, o.publicRepo), opsRefs = await refs(o.opsRoot, o.opsRepo);
     const pub = await catalog(o.publicRoot, o.publicCommit), ops = await catalog(o.opsRoot, o.opsCommit, true);
@@ -197,30 +226,38 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
     if (open.length > 0) return report("wait", { openMovePullRequests: open });
     const history = await moverHistory(o.publicRoot, o.publicCommit);
     const shared = ops.plan.tasks.filter(task => pub.plan.byId.has(task.id)).map(task => task.id).sort();
-    const converge = async (): Promise<Planned | { held: string; id: string } | undefined> => {
+    // W1-T14345: every pending id at once. An owned one is rolled back first, then the rest removed together; a held
+    // one is left out, and holds the step only when nothing else can converge.
+    const converge = async (): Promise<PlannedStep | { held: string; id: string } | undefined> => {
+      const held: Array<{ held: string; id: string }> = [];
+      const steps: Planned[] = [];
       for (const id of shared) {
         const moved = ops.plan.byId.get(id)!.moved_from;
         const source = moved === undefined ? undefined : MOVED_FROM_VALUE.exec(moved)?.[1];
         if (source === undefined) return unknown("catalog_conflict");
         const opsCopy = ops.originals.get(id)!, pubCopy = pub.originals.get(id)!;
         const text = await readBytes(o.publicRoot, `${source}:${opsCopy.path}`);
-        if (text === undefined) return { held: "bound_original_unreadable", id };
+        if (text === undefined) { held.push({ held: "bound_original_unreadable", id }); continue; }
         const step = plannedConverge(o, state, publicRefs, id, pubCopy, opsCopy, { text, blob: blobOf(text), commit: source });
-        return "held" in step ? { ...step, id } : step;
+        if ("held" in step) held.push({ ...step, id }); else steps.push(step);
       }
+      const rollbacks = steps.filter(step => step.step === "rollback");
+      if (steps.length > 0) return stepOf(rollbacks.length > 0 ? rollbacks : steps);
+      if (held.length > 0) return held[0];
+      const restores: Planned[] = [];
       for (const event of history.values()) {
         if (event.kind !== "removed" || pub.plan.byId.has(event.id) || ops.plan.byId.has(event.id)) continue;
         // A trailer is not evidence by itself: its commit must really leave the path empty.
         if (await readBytes(o.publicRoot, `${event.commit}:${event.path}`) !== undefined) continue;
         const text = await readBytes(o.publicRoot, event.blob);
-        if (text === undefined || blobOf(text) !== event.blob) return { held: "bound_original_unreadable", id: event.id };
-        return { step: "restore", id: event.id, repository: "public", path: event.path, blob: event.blob, text,
+        if (text === undefined || blobOf(text) !== event.blob) { held.push({ held: "bound_original_unreadable", id: event.id }); continue; }
+        restores.push({ step: "restore", id: event.id, repository: "public", path: event.path, blob: event.blob, text,
           evidence: { removalCommit: event.commit, boundBlob: event.blob, heldBy: "neither" },
           title: `chore(plan): restore ${event.id} after an interrupted move`,
           message: `chore(plan): restore ${event.id} after an interrupted move\n\nNeither catalog holds this record, and public history names its mover removal.\n\n` +
-            `${MOVE_RESTORED_TRAILER} ${event.id} path=${event.path} blob=${event.blob} removal=${event.commit}\n` };
+            `${MOVE_RESTORED_TRAILER} ${event.id} path=${event.path} blob=${event.blob} removal=${event.commit}\n` });
       }
-      return undefined;
+      return restores.length > 0 ? stepOf(restores) : held[0];
     };
     const step = await converge();
     if (step !== undefined && "held" in step) return report("held", { id: step.id, reason: step.held });
@@ -230,38 +267,53 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
         reservationUnchanged: event.reservation !== undefined && publicRefs.get(`refs/rmd-id/${event.id}`) === event.reservation }));
     if (step !== undefined) planned = step;
     else {
-      const selection = await selectPlanTaskMigration(o, reader);
-      const candidate = selection.candidate;
-      if (candidate === undefined) return report(completed.length > 0 ? "complete" : "none", { completed, refused: selection.refused.length });
-      const id = String(candidate.id), path = String(candidate.sourcePath), original = String(candidate.yaml);
-      if (await readBytes(o.opsRoot, `${o.opsCommit}:${path}`) !== undefined) return unknown("ops_path_taken");
-      const reservation = publicRefs.get(`refs/rmd-id/${id}`) ?? unknown("reservation_absent");
-      const text = withMovedFromLine(original, id, o.publicCommit);
-      planned = { step: "copy", id, repository: "ops", path, text, blob: String(candidate.sourceBlob),
-        evidence: { sourceCommit: o.publicCommit, sourceBlob: candidate.sourceBlob, reservation, completed },
-        title: `chore(plan): move ${id} into the ops catalog`,
-        message: `chore(plan): move ${id} into the ops catalog\n\nThe public record, byte for byte, plus one moved_from line after its id line.\n\n` +
-          `${MOVE_COPY_RECEIPT} ${id} path=${path} blob=${String(candidate.sourceBlob)} from=remudero@${o.publicCommit}\n${MOVE_RESERVATION_TRAILER} ${id} ${reservation}\n` };
+      const selection = await selectPlanTaskMigration(o, reader, ports.bounds);
+      if (selection.candidate === undefined) return report(completed.length > 0 ? "complete" : "none", { completed, refused: selection.refused.length });
+      const members: Planned[] = [];
+      for (const candidate of selection.batch) {
+        const id = String(candidate.id), path = String(candidate.sourcePath), original = String(candidate.yaml);
+        if (await readBytes(o.opsRoot, `${o.opsCommit}:${path}`) !== undefined) return unknown("ops_path_taken");
+        const reservation = publicRefs.get(`refs/rmd-id/${id}`) ?? unknown("reservation_absent");
+        const text = withMovedFromLine(original, id, o.publicCommit);
+        members.push({ step: "copy", id, repository: "ops", path, text, blob: String(candidate.sourceBlob),
+          evidence: { sourceCommit: o.publicCommit, sourceBlob: candidate.sourceBlob, reservation },
+          title: `chore(plan): move ${id} into the ops catalog`,
+          message: `chore(plan): move ${id} into the ops catalog\n\nThe public record, byte for byte, plus one moved_from line after its id line.\n\n` +
+            `${MOVE_COPY_RECEIPT} ${id} path=${path} blob=${String(candidate.sourceBlob)} from=remudero@${o.publicCommit}\n${MOVE_RESERVATION_TRAILER} ${id} ${reservation}\n` });
+      }
+      planned = stepOf(members);
     }
-    if (!apply) return report(planned.step, { id: planned.id, would: true, repository: planned.repository, path: planned.path, reason: planned.reason ?? null, evidence: planned.evidence });
+    const [lead] = planned.members as [Planned, ...Planned[]];
+    const batched = planned.members.length > 1;
+    // A batch of one prints and records exactly what a one-task step always did; a batch adds every member's id.
+    const ids = batched ? { ids: planned.members.map(m => m.id) } : {};
+    // A copy's evidence also names every completed move, once per step.
+    const evidence = { ...(batched ? { tasks: planned.members.map(m => ({ id: m.id, path: m.path, reason: m.reason ?? null, ...m.evidence })) } : lead.evidence),
+      ...(planned.step === "copy" ? { completed } : {}) };
+    if (!apply) return report(planned.step, { id: lead.id, ...ids, would: true, repository: planned.repository, path: lead.path, reason: lead.reason ?? null, evidence });
     // ── Write: one commit, the emitter's preflight, one branch push, one pull request, one ledger row. ──
     const repository = planned.repository === "public" ? o.publicRepo : o.opsRepo;
     const root = planned.repository === "public" ? o.publicRoot : o.opsRoot;
     const parent = planned.repository === "public" ? o.publicCommit : o.opsCommit;
     const base = planned.repository === "public" ? state.publicBranch : state.opsBranch;
-    const blob = planned.text === undefined ? undefined : (await git(root, ["hash-object", "-w", "--stdin"], planned.text)).trim();
-    const tree = await treeWith(root, parent, planned.path, blob);
+    let tree = `${parent}^{tree}`;
+    for (const member of planned.members) {
+      const blob = member.text === undefined ? undefined : (await git(root, ["hash-object", "-w", "--stdin"], member.text)).trim();
+      tree = await treeWith(root, tree, member.path, blob);
+    }
     const commit = await commitOn(root, parent, tree, planned.message);
-    const branch = `${MOVE_BRANCH_PREFIX}${planned.id}-${clock.now()}`;
+    // A one-task step names its task, which the review requires of a single receipt; a batch's branch names its shape.
+    const branch = `${MOVE_BRANCH_PREFIX}${batched ? "batch" : lead.id}-${clock.now()}`;
     const body = `${planned.message.slice(planned.message.indexOf("\n\n") + 2)}`;
     const verdict = await (ports.preflight ?? defaultPreflight)(root, commit, { title: planned.title, body, headRef: branch,
       ...(planned.repository === "ops" ? { codeRoot: o.publicRoot, bodyProofRoot: "plan" as const } : {}) });
     // A preflight check that could not run is reported, never refusing (the emitter's rule); the row names it.
-    const row = (outcome: string, extra: Json = {}) => ports.ledger({ run_id: branch, task_id: planned.id, step: MOVE_STEP, move_step: planned.step, outcome,
-      repository, public_commit: o.publicCommit, ops_commit: o.opsCommit, commit, preflight_unreadable: verdict.unreadable.map(f => f.check), ...extra });
+    const row = (outcome: string, extra: Json = {}) => ports.ledger({ run_id: branch, task_id: lead.id, step: MOVE_STEP, move_step: planned.step, outcome,
+      repository, public_commit: o.publicCommit, ops_commit: o.opsCommit, commit, preflight_unreadable: verdict.unreadable.map(f => f.check),
+      ...(batched ? { task_ids: ids.ids } : {}), ...extra });
     if (!planPrPreflightAllows(verdict, { lane: "move-task", branch })) {
       row("preflight_refused");
-      print(JSON.stringify({ step: planned.step, applied: false, id: planned.id, outcome: "preflight_refused", failures: verdict.failures.map(f => f.check) }));
+      print(JSON.stringify({ step: planned.step, applied: false, id: lead.id, ...ids, outcome: "preflight_refused", failures: verdict.failures.map(f => f.check) }));
       return 1;
     }
     let pr: { number: number; url: string };
@@ -274,12 +326,12 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
       // Either half leaves no pull request: the next run reads the same state and takes the same step on a new branch.
       void error;
       row(outcome);
-      print(JSON.stringify({ step: planned.step, applied: false, id: planned.id, outcome }));
+      print(JSON.stringify({ step: planned.step, applied: false, id: lead.id, ...ids, outcome }));
       return 1;
     }
     row("opened", { pull_request: pr.number });
-    print(JSON.stringify({ step: planned.step, applied: true, id: planned.id, repository, branch, commit, pullRequest: pr.number, url: pr.url,
-      publicCommit: o.publicCommit, opsCommit: o.opsCommit, reason: planned.reason ?? null, evidence: planned.evidence }));
+    print(JSON.stringify({ step: planned.step, applied: true, id: lead.id, ...ids, repository, branch, commit, pullRequest: pr.number, url: pr.url,
+      publicCommit: o.publicCommit, opsCommit: o.opsCommit, reason: lead.reason ?? null, evidence }));
     return 0;
   } catch (error) {
     // Raw Git/API/parser errors can carry private paths or record bytes: report the named reason only.

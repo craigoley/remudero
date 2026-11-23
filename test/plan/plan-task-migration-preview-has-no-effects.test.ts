@@ -56,7 +56,7 @@ test("actual migration preview has no catalog Git claim PR config or scheduler e
   assert.deepEqual([f.pub,f.ops].map(r=>[r.clone.git("show-ref"),r.clone.git("status","--porcelain"),r.origin.git("show-ref")]),before);
   assert.equal(readFileSync(join(f.pub.clone.dir,"plan/tasks.d/W1-T1.yaml"),"utf8"),text);
   assert.ok(f.gitTrap.calls().some(call=>call.includes("ls-remote")),"positive control: real Git reads crossed the mutation trap");
-  assert.ok(f.gitTrap.calls().every(call=>/\s(?:rev-parse |ls-tree |cat-file |ls-remote |ls-files --error-unmatch -- |status --porcelain -- |hash-object --no-filters -- )/.test(call)),`only readonly Git commands executed: ${JSON.stringify(f.gitTrap.calls())}`);
+  assert.ok(f.gitTrap.calls().every(call=>/\s(?:rev-parse |ls-tree |cat-file |ls-remote |ls-files --error-unmatch -- |status --porcelain -- |hash-object --no-filters -- |log |rev-list )/.test(call)),`only readonly Git commands executed: ${JSON.stringify(f.gitTrap.calls())}`);
   assert.ok(f.shim.calls().length>=2); assert.ok(f.shim.calls().every(call=>call.startsWith("api graphql ")&&!call.includes("mutation")));
   const count=f.shim.calls().length;
   const help=spawnSync(process.execPath,["--import",import.meta.resolve("tsx"),join(REPO_ROOT,"src/run-task.ts"),"migration-preview","--help"],{encoding:"utf8",timeout:30_000,env:{PATH:`${f.shim.dir}:${process.env.PATH}`,HOME:join(f.root,"home"),RMD_SELF_SYNC_DONE:"1",...(process.env.NODE_OPTIONS?{NODE_OPTIONS:process.env.NODE_OPTIONS}:{})}});
