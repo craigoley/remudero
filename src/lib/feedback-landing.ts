@@ -31,8 +31,8 @@ import { releaseTaskIdReservationAsync, type ReservationReleaseOutcome } from ".
 import { reservationHolderBranch, taskIdReservationRef } from "./task-id-reservation.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { planDestinationRepository, type PlanDestination, type PlanDestinationRepository } from "./plan-destination.js";
-import { planReconcilePrBody, planReconcileProofTemplate } from "./plan-reconcile-batch.js";
-import { reconcileShardStatus } from "./plan-reconcile.js";
+import { planReconcilePrBody, planReconcileProofFor } from "./plan-reconcile-batch.js";
+import { reconcileShardStatus, requeueShardStatusText } from "./plan-reconcile.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { mergeFeedbackRecord, type FeedbackRecordMergeDecision } from "./feedback-record-merge.js";
@@ -1752,11 +1752,15 @@ function* landContentSteps(
           // Current edits own their paths. Earlier flips can carry only if their exact bytes match main's edit.
           if (!editPaths.has(path)) {
             const current = yield* blobAt(net, mainSha, path, "blob");
-            const statusEdit = current === undefined ? undefined : reconcileShardStatus(current, path, () => true).text;
-            if (statusEdit !== undefined) {
+            // W1-T14302: an earlier re-queue carries when it is exactly the re-queue edit of main's text.
+            const edits = current === undefined ? [] : [reconcileShardStatus(current, path, () => true).text, requeueShardStatusText(current)];
+            let carries = false;
+            for (const statusEdit of edits) {
+              if (statusEdit === undefined || carries) continue;
               writeFileSync(pendingCheck, statusEdit);
-              if ((yield* net.git(["hash-object", pendingCheck], { env })).trim() === pendingBlob) continue;
+              carries = (yield* net.git(["hash-object", pendingCheck], { env })).trim() === pendingBlob;
             }
+            if (carries) continue;
           }
           pending.tipBlobs.delete(path);
         }
@@ -1902,7 +1906,7 @@ function planReconcileLandingKindSteps(
     {
       family: "plan-reconcile",
       commitMessage: (files) => [PLAN_RECONCILE_LANDING_PR_TITLE, "", "Automated plan-status reconciliation from the measurement cadence.", "", ...files.map((file) => `- ${file}`)].join("\n"),
-      prBody: (files, content) => planReconcilePrBody(files, (file) => landingProof(file, planReconcileProofTemplate(file), content)),
+      prBody: (files, content) => planReconcilePrBody(files, (file) => landingProof(file, planReconcileProofFor(file, content?.head(file)), content)),
     },
     root,
     opts,
