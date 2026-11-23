@@ -1203,13 +1203,16 @@ export function createNowView(opts: NowViewOptions): {
     // A held task is one decision carrying its plan question, on every instance whose plan is loaded; its store QUESTION lines fold into it.
     // The daemon holds over the combined plan: an ops-catalog task is held too, its question kept private.
     // Answered from the live rows, the published answers, the indexed facts and serve's store; an answer the daemon cannot see is published.
+    let publishFailed: string | undefined;
     const answered = (taskId: string): boolean => {
       const live = [...answerRecords(evidence.rows(taskId), taskId), ...answerRecords(evidence.lines, taskId)];
       const own = [...facts(taskId), ...answerRecords(instance.name === core ? storeLines : [], taskId)];
-      if (evidence.answersUnreadable === undefined && evidence.ledgerUnreadable === undefined) publishAnswers(ledgerPath, own, [...live]);
+      if (evidence.answersUnreadable === undefined && evidence.ledgerUnreadable === undefined) publishFailed ??= publishAnswers(ledgerPath, own, [...live]);
       return live.length + own.length > 0;
     };
     const held = heldTaskDecisions(instance.name, (catalog?.plan ?? plan)?.tasks ?? [], answered, catalog?.opsIds, instance.name === core);
+    // A failed publish leaves dispatch holding a task the Inbox counts as answered, so the held list is partial.
+    const heldPartial = [evidence.partial, publishFailed].filter((reason) => reason !== undefined).join("; ") || undefined;
     const heldIds = new Set(held.map((decision) => decision.taskId));
     if (instance.name === core && instance.feedbackRoot && !reasons.task_question) {
       all.push(...taskQuestionDecisions(instance.name, storeLines as QuestionStoreLine[], factAnswer, snapshot.tasks).filter((decision) => !heldIds.has(decision.taskId)));
@@ -1226,13 +1229,13 @@ export function createNowView(opts: NowViewOptions): {
       const feedback = projectFeedbackGates({ instance: instance.name, entries: feedbackEntries, now, rows, age: feedbackAge, unavailableReason: reasons.grill });
       sources.push(feedback);
       // The question reader counts the malformed lines it skips: complete only when it skipped none.
-      const partial = reasons.task_question ?? storeSkipped ?? evidence.partial ?? ((catalog?.plan ?? plan) ? undefined : "no plan was read, so held tasks are unknown");
+      const partial = reasons.task_question ?? storeSkipped ?? heldPartial ?? ((catalog?.plan ?? plan) ? undefined : "no plan was read, so held tasks are unknown");
       sources.push({ name: "task-questions", instance: instance.name, state: reasons.task_question ? "unavailable" : partial ? "partial" : "complete",
         ...(partial ? { reason: partial } : {}),
         gates: all.filter((decision) => decision.kind === "task_question").map(decisionGate) });
     } else if (plan) {
-      sources.push({ name: "held-tasks", instance: instance.name, state: evidence.partial ? "partial" : "complete",
-        ...(evidence.partial ? { reason: evidence.partial } : {}), gates: held.map(decisionGate) });
+      sources.push({ name: "held-tasks", instance: instance.name, state: heldPartial ? "partial" : "complete",
+        ...(heldPartial ? { reason: heldPartial } : {}), gates: held.map(decisionGate) });
     }
     const changeManagementUnknown = snapshot.github_unreachable || !snapshot.prQueue.complete || !!snapshot.blockedPrsUnverifiedReason;
     sources.push(projectChangeManagementGates({
