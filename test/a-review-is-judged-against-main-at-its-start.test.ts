@@ -219,12 +219,13 @@ test("W1-T9727: a fresh-tree review is judged against main at its own start", as
 });
 
 test("W1-T9727: a fresh-tree review whose own start reading is stale is still withheld", async () => {
-  const fresh: ReviewerCodeFreshness = { status: "fresh", codeSha: MAIN_AT_START, originMainSha: MAIN_AT_START, advance: "none" };
-  const { code, posts, rows } = await freshTreeReview(() => STALE_AT_START, fresh);
-  assert.deepEqual(posts, [], "W1-T3337: code stale when it judged never publishes");
+  let reviewed = 0;
+  const { code, posts, rows } = await reviewWith(undefined, () => STALE_AT_START, () => { reviewed++; }, ["--judge-at-own-start"]);
+  assert.deepEqual(posts, [], "W1-T3337: code stale at its start never publishes");
   assert.equal(code, 2);
-  const refused = rows.find((row) => row.step === "review.post_refused");
-  assert.equal(refused?.origin_main_sha, MAIN_AT_START, "the refusal names main as of the review start");
+  // W1-T12227: it now exits before its reviewer, so nothing reaches the publication check.
+  assert.equal(reviewed, 0, "no reviewer ran on a stale own start reading");
+  assert.equal(rows.some((row) => row.step === "review.post_refused"), false);
 });
 
 test("W1-T9727: a thrown own start reading is unreadable and the just-in-time read decides", async () => {
