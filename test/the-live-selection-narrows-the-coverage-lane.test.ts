@@ -108,7 +108,7 @@ const CANDIDATES = new RegExp(`test-tier-manifest\\.mjs --select-candidates cove
 const SELECT_ALL = new RegExp(`test-tier-manifest\\.mjs --select-all --shard 1/${SHARDS} --base HEAD\\^1`);
 
 test("W1-T5705: with the live flag at 1 a pull_request SOURCE coverage shard runs the narrow selection", () => {
-  assert.equal(SHARDS, 12, "coverage-ratchet runs its twelve-shard matrix (W1-T13270)");
+  assert.equal(SHARDS, 16, "coverage-ratchet runs its sixteen-shard matrix (W1-T14558)");
   const live = run(coverageBody, { GITHUB_EVENT_NAME: "pull_request", RMD_AFFECTED_SUITE_LIVE: "1" }, nodeStub(NARROW_OUT));
   assert.equal(live.status, 0, live.out);
   assert.match(live.calls, /node --import tsx -e/, "the live flag must compute the selector's narrow set");
