@@ -20,6 +20,9 @@
  * No timer, interval or count: a closed gate reopens on the first tick after its condition clears, and the rate of
  * steps follows the merge latency of the two repositories. A stand-down writes one `plan.move.stand_down` row per
  * change of reason. The janitor removes no record itself: its one write is the mover, which only ever converges.
+ *
+ * W1-T14345: a step may carry a batch (the mover's preview fills it with open records, oldest filing first, as far as
+ * the ops catalog's daily growth allows); the step row then names every task the step carried.
  */
 import { createHash } from "node:crypto";
 import { execFileRouted } from "./spawn-helper.js";
@@ -146,6 +149,7 @@ export async function runPlanTaskMoveTick(inputs: PlanTaskMoveTickInputs, mover:
     if (opened) memory.lastStep = { side: repository === pin.publicRepository ? "public" : "ops", number: ran.out.pullRequest as number };
     try {
       inputs.log(PLAN_MOVE_JANITOR_STEP, { move_step: text(ran.out.step) ?? null, applied: opened, task_id: text(ran.out.id) ?? null,
+        ...(Array.isArray(ran.out.ids) ? { task_ids: ran.out.ids.map(String) } : {}),
         side: memory.lastStep?.side ?? null, pull_request: opened ? ran.out.pullRequest : null, exit: ran.status });
     } catch (error) { void error; /* The mover's own plan.move.step row is the record of the write. */ }
     if (!opened) return standDown("step_not_applied", text(ran.out.outcome) ?? text(ran.out.reason) ?? text(ran.out.step));
