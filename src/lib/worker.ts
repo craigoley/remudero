@@ -525,6 +525,9 @@ export interface WorkerSelectionAssignment {
   id: string;
   phase: "pre-execution";
   harness_owns_git?: boolean;
+  /** W1-T12152: the hash of the prompt template and tool list this call declared ({@link workerPromptRevision}), or the named
+   *  reason it has none. Written on every assignment {@link spawnWorker} emits. */
+  prompt_revision?: WorkerPromptRevision;
   requested: {
     model: string;
     effort: string;
@@ -1225,6 +1228,9 @@ export interface SpawnWorkerArgs {
   /** Models whose drafts already failed this proposal's lint; context fit still applies first. */
   avoidModels?: readonly string[];
   prompt: string;
+  /** W1-T12152: this call's prompt template, taken BEFORE any task text is filled in. Its hash with the tool list is the
+   *  assignment's prompt revision; the filled `prompt` is never hashed for it, so no task text or secret enters one. */
+  promptTemplate?: string;
   /** Render the lane contract after routing; absent preserves the supplied prompt. */
   promptFor?: (route: { provider: WorkerProviderId; harnessOwnsGit: boolean }) => string;
   /** Resume an existing session (auto-choose round-trip, fix rounds). */
@@ -1980,6 +1986,24 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
   };
 }
 
+/** W1-T12152: the version every prompt-revision hash is taken under; bump it when the hashed inputs change. */
+export const PROMPT_REVISION_VERSION = "prompt-revision-v1" as const;
+
+export type WorkerPromptRevision = { source: "resolved-artifact"; revision: string } | { state: "unavailable"; reason: "prompt-template-not-declared" };
+
+/** W1-T12152: the prompt revision of a call — a sha256 over the declared template and the tools it is given and denied,
+ *  each tool list order-free. Two calls given the same template and tools record the same revision; a call that declared
+ *  no template records the named gap, never a hash of its filled prompt. */
+export function workerPromptRevision(
+  template: string | undefined, tools: readonly string[] | undefined, disallowedTools?: readonly string[],
+): WorkerPromptRevision {
+  if (typeof template !== "string" || template.length === 0) return { state: "unavailable", reason: "prompt-template-not-declared" };
+  const toolSet = (list: readonly string[] | undefined) => list === undefined ? null : [...new Set(list)].sort();
+  const revision = createHash("sha256")
+    .update(JSON.stringify([PROMPT_REVISION_VERSION, template, toolSet(tools), toolSet(disallowedTools) ?? []])).digest("hex");
+  return { source: "resolved-artifact", revision };
+}
+
 /** Emit the assignment to the caller's durable ledger sink. A sink failure is visible but never
  * changes a routing decision or causes a terminal row to pretend it has a matching event. */
 function emitWorkerSelectionAssignment(
@@ -1987,6 +2011,7 @@ function emitWorkerSelectionAssignment(
   input: Parameters<typeof workerSelectionAssignment>[1],
 ): string | undefined {
   const assignment = workerSelectionAssignment(args, input);
+  assignment.prompt_revision = workerPromptRevision(args.promptTemplate, args.tools, args.disallowedTools);
   if (args.promptFor) assignment.harness_owns_git = harnessOwnsGitForProvider(args, input.provider);
   console.error(JSON.stringify({ event: "worker.selection.assigned", assignment }));
   // W1-T4614: before the provider call, so every commit this worker makes in its run worktree names this assignment.

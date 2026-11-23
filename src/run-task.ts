@@ -1386,7 +1386,7 @@ import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-c
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, attemptAssignmentJoin, recordBenchmarkWorkerAttempt, benchmarkEvidenceLedgerPath, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput, terminalVerdictFields } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, attemptAssignmentJoin, recordBenchmarkWorkerAttempt, benchmarkEvidenceLedgerPath, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput, terminalVerdictFields, namedTaskWork, taskRecordBenchmarkWork, type BenchmarkTaskWorkReader } from "./lib/benchmark-run.js";
 import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cost-evidence.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
@@ -10868,6 +10868,7 @@ function ledgerNonDispatchAssignment(
   config?: Config,
   runId?: string,
   taskId?: string,
+  readTask: BenchmarkTaskWorkReader = planTaskBenchmarkWork(join(repoRoot, "plan")),
 ): void {
   const path = benchmarkEvidenceLedgerPath(config);
   if (path === undefined) return;
@@ -10877,12 +10878,35 @@ function ledgerNonDispatchAssignment(
     step: "worker.assignment",
     lane,
     worker_assignment: assignment,
-    benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane), workerBoundaryStack),
+    // W1-T12152: a named task's class and risk, as a build assignment records them; else the lane and the named reason.
+    benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane, namedTaskWork(taskId, readTask)),
+      workerBoundaryStack),
   });
 }
 
-export function ledgeredNonDispatchSpawn(lane: string, raw: typeof spawnWorker = spawnWorker): typeof spawnWorker {
-  return benchmarkNonDispatchSpawn(lane, raw);
+/** W1-T12152: reads the plan record of the task a non-dispatch call names — its shard under `planDir/tasks.d`, else the
+ *  monolith, parsed only when its text names the id — for the class and risk its assignment receipt records. */
+export function planTaskBenchmarkWork(planDir: string): BenchmarkTaskWorkReader {
+  return (taskId) => {
+    const shardDir = join(planDir, "tasks.d");
+    const shards = existsSync(shardDir)
+      ? readdirSync(shardDir).filter((name) => name.endsWith(".yaml") && isTaskShardName(name, taskId)).map((name) => join(shardDir, name)) : [];
+    const monolith = join(planDir, "tasks.yaml");
+    const texts = shards.map((shard) => ({ path: shard, text: readFileSync(shard, "utf8") }));
+    if (texts.length === 0 && existsSync(monolith)) texts.push({ path: monolith, text: readFileSync(monolith, "utf8") });
+    for (const { path, text } of texts) {
+      if (!text.includes(taskId)) continue;
+      const task = parseTasksFromYaml(text, path, undefined, {}, "preserve-external").find((t) => t.id === taskId);
+      if (task) return taskRecordBenchmarkWork(task);
+    }
+    return undefined;
+  };
+}
+
+/** The non-dispatch receipt wrapper, reading a named task's record from `planDir` (W1-T12152). */
+export function ledgeredNonDispatchSpawn(lane: string, raw: typeof spawnWorker = spawnWorker,
+  planDir: string = join(repoRoot, "plan")): typeof spawnWorker {
+  return benchmarkNonDispatchSpawn(lane, raw, planTaskBenchmarkWork(planDir));
 }
 
 /** A failed fallback call is a worker attempt, not a second task outcome. Telemetry and caller
