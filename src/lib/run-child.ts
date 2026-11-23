@@ -1443,6 +1443,16 @@ export type ReviewerCodeStartGate<D> = {
   staleThisPass: () => { oldSha: string; newSha: string } | undefined;
 };
 
+const STALE_AT_OWN_START = "reviewer-stale-at-start";
+const VERDICT_CAUSES: ReadonlySet<string> = new Set(["verdict-failure", "verdict-pending", "verdict-not-success"]);
+const NO_VERDICT_CAUSES: ReadonlySet<string> = new Set(["closed-before-review", "review-claim-held", "own-task-record-missing"]);
+
+/** W1-T12226: `verdict` when the child posted its verdict status, `no_verdict` when it correctly had nothing to post. */
+function freshTreeEndedAs(code: number, cause: string): "verdict" | "no_verdict" | "defect" {
+  if (code === 0 || (code === 1 && VERDICT_CAUSES.has(cause))) return "verdict";
+  return code === 2 && NO_VERDICT_CAUSES.has(cause) ? "no_verdict" : "defect";
+}
+
 export function reviewerCodeStartGate<D extends object>(
   readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -1459,7 +1469,9 @@ export function reviewerCodeStartGate<D extends object>(
       const freshness = await readFreshness();
       if (freshness.status === "stale") {
         firstStale ??= { oldSha: freshness.codeSha, newSha: freshness.originMainSha };
-        const stale = { pr: prArg, code_sha: freshness.codeSha, origin_main_sha: freshness.originMainSha, changed_paths: freshness.changedPaths?.length };
+        const staleFields = (read: typeof freshness) =>
+          ({ pr: prArg, code_sha: read.codeSha, origin_main_sha: read.originMainSha, changed_paths: read.changedPaths?.length });
+        const stale = staleFields(freshness);
         // MOVE THE WORK, NOT THE CODE. Six pull requests once sat unreviewed for over an hour
         // behind a one-commit lag, and the only recovery was a process restart that a
         // multi-instance host then refused. A review does not need this process's modules — it
@@ -1467,26 +1479,42 @@ export function reviewerCodeStartGate<D extends object>(
         if (reviewFromFreshTree) {
           // W1-T4055 — WHY, NOT ONLY WHETHER. 52 of 53 fresh-tree reviews once exited non-zero with
           // nothing but an exit code ledgered; the cause is what the next fix needs.
-          let failure: string | undefined;
-          let entry: FreshTreeEntry = { kind: "unknown", reason: "launcher-did-not-report" };
-          let exit: FreshTreeExit = { cause: "not-reported" };
           const childArgs = [...rest, ...childFlags(reviewDeps)];
-          return reviewFromFreshTree(prArg, childArgs, freshness, (why) => { failure = why; }, (choice) => { entry = choice; }, (ended) => { exit = ended; }).then((code) => {
-            if (code !== undefined) {
-              const why = code === 0 ? {} : {
-                failure: failure ?? "no failure reported", exit_cause: exit.cause,
-                ...(exit.signal === undefined ? {} : { exit_signal: exit.signal }),
-                ...(exit.errorClass === undefined ? {} : { exit_error_class: exit.errorClass }),
-              };
-              log("review.ran_from_fresh_tree", { ...stale, exit_code: code, entry_kind: entry.kind, entry_reason: entry.reason, ...why });
-              return code;
+          const attempt = async (read: typeof freshness) => {
+            let failure: string | undefined;
+            let entry: FreshTreeEntry = { kind: "unknown", reason: "launcher-did-not-report" };
+            let exit: FreshTreeExit = { cause: "not-reported" };
+            const code = await reviewFromFreshTree(prArg, childArgs, read, (why) => { failure = why; }, (choice) => { entry = choice; }, (ended) => { exit = ended; });
+            return { code, failure, entry, exit, stale: staleFields(read) };
+          };
+          let ran = await attempt(freshness);
+          let retry: Record<string, unknown> = {};
+          // W1-T12226: main moved after the tree was cut, so the child's verdict was withheld. One newer tree, never a loop.
+          if (ran.code !== undefined && ran.code !== 0 && ran.exit.cause === STALE_AT_OWN_START) {
+            const again = await Promise.resolve(readFreshness()).catch((): undefined => undefined); // unreadable: keep the first child's end
+            if (again?.status === "stale" && again.originMainSha !== freshness.originMainSha) {
+              const second = await attempt(again);
+              if (second.code !== undefined) { retry = { retried_after: STALE_AT_OWN_START, retry_of_origin_main_sha: freshness.originMainSha }; ran = second; }
             }
-            // COULD NOT RUN — fall through to the original skip rather than judging with stale
-            // code. W1-T3691's recurrence ladder still sees the skip and still escalates.
-            const reason = failure ?? "no reason reported";
-            log("review.skipped_stale_reviewer_code", { ...stale, fresh_tree: "unavailable", fresh_tree_reason: reason });
-            return 0;
-          });
+          }
+          const { code, failure, entry, exit } = ran;
+          if (code !== undefined) {
+            const endedAs = freshTreeEndedAs(code, exit.cause);
+            const why = code === 0 ? {} : {
+              ...(endedAs === "defect" ? { failure: failure ?? "no failure reported" } : {}), exit_cause: exit.cause,
+              ...(exit.signal === undefined ? {} : { exit_signal: exit.signal }),
+              ...(exit.errorClass === undefined ? {} : { exit_error_class: exit.errorClass }),
+            };
+            log("review.ran_from_fresh_tree", {
+              ...ran.stale, exit_code: code, ended_as: endedAs, entry_kind: entry.kind, entry_reason: entry.reason, ...why, ...retry,
+            });
+            return code;
+          }
+          // COULD NOT RUN — fall through to the original skip rather than judging with stale
+          // code. W1-T3691's recurrence ladder still sees the skip and still escalates.
+          const reason = failure ?? "no reason reported";
+          log("review.skipped_stale_reviewer_code", { ...stale, fresh_tree: "unavailable", fresh_tree_reason: reason });
+          return 0;
         }
         log("review.skipped_stale_reviewer_code", stale);
         return 0;
