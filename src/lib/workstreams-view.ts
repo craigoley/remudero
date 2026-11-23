@@ -271,6 +271,7 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
   version: number;
   prepare(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }, more: () => boolean): boolean;
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: WorkstreamsData; sources: ViewSource[] }>;
+  inputsFingerprint(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): string;
   legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
   stages(): Record<string, number> | undefined;
   heldSizes(): ThreadHolds;
@@ -325,6 +326,8 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
   /** When each instance's reuse was last audited (or first held), on the build clock. */
   const reuseAuditedAt = new Map<string, number>();
   let body: WorkstreamsData | undefined;
+  /** How many bodies `materialize` has published: a new one is published exactly when a finished build is pending. */
+  let published = 0;
   let builtFingerprint: string | undefined;
   let dirtySince: number | undefined;
   /** The build in flight: started by one `prepare`, advanced a stage at a time, published by `materialize`. */
@@ -441,6 +444,25 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
       prepared = true;
       return advance(now, slotsOf(instances), more);
     },
+    /**
+     * W1-T11976: what `materialize` would publish, read after `prepare` has run. The body changes only when a build
+     * finishes (`pending`), and a build starts only once its debounced key moves: per instance the activity ring (an
+     * insert or trim), the plan file's stamp and the persisted GitHub snapshot's file identity. Everything else the
+     * body holds (the live ledger, the credit files, the clock as `observedAt` and as the projection's aging) is read
+     * by that build and not after it. THE RING HOLDS EVERY ROW THAT NAMES A STEP, and the activity feed shows the
+     * newest 200 of them (`OPERATOR_ACTIVITY_MAX_ITEMS`), so any such row is an input of this body: only a row with no
+     * step, or one outside these instances, leaves it skipped. The sources add the instances and how far each plan
+     * is behind origin/main (`plan:<i>`, read from the ref files); `github:<i>` is the build's own, and the worker judges
+     * it, and `plan:<i>`, against its budget at every pass, so an aged one rebuilds with no input moving.
+     */
+    inputsFingerprint: ({ instances }) => {
+      const slots = slotsOf(instances);
+      return JSON.stringify([
+        // A finished build reads as the body it is about to publish, so the pass after it publishes it is skipped.
+        pending ? [published + 1, pending.fingerprint] : [published, builtFingerprint ?? null],
+        slots.map(({ instance, db }) => [instance.name, db !== undefined, planBehind(instance), gatewaySources.get(instance.name) ?? null]),
+      ]);
+    },
     /** Publishes a finished build; one with no `prepare` before it is built here in one go. */
     materialize: ({ now, instances }) => {
       if (!prepared) ran = {};
@@ -455,6 +477,7 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
         builtFingerprint = b.fingerprint;
         dirtySince = b.dirtySince;
         pending = undefined;
+        published++;
         noteBuilt(b.instances.length, b.reused, b.derived);
       }
       const sources = slots.flatMap(({ state, instance }) => {
