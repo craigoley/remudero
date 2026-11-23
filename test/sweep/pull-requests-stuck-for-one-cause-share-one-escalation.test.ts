@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -53,7 +53,7 @@ function fixture(t: TestContext, opts: { lagging?: boolean; firstReadFails?: boo
     },
     comment: (url, body) => { comments.push({ url, body }); },
   };
-  const logged: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  const logged: Array<{ step: string; fields: Record<string, unknown> }> = []; // the sweep logger; the rows asserted are ledgered
   const ledgerPath = join(root, "ledger.ndjson");
   /** One sweep pass: the daemon builds the effects afresh on every pass. */
   const pass = () => {
@@ -75,7 +75,11 @@ function fixture(t: TestContext, opts: { lagging?: boolean; firstReadFails?: boo
   };
   const issueOf = (prNumber: number) => created.find(issue => issue.title?.includes(`/pull/${prNumber}`) ||
     issue.body?.includes(`PR stage stalled: #${prNumber} `));
-  return { created, comments, logged, pass, issueOf };
+  const rows = (step: string): Array<Record<string, unknown>> => existsSync(ledgerPath)
+    ? readFileSync(ledgerPath, "utf8").trim().split("\n").map(line => JSON.parse(line)).filter(row => row.step === step) : [];
+  /** The rows of PRs that joined another PR's stall escalation. */
+  const joined = () => rows("escalation.deduped").filter(row => row.stall_cause !== undefined);
+  return { created, comments, pass, issueOf, rows, joined, reads: () => reads };
 }
 
 test(`${TITLE}: W1-T12046 criterion 1 — five PRs stalled in one stage for one diagnosis in one sweep share one escalation that lists each`, async t => {
@@ -93,10 +97,11 @@ test(`${TITLE}: W1-T12046 criterion 1 — five PRs stalled in one stage for one 
   }
   // The newest comment carries the whole list, the opener first.
   assert.match(f.comments.at(-1)!.body, /Pull requests stalled for this cause: #17622, #17617, #17626, #17619, #17618/);
-  const joined = f.logged.filter(row => row.step === "escalation.stall_cause_joined");
-  assert.deepEqual(joined.map(row => row.fields.pr_number), FIVE.slice(1));
-  assert.ok(joined.every(row => row.fields.issue_url === shared.url));
-  assert.deepEqual(joined.map(row => row.fields.task_id), FIVE.slice(1).map(n => `PR-${n}`));
+  const joined = f.joined();
+  assert.deepEqual(joined.map(row => row.pr_number), FIVE.slice(1));
+  assert.ok(joined.every(row => row.issue_url === shared.url && row.stall_cause === `awaiting-review — ${NEVER_POSTED}`));
+  assert.deepEqual(joined.map(row => row.task_id), FIVE.slice(1).map(n => `PR-${n}`));
+  assert.deepEqual(joined.at(-1)!.stall_cause_prs, FIVE);
 });
 
 test(`${TITLE}: W1-T12046 criterion 2 — a PR stalled for a different diagnosis, or in a different stage, still gets its own escalation`, async t => {
@@ -133,8 +138,7 @@ test(`${TITLE}: W1-T12046 criterion 3 — a PR stalled later for a cause with an
   assert.match(f.comments[0]!.body, /Pull request #17618 \(https:\/\/github\.com\/craigoley\/remudero\/pull\/17618\) is stalled for the same cause/);
   assert.match(f.comments[0]!.body, /Pull requests stalled for this cause: #17622, #17618/);
   assert.match(f.comments[0]!.body, new RegExp(`Task PR-17618, head ${prView(17618).headSha}\\.`));
-  assert.deepEqual(f.logged.filter(row => row.step === "escalation.stall_cause_joined").map(row => row.fields.issue_url),
-    [f.created[0]!.url]);
+  assert.deepEqual(f.joined().map(row => row.issue_url), [f.created[0]!.url]);
 });
 
 test(`${TITLE}: a PR that already has its own open stall question appends there, never to another PR's cause issue`, async t => {
@@ -146,15 +150,16 @@ test(`${TITLE}: a PR that already has its own open stall question appends there,
   await f.pass()(17618, "awaiting-review", NEVER_POSTED);
   assert.equal(f.created.length, 2);
   assert.deepEqual(f.comments.map(comment => comment.url), [f.issueOf(17618)!.url]);
-  assert.equal(f.logged.filter(row => row.step === "escalation.stall_cause_joined").length, 0);
+  assert.equal(f.joined().length, 0);
 });
 
-test(`${TITLE}: an unreadable open list is logged and the stall still escalates on its own`, async t => {
+test(`${TITLE}: an unreadable open list is the gateway's own unreadable read, so nothing is opened and it is not read twice`, async t => {
   const f = fixture(t, { firstReadFails: true });
   await f.pass()(17622, "awaiting-review", NEVER_POSTED);
-  const unread = f.logged.filter(row => row.step === "escalation.stall_cause_unread");
+  assert.equal(f.reads(), 1, "the cause lookup's read is the escalation's one read");
+  const unread = f.rows("escalation.dedup_unreadable");
   assert.equal(unread.length, 1);
-  assert.match(String(unread[0]!.fields.reason), /HTTP 502/);
-  assert.equal(f.created.length, 1, "the gateway's own read still files the escalation");
+  assert.match(String(unread[0]!.error), /HTTP 502/);
+  assert.equal(f.created.length, 0, "an unreadable list opens no issue, as it did before");
   assert.equal(f.comments.length, 0);
 });

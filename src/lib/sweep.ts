@@ -4547,14 +4547,16 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // The PR's one stall issue as GitHub stores it, when this episode is offered to it.
       let keptStall: OpenIssue | undefined;
       // W1-T12046: a stall's cause (blocker and diagnosis). The open list read to look for its issue is handed to
-      // the gateway's first read, so the escalation still reads GitHub once.
+      // the gateway's first read, so the escalation still reads GitHub once; a failed read is handed on as the
+      // gateway's own failed read, which it records as unreadable (no issue opened), exactly as before.
       const causeKey = stallIdentity === undefined ? undefined : stalledStageCauseKey(reason);
-      let causeRead: OpenIssue[] | undefined;
+      let causeRead: { open: OpenIssue[] } | { error: unknown } | undefined;
       const escalationIssues: AsyncIssueGateway = stallIdentity !== undefined && issues.listOpen
         ? { ...issues, listOpen: async (label) => {
           const reused = label === NEEDS_HUMAN_LABEL ? causeRead : undefined;
           causeRead = undefined;
-          const open = reused ?? await issues.listOpen!(label);
+          if (reused !== undefined && "error" in reused) throw reused.error;
+          const open = reused?.open ?? await issues.listOpen!(label);
           const kept = openStallQuestionForPr(open, pr, { class: cls, taskId: escalationTaskIdFor(pr), cause });
           keptStall = kept?.stored;
           return kept ? [kept.view] : open.filter(issue => {
@@ -4619,10 +4621,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         let open: OpenIssue[];
         try { open = await issues.listOpen(NEEDS_HUMAN_LABEL); }
         catch (error) {
-          log("escalation.stall_cause_unread", { pr_number: pr.prNumber, reason: String((error as Error)?.message ?? error) });
+          causeRead = { error };
           return false;
         }
-        causeRead = open;
+        causeRead = { open };
         if (openStallQuestionForPr(open, pr, { class: cls, taskId: escalationTaskIdFor(pr), cause }) !== undefined) return false;
         const listed = openStallCauseIssue(open, pr, key);
         const ours = stallCauseIssues.get(key);
@@ -4637,8 +4639,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           `Pull requests stalled for this cause: ${prs.map(n => `#${n}`).join(", ")}\n\n` +
           `Task ${escalationTaskIdFor(pr)}, head ${pr.headSha}.\n\n${reason}`);
         stallCauseIssues.set(key, { url, prs });
-        log("escalation.stall_cause_joined", { pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha,
-          task_id: escalationTaskIdFor(pr), issue_url: url, cause_key: key, prs });
+        // The row escalate() writes when an escalation lands on an issue already open, naming the cause it shares.
+        appendLedger(ledgerPath, { run_id: runId, task_id: escalationTaskIdFor(pr), step: "escalation.deduped", class: cls,
+          issue_url: url, observation_comment: "appended", pr_number: pr.prNumber, head_sha: pr.headSha,
+          stall_cause: key, stall_cause_prs: prs });
         return true;
       };
       const raise = async (): Promise<void> => {
