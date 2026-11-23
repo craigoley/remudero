@@ -122,6 +122,12 @@
       "grepHint": "Open plan PR exposure to head-identity-gate (W1-T9376)"
     },
     {
+      "path": "docs/audits/merged-without-semantic-review-2026-11-22.md",
+      "title": "Code changes that merged without a semantic review, re-reviewed on 2026-11-22",
+      "summary": "This audit re-reads the 23 code pull requests that merged on a mechanical-only review pass, and records a verdict for each one against current main.",
+      "grepHint": "Code changes that merged without a semantic review, re-reviewed on 2026-11-22"
+    },
+    {
       "path": "docs/audits/pr-4045-stale-head-fix-race-2026-09.md",
       "title": "PR #4045 — which head merged while a review-gate fix was in flight? (W1-T4464)",
       "summary": "Scope: W1-T4464. Read-only forensic pass: one artifact plus its docs-index entry; no source,",
