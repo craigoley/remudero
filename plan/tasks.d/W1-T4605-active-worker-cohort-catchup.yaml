@@ -18,6 +18,7 @@
     - docs/model-routing.md
   priority: 4
   status: queued
+  attempts: 0
   # backlog gardener: band=4 evidence=e3c93f1fe8bbbd89
   rationale: |
     After the W1-T4599 repair reached Azure, the core daemon's detached cohort
