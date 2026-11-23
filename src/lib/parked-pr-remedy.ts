@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { linkSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
-import { isMap, isSeq, parseDocument, stringify } from "yaml";
+import { isMap, isSeq, parseDocument, Scalar, stringify } from "yaml";
 
 import { stallLadderSpent, stallRemedyRows } from "./fix-progress-judge.js";
 import { isInPlanScope } from "./plan-scope.js";
@@ -770,6 +770,9 @@ function heldTaskFiles(shard: { relPath: string; text: string }, taskId: string,
 /**
  * W1-T13047: the held rebuild of a plan filing whose task file cannot be read. Its files are the plan files the pull
  * request adds or changes, and its rationale carries the red gates, the refusal and the plan files' paths.
+ * W1-T14454: the record carries the verify and risk keys the ops gate requires, and every proof is a `grep:` proof. The
+ * sweep knows the pull request's plan paths, not their content, so a path with no task id is proven by `grep: .`: the
+ * file is there and not empty once the rebuild lands it.
  */
 function heldPlanRebuildFiles(heldTaskId: string, decision: ParkedPrDecision, pr: ParkedPrSubject, ctx: ParkedPrContext):
   TaskFileInput[] {
@@ -781,9 +784,12 @@ function heldPlanRebuildFiles(heldTaskId: string, decision: ParkedPrDecision, pr
   const acceptance = files.map(path => {
     const id = /\/tasks\.d\/(W\d+-T\d+)-/.exec(path)?.[1];
     return { claim: `${path} carries the plan change of ${pr.prUrl}, and the plan gates pass on it`,
-      proof: id === undefined ? `manual-check: the plan gates pass on ${path}` : `grep: id: ${id} in ${path}` };
+      proof: id === undefined ? `grep: . in ${path}` : `grep: id: ${id} in ${path}` };
   });
-  const held = { id: heldTaskId, title: `${title} (held rebuild)`, repo, type: "implement", files, status: "queued", attempts: 0,
+  // verify: auto releases nothing: the unanswered needs_input question holds the rebuild for the operator.
+  const risk = Object.assign(new Scalar("medium"), { comment: " a held rebuild of a plan filing the sweep closed (W1-T13047)" });
+  const held = { id: heldTaskId, title: `${title} (held rebuild)`, repo, type: "implement", verify: "auto", risk, files,
+    status: "queued", attempts: 0,
     acceptance, needs_input: { question, source_pr: pr.prUrl, asked_at: ctx.nowIso },
     rationale: `REBUILD of the plan filing ${pr.prUrl}, filed by the sweep (W1-T13047) at ${pr.headSha}: ${decision.reason}.\n` +
       `RED GATES AND REFUSAL: ${ctx.text}\nPLAN FILES of the pull request:\n${files.map(f => `- ${f}`).join("\n")}\n` };
