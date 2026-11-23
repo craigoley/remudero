@@ -19,7 +19,9 @@ import { childEntryArgv } from "./child-entry-argv.js";
 import type { AcceptanceCriterion } from "./plan.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import {
+  closeSync, existsSync, fstatSync, lstatSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, symlinkSync,
+} from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { promisify } from "node:util";
 import { homedir, tmpdir } from "node:os";
@@ -693,16 +695,24 @@ function preflightCodeRoot(input: Pick<PlanPrPreflightInput, "cwd" | "codeRoot">
  *  spawn is refused (W1-T12952). A cwd with no `.git` entry is no worktree root; metadata it cannot read throws. */
 function gitCommonDir(worktree: string): string | undefined {
   const dotGit = join(worktree, ".git");
-  if (!existsSync(dotGit)) return undefined;
+  let fd: number;
   try {
-    if (lstatSync(dotGit).isDirectory()) return realpathSync(dotGit);
-    const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, "utf8"));
+    fd = openSync(dotGit, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
+    throw new Error("the git common dir is unreadable", { cause: error }); // no errno: public-code-root-unreadable
+  }
+  try {
+    if (fstatSync(fd).isDirectory()) return realpathSync(dotGit);
+    const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(fd, "utf8"));
     if (!pointer) throw new Error("the .git file names no gitdir");
     const gitDir = resolve(worktree, pointer[1]!);
     const common = readFileIfExists(join(gitDir, "commondir"));
     return realpathSync(common === undefined ? gitDir : resolve(gitDir, common.trim()));
   } catch (error) {
     throw new Error("the git common dir is unreadable", { cause: error }); // no errno: public-code-root-unreadable
+  } finally {
+    closeSync(fd);
   }
 }
 function sharesGitCommonDir(cwd: string, checkout: string): boolean {
