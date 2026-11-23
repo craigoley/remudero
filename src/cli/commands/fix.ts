@@ -5016,10 +5016,11 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     ownRows = fixHarnessOwnsGit && !proofRepairRound ? await ownVerbRows() : [];
     let fixAction = admitUnfiledOwnDiff(admitOwnVerbRows(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) })));
     const fixLeftEdits = () => (deps.worktreeHasUncommittedChanges ?? host.worktreeHasUncommittedChanges)(opts.worktreePath);
+    // W1-T8524: one derived subject for every round that left edits; the task title is the last source.
+    const roundDerivedCommit = () => derivedFixCommit([priorCiFailures?.[0]?.name, unmet[0]?.claim, gateFailuresNow?.[0]?.reason, opts.task.title]
+      .find((source) => source !== undefined && source.trim().length > 0), opts.prUrl);
     const outcomeCommitOptions = () => ({ fixOutcome: fixOutcome?.kind,
-      derivedCommit: fixOutcome?.kind === "FIXED"
-        ? derivedFixCommit(priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason ?? opts.task.title, opts.prUrl)
-        : undefined });
+      derivedCommit: fixOutcome?.kind === "FIXED" ? roundDerivedCommit() : undefined });
     // W1-T4450: a round that left edits but no COMMIT_MESSAGE line is not discarded. W1-T5325: a
     // writer that cannot resume (codex/cash) gets the subject derived from the failing check on the
     // FIRST commit attempt, so the missing line is never refused and never re-asked — that re-ask was
@@ -5028,7 +5029,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // W1-T5565: identified shell-less writers derive from the known failure. Legacy results
     // without a provider retain their session re-ask; a worker-authored subject still wins.
     const derivedFirst = fixHarnessOwnsGit && (fixResult.provider ?? fixArgs.mountProvider) !== undefined && fixLeftEdits()
-      ? derivedFixCommit(priorCiFailures?.[0]?.name ?? unmet[0]?.claim ?? gateFailuresNow?.[0]?.reason, opts.prUrl)
+      ? roundDerivedCommit()
       : undefined;
     const requiresCommit = fixAction.kind === "legacy" || fixAction.kind === "commit";
     const firstOptions = outcomeCommitOptions();
@@ -5072,8 +5073,12 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         ownRows = fixHarnessOwnsGit && !proofRepairRound ? await ownVerbRows() : [];
         fixAction = admitUnfiledOwnDiff(admitOwnVerbRows(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) })));
         if (["legacy", "commit"].includes(fixAction.kind)) {
-          harnessCommitCount = harnessCommit(answeredReport, { subjectSource: "re-asked", ...outcomeCommitOptions() });
+          harnessCommitCount = harnessCommit(answeredReport, { subjectSource: "re-asked", ...outcomeCommitOptions(), derivedCommit: roundDerivedCommit() });
         }
+      } else if (asked.kind === "abandoned") {
+        // W1-T8524: a re-ask that could not finish commits the edits under the derived subject; it never refuses them.
+        harnessCommitRefusalReason = undefined;
+        harnessCommitCount = harnessCommit(fixReport, { ...firstOptions, derivedCommit: roundDerivedCommit() });
       }
     }
     // W1-T5544: THE PROOF-REPAIR GATE, between the commit and the push. A round that committed nothing, staged a path

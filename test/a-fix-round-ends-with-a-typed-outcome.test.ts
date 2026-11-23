@@ -176,7 +176,9 @@ test("W1-T5532: a missing FIX_OUTCOME line behaves exactly as today", async () =
   missing.setEdit(() => writeFileSync(join(missing.repo.dir, "src/fix.ts"), "edit\n"));
   await runFixRung(missing.run);
   assert.equal(missing.counts().spawns, 2);
-  assert.equal(missing.rows.find((r) => r.step === "fix.commit_refused")?.reason, "no anchored COMMIT_MESSAGE line in the report");
+  // W1-T8524: a line still missing after the one re-ask commits under a harness-derived subject.
+  assert.equal(missing.rows.some((r) => r.step === "fix.commit_refused"), false);
+  assert.equal(missing.rows.find((r) => r.step === "implement.harness_commit")?.subject_source, "harness-derived");
 });
 
 test("W1-T5532: typed outcome parsing rejects malformed and escaping paths", () => {
