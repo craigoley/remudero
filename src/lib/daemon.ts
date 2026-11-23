@@ -23,6 +23,7 @@ import { startGarden, type GardenerDeps, type PrState } from "./gardener.js";
 import { knowledgeGardenSpec, type GardenWorkspace } from "./knowledge-gardener.js";
 import { startInboxResponder, type InboxResponderDeps } from "./inbox-responder.js";
 import { startLivenessPulse } from "./liveness-pulse.js";
+import { DAEMON_LOOP_STALL_STEPS, type StallLog } from "./loop-stall-profiler.js";
 import { bootSpawnHelper, SPAWN_HELPER_SWITCH } from "./spawn-helper.js";
 
 
@@ -48,7 +49,7 @@ import {
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
-import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_RATE_CEILING_MS, DEPLOY_RESTART_SCORE_THRESHOLD, EXPEDITE_RELEASE, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, FRESHNESS_LIKELY_FRACTION, FRESHNESS_MAX_DRAIN_WAIT_MS, FRESHNESS_MIN_LIFETIME_MS, INSTALL_INPUTS_RELEASE, MIN_LIFETIME_HOLD, pendingExpedite, timeToLikelyFreshnessRestart, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
+import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_RATE_CEILING_MS, DEPLOY_RESTART_SCORE_THRESHOLD, EXPEDITE_RELEASE, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, FRESHNESS_LIKELY_FRACTION, FRESHNESS_MAX_DRAIN_WAIT_MS, FRESHNESS_MIN_LIFETIME_MS, freshnessMinLifetimeForStall, INSTALL_INPUTS_RELEASE, LOOP_STALL_RELEASE, MIN_LIFETIME_HOLD, pendingExpedite, timeToLikelyFreshnessRestart, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -1478,7 +1479,7 @@ export interface DaemonDeps {
       by_caller?: unknown[]; unnamed_ms?: number; // W1-T9577: the interval's callers by total, and the rest
       async_spawn_sync_ms?: number; async_by_caller?: unknown[] }; // W1-T9754: the async spawns' fork time
     /** W1-T7746: each tick's lag, the history the loop-stall profiler's bound is a quantile of. */
-    observeLoopLag?: (reading: { lagMs: number; intervalMs: number }, log: (step: string, extra?: Record<string, unknown>) => void) => void };
+    observeLoopLag?: (reading: { lagMs: number; intervalMs: number }, log: StallLog) => void };
   /** W1-T6782: flat, payload-free memory fields (`sampleDaemonMemory`, daemon-memory-telemetry.ts)
    *  spread into the existing `daemon.alive` row. A throw is carried as `mem_telemetry`, never lost.
    *  W1-T7092: `afterRow` starts the worker-thread heap read once the row is written; the tick never
@@ -2749,7 +2750,7 @@ export function takeSyncSpawn(deps: Pick<DaemonDeps, "readLoopTelemetry">, consu
 /** W1-T7746: report a tick's lag, and first hand it to the loop-stall profiler, which sets its bound from
  *  this interval and these lags. A daemon without the sampler reports exactly as before. */
 export function reportTickLag(deps: Pick<DaemonDeps, "readLoopTelemetry">, sample: Parameters<typeof reportLoopLag>[0],
-  log: (step: string, extra?: Record<string, unknown>) => void): void {
+  log: StallLog): void {
   try {
     deps.readLoopTelemetry?.observeLoopLag?.({ lagMs: sample.observedAtMs - sample.dueAtMs, intervalMs: sample.intervalMs }, log);
   } catch (error) {
@@ -4770,9 +4771,33 @@ export async function runDaemon(
     idleLaneTickCause = undefined;
     idleLaneTickHold = undefined;
   };
-  const log: typeof emitLog = (step, fields) => {
+  // Keep the union ordered by time. Profile messages can arrive after recovery and out of order.
+  const stallIntervals: Array<{ startMs: number; endMs: number }> = [];
+  const discardStallsBefore = (startMs: number): void => {
+    let expired = 0;
+    while (expired < stallIntervals.length && stallIntervals[expired]!.endMs <= startMs) expired++;
+    if (expired > 0) stallIntervals.splice(0, expired);
+  };
+  const log: StallLog = (step, fields, recoveredAtMs) => {
     noteLog(step, fields);
     emitLog(step, fields);
+    if (step !== DAEMON_LOOP_STALL_STEPS.profile) return;
+    const lagMs = fields?.lag_ms;
+    if (typeof lagMs !== "number" || !Number.isFinite(lagMs) || lagMs <= 0) return;
+    const nowMs = idleLaneClock.now();
+    const oldestMs = nowMs - freshnessMinLifetimeMs;
+    discardStallsBefore(oldestMs);
+    let endMs = recoveredAtMs !== undefined && Number.isFinite(recoveredAtMs) ? recoveredAtMs : nowMs;
+    if (endMs <= oldestMs) return;
+    let startMs = Math.max(oldestMs, endMs - lagMs);
+    const first = stallIntervals.findLastIndex((interval) => interval.endMs < startMs) + 1;
+    let after = first;
+    while (after < stallIntervals.length && stallIntervals[after]!.startMs <= endMs) {
+      const interval = stallIntervals[after++]!;
+      startMs = Math.min(startMs, interval.startMs);
+      endMs = Math.max(endMs, interval.endMs);
+    }
+    stallIntervals.splice(first, after - first, { startMs, endMs });
   };
   const createSettlementReporting = (): SettlementReporting => {
     const faults: SettlementReporting["faults"] = [];
@@ -5784,7 +5809,7 @@ export async function runDaemon(
   };
 
   // W1-T10054: busy is only work a restart interrupts; passes and release-at-once actions are `background`.
-  const scoreFreshness = (changes: readonly DeployWorthChange[] | undefined, nowMs: number, liveLanes = 0) => {
+  const scoreFreshness = (changes: readonly DeployWorthChange[] | undefined, nowMs: number, liveLanes = 0, stallShare = 0) => {
     const staleAtMs = staleSinceMs!;
     const reviews = inFlightReviewCount();
     const interruptible = restartInterruptibleDetachedActionCount();
@@ -5816,35 +5841,42 @@ export async function runDaemon(
               ...(withheld.unparseable > 0 ? { withheld_reviews_unparseable: withheld.unparseable } : {}),
             };
     const decision = decideFreshnessRestart({ changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews,
-      threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs });
+      threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs, stallShare });
     freshnessPressure = decision.state;
     return { decision, busy, busyReasons, background, withheldEvidence };
   };
 
-  // W1-T4945/W1-T6093: score the advance, then coalesce change-driven restarts within bounded staleness.
+  const measureLoopStalls = (nowMs: number) => {
+    const startMs = Math.max(bootGateStartedAtMs, nowMs - freshnessMinLifetimeMs);
+    discardStallsBefore(startMs);
+    const windowMs = Math.max(0, nowMs - startMs);
+    const blockedMs = stallIntervals.reduce((total, interval) =>
+      total + Math.max(0, Math.min(nowMs, interval.endMs) - Math.max(startMs, interval.startMs)), 0);
+    return { blockedMs, windowMs, share: windowMs > 0 ? blockedMs / windowMs : 0 };
+  };
   let freshnessDecidedAtMs: number | undefined;
-  // W1-T12231: the change weight and the stale reading the last freshness decision scored, so an admission before the
-  // decision can predict when the staleness pressure alone takes the restart.
+  // W1-T12231: the last score's change weight and stale reading, used with the current stall share to predict release.
   let freshnessOutlook: { weight: number; staleSinceMs: number } | undefined;
   const freshnessPhases: { decision_to_latch?: number; lanes?: number; pre_exit_pass?: number; drain?: number } = {};
   const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, liveLanes = 0): "restart" | "defer" => {
     const nowMs = daemonClock.now();
     observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs);
     const staleAtMs = staleSinceMs!;
-    const { decision, busy, busyReasons, background, withheldEvidence } = scoreFreshness(freshness.changes, nowMs, liveLanes);
+    const stall = measureLoopStalls(nowMs);
+    const { decision, busy, busyReasons, background, withheldEvidence } = scoreFreshness(freshness.changes, nowMs, liveLanes, stall.share);
     freshnessOutlook = { weight: decision.weight, staleSinceMs: staleAtMs };
-    // OPERATOR RULING 2026-10-17: this lifetime began when the loop did (the boot gate's start); every release but the
-    // fast paths waits until it is FRESHNESS_MIN_LIFETIME_MS old. Both rows carry it, so the hold is measurable.
     const expedite = deps.taskExpedite ? pendingExpedite(freshness.changes, deps.taskExpedite) : undefined;
     const coalesced = coalesceFreshnessRestart({
       decision, newSha: freshness.newSha, lastAdvanceAtMs: lastAdvanceAtMs!,
       staleSinceMs: staleAtMs, nowMs, window: freshnessQuietWindow, installInputsChanged: changesInstallInputs(freshness.changes),
       threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs,
-      lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: freshnessMinLifetimeMs,
+      lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: freshnessMinLifetimeMs, stallShare: stall.share,
       ...(expedite ? { expedite } : {}),
     });
     const lifetimeEvidence = {
       lifetime_ms: Math.max(0, nowMs - bootGateStartedAtMs), min_lifetime_ms: freshnessMinLifetimeMs,
+      effective_min_lifetime_ms: freshnessMinLifetimeForStall(freshnessMinLifetimeMs, stall.share),
+      stall_ms: stall.blockedMs, stall_window_ms: stall.windowMs, stall_pressure: decision.stallPressure ?? 0,
       ...(coalesced.reason === MIN_LIFETIME_HOLD ? { held_by: MIN_LIFETIME_HOLD } : {}),
       // W1-T14360: the expedite fast path names the task and its declared reason on both rows.
       ...(coalesced.expedite
@@ -5853,7 +5885,7 @@ export async function runDaemon(
     };
     const action = coalesced.action === "hold" ? "defer" : coalesced.action;
     if (action === "restart") freshnessDecidedAtMs ??= nowMs;
-    const released = ["window_quiet", "upper_age", INSTALL_INPUTS_RELEASE, EXPEDITE_RELEASE].includes(coalesced.reason);
+    const released = ["window_quiet", "upper_age", INSTALL_INPUTS_RELEASE, EXPEDITE_RELEASE, LOOP_STALL_RELEASE].includes(coalesced.reason);
     if (coalesced.action === "hold" || freshnessHeld || released) {
       log("daemon.freshness_coalesced", {
         action: coalesced.action,
@@ -6002,8 +6034,10 @@ export async function runDaemon(
   // round that cannot end before it plus `maxDrainWaitMs` is held. A build run (`dispatch-refill`) is never held here.
   const restartLikely = (): { pressure: number; timeToRestartMs: number } | undefined => {
     if (freshnessOutlook === undefined) return undefined;
-    const outlook = timeToLikelyFreshnessRestart({ ...freshnessOutlook, nowMs: daemonClock.now(), threshold: freshnessThreshold,
-      ageHorizonMs: freshnessStalenessHorizonMs, lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: freshnessMinLifetimeMs });
+    const nowMs = daemonClock.now();
+    const outlook = timeToLikelyFreshnessRestart({ ...freshnessOutlook, nowMs, threshold: freshnessThreshold,
+      ageHorizonMs: freshnessStalenessHorizonMs, lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: freshnessMinLifetimeMs,
+      stallShare: measureLoopStalls(nowMs).share });
     return outlook.pressure >= freshnessLikelyFraction * freshnessThreshold.value ? outlook : undefined;
   };
   let likelyLengths: { atMs: number; lengths: RestartWindow["lengths"] } | undefined;

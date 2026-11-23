@@ -369,20 +369,29 @@ export function freshnessAdvanceWorth(change: DeployWorthChange): DeployWorthVer
 export interface FreshnessDecision {
   action: "restart" | "defer";
   reason: string;
-  restartTrigger?: "change" | "idle" | "age" | "withheld_reviews" | "unreadable";
+  restartTrigger?: "change" | "idle" | "age" | "withheld_reviews" | "unreadable" | "stall";
   /** Change pressure: the summed freshness weight of every advance scored this lifetime. */
   weight: number;
   /** Staleness pressure: grows linearly from the first stale reading, reaching the threshold at the horizon. */
   agePressure: number;
+  /** The stall share times the score limit, rounded down. Absent when the measured share is zero. */
+  stallPressure?: number;
   pressure: number;
   state: DeployRestartPressureState;
 }
 
+function boundedStallShare(share = 0): number {
+  return Number.isFinite(share) ? Math.min(1, Math.max(0, share)) : 0;
+}
+
+export function freshnessMinLifetimeForStall(minLifetimeMs: number, stallShare?: number): number {
+  return minLifetimeMs * (1 - boundedStallShare(stallShare));
+}
+
 /**
  * Decide WHEN, not WHETHER, to take a material advance (W1-T4945). Idle: restart now, which costs only a boot.
- * Busy: restart through the existing drain only once change pressure plus staleness pressure reaches the
- * recorded threshold, so a change to the daemon's own code goes at once and a low-weight one waits for an idle
- * moment — never past the horizon, because staleness alone reaches the threshold there. `changes` undefined means
+ * Busy: restart through the existing drain when pressure from change, staleness, withheld reviews and measured
+ * loop stalls reaches the threshold. Staleness alone reaches the threshold at the horizon. `changes` undefined means
  * the advance could not be read, which counts as full weight: an unknown advance never waits.
  */
 export function decideFreshnessRestart(input: {
@@ -396,6 +405,7 @@ export function decideFreshnessRestart(input: {
   /** W1-T5476 — terminal verdicts the reviewer withheld for stale reviewer code since the stale reading.
    *  Above 0 the review lane is stalled on exactly this lag, so it adds a full threshold of pressure. */
   withheldReviews?: number;
+  stallShare?: number;
 }): FreshnessDecision {
   const threshold = input.threshold ?? DEPLOY_RESTART_SCORE_THRESHOLD;
   const horizonMs = input.ageHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
@@ -409,14 +419,21 @@ export function decideFreshnessRestart(input: {
   const agePressure = Math.floor((threshold.value * Math.max(0, input.nowMs - input.staleSinceMs)) / horizonMs);
   const withheld = input.withheldReviews ?? 0;
   const withheldPressure = withheld > 0 ? threshold.value : 0;
-  const pressure = weight + agePressure + withheldPressure;
+  const stallShare = boundedStallShare(input.stallShare);
+  const stallPressure = Math.floor(threshold.value * stallShare);
+  const pressure = weight + agePressure + withheldPressure + stallPressure;
   const state = { total: weight, scoredShas: scored.state.scoredShas };
+  const scores = { weight, agePressure, pressure, state, ...(stallShare > 0 ? { stallPressure } : {}) };
+  const pressureTerms = `change ${weight} + staleness ${agePressure}`;
+  const stallTerm = stallShare > 0 ? ` + stall ${stallPressure}` : "";
   const restartTrigger = input.changes === undefined ? "unreadable"
     : withheldPressure > 0 ? "withheld_reviews"
     : weight >= threshold.value ? "change"
-    : !input.busy ? "idle" : "age";
+    : !input.busy ? "idle"
+    : pressure >= threshold.value && weight + agePressure < threshold.value ? "stall" : "age";
   if (!input.busy) {
-    return { action: "restart", restartTrigger, reason: "idle: nothing in flight, so the restart costs only a boot", weight, agePressure, pressure, state };
+    const stall = stallShare > 0 ? ` (stall pressure ${stallPressure})` : "";
+    return { action: "restart", restartTrigger, reason: `idle: nothing in flight, so the restart costs only a boot${stall}`, ...scores };
   }
   if (withheldPressure > 0) {
     return {
@@ -424,31 +441,22 @@ export function decideFreshnessRestart(input: {
       restartTrigger,
       reason:
         `busy, but ${withheld} review(s) withheld for stale reviewer code: pressure ${pressure} ` +
-        `(change ${weight} + staleness ${agePressure} + withheld ${withheldPressure}) >= ${threshold.value}: drain and restart`,
-      weight,
-      agePressure,
-      pressure,
-      state,
+        `(${pressureTerms} + withheld ${withheldPressure}${stallTerm}) >= ${threshold.value}: drain and restart`,
+      ...scores,
     };
   }
   if (pressure >= threshold.value) {
     return {
       action: "restart",
       restartTrigger,
-      reason: `busy, but pressure ${pressure} (change ${weight} + staleness ${agePressure}) >= ${threshold.value}: drain and restart`,
-      weight,
-      agePressure,
-      pressure,
-      state,
+      reason: `busy, but pressure ${pressure} (${pressureTerms}${stallTerm}) >= ${threshold.value}: drain and restart`,
+      ...scores,
     };
   }
   return {
     action: "defer",
-    reason: `busy, and pressure ${pressure} (change ${weight} + staleness ${agePressure}) < ${threshold.value}: wait for an idle moment`,
-    weight,
-    agePressure,
-    pressure,
-    state,
+    reason: `busy, and pressure ${pressure} (${pressureTerms}${stallTerm}) < ${threshold.value}: wait for an idle moment`,
+    ...scores,
   };
 }
 
@@ -472,12 +480,13 @@ export function changesInstallInputs(changes: readonly DeployWorthChange[] | und
  * OPERATOR RULING 2026-10-17: a daemon lifetime runs at least 90 minutes before a freshness restart takes it. On
  * 2026-10-17 the daemon read stale ~20 min after each boot and upper_age released it 30 min later, so it restarted
  * about every 75 min (18.2 freshness restarts/day over 10-12..10-17); replaying those 1406 commits with this floor
- * gave 10.9/day. Only the fast paths pass it: install inputs, withheld reviews, an unreadable advance, and (W1-T14360)
- * a declared expedite.
+ * gave 10.9/day. Install inputs, withheld reviews, an unreadable advance and a declared expedite can pass the hold.
+ * A measured loop stall shortens it in proportion to the blocked share.
  */
 export const FRESHNESS_MIN_LIFETIME_MS = 90 * 60_000;
 /** The coalesce reason, and the ledger's `held_by`, for a restart held by {@link FRESHNESS_MIN_LIFETIME_MS}. */
 export const MIN_LIFETIME_HOLD = "min_lifetime";
+export const LOOP_STALL_RELEASE = "loop_stall";
 
 /**
  * W1-T14360 — the expedite fast path. 2026-11-22: #20230, a fix for a live cost leak, merged nine minutes into a
@@ -532,6 +541,7 @@ export function coalesceFreshnessRestart(input: {
   lifetimeStartedAtMs: number;
   /** Defaults to {@link FRESHNESS_MIN_LIFETIME_MS}. */
   minLifetimeMs?: number;
+  stallShare?: number;
   /** W1-T14360: the pending commit's declared expedite ({@link pendingExpedite}); absent, the floor holds as before. */
   expedite?: FreshnessExpedite;
 }): { action: "restart" | "hold" | "defer"; reason: string; heldMs?: number; windowEndsAtMs?: number; expedite?: FreshnessExpedite } {
@@ -543,12 +553,16 @@ export function coalesceFreshnessRestart(input: {
     return { action: "restart", reason, heldMs: 0, windowEndsAtMs };
   }
   const heldMs = Math.max(0, input.nowMs - input.staleSinceMs);
-  // Every other release (change, age, idle; window_quiet and upper_age below) waits out the minimum lifetime.
-  if (input.nowMs - input.lifetimeStartedAtMs < (input.minLifetimeMs ?? FRESHNESS_MIN_LIFETIME_MS)) {
+  const lifetimeMs = input.nowMs - input.lifetimeStartedAtMs;
+  const minLifetimeMs = input.minLifetimeMs ?? FRESHNESS_MIN_LIFETIME_MS;
+  if (lifetimeMs < minLifetimeMs) {
     if (input.installInputsChanged) return { action: "restart", reason: INSTALL_INPUTS_RELEASE, heldMs, windowEndsAtMs };
     // W1-T14360: a declared expedite passes only a pressure already over the limit; at or under it, the floor holds.
     if (input.expedite && decision.pressure > (input.threshold ?? DEPLOY_RESTART_SCORE_THRESHOLD).value) {
       return { action: "restart", reason: EXPEDITE_RELEASE, heldMs, windowEndsAtMs, expedite: input.expedite };
+    }
+    if (lifetimeMs >= freshnessMinLifetimeForStall(minLifetimeMs, input.stallShare)) {
+      return { action: "restart", reason: LOOP_STALL_RELEASE, heldMs, windowEndsAtMs };
     }
     return { action: "hold", reason: MIN_LIFETIME_HOLD, heldMs, windowEndsAtMs };
   }
@@ -574,10 +588,8 @@ export const FRESHNESS_LIKELY_FRACTION = 0.5;
 export const FRESHNESS_MAX_DRAIN_WAIT_MS = 30 * 60_000;
 
 /**
- * W1-T12231 — when a busy daemon's freshness restart is likely. With no further advance only the staleness pressure
- * grows, by the rule {@link decideFreshnessRestart} applies, so the pressure reaches the score limit at a known
- * moment. `timeToRestartMs` is the time from `nowMs` to that moment, and never earlier than the end of the minimum
- * lifetime, which holds every restart this function predicts.
+ * W1-T12231 — when a busy daemon's freshness restart is likely. At the current stall share and with no further advance,
+ * staleness grows until pressure reaches the score limit. The prediction also waits for the effective minimum lifetime.
  */
 export function timeToLikelyFreshnessRestart(input: {
   /** The change pressure: the summed weight of the advances scored this lifetime. */
@@ -588,17 +600,20 @@ export function timeToLikelyFreshnessRestart(input: {
   ageHorizonMs?: number;
   lifetimeStartedAtMs: number;
   minLifetimeMs?: number;
+  stallShare?: number;
 }): { pressure: number; timeToRestartMs: number } {
   const limit = (input.threshold ?? DEPLOY_RESTART_SCORE_THRESHOLD).value;
   const horizonMs = input.ageHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
   const weight = Number.isFinite(input.weight) ? Math.max(0, input.weight) : 0;
+  const stallPressure = Math.floor(limit * boundedStallShare(input.stallShare));
   const agePressure = Math.floor((limit * Math.max(0, input.nowMs - input.staleSinceMs)) / horizonMs);
-  const needed = Math.max(0, limit - weight);
+  const needed = Math.max(0, limit - weight - stallPressure);
   // The smallest stale age whose staleness pressure, floored as the decision floors it, reaches `needed`.
   const reachedAtMs = needed === 0 ? input.nowMs : input.staleSinceMs + Math.ceil((needed * horizonMs) / limit);
-  const lifetimeEndsAtMs = input.lifetimeStartedAtMs + (input.minLifetimeMs ?? FRESHNESS_MIN_LIFETIME_MS);
+  const lifetimeEndsAtMs = input.lifetimeStartedAtMs +
+    freshnessMinLifetimeForStall(input.minLifetimeMs ?? FRESHNESS_MIN_LIFETIME_MS, input.stallShare);
   return {
-    pressure: weight + agePressure,
+    pressure: weight + agePressure + stallPressure,
     timeToRestartMs: Math.max(0, reachedAtMs - input.nowMs, lifetimeEndsAtMs - input.nowMs),
   };
 }
