@@ -970,7 +970,6 @@
     "retry.cash_allowance_exhausted",
     "retry.classified",
     "retry.exhausted",
-    "retry.success",
     "retry.usage_limit",
     "review.capacity.selector_failed",
     "review.in_process_reclaimed",

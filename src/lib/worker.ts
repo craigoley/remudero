@@ -207,6 +207,7 @@ import {
   FOUNDRY_CLAUDE_ENDPOINT_ENV,
   type CodexCapacityDeps,
   type CodexModelTier,
+  type EconomyFirstReason,
   type ProviderCapacity,
   OPENWEIGHT_FUNCTIONS,
   ProviderCapacityBlockedError,
@@ -595,6 +596,8 @@ export type RoutingRule =
   | "capability-preference"
   | "role-preference"
   | "fix-economy-first"
+  /** W1-T14549: a canary build's first attempt started on the Codex economy tier below its mount. */
+  | "build-economy-first"
   | "operator-preference"
   | "preference-bypassed"
   | "cash-fallback"
@@ -1281,6 +1284,8 @@ export interface SpawnWorkerArgs {
   /** Fix rounds may try a lower Codex tier while keeping the mount's Claude model and fallback. */
   economyFirst?: {
     codexCapability: CodexModelTier;
+    /** The lane asking (W1-T14549); absent reads as a fix round, as before. */
+    reason?: EconomyFirstReason;
     onDecision?: (reason: "economy-first" | "no-codex-capacity" | "operator-preference") => void;
   };
   /** Capacity-reader seams for provider-routing tests; production reads both subscriptions live. */
@@ -1290,7 +1295,7 @@ export interface SpawnWorkerArgs {
     readCodex?: (
       config: Config,
       request: Pick<CodexCapacityDeps, "requestedModel" | "requestedEffort" | "forceRefresh" | "selectedModel" |
-        "preferredModel" | "reservePercent" | "capabilities" | "codexCapability" | "headroomTiming">,
+        "preferredModel" | "reservePercent" | "capabilities" | "codexCapability" | "economyReason" | "headroomTiming">,
     ) => Promise<ProviderCapacity>;
     /** Test seam for the selected Codex spawn; production uses the real contained CLI adapter. */
     spawnCodex?: (
@@ -1929,7 +1934,8 @@ function routingRule(args: SpawnWorkerArgs, input: Parameters<typeof workerSelec
   if (args.routingFallback) return args.routingFallback.rule;
   if (args.routingTrial?.arm === "cash" && input.provider === "cash") return "cash-trial";
   if (input.mode !== "multi-provider") return input.mode;
-  if (input.capacity?.modelDecision?.capabilityOverride?.reason === "fix-economy-first") return "fix-economy-first";
+  const override = input.capacity?.modelDecision?.capabilityOverride?.reason;
+  if (override === "fix-economy-first" || override === "build-economy-first") return override;
   if (input.selection?.lane === "codex-credits") return "codex-credits";
   if (input.preferenceBypass) return "preference-bypassed";
   if (input.rolePreference) return "role-preference";
@@ -2901,6 +2907,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         requestedEffort: args.effort,
         ...(preferred ? { preferredModel: preferred } : {}),
         ...(codexCapability ? { codexCapability } : {}),
+        ...(codexCapability && economyFirst?.reason ? { economyReason: economyFirst.reason } : {}),
         reservePercent,
         headroomTiming,
         ...(args.model && capabilities ? { capabilities } : {}),

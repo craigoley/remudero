@@ -192,6 +192,14 @@ export interface Config {
       windowDays?: number;
       models?: string[];
     };
+    /** The Luna build canary's policy (W1-T14549); see src/lib/luna-build-canary.ts for each default. */
+    lunaBuildCanary?: {
+      enabled?: boolean;
+      sharePercent?: number;
+      minSample?: number;
+      minRelativeSuccess?: number;
+      windowDays?: number;
+    };
   };
   learningsHomes?: { userOverall?: string; global?: string };
 }
@@ -318,6 +326,16 @@ const workerProvidersShape: ValueSchema = {
         configField("minRelativeSuccess", "number", true, 0.8, "config.json", "Stop below this fraction of the control's PR rate.", numberShape),
         configField("windowDays", "number", true, 7, "config.json", "Rolling evidence window; a stop expires with it.", numberShape),
         configField("models", "string[]", true, ["gpt-oss-120b"], "config.json", "Cash deployments the trial may use.", stringArrayShape),
+      ],
+    }),
+    configField("lunaBuildCanary", "object", true, undefined, "config.json", "Luna build canary policy; defaults in src/lib/luna-build-canary.ts (W1-T14549).", {
+      kind: "object",
+      fields: [
+        configField("enabled", "boolean", true, true, "config.json", "Run the canary at all.", booleanShape),
+        configField("sharePercent", "number", true, 25, "config.json", "Share of risk:low src builds whose first attempt starts on Luna.", numberShape),
+        configField("minSample", "number", true, 20, "config.json", "Runs per arm before a relative verdict.", numberShape),
+        configField("minRelativeSuccess", "number", true, 0.8, "config.json", "Hold below this fraction of the control's first-attempt PR rate.", numberShape),
+        configField("windowDays", "number", true, 7, "config.json", "Rolling evidence window; a hold expires with it.", numberShape),
       ],
     }),
     configField(
