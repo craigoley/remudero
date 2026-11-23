@@ -26,6 +26,12 @@ export interface RestartCycleRow {
   waiting_cost_ms: number | null;
   restart_cost_ms: number | null;
   missing_parts: string[];
+  /** W1-T14547: the cycle yielded to a ready standby (daemon.handoff_yielded, then daemon.standby_promoted). */
+  handed_off: boolean;
+  /** Only on a handed-off cycle: the standby's read-only boot, from its own promoted row. */
+  standby_ready_ms?: number | null;
+  /** Only on a handed-off cycle: the yield to the successor's first loop tick, the gap a cold boot left dark. */
+  yield_to_first_tick_ms?: number | null;
 }
 
 const time = (row: Row): number => typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
@@ -137,6 +143,13 @@ export function restartCycleRow(rows: readonly Row[], startAtMs: number): Restar
   const gaveUpMs = reviews && fixes ? sum([...reviews, ...fixes].map(item => item.age_ms)) : null;
   const last = ordered.findLast(r => r.row.step === "review.posted" && r.ms < exit.ms);
   const gapMs = last && first ? first.ms - last.ms : null;
+  // W1-T14547: a handoff is the yielded row after the exit and the standby's promotion after that, before this boot.
+  const yielded = before.find(r => r.row.step === "daemon.handoff_yielded" && r.ms >= exit.ms);
+  const promoted = yielded && before.find(r => r.row.step === "daemon.standby_promoted" && r.ms >= yielded.ms);
+  const firstTick = promoted && ordered.find(r => (r.row.step === "daemon.tick" || r.row.step === "daemon.tick_phases") && r.ms >= startAtMs &&
+    (!nextBoot || r.ms < nextBoot.ms));
+  const handoff = yielded && promoted ? { handed_off: true, standby_ready_ms: finite(promoted.row.prepare_ms) ? promoted.row.prepare_ms : null,
+    yield_to_first_tick_ms: firstTick ? firstTick.ms - yielded.ms : null } : { handed_off: false };
   const missing: string[] = [];
   for (const [name, value] of Object.entries({ first_material_change_at: materialMs, decided_at: decision?.ms,
     first_verdict_at: first?.ms, refused_review_ms: refusedMs, review_wait_ms: waitMs, gave_up_age_ms: gaveUpMs, verdict_gap_ms: gapMs })) {
@@ -152,6 +165,6 @@ export function restartCycleRow(rows: readonly Row[], startAtMs: number): Restar
       (r.row.reason === "restart latched" || r.row.reason === "restart decided")).length,
     gave_up: { reviews, fix_rounds: fixes }, gave_up_age_ms: gaveUpMs,
     verdicts_posted: window.filter(r => r.row.step === "review.posted").length, verdict_gap_ms: gapMs, review_wait_ms: waitMs,
-    waiting_cost_ms: sum([refusedMs, waitMs]), restart_cost_ms: sum([gapMs, gaveUpMs]), missing_parts: missing,
+    waiting_cost_ms: sum([refusedMs, waitMs]), restart_cost_ms: sum([gapMs, gaveUpMs]), missing_parts: missing, ...handoff,
   };
 }
