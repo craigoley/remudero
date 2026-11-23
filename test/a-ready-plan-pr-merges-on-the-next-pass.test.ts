@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { attemptArm, type ArmDeps } from "#src/lib/arm-auto-merge.js";
+import { appendLedger } from "#src/lib/ledger.js";
 import type { PlanMergeSafetyReadings } from "#src/lib/plan-pr-merge-safety.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import {
@@ -92,6 +93,16 @@ function harness(seams: Seams = {}) {
   return { deps, merged, armed, updated, said };
 }
 
+/** W1-T14317: the live review verdict an arming head needs, so the arm decision never reads the history. */
+function seedVerdict(deps: SweepDeps, ...prs: OpenPrView[]): void {
+  for (const pr of prs) {
+    appendLedger(deps.ledgerPath, {
+      run_id: "R", task_id: String(pr.taskId), step: "review.posted", pr_url: pr.prUrl, head_sha: pr.headSha,
+      state: "success", capped: false, plan_only: pr.isPlanFiling === true,
+    });
+  }
+}
+
 function disposed(deps: SweepDeps, prNumber: number): Record<string, unknown> | undefined {
   return readLedgerLines(deps.ledgerPath).find((l) => l.step === "sweep.disposed" && l.pr_number === prNumber);
 }
@@ -99,6 +110,7 @@ function disposed(deps: SweepDeps, prNumber: number): Record<string, unknown> | 
 test("a light pass direct-merges a green, reviewed, mergeable plan PR instead of deferring it", async () => {
   const h = harness();
   const plan = readyPr(9001);
+  seedVerdict(h.deps, plan);
   await runSweepLightPass([plan], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.merged, [plan.prUrl], "the light pass merged the plan PR itself");
   assert.deepEqual(h.armed, [], "a plan PR is never armed for auto-merge (W1-T5615)");
@@ -114,6 +126,7 @@ test("the light-pass direct merge runs the W1-T5748 safety decision: a behind pl
     safety: { prPlanPaths: ["plan/tasks.d/W1-T9002-x.yaml"], mainPlanPaths: ["plan/tasks.d/W1-T1-y.yaml"], mergedTree: { state: "loads" } },
   });
   const plan = readyPr(9002);
+  seedVerdict(h.deps, plan);
   await runSweepLightPass([plan], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.merged, [plan.prUrl]);
   assert.deepEqual(h.updated, [], "a safe merged plan is not refreshed");
@@ -126,6 +139,7 @@ test("the light-pass direct merge updates a behind plan PR whose merged plan is 
     safety: { prPlanPaths: ["plan/tasks.d/a.yaml"], mainPlanPaths: ["plan/tasks.d/a.yaml"] },
   });
   const plan = readyPr(9003);
+  seedVerdict(h.deps, plan);
   await runSweepLightPass([plan], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.updated, [plan.prUrl], "update-then-merge: the refresh is the first half");
   assert.deepEqual(h.merged, [], "a behind plan PR is not merged on the stale head");
@@ -135,6 +149,7 @@ test("a light pass merges at most one plan PR", async () => {
   const h = harness();
   const first = readyPr(9004);
   const second = readyPr(9005);
+  seedVerdict(h.deps, first, second);
   await runSweepLightPass([first, second], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.merged, [first.prUrl], "exactly one plan PR merged");
   assert.equal(disposed(h.deps, 9005)?.stand_down_reason, "deferred to full sweep (light pass)");
@@ -144,6 +159,7 @@ test("a light pass merges at most one plan PR", async () => {
 test("a light pass enqueues the plan PR when the base requires a merge queue, never merging around it", async () => {
   const h = harness({ mergeQueue: true });
   const plan = readyPr(9006);
+  seedVerdict(h.deps, plan);
   await runSweepLightPass([plan], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.armed, [plan.prUrl], "enqueued through the queue path");
   assert.deepEqual(h.merged, [], "the REST merge bypasses the queue, so it is never called");
@@ -168,6 +184,7 @@ test("a code PR beside a ready plan PR stays deferred while the plan PR merges",
   const h = harness();
   const code = readyPr(9009, { isPlanFiling: false });
   const plan = readyPr(9010);
+  seedVerdict(h.deps, code, plan);
   await runSweepLightPass([code, plan], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.merged, [plan.prUrl]);
   assert.equal(disposed(h.deps, 9009)?.stand_down_reason, "deferred to full sweep (light pass)");

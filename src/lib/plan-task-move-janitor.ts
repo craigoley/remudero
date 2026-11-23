@@ -59,11 +59,15 @@ export interface PlanTaskMovePorts {
   readPull(pin: MovePin, side: Side, number: number): Promise<MoverPull>;
   /** Is `commit` on the pinned main of that side? */
   onMain(pin: MovePin, side: Side, commit: string): Promise<boolean>;
+  /** W1-T14448: the live ledger's lines, read once when a janitor is created, to seed the step it waits on. */
+  readLedgerLines?: () => readonly string[];
 }
 
 /** What a janitor keeps between ticks in one daemon process. */
 export interface PlanTaskMoveMemory {
   standDown?: string;
+  /** Ticks the held stand-down reason has answered; the row that replaces it names them as previous_ticks. */
+  standDownTicks?: number;
   lastStep?: { side: Side; number: number };
   answer?: { key: string; run: MoveRun };
 }
@@ -84,8 +88,33 @@ const text = (value: unknown): string | undefined => typeof value === "string" ?
  *  error's class, so a message that varies per call never writes a new row per tick. */
 const failureOf = (error: unknown): string => error instanceof Error ? (/^[\w.-]{1,64}$/.test(error.message) ? error.message : error.name) : typeof error;
 
+/** W1-T14448: the step pull request a previous process opened last, from the newest plan.move.janitor_step row. Only
+ *  that row decides: the janitor applies a step only after its last one landed or closed, so a newest row with applied
+ *  false leaves nothing pending. An unparsable newest row, or one naming no side and pull request, seeds nothing. */
+export function lastStepFromLedger(lines: readonly string[]): { side: Side; number: number } | undefined {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i]!.includes(PLAN_MOVE_JANITOR_STEP)) continue;
+    let row: unknown;
+    try { row = JSON.parse(lines[i]!); }
+    catch (error) { void error; return undefined; /* The newest row is unreadable: no seed, never an older row. */ }
+    if (row === null || typeof row !== "object" || (row as Json).step !== PLAN_MOVE_JANITOR_STEP) continue;
+    const { applied, side, pull_request: number } = row as Json;
+    const opened = applied === true && (side === "public" || side === "ops") && Number.isSafeInteger(number) && (number as number) > 0;
+    return opened ? { side, number: number as number } : undefined;
+  }
+  return undefined;
+}
+
+/** A janitor for one daemon process. Given a ledger reader, it resumes the wait on the step the last process opened
+ *  (GitHub's search can lag a pull request just opened, so a restart must not forget it). */
 export function createPlanTaskMover(ports: PlanTaskMovePorts): PlanTaskMover {
-  return { ports, memory: {} };
+  const memory: PlanTaskMoveMemory = {};
+  let lines: readonly string[] = [];
+  try { lines = ports.readLedgerLines?.() ?? []; }
+  catch (error) { void error; /* An unreadable ledger seeds nothing; the mover's own WAIT still reads GitHub. */ }
+  const last = lastStepFromLedger(lines);
+  if (last) memory.lastStep = last;
+  return { ports, memory };
 }
 
 /** Has the step this janitor opened last landed on its main? Anything but `landed` or `closed` holds every step. */
@@ -104,9 +133,13 @@ export async function runPlanTaskMoveTick(inputs: PlanTaskMoveTickInputs, mover:
   const { ports, memory } = mover;
   const standDown = (reason: string, detail?: string): PlanTaskMoveTickOutcome => {
     const signature = JSON.stringify([reason, detail ?? null]);
-    if (memory.standDown !== signature) {
+    if (memory.standDown === signature) memory.standDownTicks = (memory.standDownTicks ?? 0) + 1;
+    else {
+      // W1-T14448: the row names how long the reason it replaces held; after a reset (off, a step) none is held.
+      const previous = memory.standDown === undefined ? {} : { previous_ticks: memory.standDownTicks ?? 0 };
       memory.standDown = signature;
-      try { inputs.log(PLAN_MOVE_STAND_DOWN, { reason, ...(detail === undefined ? {} : { detail }) }); }
+      memory.standDownTicks = 1;
+      try { inputs.log(PLAN_MOVE_STAND_DOWN, { reason, ...(detail === undefined ? {} : { detail }), ...previous }); }
       catch (error) { void error; /* A row that cannot be written never takes a step. */ }
     }
     return { outcome: "stand_down", reason, ...(detail === undefined ? {} : { detail }) };
@@ -174,6 +207,8 @@ export interface PlanTaskMoveHost {
   publicRepository: string;
   readSwitch: () => PlanTaskMoveSwitch;
   readOpsCatalog: () => string | undefined;
+  /** W1-T14448: the daemon's live ledger reader; the janitor created over these ports seeds its last step from it. */
+  readLedgerLines?: () => readonly string[];
   /** The rmd CLI entry the step runs in: its own process, so the catalog read never holds the daemon loop. */
   cliEntry: string;
   execArgv?: readonly string[];
@@ -227,6 +262,7 @@ export function planTaskMovePorts(host: PlanTaskMoveHost): PlanTaskMovePorts {
   return {
     readSwitch: host.readSwitch,
     readOpsCatalog: host.readOpsCatalog,
+    ...(host.readLedgerLines ? { readLedgerLines: host.readLedgerLines } : {}),
     readHeads: async ops => {
       // Both sides settle before either refusal is raised, so no git read of this pin outlives the call.
       const [pubRead, opsRead] = await Promise.allSettled([head(host.publicRoot, host.publicRepository), head(ops.checkoutDir, ops.repository)]);

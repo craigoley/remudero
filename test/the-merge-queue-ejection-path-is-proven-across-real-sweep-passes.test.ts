@@ -196,6 +196,11 @@ function scenario(t: TestContext, label: string) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t5941-${label}-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const ledgerPath = join(root, "ledger.ndjson");
+  // W1-T14317: each head the scenarios arm carries its live review.posted verdict.
+  for (const head of [HEAD, NEXT_HEAD]) {
+    appendLedger(ledgerPath, { ts: ESCALATED_AT, run_id: "REVIEW", task_id: TASK, step: "review.posted", pr_url: PR_URL,
+      head_sha: head, capped: false, plan_only: false } as LedgerLine);
+  }
   const gh = new QueueRepoFake();
   let n = 0;
 

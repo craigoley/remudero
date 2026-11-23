@@ -2462,6 +2462,8 @@ export async function daemonCommand(
           publicRoot: targetCheckoutRoot, publicRepository: `${target.owner}/${target.repo}`,
           readSwitch: () => planTaskMoveSwitch(join(config.root, "state")),
           readOpsCatalog: opsCatalogOutcomeReader(opsShadow),
+          // W1-T14448: read once, here, before the loop: a restart resumes the wait on the step the last process opened.
+          readLedgerLines: () => readReleaseLedgerLines(ledgerPathFor(config)),
           cliEntry: fileURLToPath(new URL(`../../run-task${import.meta.url.endsWith(".ts") ? ".ts" : ".js"}`, import.meta.url)),
         })),
         ...(opsShadow ? {

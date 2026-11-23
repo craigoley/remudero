@@ -416,13 +416,30 @@ export function applyTestGardenActions(root: string, probe: TestManifestProbe, a
   return paths;
 }
 
-function prBody(actions: TestGardenAction[]): string {
+/**
+ * W1-T13987: the actions whose row the committed manifest does not already hold. A row whose committed value equals the
+ * edit changes nothing, and its `"<file>": <ms>` proof would pass at base, so it is neither filed nor proved.
+ */
+export function changedTestGardenActions(root: string, probe: Pick<TestManifestProbe, "loadManifest">, actions: readonly TestGardenAction[]): TestGardenAction[] {
+  const committed = new Map<string, TestManifest>();
+  const manifestOf = (file: string): TestManifest => {
+    let m = committed.get(file);
+    if (m === undefined) committed.set(file, m = probe.loadManifest(join(root, file)));
+    return m;
+  };
+  return actions.filter((a) => manifestOf(a.file).files?.[a.edit.key] !== a.edit.to);
+}
+
+/** W1-T13987: a row's proof misses at base unless the committed value's digits begin with the edit's. */
+const provableAtBase = (committed: number | undefined, to: number): boolean => committed === undefined || !String(committed).startsWith(String(to));
+
+function prBody(actions: TestGardenAction[], committedOf: (a: TestGardenAction) => number | undefined = () => undefined): string {
   // A first adoption moves every measured row at once (2,094 on 2026-09-29): one bullet and one
   // proof per row would overrun GitHub's 65,536-character body limit, so the body names the
   // largest rows and the manifest diff stays the complete record.
   const largest = [...actions].sort((a, b) => b.edit.to - a.edit.to || a.target.localeCompare(b.target));
   const listed = largest.slice(0, TEST_GARDEN_BODY_ROWS);
-  const proofs = largest.slice(0, TEST_GARDEN_PROOF_ROWS)
+  const proofs = largest.filter((a) => provableAtBase(committedOf(a), a.edit.to)).slice(0, TEST_GARDEN_PROOF_ROWS)
     .flatMap((a) => [`- claim: ${a.target} records ${a.edit.to}`, `  proof: grep: "${a.edit.key}": ${a.edit.to} in ${a.file}`]);
   return [
     `The test-suite gardener (W1-T4112) tends ${[...new Set(actions.map((a) => a.file))].join(", ")} from its own measurements and the fleet's flake ledger.`,
@@ -622,12 +639,15 @@ export function testGardenSpec(deps: GardenerDeps, probe: TestManifestProbe): Ga
     candidates: (inv) => inv.candidates,
     scorecard: (inv, plan) => ({ candidates: inv.candidates.length, proposed: plan.actions.length }),
     apply: (ws, plan) => {
-      const paths = applyTestGardenActions(ws.root, probe, plan.actions);
+      // W1-T13987: a row main already holds is no change, so a pass whose every row is held drafts nothing.
+      const changed = changedTestGardenActions(ws.root, probe, plan.actions);
+      const committed = new Map(changed.map((a) => [a, probe.loadManifest(join(ws.root, a.file)).files?.[a.edit.key]]));
+      const paths = applyTestGardenActions(ws.root, probe, changed);
       if (paths.length === 0) return undefined;
       return {
         paths,
-        title: `chore(test): the test gardener proposes to ${plan.acting[0]} ${plan.actions.length} manifest row(s)`,
-        body: prBody(plan.actions),
+        title: `chore(test): the test gardener proposes to ${plan.acting[0]} ${changed.length} manifest row(s)`,
+        body: prBody(changed, (a) => committed.get(a)),
       };
     },
   };

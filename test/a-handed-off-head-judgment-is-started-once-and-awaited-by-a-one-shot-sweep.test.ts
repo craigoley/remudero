@@ -28,6 +28,7 @@ function fixture(t: TestContext) {
   };
   const lines: Array<Record<string, unknown>> = [
     { step: "verdict", verdict: "handed_off", pr_url: pr.prUrl, reason: "pr_open_yield" },
+    { step: "review.posted", task_id: pr.taskId, pr_url: pr.prUrl, head_sha: pr.headSha, capped: false, plan_only: false },
   ];
   const armed: string[] = [];
   const deps: sweep.SweepDeps = {
@@ -77,6 +78,7 @@ test(`${PROOF}: settled heads leave the cache only on a full open-set change`, a
   assert.equal(pool.settled.size, 1);
   await sweep.runSweep([], { ...h.deps, repairAdmissionSurface: "light" });
   assert.equal(pool.settled.size, 1, "one light pass cannot evict another PR's head");
+  h.lines.push({ step: "review.posted", task_id: h.pr.taskId, pr_url: h.pr.prUrl, head_sha: "new-head", capped: false, plan_only: false });
   await sweep.runSweep([{ ...h.pr, headSha: "new-head" }], h.deps);
   assert.deepEqual([...pool.settled.keys()], [`${h.pr.prNumber}@new-head`]);
   assert.equal(calls, 2);
@@ -148,7 +150,8 @@ test(`${PROOF}: the one-shot bound keeps a child alive and aborts a hung judgmen
       reviewState: 'success', checksState: 'green', unmetCriteria: [], priorStrikes: 0,
       lastActivityAt: new Date().toISOString(), autoMergeArmed: false };
     await runSweep([pr], { ledgerPath: '/dev/null', runId: 'TEST',
-      readLedger: () => [{ step: 'verdict', verdict: 'handed_off', pr_url: pr.prUrl }],
+      readLedger: () => [{ step: 'verdict', verdict: 'handed_off', pr_url: pr.prUrl },
+        { step: 'review.posted', pr_url: pr.prUrl, head_sha: pr.headSha, capped: false, plan_only: false }],
       appendLine: () => {}, arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {},
       handedOffHeadJudgments: pool,
       judgeHandedOffHead: (_pr, s) => { signal = s; return new Promise(() => {}); } });

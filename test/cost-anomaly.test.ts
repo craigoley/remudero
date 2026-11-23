@@ -304,6 +304,10 @@ function fakeSweepDeps(ledgerPath: string, overrides: Partial<SweepDeps> = {}): 
   const closed: unknown[] = [];
   const fixed: unknown[] = [];
   const escalated: unknown[] = [];
+  // W1-T14317: the PR's live verdict for its head; a sweep with no readable verdict history never arms.
+  const pr = mergeableTestPr();
+  appendLedger(ledgerPath, { ts: "2026-08-16T12:00:00.000Z", run_id: "REVIEW-900", task_id: pr.taskId!, step: "review.posted",
+    pr_url: pr.prUrl, head_sha: pr.headSha, capped: false, plan_only: false });
   return {
     armed,
     closed,

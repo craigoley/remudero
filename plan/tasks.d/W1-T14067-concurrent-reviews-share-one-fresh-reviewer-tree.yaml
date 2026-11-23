@@ -18,8 +18,9 @@
     - src/lib/reviewer-worktree-lease.ts
     - src/lib/run-child.ts
     - test/review/concurrent-reviews-share-one-fresh-reviewer-tree.test.ts
-  dispatch_hold: true # superseded by merged W1-T14066 (#19940): a leased shared tree sends the review to its own per-attempt tree; shared borrowing would reverse W1-T14066 criterion 3; the operator releases or retires it
-  status: queued
+  status: blocked
+  retirement: retired # operator 2026-11-23: "yes, retire W1-T14067"; W1-T14066 (#19940) fixed the lost review with a per-attempt tree
+  superseded_by: W1-T14066
   attempts: 0
   acceptance:
     - claim: "Two review processes that borrow the same fresh reviewer worktree at once both run their review from it: the second borrow is admitted beside the first instead of throwing that the worktree is leased by another owner"

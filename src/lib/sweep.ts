@@ -2745,7 +2745,7 @@ interface ArmVerdictHistory {
 /**
  * W1-T13288: the arm decision's archive and live verdict history, loaded OFF the loop through the slice reader.
  * `complete` is judged as the resolveLedgerUnion result was: the read is ok, at least one rotation exists, and
- * nothing is unread or unclassified. A failed read is incomplete, so the W1-T3471 fail-open holds. The process
+ * nothing is unread or unclassified. A failed read is incomplete, so W1-T14317 refuses the arm. The process
  * keeps one reader, so a later pass reads only the rotations it has not seen; a restarted one reads digests.
  */
 async function readArmVerdictHistory(stateDir: string): Promise<ArmVerdictHistory> {
@@ -14654,9 +14654,8 @@ export function isCappedReviewOrphanEscalation(pr: OpenPrView, policy: SweepPoli
 
 /** ARMING PARITY WITH THE RUN FLOW — a PR the run flow refused stayed open and unarmed, but a later
  *  sweep poll could still arm it through this separate path. NOT A SECOND IMPLEMENTATION: this
- *  delegates to {@link decideAutoMergeArm}, the SAME predicate the run flow calls. FAIL-OPEN ON
- *  ABSENT EVIDENCE — refusal requires positively observing `capped: true, plan_only: false` for THIS
- *  head. // Why: #800 armed at proof_exec 0/5 and merged 35 seconds later. */
+ *  delegates to {@link decideAutoMergeArm}, the SAME predicate the run flow calls. With no
+ *  history reader, absent evidence still arms; W1-T14317: an unreadable history refuses. // Why: #800 armed at proof_exec 0/5 and merged 35 seconds later. */
 export function decideSweepArm(
   pr: OpenPrView,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
@@ -14665,26 +14664,29 @@ export function decideSweepArm(
   // the run flow's classification is worktree-bound and this pass has no worktree, so the field
   // would be permanently unproducible.
   irreversible?: boolean,
-  /** W1-T3471: archive∪live evidence consulted only after the live-file miss. `complete:false`
-   *  means the archive corpus was unavailable or incomplete, so the historical fail-open remains. */
+  /** W1-T3471: archive∪live evidence consulted only after the live-file miss. W1-T14317: `complete:false`,
+   *  `undefined` or a throw means the history could not be read, so the arm is refused. */
   readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined,
 ): ArmDecision {
   const armId = reviewLedgerKeyFor(pr.taskId, pr.prNumber);
   let facts = postedArmFactsFromLedger(ledgerLines, armId, pr.headSha, pr.prUrl);
   if (!facts && readLedgerUnion) {
+    const unreadableVerdict = (why: string): string => `unreadable verdict history (${why}) and no live ` +
+      "review.posted verdict for this head — refusing to arm until a pass reads the history";
+    let union: ReturnType<typeof readLedgerUnion>;
     try {
-      const union = readLedgerUnion();
-      if (union?.complete) {
-        facts = postedArmFactsFromLedger(union.lines, armId, pr.headSha, pr.prUrl);
-        if (!facts) {
-          return {
-            arm: false,
-            reason: "complete ledger union shows no review.posted verdict for this task and head — refusing to arm",
-          };
-        }
-      }
-    } catch {
-      // An unreadable archive is not evidence of absence; retain the historical fail-open below.
+      union = readLedgerUnion();
+    } catch (error) {
+      return { arm: false, reason: unreadableVerdict(`the history read threw: ${String((error as Error)?.message ?? error)}`) };
+    }
+    if (union === undefined) return { arm: false, reason: unreadableVerdict("no history was returned") };
+    if (!union.complete) return { arm: false, reason: unreadableVerdict("the history read is incomplete") };
+    facts = postedArmFactsFromLedger(union.lines, armId, pr.headSha, pr.prUrl);
+    if (!facts) {
+      return {
+        arm: false,
+        reason: "complete ledger union shows no review.posted verdict for this task and head — refusing to arm",
+      };
     }
   }
   if (!facts) {
@@ -18168,7 +18170,7 @@ export interface SweepDeps {
   /** Host load used to admit a retry of an inconclusive proof. */
   sampleLoad?: () => HostLoadSample;
   /** W1-T3471 — bounded archive∪live reader for the arm predicate, consulted only after the
-   *  live-file verdict miss. An incomplete result preserves the historical fail-open. */
+   *  live-file verdict miss. W1-T14317: an incomplete result refuses the arm. */
   readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined;
   /** Ledger appender; defaults to appendLedger. Injectable for tests. */
   appendLine?: (path: string, line: Record<string, unknown> & { run_id: string; task_id: string; step: string }) => void;
@@ -24011,7 +24013,7 @@ export async function runSweep(
   // W1-T3471: a live miss is not enough to call a verdict absent. W1-T13288: the archive∪live history is
   // loaded OFF the loop, at most once a pass, before the first arm decision whose live lines miss; the
   // closure then answers from that snapshot with no I/O. An unread or archive-free corpus stays incomplete,
-  // so the historical fail-open remains intact.
+  // and W1-T14317 refuses the arm on it.
   let armVerdictHistory: ArmVerdictHistory | undefined;
   const readArmLedgerUnion = deps.readLedgerUnion ??
     (() => armVerdictHistory ?? { complete: false, lines: [] });

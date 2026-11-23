@@ -1056,18 +1056,41 @@ function reusingOpenPr(deps: GardenerDeps<GardenWorkspace>): GardenerDeps<Garden
 }
 
 /** One acceptance claim of a pass's PR: what it asserts and the proof that executes at its head. */
-interface PassClaim {
+export interface PassClaim {
   claim: string;
   proof: string;
 }
 
-function passClaims(actions: GardenAction[], located: Record<string, string>, heading: string): PassClaim[] {
+/** Whether any line of `text` ends with `literal`, which is where a `grep: <literal>$` proof matches. */
+const someLineEndsWith = (text: string, literal: string): boolean => text.split("\n").some((line) => line.replace(/\r$/, "").endsWith(literal));
+
+/** W1-T13987: the garden-log line this pass writes for `a`, which names its marker's class and target. */
+export const gardenLogActionLine = (a: GardenAction): string => `- ${actionLabel(a)}:`;
+
+/**
+ * One claim per acted entry. The proof anchors on the entry's DATA line, never on the `# knowledge gardener:` marker:
+ * the reviewer reads a YAML `#` line as a comment (W1-T10372), so a proof matching only the marker is capped stale.
+ * W1-T13987: when origin/main's copy of that shard already ends a line the same way, that proof passes at base and the
+ * preflight refuses the pass, so the claim proves the pass's own garden-log line for the action, named by the same
+ * class and target the marker names (Markdown has no comment grammar). When base's log already holds that line too,
+ * no per-entry proof can miss at base and the claim is left out; the heading proof still proves the pass.
+ */
+export function passClaims(actions: GardenAction[], located: Record<string, string>, heading: string, before?: { shards: ReadonlyMap<string, string>; log: string | undefined }): PassClaim[] {
   const proved = actions.filter((a) => located[a.target]);
   return [
     { claim: "this pass is recorded in the garden log", proof: `grep: ^${heading}$ in ${GARDEN_LOG}` },
-    // The proof anchors on the entry's DATA line, never on the `# knowledge gardener:` marker: the reviewer
-    // reads a YAML `#` line as a comment (W1-T10372), so a proof matching only the marker is capped stale.
-    ...proved.map((a) => ({ claim: `the gardener's ${a.class} of ${a.target} is marked in its entry`, proof: `grep: ${a.into ? `superseded_by: ${a.into}` : "lifecycle: superseded"}$ in ${located[a.target]}` })),
+    ...proved.flatMap((a) => {
+      const data = a.into ? `superseded_by: ${a.into}` : "lifecycle: superseded";
+      // No base copy of the shard (a rule-merge's doctrine file, or no read) keeps the data-line proof as before.
+      const baseShard = before === undefined ? undefined : before.shards.get(located[a.target]!);
+      const baseHoldsData = baseShard !== undefined && someLineEndsWith(baseShard, data);
+      if (baseHoldsData === false) {
+        return [{ claim: `the gardener's ${a.class} of ${a.target} is marked in its entry`, proof: `grep: ${data}$ in ${located[a.target]}` }];
+      }
+      const logLine = gardenLogActionLine(a);
+      if (before?.log !== undefined && before.log.split("\n").some((line) => line.startsWith(logLine))) return [];
+      return [{ claim: `the gardener's ${a.class} of ${a.target} is recorded in this pass's garden log`, proof: `grep: ^${logLine} in ${GARDEN_LOG}` }];
+    }),
   ];
 }
 
@@ -1206,7 +1229,7 @@ function writePassGolden(root: string, before: PassBefore, changedShards: string
   const section = log.slice(log.lastIndexOf(`\n${heading}\n`) + 1);
   files.set(`checkout/${GARDEN_LOG}`, `${log.slice(0, log.indexOf("\n## ") + 1)}\n${section}`);
   files.set("diff.patch", patch.join(""));
-  const claims = passClaims(actions, located, heading);
+  const claims = passClaims(actions, located, heading, before);
   files.set("criteria.yaml", stringifyYaml(claims, { lineWidth: 0 }));
   const golden = existsSync(join(dir, "golden.yaml")) ? readFileSync(join(dir, "golden.yaml"), "utf8") : "";
   const criteriaAt = golden.search(/^criteria:[ \t]*$/m);
@@ -1220,14 +1243,14 @@ function writePassGolden(root: string, before: PassBefore, changedShards: string
   return [...new Set([...stale, ...[...files.keys()].map((rel) => `${KNOWLEDGE_RETIRE_GOLDEN}/${rel}`)])];
 }
 
-function prBody(actions: GardenAction[], located: Record<string, string>, heading: string): string {
+function prBody(actions: GardenAction[], located: Record<string, string>, heading: string, before?: PassBefore): string {
   const lines = [
     "The knowledge gardener (W1-T4095) tended the knowledge base. Every change is reversible: nothing is deleted, and a superseded learning keeps its text and stops being injected.",
     "",
     ...actions.map((a) => `- **${a.class}**${a.target ? ` \`${a.target}\`` : ""}${a.into ? ` into \`${a.into}\`` : ""}: ${a.reason}`),
     "",
     "## Acceptance",
-    ...passClaims(actions, located, heading).flatMap((c) => [`- claim: ${c.claim}`, `  proof: ${c.proof}`]),
+    ...passClaims(actions, located, heading, before).flatMap((c) => [`- claim: ${c.claim}`, `  proof: ${c.proof}`]),
   ];
   return lines.join("\n");
 }
@@ -1342,7 +1365,7 @@ export function knowledgeGardenSpec(deps: GardenerDeps<GardenWorkspace>): Garden
             ? `chore(knowledge): the gardener repairs ${nonRefresh.length} dangling reference(s)`
             : `chore(knowledge): the gardener folds and retires ${nonRefresh.length} learnings`;
       const ruleMergeLocated = Object.fromEntries(plan.actions.filter((a) => a.class === "rule-merge" && a.at).map((a) => [a.target, a.at!]));
-      const body = prBody(plan.actions, { ...applied.located, ...ruleMergeLocated }, heading);
+      const body = prBody(plan.actions, { ...applied.located, ...ruleMergeLocated }, heading, before);
       // W1-T5837: a retire/merge that changed a shard is a learnings data change, which the prompt-surface
       // gate admits only on a golden verdict — so the pass writes its own knowledge-retire case.
       const golden = applied.paths.length > 0 ? writePassGolden(ws.root, before, applied.paths, plan.actions, applied.located, heading, body) : [];

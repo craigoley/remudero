@@ -804,8 +804,12 @@ sweep:
   # MEASURED 2026-11-01: 506 branches on origin, 411 of them run branches with no PR; 296 of tasks
   # already shipped and older than 7 days, 83 of unshipped tasks older than 14 days. Read the
   # shadow rows before flipping this.
+  #
+  # ARMED by operator ruling 2026-11-23 ("Yes, all three" on the branch-reaper card). MEASURED that
+  # morning: 618 branches on origin, 316 reaper passes in 7 days, each deleting 0, and the shadow
+  # lane naming 462 stale holds (367 credited, 95 unshipped) on every pass.
   armStaleBranchArchive:
-    value: false
+    value: true
     origin: "net-new"
 
   # W1-T905: "repair the instance, FILE THE CLASS" (fb-1784842083584-6cc22a, second half). A

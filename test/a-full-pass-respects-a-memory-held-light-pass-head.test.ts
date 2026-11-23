@@ -36,6 +36,8 @@ function fixture(waitForMemory = true, holdJudge = waitForMemory, priorStrikes: 
   };
   if (priorStrikes === "re-arm") {
     Object.assign(pr, { checksState: "green", reviewState: "success", redRequiredChecks: [], ciFailures: [] });
+    rows.push({ step: "review.posted", task_id: pr.taskId, pr_url: pr.prUrl, head_sha: pr.headSha,
+      state: "success", capped: false, plan_only: false });
     rows.push({ step: "sweep.disposed", pr_number: pr.prNumber, pr_url: pr.prUrl,
       head_sha: pr.headSha, disposition: "mergeable", acted: true, arm_outcome: "armed" });
     for (let i = 0; i < MAX_REARMS_AFTER_DISARM_PER_HEAD; i++) {
