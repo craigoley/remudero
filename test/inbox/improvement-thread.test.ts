@@ -1043,12 +1043,12 @@ test("native improvement gardener registration preserves the off switch and sour
     for (const body of [
       JSON.stringify({ version: 1, proposals: exceedsFollowUpBound }),
       JSON.stringify({ version: 1, proposals: [...unrelated, { id: "damaged-unrelated-row" }] }),
-      JSON.stringify({ version: 1, proposals: unrelated }).padEnd(2 * 1024 * 1024 + 1, " "),
+      JSON.stringify({ version: 1, proposals: unrelated }).padEnd(8 * 1024 * 1024 + 1, " "),
     ]) {
       fs.writeFileSync(nativeRegistry, body);
       const held = await outcomes.reconcileManagedImprovementEffects({ stateDir, repoRoot: root, repository: "acme/core", log: () => {}, fetch: () => assert.fail("a source-bound refusal cannot start evidence reads") });
       assert.equal(held.state, "partial"); assert.equal(held.publishedScopes, 0);
-      assert.equal(fs.readFileSync(projection, "utf8"), previous, "the 512-improvement cap, whole-source validation and 2 MiB read bound still preserve the prior projection");
+      assert.equal(fs.readFileSync(projection, "utf8"), previous, "the 512-improvement cap, whole-source validation and 8 MiB read bound still preserve the prior projection");
       assert.equal(fs.readFileSync(nativeRegistry, "utf8"), body, "a refusal cannot edit another owner's source");
     }
   });
