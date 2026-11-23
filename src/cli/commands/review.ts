@@ -104,6 +104,16 @@ function repeatedFlagValues(rest: string[], flag: string): string[] {
   return values;
 }
 
+/** W1-T12152: the review lane's prompt template — {@link buildReviewPrompt} and {@link reviewerVerdictContract} over a
+ *  placeholder task with one criterion, every task, PR and evidence slot a named marker. It is rendered before any task
+ *  text is filled in, so two PRs reviewed under one contract record one prompt revision. */
+export function reviewPromptTemplate(): string {
+  return buildReviewPrompt({ task: { id: "${TASK_ID}", acceptance: [{ claim: "${CLAIM}", proof: "${PROOF}" }] },
+    prUrl: "${PR_URL}", owner: "${OWNER}", repo: "${REPO}", headSha: "${HEAD_SHA}", evidencePath: "${EVIDENCE_PATH}",
+    proofEvidencePath: "${PROOF_EVIDENCE_PATH}", declaredFiles: ["${DECLARED_PATH}"], changedFiles: ["${CHANGED_PATH}"],
+    widenedFiles: [] }) + "\n" + reviewerVerdictContract(1);
+}
+
 export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId" | "excludeProviders" | "planLintRetryHead"> {
   const { JUDGE_AT_OWN_START_FLAG, acceptedReviewAttemptId } = host;
   const mode = flagValue(rest, "--execution-mode");
@@ -1374,6 +1384,8 @@ export async function runReview(host: ReviewCommandHost, args: {
           }) +
           "\n" +
           reviewerVerdictContract(criteria.length);
+        // W1-T12152: the assignment's prompt revision hashes this template, never the filled prompt above.
+        const promptTemplate = reviewPromptTemplate();
         const stopTelemetry = args.workerTelemetry?.startPolling();
         let reviewer: WorkerResult;
         const reviewerClockBoundMs =
@@ -1425,6 +1437,7 @@ export async function runReview(host: ReviewCommandHost, args: {
                 ...reviewerClockBound,
                 onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
                 streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
+                promptTemplate,
                 prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
               }),
             );
@@ -1495,6 +1508,7 @@ export async function runReview(host: ReviewCommandHost, args: {
               sandboxReadRoots: snapshot.dependencyReadRoots,
               runId: args.runId, taskId: task.id,
               clockBound: { boundMs: Math.min(reviewerClockBoundMs, 60_000) },
+              promptTemplate,
               prompt,
             }));
             assertReviewerSnapshotIntegrity(host, snapshot.cwd, headSha);

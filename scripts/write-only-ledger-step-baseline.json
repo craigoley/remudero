@@ -1427,6 +1427,8 @@
   "recordOnly": {
     "config.randomised_finding": "An operator-facing finding naming the routing setting that can carry a randomised winner the mounts table cannot express; the config gardener re-reads it only to write each finding once per evidence day.",
     "config.randomised_recommendations_unread": "A diagnostic for a failed read of the randomised evidence; it records the error and changes no candidate.",
+    "dispatch.ops_catalog_hold_cleared": "W1-T14532: a diagnostic naming the ops dispatch hold a cycle cleared; nothing reads it, and it changes no dispatch or move decision.",
+    "dispatch.ops_selection_changed": "An audit row for the operator (W1-T13462): it names the previous and the new ops dispatch selection when the flag changes between cycles, never the repository; nothing decides on it.",
     "dispatch.selection_timing": "Observability for W1-T13286: per-probe selection timing that an operator reads to pick the next speed fix; no decision reads it (invariant measuring-changes-no-decision).",
     "object_reaper.gc_log_cleared": "An operator-facing record that the reaper removed a stale gc.log after a clean full pass, with its age and first line; the following repository_maintenance.complete row carries the gc.log verdict every reader uses, so nothing re-reads it.",
     "reviewer.health_save_superseded": "A diagnostic that an evaluation skipped its save because a newer health file was already on disk; the newer file is the state every reader uses, so nothing re-reads the row.",
