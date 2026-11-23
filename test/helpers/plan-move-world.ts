@@ -28,7 +28,7 @@ export function blobAt(dir: string, spec: string): string | undefined {
   catch (error) { void error; return undefined; }
 }
 export const record = (id: string, extra = "") =>
-  `- id: ${id}\n  title: Move fixture ${id}\n  repo: remudero\n  type: implement\n  priority: 1\n  status: queued\n  verify: auto\n${extra}`;
+  `- id: ${id}\n  title: Move fixture ${id}\n  repo: remudero\n  type: implement\n  priority: 1\n  status: queued\n  verify: auto\n  risk: low\n  attempts: 0\n  acceptance:\n    - claim: \"the move fixture holds\"\n      proof: \"grep: fixture in test/fixture.test.ts\"\n${extra}`;
 export const shard = (id: string) => `plan/tasks.d/${id}.yaml`;
 
 export function moveWorld(t: TestContext, publicRecords: Record<string, string>, opsRecords: Record<string, string> = {}) {

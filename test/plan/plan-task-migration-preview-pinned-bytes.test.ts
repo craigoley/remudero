@@ -12,7 +12,7 @@ import { parseTasksFromYaml } from "#src/lib/plan.js";
 import { PreviewUnknown, selectPlanTaskMigration } from "#src/lib/plan-task-migration.js";
 import type { OpsCatalogBoundsIo } from "#src/lib/ops-catalog-source.js";
 
-const record = (id: string, priority = 1, deps: string[] = []) => { const text = `- id: ${id}\n  title: migration fixture\n  repo: remudero\n  type: implement\n  priority: ${priority}\n  depends_on: ${JSON.stringify(deps)}\n`; assert.equal(parseTasksFromYaml(text,"fixture")[0]!.id,id); return text; };
+const record = (id: string, priority = 1, deps: string[] = []) => { const text = `- id: ${id}\n  title: migration fixture\n  repo: remudero\n  type: implement\n  priority: ${priority}\n  depends_on: ${JSON.stringify(deps)}\n  verify: auto\n  risk: low\n  status: queued\n  attempts: 0\n  acceptance:\n    - claim: the fixture holds\n      proof: \"grep: fixture in test/fixture.test.ts\"\n`; assert.equal(parseTasksFromYaml(text,"fixture")[0]!.id,id); return text; };
 function fixture(t: TestContext, records: Record<string, string> = {"W1-T1.yaml": record("W1-T1")}, opsText = "[]\n", publicSeed: Record<string, string> = {}, opsSeed: Record<string, string> = {}) {
   const root = ownedFixtureDir(t, "migration-preview").dir;
   const seed = {"plan/tasks.yaml": "[]\n", ...Object.fromEntries(Object.entries(records).map(([p,s]) => ["plan/tasks.d/"+p,s])), ...publicSeed};
