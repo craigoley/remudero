@@ -772,6 +772,16 @@ export function sweepArmTaskId(pr: { taskId?: string; prNumber: number }, armSes
   return armSessionPrs ? (pr.taskId ?? `PR-${pr.prNumber}`) : pr.taskId;
 }
 
+/** W1-T10832 — the head prefix of a PR only its OWNER merges: core's daily site data import
+ *  (`field-trials/daily-field-note`, src/lib/field-trials-site-import.ts). With `armSessionPrs` on, a
+ *  trailer-less PR arms as `PR-<n>`, so the branch shape alone cannot keep the sweep off it. */
+export const OWNER_MERGE_ONLY_HEAD_PREFIX = "field-trials/";
+
+/** W1-T10832 — is this head one the sweep never reviews, fixes, arms, merges or closes? */
+export function isOwnerMergeOnlyHead(head: string | undefined): boolean {
+  return typeof head === "string" && head.startsWith(OWNER_MERGE_ONLY_HEAD_PREFIX);
+}
+
 /** W1-T5813 — the arm's ledger gate reads only THIS PR's `review.posted` rows (a legacy row with
  *  no `pr_url` stays). `unfiled` is the sentinel every run-unfiled PR shares, so the gate's last-row-wins
  *  read handed #9155 another PR's verdict: `ledger-refused` at 03:37, 04:02, 04:10 and 04:20Z. */
@@ -3721,6 +3731,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         });
         await primaryShadowAlerts.refuse(pr).catch(primaryShadowAlertFailed);
         return "shadow-refused";
+      }
+      // W1-T10832: an owner-merge-only head never reaches attemptArm, whatever armSessionPrs says.
+      if (isOwnerMergeOnlyHead(pr.headRefName)) {
+        log("automerge.arm_skipped", { pr_url: pr.prUrl, head_ref: pr.headRefName, outcome: "hold-refused",
+          reason: "owner-merge-only head (W1-T10832): only the owner merges it" });
+        return "hold-refused";
       }
       // W1-T5492: select attemptArm's existing clean-status fallback without another --auto write.
       const idleDeps: ArmDeps<true> | undefined = mode === "armed-idle" ? {
@@ -13691,6 +13707,16 @@ export function isFixStrikeExhausted(pr: OpenPrView, policy: SweepPolicy): boole
 const ROLLUP_UNREAD_REASON = "checks and review unread this pass (rollup read failed) — re-reading next pass";
 
 export const DISPOSITION_RULES: readonly DispositionRule[] = [
+  {
+    // W1-T10832 — THE OWNER'S MERGE IS THE REVIEW. Core's daily site import PR is published only by the
+    // owner merging it, so no lane may review, fix, arm, merge or close it: FIRST, above every close-out row,
+    // because a PR left past the page's 72 h label stays open and is refreshed in place by core.
+    disposition: "wait",
+    when: (pr) => isOwnerMergeOnlyHead(pr.headRefName),
+    blocker: "operator-hold",
+    reason: (pr) => `owner-merge-only head ${pr.headRefName ?? ""} (W1-T10832): the owner's merge is the review — `
+      + "the sweep never reviews, arms or merges it",
+  },
   {
     // W1-T920 (DECISIONS.md #1987) — ROUTED THROUGH THE EXISTING "stale" disposition, never a new
     // one: that case already closes reversibly and already writes ONE `sweep.disposed` row, and
