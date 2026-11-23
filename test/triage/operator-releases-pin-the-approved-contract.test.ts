@@ -79,7 +79,7 @@ test("an unpinned operator release cannot dispatch or be reapproved by a model",
   assert.ok(f.rows.some(row => row.step === "machine_judge.reapproval_required"));
 });
 
-test("an exact current operator approval survives rotation and its verification transition", async t => {
+test("an exact current operator approval survives rotation and keeps its verify field", async t => {
   const f = fixture(t);
   writeFileSync(f.ledger, JSON.stringify({ step: "ratify.approved", task_id: ID }) + "\n");
   writeFileSync(join(f.stateDir, "operator-releases.json"), JSON.stringify({ releases: { [ID]: "2026-10-01T00:00:00Z" } }));
@@ -99,7 +99,7 @@ test("an exact current operator approval survives rotation and its verification 
   const report = await f.judge();
   assert.deepEqual(report.proceeded, [ID]);
   assert.equal(f.modelCalls(), 0);
-  assert.equal(f.task().verify, "auto");
+  assert.equal(f.task().verify, "human", "W1-T12224: the release authorizes dispatch, never verify: auto");
   assert.equal(operatorReleasePin(f.task()), pin);
   assert.equal(readOperatorReleases(f.stateDir, f.plan().tasks).has(ID), true);
 });
@@ -133,12 +133,12 @@ test("an operator contract that changes in the landing tree cannot receive a new
   assert.equal(f.modelCalls(), 0);
 });
 
-test("release pins ignore only bookkeeping and the verification transition", t => {
+test("release pins ignore only bookkeeping and bind the verify field", t => {
   const f = fixture(t);
   const task = f.task();
   const pin = operatorReleasePin(task);
-  assert.equal(operatorReleasePin({ ...task, sourcePath: "elsewhere", attempts: 99, verify: "auto" }), pin);
-  for (const update of [{ design: "expanded" }, { amendment: "expanded" }, { files: ["src/expanded.ts"] },
+  assert.equal(operatorReleasePin({ ...task, sourcePath: "elsewhere", attempts: 99 }), pin);
+  for (const update of [{ verify: "auto" }, { design: "expanded" }, { amendment: "expanded" }, { files: ["src/expanded.ts"] },
     { dispatch_hold: true }, { retirement: "retired" }, { status: "blocked" }, { budget_usd: 200 }]) {
     assert.notEqual(operatorReleasePin({ ...task, ...update } as Task), pin);
   }
@@ -268,7 +268,7 @@ async function parkedReapprovalControl(t: TestContext, store: "ledger" | "durabl
   assert.equal(approval.released, true);
   assert.deepEqual((await run()).proceeded, [ID]);
   assert.equal(modelCalls, 1, "explicit approval uses its own authority without another model call");
-  assert.equal(f.task().verify, "auto");
+  assert.equal(f.task().verify, "human", "W1-T12224: the release authorizes dispatch, never verify: auto");
 }
 
 test("an unpinned operator release cannot dispatch or be reapproved by a model during parked escalation re-asks", async t => {

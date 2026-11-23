@@ -577,6 +577,9 @@ export function renderRuledShard(
   // verify: line. The comment is kept on its own line above, so the rewrite never drops the filer's words.
   let verifyAt = lines.findIndex((l) => /^ {2}verify:\s*[^\s#]+\s*(#.*)?$/.test(l));
   if (verifyAt < 0) return { refused: `${relPath} has no verify: line` };
+  // A ruling-shaped record stays with the operator, as it did when its release was refused at verify: auto.
+  const rulingShaped = byOperator ? rulingVerifyViolation({ ...shardRecord(text, relPath), verify: "auto" }) : undefined;
+  if (rulingShaped !== undefined) return { refused: `${rulingShaped.check}: ${rulingShaped.message}`, lint: true };
   if (!byOperator) {
     const comment = /^ {2}verify:\s*[^\s#]+\s*#\s*(.*?)\s*$/.exec(lines[verifyAt]!)?.[1];
     if (comment) lines.splice(verifyAt++, 0, `  # ${comment}`);
