@@ -557,6 +557,58 @@ test("W1-T13160: the selector still selects every suite it selected before the r
   }
 });
 
+const parkedPrSuite = "test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts";
+const flowMergeabilitySuite = "test/sweep/flow-other-not-positively-mergeable.test.ts";
+const parkedPrEdges = ["src/lib/sweep.ts", flowMergeabilitySuite];
+const parkedPrInput: AffectedSuitesInput = {
+  ...escalationRetirabilityInput,
+  files: new Map([
+    ...escalationRetirabilityInput.files,
+    [flowMergeabilitySuite, 'import { runSweep } from "#src/lib/sweep.js";'],
+    [parkedPrSuite, 'import { runSweep } from "#src/lib/sweep.js";'],
+  ]),
+};
+
+test("W1-T13161: the selector covers the recorded suite for every recorded edge", () => {
+  for (const edge of parkedPrEdges) {
+    const selection = selectAffectedSuites([edge], parkedPrInput);
+    assert.equal(selection.fullRun, false, edge);
+    assert.ok(selection.narrow?.includes(parkedPrSuite), edge);
+  }
+
+  const unrelated = selectAffectedSuites(["test/unrelated.test.ts"], parkedPrInput);
+  assert.deepEqual(unrelated.narrow, ["test/unrelated.test.ts"]);
+
+  const files = new Map(parkedPrInput.files);
+  files.delete(parkedPrSuite);
+  for (const edge of parkedPrEdges) {
+    const selection = selectAffectedSuites([edge], { ...parkedPrInput, files });
+    assert.ok(!selection.narrow?.includes(parkedPrSuite), edge);
+  }
+});
+
+test("W1-T13161: the shadow record reads the recorded suite as selected for every recorded edge", () => {
+  for (const edge of parkedPrEdges) {
+    const selection = selectAffectedSuites([edge], parkedPrInput);
+    const { failures } = shadowRecord(selection, [parkedPrSuite], { [parkedPrSuite]: "failed" });
+    assert.deepEqual(failures, [
+      { file: parkedPrSuite, floor: "selected", narrow: "selected", retry: "failed" },
+    ], edge);
+  }
+});
+
+test("W1-T13161: the selector still selects every suite it selected before the repair", () => {
+  for (const edge of parkedPrEdges) {
+    const { suites, narrow } = selectAffectedSuites([edge], parkedPrInput);
+    for (const prior of [escalationRetirabilitySuite, flowMergeabilitySuite]) {
+      assert.ok(suites.includes(prior), `${edge} must retain ${prior} in the floor`);
+    }
+    assert.ok(narrow, edge);
+    assert.ok(narrow.includes(escalationRetirabilitySuite), edge);
+    if (edge === flowMergeabilitySuite) assert.ok(narrow.includes(flowMergeabilitySuite));
+  }
+});
+
 test("W1-T6751: the precheck census is selected for each recorded miss edge", () => {
   const census = "test/every-ci-census-is-asked-before-the-push.test.ts";
   const edges = [
