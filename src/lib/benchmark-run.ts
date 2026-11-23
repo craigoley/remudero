@@ -651,8 +651,9 @@ export function namedTaskWork(taskId: string | undefined, readTask: BenchmarkTas
   try {
     return readTask(taskId) ?? { noTaskReason: "named-task-has-no-record" };
   } catch {
-    const noTaskReason = "task-record-unreadable";
-    return { noTaskReason };
+    // An unreadable record is a named gap, never a dropped receipt or a blocked worker.
+    const reason = "task-record-unreadable";
+    return { noTaskReason: reason };
   }
 }
 

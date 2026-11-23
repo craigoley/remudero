@@ -20,13 +20,28 @@ type Receipt = { work: Record<string, unknown>; stack: Record<string, unknown> }
 
 const TASK_ID = "W1-T99121";
 const TASK_FILES = ["src/lib/widget.ts", "test/widget.test.ts"];
+const MONOLITH_TASK_ID = "W1-T99122";
 
 /** A plan with one sharded task record, the shape `plan/tasks.d` files are filed in. */
 function planWithTask(t: TestContext): { root: string; planDir: string; config: Config } {
   const root = ownedFixtureDir(t, "assignment-names-its-work").dir;
   const planDir = join(root, "plan");
   mkdirSync(join(planDir, "tasks.d"), { recursive: true });
-  writeFileSync(join(planDir, "tasks.yaml"), "[]\n");
+  // An older task still lives in the monolith, not a shard.
+  writeFileSync(join(planDir, "tasks.yaml"), `- id: ${MONOLITH_TASK_ID}
+  title: "An older widget"
+  repo: remudero
+  depends_on: []
+  type: implement
+  verify: auto
+  risk: low
+  origin: fixture
+  files: [docs/widget.md]
+  status: queued
+  acceptance:
+    - claim: "it reads"
+      proof: "unit test: it reads"
+`);
   writeFileSync(join(planDir, "tasks.d", `${TASK_ID}-a-widget.yaml`), `- id: ${TASK_ID}
   title: "A widget"
   repo: remudero
@@ -97,6 +112,8 @@ test("W1-T12152 criterion 1: an assignment for fix or review work on a pull requ
       withReceiptWork(baseArgs(config, { taskId: TASK_ID, runId: "review-run" }), { taskClass }));
     // A fix rung on the task's pull request carries nothing but the task id; the record supplies both.
     await ledgeredNonDispatchSpawn("main-repair-fix", assigningProvider, planDir)(baseArgs(config, { taskId: TASK_ID, runId: "fix-run" }));
+    // A task filed in the monolith is read from there.
+    await ledgeredNonDispatchSpawn("review", assigningProvider, planDir)(baseArgs(config, { taskId: MONOLITH_TASK_ID, runId: "old-task-run" }));
     // The falsifier: the same review with the task left out records neither.
     await ledgeredNonDispatchSpawn("review", assigningProvider, planDir)(baseArgs(config, { runId: "taskless-review-run" }));
   });
@@ -107,6 +124,9 @@ test("W1-T12152 criterion 1: an assignment for fix or review work on a pull requ
     assert.deepEqual(work.taskClass, build.taskClass, `${runId}: the task's class, as the build assignment records it`);
     assert.deepEqual(work.taskClass, { state: "observed", value: taskClass });
   }
+  const old = receiptOf(rows.find((row) => row.run_id === "old-task-run")).work;
+  assert.deepEqual([old.risk, old.taskClass], [{ state: "observed", value: "low" },
+    { state: "observed", value: deriveTaskClass({ files: ["docs/widget.md"] }) }], "the monolith record's risk and class");
   const taskless = receiptOf(rows.find((row) => row.run_id === "taskless-review-run")).work;
   assert.equal((taskless.risk as { state: string }).state, "unavailable", "no task, so no risk");
 });
@@ -117,6 +137,8 @@ test("W1-T12152 criterion 2: an assignment for work with no task records the pip
     await ledgeredNonDispatchSpawn("triage", assigningProvider, planDir)(baseArgs(config, { runId: "no-task-run" }));
     await ledgeredNonDispatchSpawn("triage", assigningProvider, planDir)(baseArgs(config, { runId: "unfiled-run", taskId: "W1-T99999" }));
     await benchmarkNonDispatchSpawn("ci-judge", assigningProvider)(baseArgs(config, { runId: "unread-run", taskId: TASK_ID }));
+    await benchmarkNonDispatchSpawn("ci-judge", assigningProvider, () => { throw new Error("EIO"); })(
+      baseArgs(config, { runId: "unreadable-run", taskId: TASK_ID }));
     // The inbox-draft lane writes its own assignment row (`ledgerNonDispatchAssignment`), with no task.
     const draft = buildInboxDraftSpawnArgs({ cwd: config.root, settingsFile: join(REPO_ROOT, "settings/worker.json"), prompt: "draft",
       mount: { model: "haiku", effort: "low", maxTurns: 5 } as never, config, disallowedTools: [] });
@@ -127,6 +149,7 @@ test("W1-T12152 criterion 2: an assignment for work with no task records the pip
     ["no-task-run", "triage", "work-has-no-task"],
     ["unfiled-run", "triage", "named-task-has-no-record"],
     ["unread-run", "ci-judge", "task-record-not-read-by-lane"],
+    ["unreadable-run", "ci-judge", "task-record-unreadable"],
     ["inbox-draft-draft-assignment", "inbox-draft", "work-has-no-task"],
   ];
   for (const [runId, pipeline, reason] of expected) {
