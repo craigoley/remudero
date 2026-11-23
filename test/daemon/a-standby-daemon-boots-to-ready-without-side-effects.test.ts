@@ -11,7 +11,7 @@ import { acquireDrainLock } from "#src/lib/drain-lock.js";
 import type { DaemonSummary } from "#src/lib/daemon.js";
 import { daemonTargetRecordPath } from "#src/lib/repo-location.js";
 import { handoffExitPath, leaveExitCodeForEntrypoint, standbyPromotePath, standbyReadyPath } from "#src/lib/daemon-standby.js";
-import { daemonCommand } from "#src/run-task.js";
+import { daemonCommand } from "#test/helpers/run-task-daemon.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
