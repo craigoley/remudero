@@ -141,11 +141,18 @@ async function fleet(opts: FleetOpts) {
 }
 
 function claimSweepFor(reserver: DispatchClaimReserverAsync): NonNullable<FleetOpts["claimSweep"]> {
+  const { listHeld } = reserver;
+  assert.ok(listHeld, "the sweep fixture requires a held-claims reader");
   return {
     claimSweepSettled: Promise.resolve(),
-    releaseLandedClaims: (isMerged) => releaseLandedDispatchClaims(reserver, {
-      isMerged, isIndeterminate: () => false, log: () => {},
-    }),
+    releaseLandedClaims: (isMerged) => {
+      // Give the scheduler and sweep the same origin read, including any read failure.
+      const listing = Promise.resolve().then(() => listHeld.call(reserver));
+      const sweep = releaseLandedDispatchClaims({ ...reserver, listHeld: () => listing }, {
+        isMerged, isIndeterminate: () => false, log: () => {},
+      });
+      return Object.assign(sweep, { listing });
+    },
   };
 }
 
