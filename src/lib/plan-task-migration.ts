@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
-import { join, relative, sep } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_TREE_ENTRIES, opsCatalogBoundRefusal, type OpsCatalogBoundsIo } from "./ops-catalog-source.js";
+import {
+  OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_TREE_ENTRIES, opsCatalogBoundRefusal, type OpsCatalogBoundsIo, type OpsCatalogGrowthPoint,
+} from "./ops-catalog-source.js";
 import { parse as parseYaml } from "yaml";
-import { defaultGitRunnerAsync, readBlobsAtRefAsync, type Plan } from "./plan.js";
+import { defaultGitRunnerAsync, readBlobsAtRefAsync, type Plan, type Task } from "./plan.js";
 import { createPlanRevisionStore } from "./plan-revision-store.js";
 import { dispatchOrder } from "./drain.js";
 import { taskIdFromRunBranch, creditsByAnchoredTrailer } from "./status.js";
@@ -21,6 +23,17 @@ export type MigrationGraphqlReader = (query: string) => Promise<unknown>;
 const graphqlRead: MigrationGraphqlReader = query => ghJsonAsync(["api", "graphql", "-f", `query=${query}`], undefined, undefined, { fresh: true });
 // BACKSTOP: refuse a runaway explicit preview whole, never truncate a population into absence.
 const MAX_CANDIDATE_LOOKUPS = 32;
+/** The page the open-PR read takes of each public pull request's files: a pull request of more files reads UNKNOWN. */
+const OPEN_PR_FILES_PAGE = 100;
+/**
+ * W1-T14345 PRIMARY CONTROL: the most tasks one move step carries, derived from the readers' own limits: each batched task costs one
+ * merge-credit lookup, and the step's public REMOVE pull request must stay readable by the open-PR files page. The ops
+ * gate's own per-pull-request limit (50 records, remudero-ops scripts/ops-gate.rb) is above both. The catalog's room
+ * (judgeOpsBatch) may stop a batch sooner.
+ */
+export const MOVE_BATCH_BOUND = Math.min(MAX_CANDIDATE_LOOKUPS, OPEN_PR_FILES_PAGE);
+/** W1-T14345 (operator ruling 2026-11-22): an open record is queued or blocked; merged and done records stay as history. */
+const OPEN_STATUSES: ReadonlySet<string> = new Set(["queued", "blocked"]);
 // The measured public corpus is 34,444,886 bytes. Leave 16 MiB for framing below the shared 64 MiB Git buffer.
 const MAX_CATALOG_BYTES = 48 * 1024 * 1024;
 export class PreviewUnknown extends RmdError {
@@ -42,9 +55,12 @@ export function migrationOptions(args: readonly string[]): Options | undefined {
   const o = Object.fromEntries(names.map((key) => [key.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase()), values.get(key)!])) as Options;
   return sha(o.publicCommit) && sha(o.opsCommit) && repository(o.publicRepo) && repository(o.opsRepo) && o.publicRepo !== o.opsRepo && o.publicRepo.split("/")[1] === "remudero" ? o : undefined;
 }
-/** W1-T14368: what an ops copy is judged on: the read catalog's sizes, as the API reader counts them. */
-export interface OpsCatalogSize { shards: number; bytes: number; treeEntries: number; shardDir: boolean }
-export async function catalog(root: string, commit: string, external = false): Promise<{ plan: Plan; originals: Map<string, Original>; size?: OpsCatalogSize }> {
+/** W1-T14368: what an ops copy is judged on: the read catalog's sizes, as the API reader counts them. W1-T14345:
+ *  `dayStart` is the catalog at the start of the UTC day `sizeAt` falls in, read from the pinned history; absent when
+ *  the history holds no commit before it. */
+export interface OpsCatalogSize { shards: number; bytes: number; treeEntries: number; shardDir: boolean; dayStart?: OpsCatalogGrowthPoint }
+const DAY_MS = 86_400_000;
+export async function catalog(root: string, commit: string, external = false, sizeAt?: number): Promise<{ plan: Plan; originals: Map<string, Original>; size?: OpsCatalogSize }> {
   const git = defaultGitRunnerAsync(root);
   if ((await git(["rev-parse", `${commit}^{commit}`])).trim() !== commit) return unknown("catalog_unreadable");
   const within = (path: string): string => {
@@ -98,6 +114,10 @@ export async function catalog(root: string, commit: string, external = false): P
       if (treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) return unknown("catalog_incompatible");
     }
     size = { shards: files.filter(file => file.shard).length, bytes: declaredBytes, treeEntries, shardDir: hasShards };
+    if (sizeAt !== undefined) {
+      const dayStart = await catalogSizeBefore(git, commit, Math.floor(sizeAt / DAY_MS) * DAY_MS, monolith, shardDir);
+      if (dayStart) size.dayStart = dayStart;
+    }
   }
   const texts = await readBlobsAtRefAsync(git, commit, files.map(f => f.path));
   let bytes = 0;
@@ -119,19 +139,53 @@ export async function catalog(root: string, commit: string, external = false): P
 }
 
 /**
+ * W1-T14345: the catalog the reader anchors its daily growth on: the newest first-parent commit before `at` (the start
+ * of a UTC day), counted as {@link catalog} counts the read one. Undefined when the history holds no such commit.
+ */
+async function catalogSizeBefore(git: ReturnType<typeof defaultGitRunnerAsync>, commit: string, at: number, monolith: string, shardDir: string):
+  Promise<OpsCatalogGrowthPoint | undefined> {
+  const start = (await git(["rev-list", "-1", "--first-parent", `--before=@${Math.floor(at / 1000)}`, commit])).trim();
+  if (!start) return undefined;
+  let shards = 0, bytes = 0;
+  for (const line of (await git(["ls-tree", "-rlz", start, "--", monolith, shardDir])).split("\0").filter(Boolean)) {
+    const m = /^100644 blob [a-f0-9]{40} +([0-9]+)\t([^\r\n]+)$/.exec(line);
+    if (!m) return unknown("catalog_unreadable");
+    bytes += Number(m[1]);
+    if (m[2]!.startsWith(shardDir) && !m[2]!.slice(shardDir.length).includes("/") && /\.ya?ml$/.test(m[2]!)) shards++;
+  }
+  return { at, shards, bytes };
+}
+
+/**
  * W1-T14368: the ops catalog a copy would produce, judged on the API reader's own bounds: the read catalog plus one
  * shard of the copy's bytes (the original and its one moved_from line), grown from the catalog it read. A copy the
  * reader would refuse is refused here, before it lands and stops ops dispatch.
  */
 export function judgeOpsCopy(size: OpsCatalogSize, original: string, publicCommit: string, io: OpsCatalogBoundsIo = {}): void {
-  const indent = /\n([ \t]+)\S/.exec(original)?.[1] ?? "";
-  const copyBytes = Buffer.byteLength(original) + Buffer.byteLength(`${indent}moved_from: remudero@${publicCommit}\n`);
-  // The copy adds one shard-tree entry, and the shard tree's own entry in the plan tree when it starts one.
-  const treeEntries = size.treeEntries + 1 + (size.shardDir ? 0 : 1);
-  if (copyBytes > OPS_CATALOG_MAX_BLOB_BYTES || treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) return unknown("catalog_incompatible");
+  judgeOpsBatch(size, [original], publicCommit, io);
+}
+
+/**
+ * W1-T14345: the same judgement for the catalog one batched COPY would produce: every copy's bytes and shard at once.
+ * Besides the read catalog, the copy is judged against the catalog at the start of its UTC day (the reader anchors its
+ * daily growth on the first catalog it accepts that day), so the steps of one day together never ask the catalog for
+ * more growth than the reader's bound allows: the step rate follows the catalog's daily growth.
+ */
+export function judgeOpsBatch(size: OpsCatalogSize, originals: readonly string[], publicCommit: string, io: OpsCatalogBoundsIo = {}): void {
+  let bytes = 0;
+  for (const original of originals) {
+    const indent = /\n([ \t]+)\S/.exec(original)?.[1] ?? "";
+    const copyBytes = Buffer.byteLength(original) + Buffer.byteLength(`${indent}moved_from: remudero@${publicCommit}\n`);
+    if (copyBytes > OPS_CATALOG_MAX_BLOB_BYTES) return unknown("catalog_incompatible");
+    bytes += copyBytes;
+  }
+  // Each copy adds one shard-tree entry, and the shard tree's own entry in the plan tree when the batch starts one.
+  const treeEntries = size.treeEntries + originals.length + (size.shardDir ? 0 : 1);
+  if (treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) return unknown("catalog_incompatible");
   const clock = io.clock ?? systemClock;
-  if (opsCatalogBoundRefusal({ shards: size.shards + 1, bytes: size.bytes + copyBytes }, { at: clock.now(), shards: size.shards, bytes: size.bytes }, { ...io, clock })) {
-    return unknown("catalog_incompatible");
+  const produced = { shards: size.shards + originals.length, bytes: size.bytes + bytes };
+  for (const reference of [{ at: clock.now(), shards: size.shards, bytes: size.bytes }, ...(size.dayStart ? [size.dayStart] : [])]) {
+    if (opsCatalogBoundRefusal(produced, reference, { ...io, clock })) return unknown("catalog_incompatible");
   }
 }
 function alreadyMoved(original: Original): boolean {
@@ -159,12 +213,13 @@ const moverFields = "number state headRefName body repository{databaseId nameWit
 function query(o: Options, taskId?: string, control?: Json, movers = false): string {
   const [owner, name] = o.publicRepo.split("/"), [opsOwner, opsName] = o.opsRepo.split("/");
   const pin = "databaseId nameWithOwner defaultBranchRef{name target{oid}}";
-  const open = `open:pullRequests(states:OPEN,first:100,orderBy:{field:CREATED_AT,direction:ASC}){totalCount pageInfo{hasNextPage endCursor} nodes{number state headRefName headRefOid body files(first:100){totalCount pageInfo{hasNextPage} nodes{path}}}}`;
+  const open = `open:pullRequests(states:OPEN,first:100,orderBy:{field:CREATED_AT,direction:ASC}){totalCount pageInfo{hasNextPage endCursor} nodes{number state headRefName headRefOid body files(first:${OPEN_PR_FILES_PAGE}){totalCount pageInfo{hasNextPage} nodes{path}}}}`;
   const merged = `merged:pullRequests(states:MERGED,first:100,orderBy:{field:UPDATED_AT,direction:DESC}){totalCount pageInfo{hasNextPage endCursor} nodes{${prFields}}}`;
   const search = (alias: string, term: string) => `${alias}:search(query:${JSON.stringify(`repo:${o.publicRepo} is:pr is:merged ${term}`)},type:ISSUE,first:100){issueCount pageInfo{hasNextPage} nodes{... on PullRequest{${prFields} repository{databaseId nameWithOwner}}}}`;
   const moves = (alias: string, repo: string, term: string) => `${alias}:search(query:${JSON.stringify(`repo:${repo} is:pr ${term}`)},type:ISSUE,first:100){issueCount pageInfo{hasNextPage} nodes{... on PullRequest{${moverFields}}}}`;
   const searches = (taskId && control ? search("byTrailer", `"Remudero-Task: ${taskId}" in:body`) + search("byBranch", `head:run-${taskId}-`) +
-    search("control", `head:${control.headRefName}`) + moves("refusedMoves", o.opsRepo, `is:closed head:plan-move-${taskId}-`) : "") +
+    // W1-T14345: a batched copy's branch names no task, so a refused copy is found by its receipt line for this id.
+    search("control", `head:${control.headRefName}`) + moves("refusedMoves", o.opsRepo, `is:closed head:plan-move- "${MOVE_COPY_RECEIPT} ${taskId}" in:body`) : "") +
     (movers ? moves("publicMoves", o.publicRepo, "is:open head:plan-move-") + moves("opsMoves", o.opsRepo, "is:open head:plan-move-") : "");
   return `query MigrationPreview{public:repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}){${pin} ${open} ${merged}} ops:repository(owner:${JSON.stringify(opsOwner)},name:${JSON.stringify(opsName)}){${pin}} ${searches}}`;
 }
@@ -256,34 +311,55 @@ function searchedMerged(state: PreviewState, id: string, control: Json): boolean
   return [...state.trailer, ...state.branch].some(pr => credited(pr).includes(id));
 }
 
-/** W1-T13680: a closed, unmerged mover pull request whose ops copy added this same public blob: the move was refused. */
+/** W1-T13680: a closed, unmerged mover pull request whose ops copy added this same public blob: the move was refused.
+ *  W1-T14345: one copy pull request may carry many tasks, so its receipt line, not its branch, names this one. */
 function moveRefused(state: PreviewState, id: string, blob: string): boolean {
   if (!state.refusedMoves) return unknown("incomplete_move_evidence");
-  return state.refusedMoves.some(pr => pr.state === "CLOSED" && String(pr.headRefName).startsWith(`plan-move-${id}-`) &&
+  return state.refusedMoves.some(pr => pr.state === "CLOSED" &&
     String(pr.body).split(/\r?\n/).some(line => line.startsWith(`${MOVE_COPY_RECEIPT} ${id} `) && line.split(" ").includes(`blob=${blob}`)));
 }
 
-/** The preview's whole answer, before it is printed; `permission` is never granted. */
+/**
+ * W1-T14345: the order the public records were filed in: the first commit of the pinned history that added each path.
+ * A path the history never shows added (a shallow read) ranks after every one it does.
+ */
+async function filingRanks(root: string, commit: string, dirs: readonly string[]): Promise<Map<string, number>> {
+  const ranks = new Map<string, number>();
+  if (dirs.length === 0) return ranks;
+  const out = await defaultGitRunnerAsync(root)(["log", "--reverse", "--no-renames", "--diff-filter=A", "--format=", "--name-only", commit, "--", ...dirs]);
+  for (const path of out.split("\n")) if (path && !ranks.has(path)) ranks.set(path, ranks.size);
+  return ranks;
+}
+
+/** The preview's whole answer, before it is printed; `permission` is never granted. W1-T14345: `batch` is every task
+ *  one move step may carry, oldest filing first; `candidate` is its first. */
 export interface MigrationSelection {
   outcome: "candidate" | "none"; permission: "not_granted"; publicCommit: string; opsCommit: string;
-  controls: Json; candidate: Json | undefined; refused: Array<{ id: string; reason: string }>;
+  controls: Json; candidate: Json | undefined; batch: Json[]; refused: Array<{ id: string; reason: string }>;
 }
 
 /** The selection the preview verb prints (W1-T13680 exports it for `rmd move-task`): pinned catalogs, ownership, the
- *  merge-credit search and a stable re-read. It throws {@link PreviewUnknown} on any unread or changed evidence. */
+ *  merge-credit search and a stable re-read. It throws {@link PreviewUnknown} on any unread or changed evidence.
+ *  W1-T14345: it fills a batch of up to {@link MOVE_BATCH_BOUND} open tasks, oldest filing first, that the ops catalog
+ *  has room for; a batch of one is selected exactly as before. */
 export async function selectPlanTaskMigration(
   o: Options, reader: MigrationGraphqlReader = graphqlRead, bounds: OpsCatalogBoundsIo = {},
 ): Promise<MigrationSelection> {
   const publicRefs = await refs(o.publicRoot, o.publicRepo), opsRefs = await refs(o.opsRoot, o.opsRepo);
-  const pub = await catalog(o.publicRoot, o.publicCommit), ops = await catalog(o.opsRoot, o.opsCommit, true);
+  const pub = await catalog(o.publicRoot, o.publicCommit), ops = await catalog(o.opsRoot, o.opsCommit, true, (bounds.clock ?? systemClock).now());
   if (ops.plan.tasks.some(t => pub.plan.byId.has(t.id) || t.depends_on.some(id => !ops.plan.byId.has(id) && !pub.plan.byId.has(id)))) return unknown("catalog_conflict");
   const initial = await readState(o, publicRefs, opsRefs, { reader }), knownMerged = new Set(initial.recent.flatMap(credited));
   // A positive search control is an actual known run PR, not an invented task or an age-based grant.
   const control = [...initial.recent].reverse().find(pr => taskIdFromRunBranch(String(pr.headRefName)) !== undefined);
   const refused: Array<{ id: string; reason: string }> = [];
   const publicPrerequisites = new Set(pub.plan.tasks.flatMap(task => task.depends_on));
-  let candidate: Json | undefined, lookups = 0;
-  for (const task of dispatchOrder(pub.plan.tasks).reverse()) {
+  // Oldest filing first; records filed in one commit keep the reverse dispatch order the preview always read.
+  const ranks = await filingRanks(o.publicRoot, o.publicCommit, [...new Set([...pub.originals.values()].filter(x => x.shard).map(x => dirname(x.path)))]);
+  const rank = (task: Task) => ranks.get(pub.originals.get(task.id)!.path) ?? Number.MAX_SAFE_INTEGER;
+  const ordered = dispatchOrder(pub.plan.tasks).reverse().map((task, i) => ({ task, i })).sort((a, b) => rank(a.task) - rank(b.task) || a.i - b.i).map(x => x.task);
+  const batch: Json[] = [];
+  let lookups = 0;
+  for (const task of ordered) {
     const original = pub.originals.get(task.id)!;
     const reason = knownMerged.has(task.id) ? "merged" : task.repo !== o.publicRepo.split("/")[1] ? "target_not_bound" : taskOwned(task.id, [...(task.files ?? []), original.path], publicRefs, initial.open) ? "owned" :
       publicPrerequisites.has(task.id) ? "public_dependants" : !original.single || !original.shard ? "not_single_shard" : alreadyMoved(original) ? "already_moved" : undefined;
@@ -292,31 +368,42 @@ export async function selectPlanTaskMigration(
       refused.push({ id: task.id, reason: "retired" });
       continue;
     }
-    // W1-T13680: only a queued, machine-verified task whose public reservation exists may move.
-    const unmovable = task.status !== "queued" ? "not_queued" : task.verify === "human" ? "verify_human" :
+    // W1-T13680: only an open, machine-verified task whose public reservation exists may move. W1-T14345: open is
+    // queued or blocked. A verify:human release is pinned to the record's contract, which its moved_from line changes,
+    // so a released task would need approving again in the destination: that exclusion stays.
+    const unmovable = !OPEN_STATUSES.has(task.status) ? "not_open" : task.verify === "human" ? "verify_human" :
       !publicRefs.has(`refs/rmd-id/${task.id}`) ? "reservation_absent" : undefined;
     if (unmovable) { refused.push({ id: task.id, reason: unmovable }); continue; }
     if (!control) return unknown("merge_credit_control_unreadable");
-    if (++lookups > MAX_CANDIDATE_LOOKUPS) return unknown("merge_credit_budget_exhausted");
+    // A full lookup budget ends the batch; with nothing selected it is still a runaway, refused whole.
+    if (lookups === MAX_CANDIDATE_LOOKUPS) { if (batch.length === 0) return unknown("merge_credit_budget_exhausted"); break; }
+    lookups++;
     const checked = await readState(o, publicRefs, opsRefs, { id: task.id, control, reader }); stable(initial, checked);
     if (moveRefused(checked, task.id, original.blob)) { refused.push({ id: task.id, reason: "move_refused" }); continue; }
     if (searchedMerged(checked, task.id, control)) { refused.push({ id: task.id, reason: "merged" }); continue; }
-    // W1-T14368: the bounds judge the ops catalog this copy would produce, not the one it read.
-    if (ops.size) judgeOpsCopy(ops.size, original.text, o.publicCommit, bounds);
-    candidate = { id: task.id, sourcePath: original.path, sourceCommit: o.publicCommit, sourceBlob: original.blob, yaml: original.text, originalBytesBase64: Buffer.from(original.text).toString("base64"), prospectiveMovedFrom: `remudero@${o.publicCommit}` };
-    break;
+    // W1-T14368: the bounds judge the ops catalog this copy would produce, not the one it read. W1-T14345: with every
+    // copy the batch already holds; a copy the catalog has no room for ends the batch, and refuses it only when alone.
+    if (ops.size) {
+      try { judgeOpsBatch(ops.size, [...batch.map(member => String(member.yaml)), original.text], o.publicCommit, bounds); }
+      catch (error) { if (batch.length === 0 || !(error instanceof PreviewUnknown)) throw error; break; }
+    }
+    batch.push({ id: task.id, sourcePath: original.path, sourceCommit: o.publicCommit, sourceBlob: original.blob, yaml: original.text, originalBytesBase64: Buffer.from(original.text).toString("base64"), prospectiveMovedFrom: `remudero@${o.publicCommit}` });
+    if (batch.length >= MOVE_BATCH_BOUND) break;
   }
-  // Independently re-read selected ownership, both source heads and the candidate's API credit before answering.
+  // Independently re-read selected ownership, both source heads and each selected task's API credit before answering.
   const finalPublic = await refs(o.publicRoot, o.publicRepo), finalOps = await refs(o.opsRoot, o.opsRepo);
-  const last = await readState(o, finalPublic, finalOps, { id: candidate ? String(candidate.id) : undefined, control, reader }); stable(initial, last);
-  if (candidate && control) {
-    if (searchedMerged(last, String(candidate.id), control)) return unknown("candidate_credit_changed");
-    const task = pub.plan.byId.get(String(candidate.id))!;
-    if (taskOwned(task.id, [...(task.files ?? []), String(candidate.sourcePath)], finalPublic, last.open)) return unknown("ownership_changed");
+  for (const member of batch.length > 0 ? batch : [undefined]) {
+    const last = await readState(o, finalPublic, finalOps, { id: member ? String(member.id) : undefined, control, reader }); stable(initial, last);
+    if (member && control) {
+      if (searchedMerged(last, String(member.id), control)) return unknown("candidate_credit_changed");
+      const task = pub.plan.byId.get(String(member.id))!;
+      if (taskOwned(task.id, [...(task.files ?? []), String(member.sourcePath)], finalPublic, last.open)) return unknown("ownership_changed");
+    }
   }
+  const candidate = batch[0];
   return { outcome: candidate ? "candidate" : "none", permission: "not_granted", publicCommit: o.publicCommit, opsCommit: o.opsCommit,
     controls: { repositoryId: initial.repositoryId, opsRepositoryId: initial.opsId, recentMergedPrs: initial.recent.length, mergedPrTotal: initial.mergedTotal,
-      wholeMergeHistoryRead: initial.recent.length === initial.mergedTotal, candidateSearches: lookups, openPrs: initial.open.length, publicTasks: pub.plan.tasks.length, opsTasks: ops.plan.tasks.length }, candidate, refused };
+      wholeMergeHistoryRead: initial.recent.length === initial.mergedTotal, candidateSearches: lookups, openPrs: initial.open.length, publicTasks: pub.plan.tasks.length, opsTasks: ops.plan.tasks.length }, candidate, batch, refused };
 }
 
 /** Explicit read-only CLI: the result describes evidence, never permission to move a task. */
