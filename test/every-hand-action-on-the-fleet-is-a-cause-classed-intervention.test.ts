@@ -165,7 +165,8 @@ test("W1-T8264: an intervention class is one incident fingerprint", async () => 
     const rows = first.filter((r) => r.step === "operator.intervention");
     const incidents = first.filter((r) => r.step === "incident.event");
     assert.equal(rows.length, found.length, "one operator.intervention row per hand action");
-    assert.equal(incidents.length, found.length, "and one routed incident.event each");
+    const distinctMessages = [...new Set(found.map((i) => interventionIncidentEvent(i, NOW).message))];
+    assert.deepEqual(incidents.map((e) => e.message), distinctMessages, "one routing per distinct intervention");
     assert.ok(incidents.every((e) => e.kind === "intervention" && e.name === rows.find((r) => r.cause_class === e.name)?.cause_class));
     assert.equal(new Set(incidents.map((e) => e.fingerprint)).size, new Set(found.map((i) => i.cause_class)).size);
     // a second pass over the same window writes nothing new

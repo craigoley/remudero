@@ -835,9 +835,8 @@ const INTERVENTION_WINDOW_MS = 7 * DAY_MS;
 function interventionReadPattern(steps: readonly string[]): RegExp {
   const ordinary = steps.filter((step) => step !== "incident.event")
     .map((step) => step.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
-  // Only keyed incident rows can prove a prior routing.
-  const keyed = /^(?=.*"step"\s*:\s*"incident\.event")(?=.*"intervention_key"\s*:\s*")/;
-  return new RegExp(`"step"\\s*:\\s*"(?:${ordinary})"|${keyed.source}`);
+  const incidents = /^(?=.*"step"\s*:\s*"incident\.event")(?=.*"kind"\s*:\s*"intervention")/;
+  return new RegExp(`"step"\\s*:\\s*"(?:${ordinary})"|${incidents.source}`);
 }
 
 /** W1-T13367: the one ledger slice the daemon's lane reads: the registered detectors' inputs and the intervention
@@ -877,6 +876,23 @@ function latestMs(...values: Array<number | undefined>): number {
 
 const keyAtMs = (key: string) => Date.parse(key.slice(key.lastIndexOf("|") + 1));
 
+function routingIdentity(row: OperatorInterventionRow): string {
+  return JSON.stringify([row.surface, row.action, row.target, row.actor, row.cause_class]);
+}
+
+function routingMessageIdentity(message: string | undefined): string | undefined {
+  const match = message?.match(/^surface=(control|pr) action=(.*?) target=(.*?) actor=(.*?) cause=(.*?)(?: file=.*?)? — a hand action answered a fleet state no lane resolved$/s);
+  return match ? JSON.stringify(match.slice(1)) : undefined;
+}
+
+function routingOccurrenceKey(key: string, identity: string): string {
+  return JSON.stringify([key, identity]);
+}
+
+function emptyInterventionMemory(): InterventionMemory {
+  return { routed: new Map(), routings: new Map(), complete: false };
+}
+
 /**
  * W1-T14005: the routing memory, each routed key with the latest instant a row that carried it was stamped at: the
  * later of that row's ledger `ts` and its intervention's `at`. A memory written before this holds bare keys, which
@@ -884,9 +900,8 @@ const keyAtMs = (key: string) => Date.parse(key.slice(key.lastIndexOf("|") + 1))
  * structured entry with an invalid `seen` as a bare key could suppress a routing.
  */
 function readInterventionMemory(path: string): InterventionMemory {
-  const routed = new Map<string, number>();
-  const routings = new Map<string, InterventionRouting>();
-  const empty = { routed, routings, complete: false };
+  const empty = emptyInterventionMemory();
+  const { routed, routings } = empty;
   if (!existsSync(path)) return empty;
   const text = readFileSync(path, "utf8");
   if (!text.trim()) return empty;
@@ -957,9 +972,8 @@ function writeInterventionMemory(path: string, memory: InterventionMemory): void
 /** W1-T14005: the intervention incident.event rows written since `sinceMs`, rotated ones included. */
 export type InterventionRoutingHistory = (sinceMs: number) => Promise<readonly IncidentLedgerEvent[]>;
 
-/** W1-T14005: a rotation's intervention incident.event rows reduced to one per intervention key, which is all
- *  {@link routedKeysIn} reads; a keyless row proves no routing and is dropped. Associative: reduce(a ++ b) =
- *  reduce(reduce(a) ++ b). */
+/** W1-T14005: extra routing history keeps one event per key. The main window supplies keyless proof from rotations.
+ *  Associative: reduce(a ++ b) = reduce(reduce(a) ++ b). */
 function latestRoutingRows(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
   const latest = new Map<string, Record<string, unknown>>();
   for (const row of rows) {
@@ -997,8 +1011,7 @@ async function readInterventionRoutingHistory(stateDir: string, sinceMs: number)
   });
 }
 
-/** W1-T14005 round 5: the keyed routings the routing memory of `stateDir` holds, as incident events. Unreadable or
- *  malformed, none, logged: the routing pass that wrote it has already thrown, and the evidence is the live file's. */
+/** W1-T14005 round 5: the keyed routings the routing memory of `stateDir` holds, as incident events. */
 function keyedRoutingEvidence(stateDir: string, log: SreLaneInput["log"]): IncidentLedgerEvent[] {
   let memory: InterventionMemory;
   try {
@@ -1012,16 +1025,6 @@ function keyedRoutingEvidence(stateDir: string, log: SreLaneInput["log"]): Incid
     fingerprint: r.fingerprint, ts: r.atMs, kind: INTERVENTION_INCIDENT_KIND, name: r.name, message: r.message, instance: stateDir, interventionKey,
     source: "sre-lane",
   }));
-}
-
-/**
- * W1-T14005: the intervention keys `history` shows routed, though the memory may have lost them (a routing rotated out
- * of the live file, a memory never written after its pass). Only an event naming its key shows a routing. An event
- * origin/main wrote names none, so it proves nothing: a late row whose only earlier routing is keyless routes once more
- * at the upgrade, carrying its key, and never again.
- */
-function routedKeysIn(history: readonly IncidentLedgerEvent[]): ReadonlyMap<string, IncidentLedgerEvent> {
-  return new Map(history.flatMap((event) => event.interventionKey === undefined ? [] : [[event.interventionKey, event] as const]));
 }
 
 /**
@@ -1039,8 +1042,8 @@ function interventionMemoryKeep(memory: ReadonlyMap<string, number>, sinceMs: nu
 /**
  * Derive the control-surface interventions from the ledger, write each new one as an `operator.intervention` row,
  * and route every intervention (control and the PR-surface rows the fix-lane gardener wrote) as ONE
- * `incident.event` of kind `intervention` named by its cause class. The window's incident rows and the memory
- * cache both identify prior routings by {@link interventionKey}.
+ * `incident.event` of kind `intervention` named by its cause class. The window's incident messages identify
+ * prior routings by surface, action, target, actor and cause, including events written without a key.
  */
 export async function routeOperatorInterventions(
   input: FleetFlowInput & { readRoutingHistory?: InterventionRoutingHistory; log?: SreLaneInput["log"] },
@@ -1067,34 +1070,68 @@ export async function routeOperatorInterventions(
     else appendLedger(join(input.stateDir, LEDGER_FILENAME), line, { clock: fixedClock(input.nowMs) });
   };
   const all = new Map<string, OperatorInterventionRow>();
-  // W1-T14005: the latest ledger `ts` this pass read each key's row at, which is what decides whether it is read again.
+  const recorded = new Map<string, Set<string>>();
   const carried = new Map<string, number>();
-  // W1-T14005: the earliest, which is when the intervention could first have been routed.
   const firstRead = new Map<string, number>();
   const shown = new Map<string, IncidentLedgerEvent>();
+  const shownKeys = new Map<string, { identity: string; event: IncidentLedgerEvent }>();
+  const path = interventionMemoryPath(input.stateDir);
+  let memory: InterventionMemory;
+  try {
+    memory = readInterventionMemory(path);
+  } catch (error) {
+    input.log?.("sre_lane.routing_memory_unread", { error: String(error) });
+    memory = emptyInterventionMemory();
+  }
+  const { routed, routings, pending } = memory;
+  const usedKeys = new Set(routed.keys());
+  const cached = new Map<string, string>();
+  for (const [key, routing] of routings) {
+    const identity = routingMessageIdentity(routing.message);
+    if (identity !== undefined) cached.set(identity, key);
+  }
+  const show = (event: IncidentLedgerEvent) => {
+    if (event.kind !== INTERVENTION_INCIDENT_KIND || (event.interventionKey === undefined && event.ts < sinceMs)) return;
+    if (event.interventionKey !== undefined) usedKeys.add(event.interventionKey);
+    const identity = routingMessageIdentity(event.message);
+    if (identity === undefined) return;
+    if (event.interventionKey !== undefined) shownKeys.set(event.interventionKey, { identity, event });
+    if (shown.get(identity)?.interventionKey === undefined) shown.set(identity, event);
+  };
+  const collect = (row: OperatorInterventionRow, tsMs: number) => {
+    const identity = routingIdentity(row);
+    const occurrences = recorded.get(identity) ?? new Set<string>();
+    occurrences.add(interventionKey(row));
+    recorded.set(identity, occurrences);
+    const existing = all.get(identity);
+    if (existing === undefined || Date.parse(row.at) < Date.parse(existing.at)) all.set(identity, row);
+    carried.set(identity, latestMs(carried.get(identity), tsMs));
+    if (tsMs < (firstRead.get(identity) ?? Number.POSITIVE_INFINITY)) firstRead.set(identity, tsMs);
+  };
   for (const row of rows) {
     if (row.step === "incident.event" && row.kind === INTERVENTION_INCIDENT_KIND) {
       const event = incidentEventFromLedgerRow(row, input.stateDir);
-      if (event?.interventionKey !== undefined) shown.set(event.interventionKey, event);
+      if (event !== undefined) show(event);
       continue;
     }
     const read = interventionFromLedgerRow(row);
-    if (!read) continue;
-    const key = interventionKey(read);
-    all.set(key, read);
-    const tsMs = typeof row.ts === "string" ? Date.parse(row.ts) : undefined;
-    carried.set(key, latestMs(carried.get(key), tsMs));
-    if (typeof tsMs === "number" && tsMs < (firstRead.get(key) ?? Number.POSITIVE_INFINITY)) firstRead.set(key, tsMs);
+    if (!read || !Number.isFinite(Date.parse(read.at))) continue;
+    collect(read, typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN);
   }
-  const path = interventionMemoryPath(input.stateDir);
-  const memory = readInterventionMemory(path);
-  const { routed, pending } = memory;
   // The current window proves routings even if a stale cache claims completeness. The extra history read can
   // still recover older routings when the cache is incomplete or a prior pass left its pending marker.
+  const cachedKey = (identity: string, row: OperatorInterventionRow) => {
+    const cachedEvent = cached.get(identity);
+    if (cachedEvent !== undefined && (shownKeys.get(cachedEvent)?.identity ?? identity) === identity) return cachedEvent;
+    for (const key of recorded.get(identity) ?? [interventionKey(row)]) {
+      if (routed.has(key) && !routings.has(key) && (shownKeys.get(key)?.identity ?? identity) === identity) return key;
+    }
+    return undefined;
+  };
   const firstReadOf = (key: string) => firstRead.get(key) ?? input.nowMs;
   const mayBeRouted = (key: string) => (!memory.complete && firstReadOf(key) < input.nowMs) ||
     (pending !== undefined && firstReadOf(key) <= pending.throughMs);
-  const unproven = [...all].filter(([key, row]) => !routed.has(key) && !shown.has(key) && Date.parse(row.at) <= input.nowMs && mayBeRouted(key))
+  const unproven = [...all].filter(([key, row]) => cachedKey(key, row) === undefined && !shown.has(key) && Date.parse(row.at) <= input.nowMs && mayBeRouted(key))
     .map(([key]) => key);
   const readHistory = input.readRoutingHistory ?? ((since: number) => readInterventionRoutingHistory(input.stateDir, since));
   let deferred: ReadonlySet<string> = new Set();
@@ -1103,41 +1140,47 @@ export async function routeOperatorInterventions(
     // clock, which is before the ts of a row the fix-lane gardener appended after that clock was taken.
     const historySinceMs = Math.min(...unproven.map(firstReadOf), pending?.sinceMs ?? Number.POSITIVE_INFINITY);
     try {
-      for (const [key, event] of routedKeysIn(await readHistory(historySinceMs))) {
-        if (!shown.has(key)) shown.set(key, event);
-      }
+      for (const event of await readHistory(historySinceMs)) show(event);
     } catch (error) {
       deferred = new Set(unproven);
       input.log?.("sre_lane.routing_deferred", { deferred: deferred.size, error: String((error as Error)?.message ?? error) });
     }
   }
-  // A row already in the ledger, or already routed, is never written a second time (a reader that lags the
-  // pass's own writes must not mint it again).
-  const recorded = new Set([...all.keys(), ...routed.keys(), ...shown.keys()]);
   const controlRows = rows.filter((r) => r.step !== OPERATOR_INTERVENTION_STEP && r.step !== "incident.event");
   for (const derived of deriveControlInterventions(controlRows)) {
-    const key = interventionKey(derived);
-    if (!recorded.has(key)) {
-      write(interventionLedgerLine(derived));
-      carried.set(key, latestMs(carried.get(key), input.nowMs));
-      firstRead.set(key, input.nowMs);
-    }
-    all.set(key, derived);
+    const identity = routingIdentity(derived);
+    if (recorded.get(identity)?.has(interventionKey(derived)) || shown.has(identity) || cachedKey(identity, derived) !== undefined) continue;
+    write(interventionLedgerLine(derived));
+    collect(derived, input.nowMs);
   }
   const toRoute: Array<[string, OperatorInterventionRow]> = [];
-  for (const [key, row] of [...all].sort(([, a], [, b]) => Date.parse(a.at) - Date.parse(b.at))) {
-    if (routed.has(key) || deferred.has(key) || !(Date.parse(row.at) <= input.nowMs)) continue;
-    const proof = shown.get(key);
-    if (proof === undefined) toRoute.push([key, row]);
-    else {
-      routed.set(key, Number.NaN);
-      if (proof.message !== undefined) memory.routings.set(key, { atMs: proof.ts, fingerprint: proof.fingerprint, name: proof.name, message: proof.message });
+  const remember = (key: string, identity: string, atMs: number) => {
+    routed.set(key, latestMs(routed.get(key), carried.get(identity), atMs));
+  };
+  const rememberProof = (identity: string, event: IncidentLedgerEvent) => {
+    const key = event.interventionKey;
+    if (key !== undefined && event.message !== undefined && routingMessageIdentity(routings.get(key)?.message) !== identity) {
+      routings.set(key, { atMs: event.ts, fingerprint: event.fingerprint, name: event.name, message: event.message });
     }
+  };
+  for (const [key, { identity, event }] of shownKeys) {
+    const atMs = keyAtMs(key);
+    if (!recorded.get(identity)?.has(key) || atMs > input.nowMs) continue;
+    remember(key, identity, atMs);
+    rememberProof(identity, event);
+  }
+  for (const [identity, row] of [...all].sort(([, a], [, b]) => Date.parse(a.at) - Date.parse(b.at))) {
+    if (deferred.has(identity) || Date.parse(row.at) > input.nowMs) continue;
+    const proof = shown.get(identity);
+    const key = proof?.interventionKey ?? cachedKey(identity, row);
+    if (key !== undefined) {
+      remember(key, identity, Date.parse(row.at));
+      if (proof !== undefined) rememberProof(identity, proof);
+    } else if (proof === undefined) toRoute.push([identity, row]);
   }
   const settled = (): Map<string, number> => {
-    for (const [key, seenMs] of routed) routed.set(key, latestMs(seenMs, carried.get(key), keyAtMs(key)));
     const keep = interventionMemoryKeep(routed, sinceMs);
-    for (const key of memory.routings.keys()) if (!keep.has(key)) memory.routings.delete(key);
+    for (const key of routings.keys()) if (!keep.has(key)) routings.delete(key);
     return keep;
   };
   if (toRoute.length) {
@@ -1148,13 +1191,16 @@ export async function routeOperatorInterventions(
     writeInterventionMemory(path, { routed: settled(), routings: memory.routings, complete: memory.complete, pending: { sinceMs: sinceMarkMs, throughMs } });
   }
   const events: LedgerLine[] = [];
-  for (const [key, row] of toRoute) {
-    // The key rides on the event, so the lane's evidence counts this intervention once however often it is routed.
+  for (const [identity, row] of toRoute) {
+    const originalKey = interventionKey(row);
+    // Preserve existing event keys and separate distinct actors or causes that share an occurrence key.
+    const key = usedKeys.has(originalKey) ? routingOccurrenceKey(originalKey, identity) : originalKey;
+    usedKeys.add(key);
     const event: LedgerLine = { ...interventionIncidentEvent(row, input.nowMs), intervention_key: key };
     write(event);
     events.push(event);
-    routed.set(key, Number.NaN);
-    memory.routings.set(key, { atMs: input.nowMs, fingerprint: String(event.fingerprint), name: String(event.name), message: String(event.message) });
+    remember(key, identity, Date.parse(row.at));
+    routings.set(key, { atMs: input.nowMs, fingerprint: String(event.fingerprint), name: String(event.name), message: String(event.message) });
   }
   // Every row this pass read is now routed, proven routed, or not yet due, unless some were deferred: then the memory
   // stays as complete as it was, and an earlier failed pass's marker stays until a readable pass proves its rows.

@@ -177,14 +177,13 @@ test("W1-T9515: a recycle with no known caller is a hand-recycle intervention", 
   writeFileSync(ledger, [row, second, row, second].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
   const distinct = deriveControlInterventions([row, second, row, second]);
   assert.equal(distinct.length, 2);
-  assert.equal(new Set(distinct.map(interventionKey)).size, 2, "each invocation keeps its identity through routing");
+  assert.equal(new Set(distinct.map(interventionKey)).size, 2, "the raw invocations keep separate occurrence keys");
   const secondEvents = await routeOperatorInterventions(input);
-  assert.equal(secondEvents.length, 1, "a second recycle in the same second is routed independently");
+  assert.deepEqual(secondEvents, [], "a recycle with the same actor, target and cause is a repeat");
   const recorded = written.filter((entry) => entry.step === "operator.intervention");
-  assert.equal(recorded.length, 2);
-  assert.deepEqual(recorded.map(interventionFromLedgerRow), distinct, "persisted interventions retain invocation identity");
+  assert.deepEqual(recorded.map(interventionFromLedgerRow), distinct.slice(0, 1), "the recorded intervention retains its invocation identity");
   assert.equal(interventionFromLedgerRow({ ...recorded[0], invocation_id: 1 }), undefined);
-  assert.deepEqual(await routeOperatorInterventions(input), [], "both invocation keys survive the routing-memory reread");
+  assert.deepEqual(await routeOperatorInterventions(input), [], "the repeat stays suppressed after rereading the routing memory");
 });
 
 test("test/every-recycle-names-who-invoked-it.test.ts: shell and TypeScript actor classifiers agree", (t) => {
