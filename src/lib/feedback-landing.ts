@@ -104,6 +104,10 @@ const FEEDBACK_PENDING_REL_DIR = "state/feedback-landing-pending";
 const TASK_FILES_PENDING_REL_DIR = "state/task-files-landing-pending";
 const TASK_FILES_REFUSED_REL_DIR = "state/task-files-landing-refused";
 const TASK_FILES_WAITING_REL_PATH = "state/task-files-landing-waiting.json";
+/** W1-T13987: the record-intrinsic refusals the task-files landing remembers by blob, beside TASK_FILES_REFUSED_REL_DIR. */
+const TASK_FILES_REFUSAL_MEMORY_REL_PATH = "state/task-files-landing-refused-blobs.json";
+/** W1-T13987: how many remembered blobs the memory keeps; the oldest goes first. */
+const TASK_FILES_REFUSAL_MEMORY_MAX = 2_048;
 const TASK_FILES_LANDING_BRANCH = "task-files-landing";
 const TASK_FILES_LANDING_PR_TITLE = "chore(plan): land pending edits of task files";
 const CI_LEARNING_SLUG_MAX = 72;
@@ -2535,6 +2539,10 @@ export interface TaskFileRefusal {
   id_release?: SetAsideIdRelease["id_release"];
   /** W1-T13169: why the id was not released, when that cause is not the outcome alone. */
   id_release_detail?: string;
+  /** W1-T13987: the record's own rules that refused these bytes, so a producer that re-drafts reads what to change. */
+  rules?: string[];
+  /** W1-T13987: set when the refusal came from memory, with the time the preflight first refused these bytes. */
+  remembered_at?: string;
 }
 
 export interface TaskFilesLandingResult {
@@ -2739,6 +2747,98 @@ function taskFileRedIsMainCaused(failures: PlanPrPreflightResult["failures"], ba
 
 const greenTaskFileTrees = new Set<string>();
 
+/**
+ * W1-T13987: a refusal the record's own bytes earned. The tree a preflight reads includes main, so a merge or a
+ * restart re-runs the same refusal of the same bytes; this memory is keyed by the record's blob instead.
+ */
+export interface RememberedRecordRefusal {
+  path: string;
+  blob: string;
+  /** The checks that refused these bytes, each a rule of the record's own. */
+  rules: string[];
+  failures: PlanPrPreflightResult["failures"];
+  first_refused_at: string;
+}
+
+const refusalMemoryPath = (stateRoot: string): string => join(stateRoot, TASK_FILES_REFUSAL_MEMORY_REL_PATH);
+
+function readRefusalMemory(stateRoot: string): Record<string, RememberedRecordRefusal> {
+  try {
+    const parsed = JSON.parse(readFileSync(refusalMemoryPath(stateRoot), "utf8")) as unknown;
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, RememberedRecordRefusal> : {};
+  } catch {
+    // deliberate: no memory yet, or an unreadable one, collapses to "nothing remembered", so the preflight runs as before.
+    return {};
+  }
+}
+
+/** W1-T13987: the refusal remembered for these bytes at `relPath`, or undefined when the preflight must run. */
+export function rememberedRecordRefusal(stateRoot: string, relPath: string, blob: string): RememberedRecordRefusal | undefined {
+  const known = readRefusalMemory(stateRoot)[blob];
+  return known !== undefined && known.path === relPath && Array.isArray(known.rules) && known.rules.length > 0 && Array.isArray(known.failures) ? known : undefined;
+}
+
+/**
+ * W1-T13987: remember a record-intrinsic refusal of `entry.blob`. Bytes already remembered are refused before any
+ * preflight runs, so each blob is written, and its rules logged, once.
+ */
+function rememberRecordRefusal(stateRoot: string, entry: RememberedRecordRefusal): void {
+  const memory = readRefusalMemory(stateRoot);
+  delete memory[entry.blob];
+  memory[entry.blob] = entry;
+  const keys = Object.keys(memory);
+  for (const key of keys.slice(0, Math.max(0, keys.length - TASK_FILES_REFUSAL_MEMORY_MAX))) delete memory[key];
+  const path = refusalMemoryPath(stateRoot);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(`${path}.${process.pid}.tmp`, `${JSON.stringify(memory)}\n`, "utf8");
+  renameSync(`${path}.${process.pid}.tmp`, path);
+}
+
+/** The text a finding prints: its first line, its detail lines and the task ids it names. */
+const findingText = (f: PlanPrPreflightResult["failures"][number]): string[] => [f.firstLine, ...(f.lines ?? []), ...(f.task_ids ?? [])];
+
+/** W1-T13987: the leading `"<proof>"` of a proof-discrimination line, decoded; undefined when the line names none. */
+function provedOfLine(line: string): string | undefined {
+  const at = line.indexOf(" proof \"");
+  if (at < 0) return undefined;
+  const from = at + " proof ".length;
+  for (let end = from + 1; end < line.length; end++) {
+    if (line[end] === "\\") { end++; continue; }
+    if (line[end] !== "\"") continue;
+    try {
+      return JSON.parse(line.slice(from, end + 1)) as string;
+    } catch {
+      // deliberate: a quoted span that is not JSON names no proof, so the line is not the record's.
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * W1-T13987: the rules of a refusal that belong to the record itself, or undefined when any part of it may be main's.
+ * A lint-plan failure is the record's when it names the record's id and main alone carries no lint-plan failure that
+ * names it; a proof-discrimination failure is the record's when every proof it names is the record's own. Any other
+ * check, a failure that names no line of the record, or a verdict with a timeout or an unreadable check is not.
+ */
+export function recordIntrinsicRules(
+  failures: PlanPrPreflightResult["failures"],
+  record: { content: string; proof: string },
+  base: PlanPrPreflightResult["failures"],
+): string[] | undefined {
+  if (failures.length === 0) return undefined;
+  const id = taskIdOfTaskFileText(record.content);
+  const names = (f: PlanPrPreflightResult["failures"][number]): boolean => id !== undefined && findingText(f).some((l) => l.includes(id));
+  const ownProof = (f: PlanPrPreflightResult["failures"][number]): boolean => {
+    const proofs = [f.firstLine, ...(f.lines ?? [])].map(provedOfLine).filter((p): p is string => p !== undefined);
+    return proofs.length > 0 && proofs.every((p) => p === record.proof || record.content.includes(p));
+  };
+  const intrinsic = failures.every((f) =>
+    f.check === "lint-plan" ? names(f) && !base.some((b) => b.check === "lint-plan" && names(b))
+      : f.check === "proof-discrimination" ? ownProof(f) : false);
+  return intrinsic ? [...new Set(failures.map((f) => f.check))].sort() : undefined;
+}
+
 type SetAsideIdRelease = {
   reserved_id?: string;
   id_release: ReservationReleaseOutcome | "kept_other_holder" | "kept_main_holds_path" | "no_id";
@@ -2905,14 +3005,18 @@ function* taskFilesLandingSteps(
       return verdict;
     };
     /** Whether main alone has the same red. A probe that cannot run leaves the red the file's own, and says why. */
-    const mainRedOf = function* (failures: PlanPrPreflightResult["failures"]): Generator<LandingAsk, { mainRed: boolean; mainRedProbeError?: string }, AskReply> {
+    const mainProbeOf = function* (failures: PlanPrPreflightResult["failures"]): Generator<LandingAsk, { mainRed: boolean; mainRedProbeError?: string; base?: PlanPrPreflightResult }, AskReply> {
       try {
         const onBase = (yield { commitSha: yield* freshMain(), pr: { title: kind.prTitle, body: taskFilesPrBody([]) } }) as PlanPrPreflightResult;
-        return { mainRed: taskFileRedIsMainCaused(failures, onBase.failures) };
+        return { mainRed: taskFileRedIsMainCaused(failures, onBase.failures), base: onBase };
       } catch (e) {
         const reason = String((e as Error)?.message ?? e);
         return { mainRed: false, mainRedProbeError: reason };
       }
+    };
+    const mainRedOf = function* (failures: PlanPrPreflightResult["failures"]): Generator<LandingAsk, { mainRed: boolean; mainRedProbeError?: string }, AskReply> {
+      const { mainRed, mainRedProbeError } = yield* mainProbeOf(failures);
+      return mainRedProbeError === undefined ? { mainRed } : { mainRed, mainRedProbeError };
     };
     const refusalText = (failures: PlanPrPreflightResult["failures"]): string =>
       `the plan preflight refused it: ${failures.map((f) => `[${f.check}] ${f.firstLine}`).join("; ")}`;
@@ -2973,10 +3077,28 @@ function* taskFilesLandingSteps(
         yield* refuse(`origin/main already holds these bytes at ${relPath}`);
         continue;
       }
+      // W1-T13987: bytes whose own fault a preflight already refused are refused from memory, across a restart and a move of main.
+      const remembered = rememberedRecordRefusal(stateRoot, relPath, blob);
+      if (remembered !== undefined) {
+        yield* refuse(refusalText(remembered.failures), {
+          failures: remembered.failures, mainSha: yield* freshMain(), mainRed: false, rules: remembered.rules, remembered_at: remembered.first_refused_at,
+        });
+        continue;
+      }
       const verdict = yield* verdictOf([{ relPath, blob, claim, proof }]);
       if (!verdict.ok) {
+        const { base, ...probe } = yield* mainProbeOf(verdict.failures);
+        const rules = verdict.timedOut !== undefined || verdict.unreadable.length > 0 || probe.mainRed || base === undefined || base.timedOut !== undefined
+          ? undefined : recordIntrinsicRules(verdict.failures, { content, proof }, base.failures);
+        if (rules !== undefined) {
+          const first_refused_at = (opts.clock ?? systemClock).iso();
+          rememberRecordRefusal(stateRoot, { path: relPath, blob, rules, failures: verdict.failures, first_refused_at });
+          for (const rule of rules) {
+            opts.log?.("task_files_landing.refusal_remembered", { path: relPath, blob, rule, lane, failures: verdict.failures.filter((f) => f.check === rule) });
+          }
+        }
         yield* refuse(refusalText(verdict.failures), {
-          failures: verdict.failures, mainSha: yield* freshMain(), ...(yield* mainRedOf(verdict.failures)),
+          failures: verdict.failures, mainSha: yield* freshMain(), ...probe, ...(rules === undefined ? {} : { rules }),
           ...(verdict.timedOut === undefined ? {} : { timedOut: true as const }),
         });
         continue;

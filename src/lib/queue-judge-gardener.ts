@@ -52,6 +52,8 @@ const ESCALATED_STEP = "queue_judge.escalated";
 const UNAVAILABLE_STEP = "queue_judge.unavailable";
 /** Written only when the judge answered: a pass that ended in {@link UNAVAILABLE_STEP} throws before it. */
 export const QUEUE_JUDGE_SCORECARD_STEP = "queue_judge.scorecard";
+/** W1-T13987: an action dropped because origin/main's shard already carries its priority and exact marker. */
+export const QUEUE_JUDGE_NOOP_STEP = "queue_judge.noop_skipped";
 
 export interface QueueJudgeAvailability { lastCompletedAt: string | undefined; staleMs: number | undefined }
 
@@ -137,6 +139,8 @@ export interface ShardPriority {
   operatorPin: boolean;
   /** The judge's own marker value, when the shard carries one. */
   marker: number | undefined;
+  /** W1-T13987: the evidence signature the judge's marker names, when the shard carries one. */
+  markerEvidence?: string;
   /** The marker names a value the priority no longer holds: someone else edited it after the judge. */
   editedSinceMarker: boolean;
   /** More than one priority key, or one the line rule cannot read: the shard cannot be edited safely. */
@@ -151,7 +155,7 @@ export function readShardPriority(text: string): ShardPriority {
   const markerValue = marker ? Number(marker[1]) : undefined;
   return {
     value, comment: line?.[2], operatorPin: line?.[2] !== undefined && OPERATOR_PIN.test(line[2]),
-    marker: markerValue, editedSinceMarker: markerValue !== undefined && value !== markerValue,
+    marker: markerValue, ...(marker ? { markerEvidence: marker[2] } : {}), editedSinceMarker: markerValue !== undefined && value !== markerValue,
     unreadable: keys.length > 1 || (keys.length === 1 && line === null),
   };
 }
@@ -913,8 +917,16 @@ function predictionRow(a: QueueJudgeAction, bound: BoundReport, prUrl: string | 
 
 const oneLine = (s: string): string => s.replace(/\s+/g, " ").trim();
 
+/** W1-T13987: the shard already carries the action's priority and its exact marker, evidence included. */
+export function isQueueJudgeNoop(shard: ShardPriority, action: Pick<QueueJudgeAction, "to" | "signature">): boolean {
+  return shard.value === action.to && shard.marker === action.to && shard.markerEvidence === action.signature;
+}
+
 /** Rewrite each action's shard: priority with its reason, the marker beneath `status: queued`, and the machine re-park. */
-export function applyQueueJudgeActions(root: string, shards: ReadonlyMap<string, string>, actions: readonly QueueJudgeAction[], now: Date, read: (path: string) => string, write: (path: string, text: string) => void): string[] {
+export function applyQueueJudgeActions(
+  root: string, shards: ReadonlyMap<string, string>, actions: readonly QueueJudgeAction[], now: Date, read: (path: string) => string, write: (path: string, text: string) => void,
+  noop?: (action: QueueJudgeAction, rel: string) => void,
+): string[] {
   const paths: string[] = [];
   const day = now.toISOString().slice(0, 10);
   for (const action of actions) {
@@ -926,6 +938,12 @@ export function applyQueueJudgeActions(root: string, shards: ReadonlyMap<string,
     if (!/^ {2}status: queued[ \t]*$/m.test(text) || /^ {2}retirement:/m.test(text) || shard.unreadable) continue;
     // The shard moved since the inventory read it: that edit is authoritative, so nothing is written over it.
     if ((shard.value ?? null) !== action.from) continue;
+    // W1-T13987: main already holds this priority under this exact marker, so the only change would be the day stamp:
+    // the pass's proof passes at base and the filing is a no-op. A changed priority or new evidence still files.
+    if (isQueueJudgeNoop(shard, action)) {
+      noop?.(action, rel);
+      continue;
+    }
     const reason = oneLine(action.reason);
     const comment = shard.operatorPin ? `${oneLine(shard.comment ?? "")} | queue-judge-${day}: ${reason}` : `queue-judge-${day}: ${reason}`;
     const priorityLine = `  priority: ${action.to}  # ${comment}`;
@@ -1009,7 +1027,8 @@ export function queueJudgeGardenSpec(
     },
     apply: (ws, plan, scorecard) => {
       const shards = planShards(ws.root);
-      const paths = applyQueueJudgeActions(ws.root, shards, plan.actions, clock.date(), (p) => readFileSync(p, "utf8"), (p, t) => writeAtomic(p, t));
+      const paths = applyQueueJudgeActions(ws.root, shards, plan.actions, clock.date(), (p) => readFileSync(p, "utf8"), (p, t) => writeAtomic(p, t),
+        (a, rel) => deps.log(QUEUE_JUDGE_NOOP_STEP, { task_id: a.target, shard: rel, priority: a.to, evidence_signature: a.signature, reason: "origin/main's shard already carries this priority and its exact marker" }));
       if (paths.length === 0) return undefined;
       const landed = plan.actions.filter((a) => paths.includes(shards.get(a.target) ?? ""));
       // The predictions are ledgered once the PR has a URL, and the pass lands through `ws.land`, so name them there.
