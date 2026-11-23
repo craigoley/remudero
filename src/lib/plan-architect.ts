@@ -668,7 +668,9 @@ function* planCommitSteps(
     // repository planned in place (W1-T14320) has no MASTER-PLAN.md; a tracked deletion still matches, so only a
     // path that is neither present nor tracked is dropped, and any other refusal is rethrown unchanged.
     const optional = opts.optionalPath;
-    if (optional === undefined || !String((addError as Error)?.message ?? addError).includes(`pathspec '${optional}' did not match any files`)) throw addError;
+    const message = addError instanceof Error ? addError.message : String(addError);
+    const absent = optional !== undefined && message.includes(`pathspec '${optional}' did not match any files`);
+    if (absent === false) throw addError;
     log(`${stepPrefix}.optional_path_absent`, { path: optional });
     (yield* step(() => git(cwd, ["add", ...addArgs.filter((arg) => arg !== optional)], stdio)));
   }
