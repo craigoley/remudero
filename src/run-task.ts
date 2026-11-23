@@ -1388,7 +1388,8 @@ import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-c
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, attemptAssignmentJoin, recordBenchmarkWorkerAttempt, benchmarkEvidenceLedgerPath, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput, terminalVerdictFields, namedTaskWork, taskRecordBenchmarkWork, type BenchmarkTaskWorkReader } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, attemptAssignmentJoin, recordBenchmarkWorkerAttempt, benchmarkEvidenceLedgerPath, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput, terminalVerdictFields, namedTaskWork, planTaskBenchmarkWork, type BenchmarkTaskWorkReader } from "./lib/benchmark-run.js";
+export { planTaskBenchmarkWork };
 import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cost-evidence.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
@@ -10903,29 +10904,11 @@ function ledgerNonDispatchAssignment(
   });
 }
 
-/** W1-T12152: reads the plan record of the task a non-dispatch call names — its shard under `planDir/tasks.d`, else the
- *  monolith, parsed only when its text names the id — for the class and risk its assignment receipt records. */
-export function planTaskBenchmarkWork(planDir: string): BenchmarkTaskWorkReader {
-  return (taskId) => {
-    const shardDir = join(planDir, "tasks.d");
-    const shards = existsSync(shardDir)
-      ? readdirSync(shardDir).filter((name) => name.endsWith(".yaml") && isTaskShardName(name, taskId)).map((name) => join(shardDir, name)) : [];
-    const monolith = join(planDir, "tasks.yaml");
-    const texts = shards.map((shard) => ({ path: shard, text: readFileSync(shard, "utf8") }));
-    if (texts.length === 0 && existsSync(monolith)) texts.push({ path: monolith, text: readFileSync(monolith, "utf8") });
-    for (const { path, text } of texts) {
-      if (!text.includes(taskId)) continue;
-      const task = parseTasksFromYaml(text, path, undefined, {}, "preserve-external").find((t) => t.id === taskId);
-      if (task) return taskRecordBenchmarkWork(task);
-    }
-    return undefined;
-  };
-}
-
 /** The non-dispatch receipt wrapper, reading a named task's record from `planDir` (W1-T12152). */
 export function ledgeredNonDispatchSpawn(lane: string, raw: typeof spawnWorker = spawnWorker,
   planDir: string = join(repoRoot, "plan")): typeof spawnWorker {
-  return benchmarkNonDispatchSpawn(lane, raw, planTaskBenchmarkWork(planDir));
+  const laneReadingPlan = { lane, readTask: planTaskBenchmarkWork(planDir) };
+  return benchmarkNonDispatchSpawn(laneReadingPlan, raw);
 }
 
 /** A failed fallback call is a worker attempt, not a second task outcome. Telemetry and caller
@@ -10984,7 +10967,8 @@ export function gitCredentialFixSpawn(
   harnessCheckout: string = repoRoot,
   readTask: BenchmarkTaskWorkReader = planTaskBenchmarkWork(join(harnessCheckout, "plan")),
 ): typeof spawnWorker {
-  const spawnFix = benchmarkNonDispatchSpawn("sweep-fix", raw, readTask);
+  const sweepFixLane = { lane: "sweep-fix", readTask };
+  const spawnFix = benchmarkNonDispatchSpawn(sweepFixLane, raw);
   return (args) => spawnFix(withGitCredentialSocket(args, socketPath, harnessCheckout));
 }
 

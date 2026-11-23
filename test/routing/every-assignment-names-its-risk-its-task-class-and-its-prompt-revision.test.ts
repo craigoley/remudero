@@ -150,13 +150,27 @@ test("W1-T12152 criterion 1: the sweep fix rung's own spawn reads the task's rec
   assert.deepEqual(work.taskClass, { state: "observed", value: deriveTaskClass({ files: TASK_FILES }) }, "the task record's class");
 });
 
+test("W1-T12152 criterion 1: the one-shot sweep's default fix spawn, handed no reader, reads the repository plan's task record", async (t) => {
+  const { config } = planWithTask(t);
+  // The one-shot `rmd sweep` path passes no spawn, so `runSweep` falls back to `benchmarkNonDispatchSpawn("sweep-fix")`.
+  const realTask = "W1-T12152";
+  await withLiveWritesAllowed(() => benchmarkNonDispatchSpawn("sweep-fix", assigningProvider)(
+    baseArgs(config, { taskId: realTask, runId: "one-shot-sweep-fix-run" })));
+  const work = receiptOf(assignmentRows(config).find((row) => row.run_id === "one-shot-sweep-fix-run")).work;
+  const record = readFileSync(join(REPO_ROOT, "plan/tasks.d/W1-T12152-every-assignment-names-its-risk-its-task-class-and-its-prompt-revision.yaml"), "utf8");
+  const risk = /^\s+risk:\s*(\S+)/m.exec(record)?.[1];
+  assert.ok(risk, "the real record names a risk");
+  assert.deepEqual(work.risk, { state: "observed", value: risk }, "the real record's risk, not task-record-not-read-by-lane");
+  assert.equal((work.taskClass as { state: string }).state, "observed", "the real record's class");
+});
+
 test("W1-T12152 criterion 2: an assignment for work with no task records the pipeline and a named reason, never an empty risk", async (t) => {
   const { planDir, config } = planWithTask(t);
   await withLiveWritesAllowed(async () => {
     await ledgeredNonDispatchSpawn("triage", assigningProvider, planDir)(baseArgs(config, { runId: "no-task-run" }));
     await ledgeredNonDispatchSpawn("triage", assigningProvider, planDir)(baseArgs(config, { runId: "unfiled-run", taskId: "W1-T99999" }));
     await benchmarkNonDispatchSpawn("ci-judge", assigningProvider)(baseArgs(config, { runId: "unread-run", taskId: TASK_ID }));
-    await benchmarkNonDispatchSpawn("ci-judge", assigningProvider, () => { throw new Error("EIO"); })(
+    await benchmarkNonDispatchSpawn({ lane: "ci-judge", readTask: () => { throw new Error("EIO"); } }, assigningProvider)(
       baseArgs(config, { runId: "unreadable-run", taskId: TASK_ID }));
     // The inbox-draft lane writes its own assignment row (`ledgerNonDispatchAssignment`), with no task.
     const draft = buildInboxDraftSpawnArgs({ cwd: config.root, settingsFile: join(REPO_ROOT, "settings/worker.json"), prompt: "draft",

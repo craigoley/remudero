@@ -7,9 +7,12 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, isAbsolute, relative } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendLedger } from "./ledger.js";
+import { parseTasksFromYaml } from "./plan.js";
+import { repoRoot } from "./repo-location.js";
+import { isTaskShardName } from "./task-shard-name.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { isTestRunner } from "./live-write-guard.js";
 import { fixedClock, systemClock } from "./clock.js";
@@ -716,6 +719,32 @@ export function namedTaskWork(taskId: string | undefined, readTask: BenchmarkTas
   }
 }
 
+/** W1-T12152: reads the plan record of the task a non-dispatch call names — its shard under `planDir/tasks.d`, else the
+ *  monolith, parsed only when its text names the id — for the class and risk its assignment receipt records. */
+export function planTaskBenchmarkWork(planDir: string): BenchmarkTaskWorkReader {
+  return (taskId) => {
+    const shardDir = join(planDir, "tasks.d");
+    const shards = existsSync(shardDir)
+      ? readdirSync(shardDir).filter((name) => name.endsWith(".yaml") && isTaskShardName(name, taskId)).map((name) => join(shardDir, name)) : [];
+    const monolith = join(planDir, "tasks.yaml");
+    const texts = shards.map((shard) => ({ path: shard, text: readFileSync(shard, "utf8") }));
+    if (texts.length === 0 && existsSync(monolith)) texts.push({ path: monolith, text: readFileSync(monolith, "utf8") });
+    for (const { path, text } of texts) {
+      if (!text.includes(taskId)) continue;
+      const task = parseTasksFromYaml(text, path, undefined, {}, "preserve-external").find((t) => t.id === taskId);
+      if (task) return taskRecordBenchmarkWork(task);
+    }
+    return undefined;
+  };
+}
+
+/** W1-T12152: the lanes that fix a pull request's task read that task's record even when their caller hands no reader —
+ *  the one-shot `rmd sweep` fix rung's default spawn (`benchmarkNonDispatchSpawn("sweep-fix")`) included. */
+/** W1-T12152: a lane with the reader of its named task's record, for a caller that reads a plan other than the repository's. */
+export interface NonDispatchLane { lane: string; readTask: BenchmarkTaskWorkReader }
+
+const LANES_THAT_READ_THEIR_TASK: ReadonlySet<string> = new Set(["sweep-fix"]);
+
 type GuardrailAttempt = { signal: "relint-used" | "judge-retry"; attempt: number };
 const guardrailAttemptContext = new AsyncLocalStorage<GuardrailAttempt>();
 
@@ -838,8 +867,12 @@ function nonDispatchTerminalEvidence(result: WorkerResult | undefined) {
  * records the work a call carries ({@link withReceiptWork}) and its named task's record through `readTask`
  * ({@link nonDispatchTaskWork}); work with no task records the lane and the named reason. */
 export function benchmarkNonDispatchSpawn(
-  lane: string, raw: typeof spawnWorker = spawnWorker, readTask?: BenchmarkTaskWorkReader,
+  laneOrReader: string | NonDispatchLane, raw: typeof spawnWorker = spawnWorker,
 ): typeof spawnWorker {
+  const lane = typeof laneOrReader === "string" ? laneOrReader : laneOrReader.lane;
+  const readTask = typeof laneOrReader === "string"
+    ? (LANES_THAT_READ_THEIR_TASK.has(lane) ? planTaskBenchmarkWork(join(repoRoot, "plan")) : undefined)
+    : laneOrReader.readTask;
   return async (requested) => {
     // The host memory budget reserves (and learns) by class, and the lane names it: a caller's own class still wins.
     const args: SpawnWorkerArgs = { ...requested, workerClass: requested.workerClass ?? workerClassOfLane(lane) };
