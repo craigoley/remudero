@@ -188,6 +188,71 @@ export function judgeOpsBatch(size: OpsCatalogSize, originals: readonly string[]
     if (opsCatalogBoundRefusal(produced, reference, { ...io, clock })) return unknown("catalog_incompatible");
   }
 }
+/** remudero-ops scripts/ops-gate.rb REQUIRED_KEYS without "id", NON_EMPTY_KEYS, RISKS, PROOF_PREFIXES and DEMONSTRATION_RE. */
+const OPS_GATE_REQUIRED_KEYS = ["title", "repo", "type", "verify", "risk", "status", "attempts", "acceptance"] as const;
+const OPS_GATE_NON_EMPTY_KEYS = ["title", "repo", "type", "verify", "status", "attempts"] as const;
+const OPS_GATE_RISKS: readonly unknown[] = ["low", "medium", "high"];
+const OPS_GATE_PROOF_PREFIXES = ["unit test:", "grep:"] as const;
+const OPS_GATE_DEMONSTRATION = /^demonstration:[ \t\r\n\f\v]*[^ \t\r\n\f\v]/i;
+// Ruby's String#strip set, so a value of other Unicode spaces is not blank, as the gate reads it.
+const rubyStrip = (value: string): string => value.replace(/^[\0\t\n\v\f\r ]+|[\0\t\n\v\f\r ]+$/g, "");
+const rubyHash = (value: unknown): value is Json => Object.prototype.toString.call(value) === "[object Object]";
+const filled = (value: unknown): value is string => typeof value === "string" && rubyStrip(value) !== "";
+/**
+ * W1-T14424: every problem remudero-ops scripts/ops-gate.rb OpsGate.rule_problems finds in one parsed task, as its own
+ * text. The gate checks a moved live record against every rule and refuses the whole copy pull request for one problem,
+ * so the mover leaves such a record out. It mirrors the Ruby line by line; a change to the gate is a visible drift:
+ *   rule_problems:     each REQUIRED_KEYS key but id is present; each NON_EMPTY_KEYS key present is not blank?;
+ *                      check_depends_on; a present priority is Numeric; a present risk is one of RISKS; check_acceptance.
+ *   blank?:            nil, an empty String/Array/Hash, or a String that strips to "".
+ *   check_depends_on:  a present depends_on is an Array, and every item is a String.
+ *   check_acceptance:  a present acceptance is a non-empty Array; each item is a Hash with a String claim that strips
+ *                      non-empty; a present satisfied_by must be non-empty text and stands in place of the proof;
+ *                      otherwise the proof is non-empty text, a stripped proof matching DEMONSTRATION_RE needs
+ *                      verify: human, and any other proof starts (unstripped) with one of PROOF_PREFIXES.
+ */
+export function opsGateShapeProblems(task: Json): string[] {
+  const problems: string[] = [];
+  const has = (key: string) => Object.hasOwn(task, key);
+  for (const key of OPS_GATE_REQUIRED_KEYS) if (!has(key)) problems.push(`is missing the required key '${key}'`);
+  for (const key of OPS_GATE_NON_EMPTY_KEYS) {
+    const value = task[key];
+    if (has(key) && (value === null || value === undefined || (typeof value === "string" && rubyStrip(value) === "") ||
+      (Array.isArray(value) && value.length === 0) || (rubyHash(value) && Object.keys(value).length === 0))) problems.push(`'${key}' is empty`);
+  }
+  if (has("depends_on")) {
+    const deps = task.depends_on;
+    if (!Array.isArray(deps)) problems.push("'depends_on' is not a list");
+    else if (!deps.every(dep => typeof dep === "string")) problems.push("'depends_on' holds an item that is not a task id");
+  }
+  if (has("priority") && !(typeof task.priority === "number" || typeof task.priority === "bigint")) problems.push("'priority' is not a number");
+  if (has("risk") && !OPS_GATE_RISKS.includes(task.risk)) problems.push("'risk' is not low, medium or high");
+  if (!has("acceptance")) return problems;
+  const items = task.acceptance;
+  if (!Array.isArray(items) || items.length === 0) return [...problems, "'acceptance' is not a non-empty list"];
+  items.forEach((item: unknown, index) => {
+    const n = index + 1;
+    if (!rubyHash(item)) { problems.push(`acceptance item ${n} is not a map`); return; }
+    if (!filled(item.claim)) problems.push(`acceptance item ${n} has no 'claim'`);
+    if (Object.hasOwn(item, "satisfied_by")) {
+      if (!filled(item.satisfied_by)) problems.push(`acceptance item ${n} has a 'satisfied_by' that is not text`);
+      return;
+    }
+    const proof = item.proof;
+    if (!filled(proof)) problems.push(`acceptance item ${n} has no 'proof'`);
+    else if (OPS_GATE_DEMONSTRATION.test(rubyStrip(proof))) {
+      if (task.verify !== "human") problems.push(`acceptance item ${n} has a 'demonstration:' proof on a task that is not 'verify: human'`);
+    } else if (!OPS_GATE_PROOF_PREFIXES.some(prefix => proof.startsWith(prefix))) {
+      problems.push(`acceptance item ${n} has a 'proof' that does not start with 'unit test:' or 'grep:'`);
+    }
+  });
+  return problems;
+}
+/** W1-T14424: a single-task record's ops-gate problems, read as the gate's YAML 1.1 reader reads its bytes. */
+function opsGateShapeRefused(original: Original): boolean {
+  const raw: unknown = parseYaml(original.text, { version: "1.1", logLevel: "silent" });
+  return !Array.isArray(raw) || raw.length !== 1 || !rubyHash(raw[0]) || opsGateShapeProblems(raw[0]).length > 0;
+}
 function alreadyMoved(original: Original): boolean {
   // Only otherwise eligible candidates need this raw metadata; strict parsing already validated all bytes.
   const raw: unknown = parseYaml(original.text, { logLevel: "silent" });
@@ -370,8 +435,9 @@ export async function selectPlanTaskMigration(
     }
     // W1-T13680: only an open, machine-verified task whose public reservation exists may move. W1-T14345: open is
     // queued or blocked. A verify:human release is pinned to the record's contract, which its moved_from line changes,
-    // so a released task would need approving again in the destination: that exclusion stays.
-    const unmovable = !OPEN_STATUSES.has(task.status) ? "not_open" : task.verify === "human" ? "verify_human" :
+    // so a released task would need approving again in the destination: that exclusion stays. W1-T14424: an open record
+    // the ops gate's moved-live rules refuse would fail the whole batch's copy, so it is left out before any lookup.
+    const unmovable = !OPEN_STATUSES.has(task.status) ? "not_open" : opsGateShapeRefused(original) ? "ops_gate_shape" : task.verify === "human" ? "verify_human" :
       !publicRefs.has(`refs/rmd-id/${task.id}`) ? "reservation_absent" : undefined;
     if (unmovable) { refused.push({ id: task.id, reason: unmovable }); continue; }
     if (!control) return unknown("merge_credit_control_unreadable");
