@@ -83,6 +83,12 @@ export function corpus(): Array<Record<string, unknown>> {
   fallback(["review.semantic_pass_refused"], "pr_url", 600);
   // W1-T12187: one judge-shadow row of each step, each under its own role, so each step moves the summary.
   JUDGE_SHADOW_STEPS.forEach((step, i) => rows.push({ step, run_id: "sweep-1", role: `role-${i}`, cost_usd: 0.0002, ts: at(m++) }));
+  // W1-T12232: one complete restart cycle, so dropping the step changes the inventory's restart sample.
+  rows.push({
+    step: "daemon.restart_cycle", run_id: "daemon", ts: at(m++), first_verdict_at: at(m),
+    trigger: "busy, but pressure 20 (change 2 + staleness 18) >= 18: drain and restart",
+    waiting_cost_ms: 2_400_000, restart_cost_ms: 2_460_000, missing_parts: [],
+  });
   return rows;
 }
 
