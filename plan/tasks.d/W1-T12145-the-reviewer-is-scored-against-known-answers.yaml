@@ -26,7 +26,7 @@
     - test/review/the-reviewer-is-scored-against-known-answers.test.ts
     - src/lib/producer-identity.ts
     - test/every-priced-ledger-step-is-in-the-config-garden-read.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The pass builds its cases from merged pull requests with a verdict_calibration.outcome. A reverted or follow-up-fixed head is an escaped-defect case whose right verdict is FAIL; a clean head is a control whose right verdict is PASS; cases are sampled per risk level with a seed"

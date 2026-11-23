@@ -1430,6 +1430,7 @@
   "recordOnly": {
     "config.randomised_finding": "An operator-facing finding naming the routing setting that can carry a randomised winner the mounts table cannot express; the config gardener re-reads it only to write each finding once per evidence day.",
     "config.randomised_recommendations_unread": "A diagnostic for a failed read of the randomised evidence; it records the error and changes no candidate.",
+    "dispatch.selection_timing": "Observability for W1-T13286: per-probe selection timing that an operator reads to pick the next speed fix; no decision reads it (invariant measuring-changes-no-decision).",
     "reviewer.health_save_superseded": "A diagnostic that an evaluation skipped its save because a newer health file was already on disk; the newer file is the state every reader uses, so nothing re-reads the row.",
     "reviewer.model_divergence": "An operator-facing record of each evaluation's per-model judgement; the incident state in reviewer-health.json carries the decision, so nothing re-reads the row.",
     "reviewer.model_divergence_closed": "An operator-facing record that a model-divergence incident closed and its issue was closed; the incident state carries the decision, so nothing re-reads the row.",

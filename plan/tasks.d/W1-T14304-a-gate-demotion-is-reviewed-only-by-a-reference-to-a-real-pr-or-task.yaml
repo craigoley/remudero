@@ -15,7 +15,7 @@
     - test/a-required-gate-can-be-demoted-in-silence.test.ts
     - "src/lib/gate-gardener.ts"
     - test/the-gates-tend-themselves.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at origin/main 8923f5635 (2026-11-22).

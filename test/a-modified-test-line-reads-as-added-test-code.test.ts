@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { detectTestTheater } from "#src/lib/review.js";
+import { TEST_DECLARATION_TITLE_RE, detectTestTheater } from "#src/lib/review.js";
 // The planted tautologies live under `test/fixtures/` — which `isFixtureDataPath` excludes from
 // the scan — because a suite holding them INLINE self-matches the very arm it is testing. See
 // that fixture's own header for the measurement that earned this split.
@@ -125,4 +125,63 @@ test("W1-T2815: fixture DATA under test/fixtures/ is still excluded from the sca
   // the patterns this detector hunts, which is why the exclusion exists.
   const diff = diffFor("test/fixtures/planted/corpus.ts", ['+test("no assertions here", () => {});']);
   assert.equal(detectTestTheater(diff), false);
+});
+
+// ── A case's OWN declaration line, rewritten (#20336) ────────────────────────────────────────
+// Making an existing case async rewrites its `test(` line, so a `test(` lands on the `+` side.
+// A `+` declaration that names the same callee and literal title as a `-` one in the same file is
+// that case rewritten, not a new one. Everything that cannot be paired that way still counts as new.
+
+test("#20336: making an existing case async rewrites its declaration line, and that is NOT test theater", () => {
+  // The shape #20336 was refused for: the case's own declaration on both sides, a drain and its
+  // comment added inside the case, and no assertion added anywhere.
+  const title = "after a CLI rebuild swaps the file the worker resumes against the new file with no lost or duplicate rows";
+  const diff = diffFor("test/read-model-worker.test.ts", [
+    `-test("${title}", (t) => {`,
+    `+test("${title}", async (t) => {`,
+    '   const ledgerDir = scratch(t, "rmw-swap-ledger");',
+    "@@ -614,6 +614,9 @@",
+    "+  // The delete waits for the transaction publisher thread to drain first.",
+    "+  await flushReadModelTransactions();",
+    '   rmSync(join(stateDir, "read-model"), { recursive: true, force: true });',
+  ]);
+  assert.equal(detectTestTheater(diff), false, "a rewritten declaration names the same case, not a new one");
+});
+
+test("#20336: a declaration whose TITLE changed is a new case, so an assertion-free one is still theater", () => {
+  const diff = diffFor("test/some-feature.test.ts", ['-test("the old name", () => {', '+test("a new name", () => {', "+  doTheThing();"]);
+  assert.equal(detectTestTheater(diff), true);
+});
+
+test("#20336: a rewritten declaration does not excuse an assertion-free case ADDED beside it", () => {
+  const diff = diffFor("test/some-feature.test.ts", [
+    '-test("existing case", () => {',
+    '+test("existing case", async () => {',
+    '+test("a brand new case", () => {',
+    "+  doTheThing();",
+    "+});",
+  ]);
+  assert.equal(detectTestTheater(diff), true, "the new case still has to assert something");
+});
+
+test("#20336: a declaration removed from ONE file does not pair with the same title added to ANOTHER", () => {
+  const diff = [
+    diffFor("test/a.test.ts", ['-test("shared title", () => {']),
+    diffFor("test/b.test.ts", ['+test("shared title", () => {', "+  doTheThing();", "+});"]),
+  ].join("\n");
+  assert.equal(detectTestTheater(diff), true);
+});
+
+test("#20336: a declaration with no literal title cannot be paired, so it still counts as a new case", () => {
+  const diff = diffFor("test/some-feature.test.ts", [
+    '-describe.each([1])("x", () => {',
+    '+describe.each([1, 2])("x", () => {',
+    "+  doTheThing();",
+  ]);
+  assert.equal(detectTestTheater(diff), true);
+});
+
+test("#20336: TEST_DECLARATION_TITLE_RE reads a declaration's literal title, and refuses one that has none", () => {
+  assert.equal(TEST_DECLARATION_TITLE_RE.exec('test("a title", async (t) => {')?.[3], "a title");
+  assert.equal(TEST_DECLARATION_TITLE_RE.exec('describe.each([1])("x", () => {'), null);
 });

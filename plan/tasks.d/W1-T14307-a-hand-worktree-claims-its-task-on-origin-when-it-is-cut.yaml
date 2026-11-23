@@ -17,7 +17,7 @@
     - src/lib/authority.ts
     - test/authority-table.test.ts
     - docs/cli-reference.md
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at origin/main 8923f5635 (2026-11-22).

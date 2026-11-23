@@ -125,7 +125,13 @@ function buildInNewProcess(root: string, ledgerPath: string, expectedReason = st
   return JSON.parse(child.stdout) as BuildObservation;
 }
 
-function interceptRotationRead(archive: string, readArchive: () => Buffer): () => void {
+// A warm reader re-reads a rotation only after its stat identity changes, so a fault in this process
+// comes with a new mtime. A cold child process injects the fault on an unchanged stat.
+function interceptRotationRead(archive: string, readArchive: () => Buffer, changeStat = true): () => void {
+  if (changeStat) {
+    const before = statSync(archive);
+    utimesSync(archive, before.atime, new Date(before.mtimeMs + 1_000));
+  }
   const read = fs.readFileSync;
   fs.readFileSync = new Proxy(read, {
     apply(target, receiver, args) {
@@ -139,10 +145,10 @@ function interceptRotationRead(archive: string, readArchive: () => Buffer): () =
   };
 }
 
-function failRotationRead(archive: string, code: "EACCES" | "EIO"): () => void {
+function failRotationRead(archive: string, code: "EACCES" | "EIO", changeStat = true): () => void {
   return interceptRotationRead(archive, () => {
     throw Object.assign(new Error(`rotation read failed: ${code}`), { code });
-  });
+  }, changeStat);
 }
 
 function unionStandDowns(rows: ReturnType<typeof parseLedger>): typeof candidates {
@@ -155,7 +161,7 @@ function unionStandDowns(rows: ReturnType<typeof parseLedger>): typeof candidate
 
 if (process.argv[2] === childFlag) {
   const archive = process.argv[6];
-  const restore = archive === undefined ? undefined : failRotationRead(archive, "EIO");
+  const restore = archive === undefined ? undefined : failRotationRead(archive, "EIO", false);
   try {
     process.stdout.write(JSON.stringify(observeBuild(process.argv[3]!, process.argv[4]!, process.argv[5])));
   } finally {
@@ -492,7 +498,7 @@ if (process.argv[2] === childFlag) {
     } finally {
       restore();
     }
-    assert.deepEqual(observeBuild(root, path), { gunzips: 0, stoodDown: candidates.slice(0, 3) });
+    assert.deepEqual(observeBuild(root, path), { gunzips: 1, stoodDown: candidates.slice(0, 3) });
   });
 
   for (const [waitAt, standDown] of [["admission", true], ["preflight", true], ["preflight", false]] as const) {
@@ -709,11 +715,11 @@ if (process.argv[2] === childFlag) {
         dispatch: { roundNotRun: true, reason: unreadHistoryReason },
         preflights: 0,
       });
-      assert.deepEqual(observeBuild(root, path, unreadHistoryReason), { gunzips: 0, stoodDown: candidates });
+      assert.deepEqual(observeBuild(root, path, unreadHistoryReason), { gunzips: 1, stoodDown: candidates });
     } finally {
       restore();
     }
-    assert.deepEqual(observeBuild(root, path), { gunzips: 0, stoodDown: candidates.slice(0, 3) });
+    assert.deepEqual(observeBuild(root, path), { gunzips: 1, stoodDown: candidates.slice(0, 3) });
   });
 
   test("without rotations the sweep uses the caller's live ledger path", (t) => {
