@@ -57,6 +57,8 @@
     src/lib/ledger.ts with this task only because those files are large and shared. W1-T147 injects faults, and W1-T298
     escalates an empty queue. Neither touches the checkpoint restore, the receipt fold or these retained steps.
   design: |
+    INVARIANT failed-read-consumes-nothing: a failed ls-remote, fetch or other git read stays today's throw; the run
+    ends restore_failed and the receipt is not consumed (the W1-T7806 rule).
     1. CLASSIFY A PRESENT REF AT ANOTHER SHA, ONCE. In `restoreBoundaryCheckpoint`, after W1-T8503's absent-ref split, a
        ref present at R ≠ the receipt head H is fetched (`git fetch origin <branch>`). FETCH_HEAD is the R that every later
        step uses, so the "moved during fetch" race is classified the same way, not thrown. Then:
@@ -102,12 +104,13 @@
       proof: 'grep: test("W1-T8535: a rewritten remote head is superseded once and resumes without a push" in test/a-checkpoint-branch-that-moved-is-resolved-once.test.ts'
     - claim: "a superseded receipt stays consumed after a real rotation"
       proof: 'grep: test("W1-T8535: a superseded receipt stays consumed after rotation" in test/a-checkpoint-branch-that-moved-is-resolved-once.test.ts'
-    - claim: "a failed ls-remote or fetch stays a failed read that consumes nothing, never a moved ref"
+    - claim: "invariant:failed-read-consumes-nothing — a failed ls-remote or fetch stays a failed read that consumes nothing, never a moved ref"
+      kind: guard
       proof: 'grep: test("W1-T8535: a failed read stays a failed read and consumes nothing" in test/a-checkpoint-branch-that-moved-is-resolved-once.test.ts'
     - claim: "the restore writes the named superseded row"
       proof: 'grep: implement\.checkpoint_superseded in src/run-task.ts'
     - claim: "the superseded row is retained"
-      proof: 'grep: "implement\.checkpoint_superseded" in src/lib/ledger.ts'
+      proof: 'grep: implement\.checkpoint_superseded in src/lib/ledger.ts'
   falsifier: |
     Keep the `remoteHead !== checkpoint.headSha` throw for a present ref. Both dispatches in the first test then end no_pr
     restart_checkpoint_restore_failed, the loop this task closes. Write the superseded row but leave
