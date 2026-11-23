@@ -931,7 +931,8 @@ export const OPS_DISPATCH_SOURCE_MAX_AGE_MS = 120_000;
 /** W1-T13052: the daemon refreshes on its own timer, so evidence stays younger than the bound between slow cycles. */
 export const OPS_DISPATCH_SOURCE_REFRESH_MS = 45_000;
 
-/** W1-T13705: one row per completed refresh, so an unreadable catalog says why. No URL, body or token reaches it. */
+/** W1-T13705: one row per completed refresh, so an unreadable catalog says why. No URL, body or token reaches it.
+ *  W1-T14374: it also carries the snapshot's shard and byte counts and, for a derived-bound refusal, the bound. */
 export const OPS_CATALOG_REFRESHED_STEP = "dispatch.ops_catalog_refreshed";
 
 export function opsCatalogShadowFeed(
@@ -956,6 +957,9 @@ export function opsCatalogShadowFeed(
       opts.log(OPS_CATALOG_REFRESHED_STEP, {
         outcome: input.outcome, refusal_stage: input.refusalStage ?? null, duration_ms: durationMs,
         kind: input.kind ?? null, http_status_class: input.httpStatusClass ?? null,
+        // W1-T14374: counts and the bound's three numbers; each is copied by name, so no other field of either reaches the row.
+        shards: input.counts?.shards ?? null, bytes: input.counts?.bytes ?? null,
+        bound: input.bound ? { reason: input.bound.reason, observed: input.bound.observed, allowed: input.bound.allowed } : null,
       });
     } catch {
       // A diagnostic row that cannot be written never changes the evidence the refresh produced.

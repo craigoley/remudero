@@ -163,3 +163,52 @@ test("W1-T13790 criterion 6: invariant:quoted-is-not-failed — a path only insi
   assert.deepEqual(failingTestFilesFromCiFailures([{ name: SHARD, logTail: cut }]), []);
   assert.deepEqual(parseFailingTestFiles(cut, CHECKOUT), []);
 });
+
+/** #20279's coverage-shard 11/12 (run 45049046525, job 137290339207), verbatim. The job merges the spec and TAP
+ *  reporters into one stream, and the spec reporter's `✖` line landed between the TAP head and its body. */
+const INTERLEAVED_LOG_TAIL = [
+  "2026-11-22T17:40:37.9403287Z # Subtest: after a CLI rebuild swaps the file the worker resumes against the new file with no lost or duplicate rows",
+  "2026-11-22T17:40:37.9433100Z not ok 3435 - after a CLI rebuild swaps the file the worker resumes against the new file with no lost or duplicate rows",
+  "2026-11-22T17:40:37.9463000Z ✖ after a CLI rebuild swaps the file the worker resumes against the new file with no lost or duplicate rows (126.484847ms)",
+  "2026-11-22T17:40:37.9497550Z   ---",
+  "2026-11-22T17:40:37.9512404Z   duration_ms: 126.484847",
+  "2026-11-22T17:40:37.9552190Z   type: 'test'",
+  "2026-11-22T17:40:37.9582464Z   location: '/home/runner/work/remudero/remudero/test/read-model-worker.test.ts:585:1'",
+  "2026-11-22T17:40:37.9602277Z   failureType: 'testCodeFailure'",
+  "2026-11-22T17:40:37.9622432Z   error: \"ENOTEMPTY, Directory not empty: '/tmp/rmd-rmw-swap-state-szmc1Z/read-model'\"",
+  "2026-11-22T17:40:37.9662274Z   code: 'ENOTEMPTY'",
+  "2026-11-22T17:40:37.9692359Z   stack: |-",
+  "2026-11-22T17:40:37.9722300Z     rmSync (node:fs:1282:18)",
+  "2026-11-22T17:40:37.9762747Z     TestContext.<anonymous> (/home/runner/work/remudero/remudero/test/read-model-worker.test.ts:617:3)",
+  "2026-11-22T17:40:37.9792491Z     Test.runInAsyncScope (node:async_hooks:227:14)",
+  "2026-11-22T17:40:37.9852967Z     Test.run (node:internal/test_runner/test:1402:25)",
+  "2026-11-22T17:40:37.9865959Z     async Test.processPendingSubtests (node:internal/test_runner/test:974:7)",
+  "2026-11-22T17:40:37.9877695Z   ..."
+].join("\n");
+/** The same lines as the retry wrapper reads them, before the job log adds its timestamps. */
+const INTERLEAVED_RUNNER_OUTPUT = INTERLEAVED_LOG_TAIL.replace(/^\S+Z /gm, "");
+const INTERLEAVED_FILE = "test/read-model-worker.test.ts";
+
+test("#20279: a spec line between a failure's TAP head and its body does not hide the failed file", () => {
+  assert.deepEqual(parseFailingTestFiles(INTERLEAVED_RUNNER_OUTPUT, CHECKOUT), [INTERLEAVED_FILE]);
+  assert.deepEqual(failingTestFilesFromCiFailures([{ name: "coverage-shard (11/12)", logTail: INTERLEAVED_LOG_TAIL }]),
+    [`${CHECKOUT}/${INTERLEAVED_FILE}`]);
+});
+
+test("#20279: once a failure's body has begun, a column-0 line still ends its block", () => {
+  // The body is one write, so a non-TAP line inside it means the block is over: a key after it is not this block's.
+  const output = [
+    "not ok 1 - u case",
+    "  ---",
+    "  duration_ms: 1",
+    "✖ u case (1ms)",
+    `  location: '${CHECKOUT}/test/u.test.ts:1:1'`,
+    "  ...",
+  ].join("\n");
+  assert.deepEqual(parseFailingTestFiles(output, CHECKOUT), []);
+});
+
+test("#20279: a TAP line before a failure's body still ends its block", () => {
+  const output = ["not ok 1 - s case", "# Subtest: next case", `  location: '${CHECKOUT}/test/s.test.ts:1:1'`].join("\n");
+  assert.deepEqual(parseFailingTestFiles(output, CHECKOUT), []);
+});

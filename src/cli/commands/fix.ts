@@ -2412,7 +2412,7 @@ export function withoutOpsCatalogSource<T extends object>(task: T): T {
   return withoutSource as T;
 }
 
-export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
+type FixRungOptions = Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
   workerProofIo?: Parameters<typeof runWorkerAcceptanceProofs>[1];
   hostedProofReader?: HostedFixProofReader;
   requiredContexts?: Iterable<string>;
@@ -2421,6 +2421,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   prBodySha256?: string;
   /** W1-T12710: a stronger-worker round's earlier rounds on its stalled criterion: diff summary and outcome each. */
   failedApproaches?: readonly string[];
+  readEarlyCiFailures?: (headSha: string) => Promise<CiFailure[]>;
   /** W1-T13991: the new failure the sweep handed this round while it waited on CI for its own push, taken once per wait. */
   liveRoundHandoff?: () => LiveRoundHandoff | undefined;
   waitForOwnHeadCi?: (
@@ -2428,10 +2429,45 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     log: Parameters<Parameters<RunTaskCommandHost["runFixRung"]>[0]["deps"]["waitForCiGreen"]>[1],
     ownHead: string | undefined,
   ) => ReturnType<Parameters<RunTaskCommandHost["runFixRung"]>[0]["deps"]["waitForCiGreen"]>;
-},
-  host: FixCommandHost,
-): ReturnType<RunTaskCommandHost["runFixRung"]> {
+};
+
+function earlyCiRecheck(opts: FixRungOptions, readFailures: NonNullable<FixRungOptions["readEarlyCiFailures"]>) {
+  const headSha = opts.initialReview.headSha;
+  const known = new Set((opts.ciFailures ?? []).map(({ name }) => name));
+  let outstanding: CiFailure[] = [];
+  let observation: { roundId: string; fields: Record<string, unknown> } | undefined;
+  let read: Promise<void> | undefined;
+  const names = () => [...new Set(outstanding.map(({ name }) => name))];
+  return {
+    headSha,
+    failures: () => outstanding,
+    names,
+    clear: () => { outstanding = []; },
+    fields: (roundId: unknown) => observation?.roundId === roundId ? observation?.fields : undefined,
+    refresh: (roundId: string) => read ??= (async () => {
+      try {
+        const failures = await readFailures(headSha);
+        outstanding = failures.filter(({ name }) => !known.has(name));
+        observation = { roundId, fields: { dispatch_checks: [...known], new_red_checks: names() } };
+      } catch (error) {
+        const reason = String(error);
+        observation = { roundId, fields: { dispatch_checks: [...known], error: reason } };
+        opts.deps.log("fix.ci_failures_fetch_error", { head_sha: headSha, round_id: roundId, site: "early_ci_recheck", error: reason });
+      }
+    })(),
+    note: () => outstanding.length > 0
+      ? `Checks first reported red during the fix round for ${headSha} and still unaddressed: ${names().join(", ")}`
+      : undefined,
+  };
+}
+
+export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): ReturnType<RunTaskCommandHost["runFixRung"]> {
   opts = noEditRecoveryOptions(opts);
+  const recheck = opts.readEarlyCiFailures && earlyCiRecheck(opts, opts.readEarlyCiFailures);
+  const finish = (outcome: FixRungOutcome): FixRungOutcome => {
+    const note = recheck?.note();
+    return note ? { ...outcome, reason: `${outcome.reason}. ${note}` } : outcome;
+  };
   /** Keep fix-rung issues within an ops task's public contract; detailed diagnostics stay host-side. */
   const fixRungEscalationForTask = (
     task: { catalog?: "public" | "ops"; title: string; acceptance?: AcceptanceCriterion[] },
@@ -2452,8 +2488,11 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       consequence: null,
     };
   };
-  const escalateForTask = (escalation: Escalation, deps: Parameters<typeof escalateWithJudge>[1], publicFacts?: string) =>
-    escalateWithJudge(fixRungEscalationForTask(opts.task, escalation, publicFacts), deps);
+  const escalateForTask = (escalation: Escalation, deps: Parameters<typeof escalateWithJudge>[1], publicFacts?: string) => {
+    const issue = fixRungEscalationForTask(opts.task, escalation, publicFacts);
+    const note = recheck?.note();
+    return escalateWithJudge(note ? { ...issue, detail: `${issue.detail}\n\n${note}` } : issue, deps);
+  };
   const {
     formerBoundStandIn,
     fixRungStandDownReason,
@@ -2506,8 +2545,15 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       ? { ...fixRungInputFields({ headSha: typeof extra?.head_sha === "string" ? extra.head_sha : opts.initialReview.headSha,
           contractRevision: currentContractRevision, bodySha256: opts.prBodySha256 }), ...extra }
       : extra;
+    const rechecked = step === "fix.done" && extra?.head_sha === recheck?.headSha ? recheck : undefined;
+    const lateNames = rechecked?.names() ?? [];
+    const observation = rechecked?.fields(extra?.round_id);
+    const completed = observation || lateNames.length > 0 ? { ...row,
+      ...(observation ? { early_ci_recheck: observation } : {}),
+      ...(lateNames.length > 0 ? { unaddressed_checks: lateNames } : {}),
+    } : row;
     const attributed = roundModelFields && ["fix.dispatch", "fix.done", "fix.exhausted", "fix.commit_refused", "fix.stood_down"].includes(step)
-      ? { ...(step === "fix.dispatch" ? { requested_model: roundModelFields.requested_model } : roundModelFields), ...row } : row;
+      ? { ...(step === "fix.dispatch" ? { requested_model: roundModelFields.requested_model } : roundModelFields), ...completed } : completed;
     roundRows.push({ ...attributed, task_id: opts.taskId, step });
     opts.deps.log(step, attributed);
   } };
@@ -2864,6 +2910,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   let fixSkillSelectionLogged = false;
   while (review.state !== "success" || proofDiscriminationStillNeedsRepair()) {
     consultedThisRound = false;
+    if (recheck && currentPrHeadSha === recheck.headSha && noReviewYet) {
+      const known = new Set(currentCiFailures?.map(({ name }) => name));
+      const added = recheck.failures().filter(({ name }) => !known.has(name));
+      if (added.length > 0) {
+        currentCiFailures = [...(currentCiFailures ?? []), ...added];
+        for (const { name } of added) everRedCiCheckNames.add(name);
+      }
+    }
     // A wired judge rules every round itself (below); only the stand-in stops at the former bounds here.
     if (judgeIsStandIn && (strikes - needsDesignRefunds >= opts.strikeCap || retriggers >= retriggerCap || consecutiveMergeRefusalReasons.length >= 2)) {
       const bound = consecutiveMergeRefusalReasons.length >= 2
@@ -4720,11 +4774,12 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) },
         fixRound: { prUrl: opts.prUrl, branch: opts.branch },
       }), deps.log);
+      if (recheck && spawnOutcome.kind !== "spawned") await recheck.refresh(roundId);
       if (spawnOutcome.kind === "superseded") {
         const s = spawnOutcome.superseded;
         const reason = `fix superseded (${s.condition}): ${s.oldHead.slice(0, 12)} -> ${s.newHead.slice(0, 12)}`;
         deps.say(`fix rung: STOPPED strike ${attempt}/${opts.strikeCap} — ${reason}: ${opts.prUrl}`);
-        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, superseded: s };
+        return finish({ outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, superseded: s });
       }
       if (spawnOutcome.kind === "yielded") {
         // W1-T8141: a pending recycle ended the round; spawnFixWorkerBounded kept the work. No fix.dispatch, no strike.
@@ -4740,8 +4795,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         const reason = `fix round yielded to a pending ${y.trigger}: ${kept
           || (y.keepError ? `work left in the worktree (${y.keepError})` : "no work to keep")}`;
         deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} YIELDED, no strike spent — ${reason}: ${opts.prUrl}`);
-        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason,
-          ...(y.keepError ? { retainWorktree: reason } : {}) };
+        return finish({ outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason,
+          ...(y.keepError ? { retainWorktree: reason } : {}) });
       }
       if (spawnOutcome.kind === "abandoned") {
         deps.say(
@@ -4751,18 +4806,19 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         // Mirrors the spawn-infra-blocked path immediately below: no subprocess demonstrably
         // ran to completion, so this round is never committed as a strike (W1-T127's own
         // "a strike is only spent once a worker demonstrably ran" invariant).
-        return { outcome: "spawn_abandoned", review, strikes, retriggers, reason: "spawn wall-clock bound exceeded", spawnAbandonedElapsedMs: spawnOutcome.elapsedMs };
+        return finish({ outcome: "spawn_abandoned", review, strikes, retriggers, reason: "spawn wall-clock bound exceeded", spawnAbandonedElapsedMs: spawnOutcome.elapsedMs });
       }
       spawnElapsedMs = spawnOutcome.elapsedMs;
       fixResult = deps.account(spawnOutcome.result);
       if (fixResult.notStarted === "admission-abandoned") {
+        if (recheck) await recheck.refresh(roundId);
         deps.log("fix.done", { ...fixReceipt.joinFields(), round_id: roundId, head_sha: priorHeadSha,
           ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
           strike: attempt, round, subtype: "admission_abandoned", worker_exit: "not_spawned",
           admission_since_ms: fixResult.admissionSinceMs, cost_usd: 0, num_turns: 0 });
         deps.branchClaim?.release();
-        return { outcome: "stood_down", review, strikes, retriggers, reason: "admission-abandoned",
-          standDownReason: "fix admission abandoned before a worker started" };
+        return finish({ outcome: "stood_down", review, strikes, retriggers, reason: "admission-abandoned",
+          standDownReason: "fix admission abandoned before a worker started" });
       }
       roundModelFields = { requested_model: fixArgs.model ?? null, served_model: fixResult.servedModel ?? null,
         ...(fixResult.servedModel == null ? { served_model_reason: fixResult.servedModelReason ??
@@ -4792,6 +4848,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     // W1-T2402's thrown kill. One that left work falls through and the harness commits it (W1-T4283, #8973).
     if (fixWorkerEndedBySignal(fixResult) && !(deps.worktreeHasUncommittedChanges ?? host.worktreeHasUncommittedChanges)(opts.worktreePath) &&
       (roundStartSha === undefined || (deps.commitsAhead ?? host.commitsAhead)(opts.worktreePath, roundStartSha) === 0)) {
+      if (recheck) await recheck.refresh(roundId);
       deps.log("fix.done", {
         ...fixReceipt.ledgerFields(fixResult),
         round_id: roundId,
@@ -4811,8 +4868,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       deps.branchClaim?.release();
       deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} worker TERMINATED BY SIGNAL (${fixResult.subtype}) — ` +
         `not a commit refusal, no strike spent: ${opts.prUrl}`);
-      return { outcome: "stood_down", review, strikes, retriggers, reason: "fix worker terminated by signal",
-        standDownReason: `the fix worker was terminated by a signal (${fixResult.subtype}) before it finished` };
+      return finish({ outcome: "stood_down", review, strikes, retriggers, reason: "fix worker terminated by signal",
+        standDownReason: `the fix worker was terminated by a signal (${fixResult.subtype}) before it finished` });
     }
 
     const censusCheck = await host.checkFixCensusSnapshotAsync(opts.worktreePath, await censusSnapshotForCheck(opts.worktreePath,
@@ -5000,11 +5057,12 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     }
 
     const filingRefusal = await filingRoundRefusal(priorHeadSha, expectedHeadShaForPush);
+    if (recheck) await recheck.refresh(roundId);
     if (filingRefusal) {
       deps.log("fix.commit_refused", { round_id: roundId, head_sha: priorHeadSha, reason: filingRefusal });
       deps.log("fix.done", { round_id: roundId, head_sha: priorHeadSha, subtype: "commit_refused" });
       deps.branchClaim?.release();
-      return { outcome: "stood_down", review, strikes, retriggers, reason: filingRefusal, standDownReason: filingRefusal };
+      return finish({ outcome: "stood_down", review, strikes, retriggers, reason: filingRefusal, standDownReason: filingRefusal });
     }
 
     // A worker DEMONSTRABLY ran (spawn returned rather than throwing) — only now is this round
@@ -5298,15 +5356,15 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       }
       fixClaimFields.base_red_claim = verified ? "verified" : "refuted";
       logFixDone();
-      return { outcome: "stood_down", review, strikes: verified ? strikes - 1 : strikes, retriggers,
-        reason: verified ? "worker-base-red-verified" : "base-red claim refuted" };
+      return finish({ outcome: "stood_down", review, strikes: verified ? strikes - 1 : strikes, retriggers,
+        reason: verified ? "worker-base-red-verified" : "base-red claim refuted" });
     }
     if (fixAction.kind === "rerun-once") {
       if (refutedFlake) {
         fixClaimFields.flake_claim = "repeated";
         logFixDone();
-        return { outcome: "stood_down", review, strikes: strikes - 1, retriggers,
-          reason: "flake claim repeated after refutation — no-op round" };
+        return finish({ outcome: "stood_down", review, strikes: strikes - 1, retriggers,
+          reason: "flake claim repeated after refutation — no-op round" });
       }
       const rerouted = fixAction.rerouted;
       if (rerouted) {
@@ -5345,8 +5403,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         try {
           const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
           const handoff = ciHandoff(ci);
-          if (handoff) { logFixDone(); return handoff; }
+          if (handoff) { logFixDone(); return finish(handoff); }
           green = host.ciGateState(ci) === "green" && (!ciGateSha(ci) || ciGateSha(ci) === priorHeadSha);
+          if (green && recheck?.headSha === priorHeadSha && ciGateSha(ci) === priorHeadSha) recheck.clear();
           for (const row of rerouted && !deferred ? fixRoundFlakeRetryRows(rerouted, green, prNumber, priorHeadSha) : []) deps.log("test.flake_retry", row);
         } catch (error) {
           deps.log("fix.flake_verification_failed", { head_sha: priorHeadSha, reason: String(error) });
@@ -5355,8 +5414,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       if (green) deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha, reason: "flake-confirmed" });
       fixClaimFields.flake_claim = green ? "confirmed" : deferred ? "requeue_deferred" : "refuted";
       logFixDone();
-      return { outcome: "stood_down", review, strikes: green ? strikes - 1 : strikes, retriggers,
-        reason: green ? "flake-confirmed" : "flake claim refuted" };
+      return finish({ outcome: "stood_down", review, strikes: green ? strikes - 1 : strikes, retriggers,
+        reason: green ? "flake-confirmed" : "flake claim refuted" });
     }
     const amendProofs = (proofEvidence: ProofDiscriminationEvidence) => dispatchProofAmendmentWrite({
       prUrl: opts.prUrl, taskId: opts.taskId, worktreePath: opts.worktreePath, config: opts.config, reviewBase: opts.reviewBase,
@@ -5421,7 +5480,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         ...(refusalExcerpt ? { report_excerpt: refusalExcerpt } : {}), needs_design_kind: sorted.kind, needs_design_remedy: remedy });
       deps.log("fix.needs_design_routed", routed);
       logFixDone();
-      return { outcome: "needs_design", review, strikes, retriggers, reason: fixAction.reason };
+      return finish({ outcome: "needs_design", review, strikes, retriggers, reason: fixAction.reason });
     }
     if (fixAction.kind === "scope-needed") {
       const scopeAction = fixAction;
@@ -5517,7 +5576,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         const repairedHead = await pushScopeRepair();
         const { reason, issueUrl } = await escalateScope(scopeKind, repairedHead);
         finishScopeRound();
-        return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, issueUrl };
+        return finish({ outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, issueUrl });
       }
       let amendment: ScopeAmendmentOutcome;
       let scopeAsks = 0;
@@ -5563,7 +5622,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       }
       if (amendment.kind !== "refused") {
         logFixDone(undefined, "scope_amendment_pending");
-        return { outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment merge" };
+        return finish({ outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment merge" });
       }
       const repairedHead = await pushScopeRepair();
       const refusal = `${amendment.reason}: ${amendment.detail}`;
@@ -5575,7 +5634,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       if (repairedHead !== undefined && scopeMainOwned.length === 0) {
         const { issueUrl } = await escalateScope("refused", repairedHead, refusal);
         finishScopeRound();
-        return { outcome: "stood_down", review, strikes, retriggers, reason: "non-test paths need scope", issueUrl };
+        return finish({ outcome: "stood_down", review, strikes, retriggers, reason: "non-test paths need scope", issueUrl });
       }
       finishScopeRound();
       if (scopeMainOwned.length > 0 && landing?.landed !== false && deps.updateBranch && prNumber !== undefined) {
@@ -5585,13 +5644,13 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           const updated = await deps.updateBranch(prNumber);
           if (updated.ok) {
             deps.log("fix.base_refreshed", { ...refresh, scope_amendment_after_refresh: fixAction.paths });
-            return { outcome: "stood_down", review, strikes, retriggers, reason: "scope_amendment_after_refresh" };
+            return finish({ outcome: "stood_down", review, strikes, retriggers, reason: "scope_amendment_after_refresh" });
           } else deps.log("fix.base_refresh_failed", { ...refresh, error: updated.error ?? "no error reported" });
         } catch (error) {
           deps.log("fix.base_refresh_failed", { ...refresh, error: String(error) });
         }
       }
-      return { outcome: "stood_down", review, strikes, retriggers, reason: "non-test paths need scope" };
+      return finish({ outcome: "stood_down", review, strikes, retriggers, reason: "non-test paths need scope" });
     }
 
     // A shell-less worker that omitted or failed its harness commit produced no new head. The
@@ -5626,14 +5685,14 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
         `fix rung: refused (${Math.max(1, refusedAtHead)} at this head) by the harness — no commit was produced: ` +
           `${harnessCommitRefusalReason}`,
       );
-      return {
+      return finish({
         outcome: "stood_down",
         review,
         strikes,
         retriggers,
         reason: "harness commit refused",
         standDownReason: harnessCommitRefusalReason,
-      };
+      });
     }
 
     let roundPush: FixRungOutcome | "refused" | undefined;
@@ -5654,8 +5713,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
       logPushedRoundDone(landing, roundPush === undefined);
     }
     if (roundPush === "refused") continue;
-    if (roundPush) return { ...roundPush, strikes: unlandedStrikes() };
-    if (!landing.landed) return notLandedOutcome(landing);
+    if (roundPush) return finish({ ...roundPush, strikes: unlandedStrikes() });
+    if (!landing.landed) return finish(notLandedOutcome(landing));
 
     recordHeadProviderAfterPush(
       {
@@ -5690,9 +5749,9 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     const resumed = host.ciGateState(waited) === "red" ? undefined : handed;
     const ci = resumed?.failure === "check" ? { state: "red" as const, sha: resumed.headSha } : waited;
     const handoff = ciHandoff(ci);
-    if (handoff) return handoff;
+    if (handoff) return finish(handoff);
     const claimLostAfterCi = branchClaimLost();
-    if (claimLostAfterCi) return claimLostAfterCi;
+    if (claimLostAfterCi) return finish(claimLostAfterCi);
     if (handed) {
       deps.log("fix.live_round_resumed", { round_id: roundId, strike: strikes, head_sha: handed.headSha, failure: resumed?.failure ?? "check",
         ...(resumed === undefined ? { handed_failure: handed.failure, precedence: "ci_red" } : {}) });
@@ -5825,7 +5884,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
           );
           deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: "ci_false_block", judged_loop: stop.loop });
           deps.say(`fix rung: escalated (ci-log false-block) — ${issueUrl}`);
-          return { outcome: "escalated", review, strikes, retriggers, reason: "ci_false_block", issueUrl };
+          return finish({ outcome: "escalated", review, strikes, retriggers, reason: "ci_false_block", issueUrl });
           }
           progressRoundReason = ciFalseBlockReason;
           deps.log("fix.ci_false_block", { strike: strikes, reason: ciFalseBlockReason });
@@ -5839,6 +5898,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     currentMergeConflict = undefined;
 
     const judgedCiHead = ciGateSha(ci);
+    if (recheck && judgedCiHead !== undefined && judgedCiHead === (landing.remoteHead ?? expectedHeadShaForPush)) recheck.clear();
     if (judgedCiHead !== undefined) {
       const checkout = await hostWorktreeGitAsync(opts.reviewBase.headCheckoutDir, ["rev-parse", "HEAD"]).then(
         head => ({ kind: "known" as const, headSha: head.trim() }),
@@ -6185,7 +6245,7 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
   if (review.state === "success" && !proofDiscriminationStillNeedsRepair()) {
     deps.log("fix.resolved", { strikes, reason: "review passed" });
     deps.say(`fix rung: resolved after ${strikes} strike(s) — review now passes`);
-    return { outcome: "fixed", review, strikes, retriggers, reason: "review passed" };
+    return finish({ outcome: "fixed", review, strikes, retriggers, reason: "review passed" });
   }
 
   // W1-T7096: reached only through a judged stop at a former bound (`judgedStop`).
@@ -6243,8 +6303,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     );
     deps.log("fix.exhausted", { strikes, retriggers, issue_url: issueUrl, reason: "retrigger_cap_exhausted", ...(judgedStop ? { judged_loop: judgedStop.loop } : {}) });
     deps.say(`fix rung: retrigger cap exhausted (${retriggers} retrigger(s)) — escalated: ${issueUrl}`);
-    return { outcome: "escalated", review, strikes, retriggers,
-      reason: judgedStop?.judged ? `fix progress loop: ${judgedStop.loop} — ${judgedStop.reason}` : "retrigger_cap_exhausted", issueUrl };
+    return finish({ outcome: "escalated", review, strikes, retriggers,
+      reason: judgedStop?.judged ? `fix progress loop: ${judgedStop.loop} — ${judgedStop.reason}` : "retrigger_cap_exhausted", issueUrl });
   }
 
   // W1-T177 SITE (ii) — TERMINAL-STATE CHECK immediately before the
@@ -6341,8 +6401,8 @@ export async function runFixRung(opts: Parameters<RunTaskCommandHost["runFixRung
     : "review_still_failing";
   deps.log("fix.exhausted", { strikes, issue_url: issueUrl, reason: exhaustionReason, ...(judgedStop ? { judged_loop: judgedStop.loop } : {}) });
   deps.say(`fix rung: exhausted after ${strikes} strike(s) — escalated: ${issueUrl}`);
-  return { outcome: "escalated", review, strikes, retriggers,
-    reason: judgedStop?.judged ? `fix progress loop: ${judgedStop.loop} — ${judgedStop.reason}` : exhaustionReason, issueUrl };
+  return finish({ outcome: "escalated", review, strikes, retriggers,
+    reason: judgedStop?.judged ? `fix progress loop: ${judgedStop.loop} — ${judgedStop.reason}` : exhaustionReason, issueUrl });
 }
 
 /** Shared by the sweep's direct fix-module call and the run-task entrypoint. */

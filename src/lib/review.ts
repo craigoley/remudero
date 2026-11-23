@@ -27,7 +27,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { combinedStatusRestArgs, prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
 // W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
-import { defaultGitRunnerAsync, loadPlanAtRef, loadPlanAtRefAsync, readBlobsAtRef, readBlobsAtRefAsync, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type KeepsUnseenDependency, type Task, type TaskRisk } from "./plan.js";
+import { defaultGitRunnerAsync, loadPlanAtRef, MOVED_FROM_VALUE, withoutOneMovedFromLine, loadPlanAtRefAsync, readBlobsAtRef, readBlobsAtRefAsync, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type KeepsUnseenDependency, type Task, type TaskRisk } from "./plan.js";
 import { scanUnreachedExports, type UnreachedExport } from "./reachability.js";
 import { baseLacksPrAddedExports } from "./proof-missing-export.js";
 import { loadDefaultPolicy, type ArmCalibrationBandRow } from "./policy.js";
@@ -111,6 +111,8 @@ export interface ReviewDecisionDigestInput extends ReviewTaskNarrativeInput {
   engineRevision?: string;
   /** Exact reservation findings observed for newly filed ids; an empty array means ownership was checked and valid. */
   ownership?: readonly TaskIdOwnershipFinding[];
+  /** W1-T14195: present only on a mover-removal head, so no other PR's identity changes. */
+  moverRemoval?: MoverRemovalVerdict;
 }
 
 /** Content address of every material input to one review decision; model output is excluded. */
@@ -146,6 +148,7 @@ export function reviewDecisionDigest(input: ReviewDecisionDigestInput): string {
     } } : {}),
     acceptance,
     declaredFiles: input.declaredFiles ?? [],
+    ...(input.moverRemoval !== undefined ? { moverRemoval: input.moverRemoval.verified ? "verified" : `refused:${input.moverRemoval.reason}` } : {}),
     ...(input.ownership !== undefined ? { ownership: input.ownership.map((finding) => finding.kind === "unknown"
       ? { id: finding.id, file: finding.file, kind: finding.kind } : finding) } : {}),
     ...narrative,
@@ -737,6 +740,9 @@ export type PromisedFollowUpObservation =
   | { state: "unknown"; reason: string; cause?: "promise-harvest-incomplete" };
 
 export interface ReviewEvidence {
+  /** W1-T14195: the verified mover removal (one or more receipts) this pull request is, read by the caller from both repositories. Present and
+   *  `verified`, with a diff that is exactly the receipt's one deletion, an empty criteria list is not a refusal. */
+  moverRemoval?: MoverRemovalVerdict;
   /** W1-T11132 arm (b), filled by W1-T11200: per `unit test:` proof file, whether hosted CI concluded `passed` or
    *  `failed` at THIS head. ABSENT (the field, or a file) switches the arm off: a proof that fails stays `executed_fail`. */
   hostedCiFilePassed?: ReadonlyMap<string, "passed" | "failed">;
@@ -1064,6 +1070,14 @@ const ASSERTION_RE = /\b(assert|expect|should)\b|\.(is|ok|equal|deepEqual|match|
  *  `.each`. This is what makes "added tests" something to judge at all; see {@link detectTestTheater} for why its
  *  absence must not fire the no-assertion arm. Matches the CALL, so a variable named `test` smuggles nothing past. */
 const TEST_DECLARATION_RE = /\b(?:test|it|describe)\s*(?:\.\w+)?\s*\(/;
+/** A declaration's callee and LITERAL title. `describe.each([…])(…)` or `test(name, …)` has no literal title here. */
+export const TEST_DECLARATION_TITLE_RE = /\b(test|it|describe)\s*(?:\.\w+)?\s*\(\s*(["'`])((?:\\.|(?!\2)[^\\])*)\2/;
+
+/** The identity a declaration line names (`test:<title>`), or undefined when its first argument is not a literal. */
+function testDeclarationKey(line: string): string | undefined {
+  const m = TEST_DECLARATION_TITLE_RE.exec(line);
+  return m ? `${m[1]}:${m[3]}` : undefined;
+}
 
 const NOOP_ASSERTION_RE =
   /assert(\.\w+)?\(\s*true\s*[),]|assert\.equal\(\s*true\s*,\s*true|expect\(\s*true\s*\)/;
@@ -1081,22 +1095,34 @@ function isFixtureDataPath(path: string): boolean {
  *  a real assertion is added. */
 export function detectTestTheater(diff: string): boolean {
   let inTestFile = false;
+  let file = "";
   const addedTestLines: string[] = [];
+  const addedDeclarations: { file: string; key: string | undefined }[] = [];
+  const removedDeclarations = new Set<string>();
   for (const line of diff.split("\n")) {
     // File headers (`+++ b/path`) precede their `+`-prefixed body lines.
     if (line.startsWith("+++ ")) {
-      const path = line.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
-      inTestFile = isTestPath(path) && !isFixtureDataPath(path);
+      file = line.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
+      inTestFile = isTestPath(file) && !isFixtureDataPath(file);
       continue;
     }
     if (line.startsWith("diff --git")) {
       // A `diff --git a/x b/y` header names both paths; use the `b/` side.
       const m = line.match(/\sb\/(\S+)\s*$/);
+      file = m ? m[1] : "";
       inTestFile = m ? isTestPath(m[1]) && !isFixtureDataPath(m[1]) : false;
       continue;
     }
     if (line.startsWith("+++") || line.startsWith("---")) continue;
-    if (inTestFile && line.startsWith("+")) addedTestLines.push(line.slice(1));
+    if (!inTestFile) continue;
+    const body = line.slice(1);
+    if (line.startsWith("+")) {
+      addedTestLines.push(body);
+      if (TEST_DECLARATION_RE.test(body)) addedDeclarations.push({ file, key: testDeclarationKey(body) });
+    } else if (line.startsWith("-") && TEST_DECLARATION_RE.test(body)) {
+      const key = testDeclarationKey(body);
+      if (key !== undefined) removedDeclarations.add(`${file}\0${key}`);
+    }
   }
   if (addedTestLines.length === 0) return false;
   // THE PLANTED-TAUTOLOGY ARM IS UNCONDITIONAL AND STAYS ABOVE THE GUARD BELOW. `assert(true)` is a deliberate act,
@@ -1109,7 +1135,15 @@ export function detectTestTheater(diff: string): boolean {
   // `testTheater = true`, 36 green checks). STATED COST: lines appended INSIDE an existing case, with no assertion
   // added, no longer trip the arm — the operator ruled for the declaration gate over an unreliable pairing
   // (2026-09-04).
-  if (!addedTestLines.some((l) => TEST_DECLARATION_RE.test(l))) return false;
+  // A REWRITTEN DECLARATION IS NOT A NEW CASE. Making an existing case async (`(t) =>` → `async (t) =>`) puts its
+  // own `test(` line on the `+` side, which read as an added case asserting nothing (#20336). A `+` declaration
+  // whose callee and literal title match a `-` declaration in the SAME file is that case rewritten. This pairs
+  // DECLARATIONS by identity, never lines by position, which is the pairing the ruling above declined. A
+  // declaration with no literal title cannot be paired and still counts as new. STATED COST: deleting a case and
+  // adding an assertion-free one under the same callee and title in the same file reads as a rewrite; the
+  // operator accepted that (2026-11-22).
+  const declaresNewCase = addedDeclarations.some(({ file: path, key }) => key === undefined || !removedDeclarations.has(`${path}\0${key}`));
+  if (!declaresNewCase) return false;
   const hasRealAssertion = addedTestLines.some((l) => ASSERTION_RE.test(l));
   return !hasRealAssertion;
 }
@@ -6288,6 +6322,135 @@ export function memoizeAsyncProofExecutor(exec: AsyncProofExecutor, sample: () =
     observations: () => records.map(record => ({ ...record, args: [...record.args] })) });
 }
 
+// ── W1-T14195: A VERIFIED MOVER REMOVAL IS THE ONE CRITERIA-LESS PR THE REVIEW ADMITS ─────────────────────────────
+// `rmd move-task` (plan-task-move.ts, W1-T13680) opens its REMOVE pull request with no `Remudero-Task:` line and no
+// `## Acceptance` block on purpose, so the merge credits no build. A deletion has no honest `grep:` or `unit test:`
+// proof, so both the author-time gate and this review failed such a PR closed (public #20072). The exemption is narrow
+// and keyed on the receipts the mover writes, ONE PER REMOVED RECORD (a batched removal carries several): it holds
+// only when (a) the PUBLIC half, readable off the pull request alone, shows a `plan-move-...-<epochMs>` head whose diff
+// is exactly the deletions the receipts name, and (b) the OPS half, which only this review can read (Actions holds no
+// ops credential), proves EVERY receipt: its commit on the plan destination's main, with a record that is the deleted
+// blob plus its one moved_from line. Any one receipt failing refuses the whole pull request and names that receipt.
+// This section does no I/O: a caller reads both halves and passes them in. It cannot live in plan-task-move.ts, which
+// imports the PR emitter, which imports this file (.dependency-cruiser.cjs forbids the cycle).
+/** The prefix of the mover's receipt line (plan-task-move.ts MOVED_TO_TRAILER; a test keeps the two in step). */
+export const MOVER_RECEIPT_PREFIX = "Remudero-Moved-To:";
+const MOVER_RECEIPT_LINE = /^Remudero-Moved-To: ([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)@([0-9a-f]{40}) (\S+) path=(plan\/tasks\.d\/[^\s/]+\.yaml) blob=([0-9a-f]{40})$/;
+/** The head-ref prefix of every mover pull request (plan-task-move.ts MOVE_BRANCH_PREFIX; a test keeps the two in step). */
+export const MOVER_BRANCH_PREFIX = "plan-move-";
+const MOVER_BRANCH = /^plan-move-(.+)-(\d+)$/;
+
+/** What one mover removal receipt says: the ops repository and commit holding the copy, the record and its original blob. */
+export interface MoverReceipt { repository: string; commit: string; id: string; path: string; blob: string }
+export type MoverReceiptsRead = { receipts: MoverReceipt[] } | { refused: "receipt-count" | "receipt-malformed" };
+
+/** Every receipt line in `message` (commit messages joined). None, a malformed line, or one id or path twice is refused. */
+export function parseMoverReceipts(message: string): MoverReceiptsRead {
+  const lines = (message ?? "").split("\n").map((line) => line.replace(/\r$/, "")).filter((line) => line.startsWith(MOVER_RECEIPT_PREFIX));
+  if (lines.length === 0) return { refused: "receipt-count" };
+  const receipts: MoverReceipt[] = [];
+  for (const line of lines) {
+    const m = MOVER_RECEIPT_LINE.exec(line);
+    if (m === null) return { refused: "receipt-malformed" };
+    receipts.push({ repository: m[1]!, commit: m[2]!, id: m[3]!, path: m[4]!, blob: m[5]! });
+  }
+  const unique = new Set(receipts.map((r) => r.id)).size === receipts.length && new Set(receipts.map((r) => r.path)).size === receipts.length;
+  return unique ? { receipts } : { refused: "receipt-count" };
+}
+
+/** What the pull request alone shows: its head ref, the commit messages beyond the merge base, the base-to-head
+ *  name-status entries (`undefined` when unreadable), and the blob the merge base holds at a receipt's path. */
+export interface MoverRemovalPublicInput {
+  headRefName?: string;
+  message: string;
+  entries?: readonly { status: string; path: string }[];
+  /** `undefined` is a blob the merge base does not hold. */
+  baseBlobAt: (path: string) => string | undefined;
+}
+/** A refusal names its reason and, when one receipt caused it, that receipt's task id. */
+export type MoverRemovalPublicResult = { ok: true; receipts: MoverReceipt[] } | { ok: false; reason: string; id?: string };
+
+/** The public half: nothing here reads the network, and every refusal names its reason. */
+export function verifyMoverRemovalPublic(input: MoverRemovalPublicInput): MoverRemovalPublicResult {
+  const branch = MOVER_BRANCH.exec(input.headRefName ?? "");
+  if (branch === null) return { ok: false, reason: "head-ref-is-not-a-mover-branch" };
+  const read = parseMoverReceipts(input.message);
+  if ("refused" in read) return { ok: false, reason: read.refused };
+  const { receipts } = read;
+  // A one-task move names its task in its branch; a batch's branch name is the mover's own, so only its shape is held.
+  if (receipts.length === 1 && branch[1] !== receipts[0]!.id) return { ok: false, reason: "head-ref-names-another-id", id: receipts[0]!.id };
+  if (input.entries === undefined) return { ok: false, reason: "diff-unreadable" };
+  const paths = new Set(receipts.map((r) => r.path));
+  if (input.entries.length !== receipts.length || !input.entries.every((e) => e.status === "D" && paths.has(e.path)) ||
+    new Set(input.entries.map((e) => e.path)).size !== receipts.length) {
+    return { ok: false, reason: "diff-is-not-the-receipts-deletions" };
+  }
+  for (const receipt of receipts) {
+    if (input.baseBlobAt(receipt.path) !== receipt.blob) return { ok: false, reason: "base-blob-differs-from-the-receipt", id: receipt.id };
+  }
+  return { ok: true, receipts };
+}
+
+/** What the ops repository shows for one receipt. `"unreadable"` for any failed read; otherwise the ops record's text
+ *  at the receipt's commit (`undefined` when that commit holds no file there), whether the commit is reachable from ops
+ *  main, and the blob the public repository holds at the record's moved_from commit and path. */
+export type MoverOpsRead = "unreadable" | { text: string | undefined; reachableFromMain: boolean; publicBlobAtMovedFrom: string | undefined };
+/** What only the ops repository shows. `destination` is the configured plan destination (`owner/name`); `reads` is keyed by task id. */
+export interface MoverRemovalOpsInput { destination?: string; reads?: Readonly<Record<string, MoverOpsRead | undefined>> }
+const gitBlobSha = (text: string): string => {
+  const bytes = Buffer.from(text);
+  return createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+};
+
+/** The public commit an ops record's moved_from line names, or `undefined` when it has none or a malformed one. */
+export function movedFromCommit(text: string): string | undefined {
+  const value = /^[ \t]+moved_from:([^\n]*)$/m.exec(text)?.[1]?.replace(/\r$/, "").trim();
+  return value === undefined ? undefined : MOVED_FROM_VALUE.exec(value)?.[1];
+}
+
+/** The ops half for ONE receipt. Returns the refusal reason, or `undefined` when the ops record proves the receipt. */
+export function moverRemovalOpsRefusal(receipt: MoverReceipt, ops: { destination?: string; read?: MoverOpsRead }): string | undefined {
+  if (ops.destination === undefined) return "plan-destination-is-not-configured";
+  if (receipt.repository !== ops.destination) return "receipt-names-a-repository-other-than-the-plan-destination";
+  if (ops.read === undefined || ops.read === "unreadable") return "ops-read-unreadable";
+  if (!ops.read.reachableFromMain) return "ops-commit-is-not-on-ops-main";
+  const text = ops.read.text;
+  if (text === undefined) return "ops-record-is-absent";
+  const stripped = withoutOneMovedFromLine(text);
+  if (stripped === undefined) return "ops-record-moved-from-line-count-is-not-one";
+  const ids = text.split("\n").map((line) => line.replace(/\r$/, "")).filter((line) => line.startsWith("- id:"));
+  if (ids.length !== 1 || ids[0]!.slice("- id:".length).trim() !== receipt.id) return "ops-record-names-another-id";
+  if (gitBlobSha(stripped) !== receipt.blob) return "ops-record-differs-from-the-deleted-blob";
+  if (movedFromCommit(text) === undefined) return "ops-record-moved-from-is-malformed";
+  if (ops.read.publicBlobAtMovedFrom !== receipt.blob) return "moved-from-public-commit-does-not-hold-the-receipt-blob";
+  return undefined;
+}
+
+export type MoverRemovalVerdict = { verified: true; receipts: MoverReceipt[] } | { verified: false; reason: string; id?: string };
+
+/** Both halves. The public half runs first, so a pull request that is not a mover removal never reaches an ops read.
+ *  Receipts are proved in order and the first failure refuses the whole pull request, naming its task id. */
+export function verifyMoverRemoval(input: { public: MoverRemovalPublicInput; ops: MoverRemovalOpsInput }): MoverRemovalVerdict {
+  const pub = verifyMoverRemovalPublic(input.public);
+  if (!pub.ok) return { verified: false, reason: pub.reason, ...(pub.id === undefined ? {} : { id: pub.id }) };
+  for (const receipt of pub.receipts) {
+    const refusal = moverRemovalOpsRefusal(receipt, { destination: input.ops.destination, read: input.ops.reads?.[receipt.id] });
+    if (refusal !== undefined) return { verified: false, reason: refusal, id: receipt.id };
+  }
+  return { verified: true, receipts: pub.receipts };
+}
+
+/** True only for a unified diff whose file blocks delete exactly `paths`, one block each, and touch nothing else. */
+function diffIsOnlyTheDeletionsOf(diff: string, paths: readonly string[]): boolean {
+  const lines = diff.split("\n");
+  const headers = lines.filter((line) => line.startsWith("diff --git "));
+  const want = new Set(paths.map((path) => `diff --git a/${path} b/${path}`));
+  if (headers.length !== paths.length || want.size !== paths.length || !headers.every((header) => want.has(header))) return false;
+  return lines.filter((line) => line.startsWith("deleted file mode ")).length === paths.length &&
+    lines.filter((line) => line === "+++ /dev/null").length === paths.length &&
+    !lines.some((line) => /^\+(?!\+\+ )/.test(line)) && !lines.some((line) => /^(?:new file mode|rename |copy |old mode|new mode)/.test(line));
+}
+
 export function judgeReview(
   criteria: AcceptanceCriterion[],
   evidence: ReviewEvidence,
@@ -6426,7 +6589,10 @@ export function judgeReview(
   // PENDING (like `cannot_evaluate`) and triggers no fix round. A conclusive failure elsewhere still fails the review.
   const inconclusiveLoad = verdicts.some((v) => v.proof_exec === "inconclusive_load");
   const unmet = unmetReviewCriteria(verdicts);
-  const noCriteria = criteria.length === 0;
+  // W1-T14195: the diff is recomputed here from `evidence.diff`, never taken from the verdict's word.
+  const moverRemovalAdmitted = criteria.length === 0 && evidence.moverRemoval?.verified === true &&
+    diffIsOnlyTheDeletionsOf(evidence.diff, evidence.moverRemoval.receipts.map((r) => r.path));
+  const noCriteria = criteria.length === 0 && !moverRemovalAdmitted;
   // W1-T2221: hoisted ahead of `state` (was computed only for `floorState`) so `state` can consult it on a plan-only
   // diff — see `unmetForState`.
   const floorUnmet = verdicts.filter((v) => !(v.floorMet ?? v.met) && v.proof_exec !== "inconclusive_load");

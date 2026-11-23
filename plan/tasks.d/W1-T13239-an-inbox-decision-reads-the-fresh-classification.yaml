@@ -17,7 +17,7 @@
   files:
     - src/lib/panel-graph.ts
     - test/console-api/an-inbox-decision-reads-the-fresh-classification.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When classifyAllProposalsMemo holds a result younger than INBOX_WRITE_CLASSIFICATION_MAX_AGE_MS (30 s) whose fingerprint inputs are unchanged and that includes the named proposal, POST /v1/inbox/decline answers without calling loadPlan, projectPlan or readLedgerLines (counted through seams) and appends the same panel.proposal_declined row as today"

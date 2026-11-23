@@ -17,7 +17,7 @@
     - src/lib/sweep.ts
     - test/ledger/the-security-producer-lock-never-makes-history-unreadable.test.ts
     - test/github/a-configuration-not-found-wait-whose-fresh-read-cleared-re-runs-the-producer.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     WHY: one empty lock file has blinded the fleet's self-repair since 2026-11-21T08:53Z.

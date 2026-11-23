@@ -1405,7 +1405,7 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { codexBalancedTrialCommand, registerCodexBalancedTrial } from "./lib/codex-balanced-trial.js";
-import { evaluateStagedSkillDraft, skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { evaluateStagedSkillDraft, skillEvalCommand, skillEvalProductionInput, skillEvalStack } from "./lib/skill-eval-command.js";
 import { autoEvaluateSkillDrafts, reportSkillEvalAuto } from "./lib/skill-eval-auto.js";
 import { proceduresCommand, proceduresProductionInput } from "./lib/procedures-command.js";
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
@@ -1552,6 +1552,7 @@ import {
 } from "./lib/task-linter.js";
 import { readPriorRefusal, preDispatchContractRevision, writePriorRefusal, repairRefusedTask, type RefusalViolation } from "./lib/dispatch-repair.js";
 import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn,
+  modelReplayCommand, readGoldenReplayLedger, readGoldenReplayResults, sealedModelReplayDispatcher, type ModelReplayInput,
   pairedReviewerReplayCommand, replayPairedReviews, type ReviewerReplayCommandInput } from "./lib/replay-harness.js";
 import { judgeInstanceLiveness, readLivenessRows, LIVENESS_WINDOW_MS } from "./lib/fleet-liveness.js";
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
@@ -14011,6 +14012,7 @@ export interface ReplayGoldensDeps {
   /** The spend-bearing seam. Absent means the verb REFUSES rather than falling back to a real
    *  dispatch: there is no default worth having here, because the wrong default costs money. */
   dispatch?: ReplayDispatch;
+  modelReplay?: ModelReplayInput;
   goldens?: readonly GoldenTask[];
   writeLedger?: typeof appendLedger;
   now?: () => number;
@@ -14029,8 +14031,8 @@ export async function benchmarkReviewerReplayCommand(rest: string[], deps: Parti
 }
 
 /**
- * `rmd replay-goldens --confirm-spend [--limit N] [--ledger <path>]` -- W1-T2689's PRODUCTION
- * CALLER, the piece the golden-replay leg was missing.
+ * `rmd replay-goldens` uses the recorded corpus with `--models`. The seeded path below is the
+ * W1-T2689 caller for the original golden-replay leg.
  *
  * This is the only process that drives {@link replayGoldens} outside a test, which is the whole
  * point of the task: the driver, the seam, the corpus, the emitter and retro.ts's consumer were all
@@ -14052,6 +14054,9 @@ export async function benchmarkReviewerReplayCommand(rest: string[], deps: Parti
  */
 export async function replayGoldensCommand(rest: string[], deps: ReplayGoldensDeps = {}): Promise<number> {
   const log = deps.log ?? ((m: string) => console.error(m));
+  if (rest.some((arg) => arg === "--models" || arg.startsWith("--models="))) {
+    return modelReplayCommand(rest, { ...(deps.modelReplay ?? modelReplayProductionInput()), log });
+  }
 
   const optIn = replayOptIn(rest);
   if (!optIn.enabled) {
@@ -14094,6 +14099,36 @@ export async function replayGoldensCommand(rest: string[], deps: ReplayGoldensDe
   const rate = replayPassRate(results);
   log(`replay-goldens: ${rate.passed}/${rate.total} golden(s) passed; ${results.length} line(s) recorded to ${ledgerPath} (run ${runId}).`);
   return results.every((r) => r.passed) ? 0 : 1;
+}
+
+function sealedAttemptClockBound(workerAbandonMs?: number): number {
+  return workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon;
+}
+
+function modelReplayProductionInput(): ModelReplayInput {
+  let loaded: Config | undefined;
+  const config = () => (loaded ??= loadConfig());
+  const stateDir = () => join(config().root, "state");
+  return {
+    loadMounts: () => loadMounts(mountsPath(repoRoot)),
+    loadPlanTasks: () => loadPlan(join(repoRoot, "plan", "tasks.yaml")).tasks,
+    readCorpusRows: () => readGoldenReplayLedger(stateDir(), ["review.posted", "verdict.merged", "verdict"]),
+    readResults: readGoldenReplayResults,
+    readIdle: async () => {
+      const root = stateDir();
+      const now = systemClock.now();
+      const instance = { name: "operator-golden-replay", repo: "operator/golden-replay", stateDir: root };
+      const liveness = judgeInstanceLiveness(instance, readLivenessRows(instance, now - LIVENESS_WINDOW_MS), now);
+      if (liveness.state !== "up" || !liveness.quiet) return { liveness };
+      return { liveness, headroom: await readUsageSnapshotPreferSdk(config()) };
+    },
+    dispatcherFor: (task, item) => {
+      const pins = deriveRuntimePins({ harnessRevision: workerBoundaryStack.harnessRevision, installRoot: resolveInstallRoot(config()) });
+      return sealedModelReplayDispatcher({ task, config: config(), repoDir: join(config().root, "repos", task.repo),
+        clockBoundMs: sealedAttemptClockBound() }, item,
+      (model, effort) => skillEvalStack(pins, { provider: "codex", model, effort }));
+    },
+  };
 }
 
 /** Offline, side-effect-free risk-judge disposition replay. It never uses the production routing
@@ -44568,9 +44603,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "replay-goldens",
-    syntax: "rmd replay-goldens --confirm-spend --ledger <path> [--limit N]",
-    summary: "Replay the seeded goldens and record what the retro's Self-Harness leg reads.",
-    detail: "W1-T2689: the golden-replay leg shipped with a corpus, a seam, a driver, an emitter and a retro consumer, and NO production caller — so replayGoldens had zero callers outside tests and the Self-Harness leg has reported `no replay run recorded` since the day it shipped, by construction rather than by failure. This is that caller. UNLIKE EVERY OTHER RETRO RUNG IT SPENDS REAL MONEY: it dispatches workers against the sandbox, so it is opt-in per invocation (--confirm-spend, deliberately not an env var or config default, so a retro tick / CI job / test spawn cannot inherit it) and BOUNDED (REPLAY_CORPUS_BOUND, a declared ceiling boundedCorpus clamps to even against a larger --limit). --ledger is REQUIRED: a spend that records nothing is worse than one that never ran, and this verb refuses rather than guessing at a shared path. --limit 0 dispatches nothing and writes NOTHING, on purpose — retro.ts must still be able to render `no run recorded`, never a fabricated 0%. Exit 0 when every replayed golden matched its expectation, 1 when any regressed, 2 on any refusal.",
+    syntax: "rmd replay-goldens --confirm-spend --ledger <path> [--limit N] [--models a,b]",
+    summary: "Replay goldens and compare two Codex models on graded pairs.",
+    detail: "--models takes two distinct IDs from the Codex mount rows, such as gpt-6.1-sol,gpt-6.2-sol. While the fleet is quiet and measured headroom is available, each selected implement task gets one sealed attempt per model at its recorded merge base. The task's recorded proofs grade each local head. The command appends replay.result rows to the required --ledger and compares fully graded pairs across runs. --confirm-spend is required per invocation. --limit is capped at three tasks, and --limit 0 only reads the comparison in model mode. Without --models, the seeded path retains its dispatch-seam requirement. Exit 0 for passing attempts or an empty selection, 1 when any attempt fails or is unmeasurable, and 2 on refusal.",
   },
   {
     name: "skill-eval",
@@ -45554,7 +45589,7 @@ export function benchmarkAaReadinessRuntime(stateDir: string, workerAbandonMs?: 
     loadPlanTasks: () => loadPlan(join(repoRoot, "plan", "tasks.yaml")).tasks,
     dispatcherFor: (task: Task) => sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo),
       spawn: benchmarkNonDispatchSpawn("aa-prospective", spawnWorker), maxBudgetUsd: PAIRED_ATTEMPT_MAX_BUDGET_USD,
-      clockBoundMs: workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon }),
+      clockBoundMs: sealedAttemptClockBound(workerAbandonMs) }),
     defaultInstanceRoots: () => registryInstanceRoots(stateDir, undefined, undefined, observer) };
 }
 
