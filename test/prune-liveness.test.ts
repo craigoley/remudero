@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -25,6 +24,7 @@ import {
   writeRunLock,
 } from "#src/lib/worker.js";
 import { buildSweepHook, sweepCommand } from "#src/run-task.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 // pruneStaleRuns needs a real git repo + worktree to exercise `git worktree list`.
 // Build one: repoDir with a NAMED worktree under worktreesRoot, then assert the
@@ -379,31 +379,32 @@ test("reapStaleWorktrees: a worktree dir removed as a side effect of its OWN `gi
   }
 });
 
-test("reapStaleWorktrees: a removal failure on one aged, terminal entry is best-effort KEPT — never thrown — and does not block the rest of the pass", () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "rmd-reap-permfail-")));
+test("reapStaleWorktrees: a removal failure on one aged, terminal entry is best-effort KEPT — never thrown — and does not block the rest of the pass", (t) => {
+  // The failure must throw for every uid. A `chmod 0o500` subdirectory did not: root deletes through it, so under uid 0
+  // the entry was reaped and the cleanup's own chmod then hit ENOENT. A DIRECTORY where this linked worktree's `locked`
+  // file belongs makes the reaper's removal step read EISDIR on every host (the remedy test/host-capability-fixtures.test.ts
+  // names).
+  const { dir, git } = gitRepo({ scope: t, kind: "reap-permfail" });
+  const root = join(realpathSync(dir), "worktrees");
+  mkdirSync(root);
   const entryPath = join(root, "run-W1-T915-permfail");
-  const lockedDir = join(entryPath, "sub");
-  try {
-    mkdirSync(lockedDir, { recursive: true });
-    writeFileSync(join(lockedDir, "f.txt"), "x\n");
-    // No write permission on `sub` — deleting `sub/f.txt` (and hence the recursive
-    // `rmSync(entryPath, ...)`) fails with EACCES; Node's `force` option only swallows
-    // ENOENT, so this genuinely throws inside the reaper's own removal try/catch.
-    chmodSync(lockedDir, 0o500);
+  git("worktree", "add", "--detach", entryPath);
+  const admin = readFileSync(join(entryPath, ".git"), "utf8").trim().slice("gitdir: ".length);
+  mkdirSync(join(admin, "locked"));
 
-    // A genuine second reap candidate, proving the permission failure doesn't halt the pass.
-    const okPath = join(root, "run-W1-T916-ok");
-    mkdirSync(okPath, { recursive: true });
-    writeRunLock(okPath, { pid: 999999, run_id: "W1-T916", startedAt: "2026-07-01T00:00:00Z" });
+  // A genuine second reap candidate, proving the removal failure doesn't halt the pass.
+  const okPath = join(root, "run-W1-T916-ok");
+  mkdirSync(okPath, { recursive: true });
+  writeRunLock(okPath, { pid: 999999, run_id: "W1-T916", startedAt: "2026-07-01T00:00:00Z" });
 
-    const summary = reapStaleWorktrees(root, { isPidAlive: () => false, now: () => 4_000_000_000_000 });
-    assert.ok(summary.kept.includes("run-W1-T915-permfail"), "a removal hiccup is best-effort KEPT, never thrown");
-    assert.ok(!summary.reaped.includes("run-W1-T915-permfail"));
-    assert.ok(summary.reaped.includes("run-W1-T916-ok"), "the pass continues past the failed entry");
-  } finally {
-    chmodSync(lockedDir, 0o700);
-    rmSync(root, { recursive: true, force: true });
-  }
+  const summary = reapStaleWorktrees(root, { isPidAlive: () => false, now: () => 4_000_000_000_000 });
+  assert.ok(summary.kept.includes("run-W1-T915-permfail"), "a removal hiccup is best-effort KEPT, never thrown");
+  const failed = summary.keptReasons?.find(({ name }) => name === "run-W1-T915-permfail");
+  assert.equal(failed?.reason, "removal-failed", "kept by the removal step itself, not by an earlier gate");
+  assert.match(failed?.error ?? "", /EISDIR/);
+  assert.ok(!summary.reaped.includes("run-W1-T915-permfail"));
+  assert.ok(existsSync(entryPath), "the failed entry is still on disk");
+  assert.ok(summary.reaped.includes("run-W1-T916-ok"), "the pass continues past the failed entry");
 });
 
 test("runWorktreeReapRung: a malformed config (worktreesDir throws) is caught and ledgered as worktree.reap.error, never thrown to the caller", () => {
