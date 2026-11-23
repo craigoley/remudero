@@ -20,9 +20,8 @@
  * BOUNDED ({@link REPLAY_CORPUS_BOUND}, which {@link boundedCorpus} clamps to even against a
  * larger ask).
  *
- * NOT IN SCOPE: the corpus, the comparison, `recordReplayResults`'s ledger shape and retro.ts's
- * reducer/renderer are shipped and correct. The renderer's non-run path especially must stay
- * reachable -- a producer that ran zero goldens must still render "no run recorded", never 0%.
+ * The seeded replay feeds the retro. Explicit model replays grade recorded work in sealed attempts
+ * and compare the two models across runs, while keeping the retro's existing row contract.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -35,24 +34,38 @@ import { cashDeploymentEndpoint } from "./config-schema.js";
 import { withTempDir } from "./tmp.js";
 import { verifyReviewerCaseEvidence } from "./review-finding-evidence.js";
 import { CASH_RESPONSES_DEPLOYMENTS, CashResponsesConversation } from "./cash-responses.js";
-import { OPENWEIGHT_MAX_COMPLETION_TOKENS, OPENWEIGHT_OUTPUT_CONTRACT, openWeightReservationUsd,
-  spawnOpenWeightWorker } from "./worker-provider.js";
+import { OPENWEIGHT_MAX_COMPLETION_TOKENS, OPENWEIGHT_OUTPUT_CONTRACT, codexNotionalCostUsd, openWeightReservationUsd,
+  spawnCodexWorker, spawnOpenWeightWorker } from "./worker-provider.js";
 import { exactBinomialHalfPValue, TRIAL_ID_RE } from "./benchmark-aa.js";
-import { loadPaidPilotProtocol, paidArmPauseReasons, readPaidPilotControls, readPaidPilotEvidence,
+import { loadPaidPilotProtocol, paidArmPauseReasons, paidPilotArmFor, readPaidPilotControls, readPaidPilotEvidence,
   reviewerReplayExclusivityReason, BENCHMARK_PAID_PILOT_VERSION,
   REVIEWER_REPLAY_STEPS, PAID_PILOT_AA_RECEIPT_MAX_AGE_MS, PAID_PILOT_CASH_CEILING_USD,
   type PaidPilotProtocol, type ReviewerReplayScope } from "./benchmark-paid-pilot.js";
 import { systemClock } from "./clock.js";
 import { appendLedger } from "./ledger.js";
-import { ledgerLivePath } from "./ledger-union.js";
-import { SEEDED_GOLDENS, type GoldenTask, type HarnessRunner, type ReplayOutcome } from "./replay.js";
+import { ledgerLivePath, openLedgerUnion } from "./ledger-union.js";
+import { resolveMountForClass, type Mounts } from "./mounts.js";
+import { gradeHeadWithReviewerExecutor, mcnemarExact, pairIdFor, sealedPairedAttemptDispatcher, type PairedAttemptRequest,
+  type PairedAttemptResult, type PairedGrader, type SealedPairedAttemptOptions } from "./paired-trial.js";
+import type { Task } from "./plan.js";
+import { renderImplementPrompt } from "./prompt-render.js";
+import { REPLAY_RESULT_STEP, SEEDED_GOLDENS, replayResultLine, type GoldenTask, type HarnessRunner, type ReplayOutcome,
+  type ReplayResult } from "./replay.js";
+import { assertLiveSpawnAllowed } from "./spawn-guard.js";
+import { readLedgerLines } from "./status.js";
+import { deriveTaskClass, implementRouteClass } from "./task-class.js";
+import { spawnWorker, type TokenUsage } from "./worker.js";
+import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import { runPairedReviewEvaluation, type BlindedReviewInput, type PairedReviewCase,
   type PairedReviewEvalInput, type PairedReviewReport, type PinnedReviewStack, type ReviewerReplayOutput } from "./paired-review-eval.js";
-import type { GoldenCorpusItem } from "./golden-corpus.js";
 import {
   deriveGoldenCorpus,
   goldenTaskFromCorpusItem,
+  heldOutLeaks,
+  mergeCreditsFromLedger,
   replayIdleGate,
+  type CorpusProofOutcome,
+  type GoldenCorpusItem,
   type ReplayIdleSignal,
   type ReplaySample,
   type ReplaySampleSource,
@@ -169,6 +182,214 @@ export function drawReplaySample(req: { argv: readonly string[]; idle: ReplayIdl
   });
   const goldens = boundedCorpus(paired.map((p) => p.golden), req.limit);
   return { enabled: true, reason, goldens, items: paired.slice(0, goldens.length).map((p) => p.item), excluded };
+}
+
+type ReplayModels = readonly [string, string];
+type ModelReplayRequest = Pick<PairedAttemptRequest<string>, "pilotId" | "pairId" | "taskId" | "position" | "isolation"> & {
+  provider: "codex";
+  model: string;
+  effort: string;
+};
+type ModelReplayAttempt = PairedAttemptResult & { tokens?: TokenUsage };
+type ModelReplayDispatch = (request: ModelReplayRequest) => Promise<ModelReplayAttempt>;
+
+export interface ModelReplayInput {
+  loadMounts: () => Mounts;
+  readIdle: () => Promise<ReplayIdleSignal>;
+  loadPlanTasks: () => readonly Task[];
+  readCorpusRows: () => Promise<readonly Record<string, unknown>[]>;
+  dispatcherFor: (task: Task, item: GoldenCorpusItem) => ModelReplayDispatch;
+  readResults: (path: string) => Promise<readonly Record<string, unknown>[]>;
+  writeLedger?: typeof appendLedger;
+  grade?: PairedGrader;
+  runId?: () => string;
+  log?: (message: string) => void;
+}
+
+type ModelReplayStack = Pick<PairedAttemptRequest<string>, "pin" | "revisions" | "stackEvidence">;
+
+/** The sealed dispatcher's Codex mount uses the configured model unless the transport receives a selection. */
+export function sealedModelReplayDispatcher(options: Omit<SealedPairedAttemptOptions, "baseRef" | "spawn">,
+  item: GoldenCorpusItem, stackFor: (model: string, effort: string) => ModelReplayStack,
+  launchCodex: typeof spawnCodexWorker = spawnCodexWorker): ModelReplayDispatch {
+  const spawn = benchmarkNonDispatchSpawn("replay-goldens", spawnWorker);
+  return async ({ provider: _provider, model, effort, ...request }) => {
+    const stack = stackFor(model, effort);
+    const config = { ...options.config, workerProviders: { ...options.config.workerProviders, codexModel: model } };
+    let tokens: TokenUsage | undefined;
+    const dispatch = sealedPairedAttemptDispatcher({ ...options, config, baseRef: item.baseSha,
+      spawn: async (args) => {
+        if (heldOutLeaks(args.prompt, [item]).length > 0) throw new Error("held-out proof in rendered prompt");
+        const result = await spawn({ ...args, providerRouting: {
+          spawnCodex: async (codexArgs, workerConfig) => {
+            if (launchCodex === spawnCodexWorker) assertLiveSpawnAllowed("sealed Codex golden replay");
+            const env = { ...codexArgs.env, GH_TOKEN: "", GITHUB_TOKEN: "", SSH_AUTH_SOCK: "" };
+            const result = await launchCodex({ ...codexArgs, env }, workerConfig, { model, effort });
+            if (result.tokenUsageState === "observed") tokens = result.tokens;
+            return result;
+          },
+        } });
+        return { ...result, apiError: result.apiError || result.isError || result.notStarted !== undefined };
+      },
+    });
+    const result = await dispatch({ ...request, ...stack, arm: model });
+    return { ...result, tokens };
+  };
+}
+
+export async function readGoldenReplayLedger(stateDir: string, step: readonly string[]): Promise<Record<string, unknown>[]> {
+  const unread: string[] = [];
+  const onUnread = (path: string) => unread.push(path);
+  const rows: Record<string, unknown>[] = [];
+  for await (const row of openLedgerUnion(stateDir, { step, onUnreadArchive: onUnread, onUnreadLive: onUnread,
+    onUnreadDirectory: onUnread })) rows.push(row);
+  if (unread.length > 0) throw new Error(`unread ledger source(s): ${unread.join(", ")}`);
+  return rows;
+}
+
+export async function readGoldenReplayResults(path: string): Promise<readonly Record<string, unknown>[]> {
+  const stateDir = dirname(resolve(path));
+  if (resolve(path) === ledgerLivePath(stateDir)) return readGoldenReplayLedger(stateDir, [REPLAY_RESULT_STEP]);
+  // ledger-read-intent: live — an explicit standalone results file, outside the canonical rotation union.
+  const rows = readLedgerLines(path);
+  if (rows.torn > 0) throw new Error(`torn replay ledger: ${path}`);
+  return rows;
+}
+
+async function replayModelAttempt(request: ModelReplayRequest, golden: GoldenTask, item: GoldenCorpusItem,
+  dispatch: ModelReplayDispatch | undefined, grade: PairedGrader): Promise<ReplayResult> {
+  let attempt: ModelReplayAttempt | undefined;
+  let verdict: CorpusProofOutcome = "unmeasurable";
+  const reasons: string[] = [];
+  try {
+    if (!dispatch) reasons.push("held-out-proof-in-prompt");
+    else {
+      attempt = await dispatch(request);
+      if (attempt.pushedRef || attempt.prUrl || attempt.breach) reasons.push("sealed-isolation-breach");
+      else if (attempt.servedModel !== null && attempt.servedModel !== request.model) reasons.push("served-model-off-pin");
+      else if (attempt.headDir === null) reasons.push("no-head-to-grade");
+      else {
+        const scored = await grade({ taskId: item.taskId, headDir: attempt.headDir, criteria: item.proofs });
+        verdict = scored.verdict;
+        if (verdict !== "pass") reasons.push(...scored.reasons);
+      }
+    }
+  } catch (error) {
+    const reason = `${attempt ? "grading" : "dispatch"}-failed:${error instanceof Error ? error.name : "unknown"}`;
+    reasons.push(reason);
+  } finally {
+    try {
+      attempt?.cleanup?.();
+    } catch (error) {
+      verdict = "unmeasurable";
+      const reason = `cleanup-failed:${error instanceof Error ? error.name : "unknown"}`;
+      reasons.push(reason);
+    }
+  }
+  const tokens = attempt?.tokens;
+  return { goldenId: golden.id, class: golden.class, model: request.model, verdict, passed: verdict === "pass",
+    mismatches: reasons, tokens, notionalCostUsd: tokens && codexNotionalCostUsd(attempt?.servedModel ?? request.model, tokens) };
+}
+
+/** Pair only the same golden within the same invocation, even when later runs reuse the golden. */
+function renderModelReplayComparison(models: ReplayModels, rows: readonly Record<string, unknown>[]): string[] {
+  type Grade = { verdict: "pass" | "fail"; cost: number | null };
+  const byPair = new Map<string, Map<string, Grade | null>>();
+  for (const row of rows) {
+    const { run_id: runId, golden_id: goldenId, model, verdict, notional_cost_usd: cost } = row;
+    if (row.step !== REPLAY_RESULT_STEP || typeof runId !== "string" || typeof goldenId !== "string" ||
+        typeof model !== "string" || !models.includes(model)) continue;
+    const key = JSON.stringify([runId, goldenId]);
+    const arms = byPair.get(key) ?? new Map();
+    byPair.set(key, arms);
+    const grade = verdict === "pass" || verdict === "fail"
+      ? { verdict, cost: typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? cost : null } : null;
+    const prior = arms.get(model);
+    if (prior === undefined || (prior?.verdict === grade?.verdict && prior?.cost === grade?.cost)) arms.set(model, grade);
+    else arms.set(model, null);
+  }
+  const pairs = [...byPair.values()].flatMap((arms) => {
+    const first = arms.get(models[0]);
+    const second = arms.get(models[1]);
+    return first && second ? [[first, second] as const] : [];
+  });
+  const paired = mcnemarExact(pairs.map(([first, second]) => ({ paid: first.verdict, control: second.verdict })));
+  return [
+    `replay-goldens: ${paired.pairs} paired grades across runs`,
+    ...models.map((model, arm) => {
+      const grades = pairs.map((pair) => pair[arm]!);
+      const passes = grades.filter((grade) => grade.verdict === "pass").length;
+      const cost = passes > 0 && grades.every((grade) => grade.cost !== null)
+        ? `$${(grades.reduce((sum, grade) => sum + grade.cost!, 0) / passes).toFixed(2)} per pass` : "cost per pass unavailable";
+      return `  ${model}: ${passes} ${passes === 1 ? "pass" : "passes"}, notional ${cost}`;
+    }),
+    `  ${paired.discordant} discordant (${paired.paidOnly} vs ${paired.controlOnly}), ` +
+      `exact McNemar p=${paired.pairs === 0 ? "unavailable" : Number(paired.pValue.toPrecision(6))}`,
+  ];
+}
+
+export async function modelReplayCommand(argv: readonly string[], input: ModelReplayInput): Promise<number> {
+  const log = input.log ?? console.error;
+  const refuse = (reason: string): number => { log(`replay-goldens: ${reason}`); return 2; };
+  const optIn = replayOptIn(argv);
+  if (!optIn.enabled) return refuse(optIn.reason);
+  try {
+    const { values } = parseArgs({ args: [...argv], options: { "confirm-spend": { type: "boolean" },
+      ledger: { type: "string" }, limit: { type: "string" }, models: { type: "string", multiple: true } } });
+    const ledgerPath = values.ledger;
+    if (!ledgerPath) return refuse("--ledger <path> is required");
+    const [first, second, extra] = values.models?.[0]?.split(",") ?? [];
+    if (values.models?.length !== 1 || !first || !second || extra !== undefined || first === second) {
+      return refuse("--models requires two distinct comma-separated Codex model IDs");
+    }
+    const models: ReplayModels = [first, second];
+    const limit = values.limit === undefined ? REPLAY_CORPUS_BOUND : Number(values.limit);
+    boundedCorpus([], limit); // Validate before reading any fleet state.
+    const mounts = input.loadMounts();
+    const codex = new Set(Object.values(mounts.capabilities?.codex ?? {}).flatMap((row) => Object.values(row).flat()));
+    if (!models.every((model) => codex.has(model))) return refuse("--models must name models in the Codex mount rows");
+
+    if (limit === 0) {
+      for (const line of renderModelReplayComparison(models, await input.readResults(ledgerPath))) log(line);
+      return 0;
+    }
+    const idle = await input.readIdle();
+    const gate = replayIdleGate(idle);
+    if (!gate.enabled) return refuse(gate.reason);
+    const rows = await input.readCorpusRows();
+    const tasks = new Map(input.loadPlanTasks().filter((task) => task.type === "implement").map((task) => [task.id, task]));
+    const specs = new Map([...tasks].map(([id, task]) => [id, { type: task.type, verify: task.verify, files: task.files ?? [] }]));
+    const sample = drawReplaySample({ argv, idle, limit, source: { kind: "derived", corpus: {
+      reviewLines: rows, merged: mergeCreditsFromLedger(rows), nowMs: systemClock.now(), tasks: specs,
+    } } });
+
+    const write = input.writeLedger ?? appendLedger;
+    const grade = input.grade ?? ((req) => gradeHeadWithReviewerExecutor(req.criteria, req.headDir));
+    const runId = input.runId?.() ?? `replay-${randomUUID()}`;
+    let nonpassing = false;
+    for (const [i, item] of sample.items.entries()) {
+      const task = { ...tasks.get(item.taskId)!, acceptance: undefined };
+      const taskClass = implementRouteClass(task, deriveTaskClass(task));
+      const effort = resolveMountForClass(mounts, task.type, task.risk, taskClass).mount.effort;
+      const pairId = pairIdFor(runId, task.id);
+      const order = paidPilotArmFor(runId, task.id) === "paid" ? models : [second, first];
+      const prompt = renderImplementPrompt(task, "", pairId);
+      const dispatch = heldOutLeaks(prompt, sample.items).length === 0 ? input.dispatcherFor(task, item) : undefined;
+      for (const position of [0, 1] as const) {
+        const result = await replayModelAttempt({ taskId: task.id, pilotId: runId, pairId, model: order[position]!, position,
+          effort, provider: "codex", isolation: { worktree: "fresh-detached", push: false, openPr: false, merge: false } },
+        sample.goldens[i]!, item, dispatch, grade);
+        write(ledgerPath, replayResultLine(runId, task.id, result));
+        if (!result.passed) nonpassing = true;
+      }
+    }
+    log(`replay-goldens: ${sample.items.length} held-out task(s) selected (run ${runId})`);
+    for (const line of renderModelReplayComparison(models, await input.readResults(ledgerPath))) log(line);
+    return nonpassing ? 1 : 0;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return refuse(reason);
+  }
 }
 
 export interface PaidPairedReviewInput extends Omit<PairedReviewEvalInput, "admitReview"> {
