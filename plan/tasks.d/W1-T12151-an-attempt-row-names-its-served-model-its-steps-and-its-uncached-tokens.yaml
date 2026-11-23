@@ -19,7 +19,7 @@
     - src/lib/worker-provider.ts
     - src/lib/benchmark-run.ts
     - test/worker/an-attempt-row-names-its-served-model-its-steps-and-its-uncached-tokens.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A Codex attempt records the model that served it when a source the Codex command writes names one, and names that source. When no source names one, the row keeps null and its reason"

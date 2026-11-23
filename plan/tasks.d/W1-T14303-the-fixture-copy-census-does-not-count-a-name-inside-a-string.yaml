@@ -16,7 +16,7 @@
   files:
     - scripts/fixture-copy-census.mjs
     - test/fixture-copy-census.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:declarations-only — countFixtureCopiesInTexts over one file whose only text `function inspectFreshReviewerWorktree(path: string) {` sits inside a double-quoted string, a single-quoted string, or the text part of a template literal gives repoBuilderFunctionNames 0. The same line as code in another file gives 1. The same holds for a ledger name (`function appendFakeLedger(`) and a GitHub name (`const fakeGitHub = () =>`) inside a string: ledgerHelperNames and fakeGithubBuilderNames are 0"
