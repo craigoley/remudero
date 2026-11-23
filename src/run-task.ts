@@ -1388,7 +1388,8 @@ import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-c
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, attemptAssignmentJoin, recordBenchmarkWorkerAttempt, benchmarkEvidenceLedgerPath, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput, terminalVerdictFields } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, attemptAssignmentJoin, recordBenchmarkWorkerAttempt, benchmarkEvidenceLedgerPath, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput, terminalVerdictFields, namedTaskWork, planTaskBenchmarkWork, type BenchmarkTaskWorkReader } from "./lib/benchmark-run.js";
+export { planTaskBenchmarkWork };
 import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cost-evidence.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
@@ -10887,6 +10888,7 @@ function ledgerNonDispatchAssignment(
   config?: Config,
   runId?: string,
   taskId?: string,
+  readTask: BenchmarkTaskWorkReader = planTaskBenchmarkWork(join(repoRoot, "plan")),
 ): void {
   const path = benchmarkEvidenceLedgerPath(config);
   if (path === undefined) return;
@@ -10896,12 +10898,17 @@ function ledgerNonDispatchAssignment(
     step: "worker.assignment",
     lane,
     worker_assignment: assignment,
-    benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane), workerBoundaryStack),
+    // W1-T12152: a named task's class and risk, as a build assignment records them; else the lane and the named reason.
+    benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane, namedTaskWork(taskId, readTask)),
+      workerBoundaryStack),
   });
 }
 
-export function ledgeredNonDispatchSpawn(lane: string, raw: typeof spawnWorker = spawnWorker): typeof spawnWorker {
-  return benchmarkNonDispatchSpawn(lane, raw);
+/** The non-dispatch receipt wrapper, reading a named task's record from `planDir` (W1-T12152). */
+export function ledgeredNonDispatchSpawn(lane: string, raw: typeof spawnWorker = spawnWorker,
+  planDir: string = join(repoRoot, "plan")): typeof spawnWorker {
+  const laneReadingPlan = { lane, readTask: planTaskBenchmarkWork(planDir) };
+  return benchmarkNonDispatchSpawn(laneReadingPlan, raw);
 }
 
 /** A failed fallback call is a worker attempt, not a second task outcome. Telemetry and caller
@@ -10952,13 +10959,16 @@ function withGitCredentialSocket(args: SpawnWorkerArgs, socketPath: string, harn
 }
 
 /** W1-T5115: the sweep fix rung's spawn — sweep.ts's own `benchmarkNonDispatchSpawn("sweep-fix")` default — with the
- *  daemon's git credential socket on every fix worker it starts. */
+ *  daemon's git credential socket on every fix worker it starts. W1-T12152: it reads the plan record of the task a fix
+ *  worker names from the harness checkout's plan, so a fix assignment records that task's class and risk. */
 export function gitCredentialFixSpawn(
   socketPath: string,
   raw: typeof spawnWorker = spawnWorker,
   harnessCheckout: string = repoRoot,
+  readTask: BenchmarkTaskWorkReader = planTaskBenchmarkWork(join(harnessCheckout, "plan")),
 ): typeof spawnWorker {
-  const spawnFix = benchmarkNonDispatchSpawn("sweep-fix", raw);
+  const sweepFixLane = { lane: "sweep-fix", readTask };
+  const spawnFix = benchmarkNonDispatchSpawn(sweepFixLane, raw);
   return (args) => spawnFix(withGitCredentialSocket(args, socketPath, harnessCheckout));
 }
 
