@@ -171,6 +171,10 @@ export interface Task {
    *  `compareDispatch` (lib/drain.ts); the §5C linter warns on a value outside [0, 99].
    *  Why: docs/forensics/plan.md#taskpriority. */
   priority?: number;
+  /** W1-T14360: why this task's merged fix may pass the freshness restart's minimum lifetime, set only when it is filed
+   *  as the fix for a live leak or storm. Read only by the expedite fast path (deploy-judge.ts `pendingExpedite`);
+   *  a blank value declares nothing. Unlike `priority`, it is an urgency signal. */
+  expedite?: string;
   /** Decorative/initial-state only — real merge state is derived from GitHub (`deriveStatus` in
    *  lib/status.ts) and never written back here; see CLAUDE.md on why this is not a completion signal. */
   status: TaskStatus;
@@ -412,17 +416,19 @@ export function answerHeld(known: readonly AnswerRecord[], record: AnswerRecord)
 }
 
 /** W1-T13940: append each of `candidates` that `known` lacks to the answers file beside the ledger, so the reader that cannot
- * see the store it came from counts it too. Best effort: it never decides an answer, and a failed append is retried next read. */
-export function publishAnswers(ledgerPath: string, candidates: readonly AnswerRecord[], known: AnswerRecord[]): void {
+ * see the store it came from counts it too. It never decides an answer. The first failed append stops it and is returned. */
+export function publishAnswers(ledgerPath: string, candidates: readonly AnswerRecord[], known: AnswerRecord[]): string | undefined {
   for (const record of candidates) {
     if (answerHeld(known, record)) continue;
     try {
       appendFileSync(sharedAnswersPath(ledgerPath), JSON.stringify(record) + "\n");
       known.push(record);
-    } catch {
-      return; // deliberate: the answer still counts where it is held; an unpublished one is published on a later read.
+    } catch (error) {
+      const reason = `the answers file ${sharedAnswersPath(ledgerPath)} could not be written: ${(error as Error).message}`;
+      return reason;
     }
   }
+  return undefined;
 }
 
 /** W1-T12715: why a task with an unanswered needs_input question is held, or undefined. */
@@ -917,6 +923,8 @@ export function parseTasksFromYaml(
       risk,
       band_meaning: bandMeaning,
       priority: typeof e.priority === "number" ? e.priority : undefined,
+      // W1-T14360: only a string declares an expedite; any other value is none, so the floor holds.
+      ...(typeof e.expedite === "string" ? { expedite: e.expedite } : {}),
       status,
       dispatch_hold: e.dispatch_hold as boolean | undefined,
       new_path_approval_ref: e.new_path_approval_ref as string | undefined,

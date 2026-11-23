@@ -393,7 +393,7 @@ export const AUTHORITY_TABLE: readonly AuthorityRow[] = [
   // ── src/lib/plan-task-move.ts ────────────────────────────────────────────────────────────
   {
     id: "push-plan-move-branch",
-    action: "push one plan-move-<id>-<epochMs> branch holding a single plan-record change (copy, removal, rollback or restore) to the public or ops repository",
+    action: "push one plan-move branch (plan-move-<id>-<epochMs> for one task, plan-move-batch-<epochMs> for a batch) holding one step's plan-record changes (copy, removal, rollback or restore) to the public or ops repository",
     module: "src/lib/plan-task-move.ts",
     symbol: "movePlanTask",
     boundary: "git-push",

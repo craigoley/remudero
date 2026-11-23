@@ -39,7 +39,7 @@ import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
 import { loadPlan, DEFAULT_RISK, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
-import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
+import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, planCreditOverridePath, type CommitTrailerIndexReader, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
 import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, dependabotCheckStates, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, REVIEW_INPUT_ADMISSION_BACKSTOP, type ReviewSetupRefusal, type BaseChangedFiles } from "./sweep.js";
 import { loadedReviewerCodeSha } from "./reviewer-health.js";
 import { readCiGateRequiredNames, resolveCiGateRequiredSource, type CiGateRequiredSource } from "./ci-gate-required.js";
@@ -255,7 +255,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
   github?: GitHub;
   issues?: IssueGateway;
   changedFilesFetch?: (prNumber: string) => Promise<string[] | undefined>;
-  commitTrailerIndex?: () => Map<string, PrRef[]> | null;
+  commitTrailerIndex?: CommitTrailerIndexReader;
   evidenceRootFor?: (owner: string, repo: string) => string | undefined;
   viewsDeps?: Parameters<typeof buildOpenPrViewsAsync>[3];
   /** W1-T6591: the open-PR reads' async transport; absent, `fetch` or `ghJsonAsync` answers them. */
@@ -327,7 +327,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     now: () => generationClock, ttlMs: 1, mergedTtlMs: 1,
     // Generation-memoised JSON fetch; changed-files cache answers the gateway's --jq read before exec.
     exec: (args) => JSON.stringify(fetch(args)),
-    commitTrailerIndex: io.commitTrailerIndex ?? (() => buildCommitTrailerIndex({ slug: `${owner}/${repo}`, cwd: checkoutRoot })()),
+    commitTrailerIndex: io.commitTrailerIndex ?? buildCommitTrailerIndex({ slug: `${owner}/${repo}`, cwd: checkoutRoot }),
   });
   return async (request: { plan: Plan; previousProjection?: Array<[string, StatusProjection]> }) => {
     const { plan } = request;
@@ -355,9 +355,11 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     const previous = new Map(prior);
     const creditBefore = loadCreditStore(defaultCreditStorePath(ledgerPath));
     let credits = creditBefore;
-    const creditIo: Pick<DeriveDeps, "readCreditStore" | "writeCreditStore"> = {
+    const creditIo: Pick<DeriveDeps, "readCreditStore" | "writeCreditStore" | "creditOverridePath"> = {
       readCreditStore: () => credits,
       writeCreditStore: (store) => { credits = store; },
+      // W1-T14302: the target checkout's own plan holds the override rows; config.root/plan does not exist on the fleet.
+      creditOverridePath: planCreditOverridePath(checkoutRoot),
     };
     let openBranches: PrRef[] | undefined;
     const derive = () => projectPlan(plan, {
@@ -3312,7 +3314,9 @@ export function buildCreditCandidates(
   evidenceRootFor: (owner: string, repo: string) => string | undefined = creditEvidenceRootFor,
   // Injectable only for the one-read regression; production uses projectPlan's normal reader.
   readLedger: DeriveDeps["readLedger"] = readLedgerLines,
-  creditIo: Pick<DeriveDeps, "readCreditStore" | "writeCreditStore"> = {},
+  creditIo: Pick<DeriveDeps, "readCreditStore" | "writeCreditStore" | "creditOverridePath"> = {},
+  // W1-T14302: the plan reconcile reads the same pass's projections for the shards whose standing credit is gone.
+  observeProjection?: (projection: ReadonlyMap<string, StatusProjection>) => void,
 ): ReconcileCreditCandidate[] {
   // W1-T181: wires the same fetch-size/fetch-failure observability the SERVE board gateway gets —
   // this sweep/daemon-poll gateway shells the identical `gh pr list` this outage's fix targeted.
@@ -3342,6 +3346,7 @@ export function buildCreditCandidates(
   // puts `(#N)` in the subject, which is what maps a credit back to what earned it.
   const mergeSubjects = readMergeSubjectsByPr(evidenceRoot, mergeLog);
   const projection = projectPlan(plan, deps);
+  observeProjection?.(projection);
   // W1-T4078 — `buildBatchedGithub` already has each merged PR body in the same cache that fed
   // the projection. Read those bodies by PR number so the measured prerequisite-only split can
   // be refused without adding a GitHub request or weakening ordinary commit-trailer credit.

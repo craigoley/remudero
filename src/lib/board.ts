@@ -156,6 +156,8 @@ interface BoardComputeOptions {
   /** Capture clean projections for memoization; BoardRow joins (lastActivityAt, liveSpendUsd)
    *  must be re-derived each pass, never carried. */
   captureProjections?: (byId: ReadonlyMap<string, StatusProjection>) => void;
+  /** W1-T14410: called after each part (project, rows, sections, queue), so a caller can time the parts. */
+  lap?: (part: string) => void;
 }
 
 interface PrQueueIndexRead {
@@ -408,6 +410,7 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
   const plan = catalog?.plan ?? deps.plan;
   const byId = projectPlan(plan, effectiveDeps);
   options.captureProjections?.(byId);
+  options.lap?.("project");
   const lastActivity = lastActivityByTask(lines);
   const liveSpend = liveRunSpendByTask(lines, [...byId.values()].filter((p) => p.phase).map((p) => p.taskId));
   const tasks: BoardRow[] = [...byId.values()].map((p) => {
@@ -440,11 +443,14 @@ export function computeBoardSnapshot(deps: BoardDeps, options: BoardComputeOptio
     return row;
   });
   // Count these same tasks; a GitHub outage means unknown, never "0 merged" (fb-1784902052582-c124f9).
+  options.lap?.("rows");
   const github_unreachable = safeReadFailed(effectiveDeps.github);
   const now = deps.now ?? Date.now;
   const generatedAt = new Date(now()).toISOString();
   const { blockedPrs, blockedPrsUnverifiedReason, mergeHeld } = deriveBoardStatusSections(effectiveDeps, lines);
+  options.lap?.("sections");
   const prQueue = derivePrQueue(effectiveDeps, lines, tasks, mergeHeld, generatedAt, options.lastGoodPrQueueAt, prQueueIndex);
+  options.lap?.("queue");
   const githubFactsAgeMs = safeFactsAgeMs(effectiveDeps.github);
   return {
     generated_at: generatedAt,

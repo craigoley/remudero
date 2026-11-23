@@ -152,7 +152,7 @@ export { readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync };
 import { tsImport } from "tsx/esm/api";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import { createIndexedLifetimeAccounting, tallyAuditedLifetimeDispatches, type LifetimeIndexFailure } from "./lib/lifetime-identity-index.js";
-import { defaultCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
+import { defaultCreditOverridePath, planCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
   type CreditOverrideRow, type CreditReadState, type CreditStore } from "./lib/status.js";
 import type { DependencyMergeEvidence } from "./lib/plan.js";
 export { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
@@ -1454,7 +1454,7 @@ import {
 } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, VERDICT_OUTCOME_STEP, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
-import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningHandFixInput, ciLearningLookbackDays, type HandFixInput, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningFromPlan, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
+import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningHandFixInput, ciLearningLookbackDays, type HandFixInput, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningFromPlan, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type CreditedMergedIds, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
 import {
   routedModelIdsFromCheckout,
   watchSuccessorModels,
@@ -19144,7 +19144,7 @@ export function creditProjectionWithReadState(
   creditBuilder: typeof buildCreditCandidates = buildCreditCandidates,
   github?: GitHub,
   catalogPlan?: Plan,
-): { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string>; windowShort?: readonly string[] } {
+): { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string>; windowShort?: readonly string[]; requeue?: RevertedRequeue[] } {
   const config = configOverride ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   // No ledger means no positive merge-credit evidence. Return an empty projection rather than
@@ -19153,12 +19153,17 @@ export function creditProjectionWithReadState(
   const self = resolveOwnerRepo();
   const plan = catalogPlan ?? loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
   const gateway = github ?? buildBatchedGithub(self.owner, self.repo);
-  const candidates = creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway);
+  // W1-T14302: the remove-credit rows of this checkout's plan, and the shards whose standing credit is gone.
+  let lost: RevertedRequeue[] = [];
+  const candidates = creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway, undefined, undefined,
+    { creditOverridePath: planCreditOverridePath(checkoutRoot) }, (projected) => { lost = revertedRequeues(projected.values()); });
   const reconcilable = candidates.filter(creditIsReconcilable);
   const ids = new Set(reconcilable.map((c) => c.taskId));
   const windowShort = candidates.filter((c) => c.merged === true && c.creditIsImplementation === undefined && c.creditHasBuildDiff === undefined && c.creditHasOtherBuildMerge !== true).map((c) => c.taskId).sort();
-  const projection = { ids, ...(windowShort.length > 0 ? { windowShort } : {}) };
   const state = gateway.readState?.();
+  // A failed or partial read re-queues nothing.
+  const wholeRead = state !== "failed" && !(state === "ok" && gateway.readTruncated?.());
+  const projection = { ids, ...(windowShort.length > 0 ? { windowShort } : {}), ...(lost.length > 0 && wholeRead ? { requeue: lost } : {}) };
   if (state === "failed") return { ...projection, unknownReason: gateway.readFailureReason?.() ?? "unknown" };
   if (state === "ok" && gateway.readTruncated?.()) {
     const coverage = gateway.readBoardCoverage?.();
@@ -19172,8 +19177,10 @@ export function creditProjectionWithReadState(
 }
 
 export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot = repoRoot,
-  creditBuilder: typeof buildCreditCandidates = buildCreditCandidates, catalogPlan?: Plan): Set<string> {
-  return creditProjectionWithReadState(configOverride, checkoutRoot, creditBuilder, undefined, catalogPlan).ids;
+  creditBuilder: typeof buildCreditCandidates = buildCreditCandidates, catalogPlan?: Plan): Set<string> & CreditedMergedIds {
+  const read = creditProjectionWithReadState(configOverride, checkoutRoot, creditBuilder, undefined, catalogPlan);
+  // W1-T14302: the re-queue rides the credited set, so the cadence reads both from this one projection.
+  return read.requeue ? Object.assign(read.ids, { requeue: read.requeue }) : read.ids;
 }
 
 /** W1-T3970: production's adapter keeps the cadence map testable without running the rest of the
@@ -19181,7 +19188,7 @@ export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot =
  * the same seams with a synthetic map and prove both the landed and fail-closed arms. */
 export interface PlanReconcileProductionInputOptions extends Omit<PlanReconcileCadenceInputOptions, "land" | "creditedMergedIds"> {
   land?: PlanReconcileLand;
-  creditedMergedIds: (plan?: Plan) => ReadonlySet<string>;
+  creditedMergedIds: (plan?: Plan) => CreditedMergedIds;
 }
 export interface CatalogPlanReconcileProductionInputOptions extends PlanReconcileProductionInputOptions {
   stateDir: string;
@@ -19209,6 +19216,7 @@ function buildPublicPlanReconcileInput(deps: PlanReconcileProductionInputOptions
       checkoutRoot: deps.checkoutRoot,
       readShards: deps.readShards,
       creditedMergedIds: deps.creditedMergedIds,
+      ...(deps.log ? { log: deps.log } : {}),
       land: landing.land,
     });
     return { ...cadence, settled: landing.settled };
@@ -19265,7 +19273,7 @@ async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProducti
     if (outcome !== "ok" && outcome !== "off") deps.log?.("plan.reconcile.unknown", { reason: `ops-${outcome}` });
   };
   reportUnknown(context.outcome);
-  let credited: ReadonlySet<string>;
+  let credited: CreditedMergedIds;
   try { credited = deps.creditedMergedIds(context.plan); }
   catch (error) { void error; deps.log?.("plan.reconcile.unknown", { reason: "credit-projection-unreadable" }); return undefined; }
   const publicInput = buildPublicPlanReconcileInput({ ...deps, creditedMergedIds: () => credited });
@@ -45082,7 +45090,7 @@ function commandSyntax(name: string): string {
 // (test/run-task.test.ts, test/install-symlink-refusal.test.ts, plus this file's own
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
-import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./lib/plan-reconcile.js";
+import { reconcilePlan, reconcileShardStatus, revertedRequeues, type RevertedRequeue, type ReconcileSummary } from "./lib/plan-reconcile.js";
 import { takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";

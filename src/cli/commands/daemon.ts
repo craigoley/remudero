@@ -57,7 +57,7 @@ import { loadTargetPlanQuarantiningDuplicates, plannedSequence, runDrain, type D
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
-import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type OpsTaskDispatchRead, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe, type PauseInFlightUnit } from "../../lib/daemon.js";
+import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type DaemonFreshness, type OpsTaskDispatchRead, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe, type PauseInFlightUnit } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktreesAsync } from "../../lib/review-worktree-reclaim.js";
 import { reapRetiredReviewerTreesAsync } from "../../lib/reviewer-tree-reaper.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
@@ -65,7 +65,7 @@ import { readGhRateLimitBuckets } from "../../lib/daemon-health.js";
 import { defaultListCandidates, defaultReadMarkers, killProcessGroup, sweepOrphanWorkers, workerInstallationScope } from "../../lib/worker-containment.js";
 import { sweepStaleTempDirs } from "../../lib/tmp.js";
 import { sweepStaleWorkerScratch } from "../../lib/worker-scratch.js";
-import { daemonInstanceRegistryPath } from "../../lib/deployer.js";
+import { daemonInstanceRegistryPath, pendingCommitTaskReader } from "../../lib/deployer.js";
 import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "../../lib/dep-review.js";
 import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
@@ -99,7 +99,7 @@ import {
   bootSweepDispatchClaimsAsync, dispatchClaimRef, realBootSweepHostProbe, releaseLandedDispatchClaims, claimMintedByRerun,
   type BootSweepInputs, type DispatchClaimReserverAsync,
 } from "../../lib/dispatch-claim.js";
-import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
+import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, planCreditOverridePath, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
 import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs, type OpenPrView } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
 import { createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus } from "../../lib/daemon-memory-census.js";
@@ -120,7 +120,7 @@ import { mainEvidenceReader } from "../../lib/stall-verifier.js";
 import { step } from "../../lib/git-push.js";
 import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from "../../lib/worker-home.js";
 import { acquireDrainLock, DrainLockError } from "../../lib/drain-lock.js";
-import { testRunnerOnItsOwnCheckout } from "../../lib/self-sync.js";
+import { asyncGit, testRunnerOnItsOwnCheckout } from "../../lib/self-sync.js";
 import { withLiveEditLadders } from "../../lib/live-edit-ladder.js";
 import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, clearKick, consumeDrainNow, consumeRestartInPlace, clearPrAction, consumeStop, isQuietHours, kickFilePath, pauseDetail, pendingKicks, pendingPrActions, stopDetail } from "../../lib/fleet-control.js";
 import { wireSweepWakeToDaemon } from "../../lib/github-event-wake.js";
@@ -1019,6 +1019,35 @@ export function opsCatalogFilingFeeds(
   return { opsShadow, datedFiling };
 }
 
+/**
+ * W1-T14360: a task's declared expedite from the two catalogs this daemon already holds: the public plan it dispatches
+ * from, and the ops snapshot the dispatch feed last settled, counted only while that snapshot is ok and young. No
+ * catalog is read here, so no GitHub read is added. A task in neither, or an ops snapshot that is not ok, declares none.
+ */
+export function catalogTaskExpedite(
+  publicPlan: () => Plan | undefined, ops: () => OpsCatalogShadowInput | undefined,
+): (taskId: string) => string | undefined {
+  return (taskId) => {
+    const declared = publicPlan()?.byId.get(taskId)?.expedite;
+    if (declared !== undefined && declared.trim() !== "") return declared;
+    const snapshot = ops();
+    return snapshot?.outcome === "ok" ? snapshot.plan?.byId.get(taskId)?.expedite : undefined;
+  };
+}
+
+/** W1-T14360: the freshness reading, with each pending commit tagged with the tasks its own Remudero-Task lines name. */
+export function withPendingCommitTasks(
+  read: () => Promise<DaemonFreshness>, git: (args: string[]) => Promise<string>,
+): () => Promise<DaemonFreshness> {
+  const tag = pendingCommitTaskReader(git);
+  return async () => {
+    const freshness = await read();
+    if (!freshness.stale || freshness.changes === undefined) return freshness;
+    const changes = await tag(freshness.changes);
+    return changes.every((change, index) => change === freshness.changes![index]) ? freshness : { ...freshness, changes };
+  };
+}
+
 type OpsDispatchSelection = PlanTaskMoveFlag;
 
 /** Read one flag of the selection file, reusing canonical repository validation and refusing a changed file. */
@@ -1605,8 +1634,8 @@ export async function daemonCommand(
   if (!targetRecordWrite.written) log("daemon.target_record_failed", { reason: targetRecordWrite.reason });
   // W1-T12200: the host switch for new plan files. With no host file this writes no row and calls nothing.
   await bootPlanDestination(join(config.root, "state"), { owner: self.owner, repo: self.repo, checkoutDir: effectiveRepoRoot }, log);
-  const targetCommitTrailerIndex = () =>
-    buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot })();
+  // W1-T14302: the reader itself, not a wrapper, so the gateway also gets its revert read.
+  const targetCommitTrailerIndex = buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot });
   const gatewayFor = createDaemonGatewayFactory(config.root, log, {
     snapshotFor: boardSnapshotFor,
     trailerIndexFor: (o: string, r: string) => (o === target.owner && r === target.repo ? targetCommitTrailerIndex : undefined),
@@ -1671,6 +1700,7 @@ export async function daemonCommand(
     const proj = projectPlan(
       planOverride,
       { ledgerPath, github: projectionGithub, skipUncreditedBuildWarning: true,
+        creditOverridePath: planCreditOverridePath(targetCheckoutRoot),
         observeOpenPrCount: (rows) => { lastOpenRows = rows; boardOpenPrCount.observe(rows); } },
       statusPath,
     );
@@ -2710,9 +2740,11 @@ export async function daemonCommand(
         // the daemon is inside a dispatch 18.2% of wall clock, p50 28.3 min).
         // 2026-10-11: a tracked edit in a live checkout deferred every refresh for five hours, silently.
         // The same read drains the host-escalation spool: host-side alerts the host itself could not post.
+        // W1-T14360: each pending commit carries the tasks its own Remudero-Task lines name, for the expedite fast path.
         checkFreshness: testRunnerOnItsOwnCheckout(repoRoot)
-          ? daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness
-          : withEscalationSpoolDrain(withLiveEditLadders(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, { ...liveEditLadderWiring(config), ...freshnessRestartLadder(policy.values.freshnessRestart) }), escalationSpoolDrainWiring(config)),
+          ? withPendingCommitTasks(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, asyncGit(repoRoot))
+          : withEscalationSpoolDrain(withLiveEditLadders(withPendingCommitTasks(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, asyncGit(repoRoot)), { ...liveEditLadderWiring(config), ...freshnessRestartLadder(policy.values.freshnessRestart) }), escalationSpoolDrainWiring(config)),
+        taskExpedite: catalogTaskExpedite(() => activePlanRef.current, () => opsShadow?.forDispatch()),
         // W1-T10919: read main's tree directly; a config-only fetch need not reset the consumer checkout.
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state"), () => runnerConfigDigest(targetCheckoutRoot, "origin/main")),
         categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,
