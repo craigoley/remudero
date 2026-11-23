@@ -232,13 +232,45 @@ export interface LedgerWriterDeps {
 }
 
 export class LedgerAppendConflict extends RmdError {
-  constructor(message: string) {
+  /** `unwritten`: the row is not in the ledger (never written, or withdrawn), so a caller may decide again. */
+  constructor(message: string, readonly unwritten = false) {
     super("read-model", GENERIC_EXIT_CODE, message);
   }
 }
 
 export function ledgerFileVersion(stat: BigIntStats): string {
   return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+}
+
+/** The rows appended to the same live file since the {@link ledgerFileVersion} `since`, and the version they end at. */
+export function readLiveLedgerGrowth(path: string, since: string):
+  { rows: Record<string, unknown>[]; version: string } | { refused: string } {
+  let fd: number | undefined;
+  try {
+    const [dev, ino, size] = since.split(":");
+    const from = BigInt(size ?? "");
+    fd = openSync(path, "r");
+    const stat = fstatSync(fd, { bigint: true });
+    const version = ledgerFileVersion(stat);
+    if (String(stat.dev) !== dev || String(stat.ino) !== ino) return { refused: "the live ledger was replaced" };
+    if (stat.size < from) return { refused: "the live ledger shrank" };
+    if (stat.size === from) return version === since ? { rows: [], version } : { refused: "the live ledger was rewritten" };
+    const tail = Buffer.alloc(Number(stat.size - from));
+    if (readSync(fd, tail, 0, tail.length, from) !== tail.length) return { refused: "short read of the appended rows" };
+    if (tail[tail.length - 1] !== 0x0a) return { refused: "the appended rows end without a newline" };
+    const rows: Record<string, unknown>[] = [];
+    for (const line of tail.toString("utf8").split("\n")) {
+      if (line.trim() === "") continue;
+      const row = JSON.parse(line) as unknown;
+      if (row === null || typeof row !== "object" || Array.isArray(row)) return { refused: "an appended row is not an object" };
+      rows.push(row as Record<string, unknown>);
+    }
+    return { rows, version };
+  } catch (error) {
+    return { refused: `could not read the appended rows: ${String(error)}` };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 function openLedgerForAppend(path: string, expectedLiveVersion: string | undefined): number {
@@ -258,7 +290,7 @@ function verifyLedgerBeforeAppend(fd: number, expectedLiveVersion: string): bigi
     throw new LedgerAppendConflict("live ledger has an unterminated tail");
   }
   if (ledgerFileVersion(fstatSync(fd, { bigint: true })) !== expectedLiveVersion) {
-    throw new LedgerAppendConflict("live ledger changed before the decline append");
+    throw new LedgerAppendConflict("live ledger changed before the decline append", true);
   }
   return size;
 }
@@ -280,7 +312,7 @@ function verifyAppendAtCheckedSize(path: string, fd: number, checkedSize: bigint
   withdrawAppendedRow(path, fd, checkedSize + BigInt(at), row.length, torn);
   throw new LedgerAppendConflict(torn
     ? "live ledger gained an unterminated row before the decline append"
-    : "live ledger gained a row before the decline append");
+    : "live ledger gained a row before the decline append", true);
 }
 
 /**
