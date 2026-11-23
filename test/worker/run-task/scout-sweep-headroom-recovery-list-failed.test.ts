@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { retireRecoveredHeadroomEscalations } from "#src/run-task.js";
+import { retireRecoveredHeadroomEscalations } from "#src/lib/headroom-recovery.js";
 
 const issueUrl = "https://github.com/example/repo/issues/42";
 const escalation = {
