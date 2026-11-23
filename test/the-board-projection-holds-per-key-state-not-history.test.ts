@@ -501,3 +501,24 @@ test("W1-T14385 criterion 2: invariant:same-board — a chunked first load holds
   assert.deepEqual(held(chunked), held(whole));
   assert.ok(chunked.rows().length < longLoad().length, "control: the load let rows go");
 });
+
+test("W1-T14410 criterion 1: a now build times the board and snapshot stages' parts", (t) => {
+  const w = world(t);
+  const view = w.view();
+  built(w, view);
+  const stages = view.stages(w.ctx()) ?? {};
+  for (const part of ["board.ingest", "board.derive", "board.persist", "snapshot.project", "snapshot.rows", "snapshot.sections", "snapshot.queue"]) {
+    assert.equal(typeof stages[part], "number", `${part} in ${JSON.stringify(stages)}`);
+  }
+});
+
+test("W1-T14410 criterion 2: invariant:parts-within-the-stage — a derive's parts sum to no more than its elapsed time", (t) => {
+  const w = world(t);
+  const board = w.board();
+  let update = board.update({ force: true });
+  for (let n = 0; !update.caughtUp && n < 1_000; n++) update = board.update({ force: true });
+  assert.equal(update.derived, true, "control: the update derived");
+  const parts = Object.values(update.phases ?? {});
+  assert.ok(parts.length >= 3);
+  assert.ok(parts.reduce((a, b) => a + b, 0) <= update.elapsedMs);
+});

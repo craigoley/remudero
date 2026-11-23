@@ -1352,7 +1352,11 @@ export function createNowView(opts: NowViewOptions): {
         held.set(name, h);
       }
       Object.assign(h, { githubKey: b.keys.github, gateway: b.gateway, feed: depsOf(instance, b) });
-      if (!h.board.update({ force: true, readerNowMs: b.now }).caughtUp) return false;
+      const update = h.board.update({ force: true, readerNowMs: b.now });
+      // W1-T14410: the board stage's parts as `board.<part>` stages.
+      const timed = ran.get(name) ?? ran.set(name, {}).get(name)!;
+      for (const [part, ms] of Object.entries(update.phases ?? {})) timed[`board.${part}`] = (timed[`board.${part}`] ?? 0) + ms;
+      if (!update.caughtUp) return false;
       b.boardNewestTs = b.state.newestTs;
       b.h = h;
       const rows = h.board.rows();
@@ -1364,7 +1368,7 @@ export function createNowView(opts: NowViewOptions): {
       // Persisted projections remain public-only. Private rows are derived solely for this
       // whitelisted body, from its captured observation rather than a later asynchronous reply.
       b.snapshot = computeBoardSnapshot({ ...depsOf(instance, b), ledgerIndex: b.index! },
-        { catalog: b.catalog ?? null, reuseProjection: (task) => projections.get(task.id) });
+        { catalog: b.catalog ?? null, reuseProjection: (task) => projections.get(task.id), lap: decisionsLap(instance.name, "snapshot") });
       // The fact store keeps only the steps a reader decides on; a task's newest row of any step is legacy's sort time.
       const activity = readTaskActivity(b.db);
       for (const t of b.snapshot.tasks) {
