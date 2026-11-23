@@ -191,10 +191,18 @@ export function earnedConfidenceBar(base: number, mean: number): number {
  */
 export function needsMachineJudgement(task: Task, operatorReleases: ReadonlySet<string> = new Set()): boolean {
   if (task.status !== "queued" || task.retirement !== undefined || shardRelPath(task) === undefined) return false;
-  if (operatorReleases.has(task.id)) return task.verify === "human";
+  if (operatorReleases.has(task.id)) return task.verify === "human" && !settledOperatorRelease(task);
   const unjudged = task.risk_ruling === undefined || task.risk_ruling.pin !== taskRulingPin(task);
   if (task.author_class === "machine") return unjudged;
   return task.verify === "human" && !isRulingShaped(task) && unjudged;
+}
+
+/** W1-T12224: the operator ruling a release authorized has ALREADY landed on this record, pinned to the same
+ *  contract. Since a release no longer flips `verify:`, such a record stays `verify: human` and would otherwise be
+ *  due on every pass: the W1-T5359 empty re-landing class, read off the record itself rather than daemon state. */
+export function settledOperatorRelease(task: Task): boolean {
+  const ruling = task.risk_ruling;
+  return ruling?.verdict === "operator" && ruling.operator_release_pin === operatorReleasePin(task);
 }
 
 /** W1-T12838: a machine record already released into the queue (`verify: auto`), not released by the operator, which
@@ -562,15 +570,22 @@ export function renderRuledShard(
   if ((text.match(/^- id:/gm) ?? []).length !== 1) return { refused: `${relPath} does not hold exactly one record` };
   const unknownDep = shardRecord(text, relPath).depends_on.find((d) => !known.has(d));
   if (unknownDep !== undefined) return { refused: `${relPath}: depends_on unknown task '${unknownDep}'` };
+  // W1-T12224: an operator one-task release (`rmd approve`, `verdict: "operator"`) authorizes DISPATCH only.
+  // Dispatch admits it through releasedIds, not through `verify:`, so the line is left byte-identical — comment
+  // included. Flipping it to auto let one approval also decide how the task is VERIFIED, which nobody approved
+  // (W1-T3206 (ii): "a released task becomes dispatchable without editing its `verify:` field").
+  const keepsVerify = ruling.verdict === "operator";
   const verify = ruling.action === "proceed" ? "auto" : "human";
   const lines = withoutRulingBlock(text.replace(/\n+$/, "").split("\n"));
   // 2026-10-10: `verify: human  # <why>` is valid YAML the plan loads, and W1-T7736 was refused as having no
   // verify: line. The comment is kept on its own line above, so the rewrite never drops the filer's words.
   let verifyAt = lines.findIndex((l) => /^ {2}verify:\s*[^\s#]+\s*(#.*)?$/.test(l));
   if (verifyAt < 0) return { refused: `${relPath} has no verify: line` };
-  const comment = /^ {2}verify:\s*[^\s#]+\s*#\s*(.*?)\s*$/.exec(lines[verifyAt]!)?.[1];
-  if (comment) lines.splice(verifyAt++, 0, `  # ${comment}`);
-  lines[verifyAt] = `  verify: ${verify}`;
+  if (!keepsVerify) {
+    const comment = /^ {2}verify:\s*[^\s#]+\s*#\s*(.*?)\s*$/.exec(lines[verifyAt]!)?.[1];
+    if (comment) lines.splice(verifyAt++, 0, `  # ${comment}`);
+    lines[verifyAt] = `  verify: ${verify}`;
+  }
   // Released machine work with no measured cost dispatches mid-queue, never last (2026-09-29).
   const released = shardRecord(text, relPath);
   if (ruling.action === "proceed" && ruling.verdict !== "operator" && released.author_class === "machine" && released.priority === undefined) {
@@ -605,7 +620,9 @@ export function renderRuledShard(
   const base = lintTask(before).violations;
   const had = checks(base);
   const added = [...checks(promoteIntroducedPlanOnlyDiagnostics(lintTask(reparsed).violations, base, false))].filter((c) => !had.has(c));
-  if (added.length > 0) return { refused: `${reparsed.id}: at verify: auto it fails lint (${added.join(", ")})`, lint: true };
+  // The reason names the verify the rewrite actually leaves on the record: an operator release moves nothing
+  // to auto, so "at verify: auto" would be a false reason for the only refusal it can produce (W1-T12224).
+  if (added.length > 0) return { refused: `${reparsed.id}: at verify: ${reparsed.verify} it fails lint (${added.join(", ")})`, lint: true };
   // lint-plan --base also runs the machine-filing admission on every changed machine record, and a plain lintTask
   // skips it: at verify: auto it refuses unmerged depends_on, which verify: human parks past. Only what the
   // rewrite introduces counts, as above, so a reason the record already carried is not the ruling's to answer.
@@ -613,7 +630,7 @@ export function renderRuledShard(
     const admit = (t: Task) => machineFilingAdmissionViolations(t, { ...admission, releasedIds: new Set() });
     const held = new Set(admit(before));
     const refusedBy = admit(reparsed).filter((r) => !held.has(r));
-    if (refusedBy.length > 0) return { refused: `${reparsed.id}: at verify: auto lint-plan's machine-filing admission refuses it (${refusedBy.join("; ")})`, lint: true };
+    if (refusedBy.length > 0) return { refused: `${reparsed.id}: at verify: ${reparsed.verify} lint-plan's machine-filing admission refuses it (${refusedBy.join("; ")})`, lint: true };
   }
   return { contents };
 }

@@ -407,7 +407,10 @@ function ports(root: string, judge: (input: RiskJudgeInput) => Promise<RiskJudge
   return { p, proposals, logs };
 }
 
-const dispatchable = (plan: Plan): string[] => runnableCandidates(plan, () => false, 50).map((t) => t.id);
+/** W1-T12224: an operator release no longer moves the record to verify: auto, so the ids the operator
+ *  released are handed to the selector exactly as the dispatcher hands them (`releasedIds`). */
+const dispatchable = (plan: Plan, releasedIds: ReadonlySet<string> = new Set()): string[] =>
+  runnableCandidates(plan, () => false, 50, { releasedIds }).map((t) => t.id);
 
 test("a machine shard with a proceed ruling dispatches where the unjudged shard parks", async () => {
   const root = planDir({ "W1-T9001-x.yaml": machineShard("W1-T9001") });
@@ -909,11 +912,15 @@ test("rmd approve becomes a pinned operator ruling that no ledger rotation can s
     assert.equal(asked, 0, "an operator release asks no model and no backstop");
     assert.deepEqual(report.proceeded.sort(), ["W1-T9110", "W1-T9111"]);
     const plan = readPlan(root);
+    const releasedIds = readOperatorReleases(state, plan.tasks);
     for (const id of ["W1-T9110", "W1-T9111"]) {
       assert.equal(plan.byId.get(id)!.risk_ruling?.verdict, "operator");
-      assert.equal(plan.byId.get(id)!.verify, "auto");
+      // W1-T12224: dispatch, not verification: the record the operator approved keeps its verify line.
+      assert.equal(plan.byId.get(id)!.verify, "human");
+      assert.equal(releasedIds.has(id), true, "and the durable release is what makes it dispatchable");
     }
-    assert.deepEqual(dispatchable(plan).sort(), ["W1-T9110", "W1-T9111"], "released with an empty ledger");
+    assert.deepEqual(dispatchable(plan, releasedIds).sort(), ["W1-T9110", "W1-T9111"], "released with an empty ledger");
+    assert.deepEqual(dispatchable(plan), [], "control: without the release the record is still parked");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

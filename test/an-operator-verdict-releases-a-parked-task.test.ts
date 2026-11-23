@@ -358,7 +358,7 @@ const shardText = (id: string): string =>
   `- id: ${id}\n  title: Fixture ${id}\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: human\n  status: queued\n`;
 
 /** The release pin as origin/main computed it before W1-T13386, written out: sorted keys, undefined dropped,
- *  verify forced to auto, and only sourcePath, attempts and risk_ruling left out. */
+ *  the record's own verify hashed (W1-T12224), and only sourcePath, attempts and risk_ruling left out. */
 function pinBeforeThisTask(task: object): string {
   const stable = (value: unknown): string => {
     if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
@@ -369,7 +369,7 @@ function pinBeforeThisTask(task: object): string {
     return JSON.stringify(value) ?? "null";
   };
   const { sourcePath: _source, attempts: _attempts, risk_ruling: _ruling, ...contract } = task as Record<string, unknown>;
-  return createHash("sha256").update(stable({ ...contract, verify: "auto" })).digest("hex");
+  return createHash("sha256").update(stable(contract)).digest("hex");
 }
 
 /** Everything the verb prints, on either stream, for the length of one test. Called once per test. */

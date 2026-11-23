@@ -49,8 +49,10 @@ test("W1-T14408 criterion 2: a release against the public record holds for the m
 test("W1-T14408 criterion 3: without a moved_from line the pin is exactly origin/main's (pinned digest, every term still pinned)", () => {
   const record = { id: "W1-T7", title: "t", repo: "remudero", type: "implement", priority: 1, status: "queued", verify: "human",
     files: ["a.ts"], acceptance: [{ claim: "c", proof: "grep: x in a.ts" }], design: "d" };
-  assert.equal(pinOf(record), "a68948e322ed1f850d17184e7e2018b088bfde802c2c4a27691a4bfa04ac129a");
-  for (const [key, value] of [["title", "u"], ["files", ["b.ts"]], ["priority", 2], ["status", "blocked"], ["repo", "other"], ["design", "e"]] as const) {
+  // W1-T12224 rebound the digest to the record's own verify, so the pinned value moved once, by design.
+  assert.equal(pinOf(record), "98af2ad596e54b5bb1c420952026ab94a6a72561debc2643414c68b123bf91a2");
+  for (const [key, value] of [["title", "u"], ["files", ["b.ts"]], ["priority", 2], ["status", "blocked"], ["repo", "other"], ["design", "e"],
+    ["verify", "auto"]] as const) {
     assert.notEqual(pinOf({ ...record, [key]: value }), pinOf(record), `${key} stays pinned`);
   }
   assert.notEqual(pinOf({ ...record, moved_from: "x" }), "", "a record with the line still pins");

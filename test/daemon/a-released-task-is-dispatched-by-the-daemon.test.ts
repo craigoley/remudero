@@ -354,7 +354,10 @@ test("W1-T10348: the judge pins an operator release over a settled escalation", 
   assert.deepEqual(released.report.proceeded, ["W1-T9700"], "the release is pinned on the record");
   assert.equal(landing.lands(), 2);
   assert.equal(onMain().risk_ruling?.verdict, "operator");
-  assert.equal(onMain().verify, "auto");
+  // W1-T12224: the release pins a dispatch authorization on the record; the verification mode it was
+  // approved at is left exactly as the operator read it, and releasedIds is what admits it.
+  assert.equal(onMain().verify, "human");
+  assert.equal(onMain().risk_ruling?.operator_release_pin, operatorReleasePin(onMain()));
 
   // While the checkout still lags, the landed release settles once and then stays quiet (W1-T5406).
   const lagging = await pass(LATER, ["W1-T9700"]);

@@ -80,22 +80,26 @@ function landingOnto(main: string) {
 }
 
 const low = async (): Promise<RiskJudgeVerdict> => ({ verdict: "low", confidence: 0.95, reasons: ["a docs remedy"] });
+/** A verdict the policy parks: it lands an ESCALATE, which leaves the record at verify: human. */
+const high = async (): Promise<RiskJudgeVerdict> => ({ verdict: "high", confidence: 0.95, reasons: ["touches a security gate"] });
 
 interface Pass {
   stateDir: string;
   clock: Clock;
   released?: string[];
+  /** The judge's own verdict for this pass; absent, the `low` proceed above. */
+  riskJudge?: () => Promise<RiskJudgeVerdict>;
 }
 
 /** One pass over the daemon's STALE checkout, landing onto `main`. */
 function judge(stale: string, landing: ReturnType<typeof landingOnto>) {
-  return async ({ stateDir, clock, released }: Pass) => {
+  return async ({ stateDir, clock, released, riskJudge }: Pass) => {
     const logs: { step: string; extra?: Record<string, unknown> }[] = [];
     for (const id of released ?? []) recordOperatorRelease(stateDir, loadPlan(join(stale, "plan", "tasks.yaml")).byId.get(id)!, clock.iso());
     const p: MachineJudgePorts = {
       stateDir,
       plan: () => loadPlan(join(stale, "plan", "tasks.yaml")),
-      riskJudge: low,
+      riskJudge: riskJudge ?? low,
       openWorkspace: landing.openWorkspace,
       prState: () => "merged",
       stageProposal: () => undefined,
@@ -171,11 +175,14 @@ test("an operator-released ruling that differs from main in any field but judged
     for (const d of edited.dirs) rmSync(d, { recursive: true, force: true });
   }
 
-  // A machine verdict on main: the operator's release replaces it.
+  // A machine verdict on main: the operator's release replaces it. W1-T12224 binds the record's verify
+  // to the release pin, and the judge's own PROCEED moves main's copy to verify: auto — a contract the
+  // operator never approved, which the pin check then refuses before landing. So the machine verdict
+  // this case lands on main is an ESCALATE, which leaves verify: human exactly as the approval read it.
   const machine = fixture("operator-release-verdict");
   try {
-    await machine.pass({ stateDir: machine.stateDir, clock: EARLIER });
-    assert.equal(loadPlan(join(machine.main, "plan", "tasks.yaml")).byId.get("W1-T9600")!.risk_ruling?.verdict, "low");
+    await machine.pass({ stateDir: machine.stateDir, clock: EARLIER, riskJudge: high });
+    assert.equal(loadPlan(join(machine.main, "plan", "tasks.yaml")).byId.get("W1-T9600")!.risk_ruling?.verdict, "high");
     const released = await machine.pass({ stateDir: machine.stateDir, clock: LATER, released: ["W1-T9600"] });
     assert.deepEqual(released.report.proceeded, ["W1-T9600"]);
     assert.deepEqual(released.report.settled, []);

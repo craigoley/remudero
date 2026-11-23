@@ -1,14 +1,22 @@
 /**
  * An operator release (`rmd approve`) bypasses the judge's `declined` map, because a release is the
- * operator's own bit and must always be honoured. A release whose `verify: auto` rewrite the linter
- * refuses (a ruling-shaped record: it declares DECISIONS.md, which ruling-verify keeps at
- * `verify: human`) was therefore refused and re-rendered every pass: W1-T5717 was released 2026-10-13
- * and ledgered ~515 identical `machine_judge.refused` rows in a day, each pass opening and disposing a
- * landing worktree and counting as found work, so the judge's pacing never widened.
+ * operator's own bit and must always be honoured. A release the rewrite refuses was therefore refused
+ * and re-rendered every pass: W1-T5717 was released 2026-10-13 and ledgered ~515 identical
+ * `machine_judge.refused` rows in a day, each pass opening and disposing a landing worktree and
+ * counting as found work, so the judge's pacing never widened.
  *
  * These tests pin the repair: the first pass refuses the release once, stages one inbox proposal that
  * says why, and marks the row as an operator release; an unchanged record is then not rendered again,
  * opens no workspace and is not found work; an edited record (a new pin) is taken again.
+ *
+ * W1-T12224 CHANGED WHICH REFUSAL CAN DRIVE THAT. The original fixture was refused BY THE LINTER: the
+ * release rewrote a ruling-shaped record (it declares DECISIONS.md, which ruling-verify keeps at
+ * `verify: human`) to `verify: auto`, and lint then blocked the rewrite. An operator release no longer
+ * touches the `verify:` line, so no lint check it can introduce fires at `verify: human` and that arm
+ * is unreachable for a release (test/an-operator-release-preserves-the-verify-field.test.ts pins the
+ * record landing instead). The record below therefore keeps its ruling-shaped `files:` and drives the
+ * refusal the renderer still has: a `verify:` value on its own continuation line, valid YAML the plan
+ * loads and the rewrite cannot place. The file name keeps the history of the measured incident.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -35,7 +43,8 @@ const CLOCK = fixedClock(1790980000000);
 const ID = "W1-T9601";
 const SHARD = `plan/tasks.d/${ID}-x.yaml`;
 
-/** An operator-filed ruling-shaped record: it declares DECISIONS.md, so it must stay verify: human. */
+/** An operator-filed ruling-shaped record (it declares DECISIONS.md, so it must stay verify: human)
+ *  whose verify value sits on its own continuation line: the rewrite cannot place it and refuses. */
 function rulingShard(title: string): string {
   return [
     `- id: ${ID}`,
@@ -43,7 +52,8 @@ function rulingShard(title: string): string {
     "  repo: remudero",
     "  depends_on: []",
     "  type: implement",
-    "  verify: human  # ruling-verify: it stamps the status of an operator ruling",
+    "  verify:",
+    "    human",
     "  priority: 3",
     "  files: [DECISIONS.md, test/every-decisions-entry-carries-a-status.test.ts]",
     "  status: queued",
@@ -88,7 +98,7 @@ function fixture(prefix: string) {
   return { root, stateDir, pass, approve, workspaces: () => workspaces, proposals, dirs: [root, stateDir] };
 }
 
-test("an operator release the linter refuses is refused once and staged as one inbox proposal", async () => {
+test("an operator release the renderer refuses is refused once and staged as one inbox proposal", async () => {
   const f = fixture("release-refused-once");
   try {
     const before = readFileSync(join(f.root, SHARD), "utf8");
@@ -99,11 +109,11 @@ test("an operator release the linter refuses is refused once and staged as one i
     const row = first.logs.find((l) => l.step === "machine_judge.refused");
     assert.equal(row?.extra?.task_id, ID);
     assert.equal(row?.extra?.operator_release, true);
-    assert.match(String(row?.extra?.reason), /ruling-verify|DECISIONS\.md/);
+    assert.match(String(row?.extra?.reason), /has no verify: line/);
     assert.equal(f.proposals.length, 1);
     assert.equal(f.proposals[0]!.id, `machine-judge-release:${ID}`);
     assert.match(f.proposals[0]!.summary, new RegExp(`rmd approve ${ID}`));
-    assert.match(f.proposals[0]!.summary, /DECISIONS\.md/);
+    assert.match(f.proposals[0]!.summary, /has no verify: line/);
     assert.equal(readFileSync(join(f.root, SHARD), "utf8"), before, "the record is not rewritten");
 
     const state = JSON.parse(readFileSync(join(f.stateDir, MACHINE_JUDGE_STATE_FILE), "utf8")) as {
@@ -118,7 +128,7 @@ test("an operator release the linter refuses is refused once and staged as one i
   }
 });
 
-test("an unchanged released record the linter refused is not re-rendered and opens no workspace", async () => {
+test("an unchanged released record the renderer refused is not re-rendered and opens no workspace", async () => {
   const f = fixture("release-refused-not-rerendered");
   try {
     await f.pass();
