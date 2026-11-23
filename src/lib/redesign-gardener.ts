@@ -247,10 +247,13 @@ type Parsed =
 export function parseRedesignAnswer(text: string): Parsed {
   const line = text.split("\n").find((l) => l.trim().startsWith("REDESIGN:"));
   if (line === undefined) return { verdict: "unparseable", reason: "no REDESIGN: line" };
-  let value: Record<string, unknown>;
-  try { value = JSON.parse(line.trim().slice("REDESIGN:".length)) as Record<string, unknown>; }
+  let decoded: unknown;
+  try { decoded = JSON.parse(line.trim().slice("REDESIGN:".length)); }
   catch (error) { return { verdict: "unparseable", reason: `REDESIGN: is not JSON (${String(error)})` }; }
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return { verdict: "unparseable", reason: "REDESIGN: needs a JSON object" };
+  if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) {
+    return { verdict: "unparseable", reason: "REDESIGN: needs a JSON object" };
+  }
+  const value = decoded as Row;
   const reason = typeof value.reason === "string" ? value.reason.trim() : "";
   if (value.verdict === "grill") return { verdict: "grill", reason: reason || "no reason given" };
   if (value.verdict === "retire") {
