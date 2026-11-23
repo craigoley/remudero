@@ -43,7 +43,7 @@ import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/moun
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure, type ReviewAdmission } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -102,6 +102,16 @@ function repeatedFlagValues(rest: string[], flag: string): string[] {
     if (rest[i] === flag) values.push(rest[++i]!);
   }
   return values;
+}
+
+/** W1-T12152: the review lane's prompt template — {@link buildReviewPrompt} and {@link reviewerVerdictContract} over a
+ *  placeholder task with one criterion, every task, PR and evidence slot a named marker. It is rendered before any task
+ *  text is filled in, so two PRs reviewed under one contract record one prompt revision. */
+export function reviewPromptTemplate(): string {
+  return buildReviewPrompt({ task: { id: "${TASK_ID}", acceptance: [{ claim: "${CLAIM}", proof: "${PROOF}" }] },
+    prUrl: "${PR_URL}", owner: "${OWNER}", repo: "${REPO}", headSha: "${HEAD_SHA}", evidencePath: "${EVIDENCE_PATH}",
+    proofEvidencePath: "${PROOF_EVIDENCE_PATH}", declaredFiles: ["${DECLARED_PATH}"], changedFiles: ["${CHANGED_PATH}"],
+    widenedFiles: [] }) + "\n" + reviewerVerdictContract(1);
 }
 
 export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId" | "excludeProviders" | "planLintRetryHead"> {
@@ -970,6 +980,8 @@ export async function runReview(host: ReviewCommandHost, args: {
    * call sites supply it immediately before posting; test-only direct calls retain their existing
    * isolated status-poster contract. */
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
+  /** W1-T12227: the path that admitted this review, named on `review.refused_after_finished_review`. */
+  admission?: ReviewAdmission;
 }): Promise<ReviewRunResult> {
   const phases: Record<string, number> = { started: systemClock.now() };
   // W1-T11149: the phase reaches the CPU bound (setup, proofs) or the provider bound (judge, posting), in process or as a child.
@@ -1374,6 +1386,8 @@ export async function runReview(host: ReviewCommandHost, args: {
           }) +
           "\n" +
           reviewerVerdictContract(criteria.length);
+        // W1-T12152: the assignment's prompt revision hashes this template, never the filled prompt above.
+        const promptTemplate = reviewPromptTemplate();
         const stopTelemetry = args.workerTelemetry?.startPolling();
         let reviewer: WorkerResult;
         const reviewerClockBoundMs =
@@ -1425,6 +1439,7 @@ export async function runReview(host: ReviewCommandHost, args: {
                 ...reviewerClockBound,
                 onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
                 streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
+                promptTemplate,
                 prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
               }),
             );
@@ -1495,6 +1510,7 @@ export async function runReview(host: ReviewCommandHost, args: {
               sandboxReadRoots: snapshot.dependencyReadRoots,
               runId: args.runId, taskId: task.id,
               clockBound: { boundMs: Math.min(reviewerClockBoundMs, 60_000) },
+              promptTemplate,
               prompt,
             }));
             assertReviewerSnapshotIntegrity(host, snapshot.cwd, headSha);
@@ -1783,6 +1799,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     reviewEngineRevision: REVIEW_ENGINE_REVISION,
     evaluatorProvenance,
     reviewerCodeFreshness,
+    finishedReview: { admission: args.admission ?? "direct", reviewerMs: phases.postStart - phases.started },
     fetchLifecycle: () => fetchPrLifecycleAsync(prUrl),
     readRequiredContexts: readRequiredStatusCheckContextsAsync,
     cannotEvaluateEscalation: (e, issues) => tryEscalate(task.catalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath: args.ledgerPath, runId: args.runId }),
@@ -2990,6 +3007,13 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       reason: startFreshness.reason,
     });
   }
+  // W1-T12227: a fresh-tree child stale at its own start ends before its pending status and its reviewer; its gate retries.
+  if (!shadow && deps.reviewStartFreshness === undefined && startFreshness?.status === "stale") {
+    console.error(`rmd review: reviewer code ${startFreshness.codeSha.slice(0, 12)} is behind origin/main ` +
+      `${startFreshness.originMainSha.slice(0, 12)} at its own start; no pending status and no reviewer`);
+    exit.as("reviewer-stale-at-start");
+    return 2;
+  }
   const publicationFreshness = reviewerFreshnessForPublication(startFreshness, reviewerCodeFreshnessDep);
   let claimHeld: string | undefined;
   if (!shadow) try {
@@ -3153,6 +3177,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
           // the documented fallback (criterion 5) — never silent.
           headCheckoutDir: worktreePath,
           reviewerCodeFreshness: publicationFreshness,
+          admission: deps.reviewStartFreshness !== undefined ? "start-gate" : deps.judgeAtOwnStart === true ? "fresh-tree-child" : "operator",
           prCreatedAt: view.createdAt,
           readReviewStatusHistory: deps.readReviewStatusHistory,
           // The three base facts, threaded by NAME so a reader (and test/preexisting-proof-hits-wiring)
@@ -3287,9 +3312,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   if (cappedHoldWithheld && !(overrideBy && overrideReason) && cappedWordingApplies(verdict)) {
     console.log(cappedOverrideHint(view.number));
   }
-  // W1-T12226: main moved between the cut of this child's tree and its start; its gate retries in a newer tree.
-  const staleAtOwnStart = deps.reviewStartFreshness === undefined && startFreshness?.status === "stale";
-  if (verdict.verdictWithheld) exit.as(staleAtOwnStart ? "reviewer-stale-at-start" : "verdict-not-posted");
+  if (verdict.verdictWithheld) exit.as("verdict-not-posted");
   if (verdict.verdictWithheld) return 2;
 
   if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(host, source, subjectRepoDir)) {

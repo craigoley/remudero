@@ -70,12 +70,19 @@ export interface PlanTaskMoveMemory {
   standDownTicks?: number;
   lastStep?: { side: Side; number: number };
   answer?: { key: string; run: MoveRun };
+  /** W1-T14536: the tick in flight: the phase it is in, set before each awaited port, and when it started; cleared
+   *  when it settles. The daemon's plan.move.tick_in_flight row names the phase. */
+  inFlight?: { phase: PlanTaskMovePhase; startedAtMs?: number };
 }
+/** Where a tick is: reading the switch, both heads, the last step's pull request, the dry run, or the apply. */
+export type PlanTaskMovePhase = "switch" | "heads" | "last_step" | "dry_run" | "apply";
 export interface PlanTaskMover { ports: PlanTaskMovePorts; memory: PlanTaskMoveMemory }
 export interface PlanTaskMoveTickInputs {
   /** The daemon's own ops dispatch hold this iteration, or undefined while ops dispatch is not held. */
   opsDispatchHold: string | undefined;
   log: (step: string, fields: Json) => void;
+  /** W1-T14536: the daemon clock's reading as it starts this tick; the in-flight row's age counts from it. */
+  startedAtMs?: number;
 }
 export type PlanTaskMoveTickOutcome = { outcome: "off" } | { outcome: "stand_down"; reason: string; detail?: string }
   | { outcome: "step"; step: string };
@@ -144,6 +151,10 @@ export async function runPlanTaskMoveTick(inputs: PlanTaskMoveTickInputs, mover:
     }
     return { outcome: "stand_down", reason, ...(detail === undefined ? {} : { detail }) };
   };
+  const inFlight: NonNullable<PlanTaskMoveMemory["inFlight"]> = { phase: "switch",
+    ...(inputs.startedAtMs === undefined ? {} : { startedAtMs: inputs.startedAtMs }) };
+  memory.inFlight = inFlight;
+  const enter = (phase: PlanTaskMovePhase) => { inFlight.phase = phase; };
   try {
     const sw = ports.readSwitch();
     if (sw.move.outcome === "off") { memory.standDown = undefined; return { outcome: "off" }; }
@@ -152,9 +163,11 @@ export async function runPlanTaskMoveTick(inputs: PlanTaskMoveTickInputs, mover:
     if (sw.dispatch.outcome === "unavailable") return standDown("ops_dispatch_unavailable", sw.dispatch.reason);
     if (sw.dispatch.repository !== sw.move.repository) return standDown("move_switch_unavailable", "selection_changed");
     let pin: MovePin;
+    enter("heads");
     try { pin = await ports.readHeads({ repository: sw.move.repository, checkoutDir: sw.move.checkoutDir }); }
     catch (error) { const failed = failureOf(error); return standDown("heads_unreadable", failed); }
     if (memory.lastStep) {
+      enter("last_step");
       const last = await lastStepState(ports, pin, memory.lastStep);
       if (last.state !== "landed" && last.state !== "closed") return standDown(last.state, last.detail);
       memory.lastStep = undefined;
@@ -162,6 +175,7 @@ export async function runPlanTaskMoveTick(inputs: PlanTaskMoveTickInputs, mover:
     }
     let dry = memory.answer?.key === pin.key ? memory.answer.run : undefined;
     if (dry === undefined) {
+      enter("dry_run");
       dry = await ports.move(pin, false);
       memory.answer = KEPT.has(String(dry.out.step)) ? { key: pin.key, run: dry } : undefined;
     }
@@ -177,6 +191,7 @@ export async function runPlanTaskMoveTick(inputs: PlanTaskMoveTickInputs, mover:
     }
     memory.answer = undefined;
     memory.standDown = undefined;
+    enter("apply");
     const ran = await ports.move(pin, true);
     const repository = text(ran.out.repository);
     const opened = ran.out.applied === true && typeof ran.out.pullRequest === "number" && repository !== undefined;
@@ -191,7 +206,15 @@ export async function runPlanTaskMoveTick(inputs: PlanTaskMoveTickInputs, mover:
   } catch (error) {
     const failed = failureOf(error);
     return standDown("tick_failed", failed);
+  } finally {
+    if (memory.inFlight === inFlight) memory.inFlight = undefined;
   }
+}
+
+/** W1-T14536: the phase of the tick in flight, read by the daemon's plan.move.tick_in_flight row; undefined once it
+ *  settles. It only reads the tick's memory. */
+export function planTaskMoveTickPhase(mover: PlanTaskMover): PlanTaskMovePhase | undefined {
+  return mover.memory.inFlight?.phase;
 }
 
 /** The daemon's ops catalog feed, read for its outcome only: the private plan never reaches the janitor. */

@@ -6,7 +6,7 @@
   verify: auto
   principles: {tdd: strict}
   risk: high
-  budget_usd: 60.00
+  budget_usd: 4.50
   origin: feedback#fb-dep-review-2c0184950469bc3f
   plan_refs: ["§7B", W1-T2705, W1-T108]
   files:

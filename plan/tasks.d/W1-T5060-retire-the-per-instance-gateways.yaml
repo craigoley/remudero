@@ -7,7 +7,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 25.00
+  budget_usd: 4.50
   risk: high
   band_meaning: span
   origin: "2026-10-01 core-console architecture Phase 4 design (P4-T3x (per-instance gateway)), arch-phase4-design.md"

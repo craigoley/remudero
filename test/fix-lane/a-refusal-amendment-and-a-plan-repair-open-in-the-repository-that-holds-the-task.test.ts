@@ -63,6 +63,9 @@ function fixture(t: TestContext, catalog: "public" | "ops", kinds: string[] | nu
     },
     planRepairGitImpl: (_file, args) => {
       git.push([...args]);
+      // The ops record is also on the ops main branch, where an ops refusal amendment reads it.
+      if (args[1] === opsDir && args.includes("ls-tree") && args.at(-1) === "plan/tasks.d/") return `${SHARD}\n`;
+      if (args[1] === opsDir && args.at(-1) === `fixture-sha:${SHARD}`) return yaml("ops");
       if (args.includes("rev-parse")) return args.at(-1) === "origin/main" ? "mainsha" : "fixture-sha";
       if (args.includes("hash-object")) return "fixture-blob";
       if (args.includes("write-tree")) return `tree-${root}-${args[1]}`;
