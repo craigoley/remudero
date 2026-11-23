@@ -11,7 +11,6 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendLedger } from "./ledger.js";
 import { parseTasksFromYaml } from "./plan.js";
-import { repoRoot } from "./repo-location.js";
 import { isTaskShardName } from "./task-shard-name.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { isTestRunner } from "./live-write-guard.js";
@@ -743,6 +742,9 @@ export function planTaskBenchmarkWork(planDir: string): BenchmarkTaskWorkReader 
 /** W1-T12152: a lane with the reader of its named task's record, for a caller that reads a plan other than the repository's. */
 export interface NonDispatchLane { lane: string; readTask: BenchmarkTaskWorkReader }
 
+/** The plan of the checkout this module runs from (src/lib/ -> the checkout root), read without repo-location's argv cost. */
+const harnessPlanDir = (): string => join(dirname(dirname(dirname(fileURLToPath(import.meta.url)))), "plan");
+
 const LANES_THAT_READ_THEIR_TASK: ReadonlySet<string> = new Set(["sweep-fix"]);
 
 type GuardrailAttempt = { signal: "relint-used" | "judge-retry"; attempt: number };
@@ -871,7 +873,7 @@ export function benchmarkNonDispatchSpawn(
 ): typeof spawnWorker {
   const lane = typeof laneOrReader === "string" ? laneOrReader : laneOrReader.lane;
   const readTask = typeof laneOrReader === "string"
-    ? (LANES_THAT_READ_THEIR_TASK.has(lane) ? planTaskBenchmarkWork(join(repoRoot, "plan")) : undefined)
+    ? (LANES_THAT_READ_THEIR_TASK.has(lane) ? planTaskBenchmarkWork(harnessPlanDir()) : undefined)
     : laneOrReader.readTask;
   return async (requested) => {
     // The host memory budget reserves (and learns) by class, and the lane names it: a caller's own class still wins.

@@ -1340,13 +1340,6 @@ export function createProbeVerdictCache(): ProbeVerdictCache {
 /** W1-T12152: the placeholder task the implement template is rendered over; every task slot is a named marker. */
 const IMPLEMENT_TEMPLATE_TASK = { id: "${TASK_ID}", title: "${TASK_TITLE}", prompt: "${TASK_BODY}" } as Task;
 
-/** W1-T12152: the implement lane's prompt template — {@link renderImplementPrompt} over a placeholder task, with every
- *  task, run and context slot a named marker, then the contract tail the real prompt ends with. It is rendered before
- *  any task text is filled in, so two tasks under one renderer and one contract record one prompt revision. */
-export function implementPromptTemplate(harnessOwnsGit: boolean, contractTail: string): string {
-  return `${renderImplementPrompt(IMPLEMENT_TEMPLATE_TASK, "${RECON}", "${RUN_ID}", "${MATCHED_LEARNINGS}", "${OPERATOR_NOTES}",
-    "${RULE_HEADLINES}", "${SKILLS}", harnessOwnsGit)}\n${contractTail}`;
-}
 
 export const IMPLEMENT_REFUSAL_REPORT_CONTRACT = [
   "",
@@ -8853,3 +8846,10 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
   }
 } // ── end runTaskBody
 
+/** W1-T12152: the implement lane's prompt template — {@link renderImplementPrompt} over a placeholder task, with every
+ *  task, run and context slot a named marker, then the contract tail the real prompt ends with. It is rendered before
+ *  any task text is filled in, so two tasks under one renderer and one contract record one prompt revision. */
+export function implementPromptTemplate(harnessOwnsGit: boolean, contractTail: string): string {
+  return `${renderImplementPrompt(IMPLEMENT_TEMPLATE_TASK, "${RECON}", "${RUN_ID}", "${MATCHED_LEARNINGS}", "${OPERATOR_NOTES}",
+    "${RULE_HEADLINES}", "${SKILLS}", harnessOwnsGit)}\n${contractTail}`;
+}
