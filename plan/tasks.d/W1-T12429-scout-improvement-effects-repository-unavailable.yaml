@@ -3,29 +3,39 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
-  risk: low
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
+  risk: high # Raised 2026-11-23: the scope amendment spans 2 concerns (Rule 19)
   priority: 1.47
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-11-23T05:25:03.271Z
   attempts: 0
   author_class: machine
   origin: "scout:improvement_effects.repository_unavailable"
   files:
     - src/lib/opportunity-outcomes.ts
+    - test/inbox/improvement-thread.test.ts
     - test/triage/scout-improvement-effects-repository-unavailable.test.ts
   acceptance:
     - claim: "improvement_effects.repository_unavailable stops recurring: its cause is fixed rather than its rows hidden"
       proof: "grep: test(\"W1-T12429: improvement_effects.repository_unavailable no longer recurs\" in test/triage/scout-improvement-effects-repository-unavailable.test.ts"
   note: "Filed by the scout gardener (W1-T5454). The scout measures this step again once the build merges and credits or debits its class by whether the rows stopped. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person."
+  amendment: |
+    2026-11-23, scope: test/inbox/improvement-thread.test.ts joins files:. The cause of the recurring row is
+    the evidence pass's own 2 MiB read bound on the native Inbox registry: production's registry is about
+    2.45 MB (W1-T13202), so every pass reports the repository unavailable. The fix reads that file at
+    INBOX_GARDENER_SOURCE_LIMITS.registryBytes (8 MiB), the bound the Inbox gardener already applies to the
+    same file. That suite's guard pads a registry past 2 MiB and expects a refusal, so its case moves past
+    8 MiB; an oversized registry is still refused (#20378). The operator approved raising the bound
+    (2026-11-23 03:10Z). No acceptance change.
   rationale: |
     The ledger step improvement_effects.repository_unavailable carries a failure shape and landed rows in both halves of the trailing 7 days: 108 in the older half, 135 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file; tracked source literals locate this step in: src/lib/opportunity-outcomes.ts. Start there.
   risk_ruling:
-    verdict: "rule-3-low-privilege"
-    action: proceed
-    confidence: 1
+    verdict: "high"
+    action: escalate
+    confidence: 0.94
     reasons:
-      - "rule 3 (live and low-privilege): the symptom is live, 243 occurrence(s) across 7 day(s), last seen 2026-11-12T21:14:22.086Z, and the record declares no privileged path"
-    judged_at: "2026-11-12T23:04:01.402Z"
-    pin: "24220cef50499bfbedcf40d2f995a13f0ad4c8812c83ffb48df7674b4b047922"
+      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The filing reports 243 occurrences and identifies a source file by a matching literal. It supplies no evidence of the underlying cause, so the basis for a cause-specific repair cannot be verified from the record.; on the change's description/files alone, no diff was read — The sole automated acceptance proof greps for a test title. That check can verify the title’s presence, while the stated acceptance criterion requires evidence that the cause was fixed and the symptom stops recurring."
+    judged_at: "2026-11-23T04:15:50.608Z"
+    pin: "8839fa973c9252e753ae61675b40cb3657d85223411ed2b5ba21894432b1008f"

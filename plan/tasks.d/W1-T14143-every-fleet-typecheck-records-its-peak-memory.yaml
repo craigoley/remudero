@@ -17,7 +17,7 @@
     - src/lib/commit-message.ts
     - src/lib/worker-provider.ts
     - test/ci/gates/every-fleet-typecheck-records-its-peak-memory.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-11-21 12:49Z on the Azure host (read-only): load 216/215/171, 43 tasks in D state, memory PSI some

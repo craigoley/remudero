@@ -332,7 +332,8 @@ interface OwnTailRung {
   startTypicalMib: number;
   startTailMib: number;
   otherClaimsChargedMib: number;
-  /** MemAvailable less the daemons' typical growth, the cold-start reserve, every typical claim and the margin. */
+  /** MemAvailable less the daemons' typical growth, the cold-start reserve, every typical claim, every validating tree's
+   *  tail (W1-T14155) and the margin. */
   typicalHeadroomMib: number | null;
 }
 
@@ -341,7 +342,7 @@ function ownTailRung(root: string, inputs: ShadowInputs, verdict: ShadowVerdict,
   const n = verdict.numbers;
   const startTypicalMib = Math.min(inputs.start.typicalMib ?? inputs.start.estimateMib, inputs.start.estimateMib);
   const typicalHeadroomMib = n.memAvailableMib === null ? null
-    : n.memAvailableMib - n.daemonGrowthTypicalMib - n.coldStartReserveMib - n.hostTypicalMib - n.marginMib;
+    : n.memAvailableMib - n.daemonGrowthTypicalMib - n.coldStartReserveMib - n.hostTypicalMib - n.validatingTailsMib - n.marginMib;
   const rung: OwnTailRung = { startTypicalMib, startTailMib: n.hostTailMib,
     otherClaimsChargedMib: Math.max(0, n.hostTypicalMib - startTypicalMib), typicalHeadroomMib };
   const blocked = (block: OwnTailBlock): OwnTailRung => ({ ...rung, block });

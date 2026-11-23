@@ -275,6 +275,7 @@ export interface CodexModelDecisionOption {
 
 export interface CodexModelDecision {
   requestedCapability: CodexModelTier;
+  capabilityOverride?: { from: CodexModelTier; reason: "fix-economy-first" };
   requestedEffort: string;
   mappedCandidates: string[];
   options: CodexModelDecisionOption[];
@@ -931,6 +932,18 @@ export function codexCapabilityForRequestedModel(
   return isCodexModelTier(capability) ? capability : "balanced";
 }
 
+export function codexCapabilityBelow(capabilities: CapabilityLadder | undefined, model: string): CodexModelTier | undefined {
+  if (!capabilities) return undefined;
+  const rank = capabilities.ladder[codexCapabilityForRequestedModel(capabilities, model)]!;
+  let below: CodexModelTier | undefined;
+  for (const [tier, candidateRank] of Object.entries(capabilities.ladder)) {
+    if (isCodexModelTier(tier) && candidateRank < rank && (below === undefined || candidateRank > capabilities.ladder[below]!)) {
+      below = tier;
+    }
+  }
+  return below;
+}
+
 /** Why {@link resolveCodexCapability} fell back to "balanced" for this request. Exactly one member today: the two OTHER
  *  ways a request can land on "balanced" — a genuinely unmapped model, or `requestedModel` itself being absent — are the
  *  documented default and carry no reason at all (W1-T3097). */
@@ -1506,12 +1519,13 @@ export function selectCodexModel(
   capabilities?: CapabilityLadder,
   policy: { preferredModel?: CodexModelPreference; reservePercent?: number;
     switchback?: { window: VersionSwitchbackWindow; taskId: string; at: string };
-    headroomTiming?: ProviderHeadroomTiming } = {},
+    headroomTiming?: ProviderHeadroomTiming; codexCapability?: CodexModelTier } = {},
 ): ProviderCapacity {
   const reading = rateLimits && typeof rateLimits === "object" ? rateLimits as CodexRateLimitResult : {};
   const visible = [...visibleCodexModels(models).values()];
   const forced = config.workerProviders?.codexModel;
-  const { tier, fallbackReason: capabilityFallbackReason } = resolveCodexCapability(capabilities, requestedModel);
+  const { tier: mountTier, fallbackReason: capabilityFallbackReason } = resolveCodexCapability(capabilities, requestedModel);
+  const tier = policy.codexCapability ?? mountTier;
   const preferred = forced
     ? [forced]
     : [...(config.workerProviders?.codexModels?.[tier] ?? codexCandidatesForCapability(capabilities, tier, requestedEffort))];
@@ -1589,6 +1603,7 @@ export function selectCodexModel(
   selected ??= eligible[0];
   const decisionBase: CodexModelDecision = {
     requestedCapability: tier,
+    ...(tier !== mountTier ? { capabilityOverride: { from: mountTier, reason: "fix-economy-first" } } : {}),
     requestedEffort: requestedEffortLabel,
     mappedCandidates,
     options,
@@ -1691,6 +1706,8 @@ export interface CodexCapacityDeps {
   timeoutMs?: number;
   requestedModel?: string;
   requestedEffort?: string;
+  /** A first fix round probes the tier below the mount's own. */
+  codexCapability?: CodexModelTier;
   /** Process environment used only for PATH resolution of an unconfigured Codex binary. */
   resolveEnv?: NodeJS.ProcessEnv;
   /** Bypass the routing cache at an attribution boundary. */
@@ -2143,7 +2160,8 @@ function selectCodexRuntime(
     : undefined;
   const requestedEffort = pooledRoute?.effort ?? deps.requestedEffort;
   const preferredModel = pooledRoute
-    ? { capability: resolveCodexCapability(capabilities, deps.requestedModel).tier, effort: pooledRoute.effort, model: pooledRoute.model }
+    ? { capability: deps.codexCapability ?? resolveCodexCapability(capabilities, deps.requestedModel).tier,
+      effort: pooledRoute.effort, model: pooledRoute.model }
     : deps.preferredModel;
   const read = deps.selectedModel
     ? selectCodexAttributionModel(value.models, value.rateLimits, deps.selectedModel)
@@ -2151,6 +2169,7 @@ function selectCodexRuntime(
       preferredModel,
       reservePercent: deps.reservePercent,
       switchback: deps.switchback,
+      codexCapability: deps.codexCapability,
       ...(deps.headroomTiming ? { headroomTiming: deps.headroomTiming } : {}),
     });
   const capacity: ProviderCapacity = !deps.selectedModel && !read.readable && !read.exhausted

@@ -208,20 +208,21 @@ test("W1-T14345 criterion 2: the janitor picks open records first, oldest filing
   const outcome = await runPlanTaskMoveTick({ opsDispatchHold: undefined, log: (step, data) => { rows.push({ step, data }); } }, mover);
   assert.deepEqual(outcome, { outcome: "step", step: "copy" }, JSON.stringify(rows));
   const [copy] = w.pulls;
-  assert.deepEqual(receiptIds(copy!, "Remudero-Move-Copy:"), ["W1-T5", "W1-T9", "W1-T2"], "THE CLAIM: open records, oldest filing first");
-  assert.deepEqual(rows.find(row => row.step === "plan.move.janitor_step")?.data.task_ids, ["W1-T5", "W1-T9", "W1-T2"], "the step row names every task it carried");
+  assert.deepEqual(receiptIds(copy!, "Remudero-Move-Copy:"), ["W1-T5", "W1-T6", "W1-T9", "W1-T2"], "THE CLAIM: open records (a verify:human one included, W1-T14425), oldest filing first");
+  assert.deepEqual(rows.find(row => row.step === "plan.move.janitor_step")?.data.task_ids, ["W1-T5", "W1-T6", "W1-T9", "W1-T2"], "the step row names every task it carried");
   for (const id of ["W1-T7", "W1-T8"]) assert.ok(!copy!.files.includes(shard(id)), `${id} is history: never picked`);
-  assert.ok(!copy!.files.includes(shard("W1-T6")), "a verify:human record stays (its release is pinned to the public contract)");
+  // W1-T14425 replaces the W1-T14345 contract that kept a verify:human record public: its release survives the move (W1-T14408).
+  assert.ok(copy!.files.includes(shard("W1-T6")), "a verify:human record is carried like any other open record");
   assert.equal(dry.out.step, "copy");
-  assert.deepEqual(dry.out.ids, ["W1-T5", "W1-T9", "W1-T2"], "the dry run admits the same batch, in the same order");
+  assert.deepEqual(dry.out.ids, ["W1-T5", "W1-T6", "W1-T9", "W1-T2"], "the dry run admits the same batch, in the same order");
 
   // The whole catalog drained of its open records, the merged and done ones stay public, through the janitor alone.
   for (let round = 0; round < 6 && w.pulls.some(pr => pr.state === "OPEN"); round++) {
     w.merge(w.pulls.find(pr => pr.state === "OPEN")!);
     await runPlanTaskMoveTick({ opsDispatchHold: undefined, log: () => undefined }, mover);
   }
-  assert.ok(["W1-T5", "W1-T9", "W1-T2"].every(id => w.holds("ops", id) && !w.holds("public", id)));
-  assert.ok(["W1-T7", "W1-T8", "W1-T6"].every(id => w.holds("public", id) && !w.holds("ops", id)), "history and verify:human stay public");
+  assert.ok(["W1-T5", "W1-T6", "W1-T9", "W1-T2"].every(id => w.holds("ops", id) && !w.holds("public", id)));
+  assert.ok(["W1-T7", "W1-T8"].every(id => w.holds("public", id) && !w.holds("ops", id)), "history stays public");
   const rest = await w.run(false);
   assert.equal(rest.out.step, "complete");
 });

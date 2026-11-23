@@ -858,6 +858,20 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   const fromRows = keepAll && opts.deriveFromRows === true;
   // W1-T6467: this projection's own table, dropped with it; each views worker isolate builds its own.
   const strings = opts.internStrings === false ? undefined : new Map<string, string>();
+  /** W1-T14431: how many kept rows hold each interned value, so a compaction forgets a value without walking every row. */
+  const stringRefs = new Map<string, number>();
+  function countStrings(row: Row, delta: 1 | -1): void {
+    if (!strings) return;
+    for (const value of Object.values(row)) {
+      if (typeof value !== "string" || value.length > BOARD_INTERN_MAX_CHARS) continue;
+      const n = (stringRefs.get(value) ?? 0) + delta;
+      if (n > 0) stringRefs.set(value, n);
+      else {
+        stringRefs.delete(value);
+        strings.delete(value);
+      }
+    }
+  }
   db.exec(BOARD_PROJECTION_DDL);
   const unread = [...BOARD_UNREAD_STEPS];
   const unreadSql = unread.map(() => "?").join(", ");
@@ -1133,7 +1147,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     }
     kept.get(row)!.bytes = bytes;
     keptBytes += bytes;
-    if (strings) internRowStrings(row, strings);
+    if (strings) {
+      internRowStrings(row, strings);
+      countStrings(row, 1);
+    }
     touched();
   }
 
@@ -1226,17 +1243,10 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     }
     rows.length = to;
     rowTsMs.length = to;
+    // W1-T9436: the table keeps only the kept rows' values; W1-T14431 forgets them by count, from the dropped rows alone.
+    for (const row of dropped) countStrings(row, -1);
     dropped.clear();
     touched();
-    // W1-T9436: the table keeps only the kept rows' values; each is already the table's own copy, so identity holds.
-    if (strings) {
-      const values: string[] = [];
-      for (let at = 1; at < rows.length; at++) {
-        for (const value of Object.values(rows[at]!)) if (typeof value === "string" && value.length <= BOARD_INTERN_MAX_CHARS) values.push(value);
-      }
-      strings.clear();
-      for (const value of values) if (!strings.has(value)) strings.set(value, value);
-    }
   }
 
   function ingest(limit: number, deadline = Number.POSITIVE_INFINITY): { fresh: number; caughtUp: boolean } {

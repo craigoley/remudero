@@ -22,6 +22,23 @@
     - test/an-unfiled-pr-has-its-own-fix-and-escalation-identity.test.ts
     - test/daemon/an-interphase-review-pass-arms-a-ready-pr.test.ts
     - test/the-plan-queue-tends-itself.test.ts
+    - test/a-ready-pr-is-armed-and-its-review-admitted-on-the-next-light-pass.test.ts
+    - test/ledger/light-pass-merge-budget-uses-measured-interval.test.ts
+    - test/cost-anomaly.test.ts
+    - test/the-risk-judge-reads-the-shard-it-judges.test.ts
+    - test/stale-base-release-before-exhaustion.test.ts
+    - test/dispatch/dependency-main-identity.test.ts
+    - test/queue-governor.test.ts
+    - test/draft-pr-merge-hold.test.ts
+    - test/a-ready-plan-pr-merges-on-the-next-pass.test.ts
+    - test/cost-governor.test.ts
+    - test/daemon/a-freshness-exit-starts-no-new-sweep-and-ends-a-running-one-early.test.ts
+    - test/the-sweep-runs-the-risk-judge-on-a-handed-off-head.test.ts
+    - test/a-github-actions-incident-pauses-the-lanes-that-spend-ci.test.ts
+    - test/a-finished-plan-merge-frees-the-next-light-pass.test.ts
+    - test/automerge-hold.test.ts
+    - test/a-handed-off-head-judgment-is-started-once-and-awaited-by-a-one-shot-sweep.test.ts
+    - test/fix-lane/unfiled-scope-supervision.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -49,3 +66,11 @@
     reservation hand-off: run-unfiled-1795355533924 -> run-unfiled-1795355533924
     Filed by an operator session from read-only ledger and source evidence, 2026-11-22. Line numbers are at 51105aaa3.
     Pinning tests: the suites that call decideSweepArm or assert the fail-open are in files.
+    Amendment 2026-11-23 (hand build stopped before commit): readArmVerdictHistory (src/lib/sweep.ts) calls a
+    history complete only when it has at least one archive, and a test state directory has none. So the
+    refusal makes every sweep test that arms a green, reviewed PR without writing a review.posted row for its
+    head stand down instead of arming. 17 such suites, found by running 28 of the ~275 that share this setup,
+    are now in files:; more may exist. A builder should run the whole sweep test set once on the host and
+    give each arming fixture a review.posted row for its head (or a complete history), not loosen the rule:
+    the design and the-sweeps-arm-decision-reads-no-ledger-union-on-the-loop.test.ts line 199 both count an
+    archive-free history as unreadable.

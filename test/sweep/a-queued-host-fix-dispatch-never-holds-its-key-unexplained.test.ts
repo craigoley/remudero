@@ -154,18 +154,52 @@ test("W1-T13440 criterion 3: past the bound a later pass releases the key, ledge
   } finally { await f.cleanup(); }
 });
 
-test("W1-T13440 criterion 4: invariant:same-pass-race-unchanged — a key claimed with no recorded holder keeps the same-pass literal", async () => {
+test("a host launch without an admission callback names its age and keeps its claim past the queue bound", async () => {
   const f = rig({ reportsPending: false });
   try {
     const first = runSweep([pr()], f.deps);
     await untilAsked(f.asked, 1);
     f.advance(QUEUED_FIX_ADMISSION_RELEASE_MS * 2);
     await runSweep([pr()], f.deps);
-    assert.equal(String(f.disposed().at(-1)?.stand_down_reason),
-      `duplicate fix-dispatch key (${KEY}) already claimed this pass — a concurrent sweep is already dispatching this PR's fix rung`);
-    assert.deepEqual(f.aborts, [], "with no recorded holder there is nothing to release");
+    const disposed = f.disposed().at(-1);
+    assert.equal(disposed?.stand_down_reason,
+      `duplicate fix-dispatch key (${KEY}) is held by a fix child launch in progress for ${QUEUED_FIX_ADMISSION_RELEASE_MS * 2 / 1000}s`);
+    assert.equal(disposed?.in_flight_action, "fix-child-launch");
+    assert.equal(disposed?.in_flight_age_ms, QUEUED_FIX_ADMISSION_RELEASE_MS * 2);
+    assert.equal(f.asked.length, 1);
+    assert.deepEqual(f.aborts, [], "only a reported admission wait can be aborted");
     assert.equal(f.rows.some((r) => r.step === "sweep.fix.child_queued"), false);
+    assert.equal(f.rows.some((r) => r.step === "sweep.fix.child_admission_released"), false);
     f.waits[0]!.abandon();
     await first;
   } finally { await f.cleanup(); }
+});
+
+test("W1-T13440 criterion 4: invariant:same-pass-race-unchanged — an inline claim keeps the full fallback", async () => {
+  const f = rig({ reportsPending: false });
+  let enter!: () => void;
+  let settle!: () => void;
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  const settled = new Promise<void>(resolve => { settle = resolve; });
+  let dispatches = 0;
+  f.deps.detachFixWait = false;
+  f.deps.dispatchFix = async () => {
+    dispatches++;
+    enter();
+    await settled;
+  };
+  const first = runSweep([pr()], f.deps);
+  try {
+    await entered;
+    await runSweep([pr()], f.deps);
+    const disposed = f.disposed().at(-1);
+    assert.equal(disposed?.stand_down_reason,
+      `duplicate fix-dispatch key (${KEY}) already claimed this pass — a concurrent sweep is already dispatching this PR's fix rung`);
+    assert.equal(disposed?.in_flight_action, undefined);
+    assert.equal(dispatches, 1);
+    assert.deepEqual(f.asked, []);
+  } finally {
+    settle();
+    try { await first; } finally { await f.cleanup(); }
+  }
 });

@@ -8,7 +8,7 @@
  * It is the bounded archive executor shared by the CLI and the daemon compaction rung; it is
  * never a rotation-path dependency.
  */
-import { constants, copyFileSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, utimesSync } from "node:fs";
+import { closeSync, constants, copyFileSync, existsSync, fstatSync, linkSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, utimesSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 
@@ -32,6 +32,9 @@ export const LEDGER_COMPACT_MAX_SOURCES = 50;
  */
 export const LEDGER_COMPACT_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 const LEDGER_COMPACT_MAX_OLDER_THAN_DAYS = 36_500;
+const GZIP_ISIZE_BYTES = 4;
+// Ten header bytes, at least two DEFLATE bytes, and eight trailer bytes.
+const GZIP_MIN_BYTES = 20;
 const LEDGER_COMPACT_VALUE_FLAGS = ["--older-than", "--older-than-hours", "--max-sources"];
 /** An archive this many times the typical rotation's size is a previous pass's output (one pass
  *  merges up to {@link LEDGER_COMPACT_MAX_SOURCES} rotations; rotations are cut at one size). */
@@ -54,6 +57,8 @@ export interface LedgerCompactFs {
   gunzipSync: (content: Buffer, options?: { maxOutputLength?: number }) => Buffer;
   /** Bytes on disk. Absent, every archive is treated alike, as before W1-T4262. */
   sizeOf?: (path: string) => number;
+  /** Size from the last gzip member's trailer. Undefined when too short to read a trailer. */
+  gzipTrailerSizeOf?: (path: string) => number | undefined;
   /** Cold storage: a merged source is MOVED, never deleted, until its retention lapses. */
   mkdirSync?: (dir: string) => void;
   renameSync?: (from: string, to: string) => void;
@@ -117,6 +122,19 @@ const replaceArchiveIo: WriteAtomicIo = {
   renameSync: (...args) => realWriteAtomicIo.renameSync(...args),
 };
 
+function readGzipTrailerSize(path: string): number | undefined {
+  const fd = openSync(path, "r");
+  try {
+    const { size } = fstatSync(fd);
+    if (size < GZIP_MIN_BYTES) return undefined;
+    const tail = Buffer.alloc(GZIP_ISIZE_BYTES);
+    const bytes = readSync(fd, tail, 0, tail.length, size - tail.length);
+    return bytes === tail.length ? tail.readUInt32LE(0) : undefined;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 const realFs: LedgerCompactFs = {
   readdirSync: (dir) => readdirSync(dir),
   readFileSync: (path) => readFileSync(path),
@@ -126,6 +144,7 @@ const realFs: LedgerCompactFs = {
   gzipSync: (content) => gzipSync(content),
   gunzipSync: (content, options) => gunzipSync(content, options),
   sizeOf: (path) => statSync(path).size,
+  gzipTrailerSizeOf: readGzipTrailerSize,
   mkdirSync: (dir) => mkdirSync(dir, { recursive: true }),
   renameSync: (from, to) => renameSync(from, to),
   touch: (path, atMs) => utimesSync(path, atMs / 1000, atMs / 1000),
@@ -180,8 +199,7 @@ export function selectLedgerCompactionSources(
     return bytes;
   };
   // Repair a legacy oversized merged output before steady new rotations can starve it forever.
-  // The probe is bounded to one archive's ceiling plus one byte at a time. Once repaired, its
-  // smaller pieces no longer qualify and normal rotation-first scheduling resumes.
+  // Once repaired, smaller pieces no longer qualify and normal rotation-first scheduling resumes.
   const repair = decompressedSizeOf
     ? eligible.find((entry) => merged.has(entry.path) && measure(entry) > maxArchiveBytes)
     : undefined;
@@ -300,6 +318,8 @@ function decompressedSizeOf(fs: LedgerCompactFs, entry: LedgerCorpusEntry, maxAr
     if (entry.form === "plain") {
       return fs.sizeOf ? fs.sizeOf(entry.path) : fs.readFileSync(entry.path).byteLength;
     }
+    const trailerSize = fs.gzipTrailerSizeOf?.(entry.path);
+    if (trailerSize !== undefined) return trailerSize;
     const compressed = fs.readFileSync(entry.path);
     try {
       return fs.gunzipSync(compressed, { maxOutputLength: maxArchiveBytes + 1 }).byteLength;
@@ -312,12 +332,29 @@ function decompressedSizeOf(fs: LedgerCompactFs, entry: LedgerCorpusEntry, maxAr
   }
 }
 
+function readCompactionBody(fs: LedgerCompactFs, entry: LedgerCorpusEntry, log: (line: string) => void): Buffer {
+  const raw = fs.readFileSync(entry.path);
+  if (entry.form === "plain") return raw;
+  const trailerSize = raw.length >= GZIP_MIN_BYTES ? raw.readUInt32LE(raw.length - GZIP_ISIZE_BYTES) : undefined;
+  const trailer = trailerSize === undefined ? "trailer unavailable" : `trailer ${trailerSize} bytes`;
+  let body: Buffer;
+  try {
+    body = fs.gunzipSync(raw);
+  } catch (err) {
+    throw new Error(`${entry.path}: ${trailer}, inflated size unavailable — ${(err as Error)?.message ?? String(err)}`);
+  }
+  // Both ledger writers emit one member. The last member's size alone can undercount a hand-built archive.
+  if (trailerSize !== body.byteLength) {
+    log(`rmd ledger-compact: gzip size mismatch for ${entry.path} — ${trailer}, inflated ${body.byteLength} bytes`);
+  }
+  return body;
+}
+
 interface MeasuredArchive { size: number; mtimeMs: number; bytes: number; limit: number }
 
 /**
- * W1-T13371: measured decompressed sizes, kept for the life of the process. The daemon runs every compaction pass in
- * process, so a pass reuses what earlier passes measured. Nothing is written to the state dir: a pass that cannot
- * reduce still writes nothing.
+ * W1-T13371: measured decompressed sizes, kept for the life of the process. In-process callers can reuse earlier
+ * measurements. Nothing is written to the state dir: a pass that cannot reduce still writes nothing.
  */
 const measuredArchives = new Map<string, MeasuredArchive>();
 
@@ -554,8 +591,7 @@ function compactWindow({ mode, olderThanDays, maxSources, maxArchiveBytes, state
       readRows: (path) => {
         const entry = entryByPath.get(path);
         if (!entry) throw new Error(`selected source disappeared from the manifest: ${path}`);
-        const raw = fs.readFileSync(path);
-        const body = entry.form === "gzip" ? fs.gunzipSync(raw) : raw;
+        const body = readCompactionBody(fs, entry, log);
         const lines = body.toString("utf8").split("\n");
         // Kept to order a replacement after the outputs holding this source's rows, without a second read.
         sourceLines.set(path, lines);

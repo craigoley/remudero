@@ -319,13 +319,6 @@ const DECLARED: readonly Declared[] = [
   },
   {
     kind: "chmod",
-    file: "prune-liveness.test.ts",
-    key: "0o500",
-    count: 1,
-    reason: `no-write on a subdirectory so the reaper's rmSync throws EACCES. Root writes anyway. ${CHMOD_REMEDY}`,
-  },
-  {
-    kind: "chmod",
     file: "worker-home-poisoned-slot.test.ts",
     key: "0o500",
     count: 1,

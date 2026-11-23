@@ -400,7 +400,8 @@ test("W1-T13681 criterion 5: a tick cut off mid-step leaves a state the next tic
   assert.deepEqual(await hostTick(), { outcome: "stand_down", reason: "mover_pull_request_open" });
   pullRow = { state: "closed", merged: true, merge_commit_sha: head };
   assert.deepEqual(await hostTick(), { outcome: "step", step: "copy" }, "the landed step frees the next, through the same verb");
-  assert.deepEqual([...new Set(argv.git.map(args => args[0]))].sort(), ["cat-file", "fetch", "ls-remote", "merge-base"], "read-only git verbs");
+  assert.deepEqual([...new Set(argv.git.map(args => args[0]))].sort(), ["cat-file", "fetch", "ls-remote", "merge-base", "rev-parse"],
+    "read-only git verbs: the canned tracking ref names no commit, so the public side's fast-forward writes nothing");
   assert.ok(argv.git.filter(args => args[0] === "fetch").every(args => args.includes("--no-write-fetch-head")), "a fetch writes no FETCH_HEAD");
   assert.deepEqual(argv.gh, [["api", `repos/${OPS}/pulls/3`], ["api", `repos/${OPS}/pulls/3`]], "one direct REST read per tick, no write method");
   assert.equal(argv.exec.length, 4, "a dry run and an --apply step per step taken");

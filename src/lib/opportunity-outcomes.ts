@@ -22,6 +22,8 @@ import type { GardenerOverseerPorts, OpportunityMeasurement, productionGardenerO
 import { ghJson, ghJsonAsync } from "./github-transport.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { loadProposalRegistry, parseProposalRegistryResult } from "./inbox.js";
+import { INBOX_GARDENER_SOURCE_LIMITS } from "./inbox-gardener.js";
+import { readInboxGardenerFile } from "./inbox-retirement.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { opportunityKey, openOpportunityIntakePorts, productionOpportunityIntakePorts, type OpportunityCandidate, type OpportunityIntakePorts, type OpportunityWork } from "./opportunity-intake.js";
 import { loadCreditStore } from "./status.js";
@@ -582,11 +584,12 @@ export async function reconcileManagedImprovementEffects(input: {
       const intake: OpportunityIntakePorts = { repo: scope.repository, clock, standingDebtAnchor: "", readStandingDebt: forbidden,
         readCodeql: forbidden, readFriction: forbidden, riskJudge: async () => forbidden(), fileCandidate: async () => forbidden(), stageProposal: forbidden,
         readWork: () => {
-          const raw = readCodeHealthArtifactJson(join(nativeStateDir, "inbox-proposals.json"), 2 * 1024 * 1024), parsed = parseProposalRegistryResult(JSON.stringify(raw));
+          const parsed = parseProposalRegistryResult(readInboxGardenerFile(
+            join(nativeStateDir, "inbox-proposals.json"), INBOX_GARDENER_SOURCE_LIMITS.registryBytes,
+          ));
           if (parsed.kind !== "ok" || parsed.proposals.some(p => !p || typeof p.id !== "string" || typeof p.summary !== "string" || !Array.isArray(p.evidenceAnchors))) throw new Error("The native planning registry is unavailable or invalid.");
           const improvements = parsed.proposals.filter(p => p.improvement !== undefined);
           // The pass follows saved improvements; unrelated native producers do not consume its cap.
-          // The entire source still passes the unchanged 2 MiB read bound and row validation above.
           if (improvements.length > 512) throw new Error("The saved improvements exceed this evidence pass's bounded population.");
           return { proposals: improvements, tasks: loadPlan(options.planPath!).tasks, prs: [], mergedKeys: [], feedback: [] };
         } };

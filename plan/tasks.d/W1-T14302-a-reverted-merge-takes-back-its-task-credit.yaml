@@ -52,7 +52,7 @@
     - test/plan-reconcile-truncated-read-is-coverage-aware.test.ts
     - test/a-merged-tasks-dispatch-claim-is-released-by-the-daemon-tick.test.ts
     - test/the-tick-reads-run-off-the-event-loop.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:a-revert-takes-back-its-credit — projectPlan over a fixture main history where PR 101 (subject ends (#101), body Remudero-Task: W1-T1) is followed by a commit whose body says 'This reverts commit <sha of PR 101>' gives W1-T1 merged false, status queued and a revertedCredit field that names pr 101 and the revert sha. This holds when the credit comes from the durable credit store, from the PR body trailer, from the commit trailer and from a carried previous projection"

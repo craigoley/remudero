@@ -14,9 +14,9 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 test("migration preview excludes operator retirements before checking candidate merge credit", async t => {
   const root = ownedFixtureDir(t, "migration-preview-retirement").dir;
   const record = (id: string, priority: number) =>
-    `- id: ${id}\n  title: Fixture task ${id}\n  repo: remudero\n  type: implement\n  priority: ${priority}\n`;
+    `- id: ${id}\n  title: Fixture task ${id}\n  repo: remudero\n  type: implement\n  priority: ${priority}\n  verify: auto\n  risk: low\n  attempts: 0\n  acceptance:\n    - claim: the fixture holds\n      proof: \"grep: fixture in test/fixture.test.ts\"\n`;
   const eligible = "W1-T11";
-  const eligibleBytes = record(eligible, 0);
+  const eligibleBytes = record(eligible, 0) + "  status: queued\n";
   const retired = RETIREMENT_REASONS.map((reason, index) => ({
     id: `W1-T${index + 12}`,
     reason,

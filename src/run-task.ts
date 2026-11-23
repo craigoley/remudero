@@ -1260,6 +1260,7 @@ import {
   filedTaskIdFromRunBranch,
   openPullRequestChecked,
   openPullRequestCheckedAsync,
+  partitionAcceptanceCriteria,
   PrOpenRefusedError,
   readOtherOpenPrForTask,
   recordRefusedPrOpen,
@@ -1833,8 +1834,11 @@ import {
   diagnoseUnrunnableProofs,
   renderBodyDefects,
   replaceBodyProofs,
-  planFilingAcceptanceCure,
+  addedTestCriterion,
+  missingDiffProofReason,
+  repairMissingAcceptance,
   type FilingDiffFile,
+  type PlanFilingDiffAtHead,
 } from "./lib/body-repair.js";
 import { fixRungInputFields, prBodyDigest } from "./lib/sweep.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
@@ -5815,9 +5819,9 @@ export async function repairPrMetadata(
   planCriteriaAtHead: (body: string, headSha: string, baseRef?: string) =>
     readonly AcceptanceCriterion[] | Promise<readonly AcceptanceCriterion[]> = planCriteriaAtMergeForRepair,
   /** The test files this PR head ADDS against main — absent at base, so a `unit test:` on one cannot pass there. */
-  addedTestsAtHead: (headSha: string) => AddedTestsAtHead = addedTestFilesAtHead,
+  addedTestsAtHead?: (headSha: string) => AddedTestsAtHead,
   /** The complete diff and head text for added task shards, used only for the no-header filing cure. */
-  planFilingDiffAtHead: (headSha: string) => PlanFilingDiffAtHead = addedPlanFilingDiffAtHead,
+  planFilingDiffAtHead?: (headSha: string) => PlanFilingDiffAtHead,
 ): Promise<MetadataRepairResult> {
   const live = read(pr.prUrl);
   const fields: { title?: string; body?: string } = {};
@@ -5847,28 +5851,26 @@ export async function repairPrMetadata(
     // proof-discrimination-only red is never cured by rewriting a body that gate does not read.
     const gateRed = checks.includes("acceptance-author-gate");
     const planCriteria = gateRed && pr.headSha ? await planCriteriaAtHead(live.body, pr.headSha, live.base?.ref) : [];
-    // Never the generic grep of a function main already has: proof-discrimination reads it executed_stale, so the
-    // "repair" was a guaranteed red (#10404, #10413). Only a proof derived from a test the diff ADDS misses at base.
-    const added: AddedTestsAtHead = pr.headSha ? addedTestsAtHead(pr.headSha) : { kind: "unreadable", reason: "no PR head sha" };
-    const headOnly = added.kind === "read" ? added.files.map(addedTestCriterion) : [];
+    const cwd = process.cwd();
+    let mergeBase: string | undefined;
+    const readMergeBase = (headSha: string) => mergeBase ??= prRepairMergeBase(headSha, cwd);
+    const added: AddedTestsAtHead = pr.headSha
+      ? (addedTestsAtHead?.(pr.headSha) ?? addedTestFilesAtHead(pr.headSha, cwd, readMergeBase))
+      : { kind: "unreadable", reason: "no PR head sha" };
     const gate = acceptanceAuthorTimeCheck(live.body);
-    const filingDiff = !gate.ok && gate.defect === "no-header" && headOnly.length === 0 && pr.headSha
-      ? planFilingDiffAtHead(pr.headSha)
+    const noHeader = !gate.ok && gate.defect === "no-header";
+    const filingDiff = noHeader && pr.headSha && (added.kind === "unreadable" || added.files.length === 0)
+      ? (planFilingDiffAtHead?.(pr.headSha) ?? addedPlanFilingDiffAtHead(pr.headSha, cwd, readMergeBase))
       : undefined;
-    const planFiling = filingDiff?.kind === "read"
-      ? planFilingAcceptanceCure(live.body, filingDiff.files, filingDiff.shardDir, acceptanceAuthorTimeCheck)
+    const missing = noHeader
+      ? repairMissingAcceptance(live.body, added, filingDiff, acceptanceAuthorTimeCheck, ensureJudgeableBody)
       : undefined;
-    if (!gate.ok && (gate.defect === "no-header" || gate.defect === "empty-proofs") && headOnly.length === 0 && !planFiling) {
-      const why = added.kind === "read" ? "the diff adds no test file" : added.reason;
-      return {
-        repaired: false,
-        noCure: true,
-        reason:
-          `the body has no judgeable Acceptance block and ${why}, so no proof that misses at base is derivable; ` +
-          "a generic block would pass at base and fail proof-discrimination",
-      };
+    if (missing?.kind === "no-cure") return { repaired: false, noCure: true, reason: missing.reason };
+    const headOnly = !noHeader && added.kind === "read" ? added.files.map(addedTestCriterion) : [];
+    if (!gate.ok && gate.defect === "empty-proofs" && headOnly.length === 0) {
+      return { repaired: false, noCure: true, reason: missingDiffProofReason(added) };
     }
-    const repair = planFiling ?? acceptanceGateBodyRepair(live.body, headOnly, gateRed ? { planCriteria } : undefined);
+    const repair = missing ?? acceptanceGateBodyRepair(live.body, headOnly, gateRed ? { planCriteria } : undefined);
     if (!repair) {
       return {
         repaired: false,
@@ -6033,10 +6035,6 @@ const ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK: AcceptanceCriterion[] = [
   },
 ];
 
-function addedTestCriterion(path: string): AcceptanceCriterion {
-  return { claim: `the suite this PR adds passes (an Acceptance block derived from the diff): ${path}`, proof: `unit test: ${path}` };
-}
-
 /**
  * W1-T4263 — THE FALLBACK GREPS A LINE THIS PR'S OWN DIFF ADDS. The two static constants above grep
  * `acceptanceAuthorTimeCheck`, a function main already has, so `proof-discrimination` reads them as passing at the
@@ -6091,20 +6089,25 @@ export function diffSinceMergeBase(cwd: string, head = "HEAD"): string | undefin
   }
 }
 
-/** {@link addedTestFilesAtHead}'s answer: an unreadable head is never reported as "adds no test". */
+function prRepairMergeBase(headSha: string, cwd: string): string {
+  return hostWorktreeGitAtTopLevel(cwd, ["merge-base", "origin/main", headSha]).trim();
+}
 
 /** {@link repairPrMetadata}'s production `addedTestsAtHead`: `test/**\/*.test.ts` files added since the merge base with
  *  origin/main. */
-export function addedTestFilesAtHead(headSha: string, cwd: string = process.cwd()): AddedTestsAtHead {
-  const mergeBase = () => hostWorktreeGitAtTopLevel(cwd, ["merge-base", "origin/main", headSha]).trim();
+export function addedTestFilesAtHead(
+  headSha: string,
+  cwd: string = process.cwd(),
+  readMergeBase = (sha: string) => prRepairMergeBase(sha, cwd),
+): AddedTestsAtHead {
   try {
     let base: string;
     try {
-      base = mergeBase();
+      base = readMergeBase(headSha);
     } catch {
       // The head is not local yet (pushed since the last fetch): fetch it once and retry; a second failure is recorded below.
       hostWorktreeGitAtTopLevel(cwd, ["fetch", "--quiet", "origin", headSha], { timeout: 60_000 });
-      base = mergeBase();
+      base = readMergeBase(headSha);
     }
     const files = hostWorktreeGitAtTopLevel(cwd, ["diff", "--name-only", "--diff-filter=A", base, headSha, "--", "test/"])
       .split("\n")
@@ -6116,17 +6119,18 @@ export function addedTestFilesAtHead(headSha: string, cwd: string = process.cwd(
   }
 }
 
-/** `repairPrMetadata`'s complete PR diff plus head text for added shards; unreadable is never treated as an empty filing. */
-export type PlanFilingDiffAtHead =
-  | { kind: "read"; files: FilingDiffFile[]; shardDir: string }
-  | { kind: "unreadable"; reason: string };
+export type { PlanFilingDiffAtHead } from "./lib/body-repair.js";
 
 /** Read the whole diff so the cure can refuse mixed code/plan changes, then read only added task-shard blobs. */
-export function addedPlanFilingDiffAtHead(headSha: string, cwd: string = process.cwd()): PlanFilingDiffAtHead {
+export function addedPlanFilingDiffAtHead(
+  headSha: string,
+  cwd: string = process.cwd(),
+  readMergeBase = (sha: string) => prRepairMergeBase(sha, cwd),
+): PlanFilingDiffAtHead {
   if (!/^[0-9a-f]{40}$/i.test(headSha)) return { kind: "unreadable", reason: "the PR head is not a full commit SHA" };
   try {
     const top = hostWorktreeGitAtTopLevel(cwd, ["rev-parse", "--show-toplevel"]).trim();
-    const base = hostWorktreeGitAtTopLevel(top, ["merge-base", "origin/main", headSha]).trim();
+    const base = readMergeBase(headSha);
     const shardDir = relative(top, join(resolveRepoLayout(top).planDir, "tasks.d"));
     const names = hostWorktreeGitAtTopLevel(top, ["diff", "--name-status", "-z", "--no-renames", base, headSha, "--"], { maxBuffer: 1 << 26 })
       .split("\0").filter((part) => part.length > 0);
@@ -18170,6 +18174,37 @@ export function planDestinationCommand(rest: string[]): number {
     return 1;
   }
   console.log(`kind: ${kind}\noutcome: ${destination.outcome}\nrepository: ${destination.owner}/${destination.repo}\ncheckout: ${destination.checkoutDir}`);
+  return 0;
+}
+
+async function opsTaskPrBodyCommand(rest: string[]): Promise<number> {
+  const [taskId] = rest;
+  const command = "rmd plan-destination task --pr-body";
+  if (rest.length !== 1 || taskId === undefined || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(taskId)) {
+    console.error(`usage: ${command} <task-id>`);
+    return 2;
+  }
+  const instance = existingCliRootWithoutConfig();
+  if (instance.state === "unreadable" || instance.state === "corrupt") {
+    console.error(`${command}: task catalog unreadable (instance configuration)`);
+    return 1;
+  }
+  const stateDir = instance.state === "present" ? join(instance.root ?? join(homedir(), "Remudero"), "state") : undefined;
+  const found = await findTaskInCatalogs(taskId, { byId: new Map(), stateDir });
+  if (found.outcome === "unreadable") {
+    console.error(`${command}: task catalog unreadable (${found.reason})`);
+    return 1;
+  }
+  if (found.outcome === "absent") {
+    console.error(`${command}: no ops task matches ${taskId}`);
+    return 1;
+  }
+  // Match opsRunPublication: only the title and criteria may be copied from the record.
+  const { title, acceptance } = found.task;
+  const { executable, priorCredit } = partitionAcceptanceCriteria(acceptance ?? []);
+  const block = executable.length > 0 ? renderAcceptanceBlock(executable) : "";
+  process.stdout.write(`${title}\n\n## Decisions\n\n- Keep private task fields host-side.\n\n` +
+    `${priorCredit ? `${priorCredit}\n\n` : ""}${block}\n\nRemudero-Task: ${taskId}\n`);
   return 0;
 }
 
@@ -44371,9 +44406,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "plan-destination",
-    syntax: "rmd plan-destination <decision|feedback|task>",
+    syntax: "rmd plan-destination <decision|feedback|task> | rmd plan-destination task --pr-body <task-id>",
     summary: "Print the repository and checkout that take a new plan file of this kind on this host.",
-    detail: "W1-T12216: reads the host file <state dir>/plan-destination.json, the switch of W1-T12200, and prints three facts for a NEW file of the kind: the outcome (off when there is no host file, not_listed when the file does not list the kind, destination when it does), the repository, and the checkout. off and not_listed name the public repository and this command's own checkout. A file that is present but wrong prints `outcome: unreadable` with its reason and exits 1; it is never read as off. A changed file is edited in the repository that holds it, whatever this command prints. Exits 0 when it names a repository, 1 unreadable, 2 bad usage. READ-ONLY.",
+    detail: "W1-T12216: reads the host file <state dir>/plan-destination.json, the switch of W1-T12200, and prints three facts for a NEW file of the kind: the outcome (off when there is no host file, not_listed when the file does not list the kind, destination when it does), the repository, and the checkout. off and not_listed name the public repository and this command's own checkout. A file that is present but wrong prints `outcome: unreadable` with its reason and exits 1; it is never read as off. A changed file is edited in the repository that holds it, whatever this command prints. `task --pr-body <task-id>` prints the public pull request body for an ops task. Exits 0 on success, 1 if unreadable or the requested task is absent, and 2 on bad usage. READ-ONLY.",
   },
   {
     name: "emissions",
@@ -45784,7 +45819,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["next-task-id", async (rest) => await withGhTransportFloorMode("wait", () => nextTaskIdCommand(rest))],
   ["migration-preview", (rest) => withGhTransportFloorMode("enforce", () => previewPlanTaskMigration(rest))],
   ["move-task", (rest) => withGhTransportFloorMode("enforce", () => movePlanTask(rest, { ledger: (row) => appendLedger(ledgerPathFor(loadConfig()), row) }))],
-  ["plan-destination", (rest) => planDestinationCommand(rest)],
+  ["plan-destination", (rest) => isOpsTaskPrBody(rest) ? opsTaskPrBodyCommand(rest.slice(2)) : planDestinationCommand(rest)],
   ["hand-worktree", (rest) => handWorktreeCommand(rest)],
   ["worktree", (rest) => worktreeCommand(rest)],
   ["pr-checks", (rest) => reportPrChecks(rest)],
@@ -45944,6 +45979,10 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
  */
 const REGISTRY: readonly RegisteredCommand[] = buildRegistry(COMMANDS, HANDLERS);
 
+function isOpsTaskPrBody(args: readonly string[]): boolean {
+  return args[0] === "task" && args[1] === "--pr-body";
+}
+
 // ── CLI entry (invoked by bin/rmd). Kept tiny; all logic is above/lib.
 async function main(
   assessBrokerFreshness: () => void,
@@ -45962,7 +46001,8 @@ async function main(
   // It writes nothing until a gh call finds no credential; then the row names the sources tried, never a value.
   // Explicit preview precedes invocation logging, housekeeping and credential diagnostics.
   const previewArgv = stripRepoRootFlag(process.argv.slice(2));
-  if (previewArgv[0] === "migration-preview" || previewArgv[0] === "move-task") {
+  if (previewArgv[0] === "migration-preview" || previewArgv[0] === "move-task" ||
+    (previewArgv[0] === "plan-destination" && isOpsTaskPrBody(previewArgv.slice(1)))) {
     if (previewArgv.includes("--help") || previewArgv.includes("-h")) {
       console.log(commandHelp(commandSpec(previewArgv[0])));
       return await flushThenExit(0);
