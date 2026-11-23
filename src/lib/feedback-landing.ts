@@ -1133,6 +1133,30 @@ function* closeRedundantLandingPr(
   throw new Error(`cannot identify the merged PR carrying ${existing}'s content on main`);
 }
 
+/** W1-T14313: `undefined` unless a plan-reconcile tip tree differs from main; `closed` names a PR closed on that exact tip. */
+function* closeStaleLandingPr(
+  kind: LandingKind,
+  net: LandingNet,
+  build: LandingTreeBuild,
+): Generator<LandingAsk, { closed?: string } | undefined, AskReply> {
+  if (kind.family !== "plan-reconcile" || !build.branchTipSha) return undefined;
+  if ((yield* net.git(["rev-parse", `${build.branchTipSha}^{tree}`])).trim() === build.treeSha) return undefined;
+  const repoArgs = landingRepoArgs(kind);
+  const open = (JSON.parse(yield* net.gh([
+    "pr", "list", "--head", kind.prHead, "--base", "main", "--state", "open", "--json", "url,headRefOid", ...repoArgs,
+  ])) as Array<{ url: string; headRefOid: string }>)[0];
+  if (!open || open.headRefOid !== build.branchTipSha) return {};
+  const more = build.refused.length > 5 ? [`and ${build.refused.length - 5} more`] : [];
+  const comment = [
+    "Every input of this landing was refused or is already on main, so the branch tip holds content no input now supports.",
+    ...build.refused.slice(0, 5).map((r) => `- ${r.path}: ${r.reason}`),
+    ...more,
+  ].join("\n");
+  assertLiveWriteAllowed("gh-transport", `closing the stale landing PR ${open.url}`);
+  yield* net.gh(["pr", "close", open.url, "--comment", comment, ...repoArgs]);
+  return { closed: open.url };
+}
+
 /**
  * Shared commit/push/open-PR tail for disk and content writers. Callers fold errors into results;
  * failed PR creation still means `landed: true` after a successful push.
@@ -1157,9 +1181,17 @@ function* finishLanding(
   });
   const nothingToLand = function* (b: LandingTreeBuild): Generator<LandingAsk, LandFeedbackResult | undefined, AskReply> {
     if (b.treeSha !== (yield* net.git(["rev-parse", `${b.mainSha}^{tree}`])).trim()) return undefined;
-    opts.log?.("landing.nothing_to_land", { family: kind.family, branch: kind.branch, mainSha: b.mainSha });
+    const row = { family: kind.family, branch: kind.branch, mainSha: b.mainSha };
     const result: LandFeedbackResult = { landed: false, files: [], ...(b.refused.length > 0 ? { refused: b.refused } : {}) };
-    if (b.refused.length > 0 && b.unlanded.length === 0) return result;
+    let stale: { closed?: string } | undefined;
+    try {
+      stale = yield* closeStaleLandingPr(kind, net, b);
+    } catch (e) {
+      opts.log?.("landing.nothing_to_land", row);
+      return { ...result, error: `stale landing PR cleanup failed: ${String((e as Error)?.message ?? e)}` };
+    }
+    opts.log?.("landing.nothing_to_land", stale?.closed ? { ...row, staleTipClosed: stale.closed } : row);
+    if (stale || (b.refused.length > 0 && b.unlanded.length === 0)) return result;
     try {
       yield* closeRedundantLandingPr(kind, net, b);
       return result;

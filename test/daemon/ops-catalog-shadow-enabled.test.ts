@@ -95,6 +95,7 @@ async function driveLoop(plan: Plan, wired: DaemonDeps, afterRun?: (count: numbe
     memoryGovernor: createDaemonMemoryGovernor({ read: () => ({ rss_bytes: 1 }), setFlags: () => {}, heapUsed: () => 1 }),
     heapStatistics: () => ({ used_heap_size: 1, heap_size_limit: 1_000_000_000 }),
     now: () => new Date(Date.UTC(2026, 0, 1)),
+    selectionTimingNow: () => 0,
     bootCheckoutBlocked: "",
     ...Object.fromEntries(SHADOW_SEAMS.filter((seam) => seam in wired)
       .map((seam) => [seam, (wired as unknown as Record<string, unknown>)[seam]])),
