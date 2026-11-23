@@ -146,7 +146,7 @@ function journaledBirthRounds(
 ): CiFrictionRound[] {
   const { addedByPr, historyRevision } = search;
   if (!addedByPr || !historyRevision) return withoutBirthRounds(rounds, search);
-  const journal = gardenUnitJournal<number | null>(deps.stateDir, "ci-friction", period, {
+  const journal = gardenUnitJournal(deps.stateDir, "ci-friction", period, {
     log: deps.log,
     isResult: (value): value is number | null => value === null || (typeof value === "number" && Number.isSafeInteger(value)),
   });
