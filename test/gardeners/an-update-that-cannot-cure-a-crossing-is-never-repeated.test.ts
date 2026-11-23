@@ -281,6 +281,8 @@ test("W1-T12717 criterion 7: a withheld crossing is handed to the PR's fix lane 
   logArmAttribution((step, extra = {}) => lines.push({ step, ...extra, head_sha: head }), result.outcome, url(n), `W1-T${n}`, "sweep", {}, undefined,
     result.directMergePreflight, result.ratchetJudge);
   assert.equal(lines.find((r) => r.step === "sweep.ratchet_judge.decided")?.remedy, "fix-lane");
+  // W1-T14317: the head's live verdict; with no readable verdict history the sweep stops at the arm refusal.
+  lines.push({ task_id: view.taskId, step: "review.posted", pr_url: view.prUrl, head_sha: head, capped: false, plan_only: false });
   const fixes: string[] = [];
   const armed: string[] = [];
   const escalated: string[] = [];

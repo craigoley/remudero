@@ -87,6 +87,9 @@ async function runPaused(
   opts: { wireWorkerAdmissionHold: boolean; checkPause?: () => string | undefined },
 ): Promise<Observed> {
   const seen: Observed = { sweeps: 0, armed: [], merged: [], fixed: [], reviewed: [], dispatched: [], lines: [], sweepLedger: join(root, "sweep-ledger.ndjson") };
+  // W1-T14317: the green PR's live verdict for its head; with no readable verdict history the sweep never arms.
+  writeFileSync(seen.sweepLedger, JSON.stringify({ ts: RECENT, run_id: "REVIEW-9217", task_id: "W1-GREEN", step: "review.posted",
+    pr_url: "url/9217", head_sha: "green01", capped: false, plan_only: false }) + "\n");
   const checkStop = (): string | undefined => stopDetail(root);
   const checkPause = opts.checkPause ?? ((): string | undefined => pauseDetail(root));
   let sleeps = 0;

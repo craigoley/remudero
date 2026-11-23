@@ -5,9 +5,9 @@ import {
 } from "./operator-message.js";
 import {
   hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, measuredTypecheckInvocation,
-  measuredTypecheckResult, recordTypecheckPeak, typecheckEnv, typecheckPeakBytes, type TypecheckObservation,
+  measuredTypecheckResult, recordTypecheckPeak, typecheckEnv, type TypecheckObservation,
 } from "./typecheck-buildinfo.js";
-import { dirIsWritable, prepareTypecheckRun, typecheckPeakWriter } from "./typecheck-run.js";
+import { dirIsWritable, prepareTypecheckRun, typecheckAdmissionPeak, typecheckPeakWriter } from "./typecheck-run.js";
 import { admitStaticWork, readMemoryHeadroom, type StaticAdmission, type TestSlotOptions } from "./test-slot.js";
 import { observeSynchronousPreflightPhase, type PreflightPhaseReporter } from "./preflight-phase-progress.js";
 
@@ -590,8 +590,9 @@ export function typecheckStep(
     const tsc = join(repoRoot, "node_modules", ".bin", "tsc");
     const prepared = prepareTypecheckRun(repoRoot, canWrite);
     const warm = hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(repoRoot));
-    const peak = typecheckPeakBytes(warm);
-    // W1-T9951: a tsc is a memory cost, admitted by headroom alone — never behind a suite ticket or slot. W1-T14153: warm too.
+    const peak = typecheckAdmissionPeak(repoRoot, warm);
+    // W1-T9951: a tsc is a memory cost, admitted by headroom alone — never behind a suite ticket or slot. W1-T14145: a
+    // warm one names the warm peak learned from the ledger.
     slot = admitStaticWork("typecheck:preflight", { memoryBytes: peak, ...testSlot });
     if (!slot.executionAllowed) return { name: "typecheck", ok: false, detail: `typecheck: NOT_RUN (${slot.note})` };
     const tight = lowMemoryTypecheckArgs((testSlot.memoryHeadroom ?? readMemoryHeadroom)(), peak);
@@ -599,7 +600,7 @@ export function typecheckStep(
     try {
       res = spawn(tsc, [...prepared.args, ...tight], { cwd: repoRoot, env: typecheckEnv(process.env), measureTypecheck: true });
     } finally {
-      recordTypecheckPeak(typecheckPeakWriter(repoRoot), "preflight", warm, res?.observation, res && `${res.stdout}\n${res.stderr}`);
+      recordTypecheckPeak(typecheckPeakWriter(repoRoot), "preflight", warm, res?.observation, res ? `${res.stdout}\n${res.stderr}` : "", slot.waitedMs);
     }
     const spawnFailed = spawnFailureDetail("typecheck", res);
     if (spawnFailed) return { name: "typecheck", ok: false, detail: spawnFailed };

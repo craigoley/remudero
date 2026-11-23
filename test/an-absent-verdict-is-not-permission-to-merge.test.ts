@@ -37,16 +37,16 @@ test("W1-T3471: a verdict rotated out of the live file is recovered and still ar
   assert.match(decision.reason, /full PASS/);
 });
 
-test("W1-T3471: an unavailable or throwing archive lookup preserves the historical fail-open", () => {
+test("W1-T14317: an unavailable or throwing archive lookup refuses the arm and names the unreadable history", () => {
   const unavailable = decideSweepArm(greenPr(), [], undefined, () => ({ complete: false, lines: [] }));
-  assert.equal(unavailable.arm, true);
-  assert.match(unavailable.reason, /no ledgered verdict recoverable/);
+  assert.equal(unavailable.arm, false);
+  assert.match(unavailable.reason, /unreadable verdict history/);
 
   const throwing = decideSweepArm(greenPr(), [], undefined, () => {
     throw new Error("archive unreadable");
   });
-  assert.equal(throwing.arm, true);
-  assert.match(throwing.reason, /no ledgered verdict recoverable/);
+  assert.equal(throwing.arm, false);
+  assert.match(throwing.reason, /unreadable verdict history \(the history read threw: archive unreadable\)/);
 });
 
 test("W1-T3471: a rotated capped verdict still refuses through the existing shared predicate", () => {

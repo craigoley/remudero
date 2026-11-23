@@ -11,7 +11,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import type { Worker } from "node:worker_threads";
 import type { Clock } from "#src/lib/clock.js";
-import { READ_MODEL_HEAVY_IDLE_MS, threadViews, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
+import { heavyLaneKeptWarm, READ_MODEL_HEAVY_IDLE_MS, threadViews, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
 import { trackWorkerThreads } from "#src/lib/worker-heaps.js";
 import { onReadModelClose, readModelFixtureDir } from "#test/helpers/read-model-fixture-dir.js";
 
@@ -58,7 +58,7 @@ async function until(done: () => boolean, what: string): Promise<void> {
   assert.ok(done(), what);
 }
 
-function rig(t: Parameters<typeof readModelFixtureDir>[0], name: string) {
+function rig(t: Parameters<typeof readModelFixtureDir>[0], name: string, keepWarm?: () => boolean) {
   const dir = readModelFixtureDir(t, name).dir;
   const lanePath = join(dir, "lane.mjs");
   const dyingPath = join(dir, "dying.mjs");
@@ -76,6 +76,7 @@ function rig(t: Parameters<typeof readModelFixtureDir>[0], name: string) {
     data: { stateDir: dir, instances: [], tickMs: 50, holder: name }, workerUrl: pathToFileURL(lanePath), clock,
     every: (run) => { check = run; return () => void (check = undefined); },
     log: (step, extra) => void logs.push({ step, extra }), relay: (msg) => void relayed.push(msg),
+    ...(keepWarm ? { keepWarm } : {}),
   };
   const lanes = threadViews(options);
   onReadModelClose(t, async () => {
@@ -207,4 +208,23 @@ test("W1-T11937 criterion 4: a lane that fails to restart reports it to the call
   assert.deepEqual(r.lanes.read("/v1/now"), { woke: "restarted" }, "the next read retries the restart");
   await until(() => r.rows("read_model.view_lane_restarted").length === 1, "the retried restart painted");
   assert.equal(r.heavyThreads().length, 1);
+});
+
+test("W1-T14444 criterion 1: a heavy lane kept warm does not end for idleness, and ends once it is no longer kept", async (t) => {
+  let warm = true;
+  const r = rig(t, "kept-warm", () => warm);
+  await r.moved();
+  r.advance(READ_MODEL_HEAVY_IDLE_MS * 3);
+  r.check();
+  assert.deepEqual(r.rows("read_model.view_lane_idle_ended"), [], "kept warm, the lane runs past three idle windows");
+  assert.equal(r.heavyThreads().length, 1);
+  warm = false;
+  r.check();
+  assert.equal(r.rows("read_model.view_lane_idle_ended").length, 1, "control: no longer kept, the backstop ends it");
+});
+
+test("W1-T14444 criterion 2: invariant:backstop-elsewhere — the lane is kept warm only while now serves or is on auto", () => {
+  assert.equal(heavyLaneKeptWarm({ now: "serve" }), true);
+  assert.equal(heavyLaneKeptWarm({ now: "auto" }), true);
+  for (const views of [{ now: "shadow" }, { now: "off" }, {}, undefined, { repositories: "serve" }]) assert.equal(heavyLaneKeptWarm(views), false, JSON.stringify(views));
 });

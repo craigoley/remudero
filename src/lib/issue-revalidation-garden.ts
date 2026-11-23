@@ -23,7 +23,7 @@
  * residue no producer owns.
  */
 import { createHash } from "node:crypto";
-import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { attemptAssignmentJoin, benchmarkEvidenceLedgerPath, benchmarkNonDispatchSpawn, benchmarkWorkerAttemptResources, withReceiptIdentity } from "./benchmark-run.js";
@@ -125,6 +125,8 @@ export interface RevalidationIssue {
 }
 
 export interface RevalidationComment {
+  /** The comment's REST id; W1-T14014 matches it against the question store's `issue#<n>:comment:<id>` origins. */
+  id?: number;
   authorLogin: string;
   authorType: string;
   authorAssociation: string;
@@ -356,6 +358,8 @@ export interface PriorVerdict {
    *  the newest one: a refresh is followed by `keep` rows, and reading only the newest row let a `keep`
    *  hide the refresh, so the pass after it refreshed again (#15114: 34 comments in 4 days). */
   lastRefreshAt?: string;
+  /** W1-T14014: the newest earlier row a model judge decided; the judge slots go to the oldest of these first. */
+  lastJudgedAt?: string;
   /** The newest earlier row whose convert ACTED: a `keep` after it must not let the next pass convert again. */
   lastConvertAt?: string;
 }
@@ -416,13 +420,17 @@ export function decideAction(input: {
   stageStallResolved?: boolean;
   /** The resolution is a W1-T13220 terminal-referent rule ({@link terminalPrResolution}, {@link terminalTaskResolution}). */
   terminalReferentResolved?: boolean;
+  /** W1-T14014: the resolution is {@link answeredEscalationResolution}: the newest operator comment is an answer the
+   *  fleet recorded as read, so it neither keeps the issue as mid-conversation nor holds an operator-owned class. */
+  answerResolved?: boolean;
   prior: PriorVerdict | undefined;
   nowMs: number;
 }): { action: RevalidationAction; guard?: RevalidationGuard } {
   const { verdict } = input;
   if (verdict.verdict === "unknown") return { action: "keep" };
   if (input.operatorSpokeLast === undefined) return { action: "keep", guard: "comments-unread" };
-  if (input.operatorSpokeLast) return { action: "keep", guard: "newer-operator-comment" };
+  const answered = input.answerResolved === true && verdict.verdict === "resolved";
+  if (input.operatorSpokeLast && !answered) return { action: "keep", guard: "newer-operator-comment" };
   const operatorOwned = input.escalationClass !== undefined && OPERATOR_OWNED_CLASSES.has(input.escalationClass);
   if (verdict.verdict === "resolved") {
     if (!verdict.citation) return { action: "keep", guard: "no-citation" };
@@ -430,7 +438,7 @@ export function decideAction(input: {
     // A stall report is the fleet's own observation, not an operator capacity decision: its deterministic
     // resolutions may close a MANUAL issue. A GRILL, and any other MANUAL resolution, still only refreshes.
     const fleetObservation = (input.stageStallResolved === true || input.terminalReferentResolved === true) && input.escalationClass === "MANUAL";
-    if (operatorOwned && !fleetObservation) return refreshUnlessRecent(input.prior, input.nowMs, "operator-owned-class");
+    if (operatorOwned && !fleetObservation && !answered) return refreshUnlessRecent(input.prior, input.nowMs, "operator-owned-class");
     if (input.reobserved) return { action: "keep", guard: "condition-reobserved" };
     return { action: "close" };
   }
@@ -608,6 +616,75 @@ export function stageStallResolution(
   };
 }
 
+// ── An answered escalation (W1-T14014) ───────────────────────────────────────────────────────────
+
+/** A question-store origin for an issue comment, as {@link import("./escalation-answers.js")} writes it. */
+export const ANSWER_COMMENT_ORIGIN_RE = /^issue#(\d+):comment:(\d+)$/;
+/** Associations that can hold the operator role; the answer reader refuses every other author's text. */
+const ANSWER_AUTHOR_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+export const FLEET_COMMENT_RE = /^(?:Another escalation observed the same condition \(|Still open as of \S+ \(issue-revalidation garden, |Queued for conversion to a plan task as feedback |Closed by the (?:issue-revalidation garden|ci-friction gardener))/;
+
+/** The issue numbers whose comments the question store holds an answer for. */
+export function answeredIssueNumbers(origins: ReadonlySet<string>): Set<number> {
+  const out = new Set<number>();
+  for (const origin of origins) {
+    const m = ANSWER_COMMENT_ORIGIN_RE.exec(origin);
+    if (m) out.add(Number(m[1]));
+  }
+  return out;
+}
+
+/**
+ * W1-T14014: an escalation whose newest comment from an operator-capable author (owner, member or collaborator;
+ * never a bot or the fleet's own text) is an answer the fleet recorded as read resolves, citing that answer.
+ * INVARIANT unread-answer-keeps: a newer comment the store does not hold, or a comment with no id, decides nothing,
+ * so the issue takes the path it took before (and an owner's unread comment keeps it as newer-operator-comment).
+ */
+export function answeredEscalationResolution(issue: Pick<RevalidationIssue, "number">, comments: readonly RevalidationComment[],
+  answered: ReadonlySet<string>): RevalidationVerdict | undefined {
+  let newest: RevalidationComment | undefined;
+  for (const c of comments) {
+    if (c.authorType.toLowerCase() === "bot" || BOT_SUFFIX.test(c.authorLogin) || !ANSWER_AUTHOR_ASSOCIATIONS.has(c.authorAssociation)) continue;
+    if (FLEET_COMMENT_RE.test((c.body ?? "").trimStart())) continue;
+    if (!Number.isFinite(Date.parse(c.createdAt))) continue;
+    if (newest === undefined || Date.parse(c.createdAt) >= Date.parse(newest.createdAt)) newest = c;
+  }
+  if (newest?.id === undefined || !answered.has(`issue#${issue.number}:comment:${newest.id}`)) return undefined;
+  // The fleet seeing the condition again after the answer asks the question again: the answer no longer settles it.
+  const answeredAt = Date.parse(newest.createdAt);
+  if (comments.some((c) => (c.body ?? "").trimStart().startsWith("Another escalation observed the same condition (") &&
+    [c.createdAt, c.updatedAt].some((at) => at !== undefined && Date.parse(at) > answeredAt))) return undefined;
+  const text = (newest.body ?? "").trim().split("\n")[0]!.slice(0, 120);
+  return {
+    verdict: "resolved",
+    reason: "the operator answered this escalation and the fleet recorded the answer as read",
+    citation: `answer "${text}" by ${newest.authorLogin} at ${newest.createdAt} (comment ${newest.id}), recorded in the question store`,
+  };
+}
+
+/** Every `issue#<n>:comment:<id>` origin in `<repoRoot>/plan/questions.ndjson`, the store the answer reader writes
+ *  (worker.ts appendQuestionAnswer). An absent file holds none; a torn line is skipped. THROWS on any other read
+ *  failure, so the pass ledgers it and no answer rule fires. */
+export function readAnsweredCommentOrigins(repoRoot: string): Set<string> {
+  const path = join(repoRoot, "plan", "questions.ndjson");
+  const out = new Set<string>();
+  if (!existsSync(path)) return out;
+  for (const raw of readFileSync(path, "utf8").split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      // deliberate: a torn line names no origin; the next whole line still counts.
+      continue;
+    }
+    const origin = (parsed as { origin?: unknown } | null)?.origin;
+    if (typeof origin === "string" && ANSWER_COMMENT_ORIGIN_RE.test(origin)) out.add(origin);
+  }
+  return out;
+}
+
 // ── The pass ─────────────────────────────────────────────────────────────────────────────────────
 
 export interface JudgeEvidence {
@@ -642,6 +719,9 @@ export interface IssueRevalidationPorts {
    *  that set it. `undefined` when no single shard names the task. THROWS on a failed read. Absent, no
    *  terminal-task rule runs. */
   planTaskState?: (taskId: string) => PlanTaskFact | undefined;
+  /** W1-T14014: the `issue#<n>:comment:<id>` origins of answers the fleet recorded as read. THROWS on a failed
+   *  read. Absent, no answered-escalation rule runs. */
+  answeredOrigins?: () => ReadonlySet<string>;
   /** W1-T13221: `reason` "not planned" closes a superseded duplicate; absent closes as completed. */
   close: (issueUrl: string, comment: string, reason?: "not planned") => Promise<void>;
   comment: (issueUrl: string, body: string) => Promise<void>;
@@ -693,6 +773,17 @@ function closeComment(row: { verdict: RevalidationVerdict; issueClass: IssueClas
     `**Class:** ${row.issueClass}`,
     "",
     "_Reopen this issue if the condition still holds; the garden never closes an issue whose newest comment is the operator's._",
+  ].join("\n");
+}
+
+function answeredCloseComment(row: { verdict: RevalidationVerdict; issueClass: IssueClass }): string {
+  return [
+    "Closed by the issue-revalidation garden (W1-T14014): the operator answered this escalation, and the fleet has read the answer.",
+    "",
+    `**Evidence:** ${row.verdict.citation}`,
+    `**Class:** ${row.issueClass}`,
+    "",
+    "_Reopen this issue if the answer did not settle it; a newer operator comment the fleet has not read keeps an issue open._",
   ].join("\n");
 }
 
@@ -784,9 +875,26 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
       return undefined;
     }
   };
+  // W1-T14014: the answers the fleet recorded as read, once per pass. A failed read decides nothing.
+  let answered: ReadonlySet<string> = new Set();
+  if (ports.answeredOrigins) {
+    try {
+      answered = ports.answeredOrigins();
+    } catch (e) {
+      ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "answered-origins", error: String((e as Error)?.message ?? e) });
+    }
+  }
+  const answeredIssues = answeredIssueNumbers(answered);
+  // W1-T14014: the judge slots go to the issues judged longest ago, never-judged first; ties keep the listed order.
+  const lastJudged = (i: RevalidationIssue): number => {
+    const at = Date.parse(prior.get(i.number)?.lastJudgedAt ?? "");
+    return Number.isFinite(at) ? at : -Infinity;
+  };
+  const walk = issues.map((issue, index) => ({ issue, index }))
+    .sort((a, b) => lastJudged(a.issue) - lastJudged(b.issue) || a.index - b.index).map((e) => e.issue);
   let found = false;
   const rows: IssueRevalidationRow[] = [];
-  for (const issue of issues) {
+  for (const issue of walk) {
     const issueClass = classes.get(issue.number)!;
     const escalationClass = issueEscalationClass(issue);
     const before = prior.get(issue.number);
@@ -795,13 +903,25 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
     let receiptSource: JudgeReceipt["source"] = "deterministic";
     let stageStallResolved = false;
     const keptBy = superseded.get(issue.number);
-    const terminal = keptBy === undefined ? await terminalReferent(issue) : undefined;
+    let answer: RevalidationVerdict | undefined;
+    if (keptBy === undefined && escalationClass !== undefined && OPERATOR_OWNED_CLASSES.has(escalationClass) && answeredIssues.has(issue.number)) {
+      try {
+        const comments = commentsByIssue.get(issue.number) ?? await ports.listComments(issue.number);
+        commentsByIssue.set(issue.number, comments);
+        answer = answeredEscalationResolution(issue, comments, answered);
+      } catch (e) {
+        ports.log(ISSUE_REVALIDATION_FAILED_STEP, { stage: "comments", issue_number: issue.number, error: String((e as Error)?.message ?? e) });
+      }
+    }
+    const terminal = keptBy === undefined && answer === undefined ? await terminalReferent(issue) : undefined;
     if (keptBy !== undefined) {
       verdict = {
         verdict: "resolved",
         reason: `a newer open escalation carries the same task key (superseded by #${keptBy.number})`,
         citation: `superseded by ${keptBy.url}: same **Task:** ${issueTaskId(issue)} and class family ${escalationClassFamily(escalationClass ?? "")}`,
       };
+    } else if (answer !== undefined) {
+      verdict = answer;
     } else if (terminal !== undefined) {
       verdict = terminal;
     } else if (issueClass === "referent") {
@@ -857,7 +977,7 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
       ? spokeLast === undefined ? { action: "keep" as const, guard: "comments-unread" as const }
         : spokeLast ? { action: "keep" as const, guard: "newer-operator-comment" as const } : { action: "close" as const }
       : decideAction({ verdict, escalationClass, operatorSpokeLast: spokeLast, reobserved, stageStallResolved,
-        terminalReferentResolved: terminal !== undefined, prior: before, nowMs });
+        terminalReferentResolved: terminal !== undefined, answerResolved: answer !== undefined, prior: before, nowMs });
     if (action === "close" && closes >= policy.maxClosesPerPass) {
       action = "keep";
       guard = "close-cap";
@@ -868,6 +988,7 @@ export async function runIssueRevalidationGarden(ports: IssueRevalidationPorts):
     if (policy.mode === "act" && action !== "keep") {
       try {
         if (action === "close" && keptBy !== undefined) await ports.close(issue.url, supersededComment(keptBy, issue), "not planned");
+        else if (action === "close" && answer !== undefined) await ports.close(issue.url, answeredCloseComment({ verdict, issueClass }));
         else if (action === "close") await ports.close(issue.url, closeComment({ verdict, issueClass }));
         else if (action === "refresh") await ports.comment(issue.url, refreshComment({ verdict, issueClass }, clock.iso()));
         else {
@@ -908,6 +1029,7 @@ export function priorVerdictsFromRows(rows: Iterable<Record<string, unknown>>): 
   const out = new Map<number, PriorVerdict>();
   const refreshedAt = new Map<number, string>();
   const convertedAt = new Map<number, string>();
+  const judgedAt = new Map<number, string>();
   for (const r of rows) {
     if (r.step !== ISSUE_REVALIDATION_VERDICT_STEP) continue;
     const n = Number(r.issue_number);
@@ -917,6 +1039,10 @@ export function priorVerdictsFromRows(rows: Iterable<Record<string, unknown>>): 
       if (r.action !== action || r.acted !== true) continue;
       const last = seenAt.get(n);
       if (last === undefined || Date.parse(last) < Date.parse(at)) seenAt.set(n, at);
+    }
+    if (r.judged === true) {
+      const last = judgedAt.get(n);
+      if (last === undefined || Date.parse(last) < Date.parse(at)) judgedAt.set(n, at);
     }
     const seen = out.get(n);
     if (seen !== undefined && Date.parse(seen.at) >= Date.parse(at)) continue;
@@ -931,6 +1057,7 @@ export function priorVerdictsFromRows(rows: Iterable<Record<string, unknown>>): 
   }
   for (const [n, lastRefreshAt] of refreshedAt) out.set(n, { ...out.get(n)!, lastRefreshAt });
   for (const [n, lastConvertAt] of convertedAt) out.set(n, { ...out.get(n)!, lastConvertAt });
+  for (const [n, lastJudgedAt] of judgedAt) out.set(n, { ...out.get(n)!, lastJudgedAt });
   return out;
 }
 
@@ -1064,6 +1191,7 @@ export function parseIssueCommentsRest(raw: string): RevalidationComment[] {
     return (page as Array<Record<string, unknown>>).map((r) => {
       const user = (r.user ?? {}) as { login?: unknown; type?: unknown };
       return {
+        ...(typeof r.id === "number" && Number.isSafeInteger(r.id) ? { id: r.id } : {}),
         authorLogin: String(user.login ?? ""),
         authorType: String(user.type ?? "User"),
         authorAssociation: String(r.author_association ?? "NONE"),
@@ -1168,6 +1296,7 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
       return listed;
     },
     listComments: async (n) => parseIssueCommentsRest(await readText(["api", `repos/${repoArg}/issues/${n}/comments?per_page=100`, "--paginate"])),
+    answeredOrigins: () => readAnsweredCommentOrigins(opts.repoRoot),
     pullState: async (n) => pullStateFromRest(await readText(["api", `repos/${repoArg}/pulls/${n}`, "--jq", "{state: .state, merged_at: .merged_at, closed_at: .closed_at}"])),
     // One tree listing per pass, however many BLOCKED issues ask for a shard.
     planTaskState: (taskId) => planTaskStateAtOriginMain((args) => (args[0] === "ls-tree" ? (shardList ??= runGit(args)) : runGit(args)), taskId,

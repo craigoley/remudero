@@ -74,7 +74,9 @@ test("an undelivered or malformed unfiled escalation does not silently park the 
 });
 
 test("a scope question never prevents an already green unfiled PR from normal auto-merge arming", async () => {
-  const f = fixture([scope()]);
+  // W1-T14317: the PR's live verdict for its head; with no readable verdict history the sweep never arms.
+  const f = fixture([scope(), { task_id: `PR-${PR}`, step: "review.posted", pr_url: view().prUrl, head_sha: HEAD,
+    capped: false, plan_only: false }]);
   await runSweep([view({ checksState: "green", reviewState: "success", priorStrikes: 0,
     redRequiredChecks: [], ciFailures: [] })], f.deps, DEFAULT_SWEEP_POLICY);
   assert.equal(f.calls.arms, 1);

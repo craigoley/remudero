@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { appendLedger } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { lightPassActionable } from "#src/run-task.js";
@@ -57,6 +58,15 @@ function deps(ledger: string, armed: number[], gate: Promise<void>, blockOn: Set
   };
 }
 
+/** W1-T14317: each head's live review verdict, so the arm decision never reads the history. */
+function seedVerdicts(ledger: string, ...prNumbers: number[]): void {
+  for (const n of prNumbers) {
+    const pr = readyPr(n, true);
+    appendLedger(ledger, { run_id: "R", task_id: String(pr.taskId), step: "review.posted", pr_url: pr.prUrl,
+      head_sha: pr.headSha, state: "success", capped: false, plan_only: false });
+  }
+}
+
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 function standDown(ledger: string, prNumber: number): string {
@@ -66,6 +76,7 @@ function standDown(ledger: string, prNumber: number): string {
 
 test("an overlapping light pass merges its plan PR once the long pass's own plan merge has finished", async () => {
   const ledger = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-claim-`)), "ledger.ndjson");
+  seedVerdicts(ledger, 9301, 9302, 9303);
   const armed: number[] = [];
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -87,6 +98,7 @@ test("an overlapping light pass merges its plan PR once the long pass's own plan
 
 test("a finishing light pass never releases a plan-merge claim another pass holds", async () => {
   const ledger = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-claim-`)), "ledger.ndjson");
+  seedVerdicts(ledger, 9311, 9312, 9313, 9314);
   const armed: number[] = [];
   let releaseHolder!: () => void;
   const holderGate = new Promise<void>((resolve) => { releaseHolder = resolve; });

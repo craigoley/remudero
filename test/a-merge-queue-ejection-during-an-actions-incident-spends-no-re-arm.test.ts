@@ -47,8 +47,12 @@ function pr(over: Partial<OpenPrView> = {}): OpenPrView {
   };
 }
 
-/** The `acted:true` arm row that seeds `prior.armed` at a head, as W1-T5909's suite writes it. */
+/** The `acted:true` arm row that seeds `prior.armed` at a head, as W1-T5909's suite writes it, after the head's
+ *  live review.posted verdict (W1-T14317: the sweep arms only a head with one). */
 function priorSweepArm(ledgerPath: string, prNumber = PR_NUMBER): void {
+  appendLedger(ledgerPath, { ts: new Date(T0 - HOUR).toISOString(), run_id: "REVIEW", task_id: "W1-T5908",
+    step: "review.posted", pr_url: `https://github.com/craigoley/remudero/pull/${prNumber}`, head_sha: HEAD,
+    capped: false, plan_only: false });
   appendLedger(ledgerPath, { run_id: "DAEMON-1", task_id: "SWEEP", step: "sweep.disposed", pr_number: prNumber,
     pr_url: `https://github.com/craigoley/remudero/pull/${prNumber}`, disposition: "mergeable", acted: true,
     arm_outcome: "armed", head_sha: HEAD });

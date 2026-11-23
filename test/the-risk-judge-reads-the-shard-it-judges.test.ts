@@ -45,6 +45,7 @@ function escalatedAtHead(digest?: string): Array<Record<string, unknown>> {
   const tag = { pr_number: 12219, head_sha: HEAD, ...(digest === undefined ? {} : { plan_context_digest: digest }) };
   return [
     { ts: "2026-10-16T08:00:00.000Z", task_id: TASK, step: "verdict", verdict: "handed_off", pr_url: PR_URL, reason: "pr_open_yield", head_sha: HEAD },
+    { ts: "2026-10-16T08:30:00.000Z", task_id: TASK, step: "review.posted", pr_url: PR_URL, head_sha: HEAD, capped: false, plan_only: false },
     { ts: "2026-10-16T10:32:46.000Z", step: "risk_judge.decision", verdict: "high", confidence: 0.6, action: "escalate", ...tag },
     { ts: "2026-10-16T10:33:15.000Z", step: "risk_judge.escalated", issue_url: ISSUE, ...tag },
   ];

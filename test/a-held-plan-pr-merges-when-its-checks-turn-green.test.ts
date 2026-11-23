@@ -67,6 +67,12 @@ function heldRow(pr: OpenPrView, held: { mergeable_state: string; remedy: string
   };
 }
 
+/** W1-T14317: the head's live review verdict, so the arm decision never reads the history. */
+function verdictRow(pr: OpenPrView): Record<string, unknown> {
+  return { ts: new Date(HELD_AT - 60_000).toISOString(), run_id: "review", task_id: pr.taskId, step: "review.posted",
+    pr_url: pr.prUrl, head_sha: pr.headSha, state: "success", capped: false, plan_only: true };
+}
+
 function ledgerWith(rows: Array<Record<string, unknown>>): string {
   const ledger = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t9212-`)), "ledger.ndjson");
   writeFileSync(ledger, "");
@@ -107,6 +113,7 @@ test("W1-T9212: a held plan PR merges when its checks turn green", async () => {
   const ledger = ledgerWith([
     heldRow(first, { mergeable_state: "blocked", remedy: "retry-later" }),
     heldRow(second, { mergeable_state: "blocked", remedy: "retry-later" }),
+    verdictRow(first), verdictRow(second),
   ]);
   const armed: number[] = [];
   await runSweepLightPass([first, second], sweepDeps(ledger, armed, new Map()), DEFAULT_SWEEP_POLICY);
@@ -129,6 +136,7 @@ test("W1-T9212: a held plan PR on unknown mergeability merges when it settles", 
   const ledger = ledgerWith([
     heldRow(settled, { mergeable_state: "unknown", remedy: "mergeability-unknown" }),
     heldRow(stillUnknown, { mergeable_state: "unknown", remedy: "mergeability-unknown" }),
+    verdictRow(settled), verdictRow(stillUnknown),
   ]);
   const armed: number[] = [];
   const outcomes = new Map<number, string>([[9411, "direct-merged"], [9412, "plan-pr-held"]]);
@@ -150,6 +158,7 @@ test("W1-T9212: the re-evaluation never arms and takes the one-plan-merge claim"
   const ledger = ledgerWith([
     heldRow(heldA, { mergeable_state: "blocked", remedy: "retry-later" }),
     heldRow(heldB, { mergeable_state: "blocked", remedy: "retry-later" }),
+    verdictRow(heldA), verdictRow(heldB), verdictRow(fresh), verdictRow(planPr(9424)),
   ]);
   const armed: number[] = [];
   const overlap = { now: 0, max: 0 };

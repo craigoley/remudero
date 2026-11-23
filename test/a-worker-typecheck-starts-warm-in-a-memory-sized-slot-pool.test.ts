@@ -50,8 +50,9 @@ function slotPool(t: TestContext): string {
   return dir;
 }
 
+/** Every admission record: a slot (a cold check) or a headroom admission (a warm check, W1-T14145). */
 const heldRecords = (dir: string): Array<{ label: string; memoryBytes?: number }> =>
-  readdirSync(dir).filter((name) => name.startsWith("slot-")).map((name) => JSON.parse(readFileSync(join(dir, name), "utf8")));
+  readdirSync(dir).filter((name) => /^(slot|static)-.*\.json$/.test(name)).map((name) => JSON.parse(readFileSync(join(dir, name), "utf8")));
 
 /** The real compiler, recording each argv. */
 function realTsc(seen: string[][] = []): (file: string, args: readonly string[], cwd: string) => { status: number | null } {

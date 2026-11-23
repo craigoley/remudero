@@ -24,6 +24,12 @@ function planPr(prNumber: number): OpenPrView {
   };
 }
 
+/** W1-T14317: each head's live review verdict, so the arm decision never reads the history. */
+function verdictRows(...prs: OpenPrView[]): Array<Record<string, unknown>> {
+  return prs.map((pr) => ({ ts: new Date(BASE - 30_000).toISOString(), run_id: "review", task_id: pr.taskId,
+    step: "review.posted", pr_url: pr.prUrl, head_sha: pr.headSha, capped: false, plan_only: true }));
+}
+
 function rowsAt(ledger: string): Array<Record<string, unknown>> {
   return readFileSync(ledger, "utf8").split("\n").filter(Boolean)
     .map((line) => JSON.parse(line) as Record<string, unknown>);
@@ -92,9 +98,9 @@ test("W1-T11445 criterion 1: light passes emit paired measurements and reject in
 });
 
 test("W1-T11445 criterion 2: plan merge attempts record elapsed time and outcome", async () => {
-  const ledger = writeLedger().path;
-  const armed: number[] = [];
   const pr = planPr(1144501);
+  const ledger = writeLedger(verdictRows(pr)).path;
+  const armed: number[] = [];
   await runSweepLightPass([pr], sweepDeps(ledger, armed), DEFAULT_SWEEP_POLICY);
   assert.deepEqual(armed, [pr.prNumber]);
   const row = mergeRows(ledger).find((entry) => entry.pr_number === pr.prNumber);
@@ -105,7 +111,8 @@ test("W1-T11445 criterion 2: plan merge attempts record elapsed time and outcome
 });
 
 test("W1-T11445 criterion 3: plan merge work stops at the measured interval budget", async () => {
-  const ledger = writeLedger(pairedPassRows([250, 250, 250])).path;
+  const ledger = writeLedger([...pairedPassRows([250, 250, 250]),
+    ...verdictRows(planPr(1144511), planPr(1144512), planPr(1144513))]).path;
   const armed: number[] = [];
   const slowArm: SweepDeps["arm"] = async (pr): Promise<"direct-merged"> => {
     armed.push(pr.prNumber);
@@ -121,7 +128,8 @@ test("W1-T11445 criterion 3: plan merge work stops at the measured interval budg
 });
 
 test("W1-T12267: the plan-merge budget is half of the sweep tick bound the policy carries", async () => {
-  const ledger = writeLedger(pairedPassRows([250, 250, 250])).path;
+  const ledger = writeLedger([...pairedPassRows([250, 250, 250]),
+    ...verdictRows(planPr(1226761), planPr(1226762), planPr(1226763))]).path;
   const armed: number[] = [];
   const slowArm: SweepDeps["arm"] = async (pr): Promise<"direct-merged"> => {
     armed.push(pr.prNumber);
@@ -155,10 +163,10 @@ test("W1-T11445 criterion 4: invalid or sparse measurements keep the one-plan bo
   summaryBeforeStart.splice(startIndex, 0, outOfOrderSummary!);
 
   for (const rows of [sparse, malformed, clockRegressed, summaryBeforeStart]) {
-    const ledger = writeLedger(rows).path;
-    const armed: number[] = [];
     const first = planPr(1144521);
     const second = planPr(1144522);
+    const ledger = writeLedger([...rows, ...verdictRows(first, second)]).path;
+    const armed: number[] = [];
     await runSweepLightPass([first, second], sweepDeps(ledger, armed), DEFAULT_SWEEP_POLICY);
     assert.deepEqual(armed, [first.prNumber]);
     const deferred = rowsAt(ledger).find((row) => row.step === "sweep.disposed" && row.pr_number === second.prNumber);
@@ -170,13 +178,15 @@ test("W1-T11445 criterion 4: invalid or sparse measurements keep the one-plan bo
   const heldLedger = writeLedger([
     heldPlanRow(olderHeld, BASE - 60_000),
     heldPlanRow(newerHeld, BASE - 120_000),
+    ...verdictRows(olderHeld, newerHeld),
   ]).path;
   const heldArmed: number[] = [];
   await runSweepLightPass([olderHeld, newerHeld], sweepDeps(heldLedger, heldArmed), DEFAULT_SWEEP_POLICY);
   assert.deepEqual(heldArmed, [newerHeld.prNumber, olderHeld.prNumber],
     "sparse cadence retains the oldest-held-first re-evaluation for every ready held plan PR");
 
-  const noDurationLedger = writeLedger(pairedPassRows([250, 250, 250])).path;
+  const noDurationLedger = writeLedger([...pairedPassRows([250, 250, 250]),
+    ...verdictRows(planPr(1144531), planPr(1144532))]).path;
   const noDurationArmed: number[] = [];
   const noDurationDeps = sweepDeps(noDurationLedger, noDurationArmed);
   noDurationDeps.readArmFacts = (pr) => ({

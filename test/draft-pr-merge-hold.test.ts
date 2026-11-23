@@ -25,7 +25,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   DEFAULT_SWEEP_POLICY,
   deriveDisposition,
@@ -34,6 +34,7 @@ import {
   type SweepDeps,
 } from "#test/helpers/sweep-test.js";
 import { readLedgerLines } from "#src/lib/status.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import {
   armAutoMergeAtOpen,
   armIfVerdictPermits,
@@ -145,6 +146,8 @@ test("W1-T3551: a draft PR with green checks and review success calls no arm eff
 test("W1-T3551: a non-draft pull request with the same green checks and review success still arms exactly as before", async () => {
   const path = ledgerPath();
   const ready = greenPr(); // isDraft omitted — the pre-existing, unchanged shape
+  writeLedger([{ ts: RECENT, run_id: "REVIEW", task_id: TASK, step: "review.posted", pr_url: PR_URL,
+    head_sha: HEAD, capped: false, plan_only: false }], { dir: dirname(path) });
 
   const deps = fakeDeps(path);
   const summary = await runSweep([ready], deps);

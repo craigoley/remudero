@@ -694,6 +694,28 @@ export function stalledStageEscalationSummary(reason: string): string {
     .replace(/; the fleet itself withheld the repair for \d+ of those minutes$/, "");
 }
 
+/** W1-T12046: a stalled stage's cause — its blocker and the diagnosis the sweep computed — keyed so two PRs stalled
+ *  for one cause share it. The PR, its age, episode start and per-PR held/last-round tails are dropped. Reads a
+ *  reason or the body of an issue it opened; `undefined` for any other text. #17633-#17637 were five
+ *  `awaiting-review` stalls with one diagnosis: `repeat: "checks green, review never posted — …" x3`. */
+export function stalledStageCauseKey(text: string): string | undefined {
+  const found = /PR stage stalled: #\d+ \S+ — ([a-z-]+) for \d+ minutes \([^)]*\); since [^;]*; DIAGNOSIS: (.*?)(?:; the fleet itself withheld the repair for \d+ of those minutes)?(?:; the last fix round ended at \S+?)?\.?$/m.exec(text);
+  return found === null ? undefined : `${found[1]} — ${found[2]}`;
+}
+
+/** W1-T12046: the oldest open stall escalation another PR opened for the same cause, which this PR joins by a
+ *  comment instead of opening its own. An issue of this PR, or of a different blocker or diagnosis, never matches. */
+export function openStallCauseIssue(open: readonly OpenIssue[], pr: { prNumber: number; prUrl: string },
+  causeKey: string): OpenIssue | undefined {
+  const own = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — `;
+  return open.filter(issue => {
+    const body = escalationBodyInLegacyOrder(issue.body ?? "");
+    const identity = stalledStageIssueIdentity({ title: issue.title, body });
+    return identity !== undefined && !identity.startsWith(own) && escalationIssueCause(body) === "stage-stall" &&
+      stalledStageCauseKey(body) === causeKey;
+  }).sort((a, b) => a.number - b.number)[0];
+}
+
 /** The PR's oldest open stage-stall question, whatever its head, blocker or contract, viewed at the
  *  episode's head with no contract line so the gateway's own task/PR/cause match appends to it. */
 function openStallQuestionForPr(open: OpenIssue[], pr: { prNumber: number; prUrl: string; headSha: string },
@@ -2723,7 +2745,7 @@ interface ArmVerdictHistory {
 /**
  * W1-T13288: the arm decision's archive and live verdict history, loaded OFF the loop through the slice reader.
  * `complete` is judged as the resolveLedgerUnion result was: the read is ok, at least one rotation exists, and
- * nothing is unread or unclassified. A failed read is incomplete, so the W1-T3471 fail-open holds. The process
+ * nothing is unread or unclassified. A failed read is incomplete, so W1-T14317 refuses the arm. The process
  * keeps one reader, so a later pass reads only the rotations it has not seen; a restarted one reads digests.
  */
 async function readArmVerdictHistory(stateDir: string): Promise<ArmVerdictHistory> {
@@ -2961,6 +2983,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     planPrPreflightImpl = planPrPreflightAtCommitAsync,
     updatePrBodyImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updatePrBodyImpl"]>>("updatePrBodyImpl"),
   } = deps;
+  // W1-T12046: each pass builds these effects afresh, so this pass's own stall-cause issues and the PRs that
+  // joined them stay visible to its later PRs even before GitHub's open list shows a just-opened issue.
+  const stallCauseIssues = new Map<string, { url: string; prs: number[] }>();
+  // One cause's escalations run one at a time, so two PRs of one cause can never both open an issue.
+  const stallCauseTurns = new Map<string, Promise<unknown>>();
 
   // W1-T2889: kept as a typed local (not a destructured default) so this default arm's shape
   // survives the positional-parameters-to-one-deps-object collapse verbatim — the sweep's
@@ -4542,9 +4569,17 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // narrow by blocker and keep older heads visible to the gateway's supersession cleanup.
       // The PR's one stall issue as GitHub stores it, when this episode is offered to it.
       let keptStall: OpenIssue | undefined;
+      // W1-T12046: a stall's cause (blocker and diagnosis). The open list read to look for its issue is handed to
+      // the gateway's first read, so the escalation still reads GitHub once; a failed read is handed on as the
+      // gateway's own failed read, which it records as unreadable (no issue opened), exactly as before.
+      const causeKey = stallIdentity === undefined ? undefined : stalledStageCauseKey(reason);
+      let causeRead: { open: OpenIssue[] } | { error: unknown } | undefined;
       const escalationIssues: AsyncIssueGateway = stallIdentity !== undefined && issues.listOpen
         ? { ...issues, listOpen: async (label) => {
-          const open = await issues.listOpen!(label);
+          const reused = label === NEEDS_HUMAN_LABEL ? causeRead : undefined;
+          causeRead = undefined;
+          if (reused !== undefined && "error" in reused) throw reused.error;
+          const open = reused?.open ?? await issues.listOpen!(label);
           const kept = openStallQuestionForPr(open, pr, { class: cls, taskId: escalationTaskIdFor(pr), cause });
           keptStall = kept?.stored;
           return kept ? [kept.view] : open.filter(issue => {
@@ -4572,7 +4607,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
         }
       };
-      const file = async (context: string): Promise<void> => { const filedUrl = await escalateAsync(
+      const file = async (context: string): Promise<string> => { const filedUrl = await escalateAsync(
         {
           class: cls,
           // See {@link escalationTaskIdFor} — pure and separately tested, so the mint that makes
@@ -4601,9 +4636,51 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           recommendation: question.resolutions[0].label,
         },
         { issues: escalationIssues, ledgerPath, runId },
-      ); await refreshStoredHead(filedUrl); };
-      if (pr.mergeState !== "dirty") return file("");
-      return readMainCommit().then((main) => file(conflictEscalationContext(pr, main?.sha)));
+      ); await refreshStoredHead(filedUrl); return filedUrl; };
+      // W1-T12046: a PR with no stall question of its own, stalled for a cause another PR's open stall issue (or one
+      // this pass opened) already names, is listed on that issue by a comment instead of opening its own.
+      const joinStallCause = async (key: string): Promise<boolean> => {
+        const listOpen = issues.listOpen;
+        if (!listOpen || !issues.comment) return false;
+        // Settled to a value: a failed read reaches the gateway, which ledgers it as `escalation.dedup_unreadable`.
+        const read = await Promise.resolve().then(() => listOpen(NEEDS_HUMAN_LABEL))
+          .then((open): { open: OpenIssue[] } => ({ open }), (error: unknown): { error: unknown } => ({ error }));
+        causeRead = read;
+        if ("error" in read) return false;
+        const open = read.open;
+        if (openStallQuestionForPr(open, pr, { class: cls, taskId: escalationTaskIdFor(pr), cause }) !== undefined) return false;
+        const listed = openStallCauseIssue(open, pr, key);
+        const ours = stallCauseIssues.get(key);
+        const url = listed?.url ?? ours?.url;
+        if (url === undefined) return false;
+        const opener = Number(/#(\d+)/.exec(stalledStageIssueIdentity({ title: listed?.title,
+          body: escalationBodyInLegacyOrder(listed?.body) }) ?? "")?.[1]);
+        const prs = [...new Set([...(ours?.url === url ? ours.prs : Number.isInteger(opener) ? [opener] : []), pr.prNumber])];
+        await issues.comment(url,
+          `Pull request #${pr.prNumber} (${pr.prUrl}) is stalled for the same cause as this issue, so it is listed ` +
+          `here instead of opening its own escalation (W1-T12046).\n\n` +
+          `Pull requests stalled for this cause: ${prs.map(n => `#${n}`).join(", ")}\n\n` +
+          `Task ${escalationTaskIdFor(pr)}, head ${pr.headSha}.\n\n${reason}`);
+        stallCauseIssues.set(key, { url, prs });
+        // The row escalate() writes when an escalation lands on an issue already open, naming the cause it shares.
+        appendLedger(ledgerPath, { run_id: runId, task_id: escalationTaskIdFor(pr), step: "escalation.deduped", class: cls,
+          issue_url: url, observation_comment: "appended", pr_number: pr.prNumber, head_sha: pr.headSha,
+          stall_cause: key, stall_cause_prs: prs });
+        return true;
+      };
+      const raise = async (): Promise<void> => {
+        if (causeKey !== undefined && await joinStallCause(causeKey)) return;
+        const filedUrl = pr.mergeState !== "dirty" ? await file("")
+          : await readMainCommit().then((main) => file(conflictEscalationContext(pr, main?.sha)));
+        if (causeKey !== undefined && filedUrl && keptStall === undefined && !stallCauseIssues.has(causeKey)) {
+          stallCauseIssues.set(causeKey, { url: filedUrl, prs: [pr.prNumber] });
+        }
+      };
+      if (causeKey === undefined) return raise();
+      const turn = (stallCauseTurns.get(causeKey) ?? Promise.resolve()).then(raise, raise);
+      // Only the order is kept here: the caller still receives this escalation's own rejection through `turn`.
+      stallCauseTurns.set(causeKey, turn.then(() => "settled", (error: unknown) => error));
+      return turn;
     },
 
     dispatchPlanGateRound: async (pr) => {
@@ -14577,9 +14654,8 @@ export function isCappedReviewOrphanEscalation(pr: OpenPrView, policy: SweepPoli
 
 /** ARMING PARITY WITH THE RUN FLOW — a PR the run flow refused stayed open and unarmed, but a later
  *  sweep poll could still arm it through this separate path. NOT A SECOND IMPLEMENTATION: this
- *  delegates to {@link decideAutoMergeArm}, the SAME predicate the run flow calls. FAIL-OPEN ON
- *  ABSENT EVIDENCE — refusal requires positively observing `capped: true, plan_only: false` for THIS
- *  head. // Why: #800 armed at proof_exec 0/5 and merged 35 seconds later. */
+ *  delegates to {@link decideAutoMergeArm}, the SAME predicate the run flow calls. With no
+ *  history reader, absent evidence still arms; W1-T14317: an unreadable history refuses. // Why: #800 armed at proof_exec 0/5 and merged 35 seconds later. */
 export function decideSweepArm(
   pr: OpenPrView,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
@@ -14588,26 +14664,29 @@ export function decideSweepArm(
   // the run flow's classification is worktree-bound and this pass has no worktree, so the field
   // would be permanently unproducible.
   irreversible?: boolean,
-  /** W1-T3471: archive∪live evidence consulted only after the live-file miss. `complete:false`
-   *  means the archive corpus was unavailable or incomplete, so the historical fail-open remains. */
+  /** W1-T3471: archive∪live evidence consulted only after the live-file miss. W1-T14317: `complete:false`,
+   *  `undefined` or a throw means the history could not be read, so the arm is refused. */
   readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined,
 ): ArmDecision {
   const armId = reviewLedgerKeyFor(pr.taskId, pr.prNumber);
   let facts = postedArmFactsFromLedger(ledgerLines, armId, pr.headSha, pr.prUrl);
   if (!facts && readLedgerUnion) {
+    const unreadableVerdict = (why: string): string => `unreadable verdict history (${why}) and no live ` +
+      "review.posted verdict for this head — refusing to arm until a pass reads the history";
+    let union: ReturnType<typeof readLedgerUnion>;
     try {
-      const union = readLedgerUnion();
-      if (union?.complete) {
-        facts = postedArmFactsFromLedger(union.lines, armId, pr.headSha, pr.prUrl);
-        if (!facts) {
-          return {
-            arm: false,
-            reason: "complete ledger union shows no review.posted verdict for this task and head — refusing to arm",
-          };
-        }
-      }
-    } catch {
-      // An unreadable archive is not evidence of absence; retain the historical fail-open below.
+      union = readLedgerUnion();
+    } catch (error) {
+      return { arm: false, reason: unreadableVerdict(`the history read threw: ${String((error as Error)?.message ?? error)}`) };
+    }
+    if (union === undefined) return { arm: false, reason: unreadableVerdict("no history was returned") };
+    if (!union.complete) return { arm: false, reason: unreadableVerdict("the history read is incomplete") };
+    facts = postedArmFactsFromLedger(union.lines, armId, pr.headSha, pr.prUrl);
+    if (!facts) {
+      return {
+        arm: false,
+        reason: "complete ledger union shows no review.posted verdict for this task and head — refusing to arm",
+      };
     }
   }
   if (!facts) {
@@ -18091,7 +18170,7 @@ export interface SweepDeps {
   /** Host load used to admit a retry of an inconclusive proof. */
   sampleLoad?: () => HostLoadSample;
   /** W1-T3471 — bounded archive∪live reader for the arm predicate, consulted only after the
-   *  live-file verdict miss. An incomplete result preserves the historical fail-open. */
+   *  live-file verdict miss. W1-T14317: an incomplete result refuses the arm. */
   readLedgerUnion?: () => { complete: boolean; lines: ReadonlyArray<Record<string, unknown>> } | undefined;
   /** Ledger appender; defaults to appendLedger. Injectable for tests. */
   appendLine?: (path: string, line: Record<string, unknown> & { run_id: string; task_id: string; step: string }) => void;
@@ -23934,7 +24013,7 @@ export async function runSweep(
   // W1-T3471: a live miss is not enough to call a verdict absent. W1-T13288: the archive∪live history is
   // loaded OFF the loop, at most once a pass, before the first arm decision whose live lines miss; the
   // closure then answers from that snapshot with no I/O. An unread or archive-free corpus stays incomplete,
-  // so the historical fail-open remains intact.
+  // and W1-T14317 refuses the arm on it.
   let armVerdictHistory: ArmVerdictHistory | undefined;
   const readArmLedgerUnion = deps.readLedgerUnion ??
     (() => armVerdictHistory ?? { complete: false, lines: [] });
