@@ -4,6 +4,7 @@ import { buildPlanReconcileCadenceInput, planReconcileCadence } from "#src/lib/m
 import {
   PLAN_RECONCILE_LANDING_BODY_BUDGET,
   PLAN_RECONCILE_LANDING_FILE_LIMIT,
+  PLAN_RECONCILE_LANDING_RECORD_LIMIT,
   planReconcileProofTemplate,
   planReconcilePrBody,
   takePlanReconcileBatch,
@@ -38,10 +39,10 @@ test("W1-T11859 criterion 1: a drift over the limit lands one batch, lowest task
   assert.equal(report.status, "landed");
   assert.equal(report.drift, 200, "the report still names the whole drift");
   assert.equal(handed.length, 1);
-  assert.equal(handed[0].length, PLAN_RECONCILE_LANDING_FILE_LIMIT);
+  assert.equal(handed[0].length, PLAN_RECONCILE_LANDING_RECORD_LIMIT);
   assert.deepEqual(
     handed[0].map((i) => i.relPath),
-    Array.from({ length: PLAN_RECONCILE_LANDING_FILE_LIMIT }, (_, i) => `plan/tasks.d/W1-T${i + 1}.yaml`),
+    Array.from({ length: PLAN_RECONCILE_LANDING_RECORD_LIMIT }, (_, i) => `plan/tasks.d/W1-T${i + 1}.yaml`),
     "numeric order: W1-T2 before W1-T10, never the string order",
   );
 
@@ -73,7 +74,7 @@ test("W1-T11859 criterion 3: repeated fires over a 397-shard drift land every sh
     const report = cadence(records, (inputs) => handed.push([...inputs]));
     if (report.status === "clear") break;
     assert.equal(handed.length, 1);
-    assert.ok(handed[0].length <= PLAN_RECONCILE_LANDING_FILE_LIMIT);
+    assert.ok(handed[0].length <= PLAN_RECONCILE_LANDING_RECORD_LIMIT);
     for (const input of handed[0]) {
       assert.equal(seen.has(input.relPath), false, `${input.relPath} landed once`);
       seen.add(input.relPath);
@@ -83,6 +84,6 @@ test("W1-T11859 criterion 3: repeated fires over a 397-shard drift land every sh
   }
   assert.ok(PLAN_RECONCILE_LANDING_FILE_LIMIT <= 300, "within GitHub's 300-file review ceiling, whatever the constant says");
   assert.ok(fires > 1, "a 397-shard drift is more than one pull request can hold");
-  assert.equal(fires, Math.ceil(397 / PLAN_RECONCILE_LANDING_FILE_LIMIT), "ceil(397 / limit) landing fires, then a clear one");
+  assert.equal(fires, Math.ceil(397 / PLAN_RECONCILE_LANDING_RECORD_LIMIT), "ceil(397 / limit) landing fires, then a clear one");
   assert.equal(seen.size, 397);
 });

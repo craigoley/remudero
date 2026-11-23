@@ -20,20 +20,23 @@
   files:
     - src/run-task.ts
     - src/cli/commands/review.ts
+    - src/lib/run-child.ts
+    - test/review/a-fresh-tree-review-records-why-its-child-exited.test.ts
     - test/review/each-failure-class-of-the-fresh-tree-review-has-a-cause-and-a-fix.test.ts
   status: queued
   attempts: 0
   acceptance:
     - claim: "The test file has one test for each value of `exit_cause` that the core ledger shows on two or more fresh-tree reviews in the 7 days before the build. Each test has the value in its title and drives `buildReviewerCodeFreshnessGate` and the real review command to that exit"
       proof: "grep: W1-T12226 criterion 1 in test/review/each-failure-class-of-the-fresh-tree-review-has-a-cause-and-a-fix.test.ts"
-    - claim: "The row `review.ran_from_fresh_tree` carries the field `ended_as` with one of three values: `verdict` when the child posted a terminal verdict, `no_verdict` when the review correctly had nothing to post, and `defect` for every other exit. A row with `verdict` or `no_verdict` carries no `failure` field"
+    - claim: "The row `review.ran_from_fresh_tree` carries the field `ended_as` with one of three values: `verdict` when the child posted its verdict status (a terminal verdict, or the pending of a cannot-evaluate escalation), `no_verdict` when the review correctly had nothing to post, and `defect` for every other exit. A row with `verdict` or `no_verdict` carries no `failure` field"
       proof: "grep: W1-T12226 criterion 2 in test/review/each-failure-class-of-the-fresh-tree-review-has-a-cause-and-a-fix.test.ts"
     - claim: "Each cause that the build classes as `defect` has its fix in the same pull request. The test of that cause fails when the fix is removed"
       proof: "grep: W1-T12226 criterion 3 in test/review/each-failure-class-of-the-fresh-tree-review-has-a-cause-and-a-fix.test.ts"
-    - claim: "A child that exits with code 1 because the verdict is not `success` writes `ended_as: verdict`. The gate returns the code of the child, as today"
+    - claim: "invariant:exit-codes-as-today — a child that exits with code 1 because the verdict is not `success` writes `ended_as: verdict`, and the gate returns the code of the child, as today"
+      kind: guard
       proof: "grep: W1-T12226 criterion 4 in test/review/each-failure-class-of-the-fresh-tree-review-has-a-cause-and-a-fix.test.ts"
     - claim: "The gate writes the class on the row"
-      proof: "grep: ended_as in src/run-task.ts"
+      proof: "grep: ended_as in src/lib/run-child.ts"
   rationale: |
     OBSERVED 2026-11-04T01:56Z to 2026-11-11T01:56Z in the ledger of the core instance: the child of the fresh-tree review exited with a code that is not 0 in 26 of 56 runs.
     - Two failure classes exist: exit code 2 (16 runs) and exit code 1 (10 runs).
@@ -46,6 +49,9 @@
     - W1-T11155 (queued) fixes modules that the compiled review entry does not load. Whether it explains part of either class is not established.
     W1-T12227 sends every review with stale reviewer code through this path. A path that fails in 26 of 56 runs must be fixed first.
   design: |
+    INVARIANT exit-codes-as-today: the gate returns the child's exit code and the review command's exit codes are as on
+    origin/main except where a defect's fix changes that exit; the row keeps every field it has today, and only a
+    verdict or no_verdict row drops `failure`.
     1. Read the rows. Count `review.ran_from_fresh_tree` rows of the core instance by `exit_code` and `exit_cause` for the 7 days before the build. Put the table, with its window, in the `Why` part of the pull request.
     2. If the ledger holds fewer than 10 rows with `exit_cause`, stop. Report that the evidence is not there yet. Do not guess a cause.
     3. Class each cause: `verdict`, `no_verdict` or `defect`. A cause is `defect` when the review had a pull request to judge and judged nothing, or judged and could not post.
@@ -58,3 +64,17 @@
     Remove one fix and the test of its cause must fail (criterion 3). Write `failure` on a row with `ended_as: verdict` and criterion 2 must fail. Class an exit with code 1 and a posted verdict as `defect` and criterion 4 must fail. Restore and require all five to pass.
   note: |
     After the merge, read the rows for 7 days: the share of `ended_as: defect` among fresh-tree reviews is the measure. It was at most 26 of 56 before this task; the true share is not known, because some of the 26 exits can be correct ends.
+    Amendment 2026-11-23 (hand build stopped before code): W1-T12824 moved reviewerCodeStartGate and the
+    review.ran_from_fresh_tree row to src/lib/run-child.ts; buildReviewerCodeFreshnessGate in src/run-task.ts only
+    wraps it, so run-child.ts is in files: and the class is written there. Evidence 2026-11-16T14Z to 11-23T14Z:
+    297 rows, 85 with exit_cause (verdict-failure 42, closed-before-review 27, verdict-not-posted 7,
+    verdict-pending 5, task-metadata-unavailable 2, own-task-record-missing 1, threw-in-review 1).
+    Rulings: verdict-pending (one PR, cannot-evaluate escalations) is verdict. verdict-not-posted has three
+    sources: (a) 3 rows of reviewer output cut at the 1 MiB cap on 11-20, already fixed on main by W1-T13951 and
+    W1-T14207, so no new fix, the test pins the class only; (b) 3 rows where the child was stale at its own start
+    (main moved between tree build and child start; post refused as materially behind): fix in run-child.ts,
+    for example rebuild the fresh tree and retry once, or refuse before judging; (c) 1 row where the head moved,
+    which is a correct refusal. A distinct exit_cause per source is fine. task-metadata-unavailable follows
+    review.catalog.unreadable ops-ref_moved: one bounded retry at the review.ts call site, not in
+    ops-catalog-source.ts. The W1-T12225 criterion 4 test may change: a no_verdict row carries no failure.
+    A remudero-fleet checkpoint branch from 11-12 predates the move and W1-T14066; build from origin/main.

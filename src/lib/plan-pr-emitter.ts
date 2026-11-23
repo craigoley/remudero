@@ -779,6 +779,47 @@ function inTreeCommand(cwd: string, relPath: string, argv: string[], judged?: Ju
 const absentFromTree = (relPath: string): PlanPrPreflightReading => ({ status: null, output: `${relPath} is absent from the tree` });
 const taskIdReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
   r.status === 1 && TASK_ID_UNREADABLE_RE.test(r.output) ? { ...r, status: null } : r;
+/** W1-T14187: the unresolved-citation block of a task-id-existence reading (its two-space-indented id rows). */
+const UNRESOLVED_IDS_HEADER = /^task-id-existence: FAILED -- the following id\(s\) are cited under .+ but resolve to NEITHER a reservation ref NOR a declared plan record:$/;
+const UNRESOLVED_ID_ROW = /^ {2}([A-Z][A-Z0-9]*-T[0-9]+[A-Za-z]?)$/;
+const UNRESOLVED_OCCURRENCE_ROW = /^ {4}\S/;
+function unresolvedIdBlock(output: string): { lines: string[]; header: number; end: number; ids: string[] } | undefined {
+  const lines = output.split("\n");
+  const header = lines.findIndex((l) => UNRESOLVED_IDS_HEADER.test(l.trim()));
+  if (header < 0) return undefined;
+  const ids: string[] = [];
+  let end = header + 1;
+  for (; end < lines.length; end++) {
+    const id = UNRESOLVED_ID_ROW.exec(lines[end]!)?.[1];
+    if (id !== undefined) ids.push(id);
+    else if (lines[end]!.trim() !== "" && !UNRESOLVED_OCCURRENCE_ROW.test(lines[end]!)) break;
+  }
+  return { lines, header, end, ids };
+}
+/** W1-T14187: an ops commit's task-id-existence red, less the unresolved ids its first parent already cites. Only a
+ *  parent red with that block subtracts: a green, unreadable or timed-out parent leaves the commit's red standing. */
+function withoutInheritedIds(commit: PlanPrPreflightReading, parent: PlanPrPreflightReading): PlanPrPreflightReading {
+  const block = unresolvedIdBlock(commit.output);
+  const parentBlock = parent.status === 1 && parent.timedOutMs === undefined ? unresolvedIdBlock(parent.output) : undefined;
+  if (block === undefined || parentBlock === undefined) return commit;
+  const inherited = new Set(parentBlock.ids.filter((id) => block.ids.includes(id)));
+  if (inherited.size === 0) return commit;
+  const kept: string[] = [];
+  let dropping = false;
+  for (const line of block.lines.slice(block.header + 1, block.end)) {
+    const id = UNRESOLVED_ID_ROW.exec(line)?.[1];
+    if (id !== undefined) dropping = inherited.has(id);
+    else if (!UNRESOLVED_OCCURRENCE_ROW.test(line)) dropping = false;
+    if (!dropping) kept.push(line);
+  }
+  const before = block.lines.slice(0, block.header);
+  const note = `task-id-existence: ${inherited.size} unresolved id(s) the commit's first parent already cites are not this commit's (W1-T14187)`;
+  if (block.ids.some((id) => !inherited.has(id))) {
+    return { ...commit, output: [...before, block.lines[block.header]!, ...kept, ...block.lines.slice(block.end), note].join("\n") };
+  }
+  const otherRefusal = before.some((l) => /^task-id-existence: FAILED\b/.test(l.trim()));
+  return { ...commit, status: otherRefusal ? 1 : 0, output: [...before, note].join("\n") };
+}
 const shardCensusReading = (r: PlanPrPreflightReading): PlanPrPreflightReading =>
   r.status === 1 && !/^# fail [1-9]/m.test(r.output) ? { ...r, status: null } : r; // no `# fail N`: a load error, not a result
 
@@ -1309,8 +1350,32 @@ export async function planPrPreflightAtCommitAsync(
   const realTree = join(realpathSync(parent), "tree");
   const budgetMs = (checks.budgetMs ?? (() => inTreeCheckBudgetMs()))();
   let leaveTreeForSafety = false;
+  // W1-T14187: an ops (code-root) commit's unresolved-id red stands only for ids its first parent does not already
+  // cite, read the same way in a second detached tree. That tree is cleaned up exactly as the commit's is.
+  const firstParent = { tree: join(parent, "first-parent"), added: false, leaveForSafety: false };
+  const addTree = (at: string, rev: string) => execFileAsync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", at, rev], budgetedSpawn(budgetMs));
+  const taskIds = checks.taskIdExistence ?? defaultPreflightChecksAsync.taskIdExistence;
+  const readFirstParent = async (headRef: string | undefined, budget: number, root: string): Promise<PlanPrPreflightReading> => {
+    firstParent.added = true;
+    const add = addTree(firstParent.tree, `${commitSha}^1`);
+    try {
+      await add;
+      borrowNodeModules(repoDir, firstParent.tree);
+      return await taskIds(firstParent.tree, headRef, budget, root);
+    } catch (e) {
+      const result = treeNotMaterialized(`${commitSha}^1`, e, budgetMs, add.child.pid); // a parent it cannot read: the commit's red stands
+      if (result.timedOut !== undefined && !(await waitForProcessGroupExit(add.child.pid))) firstParent.leaveForSafety = true;
+      return { status: null, output: errorText(e) };
+    }
+  };
+  const treeChecks: PlanPrPreflightAsyncChecks = codeRoot === undefined ? checks : { ...checks,
+    taskIdExistence: async (cwd, headRef, budget, root) => {
+      const reading = await taskIds(cwd, headRef, budget, root);
+      if (reading.status !== 1 || root === undefined || unresolvedIdBlock(reading.output) === undefined) return reading;
+      return withoutInheritedIds(reading, await readFirstParent(headRef, budget, root));
+    } };
   try {
-    const add = execFileAsync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha], budgetedSpawn(budgetMs));
+    const add = addTree(tree, commitSha);
     try {
       await add;
     } catch (e) {
@@ -1322,11 +1387,12 @@ export async function planPrPreflightAtCommitAsync(
       return result;
     }
     borrowNodeModules(repoDir, tree);
-    return await planPrPreflightAsync({ cwd: tree, ...pr, ...(codeRoot === undefined ? {} : { codeRoot }) }, checks);
+    return await planPrPreflightAsync({ cwd: tree, ...pr, ...(codeRoot === undefined ? {} : { codeRoot }) }, treeChecks);
   } finally {
     if (!leaveTreeForSafety) {
       await removeTemporaryWorktree(repoDir, tree);
-      await rm(parent, { recursive: true, force: true });
+      if (firstParent.added && !firstParent.leaveForSafety) await removeTemporaryWorktree(repoDir, firstParent.tree);
+      if (!firstParent.leaveForSafety) await rm(parent, { recursive: true, force: true });
     }
   }
 }

@@ -31,7 +31,7 @@ import { parse as parseYaml } from "yaml";
 import { systemClock, type Clock } from "./clock.js";
 import { MOVED_FROM_VALUE, defaultGitRunnerAsync, withoutOneMovedFromLine } from "./plan.js";
 import {
-  MOVE_COPY_RECEIPT, PreviewUnknown, catalog, migrationOptions, readState, refs, selectPlanTaskMigration, unknown,
+  MOVE_COPY_RECEIPT, PreviewUnknown, catalog, liveHeadJudge, migrationOptions, readState, refs, selectPlanTaskMigration, unknown,
   type CatalogOriginal, type MigrationGraphqlReader, type MigrationOptions, type PreviewState,
 } from "./plan-task-migration.js";
 import { planPrPreflightAllows, planPrPreflightAtCommitAsync, ratifyPrCreateRestArgs, type PlanPrPreflightResult } from "./plan-pr-emitter.js";
@@ -283,6 +283,9 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
       }
       planned = stepOf(members);
     }
+    // W1-T14447: a main that moved past its pin is admitted only when its range touches none of the step's records on
+    // either side (the selection judged its own reads; this judges the step's). The step is still written on the pin.
+    await liveHeadJudge(o, { public: pub.paths, ops: ops.paths })(state, planned.members.map(m => ({ id: m.id, path: m.path, files: [m.path] })));
     const [lead] = planned.members as [Planned, ...Planned[]];
     const batched = planned.members.length > 1;
     // A batch of one prints and records exactly what a one-task step always did; a batch adds every member's id.

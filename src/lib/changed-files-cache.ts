@@ -17,7 +17,7 @@ import fs from "node:fs";
 import { dirname, join } from "node:path";
 
 import { systemClock, type Clock } from "./clock.js";
-import { DEFAULT_GH_CALL_TIMEOUT_MS } from "./github-transport.js";
+import { DEFAULT_GH_CALL_TIMEOUT_MS, ghTextAsync } from "./github-transport.js";
 
 const SCHEMA = 1;
 /** PRIMARY CONTROL: GitHub's paginated pull-files endpoint returns at most 3,000 files.
@@ -108,16 +108,16 @@ export function createChangedFilesCache(
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const concurrency = Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY);
   const failureTtlMs = options.failureTtlMs ?? DEFAULT_FAILURE_TTL_MS;
-  const fetchFiles: (prNumber: string, bound?: boolean) => Promise<string[] | undefined> =
+  const fetchFiles: (prNumber: string, immutable: boolean, bound: boolean) => Promise<string[] | undefined> =
     options.fetch ??
-    (async (prNumber: string, bound?: boolean): Promise<string[] | undefined> => {
-      const { stdout } = await execFileRouted(
-        options.ghBin ?? "gh",
-        ["api", "--paginate", `repos/${owner}/${repo}/pulls/${prNumber}/files`, "--jq", bound ? ".[].filename | @json" : ".[].filename"],
-        { encoding: "utf8", maxBuffer: 1 << 26, timeout: DEFAULT_GH_CALL_TIMEOUT_MS },
-      );
-      // JSON strings preserve valid filenames containing newlines or edge whitespace. Legacy reads retain
-      // their historical decoder; neither path adds an endpoint, cadence or pagination request.
+    (async (prNumber: string, immutable: boolean, bound: boolean): Promise<string[] | undefined> => {
+      const args = ["api", "--paginate", `repos/${owner}/${repo}/pulls/${prNumber}/files`, "--jq", bound ? ".[].filename | @json" : ".[].filename"];
+      const bounds = { maxBuffer: 1 << 26, timeout: DEFAULT_GH_CALL_TIMEOUT_MS };
+      // Open caches can observe different heads while the same URL is in flight.
+      const stdout = immutable && options.ghBin === undefined
+        ? await ghTextAsync(args, { ...bounds, fresh: true })
+        : (await execFileRouted(options.ghBin ?? "gh", args, { ...bounds, encoding: "utf8" })).stdout;
+      // JSON strings preserve filenames containing newlines or edge whitespace.
       const lines = bound ? stdout.split("\n").filter(l => l.length > 0).map(l => JSON.parse(l) as unknown)
         : stdout.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
       return isFileList(lines) ? lines : undefined;
@@ -192,7 +192,7 @@ export function createChangedFilesCache(
       const job = queue.shift() as { url: string; immutable: boolean; headRefOid?: string; head?: string };
       active += 1;
       const number = job.url.match(/\/pull\/(\d+)/)?.[1] as string;
-      void fetchFiles(number, job.headRefOid !== undefined)
+      void fetchFiles(number, job.immutable, job.headRefOid !== undefined)
         .then(
           (files) => {
             if (!files) {

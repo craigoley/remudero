@@ -15,6 +15,13 @@
 /** PRIMARY CONTROL: half of GitHub's 300-file review ceiling (`PLAN_RECONCILE_REVIEW_FILE_CEILING`, W1-T3761). */
 export const PLAN_RECONCILE_LANDING_FILE_LIMIT = 150;
 
+/**
+ * W1-T14485: PRIMARY CONTROL: the plan review's per-pull-request record bound (remudero-ops
+ * scripts/ops-gate.rb MAX_RECORDS_PER_PULL_REQUEST). Both status-reconciliation callers cut their
+ * batch here, so every re-queue row and landed count names only records that went into the landing.
+ */
+export const PLAN_RECONCILE_LANDING_RECORD_LIMIT = 50;
+
 /** PRIMARY CONTROL: characters of pull-request body one landing may use; GitHub refuses a body over 65,536. */
 export const PLAN_RECONCILE_LANDING_BODY_BUDGET = 60_000;
 

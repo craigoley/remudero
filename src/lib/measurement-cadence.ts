@@ -1,6 +1,6 @@
 import { stampMechanicalAsk } from "./inbox-retirement.js";
 import { reconcilePlan, reconcileShardStatus, requeueRevertedShard, type RevertedRequeue } from "./plan-reconcile.js";
-import { takePlanReconcileBatch } from "./plan-reconcile-batch.js";
+import { PLAN_RECONCILE_LANDING_BODY_BUDGET, PLAN_RECONCILE_LANDING_RECORD_LIMIT, takePlanReconcileBatch } from "./plan-reconcile-batch.js";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
 import { promisify } from "node:util";
@@ -1619,7 +1619,9 @@ export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOp
       const statusEdit = (taskId: string) => (current: string) => requeueIds.has(taskId)
         ? requeueRevertedShard(current, taskId, lost.get(taskId)).text
         : reconcileShardStatus(current, taskId, (id) => credited.has(id)).text;
-      const batch = takePlanReconcileBatch(landable, (write) => relPathOf(write.taskId));
+      // W1-T14485: cut at the plan review's record bound, so each re-queue row and the landed count name only landed records.
+      const batch = takePlanReconcileBatch(landable, (write) => relPathOf(write.taskId),
+        { files: PLAN_RECONCILE_LANDING_RECORD_LIMIT, bodyChars: PLAN_RECONCILE_LANDING_BODY_BUDGET });
       const inputs = batch.map((write) =>
         ({ relPath: relPathOf(write.taskId), content: write.text, edit: statusEdit(write.taskId) }));
       if (inputs.length > 0) deps.land(inputs);
