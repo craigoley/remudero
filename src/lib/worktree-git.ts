@@ -437,6 +437,7 @@ export interface HostWorktreeGitOptions {
   timeout?: number;
   /** The signal `timeout` kills with (node's default is SIGTERM). */
   killSignal?: NodeJS.Signals;
+  signal?: AbortSignal;
   /** `latin1` maps each stdout byte to one char, so `Buffer.from(out, "latin1")` is the bytes exactly: a blob read
    *  must reach its reader as a checkout writes it, and a UTF-8 decode rewrites an invalid sequence. Default utf8. */
   encoding?: "utf8" | "latin1";
@@ -517,13 +518,16 @@ function directGit(pin: PinnedWorktreeGit, args: readonly string[], spawn: Omit<
 
 /** {@link hostWorktreeGit} off the event loop. `inherit-stdout` writes stdout through on completion. */
 export async function hostWorktreeGitAsync(worktreePath: string, args: readonly string[], opts: HostWorktreeGitOptions = {}): Promise<string> {
+  opts.signal?.throwIfAborted();
   const pin = pinWorktreeGit(worktreePath, opts.log);
   const overrides = await vetPinnedConfigAsync(pin, opts.log ?? stderrLog, opts.configReadTimeoutMs);
-  const { stdio: _stdio, input, ...spawn } = spawnOptions(pin, opts, overrides);
+  opts.signal?.throwIfAborted();
+  const { stdio: _stdio, input, ...spawnOptionsWithoutSignal } = spawnOptions(pin, opts, overrides);
+  const spawn = opts.signal === undefined ? spawnOptionsWithoutSignal : { ...spawnOptionsWithoutSignal, signal: opts.signal };
   const run = async (): Promise<string> => {
     // W1-T13434: through a healthy helper the git child forks there; a request it took is never sent again.
     const route = spawnRoute(spawn);
-    const { stdout } = route.helper !== undefined && route.why === undefined
+    const { stdout } = opts.signal === undefined && route.helper !== undefined && route.why === undefined
       ? await execFileRouted("git", argv(pin, args), { ...spawn, cwd: pin.worktree, ...(input === undefined ? {} : { input }) })
       : await directGit(pin, args, spawn, input, route);
     if (opts.stdio === "inherit-stdout") {
@@ -535,6 +539,7 @@ export async function hostWorktreeGitAsync(worktreePath: string, args: readonly 
   try {
     return await run();
   } catch (error) {
+    opts.signal?.throwIfAborted();
     // The same repair as the sync leaf, off the loop; anything else rethrows.
     const { stdio: _repairStdio, ...repair } = spawnOptions(pin, {}, overrides);
     return retryAfterDanglingRefRepairAsync(async (a, timeout) =>

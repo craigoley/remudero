@@ -232,11 +232,13 @@ test("the real registry declares EXACTLY the five exempt raw sites — the two t
   // W1-T9077 moves it 10 -> 11: a run child's engine tree is cut DETACHED at the daemon's own pinned sha.
   // W1-T9578 moves it 11 -> 12: artifact conflicts are resolved in a leased tree at the PR's head.
   // W1-T10257 keeps it at 12: the hand-worktree row's raw add moves into the shared CoW materializer.
+  // W1-T12169 moves it 12 -> 13: hand-ship cuts unchanged main on the preflight host, possibly over ssh.
   assert.deepEqual(exempt, [
     "src/lib/check-proof.ts::buildBaseProofDir",
     "src/lib/composition-root.ts::addWorktree",
     "src/lib/cow-worktree.ts::gitWorktreeAdd",
     "src/lib/engine-tree.ts::buildEngine",
+    "src/lib/hand-ship.ts::hosts",
     "src/lib/paired-trial.ts::cutSealedAttemptTree",
     "src/lib/plan-pr-emitter.ts::planPrPreflightAtCommit",
     "src/lib/plan-pr-emitter.ts::planPrPreflightAtCommitAsync",
@@ -317,6 +319,7 @@ test("findRawWorktreeAddSites finds every real raw site, including both canonica
       "src/lib/composition-root.ts::addWorktree",
       "src/lib/cow-worktree.ts::gitWorktreeAdd", // W1-T10257: the shared CoW materializer, which hand-worktree now routes through
       "src/lib/engine-tree.ts::buildEngine", // W1-T9077: the pinned engine tree is cut DETACHED at the daemon's sha
+      "src/lib/hand-ship.ts::hosts", // W1-T12169: unchanged main on the hand-ship preflight host, possibly over ssh
       "src/lib/paired-trial.ts::cutSealedAttemptTree",
       "src/lib/plan-pr-emitter.ts::planPrPreflightAtCommit",
       "src/lib/plan-pr-emitter.ts::planPrPreflightAtCommitAsync",

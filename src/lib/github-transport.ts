@@ -26,12 +26,27 @@ import {
   takeGithubHttpReadConditionalTally,
 } from "./github-http-read.js";
 import { sameHost } from "./host-identity.js";
-import { LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
+import { assertLiveWriteAllowed, LIVE_WRITE_SENTINEL_TOKEN, LiveWriteBlockedError } from "./live-write-guard.js";
 
 /** PRIMARY CONTROL: every GitHub CLI invocation gets a wall-clock ceiling unless a caller narrows it. */
 export const DEFAULT_GH_CALL_TIMEOUT_MS = 60_000;
 
 const DEFAULT_GH_MAX_BUFFER = 1 << 24;
+
+export async function writeHandShipPullRequest(
+  { repo, branch }: { repo: string; branch: string }, number: number | undefined, title: string, body: string,
+  signal: AbortSignal, transport = ghTextAsync,
+): Promise<number> {
+  signal.throwIfAborted();
+  assertLiveWriteAllowed("gh-pr-create", `publishing the hand-ship PR for ${branch}`);
+  const fields = ["-f", `title=${title}`, "-f", `body=${body}`];
+  const args = number === undefined
+    ? ["api", "-X", "POST", `repos/${repo}/pulls`, "-f", "base=main", "-f", `head=${branch}`, ...fields]
+    : ["api", "-X", "PATCH", `repos/${repo}/pulls/${number}`, ...fields];
+  const row = JSON.parse(await withGhTransportFloor(() => transport(args, { signal })));
+  if (!Number.isSafeInteger(row.number) || row.number <= 0) throw new Error("GitHub did not return a PR number");
+  return row.number;
+}
 
 export interface GhRateLimitReading {
   remaining?: number;
@@ -524,7 +539,7 @@ function ghHttpReadFor(args: readonly string[], timeoutMs?: number): { paged: bo
  * the broker answers only UTF-8 text, so such a read runs `gh` itself. */
 export async function ghTextAsync(
   args: string[],
-  opts: { maxBuffer?: number; timeout?: number; env?: NodeJS.ProcessEnv; fresh?: true; encoding?: "latin1" } = {},
+  opts: { maxBuffer?: number; timeout?: number; env?: NodeJS.ProcessEnv; fresh?: true; encoding?: "latin1"; signal?: AbortSignal } = {},
   execAsync: GhAsyncExecutor = execFileAsync,
 ): Promise<string> {
   const maxBuffer = opts.maxBuffer ?? DEFAULT_GH_MAX_BUFFER;
@@ -532,7 +547,9 @@ export async function ghTextAsync(
   const env = opts.env;
   const encoding: BufferEncoding = opts.encoding ?? "utf8";
   const read = async (): Promise<string> => {
-    const execOpts = { encoding, maxBuffer, timeout, ...(env === undefined ? {} : { env }) };
+    opts.signal?.throwIfAborted();
+    const execOpts = { encoding, maxBuffer, timeout, ...(opts.signal === undefined ? {} : { signal: opts.signal }),
+      ...(env === undefined ? {} : { env }) };
     const { stdout } = await withGhKillEscalation(execAsync("gh", args, execOpts), args, timeout);
     return stdout;
   };
@@ -549,16 +566,16 @@ export async function ghTextAsync(
     await admitInstallationReadAsync(args);
     try { return rememberHeaders(await read()); } catch (err) { noteInstallationRefusal(err); throw err; }
   }
-  const key = env === undefined && ghArgsAreCoalescibleRead(args) ? `text:${encoding}:${opts.fresh === true ? "fresh:" : ""}${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
+  const key = opts.signal === undefined && env === undefined && ghArgsAreCoalescibleRead(args) ? `text:${encoding}:${opts.fresh === true ? "fresh:" : ""}${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
     await admitInstallationReadAsync(args);
     refuseSentinelGhToken("gh", args, env);
-    const brokered = encoding === "utf8" ? await ghBrokeredAsync(args, opts, env) : undefined;
+    const brokered = opts.signal === undefined && encoding === "utf8" ? await ghBrokeredAsync(args, opts, env) : undefined;
     if (brokered !== undefined) return rememberHeaders(brokered);
     await applyGhReadCadenceAsync(args);
-    const inProcess = encoding === "utf8" && env === undefined ? ghHttpReadFor(args, timeout) : undefined;
+    const inProcess = opts.signal === undefined && encoding === "utf8" && env === undefined ? ghHttpReadFor(args, timeout) : undefined;
     if (inProcess === undefined) return rememberHeaders(await read());
     const stdout = await inProcess.send();
     if (Buffer.byteLength(stdout) > maxBuffer) {

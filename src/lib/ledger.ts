@@ -737,6 +737,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "daemon.memory_drain.completed",
   "daemon.signal_exit",
   "daemon.headroom_reserve.escalated",
+  // W1-T12440: `buildHeadroomRecoveryCandidates` (lib/headroom-recovery.ts) skips escalations this
+  // row already retired; dropping it re-lists issues every sweep to re-learn a closed retirement.
+  "daemon.headroom_reserve.retired",
   // `escalateHeadroomParkCeiling` (run-task.ts) compares this row against the newest
   // `daemon.headroom`; dropping it re-pages once per daemon boot while the probe stays broken.
   "daemon.headroom.park_ceiling.escalated",
