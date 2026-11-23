@@ -2470,7 +2470,7 @@ export function codexServedModel(reroutes: readonly string[]): { servedModel: st
 
 /** Where the Codex served model was named. */
 export type CodexServedModelSource = "codex-exec-stream" | "codex-session-file";
-/** Maximum session-file tail read. */
+/** PRIMARY CONTROL (test/bound-kind-declared.test.ts): caps session-file tail bytes read per attempt. */
 export const CODEX_SESSION_FILE_MAX_BYTES = 16 * 1024 * 1024;
 /** Reasons a present session file cannot name a model. */
 export const CODEX_SESSION_SERVED_MODEL_REASONS = {
