@@ -48,6 +48,9 @@
     - W1-T11155 (queued) fixes modules that the compiled review entry does not load. Whether it explains part of either class is not established.
     W1-T12227 sends every review with stale reviewer code through this path. A path that fails in 26 of 56 runs must be fixed first.
   design: |
+    INVARIANT exit-codes-as-today: the gate returns the child's exit code and the review command's exit codes are as on
+    origin/main except where a defect's fix changes that exit; the row keeps every field it has today, and only a
+    verdict or no_verdict row drops `failure`.
     1. Read the rows. Count `review.ran_from_fresh_tree` rows of the core instance by `exit_code` and `exit_cause` for the 7 days before the build. Put the table, with its window, in the `Why` part of the pull request.
     2. If the ledger holds fewer than 10 rows with `exit_cause`, stop. Report that the evidence is not there yet. Do not guess a cause.
     3. Class each cause: `verdict`, `no_verdict` or `defect`. A cause is `defect` when the review had a pull request to judge and judged nothing, or judged and could not post.
