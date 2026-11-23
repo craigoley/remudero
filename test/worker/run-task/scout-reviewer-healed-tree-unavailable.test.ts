@@ -3,17 +3,12 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { emptyReviewerHealthState, reviewerHealthStatePath, saveReviewerHealthState } from "#src/lib/reviewer-health.js";
+import * as runTask from "#test/helpers/run-task-test.js";
 import type { Config } from "#src/lib/config.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
-type PrepareWorktree = (repoDir: string, worktreePath: string) => boolean;
-
-async function fixture(t: TestContext, prepareWorktree: PrepareWorktree = () => true) {
-  // Keep this focused regression out of run-task's importer census while still loading the real
-  // route at runtime. The graph reader only resolves literal module specifiers.
-  const runTaskPath = ["#src/", "run-task.js"].join("");
-  const runTask = await import(runTaskPath);
+function fixture(t: TestContext, prepareWorktree: runTask.FreshTreeReviewSeams["prepareWorktree"] = () => true) {
   const { dir } = ownedFixtureDir(t, "scout-healed-review");
   const origin = gitRepo({ scope: t, bare: true });
   const worker = gitRepo({ scope: t });
@@ -67,7 +62,7 @@ async function fixture(t: TestContext, prepareWorktree: PrepareWorktree = () => 
 }
 
 test("W1-T13096: reviewer.healed_tree_unavailable no longer recurs", async (t) => {
-  const f = await fixture(t);
+  const f = fixture(t);
   const normal = async () => 7;
   assert.equal(await f.route("207", [], {}, normal), 0);
   assert.equal(await f.route("208", [], {}, normal), 0);
@@ -82,7 +77,7 @@ test("W1-T13096: reviewer.healed_tree_unavailable no longer recurs", async (t) =
 });
 
 test("W1-T13096: the symptom is still recorded when its failure occurs", async (t) => {
-  const f = await fixture(t, () => false);
+  const f = fixture(t, () => false);
   assert.equal(await f.route("209", [], {}, async () => 7), 7);
   assert.equal(f.cuts.length, 1);
   assert.equal(existsSync(f.cuts[0]!), false, "the failed private checkout is removed");
