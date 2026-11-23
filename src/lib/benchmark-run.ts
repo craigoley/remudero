@@ -504,6 +504,63 @@ function callEvidence(row: Record<string, unknown>) {
   };
 }
 
+/** W1-T12151: one count on an attempt row — the number the provider reported, or `null` beside `<field>_unreported_reason`.
+ *  A count no provider reported is never written as 0. */
+function attemptCount<F extends AttemptCountField>(field: F, value: number | undefined,
+  gap: string | undefined): Pick<AttemptCounts, F | `${F}_unreported_reason`> {
+  const count: Partial<Record<string, number | string | null>> = gap === undefined && value !== undefined
+    && Number.isSafeInteger(value) && value >= 0 ? { [field]: value }
+    : { [field]: null, [`${field}_unreported_reason`]: gap ?? `${field}-not-reported` };
+  return count as Pick<AttemptCounts, F | `${F}_unreported_reason`>;
+}
+
+type AttemptCountField = "turns" | "model_steps" | "uncached_input_tokens" | "cached_input_tokens";
+
+/** W1-T12151: the counts an attempt row carries; each is the reported number, or `null` beside its named reason. */
+export interface AttemptCounts {
+  turns: number | null;
+  turns_unreported_reason?: string;
+  /** Codex rows only: completed model-output and tool-call items inside the turns. */
+  model_steps?: number | null;
+  model_steps_unreported_reason?: string;
+  uncached_input_tokens: number | null;
+  uncached_input_tokens_unreported_reason?: string;
+  cached_input_tokens: number | null;
+  cached_input_tokens_unreported_reason?: string;
+}
+
+/** W1-T12151: every count an attempt row carries, as a named gap, for a row that has no worker result to read one from. */
+export function unreportedAttemptCounts(reason: string): AttemptCounts {
+  return { ...attemptCount("turns", undefined, reason), ...attemptCount("uncached_input_tokens", undefined, reason),
+    ...attemptCount("cached_input_tokens", undefined, reason) };
+}
+
+/** W1-T12151: the turn count, a Codex attempt's model steps, and input tokens split into uncached and cached with one
+ *  meaning for every provider: `cached_input_tokens` were read from the provider's prompt cache, `uncached_input_tokens`
+ *  are every other input token. Codex reports input with cached inside, so uncached is input minus cached; Claude reports
+ *  them apart, so uncached is its input plus the tokens it wrote to the cache. The `tokens` object stays as it was. */
+function attemptCounts(result: WorkerResult, observedEnvelope: boolean, tokensObserved: boolean,
+  usageState: string | undefined): AttemptCounts {
+  const codex = result as WorkerResult & { modelSteps?: number };
+  const absent = result.outputRetention?.completion?.state === "absent";
+  const turnGap = !observedEnvelope ? "worker-result-envelope-not-reported"
+    : result.provider === "codex" && absent ? "codex-stdout-report-absent" : undefined;
+  const tokenGap = !observedEnvelope ? "worker-result-envelope-not-reported"
+    : result.provider === "cash" ? "cash-input-token-split-differs-by-deployment-api"
+      : usageState === "partial" ? "worker-token-usage-partial"
+        : usageState === "unavailable" || !tokensObserved ? "worker-token-usage-unavailable" : undefined;
+  const { input, cacheRead, cacheCreation } = result.tokens;
+  const uncached = result.provider === "codex" ? input - cacheRead : input + cacheCreation;
+  return {
+    ...attemptCount("turns", result.numTurns, turnGap),
+    ...(result.provider === "codex"
+      ? attemptCount("model_steps", codex.modelSteps, turnGap ?? (codex.modelSteps === undefined ? "codex-model-steps-not-counted" : undefined))
+      : {}),
+    ...attemptCount("uncached_input_tokens", uncached, tokenGap),
+    ...attemptCount("cached_input_tokens", cacheRead, tokenGap),
+  };
+}
+
 /** Keep the billing derivation at the canonical worker boundary, including cash-provider calls.
  * An empty result envelope carries default usage zeros, not observations. Codex CLI currently
  * supplies zero placeholders when dollars or token usage are not reported. */
@@ -523,10 +580,15 @@ export function benchmarkWorkerAttemptResources(result: WorkerResult) {
       const state = retention[channel]?.state;
       return state === undefined ? [] : [[channel, { state }]];
     })) : undefined;
+  const servedModelSource = (result as { servedModelSource?: unknown }).servedModelSource;
   return {
     // The private ledger row owns attempt identity; the public-safe benchmark envelope below does not.
     ...(fields.execution_evidence === undefined ? {} : { execution_evidence: fields.execution_evidence }),
     served_model: fields.served_model,
+    // W1-T12151: the source the Codex command wrote that named the served model.
+    ...(fields.served_model !== null && result.provider === "codex" && typeof servedModelSource === "string"
+      ? { served_model_source: servedModelSource } : {}),
+    ...attemptCounts(result, observedEnvelope, tokensObserved, fields.token_usage_state),
     ...(outputRetention === undefined ? {} : { output_retention: outputRetention }),
     // W1-T10877: the sampling pin the cash request carried, from the table openWeightTemperatureField reads.
     ...(result.provider === "cash" && Object.hasOwn(OPENWEIGHT_TEMPERATURE, fields.model)
@@ -644,6 +706,9 @@ export const SPAWN_FAILURE_MESSAGE_MAX_CHARS = 240;
 /** W1-T4616: the cause of a spawn that threw before returning — its class, code and a bounded message
  *  with paths, credentials and long tokens redacted — and whether it failed before any model was
  *  selected, so the attempt is a counted coverage gap rather than a model's failure. */
+/** W1-T12151: why a row for a spawn that threw before its result carries no count. */
+export const SPAWN_THREW_BEFORE_RESULT = "spawn-threw-before-result";
+
 export function spawnFailureDetail(error: unknown, assignmentObserved: boolean,
   observations?: WeakMap<object, { servedModel: string | null; servedModelReason?: string }>): Record<string, unknown> {
   const errorClass = error instanceof Error ? error.constructor.name || "Error" : typeof error;
@@ -656,7 +721,7 @@ export function spawnFailureDetail(error: unknown, assignmentObserved: boolean,
     .replace(/[A-Za-z0-9+_=-]{32,}/g, "<token>")
     .replace(/\s+/g, " ").trim().slice(0, SPAWN_FAILURE_MESSAGE_MAX_CHARS);
   return { pre_selection: !assignmentObserved, error_class: errorClass, ...(code ? { error_code: code } : {}), error_message: message,
-    ...thrownServedModelEvidence(error, observations) };
+    ...thrownServedModelEvidence(error, observations), ...unreportedAttemptCounts(SPAWN_THREW_BEFORE_RESULT) };
 }
 
 /** W1-T13868: named when a getter on the thrown error or its `cause` chain throws while its served model is read. */
@@ -872,7 +937,8 @@ export function orphanedAttemptFields(assignmentId: string, detectedBy: string):
   const gap = unavailable(ORPHAN_EVIDENCE_REASON);
   const fields = { ...attemptAssignmentJoin(assignmentId, false), success: false, worker_failure: ORPHANED_BY_PROCESS_EXIT,
     orphan_detected_by: detectedBy, served_model_unavailable_reason: ORPHAN_EVIDENCE_REASON,
-    billing_mode_unavailable_reason: ORPHAN_EVIDENCE_REASON, cost_unavailable_reason: ORPHAN_EVIDENCE_REASON };
+    billing_mode_unavailable_reason: ORPHAN_EVIDENCE_REASON, cost_unavailable_reason: ORPHAN_EVIDENCE_REASON,
+    ...unreportedAttemptCounts(ORPHAN_EVIDENCE_REASON) };
   const receipt = benchmarkRunAttemptReceipt({ step: "worker.attempt", ...fields })!;
   return { ...fields, benchmark_run: { ...receipt, servedModel: gap, tokens: gap, durationMs: gap,
     accounting: { source: receipt.accounting.source, billingMode: gap, apiCostUsd: gap, subscriptionNotionalUsd: gap } } };

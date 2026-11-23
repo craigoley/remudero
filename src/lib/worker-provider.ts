@@ -175,6 +175,10 @@ interface CodexWorkerResult {
    * (see {@link codexServedModel}). Never the `--model` request echoed back. */
   servedModel?: string | null;
   servedModelReason?: string;
+  /** W1-T12151: the source that named {@link servedModel}; absent beside a null. */
+  servedModelSource?: CodexServedModelSource;
+  /** W1-T12151: model steps inside the attempt's turns ({@link ParsedCodexEvents.modelSteps}). */
+  modelSteps?: number;
   compactionEvents: [];
   compactionFailures: [];
   compactionConfigured: false;
@@ -2478,6 +2482,96 @@ export function codexServedModel(reroutes: readonly string[]): { servedModel: st
   return latest === undefined ? { servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON } : { servedModel: latest };
 }
 
+/** W1-T12151: which source the Codex command wrote named the served model. The request's `--model` is never one. */
+export type CodexServedModelSource = "codex-exec-stream" | "codex-session-file";
+/** W1-T12151: BACKSTOP on the bytes read from a session file's tail; the latest turn is what names the model that answered,
+ *  so a file past it still names one unless its final turn alone is larger. */
+export const CODEX_SESSION_FILE_MAX_BYTES = 16 * 1024 * 1024;
+/** W1-T12151: why a session file codex wrote for the thread named no model either. Absent file: {@link CODEX_SERVED_MODEL_REASON}. */
+export const CODEX_SESSION_SERVED_MODEL_REASONS = {
+  unnamed: `${CODEX_SERVED_MODEL_REASON}, and the thread's session file has no turn_context model or model_reroute`,
+  unreadable: `${CODEX_SERVED_MODEL_REASON}, and the thread's session file could not be read`,
+} as const;
+
+/** W1-T12151: how many of the newest `sessions/YYYY/MM/DD` day directories are searched for a thread's file. Codex creates
+ *  the file the day the thread starts, so a fresh attempt's file is in the newest day, or the one before it across midnight. */
+const CODEX_SESSION_DAYS_SEARCHED = 3;
+
+/** One directory's entries; `undefined` when it does not exist, `unreadable` for any other failure to list it. */
+function listSessionDir(dir: string): string[] | undefined | "unreadable" {
+  try { return readdirSync(dir); } catch (error) {
+    // A directory codex never created holds no file; any other failure is carried out as `unreadable`.
+    return (error as NodeJS.ErrnoException)?.code === "ENOENT" ? undefined : "unreadable";
+  }
+}
+
+/** W1-T12151: `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl`, searched in the newest
+ *  {@link CODEX_SESSION_DAYS_SEARCHED} day directories codex wrote, whatever clock or zone named them. A directory that
+ *  exists but cannot be listed is `unreadable`, never read as no file. */
+export function codexSessionFilePath(home: string,
+  threadId: string): { state: "found"; path: string } | { state: "absent" } | { state: "unreadable" } {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(threadId)) return { state: "absent" };
+  const newest = (names: readonly string[]) => names.filter((name) => /^\d+$/.test(name)).sort().reverse();
+  let unreadable = false;
+  const days: string[] = [];
+  const walk = (dir: string, depth: number): void => {
+    const names = listSessionDir(dir);
+    if (names === "unreadable") { unreadable = true; return; }
+    for (const name of newest(names ?? [])) {
+      if (days.length >= CODEX_SESSION_DAYS_SEARCHED) return;
+      if (depth === 2) days.push(join(dir, name));
+      else walk(join(dir, name), depth + 1);
+    }
+  };
+  walk(join(home, "sessions"), 0);
+  const suffix = `-${threadId}.jsonl`;
+  for (const dir of days) {
+    const names = listSessionDir(dir);
+    if (names === "unreadable") { unreadable = true; continue; }
+    const name = names?.find((entry) => entry.startsWith("rollout-") && entry.endsWith(suffix));
+    if (name !== undefined) return { state: "found", path: join(dir, name) };
+  }
+  return unreadable ? { state: "unreadable" } : { state: "absent" };
+}
+
+/** W1-T12151: the latest model a codex session file names, from a `turn_context` record's `payload.model` (the model
+ *  codex ran that turn with) or an `event_msg` `model_reroute` record's `payload.to_model` (the server's reroute). */
+export function codexSessionFileModel(text: string): string | undefined {
+  let latest: string | undefined;
+  for (const line of text.split("\n")) {
+    if (!line.includes("turn_context") && !line.includes("model_reroute")) continue;
+    let record: { type?: unknown; payload?: { type?: unknown; model?: unknown; to_model?: unknown } } | null;
+    try { record = JSON.parse(line) as typeof record; } catch (error) {
+      // A torn line (the tail read's cut head, or a write in progress) names no model; the other lines still can.
+      void error;
+      continue;
+    }
+    const payload = record?.payload;
+    const named = record?.type === "turn_context" ? cashResponseModel(payload?.model)
+      : record?.type === "event_msg" && payload?.type === "model_reroute" ? cashResponseModel(payload?.to_model) : undefined;
+    if (named !== undefined) latest = named;
+  }
+  return latest;
+}
+
+/** W1-T12151: the served model of a finished codex attempt and the source that named it. The `exec --json` stream speaks
+ *  first (a reroute is the server's own word); else the session file codex wrote for the thread; else `null` beside the
+ *  reason, never the requested model. */
+export function codexAttemptServedModel(reroutes: readonly string[], home: string,
+  threadId: string): { servedModel: string | null; servedModelReason?: string; servedModelSource?: CodexServedModelSource } {
+  const stream = codexServedModel(reroutes);
+  if (stream.servedModel !== null) return { ...stream, servedModelSource: "codex-exec-stream" };
+  const found = codexSessionFilePath(home, threadId);
+  if (found.state === "absent") return stream;
+  const tail = found.state === "found" ? readBoundedFileTail(found.path, CODEX_SESSION_FILE_MAX_BYTES) : undefined;
+  if (tail === undefined || (tail.state !== "complete" && tail.state !== "truncated")) {
+    return { servedModel: null, servedModelReason: CODEX_SESSION_SERVED_MODEL_REASONS.unreadable };
+  }
+  const named = codexSessionFileModel(tail.text);
+  return named === undefined ? { servedModel: null, servedModelReason: CODEX_SESSION_SERVED_MODEL_REASONS.unnamed }
+    : { servedModel: named, servedModelSource: "codex-session-file" };
+}
+
 type ObservedServedModel = { servedModel: string | null; servedModelReason?: string };
 const observedServedModels = new WeakMap<object, ObservedServedModel>();
 /** W1-T13868: one call's own observations. A caller's abort reason can be ONE error shared by many calls (one signal,
@@ -2601,8 +2695,16 @@ export interface ParsedCodexEvents {
   completion: CodexCompletionEvidence;
   /** W1-T13868: each turn's reroute target, in order; present only when codex reported one. */
   reroutes?: string[];
+  /** W1-T12151: completed items that are model output or tool calls ({@link CODEX_MODEL_STEP_ITEM_TYPES}), every turn. */
+  modelSteps: number;
   retentionLoss: CodexRetentionLoss;
 }
+
+/** W1-T12151: the `item.completed` item types that are a model step: a message, reasoning, or a tool call. One `exec` call
+ *  is one turn however many of these it takes, so the turn count alone cannot compare a Codex attempt's work. */
+export const CODEX_MODEL_STEP_ITEM_TYPES: ReadonlySet<string> = new Set([
+  "agent_message", "reasoning", "command_execution", "file_change", "mcp_tool_call", "web_search",
+]);
 
 export interface CodexRetentionLoss {
   finalMessageSealed: boolean;
@@ -3018,6 +3120,7 @@ export class CodexJsonlAccumulator {
   private missingUsageTurns = 0;
   private turnInProgress = false;
   private numTurns = 0;
+  private modelSteps = 0;
   private usageRefusal: UsageLimitRefusal | undefined;
   private pending = "";
   private keptBytes = 0;
@@ -3146,6 +3249,7 @@ export class CodexJsonlAccumulator {
       tokenUsageState: this.usageTurns === 0 ? "unavailable"
         : this.missingUsageTurns > 0 || this.failed || this.turnInProgress || this.numTurns > this.completedTurns ? "partial" : "observed",
       numTurns: this.numTurns,
+      modelSteps: this.modelSteps,
       isError: this.failed,
       subtype: this.failed ? "error_codex" : "success",
       errors: this.errors,
@@ -3356,6 +3460,7 @@ export class CodexJsonlAccumulator {
       this.observeMessage?.(event.item.text, this.nowMs);
     }
     if (event.type === "item.completed") this.observeToolCalls(event.item);
+    if (event.type === "item.completed" && itemType !== undefined && CODEX_MODEL_STEP_ITEM_TYPES.has(itemType)) this.modelSteps += 1;
     if (event.type === "item.completed" && event.item?.type === "error" && typeof event.item.message === "string") {
       const to = cashResponseModel(CODEX_REROUTE_RE.exec(event.item.message)?.[2]);
       if (to !== undefined) this.observeModel(to);
@@ -7268,6 +7373,7 @@ async function spawnCodexWorkerInPrivateTemp(
       costUsd: 0,
       ...(notionalCostUsd === undefined ? {} : { notionalCostUsd }),
       numTurns: parsed.numTurns,
+      modelSteps: parsed.modelSteps,
       // Codex exec 0.152.0 exposes no max-turn flag; never ledger the Claude cap as enforced.
       maxTurns: undefined,
       text: parsed.text,
@@ -7291,7 +7397,8 @@ async function spawnCodexWorkerInPrivateTemp(
       tokens: parsed.tokens,
       tokenUsageState: parsed.tokenUsageState,
       modelUsage: {},
-      ...codexServedModel(parsed.reroutes ?? []),
+      // W1-T12151: the stream's reroute, else the session file codex wrote for the thread, else null and why.
+      ...codexAttemptServedModel(parsed.reroutes ?? [], codexHome(config), parsed.sessionId || args.resumeSessionId || ""),
       compactionEvents: [],
       compactionFailures: [],
       compactionConfigured: false,
