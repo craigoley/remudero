@@ -906,7 +906,8 @@ test("W1-T10618: the served product case operation matches the authenticated API
 });
 
 test("W1-T10823: the served plan proposal reaches the maintained native handoff; served product proposal uses the verified managed checkout default", async (t) => {
-  const root = ownedFixtureDir(t, "product-plan-http").dir;
+  const fixture = ownedFixtureDir(t, "product-plan-http");
+  const root = fixture.dir;
   const repoRoot = join(root, "immutable-generation", "remudero");
   const stateBase = join(root, "instances");
   const checkout = join(stateBase, "arcade", "repos", "wreckterra");
@@ -941,24 +942,32 @@ test("W1-T10823: the served plan proposal reaches the maintained native handoff;
   const ledgerPath = join(root, "state/ledger.ndjson");
   const argsFile = join(root, "child-args.txt");
   const countFile = join(root, "child-count.txt");
+  const release = join(root, "release");
   writeFileSync(join(tree, "bin", "rmd"), String.raw`#!/usr/bin/env node
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(countFile)}, "invoked\n");
 fs.writeFileSync(${JSON.stringify(argsFile)}, args.join("\n") + "\n");
-setTimeout(() => {
+const timer = setInterval(() => {
+  if (!fs.existsSync(${JSON.stringify(release)})) return;
+  clearInterval(timer);
   const mode = args[1].slice("--mode=".length), run_id = "PLAN-" + mode + "-fixture", task_id = "PLAN-" + mode;
   const rows = [
     { ts: new Date().toISOString(), run_id, task_id, step: "plan.start", lane: "plan", actor_pid: process.pid, mode, brief: args[2] },
     { ts: new Date().toISOString(), run_id, task_id, step: "pr.opened", lane: "plan", pr_url: "https://github.com/craigoley/wreckterra/pull/42" }
   ];
   fs.appendFileSync(${JSON.stringify(ledgerPath)}, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
-}, 1000);
+}, 20);
+setTimeout(() => process.exit(2), 30000).unref();
 `);
   chmodSync(join(tree, "bin", "rmd"), 0o755);
   mkdirSync(join(root, "state"), { recursive: true });
   writeFileSync(ledgerPath, "");
-  const gateway = ratifyCliGateway(repoRoot, join(root, "logs"), { ledgerPath, freshTree: (action) => action({ path: tree, sha: "f".repeat(40) }) });
+  const gateway = ratifyCliGateway(repoRoot, join(root, "logs"), { ledgerPath, freshTree: (action) => {
+    const completed = action({ path: tree, sha: "f".repeat(40) });
+    fixture.until(completed);
+    return completed;
+  } });
   const panelGraph = { root: repoRoot, planPath: join(root, "plan/tasks.yaml"), ledgerPath, github: { prView: () => null }, statusGithub: fakeGitHub(), ratify: gateway };
   const products = assembled(root);
   const mounted = assembled(root, "/v1/products/case", { panelGraph, instances: { registryPath, stateBase } });
@@ -990,7 +999,8 @@ setTimeout(() => {
   assert.equal((await send("alice", propose({ expectedRevision: 1 }))).body.error, "stale_revision");
   assert.equal(readFileSync(ledgerPath, "utf8"), "", "no refusal reached the gateway");
 
-  const pending = await send("alice", propose());
+  // Keep the child in flight until the first response has been read, even when the ledger reader is slow.
+  const pending = await send("alice", propose()).finally(() => writeFileSync(release, "release\n"));
   assert.equal(pending.status, 200, JSON.stringify(pending.body));
   assert.equal(pending.body.planOperation?.state, "pending", "the response is a truthful pending observation, not a wait for the child");
   assert.equal(pending.body.planOperation?.mode, "clarify");
