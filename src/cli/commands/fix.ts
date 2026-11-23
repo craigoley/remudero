@@ -4955,6 +4955,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     let harnessCommitMarkerFiles: readonly string[] = [];
     let harnessCommittedSha: string | undefined;
     let ownRows: string[] = [];
+    const fixLeftEdits = () => (deps.worktreeHasUncommittedChanges ?? host.worktreeHasUncommittedChanges)(opts.worktreePath);
     const harnessCommit = (report: string, options: Pick<Parameters<typeof host.harnessCommitForShellLessWorker>[0], "subjectSource" | "derivedCommit" | "fixOutcome"> = {}, candidate?: { branch: string; base: string }) => {
       if (censusCheck?.refusal) {
         harnessCommitRefusalReason = censusCheck.refusal.text;
@@ -4973,6 +4974,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         acceptance: opts.task.acceptance,
         admitTests: admitFixTests,
         ...options,
+        leftEdits: fixLeftEdits,
         assignmentId: fixResult.selectionAssignmentId,
         requireMergeHead: currentMergeConflict !== undefined,
         log: deps.log,
@@ -5015,7 +5017,6 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     };
     ownRows = fixHarnessOwnsGit && !proofRepairRound ? await ownVerbRows() : [];
     let fixAction = admitUnfiledOwnDiff(admitOwnVerbRows(decideFixOutcomeAction(fixOutcome, { admitTests: admitFixTests, attribution: await attributeRed(fixOutcome) })));
-    const fixLeftEdits = () => (deps.worktreeHasUncommittedChanges ?? host.worktreeHasUncommittedChanges)(opts.worktreePath);
     // W1-T8524: one derived subject for every round that left edits; the task title is the last source.
     const roundDerivedCommit = () => derivedFixCommit([priorCiFailures?.[0]?.name, unmet[0]?.claim, gateFailuresNow?.[0]?.reason, opts.task.title]
       .find((source) => source !== undefined && source.trim().length > 0), opts.prUrl);

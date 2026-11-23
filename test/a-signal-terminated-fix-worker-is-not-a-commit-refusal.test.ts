@@ -30,7 +30,8 @@ import type { ReviewVerdict } from "#src/lib/review.js";
 
 const TASK = "W1-T5999X";
 const HEAD = "head-a";
-const MISSING_LINE = "no anchored COMMIT_MESSAGE line in the report";
+/** A worker that left no edits and no COMMIT_MESSAGE line changed nothing. */
+const CHANGED_NOTHING = "the worker changed nothing";
 /** The codex runner's result for a child a signal ended: subtype `error_exit_null`, and since W1-T6027 the signal's name. */
 const SIGNAL_EXIT = { subtype: "error_exit_null", isError: true, exit: { kind: "signal", signal: "SIGTERM" } } as const;
 const NORMAL_EXIT = { subtype: "success", isError: false, exit: { kind: "exit", code: 0 } } as const;
@@ -123,17 +124,19 @@ test("W1-T5999: two signal-terminated fix rounds at one head never count toward 
 
 test("W1-T5999: a fix worker that exits normally without a COMMIT_MESSAGE line is still a refusal", async (t) => {
   const first = await fixRound(t, "DAEMON-1", NORMAL_EXIT);
-  assert.equal(first.rows.find((row) => row.step === "fix.commit_refused")?.reason, MISSING_LINE);
+  assert.equal(first.rows.find((row) => row.step === "fix.commit_refused")?.reason, CHANGED_NOTHING);
   assert.equal(first.rows.find((row) => row.step === "fix.done")?.subtype, "commit_refused");
   assert.equal(first.outcome.reason, "harness commit refused");
   const second = await fixRound(t, "DAEMON-2", NORMAL_EXIT);
+  // A round that changed nothing is re-read once at its head before it stands down.
+  assert.equal(first.rows.filter((row) => row.step === "fix.commit_refused").length, 2);
   const tally = fixRoundTally([...first.rows, ...second.rows], TASK, HEAD, "executed");
-  assert.equal(tally.refusals.length, 2);
-  assert.equal(tally.repeatedRefusal, MISSING_LINE);
+  assert.equal(tally.refusals.length, 4);
+  assert.equal(tally.repeatedRefusal, CHANGED_NOTHING);
 });
 
 test("W1-T5999: a non-zero exit CODE is not a signal — the worker exited, so its missing line is a refusal", async (t) => {
   const { rows } = await fixRound(t, "DAEMON-1", { subtype: "error_exit_1", isError: true, exit: { kind: "exit", code: 1 } });
-  assert.equal(rows.find((row) => row.step === "fix.commit_refused")?.reason, MISSING_LINE);
+  assert.equal(rows.find((row) => row.step === "fix.commit_refused")?.reason, CHANGED_NOTHING);
   assert.equal(rows.find((row) => row.step === "fix.done")?.subtype, "commit_refused");
 });
