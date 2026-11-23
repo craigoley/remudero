@@ -12,7 +12,8 @@
   # refusal-amendment (W1-T9663, run W1-T9663-1792605145320, 2026-10-21T19:30:21.614Z): the worker refused criterion 2 [needs-operator-input] — proposed add-precondition: record the operator decision the worker needs as a precondition, then re-dispatch
   #   worker evidence: Documenting a fresh task requires the same ruling.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: blocked
+  retirement: retired # operator 2026-11-23: "Retire W1-T9663"; the operator ruled that the 30-minute bake rule needs no plan-only task
   # backlog gardener: band=4 evidence=af5af096fca9ddfb
   attempts: 0
   files:

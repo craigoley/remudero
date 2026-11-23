@@ -7,7 +7,8 @@
   verify: auto
   risk: low
   priority: 4
-  status: queued
+  status: blocked
+  retirement: retired # operator 2026-11-23: "Retire it"; its only target, src/coverage-ratchet/config.yaml, does not exist, so it cannot be built as written
   # backlog gardener: band=4 evidence=33b88a5db5b4e12e
   attempts: 0
   files:

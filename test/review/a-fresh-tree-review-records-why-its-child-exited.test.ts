@@ -182,10 +182,11 @@ test("W1-T12225 criterion 3: a signal and a silent child each have a cause, and 
 });
 
 test("W1-T12225 criterion 4: the row keeps `failure`, and a child that exits 0 writes no `exit_cause`", async () => {
-  const failed = await stubRun('echo "fatal: the stderr line of the child" >&2\nexit 2', "closed-before-review");
+  // W1-T12226: only a defect keeps `failure`; a closed pull request is `no_verdict` and drops it.
+  const failed = await stubRun('echo "fatal: the stderr line of the child" >&2\nexit 2', "verdict-not-posted");
   assert.equal(failed.code, 2);
   assert.equal(failed.row.failure, "fatal: the stderr line of the child", "the stderr text stays in `failure`, as before");
-  assert.equal(failed.row.exit_cause, "closed-before-review");
+  assert.equal(failed.row.exit_cause, "verdict-not-posted");
   assert.equal(existsSync(dirname(failed.exitFile)), false, "the directory of the result file does not stay on disk");
 
   const clean = await commandRun("success");
