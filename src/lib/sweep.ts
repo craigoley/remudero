@@ -420,6 +420,7 @@ import {
   holdTaskForRefusal,
   noPrVerdictRowsFromLedger,
   readTaskShard,
+  readTaskShardAtMain,
   taskAwaitsAmendment,
   type RefusalAmendmentResult,
   type RefusalCandidate,
@@ -3596,6 +3597,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     const facts = { taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber, headSha: pr.headSha, ...contractRevisionFor(pr) };
     return await readPriorRoundHold(rows, facts, { readAmendmentMergedAt, readCheckCompletions: () => readRequiredCheckCompletions(pr) });
   };
+  const planRepairGitAsync = (dir: string) => async (args: string[]) =>
+    (deps.planRepairGitImpl ?? defaultGitCaptureAsync)("git", ["-C", dir, ...args]);
   // W1-T12199: amendments land through the sealed task-file landing. A test's injected git and gh
   // carry the landing too, so it never runs a real child against the checkout the test runs in.
   const taskFilesLandingOpts = (target: PlanDestinationRepository): LandTaskFilesOpts => ({
@@ -3608,7 +3611,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     ...(deps.planRepairGitImpl ? { git: (args: string[]) => planRepairGit("git", ["-C", target.checkoutDir, ...args]) } : {}),
     // W1-T13169: task ids are reserved in the public repository, so a landing into the plan destination releases one there.
     ...(target.checkoutDir === repoDir ? {} : {
-      reservationGitAsync: async (args: string[]) => (deps.planRepairGitImpl ?? defaultGitCaptureAsync)("git", ["-C", repoDir, ...args]),
+      reservationGitAsync: planRepairGitAsync(repoDir),
     }),
     ...(deps.ghJsonImpl ? { gh: (args: string[]) => {
       const out = ghJsonForBuild(args);
@@ -6108,6 +6111,17 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           results.push({ ...base, outcome: "task_closed" });
           continue;
         }
+        const isPublic = target === publicTaskRepository;
+        let atMain: Awaited<ReturnType<typeof readTaskShardAtMain>>;
+        if (!isPublic) {
+          try {
+            atMain = await readTaskShardAtMain(target.checkoutDir, c.taskId, planRepairGitAsync(target.checkoutDir));
+          } catch (e) {
+            results.push({ ...base, outcome: "lookup_unreadable", code: "ops-shard-unreadable", error: String((e as Error)?.message ?? e) });
+            continue;
+          }
+        }
+        const shardOf = (taskId: string) => isPublic ? readTaskShard(target.checkoutDir, taskId) : atMain;
         try {
           holdTaskForRefusal(join(config.root, "state"), task, c.refusals, c.runId, c.contractRevision);
         } catch (e) {
@@ -6115,11 +6129,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
         results.push(
           await draftRefusalAmendment(c, {
-            readShard: (taskId) => readTaskShard(target.checkoutDir, taskId),
+            readShard: shardOf,
             // W1-T12199: an amendment that waits, or that the open landing PR carries, is found by its staged
             // file. The per-task branch is still read for an amendment opened before this landing.
             probeExisting: async (branch) => {
-              const relPath = readTaskShard(target.checkoutDir, c.taskId)?.relPath;
+              const relPath = shardOf(c.taskId)?.relPath;
               const scoped = destination.outcome === "named"
                 ? (await landTaskFilesAsync(target.checkoutDir, [], { ...landingOpts(target), stageOnly: true })).waiting
                 : undefined;
