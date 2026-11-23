@@ -97,9 +97,9 @@ test("W1-T12439: a redesign amendment with distinct proofs reaches filing", asyn
   assert.equal(rows.some((row) => row.step === FAILURE), false);
 });
 
-test("W1-T12439: redesign refuses a shared proof before filing", {
-  todo: "The redesign amendment precheck must apply the plan-only promotion for the existing shard.",
-}, async (t) => {
+// The recurring cause: an amendment whose new proof duplicates a sibling's passed the redesign precheck, then the
+// plan PR's preflight blocked it as shared-proof and the row landed as redesign.garden_filing_failed.
+test("W1-T12439: redesign.garden_filing_failed no longer recurs", async (t) => {
   const { rows, filingChecks } = await replayAmendment(t, FIRST_PROOF);
   const verdict = rows.find((row) => row.step === REDESIGN_JUDGED_STEP);
   const failure = rows.find((row) => row.step === FAILURE);
