@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: low # changes only the refusal reason and its ledger fields; the mutex check, the claim and every release stay as they are
+  risk: high # changes only the refusal reason and its ledger fields; the mutex check, the claim and every release stay as they are. Raised 2026-11-23: the scope amendment spans 2 concerns (Rule 19)
   origin: "operator-session#dispatch-oddities-2026-11-17"
   plan_refs:
     - W1-T2520
