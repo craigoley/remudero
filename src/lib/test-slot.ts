@@ -2370,22 +2370,55 @@ const SLOT_RECORD = /^slot-[1-9][0-9]*\.json$/;
  * so. A static record held by an ANCESTOR (the author whose step this is) already covers this process.
  */
 export function admitStaticWork(label: string, opts: TestSlotOptions & { memoryBytes: number }): StaticAdmission {
+  const startedAt = (opts.clock ?? systemClock).now();
+  const run = staticAdmission(label, opts, opts.memoryHeadroom ?? (() => readMemoryHeadroom(undefined, {
+    platform: opts.platform, vmStat: opts.vmStat ?? readVmStat,
+  })));
+  let next = run.next();
+  while (!next.done) {
+    (opts.sleep ?? sleepSync)(next.value);
+    next = run.next();
+  }
+  return "slotReason" in next.value ? staticSlotAdmission(next.value.slotReason, acquireTestSlot(label, opts), opts, startedAt) : next.value;
+}
+
+/** {@link admitStaticWork} on a daemon path (W1-T14145): the wait yields the event loop and darwin's vm_stat is awaited. */
+export async function admitStaticWorkAsync(label: string, opts: Omit<TestSlotOptions, "sleep"> & { memoryBytes: number }): Promise<StaticAdmission> {
+  const startedAt = (opts.clock ?? systemClock).now();
+  const darwin = darwinHeadroom(opts);
+  const refresh = async (): Promise<void> => {
+    if (!darwin.active) return;
+    const report = opts.vmStat ? opts.vmStat() : await readVmStatAsync();
+    darwin.feed(() => report);
+  };
+  const run = staticAdmission(label, opts, darwin.opts.memoryHeadroom ?? (() => readMemoryHeadroom()));
+  await refresh();
+  let next = run.next();
+  while (!next.done) {
+    await sleepAsync(next.value);
+    await refresh();
+    next = run.next();
+  }
+  return "slotReason" in next.value ? staticSlotAdmission(next.value.slotReason, await acquireTestSlotAsync(label, opts), opts, startedAt) : next.value;
+}
+
+function staticSlotAdmission(why: string, lease: TestSlotLease, opts: Pick<TestSlotOptions, "clock">, startedAt: number): StaticAdmission {
+  return { outcome: "slot", executionAllowed: testSlotExecutionAllowed(lease), waitedMs: (opts.clock ?? systemClock).now() - startedAt,
+    note: `${why}; ${lease.note}`, ...(lease.childEnvironment ? { childEnvironment: lease.childEnvironment } : {}), release: () => lease.release() };
+}
+
+/** The admission both drivers step: each yield is a poll's sleep; `slotReason` hands the judgment to a slot. */
+function* staticAdmission(label: string, opts: Omit<TestSlotOptions, "sleep"> & { memoryBytes: number },
+  headroomOf: () => number | undefined): Generator<number, StaticAdmission | { slotReason: string }> {
   const clock = opts.clock ?? systemClock;
   const log = opts.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
   const startedAt = clock.now(), startedIso = clock.iso();
   const waited = (): number => clock.now() - startedAt;
   const host = opts.hostname ?? hostname, bootId = opts.bootId ?? (() => readBootId());
   const isPidAlive = opts.isPidAlive ?? defaultIsPidAlive, pidNamespace = opts.pidNamespace ?? (() => readPidNamespace());
-  const headroomOf = opts.memoryHeadroom ?? (() => readMemoryHeadroom(undefined, {
-    platform: opts.platform, vmStat: opts.vmStat ?? readVmStat,
-  }));
   const waitBoundMs = opts.waitBoundMs ?? TEST_SLOT_WAIT_BOUND_MS, pollMs = opts.pollMs ?? TEST_SLOT_POLL_MS;
   const mib = (bytes: number): number => Math.round(bytes / 1024 ** 2);
-  const viaSlot = (why: string): StaticAdmission => {
-    const lease = acquireTestSlot(label, opts);
-    return { outcome: "slot", executionAllowed: testSlotExecutionAllowed(lease), waitedMs: waited(), note: `${why}; ${lease.note}`,
-      ...(lease.childEnvironment ? { childEnvironment: lease.childEnvironment } : {}), release: () => lease.release() };
-  };
+  const viaSlot = (why: string): { slotReason: string } => ({ slotReason: why });
   if (opts.ownershipProtocol || opts.privateCoordinationRequired || opts.privateParentPolicy) return viaSlot("private coordination configured");
   let dir: string;
   try { dir = opts.dir ?? resolveTestSlotDir().dir; }
@@ -2534,6 +2567,6 @@ export function admitStaticWork(label: string, opts: TestSlotOptions & { memoryB
       announced = true;
       log(JSON.stringify({ step: "test_slot.static_waiting", label, headroomMiB: mib(headroom), needMiB: mib(need), holders: seen.holders }));
     }
-    (opts.sleep ?? sleepSync)(Math.min(pollMs, Math.max(0, waitBoundMs - waited())));
+    yield Math.min(pollMs, Math.max(0, waitBoundMs - waited()));
   }
 }

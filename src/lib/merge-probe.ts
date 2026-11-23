@@ -8,10 +8,10 @@ import { proofChildEnv } from "./review.js";
 import { readLedgerLines } from "./status.js";
 import {
   canonicalBuildInfo, hasUsableTypecheckBuildInfo, lowMemoryTypecheckArgs, publishBuildInfo, recordTypecheckPeak, seedBuildInfo,
-  typecheckEnv, typecheckPeakBytes, watchTypecheckRss, type TypecheckPeakRow,
+  typecheckEnv, watchTypecheckRss, type TypecheckPeakRow,
 } from "./typecheck-buildinfo.js";
-import { typecheckPeakWriter } from "./typecheck-run.js";
-import { acquireTestSlotAsync, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotOptions } from "./test-slot.js";
+import { typecheckAdmissionPeak, typecheckPeakWriter } from "./typecheck-run.js";
+import { acquireTestSlotAsync, admitStaticWorkAsync, readMemoryHeadroom, type TestSlotOptions } from "./test-slot.js";
 import { pinWorktreeGit } from "./worktree-git.js";
 import { hasCapturedMergeConflictEvidence, lastKnownMergeStateFromLedger, mergeInheritanceRefused, type OpenPrView } from "./sweep.js";
 import type { MergeConflictEvidence } from "./merge-state.js";
@@ -290,7 +290,7 @@ export function mergedTypecheckArgv(tsc: string, buildInfo: string, config: stri
 
 function harnessTypecheck(
   tsc: string, scratch: string, spawnChild: TypecheckSpawn, state: ProbeBuildInfo,
-  writePeak: (row: TypecheckPeakRow) => void, testSlot?: Omit<TestSlotOptions, "sleep">,
+  writePeak: (row: TypecheckPeakRow) => void, peakOf: (warm: boolean) => number, testSlot?: Omit<TestSlotOptions, "sleep">,
 ): (dir: string, nodeModules: string) => Promise<TypecheckRun> {
   let n = 0;
   let previous = state.canonical;
@@ -305,9 +305,12 @@ function harnessTypecheck(
     const self = { root: dir, buildInfo: join(scratch, `typecheck-${n}.tsbuildinfo`) };
     if (previous !== undefined) seedBuildInfo(previous, self, state.tsVersion);
     const warm = hasUsableTypecheckBuildInfo(self.buildInfo, state.tsVersion);
-    const slot = await acquireTestSlotAsync("typecheck:merge-probe", { memoryBytes: typecheckPeakBytes(warm), ...testSlot });
+    const peak = peakOf(warm);
+    // W1-T14145: a cold check takes a slot; a warm one waits on memory headroom alone, at the learned warm peak.
+    const slot = warm ? await admitStaticWorkAsync("typecheck:merge-probe", { memoryBytes: peak, ...testSlot })
+      : await acquireTestSlotAsync("typecheck:merge-probe", { memoryBytes: peak, ...testSlot });
     try {
-      if (!testSlotExecutionAllowed(slot)) return { status: null, output: `typecheck NOT_RUN (${slot.note})`, timedOut: false };
+      if (slot.executionAllowed === false) return { status: null, output: `typecheck NOT_RUN (${slot.note})`, timedOut: false };
       return await new Promise<TypecheckRun>((resolveRun) => {
         let output = "";
         let timedOut = false;
@@ -318,7 +321,7 @@ function harnessTypecheck(
           if (settled) return;
           settled = true;
           clearTimeout(timer);
-          recordTypecheckPeak(writePeak, "merge-probe", warm, { peak: stopWatching?.() }, output);
+          recordTypecheckPeak(writePeak, "merge-probe", warm, { peak: stopWatching?.() }, output, slot.waitedMs);
           if (status !== null && !timedOut) {
             previous = self;
             if (!published && state.canonical !== undefined) {
@@ -329,7 +332,7 @@ function harnessTypecheck(
           resolveRun({ status, output: output + extra, timedOut });
         };
         try {
-          const tight = lowMemoryTypecheckArgs((testSlot?.memoryHeadroom ?? readMemoryHeadroom)(), typecheckPeakBytes(warm));
+          const tight = lowMemoryTypecheckArgs((testSlot?.memoryHeadroom ?? readMemoryHeadroom)(), peak);
           // The proof env is an allowlist that drops an inherited GOMEMLIMIT, so the daemon's own limit is passed on.
           const child = spawnChild(process.execPath, [...mergedTypecheckArgv(tsc, self.buildInfo, config), ...tight], {
             cwd: dir, stdio: ["ignore", "pipe", "pipe"], env: typecheckEnv(proofChildEnv(home), process.env.GOMEMLIMIT),
@@ -404,7 +407,7 @@ export async function mergedHeadTypechecks(wt: string, ports: MergedTypecheckPor
     scratch = root;
     const typecheck = ports.typecheck ?? harnessTypecheck(harness.tsc, root, ports.spawn ?? spawn, {
       canonical: canonicalBuildInfo(wt), tsVersion: harness.version,
-    }, typecheckPeakWriter(wt), ports.testSlot);
+    }, typecheckPeakWriter(wt), (warm) => typecheckAdmissionPeak(wt, warm), ports.testSlot);
     const materialise = async (treeish: string, name: string): Promise<string | undefined> => {
       const tar = join(root, `${name}.tar`);
       const dir = join(root, name);
