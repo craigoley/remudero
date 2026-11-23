@@ -208,6 +208,11 @@ export interface OpsCatalogSnapshot {
   httpStatusClass?: OpsCatalogHttpStatusClass;
   /** W1-T14368: present only when a derived bound refused the catalog: which one, what it saw and what it allowed. */
   bound?: OpsCatalogBoundRefusal;
+  /**
+   * W1-T14557: present only on an ok snapshot whose growth, moved records left out, passed the daily allowance, and
+   * only on the first such snapshot of its UTC day: the reader still accepts it, and says so once a day.
+   */
+  growthExceeded?: OpsCatalogBoundRefusal;
 }
 /** W1-T13705: why a GET failed, as a closed class. It never carries a URL, a body or token text. */
 export type OpsCatalogHttpStatusClass = "4xx" | "5xx" | "auth" | "transport";
@@ -226,6 +231,8 @@ export interface OpsCatalogShadowInput {
   readonly bound?: OpsCatalogBoundRefusal;
   /** W1-T14374: the snapshot's shard and byte counts, when a catalog read produced them. Non-enumerable. */
   readonly counts?: OpsCatalogShadowCounts;
+  /** W1-T14557: the day's first accepted growth past the allowance; see {@link OpsCatalogSnapshot.growthExceeded}. Non-enumerable. */
+  readonly growthExceeded?: OpsCatalogBoundRefusal;
 }
 /** W1-T14374: the two counts a refresh row carries. Numbers only. */
 export interface OpsCatalogShadowCounts { shards: number; bytes: number }
@@ -512,7 +519,11 @@ function instanceStateDir(env: NodeJS.ProcessEnv = process.env): string | undefi
  * reader its rate, while one jump does not (the second-largest day's growth is the learned rate).
  */
 interface GrowthDay { day: number; shards: number; bytes?: number }
-interface GrowthRecord { anchor?: OpsCatalogGrowthPoint; latest?: OpsCatalogGrowthPoint; days: GrowthDay[] }
+interface GrowthRecord {
+  anchor?: OpsCatalogGrowthPoint; latest?: OpsCatalogGrowthPoint; days: GrowthDay[];
+  /** W1-T14557: the UTC day an accepted snapshot last reported growth past the allowance, so it says so once a day. */
+  exceededDay?: number;
+}
 const growthRecords = new WeakMap<OpsCatalogApi, Map<number, GrowthRecord>>();
 /** BACKSTOP: a valid record (two points, eight days) serializes in well under 2 KiB; a larger file is not one. */
 const GROWTH_FILE_MAX_BYTES = 16 * 1024;
@@ -560,7 +571,9 @@ function loadGrowth(api: OpsCatalogApi, repositoryId: number, stateDir: string |
       return { day: d.day, shards: d.shards, ...(d.bytes === undefined ? {} : { bytes: d.bytes }) };
     });
     const anchor = growthPoint(raw.anchor), latest = growthPoint(raw.latest);
-    return { ...(anchor ? { anchor } : {}), ...(latest ? { latest } : {}), days };
+    if (raw.exceededDay !== undefined && !count(raw.exceededDay)) throw new Refusal("malformed");
+    return { ...(anchor ? { anchor } : {}), ...(latest ? { latest } : {}), days,
+      ...(raw.exceededDay === undefined ? {} : { exceededDay: raw.exceededDay as number }) };
   } catch (error) {
     void error; // An unreadable or damaged record is no record: this api's memory answers, and the next ok read rewrites it.
     return remembered ?? { days: [] };
@@ -649,10 +662,23 @@ function checkBytes(pass: Pass): void {
 }
 
 /** A jump past the catalog's measured growth from the last accepted snapshot is refused whole, naming both numbers. */
-function checkGrowth(pass: Pass, keys: readonly (keyof OpsCatalogGrowth)[]): void {
+/**
+ * W1-T14557: the growth of `net` (the catalog with its moved records left out) past the daily allowance, or undefined.
+ * It no longer refuses: a catalog that grew faster than its day is still read, and the reader says so once a day.
+ */
+function growthExceedance(pass: Pass, net: OpsCatalogGrowth): OpsCatalogBoundRefusal | undefined {
   const { growth, now, dailyGrowth } = pass.limits;
-  const refusal = growthRefusal(pass.counts, [growth.anchor, growth.latest], now, dailyGrowth?.() ?? measuredDailyGrowth(growth.days), keys);
-  if (refusal) throw new Refusal("malformed", undefined, refusal);
+  return growthRefusal(net, [growth.anchor, growth.latest], now, dailyGrowth?.() ?? measuredDailyGrowth(growth.days), ["shards", "bytes"]);
+}
+
+/**
+ * W1-T14557: a shard whose one record is a catalog move's copy: its id line, then the mover's
+ * `moved_from: remudero@<commit>` line at the record's indent (plan-task-move.ts movedCopy). The ops gate verifies such
+ * a record against the public one when it lands, so it replaces a public record and is not growth of the fleet's work.
+ */
+const MOVED_COPY = /^([ \t]*)- id: [^\n]+\n\1  moved_from: remudero@[0-9a-f]{40}\r?\n/m;
+export function isMovedCopyShard(text: string): boolean {
+  return (text.match(/^[ \t]*- id:/gm) ?? []).length === 1 && MOVED_COPY.test(text);
 }
 
 /**
@@ -725,6 +751,9 @@ function digestOf(binding: OpsCatalogBinding): string {
 }
 
 interface PassRead {
+  /** W1-T14557: the catalog's size with its moved records left out, which is what its growth is judged on. */
+  net: OpsCatalogGrowth;
+  growthExceeded?: OpsCatalogBoundRefusal;
   monolith: TreeEntry;
   shardDir?: TreeEntry;
   shardEntries: TreeEntry[];
@@ -760,21 +789,24 @@ async function readPass(
     .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)) : [];
   if (!shardEntries.every(regular)) throw new Refusal("malformed");
   counts.shards = shardEntries.length;
-  // W1-T14368: past the baseline, a runaway shard directory is refused before a blob is fetched, and so is one
-  // whose blob reads the GitHub budget cannot pay for.
-  observeGrowth(pass.limits.growth, pass.limits.now, counts.shards);
-  if (counts.shards > OPS_CATALOG_BASELINE_SHARDS) {
-    checkGrowth(pass, ["shards"]);
-    checkBlobReads(api, pass, [monolith, ...shardEntries]);
-  }
+  // W1-T14368: past the baseline, a shard directory whose blob reads the GitHub budget cannot pay for is refused before
+  // a blob is fetched. W1-T14557: its growth is judged after the blobs, where the moved records can be left out.
+  if (counts.shards > OPS_CATALOG_BASELINE_SHARDS) checkBlobReads(api, pass, [monolith, ...shardEntries]);
   atStage("blob_verification");
   const blobs: Array<{ label: string; text: string }> = [
     { label: "tasks.yaml", text: await readBlob(api, repo, monolith.sha, pass) },
   ];
-  for (const e of shardEntries) blobs.push({ label: `tasks.d/${e.path}`, text: await readBlob(api, repo, e.sha, pass) });
-  observeGrowth(pass.limits.growth, pass.limits.now, counts.shards, counts.bytes);
-  if (!withinOpsCatalogBaseline(counts)) checkGrowth(pass, ["shards", "bytes"]);
-  return { monolith, shardDir, shardEntries, blobs };
+  let movedShards = 0, movedBytes = 0;
+  for (const e of shardEntries) {
+    const text = await readBlob(api, repo, e.sha, pass);
+    blobs.push({ label: `tasks.d/${e.path}`, text });
+    // W1-T14557: a moved record's copy is not growth; the heap and budget bounds above still count every byte.
+    if (isMovedCopyShard(text)) { movedShards++; movedBytes += Buffer.byteLength(text); }
+  }
+  const net = { shards: counts.shards - movedShards, bytes: counts.bytes - movedBytes };
+  observeGrowth(pass.limits.growth, pass.limits.now, net.shards, net.bytes);
+  const growthExceeded = withinOpsCatalogBaseline(counts) ? undefined : growthExceedance(pass, net);
+  return { monolith, shardDir, shardEntries, blobs, net, ...(growthExceeded ? { growthExceeded } : {}) };
 }
 
 /** A later pass refused for one of these reasons, once bound to its commit, found a defect in that commit's content. */
@@ -843,7 +875,7 @@ async function read(
 
 function adopt(
   api: OpsCatalogApi, store: PlanRevisionStore, pass: Pass, branch: string, commit: string,
-  { monolith, shardDir, shardEntries, blobs }: PassRead, atStage: (stage: OpsCatalogRefusalStage) => void,
+  { monolith, shardDir, shardEntries, blobs, net, growthExceeded }: PassRead, atStage: (stage: OpsCatalogRefusalStage) => void,
 ): OpsCatalogSnapshot {
   const { counts, repositoryId } = pass;
   const shardTreeSha = shardDir ? shardDir.sha : "";
@@ -859,7 +891,11 @@ function adopt(
   } catch (error) {
     throw new Refusal(error instanceof PlanError && /^duplicate task id /.test(error.message) ? "duplicate_task_id" : "malformed");
   }
-  acceptGrowth(pass.limits.growth, pass.limits.now, counts);
+  acceptGrowth(pass.limits.growth, pass.limits.now, net);
+  // W1-T14557: the day's first accepted growth past the allowance is reported; later ones that day are not.
+  const today = utcDay(pass.limits.now);
+  const reported = growthExceeded !== undefined && pass.limits.growth.exceededDay !== today ? growthExceeded : undefined;
+  if (reported) pass.limits.growth.exceededDay = today;
   // Every sha in the binding was verified in this pass or recovered from verified bytes.
   const boundBlobs = new Map<string, KeptBlob>();
   for (const blobSha of [binding.tasksYamlBlob, ...Object.values(binding.shardBlobs)]) {
@@ -869,7 +905,8 @@ function adopt(
   if (pass.blobFiles) pruneBlobFiles(pass.blobFiles, new Set(boundBlobs.keys()));
   newestOkBinding.set(api, { repositoryId, blobShas: [...boundBlobs.keys()], taskIds: new Set(plan.byId.keys()) });
   Object.freeze(counts.fetchedObjects);
-  return privateHandles({ outcome: "ok" as const, identityDigest, counts: Object.freeze(counts) }, { plan, binding });
+  return privateHandles({ outcome: "ok" as const, identityDigest, counts: Object.freeze(counts),
+    ...(reported ? { growthExceeded: Object.freeze({ ...reported }) } : {}) }, { plan, binding });
 }
 
 // W1-T13673: one default api per process, so every default reader shares one pacer and the kept blobs.
@@ -1010,9 +1047,9 @@ export function createOpsCatalogShadowSource(
   const store = createPlanRevisionStore({ strict: true, retainLatest: true, yamlLogLevel: "error", dependencyMode: "preserve-external" });
   const treeCache: ShadowTreeCache = {};
   const answer = (snap: { plan?: Plan; binding?: OpsCatalogBinding; identityDigest?: string; counts: OpsCatalogShadowCounts },
-    kind: "full" | "revalidate"): OpsCatalogShadowInput =>
+    kind: "full" | "revalidate", growthExceeded?: OpsCatalogBoundRefusal): OpsCatalogShadowInput =>
     privateHandles({ outcome: "ok" as const, identityDigest: snap.identityDigest },
-      { plan: snap.plan, opsCommit: snap.binding?.commit, kind, counts: snap.counts });
+      { plan: snap.plan, opsCommit: snap.binding?.commit, kind, counts: snap.counts, ...(growthExceeded ? { growthExceeded } : {}) });
   let revalidateClass: OpsCatalogHttpStatusClass | undefined;
   const revalidate = async (k: NonNullable<typeof kept>): Promise<"same" | "moved" | "failed"> => {
     revalidateClass = undefined;
@@ -1037,7 +1074,8 @@ export function createOpsCatalogShadowSource(
       if (snap.outcome === "ok" && snap.binding) {
         everOk = true;
         kept = { plan: snap.plan, binding: snap.binding, identityDigest: snap.identityDigest, counts: { shards: snap.counts.shards, bytes: snap.counts.bytes } };
-        return answer(kept, "full");
+        // W1-T14557: only the full read that measured it carries the day's growth report; a revalidation never does.
+        return answer(kept, "full", snap.growthExceeded);
       }
       return withDiagnostics({ outcome: everOk ? "stale" : snap.outcome, ...(snap.refusalStage ? { refusalStage: snap.refusalStage } : {}) },
         "full", snap.httpStatusClass, snap.bound, { shards: snap.counts.shards, bytes: snap.counts.bytes });
