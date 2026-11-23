@@ -6,6 +6,9 @@
   verify: auto
   risk: low
   priority: 2.42
+  # refusal-amendment (W1-T12435, run W1-T12435-1795406208013, 2026-11-23T04:08:43.252Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: W1-T12435 declares only a test file, but fixing the production failure that triggers `gardener_overseer.escalated` requires changing production code.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   author_class: machine
