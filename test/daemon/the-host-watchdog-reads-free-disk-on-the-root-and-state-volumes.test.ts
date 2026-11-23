@@ -52,7 +52,7 @@ function host(t: TestContext, opts: { realDf?: boolean; env?: Record<string, str
 if [ "$1" = -c ] && [ "$2" = %Y ]; then
   exec ${JSON.stringify(process.execPath)} -e 'console.log(Math.floor(require("node:fs").statSync(process.argv[1]).mtimeMs / 1000))' "$3"
 fi
-exec /usr/bin/stat "$@"`);
+exit 2`);
   executable(join(bin, "git"), `
 code=""
 if [ "$1" = -C ]; then code="$2"; shift 2; fi
