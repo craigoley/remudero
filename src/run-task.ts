@@ -1833,8 +1833,11 @@ import {
   diagnoseUnrunnableProofs,
   renderBodyDefects,
   replaceBodyProofs,
-  planFilingAcceptanceCure,
+  addedTestCriterion,
+  missingDiffProofReason,
+  repairMissingAcceptance,
   type FilingDiffFile,
+  type PlanFilingDiffAtHead,
 } from "./lib/body-repair.js";
 import { fixRungInputFields, prBodyDigest } from "./lib/sweep.js";
 import { diagnoseBodyDefects } from "./lib/body-repair.js";
@@ -5815,9 +5818,9 @@ export async function repairPrMetadata(
   planCriteriaAtHead: (body: string, headSha: string, baseRef?: string) =>
     readonly AcceptanceCriterion[] | Promise<readonly AcceptanceCriterion[]> = planCriteriaAtMergeForRepair,
   /** The test files this PR head ADDS against main — absent at base, so a `unit test:` on one cannot pass there. */
-  addedTestsAtHead: (headSha: string) => AddedTestsAtHead = addedTestFilesAtHead,
+  addedTestsAtHead?: (headSha: string) => AddedTestsAtHead,
   /** The complete diff and head text for added task shards, used only for the no-header filing cure. */
-  planFilingDiffAtHead: (headSha: string) => PlanFilingDiffAtHead = addedPlanFilingDiffAtHead,
+  planFilingDiffAtHead?: (headSha: string) => PlanFilingDiffAtHead,
 ): Promise<MetadataRepairResult> {
   const live = read(pr.prUrl);
   const fields: { title?: string; body?: string } = {};
@@ -5847,28 +5850,26 @@ export async function repairPrMetadata(
     // proof-discrimination-only red is never cured by rewriting a body that gate does not read.
     const gateRed = checks.includes("acceptance-author-gate");
     const planCriteria = gateRed && pr.headSha ? await planCriteriaAtHead(live.body, pr.headSha, live.base?.ref) : [];
-    // Never the generic grep of a function main already has: proof-discrimination reads it executed_stale, so the
-    // "repair" was a guaranteed red (#10404, #10413). Only a proof derived from a test the diff ADDS misses at base.
-    const added: AddedTestsAtHead = pr.headSha ? addedTestsAtHead(pr.headSha) : { kind: "unreadable", reason: "no PR head sha" };
-    const headOnly = added.kind === "read" ? added.files.map(addedTestCriterion) : [];
+    const cwd = process.cwd();
+    let mergeBase: string | undefined;
+    const readMergeBase = (headSha: string) => mergeBase ??= prRepairMergeBase(headSha, cwd);
+    const added: AddedTestsAtHead = pr.headSha
+      ? (addedTestsAtHead?.(pr.headSha) ?? addedTestFilesAtHead(pr.headSha, cwd, readMergeBase))
+      : { kind: "unreadable", reason: "no PR head sha" };
     const gate = acceptanceAuthorTimeCheck(live.body);
-    const filingDiff = !gate.ok && gate.defect === "no-header" && headOnly.length === 0 && pr.headSha
-      ? planFilingDiffAtHead(pr.headSha)
+    const noHeader = !gate.ok && gate.defect === "no-header";
+    const filingDiff = noHeader && pr.headSha && (added.kind === "unreadable" || added.files.length === 0)
+      ? (planFilingDiffAtHead?.(pr.headSha) ?? addedPlanFilingDiffAtHead(pr.headSha, cwd, readMergeBase))
       : undefined;
-    const planFiling = filingDiff?.kind === "read"
-      ? planFilingAcceptanceCure(live.body, filingDiff.files, filingDiff.shardDir, acceptanceAuthorTimeCheck)
+    const missing = noHeader
+      ? repairMissingAcceptance(live.body, added, filingDiff, acceptanceAuthorTimeCheck, ensureJudgeableBody)
       : undefined;
-    if (!gate.ok && (gate.defect === "no-header" || gate.defect === "empty-proofs") && headOnly.length === 0 && !planFiling) {
-      const why = added.kind === "read" ? "the diff adds no test file" : added.reason;
-      return {
-        repaired: false,
-        noCure: true,
-        reason:
-          `the body has no judgeable Acceptance block and ${why}, so no proof that misses at base is derivable; ` +
-          "a generic block would pass at base and fail proof-discrimination",
-      };
+    if (missing?.kind === "no-cure") return { repaired: false, noCure: true, reason: missing.reason };
+    const headOnly = !noHeader && added.kind === "read" ? added.files.map(addedTestCriterion) : [];
+    if (!gate.ok && gate.defect === "empty-proofs" && headOnly.length === 0) {
+      return { repaired: false, noCure: true, reason: missingDiffProofReason(added) };
     }
-    const repair = planFiling ?? acceptanceGateBodyRepair(live.body, headOnly, gateRed ? { planCriteria } : undefined);
+    const repair = missing ?? acceptanceGateBodyRepair(live.body, headOnly, gateRed ? { planCriteria } : undefined);
     if (!repair) {
       return {
         repaired: false,
@@ -6033,10 +6034,6 @@ const ACCEPTANCE_GATE_BODY_REPAIR_FALLBACK: AcceptanceCriterion[] = [
   },
 ];
 
-function addedTestCriterion(path: string): AcceptanceCriterion {
-  return { claim: `the suite this PR adds passes (an Acceptance block derived from the diff): ${path}`, proof: `unit test: ${path}` };
-}
-
 /**
  * W1-T4263 — THE FALLBACK GREPS A LINE THIS PR'S OWN DIFF ADDS. The two static constants above grep
  * `acceptanceAuthorTimeCheck`, a function main already has, so `proof-discrimination` reads them as passing at the
@@ -6091,20 +6088,25 @@ export function diffSinceMergeBase(cwd: string, head = "HEAD"): string | undefin
   }
 }
 
-/** {@link addedTestFilesAtHead}'s answer: an unreadable head is never reported as "adds no test". */
+function prRepairMergeBase(headSha: string, cwd: string): string {
+  return hostWorktreeGitAtTopLevel(cwd, ["merge-base", "origin/main", headSha]).trim();
+}
 
 /** {@link repairPrMetadata}'s production `addedTestsAtHead`: `test/**\/*.test.ts` files added since the merge base with
  *  origin/main. */
-export function addedTestFilesAtHead(headSha: string, cwd: string = process.cwd()): AddedTestsAtHead {
-  const mergeBase = () => hostWorktreeGitAtTopLevel(cwd, ["merge-base", "origin/main", headSha]).trim();
+export function addedTestFilesAtHead(
+  headSha: string,
+  cwd: string = process.cwd(),
+  readMergeBase = (sha: string) => prRepairMergeBase(sha, cwd),
+): AddedTestsAtHead {
   try {
     let base: string;
     try {
-      base = mergeBase();
+      base = readMergeBase(headSha);
     } catch {
       // The head is not local yet (pushed since the last fetch): fetch it once and retry; a second failure is recorded below.
       hostWorktreeGitAtTopLevel(cwd, ["fetch", "--quiet", "origin", headSha], { timeout: 60_000 });
-      base = mergeBase();
+      base = readMergeBase(headSha);
     }
     const files = hostWorktreeGitAtTopLevel(cwd, ["diff", "--name-only", "--diff-filter=A", base, headSha, "--", "test/"])
       .split("\n")
@@ -6116,17 +6118,18 @@ export function addedTestFilesAtHead(headSha: string, cwd: string = process.cwd(
   }
 }
 
-/** `repairPrMetadata`'s complete PR diff plus head text for added shards; unreadable is never treated as an empty filing. */
-export type PlanFilingDiffAtHead =
-  | { kind: "read"; files: FilingDiffFile[]; shardDir: string }
-  | { kind: "unreadable"; reason: string };
+export type { PlanFilingDiffAtHead } from "./lib/body-repair.js";
 
 /** Read the whole diff so the cure can refuse mixed code/plan changes, then read only added task-shard blobs. */
-export function addedPlanFilingDiffAtHead(headSha: string, cwd: string = process.cwd()): PlanFilingDiffAtHead {
+export function addedPlanFilingDiffAtHead(
+  headSha: string,
+  cwd: string = process.cwd(),
+  readMergeBase = (sha: string) => prRepairMergeBase(sha, cwd),
+): PlanFilingDiffAtHead {
   if (!/^[0-9a-f]{40}$/i.test(headSha)) return { kind: "unreadable", reason: "the PR head is not a full commit SHA" };
   try {
     const top = hostWorktreeGitAtTopLevel(cwd, ["rev-parse", "--show-toplevel"]).trim();
-    const base = hostWorktreeGitAtTopLevel(top, ["merge-base", "origin/main", headSha]).trim();
+    const base = readMergeBase(headSha);
     const shardDir = relative(top, join(resolveRepoLayout(top).planDir, "tasks.d"));
     const names = hostWorktreeGitAtTopLevel(top, ["diff", "--name-status", "-z", "--no-renames", base, headSha, "--"], { maxBuffer: 1 << 26 })
       .split("\0").filter((part) => part.length > 0);

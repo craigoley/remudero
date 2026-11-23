@@ -388,6 +388,10 @@ export interface FilingDiffFile {
   headText?: string;
 }
 
+type UnreadableDiff = { kind: "unreadable"; reason: string };
+type AddedTestDiff = { kind: "read"; files: readonly string[] } | UnreadableDiff;
+export type PlanFilingDiffAtHead = { kind: "read"; files: FilingDiffFile[]; shardDir: string } | UnreadableDiff;
+
 /** The author-time gate's verdict on a body, in `acceptanceAuthorTimeCheck`'s own shape. INJECTED: the gate lives in
  *  `review.ts`, which `plan-pr-emitter.ts` imports beside this module, so importing it here would close a ring. */
 export type BodyGate = (body: string) => { ok: boolean; defect?: string };
@@ -401,8 +405,8 @@ export interface PlanFilingAcceptanceCure {
 /** A path a `grep:` proof and a `- claim | proof` bullet can both carry: no space, no `|`, no `..` segment.
  *  Exported, like the two below, so a fixture can drive both of its arms by name. */
 export const PROOF_SAFE_PATH_RE = /^(?!.*\.\.)[A-Za-z0-9._/-]+$/;
-/** One line that is a record's bare `id:`: a quoted id would not be hit by the `id: <id>` pattern the proof greps. */
-export const SHARD_ID_LINE_RE = /^\s*(?:-\s+)?id:\s*([A-Za-z0-9-]+)\s*$/;
+/** One line that is a record's bare `id:`. The grep proof uses the line's own spacing. */
+export const SHARD_ID_LINE_RE = /^\s*(?:-\s+)?id:[ \t]+([A-Za-z0-9-]+)\s*$/;
 /** The line a session's pull request body ends with; the derived block goes above the last one. */
 export const ATTRIBUTION_LINE_RE = /^\s*\u{1F916} Generated with /u;
 
@@ -439,10 +443,13 @@ export function planFilingAcceptanceCure(
     if (!file.added || !file.path.startsWith(shardPrefix)) continue;
     const shardName = file.path.slice(shardPrefix.length);
     if (shardName.includes("/") || !shardName.endsWith(".yaml")) continue; // not a file the plan loader reads as a shard
-    const ids = (file.headText ?? "").split("\n").flatMap((line) => SHARD_ID_LINE_RE.exec(line)?.[1] ?? []);
-    const id = PROOF_SAFE_PATH_RE.test(file.path) ? ids.find((candidate) => isTaskShardName(shardName, candidate)) : undefined;
-    if (id === undefined) return undefined;
-    criteria.push({ claim: `the ${id} shard is filed`, proof: `grep: id: ${id} in ${file.path}` });
+    if (!PROOF_SAFE_PATH_RE.test(file.path)) return undefined;
+    const idLine = file.headText?.split("\n").map((line) => SHARD_ID_LINE_RE.exec(line))
+      .find((match) => match !== null && isTaskShardName(shardName, match[1]!));
+    if (!idLine) return undefined;
+    const [line, id] = idLine;
+    const pattern = line.slice(line.indexOf("id:")).trimEnd();
+    criteria.push({ claim: `the ${id} shard is filed`, proof: `grep: ${pattern} in ${file.path}` });
   }
   if (criteria.length === 0) return undefined;
   const block = ["## Acceptance", ...criteria.map((c) => `- ${c.claim} | ${c.proof}`)].join("\n");
@@ -452,4 +459,34 @@ export function planFilingAcceptanceCure(
   const below = attribution < 0 ? "" : lines.slice(attribution).join("\n");
   const repairedBody = `${[above, block, below].filter((part) => part.length > 0).join("\n\n")}\n`;
   return gate(repairedBody).ok ? { criteria, repairedBody } : undefined;
+}
+
+export function addedTestCriterion(path: string): BodyCriterion {
+  return { claim: `the suite this PR adds passes (an Acceptance block derived from the diff): ${path}`, proof: `unit test: ${path}` };
+}
+
+export function missingDiffProofReason(addedTests: AddedTestDiff, filingDiff?: PlanFilingDiffAtHead): string {
+  const testReason = addedTests.kind === "read" ? "the diff adds no test file" : addedTests.reason;
+  const filingReason = filingDiff?.kind === "unreadable" ? ` and ${filingDiff.reason}` : "";
+  return `the body has no judgeable Acceptance block and ${testReason}${filingReason}, ` +
+    "so no proof that misses at base is derivable; a generic block would pass at base and fail proof-discrimination";
+}
+
+/** Select a no-header cure from the PR's diff evidence. The caller supplies the existing test-block renderer. */
+export function repairMissingAcceptance(
+  body: string,
+  addedTests: AddedTestDiff,
+  filingDiff: PlanFilingDiffAtHead | undefined,
+  gate: BodyGate,
+  renderAddedTestBlock: (body: string, criteria: BodyCriterion[]) => string,
+): { kind: "cured"; repairedBody: string } | { kind: "no-cure"; reason: string } | undefined {
+  const verdict = gate(body);
+  if (verdict.ok || verdict.defect !== "no-header") return undefined;
+  if (addedTests.kind === "read" && addedTests.files.length > 0) {
+    return { kind: "cured", repairedBody: renderAddedTestBlock(body, addedTests.files.map(addedTestCriterion)) };
+  }
+  const filing = filingDiff?.kind === "read" ? planFilingAcceptanceCure(body, filingDiff.files, filingDiff.shardDir, gate) : undefined;
+  return filing
+    ? { kind: "cured", repairedBody: filing.repairedBody }
+    : { kind: "no-cure", reason: missingDiffProofReason(addedTests, filingDiff) };
 }
