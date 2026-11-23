@@ -1,6 +1,5 @@
 /**
- * W1-T13680 criterion 6: the migration preview refuses, each with its named reason, a task that is not queued, one
- * that is verify: human, one whose refs/rmd-id ref is absent from the public repo, and one whose closed, unmerged
+ * W1-T13680 criterion 6: the migration preview refuses, each with its named reason, one whose refs/rmd-id ref is absent from the public repo, and one whose closed, unmerged
  * mover pull request added its unchanged public blob, then names the next eligible task with its exact bytes and
  * permission not_granted. The preview runs over two real Git origins (test/helpers/plan-move-world.ts): once in
  * process through the selection the CLI prints, once as the real verb through the CLI's own GitHub read (a gh shim).
@@ -39,21 +38,22 @@ test("W1-T13680 criterion 6: the preview refuses not_queued, verify_human, reser
     const refused = new Map(selection.refused.map(r => [r.id, r.reason]));
     // W1-T14345 (operator ruling 2026-11-22): a blocked record is open, so it is admitted, not refused not_queued.
     assert.equal(refused.get("W1-T11"), undefined);
-    assert.equal(refused.get("W1-T12"), "verify_human");
+    // W1-T14425 replaces the W1-T13680 contract that refused verify_human: an open verify:human record is admitted, since a release survives the move (W1-T14408).
+    assert.equal(refused.get("W1-T12"), undefined);
     assert.equal(refused.get("W1-T13"), "reservation_absent");
     assert.equal(refused.get("W1-T14"), "move_refused");
     assert.equal(selection.outcome, "candidate");
     assert.equal(selection.permission, "not_granted");
     // W1-T14345: the selection is a batch of every eligible task; filed in one commit, they keep reverse dispatch order.
     assert.equal(selection.candidate?.id, "W1-T11");
-    assert.deepEqual(selection.batch.map(member => member.id), ["W1-T11", "W1-T15"]);
-    assert.equal(selection.batch[1]?.yaml, RECORDS["W1-T15"]);
-    assert.equal(selection.batch[1]?.originalBytesBase64, Buffer.from(RECORDS["W1-T15"]).toString("base64"));
+    assert.deepEqual(selection.batch.map(member => member.id), ["W1-T11", "W1-T12", "W1-T15"]);
+    assert.equal(selection.batch[2]?.yaml, RECORDS["W1-T15"]);
+    assert.equal(selection.batch[2]?.originalBytesBase64, Buffer.from(RECORDS["W1-T15"]).toString("base64"));
 
     // Positive control for move_refused: a refused copy of a DIFFERENT blob does not refuse today's record.
     refusal.body = refusal.body.replace(blob, "f".repeat(40));
     const changed = await selectPlanTaskMigration(o, async query => w.answer(query));
-    assert.deepEqual(changed.batch.map(member => member.id), ["W1-T11", "W1-T14", "W1-T15"]);
+    assert.deepEqual(changed.batch.map(member => member.id), ["W1-T11", "W1-T12", "W1-T14", "W1-T15"]);
 
     // The real verb, reading GitHub through its own default reader (a gh shim answering the same model).
     refusal.body = refusal.body.replace("f".repeat(40), blob);
@@ -74,7 +74,7 @@ test("W1-T13680 criterion 6: the preview refuses not_queued, verify_human, reser
     assert.equal(printed.permission, "not_granted");
     assert.equal(printed.candidate.id, "W1-T11");
     assert.deepEqual(printed.refused.filter((r: { id: string }) => ["W1-T11", "W1-T12", "W1-T13", "W1-T14"].includes(r.id)).map((r: { reason: string }) => r.reason),
-      ["verify_human", "reservation_absent", "move_refused"]);
+      ["reservation_absent", "move_refused"]);
     assert.ok(shim.calls().length >= 2 && shim.calls().every(call => call.startsWith("api graphql ")), "positive control: the verb read GitHub through the shim");
     // Unread evidence is UNKNOWN with permission not_granted, and bad usage is refused before any read.
     writeFileSync(answer, JSON.stringify({ errors: [{ message: "rate limited" }] }));
