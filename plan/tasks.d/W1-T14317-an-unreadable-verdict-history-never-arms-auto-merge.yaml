@@ -68,7 +68,7 @@
     - test/the-merge-queue-ejection-path-is-proven-across-real-sweep-passes.test.ts
     - test/the-sweep-never-acts-on-a-head-the-pr-has-left.test.ts
     - test/the-sweep-sees-a-new-head-in-the-same-pass.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     WHY: a fault in reading history becomes permission to merge.

@@ -19,7 +19,7 @@
     - src/lib/test-slot.ts # only if a headroom-only admission needs a new export
     - test/ci/gates/a-warm-typecheck-waits-for-memory-headroom.test.ts
     - test/a-worker-typecheck-starts-warm-in-a-memory-sized-slot-pool.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-11-21 12:49Z on the Azure host (read-only): load 216/215/171, 43 tasks in D state, memory PSI some
