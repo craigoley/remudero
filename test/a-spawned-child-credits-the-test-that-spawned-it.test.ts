@@ -13,7 +13,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { copyFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -262,4 +262,27 @@ test("W1-T6108: a late child report is collected when directory cleanup races it
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
+});
+
+test("a late coverage report does not fail its suite and survives directory cleanup", (t) => {
+  const out = mkdtempSync(join(tmpdir(), "rmd-t6108-late-child-coverage-"));
+  t.after(() => rmSync(out, { recursive: true, force: true }));
+  const redirect = hygiene.redirectChildCoverage({ NODE_V8_COVERAGE: out }, {
+    script: join(REPO_ROOT, "test", "x.test.ts"), cwd: REPO_ROOT,
+  });
+  assert.ok(redirect);
+  t.after(() => rmSync(redirect.root, { recursive: true, force: true }));
+  const first = "coverage-1-0000000000000-0.json";
+  const late = "coverage-1-0000000000000-1.json";
+  const firstPath = join(redirect.childDir, first);
+  writeFileSync(firstPath, "{}");
+  const rename = fs.renameSync;
+  t.mock.method(fs, "renameSync", (from: fs.PathLike, to: fs.PathLike) => {
+    rename(from, to);
+    if (from === firstPath) writeFileSync(join(redirect.childDir, late), '{"result":[]}');
+  });
+
+  assert.deepEqual(hygiene.flattenChildCoverage(redirect), [first, late]);
+  assert.equal(readFileSync(join(out, late), "utf8"), '{"result":[]}');
+  assert.equal(lstatSync(redirect.childDir).isSymbolicLink(), true);
 });

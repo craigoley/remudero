@@ -427,13 +427,17 @@ export function redirectChildCoverage(
 export function flattenChildCoverage(
   redirect: ChildCoverageRedirect,
   now: () => number = Date.now,
-  removeChildDir: (path: string) => void = (path) => fs.rmSync(path, { recursive: true, force: true }),
+  removeChildDir: (path: string) => void = fs.rmdirSync,
   createChildDirLink: (target: string, path: string) => void = (target, path) => fs.symlinkSync(target, path, "dir"),
 ): string[] {
   const moved: string[] = [];
   const moveReports = (): void => {
-    for (const name of fs.readdirSync(redirect.childDir).filter((n) => V8_REPORT.test(n)).sort()) {
+    for (const name of fs.readdirSync(redirect.childDir).sort()) {
       const from = join(redirect.childDir, name);
+      if (!V8_REPORT.test(name)) {
+        fs.rmSync(from, { recursive: true, force: true });
+        continue;
+      }
       const to = join(redirect.coverageDir, name);
       try {
         fs.renameSync(from, to);
@@ -447,8 +451,8 @@ export function flattenChildCoverage(
     }
   };
   moveReports();
-  // A late V8 thread can publish during removal or recreate the path before the symlink is installed.
-  // Collect its report and retry both operations when those races surface as ENOTEMPTY or EEXIST.
+  // Removing only an empty directory makes a report written after the scan trigger ENOTEMPTY.
+  // A writer can also recreate the directory before symlink creation, triggering EEXIST.
   for (let attempt = 0; ; attempt += 1) {
     try {
       removeChildDir(redirect.childDir);
