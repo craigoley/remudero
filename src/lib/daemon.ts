@@ -154,7 +154,7 @@ import {
 // Pure shared gate; dispatch-governor.ts explains why drain.ts cannot share it from here (W1-T342).
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
 import { assertRunnable, readTaskPrecondition, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task, type TaskInputAnswer } from "./plan.js";
-import { composeSecondaryPlan, compositionHoldEdge, type CompositionHold } from "./task-lookup.js";
+import { composeSecondaryPlan, compositionHoldEdge, type CompositionHold, type CompositionRecordFailure } from "./task-lookup.js";
 import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
@@ -5599,16 +5599,28 @@ export async function runDaemon(
   };
   const opsDispatchContexts = new WeakMap<Plan, OpsDispatchContext>();
   let lastOpsDispatchHold: string | undefined;
-  const holdOpsDispatch = (reason: string, taskId?: string, source?: OpsCatalogShadowInput): void => {
+  const holdOpsDispatch = (reason: string, observation: OpsTaskDispatchRead, record?: CompositionRecordFailure): void => {
     const safeReason = OPS_CATALOG_OUTCOMES.includes(reason as OpsCatalogOutcome) ||
       ["selection_unreadable", "selection_changed", "invalid_dispatch_flag", "source_pending", "source_identity_unknown",
         "primary_revision_unknown", "duplicate_task_id", "invalid_cross_catalog_dependency", "malformed"].includes(reason)
       ? reason : "selection_unreadable";
-    const stage = opsCatalogRefusalStage(source);
-    const signature = JSON.stringify([safeReason, taskId, stage]);
+    const stage = opsCatalogRefusalStage(observation.outcome === "off" ? undefined : observation.source);
+    let revision: string | undefined;
+    try {
+      if (observation.outcome === "selected") {
+        const { publicCommit, source: { opsCommit } } = observation;
+        if (CATALOG_COMMIT.test(publicCommit) && typeof opsCommit === "string" && CATALOG_COMMIT.test(opsCommit)) {
+          revision = compositeCatalogRevisionKey(publicCommit, opsCommit);
+        }
+      }
+    } catch (error) { void error; /* Unreadable revision evidence leaves the hold unkeyed. */ }
+    const signature = JSON.stringify([safeReason, record?.taskId, record?.field, record?.side, stage, revision]);
     if (signature === lastOpsDispatchHold) return;
-    try { log("dispatch.ops_catalog_held", { outcome: safeReason, ...(stage ? { refusal_stage: stage } : {}), ...(taskId ? { task_id: taskId } : {}) }); }
-    catch (error) { void error; /* A diagnostic failure cannot authorize ops work or stop public selection. */ }
+    try {
+      log("dispatch.ops_catalog_held", { outcome: safeReason, ...(stage ? { refusal_stage: stage } : {}),
+        ...(record?.taskId === undefined ? {} : { task_id: record.taskId }),
+        ...(record === undefined ? {} : { field: record.field, side: record.side }) });
+    } catch (error) { void error; /* A diagnostic failure cannot authorize ops work or stop public selection. */ }
     lastOpsDispatchHold = signature;
   };
   /** W1-T13681: why ops dispatch is held this iteration (the hold's own outcome label), or undefined while it is not. */
@@ -5646,24 +5658,24 @@ export async function runDaemon(
     const observation = readOpsDispatch(primary);
     if (observation.outcome === "off") { lastOpsDispatchHold = undefined; return { plan: primary, observation }; }
     if (observation.outcome === "unavailable") {
-      holdOpsDispatch(observation.reason, undefined, observation.source);
+      holdOpsDispatch(observation.reason, observation);
       return { plan: primary, observation };
     }
     const input = observation.source;
     if (input.outcome !== "ok" || input.plan === undefined) {
-      holdOpsDispatch(input.outcome === "ok" ? "source_identity_unknown" : input.outcome, undefined, input);
+      holdOpsDispatch(input.outcome === "ok" ? "source_identity_unknown" : input.outcome, observation);
       return { plan: primary, observation };
     }
     if (!CATALOG_COMMIT.test(observation.publicCommit)) {
-      holdOpsDispatch("primary_revision_unknown"); return { plan: primary, observation };
+      holdOpsDispatch("primary_revision_unknown", observation); return { plan: primary, observation };
     }
     if (typeof input.opsCommit !== "string" || !CATALOG_COMMIT.test(input.opsCommit) ||
       typeof input.identityDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.identityDigest)) {
-      holdOpsDispatch("source_identity_unknown"); return { plan: primary, observation };
+      holdOpsDispatch("source_identity_unknown", observation); return { plan: primary, observation };
     }
     const composition = composeSecondaryPlan(primary, input.plan);
     if (composition.outcome !== "ok") {
-      holdOpsDispatch(composition.outcome);
+      holdOpsDispatch(composition.outcome, observation, composition.field === undefined ? undefined : composition);
       return { plan: primary, observation };
     }
     lastOpsDispatchHold = undefined;
@@ -5683,8 +5695,7 @@ export async function runDaemon(
     if (latest.outcome === "selected" && latest.source.outcome === "ok" &&
       latest.publicCommit === captured.publicCommit && latest.source.identityDigest === captured.source.identityDigest &&
       latest.source.opsCommit === captured.source.opsCommit) return true;
-    holdOpsDispatch(latest.outcome === "unavailable" ? latest.reason : "selection_changed", undefined,
-      latest.outcome === "off" ? undefined : latest.source);
+    holdOpsDispatch(latest.outcome === "unavailable" ? latest.reason : "selection_changed", latest);
     return false;
   };
   // W1-T11768: the one snapshot of an injected ops target; `null` is any refusal (never a partial Plan).

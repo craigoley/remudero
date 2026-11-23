@@ -19,6 +19,7 @@
     - test/plan/ops-catalog-shadow-invalid-edges.test.ts
     - test/daemon/ops-catalog-shadow-enabled.test.ts
     - test/quiet-hours-dispatch-gate.test.ts
+    - test/plan/ops-catalog-shadow-real-reader.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -56,3 +57,8 @@
     zeroes the measured fields of four timing rows before it compares (W1-T4998, W1-T8235, W1-T9072,
     #12826); dispatch.selection_timing's total_ms and probe_ms join that list. Its decision fields
     (site, candidates_examined) are still compared.
+    2026-11-23, scope: test/plan/ops-catalog-shadow-real-reader.test.ts joins files:. Its W1-T12185
+    criterion 2 test compares two daemon runs' ledgers with inline deps that pin now but not the timing
+    clock, so it read total_ms 1 against 3 (#20314 coverage-shard 4/12). It pins selectionTimingNow to 0,
+    as the other inline suites do. No assertion changes. A sweep of all 363 suites that import the daemon,
+    run with a randomized timing clock, failed only this one.
