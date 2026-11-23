@@ -60,7 +60,10 @@ export function migrationOptions(args: readonly string[]): Options | undefined {
  *  the history holds no commit before it. */
 export interface OpsCatalogSize { shards: number; bytes: number; treeEntries: number; shardDir: boolean; dayStart?: OpsCatalogGrowthPoint }
 const DAY_MS = 86_400_000;
-export async function catalog(root: string, commit: string, external = false, sizeAt?: number): Promise<{ plan: Plan; originals: Map<string, Original>; size?: OpsCatalogSize }> {
+/** W1-T14447: the catalog's own paths at its commit: its monolith and its shard directory (with a trailing slash). */
+export interface CatalogPaths { monolith: string; shardDir: string }
+export async function catalog(root: string, commit: string, external = false, sizeAt?: number):
+  Promise<{ plan: Plan; originals: Map<string, Original>; paths: CatalogPaths; size?: OpsCatalogSize }> {
   const git = defaultGitRunnerAsync(root);
   if ((await git(["rev-parse", `${commit}^{commit}`])).trim() !== commit) return unknown("catalog_unreadable");
   const within = (path: string): string => {
@@ -135,7 +138,7 @@ export async function catalog(root: string, commit: string, external = false, si
   for (const task of plan.tasks) counts.set(task.sourcePath!, (counts.get(task.sourcePath!) ?? 0) + 1);
   const originals = new Map<string, Original>(plan.tasks.map(task => [task.id,
     { ...byPath.get(task.sourcePath!)!, single: counts.get(task.sourcePath!) === 1 }]));
-  return { plan, originals, ...(size ? { size } : {}) };
+  return { plan, originals, paths: { monolith, shardDir }, ...(size ? { size } : {}) };
 }
 
 /**
@@ -288,11 +291,16 @@ function query(o: Options, taskId?: string, control?: Json, movers = false): str
     (movers ? moves("publicMoves", o.publicRepo, "is:open head:plan-move-") + moves("opsMoves", o.opsRepo, "is:open head:plan-move-") : "");
   return `query MigrationPreview{public:repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}){${pin} ${open} ${merged}} ops:repository(owner:${JSON.stringify(opsOwner)},name:${JSON.stringify(opsName)}){${pin}} ${searches}}`;
 }
-function pin(repo: Json, expected: string, commit: string, remote: Map<string, string>): { id: number; branch: string } {
+/** W1-T14447: the repository's identity and default branch, and every live head (the API's default-branch oid, the
+ *  listed branch and HEAD) that is not the pinned commit. A live head is not refused here: {@link liveHeadJudge}
+ *  admits it only when it descends from the pin by commits that touch no carried task. */
+function pin(repo: Json, expected: string, commit: string, remote: Map<string, string>): { id: number; branch: string; live: string[] } {
   if (repo.nameWithOwner !== expected || !Number.isSafeInteger(repo.databaseId) || Number(repo.databaseId) <= 0) return unknown("repository_identity");
   const branch = object(repo.defaultBranchRef), target = object(branch.target);
-  if (typeof branch.name !== "string" || target.oid !== commit || remote.get(`refs/heads/${branch.name}`) !== commit || remote.get("HEAD") !== commit) return unknown("ref_moved");
-  return { id: Number(repo.databaseId), branch: branch.name };
+  if (typeof branch.name !== "string") return unknown("ref_moved");
+  const heads = [target.oid, remote.get(`refs/heads/${branch.name}`), remote.get("HEAD")];
+  if (!heads.every(sha)) return unknown("ref_moved");
+  return { id: Number(repo.databaseId), branch: branch.name, live: [...new Set(heads)].filter(head => head !== commit) };
 }
 function page(value: unknown): { nodes: Json[]; total: number; next: boolean; cursor: string | null } {
   const p = object(value), info = object(p.pageInfo);
@@ -322,6 +330,8 @@ export function taskOwned(id: string, files: readonly string[], remote: Map<stri
 
 export interface PreviewState {
   repositoryId: number; opsId: number; publicBranch: string; opsBranch: string; open: Json[]; recent: Json[]; mergedTotal: number;
+  /** W1-T14447: each side's live heads that are not its pinned commit; empty while the main still sits at the pin. */
+  publicLive: string[]; opsLive: string[];
   trailer?: Json[]; branch?: Json[]; control?: Json[]; refusedMoves?: Json[]; publicMoves?: Json[]; opsMoves?: Json[];
 }
 /** A mover pull request search: complete, in the named repository, on a plan-move- branch, never merged-credit evidence. */
@@ -361,13 +371,82 @@ export async function readState(o: Options, primaryRefs: Map<string, string>, pr
   if (recent.nodes.length !== Math.min(recent.total, 100) || recent.next !== (recent.total > recent.nodes.length)) return unknown("incomplete_merge_credit");
   const numbers = new Set<number>();
   for (const pr of recent.nodes) { credited(pr); if (numbers.has(Number(pr.number))) return unknown("incomplete_merge_credit"); numbers.add(Number(pr.number)); }
-  return { repositoryId, opsId, publicBranch: publicPin.branch, opsBranch: opsPin.branch, open: openSnapshot(primary.open), recent: recent.nodes, mergedTotal: recent.total,
+  return { repositoryId, opsId, publicBranch: publicPin.branch, opsBranch: opsPin.branch, publicLive: publicPin.live, opsLive: opsPin.live,
+    open: openSnapshot(primary.open), recent: recent.nodes, mergedTotal: recent.total,
     ...(id && control ? { trailer: searchRows(data.byTrailer, repositoryId, o.publicRepo), branch: searchRows(data.byBranch, repositoryId, o.publicRepo), control: searchRows(data.control, repositoryId, o.publicRepo),
       refusedMoves: moverRows(data.refusedMoves, opsId, o.opsRepo, ["CLOSED", "MERGED"]) } : {}),
     ...(movers ? { publicMoves: moverRows(data.publicMoves, repositoryId, o.publicRepo, ["OPEN"]), opsMoves: moverRows(data.opsMoves, opsId, o.opsRepo, ["OPEN"]) } : {}) };
 }
-function stable(before: PreviewState, after: PreviewState): void {
-  if (before.repositoryId !== after.repositoryId || before.opsId !== after.opsId || before.mergedTotal !== after.mergedTotal || JSON.stringify(before.open) !== JSON.stringify(after.open) || JSON.stringify(before.recent) !== JSON.stringify(after.recent)) return unknown("ownership_changed");
+/** W1-T14447: a task a move step carries: its id, its record path (the same path on both sides), and every path
+ *  taskOwned reads as its own (its files: and its record path). */
+export interface CarriedTask { id: string; path: string; files: readonly string[] }
+const NO_REFS: Map<string, string> = new Map();
+/**
+ * W1-T14447: the re-read refuses ownership_changed only for a change that touches a carried task: another repository,
+ * an open pull request owning a carried task by taskOwned's rules (its files and record path, its run branch, its
+ * trailer), or a merged pull request crediting one. Every open and merged pull request of `after` is judged, not only
+ * the new or changed ones: the selection already refused any task owned in `before.open` or credited in
+ * `before.recent`, so a hit here is a change, and judging the whole read cannot miss one. A merged pull request that
+ * is new or changed since `before` is also refused when it merely names a carried task the way taskOwned reads an open
+ * one (its run branch or a `Remudero-Task:` line), even where the anchored credit rule would not count it: a revised
+ * merged body is a change to that task's evidence. Pushes, merges and order changes that touch no carried task pass.
+ */
+function stable(before: PreviewState, after: PreviewState, carried: readonly CarriedTask[]): void {
+  if (before.repositoryId !== after.repositoryId || before.opsId !== after.opsId) return unknown("ownership_changed");
+  const ids = new Set(carried.map(task => task.id));
+  if (carried.some(task => taskOwned(task.id, task.files, NO_REFS, after.open)) || after.recent.some(pr => credited(pr).some(id => ids.has(id)))) return unknown("ownership_changed");
+  const prior = new Map(before.recent.map(pr => [pr.number, JSON.stringify(pr)]));
+  const named = (pr: Json) => carried.some(task => taskIdFromRunBranch(String(pr.headRefName)) === task.id || String(pr.body).split(/\r?\n/).includes(`Remudero-Task: ${task.id}`));
+  if (after.recent.some(pr => prior.get(pr.number) !== JSON.stringify(pr) && named(pr))) return unknown("ownership_changed");
+}
+
+/** A git command's exit status: 0 on success, the process's own status otherwise (-1 when it never ran). */
+const exitOf = (git: ReturnType<typeof defaultGitRunnerAsync>, args: string[]): Promise<number> =>
+  git(args).then(() => 0, (error: { code?: unknown }) => typeof error.code === "number" ? error.code : -1);
+/** The change from a pinned commit to one live head: every path it touches, and its catalog patch. */
+interface LiveRange { changed: ReadonlySet<string>; patch: string }
+async function liveRange(root: string, repository: string, pinned: string, live: string, paths: CatalogPaths): Promise<LiveRange> {
+  const git = defaultGitRunnerAsync(root);
+  // The live head is read as the janitor reads one: fetch its objects when absent, and write no ref.
+  if (await exitOf(git, ["cat-file", "-e", `${live}^{commit}`]) !== 0) {
+    await exitOf(git, ["fetch", "--quiet", "--no-write-fetch-head", `https://github.com/${repository}.git`, "HEAD"]);
+    if (await exitOf(git, ["cat-file", "-e", `${live}^{commit}`]) !== 0) return unknown("ref_moved");
+  }
+  if (await exitOf(git, ["merge-base", "--is-ancestor", pinned, live]) !== 0) return unknown("ref_moved");
+  // No rename detection: a record moved away from its path names that path, not only its new one.
+  const changed = new Set((await git(["diff", "--no-renames", "--name-only", "-z", pinned, live, "--"])).split("\0").filter(Boolean));
+  const patch = await git(["diff", "--no-renames", "--no-color", "--no-ext-diff", "--no-textconv", "-U0", pinned, live, "--", paths.monolith, paths.shardDir]);
+  return { changed, patch };
+}
+/** An id named as a whole word: W1-T1 is not named by W1-T10, and is named by run-W1-T1-5 or `depends_on: [W1-T1]`. */
+const namesTask = (text: string, id: string): boolean => {
+  const literal = id.replace(/[.*+?^$()|[\]{}\\]/g, "\\$&");
+  return new RegExp(`(^|[^A-Za-z0-9])${literal}(?![A-Za-z0-9])`, "m").test(text);
+};
+export type LiveHeadJudge = (state: PreviewState, carried: readonly CarriedTask[]) => Promise<void>;
+/**
+ * W1-T14447: admit a main that moved past its pinned commit. Each live head of each side is fetched without writing
+ * a ref and admitted only when the pin is its ancestor, its range from the pin changes no carried task's record path
+ * on that side, and its catalog patch names no carried task (a new record at another path, or a new dependant);
+ * otherwise ref_moved. A step is still written on its pinned commit. Each range is read once per judge.
+ */
+export function liveHeadJudge(o: Options, paths: { public: CatalogPaths; ops: CatalogPaths }): LiveHeadJudge {
+  const ranges = new Map<string, Promise<LiveRange>>();
+  const sides = [
+    { side: "public" as const, root: o.publicRoot, repository: o.publicRepo, pinned: o.publicCommit, live: (state: PreviewState) => state.publicLive },
+    { side: "ops" as const, root: o.opsRoot, repository: o.opsRepo, pinned: o.opsCommit, live: (state: PreviewState) => state.opsLive },
+  ];
+  return async (state, carried) => {
+    for (const { side, root, repository, pinned, live } of sides) {
+      for (const head of live(state)) {
+        const key = `${side}:${head}`;
+        const range = ranges.get(key) ?? liveRange(root, repository, pinned, head, paths[side]);
+        ranges.set(key, range);
+        const { changed, patch } = await range;
+        if (carried.some(task => changed.has(task.path) || namesTask(patch, task.id))) return unknown("ref_moved");
+      }
+    }
+  };
 }
 function searchedMerged(state: PreviewState, id: string, control: Json): boolean {
   // Missing search evidence is incomplete; a complete search without its positive control is unreadable.
@@ -413,7 +492,9 @@ export async function selectPlanTaskMigration(
   const publicRefs = await refs(o.publicRoot, o.publicRepo), opsRefs = await refs(o.opsRoot, o.opsRepo);
   const pub = await catalog(o.publicRoot, o.publicCommit), ops = await catalog(o.opsRoot, o.opsCommit, true, (bounds.clock ?? systemClock).now());
   if (ops.plan.tasks.some(t => pub.plan.byId.has(t.id) || t.depends_on.some(id => !ops.plan.byId.has(id) && !pub.plan.byId.has(id)))) return unknown("catalog_conflict");
+  const judge = liveHeadJudge(o, { public: pub.paths, ops: ops.paths });
   const initial = await readState(o, publicRefs, opsRefs, { reader }), knownMerged = new Set(initial.recent.flatMap(credited));
+  await judge(initial, []);
   // A positive search control is an actual known run PR, not an invented task or an age-based grant.
   const control = [...initial.recent].reverse().find(pr => taskIdFromRunBranch(String(pr.headRefName)) !== undefined);
   const refused: Array<{ id: string; reason: string }> = [];
@@ -423,6 +504,9 @@ export async function selectPlanTaskMigration(
   const rank = (task: Task) => ranks.get(pub.originals.get(task.id)!.path) ?? Number.MAX_SAFE_INTEGER;
   const ordered = dispatchOrder(pub.plan.tasks).reverse().map((task, i) => ({ task, i })).sort((a, b) => rank(a.task) - rank(b.task) || a.i - b.i).map(x => x.task);
   const batch: Json[] = [];
+  // W1-T14447: what each re-read protects: every member selected so far, and the candidate under lookup.
+  const carried: CarriedTask[] = [];
+  const carriedOf = (task: Task, path: string): CarriedTask => ({ id: task.id, path, files: [...(task.files ?? []), path] });
   let lookups = 0;
   for (const task of ordered) {
     const original = pub.originals.get(task.id)!;
@@ -444,7 +528,9 @@ export async function selectPlanTaskMigration(
     // A full lookup budget ends the batch; with nothing selected it is still a runaway, refused whole.
     if (lookups === MAX_CANDIDATE_LOOKUPS) { if (batch.length === 0) return unknown("merge_credit_budget_exhausted"); break; }
     lookups++;
-    const checked = await readState(o, publicRefs, opsRefs, { id: task.id, control, reader }); stable(initial, checked);
+    const checked = await readState(o, publicRefs, opsRefs, { id: task.id, control, reader });
+    const carrying = [...carried, carriedOf(task, original.path)];
+    stable(initial, checked, carrying); await judge(checked, carrying);
     if (moveRefused(checked, task.id, original.blob)) { refused.push({ id: task.id, reason: "move_refused" }); continue; }
     if (searchedMerged(checked, task.id, control)) { refused.push({ id: task.id, reason: "merged" }); continue; }
     // W1-T14368: the bounds judge the ops catalog this copy would produce, not the one it read. W1-T14345: with every
@@ -453,13 +539,15 @@ export async function selectPlanTaskMigration(
       try { judgeOpsBatch(ops.size, [...batch.map(member => String(member.yaml)), original.text], o.publicCommit, bounds); }
       catch (error) { if (batch.length === 0 || !(error instanceof PreviewUnknown)) throw error; break; }
     }
+    carried.push(carriedOf(task, original.path));
     batch.push({ id: task.id, sourcePath: original.path, sourceCommit: o.publicCommit, sourceBlob: original.blob, yaml: original.text, originalBytesBase64: Buffer.from(original.text).toString("base64"), prospectiveMovedFrom: `remudero@${o.publicCommit}` });
     if (batch.length >= MOVE_BATCH_BOUND) break;
   }
   // Independently re-read selected ownership, both source heads and each selected task's API credit before answering.
   const finalPublic = await refs(o.publicRoot, o.publicRepo), finalOps = await refs(o.opsRoot, o.opsRepo);
   for (const member of batch.length > 0 ? batch : [undefined]) {
-    const last = await readState(o, finalPublic, finalOps, { id: member ? String(member.id) : undefined, control, reader }); stable(initial, last);
+    const last = await readState(o, finalPublic, finalOps, { id: member ? String(member.id) : undefined, control, reader });
+    stable(initial, last, carried); await judge(last, carried);
     if (member && control) {
       if (searchedMerged(last, String(member.id), control)) return unknown("candidate_credit_changed");
       const task = pub.plan.byId.get(String(member.id))!;
