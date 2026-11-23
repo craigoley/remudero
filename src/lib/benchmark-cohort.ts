@@ -1121,7 +1121,7 @@ export async function runBenchmarkCohortPass(
   const state = opts.caseFiles === undefined && opts.caseFilesFromState ? readStateCaseFiles(stateDir) : undefined;
   const caseFiles = opts.caseFiles ?? (state && "files" in state ? state.files : undefined);
   const result = await cohortPass(stateDir, { ...opts, caseFiles }, io);
-  return { ...result, ...io, ...(state ? { caseFileJoin: "files" in state ? "joined" as const : state.skip } : {}) };
+  return { ...result, ...io, ...(state ? { caseFileJoin: "files" in state ? "joined" as const : state.reason } : {}) };
 }
 
 /** W1-T14539: the case-file snapshot the daily Field Trials refresh writes beside the ledger. */
@@ -1164,17 +1164,17 @@ export function loadCaseFileSnapshot(caseFilePath: string, beforeRead?: () => vo
 }
 
 /** The state snapshot, or the reason the pass runs without it. A bad snapshot never fails the pass. */
-export function readStateCaseFiles(stateDir: string): { files: TaskCaseFile[] } | { skip: Exclude<CaseFileJoin, "joined"> } {
+export function readStateCaseFiles(stateDir: string): { files: TaskCaseFile[] } | { reason: Exclude<CaseFileJoin, "joined"> } {
   try {
     return { files: loadCaseFileSnapshot(stateCaseFileSnapshotPath(stateDir)) };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException | null)?.code;
-    if (code === "ENOENT") return { skip: "absent" };
-    if (error instanceof TypeError && error.message === "case-file-snapshot-too-large") return { skip: "too-large" };
+    if (code === "ENOENT") return { reason: "absent" };
+    if (error instanceof TypeError && error.message === "case-file-snapshot-too-large") return { reason: "too-large" };
     if (code === "EACCES" || code === "EPERM" || code === "EISDIR"
       || (error instanceof TypeError && (error.message === "case-file-snapshot-not-a-file"
-        || error.message === "case-file-snapshot-changed-during-read"))) return { skip: "unreadable" };
-    return { skip: "invalid" };
+        || error.message === "case-file-snapshot-changed-during-read"))) return { reason: "unreadable" };
+    return { reason: "invalid" };
   }
 }
 

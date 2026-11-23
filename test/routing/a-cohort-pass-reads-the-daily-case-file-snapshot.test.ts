@@ -83,17 +83,17 @@ test("W1-T14539 criterion 2: a missing, unreadable, oversized or invalid snapsho
     assert.equal(absent.caseFileJoin, "absent");
     for (const outcome of outcomes(absent)) assert.equal(outcome, NO_JOIN);
     f.writeCases("not json");
-    assert.deepEqual(readStateCaseFiles(f.stateDir), { skip: "invalid" });
+    assert.deepEqual(readStateCaseFiles(f.stateDir), { reason: "invalid" });
     f.writeCases(JSON.stringify([{ version: "task-case-file-v0", taskId: "W1-T1", asOf: cutoff }]));
-    assert.deepEqual(readStateCaseFiles(f.stateDir), { skip: "invalid" });
+    assert.deepEqual(readStateCaseFiles(f.stateDir), { reason: "invalid" });
     const invalid = await runBenchmarkCohortPass(f.stateDir, { nowIso: cutoff, caseFilesFromState: true });
     assert.equal(invalid.caseFileJoin, "invalid");
     for (const outcome of outcomes(invalid)) assert.equal(outcome, NO_JOIN);
     f.writeCases(" ".repeat(4 * 1024 * 1024 + 1));
-    assert.deepEqual(readStateCaseFiles(f.stateDir), { skip: "too-large" });
+    assert.deepEqual(readStateCaseFiles(f.stateDir), { reason: "too-large" });
     rmSync(stateCaseFileSnapshotPath(f.stateDir));
     mkdirSync(stateCaseFileSnapshotPath(f.stateDir));
-    assert.deepEqual(readStateCaseFiles(f.stateDir), { skip: "unreadable" });
+    assert.deepEqual(readStateCaseFiles(f.stateDir), { reason: "unreadable" });
     rmSync(stateCaseFileSnapshotPath(f.stateDir), { recursive: true });
     f.writeCases(goodSnapshot());
     // A pass that does not ask for the state snapshot reports nothing about it.
