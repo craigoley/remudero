@@ -416,17 +416,19 @@ export function answerHeld(known: readonly AnswerRecord[], record: AnswerRecord)
 }
 
 /** W1-T13940: append each of `candidates` that `known` lacks to the answers file beside the ledger, so the reader that cannot
- * see the store it came from counts it too. Best effort: it never decides an answer, and a failed append is retried next read. */
-export function publishAnswers(ledgerPath: string, candidates: readonly AnswerRecord[], known: AnswerRecord[]): void {
+ * see the store it came from counts it too. It never decides an answer. The first failed append stops it and is returned. */
+export function publishAnswers(ledgerPath: string, candidates: readonly AnswerRecord[], known: AnswerRecord[]): string | undefined {
   for (const record of candidates) {
     if (answerHeld(known, record)) continue;
     try {
       appendFileSync(sharedAnswersPath(ledgerPath), JSON.stringify(record) + "\n");
       known.push(record);
-    } catch {
-      return; // deliberate: the answer still counts where it is held; an unpublished one is published on a later read.
+    } catch (error) {
+      const reason = `the answers file ${sharedAnswersPath(ledgerPath)} could not be written: ${(error as Error).message}`;
+      return reason;
     }
   }
+  return undefined;
 }
 
 /** W1-T12715: why a task with an unanswered needs_input question is held, or undefined. */
