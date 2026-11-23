@@ -694,6 +694,28 @@ export function stalledStageEscalationSummary(reason: string): string {
     .replace(/; the fleet itself withheld the repair for \d+ of those minutes$/, "");
 }
 
+/** W1-T12046: a stalled stage's cause — its blocker and the diagnosis the sweep computed — keyed so two PRs stalled
+ *  for one cause share it. The PR, its age, episode start and per-PR held/last-round tails are dropped. Reads a
+ *  reason or the body of an issue it opened; `undefined` for any other text. #17633-#17637 were five
+ *  `awaiting-review` stalls with one diagnosis: `repeat: "checks green, review never posted — …" x3`. */
+export function stalledStageCauseKey(text: string): string | undefined {
+  const found = /PR stage stalled: #\d+ \S+ — ([a-z-]+) for \d+ minutes \([^)]*\); since [^;]*; DIAGNOSIS: (.*?)(?:; the fleet itself withheld the repair for \d+ of those minutes)?(?:; the last fix round ended at \S+?)?\.?$/m.exec(text);
+  return found === null ? undefined : `${found[1]} — ${found[2]}`;
+}
+
+/** W1-T12046: the oldest open stall escalation another PR opened for the same cause, which this PR joins by a
+ *  comment instead of opening its own. An issue of this PR, or of a different blocker or diagnosis, never matches. */
+export function openStallCauseIssue(open: readonly OpenIssue[], pr: { prNumber: number; prUrl: string },
+  causeKey: string): OpenIssue | undefined {
+  const own = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — `;
+  return open.filter(issue => {
+    const body = escalationBodyInLegacyOrder(issue.body ?? "");
+    const identity = stalledStageIssueIdentity({ title: issue.title, body });
+    return identity !== undefined && !identity.startsWith(own) && escalationIssueCause(body) === "stage-stall" &&
+      stalledStageCauseKey(body) === causeKey;
+  }).sort((a, b) => a.number - b.number)[0];
+}
+
 /** The PR's oldest open stage-stall question, whatever its head, blocker or contract, viewed at the
  *  episode's head with no contract line so the gateway's own task/PR/cause match appends to it. */
 function openStallQuestionForPr(open: OpenIssue[], pr: { prNumber: number; prUrl: string; headSha: string },
@@ -2961,6 +2983,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     planPrPreflightImpl = planPrPreflightAtCommitAsync,
     updatePrBodyImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updatePrBodyImpl"]>>("updatePrBodyImpl"),
   } = deps;
+  // W1-T12046: each pass builds these effects afresh, so this pass's own stall-cause issues and the PRs that
+  // joined them stay visible to its later PRs even before GitHub's open list shows a just-opened issue.
+  const stallCauseIssues = new Map<string, { url: string; prs: number[] }>();
+  // One cause's escalations run one at a time, so two PRs of one cause can never both open an issue.
+  const stallCauseTurns = new Map<string, Promise<unknown>>();
 
   // W1-T2889: kept as a typed local (not a destructured default) so this default arm's shape
   // survives the positional-parameters-to-one-deps-object collapse verbatim — the sweep's
@@ -4542,9 +4569,17 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // narrow by blocker and keep older heads visible to the gateway's supersession cleanup.
       // The PR's one stall issue as GitHub stores it, when this episode is offered to it.
       let keptStall: OpenIssue | undefined;
+      // W1-T12046: a stall's cause (blocker and diagnosis). The open list read to look for its issue is handed to
+      // the gateway's first read, so the escalation still reads GitHub once; a failed read is handed on as the
+      // gateway's own failed read, which it records as unreadable (no issue opened), exactly as before.
+      const causeKey = stallIdentity === undefined ? undefined : stalledStageCauseKey(reason);
+      let causeRead: { open: OpenIssue[] } | { error: unknown } | undefined;
       const escalationIssues: AsyncIssueGateway = stallIdentity !== undefined && issues.listOpen
         ? { ...issues, listOpen: async (label) => {
-          const open = await issues.listOpen!(label);
+          const reused = label === NEEDS_HUMAN_LABEL ? causeRead : undefined;
+          causeRead = undefined;
+          if (reused !== undefined && "error" in reused) throw reused.error;
+          const open = reused?.open ?? await issues.listOpen!(label);
           const kept = openStallQuestionForPr(open, pr, { class: cls, taskId: escalationTaskIdFor(pr), cause });
           keptStall = kept?.stored;
           return kept ? [kept.view] : open.filter(issue => {
@@ -4572,7 +4607,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
         }
       };
-      const file = async (context: string): Promise<void> => { const filedUrl = await escalateAsync(
+      const file = async (context: string): Promise<string> => { const filedUrl = await escalateAsync(
         {
           class: cls,
           // See {@link escalationTaskIdFor} — pure and separately tested, so the mint that makes
@@ -4601,9 +4636,51 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           recommendation: question.resolutions[0].label,
         },
         { issues: escalationIssues, ledgerPath, runId },
-      ); await refreshStoredHead(filedUrl); };
-      if (pr.mergeState !== "dirty") return file("");
-      return readMainCommit().then((main) => file(conflictEscalationContext(pr, main?.sha)));
+      ); await refreshStoredHead(filedUrl); return filedUrl; };
+      // W1-T12046: a PR with no stall question of its own, stalled for a cause another PR's open stall issue (or one
+      // this pass opened) already names, is listed on that issue by a comment instead of opening its own.
+      const joinStallCause = async (key: string): Promise<boolean> => {
+        const listOpen = issues.listOpen;
+        if (!listOpen || !issues.comment) return false;
+        // Settled to a value: a failed read reaches the gateway, which ledgers it as `escalation.dedup_unreadable`.
+        const read = await Promise.resolve().then(() => listOpen(NEEDS_HUMAN_LABEL))
+          .then((open): { open: OpenIssue[] } => ({ open }), (error: unknown): { error: unknown } => ({ error }));
+        causeRead = read;
+        if ("error" in read) return false;
+        const open = read.open;
+        if (openStallQuestionForPr(open, pr, { class: cls, taskId: escalationTaskIdFor(pr), cause }) !== undefined) return false;
+        const listed = openStallCauseIssue(open, pr, key);
+        const ours = stallCauseIssues.get(key);
+        const url = listed?.url ?? ours?.url;
+        if (url === undefined) return false;
+        const opener = Number(/#(\d+)/.exec(stalledStageIssueIdentity({ title: listed?.title,
+          body: escalationBodyInLegacyOrder(listed?.body) }) ?? "")?.[1]);
+        const prs = [...new Set([...(ours?.url === url ? ours.prs : Number.isInteger(opener) ? [opener] : []), pr.prNumber])];
+        await issues.comment(url,
+          `Pull request #${pr.prNumber} (${pr.prUrl}) is stalled for the same cause as this issue, so it is listed ` +
+          `here instead of opening its own escalation (W1-T12046).\n\n` +
+          `Pull requests stalled for this cause: ${prs.map(n => `#${n}`).join(", ")}\n\n` +
+          `Task ${escalationTaskIdFor(pr)}, head ${pr.headSha}.\n\n${reason}`);
+        stallCauseIssues.set(key, { url, prs });
+        // The row escalate() writes when an escalation lands on an issue already open, naming the cause it shares.
+        appendLedger(ledgerPath, { run_id: runId, task_id: escalationTaskIdFor(pr), step: "escalation.deduped", class: cls,
+          issue_url: url, observation_comment: "appended", pr_number: pr.prNumber, head_sha: pr.headSha,
+          stall_cause: key, stall_cause_prs: prs });
+        return true;
+      };
+      const raise = async (): Promise<void> => {
+        if (causeKey !== undefined && await joinStallCause(causeKey)) return;
+        const filedUrl = pr.mergeState !== "dirty" ? await file("")
+          : await readMainCommit().then((main) => file(conflictEscalationContext(pr, main?.sha)));
+        if (causeKey !== undefined && filedUrl && keptStall === undefined && !stallCauseIssues.has(causeKey)) {
+          stallCauseIssues.set(causeKey, { url: filedUrl, prs: [pr.prNumber] });
+        }
+      };
+      if (causeKey === undefined) return raise();
+      const turn = (stallCauseTurns.get(causeKey) ?? Promise.resolve()).then(raise, raise);
+      // Only the order is kept here: the caller still receives this escalation's own rejection through `turn`.
+      stallCauseTurns.set(causeKey, turn.then(() => "settled", (error: unknown) => error));
+      return turn;
     },
 
     dispatchPlanGateRound: async (pr) => {
