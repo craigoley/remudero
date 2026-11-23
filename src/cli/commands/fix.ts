@@ -2478,6 +2478,32 @@ function earlyCiRecheck(opts: FixRungOptions, readFailures: NonNullable<FixRungO
   };
 }
 
+const FIX_TEMPLATE_CRITERION: CriterionVerdict = { claim: "${CLAIM}", proof: "${PROOF}", met: false, reason: "${REASON}",
+  proof_exec: "executed_fail" };
+
+/** W1-T12152: one placeholder evidence per fix mode, each deriving that same mode, with every task and evidence slot a
+ *  named marker — the input {@link fixPromptTemplate} renders a mode's template from. */
+const FIX_TEMPLATE_EVIDENCE: Readonly<Record<string, FixEvidence>> = {
+  "merge-conflict": { mergeConflict: { files: [{ path: "${CONFLICT_PATH}", oursDeleted: 0, theirsDeleted: 0 }],
+    oursLog: "${OURS_LOG}", theirsLog: "${THEIRS_LOG}" } },
+  "plan-gate": { planGateFindings: [{ check: "${CHECK}", firstLine: "${FINDING}" }] },
+  "ci-log": { ciFailures: [{ name: "${CHECK}", logTail: "${LOG_TAIL}" }] },
+  "gate-fix": { actionableGateFailures: [{ reason: "${GATE_REASON}" }] },
+  "proof-discrimination": { proofDiscrimination: { proofs: [{ claim: "${CLAIM}", proof: "${PROOF}", proofExec: "not_executable" }] } },
+  "body-coverage": { review: { unmetCriteria: [{ ...FIX_TEMPLATE_CRITERION, reason: "matched 0/1 proof keywords",
+    proof_exec: "not_executable" }], summary: "${SUMMARY}" } },
+  "reviewer-unmet": { review: { unmetCriteria: [FIX_TEMPLATE_CRITERION], summary: "${SUMMARY}" } },
+};
+
+/** W1-T12152: the fix lane's prompt template for a round — {@link renderFixPrompt} over a placeholder task and its mode's
+ *  placeholder evidence, rendered before any task or evidence text is filled in, so two PRs repaired in one mode under
+ *  one contract record one prompt revision. A mode with no placeholder records no template (the named gap). */
+export function fixPromptTemplate(evidence: FixEvidence, harnessCommits: boolean): string | undefined {
+  const placeholder = FIX_TEMPLATE_EVIDENCE[deriveFixMode(evidence)];
+  return placeholder === undefined ? undefined : renderFixPrompt({ harnessCommits, round: 1, branch: "${BRANCH}",
+    task: { id: "${TASK_ID}", title: "${TASK_TITLE}", files: ["${TASK_FILE}"] }, evidence: placeholder });
+}
+
 export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): ReturnType<RunTaskCommandHost["runFixRung"]> {
   opts = noEditRecoveryOptions(opts);
   const recheck = opts.readEarlyCiFailures && earlyCiRecheck(opts, opts.readEarlyCiFailures);
@@ -4713,6 +4739,8 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       // W1-T210: ci-log mode's prompt carries an untrusted CI log tail, so no WebFetch/WebSearch.
       // W1-T4458 (iii): a round the harness commits loses Bash too, so its prompt and tools agree.
       tools: fixHarnessOwnsGit ? FIX_WORKER_TOOLS_HARNESS_COMMITS : FIX_WORKER_TOOLS,
+      // W1-T12152: the assignment's prompt revision hashes the round's template, never the filled prompt above.
+      promptTemplate: fixPromptTemplate(evidence, fixHarnessOwnsGit),
       // W1-T3727: the surface a BLOCKED auction would divert this round to. Offered only when the
       // prompt above already said the harness commits — otherwise a retry hands a shell-less
       // worker a contract asking for `git push`.
@@ -5046,6 +5074,8 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         { ...deps, spawn: askReceipt.spawn },
         {
           ...fixArgs,
+          // W1-T12152: a different prompt, so the fix round's template is not its revision.
+          promptTemplate: undefined,
           prompt: host.missingCommitLinePrompt({
             provider: fixResult.provider ?? fixArgs.mountProvider,
             tools: fixArgs.tools,

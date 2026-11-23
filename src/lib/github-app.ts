@@ -472,6 +472,9 @@ export function nextRefreshDelayMs(expiresAtMs: number, now: number = Date.now()
 /** Once per retained token: a failed refresh has spent half its lead, and the token has expired. */
 export const TOKEN_EXPIRING_STEP = "github_app.token_expiring";
 export const TOKEN_EXPIRED_STEP = "github_app.token_expired";
+/** W1-T14537: a scheduled refresh ran after the token it replaces had expired — its timer could not fire while the
+ *  loop was blocked, so every caller that read the env value in between presented a dead token. Once per token. */
+export const TOKEN_REFRESH_LATE_STEP = "github_app.token_refresh_late";
 const ATTEMPT_CYCLE_SAMPLES = 8;
 
 /** The margin's attempt count at the measured cycle (timer lateness plus exchange), up to half a life. */
@@ -597,7 +600,18 @@ export function startInstallationTokenRefresh(opts: {
       },
     );
   const tick = (): void => {
-    if (!stopped) void runOnce();
+    if (stopped) return;
+    const replaced = lastSuccessfulExpiresAtMs;
+    const at = now();
+    void runOnce();
+    if (replaced === undefined || at <= replaced || warned.has(`late:${replaced}`)) return;
+    warned.add(`late:${replaced}`);
+    // After runOnce: the refresh never waits on this row, and a failed write must not throw out of a timer.
+    try {
+      opts.log?.(TOKEN_REFRESH_LATE_STEP, { expires_at: fixedClock(replaced).iso(), late_ms: at - replaced, timer_lag_ms: Math.max(0, at - dueAt) });
+    } catch (err) {
+      process.stderr.write(`github_app: ${TOKEN_REFRESH_LATE_STEP} row not written: ${String((err as Error)?.message ?? err)}\n`);
+    }
   };
   const firstResult = runOnce();
   const ready = firstResult.then(() => undefined);

@@ -287,6 +287,7 @@ test("the committed registry parses and puts core, site and console in the remud
       ["site", "remudero", "craigoley/remudero-site", true],
       ["console", "remudero", "craigoley/remudero-console", true],
       ["ops", "remudero", "craigoley/remudero-ops", true],
+      ["oleyarcade", "remudero", "craigoley/oley-arcade", true],
     ],
   );
 });
@@ -296,7 +297,8 @@ test("W1-T13700: the committed registry runs remudero-ops live, and every other 
   const parsed = parseInstanceRegistry(text);
   assert.deepEqual(
     parsed.instances.map((i) => [i.name, i.mode ?? "live"]),
-    [["core", "live"], ["site", "live"], ["console", "live"], ["ops", "live"]],
+    // W1-T14552: oleyarcade, added after this ruling, is the one shadow row; the four before it stay live.
+    [["core", "live"], ["site", "live"], ["console", "live"], ["ops", "live"], ["oleyarcade", "shadow"]],
   );
   // The ruling is written out: an absent mode also reads live, so only the ops block's own key tells
   // the promotion from a dropped one.

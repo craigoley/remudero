@@ -218,13 +218,15 @@ test("W1-T9727: a fresh-tree review is judged against main at its own start", as
   assert.equal(justInTimeReads, 1, "one reading, taken before the reviewer ran");
 });
 
-test("W1-T9727: a fresh-tree review whose own start reading is stale is still withheld", async () => {
-  const fresh: ReviewerCodeFreshness = { status: "fresh", codeSha: MAIN_AT_START, originMainSha: MAIN_AT_START, advance: "none" };
-  const { code, posts, rows } = await freshTreeReview(() => STALE_AT_START, fresh);
-  assert.deepEqual(posts, [], "W1-T3337: code stale when it judged never publishes");
+test("W1-T9727: a fresh-tree review whose own start reading is stale ends before its reviewer (W1-T12227)", async () => {
+  let reviewed = false;
+  const { code, posts, rows } = await reviewWith(undefined, () => STALE_AT_START, () => {
+    reviewed = true;
+  }, ["--judge-at-own-start"]);
+  assert.equal(reviewed, false, "no reviewer judges with code stale at its own start");
+  assert.deepEqual(posts, [], "W1-T3337: stale code never publishes");
   assert.equal(code, 2);
-  const refused = rows.find((row) => row.step === "review.post_refused");
-  assert.equal(refused?.origin_main_sha, MAIN_AT_START, "the refusal names main as of the review start");
+  assert.equal(rows.some((row) => row.step === "review.post_refused"), false, "nothing was judged, so nothing is refused");
 });
 
 test("W1-T9727: a thrown own start reading is unreadable and the just-in-time read decides", async () => {

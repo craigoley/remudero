@@ -36,7 +36,7 @@ type Job = { name?: string; "timeout-minutes"?: number; steps: Step[] };
 const workflow = (path: string) => parseYaml(readFileSync(join(REPO_ROOT, path), "utf8")) as { jobs: Record<string, Job> };
 const NIGHTLY = workflow(".github/workflows/coverage-nightly.yml").jobs.merge!;
 const CI = workflow(".github/workflows/ci.yml");
-const SHARD_JOB = Object.values(CI.jobs).find((job) => job.name === "coverage-shard (${{ matrix.shard }}/12)")!;
+const SHARD_JOB = Object.values(CI.jobs).find((job) => job.name === "coverage-shard (${{ matrix.shard }}/16)")!;
 
 function step(job: Job, prefix: string): Step {
   const hit = job.steps.find((s) => s.name?.startsWith(prefix));

@@ -11,7 +11,7 @@ import { parse as parseYaml } from "yaml";
 import { DEFAULT_CI_SHARD_COUNT, proposalIsMaterial } from "#scripts/test-tier-manifest.mjs";
 // @ts-expect-error — plain .mjs, no declaration file.
 import { assertExpectedShardCount } from "#scripts/coverage-merge-ratchet.mjs";
-// W1-T13270: the coverage lane moved to its own count (12); ci-shard keeps the canonical 8.
+// W1-T13270: the coverage lane moved to its own count (12; 16 since W1-T14558); ci-shard keeps the canonical 8.
 import { CI_COVERAGE_SHARD_COUNT } from "#src/lib/ci-parity.js";
 
 // ── W1-T4436 ──────────────────────────────────────────────────────────────────────────────────
@@ -175,11 +175,11 @@ test("W1-T4436: the coverage aggregator requires exactly that many shard artifac
   assert.ok(coverageRequired, "expected ci.yml to still define coverage-ratchet-required");
 
   const artifactStep = stepNamed(coverageRequired, "Require downloaded coverage shard artifacts");
-  assert.match(artifactStep.run!, /for SHARD in 1 2 3 4 5 6 7 8 9 10 11 12; do/);
+  assert.match(artifactStep.run!, /for SHARD in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do/);
   assert.ok(!/for SHARD in 1 2 3 4; do/.test(artifactStep.run!), "the artifact-count loop must not still stop at 4");
 
   const mergeStep = stepNamed(coverageRequired, "Merge raw V8 coverage shards before assigning LCOV branch indexes");
-  assert.match(mergeStep.run!, /for SHARD in 1 2 3 4 5 6 7 8 9 10 11 12; do/);
+  assert.match(mergeStep.run!, /for SHARD in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do/);
   for (const n of COVERAGE_SHARD_LIST) {
     assert.ok(
       mergeStep.run!.includes(`coverage-shards/coverage-shard-${n}/raw`),

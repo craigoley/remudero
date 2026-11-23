@@ -1722,13 +1722,13 @@ jobs:
     # step below is a separate, diff-scoped check on the SAME job — sharing this job's
     # always-registers shape rather than adding a required context that could go absent — and
     # fails when the diff adds a source line lcov marks instrumented but never hit.
-    name: coverage-shard (${{ matrix.shard }}/12)
+    name: coverage-shard (${{ matrix.shard }}/16)
     runs-on: ubuntu-26.04
     needs: [coverage-ledger]
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     # W1-T1033: deliberately no `if:` here, at job or step level — test/diff-coverage.test.ts asserts
     # this job body carries none at all (the #729 discipline), so the job still registers on the push
     # trigger. Its collection step opens with a plain shell guard instead, and the staging step
@@ -2004,7 +2004,7 @@ jobs:
               console.log("W1-T5705: live coverage selection -> " + (narrow.length === 0 ? "FULL: " + (sel.reasons[0] ?? "no narrow set") : narrow.length + " narrow suite(s)"));
             ' changed-files.txt "${RUNNER_TEMP}/affected.diff" coverage-narrow-suites.txt || echo "full" > coverage-narrow-suites.txt
             if [ "$(head -n 1 coverage-narrow-suites.txt 2>/dev/null || true)" != "full" ] \
-              && node scripts/test-tier-manifest.mjs --select-candidates coverage-narrow-suites.txt --shard ${{ matrix.shard }}/12 --base HEAD^1 \
+              && node scripts/test-tier-manifest.mjs --select-candidates coverage-narrow-suites.txt --shard ${{ matrix.shard }}/16 --base HEAD^1 \
                 > coverage-test-files.txt 2> coverage-shard-selection.log && grep -q . coverage-test-files.txt; then
               SELECTION="narrow"
             else
@@ -2017,7 +2017,7 @@ jobs:
           # run is recorded but is never evidence about the selector's misses.
           echo "COVERAGE-SELECTION: ${SELECTION}"
           # W1-T5923: weigh the split on this lane's own instrumented durations.
-          if [ "$SELECTION" = "all" ] && ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/12 --base HEAD^1 \
+          if [ "$SELECTION" = "all" ] && ! node scripts/test-tier-manifest.mjs --select-all --shard ${{ matrix.shard }}/16 --base HEAD^1 \
             --instrumented-manifest scripts/test-tier-coverage-manifest.json --snapshot coverage/ledger-snapshot.manifest \
             --workers 3 --selection-output coverage/selected-files.json --resolved-ledger coverage/ledger-choice.json \
             > coverage-test-files.txt 2> coverage-shard-selection.log; then
@@ -2339,7 +2339,7 @@ jobs:
             exit 0
           fi
           EXPECTED=""
-          for SHARD in 1 2 3 4 5 6 7 8 9 10 11 12; do
+          for SHARD in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
             CLASS_FILE="coverage-shards/coverage-shard-${SHARD}/class"
             if [ ! -s "$CLASS_FILE" ]; then
               echo "coverage-ratchet: expected coverage-shard-${SHARD} artifact metadata; refusing a missing or partial artifact."
@@ -2364,13 +2364,13 @@ jobs:
             fi
           done
           SELECTIONS=()
-          for SHARD in 1 2 3 4 5 6 7 8 9 10 11 12; do
+          for SHARD in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
             if [ -s "coverage-shards/coverage-shard-${SHARD}/selected-files.json" ]; then SELECTIONS+=("coverage-shards/coverage-shard-${SHARD}/selected-files.json"); fi
           done
-          if [ "${#SELECTIONS[@]}" -eq 12 ]; then
+          if [ "${#SELECTIONS[@]}" -eq 16 ]; then
             node scripts/test-tier-manifest.mjs --check-partition "${SELECTIONS[@]}" --resolved-digest '${{ needs.coverage-ledger.outputs.digest }}'
           else
-            echo "W1-T4071: ${#SELECTIONS[@]} of 12 shards recorded a full split; no partition (every file once, one ledger) to check."
+            echo "W1-T4071: ${#SELECTIONS[@]} of 16 shards recorded a full split; no partition (every file once, one ledger) to check."
           fi
           EVENT="${EXPECTED%%:*}"
           CLASS="${EXPECTED#*:}"
@@ -2385,7 +2385,7 @@ jobs:
             echo "W1-T2428 fast-lane: class=${CLASS} — no coverage shards were collected."
             exit 0
           fi
-          for SHARD in 1 2 3 4 5 6 7 8 9 10 11 12; do
+          for SHARD in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
             RAW_DIR="coverage-shards/coverage-shard-${SHARD}/raw"
             if [ ! -s "coverage-shards/coverage-shard-${SHARD}/lcov.info" ]; then
               echo "coverage-ratchet: shard ${SHARD} is missing its independently generated lcov line evidence."
@@ -2398,7 +2398,7 @@ jobs:
           done
           mkdir -p coverage
           node --expose-internals scripts/coverage-merge-ratchet.mjs --output coverage/lcov.info \
-            --shard-count 12 \
+            --shard-count 16 \
             --line-lcov coverage-shards/coverage-shard-1/lcov.info \
             --line-lcov coverage-shards/coverage-shard-2/lcov.info \
             --line-lcov coverage-shards/coverage-shard-3/lcov.info \
@@ -2411,12 +2411,18 @@ jobs:
             --line-lcov coverage-shards/coverage-shard-10/lcov.info \
             --line-lcov coverage-shards/coverage-shard-11/lcov.info \
             --line-lcov coverage-shards/coverage-shard-12/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-13/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-14/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-15/lcov.info \
+            --line-lcov coverage-shards/coverage-shard-16/lcov.info \
             coverage-shards/coverage-shard-1/raw coverage-shards/coverage-shard-2/raw \
             coverage-shards/coverage-shard-3/raw coverage-shards/coverage-shard-4/raw \
             coverage-shards/coverage-shard-5/raw coverage-shards/coverage-shard-6/raw \
             coverage-shards/coverage-shard-7/raw coverage-shards/coverage-shard-8/raw \
             coverage-shards/coverage-shard-9/raw coverage-shards/coverage-shard-10/raw \
-            coverage-shards/coverage-shard-11/raw coverage-shards/coverage-shard-12/raw
+            coverage-shards/coverage-shard-11/raw coverage-shards/coverage-shard-12/raw \
+            coverage-shards/coverage-shard-13/raw coverage-shards/coverage-shard-14/raw \
+            coverage-shards/coverage-shard-15/raw coverage-shards/coverage-shard-16/raw
       # INVARIANT (2026-08-13): Diff coverage runs BEFORE the aggregate ratchet. No step in this job
       # carries an `if:`, so a failing step skips every step after it — measured, in five of six
       # recent failing runs the ratchet concluded `failure` and `Diff coverage` was `skipped`, so the

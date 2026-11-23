@@ -337,7 +337,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     github.resetFailureFlags?.();
     let openPrRows: OpenPrRest[] | undefined;
     let openPrError: string | undefined;
-    try { openPrRows = await fetchOpenPrsWithPostedIdsAsync(owner, repo, fetchAsync, pacer); }
+    try { openPrRows = await fetchTickOpenPrs(owner, repo, fetchAsync, pacer); }
     catch (error) {
       openPrError = String(error);
       log("read_plane.open_failed", { reason: openPrError });
@@ -2979,6 +2979,45 @@ export function* openPrViewSteps(
 }
 
 type OpenPrCiFailureRead = (owner: string, repo: string, rollup: RollupCheck[] | undefined) => Promise<CiFailure[]>;
+
+const TICK_OPEN_PRS_QUERY =
+  "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){" +
+  "pullRequests(states:OPEN,first:100,orderBy:{field:CREATED_AT,direction:DESC}){" +
+  "nodes{number url headRefName headRefOid createdAt updatedAt body isDraft autoMergeRequest{enabledAt}}}}}";
+
+async function fetchTickOpenPrs(owner: string, repo: string, read: GhApiFetcher, pacer: GhCallPacer): Promise<OpenPrRest[]> {
+  try {
+    return await fetchOpenPrsWithPostedIdsAsync(owner, repo, read, pacer);
+  } catch (restError) {
+    if (!(restError instanceof GhPaceFloorStandDownError) || restError.resource !== "core") throw restError;
+    const admission = githubInstallationBudget().admit();
+    if (admission.ok || admission.reason !== "reserve") throw restError;
+    try {
+      // GraphQL has its own budget. This read supplies fresh PRs; REST-only check evidence stays unknown.
+      return await paceGhEntryAsync(pacer, isGhRateLimitError, async () => {
+        const answer = await read(["api", "graphql", "-f", `query=${TICK_OPEN_PRS_QUERY}`, "-f", `owner=${owner}`, "-f", `name=${repo}`]) as {
+          data?: { repository?: { pullRequests?: { nodes?: Array<OpenPrRest | null> } } };
+          errors?: unknown;
+        } | null;
+        if (answer?.errors !== undefined) throw new Error("GraphQL open PR list returned errors");
+        const nodes = answer?.data?.repository?.pullRequests?.nodes;
+        if (!Array.isArray(nodes)) throw new Error("GraphQL open PR list carried no nodes");
+        return nodes.map((node) => {
+          if (!node || !Number.isSafeInteger(node.number) || node.number <= 0 || typeof node.url !== "string" ||
+              typeof node.headRefName !== "string" || typeof node.headRefOid !== "string" || !node.headRefOid ||
+              typeof node.updatedAt !== "string" || typeof node.createdAt !== "string" || typeof node.body !== "string" ||
+              typeof node.isDraft !== "boolean" || node.autoMergeRequest === undefined) {
+            throw new Error("GraphQL open PR list returned incomplete PR metadata");
+          }
+          const { number, url, headRefName, headRefOid, createdAt, updatedAt, body, isDraft, autoMergeRequest } = node;
+          return { number, url, headRefName, headRefOid, createdAt, updatedAt, body, isDraft, autoMergeRequest, rollupUnreadable: true };
+        });
+      });
+    } catch (graphqlError) {
+      throw new Error(`${restError.message}. GraphQL fallback failed: ${String(graphqlError)}`, { cause: graphqlError });
+    }
+  }
+}
 
 export function fetchOpenPrsWithPostedIdsAsync(
   owner: string,
