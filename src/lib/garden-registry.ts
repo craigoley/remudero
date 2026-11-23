@@ -14,6 +14,7 @@
  */
 import { spawn } from "node:child_process";
 import { BoundedOutput } from "./bounded-file-tail.js";
+import { redactProofOutput } from "./proofExecutor.js";
 import { RmdError } from "./errors.js";
 import { inboxGardenerMode } from "./inbox-retirement.js";
 import { execFileRouted } from "./spawn-helper.js";
@@ -138,7 +139,12 @@ export type GardenPassOutcome = number | null | { kind: "deferred"; reason: "mem
 export interface GardenDeferral { cadenceMs: number; cadenceBasis: "measured" | "carried" | "scheduled"; samples: number; firstAsk: boolean }
 /** Runs ONE pass. The optional admitted notification means a successfully spawned child,
  * not ownership of a pool slot or a memory grant; injected process producers must signal it explicitly. */
-export type GardenPassSpawn = (name: RegisteredGardenName, args: readonly string[], signal: { readonly stopped: boolean; readonly passId?: string; admitted?: () => void; readonly deferral?: GardenDeferral }) => Promise<GardenPassOutcome>;
+export type GardenPassSpawn = (name: RegisteredGardenName, args: readonly string[], signal: {
+  readonly stopped: boolean; readonly passId?: string; admitted?: () => void; readonly deferral?: GardenDeferral;
+  onFailedExit?: (evidence: GardenFailedExitEvidence) => void;
+}) => Promise<GardenPassOutcome>;
+
+type GardenFailedExitEvidence = { stderr: string; failure_class: string };
 
 /** The run id a garden's admission rows and deferral streak carry. */
 export function gardenRunId(name: string): string {
@@ -421,6 +427,7 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
     periodFirstAskMs ??= startedMs; // a deferred re-ask of the same due period does not open a new one
     const passId = randomUUID();
     let admittedMs: number | undefined;
+    let failedExit: GardenFailedExitEvidence | undefined;
     let settled = false;
     const leaveFlight = wiring.flight?.enter(name, startedMs);
     observe(event("queued", { passId, nextDueAt: null }));
@@ -428,6 +435,7 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
       passId,
       deferral: deferral(),
       get stopped() { return signal.stopped; },
+      onFailedExit: (evidence: GardenFailedExitEvidence) => { if (!settled) failedExit = evidence; },
       admitted: () => {
         if (settled || admittedMs !== undefined) return;
         admittedMs = clock.now();
@@ -458,7 +466,7 @@ export function startGardenOffLoop(name: RegisteredGardenName, intervalMs: numbe
       wiring.log(GARDEN_PASS_STEP, { name, passId, ms: finishedMs - startedMs, queueMs, executionMs, exit,
         ...(deferred ? { reason: outcome.reason } : {}), ...(error === undefined ? {} : { error }),
         ...(report ? { signal: report.signal, output_retention: report.retained.evidence,
-          stderr: report.retained.chunks.join("") } : {}) });
+          stderr: report.retained.chunks.join("") } : failedExit) });
       const phase = deferred ? "idle" : error !== undefined || (exit !== null && exit !== 0) ? "failed" : exit === 0 ? "completed" : "cancelled";
       observe(event(phase, { passId, exit,
         queueMs, executionMs, ...(dueIntervalMs === undefined ? {} : { dueIntervalMs }),
@@ -553,6 +561,7 @@ export const GARDEN_PRIORITY_DEGRADED_STEP = "garden.priority_degraded";
 export const GARDEN_HEAP_EXHAUSTED = "heap_exhausted";
 
 const HEAP_EXHAUSTED_STDERR = /heap out of memory/;
+const GARDEN_ERROR_CLASS = /^[ \t]*([A-Za-z0-9_]*(?:Error|Exception)|[A-Z][A-Z0-9_]+|error|fatal):/m;
 /** PRIMARY CONTROL: match worker report retention; valid telemetry alone exceeds the old 8 KiB excerpt. */
 export const GARDEN_OUTPUT_BYTES = 256 * 1024;
 
@@ -732,7 +741,7 @@ export function childGardenPassSpawn(
         release();
         reject(error);
       });
-      child.once("close", (code, signal) => {
+      child.once("close", (code, childSignal) => {
         release();
         if (!stderrFailure) {
           try { stderr.push(decoder.decode()); }
@@ -743,14 +752,18 @@ export function childGardenPassSpawn(
         const retained = stderr.finish();
         if (stderrFailure) retained.evidence = { ...retained.evidence, ...stderrFailure, fileBytes: stderrBytes };
         void lowered.then(() => {
-          if (signal !== null && heapExhaustedSeen) {
-            reject(new GardenReportError(`${GARDEN_HEAP_EXHAUSTED}: garden ${name} exceeded its ${heapLimitMb} MB heap cap (${signal})`, code, signal, retained));
+          if (childSignal !== null && heapExhaustedSeen) {
+            reject(new GardenReportError(`${GARDEN_HEAP_EXHAUSTED}: garden ${name} exceeded its ${heapLimitMb} MB heap cap (${childSignal})`, code, childSignal, retained));
           } else if (retained.evidence.state !== "complete") {
-            reject(new GardenReportError(`garden ${name}: incomplete stderr output (${retained.evidence.state})`, code, signal, retained));
+            reject(new GardenReportError(`garden ${name}: incomplete stderr output (${retained.evidence.state})`, code, childSignal, retained));
           } else {
+            if (code !== null && code !== 0 && signal.onFailedExit) {
+              const stderr = redactProofOutput(retained.chunks.join(""));
+              signal.onFailedExit({ stderr, failure_class: GARDEN_ERROR_CLASS.exec(stderr)?.[1] ?? "exit-only" });
+            }
             resolve(code);
           }
-        });
+        }).catch(reject);
       });
     }).catch((error: unknown) => {
       release(); // A spawn that threw synchronously never reached "error" or "close".

@@ -28,7 +28,7 @@
     - scripts/preflight-author.mjs
     - src/lib/worktree-sites.ts
     - test/worktree-creation-census.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The command chooses the host for the preflight from readings: the Mac when its memory pressure is normal, else the other configured host. It names the host and the reading. A host whose reading is unreadable is not chosen"

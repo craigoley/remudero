@@ -8,6 +8,11 @@ task or returns a terminal `RunResult` with a named `verdict`
 (`src/lib/run-result.ts`) — nothing is left ambiguous about *why* a run
 stopped.
 
+The task's record can live in either catalog: this repository's `plan/tasks.d/` shards, or the
+host's plan destination. The public catalog takes no new record (`catalog.newTasks: closed` in
+`plan/policy.yaml`, W1-T14343), so every new task is filed in the destination. See
+[Filing in the plan destination](operator-guide.md#filing-in-the-plan-destination).
+
 ## Status shape
 
 The ladder below is the **derived** lifecycle — the stages a run actually moves

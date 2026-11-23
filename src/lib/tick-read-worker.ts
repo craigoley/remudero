@@ -17,7 +17,7 @@ export { createPlanRevisionStore, type PlanRevision, type PlanRevisionStore, typ
 import { readPlaneWorkerInput, readPlaneWorkerLog, runReadPlaneWorker } from "./read-plane.worker.js";
 import { runsBundled, startWorker } from "./child-entry-argv.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, githubInstallationBudget } from "./github-transport.js";
+import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, githubInstallationBudget, GhPaceFloorStandDownError } from "./github-transport.js";
 import type { InstallationBudgetThreadInput } from "./github-installation-budget.js";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -26,7 +26,7 @@ import { ledgerPathFor } from "./ledger-path.js";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
-import { escalationTaskId, ghIssueGateway, ghIssueGatewayAsync, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText } from "./escalate.js";
+import { escalationTaskId, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText } from "./escalate.js";
 import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, classifyChangesRequested, pullReviewsRestArgs, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation } from "./open-prs-rest.js";
 import { createHash } from "node:crypto";
 import { codeqlAlertsReadDue } from "./pr-blocker.js";
@@ -3437,7 +3437,12 @@ export async function buildEscalationReconcileCandidatesAsync(
 ): Promise<EscalationReconcileCandidate[]> {
   let open: OpenIssue[];
   try {
-    open = await listRetirableEscalationIssuesAsync(injected.issues ?? ghIssueGatewayAsync(owner, repo));
+    open = await listRetirableEscalationIssuesAsync(injected.issues ?? ghIssueGatewayAsync(owner, repo))
+      .catch((error: unknown) => {
+        if (injected.issues || !(error instanceof GhPaceFloorStandDownError) || error.resource !== "core") throw error;
+        // GraphQL has a separate budget. Re-read both labels so a partial REST list cannot reach the closer.
+        return listRetirableEscalationIssuesAsync(ghIssueGatewayGraphql(owner, repo));
+      });
   } catch (error) {
     log?.("sweep.escalation_reconcile.list_failed", { error: String((error as Error)?.message ?? error) });
     return [];
