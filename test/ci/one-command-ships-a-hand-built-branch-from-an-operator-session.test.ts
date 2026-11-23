@@ -12,6 +12,7 @@ import {
   type HandShipPorts, type HandShipReceipt,
 } from "#src/lib/hand-ship.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const sha = "a".repeat(40);
@@ -86,7 +87,7 @@ test("W1-T12169 criterion 2 prefers the normal Mac and requests low priority", a
 });
 
 test("W1-T12169 criterion 2 the local launcher stages a bundle and preserves PATH under nice", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "hand-ship-bundle-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-bundle-`));
   const work = join(dir, "work");
   const journal = shipRunJournal(dir);
   const { deps, cleanup } = handShipProduction(work, dir, journal);
@@ -210,7 +211,7 @@ test("amendment metadata needs Acceptance and the stored PR must match the teste
 });
 
 test("the publication adapter uses REST for lookup, open, amendment and stored-body verification", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "hand-ship-pr-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-pr-`));
   const journal = shipRunJournal(dir);
   t.after(() => {
     journal.finish("refused");
@@ -238,7 +239,7 @@ test("the publication adapter uses REST for lookup, open, amendment and stored-b
 });
 
 test("W1-T12169 criterion 3 a changed assertion message retains the nested test identity", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "hand-ship-rerun-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-rerun-`));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const log = join(dir, "rerun.log");
   const file = "test/ci/example.test.mjs";
@@ -270,7 +271,7 @@ describe("unrelated", () => {
 });
 
 test("W1-T12169 criterion 4 an actual lease rejects a competing fast-forward and a coalesced push", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "hand-ship-lease-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-lease-`));
   const origin = join(dir, "origin.git");
   const work = join(dir, "work");
   const journal = shipRunJournal(dir);
@@ -314,7 +315,7 @@ test("W1-T12169 criterion 4 an actual lease rejects a competing fast-forward and
 });
 
 test("W1-T12169 criterion 5 stops a live run by id without inspecting processes", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "hand-ship-test-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-test-`));
   const journal = shipRunJournal(dir);
   t.after(() => {
     journal.finish("stopped");
@@ -331,7 +332,7 @@ test("W1-T12169 criterion 5 stops a live run by id without inspecting processes"
 });
 
 test("the session records completed and stopped outcomes and reads the exact body file", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "hand-ship-session-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-session-`));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const root = join(dir, "hand-ship");
   const terminalStatuses = () => readdirSync(root).filter((id) => id !== "preflight.lock")
@@ -353,7 +354,7 @@ test("the session records completed and stopped outcomes and reads the exact bod
 });
 
 test("W1-T12169 criterion 5 the stop marker cancels an active SSH-supervised rerun", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "hand-ship-ssh-stop-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-ssh-stop-`));
   const journal = shipRunJournal(dir);
   const previousPath = process.env.PATH;
   t.after(() => {
@@ -403,7 +404,7 @@ test("holds", () => {
 });
 
 test("a failed run log write stops the local child and preserves the error", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "hand-ship-log-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}hand-ship-log-`));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   symlinkSync(join(REPO_ROOT, "node_modules"), join(dir, "node_modules"), "dir");
   mkdirSync(join(dir, "test", "setup"), { recursive: true });

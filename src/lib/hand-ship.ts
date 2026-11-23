@@ -8,7 +8,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { authorPushEligibility, failingTestsFromTap } from "../../scripts/preflight-author.mjs";
 // @ts-ignore The author admission module currently has no declaration file.
 import { macPressureState } from "../../scripts/lib/mac-author-admission.mjs";
-import { loopAvailableDeadline, systemClock } from "./clock.js";
+import { type Clock, loopAvailableDeadline, systemClock } from "./clock.js";
 import { pushHandShipCommit } from "./git-push.js";
 import { ghTextAsync, withGhTransportFloor, writeHandShipPullRequest } from "./github-transport.js";
 import { acquireInflightLock } from "./inflight-lock.js";
@@ -142,7 +142,7 @@ export async function runHandShip(input: ShipBody, deps: HandShipPorts): Promise
 
 type RunStatus = "running" | "shipped" | "refused" | "stopped";
 
-export function shipRunJournal(stateDir: string) {
+export function shipRunJournal(stateDir: string, clock: Clock = systemClock) {
   const id = randomUUID();
   const dir = join(stateDir, "hand-ship", id);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -152,7 +152,7 @@ export function shipRunJournal(stateDir: string) {
     if (existsSync(stopFile)) controller.abort(new Error(`hand-ship run ${id} stopped`));
   };
   const record = (status: RunStatus) => {
-    const row = JSON.stringify({ id, pid: process.pid, host: hostname(), status, at: new Date().toISOString() }) + "\n";
+    const row = JSON.stringify({ id, pid: process.pid, host: hostname(), status, at: clock.iso() }) + "\n";
     const path = join(dir, "status.json");
     writeFileSync(path + ".next", row, { mode: 0o600 });
     renameSync(path + ".next", path);
@@ -178,14 +178,14 @@ export function stopHandShip(stateDir: string, id: string): boolean {
   return true;
 }
 
-export async function waitForHandShipStop(stateDir: string, id: string): Promise<string> {
+export async function waitForHandShipStop(stateDir: string, id: string, clock: Clock = systemClock): Promise<string> {
   const path = join(stateDir, "hand-ship", id, "status.json");
-  const deadline = Date.now() + 30_000;
+  const deadline = clock.now() + 30_000;
   do {
     const { status } = JSON.parse(readFileSync(path, "utf8"));
     if (status !== "running") return status;
     await delay(100);
-  } while (Date.now() < deadline);
+  } while (clock.now() < deadline);
   throw new Error(`stop requested for ${id}; the run has not acknowledged it within 30 seconds`);
 }
 
