@@ -289,6 +289,12 @@ export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" |
  * even the type-only return edge here as a cycle. Keep this export canonical for its other callers
  * rather than re-exporting it (W1-T2895). */
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
+/** W1-T14532: the row a cycle writes when it clears the ops dispatch hold the previous cycle held. */
+export const OPS_CATALOG_HOLD_CLEARED_STEP = "dispatch.ops_catalog_hold_cleared";
+/** W1-T14532: the row a cycle writes when it skips the move tick because an earlier one has not settled. */
+export const PLAN_TASK_MOVE_IN_FLIGHT_STEP = "plan.move.tick_in_flight";
+/** W1-T14532: at most one in-flight row an hour for the same unsettled tick. */
+export const PLAN_TASK_MOVE_IN_FLIGHT_ROW_MS = 60 * 60_000;
 
 export type IntakeRungDecision =
   | { rung: string; fire: true; reason: string }
@@ -5629,6 +5635,9 @@ export async function runDaemon(
   };
   const opsDispatchContexts = new WeakMap<Plan, OpsDispatchContext>();
   let lastOpsDispatchHold: string | undefined;
+  // W1-T14532: when this process last launched a move tick, and when it last said a tick was still in flight.
+  let planTaskMoveTickStartedAtMs: number | undefined;
+  let planTaskMoveInFlightRowAtMs: number | undefined;
   const holdOpsDispatch = (reason: string, observation: OpsTaskDispatchRead, record?: CompositionRecordFailure): void => {
     const safeReason = OPS_CATALOG_OUTCOMES.includes(reason as OpsCatalogOutcome) ||
       ["selection_unreadable", "selection_changed", "invalid_dispatch_flag", "source_pending", "source_identity_unknown",
@@ -5652,6 +5661,17 @@ export async function runDaemon(
         ...(record === undefined ? {} : { field: record.field, side: record.side }) });
     } catch (error) { void error; /* A diagnostic failure cannot authorize ops work or stop public selection. */ }
     lastOpsDispatchHold = signature;
+  };
+  // W1-T14532: a hold that clears writes one row naming the hold it clears; a cycle that held nothing writes none, so
+  // a hold that never clears and one that cleared silently no longer read the same in the ledger.
+  const clearOpsDispatchHold = (): void => {
+    if (lastOpsDispatchHold === undefined) return;
+    let cleared = "unknown";
+    try { cleared = String((JSON.parse(lastOpsDispatchHold) as unknown[])[0]); }
+    catch (error) { void error; /* An unreadable signature still clears; the row names it unknown. */ }
+    lastOpsDispatchHold = undefined;
+    try { log(OPS_CATALOG_HOLD_CLEARED_STEP, { outcome: cleared }); }
+    catch (error) { void error; /* The hold clears either way; only the diagnostic is lost. */ }
   };
   /** W1-T13681: why ops dispatch is held this iteration (the hold's own outcome label), or undefined while it is not. */
   const opsDispatchHoldReason = (): string | undefined => deps.readOpsTaskDispatch === undefined ? "ops_dispatch_unwired"
@@ -5686,7 +5706,7 @@ export async function runDaemon(
   };
   const captureOpsDispatchPlan = (primary: Plan): { plan: Plan; observation: OpsTaskDispatchRead } => {
     const observation = readOpsDispatch(primary);
-    if (observation.outcome === "off") { lastOpsDispatchHold = undefined; return { plan: primary, observation }; }
+    if (observation.outcome === "off") { clearOpsDispatchHold(); return { plan: primary, observation }; }
     if (observation.outcome === "unavailable") {
       holdOpsDispatch(observation.reason, observation);
       return { plan: primary, observation };
@@ -5708,7 +5728,7 @@ export async function runDaemon(
       holdOpsDispatch(composition.outcome, observation, composition.field === undefined ? undefined : composition);
       return { plan: primary, observation };
     }
-    lastOpsDispatchHold = undefined;
+    clearOpsDispatchHold();
     // W1-T13749: a bad edge holds its own task and its dependants; every other task dispatches from the composed plan.
     noteOpsTaskHolds(composition.held);
     opsDispatchContexts.set(composition.plan, { publicPlan: primary, publicCommit: observation.publicCommit,
@@ -7765,8 +7785,21 @@ export async function runDaemon(
     }
     // W1-T13681: at most one move-task tick in flight, detached after this iteration's ops hold is read; never gates dispatch.
     if (deps.planTaskMover && !detachedActionInFlight(PLAN_TASK_MOVE_ACTION)) {
+      planTaskMoveTickStartedAtMs = daemonClock.now();
+      planTaskMoveInFlightRowAtMs = undefined;
       detachSweepAction(runPlanTaskMoveTick({ opsDispatchHold: opsDispatchHoldReason(), log }, deps.planTaskMover),
         { actionKind: PLAN_TASK_MOVE_ACTION, taskId: "DAEMON" });
+    } else if (deps.planTaskMover) {
+      // W1-T14532: a tick that never settles holds every later one; say so, with its age, at most once an hour.
+      const nowMs = daemonClock.now();
+      if (planTaskMoveInFlightRowAtMs === undefined || nowMs - planTaskMoveInFlightRowAtMs >= PLAN_TASK_MOVE_IN_FLIGHT_ROW_MS) {
+        planTaskMoveInFlightRowAtMs = nowMs;
+        try {
+          log(PLAN_TASK_MOVE_IN_FLIGHT_STEP, {
+            age_ms: planTaskMoveTickStartedAtMs === undefined ? null : Math.max(0, nowMs - planTaskMoveTickStartedAtMs),
+          });
+        } catch (error) { void error; /* The skip stands either way; only the diagnostic is lost. */ }
+      }
     }
     const isMerged = deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch);
     for (const taskId of pendingMergedCredit) {

@@ -8,7 +8,7 @@ import {
   type ProductBuildCode, type ProductBuildOptions, type ProductBuildReceipt, type ProductBuildExecution,
 } from "./product-build.js";
 import {
-  productCasePlanText, productPlanAssociationReferences, productPlanProposalSchema, ProductPlanOperationService, refreshProductPlanCheckout, verifyProductPlanCheckout, verifyProductPlanEvidence,
+  productCasePlanText, productPlanAssociationReferences, productPlanTrustedReviewer, productPlanProposalSchema, ProductPlanOperationService, refreshProductPlanCheckout, verifyProductPlanCheckout, verifyProductPlanEvidence,
   type PlanHandoffPort, type PlanRepository, type ProductPlanObservation, type ProductPlanOperationCode,
 } from "./product-plan-operation.js";
 import { ProductIntentStore } from "./product-intent-store.js";
@@ -523,7 +523,7 @@ export class ProductCaseService {
       const reviews = z.array(z.object({ state: z.string(), commit_id: z.string(), user: z.object({ login: z.string(), type: z.string().optional() }).nullable() }).passthrough()).max(99)
         .parse(await api(`${slug}/pulls/${match[3]}/reviews?per_page=100`));
       const hold = classifyChangesRequested({ headSha: head }, reviews);
-      const trusted = this.options.planTrustedReviewer ?? process.env[REVIEWER_IDENTITY_ENV] ?? "";
+      const trusted = productPlanTrustedReviewer(this.options.planTrustedReviewer, process.env[REVIEWER_IDENTITY_ENV]);
       // Bind provenance to the bounded status snapshot used for required contexts. The reader's
       // GraphQL identity fallback still verifies the repository, head and unchanged review state.
       const review = resolveReviewProvenance(await readReviewStatusEntry(repo.owner, repo.name, head,

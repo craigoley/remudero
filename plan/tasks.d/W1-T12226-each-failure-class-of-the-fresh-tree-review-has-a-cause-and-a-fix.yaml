@@ -23,7 +23,7 @@
     - src/lib/run-child.ts
     - test/review/a-fresh-tree-review-records-why-its-child-exited.test.ts
     - test/review/each-failure-class-of-the-fresh-tree-review-has-a-cause-and-a-fix.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The test file has one test for each value of `exit_cause` that the core ledger shows on two or more fresh-tree reviews in the 7 days before the build. Each test has the value in its title and drives `buildReviewerCodeFreshnessGate` and the real review command to that exit"

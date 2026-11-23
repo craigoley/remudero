@@ -17,6 +17,9 @@
     - src/lib/benchmark-run.ts
     - src/lib/worker.ts
     - src/run-task.ts
+    - src/cli/commands/run-task-verb.ts # 2026-11-23: build lane's prompt template (operator narrowed the claim to build, fix and review)
+    - src/cli/commands/fix.ts # 2026-11-23: fix lane's prompt template
+    - src/cli/commands/review.ts # 2026-11-23: review lane's prompt template
     - test/routing/every-assignment-names-its-risk-its-task-class-and-its-prompt-revision.test.ts
   status: queued
   attempts: 0
@@ -25,9 +28,9 @@
       proof: "grep: W1-T12152 criterion 1 in test/routing/every-assignment-names-its-risk-its-task-class-and-its-prompt-revision.test.ts"
     - claim: "An assignment for work with no task records the pipeline and a named reason, never an empty risk"
       proof: "grep: W1-T12152 criterion 2 in test/routing/every-assignment-names-its-risk-its-task-class-and-its-prompt-revision.test.ts"
-    - claim: "Every assignment records a prompt revision, which is a hash of the prompt template and the tool list the worker is given. Two workers given the same template and tools record the same revision"
+    - claim: "Every build, fix and review assignment records a prompt revision, which is a hash of the prompt template and the tool list the worker is given; every other lane records the named gap prompt-template-not-declared. Two workers given the same template and tools record the same revision"
       proof: "grep: W1-T12152 criterion 3 in test/routing/every-assignment-names-its-risk-its-task-class-and-its-prompt-revision.test.ts"
-    - claim: "The hash is taken from the template before task text is filled in, so no task text or secret enters it"
+    - claim: "The build, fix and review lanes take the hash from their template before task text is filled in, so no task text or secret enters it"
       proof: "grep: W1-T12152 criterion 4 in test/routing/every-assignment-names-its-risk-its-task-class-and-its-prompt-revision.test.ts"
   rationale: |
     MEASURED 2026-11-10 in the core instance's ledger, 2026-10-27 to 2026-11-10, over 16,233 `worker.assignment` rows: risk and task class are absent on 87.9% of them.
@@ -36,9 +39,11 @@
     - Without risk and class, a comparison of two models cannot be matched on how hard the work was.
     - Without a prompt revision, a change in a rate cannot be told apart from a change in the prompt.
   design: |
+    NO-INVARIANTS: additive receipt fields only. The assignment row gains task risk, class, pipeline and a prompt revision; no existing field, bucket, default or side effect changes, and lanes outside build, fix and review keep the named gap they record today. The existing tests that name promptRevision or nonDispatchBenchmarkWork (lint pinning-tests list) read those fields and do not pin their absence.
     Pass the task's risk and class from the fix and review call sites into the assignment receipt. `ledgerNonDispatchAssignment` in src/run-task.ts already takes a task id, so it can read the task file.
     Compute the prompt revision where the prompt is rendered, and pass it as `promptRevision` in the stack evidence. `pinEvidence` already has the field.
-    NOT IN SCOPE: the scorer and environment revisions, and the paired-trial checks of W1-T11113.
+    Narrowed 2026-11-23 18:01Z (operator chose "Narrow, file the rest" on the operator-session decision card): the build, fix and review lanes pass their prompt template; the other non-dispatch lanes keep the named gap, and a follow-up task wires them.
+    NOT IN SCOPE: the scorer and environment revisions, the paired-trial checks of W1-T11113, and the prompt templates of lanes other than build, fix and review.
   falsifier: |
     Leave the task out of a review assignment and criterion 1 must fail. Hash the filled prompt and criterion 4 must fail, because two tasks then give two revisions. Restore and require all to pass.
   note: |

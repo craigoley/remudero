@@ -82,6 +82,23 @@ is real code: run-task/drain/daemon/review/sweep/fix/serve and the rest of the
 - `src/spike.ts` — the original WS-0 spike script, kept for the record (`npm run spike`).
 - `settings/worker.json` + `hooks/deny-floor.sh` — the worker containment policy.
 
+## Where tasks and views live
+
+- **Tasks.** This repository's plan catalog (`plan/tasks.d/`) takes no new task record. Since
+  W1-T14343, `plan/policy.yaml` sets `catalog.newTasks: closed`, and `lint-plan` refuses a pull
+  request that adds a record with an id no earlier commit held (`new-public-task-record`). Edits to
+  existing records still land here. A new task is filed in the host's plan destination, a private
+  repository; `rmd plan-destination task` prints where. While the host names that repository, the
+  readers read both catalogs.
+- **Merge credit.** A task counts as merged only when GitHub shows a merged pull request with its
+  `Remudero-Task: <id>` trailer, or one whose head branch is `run-<id>-<epochMs>`. The `status:`
+  field in a record is not merge evidence.
+- **The Console** at app.remudero.com reads `rmd serve`'s `/v1` gateway. Pages such as Now read a view,
+  `GET /v1/views/<name>`, which a read model projects from the ledger, and fall back to the older
+  routes while that view is not served. Each view has a switch: `off`, `shadow`, `serve` or `auto`. See [docs/views.md](./docs/views.md).
+- **remudero.com** publishes Field Trials (per-model call reliability, cost, and task merge rate)
+  and a pinned copy of some of these documents.
+
 ## Requirements
 
 - **Node 24.21.0, exactly** — `.nvmrc` and `package.json#engines` pin it, `deploy/Dockerfile`

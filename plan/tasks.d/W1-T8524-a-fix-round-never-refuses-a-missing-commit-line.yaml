@@ -18,7 +18,7 @@
   # refusal-amendment (W1-T8524, run W1-T8524-1794955167529, 2026-11-17T23:47:28.973Z): the worker refused criterion 3 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: Recovery when the re-ask cannot spawn requires changing `src/cli/commands/fix.ts:4820`, outside the declared scope.
   #   2026-11-23 operator amendment: files widened to src/cli/commands/fix.ts and the two pinning tests, as proposed
-  status: queued
+  status: merged
   priority: 1 # 2026-11-17 operator: the design-remedy chosen on #10031 (2026-10-13) still has 0 attempts behind about 849 queued tasks while its refusal stays live on main; was 2
   attempts: 0
   rationale: |
