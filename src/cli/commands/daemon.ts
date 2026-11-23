@@ -96,7 +96,7 @@ import { loadPolicy, policyPath, type FreshnessRestartValues } from "../../lib/p
 import { refreshReviewPublisherToken as refreshInstallationToken } from "../../lib/review.js";
 import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
 import {
-  bootSweepDispatchClaimsAsync, dispatchClaimRef, realBootSweepHostProbe, releaseLandedDispatchClaims, claimMintedByRerun,
+  bootSweepDispatchClaimsAsync, dispatchClaimRef, realBootSweepHostProbe, releaseLandedDispatchClaims, listHeldDispatchClaims, claimMintedByRerun,
   type BootSweepInputs, type DispatchClaimReserverAsync,
 } from "../../lib/dispatch-claim.js";
 import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, planCreditOverridePath, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
@@ -2510,8 +2510,12 @@ export async function daemonCommand(
         // reports a task in-flight — see NextRunnableOpts.readLiveState's doc.
         readLiveState: daemonLiveStateReader(target.owner, target.repo),
         isIndeterminate,
-        releaseLandedClaims: async (isMerged) => {
-          await releaseLandedDispatchClaims(deps.tickClaimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", target.repo)), {
+        releaseLandedClaims: (isMerged) => {
+          const reserver = deps.tickClaimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", target.repo));
+          // W1-T13356: one listing feeds both this sweep and selection's claim-held deferral lift.
+          const listing = listHeldDispatchClaims(reserver);
+          return Object.assign(releaseLandedDispatchClaims(reserver, {
+            listing,
             isMerged,
             isIndeterminate,
             prUrlFor: (id) => lastProj?.get(id)?.prUrl,
@@ -2519,7 +2523,7 @@ export async function daemonCommand(
             reportedRerun: landedClaimRerunReported,
             localHost: hostname(),
             log,
-          });
+          }), { listing });
         },
         isIndependentFailureBlocked,
         independentBlockReleases: () => independentBlockReleasesFrom(lastProj), // W1-T8676: ledgered by the selection pass

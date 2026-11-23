@@ -36,8 +36,9 @@
     cannot fill the changed-activity slot; (3) a cached fact deleted under the board (the consistency oracle's heal)
     leaves the deleted fact's time in effect, and a second deletion between the reset's reads does too. These come
     from the board's retention and stand-in rules on main (W1-T9436), not from W1-T13905's index, and the board oracle
-    only audits them every 10 minutes. The fleet's fixes on #19812 (commits aa0ae670, 32f6f6ce, 64c7461b, a08e3a6e on
-    branch run-W1-T13905-1795143244000) are a starting point: they order rows at one instant as a cold load does
+    only audits them every 10 minutes. The fleet's fixes on #19812 (commits aa0ae670, 32f6f6ce, 64c7461b, a08e3a6e,
+    reachable from refs/pull/19812/head at ee4612d04; their branch was deleted when #19812 closed) are a starting
+    point: they order rows at one instant as a cold load does
     (ts, kind, seq), keep a fallback per task slot, and replay activity after a reset.
   design: |
     INVARIANT cold-load-parity: after every update, the extended board's run activity stand-ins equal those of a fresh

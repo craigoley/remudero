@@ -14,6 +14,9 @@
   files:
     - src/lib/sre-lane.ts
     - test/sre/an-operator-intervention-is-routed-once-whatever-the-memory-file-holds.test.ts
+  # refusal-amendment (W1-T11887, run work-fix-dispatch-W1-T11887-1795403331874-6d29@34f47bfaabf515550ad04903794f3c2b3091aaf9, 2026-11-23T03:30:28.590Z): the worker refused criterion 1 [contradicts-another-criterion] — proposed re-scope-criteria: reconcile the contradicting criteria — re-scope one so both can hold at once
+  #   worker evidence: Keyless events can make a fully routed window indistinguishable from one containing a genuinely new intervention that criterion 3 requires the pass to route.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:

@@ -20848,6 +20848,12 @@ export const QUEUED_FIX_ADMISSION_RELEASE_MS = 15 * 60_000;
  *  `onPending`, cleared when `spawnFix` returns. Without it a later pass saw the key held and named no holder. */
 interface QueuedHostFix { sinceMs: number; runId: string; abort: () => Promise<void>; prNumber: number; headSha: string; releasing: boolean }
 const queuedHostFixes = new Map<string, QueuedHostFix>();
+const pendingFixLaunches = new Map<string, number>();
+
+interface FixDispatchHolder {
+  reason: string;
+  fields: Record<string, unknown>;
+}
 
 function queuedHostFixHolder(fixKey: string, nowMs: number) {
   const queued = queuedHostFixes.get(fixKey);
@@ -21206,6 +21212,7 @@ export interface ChildWorkRegistration {
   planLane?: boolean;
 }
 interface RegisteredChildWork extends ChildWorkRegistration {
+  registeredAtMs: number;
   releasedAtPost?: number; phaseTimer?: ReturnType<typeof setInterval>; phaseReadError?: string;
   /** W1-T11149: the review's last phase read back from its status.json, without the `review:` prefix; unread is undefined. */
   phase?: string;
@@ -21215,6 +21222,27 @@ interface RegisteredChildWork extends ChildWorkRegistration {
 const childWork = new Map<string, RegisteredChildWork>();
 const settledChildWork = new Set<string>();
 const childWorkSettleKey = (runId: string, headSha?: string): string => `${runId}@${headSha ?? ""}`;
+
+function registeredFixChild(fixKey: string): RegisteredChildWork | undefined {
+  return [...childWork.values()].find(work => work.kind === "fix-dispatch" && work.fixKey === fixKey);
+}
+
+function fixChildHolder(fixKey: string, nowMs: number, child: RegisteredChildWork | undefined): FixDispatchHolder | undefined {
+  const launchStartedAt = pendingFixLaunches.get(fixKey);
+  if (launchStartedAt !== undefined) {
+    const ageMs = Math.max(0, nowMs - launchStartedAt);
+    return {
+      reason: `duplicate fix-dispatch key (${fixKey}) is held by a fix child launch in progress for ${Math.floor(ageMs / 1000)}s`,
+      fields: { in_flight_action: "fix-child-launch", in_flight_age_ms: ageMs },
+    };
+  }
+  if (child === undefined) return undefined;
+  const ageMs = Math.max(0, nowMs - child.registeredAtMs);
+  return {
+    reason: `duplicate fix-dispatch key (${fixKey}) is held by fix run child ${child.runId}, running for ${Math.floor(ageMs / 1000)}s`,
+    fields: { in_flight_action: "fix-child", in_flight_run_id: child.runId, in_flight_age_ms: ageMs },
+  };
+}
 
 function refreshChildReviewPhase(work: RegisteredChildWork): void {
   if (work.kind !== "review" || work.releasedAtPost !== undefined || !work.readPhase) return;
@@ -21242,7 +21270,7 @@ function refreshChildReviewPhase(work: RegisteredChildWork): void {
 /** Claims the slot and the mutex key of a child's work. Registering a run id again is a no-op. */
 export function registerChildWork(work: ChildWorkRegistration): void {
   if (childWork.has(work.runId)) return;
-  const registered: RegisteredChildWork = { ...work, refusalEpoch: reviewProviderRefusalEpoch };
+  const registered: RegisteredChildWork = { ...work, registeredAtMs: systemClock.now(), refusalEpoch: reviewProviderRefusalEpoch };
   if (work.kind === "review") reviewLaneTransition(() => childWork.set(work.runId, registered));
   else childWork.set(work.runId, registered);
   if (work.reviewKey !== undefined) inFlightReviewKeys.add(work.reviewKey);
@@ -24994,12 +25022,14 @@ export async function runSweep(
         heldAdmission.releaseCharge?.();
         markFixAdmissionChargeReleased(heldAdmission.lock);
       } else if (deps.fixAdmissionLockDir !== undefined) releaseFixCapacity(pr);
+      pendingFixLaunches.set(claim.fixKey, deps.now?.() ?? systemClock.now());
       hosted = await host.spawnFix({ pr: { prNumber: pr.prNumber, headSha: pr.headSha, taskId: escalationTaskIdFor(pr) }, fixKey: claim.fixKey, envelope, onPending });
       launched = hosted !== undefined && !("abandoned" in hosted);
     } catch (error) {
       log("sweep.fix.child_spawn_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
       return false;
     } finally {
+      pendingFixLaunches.delete(claim.fixKey);
       queuedHostFixes.delete(claim.fixKey);
       // No child launched: free the lock now. A launched child may adopt it in place, but never frees it: the host holds the
       // child's memory reservation until it settles the child, so the lock is freed at that settlement, whoever holds it.
@@ -25078,7 +25108,7 @@ export async function runSweep(
     pr: OpenPrView,
     /** W1-T5544: the dispatch is the plan-shard flag (no worker round), so two refused WORKER rounds do not bar it. */
     planFlagRung = false,
-  ): ({ ok: true } & DetachedFixClaim) | { ok: false; reason: string } {
+  ): ({ ok: true } & DetachedFixClaim) | { ok: false; reason: string; holder?: FixDispatchHolder } {
     const fixTaskId = fixLedgerTaskIdFor(pr);
     const fixKey = `${fixTaskId ?? ""}@${pr.headSha}`;
     // The current owner can receive a hand-off even while it still holds admission for the PR.
@@ -25090,9 +25120,8 @@ export async function runSweep(
       return { ok: false, reason: `deferred to the live fix round ${live.liveRoundRunId} waiting on CI for ${pr.headSha}` };
     }
     // The dispatch and strike budget stay keyed by head. The memory charge follows the PR.
-    const heldKey =
-      [...childWork.values()].find((work) => work.kind === "fix-dispatch" && work.fixKey === fixKey)?.fixKey ??
-      (inFlightFixKeys.has(fixKey) ? fixKey : undefined);
+    const child = registeredFixChild(fixKey);
+    const heldKey = child?.fixKey ?? (inFlightFixKeys.has(fixKey) ? fixKey : undefined);
     if (heldKey !== undefined) {
       const nowMs = deps.now?.() ?? systemClock.now();
       const queued = queuedHostFixHolder(heldKey, nowMs);
@@ -25110,11 +25139,9 @@ export async function runSweep(
           error: String((error as Error)?.message ?? error),
         }));
       }
-      return {
-        ok: false,
-        reason: detachedFixHolder(heldKey, nowMs)?.reason ??
-          `duplicate fix-dispatch key (${heldKey}) already claimed this pass — a concurrent sweep is already dispatching this PR's fix rung`,
-      };
+      const holder = detachedFixHolder(heldKey, nowMs) ?? fixChildHolder(heldKey, nowMs, child);
+      return { ok: false, holder, reason: holder?.reason ??
+        `duplicate fix-dispatch key (${heldKey}) already claimed this pass — a concurrent sweep is already dispatching this PR's fix rung` };
     }
     const freshTally = fixRoundTally(freshLines, fixTaskId, pr.headSha);
     // W1-T5542 + W1-T7096: a stale view reaching the claim at (or past) the former ceiling, or on a
@@ -26181,6 +26208,7 @@ export async function runSweep(
         log("sweep.judge_withdraw.failed", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) });
       }
     }
+    let refusedFixHolder: FixDispatchHolder | undefined;
     // W1-T5543: fleet filings have their own plan surface; the code rung still never owns one.
     if (planConflictRound || (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true)) {
       const pendingJudgment = judgedUnavailable.get(pr.prNumber);
@@ -26224,6 +26252,7 @@ export async function runSweep(
           }
           const claimed = claimFixDispatch({ ...pr, taskId: escalationTaskIdFor(pr) });
           if (!claimed.ok) {
+            refusedFixHolder = claimed.holder;
             repair.reason = claimed.reason;
             if (claimed.reason.includes("refused twice")) {
               repair.repaired = false;
@@ -27345,6 +27374,7 @@ export async function runSweep(
                 const fixClaim = claimFixDispatch(pr);
                 if (!fixClaim.ok) {
                   acted = false;
+                  refusedFixHolder = fixClaim.holder;
                   standDownReason = fixClaim.reason;
                   break;
                 }
@@ -27834,6 +27864,7 @@ export async function runSweep(
                 const codeqlClaim = claimFixDispatch(pr);
                 if (!codeqlClaim.ok) {
                   acted = false;
+                  refusedFixHolder = codeqlClaim.holder;
                   standDownReason = codeqlClaim.reason;
                   break;
                 }
@@ -28594,6 +28625,7 @@ export async function runSweep(
               const fixClaim = claimFixDispatch(pr, proofRepairRoute !== undefined && !proofRepairActive);
               if (!fixClaim.ok) {
                 acted = false;
+                refusedFixHolder = fixClaim.holder;
                 standDownReason = fixClaim.reason;
                 break;
               }
@@ -28806,6 +28838,7 @@ export async function runSweep(
               const conflictedFixClaim = claimFixDispatch(ownedRound ? { ...pr, taskId: escalationTaskIdFor(pr) } : pr);
               if (!conflictedFixClaim.ok) {
                 acted = false;
+                refusedFixHolder = conflictedFixClaim.holder;
                 standDownReason = conflictedFixClaim.reason;
                 break;
               }
@@ -29445,8 +29478,13 @@ export async function runSweep(
         contradictory_interval_ms: state.interval, contradictory_next_row_at: state.next };
       contradictoryCheckpoint = state;
     }
-    const fixHolder = !acted && (disposition === "blocked-fixable" || disposition === "conflicted" || disposition === "mergeable")
-      ? detachedFixHolder(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`, deps.now?.() ?? systemClock.now()) : undefined;
+    let fixHolder = refusedFixHolder;
+    if (fixHolder === undefined && !acted && (disposition === "blocked-fixable" || disposition === "conflicted" || disposition === "mergeable")) {
+      const fixKey = `${fixLedgerTaskIdFor(pr)}@${pr.headSha}`;
+      const nowMs = deps.now?.() ?? systemClock.now();
+      fixHolder = detachedFixHolder(fixKey, nowMs) ??
+        (inFlightFixKeys.has(fixKey) ? fixChildHolder(fixKey, nowMs, registeredFixChild(fixKey)) : undefined);
+    }
     if (fixHolder) {
       standDownReason = fixHolder.reason;
       extraDisposedFields = { ...extraDisposedFields, ...fixHolder.fields };

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -65,6 +65,43 @@ test("W1-T9071: a recycle runs its pending actions in the stopped window", (t) =
   assert.ok(existsSync(join(state, "later-ran")));
   assert.deepEqual(entries(join(state, "recycle-actions", "pending")), []);
   assert.equal(bash(`. "${ACTIONS_LIB}"; recycle_actions_run stopped "${join(root, "nowhere")}"; echo "rc=$?"`).stdout.trim(), "rc=0");
+});
+
+test("under the recycle's own set -euo pipefail, a failed, timed-out or phaseless action still returns and the caller carries on, with or without timeout(1)", (t) => {
+  // recycle-container.sh sources this library under `set -euo pipefail`. There, a bare failing action command ended
+  // the whole recycle after `docker rm`, so no container was started again.
+  const root = fixture(t);
+  const actions = join(root, "actions");
+  mkdirSync(actions);
+  action(actions, "fails", "exit 3");
+  action(actions, "sleeps", "sleep 5");
+  writeFileSync(join(actions, "no-phase.sh"), "#!/usr/bin/env bash\ntrue\n");
+  const run = (state: string, names: string[], env: Record<string, string> = {}) => {
+    pending(state, ...names);
+    return bash(`set -euo pipefail; . "${ACTIONS_LIB}"; CODEX_DIR=/codex; recycle_actions_run stopped "${state}"; echo "carried on"`,
+      { RMD_RECYCLE_ACTIONS_DIR: actions, RMD_RECYCLE_ACTION_TIMEOUT_S: "1", ...env });
+  };
+
+  const bounded = join(root, "bounded");
+  const withTimeout = run(bounded, ["fails", "sleeps", "no-phase"]);
+  assert.equal(withTimeout.status, 0, withTimeout.stderr);
+  assert.match(withTimeout.stdout, /^carried on$/m, "the caller's next command runs");
+  assert.deepEqual(entries(join(bounded, "recycle-actions", "failed")).map((n) => n.split(".")[0]).sort(), ["fails", "no-phase", "sleeps"]);
+  const boundedLog = readFileSync(join(bounded, "recycle-actions", "log"), "utf8");
+  assert.match(boundedLog, /action=fails rc=3 reason=exited 3/);
+  assert.match(boundedLog, /action=sleeps rc=124 reason=timed out after 1s/);
+
+  // A host with no timeout(1) (stock macOS) takes the unbounded branch: a PATH holding only what the library calls.
+  const bin = join(root, "bin-without-timeout");
+  mkdirSync(bin);
+  for (const tool of ["bash", "sed", "head", "date", "basename", "dirname", "mkdir", "mv"]) symlinkSync(bash(`command -v ${tool}`).stdout.trim(), join(bin, tool));
+  assert.notEqual(bash("command -v timeout", { PATH: bin }).status, 0, "the PATH really has no timeout(1)");
+  const unbounded = join(root, "unbounded");
+  const withoutTimeout = run(unbounded, ["fails"], { PATH: bin });
+  assert.equal(withoutTimeout.status, 0, withoutTimeout.stderr);
+  assert.match(withoutTimeout.stdout, /no timeout\(1\) on this host; fails runs unbounded/);
+  assert.match(withoutTimeout.stdout, /^carried on$/m, "the caller's next command runs");
+  assert.match(readFileSync(join(unbounded, "recycle-actions", "log"), "utf8"), /action=fails rc=3 reason=exited 3/);
 });
 
 test("the sessions bind is planned only from this instance's own ready file", (t) => {
