@@ -26,7 +26,7 @@
       proof: "grep: W1-T14303 criterion 2: in test/fixture-copy-census.test.ts"
     - claim: "The other signatures read the raw text as today. A `[\"init\"` call site and a gh PATH shim whose quoted \"gh\" is a string literal are still counted in gitInitSites, gitInitFiles and ghPathShimFiles"
       proof: "grep: W1-T14303 criterion 3: in test/fixture-copy-census.test.ts"
-    - claim: "On the real tree, each of the three builder-name counts is at most what the old rule counts, the other four counts are equal, and every name the old rule counts but the new rule does not appears in test/ only inside string or template literals"
+    - claim: "On the real tree, each of the three builder-name counts is at most what the old rule counts, the GitHub builder file count drops only by files whose every GitHub declaration is literal text, the git init and gh shim counts are equal, and every name the old rule counts but the new rule does not appears in test/ only inside string or template literals"
       proof: "grep: W1-T14303 criterion 4: in test/fixture-copy-census.test.ts"
     - claim: "The production counter masks literal text before it matches builder names"
       proof: "grep: codeOnlyText( in scripts/fixture-copy-census.mjs"
@@ -73,6 +73,10 @@
     GitHub cases pass. Make codeOnlyText blank the whole rest of the file after an escaped quote:
     criterion 2 fails.
   note: |
+    Amended 2026-11-22 by the hand builder: criterion 4 said the four counts other than the three builder
+    names stay equal, but fakeGithubBuilderFiles comes from the same GitHub name matches, so it drops with
+    them (86 to 85 on main 00c9f2f4cc: board-index-open-and-merged-clocks.test.ts holds its only GitHub
+    declaration in a string).
     Id minted with `rmd next-task-id --no-reserve` on branch run-unfiled-1795352828000. The filer did
     not push a reservation; the shipper reserves it.
     Filed by the operator session on 2026-11-22. Filing only; not built.

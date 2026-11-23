@@ -17,6 +17,9 @@
   files:
     - src/lib/sweep.ts
     - test/a-held-fix-dispatch-key-names-its-holder.test.ts
+  # refusal-amendment (W1-T13287, run work-fix-dispatch-W1-T13287-1795392104551-4bfb@6c33d514d2209174fb3c1fd985fcce38c75e8e33, 2026-11-23T00:31:26.581Z): the worker refused criterion 2 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The merge-base queued-host test requires the exact generic fallback for the pending launch that criterion 2 requires the sweep to name.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:

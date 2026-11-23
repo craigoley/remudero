@@ -83,9 +83,11 @@ function noMergedGithub(opts: { openPrs?: PrRef[] | null; omitOpenMethod?: boole
   return g;
 }
 
-/** `deriveStatus` deps with NO ledger at all — no `pr.opened` line, the incident's condition. */
+/** `deriveStatus` deps with NO ledger at all — no `pr.opened` line, the incident's condition — and an empty credit
+ *  store. The store's default path sits beside the ledger path: a run as root creates `/nonexistent/merge-credit.json`,
+ *  and a later test or run reads its credits back as merges. */
 function deps(github: GitHub, over: Partial<DeriveDeps> = {}): DeriveDeps {
-  return { ledgerPath: "/nonexistent/ledger.ndjson", github, readLedger: () => [], ...over };
+  return { ledgerPath: "/nonexistent/ledger.ndjson", github, readLedger: () => [], readCreditStore: () => ({}), writeCreditStore: () => {}, ...over };
 }
 
 // ── THE INCIDENT, REPLAYED ────────────────────────────────────────────────────────────────────
@@ -261,7 +263,7 @@ test("projectPlan groups the ONE open fetch by task client-side, and credits the
   };
 
   const plan = { tasks: [task(TASK_ID), task("W1-T999")] } as unknown as Plan;
-  const byId = projectPlan(plan, { ledgerPath: "/nonexistent", github: g, readLedger: () => [] } as DeriveDeps);
+  const byId = projectPlan(plan, { ledgerPath: "/nonexistent", github: g, readLedger: () => [], readCreditStore: () => ({}), writeCreditStore: () => {} } as DeriveDeps);
 
   assert.equal(openFetches, 1, "ONE fetch for the whole plan, not one per task");
   assert.equal(byId.get(TASK_ID)?.prNumber, 1377, "each task got its OWN branch's PR");

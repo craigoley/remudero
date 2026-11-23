@@ -1,5 +1,5 @@
 import { stampMechanicalAsk } from "./inbox-retirement.js";
-import { reconcilePlan, reconcileShardStatus } from "./plan-reconcile.js";
+import { reconcilePlan, reconcileShardStatus, requeueRevertedShard, type RevertedRequeue } from "./plan-reconcile.js";
 import { takePlanReconcileBatch } from "./plan-reconcile-batch.js";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
@@ -1491,6 +1491,8 @@ export interface PlanReconcileCadenceResult {
   status: "clear" | "reported" | "landed";
   threshold: number;
   held?: PlanReconcileHeld[];
+  /** W1-T14302: shards whose standing credit a revert or an override took back, re-queued in the same landing. */
+  requeued?: string[];
 }
 
 export interface PlanReconcileHeld {
@@ -1508,23 +1510,27 @@ export interface PlanReconcileCadenceOpts {
   threshold: number;
   /** Caller-owned landing bridge; absent = report only. Never dirty the daemon checkout (`checkCliFreshness` refuses it). */
   land?: (writes: ReadonlyArray<{ taskId: string; text: string }>) => void | { held: PlanReconcileHeld[]; landed: number };
+  /** W1-T14302: merged-to-queued writes from {@link requeueRevertedShard}. Any one lands below the threshold. */
+  requeue?: ReadonlyArray<{ taskId: string; text: string }>;
 }
 
 /** Schedule `reconcilePlan` unchanged: report every cycle; land only at or above the threshold. */
 export function planReconcileCadence(opts: PlanReconcileCadenceOpts): PlanReconcileCadenceResult {
   const { writes } = reconcilePlan(opts.shards, opts.isCreditedMerged);
   const taskIds = writes.map((w) => w.taskId);
-  if (taskIds.length === 0) {
+  const requeue = (opts.requeue ?? []).filter((r) => !taskIds.includes(r.taskId));
+  const requeued = requeue.length > 0 ? { requeued: requeue.map((r) => r.taskId) } : {};
+  if (taskIds.length === 0 && requeue.length === 0) {
     return { drift: 0, taskIds, status: "clear", threshold: opts.threshold };
   }
-  // Below threshold or without `land`, report-only by construction.
-  if (taskIds.length < opts.threshold || opts.land === undefined) {
-    return { drift: taskIds.length, taskIds, status: "reported", threshold: opts.threshold };
+  // Below threshold or without `land`, report-only by construction. A re-queue is never held for the threshold.
+  if ((taskIds.length < opts.threshold && requeue.length === 0) || opts.land === undefined) {
+    return { drift: taskIds.length, taskIds, status: "reported", threshold: opts.threshold, ...requeued };
   }
-  const outcome = opts.land(writes);
+  const outcome = opts.land([...writes, ...requeue]);
   const held = outcome?.held ?? [];
   const status = outcome !== undefined && outcome.landed === 0 ? "reported" : "landed";
-  return { drift: taskIds.length, taskIds, status, threshold: opts.threshold, ...(held.length > 0 ? { held } : {}) };
+  return { drift: taskIds.length, taskIds, status, threshold: opts.threshold, ...(held.length > 0 ? { held } : {}), ...requeued };
 }
 
 export interface PlanReconcileShardRecord {
@@ -1533,10 +1539,15 @@ export interface PlanReconcileShardRecord {
   text: string;
 }
 
+/** W1-T14302: the credited set, and the shards whose standing credit is gone, from ONE projection read. */
+export type CreditedMergedIds = ReadonlySet<string> & { readonly requeue?: readonly RevertedRequeue[] };
+
 export interface PlanReconcileCadenceInputOptions {
   checkoutRoot: string;
   readShards: () => readonly PlanReconcileShardRecord[];
-  creditedMergedIds: () => ReadonlySet<string>;
+  creditedMergedIds: () => CreditedMergedIds;
+  /** W1-T14302: the ledger writer for plan.reconcile.reverted_requeue rows. */
+  log?: (step: string, extra?: Record<string, unknown>) => void;
   land: (inputs: readonly { relPath: string; content: string; edit?: (current: string) => string | undefined }[]) => void;
   threshold?: number;
   lint?: PlanReconcileLint;
@@ -1582,11 +1593,20 @@ export function planReconcileLintHold(lint: PlanReconcileLint = lintAsTheShardCe
 export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOptions): PlanReconcileCadenceOpts {
   const records = [...deps.readShards()];
   const byId = new Map(records.map((record) => [record.taskId, record.path]));
-  const credited = new Set(deps.creditedMergedIds());
+  const read = deps.creditedMergedIds();
+  const credited = new Set(read);
+  // W1-T14302: a shard flipped to merged by a credit that is gone goes back to queued, in this same landing.
+  const lost = new Map((read.requeue ?? []).filter((r) => !credited.has(r.taskId)).map((r) => [r.taskId, r]));
+  const requeue = records.flatMap(({ taskId, text }) => {
+    const edited = lost.has(taskId) ? requeueRevertedShard(text, taskId, lost.get(taskId)).text : undefined;
+    return edited === undefined ? [] : [{ taskId, text: edited }];
+  });
+  const requeueIds = new Set(requeue.map((r) => r.taskId));
   return {
     shards: records.map(({ taskId, text }) => ({ taskId, text })),
     isCreditedMerged: (taskId) => credited.has(taskId),
     threshold: deps.threshold ?? 10,
+    ...(requeue.length > 0 ? { requeue } : {}),
     land: (writes) => {
       const { landable, held } = planReconcileLintHold(deps.lint)(deps.checkoutRoot, records, writes);
       const relPathOf = (taskId: string): string => {
@@ -1596,10 +1616,23 @@ export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOp
       };
       // W1-T11859: one bounded batch per fire; the next fire reads the merged flips as no longer drifted and takes the next.
       // W1-T13816: the landing applies `edit` to main's current shard text; `content` is only this read's flip.
-      const statusEdit = (taskId: string) => (current: string) => reconcileShardStatus(current, taskId, (id) => credited.has(id)).text;
-      const inputs = takePlanReconcileBatch(landable, (write) => relPathOf(write.taskId)).map((write) =>
+      const statusEdit = (taskId: string) => (current: string) => requeueIds.has(taskId)
+        ? requeueRevertedShard(current, taskId, lost.get(taskId)).text
+        : reconcileShardStatus(current, taskId, (id) => credited.has(id)).text;
+      const batch = takePlanReconcileBatch(landable, (write) => relPathOf(write.taskId));
+      const inputs = batch.map((write) =>
         ({ relPath: relPathOf(write.taskId), content: write.text, edit: statusEdit(write.taskId) }));
       if (inputs.length > 0) deps.land(inputs);
+      for (const write of batch) {
+        const r = requeueIds.has(write.taskId) ? lost.get(write.taskId) : undefined;
+        if (!r) continue;
+        deps.log?.("plan.reconcile.reverted_requeue", {
+          task: write.taskId, file: relPathOf(write.taskId),
+          ...(r.revertedCredit
+            ? { cause: "revert", pr: r.revertedCredit.pr, revert_sha: r.revertedCredit.revertSha }
+            : { cause: "override", pr: r.creditOverride!.pr }),
+        });
+      }
       return { held, landed: inputs.length };
     },
   };

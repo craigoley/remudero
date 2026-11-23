@@ -14,7 +14,7 @@ import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.
 import { checkReviewerCodeFreshnessAsync, reviewerCodeJudge, type ReviewerCodeFreshness } from "../../lib/self-sync.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
 import { ghJsonAsync } from "../../lib/github-transport.js";
-import { readLedgerLines, buildBatchedGithub, readRequiredStatusCheckContextsAsync, type GitHub } from "../../lib/status.js";
+import { readLedgerLines, buildBatchedGithub, planCreditOverridePath, readRequiredStatusCheckContextsAsync, type GitHub } from "../../lib/status.js";
 import { liveInflightRuns } from "../../lib/report-commands.js";
 import { worktreeRemove, worktreeRemoveAsync, releaseReviewWorktree, runWorktreeReapRung, type WorktreeReapSummary } from "../../lib/worker.js";
 import { automaticBranchReapStateFileName, readAutomaticBranchReapState, writeAutomaticBranchReapState, type AutomaticBranchReapState } from "../../lib/branch-reaper.js";
@@ -837,7 +837,7 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
   // and escalating after #3874 merged its task — `supersededBy` is computed from the OPEN array,
   // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
   // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
-  const creditCandidates = buildCreditCandidates(owner, repo, plan, ledgerPath, log);
+  const creditCandidates = sweepCreditCandidates(repo === self.repo ? repoRoot : join(config.root, "repos", repo), owner, repo, plan, ledgerPath, log);
   const summary = await runOneShotSweep((handedOffHeadJudgments) => runSweep(
     projectMergedTaskCandidates(prsForFixRung, creditCandidates),
     withFullSweepRepairAdmission({
@@ -910,6 +910,21 @@ export async function sweepCommand(host: SweepCommandHost & Required<Pick<SweepC
       `\nworktree reap: ${reapSummary.reaped.length} worktree(s) reaped · ${reapSummary.reapedLocks.length} widowed lock(s) reaped`,
   );
   return 0;
+}
+
+/** W1-T14302: the sweep's own credit read, with the remove-credit rows of the target checkout's plan. These
+ *  candidates set taskMergedBy, which closes an open PR as a leftover. */
+export function sweepCreditCandidates(
+  checkoutRoot: string,
+  owner: string,
+  repo: string,
+  plan: Plan,
+  ledgerPath: string,
+  log?: (step: string, extra?: Record<string, unknown>) => void,
+  github?: GitHub,
+): ReturnType<typeof buildCreditCandidates> {
+  return buildCreditCandidates(owner, repo, plan, ledgerPath, log, github, undefined, undefined,
+    { creditOverridePath: planCreditOverridePath(checkoutRoot) });
 }
 
 /**
@@ -1182,7 +1197,7 @@ export function buildSweepHook(
       // so the peer relation vanished the moment the winner merged. ONE call per full sweep: the
       // array below is passed to the projection AND to `runCreditBackfill`, never rebuilt.
       const creditCandidates = await prelude.time("credit_candidates", () =>
-        tickRead?.creditCandidates ?? buildCreditCandidates(owner, repo, plan, ledgerPath, log, boardGithub));
+        tickRead?.creditCandidates ?? sweepCreditCandidates(targetCheckoutRoot ?? repoRoot, owner, repo, plan, ledgerPath, log, boardGithub));
       await runSweep(
         projectMergedTaskCandidates(prsForFixRung, creditCandidates),
         withFullSweepRepairAdmission({

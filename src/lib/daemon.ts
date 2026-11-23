@@ -153,8 +153,8 @@ import {
 } from "./arm-auto-merge.js";
 // Pure shared gate; dispatch-governor.ts explains why drain.ts cannot share it from here (W1-T342).
 import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadTracker, type QuietHoursHoldResult } from "./dispatch-governor.js";
-import { assertRunnable, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task, type TaskInputAnswer } from "./plan.js";
-import { composeSecondaryPlan, compositionHoldEdge, type CompositionHold } from "./task-lookup.js";
+import { assertRunnable, readTaskPrecondition, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task, type TaskInputAnswer } from "./plan.js";
+import { composeSecondaryPlan, compositionHoldEdge, type CompositionHold, type CompositionRecordFailure } from "./task-lookup.js";
 import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
@@ -176,7 +176,7 @@ import type { FeedbackRefusal, LandFeedbackResult, LandingGitMeter } from "./fee
 import type { GithubPostureFinding } from "./github-posture.js";
 // Clock adapters preserve DaemonDeps.now's Date and crashLoopCheck.now's string injection shapes.
 // The internal headroom sampler uses Clock directly (W1-T2897).
-import { clockFromDateFn, clockFromIsoFn, fixedClock, loopAvailableDeadline, systemClock, type Clock } from "../lib/clock.js";
+import { clockFromDateFn, clockFromIsoFn, clockFromMillisFn, fixedClock, loopAvailableDeadline, systemClock, type Clock } from "../lib/clock.js";
 import { createNearLimitHeapTelemetry, NEAR_HEAP_FILE, type NearLimitHeapTelemetry, type NearLimitSample } from "./daemon-heap-near-limit.js";
 import { createHeapAdmissionHold, type HeapAdmissionHoldLatch, type HeapAdmissionHoldMode, type HeapHoldTrace } from "./daemon-heap-admission-hold.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync } from "./ledger-union.js";
@@ -1115,6 +1115,8 @@ export interface DaemonOpts {
    *  floor, and at 1 the selection, callbacks and ordering are byte-identical to before this parameter
    *  existed. W1-T344 owns raising the row that flips it (W1-T343). Forensics: docs/forensics/daemon.md. */
   laneCount?: number;
+  /** Record dispatch selection timings. Defaults on. */
+  selectionTiming?: boolean;
   /** `SweepPolicy.wipLimit` (W1-T121), threaded through only to size a batch of two or more lanes, exactly as
    * `runDrainLanes` does. Distinct from `checkQueueGovernor`, which stops new dispatch outright for the whole tick;
    * this is how many lanes still fit under the ceiling right now. Without it a wide batch could overshoot by up to
@@ -1425,6 +1427,8 @@ interface OpsDispatchContext {
 }
 
 export interface DaemonDeps {
+  /** W1-T13286: the selection-timing row's own clock, so timing never consumes a reading of `now` a decision depends on. */
+  selectionTimingNow?: () => number;
   /** Absent by default. This reads completed state only; it never awaits a private source on the tick. */
   readOpsTaskDispatch?: (publicPlan: Plan) => OpsTaskDispatchRead;
   /** W1-T13681: the move janitor, one detached movePlanTask tick per iteration; absent, no tick runs. */
@@ -2288,6 +2292,79 @@ export function captureDispatchFrontier(plan: Plan, opts: NextRunnableOpts) {
     } },
   };
   return selection;
+}
+
+function dispatchSelectionTiming(
+  site: "tick" | "lane-refill", clock: Clock, log: ((step: string, fields: Record<string, unknown>) => void) | undefined,
+) {
+  const startedAt = log === undefined ? 0 : clock.now();
+  const probeMs: Record<string, number> = {};
+  let measuredMs = 0;
+  let candidatesExamined = 0;
+  const elapsed = (since: number) => Math.max(0, clock.now() - since);
+  const probe = <T>(name: string, read: () => T): T => {
+    if (log === undefined) return read();
+    const started = clock.now();
+    const finish = () => {
+      const ms = elapsed(started);
+      probeMs[name] = (probeMs[name] ?? 0) + ms;
+      measuredMs += ms;
+    };
+    let result: T | undefined;
+    try {
+      result = read();
+      return result;
+    } finally {
+      // Observe the existing promise so its decision continuation keeps its place in the queue.
+      if (result instanceof Promise) void result.then(finish, finish);
+      else finish();
+    }
+  };
+  const wrap = <Args extends unknown[], Result>(name: string, read?: (...args: Args) => Result) =>
+    log === undefined || read === undefined ? read : function (this: unknown, ...args: Args) {
+      return probe(name, () => read.apply(this, args));
+    };
+  return {
+    probe,
+    wrap,
+    selectionInputs(plan: Plan, isMerged: MergedSet, limit: number, opts: NextRunnableOpts) {
+      if (log === undefined || limit <= 0) return { isMerged, opts, finish: () => {} };
+      const started = clock.now();
+      const before = measuredMs;
+      return {
+        isMerged: (id: string) => probe("isMerged", () => isMerged(id)),
+        opts: {
+          ...opts,
+          beginSelectionPass: wrap("beginSelectionPass", opts.beginSelectionPass),
+          isCreditIndeterminate: wrap("isCreditIndeterminate", opts.isCreditIndeterminate),
+          isIndependentFailureBlocked: wrap("isIndependentFailureBlocked", opts.isIndependentFailureBlocked),
+          inputAnswer: wrap("inputAnswer", opts.inputAnswer),
+          readPrecondition: wrap("readPrecondition", opts.readPrecondition ?? readTaskPrecondition),
+          isTerminalPreDispatchRefusalHeld: wrap("isTerminalPreDispatchRefusalHeld", opts.isTerminalPreDispatchRefusalHeld),
+          isIndeterminate: wrap("isIndeterminate", opts.isIndeterminate),
+          isCircuitTripped: wrap("isCircuitTripped", opts.isCircuitTripped),
+          isLifetimeCapExceeded: wrap("isLifetimeCapExceeded", opts.isLifetimeCapExceeded),
+          isOpenPr: wrap("isOpenPr", opts.isOpenPr),
+          readLiveState: wrap("readCachedLiveState", opts.readLiveState),
+          hasPushedRunBranch: wrap("hasPushedRunBranch", opts.hasPushedRunBranch),
+          openSiblingBuildFor: wrap("openSiblingBuildFor", opts.openSiblingBuildFor),
+        },
+        finish() {
+          // A positive-limit walk checks every plan task, including those declined or already merged.
+          candidatesExamined = plan.tasks.length;
+          // The shared selector's inline guards and packing have no probe hook at the daemon boundary.
+          probeMs.selector_unattributed = Math.max(0, elapsed(started) - (measuredMs - before));
+        },
+      };
+    },
+    write() {
+      try {
+        log?.("dispatch.selection_timing", {
+          site, total_ms: elapsed(startedAt), candidates_examined: candidatesExamined, probe_ms: { ...probeMs },
+        });
+      } catch (error) { void error; /* A timing row is best-effort and cannot hold a lane. */ }
+    },
+  };
 }
 
 /** W1-T11600: the only data returned from a second-catalog comparison is aggregate evidence. */
@@ -4630,6 +4707,8 @@ export async function runDaemon(
     },
   };
   const emitLog: (step: string, extra?: Record<string, unknown>) => void = deps.log ?? (() => {});
+  const timingSink = opts.selectionTiming === false ? undefined : deps.log && emitLog;
+  const selectionTimingClock = clockFromMillisFn(deps.selectionTimingNow);
   type SettlementReporting = {
     report: typeof emitLog;
     faults: Array<{ phase: string; reason: unknown }>;
@@ -5520,16 +5599,28 @@ export async function runDaemon(
   };
   const opsDispatchContexts = new WeakMap<Plan, OpsDispatchContext>();
   let lastOpsDispatchHold: string | undefined;
-  const holdOpsDispatch = (reason: string, taskId?: string, source?: OpsCatalogShadowInput): void => {
+  const holdOpsDispatch = (reason: string, observation: OpsTaskDispatchRead, record?: CompositionRecordFailure): void => {
     const safeReason = OPS_CATALOG_OUTCOMES.includes(reason as OpsCatalogOutcome) ||
       ["selection_unreadable", "selection_changed", "invalid_dispatch_flag", "source_pending", "source_identity_unknown",
         "primary_revision_unknown", "duplicate_task_id", "invalid_cross_catalog_dependency", "malformed"].includes(reason)
       ? reason : "selection_unreadable";
-    const stage = opsCatalogRefusalStage(source);
-    const signature = JSON.stringify([safeReason, taskId, stage]);
+    const stage = opsCatalogRefusalStage(observation.outcome === "off" ? undefined : observation.source);
+    let revision: string | undefined;
+    try {
+      if (observation.outcome === "selected") {
+        const { publicCommit, source: { opsCommit } } = observation;
+        if (CATALOG_COMMIT.test(publicCommit) && typeof opsCommit === "string" && CATALOG_COMMIT.test(opsCommit)) {
+          revision = compositeCatalogRevisionKey(publicCommit, opsCommit);
+        }
+      }
+    } catch (error) { void error; /* Unreadable revision evidence leaves the hold unkeyed. */ }
+    const signature = JSON.stringify([safeReason, record?.taskId, record?.field, record?.side, stage, revision]);
     if (signature === lastOpsDispatchHold) return;
-    try { log("dispatch.ops_catalog_held", { outcome: safeReason, ...(stage ? { refusal_stage: stage } : {}), ...(taskId ? { task_id: taskId } : {}) }); }
-    catch (error) { void error; /* A diagnostic failure cannot authorize ops work or stop public selection. */ }
+    try {
+      log("dispatch.ops_catalog_held", { outcome: safeReason, ...(stage ? { refusal_stage: stage } : {}),
+        ...(record?.taskId === undefined ? {} : { task_id: record.taskId }),
+        ...(record === undefined ? {} : { field: record.field, side: record.side }) });
+    } catch (error) { void error; /* A diagnostic failure cannot authorize ops work or stop public selection. */ }
     lastOpsDispatchHold = signature;
   };
   /** W1-T13681: why ops dispatch is held this iteration (the hold's own outcome label), or undefined while it is not. */
@@ -5567,24 +5658,24 @@ export async function runDaemon(
     const observation = readOpsDispatch(primary);
     if (observation.outcome === "off") { lastOpsDispatchHold = undefined; return { plan: primary, observation }; }
     if (observation.outcome === "unavailable") {
-      holdOpsDispatch(observation.reason, undefined, observation.source);
+      holdOpsDispatch(observation.reason, observation);
       return { plan: primary, observation };
     }
     const input = observation.source;
     if (input.outcome !== "ok" || input.plan === undefined) {
-      holdOpsDispatch(input.outcome === "ok" ? "source_identity_unknown" : input.outcome, undefined, input);
+      holdOpsDispatch(input.outcome === "ok" ? "source_identity_unknown" : input.outcome, observation);
       return { plan: primary, observation };
     }
     if (!CATALOG_COMMIT.test(observation.publicCommit)) {
-      holdOpsDispatch("primary_revision_unknown"); return { plan: primary, observation };
+      holdOpsDispatch("primary_revision_unknown", observation); return { plan: primary, observation };
     }
     if (typeof input.opsCommit !== "string" || !CATALOG_COMMIT.test(input.opsCommit) ||
       typeof input.identityDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.identityDigest)) {
-      holdOpsDispatch("source_identity_unknown"); return { plan: primary, observation };
+      holdOpsDispatch("source_identity_unknown", observation); return { plan: primary, observation };
     }
     const composition = composeSecondaryPlan(primary, input.plan);
     if (composition.outcome !== "ok") {
-      holdOpsDispatch(composition.outcome);
+      holdOpsDispatch(composition.outcome, observation, composition.field === undefined ? undefined : composition);
       return { plan: primary, observation };
     }
     lastOpsDispatchHold = undefined;
@@ -5604,8 +5695,7 @@ export async function runDaemon(
     if (latest.outcome === "selected" && latest.source.outcome === "ok" &&
       latest.publicCommit === captured.publicCommit && latest.source.identityDigest === captured.source.identityDigest &&
       latest.source.opsCommit === captured.source.opsCommit) return true;
-    holdOpsDispatch(latest.outcome === "unavailable" ? latest.reason : "selection_changed", undefined,
-      latest.outcome === "off" ? undefined : latest.source);
+    holdOpsDispatch(latest.outcome === "unavailable" ? latest.reason : "selection_changed", latest);
     return false;
   };
   // W1-T11768: the one snapshot of an injected ops target; `null` is any refusal (never a partial Plan).
@@ -8247,13 +8337,14 @@ export async function runDaemon(
     // by {@link assertRunnable} is cleared and its named reason ledgered, never silently dropped. The
     // first runnable kick becomes this cycle's task; others wait (fb-1784988460437-9daa9b).
     const mergedTask: MergedResolver = (t) => isMerged(t.id);
+    const tickTiming = dispatchSelectionTiming("tick", selectionTimingClock, timingSink);
     // W1-T10348: the released set, resolved ONCE per tick by the resolver every admission site shares
     // (ledger rows plus operator-releases.json), and handed to the kick, the tick selection and the refill.
     let tickLedgerLines: readonly string[] | undefined;
     const readTickLedger = deps.readLedgerLines;
-    const tickReleases = resolveReleases({
+    const tickReleases = tickTiming.probe("resolveReleases", () => resolveReleases({
       readDurableReleases: deps.readDurableReleases, readLedgerLines: readTickLedger && (() => (tickLedgerLines = readTickLedger())),
-    }, planForBatch);
+    }, planForBatch));
     if (tickLedgerLines !== undefined) {
       const lines = tickLedgerLines;
       for (const [taskId, deferral] of claimHeldDeferrals) {
@@ -8346,7 +8437,7 @@ export async function runDaemon(
     const tickDeferredForPriority = new Set<string>();
     const tickOpenPr = new Set<string>();
     // W1-T8676: every release the latch projects leaves its row, once per blocking run.
-    const independentBlockReleasesThisPass = deps.independentBlockReleases?.() ?? new Map<string, IndependentBlockRelease>();
+    const independentBlockReleasesThisPass = tickTiming.probe("independentBlockReleases", () => deps.independentBlockReleases?.()) ?? new Map<string, IndependentBlockRelease>();
     for (const [taskId, release] of independentBlockReleasesThisPass) {
       if (release.receiptRecorded || ledgeredIndependentBlockReleases.has(release.blockingRunId)) continue;
       ledgeredIndependentBlockReleases.add(release.blockingRunId);
@@ -8359,7 +8450,8 @@ export async function runDaemon(
     }
     let terminalPreDispatchRefusalRevisions: ReadonlyMap<string, string> = new Map();
     try {
-      terminalPreDispatchRefusalRevisions = deps.readTerminalPreDispatchRefusalRevisions?.() ?? terminalPreDispatchRefusalRevisions;
+      terminalPreDispatchRefusalRevisions = tickTiming.probe("readTerminalPreDispatchRefusalRevisions", () =>
+        deps.readTerminalPreDispatchRefusalRevisions?.()) ?? terminalPreDispatchRefusalRevisions;
     } catch (e) {
       log("dispatch.held_pre_dispatch_refusal_unreadable", { error: String((e as Error)?.message ?? e) });
     }
@@ -8369,34 +8461,38 @@ export async function runDaemon(
     // One branch sweep per tick, resolved before the options object so the closure below is a
     // set-membership test rather than a round trip per candidate (W1-T916). A failed read refuses
     // nothing, the direction a guard on whether work starts at all must fail.
-      const readRunBranchesFor = (site: "tick" | "lane-refill", fallback: string | undefined) =>
-        readRunBranchListing(deps.readPushedRunBranches, (error) => {
+      const readRunBranchesFor = (timing: typeof tickTiming, site: "tick" | "lane-refill", fallback: string | undefined) =>
+        readRunBranchListing(timing.wrap("readPushedRunBranches", deps.readPushedRunBranches), (error) => {
           log("dispatch.run_branch_read_failed", { site, error: String((error as Error)?.message ?? error) });
           return fallback;
         });
-      const tickRunBranchRead = readRunBranchesFor("tick", undefined);
+      const tickRunBranchRead = readRunBranchesFor(tickTiming, "tick", undefined);
       const tickRunBranchListing = tickRunBranchRead instanceof Promise ? await tickRunBranchRead : tickRunBranchRead;
       // W1-T4002 — the most recent completed full sweep already proved these (W1-T4998); see
       // `SweepCycleOutcome.planOnlyRunBranchReceipts`'s doc for why no second GitHub read happens.
       const planOnlyReceiptsThisTick: readonly PlanOnlyRunBranchReceipt[] = sweepCycleOutcome?.planOnlyRunBranchReceipts ?? [];
       // W1-T14233: the closed-PR read is resolved here, once per selection pass, because the predicate is synchronous.
       // A failed read yields no rows, so every ref keeps blocking.
-      const readClosedRowsFor = (site: "tick" | "lane-refill", listing: string | undefined, passPlan: Plan, passMerged: MergedSet) =>
-        aCandidateHoldsARunBranch(listing, passPlan, passMerged, deps.isOpenPr)
-          ? readRunBranchListing(deps.readClosedRunBranchPrs, (error) => {
+      const readClosedRowsFor = (timing: typeof tickTiming, site: "tick" | "lane-refill", listing: string | undefined, passPlan: Plan, passMerged: MergedSet) =>
+        timing.probe("aCandidateHoldsARunBranch", () => aCandidateHoldsARunBranch(listing, passPlan, passMerged, deps.isOpenPr))
+          ? readRunBranchListing(timing.wrap("readClosedRunBranchPrs", deps.readClosedRunBranchPrs), (error) => {
             log("dispatch.run_branch_read_failed", { site: `${site}:closed-prs`, error: String((error as Error)?.message ?? error) });
             return undefined;
           })
           : undefined;
-      const tickClosedRead = readClosedRowsFor("tick", tickRunBranchListing, planForBatch, isMerged);
+      const tickClosedRead = readClosedRowsFor(tickTiming, "tick", tickRunBranchListing, planForBatch, isMerged);
       const tickClosedRows = tickClosedRead instanceof Promise ? await tickClosedRead : tickClosedRead;
       const runBranchStateThisTick = runBranchStateFrom(
-        tickRunBranchListing, readRunBranchEvidence(), resumableHandoffs,
+        tickRunBranchListing, tickTiming.probe("readRunBranchEvidence", readRunBranchEvidence), resumableHandoffs,
         lazyClosedUnmerged(tickClosedRows === undefined ? undefined : () => tickClosedRows),
       );
-      const tickMachineShareRows = await machineShareRowsFor(tickLedgerLines);
-      const prefetchLive = (passPlan: Plan, passMerged: MergedSet) =>
-        deps.readLiveState ? prefetchLiveStates(passPlan, passMerged, deps.isOpenPr, deps.readLiveState) : Promise.resolve(undefined);
+      const tickMachineShareRows = await tickTiming.probe("machineShareRowsFor", () => machineShareRowsFor(tickLedgerLines));
+      const prefetchLive = (timing: typeof tickTiming, passPlan: Plan, passMerged: MergedSet) => {
+        const read = timing.wrap("readLiveState", deps.readLiveState);
+        // The batch is wall time. Individual PR reads can overlap, so their summed time may exceed it.
+        return read ? timing.probe("prefetchLiveStates", () => prefetchLiveStates(passPlan, passMerged, deps.isOpenPr, read))
+          : Promise.resolve(undefined);
+      };
       const liveStateLogged = (live: Awaited<ReturnType<typeof prefetchLive>>): NextRunnableOpts["readLiveState"] => live
         ? (taskId, prNumber) => {
             const state = live.read(taskId, prNumber);
@@ -8404,13 +8500,13 @@ export async function runDaemon(
             return state;
           }
         : undefined;
-      const tickLive = deps.readLiveState ? await prefetchLive(planForBatch, isMerged) : undefined;
+      const tickLive = deps.readLiveState ? await prefetchLive(tickTiming, planForBatch, isMerged) : undefined;
       const dispatchOpts: NextRunnableOpts = {
       onPassedOver: (task, detail) => { tickPassedOver.add(task.id); observePassedOver("tick")(task, detail); },
       priorityBackfill,
       onDeferredForPriority: (d) => { tickDeferredForPriority.add(d.task.id); logPriorityDeferral(d); },
       onPriorityReservationReleased: logPriorityRelease,
-      dispatchValueContext: deps.buildDispatchValueContext?.(planForBatch, isMerged),
+      dispatchValueContext: tickTiming.probe("buildDispatchValueContext", () => deps.buildDispatchValueContext?.(planForBatch, isMerged)),
       machineShare: machineShareFor(planForBatch, tickMachineShareRows),
       beginSelectionPass: deps.beginSelectionPass,
       inputAnswer: deps.taskInputAnswer,
@@ -8544,13 +8640,15 @@ export async function runDaemon(
     // evidence of spare capacity.
     let laneBudget = 0;
     bootFirstSelectionAtMs ??= daemonClock.now();
+    const tickMerged = isMerged;
     if (forcedNext) {
       dispatchSet = hasChildTask(forcedNext.id) || occupiedTasks.length >= laneCount ? [] : [forcedNext];
       tickEligible = [...dispatchSet];
     } else {
       const wipBudget = laneCount <= 1
         ? laneCount
-        : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission });
+        : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit,
+          openPrCount: tickTiming.probe("openPrCount", () => deps.openPrCount?.()), queueAdmission: tickQueueAdmission });
       const tickLaneTarget = enforcedLaneTarget(occupiedTasks.length, tickQueueAdmission?.wipLimit);
       const budget = Math.max(0, Math.min(wipBudget, tickLaneTarget) - occupiedTasks.length);
       if (laneCount >= 2 && budget <= 0) {
@@ -8562,14 +8660,18 @@ export async function runDaemon(
           lane_count: laneCount,
           ...(targetHeld ? { target: tickLaneTarget, in_flight: occupiedTasks.length } : {}),
           wip_limit: opts.wipLimit ?? null,
-          observed_open_count: deps.openPrCount?.() ?? null,
+          observed_open_count: tickTiming.probe("openPrCount", () => deps.openPrCount?.()) ?? null,
           ...wipDeferredAdmissionFields(tickQueueAdmission),
         });
       }
-      const selection = captureDispatchFrontier(planForBatch, {
+      const frontierOpts = {
         ...dispatchOpts, excludeIds: new Set([...(dispatchOpts.excludeIds ?? []), ...childTaskIds()]), inFlight: occupiedTasks,
-      });
+      };
+      const pass = tickTiming.selectionInputs(planForBatch, tickMerged, budget, frontierOpts);
+      const selection = captureDispatchFrontier(planForBatch, pass.opts);
+      const { isMerged } = pass;
       const candidates = runnableCandidates(planForBatch, isMerged, budget, selection.opts);
+      pass.finish();
       // W1-T11769: the per-tick source is read here, once per tick, after the dispatch candidates are fixed.
       // Its row goes to the ledger only. No secondary task enters `candidates`, a claim, a review or a worker.
       const shadowSource = opsDispatchObservation && opsDispatchObservation.outcome !== "off"
@@ -8581,7 +8683,7 @@ export async function runDaemon(
         const sourceShadow = opsCatalogShadowRow(shadowSource,
           composedDispatch ? () => opsDispatchContexts.get(planForBatch)!.publicCommit : deps.primaryPlanCommit,
           composedDispatch ? null : candidates.length, (secondary) =>
-          compareSecondaryCatalogShadow(publicPlanForBatch, secondary, composedDispatch ? undefined : candidates, isMerged, budget, selection.opts,
+          compareSecondaryCatalogShadow(publicPlanForBatch, secondary, composedDispatch ? undefined : candidates, tickMerged, budget, frontierOpts,
             runBranchStateThisTick.ids));
         if (sourceShadow && sourceShadow.signature !== lastSecondaryCatalogShadowSignature) {
           try { log("dispatch.secondary_catalog_shadow", { ...sourceShadow.row }); }
@@ -8599,7 +8701,7 @@ export async function runDaemon(
       }
       if (secondaryForShadow !== undefined && budget > 0) {
         const secondaryShadow = compareSecondaryCatalogShadow(
-          planForBatch, secondaryForShadow, candidates, isMerged, budget, selection.opts,
+          planForBatch, secondaryForShadow, candidates, tickMerged, budget, frontierOpts,
           runBranchStateThisTick.ids,
         );
         if (secondaryShadow) {
@@ -8616,16 +8718,18 @@ export async function runDaemon(
       tickContext = selection.context;
       // Passed explicitly rather than relying on the partition's own default parameter — see
       // `DaemonDeps.observedByTask` (W1-T2286).
-      const partition = partitionByFileOverlap([...occupiedTasks, ...candidates], deps.observedByTask ?? NO_OBSERVED_SCOPE);
+      const partition = tickTiming.probe("partitionByFileOverlap", () =>
+        partitionByFileOverlap([...occupiedTasks, ...candidates], deps.observedByTask ?? NO_OBSERVED_SCOPE));
       for (const d of partition.serialized) log("dispatch.serialized", serializedLedgerPayload(d));
       deferredPairings = partition.serialized.length;
       laneBudget = budget;
       dispatchSet = partition.dispatch.filter((task) => !hasChildTask(task.id));
-      const openPrScope = candidates.length > 0 ? deps.observedOpenPrScope?.() : undefined;
+      const openPrScope = candidates.length > 0 ? tickTiming.probe("observedOpenPrScope", () => deps.observedOpenPrScope?.()) : undefined;
       if (openPrScope) {
         const shadow = observedOverlapShadow(candidates, occupiedTasks, openPrScope, partition);
         let mode: "shadow" | "enforce" = "shadow";
-        try { mode = deps.observedOverlapMode?.() ?? "shadow"; } catch { /* an unreadable policy stays shadow */ }
+        try { mode = tickTiming.probe("observedOverlapMode", () => deps.observedOverlapMode?.()) ?? "shadow"; }
+        catch { /* an unreadable policy stays shadow */ }
         const signature = JSON.stringify(shadow.holds);
         if (shadow.holds.length > 0 && signature !== lastOverlapShadowSignature) {
           log(OVERLAP_SHADOW_STEP, overlapShadowPayload(shadow, openPrScope, mode));
@@ -8634,6 +8738,7 @@ export async function runDaemon(
         if (mode === "enforce") dispatchSet = shadow.dispatch.filter((task) => !hasChildTask(task.id));
       }
     }
+    tickTiming.write();
     logTickPhases();
 
     // The auto-triage rung runs BEFORE the idle branch (operator ruling, reversing W1-T469). The starved
@@ -9084,10 +9189,12 @@ export async function runDaemon(
       return undefined;
     };
     const decideRefill = (lane: number, finished: Task | undefined, grow?: LaneGrow): Task | undefined | Promise<Task | undefined> => {
+      const timing = dispatchSelectionTiming("lane-refill", selectionTimingClock, timingSink);
       const phaseAgeMs = daemonClock.now() - dispatchPhaseStartedAtMs;
       const phaseBound = !refillClosed && phaseBoundHolds() ? "phase bound" : undefined;
       // With no history no sibling can ever read slow, so parking could only end as a hold: hold now (W1-T5761).
       if (phaseBound && measuredRefillBound && inFlightTasks.size > 0) {
+        timing.write();
         if (grow) return holdGrow(lane, phaseBound, { phase_age_ms: phaseAgeMs, refill_bound_ms: refillBoundMs });
         log("dispatch.lane_parked", { lane, finished_task: finished!.id, reason: phaseBound, phase_age_ms: phaseAgeMs,
           refill_bound_ms: refillBoundMs, waiting_on: [...inFlightTasks].map((t) => t.id) });
@@ -9096,16 +9203,18 @@ export async function runDaemon(
         return new Promise<Task | undefined>((wake) => parkedLanes.push({ lane, finished: finished!, wake }));
       }
       const apiWindow = daemonClock.now() < apiWindowHeldUntilMs ? "blocked_transient" : undefined;
-      const governed = refillClosed || phaseBound || apiWindow ? undefined : checkDispatchGovernors(deps, dailyCostCeilingUsd);
+      const governed = refillClosed || phaseBound || apiWindow ? undefined :
+        timing.probe("checkDispatchGovernors", () => checkDispatchGovernors(deps, dailyCostCeilingUsd));
       const memoryPressure = governed?.kind === "queue" && governed.result.measuredBound === 0
         ? governed.result.pressure : undefined;
       const governorReason = memoryPressure
         ? `governor: memory ${memoryPressure.tier} (${memoryPressure.binding}): ${memoryPressure.availableMib} MiB available, floor ${memoryPressure.floorMib} MiB`
         : governed ? `governor: ${governed.kind}` : undefined;
-      const stopped = deps.checkStop?.();
-      const paused = deps.checkPause?.();
+      const stopped = timing.probe("checkStop", () => deps.checkStop?.());
+      const paused = timing.probe("checkPause", () => deps.checkPause?.());
       // W1-T5083: the same restart decision the top of tick asks; a sibling lane in flight makes it busy.
-      const freshness = refillClosed || phaseBound || apiWindow ? undefined : freshnessReadsAsync ? settledFreshness : (checkFreshness?.() as DaemonFreshness | undefined);
+      const freshness = refillClosed || phaseBound || apiWindow ? undefined : freshnessReadsAsync ? settledFreshness :
+        timing.probe("checkFreshness", () => checkFreshness?.() as DaemonFreshness | undefined);
       if (!freshnessReadsAsync) logNotStaleFreshness(freshness);
       const freshnessAction = freshness?.stale ? decideFreshness(freshness, inFlightTasks.size) : undefined;
       // W1-T9089: a restart decided here holds only the refills that would not run as a child.
@@ -9116,16 +9225,18 @@ export async function runDaemon(
         (grow && restartDecided ? "stale code: a restart was decided" : undefined) ??
         phaseBound ??
         (opts.max !== undefined && attempted.length >= opts.max ? "max reached" : undefined) ??
-        holdWorkerAdmission("lane-refill")?.reason ??
+        timing.probe("holdWorkerAdmission", () => holdWorkerAdmission("lane-refill"))?.reason ??
         (stopped ? `stop: ${stopped}` : undefined) ??
         (paused ? `pause: ${paused}` : undefined) ??
         apiWindow ??
         governorReason ??
-        (enforcedLaneTarget(inFlightTasks.size, deps.readQueueAdmission?.()?.wipLimit) <= inFlightTasks.size ? "lane target" : undefined);
+        (enforcedLaneTarget(inFlightTasks.size, timing.probe("readQueueAdmission", () => deps.readQueueAdmission?.())?.wipLimit) <= inFlightTasks.size ? "lane target" : undefined);
       // 2026-10-12 09:00: one container-short WIP reading held lane 2 for good while two siblings ran on past the hour.
       // A governor reading is re-taken each tick and an API-window hold lapses, so a lane held by either one parks.
-      if (reason !== undefined && (reason === apiWindow || reason === governorReason || reason === "lane target") && inFlightTasks.size > 0)
+      if (reason !== undefined && (reason === apiWindow || reason === governorReason || reason === "lane target") && inFlightTasks.size > 0) {
+        timing.write();
         return grow ? holdGrow(lane, reason) : parkLane(lane, finished!, reason, phaseAgeMs);
+      }
       // W1-T5805: the refill decides on its OWN branch read, never the tick's: a branch pushed since the
       // tick began must refuse its task here. A failed read decides on the tick-start reading instead.
       const chooseRefill = (runBranchListing: string | undefined): Task | undefined | Promise<Task | undefined> => {
@@ -9139,17 +9250,19 @@ export async function runDaemon(
         const decide = (snapshot: { plan: Plan; isMerged: MergedSet }, live: Awaited<ReturnType<typeof prefetchLive>> | undefined,
           closedRows: string | undefined): void => {
           let openPrCount: number | undefined;
-          try { openPrCount = deps.openPrCount?.(); } catch (e) { boardUnreadable = true; throw e; }
-          const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount, queueAdmission: deps.readQueueAdmission?.() });
+          try { openPrCount = timing.probe("openPrCount", () => deps.openPrCount?.()); } catch (e) { boardUnreadable = true; throw e; }
+          const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount,
+            queueAdmission: timing.probe("readQueueAdmission", () => deps.readQueueAdmission?.()) });
           const runBranchState = runBranchStateFrom(
-            runBranchListing, readRunBranchEvidence(), resumableHandoffs,
+            runBranchListing, timing.probe("readRunBranchEvidence", readRunBranchEvidence), resumableHandoffs,
             lazyClosedUnmerged(closedRows === undefined ? undefined : () => closedRows),
           );
-          const selection = captureDispatchFrontier(snapshot.plan, {
+          const limit = budget > inFlightTasks.size ? laneCount : 0;
+          const pass = timing.selectionInputs(snapshot.plan, snapshot.isMerged, limit, {
             ...dispatchOpts,
             ...runBranchDispatchOpts(runBranchState, planOnlyReceiptsThisTick, log, reportedRunBranchReleases),
             readLiveState: liveStateLogged(live),
-            dispatchValueContext: deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged),
+            dispatchValueContext: timing.probe("buildDispatchValueContext", () => deps.buildDispatchValueContext?.(snapshot.plan, snapshot.isMerged)),
             machineShare: machineShareFor(snapshot.plan, tickMachineShareRows, phaseStarts),
             // Re-read at each refill: a lane that settled since the tick began may have written or spent a receipt.
             resumableTaskIds: new Set(resumableHandoffs.keys()),
@@ -9160,17 +9273,20 @@ export async function runDaemon(
             onPassedOver: observePassedOver("lane-refill"),
             onDeferredForPriority: (d) => { refillDeferrals.push(d); logPriorityDeferral(d); },
           });
-          const pool = runnableCandidates(snapshot.plan, snapshot.isMerged, budget > inFlightTasks.size ? laneCount : 0, selection.opts);
+          const selection = captureDispatchFrontier(snapshot.plan, pass.opts);
+          const pool = runnableCandidates(snapshot.plan, pass.isMerged, limit, selection.opts);
+          pass.finish();
           forgetPassedOver(snapshot.plan, pool);
           refillEligible = selection.eligible;
           refillContext = selection.context;
-          const fits = partitionByFileOverlap([...inFlightTasks, ...refillProposals, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE);
+          const fits = timing.probe("partitionByFileOverlap", () =>
+            partitionByFileOverlap([...inFlightTasks, ...refillProposals, ...pool], deps.observedByTask ?? NO_OBSERVED_SCOPE));
           // The same row the tick path writes, for pool tasks only: an occupied lane's own deferral is not a refill's.
           const poolIds = new Set(pool.map((t) => t.id));
           for (const d of fits.serialized) if (poolIds.has(d.task)) log("dispatch.serialized", serializedLedgerPayload(d));
           const candidates = fits.dispatch.filter((t) => !inFlightTasks.has(t) && !refillProposals.has(t));
           if (restartDecided && !refillClosed) {
-            next = candidates.find(runsAsChild);
+            next = timing.probe("runsAsChild", () => candidates.find(runsAsChild));
             heldForRestart = !next && candidates.length > 0;
           } else next = candidates[0];
           if (next) nextSnapshot = snapshot;
@@ -9181,7 +9297,7 @@ export async function runDaemon(
         // W1-T14233: only a promised closed-PR read makes a refill wait.
         const decideWithClosed = (snapshot: { plan: Plan; isMerged: MergedSet },
           live?: Awaited<ReturnType<typeof prefetchLive>>): void | Promise<void> => {
-          const closed = readClosedRowsFor("lane-refill", runBranchListing, snapshot.plan, snapshot.isMerged);
+          const closed = readClosedRowsFor(timing, "lane-refill", runBranchListing, snapshot.plan, snapshot.isMerged);
           if (closed instanceof Promise) return closed.then((rows) => decide(snapshot, live, rows));
           decide(snapshot, live, closed);
         };
@@ -9193,20 +9309,25 @@ export async function runDaemon(
           return conclude();
         };
         const decideLive = (refillPlan: Plan, isMerged: MergedSet): Promise<Task | undefined> =>
-          prefetchLive(refillPlan, isMerged).then((live) => decideWithClosed({ plan: refillPlan, isMerged }, live))
+          prefetchLive(timing, refillPlan, isMerged).then((live) => decideWithClosed({ plan: refillPlan, isMerged }, live))
             .then(conclude, (e) => { readFailed(e); return conclude(); });
         const conclude = (): Task | undefined | Promise<Task | undefined> => {
-          if (boardUnreadable && inFlightTasks.size > 0) return grow ? holdGrow(lane, reason!) : parkLane(lane, finished!, reason!, phaseAgeMs);
+          if (boardUnreadable && inFlightTasks.size > 0) {
+            timing.write();
+            return grow ? holdGrow(lane, reason!) : parkLane(lane, finished!, reason!, phaseAgeMs);
+          }
           laneParkedFor.delete(lane);
           // W1-T6274: the reads above are awaited; a restart, stop or pause decided meanwhile still holds the lane.
           if (next) {
             const latched = refillClosed ?? (restartDecided && (grow || !runsAsChild(next)) ? "stale code" : undefined) ??
-              (deps.checkStop?.() ? "stop" : undefined) ?? (deps.checkPause?.() ? "pause" : undefined);
+              (timing.probe("checkStop", () => deps.checkStop?.()) ? "stop" : undefined) ??
+              (timing.probe("checkPause", () => deps.checkPause?.()) ? "pause" : undefined);
             if (latched !== undefined) {
               reason = `${latched} (decided while the refill read was in flight)`;
               next = undefined;
             }
           }
+          timing.write();
           if (!next) {
             const heldReason = reason ?? (heldForRestart ? "stale code: no candidate runs as a child" : refillDeferrals.length > 0
               ? `priority reservation: ${refillDeferrals.map((d) => `${d.task.id} deferred for waiting ${d.waiting.id}`).join(", ")}`
@@ -9230,12 +9351,12 @@ export async function runDaemon(
         };
         const decideFromPlan = (): Task | undefined | Promise<Task | undefined> => {
           try {
-            const refillPlan = deps.readOpsTaskDispatch ? captureOpsDispatchPlan(plan).plan : plan;
+            const refillPlan = deps.readOpsTaskDispatch ? timing.probe("captureOpsDispatchPlan", () => captureOpsDispatchPlan(plan).plan) : plan;
             // W1-T5846: with the async port wired the merged set is read through it, never `refreshMerged`, whose
             // stale-generation fallback (W1-T5762) is a synchronous live read on the event loop. Only a deps
             // object that supplies no async port keeps the synchronous read, and its refill stays synchronous.
             if (deps.refreshMergedAsync) {
-              return deps.refreshMergedAsync(refillPlan).then(
+              return timing.probe("refreshMerged", () => deps.refreshMergedAsync!(refillPlan)).then(
                 (isMerged) => {
                   if (deps.readLiveState) return decideLive(refillPlan, isMerged);
                   return decideThenConclude({ plan: refillPlan, isMerged });
@@ -9243,7 +9364,7 @@ export async function runDaemon(
                 (e) => { readFailed(e); return conclude(); },
               );
             }
-            const isMerged = deps.refreshMerged(refillPlan);
+            const isMerged = timing.probe("refreshMerged", () => deps.refreshMerged(refillPlan));
             if (deps.readLiveState) return decideLive(refillPlan, isMerged);
             return decideThenConclude({ plan: refillPlan, isMerged });
           } catch (e) {
@@ -9254,9 +9375,9 @@ export async function runDaemon(
         };
         if (reason !== undefined) return conclude();
         // W1-T7743: the reload is awaited (its git runs off the loop); a deps object with no reloader stays synchronous.
-        return deps.reloadPlan ? reloadPlanBinding().then(decideFromPlan) : decideFromPlan();
+        return deps.reloadPlan ? timing.probe("reloadPlan", reloadPlanBinding).then(decideFromPlan) : decideFromPlan();
       };
-      const runBranchRead = reason === undefined ? readRunBranchesFor("lane-refill", tickRunBranchListing) : undefined;
+      const runBranchRead = reason === undefined ? readRunBranchesFor(timing, "lane-refill", tickRunBranchListing) : undefined;
       return runBranchRead instanceof Promise ? runBranchRead.then(chooseRefill) : chooseRefill(runBranchRead);
     };
     // W1-T5308: a restart decided while lanes run is read on the dispatch tick; it releases child lanes, never yields one.

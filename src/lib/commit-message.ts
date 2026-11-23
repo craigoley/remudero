@@ -1,12 +1,13 @@
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
 import { join } from "node:path";
 import {
   type OperatorMessageSlot,
 } from "./operator-message.js";
 import {
-  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, typecheckEnv, typecheckPeakBytes,
+  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, measuredTypecheckInvocation,
+  measuredTypecheckResult, recordTypecheckPeak, typecheckEnv, typecheckPeakBytes, type TypecheckObservation,
 } from "./typecheck-buildinfo.js";
-import { dirIsWritable, prepareTypecheckRun } from "./typecheck-run.js";
+import { dirIsWritable, prepareTypecheckRun, typecheckPeakWriter } from "./typecheck-run.js";
 import { admitStaticWork, readMemoryHeadroom, type StaticAdmission, type TestSlotOptions } from "./test-slot.js";
 import { observeSynchronousPreflightPhase, type PreflightPhaseReporter } from "./preflight-phase-progress.js";
 
@@ -409,6 +410,7 @@ export type PreflightSpawn = (
      * here parse captured stdout as data, which streaming would break. Why: docs/forensics/commit-message.md.
      */
     stream?: boolean;
+    measureTypecheck?: boolean;
   },
 ) => {
   status: number | null;
@@ -424,6 +426,7 @@ export type PreflightSpawn = (
    * {@link spawnFailureDetail} reports it first. Why: archived in docs/forensics/commit-message.md.
    */
   signal?: string;
+  observation?: TypecheckObservation;
 };
 
 // `spawnSync`'s 1MB default `maxBuffer` kills an oversized step (ENOBUFS) as a bare, unexplained
@@ -439,15 +442,15 @@ const SELF_SYNC_GUARD_ENV_NAME = "RMD_SELF_SYNC_DONE";
 export function defaultPreflightSpawn(
   file: string,
   args: string[],
-  opts: { cwd?: string; input?: string; stream?: boolean; env?: NodeJS.ProcessEnv } = {},
-): { status: number | null; stdout: string; stderr: string; error?: string; signal?: string } {
+  opts: NonNullable<Parameters<PreflightSpawn>[2]> = {},
+): ReturnType<PreflightSpawn> {
   // Merged OVER `process.env`, never replacing it: a bare `env` would drop PATH, HOME and toolchain pins.
   const env = { ...process.env, ...opts.env };
   // Unconditionally scrubbed: every child here is a build/test process, never a re-exec of
   // `rmd` itself, so an inherited `RMD_SELF_SYNC_DONE` has no meaning and once crossed into a
   // spawned child, turning 45 unrelated tests red. Why: archived in docs/forensics/commit-message.md.
   delete env[SELF_SYNC_GUARD_ENV_NAME];
-  const res = spawnSync(file, args, {
+  const options: SpawnSyncOptionsWithStringEncoding = {
     cwd: opts.cwd,
     input: opts.input,
     env,
@@ -464,8 +467,12 @@ export function defaultPreflightSpawn(
     // So an inherited run in a real terminal prints per-test spec lines live, and the
     // coverage step (which passes `--test-reporter=spec --test-reporter-destination=stdout`
     // explicitly) streams its per-file lines in either case. No reporter flag changes here.
-    ...(opts.stream ? { stdio: ["pipe", "inherit", "inherit"] as const } : {}),
-  });
+    stdio: opts.stream ? ["pipe", "inherit", "inherit"] : undefined,
+  };
+  const command = opts.measureTypecheck ? measuredTypecheckInvocation(file, args, options) : { file, args, options };
+  const result = spawnSync(command.file, command.args, command.options);
+  const observed = opts.measureTypecheck ? measuredTypecheckResult(result) : undefined;
+  const res = observed ?? result;
   return {
     status: res.status,
     stdout: res.stdout ?? "",
@@ -474,6 +481,7 @@ export function defaultPreflightSpawn(
     // `spawnSync` types this `NodeJS.Signals | null`; normalised to `undefined` so it reads the
     // same way as `error` above — absent means absent, never a null a caller has to special-case.
     signal: res.signal ?? undefined,
+    ...(observed ? { observation: observed.observation } : {}),
   };
 }
 
@@ -581,12 +589,18 @@ export function typecheckStep(
   try {
     const tsc = join(repoRoot, "node_modules", ".bin", "tsc");
     const prepared = prepareTypecheckRun(repoRoot, canWrite);
-    const peak = typecheckPeakBytes(hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(repoRoot)));
+    const warm = hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(repoRoot));
+    const peak = typecheckPeakBytes(warm);
     // W1-T9951: a tsc is a memory cost, admitted by headroom alone — never behind a suite ticket or slot. W1-T14153: warm too.
     slot = admitStaticWork("typecheck:preflight", { memoryBytes: peak, ...testSlot });
     if (!slot.executionAllowed) return { name: "typecheck", ok: false, detail: `typecheck: NOT_RUN (${slot.note})` };
     const tight = lowMemoryTypecheckArgs((testSlot.memoryHeadroom ?? readMemoryHeadroom)(), peak);
-    const res = spawn(tsc, [...prepared.args, ...tight], { cwd: repoRoot, env: typecheckEnv(process.env) });
+    let res: ReturnType<PreflightSpawn> | undefined;
+    try {
+      res = spawn(tsc, [...prepared.args, ...tight], { cwd: repoRoot, env: typecheckEnv(process.env), measureTypecheck: true });
+    } finally {
+      recordTypecheckPeak(typecheckPeakWriter(repoRoot), "preflight", warm, res?.observation, res && `${res.stdout}\n${res.stderr}`);
+    }
     const spawnFailed = spawnFailureDetail("typecheck", res);
     if (spawnFailed) return { name: "typecheck", ok: false, detail: spawnFailed };
     const ok = res.status === 0;

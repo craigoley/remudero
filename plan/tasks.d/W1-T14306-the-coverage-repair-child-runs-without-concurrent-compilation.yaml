@@ -13,7 +13,7 @@
   files:
     - scripts/test-with-retry.mjs
     - test/ci/suites/the-coverage-repair-child-runs-without-concurrent-compilation.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     READ at origin/main 8923f5635 (2026-11-22). Left open by #20139.

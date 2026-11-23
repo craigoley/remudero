@@ -152,7 +152,7 @@ export { readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync };
 import { tsImport } from "tsx/esm/api";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import { createIndexedLifetimeAccounting, tallyAuditedLifetimeDispatches, type LifetimeIndexFailure } from "./lib/lifetime-identity-index.js";
-import { defaultCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
+import { defaultCreditOverridePath, planCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
   type CreditOverrideRow, type CreditReadState, type CreditStore } from "./lib/status.js";
 import type { DependencyMergeEvidence } from "./lib/plan.js";
 export { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
@@ -434,6 +434,7 @@ import { buildWorkerEnv, billingMode, readBinaryPin, type BillingMode, type Bina
 import { bodyVsDiffContractLines, commitMessageContractLines, renderAnchorBlock } from "./lib/compaction.js";
 import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "./lib/unfinished-checkpoint.js";
 import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, type PreopenGateResult } from "./lib/preopen-gate.js";
+import { readPreopenGateRows } from "./lib/preopen-gate-health.js";
 import { createGateSandboxMetrics } from "./lib/gate-sandbox-metrics.js";
 import { composeRealDeps, realReviewWorktreeAsync, type ComposedRealGraph, type ReviewWorktreeDeps } from "./lib/composition-root.js";
 export type { ReviewWorktreeDeps } from "./lib/composition-root.js";
@@ -641,7 +642,7 @@ import { readRestartHistoryLines, type RetroCheckCompanions, type RetroReadProje
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { ReviewerWorktreeLeasedError, withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
-import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, claimHealedDeathEscalation, evaluateReviewerHealth, gitIn, healedChildDiedBeforeJudging, healedChildLedgerMark, healedChildStartedJudging, readReviewerHealthRows, reviewerHealedChildDiedEscalation, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerRegressionEscalation, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
+import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, claimHealedDeathEscalation, evaluateReviewerHealth, gitIn, healedChildDiedBeforeJudging, healedChildLedgerMark, healedChildStartedJudging, noteHealedTreeOutcome, readReviewerHealthRows, reviewerHealedChildDiedEscalation, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
 import {
   REVIEW_CALIBRATION_CASE_STEP, REVIEW_CALIBRATION_RESULT_STEP, calibrationPorts, scoreReviewersAgainstKnownAnswers, type ReviewerCalibrationPorts,
 } from "./lib/reviewer-calibration.js";
@@ -1404,7 +1405,7 @@ import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, pairedPilotReportVie
   type PairedTrialInput } from "./lib/paired-trial.js";
 import { prospectiveAaCommand, runProspectiveAa, runProspectiveAaPair } from "./lib/benchmark-aa-prospective.js";
 import { codexBalancedTrialCommand, registerCodexBalancedTrial } from "./lib/codex-balanced-trial.js";
-import { evaluateStagedSkillDraft, skillEvalCommand, skillEvalProductionInput } from "./lib/skill-eval-command.js";
+import { evaluateStagedSkillDraft, skillEvalCommand, skillEvalProductionInput, skillEvalStack } from "./lib/skill-eval-command.js";
 import { autoEvaluateSkillDrafts, reportSkillEvalAuto } from "./lib/skill-eval-auto.js";
 import { proceduresCommand, proceduresProductionInput } from "./lib/procedures-command.js";
 import { readOnlyInspectionCommand } from "./lib/read-only-inspection.js";
@@ -1453,7 +1454,7 @@ import {
 } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, VERDICT_OUTCOME_STEP, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
-import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningHandFixInput, ciLearningLookbackDays, type HandFixInput, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningFromPlan, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
+import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningHandFixInput, ciLearningLookbackDays, type HandFixInput, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningFromPlan, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type CreditedMergedIds, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
 import {
   routedModelIdsFromCheckout,
   watchSuccessorModels,
@@ -1551,6 +1552,7 @@ import {
 } from "./lib/task-linter.js";
 import { readPriorRefusal, preDispatchContractRevision, writePriorRefusal, repairRefusedTask, type RefusalViolation } from "./lib/dispatch-repair.js";
 import { REPLAY_CORPUS_BOUND, ReplayDispatch, boundedCorpus, harnessRunnerOver, replayOptIn,
+  modelReplayCommand, readGoldenReplayLedger, readGoldenReplayResults, sealedModelReplayDispatcher, type ModelReplayInput,
   pairedReviewerReplayCommand, replayPairedReviews, type ReviewerReplayCommandInput } from "./lib/replay-harness.js";
 import { judgeInstanceLiveness, readLivenessRows, LIVENESS_WINDOW_MS } from "./lib/fleet-liveness.js";
 import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, type GoldenTask } from "./lib/replay.js";
@@ -2477,7 +2479,6 @@ export function buildReviewerHealthRoute(
     appendLedger(ledgerPath, { run_id: runId, task_id: "REVIEWER-HEALTH", step, lane: "review", ...extra });
   const { cut, remove } = healedReviewerTreeTools(repoDir, tree.worktreeRoot,
     (prefix, sha) => prepareFreshOriginMainTree(repoDir, tree, prefix, sha));
-  const escalatedConflicts = new Set<string>();
   return async (prArg, rest, reviewDeps, normal) => {
     // An unreadable origin/main still ingests; no current reviewer is judged this call.
     const originMainSha = await git(["rev-parse", "origin/main"]).then((text) => text.trim(), () => null);
@@ -2487,18 +2488,14 @@ export function buildReviewerHealthRoute(
     // A healed tree built from a PR's head never reviews that same PR: the revert-built tree judges it.
     const withPr = decision.withPr !== null && String(decision.withPr) !== prArg ? decision.withPr : undefined;
     const healed = await buildHealedReviewerTree(repoDir, incident.offending!.sha, cut, remove, withPr === undefined ? {} : { withPr });
+    // W1-T13393: the outcome is recorded on the incident, and its first conflict escalated, once per incident.
+    await noteHealedTreeOutcome(statePath, incident, healed, escalation, log, systemClock);
     if (healed.state === "empty") {
       log("reviewer.healed_patch_empty", { incident_id: incident.id, origin_main_sha: healed.originMainSha, pr: prArg });
       return normal();
     }
     if (healed.state !== "ready") {
       log("reviewer.healed_tree_unavailable", { incident_id: incident.id, pr: prArg, ...reviewerHealedTreeUnavailableFields(healed) });
-      const key = `${incident.id}:${healed.originMainSha}`;
-      if (healed.state === "conflict" && !escalatedConflicts.has(key)) {
-        escalatedConflicts.add(key);
-        // tryEscalateAsync never rejects; a failed filing is ledgered as escalation.failed.
-        await tryEscalateAsync(reviewerRegressionEscalation(incident, healed), escalation);
-      }
       return normal();
     }
     const childArgs = [...rest, ...reviewOptionFlags(reviewDeps), JUDGE_AT_OWN_START_FLAG];
@@ -10946,7 +10943,44 @@ async function runTask(
   taskId: string,
   opts: Parameters<typeof runTaskFromModule>[1] = {},
 ): Promise<RunResult> {
-  return runTaskFromModule(taskId, opts, runTaskCommandHost());
+  const { options, host } = consoleParityPrOpenGuard(opts, runTaskCommandHost());
+  return runTaskFromModule(taskId, options, host);
+}
+
+function consoleParityPrOpenGuard(opts: NonNullable<Parameters<typeof runTaskFromModule>[1]>, host: RunTaskCommandHost) {
+  if (opts.spawn !== undefined && opts.preopenGate === undefined) {
+    return { options: opts, host };
+  }
+
+  const gate = opts.preopenGate ?? ((cwd: string) => {
+    const stateDir = dirname(ledgerPathFor(opts.config ?? loadConfig()));
+    return runPreopenGate(cwd, { history: { stateDir, readRows: () => readPreopenGateRows(stateDir) } });
+  });
+  let parityRefusal: { cwd: string; detail: string } | undefined;
+  const options: typeof opts = {
+    ...opts,
+    preopenGate: async cwd => {
+      const result = await gate(cwd);
+      const detail = result.kind === "fail" && result.failedSteps.includes("ci-checks:console-parity")
+        ? result.failedDetail?.["ci-checks:console-parity"] : undefined;
+      parityRefusal = detail && /^UNMAPPED — neither a console route nor a CLI_ONLY reason /m.test(detail)
+        ? { cwd, detail } : undefined;
+      return result;
+    },
+  };
+  const guardedHost: RunTaskCommandHost = {
+    ...host,
+    runGhPrCreate: (create, branch, log, say, ...ports) => {
+      // The implementation retry has already run. A measured parity red would send this PR to the fix lane.
+      if (parityRefusal?.cwd === create.options.cwd) {
+        log("pr.open_refused", { branch, refusal_class: "console-parity-unmapped", reason: parityRefusal.detail });
+        say(`PR open refused for ${branch} because console parity still reports unmapped commands`);
+        return {};
+      }
+      return host.runGhPrCreate(create, branch, log, say, ...ports);
+    },
+  };
+  return { options, host: guardedHost };
 }
 
 /** Release the run's task lock after unwinding, retaining attribution for a recycle handoff. */
@@ -13978,6 +14012,7 @@ export interface ReplayGoldensDeps {
   /** The spend-bearing seam. Absent means the verb REFUSES rather than falling back to a real
    *  dispatch: there is no default worth having here, because the wrong default costs money. */
   dispatch?: ReplayDispatch;
+  modelReplay?: ModelReplayInput;
   goldens?: readonly GoldenTask[];
   writeLedger?: typeof appendLedger;
   now?: () => number;
@@ -13996,8 +14031,8 @@ export async function benchmarkReviewerReplayCommand(rest: string[], deps: Parti
 }
 
 /**
- * `rmd replay-goldens --confirm-spend [--limit N] [--ledger <path>]` -- W1-T2689's PRODUCTION
- * CALLER, the piece the golden-replay leg was missing.
+ * `rmd replay-goldens` uses the recorded corpus with `--models`. The seeded path below is the
+ * W1-T2689 caller for the original golden-replay leg.
  *
  * This is the only process that drives {@link replayGoldens} outside a test, which is the whole
  * point of the task: the driver, the seam, the corpus, the emitter and retro.ts's consumer were all
@@ -14019,6 +14054,9 @@ export async function benchmarkReviewerReplayCommand(rest: string[], deps: Parti
  */
 export async function replayGoldensCommand(rest: string[], deps: ReplayGoldensDeps = {}): Promise<number> {
   const log = deps.log ?? ((m: string) => console.error(m));
+  if (rest.some((arg) => arg === "--models" || arg.startsWith("--models="))) {
+    return modelReplayCommand(rest, { ...(deps.modelReplay ?? modelReplayProductionInput()), log });
+  }
 
   const optIn = replayOptIn(rest);
   if (!optIn.enabled) {
@@ -14061,6 +14099,36 @@ export async function replayGoldensCommand(rest: string[], deps: ReplayGoldensDe
   const rate = replayPassRate(results);
   log(`replay-goldens: ${rate.passed}/${rate.total} golden(s) passed; ${results.length} line(s) recorded to ${ledgerPath} (run ${runId}).`);
   return results.every((r) => r.passed) ? 0 : 1;
+}
+
+function sealedAttemptClockBound(workerAbandonMs?: number): number {
+  return workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon;
+}
+
+function modelReplayProductionInput(): ModelReplayInput {
+  let loaded: Config | undefined;
+  const config = () => (loaded ??= loadConfig());
+  const stateDir = () => join(config().root, "state");
+  return {
+    loadMounts: () => loadMounts(mountsPath(repoRoot)),
+    loadPlanTasks: () => loadPlan(join(repoRoot, "plan", "tasks.yaml")).tasks,
+    readCorpusRows: () => readGoldenReplayLedger(stateDir(), ["review.posted", "verdict.merged", "verdict"]),
+    readResults: readGoldenReplayResults,
+    readIdle: async () => {
+      const root = stateDir();
+      const now = systemClock.now();
+      const instance = { name: "operator-golden-replay", repo: "operator/golden-replay", stateDir: root };
+      const liveness = judgeInstanceLiveness(instance, readLivenessRows(instance, now - LIVENESS_WINDOW_MS), now);
+      if (liveness.state !== "up" || !liveness.quiet) return { liveness };
+      return { liveness, headroom: await readUsageSnapshotPreferSdk(config()) };
+    },
+    dispatcherFor: (task, item) => {
+      const pins = deriveRuntimePins({ harnessRevision: workerBoundaryStack.harnessRevision, installRoot: resolveInstallRoot(config()) });
+      return sealedModelReplayDispatcher({ task, config: config(), repoDir: join(config().root, "repos", task.repo),
+        clockBoundMs: sealedAttemptClockBound() }, item,
+      (model, effort) => skillEvalStack(pins, { provider: "codex", model, effort }));
+    },
+  };
 }
 
 /** Offline, side-effect-free risk-judge disposition replay. It never uses the production routing
@@ -19076,7 +19144,7 @@ export function creditProjectionWithReadState(
   creditBuilder: typeof buildCreditCandidates = buildCreditCandidates,
   github?: GitHub,
   catalogPlan?: Plan,
-): { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string>; windowShort?: readonly string[] } {
+): { ids: Set<string>; unknownReason?: string; boardFloor?: string; unreadPrIds?: Set<string>; windowShort?: readonly string[]; requeue?: RevertedRequeue[] } {
   const config = configOverride ?? loadConfig();
   const ledgerPath = ledgerPathFor(config);
   // No ledger means no positive merge-credit evidence. Return an empty projection rather than
@@ -19085,12 +19153,17 @@ export function creditProjectionWithReadState(
   const self = resolveOwnerRepo();
   const plan = catalogPlan ?? loadPlan(join(checkoutRoot, "plan", "tasks.yaml"));
   const gateway = github ?? buildBatchedGithub(self.owner, self.repo);
-  const candidates = creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway);
+  // W1-T14302: the remove-credit rows of this checkout's plan, and the shards whose standing credit is gone.
+  let lost: RevertedRequeue[] = [];
+  const candidates = creditBuilder(self.owner, self.repo, plan, ledgerPath, undefined, gateway, undefined, undefined,
+    { creditOverridePath: planCreditOverridePath(checkoutRoot) }, (projected) => { lost = revertedRequeues(projected.values()); });
   const reconcilable = candidates.filter(creditIsReconcilable);
   const ids = new Set(reconcilable.map((c) => c.taskId));
   const windowShort = candidates.filter((c) => c.merged === true && c.creditIsImplementation === undefined && c.creditHasBuildDiff === undefined && c.creditHasOtherBuildMerge !== true).map((c) => c.taskId).sort();
-  const projection = { ids, ...(windowShort.length > 0 ? { windowShort } : {}) };
   const state = gateway.readState?.();
+  // A failed or partial read re-queues nothing.
+  const wholeRead = state !== "failed" && !(state === "ok" && gateway.readTruncated?.());
+  const projection = { ids, ...(windowShort.length > 0 ? { windowShort } : {}), ...(lost.length > 0 && wholeRead ? { requeue: lost } : {}) };
   if (state === "failed") return { ...projection, unknownReason: gateway.readFailureReason?.() ?? "unknown" };
   if (state === "ok" && gateway.readTruncated?.()) {
     const coverage = gateway.readBoardCoverage?.();
@@ -19104,8 +19177,10 @@ export function creditProjectionWithReadState(
 }
 
 export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot = repoRoot,
-  creditBuilder: typeof buildCreditCandidates = buildCreditCandidates, catalogPlan?: Plan): Set<string> {
-  return creditProjectionWithReadState(configOverride, checkoutRoot, creditBuilder, undefined, catalogPlan).ids;
+  creditBuilder: typeof buildCreditCandidates = buildCreditCandidates, catalogPlan?: Plan): Set<string> & CreditedMergedIds {
+  const read = creditProjectionWithReadState(configOverride, checkoutRoot, creditBuilder, undefined, catalogPlan);
+  // W1-T14302: the re-queue rides the credited set, so the cadence reads both from this one projection.
+  return read.requeue ? Object.assign(read.ids, { requeue: read.requeue }) : read.ids;
 }
 
 /** W1-T3970: production's adapter keeps the cadence map testable without running the rest of the
@@ -19113,7 +19188,7 @@ export function defaultCreditedMergedIds(configOverride?: Config, checkoutRoot =
  * the same seams with a synthetic map and prove both the landed and fail-closed arms. */
 export interface PlanReconcileProductionInputOptions extends Omit<PlanReconcileCadenceInputOptions, "land" | "creditedMergedIds"> {
   land?: PlanReconcileLand;
-  creditedMergedIds: (plan?: Plan) => ReadonlySet<string>;
+  creditedMergedIds: (plan?: Plan) => CreditedMergedIds;
 }
 export interface CatalogPlanReconcileProductionInputOptions extends PlanReconcileProductionInputOptions {
   stateDir: string;
@@ -19141,6 +19216,7 @@ function buildPublicPlanReconcileInput(deps: PlanReconcileProductionInputOptions
       checkoutRoot: deps.checkoutRoot,
       readShards: deps.readShards,
       creditedMergedIds: deps.creditedMergedIds,
+      ...(deps.log ? { log: deps.log } : {}),
       land: landing.land,
     });
     return { ...cadence, settled: landing.settled };
@@ -19197,7 +19273,7 @@ async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProducti
     if (outcome !== "ok" && outcome !== "off") deps.log?.("plan.reconcile.unknown", { reason: `ops-${outcome}` });
   };
   reportUnknown(context.outcome);
-  let credited: ReadonlySet<string>;
+  let credited: CreditedMergedIds;
   try { credited = deps.creditedMergedIds(context.plan); }
   catch (error) { void error; deps.log?.("plan.reconcile.unknown", { reason: "credit-projection-unreadable" }); return undefined; }
   const publicInput = buildPublicPlanReconcileInput({ ...deps, creditedMergedIds: () => credited });
@@ -44535,9 +44611,9 @@ const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: "replay-goldens",
-    syntax: "rmd replay-goldens --confirm-spend --ledger <path> [--limit N]",
-    summary: "Replay the seeded goldens and record what the retro's Self-Harness leg reads.",
-    detail: "W1-T2689: the golden-replay leg shipped with a corpus, a seam, a driver, an emitter and a retro consumer, and NO production caller — so replayGoldens had zero callers outside tests and the Self-Harness leg has reported `no replay run recorded` since the day it shipped, by construction rather than by failure. This is that caller. UNLIKE EVERY OTHER RETRO RUNG IT SPENDS REAL MONEY: it dispatches workers against the sandbox, so it is opt-in per invocation (--confirm-spend, deliberately not an env var or config default, so a retro tick / CI job / test spawn cannot inherit it) and BOUNDED (REPLAY_CORPUS_BOUND, a declared ceiling boundedCorpus clamps to even against a larger --limit). --ledger is REQUIRED: a spend that records nothing is worse than one that never ran, and this verb refuses rather than guessing at a shared path. --limit 0 dispatches nothing and writes NOTHING, on purpose — retro.ts must still be able to render `no run recorded`, never a fabricated 0%. Exit 0 when every replayed golden matched its expectation, 1 when any regressed, 2 on any refusal.",
+    syntax: "rmd replay-goldens --confirm-spend --ledger <path> [--limit N] [--models a,b]",
+    summary: "Replay goldens and compare two Codex models on graded pairs.",
+    detail: "--models takes two distinct IDs from the Codex mount rows, such as gpt-6.1-sol,gpt-6.2-sol. While the fleet is quiet and measured headroom is available, each selected implement task gets one sealed attempt per model at its recorded merge base. The task's recorded proofs grade each local head. The command appends replay.result rows to the required --ledger and compares fully graded pairs across runs. --confirm-spend is required per invocation. --limit is capped at three tasks, and --limit 0 only reads the comparison in model mode. Without --models, the seeded path retains its dispatch-seam requirement. Exit 0 for passing attempts or an empty selection, 1 when any attempt fails or is unmeasurable, and 2 on refusal.",
   },
   {
     name: "skill-eval",
@@ -45014,7 +45090,7 @@ function commandSyntax(name: string): string {
 // (test/run-task.test.ts, test/install-symlink-refusal.test.ts, plus this file's own
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
-import { reconcilePlan, reconcileShardStatus, type ReconcileSummary } from "./lib/plan-reconcile.js";
+import { reconcilePlan, reconcileShardStatus, revertedRequeues, type RevertedRequeue, type ReconcileSummary } from "./lib/plan-reconcile.js";
 import { takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
@@ -45521,7 +45597,7 @@ export function benchmarkAaReadinessRuntime(stateDir: string, workerAbandonMs?: 
     loadPlanTasks: () => loadPlan(join(repoRoot, "plan", "tasks.yaml")).tasks,
     dispatcherFor: (task: Task) => sealedPairedAttemptDispatcher({ task, config, repoDir: join(config.root, "repos", task.repo),
       spawn: benchmarkNonDispatchSpawn("aa-prospective", spawnWorker), maxBudgetUsd: PAIRED_ATTEMPT_MAX_BUDGET_USD,
-      clockBoundMs: workerAbandonMs ?? loadDefaultPolicy().values.workerAbandon }),
+      clockBoundMs: sealedAttemptClockBound(workerAbandonMs) }),
     defaultInstanceRoots: () => registryInstanceRoots(stateDir, undefined, undefined, observer) };
 }
 

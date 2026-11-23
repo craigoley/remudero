@@ -99,7 +99,7 @@ import {
   bootSweepDispatchClaimsAsync, dispatchClaimRef, realBootSweepHostProbe, releaseLandedDispatchClaims, claimMintedByRerun,
   type BootSweepInputs, type DispatchClaimReserverAsync,
 } from "../../lib/dispatch-claim.js";
-import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
+import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, planCreditOverridePath, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
 import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs, type OpenPrView } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
 import { createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus } from "../../lib/daemon-memory-census.js";
@@ -931,7 +931,8 @@ export const OPS_DISPATCH_SOURCE_MAX_AGE_MS = 120_000;
 /** W1-T13052: the daemon refreshes on its own timer, so evidence stays younger than the bound between slow cycles. */
 export const OPS_DISPATCH_SOURCE_REFRESH_MS = 45_000;
 
-/** W1-T13705: one row per completed refresh, so an unreadable catalog says why. No URL, body or token reaches it. */
+/** W1-T13705: one row per completed refresh, so an unreadable catalog says why. No URL, body or token reaches it.
+ *  W1-T14374: it also carries the snapshot's shard and byte counts and, for a derived-bound refusal, the bound. */
 export const OPS_CATALOG_REFRESHED_STEP = "dispatch.ops_catalog_refreshed";
 
 export function opsCatalogShadowFeed(
@@ -956,6 +957,9 @@ export function opsCatalogShadowFeed(
       opts.log(OPS_CATALOG_REFRESHED_STEP, {
         outcome: input.outcome, refusal_stage: input.refusalStage ?? null, duration_ms: durationMs,
         kind: input.kind ?? null, http_status_class: input.httpStatusClass ?? null,
+        // W1-T14374: counts and the bound's three numbers; each is copied by name, so no other field of either reaches the row.
+        shards: input.counts?.shards ?? null, bytes: input.counts?.bytes ?? null,
+        bound: input.bound ? { reason: input.bound.reason, observed: input.bound.observed, allowed: input.bound.allowed } : null,
       });
     } catch {
       // A diagnostic row that cannot be written never changes the evidence the refresh produced.
@@ -1601,8 +1605,8 @@ export async function daemonCommand(
   if (!targetRecordWrite.written) log("daemon.target_record_failed", { reason: targetRecordWrite.reason });
   // W1-T12200: the host switch for new plan files. With no host file this writes no row and calls nothing.
   await bootPlanDestination(join(config.root, "state"), { owner: self.owner, repo: self.repo, checkoutDir: effectiveRepoRoot }, log);
-  const targetCommitTrailerIndex = () =>
-    buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot })();
+  // W1-T14302: the reader itself, not a wrapper, so the gateway also gets its revert read.
+  const targetCommitTrailerIndex = buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot });
   const gatewayFor = createDaemonGatewayFactory(config.root, log, {
     snapshotFor: boardSnapshotFor,
     trailerIndexFor: (o: string, r: string) => (o === target.owner && r === target.repo ? targetCommitTrailerIndex : undefined),
@@ -1667,6 +1671,7 @@ export async function daemonCommand(
     const proj = projectPlan(
       planOverride,
       { ledgerPath, github: projectionGithub, skipUncreditedBuildWarning: true,
+        creditOverridePath: planCreditOverridePath(targetCheckoutRoot),
         observeOpenPrCount: (rows) => { lastOpenRows = rows; boardOpenPrCount.observe(rows); } },
       statusPath,
     );

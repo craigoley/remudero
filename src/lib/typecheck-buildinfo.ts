@@ -16,6 +16,7 @@
  * A SEED CAN ONLY COST TIME, NEVER CHANGE A RESULT: tsc discards any cached entry whose hash, options or version differ.
  * Node builtins only, so it loads directly under Node's type stripping.
  */
+import type { SpawnSyncOptionsWithStringEncoding, SpawnSyncReturns } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -287,4 +288,156 @@ export function prepareWorktreeTypecheck(root: string): { args: string[]; buildI
   const buildInfo = worktreeBuildInfoPath(root);
   if (buildInfo === undefined) return { args: typecheckArgs(undefined), seed: "no-seed" };
   return { args: typecheckArgs(buildInfo), buildInfo, seed: seedFromCanonical(root, buildInfo) };
+}
+
+export type TypecheckEntry = "npm" | "preflight" | "merge-probe" | "bwrap";
+
+export interface TypecheckObservation {
+  peak?: number;
+  rechecked?: number;
+}
+
+export interface TypecheckPeakRow {
+  step: "typecheck.peak";
+  entry: TypecheckEntry;
+  warm: boolean;
+  peak_rss_bytes: number | "unknown";
+  rechecked_files?: number;
+}
+
+const RECHECKED_FILES = /^(?:Files rechecked|Rechecked files):[ \t]*(\d+)[ \t]*\r?$/im;
+const TYPECHECK_PEAK_MARKER = "\nrmd-typecheck-observation:";
+
+export function recordTypecheckPeak(
+  write: (row: TypecheckPeakRow) => void, entry: TypecheckEntry, warm: boolean,
+  observation?: TypecheckObservation, output = "",
+): void {
+  const peak = observation?.peak;
+  const rechecked = observation?.rechecked ?? Number(RECHECKED_FILES.exec(output)?.[1]);
+  const row: TypecheckPeakRow = {
+    step: "typecheck.peak", entry, warm,
+    peak_rss_bytes: peak !== undefined && Number.isSafeInteger(peak) && peak > 0 ? peak : "unknown",
+    ...(Number.isSafeInteger(rechecked) && rechecked >= 0 ? { rechecked_files: rechecked } : {}),
+  };
+  try {
+    write(row);
+  } catch (error) {
+    process.stderr.write(`typecheck: could not record peak: ${String(error)}\n`);
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (entry !== "bwrap" && (code === "EACCES" || code === "EPERM" || code === "EROFS")) {
+      // A Codex command has a read-only state mount. Its provider can record the bounded sample from command output.
+      process.stderr.write(`\nrmd-typecheck-peak:${JSON.stringify(row)}\n`);
+    }
+  }
+}
+
+// Keep this function self-contained: the same sampler runs in the observer subprocess.
+// TS 7's bin/tsc execs the native compiler, but the fleet's .bin/tsc shim also has a Node parent.
+export function readTypecheckRss(pid: number, read: (path: string, encoding: "utf8") => string): number | undefined {
+  const pending = [pid];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    try {
+      const status = read(`/proc/${current}/status`, "utf8");
+      if (/^Name:\s+tsc\s*$/m.test(status)) {
+        const bytes = Number(/^VmHWM:[ \t]+(\d+) kB$/m.exec(status)?.[1]) * 1024;
+        if (Number.isSafeInteger(bytes) && bytes > 0) return bytes;
+      }
+      const children = read(`/proc/${current}/task/${current}/children`, "utf8").match(/\d+/g) ?? [];
+      for (const child of children) pending.push(Number(child));
+    } catch {
+      // The process exited between reads, or procfs is hidden. Keep the previous valid sample.
+    }
+  }
+  return undefined;
+}
+
+export function watchTypecheckRss(pid: number | undefined): () => number | undefined {
+  if (process.platform !== "linux" || pid === undefined) return () => undefined;
+  let peak: number | undefined;
+  const timer = setInterval(() => { peak = readTypecheckRss(pid, readFileSync) ?? peak; }, 20);
+  return () => {
+    clearInterval(timer);
+    return peak;
+  };
+}
+
+const TYPECHECK_OBSERVER = String.raw`
+const { spawn } = require("node:child_process");
+const { readFileSync, writeSync } = require("node:fs");
+const { constants } = require("node:os");
+const readPeak = (${readTypecheckRss.toString()});
+const [mode, file, ...args] = process.argv.slice(1);
+const child = spawn(file, args, { stdio: [0, mode === "stream" ? "pipe" : 1, 2] });
+let peak, tail = "";
+child.stdout?.on("data", chunk => { tail = (tail + chunk.toString()).slice(-16384); });
+child.stdout?.pipe(process.stdout);
+const timer = process.platform === "linux" && child.pid !== undefined
+  ? setInterval(() => { peak = readPeak(child.pid, readFileSync) ?? peak; }, 20)
+  : undefined;
+const forwardTerm = () => child.kill("SIGTERM");
+const forwardInt = () => child.kill("SIGINT");
+process.on("SIGTERM", forwardTerm);
+process.on("SIGINT", forwardInt);
+let error;
+child.on("error", err => { error = err.message; });
+child.on("close", (status, signal) => {
+  clearInterval(timer);
+  const rechecked = Number(${RECHECKED_FILES}.exec(tail)?.[1]);
+  try {
+    writeSync(mode === "sandbox" ? 2 : 3, ${JSON.stringify(TYPECHECK_PEAK_MARKER)} +
+      JSON.stringify({ peak, rechecked: Number.isSafeInteger(rechecked) ? rechecked : undefined, error }) + "\n");
+  } catch {
+    // Losing the telemetry channel cannot change tsc's result.
+  }
+  process.off("SIGTERM", forwardTerm);
+  process.off("SIGINT", forwardInt);
+  if (signal) {
+    process.exitCode = 128 + constants.signals[signal];
+    process.kill(process.pid, signal);
+  } else process.exitCode = status ?? 127;
+});
+`;
+
+export function measuredTypecheckArgs(mode: "stream" | "capture" | "sandbox", file: string, args: readonly string[]): string[] {
+  return ["--input-type=commonjs", "-e", TYPECHECK_OBSERVER, "--", mode, file, ...args];
+}
+
+export function takeTypecheckObservation(stderr: string): {
+  stderr: string; observation?: TypecheckObservation & { error?: string };
+} {
+  const start = stderr.lastIndexOf(TYPECHECK_PEAK_MARKER);
+  if (start < 0 || !stderr.endsWith("\n")) return { stderr };
+  try {
+    const observation: unknown = JSON.parse(stderr.slice(start + TYPECHECK_PEAK_MARKER.length));
+    if (observation === null || typeof observation !== "object" || Array.isArray(observation)) return { stderr };
+    return { stderr: stderr.slice(0, start), observation };
+  } catch {
+    // A killed observer can leave a partial report. Preserve the original diagnostics.
+    return { stderr };
+  }
+}
+
+export function measuredTypecheckInvocation(
+  file: string, args: readonly string[], options: SpawnSyncOptionsWithStringEncoding, stream = false,
+): { file: string; args: string[]; options: SpawnSyncOptionsWithStringEncoding } {
+  const env = { ...options.env, RMD_TSC_ENTRY: "1" } as NodeJS.ProcessEnv;
+  // The observer pipes stdout to collect the summary. Carry the terminal's default color behavior.
+  if (stream && process.stdout.isTTY && env.TERM !== "dumb" && env.NO_COLOR === undefined && env.FORCE_COLOR === undefined) {
+    env.FORCE_COLOR = "1";
+  }
+  return {
+    file: process.execPath,
+    args: measuredTypecheckArgs(stream ? "stream" : "capture", file, args),
+    options: {
+      ...options, env,
+      stdio: stream ? ["inherit", "inherit", "inherit", "pipe"] : ["pipe", "pipe", "pipe", "pipe"],
+    },
+  };
+}
+
+export function measuredTypecheckResult(result: SpawnSyncReturns<string>) {
+  const { observation } = takeTypecheckObservation(result.output?.[3] ?? "");
+  const error = observation?.error ? new Error(observation.error) : result.error;
+  return { ...result, status: error ? null : result.status, error, observation };
 }

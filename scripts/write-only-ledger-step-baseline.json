@@ -1430,6 +1430,7 @@
   "recordOnly": {
     "config.randomised_finding": "An operator-facing finding naming the routing setting that can carry a randomised winner the mounts table cannot express; the config gardener re-reads it only to write each finding once per evidence day.",
     "config.randomised_recommendations_unread": "A diagnostic for a failed read of the randomised evidence; it records the error and changes no candidate.",
+    "dispatch.selection_timing": "Observability for W1-T13286: per-probe selection timing that an operator reads to pick the next speed fix; no decision reads it (invariant measuring-changes-no-decision).",
     "reviewer.health_save_superseded": "A diagnostic that an evaluation skipped its save because a newer health file was already on disk; the newer file is the state every reader uses, so nothing re-reads the row.",
     "reviewer.model_divergence": "An operator-facing record of each evaluation's per-model judgement; the incident state in reviewer-health.json carries the decision, so nothing re-reads the row.",
     "reviewer.model_divergence_closed": "An operator-facing record that a model-divergence incident closed and its issue was closed; the incident state carries the decision, so nothing re-reads the row.",
@@ -1440,10 +1441,11 @@
     "reviewer.model_divergence_issue_close_failed": "A diagnostic for a failed close of a model-divergence issue; it records the error and the issue URL for the operator.",
     "reviewer.model_divergence_opened": "An operator-facing record that a model-divergence incident opened with its issue; the incident state carries the decision, so nothing re-reads the row.",
     "reviewer.regression_blame_cleared": "An operator-facing record of why a reviewer-regression incident closed (the healed and regressed k/n and the offending sha); the closed incident in reviewer-health.json carries the decision, so nothing re-reads the row.",
-    "reviewer_tree.reaped": "A janitor's receipt from the retired reviewer-tree reaper: it names the trees it removed, the bytes freed and any tree kept for an unexpected reason, and nothing decides on it.",
+    "reviewer_tree.reaped": "An operator record of one reviewer-tree reaper pass: the trees it removed with their bytes, and the trees it kept for a reason an operator may need to act on. The reaper decides each pass from the disk and the tree leases, never from this row.",
     "sweep.fix.admission_release_failed": "A diagnostic for a failed release of a fix round's admission lock; the lock is left to the stale-holder check, and the row makes the leak visible.",
     "sweep.fix.deferred_to_live_round": "An operator-facing record that a new failure was handed to the live fix round instead of a second round; the hand-off file carries the decision, so nothing re-reads the row.",
     "sweep.fix.handoff_cleanup_failed": "A diagnostic for a hand-off file that could not be removed after its round ended; it records the error, and the stale file is ignored because its claim and round ids no longer match.",
-    "sweep.fix.handoff_unreadable": "A diagnostic for a hand-off file that could not be parsed; the round treats it as no hand-off and records the error."
+    "sweep.fix.handoff_unreadable": "A diagnostic for a hand-off file that could not be parsed; the round treats it as no hand-off and records the error.",
+    "plan.reconcile.reverted_requeue": "An audit row for each shard the plan reconcile re-queues after a revert or a remove-credit override; the landing PR and the projection carry the state, so nothing re-reads the row."
   }
 }

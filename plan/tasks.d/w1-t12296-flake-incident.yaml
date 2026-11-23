@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 2.5
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "flake-incident:test/shadow-comparisons-follow-the-view-owner.test.ts#shadow owner: native heavy worker accrues parity for unchanged values without promoting"
