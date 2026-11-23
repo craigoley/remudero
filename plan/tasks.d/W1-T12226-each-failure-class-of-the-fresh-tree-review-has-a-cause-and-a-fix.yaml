@@ -32,7 +32,8 @@
       proof: "grep: W1-T12226 criterion 2 in test/review/each-failure-class-of-the-fresh-tree-review-has-a-cause-and-a-fix.test.ts"
     - claim: "Each cause that the build classes as `defect` has its fix in the same pull request. The test of that cause fails when the fix is removed"
       proof: "grep: W1-T12226 criterion 3 in test/review/each-failure-class-of-the-fresh-tree-review-has-a-cause-and-a-fix.test.ts"
-    - claim: "A child that exits with code 1 because the verdict is not `success` writes `ended_as: verdict`. The gate returns the code of the child, as today"
+    - claim: "invariant:exit-codes-as-today — a child that exits with code 1 because the verdict is not `success` writes `ended_as: verdict`, and the gate returns the code of the child, as today"
+      kind: guard
       proof: "grep: W1-T12226 criterion 4 in test/review/each-failure-class-of-the-fresh-tree-review-has-a-cause-and-a-fix.test.ts"
     - claim: "The gate writes the class on the row"
       proof: "grep: ended_as in src/lib/run-child.ts"
