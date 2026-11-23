@@ -152,7 +152,12 @@ export interface BenchmarkCohortPassResult {
   checkpointWrittenBytes?: number;
   dueBecause?: string;
   passMs?: number;
+  /** W1-T14539: whether this pass joined the daily case-file snapshot, or why it did not. */
+  caseFileJoin?: CaseFileJoin;
 }
+
+/** W1-T14539: "joined", or the named reason a pass that reads the state snapshot ran without it. */
+export type CaseFileJoin = "joined" | "absent" | "unreadable" | "too-large" | "invalid";
 
 type ManifestEntry = { name: string; path: string; form: Form; size: number; mtimeMs: number };
 
@@ -1108,11 +1113,69 @@ function deriveSnapshot(
 export async function runBenchmarkCohortPass(
   stateDir: string,
   opts: { maxSources?: number; nowIso?: string; onLiveWatermark?: () => void;
-    onBeforeLivePrefixVerify?: () => void; onBeforeLiveCacheVerify?: () => void; caseFiles?: TaskCaseFile[] } = {},
+    onBeforeLivePrefixVerify?: () => void; onBeforeLiveCacheVerify?: () => void; caseFiles?: TaskCaseFile[];
+    caseFilesFromState?: boolean } = {},
 ): Promise<BenchmarkCohortPassResult> {
   const io: CheckpointIO = { checkpointReadBytes: 0, checkpointWrittenBytes: 0 };
-  const result = await cohortPass(stateDir, opts, io);
-  return { ...result, ...io };
+  // W1-T14539: every writer joins the same daily snapshot, so no pass erases a join another pass made.
+  const state = opts.caseFiles === undefined && opts.caseFilesFromState ? readStateCaseFiles(stateDir) : undefined;
+  const caseFiles = opts.caseFiles ?? (state && "files" in state ? state.files : undefined);
+  const result = await cohortPass(stateDir, { ...opts, caseFiles }, io);
+  return { ...result, ...io, ...(state ? { caseFileJoin: "files" in state ? "joined" as const : state.skip } : {}) };
+}
+
+/** W1-T14539: the case-file snapshot the daily Field Trials refresh writes beside the ledger. */
+export function stateCaseFileSnapshotPath(stateDir: string): string {
+  return join(stateDir, "field-trials", "case-files-latest.json");
+}
+
+/** Reads a bounded `task-case-file-v1` snapshot; throws ENOENT/EACCES/EPERM or a named TypeError. */
+export function loadCaseFileSnapshot(caseFilePath: string, beforeRead?: () => void): TaskCaseFile[] {
+  const maxBytes = 4 * 1024 * 1024;
+  const fd = openSync(caseFilePath, "r");
+  let text: string;
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile()) throw new TypeError("case-file-snapshot-not-a-file");
+    if (before.size > maxBytes) throw new TypeError("case-file-snapshot-too-large");
+    beforeRead?.();
+    const bytes = Buffer.allocUnsafe(before.size + 1);
+    let used = 0;
+    while (used < bytes.length) {
+      const read = readSync(fd, bytes, used, bytes.length - used, null);
+      if (read === 0) break;
+      used += read;
+    }
+    const after = fstatSync(fd);
+    if (used !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) {
+      throw new TypeError("case-file-snapshot-changed-during-read");
+    }
+    text = bytes.subarray(0, used).toString("utf8");
+  } finally { closeSync(fd); }
+  const parsed: unknown = JSON.parse(text);
+  if (!Array.isArray(parsed) || parsed.some((file) => {
+    const value = object(file);
+    return value === undefined || value.version !== "task-case-file-v1"
+      || typeof value.taskId !== "string" || typeof value.asOf !== "string";
+  })) {
+    throw new TypeError("case-file-snapshot-invalid");
+  }
+  return parsed as TaskCaseFile[];
+}
+
+/** The state snapshot, or the reason the pass runs without it. A bad snapshot never fails the pass. */
+export function readStateCaseFiles(stateDir: string): { files: TaskCaseFile[] } | { skip: Exclude<CaseFileJoin, "joined"> } {
+  try {
+    return { files: loadCaseFileSnapshot(stateCaseFileSnapshotPath(stateDir)) };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    if (code === "ENOENT") return { skip: "absent" };
+    if (error instanceof TypeError && error.message === "case-file-snapshot-too-large") return { skip: "too-large" };
+    if (code === "EACCES" || code === "EPERM" || code === "EISDIR"
+      || (error instanceof TypeError && (error.message === "case-file-snapshot-not-a-file"
+        || error.message === "case-file-snapshot-changed-during-read"))) return { skip: "unreadable" };
+    return { skip: "invalid" };
+  }
 }
 
 async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof runBenchmarkCohortPass>[1]>,
@@ -1297,6 +1360,8 @@ type BenchmarkCohortInputs = {
   config: string;
   sealed: string;
   live: { ino: number; size: number } | null;
+  /** W1-T14539: the case-file snapshot's identity, so a new daily snapshot makes a pass due. */
+  caseFiles: string;
 };
 
 function benchmarkCohortInputs(stateDir: string): BenchmarkCohortInputs | { error: string } {
@@ -1306,8 +1371,10 @@ function benchmarkCohortInputs(stateDir: string): BenchmarkCohortInputs | { erro
       const stat = statSync(entry.path);
       return [basename(entry.path), stat.size, stat.mtimeMs];
     });
+    const cases = statSync(stateCaseFileSnapshotPath(stateDir), { throwIfNoEntry: false });
     return { config: JSON.stringify([BENCHMARK_COHORT_VERSION, stateDir, BENCHMARK_COHORT_DAEMON_MAX_SOURCES]),
-      sealed: JSON.stringify(rotations), live: live ? { ino: live.ino, size: live.size } : null };
+      sealed: JSON.stringify(rotations), live: live ? { ino: live.ino, size: live.size } : null,
+      caseFiles: JSON.stringify(cases ? [cases.ino, cases.size, cases.mtimeMs] : null) };
   } catch (error) {
     return { error: String((error as Error)?.message ?? error) };
   }
@@ -1329,6 +1396,7 @@ export function benchmarkCohortCadence(deps: BenchmarkCohortCadenceDeps): Benchm
     if (!finishedInputs) return "boot";
     if (inputs.config !== finishedInputs.config) return "config";
     if (inputs.sealed !== finishedInputs.sealed) return "sealed_sources";
+    if (inputs.caseFiles !== finishedInputs.caseFiles) return "case_files";
     if (inputs.live?.ino !== finishedInputs.live?.ino) return "live_identity";
     if (inputs.live && finishedInputs.live && inputs.live.size < finishedInputs.live.size) return "live_shrank";
     return undefined;
@@ -1365,7 +1433,7 @@ export function benchmarkCohortCadence(deps: BenchmarkCohortCadenceDeps): Benchm
 
 const BENCHMARK_COHORT_WORKER_KIND = "benchmark-cohort-pass-v1" as const;
 type CohortWorkerData = { kind: typeof BENCHMARK_COHORT_WORKER_KIND; stateDir: string;
-  opts: { maxSources?: number; nowIso?: string } };
+  opts: { maxSources?: number; nowIso?: string; caseFilesFromState?: boolean } };
 type CohortWorkerReply = { ok: true; result: BenchmarkCohortPassResult } | { ok: false; error: string };
 
 /** W1-T9845: the daemon's pass runs in a one-shot worker. The checkpoint's read, parse, stringify and write, and
@@ -1394,15 +1462,16 @@ export function runBenchmarkCohortPassOffLoop(
 
 /** W1-T9845: the pass the daemon hook runs by default, off the daemon loop. */
 export const benchmarkCohortDaemonPass = (stateDir: string): Promise<BenchmarkCohortPassResult> =>
-  runBenchmarkCohortPassOffLoop(stateDir, { maxSources: BENCHMARK_COHORT_DAEMON_MAX_SOURCES });
+  runBenchmarkCohortPassOffLoop(stateDir, { maxSources: BENCHMARK_COHORT_DAEMON_MAX_SOURCES, caseFilesFromState: true });
 
 /** Direct, internal maintenance entrypoint: no new public `rmd` verb or model worker. */
 export async function runBenchmarkCohortIdlePass(
   stateDir: string, run: typeof runBenchmarkCohortPass = runBenchmarkCohortPass,
 ): Promise<number> {
   try {
-    const result = await run(stateDir, { maxSources: 4 });
+    const result = await run(stateDir, { maxSources: 4, caseFilesFromState: true });
     console.log(JSON.stringify({ event: "benchmark_cohort.idle_pass", state: result.state,
+      case_file_join: result.caseFileJoin ?? null,
       scanned_sources: result.scannedSources, pending_sources: result.pendingSources,
       tail_pending_bytes: result.tailPendingBytes ?? 0, checkpoint_bytes: result.checkpointBytes,
       checkpoint_read_bytes: result.checkpointReadBytes, checkpoint_written_bytes: result.checkpointWrittenBytes,
@@ -1423,35 +1492,8 @@ export async function runBenchmarkVerifiedOverlayPass(
   stateDir: string, caseFilePath: string, beforeRead?: () => void,
 ): Promise<number> {
   try {
-    const maxBytes = 4 * 1024 * 1024;
-    const fd = openSync(caseFilePath, "r");
-    let text: string;
-    try {
-      const before = fstatSync(fd);
-      if (!before.isFile() || before.size > maxBytes) throw new TypeError("case-file-snapshot-too-large");
-      beforeRead?.();
-      const bytes = Buffer.allocUnsafe(before.size + 1);
-      let used = 0;
-      while (used < bytes.length) {
-        const read = readSync(fd, bytes, used, bytes.length - used, null);
-        if (read === 0) break;
-        used += read;
-      }
-      const after = fstatSync(fd);
-      if (used !== before.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) {
-        throw new TypeError("case-file-snapshot-changed-during-read");
-      }
-      text = bytes.subarray(0, used).toString("utf8");
-    } finally { closeSync(fd); }
-    const parsed: unknown = JSON.parse(text);
-    if (!Array.isArray(parsed) || parsed.some((file) => {
-      const value = object(file);
-      return value === undefined || value.version !== "task-case-file-v1"
-        || typeof value.taskId !== "string" || typeof value.asOf !== "string";
-    })) {
-      throw new TypeError("case-file-snapshot-invalid");
-    }
-    const result = await runBenchmarkCohortPass(stateDir, { maxSources: 4, caseFiles: parsed as TaskCaseFile[] });
+    const parsed = loadCaseFileSnapshot(caseFilePath, beforeRead);
+    const result = await runBenchmarkCohortPass(stateDir, { maxSources: 4, caseFiles: parsed });
     console.log(JSON.stringify({ event: "benchmark_cohort.verified_overlay", state: result.state,
       verified_task_outcome: result.snapshot.verifiedTaskOutcome,
       // W1-T13867: each cohort row's own outcome counts, so the analyst can score each model by result.
