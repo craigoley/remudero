@@ -52,7 +52,7 @@ import { createRequire } from "node:module";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Clock } from "./clock.js";
-import { escalationTaskId, NEEDS_HUMAN_LABEL, renderIssueBody, tryEscalateAsync, type AsyncIssueGateway, type EscalateDeps, type Escalation } from "./escalate.js";
+import { escalationTaskId, NEEDS_HUMAN_LABEL, renderIssueBody, tryEscalateAsync, type AsyncIssueGateway, type EscalateDeps, type Escalation, type OpenIssue } from "./escalate.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { ghJsonAsync, type GhJsonReadOptions } from "./github-transport.js";
 import { ledgerLivePath, ledgerRotationEntries, openLedgerUnion } from "./ledger-union.js";
@@ -212,6 +212,9 @@ export interface ReviewerIncident {
   healedTree?: { state: "conflict" | "empty"; originMainSha: string; reason: string; paths: string[]; at: string };
   /** W1-T13393: when this incident's healed-tree conflict was escalated: once per incident, across main advances and restarts. */
   conflictEscalatedAt?: string;
+  /** W1-T14427: the issue that escalation landed on when it is not `issueUrl` (a first issue closed by hand makes it open
+   *  another). The incident's close closes it with its own comment. */
+  conflictIssueUrl?: string;
 }
 
 /** Why an incident closed. `no-heal-not-regressed` (W1-T13393): no heal was in effect and today's reviewer did not read
@@ -1292,10 +1295,14 @@ export function resetHealedReviewerTrees(): void {
   healedConflictMemo.clear();
   escalatedHealedDeaths.clear();
   unrecordedConflictEscalations.clear();
+  orphanSweptStarts.clear();
 }
 
 /** W1-T13393 — incidents whose conflict this process escalated while the state file could not record it. */
 const unrecordedConflictEscalations = new Set<string>();
+
+/** W1-T14427 — state files this process has swept for closed incidents' open issues since it started. */
+const orphanSweptStarts = new Set<string>();
 
 /**
  * W1-T13393 — the review route's record of a healed tree it built, or could not. A conflict or an empty patch is recorded
@@ -1307,6 +1314,7 @@ export async function noteHealedTreeOutcome(statePath: string, incident: Reviewe
   escalation: EscalateDeps<AsyncIssueGateway>, log: ReviewerHealthLog, clock: Pick<Clock, "iso">): Promise<void> {
   if (healed.state === "unavailable") return;
   let escalate = false;
+  let recordable = true;
   try {
     escalate = withReviewerHealthStateLock(statePath, () => {
       const state = loadReviewerHealthState(statePath);
@@ -1327,9 +1335,58 @@ export async function noteHealedTreeOutcome(statePath: string, incident: Reviewe
     log("reviewer.health_unavailable", { phase: "healed-tree-record", incident_id: incident.id, state: healed.state, error: String((error as Error)?.message ?? error) });
     escalate = healed.state === "conflict" && !unrecordedConflictEscalations.has(incident.id);
     if (escalate) unrecordedConflictEscalations.add(incident.id);
+    recordable = false;
   }
+  if (!escalate || healed.state !== "conflict") return;
   // tryEscalateAsync never rejects; a failed filing is ledgered as escalation.failed.
-  if (escalate && healed.state === "conflict") await tryEscalateAsync(reviewerRegressionEscalation(incident, healed), escalation);
+  const url = await tryEscalateAsync(reviewerRegressionEscalation(incident, healed), escalation);
+  // W1-T14427: an issue other than the incident's own is recorded on it, so the incident's close closes that issue too. A
+  // file this call could not write is not tried again; the sweep after the incident's close finds the issue by its Task line.
+  if (url === null || !recordable) return;
+  try {
+    withReviewerHealthStateLock(statePath, () => {
+      const state = loadReviewerHealthState(statePath);
+      const open = state.incident;
+      if (open === null || open.id !== incident.id || open.issueUrl === url || open.conflictIssueUrl === url) return;
+      open.conflictIssueUrl = url;
+      saveReviewerHealthState(statePath, state);
+    });
+  } catch (error) {
+    log("reviewer.health_unavailable", { phase: "conflict-issue-record", incident_id: incident.id, issue_url: url, error: String((error as Error)?.message ?? error) });
+  }
+}
+
+/**
+ * W1-T14427 — close each open reviewer-regression issue whose incident the state file records as closed, with a comment
+ * naming that close. One read of the escalation label; a failed read closes nothing and is ledgered (as an unavailable
+ * health phase: the write-only ledger step ratchet admits no new step that nothing reads).
+ * INVARIANT an-open-incidents-issue-stays-open: the open incident's own issue, and every issue that is not a
+ * reviewer-regression escalation, is never closed here. Only a recorded close counts: a new incident's issue is open
+ * before the state file names the incident.
+ */
+async function closeClosedIncidentIssues(issues: AsyncIssueGateway, openId: string | undefined,
+  closed: ReadonlyMap<string, ReviewerHealthState["closed"][number]>, closedHere: ReadonlySet<string>, log: ReviewerHealthLog): Promise<void> {
+  if (!issues.listOpen || !issues.closeWithComment) return;
+  let open: OpenIssue[];
+  try {
+    open = await issues.listOpen(NEEDS_HUMAN_LABEL);
+  } catch (error) {
+    log("reviewer.health_unavailable", { phase: "closed-incident-issue-sweep", label: NEEDS_HUMAN_LABEL, error: String((error as Error)?.message ?? error) });
+    return;
+  }
+  for (const issue of open) {
+    const id = escalationTaskId(issue.body);
+    const incident = id === undefined ? undefined : closed.get(id);
+    if (id === undefined || incident === undefined || id === openId || !id.startsWith("reviewer-regression-") || closedHere.has(issue.url)) continue;
+    // The close comment is the record of a close; a failed one is ledgered as the incident's own close failure.
+    try {
+      await issues.closeWithComment(issue.url, `Reviewer-regression incident ${id} closed at ${incident.closedAt} ` +
+        `(${incident.closedReason ?? "returned-to-baseline"}) and left this issue open, so it closes with the incident (W1-T14427).`);
+    } catch (error) {
+      log("reviewer.regression_issue_close_failed", { incident_id: id, issue_url: issue.url, phase: "closed-incident-issue-sweep",
+        error: String((error as Error)?.message ?? error) });
+    }
+  }
 }
 
 /** The outcome-mix evidence, as the revert PR body and the issue name it. */
@@ -1632,8 +1689,8 @@ export async function evaluateReviewerHealthNow(
     if (prior !== undefined) {
       // W1-T13393: the healed-tree record and its escalation belong to the closed incident, never its reopening.
       const { closedAt: _closedAt, closedReason: _closedReason, revertPrUrl: _url, revertRefused: _refused,
-        offendingUnavailable: _oldUnavailable, healedTree: _healedTree, conflictEscalatedAt: _escalated, ...rest } = prior;
-      void [_closedAt, _closedReason, _url, _refused, _oldUnavailable, _healedTree, _escalated];
+        offendingUnavailable: _oldUnavailable, healedTree: _healedTree, conflictEscalatedAt: _escalated, conflictIssueUrl: _conflictIssue, ...rest } = prior;
+      void [_closedAt, _closedReason, _url, _refused, _oldUnavailable, _healedTree, _escalated, _conflictIssue];
       const blame = await findBlame(rec);
       const priorOffenderInRange = prior.offending !== null && blame.lastHealthy !== undefined
         && await isAncestor(blame.lastHealthy.sha, prior.offending.sha) && await isAncestor(prior.offending.sha, rec.sha);
@@ -1682,6 +1739,9 @@ export async function evaluateReviewerHealthNow(
       reason: incident.revertRefused.reason, conflict_paths: incident.revertRefused.paths });
   };
 
+  // W1-T14427: whether this evaluation closed an incident live, and the issues its close closed.
+  let closedLive = false;
+  const issuesClosedHere = new Set<string>();
   const closeIncident = async (judgment: ReviewerShaJudgment, live: boolean, cleared?: ReviewerBlameEvidence, unhealed?: true): Promise<void> => {
     const incident = state.incident!;
     const closedReason: ReviewerIncidentCloseReason | undefined = cleared !== undefined ? "blame-cleared" : unhealed ? "no-heal-not-regressed" : undefined;
@@ -1690,6 +1750,7 @@ export async function evaluateReviewerHealthNow(
       ...(closedReason === undefined ? {} : { closedReason }) }].slice(-MAX_CLOSED_REVIEWER_INCIDENTS);
     state.incident = null;
     if (!live) return;
+    closedLive = true;
     let revertPr: "open" | "closed" | "merged" | "unread" | null = null;
     if (incident.revertPrUrl !== undefined) {
       try {
@@ -1716,11 +1777,14 @@ export async function evaluateReviewerHealthNow(
         log("reviewer.regression_revert_close_failed", { incident_id: incident.id, revert_pr: incident.revertPrUrl, error: String((error as Error)?.message ?? error) });
       }
     }
-    if (incident.issueUrl && escalation.issues.closeWithComment) {
+    // W1-T14427: every issue the incident recorded, its conflict escalation's included.
+    for (const url of new Set([incident.issueUrl, incident.conflictIssueUrl])) {
+      if (!url || !escalation.issues.closeWithComment) continue;
       try {
-        await escalation.issues.closeWithComment(incident.issueUrl, comment);
+        await escalation.issues.closeWithComment(url, comment);
+        issuesClosedHere.add(url);
       } catch (error) {
-        log("reviewer.regression_issue_close_failed", { incident_id: incident.id, issue_url: incident.issueUrl, error: String((error as Error)?.message ?? error) });
+        log("reviewer.regression_issue_close_failed", { incident_id: incident.id, issue_url: url, error: String((error as Error)?.message ?? error) });
       }
     }
     log("reviewer.regression_closed", { incident_id: incident.id, current_reviewer_code_sha: judgment.sha, k: judgment.k, n: judgment.n,
@@ -1905,7 +1969,8 @@ export async function evaluateReviewerHealthNow(
     }
   };
 
-  if (state.cursor === null) {
+  const seedRun = state.cursor === null;
+  if (seedRun) {
     // THE SEED replays history row by row with effects off, so a deploy mid-outage inherits the
     // outage's incident (and its blame) rather than judging today against a poisoned baseline.
     for (const row of read.rows) await step([row], newestReviewerSha(state), false);
@@ -1944,11 +2009,12 @@ export async function evaluateReviewerHealthNow(
       // W1-T13393: the review route owns the incident's healed-tree record (noteHealedTreeOutcome) and may have written
       // it since this evaluation loaded the file; the file's copy stands, so a restart still knows it escalated.
       if (state.incident !== null && disk.incident?.id === state.incident.id) {
-        const { healedTree, conflictEscalatedAt } = disk.incident;
+        const { healedTree, conflictEscalatedAt, conflictIssueUrl } = disk.incident;
         delete state.incident.healedTree;
         delete state.incident.conflictEscalatedAt;
+        delete state.incident.conflictIssueUrl;
         Object.assign(state.incident, healedTree === undefined ? {} : { healedTree },
-          conflictEscalatedAt === undefined ? {} : { conflictEscalatedAt });
+          conflictEscalatedAt === undefined ? {} : { conflictEscalatedAt }, conflictIssueUrl === undefined ? {} : { conflictIssueUrl });
       }
     } catch (error) {
       // Keep the initially loaded incidents and save the SHA decision even if that refresh fails.
@@ -2005,6 +2071,13 @@ export async function evaluateReviewerHealthNow(
   } catch (error) {
     // Report observation failures and return the decision from the saved SHA state.
     reportModelHealthFailure(error, log);
+  }
+  // W1-T14427: once per evaluator start (the seed has effects off) and once after each close, queued off the route.
+  if (!seedRun && (closedLive || !orphanSweptStarts.has(statePath))) {
+    orphanSweptStarts.add(statePath);
+    const openId = state.incident?.id;
+    const closed = new Map(state.closed.map((c) => [c.id, c]));
+    queueModelJudgment(statePath, () => closeClosedIncidentIssues(escalation.issues, openId, closed, issuesClosedHere, log), log);
   }
   return decision;
 }
