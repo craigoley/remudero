@@ -26,6 +26,7 @@
     - src/cli/commands/sweep.ts
     - src/lib/review.ts
     - src/lib/child-entry-argv.ts
+    - src/lib/config-gardener.ts # 2026-11-23: the new review.refused_after_finished_review receipt joins the config gardener's PR-step list
     - test/review/a-review-runs-from-fresh-code-when-the-reviewer-code-is-behind.test.ts
     - test/a-review-is-judged-against-main-at-its-start.test.ts
     - test/an-untasked-pr-silently-skips-the-semantic-reviewer.test.ts
