@@ -6,7 +6,7 @@
   verify: human
   risk: high # Raised 2026-11-23: the scope amendment spans 2 concerns (Rule 19)
   priority: 1.47
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "scout:improvement_effects.repository_unavailable"

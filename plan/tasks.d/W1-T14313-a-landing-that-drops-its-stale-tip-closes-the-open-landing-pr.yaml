@@ -22,7 +22,7 @@
     - test/plan/a-status-reconcile-keeps-what-main-changed-since-its-read.test.ts
     - test/inbox/compress-src-lib-feedback-landing-ts.test.ts
     - test/inbox/a-red-landing-pull-request-rebuilds-itself.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:stale-tip-never-stays-open — on a git fixture, the plan-reconcile landing branch holds a status flip of shard A made against an older main, and an open landing PR has that tip as its head. Main has since changed A so that its status edit is refused. landPlanReconcileShards with A as its only input returns landed false and a refused entry for A, pushes nothing, and closes that PR once with a comment that names A and its refusal reason. The landing branch on origin still points at the old tip"

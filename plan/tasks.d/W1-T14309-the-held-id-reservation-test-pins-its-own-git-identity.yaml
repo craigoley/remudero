@@ -14,7 +14,7 @@
     - W1-T2903
   files:
     - test/sweep/a-split-or-rebuild-refused-on-the-same-input-is-not-tried-again.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "invariant:fixture-owns-its-identity — with GIT_AUTHOR_NAME and GIT_COMMITTER_NAME set to the empty string in process.env and a global git config that sets user.useConfigOnly=true and no user, the W1-T13830 criterion 6 body reserves two task ids and origin holds both reservation refs"
