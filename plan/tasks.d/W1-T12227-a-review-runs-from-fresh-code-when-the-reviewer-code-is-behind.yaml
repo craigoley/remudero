@@ -30,6 +30,8 @@
     - test/review/a-review-runs-from-fresh-code-when-the-reviewer-code-is-behind.test.ts
     - test/a-review-is-judged-against-main-at-its-start.test.ts
     - test/an-untasked-pr-silently-skips-the-semantic-reviewer.test.ts
+    - test/gardeners/the-config-gardener-reads-the-same-steps-once-gather-runs-owns-its-list.test.ts # 2026-11-23: pins the gardener's step set
+    - test/helpers/the-config-gardener-reads-only-the-ledger-steps-it-prices.ts # 2026-11-23: one fixture row per gardener step
   status: queued
   attempts: 0
   acceptance:
