@@ -4,13 +4,14 @@
  * (through scripts/census-precheck.mjs) is that caller: importing a `node:test` file runs its
  * tests, and W1-T3225 removed the runner from that hook for damaging the repo it protected.
  *
- * The definitions are unchanged, byte for byte in behaviour; the census suite imports them from
- * here and keeps every falsifier that pins what each signature does and does not count.
+ * The census suite imports the definitions from here and keeps every falsifier that pins what
+ * each signature does and does not count.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { createScanner, SyntaxKind as K } from "typescript/unstable/ast";
 
 /** Every signature this census tracks, in the fixed order the baseline JSON's keys must match
  *  exactly (see the "no key drift" test in test/fixture-copy-census.test.ts). */
@@ -33,6 +34,55 @@ export const FIXTURE_COPY_CENSUS_FILENAME = "fixture-copy-census.test.ts";
  *  and CLI help text listing `"init"` as a subcommand name — both false positives this pattern
  *  excludes by requiring `"init"` to sit immediately after `(` or `[`. */
 const GIT_INIT_SITE_RE = /[([]\s*["']init["']/g;
+
+/** Tokens after which a `/` divides: each one can end an expression. After any other token, a `/`
+ *  starts a regex literal, which the scanner then reads as one token. */
+const ENDS_AN_EXPRESSION = new Set([
+  K.Identifier, K.PrivateIdentifier, K.NumericLiteral, K.BigIntLiteral, K.StringLiteral, K.RegularExpressionLiteral,
+  K.NoSubstitutionTemplateLiteral, K.TemplateTail, K.CloseParenToken, K.CloseBracketToken, K.CloseBraceToken,
+  K.PlusPlusToken, K.MinusMinusToken, K.ThisKeyword, K.SuperKeyword, K.TrueKeyword, K.FalseKeyword, K.NullKeyword,
+]);
+
+/** Literal text inside each token kind, as [offset from the token start, offset from the token end]. */
+const LITERAL_TEXT = new Map([
+  [K.StringLiteral, [1, 1]],
+  [K.NoSubstitutionTemplateLiteral, [1, 1]],
+  [K.TemplateHead, [1, 2]],
+  [K.TemplateMiddle, [1, 2]],
+  [K.TemplateTail, [1, 1]],
+]);
+
+/**
+ * `text` with every character inside a string literal, and inside the text part of a template
+ * literal, replaced by a space (W1-T14303). Newlines stay, so offsets and line numbers stay the
+ * same. Code inside a template's `${...}` stays code. The TypeScript scanner reads escapes, regex
+ * literals and nested templates; this walk only tells it where a regex or a template part starts.
+ */
+export function codeOnlyText(text) {
+  const out = text.split("");
+  const scanner = createScanner(true, undefined, text);
+  const braces = [];
+  let previous = K.Unknown;
+  for (let kind = scanner.scan(); kind !== K.EndOfFile; kind = scanner.scan()) {
+    if ((kind === K.SlashToken || kind === K.SlashEqualsToken) && !ENDS_AN_EXPRESSION.has(previous)) kind = scanner.reScanSlashToken();
+    else if (kind === K.CloseBraceToken && braces.at(-1) === "template") {
+      braces.pop();
+      kind = scanner.reScanTemplateToken(false);
+    } else if (kind === K.OpenBraceToken) braces.push("brace");
+    else if (kind === K.CloseBraceToken) braces.pop();
+    if (kind === K.TemplateHead || kind === K.TemplateMiddle) braces.push("template");
+    // The scanner returns a lone `#` as an empty token and stays on it; step past it.
+    if (scanner.getTokenEnd() <= scanner.getTokenStart()) scanner.resetTokenState(scanner.getTokenStart() + 1);
+    const literal = LITERAL_TEXT.get(kind);
+    if (literal) {
+      for (let i = scanner.getTokenStart() + literal[0]; i < scanner.getTokenEnd() - literal[1]; i++) {
+        if (out[i] !== "\n" && out[i] !== "\r") out[i] = " ";
+      }
+    }
+    previous = kind;
+  }
+  return out.join("");
+}
 
 /** A builder function/const declaration whose name contains one of `word`'s alternatives — either
  *  `function name(` or `const name = (...) =>` (an arrow function; a plain `const x = "foo"` or
@@ -118,6 +168,8 @@ export function countFixtureCopiesInTexts(texts) {
       gitInitFiles += 1;
     }
 
+    // A builder name counts only where it is declared in code, never inside literal text (W1-T14303).
+    const code = codeOnlyText(text);
     let m;
     // `Repo(?!rt)`: MEASURED across 1411 test files, the bare `Repo` alternative counted five
     // REPORT builders — parseReport, runFixtureReport, runReport, shardLintReport and
@@ -125,18 +177,18 @@ export function countFixtureCopiesInTexts(texts) {
     // apiece (#5069, #5071) on an overage they did not cause. The negative lookahead drops exactly
     // those five and keeps all 42 genuine `Repo`-bearing builders, `Repository` spellings included.
     const repoRe = builderDeclarationRe("Repo(?!rt)|Checkout|Clone|Worktree|Bare");
-    while ((m = repoRe.exec(text))) repoBuilderNames.add(m[1] ?? m[2]);
+    while ((m = repoRe.exec(code))) repoBuilderNames.add(m[1] ?? m[2]);
 
     const ghRe = builderDeclarationRe("[Gg]it[Hh]ub");
     let sawGh = false;
-    while ((m = ghRe.exec(text))) {
+    while ((m = ghRe.exec(code))) {
       fakeGithubBuilderNames.add(m[1] ?? m[2]);
       sawGh = true;
     }
     if (sawGh) fakeGithubBuilderFiles.add(name);
 
     const ledgerRe = builderDeclarationRe("[Ll]edger");
-    while ((m = ledgerRe.exec(text))) ledgerHelperNames.add(m[1] ?? m[2]);
+    while ((m = ledgerRe.exec(code))) ledgerHelperNames.add(m[1] ?? m[2]);
 
     if (isGhPathShimFile(text)) ghPathShimFiles += 1;
   }

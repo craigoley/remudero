@@ -35,6 +35,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
   FIXTURE_COPY_CENSUS_FILENAME,
+  codeOnlyText,
   FIXTURE_COPY_SIGNATURES,
   countFixtureCopies as countFixtureCopiesFromRoot,
   countFixtureCopiesInTexts,
@@ -292,4 +293,121 @@ test("W1-T12322: the real tree counts the same gh shim files as before", () => {
   assert.deepEqual(after.filter((name) => !before.includes(name)), [], "the new rule counts no file the old rule did not count");
   assert.equal(after.length + dropped.length, before.length, "every file the old rule counted is still counted or is a fixture-directory case");
   assert.equal(countFixtureCopies(REPO_ROOT).ghPathShimFiles, after.length);
+});
+
+// ── W1-T14303: a builder name counts only where it is declared in code ──────────────────────────
+
+const countTexts = (files: Record<string, string>): FixtureCopyCounts =>
+  countFixtureCopiesInTexts(Object.entries(files)) as FixtureCopyCounts;
+
+/** The same declaration line held as literal text in each of the three literal forms. */
+const asLiteralText = (line: string): Record<string, string> => ({
+  "double.test.ts": `const source = ${JSON.stringify(line)};\n`,
+  "single.test.ts": `const source = '${line}';\n`,
+  "template.test.ts": `const source = \`\${prefix}\n${line}\n\${suffix}\`;\n`,
+});
+
+test("W1-T14303 criterion 1: a repo, GitHub or ledger declaration inside a string or template literal is not counted", () => {
+  const cases = [
+    { line: "function inspectFreshReviewerWorktree(path: string) {", signature: "repoBuilderFunctionNames" },
+    { line: "function appendFakeLedger(rows: unknown[]) {", signature: "ledgerHelperNames" },
+    { line: "const fakeGitHub = () => ({});", signature: "fakeGithubBuilderNames" },
+  ] as const;
+  for (const { line, signature } of cases) {
+    for (const [name, text] of Object.entries(asLiteralText(line))) {
+      const counts = countTexts({ [name]: text });
+      assert.equal(counts[signature], 0, `${signature}: the declaration in ${name} is literal text`);
+    }
+    assert.equal(countTexts({ "code.test.ts": `${line}\n` })[signature], 1, `${signature}: the same line as code counts`);
+  }
+  assert.equal(countTexts(asLiteralText("const fakeGitHub = () => ({});")).fakeGithubBuilderFiles, 0,
+    "a file whose only GitHub declaration is literal text is not a builder file");
+});
+
+test("W1-T14303 criterion 2: a declaration after an escaped quote, a regex with a quote, a lone # and a nested template still counts", () => {
+  const text = [
+    'const escaped = "say \\"function quotedRepo() {\\" twice";',
+    "const quoteRe = /\"/g;",
+    "const otherQuoteRe = text.replace(/'/g, \"\");",
+    "const half = (total) / 2 / 1;",
+    "const stray = value # not a private name;",
+    "const nested = `a ${ \"b\" + `c ${ { k: 1 }.k } function innerRepo() {` } function outerRepo() {`;",
+    "function realRepoAfter() {}",
+    "function realRepoAfter() {}",
+    "const realCloneAfter = () => 1;",
+    "function appendRealLedger(rows: unknown[]) {}",
+    "const realGitHubAfter = () => ({});",
+  ].join("\n");
+  const counts = countTexts({ "tricky.test.ts": text });
+  assert.equal(counts.repoBuilderFunctionNames, 2, "realRepoAfter (once) and realCloneAfter, and none of the quoted names");
+  assert.equal(counts.ledgerHelperNames, 1);
+  assert.equal(counts.fakeGithubBuilderNames, 1);
+  const code = codeOnlyText(text) as string;
+  assert.equal(code.length, text.length, "the masked text keeps every offset");
+  assert.equal(code.split("\n").length, text.split("\n").length, "the masked text keeps every line");
+  assert.ok(code.includes("const quoteRe = /\"/g;"), "the regex literal stays as code");
+  assert.ok(code.includes("{ k: 1 }.k"), "code inside a template's ${...} stays code");
+});
+
+test("W1-T14303 criterion 3: git init call sites and gh PATH shims are still read from the raw text", () => {
+  const counts = countTexts({
+    "init.test.ts": 'git(["init", "-q", dir]);\ng("init", "--bare");\n',
+    "shim.test.ts": 'writeFileSync(join(bin, "gh"), "#!/bin/sh\\n");\nchmodSync(join(bin, "gh"), 0o755);\nprocess.env.PATH = bin;\n',
+  });
+  assert.equal(counts.gitInitSites, 2);
+  assert.equal(counts.gitInitFiles, 1);
+  assert.equal(counts.ghPathShimFiles, 1);
+});
+
+test("W1-T14303 criterion 4: on the real tree the new rule counts no more builders, and each dropped name is only literal text", () => {
+  const oldDeclarationRe = (word: string): RegExp => new RegExp(
+    `function\\s+([a-zA-Z]*(?:${word})[A-Za-z]*)\\s*\\(` + `|const\\s+([a-zA-Z]*(?:${word})[A-Za-z]*)\\s*(?::[^=\\n]+)?=\\s*\\([^)]*\\)\\s*(?::[^=\\n]+)?=>`,
+    "g",
+  );
+  const words = { repoBuilderFunctionNames: "Repo(?!rt)|Checkout|Clone|Worktree|Bare", fakeGithubBuilderNames: "[Gg]it[Hh]ub",
+    ledgerHelperNames: "[Ll]edger" } as const;
+  const texts = (listFixtureCopyFiles(REPO_ROOT) as string[]).map((name) => [name, readFileSync(join(REPO_ROOT, "test", name), "utf8")] as const);
+  const codeOf = new Map(texts.map(([name, text]) => [name, codeOnlyText(text) as string]));
+  const live = countFixtureCopies(REPO_ROOT);
+  for (const [signature, word] of Object.entries(words) as [keyof typeof words, string][]) {
+    const before = new Map<string, { name: string; text: string; at: number }[]>();
+    const after = new Set<string>();
+    for (const [name, text] of texts) {
+      for (const m of text.matchAll(oldDeclarationRe(word))) {
+        const id = m[1] ?? m[2];
+        before.set(id, [...(before.get(id) ?? []), { name, text, at: m.index }]);
+      }
+      for (const m of codeOf.get(name)!.matchAll(oldDeclarationRe(word))) after.add(m[1] ?? m[2]);
+    }
+    assert.ok(before.size > 0, `${signature}: the old rule counts real names on this tree`);
+    assert.equal(live[signature], after.size);
+    assert.ok(live[signature] <= before.size, `${signature}: ${live[signature]} is at most the old ${before.size}`);
+    assert.deepEqual([...after].filter((id) => !before.has(id)), [], `${signature}: no name the old rule did not count`);
+    for (const [id, sites] of before) {
+      if (after.has(id)) continue;
+      for (const { name, text, at } of sites) {
+        const lineStart = text.lastIndexOf("\n", at) + 1;
+        assert.match(text.slice(lineStart, at), /["'`]/, `${id} in ${name} sits after a quote on its line`);
+        assert.equal(codeOf.get(name)!.slice(at, at + 8).trim(), "", `${id} in ${name} is literal text`);
+      }
+    }
+  }
+  const old = { gitInitSites: 0, gitInitFiles: 0, ghPathShimFiles: 0, fakeGithubBuilderFiles: 0 };
+  const droppedGithubFiles: string[] = [];
+  for (const [name, text] of texts) {
+    const sites = (text.match(/[([]\s*["']init["']/g) ?? []).length;
+    old.gitInitSites += sites;
+    old.gitInitFiles += sites > 0 ? 1 : 0;
+    const withoutDirNames = text.replace(/ownedFixtureDir\(\s*[^,()]+,\s*["']gh["']/g, "ownedFixtureDir(scope, name");
+    if (/["']gh["']/.test(withoutDirNames) && /(chmod|writeFileSync)/.test(text) && /PATH/.test(text)) old.ghPathShimFiles += 1;
+    if (oldDeclarationRe(words.fakeGithubBuilderNames).test(text)) {
+      old.fakeGithubBuilderFiles += 1;
+      if (!oldDeclarationRe(words.fakeGithubBuilderNames).test(codeOf.get(name)!)) droppedGithubFiles.push(name);
+    }
+  }
+  assert.equal(live.gitInitSites, old.gitInitSites, "git init call sites are counted as before");
+  assert.equal(live.gitInitFiles, old.gitInitFiles, "git init files are counted as before");
+  assert.equal(live.ghPathShimFiles, old.ghPathShimFiles, "gh PATH shim files are counted as before");
+  assert.equal(live.fakeGithubBuilderFiles, old.fakeGithubBuilderFiles - droppedGithubFiles.length,
+    "a GitHub builder file drops out only when each of its GitHub declarations is literal text");
 });

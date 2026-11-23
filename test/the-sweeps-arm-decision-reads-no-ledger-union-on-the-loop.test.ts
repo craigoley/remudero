@@ -183,7 +183,7 @@ test("W1-T13288 criterion 1: an archived capped verdict still refuses, a clean o
   }
 });
 
-test("W1-T13288 criterion 2: a complete corpus with no verdict refuses; no archives or an unreadable rotation fails open", async () => {
+test("W1-T13288 criterion 2: a complete corpus with no verdict refuses; no archives or an unreadable rotation refuses (W1-T14317)", async () => {
   const absent = corpus("arm-absent", [posted(13010, { head_sha: "other-head" })]);
   const bare = corpus("arm-bare", [], { noArchive: true });
   const broken = corpus("arm-broken", [posted(13012)]);
@@ -196,7 +196,8 @@ test("W1-T13288 criterion 2: a complete corpus with no verdict refuses; no archi
 
     const noArchives = deps(bare);
     await runSweep([pr(13011)], noArchives.deps);
-    assert.deepEqual(noArchives.armed, [13011], "with no archives the historical fail-open arms, as at origin/main");
+    assert.deepEqual(noArchives.armed, [], "W1-T14317: with no archives the history is unreadable, so the arm is refused");
+    assert.match(standDown(bare, 13011), /unreadable verdict history/);
     assert.equal(historyRows(noArchives).at(-1)?.complete, false);
 
     for (const path of archives(broken)) if (path.endsWith(".gz")) {
@@ -205,7 +206,8 @@ test("W1-T13288 criterion 2: a complete corpus with no verdict refuses; no archi
     }
     const unreadable = deps(broken);
     await runSweep([pr(13012)], unreadable.deps);
-    assert.deepEqual(unreadable.armed, [13012], "a rotation the reader cannot read is no evidence: the arm fails open");
+    assert.deepEqual(unreadable.armed, [], "W1-T14317: a rotation the reader cannot read refuses the arm");
+    assert.match(standDown(broken, 13012), /unreadable verdict history/);
     assert.equal(historyRows(unreadable).at(-1)?.complete, false);
   } finally {
     for (const dir of [absent, bare, broken]) rmSync(dir, { recursive: true, force: true });

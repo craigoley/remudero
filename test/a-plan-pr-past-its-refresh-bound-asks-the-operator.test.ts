@@ -8,6 +8,7 @@ import type { IssueGateway, OpenIssue } from "#src/lib/escalate.js";
 import { buildSweepEffects, runSweep, type OpenPrView } from "#test/helpers/sweep-test.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const PR: OpenPrView = {
   prNumber: 9205,
@@ -41,7 +42,9 @@ function held(): ArmAttemptResult {
 function fixture(t: TestContext, result: ArmOutcome | ArmAttemptResult = held()) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t5782-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const ledgerPath = join(root, "ledger.ndjson");
+  // W1-T14317: the head's live review verdict, so the arm decision never reads the history.
+  const ledgerPath = writeLedger([{ ts: new Date().toISOString(), run_id: "review", task_id: PR.taskId, step: "review.posted",
+    pr_url: PR.prUrl, head_sha: PR.headSha, state: "success", capped: false, plan_only: true }], { dir: root }).path;
   const created: Array<OpenIssue & { labels: string[] }> = [];
   const comments: string[] = [];
   let armCalls = 0;

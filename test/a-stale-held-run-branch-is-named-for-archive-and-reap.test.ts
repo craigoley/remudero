@@ -229,9 +229,9 @@ test("the stale-hold archive cap holds: 25 pushes per pass and the rest counted 
   assert.deepEqual(outcome.archived.map((a) => a.name), candidates.slice(0, 25).map((c) => c.name));
 });
 
-test("the policy default for sweep.armStaleBranchArchive is false, read from the checkout's policy", () => {
+test("the committed sweep.armStaleBranchArchive row is armed (operator ruling 2026-11-23), read from the checkout's policy", () => {
   const policy = loadPolicy(join(REPO_ROOT, "plan", "policy.yaml"));
-  assert.equal(policy.values.sweep.armStaleBranchArchive, false);
+  assert.equal(policy.values.sweep.armStaleBranchArchive, true);
   assert.equal(policy.origin["sweep.armStaleBranchArchive"]?.kind, "net-new");
   // The REAL default seam: no override, so the arm is read from <root>/plan/policy.yaml.
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}reap-act-policy-`));
@@ -239,11 +239,11 @@ test("the policy default for sweep.armStaleBranchArchive is false, read from the
     mkdirSync(join(root, "plan"));
     const yaml = readFileSync(join(REPO_ROOT, "plan", "policy.yaml"), "utf8");
     writeFileSync(join(root, "plan", "policy.yaml"), yaml);
-    assert.deepEqual(pass(["--archive-stale"], { root }).pushes, [], "the committed row (false) leaves it in shadow");
-    const armedYaml = yaml.replace(/(armStaleBranchArchive:\n\s+value: )false/, "$1true");
-    assert.notEqual(armedYaml, yaml);
-    writeFileSync(join(root, "plan", "policy.yaml"), armedYaml);
-    assert.deepEqual(pass(["--archive-stale"], { root }).pushes, [ATOMIC_PUSH], "flipping the row arms it");
+    assert.deepEqual(pass(["--archive-stale"], { root }).pushes, [ATOMIC_PUSH], "the committed row (true) arms it");
+    const shadowYaml = yaml.replace(/(armStaleBranchArchive:\n\s+value: )true/, "$1false");
+    assert.notEqual(shadowYaml, yaml);
+    writeFileSync(join(root, "plan", "policy.yaml"), shadowYaml);
+    assert.deepEqual(pass(["--archive-stale"], { root }).pushes, [], "flipping the row off leaves it in shadow");
     rmSync(join(root, "plan", "policy.yaml"));
     const unreadable = pass(["--archive-stale"], { root });
     assert.deepEqual(unreadable.pushes, [], "an unreadable policy fails closed to shadow");

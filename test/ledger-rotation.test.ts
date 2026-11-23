@@ -94,6 +94,7 @@ test("DECISION_RELEVANT_LEDGER_STEPS: derived from consumers, not hardcoded — 
     "../src/lib/review.ts",
     "../src/lib/stall-verifier.ts",
     "../src/lib/restart-cycle.ts",
+    "../src/lib/headroom-recovery.ts", // W1-T14450: buildHeadroomRecoveryCandidates skips escalations a daemon.headroom_reserve.retired row closed.
     "../src/lib/plan.ts", // W1-T13940: newestLedgerTaskAnswer releases a needs_input task from a panel.question_answered row.
   ];
 
@@ -811,6 +812,8 @@ test("FALSIFIER — sweep dedup: dropping the sweep.disposed(armed) line re-arms
       // `prior.armed` sha-keyed, matching `prior.fixed` which always was). This fixture
       // predates that field; without it the dedup key is `7@` and never matches `7@deadbeef`.
       // The test's subject is ROTATION RETENTION, which is unchanged either way.
+      JSON.stringify({ run_id: "r0", task_id: pr.taskId, step: "review.posted", pr_url: pr.prUrl, head_sha: pr.headSha, capped: false, plan_only: false }) +
+      "\n" +
       JSON.stringify({ run_id: "r0", task_id: pr.taskId, step: "sweep.disposed", disposition: "mergeable", pr_number: prNumber, head_sha: pr.headSha, acted: true }) +
       "\n" +
       noiseBlock(300);

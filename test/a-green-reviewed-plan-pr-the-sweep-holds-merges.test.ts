@@ -24,6 +24,7 @@ import {
   type SweepDeps,
 } from "#test/helpers/sweep-test.js";
 import { readLedgerLines } from "#src/lib/status.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { buildSweepEffects } from "#src/run-task.js";
 
 const PR_URL = "https://github.com/craigoley/remudero/pull/10141";
@@ -189,7 +190,8 @@ test("W1-T6595: a plan PR's mergeable row says merging directly; any other PR st
 });
 
 test("W1-T6595: a held plan PR's disposed row names the hold, never an arm", async () => {
-  const ledgerPath = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t6595-held-`)), "ledger.ndjson");
+  // W1-T14317: the head's live review verdict, so the arm decision never reads the history.
+  const ledgerPath = writeLedger([REVIEW_PASSED], { dir: mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t6595-held-`)) }).path;
   try {
     const deps: SweepDeps = {
       ledgerPath,

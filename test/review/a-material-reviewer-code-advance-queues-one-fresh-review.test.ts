@@ -249,7 +249,8 @@ test("W1-T11847: stale or incomplete reviewer-code provenance cannot attest merg
 test("W1-T11847: unrelated main churn leaves the reviewer-code result current", async (t) => {
   const gh = shim(t);
   const f = sweepFixture(t, HISTORY.immaterial);
-  f.deliver();
+  // W1-T14317: the delivered verdict carries its capped facts; with no readable verdict history the sweep never arms.
+  f.deliver({ capped: false, plan_only: false });
   const row = await f.run();
   assert.equal(row?.disposition, "mergeable", JSON.stringify(row));
   assert.deepEqual(f.armed, [PR]);

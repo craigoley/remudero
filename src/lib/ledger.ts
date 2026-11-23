@@ -737,6 +737,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "daemon.memory_drain.completed",
   "daemon.signal_exit",
   "daemon.headroom_reserve.escalated",
+  // W1-T12440: `buildHeadroomRecoveryCandidates` (lib/headroom-recovery.ts) skips escalations this
+  // row already retired; dropping it re-lists issues every sweep to re-learn a closed retirement.
+  "daemon.headroom_reserve.retired",
   // `escalateHeadroomParkCeiling` (run-task.ts) compares this row against the newest
   // `daemon.headroom`; dropping it re-pages once per daemon boot while the probe stays broken.
   "daemon.headroom.park_ceiling.escalated",
@@ -1071,6 +1074,13 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "pr_owner.recovery_authorized",
   "pr_owner.recovery_receipt",
   "review.finding", // W1-T5019: verifiedReviewFindingsForFix (run-task.ts) feeds repair prompts.
+  // W1-T14448: createPlanTaskMover (plan-task-move-janitor.ts) seeds the step pull request a restarted janitor waits on
+  // from the newest janitor_step row. Stand-down rows (one per change of reason) and the mover's own plan.move.step
+  // rows (MOVE_STEP, plan-task-move.ts) are the operator's only record of why no step runs; literals, as importing
+  // either module here would be a cycle.
+  "plan.move.janitor_step",
+  "plan.move.stand_down",
+  "plan.move.step",
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: test/ledger-rotation.test.ts
   // anchors its mutation check on those three lines followed by `]);` and asserts the needle occurs
   // EXACTLY once. A block appended after them silently breaks that anchor.

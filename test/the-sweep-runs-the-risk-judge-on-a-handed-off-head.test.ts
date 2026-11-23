@@ -71,6 +71,11 @@ function harness(
   lines: Array<Record<string, unknown>> = [handedOffVerdict()],
   overrides: Partial<SweepDeps> = {},
 ): Harness {
+  // W1-T14317: each head carries its live review verdict, so the arm decision never reads the history.
+  if (!lines.some((l) => l.step === "review.posted")) {
+    lines.push(...[HEAD, NEXT_HEAD].map((head_sha) => ({ ts: "2026-10-03T10:30:00.000Z", run_id: "REVIEW-5403",
+      task_id: TASK, step: "review.posted", pr_url: PR_URL, head_sha, capped: false, plan_only: false })));
+  }
   const armed: string[] = [];
   const judged: string[] = [];
   const log = (step: string, extra: Record<string, unknown> = {}) => {

@@ -76,6 +76,12 @@ function holdEngagedLine(over: Record<string, unknown> = {}): Record<string, unk
   };
 }
 
+/** W1-T14317: the live review.posted verdict for greenPr()'s head, which the sweep needs to arm. */
+function verdictLine(): Record<string, unknown> {
+  return { ts: "2026-08-21T11:30:00.000Z", run_id: "REVIEW-1", task_id: TASK, step: "review.posted",
+    pr_url: greenPr().prUrl, head_sha: HEAD, capped: false, plan_only: false };
+}
+
 /** One `automerge.hold_released` ledger line. */
 function holdReleasedLine(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -265,7 +271,7 @@ test("W1-T4581 criterion 4: a parent-order refusal clears the old armed dedup so
     pr_number: PR_NUMBER,
     head_sha: HEAD,
   };
-  const deps = fakeDeps([previouslyArmed, priorStackRefusal]);
+  const deps = fakeDeps([verdictLine(), previouslyArmed, priorStackRefusal]);
 
   const summary = await runSweep([greenPr({ autoMergeArmed: false })], deps);
 
@@ -361,7 +367,7 @@ test("a push to a held pull request does not lift the hold, and only an explicit
 // ── Acceptance 5: after a release, the backlog re-arms next pass — no separate resume path ─
 
 test("after a release the eligible backlog re-arms on the next pass with no separate resume path", async () => {
-  const lines: Array<Record<string, unknown>> = [holdEngagedLine()];
+  const lines: Array<Record<string, unknown>> = [verdictLine(), holdEngagedLine()];
   const deps = fakeDeps(lines);
 
   await runSweep([greenPr()], deps);

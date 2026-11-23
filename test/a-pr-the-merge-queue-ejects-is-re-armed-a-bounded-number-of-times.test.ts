@@ -48,6 +48,11 @@ function harness(t: TestContext, membership: () => MergeQueueMembership | Promis
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t5909-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const ledgerPath = join(root, "ledger.ndjson");
+  // W1-T14317: each head the suite arms carries its live review.posted verdict.
+  for (const head of [HEAD, NEXT_HEAD]) {
+    appendLedger(ledgerPath, { ts: new Date().toISOString(), run_id: "REVIEW", task_id: TASK, step: "review.posted",
+      pr_url: PR_URL, head_sha: head, capped: false, plan_only: false });
+  }
   const arms: string[] = [];
   const escalations: Array<{ head: string; rearms: number; bound: number }> = [];
   const deps: SweepDeps = {
