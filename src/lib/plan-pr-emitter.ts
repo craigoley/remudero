@@ -680,9 +680,34 @@ function preflightCodeRoot(input: Pick<PlanPrPreflightInput, "cwd" | "codeRoot">
   if (input.codeRoot !== undefined) return realpathSync(input.codeRoot);
   const destination = resolvePlanDestination("task", (checks.destinationStateDir ?? preflightStateDir)(), { owner: "", repo: "", checkoutDir: "" });
   if (destination.outcome === "unreadable") throw new Error("plan destination is unreadable");
-  if (destination.outcome !== "destination" || realpathSync(input.cwd) !== realpathSync(destination.checkoutDir)) return undefined;
+  if (destination.outcome !== "destination") return undefined;
+  const cwd = realpathSync(input.cwd), checkout = realpathSync(destination.checkoutDir);
+  if (cwd !== checkout && !sharesGitCommonDir(cwd, checkout)) return undefined;
   const root = checks.publicCodeRoot ?? (() => (createRequire(import.meta.url)("../../scripts/lib/repo-root.mjs") as { REPO_ROOT: string }).REPO_ROOT);
   return realpathSync(root());
+}
+/** W1-T14453: a plan-scoped fix round preflights from its own linked worktree of the destination checkout
+ *  (remudero-ops#427, 2026-11-23); git's common dir says it is that repository, so it takes the same code root.
+ *  It reads git's own metadata (`.git`, then the gitdir's `commondir`), the directory `git rev-parse --git-common-dir`
+ *  names, with no child: this runs on the daemon loop through planPrPreflightAtCommitAsync, where a synchronous git
+ *  spawn is refused (W1-T12952). A cwd with no `.git` entry is no worktree root; metadata it cannot read throws. */
+function gitCommonDir(worktree: string): string | undefined {
+  const dotGit = join(worktree, ".git");
+  if (!existsSync(dotGit)) return undefined;
+  try {
+    if (lstatSync(dotGit).isDirectory()) return realpathSync(dotGit);
+    const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotGit, "utf8"));
+    if (!pointer) throw new Error("the .git file names no gitdir");
+    const gitDir = resolve(worktree, pointer[1]!);
+    const common = readFileIfExists(join(gitDir, "commondir"));
+    return realpathSync(common === undefined ? gitDir : resolve(gitDir, common.trim()));
+  } catch (error) {
+    throw new Error("the git common dir is unreadable", { cause: error }); // no errno: public-code-root-unreadable
+  }
+}
+function sharesGitCommonDir(cwd: string, checkout: string): boolean {
+  const own = gitCommonDir(cwd);
+  return own !== undefined && own === gitCommonDir(checkout);
 }
 function codeRootFailureReason(error: unknown): string {
   if (error instanceof Error && error.message === "plan destination is unreadable") return "host-selection-unreadable";
