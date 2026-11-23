@@ -185,6 +185,7 @@ import { GARDEN_PLAN_FLAG, GARDEN_REPO_FLAG, issueRevalidationPolicyForTarget, r
 import { APPROVE_PUBLIC_REPLAY_FLAG, APPROVE_WORKING_TREE_REPLAY_FLAG, approveInChild, productionStuckStatePorts, readApproveRelease, runStuckStateGardener } from "./lib/stuck-state-gardener.js";
 import { inboxGardenerMode, inboxRetirementContext } from "./lib/inbox-retirement.js";
 import { createHandWorktree, defaultHandWorktreeParent, renderHandWorktree } from "./lib/hand-worktree.js";
+import { handShipArgs, runHandShip, stopHandShip, waitForHandShipStop, withHandShipRun } from "./lib/hand-ship.js";
 import { addCowWorktree, linkDonorNodeModules, mainWorktreeOf, renderCowWorktree } from "./lib/cow-worktree.js";
 import { judgeFixProgress, resolveFixProgress,
   type FixProgressJudge, type FixProgressVerdict, reviewerProofFailures } from "./lib/fix-progress-judge.js";
@@ -15389,6 +15390,24 @@ export function handWorktreeCommand(rest: string[], opts: { repoDir?: string; cl
   }
   console.log(renderHandWorktree(result));
   return 0;
+}
+
+async function handWorktreeShipCommand(rest: string[]): Promise<number> {
+  const state = join(loadConfig().root, "state");
+  try {
+    if (rest[0] === "stop" && rest.length === 2) {
+      if (!stopHandShip(state, rest[1])) throw new Error(`no running hand-ship run with id ${rest[1]}`);
+      const status = await waitForHandShipStop(state, rest[1]);
+      console.log(`hand-ship run ${rest[1]}: ${status}`);
+      return status === "stopped" ? 0 : 1;
+    }
+    const cwd = process.cwd();
+    const input = handShipArgs(rest, cwd);
+    return await withHandShipRun(cwd, state, (deps) => runHandShip(input, deps));
+  } catch (error) {
+    console.error(`rmd hand-worktree ship: ${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  }
 }
 
 /**
@@ -44235,7 +44254,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "hand-worktree",
     syntax: "rmd hand-worktree <taskId|unfiled> [--parent <abs dir>] [--no-claim]",
     summary: "Create a hand build's run-<taskId>-<epochMs> worktree from origin/main with linked node_modules.",
-    detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before adding a worktree when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent wins; otherwise defaults to /mnt/scratch/hand when /mnt/scratch is a directory, creating hand if needed, or beside the checkout when scratch is absent; avoids the janitor sweep root /mnt/scratch/worktrees) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. W1-T14307: for a filed id it also refuses when origin holds `refs/rmd-dispatch/<taskId>`, and after the cut it takes that dispatch claim through `rmd claim`'s reserver and pushes the run branch to origin at its base sha, so the fleet reads the task as in flight from the first minute; a refused push, a failed listing or another run-<taskId>-* branch appearing undoes the worktree, the branch and the claim it made, and refuses. `--no-claim` skips both pushes for an offline host and says so; `unfiled` pushes nothing. Prints the chosen parent and why, the path and branch, and the claim it holds; exits 0 created, 1 refused, 2 bad usage.",
+    detail: "W1-T5533: the worktree a HAND build works in, made by one command instead of retyped. Refuses before adding a worktree when the task id is malformed, --parent is relative or missing, the target filesystem has under 2 GiB free, origin is unreachable, origin already has a run-<taskId>-* branch, or origin/main already carries a `Remudero-Task: <taskId>` trailer (`unfiled` skips the two duplicate checks). Then runs `git worktree add --no-track -b run-<taskId>-<epochMs> <parent>/<branch> origin/main` — no upstream, an ABSOLUTE path (--parent wins; otherwise defaults to /mnt/scratch/hand when /mnt/scratch is a directory, creating hand if needed, or beside the checkout when scratch is absent; avoids the janitor sweep root /mnt/scratch/worktrees) — and HARD-LINKS (`cp -al`, never a symlink, so a later `npm ci` cannot empty the donor) node_modules from the first sibling worktree on the same filesystem whose package-lock.json is byte-identical, whose node_modules/.bin is non-empty and whose top-level `npm ls` passes. When none qualifies it prints `npm ci` as the next step with each candidate's reason and the free space, and does not run it. W1-T14307: for a filed id it also refuses when origin holds `refs/rmd-dispatch/<taskId>`, and after the cut it takes that dispatch claim through `rmd claim`'s reserver and pushes the run branch to origin at its base sha, so the fleet reads the task as in flight from the first minute; a refused push, a failed listing or another run-<taskId>-* branch appearing undoes the worktree, the branch and the claim it made, and refuses. `--no-claim` skips both pushes for an offline host and says so; `unfiled` pushes nothing. Prints the chosen parent and why, the path and branch, and the claim it holds; exits 0 created, 1 refused, 2 bad usage.\n\n`rmd hand-worktree ship [--title <title>] [--body-file <path>]` runs from a clean, committed hand-worktree. A new PR needs both inputs. An open PR supplies omitted metadata, and the stored title, body, Acceptance block and head are verified after publication. Configure the operator state file `hand-ship-hosts.json` as an array of entries with `name`, `kind` (`mac` or `linux`), and `target` (`local` or an SSH destination). For SSH, set `donor` to the absolute path of a checkout with installed dependencies and a matching lockfile. Local `donor` defaults to the hand-worktree. An optional `path` entry prepends directories to the host PATH. One hand-ship run at a time uses the operator state directory. The command prints the selected host and its reading, runs the author preflight at low priority on Mac, and compares isolated failures with the recorded main commit on that host. Publication uses the tested commit and a fast-forward-only lease. The run prints its ID and saves its status, history, receipt and logs under `state/hand-ship/<run-id>`. Use `rmd hand-worktree ship stop <run-id>` to request cancellation.",
   },
   {
     name: "worktree",
@@ -45677,7 +45696,7 @@ const HANDLERS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHan
   ["migration-preview", (rest) => withGhTransportFloorMode("enforce", () => previewPlanTaskMigration(rest))],
   ["move-task", (rest) => withGhTransportFloorMode("enforce", () => movePlanTask(rest, { ledger: (row) => appendLedger(ledgerPathFor(loadConfig()), row) }))],
   ["plan-destination", (rest) => isOpsTaskPrBody(rest) ? opsTaskPrBodyCommand(rest.slice(2)) : planDestinationCommand(rest)],
-  ["hand-worktree", (rest) => handWorktreeCommand(rest)],
+  ["hand-worktree", (rest) => rest[0] === "ship" ? handWorktreeShipCommand(rest.slice(1)) : handWorktreeCommand(rest)],
   ["worktree", (rest) => worktreeCommand(rest)],
   ["pr-checks", (rest) => reportPrChecks(rest)],
   [
