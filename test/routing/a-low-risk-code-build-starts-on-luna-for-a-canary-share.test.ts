@@ -208,6 +208,8 @@ test("W1-T14549 criterion 2: control and ineligible tasks spawn with no economy 
 test("W1-T14549 criterion 3: with no Codex economy capacity, or an operator preference, the build routes as on main", async t => {
   const config = checkout(t);
   const baseline = await route(config, {});
+  const healthy = await route(config, { economyFirst: true });
+  assert.equal(healthy.assignment.routing.decision?.rule, "build-economy-first", "the contrast: with capacity the build starts on Luna");
   for (const economy of ["exhausted", "unreadable"] as const) {
     const attempt = await route(config, { economyFirst: true, economy });
     assert.deepEqual(attempt.starts, ["no-codex-capacity"], economy);
@@ -307,4 +309,8 @@ test("W1-T14549 criterion 6: review, the cash-simple trial and the fix lane's ec
     capabilities, { codexCapability: "economy" });
   assert.deepEqual(fix.modelDecision?.capabilityOverride, { from: "balanced", reason: "fix-economy-first" },
     "a reasonless economy read is still labelled as the fix lane's");
+  const build = codex.selectCodexModel(CANDIDATES, { rateLimits: { primary: { usedPercent: 25 } } }, config, "sonnet", "medium",
+    capabilities, { codexCapability: "economy", economyReason: "build-economy-first" });
+  assert.deepEqual(build.modelDecision?.capabilityOverride, { from: "balanced", reason: "build-economy-first" },
+    "the build lane's read names its own lane, so the two are split in the ledger");
 });
