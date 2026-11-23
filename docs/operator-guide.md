@@ -134,7 +134,7 @@ real self-sync re-exec sets on its own child, so it skips the whole check, not e
 | `rmd pr-owner <pr-number>` | Whether the LOCAL ledger shows a fix lane owning one PR — a read of `fix.*` rows keyed by that pr number, printed with the owning lane and the row that proves it. READ-ONLY and host-local: it writes no ledger line, opens no PR, and touches no git state. It answers from the ledger this host holds, so a lane that claimed the PR on another host is invisible to it — an absent owner is 'this host has no record', never 'nobody owns it'. |
 | `rmd pr-state <n...> [--max-age <dur>]` | Read PR head sha, check rollup and failing names, mergeability, review state, auto-merge and terminal state from the host-local ledger union, with each field's timestamp and source step. Stale or incomplete PRs share one batched read-broker query; a failed read preserves the ledger answer marked stale with its error. Default freshness is two sweep periods, derived from recent pass rows or the policy's poll interval. Read-only: writes no ledger or GitHub state. |
 | `rmd claim <task-id> [--drop \| --renew \| --hold [--interval-ms <n>]]` | Takes the dispatch claim the fleet honours for a hand build (W1-T5859): pushes `refs/rmd-dispatch/<task-id>` through the same git-ref create-if-absent claim the fleet's own lanes take, with the same anchor message, so dispatch sees a hand-built task before its branch or PR exists. Refuses a task id that is not in the plan on `origin/main`. Prints `claimed refs/rmd-dispatch/<id>` and exits 0 when created; exits 1 naming the holder when taken, and exits 1 without claiming when origin is unreachable. `--drop` removes the claim only when its anchor's host is this host (an abandoned hand build), never another host's. A claim holds only while its holder renews it (W1-T9432). `--hold` takes the claim (or adopts this host's existing one), stays in the foreground, renews it every 5 minutes (`--interval-ms` overrides the pace) printing one `renewed` line each time, and drops it on SIGINT, SIGTERM or SIGHUP; a `lost` renewal exits 1 naming the new holder. Run it in the background of the session doing the build, so the claim dies with that session. `--renew` renews once, and only a claim whose anchor's host is this host. A renewal is a child commit of the claim pushed with `--force-with-lease`, so it never recreates a claim that was reclaimed or dropped. The fleet's own runs renew their claims the same way while they live. A lane that meets a claim judges its holder's last sign of life (the newest renewal, the mint, or a commit on an origin `run-<id>-*` branch) against W, the p90 of this instance's measured claim-to-verdict durations over 7 days: silence of W or more writes `dispatch.claim_unrenewed` once and keeps the claim; silence of 2W or more drops it (`dispatch.claim_reclaimed`) and that lane takes the task. So a hand build that neither holds nor renews its claim is reclaimed after 2W of silence. With no measured durations, nothing is reclaimed and the claim waits for an operator, as before. |
-| `rmd progress-watchdog [--json] [--state-root <dir>]` | Names a stalled sweep by its **progress**, not its pulse (W1-T5687): reads the ledger union (every archive plus the live ledger) and prints one verdict — PROGRESSING; IDLE (no open PRs); STALLED (newest progress row over 15 min old: `capture-diagnostics`; over 30 min: `recycle`); CRASH_LOOP (3 or more `daemon.paths` boots in 15 min that never reached `daemon.boot`: `hold-revive`); or UNKNOWN (no rows, or no open-PR count — never a silent `none`). Progress is only a `sweep.pass`, `review.posted` or `verdict.merged` row; `daemon.*` and `runtime.*` rows are a pulse, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest `sweep.pass` row's `enumerated` field. On `capture-diagnostics` it writes one bundle (ledger tail, `docker ps`, the tenant's `docker logs --tail`, the verdict) under `<state>/diagnostics/progress-<ts>/`, at most one per 15 min — its only write. It recycles nothing; acting on `recycle` / `hold-revive` from the host launcher is W1-T5688. |
+| `rmd progress-watchdog [--json] [--state-root <dir>] [--request-restart]` | Names a stalled sweep by its **progress**, not its pulse (W1-T5687): reads the ledger union (every archive plus the live ledger) and prints one verdict — PROGRESSING; IDLE (no open PRs); STALLED (newest progress row over 15 min old: `capture-diagnostics`; over 30 min: `recycle`); CRASH_LOOP (3 or more `daemon.paths` boots in 15 min that never reached `daemon.boot`: `hold-revive`); or UNKNOWN (no rows, or no open-PR count — never a silent `none`). Progress is only a `sweep.pass`, `review.posted` or `verdict.merged` row; `daemon.*` and `runtime.*` rows are a pulse, which is why the 318-minute crash loop of 2026-10-03 read live to every daemon-prefix reader. The open-PR count is the newest `sweep.pass` row's `enumerated` field. On `capture-diagnostics` it writes one bundle (ledger tail, `docker ps`, the tenant's `docker logs --tail`, the verdict) under `<state>/diagnostics/progress-<ts>/`, at most one per 15 min. It recycles nothing itself: the host launcher (`deploy/install-host-units.sh`) acts on the verdict. A STALLED verdict whose loop is still alive answers `restart-in-place` before `recycle` (W1-T11327). The launcher then runs `--request-restart`, which writes the one-shot `state/RESTART_REQUESTED` marker and a `watchdog.restart_requested` row. The daemon reads the marker on its next tick and takes the freshness exit, so the container restarts the process on fresh `origin/main` code without a recycle. A request with no newer boot after 15 minutes, or a frozen loop, still answers `recycle`. |
 | `rmd live-edits --tree <daemon-checkout\|install-checkout> --checkout <dir> --state-root <dir> [--json]` | One rung of the live-edit ladder (2026-10-11), run by the host watchdog for the daemon checkout and the install checkout. Tracked edits are written at once to a patch under `<state>/recovery/live-edits/<tree>/` and to `refs/rmd-recovery/live-edits/<host>/<ts>`, read back and re-applied before they count as a copy. At the daemon's own freshness restart pressure the daemon opens one needs-human issue; at twice it, and only with a confirmed copy of these exact edits, the tracked paths are restored to HEAD so the checkout fast-forwards. The host has no GitHub credential, so this verb spools its escalation and restore notice under `<state>/escalation-spool/` and the daemon posts them. |
 | `rmd host-alert --state-root <dir> --instance <name> --condition <condition> (--raise <message> \| --clear) [--json]` | The host watchdog's own alarms (2026-10-11), asked by the launcher: `crash-loop` (the `state/DAEMON_CRASH_LOOP` marker), `units-not-on-main`, `units-diverged`, `deploy-code-fetch-failed`, `deploy-code-diverged` and `deploy-run-problem`. A refusal is counted per consecutive tick under `<state>/launcher-alerts/`: at the deployer's `REFUSAL_PERSISTING_AT` it is ledgered as `launcher_alert.persisting`, and at `REFUSAL_ESCALATE_AT` one needs-human escalation is spooled under `<state>/escalation-spool/` for the daemon to post. A crash loop is spooled at once. `--clear`, run when the launcher sees the step succeed, withdraws a still-spooled escalation or spools the close of the one the daemon opened. The heartbeat also publishes the crash-loop marker as `crash_loop_verdict`, which `fleet-heartbeat-watch.yml` raises as its `CRASH_LOOP` arm. |
 | `rmd routing-ab [--json]` | Compares the arms of each live routing experiment (today: Sol vs Sonnet on sonnet/high work, operator ruling 2026-09-24) over the ledger union: tasks, merges, merge rate, fix dispatches per task, median worker minutes, tokens and notional cost per arm. An arm under the experiment's minimum sample reads "insufficient sample", never a verdict, and the revisit date is flagged once due. Read-only. |
@@ -244,10 +244,11 @@ cheap `git ls-remote --heads origin` fingerprint; the REST/ancestry classifier
 is throttled, and the light in-flight pass never reaches the remote git write.
 An unreadable or empty listing refuses rather than becoming a healthy zero.
 
-**Stale held run branches: shadow by default, act behind a flag** (operator ruling 2026-11-01).
+**Stale held run branches: armed since 2026-11-23** (operator rulings 2026-11-01 and 2026-11-23).
 Each reap pass names the run branches `planBranchReap` holds that have gone stale (7 days for a
 merge-credited task, 14 otherwise) and ledgers them as `branch_reap.hygiene_shadow`, pushing nothing.
-`sweep.armStaleBranchArchive` in `plan/policy.yaml` (default `false`) arms the act mode: the automatic
+`sweep.armStaleBranchArchive` in `plan/policy.yaml` arms the act mode. It is `true` since the operator's
+2026-11-23 ruling; set it to `false` to return to the shadow alone. Armed, the automatic
 rung's prune pass, or `rmd reap-branches --archive-stale`, archives up to 25 per pass with one atomic
 leased push each and ledgers `branch_reap.hygiene_archived`. Restore one with
 `git fetch origin refs/rmd-recovery/reaped/<name>/<sha>:refs/rmd-recovery/reaped/<name>/<sha> && git push origin refs/rmd-recovery/reaped/<name>/<sha>:refs/heads/<name>`.
@@ -793,6 +794,12 @@ switch: `<state dir>/plan-destination.json`, beside `daemon-target.json`.
 - A file that is present but wrong is `unreadable`. A writer then refuses. It never reads the file
   as "off".
 
+**The public catalog takes no new task record** (W1-T14343). `catalog.newTasks: closed` in
+`plan/policy.yaml` makes `lint-plan` refuse a pull request to this repository that adds a task
+record whose id no commit of the base's history ever held (`new-public-task-record`). An edit, a
+removal, or a restore of an id that history holds still passes. So a new task always goes to the
+plan destination, whatever this host file says.
+
 Before a hand filing, ask the host where the file goes:
 
 ```sh
@@ -996,6 +1003,20 @@ lsof -ti :4317        # empty output = the port is free, safe to `rmd serve` aga
 ```
 
 ### Recycling the containerised daemon onto a fresh image
+
+**Restart in place before you recycle.** When the daemon only needs to load newer `origin/main`
+code, and not a new image, ask the running daemon to restart itself:
+
+```sh
+./bin/rmd progress-watchdog --request-restart --state-root <state dir>
+```
+
+It writes `state/RESTART_REQUESTED` and one `watchdog.restart_requested` ledger row. The daemon
+reads the marker once on its next tick, ledgers `daemon.restart_request_consumed`, and takes the
+same exit as a freshness restart. The container's entrypoint then fetches, checks out and restarts
+the process in the same container. Nothing is pulled and the container is not replaced. Use a
+recycle, below, when the image itself must change (a `deploy/Dockerfile` or `deploy/entrypoint.sh`
+change) or when the daemon's loop is frozen and cannot read the marker.
 
 The section above restarts the **mini's** launchd-supervised daemon in-process. A **containerised**
 daemon (Azure host, `docker run --name remudero-daemon ...` per `deploy/host-update.sh
@@ -2144,7 +2165,9 @@ docker exec remudero-daemon sh -c 'test -n "$RMD_CASH_EASTUS_API_KEY" && echo se
 Every Foundry Messages turn reserves against the same UTC-day `dailyCapUsd` as the inexpensive
 cash requests **within one daemon** unless `workerProviders.fleetCashAllowancePath` names one
 host-shared file for every cash instance. Opus has an additional $5 ordinary and $10 squeeze-day limit; automatic routing
-uses it only on squeeze days. Keep the production shared squeezed limit at or below **$25**. A
+uses it only on squeeze days. The live caps, read from the Azure host's config on 2026-11-23, are
+`dailyCapUsd: { normal: 10, squeezed: 50 }` and a shared `fleetCapUsd` of 50 in the fleet allowance file: $10
+for a normal UTC day and $50 for a day the subscriptions are tapped out. A
 missing endpoint/key, unsupported tool, exhausted allowance, or absent deployment leaves the
 task blocked or returns a named error; it does not claim completion. After provisioning, verify
 the running daemon's boot/image SHA, an actual Luna and Foundry response, and the allowance
