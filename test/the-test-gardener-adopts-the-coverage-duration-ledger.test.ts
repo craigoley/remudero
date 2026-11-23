@@ -76,6 +76,7 @@ test("W1-T6174: a coverage proposal is adopted into the coverage ledger only", a
   const probe = await probePromise;
   await refreshTestManifestProposalAsync("acme", "remudero", f.stateDir, f.io(true));
   const before = readFileSync(join(f.root, FAST), "utf8");
+  const coverageBefore = readFileSync(join(f.root, COVERAGE), "utf8");
   const actions = testGardenInventory(f.root, f.stateDir, probe, { manifestChangedAtMs: () => undefined }).candidates;
   assert.equal(actions.length, 1);
   assert.equal(actions[0]!.class, "adopt-durations");
@@ -86,9 +87,13 @@ test("W1-T6174: a coverage proposal is adopted into the coverage ledger only", a
   assert.equal(readFileSync(join(f.root, FAST), "utf8"), before);
   const workspace = { root: f.root, land: () => undefined, dispose: () => {} };
   const spec = testGardenSpec({ repoRoot: f.root, stateDir: f.stateDir, log: () => {}, openWorkspace: () => workspace }, probe);
+  // W1-T13987: a manifest that already holds every row drafts nothing; one whose rows differ drafts the pass.
+  assert.equal(spec.apply(workspace, { actions, acting: ["adopt-durations"] }, {}), undefined);
+  writeFileSync(join(f.root, COVERAGE), coverageBefore);
   const applied = spec.apply(workspace, { actions, acting: ["adopt-durations"] }, {});
   assert.ok(applied);
   assert.match(applied.body, /tends scripts\/test-tier-coverage-manifest\.json/);
+  assert.equal(probe.loadManifest(join(f.root, COVERAGE)).files["test/b.test.ts"], 6200);
 });
 
 test("W1-T6174: a run with no coverage proposal is recorded absent", async (t) => {
