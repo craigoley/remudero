@@ -690,6 +690,10 @@ export const DAEMON_EXIT_ENVIRONMENTAL = 77;
 /** A positively empty dedicated queue hands control to the zero-token shell supervisor. */
 export const DAEMON_EXIT_IDLE_STARVED = 78;
 
+/** W1-T14546: the daemon handed its run to a standby it started; the entrypoint watches that successor by pid.
+ * Keep deploy/entrypoint-supervise.sh's duplicate in sync: test/entrypoint-boot.test.ts is the falsifier. */
+export const DAEMON_EXIT_HANDED_OFF = 79;
+
 /** Restart at a fraction of V8's reported limit so NODE_OPTIONS changes cannot stale a byte bound.
  * The remaining quarter lets the detecting tick allocate to log and return (W1-T3335).
  * Forensics: docs/forensics/daemon.md. */
