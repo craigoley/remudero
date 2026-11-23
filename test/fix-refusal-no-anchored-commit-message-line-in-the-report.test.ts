@@ -113,9 +113,10 @@ test("an existing fix commit is left intact", async (t) => {
 });
 
 test("a fix with no edits does not dispatch a commit-line request", async (t) => {
-  const { outcome, prompts, messages } = await fixRound(t, { edits: false });
+  const { outcome, rows, messages } = await fixRound(t, { edits: false });
   assert.equal(outcome.outcome, "stood_down");
-  assert.equal(prompts.length, 1);
+  assert.equal(rows.some((row) => row.step === "fix.commit_line_requested"), false);
+  assert.equal(rows.find((row) => row.step === "fix.commit_refused")?.reason, "the worker changed nothing");
   assert.equal(messages.length, 0);
 });
 

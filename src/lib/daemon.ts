@@ -123,7 +123,7 @@ import {
   type StaleReviewerRecurrenceState,
   type StaleReviewerSkipObservation,
 } from "./sweep.js";
-import { PLAN_TASK_MOVE_ACTION, runPlanTaskMoveTick, type PlanTaskMover } from "./plan-task-move-janitor.js";
+import { PLAN_TASK_MOVE_ACTION, planTaskMoveTickPhase, runPlanTaskMoveTick, type PlanTaskMover } from "./plan-task-move-janitor.js";
 // The same cycle-free sweep.ts value edge (W1-T2744).
 import {
   adoptChildWork,
@@ -5638,6 +5638,8 @@ export async function runDaemon(
   // W1-T14532: when this process last launched a move tick, and when it last said a tick was still in flight.
   let planTaskMoveTickStartedAtMs: number | undefined;
   let planTaskMoveInFlightRowAtMs: number | undefined;
+  // W1-T14536: the phase the last in-flight row named.
+  let planTaskMoveInFlightRowPhase: string | undefined;
   const holdOpsDispatch = (reason: string, observation: OpsTaskDispatchRead, record?: CompositionRecordFailure): void => {
     const safeReason = OPS_CATALOG_OUTCOMES.includes(reason as OpsCatalogOutcome) ||
       ["selection_unreadable", "selection_changed", "invalid_dispatch_flag", "source_pending", "source_identity_unknown",
@@ -7787,15 +7789,21 @@ export async function runDaemon(
     if (deps.planTaskMover && !detachedActionInFlight(PLAN_TASK_MOVE_ACTION)) {
       planTaskMoveTickStartedAtMs = daemonClock.now();
       planTaskMoveInFlightRowAtMs = undefined;
-      detachSweepAction(runPlanTaskMoveTick({ opsDispatchHold: opsDispatchHoldReason(), log }, deps.planTaskMover),
-        { actionKind: PLAN_TASK_MOVE_ACTION, taskId: "DAEMON" });
+      planTaskMoveInFlightRowPhase = undefined;
+      detachSweepAction(runPlanTaskMoveTick({ opsDispatchHold: opsDispatchHoldReason(), log, startedAtMs: planTaskMoveTickStartedAtMs },
+        deps.planTaskMover), { actionKind: PLAN_TASK_MOVE_ACTION, taskId: "DAEMON" });
     } else if (deps.planTaskMover) {
       // W1-T14532: a tick that never settles holds every later one; say so, with its age, at most once an hour.
+      // W1-T14536: the row names the phase the tick is in, and a change of phase writes one more.
       const nowMs = daemonClock.now();
-      if (planTaskMoveInFlightRowAtMs === undefined || nowMs - planTaskMoveInFlightRowAtMs >= PLAN_TASK_MOVE_IN_FLIGHT_ROW_MS) {
+      const phase = planTaskMoveTickPhase(deps.planTaskMover);
+      if (planTaskMoveInFlightRowAtMs === undefined || nowMs - planTaskMoveInFlightRowAtMs >= PLAN_TASK_MOVE_IN_FLIGHT_ROW_MS ||
+        (phase !== undefined && phase !== planTaskMoveInFlightRowPhase)) {
         planTaskMoveInFlightRowAtMs = nowMs;
+        planTaskMoveInFlightRowPhase = phase;
         try {
           log(PLAN_TASK_MOVE_IN_FLIGHT_STEP, {
+            phase: phase ?? null,
             age_ms: planTaskMoveTickStartedAtMs === undefined ? null : Math.max(0, nowMs - planTaskMoveTickStartedAtMs),
           });
         } catch (error) { void error; /* The skip stands either way; only the diagnostic is lost. */ }

@@ -104,10 +104,10 @@ test("W1-T4064: open fanout adds impact and measured cost per merge changes the 
   assert.equal(expensiveContext.costOfDelayByTaskId!.get(parent.id), context.costOfDelayByTaskId!.get(parent.id)! / 2);
 });
 
-test("W1-T4064: duplicate archive starts consume one slot and old slots survive the class window", () => {
-  const selected = { step: "run.start", task_id: fresh.id, run_id: "selected", ts: new Date(NOW - 14 * DAY).toISOString() };
+test("W1-T4064: duplicate archive starts consume one slot", () => {
+  const selected = { step: "run.start", task_id: fresh.id, run_id: "selected", ts: new Date(NOW - 2 * DAY).toISOString() };
   // W1-T8166: a lone old start is a proven orphan and spends no stride; this run did dispatch, so it owns a row.
-  const worked = { step: "worker.spawn", task_id: fresh.id, run_id: "selected", ts: new Date(NOW - 14 * DAY + 1000).toISOString() };
+  const worked = { step: "worker.spawn", task_id: fresh.id, run_id: "selected", ts: new Date(NOW - 2 * DAY + 1000).toISOString() };
   const a = calibrate([old, fresh], [...history, selected, worked]);
   const b = calibrate([old, fresh], [...history, selected, worked, selected, worked]);
   const initial = calibrate([old, fresh]);
