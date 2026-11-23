@@ -98,6 +98,12 @@ export const DECISIONS_LANDING_BRANCH = "decisions-landing";
 /** The one shared PR title/head every decision-record landing call opens or reuses. */
 export const DECISIONS_LANDING_PR_TITLE = "chore(decisions): land pending decision records";
 const PLAN_RECONCILE_LANDING_BRANCH = "plan-reconcile-landing";
+/**
+ * W1-T14452: the plan review's per-pull-request record bound (remudero-ops scripts/ops-gate.rb
+ * MAX_RECORDS_PER_PULL_REQUEST). One reconcile landing carries at most this many inputs; the next
+ * cadence pass derives the rest again from merge credit, so nothing is queued.
+ */
+export const PLAN_REVIEW_RECORDS_PER_PULL_REQUEST = 50;
 const PLAN_RECONCILE_LANDING_PR_TITLE = "chore(plan): reconcile credited task statuses";
 const CI_LEARNING_PENDING_REL_DIR = "state/ci-learning-pending";
 const FEEDBACK_PENDING_REL_DIR = "state/feedback-landing-pending";
@@ -206,6 +212,8 @@ export interface LandFeedbackResult {
   carry?: LandingCarry;
   /** W1-T9616: set when the push was skipped because the branch already carries this exact change, though main moved. */
   unchangedSinceMainMoved?: true;
+  /** W1-T14452: inputs past {@link PLAN_REVIEW_RECORDS_PER_PULL_REQUEST}, in input order, NOT landed by this call. */
+  notLanded?: string[];
 }
 
 const ACKNOWLEDGEMENT_PATH_LIMIT = 50;
@@ -1884,16 +1892,31 @@ function* landContentSteps(
   }
 }
 
-export function landPlanReconcileShardsAsync(
+/** W1-T14452: the first bound's worth of inputs in input order, and the paths of the rest. */
+function withinPlanReviewBound(inputs: readonly LandContentInput[]): { carried: LandContentInput[]; notLanded: string[] } {
+  return {
+    carried: inputs.slice(0, PLAN_REVIEW_RECORDS_PER_PULL_REQUEST),
+    notLanded: inputs.slice(PLAN_REVIEW_RECORDS_PER_PULL_REQUEST).map((input) => input.relPath),
+  };
+}
+
+/** At or under the bound the result is the landing's own, unchanged; over it, the rest is named as not landed. */
+function reportNotLanded(result: LandFeedbackResult, notLanded: string[]): LandFeedbackResult {
+  return notLanded.length === 0 ? result : { ...result, notLanded };
+}
+
+export async function landPlanReconcileShardsAsync(
   root: string,
   inputs: readonly LandContentInput[],
   opts: LandFeedbackAsyncOpts = {},
 ): Promise<LandFeedbackResult> {
-  return landContentAsync(root, (net) => planReconcileLandingKindSteps(root, opts, net), [...inputs], opts);
+  const { carried, notLanded } = withinPlanReviewBound(inputs);
+  return reportNotLanded(await landContentAsync(root, (net) => planReconcileLandingKindSteps(root, opts, net), carried, opts), notLanded);
 }
 
 export function landPlanReconcileShards(root: string, inputs: readonly LandContentInput[], opts: LandFeedbackOpts = {}): LandFeedbackResult {
-  return landContent(root, (net) => planReconcileLandingKindSteps(root, opts, net), [...inputs], opts);
+  const { carried, notLanded } = withinPlanReviewBound(inputs);
+  return reportNotLanded(landContent(root, (net) => planReconcileLandingKindSteps(root, opts, net), carried, opts), notLanded);
 }
 
 export type PlanReconcileLand = (root: string, inputs: readonly LandContentInput[], opts: LandFeedbackAsyncOpts) => LandFeedbackResult | Promise<LandFeedbackResult>;
