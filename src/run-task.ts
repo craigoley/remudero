@@ -299,8 +299,8 @@ import {
   type LedgerCompactionDecision,
   type LedgerCompactionOutcome,
 } from "./lib/ledger-compaction-rung.js";
+import * as headroomRecovery from "./lib/headroom-recovery.js";
 // Compatibility re-export target: lib/escalation-catalogue"
-import { retireRecoveredHeadroomEscalations } from "./lib/headroom-recovery.js";
 import { DISK_HEADROOM_EPISODE_MS, POST_REVIEW_STALL_EPISODE_MS, escalateCircuitBreak, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateLifetimeCapExceeded, escalatePostReviewStall, escalateQuotaExhaustion, escalateStarvation, escalateStarvationCleared } from "./lib/escalation-catalogue.js";
 export {
   DISK_HEADROOM_EPISODE_MS,
@@ -33637,7 +33637,7 @@ export async function sweepEscalationReconcile(
   // candidate build and close loop, non-fatal like everything else in this rung — a throw here
   // must never take out the task-referent reconciler's own summary above.
   try {
-    await retireRecoveredHeadroomEscalations(ledgerPath, runId, {
+    await headroomRecovery.retireRecoveredHeadroomEscalations(ledgerPath, runId, {
       issues: opts.issues ?? ghIssueGatewayAsync(owner, repo),
       log,
       dryRun: opts.dryRun,
