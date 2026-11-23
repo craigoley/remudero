@@ -122,7 +122,7 @@ const RECON = "RECON REPORT\nOBSERVED: nothing\nINFERRED: nothing\nCOULDN'T-VERI
 
 /** One real `runTask` dispatch over a seeded ledger. The fake spawn answers each economy start as `economy-first`. */
 async function dispatch(taskId: string, over: { risk?: string; files?: string; canary?: Record<string, unknown>;
-  failFirstImplement?: boolean; seed?: Row[] } = {}): Promise<{ spawns: SpawnWorkerArgs[]; rows: Row[] }> {
+  failFirstImplement?: boolean; seed?: Row[]; startReason?: "economy-first" | "no-codex-capacity" | "operator-preference" } = {}): Promise<{ spawns: SpawnWorkerArgs[]; rows: Row[] }> {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}luna-canary-root-`));
   const planPath = join(root, "tasks.yaml");
   writeFileSync(planPath, [`- id: ${taskId}`, "  title: luna build canary probe", "  repo: remudero", "  type: implement",
@@ -145,7 +145,7 @@ async function dispatch(taskId: string, over: { risk?: string; files?: string; c
   const spawn = async (args: SpawnWorkerArgs): Promise<WorkerResult> => {
     spawns.push(args);
     if (spawns.length === 1) return workerResult(RECON);
-    args.economyFirst?.onDecision?.("economy-first");
+    args.economyFirst?.onDecision?.(over.startReason ?? "economy-first");
     return workerResult("REPORT\nno PR opened yet\n", over.failFirstImplement === true && spawns.length === 2);
   };
   try {
@@ -220,6 +220,12 @@ test("W1-T14549 criterion 3: with no Codex economy capacity, or an operator pref
     enabledProviders: ["claude", "codex"], preference: "claude", reservePercent: 5, parks: [],
     expiresAt: new Date(NOW + 3_600_000).toISOString(),
   }, { config, now: () => NOW, writerFingerprint: "unknown" });
+  for (const startReason of ["no-codex-capacity", "operator-preference"] as const) {
+    const { rows } = await dispatch(taskInArm("luna"), { startReason, failFirstImplement: true });
+    assert.equal(canaryRows(rows)[0]?.start_reason, startReason, "the canary row carries the spawn's own start reason");
+    assert.equal(rows.some((row) => row.step === "implement.luna_canary_escalated"), false,
+      "a first attempt that never started on Luna is not a Luna failure");
+  }
   const preferred = await route(config, { draw: 0.9999 });
   const attempt = await route(config, { economyFirst: true, draw: 0.9999 });
   assert.deepEqual(attempt.starts, ["operator-preference"]);
