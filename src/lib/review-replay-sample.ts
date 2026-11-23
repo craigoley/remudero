@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { systemClock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { logGardenLedgerRead } from "./gardener-runtime.js";
+import { createIncrementalLedgerUnion, ledgerRotationEntries, realLedgerFs, type LedgerGrepFsDeps,
+  type readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { loadReviewerHealthState, reviewerHealthStatePath } from "./reviewer-health.js";
 import { classifyReviewOutcome, reviewReplayInputDigest, type ReviewOutcomeClass,
   type ReviewOutcomeDecision, type ReviewReplayInput } from "./review-outcome-class.js";
@@ -228,9 +230,39 @@ function reviewerRegressionExclusions(stateDir: string): string[] {
   return [...shas];
 }
 
+function createReviewReplayLedgerReader(fs: LedgerGrepFsDeps = realLedgerFs, log?: GardenerDeps["log"]):
+  typeof readLedgerUnionRecordsSync {
+  let rotationsParsed = 0;
+  const read = createIncrementalLedgerUnion({
+    // Review replay refuses any torn line, even one without a replay step.
+    holder: "review-replay", reducerVersion: "1", rawPattern: /(?:)/, strictFileIdentity: true,
+  }, { ...fs,
+    readFileSync(path) {
+      const bytes = fs.readFileSync(path);
+      if (ledgerRotationEntries([basename(path)], ".")[0]?.form === "plain") rotationsParsed++;
+      return bytes;
+    },
+    gunzipSync(bytes) {
+      const decoded = fs.gunzipSync(bytes);
+      rotationsParsed++;
+      return decoded;
+    },
+  });
+  return (stateDir, opts) => {
+    rotationsParsed = 0;
+    try {
+      return read(stateDir, opts);
+    } finally {
+      if (log) logGardenLedgerRead(log, "review-replay", read.lastPass().readBytes, rotationsParsed);
+    }
+  };
+}
+
+const readReviewReplayLedger = createReviewReplayLedgerReader();
+
 function readReviewReplaySample(options: { stateDir: string; generatorRevision: string;
   since?: string; readLedger?: typeof readLedgerUnionRecordsSync }): ReviewReplaySample {
-  const ledger = (options.readLedger ?? readLedgerUnionRecordsSync)(options.stateDir,
+  const ledger = (options.readLedger ?? readReviewReplayLedger)(options.stateDir,
     { step: REVIEW_REPLAY_READ_STEPS, requireArchives: true, refuseIncomplete: true });
   if (!ledger.ok || ledger.torn > 0) throw new Error("review replay refuses an incomplete ledger union");
   return deriveReviewReplaySample(ledger.rows, { ...options,
@@ -245,10 +277,11 @@ export function refreshReviewReplaySample(options: { stateDir: string; root: str
 }
 
 export function reviewReplayGardenSpec(deps: GardenerDeps, generatorRevision: () => string,
-  options: { readLedger?: typeof readLedgerUnionRecordsSync } = {}):
+  options: { readLedger?: typeof readLedgerUnionRecordsSync; ledgerFs?: LedgerGrepFsDeps } = {}):
   GardenSpec<"refresh", string, GardenAction<"refresh"> & { content: string }, GardenCheckout> {
+  const readLedger = options.readLedger ?? createReviewReplayLedgerReader(options.ledgerFs, deps.log);
   const inventory = (): string => serializeReviewReplaySample(readReviewReplaySample({
-    stateDir: deps.stateDir, generatorRevision: generatorRevision(), readLedger: options.readLedger,
+    stateDir: deps.stateDir, generatorRevision: generatorRevision(), readLedger,
   }));
   return { name: "review-replay", classes: ["refresh"], decision: ["refresh"],
     cheapFingerprint: () => `${generatorRevision()}:${gardenLedgerBucket(deps.clock ?? systemClock)}`,

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { systemClock, type Clock } from "./clock.js";
 import { writeAtomicAsync } from "./fs-race-safe.js";
+import { readGardenerOrigin } from "./worker-containment.js";
 
 export const GARDENER_RUNTIME_VERSION = 1;
 export const GARDENER_RUNTIME_FILE = "gardener-runtime.json";
@@ -45,6 +46,15 @@ export interface GardenerRuntimeSnapshot {
   configuredAt: string;
   observedAt: string;
   gardens: GardenerRuntimeEntry[];
+}
+
+/** The child can report its read cost on the parent's pass ID before it exits. */
+export function logGardenLedgerRead(log: (step: string, extra: Record<string, unknown>) => void, name: string,
+  bytesRead: number, rotationsParsed: number): void {
+  const origin = readGardenerOrigin();
+  const passId = origin?.state === "linked" && origin.name === name ? origin.passId : null;
+  log("garden.lifecycle", { name, passId, phase: "ledger-read",
+    ledger_bytes_read: bytesRead, ledger_rotations_parsed: rotationsParsed });
 }
 
 const phases: readonly unknown[] = ["scheduled", "queued", "running", "completed", "failed", "cancelled", "idle"];
