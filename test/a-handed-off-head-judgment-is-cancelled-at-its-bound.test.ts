@@ -69,6 +69,16 @@ test("W1-T5659: a handed-off-head judgment that outlives the pool's bound has it
       pr_url: pr().prUrl,
       reason: "pr_open_yield",
     },
+    {
+      ts: "2026-10-04T10:30:00.000Z",
+      run_id: "REVIEW-1",
+      task_id: `W1-T${PR}`,
+      step: "review.posted",
+      pr_url: pr().prUrl,
+      head_sha: pr().headSha,
+      capped: false,
+      plan_only: false,
+    },
   ];
   const log = (step: string, extra: Record<string, unknown> = {}) => {
     lines.push({ ts: "2026-10-04T11:30:00.000Z", run_id: "SWEEP", step, ...extra });

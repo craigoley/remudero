@@ -233,13 +233,15 @@ test("postedArmFactsFromLedger takes the LAST matching line for the head — a r
   assert.deepEqual(postedArmFactsFromLedger(lines, TASK, HEAD), { capped: false, planOnly: false });
 });
 
-test("a head with no recoverable ledgered verdict arms exactly as it did before — refusal requires positively observing capped true and plan_only false", async () => {
+test("a head with no recoverable ledgered verdict: the bare predicate arms as before, but W1-T14317 refuses when the sweep's verdict history cannot be read", async () => {
   const deps = fakeDeps([]);
   const decision = decideSweepArm(greenPr(), []);
   assert.equal(decision.arm, true);
   assert.match(decision.reason, /no ledgered verdict recoverable for this head/);
   await runSweep([greenPr()], deps);
-  assert.deepEqual(deps.armed.map((p) => p.prNumber), [800], "a rotated ledger must never strand a green PR");
+  assert.deepEqual(deps.armed, [], "an archive-free state directory is an unreadable history, not permission to arm");
+  const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
+  assert.match(String(disposed[0].stand_down_reason), /unreadable verdict history/);
 });
 
 // ── 6. parity is delegation, not duplication ───────────────────────────────
@@ -308,7 +310,7 @@ test("W1-T970: a risk-judge escalation blocks arming for that head", async () =>
 });
 
 test("W1-T970: a new head clears the risk-judge refusal", async () => {
-  const deps = fakeDeps([riskEscalatedLine()]);
+  const deps = fakeDeps([riskEscalatedLine(), postedLine({ head_sha: OTHER_HEAD, capped: false, proof_exec: ["executed_pass"], pr_url: greenPr().prUrl })]);
   // The SAME PR, but pushed to a NEW head — the refusal was keyed to the OLD head only.
   const summary = await runSweep([greenPr({ headSha: OTHER_HEAD })], deps);
   assert.deepEqual(
@@ -327,7 +329,7 @@ test("W1-T970: an operator override clears the risk-judge refusal", async () => 
     reason: "read the diff by hand — arming anyway",
     head_sha: HEAD,
   };
-  const deps = fakeDeps([riskEscalatedLine(), grant]);
+  const deps = fakeDeps([riskEscalatedLine(), grant, postedLine({ capped: false, proof_exec: ["executed_pass"], pr_url: greenPr().prUrl })]);
   const summary = await runSweep([greenPr()], deps);
   assert.deepEqual(
     deps.armed.map((p) => p.prNumber),
@@ -353,7 +355,7 @@ test("an override granted against a DIFFERENT head never clears a risk-judge ref
 
 test("W1-T970: a refusal for one head does not block a different pr", async () => {
   const otherPr = greenPr({ prNumber: 801, prUrl: "https://github.com/craigoley/remudero/pull/801", taskId: "W1-T801" });
-  const deps = fakeDeps([riskEscalatedLine()]); // refuses PR 800 only
+  const deps = fakeDeps([riskEscalatedLine(), postedLine({ task_id: "W1-T801", pr_url: otherPr.prUrl, capped: false, proof_exec: ["executed_pass"] })]); // refuses PR 800 only
   const summary = await runSweep([otherPr], deps);
   assert.deepEqual(
     deps.armed.map((p) => p.prNumber),

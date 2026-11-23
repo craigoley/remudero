@@ -36,7 +36,10 @@ function pr(prNumber: number): OpenPrView {
 }
 
 function sweepDeps(log: (step: string, extra?: Record<string, unknown>) => void, arm: SweepDeps["arm"]): SweepDeps {
-  return { arm, close: () => {}, dispatchFix: () => {}, escalate: () => {}, ledgerPath: writeLedger([]).path,
+  return { arm, close: () => {}, dispatchFix: () => {}, escalate: () => {},
+    // W1-T14317: each pull request's live verdict for its head; with no readable verdict history the sweep never arms.
+    ledgerPath: writeLedger([1, 2, 3].map((n) => ({ ts: new Date(NOW).toISOString(), run_id: "REVIEW", task_id: pr(n).taskId,
+      step: "review.posted", pr_url: pr(n).prUrl, head_sha: pr(n).headSha, capped: false, plan_only: false }))).path,
     runId: "w1-t12237", now: () => NOW, log };
 }
 

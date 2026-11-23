@@ -72,7 +72,9 @@ function harness(
   judge: SweepDeps["judgeCodeScanningAlerts"],
   over: Partial<SweepDeps> = {},
 ): Harness {
-  const lines: Array<Record<string, unknown>> = [];
+  // W1-T14317: the head carries its live review.posted verdict, which the sweep needs before it arms.
+  const lines: Array<Record<string, unknown>> = [{ ts: "2026-10-04T11:30:00.000Z", run_id: "REVIEW-5633", task_id: `W1-T${N}`,
+    step: "review.posted", pr_url: pr().prUrl, head_sha: HEAD, state: "success", capped: false, plan_only: false }];
   const armed: string[] = [];
   const fixes: Harness["fixes"] = [];
   const comments: string[] = [];

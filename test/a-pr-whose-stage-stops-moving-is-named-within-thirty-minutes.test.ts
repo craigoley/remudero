@@ -143,7 +143,9 @@ test("a failed escalation records its reason and a successful arm raises no stal
   const f = fixture();
   await runSweep([pr], { ...f.deps, escalate: () => { throw new Error("issue gateway unavailable"); } });
   assert.equal(f.rows("pr.stuck.escalation_failed")[0].reason, "Error: issue gateway unavailable");
-  const armed = fixture();
+  // W1-T14317: the PR's live verdict for its head; with no readable verdict history the sweep never arms.
+  const armed = fixture("awaiting-arm", 40, [{ ts: ago(20), run_id: "review", task_id: pr.taskId, step: "review.posted",
+    pr_url: pr.prUrl, head_sha: pr.headSha, capped: false, plan_only: false }]);
   await runSweep([pr], { ...armed.deps, arm: () => "armed" });
   assert.equal(armed.rows("pr.stuck").length, 0);
   const overlap = fixture();
