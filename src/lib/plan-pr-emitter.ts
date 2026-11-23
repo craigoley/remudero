@@ -1353,10 +1353,11 @@ export async function planPrPreflightAtCommitAsync(
   // W1-T14187: an ops (code-root) commit's unresolved-id red stands only for ids its first parent does not already
   // cite, read the same way in a second detached tree. That tree is cleaned up exactly as the commit's is.
   const firstParent = { tree: join(parent, "first-parent"), added: false, leaveForSafety: false };
+  const addTree = (at: string, rev: string) => execFileAsync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", at, rev], budgetedSpawn(budgetMs));
   const taskIds = checks.taskIdExistence ?? defaultPreflightChecksAsync.taskIdExistence;
   const readFirstParent = async (headRef: string | undefined, budget: number, root: string): Promise<PlanPrPreflightReading> => {
     firstParent.added = true;
-    const add = execFileAsync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", firstParent.tree, `${commitSha}^1`], budgetedSpawn(budgetMs));
+    const add = addTree(firstParent.tree, `${commitSha}^1`);
     try {
       await add;
       borrowNodeModules(repoDir, firstParent.tree);
@@ -1374,7 +1375,7 @@ export async function planPrPreflightAtCommitAsync(
       return withoutInheritedIds(reading, await readFirstParent(headRef, budget, root));
     } };
   try {
-    const add = execFileAsync("git", ["-C", repoDir, "worktree", "add", "--detach", "--quiet", tree, commitSha], budgetedSpawn(budgetMs));
+    const add = addTree(tree, commitSha);
     try {
       await add;
     } catch (e) {
