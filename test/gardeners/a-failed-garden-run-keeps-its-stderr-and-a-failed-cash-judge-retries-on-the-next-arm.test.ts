@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -132,6 +132,19 @@ test("W1-T13988 criterion 3: the retry stays off cash and each attempt keeps its
     assert.equal(one.requests.length, 1);
     assert.deepEqual(one.rows("judge.fallback"), []);
   }
+});
+
+test("an unwritable fallback receipt is reported on stderr and leaves the retried answer intact", async t => {
+  const f = judgeFixture(t, [cashFailure("openweight_error"), {}], "cash");
+  mkdirSync(join(f.config.root, "state", "ledger.ndjson"), { recursive: true });
+  const errors: string[] = [];
+  t.mock.method(console, "error", (line: unknown) => { errors.push(String(line)); });
+  assert.equal(await f.judge("prompt", 42), answer);
+  assert.deepEqual(f.requests.map(args => args.mountProvider), ["cash", undefined]);
+  const receipts = errors.map(line => { try { return JSON.parse(line) as Fields; } catch { return undefined; } })
+    .filter(row => row?.event === "judge.fallback_receipt_failed");
+  assert.equal(receipts.length, 1);
+  assert.equal(typeof receipts[0]!.reason, "string");
 });
 
 test("a rejected initial spawn is neither retried nor treated as a judge answer", async t => {
