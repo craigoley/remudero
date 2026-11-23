@@ -13,6 +13,7 @@
   files:
     - src/cli/commands/review.ts
     - test/review/a-pass-cannot-replace-another-writers-standing-fail.test.ts
+    - test/wiring-ordering-behaviour.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -42,3 +43,10 @@
   falsifier: |
     Post the PASS without reading the status history: criterion 1's second-writer case posts success and arms
     auto-merge, and the test fails.
+  note: |
+    Amendment 2026-11-23 (pinning test from a hand build): telling writers apart across hosts needs a writer
+    marker on each review comment (the status description is capped and target_url is not posted), so two
+    runs' comment bodies differ by that line. test/wiring-ordering-behaviour.test.ts compares judgeRubric
+    comment bodies from two runs byte for byte (2 of 6 fail); the build strips the marker line before that
+    comparison. Reviewer code stays part of the identity, as the design says: a FAIL from different reviewer
+    code keeps today's behaviour.

@@ -6249,11 +6249,10 @@ function openWeightEndpoint(config: Config, model: string): string {
 
 /** W1-T4650: the named reasons a cash attempt reports no served model. */
 export const CASH_SERVED_MODEL_REASONS = {
-  // W1-T13868: a body that lands after the deadline aborted the attempt reaches only the late usage handler. The row is
-  // already written by then, so the reason says when, not that no reply ever came.
+  // Also used for a body that lands after the deadline aborted the attempt, too late for the row.
   noResponse: "no cash response was received, so none named the model that served it",
   unnamed: "a cash response named no model id",
-  mixed: "cash responses in this attempt named different models",
+  mixed: "cash responses in this attempt named different models", // No longer produced; kept so that older rows still read.
 } as const;
 
 /** The model id ONE cash response names in its `model` field, or `undefined`. Both endpoint
@@ -6263,19 +6262,11 @@ export function cashResponseModel(model: unknown): string | undefined {
   return typeof model === "string" && SAFE_OPENWEIGHT_MODEL_ID.test(model) ? model : undefined;
 }
 
-/**
- * W1-T4650: THE SERVED MODEL OF A WHOLE CASH ATTEMPT, from what each response named, in order.
- *
- * A tool loop sends one paid request per turn, so one attempt can hold several responses. The
- * attempt reports a model ONLY when every response received named one and all named the SAME one;
- * a missing name or a disagreement is a named reason, never a pick of first or last, because an
- * attempt served by two models has no single served model to compare arms on. The requested
- * deployment is never a fallback: echoing the ask is the guess W1-T2572 refuses.
- */
+/** W1-T4650: the served model of a cash attempt, from what each response named, in order.
+ *  The latest response that named a model wins. The unnamed reason applies only when none named one,
+ *  and the noResponse reason when no response came. Never the requested deployment (W1-T2572). */
 export function cashServedModel(named: readonly (string | undefined)[]): { servedModel: string | null; servedModelReason?: string } {
   if (named.length === 0) return { servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.noResponse };
-  // W1-T13868: a call that received a model name records it, even when another response omitted or changed it. The
-  // latest named response wins: it produced the attempt's final answer. Never the requested deployment.
   const latest = named.findLast((model) => model !== undefined);
   return latest === undefined ? { servedModel: null, servedModelReason: CASH_SERVED_MODEL_REASONS.unnamed } : { servedModel: latest };
 }

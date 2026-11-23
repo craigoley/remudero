@@ -7,6 +7,7 @@
   risk: low
   priority: 1.1
   status: queued
+  attempts: 0
   files:
     - docs/recon/parked-remedies-outlive-their-evidence.md
   acceptance:

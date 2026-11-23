@@ -18,6 +18,7 @@
     - src/lib/worker-provider.ts
     - src/lib/test-slot.ts # only if a headroom-only admission needs a new export
     - test/ci/gates/a-warm-typecheck-waits-for-memory-headroom.test.ts
+    - test/a-worker-typecheck-starts-warm-in-a-memory-sized-slot-pool.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -59,3 +60,17 @@
   note: |
     Validation: on the next sweep burst, the heartbeat's memory PSI full stays below its pre-change level, and
     typecheck.peak rows show waits instead of four overlapping starts.
+    Amendment 2026-11-23 (hand build stopped before code): since W1-T14153 (#20108) every warm check is already
+    admitted at the cold peak, through the slot pool (npm, merge-probe, bwrap) or admitStaticWork (preflight); the
+    rationale's "a warm one spawns with no admission" predates that. The change is: warm checks move from the slot
+    pool to headroom-only admission at the learned warm peak, and the row records the wait. Notes for the builder:
+    (1) test/a-worker-typecheck-starts-warm-in-a-memory-sized-slot-pool.test.ts test 1 asserts a slot-* record
+    labelled typecheck:npm; headroom-only admission writes a static-* record, so that assertion changes (now in
+    files:). (2) merge-probe and bwrap admit on async daemon paths; admitStaticWork blocks with sleepSync, so add an
+    async headroom-only admission in src/lib/test-slot.ts (the synchronous-spawn census forbids the sync form there).
+    (3) Pick a bounded window for "recent" warm rows (for example the last 200 measured rows from a bounded ledger
+    tail), skip peak_rss_bytes "unknown", and fall back to TYPECHECK_COLD_PEAK_BYTES below 50 rows (fail closed).
+    (4) Keep TYPECHECK_WARM_PEAK_BYTES === TYPECHECK_COLD_PEAK_BYTES (W1-T14153 criterion 3 asserts it); the learned
+    p95 is a new function. Memory criterion 1 expects slot "acquired" and an injected acquireSlot still called for
+    warm checks; a lease adapter around the headroom admission satisfies both. (5) The wait field must pass through
+    readRelayedTypecheckPeaks in src/lib/worker-provider.ts, which rebuilds rows field by field (180-char cap).

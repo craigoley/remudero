@@ -3309,8 +3309,23 @@ const INBOX_THREAD_LIST_WARM_MS = 60_000;
 export type { ThreadListInbox };
 
 export function inboxClassificationEvidence(classified: Pick<ClassifiedInbox, "projection" | "classifications">): ClassificationEvidence {
-  const partial = [...classified.projection.values()].some((value) => value.indeterminate) || classified.classifications.some((value) => value.referentUnverified);
-  return partial ? { complete: false, incompleteReason: "the GitHub projection or a proposal referent is indeterminate" } : { complete: true };
+  const proposals = classified.classifications.filter(value => value.referentUnverified)
+    .sort((a, b) => a.proposalId === b.proposalId ? 0 : a.proposalId < b.proposalId ? -1 : 1)
+    .map(value => `${value.proposalId} (${value.referentUnverifiedReason ?? "reason unavailable"})`);
+  const tasks = [...classified.projection.values()].filter(value => value.indeterminate).map(value => value.taskId).sort();
+  const names = [...proposals, ...tasks];
+  if (names.length === 0) return { complete: true };
+
+  const prefix = "the GitHub projection or a proposal referent is indeterminate";
+  const shown = names.slice(0, 10);
+  while (shown.length > 0) {
+    const remaining = names.length - shown.length;
+    const overflow = remaining === 0 ? "" : `, and ${remaining} more`;
+    const incompleteReason = `${prefix}: ${shown.join(", ")}${overflow}`;
+    if (incompleteReason.length <= 1_000) return { complete: false, incompleteReason };
+    shown.pop();
+  }
+  return { complete: false, incompleteReason: `${prefix}: and ${names.length} more` };
 }
 
 const slowLaneClassifications = new WeakMap<PanelGraphDeps, { stamp: string; held: ThreadListClassification<ThreadListInbox> | undefined }>();

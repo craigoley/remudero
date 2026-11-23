@@ -54,19 +54,22 @@ recycle_actions_run() {
             reason="the script declares no '# phase:' line"; rc=2
           else
             echo "recycle-actions: ${phase}: running ${name} (bounded ${timeout_s}s)"
+            # `|| rc=$?`, never a bare command then `rc=$?`: recycle-container.sh calls this under
+            # `set -euo pipefail`, where a bare failing action would end the whole recycle after
+            # `docker rm` and leave no container running.
+            rc=0
             # The caller's own codex dir and container name reach the action; nothing else of its state does.
             if command -v timeout >/dev/null 2>&1; then
               RECYCLE_ACTION_STATE_DIR="${state_dir}" RECYCLE_ACTION_PHASE="${phase}" \
                 RECYCLE_ACTION_CODEX_DIR="${CODEX_DIR:-}" RECYCLE_ACTION_CONTAINER="${CONTAINER_NAME:-}" \
-                timeout "${timeout_s}" bash "${script}" "${state_dir}" >> "${log}" 2>&1
+                timeout "${timeout_s}" bash "${script}" "${state_dir}" >> "${log}" 2>&1 || rc=$?
             else
               # A host with no `timeout` (stock macOS) runs the action unbounded and says so.
               echo "recycle-actions: ${phase}: no timeout(1) on this host; ${name} runs unbounded"
               RECYCLE_ACTION_STATE_DIR="${state_dir}" RECYCLE_ACTION_PHASE="${phase}" \
                 RECYCLE_ACTION_CODEX_DIR="${CODEX_DIR:-}" RECYCLE_ACTION_CONTAINER="${CONTAINER_NAME:-}" \
-                bash "${script}" "${state_dir}" >> "${log}" 2>&1
+                bash "${script}" "${state_dir}" >> "${log}" 2>&1 || rc=$?
             fi
-            rc=$?
             if [ "${rc}" -eq 0 ]; then reason="ok"
             elif [ "${rc}" -eq 124 ]; then reason="timed out after ${timeout_s}s"
             else reason="exited ${rc}"

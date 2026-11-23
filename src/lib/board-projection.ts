@@ -501,6 +501,8 @@ export interface BoardUpdate {
   reused: number;
   full: boolean;
   elapsedMs: number;
+  /** W1-T14410: the ms of each part of a derive (ingest, derive, persist, oracle), set when it derived. */
+  phases?: Record<string, number>;
   oracle?: BoardOracleResult;
   crossTask?: BoardCrossTask;
 }
@@ -1999,6 +2001,7 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       const oracleDue = lastOracleAt === undefined ? false : now - lastOracleAt >= BOARD_ORACLE_INTERVAL_MS;
       // The oracle runs right after a clock re-derive, so it never reports what the next 30 s tick would fix.
       const clockDue = rules.clock && (lastClockAt === undefined || now - lastClockAt >= BOARD_CLOCK_REDERIVE_MS || oracleDue);
+      const ingestedAt = clock.now();
       const { plan, credit, overrides, stampOf } = inputs();
       const stamps = new Map<string, string>();
       for (const task of plan.tasks) stamps.set(task.id, stampOf(task.id, task));
@@ -2050,7 +2053,9 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       }
       keepReads(plan, view, reads, new Set(rederived));
       derivedLatestTsMs = latestTsMs;
+      const derivedAt = clock.now();
       persist(changed, removed);
+      const persistedAt = clock.now();
       pending = false;
       lastDeriveAt = now;
       crossRowsPending = 0;
@@ -2066,6 +2071,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
       }
       if (oracleDue) result.oracle = oracleWith(plan, credit, overrides, stampOf);
       result.elapsedMs = clock.now() - startedAt;
+      result.phases = { ingest: ingestedAt - startedAt, derive: derivedAt - ingestedAt, persist: persistedAt - derivedAt,
+        ...(oracleDue ? { oracle: clock.now() - persistedAt } : {}) };
       return result;
     },
     projections: () => new Map([...held].map(([id, h]) => [id, h.projection])),

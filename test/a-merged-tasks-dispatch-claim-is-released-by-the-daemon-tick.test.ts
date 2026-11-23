@@ -293,15 +293,29 @@ test("W1-T8616: the daemon command wires the tick sweep to the claim reserver an
   });
   const tick = fakeReserver({ "W1-T6369": { sha: "a".repeat(40), message: "rmd-dispatch claim 1@elsewhere 2026-10-14T12:00:00.000Z" } });
   const boot = { mintAnchor: () => "x", attempt: () => "taken" as const, holder: () => undefined, drop: () => false, list: () => [] };
+  let listingReads = 0;
+  const tickClaimReserver = {
+    ...tick.reserver,
+    listHeld: () => {
+      listingReads++;
+      return tick.reserver.listHeld!();
+    },
+  };
   const code = await daemonCommand(["--repo", "remudero-sandbox", "--plan", planPath, "--max", "0"], {
     bootClaimReserver: boot,
-    ...({ tickClaimReserver: tick.reserver } as Record<string, unknown>),
+    tickClaimReserver,
     runDaemon: async (_plan, wired): Promise<DaemonSummary> => {
-      await (wired as { releaseLandedClaims?: (m: (id: string) => boolean) => Promise<void> }).releaseLandedClaims?.((id) => id === "W1-T6369");
+      const sweep = wired.releaseLandedClaims?.((id) => id === "W1-T6369");
+      assert.ok(sweep);
+      const listing = await sweep.listing;
+      await sweep;
+      assert.deepEqual(listing, { ok: true, claims: [{ taskId: "W1-T6369", holder: "a".repeat(40) }] },
+        "W1-T13356: selection gets the origin snapshot that supplied the release lease");
       return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
     },
   });
   assert.equal(code, 0);
+  assert.equal(listingReads, 1, "selection and the landed sweep share a single listing");
   assert.equal(tick.refs.size, 0, "the wired sweep released the merged task's claim");
   const ledger = readFileSync(join(root, "state", "ledger.ndjson"), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
   const released = ledger.filter((r) => r.step === "dispatch.claim_released" && r.surface === "tick-sweep");

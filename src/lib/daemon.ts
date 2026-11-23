@@ -48,7 +48,7 @@ import {
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
-import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_RATE_CEILING_MS, DEPLOY_RESTART_SCORE_THRESHOLD, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, FRESHNESS_LIKELY_FRACTION, FRESHNESS_MAX_DRAIN_WAIT_MS, FRESHNESS_MIN_LIFETIME_MS, INSTALL_INPUTS_RELEASE, MIN_LIFETIME_HOLD, timeToLikelyFreshnessRestart, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
+import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_RATE_CEILING_MS, DEPLOY_RESTART_SCORE_THRESHOLD, EXPEDITE_RELEASE, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, FRESHNESS_LIKELY_FRACTION, FRESHNESS_MAX_DRAIN_WAIT_MS, FRESHNESS_MIN_LIFETIME_MS, INSTALL_INPUTS_RELEASE, MIN_LIFETIME_HOLD, pendingExpedite, timeToLikelyFreshnessRestart, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -159,7 +159,7 @@ import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, openDependentFanout, type DispatchValueContext } from "./dispatch-value.js";
-import { CLAIM_SILENCE_FLOOR_MS, claimSilenceWindow } from "./dispatch-claim.js";
+import { CLAIM_SILENCE_FLOOR_MS, claimSilenceWindow, dispatchClaimRef, type DispatchClaimListing } from "./dispatch-claim.js";
 import {
   OPS_CATALOG_OUTCOMES, opsCatalogRefusalStage, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome, type OpsCatalogShadowInput,
   type OpsCatalogTarget,
@@ -1592,8 +1592,10 @@ export interface DaemonDeps {
   isIndeterminate?: (taskId: string) => boolean;
   /** W1-T8616: release the dispatch claims of tasks this cycle's `isMerged` credits (`releaseLandedDispatchClaims`:
    *  the evidence arm, each drop leased to the sha one `ls-remote` listed, a `--rerun` lane's claim left alone, a failed
-   *  listing ledgered and never read as no claims). Started once per cycle, never awaited, never overlapped. Optional. */
-  releaseLandedClaims?: (isMerged: (taskId: string) => boolean) => Promise<void>;
+   *  listing ledgered and never read as no claims). The sweep itself stays detached. It can publish its listing
+   *  separately so selection can reconcile claim-held deferrals before offering work. */
+  releaseLandedClaims?: (isMerged: (taskId: string) => boolean) =>
+    Promise<unknown> & { listing?: Promise<DispatchClaimListing> };
   claimSweepSettled?: Promise<void>;
   /** True when status.ts derives a durable independent-failure block from the ledger. */
   isIndependentFailureBlocked?: NextRunnableOpts["isIndependentFailureBlocked"];
@@ -1758,6 +1760,9 @@ export interface DaemonDeps {
    *  closes admission; admitted lanes settle before the existing drain and stale exit (W1-T5308). A
    *  promise is awaited at the tick's own boundaries; a lane's sync refill reads the latest settled one (W1-T5282). */
   checkFreshness?: () => DaemonFreshness | Promise<DaemonFreshness>;
+  /** W1-T14360: a task's declared `expedite` reason from the catalogs the daemon already holds, or undefined. Asked only
+   *  for the tasks a pending commit's own Remudero-Task line names (`DeployWorthChange.tasks`); absent, no expedite. */
+  taskExpedite?: (taskId: string) => string | undefined;
   /** W1-T9631: the sha the boot checkout could not reach; defaults to the entrypoint's RMD_BOOT_CHECKOUT_BLOCKED. */
   bootCheckoutBlocked?: string;
   /** Consulted only when freshness reports an install is needed. Runs before the loop stops for
@@ -5832,19 +5837,25 @@ export async function runDaemon(
     freshnessOutlook = { weight: decision.weight, staleSinceMs: staleAtMs };
     // OPERATOR RULING 2026-10-17: this lifetime began when the loop did (the boot gate's start); every release but the
     // fast paths waits until it is FRESHNESS_MIN_LIFETIME_MS old. Both rows carry it, so the hold is measurable.
+    const expedite = deps.taskExpedite ? pendingExpedite(freshness.changes, deps.taskExpedite) : undefined;
     const coalesced = coalesceFreshnessRestart({
       decision, newSha: freshness.newSha, lastAdvanceAtMs: lastAdvanceAtMs!,
       staleSinceMs: staleAtMs, nowMs, window: freshnessQuietWindow, installInputsChanged: changesInstallInputs(freshness.changes),
       threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs,
       lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: freshnessMinLifetimeMs,
+      ...(expedite ? { expedite } : {}),
     });
     const lifetimeEvidence = {
       lifetime_ms: Math.max(0, nowMs - bootGateStartedAtMs), min_lifetime_ms: freshnessMinLifetimeMs,
       ...(coalesced.reason === MIN_LIFETIME_HOLD ? { held_by: MIN_LIFETIME_HOLD } : {}),
+      // W1-T14360: the expedite fast path names the task and its declared reason on both rows.
+      ...(coalesced.expedite
+        ? { fast_path: EXPEDITE_RELEASE, expedite_task_id: coalesced.expedite.taskId, expedite_reason: coalesced.expedite.reason }
+        : {}),
     };
     const action = coalesced.action === "hold" ? "defer" : coalesced.action;
     if (action === "restart") freshnessDecidedAtMs ??= nowMs;
-    const released = ["window_quiet", "upper_age", INSTALL_INPUTS_RELEASE].includes(coalesced.reason);
+    const released = ["window_quiet", "upper_age", INSTALL_INPUTS_RELEASE, EXPEDITE_RELEASE].includes(coalesced.reason);
     if (coalesced.action === "hold" || freshnessHeld || released) {
       log("daemon.freshness_coalesced", {
         action: coalesced.action,
@@ -7752,11 +7763,28 @@ export async function runDaemon(
       log("daemon.block.rearmed", { task: taskId, pr_url: park.prUrl, reason });
     }
 
+    let tickClaimEvidence: {
+      deferrals: typeof claimHeldDeferrals;
+      listing: Promise<DispatchClaimListing | undefined>;
+    } | undefined;
     // W1-T8616: a merged task's dispatch claim is released here, from the cycle's own `isMerged`.
     if (deps.releaseLandedClaims && !landedClaimSweepInFlight) {
       landedClaimSweepInFlight = true;
       const releaseLanded = deps.releaseLandedClaims;
-      void (deps.claimSweepSettled ? deps.claimSweepSettled.then(() => releaseLanded(isMerged)) : releaseLanded(isMerged))
+      const startSweep = () => {
+        const sweep = releaseLanded(isMerged);
+        if (sweep.listing) {
+          tickClaimEvidence = {
+            deferrals: new Map(claimHeldDeferrals),
+            listing: sweep.listing.catch((error: unknown) => {
+              log("dispatch.claim_sweep_failed", { surface: "tick-listing", error: String((error as Error)?.message ?? error).slice(0, 300) });
+              return undefined;
+            }),
+          };
+        }
+        return sweep;
+      };
+      void (deps.claimSweepSettled ? deps.claimSweepSettled.then(startSweep) : startSweep())
         .catch((e) => log("dispatch.claim_sweep_failed", { surface: "tick-sweep", error: String((e as Error)?.message ?? e).slice(0, 300) }))
         .finally(() => {
           landedClaimSweepInFlight = false;
@@ -8349,6 +8377,18 @@ export async function runDaemon(
       const lines = tickLedgerLines;
       for (const [taskId, deferral] of claimHeldDeferrals) {
         if (claimDroppedSince(lines, deferral.ref, deferral.sinceMs)) claimHeldDeferrals.delete(taskId);
+      }
+    }
+    if (tickClaimEvidence?.deferrals.size) {
+      const { listing, deferrals } = tickClaimEvidence;
+      const result = await listing;
+      if (result?.ok) {
+        const heldRefs = new Set(result.claims.map(({ taskId }) => dispatchClaimRef(taskId)));
+        for (const [taskId, deferral] of deferrals) {
+          if (claimHeldDeferrals.get(taskId) !== deferral || heldRefs.has(deferral.ref)) continue;
+          claimHeldDeferrals.delete(taskId);
+          log("daemon.block.rearmed", { task: taskId, ref: deferral.ref, reason: "absent from origin's held-claims listing" });
+        }
       }
     }
     if (tickReleases.durableUnreadable !== undefined || tickReleases.ledgerUnreadable !== undefined) {

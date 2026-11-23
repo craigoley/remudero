@@ -6,7 +6,7 @@ export function readReleaseLedgerLines(path: string): readonly string[] {
   return (readFileIfExists(path) ?? "").split("\n").filter(Boolean);
 }
 
-type ReleaseContract = { id: string; sourcePath?: unknown; attempts?: unknown; catalog?: unknown;
+type ReleaseContract = { id: string; sourcePath?: unknown; attempts?: unknown; catalog?: unknown; moved_from?: unknown;
   risk_ruling?: { operator_release_pin?: string }; verify?: unknown };
 
 export type ReleaseEvidence = ReadonlyMap<string, unknown> | ReadonlySet<string>;
@@ -16,9 +16,12 @@ export type ReleaseAuthor = "operator" | "machine";
  *  The human-to-auto verification transition must not invalidate its own approval.
  *  W1-T13386: `catalog` is where a reader found the record, stamped on after the read, never a term of the
  *  contract. The daemon's tick hashes an ops record without the stamp and the task's own run hashes it with
- *  the stamp, so a pin that included it made one release read as two contracts. */
+ *  the stamp, so a pin that included it made one release read as two contracts.
+ *  W1-T14408: `moved_from` is the provenance line the catalog mover (W1-T13680) writes into a record's ops copy,
+ *  never a term the operator approved. A pin that included it read a record released in the public catalog as
+ *  reapproval required once moved. Every other term, the title, files, acceptance and design included, stays pinned. */
 export function operatorReleasePin(task: ReleaseContract): string {
-  const { sourcePath: _source, attempts: _attempts, catalog: _catalog, risk_ruling: _ruling, ...contract } = task;
+  const { sourcePath: _source, attempts: _attempts, catalog: _catalog, moved_from: _moved, risk_ruling: _ruling, ...contract } = task;
   const stable = (value: unknown): string => {
     if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
     if (value !== null && typeof value === "object") {

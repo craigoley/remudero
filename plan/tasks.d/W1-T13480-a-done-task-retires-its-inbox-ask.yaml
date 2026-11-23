@@ -7,6 +7,7 @@
   risk: high # one concern across 3 files: the gardener proof that reads a done status, the validator that accepts it, and its own new test
   priority: 1.2
   status: queued
+  attempts: 0
   # amendment 2026-11-18: files: adds src/lib/inbox-gardener.ts, whose proof() builds the plan-retirement proof (it reads candidate.task.retirement only); validInboxTerminalProof alone cannot see a done status.
   files:
     - src/lib/inbox-gardener.ts

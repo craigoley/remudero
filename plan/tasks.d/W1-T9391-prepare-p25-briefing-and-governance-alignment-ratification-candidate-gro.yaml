@@ -14,7 +14,7 @@
     - plan/tasks.yaml
   acceptance:
     - claim: "The P25 briefing document exists with scope, criteria, and acceptance metrics."
-      proof: "grep: \"scope\" in docs/ratification/p25_briefing.md"
+      proof: "grep: scope in docs/ratification/p25_briefing.md"
   origin: architect
 
   rationale: >-
