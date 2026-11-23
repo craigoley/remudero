@@ -68,6 +68,9 @@ test("W1-T14550: an engine change inside a day of the last boot defers", (t) => 
 test("W1-T14550: an engine change a day after the last boot wakes", (t) => {
   const p = probe(t, emptyWake(START - 1000));
   assert.equal(p.run(0).status, 0);
+  // One second short of the day still defers; the wake comes at the day, not at the learned 70 s.
+  assert.equal(p.run(DAY - 1000 - 1).status, 0);
+  assert.equal(p.last().step, "daemon.idle_starved.engine_deferred");
   const wake = p.run(DAY - 1000);
   assert.equal(wake.status, 10, wake.stderr);
   assert.equal(p.last().step, "daemon.idle_starved.engine_wake");
@@ -77,7 +80,8 @@ test("W1-T14550: an engine change a day after the last boot wakes", (t) => {
 test("W1-T14550: an open PR wakes inside the engine day", (t) => {
   const p = probe(t, emptyWake(START - 1000));
   assert.equal(p.run(0).status, 0);
-  const wake = p.run(60, '[{"number":125}]');
+  // An hour in, past the learned back-off: the engine change stays deferred, and the open PR is the wake.
+  const wake = p.run(3_600, '[{"number":125}]');
   assert.equal(wake.status, 10, wake.stderr);
-  assert.notEqual(p.last().step, "daemon.idle_starved.engine_wake");
+  assert.equal(p.last().step, "daemon.idle_starved.engine_deferred");
 });
