@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
@@ -10,6 +9,7 @@ import { gardenStatePath, readGardenState, runGardenAsync, type GardenerDeps, ty
 import { parseTasksFromYaml } from "#src/lib/plan.js";
 import { PR_OPEN_SATISFIED_BY_MAIN_STEP } from "#src/lib/pr-open.js";
 import { REDESIGN_JUDGED_STEP, REDESIGN_MARKER_RE, redesignGardenSpec } from "#src/lib/redesign-gardener.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const ID = "W1-T100";
 const SHARD = `plan/tasks.d/${ID}-example.yaml`;
@@ -45,8 +45,7 @@ const RECORD = [
 ].join("\n");
 
 function fixture(t: TestContext, response = retire(), beforeCheckout?: (root: string) => void) {
-  const root = mkdtempSync(join(tmpdir(), "rmd-redesign-retire-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { dir: root } = gitRepo({ scope: t, seedCommit: false, kind: "redesign-retire" });
   const stateDir = join(root, "state");
   for (const dir of ["plan/tasks.d", "src/lib", "test", "state"]) mkdirSync(join(root, dir), { recursive: true });
   const write = (path: string, text: string) => writeFileSync(join(root, path), text);
@@ -65,7 +64,6 @@ function fixture(t: TestContext, response = retire(), beforeCheckout?: (root: st
   write(SHARD, RECORD);
   write(SOURCE, "export {};\n");
   write(TEST, "export {};\n");
-  git("init", "--quiet");
   commit("file the task");
   const landed: GardenLandOpts[] = [];
   const rows: Array<Record<string, unknown>> = [];
