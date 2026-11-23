@@ -12,6 +12,7 @@ import {
   grepProofCanOnlyCertifyComments,
   isDialectPrefixed,
   parseWhitelistedProof,
+  wrappedGrepPattern,
   type NameFilterResolution,
   type WhitelistedProof,
 } from "./review.js";
@@ -1050,6 +1051,34 @@ export function proofGrepCommentOnlyViolations(task: Task, opts: LintOpts = {}):
         `match comment text in ${target.path}: review grades a grep proof whose every matching line is a comment ` +
         "executed_stale, so the criterion can never pass whatever the build does. Use a `unit test:` proof, or grep " +
         "a code line the build adds.",
+    });
+  });
+  return violations;
+}
+
+/** (W1-T14426) Every NEW or CHANGED `grep:` proof whose pattern {@link wrappedGrepPattern} finds wrapped in quote marks. */
+export function proofGrepWrappedPatternViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  const { baseAcceptance } = opts;
+  if (!baseAcceptance) return [];
+  const current = task.acceptance ?? [];
+  const judged = new Set([
+    ...criteriaAdded(baseAcceptance, current),
+    ...criteriaProofChanged(baseAcceptance, current).map((pair) => pair.current),
+  ]);
+  const violations: LintViolation[] = [];
+  current.forEach((c, i) => {
+    if (!judged.has(c) || c.satisfied_by) return;
+    const proof = c.proof ?? "";
+    const wrapped = wrappedGrepPattern(proof);
+    if (!wrapped) return;
+    const path = /\s+in\s+(\S+)\s*$/.exec(proof)?.[1] ?? "<path>";
+    violations.push({
+      check: "proof-grep-safety",
+      severity: "block",
+      message:
+        `criterion ${i + 1} wraps its grep pattern in ${wrapped.delimiter}; use: grep: ${wrapped.bare} in ${path}. ` +
+        "The executor runs grep with no -F, so the quote marks become text the file must contain. The " +
+        "acceptance-author gate refuses this proof shape when the PR opens.",
     });
   });
   return violations;
@@ -3825,6 +3854,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...proofBaseDiscriminationViolations(task, opts));
   violations.push(...proofGrepAlreadyTrueViolations(task, opts));
   violations.push(...proofGrepCommentOnlyViolations(task, opts));
+  violations.push(...proofGrepWrappedPatternViolations(task, opts));
   violations.push(...proofUnitTestBaseWrapperViolations(task, opts));
   violations.push(...proofTestOnlyDiscriminationViolations(task));
   violations.push(...newShardRuleSuiteViolations(task, opts));
