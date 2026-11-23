@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, renameSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readlinkSync, renameSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
@@ -105,5 +105,18 @@ test("a native full pass can still clear its own marker", async (t) => {
   await run();
   assert.equal(existsSync(marker), false);
   assert.equal(readMaintenanceState(statePath).lastOutcome, "complete");
+  assert.ok(rows.every(({ step }) => step !== "object_reaper.gc_log_cleared"));
+});
+
+test("a successful full pass preserves a warning reached through a symbolic link", async (t) => {
+  const { marker, statePath, rows, run } = fixture(t);
+  const target = `${marker}.target`;
+  renameSync(marker, target);
+  symlinkSync(target, marker);
+  await run(async () => ok);
+
+  assert.equal(readlinkSync(marker), target);
+  assert.equal(readFileSync(marker, "utf8"), warning);
+  assert.equal(readMaintenanceState(statePath).lastOutcome, "fail");
   assert.ok(rows.every(({ step }) => step !== "object_reaper.gc_log_cleared"));
 });

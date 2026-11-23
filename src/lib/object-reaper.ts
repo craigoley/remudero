@@ -1065,9 +1065,14 @@ export async function surveyRepositoryMaintenance(
   let gcLog: string | null;
   let gcLogFile: GcLogFile | undefined;
   try {
-    const stat = lstatSync(path);
-    gcLog = readFileSync(path, "utf8");
-    if (stat.isFile()) gcLogFile = { path, stat };
+    const fd = openSync(path, "r");
+    try {
+      const stat = fstatSync(fd);
+      gcLog = readFileSync(fd, "utf8");
+      if (stat.isFile()) gcLogFile = { path, stat };
+    } finally {
+      closeSync(fd);
+    }
   }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { ...context, readable: false, error: String(error) };
@@ -1090,7 +1095,7 @@ function clearUnchangedGcLog({ path, stat: original }: GcLogFile): boolean {
     if (["objects/maintenance.lock", "gc.pid", "gc.pid.lock"].some((rel) =>
       lstatSync(join(dirname(path), rel), { throwIfNoEntry: false }) !== undefined)) return false;
     const current = lstatSync(path, { throwIfNoEntry: false });
-    if (current?.dev !== original.dev || current.ino !== original.ino ||
+    if (current === undefined || !current.isFile() || current.dev !== original.dev || current.ino !== original.ino ||
         current.mtimeMs !== original.mtimeMs || current.ctimeMs !== original.ctimeMs) return false;
     unlinkSync(path);
     return true;
