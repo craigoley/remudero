@@ -32,6 +32,7 @@
     - test/every-worker-lane-ledgers-its-assignment.test.ts
     - docs/model-routing.md
   status: blocked
+  attempts: 0
   retirement: closed
   rationale: |
     The original filing misattributed W1-T4580 to PR #7350; that PR implemented

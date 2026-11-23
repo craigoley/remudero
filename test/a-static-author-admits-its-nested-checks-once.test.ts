@@ -9,11 +9,12 @@ import { acquireTestSlot, resolveTestSlotDir, testSlotHasAncestor, testSlotProce
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const probe = `
+  import { getCompileCacheDir } from 'node:module';
   import { acquireTestSlot } from './src/lib/test-slot.ts';
   const logs=[];
   const lease=acquireTestSlot('real-nested-child',{slots:1,waitBoundMs:0,log:line=>logs.push(JSON.parse(line))});
   lease.refresh(); lease.release();
-  console.log(JSON.stringify({outcome:lease.outcome,note:lease.note,concurrency:lease.concurrency,logs}));
+  console.log(JSON.stringify({outcome:lease.outcome,note:lease.note,concurrency:lease.concurrency,logs,cacheDir:getCompileCacheDir(),disableCompileCache:process.env.NODE_DISABLE_COMPILE_CACHE}));
 `;
 function child(environment: NodeJS.ProcessEnv) {
   return JSON.parse(execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", probe], {
@@ -32,13 +33,20 @@ function owner(t: { after: (fn: () => void) => void }) {
   return { dir, lease, claim, bytes };
 }
 
-test("W1-T13916 criterion 1: author static admission: real child and grandchild borrow one live owner without releasing it", (t) => {
+function assertNestedAdmission(t: Parameters<typeof owner>[0], parentEnvironment: NodeJS.ProcessEnv, cacheDisabled = false) {
   const { dir, lease, bytes, claim } = owner(t);
   // This fixture specifically verifies the ordinary compile-cache path. The coverage runner disables
   // it for every suite child to preserve V8 precision, so make these two ordinary Node probes explicit.
-  const ordinaryChildEnvironment = { ...lease.childEnvironment!, NODE_DISABLE_COMPILE_CACHE: undefined, NODE_V8_COVERAGE: "" };
+  const ordinaryChildEnvironment = {
+    ...parentEnvironment,
+    ...lease.childEnvironment,
+    ...(parentEnvironment.NODE_DISABLE_COMPILE_CACHE === undefined ? { NODE_DISABLE_COMPILE_CACHE: undefined } : {}),
+    NODE_V8_COVERAGE: "",
+    NODE_TEST_CONTEXT: undefined,
+  };
   const result = child(ordinaryChildEnvironment);
   assert.equal(result.outcome, "acquired");
+  assert.equal(result.disableCompileCache, cacheDisabled ? "1" : undefined);
   assert.match(result.note, /inherited live parent test slot/);
   assert.equal(result.concurrency, lease.concurrency);
   assert.deepEqual(result.logs, []);
@@ -46,14 +54,33 @@ test("W1-T13916 criterion 1: author static admission: real child and grandchild 
   const grandchild = execFileSync(process.execPath, ["--input-type=module", "-e", `
     import { execFileSync } from 'node:child_process';
     process.stdout.write(execFileSync(process.execPath, ${JSON.stringify(["--import", "tsx", "--input-type=module", "-e", probe])}, {encoding:'utf8'}));
-  `], { cwd: ROOT, encoding: "utf8", timeout: 15_000,
-    env: { ...process.env, ...ordinaryChildEnvironment, NODE_TEST_CONTEXT: undefined } });
-  assert.match(JSON.parse(grandchild).note, /inherited live parent test slot/);
+  `], { cwd: ROOT, encoding: "utf8", timeout: 15_000, env: ordinaryChildEnvironment });
+  const grandchildResult = JSON.parse(grandchild);
+  assert.equal(grandchildResult.disableCompileCache, cacheDisabled ? "1" : undefined);
+  assert.match(grandchildResult.note, /inherited live parent test slot/);
   // Both probes run with ordinaryChildEnvironment, which unsets NODE_DISABLE_COMPILE_CACHE even in a coverage
   // run, so the slot's NODE_COMPILE_CACHE directory is always written. readdir order is not defined: sort it.
-  assert.deepEqual(readdirSync(dir).sort(), ["node-compile-cache", "slot-1.json"],
-    "W1-T13916 compile cache (after W1-T13853): the probes unset NODE_DISABLE_COMPILE_CACHE, so their compile cache is always on");
+  if (cacheDisabled) {
+    assert.deepEqual(readdirSync(dir), ["slot-1.json"], "disabled compile cache must not create a cache directory");
+    assert.equal(result.cacheDir, undefined);
+    assert.equal(grandchildResult.cacheDir, undefined);
+  } else {
+    assert.deepEqual(readdirSync(dir).sort(), ["node-compile-cache", "slot-1.json"],
+      "W1-T13916 compile cache (after W1-T13853): ordinary probes use the slot compile cache");
+    const cacheDir = join(dir, "node-compile-cache");
+    assert.equal(result.cacheDir && dirname(result.cacheDir), cacheDir, "the child must use the slot's compile cache");
+    assert.equal(grandchildResult.cacheDir && dirname(grandchildResult.cacheDir), cacheDir,
+      "the grandchild must use the slot's compile cache");
+  }
   assert.equal(readFileSync(claim.path, "utf8"), bytes);
+}
+
+test("W1-T13916 criterion 1: author static admission: real child and grandchild borrow one live owner without releasing it", (t) => {
+  assertNestedAdmission(t, process.env);
+});
+
+test("W1-T13049 pins the cause of the intermittent failure", (t) => {
+  assertNestedAdmission(t, { ...process.env, NODE_DISABLE_COMPILE_CACHE: "1" }, true);
 });
 
 test("author static admission: malformed, wrong-directory and unreadable claims never bypass contention", (t) => {

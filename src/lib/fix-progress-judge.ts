@@ -843,6 +843,24 @@ export type StallRemedy = (typeof STALL_REMEDIES)[number];
 /** W1-T12710: one `fix.stall_remedy` row of a pull request and criterion, as read back. */
 export interface StallRemedyRow { remedy: StallRemedy; outcome: "taken" | "skipped"; rounds: number; mount?: string }
 
+const fixRoundLanded = (round: FixProgressRound): boolean =>
+  round.subtype !== "push_failed" && round.pushedHead !== undefined && round.pushedHead !== round.dispatchedHead;
+
+function criterionAfterRound(round: FixProgressRound, criterion: string): "moved" | "unmet" | "unknown" {
+  const unmet = round.redAfter?.includes(criterion) ?? false;
+  if (!unmet && round.redAfterPartial) return "unknown";
+  if (!fixRoundLanded(round)) return "unmet";
+  if (!unmet) return "moved";
+  if (!criterion.startsWith("review:")) return "unmet";
+  const claim = criterion.slice("review:".length);
+  const before = round.reviewerFailures?.find(f => f.claim === claim)?.digest;
+  const after = round.reviewAfter?.find(f => f.claim === claim)?.digest;
+  return before !== undefined && after !== undefined && before !== after ? "moved" : "unmet";
+}
+
+const awaitingScopeAmendment = (round: FixProgressRound): boolean =>
+  round.scopeAmendment?.state === "pending" || round.scopeAmendment?.state === "merged";
+
 /**
  * W1-T12710: the completed rounds dispatched against `criterionKey` (`review:<claim>`, or a check name for a CI red)
  * since the last round that moved it. A round moved it when it landed and, after it, the criterion was met or failed
@@ -850,20 +868,65 @@ export interface StallRemedyRow { remedy: StallRemedy; outcome: "taken" | "skipp
  * amendment, or that a pending check leaves unknown, neither adds nor resets. PURE.
  */
 export function sameCriterionStall(rounds: readonly FixProgressRound[], criterionKey: string): number {
-  const claim = criterionKey.startsWith("review:") ? criterionKey.slice("review:".length) : undefined;
   let stall = 0;
   for (const round of rounds) {
-    if (!round.completed || !round.redBefore.includes(criterionKey)) continue;
-    if (round.scopeAmendment?.state === "pending" || round.scopeAmendment?.state === "merged") continue;
-    const unmet = (round.redAfter ?? []).includes(criterionKey);
-    if (!unmet && round.redAfterPartial) continue;
-    const landed = round.subtype !== "push_failed" && round.pushedHead !== undefined && round.pushedHead !== round.dispatchedHead;
-    const before = claim === undefined ? undefined : round.reviewerFailures?.find(f => f.claim === claim)?.digest;
-    const after = claim === undefined ? undefined : round.reviewAfter?.find(f => f.claim === claim)?.digest;
-    const newDigest = before !== undefined && after !== undefined && before !== after;
-    stall = landed && (!unmet || newDigest) ? 0 : stall + 1;
+    if (!round.completed || !round.redBefore.includes(criterionKey) || awaitingScopeAmendment(round)) continue;
+    const after = criterionAfterRound(round, criterionKey);
+    if (after !== "unknown") stall = after === "moved" ? 0 : stall + 1;
   }
   return stall;
+}
+
+type FixEconomyFailure = { kind: "not-landed"; subtype: string } | { kind: "unmet"; criterion: string };
+type FixRoundCapabilityDecision = { start: "economy-first" } | {
+  start: "mount-tier";
+  escalation?: { failedRoundId: string; fromModel: string; cause: FixEconomyFailure };
+};
+
+const NON_MODEL_FIX_ENDS = new Set(["round_yielded", "admission_abandoned", "scope_amendment_pending", "push_failed"]);
+
+/** Follow this PR's head through its completed rounds, keeping routing metadata out of the judge's input. */
+export function fixRoundCapabilityFor({ rounds, ledger, currentHead }: {
+  rounds: readonly FixProgressRound[]; ledger: readonly Record<string, unknown>[]; currentHead: string;
+}): FixRoundCapabilityDecision {
+  const dispatches = new Map<string, Record<string, unknown>>();
+  const completions = new Map<string, Record<string, unknown>>();
+  for (const row of ledger) {
+    if (typeof row.round_id !== "string") continue;
+    if (row.step === "fix.dispatch" || row.step === "fix.retrigger") dispatches.set(row.round_id, row);
+    if (row.step === "fix.done") completions.set(row.round_id, row);
+  }
+  const economyStart = { start: "economy-first" } as const;
+  let decision: FixRoundCapabilityDecision = economyStart;
+  let previous: FixProgressRound | undefined;
+  const staysOnHead = (head: string | undefined) => previous === undefined ||
+    head === previous.dispatchedHead || head === previous.pushedHead;
+  for (const recorded of rounds) {
+    if (!recorded.completed) continue;
+    const dispatch = dispatches.get(recorded.id);
+    const routedHead = stringValue(dispatch?.start_head_sha);
+    const round = routedHead === undefined ? recorded : { ...recorded, dispatchedHead: routedHead };
+    if (!staysOnHead(round.dispatchedHead)) decision = economyStart;
+    previous = round;
+    const done = completions.get(round.id);
+    const subtype = round.subtype ?? "unknown";
+    const signal = done?.worker_exit === "signal" || subtype === "error_exit_null" || done?.worker_subtype === "error_exit_null";
+    if (NON_MODEL_FIX_ENDS.has(subtype) || (signal && !round.pushedHead) ||
+        awaitingScopeAmendment(round) || round.redAfterPartial) continue;
+    const unmet = round.redBefore.find(criterion => criterionAfterRound(round, criterion) === "unmet");
+    const cause: FixEconomyFailure | undefined = !fixRoundLanded(round) ? { kind: "not-landed", subtype }
+      : unmet !== undefined ? { kind: "unmet", criterion: unmet } : undefined;
+    if (cause === undefined) {
+      decision = economyStart;
+    } else if (decision.start === "economy-first") {
+      const model = done?.provider === "codex" ? stringValue(done.selected_model) : undefined;
+      const economy = dispatch?.start_reason === "economy-first" || dispatch?.start_capability === "economy";
+      decision = model && economy
+        ? { start: "mount-tier", escalation: { failedRoundId: round.id, fromModel: model, cause } }
+        : { start: "mount-tier" };
+    }
+  }
+  return staysOnHead(currentHead) ? decision : economyStart;
 }
 
 /**

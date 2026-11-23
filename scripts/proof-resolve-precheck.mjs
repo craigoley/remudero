@@ -7,9 +7,8 @@
  * comment — plus 4 whose `grep:` proof matched nothing. The reviewer found each one only after a full CI cycle; each
  * was knowable offline in about a second.
  *
- * ONE PREDICATE, NEVER TWO. The criteria come from the reviewer's own `resolvePlanCriteriaAtHead` (the task the run
- * branch or the head commit's `Remudero-Task:` trailer names) and the verdicts from `certainHeadRefusals`, which is
- * built on the reviewer's own resolver and executor and reports only what the reviewer is CERTAIN to refuse.
+ * The public plan is read at the commit as in review. A public miss uses the claim verb's catalog lookup.
+ * Both sources go through the reviewer's own proof resolver and executor in `certainHeadRefusals`.
  *
  * TWO SEVERITIES, ON PURPOSE. A test-title miss BLOCKS, and so does a `grep: test("<title>"` miss against a test file that
  * exists (W1-T5026, #8156): naming a test with the proof's exact title is always within a worker's reach. Any other grep
@@ -24,9 +23,14 @@
  *
  * Exit 0 clean or reported-only, 1 a blocking refusal, 2 could not read (the hook never blocks on 2).
  */
-import { certainHeadRefusals, extractTaskTrailerId, planOnlyDiff, resolvePlanCriteriaAtHead } from "../src/lib/review.js";
+import { statSync } from "node:fs";
+import { join } from "node:path";
+import { configPath, loadConfig } from "../src/lib/config.js";
+import { loadPlanAtRef } from "../src/lib/plan.js";
+import { certainHeadRefusals, extractTaskTrailerId, planOnlyDiff } from "../src/lib/review.js";
 import { certainStaleProofs } from "../src/lib/proof-base-stale.js";
 import { taskIdFromRunBranch } from "../src/lib/status.js";
+import { findTaskInCatalogs } from "../src/lib/task-lookup.js";
 import { isMainModule } from "./lib/argv.mjs";
 import { gitOrThrow } from "./lib/git.mjs";
 
@@ -36,14 +40,21 @@ const PLAN = "plan/tasks.yaml";
  * The pure verdict. `resolveCriteria(taskId)` and `refusalsFor(criteria)` are injected so a test drives every arm
  * without a checkout; `main` below wires the reviewer's real functions.
  */
-export function proofResolveVerdict({ diff, headRef, headMessage, resolveCriteria, refusalsFor, staleFor = () => [] }) {
+export function proofResolveVerdict(input) {
+  return checkTaskProofs(input, (taskId) => proofVerdict(taskId, input.resolveCriteria(taskId), input));
+}
+
+function checkTaskProofs({ diff, headRef, headMessage }, check) {
   const branchTask = taskIdFromRunBranch(headRef);
   if (planOnlyDiff(diff) && !branchTask) {
     return { exit: 0, lines: ["proof-resolve-precheck: SKIP -- a plan-only filing (no run-<taskId> branch); its proofs are the build PR's"] };
   }
   const taskId = branchTask ?? extractTaskTrailerId(headMessage);
   if (!taskId) return { exit: 0, lines: ["proof-resolve-precheck: SKIP -- no task resolved from the branch or a Remudero-Task: trailer"] };
-  const criteria = resolveCriteria(taskId);
+  return check(taskId);
+}
+
+function proofVerdict(taskId, criteria, { refusalsFor, staleFor = () => [] }) {
   if (criteria.length === 0) return { exit: 0, lines: [`proof-resolve-precheck: SKIP -- ${taskId} resolves no acceptance criteria at HEAD`] };
   const refusals = refusalsFor(criteria);
   const stale = staleFor(criteria);
@@ -81,7 +92,23 @@ export function proofResolveVerdict({ diff, headRef, headMessage, resolveCriteri
   return { exit: blocking.length > 0 ? 1 : 0, lines };
 }
 
-function main() {
+async function criteriaAtHead(taskId, repoRoot, headSha) {
+  const { byId } = loadPlanAtRef(repoRoot, PLAN, headSha);
+  const publicTask = byId.get(taskId);
+  if (publicTask !== undefined) return publicTask.acceptance ?? [];
+
+  let stateDir;
+  try {
+    if (statSync(configPath(), { throwIfNoEntry: false })) stateDir = join(loadConfig().root, "state");
+  } catch (error) {
+    throw new Error("task catalog unreadable (instance configuration)", { cause: error });
+  }
+  const found = await findTaskInCatalogs(taskId, { byId, stateDir });
+  if (found.outcome === "unreadable") throw new Error(`task catalog unreadable (${found.reason})`);
+  return found.task?.acceptance ?? [];
+}
+
+async function main() {
   const argv = process.argv.slice(2);
   const flag = (name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
   const base = flag("--base") ?? "origin/main";
@@ -89,14 +116,14 @@ function main() {
   try {
     const repoRoot = gitOrThrow(["rev-parse", "--show-toplevel"]);
     const headSha = gitOrThrow(["rev-parse", "HEAD"]);
-    verdict = proofResolveVerdict({
+    verdict = await checkTaskProofs({
       diff: gitOrThrow(["diff", `${base}...HEAD`]),
       headRef: flag("--head-ref") || gitOrThrow(["rev-parse", "--abbrev-ref", "HEAD"]),
       headMessage: gitOrThrow(["log", "-1", "--format=%B"]),
-      resolveCriteria: (taskId) => resolvePlanCriteriaAtHead(`Remudero-Task: ${taskId}`, repoRoot, PLAN, headSha).criteria,
+    }, async (taskId) => proofVerdict(taskId, await criteriaAtHead(taskId, repoRoot, headSha), {
       refusalsFor: (criteria) => certainHeadRefusals(criteria, repoRoot),
       staleFor: (criteria) => certainStaleProofs(criteria, repoRoot, gitOrThrow(["merge-base", base, "HEAD"])),
-    });
+    }));
   } catch (e) {
     console.error(`proof-resolve-precheck: could not read this head (${e.message}) -- NOT reporting clean`);
     return 2;
@@ -105,4 +132,4 @@ function main() {
   return verdict.exit;
 }
 
-if (isMainModule(import.meta.url)) process.exit(main());
+if (isMainModule(import.meta.url)) process.exitCode = await main();

@@ -2,6 +2,7 @@ import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from ".
 import { FIX_CLAIM_YIELDED_STEP } from "./adaptive-wip.js";
 import { registerProcessExitLatch } from "./process-exit-latches.js";
 import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
+import type { OpsCatalogShadowInput } from "./ops-catalog-source.js";
 import { clearanceBound, fixDispatchCauseProbe, fixDispatchRefusalClass } from "./stuck-state-gardener.js";
 import { planDestinationRepository, resolvePlanDestination, type PlanDestinationRepository } from "./plan-destination.js";
 import { decideLoopOutcome } from "./loop-decision.js";
@@ -691,6 +692,28 @@ export function stalledStageEscalationSummary(reason: string): string {
   return reason
     .replace(/^(PR stage stalled: .+?) for \d+ minutes \((?:BACKSTOP \d+|owner: none)\); since [^;]*;/, "$1;")
     .replace(/; the fleet itself withheld the repair for \d+ of those minutes$/, "");
+}
+
+/** W1-T12046: a stalled stage's cause — its blocker and the diagnosis the sweep computed — keyed so two PRs stalled
+ *  for one cause share it. The PR, its age, episode start and per-PR held/last-round tails are dropped. Reads a
+ *  reason or the body of an issue it opened; `undefined` for any other text. #17633-#17637 were five
+ *  `awaiting-review` stalls with one diagnosis: `repeat: "checks green, review never posted — …" x3`. */
+export function stalledStageCauseKey(text: string): string | undefined {
+  const found = /PR stage stalled: #\d+ \S+ — ([a-z-]+) for \d+ minutes \([^)]*\); since [^;]*; DIAGNOSIS: (.*?)(?:; the fleet itself withheld the repair for \d+ of those minutes)?(?:; the last fix round ended at \S+?)?\.?$/m.exec(text);
+  return found === null ? undefined : `${found[1]} — ${found[2]}`;
+}
+
+/** W1-T12046: the oldest open stall escalation another PR opened for the same cause, which this PR joins by a
+ *  comment instead of opening its own. An issue of this PR, or of a different blocker or diagnosis, never matches. */
+export function openStallCauseIssue(open: readonly OpenIssue[], pr: { prNumber: number; prUrl: string },
+  causeKey: string): OpenIssue | undefined {
+  const own = `PR stage stalled: #${pr.prNumber} ${pr.prUrl} — `;
+  return open.filter(issue => {
+    const body = escalationBodyInLegacyOrder(issue.body ?? "");
+    const identity = stalledStageIssueIdentity({ title: issue.title, body });
+    return identity !== undefined && !identity.startsWith(own) && escalationIssueCause(body) === "stage-stall" &&
+      stalledStageCauseKey(body) === causeKey;
+  }).sort((a, b) => a.number - b.number)[0];
 }
 
 /** The PR's oldest open stage-stall question, whatever its head, blocker or contract, viewed at the
@@ -1678,10 +1701,11 @@ export interface BuildSweepEffectsDeps {
   ghLiveStateImpl?: SweepRuntimeFn;
   fixRungTaskForImpl?: typeof fixRungTaskFor;
   /** W1-T4460 (design ii) — re-reads the plan ONCE for {@link fixRungTaskWithPlanReload} when a
-   *  fix dispatch's task id is missing from the snapshot `plan` (above) carries. Omitted in
-   *  production defaults to a real disk read of this repo's own `plan/tasks.yaml`; a test replaces
-   *  it to avoid touching the filesystem or to assert the miss/reload sequence directly. */
+   *  fix dispatch's task id is missing from the pass snapshot. The daemon supplies its active
+   *  plan accessor. Standalone callers default to a disk read of this repo's `plan/tasks.yaml`. */
   reloadPlanForFixImpl?: () => Plan | undefined;
+  /** The daemon's retained ops view, scoped to the repository its source reads. */
+  opsCatalogForContract?: { repository: string | undefined; current: () => OpsCatalogShadowInput | undefined };
   /** W1-T4073 — resolves a fix dispatch's task contract from the plan AT THE PR HEAD (the checkout
    *  it just created is where the head's objects are local). `undefined` means unreadable. Omitted
    *  keeps the pre-W1-T4073 snapshot contract, so fixtures that never touch it need no update;
@@ -2743,9 +2767,28 @@ const fleetStateCommitStores = new Map<string, FleetStateCommitStore>();
 /** W1-T13669: the fix rung's plan re-read keeps its parses for the process; a changed file is parsed again. */
 export const FIX_PLAN_BLOB_CACHE = new PlanBlobCache();
 
+type SweepTaskReaders = Required<Pick<BuildSweepEffectsDeps, "reloadPlanForFixImpl" | "opsCatalogForContract">>;
+const sweepTaskReaders = new AsyncLocalStorage<SweepTaskReaders>();
+
+/** Bind the daemon's readers through the full and light hooks, which build effects after awaiting their PR reads. */
+export function withSweepTaskReaders<Args extends unknown[], Result>(
+  readers: SweepTaskReaders, sweep: (...args: Args) => Result,
+): (...args: Args) => Result {
+  return (...args) => sweepTaskReaders.run(readers, sweep, ...args);
+}
+
 /** W1-T13865: the checks a PR's base branch requires, each pinned to an App id or null; `complete` is false when one of
  *  its requirement sources could not be read. */
 type BaseRequiredChecks = { checks: ReadonlyMap<string, number | null>; complete: boolean };
+
+const PRIMARY_SHADOW_EPISODE_LINE = /primary_shadow\.(observation|issue_published)|PRIMARY-SHADOW-/;
+const isPrimaryShadowEpisodeRow = (row: Record<string, unknown>): boolean =>
+  typeof row.task_id === "string" && row.task_id.startsWith("PRIMARY-SHADOW-");
+const primaryShadowEpisodeMemo = createLedgerRotationMemo(rows => rows.filter(isPrimaryShadowEpisodeRow), {
+  holder: "sweep-primary-shadow-episodes", durableDigest: { reducerVersion: "primary-shadow-episodes-v2" },
+  pattern: PRIMARY_SHADOW_EPISODE_LINE, requireObjects: true,
+});
+
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
   | "readerAgreement"
@@ -2897,7 +2940,6 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown = requiredSweepRuntime("dispatchFixPreflightStandDownImpl"),
     ghLiveStateImpl: ghLiveState = requiredSweepRuntime("ghLiveStateImpl"),
     fixRungTaskForImpl: fixRungTaskForForBuild = fixRungTaskFor,
-    reloadPlanForFixImpl,
     resolveTaskContractAtHeadImpl,
     readTaskContractAdvanceAtHeadImpl,
     readPreservedOwnerPatchImpl = readPreservedOwnerPatch,
@@ -2941,6 +2983,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     planPrPreflightImpl = planPrPreflightAtCommitAsync,
     updatePrBodyImpl = requiredSweepRuntime<NonNullable<BuildSweepEffectsDeps["updatePrBodyImpl"]>>("updatePrBodyImpl"),
   } = deps;
+  // W1-T12046: each pass builds these effects afresh, so this pass's own stall-cause issues and the PRs that
+  // joined them stay visible to its later PRs even before GitHub's open list shows a just-opened issue.
+  const stallCauseIssues = new Map<string, { url: string; prs: number[] }>();
+  // One cause's escalations run one at a time, so two PRs of one cause can never both open an issue.
+  const stallCauseTurns = new Map<string, Promise<unknown>>();
 
   // W1-T2889: kept as a typed local (not a destructured default) so this default arm's shape
   // survives the positional-parameters-to-one-deps-object collapse verbatim — the sweep's
@@ -2978,6 +3025,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     return { outcome: "resolved" as const, task: found.task, target };
   };
   const pauseGit = fixDispatchPauseGitImpl ?? realSharedPauseGitDeps(repoDir);
+  const daemonTaskReaders = sweepTaskReaders.getStore();
+  const reloadPlanForFixImpl = deps.reloadPlanForFixImpl ?? daemonTaskReaders?.reloadPlanForFixImpl;
+  const opsCatalogForContract = deps.opsCatalogForContract ?? daemonTaskReaders?.opsCatalogForContract;
   // W1-T4460 (design ii): the real default reads this repo's OWN plan fresh off disk, swallowing a
   // read failure (an unreadable plan on this one opportunistic re-read is never this dispatch's
   // reason to throw — `fixRungTaskWithPlanReload` already degrades to the stale `plan` on `undefined`).
@@ -3165,7 +3215,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   const inflightDir = join(config.root, "state", "inflight");
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
   const openEscalationIssues = issuesImpl ?? ghIssueGatewayAsync(owner, repo);
-  const primaryShadowAlerts = primaryShadowOperatorChannel({ owner, repo, ledgerPath, runId, issues: issuesImpl,
+  const primaryShadowOptions = { owner, repo, ledgerPath, runId, issues: issuesImpl,
     clock: clockFromMillisFn(nowMsImpl), readPrState: ghLiveState,
     selection: () => {
       try {
@@ -3184,9 +3234,20 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         log("primary_shadow.selection_unknown", { error_class: error instanceof Error ? error.name : "unknown" });
         return undefined;
       }
-    } });
+    } };
+  const primaryShadowAlerts = primaryShadowOperatorChannel(primaryShadowOptions);
   const primaryShadowAlertFailed = (error: unknown): void => {
     log("primary_shadow.alert_failed", { error_class: error instanceof Error ? error.name : "unknown" });
+  };
+  const maintainPrimaryShadowAlert = async (maintain: () => Promise<void>): Promise<void> => {
+    if (!primaryShadowOptions.selection()) return;
+    // The channel records the episode's task ID before contacting GitHub. Read live and archived
+    // references so an episode waiting for its first delivery also gets reconciled.
+    const history = await readLedgerUnionRecordsMemoized(dirname(ledgerPath), primaryShadowEpisodeMemo, {
+      refuseIncomplete: true, where: isPrimaryShadowEpisodeRow,
+      pattern: PRIMARY_SHADOW_EPISODE_LINE, liveFirst: true, satisfied: steps => steps.size > 0,
+    });
+    if (!history.ok || history.torn > 0 || history.unclassified.length > 0 || history.rows.length > 0) await maintain();
   };
   const terminalState = terminalUncreditableHeadsByLedger.get(ledgerPath)
     ?? { heads: new Map<string, TerminalUncreditableHead>(), historyHold: undefined, refreshPending: true };
@@ -3484,10 +3545,19 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     }
   };
 
-  // The daemon hands each pass its tick's fresh plan; a task missing from it gets ONE re-read per cycle.
+  // A daemon pass can outlive its tick's plan. Standalone callers keep the opportunistic local re-read.
   let reloadedForContract: { plan: Plan | undefined } | undefined;
   const privateContractTasks = new Map<string, Task>();
   const readContractTask = (taskId: string): Task | undefined => {
+    if (opsCatalogForContract !== undefined) {
+      const publicTask = (reloadPlanForFixImpl?.() ?? plan).byId.get(taskId);
+      if (publicTask !== undefined) return publicTask;
+      const snapshot = opsCatalogForContract.current();
+      if (snapshot?.outcome !== "ok") return undefined;
+      const destination = planDestinationRepository(join(config.root, "state"));
+      return destination.outcome === "named" && `${destination.owner}/${destination.repo}` === opsCatalogForContract.repository
+        ? snapshot.plan?.byId.get(taskId) : undefined;
+    }
     let task = plan.byId.get(taskId) ?? privateContractTasks.get(taskId);
     if (task === undefined) {
       reloadedForContract ??= { plan: reloadPlanForFix() };
@@ -3564,7 +3634,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         ...readers, readPressure: () => reading.pressure, readActiveWorkers: () => reading.activeWorkers,
       });
     },
-    reconcilePrimaryShadowAlert: () => primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
+    reconcilePrimaryShadowAlert: () => maintainPrimaryShadowAlert(primaryShadowAlerts.reconcile).catch(primaryShadowAlertFailed),
     readOpenEscalations: () => openEscalationIssues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
     readHostedProofResults: (headSha, proofs) => readHostedFixProofResults({ owner, repo, headSha, proofs },
@@ -4499,9 +4569,17 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // narrow by blocker and keep older heads visible to the gateway's supersession cleanup.
       // The PR's one stall issue as GitHub stores it, when this episode is offered to it.
       let keptStall: OpenIssue | undefined;
+      // W1-T12046: a stall's cause (blocker and diagnosis). The open list read to look for its issue is handed to
+      // the gateway's first read, so the escalation still reads GitHub once; a failed read is handed on as the
+      // gateway's own failed read, which it records as unreadable (no issue opened), exactly as before.
+      const causeKey = stallIdentity === undefined ? undefined : stalledStageCauseKey(reason);
+      let causeRead: { open: OpenIssue[] } | { error: unknown } | undefined;
       const escalationIssues: AsyncIssueGateway = stallIdentity !== undefined && issues.listOpen
         ? { ...issues, listOpen: async (label) => {
-          const open = await issues.listOpen!(label);
+          const reused = label === NEEDS_HUMAN_LABEL ? causeRead : undefined;
+          causeRead = undefined;
+          if (reused !== undefined && "error" in reused) throw reused.error;
+          const open = reused?.open ?? await issues.listOpen!(label);
           const kept = openStallQuestionForPr(open, pr, { class: cls, taskId: escalationTaskIdFor(pr), cause });
           keptStall = kept?.stored;
           return kept ? [kept.view] : open.filter(issue => {
@@ -4529,7 +4607,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
         }
       };
-      const file = async (context: string): Promise<void> => { const filedUrl = await escalateAsync(
+      const file = async (context: string): Promise<string> => { const filedUrl = await escalateAsync(
         {
           class: cls,
           // See {@link escalationTaskIdFor} — pure and separately tested, so the mint that makes
@@ -4558,9 +4636,51 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           recommendation: question.resolutions[0].label,
         },
         { issues: escalationIssues, ledgerPath, runId },
-      ); await refreshStoredHead(filedUrl); };
-      if (pr.mergeState !== "dirty") return file("");
-      return readMainCommit().then((main) => file(conflictEscalationContext(pr, main?.sha)));
+      ); await refreshStoredHead(filedUrl); return filedUrl; };
+      // W1-T12046: a PR with no stall question of its own, stalled for a cause another PR's open stall issue (or one
+      // this pass opened) already names, is listed on that issue by a comment instead of opening its own.
+      const joinStallCause = async (key: string): Promise<boolean> => {
+        const listOpen = issues.listOpen;
+        if (!listOpen || !issues.comment) return false;
+        // Settled to a value: a failed read reaches the gateway, which ledgers it as `escalation.dedup_unreadable`.
+        const read = await Promise.resolve().then(() => listOpen(NEEDS_HUMAN_LABEL))
+          .then((open): { open: OpenIssue[] } => ({ open }), (error: unknown): { error: unknown } => ({ error }));
+        causeRead = read;
+        if ("error" in read) return false;
+        const open = read.open;
+        if (openStallQuestionForPr(open, pr, { class: cls, taskId: escalationTaskIdFor(pr), cause }) !== undefined) return false;
+        const listed = openStallCauseIssue(open, pr, key);
+        const ours = stallCauseIssues.get(key);
+        const url = listed?.url ?? ours?.url;
+        if (url === undefined) return false;
+        const opener = Number(/#(\d+)/.exec(stalledStageIssueIdentity({ title: listed?.title,
+          body: escalationBodyInLegacyOrder(listed?.body) }) ?? "")?.[1]);
+        const prs = [...new Set([...(ours?.url === url ? ours.prs : Number.isInteger(opener) ? [opener] : []), pr.prNumber])];
+        await issues.comment(url,
+          `Pull request #${pr.prNumber} (${pr.prUrl}) is stalled for the same cause as this issue, so it is listed ` +
+          `here instead of opening its own escalation (W1-T12046).\n\n` +
+          `Pull requests stalled for this cause: ${prs.map(n => `#${n}`).join(", ")}\n\n` +
+          `Task ${escalationTaskIdFor(pr)}, head ${pr.headSha}.\n\n${reason}`);
+        stallCauseIssues.set(key, { url, prs });
+        // The row escalate() writes when an escalation lands on an issue already open, naming the cause it shares.
+        appendLedger(ledgerPath, { run_id: runId, task_id: escalationTaskIdFor(pr), step: "escalation.deduped", class: cls,
+          issue_url: url, observation_comment: "appended", pr_number: pr.prNumber, head_sha: pr.headSha,
+          stall_cause: key, stall_cause_prs: prs });
+        return true;
+      };
+      const raise = async (): Promise<void> => {
+        if (causeKey !== undefined && await joinStallCause(causeKey)) return;
+        const filedUrl = pr.mergeState !== "dirty" ? await file("")
+          : await readMainCommit().then((main) => file(conflictEscalationContext(pr, main?.sha)));
+        if (causeKey !== undefined && filedUrl && keptStall === undefined && !stallCauseIssues.has(causeKey)) {
+          stallCauseIssues.set(causeKey, { url: filedUrl, prs: [pr.prNumber] });
+        }
+      };
+      if (causeKey === undefined) return raise();
+      const turn = (stallCauseTurns.get(causeKey) ?? Promise.resolve()).then(raise, raise);
+      // Only the order is kept here: the caller still receives this escalation's own rejection through `turn`.
+      stallCauseTurns.set(causeKey, turn.then(() => "settled", (error: unknown) => error));
+      return turn;
     },
 
     dispatchPlanGateRound: async (pr) => {
@@ -5769,7 +5889,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // `SweepDeps.readLiveState`'s own doc for the fail-open contract.
     readLiveState: async (pr) => {
       const observed = await ghLiveState(pr.prUrl);
-      if (observed.ok && observed.state?.toUpperCase() === "MERGED") await primaryShadowAlerts.resolved(pr).catch(primaryShadowAlertFailed);
+      if (observed.ok && observed.state?.toUpperCase() === "MERGED") {
+        await maintainPrimaryShadowAlert(() => primaryShadowAlerts.resolved(pr)).catch(primaryShadowAlertFailed);
+      }
       return observed;
     },
 
@@ -20848,6 +20970,12 @@ export const QUEUED_FIX_ADMISSION_RELEASE_MS = 15 * 60_000;
  *  `onPending`, cleared when `spawnFix` returns. Without it a later pass saw the key held and named no holder. */
 interface QueuedHostFix { sinceMs: number; runId: string; abort: () => Promise<void>; prNumber: number; headSha: string; releasing: boolean }
 const queuedHostFixes = new Map<string, QueuedHostFix>();
+const pendingFixLaunches = new Map<string, number>();
+
+interface FixDispatchHolder {
+  reason: string;
+  fields: Record<string, unknown>;
+}
 
 function queuedHostFixHolder(fixKey: string, nowMs: number) {
   const queued = queuedHostFixes.get(fixKey);
@@ -21206,6 +21334,7 @@ export interface ChildWorkRegistration {
   planLane?: boolean;
 }
 interface RegisteredChildWork extends ChildWorkRegistration {
+  registeredAtMs: number;
   releasedAtPost?: number; phaseTimer?: ReturnType<typeof setInterval>; phaseReadError?: string;
   /** W1-T11149: the review's last phase read back from its status.json, without the `review:` prefix; unread is undefined. */
   phase?: string;
@@ -21215,6 +21344,27 @@ interface RegisteredChildWork extends ChildWorkRegistration {
 const childWork = new Map<string, RegisteredChildWork>();
 const settledChildWork = new Set<string>();
 const childWorkSettleKey = (runId: string, headSha?: string): string => `${runId}@${headSha ?? ""}`;
+
+function registeredFixChild(fixKey: string): RegisteredChildWork | undefined {
+  return [...childWork.values()].find(work => work.kind === "fix-dispatch" && work.fixKey === fixKey);
+}
+
+function fixChildHolder(fixKey: string, nowMs: number, child: RegisteredChildWork | undefined): FixDispatchHolder | undefined {
+  const launchStartedAt = pendingFixLaunches.get(fixKey);
+  if (launchStartedAt !== undefined) {
+    const ageMs = Math.max(0, nowMs - launchStartedAt);
+    return {
+      reason: `duplicate fix-dispatch key (${fixKey}) is held by a fix child launch in progress for ${Math.floor(ageMs / 1000)}s`,
+      fields: { in_flight_action: "fix-child-launch", in_flight_age_ms: ageMs },
+    };
+  }
+  if (child === undefined) return undefined;
+  const ageMs = Math.max(0, nowMs - child.registeredAtMs);
+  return {
+    reason: `duplicate fix-dispatch key (${fixKey}) is held by fix run child ${child.runId}, running for ${Math.floor(ageMs / 1000)}s`,
+    fields: { in_flight_action: "fix-child", in_flight_run_id: child.runId, in_flight_age_ms: ageMs },
+  };
+}
 
 function refreshChildReviewPhase(work: RegisteredChildWork): void {
   if (work.kind !== "review" || work.releasedAtPost !== undefined || !work.readPhase) return;
@@ -21242,7 +21392,7 @@ function refreshChildReviewPhase(work: RegisteredChildWork): void {
 /** Claims the slot and the mutex key of a child's work. Registering a run id again is a no-op. */
 export function registerChildWork(work: ChildWorkRegistration): void {
   if (childWork.has(work.runId)) return;
-  const registered: RegisteredChildWork = { ...work, refusalEpoch: reviewProviderRefusalEpoch };
+  const registered: RegisteredChildWork = { ...work, registeredAtMs: systemClock.now(), refusalEpoch: reviewProviderRefusalEpoch };
   if (work.kind === "review") reviewLaneTransition(() => childWork.set(work.runId, registered));
   else childWork.set(work.runId, registered);
   if (work.reviewKey !== undefined) inFlightReviewKeys.add(work.reviewKey);
@@ -24994,12 +25144,14 @@ export async function runSweep(
         heldAdmission.releaseCharge?.();
         markFixAdmissionChargeReleased(heldAdmission.lock);
       } else if (deps.fixAdmissionLockDir !== undefined) releaseFixCapacity(pr);
+      pendingFixLaunches.set(claim.fixKey, deps.now?.() ?? systemClock.now());
       hosted = await host.spawnFix({ pr: { prNumber: pr.prNumber, headSha: pr.headSha, taskId: escalationTaskIdFor(pr) }, fixKey: claim.fixKey, envelope, onPending });
       launched = hosted !== undefined && !("abandoned" in hosted);
     } catch (error) {
       log("sweep.fix.child_spawn_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
       return false;
     } finally {
+      pendingFixLaunches.delete(claim.fixKey);
       queuedHostFixes.delete(claim.fixKey);
       // No child launched: free the lock now. A launched child may adopt it in place, but never frees it: the host holds the
       // child's memory reservation until it settles the child, so the lock is freed at that settlement, whoever holds it.
@@ -25078,7 +25230,7 @@ export async function runSweep(
     pr: OpenPrView,
     /** W1-T5544: the dispatch is the plan-shard flag (no worker round), so two refused WORKER rounds do not bar it. */
     planFlagRung = false,
-  ): ({ ok: true } & DetachedFixClaim) | { ok: false; reason: string } {
+  ): ({ ok: true } & DetachedFixClaim) | { ok: false; reason: string; holder?: FixDispatchHolder } {
     const fixTaskId = fixLedgerTaskIdFor(pr);
     const fixKey = `${fixTaskId ?? ""}@${pr.headSha}`;
     // The current owner can receive a hand-off even while it still holds admission for the PR.
@@ -25090,9 +25242,8 @@ export async function runSweep(
       return { ok: false, reason: `deferred to the live fix round ${live.liveRoundRunId} waiting on CI for ${pr.headSha}` };
     }
     // The dispatch and strike budget stay keyed by head. The memory charge follows the PR.
-    const heldKey =
-      [...childWork.values()].find((work) => work.kind === "fix-dispatch" && work.fixKey === fixKey)?.fixKey ??
-      (inFlightFixKeys.has(fixKey) ? fixKey : undefined);
+    const child = registeredFixChild(fixKey);
+    const heldKey = child?.fixKey ?? (inFlightFixKeys.has(fixKey) ? fixKey : undefined);
     if (heldKey !== undefined) {
       const nowMs = deps.now?.() ?? systemClock.now();
       const queued = queuedHostFixHolder(heldKey, nowMs);
@@ -25110,11 +25261,9 @@ export async function runSweep(
           error: String((error as Error)?.message ?? error),
         }));
       }
-      return {
-        ok: false,
-        reason: detachedFixHolder(heldKey, nowMs)?.reason ??
-          `duplicate fix-dispatch key (${heldKey}) already claimed this pass — a concurrent sweep is already dispatching this PR's fix rung`,
-      };
+      const holder = detachedFixHolder(heldKey, nowMs) ?? fixChildHolder(heldKey, nowMs, child);
+      return { ok: false, holder, reason: holder?.reason ??
+        `duplicate fix-dispatch key (${heldKey}) already claimed this pass — a concurrent sweep is already dispatching this PR's fix rung` };
     }
     const freshTally = fixRoundTally(freshLines, fixTaskId, pr.headSha);
     // W1-T5542 + W1-T7096: a stale view reaching the claim at (or past) the former ceiling, or on a
@@ -26181,6 +26330,7 @@ export async function runSweep(
         log("sweep.judge_withdraw.failed", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) });
       }
     }
+    let refusedFixHolder: FixDispatchHolder | undefined;
     // W1-T5543: fleet filings have their own plan surface; the code rung still never owns one.
     if (planConflictRound || (disposition === "blocked-fixable" && isBlockedCi(pr) && pr.isPlanFiling === true)) {
       const pendingJudgment = judgedUnavailable.get(pr.prNumber);
@@ -26224,6 +26374,7 @@ export async function runSweep(
           }
           const claimed = claimFixDispatch({ ...pr, taskId: escalationTaskIdFor(pr) });
           if (!claimed.ok) {
+            refusedFixHolder = claimed.holder;
             repair.reason = claimed.reason;
             if (claimed.reason.includes("refused twice")) {
               repair.repaired = false;
@@ -27345,6 +27496,7 @@ export async function runSweep(
                 const fixClaim = claimFixDispatch(pr);
                 if (!fixClaim.ok) {
                   acted = false;
+                  refusedFixHolder = fixClaim.holder;
                   standDownReason = fixClaim.reason;
                   break;
                 }
@@ -27834,6 +27986,7 @@ export async function runSweep(
                 const codeqlClaim = claimFixDispatch(pr);
                 if (!codeqlClaim.ok) {
                   acted = false;
+                  refusedFixHolder = codeqlClaim.holder;
                   standDownReason = codeqlClaim.reason;
                   break;
                 }
@@ -28594,6 +28747,7 @@ export async function runSweep(
               const fixClaim = claimFixDispatch(pr, proofRepairRoute !== undefined && !proofRepairActive);
               if (!fixClaim.ok) {
                 acted = false;
+                refusedFixHolder = fixClaim.holder;
                 standDownReason = fixClaim.reason;
                 break;
               }
@@ -28806,6 +28960,7 @@ export async function runSweep(
               const conflictedFixClaim = claimFixDispatch(ownedRound ? { ...pr, taskId: escalationTaskIdFor(pr) } : pr);
               if (!conflictedFixClaim.ok) {
                 acted = false;
+                refusedFixHolder = conflictedFixClaim.holder;
                 standDownReason = conflictedFixClaim.reason;
                 break;
               }
@@ -29445,8 +29600,13 @@ export async function runSweep(
         contradictory_interval_ms: state.interval, contradictory_next_row_at: state.next };
       contradictoryCheckpoint = state;
     }
-    const fixHolder = !acted && (disposition === "blocked-fixable" || disposition === "conflicted" || disposition === "mergeable")
-      ? detachedFixHolder(`${fixLedgerTaskIdFor(pr) ?? ""}@${pr.headSha}`, deps.now?.() ?? systemClock.now()) : undefined;
+    let fixHolder = refusedFixHolder;
+    if (fixHolder === undefined && !acted && (disposition === "blocked-fixable" || disposition === "conflicted" || disposition === "mergeable")) {
+      const fixKey = `${fixLedgerTaskIdFor(pr)}@${pr.headSha}`;
+      const nowMs = deps.now?.() ?? systemClock.now();
+      fixHolder = detachedFixHolder(fixKey, nowMs) ??
+        (inFlightFixKeys.has(fixKey) ? fixChildHolder(fixKey, nowMs, registeredFixChild(fixKey)) : undefined);
+    }
     if (fixHolder) {
       standDownReason = fixHolder.reason;
       extraDisposedFields = { ...extraDisposedFields, ...fixHolder.fields };

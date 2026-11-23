@@ -24,6 +24,10 @@
     - src/lib/github-transport.ts
     - src/lib/worktree-git.ts
     - test/authority-table.test.ts
+    - scripts/lib/author-push-eligibility.mjs
+    - scripts/preflight-author.mjs
+    - src/lib/worktree-sites.ts
+    - test/worktree-creation-census.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -39,6 +43,15 @@
       proof: "grep: W1-T12169 criterion 5 in test/ci/one-command-ships-a-hand-built-branch-from-an-operator-session.test.ts"
     - claim: "The command table calls the new module"
       proof: "grep: runHandShip( in src/run-task.ts"
+  amendment: |
+    2026-11-23, scope: four paths join files:. (1) src/lib/hand-ship.ts imported authorPushEligibility and
+    failingTestsFromTap from scripts/preflight-author.mjs, which spawns src/run-task.ts, so run-task -> hand-ship ->
+    preflight-author -> run-task formed a cycle: the reach ratchet refused it (largestScc 90 > 85) and bundled-child
+    suites failed on preflight-author's top-level await. Those helpers move unchanged to
+    scripts/lib/author-push-eligibility.mjs, which scripts/preflight-author.mjs re-exports and hand-ship imports.
+    (2) hand-ship cuts unchanged main with a raw git worktree add on the preflight host, possibly over ssh, where
+    worktreeAdd cannot reach. The worktree-creation census requires a named row in src/lib/worktree-sites.ts and its
+    test's count of exempt sites; the operator approved that named row (2026-11-23 11:41Z). No acceptance change.
   rationale: |
     OBSERVED 2026-11-10: operator sessions ship hand-built branches through two shell scripts that are in no repository.
     - One is ~/rmd-hand/bin/ship.sh on the Mac agent account (179 lines). The other is ~/rmd-work/bin/ship.sh on the Azure host. They differ, and each was changed by hand during the day.
@@ -52,7 +65,8 @@
     The classes of criterion 3 follow the Mac script: all green alone means the host; red alone and red on main means also failing on main; otherwise the change.
     The command keeps its state in one directory for each run: status, history, logs and the process id.
     `authorPushEligibility` in scripts/preflight-author.mjs stays the only judge of a receipt.
-    NOT IN SCOPE: the merge, any change to the author preflight, and the removal of the two shell scripts. The operator removes them after one week of use.
+    NOT IN SCOPE: the merge, any change to the author preflight's behaviour (the 2026-11-23 amendment moves its
+    push-eligibility helpers to a module it re-exports, nothing more), and the removal of the two shell scripts. The operator removes them after one week of use.
     NO-INVARIANTS: the command is new and has no prior behaviour to keep; the shared modules it touches (authority, git-push, github-transport, worktree-git) gain the rows and helpers it calls, and their existing callers are covered by their own tests.
   falsifier: |
     Choose a host whose reading is unreadable and criterion 1 must fail. Push after a failure in the class caused by the change and criterion 4 must fail. Call a failure that is green on main "also failing on main" and criterion 3 must fail. Key a failure by its callback body instead of its file and title, edit only an assertion message in a test that fails on main, and criterion 3 must fail. Drop the lease and move the remote tip between the last read and the push, and criterion 4 must fail. Restore and require all to pass.

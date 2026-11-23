@@ -90,6 +90,7 @@ export function createIncidentsView<S extends { instance: string; tickedAt?: num
   version: number;
   prepare(ctx: { instances: ReadonlyArray<Slot<S>> }, more: () => boolean): boolean;
   materialize(ctx: { now: number; instances: ReadonlyArray<Slot<S>> }): Array<{ key: string; data: IncidentsViewData; sources: ViewSource[] }>;
+  inputsFingerprint(ctx: { now: number; instances: ReadonlyArray<Slot<S>> }): string | undefined;
   legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
 } {
   const folds = opts.folds ?? AGENT_FOLDS;
@@ -103,32 +104,49 @@ export function createIncidentsView<S extends { instance: string; tickedAt?: num
   const slotsOf = (instances: ReadonlyArray<Slot<S>>) => instances.flatMap((slot) =>
     byName.has(slot.state.instance) && slot.db && slot.state.tickedAt !== undefined ? [{ ...slot, db: slot.db, name: slot.state.instance }] : []);
   const foldSlot = (slot: { name: string; db: ReadModelDb; lease?: ReadModelLease }) => ({ instance: slot.name, db: slot.db, ...(slot.lease ? { lease: slot.lease } : {}) });
+  /** The body's content at `now`, the store re-read only when its file's fingerprint moved. */
+  const contentAt = (now: number, instances: ReadonlyArray<Slot<S>>, dir: string) => {
+    const stat = storeStat(incidentLifecycleStorePath(dir));
+    if (store?.fingerprint !== stat.fingerprint) store = { ...stat, part: incidentsStorePart(dir) };
+    const newestTsMs = new Map<string, number>();
+    const slots = slotsOf(instances);
+    const data: IncidentsViewData = {
+      store: store.part,
+      instances: slots.map((slot) => {
+        const fold = folds.current(foldSlot(slot));
+        newestTsMs.set(slot.name, fold.newestTsMs);
+        return { instance: slot.name, emergency: { active: activeEmergencyStopsAt(fold.rows.filter(isEmergencyRow), now) }, liveness: instanceLiveness(slot.db, now) };
+      }),
+    };
+    return { held: store, slots, data, newestTsMs, json: JSON.stringify(data) };
+  };
   return {
     name: INCIDENTS_VIEW_NAME,
     version: INCIDENTS_VIEW_VERSION,
     prepare: ({ instances }, more) => slotsOf(instances).every((slot) => folds.advance(foldSlot(slot), more)),
+    /**
+     * W1-T11976: every input of the body, after `prepare` has advanced the folds. They are the store file (its size,
+     * mtime and inode, which also give its source's as-of), and per ticked instance its `panel.emergency_stop_*` rows and
+     * its newest `daemon.*` row. Both rows are read through clock-derived fields: a stop's expiry and the liveness band.
+     * So the fingerprint is the content at `now` itself, and a stop expiring or a heartbeat aging out of the band
+     * moves it with no row. It is cheap: the folds are held in memory and the store is re-read only when its file moved.
+     * Its other sources are `ledger:<i>`, which a skip restamps.
+     */
+    inputsFingerprint: ({ now, instances }) => {
+      if (storeDir === undefined) return undefined;
+      const { held, json } = contentAt(now, instances, storeDir);
+      return JSON.stringify([held.fingerprint, json]);
+    },
     materialize: ({ now, instances }) => {
       if (storeDir === undefined) return [];
-      const stat = storeStat(incidentLifecycleStorePath(storeDir));
-      if (store?.fingerprint !== stat.fingerprint) store = { ...stat, part: incidentsStorePart(storeDir) };
-      const newestTsMs = new Map<string, number>();
-      const slots = slotsOf(instances);
-      const data: IncidentsViewData = {
-        store: store.part,
-        instances: slots.map((slot) => {
-          const fold = folds.current(foldSlot(slot));
-          newestTsMs.set(slot.name, fold.newestTsMs);
-          return { instance: slot.name, emergency: { active: activeEmergencyStopsAt(fold.rows.filter(isEmergencyRow), now) }, liveness: instanceLiveness(slot.db, now) };
-        }),
-      };
-      const json = JSON.stringify(data);
+      const { held, slots, data, newestTsMs, json } = contentAt(now, instances, storeDir);
       if (last?.json !== json) {
         last = { json, data };
         shown.set(data, { builtMs: now, newestTsMs });
       }
-      const read: ViewSource = store.part.state === "ok"
-        ? { name: storeSource, asOf: store.asOf, state: "fresh" }
-        : { name: storeSource, asOf: store.asOf, state: "unavailable", reason: `the incident lifecycle store is ${store.part.reason}` };
+      const read: ViewSource = held.part.state === "ok"
+        ? { name: storeSource, asOf: held.asOf, state: "fresh" }
+        : { name: storeSource, asOf: held.asOf, state: "unavailable", reason: `the incident lifecycle store is ${held.part.reason}` };
       return [{ key: "", data: last.data, sources: [read, ...slots.map((slot) => opts.ledgerSource(slot.state, now))] }];
     },
     /**

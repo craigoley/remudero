@@ -14,7 +14,7 @@
     - docs/ratification/p25_validation.md
   acceptance:
     - claim: "Risks identified with P25 ratification and mitigation plan documented."
-      proof: "grep: \"Risks\" in docs/ratification/p25_validation.md"
+      proof: "grep: Risks in docs/ratification/p25_validation.md"
   origin: architect
   rationale: >-
     From the 2026-10-05 follow-up on W1-T5689-1791183035928, ratified via rmd approve:
@@ -24,15 +24,10 @@
     `sweepLandingSteps` by name, because the positive-control falsifier depends on it. — from
     W1-T5689 (run W1-T5689-1791183035928)
   risk_ruling:
-    verdict: "low"
+    verdict: "high"
     action: escalate
-    confidence: 0.8
+    confidence: 0.98
     reasons:
-      - "The filed task is a diagnose/research task. Its single acceptance check is a grep for \"Risks\" in a new doc, docs/ratification/p25_validation.md. That points to documentation output only."
-      - "The declared files are plan/tasks.yaml and one markdown doc. Neither is described as touching secrets, credentials, auth, merge or deploy policy, or infrastructure. The description names no deletion and no irreversible action."
-      - "The doc is absent at the base. The task creates it, which is expected for a new doc and not a drift signal."
-      - "The gates state is clean: author_class is operator, filingTime is true, and the family record is 3 merged and 1 declined (Beta mean 0.67)."
-      - "The rationale asks to confirm that certain seeds reach named functions. That is a verifiable code-trace question, not an operator-only decision. The task still goes through CI and review."
-      - "the judge said proceed, but W1-T9393: at verify: auto it fails lint (rule15-filing)"
-    judged_at: "2026-10-14T06:49:14.995Z"
-    pin: "8dca99c19dc1f5c3c0765861112d71ecd8502647a02f12dc29ff64e842bf402e"
+      - "high-risk verdict at confidence 0.98 — on the change's description/files alone, no diff was read — The filed rationale calls for confirming two daemon call paths that a positive-control falsifier depends on. The title and acceptance criterion instead call for a P25 ratification risk report, and the filing supplies no plan reference connecting those objectives.; on the change's description/files alone, no diff was read — The sole acceptance proof checks for the word “Risks” in the proposed report. It cannot verify either call path or establish that the report documents mitigations."
+    judged_at: "2026-11-23T04:16:23.031Z"
+    pin: "62f9d0b8ede41ddddf35ee77b1cf94493b25f9ae5486b6651e6183014ddb3290"

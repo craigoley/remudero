@@ -11,8 +11,13 @@
   plan_refs: [W1-T14035]
   files:
     - docs/review-status-writers.md
+    - docs/docs-index.json
   status: queued
   attempts: 0
+  amendment: |
+    2026-11-23, scope: docs/docs-index.json joins files:. A new document under docs/ must be listed in the generated
+    index (scripts/generate-docs-index.mjs, checked by docs-index-check), and acceptance-author-gate refused the
+    build PR for changing the index outside files:. No acceptance change.
   rationale: |
     OBSERVED 2026-11-21 (host ledger and the GitHub status API, read-only) on #19922 head 66e66ab8941c, all with
     reviewer code ebea9d1a5:

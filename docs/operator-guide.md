@@ -815,6 +815,19 @@ reading the ops repository, and its tasks and feedback are no longer seen on thi
 The doctrine page for a hand filing says which commands to run in the destination:
 [file from the operator checkout](../doctrine/plan-and-task-hygiene/file-from-the-operator-checkout.md).
 
+For a hand build of an existing ops task, run this from the code worktree with your task ID to
+save the pull request body before pushing:
+
+```sh
+./bin/rmd plan-destination task --pr-body W1-T1234 > pr-body.md
+```
+
+Use the saved text as the pull request body. It carries the task title, the private-fields
+decision, the rendered acceptance block, and the task trailer. The pre-push proof check reads
+the committed public plan first, then looks up a missing task in the configured ops catalog.
+An unreadable catalog is reported as an unchecked result. Resolve the catalog access issue and
+rerun the check before treating the proofs as checked.
+
 
 ## Operating this host (migrated from CLAUDE.md, W1-T2507)
 

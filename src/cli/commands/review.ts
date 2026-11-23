@@ -24,9 +24,9 @@ import { withTempDir } from "../../lib/tmp.js";
 import { systemClock } from "../../lib/clock.js";
 import { reapWorkerScratch } from "../../lib/worker-scratch.js";
 import { resolveInstallRoot } from "../../lib/install-root.js";
-import { escalate, ghIssueGateway, tryEscalate } from "../../lib/escalate.js";
+import { escalate, ghIssueGateway, ghIssueGatewayAsync, tryEscalate, tryEscalateAsync } from "../../lib/escalate.js";
 import { combinedStatusRestArgs, compareRestArgs, mapRestPr, rollupForAsync, tryFetchReviewReuseFacts, type ReviewReuseFacts, type RestPullRow } from "../../lib/open-prs-rest.js";
-import { ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
+import { ghJsonAsync, ghLinesAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { appendLedger, REVIEW_LANE_ABORTED_STEP } from "../../lib/ledger.js";
 import { requiredSemanticDecisionDigest } from "../../lib/required-semantic-review.js";
 import { deriveTaskClass } from "../../lib/task-class.js";
@@ -43,7 +43,7 @@ import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/moun
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -558,6 +558,158 @@ export async function readChecksGreenReviewedAtHead(
  *  withheld or replayed verdict is terminal and reports `posted`. */
 export { readReviewStatusHistory, type ReviewStatusHistoryReader } from "../../lib/review.js";
 
+/** W1-T14179: the writer a review comment names, hidden in the rendered text, so another host can tell its runs apart. */
+const REVIEW_WRITER_MARKER = /<!-- remudero-review writer run=(\S+) input=(\S+) code=(\S+) -->/;
+export function reviewWriterMarker(runId: string, inputDigest: string | undefined, codeSha: string | undefined): string {
+  return `<!-- remudero-review writer run=${runId} input=${inputDigest ?? "none"} code=${codeSha ?? "none"} -->`;
+}
+
+/** W1-T14179: the newest terminal remudero-review status at a head when it is a FAIL, with what its comment names. */
+export interface StandingReviewFailure {
+  headSha: string;
+  runId?: string;
+  inputDigest?: string;
+  codeSha?: string;
+  unmet: { claim: string; reason: string }[];
+}
+type SharedReviewStatusHistory = ReviewStatusHistory & { standingFailure?: StandingReviewFailure };
+export interface ReviewPassDispute { reason: string; description: string; failRunId?: string; unanswered: string[]; standing: StandingReviewFailure }
+type ReviewWriter = { runId: string; inputDigest?: string; codeSha?: string };
+
+export function standingReviewFailureFromHistory(statuses: readonly unknown[], reviews: readonly unknown[], headSha: string): StandingReviewFailure | undefined {
+  const field = (row: unknown, key: string): unknown => (row as Record<string, unknown> | null)?.[key];
+  const terminal = statuses.find((row) => field(row, "context") === REVIEW_CONTEXT && String(field(row, "state")).toLowerCase() !== "pending");
+  if (terminal === undefined || String(field(terminal, "state")).toLowerCase() !== "failure") return undefined;
+  const bodies = reviews.filter((row) => field(row, "commit_id") === headSha && typeof field(row, "body") === "string" &&
+    /^\s*\*\*remudero-review=failure\*\*/.test(String(field(row, "body"))))
+    .sort((a, b) => String(field(a, "submitted_at") ?? "").localeCompare(String(field(b, "submitted_at") ?? "")));
+  const body = String(field(bodies.at(-1), "body") ?? "");
+  const marker = REVIEW_WRITER_MARKER.exec(body);
+  const named = (value: string | undefined): string | undefined => value === undefined || value === "none" ? undefined : value;
+  const unmet: { claim: string; reason: string }[] = [];
+  for (const line of body.split(/\r?\n---\s*(?:\r?\n|$)/)[0]!.split(/\r?\n/)) {
+    const item = /^(?:\d+\.|-)\s+(.+)$/.exec(line);
+    if (item) unmet.push({ claim: item[1]!.trim(), reason: "" });
+    else if (unmet.length > 0 && /^\s+\S/.test(line)) unmet.at(-1)!.reason += `${line.trim().replace(/^- /, "")}\n`;
+  }
+  const runId = named(marker?.[1]), inputDigest = named(marker?.[2]);
+  const codeSha = named(marker?.[3]) ?? reviewCodeShaFromDescription(field(terminal, "description"));
+  return { headSha, ...(runId ? { runId } : {}), ...(inputDigest ? { inputDigest } : {}), ...(codeSha ? { codeSha } : {}),
+    unmet: unmet.map((criterion) => ({ claim: criterion.claim, reason: criterion.reason.trim() })) };
+}
+
+async function readReviewHistoryPages(readJson: (args: string[], options: { fresh: true }) => unknown | Promise<unknown>, endpoint: string): Promise<unknown[]> {
+  const rows: unknown[] = [];
+  for (let page = 1; page <= 10; page += 1) {
+    const value = await readJson(["api", `${endpoint}?per_page=100&page=${page}`], { fresh: true });
+    if (!Array.isArray(value)) throw new Error("GitHub returned a non-list response");
+    rows.push(...value.flat());
+    if (value.flat().length < 100) return rows;
+  }
+  throw new Error("GitHub history still full after 10 pages");
+}
+
+/** W1-T14179: {@link readReviewStatusHistory} plus the standing FAIL, from the same GitHub reads. Any read error is unreadable. */
+async function readSharedReviewStatusHistory(owner: string, repo: string, prUrl: string, headSha: string,
+  readJson: (args: string[], options: { fresh: true }) => unknown | Promise<unknown> =
+    (args, options) => ghJsonAsync(args, undefined, undefined, options)): Promise<SharedReviewStatusHistory> {
+  const reads = new Map<string, Promise<unknown>>();
+  const once = (args: string[], options: { fresh: true }): Promise<unknown> => {
+    const key = args.join("\0");
+    if (!reads.has(key)) reads.set(key, Promise.resolve().then(() => readJson(args, options)));
+    return reads.get(key)!;
+  };
+  const history = await readReviewStatusHistory(owner, repo, prUrl, headSha, once);
+  if (history.kind === "unreadable") return history;
+  try {
+    const statuses = await readReviewHistoryPages(once, `repos/${owner}/${repo}/commits/${headSha}/statuses`);
+    const failed = standingReviewFailureFromHistory(statuses, [], headSha);
+    if (failed === undefined) return history;
+    const number = /\/pull\/([1-9]\d*)\/?$/.exec(prUrl)?.[1];
+    if (number === undefined) throw new Error("PR number is unavailable from review URL");
+    const reviews = await readReviewHistoryPages(once, `repos/${owner}/${repo}/pulls/${number}/reviews`);
+    return { ...history, standingFailure: standingReviewFailureFromHistory(statuses, reviews, headSha) };
+  } catch (error) {
+    return { kind: "unreadable", reason: `GitHub remudero-review standing failure unreadable: ${String((error as Error)?.message ?? error)}` };
+  }
+}
+
+/** W1-T14179 (invariant no-silent-override): why a PASS may not replace another run's standing FAIL on this head,
+ *  input and reviewer code (an unknown code on either side counts as the same). A criterion is answered when its own proof executed and passed where the FAIL's proof did not, or when the
+ *  reproduced-failure rule recorded it addressed. A FAIL whose criteria are unreadable is never answered. */
+export function passDisputesStandingFailure(verdict: Pick<ReviewVerdict, "state" | "criteria">, headSha: string, writer: ReviewWriter,
+  history: ReviewStatusHistory, answeredClaims: ReadonlySet<string> = new Set()): ReviewPassDispute | undefined {
+  if (verdict.state !== "success" || history.kind !== "readable") return undefined;
+  const standing = (history as SharedReviewStatusHistory).standingFailure;
+  if (standing === undefined || standing.headSha !== headSha || standing.runId === writer.runId) return undefined;
+  if (standing.inputDigest !== undefined && writer.inputDigest !== undefined && standing.inputDigest !== writer.inputDigest) return undefined;
+  if (standing.codeSha !== undefined && writer.codeSha !== undefined && standing.codeSha !== writer.codeSha) return undefined;
+  const answers = (failed: { claim: string; reason: string }): boolean => {
+    const matches = verdict.criteria.filter((criterion) => criterion.claim.trim() === failed.claim);
+    return answeredClaims.has(failed.claim) || (matches.length === 1 && matches[0]!.met && matches[0]!.proof_exec === "executed_pass" &&
+      failed.reason !== "" && !/proof executed and PASSED/i.test(failed.reason));
+  };
+  const unanswered = standing.unmet.length === 0 ? ["the FAIL names no readable criterion"]
+    : standing.unmet.filter((failed) => !answers(failed)).map((failed) => failed.claim);
+  if (unanswered.length === 0) return undefined;
+  const failRun = standing.runId ?? "unknown";
+  return { reason: `PASS of run ${writer.runId} disputes the standing FAIL of run ${failRun} on ${headSha.slice(0, 7)}; ` +
+      `${unanswered.length} unmet criteria unanswered`,
+    description: `remudero-review: pending — PASS disputes FAIL of run ${failRun}`, ...(standing.runId ? { failRunId: standing.runId } : {}),
+    unanswered, standing };
+}
+
+/** W1-T14179: the publish path's history read, refusing a disputed PASS. The reproduced-failure rule and the semantic
+ *  rule decide first; a plan-only pass has no semantic judgement to dispute. */
+function disputeGuardedHistoryReader(read: ReviewStatusHistoryReader, verdict: ReviewVerdict, writer: ReviewWriter,
+  judgement: { planOnly?: unknown; reviewerOutcome?: unknown }, onDispute: (dispute: ReviewPassDispute) => void,
+  evidence?: Parameters<typeof applyReviewStatusHistoryGuard>[3], presentedFailureIds: readonly string[] = []): ReviewStatusHistoryReader {
+  if (judgement.planOnly === true || semanticJudgementRefusal(judgement) !== undefined) return read;
+  return async (owner, repo, prUrl, headSha) => {
+    const history = await read(owner, repo, prUrl, headSha);
+    const reproduction = applyReviewStatusHistoryGuard(verdict, headSha, history, evidence, undefined, presentedFailureIds);
+    if (history.kind !== "readable" || reproduction.verdict.state !== "success") return history;
+    const addressed = new Set(reproduction.verdict.reproducedFailureIdsAddressed ?? []);
+    const answered = new Set(history.failures.filter((failure) => failure.headSha === headSha && addressed.has(failure.id))
+      .map((failure) => failure.finding.split(/\r?\n/, 1)[0]!.replace(/^\s*\d+\.\s*/, "").trim()));
+    const dispute = passDisputesStandingFailure(verdict, headSha, writer, history, answered);
+    if (dispute === undefined) return history;
+    onDispute(dispute);
+    return { kind: "unreadable", reason: dispute.reason };
+  };
+}
+
+/** W1-T14179: a disputed PASS posts pending naming both runs, withdraws any arm and raises one escalation. */
+async function holdDisputedPass(dispute: ReviewPassDispute, verdict: ReviewVerdict, ctx: {
+  owner: string; repo: string; prUrl: string; headSha: string; taskId: string; runId: string; ledgerPath: string;
+  catalog?: "public" | "ops"; log: (step: string, extra?: Record<string, unknown>) => void; disarm?: (prUrl: string) => DisarmOutcome | void;
+  publish: (held: ReviewVerdict, description: string) => Promise<{ posted: boolean }>;
+}): Promise<ReviewVerdict & { verdictWithheld: string }> {
+  const held: ReviewVerdict = { ...verdict, state: "pending", summary: dispute.description };
+  withdrawArmIfVerdictRefuses(held, { prUrl: ctx.prUrl, taskId: ctx.taskId, headSha: ctx.headSha, ledgerPath: ctx.ledgerPath, log: ctx.log },
+    { disarm: ctx.disarm });
+  const published = await ctx.publish(held, dispute.description);
+  const ops = ctx.catalog === "ops";
+  const issueUrl = await tryEscalateAsync({
+    class: "MANUAL", taskId: ctx.taskId, runId: ctx.runId, headSha: ctx.headSha, cause: "review",
+    summary: `PR ${ctx.prUrl} has a PASS that disputes a standing FAIL`,
+    detail: ops ? "Two reviews disagree on this head; detailed evidence is retained on the host."
+      : `${dispute.reason}. Unanswered: ${dispute.unanswered.join("; ")}.`,
+    options: [
+      { label: "Run a third review", detail: "Run one more semantic review of this head to settle the disagreement." },
+      { label: "Decide by hand", detail: "Read both reviews, then post the verdict this head deserves." },
+    ],
+    recommendation: "Run a third review",
+    consequence: "The required review remains pending and the PR cannot merge.",
+  }, { issues: ghIssueGatewayAsync(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId });
+  ctx.log("review.post_refused", {
+    pr_url: ctx.prUrl, head_sha: ctx.headSha, attempted_state: "success", outcome: "disputed_pass_held", reason: dispute.reason,
+    pass_run_id: ctx.runId, fail_run_id: dispute.failRunId ?? null, fail_review_input_digest: dispute.standing.inputDigest ?? null,
+    unanswered_criteria: ops ? dispute.unanswered.length : dispute.unanswered, pending_posted: published.posted, escalation_issue_url: issueUrl,
+  });
+  return { ...held, verdictWithheld: dispute.reason };
+}
+
 export function failureRecordingPoster(): { post: (o: Parameters<typeof postReviewStatus>[0]) => Promise<void>; failed: () => boolean; published: () => boolean } {
   let threw = false;
   let published = false;
@@ -576,13 +728,24 @@ export function failureRecordingPoster(): { post: (o: Parameters<typeof postRevi
   };
 }
 
+async function readReviewHostedJobLog(argv: string[]): Promise<string> {
+  const lines: string[] = [];
+  await ghLinesAsync(argv, line => {
+    // Keep the shared parser's receipts, test locations and failure section marker in order.
+    if (line.includes("RMD-TEST-FILE-DIAGNOSTIC ") || line.includes(".test.") || line.includes("✖ failing tests:")) {
+      lines.push(line);
+    }
+  });
+  return lines.join("\n");
+}
+
 /** W1-T11200: share the fix lane's exact-head, file-receipt reader with the review judge. */
 export async function reviewHostedCiFileEvidence(
   args: { owner: string; repo: string; headSha: string; criteria: readonly AcceptanceCriterion[];
     headCheckoutDir?: string; log: (step: string, extra?: Record<string, unknown>) => void },
   read: HostedFixProofReader = (headSha, proofs) => readHostedFixProofResults({
     owner: args.owner, repo: args.repo, headSha, proofs,
-  }),
+  }, { json: ghJsonAsync, text: readReviewHostedJobLog }),
 ): Promise<ReadonlyMap<string, "passed" | "failed"> | undefined> {
   try {
     const files = new Set<string>();
@@ -893,7 +1056,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   } catch (e) {
     log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
   }
-  const readStatusHistory = args.readReviewStatusHistory ?? readReviewStatusHistory;
+  const readStatusHistory = args.readReviewStatusHistory ?? readSharedReviewStatusHistory;
   const initialStatusHistory: ReviewStatusHistory = args.shadow
     ? { kind: "readable", failures: [] }
     : await readStatusHistory(owner, repo, prUrl, headSha);
@@ -1590,6 +1753,10 @@ export async function runReview(host: ReviewCommandHost, args: {
   reportPhase("posting");
   const poster = failureRecordingPoster();
   const publishingState = verdict.state;
+  const codeSha = reviewerCodeFreshness?.status === "fresh" ? reviewerCodeFreshness.codeSha : undefined;
+  const historyEvidence = reviewerFindingText === undefined ? undefined : parseReviewerHistoryEvidence(reviewerFindingText, criteria.length);
+  const presentedFailureIds = initialStatusHistory.kind === "readable" ? initialStatusHistory.failures.map(finding => finding.id) : [];
+  let dispute: ReviewPassDispute | undefined;
   const posted = await postReviewStatusGuarded({
     post: catalogReviewPoster(task.catalog, poster.post, reviewerCodeFreshness?.status === "fresh" ? reviewerCodeFreshness.codeSha : undefined),
     outboxBeforePost: true,
@@ -1598,10 +1765,10 @@ export async function runReview(host: ReviewCommandHost, args: {
     sha: headSha,
     state: verdict.state,
     verdict,
-    reviewerHistoryEvidence: reviewerFindingText === undefined ? undefined
-      : parseReviewerHistoryEvidence(reviewerFindingText, criteria.length),
-    presentedFailureIds: initialStatusHistory.kind === "readable" ? initialStatusHistory.failures.map(finding => finding.id) : [],
-    readReviewStatusHistory: readStatusHistory,
+    reviewerHistoryEvidence: historyEvidence,
+    presentedFailureIds,
+    readReviewStatusHistory: disputeGuardedHistoryReader(readStatusHistory, verdict, { runId: args.runId, inputDigest, codeSha },
+      { planOnly: planOnlySkip, reviewerOutcome: outcome }, (found) => { dispute = found; }, historyEvidence, presentedFailureIds),
     description,
     taskId: task.id,
     evidence: reviewEvidenceStrength(verdict.criteria),
@@ -1628,6 +1795,17 @@ export async function runReview(host: ReviewCommandHost, args: {
   if (!poster.failed()) (args.onPhase ?? reportReviewPhase)("posted");
   decisionDigest = posted.effectiveReviewDecisionDigest ?? decisionDigest;
   if (posted.effectiveVerdict) verdict = { ...verdict, ...posted.effectiveVerdict, state: posted.effectiveState ?? posted.effectiveVerdict.state };
+  if (dispute !== undefined && posted.effectiveState === "pending") {
+    const held = await holdDisputedPass(dispute, verdict, { owner, repo, prUrl, headSha, taskId: task.id, runId: args.runId,
+      ledgerPath: args.ledgerPath, catalog: task.catalog, log, disarm: args.disarm,
+      publish: (pending, pendingDescription) => postReviewStatusGuarded({ post: catalogReviewPoster(task.catalog, poster.post),
+        owner, repo, sha: headSha, state: "pending", verdict: pending, description: pendingDescription, taskId: task.id,
+        evidence: reviewEvidenceStrength(pending.criteria), ledgerPath: args.ledgerPath, runId: args.runId, prUrl,
+        reviewInputDigest: inputDigest, reviewEngineRevision: REVIEW_ENGINE_REVISION, reviewerCodeFreshness,
+        fetchLifecycle: () => fetchPrLifecycleAsync(prUrl), readRequiredContexts: readRequiredStatusCheckContextsAsync }) });
+    say(`remudero-review: PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${held.verdictWithheld}`);
+    return { ...held, headSha, reviewerOutcome: outcome, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
+  }
   if (posted.semanticHold !== undefined) {
     // W1-T14235: the pass was held (pending, or a standing failure left standing), so an arm taken at open is withdrawn.
     withdrawArmIfVerdictRefuses(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
@@ -1930,7 +2108,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   const body = task.catalog === "ops"
     ? `**remudero-review=${verdict.state}** — detailed evidence retained on host\n\n` +
       visibleCriteria(task.acceptance ?? []).map(criterion => `- ${criterion.claim}`).join("\n")
-    : parts.join("\n\n---\n\n");
+    : `${parts.join("\n\n---\n\n")}\n\n${reviewWriterMarker(args.runId, inputDigest, codeSha)}`;
   postReviewCommentGuarded(prUrl, body, { commitSha: headSha });
   // W1-T63/P10-a: the console summary distinguishes a completed review from a
   // floor-only one (reviewer never attempted, or attempted but walled/failed).
@@ -3013,10 +3191,13 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     const restorePoster = failureRecordingPoster();
     const restoringState = verdict.state;
     const restoringFreshness = await publicationFreshness();
+    let replayDispute: ReviewPassDispute | undefined;
     const restored = await postStatusDep({
       post: catalogReviewPoster(taskCatalog, restorePoster.post, restoringFreshness.status === "fresh" ? restoringFreshness.codeSha : undefined),
       owner, repo, sha: view.headRefOid, state: verdict.state, verdict,
-      readReviewStatusHistory: deps.readReviewStatusHistory,
+      readReviewStatusHistory: disputeGuardedHistoryReader(deps.readReviewStatusHistory ?? readSharedReviewStatusHistory, verdict,
+        { runId, inputDigest, codeSha: restoringFreshness.status === "fresh" ? restoringFreshness.codeSha : undefined },
+        { planOnly: verdict.planOnly, reviewerOutcome: verdict.reviewerOutcome }, (found) => { replayDispute = found; }),
       description: reviewPostedDescription(verdict),
       taskId: reviewKey, evidence: reviewEvidenceStrength(verdict.criteria),
       ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest,
@@ -3036,7 +3217,15 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     if (restored.effectiveVerdict) verdict = { ...verdict, ...restored.effectiveVerdict, state: restored.effectiveState ?? restored.effectiveVerdict.state };
     if (restoringState === "success" && verdict.state === "failure") withdrawArmIfVerdictRefuses(verdict,
       { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
-    if (restored.semanticHold !== undefined) {
+    if (replayDispute !== undefined && restored.effectiveState === "pending") {
+      verdict = { ...verdict, ...await holdDisputedPass(replayDispute, verdict, { owner, repo, prUrl: view.url, headSha: view.headRefOid,
+        taskId: reviewKey, runId, ledgerPath, catalog: taskCatalog, log, disarm: deps.disarm,
+        publish: (pending, pendingDescription) => postStatusDep({ post: catalogReviewPoster(taskCatalog, restorePoster.post), owner, repo,
+          sha: view.headRefOid, state: "pending", verdict: pending, description: pendingDescription, taskId: reviewKey,
+          evidence: reviewEvidenceStrength(pending.criteria), ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest,
+          reviewEngineRevision: REVIEW_ENGINE_REVISION, reviewerCodeFreshness: restoringFreshness,
+          fetchLifecycle: () => fetchPrLifecycle(view.url), readRequiredContexts: readRequiredStatusCheckContextsAsync }) }) };
+    } else if (restored.semanticHold !== undefined) {
       if (verdict.state === "pending") withdrawArmIfVerdictRefuses(verdict,
         { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
       verdict.verdictWithheld = restored.reason ?? restored.semanticHold;

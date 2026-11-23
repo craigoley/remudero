@@ -3,14 +3,16 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: low
   priority: 2.97
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-11-23T08:17:19.553Z
   attempts: 0
   author_class: machine
   origin: "scout:redesign.garden_filing_failed"
   files:
+    - "src/lib/redesign-gardener.ts"
     - test/gardeners/scout-redesign-garden-filing-failed.test.ts
   acceptance:
     - claim: "redesign.garden_filing_failed stops recurring: its cause is fixed rather than its rows hidden"
@@ -20,11 +22,3 @@
     The ledger step redesign.garden_filing_failed carries a failure shape and landed rows in both halves of the trailing 7 days: 2 in the older half, 7 in the newer.
     No queued task and no task merged in that window cites this step, and no gardener scorecard prices it.
     The rows name no file of their own: locate the code that writes this step first, then fix its cause.
-  risk_ruling:
-    verdict: "rule-3-low-privilege"
-    action: proceed
-    confidence: 1
-    reasons:
-      - "rule 3 (live and low-privilege): the symptom is live, 11 occurrence(s) across 7 day(s), last seen 2026-11-12T23:42:15.114Z, and the record declares no privileged path"
-    judged_at: "2026-11-13T00:41:50.687Z"
-    pin: "3bf1b93e480024eb38a7bb68fd93790862612f2feb9b894c5cad91487bf5e9df"

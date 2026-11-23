@@ -505,6 +505,58 @@ test("W1-T7766: the capped-repair suite is selected for each recorded miss edge"
   assert.ok(!absent.narrow?.includes(suite));
 });
 
+const escalationRetirabilitySuite = "test/escalation-retirability.test.ts";
+const escalationRetirabilityBaseline = [
+  ["src/lib/sweep.ts", "test/a-plan-only-pr-requeues-its-cancelled-check.test.ts"],
+  ["test/sweep/flow-other-not-positively-mergeable.test.ts", "test/sweep/flow-other-not-positively-mergeable.test.ts"],
+] as const;
+const escalationRetirabilityInput: AffectedSuitesInput = {
+  files: new Map([
+    ...Object.entries(TREE),
+    ...escalationRetirabilityBaseline.flatMap(([edge, priorSuite]): [string, string][] => [[edge, ""], [priorSuite, ""]]),
+    [escalationRetirabilitySuite, 'import "../src/lib/sweep.js";'],
+  ]),
+  pathReaders: [],
+  symbolSuites: [],
+};
+
+test("W1-T13160: the selector covers the recorded suite for every recorded edge", () => {
+  for (const [edge] of escalationRetirabilityBaseline) {
+    const selection = selectAffectedSuites([edge], escalationRetirabilityInput);
+    assert.equal(selection.fullRun, false, edge);
+    assert.ok(selection.narrow?.includes(escalationRetirabilitySuite), edge);
+  }
+
+  const unrelated = selectAffectedSuites(["test/unrelated.test.ts"], escalationRetirabilityInput);
+  assert.deepEqual(unrelated.narrow, ["test/unrelated.test.ts"]);
+
+  const files = new Map(escalationRetirabilityInput.files);
+  files.delete(escalationRetirabilitySuite);
+  for (const [edge, priorSuite] of escalationRetirabilityBaseline) {
+    const absent = selectAffectedSuites([edge], { ...escalationRetirabilityInput, files });
+    assert.deepEqual(absent.narrow, [priorSuite], edge);
+  }
+});
+
+test("W1-T13160: the shadow record reads the recorded suite as selected for every recorded edge", () => {
+  for (const [edge] of escalationRetirabilityBaseline) {
+    const selection = selectAffectedSuites([edge], escalationRetirabilityInput);
+    const { failures } = shadowRecord(selection, [escalationRetirabilitySuite], { [escalationRetirabilitySuite]: "failed" });
+    assert.deepEqual(failures, [
+      { file: escalationRetirabilitySuite, floor: "selected", narrow: "selected", retry: "failed" },
+    ], edge);
+  }
+});
+
+test("W1-T13160: the selector still selects every suite it selected before the repair", () => {
+  for (const [edge, priorSuite] of escalationRetirabilityBaseline) {
+    const selection = selectAffectedSuites([edge], escalationRetirabilityInput);
+    const expected = [priorSuite, escalationRetirabilitySuite].sort();
+    assert.deepEqual(selection.suites, expected, edge);
+    assert.deepEqual(selection.narrow, expected, edge);
+  }
+});
+
 test("W1-T6751: the precheck census is selected for each recorded miss edge", () => {
   const census = "test/every-ci-census-is-asked-before-the-push.test.ts";
   const edges = [

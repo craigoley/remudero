@@ -571,6 +571,7 @@ export interface WorkerSelectionAssignment {
     windows: Array<{ name: string; usedPercent: number; resetsAt?: number | string }>;
     modelDecision?: {
       requestedCapability: CodexModelTier;
+      capabilityOverride?: NonNullable<ProviderCapacity["modelDecision"]>["capabilityOverride"];
       requestedEffort: string;
       mappedCandidates: string[];
       selectedModel?: string;
@@ -588,6 +589,7 @@ export type RoutingRule =
   | "headroom-auction"
   | "capability-preference"
   | "role-preference"
+  | "fix-economy-first"
   | "operator-preference"
   | "preference-bypassed"
   | "cash-fallback"
@@ -1266,13 +1268,19 @@ export interface SpawnWorkerArgs {
   maxTurns?: number;
   maxBudgetUsd?: number;
   config?: Config;
+  /** Fix rounds may try a lower Codex tier while keeping the mount's Claude model and fallback. */
+  economyFirst?: {
+    codexCapability: CodexModelTier;
+    onDecision?: (reason: "economy-first" | "no-codex-capacity" | "operator-preference") => void;
+  };
   /** Capacity-reader seams for provider-routing tests; production reads both subscriptions live. */
   providerRouting?: {
     readClaudeHealth?: () => Promise<ClaudeModelHealthReading>;
     readClaude?: (request?: Pick<ClaudeCapacityDeps, "forceRefresh">) => Promise<ProviderCapacity>;
     readCodex?: (
       config: Config,
-      request: Pick<CodexCapacityDeps, "requestedModel" | "requestedEffort" | "forceRefresh" | "selectedModel" | "preferredModel" | "reservePercent" | "capabilities">,
+      request: Pick<CodexCapacityDeps, "requestedModel" | "requestedEffort" | "forceRefresh" | "selectedModel" |
+        "preferredModel" | "reservePercent" | "capabilities" | "codexCapability" | "headroomTiming">,
     ) => Promise<ProviderCapacity>;
     /** Test seam for the selected Codex spawn; production uses the real contained CLI adapter. */
     spawnCodex?: (
@@ -1805,6 +1813,7 @@ function selectionCandidateSnapshot(capacity: ProviderCapacity): WorkerSelection
       ? {
           modelDecision: {
             requestedCapability: decision.requestedCapability,
+            ...(decision.capabilityOverride ? { capabilityOverride: decision.capabilityOverride } : {}),
             requestedEffort: decision.requestedEffort,
             mappedCandidates: decision.mappedCandidates.slice(0, 12),
             ...(decision.selectedModel ? { selectedModel: decision.selectedModel } : {}),
@@ -1910,6 +1919,7 @@ function routingRule(args: SpawnWorkerArgs, input: Parameters<typeof workerSelec
   if (args.routingFallback) return args.routingFallback.rule;
   if (args.routingTrial?.arm === "cash" && input.provider === "cash") return "cash-trial";
   if (input.mode !== "multi-provider") return input.mode;
+  if (input.capacity?.modelDecision?.capabilityOverride?.reason === "fix-economy-first") return "fix-economy-first";
   if (input.selection?.lane === "codex-credits") return "codex-credits";
   if (input.preferenceBypass) return "preference-bypassed";
   if (input.rolePreference) return "role-preference";
@@ -2784,6 +2794,12 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     : routingPolicy.routableProviders.filter((provider) => provider !== "cash");
   const capabilities = resolveWorkerCapabilities(args.cwd);
   const requestedCapability = args.model && capabilities ? codexCapabilityForRequestedModel(capabilities, args.model) : undefined;
+  const operatorPreference = args.mountProvider !== undefined || routingPolicy.preference !== "automatic" ||
+    routingPolicy.codexModelPreference !== undefined || config.workerProviders?.codexModel !== undefined;
+  const economyFirst = operatorPreference ? undefined : args.economyFirst;
+  if (args.economyFirst && (operatorPreference || !providers.includes("codex"))) {
+    args.economyFirst.onDecision?.(operatorPreference ? "operator-preference" : "no-codex-capacity");
+  }
   const subscriptionOnly = subscriptionOnlyModel(capabilities, args.model);
   const claudeHealthRoute = providers.includes("claude")
     ? await resolveWorkerClaudeHealth(args, capabilities)
@@ -2848,18 +2864,21 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     }
   }
   if (!args.mountProvider && !claudeOnlyWithoutAuction) {
-    const readCodexFor = (preferred: typeof routingPolicy.codexModelPreference) =>
+    const reservePercent = routingPolicy.reservePercent;
+    const economyCapability = args.excludeProviders?.includes("codex") ? undefined : economyFirst?.codexCapability;
+    const readCodexFor = (preferred: typeof routingPolicy.codexModelPreference, codexCapability?: CodexModelTier) =>
       (args.providerRouting?.readCodex ?? readCodexCapacity)(config, {
         requestedModel: args.model,
         requestedEffort: args.effort,
         ...(preferred ? { preferredModel: preferred } : {}),
-        reservePercent: routingPolicy.reservePercent,
+        ...(codexCapability ? { codexCapability } : {}),
+        reservePercent,
         headroomTiming,
         ...(args.model && capabilities ? { capabilities } : {}),
       });
     let capacities = await Promise.all(
       providers.map((provider) => {
-        if (provider === "codex") return readCodexFor(routingPolicy.codexModelPreference);
+        if (provider === "codex") return readCodexFor(routingPolicy.codexModelPreference, economyCapability);
         if (claudeHealthRoute && !claudeHealthRoute.eligible) return unavailableClaudeCapacity(claudeHealthRoute);
         return (args.providerRouting?.readClaude ?? (() => readClaudeProviderCapacity(config)))()
           .then((capacity) => claudeHealthRoute
@@ -2867,7 +2886,24 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             : capacity);
       }),
     );
-    const reservePercent = routingPolicy.reservePercent;
+    let startsOnEconomy = false;
+    if (economyFirst && providers.includes("codex")) {
+      const codex = capacities.find(capacity => capacity.provider === "codex");
+      if (economyCapability && codex?.model) {
+        const verdict = providerEligibility(codex, reservePercent, headroomTiming);
+        const otherSubscription = capacities.some(capacity => {
+          if (capacity.provider === "codex" || args.excludeProviders?.includes(capacity.provider)) return false;
+          const other = providerEligibility(capacity, reservePercent, headroomTiming);
+          return other.eligible && other.lane === undefined;
+        });
+        startsOnEconomy = verdict.eligible && (verdict.lane === undefined || !otherSubscription);
+      }
+      if (!startsOnEconomy && economyCapability) {
+        const normal = await readCodexFor(routingPolicy.codexModelPreference);
+        capacities = capacities.map(capacity => capacity.provider === "codex" ? normal : capacity);
+      }
+      economyFirst.onDecision?.(startsOnEconomy ? "economy-first" : "no-codex-capacity");
+    }
     const statusBase = {
       enabledProviders: providers,
       reservePercent,
@@ -2887,15 +2923,17 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     let selection: ProviderSelection;
     let preferenceBypass: ProviderRoutingWriteInput["preferenceBypass"];
     try {
-      const auction = policyForCapability(
-        routingPolicy,
-        requestedCapability,
-        capabilities?.providerPreference,
-        // W1-T12172: the disposable review sandbox is the one spawn whose worker role the router can tell apart.
-        { role: args.sandboxIntent === "disposable-review" ? "reviewer" : undefined, preferences: capabilities?.rolePreference },
-        // W1-T14298: judged on this decision's capacities, exclusions and W1-T14200's clock and curve.
-        { capacities, timing: headroomTiming, ...(args.excludeProviders ? { excludeProviders: args.excludeProviders } : {}) },
-      );
+      const auction: ReturnType<typeof policyForCapability> = startsOnEconomy
+        ? { policy: { ...routingPolicy, preference: "codex" } }
+        : policyForCapability(
+          routingPolicy,
+          requestedCapability,
+          capabilities?.providerPreference,
+          // W1-T12172: the disposable review sandbox identifies the reviewer role for the router.
+          { role: args.sandboxIntent === "disposable-review" ? "reviewer" : undefined, preferences: capabilities?.rolePreference },
+          // W1-T14298: use this decision's capacities, exclusions and W1-T14200's clock and curve.
+          { capacities, timing: headroomTiming, ...(args.excludeProviders ? { excludeProviders: args.excludeProviders } : {}) },
+        );
       routedCapabilityPreference = auction.capabilityPreference;
       routedRolePreference = auction.rolePreference;
       const initialCandidates = providerExclusionCandidates(
@@ -2912,7 +2950,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         : selectWorkerProviderWithExclusions(current, auction.policy, draw, args.excludeProviders, headroomTiming);
       if (learned) {
         // W1-T14297: only the OPERATOR's own preference stands the learner aside, never one the committed table produced.
-        const stoodAside = keyed.unit === "task" ? "live-routing-experiment"
+        const stoodAside = startsOnEconomy ? "fix-economy-first" : keyed.unit === "task" ? "live-routing-experiment"
           : routingPolicy.preference !== "automatic" ? "operator-preference" : undefined;
         if (stoodAside) emitFixRoutingDecision(learned, { learner: FIX_ROUTING_LEARNER, applied: false, reason: stoodAside });
         else {
@@ -2987,6 +3025,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         return spawnWorker({
           ...args,
           ...fallback,
+          economyFirst: undefined,
           ...(fallback.routingFallback ? { routingFallback: { ...fallback.routingFallback, headroomTiming } } : {}),
           mountProvider,
         });
@@ -3172,7 +3211,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         preferenceBypass,
         capabilityPreference: routedCapabilityPreference,
         rolePreference: routedRolePreference,
-        capability: requestedCapability,
+        capability: startsOnEconomy ? economyCapability : requestedCapability,
         exclusion_unhonoured: assignmentExclusionUnhonoured,
       });
       let measurement: ProviderWindowMeasurement | undefined;

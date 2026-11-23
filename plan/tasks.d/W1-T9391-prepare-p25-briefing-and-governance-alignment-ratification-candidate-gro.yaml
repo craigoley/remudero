@@ -14,7 +14,7 @@
     - plan/tasks.yaml
   acceptance:
     - claim: "The P25 briefing document exists with scope, criteria, and acceptance metrics."
-      proof: "grep: \"scope\" in docs/ratification/p25_briefing.md"
+      proof: "grep: scope in docs/ratification/p25_briefing.md"
   origin: architect
 
   rationale: >-
@@ -27,8 +27,8 @@
   risk_ruling:
     verdict: "high"
     action: escalate
-    confidence: 0.94
+    confidence: 0.98
     reasons:
-      - "high-risk verdict at confidence 0.94 — on the change's description/files alone, no diff was read — The filed title and acceptance concern a P25 governance briefing, while the rationale requests research confirming named daemon hooks reach syncPlanFromOrigin and sweepLandingSteps; the supplied record does not connect these objectives.; on the change's description/files alone, no diff was read — The sole proof checks for \"scope\" in the briefing; it does not verify the requested hook reachability, governance alignment, criteria, or acceptance metrics. The finding therefore cannot be verified from what is shown, meeting the stated escalation condition."
-    judged_at: "2026-10-14T06:48:34.512Z"
-    pin: "7a2e8cb1404388628b11394393a578211aec56f1e90424e2cbdd02a756aaeca8"
+      - "high-risk verdict at confidence 0.98 — on the change's description/files alone, no diff was read — The title and acceptance criterion call for a P25 ratification briefing, while the filed rationale calls for verifying daemon hook reachability for W1-T5689. The plan context supplies no references connecting those objectives.; on the change's description/files alone, no diff was read — The sole automated proof searches the briefing for `scope`. That match would leave the required criteria and metrics and the rationale’s hook-reachability finding unverified."
+    judged_at: "2026-11-23T04:16:05.920Z"
+    pin: "fd54f3796cf345163688f4df70eb5b8964bede03b200f21354004601e9fadee0"

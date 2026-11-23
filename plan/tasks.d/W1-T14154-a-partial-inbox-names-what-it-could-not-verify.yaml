@@ -15,7 +15,7 @@
     - src/lib/inbox.ts
     - src/lib/panel-graph.ts
     - test/inbox/a-partial-inbox-names-what-it-could-not-verify.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     Live 2026-11-20 to 2026-11-21: the core Inbox read partial for over 9 hours. Its only explanation was the fixed
