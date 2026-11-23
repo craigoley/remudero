@@ -32663,7 +32663,7 @@ export function commitWorkerEdits(
       return { committed: false, undeclared: [], ignored_declared,
         reason: `declared path ignored by .gitignore: ${details.join(", ")}` };
     }
-    return { committed: false, undeclared: [], reason: "the worker changed nothing" };
+    return { committed: false, undeclared: [], reason: WORKER_CHANGED_NOTHING_REASON };
   }
 
   // W1-T4450: a REGISTERED REGENERABLE ARTIFACT (a gate's own baseline, whose failure message names
@@ -32759,7 +32759,7 @@ export function commitWorkerEdits(
       stageWorkerPaths(addable, args => hostWorktreeGit(repoDir, args, { env }));
     }, mergeHead === undefined ? undefined : resolve(repoDir, runGit(["rev-parse", "--git-path", "index"]).trim()));
     if (mergeHead === undefined && tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
-      return { committed: false, undeclared, reason: "the worker changed nothing" };
+      return { committed: false, undeclared, reason: WORKER_CHANGED_NOTHING_REASON };
     }
     sha = runGit(["commit-tree", tree, "-p", options.priorHeadSha!, ...(mergeHead === undefined ? [] : ["-p", mergeHead]), "-m", commitMessage]).trim();
     try {
@@ -33008,6 +33008,9 @@ export function scopeAmendmentFromFixReport(report: string): string | undefined 
  *  two functions can never drift on what "the missing-line refusal" means. */
 const MISSING_COMMIT_MESSAGE_REASON = "no anchored COMMIT_MESSAGE line in the report";
 
+/** The reason a harness commit names when the worker left no edit to commit. */
+export const WORKER_CHANGED_NOTHING_REASON = "the worker changed nothing";
+
 
 
 /** W1-T4450: how much of a report a missing-line refusal carries into the ledger. */
@@ -33027,7 +33030,7 @@ export function harnessCommitForShellLessWorker(
   const ahead = deps.ahead ?? commitsAhead;
   const asked = parseReport(input.report)?.commitMessage;
   if (asked === undefined && input.derivedCommit === undefined) {
-    const reason = MISSING_COMMIT_MESSAGE_REASON;
+    const reason = workerLeftEdits(input) ? MISSING_COMMIT_MESSAGE_REASON : WORKER_CHANGED_NOTHING_REASON;
     // W1-T4450: the tail of the report that was parsed, so the next diagnosis has evidence instead
     // of a transcript a later round overwrote.
     input.log("implement.harness_commit_refused", { reason, report_tail: input.report.slice(-REFUSED_REPORT_TAIL_CHARS) });
@@ -33065,6 +33068,14 @@ export function harnessCommitForShellLessWorker(
   if (committed.sha) input.onCommit?.(committed.sha, committed.undeclared);
   input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — it had no shell of its own`);
   return ahead(input.worktreePath, "origin/main");
+}
+
+function workerLeftEdits(input: Pick<Parameters<typeof harnessCommitForShellLessWorker>[0], "leftEdits" | "worktreePath">): boolean {
+  try {
+    return (input.leftEdits ?? (() => worktreeHasUncommittedChanges(input.worktreePath)))();
+  } catch {
+    return true; // An unreadable worktree counts as one with edits, so the missing-line refusal stays.
+  }
 }
 
 /** W1-T4614: the head sha a worktree holds and the assignment its commit names — the fields `implement.done` and

@@ -36,7 +36,8 @@ import type { ReviewVerdict } from "#src/lib/review.js";
 
 const TASK = "W1-T6027X";
 const HEAD = "head-a";
-const MISSING_LINE = "no anchored COMMIT_MESSAGE line in the report";
+/** A worker that left no edits and no COMMIT_MESSAGE line changed nothing. */
+const CHANGED_NOTHING = "the worker changed nothing";
 
 // ── the codex runner ──────────────────────────────────────────────────────────────────────────
 
@@ -258,13 +259,13 @@ test("W1-T6027: a fix worker whose stream logged turn.failed before SIGTERM is s
 
 test("W1-T6027: a fix worker that exited with a non-zero code and no COMMIT_MESSAGE line is still a refusal", async (t) => {
   const { rows } = await fixRound(t, "DAEMON-1", { subtype: "error_exit_1", isError: true, exit: { kind: "exit", code: 1 } });
-  assert.equal(rows.find((row) => row.step === "fix.commit_refused")?.reason, MISSING_LINE);
+  assert.equal(rows.find((row) => row.step === "fix.commit_refused")?.reason, CHANGED_NOTHING);
   assert.equal(rows.find((row) => row.step === "fix.done")?.subtype, "commit_refused");
   assert.equal(rows.some((row) => "worker_exit_signal" in row), false);
 });
 
 test("W1-T6027: the fix rung reads the exit, never the subtype — error_exit_null with no observed signal is a refusal", async (t) => {
   const { rows } = await fixRound(t, "DAEMON-1", { subtype: "error_exit_null", isError: true, exit: { kind: "unobserved" } });
-  assert.equal(rows.find((row) => row.step === "fix.commit_refused")?.reason, MISSING_LINE);
+  assert.equal(rows.find((row) => row.step === "fix.commit_refused")?.reason, CHANGED_NOTHING);
   assert.equal(rows.find((row) => row.step === "fix.done")?.subtype, "commit_refused");
 });

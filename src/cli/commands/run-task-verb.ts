@@ -620,7 +620,7 @@ export interface RunTaskCommandHost {
     fixOutcome?: TypedFixOutcome["kind"];
     subjectSource?: "worker-authored" | "re-asked" | "harness-derived";
     derivedCommit?: { subject: string; reason: string };
-    
+    leftEdits?: () => boolean;
     assignmentId?: string;
     requireMergeHead?: boolean;
     log: (step: string, extra?: Record<string, unknown>) => void;
@@ -7468,6 +7468,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       declaredPaths: task.files ?? [],
       acceptance: task.acceptance,
       assignmentId: impl.selectionAssignmentId,
+      leftEdits: () => worktreeHasUncommittedChanges(worktreePath),
       log,
       say,
       onRefusal: createHarnessCommitRefusalRecorder(harnessCommitRefusalState),
