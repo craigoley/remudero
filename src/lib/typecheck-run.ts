@@ -1,7 +1,8 @@
 /**
  * `npm run typecheck` — the full `tsc -p tsconfig.json --noEmit`, run the way the fleet's own checks run it: incremental
  * against this checkout's per-worktree buildinfo (seeded from the canonical checkout's, src/lib/typecheck-buildinfo.ts),
- * and admitted through a host test slot sized by its peak, warm or cold (W1-T7392, W1-T14153).
+ * and admitted by its peak: a cold check through a host test slot (W1-T7392), a warm one by memory headroom alone at
+ * the warm peak learned from the ledger (W1-T14145).
  *
  * WHY. Worker agents call `npm run typecheck` directly. As plain tsc that path stayed cold, full and unslotted after
  * #10374 and #10487 fixed the harness's own calls: two such checks in run-W1-T7615/W1-T7616 worktrees held 2.4 and
@@ -24,11 +25,14 @@ import { basename, dirname, join, resolve } from "node:path";
 import { appendProducerLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { discoverLiveLedgerRoot } from "./live-write-guard.js";
-import { acquireTestSlot, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
+import {
+  acquireTestSlot, admitStaticWork, readMemoryHeadroom, testSlotExecutionAllowed, type StaticAdmission, type TestSlotLease, type TestSlotOptions,
+} from "./test-slot.js";
 import {
   canonicalBuildInfo,
   hasUsableTypecheckBuildInfo,
   installedTypescriptVersion,
+  learnedTypecheckWarmPeakBytes,
   lowMemoryTypecheckArgs,
   measuredTypecheckInvocation,
   measuredTypecheckResult,
@@ -69,14 +73,37 @@ const inheritSpawn: TypecheckRunSpawn = (file, args, cwd, env) => {
   return measuredTypecheckResult(spawnSync(command.file, command.args, command.options));
 };
 
+/** The ledger a check of the tree at `root` writes its typecheck.peak row to, and reads its learned warm peak from. */
+function typecheckLedgerPath(root: string): string {
+  const parent = dirname(resolve(root));
+  // Fleet worktrees are rooted under config.root/worktrees, including when a worker has a redirected HOME.
+  const managed = !process.env.NODE_TEST_CONTEXT && basename(parent) === "worktrees" && existsSync(join(dirname(parent), "state"));
+  const ledgerRoot = process.env.NODE_TEST_CONTEXT
+    ? canonicalBuildInfo(root)?.root ?? root : managed ? dirname(parent) : discoverLiveLedgerRoot();
+  return ledgerPathFor({ root: ledgerRoot });
+}
+
 export function typecheckPeakWriter(root: string): (row: TypecheckPeakRow) => void {
-  return row => {
-    const parent = dirname(resolve(root));
-    // Fleet worktrees are rooted under config.root/worktrees, including when a worker has a redirected HOME.
-    const managed = !process.env.NODE_TEST_CONTEXT && basename(parent) === "worktrees" && existsSync(join(dirname(parent), "state"));
-    const ledgerRoot = process.env.NODE_TEST_CONTEXT
-      ? canonicalBuildInfo(root)?.root ?? root : managed ? dirname(parent) : discoverLiveLedgerRoot();
-    appendProducerLedger(ledgerPathFor({ root: ledgerRoot }), "CLI", { run_id: "unattributed", ...row });
+  return row => appendProducerLedger(typecheckLedgerPath(root), "CLI", { run_id: "unattributed", ...row });
+}
+
+/** The peak a check names to its admission: the cold one, or the warm peak learned from the ledger (W1-T14145). */
+export function typecheckAdmissionPeak(root: string, warm: boolean): number {
+  if (!warm) return typecheckPeakBytes(false);
+  try {
+    return learnedTypecheckWarmPeakBytes(typecheckLedgerPath(root));
+  } catch (error) {
+    // An unreadable live-ledger config names no ledger: the warm check fails closed, at the cold peak.
+    process.stderr.write(JSON.stringify({ step: "typecheck.warm_peak_unread", reason: String(error) }) + "\n");
+    return typecheckPeakBytes(false);
+  }
+}
+
+/** A warm check's headroom admission (W1-T14145), as the lease `runTypecheck` holds. */
+function staticLease(admission: StaticAdmission): TestSlotLease {
+  return {
+    outcome: admission.outcome === "wait_bound_exceeded" ? "wait_bound_exceeded" : "acquired", executionAllowed: admission.executionAllowed,
+    concurrency: 1, waitedMs: admission.waitedMs, note: admission.note, refresh: () => {}, release: () => admission.release(),
   };
 }
 
@@ -112,17 +139,18 @@ export function prepareTypecheckRun(root: string, canWrite: (dir: string) => boo
   return { args: typecheckArgs(buildInfo), buildInfo, seed, where: "worktree" };
 }
 
-/** Run the incremental full typecheck of the checkout at `root`, warm or cold, inside a slot sized by its peak. */
+/** Run the incremental full typecheck of the checkout at `root`, warm or cold, inside an admission sized by its peak. */
 export function runTypecheck(root: string, extraArgs: readonly string[] = [], opts: TypecheckRunOptions = {}): number {
   const prepared = prepareTypecheckRun(root, opts.canWrite);
   const cold = !hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(root));
   const log = opts.log ?? ((line: string) => process.stderr.write(line + "\n"));
-  const peak = typecheckPeakBytes(!cold);
+  const peak = typecheckAdmissionPeak(root, !cold);
   let slot: TestSlotLease | undefined;
   try {
-    // W1-T14153: a warm tsc peaks as high as a cold one, so it is admitted the same way.
+    // W1-T14145: a cold check takes a slot; a warm one waits on memory headroom alone, never on a slot count.
     slot = opts.acquireSlot ? opts.acquireSlot(NPM_TYPECHECK_SLOT_LABEL)
-      : acquireTestSlot(NPM_TYPECHECK_SLOT_LABEL, { memoryBytes: peak, ...opts.testSlot });
+      : cold ? acquireTestSlot(NPM_TYPECHECK_SLOT_LABEL, { memoryBytes: peak, ...opts.testSlot })
+      : staticLease(admitStaticWork(NPM_TYPECHECK_SLOT_LABEL, { memoryBytes: peak, ...opts.testSlot }));
     if (!testSlotExecutionAllowed(slot)) {
       log(JSON.stringify({ step: "typecheck.not_run", note: slot.note }));
       return 75;
@@ -138,7 +166,7 @@ export function runTypecheck(root: string, extraArgs: readonly string[] = [], op
         join(root, "node_modules", ".bin", "tsc"), [...prepared.args, ...tight, ...extraArgs], root, typecheckEnv(process.env),
       );
     } finally {
-      recordTypecheckPeak(typecheckPeakWriter(root), "npm", !cold, res?.observation);
+      recordTypecheckPeak(typecheckPeakWriter(root), "npm", !cold, res?.observation, "", slot.waitedMs);
     }
     if (res.error) {
       log(`typecheck: could not run tsc: ${res.error.message}`);

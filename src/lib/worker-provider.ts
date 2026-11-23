@@ -54,11 +54,11 @@ import { switchbackArmFor, type SwitchbackAssignment, type VersionSwitchbackWind
 import type { ModelApproval } from "./config-schema.js";
 import { cashDeploymentEndpoint, cashDeploymentTarget } from "./config-schema.js";
 import {
-  hasUsableTypecheckBuildInfo, installedTypescriptVersion, lowMemoryTypecheckArgs, measuredTypecheckArgs,
+  hasUsableTypecheckBuildInfo, installedTypescriptVersion, learnedTypecheckWarmPeakBytes, lowMemoryTypecheckArgs, measuredTypecheckArgs,
   recordTypecheckPeak, seedFromCanonical, takeTypecheckObservation, TYPECHECK_BUILDINFO_NAME,
   typecheckEnv, typecheckPeakBytes, type TypecheckObservation, type TypecheckPeakRow,
 } from "./typecheck-buildinfo.js";
-import { acquireTestSlotAsync, defaultTestSlots, readHostLoad, readMemoryHeadroom, testRunConcurrency, testSlotExecutionAllowed, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
+import { acquireTestSlotAsync, admitStaticWorkAsync, defaultTestSlots, readHostLoad, readMemoryHeadroom, testRunConcurrency, TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { selectFromRoutingPool, type RoutingPoolDecision, type RoutingPoolRequest, type RoutingPoolSnapshot } from "./model-pool.js";
 import {
   spawnDetachedGroup,
@@ -6108,14 +6108,15 @@ async function executeOpenWeightTool(
       const scoped = suites === null ? {} : { suites };
       const warm = args.check === "typecheck" &&
         hasUsableTypecheckBuildInfo(join(workerHome, TYPECHECK_BUILDINFO_NAME), installedTypescriptVersion(cwd));
-      const slot = args.check === "typecheck"
-        ? await acquireTestSlotAsync("typecheck:bwrap", { memoryBytes: typecheckPeakBytes(warm) }) : undefined;
-      if (slot && !testSlotExecutionAllowed(slot)) {
+      const peak = warm ? learnedTypecheckWarmPeakBytes(ledgerPathFor(ledger.config)) : typecheckPeakBytes(false);
+      const slot = args.check !== "typecheck" ? undefined : warm
+        ? await admitStaticWorkAsync("typecheck:bwrap", { memoryBytes: peak }) : await acquireTestSlotAsync("typecheck:bwrap", { memoryBytes: peak });
+      if (slot && slot.executionAllowed === false) {
         slot.release();
         ledgerRunCheck(ledger, { check: args.check, outcome: "refused", suites, startedAt, reason: slot.note, scopeRule });
         return { check: args.check, ran: false, refused: `NOT_RUN (${slot.note})` };
       }
-      if (args.check === "typecheck") argv = [...argv, ...lowMemoryTypecheckArgs(readMemoryHeadroom(), typecheckPeakBytes(warm))];
+      if (args.check === "typecheck") argv = [...argv, ...lowMemoryTypecheckArgs(readMemoryHeadroom(), peak)];
       let observation: TypecheckObservation | undefined;
       let compilerOutput = "";
       let compilerStderr = "";
@@ -6148,7 +6149,7 @@ async function executeOpenWeightTool(
         if (args.check === "typecheck") {
           recordTypecheckPeak(row => appendLedger(ledgerPathFor(ledger.config), {
             run_id: ledger.runId ?? "unattributed", task_id: ledger.taskId ?? "HARNESS", ...row,
-          }), "bwrap", warm, observation, `${compilerOutput}\n${compilerStderr}`);
+          }), "bwrap", warm, observation, `${compilerOutput}\n${compilerStderr}`, slot?.waitedMs);
         }
         slot?.release();
       }
@@ -7083,6 +7084,7 @@ export function readRelayedTypecheckPeaks(output: string): TypecheckPeakRow[] {
         ? row.peak_rss_bytes : "unknown",
       ...(typeof row.rechecked_files === "number" && row.rechecked_files >= 0 && Number.isSafeInteger(row.rechecked_files)
         ? { rechecked_files: row.rechecked_files } : {}),
+      ...(typeof row.waited_ms === "number" && row.waited_ms >= 0 && Number.isSafeInteger(row.waited_ms) ? { waited_ms: row.waited_ms } : {}),
     });
   }
   return rows;
@@ -7111,7 +7113,7 @@ async function spawnCodexWorkerInPrivateTemp(
       }), row.entry, row.warm, {
         peak: typeof row.peak_rss_bytes === "number" ? row.peak_rss_bytes : undefined,
         rechecked: row.rechecked_files,
-      });
+      }, "", row.waited_ms);
     }
   },
     (text, tsMs) => args.streamObserver?.({ kind: "message", tsMs, text }),
