@@ -2314,6 +2314,23 @@ test("W1-T9071: a pending recycle action runs between docker rm and docker run, 
   assert.match(run.stdout, /recycle-container: codex sessions from /);
 });
 
+test("a reviewed recycle action that exits nonzero never stops the recycle: the replacement still starts after docker rm", () => {
+  // The recycle runs under `set -euo pipefail`. Here the real action refuses with exit 5, because its stat says the data
+  // disk shares the source's filesystem. It must be recorded FAILED, and the replacement must still start.
+  const { state, dst, extraEnv } = codexSessionsRecycle(["codex-sessions-to-data-disk"]);
+  const sameFilesystem = join(dirname(dirname(dst)), "same-filesystem-stat");
+  writeFileSync(sameFilesystem, "#!/usr/bin/env bash\necho 1\n");
+  chmodSync(sameFilesystem, 0o755);
+  const run = runRecycle("good", { stateDir: state, extraEnv: { ...extraEnv, RMD_CODEX_SESSIONS_STAT: sameFilesystem } });
+  assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+  assert.equal(run.calls.filter(isRun).length, 1, "the replacement still starts");
+  assert.ok(run.calls.findIndex(isRm) < run.calls.findIndex(isRun), "it starts after the old container was removed");
+  assert.ok(!run.calls.find(isRun)!.argv.join(" ").includes(dst), "no bind without this instance's ready copy");
+  assert.deepEqual(readdirSync(join(state, "recycle-actions", "pending")), []);
+  assert.equal(readdirSync(join(state, "recycle-actions", "failed")).length, 1);
+  assert.match(run.stderr, /recycle-actions: stopped: codex-sessions-to-data-disk FAILED \(exited 5\) — the recycle continues without it/);
+});
+
 test("W1-T9071: a failing recycle action never stops the recycle, and no sessions bind is planned without a ready copy", () => {
   const { state, dst, extraEnv } = codexSessionsRecycle(["not-a-reviewed-action"]);
   const run = runRecycle("good", { stateDir: state, extraEnv });
