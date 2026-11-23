@@ -14,7 +14,7 @@ import { planPrPreflightAtCommitAsync, type PlanPrPreflightAsyncChecks } from "#
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import type { OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
-import { PLAN_RECONCILE_LANDING_FILE_LIMIT } from "#src/lib/plan-reconcile-batch.js";
+import { PLAN_RECONCILE_LANDING_FILE_LIMIT, PLAN_RECONCILE_LANDING_RECORD_LIMIT } from "#src/lib/plan-reconcile-batch.js";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
 const publicIds = Array.from({ length: 10 }, (_, i) => `W1-T${900000 + i}`);
@@ -224,8 +224,8 @@ test("the ops group retains the existing bounded lowest-task-first landing prefi
   const report = planReconcileCadence(input); await input.settled();
   assert.equal(report.drift, publicIds.length + opsIds.length + extra.length);
   const ops = f.calls.find(call => call.root === f.opsRoot); assert.ok(ops);
-  assert.equal(ops.paths.length, PLAN_RECONCILE_LANDING_FILE_LIMIT);
-  const expected = [...opsIds, ...extra].slice(0, PLAN_RECONCILE_LANDING_FILE_LIMIT).map(id => `plan/tasks.d/${id}.yaml`);
+  assert.equal(ops.paths.length, PLAN_RECONCILE_LANDING_RECORD_LIMIT);
+  const expected = [...opsIds, ...extra].slice(0, PLAN_RECONCILE_LANDING_RECORD_LIMIT).map(id => `plan/tasks.d/${id}.yaml`);
   assert.deepEqual(ops.paths, expected); assert.equal(f.calls.filter(call => call.root === f.publicRoot).length, 1);
 });
 test("an operator-retired ops task remains untouched despite public merge credit", async t => {

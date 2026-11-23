@@ -19427,7 +19427,9 @@ async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProducti
             const prior = rules(before, write.taskId), gained = [...rules(after, write.taskId)].filter(rule => !prior.has(rule));
             for (const rule of gained) held.push({ taskId: write.taskId, rule }); return gained.length === 0;
           });
-          const batch = takePlanReconcileBatch(landable, write => taskPaths.get(write.taskId)!);
+          // W1-T14485: cut at the plan review's record bound, so `landed` counts only records that went into the landing.
+          const batch = takePlanReconcileBatch(landable, write => taskPaths.get(write.taskId)!,
+            { files: PLAN_RECONCILE_LANDING_RECORD_LIMIT, bodyChars: PLAN_RECONCILE_LANDING_BODY_BUDGET });
           const byPath = new Map<string, Set<string>>();
           for (const write of batch) { const path = taskPaths.get(write.taskId)!; const ids = byPath.get(path) ?? new Set<string>(); ids.add(write.taskId); byPath.set(path, ids); }
           const inputs = [...byPath].map(([relPath, ids]) => ({ relPath,
@@ -45016,7 +45018,7 @@ function commandSyntax(name: string): string {
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
 import { reconcilePlan, reconcileShardStatus, revertedRequeues, type RevertedRequeue, type ReconcileSummary } from "./lib/plan-reconcile.js";
-import { takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
+import { PLAN_RECONCILE_LANDING_BODY_BUDGET, PLAN_RECONCILE_LANDING_RECORD_LIMIT, takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
