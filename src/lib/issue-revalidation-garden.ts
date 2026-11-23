@@ -622,7 +622,7 @@ export function stageStallResolution(
 export const ANSWER_COMMENT_ORIGIN_RE = /^issue#(\d+):comment:(\d+)$/;
 /** Associations that can hold the operator role; the answer reader refuses every other author's text. */
 const ANSWER_AUTHOR_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
-const FLEET_COMMENT_RE = /^(?:Another escalation observed the same condition \(|Still open as of \S+ \(issue-revalidation garden, |Queued for conversion to a plan task as feedback |Closed by the (?:issue-revalidation garden|ci-friction gardener))/;
+export const FLEET_COMMENT_RE = /^(?:Another escalation observed the same condition \(|Still open as of \S+ \(issue-revalidation garden, |Queued for conversion to a plan task as feedback |Closed by the (?:issue-revalidation garden|ci-friction gardener))/;
 
 /** The issue numbers whose comments the question store holds an answer for. */
 export function answeredIssueNumbers(origins: ReadonlySet<string>): Set<number> {

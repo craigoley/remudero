@@ -6,6 +6,8 @@ import { test } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import {
   answeredEscalationResolution,
+  ANSWER_COMMENT_ORIGIN_RE,
+  FLEET_COMMENT_RE,
   answeredIssueNumbers,
   decideAction,
   MAX_ISSUE_REVALIDATION_JUDGES_PER_PASS,
@@ -224,4 +226,13 @@ test("W1-T14014: the question store and the comment REST rows carry what the rul
   ]));
   assert.equal(parsed[0]!.id, 7001);
   assert.equal("id" in parsed[1]!, false, "a non-numeric id is dropped, so it never matches an origin");
+});
+
+test("W1-T14014: the answer-origin and fleet-comment patterns refuse the near misses they must", () => {
+  assert.equal(ANSWER_COMMENT_ORIGIN_RE.test("issue#5425:comment:3512345678"), true);
+  assert.equal(ANSWER_COMMENT_ORIGIN_RE.test("issue#5425:reaction:3512345678"), false);
+  assert.equal(ANSWER_COMMENT_ORIGIN_RE.test("issue#5425:comment:12 trailing"), false);
+  assert.equal(FLEET_COMMENT_RE.test("Another escalation observed the same condition (run x)"), true);
+  assert.equal(FLEET_COMMENT_RE.test("Closed by the ci-friction gardener after a quiet week"), true);
+  assert.equal(FLEET_COMMENT_RE.test("Retire it. Another escalation observed the same condition ("), false);
 });
