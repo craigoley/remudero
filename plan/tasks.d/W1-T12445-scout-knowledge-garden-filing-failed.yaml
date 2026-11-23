@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 4
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "scout:knowledge.garden_filing_failed"
