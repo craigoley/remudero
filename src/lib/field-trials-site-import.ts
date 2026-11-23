@@ -22,7 +22,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PreflightFastDeps } from "./ci-parity.js";
-import { hostWorktreeGit, hostWorktreeGitEnv } from "./worktree-git.js";
+import { hostWorktreeGitAsync, hostWorktreeGitEnv } from "./worktree-git.js";
 import { ghJson } from "./github-transport.js";
 import { GH_APP_ID_ENV, GH_APP_INSTALLATION_ID_ENV, GH_APP_PRIVATE_KEY_PATH_ENV, mintScopedToken } from "./github-app.js";
 import { plannerPrWriteToken } from "./secret-boundary.js";
@@ -92,9 +92,9 @@ export function appWriteProof(env: NodeJS.ProcessEnv = process.env, mint: typeof
   };
 }
 
-function runGit(args: string[], cwd: string): SiteImportRun {
+async function runGit(args: string[], cwd: string): Promise<SiteImportRun> {
   try {
-    return { status: 0, stdout: hostWorktreeGit(cwd, args, { timeout: 180_000, maxBuffer: 16 * 1024 * 1024 }), stderr: "" };
+    return { status: 0, stdout: await hostWorktreeGitAsync(cwd, args, { timeout: 180_000, maxBuffer: 16 * 1024 * 1024 }), stderr: "" };
   } catch (error) {
     const failed = error as { status?: number; stdout?: string | Buffer; stderr?: string | Buffer };
     return { status: failed.status ?? null, stdout: String(failed.stdout ?? ""), stderr: String(failed.stderr ?? error) };
@@ -112,8 +112,8 @@ function readReleases(siteDir: string): SiteRelease[] | string {
 }
 
 /** The changed paths of the staged checkout; anything outside data/ or any deletion is a refusal. */
-function stagedFiles(siteDir: string): string[] | string {
-  const status = runGit(["status", "--porcelain=v1", "--untracked-files=all"], siteDir);
+async function stagedFiles(siteDir: string): Promise<string[] | string> {
+  const status = await runGit(["status", "--porcelain=v1", "--untracked-files=all"], siteDir);
   if (status.status !== 0) return `git-status-failed: ${status.stderr.trim()}`;
   const files: string[] = [];
   for (const line of status.stdout.split("\n").filter(Boolean)) {
@@ -125,9 +125,9 @@ function stagedFiles(siteDir: string): string[] | string {
 }
 
 /** Write the staged files onto ONE branch over REST and keep ONE ready PR open for it. */
-function publish(fetch: GhApiFetcher, siteDir: string, workDir: string,
-  releaseId: string, files: string[], summary: string): Extract<SiteImportOutcome, { state: "staged" }> {
-  const head = runGit(["rev-parse", "HEAD", "HEAD^{tree}"], siteDir);
+async function publish(fetch: GhApiFetcher, siteDir: string, workDir: string,
+  releaseId: string, files: string[], summary: string): Promise<Extract<SiteImportOutcome, { state: "staged" }>> {
+  const head = await runGit(["rev-parse", "HEAD", "HEAD^{tree}"], siteDir);
   const [baseSha, baseTree] = head.stdout.trim().split("\n");
   if (head.status !== 0 || !baseSha || !baseTree) throw new Error(`git-rev-parse-failed: ${head.stderr.trim()}`);
   const repo = `repos/${SITE_IMPORT_OWNER}/${SITE_IMPORT_REPO}`;
@@ -209,12 +209,12 @@ export async function syncFieldNoteSiteImport(input: SiteImportInput,
     if (stage.status !== SITE_STAGE_EXIT.staged || reported.outcome !== "staged") {
       return { state: "stage-failed", releaseId, reason: `stage-exit-${stage.status}: ${stage.stderr.trim() || line}` };
     }
-    const files = stagedFiles(siteDir);
+    const files = await stagedFiles(siteDir);
     if (typeof files === "string") return { state: "stage-failed", releaseId, reason: files };
     const summary = readFileSync(summaryPath, "utf8");
     const proof = await (deps.writeProof ?? appWriteProof())(`${SITE_IMPORT_OWNER}/${SITE_IMPORT_REPO}`);
     if (!proof.ok) return { state: "site-grant-missing", releaseId, reason: proof.reason, missing: proof.missing, grant: SITE_IMPORT_GRANT };
-    try { return publish(deps.fetch ?? ghJson, siteDir, workDir, releaseId, files, summary); }
+    try { return await publish(deps.fetch ?? ghJson, siteDir, workDir, releaseId, files, summary); }
     catch (error) {
       const reason = String(error instanceof Error ? error.message : error);
       return { state: "publish-failed", releaseId, reason, grant: SITE_IMPORT_GRANT };
