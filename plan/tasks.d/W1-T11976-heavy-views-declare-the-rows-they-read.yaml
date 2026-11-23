@@ -23,7 +23,7 @@
     - src/lib/actions-view.ts
     - src/lib/incidents-view.ts
     - test/console-api/read-model/a-heavy-view-that-declares-its-rows-is-skipped-when-only-other-rows-moved.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "workstreams, repositories, actions and incidents each declare inputsFingerprint over every input their bodies depend on (rows, snapshots, files and clock-derived fields), and a ledger row none of them reads leaves each declared view skipped"

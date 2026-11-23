@@ -15,7 +15,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/pull-requests-stuck-for-one-cause-share-one-escalation.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "When several pull requests are stuck in the same stage with the same diagnosis in one sweep, one escalation is opened that lists each of them"

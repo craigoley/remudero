@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 2.5
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "flake-incident:test/the-offline-plan-lint-names-its-omissions.test.ts#lint dependency credit: transform reuse keeps child runtime and scratch independent"

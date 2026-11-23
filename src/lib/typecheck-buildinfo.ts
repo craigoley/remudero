@@ -17,7 +17,7 @@
  * Node builtins only, so it loads directly under Node's type stripping.
  */
 import type { SpawnSyncOptionsWithStringEncoding, SpawnSyncReturns } from "node:child_process";
-import { existsSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** The buildinfo's file name inside a checkout's git directory. */
@@ -36,6 +36,50 @@ export const TYPECHECK_WARM_PEAK_BYTES = TYPECHECK_COLD_PEAK_BYTES;
 /** The peak one tsc run names to its memory admission: the warm or the cold one. */
 export function typecheckPeakBytes(warm: boolean): number {
   return warm ? TYPECHECK_WARM_PEAK_BYTES : TYPECHECK_COLD_PEAK_BYTES;
+}
+
+/** W1-T14145: the fewest measured warm rows a learned warm peak needs, and the most recent ones it reads. */
+export const TYPECHECK_WARM_PEAK_MIN_ROWS = 50;
+const TYPECHECK_WARM_PEAK_WINDOW = 200;
+const TYPECHECK_PEAK_TAIL_BYTES = 8 * 1024 ** 2;
+
+/** The warm peak a warm check names to its headroom admission (W1-T14145): the p95 of the last
+ *  {@link TYPECHECK_WARM_PEAK_WINDOW} measured warm typecheck.peak rows in the ledger's bounded tail. With fewer than
+ *  {@link TYPECHECK_WARM_PEAK_MIN_ROWS}, or no readable ledger, it is {@link TYPECHECK_COLD_PEAK_BYTES} (fail closed). */
+export function learnedTypecheckWarmPeakBytes(ledgerPath: string): number {
+  let text: string;
+  try {
+    const fd = openSync(ledgerPath, "r");
+    try {
+      const size = fstatSync(fd).size, length = Math.min(size, TYPECHECK_PEAK_TAIL_BYTES);
+      const buffer = Buffer.alloc(length);
+      const read = readSync(fd, buffer, 0, length, size - length);
+      text = buffer.subarray(0, read).toString("utf8");
+      if (length < size) text = text.slice(text.indexOf("\n") + 1);
+    } finally {
+      closeSync(fd);
+    }
+  } catch (error) {
+    // No ledger yet is the common fresh-host case and names nothing; any other failure is said once per check.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      process.stderr.write(`typecheck: the warm peak could not be learned (${String(error)}); admitting at the cold peak\n`);
+    }
+    return TYPECHECK_COLD_PEAK_BYTES;
+  }
+  const peaks: number[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.includes('"typecheck.peak"')) continue;
+    try {
+      const row = JSON.parse(line) as Partial<TypecheckPeakRow>;
+      const peak = row.peak_rss_bytes;
+      if (row.step === "typecheck.peak" && row.warm === true && typeof peak === "number" && Number.isSafeInteger(peak) && peak > 0) peaks.push(peak);
+    } catch {
+      // A torn or foreign line names no peak; it is skipped like an "unknown" one.
+    }
+  }
+  const recent = peaks.slice(-TYPECHECK_WARM_PEAK_WINDOW).sort((a, b) => a - b);
+  if (recent.length < TYPECHECK_WARM_PEAK_MIN_ROWS) return TYPECHECK_COLD_PEAK_BYTES;
+  return recent[Math.ceil(0.95 * recent.length) - 1]!;
 }
 
 /**
@@ -303,6 +347,8 @@ export interface TypecheckPeakRow {
   warm: boolean;
   peak_rss_bytes: number | "unknown";
   rechecked_files?: number;
+  /** W1-T14145: how long the check's memory admission waited before tsc started. */
+  waited_ms?: number;
 }
 
 const RECHECKED_FILES = /^(?:Files rechecked|Rechecked files):[ \t]*(\d+)[ \t]*\r?$/im;
@@ -310,14 +356,16 @@ const TYPECHECK_PEAK_MARKER = "\nrmd-typecheck-observation:";
 
 export function recordTypecheckPeak(
   write: (row: TypecheckPeakRow) => void, entry: TypecheckEntry, warm: boolean,
-  observation?: TypecheckObservation, output = "",
+  observation?: TypecheckObservation, output = "", waitedMs?: number,
 ): void {
   const peak = observation?.peak;
   const rechecked = observation?.rechecked ?? Number(RECHECKED_FILES.exec(output)?.[1]);
+  const waited = waitedMs === undefined ? NaN : Math.round(waitedMs);
   const row: TypecheckPeakRow = {
     step: "typecheck.peak", entry, warm,
     peak_rss_bytes: peak !== undefined && Number.isSafeInteger(peak) && peak > 0 ? peak : "unknown",
     ...(Number.isSafeInteger(rechecked) && rechecked >= 0 ? { rechecked_files: rechecked } : {}),
+    ...(Number.isSafeInteger(waited) && waited >= 0 ? { waited_ms: waited } : {}),
   };
   try {
     write(row);

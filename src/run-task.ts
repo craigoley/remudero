@@ -299,6 +299,7 @@ import {
   type LedgerCompactionDecision,
   type LedgerCompactionOutcome,
 } from "./lib/ledger-compaction-rung.js";
+import * as headroomRecovery from "./lib/headroom-recovery.js";
 // Compatibility re-export target: lib/escalation-catalogue"
 import { DISK_HEADROOM_EPISODE_MS, POST_REVIEW_STALL_EPISODE_MS, escalateCircuitBreak, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateLifetimeCapExceeded, escalatePostReviewStall, escalateQuotaExhaustion, escalateStarvation, escalateStarvationCleared } from "./lib/escalation-catalogue.js";
 export {
@@ -25563,156 +25564,12 @@ export async function readUsageSnapshotAsync(
   return parseUsageReporting(out, onUnreadable);
 }
 
-/**
- * W1-T2603 (A RECOVERED HEADROOM BREACH NEVER CLOSES ITS OWN ESCALATION). `escalateHeadroomReserve`
- * above raises one `[HARD_STOP]` issue per breach episode and nothing ever retires it — the breach
- * is a property of the ACCOUNT, not of any task, so it carries no task referent for
- * `buildEscalationReconcileCandidates` (below) to resolve against and falls through every arm of
- * that reconciler by construction, not by a bug in it (see this task's own rationale). This is the
- * missing retirement PATH for exactly that class, kept structurally separate from the task-referent
- * reconciler rather than bolted onto it.
- *
- * RETIRE ON AN OBSERVED RECOVERY, NEVER ON A TIMER OR AN ABSENCE. The daemon's own poll loop
- * (`daemon.ts`) already writes a `daemon.headroom` row on every tick with `window`, `percent_used`,
- * `limit_pct` and `over_ceiling` — a POSITIVE reading, taken whether or not the governor is
- * enforcing (see that step's own "ONE HEARTBEAT PER TICK, IN EVERY ENFORCEMENT POSTURE" doc). This
- * scans forward from the escalating row's own `ts` for the NEWEST such reading, for the SAME
- * `window` string, carrying `over_ceiling === false` — a positive observation that the door is open
- * again. A daemon that stopped reading headroom entirely (the W1-T2565 blind window) produces
- * exactly zero matching rows, never a false one, so an absence of breach rows is never mistaken for
- * recovery — the candidate list is built ONLY from a reading that actually happened.
- *
- * MATCH THE WINDOW, NOT JUST THE CLASS. The session (5h) and weekly windows breach independently
- * (`resolveHeadroomWindows`, daemon.ts) — a recovery reading for one must never retire an escalation
- * raised for the other, so `window` is compared for exact string equality, never treated as
- * interchangeable with "some window recovered".
- */
-export interface HeadroomRecoveryCandidate {
-  issueUrl: string;
-  window: string;
-  resetsAt: string;
-  /** The recovery reading that justifies retiring this issue — always `over_ceiling: false`,
-   *  always for the SAME `window`, always newer than the escalation it retires. */
-  recovery: { percentUsed: number; limitPct: number; ts: string };
-}
-
-/**
- * Pure builder, mirroring `buildEscalationReconcileCandidates`'s own "read the ledger, hand back
- * candidates" shape: one {@link HeadroomRecoveryCandidate} per still-OPEN headroom-reserve
- * escalation (`openIssueUrls`, the caller's own live `listOpen` read — never re-read here) whose
- * `daemon.headroom_reserve.escalated` row names a `window` that has SINCE recovered. An escalated
- * row missing `window`/`resets_at` (every row written before this task) or whose `issue_url` is not
- * in `openIssueUrls` (never delivered, or already closed) yields no candidate.
- */
-export function buildHeadroomRecoveryCandidates(
-  ledgerPath: string,
-  openIssueUrls: ReadonlySet<string>,
-): HeadroomRecoveryCandidate[] {
-  const lines = readLedgerLines(ledgerPath); // ledger-read-intent: live — this scan wants the newest rows only.
-  const candidates: HeadroomRecoveryCandidate[] = [];
-  for (const line of lines) {
-    if (line.step !== "daemon.headroom_reserve.escalated") continue;
-    const issueUrl = typeof line.issue_url === "string" ? line.issue_url : undefined;
-    if (!issueUrl || !openIssueUrls.has(issueUrl)) continue; // undelivered, or already closed
-    const window = typeof line.window === "string" ? line.window : undefined;
-    const resetsAt = typeof line.resets_at === "string" ? line.resets_at : undefined;
-    const escalatedTs = typeof line.ts === "string" ? line.ts : undefined;
-    if (!window || !resetsAt || !escalatedTs) continue; // a pre-W1-T2603 row — no window to match
-    const escalatedMs = Date.parse(escalatedTs);
-    if (!Number.isFinite(escalatedMs)) continue;
-    // The NEWEST matching recovery reading, so the citation names the most current evidence —
-    // "newest wins" never changes WHETHER this retires, only what the close comment cites.
-    let recovery: { percentUsed: number; limitPct: number; ts: string } | undefined;
-    for (const reading of lines) {
-      if (reading.step !== "daemon.headroom") continue;
-      if (reading.window !== window) continue; // THE WINDOW MATCH — never just the class
-      if (reading.over_ceiling !== false) continue; // a positive under-ceiling observation only
-      const readingTs = typeof reading.ts === "string" ? reading.ts : undefined;
-      if (!readingTs) continue;
-      const readingMs = Date.parse(readingTs);
-      if (!Number.isFinite(readingMs) || readingMs <= escalatedMs) continue; // must POSTDATE the breach
-      if (!recovery || readingMs > Date.parse(recovery.ts)) {
-        recovery = {
-          percentUsed: typeof reading.percent_used === "number" ? reading.percent_used : NaN,
-          limitPct: typeof reading.limit_pct === "number" ? reading.limit_pct : NaN,
-          ts: readingTs,
-        };
-      }
-    }
-    if (recovery) candidates.push({ issueUrl, window, resetsAt, recovery });
-  }
-  return candidates;
-}
-
-/** The closing citation posted on a headroom-recovery retirement — mirrors
- *  `renderReconcileCloseComment`'s "name the resolution" discipline for the task-referent arm. */
-export function renderHeadroomRecoveryCloseComment(c: HeadroomRecoveryCandidate): string {
-  return [
-    "Auto-retired by the headroom-recovery reconciler (W1-T2603).",
-    "",
-    `**${c.window}** is now reading **${c.recovery.percentUsed}% used** (below the ${c.recovery.limitPct}% ` +
-      `operator reserve ceiling) as of ${c.recovery.ts} — under its ceiling again since this escalation was ` +
-      `raised for a breach at ${c.resetsAt !== undefined ? `the window resetting ${c.resetsAt}` : "this window"}.`,
-    "",
-    "_Level-triggered closure from a daemon-observed `daemon.headroom` reading for the SAME window. If the " +
-      "account breaches again, a fresh escalation opens on its own._",
-  ].join("\n");
-}
-
-/**
- * Reconcile OPEN headroom-reserve escalations against observed recovery — the retirement leg
- * `escalateHeadroomReserve` never had. Lists open needs-human/fleet-notice issues via the SAME
- * `listRetirableEscalationIssues` the task-referent reconciler uses (never a second listing
- * mechanism), builds candidates from the ledger, and closes each with a citation. Best-effort and
- * non-fatal throughout, mirroring `runEscalationReconcile`'s per-item throw containment: a failed
- * issue-list read or a failed close is logged and this cycle simply retires fewer, never none of
- * the reconciler's other rungs.
- */
-export async function retireRecoveredHeadroomEscalations(
-  ledgerPath: string,
-  runId: string,
-  ctx: { issues: AsyncIssueGateway; log?: (step: string, extra?: Record<string, unknown>) => void; dryRun?: boolean },
-): Promise<{ retired: number }> {
-  const log = ctx.log ?? (() => {});
-  let open: OpenIssue[];
-  try {
-    open = await listRetirableEscalationIssuesAsync(ctx.issues);
-  } catch (e) {
-    log("sweep.headroom_recovery.list_failed", { error: String((e as Error)?.message ?? e) });
-    return { retired: 0 };
-  }
-  const openUrls = new Set(open.map((i) => i.url));
-  const candidates = buildHeadroomRecoveryCandidates(ledgerPath, openUrls);
-  let retired = 0;
-  for (const c of candidates) {
-    // dryRun leaves no trace — mirrors runEscalationReconcile's own "still counts, never acts" preview.
-    if (ctx.dryRun) {
-      retired++;
-      continue;
-    }
-    try {
-      if (!ctx.issues.closeWithComment) throw new Error("issue gateway cannot close issues");
-      await ctx.issues.closeWithComment(c.issueUrl, renderHeadroomRecoveryCloseComment(c));
-    } catch (e) {
-      log("sweep.headroom_recovery.close_failed", { issue_url: c.issueUrl, error: String((e as Error)?.message ?? e) });
-      continue;
-    }
-    appendLedger(ledgerPath, {
-      run_id: runId,
-      task_id: "daemon",
-      step: "daemon.headroom_reserve.retired",
-      issue_url: c.issueUrl,
-      window: c.window,
-      resets_at: c.resetsAt,
-      recovered_percent_used: c.recovery.percentUsed,
-      recovered_ts: c.recovery.ts,
-    });
-    log("sweep.headroom_recovery.retired", { issue_url: c.issueUrl, window: c.window, recovered_ts: c.recovery.ts });
-    retired++;
-  }
-  log("sweep.headroom_recovery.summary", { candidates: candidates.length, retired });
-  return { retired };
-}
+export {
+  buildHeadroomRecoveryCandidates,
+  renderHeadroomRecoveryCloseComment,
+  retireRecoveredHeadroomEscalations,
+  type HeadroomRecoveryCandidate,
+} from "./lib/headroom-recovery.js";
 
 /**
  * The drain's end-of-run quota check: when a drain stopped with NOTHING RUNNABLE and at least one
@@ -33780,7 +33637,7 @@ export async function sweepEscalationReconcile(
   // candidate build and close loop, non-fatal like everything else in this rung — a throw here
   // must never take out the task-referent reconciler's own summary above.
   try {
-    await retireRecoveredHeadroomEscalations(ledgerPath, runId, {
+    await headroomRecovery.retireRecoveredHeadroomEscalations(ledgerPath, runId, {
       issues: opts.issues ?? ghIssueGatewayAsync(owner, repo),
       log,
       dryRun: opts.dryRun,

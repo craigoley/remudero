@@ -39,6 +39,35 @@
     - test/automerge-hold.test.ts
     - test/a-handed-off-head-judgment-is-started-once-and-awaited-by-a-one-shot-sweep.test.ts
     - test/fix-lane/unfiled-scope-supervision.test.ts
+    - test/a-full-pass-respects-a-memory-held-light-pass-head.test.ts
+    - test/a-green-reviewed-plan-pr-the-sweep-holds-merges.test.ts
+    - test/a-handed-off-head-judgment-is-cancelled-at-its-bound.test.ts
+    - test/a-held-plan-pr-merges-when-its-checks-turn-green.test.ts
+    - test/a-merge-queue-ejection-during-an-actions-incident-spends-no-re-arm.test.ts
+    - test/a-new-codeql-alert-is-judged-and-never-holds-the-pr.test.ts
+    - test/a-plan-pr-past-its-refresh-bound-asks-the-operator.test.ts
+    - test/a-pr-the-merge-queue-ejects-is-re-armed-a-bounded-number-of-times.test.ts
+    - test/a-pr-whose-stage-stops-moving-is-named-within-thirty-minutes.test.ts
+    - test/a-recycle-pause-holds-dispatch-not-merges.test.ts
+    - test/a-security-alert-hold-dispatches-a-fix-round-for-its-alert.test.ts
+    - test/an-operator-who-enqueues-a-risk-held-head-by-hand-releases-it-for-the-sweep.test.ts
+    - test/arm-failure-classification.test.ts
+    - test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts
+    - test/failed-arm-fresh-evidence.test.ts
+    - test/flow-awaiting-ci-stale-pending.test.ts
+    - test/gardeners/an-update-that-cannot-cure-a-crossing-is-never-repeated.test.ts
+    - test/github/a-daemon-exit-latch-never-leaks-into-the-next-pooled-file.test.ts
+    - test/ledger-rotation.test.ts
+    - test/review/a-material-reviewer-code-advance-queues-one-fresh-review.test.ts
+    - test/strike-exhaustion-climbs-a-ladder-before-it-reaches-a-human.test.ts
+    - test/sweep-review-admission.test.ts
+    - test/sweep.test.ts
+    - test/sweep/flow-armed-idle-review-success-required-checks-green.test.ts
+    - test/sweep/flow-other-not-positively-mergeable.test.ts
+    - test/the-handed-off-head-risk-judge-never-holds-the-full-sweep.test.ts
+    - test/the-merge-queue-ejection-path-is-proven-across-real-sweep-passes.test.ts
+    - test/the-sweep-never-acts-on-a-head-the-pr-has-left.test.ts
+    - test/the-sweep-sees-a-new-head-in-the-same-pass.test.ts
   status: queued
   attempts: 0
   rationale: |
@@ -74,3 +103,9 @@
     give each arming fixture a review.posted row for its head (or a complete history), not loosen the rule:
     the design and the-sweeps-arm-decision-reads-no-ledger-union-on-the-loop.test.ts line 199 both count an
     archive-free history as unreadable.
+    Amendment 2026-11-23b (second hand build, stopped before commit): a run of all 772 suites that import
+    lib/sweep.js or call runSweep found 47 that fail with the refusal and pass on origin/main; every one reaches
+    the refusal. The 29 outside files: are now listed, so files: holds the complete set. A complete history with
+    no verdict also refuses, so each arming fixture needs a live review.posted row (capped false, its head's
+    head_sha, matching pr_url and task_id); per-file work. A work-in-progress patch (rule, new test, two pinned
+    tests updated) is kept on the operator's Mac.
