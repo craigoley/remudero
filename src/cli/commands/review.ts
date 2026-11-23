@@ -970,6 +970,8 @@ export async function runReview(host: ReviewCommandHost, args: {
    * call sites supply it immediately before posting; test-only direct calls retain their existing
    * isolated status-poster contract. */
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
+  /** W1-T12227: the path that admitted this review, named on `review.refused_after_finished_review`. */
+  admissionPath?: string;
 }): Promise<ReviewRunResult> {
   const phases: Record<string, number> = { started: systemClock.now() };
   // W1-T11149: the phase reaches the CPU bound (setup, proofs) or the provider bound (judge, posting), in process or as a child.
@@ -1788,6 +1790,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     cannotEvaluateEscalation: (e, issues) => tryEscalate(task.catalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath: args.ledgerPath, runId: args.runId }),
     // W1-T14235 (invariant no-semantic-no-code-pass): a code pass publishes only on this run's own semantic judgement.
     semanticJudgement: { planOnly: planOnlySkip, reviewerOutcome: outcome },
+    finishedReview: { admissionPath: args.admissionPath ?? "unrecorded", reviewerMs: phases.postStart - phases.started },
   });
   phases.post = systemClock.now();
   // W1-T11151: `posted` releases admission once the outcome is terminal: posted, refused (review.post_refused) or a
@@ -2351,6 +2354,8 @@ export interface ReviewCommandDeps {
   reviewStartFreshness?: ReviewerCodeFreshness;
   /** W1-T9727: set by `--judge-at-own-start` (the fresh-tree child): with no handed reading, take one at start. */
   judgeAtOwnStart?: boolean;
+  /** W1-T12227: the path that admitted this review (the start gate names it); absent, the operator CLI or a fresh-tree child. */
+  admissionPath?: string;
 }
 
 type ReviewSubjectFailureReason =
@@ -2983,6 +2988,14 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // W1-T9727: a fresh-tree child reads at its own start, before a memory-admission wait lets main move past it.
   const startFreshness = deps.reviewStartFreshness ??
     (deps.judgeAtOwnStart === true ? await ownStartFreshness(reviewerCodeFreshnessDep) : undefined);
+  // W1-T12227: a fresh-tree child already behind main at its own start judges nothing: no pending status, no reviewer.
+  // Its gate runs the review once more from a tree at the new head of main (W1-T12226). A shadow review still runs.
+  if (deps.reviewStartFreshness === undefined && startFreshness?.status === "stale" && !shadow) {
+    console.log(`rmd review: PR #${view.number} not reviewed — reviewer code ${startFreshness.codeSha.slice(0, 12)} is behind ` +
+      `origin/main ${startFreshness.originMainSha.slice(0, 12)} at its own start`);
+    exit.as("reviewer-stale-at-start");
+    return 2;
+  }
   // The start reading could not prove freshness: say so, then fall back to the JIT read.
   if (startFreshness?.status === "unreadable") {
     log("review.reviewer_freshness_unreadable_at_start", {
@@ -3153,6 +3166,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
           // the documented fallback (criterion 5) — never silent.
           headCheckoutDir: worktreePath,
           reviewerCodeFreshness: publicationFreshness,
+          admissionPath: deps.admissionPath ?? (deps.judgeAtOwnStart === true ? "fresh-tree" : "review-command"),
           prCreatedAt: view.createdAt,
           readReviewStatusHistory: deps.readReviewStatusHistory,
           // The three base facts, threaded by NAME so a reader (and test/preexisting-proof-hits-wiring)
@@ -3287,9 +3301,8 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   if (cappedHoldWithheld && !(overrideBy && overrideReason) && cappedWordingApplies(verdict)) {
     console.log(cappedOverrideHint(view.number));
   }
-  // W1-T12226: main moved between the cut of this child's tree and its start; its gate retries in a newer tree.
-  const staleAtOwnStart = deps.reviewStartFreshness === undefined && startFreshness?.status === "stale";
-  if (verdict.verdictWithheld) exit.as(staleAtOwnStart ? "reviewer-stale-at-start" : "verdict-not-posted");
+  // W1-T12227: a child stale at its own start already exited before its pending status (reviewer-stale-at-start).
+  if (verdict.verdictWithheld) exit.as("verdict-not-posted");
   if (verdict.verdictWithheld) return 2;
 
   if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(host, source, subjectRepoDir)) {

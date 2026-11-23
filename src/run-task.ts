@@ -1253,7 +1253,7 @@ import {
   runAutomatedRetroSubprocess,
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
-import { childEntryArgv, childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, type ChildEntryStoreOptions } from "./lib/child-entry-argv.js";
+import { childEntryArgv, childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, FRESH_TREE_REVIEW_FILL_SOURCE, isFillableMiss, type ChildEntryStoreOptions } from "./lib/child-entry-argv.js";
 import {
   bodyWithFailingProofAtOpen,
   checkProofLaunchArgv,
@@ -1960,6 +1960,14 @@ export { classifyUpdateBranchFailure, detectReviewFalseBlock, detectCiLogVerdict
  *  without git, a worktree or a spawn. A `type` whose name does NOT end in `Deps`, deliberately:
  *  `scripts/deps-interface-baseline.json`'s census can only shrink, and another `*Deps` shape is
  *  exactly what it exists to discourage. This is a seam, not a wiring root. */
+/** W1-T12227: the compiled-entry store a fresh-tree review asks. `fillOnMiss` (the shared tree only: a per-attempt tree is
+ *  removed when it settles) requests one build for the tree's commit on a miss, unawaited; the review that missed runs tsx. */
+export type FreshTreeStore = {
+  storeRoot?: string; fillOnMiss?: boolean; log?: StoreLog; build?: OwnTreeFillOptions["build"];
+  /** Whether this process may build. Default {@link daemonOwnedProcess}, so a test or a shell never builds. */
+  daemonOwned?: boolean;
+};
+
 export type FreshTreeReviewSeams = {
   /** `git -C <repoDir> …`, returning stdout. Throws on a non-zero exit, like `execFileSync`.
    *  Used for the FETCH and for proving a prior detached reviewer tree is safe to reuse — the
@@ -1975,7 +1983,9 @@ export type FreshTreeReviewSeams = {
    *  non-zero exit it first hands `onFailure` the child's bounded stderr tail (W1-T4055). */
   spawnReview: (worktree: string, args: string[], onFailure?: (failure: string) => void,
     parentEnv?: NodeJS.ProcessEnv, onEntry?: (entry: FreshTreeEntry) => void,
-    store?: { storeRoot?: string }, onExit?: (exit: FreshTreeExit) => void) => Promise<number>;
+    store?: FreshTreeStore, onExit?: (exit: FreshTreeExit) => void) => Promise<number>;
+  /** W1-T12227: where a store build the shared tree requested writes its `child_entry.*` rows. */
+  storeLog?: StoreLog;
   /** Tests may replace ownership; production holds the general reaper's real run-lock token. */
   withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
   /** Remove a tree this process cut for one attempt through the async hardened Git leaf by default.
@@ -2093,7 +2103,7 @@ export function buildFreshTreeReviewRunner(
   const prepared = new Map<string, string>();
   return async (prArg, rest, freshness, onFailure, onEntry, onExit) => {
     const sha = freshness.originMainSha;
-    const review = (tree: string) => deps.spawnReview(tree, [prArg, ...rest], onFailure, undefined, onEntry, undefined, onExit);
+    const review = (tree: string, store?: FreshTreeStore) => deps.spawnReview(tree, [prArg, ...rest], onFailure, undefined, onEntry, store, onExit);
     // W1-T14066: a busy or unproven shared tree is never reviewed in, added over or removed. The
     // review cuts its own tree at the same sha instead, and skips only when that cannot be done.
     let ownTree = false;
@@ -2131,7 +2141,7 @@ export function buildFreshTreeReviewRunner(
           prepared.delete(sha);
           throw new Error(`cached reviewer worktree at ${reviewerTree} is no longer an exact clean detached checkout of ${sha}`);
         }
-        return review(reviewerTree);
+        return review(reviewerTree, { fillOnMiss: true, ...(deps.storeLog === undefined ? {} : { log: deps.storeLog }) });
       };
       try {
         return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(reviewerTree, run);
@@ -2327,17 +2337,31 @@ function readFreshTreeExit(exitFile: string, signal: NodeJS.Signals | null): Fre
   return { cause, ...(/^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/.test(errorClass) ? { errorClass } : {}) };
 }
 
+/** W1-T12227: on a fillable miss, one store build for the shared tree's commit, never awaited. Undefined when none applies. */
+function requestFreshTreeStoreFill(worktree: string, lookup: Parameters<typeof isFillableMiss>[0], store: FreshTreeStore): OwnTreeFill | undefined {
+  if (store.fillOnMiss !== true || !isFillableMiss(lookup) || !(store.daemonOwned ?? daemonOwnedProcess())) return undefined;
+  try {
+    return fillStoreForOwnTree(worktree, lookup.hash, { storeRoot: store.storeRoot ?? defaultChildEntryStoreRoot(),
+      source: FRESH_TREE_REVIEW_FILL_SOURCE, log: store.log, build: store.build });
+  } catch (error) {
+    // The store is advisory: an unreadable store root leaves this review on tsx, and the next miss asks again.
+    process.stderr.write(`spawnRmdReviewForFreshTree: no store build requested for ${worktree}: ${String(error)}\n`);
+    return undefined;
+  }
+}
+
 export function spawnRmdReviewForFreshTree(
   worktree: string,
   args: string[],
   onFailure?: (failure: string) => void,
   parentEnv: NodeJS.ProcessEnv = process.env,
   onEntry?: (entry: FreshTreeEntry) => void,
-  store: { storeRoot?: string } = {},
+  store: FreshTreeStore = {},
   onExit?: (exit: FreshTreeExit) => void,
 ): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     const prepared = materializeMainEntryFromStore(worktree, store.storeRoot);
+    const fill = requestFreshTreeStoreFill(worktree, prepared.lookup, store);
     const exitDir = makeTempDir("review-exit");
     const exitFile = join(exitDir, "cause");
     const sourceArgs = prepared.source ? ["--main-entry-source", JSON.stringify(prepared.source)] : [];
@@ -2364,8 +2388,8 @@ export function spawnRmdReviewForFreshTree(
     // `close`, not `exit`: only `close` guarantees the piped stderr has been read to its end.
     child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       const [kind, reason] = entryReport.trim().split("\t");
-      const storeReason = prepared.lookup.outcome === "miss" ? prepared.lookup.reason
-        : prepared.lookup.outcome === "hit" ? "store-hit" : "tree-current";
+      const storeReason = (prepared.lookup.outcome === "miss" ? prepared.lookup.reason
+        : prepared.lookup.outcome === "hit" ? "store-hit" : "tree-current") + (fill === undefined ? "" : `; store-fill-${fill}`);
       onEntry?.({ kind: kind === "bundle" || kind === "tsx" ? kind : "unknown",
         reason: `${reason || "launcher-did-not-report"}; ${storeReason}` });
       const exitCode = code ?? 1;
@@ -2419,8 +2443,10 @@ export function buildReviewerCodeFreshnessGate(
   log: (step: string, extra?: Record<string, unknown>) => void,
   next: (prArg: string, rest: string[], deps: ReviewCommandDeps) => Promise<number>,
   reviewFromFreshTree?: FreshTreeReview,
+  admissionPath?: ReviewAdmissionPath,
 ): ReviewerCodeStartGate<ReviewCommandDeps> {
-  return reviewerCodeStartGate(readFreshness, log, next, (deps) => [...reviewOptionFlags(deps), JUDGE_AT_OWN_START_FLAG], reviewFromFreshTree);
+  return reviewerCodeStartGate(readFreshness, log, next, (deps) => [...reviewOptionFlags(deps), JUDGE_AT_OWN_START_FLAG], reviewFromFreshTree,
+    admissionPath);
 }
 
 /** W1-T10269 — the escalation's issue gateway, assigning each issue it files to the repo owner
@@ -2759,14 +2785,33 @@ export async function mainTipViaGit(repoDir: string): Promise<string> {
   return (await hostWorktreeGitAsync(repoDir, ["rev-parse", "origin/main"])).trim();
 }
 
+/** W1-T12227: the required fix review decides its path at its start. Fresh or unreadable judges here with that start
+ *  reading. Stale runs the review from a fresh tree through the sweep's gate, starts no reviewer in this process, and
+ *  returns a withheld result, so the fix rung stands down as on any withheld verdict. */
 export function buildRequiredFixReviewRunner(
   next: typeof runReview,
   readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
+  gate: Pick<ReviewerCodeStartGate<ReviewCommandDeps>, "fromFreshTree">,
+  readHeadSha: (prUrl: string) => string = readHeadShaRest,
 ): typeof runReview {
   return async (args) => {
-    const startFreshness = await ownStartFreshness(readFreshness);
-    return next({ ...args, requireSemanticReview: true,
-      reviewerCodeFreshness: reviewerFreshnessForPublication(startFreshness, readFreshness) });
+    const decision = await decideReviewPath(() => ownStartFreshness(readFreshness));
+    if (decision.path === "in-process") {
+      return next({ ...args, requireSemanticReview: true, admissionPath: "required-fix",
+        reviewerCodeFreshness: reviewerFreshnessForPublication(decision.startFreshness, readFreshness) });
+    }
+    const headSha = readHeadSha(args.prUrl);
+    const prArg = /\/pull\/(\d+)$/.exec(args.prUrl)?.[1] ?? args.prUrl;
+    const { codeSha, originMainSha } = decision.freshness;
+    const code = await gate.fromFreshTree(prArg, ["--repo", `${args.owner}/${args.repo}`], { executionMode: "semantic" },
+      decision.freshness, "required-fix");
+    const reason = `reviewer code ${codeSha.slice(0, 12)} is behind origin/main ${originMainSha.slice(0, 12)} at review start; ` +
+      `the review ran from a fresh tree (exit ${code}), not in this process`;
+    return {
+      state: "pending", criteria: [], testTheater: false, summary: `review moved to a fresh tree: ${reason}`,
+      floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
+      headSha, reviewerOutcome: "not_attempted_reviewer_code_stale", verdictWithheld: reason,
+    };
   };
 }
 
@@ -7765,6 +7810,8 @@ async function runReview(args: {
    * call sites supply it immediately before posting; test-only direct calls retain their existing
    * isolated status-poster contract. */
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
+  /** W1-T12227: the path that admitted this review, named on `review.refused_after_finished_review`. */
+  admissionPath?: string;
 }): Promise<ReviewRunResult> {
   return runReviewFromModule(reviewCommandHost(), args);
 }
@@ -45022,12 +45069,13 @@ import { PLAN_RECONCILE_LANDING_BODY_BUDGET, PLAN_RECONCILE_LANDING_RECORD_LIMIT
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
-import { buildIntoStore, childEntryStoreRoot, materializeMainEntryFromStore } from "./lib/child-entry-store.js";
+import { buildIntoStore, childEntryStoreRoot, defaultChildEntryStoreRoot, fillStoreForOwnTree, materializeMainEntryFromStore, type OwnTreeFill,
+  type OwnTreeFillOptions, type StoreLog } from "./lib/child-entry-store.js";
 // W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
-import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, reviewerCodeStartGate, runChildModeIsOn, runDetachedReview, spawnRunChild, type DetachedReviewCommand, type DetachedWorkSpec,
-  type FreshTreeEntry, type FreshTreeExit, type FreshTreeReview, type ReviewerCodeStartGate, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
+import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, decideReviewPath, reviewerCodeStartGate, runChildModeIsOn, runDetachedReview, spawnRunChild, type DetachedReviewCommand, type DetachedWorkSpec,
+  type FreshTreeEntry, type FreshTreeExit, type FreshTreeReview, type ReviewAdmissionPath, type ReviewerCodeStartGate, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
 export type { FreshTreeEntry, FreshTreeExit } from "./lib/run-child.js";
 import { createSweepFixAdmissionController, productionFixAdmissionResidents, installDetachedWorkHost, readFixDispatchEnvelope, runFixDispatchChild, timedFixStage, type FixDispatchChildPorts } from "./lib/sweep.js";
 import { classEstimate, classTypical } from "./lib/host-memory-learning.js";
@@ -46197,9 +46245,10 @@ export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: stri
 export function gatedDetachedReviewCommand(root: string, log: (step: string, extra?: Record<string, unknown>) => void): DetachedReviewCommand {
   const seams: FreshTreeReviewSeams = {
     git: reviewerGit(root), addWorktree: realDeps().reviewWorktree.addWorktree, worktreeRoot: join(root, "..", "worktrees"), spawnReview: spawnRmdReviewForFreshTree,
+    storeLog: log,
   };
   const gate = buildReviewerCodeFreshnessGate(() => checkReviewerCodeFreshnessAsync(root, process.env), log, reviewCommand,
-    buildFreshTreeReviewRunner(root, seams));
+    buildFreshTreeReviewRunner(root, seams), "run-child");
   return (prArg, rest, opts) => gate.call(prArg, rest, opts);
 }
 

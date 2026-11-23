@@ -13059,7 +13059,13 @@ export interface PostReviewStatusGuardedOpts {
    *  leaves a standing failure standing. Absent, the post is unchecked — only the out-of-scope dependency review
    *  (`decideDepReview`, which has no reviewer by design) omits it. */
   semanticJudgement?: SemanticJudgementFact;
+  /** W1-T12227: present when a review was judged before this post: the path that admitted it and the time it spent.
+   *  A stale refusal of such a post writes `review.refused_after_finished_review`, a defect count whose target is 0. */
+  finishedReview?: { admissionPath: string; reviewerMs: number };
 }
+
+/** W1-T12227: the row a terminal verdict refused for stale reviewer code after its review ran writes. */
+export const REVIEW_REFUSED_AFTER_FINISHED_REVIEW_STEP = "review.refused_after_finished_review";
 
 type ReviewerCodeFreshness =
   | { status: "fresh"; codeSha: string; originMainSha: string; advance: "none" | "immaterial" }
@@ -13355,6 +13361,15 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
       ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
       ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
     });
+    // W1-T12227: the reviewer's spend was discarded. Every admission path decides at its start, so the target is 0.
+    if (freshness.status === "stale" && opts.finishedReview !== undefined) {
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId, task_id: opts.taskId, step: REVIEW_REFUSED_AFTER_FINISHED_REVIEW_STEP,
+        pr_url: opts.prUrl ?? null, head_sha: opts.sha, attempted_state: opts.state,
+        admission_path: opts.finishedReview.admissionPath, reviewer_ms: opts.finishedReview.reviewerMs,
+        reviewer_code_sha: freshness.codeSha, origin_main_sha: freshness.originMainSha,
+      });
+    }
     return { posted: false, reason: freshnessRefusal };
   }
   // W1-T14035: every pending post names its own run, so a hold is told apart from a newer run's status by its owner.

@@ -312,13 +312,18 @@ export const DAEMON_TREE_FILL_SOURCE = "daemon-tree";
 const OWN_TREE = fileURLToPath(new URL("../../", import.meta.url));
 /** W1-T9601: the misses a fill answers, meaning no build of this tree's source exists yet. A refused stored build is not one. */
 const FILLABLE_MISSES: ReadonlySet<string> = new Set(["no-stored-build", "store-empty"]);
+/** W1-T12227: the `source` a fill for the shared fresh reviewer tree ledgers on child_entry.store_build_requested. */
+export const FRESH_TREE_REVIEW_FILL_SOURCE = "fresh-tree-review";
+/** W1-T12227: does a store answer mean no build of the tree's source exists yet, so a fill would answer it? */
+export const isFillableMiss = (lookup: StoreLookup | { outcome: "current" }): lookup is Extract<StoreLookup, { outcome: "miss" }> =>
+  lookup.outcome === "miss" && FILLABLE_MISSES.has(lookup.reason);
 
 /**
  * W1-T9601: on a fillable miss for the daemon's own tree in a daemon-owned process, request one store build for the
  * tree's source hash, fire-and-forget: the launch that missed still runs tsx. Undefined when no fill applies.
  */
 function fillOnMiss(root: string, lookup: StoreLookup, storeRoot: string, store: ChildEntryStoreOptions): OwnTreeFill | undefined {
-  if (lookup.outcome !== "miss" || !FILLABLE_MISSES.has(lookup.reason)) return undefined;
+  if (!isFillableMiss(lookup)) return undefined;
   if (root !== resolve(store.ownTree ?? OWN_TREE) || !(store.daemonOwned ?? daemonOwnedProcess())) return undefined;
   return fillStoreForOwnTree(root, lookup.hash, { storeRoot, source: DAEMON_TREE_FILL_SOURCE, log: store.log, build: store.build });
 }

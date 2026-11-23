@@ -1435,8 +1435,28 @@ export type FreshTreeReview = (
   onExit?: (exit: FreshTreeExit) => void,
 ) => Promise<number | undefined>;
 
+/** W1-T12227: the path that admitted a review. The fresh-tree row and `review.refused_after_finished_review` name it. */
+export type ReviewAdmissionPath = "sweep" | "run-child" | "required-fix" | "fresh-tree" | "review-command";
+
+/** W1-T12227: a review's path, decided from ONE reading before any reviewer spend. Fresh or unreadable runs in this
+ *  process with that reading as its start reading (unreadable keeps the just-in-time read at publication). Stale runs
+ *  from the fresh tree, and no reviewer starts in this process. */
+export type ReviewPathDecision =
+  | { path: "in-process"; startFreshness: Exclude<ReviewerCodeFreshness, { status: "stale" }> }
+  | { path: "fresh-tree"; freshness: Extract<ReviewerCodeFreshness, { status: "stale" }> };
+
+export async function decideReviewPath(
+  readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
+): Promise<ReviewPathDecision> {
+  const freshness = await readFreshness();
+  return freshness.status === "stale" ? { path: "fresh-tree", freshness } : { path: "in-process", startFreshness: freshness };
+}
+
 export type ReviewerCodeStartGate<D> = {
   call: (prArg: string, rest: string[], deps: D) => Promise<number>;
+  /** W1-T12227: the stale arm alone, for a caller that decided the path itself (the required fix review). */
+  fromFreshTree: (prArg: string, rest: string[], deps: D, freshness: Extract<ReviewerCodeFreshness, { status: "stale" }>,
+    admissionPath?: ReviewAdmissionPath) => Promise<number>;
   /** The sha pair the FIRST time THIS PASS'S freshness reads came back stale (there can be many,
    *  one per `call()`), or `undefined` when every read so far came back fresh, no PR reached the
    *  gate this pass, or every stale-looking read was actually unreadable. */
@@ -1456,73 +1476,76 @@ function freshTreeEndedAs(code: number, cause: string): "verdict" | "no_verdict"
 export function reviewerCodeStartGate<D extends object>(
   readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
   log: (step: string, extra?: Record<string, unknown>) => void,
-  next: (prArg: string, rest: string[], deps: D & { reviewStartFreshness?: ReviewerCodeFreshness }) => Promise<number>,
+  next: (prArg: string, rest: string[], deps: D & { reviewStartFreshness?: ReviewerCodeFreshness; admissionPath?: ReviewAdmissionPath }) => Promise<number>,
   childFlags: (deps: D) => string[],
   reviewFromFreshTree?: FreshTreeReview,
+  gatePath: ReviewAdmissionPath = "sweep",
 ): ReviewerCodeStartGate<D> {
   let firstStale: { oldSha: string; newSha: string } | undefined;
+  const fromFreshTree: ReviewerCodeStartGate<D>["fromFreshTree"] = async (prArg, rest, reviewDeps, freshness, admissionPath = gatePath) => {
+    firstStale ??= { oldSha: freshness.codeSha, newSha: freshness.originMainSha };
+    const staleFields = (read: typeof freshness) => ({ pr: prArg, code_sha: read.codeSha, origin_main_sha: read.originMainSha,
+      changed_paths: read.changedPaths?.length, admission_path: admissionPath });
+    const stale = staleFields(freshness);
+    // MOVE THE WORK, NOT THE CODE. Six pull requests once sat unreviewed for over an hour
+    // behind a one-commit lag, and the only recovery was a process restart that a
+    // multi-instance host then refused. A review does not need this process's modules — it
+    // needs FRESH ones, and a subprocess out of a worktree at origin/main has them.
+    if (reviewFromFreshTree) {
+      // W1-T4055 — WHY, NOT ONLY WHETHER. 52 of 53 fresh-tree reviews once exited non-zero with
+      // nothing but an exit code ledgered; the cause is what the next fix needs.
+      const childArgs = [...rest, ...childFlags(reviewDeps)];
+      const attempt = async (read: typeof freshness) => {
+        let failure: string | undefined;
+        let entry: FreshTreeEntry = { kind: "unknown", reason: "launcher-did-not-report" };
+        let exit: FreshTreeExit = { cause: "not-reported" };
+        const code = await reviewFromFreshTree(prArg, childArgs, read, (why) => { failure = why; }, (choice) => { entry = choice; }, (ended) => { exit = ended; });
+        return { code, failure, entry, exit, stale: staleFields(read) };
+      };
+      let ran = await attempt(freshness);
+      let retry: Record<string, unknown> = {};
+      // W1-T12226: main moved after the tree was cut, so the child's verdict was withheld. One newer tree, never a loop.
+      if (ran.code !== undefined && ran.code !== 0 && ran.exit.cause === STALE_AT_OWN_START) {
+        const again = await Promise.resolve(readFreshness()).catch((): undefined => undefined); // unreadable: keep the first child's end
+        if (again?.status === "stale" && again.originMainSha !== freshness.originMainSha) {
+          const second = await attempt(again);
+          if (second.code !== undefined) { retry = { retried_after: STALE_AT_OWN_START, retry_of_origin_main_sha: freshness.originMainSha }; ran = second; }
+        }
+      }
+      const { code, failure, entry, exit } = ran;
+      if (code !== undefined) {
+        const endedAs = freshTreeEndedAs(code, exit.cause);
+        const why = code === 0 ? {} : {
+          ...(endedAs === "defect" ? { failure: failure ?? "no failure reported" } : {}), exit_cause: exit.cause,
+          ...(exit.signal === undefined ? {} : { exit_signal: exit.signal }),
+          ...(exit.errorClass === undefined ? {} : { exit_error_class: exit.errorClass }),
+        };
+        log("review.ran_from_fresh_tree", {
+          ...ran.stale, exit_code: code, ended_as: endedAs, entry_kind: entry.kind, entry_reason: entry.reason, ...why, ...retry,
+        });
+        return code;
+      }
+      // COULD NOT RUN — fall through to the original skip rather than judging with stale
+      // code. W1-T3691's recurrence ladder still sees the skip and still escalates.
+      const reason = failure ?? "no reason reported";
+      log("review.skipped_stale_reviewer_code", { ...stale, fresh_tree: "unavailable", fresh_tree_reason: reason });
+      return 0;
+    }
+    log("review.skipped_stale_reviewer_code", stale);
+    return 0;
+  };
   return {
     call: async (prArg, rest, reviewDeps) => {
       // Read fresh for THIS PR, immediately before the spend it guards — never cached across the
       // pass (W1-T3697): a reading that changes between two PRs must be observed by the second PR
       // even though the first already ran under the earlier reading.
-      const freshness = await readFreshness();
-      if (freshness.status === "stale") {
-        firstStale ??= { oldSha: freshness.codeSha, newSha: freshness.originMainSha };
-        const staleFields = (read: typeof freshness) =>
-          ({ pr: prArg, code_sha: read.codeSha, origin_main_sha: read.originMainSha, changed_paths: read.changedPaths?.length });
-        const stale = staleFields(freshness);
-        // MOVE THE WORK, NOT THE CODE. Six pull requests once sat unreviewed for over an hour
-        // behind a one-commit lag, and the only recovery was a process restart that a
-        // multi-instance host then refused. A review does not need this process's modules — it
-        // needs FRESH ones, and a subprocess out of a worktree at origin/main has them.
-        if (reviewFromFreshTree) {
-          // W1-T4055 — WHY, NOT ONLY WHETHER. 52 of 53 fresh-tree reviews once exited non-zero with
-          // nothing but an exit code ledgered; the cause is what the next fix needs.
-          const childArgs = [...rest, ...childFlags(reviewDeps)];
-          const attempt = async (read: typeof freshness) => {
-            let failure: string | undefined;
-            let entry: FreshTreeEntry = { kind: "unknown", reason: "launcher-did-not-report" };
-            let exit: FreshTreeExit = { cause: "not-reported" };
-            const code = await reviewFromFreshTree(prArg, childArgs, read, (why) => { failure = why; }, (choice) => { entry = choice; }, (ended) => { exit = ended; });
-            return { code, failure, entry, exit, stale: staleFields(read) };
-          };
-          let ran = await attempt(freshness);
-          let retry: Record<string, unknown> = {};
-          // W1-T12226: main moved after the tree was cut, so the child's verdict was withheld. One newer tree, never a loop.
-          if (ran.code !== undefined && ran.code !== 0 && ran.exit.cause === STALE_AT_OWN_START) {
-            const again = await Promise.resolve(readFreshness()).catch((): undefined => undefined); // unreadable: keep the first child's end
-            if (again?.status === "stale" && again.originMainSha !== freshness.originMainSha) {
-              const second = await attempt(again);
-              if (second.code !== undefined) { retry = { retried_after: STALE_AT_OWN_START, retry_of_origin_main_sha: freshness.originMainSha }; ran = second; }
-            }
-          }
-          const { code, failure, entry, exit } = ran;
-          if (code !== undefined) {
-            const endedAs = freshTreeEndedAs(code, exit.cause);
-            const why = code === 0 ? {} : {
-              ...(endedAs === "defect" ? { failure: failure ?? "no failure reported" } : {}), exit_cause: exit.cause,
-              ...(exit.signal === undefined ? {} : { exit_signal: exit.signal }),
-              ...(exit.errorClass === undefined ? {} : { exit_error_class: exit.errorClass }),
-            };
-            log("review.ran_from_fresh_tree", {
-              ...ran.stale, exit_code: code, ended_as: endedAs, entry_kind: entry.kind, entry_reason: entry.reason, ...why, ...retry,
-            });
-            return code;
-          }
-          // COULD NOT RUN — fall through to the original skip rather than judging with stale
-          // code. W1-T3691's recurrence ladder still sees the skip and still escalates.
-          const reason = failure ?? "no reason reported";
-          log("review.skipped_stale_reviewer_code", { ...stale, fresh_tree: "unavailable", fresh_tree_reason: reason });
-          return 0;
-        }
-        log("review.skipped_stale_reviewer_code", stale);
-        return 0;
-      }
+      const decision = await decideReviewPath(readFreshness);
+      if (decision.path === "fresh-tree") return fromFreshTree(prArg, rest, reviewDeps, decision.freshness);
       // Operator ruling 2026-10-06: this reading is the review's START reading. The post-time
       // guard judges against it, so a merge landing mid-review no longer discards the verdict.
-      return next(prArg, rest, { ...reviewDeps, reviewStartFreshness: freshness });
+      return next(prArg, rest, { ...reviewDeps, reviewStartFreshness: decision.startFreshness, admissionPath: gatePath });
     },
+    fromFreshTree,
     staleThisPass: () => firstStale,
   };
 }
