@@ -23,9 +23,13 @@ import { fakeGitHub } from "#test/helpers/fake-github.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-// Operator resource contract: a cold child must also finish within this bound.
+// Operator resource contract for each offline CLI invocation.
 const OFFLINE_CHILD_TIMEOUT_MS = 20_000;
 const FIXTURE_IDENTITY = { name: "remudero offline lint fixture", email: "fixture@remudero.invalid" };
+
+function tsxCachePath(tempRoot: string): string {
+  return join(tempRoot, `tsx-${process.geteuid?.() ?? userInfo().username}`);
+}
 
 // Native-format PRIVATE cache/release fixtures confer no live credit or authority.
 const CREDIT_CHILD = "ZZ-T2", CREDIT_DEP = "ZZ-T1", CREDIT_GRANDPARENT = "ZZ-T0";
@@ -77,7 +81,7 @@ async function withDependencyCreditFixture(
     // tsx 4.23.15 keys transformed code by source/options/version in TMPDIR/tsx-<euid>.
     // Share only that cache inside this one proof; every child keeps its own process and scratch.
     if (transformCache !== undefined) {
-      symlinkSync(transformCache, join(dir, "tmp", `tsx-${process.geteuid?.() ?? userInfo().username}`), "dir");
+      symlinkSync(transformCache, tsxCachePath(join(dir, "tmp")), "dir");
     }
     const tripwires = [
       { command: "GitHub CLI", shim: ghShim([{ when: "", exit: 99 }], { kind: "lint-credit-tripwire" }) },
@@ -152,23 +156,54 @@ async function withDependencyCreditFixture(
   });
 }
 
+async function withPreparedOfflineTransformCache(
+  t: TestContext, run: (cache: string, first: DependencyCreditFixture) => void | Promise<void>,
+): Promise<void> {
+  await withTempDir("offline-lint-transform-cache-control", async scratch => {
+    const cache = tsxCachePath(scratch);
+    const home = join(scratch, "home");
+    mkdirSync(cache);
+    mkdirSync(home);
+    await withDependencyCreditFixture(t, async first => {
+      // A cold transform under coverage can consume the CLI deadline before lint starts.
+      execFileSync(process.execPath, [
+        "--import", import.meta.resolve("tsx"), "--import", join(REPO_ROOT, "src/run-task.ts"), "--eval", "",
+      ], {
+        cwd: first.root,
+        env: { ...first.env, HOME: home, TMPDIR: scratch, NODE_V8_COVERAGE: "" },
+        timeout: 60_000,
+      });
+      await run(cache, first);
+    }, false, undefined, cache);
+  });
+}
+
 test("lint dependency credit: transform reuse keeps child runtime and scratch independent", async t => {
   assert.equal(OFFLINE_CHILD_TIMEOUT_MS, 20_000, "the operator's child budget is unchanged");
-  await withTempDir("offline-lint-transform-cache-control", async cache => {
+  await withPreparedOfflineTransformCache(t, async (cache, first) => {
+    const prepared = readdirSync(cache).sort();
     const homes: string[] = [], temporaryRoots: string[] = [];
-    const run = async (credit: boolean) => withDependencyCreditFixture(t, f => {
+    const check = (f: DependencyCreditFixture, credit: boolean) => {
       homes.push(f.env.HOME!); temporaryRoots.push(f.env.TMPDIR!);
-      const link = join(f.env.TMPDIR!, `tsx-${process.geteuid?.() ?? userInfo().username}`);
+      const link = tsxCachePath(f.env.TMPDIR!);
       assert.equal(realpathSync(link), realpathSync(cache));
       if (credit) f.store(nativeFixtureCredit());
       const result = f.offline();
       assert.equal(result.code, credit ? 0 : 1, result.output);
       if (!credit) assert.match(result.output, /credit.*(?:unknown|unavailable|unobservable)/i);
-      assert.ok(readdirSync(cache).length > 0, "the actual tsx child populated the proof-owned transform cache");
-    }, false, undefined, cache);
-    await run(true); await run(false);
+    };
+    check(first, true);
+    assert.deepEqual(readdirSync(cache).sort(), prepared, "the first timed CLI child reused the prepared transforms");
+    await withDependencyCreditFixture(t, second => check(second, false), false, undefined, cache);
     assert.equal(new Set(homes).size, 2, "HOME/config authority is not reused");
     assert.equal(new Set(temporaryRoots).size, 2, "runtime temp roots are not reused");
+  });
+});
+
+test("W1-T12446 pins the cause of the intermittent failure", async t => {
+  await withPreparedOfflineTransformCache(t, (_cache, first) => {
+    assert.ok(readdirSync(tsxCachePath(first.env.TMPDIR!)).length > 0,
+      "the first timed CLI child must start with a populated transform cache");
   });
 });
 
