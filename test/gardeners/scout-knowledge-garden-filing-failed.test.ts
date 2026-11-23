@@ -8,7 +8,7 @@ import { clockFromMillisFn } from "#src/lib/clock.js";
 import { GARDEN_FILING_RETRY_BASE_MS, readGardenState } from "#src/lib/gardener.js";
 import { GARDEN_ACTION_CLASSES, gardenerStatePath, runGardenPass } from "#src/lib/knowledge-gardener.js";
 
-test("W1-T12445: a knowledge filing records its failure and lands after the transient error clears", async (t) => {
+test("W1-T12445: knowledge.garden_filing_failed no longer recurs", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "rmd-knowledge-filing-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const repoRoot = join(root, "repo");
