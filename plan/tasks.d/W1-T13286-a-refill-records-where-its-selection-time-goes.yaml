@@ -6,7 +6,7 @@
   verify: auto
   principles:
     tdd: strict
-  risk: medium # observability only; no decision changes
+  risk: high # observability only; no decision changes. Raised 2026-11-22: the scope amendment spans 5 concerns (Rule 19)
   band_meaning: span
   origin: "operator-session#idle-lanes-2026-11-16"
   plan_refs:
@@ -14,6 +14,11 @@
   files:
     - src/lib/daemon.ts
     - test/daemon/a-refill-records-where-its-selection-time-goes.test.ts
+    - scripts/write-only-ledger-step-baseline.json
+    - test/helpers/daemon-host-pins.ts
+    - test/plan/ops-catalog-shadow-invalid-edges.test.ts
+    - test/daemon/ops-catalog-shadow-enabled.test.ts
+    - test/quiet-hours-dispatch-gate.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -36,3 +41,18 @@
   note: |
     reservation hand-off: run-unfiled-1794875392692 -> run-unfiled-1794875392692
     Reserved with rmd next-task-id from a worktree at origin/main. The test folder is the one rmd test-place computed for a stub importing daemon.ts. Do not add a test importer of src/run-task.ts.
+  amendment: |
+    2026-11-22, scope: four files join files:. The timing row needs its own clock so measuring moves no
+    decision (W1-T11129 criterion 1 failed when it shared the decision clock). Suites that compare whole
+    ledgers between runs then saw real timings, so they pin that clock to 0 next to their pinned now:
+    test/helpers/daemon-host-pins.ts (hostIndependentDaemonDeps), and the inline deps in
+    test/plan/ops-catalog-shadow-invalid-edges.test.ts and test/daemon/ops-catalog-shadow-enabled.test.ts.
+    No assertion changes. The operator approved (2026-11-22 21:36Z) a recordOnly entry for
+    dispatch.selection_timing in scripts/write-only-ledger-step-baseline.json, since design step 2 says no
+    decision reads the row.
+    2026-11-22, scope: test/quiet-hours-dispatch-gate.test.ts joins files:. Its W1-T2655 "omitting quiet
+    hours is byte-identical" test compares two daemon runs row for row and injects no clock, so under
+    coverage load the new row read total_ms 2 against 0 (#20314 coverage-shard 3/12). The test already
+    zeroes the measured fields of four timing rows before it compares (W1-T4998, W1-T8235, W1-T9072,
+    #12826); dispatch.selection_timing's total_ms and probe_ms join that list. Its decision fields
+    (site, candidates_examined) are still compared.

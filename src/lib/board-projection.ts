@@ -1122,8 +1122,13 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
   function place(row: Row, tsMs: number, bytes: number, bulk: boolean): void {
     let at = rows.length;
     if (!bulk) while (rowTsMs[at - 1]! > tsMs) at--;
-    rows.splice(at, 0, row);
-    rowTsMs.splice(at, 0, tsMs);
+    if (at === rows.length) {
+      rows.push(row);
+      rowTsMs.push(tsMs);
+    } else {
+      rows.splice(at, 0, row);
+      rowTsMs.splice(at, 0, tsMs);
+    }
     kept.get(row)!.bytes = bytes;
     keptBytes += bytes;
     if (strings) internRowStrings(row, strings);
@@ -1300,7 +1305,8 @@ export function createBoardProjection(opts: BoardProjectionOptions): BoardProjec
     const caughtUp = !cut && fresh < limit;
     [bulkOpen, bulkOutOfOrder] = [bulk && !caughtUp, !caughtUp && outOfOrder];
     if (!caughtUp) {
-      compact();
+      // No reader sees a first load before it catches up, so it compacts as the dropped reach half: linear, not per chunk.
+      if (!bulk || dropped.size * 2 >= rows.length) compact();
       pending = true;
       return { fresh, caughtUp };
     }
