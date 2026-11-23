@@ -23,6 +23,18 @@ export function planReconcileProofTemplate(file: string): string {
   return `grep: ^  status: merged$ in ${file}`;
 }
 
+/** W1-T14302: the proof a re-queued shard's Acceptance bullet carries. */
+export function planReconcileRequeueProofTemplate(file: string): string {
+  return `grep: ^  status: queued$ in ${file}`;
+}
+
+/** The template for one landed file: a shard whose landed text reads `status: queued` was re-queued. */
+export function planReconcileProofFor(file: string, landedText: string | undefined): string {
+  return landedText !== undefined && /^  status: queued[ \t]*$/m.test(landedText)
+    ? planReconcileRequeueProofTemplate(file)
+    : planReconcileProofTemplate(file);
+}
+
 /** The whole landing PR body: the explanation, then one Acceptance bullet per shard. */
 export function planReconcilePrBody(files: readonly string[], proofFor: (file: string) => string): string {
   return [

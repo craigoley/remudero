@@ -736,6 +736,18 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["autoEvaluateSkillDrafts"],
     outcomes: ["claimed"],
   },
+  {
+    // W1-T14302: the one merged-to-queued write of the plan reconcile.
+    step: "plan.reconcile.reverted_requeue",
+    meaning:
+      "The plan reconcile handed the landing a shard that goes from status merged back to queued, because the task's " +
+      "only standing credit is gone. Fields: `task`, `pr` (the pairing that lost its credit), `file`, and `cause`: " +
+      "`revert` (a later commit on main reverted that pull request's squash merge; the row also has `revert_sha`) " +
+      "or `override` (a plan/credit-overrides.yaml remove-credit row; no `revert_sha`). One row per re-queue handed " +
+      "to the landing.",
+    writer: ["buildPlanReconcileCadenceInput"],
+    outcomes: ["revert", "override"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never

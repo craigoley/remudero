@@ -112,3 +112,64 @@ export function reconcilePlan(
   }
   return { summary: { rewritten: writes.map((w) => w.taskId), skipped }, writes };
 }
+
+/** W1-T14302: the projection facts a re-queue reads. A structural shape, so this module stays pure. */
+export interface LostCreditProjection {
+  readonly merged: boolean;
+  readonly indeterminate?: boolean;
+  readonly revertedCredit?: { readonly pr: number; readonly revertSha: string; readonly revertPr?: number };
+  readonly creditOverride?: { readonly reason: string; readonly pr: number };
+}
+
+/** One shard whose only standing credit is gone, as the plan reconcile reads it. */
+export type RevertedRequeue = LostCreditProjection & { readonly taskId: string };
+
+/** Why {@link requeueRevertedShard} left a shard alone. */
+export type RequeueSkip = "retired" | "no-status-field" | "status-not-merged" | "no-lost-credit" | "still-merged" | "credit-unreadable";
+
+/** The re-queued text, or the guard that declined. */
+export interface RequeueOutcome {
+  readonly text?: string;
+  readonly skipped?: RequeueSkip;
+}
+
+/** The re-queue edit alone: `  status: merged` becomes `  status: queued`, every other byte the same. A retired
+ *  shard or a shard that does not read merged gives undefined. The landing also re-derives carried blobs with it. */
+export function requeueShardStatusText(text: string): string | undefined {
+  if (/^  retirement:/m.test(text)) return undefined;
+  if (!/^  status: merged[ \t]*$/m.test(text)) return undefined;
+  return text.replace(/^  status: merged[ \t]*$/m, () => `  status: ${RECONCILE_FROM_STATUS}`);
+}
+
+/**
+ * W1-T14302 — the one path from `merged` back to `queued`. It acts only on a POSITIVE record that the task's
+ * standing credit is gone: a revert on main (`revertedCredit`) or an operator remove-credit row (`creditOverride`),
+ * on a projection that read cleanly and is not merged. Missing credit alone never re-queues, so a GitHub outage
+ * that reads every task as uncredited changes nothing. {@link reconcileShardStatus} stays one-way.
+ */
+export function requeueRevertedShard(text: string, taskId: string, projection: LostCreditProjection | undefined): RequeueOutcome {
+  void taskId; // the caller's key for the projection; the decision reads only the text and the projection
+  if (/^  retirement:/m.test(text)) return { skipped: "retired" };
+  const statusLine = text.match(/^  status: (\S+)[ \t]*$/m);
+  if (!statusLine) return { skipped: "no-status-field" };
+  if (statusLine[1] !== RECONCILE_TO_STATUS) return { skipped: "status-not-merged" };
+  if (projection === undefined || projection.indeterminate === true) return { skipped: "credit-unreadable" };
+  if (projection.merged) return { skipped: "still-merged" };
+  if (!projection.revertedCredit && !projection.creditOverride) return { skipped: "no-lost-credit" };
+  const edited = requeueShardStatusText(text);
+  return edited === undefined ? { skipped: "status-not-merged" } : { text: edited };
+}
+
+/** The projections whose standing credit a revert or an override took back, read cleanly and not merged. */
+export function revertedRequeues(projections: Iterable<LostCreditProjection & { readonly taskId: string }>): RevertedRequeue[] {
+  const out: RevertedRequeue[] = [];
+  for (const p of projections) {
+    if (p.merged || p.indeterminate === true || (!p.revertedCredit && !p.creditOverride)) continue;
+    out.push({
+      taskId: p.taskId, merged: false,
+      ...(p.revertedCredit ? { revertedCredit: p.revertedCredit } : {}),
+      ...(p.creditOverride ? { creditOverride: p.creditOverride } : {}),
+    });
+  }
+  return out;
+}

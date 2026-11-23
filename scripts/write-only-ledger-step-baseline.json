@@ -1445,6 +1445,7 @@
     "sweep.fix.admission_release_failed": "A diagnostic for a failed release of a fix round's admission lock; the lock is left to the stale-holder check, and the row makes the leak visible.",
     "sweep.fix.deferred_to_live_round": "An operator-facing record that a new failure was handed to the live fix round instead of a second round; the hand-off file carries the decision, so nothing re-reads the row.",
     "sweep.fix.handoff_cleanup_failed": "A diagnostic for a hand-off file that could not be removed after its round ended; it records the error, and the stale file is ignored because its claim and round ids no longer match.",
-    "sweep.fix.handoff_unreadable": "A diagnostic for a hand-off file that could not be parsed; the round treats it as no hand-off and records the error."
+    "sweep.fix.handoff_unreadable": "A diagnostic for a hand-off file that could not be parsed; the round treats it as no hand-off and records the error.",
+    "plan.reconcile.reverted_requeue": "An audit row for each shard the plan reconcile re-queues after a revert or a remove-credit override; the landing PR and the projection carry the state, so nothing re-reads the row."
   }
 }
