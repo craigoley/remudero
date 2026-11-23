@@ -1046,6 +1046,12 @@
       "grepHint": "Review-enforced merge gate (W1-T1C + W1-T1D + W1-T24 + W1-T24b)"
     },
     {
+      "path": "docs/review-status-writers.md",
+      "title": "Review status writers",
+      "summary": "Who can post the `remudero-review` status on a pull request head, and what happened when two of them disagreed on #19922.",
+      "grepHint": "Review status writers"
+    },
+    {
       "path": "docs/security-merge-policy.md",
       "title": "Exact-head high/critical merge protection",
       "summary": "This is a staged, trusted metadata producer, not a claim that repository protection",
