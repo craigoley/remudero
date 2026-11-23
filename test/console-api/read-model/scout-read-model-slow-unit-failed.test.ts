@@ -7,6 +7,14 @@ import { runSlowLaneWorker, SLOW_LANE_CATALOG_WAIT_MS, type SlowLaneMessage } fr
 import { BOARD_CATALOG_WIRE_VERSION, type BoardCatalogRequest } from "#src/lib/serve-plan-reload.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
+function deferredPass() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function instanceLane(t: TestContext, registry: string) {
   const { dir: root } = gitRepo({ scope: t });
   const state = join(root, "state");
@@ -23,7 +31,7 @@ function instanceLane(t: TestContext, registry: string) {
   const messages: SlowLaneMessage[] = [];
   let send: (message: { type: "lease"; held: boolean; instances: string[] }) => void;
   let requestedCatalog = false;
-  let passComplete = Promise.withResolvers<void>();
+  let passComplete = deferredPass();
   const lane = runSlowLaneWorker({
     on: (_event, handler) => { send = handler; },
     postMessage: (value) => {
@@ -49,7 +57,7 @@ function instanceLane(t: TestContext, registry: string) {
 
   return {
     lease(held: boolean) {
-      if (held) passComplete = Promise.withResolvers<void>();
+      if (held) passComplete = deferredPass();
       send({ type: "lease", held, instances: held ? ["site"] : [] });
       return passComplete.promise;
     },
