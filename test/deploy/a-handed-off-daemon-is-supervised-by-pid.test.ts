@@ -170,3 +170,34 @@ test("W1-T14546 a missing successor falls back to a cold start", (t) => {
   assert.match((cold.stderr ?? "").slice(missing), /checkout:/, "the cold start re-syncs the checkout first");
   assert.doesNotMatch(cold.stderr ?? "", /sleeping 1s before exiting/, "a missing successor is not a crash");
 });
+
+test("W1-T14546 a stop that arrives during the hand-over reaches the successor", (t) => {
+  // The old daemon ignores TERM, asks the entrypoint to stop while it is still its child, and exits 79 anyway:
+  // the stop it took is owed to the successor, which now holds the run (CI flake-screen, #20555).
+  const w = world(t);
+  const started = join(w.dir, "started");
+  const cleaned = join(w.dir, "cleaned");
+  const successor = script(join(w.dir, "daemon-successor.sh"), [
+    `trap 'touch "${cleaned}"; trap - TERM; kill -TERM $$' TERM`,
+    `touch "${started}"`,
+    "while :; do sleep 0.1; done",
+  ]);
+  const old = script(join(w.dir, "old-daemon.sh"), [
+    `calls="${w.calls}"`,
+    'n=$(( $(cat "$calls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$calls"',
+    'dir="$HOME/Remudero/state/daemon-handoff"; mkdir -p "$dir"',
+    `bash "${successor}" "$dir" </dev/null >/dev/null 2>&1 &`,
+    'echo "$! DAEMON-SUCCESSOR-1" > "$dir/successor.pid"',
+    "trap '' TERM # after the spawn: an ignored signal is inherited and could not be trapped by the successor",
+    `while [ ! -f "${started}" ]; do sleep 0.05; done`,
+    "kill -TERM $PPID; sleep 0.5",
+    "exit 79",
+  ]);
+  const r = spawnSync("bash", [SCRIPT, "bash", old], { encoding: "utf8", cwd: REPO_ROOT, env: { ...w.env, RMD_RESTART_THROTTLE_S: "20" }, timeout: 60_000 });
+  const err = r.stderr ?? "";
+  assert.equal(r.status, 0, err);
+  assert.equal(existsSync(cleaned), true, `the successor got the stop and ran its own cleanup: ${err}`);
+  assert.match(err, /forwarding to handed-off successor pid \d+/);
+  assert.match(err, /operator stop handled/);
+  assert.equal(callCount(w), 1, "no daemon is started after the stop");
+});

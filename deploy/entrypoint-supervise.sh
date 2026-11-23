@@ -110,6 +110,9 @@ signal_forwarded=""
 child_pid=""
 child_rc=""
 successor_pid=""
+# A stop that arrives while no process can take it (between the daemon's exit 79 and the watch on its
+# successor) is kept here and forwarded once the successor is known, never dropped.
+pending_signal=""
 forward_signal() {
   sig="$1"
   # W1-T14546: while the loop watches a handed-off successor, `child_pid` is only the poll's sleep;
@@ -130,7 +133,9 @@ forward_signal() {
     child_rc=0
     wait "$child_pid" 2>/dev/null || child_rc=$?
     signal_forwarded=1
+    return 0
   fi
+  pending_signal="$sig"
 }
 trap 'forward_signal TERM' TERM
 trap 'forward_signal INT' INT
@@ -177,8 +182,13 @@ handed_off_successor() {
 # Waits for the successor to exit, then sets `rc` to the code it wrote to `<pid>.exit`. No file
 # (a SIGKILL, an OOM kill, a crash before its exit hook) is a crash: rc 1.
 watch_successor() {
-  local pid="$1" exit_file="$HANDOFF_DIR/$1.exit" code=""
+  local pid="$1" exit_file="$HANDOFF_DIR/$1.exit" code="" held=""
   successor_pid="$pid"
+  if [ -n "$pending_signal" ]; then
+    held="$pending_signal"
+    pending_signal=""
+    forward_signal "$held"
+  fi
   while successor_alive "$pid"; do
     sleep "$HANDOFF_WATCH_INTERVAL_S" &
     child_pid=$!
@@ -398,9 +408,11 @@ async function forwardLine(line) {
   # W1-T14546: exit 79 means a standby this daemon started already holds the run. Watch it by pid
   # instead of starting a daemon (no sync_tree: the successor runs from its own engine tree), then
   # route the code it exits with through the cases below; a successor may itself hand off again.
-  while [ "$rc" -eq "$DAEMON_EXIT_HANDED_OFF" ] && [ -z "$signal_forwarded" ]; do
+  while [ "$rc" -eq "$DAEMON_EXIT_HANDED_OFF" ]; do
     successor=""
     if ! successor="$(handed_off_successor)"; then
+      # A stop that reached the exiting daemon ends here: there is no successor to stop and nothing to start.
+      [ -z "$signal_forwarded" ] || { rm -f -- "$HANDOFF_DIR/successor.pid"; break; }
       log "handoff_successor_missing: exited $rc (handed off) but $HANDOFF_DIR/successor.pid names no live daemon — cold-starting now"
       rm -f -- "$HANDOFF_DIR/successor.pid"
       sync_tree
@@ -413,6 +425,11 @@ async function forwardLine(line) {
     successor_run="${successor#* }"
     successor="${successor%% *}"
     log "exited $rc (handed off) — watching successor pid $successor${successor_run:+ ($successor_run)} instead of starting a daemon"
+    # A stop the exiting daemon already took is owed to the successor, which now holds the run.
+    if [ -n "$signal_forwarded" ]; then
+      pending_signal="${sig:-TERM}"
+      signal_forwarded=""
+    fi
     watch_successor "$successor"
     if [ "$supervise_daemon" -eq 1 ] && [ -n "$successor_run" ]; then
       persist_daemon_exit "$successor_run" "$rc" ""
