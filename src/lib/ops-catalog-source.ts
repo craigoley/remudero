@@ -231,11 +231,34 @@ export interface OpsCatalogShadowInput {
   readonly bound?: OpsCatalogBoundRefusal;
   /** W1-T14374: the snapshot's shard and byte counts, when a catalog read produced them. Non-enumerable. */
   readonly counts?: OpsCatalogShadowCounts;
+  /** W1-T14564: present only when a refresh failed and the kept snapshot answered: why, and the snapshot's age.
+   *  Non-enumerable, like the other diagnostics. */
+  readonly lastGood?: OpsCatalogLastGoodServed;
+  /** W1-T14564: with `lastGood`, the refusal exactly as it would have been answered, so its row reads as before. */
+  readonly refused?: OpsCatalogShadowInput;
   /** W1-T14557: the day's first accepted growth past the allowance; see {@link OpsCatalogSnapshot.growthExceeded}. Non-enumerable. */
   readonly growthExceeded?: OpsCatalogBoundRefusal;
 }
+/** W1-T14564: the refusal a kept snapshot answered for, and how old that snapshot is. Closed labels and numbers only. */
+export interface OpsCatalogLastGoodServed {
+  refusal: OpsCatalogOutcome;
+  refusalStage?: OpsCatalogRefusalStage;
+  snapshotAgeMs: number;
+}
 /** W1-T14374: the two counts a refresh row carries. Numbers only. */
 export interface OpsCatalogShadowCounts { shards: number; bytes: number }
+
+/**
+ * W1-T14564: the same ok snapshot, served past its refresh's age bound: every private handle carried over, with
+ * `lastGood` naming why it is served and how old it is. A non-ok input is returned unchanged.
+ */
+export function servedAsLastGood(input: OpsCatalogShadowInput, lastGood: OpsCatalogLastGoodServed): OpsCatalogShadowInput {
+  if (input.outcome !== "ok") return input;
+  const handles = { plan: input.plan, opsCommit: input.opsCommit, kind: input.kind, counts: input.counts,
+    refused: input.refused, lastGood };
+  return privateHandles({ outcome: "ok" as const, identityDigest: input.identityDigest },
+    Object.fromEntries(Object.entries(handles).filter(([, value]) => value !== undefined)));
+}
 
 /** W1-T13705: attach the refresh diagnostics without changing the input's own enumerable shape. */
 function withDiagnostics(input: OpsCatalogShadowInput, kind: "full" | "revalidate",
@@ -1021,7 +1044,14 @@ async function readSnapshot(
 ): Promise<OpsCatalogSnapshot> {
   const counts: OpsCatalogCounts = { treeEntries: 0, shards: 0, bytes: 0, passes: 0, fetchedObjects: [], cachedObjects: 0 };
   let refusalStage: OpsCatalogRefusalStage = "repository_identity";
-  try { return await read(target, api, counts, store, stage => { refusalStage = stage; }, treeCache, stateDir, io); }
+  try {
+    const snapshot = await read(target, api, counts, store, stage => { refusalStage = stage; }, treeCache, stateDir, io);
+    // W1-T14564: an accepted binding is what a later refused read falls back to. Writing it never throws.
+    if (stateDir !== undefined && snapshot.outcome === "ok" && snapshot.binding) {
+      writeLastGoodBinding(stateDir, target.repository, snapshot.binding, (io?.clock ?? systemClock).now());
+    }
+    return snapshot;
+  }
   catch (error) {
     // The outcome code is the reason: the error's own message may hold a URL or body, so it is dropped here.
     const httpStatusClass = error instanceof Refusal ? error.httpStatusClass : undefined;
@@ -1032,8 +1062,9 @@ async function readSnapshot(
 }
 
 /**
- * A stateful source for a per-tick refresh: a refresh that fails after an earlier success reads `stale` and
- * never hands the earlier snapshot back as current. W1-T13052: while the default branch still names the kept
+ * A stateful source for a per-tick refresh. W1-T14564 (operator ruling 2026-11-23): a refresh that fails answers the
+ * last good snapshot (this source's newest accepted one, else the state dir's kept one) as `ok`, carrying `lastGood`
+ * with the refusal and the snapshot's age; with no good snapshot it answers the refusal as before. W1-T13052: while the default branch still names the kept
  * commit, one ref GET revalidates the kept snapshot; a failed ref GET reads stale. A moved branch is read again
  * using the source's kept trees and the api's verified blobs, so it fetches only the trees and blobs that changed.
  */
@@ -1043,13 +1074,35 @@ export function createOpsCatalogShadowSource(
   opts: OpsCatalogReadOptions = {},
 ): { refresh(): Promise<OpsCatalogShadowInput> } {
   let everOk = false;
+  const clock = opts.bounds?.clock ?? systemClock;
+  /** W1-T14564: the newest snapshot this source accepted or confirmed, and when; a failed refresh answers it. */
+  let lastOk: { snap: NonNullable<typeof kept>; confirmedAt: number } | undefined;
   let kept: { plan?: Plan; binding: OpsCatalogBinding; identityDigest?: string; counts: OpsCatalogShadowCounts } | undefined;
   const store = createPlanRevisionStore({ strict: true, retainLatest: true, yamlLogLevel: "error", dependencyMode: "preserve-external" });
   const treeCache: ShadowTreeCache = {};
   const answer = (snap: { plan?: Plan; binding?: OpsCatalogBinding; identityDigest?: string; counts: OpsCatalogShadowCounts },
-    kind: "full" | "revalidate", growthExceeded?: OpsCatalogBoundRefusal): OpsCatalogShadowInput =>
+    kind: "full" | "revalidate", diagnostics: Partial<Pick<OpsCatalogShadowInput, "lastGood" | "refused" | "growthExceeded">> = {}): OpsCatalogShadowInput =>
     privateHandles({ outcome: "ok" as const, identityDigest: snap.identityDigest },
-      { plan: snap.plan, opsCommit: snap.binding?.commit, kind, counts: snap.counts, ...(growthExceeded ? { growthExceeded } : {}) });
+      { plan: snap.plan, opsCommit: snap.binding?.commit, kind, counts: snap.counts,
+        ...Object.fromEntries(Object.entries(diagnostics).filter(([, value]) => value !== undefined)) });
+  const accepted = (snap: NonNullable<typeof kept>, kind: "full" | "revalidate", growthExceeded?: OpsCatalogBoundRefusal): OpsCatalogShadowInput => {
+    lastOk = { snap, confirmedAt: clock.now() };
+    return answer(snap, kind, { growthExceeded });
+  };
+  /** The last good snapshot answering `refused`, or the refusal itself when there is none: never an empty catalog. */
+  const lastGoodOr = async (refused: OpsCatalogShadowInput, kind: "full" | "revalidate",
+    refusal: OpsCatalogOutcome = refused.outcome): Promise<OpsCatalogShadowInput> => {
+    if (lastOk === undefined) {
+      const onDisk = await readLastGoodOpsCatalogSnapshot(target, api, opts);
+      if (onDisk.outcome === "ok" && onDisk.binding) {
+        lastOk = { snap: { plan: onDisk.plan, binding: onDisk.binding, identityDigest: onDisk.identityDigest, counts: onDisk.counts }, confirmedAt: onDisk.acceptedAt };
+      }
+    }
+    if (lastOk === undefined) return refused;
+    const lastGood: OpsCatalogLastGoodServed = { refusal,
+      ...(refused.refusalStage ? { refusalStage: refused.refusalStage } : {}), snapshotAgeMs: Math.max(0, clock.now() - lastOk.confirmedAt) };
+    return answer(lastOk.snap, kind, { lastGood, refused });
+  };
   let revalidateClass: OpsCatalogHttpStatusClass | undefined;
   const revalidate = async (k: NonNullable<typeof kept>): Promise<"same" | "moved" | "failed"> => {
     revalidateClass = undefined;
@@ -1065,20 +1118,126 @@ export function createOpsCatalogShadowSource(
   return {
     async refresh() {
       const check = kept ? await revalidate(kept) : "moved";
-      if (check === "same" && kept) return answer(kept, "revalidate");
+      if (check === "same" && kept) return accepted(kept, "revalidate");
       kept = undefined;
       if (check === "failed") {
-        return withDiagnostics({ outcome: "stale", refusalStage: "branch_ref" }, "revalidate", revalidateClass);
+        return lastGoodOr(withDiagnostics({ outcome: "stale", refusalStage: "branch_ref" }, "revalidate", revalidateClass), "revalidate");
       }
       const snap = await readSnapshot(target, api, store, treeCache, blobStateDir(api, opts), opts.bounds);
       if (snap.outcome === "ok" && snap.binding) {
         everOk = true;
         kept = { plan: snap.plan, binding: snap.binding, identityDigest: snap.identityDigest, counts: { shards: snap.counts.shards, bytes: snap.counts.bytes } };
         // W1-T14557: only the full read that measured it carries the day's growth report; a revalidation never does.
-        return answer(kept, "full", snap.growthExceeded);
+        return accepted(kept, "full", snap.growthExceeded);
       }
-      return withDiagnostics({ outcome: everOk ? "stale" : snap.outcome, ...(snap.refusalStage ? { refusalStage: snap.refusalStage } : {}) },
+      const refused = withDiagnostics({ outcome: everOk ? "stale" : snap.outcome, ...(snap.refusalStage ? { refusalStage: snap.refusalStage } : {}) },
         "full", snap.httpStatusClass, snap.bound, { shards: snap.counts.shards, bytes: snap.counts.bytes });
+      return lastGoodOr(refused, "full", snap.outcome);
     },
   };
+}
+
+// ── W1-T14564: the last good snapshot ──
+//
+// Operator ruling 2026-11-23: an ops catalog read problem never stops core work. Each accepted read keeps its binding
+// in one owner-only file beside the blob cache; the blob cache already keeps exactly that binding's verified blobs
+// (pruneBlobFiles after each ok read). A refused read rebuilds the accepted plan from the two, verifying every blob
+// against its sha again. Any missing or mismatched blob is no snapshot: a refusal is never read as an empty catalog.
+
+/** BACKSTOP: a binding names at most OPS_CATALOG_MAX_TREE_ENTRIES shards, each well under 200 bytes of JSON. */
+const LAST_GOOD_FILE_MAX_BYTES = 4 * 1024 * 1024;
+
+export function opsCatalogLastGoodFile(stateDir: string, repository: string): string {
+  return join(stateDir, "cache", "ops-catalog-last-good", `${encodeURIComponent(repository.toLowerCase())}.json`);
+}
+
+/** The accepted binding and when it was accepted, written whole under a private temporary name and renamed. */
+function writeLastGoodBinding(stateDir: string, repository: string, binding: OpsCatalogBinding, acceptedAt: number): void {
+  const path = opsCatalogLastGoodFile(stateDir, repository);
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    fs.mkdirSync(join(stateDir, "cache", "ops-catalog-last-good"), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(temp, `${JSON.stringify({ version: 1, repository: repository.toLowerCase(), acceptedAt, binding })}\n`, { mode: 0o600, flag: "wx" });
+    fs.renameSync(temp, path);
+  } catch (error) {
+    void error; // A binding that cannot be kept changes only a later refused read, which then has no snapshot, as before.
+    removeBlobFile(temp);
+  }
+}
+
+/** Why there is no last good snapshot: closed codes, never a path or file text. */
+export type OpsCatalogLastGoodMiss = "no_state_dir" | "no_record" | "record_malformed" | "blob_missing" | "parse";
+export type OpsCatalogLastGood =
+  | { outcome: "ok"; plan?: Plan; binding?: OpsCatalogBinding; identityDigest: string; acceptedAt: number; ageMs: number;
+    counts: OpsCatalogShadowCounts }
+  | { outcome: "none"; reason: OpsCatalogLastGoodMiss };
+
+/** The kept record, read through one descriptor that does not follow a link (the loadGrowth discipline). */
+function readLastGoodRecord(path: string): { record?: { repository: string; acceptedAt: number; binding: OpsCatalogBinding }; miss?: OpsCatalogLastGoodMiss } {
+  let fd: number;
+  try { fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); }
+  catch (error) {
+    void error; // An absent or unopenable record is no record.
+    return { miss: "no_record" };
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > LAST_GOOD_FILE_MAX_BYTES) return { miss: "record_malformed" };
+    const raw = rec(JSON.parse(fs.readFileSync(fd, "utf8")));
+    const b = rec(raw.binding), blobs = rec(b.shardBlobs);
+    if (raw.version !== 1 || typeof raw.repository !== "string" || !count(raw.acceptedAt)) throw new Refusal("malformed");
+    if (typeof b.repositoryId !== "number" || !Number.isSafeInteger(b.repositoryId) || b.repositoryId < 1
+      || typeof b.ref !== "string" || !b.ref.startsWith("refs/heads/") || typeof b.shardTreeSha !== "string"
+      || (b.shardTreeSha !== "" && !SHA.test(b.shardTreeSha))) throw new Refusal("malformed");
+    const names = Object.keys(blobs);
+    if (names.length > OPS_CATALOG_MAX_TREE_ENTRIES || !names.every((n) => !n.includes("/") && isShardFile(n))) throw new Refusal("malformed");
+    const shardBlobs = Object.fromEntries(names.sort().map((n) => [n, sha(blobs[n])]));
+    const binding: OpsCatalogBinding = { repositoryId: b.repositoryId, ref: b.ref, commit: sha(b.commit), tasksYamlBlob: sha(b.tasksYamlBlob),
+      shardTreeSha: b.shardTreeSha, shardBlobs };
+    return { record: { repository: raw.repository, acceptedAt: raw.acceptedAt, binding } };
+  } catch (error) {
+    void error; // An unreadable descriptor, JSON or field damage: the record names no snapshot, so the read stays refused.
+    return { miss: "record_malformed" };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+const isShardFile = (path: string): boolean => path.endsWith(".yaml") || path.endsWith(".yml");
+
+/**
+ * W1-T14564: the snapshot the newest accepted read of `target` produced, rebuilt from its kept binding and the
+ * verified blob cache, with its age. The state dir resolves as a read's does (`opts.stateDir`, else the instance's
+ * for the shared default api). It makes no GitHub read and never throws; any gap is `none` with a closed reason.
+ */
+export async function readLastGoodOpsCatalogSnapshot(
+  target: OpsCatalogTarget, api: OpsCatalogApi = sharedDefaultOpsCatalogApi(), opts: OpsCatalogReadOptions = {},
+): Promise<OpsCatalogLastGood> {
+  const stateDir = blobStateDir(api, opts);
+  if (stateDir === undefined) return { outcome: "none", reason: "no_state_dir" };
+  const read = readLastGoodRecord(opsCatalogLastGoodFile(stateDir, target.repository));
+  const record = read.record;
+  if (!record) return { outcome: "none", reason: read.miss ?? "no_record" };
+  if (record.repository !== target.repository.toLowerCase()) return { outcome: "none", reason: "record_malformed" };
+  const { binding } = record;
+  const files: BlobFiles = { dir: opsCatalogBlobCacheDir(stateDir, binding.repositoryId) };
+  const blobs: Array<{ label: string; text: string }> = [];
+  let bytes = 0;
+  for (const [label, blobSha] of [["tasks.yaml", binding.tasksYamlBlob], ...Object.entries(binding.shardBlobs).map(([n, s]) => [`tasks.d/${n}`, s])]) {
+    // readBlobFile verifies the bytes against the sha and the per-blob bound; a file failing either is removed.
+    const blob = readBlobFile(files, blobSha!);
+    if (!blob) return { outcome: "none", reason: "blob_missing" };
+    blobs.push({ label: label!, text: blob.text });
+    bytes += blob.bytes;
+  }
+  const identityDigest = digestOf(binding);
+  let plan: Plan;
+  try { plan = snapshotStore.adopt({ key: `${binding.commit}:${identityDigest}`, commit: binding.commit, repoDir: "", relPath: "" }, blobs).plan; }
+  catch (error) {
+    void error; // The bytes were accepted once; a parser that now refuses them leaves no snapshot to serve.
+    return { outcome: "none", reason: "parse" };
+  }
+  const ageMs = Math.max(0, (opts.bounds?.clock ?? systemClock).now() - record.acceptedAt);
+  const counts = { shards: Object.keys(binding.shardBlobs).length, bytes };
+  return privateHandles({ outcome: "ok" as const, identityDigest, acceptedAt: record.acceptedAt, ageMs, counts }, { plan, binding: Object.freeze(binding) });
 }

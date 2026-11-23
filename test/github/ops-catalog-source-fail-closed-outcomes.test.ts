@@ -156,9 +156,14 @@ test("W1-T11768 criterion 2: a refresh failing after a success is stale and neve
   assert.equal(first.outcome, "ok");
   down = true;
   const second = await source.refresh();
-  assert.equal(second.outcome, "stale");
-  assert.equal(second.plan, undefined, "the earlier plan is not current");
-  assert.equal(second.identityDigest, undefined);
+  // W1-T14564 (operator ruling 2026-11-23): the earlier snapshot is served, marked as the last good one; the refusal
+  // it answers for keeps its old shape on `refused`, with no plan.
+  assert.equal(second.outcome, "ok");
+  assert.equal(second.identityDigest, first.identityDigest);
+  assert.deepEqual([second.lastGood?.refusal, second.lastGood?.refusalStage], ["stale", "branch_ref"]);
+  assert.equal(second.refused?.outcome, "stale");
+  assert.equal(second.refused?.plan, undefined, "the refusal itself carries no plan");
+  assert.equal(second.refused?.identityDigest, undefined);
   down = false;
   assert.equal((await source.refresh()).outcome, "ok", "a later success is current again");
   const fresh = createOpsCatalogShadowSource(target, fixture({ noPlanDir: true }).api);

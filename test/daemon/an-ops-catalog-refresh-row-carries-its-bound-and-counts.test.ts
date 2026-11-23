@@ -116,7 +116,9 @@ test("W1-T14374 criterion 2: no field names or quotes private content, counts an
   t.after(() => feed.stop());
   await refresh();
   fx.fail(true);
-  await refresh();
+  // W1-T14564: the kept snapshot answers this failed refresh, so its row adds the refusal and the snapshot's age.
+  const served = await refresh();
+  assert.deepEqual([served.data.refusal, typeof served.data.snapshot_age_ms], ["stale", "number"]);
   const refused = feedOver(createOpsCatalogShadowSource(target, remote(shards(OPS_CATALOG_BASELINE_SHARDS + 100)).api, { bounds: BUDGET }));
   t.after(() => refused.feed.stop());
   await refused.refresh();
@@ -136,7 +138,8 @@ test("W1-T14374 criterion 2: no field names or quotes private content, counts an
   const text = JSON.stringify(all);
   for (const sentinel of [PRIVATE, REPO, "OPS-T0"]) assert.equal(text.includes(sentinel), false, `no row carries ${sentinel}`);
   for (const row of all) {
-    assert.deepEqual(Object.keys(row.data).sort(), [...OLD_FIELDS, ...NEW_FIELDS].sort());
+    const servedFields = row === served ? ["refusal", "snapshot_age_ms"] : [];
+    assert.deepEqual(Object.keys(row.data).sort(), [...OLD_FIELDS, ...NEW_FIELDS, ...servedFields].sort());
     for (const key of ["shards", "bytes"]) assert.ok(row.data[key] === null || Number.isInteger(row.data[key]), `${key} is a count or null`);
     const bound = row.data.bound as Record<string, unknown> | null;
     if (bound !== null) {
