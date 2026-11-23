@@ -5134,7 +5134,7 @@ export function buildBatchedGithub(
       // half's proven stop test over rather than a second mechanism.
       let bytes = 0;
       const fetchJson = (args: string[]): unknown => {
-        const raw = run(args);
+        const raw = runBoardApiRead(() => run(args), pacer.sleepSync);
         bytes += Buffer.byteLength(raw, "utf8");
         return JSON.parse(raw);
       };
