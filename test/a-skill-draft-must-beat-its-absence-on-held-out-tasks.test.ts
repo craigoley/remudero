@@ -117,7 +117,7 @@ test("an expired skill eval control refuses new attempts while preserving the qu
     grade: fleet.grade, argv: CONFIRM, idle: IDLE, log: fleet.log, control: { finishByMs: 1000, shutdownReserveMs: 100 } };
   assert.equal((await runSkillEval(input)).state, "cancelled");assert.equal(fleet.built.length, 0);
   assert.equal((await runSkillEval({ ...input, argv: [] })).state, "refused");
-  assert.equal((await runSkillEval({ ...input, idle: { liveness: { state: "up" }, headroom: HEADROOM } })).state, "refused");
+  assert.equal((await runSkillEval({ ...input, idle: { liveness: { state: "down" }, headroom: HEADROOM } })).state, "refused");
 });
 
 test("skill eval cancellation during grading or failed cleanup is never an evaluated success", async () => {
@@ -270,7 +270,7 @@ test("a skill eval without --confirm-spend, or with the fleet not idle, refuses 
   const cases: { argv: string[]; idle: ReplayIdleSignal; reason: string }[] = [
     { argv: [], idle: IDLE, reason: "spend-not-confirmed" },
     { argv: ["--confirm"], idle: IDLE, reason: "spend-not-confirmed" },
-    { argv: CONFIRM, idle: { liveness: { state: "up" }, headroom: HEADROOM }, reason: "fleet-not-idle" },
+    { argv: CONFIRM, idle: { liveness: { state: "down" }, headroom: HEADROOM }, reason: "fleet-not-idle" },
     { argv: CONFIRM, idle: { headroom: HEADROOM }, reason: "fleet-not-idle" },
     { argv: CONFIRM, idle: { liveness: { state: "up", quiet: true }, headroom: { ...HEADROOM, session: { percentUsed: 99 } } }, reason: "fleet-not-idle" },
   ];
@@ -280,7 +280,7 @@ test("a skill eval without --confirm-spend, or with the fleet not idle, refuses 
       grade: fleet.grade, argv, idle, log: fleet.log });
     assert.equal(run.state, "refused", JSON.stringify({ argv, idle }));
     assert.ok(run.state === "refused" && run.reason === reason && run.dispatched === 0, JSON.stringify(run));
-    assert.ok(run.state === "refused" && run.detail.startsWith("refusing to replay"), "the gate's own reason is carried");
+    assert.ok(run.state === "refused" && /^refusing (to replay|a skill eval)/.test(run.detail), "the gate's own reason is carried");
     assert.equal(fleet.built.length, 0, "no dispatcher is even built");
     assert.equal(fleet.requests.length, 0, "the fake dispatcher records zero calls");
     assert.deepEqual(fleet.rows.map((r) => r.step), [SKILL_EVAL_STEPS.refused]);
