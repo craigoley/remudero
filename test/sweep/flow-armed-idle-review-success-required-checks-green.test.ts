@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 function harness(t: TestContext, outcome: "armed" | "direct-merged" | "arm-error-ignored" | undefined = "armed") {
   const root = mkdtempSync(join(tmpdir(), "rmd-flow-armed-idle-"));
@@ -16,6 +17,8 @@ function harness(t: TestContext, outcome: "armed" | "direct-merged" | "arm-error
     reviewState: "success", checksState: "green", unmetCriteria: [], priorStrikes: 0,
     lastActivityAt: new Date().toISOString(),
   };
+  writeLedger([{ ts: new Date().toISOString(), run_id: "REVIEW", task_id: pr.taskId, step: "review.posted",
+    pr_url: pr.prUrl, head_sha: pr.headSha, capped: false, plan_only: false }], { dir: root });
   const deps: SweepDeps = {
     ledgerPath, runId: "flow-armed-idle", readLedgerUnion: () => ({ complete: false, lines: [] }),
     arm: (_pr, mode) => { calls.push(mode); return mode === "armed-idle" ? "direct-merged" : outcome; },

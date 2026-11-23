@@ -67,6 +67,15 @@ function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-sweep-")), "ledger.ndjson");
 }
 
+/** W1-T14317: a live review.posted verdict for each PR's head, so an arming fixture arms on evidence. */
+function withVerdicts(path: string, ...prs: OpenPrView[]): string {
+  for (const p of prs) {
+    appendLedger(path, { ts: "2026-07-17T11:00:00.000Z", run_id: "REVIEW-1", task_id: p.taskId ?? "", step: "review.posted",
+      pr_url: p.prUrl, head_sha: p.headSha, capped: false, plan_only: false });
+  }
+  return path;
+}
+
 function criterion(over: Partial<CriterionVerdict> = {}): CriterionVerdict {
   return {
     claim: "does the thing",
@@ -1704,7 +1713,7 @@ test("runSweep acceptance 3 — an rmd-owned deletion conflict dispatches one bo
 test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), superseded-orphan, strikes-exhausted} -> exactly {one arm, ONE fix carrying BOTH criteria, one close, one escalation}; none-count == 0", async () => {
   // Ruling 2026-10-09 (W1-T7096): the progress judge (here the helper's fixture judge) rules the former
   // ceiling a loop; that verdict enters main's strikes-exhausted route unchanged, so main's assertions stand.
-  const deps = fakeDeps();
+  const deps = fakeDeps({ ledgerPath: withVerdicts(ledgerPath(), mergeablePr()) });
   const seeded = [mergeablePr(), blockedFixablePr(), supersededOrphanPr(), strikesExhaustedPr()];
 
   const summary = await runSweep(seeded, deps);
@@ -1750,7 +1759,7 @@ test("acceptance 1 — the P22 golden: {mergeable, blocked-fixable(2 criteria), 
 // ── ACCEPTANCE 2: idempotence — the level-triggered core ──────────────────────
 
 test("acceptance 2 — idempotence: the same fixture swept twice unchanged performs zero actions the second time, dispositions identical", async () => {
-  const shared = ledgerPath(); // the SAME ledger persists across both sweeps
+  const shared = withVerdicts(ledgerPath(), mergeablePr()); // the SAME ledger persists across both sweeps
   const seeded = () => [mergeablePr(), blockedFixablePr(), supersededOrphanPr(), strikesExhaustedPr()];
 
   const deps1 = fakeDeps({ ledgerPath: shared, runId: "SWEEP-1" });
@@ -2114,14 +2123,14 @@ test("acceptance 4 — one runSweep entry point, driven from a fake DAEMON calle
   const seeded = () => [mergeablePr(), supersededOrphanPr()];
 
   // A fake "daemon poll" caller.
-  const daemonDeps = fakeDeps({ runId: "DAEMON-123" });
+  const daemonDeps = fakeDeps({ runId: "DAEMON-123", ledgerPath: withVerdicts(ledgerPath(), mergeablePr()) });
   const fromDaemon = await runSweep(seeded(), daemonDeps);
   assert.equal(daemonDeps.armed.length, 1);
   assert.equal(daemonDeps.closed.length, 1);
   assert.equal(fromDaemon.total, 2);
 
   // A fake "rmd sweep" CLI caller — the SAME function, distinct ledger/runId.
-  const cliDeps = fakeDeps({ runId: "SWEEP-456" });
+  const cliDeps = fakeDeps({ runId: "SWEEP-456", ledgerPath: withVerdicts(ledgerPath(), mergeablePr()) });
   const fromCli = await runSweep(seeded(), cliDeps);
   assert.equal(cliDeps.armed.length, 1);
   assert.equal(cliDeps.closed.length, 1);
@@ -2131,7 +2140,7 @@ test("acceptance 4 — one runSweep entry point, driven from a fake DAEMON calle
 // ── dry-run: preview only, no effects, no ledger trace ────────────────────────
 
 test("dry-run: derives dispositions but takes NO effects and writes NO ledger line (a later real sweep still acts)", async () => {
-  const shared = ledgerPath();
+  const shared = withVerdicts(ledgerPath(), mergeablePr());
   const dry = fakeDeps({ ledgerPath: shared, dryRun: true });
   const preview = await runSweep([mergeablePr(), blockedFixablePr()], dry);
   assert.equal(dry.armed.length, 0);
@@ -2287,7 +2296,7 @@ test("W1-T1116: an already-armed hold is distinguishable from a refusal", async 
 });
 
 test("W1-T1116: an armed disposition still acts unchanged", async () => {
-  const deps = fakeDeps();
+  const deps = fakeDeps({ ledgerPath: withVerdicts(ledgerPath(), mergeablePr()) });
   const summary = await runSweep([mergeablePr()], deps);
   assert.deepEqual(deps.armed.map((p) => p.prNumber), [10], "an ordinary mergeable PR still arms exactly as before this task");
   assert.equal(summary.actions[0].acted, true);
@@ -2845,7 +2854,7 @@ test("W1-T103 acceptance 1 — the #170 fixture (all required success, one non-r
   const healedPr = pr({ prNumber: 170, prUrl: "url/170", taskId: "W1-T170", reviewState: "success", checksState });
   assert.equal(deriveDisposition(healedPr, DEFAULT_SWEEP_POLICY, NOW).disposition, "mergeable");
 
-  const deps = fakeDeps();
+  const deps = fakeDeps({ ledgerPath: withVerdicts(ledgerPath(), healedPr) });
   await runSweep([healedPr], deps);
   assert.equal(deps.armed.length, 1, "arm invoked exactly once");
   assert.equal(deps.armed[0].prNumber, 170);
@@ -3918,6 +3927,7 @@ test("runSweep: a throwing action does not abort the pass — later PRs still re
     checksState: "green",
     headSha: "bbbb222",
   });
+  withVerdicts(deps.ledgerPath, throwing, healthy);
 
   const summary = await runSweep([throwing, healthy], deps, DEFAULT_SWEEP_POLICY);
 
@@ -4037,7 +4047,7 @@ test("runSweep (light pass): a post-review disposition IS actionable under the s
 // next pass deduped forever). Observed live on PR #960.
 
 test("arm outcome: a no-task-id refusal yields acted:false AND names itself in stand_down_reason", async () => {
-  const deps = fakeDeps({ arm: () => "no-task-id" });
+  const deps = fakeDeps({ arm: () => "no-task-id", ledgerPath: withVerdicts(ledgerPath(), mergeablePr()) });
   await runSweep([mergeablePr()], deps, DEFAULT_SWEEP_POLICY);
 
   const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
@@ -4056,7 +4066,7 @@ test("arm outcome: a no-task-id refusal yields acted:false AND names itself in s
 });
 
 test("arm outcome REGRESSION LOCK: an armed outcome still yields acted:true — the fix did not make everything stand down", async () => {
-  const deps = fakeDeps({ arm: () => "armed" });
+  const deps = fakeDeps({ arm: () => "armed", ledgerPath: withVerdicts(ledgerPath(), mergeablePr()) });
   await runSweep([mergeablePr()], deps, DEFAULT_SWEEP_POLICY);
 
   const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
@@ -4067,7 +4077,7 @@ test("arm outcome REGRESSION LOCK: an armed outcome still yields acted:true — 
 test("arm outcome: a PR that stood down on one pass is RETRIED on the next, not deduped forever", async () => {
   // PASS 1 — the arm refuses. This is the permanence half of the bug: the old code recorded
   // acted:true here, which seeded prior.armed and deduped the PR on every later pass.
-  const first = fakeDeps({ arm: () => "no-task-id" });
+  const first = fakeDeps({ arm: () => "no-task-id", ledgerPath: withVerdicts(ledgerPath(), mergeablePr()) });
   await runSweep([mergeablePr()], first, DEFAULT_SWEEP_POLICY);
   const firstDisposed = readLedgerLines(first.ledgerPath).filter((l) => l.step === "sweep.disposed");
   assert.equal(firstDisposed[0].acted, false, "pass 1 stood down");
@@ -4093,7 +4103,7 @@ test("arm outcome: a PR that stood down on one pass is RETRIED on the next, not 
 
 test("arm outcome: a NEW head sha re-earns an arm attempt even after a prior success on the old sha", async () => {
   // PASS 1 — a real arm on the original sha, recorded acted:true.
-  const first = fakeDeps({ arm: () => "armed" });
+  const first = fakeDeps({ arm: () => "armed", ledgerPath: withVerdicts(ledgerPath(), mergeablePr()) });
   await runSweep([mergeablePr()], first, DEFAULT_SWEEP_POLICY);
   assert.equal(
     readLedgerLines(first.ledgerPath).filter((l) => l.step === "sweep.disposed")[0].acted,
@@ -4106,6 +4116,7 @@ test("arm outcome: a NEW head sha re-earns an arm attempt even after a prior suc
   const calls: string[] = [];
   const movedHead = mergeablePr();
   movedHead.headSha = "newsha0000";
+  withVerdicts(first.ledgerPath, movedHead);
   const second = fakeDeps({
     ledgerPath: first.ledgerPath,
     arm: (p) => {
@@ -4124,7 +4135,7 @@ test("arm outcome: a NEW head sha re-earns an arm attempt even after a prior suc
 // `stand_down_reason` keeps its human sentence unchanged; `arm_outcome` is the new sibling.
 
 test("sweep arm outcome: the disposed row carries the outcome as a field and not as prose", async () => {
-  const deps = fakeDeps({ arm: () => "no-task-id" });
+  const deps = fakeDeps({ arm: () => "no-task-id", ledgerPath: withVerdicts(ledgerPath(), mergeablePr()) });
   await runSweep([mergeablePr()], deps, DEFAULT_SWEEP_POLICY);
 
   const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
@@ -4140,7 +4151,7 @@ test("sweep arm outcome: the disposed row carries the outcome as a field and not
 });
 
 test("sweep arm outcome: the field is readable without parsing a sentence", async () => {
-  const deps = fakeDeps({ arm: () => "ledger-refused" });
+  const deps = fakeDeps({ arm: () => "ledger-refused", ledgerPath: withVerdicts(ledgerPath(), mergeablePr()) });
   await runSweep([mergeablePr()], deps, DEFAULT_SWEEP_POLICY);
 
   const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");
@@ -4167,7 +4178,7 @@ test("sweep arm outcome: a disposal with no arm attempt carries no outcome field
 });
 
 test("sweep arm outcome: the sentence and the field agree on what happened", async () => {
-  const deps = fakeDeps({ arm: () => "head-unavailable" });
+  const deps = fakeDeps({ arm: () => "head-unavailable", ledgerPath: withVerdicts(ledgerPath(), mergeablePr()) });
   await runSweep([mergeablePr()], deps, DEFAULT_SWEEP_POLICY);
 
   const disposed = readLedgerLines(deps.ledgerPath).filter((l) => l.step === "sweep.disposed");

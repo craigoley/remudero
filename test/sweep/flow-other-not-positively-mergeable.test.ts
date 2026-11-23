@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -54,6 +54,8 @@ test("W1-T9408: flow-other-not-positively-mergeable clears without a person", as
   assert.deepEqual(effects, ["recover-ci"], "a fresh head waits for CI without another push");
   await runSweep([{ ...recovered, checksState: "green" }], deps);
   assert.deepEqual(effects, ["recover-ci", "review"]);
+  appendFileSync(deps.ledgerPath, JSON.stringify({ ts: new Date(NOW).toISOString(), run_id: "REVIEW", task_id: recovered.taskId,
+    step: "review.posted", pr_url: recovered.prUrl, head_sha: recovered.headSha, capped: false, plan_only: false }) + "\n");
   await runSweep([{ ...recovered, checksState: "green", reviewState: "success" }], deps);
   assert.deepEqual(effects, ["recover-ci", "review", "arm"]);
 });

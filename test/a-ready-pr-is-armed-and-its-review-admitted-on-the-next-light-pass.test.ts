@@ -105,6 +105,16 @@ function disposed(deps: SweepDeps, prNumber: number): Record<string, unknown> | 
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+/** W1-T14317: the live review verdict an arming head needs, so the arm decision never reads the history. */
+function seedVerdict(deps: SweepDeps, ...prs: OpenPrView[]): void {
+  for (const pr of prs) {
+    appendLedger(deps.ledgerPath, {
+      run_id: "R", task_id: String(pr.taskId), step: "review.posted", pr_url: pr.prUrl, head_sha: pr.headSha,
+      state: "success", capped: false, plan_only: false,
+    });
+  }
+}
+
 // ── (1) the arm ──────────────────────────────────────────────────────────────────────────────────
 
 test("lightPassActionable admits mergeable only when the ordinary light pass says so", () => {
@@ -119,6 +129,7 @@ test("lightPassActionable admits mergeable only when the ordinary light pass say
 
 test("a light pass arms a green, reviewed, mergeable code PR and names the light surface on its row", async () => {
   const h = harness();
+  seedVerdict(h.deps, readyPr(9101));
   await runSweepLightPass([readyPr(9101)], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.armed, [{ pr: 9101 }], "armed once, through deps.arm");
   const row = disposed(h.deps, 9101);
@@ -169,6 +180,7 @@ test("a handed-off head is judged by the W1-T5403 risk judge before a light pass
     handedOffHeadJudgments: handedOffHeadJudgmentPool(),
   });
   const pr = readyPr(9105);
+  seedVerdict(escalating.deps, pr);
   appendLedger(escalating.deps.ledgerPath, {
     run_id: "R", task_id: String(pr.taskId), step: "verdict", verdict: "handed_off", pr_url: pr.prUrl, reason: "pr_open_yield",
   });
@@ -211,11 +223,13 @@ test("the armed-idle completion stays on the full pass: a light pass never attem
   });
   const light = harness();
   seed(light.deps);
+  seedVerdict(light.deps, pr);
   await runSweepLightPass([pr], light.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(light.armed, [], "no guarded completion from a 60-second pass");
 
   const full = harness({ actionable: undefined });
   seed(full.deps);
+  seedVerdict(full.deps, pr);
   await runSweep([pr], full.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(full.armed, [{ pr: 9109, mode: "armed-idle" }], "control: the full pass completes it");
 });
@@ -228,6 +242,7 @@ test("a light pass reads the live head for its arm and stands down when the head
       return p.prNumber === 9110 ? "movedsha" : p.headSha;
     },
   });
+  seedVerdict(h.deps, readyPr(9110), readyPr(9111));
   await runSweepLightPass(
     [readyPr(9110), readyPr(9111), eligiblePr(9112, "2026-10-05T17:00:00Z")],
     h.deps,
@@ -244,6 +259,7 @@ test("one plan PR direct-merges per light pass (W1-T5901) while a code PR beside
   const code = readyPr(9113);
   const firstPlan = readyPr(9114, { isPlanFiling: true });
   const secondPlan = readyPr(9115, { isPlanFiling: true });
+  seedVerdict(h.deps, code, firstPlan, secondPlan);
   await runSweepLightPass([code, firstPlan, secondPlan], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.armed.map((a) => a.pr).sort(), [9113, 9114], "the code PR and ONE plan PR");
   assert.equal(disposed(h.deps, 9115)?.acted, false);
@@ -261,6 +277,7 @@ test("two passes never arm one head at once: the second names the arm in flight"
     },
   });
   const pr = readyPr(9116);
+  seedVerdict(light.deps, pr);
   const lightPass = runSweepLightPass([pr], light.deps, DEFAULT_SWEEP_POLICY);
   for (let i = 0; i < 100 && light.armed.length === 0; i++) await settle();
   assert.equal(light.armed.length, 1, "precondition: the light arm is in flight");
@@ -286,6 +303,7 @@ test("a throwing arm releases its in-flight claim, so the next pass arms", async
     },
   });
   const pr = readyPr(9117);
+  seedVerdict(h.deps, pr);
   await runSweepLightPass([pr], h.deps, DEFAULT_SWEEP_POLICY);
   assert.match(String(disposed(h.deps, 9117)?.action_error), /gh: 502/);
   await runSweepLightPass([pr], h.deps, DEFAULT_SWEEP_POLICY);
@@ -295,6 +313,7 @@ test("a throwing arm releases its in-flight claim, so the next pass arms", async
 
 test("a full pass arms exactly as before: no surface field and the same outcome", async () => {
   const h = harness({ actionable: undefined });
+  seedVerdict(h.deps, readyPr(9118));
   await runSweep([readyPr(9118)], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.armed, [{ pr: 9118 }]);
   const row = disposed(h.deps, 9118);

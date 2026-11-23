@@ -92,7 +92,9 @@ test("W1-T2789: an exhausted red PR with an exact newer-base path refreshes befo
   });
   assert.equal(classifyRedCause(stale, [stale, green]), "in-diff", "the mixed cohort must defeat the cohort-wide base-caused shortcut");
 
-  const result = await sweep([stale, green], { staleGate: true });
+  // W1-T14317: the green PR's live verdict for its head; with no readable verdict history the sweep never arms.
+  const result = await sweep([stale, green], { staleGate: true, prior: [{ task_id: green.taskId, step: "review.posted",
+    pr_url: green.prUrl, head_sha: green.headSha, capped: false, plan_only: false }] });
 
   assert.deepEqual(result.updated, [9100], "the older end-of-pass update lane must not write the same stale snapshot twice");
   assert.deepEqual(result.escalated, [], "the accepted refresh replaces this pass's exhausted escalation");

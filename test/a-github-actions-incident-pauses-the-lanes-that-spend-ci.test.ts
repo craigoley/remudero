@@ -371,7 +371,11 @@ test("a red with real test-failure evidence is handled as before during the inci
   const real = realFailurePr();
   const mixed = cancelledPr({ prNumber: 9416, prUrl: "https://github.com/craigoley/remudero/pull/9416", headSha: "beef9416",
     ciFailures: [...(cancelledPr().ciFailures ?? []), ...(real.ciFailures ?? [])], redRequiredChecks: ["test (3/8)", "test (5/8)"] });
-  await runSweep([real, mixed, greenPr()], h.deps, DEFAULT_SWEEP_POLICY);
+  const green = greenPr();
+  // W1-T14317: the green PR's live verdict for its head; with no readable verdict history the sweep never arms.
+  appendLedger(path, { run_id: "REVIEW-9420", task_id: green.taskId!, step: "review.posted", pr_url: green.prUrl,
+    head_sha: green.headSha, capped: false, plan_only: false });
+  await runSweep([real, mixed, green], h.deps, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(h.fixed.map((f) => f.pr), [9415, 9416], "the ordinary fix rung, a cancellation beside a real failure included");
   assert.deepEqual(h.armed, [9420], "arming green PRs continues");
   assert.equal(rows(path, ACTIONS_INCIDENT_HOLD_STEP).length, 0);

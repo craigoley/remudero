@@ -1562,7 +1562,7 @@ import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, typ
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount, type Mounts } from "./lib/mounts.js";
 import { runFixSelfCheckWith, type FixSelfCheckRunArgs } from "./lib/fix-self-check.js";
-import { resolveMountExplorationDispatch as exploreMount } from "./lib/mount-exploration.js";
+import { loadMountHeadroomCells, resolveMountExplorationDispatch as exploreMount } from "./lib/mount-exploration.js";
 import {
   RULING_JUDGED_STEP,
   judgeRulingRisk,
@@ -2483,8 +2483,25 @@ export function buildReviewerHealthRoute(
   const readRows = (cursor: Parameters<typeof readReviewerHealthRows>[1]) => readReviewerHealthRows(dirname(ledgerPath), cursor);
   const healthLog = (step: string, extra: Record<string, unknown> = {}) =>
     appendLedger(ledgerPath, { run_id: runId, task_id: "REVIEWER-HEALTH", step, lane: "review", ...extra });
-  const { cut, remove } = healedReviewerTreeTools(repoDir, tree.worktreeRoot,
+  const { cut: cutShared, remove } = healedReviewerTreeTools(repoDir, tree.worktreeRoot,
     (prefix, sha) => prepareFreshOriginMainTree(repoDir, tree, prefix, sha));
+  const cut = async (prefix: string, sha: string): Promise<string> => {
+    try {
+      return await cutShared(prefix, sha);
+    } catch (error) {
+      // A registered checkout can be locked against recovery. Build from the same main on a sibling.
+      if (!(error instanceof UnprovenFreshTreeError)) throw error;
+      const path = perAttemptTreePath(tree, prefix, sha);
+      tree.addWorktree(repoDir, path, sha);
+      try {
+        makeTreeRunnable(repoDir, tree, prefix, path);
+        return path;
+      } catch (preparationError) {
+        await removePerAttemptTree(repoDir, tree, path);
+        throw preparationError;
+      }
+    }
+  };
   return async (prArg, rest, reviewDeps, normal) => {
     // An unreadable origin/main still ingests; no current reviewer is judged this call.
     const originMainSha = await git(["rev-parse", "origin/main"]).then((text) => text.trim(), () => null);
@@ -34247,14 +34264,11 @@ export async function runMountRecommenderRung(
     }
     writeFeedbackDocketMarker(markerPath, { lastFireIso: now.toISOString() });
 
-    let buildMountHeadroomSweep = deps.buildMountHeadroomSweep;
-    if (!buildMountHeadroomSweep) {
-      const scriptUrl = pathToFileURL(join(root, "scripts", "mount-headroom-sweep.mjs")).href;
-      ({ buildMountHeadroomSweep } = (await import(scriptUrl)) as {
-        buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
-      });
-    }
-    const sweep = buildMountHeadroomSweep(stateDir);
+    // W1-T13791's loader, not a plain import(): this rung runs in the bundled run child, which has no tsx loader, and
+    // the sweep imports src/*.ts that Node's strip-only mode refuses (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX).
+    const sweep = deps.buildMountHeadroomSweep
+      ? deps.buildMountHeadroomSweep(stateDir)
+      : { cells: await loadMountHeadroomCells(root, stateDir) };
     const mounts = loadMounts(mountsPath(root));
     // Derive the objective from the SAME sanctioned environment boundary a real worker crosses:
     // API only when config opts in AND the key is materially present; otherwise subscription.

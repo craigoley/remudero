@@ -25,8 +25,15 @@ function facts(over: Partial<ArmReprobeFacts> = {}): ArmReprobeFacts {
   };
 }
 
+/** W1-T14317: the live review.posted verdict for the head, which the sweep needs to arm. */
+function verdict() {
+  return { ts: new Date(now - 60_000).toISOString(), run_id: "REVIEW", task_id: pr.taskId!, step: "review.posted",
+    pr_url: pr.prUrl, head_sha: pr.headSha, capped: false, plan_only: false };
+}
+
 function fixture() {
   const ledgerPath = join(mkdtempSync(join(tmpdir(), "rmd-failed-arm-")), "ledger.ndjson");
+  appendLedger(ledgerPath, verdict());
   let current = facts({ mergeable: null, mergeableState: "unknown", reviewPublished: false });
   let calls = 0;
   const deps: SweepDeps = {
@@ -77,7 +84,7 @@ test("changed attributable facts reopen one failed arm and survive restart", asy
   assert.equal(attempts[1].arm_failure_class, "unknown");
   assert.ok(attempts[1].arm_reprobe_previous_failure);
   assert.ok(attempts[1].arm_evidence_fingerprint);
-  writeFileSync(f.ledgerPath, JSON.stringify(attempts[0]) + "\n");
+  writeFileSync(f.ledgerPath, JSON.stringify(verdict()) + "\n" + JSON.stringify(attempts[0]) + "\n");
   await runSweep([pr], { ...f.deps, runId: "after-rotation" });
   assert.equal(f.calls(), 3, "durable evidence receipts survive loss of a later live ledger row");
 });

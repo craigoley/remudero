@@ -138,6 +138,11 @@ function harness(
   pool: sweepModule.HandedOffHeadJudgmentPool,
 ): Harness {
   const armed: string[] = [];
+  // W1-T14317: each handed-off head carries its live review verdict, so the arm decision never reads the history.
+  for (const row of lines.filter((l) => l.verdict === "handed_off")) {
+    lines.push({ ts: "2026-10-04T10:30:00.000Z", run_id: "REVIEW-5523", task_id: row.task_id, step: "review.posted",
+      pr_url: row.pr_url, head_sha: row.head_sha, capped: false, plan_only: false });
+  }
   const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t5523-`));
   const ledgerPath = join(dir, "ledger.ndjson");
   const log = (step: string, extra: Record<string, unknown> = {}) => {
