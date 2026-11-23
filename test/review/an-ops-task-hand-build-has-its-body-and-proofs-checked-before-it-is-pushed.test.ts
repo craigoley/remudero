@@ -65,11 +65,12 @@ function fixture(t: TestContext, publicPlan: string) {
     return spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), join(REPO_ROOT, entry), ...args], {
       cwd: repo.dir,
       env: {
-        PATH: `${shim.dir}:${process.env.PATH}`, HOME: instance, LANG: "C", TMPDIR: tmpdir(),
+        PATH: `${shim.dir}:${process.env.PATH}`, HOME: instance, LANG: "C", TMPDIR: tmpdir(), GH_HOST: "github.invalid",
         RMD_GH_COOLDOWN_S: "0",
+        RMD_GH_SHARED_READ_GAP_MS: "0",
         NODE_V8_COVERAGE: process.env.NODE_V8_COVERAGE,
       },
-      encoding: "utf8", timeout: 30_000,
+      encoding: "utf8", timeout: 60_000,
     });
   }
 
