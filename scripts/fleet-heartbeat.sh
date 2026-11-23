@@ -514,40 +514,11 @@ if [ "$LEDGER_STATE" = "ok" ]; then
   fi
 fi
 
-# ── probe: deploy-supervisor liveness, the max ts over the `deploy.` prefix (W1-T2349) ───────────
-# THE GAP THIS CLOSES. The daemon probe above answers "is the daemon alive"; nothing until now
-# answered "is the thing that ADVANCES the daemon's code alive" — the deploy-supervisor went
-# 7h26m overdue on the mini with nothing off-host reporting it, because every other beat field
-# (daemon liveness, the install verdict, the restart budget, three shas) can read perfectly
-# healthy while the deploy cycle itself has stopped ticking.
-#
-# WHY THIS MIRRORS THE `daemon.` PROBE ABOVE, STEP FOR STEP. `runDeployCycle`
-# (src/lib/deployer.ts) has no single ledger step that fires unconditionally either —
-# `deploy.skip` on a same-head no-op, `deploy.not_idle` / `deploy.idle_ceiling_forced` while the
-# idle gate defers, `deploy.abort_dirty_tree`, `deploy.pulled`, `deploy.dry_run`,
-# `deploy.kickstart` -> `deploy.ok` / `deploy.unhealthy_rollback` on a real cycle — but RE-READING
-# THAT FUNCTION TOP TO BOTTOM (2026-08-27), every `return` in it is preceded by a `deps.log("deploy…")`
-# call on the same branch, so every tick logs at least one `deploy.`-prefixed line before the next.
-# That includes a DEFERRED tick: `deploy.not_idle` fires every time the idle gate holds, so the
-# 30-minute `DEPLOY_IDLE_DEFER_CEILING_MS` (src/lib/deployer.ts) bounds how long a deploy can be
-# HELD, never how long the ledger can go quiet, and does not enter the threshold below. The MAX ts
-# over the prefix is therefore the same always-advancing signal the `daemon.` probe already reads,
-# over the supervisor's own ledger writes rather than the daemon's.
-#
-# THE FIELD NAMES MIRROR `daemon_*` ONE-FOR-ONE, WITH ONE DELIBERATE DIFFERENCE. Same
-# `sort | tail -n 1` idiom, same `epoch_of`/`human_age` reuse, same never-touch-a-new-file
-# discipline. But an ABSENT reading here does NOT reuse the `daemon_last_age_s=unknown` shape:
-# it follows `restart_count`/`image_build_sha` instead and OMITS `supervisor_last_age_s` from the
-# payload entirely rather than writing the string "unknown" into a numeric-shaped field — the
-# same absent-never-reassuring law, applied consistently.
-#
-# A HOST WITH NO `deploy.` LINE EVER IS NOT A DEFECT IN THIS PROBE. The container host (W1-T483)
-# advances its tree from `deploy/entrypoint.sh` under docker, with no launchd and no
-# deploy-supervisor unit, so its ledger may legitimately carry zero `deploy.` lines forever. This
-# probe cannot and does not decide "never installed" vs "went quiet" — it publishes the same
-# `supervisor_verdict=unknown` either way, with the reason in `supervisor_source`, and leaves the
-# never-present-is-silent judgment to the watcher, which sees every beat over time and a branch
-# list that already knows which hosts run a deploy-supervisor at all.
+# ── probe: deploy-supervisor liveness (W1-T2349, W1-T13388) ──────────────────────────────────
+# A launchd cycle always leaves a deploy.* row. The host watchdog can finish a healthy tick before
+# deploy-run, or spend a long time in its oneshot service. Keep the ledger age in the payload and
+# consult the watchdog when the row is old. With no deploy row the verdict is unknown and the age
+# field is absent, as on hosts that have never run a deploy cycle.
 SUPERVISOR_LAST_TS=""
 SUPERVISOR_LAST_STEP=""
 SUPERVISOR_SOURCE="ledger"
@@ -568,19 +539,66 @@ SUPERVISOR_LAST_EPOCH="$(epoch_of "$SUPERVISOR_LAST_TS")"
 SUPERVISOR_AGE_S=""
 if [ -n "$SUPERVISOR_LAST_EPOCH" ]; then SUPERVISOR_AGE_S="$((NOW_EPOCH - SUPERVISOR_LAST_EPOCH))"; fi
 
-# THE THRESHOLD IS DERIVED AND GENEROUS (design note v). The installed supervisor unit's
-# `StartInterval` is `DEFAULT_SUPERVISOR_INTERVAL_S = 120` (src/lib/launchd.ts) — every tick runs
-# ONE `rmd deploy-run`, i.e. one `runDeployCycle`, i.e. at least one `deploy.*` log line, whether
-# or not that cycle actually deployed anything. This carries a GENEROUS CONSTANT rather than
-# shelling `rmd status` or parsing the installed plist — the beat may not shell an `rmd` verb (see
-# this script's own header) and a plist path is host-specific and absent entirely on the container
-# host. 1200s is 10x the 120s interval, the SAME multiple `DAEMON_STALE_AFTER_S` already uses
-# against `DEFAULT_POLL_INTERVAL_MS` (600s / 60s) above, and against the 7h26m (26760s) failure
-# that filed this task, a 1200s bound still catches it more than 20x over.
+HEARTBEAT_SYSTEMCTL="${RMD_HEARTBEAT_SYSTEMCTL:-systemctl}"
+
+# systemctl show renders timestamps as "Mon YYYY-MM-DD HH:MM:SS UTC" and finite timespans as
+# space-separated terms such as "1h 15min" or "4.500000s". Compare in seconds like the ledger.
+watchdog_within_window() {
+  local stamp="$1" span="$2" epoch
+  [[ "$stamp" == ???\ ????-??-??\ ??:??:??\ UTC ]] || return 1
+  [[ "$span" != *$'\n'* ]] || return 1
+  stamp="${stamp#* }"
+  stamp="${stamp% UTC}"
+  epoch="$(epoch_of "${stamp/ /T}Z")"
+  [ -n "$epoch" ] && [ "$epoch" -le "$NOW_EPOCH" ] || return 1
+  LC_ALL=C awk -v age="$((NOW_EPOCH - epoch))" -v span="$span" 'BEGIN {
+    scale["y"] = 31557600; scale["month"] = 2629800; scale["w"] = 604800
+    scale["d"] = 86400; scale["h"] = 3600; scale["min"] = 60
+    scale["s"] = 1; scale["ms"] = 0.001; scale["us"] = 0.000001
+    count = split(span, terms, " ")
+    for (i = 1; i <= count; i++) {
+      if (!match(terms[i], /^[0-9]+(\.[0-9]+)?/)) exit 1
+      unit = substr(terms[i], RLENGTH + 1)
+      if (!(unit in scale)) exit 1
+      limit += substr(terms[i], 1, RLENGTH) * scale[unit]
+    }
+    exit !(limit > 0 && age <= limit)
+  }'
+}
+
+watchdog_supervisor_source() {
+  local timer=rmd-fleet-watchdog.timer service=rmd-fleet-watchdog.service
+  local properties trigger interval state substate started timeout
+  command -v "$HEARTBEAT_SYSTEMCTL" >/dev/null 2>&1 || return 1
+  if properties="$(LC_ALL=C TZ=UTC "$HEARTBEAT_SYSTEMCTL" show "$timer" \
+      -p ActiveState -p LastTriggerUSec -p TimersMonotonic 2>/dev/null </dev/null)"; then
+    state="$(sed -n 's/^ActiveState=//p' <<< "$properties")"
+    trigger="$(sed -n 's/^LastTriggerUSec=//p' <<< "$properties")"
+    interval="$(sed -n 's/^TimersMonotonic={ OnUnitActiveUSec=\([^;]*\) ;.*/\1/p' <<< "$properties")"
+    if [ "$state" = active ] && watchdog_within_window "$trigger" "$interval"; then
+      printf '%s LastTriggerUSec=%s within OnUnitActiveUSec=%s' "$timer" "$trigger" "$interval"
+      return 0
+    fi
+  fi
+  properties="$(LC_ALL=C TZ=UTC "$HEARTBEAT_SYSTEMCTL" show "$service" \
+    -p ActiveState -p SubState -p ExecMainStartTimestamp -p TimeoutStartUSec 2>/dev/null </dev/null)" || return 1
+  state="$(sed -n 's/^ActiveState=//p' <<< "$properties")"
+  substate="$(sed -n 's/^SubState=//p' <<< "$properties")"
+  case "$state:$substate" in activating:start|active:running) ;; *) return 1 ;; esac
+  started="$(sed -n 's/^ExecMainStartTimestamp=//p' <<< "$properties")"
+  timeout="$(sed -n 's/^TimeoutStartUSec=//p' <<< "$properties")"
+  watchdog_within_window "$started" "$timeout" || return 1
+  printf '%s ExecMainStartTimestamp=%s within TimeoutStartUSec=%s' "$service" "$started" "$timeout"
+}
+
+# Ledger fallback for launchd's 120s cycle, allowing the same 10x margin as the daemon probe.
 SUPERVISOR_STALE_AFTER_S=1200
 if [ -z "$SUPERVISOR_AGE_S" ]; then
   SUPERVISOR_VERDICT="unknown"
 elif [ "$SUPERVISOR_AGE_S" -le "$SUPERVISOR_STALE_AFTER_S" ]; then
+  SUPERVISOR_VERDICT="live"
+elif watchdog_source="$(watchdog_supervisor_source)"; then
+  SUPERVISOR_SOURCE="$watchdog_source"
   SUPERVISOR_VERDICT="live"
 else
   SUPERVISOR_VERDICT="STALE — last deploy cycle $(human_age "$SUPERVISOR_AGE_S") ago"
@@ -1809,13 +1827,12 @@ fi
 # INCOMPLETE (no summary line, and not running, or already running at the previous beat) and FAILED
 # alarm in fleet-heartbeat-watch.yml; a host with neither log nor pass reads unknown, silently.
 REAPER_LOG="${RMD_SESSION_REAPER_LOG:-${HOME}/session-reaper.log}"
-REAPER_SYSTEMCTL="${RMD_HEARTBEAT_SYSTEMCTL:-systemctl}"
 REAPER_VERDICT=unknown
 reaper_pass="$(tail -c 1048576 "$REAPER_LOG" 2>/dev/null | grep -E '^(rmd-session-reaper: (pass|sessions) |REFUSE )' |
   awk '/^rmd-session-reaper: pass / { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }')"
 reaper_unit=""
-if command -v "$REAPER_SYSTEMCTL" >/dev/null 2>&1; then
-  reaper_unit="$("$REAPER_SYSTEMCTL" show rmd-session-reaper.service -p ActiveState -p Result 2>/dev/null </dev/null)"
+if command -v "$HEARTBEAT_SYSTEMCTL" >/dev/null 2>&1; then
+  reaper_unit="$("$HEARTBEAT_SYSTEMCTL" show rmd-session-reaper.service -p ActiveState -p Result 2>/dev/null </dev/null)"
 fi
 reaper_active="$(printf '%s\n' "$reaper_unit" | sed -n 's/^ActiveState=//p')"
 reaper_result="$(printf '%s\n' "$reaper_unit" | sed -n 's/^Result=//p')"
