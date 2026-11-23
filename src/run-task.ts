@@ -25566,22 +25566,23 @@ export interface HeadroomRecoveryCandidate {
 
 /**
  * Pure builder, mirroring `buildEscalationReconcileCandidates`'s own "read the ledger, hand back
- * candidates" shape: one {@link HeadroomRecoveryCandidate} per still-OPEN headroom-reserve
- * escalation (`openIssueUrls`, the caller's own live `listOpen` read — never re-read here) whose
- * `daemon.headroom_reserve.escalated` row names a `window` that has SINCE recovered. An escalated
- * row missing `window`/`resets_at` (every row written before this task) or whose `issue_url` is not
- * in `openIssueUrls` (never delivered, or already closed) yields no candidate.
+ * candidates" shape: delivered headroom-reserve escalations with a later recovery reading for
+ * their window. With a live `openIssueUrls` snapshot, only open issues qualify. Without one,
+ * return potential candidates with no recorded retirement so the caller can decide whether to list.
  */
 export function buildHeadroomRecoveryCandidates(
   ledgerPath: string,
-  openIssueUrls: ReadonlySet<string>,
+  openIssueUrls?: ReadonlySet<string>,
 ): HeadroomRecoveryCandidate[] {
   const lines = readLedgerLines(ledgerPath); // ledger-read-intent: live — this scan wants the newest rows only.
+  const retiredUrls = new Set(openIssueUrls === undefined
+    ? lines.filter((line) => line.step === "daemon.headroom_reserve.retired").map((line) => line.issue_url)
+    : []);
   const candidates: HeadroomRecoveryCandidate[] = [];
   for (const line of lines) {
     if (line.step !== "daemon.headroom_reserve.escalated") continue;
     const issueUrl = typeof line.issue_url === "string" ? line.issue_url : undefined;
-    if (!issueUrl || !openIssueUrls.has(issueUrl)) continue; // undelivered, or already closed
+    if (!issueUrl || retiredUrls.has(issueUrl) || (openIssueUrls && !openIssueUrls.has(issueUrl))) continue;
     const window = typeof line.window === "string" ? line.window : undefined;
     const resetsAt = typeof line.resets_at === "string" ? line.resets_at : undefined;
     const escalatedTs = typeof line.ts === "string" ? line.ts : undefined;
@@ -25629,12 +25630,9 @@ export function renderHeadroomRecoveryCloseComment(c: HeadroomRecoveryCandidate)
 
 /**
  * Reconcile OPEN headroom-reserve escalations against observed recovery — the retirement leg
- * `escalateHeadroomReserve` never had. Lists open needs-human/fleet-notice issues via the SAME
- * `listRetirableEscalationIssues` the task-referent reconciler uses (never a second listing
- * mechanism), builds candidates from the ledger, and closes each with a citation. Best-effort and
- * non-fatal throughout, mirroring `runEscalationReconcile`'s per-item throw containment: a failed
- * issue-list read or a failed close is logged and this cycle simply retires fewer, never none of
- * the reconciler's other rungs.
+ * `escalateHeadroomReserve` never had. Build potential candidates from the ledger first, then use
+ * the shared listing to confirm they are still open under needs-human or fleet-notice. A failed
+ * issue-list read or close is logged and the other reconciliation rungs can continue.
  */
 export async function retireRecoveredHeadroomEscalations(
   ledgerPath: string,
@@ -25642,15 +25640,18 @@ export async function retireRecoveredHeadroomEscalations(
   ctx: { issues: AsyncIssueGateway; log?: (step: string, extra?: Record<string, unknown>) => void; dryRun?: boolean },
 ): Promise<{ retired: number }> {
   const log = ctx.log ?? (() => {});
-  let open: OpenIssue[];
-  try {
-    open = await listRetirableEscalationIssuesAsync(ctx.issues);
-  } catch (e) {
-    log("sweep.headroom_recovery.list_failed", { error: String((e as Error)?.message ?? e) });
-    return { retired: 0 };
+  let candidates = buildHeadroomRecoveryCandidates(ledgerPath);
+  if (candidates.length > 0) {
+    let open: OpenIssue[];
+    try {
+      open = await listRetirableEscalationIssuesAsync(ctx.issues);
+    } catch (e) {
+      log("sweep.headroom_recovery.list_failed", { error: String((e as Error)?.message ?? e) });
+      return { retired: 0 };
+    }
+    const openUrls = new Set(open.map((issue) => issue.url));
+    candidates = candidates.filter((candidate) => openUrls.has(candidate.issueUrl));
   }
-  const openUrls = new Set(open.map((i) => i.url));
-  const candidates = buildHeadroomRecoveryCandidates(ledgerPath, openUrls);
   let retired = 0;
   for (const c of candidates) {
     // dryRun leaves no trace — mirrors runEscalationReconcile's own "still counts, never acts" preview.
