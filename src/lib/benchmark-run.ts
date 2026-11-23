@@ -535,10 +535,7 @@ export function unreportedAttemptCounts(reason: string): AttemptCounts {
     ...attemptCount("cached_input_tokens", undefined, reason) };
 }
 
-/** W1-T12151: the turn count, a Codex attempt's model steps, and input tokens split into uncached and cached with one
- *  meaning for every provider: `cached_input_tokens` were read from the provider's prompt cache, `uncached_input_tokens`
- *  are every other input token. Codex reports input with cached inside, so uncached is input minus cached; Claude reports
- *  them apart, so uncached is its input plus the tokens it wrote to the cache. The `tokens` object stays as it was. */
+/** W1-T12151: attempt counts. `tokens` remains unchanged for older readers. */
 function attemptCounts(result: WorkerResult, observedEnvelope: boolean, tokensObserved: boolean,
   usageState: string | undefined): AttemptCounts {
   const codex = result as WorkerResult & { modelSteps?: number };
@@ -549,8 +546,8 @@ function attemptCounts(result: WorkerResult, observedEnvelope: boolean, tokensOb
     : result.provider === "cash" ? "cash-input-token-split-differs-by-deployment-api"
       : usageState === "partial" ? "worker-token-usage-partial"
         : usageState === "unavailable" || !tokensObserved ? "worker-token-usage-unavailable" : undefined;
-  const { input, cacheRead, cacheCreation } = result.tokens;
-  const uncached = result.provider === "codex" ? input - cacheRead : input + cacheCreation;
+  const { input, cacheRead } = result.tokens;
+  const uncached = result.provider === "codex" ? input - cacheRead : input;
   return {
     ...attemptCount("turns", result.numTurns, turnGap),
     ...(result.provider === "codex"

@@ -175,9 +175,9 @@ interface CodexWorkerResult {
    * (see {@link codexServedModel}). Never the `--model` request echoed back. */
   servedModel?: string | null;
   servedModelReason?: string;
-  /** W1-T12151: the source that named {@link servedModel}; absent beside a null. */
+  /** Source of {@link servedModel}; absent beside a null. */
   servedModelSource?: CodexServedModelSource;
-  /** W1-T12151: model steps inside the attempt's turns ({@link ParsedCodexEvents.modelSteps}). */
+  /** Completed model-output and tool-call items. */
   modelSteps?: number;
   compactionEvents: [];
   compactionFailures: [];
@@ -2453,48 +2453,32 @@ export async function readCodexCapacity(config: Config, deps: CodexCapacityDeps 
   return persistence ? { ...selected, detail: [selected.detail, persistence].filter(Boolean).join("; ") } : selected;
 }
 
-/**
- * W1-T4650: WHY A CODEX ATTEMPT NAMES NO SERVED MODEL. The `exec --json` stream's events
- * (`thread.started`, `turn.*`, `item.*`, see {@link CodexJsonEvent}) carry no model id, so what
- * served the attempt is genuinely unreportable. Saying so by name keeps the row apart from one
- * that was never checked; `--model` is the REQUEST and is never echoed back as the served model.
- */
+/** Why the Codex stream did not name its served model. */
 export const CODEX_SERVED_MODEL_REASON =
   "codex exec --json names no model: its thread, turn and item events carry no model id";
 
-/**
- * W1-T13868: THE ONE PLACE `codex exec --json` NAMES A SERVED MODEL. Verified against the codex-rs source at
- * tag rust-v0.152.0 (the pinned CLI): the client reads the server's `openai-model` response header
- * (codex-api/src/sse/responses.rs) and, ONLY when it differs from the requested model, emits ModelReroute, which
- * exec projects as `item.completed` with `item: { type: "error", message: "model rerouted: <from> -> <to> (<reason>)" }`
- * (exec/src/event_processor_with_jsonl_output.rs). At most one per turn. A match is logged, never streamed, so
- * no reroute is NOT proof the request was served: it stays {@link CODEX_SERVED_MODEL_REASON}.
- */
+/** Codex emits this only when the server reroutes from the requested model. */
 export const CODEX_REROUTE_RE = /^model rerouted: (\S+) -> (\S+) \(/;
-/** Bounded like every retained codex field: a turn reroutes at most once, so more than this is not a real stream. */
+/** Maximum retained reroutes. */
 const CODEX_REROUTES_KEPT = 64;
 
-/** W1-T13868: the served model of a codex attempt, from its per-turn reroute targets. Any model name the stream
- * reported is recorded: the latest one, which served the turn that produced the attempt's final answer. With none,
- * `null` with {@link CODEX_SERVED_MODEL_REASON}, never the requested model. */
+/** Latest server reroute target, or a named gap. */
 export function codexServedModel(reroutes: readonly string[]): { servedModel: string | null; servedModelReason?: string } {
   const latest = reroutes.at(-1);
   return latest === undefined ? { servedModel: null, servedModelReason: CODEX_SERVED_MODEL_REASON } : { servedModel: latest };
 }
 
-/** W1-T12151: which source the Codex command wrote named the served model. The request's `--model` is never one. */
+/** Where the Codex served model was named. */
 export type CodexServedModelSource = "codex-exec-stream" | "codex-session-file";
-/** W1-T12151: BACKSTOP on the bytes read from a session file's tail; the latest turn is what names the model that answered,
- *  so a file past it still names one unless its final turn alone is larger. */
+/** Maximum session-file tail read. */
 export const CODEX_SESSION_FILE_MAX_BYTES = 16 * 1024 * 1024;
-/** W1-T12151: why a session file codex wrote for the thread named no model either. Absent file: {@link CODEX_SERVED_MODEL_REASON}. */
+/** Reasons a present session file cannot name a model. */
 export const CODEX_SESSION_SERVED_MODEL_REASONS = {
   unnamed: `${CODEX_SERVED_MODEL_REASON}, and the thread's session file has no turn_context model or model_reroute`,
   unreadable: `${CODEX_SERVED_MODEL_REASON}, and the thread's session file could not be read`,
 } as const;
 
-/** W1-T12151: how many of the newest `sessions/YYYY/MM/DD` day directories are searched for a thread's file. Codex creates
- *  the file the day the thread starts, so a fresh attempt's file is in the newest day, or the one before it across midnight. */
+/** Number of recent session days searched. */
 const CODEX_SESSION_DAYS_SEARCHED = 3;
 
 /** One directory's entries; `undefined` when it does not exist, `unreadable` for any other failure to list it. */
@@ -2505,9 +2489,7 @@ function listSessionDir(dir: string): string[] | undefined | "unreadable" {
   }
 }
 
-/** W1-T12151: `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl`, searched in the newest
- *  {@link CODEX_SESSION_DAYS_SEARCHED} day directories codex wrote, whatever clock or zone named them. A directory that
- *  exists but cannot be listed is `unreadable`, never read as no file. */
+/** Locate a thread's rollout file; distinguish absent from unreadable directories. */
 export function codexSessionFilePath(home: string,
   threadId: string): { state: "found"; path: string } | { state: "absent" } | { state: "unreadable" } {
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(threadId)) return { state: "absent" };
@@ -2534,8 +2516,7 @@ export function codexSessionFilePath(home: string,
   return unreadable ? { state: "unreadable" } : { state: "absent" };
 }
 
-/** W1-T12151: the latest model a codex session file names, from a `turn_context` record's `payload.model` (the model
- *  codex ran that turn with) or an `event_msg` `model_reroute` record's `payload.to_model` (the server's reroute). */
+/** Read the latest model named by a turn context or reroute record. */
 export function codexSessionFileModel(text: string): string | undefined {
   let latest: string | undefined;
   for (const line of text.split("\n")) {
@@ -2554,9 +2535,7 @@ export function codexSessionFileModel(text: string): string | undefined {
   return latest;
 }
 
-/** W1-T12151: the served model of a finished codex attempt and the source that named it. The `exec --json` stream speaks
- *  first (a reroute is the server's own word); else the session file codex wrote for the thread; else `null` beside the
- *  reason, never the requested model. */
+/** Resolve the served model from a reroute first, then the thread's session file. */
 export function codexAttemptServedModel(reroutes: readonly string[], home: string,
   threadId: string): { servedModel: string | null; servedModelReason?: string; servedModelSource?: CodexServedModelSource } {
   const stream = codexServedModel(reroutes);
@@ -2695,13 +2674,12 @@ export interface ParsedCodexEvents {
   completion: CodexCompletionEvidence;
   /** W1-T13868: each turn's reroute target, in order; present only when codex reported one. */
   reroutes?: string[];
-  /** W1-T12151: completed items that are model output or tool calls ({@link CODEX_MODEL_STEP_ITEM_TYPES}), every turn. */
+  /** Completed model-output and tool-call items across turns. */
   modelSteps: number;
   retentionLoss: CodexRetentionLoss;
 }
 
-/** W1-T12151: the `item.completed` item types that are a model step: a message, reasoning, or a tool call. One `exec` call
- *  is one turn however many of these it takes, so the turn count alone cannot compare a Codex attempt's work. */
+/** `item.completed` types counted as model steps. */
 export const CODEX_MODEL_STEP_ITEM_TYPES: ReadonlySet<string> = new Set([
   "agent_message", "reasoning", "command_execution", "file_change", "mcp_tool_call", "web_search",
 ]);

@@ -159,9 +159,9 @@ test("W1-T12151 criterion 3: every attempt row records uncached and cached input
   assert.equal(codex.cached_input_tokens, 60);
   assert.deepEqual(codex.tokens, { input: 100, output: 9, cacheRead: 60, cacheCreation: 0 }, "older readers' tokens are unchanged");
 
-  // Claude reports them apart: uncached is its input plus what it wrote to the cache, cached is what it read from it.
+  // Claude reports input and cache reads separately; cache creation is not included in uncached input.
   const claude = benchmarkWorkerAttemptResources(claudeResult());
-  assert.equal(claude.uncached_input_tokens, 15);
+  assert.equal(claude.uncached_input_tokens, 10);
   assert.equal(claude.cached_input_tokens, 50);
   assert.deepEqual(claude.tokens, { input: 10, output: 4, cacheRead: 50, cacheCreation: 5 });
 });
