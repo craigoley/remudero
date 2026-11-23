@@ -6128,7 +6128,7 @@ async function executeOpenWeightTool(
       } finally {
         if (args.check === "typecheck") {
           recordTypecheckPeak(row => appendLedger(ledgerPathFor(ledger.config), {
-            run_id: ledger.runId ?? "unattributed", task_id: ledger.taskId ?? "unattributed", ...row,
+            run_id: ledger.runId ?? "unattributed", task_id: ledger.taskId ?? "HARNESS", ...row,
           }), "bwrap", warm, observation, `${compilerOutput}\n${compilerStderr}`);
         }
         slot?.release();
@@ -7097,7 +7097,7 @@ async function spawnCodexWorkerInPrivateTemp(
         typeof event.item.aggregated_output !== "string") return;
     for (const row of readRelayedTypecheckPeaks(event.item.aggregated_output)) {
       recordTypecheckPeak(peak => appendLedger(ledgerPathFor(config), {
-        run_id: args.runId ?? "unattributed", task_id: args.taskId ?? "unattributed", ...peak, source: "codex_command",
+        run_id: args.runId ?? "unattributed", task_id: args.taskId ?? "HARNESS", ...peak, source: "codex_command",
       }), row.entry, row.warm, {
         peak: typeof row.peak_rss_bytes === "number" ? row.peak_rss_bytes : undefined,
         rechecked: row.rechecked_files,

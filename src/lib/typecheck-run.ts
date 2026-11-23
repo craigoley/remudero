@@ -21,7 +21,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
-import { appendLedger } from "./ledger.js";
+import { appendProducerLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { discoverLiveLedgerRoot } from "./live-write-guard.js";
 import { acquireTestSlot, readMemoryHeadroom, testSlotExecutionAllowed, type TestSlotLease, type TestSlotOptions } from "./test-slot.js";
@@ -76,7 +76,7 @@ export function typecheckPeakWriter(root: string): (row: TypecheckPeakRow) => vo
     const managed = !process.env.NODE_TEST_CONTEXT && basename(parent) === "worktrees" && existsSync(join(dirname(parent), "state"));
     const ledgerRoot = process.env.NODE_TEST_CONTEXT
       ? canonicalBuildInfo(root)?.root ?? root : managed ? dirname(parent) : discoverLiveLedgerRoot();
-    appendLedger(ledgerPathFor({ root: ledgerRoot }), { run_id: "unattributed", task_id: "unattributed", ...row });
+    appendProducerLedger(ledgerPathFor({ root: ledgerRoot }), "CLI", { run_id: "unattributed", ...row });
   };
 }
 

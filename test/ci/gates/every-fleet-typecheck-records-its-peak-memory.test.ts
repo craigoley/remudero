@@ -61,6 +61,7 @@ test("W1-T14143 criterion 1 — npm and preflight record each completed compiler
   const rows = peaks(repo.dir);
   assert.deepEqual(rows.map(row => [row.entry, row.warm]), [["npm", false], ["preflight", true]]);
   for (const row of rows) {
+    assert.equal(row.task_id, "CLI");
     if (process.platform === "linux") assert.ok(typeof row.peak_rss_bytes === "number" && row.peak_rss_bytes > 0);
     else assert.equal(row.peak_rss_bytes, "unknown");
     assert.equal(row.rechecked_files, undefined, "the installed tsc does not report a rechecked-file count");
@@ -87,6 +88,7 @@ test("W1-T14143 criterion 1 — merge-probe records after its compiler child clo
   assert.equal(result.outcome, "passes", JSON.stringify(result));
   const rows = peaks(repo.dir);
   assert.deepEqual(rows.map(row => [row.entry, row.warm]), [["merge-probe", false]]);
+  assert.equal(rows[0]?.task_id, "CLI");
   if (process.platform === "linux") assert.ok(typeof rows[0]?.peak_rss_bytes === "number" && rows[0].peak_rss_bytes > 0);
 });
 
@@ -127,8 +129,8 @@ test("W1-T14143 criterion 1 — bwrap's tool loop records both successful and fa
     },
   }, { root: dir, dailyCapUsd: 1, workerProviders: { enabled: ["openweight"], openweightEndpoint: "https://example.test/" } } as Config,
   { model: "gpt-oss-120b", effort: "low" });
-  assert.deepEqual(peaks(dir).map(row => [row.entry, row.warm, row.peak_rss_bytes, row.rechecked_files]), [
-    ["bwrap", false, 123456, 4], ["bwrap", true, "unknown", 0],
+  assert.deepEqual(peaks(dir).map(row => [row.task_id, row.entry, row.warm, row.peak_rss_bytes, row.rechecked_files]), [
+    ["HARNESS", "bwrap", false, 123456, 4], ["HARNESS", "bwrap", true, "unknown", 0],
   ]);
 });
 
