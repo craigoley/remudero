@@ -204,15 +204,6 @@ type Work<T> = () => Promise<T>;
 type WorkWrapper = <T>(work: Work<T>) => Promise<T>;
 const EMERGENCY_STATUS = "/v1/operator-agent/emergency/status";
 
-/** A runner `factor`× slower: after `work` finishes, spin this thread for (factor − 1)× the CPU the work itself took. */
-async function withCpuTax<T>(factor: number, work: Work<T>): Promise<T> {
-  const start = threadCpuMs();
-  const value = await work();
-  const until = start + (threadCpuMs() - start) * factor;
-  while (threadCpuMs() < until) { /* the tax */ }
-  return value;
-}
-
 /** The regression the relative bound must catch: decode and parse every archive in `dir` on this thread. */
 function rereadCorpus(dir: string): number {
   let rows = 0;
@@ -224,22 +215,20 @@ function rereadCorpus(dir: string): number {
   return rows;
 }
 
-/** Measure ROTATION_BASELINE_READS warm reads, land rotation `index` carrying stop `stopId`, then measure the read
- *  after it. `everyRead` wraps baseline and subject alike (a uniform tax); `subjectOnly` wraps the subject alone. */
+/** Measure the warm baseline, land a rotation, then measure the first read that sees its stop. */
 async function measureRotationRead(
   base: string,
   ledger: LedgerFixture,
   index: number,
   stopId: string,
-  everyRead: WorkWrapper = (work) => work(),
   subjectOnly: WorkWrapper = (work) => work(),
 ): Promise<{ baselineMs: number[]; subjectMs: number; stallMs: number; elapsedMs: number; activeStops: string[] }> {
   const baselineMs: number[] = [];
   for (let i = 0; i < ROTATION_BASELINE_READS; i++) {
-    baselineMs.push((await longestLoopStall(() => everyRead(() => read(base, EMERGENCY_STATUS)))).busyMs);
+    baselineMs.push((await longestLoopStall(() => read(base, EMERGENCY_STATUS))).busyMs);
   }
   writeLedger([], { dir: ledger.dir, rotations: [archive(index, [stopRow(stopId)])] });
-  const subject = await longestLoopStall(() => subjectOnly(() => everyRead(() => read(base, EMERGENCY_STATUS))));
+  const subject = await longestLoopStall(() => subjectOnly(() => read(base, EMERGENCY_STATUS)));
   const activeStops = (subject.value.active as Array<{ id: string }>).map((s) => s.id);
   assert.ok(activeStops.includes(stopId), `the new rotation's stop ${stopId} is active`);
   return { baselineMs, subjectMs: subject.busyMs, stallMs: subject.stallMs, elapsedMs: subject.elapsedMs, activeStops };
@@ -255,6 +244,12 @@ function judgeRotationRead(baselineMs: readonly number[], subjectMs: number): Ro
   const baselineMedianMs = Math.max(sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2, 0.001);
   const ratio = subjectMs / baselineMedianMs;
   return { baselineMedianMs, subjectMs, ratio, withinRatio: ratio <= ROTATION_READ_RATIO, underCeiling: subjectMs < ROTATION_READ_CEILING_MS };
+}
+
+function judgeSlowerRotationRead(baselineMs: readonly number[], subjectMs: number): RotationReadVerdict {
+  // The calibration and the slowdown use the same sample. A second rotation has its own CPU cost.
+  const factor = Math.max(2, Math.ceil((3 * RETIRED_FIXED_BUDGET_MS) / subjectMs));
+  return judgeRotationRead(baselineMs.map((ms) => ms * factor), subjectMs * factor);
 }
 
 function describeVerdict(v: RotationReadVerdict): string {
@@ -279,40 +274,54 @@ test("after a rotation lands the emergency status answers within budget and sees
 });
 
 test("W1-T6402: a rotation read is bounded by a same-run baseline, and a re-read of the corpus still fails", async (t) => {
-  const ledger = writeArchives(ARCHIVES);
+  // The preceding route test measures the healthy path. Use fixed measurements to check the bound's arithmetic.
+  const baselineMs = Array.from({ length: ROTATION_BASELINE_READS }, () => 2);
+  const subjectMs = 80;
+  const healthy = judgeRotationRead(baselineMs, subjectMs);
+  assert.ok(healthy.withinRatio && healthy.underCeiling, describeVerdict(healthy));
+  const taxed = judgeSlowerRotationRead(baselineMs, subjectMs);
+  assert.throws(
+    () => assertWallClockBound(taxed.subjectMs, RETIRED_FIXED_BUDGET_MS, "a healthy rotation on a slower runner"),
+    /WALL-CLOCK DEPENDENT/,
+  );
+  assert.ok(taxed.withinRatio && taxed.underCeiling, describeVerdict(taxed));
+  assert.equal(taxed.ratio, healthy.ratio, "the uniform CPU tax cancels against the same-run baseline");
+
+  // Include the two rotations previously added by the positive controls in the re-read workload.
+  const rereadRotation = ARCHIVES + 2;
+  const ledger = writeArchives(rereadRotation);
   await withDelegationService(ledger.path, async (base) => {
-    await read(base, "/v1/operator-agent/emergency/status");
-
-    // Positive control: a healthy post-rotation read, untaxed, passes the relative bound and the ceiling.
-    const healthy = await measureRotationRead(base, ledger, ARCHIVES, "stop-healthy");
-    const healthyVerdict = judgeRotationRead(healthy.baselineMs, healthy.subjectMs);
-    assert.ok(healthyVerdict.withinRatio && healthyVerdict.underCeiling, `control: a healthy rotation read passes — ${describeVerdict(healthyVerdict)}`);
-
-    // A runner `factor`× slower taxes the baseline and the subject alike. The factor is sized from the healthy read so
-    // the taxed subject lands near 3× the retired fixed budget on any runner, fast or slow.
-    const factor = Math.max(2, Math.ceil((3 * RETIRED_FIXED_BUDGET_MS) / Math.max(healthy.subjectMs, 1)));
-    const taxed = await measureRotationRead(base, ledger, ARCHIVES + 1, "stop-taxed", (work) => withCpuTax(factor, work));
-    const taxedVerdict = judgeRotationRead(taxed.baselineMs, taxed.subjectMs);
-    assert.throws(
-      () => assertWallClockBound(taxed.subjectMs, RETIRED_FIXED_BUDGET_MS, `a ${factor}× slower runner's rotation read spent ${Math.round(taxed.subjectMs)} ms`),
-      /WALL-CLOCK DEPENDENT/,
-      `the retired fixed ${RETIRED_FIXED_BUDGET_MS} ms budget reds a healthy read on a ${factor}× slower runner (${Math.round(taxed.subjectMs)} ms)`,
-    );
-    assert.ok(taxedVerdict.withinRatio, `a uniform ${factor}× CPU tax cancels against the same-run baseline — ${describeVerdict(taxedVerdict)}`);
+    await read(base, EMERGENCY_STATUS);
 
     // A real regression: the read after the rotation re-reads every archive on the loop thread. The baseline is untouched.
-    const reread = await measureRotationRead(base, ledger, ARCHIVES + 2, "stop-reread", undefined, async (work) => {
+    const reread = await measureRotationRead(base, ledger, rereadRotation, "stop-reread", async (work) => {
       const value = await work();
       rereadCorpus(ledger.dir);
       return value;
     });
     const rereadVerdict = judgeRotationRead(reread.baselineMs, reread.subjectMs);
-    t.diagnostic(`healthy: ${describeVerdict(healthyVerdict)}`);
-    t.diagnostic(`${factor}× taxed: ${describeVerdict(taxedVerdict)}`);
+    t.diagnostic(`healthy: ${describeVerdict(healthy)}`);
+    t.diagnostic(`taxed: ${describeVerdict(taxed)}`);
     t.diagnostic(`corpus re-read: ${describeVerdict(rereadVerdict)}`);
     assert.equal(rereadVerdict.withinRatio, false, `a post-rotation read that re-reads the corpus must fail the relative bound — ${describeVerdict(rereadVerdict)}`);
   });
   await settleOperatorAgentUnionLoads();
+});
+
+test("W1-T12468 pins the cause of the intermittent failure", () => {
+  const baselineMs = Array.from({ length: ROTATION_BASELINE_READS }, () => 2);
+  const firstRotationMs = 112.5;
+  const nextRotationMs = 32.5;
+  // #18039: sizing the tax from the first rotation made the next read land at 130 ms.
+  const first = judgeSlowerRotationRead(baselineMs, firstRotationMs);
+  assert.equal(first.subjectMs, 450);
+  assert.equal((first.subjectMs / firstRotationMs) * nextRotationMs, 130);
+  const next = judgeSlowerRotationRead(baselineMs, nextRotationMs);
+  assert.throws(
+    () => assertWallClockBound(next.subjectMs, RETIRED_FIXED_BUDGET_MS, "a faster rotation with its own calibration"),
+    /WALL-CLOCK DEPENDENT/,
+  );
+  assert.equal(next.ratio, judgeRotationRead(baselineMs, nextRotationMs).ratio);
 });
 
 test("time the OS takes the thread away is not counted as the loop being held", async () => {
