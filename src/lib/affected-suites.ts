@@ -892,6 +892,15 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(cancelledCheckRequeue) && cancelledCheckRequeueEdges.some((edge) => changedSet.has(edge))) {
     pathReaders.push(cancelledCheckRequeue);
   }
+  // W1-T13160: coverage run 43866749772 missed this suite in the narrow arm after its retry failed.
+  const escalationRetirability = suitePath("test/escalation-retirability.test.ts");
+  const escalationRetirabilityEdges = [
+    "src/lib/sweep.ts",
+    suitePath("test/sweep/flow-other-not-positively-mergeable.test.ts"),
+  ];
+  if (input.files.has(escalationRetirability) && escalationRetirabilityEdges.some((edge) => changedSet.has(edge))) {
+    pathReaders.push(escalationRetirability);
+  }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");
   // W1-T6084: the OBSERVED readers and census readers, beside the source-text rules above (which still
