@@ -11,12 +11,13 @@ import { test } from "node:test";
 
 import { fixedClock } from "#src/lib/clock.js";
 import {
-  applyConfigEdits, configCandidates, configGardenSpec, restartPolicyChangedAt, restartPolicyRows, restartTuneCandidate,
+  applyConfigEdits, CONFIG_GARDEN_READ_STEPS, configCandidates, configGardenSpec, restartPolicyChangedAt, restartPolicyRows, restartTuneCandidate,
   restartTuneEvidence, RESTART_CYCLE_STEP, RESTART_TUNE_FACTOR, RESTART_TUNE_ROWS, RESTART_TUNE_STEP, serveConfigMeasurement,
   type ConfigCanary, type ConfigInventory, type RestartTuneInput,
 } from "#src/lib/config-gardener.js";
 import type { GardenerDeps } from "#src/lib/gardener.js";
 import { loadPolicy, policyPath } from "#src/lib/policy.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { ownedFixtureDir, type FixtureScope } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -111,11 +112,15 @@ test("W1-T12232 criterion 1: the last change of the two rows is the newest commi
   commit(dir, "2026-11-05T00:00:00Z");
   assert.deepEqual(restartPolicyChangedAt(dir, lines), { ms: Date.parse("2026-11-05T00:00:00Z") });
 
-  // The inventory reads it, with the restart_cycle rows of the ledger.
-  const rows = [{ step: "run.start", run_id: "r" }, ...cycles(2, HOUR, HOUR, NOT_STALE, Date.parse("2026-11-05T00:00:00Z") - CHANGED_MS)];
+  // The measurement worker's own ledger read takes the restart_cycle rows, beside the priced steps, and the inventory
+  // carries them with the last change.
+  const stateDir = join(dir, "state");
+  writeLedger([{ step: "run.start", run_id: "r" }, ...cycles(2, HOUR, HOUR, NOT_STALE, Date.parse("2026-11-05T00:00:00Z") - CHANGED_MS)], { dir: stateDir });
+  assert.ok(CONFIG_GARDEN_READ_STEPS.includes(RESTART_CYCLE_STEP));
   let reply: unknown;
-  return serveConfigMeasurement({ kind: "inventory", stateDir: dir, repoRoot: dir, nowMs: Date.parse(ISO), rows, weights: {}, recommendations: [] } as never,
+  return serveConfigMeasurement({ kind: "inventory", stateDir, repoRoot: dir, nowMs: Date.parse(ISO), weights: {}, recommendations: [] },
     { postMessage: (r) => { reply = r; } }).then(() => {
+    assert.equal((reply as { ok: boolean }).ok, true, JSON.stringify(reply));
     const inv = (reply as { ok: true; value: ConfigInventory }).value;
     assert.equal(inv.restart?.changedAtMs, Date.parse("2026-11-05T00:00:00Z"));
     assert.equal(inv.restart?.cycles.length, 2);

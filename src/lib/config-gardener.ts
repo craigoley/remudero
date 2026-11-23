@@ -412,10 +412,102 @@ export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
   ...JUDGE_SHADOW_STEPS,
 ];
 
-/** W1-T5474: the 60-day union read bounded to {@link CONFIG_GARDEN_LEDGER_STEPS}. An incomplete union fails
- *  the pass rather than pricing budgets from a partial history. */
-export function readConfigGardenLedgerRows(stateDir: string, reader: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync): Array<Record<string, unknown>> {
-  const read = reader(stateDir, { rotationWindowMs: 60 * 24 * 3600 * 1000, minRotations: 4, step: [...CONFIG_GARDEN_LEDGER_STEPS, ...RESTART_TUNE_LEDGER_STEPS], refuseIncomplete: true });
+// W1-T12232: the retune-restart class's inputs, read by the inventory. Declared before the measurement worker's entry
+// below, which runs at module load.
+
+/** W1-T12232: the step whose rows price one freshness restart cycle (src/lib/restart-cycle.ts). It is read beside
+ *  {@link CONFIG_GARDEN_LEDGER_STEPS}, not inside it: that list is what gatherRuns and the cap price, and two census
+ *  suites pin it to exactly those readers. */
+export const RESTART_CYCLE_STEP = "daemon.restart_cycle";
+export const RESTART_TUNE_LEDGER_STEPS: readonly string[] = [RESTART_CYCLE_STEP];
+/** The policy file the two rows live in (W1-T12228 writes each row on one line). */
+export const RESTART_POLICY_PATH = "plan/policy.yaml";
+export type RestartPolicyRowName = "scoreLimit" | "stalenessHorizonMs";
+const RESTART_POLICY_ROWS: readonly RestartPolicyRowName[] = ["scoreLimit", "stalenessHorizonMs"];
+
+export interface RestartPolicyRow {
+  name: RestartPolicyRowName;
+  /** The whole line, the `from` of the one edit. */
+  line: string;
+  /** 1-based, for `git blame -L`. */
+  lineNumber: number;
+  value: number;
+  min: number;
+  max: number;
+}
+
+export interface RestartTuneInput {
+  rows: RestartPolicyRow[];
+  /** When the last commit changed either row. Absent when it is unknown, and then `unknownChange` says why. */
+  changedAtMs?: number;
+  unknownChange?: string;
+  cycles: Array<Record<string, unknown>>;
+}
+
+/** What one pass measured, and the proposal when there is one. `reason` always says why there is or is not one. */
+export interface RestartTuneEvidence {
+  /** Complete rows counted: later than the last change, with a first verdict and both cost parts. At most {@link RESTART_TUNE_ROWS}. */
+  rows: number;
+  /** Rows later than the last change, with a first verdict, of which a cost part is null. Never counted. */
+  nullPartRows: number;
+  waitingMedianMs?: number;
+  restartMedianMs?: number;
+  stalenessReleased?: number;
+  row?: RestartPolicyRow;
+  to?: number;
+  reason: string;
+}
+
+/** The one-line `scoreLimit` and `stalenessHorizonMs` rows of the `freshnessRestart:` block. A row that is absent, not
+ *  on one line, or listed twice is not returned: one edit replaces one line. */
+export function restartPolicyRows(text: string): RestartPolicyRow[] {
+  const lines = text.split("\n");
+  const start = lines.findIndex((line) => /^freshnessRestart:\s*$/.test(line));
+  if (start < 0) return [];
+  const found = new Map<RestartPolicyRowName, RestartPolicyRow[]>();
+  for (let i = start + 1; i < lines.length && /^\s/.test(lines[i]!); i++) {
+    const line = lines[i]!;
+    const m = /^ {2}(\w+): \{([^{}]*)\}\s*$/.exec(line);
+    const name = m?.[1] as RestartPolicyRowName | undefined;
+    if (!m || !name || !RESTART_POLICY_ROWS.includes(name)) continue;
+    const num = (key: string): number => Number(new RegExp(`(?:^|[\\s,])${key}: (-?[0-9.]+)`).exec(m[2]!)?.[1] ?? NaN);
+    const row = { name, line, lineNumber: i + 1, value: num("value"), min: num("min"), max: num("max") };
+    if ([row.value, row.min, row.max].every(Number.isFinite)) found.set(name, [...(found.get(name) ?? []), row]);
+  }
+  return RESTART_POLICY_ROWS.flatMap((name) => (found.get(name)?.length === 1 ? found.get(name)! : []));
+}
+
+export type GitRun = (args: string[]) => string;
+const defaultGit = (repoRoot: string): GitRun => (args) =>
+  execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] });
+
+/** When the last commit changed any of `lineNumbers` in plan/policy.yaml, from `git blame`. A line with uncommitted
+ *  edits blames to now, so no cycle is later than it. A checkout git cannot blame gives no time and its reason. */
+export function restartPolicyChangedAt(repoRoot: string, lineNumbers: readonly number[], git: GitRun = defaultGit(repoRoot)): { ms: number } | { error: string } {
+  if (lineNumbers.length === 0) return { error: `${RESTART_POLICY_PATH} holds no one-line freshnessRestart row` };
+  let out: string;
+  try {
+    out = git(["blame", "--porcelain", ...lineNumbers.flatMap((n) => ["-L", `${n},${n}`]), "--", RESTART_POLICY_PATH]);
+  } catch (error) {
+    return { error: `git blame of ${RESTART_POLICY_PATH} failed: ${String((error as Error)?.message ?? error).split("\n")[0]}` };
+  }
+  const times = [...out.matchAll(/^committer-time (\d+)$/gm)].map((m) => Number(m[1]) * 1000);
+  return times.length ? { ms: Math.max(...times) } : { error: `git blame of ${RESTART_POLICY_PATH} named no committer time` };
+}
+
+function restartTuneInput(repoRoot: string, ledgerRows: readonly Record<string, unknown>[], git?: GitRun): RestartTuneInput {
+  const rows = restartPolicyRows(readFileIfExists(join(repoRoot, RESTART_POLICY_PATH)) ?? "");
+  const changed = restartPolicyChangedAt(repoRoot, rows.map((r) => r.lineNumber), git);
+  return { rows, ...("ms" in changed ? { changedAtMs: changed.ms } : { unknownChange: changed.error }), cycles: ledgerRows.filter((r) => r.step === RESTART_CYCLE_STEP) };
+}
+
+/** W1-T12232: what the measurement worker's own read asks for: the priced steps and the restart cycle rows. */
+export const CONFIG_GARDEN_READ_STEPS: readonly string[] = [...CONFIG_GARDEN_LEDGER_STEPS, ...RESTART_TUNE_LEDGER_STEPS];
+
+/** W1-T5474: the 60-day union read bounded to `steps`, by default {@link CONFIG_GARDEN_LEDGER_STEPS}. An incomplete
+ *  union fails the pass rather than pricing budgets from a partial history. */
+export function readConfigGardenLedgerRows(stateDir: string, reader: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync, steps: readonly string[] = CONFIG_GARDEN_LEDGER_STEPS): Array<Record<string, unknown>> {
+  const read = reader(stateDir, { rotationWindowMs: 60 * 24 * 3600 * 1000, minRotations: 4, step: steps, refuseIncomplete: true });
   if (!read.ok) throw new Error(`config gardener: incomplete ledger union: ${read.unread.join(", ")}`);
   return read.rows;
 }
@@ -517,7 +609,8 @@ function withMountClass(runs: RunSummary[], rows: readonly Record<string, unknow
 }
 
 function buildConfigInventory(input: InventoryMeasurement): ConfigInventory {
-  const rows = input.rows ?? readConfigGardenLedgerRows(input.stateDir);
+  // The worker's own read is the production one, and it adds the restart cycle rows (W1-T12232); injected rows are used as given.
+  const rows = input.rows ?? readConfigGardenLedgerRows(input.stateDir, readLedgerUnionRecordsSync, CONFIG_GARDEN_READ_STEPS);
   const weights = input.weights ?? buildEntryWeightIndex(loadLearningsCorpus(resolveRepoLayout(input.repoRoot).learningsDir));
   const canaries = readConfigCanaries(input.stateDir);
   return {
@@ -965,92 +1058,6 @@ export function capCandidate(inv: ConfigInventory, baselineText: string): Config
 }
 
 // ── Retune restart (W1-T12232) ───────────────────────────────────────────────────────────────
-
-/** W1-T12232: the step whose rows price one freshness restart cycle (src/lib/restart-cycle.ts). It is read beside
- *  {@link CONFIG_GARDEN_LEDGER_STEPS}, not inside it: that list is what gatherRuns and the cap price, and two census
- *  suites pin it to exactly those readers. */
-export const RESTART_CYCLE_STEP = "daemon.restart_cycle";
-export const RESTART_TUNE_LEDGER_STEPS: readonly string[] = [RESTART_CYCLE_STEP];
-/** The policy file the two rows live in (W1-T12228 writes each row on one line). */
-export const RESTART_POLICY_PATH = "plan/policy.yaml";
-export type RestartPolicyRowName = "scoreLimit" | "stalenessHorizonMs";
-const RESTART_POLICY_ROWS: readonly RestartPolicyRowName[] = ["scoreLimit", "stalenessHorizonMs"];
-
-export interface RestartPolicyRow {
-  name: RestartPolicyRowName;
-  /** The whole line, the `from` of the one edit. */
-  line: string;
-  /** 1-based, for `git blame -L`. */
-  lineNumber: number;
-  value: number;
-  min: number;
-  max: number;
-}
-
-export interface RestartTuneInput {
-  rows: RestartPolicyRow[];
-  /** When the last commit changed either row. Absent when it is unknown, and then `unknownChange` says why. */
-  changedAtMs?: number;
-  unknownChange?: string;
-  cycles: Array<Record<string, unknown>>;
-}
-
-/** What one pass measured, and the proposal when there is one. `reason` always says why there is or is not one. */
-export interface RestartTuneEvidence {
-  /** Complete rows counted: later than the last change, with a first verdict and both cost parts. At most {@link RESTART_TUNE_ROWS}. */
-  rows: number;
-  /** Rows later than the last change, with a first verdict, of which a cost part is null. Never counted. */
-  nullPartRows: number;
-  waitingMedianMs?: number;
-  restartMedianMs?: number;
-  stalenessReleased?: number;
-  row?: RestartPolicyRow;
-  to?: number;
-  reason: string;
-}
-
-/** The one-line `scoreLimit` and `stalenessHorizonMs` rows of the `freshnessRestart:` block. A row that is absent, not
- *  on one line, or listed twice is not returned: one edit replaces one line. */
-export function restartPolicyRows(text: string): RestartPolicyRow[] {
-  const lines = text.split("\n");
-  const start = lines.findIndex((line) => /^freshnessRestart:\s*$/.test(line));
-  if (start < 0) return [];
-  const found = new Map<RestartPolicyRowName, RestartPolicyRow[]>();
-  for (let i = start + 1; i < lines.length && /^\s/.test(lines[i]!); i++) {
-    const line = lines[i]!;
-    const m = /^ {2}(\w+): \{([^{}]*)\}\s*$/.exec(line);
-    const name = m?.[1] as RestartPolicyRowName | undefined;
-    if (!m || !name || !RESTART_POLICY_ROWS.includes(name)) continue;
-    const num = (key: string): number => Number(new RegExp(`(?:^|[\\s,])${key}: (-?[0-9.]+)`).exec(m[2]!)?.[1] ?? NaN);
-    const row = { name, line, lineNumber: i + 1, value: num("value"), min: num("min"), max: num("max") };
-    if ([row.value, row.min, row.max].every(Number.isFinite)) found.set(name, [...(found.get(name) ?? []), row]);
-  }
-  return RESTART_POLICY_ROWS.flatMap((name) => (found.get(name)?.length === 1 ? found.get(name)! : []));
-}
-
-export type GitRun = (args: string[]) => string;
-const defaultGit = (repoRoot: string): GitRun => (args) =>
-  execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] });
-
-/** When the last commit changed any of `lineNumbers` in plan/policy.yaml, from `git blame`. A line with uncommitted
- *  edits blames to now, so no cycle is later than it. A checkout git cannot blame gives no time and its reason. */
-export function restartPolicyChangedAt(repoRoot: string, lineNumbers: readonly number[], git: GitRun = defaultGit(repoRoot)): { ms: number } | { error: string } {
-  if (lineNumbers.length === 0) return { error: `${RESTART_POLICY_PATH} holds no one-line freshnessRestart row` };
-  let out: string;
-  try {
-    out = git(["blame", "--porcelain", ...lineNumbers.flatMap((n) => ["-L", `${n},${n}`]), "--", RESTART_POLICY_PATH]);
-  } catch (error) {
-    return { error: `git blame of ${RESTART_POLICY_PATH} failed: ${String((error as Error)?.message ?? error).split("\n")[0]}` };
-  }
-  const times = [...out.matchAll(/^committer-time (\d+)$/gm)].map((m) => Number(m[1]) * 1000);
-  return times.length ? { ms: Math.max(...times) } : { error: `git blame of ${RESTART_POLICY_PATH} named no committer time` };
-}
-
-function restartTuneInput(repoRoot: string, ledgerRows: readonly Record<string, unknown>[], git?: GitRun): RestartTuneInput {
-  const rows = restartPolicyRows(readIfPresent(join(repoRoot, RESTART_POLICY_PATH)));
-  const changed = restartPolicyChangedAt(repoRoot, rows.map((r) => r.lineNumber), git);
-  return { rows, ...("ms" in changed ? { changedAtMs: changed.ms } : { unknownChange: changed.error }), cycles: ledgerRows.filter((r) => r.step === RESTART_CYCLE_STEP) };
-}
 
 /** Did staleness release this restart? `upper_age` is the coalescer's staleness release; a busy pressure reason is one
  *  when its change term alone stays under the limit and change plus staleness reaches it. A withheld review is not. */
