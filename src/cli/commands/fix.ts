@@ -12,6 +12,7 @@ import { BASE_REPRODUCTION_MAX_FILES, boundedBaseProbeReason, baseReproductionFi
 import { assessRefreshClearance, mainPathsReachingRed, REFRESH_CLEARANCE_STEP, refreshClearanceFields, refreshedOnSameRed, refreshRecordsFromLedger } from "../../lib/base-reproduction.js";
 import { anchoredFixOutcome, decideFixOutcomeAction, fixRoundFlakeRetryRows, readRedAttribution, scopeReroutedFields, type FixOutcome as TypedFixOutcome } from "../../lib/fix-outcome.js";
 import { fixRoundBaseHead } from "../../lib/fix-round-base.js";
+import { gateLooseningRefusal, isFixRoundGatePath, ownerFixLaneInstructions, ownerFixLaneRefusal, readPrConversation, type FixRoundRefusal } from "../../lib/fix-round-gate-loosening.js";
 import { admittedFixTestPaths } from "../../lib/fix-test-scope.js";
 import { readFixScopeHistory } from "../../lib/fix-scope-history.js";
 import { CONFLICT_REPAIR_HANDOFF_REASON, fixRungInputFields, fixRungInputsUnchanged, productionFixProgressJudge, CHECK_REQUEUE_DEFERRED_STEP, CHECK_REQUEUE_STEP, jobRequeueOutcome, requeuedCheckKeysFromLedger, type JobRequeueOutcome } from "../../lib/sweep.js";
@@ -2807,22 +2808,55 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       return await opts.ownedConflictPushGuard!.verifyOwnership();
     },
   };
+  const roundGit = (args: string[]) =>
+    (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(opts.worktreePath, args, { maxBuffer: 1 << 26 });
   const filingRoundRefusal = async (priorHead: string, nextHead: string | undefined): Promise<string | undefined> => {
     if (baselineDiffFiles === undefined) return undefined;
     if (baselineDiffFiles.length === 0 || !baselineDiffFiles.every(isInPlanScope)) return undefined;
     if (nextHead === undefined || nextHead.trim() === "") return "unreadable plan filing nextHead; cannot verify the round before push";
-    return planFilingFixRoundRefusal(await readPlanFilingFixRoundInput(
-      baselineDiffFiles, priorHead, nextHead,
-      args => (deps.scopeAmendmentGit ?? hostWorktreeGitAsync)(opts.worktreePath, args, { maxBuffer: 1 << 26 })));
+    return planFilingFixRoundRefusal(await readPlanFilingFixRoundInput(baselineDiffFiles, priorHead, nextHead, roundGit));
   };
-  const landRoundPush = async (push: () => unknown, headSha: string | undefined, site: string): Promise<FixRungOutcome | "refused" | undefined> => {
+  // The hosted body adapter also requires the full PR conversation before dispatch or push.
+  const readsHostedConversation = deps.fetchPrBody === host.fetchPrBodyViaGh ||
+    (opts.guardRoundHead && deps.fetchPrBody === undefined);
+  let conversation: Promise<ReturnType<typeof ownerFixLaneInstructions> | { unreadable: string }> | undefined;
+  const readOwnerInstructions = () => conversation ??= (async () => {
+    if (!readsHostedConversation) return [];
+    const result = await readPrConversation(opts.prUrl);
+    return "unreadable" in result ? result : ownerFixLaneInstructions(result);
+  })();
+  const roundPolicyRefusal = async (priorHead: string, headSha: string | undefined): Promise<FixRoundRefusal | undefined> => {
+    const owner = await readOwnerInstructions();
+    if ("unreadable" in owner) {
+      return { reason: "pr-conversation-unreadable", files: [], detail: `Could not read the PR body and comments: ${owner.unreadable}` };
+    }
+    try {
+      if (!priorHead || !headSha) throw new Error("the PR head or round head is missing");
+      const range = ["--no-ext-diff", "--no-textconv", "--no-renames", "--no-relative", "--ignore-submodules=none", priorHead, headSha, "--"];
+      const diffFiles = (await roundGit(["diff", "--name-only", "-z", ...range])).split("\0").filter(Boolean);
+      const ownerRefusal = ownerFixLaneRefusal(diffFiles, owner);
+      if (ownerRefusal || !diffFiles.some(isFixRoundGatePath)) return ownerRefusal;
+      const diff = await roundGit(["diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", ...range]);
+      return gateLooseningRefusal({ diffFiles, diff });
+    } catch (error) {
+      if (!readsHostedConversation && !opts.guardRoundHead) return undefined; // offline callers can use synthetic SHAs
+      return { reason: "round-diff-unreadable", files: [], detail: `Could not verify the fix round diff: ${String(error).slice(0, 500)}` };
+    }
+  };
+  let roundCommitRefusal: FixRungOutcome | undefined;
+  const landRoundPush = async (push: () => unknown, headSha: string | undefined, site: string, roundId?: string): Promise<FixRungOutcome | "refused" | undefined> => {
+    roundCommitRefusal = undefined;
     roundPushFailure = undefined;
     roundPushReceipt = undefined;
     const filingRefusal = await filingRoundRefusal(review.headSha, headSha);
-    if (filingRefusal) {
-      deps.log("fix.commit_refused", { site, head_sha: review.headSha, reason: filingRefusal });
-      deps.log("fix.done", { site, head_sha: review.headSha, subtype: "commit_refused" });
-      return { outcome: "stood_down", review, strikes, retriggers, reason: filingRefusal, standDownReason: filingRefusal };
+    const refusal = filingRefusal === undefined ? await roundPolicyRefusal(currentPrHeadSha, headSha)
+      : { reason: filingRefusal, detail: filingRefusal };
+    if (refusal) {
+      const fields = { site, head_sha: currentPrHeadSha, ...(roundId === undefined ? {} : { round_id: roundId }) };
+      deps.log("fix.commit_refused", { ...fields, reason: refusal.reason, files: "files" in refusal ? refusal.files : undefined });
+      deps.log("fix.done", { ...fields, subtype: "commit_refused" });
+      return roundCommitRefusal = { outcome: "stood_down", review, strikes, retriggers, reason: refusal.detail,
+        standDownReason: refusal.detail };
     }
     try {
       const pushed = await push();
@@ -4609,14 +4643,23 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // At the first prompt assembly, as the implement lane does — emitted even at zero selection.
     if (!fixSkillSelectionLogged) deps.log("skills.selection", fixSkillSelection.observation);
     fixSkillSelectionLogged = true;
+    const owner = await readOwnerInstructions();
+    if ("unreadable" in owner) {
+      const reason = `Could not read the PR body and comments before dispatch: ${owner.unreadable}`;
+      deps.log("fix.stood_down", { site: "rung.strike", head_sha: currentPrHeadSha, reason });
+      deps.branchClaim?.release();
+      return finish({ outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason });
+    }
     const prompt = [
       renderFixPrompt({
         harnessCommits: fixHarnessOwnsGit,
+        harnessPushes: true,
         censusSnapshotPath,
         task: opts.task,
         round: attempt,
         branch: opts.branch,
         evidence,
+        ownerInstructions: owner.map(({ line }) => line),
         skillsPart: renderSkillsPart(fixSkillSelection.selected),
         // W1-T2607: the SAME baseline captured above (before this invocation's first strike) that
         // fixRungScopeStandDownReason's pre-strike gate already exempts — so the worker is told
@@ -5576,7 +5619,8 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           expectedHeadShaForPush = partialHead;
           const lease = opts.guardRoundHead && ownedSessionPushGuard === undefined ? roundPushBaseSha : undefined;
           const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, partialHead, lease, ownedSessionPushGuard),
-            partialHead, "rung.strike");
+            partialHead, "rung.strike", roundId);
+          if (roundCommitRefusal) return undefined;
           landing = await roundLanding(partialHead);
           return pushed === undefined && landing.landed ? landing.remoteHead : undefined;
         } catch (error) {
@@ -5644,6 +5688,10 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       if (workflowPaths.length > 0 || instrumentPaths.length > 0 || unfiledScope) {
         const scopeKind = workflowPaths.length > 0 ? "workflow" : instrumentPaths.length > 0 ? "instrument" : "unfiled";
         const repairedHead = await pushScopeRepair();
+        if (roundCommitRefusal) {
+          releaseRoundClaim();
+          return finish({ ...roundCommitRefusal, strikes: unlandedStrikes() });
+        }
         const { reason, issueUrl } = await escalateScope(scopeKind, repairedHead);
         finishScopeRound();
         return finish({ outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, issueUrl });
@@ -5695,6 +5743,10 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         return finish({ outcome: "stood_down", review, strikes, retriggers, reason: "awaiting scope amendment merge" });
       }
       const repairedHead = await pushScopeRepair();
+      if (roundCommitRefusal) {
+        releaseRoundClaim();
+        return finish({ ...roundCommitRefusal, strikes: unlandedStrikes() });
+      }
       const refusal = `${amendment.reason}: ${amendment.detail}`;
       deps.log("fix.commit_refused", { round_id: roundId, strike: attempt, round, head_sha: priorHeadSha,
         reason: `non-test paths need scope (${refusal})` + (repairedHead ? `. In-scope repairs pushed in ${repairedHead}. Scope still needed for ${paths.join(", ")}` : ""),
@@ -5774,13 +5826,14 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     let landing: FixRoundLanding = { landed: false, outcome: "failed", reason: "the push did not return" };
     try {
       const priorHeadSha = opts.guardRoundHead && fixHarnessOwnsGit && ownedSessionPushGuard === undefined ? roundPushBaseSha : undefined;
-      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, priorHeadSha, ownedSessionPushGuard), expectedHeadShaForPush, "rung.strike");
-      landing = await roundLanding(expectedHeadShaForPush);
+      roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, priorHeadSha, ownedSessionPushGuard), expectedHeadShaForPush, "rung.strike", roundId);
+      if (!roundCommitRefusal) landing = await roundLanding(expectedHeadShaForPush);
     } catch (error) {
       landing = pushThrew(error);
       throw error;
     } finally {
-      logPushedRoundDone(landing, roundPush === undefined);
+      if (roundCommitRefusal) releaseRoundClaim();
+      else logPushedRoundDone(landing, roundPush === undefined);
     }
     if (roundPush === "refused") continue;
     if (roundPush) return finish({ ...roundPush, strikes: unlandedStrikes() });

@@ -400,6 +400,7 @@ export function renderFixPrompt(opts: {
   /** W1-T3727: the harness owns this round's COMMIT, so the prompt must not ask for git. True only
    *  where the spawn was also bounded without a shell — see FIX_CASH_TOOLS. */
   harnessCommits?: boolean;
+  harnessPushes?: boolean;
   censusSnapshotPath?: string;
   // W1-T2653: the declared remedy file(s) of the check(s) THIS strike is addressing — the SAME
   // list the caller passed {@link fixRungScopeStandDownReason}'s 4th parameter, so instruction and
@@ -408,6 +409,7 @@ export function renderFixPrompt(opts: {
   reachableRemedyFiles?: readonly RemedyFileForGate[];
   /** `renderSkillsPart` of the fix lane's selected skills; "", omitted, or a plan-gate round renders nothing. */
   skillsPart?: string;
+  ownerInstructions?: readonly string[];
 }): string {
   const mode = deriveFixMode(opts.evidence);
   const censusSnapshotEnv = opts.censusSnapshotPath === undefined ? undefined :
@@ -427,7 +429,15 @@ export function renderFixPrompt(opts: {
     ...(taskSemanticRevision(opts.task) === undefined ? [] : [
       ...(opts.task.design ? ["", "AUTHORITATIVE TASK DESIGN:", opts.task.design] : []),
       ...(opts.task.amendment ? ["", "AUTHORITATIVE TASK AMENDMENT:", opts.task.amendment] : []),
-    ])];
+    ]),
+    ...(opts.ownerInstructions?.length ? [
+      "",
+      "OWNER INSTRUCTIONS (from the PR body and comments; they override the task design)",
+      "Honor the change restrictions quoted below. The parent enforces them before pushing.",
+      CI_LOG_FENCE_OPEN,
+      envelope(neutralizeFenceMarkers(opts.ownerInstructions.join("\n")), "github-pr-comment"),
+      CI_LOG_FENCE_CLOSE,
+    ] : [])];
   if (mode === "plan-gate") {
     return [header, ...constraintBlock,
       `STAGEABLE PLAN PATHS: ${(opts.task.files ?? []).join(", ")}. Edit only these exact paths.`,
@@ -597,7 +607,9 @@ export function renderFixPrompt(opts: {
         "missing line is refused unless you state FIXED with saved edits; then the harness derives a subject.",
         `Your PR body`,
       ]
-      : [`Then: \`git push origin HEAD\` (no -u) — never force-push. Your PR body`]),
+      : opts.harnessPushes
+        ? ["Commit locally and leave the push to the harness so it can check the round's diff. Your PR body"]
+        : [`Then: \`git push origin HEAD\` (no -u) — never force-push. Your PR body`]),
     ...WORKER_PR_AUTHORITY_LINES,
     `must substantiate EVERY task acceptance`,
     `criterion, not only the ones fixed here — the review floor judges the body against the`,
