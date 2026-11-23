@@ -1253,7 +1253,7 @@ import {
   runAutomatedRetroSubprocess,
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
-import { childEntryArgv, childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, type ChildEntryStoreOptions } from "./lib/child-entry-argv.js";
+import { childEntryArgv, childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, FILLABLE_MISSES as FILLABLE_STORE_MISSES, type ChildEntryStoreOptions } from "./lib/child-entry-argv.js";
 import {
   bodyWithFailingProofAtOpen,
   checkProofLaunchArgv,
@@ -1816,6 +1816,7 @@ import {
   type PlanLintOutcome,
   type ReviewEvaluatorProvenance,
   type NameFilterResolution,
+  type ReviewAdmission,
   registerReviewerCheckout,
   INSTRUMENT_SURFACE,
   INSTRUMENT_SURFACE_EXCLUSIONS,
@@ -1975,7 +1976,7 @@ export type FreshTreeReviewSeams = {
    *  non-zero exit it first hands `onFailure` the child's bounded stderr tail (W1-T4055). */
   spawnReview: (worktree: string, args: string[], onFailure?: (failure: string) => void,
     parentEnv?: NodeJS.ProcessEnv, onEntry?: (entry: FreshTreeEntry) => void,
-    store?: { storeRoot?: string }, onExit?: (exit: FreshTreeExit) => void) => Promise<number>;
+    store?: { storeRoot?: string; fill?: StoreFill }, onExit?: (exit: FreshTreeExit) => void) => Promise<number>;
   /** Tests may replace ownership; production holds the general reaper's real run-lock token. */
   withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
   /** Remove a tree this process cut for one attempt through the async hardened Git leaf by default.
@@ -2000,7 +2001,13 @@ export type FreshTreeReviewSeams = {
   prepareWorktree?: (repoDir: string, worktreePath: string) => boolean;
   /** Where worktrees are cut. One per code sha, reused across PRs in the same pass. */
   worktreeRoot: string;
+  /** W1-T12227: on a store miss for the shared tree, build its compiled entries once per commit, unawaited, ledgered here. */
+  storeFill?: StoreFill;
 }
+
+type StoreFill = { log: StoreLog; build?: OwnTreeFillOptions["build"] };
+/** W1-T12227: the `source` a fresh-tree review's fill ledgers on child_entry.store_build_requested. */
+const FRESH_TREE_REVIEW_FILL_SOURCE = "fresh-tree-review";
 
 /** Existing loaded configuration is the opt-in boundary; never load/create config in an offline reader. */
 function selectedRegistryIntentForConfig(config: Config) {
@@ -2093,7 +2100,7 @@ export function buildFreshTreeReviewRunner(
   const prepared = new Map<string, string>();
   return async (prArg, rest, freshness, onFailure, onEntry, onExit) => {
     const sha = freshness.originMainSha;
-    const review = (tree: string) => deps.spawnReview(tree, [prArg, ...rest], onFailure, undefined, onEntry, undefined, onExit);
+    const review = (tree: string, store?: { fill?: StoreFill }) => deps.spawnReview(tree, [prArg, ...rest], onFailure, undefined, onEntry, store, onExit);
     // W1-T14066: a busy or unproven shared tree is never reviewed in, added over or removed. The
     // review cuts its own tree at the same sha instead, and skips only when that cannot be done.
     let ownTree = false;
@@ -2131,7 +2138,8 @@ export function buildFreshTreeReviewRunner(
           prepared.delete(sha);
           throw new Error(`cached reviewer worktree at ${reviewerTree} is no longer an exact clean detached checkout of ${sha}`);
         }
-        return review(reviewerTree);
+        // A per-attempt tree is removed when it settles, so only the shared tree fills the store (W1-T14066).
+        return review(reviewerTree, deps.storeFill === undefined ? undefined : { fill: deps.storeFill });
       };
       try {
         return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(reviewerTree, run);
@@ -2333,11 +2341,16 @@ export function spawnRmdReviewForFreshTree(
   onFailure?: (failure: string) => void,
   parentEnv: NodeJS.ProcessEnv = process.env,
   onEntry?: (entry: FreshTreeEntry) => void,
-  store: { storeRoot?: string } = {},
+  store: { storeRoot?: string; fill?: StoreFill } = {},
   onExit?: (exit: FreshTreeExit) => void,
 ): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     const prepared = materializeMainEntryFromStore(worktree, store.storeRoot);
+    // W1-T12227: a commit the store has no build for gets one, not awaited; this child still runs tsx, a later one the bundle.
+    if (store.fill !== undefined && prepared.lookup.outcome === "miss" && FILLABLE_STORE_MISSES.has(prepared.lookup.reason)) {
+      fillStoreForOwnTree(worktree, prepared.lookup.hash ?? prepared.source?.hash, { storeRoot: store.storeRoot ?? defaultChildEntryStoreRoot(),
+        source: FRESH_TREE_REVIEW_FILL_SOURCE, log: store.fill.log, ...(store.fill.build === undefined ? {} : { build: store.fill.build }) });
+    }
     const exitDir = makeTempDir("review-exit");
     const exitFile = join(exitDir, "cause");
     const sourceArgs = prepared.source ? ["--main-entry-source", JSON.stringify(prepared.source)] : [];
@@ -2759,15 +2772,26 @@ export async function mainTipViaGit(repoDir: string): Promise<string> {
   return (await hostWorktreeGitAsync(repoDir, ["rev-parse", "origin/main"])).trim();
 }
 
+/** W1-T12227: the fix pipeline's required review, routed by {@link decideReviewPath}. On a stale reading no reviewer starts in
+ *  this process: the review runs from a fresh tree through the sweep's gate, and the rung gets a withheld result. */
 export function buildRequiredFixReviewRunner(
   next: typeof runReview,
   readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
+  stale: { gate: Pick<ReviewerCodeStartGate<ReviewCommandDeps>, "fromFreshTree">; readHead: (prUrl: string) => string },
 ): typeof runReview {
-  return async (args) => {
-    const startFreshness = await ownStartFreshness(readFreshness);
-    return next({ ...args, requireSemanticReview: true,
-      reviewerCodeFreshness: reviewerFreshnessForPublication(startFreshness, readFreshness) });
-  };
+  return (args) => decideReviewPath(() => ownStartFreshness(readFreshness),
+    (start) => next({ ...args, requireSemanticReview: true, admission: "required-fix",
+      reviewerCodeFreshness: reviewerFreshnessForPublication(start, readFreshness) }),
+    async (reading) => {
+      const headSha = stale.readHead(args.prUrl);
+      const pr = /\/pull\/(\d+)/.exec(args.prUrl)?.[1] ?? args.prUrl;
+      const code = await stale.gate.fromFreshTree(pr, ["--repo", `${args.owner}/${args.repo}`], { executionMode: "semantic" }, reading);
+      const behind = `reviewer code ${reading.codeSha.slice(0, 12)} is behind origin/main ${reading.originMainSha.slice(0, 12)}`;
+      const reason = code === undefined ? `${behind}; no fresh tree could run, so no reviewer started`
+        : `${behind}; the review ran from a fresh tree and exited ${code}`;
+      return { state: "pending", criteria: [], testTheater: false, summary: reason, floorDegraded: false, capped: false,
+        keywordOnly: false, planOnly: false, headSha, reviewerOutcome: "not_attempted_stale_reviewer_code", verdictWithheld: reason };
+    });
 }
 
 export function buildSweepEffects(
@@ -7765,6 +7789,8 @@ async function runReview(args: {
    * call sites supply it immediately before posting; test-only direct calls retain their existing
    * isolated status-poster contract. */
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
+  /** W1-T12227: the path that admitted this review. */
+  admission?: ReviewAdmission;
 }): Promise<ReviewRunResult> {
   return runReviewFromModule(reviewCommandHost(), args);
 }
@@ -45022,11 +45048,11 @@ import { PLAN_RECONCILE_LANDING_BODY_BUDGET, PLAN_RECONCILE_LANDING_RECORD_LIMIT
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
-import { buildIntoStore, childEntryStoreRoot, materializeMainEntryFromStore } from "./lib/child-entry-store.js";
+import { buildIntoStore, childEntryStoreRoot, defaultChildEntryStoreRoot, fillStoreForOwnTree, materializeMainEntryFromStore, type OwnTreeFillOptions, type StoreLog } from "./lib/child-entry-store.js";
 // W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
-import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, reviewerCodeStartGate, runChildModeIsOn, runDetachedReview, spawnRunChild, type DetachedReviewCommand, type DetachedWorkSpec,
+import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, decideReviewPath, reviewerCodeStartGate, runChildModeIsOn, runDetachedReview, spawnRunChild, type DetachedReviewCommand, type DetachedWorkSpec,
   type FreshTreeEntry, type FreshTreeExit, type FreshTreeReview, type ReviewerCodeStartGate, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
 export type { FreshTreeEntry, FreshTreeExit } from "./lib/run-child.js";
 import { createSweepFixAdmissionController, productionFixAdmissionResidents, installDetachedWorkHost, readFixDispatchEnvelope, runFixDispatchChild, timedFixStage, type FixDispatchChildPorts } from "./lib/sweep.js";
@@ -46197,6 +46223,7 @@ export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: stri
 export function gatedDetachedReviewCommand(root: string, log: (step: string, extra?: Record<string, unknown>) => void): DetachedReviewCommand {
   const seams: FreshTreeReviewSeams = {
     git: reviewerGit(root), addWorktree: realDeps().reviewWorktree.addWorktree, worktreeRoot: join(root, "..", "worktrees"), spawnReview: spawnRmdReviewForFreshTree,
+    storeFill: { log },
   };
   const gate = buildReviewerCodeFreshnessGate(() => checkReviewerCodeFreshnessAsync(root, process.env), log, reviewCommand,
     buildFreshTreeReviewRunner(root, seams));
