@@ -52,4 +52,5 @@ test("W1-T12441: redesign.gardener_failed no longer recurs", async (t) => {
   const verdict = rows.find(({ step }) => step === REDESIGN_JUDGED_STEP)?.fields;
   assert.equal(verdict?.task_id, id);
   assert.equal(verdict?.outcome, "unparseable");
+  assert.equal(verdict?.reason, "REDESIGN: needs a JSON object");
 });
