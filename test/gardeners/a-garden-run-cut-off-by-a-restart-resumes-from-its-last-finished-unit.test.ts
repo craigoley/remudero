@@ -6,21 +6,14 @@ import { test, type TestContext } from "node:test";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 import { ciFrictionGardenSpec, gitCiFrictionOwnerSearch, type CiFrictionGardenSources } from "#src/lib/ci-friction-gardener.js";
 import * as gardener from "#src/lib/gardener.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { LedgerRecord } from "#src/lib/retro.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
 function stateDir(t: TestContext): string {
-  const dir = mkdtempSync(join(tmpdir(), "garden-units-"));
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}garden-units-`));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
-}
-
-function ledgerRows(at: string): LedgerRecord[] {
-  return ["a", "b", "c"].flatMap((name, index) => [
-    { step: "sweep.disposed", run_id: "daemon-1", pr_number: index + 1, head_sha: name, ts: at },
-    { step: "fix.dispatch", run_id: "daemon-1", round: "resume", mode: "ci-log", head_sha: name, elapsed_ms: 600_000, ts: at,
-      ci_failures: [{ check: "ci-shard (1/8)", signature: `test/${name}.test.ts` }] },
-  ]);
 }
 
 function ciFixture(t: TestContext, existingRepo?: ReturnType<typeof gitRepo>, fileRemedy = false) {
@@ -44,7 +37,11 @@ function ciFixture(t: TestContext, existingRepo?: ReturnType<typeof gitRepo>, fi
   let now = Date.parse("2026-11-20T12:20:00Z");
   let stopAt: string | undefined;
   const clock = clockFromMillisFn(() => now);
-  const rows = ledgerRows(clock.iso());
+  const rows: LedgerRecord[] = ["a", "b", "c"].flatMap((name, index) => [
+    { step: "sweep.disposed", run_id: "daemon-1", pr_number: index + 1, head_sha: name, ts: clock.iso() },
+    { step: "fix.dispatch", run_id: "daemon-1", round: "resume", mode: "ci-log", head_sha: name, elapsed_ms: 600_000, ts: clock.iso(),
+      ci_failures: [{ check: "ci-shard (1/8)", signature: `test/${name}.test.ts` }] },
+  ]);
   const searched: string[] = [];
   const events: Array<{ step: string; fields?: Record<string, unknown> }> = [];
   const escalations: unknown[] = [];
