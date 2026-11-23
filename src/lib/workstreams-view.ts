@@ -458,7 +458,8 @@ export function createWorkstreamsView<S extends { instance: string; newestTs: st
     inputsFingerprint: ({ instances }) => {
       const slots = slotsOf(instances);
       return JSON.stringify([
-        pending ? [published + 1, pending.fingerprint, pending.now] : [published, builtFingerprint ?? null],
+        // A finished build reads as the body it is about to publish, so the pass after it publishes it is skipped.
+        pending ? [published + 1, pending.fingerprint] : [published, builtFingerprint ?? null],
         slots.map(({ instance, db }) => [instance.name, db !== undefined, planBehind(instance), gatewaySources.get(instance.name) ?? null]),
       ]);
     },
