@@ -1432,6 +1432,7 @@
     "dispatch.selection_timing": "Observability for W1-T13286: per-probe selection timing that an operator reads to pick the next speed fix; no decision reads it (invariant measuring-changes-no-decision).",
     "github_app.token_refresh_late": "W1-T14537: a diagnostic that a scheduled App token refresh ran after the token it replaced had expired, with how late; it changes no refresh or credential decision.",
     "object_reaper.gc_log_cleared": "An operator-facing record that the reaper removed a stale gc.log after a clean full pass, with its age and first line; the following repository_maintenance.complete row carries the gc.log verdict every reader uses, so nothing re-reads it.",
+    "ops_catalog.growth_exceeded": "W1-T14557: the operator's alert that the ops catalog grew past its learned daily allowance on a UTC day, written once a day beside its escalation; the catalog is accepted either way, so no decision reads it.",
     "reviewer.health_save_superseded": "A diagnostic that an evaluation skipped its save because a newer health file was already on disk; the newer file is the state every reader uses, so nothing re-reads the row.",
     "reviewer.model_divergence": "An operator-facing record of each evaluation's per-model judgement; the incident state in reviewer-health.json carries the decision, so nothing re-reads the row.",
     "reviewer.model_divergence_closed": "An operator-facing record that a model-divergence incident closed and its issue was closed; the incident state carries the decision, so nothing re-reads the row.",

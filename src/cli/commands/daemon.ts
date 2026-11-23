@@ -70,7 +70,7 @@ import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "../../lib/dep-review.js";
 import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
 import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
-import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
+import { escalate, escalateAsync, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
 import { boardPrsRestArgs, createGhCallPacer, prStateFromRest, singlePrRestArgs } from "../../lib/open-prs-rest.js";
 import { buildMainHealthRung } from "../../lib/main-health-rung.js";
 import { ghEscalationAnswerGateway } from "../../lib/escalation-answers.js";
@@ -130,7 +130,9 @@ import { automaticBranchReapStateFileName, orphanRunBranchEvidenceReader } from 
 import { repoRoot, resolveOwnerRepo, writeDaemonTargetRecord } from "../../lib/repo-location.js";
 import { resolveRepoLayout } from "../../lib/repo-layout.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
-import { createOpsCatalogShadowSource, type OpsCatalogApi, type OpsCatalogShadowInput } from "../../lib/ops-catalog-source.js";
+import {
+  createOpsCatalogShadowSource, type OpsCatalogApi, type OpsCatalogGrowthExceeded, type OpsCatalogShadowInput,
+} from "../../lib/ops-catalog-source.js";
 import { liveInflightRuns, readCheckoutDepth } from "../../lib/report-commands.js";
 import { adoptRunChildren, createAdmittedPlanSlot, runChildModeIsOn, startRunChildProbe, tapPlanSnapshot, type AdoptedRunChild } from "../../lib/run-child.js";
 import { loadObservedOverlapMode, loadRunChildMode, type RunChildMode } from "../../lib/policy.js";
@@ -937,12 +939,47 @@ export const OPS_DISPATCH_SOURCE_REFRESH_MS = 45_000;
  *  W1-T14374: it also carries the snapshot's shard and byte counts and, for a derived-bound refusal, the bound. */
 export const OPS_CATALOG_REFRESHED_STEP = "dispatch.ops_catalog_refreshed";
 
+/** W1-T14557 (operator ruling 2026-11-23): one row on the first accepted refresh of a UTC day whose catalog grew past
+ *  its learned daily allowance. The catalog is accepted and dispatched from; the row names the growth, the allowance
+ *  and the UTC day, numbers only. */
+export const OPS_CATALOG_GROWTH_EXCEEDED_STEP = "ops_catalog.growth_exceeded";
+
+/** W1-T14557: the one escalation a UTC day's growth past the allowance opens; its summary names the day, so a day
+ *  dedupes to one issue. Numbers and labels only: no private record text, path or repository name. */
+export function opsCatalogGrowthEscalation(growth: OpsCatalogGrowthExceeded): Escalation {
+  const what = growth.reason === "byte_growth" ? "bytes" : "shards";
+  return {
+    class: "BLOCKED",
+    taskId: "DAEMON",
+    summary: `ops catalog grew past its daily allowance on ${growth.day}`,
+    detail: `W1-T14557: on ${growth.day} (UTC) the private ops catalog grew ${growth.observed} ${what} where its learned daily `
+      + `allowance is ${growth.allowed}. Under the operator ruling of 2026-11-23 the catalog is still accepted and ops dispatch `
+      + "continues; records the catalog mover copied in (they carry moved_from) are not counted. Only the heap-byte and "
+      + "blob-read-budget bounds refuse a snapshot. This is the day's one alert; the ledger row is ops_catalog.growth_exceeded.",
+    options: [
+      { label: "accept the growth", detail: "Ordinary filings: nothing to do. Close this escalation; the reader learns a faster rate after two such days." },
+      { label: "find the writer", detail: "If nobody filed this many records today, look for a writer gone wrong in the ops repository's history for the day." },
+    ],
+    recommendation: "accept the growth",
+    consequence: "None for dispatch: the catalog is accepted either way. A runaway writer would go unnoticed until the heap bound refuses.",
+  };
+}
+
+/** W1-T14557: raise the day's growth escalation through `raise`, off the caller's loop; a raise that fails is absorbed. */
+export function opsCatalogGrowthRaiser(raise: (escalation: Escalation) => Promise<unknown>): (growth: OpsCatalogGrowthExceeded) => void {
+  return (growth) => void raise(opsCatalogGrowthEscalation(growth)).then(undefined, (error: unknown) => {
+    void error; // An escalation that cannot be raised leaves the day's ops_catalog.growth_exceeded row as the alert.
+  });
+}
+
 export function opsCatalogShadowFeed(
   source: { refresh(): Promise<OpsCatalogShadowInput> }, clock: Clock = systemClock,
   opts: {
     refreshEveryMs?: number; log?: (step: string, fields: Record<string, unknown>) => void;
     /** W1-T14218: told each settled refresh, after it is the evidence and its row is written. */
     onSettled?: (input: OpsCatalogShadowInput) => void;
+    /** W1-T14557: told the day's first accepted growth past the allowance, after its row is written (the escalation). */
+    onGrowthExceeded?: (growth: OpsCatalogGrowthExceeded) => void;
   } = {},
 ): {
   current(): OpsCatalogShadowInput | undefined;
@@ -967,6 +1004,18 @@ export function opsCatalogShadowFeed(
       // A diagnostic row that cannot be written never changes the evidence the refresh produced.
     }
   };
+  // W1-T14557: the day's first accepted growth past the allowance writes one row and raises one escalation.
+  const reportGrowth = (input: OpsCatalogShadowInput): void => {
+    const growth = input.outcome === "ok" ? input.growthExceeded : undefined;
+    if (growth === undefined || !growth.alert) return;
+    try {
+      opts.log?.(OPS_CATALOG_GROWTH_EXCEEDED_STEP, { reason: growth.reason, observed: growth.observed, allowed: growth.allowed, day: growth.day });
+      opts.onGrowthExceeded?.(growth);
+    } catch (error) {
+      // An alert that cannot be written or raised never changes the evidence the refresh produced.
+      void error;
+    }
+  };
   const start = (): void => {
     if (inFlight) return;
     inFlight = true;
@@ -978,6 +1027,7 @@ export function opsCatalogShadowFeed(
     }).then(() => {
       if (!latest) return;
       logRefresh(latest, clock.now() - startedAt);
+      reportGrowth(latest);
       try {
         opts.onSettled?.(latest);
       } catch (error) {
@@ -1008,7 +1058,10 @@ export function opsCatalogShadowFeed(
  */
 export function opsCatalogFilingFeeds(
   source: { refresh(): Promise<OpsCatalogShadowInput> } | undefined, clock: Clock,
-  feed: { refreshEveryMs?: number; log?: (step: string, fields: Record<string, unknown>) => void },
+  feed: {
+    refreshEveryMs?: number; log?: (step: string, fields: Record<string, unknown>) => void;
+    onGrowthExceeded?: (growth: OpsCatalogGrowthExceeded) => void;
+  },
   filing: Omit<CatalogFilingReaderOpts, "ops"> & { ops: (latest: OpsCatalogShadowInput | undefined) => OpsFilingBinding | undefined },
 ) {
   function warmOpsFiling(input: OpsCatalogShadowInput): void {
@@ -2401,8 +2454,10 @@ export async function daemonCommand(
       : opsCatalogShadowFeed(createOpsCatalogShadowSource({ repository: shadowOpsCatalog }, deps.opsCatalogApi), opsClock);
     // W1-T14214: an ops task is dated from the ops checkout's history at the commit the dispatch capture is bound to.
     // W1-T14218: each ok snapshot the source settles starts that read, so the first selection after a boot is dated.
+    // W1-T14557: the day's growth alert opens its escalation off the loop; its row is already written.
+    const raiseOpsCatalogGrowth = opsCatalogGrowthRaiser((e) => escalateAsync({ ...e, runId }, { issues: ghIssueGatewayAsync(target.owner, target.repo), ledgerPath, runId }));
     const filingFeeds = opsCatalogFilingFeeds(undefined, opsClock, {
-      refreshEveryMs: OPS_DISPATCH_SOURCE_REFRESH_MS, ...(explicitShadow ? {} : { log }),
+      refreshEveryMs: OPS_DISPATCH_SOURCE_REFRESH_MS, ...(explicitShadow ? {} : { log, onGrowthExceeded: raiseOpsCatalogGrowth }),
     }, { publicReader: dispatchFilingPrefetch, log,
       ports: { parseFilingDates: filingDatesFromPlanHistory, gitFor: planSyncGitRunnerAsync },
       ops: (latest) => opsFilingBinding(readOpsSelection(), opsSourceRepository, latest) });

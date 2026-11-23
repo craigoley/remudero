@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { dirname, join, relative, sep } from "node:path";
 import { resolveRepoLayout } from "./repo-layout.js";
 import {
-  OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_TREE_ENTRIES, opsCatalogBoundRefusal, type OpsCatalogBoundsIo, type OpsCatalogGrowthPoint,
+  OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_TREE_ENTRIES, opsCatalogBoundRefusal, type OpsCatalogBoundRefusal, type OpsCatalogBoundsIo,
+  type OpsCatalogGrowthPoint,
 } from "./ops-catalog-source.js";
 import { parse as parseYaml } from "yaml";
 import { defaultGitRunnerAsync, readBlobsAtRefAsync, type Plan, type Task } from "./plan.js";
@@ -162,10 +163,10 @@ async function catalogSizeBefore(git: ReturnType<typeof defaultGitRunnerAsync>, 
 /**
  * W1-T14368: the ops catalog a copy would produce, judged on the API reader's own bounds: the read catalog plus one
  * shard of the copy's bytes (the original and its one moved_from line), grown from the catalog it read. A copy the
- * reader would refuse is refused here, before it lands and stops ops dispatch.
+ * reader would refuse is refused here, before it lands and stops ops dispatch. W1-T14557: see {@link judgeOpsBatch}.
  */
-export function judgeOpsCopy(size: OpsCatalogSize, original: string, publicCommit: string, io: OpsCatalogBoundsIo = {}): void {
-  judgeOpsBatch(size, [original], publicCommit, io);
+export function judgeOpsCopy(size: OpsCatalogSize, original: string, publicCommit: string, io: OpsCatalogBoundsIo = {}): OpsCatalogBoundRefusal | undefined {
+  return judgeOpsBatch(size, [original], publicCommit, io);
 }
 
 /**
@@ -173,8 +174,13 @@ export function judgeOpsCopy(size: OpsCatalogSize, original: string, publicCommi
  * Besides the read catalog, the copy is judged against the catalog at the start of its UTC day (the reader anchors its
  * daily growth on the first catalog it accepts that day), so the steps of one day together never ask the catalog for
  * more growth than the reader's bound allows: the step rate follows the catalog's daily growth.
+ * W1-T14557 (operator ruling 2026-11-23): growth no longer refuses a copy, and the batch's own copies (each carries a
+ * moved_from line) are not growth; only the heap, tree-entry and blob-size bounds refuse. It answers the growth past the
+ * allowance the produced catalog would still show without the batch (other filings), or undefined.
  */
-export function judgeOpsBatch(size: OpsCatalogSize, originals: readonly string[], publicCommit: string, io: OpsCatalogBoundsIo = {}): void {
+export function judgeOpsBatch(
+  size: OpsCatalogSize, originals: readonly string[], publicCommit: string, io: OpsCatalogBoundsIo = {},
+): OpsCatalogBoundRefusal | undefined {
   let bytes = 0;
   for (const original of originals) {
     const indent = /\n([ \t]+)\S/.exec(original)?.[1] ?? "";
@@ -186,10 +192,14 @@ export function judgeOpsBatch(size: OpsCatalogSize, originals: readonly string[]
   const treeEntries = size.treeEntries + originals.length + (size.shardDir ? 0 : 1);
   if (treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) return unknown("catalog_incompatible");
   const clock = io.clock ?? systemClock;
-  const produced = { shards: size.shards + originals.length, bytes: size.bytes + bytes };
+  const produced = { shards: size.shards + originals.length, bytes: size.bytes + bytes, moved: { shards: originals.length, bytes } };
+  let growth: OpsCatalogBoundRefusal | undefined;
   for (const reference of [{ at: clock.now(), shards: size.shards, bytes: size.bytes }, ...(size.dayStart ? [size.dayStart] : [])]) {
-    if (opsCatalogBoundRefusal(produced, reference, { ...io, clock })) return unknown("catalog_incompatible");
+    const judged = opsCatalogBoundRefusal(produced, reference, { ...io, clock });
+    if (judged?.reason === "heap_bytes") return unknown("catalog_incompatible");
+    growth ??= judged;
   }
+  return growth;
 }
 /** remudero-ops scripts/ops-gate.rb REQUIRED_KEYS without "id", NON_EMPTY_KEYS, RISKS, PROOF_PREFIXES and DEMONSTRATION_RE. */
 const OPS_GATE_REQUIRED_KEYS = ["title", "repo", "type", "verify", "risk", "status", "attempts", "acceptance"] as const;

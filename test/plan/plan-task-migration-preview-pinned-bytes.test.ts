@@ -143,18 +143,20 @@ test("migration preview respects the actual private reader capacity contract", a
   });
   // W1-T14368: past 500 shards or 8 MiB the reader's derived bounds judge the catalog the copy would produce. Each of
   // these is driven past one of them with an injected reading, and the same selection without it is the control.
-  const derived: Array<{ name: string; seed: Record<string, string>; bounds: OpsCatalogBoundsIo }> = [
+  // W1-T14557 (operator ruling 2026-11-23): growth no longer refuses a copy, and the copy's own moved record is not growth,
+  // so only the heap bound still refuses.
+  const derived: Array<{ name: string; seed: Record<string, string>; bounds: OpsCatalogBoundsIo; reason: string | undefined }> = [
     { name: "too many private YAML shards", seed: Object.fromEntries(Array.from({ length: 501 }, (_, i) => [`plan/tasks.d/empty-${i}.yaml`, "[]\n"])),
-      // A catalog measured as not growing: the copy's one shard is a jump past its daily growth.
-      bounds: { dailyGrowth: () => ({ shards: 0, bytes: 0 }) } },
+      // A catalog measured as not growing: the copy's one shard would be a jump past its daily growth, but it is a move.
+      bounds: { dailyGrowth: () => ({ shards: 0, bytes: 0 }) }, reason: undefined },
     { name: "too many private snapshot bytes", seed: Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`plan/tasks.d/empty-${i}.yaml`, emptyAtBytes(blob)])),
       // A heap with no headroom left below the daemon's heap-limit exit: no byte past the baseline fits.
-      bounds: { heap: () => ({ used_heap_size: 2 ** 40, heap_size_limit: 2 ** 40 }) } },
+      bounds: { heap: () => ({ used_heap_size: 2 ** 40, heap_size_limit: 2 ** 40 }) }, reason: "catalog_incompatible" },
   ];
   for (const entry of derived) await t.test(entry.name, async sub => {
     const f = fixture(sub, undefined, "[]\n", {}, entry.seed);
     const refused = await selectInProcess(f, entry.bounds);
-    assert.equal(refused.reason, "catalog_incompatible", JSON.stringify(refused));
+    assert.equal(refused.reason, entry.reason, JSON.stringify(refused));
     const control = await selectInProcess(f, {});
     assert.equal(control.selection?.candidate?.id, "W1-T1", `positive control: without the reading the copy is admitted ${JSON.stringify(control)}`);
   });
