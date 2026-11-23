@@ -3,7 +3,7 @@ import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult, type
 import { planDestinationRepository } from "../../lib/plan-destination.js";
 import type { RunTaskCommandHost, GitRunner, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, CensusPushRefusal, FixRoundPushReceipt } from "./run-task-verb.js";
 import { buildBaseProofDir, releaseBaseProofDir, type BaseProofDir } from "../../lib/check-proof.js";
-import { conflictRoundProgressVerdict, judgeFixProgress, resolveFixProgress, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict, type FixProgressWorkerProofResult, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
+import { conflictRoundProgressVerdict, fixRoundCapabilityFor, judgeFixProgress, resolveFixProgress, rowPrNumber, type FixProgressJudge, type FixProgressResult, type FixProgressVerdict, type FixProgressWorkerProofResult, reviewerProofFailures, unfiledScopeGrant, UNFILED_SCOPE_GRANT_ANSWER } from "../../lib/fix-progress-judge.js";
 import { openEscalationRelease, PARKED_PR_REMEDY_STEP } from "../../lib/parked-pr-remedy.js";
 import { buildFixProgressInputWithHostedProofs, conflictRoundHeldHead, fixRoundArchiveRows, readHostedFixProofResults, readSweepRepairHistory, reservePlanRepairTaskId, type HostedFixProofReader } from "../../lib/sweep.js";
 import { parseWhitelistedProof, execWhitelistedProofAsync, proofChildCommand, buildProofEnv, type AsyncProofSpawner } from "../../lib/review.js";
@@ -37,6 +37,7 @@ import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "../../li
 import { createPlanPrRest, probeExistingPlanPr, renderAcceptanceBlock } from "../../lib/plan-pr-emitter.js";
 import { findTaskShard, parseProofAmendmentProposal, requestProofAmendment, requestScopeAmendment, isUngrantableInstrumentPath, SCOPE_AMENDMENT_RETRYABLE_REFUSALS, saveScopeAmendmentWork, restoreScopeAmendmentWork, type ScopeAmendmentOutcome, type ScopeAmendmentRequest, type ProofAmendmentOutcome } from "../../lib/proof-amendment.js";
 import { appendLedger, isSpawnInfraBlockedError, LEDGER_COST_TAG_INFRA } from "../../lib/ledger.js";
+import { prUrlKey } from "../../lib/ledger-carry.js";
 import { setDanglingRefRepairLog } from "../../lib/git-fetch-retry.js";
 import { systemClock } from "../../lib/clock.js";
 import { FIX_SELF_CHECK_EXTRA_TURNS, FIX_SELF_CHECK_TIMEOUT_MS, buildFixSelfCheckPrompt, decideFixSelfCheck, fixSelfCheckUnclearedLines, metCriteriaForFix, runBoundedFixSelfCheck, type FixSelfCheckDecision, type FixSelfCheckRunArgs, type FixSelfCheckRunResult } from "../../lib/fix-self-check.js";
@@ -47,6 +48,7 @@ import { fixLaneBenchmarkWork } from "../../lib/benchmark-run.js";
 import { captureCiRemedyComponent, recordCiRemedyExecution } from "../../lib/ci-remedy-execution.js";
 import { loadPlan, visibleCriteria, type AcceptanceCriterion, type Plan } from "../../lib/plan.js";
 import { loadMounts, mountsPath, type Mount } from "../../lib/mounts.js";
+import { codexCapabilityBelow, codexCapabilityForRequestedModel } from "../../lib/worker-provider.js";
 import { fixArmEvidence, fixRoutingWeights, readFixRoutingRows, type FixLearnedArms } from "../../lib/fix-routing-learner.js";
 import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, SKILL_WITHHOLDING_SHARE, skillWithheldUnderRetirement, stagedSkillRetirements } from "../../lib/skill-workshop.js";
 import { SKILL_ARM_EPOCH, TASK_ARM_UNIT, taskArmWithheld } from "../../lib/task-arm.js";
@@ -2431,6 +2433,21 @@ type FixRungOptions = Parameters<RunTaskCommandHost["runFixRung"]>[0] & {
   ) => ReturnType<Parameters<RunTaskCommandHost["runFixRung"]>[0]["deps"]["waitForCiGreen"]>;
 };
 
+function fixRoundRoutingLedger(persisted: readonly Record<string, unknown>[], local: readonly Record<string, unknown>[],
+  taskId: string, prNumber: number | undefined, prUrl: string): Record<string, unknown>[] {
+  const rows = new Map<string, Record<string, unknown>>();
+  const target = prUrlKey(prUrl)?.toLowerCase();
+  for (const row of [...persisted, ...local]) {
+    const pr = rowPrNumber(row);
+    const keyForPr = prUrlKey(row.repair_pr_url ?? row.pr_url)?.toLowerCase();
+    if (row.step !== "pr.terminal" && (row.task_id !== taskId || (pr !== undefined && pr !== prNumber) ||
+      (target !== undefined && keyForPr !== undefined && target !== keyForPr))) continue;
+    const key = typeof row.round_id === "string" ? `${row.step}:${row.round_id}` : JSON.stringify(row);
+    rows.set(key, { ...rows.get(key), ...row });
+  }
+  return [...rows.values()];
+}
+
 function earlyCiRecheck(opts: FixRungOptions, readFailures: NonNullable<FixRungOptions["readEarlyCiFailures"]>) {
   const headSha = opts.initialReview.headSha;
   const known = new Set((opts.ciFailures ?? []).map(({ name }) => name));
@@ -2644,6 +2661,8 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
   // of targeting the check that is actually still red.
   let noReviewYet = opts.ciFailures !== undefined;
   let currentCiFailures = opts.ciFailures;
+  let partialFixCi = false;
+  const routingCapabilities = opts.stepUpMount ? loadMounts(mountsPath(repoRoot)).capabilities : undefined;
   // W1-T2804: the head sha THIS rung's most recent gate read judged. Seeded from the dispatching
   // sweep's own resolved head so round 1 is pinned too, then re-pinned by every gate read. It is
   // never independently resolved here — a second read is a second chance to skew.
@@ -2999,6 +3018,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
             openEscalationRelease(opts.pendingAnswer, history, prNumber, head)) !== undefined);
       },
     );
+    let pendingFixChecks = noReviewYet && partialFixCi ? ["CI"] : [];
     let preStrikeStandDown = await fixRungStandDownReason(
       deps.readLiveState,
       opts.prUrl,
@@ -3006,7 +3026,11 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       deps.log,
       deps.readLiveHead ? { readLiveHead: deps.readLiveHead, rungOwnHeadSha } : undefined,
       noReviewYet && currentCiFailures && currentCiFailures.length > 0 && deps.readCiRollup
-        ? { redNames: currentCiFailures.map((f) => f.name), readRollup: deps.readCiRollup }
+        ? { redNames: currentCiFailures.map((f) => f.name), readRollup: async (url) => {
+          const rollup = await deps.readCiRollup!(url);
+          pendingFixChecks = pendingQualityGateNames(rollup, opts.requiredContexts);
+          return rollup;
+        } }
         : undefined,
       // Skipped whenever `currentMergeConflict` is already set — that mode already owns a dirty
       // read correctly (design note iv); this check exists for every OTHER mode, where a dirty
@@ -4636,6 +4660,38 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // The final fresh strike steps up: the fix mount has already failed this PR at least once.
     const strikeMount = opts.stepUpMount && round === "fresh" && attempt >= opts.strikeCap ? opts.stepUpMount : opts.mount;
     if (strikeMount !== opts.mount) deps.log("fix.step_up", { strike: attempt, from: opts.mount.model, to: strikeMount.model });
+    const mountTier = codexCapabilityForRequestedModel(routingCapabilities, strikeMount.model);
+    const stepUpTier = codexCapabilityForRequestedModel(routingCapabilities, opts.stepUpMount?.model);
+    const ladder = routingCapabilities?.ladder;
+    const stepUp = strikeMount !== opts.mount || (ladder !== undefined && ladder[mountTier]! >= ladder[stepUpTier]!);
+    const lowerTier = stepUp ? undefined : codexCapabilityBelow(routingCapabilities, strikeMount.model);
+    let startReason: "step-up" | "escalated" | "economy-first" | "no-codex-capacity" | "operator-preference" | undefined =
+      stepUp ? "step-up" : undefined;
+    let escalation: Extract<ReturnType<typeof fixRoundCapabilityFor>, { start: "mount-tier" }>["escalation"];
+    if (lowerTier !== undefined) {
+      const ledger = fixRoundRoutingLedger([...(repairHistory?.ok ? repairHistory.rows : []), ...roundLedger],
+        roundRows, opts.taskId, prNumber, opts.prUrl);
+      const currentRed = currentMergeConflict !== undefined
+        ? (conflictedFilePaths(currentMergeConflict) ?? []).map(path => `conflict:${path}`)
+        : noReviewYet ? (currentCiFailures ?? []).map(f => f.name)
+        : review.criteria.filter(criterion => !criterion.met).map(criterion => `review:${criterion.claim}`);
+      const { rounds } = buildFixProgressInput({ taskId: opts.taskId, prNumber, headSha: currentPrHeadSha,
+        currentRed, pendingChecks: pendingFixChecks, ledger });
+      const decision = fixRoundCapabilityFor({ rounds, ledger, currentHead: currentPrHeadSha });
+      if (decision.start === "mount-tier") {
+        startReason = "escalated";
+        const failedRoundId = decision.escalation?.failedRoundId;
+        if (failedRoundId && !ledger.some(row => row.failed_round_id === failedRoundId &&
+          (row.step === "fix.economy_escalated" || row.start_reason === "escalated"))) escalation = decision.escalation;
+      }
+    }
+    const startFields = () => startReason === undefined ? {} : {
+      start_reason: startReason,
+      start_capability: startReason === "economy-first" ? lowerTier : mountTier,
+      // CI-only retries can run at the new PR tip while the review still names the preceding head.
+      ...(currentPrHeadSha !== priorHeadSha ? { start_head_sha: currentPrHeadSha } : {}),
+      ...(escalation ? { failed_round_id: escalation.failedRoundId } : {}),
+    };
     // W1-T5535: a mount that names its provider bypasses the auction, so there is nothing to learn for.
     const learnedArms = strikeMount.provider === undefined ? await fixLearnedArmsFor(deps, { strike: attempt, round }) : undefined;
     const fixArgs: SpawnWorkerArgs = {
@@ -4667,6 +4723,9 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       runId: opts.runId,
       taskId: opts.taskId,
       ...(learnedArms ? { providerRouting: { learnedArms } } : {}),
+      ...(lowerTier !== undefined && startReason === undefined ? { economyFirst: {
+        codexCapability: lowerTier, onDecision: (reason) => { startReason = reason; },
+      } } : {}),
     };
 
     // W1-T4458 (i): the harness starts the merge a shell-less round cannot run, so the worker only
@@ -4774,6 +4833,15 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         snapshot: { headSha: priorHeadSha, failingChecks: (priorCiFailures ?? []).map((f) => f.name) },
         fixRound: { prUrl: opts.prUrl, branch: opts.branch },
       }), deps.log);
+      if (escalation) {
+        const result = spawnOutcome.kind === "spawned" ? spawnOutcome.result : undefined;
+        deps.log("fix.economy_escalated", { strike: attempt, round_id: roundId, pr_number: prNumber,
+          repair_pr_url: opts.prUrl, head_sha: currentPrHeadSha,
+          from: lowerTier, to: mountTier, from_model: escalation.fromModel, to_model: result?.servedModel ?? null,
+          ...(result?.servedModel == null ? { to_model_reason: result?.servedModelReason ?? result?.notStarted ??
+            (result ? "the provider reported no served model" : spawnOutcome.kind) } : {}),
+          failed_round_id: escalation.failedRoundId, cause: escalation.cause });
+      }
       if (recheck && spawnOutcome.kind !== "spawned") await recheck.refresh(roundId);
       if (spawnOutcome.kind === "superseded") {
         const s = spawnOutcome.superseded;
@@ -5102,6 +5170,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       retriggers += 1;
       deps.log("fix.retrigger", {
         ...roundDiffEvidence,
+        ...startFields(),
         round_id: roundId,
         head_sha: priorHeadSha,
         retrigger: retriggers,
@@ -5123,6 +5192,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       deps.log("fix.dispatch", {
         round_id: roundId,
         ...fixReceipt.joinFields(),
+        ...startFields(),
         strike: attempt,
         strike_cap: opts.strikeCap,
         unmet_count: unmet.length,
@@ -5780,6 +5850,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // independent head resolution between the two halves of a single decision.
     currentPinnedSha = ciGateSha(ci) ?? currentPinnedSha;
     currentPrHeadSha = ciGateSha(ci) ?? landing.remoteHead ?? expectedHeadShaForPush ?? currentPrHeadSha;
+    partialFixCi = host.ciGateState(ci) === "timeout";
     if (host.ciGateState(ci) !== "green") {
       deps.log("fix.ci_not_green", { strike: strikes, ci: host.ciGateState(ci), sha: ciGateSha(ci) });
       // W1-T138 (the #303/#305/#292/#315 fix): no review ran for THIS push
