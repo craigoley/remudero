@@ -440,7 +440,7 @@ export interface ShadowVerdict {
     memAvailableMib: number | null;
     /** Every live tree's remaining p90 claim summed (the host rule through #10763), for comparison only. */
     unrealizedMib: number;
-    /** What the host check counts: every tree's typical growth plus the ONE tail allowance (a tree's or a daemon's). */
+    /** In the legacy model, the host claim adds each validating tree's tail to typical growth and the shared tail. */
     hostClaimMib: number;
     /** W1-T9762: the same claim were no live tree decayed by its class's measured time to peak, for comparison only. */
     hostClaimUndecayedMib: number;
@@ -762,7 +762,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       hostClaimUndecayedMib: hostClaimUndecayed,
       hostTypicalMib: inputs.jointClaim ? inputs.jointClaim.hostMib : typicalAll,
       hostTailMib: inputs.jointClaim ? daemonTail : hostTail,
-      validatingTails,
+      "validatingTails": validatingTails,
       validatingTailsMib: inputs.jointClaim ? 0 : validatingTailsMib,
       hostClaimOneTailMib: hostClaimOneTail,
       unrealizedOwnContainerMib: unrealizedOwn,

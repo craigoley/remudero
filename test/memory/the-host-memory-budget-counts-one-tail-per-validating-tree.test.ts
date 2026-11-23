@@ -111,6 +111,9 @@ function ports(trees: Tree[], memAvailableMib: number, rows: LedgerLine[], opene
     readLedger: () => h.reading,
     policy: () => POLICY,
     write: (_path, row) => void rows.push(row),
+    writeFile: () => undefined,
+    calibrationSamples: () => [],
+    publishCalibration: () => undefined,
     stderr: () => undefined,
     instance: () => "state2",
     daemonPid: () => 777,
@@ -119,6 +122,7 @@ function ports(trees: Tree[], memAvailableMib: number, rows: LedgerLine[], opene
     typical: (cls) => TYPICAL[cls] ?? 1024,
     survival: (_cls, ageMs) => ({ factor: h.factorAt.get(ageMs) ?? 1, samples: 30 }),
     readReviewDemand: () => ({ state: "present", rows: [], unreadableRows: 0 }),
+    readHostServe: () => ({ state: "unknown", cause: "local-only", basis: "test fixture" }),
     enforceHere: () => true,
     withLock: (action) => action(),
     openReservation: (input) => {
@@ -237,6 +241,16 @@ test("W1-T14155 criterion 3: with no live validating tree the claim is today's, 
   assert.equal(quiet.numbers.validatingTailsMib, 0);
   assert.equal(quiet.numbers.hostClaimMib, quiet.numbers.hostClaimOneTailMib);
   assert.equal(quiet.numbers.hostClaimMib, quiet.numbers.hostTypicalMib + quiet.numbers.hostTailMib);
+  resetShadowMemoryStateForTests();
+  const rows: LedgerLine[] = [];
+  const p = ports(window1222(), 9234, rows, [], () => undefined);
+  recordShadowMemoryVerdict({ workerClass: "fix", root: ROOT }, { ...p, policy: () => ({ ...POLICY, mode: "shadow" }) });
+  const row = rows.find((r) => r.step === "memory_budget.shadow");
+  assert.ok(row, "the quiet host writes a shadow row");
+  const n = row.numbers as Record<string, number>;
+  assert.equal(n.validatingTails, 0);
+  assert.equal(n.hostClaimMib, quiet.numbers.hostClaimMib);
+
   // A test run that has ended leaves its tree with today's claim.
   const ended = evaluateShadowMemory(snapshot([...window1222({ F1: ["t"] }), testRun("t", 1, true)], 9234), POLICY);
   assert.equal(ended.numbers.validatingTails, 0);
