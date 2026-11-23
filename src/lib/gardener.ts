@@ -160,6 +160,8 @@ export function gardenUnitJournal<T = unknown>(
       }
     }
   } catch (error) {
+    // An unreadable journal reads as empty, so every unit re-runs; report() writes one
+    // garden.unit_journal_failed row (a missing file is the normal first pass).
     units.clear();
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") report("read", error);
   }
@@ -178,6 +180,7 @@ export function gardenUnitJournal<T = unknown>(
         writeAtomic(path, JSON.stringify({ version: 1, period, units: snapshot }) + "\n");
         units.set(key, unit);
       } catch (error) {
+        // An unwritten unit is not remembered, so the next pass re-runs it; report() writes one row.
         report("write", error);
       }
     },
