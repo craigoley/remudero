@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  budget_usd: 10.00
+  budget_usd: 4.50
   risk: high # spans the host-update nightly script and the ledger snapshot writer; both must agree on one snapshot name
   band_meaning: span
   origin: "operator-session#pr-backlog-round5-2026-11-20"

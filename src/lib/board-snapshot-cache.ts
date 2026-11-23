@@ -756,7 +756,8 @@ export function createBoardSnapshotCache(root: string, owner: string, repo: stri
     const kept = new Set<number>();
     const changed = new Map<number, ClosedDiskRow>();
     try {
-      if (rows.length > maxRows) throw new SnapshotRefusal("row_limit");
+      const retained = channel === "closed" ? state.issues : state.closed;
+      if (rows.length + (retained?.size ?? 0) > maxRows) throw new SnapshotRefusal("row_limit");
       if (channel === "closed") {
         const closed = rows as readonly BoardPrRest[];
         for (const row of closed) {

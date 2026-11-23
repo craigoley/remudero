@@ -71,27 +71,35 @@ engine_schedule="$(engine_history | run_bounded jq -sr --arg since "$since" --ar
     if .seen[$key] then . else .seen[$key] = true | .rows += [$row] end
   ) | .rows | map(. + {at: (.ts | epoch)}) | sort_by(.at) |
   reduce .[] as $row (
-    {deferral_s: 0, empty_wake_run: 0, armed: false, boot: null, pending: null};
+    {deferral_s: 0, empty_wake_run: 0, armed: false, boot: null, pending: null, empty_boot: null};
     if $row.step == "daemon.idle_starved.engine_wake" then
       .armed = ($row.reason == "engine_revision_changed") | .boot = null
     elif $row.step == "daemon.boot" then
       .boot = (if .armed then $row.at else null end) | .armed = false
     elif $row.step == "dispatch.claim" then
-      .deferral_s = 0 | .empty_wake_run = 0 | .boot = null | .armed = false | .pending = null
+      .deferral_s = 0 | .empty_wake_run = 0 | .boot = null | .armed = false | .pending = null | .empty_boot = null
     elif $row.step == "daemon.idle_starved.enter" then
       if .boot != null and $row.at > .boot then
-        .deferral_s += ($row.at - .boot) | .empty_wake_run += 1
+        .deferral_s += ($row.at - .boot) | .empty_wake_run += 1 | .empty_boot = .boot
       else . end | .boot = null | .armed = false
     elif $row.step == "daemon.idle_starved.engine_deferred"
       and $row.idle_since == $since and $row.engine_base_sha == $baseline then
       .pending = (.pending // $row)
     else . end
   ) |
-  [(.deferral_s | ceil), .empty_wake_run, (.pending.deferred_at_s // $now), (.pending.engine_head_sha // "none")] | @tsv
+  [(.deferral_s | ceil), .empty_wake_run, (.pending.deferred_at_s // $now), (.pending.engine_head_sha // "none"), (if .empty_boot == null then "none" else (.empty_boot | floor) end)] | @tsv
 ')" || exit 2
-IFS=$'\t' read -r deferral_s empty_wake_run deferred_at_s pending_head <<< "$engine_schedule"
+IFS=$'\t' read -r deferral_s empty_wake_run deferred_at_s pending_head empty_boot_at <<< "$engine_schedule"
+# After an engine wake that found no work, an engine change alone waits a day from that wake's
+# boot: a quiet site daemon spent 53 of 60 weekly wakes on engine changes (2026-11-23). Any real
+# work (PR board, main, kicks, inbox, approvals) still wakes at once and re-syncs the tree.
+ENGINE_DAY_S=86400
+engine_due_s=$((deferred_at_s + deferral_s))
+if [ "$empty_boot_at" != none ] && [ "$((empty_boot_at + ENGINE_DAY_S))" -gt "$engine_due_s" ]; then
+  engine_due_s=$((empty_boot_at + ENGINE_DAY_S))
+fi
 if [ "$engine_head" != "$engine_base_sha" ] || [ "$pending_head" != none ]; then
-  if [ "$deferral_s" -eq 0 ] || [ "$now" -ge "$((deferred_at_s + deferral_s))" ]; then
+  if { [ "$deferral_s" -eq 0 ] && [ "$empty_boot_at" = none ]; } || [ "$now" -ge "$engine_due_s" ]; then
     engine_wake engine_revision_changed "$engine_head"
     exit 10
   fi

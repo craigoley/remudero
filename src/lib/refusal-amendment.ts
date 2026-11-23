@@ -32,7 +32,7 @@ import {
   writePriorRefusal,
 } from "./dispatch-repair.js";
 import type { Task } from "./plan.js";
-import type { PlanPrPreflightCheck, PlanPrPreflightFinding } from "./plan-pr-emitter.js";
+import { escapeGrepLiteral, type PlanPrPreflightCheck, type PlanPrPreflightFinding } from "./plan-pr-emitter.js";
 import { parseCriterionRefusals, type CriterionRefusalClass } from "./review.js";
 import { isTaskShardName } from "./task-shard-name.js";
 
@@ -413,6 +413,11 @@ export function refusalAmendmentBranch(taskId: string): string {
   return `refusal-amendment/${taskId}`;
 }
 
+/** The PR-body proof: a BRE grep for the comment prefix of this run only. */
+export function refusalAmendmentProof(taskId: string, runId: string, relPath: string): string {
+  return `grep: ${escapeGrepLiteral(`refusal-amendment (${taskId}, run ${runId},`)} in ${relPath}`;
+}
+
 /** Draft the ONE plan-only amendment PR for `candidate`. Never throws: a failure is an `error`
  *  outcome the caller leaves un-ledgered so the next pass retries. */
 export async function draftRefusalAmendment(
@@ -450,7 +455,7 @@ export async function draftRefusalAmendment(
         `the task proposing the change each category implies; it edits no claim, proof or files field. ` +
         `An Architect makes the change — nothing here is merged unreviewed.`,
       claim: `the shard records the worker's refusal of ${taskId} and the amendment it implies`,
-      proof: `grep: refusal-amendment (${taskId} in ${shard.relPath}`,
+      proof: refusalAmendmentProof(taskId, runId, shard.relPath),
     });
     return created.prUrl ? { ...base, outcome: "drafted", prUrl: created.prUrl } : { ...base, outcome: "waiting" };
   } catch (e) {
