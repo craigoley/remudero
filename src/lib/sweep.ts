@@ -4617,14 +4617,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       // W1-T12046: a PR with no stall question of its own, stalled for a cause another PR's open stall issue (or one
       // this pass opened) already names, is listed on that issue by a comment instead of opening its own.
       const joinStallCause = async (key: string): Promise<boolean> => {
-        if (!issues.listOpen || !issues.comment) return false;
-        let open: OpenIssue[];
-        try { open = await issues.listOpen(NEEDS_HUMAN_LABEL); }
-        catch (error) {
-          causeRead = { error };
-          return false;
-        }
-        causeRead = { open };
+        const listOpen = issues.listOpen;
+        if (!listOpen || !issues.comment) return false;
+        // Settled to a value: a failed read reaches the gateway, which ledgers it as `escalation.dedup_unreadable`.
+        const read = await Promise.resolve().then(() => listOpen(NEEDS_HUMAN_LABEL))
+          .then((open): { open: OpenIssue[] } => ({ open }), (error: unknown): { error: unknown } => ({ error }));
+        causeRead = read;
+        if ("error" in read) return false;
+        const open = read.open;
         if (openStallQuestionForPr(open, pr, { class: cls, taskId: escalationTaskIdFor(pr), cause }) !== undefined) return false;
         const listed = openStallCauseIssue(open, pr, key);
         const ours = stallCauseIssues.get(key);
