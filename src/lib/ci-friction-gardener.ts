@@ -9,7 +9,7 @@ import { checkoutHeadStamp } from "./checkout-head.js";
 import { RULE_SUITE_NAME_RE } from "./ci-parity.js";
 import { ghIssueGatewayAsync, type Escalation } from "./escalate.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
-import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter } from "./gardener.js";
+import { prepareGardenTaskIds, gardenLedgerBucket, gardenUnitJournal, type GardenTaskIdMinter } from "./gardener.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { ghExec, ghTextAsync } from "./github-transport.js";
 import { gateFireRatesPath, type GateFireRate, type GateFireRateReport } from "./gate-fire-rate.js";
@@ -17,6 +17,7 @@ import { ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, readLedge
 import { readOriginMainSha } from "./inbox.js";
 import { loadPlanFromYaml, newTestPath, type Task } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { readGardenerOrigin } from "./worker-containment.js";
 import { proofResolvabilityViolations } from "./task-linter.js";
 import { machineShardFilingRefusal, machineShardLandingGuard, machineShardLint, renderMachineShard } from "./machine-filing.js";
 import { retirementReopensAt, type RetirementDated } from "./mechanical-rulings.js";
@@ -136,6 +137,42 @@ export function withoutBirthRounds(rounds: readonly CiFrictionRound[], search: P
     const file = round.cause.kind === "check" ? /^test:(test\/[\w./-]+\.test\.[mc]?[jt]s)(?::flaky)?$/.exec(round.cause.name)?.[1] : undefined;
     return file === undefined || addedByPr(file) !== round.pr;
   });
+}
+
+type CiFrictionOwnerSearch = OwnerSearch & { historyRevision?: () => string };
+
+function journaledBirthRounds(
+  rounds: readonly CiFrictionRound[], search: CiFrictionOwnerSearch, deps: GardenerDeps, period: number,
+): CiFrictionRound[] {
+  const { addedByPr, historyRevision } = search;
+  if (!addedByPr || !historyRevision) return withoutBirthRounds(rounds, search);
+  const journal = gardenUnitJournal<number | null>(deps.stateDir, "ci-friction", period, {
+    log: deps.log,
+    isResult: (value): value is number | null => value === null || (typeof value === "number" && Number.isSafeInteger(value)),
+  });
+  const seen = new Map<string, number | undefined>();
+  let digest: string | undefined;
+  let resumed = 0;
+  let fresh = 0;
+  const filtered = withoutBirthRounds(rounds, { addedByPr: (file) => {
+    if (seen.has(file)) return seen.get(file);
+    digest ??= createHash("sha256").update(`adding-pr:v1:${historyRevision()}`).digest("hex");
+    const saved = journal.get(file, digest);
+    if (saved !== undefined) {
+      resumed++;
+      seen.set(file, saved ?? undefined);
+      return saved ?? undefined;
+    }
+    const pr = addedByPr(file);
+    journal.done(file, digest, pr ?? null);
+    fresh++;
+    seen.set(file, pr);
+    return pr;
+  } });
+  const origin = readGardenerOrigin();
+  deps.log("ci-friction.pass", { resumed_units: resumed, fresh_units: fresh,
+    ...(origin?.state === "linked" && origin.name === "ci-friction" ? { passId: origin.passId } : {}) });
+  return filtered;
 }
 
 /** A manual change records file overlap, not proof that a particular check failed or was repaired.
@@ -1145,7 +1182,7 @@ export function isCiFrictionTestFile(file: string): boolean {
 /** Pin fetched main for literal source reads and declared workflow identities (W1-T6311).
  *  Missing paths are absence and failed git reads refuse the pass; a workflow shape it cannot name, or two
  *  owners it cannot tell apart, is a gap for that check alone ({@link OwnerSearch.workflowGaps}). */
-export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/main"): OwnerSearch {
+export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/main"): CiFrictionOwnerSearch {
   let revision: string | undefined;
   const pinned = (): string => {
     if (!revision) {
@@ -1163,6 +1200,7 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
   const addedBy = new Map<string, number | undefined>();
   return {
     pin: () => gitCiFrictionOwnerSearch(git, refName),
+    historyRevision: pinned,
     readSource: (file) => git(["show", `${pinned()}:${file}`]),
     addedByPr: (file) => {
       if (!addedBy.has(file)) {
@@ -1734,7 +1772,7 @@ export interface CiFrictionGardenSources {
   /** Every ci-friction task on fetched main, with when its build merged ({@link readCiFrictionPlanState}). */
   planState: () => CiFrictionPlanState;
   /** Finds the code a cause's rounds name ({@link locateCiFrictionOwner}). */
-  ownerSearch: OwnerSearch;
+  ownerSearch: CiFrictionOwnerSearch;
   /** THE RESERVATION PATH (task-id-reservation.ts via `ciLearningTaskIdMinter`, run-task.ts),
    *  never `max(id)+1` — see that minter's own doc for why. */
   mintTaskId: GardenTaskIdMinter;
@@ -1944,10 +1982,11 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       return `${head}:${gardenLedgerBucket(clock)}:${liveAccessStamp()}:${fileStamp(report)}:${archives}`;
     },
     inventory: () => {
+      const period = gardenLedgerBucket(clock);
       const records = sources.ledgerRecords();
       const plan = sources.planState();
-      const ownerSearch = sources.ownerSearch.pin?.() ?? sources.ownerSearch;
-      const ledgerRounds = withoutBirthRounds(ciFrictionRoundsFromLedger(records), ownerSearch);
+      const ownerSearch: CiFrictionOwnerSearch = sources.ownerSearch.pin?.() ?? sources.ownerSearch;
+      const ledgerRounds = journaledBirthRounds(ciFrictionRoundsFromLedger(records), ownerSearch, deps, period);
       const hand = sources.handFixes?.();
       if (hand?.state === "unmeasured") deps.log("ci-friction.hand_fixes_unmeasured", { reason: hand.reason });
       const gateFireRates = sources.gateFireRates?.();
