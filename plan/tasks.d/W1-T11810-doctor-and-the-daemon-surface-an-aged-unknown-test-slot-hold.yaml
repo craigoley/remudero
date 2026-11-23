@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 6.00
+  budget_usd: 4.50
   risk: high  # Rule 19 merits test YES: one invariant (`rmd doctor` reports test-slot-holds) needs the doctor.ts judge AND its doctorCommand input gather together; report-only, no release path
   band_meaning: span
   origin: architect
