@@ -295,6 +295,7 @@ export function buildSweepEffects(
     addWorktree: realDeps().reviewWorktree.addWorktree,
     worktreeRoot: join(repoRoot, "..", "worktrees"),
     spawnReview: spawnRmdReviewForFreshTree,
+    storeFill: { log: deps.log },
   };
   const readReviewerCodeFreshness = reviewerCodeFreshnessImpl ?? (() => checkReviewerCodeFreshnessAsync(repoRoot, process.env));
   const judgeReviewerCode = reviewerCodeJudge(readReviewerCodeFreshness, repoRoot);
@@ -685,7 +686,7 @@ export function buildSweepEffects(
     waitForCiGreenImpl: waitForCiGreen,
     restRollupForImpl: restRollupFor,
     fetchCiFailuresImpl: fetchCiFailuresAsync,
-    runReviewImpl: buildRequiredFixReviewRunner(runReview, readReviewerCodeFreshness),
+    runReviewImpl: buildRequiredFixReviewRunner(runReview, readReviewerCodeFreshness, { gate: reviewerCodeGate, readHead: readHeadShaRest }),
     fetchPrBodyImpl: fetchPrBodyViaGh,
     // W1-T3869: the missing-trailer repair's writer. Unwired, `requiredSweepRuntime` throws
     // `buildSweepEffects requires updatePrBodyImpl from its entrypoint adapter` the moment

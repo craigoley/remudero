@@ -68,7 +68,8 @@ test("W1-T10614: a failing Wreckterra test cannot produce a passing proof", (t) 
 
 test("managed discovery includes only the exact owned Wreckterra addition", () => {
   const registry = JSON.parse(readFileSync(join(REPO_ROOT, ".remudero/managed-repos.json"), "utf8"));
-  assert.deepEqual(registry.repos, ["craigoley/remudero-site", "craigoley/remudero-console", "craigoley/wreckterra"]);
+  // W1-T14552 adds oley-arcade for maintenance intake only; it registers no proof runner.
+  assert.deepEqual(registry.repos, ["craigoley/remudero-site", "craigoley/remudero-console", "craigoley/wreckterra", "craigoley/oley-arcade"]);
 });
 
 test("existing registered proof runners retain their roots and target ownership", () => {

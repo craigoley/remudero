@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 8.00
+  budget_usd: 4.50
   risk: high  # Rule 19: one concern, which process forks serve's per-pass children; what each child runs and answers is unchanged
   band_meaning: span
   origin: "coordinator brief file1020c item 2 (2026-10-20); the expected-cost paragraph of PR #13207's body (logs-8864/c5-pr-body.md)"

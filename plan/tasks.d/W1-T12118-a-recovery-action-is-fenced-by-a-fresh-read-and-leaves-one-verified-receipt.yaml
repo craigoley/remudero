@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 14.00
+  budget_usd: 4.50
   risk: high  # Rule 19: one concern (how a recorded recovery's action is fenced, receipted and verified); the record module plus its sweep call site
   band_meaning: span
   priority: 2

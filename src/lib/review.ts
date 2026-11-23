@@ -12993,6 +12993,8 @@ export type RequiredStatusContextsReader = (
   readText: (args: string[]) => Promise<string>,
 ) => Promise<{ kind: string; reason?: string }>;
 
+export type ReviewAdmission = "start-gate" | "fresh-tree-child" | "required-fix" | "operator" | "direct";
+
 export interface PostReviewStatusGuardedOpts {
   owner: string;
   repo: string;
@@ -13026,6 +13028,7 @@ export interface PostReviewStatusGuardedOpts {
    * material stale or unprovable code withholds the verdict; an allowed verdict names this SHA in
    * its commit-status description. Pending is progress, not a verdict, and remains publishable. */
   reviewerCodeFreshness?: ReviewerCodeFreshness;
+  finishedReview?: { admission: ReviewAdmission; reviewerMs: number };
   /** Fresh lifecycle read for THIS attempt — real callers pass `() => fetchPrLifecycle(prUrl)`,
    * tests inject a fake. Called INSIDE the lock, never before (see the module doc above). */
   fetchLifecycle: () => PrLifecycleState | Promise<PrLifecycleState>;
@@ -13355,6 +13358,14 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
       ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
       ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
     });
+    if (freshness.status === "stale" && opts.finishedReview !== undefined) {
+      appendLedger(opts.ledgerPath, {
+        run_id: opts.runId, task_id: opts.taskId, step: "review.refused_after_finished_review",
+        pr_url: opts.prUrl ?? null, head_sha: opts.sha, attempted_state: opts.state,
+        admission: opts.finishedReview.admission, reviewer_ms: opts.finishedReview.reviewerMs,
+        reviewer_code_sha: freshness.codeSha, origin_main_sha: freshness.originMainSha,
+      });
+    }
     return { posted: false, reason: freshnessRefusal };
   }
   // W1-T14035: every pending post names its own run, so a hold is told apart from a newer run's status by its owner.

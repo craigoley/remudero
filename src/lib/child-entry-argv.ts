@@ -311,7 +311,7 @@ export const DAEMON_TREE_FILL_SOURCE = "daemon-tree";
 /** This package's root: the HARNESS_ROOT garden-registry.ts, preopen-gate.ts and pr-open.ts launch from. */
 const OWN_TREE = fileURLToPath(new URL("../../", import.meta.url));
 /** W1-T9601: the misses a fill answers, meaning no build of this tree's source exists yet. A refused stored build is not one. */
-const FILLABLE_MISSES: ReadonlySet<string> = new Set(["no-stored-build", "store-empty"]);
+export const FILLABLE_MISSES: ReadonlySet<string> = new Set(["no-stored-build", "store-empty"]);
 
 /**
  * W1-T9601: on a fillable miss for the daemon's own tree in a daemon-owned process, request one store build for the

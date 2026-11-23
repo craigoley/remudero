@@ -30366,7 +30366,7 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
   openPrs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "mergeQueue" | "readActionsStatusSummary" |
     "readPrFileSource" | "behindMainByPr" | "baseChangedFilesByPr" | "inFlightTaskIds" | "now" | "readLedger" |
-    "appendLine" | "dryRun" | "readBranchProtectionStrict" | "refreshJudge" | "log">,
+    "appendLine" | "dryRun" | "readBranchProtectionStrict" | "refreshJudge" | "log" | "readLiveState">,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   timing?: LightPassPreReviewTiming,
 ): Promise<number | undefined> {
@@ -30417,21 +30417,42 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
       return view.checksState !== "pending" && view.isDependabot !== true && (runTaskId === undefined || !inFlight.has(runTaskId)) &&
         valueGate.admit(c, view, "ready-light");
     });
-    const winner = oldestActivityFirst(eligible.map((c) => byNumber.get(c.prNumber)!), now);
-    const target = eligible.find((c) => c.prNumber === winner?.prNumber);
-    if (!target) return undefined;
-    const settleValue = () => valueGate.settle(target, byNumber.get(target.prNumber)!, "ready-light");
-    if (!(await (timing ? timing.measure("ready_value_gate", settleValue) : settleValue()))) return undefined;
-    const row = {
-      run_id: deps.runId, task_id: target.taskId ?? "SWEEP", pr_number: target.prNumber, pr_url: target.prUrl,
-      head_sha: target.headSha, ...(target.behindBy === undefined ? {} : { behind_by: target.behindBy }),
-      update_reason: target.updateReason,
-      ...(target.matchingBaseFiles === undefined ? {} : { matching_base_files: target.matchingBaseFiles }),
+    const rowFor = (c: ArmedStalledPr) => ({
+      run_id: deps.runId, task_id: c.taskId ?? "SWEEP", pr_number: c.prNumber, pr_url: c.prUrl,
+      head_sha: c.headSha, ...(c.behindBy === undefined ? {} : { behind_by: c.behindBy }),
+      update_reason: c.updateReason,
+      ...(c.matchingBaseFiles === undefined ? {} : { matching_base_files: c.matchingBaseFiles }),
       source: "light_pass",
-    };
+    });
+    // W1-T14315: the snapshot predates the base facts, so a PR that merged since reads its own files as main
+    // moving under it. Each selected PR is read live before its write; a merged, closed or moved one stands
+    // down and the slot passes to the next eligible candidate. An unreadable read refreshes as before.
+    let pool = eligible;
+    let target: ArmedStalledPr | undefined;
+    for (;;) {
+      const winner = oldestActivityFirst(pool.map((c) => byNumber.get(c.prNumber)!), now);
+      target = pool.find((c) => c.prNumber === winner?.prNumber);
+      if (!target) return undefined;
+      const selected = target;
+      const readLive = () => Promise.resolve().then(() => deps.readLiveState?.(byNumber.get(selected.prNumber)!))
+        .catch((): LiveStateResult => ({ ok: false }));
+      const live = await (timing ? timing.measure("ready_update", readLive) : readLive());
+      const notOpen = live?.ok !== true ? undefined : terminalStateReason(live.state) ??
+        (live.headSha !== undefined && live.headSha !== selected.headSha
+          ? `head moved from ${selected.headSha} to ${live.headSha}` : undefined);
+      if (notOpen === undefined) break;
+      appendLine(deps.ledgerPath, { ...rowFor(selected), step: "sweep.update_branch.skipped_not_open", reason: notOpen,
+        ...(live?.state === undefined ? {} : { live_state: live.state }),
+        ...(live?.headSha === undefined ? {} : { live_head_sha: live.headSha }) });
+      pool = pool.filter((c) => c !== selected);
+    }
+    const chosen = target;
+    const settleValue = () => valueGate.settle(chosen, byNumber.get(chosen.prNumber)!, "ready-light");
+    if (!(await (timing ? timing.measure("ready_value_gate", settleValue) : settleValue()))) return undefined;
+    const row = rowFor(chosen);
     appendLine(deps.ledgerPath, { ...row, step: "sweep.update_branch.attempted" });
     try {
-      const update = () => updateBranch(target);
+      const update = () => updateBranch(chosen);
       const outcome = await (timing ? timing.measure("ready_update", update) : update());
       appendLine(deps.ledgerPath, { ...row, step: `sweep.update_branch.${outcome}` });
     } catch (e) {
