@@ -489,3 +489,22 @@ export function readTaskShard(repoDir: string, taskId: string): { relPath: strin
   if (!shardRel) return undefined;
   return { relPath: shardRel, text: readFileSync(join(repoDir, shardRel), "utf8") };
 }
+
+/** The task's shard file at `repoDir`'s origin main, fetched first through `runGit` (rooted at
+ *  `repoDir`): undefined when main has no file for the task; any git failure throws. */
+export async function readTaskShardAtMain(
+  repoDir: string,
+  taskId: string,
+  runGit: (args: string[]) => Promise<string>,
+): Promise<{ relPath: string; text: string } | undefined> {
+  const tracking = "refs/remotes/origin/main";
+  await runGit(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", `+refs/heads/main:${tracking}`]);
+  const sha = (await runGit(["rev-parse", tracking])).trim();
+  const shardDir = relative(repoDir, join(resolveRepoLayout(repoDir).planDir, "tasks.d")).split(sep).join("/");
+  const relPath = (await runGit(["ls-tree", "--name-only", sha, "--", `${shardDir}/`]))
+    .split("\n")
+    .map((line) => line.trim())
+    .find((path) => isTaskShardName(path.slice(path.lastIndexOf("/") + 1), taskId) && /\.ya?ml$/.test(path));
+  if (relPath === undefined) return undefined;
+  return { relPath, text: await runGit(["show", `${sha}:${relPath}`]) };
+}
