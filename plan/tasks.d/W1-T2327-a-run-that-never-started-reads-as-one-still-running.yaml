@@ -20,6 +20,7 @@
   # (src/lib/status-board.ts) requires `status === "blocked"` AND a `retirement` value, which is why
   # W1-T2275 was field-retired and stayed invisible at `queued`.
   status: blocked
+  attempts: 0
   retirement: retired
   rationale: |
     **THE WHOLE BOARD IS DERIVED FROM CHECK-RUNS, AND A RUN THAT NEVER STARTS PRODUCES NONE.**
