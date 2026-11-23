@@ -15,7 +15,7 @@ import { grepProofHeldAt, planCheapFingerprint, planInventory, type PlanInventor
 import { PR_OPEN_SATISFIED_BY_MAIN_STEP } from "./pr-open.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import { INSTRUMENT_SURFACE, commentOnlyGrepProofRefusal, isDialectPrefixed } from "./review.js";
-import { lintTask } from "./task-linter.js";
+import { lintTask, promoteIntroducedPlanOnlyDiagnostics, sharedProofViolations } from "./task-linter.js";
 
 /**
  * The redesign gardener lets the plan Architect amend a held task or propose retirement backed by main.
@@ -434,8 +434,15 @@ export function buildRedesignSources(deps: GardenerDeps, overrides: Partial<Rede
     landingRefusal: (rel, text) => {
       const exists = (p: string) => existsSync(join(deps.repoRoot, p));
       const head = parseTasksFromYaml(text, rel);
-      if (head.some((t) => t.author_class === "machine")) return machineShardFilingRefusal(text, rel, { pathExists: exists, pathExistsAtBase: exists });
       const base = parseTasksFromYaml(readFileSync(join(deps.repoRoot, rel), "utf8"), rel);
+      const sharedProofs = head.flatMap((task) => {
+        const prior = base.find((b) => b.id === task.id);
+        return promoteIntroducedPlanOnlyDiagnostics(
+          sharedProofViolations(task), prior && sharedProofViolations(prior), prior === undefined,
+        ).filter((v) => v.severity === "block").map((v) => `${task.id}: ${v.check}: ${v.message}`);
+      });
+      if (sharedProofs.length > 0) return sharedProofs.join("; ");
+      if (head.some((t) => t.author_class === "machine")) return machineShardFilingRefusal(text, rel, { pathExists: exists, pathExistsAtBase: exists });
       const blocks = (t: Task | undefined) => new Map((t === undefined ? [] : lintTask(t, { moduleExists: exists }).violations)
         .filter((v) => v.severity === "block").map((v) => [v.check, v.message]));
       const reasons = head.flatMap((t) => {
