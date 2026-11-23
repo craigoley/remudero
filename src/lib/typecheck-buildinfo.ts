@@ -62,7 +62,7 @@ export function learnedTypecheckWarmPeakBytes(ledgerPath: string): number {
   } catch (error) {
     // No ledger yet is the common fresh-host case and names nothing; any other failure is said once per check.
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      process.stderr.write(JSON.stringify({ step: "typecheck.warm_peak_unread", reason: String(error) }) + "\n");
+      process.stderr.write(`typecheck: the warm peak could not be learned (${String(error)}); admitting at the cold peak\n`);
     }
     return TYPECHECK_COLD_PEAK_BYTES;
   }

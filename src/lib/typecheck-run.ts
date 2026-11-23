@@ -94,7 +94,7 @@ export function typecheckAdmissionPeak(root: string, warm: boolean): number {
     return learnedTypecheckWarmPeakBytes(typecheckLedgerPath(root));
   } catch (error) {
     // An unreadable live-ledger config names no ledger: the warm check fails closed, at the cold peak.
-    process.stderr.write(JSON.stringify({ step: "typecheck.warm_peak_unread", reason: String(error) }) + "\n");
+    process.stderr.write(`typecheck: the warm peak could not be learned (${String(error)}); admitting at the cold peak\n`);
     return typecheckPeakBytes(false);
   }
 }
