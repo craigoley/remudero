@@ -2289,15 +2289,22 @@ export function reconcileDependabotOwnRed(args: {
   record.redChecks = args.result.redChecks;
   state.ownRed = record;
   save();
-  if (record.feedbackId !== undefined) return "proposed";
   if (prior === undefined) {
     args.log("dep-review.own_red.observed", { pr_number: args.prNumber, head_sha: args.headSha, basis, red_checks: args.result.redChecks });
     return "observed";
   }
   const registryPath = join(dirname(args.statePath), OWN_RED_PROPOSALS_FILE);
   const proposals = readOwnRedProposals(registryPath);
-  const mine = bumps.map(ownRedBumpKey);
-  const carrier = proposals.find((p) => mine.every((k) => p.bumps.includes(k)));
+  const mine = record.bumps.map(ownRedBumpKey);
+  const carrier = proposals.find((p) => (record.feedbackId === undefined || p.feedbackId === record.feedbackId) &&
+    mine.length > 0 && mine.every((k) => p.bumps.includes(k)));
+  // Triage requires registry membership as well as the exact-head binding. Repair older folds
+  // on their next review, using only the proposal the head already names.
+  if (carrier !== undefined && !carrier.prNumbers.includes(args.prNumber)) {
+    carrier.prNumbers.push(args.prNumber);
+    writeAtomic(registryPath, `${JSON.stringify({ proposals })}\n`);
+  }
+  if (record.feedbackId !== undefined) return "proposed";
   if (carrier !== undefined) {
     record.feedbackId = carrier.feedbackId;
     save();
