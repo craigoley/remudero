@@ -2,6 +2,7 @@ import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from ".
 import { FIX_CLAIM_YIELDED_STEP } from "./adaptive-wip.js";
 import { registerProcessExitLatch } from "./process-exit-latches.js";
 import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
+import type { OpsCatalogShadowInput } from "./ops-catalog-source.js";
 import { clearanceBound, fixDispatchCauseProbe, fixDispatchRefusalClass } from "./stuck-state-gardener.js";
 import { planDestinationRepository, resolvePlanDestination, type PlanDestinationRepository } from "./plan-destination.js";
 import { decideLoopOutcome } from "./loop-decision.js";
@@ -1678,10 +1679,11 @@ export interface BuildSweepEffectsDeps {
   ghLiveStateImpl?: SweepRuntimeFn;
   fixRungTaskForImpl?: typeof fixRungTaskFor;
   /** W1-T4460 (design ii) — re-reads the plan ONCE for {@link fixRungTaskWithPlanReload} when a
-   *  fix dispatch's task id is missing from the snapshot `plan` (above) carries. Omitted in
-   *  production defaults to a real disk read of this repo's own `plan/tasks.yaml`; a test replaces
-   *  it to avoid touching the filesystem or to assert the miss/reload sequence directly. */
+   *  fix dispatch's task id is missing from the pass snapshot. The daemon supplies its active
+   *  plan accessor. Standalone callers default to a disk read of this repo's `plan/tasks.yaml`. */
   reloadPlanForFixImpl?: () => Plan | undefined;
+  /** The daemon's retained ops view, scoped to the repository its source reads. */
+  opsCatalogForContract?: { repository: string | undefined; current: () => OpsCatalogShadowInput | undefined };
   /** W1-T4073 — resolves a fix dispatch's task contract from the plan AT THE PR HEAD (the checkout
    *  it just created is where the head's objects are local). `undefined` means unreadable. Omitted
    *  keeps the pre-W1-T4073 snapshot contract, so fixtures that never touch it need no update;
@@ -2743,6 +2745,16 @@ const fleetStateCommitStores = new Map<string, FleetStateCommitStore>();
 /** W1-T13669: the fix rung's plan re-read keeps its parses for the process; a changed file is parsed again. */
 export const FIX_PLAN_BLOB_CACHE = new PlanBlobCache();
 
+type SweepTaskReaders = Required<Pick<BuildSweepEffectsDeps, "reloadPlanForFixImpl" | "opsCatalogForContract">>;
+const sweepTaskReaders = new AsyncLocalStorage<SweepTaskReaders>();
+
+/** Bind the daemon's readers through the full and light hooks, which build effects after awaiting their PR reads. */
+export function withSweepTaskReaders<Args extends unknown[], Result>(
+  readers: SweepTaskReaders, sweep: (...args: Args) => Result,
+): (...args: Args) => Result {
+  return (...args) => sweepTaskReaders.run(readers, sweep, ...args);
+}
+
 /** W1-T13865: the checks a PR's base branch requires, each pinned to an App id or null; `complete` is false when one of
  *  its requirement sources could not be read. */
 type BaseRequiredChecks = { checks: ReadonlyMap<string, number | null>; complete: boolean };
@@ -2906,7 +2918,6 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     dispatchFixPreflightStandDownImpl: dispatchFixPreflightStandDown = requiredSweepRuntime("dispatchFixPreflightStandDownImpl"),
     ghLiveStateImpl: ghLiveState = requiredSweepRuntime("ghLiveStateImpl"),
     fixRungTaskForImpl: fixRungTaskForForBuild = fixRungTaskFor,
-    reloadPlanForFixImpl,
     resolveTaskContractAtHeadImpl,
     readTaskContractAdvanceAtHeadImpl,
     readPreservedOwnerPatchImpl = readPreservedOwnerPatch,
@@ -2987,6 +2998,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     return { outcome: "resolved" as const, task: found.task, target };
   };
   const pauseGit = fixDispatchPauseGitImpl ?? realSharedPauseGitDeps(repoDir);
+  const daemonTaskReaders = sweepTaskReaders.getStore();
+  const reloadPlanForFixImpl = deps.reloadPlanForFixImpl ?? daemonTaskReaders?.reloadPlanForFixImpl;
+  const opsCatalogForContract = deps.opsCatalogForContract ?? daemonTaskReaders?.opsCatalogForContract;
   // W1-T4460 (design ii): the real default reads this repo's OWN plan fresh off disk, swallowing a
   // read failure (an unreadable plan on this one opportunistic re-read is never this dispatch's
   // reason to throw — `fixRungTaskWithPlanReload` already degrades to the stale `plan` on `undefined`).
@@ -3504,10 +3518,19 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     }
   };
 
-  // The daemon hands each pass its tick's fresh plan; a task missing from it gets ONE re-read per cycle.
+  // A daemon pass can outlive its tick's plan. Standalone callers keep the opportunistic local re-read.
   let reloadedForContract: { plan: Plan | undefined } | undefined;
   const privateContractTasks = new Map<string, Task>();
   const readContractTask = (taskId: string): Task | undefined => {
+    if (opsCatalogForContract !== undefined) {
+      const publicTask = (reloadPlanForFixImpl?.() ?? plan).byId.get(taskId);
+      if (publicTask !== undefined) return publicTask;
+      const snapshot = opsCatalogForContract.current();
+      if (snapshot?.outcome !== "ok") return undefined;
+      const destination = planDestinationRepository(join(config.root, "state"));
+      return destination.outcome === "named" && `${destination.owner}/${destination.repo}` === opsCatalogForContract.repository
+        ? snapshot.plan?.byId.get(taskId) : undefined;
+    }
     let task = plan.byId.get(taskId) ?? privateContractTasks.get(taskId);
     if (task === undefined) {
       reloadedForContract ??= { plan: reloadPlanForFix() };

@@ -41,7 +41,7 @@ import {
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "../../lib/provider-routing-status.js";
 import { readFileIfExists } from "../../lib/fs-race-safe.js";
 import { mergedInLastDayAsync } from "../../lib/fleet-lane.js";
-import { startDaemonSreLane, type LightPassScope } from "../../lib/daemon.js";
+import { startDaemonSreLane, type LightPassScope, type ReviewAdmissionGate, type SweepCycleOutcome } from "../../lib/daemon.js";
 import { REGISTERED_GARDEN_NAMES, createGardenFlightRegistry, gardenAndJudgeUnits, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "../../lib/garden-registry.js";
 import { gardenSchedule } from "../../lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "../../lib/gardener-runtime.js";
@@ -100,7 +100,7 @@ import {
   type BootSweepInputs, type DispatchClaimReserverAsync,
 } from "../../lib/dispatch-claim.js";
 import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, planCreditOverridePath, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
-import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs, type OpenPrView } from "../../lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs, withSweepTaskReaders, type OpenPrView } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
 import { createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus } from "../../lib/daemon-memory-census.js";
 import { createEscalationTriageHistoryReader, terminalUnionScans, type EscalationTriageHistoryReader } from "../../lib/sweep.js";
@@ -1440,13 +1440,6 @@ export async function daemonCommand(
     ...reviewerCodeRecoveryFromLoadedModule(daemonModuleRepoDir, daemonLoadedCodeSha),
     freshTreeReviewAvailable: true,
   };
-  const buildSweepHook: DaemonSweepHookBuilder = (...args) => withGoalRemeasurement(
-    withCiJudgeAfterSweep((deps.buildSweepHook ?? daemonDefaultBuildSweepHook)(...args), () => target.isSelf ? kickCiJudge?.() : undefined),
-    () => remeasureSettledGoals({ repoRoot: target.isSelf ? effectiveRepoRoot : targetCheckoutRoot, stateDir: join(config.root, "state"),
-      tasks: activePlanRef.current.tasks, settled: (id) => lastProj?.get(id)?.indeterminate ? undefined : lastProj?.get(id)?.merged,
-      log }), log);
-  const buildSweepLightHook: DaemonSweepLightHookBuilder = deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook;
-
   // ── REPO TARGETING + self-target GUARD (fix/daemon-repo-targeting). The daemon must know
   // WHICH repo to drain, EXPLICITLY — the old code read the plan from its own checkout and
   // hardcoded the "remudero" gateway, so an unattended run silently drained its own source.
@@ -2416,6 +2409,21 @@ export async function daemonCommand(
       if (publicCommit === undefined) return { outcome: "unavailable", reason: "primary_revision_unknown", source: input };
       return { outcome: "selected", source: input, publicCommit };
     };
+    const sweepTaskReaders = {
+      reloadPlanForFixImpl: () => activePlanRef.current,
+      opsCatalogForContract: { repository: opsSourceRepository, current: () => opsShadow?.forDispatch() },
+    };
+    const buildSweepHook: DaemonSweepHookBuilder = (...args) => {
+      const sweep: (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> =
+        (deps.buildSweepHook ?? daemonDefaultBuildSweepHook)(...args);
+      return withGoalRemeasurement(
+        withCiJudgeAfterSweep(withSweepTaskReaders(sweepTaskReaders, sweep), () => target.isSelf ? kickCiJudge?.() : undefined),
+        () => remeasureSettledGoals({ repoRoot: target.isSelf ? effectiveRepoRoot : targetCheckoutRoot, stateDir: join(config.root, "state"),
+          tasks: activePlanRef.current.tasks, settled: (id) => lastProj?.get(id)?.indeterminate ? undefined : lastProj?.get(id)?.merged,
+          log }), log);
+    };
+    const buildSweepLightHook: DaemonSweepLightHookBuilder = (...args) =>
+      withSweepTaskReaders(sweepTaskReaders, (deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook)(...args));
     const summary = await runDaemonFn(
       plan,
       {
