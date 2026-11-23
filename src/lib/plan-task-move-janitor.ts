@@ -19,7 +19,8 @@
  *
  * No timer, interval or count: a closed gate reopens on the first tick after its condition clears, and the rate of
  * steps follows the merge latency of the two repositories. A stand-down writes one `plan.move.stand_down` row per
- * change of reason. The janitor removes no record itself: its one write is the mover, which only ever converges.
+ * change of reason. The janitor acts on the remote catalogs through the mover, which only ever converges.
+ * The public head read can fast-forward the code root's local origin/main tracking ref to the pinned head.
  *
  * W1-T14345: a step may carry a batch (the mover's preview fills it with open records, oldest filing first, as far as
  * the ops catalog's daily growth allows); the step row then names every task the step carried.
@@ -52,7 +53,7 @@ export interface PlanTaskMovePorts {
   /** The outcome of the ops catalog read the claim path uses (`ok`, `ref_moved`, `stale`, ...); undefined: none yet. */
   readOpsCatalog(): string | undefined;
   readHeads(ops: OpsTarget): Promise<MovePin>;
-  /** movePlanTask at the pinned heads; `apply` false is the dry run. The janitor's only write. */
+  /** movePlanTask at the pinned heads; `apply` false is the dry run. The janitor's only write to either remote. */
   move(pin: MovePin, apply: boolean): Promise<MoveRun>;
   /** A direct read of one pull request (never a search), so one just opened is never missed. */
   readPull(pin: MovePin, side: Side, number: number): Promise<MoverPull>;
@@ -182,6 +183,20 @@ export interface PlanTaskMoveHost {
 }
 
 const url = (repository: string) => `https://github.com/${repository}.git`;
+const TRACKING_REF = "refs/remotes/origin/main";
+
+/** Fast-forward the code root's origin/main to `commit`, the head ls-remote named in `listing`, so the task-id gate's
+ *  moved_from proof sees the commit the mover pins. Any doubt changes nothing: a missing or unreadable ref, a listing
+ *  whose main is not that head, or a ref that is not an ancestor of it. update-ref with the old value refuses a ref
+ *  that moved in between. */
+async function advancePublicTrackingRef(run: GitRunner, commit: string, listing: string): Promise<"advanced" | "unchanged"> {
+  if (/^([0-9a-f]{40})\trefs\/heads\/main$/m.exec(listing)?.[1] !== commit) return "unchanged";
+  const current = await run(["rev-parse", "--verify", "--quiet", `${TRACKING_REF}^{commit}`]);
+  const old = current.stdout.trim();
+  if (current.status !== 0 || !/^[0-9a-f]{40}$/.test(old) || old === commit) return "unchanged";
+  if ((await run(["merge-base", "--is-ancestor", old, commit])).status !== 0) return "unchanged";
+  return (await run(["update-ref", "-m", "plan-task-move: fast-forward to the live head", TRACKING_REF, commit, old])).status === 0 ? "advanced" : "unchanged";
+}
 /** The last JSON line a mover run printed; an unparsable answer reads as unknown, naming why. */
 function lastLine(stdout: string): Json {
   const line = stdout.trim().split("\n").at(-1) ?? "";
@@ -218,6 +233,8 @@ export function planTaskMovePorts(host: PlanTaskMoveHost): PlanTaskMovePorts {
       if (pubRead.status === "rejected") throw pubRead.reason;
       if (opsRead.status === "rejected") throw opsRead.reason;
       const pub = pubRead.value, opsHead = opsRead.value;
+      // The public side only: the gate reads the code root's origin/main. The ops side writes no ref.
+      await advancePublicTrackingRef(git(host.publicRoot), pub.commit, pub.listing);
       const key = createHash("sha256").update(pub.listing).update("\0").update(opsHead.listing).digest("hex");
       return { ops, publicRepository: host.publicRepository, publicCommit: pub.commit, opsCommit: opsHead.commit, key };
     },
