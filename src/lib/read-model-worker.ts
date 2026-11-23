@@ -217,6 +217,15 @@ export const READ_MODEL_READ_NOTE_MS = 5_000;
  * reads every minute, so only a closed one reaches it. Costs the first paint 0.3-5 s after idle.
  */
 export const READ_MODEL_HEAVY_IDLE_MS = 10 * 60_000;
+/**
+ * W1-T14444 (operator ruling 2026-11-23, choice A): the heavy lane is not ended for idleness while the now view
+ * serves (switch `serve` or `auto`): a restart rebuilds the board cold, and a served view would answer stale
+ * meanwhile. Shadow and off keep the W1-T11937 backstop.
+ */
+export function heavyLaneKeptWarm(views: Readonly<Record<string, string | undefined>> | undefined): boolean {
+  const mode = views?.[NOW_VIEW_NAME];
+  return mode === "serve" || mode === "auto";
+}
 /** `GET /v1/views/versions` (view-events.ts's VIEW_VERSIONS_PATH): a console polling every view's version reads them all. */
 const READ_MODEL_EVERY_VIEW_PATHS: ReadonlySet<string> = new Set(["/v1/views/versions"]);
 /** W1-T11979: the versions poll's optional comma-separated list of the views its page shows. */
@@ -2452,6 +2461,8 @@ export function threadViews(opts: {
   workerUrl?: URL;
   clock?: Clock;
   every?: (run: () => void, ms: number) => () => void;
+  /** W1-T14444: true while the heavy lane must not end for idleness. */
+  keepWarm?: () => boolean;
 }): ReadModelViewLane {
   const selectedRegistryIntent = copySelectedRegistryIntent(opts.data.selectedRegistryIntent);
   const clock = opts.clock ?? systemClock;
@@ -2550,7 +2561,7 @@ export function threadViews(opts: {
   };
   const endIdle = (): void => {
     const running = heavy.worker, idleMs = clock.now() - lastReadAt;
-    if (closed || !running || busy.has(running) || idleMs < READ_MODEL_HEAVY_IDLE_MS) return;
+    if (closed || !running || busy.has(running) || idleMs < READ_MODEL_HEAVY_IDLE_MS || opts.keepWarm?.()) return;
     Object.assign(heavy, { worker: undefined, idle: true, building: undefined, holds: undefined, wokeAt: undefined });
     let exited = false;
     running.once("exit", () => void (exited = true));
@@ -2718,10 +2729,11 @@ export function runReadModelWorker(
   const log = readModelWorkerLog((message) => port.postMessage(message), false);
   setLedgerMemoRetentionContext({ thread: "projector", log, instances: data.instances });
   const holder = randomUUID();
+  let viewModes: Readonly<Record<string, string | undefined>> | undefined;
   const views = threadViews({
     data: { catalogBridgeVersion: data.catalogBridgeVersion, stateDir: data.stateDir, instances: data.instances, tickMs: data.tickMs, holder, ...(data.registry ? { registry: data.registry } : {}), ...(data.viewsModule ? { viewsModule: data.viewsModule } : {}), ...(data.slowLane?.inbox ? { inboxRoot: data.slowLane.inbox.inboxRoot } : {}), ...hostOf(data.slowLane), ...(data.modelApprovalConfig ? { modelApprovalConfig: data.modelApprovalConfig } : {}), ...(data.selectedRegistryIntent === undefined ? {} : { selectedRegistryIntent: data.selectedRegistryIntent }),
       ...(data.slowLane?.dailyProgress?.timeZone ? { dailyProgressTimeZone: data.slowLane.dailyProgress.timeZone } : {}) },
-    relay: (m) => port.postMessage(m), log, clock,
+    relay: (m) => port.postMessage(m), log, clock, keepWarm: () => heavyLaneKeptWarm(viewModes),
   });
   const post = (m: ReadModelWorkerMessage): void => {
     if (m.type === "state") {
@@ -2729,6 +2741,7 @@ export function runReadModelWorker(
       dailyOwnershipIdentity = readHomeLeaseIdentity?.();
       const ownershipKey = JSON.stringify([m.instances[0]?.lease === "held", owned, dailyOwnershipIdentity]);
       if (dailyOwnershipKey !== ownershipKey) { dailyOwnershipEpoch++; dailyOwnershipKey = ownershipKey; }
+      viewModes = m.switches.views;
       slowLane?.views(m.switches.views);
       slowLane?.lease(m.instances[0]?.lease === "held", owned, dailyOwnershipEpoch);
       views.state(m.instances);
