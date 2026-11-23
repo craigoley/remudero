@@ -1,7 +1,7 @@
 /** Repository maintenance cadence; legacy reaper exports are unreachable from production dispatch. */
 import { execFileSync, spawn } from "node:child_process";
 import { boundChildByLoopTime } from "./loop-bounded-child.js";
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync, type Stats } from "node:fs";
 import { readFile, readdir, rm, stat } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -277,7 +277,7 @@ export const STALE_MAINTENANCE_LOCK_AGE_MS = 60 * 60_000;
 
 /** Leftovers under a repo's git dir whose presence blocks git's own maintenance. A minimal subset
  *  of PR #9555's `GIT_MAINTENANCE_LEFTOVERS` (unmerged when this landed): ref and index locks are
- *  not maintenance and are never touched here. Git alone owns `gc.log`. */
+ *  not maintenance and are never touched here. A gc.log is evidence, not a leftover lock. */
 export const MAINTENANCE_LEFTOVERS = ["objects/maintenance.lock", "gc.pid", "gc.log.lock"] as const;
 
 /** A git process that may own a maintenance lock. Matched against a whole `ps` args line. */
@@ -418,7 +418,7 @@ async function leftoverCandidates(gitDir: string): Promise<string[]> {
  * removed only when no git process that could own it is alive in this PID namespace, `gc.pid` (when present)
  * names a dead pid here or another host, and its mtime predates {@link ObjectReapDeps.bootMs} (the earliest
  * start of any instance that mounts the store). Anything unreadable KEEPS the leftover and says what.
- * `gc.log` is never touched (W1-T3116 (iv)). Never throws: a failure is carried in the result.
+ * Failure evidence in `gc.log` is kept here. A reclaim failure is carried in the result.
  */
 export async function reclaimOwnerGoneLeftovers(repo: string, deps: ObjectReapDeps = {}): Promise<LeftoverReclaim> {
   const result: LeftoverReclaim = { reclaimed: [], kept: [], failed: [] };
@@ -897,11 +897,17 @@ export interface MaintenanceContext {
   queueBusy?: boolean;
 }
 
+interface GcLogFile {
+  path: string;
+  stat: Stats;
+}
+
 export interface MaintenanceSurvey extends MaintenanceContext {
   readable: boolean;
   looseCount?: number;
   looseBytes?: number;
   gcLog?: string | null;
+  gcLogFile?: GcLogFile;
   error?: string;
 }
 
@@ -995,7 +1001,7 @@ function saveMaintenanceState(path: string, state: MaintenanceState): void {
   renameSync(temporary, path);
 }
 
-export type MaintenanceChild = { ok: true; stdout: string } |
+export type MaintenanceChild = { ok: true; stdout: string; warned?: true } |
   { ok: false; timedOut: boolean; error: string };
 
 /** A private process group bounds Git and its descendants; Git owns the database lock. */
@@ -1011,6 +1017,7 @@ export function runMaintenanceGit(repo: string, args: readonly string[], timeout
       env: { ...process.env, LC_ALL: "C" }, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let warned = false;
     let spawnError: string | undefined;
     const signal = (kind: NodeJS.Signals): void => {
       try {
@@ -1023,7 +1030,11 @@ export function runMaintenanceGit(repo: string, args: readonly string[], timeout
     const teardown = () => signal("SIGKILL");
     process.once("exit", teardown);
     child.stdout.on("data", (chunk) => { stdout = (stdout + String(chunk)).slice(-64 * 1024 * 1024); });
-    child.stderr.on("data", (chunk) => { stderr = (stderr + String(chunk)).slice(-65536); });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+      warned ||= maintenanceRun && /(?:^|[\r\n])(?:warning|error|fatal):/.test(stderr);
+      stderr = stderr.slice(-65536);
+    });
     child.on("error", (error) => { spawnError = error.message; });
     // W1-T9651: the group is signalled at a loop-available budget, so a held loop never stops a finished git.
     const bound = boundChildByLoopTime({ kill: (kind) => (signal(kind as NodeJS.Signals), true) }, timeoutMs, { escalateAfterMs: 1000 });
@@ -1033,7 +1044,7 @@ export function runMaintenanceGit(repo: string, args: readonly string[], timeout
       bound.cancel();
       if (timedOut) signal("SIGKILL");
       const skipped = maintenanceRun && /^warning: lock file '[^\r\n]+' exists, skipping maintenance\r?$/m.test(stderr);
-      resolve(code === 0 && !timedOut && !spawnError && !skipped ? { ok: true, stdout } :
+      resolve(code === 0 && !timedOut && !spawnError && !skipped ? { ok: true, stdout, ...(warned ? { warned: true } : {}) } :
         { ok: false, timedOut, error: spawnError ?? (stderr.trim() || `git exited ${code}`) });
     });
   });
@@ -1050,13 +1061,43 @@ export async function surveyRepositoryMaintenance(
   const count = /^count: (\d+)$/m.exec(counts.stdout);
   const size = /^size: (\d+)$/m.exec(counts.stdout);
   if (!count || !size) return { ...context, readable: false, error: "incomplete count-objects output" };
+  const path = join(resolve(repo, common.stdout.trim()), "gc.log");
   let gcLog: string | null;
-  try { gcLog = readFileSync(join(resolve(repo, common.stdout.trim()), "gc.log"), "utf8"); }
+  let gcLogFile: GcLogFile | undefined;
+  try {
+    const stat = lstatSync(path);
+    gcLog = readFileSync(path, "utf8");
+    if (stat.isFile()) gcLogFile = { path, stat };
+  }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") return { ...context, readable: false, error: String(error) };
     gcLog = null;
   }
-  return { ...context, readable: true, looseCount: Number(count[1]), looseBytes: Number(size[1]) * 1024, gcLog };
+  return { ...context, readable: true, looseCount: Number(count[1]), looseBytes: Number(size[1]) * 1024, gcLog, gcLogFile };
+}
+
+function clearUnchangedGcLog({ path, stat: original }: GcLogFile): boolean {
+  const lock = `${path}.lock`;
+  let fd: number;
+  try {
+    fd = openSync(lock, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw error;
+  }
+  try {
+    // Git publishes new gc.log files through this lock. Leave the evidence beside any active pass.
+    if (["objects/maintenance.lock", "gc.pid", "gc.pid.lock"].some((rel) =>
+      lstatSync(join(dirname(path), rel), { throwIfNoEntry: false }) !== undefined)) return false;
+    const current = lstatSync(path, { throwIfNoEntry: false });
+    if (current?.dev !== original.dev || current.ino !== original.ino ||
+        current.mtimeMs !== original.mtimeMs || current.ctimeMs !== original.ctimeMs) return false;
+    unlinkSync(path);
+    return true;
+  } finally {
+    closeSync(fd);
+    unlinkSync(lock);
+  }
 }
 
 const maintenanceInFlight = new Set<string>();
@@ -1195,9 +1236,19 @@ export async function runRepositoryMaintenance(
     state.nextEligibleAt = clock.now() + policy.timeoutMs + jittered(backoff);
     saveMaintenanceState(statePath, state);
     emit("start", decision.reason);
+    const passStarted = clock.now();
     const result = await (deps.run ?? runMaintenanceGit)(repo, maintenanceArgs(kind, prune?.expire), policy.timeoutMs);
     const postContext = deps.context();
     after = await survey(repo, postContext.activeLanes, postContext.disk, Math.min(policy.timeoutMs, 30000));
+    const oldLog = before.gcLogFile;
+    if (kind === "gc" && result.ok && !result.warned && completeMaintenanceSurvey(after) &&
+        oldLog && oldLog.stat.mtimeMs < passStarted && typeof before.gcLog === "string" &&
+        after.gcLog === before.gcLog && after.gcLogFile?.path === oldLog.path && clearUnchangedGcLog(oldLog)) {
+      log("object_reaper.gc_log_cleared", {
+        repo, age_ms: passStarted - oldLog.stat.mtimeMs, first_line: before.gcLog.split(/\r?\n/, 1)[0],
+      });
+      after = { ...after, gcLog: null, gcLogFile: undefined };
+    }
     const beside = kind === "incremental" && before.gcLog !== null;
     const verified = result.ok && completeMaintenanceSurvey(after) && (beside || after.gcLog === null);
     if (verified && beside) {
