@@ -21,6 +21,7 @@ import {
 } from "#src/lib/machine-filing-judge.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, releaseContractPins } from "#src/lib/operator-release.js";
 import { loadPlan, parseTasksFromYaml, type Task } from "#src/lib/plan.js";
+import type { FilingRiskRuling } from "#src/lib/risk-judge.js";
 import { lintTask, taskRulingPin } from "#src/lib/task-linter.js";
 
 const ID = "W1-T9903";
@@ -43,10 +44,10 @@ function heldShard(): string {
 const record = (text: string): Task => parseTasksFromYaml(text, REL)[0]!;
 const verifyLine = (text: string): string | undefined => text.split("\n").find((l) => /^ {2}verify:/.test(l));
 const blocks = (t: Task): string[] => lintTask(t).violations.filter((v) => v.severity === "block").map((v) => v.check);
-const operatorRuling = { verdict: "operator", action: "proceed", confidence: 1, reasons: ["released by the operator with rmd approve"],
-  judgedAt: CLOCK.iso() } as const;
+const operatorRuling: FilingRiskRuling = { verdict: "operator", action: "proceed", confidence: 1,
+  reasons: ["released by the operator with rmd approve"], judgedAt: CLOCK.iso() };
 
-function render(text: string, ruling: Parameters<typeof renderRuledShard>[3]): string {
+function render(text: string, ruling: FilingRiskRuling): string {
   const out = renderRuledShard(text, REL, taskRulingPin({ ...record(text), verify: "auto" }), ruling);
   assert.ok("contents" in out, `rendered: ${"refused" in out ? out.refused : ""}`);
   return out.contents;
