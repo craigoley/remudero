@@ -8,6 +8,7 @@ import { test, mock, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
 import { systemClock, type Clock } from "#src/lib/clock.js";
 import { INBOX_STALE_AFTER_MS } from "#src/lib/inbox-freshness.js";
 import { daemonInstanceRegistryPath } from "#src/lib/deployer.js";
@@ -21,7 +22,7 @@ import {
   READ_MODEL_CONSISTENCY_STEP,
   READ_MODEL_SELF_HEALED_STEP,
 } from "#src/lib/read-model-consistency.js";
-import { acquireLease, releaseLease, writeSourceSnapshot, SOURCE_SNAPSHOT_DDL } from "#src/lib/read-model-db.js";
+import { acquireLease, flushReadModelTransactions, releaseLease, writeSourceSnapshot, SOURCE_SNAPSHOT_DDL } from "#src/lib/read-model-db.js";
 import { coldAnalyticsSnapshot } from "#src/lib/analytics-route.js";
 import { analyticsSourceBodies } from "#src/lib/analytics-view.js";
 import { AGENT_QUALIFICATION_GENERATION, agentViewKey, type AgentProposalsBody, type AgentViewData } from "#src/lib/agent-view.js";
@@ -582,7 +583,7 @@ function digestOf(stateDir: string): string {
   }
 }
 
-test("after a CLI rebuild swaps the file the worker resumes against the new file with no lost or duplicate rows", (t) => {
+test("after a CLI rebuild swaps the file the worker resumes against the new file with no lost or duplicate rows", async (t) => {
   const ledgerDir = scratch(t, "rmw-swap-ledger");
   const stateDir = scratch(t, "rmw-swap-state");
   corpus(ledgerDir, 1, 10, 4);
@@ -611,9 +612,34 @@ test("after a CLI rebuild swaps the file the worker resumes against the new file
   ticker.tick();
   assert.equal(sink.logs("read_model.reopened").length, 1, "the rename was noticed by its inode");
   assert.equal(lastState(sink.messages).instances[0]?.reason, undefined);
-  assert.equal(tableCount(stateDir, "core", "seen"), 23, "no row lost and none doubled");
+
+  // The final count opens and closes a writable connection. Watch its real publisher acknowledgement
+  // so the test can detect a missing drain even if the filesystem delete happens to win the race.
+  let publicationRetired = false;
+  const postMessage = Worker.prototype.postMessage;
+  const publication = t.mock.method(Worker.prototype, "postMessage", function (
+    this: Worker, ...args: Parameters<Worker["postMessage"]>
+  ) {
+    const [{ id }] = args;
+    const acknowledge = (message: { id: string; closed: boolean; failed: boolean }) => {
+      if (message.id !== id || !message.closed) return;
+      publicationRetired = !message.failed;
+      this.off("message", acknowledge);
+    };
+    this.on("message", acknowledge);
+    postMessage.apply(this, args);
+  });
+  try {
+    assert.equal(tableCount(stateDir, "core", "seen"), 23, "no row lost and none doubled");
+  } finally {
+    publication.mock.restore();
+  }
 
   // The design's full rollback deletes state/read-model/: the worker rebuilds from the ledger.
+  // The delete waits for the transaction publisher thread to drain first. Otherwise that thread can
+  // re-create `core.v1.sqlite.transactions/` under the recursive delete, and its final rmdir fails ENOTEMPTY.
+  await flushReadModelTransactions();
+  assert.equal(publicationRetired, true, "the publisher retired the final connection before deletion");
   rmSync(join(stateDir, "read-model"), { recursive: true, force: true });
   ticker.tick();
   assert.equal(sink.logs("read_model.reopened").length, 2, "a deleted file reads as replaced");
