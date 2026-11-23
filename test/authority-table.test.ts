@@ -405,6 +405,9 @@ test("W1-T13773 criterion 3: the closed gate vocabulary adds host-switch, whose 
  */
 const ROWS_AS_BEFORE: Record<string, string> = {
   "hand-worktree-run-branch-push": "8f57a3367c725422",
+  "hand-ship-push": "17d0fe19f80a7f30",
+  "hand-ship-open-pr": "07951faedcfc40ad",
+  "hand-ship-amend-pr": "248806a562843814",
   "create-product-repository": "c75665ea4e8925f0",
   "propose-product-runner-config": "f4add31d2e9f816e",
   "restore-checkpoint-branch": "3369093791eeb635",

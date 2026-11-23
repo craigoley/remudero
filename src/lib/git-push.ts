@@ -797,14 +797,24 @@ function runHookAsync(worktreePath: string, gate: PrePushGate): Promise<HookOutc
 }
 
 /** {@link worktreePushExec} off the event loop; `prGates: false` (a restart checkpoint, which opens no PR) skips the PR gate. */
-export function worktreePushExecAsync(
-  worktreePath: string, { prGates = true, verdicts = defaultPushGateVerdicts(), push, refreshAmbient }: {
-    prGates?: boolean; verdicts?: PushGateVerdicts; push?: typeof hostWorktreeGitAsync; refreshAmbient?: () => Promise<unknown>;
-  } = {},
-): PushExecAsync {
-  return async (_file, args, opts) => {
-    const pushArgs = leafArgs(worktreePath, args);
-    const read = (a: string[]) => hostWorktreeGitAsync(worktreePath, a);
+export function worktreePushExecAsync(worktreePath: string, options: WorktreePushOptions = {}): PushExecAsync {
+  const read = (args: string[]) => hostWorktreeGitAsync(worktreePath, args);
+  const push = worktreePushArgsAsync(worktreePath, read, options);
+  return async (_file, args, opts) => push(leafArgs(worktreePath, args), opts);
+}
+
+interface WorktreePushOptions {
+  prGates?: boolean;
+  verdicts?: PushGateVerdicts;
+  push?: typeof hostWorktreeGitAsync;
+  refreshAmbient?: () => Promise<unknown>;
+}
+
+function worktreePushArgsAsync(
+  worktreePath: string, read: (args: string[]) => Promise<string>,
+  { prGates = true, verdicts = defaultPushGateVerdicts(), push, refreshAmbient }: WorktreePushOptions,
+) {
+  return async (pushArgs: string[], opts: { stdio: "inherit" | "ignore" }) => {
     const gate = prGates
       ? await runStepsAsync(prePushGateSteps(worktreePath, pushArgs, read, pinnedConfigValueAsync))
       : undefined;
@@ -822,6 +832,36 @@ export function worktreePushExecAsync(
       }
     }, basename(worktreePath), verdicts, refreshAmbient);
   };
+}
+
+export async function pushHandShipCommit(worktree: string, branch: string, sha: string, expected: string | null, signal?: AbortSignal): Promise<void> {
+  assertLiveWriteAllowed("git-push", `publishing hand build ${branch}`);
+  const ref = `refs/heads/${branch}`;
+  if (!/^run-[A-Za-z0-9-]+-[0-9]+$/.test(branch) || !/^[a-f0-9]{40}$/.test(sha) ||
+      (expected !== null && !/^[a-f0-9]{40}$/.test(expected))) {
+    throw new Error("hand-ship requires a run branch and exact commit SHAs");
+  }
+  const read = (args: string[]) => hostWorktreeGitAsync(worktree, args, { signal });
+  if (expected !== null && expected !== sha) {
+    await read(["fetch", "--no-tags", "origin", expected]);
+    await read(["merge-base", "--is-ancestor", expected, sha]);
+  }
+  // Git's explicit lease is a compare-and-swap. The ancestry check above forbids history rewrites.
+  const args = ["push", "--porcelain", "--no-follow-tags", `--force-with-lease=${ref}:${expected ?? ""}`, "origin", `${sha}:${ref}`];
+  await worktreePushArgsAsync(worktree, read, {
+    push: async (cwd, argv, opts) => {
+      signal?.throwIfAborted();
+      const output = await hostWorktreeGitAsync(cwd, argv, { ...opts, stdio: "pipe", signal }).catch((error: { stdout?: string }) => {
+        if (/^!\t.*\t\[rejected\] \(stale info\)$/m.test(error.stdout ?? "")) {
+          throw new Error(`stale lease: origin/${branch} no longer matches ${expected ?? "an absent branch"}`, { cause: error });
+        }
+        throw error;
+      });
+      // Git elides the lease when the destination already equals the source.
+      if (expected !== sha && /^=\t/m.test(output)) throw new Error(`stale lease: origin/${branch} moved to ${sha}`);
+      return output;
+    },
+  })(args, { stdio: "inherit" });
 }
 
 export type PushGateKeyFields = { tree: string; head: string; base: string; recipe: string };
