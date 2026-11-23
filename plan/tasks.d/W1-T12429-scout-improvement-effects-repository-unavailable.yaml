@@ -3,10 +3,11 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: human
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: high # Raised 2026-11-23: the scope amendment spans 2 concerns (Rule 19)
   priority: 1.47
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 1 (already shipped or declined) of the operator's mechanical rulings (2026-10-21, W1-T10371): a merged pull request on main carries this record's Remudero-Task trailer. Retired by the machine-filing judge, 2026-11-23T05:25:03.271Z
   attempts: 0
   author_class: machine
   origin: "scout:improvement_effects.repository_unavailable"

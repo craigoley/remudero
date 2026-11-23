@@ -14,7 +14,7 @@
   files:
     - src/lib/panel-graph.ts
     - test/inbox/a-merged-ops-filed-tasks-referent-resolves-merged.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     The W1-T14114 review on #20026 (2026-11-21) reported a follow-up finding: a board proposal whose referent is a

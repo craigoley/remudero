@@ -12,7 +12,7 @@
     - W1-T14149
   files:
     - scripts/write-only-ledger-step-baseline.json
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "scripts/write-only-ledger-step-baseline.json has a recordOnly entry for reviewer_tree.reaped whose reason says the reaper decides each pass from the disk and the tree leases, and that the row is an operator record of freed bytes and kept trees"
