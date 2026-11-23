@@ -52,6 +52,8 @@
     NOT MEASURED: how many other queued tasks carry a grep proof main already satisfies. The design's row makes that
     countable.
   design: |
+    INVARIANT unjudged-proofs-dispatch-as-today: a proof that misses at base, a guard criterion and an unreadable
+    target dispatch exactly as today; only a grep proof that already matches at base refuses.
     1. THE PREDICATE, IN src/lib/proof-base-stale.ts. Export `staleAtDispatchBase(criteria, repoDir, baseRev, deps)`,
        returning `{ stale: StaleProofRow[]; unknown: string[] }`. Use the same criteria as `certainStaleProofs`:
        `visibleCriteria`, skipping `satisfied_by`, `kind: guard` and any proof `isDialectGrepProof` rejects. Do not run the
@@ -91,14 +93,15 @@
       proof: "unit test: test/a-queued-task-whose-proof-already-passes-at-base-is-not-built.test.ts"
     - claim: "a grep proof that already matches at origin/main refuses dispatch with a named row and spawns no worker"
       proof: 'grep: test("W1-T8759: a grep proof that already matches at origin/main refuses dispatch with a named row" in test/a-queued-task-whose-proof-already-passes-at-base-is-not-built.test.ts'
-    - claim: "a proof that misses at base, a guard criterion and an unreadable target never refuse dispatch"
+    - claim: "invariant:unjudged-proofs-dispatch-as-today — a proof that misses at base, a guard criterion and an unreadable target never refuse dispatch"
+      kind: guard
       proof: 'grep: test("W1-T8759: a missing proof, a guard and an unreadable target never refuse dispatch" in test/a-queued-task-whose-proof-already-passes-at-base-is-not-built.test.ts'
     - claim: "the same stale proof on a later main escalates once and is then held, and an amended proof dispatches"
       proof: 'grep: test("W1-T8759: a stale proof escalates once as main moves, and an amended proof dispatches" in test/a-queued-task-whose-proof-already-passes-at-base-is-not-built.test.ts'
     - claim: "the dispatch-base check and the pre-push check agree on every grep proof they both judge"
       proof: 'grep: test("W1-T8759: the dispatch check and certainStaleProofs agree on the base side" in test/a-queued-task-whose-proof-already-passes-at-base-is-not-built.test.ts'
     - claim: "the pre-dispatch stale-proof row has a named step"
-      proof: 'grep: "dispatch\.proof_stale_at_base" in src/lib/proof-base-stale.ts'
+      proof: 'grep: dispatch\.proof_stale_at_base in src/lib/proof-base-stale.ts'
     - claim: "the pre-dispatch guard calls the check"
       proof: 'grep: staleAtDispatchBase( in src/run-task.ts'
   falsifier: |
