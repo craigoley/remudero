@@ -408,6 +408,7 @@ export function renderFixPrompt(opts: {
   reachableRemedyFiles?: readonly RemedyFileForGate[];
   /** `renderSkillsPart` of the fix lane's selected skills; "", omitted, or a plan-gate round renders nothing. */
   skillsPart?: string;
+  ownerInstructions?: readonly string[];
 }): string {
   const mode = deriveFixMode(opts.evidence);
   const censusSnapshotEnv = opts.censusSnapshotPath === undefined ? undefined :
@@ -427,7 +428,15 @@ export function renderFixPrompt(opts: {
     ...(taskSemanticRevision(opts.task) === undefined ? [] : [
       ...(opts.task.design ? ["", "AUTHORITATIVE TASK DESIGN:", opts.task.design] : []),
       ...(opts.task.amendment ? ["", "AUTHORITATIVE TASK AMENDMENT:", opts.task.amendment] : []),
-    ])];
+    ]),
+    ...(opts.ownerInstructions?.length ? [
+      "",
+      "OWNER INSTRUCTIONS (from the PR body and comments; they override the task design)",
+      "Apply the file and change restrictions quoted below when choosing the repair.",
+      CI_LOG_FENCE_OPEN,
+      envelope(neutralizeFenceMarkers(opts.ownerInstructions.join("\n")), "github-pr-comment"),
+      CI_LOG_FENCE_CLOSE,
+    ] : [])];
   if (mode === "plan-gate") {
     return [header, ...constraintBlock,
       `STAGEABLE PLAN PATHS: ${(opts.task.files ?? []).join(", ")}. Edit only these exact paths.`,
