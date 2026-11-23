@@ -191,10 +191,16 @@ export function earnedConfidenceBar(base: number, mean: number): number {
  */
 export function needsMachineJudgement(task: Task, operatorReleases: ReadonlySet<string> = new Set()): boolean {
   if (task.status !== "queued" || task.retirement !== undefined || shardRelPath(task) === undefined) return false;
-  if (operatorReleases.has(task.id)) return task.verify === "human";
+  // W1-T12224: an operator ruling keeps `verify: human`, so one already landed at the current pin is settled.
+  if (operatorReleases.has(task.id)) return task.verify === "human" && !landedOperatorRuling(task);
   const unjudged = task.risk_ruling === undefined || task.risk_ruling.pin !== taskRulingPin(task);
   if (task.author_class === "machine") return unjudged;
   return task.verify === "human" && !isRulingShaped(task) && unjudged;
+}
+
+/** W1-T12224: the record already carries the operator ruling its current contract was released at. */
+export function landedOperatorRuling(task: Task): boolean {
+  return task.risk_ruling?.verdict === "operator" && task.risk_ruling.operator_release_pin === operatorReleasePin(task);
 }
 
 /** W1-T12838: a machine record already released into the queue (`verify: auto`), not released by the operator, which
@@ -545,7 +551,8 @@ function withoutJudgedAt(text: string): string {
 const shardRecord = (text: string, relPath: string): Task => parseTasksFromYaml(text, relPath)[0]!;
 
 /**
- * Rewrite ONE shard's text with a ruling: `verify:` set by the action and the ruling appended,
+ * Rewrite ONE shard's text with a ruling: `verify:` set by a judge's action (an operator ruling leaves it as
+ * written, W1-T12224) and the ruling appended,
  * pinned to the record AS REWRITTEN. Returns undefined, with the reason, when the text is not a
  * single record, names a different id, depends on a task `known` (the whole plan) lacks, or the
  * rewrite would not clear the linter it exists for.
@@ -562,18 +569,22 @@ export function renderRuledShard(
   if ((text.match(/^- id:/gm) ?? []).length !== 1) return { refused: `${relPath} does not hold exactly one record` };
   const unknownDep = shardRecord(text, relPath).depends_on.find((d) => !known.has(d));
   if (unknownDep !== undefined) return { refused: `${relPath}: depends_on unknown task '${unknownDep}'` };
+  // W1-T12224: an operator release authorizes dispatch only; its `verify:` line stays byte-identical.
+  const byOperator = ruling.verdict === "operator";
   const verify = ruling.action === "proceed" ? "auto" : "human";
   const lines = withoutRulingBlock(text.replace(/\n+$/, "").split("\n"));
   // 2026-10-10: `verify: human  # <why>` is valid YAML the plan loads, and W1-T7736 was refused as having no
   // verify: line. The comment is kept on its own line above, so the rewrite never drops the filer's words.
   let verifyAt = lines.findIndex((l) => /^ {2}verify:\s*[^\s#]+\s*(#.*)?$/.test(l));
   if (verifyAt < 0) return { refused: `${relPath} has no verify: line` };
-  const comment = /^ {2}verify:\s*[^\s#]+\s*#\s*(.*?)\s*$/.exec(lines[verifyAt]!)?.[1];
-  if (comment) lines.splice(verifyAt++, 0, `  # ${comment}`);
-  lines[verifyAt] = `  verify: ${verify}`;
+  if (!byOperator) {
+    const comment = /^ {2}verify:\s*[^\s#]+\s*#\s*(.*?)\s*$/.exec(lines[verifyAt]!)?.[1];
+    if (comment) lines.splice(verifyAt++, 0, `  # ${comment}`);
+    lines[verifyAt] = `  verify: ${verify}`;
+  }
   // Released machine work with no measured cost dispatches mid-queue, never last (2026-09-29).
   const released = shardRecord(text, relPath);
-  if (ruling.action === "proceed" && ruling.verdict !== "operator" && released.author_class === "machine" && released.priority === undefined) {
+  if (ruling.action === "proceed" && !byOperator && released.author_class === "machine" && released.priority === undefined) {
     lines.splice(verifyAt + 1, 0, `  priority: ${UNPRICED_PRIORITY}`);
   }
   const flipped = lines.join("\n") + "\n";
@@ -591,7 +602,7 @@ export function renderRuledShard(
     ...(ruling.reasons.length > 0 ? ruling.reasons.map((r) => `      - ${q(r)}`) : ["      - \"(the judge recorded no reason)\""]),
     `    judged_at: ${q(ruling.judgedAt)}`,
     `    pin: ${q(ruled.risk_ruling!.pin)}`,
-    ...(ruling.verdict === "operator" ? [`    operator_release_pin: ${q(operatorReleasePin(before))}`] : []),
+    ...(byOperator ? [`    operator_release_pin: ${q(operatorReleasePin(before))}`] : []),
   ];
   const contents = flipped + block.join("\n") + "\n";
   const reparsed = shardRecord(contents, relPath);
@@ -605,7 +616,8 @@ export function renderRuledShard(
   const base = lintTask(before).violations;
   const had = checks(base);
   const added = [...checks(promoteIntroducedPlanOnlyDiagnostics(lintTask(reparsed).violations, base, false))].filter((c) => !had.has(c));
-  if (added.length > 0) return { refused: `${reparsed.id}: at verify: auto it fails lint (${added.join(", ")})`, lint: true };
+  const at = `at verify: ${reparsed.verify}`;
+  if (added.length > 0) return { refused: `${reparsed.id}: ${at} it fails lint (${added.join(", ")})`, lint: true };
   // lint-plan --base also runs the machine-filing admission on every changed machine record, and a plain lintTask
   // skips it: at verify: auto it refuses unmerged depends_on, which verify: human parks past. Only what the
   // rewrite introduces counts, as above, so a reason the record already carried is not the ruling's to answer.
@@ -613,7 +625,7 @@ export function renderRuledShard(
     const admit = (t: Task) => machineFilingAdmissionViolations(t, { ...admission, releasedIds: new Set() });
     const held = new Set(admit(before));
     const refusedBy = admit(reparsed).filter((r) => !held.has(r));
-    if (refusedBy.length > 0) return { refused: `${reparsed.id}: at verify: auto lint-plan's machine-filing admission refuses it (${refusedBy.join("; ")})`, lint: true };
+    if (refusedBy.length > 0) return { refused: `${reparsed.id}: ${at} lint-plan's machine-filing admission refuses it (${refusedBy.join("; ")})`, lint: true };
   }
   return { contents };
 }

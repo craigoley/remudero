@@ -13,7 +13,8 @@ export type ReleaseEvidence = ReadonlyMap<string, unknown> | ReadonlySet<string>
 export type ReleaseAuthor = "operator" | "machine";
 
 /** Pins the loaded contract, excluding only runtime bookkeeping and the ruling it authorizes.
- *  The human-to-auto verification transition must not invalidate its own approval.
+ *  W1-T12224: `verify` is pinned as written. A release authorizes dispatch only, so a later human<->auto edit
+ *  changes the contract the operator approved and needs a fresh `rmd approve`.
  *  W1-T13386: `catalog` is where a reader found the record, stamped on after the read, never a term of the
  *  contract. The daemon's tick hashes an ops record without the stamp and the task's own run hashes it with
  *  the stamp, so a pin that included it made one release read as two contracts.
@@ -31,7 +32,7 @@ export function operatorReleasePin(task: ReleaseContract): string {
     }
     return JSON.stringify(value) ?? "null";
   };
-  return createHash("sha256").update(stable({ ...contract, verify: "auto" })).digest("hex");
+  return createHash("sha256").update(stable(contract)).digest("hex");
 }
 
 export function releaseContractPins(tasks: readonly ReleaseContract[]): (id: string) => string | undefined {
