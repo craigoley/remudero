@@ -122,6 +122,8 @@ import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from
 import { acquireDrainLock, DrainLockError } from "../../lib/drain-lock.js";
 import { abortStandby, acquireLockWhenFree, awaitPromotion, leaveExitCodeForEntrypoint, logPromoted, standbyPorts,
   type StandbyOptions, type StandbyPorts } from "../../lib/daemon-standby.js";
+import { createDaemonHandoff, daemonSlotsDir, type DaemonHandoff } from "../../lib/daemon-handoff.js";
+import { createSlotPreparer } from "../../lib/serve-slots.js";
 import { asyncGit, testRunnerOnItsOwnCheckout } from "../../lib/self-sync.js";
 import { withLiveEditLadders } from "../../lib/live-edit-ladder.js";
 import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, clearKick, consumeDrainNow, consumeRestartInPlace, clearPrAction, consumeStop, isQuietHours, kickFilePath, pauseDetail, pendingKicks, pendingPrActions, stopDetail } from "../../lib/fleet-control.js";
@@ -1216,6 +1218,8 @@ export async function daemonCommand(
     standby?: StandbyOptions;
     /** W1-T14544: where a plan quarantine's escalation goes; production omits it and opens or comments on a GitHub issue. */
     raiseEscalation?: (e: Escalation) => string;
+    /** W1-T14545: the blue-green handoff; production omits it and gets {@link createDaemonHandoff}. */
+    handoff?: DaemonHandoff;
     /** Injectable GitHub-gateway constructor for the merged-status projection. Defaults to the
      *  BATCHED {@link buildBatchedGithub} — one NON-search `gh pr list` per projection, which is
      *  what keeps merge state derivable while GitHub's GraphQL `search()` connection is
@@ -2940,6 +2944,11 @@ export async function daemonCommand(
         } : {}),
         consumeDrainNow: () => consumeDrainNow(config.root),
         // W1-T11327: the progress watchdog's restart-in-place request, exited on with this process's own boot sha.
+        // W1-T14545: off unless state/daemon-handoff.on exists; read at each restart decision.
+        handoff: deps.handoff ?? createDaemonHandoff({ stateDir: join(config.root, "state"),
+          activeDir: effectiveRepoRoot, activeSha: daemonLoadedCodeSha, daemonArgs: rest, log,
+          prepareSlot: createSlotPreparer({ repoDir: effectiveRepoRoot, gensDir: daemonSlotsDir(join(config.root, "state")),
+            log: (step, extra) => log(step.replace(/^serve\./, "daemon."), extra) }) }),
         consumeRestartRequest: () => {
           const request = consumeRestartInPlace(config.root);
           return request && { ...request, ...(daemonLoadedCodeSha ? { codeSha: daemonLoadedCodeSha } : {}) };
