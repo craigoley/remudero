@@ -16,8 +16,11 @@ const REPOSITORY = "fixture-private/ops";
 const PREFIX = `repos/${REPOSITORY}`;
 const REF = `${PREFIX}/git/ref/heads/main`;
 const SENTINELS = ["PRIVATE_BODY_SENTINEL", "ghp_SECRET_TOKEN_SENTINEL", PREFIX];
+// W1-T14374: the fixture catalog is one 107-byte tasks.yaml and no shard files.
+const SHARDS = 0, BYTES = 107;
 const pacer = { wait() {}, recordResult() {} };
-const FIELDS = ["duration_ms", "http_status_class", "kind", "outcome", "refusal_stage"];
+// W1-T14374: the row also carries shards, bytes and bound.
+const FIELDS = ["bound", "bytes", "duration_ms", "http_status_class", "kind", "outcome", "refusal_stage", "shards"];
 
 /** The real default api over a fake `gh` that fails every call with one stderr line. */
 function failingGh(stderr: string): OpsCatalogApi {
@@ -84,7 +87,7 @@ test("W1-T13705 criterion 1: every completed refresh writes one dispatch.ops_cat
   const full = await refresh();
   assert.equal(full.step, OPS_CATALOG_REFRESHED_STEP);
   assert.deepEqual(Object.keys(full.data).sort(), FIELDS);
-  assert.deepEqual({ ...full.data, duration_ms: 0 }, { outcome: "ok", refusal_stage: null, duration_ms: 0, kind: "full", http_status_class: null });
+  assert.deepEqual({ ...full.data, duration_ms: 0 }, { outcome: "ok", refusal_stage: null, duration_ms: 0, kind: "full", http_status_class: null, shards: SHARDS, bytes: BYTES, bound: null });
   assert.equal(typeof full.data.duration_ms, "number");
   assert.ok((full.data.duration_ms as number) >= 0);
 
@@ -107,7 +110,7 @@ test("W1-T13705 criterion 1: every completed refresh writes one dispatch.ops_cat
   t.after(() => rejecting.feed.stop());
   const rejected = await rejecting.refresh();
   assert.deepEqual({ ...rejected.data, duration_ms: 0 },
-    { outcome: "unreadable", refusal_stage: "source_refresh", duration_ms: 0, kind: null, http_status_class: null });
+    { outcome: "unreadable", refusal_stage: "source_refresh", duration_ms: 0, kind: null, http_status_class: null, shards: null, bytes: null, bound: null });
 
   // A log that throws changes nothing the refresh produced.
   const throwing = opsCatalogShadowFeed({ refresh: () => failingGh("gh: Not Found (HTTP 404)")("x").then(() => ({ outcome: "ok" as const })) },
@@ -126,7 +129,7 @@ test("W1-T13705 criterion 2: a refresh whose first GET fails with HTTP 404 write
   t.after(() => feed.stop());
   const row = await refresh();
   assert.deepEqual({ ...row.data, duration_ms: 0 },
-    { outcome: "unreadable", refusal_stage: "repository_identity", duration_ms: 0, kind: "full", http_status_class: "4xx" });
+    { outcome: "unreadable", refusal_stage: "repository_identity", duration_ms: 0, kind: "full", http_status_class: "4xx", shards: 0, bytes: 0, bound: null });
   const forbidden = feedOver(createOpsCatalogShadowSource({ repository: REPOSITORY }, failingGh("HTTP 403: Resource not accessible by integration")));
   t.after(() => forbidden.feed.stop());
   assert.equal((await forbidden.refresh()).data.http_status_class, "4xx");
