@@ -922,6 +922,7 @@ test("harness contract keeps unsupported Codex identity and compaction distinct 
   assert.equal(result.isError, false);
   assert.equal(result.servedModel, null);
   assert.equal(result.compactionConfigured, false);
+  assert.ok(result.capabilityContract, "a codex run carries its capability record");
   assert.equal(result.capabilityContract.capabilities.configuredCompaction.declared, "unsupported");
   assert.equal(result.capabilityContract.capabilities.servedModelIdentity.tested, "unknown");
   assert.equal(result.capabilityContract.capabilities.resume.tested, "supported");

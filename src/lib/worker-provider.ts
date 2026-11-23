@@ -234,7 +234,7 @@ export function buildWorkerCapabilityContract(provider: string, facts: {
 
 interface CodexWorkerResult {
   provider: "codex";
-  capabilityContract: WorkerCapabilityContract;
+  capabilityContract?: WorkerCapabilityContract;
   /** W1-T6148: what the harness did with a codex writer's edits; absent when its caller commits them. */
   harnessCommit?: CodexHarnessCommit;
   sessionId: string;
