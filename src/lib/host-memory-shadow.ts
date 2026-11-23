@@ -261,6 +261,8 @@ export interface ShadowEntryInput {
   typicalMib?: number;
   /** W1-T9762: the class's measured survival at `ageMs`, which scales its remaining claim. Absent: not decayed. */
   survival?: Survival;
+  /** W1-T14155: its test runner is live (it is one, or holds one), so its tail is claimed beside the one allowance. */
+  validating?: true;
 }
 
 export interface ShadowInputs {
@@ -444,6 +446,11 @@ export interface ShadowVerdict {
     hostClaimUndecayedMib: number;
     hostTypicalMib: number;
     hostTailMib: number;
+    /** W1-T14155: how many live trees are in validation, and their tails summed; the claim counts each in full. */
+    validatingTails: number;
+    validatingTailsMib: number;
+    /** Today's one-tail claim were no tree validating, for comparison only. */
+    hostClaimOneTailMib: number;
     /** The sum of this container's trees' remaining p90 claims: every tree at its p90 at once. */
     unrealizedOwnContainerMib: number;
     /** What the container check counts: the trees' typical sum plus the one tail allowance (a tree's or this daemon's);
@@ -543,6 +550,10 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   let typicalAll = 0;
   let tailAll = 0;
   let tailAllOwner: string | null = null;
+  let oneTail = 0;
+  let validatingTails = 0;
+  let validatingTailsMib = 0;
+  let validatingUndecayed = 0;
   let typicalUndecayed = 0;
   let tailUndecayed = 0;
   const claims: ShadowClaim[] = [];
@@ -570,12 +581,18 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     const { share, typical, charged, chargedTail } = claim(entry.estimateMib, entry.typicalMib, resident, released, decay.factor ?? 1);
     unrealized += share;
     typicalAll += charged;
-    if (chargedTail > tailAll) {
+    oneTail = Math.max(oneTail, chargedTail);
+    const validating = entry.validating === true && !released;
+    if (validating) {
+      validatingTails += 1;
+      validatingTailsMib += chargedTail;
+      validatingUndecayed += share - typical;
+    } else if (chargedTail > tailAll) {
       tailAll = chargedTail;
       tailAllOwner = entry.id === inputs.start.reservationId ? "start" : entry.workerClass;
     }
     typicalUndecayed += typical;
-    tailUndecayed = Math.max(tailUndecayed, share - typical);
+    if (!validating) tailUndecayed = Math.max(tailUndecayed, share - typical);
     const own = entry.status === "owned";
     if (own) {
       unrealizedOwn += share;
@@ -600,6 +617,7 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
     const own = claim(inputs.start.estimateMib, inputs.start.typicalMib, 0, false);
     unrealized += own.share;
     typicalAll += own.typical;
+    oneTail = Math.max(oneTail, own.share - own.typical);
     if (own.share - own.typical > tailAll) {
       tailAll = own.share - own.typical;
       tailAllOwner = "start";
@@ -649,8 +667,10 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
   const containerClaim = inputs.jointClaim ? inputs.jointClaim.ownMib + ownDaemonTail : typicalOwn + containerTail;
   const hostTail = Math.max(tailAll, daemonTail);
   const hostTailOwner = inputs.jointClaim || daemonTail > tailAll ? daemonTailOwner : tailAllOwner;
-  const hostClaim = inputs.jointClaim ? inputs.jointClaim.hostMib + daemonTail : typicalAll + hostTail;
-  const hostClaimUndecayed = inputs.jointClaim ? hostClaim : typicalUndecayed + Math.max(tailUndecayed, daemonTail);
+  const hostClaim = inputs.jointClaim ? inputs.jointClaim.hostMib + daemonTail : typicalAll + validatingTailsMib + hostTail;
+  const hostClaimUndecayed = inputs.jointClaim ? hostClaim
+    : typicalUndecayed + validatingUndecayed + Math.max(tailUndecayed, daemonTail);
+  const hostClaimOneTail = inputs.jointClaim ? hostClaim : typicalAll + Math.max(oneTail, daemonTail);
 
   const scenario = inputs.serve.scenario;
   const coldStartReserve = scenario === "serve-cold-start" ? policy.serveColdStartReserveMib : 0;
@@ -742,6 +762,9 @@ export function evaluateShadowMemory(inputs: ShadowInputs, policy: HostMemoryBud
       hostClaimUndecayedMib: hostClaimUndecayed,
       hostTypicalMib: inputs.jointClaim ? inputs.jointClaim.hostMib : typicalAll,
       hostTailMib: inputs.jointClaim ? daemonTail : hostTail,
+      validatingTails,
+      validatingTailsMib: inputs.jointClaim ? 0 : validatingTailsMib,
+      hostClaimOneTailMib: hostClaimOneTail,
       unrealizedOwnContainerMib: unrealizedOwn,
       containerClaimMib: containerClaim,
       containerTypicalMib: inputs.jointClaim ? inputs.jointClaim.ownMib : typicalOwn,
@@ -1782,6 +1805,21 @@ function recordedTree(read: ShadowMemoryPorts["readFile"], entryPath: string):
   }
 }
 
+/** W1-T14155: each live test run is in validation, and so is every live tree that holds a test run's root. Pure over
+ *  `read`; an unreadable tree cannot show what it holds, but a live test run still counts. */
+function validatingTreesOf(read: ShadowMemoryPorts["readFile"],
+  entries: ReadonlyArray<{ workerClass: WorkerClass; path: string; occupancyReleased?: boolean }>): boolean[] {
+  const trees = entries.map((entry) => (entry.occupancyReleased ? undefined : recordedTree(read, entry.path)));
+  const keys = trees.map((t) => new Set(t === undefined || "unread" in t ? [] : t.tree.map(identityKey)));
+  const runs = entries.map((entry) => entry.workerClass === "test" && !entry.occupancyReleased);
+  const out = [...runs];
+  trees.forEach((t, i) => {
+    if (!runs[i] || t === undefined || "unread" in t) return;
+    keys.forEach((other, j) => { if (j !== i && t.roots.some((root) => other.has(identityKey(root)))) out[j] = true; });
+  });
+  return out;
+}
+
 /**
  * Each tree's rss+swap, a process counted ONCE: a tree rooted inside another (a test run inside a worker's tree) is
  * measured first and keeps its processes, so the enclosing tree's resident leaves them out. Pure over `read`.
@@ -2038,6 +2076,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
   const ledger = readLedgerState(ports, start.root);
   const recorded = ledger.reading?.entries ?? [];
   const residents = residentsOf(ports.readFile, recorded.map((entry) => entry.path), undefined, { includeRss: true });
+  const validating = validatingTreesOf(ports.readFile, recorded);
   // A measured estimate's class also has a learned median; an unmeasured one claims its whole estimate as typical.
   const typical = (workerClass: WorkerClass, estimateMib: number): { typicalMib?: number } => {
     const median = typicalOf(ports, workerClass);
@@ -2054,6 +2093,7 @@ export function gatherShadowInputs(start: ShadowStart, ports: ShadowMemoryPorts,
     resident: residents[i]!,
     ageMs: entry.ageMs,
     ...(entry.occupancyReleased ? { occupancyReleased: true } : {}),
+    ...(validating[i] ? { validating: true } : {}),
     ...(entry.estimateSource.kind === "measured" ? typical(entry.workerClass, entry.estimateMib) : {}),
     ...(entry.estimateSource.kind === "measured" && !entry.occupancyReleased
       ? { survival: survivalOf(ports, entry.workerClass, entry.ageMs) } : {}),
