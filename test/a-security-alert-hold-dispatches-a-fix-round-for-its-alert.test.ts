@@ -69,7 +69,9 @@ function sweep(prior: Record<string, unknown>[]) {
       fixes.push(((evidence as { ciFailures?: Array<{ logTail: string }> }).ciFailures ?? []).map((f) => f.logTail));
     },
     ledgerPath: "/nonexistent/rmd-w1-t9731/rows.ndjson", runId: "SWEEP-W1-T9731", now: () => NOW,
-    readLedger: () => [...prior, ...rows], appendLine: (_path, row) => { rows.push(row); },
+    // W1-T14317: the head's live verdict; with no readable verdict history the sweep stops at the arm refusal.
+    readLedger: () => [{ ts: "2026-10-15T17:55:00.000Z", run_id: "REVIEW-1", task_id: TASK, step: "review.posted", pr_url: PR_URL,
+      head_sha: HEAD, capped: false, plan_only: false }, ...prior, ...rows], appendLine: (_path, row) => { rows.push(row); },
     log: (step, extra = {}) => { rows.push({ run_id: "SWEEP-W1-T9731", step, ...extra }); },
   };
   return { deps, rows, fixes, armed };

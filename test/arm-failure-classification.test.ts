@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { armAutoMerge, armFailureAction, sweepArmAttemptOutcome, type ArmDeps } from "#src/run-task.js";
 import { runSweep, DEFAULT_SWEEP_POLICY, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 import { readLedgerLines } from "#src/lib/status.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 // W1-T1117 — `armFailureAction`'s `transient` arm was an allowlist of TRANSPORT/SERVER faults
 // only, so a merge race whose own GitHub message says "try the merge again" fell through to the
@@ -73,8 +74,11 @@ test("armAutoMerge: a clean-status refusal still completes as a direct merge end
 
 // ── acceptance 3/4 — the sweep's "mergeable" arm dedup actually consults the classification ──
 
+/** The ledger holds the live review.posted verdict for mergeablePr()'s head (W1-T14317). */
 function ledgerPath(): string {
-  return join(mkdtempSync(join(tmpdir(), "rmd-arm-failure-classification-")), "ledger.ndjson");
+  return writeLedger([{ ts: "2026-07-17T11:00:00.000Z", run_id: "REVIEW", task_id: "W1-A", step: "review.posted",
+    pr_url: "url/10", head_sha: "aaaa111", capped: false, plan_only: false }],
+  { dir: mkdtempSync(join(tmpdir(), "rmd-arm-failure-classification-")) }).path;
 }
 
 const NOW = Date.parse("2026-07-17T12:00:00Z");

@@ -65,8 +65,12 @@ interface Fixture {
   clock: { ms: number };
 }
 
-function fixture(reread: SweepDeps["rereadPrAtAct"], over: Partial<SweepDeps> = {}): Fixture {
-  const { path } = writeLedger();
+/** W1-T14317: a live review.posted verdict for each head in `verdictHeads`; with no readable verdict history the
+ *  sweep never arms a head that has none. */
+function fixture(reread: SweepDeps["rereadPrAtAct"], over: Partial<SweepDeps> = {}, verdictHeads: string[] = []): Fixture {
+  const pr = snapshotPr();
+  const { path } = writeLedger(verdictHeads.map((head) => ({ ts: minutesAgo(10), run_id: "REVIEW-10001", task_id: pr.taskId,
+    step: "review.posted", pr_url: pr.prUrl, head_sha: head, capped: false, plan_only: false })));
   const clock = { ms: NOW };
   const f: Fixture = {
     deps: undefined as unknown as SweepDeps, armed: [], reviewed: [], rereads: 0,
@@ -91,7 +95,7 @@ function fixture(reread: SweepDeps["rereadPrAtAct"], over: Partial<SweepDeps> = 
 
 test("W1-T7734: a full pass that finds a moved head re-derives that PR from a fresh single-PR read in the same pass", async () => {
   // The fresh read sees the SAME PR green and reviewed at the new head, so the re-derived disposition is `mergeable`.
-  const f = fixture((pr) => ({ ...pr, headSha: LIVE_HEAD }));
+  const f = fixture((pr) => ({ ...pr, headSha: LIVE_HEAD }), {}, [LIVE_HEAD]);
   const summary = await runSweep([snapshotPr()], f.deps, DEFAULT_SWEEP_POLICY);
   assert.equal(f.rereads, 1, "the one moved PR is read once");
   assert.deepEqual(f.armed, [LIVE_HEAD], "the re-derived disposition acts on the NEW head, in this pass");
@@ -164,14 +168,14 @@ test("W1-T7734: a disposed row records the snapshot age at act time", async () =
   const plain = fixture(undefined, {
     readLiveStateAtAct: (pr) => ({ ok: true, state: "OPEN", headSha: (pr as OpenPrView).headSha }),
     snapshotPublishedAtMs: NOW - 90_000,
-  });
+  }, [SNAPSHOT_HEAD]);
   await runSweep([snapshotPr()], plain.deps, DEFAULT_SWEEP_POLICY);
   const row = plain.rows().find((r) => r.step === "sweep.disposed");
   assert.equal(row?.snapshot_age_ms, 90_000);
   assert.equal(row?.rederived, undefined, "an unmoved PR is not marked re-derived");
 
   // A re-derived PR records the age of its FRESH read, measured when it is acted on (the arm takes 2 s).
-  const rederived = fixture((pr) => ({ ...pr, headSha: LIVE_HEAD }), { snapshotPublishedAtMs: NOW - 90_000 });
+  const rederived = fixture((pr) => ({ ...pr, headSha: LIVE_HEAD }), { snapshotPublishedAtMs: NOW - 90_000 }, [LIVE_HEAD]);
   const arm = rederived.deps.arm;
   rederived.deps.arm = (pr, mode) => { rederived.clock.ms += 2_000; return arm(pr, mode); };
   await runSweep([snapshotPr()], rederived.deps, DEFAULT_SWEEP_POLICY);

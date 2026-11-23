@@ -398,6 +398,8 @@ describe("test/every-fixed-repair-budget-defers-to-the-progress-judge.test.ts", 
       const rows: Record<string, unknown>[] = [
         { step: "sweep.disposed", pr_number: 7243, head_sha: "head", disposition: "mergeable", acted: true, arm_outcome: "armed" },
         ...Array.from({ length: 3 }, () => ({ step: REARMED_AFTER_DISARM_STEP, pr_number: 7243, head_sha: "head" })),
+        // W1-T14317: the head's live verdict; with no readable verdict history the sweep never arms.
+        { task_id: "W1-T7243", step: "review.posted", pr_url: pr().prUrl, head_sha: "head", capped: false, plan_only: false },
       ];
       const f = fixture(rows, async facts => {
         assert.match(facts.parkedReason!, /re-arm/);

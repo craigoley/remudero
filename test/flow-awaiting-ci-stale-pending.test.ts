@@ -21,7 +21,8 @@ function facts(over: Partial<ArmReprobeFacts> = {}): ArmReprobeFacts {
     autoMergeArmed: false, mergeable: true, mergeableState: "clean", baseSha: "base", ...over };
 }
 function fixture(reader?: SweepDeps["readArmFacts"]) {
-  const ledger = writeLedger();
+  const ledger = writeLedger([{ ts: new Date(NOW).toISOString(), run_id: "REVIEW", task_id: "W1-T6052", step: "review.posted",
+    pr_url: "https://github.com/o/r/pull/6052", head_sha: HEAD, capped: false, plan_only: false }]);
   const armed: OpenPrView[] = [];
   const escalated: OpenPrView[] = [];
   const deps: SweepDeps = { ledgerPath: ledger.path, runId: "T6052", now: () => NOW,

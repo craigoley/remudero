@@ -47,7 +47,10 @@ function staleCiPr(): OpenPrView {
 }
 
 function fixture(live: (pr: OpenPrView) => LiveStateResult | Promise<LiveStateResult>) {
-  const { path } = writeLedger();
+  // W1-T14317: the mergeable PR's live verdict for its head; with no readable verdict history the sweep never arms.
+  const ready = mergeablePr();
+  const { path } = writeLedger([{ ts: minutesAgo(10), run_id: "REVIEW-9138", task_id: ready.taskId, step: "review.posted",
+    pr_url: ready.prUrl, head_sha: ready.headSha, capped: false, plan_only: false }]);
   const armed: string[] = [];
   const escalated: string[] = [];
   const deps: SweepDeps = {

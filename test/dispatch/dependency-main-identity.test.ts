@@ -10,6 +10,7 @@ import { DEFAULT_SWEEP_POLICY, deriveDisposition, runSweep, type OpenPrView, typ
 import { acquireInflightLock, inflightLockPath } from "#src/lib/inflight-lock.js";
 import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const HEAD = "c".repeat(40), MAIN = "a".repeat(40), HEAD_TREE = "d".repeat(40), MAIN_TREE = "e".repeat(40), BLOB = "f".repeat(40), LANDED = "9".repeat(40);
 function fixture() {
@@ -305,6 +306,8 @@ test("ordinary mergeable disposition retains its normal arm path despite unrelat
     const ledgerPath = join(f.dir, "state", "ledger.ndjson");
     const pr: OpenPrView = { ...view(), isDependabot: false, checksState: "green", mergeableState: "clean", autoMergeArmed: false };
     assert.equal(deriveDisposition(pr, DEFAULT_SWEEP_POLICY).disposition, "mergeable");
+    writeLedger([{ ts: "2026-01-01T00:00:00.000Z", run_id: "REVIEW", task_id: pr.taskId, step: "review.posted",
+      pr_url: pr.prUrl, head_sha: pr.headSha, capped: false, plan_only: false }], { dir: join(f.dir, "state") });
     let closes = 0, fences = 0, arms = 0;
     const deps: SweepDeps = { ledgerPath, runId: "ordinary-mergeable", arm: () => { arms++; }, dispatchFix: () => {}, escalate: () => {},
       close: () => { closes++; }, withDependencyCloseFence: async () => { fences++; return { closed: false }; } };

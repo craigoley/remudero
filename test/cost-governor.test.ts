@@ -112,6 +112,11 @@ function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
   const closed: Array<{ pr: OpenPrView; reason: string }> = [];
   const fixed: Array<{ pr: OpenPrView; evidence: FixDispatchEvidence }> = [];
   const escalated: Array<{ pr: OpenPrView; reason: string }> = [];
+  // W1-T14317: the mergeable PR's live verdict for its head; with no readable verdict history the sweep never arms.
+  const path = ledgerPath();
+  const ready = mergeablePr();
+  appendLedger(path, { ts: RECENT, run_id: "REVIEW-10", task_id: ready.taskId!, step: "review.posted",
+    pr_url: ready.prUrl, head_sha: ready.headSha, capped: false, plan_only: false });
   return {
     armed,
     closed,
@@ -121,7 +126,7 @@ function fakeDeps(overrides: Partial<SweepDeps> = {}): SweepDeps & {
     close: (p, reason) => { closed.push({ pr: p, reason }); },
     dispatchFix: (p, evidence) => { fixed.push({ pr: p, evidence }); },
     escalate: (p, reason) => { escalated.push({ pr: p, reason }); },
-    ledgerPath: ledgerPath(),
+    ledgerPath: path,
     runId: "SWEEP-1",
     now: () => TODAY,
     ...overrides,

@@ -116,6 +116,8 @@ test("W1-T5536: a ladder-refreshed head that goes red climbs, never earning fres
   assert.ok(f.calls.some(c => c.startsWith("close:")));
   const green = fixture(t);
   await green.sweep([pr({ currentMergeBaseSha: "old-main" })]);
+  // W1-T14317: the green head's live verdict; with no readable verdict history the sweep never arms.
+  green.rows.push({ step: "review.posted", task_id: "W1-T5536", pr_url: pr().prUrl, head_sha: "green-head", capped: false, plan_only: false });
   await green.sweep([pr({ headSha: "green-head", priorStrikes: 0, checksState: "green", ciFailures: [] })]);
   assert.ok(green.calls.includes("arm"));
   assert.equal(green.calls.some(c => c.startsWith("close:")), false);

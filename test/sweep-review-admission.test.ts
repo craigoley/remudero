@@ -263,6 +263,8 @@ test("W1-T526: arming and fixing still act on every pull request", async () => {
   const fixable = blockedFixablePr({ prNumber: 41, prUrl: "url/41", taskId: "W1-T41", headSha: "sha41" });
   const older = postReviewPr({ prNumber: 10, prUrl: "url/10", taskId: "W1-T10", headSha: "sha10", lastActivityAt: "2026-07-10T00:00:00Z" });
   const younger = postReviewPr({ prNumber: 20, prUrl: "url/20", taskId: "W1-T20", headSha: "sha20", lastActivityAt: "2026-07-15T00:00:00Z" });
+  appendLedger(lp, { ts: "2026-07-17T11:00:00Z", run_id: "REVIEW", task_id: "W1-T40", step: "review.posted",
+    pr_url: "url/40", head_sha: "sha40", capped: false, plan_only: false });
 
   await runSweepLightPass([mergeable, fixable, older, younger], deps, DEFAULT_SWEEP_POLICY);
 
