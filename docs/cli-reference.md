@@ -30,7 +30,7 @@ usage:
   rmd next-task-id [--plan <path>] [--offline] [--no-reserve] [--audit [--reap [--apply | --reconcile]]] [--audit-age-days <days>] [--prefix <P> --repo <owner/name>] [--branch <name>] [--count <n>] [--max-scan <1..200>]   # Claim the next task id, or preview orphan cleanup with --audit --reap; --apply deletes under leases.
   rmd migration-preview --public-root <path> --public-commit <sha> --public-repo <owner/remudero> --ops-root <path> --ops-commit <sha> --ops-repo <owner/name>   # Preview the lowest-priority safe public task without moving it.
   rmd move-task --public-root <path> --public-commit <sha> --public-repo <owner/remudero> --ops-root <path> --ops-commit <sha> --ops-repo <owner/name> [--apply]   # Take one recoverable step of moving a preview-admitted public task into the ops catalog.
-  rmd plan-destination <decision|feedback|task>   # Print the repository and checkout that take a new plan file of this kind on this host.
+  rmd plan-destination <decision|feedback|task> | rmd plan-destination task --pr-body <task-id>   # Print the repository and checkout that take a new plan file of this kind on this host.
   rmd emissions [--days N]   # Which CLI verbs wrote no ledger line in the window -- dead-capability detection.
   rmd receipt <pr> [--repo <name>]   # Print a deterministic in-toto-style run receipt from ledger ground truth.
   rmd replay <since> <until> [--task <id>] [--step <prefix>]   # Narrate a ledger window in plain text: what the fleet decided, in order.
@@ -310,10 +310,10 @@ W1-T13680. Reads both mains at the pinned commits (which must be current in thei
 Print the repository and checkout that take a new plan file of this kind on this host.
 
 ```
-rmd plan-destination <decision|feedback|task>
+rmd plan-destination <decision|feedback|task> | rmd plan-destination task --pr-body <task-id>
 ```
 
-W1-T12216: reads the host file <state dir>/plan-destination.json, the switch of W1-T12200, and prints three facts for a NEW file of the kind: the outcome (off when there is no host file, not_listed when the file does not list the kind, destination when it does), the repository, and the checkout. off and not_listed name the public repository and this command's own checkout. A file that is present but wrong prints `outcome: unreadable` with its reason and exits 1; it is never read as off. A changed file is edited in the repository that holds it, whatever this command prints. Exits 0 when it names a repository, 1 unreadable, 2 bad usage. READ-ONLY.
+W1-T12216: reads the host file <state dir>/plan-destination.json, the switch of W1-T12200, and prints three facts for a NEW file of the kind: the outcome (off when there is no host file, not_listed when the file does not list the kind, destination when it does), the repository, and the checkout. off and not_listed name the public repository and this command's own checkout. A file that is present but wrong prints `outcome: unreadable` with its reason and exits 1; it is never read as off. A changed file is edited in the repository that holds it, whatever this command prints. `task --pr-body <task-id>` prints the public pull request body for an ops task. Exits 0 on success, 1 if unreadable or the requested task is absent, and 2 on bad usage. READ-ONLY.
 
 ### `rmd emissions`
 
