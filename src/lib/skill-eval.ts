@@ -9,13 +9,14 @@
  *
  * The selector is pure. The draft is frozen first, because its sha256 seeds the draw. The runner
  * spends, so it refuses unless the operator passed --confirm-spend (or the fleet passed the operator's standing
- * approval, W1-T13861) and the fleet is idle, and it
+ * approval, W1-T13861) and the fleet is up with measured headroom below the limit, and it
  * dispatches only through an injected sealed dispatcher. Every refusal is a value the caller sees,
  * never an empty success. The drafter (skill-workshop.ts, workflow-mining.ts) must never import this
  * module or golden-corpus.ts; the dependency-cruiser rule `drafter-never-sees-held-out-set` refuses that edge.
  */
 import { createHash } from "node:crypto";
-import { heldOutLeaks, replayIdleGate, type CorpusProofOutcome, type GoldenCorpusItem, type ReplayIdleSignal } from "./golden-corpus.js";
+import { heldOutLeaks, type CorpusProofOutcome, type GoldenCorpusItem, type ReplayGate, type ReplayIdleSignal } from "./golden-corpus.js";
+import { HEADROOM_LIMIT_PCT, headroomExhausted } from "./headroom.js";
 import { gradeHeadWithReviewerExecutor, PAIRED_ATTEMPT_MAX_BUDGET_USD, type PairedAttemptDispatch, type PairedAttemptRequest,
   type PairedAttemptResult, type PairedGrade, type PairedGrader } from "./paired-trial.js";
 import { promotionFloor } from "./promotion-bars.js";
@@ -246,7 +247,7 @@ export interface SkillEvalRunInput {
   /** The invocation's argv: the run spends only with `--confirm-spend` (`replayOptIn`), or with the standing approval. */
   argv: readonly string[];
   /** W1-T13861: in place of `--confirm-spend`, only when it is {@link SKILL_EVAL_STANDING_APPROVAL} itself. Every other
-   *  check (the quiet fleet, the draft, the held-out task count, the spend ceiling) still applies unchanged. */
+   *  check (the capacity gate, the draft, the held-out task count, the spend ceiling) still applies unchanged. */
   standingApproval?: Readonly<{ ref: string }>;
   idle: ReplayIdleSignal;
   log: (step: string, row: Record<string, unknown>) => void;
@@ -313,9 +314,22 @@ async function runSkillEvalAttempt(input: SkillEvalRunInput, item: GoldenCorpusI
 }
 
 /**
+ * The capacity gate a skill eval reads: the fleet is up and measured headroom is below the limit on every window.
+ * It does not ask for quiet mode. An unmeasured liveness or headroom refuses.
+ */
+export function skillEvalCapacityGate(signal: ReplayIdleSignal, limitPct: number = HEADROOM_LIMIT_PCT): ReplayGate {
+  if (signal.liveness === undefined) return { enabled: false, reason: "refusing a skill eval: fleet liveness was not measured" };
+  if (signal.liveness.state !== "up") return { enabled: false, reason: `refusing a skill eval: the fleet is ${signal.liveness.state}` };
+  if (signal.headroom === undefined) return { enabled: false, reason: "refusing a skill eval: headroom was not measured" };
+  const over = headroomExhausted(signal.headroom, limitPct);
+  if (over !== null) return { enabled: false, reason: `refusing a skill eval: ${over.window} is at ${over.percentUsed}% (limit ${limitPct}%)` };
+  return { enabled: true, reason: "the fleet is up and measured headroom is below the limit" };
+}
+
+/**
  * Attempt the draft on each held-out task, R trials per arm in {@link skillEvalTrialOrder}, grade every head and
  * clean it up, log one `skill_eval.attempt` row per attempt and one `skill_eval.result` row, and return the verdict.
- * Refuses, having dispatched nothing, without `--confirm-spend`, when the fleet is not idle, when the draft is not
+ * Refuses, having dispatched nothing, without `--confirm-spend`, when the capacity gate is closed, when the draft is not
  * the one the selection was drawn for, or when the attempts could exceed {@link SKILL_EVAL_MAX_SPEND_USD}.
  */
 async function skillEvalRun(input: SkillEvalRunInput, control?: SkillEvalControl): Promise<SkillEvalRun> {
@@ -327,8 +341,8 @@ async function skillEvalRun(input: SkillEvalRunInput, control?: SkillEvalControl
   };
   const optIn = spendApproval(input);
   if (!optIn.enabled) return refuse("spend-not-confirmed", optIn.reason);
-  const idle = replayIdleGate(input.idle);
-  if (!idle.enabled) return refuse("fleet-not-idle", idle.reason);
+  const capacity = skillEvalCapacityGate(input.idle);
+  if (!capacity.enabled) return refuse("fleet-not-idle", capacity.reason);
   if (sha256(input.draftMarkdown) !== selection.draftSha256) {
     return refuse("draft-not-selected", "the draft's sha256 is not the one that drew this held-out set");
   }
@@ -379,7 +393,7 @@ function spendApproval(input: Pick<SkillEvalRunInput, "argv" | "standingApproval
   return replayOptIn(input.argv);
 }
 
-/** Optional fixed whole-loop control is inert when absent and cannot bypass quiet/spend gates.
+/** Optional fixed whole-loop control is inert when absent and cannot bypass capacity/spend gates.
  * Synchronous setup/grading and escaped descendants still require an independently qualified
  * whole-process boundary. No successful or cancelled return here releases a capacity lease. */
 export async function runSkillEval(input: SkillEvalRunInput): Promise<SkillEvalRun> {

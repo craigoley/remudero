@@ -13,6 +13,7 @@
   plan_refs: [W1-T7214, W1-T10944]
   files:
     - src/lib/sweep.ts
+    - src/lib/ledger.ts # 2026-11-23: the skip row joins DECISION_RELEVANT_LEDGER_STEPS, as skipped_queue did (W1-T5903)
     - test/sweep/a-light-pass-never-updates-a-merged-pr.test.ts
     - test/a-ready-pr-main-moved-under-is-refreshed-on-the-light-pass.test.ts
     - test/a-main-merge-refresh-is-taken-only-when-it-is-worth-a-ci-run.test.ts

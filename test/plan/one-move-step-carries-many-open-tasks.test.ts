@@ -151,27 +151,20 @@ function padOps(w: MoveWorld, count: number, at: string): void {
   run("push", "--quiet", "origin", "main");
 }
 
-test("W1-T14345 criterion 1: past the reader's baseline a batch takes only the growth room its UTC day has left, so the step rate follows the daily growth bound", async t => {
+test("W1-T14345 criterion 1: past the reader's baseline a batch of moved records is not limited by the daily growth bound (W1-T14557: moves are not growth)", async t => {
   const ids = ["W1-T1", "W1-T2", "W1-T3", "W1-T4", "W1-T5"];
   const w = moveWorld(t, Object.fromEntries(ids.map(id => [id, record(id)])));
   const now = Date.now();
   padOps(w, 498, new Date(now - 2 * 86_400_000).toISOString());
-  // A catalog measured as growing two shards a day: from 498, the copy may take it to 500 within the baseline, and past
-  // the baseline it may grow no more than two shards in the day.
+  // A catalog measured as growing two shards a day. Before W1-T14557 the copy stopped at two; the operator's ruling
+  // (2026-11-23, "Alert plus exempt moves") makes a moved copy (it carries moved_from) count for no growth, so the
+  // whole batch copies past the baseline and only the heap bound could still stop it.
   const today: OpsCatalogBoundsIo = { dailyGrowth: () => ({ shards: 2, bytes: 1e9 }), clock: { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() } };
   const { pr: copy } = await step(w, "copy", { bounds: today });
-  assert.equal(copy.files.length, 2, "THE CLAIM: the batch stops where a third copy would break the day's growth bound");
+  assert.equal(copy.files.length, ids.length, "THE CLAIM: the daily growth bound no longer stops a batch of moved records");
   w.merge(copy);
   w.merge((await step(w, "remove", { bounds: today })).pr);
-  // The same UTC day: the catalog already grew two shards since the day began, so even one more copy is refused.
-  const again = await w.run(true, { bounds: today });
-  assert.deepEqual([again.out.step, again.out.reason], ["unknown", "catalog_incompatible"], again.lines.join("\n"));
-  assert.equal(w.pulls.length, 2, "no step past the day's room");
-  // A later UTC day starts from the catalog as it stands: two more shards fit, a third does not.
-  const later = now + 2 * 86_400_000;
-  const tomorrow: OpsCatalogBoundsIo = { ...today, clock: { now: () => later, date: () => new Date(later), iso: () => new Date(later).toISOString() } };
-  const { pr: next } = await step(w, "copy", { bounds: tomorrow });
-  assert.equal(next.files.length, 2);
+  assert.equal(w.pulls.length, 2, "one COPY and one REMOVE carried all five");
 });
 
 /** The janitor's ports over one move world: the switch on, every gate open, each move the real verb at both mains. */

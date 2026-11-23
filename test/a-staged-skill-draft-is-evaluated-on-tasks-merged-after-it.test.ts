@@ -352,7 +352,7 @@ test("a draft the with-skill prompt would not inject refuses before any dispatch
 
 test("an eval the fleet is not idle for exits 2 and records nothing", async () => {
   const { skillEvalCommand } = await command();
-  const fx = fixture({ idle: { liveness: { state: "up" }, headroom: HEADROOM } });
+  const fx = fixture({ idle: { liveness: { state: "down" }, headroom: HEADROOM } });
   assert.equal(await skillEvalCommand(CONFIRM, fx.deps), 2);
   assert.deepEqual(refusals(fx).map((row) => [row.reason, row.task_id]), [["fleet-not-idle", PROPOSAL_ID]]);
   assert.deepEqual(fx.dispatched, []);

@@ -46,7 +46,7 @@ import { isInPlanScope } from "./plan-architect.js";
 import { isDeclaredBranchGuard } from "./branch-reaper.js";
 import { activeCategorizedRefusal, categorizedRefusalRejoin, type CategorizedRefusalRejoin } from "./refusal-amendment.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
-import { DEFAULT_LIVENESS_BOUND_MS, infrastructureRefusal, lifetimeInfrastructureRefusal, provenOrphanRunIds, streakRefusal } from "./non-worker-verdict.js";
+import { DEFAULT_LIVENESS_BOUND_MS, infrastructureRefusal, lifetimeInfrastructureRefusal, provenOrphanRunIds, runErrorRunRows, streakRefusal } from "./non-worker-verdict.js";
 import { startWorker } from "./child-entry-argv.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -1630,8 +1630,9 @@ function dispatchStreakTally(
   const rows = taskRowsInTimeOrder(indexedTaskRows(lines, taskId, index), taskId);
   // A run's terminal verdict follows its start, so collect exclusions before counting starts.
   const refusalByRunId = new Map<string, string>();
+  const runRows = runErrorRunRows(rows);
   for (const line of rows) {
-    const refusal = line.task_id === taskId && line.step === "verdict" ? streakRefusal(line) : undefined;
+    const refusal = line.task_id === taskId && line.step === "verdict" ? streakRefusal(line, typeof line.run_id === "string" ? runRows.get(line.run_id) : undefined) : undefined;
     if (refusal !== undefined && typeof line.run_id === "string") refusalByRunId.set(line.run_id, refusal);
   }
   const orphanRunIds = orphanedRunIds(lines, taskId, index, opts);
@@ -1748,9 +1749,10 @@ export function taskAttributableLifetimeDispatches(
   const rows = indexedTaskRows(lines, taskId, index);
   const orphanRunIds = orphanedRunIds(lines, taskId, index, opts);
   const infrastructureRunIds = new Set<string>();
+  const runRows = runErrorRunRows(rows);
   for (const line of rows) {
     if (line.task_id === taskId && line.step === "verdict" &&
-        typeof line.run_id === "string" && streakRefusal(line) !== undefined) {
+        typeof line.run_id === "string" && streakRefusal(line, runRows.get(line.run_id)) !== undefined) {
       infrastructureRunIds.add(line.run_id);
     }
   }
