@@ -7,7 +7,6 @@
   principles: {tdd: strict}
   budget_usd: 3.00
   risk: low  # two existing shards' metadata plus this shard; plan-only, no src/ or test/ path
-  priority: 1  # both target tasks are queued priority 1 and would be refused at review by proofs that cannot fail on base
   origin: architect
   plan_refs: [W1-T11623, W1-T11659, W1-T10389, W1-T9874]
   files:
@@ -17,7 +16,9 @@
   # refusal-amendment (W1-T11669, run W1-T11669-1794187483620, 2026-11-09T08:49:35.396Z): the worker refused criterion 1 [proof-unexecutable-at-head] — proposed re-scope-criteria: repair the criterion's proof so it is executable at HEAD, or re-scope the criterion
   #   worker evidence: W1-T11669: a filed proof already passes at the merge base, so branch run-W1-T11669-1794187483620 cannot open a PR
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: blocked
+  retirement: retired
+  # operator 2026-11-23T12:27Z (thread "Triage open remudero GitHub issues"): retire W1-T11669 (answered retire-task on #17472, 2026-11-17T14:42Z) — its filed proof already passes at the merge base, so no build can open a PR.
   attempts: 0
   rationale: |
     The initiative asked for this task under "the reserved W1-T11668 id". The harness reserved
