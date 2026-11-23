@@ -72,3 +72,25 @@ test("W1-T13099: the symptom is still recorded when its failure occurs", async (
     assert.equal(run.ledger().length, 1);
   }
 });
+
+test("W1-T13099: a stalled local diff aborts at its deadline and records the failure", async (t) => {
+  const run = fixture(t, FILE_CAP, 1);
+  const originalNow = Date.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  let now = 0;
+  Date.now = () => now;
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void) => {
+    now = 1_000_000_000;
+    callback();
+    return 1 as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  try {
+    assert.deepEqual(await judgeCiEscalation(run.ports), { off: false, judged: [], failed: [7] });
+  } finally {
+    Date.now = originalNow;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+  const [row] = run.ledger();
+  assert.equal(row.step, "ci_judge.failed");
+  assert.match(String(row.error), /local diff exceeded/);
+});
