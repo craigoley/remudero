@@ -10976,13 +10976,15 @@ function withGitCredentialSocket(args: SpawnWorkerArgs, socketPath: string, harn
 }
 
 /** W1-T5115: the sweep fix rung's spawn — sweep.ts's own `benchmarkNonDispatchSpawn("sweep-fix")` default — with the
- *  daemon's git credential socket on every fix worker it starts. */
+ *  daemon's git credential socket on every fix worker it starts. W1-T12152: it reads the plan record of the task a fix
+ *  worker names from the harness checkout's plan, so a fix assignment records that task's class and risk. */
 export function gitCredentialFixSpawn(
   socketPath: string,
   raw: typeof spawnWorker = spawnWorker,
   harnessCheckout: string = repoRoot,
+  readTask: BenchmarkTaskWorkReader = planTaskBenchmarkWork(join(harnessCheckout, "plan")),
 ): typeof spawnWorker {
-  const spawnFix = benchmarkNonDispatchSpawn("sweep-fix", raw);
+  const spawnFix = benchmarkNonDispatchSpawn("sweep-fix", raw, readTask);
   return (args) => spawnFix(withGitCredentialSocket(args, socketPath, harnessCheckout));
 }
 
