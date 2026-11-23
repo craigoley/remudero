@@ -14,7 +14,7 @@
     - src/cli/commands/review.ts
     - test/review/a-pass-cannot-replace-another-writers-standing-fail.test.ts
     - test/wiring-ordering-behaviour.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-11-21 (W1-T14178 recon, comment on #20066): on #19922 head 66e66ab89, reviewer code ebea9d1a5, the

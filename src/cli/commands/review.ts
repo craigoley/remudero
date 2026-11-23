@@ -26,7 +26,7 @@ import { reapWorkerScratch } from "../../lib/worker-scratch.js";
 import { resolveInstallRoot } from "../../lib/install-root.js";
 import { escalate, ghIssueGateway, ghIssueGatewayAsync, tryEscalate, tryEscalateAsync } from "../../lib/escalate.js";
 import { combinedStatusRestArgs, compareRestArgs, mapRestPr, rollupForAsync, tryFetchReviewReuseFacts, type ReviewReuseFacts, type RestPullRow } from "../../lib/open-prs-rest.js";
-import { ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
+import { ghJsonAsync, ghLinesAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { appendLedger, REVIEW_LANE_ABORTED_STEP } from "../../lib/ledger.js";
 import { requiredSemanticDecisionDigest } from "../../lib/required-semantic-review.js";
 import { deriveTaskClass } from "../../lib/task-class.js";
@@ -728,13 +728,24 @@ export function failureRecordingPoster(): { post: (o: Parameters<typeof postRevi
   };
 }
 
+async function readReviewHostedJobLog(argv: string[]): Promise<string> {
+  const lines: string[] = [];
+  await ghLinesAsync(argv, line => {
+    // Keep the shared parser's receipts, test locations and failure section marker in order.
+    if (line.includes("RMD-TEST-FILE-DIAGNOSTIC ") || line.includes(".test.") || line.includes("✖ failing tests:")) {
+      lines.push(line);
+    }
+  });
+  return lines.join("\n");
+}
+
 /** W1-T11200: share the fix lane's exact-head, file-receipt reader with the review judge. */
 export async function reviewHostedCiFileEvidence(
   args: { owner: string; repo: string; headSha: string; criteria: readonly AcceptanceCriterion[];
     headCheckoutDir?: string; log: (step: string, extra?: Record<string, unknown>) => void },
   read: HostedFixProofReader = (headSha, proofs) => readHostedFixProofResults({
     owner: args.owner, repo: args.repo, headSha, proofs,
-  }),
+  }, { json: ghJsonAsync, text: readReviewHostedJobLog }),
 ): Promise<ReadonlyMap<string, "passed" | "failed"> | undefined> {
   try {
     const files = new Set<string>();

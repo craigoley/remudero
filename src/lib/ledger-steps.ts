@@ -563,6 +563,13 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["OBSERVED", "UNKNOWN"],
   },
   {
+    step: "fix.economy_escalated",
+    meaning: "A fix round moved from the Codex economy tier to the mount tier after a failed round. " +
+      "The row joins the failed round, names the failure and records the served model when available.",
+    writer: ["runFixRung"],
+    outcomes: ["not-landed", "unmet"],
+  },
+  {
     // W1-T12710: fix rounds that did not move one criterion get a different remedy.
     step: "fix.stall_remedy",
     meaning:

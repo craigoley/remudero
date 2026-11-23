@@ -14,7 +14,7 @@
     - src/lib/host-memory-shadow.ts
     - src/lib/host-memory-admission.ts
     - test/memory/the-host-memory-budget-counts-one-tail-per-validating-tree.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     OBSERVED 2026-11-21 13:13-13:16Z on the Azure host (read-only): memory PSI some avg10 99.97 and full avg10 59 at

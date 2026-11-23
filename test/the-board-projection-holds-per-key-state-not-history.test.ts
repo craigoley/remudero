@@ -522,3 +522,38 @@ test("W1-T14410 criterion 2: invariant:parts-within-the-stage — a derive's par
   assert.ok(parts.length >= 3);
   assert.ok(parts.reduce((a, b) => a + b, 0) <= update.elapsedMs);
 });
+
+/** A newer wait on each of the first `n` of {@link longLoad}'s pull requests, on the same head: each supersedes a kept row. */
+function newerWaits(n: number): Row[] {
+  return Array.from({ length: n }, (_, pr) => ({ ts: at(NOW0 + 1_000 + pr), step: "sweep.disposed", task_id: "SWEEP", pr_number: 1_000 + pr,
+    pr_url: url(1_000 + pr), head_sha: `w${pr}`, disposition: "blocked-fixable", reason: "strike 1/2" }));
+}
+
+/** The distinct short string values of a board's rows past its clock sentinel: what its intern table holds. */
+const rowValues = (board: BoardProjection): string[] => [...new Set(board.rows().slice(1).flatMap((row) => Object.values(row)
+  .filter((v): v is string => typeof v === "string" && v.length <= 96)))].sort();
+
+test("W1-T14431 criterion 1: a live update that lets rows go visits those rows, not every kept row", (t) => {
+  const w = world(t, longLoad());
+  const board = w.board();
+  drain(board);
+  const before = board.rows().length;
+  w.append(newerWaits(5));
+  const values = t.mock.method(Object, "values");
+  drain(board);
+  const visits = values.mock.callCount();
+  values.mock.restore();
+  assert.ok(before > 300, `control: the board holds many rows (${before})`);
+  assert.ok(board.rows().length <= before, "control: the new rows replaced rows it held");
+  assert.ok(visits < 60, `${visits} row visits for 5 rows in and 5 let go`);
+});
+
+test("W1-T14431 criterion 2: invariant:same-table — after rows are let go the table holds exactly the kept rows' values", (t) => {
+  const w = world(t, longLoad());
+  const board = w.board();
+  drain(board);
+  w.append(newerWaits(40));
+  drain(board);
+  assert.ok(rowValues(board).length > 0);
+  assert.equal(board.internedStrings(), rowValues(board).length);
+});

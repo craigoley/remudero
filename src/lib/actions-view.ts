@@ -38,7 +38,8 @@ export interface ActionsData {
 }
 
 type Row = Record<string, unknown>;
-type Fold = { seq: number; rows: Row[] };
+/** `epoch` numbers each fold afresh, so a store rebuilt below `seq` is a new input even when its row count is not. */
+type Fold = { seq: number; rows: Row[]; epoch: number };
 
 export interface ActionsViewOptions<S extends { instance: string; newestTs: string | null }> {
   instances: ReadonlyArray<{ name: string; ledgerDir: string }>;
@@ -51,15 +52,15 @@ function withMeta(rows: Row[], present: boolean, torn = 0): LedgerLines {
 }
 
 /** Folds the reconciled facts past `fold.seq`; a store whose facts were rebuilt below it is folded afresh. */
-function foldFacts(folds: WeakMap<ReadModelDb, Fold>, db: ReadModelDb): boolean {
+function foldFacts(folds: WeakMap<ReadModelDb, Fold>, db: ReadModelDb, nextEpoch: () => number): Fold {
   const max = Number(db.prepare("SELECT coalesce(max(seq), 0) AS m FROM fact").get()?.m);
   let fold = folds.get(db);
-  if (!fold || max < fold.seq) folds.set(db, (fold = { seq: 0, rows: [] }));
-  if (max === fold.seq) return false;
+  if (!fold || max < fold.seq) folds.set(db, (fold = { seq: 0, rows: [], epoch: nextEpoch() }));
+  if (max === fold.seq) return fold;
   const fresh = db.prepare("SELECT body FROM fact WHERE seq > ? AND seq <= ? AND step = ? ORDER BY seq").all(fold.seq, max, EXTERNAL_EFFECT_RECONCILED_STEP);
   fold.seq = max;
   for (const fact of fresh) fold.rows.push(JSON.parse(String(fact.body)) as Row);
-  return fresh.length > 0;
+  return fold;
 }
 
 /** The `actions` view as the read-model worker materializes it: one body, key `""`. */
@@ -67,6 +68,7 @@ export function createActionsView<S extends { instance: string; newestTs: string
   name: string;
   version: number;
   materialize(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): Array<{ key: string; data: ActionsData; sources: ViewSource[] }>;
+  inputsFingerprint(ctx: { now: number; instances: ReadonlyArray<{ state: S; db?: ReadModelDb }> }): string;
   legacy(key: string, now: number, data: unknown): ShadowLegacy | undefined;
 } {
   const byName = new Map(opts.instances.map((i) => [i.name, i]));
@@ -76,17 +78,34 @@ export function createActionsView<S extends { instance: string; newestTs: string
   const legacyMemos = new Map<string, LedgerRotationMemo>();
   let body: ActionsData | undefined;
   let builtKey: string | undefined;
+  let epochs = 0;
+  /**
+   * Everything the body is built from, as one key: per instance, whether its store is open, how many reconciled facts
+   * its fold holds (and which fold: a store rebuilt below it is folded afresh) and the newest instant the route's
+   * rotation window leaves out. The body is rebuilt exactly when this key moves; its `generatedAt` is the build's
+   * clock, and no field of it ages with the clock after that, so the clock is not an input.
+   */
+  const inputsOf = (instances: ReadonlyArray<{ state: S; db?: ReadModelDb }>) => {
+    const slots = instances.filter(({ state }) => byName.has(state.instance));
+    const after = new Map(slots.map(({ state }) => [state.instance, rotationWindowExcludedThroughMs(byName.get(state.instance)!.ledgerDir, STATUS_BOARD_WINDOW_MS, STATUS_BOARD_MIN_ROTATIONS)]));
+    const key = slots.map(({ state, db }) => {
+      const fold = db ? foldFacts(folds, db, () => ++epochs) : undefined;
+      return `${state.instance}=${fold ? `${fold.epoch}.${fold.rows.length}` : "-"}>${after.get(state.instance)}`;
+    }).join(";");
+    return { slots, after, key };
+  };
 
   return {
     name: ACTIONS_VIEW_NAME,
     version: ACTIONS_VIEW_VERSION,
+    /**
+     * W1-T11976: its inputs are its reconciled facts and its rotation window (see `inputsOf`), so a row of any other
+     * step leaves the body skipped. Its only source is `ledger:<i>`, which a skip restamps.
+     */
+    inputsFingerprint: ({ instances }) => inputsOf(instances).key,
     materialize: ({ now, instances }) => {
-      const slots = instances.filter(({ state }) => byName.has(state.instance));
-      let moved = false;
-      for (const { db } of slots) if (db && foldFacts(folds, db)) moved = true;
-      const after = new Map(slots.map(({ state }) => [state.instance, rotationWindowExcludedThroughMs(byName.get(state.instance)!.ledgerDir, STATUS_BOARD_WINDOW_MS, STATUS_BOARD_MIN_ROTATIONS)]));
-      const key = slots.map(({ state, db }) => `${state.instance}=${db ? "db" : "-"}>${after.get(state.instance)}`).join(";");
-      if (body === undefined || moved || key !== builtKey) {
+      const { slots, after, key } = inputsOf(instances);
+      if (body === undefined || key !== builtKey) {
         body = { instances: slots.map(({ state, db }) => {
           const fold = db ? folds.get(db) : undefined;
           return { instance: state.instance, results: buildActionResultsProjection(withMeta((fold?.rows ?? []).filter((row) => !(Date.parse(String(row.ts)) <= after.get(state.instance)!)), fold !== undefined), {}, () => now) };
