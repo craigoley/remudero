@@ -634,8 +634,8 @@ async function readSharedReviewStatusHistory(owner: string, repo: string, prUrl:
   }
 }
 
-/** W1-T14179 (invariant no-silent-override): why a PASS may not replace another run's standing FAIL on this head and
- *  input. A criterion is answered when its own proof executed and passed where the FAIL's proof did not, or when the
+/** W1-T14179 (invariant no-silent-override): why a PASS may not replace another run's standing FAIL on this head,
+ *  input and reviewer code (an unknown code on either side counts as the same). A criterion is answered when its own proof executed and passed where the FAIL's proof did not, or when the
  *  reproduced-failure rule recorded it addressed. A FAIL whose criteria are unreadable is never answered. */
 export function passDisputesStandingFailure(verdict: Pick<ReviewVerdict, "state" | "criteria">, headSha: string, writer: ReviewWriter,
   history: ReviewStatusHistory, answeredClaims: ReadonlySet<string> = new Set()): ReviewPassDispute | undefined {
@@ -643,6 +643,7 @@ export function passDisputesStandingFailure(verdict: Pick<ReviewVerdict, "state"
   const standing = (history as SharedReviewStatusHistory).standingFailure;
   if (standing === undefined || standing.headSha !== headSha || standing.runId === writer.runId) return undefined;
   if (standing.inputDigest !== undefined && writer.inputDigest !== undefined && standing.inputDigest !== writer.inputDigest) return undefined;
+  if (standing.codeSha !== undefined && writer.codeSha !== undefined && standing.codeSha !== writer.codeSha) return undefined;
   const answers = (failed: { claim: string; reason: string }): boolean => {
     const matches = verdict.criteria.filter((criterion) => criterion.claim.trim() === failed.claim);
     return answeredClaims.has(failed.claim) || (matches.length === 1 && matches[0]!.met && matches[0]!.proof_exec === "executed_pass" &&

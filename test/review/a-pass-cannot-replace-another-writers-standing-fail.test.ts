@@ -41,12 +41,12 @@ function reviewerSays(text: string): Awaited<ReturnType<NonNullable<Parameters<t
   };
 }
 
-function failureComment(head: string, reason: string, writer?: { run: string; input: string | undefined }) {
+function failureComment(head: string, reason: string, writer?: { run: string; input: string | undefined; code?: string }) {
   return {
     commit_id: head, submitted_at: "2026-11-21T19:00:03Z",
     body: `**remudero-review=failure** — the following acceptance criterion is unmet:\n\n1. ${CLAIM}\n   - ${reason}\n\n` +
       "Add the missing work (or escalate). Do NOT edit the acceptance criteria to match the diff." +
-      (writer ? `\n\n${reviewCommand.reviewWriterMarker(writer.run, writer.input, CODE)}` : ""),
+      (writer ? `\n\n${reviewCommand.reviewWriterMarker(writer.run, writer.input, writer.code ?? CODE)}` : ""),
   };
 }
 
@@ -54,6 +54,7 @@ interface Scenario {
   reason: string;
   failRun?: string;
   failInput?: "same" | "other";
+  failCode?: string;
   marker?: boolean;
   comment?: boolean;
   failOnOtherHead?: boolean;
@@ -73,10 +74,10 @@ async function drivePass(t: TestContext, scenario: Scenario) {
   const failHead = scenario.failOnOtherHead ? "f".repeat(40) : head;
   const statuses = scenario.failOnOtherHead ? [] : [
     { id: 2, context: "remudero-review", state: "pending", description: `remudero-review: review in progress (owned by run ${HAND_RUN})` },
-    { id: 1, context: "remudero-review", state: "failure", description: `remudero-review: FAIL — 1/1 criteria unmet [review code ${CODE}]` },
+    { id: 1, context: "remudero-review", state: "failure", description: `remudero-review: FAIL — 1/1 criteria unmet [review code ${scenario.failCode ?? CODE}]` },
   ];
   const writer = scenario.marker === false ? undefined
-    : { run: scenario.failRun ?? FLEET_RUN, input: scenario.failInput === "other" ? "0".repeat(64) : inputDigest };
+    : { run: scenario.failRun ?? FLEET_RUN, input: scenario.failInput === "other" ? "0".repeat(64) : inputDigest, code: scenario.failCode };
   const reviews = scenario.comment === false ? [] : [failureComment(failHead, scenario.reason, writer)];
   const shim = ghShim([
     { when: `commits/${head}/statuses?per_page`, stdout: JSON.stringify(statuses) },
@@ -168,9 +169,10 @@ test("W1-T14179 criterion 2: a PASS that answers every unmet criterion with an e
   await t.test("a reproduced failure the PASS addressed", async st => assertPosted(await drivePass(st, { reason: EXECUTED_FAIL, acknowledge: true })));
 });
 
-test("W1-T14179 criterion 2: a new head, a new input digest or the same writer's re-post keeps today's behaviour", async t => {
+test("W1-T14179 criterion 2: a new head, a new input digest, a different reviewer code or the same writer's re-post keeps today's behaviour", async t => {
   await t.test("new head", async st => assertPosted(await drivePass(st, { reason: DOWNGRADE, failOnOtherHead: true })));
   await t.test("new input digest", async st => assertPosted(await drivePass(st, { reason: DOWNGRADE, failInput: "other" })));
+  await t.test("different reviewer code", async st => assertPosted(await drivePass(st, { reason: DOWNGRADE, failCode: "c".repeat(40) })));
   await t.test("same writer's re-post", async st => assertPosted(await drivePass(st, { reason: DOWNGRADE, failRun: HAND_RUN })));
 });
 
@@ -184,7 +186,12 @@ test("W1-T14179 criterion 2: a FAIL replacing a PASS and a reproduced failure ke
   assert.equal(reviewCommand.passDisputesStandingFailure({ state: "failure", criteria }, head, { runId: HAND_RUN, inputDigest: "d" }, history), undefined,
     "a FAIL may always replace what stands");
   const passing = [{ ...criteria[0], met: true, proof_exec: "executed_pass" as const }];
-  assert.ok(reviewCommand.passDisputesStandingFailure({ state: "success", criteria: passing }, head, { runId: HAND_RUN, inputDigest: "d" }, history));
+  assert.ok(reviewCommand.passDisputesStandingFailure({ state: "success", criteria: passing }, head, { runId: HAND_RUN, inputDigest: "d" }, history),
+    "an unknown reviewer code on the PASS side cannot prove a different code");
+  assert.ok(reviewCommand.passDisputesStandingFailure({ state: "success", criteria: passing }, head, { runId: HAND_RUN, inputDigest: "d", codeSha: CODE }, history),
+    "the same reviewer code is disputed");
+  assert.equal(reviewCommand.passDisputesStandingFailure({ state: "success", criteria: passing }, head,
+    { runId: HAND_RUN, inputDigest: "d", codeSha: "c".repeat(40) }, history), undefined, "a different reviewer code keeps today's behaviour");
   assert.equal(reviewCommand.standingReviewFailureFromHistory([{ ...statuses[0], state: "success" }, ...statuses], [], head), undefined,
     "a FAIL that a later terminal status replaced does not stand");
 });
