@@ -4,7 +4,6 @@
   depends_on:
     - W1-T12271
     - W1-T12235
-  priority: 1.2
   type: implement
   verify: auto
   principles:
@@ -24,7 +23,9 @@
     - test/sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store.test.ts
     - test/an-escalated-terminal-head-stands-down-before-redispatch.test.ts
     - test/non-fleet-head-escalation-precision.test.ts
-  status: queued
+  status: blocked
+  retirement: withdrawn  # duplicate held follow-up; #19672 met this criterion at its merged head
+  superseded_by: W1-T12271
   attempts: 0
   acceptance:
     - claim: An unreadable rotated file gives the answer of today for an unread history. A head is never reported as free because its file could not be read
@@ -55,7 +56,12 @@
     NOT IN SCOPE: the other `resolveLedgerUnion` calls in src/lib/sweep.ts (lines 18742, 19374 and 19685 read for one pull request at action time), and the store itself.
   falsifier: |
     Call `resolveLedgerUnion` again and criterion 1 must fail. Drop the rows of the live file or accept a spaced `"step": "..."` row that the legacy raw regex misses, and criterion 2 must fail. Return no heads for an unreadable file and criterion 3 must fail. Restore and require all four to pass.
-  needs_input:
-    question: 'Pull request https://github.com/craigoley/remudero/pull/19672 (task W1-T12271) cannot meet these criteria without your input. "An unreadable rotated file gives the answer of today for an unread history. A head is never reported as free because its file could not be read". What it needs: fix stall on review:An unreadable rotated file gives the answer of today for an unread history. A head is never reported as free because its file could not be read: 4 rounds left it unmet with the same failure'
-    source_pr: https://github.com/craigoley/remudero/pull/19672
-    asked_at: 2026-11-20T23:25:50.590Z
+  note: |
+    WITHDRAWN 2026-11-22 (operator session, post-merge audit): W1-T12271 supersedes W1-T14086. The sweep filed
+    this held follow-up of W1-T12271 for criteria 2 and 3 of https://github.com/craigoley/remudero/pull/19672
+    (at fa2ec2a403), one of four copies (W1-T14081, W1-T14082, W1-T14086 and W1-T14088). #19672 has merged
+    (cc2f048b24), so the question to the operator has no pull request to answer. Its two notes are not
+    production defects. The custom ledger path is reached only by a test: production always passes
+    stateDir/ledger.ndjson. A rotation that vanishes between two listings loses no history in production:
+    rotated files are compacted, never deleted for retention (src/lib/ledger.ts, W1-T3237). The audit's
+    real gap on #19672, the per-call hash of every rotation, is W1-T14386. This record keeps no question.
