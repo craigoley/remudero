@@ -3432,7 +3432,7 @@ interface InboxSlot {
   stamp?: string;
   read: boolean;
   shared?: InboxShared;
-  building: boolean;
+  building?: Promise<void>;
   /** Bumped by every install, so a build that started before an in-place install never overwrites it. */
   installs: number;
   failedAtMs?: number;
@@ -3450,7 +3450,7 @@ function inboxSlotOf(input: InboxBuildInput): InboxSlot {
   const key = JSON.stringify([input.inboxRoot, input.identity ?? null, input.scope ?? null]);
   let slot = inboxSlots.get(key);
   if (!slot) {
-    inboxSlots.set(key, slot = { read: false, building: false, installs: 0 });
+    inboxSlots.set(key, slot = { read: false, installs: 0 });
     for (const oldest of inboxSlots.keys()) if (inboxSlots.size > INBOX_SLOTS_HELD) inboxSlots.delete(oldest);
   }
   return slot;
@@ -3491,14 +3491,12 @@ function inboxBuildFailed(slot: InboxSlot, deps: PanelGraphDeps, reason: string)
 /** Start one off-loop build for a slot; N reads while it runs start none. The result is installed only over what it replaces. */
 function startInboxBuild(slot: InboxSlot, deps: PanelGraphDeps, input: InboxBuildInput): void {
   if (slot.building) return;
-  slot.building = true;
   const installs = slot.installs;
   const build = deps.inboxBuild ?? buildInboxInWorker;
-  let started: Promise<InboxBuildOutcome>;
-  try { started = build({ ...input, ...(slot.shared && slot.stamp !== undefined ? { knownStamp: slot.stamp } : {}) }); }
-  catch (error) { started = Promise.resolve({ ok: false, reason: String((error as Error)?.message ?? error) }); }
-  void started.then((outcome) => {
-    slot.building = false;
+  let resolveBuild!: (outcome: InboxBuildOutcome | Promise<InboxBuildOutcome>) => void;
+  const promise = new Promise<InboxBuildOutcome>(resolve => { resolveBuild = resolve; });
+  slot.building = promise.then((outcome) => {
+    slot.building = undefined;
     if (!outcome.ok) return inboxBuildFailed(slot, deps, outcome.reason);
     if (slot.installs !== installs) return;
     slot.failedAtMs = undefined;
@@ -3511,9 +3509,11 @@ function startInboxBuild(slot: InboxSlot, deps: PanelGraphDeps, input: InboxBuil
       if (outcome.pages) shared.pages = { lanes: outcome.lanes.built, bodies: outcome.pages };
     }
   }, (error: unknown) => {
-    slot.building = false;
+    slot.building = undefined;
     inboxBuildFailed(slot, deps, String((error as Error)?.message ?? error));
   });
+  try { resolveBuild(build({ ...input, ...(slot.shared && slot.stamp !== undefined ? { knownStamp: slot.stamp } : {}) })); }
+  catch (error) { resolveBuild({ ok: false, reason: String((error as Error)?.message ?? error) }); }
 }
 
 /**
@@ -3657,6 +3657,7 @@ function inboxNotReady(res: ServerResponse): void {
 
 /** The persisted classification as the thread list's evidence: `classify` lands only one inside its freshness budget (W1-T5269). */
 function slowLaneThreadList(deps: PanelGraphDeps): { classify: () => Promise<ThreadListClassification<ThreadListInbox>>; peek: () => ThreadListClassification<ThreadListInbox> | undefined } {
+  const clock = deps.inboxClock ?? systemClock;
   const peek = (): ThreadListClassification<ThreadListInbox> | undefined => {
     const read = readSlowLaneInbox(deps);
     if (read === undefined) return undefined;
@@ -3666,9 +3667,17 @@ function slowLaneThreadList(deps: PanelGraphDeps): { classify: () => Promise<Thr
   return {
     peek,
     classify: async () => {
-      const held = peek();
+      let held = peek();
+      if (held && clock.now() - held.classifiedAtMs > INBOX_STALE_AFTER_MS) {
+        const building = inboxSlotOf(inboxBuildInputOf(deps)).building;
+        if (building) {
+          // A newer persisted snapshot is already being loaded. The view still caps the request's wait.
+          await building;
+          held = peek();
+        }
+      }
       if (held === undefined) throw new Error("serve's slow lane has not persisted an inbox classification yet");
-      if (systemClock.now() - held.classifiedAtMs > INBOX_STALE_AFTER_MS) throw new Error(`the slow lane's classification of ${fixedClock(held.classifiedAtMs).iso()} is past its ${INBOX_STALE_AFTER_MS} ms budget`);
+      if (clock.now() - held.classifiedAtMs > INBOX_STALE_AFTER_MS) throw new Error(`the slow lane's classification of ${fixedClock(held.classifiedAtMs).iso()} is past its ${INBOX_STALE_AFTER_MS} ms budget`);
       return held;
     },
   };
@@ -3685,7 +3694,7 @@ export function inboxThreadListSources(deps: PanelGraphDeps, readPlanSnapshot?: 
   let reportedAtMs: number | undefined;
   let reportedFailure: string | undefined;
   return {
-    now: () => systemClock.now(),
+    now: () => (deps.inboxClock ?? systemClock).now(),
     classify: async () => stamped(await classifyAllProposalsSliced(deps, readPlanSnapshot), systemClock.now()),
     ...(deps.inboxFromSlowLane ? slowLaneThreadList(deps) : {}),
     peek: () => {
