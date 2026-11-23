@@ -394,6 +394,8 @@ export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
   "review.history_guarded",
   // W1-T14235: a refused code pass writes its receipt with the PR it refused.
   "review.semantic_pass_refused",
+  // W1-T12227: a stale-code refusal after a completed review records the PR it withheld.
+  "review.refused_after_finished_review",
   // Automatic follow-up filing records the originating PR on this worker-priced receipt.
   "followup.filed",
   // W1-T12187: the judges' cash shadow rows, for judgeShadowSummary.

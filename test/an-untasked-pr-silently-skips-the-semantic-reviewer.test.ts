@@ -215,19 +215,25 @@ test("the unattended fix reviewer requires semantic completion and preserves its
     assert.notEqual(requiredSemanticDecisionDigest("same-material-input", args.requireSemanticReview === true),
       requiredSemanticDecisionDigest("same-material-input", false));
     return { marker: "actual-next-result" } as never;
-  }, async () => { reads++; return fresh; });
+  }, async () => { reads++; return fresh; }, {
+    gate: { fromFreshTree: async () => assert.fail("a fresh start reading reviews in this process") },
+    readHead: () => assert.fail("a fresh start reading reads no head here"),
+  });
   const result = await review({ requireSemanticReview: false,
     reviewerCodeFreshness: async () => { throw new Error("untrusted override must not replace the production reader"); } } as never);
   assert.deepEqual(result, { marker: "actual-next-result" });
   assert.equal(reads, 1, "the review uses the actual start reading throughout publication");
 });
 
-test("the unattended fix reviewer preserves stale starts and retries unreadable start evidence at publication", async () => {
+test("the unattended fix reviewer sends a stale start to the fresh tree and retries unreadable start evidence at publication", async () => {
   const { buildRequiredFixReviewRunner } = await import("#src/run-task.js");
   const stale = { status: "stale" as const, codeSha: "old-code", originMainSha: "new-code", advance: "review-path" as const };
   for (const mode of ["stale", "throw", "unreadable"] as const) {
     let reads = 0;
+    let inProcess = 0;
+    const freshTree: unknown[][] = [];
     const review = buildRequiredFixReviewRunner(async (args) => {
+      inProcess++;
       assert.equal(args.requireSemanticReview, true);
       assert.deepEqual(await args.reviewerCodeFreshness?.(), stale);
       return {} as never;
@@ -236,8 +242,10 @@ test("the unattended fix reviewer preserves stale starts and retries unreadable 
       if (reads === 1 && mode === "throw") throw new Error("git unreadable");
       if (reads === 1 && mode === "unreadable") return { status: "unreadable", reason: "git unreadable" };
       return stale;
-    });
-    await review({} as never);
+    }, { gate: { fromFreshTree: async (...call) => { freshTree.push(call); return 0; } }, readHead: () => "c".repeat(40) });
+    const result = await review({ prUrl: "https://github.com/acme/remudero/pull/7", owner: "acme", repo: "remudero" } as never);
     assert.equal(reads, mode === "stale" ? 1 : 2, mode);
+    assert.deepEqual([inProcess, freshTree.length], mode === "stale" ? [0, 1] : [1, 0], mode);
+    if (mode === "stale") assert.match(String(result.verdictWithheld), /ran from a fresh tree/);
   }
 });
