@@ -7,9 +7,11 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, isAbsolute, relative } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendLedger } from "./ledger.js";
+import { parseTasksFromYaml } from "./plan.js";
+import { isTaskShardName } from "./task-shard-name.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { isTestRunner } from "./live-write-guard.js";
 import { fixedClock, systemClock } from "./clock.js";
@@ -33,7 +35,7 @@ const REVISION_FIELDS = ["harnessRevision", "promptRevision", "toolRevision", "s
 const PIN_UNAVAILABLE_REASONS = new Set([
   "executing-module-outside-repository", "executing-source-not-clean", "executing-commit-invalid",
   "executing-module-revision-unavailable", "git-command-unavailable",
-  "manifest-not-pinned", "artifact-not-resolved",
+  "manifest-not-pinned", "artifact-not-resolved", "prompt-template-not-declared",
 ]);
 export type BenchmarkRevisionField = typeof REVISION_FIELDS[number];
 export type BenchmarkRevisionPin = { source: "executing-module-git" | "image-build-stamp" | "resolved-artifact" | "trial-manifest"; revision: string };
@@ -390,7 +392,17 @@ const RECON_SIZE_GAPS: Readonly<Record<TaskShapeRecon, string>> = {
   degraded: "recon-degraded-no-report", masked: "recon-masked",
 };
 
-export interface BenchmarkWorkInput { taskClass?: string; risk?: string; shape?: TaskShapeCovariates }
+/** `pipeline` names the lane a non-dispatch assignment ran in, and `noTaskReason` why its work has no task's class or risk. */
+export interface BenchmarkWorkInput { taskClass?: string; risk?: string; shape?: TaskShapeCovariates; pipeline?: string; noTaskReason?: string }
+
+/** W1-T12152: the task facts a non-dispatch assignment records, or the named reason it records none. */
+export type BenchmarkTaskWork = Pick<BenchmarkWorkInput, "taskClass" | "risk" | "noTaskReason">;
+
+/** W1-T12152: the class and risk a task record declares, the same pair a build assignment's run.start records. */
+export function taskRecordBenchmarkWork(task: { files?: readonly string[]; risk?: string }): BenchmarkTaskWork {
+  return { taskClass: deriveTaskClass({ files: task.files ? [...task.files] : undefined }),
+    ...(typeof task.risk === "string" ? { risk: task.risk } : {}) };
+}
 
 /** What an assignment receipt knows about the work so far: `run.start` sets class, risk and shape, and
  *  each recon step marks the shape's recon state for the assignments that follow it. */
@@ -408,11 +420,13 @@ export function observeBenchmarkWork(work: BenchmarkWorkInput, step: string, ext
     reconSizeEstimate: unavailable(RECON_SIZE_GAPS[recon]) } };
 }
 
-/** A non-dispatch lane has a lane name and no task record: every other covariate is a named gap, except a class
- *  its caller knows when the worker is assigned (the review lane's, its PR's plan task: W1-T14146). */
-export function nonDispatchBenchmarkWork(lane: string, known: Pick<BenchmarkWorkInput, "taskClass"> = {}): BenchmarkWorkInput {
-  return { ...(known.taskClass ? { taskClass: known.taskClass } : {}),
-    shape: taskShapeCovariates({ lane }, "non-dispatch-lane-has-no-task-record") };
+/** A non-dispatch lane has a lane name and no task record: every other covariate is a named gap, except the class and
+ *  risk its caller knows when the worker is assigned (the review lane's, its PR's plan task: W1-T14146, W1-T12152).
+ *  The lane is recorded as the pipeline, and work with no task names why its class and risk are absent. */
+export function nonDispatchBenchmarkWork(lane: string, known: BenchmarkTaskWork = {}): BenchmarkWorkInput {
+  return { ...(known.taskClass ? { taskClass: known.taskClass } : {}), ...(known.risk ? { risk: known.risk } : {}),
+    ...(!known.taskClass && !known.risk && known.noTaskReason ? { noTaskReason: known.noTaskReason } : {}),
+    pipeline: lane, shape: taskShapeCovariates({ lane }, "non-dispatch-lane-has-no-task-record") };
 }
 
 export interface BenchmarkRunAssignmentInput {
@@ -420,6 +434,8 @@ export interface BenchmarkRunAssignmentInput {
   requested: { model: string; effort: string };
   selected: { provider: string; model: string; effort: string };
   routing?: { experiment?: ExperimentIntentionToTreat };
+  /** W1-T12152: the revision {@link spawnWorker} computed from the call's declared template and tools. */
+  prompt_revision?: BenchmarkStackEvidence["promptRevision"];
 }
 
 export function benchmarkRunAssignmentReceipt(
@@ -435,8 +451,9 @@ export function benchmarkRunAssignmentReceipt(
     phase: "assignment" as const,
     loadedModule: importedModuleOf(stackEvidence.loadedModule),
     work: {
-      taskClass: observedString(work.taskClass, "not-recorded-at-assignment"),
-      risk: observedString(work.risk, "not-recorded-at-assignment"),
+      taskClass: observedString(work.taskClass, work.noTaskReason ?? "not-recorded-at-assignment"),
+      risk: observedString(work.risk, work.noTaskReason ?? "not-recorded-at-assignment"),
+      ...(work.pipeline === undefined ? {} : { pipeline: observedString(work.pipeline, "pipeline-not-named") }),
       shape: isTaskShape(work.shape) ? work.shape
         : taskShapeCovariates({}, work.shape === undefined ? "task-shape-not-supplied-by-caller" : "task-shape-invalid"),
     },
@@ -447,7 +464,8 @@ export function benchmarkRunAssignmentReceipt(
       requestedEffort: observedString(assignment.requested.effort, "requested-effort-unavailable"),
       selectedEffort: observedString(assignment.selected.effort, "selected-effort-unavailable"),
       harnessRevision: pinEvidence("harnessRevision", stackEvidence.harnessRevision),
-      promptRevision: pinEvidence("promptRevision", stackEvidence.promptRevision),
+      // A caller's own pin (a trial manifest) wins; else the worker's hash of the call's declared template and tools.
+      promptRevision: pinEvidence("promptRevision", stackEvidence.promptRevision ?? assignment.prompt_revision),
       toolRevision: pinEvidence("toolRevision", stackEvidence.toolRevision),
       scorerRevision: pinEvidence("scorerRevision", stackEvidence.scorerRevision),
       environmentRevision: pinEvidence("environmentRevision", stackEvidence.environmentRevision),
@@ -669,13 +687,65 @@ export function receiptIdentity(args: SpawnWorkerArgs): Partial<ReceiptIdentity>
  *  so it rides the call's args to the receipt wrapper and never reaches the router. */
 export const BENCHMARK_RECEIPT_WORK: unique symbol = Symbol("rmd.benchmarkReceiptWork");
 
-export function withReceiptWork(args: SpawnWorkerArgs, work: Pick<BenchmarkWorkInput, "taskClass">): SpawnWorkerArgs {
+export function withReceiptWork(args: SpawnWorkerArgs, work: Pick<BenchmarkWorkInput, "taskClass" | "risk">): SpawnWorkerArgs {
   return { ...args, [BENCHMARK_RECEIPT_WORK]: { ...work } } as SpawnWorkerArgs;
 }
 
-function receiptWork(args: SpawnWorkerArgs): Pick<BenchmarkWorkInput, "taskClass"> {
-  return (args as { [BENCHMARK_RECEIPT_WORK]?: Pick<BenchmarkWorkInput, "taskClass"> })[BENCHMARK_RECEIPT_WORK] ?? {};
+/** W1-T12152: reads the record of the task a call names. Absent means no record exists; a throw means it was unreadable. */
+export type BenchmarkTaskWorkReader = (taskId: string) => BenchmarkTaskWork | undefined;
+
+/** W1-T12152: the task facts a non-dispatch assignment records. Carried work with a class means the caller resolved the
+ *  task, so its record fills the risk; carried work with no class is the caller's own "no class" (an untasked review, a
+ *  head task that did not resolve: W1-T14146) and is kept. A call carrying nothing records its named task's class and
+ *  risk, or the named reason it has none. */
+export function nonDispatchTaskWork(args: SpawnWorkerArgs, readTask?: BenchmarkTaskWorkReader): BenchmarkTaskWork {
+  const carried = (args as { [BENCHMARK_RECEIPT_WORK]?: Pick<BenchmarkWorkInput, "taskClass" | "risk"> })[BENCHMARK_RECEIPT_WORK];
+  if (carried !== undefined && !carried.taskClass) return carried;
+  const { noTaskReason, ...record } = namedTaskWork(args.taskId ?? receiptIdentity(args).taskId, readTask);
+  return carried === undefined ? { ...record, ...(noTaskReason ? { noTaskReason } : {}) } : { ...record, ...carried };
 }
+
+/** W1-T12152: the class and risk of the task a non-dispatch call names, or the named reason its work has none. */
+export function namedTaskWork(taskId: string | undefined, readTask: BenchmarkTaskWorkReader | undefined): BenchmarkTaskWork {
+  if (!taskId) return { noTaskReason: "work-has-no-task" };
+  if (!readTask) return { noTaskReason: "task-record-not-read-by-lane" };
+  try {
+    return readTask(taskId) ?? { noTaskReason: "named-task-has-no-record" };
+  } catch {
+    // An unreadable record is a named gap, never a dropped receipt or a blocked worker.
+    const reason = "task-record-unreadable";
+    return { noTaskReason: reason };
+  }
+}
+
+/** W1-T12152: reads the plan record of the task a non-dispatch call names — its shard under `planDir/tasks.d`, else the
+ *  monolith, parsed only when its text names the id — for the class and risk its assignment receipt records. */
+export function planTaskBenchmarkWork(planDir: string): BenchmarkTaskWorkReader {
+  return (taskId) => {
+    const shardDir = join(planDir, "tasks.d");
+    const shards = existsSync(shardDir)
+      ? readdirSync(shardDir).filter((name) => name.endsWith(".yaml") && isTaskShardName(name, taskId)).map((name) => join(shardDir, name)) : [];
+    const monolith = join(planDir, "tasks.yaml");
+    const texts = shards.map((shard) => ({ path: shard, text: readFileSync(shard, "utf8") }));
+    if (texts.length === 0 && existsSync(monolith)) texts.push({ path: monolith, text: readFileSync(monolith, "utf8") });
+    for (const { path, text } of texts) {
+      if (!text.includes(taskId)) continue;
+      const task = parseTasksFromYaml(text, path, undefined, {}, "preserve-external").find((t) => t.id === taskId);
+      if (task) return taskRecordBenchmarkWork(task);
+    }
+    return undefined;
+  };
+}
+
+/** W1-T12152: the lanes that fix a pull request's task read that task's record even when their caller hands no reader —
+ *  the one-shot `rmd sweep` fix rung's default spawn (`benchmarkNonDispatchSpawn("sweep-fix")`) included. */
+/** W1-T12152: a lane with the reader of its named task's record, for a caller that reads a plan other than the repository's. */
+export interface NonDispatchLane { lane: string; readTask: BenchmarkTaskWorkReader }
+
+/** The plan of the checkout this module runs from (src/lib/ -> the checkout root), read without repo-location's argv cost. */
+const harnessPlanDir = (): string => join(dirname(dirname(dirname(fileURLToPath(import.meta.url)))), "plan");
+
+const LANES_THAT_READ_THEIR_TASK: ReadonlySet<string> = new Set(["sweep-fix"]);
 
 type GuardrailAttempt = { signal: "relint-used" | "judge-retry"; attempt: number };
 const guardrailAttemptContext = new AsyncLocalStorage<GuardrailAttempt>();
@@ -796,10 +866,15 @@ function nonDispatchTerminalEvidence(result: WorkerResult | undefined) {
 
 /** Capture an auxiliary worker call without turning telemetry into a worker or PR gate. The
  * caller's existing assignment sink remains authoritative when one is supplied. The assignment receipt
- * records the work a call carries ({@link withReceiptWork}); a call carrying none records none. */
+ * records the work a call carries ({@link withReceiptWork}) and its named task's record through `readTask`
+ * ({@link nonDispatchTaskWork}); work with no task records the lane and the named reason. */
 export function benchmarkNonDispatchSpawn(
-  lane: string, raw: typeof spawnWorker = spawnWorker,
+  laneOrReader: string | NonDispatchLane, raw: typeof spawnWorker = spawnWorker,
 ): typeof spawnWorker {
+  const lane = typeof laneOrReader === "string" ? laneOrReader : laneOrReader.lane;
+  const readTask = typeof laneOrReader === "string"
+    ? (LANES_THAT_READ_THEIR_TASK.has(lane) ? planTaskBenchmarkWork(harnessPlanDir()) : undefined)
+    : laneOrReader.readTask;
   return async (requested) => {
     // The host memory budget reserves (and learns) by class, and the lane names it: a caller's own class still wins.
     const args: SpawnWorkerArgs = { ...requested, workerClass: requested.workerClass ?? workerClassOfLane(lane) };
@@ -846,7 +921,8 @@ export function benchmarkNonDispatchSpawn(
         observedAssignmentId = undefined;
         try {
           write("worker.assignment", { worker_assignment: assignment,
-            benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane, receiptWork(args)), nonDispatchWorkerStack) });
+            benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane, nonDispatchTaskWork(args, readTask)),
+              nonDispatchWorkerStack) });
           observedAssignmentIds.add(assignment.id);
           observedAssignmentId = assignment.id;
         } catch {

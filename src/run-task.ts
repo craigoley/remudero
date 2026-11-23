@@ -1388,7 +1388,8 @@ import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-c
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, attemptAssignmentJoin, recordBenchmarkWorkerAttempt, benchmarkEvidenceLedgerPath, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput, terminalVerdictFields } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, attemptAssignmentJoin, recordBenchmarkWorkerAttempt, benchmarkEvidenceLedgerPath, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput, terminalVerdictFields, namedTaskWork, planTaskBenchmarkWork, type BenchmarkTaskWorkReader } from "./lib/benchmark-run.js";
+export { planTaskBenchmarkWork };
 import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cost-evidence.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
@@ -10887,6 +10888,7 @@ function ledgerNonDispatchAssignment(
   config?: Config,
   runId?: string,
   taskId?: string,
+  readTask: BenchmarkTaskWorkReader = planTaskBenchmarkWork(join(repoRoot, "plan")),
 ): void {
   const path = benchmarkEvidenceLedgerPath(config);
   if (path === undefined) return;
@@ -10896,12 +10898,17 @@ function ledgerNonDispatchAssignment(
     step: "worker.assignment",
     lane,
     worker_assignment: assignment,
-    benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane), workerBoundaryStack),
+    // W1-T12152: a named task's class and risk, as a build assignment records them; else the lane and the named reason.
+    benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane, namedTaskWork(taskId, readTask)),
+      workerBoundaryStack),
   });
 }
 
-export function ledgeredNonDispatchSpawn(lane: string, raw: typeof spawnWorker = spawnWorker): typeof spawnWorker {
-  return benchmarkNonDispatchSpawn(lane, raw);
+/** The non-dispatch receipt wrapper, reading a named task's record from `planDir` (W1-T12152). */
+export function ledgeredNonDispatchSpawn(lane: string, raw: typeof spawnWorker = spawnWorker,
+  planDir: string = join(repoRoot, "plan")): typeof spawnWorker {
+  const laneReadingPlan = { lane, readTask: planTaskBenchmarkWork(planDir) };
+  return benchmarkNonDispatchSpawn(laneReadingPlan, raw);
 }
 
 /** A failed fallback call is a worker attempt, not a second task outcome. Telemetry and caller
@@ -10952,13 +10959,16 @@ function withGitCredentialSocket(args: SpawnWorkerArgs, socketPath: string, harn
 }
 
 /** W1-T5115: the sweep fix rung's spawn — sweep.ts's own `benchmarkNonDispatchSpawn("sweep-fix")` default — with the
- *  daemon's git credential socket on every fix worker it starts. */
+ *  daemon's git credential socket on every fix worker it starts. W1-T12152: it reads the plan record of the task a fix
+ *  worker names from the harness checkout's plan, so a fix assignment records that task's class and risk. */
 export function gitCredentialFixSpawn(
   socketPath: string,
   raw: typeof spawnWorker = spawnWorker,
   harnessCheckout: string = repoRoot,
+  readTask: BenchmarkTaskWorkReader = planTaskBenchmarkWork(join(harnessCheckout, "plan")),
 ): typeof spawnWorker {
-  const spawnFix = benchmarkNonDispatchSpawn("sweep-fix", raw);
+  const sweepFixLane = { lane: "sweep-fix", readTask };
+  const spawnFix = benchmarkNonDispatchSpawn(sweepFixLane, raw);
   return (args) => spawnFix(withGitCredentialSocket(args, socketPath, harnessCheckout));
 }
 
@@ -32663,7 +32673,7 @@ export function commitWorkerEdits(
       return { committed: false, undeclared: [], ignored_declared,
         reason: `declared path ignored by .gitignore: ${details.join(", ")}` };
     }
-    return { committed: false, undeclared: [], reason: "the worker changed nothing" };
+    return { committed: false, undeclared: [], reason: WORKER_CHANGED_NOTHING_REASON };
   }
 
   // W1-T4450: a REGISTERED REGENERABLE ARTIFACT (a gate's own baseline, whose failure message names
@@ -32759,7 +32769,7 @@ export function commitWorkerEdits(
       stageWorkerPaths(addable, args => hostWorktreeGit(repoDir, args, { env }));
     }, mergeHead === undefined ? undefined : resolve(repoDir, runGit(["rev-parse", "--git-path", "index"]).trim()));
     if (mergeHead === undefined && tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
-      return { committed: false, undeclared, reason: "the worker changed nothing" };
+      return { committed: false, undeclared, reason: WORKER_CHANGED_NOTHING_REASON };
     }
     sha = runGit(["commit-tree", tree, "-p", options.priorHeadSha!, ...(mergeHead === undefined ? [] : ["-p", mergeHead]), "-m", commitMessage]).trim();
     try {
@@ -33008,6 +33018,9 @@ export function scopeAmendmentFromFixReport(report: string): string | undefined 
  *  two functions can never drift on what "the missing-line refusal" means. */
 const MISSING_COMMIT_MESSAGE_REASON = "no anchored COMMIT_MESSAGE line in the report";
 
+/** The reason a harness commit names when the worker left no edit to commit. */
+export const WORKER_CHANGED_NOTHING_REASON = "the worker changed nothing";
+
 
 
 /** W1-T4450: how much of a report a missing-line refusal carries into the ledger. */
@@ -33027,7 +33040,7 @@ export function harnessCommitForShellLessWorker(
   const ahead = deps.ahead ?? commitsAhead;
   const asked = parseReport(input.report)?.commitMessage;
   if (asked === undefined && input.derivedCommit === undefined) {
-    const reason = MISSING_COMMIT_MESSAGE_REASON;
+    const reason = workerLeftEdits(input) ? MISSING_COMMIT_MESSAGE_REASON : WORKER_CHANGED_NOTHING_REASON;
     // W1-T4450: the tail of the report that was parsed, so the next diagnosis has evidence instead
     // of a transcript a later round overwrote.
     input.log("implement.harness_commit_refused", { reason, report_tail: input.report.slice(-REFUSED_REPORT_TAIL_CHARS) });
@@ -33065,6 +33078,14 @@ export function harnessCommitForShellLessWorker(
   if (committed.sha) input.onCommit?.(committed.sha, committed.undeclared);
   input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — it had no shell of its own`);
   return ahead(input.worktreePath, "origin/main");
+}
+
+function workerLeftEdits(input: Pick<Parameters<typeof harnessCommitForShellLessWorker>[0], "leftEdits" | "worktreePath">): boolean {
+  try {
+    return (input.leftEdits ?? (() => worktreeHasUncommittedChanges(input.worktreePath)))();
+  } catch {
+    return true; // An unreadable worktree counts as one with edits, so the missing-line refusal stays.
+  }
 }
 
 /** W1-T4614: the head sha a worktree holds and the assignment its commit names — the fields `implement.done` and

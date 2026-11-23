@@ -496,16 +496,18 @@ async function bootPlanDestination(
   stateDir: string,
   publicRepository: PlanDestinationRepository,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  opsSelection: OpsDispatchSelection,
 ): Promise<void> {
   const named = planDestinationRepository(stateDir);
   if (named.outcome === "off") return;
+  const dispatch = { dispatch_ops: opsSelection.outcome, dispatch_ops_reason: opsSelectionReason(opsSelection) };
   if (named.outcome === "unreadable") {
-    log("daemon.plan_destination", { outcome: "unreadable", kinds: [], reason: named.reason });
+    log("daemon.plan_destination", { outcome: "unreadable", kinds: [], reason: named.reason, ...dispatch });
     return;
   }
   const kinds = PLAN_DESTINATION_KINDS.filter((kind) => resolvePlanDestination(kind, stateDir, publicRepository).outcome === "destination");
   if (existsSync(join(named.checkoutDir, ".git"))) {
-    log("daemon.plan_destination", { outcome: "named", kinds, checkout: "present" });
+    log("daemon.plan_destination", { outcome: "named", kinds, checkout: "present", ...dispatch });
     return;
   }
   try {
@@ -513,12 +515,12 @@ async function bootPlanDestination(
     // The same awaited call as the clone of a target job's repository, so the clone does not block the event loop.
     // The output of `gh` is not written to a row or to a log.
     await ghTextAsync(["repo", "clone", `${named.owner}/${named.repo}`, named.checkoutDir], { timeout: 300_000 });
-    log("daemon.plan_destination", { outcome: "named", kinds, checkout: "cloned" });
+    log("daemon.plan_destination", { outcome: "named", kinds, checkout: "cloned", ...dispatch });
   } catch (e) {
     // The message holds the command line, which names the repository. The row keeps the exit status or the error code only.
     const { code } = e as { code?: unknown };
     const cause = typeof code === "number" ? `exit ${code}` : typeof code === "string" ? code : "error";
-    log("daemon.plan_destination", { outcome: "named", kinds, checkout: "clone_failed", reason: `gh repo clone failed (${cause})` });
+    log("daemon.plan_destination", { outcome: "named", kinds, checkout: "clone_failed", reason: `gh repo clone failed (${cause})`, ...dispatch });
   }
 }
 
@@ -1008,15 +1010,25 @@ export function opsCatalogFilingFeeds(
   source: { refresh(): Promise<OpsCatalogShadowInput> } | undefined, clock: Clock,
   feed: { refreshEveryMs?: number; log?: (step: string, fields: Record<string, unknown>) => void },
   filing: Omit<CatalogFilingReaderOpts, "ops"> & { ops: (latest: OpsCatalogShadowInput | undefined) => OpsFilingBinding | undefined },
-): { opsShadow: ReturnType<typeof opsCatalogShadowFeed> | undefined; datedFiling: ReturnType<typeof catalogFilingReader> } {
+) {
   function warmOpsFiling(input: OpsCatalogShadowInput): void {
     if (input.outcome !== "ok") return;
     // A warm-up that cannot read leaves the selection's own prefetch-behind read, which names any refusal.
     datedFiling.refresh().then(undefined, (error: unknown) => { void error; });
   }
-  const opsShadow = source === undefined ? undefined : opsCatalogShadowFeed(source, clock, { ...feed, onSettled: warmOpsFiling });
+  let opsShadow: ReturnType<typeof opsCatalogShadowFeed> | undefined;
   const datedFiling = catalogFilingReader({ ...filing, ops: () => filing.ops(opsShadow?.forDispatch()) });
-  return { opsShadow, datedFiling };
+  const stopSource = () => {
+    opsShadow?.stop();
+    opsShadow = undefined;
+  };
+  const startSource = (next: NonNullable<typeof source>) => {
+    stopSource();
+    opsShadow = opsCatalogShadowFeed(next, clock, { ...feed, onSettled: warmOpsFiling });
+    return opsShadow;
+  };
+  if (source !== undefined) startSource(source);
+  return { get opsShadow() { return opsShadow; }, datedFiling, startSource, stopSource };
 }
 
 /**
@@ -1076,6 +1088,10 @@ function planDestinationFlag(stateDir: string, name: "dispatch_ops_tasks" | "mov
 
 function opsDispatchSelection(stateDir: string): OpsDispatchSelection {
   return planDestinationFlag(stateDir, "dispatch_ops_tasks", "invalid_dispatch_flag");
+}
+
+function opsSelectionReason(selection: OpsDispatchSelection): string | undefined {
+  return selection.outcome === "unavailable" ? selection.reason : undefined;
 }
 
 /** W1-T13681: `move_public_tasks` beside `dispatch_ops_tasks`, each read with the same rules on every tick. */
@@ -1626,7 +1642,9 @@ export async function daemonCommand(
     { owner: target.owner, repo: target.repo, isSelf: target.isSelf, checkoutRoot: targetCheckoutRoot });
   if (!targetRecordWrite.written) log("daemon.target_record_failed", { reason: targetRecordWrite.reason });
   // W1-T12200: the host switch for new plan files. With no host file this writes no row and calls nothing.
-  await bootPlanDestination(join(config.root, "state"), { owner: self.owner, repo: self.repo, checkoutDir: effectiveRepoRoot }, log);
+  const opsStateDir = join(config.root, "state");
+  const bootOpsSelection = opsDispatchSelection(opsStateDir);
+  await bootPlanDestination(opsStateDir, { owner: self.owner, repo: self.repo, checkoutDir: effectiveRepoRoot }, log, bootOpsSelection);
   // W1-T14302: the reader itself, not a wrapper, so the gateway also gets its revert read.
   const targetCommitTrailerIndex = buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot });
   const gatewayFor = createDaemonGatewayFactory(config.root, log, {
@@ -2375,32 +2393,48 @@ export async function daemonCommand(
     bootPhases.mark("loop_wiring");
     await dispatchFilingPrefetch.refresh(target.planPath);
     bootPhases.mark("filing_prefetch");
-    // W1-T11770: absent the flag, nothing is built, read or passed. Present, the first read starts here, unawaited.
-    const opsSelection = opsDispatchSelection(join(config.root, "state"));
-    const opsSourceRepository = shadowOpsCatalog ?? (opsSelection.outcome === "on" ? opsSelection.repository : undefined);
-    const source = opsSourceRepository === undefined ? undefined
-      : createOpsCatalogShadowSource({ repository: opsSourceRepository }, deps.opsCatalogApi);
+    const opsClock = clockFromMillisFn(deps.now);
+    const readOpsSelection = () => opsDispatchSelection(opsStateDir);
+    let previousOpsSelection = bootOpsSelection;
+    let opsSourceRepository = shadowOpsCatalog;
+    const explicitShadow = shadowOpsCatalog === undefined ? undefined
+      : opsCatalogShadowFeed(createOpsCatalogShadowSource({ repository: shadowOpsCatalog }, deps.opsCatalogApi), opsClock);
     // W1-T14214: an ops task is dated from the ops checkout's history at the commit the dispatch capture is bound to.
     // W1-T14218: each ok snapshot the source settles starts that read, so the first selection after a boot is dated.
-    const { opsShadow, datedFiling } = opsCatalogFilingFeeds(source === undefined ? undefined : shadowOpsCatalog ? source : {
-      refresh: () => {
-        const current = opsDispatchSelection(join(config.root, "state"));
-        return current.outcome === "on" && current.repository === opsSourceRepository
-          ? source.refresh() : Promise.resolve({ outcome: "stale" as const });
-      },
-    }, clockFromMillisFn(deps.now), {
-      ...(opsSelection.outcome === "on" ? { refreshEveryMs: OPS_DISPATCH_SOURCE_REFRESH_MS } : {}),
-      // W1-T13705: only the dispatch feed ledgers its refreshes; --shadow-ops-catalog keeps W1-T11770's one aggregate row.
-      ...(shadowOpsCatalog ? {} : { log }),
+    const filingFeeds = opsCatalogFilingFeeds(undefined, opsClock, {
+      refreshEveryMs: OPS_DISPATCH_SOURCE_REFRESH_MS, ...(explicitShadow ? {} : { log }),
     }, { publicReader: dispatchFilingPrefetch, log,
       ports: { parseFilingDates: filingDatesFromPlanHistory, gitFor: planSyncGitRunnerAsync },
-      ops: (latest) => opsFilingBinding(opsDispatchSelection(join(config.root, "state")), opsSourceRepository, latest) });
-    if (opsShadow) cleanup.push({ resource: "ops_catalog_refresh", close: opsShadow.stop });
-    opsShadow?.current();
-    const readOpsTaskDispatch = opsSelection.outcome === "off" ? undefined : (publicPlan: Plan): OpsTaskDispatchRead => {
-      const current = opsDispatchSelection(join(config.root, "state"));
-      if (current.outcome !== "on") return current;
-      if (!opsShadow || current.repository !== opsSourceRepository) return { outcome: "unavailable", reason: "selection_changed" };
+      ops: (latest) => opsFilingBinding(readOpsSelection(), opsSourceRepository, latest) });
+    cleanup.push({ resource: "ops_catalog_refresh", close: () => { filingFeeds.stopSource(); explicitShadow?.stop(); } });
+    const readOpsTaskDispatch = (publicPlan: Plan): OpsTaskDispatchRead => {
+      const current = readOpsSelection();
+      const fromReason = opsSelectionReason(previousOpsSelection), toReason = opsSelectionReason(current);
+      if (current.outcome !== previousOpsSelection.outcome || fromReason !== toReason) {
+        log("dispatch.ops_selection_changed", {
+          from: previousOpsSelection.outcome, to: current.outcome, from_reason: fromReason, to_reason: toReason,
+        });
+      }
+      previousOpsSelection = current;
+      if (current.outcome !== "on") {
+        filingFeeds.stopSource();
+        return current;
+      }
+      opsSourceRepository ??= current.repository;
+      if (current.repository !== opsSourceRepository) {
+        filingFeeds.stopSource();
+        return { outcome: "unavailable", reason: "selection_changed" };
+      }
+      let opsShadow = filingFeeds.opsShadow;
+      if (opsShadow === undefined) {
+        const repository = current.repository;
+        const source = createOpsCatalogShadowSource({ repository }, deps.opsCatalogApi);
+        opsShadow = filingFeeds.startSource({ refresh: () => {
+          const selection = readOpsSelection();
+          return selection.outcome === "on" && selection.repository === repository
+            ? source.refresh() : Promise.resolve({ outcome: "stale" as const });
+        } });
+      }
       opsShadow.current();
       const input = opsShadow.forDispatch();
       if (input === undefined) return { outcome: "unavailable", reason: "source_pending" };
@@ -2409,9 +2443,12 @@ export async function daemonCommand(
       if (publicCommit === undefined) return { outcome: "unavailable", reason: "primary_revision_unknown", source: input };
       return { outcome: "selected", source: input, publicCommit };
     };
+    readOpsTaskDispatch(plan);
+    if (filingFeeds.opsShadow === undefined) explicitShadow?.current();
+    const currentOpsCatalog = () => filingFeeds.opsShadow?.forDispatch() ?? explicitShadow?.forDispatch();
     const sweepTaskReaders = {
       reloadPlanForFixImpl: () => activePlanRef.current,
-      opsCatalogForContract: { repository: opsSourceRepository, current: () => opsShadow?.forDispatch() },
+      opsCatalogForContract: { get repository() { return opsSourceRepository; }, current: currentOpsCatalog },
     };
     const buildSweepHook: DaemonSweepHookBuilder = (...args) => {
       const sweep: (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> =
@@ -2456,24 +2493,24 @@ export async function daemonCommand(
           activePlanRef.current = fresh;
           daemonPlanCopies.observe(fresh);
         },
-        ...(readOpsTaskDispatch ? { readOpsTaskDispatch } : {}),
+        readOpsTaskDispatch,
         // W1-T13681: the move janitor reads move_public_tasks on every tick; absent or false, it does nothing.
         planTaskMover: createPlanTaskMover(planTaskMovePorts({
           publicRoot: targetCheckoutRoot, publicRepository: `${target.owner}/${target.repo}`,
           readSwitch: () => planTaskMoveSwitch(join(config.root, "state")),
-          readOpsCatalog: opsCatalogOutcomeReader(opsShadow),
+          readOpsCatalog: opsCatalogOutcomeReader({ forDispatch: currentOpsCatalog }),
           // W1-T14448: read once, here, before the loop: a restart resumes the wait on the step the last process opened.
           readLedgerLines: () => readReleaseLedgerLines(ledgerPathFor(config)),
           cliEntry: fileURLToPath(new URL(`../../run-task${import.meta.url.endsWith(".ts") ? ".ts" : ".js"}`, import.meta.url)),
         })),
-        ...(opsShadow ? {
-          secondaryCatalogShadowSource: opsShadow.current,
+        ...(explicitShadow ? {
+          secondaryCatalogShadowSource: explicitShadow.current,
           primaryPlanCommit: () => planReaders.revisions.revisionOf(activePlanRef.current)?.commit,
         } : {}),
         // W1-T3412: daemon selection uses the same complete-union calibration as the bounded
         // drain. A refused calibration returns undefined, preserving historic ordering.
         buildDispatchValueContext: (dispatchPlan, merged) =>
-          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, target.planPath, undefined, datedFiling(dispatchPlan)),
+          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, target.planPath, undefined, filingFeeds.datedFiling(dispatchPlan)),
         isOpenPr,
         isCreditIndeterminate,
         // W1-T3216: THE PRODUCER, on the lane that actually dispatches — the same omission
@@ -2758,7 +2795,7 @@ export async function daemonCommand(
         checkFreshness: testRunnerOnItsOwnCheckout(repoRoot)
           ? withPendingCommitTasks(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, asyncGit(repoRoot))
           : withEscalationSpoolDrain(withLiveEditLadders(withPendingCommitTasks(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, asyncGit(repoRoot)), { ...liveEditLadderWiring(config), ...freshnessRestartLadder(policy.values.freshnessRestart) }), escalationSpoolDrainWiring(config)),
-        taskExpedite: catalogTaskExpedite(() => activePlanRef.current, () => opsShadow?.forDispatch()),
+        taskExpedite: catalogTaskExpedite(() => activePlanRef.current, currentOpsCatalog),
         // W1-T10919: read main's tree directly; a config-only fetch need not reset the consumer checkout.
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state"), () => runnerConfigDigest(targetCheckoutRoot, "origin/main")),
         categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,

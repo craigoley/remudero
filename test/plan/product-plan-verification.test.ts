@@ -9,7 +9,7 @@ import { ProductBuildService, productBuildKickOrigin, readTargetExecution, type 
 import { ProductCaseService } from "#src/lib/product-case.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import type { StoredProduct } from "#src/lib/product-intent.js";
-import { productCasePlanText, productPlanOrigin, verifyProductPlanEvidence, type ProductPlanVerification } from "#src/lib/product-plan-operation.js";
+import { DEFAULT_PRODUCT_PLAN_REVIEWER_LOGIN, productCasePlanText, productPlanOrigin, productPlanTrustedReviewer, verifyProductPlanEvidence, type ProductPlanVerification } from "#src/lib/product-plan-operation.js";
 import type { ProductRepositoryProvider } from "#src/lib/product-repository.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -301,4 +301,41 @@ test("W1-T10823: manual approval never substitutes for the native plan verdict",
   assert.ok((await f.verify()).ok);
   f.setPage({ files: [{ filename: shardPath }, { filename: "src/lib/anything.ts" }] });
   assert.equal(refusal(await f.verify()), "plan_not_approved", "approval does not broaden the plan-only protocol");
+});
+
+/** W1-T14524: run `body` with REMUDERO_REVIEWER_LOGIN set to `login` (or unset), restoring it afterwards. */
+async function withReviewerLogin<T>(login: string | undefined, body: () => Promise<T>): Promise<T> {
+  const saved = process.env.REMUDERO_REVIEWER_LOGIN;
+  if (login === undefined) delete process.env.REMUDERO_REVIEWER_LOGIN; else process.env.REMUDERO_REVIEWER_LOGIN = login;
+  try { return await body(); } finally { if (saved === undefined) delete process.env.REMUDERO_REVIEWER_LOGIN; else process.env.REMUDERO_REVIEWER_LOGIN = saved; }
+}
+const fleetStatus = (f: ReturnType<typeof wreck>, login: string) => f.shim.addRoute({ when: `commits/${REVIEWED}/status`,
+  stdout: JSON.stringify({ statuses: [{ context: "remudero-review", state: "success", creator: { login, type: "Bot" } }] }) });
+
+test("W1-T14524: with no reviewer login configured the fleet reviewer status passes", async (t) => {
+  const f = wreck(t);
+  fleetStatus(f, DEFAULT_PRODUCT_PLAN_REVIEWER_LOGIN);
+  assert.equal(productPlanTrustedReviewer(undefined, undefined), DEFAULT_PRODUCT_PLAN_REVIEWER_LOGIN);
+  assert.equal(productPlanTrustedReviewer(undefined, "  "), DEFAULT_PRODUCT_PLAN_REVIEWER_LOGIN, "a blank login is no login");
+  const verdict = await withReviewerLogin(undefined, () => f.verify({ trustedReviewer: undefined }));
+  assert.ok(verdict.ok, JSON.stringify(verdict));
+  assert.equal(verdict.value.receipt?.review, "native-status");
+});
+
+test("W1-T14524: a configured reviewer login wins over the default", async (t) => {
+  const f = wreck(t);
+  assert.equal(productPlanTrustedReviewer(undefined, TRUSTED), TRUSTED);
+  assert.equal(productPlanTrustedReviewer("", TRUSTED), "", "an explicit empty identity still trusts no one");
+  fleetStatus(f, DEFAULT_PRODUCT_PLAN_REVIEWER_LOGIN);
+  assert.equal(refusal(await withReviewerLogin(TRUSTED, () => f.verify({ trustedReviewer: undefined }))), "plan_not_approved",
+    "with a login configured the fleet default is not trusted");
+  fleetStatus(f, TRUSTED);
+  assert.ok((await withReviewerLogin(TRUSTED, () => f.verify({ trustedReviewer: undefined }))).ok);
+});
+
+test("W1-T14524: a review success from another login is refused", async (t) => {
+  const f = wreck(t);
+  fleetStatus(f, "attacker[bot]");
+  assert.equal(refusal(await withReviewerLogin(undefined, () => f.verify({ trustedReviewer: undefined }))), "plan_not_approved");
+  assert.equal(refusal(await withReviewerLogin(undefined, () => f.verify({ trustedReviewer: "" }))), "plan_not_approved");
 });
