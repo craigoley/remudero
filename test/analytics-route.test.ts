@@ -536,32 +536,46 @@ test("deriveAnalyticsSnapshotFromLedger streams a replaying rotation union to th
   }
 });
 
-test("deriveAnalyticsSnapshotFromStream does not retain a response-irrelevant corpus", () => {
+function runAnalyticsHeapChild(retainCorpus: boolean) {
   const script = `
+    import assert from "node:assert/strict";
     import { deriveAnalyticsSnapshotFromStream } from "./src/lib/analytics-route.js";
     import { fixedClock } from "./src/lib/clock.js";
+    assert.equal(process.env.NODE_V8_COVERAGE, undefined, "heap test child must start without NODE_V8_COVERAGE");
     async function* rows() {
+      const retained = [];
       for (let i = 0; i < 20000; i += 1) {
-        yield { step: "irrelevant", payload: Buffer.alloc(8192, i % 251).toString("hex") + i };
+        const row = { step: "irrelevant", payload: Buffer.alloc(8192, i % 251).toString("hex") + i };
+        if (${retainCorpus}) retained.push(row);
+        yield row;
       }
       yield { step: "cli.invoked", verb: "status" };
     }
     const snapshot = await deriveAnalyticsSnapshotFromStream(rows(), fixedClock(Date.parse("2026-08-14T03:00:00.000Z")));
     if (snapshot.invocationsByVerb.status !== 1) process.exit(2);
   `;
-  const run = spawnSync(
+  return spawnSync(
     process.execPath,
     ["--max-old-space-size=192", "--import", "tsx", "--input-type=module", "--eval", script],
-    // This child measures the stream's heap use. Coverage instrumentation inherited from the
-    // parent writes a large raw report for the generated corpus and can consume the 192 MiB
-    // budget itself, so keep the measurement process uninstrumented.
-    { cwd: process.cwd(), encoding: "utf8", timeout: 30_000, env: { ...process.env, NODE_V8_COVERAGE: "" } },
+    // Node reinjects the parent's coverage variable if the child env omits the key.
+    { cwd: process.cwd(), encoding: "utf8", timeout: 30_000, env: { ...process.env, NODE_V8_COVERAGE: undefined } },
   );
+}
+
+test("W1-T13376 criterion 1: deriveAnalyticsSnapshotFromStream does not retain a response-irrelevant corpus", () => {
+  const run = runAnalyticsHeapChild(false);
+  assert.ifError(run.error);
   assert.equal(
     run.status,
     0,
     `a 313 MiB logical input must fit a 192 MiB heap when it is folded rather than retained\n${run.stderr}`,
   );
+});
+
+test("W1-T13376 criterion 2: retaining the same corpus exceeds the heap cap", () => {
+  const run = runAnalyticsHeapChild(true);
+  assert.ifError(run.error);
+  assert.match(run.stderr, /JavaScript heap out of memory/, "retaining the corpus must exhaust the 192 MiB heap");
 });
 
 test("deriveAnalyticsSnapshotFromStream stamps asOf after the stream has been consumed", async () => {
