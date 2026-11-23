@@ -22,7 +22,7 @@ import { buildSweepEffects, DEFAULT_SWEEP_POLICY, reservePlanRepairTaskIdAsync, 
   type UpdateBranchOutcome } from "#src/lib/sweep.js";
 import { taskIdReservationRef } from "#src/lib/task-id-reservation.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { originWithClone } from "#test/helpers/git-repo.js";
+import { GIT_REPO_FIXTURE_IDENTITY, originWithClone } from "#test/helpers/git-repo.js";
 
 type Row = { step: string } & Record<string, unknown>;
 
@@ -255,7 +255,38 @@ const PLAN_SEED = {
     "  type: implement", "  verify: auto", "  status: queued", "  attempts: 0", ""].join("\n"),
 };
 
-test("W1-T13830 criterion 6: the sweep's parked-PR host reserves the held task id through an awaited reservation", async (t) => {
+const IDENTITY_KEYS = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"] as const;
+type IdentityKey = typeof IDENTITY_KEYS[number];
+type IdentityEnv = Partial<Record<IdentityKey, string>>;
+
+const identityEnvNow = (): IdentityEnv =>
+  Object.fromEntries(IDENTITY_KEYS.flatMap(k => process.env[k] === undefined ? [] : [[k, process.env[k]]]));
+
+/** Puts the four identity keys back as `saved` holds them: a key that was unset is deleted, never assigned. */
+function restoreIdentityEnv(saved: IdentityEnv): void {
+  for (const k of IDENTITY_KEYS) {
+    const v = saved[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+}
+
+/** Runs `body` with the fixture identity in process.env, then restores the four keys as they were before. */
+async function withFixtureIdentity<T>(body: () => Promise<T>): Promise<T> {
+  const saved = identityEnvNow();
+  process.env.GIT_AUTHOR_NAME = GIT_REPO_FIXTURE_IDENTITY.name;
+  process.env.GIT_AUTHOR_EMAIL = GIT_REPO_FIXTURE_IDENTITY.email;
+  process.env.GIT_COMMITTER_NAME = GIT_REPO_FIXTURE_IDENTITY.name;
+  process.env.GIT_COMMITTER_EMAIL = GIT_REPO_FIXTURE_IDENTITY.email;
+  try {
+    return await body();
+  } finally {
+    restoreIdentityEnv(saved);
+  }
+}
+
+/** The W1-T13830 criterion 6 body: two awaited reservations of task ids, and origin holds both refs. */
+async function reserveTwoTaskIdsOffTheLoop(t: TestContext): Promise<void> {
   const parent = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t13830-reserve-`));
   const { origin, clone } = originWithClone(join(parent, "work"), { seed: PLAN_SEED });
   try {
@@ -268,33 +299,73 @@ test("W1-T13830 criterion 6: the sweep's parked-PR host reserves the held task i
     let ticks = 0;
     const timer = setInterval(() => { ticks++; }, 1);
     try {
-      recorder.arm(true);
-      const pending = effects.parkedPr!.reserveTaskId({ owner: "o", repo: "remudero", checkoutDir: clone.dir });
-      recorder.arm(false);
-      assert.ok(pending instanceof Promise, "the host's reservation is awaited");
-      const before = ticks;
-      recorder.arm(true);
-      const id = await pending;
-      recorder.arm(false);
-      assert.ok(ticks > before, "an interval timer fired while the reservation was pending");
-      assert.match(id, /^W1-T\d+$/);
-      assert.ok(origin.git("rev-parse", taskIdReservationRef(id)).trim(), "origin holds the reservation ref");
-      assert.deepEqual(recorder.calls, [], "the reservation reached no synchronous child process");
+      await withFixtureIdentity(async () => {
+        recorder.arm(true);
+        const pending = effects.parkedPr!.reserveTaskId({ owner: "o", repo: "remudero", checkoutDir: clone.dir });
+        recorder.arm(false);
+        assert.ok(pending instanceof Promise, "the host's reservation is awaited");
+        const before = ticks;
+        recorder.arm(true);
+        const id = await pending;
+        recorder.arm(false);
+        assert.ok(ticks > before, "an interval timer fired while the reservation was pending");
+        assert.match(id, /^W1-T\d+$/);
+        assert.ok(origin.git("rev-parse", taskIdReservationRef(id)).trim(), "origin holds the reservation ref");
+        assert.deepEqual(recorder.calls, [], "the reservation reached no synchronous child process");
 
-      // The same reservation over a git runner that resolves only after a timer.
-      const slow = (args: string[]) => new Promise<{ status: number; stdout: string; stderr: string }>((resolve) => {
-        setTimeout(() => execFile("git", ["-C", clone.dir, ...args], { encoding: "utf8" }, (error, stdout, stderr) =>
-          resolve({ status: error ? (typeof error.code === "number" ? error.code : 1) : 0, stdout, stderr })), 5);
+        // The same reservation over a git runner that resolves only after a timer.
+        const slow = (args: string[]) => new Promise<{ status: number; stdout: string; stderr: string }>((resolve) => {
+          setTimeout(() => execFile("git", ["-C", clone.dir, ...args], { encoding: "utf8" }, (error, stdout, stderr) =>
+            resolve({ status: error ? (typeof error.code === "number" ? error.code : 1) : 0, stdout, stderr })), 5);
+        });
+        const atStart = ticks;
+        const next = await reservePlanRepairTaskIdAsync(clone.dir, "rmd/task-files-landing", slow);
+        assert.ok(ticks > atStart, "the timer fired while the slow runner held the reservation");
+        assert.notEqual(next, id, "a second reservation takes the next id");
+        assert.ok(origin.git("rev-parse", taskIdReservationRef(next)).trim(), "origin holds the second reservation ref");
       });
-      const atStart = ticks;
-      const next = await reservePlanRepairTaskIdAsync(clone.dir, "rmd/task-files-landing", slow);
-      assert.ok(ticks > atStart, "the timer fired while the slow runner held the reservation");
-      assert.notEqual(next, id, "a second reservation takes the next id");
     } finally {
       clearInterval(timer);
     }
   } finally {
     origin.cleanup();
     rmSync(parent, { recursive: true, force: true });
+  }
+}
+
+test("W1-T13830 criterion 6: the sweep's parked-PR host reserves the held task id through an awaited reservation", async (t) => {
+  await reserveTwoTaskIdsOffTheLoop(t);
+});
+
+test("W1-T14309 criterion 1: an empty GIT_AUTHOR_NAME and GIT_COMMITTER_NAME in the runner do not stop the criterion 6 reservations", async (t) => {
+  const runner = identityEnvNow();
+  process.env.GIT_AUTHOR_NAME = "";
+  process.env.GIT_COMMITTER_NAME = "";
+  try {
+    await reserveTwoTaskIdsOffTheLoop(t);
+  } finally {
+    restoreIdentityEnv(runner);
+  }
+});
+
+test("W1-T14309 criterion 2: the identity pin restores each key to its old value and leaves an unset key unset", async () => {
+  const runner = identityEnvNow();
+  try {
+    process.env.GIT_AUTHOR_NAME = "";
+    process.env.GIT_COMMITTER_EMAIL = "outer@remudero.invalid";
+    delete process.env.GIT_AUTHOR_EMAIL;
+    delete process.env.GIT_COMMITTER_NAME;
+    await withFixtureIdentity(async () => {
+      for (const k of IDENTITY_KEYS) assert.ok(process.env[k], `${k} is pinned inside the body`);
+    });
+    assert.equal(process.env.GIT_AUTHOR_NAME, "");
+    assert.equal(process.env.GIT_COMMITTER_EMAIL, "outer@remudero.invalid");
+    assert.equal("GIT_AUTHOR_EMAIL" in process.env, false, "an unset key is unset again");
+    assert.equal("GIT_COMMITTER_NAME" in process.env, false, "an unset key is unset again");
+    await assert.rejects(withFixtureIdentity(async () => { throw new Error("body failed"); }), /body failed/);
+    assert.equal(process.env.GIT_AUTHOR_NAME, "", "a failed body restores the keys too");
+    assert.equal("GIT_AUTHOR_EMAIL" in process.env, false, "a failed body leaves an unset key unset");
+  } finally {
+    restoreIdentityEnv(runner);
   }
 });
