@@ -1073,7 +1073,9 @@ export function demotionCandidate(report: GateFireRateReport & { measuredAt?: st
     .sort((a, b) => b.minutes - a.minutes || b.prs - a.prs);
   const g: GateFireRate | undefined = quiet[0];
   if (!g) return undefined;
-  const rationale = `W1-T4116 gate gardener: ${g.gate} refused 0 of ${g.runs} runs on ${g.prs} pull requests (measured ${report.measuredAt ?? "unknown"}, ${g.minutes} min).`;
+  // W1-T14384: the gardener cannot know its PR's number before the PR exists, so its own merge is named by the token
+  // gate-monotonic reads as the PR under check; W1-T4116 alone is stale once main's rationale names it.
+  const rationale = `W1-T4116 gate gardener: ${g.gate} refused 0 of ${g.runs} runs on ${g.prs} pull requests (measured ${report.measuredAt ?? "unknown"}, ${g.minutes} min). Reviewed by its own merge: #this-pr.`;
   return { class: "demote", target: g.gate, file: CI_GATE_YML, edit: { kind: "demote", gate: g.gate, rationale }, reason: `It never refused on ${g.prs} pull requests and cost ${g.minutes} CI minutes.` };
 }
 

@@ -376,3 +376,45 @@ test("W1-T14304 criterion 3: a rationale that pads, re-spells or zero-pads the b
   assert.equal(result.status, 1, result.stdout);
   assert.match(result.stderr, /gate-monotonic: REFUSED -- .*names no PR or task origin\/main's did not/);
 });
+
+// Operator ruling 2026-11-22: an automated demotion cannot know its PR's number before the PR exists, so `#this-pr`
+// names the PR under check. It is as strong as that PR's own `#<n>`, which already counts, and it is never silent: it
+// reviews a demotion only when the rationale names each demoted context and is not origin/main's carried over.
+test("W1-T14384 criterion 1: a rationale holding #this-pr reviews a demotion only when it names every demoted context exactly and is not origin/main's rationale carried over", () => {
+  const prior = "W1-T4116 gate gardener: scan-pr / osv-scan refused 0 of 115 runs. Reviewed by its own merge: #this-pr.";
+  const base = lists(["ci", "quiet-gate", "busy-gate"], prior);
+  const reviewed = gate.evaluateGateMonotonic(base, lists(["ci", "busy-gate"], "W1-T4116 gate gardener: quiet-gate refused 0 of 12 runs. #this-pr"));
+  assert.equal(reviewed.status, "reviewed", "no plan or PR record is needed: the token names the PR whose merge decides");
+  assert.match(reviewed.detail, /#this-pr and each of them/);
+  for (const [rationale, gap] of [
+    ["W1-T4116 gate gardener: quiet-gate refused 0. #this-pr", /does not name busy-gate/], // one of two demoted unnamed
+    ["quiet-gate and busy-gate go. #this-prx", undefined], // the token glued to a word is no token
+    ["quiet-gate and busy-gate go. this-pr", undefined], // nor is it without its #
+    ["W1-T4116 gate gardener: quiet-gate-old and busy-gate refused 0. #this-pr", /does not name quiet-gate/], // a longer name is not the name
+  ] as const) {
+    const v = gate.evaluateGateMonotonic(base, lists(["ci"], rationale));
+    assert.equal(v.ok, false, JSON.stringify(rationale));
+    if (gap) assert.match(v.detail, gap);
+  }
+  // origin/main's own rationale, carried over or padded with whitespace, reviews nothing new, even for a context it names.
+  const carried = lists(["ci", "busy-gate"], prior.replace("scan-pr / osv-scan", "quiet-gate"));
+  const named = { ...base, rationale: carried.rationale };
+  for (const head of [carried, { ...carried, rationale: `  ${carried.rationale}\n` }]) {
+    const v = gate.evaluateGateMonotonic(named, head);
+    assert.equal(v.ok, false);
+    assert.match(v.detail, /#this-pr cannot review it: the rationale is origin\/main's, carried over/);
+  }
+});
+
+test("W1-T14384 criterion 2: a #this-pr demotion that names its context exits 0 through main() on a git fixture, and one that misses a part says which part", () => {
+  const prior = "W1-T4116 gate gardener: scan-pr / osv-scan refused 0 of 115 runs. Reviewed by its own merge: #this-pr.";
+  // The gardener's own shape exits 0 with no --pr and no GITHUB_REF: the token needs no PR record.
+  const reviewed = run(ciGateFixture(["ci", "quiet-gate"], prior, ["ci"], "W1-T4116 gate gardener: quiet-gate refused 0 of 12 runs. #this-pr"));
+  assert.equal(reviewed.status, 0, reviewed.stderr);
+  assert.match(reviewed.stdout, /gate-monotonic: OK -- .*naming #this-pr/);
+  // Two contexts leave, and the rationale names one: refused, naming the context it misses.
+  const missing = run(ciGateFixture(["ci", "quiet-gate", "busy-gate"], prior, ["ci"], "W1-T4116 gate gardener: quiet-gate refused 0 of 12 runs. #this-pr"));
+  assert.equal(missing.status, 1, missing.stdout);
+  assert.match(missing.stderr, /gate-monotonic: REFUSED -- /);
+  assert.match(missing.stderr, /#this-pr cannot review it: it does not name busy-gate/);
+});
