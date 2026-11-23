@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { benchmarkRunLedgerLogger, buildInboxDraftSpawnArgs, ledgeredNonDispatchSpawn } from "#test/routing/assignment-receipt-test-seams.js";
+import { benchmarkRunLedgerLogger, buildInboxDraftSpawnArgs, ledgeredNonDispatchSpawn } from "#test/helpers/run-task-test.js";
 import { benchmarkNonDispatchSpawn, withReceiptWork } from "#src/lib/benchmark-run.js";
 import type { Config } from "#src/lib/config.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
