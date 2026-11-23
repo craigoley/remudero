@@ -2746,6 +2746,15 @@ export const FIX_PLAN_BLOB_CACHE = new PlanBlobCache();
 /** W1-T13865: the checks a PR's base branch requires, each pinned to an App id or null; `complete` is false when one of
  *  its requirement sources could not be read. */
 type BaseRequiredChecks = { checks: ReadonlyMap<string, number | null>; complete: boolean };
+
+const PRIMARY_SHADOW_EPISODE_LINE = /primary_shadow\.(observation|issue_published)|PRIMARY-SHADOW-/;
+const isPrimaryShadowEpisodeRow = (row: Record<string, unknown>): boolean =>
+  typeof row.task_id === "string" && row.task_id.startsWith("PRIMARY-SHADOW-");
+const primaryShadowEpisodeMemo = createLedgerRotationMemo(rows => rows.filter(isPrimaryShadowEpisodeRow), {
+  holder: "sweep-primary-shadow-episodes", durableDigest: { reducerVersion: "primary-shadow-episodes-v2" },
+  pattern: PRIMARY_SHADOW_EPISODE_LINE, requireObjects: true,
+});
+
 export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   SweepDeps,
   | "readerAgreement"
@@ -3165,7 +3174,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
   const inflightDir = join(config.root, "state", "inflight");
   const issues = issuesImpl ?? ghIssueGateway(owner, repo);
   const openEscalationIssues = issuesImpl ?? ghIssueGatewayAsync(owner, repo);
-  const primaryShadowAlerts = primaryShadowOperatorChannel({ owner, repo, ledgerPath, runId, issues: issuesImpl,
+  const primaryShadowOptions = { owner, repo, ledgerPath, runId, issues: issuesImpl,
     clock: clockFromMillisFn(nowMsImpl), readPrState: ghLiveState,
     selection: () => {
       try {
@@ -3184,9 +3193,20 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         log("primary_shadow.selection_unknown", { error_class: error instanceof Error ? error.name : "unknown" });
         return undefined;
       }
-    } });
+    } };
+  const primaryShadowAlerts = primaryShadowOperatorChannel(primaryShadowOptions);
   const primaryShadowAlertFailed = (error: unknown): void => {
     log("primary_shadow.alert_failed", { error_class: error instanceof Error ? error.name : "unknown" });
+  };
+  const maintainPrimaryShadowAlert = async (maintain: () => Promise<void>): Promise<void> => {
+    if (!primaryShadowOptions.selection()) return;
+    // The channel records the episode's task ID before contacting GitHub. Read live and archived
+    // references so an episode waiting for its first delivery also gets reconciled.
+    const history = await readLedgerUnionRecordsMemoized(dirname(ledgerPath), primaryShadowEpisodeMemo, {
+      refuseIncomplete: true, where: isPrimaryShadowEpisodeRow,
+      pattern: PRIMARY_SHADOW_EPISODE_LINE, liveFirst: true, satisfied: steps => steps.size > 0,
+    });
+    if (!history.ok || history.torn > 0 || history.unclassified.length > 0 || history.rows.length > 0) await maintain();
   };
   const terminalState = terminalUncreditableHeadsByLedger.get(ledgerPath)
     ?? { heads: new Map<string, TerminalUncreditableHead>(), historyHold: undefined, refreshPending: true };
@@ -3564,7 +3584,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         ...readers, readPressure: () => reading.pressure, readActiveWorkers: () => reading.activeWorkers,
       });
     },
-    reconcilePrimaryShadowAlert: () => primaryShadowAlerts.reconcile().catch(primaryShadowAlertFailed),
+    reconcilePrimaryShadowAlert: () => maintainPrimaryShadowAlert(primaryShadowAlerts.reconcile).catch(primaryShadowAlertFailed),
     readOpenEscalations: () => openEscalationIssues.listOpen?.(NEEDS_HUMAN_LABEL) ?? [],
     fixProgressJudge: effectsProgressJudge,
     readHostedProofResults: (headSha, proofs) => readHostedFixProofResults({ owner, repo, headSha, proofs },
@@ -5769,7 +5789,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // `SweepDeps.readLiveState`'s own doc for the fail-open contract.
     readLiveState: async (pr) => {
       const observed = await ghLiveState(pr.prUrl);
-      if (observed.ok && observed.state?.toUpperCase() === "MERGED") await primaryShadowAlerts.resolved(pr).catch(primaryShadowAlertFailed);
+      if (observed.ok && observed.state?.toUpperCase() === "MERGED") {
+        await maintainPrimaryShadowAlert(() => primaryShadowAlerts.resolved(pr)).catch(primaryShadowAlertFailed);
+      }
       return observed;
     },
 
