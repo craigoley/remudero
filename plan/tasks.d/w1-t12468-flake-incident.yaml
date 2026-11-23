@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 2.5
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "flake-incident:test/operator-agent-scan-routes-never-block-the-loop.test.ts#W1-T6402: a rotation read is bounded by a same-run baseline, and a re-read of the corpus still fails"
