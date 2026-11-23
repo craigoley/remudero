@@ -416,8 +416,8 @@ export const CONFIG_GARDEN_LEDGER_STEPS: readonly string[] = [
 // below, which runs at module load.
 
 /** W1-T12232: the step whose rows price one freshness restart cycle (src/lib/restart-cycle.ts). It is read beside
- *  {@link CONFIG_GARDEN_LEDGER_STEPS}, not inside it: that list is what gatherRuns and the cap price, and two census
- *  suites pin it to exactly those readers. */
+ *  {@link CONFIG_GARDEN_LEDGER_STEPS}, not inside it: that list is what gatherRuns, the cap and the judges price, and
+ *  three suites pin it to exactly those readers ({@link CONFIG_GARDEN_READ_STEPS} is the worker's read). */
 export const RESTART_CYCLE_STEP = "daemon.restart_cycle";
 export const RESTART_TUNE_LEDGER_STEPS: readonly string[] = [RESTART_CYCLE_STEP];
 /** The policy file the two rows live in (W1-T12228 writes each row on one line). */
