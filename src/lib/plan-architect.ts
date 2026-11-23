@@ -560,6 +560,9 @@ export function planCommitMessage(opts: {
 
 // ── Propose-outcome commit (harness-owned, REAL git — no dry-run) ───────────
 
+/** Core's own master plan; a product repository's plan has none (W1-T14413). */
+const MASTER_PLAN = "MASTER-PLAN.md";
+
 /**
  * Stage + commit a PROPOSED outcome's plan-scope edits — the two `git` calls
  * `run-task.ts`'s `planCommand` runs for every mode's propose branch
@@ -576,10 +579,11 @@ export function applyPlanProposalCommit(
   log: (step: string, extra?: Record<string, unknown>) => void = () => {},
   git?: PlanCommitGit,
 ): void {
-  gitAddAndCommitWithRollback(cwd, ["-A", "--", "plan/", "MASTER-PLAN.md"], commitMessage, {
+  gitAddAndCommitWithRollback(cwd, ["-A", "--", "plan/", MASTER_PLAN], commitMessage, {
     stdio: "inherit",
     log,
     stepPrefix: "plan_commit",
+    optionalPath: MASTER_PLAN,
     ...(git ? { git } : {}),
   });
 }
@@ -625,6 +629,8 @@ export function gitAddAndCommitWithRollback(
     stdio: "inherit" | "pipe";
     log: (step: string, extra?: Record<string, unknown>) => void;
     stepPrefix: string;
+    /** W1-T14413: an `addArgs` path the commit stages only when it is present or tracked. */
+    optionalPath?: string;
     /** Test seam; production is {@link leafPlanCommitGit}. */
     git?: PlanCommitGit;
   },
@@ -640,6 +646,7 @@ function* planCommitSteps(
     stdio: "inherit" | "pipe";
     log: (step: string, extra?: Record<string, unknown>) => void;
     stepPrefix: string;
+    optionalPath?: string;
     /** Test seam; production is {@link leafPlanCommitGit}. */
     git?: (cwd: string, args: string[], stdio: "inherit" | "pipe") => string | Promise<string>;
   },
@@ -654,7 +661,17 @@ function* planCommitSteps(
     // below still runs, but a refused commit can only log-and-skip its rollback, not restore.
     log(`${stepPrefix}.snapshot.error`, { error: String((e as Error)?.message ?? e) });
   }
-  (yield* step(() => git(cwd, ["add", ...addArgs], stdio)));
+  try {
+    (yield* step(() => git(cwd, ["add", ...addArgs], stdio)));
+  } catch (addError) {
+    // W1-T14413: git refuses the whole add when one pathspec matches nothing, and stages nothing. A product
+    // repository planned in place (W1-T14320) has no MASTER-PLAN.md; a tracked deletion still matches, so only a
+    // path that is neither present nor tracked is dropped, and any other refusal is rethrown unchanged.
+    const optional = opts.optionalPath;
+    if (optional === undefined || !String((addError as Error)?.message ?? addError).includes(`pathspec '${optional}' did not match any files`)) throw addError;
+    log(`${stepPrefix}.optional_path_absent`, { path: optional });
+    (yield* step(() => git(cwd, ["add", ...addArgs.filter((arg) => arg !== optional)], stdio)));
+  }
   try {
     (yield* step(() => git(cwd, ["commit", "-m", commitMessage], stdio)));
   } catch (commitError) {
@@ -685,7 +702,7 @@ export function applyPlanProposalCommitAsync(
   log: (step: string, extra?: Record<string, unknown>) => void = () => {},
   git: (cwd: string, args: string[], stdio: "inherit" | "pipe") => string | Promise<string> = leafPlanCommitGitAsync,
 ): Promise<void> {
-  return runStepsAsync(planCommitSteps(cwd, ["-A", "--", "plan/", "MASTER-PLAN.md"], commitMessage, {
-    stdio: "inherit", log, stepPrefix: "plan_commit", git,
+  return runStepsAsync(planCommitSteps(cwd, ["-A", "--", "plan/", MASTER_PLAN], commitMessage, {
+    stdio: "inherit", log, stepPrefix: "plan_commit", optionalPath: MASTER_PLAN, git,
   }));
 }
