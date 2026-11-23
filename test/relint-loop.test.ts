@@ -291,6 +291,37 @@ test("lintFiledTasks reads SHARDS too, and a plan that will not load is itself o
   }
 });
 
+/** CLEAN_TASK with one depends_on edge to a task this plan does not hold (another catalog's id). */
+const CROSS_CATALOG_TASK = (id: string, dep: string): string =>
+  CLEAN_TASK(id).replace("  depends_on: []", `  depends_on: [${dep}]`);
+
+test("W1-T14556: an existing cross-catalog edge does not fail the triage relint", () => {
+  const root = planDir();
+  try {
+    // W1-T1 is an EXISTING record whose edge names a task only the other catalog holds.
+    writeFileSync(join(root, "plan", "tasks.yaml"), CROSS_CATALOG_TASK("W1-T1", "W1-T99999"));
+    writeFileSync(join(root, "plan", "tasks.d", "W1-T900-x.yaml"), CLEAN_TASK("W1-T900"));
+    assert.deepEqual(lintFiledTasks(root, ["W1-T900"]), [], "an edge this run did not file is not its plan-load block");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T14556: a filed record that breaks the plan load still blocks the relint", () => {
+  const root = planDir();
+  try {
+    writeFileSync(join(root, "plan", "tasks.yaml"), CLEAN_TASK("W1-T1"));
+    writeFileSync(join(root, "plan", "tasks.d", "W1-T900-x.yaml"), CROSS_CATALOG_TASK("W1-T900", "W1-T99999"));
+    const v = lintFiledTasks(root, ["W1-T900"]);
+    assert.equal(v.length, 1);
+    assert.equal(v[0].check, "plan-load");
+    assert.equal(v[0].severity, "block");
+    assert.match(v[0].message, /task W1-T900: depends_on unknown task 'W1-T99999'/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ── newMonolithIdsAgainstBase: the REAL shell-out, and its catch arm ─────────
 
 test("newMonolithIdsAgainstBase really shells out to git and names only ids NEW to the monolith", () => {
