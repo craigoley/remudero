@@ -15,9 +15,14 @@ const SHARD = `plan/tasks.d/${ID}-row-reader.yaml`;
 const FIRST_PROOF = `unit test: ${ID}: reads a widened row`;
 const SECOND_PROOF = `unit test: ${ID}: reads a legacy row`;
 const NEW_PROOF = `unit test: ${ID}: replays a legacy row`;
+const THIRD_PROOF = `unit test: ${ID}: rejects a malformed row`;
 const FAILURE = "redesign.garden_filing_failed";
 
-async function replayAmendment(t: TestContext, proof: string) {
+async function replayAmendment(
+  t: TestContext,
+  proofs: Array<{ criterion: number; proof: string }>,
+  legacyProof = SECOND_PROOF,
+) {
   const root = mkdtempSync(join(tmpdir(), "rmd-redesign-shared-proof-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const checkout = join(root, "checkout");
@@ -45,7 +50,9 @@ async function replayAmendment(t: TestContext, proof: string) {
     "    - claim: a widened row is readable",
     `      proof: "${FIRST_PROOF}"`,
     "    - claim: a legacy row is readable",
-    `      proof: "${SECOND_PROOF}"`,
+    `      proof: "${legacyProof}"`,
+    "    - claim: a malformed row is rejected",
+    `      proof: "${THIRD_PROOF}"`,
     "",
   ].join("\n");
   writeFileSync(path, base);
@@ -80,34 +87,45 @@ async function replayAmendment(t: TestContext, proof: string) {
     ledger: (steps) => rows.filter((row) => steps.some((step) => step === row.step)),
     judgeText: async () => `REDESIGN: ${JSON.stringify({
       verdict: "amend",
-      reason: "replace the legacy row proof",
-      amendment: "Replay a legacy row through the reader.",
+      reason: "update the row reader proofs",
+      amendment: "Replay rows through the reader.",
       files_add: [],
-      proofs: [{ criterion: 2, proof }],
+      proofs,
     })}`,
   });
   await runGardenAsync(spec, deps);
-  return { rows, filingChecks, draft: readFileSync(join(checkout, SHARD), "utf8") };
+  return { rows, filingChecks, base, draft: readFileSync(join(checkout, SHARD), "utf8") };
 }
 
 test("W1-T12439: a redesign amendment with distinct proofs reaches filing", async (t) => {
-  const { rows, filingChecks, draft } = await replayAmendment(t, NEW_PROOF);
+  const { rows, filingChecks, draft } = await replayAmendment(t, [{ criterion: 2, proof: NEW_PROOF }]);
   assert.deepEqual(filingChecks, [[]]);
   assert.ok(draft.includes(NEW_PROOF));
   assert.equal(rows.some((row) => row.step === FAILURE), false);
 });
 
-// The recurring cause: an amendment whose new proof duplicates a sibling's passed the redesign precheck, then the
-// plan PR's preflight blocked it as shared-proof and the row landed as redesign.garden_filing_failed.
+test("W1-T12439: an unchanged shared proof on an existing task reaches filing", async (t) => {
+  const { rows, filingChecks, draft } = await replayAmendment(t, [{ criterion: 3, proof: NEW_PROOF }], FIRST_PROOF);
+  assert.deepEqual(filingChecks, [[]]);
+  assert.ok(draft.includes(NEW_PROOF));
+  assert.equal(rows.some((row) => row.step === FAILURE), false);
+});
+
 test("W1-T12439: redesign.garden_filing_failed no longer recurs", async (t) => {
-  const { rows, filingChecks } = await replayAmendment(t, FIRST_PROOF);
-  const verdict = rows.find((row) => row.step === REDESIGN_JUDGED_STEP);
-  const failure = rows.find((row) => row.step === FAILURE);
-  assert.deepEqual(
-    { filingChecks, failure: failure?.step, refusal: failure?.refusal },
-    { filingChecks: [], failure: undefined, refusal: undefined },
-    "a duplicate proof must be refused before the plan PR preflight",
-  );
-  assert.equal(verdict?.outcome, "refused");
-  assert.match(String(verdict?.reason), /shared-proof/);
+  const cases = [
+    { name: "duplicates an untouched sibling", proofs: [{ criterion: 2, proof: FIRST_PROOF }] },
+    { name: "duplicates another edited proof", proofs: [{ criterion: 1, proof: NEW_PROOF }, { criterion: 2, proof: NEW_PROOF }] },
+    { name: "expands an inherited duplicate", proofs: [{ criterion: 3, proof: FIRST_PROOF }], legacyProof: FIRST_PROOF },
+  ];
+  for (const { name, proofs, legacyProof } of cases) {
+    await t.test(name, async (t) => {
+      const { rows, filingChecks, base, draft } = await replayAmendment(t, proofs, legacyProof);
+      const verdict = rows.find((row) => row.step === REDESIGN_JUDGED_STEP);
+      assert.deepEqual(filingChecks, [], "a duplicate proof must be refused before the plan PR preflight");
+      assert.equal(draft, base);
+      assert.equal(rows.some((row) => row.step === FAILURE), false);
+      assert.equal(verdict?.outcome, "refused");
+      assert.match(String(verdict?.reason), /shared-proof/);
+    });
+  }
 });
