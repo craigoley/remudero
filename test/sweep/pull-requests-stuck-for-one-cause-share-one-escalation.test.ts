@@ -15,6 +15,8 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 const TITLE = "test/sweep/pull-requests-stuck-for-one-cause-share-one-escalation.test.ts";
 const NEVER_POSTED = `repeat: "checks green, review never posted — running the review lane on #<pr>" x3`;
 const FIVE = [17622, 17617, 17626, 17619, 17618];
+const STALLED_MINUTES = 49;
+const STALLED_SINCE = new Date(Date.now() - STALLED_MINUTES * 60_000).toISOString();
 
 const prView = (prNumber: number): OpenPrView => ({
   prNumber,
@@ -22,12 +24,12 @@ const prView = (prNumber: number): OpenPrView => ({
   headSha: String(prNumber).padEnd(40, "a"),
   headRefName: `run-unfiled-17940000${prNumber}`,
   reviewState: "none", checksState: "green", unmetCriteria: [], priorStrikes: 0,
-  lastActivityAt: "2026-11-10T10:46:15.943Z", autoMergeArmed: false,
+  lastActivityAt: STALLED_SINCE, autoMergeArmed: false,
 });
 
 const reasonFor = (prNumber: number, blocker: string, diagnosis: string, heldMinutes?: number) =>
-  `PR stage stalled: #${prNumber} https://github.com/craigoley/remudero/pull/${prNumber} — ${blocker} for 49 minutes ` +
-    `(BACKSTOP 30); since 2026-11-10T10:46:15.943Z; DIAGNOSIS: ${diagnosis}` +
+  `PR stage stalled: #${prNumber} https://github.com/craigoley/remudero/pull/${prNumber} — ${blocker} for ${STALLED_MINUTES} minutes ` +
+    `(BACKSTOP 30); since ${STALLED_SINCE}; DIAGNOSIS: ${diagnosis}` +
     (heldMinutes === undefined ? "" : `; the fleet itself withheld the repair for ${heldMinutes} of those minutes`);
 
 function fixture(t: TestContext, opts: { lagging?: boolean; firstReadFails?: boolean } = {}) {
