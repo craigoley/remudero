@@ -27,7 +27,7 @@ import { closeSync, existsSync, fstatSync, openSync, readFileSync } from "node:f
 import { join, relative } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { attemptAssignmentJoin, benchmarkEvidenceLedgerPath, benchmarkNonDispatchSpawn, benchmarkWorkerAttemptResources, withReceiptIdentity } from "./benchmark-run.js";
-import type { Config } from "./config.js";
+import { loadConfig, type Config, type WorkerProviderId } from "./config.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import {
@@ -44,13 +44,15 @@ import { appendLedger } from "./ledger.js";
 import type { Mount } from "./mounts.js";
 import { installPolicyPath } from "./policy.js";
 import { stalledStageIssueIdentity } from "./stage-stall-identity.js";
-import type { spawnWorker, WorkerResult } from "./worker.js";
+import type { spawnWorker, SpawnWorkerArgs, WorkerResult } from "./worker.js";
+import { ProviderCapacityBlockedError } from "./worker-provider.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 
 export const ISSUE_REVALIDATION_VERDICT_STEP = "issue_revalidation.verdict";
 export const ISSUE_REVALIDATION_PASS_STEP = "issue_revalidation.pass";
 export const ISSUE_REVALIDATION_FAILED_STEP = "issue_revalidation.failed";
 export const ISSUE_REVALIDATION_ACTION_FAILED_STEP = "issue_revalidation.action_failed";
+export const JUDGE_FALLBACK_STEP = "judge.fallback";
 
 /** The garden's timer floor: one pass an hour at most, slower while passes find nothing new. */
 export const ISSUE_REVALIDATION_MIN_INTERVAL_MS = 60 * 60 * 1000;
@@ -1408,14 +1410,19 @@ function failedResultSubtype(result: WorkerResult): string | undefined {
   return result.subtype;
 }
 
-/** The existing single judge spawn, with best-effort monetary receipts before parsing can discard a
- * paid result. The optional config names only the evidence sink, never the router or child environment. */
+function judgeFallbackArm(result: WorkerResult, pin: WorkerProviderId | undefined, selected: WorkerProviderId | undefined): string | undefined {
+  // Cash mounts can already yield to a subscription inside the router. Confirm which arm failed.
+  if (pin !== "cash" || selected !== "cash" || result.provider !== "cash") return undefined;
+  return result.subtype === "openweight_error" || result.subtype === "cash_allowance_exhausted" ? result.subtype : undefined;
+}
+
+/** One tool-less judge request, with at most one retry on a subscription and a spend receipt for each attempt. */
 export function issueRevalidationJudgeText(opts: { mount: Mount; cwd: string; settingsFile: string; spawn?: typeof spawnWorker; config?: Config }): IssueRevalidationJudgeText {
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("escalation-summary");
   return async (prompt, issueNumber, observe) => {
     const identity = { taskId: "ISSUE-REVALIDATION", runId: `issue-revalidation-${issueNumber}-${createHash("sha256").update(prompt).digest("hex").slice(0, 12)}` };
     let assignmentId: string | undefined, unstartedRecorded = false;
-    const selections = new Map<string, { signature: string; provider: string }>(), departed = new Set<string>();
+    const selections = new Map<string, { signature: string; provider: WorkerProviderId; model: string }>(), departed = new Set<string>();
     let identityInvalid = false, identityConflict = false, unknownFallback = false;
     const recordedIds = new Set<string>(), unkeyedResults = new WeakSet<WorkerResult>(), keyedResults = new WeakSet<WorkerResult>();
     const record = (result: WorkerResult | undefined, id: string | undefined): void => {
@@ -1448,40 +1455,77 @@ export function issueRevalidationJudgeText(opts: { mount: Mount; cwd: string; se
         });
       } catch { /* monetary telemetry must not change the result, rejection or existing retry flow */ }
     };
-    let result: WorkerResult;
-    try {
-      result = await spawn(withReceiptIdentity({
-        cwd: opts.cwd, permissionMode: "bypassPermissions", settingsFile: opts.settingsFile, prompt,
-        model: opts.mount.model, effort: opts.mount.effort, maxTurns: opts.mount.maxTurns, tools: [],
-        ...(opts.mount.provider === undefined ? {} : { mountProvider: opts.mount.provider }),
-        onSelectionAssignment: assignment => {
-          assignmentId = assignment.id;
-          try {
-            if (!ASSIGNMENT_ID.test(assignment.id) || selections.size >= 32) { identityInvalid = true;return; }
-            const provider = assignment.selected.provider, signature = JSON.stringify(assignment.selected);
-            if (!["claude", "codex", "cash"].includes(provider)) { identityInvalid = true;return; }
-            if (selections.has(assignment.id) && selections.get(assignment.id)!.signature !== signature) identityConflict = true;
-            selections.set(assignment.id, { provider, signature });
-          } catch {
-            // Unreadable selection metadata refuses attribution without altering worker execution.
-            identityInvalid = true;
-          }
-        },
-        onModelFallbackAttempt: attempt => {
-          const id = attempt.selectionAssignmentId ?? attempt.result?.selectionAssignmentId;
-          record(attempt.result, id);
-          try {
-            if (id && ASSIGNMENT_ID.test(id) && departed.size < 32) departed.add(id);
-            else unknownFallback = true;
-          } catch {
-            // Unreadable fallback provenance cannot identify the consumed attempt; money is retained above.
-            unknownFallback = true;
-          }
-        },
-      }, identity));
-    } catch (error) { record(undefined, assignmentId); throw error; }
+    const request = withReceiptIdentity({
+      cwd: opts.cwd, permissionMode: "bypassPermissions", settingsFile: opts.settingsFile, prompt,
+      model: opts.mount.model, effort: opts.mount.effort, maxTurns: opts.mount.maxTurns, tools: [],
+      ...(opts.mount.provider === undefined ? {} : { mountProvider: opts.mount.provider }),
+      onSelectionAssignment: assignment => {
+        assignmentId = assignment.id;
+        try {
+          if (!ASSIGNMENT_ID.test(assignment.id) || selections.size >= 32) { identityInvalid = true; return; }
+          const { provider, model } = assignment.selected;
+          const signature = JSON.stringify(assignment.selected);
+          if (!["claude", "codex", "cash"].includes(provider)) { identityInvalid = true; return; }
+          if (selections.has(assignment.id) && selections.get(assignment.id)!.signature !== signature) identityConflict = true;
+          selections.set(assignment.id, { provider, signature, model });
+        } catch {
+          // Unreadable selection metadata refuses attribution without altering worker execution.
+          identityInvalid = true;
+        }
+      },
+      onModelFallbackAttempt: attempt => {
+        const id = attempt.selectionAssignmentId ?? attempt.result?.selectionAssignmentId;
+        record(attempt.result, id);
+        try {
+          if (id && ASSIGNMENT_ID.test(id) && departed.size < 32) departed.add(id);
+          else unknownFallback = true;
+        } catch {
+          // Unreadable fallback provenance cannot identify the consumed attempt; money is retained above.
+          unknownFallback = true;
+        }
+      },
+    }, identity);
+    const attempt = async (args: SpawnWorkerArgs): Promise<WorkerResult> => {
+      assignmentId = undefined;
+      try {
+        const result = await spawn(args);
+        record(result, result.selectionAssignmentId ?? assignmentId);
+        return result;
+      } catch (error) { record(undefined, assignmentId); throw error; }
+    };
+    let result = await attempt(request);
+    const firstId = result.selectionAssignmentId ?? assignmentId;
+    const fallbackCause = judgeFallbackArm(result, opts.mount.provider, firstId === undefined ? undefined : selections.get(firstId)?.provider);
+    if (fallbackCause !== undefined) {
+      const config = opts.config ?? loadConfig();
+      selections.clear();
+      departed.clear();
+      identityInvalid = identityConflict = unknownFallback = false;
+      let retried: WorkerResult | undefined;
+      try {
+        // Keep the auction and its eligibility rules. Disable its paid routes for this request only.
+        retried = await attempt({ ...request, mountProvider: undefined,
+          config: { ...config, overflow: "none", workerProviders: { ...config.workerProviders, cashFallbackWhenBlocked: false } } });
+      } catch (error) {
+        const subtype = error instanceof ProviderCapacityBlockedError ? fallbackCause : "spawn-rejected";
+        throw Object.assign(new JudgeWorkerFailedError(subtype), { cause: error });
+      } finally {
+        const retryId = retried?.selectionAssignmentId ?? assignmentId;
+        const selection = retryId === undefined ? undefined : selections.get(retryId);
+        try {
+          const path = benchmarkEvidenceLedgerPath(opts.config);
+          if (path !== undefined) appendLedger(path, {
+            run_id: identity.runId, task_id: identity.taskId, step: JUDGE_FALLBACK_STEP, from_provider: "cash",
+            to_provider: retried?.provider ?? selection?.provider ?? null,
+            model: retried?.model ?? selection?.model ?? opts.mount.model, cause: fallbackCause,
+          });
+        } catch (error) {
+          console.error(JSON.stringify({ event: "judge.fallback_receipt_failed", reason: String((error as Error)?.name ?? "ledger-write-failed") }));
+        }
+      }
+      result = retried;
+    }
     const finalId = result.selectionAssignmentId;
-    record(result, finalId ?? assignmentId);
     if (observe) {
       let identity: JudgeIdentity;
       try {

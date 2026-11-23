@@ -31150,11 +31150,11 @@ async function runSweepLightPassCore(
   lightPassSpawningReservations += spawning.length;
   planLaneReviewsInFlight += planFilings.length;
   for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.add(lightPassHeadKey(pr));
-  const spawningNumbers = new Set(spawning.map((pr) => pr.prNumber));
+  const spawningHeads = new Map(spawning.map((pr) => [pr.prNumber, lightPassHeadKey(pr)]));
   // The eligible spawning-lane PRs this pass could not admit, oldest first. A lane this pass frees
   // admits the next of them at once (`refillFreedLanes` below) instead of idling until another pass.
   const refillTail = selectReviewAdmissions(
-    openPrs.filter((pr) => !spawningNumbers.has(pr.prNumber) && !lightPassReservedHeads.has(lightPassHeadKey(pr))),
+    openPrs.filter((pr) => !spawningHeads.has(pr.prNumber) && !lightPassReservedHeads.has(lightPassHeadKey(pr))),
     policy, now, outcomes, openPrs.length, undefined, needsPerson, queuedAt,
   ).spawning;
   let refillArmed = false;
@@ -31162,14 +31162,16 @@ async function runSweepLightPassCore(
   // floor refills nothing; its tail re-derives next pass, exactly as a full pass closes admissions.
   let providerFloorMet = false;
   const basePostReview = deps.postReview;
-  const passPostReview: SweepDeps["postReview"] = basePostReview && (async (pr, mode, attempt, onPhase) => {
+  const passPostReview = basePostReview && (async (
+    pr: ReviewDispatchPr, mode?: ReviewDispatchMode, attempt?: string, onPhase?: (phase: string) => void, initial = true,
+  ) => {
     // W1-T11149: a spawning (code) review's judge and posting phases leave the CPU bound for the provider bound.
-    const phases = spawningNumbers.has(pr.prNumber) ? trackInProcessReviewPhase() : undefined;
+    const phases = initial && spawningHeads.has(pr.prNumber) ? trackInProcessReviewPhase() : undefined;
     try {
       const reviewStartedAtMs = performance.now();
       await basePostReview(pr, mode, attempt, (phase) => {
         phases?.phase(phase);
-        if (phase === "posted") releases.get(pr.prNumber)?.();
+        if (phase === "posted" && initial) releases.get(pr.prNumber)?.();
         else if (phases && isReviewProviderPhase(phase)) {
           releaseReviewSlot();
           onOwnLaneFreed();
@@ -31264,13 +31266,13 @@ async function runSweepLightPassCore(
       if (released) return;
       released = true;
       if (lightPassHeadReleases.get(headKey) === release) lightPassHeadReleases.delete(headKey);
-      if (spawningNumbers.has(pr.prNumber)) {
+      if (spawningHeads.has(pr.prNumber)) {
         lightPassSpawningReservations--;
         unsettledSpawning--;
       } else planLaneReviewsInFlight--;
       lightPassReservedHeads.delete(headKey);
       releaseReviewSlot();
-      if (spawningNumbers.has(pr.prNumber)) onOwnLaneFreed();
+      if (spawningHeads.has(pr.prNumber)) onOwnLaneFreed();
     };
     releases.set(pr.prNumber, release);
     // W1-T11340: a later pass that reclaims this head's stuck review releases it through the same, once-only path.
@@ -31467,7 +31469,7 @@ async function runSweepLightPassCore(
   // re-read now) and the SAME process-wide bound every pass shares. Each candidate's head is read
   // live first, so a stale snapshot never reviews a dead head. Only the review lane may act.
   const append = deps.appendLine ?? appendLedger;
-  const detachedRefills = new Set<number>();
+  const detachedRefills = new Set<string>();
   const refillDeps = (pr: OpenPrView, release: () => void): SweepDeps => ({
     ...deps,
     stuckStagePeers: openPrs,
@@ -31480,11 +31482,11 @@ async function runSweepLightPassCore(
       passPostReview(review, mode, attempt, (phase) => {
         if (phase === "posted") release();
         onPhase?.(phase);
-      })),
+      }, false)),
     actionable: isReviewLaneDisposition,
     standDownReasonFor: (d) => (isReviewLaneDisposition(d) ? undefined : "deferred to full sweep (light pass)"),
     detachReviewWait: (work) => {
-      detachedRefills.add(pr.prNumber);
+      detachedRefills.add(lightPassHeadKey(pr));
       void work.finally(release).catch((error) => {
         deps.log?.("sweep.post_review.failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String(error) });
       });
@@ -31511,8 +31513,15 @@ async function runSweepLightPassCore(
     refillViewReadAtMs = deps.now ? deps.now() : systemClock.now();
     const freshViews = fresh.map(pr => completedRefusalRetryView(promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad), selectionPrior));
     refillTail.splice(0, refillTail.length, ...selectReviewAdmissions(
-      freshViews.filter((pr) => !spawningNumbers.has(pr.prNumber) && !refilledHeads.has(lightPassHeadKey(pr)) &&
-        !lightPassReservedHeads.has(lightPassHeadKey(pr))),
+      freshViews.filter((pr) => {
+        const key = lightPassHeadKey(pr);
+        if (refilledHeads.has(key) || lightPassReservedHeads.has(key)) return false;
+        const admittedHead = spawningHeads.get(pr.prNumber);
+        if (admittedHead === undefined) return true;
+        // Once the earlier head releases its slot, the normal selector can consider its green successor.
+        return admittedHead !== key && !lightPassReservedHeads.has(admittedHead) &&
+          pr.checksState === "green" && pr.reviewState === "none" && pr.reviewOrphanedByPush === true;
+      }),
       policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson, queuedAt,
     ).spawning);
   };
@@ -31630,7 +31639,7 @@ async function runSweepLightPassCore(
       throw error;
     }
     void runSweep([next], refillDeps(next, release), policy).then(
-      () => { if (!detachedRefills.has(next.prNumber)) release(); },
+      () => { if (!detachedRefills.has(key)) release(); },
       (error) => {
         release();
         deps.log?.("sweep.post_review.failed", { pr_number: next.prNumber, head_sha: next.headSha, error: String(error) });

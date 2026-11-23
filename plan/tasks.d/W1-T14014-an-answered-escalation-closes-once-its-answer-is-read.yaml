@@ -16,7 +16,7 @@
   files:
     - src/lib/issue-revalidation-garden.ts
     - test/gardeners/an-answered-escalation-closes-once-its-answer-is-read.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "An open MANUAL or GRILL escalation whose newest comment is the owner's answer, and whose answer the fleet has recorded as read, gets the action close with that answer as its citation"
