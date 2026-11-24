@@ -104,6 +104,10 @@ test("W1-T13705 criterion 1: every completed refresh writes one dispatch.ops_cat
   fx.fail("To get started with GitHub CLI, please run:  gh auth login");
   const auth = await refresh();
   assert.deepEqual([auth.data.outcome, auth.data.http_status_class], ["stale", "auth"]);
+  // W1-T14564: each failed refresh was answered by the kept snapshot; its row adds the refusal and the snapshot's age.
+  assert.deepEqual([down, transport, auth].map(row => row.data.refusal), ["stale", "unreadable", "auth_missing"]);
+  for (const row of [down, transport, auth]) assert.ok(typeof row.data.snapshot_age_ms === "number" && row.data.snapshot_age_ms >= 0);
+  assert.equal(feed.forDispatch()?.outcome, "ok", "dispatch is served the kept snapshot, not held");
 
   // A source that rejects still completes a refresh, and its row says so.
   const rejecting = feedOver({ refresh: () => Promise.reject(new Error("PRIVATE_BODY_SENTINEL")) });
@@ -120,7 +124,10 @@ test("W1-T13705 criterion 1: every completed refresh writes one dispatch.ops_cat
   for (let i = 0; i < 400 && throwing.current() === undefined; i++) await delay(5);
   assert.equal(throwing.current()?.outcome, "unreadable");
 
-  for (const row of [...rows, ...rejecting.rows]) assert.deepEqual(Object.keys(row.data).sort(), FIELDS);
+  const served = new Set([down, transport, auth]);
+  for (const row of [...rows, ...rejecting.rows]) {
+    assert.deepEqual(Object.keys(row.data).sort(), served.has(row) ? [...FIELDS, "refusal", "snapshot_age_ms"].sort() : FIELDS);
+  }
   assertPrivate([...rows, ...rejecting.rows]);
 });
 

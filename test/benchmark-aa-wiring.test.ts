@@ -1,7 +1,7 @@
 // test/benchmark-aa-wiring.test.ts — W1-T4575: `rmd benchmark-aa` reaches the A/A builder through the
 // command registry, refuses bad input by name, and keeps a stale report when its sources fail.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import { tmpdir } from "node:os";
@@ -13,6 +13,9 @@ import type { AaTrialManifest } from "#src/lib/benchmark-aa.js";
 import { runProspectiveAa } from "#src/lib/benchmark-aa-prospective.js";
 import { fixedClock } from "#src/lib/clock.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { loadMounts } from "#src/lib/mounts.js";
+import { balancedTrialControl } from "#src/lib/worker-provider.js";
 
 const SHA = "d".repeat(40);
 const NOW = "2026-09-27T12:10:00.000Z";
@@ -95,9 +98,14 @@ test("the balanced operator verb invokes registration and the real readiness run
   mkdirSync(configDir, { recursive: true });
   mkdirSync(stateDir);
   writeFileSync(join(configDir, "config.json"), JSON.stringify({ claudeBin: "/bin/true", root: dir }));
+  // W1-T10842: the verb reads the balanced control from the root's mounts table, so the fixture carries the real one.
+  mkdirSync(join(dir, ".remudero"));
+  copyFileSync(join(REPO_ROOT, ".remudero", "mounts.yaml"), join(dir, ".remudero", "mounts.yaml"));
+  const sol = balancedTrialControl(loadMounts(join(dir, ".remudero", "mounts.yaml")).capabilities, "low");
+  assert.ok(sol, "the real mounts table names a balanced low sol");
   const tasks = Array.from({ length: 12 }, (_, i) => ({ taskId: `CLI-${i}`, taskClass: "implement", risk: "low" }));
   const manifest: AaTrialManifest = { version: "benchmark-aa-trial-v1", trialId: "balanced-cli-aa",
-    cohort: { kind: "public-fixture" }, stack: { provider: "codex", model: "gpt-6.1-sol", effort: "low",
+    cohort: { kind: "public-fixture" }, stack: { provider: "codex", model: sol, effort: "low",
       harnessRevision: SHA, promptRevision: SHA, toolRevision: SHA, scorerRevision: SHA, environmentRevision: SHA },
     labels: ["A1", "A2"], strataRevision: "v1", tasks };
   const requestPath = join(dir, "request.json");

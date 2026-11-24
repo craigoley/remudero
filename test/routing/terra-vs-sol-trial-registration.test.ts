@@ -12,6 +12,7 @@ import { activateBenchmarkPaidPilot, PAID_PILOT_AA_RECEIPT_MAX_AGE_MS, PAID_PILO
 import { codexBalancedAttemptAdmission, codexBalancedTrialCommand, registerCodexBalancedTrial,
   type CodexBalancedTrialInput, type CodexBalancedTrialRequest } from "#src/lib/codex-balanced-trial.js";
 import { fixedClock } from "#src/lib/clock.js";
+import { readCodexBalancedTrialProtocols } from "#src/lib/routing-experiments.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const SHA = "a".repeat(40);
@@ -21,9 +22,9 @@ const tasks = Array.from({ length: 12 }, (_, i) => ({ taskId: `TRIAL-${i}`, task
 const plan = tasks.map(({ taskId }) => ({ id: taskId, acceptance: [{ claim: "works", proof: "grep: works in result.txt" }] }));
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-function request(effort: "low" | "medium" = "low"): CodexBalancedTrialRequest {
+function request(effort: "low" | "medium" = "low", control = "gpt-6.1-sol"): CodexBalancedTrialRequest {
   return { phase: "aa", manifest: { version: "benchmark-aa-trial-v1", trialId: `balanced-${effort}-aa`,
-    cohort: { kind: "public-fixture" }, stack: { provider: "codex", model: "gpt-6.1-sol", effort, ...revisions },
+    cohort: { kind: "public-fixture" }, stack: { provider: "codex", model: control, effort, ...revisions },
     labels: ["A1", "A2"], strataRevision: "v1", tasks },
     selections: tasks.map(({ taskId }) => ({ task_id: taskId, worker_assignment: { selected: { provider: "codex", effort },
       routing: { decision: { capability: "balanced" } } } })),
@@ -31,7 +32,7 @@ function request(effort: "low" | "medium" = "low"): CodexBalancedTrialRequest {
       approval: { reference: "#7418", approvedAt: null },
       repos: ["fixture/alpha", "fixture/beta", "fixture/gamma"].map(repo => ({ repo, consentReceipt: "fixture-consent" })),
       pseudonymSalt: "fixture-salt", assignmentSeed: "fixture-seed", revisions, strataRevision: "v1",
-      arms: { control: { provider: "codex", model: "gpt-6.1-sol", effort }, paid: { provider: "codex", model: "gpt-6.1-terra", effort } },
+      arms: { control: { provider: "codex", model: control, effort }, paid: { provider: "codex", model: "gpt-6.1-terra", effort } },
       population: tasks.map(task => ({ ...task, repo: "fixture/alpha" })),
       primaryOutcome: "verified-completion", maturityDays: 14, protocolText: "operator protocol" } };
 }
@@ -48,8 +49,11 @@ function runtime(stateDir: string): Omit<BenchmarkAaReadinessInput, "stateDir" |
 }
 
 function input(stateDir: string, req = request(), readiness = runtime(stateDir)): CodexBalancedTrialInput {
+  const control = req.manifest.stack.model;
   return { stateDir, request: req, readiness: registration => runBenchmarkAaReadiness({ ...readiness, ...registration }), clock: fixedClock(NOW),
-    readCatalog: async () => ["gpt-6.1-sol", "gpt-6.1-terra"] };
+    readCapabilities: () => ({ ladder: { balanced: 1 }, claude: {},
+      codex: { balanced: { [req.manifest.stack.effort]: ["gpt-6-luna", control, "gpt-6-sol"] } } }),
+    readCatalog: async () => [control, "gpt-6.1-terra"] };
 }
 
 async function calibrated(stateDir: string, req = request()) {
@@ -89,7 +93,8 @@ test("W1-T10841: the A/A registers two Sol 6.1 labels on the Codex balanced low 
 
 test("W1-T10841: the protocol pre-registers outcome, guardrails and stopping rule before any assignment", async t => {
   const { dir } = ownedFixtureDir(t, "balanced-protocol");
-  const args = await calibrated(dir);
+  const control = "gpt-6.2-sol";
+  const args = await calibrated(dir, request("low", control));
   const result = await registerCodexBalancedTrial(args);
   assert.ok(result.ok && result.phase === "ab", JSON.stringify(result));
   const protocol = result.protocol;
@@ -98,18 +103,28 @@ test("W1-T10841: the protocol pre-registers outcome, guardrails and stopping rul
   assert.equal(protocol.analysis, "intention-to-treat");
   assert.deepEqual(protocol.guardrails, ["recovery.repairRunsObserved", "laterDefects", "missingness.servedModel", "missingness.billingMode", "missingness.cost", "accounting.cashEstimate"]);
   assert.equal(protocol.stoppingRule, PAID_PILOT_STOPPING_RULE);
-  assert.equal(protocol.lead, "gpt-6.1-sol");
+  assert.equal(protocol.lead, control);
   assert.equal(protocol.liveAssignment, false);
   assert.equal(protocol.pilotRequest.approval.reference, "#7418");
   assert.deepEqual(protocol.pilotRequest.arms, {
-    control: { provider: "codex", model: "gpt-6.1-sol", effort: "low" }, paid: { provider: "codex", model: "gpt-6.1-terra", effort: "low" } });
+    control: { provider: "codex", model: control, effort: "low" }, paid: { provider: "codex", model: "gpt-6.1-terra", effort: "low" } });
   const { digest, ...body } = protocol;
   assert.equal(digest, hash(body));
   for (const change of [{ assignment: { ...body.assignment, unit: "attempt" } }, { primaryOutcome: "merged" },
     { guardrails: [] }, { stoppingRule: "interim winner" }]) assert.notEqual(hash({ ...body, ...change }), digest);
   assert.deepEqual(JSON.parse(readFileSync(result.path, "utf8")), protocol);
+  assert.deepEqual(readCodexBalancedTrialProtocols(dir), [protocol]);
   assert.equal(readdirSync(dir).some(name => name.startsWith("benchmark-paid-pilot-v1.")), false);
   assert.deepEqual(await registerCodexBalancedTrial(args), { ok: false, reason: "trial-already-registered" });
+});
+
+test("registration requires a readable balanced row with a Sol at the calibrated effort", async t => {
+  const { dir } = ownedFixtureDir(t, "balanced-missing-control");
+  const args = input(dir);
+  assert.deepEqual(await registerCodexBalancedTrial({ ...args, readCapabilities: () => undefined }),
+    { ok: false, reason: "balanced-sol-unavailable" });
+  assert.deepEqual(await registerCodexBalancedTrial({ ...args, readCapabilities: () => { throw new Error("mounts unavailable"); } }),
+    { ok: false, reason: "balanced-sol-unreadable:mounts unavailable" });
 });
 
 test("W1-T10841: the A/B refuses to register without a passing A/A receipt", async t => {

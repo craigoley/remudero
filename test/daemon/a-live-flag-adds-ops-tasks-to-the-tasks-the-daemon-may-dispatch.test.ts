@@ -436,8 +436,10 @@ test("W1-T12209 criterion 5: unavailable private evidence preserves public work 
 
 test("W1-T12209 criterion 5: completed private evidence expires while the next real GET is hung", async () => {
   const result = await selectedRun(true, { expireAfterWarm: true });
-  assert.deepEqual(result.ran, ["PUB-A", "PUB-B", "PUB-C"]);
-  assert.equal(result.rows.filter(row => row.step === "dispatch.ops_catalog_held" && row.data.outcome === "stale").length, 1);
+  // W1-T14564 (operator ruling 2026-11-23): past the bound the completed snapshot is still served, so the ops task
+  // dispatches beside public work and no stale hold is written.
+  assert.deepEqual(result.ran, ["OPS-T1", "PUB-A", "PUB-B"], JSON.stringify(result.rows));
+  assert.equal(result.rows.filter(row => row.step === "dispatch.ops_catalog_held").length, 0);
   assert.doesNotMatch(JSON.stringify(result.rows), new RegExp(PRIVATE));
 });
 
