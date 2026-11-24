@@ -353,6 +353,8 @@ export function writeCrashLoopStatus(issues: IssueGateway, open: CrashLoopIncide
         return { delivered: true, queued: false, outcome: "edited" };
       }
     } catch (failure) {
+      // deliberate: an unreadable or refused edit falls back to posting the status as a new comment, and the
+      // updated row names this error, so the fallback is countable rather than silent.
       error = `status edit: ${String((failure as Error)?.message ?? failure)}`.slice(0, 240);
     }
   }
@@ -362,6 +364,7 @@ export function writeCrashLoopStatus(issues: IssueGateway, open: CrashLoopIncide
       return { delivered: true, queued: false, outcome: "posted", ...(error ? { error } : {}) };
     }
   } catch (failure) {
+    // deliberate: a refused post is spooled for the host-spool drain below, and the updated row names this error.
     error = `status post: ${String((failure as Error)?.message ?? failure)}`.slice(0, 240);
   }
   try {
