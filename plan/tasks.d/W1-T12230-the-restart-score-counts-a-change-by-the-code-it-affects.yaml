@@ -25,8 +25,11 @@
     - src/lib/deploy-judge.ts
     - src/lib/daemon.ts
     - test/daemon/the-restart-score-counts-a-change-by-the-code-it-affects.test.ts
-    - "src/cli/commands/daemon.ts"
-    - "src/lib/daemon-closure.ts"
+    # 2026-11-24 amendment (PR #20683 review): the closure verdict must name the changed paths it holds, the daemon
+    # command must pass the new row to runDaemon, and the CI-wait wiring test pins each reading's change list.
+    - src/lib/daemon-closure.ts
+    - src/cli/commands/daemon.ts
+    - test/daemon-external-wait-freshness.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -38,7 +41,9 @@
       proof: "grep: W1-T12230 criterion 3 in test/daemon/the-restart-score-counts-a-change-by-the-code-it-affects.test.ts"
     - claim: "For an advance with a `reviewer` commit, the staleness pressure reaches the score limit at `stalenessHorizonMs` after the daemon first read that commit, as today"
       proof: "grep: W1-T12230 criterion 4 in test/daemon/the-restart-score-counts-a-change-by-the-code-it-affects.test.ts"
-    - claim: "The policy block `freshnessRestart` has the row `loopOnlyHorizonMs` with the value 10800000 and bounds. The loader refuses a value below `stalenessHorizonMs`"
+    # 2026-11-24 amendment, Craig's decision card 15:30Z ("4 hours, same as today"): 10800000 contradicted the loader rule
+    # below once W1-T12552 raised stalenessHorizonMs to 14400000. W1-T14663 derives this value from measured restart cost.
+    - claim: "The policy block `freshnessRestart` has the row `loopOnlyHorizonMs` with the value 14400000 and bounds. The loader refuses a value below `stalenessHorizonMs`"
       proof: "grep: W1-T12230 criterion 5 in test/daemon/the-restart-score-counts-a-change-by-the-code-it-affects.test.ts"
     - claim: "The row `daemon.freshness_decision` carries the count of commits in each class and the horizon that the decision used. The test drives `runDaemon` with a freshness reading that the real `daemonFreshnessFromService` made"
       proof: "grep: W1-T12230 criterion 6 in test/daemon/the-restart-score-counts-a-change-by-the-code-it-affects.test.ts"
@@ -64,9 +69,11 @@
     2. Carry the class on each change that the freshness reading gives the daemon.
     3. In `decideFreshnessRestart`, score a `worker_only` change 0. Compute the staleness pressure as the larger of two parts: the time since the first `reviewer` change against `stalenessHorizonMs`, and the time since the first `loop` change against `loopOnlyHorizonMs`.
     4. Give `coalesceFreshnessRestart` the same horizon for its `upper_age` release.
-    5. Add `loopOnlyHorizonMs` to the block `freshnessRestart`: value 10800000 (180 minutes), bounds 3600000 to 43200000, on one line.
+    5. Add `loopOnlyHorizonMs` to the block `freshnessRestart`: value 14400000 (240 minutes, the current `stalenessHorizonMs`), bounds 3600000 to 43200000, on one line. Pass it from `freshnessRestartOpts` to `runDaemon`.
     6. Add `change_classes` and `horizon_ms` to `daemon.freshness_decision`.
+    7. `judgeAdvanceByClosure` records `inside`, the changed paths that lie in the closure, so a commit of a material advance is classed by its own files.
     The fast releases stay first: install inputs, withheld reviews and an unreadable advance.
+    NO-INVARIANTS: the prior behavior this keeps is pinned by its own criteria: 2 (a reviewer and a loop commit score 1, as today), 4 (the reviewer horizon, as today) and 7 (the fast releases, as today); a commit that cannot be classed fails toward loop (criterion 1).
     NOT IN SCOPE: the quiet window (W1-T10059), what makes the daemon busy (W1-T10054), and the image recycle.
   falsifier: |
     Score a `worker_only` commit 1 and criterion 2 must fail. Use one horizon for both classes and criterion 3 must fail. Class a commit that cannot be classed as `worker_only` and criterion 1 must fail. Restore and require all eight to pass.
