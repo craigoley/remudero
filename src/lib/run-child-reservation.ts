@@ -9,7 +9,7 @@ import {
 } from "./host-memory-learning.js";
 import {
   censusRunDirs, classifyRunDir, readSpec,
-  type RunChildEntryKind, type RunChildProbe, type RunChildSpec,
+  type RunChildEntryKind, type RunChildIdentity, type RunChildProbe, type RunChildSpec,
 } from "./run-child-contract.js";
 
 /** Admission and reservation happen in the daemon, before it spawns and binds the run child's pid. */
@@ -25,16 +25,26 @@ export async function reserveRunChild(
   return ("reservation" in admission ? admission.reservation : undefined) ?? reserve();
 }
 
-/** The boot adoption caller reclaims only a child whose contract and process identity still agree. */
-export function adoptRunChildReservation(
-  dir: string, deps: LearnedReservationOptions = {}, probe?: RunChildProbe,
-): LearnedReservation | undefined {
+/** W1-T14662: the guard {@link adoptRunChildReservation} applies, asked without adopting: a live child whose spec names
+ *  its run and a reservation. Undefined when boot adoption would reclaim nothing. */
+export function runChildReservationAdoptable(
+  dir: string, probe?: RunChildProbe,
+): { reservationId: string; identity: RunChildIdentity } | undefined {
   const classified = classifyRunDir(dir, probe);
   const spec = readSpec(dir);
   if (classified.kind !== "live" || !classified.status || !spec.ok ||
       spec.value.runId !== classified.status.runId || !spec.value.reservationId) return undefined;
-  const identity = classified.status.identity;
-  return adoptLearnedReservation(spec.value.reservationId, {
+  return { reservationId: spec.value.reservationId, identity: classified.status.identity };
+}
+
+/** The boot adoption caller reclaims only a child whose contract and process identity still agree. */
+export function adoptRunChildReservation(
+  dir: string, deps: LearnedReservationOptions = {}, probe?: RunChildProbe,
+): LearnedReservation | undefined {
+  const adoptable = runChildReservationAdoptable(dir, probe);
+  if (!adoptable) return undefined;
+  const identity = adoptable.identity;
+  return adoptLearnedReservation(adoptable.reservationId, {
     pid: identity.pid, start: identity.startTicks, generation: identity.containerGeneration,
   }, { ...deps, ledger: { ...deps.ledger, root: deps.ledger?.root ?? loadConfig().root } });
 }

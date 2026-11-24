@@ -76,6 +76,7 @@ import { cashTrialEligible, cashTrialModelFor, cashTrialModels, cashTrialPolicy,
 import { benchmarkNonDispatchSpawn, callerOwnsBenchmarkReceipt, type BenchmarkStackEvidence, dispatchTaskShape, fixLaneBenchmarkWork, type BenchmarkWorkInput } from "../../lib/benchmark-run.js";
 import { type RepairReceiptContext } from "../../lib/repair-cost-evidence.js";
 import { type CiRemedyExecution } from "../../lib/ci-remedy-execution.js";
+import { upsertFixRoundComment, type FixRoundCommentWriter } from "../../lib/fix-round-comment.js";
 import { PAIRED_ATTEMPT_MAX_BUDGET_USD, PAIRED_CLI_REFUSAL, runPairedTrial, sealedPairedAttemptDispatcher, type PairedTrialInput } from "../../lib/paired-trial.js";
 import { runProspectiveAaPair } from "../../lib/benchmark-aa-prospective.js";
 import { parseSelfForecast, SELF_FORECAST_REPORT_CONTRACT } from "../../lib/self-forecast.js";
@@ -449,6 +450,8 @@ export interface RunTaskCommandHost {
       guard?: { prHeadSha: string; verifyOwnership: () => Promise<string | undefined> }) => unknown;
     
     readHeadShaForProvenance?: (prUrl: string) => string;
+    /** W1-T14628: after each landed push, create or edit the PR's one fix-round comment. Omitted, no comment is posted. */
+    upsertFixRoundComment?: FixRoundCommentWriter;
     issues: IssueGateway;
     escalationIssues?: AsyncIssueGateway;
     ledgerPath: string;
@@ -8239,6 +8242,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
           // a refusal or failure now throws `FixRoundPushError`, which `runFixRung` turns into a named round.
           push: (wt, br, sha, prior) => pushFixRoundPrechecked((step, extra) => log(step, extra), wt, br, sha, { repo: task.repo }, pushFixRound, prior),
           readHeadShaForProvenance: readHeadShaRest,
+          upsertFixRoundComment,
           issues: ghIssueGateway(owner, task.repo),
           escalationIssues: ghIssueGatewayAsync(owner, task.repo),
           ledgerPath,

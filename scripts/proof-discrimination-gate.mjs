@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import { CHECK_PROOF_EXIT, checkProofChildArgv } from "../src/lib/check-proof.ts";
+import { CHECK_PROOF_CHILD_ENTRY, CHECK_PROOF_EXIT, checkProofChildArgv } from "../src/lib/check-proof.ts";
 // A proof that passes before and after a PR does not establish the PR's claim.  This gate runs
 // the reviewer's own parser/executor at the PR head and its actual merge base before ci-gate can
 // report a green aggregate.  `rmd check-proof --base` owns the execution and its `executed_stale`
 // verdict; this file owns only pull-request event wiring and the failure presentation.
 
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { parseArgs } from "node:util";
@@ -13,6 +14,7 @@ import { isMainModule } from "./lib/argv.mjs";
 import { REPO_ROOT } from "./lib/repo-root.mjs";
 import { bodyWithRecoveredIdentity, readEventPayload, resolveTaskIdentity } from "./acceptance-author-gate.mjs";
 import { parseAcceptanceBlock, parseWhitelistedProof, resolvePlanCriteriaAtHead } from "../src/lib/review.ts";
+import { buildAffectedSuitesGraph } from "../src/lib/affected-suites.ts";
 
 function defaultGit(args, root) {
   return spawnSync("git", ["-C", root, ...args], { encoding: "utf8" });
@@ -91,6 +93,8 @@ export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
   let credited = 0;
   let guarded = 0;
   const countDiscriminated = [];
+  // W1-T11157: every proof this gate ran, with its raw outcome, for the published result record.
+  const judged = [];
   for (const criterion of criteria) {
     // W1-T3729 — A CRITERION THE PLAN CREDITS TO AN EARLIER MERGE IS STALE BY CONSTRUCTION.
     //
@@ -132,6 +136,7 @@ export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
     const proof = criterion.proof?.trim() ?? "";
     if (!proof || parseWhitelistedProof(proof) === null) continue;
     const result = runProof(proof, mergeBase);
+    judged.push({ proof, status: result.status, error: result.error ?? result.signal, stdout: String(result.stdout ?? "") });
     if (result.status === null || result.status === undefined || result.error) {
       unreadable.push({ proof, detail: result.error ?? result.signal ?? "check-proof did not return an exit status" });
       continue;
@@ -151,7 +156,7 @@ export function evaluateProofDiscrimination(criteria, mergeBase, runProof) {
       stale.push({ proof, ...proofCounts(result.stdout), output: result.stdout.trim() });
     }
   }
-  return { stale, unreadable, executed, credited, guarded, countDiscriminated };
+  return { stale, unreadable, executed, credited, guarded, countDiscriminated, judged };
 }
 
 /**
@@ -209,6 +214,128 @@ export function judgeStaleAgainstAllowance(staleCount, allowed) {
   return { ok: staleCount <= allowed, staleCount, allowed, excess: Math.max(0, staleCount - allowed) };
 }
 
+// ── W1-T11157: THE RESULT RECORD A REVIEW MAY READ IN SHADOW ─────────────────────────────────────────────────────────
+// The review re-runs every proof this job just ran. This job now publishes what it judged as ONE line of its own log,
+// so `rmd review` can compare each hosted outcome with its host run (src/cli/commands/review.ts, review.proof_reuse_shadow).
+// Operator trust decision 2026-11-03: the record counts only as this workflow's successful job at that exact head, read
+// through the App; the executor is everything this job runs; a reused outcome counts toward no verdict (shadow first).
+// The job log, not check-run output, carries it: an Actions job cannot write its own check run's summary without a
+// `checks: write` token, and that token would sit beside the PR head's test code this job executes.
+
+/** The workflow whose successful job at a head is the only producer the review accepts. */
+export const PROOF_DISCRIMINATION_WORKFLOW = ".github/workflows/proof-discrimination-gate.yml";
+/** That workflow's job, as the Actions jobs API names it. */
+export const PROOF_DISCRIMINATION_JOB = "proof-discrimination";
+/** The log line prefix that carries the record; exactly one such line per job. */
+export const RESULT_MARKER = "RMD-PROOF-DISCRIMINATION-RESULT ";
+export const RESULT_FORMAT = "rmd-proof-discrimination-result-v1";
+/** The record's byte cap (the Checks API's 64 KiB summary cap); a larger record publishes only that it was too large. */
+export const RESULT_MAX_BYTES = 64 * 1024;
+/** check-proof's stable exit codes by name, as the record reports each proof's verdict. */
+export const CHECK_PROOF_VERDICT_NAMES = Object.fromEntries(Object.entries(CHECK_PROOF_EXIT).map(([name, code]) =>
+  [code, { pass: "pass", fail: "fail", refused: "refused", noMatch: "no-match", execError: "exec_error", executedStale: "executed_stale" }[name] ?? name]));
+
+const EXECUTOR_ENTRIES = ["scripts/proof-discrimination-gate.mjs", CHECK_PROOF_CHILD_ENTRY];
+const EXECUTOR_FILES = ["package.json", "package-lock.json", ".nvmrc", PROOF_DISCRIMINATION_WORKFLOW];
+const EXECUTOR_TREES = ["test/setup/"];
+/** The affected-suite selector's graph input: tracked code files under these trees (affected-suites.ts TRACKED_CODE_ARGS). */
+const GRAPH_TREES = ["src/", "scripts/", "bin/", "test/"];
+const GRAPH_CODE_FILE = /\.(?:ts|mts|mjs|js|cjs)$/;
+
+/**
+ * THE EXECUTOR SET, called by this gate and by the review alike: the import closure of this script and of the
+ * check-proof child it spawns, walked over the affected-suite selector's own graph ({@link buildAffectedSuitesGraph}),
+ * plus package.json, package-lock.json, .nvmrc, test/setup/** and this workflow. The walk builds the graph one layer at
+ * a time with every tracked code path as a target, so each reached file's edges equal the whole-tree graph's while
+ * only the reached files are read. `trackedPaths` is `git ls-files`; `readText(path)` reads one tracked file.
+ */
+export function proofDiscriminationExecutorSet(trackedPaths, readText) {
+  const tracked = new Set(trackedPaths);
+  const code = trackedPaths.filter((path) => GRAPH_TREES.some((tree) => path.startsWith(tree)) && GRAPH_CODE_FILE.test(path));
+  const aliases = tracked.has("package.json") ? JSON.parse(readText("package.json")).imports ?? {} : {};
+  const set = new Set();
+  let frontier = EXECUTOR_ENTRIES.filter((path) => tracked.has(path));
+  while (frontier.length > 0) {
+    for (const path of frontier) set.add(path);
+    const graph = buildAffectedSuitesGraph(new Map(frontier.map((path) => [path, readText(path)])), code, aliases);
+    frontier = [...new Set(frontier.flatMap((path) => [...(graph.dependencies.get(path) ?? [])]))].filter((path) => !set.has(path));
+  }
+  for (const path of trackedPaths) if (EXECUTOR_FILES.includes(path) || EXECUTOR_TREES.some((tree) => path.startsWith(tree))) set.add(path);
+  return [...set].sort();
+}
+
+const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
+/** The PR body's digest, as both sides compute it. */
+export function bodyDigest(body) {
+  return sha256(String(body ?? ""));
+}
+
+/** The executor set's digest (each path with its content's sha256, in path order) and the workflow file's own. */
+export function proofDiscriminationDigests(trackedPaths, readBytes) {
+  const files = proofDiscriminationExecutorSet(trackedPaths, (path) => readBytes(path).toString("utf8"));
+  const executor = files.map((path) => `${path}\0${sha256(readBytes(path))}\n`).join("");
+  return {
+    files,
+    executor_digest: sha256(executor),
+    workflow_digest: trackedPaths.includes(PROOF_DISCRIMINATION_WORKFLOW) ? sha256(readBytes(PROOF_DISCRIMINATION_WORKFLOW)) : null,
+  };
+}
+
+/** The tracked paths at `root`, as `git ls-files -z` lists them. */
+export function trackedPathsAt(root, git = defaultGit) {
+  const result = git(["ls-files", "-z"], root);
+  if (result.error || result.status !== 0) throw new Error(`git ls-files failed: ${String(result.stderr ?? result.error?.message ?? "").trim()}`);
+  return String(result.stdout ?? "").split("\0").filter(Boolean);
+}
+
+/** The executor digests of the checkout at `root`. */
+export function executorDigestsAt(root) {
+  return proofDiscriminationDigests(trackedPathsAt(root), (path) => readFileSync(join(root, path)));
+}
+
+/** The proofs this gate executes for `criteria`, in order: the same filter {@link evaluateProofDiscrimination} applies. */
+export function discriminationProofs(criteria) {
+  return criteria.filter((criterion) => !criterion.satisfied_by && criterion.kind !== "guard")
+    .map((criterion) => criterion.proof?.trim() ?? "")
+    .filter((proof) => proof !== "" && parseWhitelistedProof(proof) !== null);
+}
+
+/** One judged proof as the record names it: check-proof's head and base outcome lines and its exit verdict. */
+export function recordedProofOutcome({ proof, status, error, stdout }) {
+  const verdict = typeof status === "number" ? CHECK_PROOF_VERDICT_NAMES[status] ?? `exit ${status}` : "unreadable";
+  return {
+    proof,
+    head: /^verdict:\s+(\S+)/m.exec(stdout)?.[1] ?? "not reported",
+    base: /^base:\s+(\S+)/m.exec(stdout)?.[1] ?? "not reported",
+    verdict,
+    ...(verdict === "unreadable" ? { detail: String(error ?? "check-proof did not return an exit status") } : {}),
+  };
+}
+
+/** The record for one evaluated head. `executor` is {@link executorDigestsAt}'s result, or `{ error }`. */
+export function proofDiscriminationRecord({ headSha, baseSha, body, criteriaSource, executor, judged }) {
+  return {
+    format: RESULT_FORMAT,
+    head_sha: headSha,
+    base_sha: baseSha,
+    body_digest: bodyDigest(body),
+    criteria_source: criteriaSource,
+    executor_digest: executor.executor_digest ?? null,
+    workflow_digest: executor.workflow_digest ?? null,
+    ...(executor.error === undefined ? { executor_files: executor.files.length } : { executor_error: executor.error }),
+    proofs: judged.map(recordedProofOutcome),
+  };
+}
+
+/** The one log line that publishes `record`, or names it too large when it would pass {@link RESULT_MAX_BYTES}. */
+export function resultLine(record) {
+  const json = JSON.stringify(record);
+  const bytes = Buffer.byteLength(json);
+  if (bytes <= RESULT_MAX_BYTES) return `${RESULT_MARKER}${json}`;
+  return `${RESULT_MARKER}${JSON.stringify({ format: RESULT_FORMAT, head_sha: record.head_sha, too_large: true, bytes })}`;
+}
+
 export function main(argv, {
   root = REPO_ROOT,
   readPayload = readEventPayload,
@@ -217,8 +344,10 @@ export function main(argv, {
   runProof = (proof, base) => runCheckProof(proof, base, { root }),
   baseline = readStaleBaseline,
   log = console,
+  executorDigests = executorDigestsAt,
+  writeResult = (path, text) => writeFileSync(path, text),
 } = {}) {
-  const { values } = parseArgs({ args: argv, options: { "event-path": { type: "string" } } });
+  const { values } = parseArgs({ args: argv, options: { "event-path": { type: "string" }, "result-path": { type: "string" } } });
   const eventPath = values["event-path"] ?? process.env.GITHUB_EVENT_PATH;
   if (!eventPath) {
     log.error("proof-discrimination: REFUSED — no event payload path (pass --event-path or set GITHUB_EVENT_PATH)");
@@ -241,6 +370,8 @@ export function main(argv, {
   const result = evaluateProofDiscrimination(honouredGuards(criteria, source, taskId), base.mergeBase, runProof);
   const allowed = staleAllowanceFor(taskId, baseline(root));
   const verdict = judgeStaleAgainstAllowance(result.stale.length, allowed);
+  publishResult({ payload, mergeBase: base.mergeBase, source, judged: result.judged, root, executorDigests, log,
+    resultPath: values["result-path"], writeResult });
   // W1-T3729 design (ii): SKIPPED IS REPORTED, NEVER SILENT — on every verdict path below, so a
   // reader of a pass and a reader of a refusal both learn the same thing.
   if (result.credited > 0) {
@@ -291,6 +422,21 @@ export function main(argv, {
   }
   log.log(`proof-discrimination: OK — ${result.executed} executable proof(s) from ${source} did not pass at both head and merge base.`);
   return 0;
+}
+
+/** Publish the record as one log line before any verdict line, so a failing job's log still ends in its verdict
+ *  (#10234: the sweep reads only the tail). Never changes the exit code: an unreadable executor is named in the record. */
+function publishResult({ payload, mergeBase, source, judged, root, executorDigests, log, resultPath, writeResult }) {
+  let executor;
+  try {
+    executor = executorDigests(root);
+  } catch (error) {
+    executor = { error: String(error?.message ?? error).slice(0, 500) };
+  }
+  const record = proofDiscriminationRecord({ headSha: payload.headSha, baseSha: mergeBase, body: payload.body,
+    criteriaSource: source, executor, judged });
+  log.log(resultLine(record));
+  if (resultPath) writeResult(resultPath, `${JSON.stringify(record, null, 2)}\n`);
 }
 
 if (isMainModule(import.meta.url)) process.exitCode = main(process.argv.slice(2));

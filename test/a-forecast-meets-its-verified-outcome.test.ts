@@ -193,6 +193,6 @@ test("an older checkpoint is recomputed, and a live source scanned without imple
     assert.equal(calibration.coverage!.paired, 7, "rows the legacy scan never retained are read again, not lost");
     assert.equal(calibration.state, "observed");
     const stored = JSON.parse(readFileSync(checkpointFile, "utf8"));
-    assert.deepEqual(stored.sources.map((source: { projection?: string }) => source.projection), ["implement-forecast-v1"]);
+    assert.deepEqual(stored.sources.map((source: { projection?: string }) => source.projection), ["codex-notional-v1"]);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -49,9 +49,16 @@ test("W1-T14408 criterion 2: a release against the public record holds for the m
 test("W1-T14408 criterion 3: without a moved_from line the pin is exactly origin/main's (pinned digest, every term still pinned)", () => {
   const record = { id: "W1-T7", title: "t", repo: "remudero", type: "implement", priority: 1, status: "queued", verify: "human",
     files: ["a.ts"], acceptance: [{ claim: "c", proof: "grep: x in a.ts" }], design: "d" };
-  assert.equal(pinOf(record), "a68948e322ed1f850d17184e7e2018b088bfde802c2c4a27691a4bfa04ac129a");
-  for (const [key, value] of [["title", "u"], ["files", ["b.ts"]], ["priority", 2], ["status", "blocked"], ["repo", "other"], ["design", "e"]] as const) {
+  // W1-T14661: priority and expedite left the pin (scheduling, not contract); the digest moved with them, and the
+  // digest pinned here before that change stays a legacy pin a recorded release may still match.
+  assert.equal(pinOf(record), "b31d1b255031a3bce94130081391c945b461ff437fca5b9c4a6867b2eb99b106");
+  assert.equal(release.legacyOperatorReleasePin(record), "a68948e322ed1f850d17184e7e2018b088bfde802c2c4a27691a4bfa04ac129a");
+  assert.equal(release.releasePinMatches(record, "a68948e322ed1f850d17184e7e2018b088bfde802c2c4a27691a4bfa04ac129a"), true);
+  for (const [key, value] of [["title", "u"], ["files", ["b.ts"]], ["status", "blocked"], ["repo", "other"], ["design", "e"]] as const) {
     assert.notEqual(pinOf({ ...record, [key]: value }), pinOf(record), `${key} stays pinned`);
+  }
+  for (const [key, value] of [["priority", 2], ["expedite", "operator ask"]] as const) {
+    assert.equal(pinOf({ ...record, [key]: value }), pinOf(record), `${key} is scheduling, not pinned`);
   }
   assert.notEqual(pinOf({ ...record, moved_from: "x" }), "", "a record with the line still pins");
 });
