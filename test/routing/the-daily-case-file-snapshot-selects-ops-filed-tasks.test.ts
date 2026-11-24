@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test, type TestContext } from "node:test";
-import { buildFieldTrialsCaseFiles, readCaseFileCatalog, type CaseFileCatalog, type CaseFileOpsRead,
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildFieldTrialsCaseFiles, readCaseFileCatalog, readCaseFileOpsCatalog, type CaseFileCatalog, type CaseFileOpsRead,
+  type CaseFileOpsReadDeps,
   type FieldTrialsCaseFilePlan, type ViewPr } from "#src/lib/field-trials-case-files.js";
 import type { FlowRow } from "#src/lib/field-trials-flow.js";
 import type { Plan, Task } from "#src/lib/plan.js";
@@ -91,4 +95,26 @@ test("W1-T14717: an unreadable ops catalog still builds case files for public ta
     assert.equal(result.summary.outsidePlan, 1);
     assert.deepEqual(result.files.map((file) => file.taskId), [publicId]);
   }
+});
+
+test("the script's ops catalog read: off, a refused destination, the live catalog, the last good one, or the refusal", async () => {
+  const named = (() => ({ outcome: "named", kinds: [], owner: "craigoley", repo: "remudero-ops" })) as unknown as CaseFileOpsReadDeps["destination"];
+  const live = (outcome: string, plan?: Plan) => (async (target: { repository: string }) => {
+    assert.equal(target.repository, "craigoley/remudero-ops");
+    return { outcome, plan, counts: {} };
+  }) as unknown as CaseFileOpsReadDeps["snapshot"];
+  const kept = (plan?: Plan) => (async () => plan ? { outcome: "ok", plan } : { outcome: "none", reason: "no_record" }) as unknown as CaseFileOpsReadDeps["lastGood"];
+  assert.deepEqual(await readCaseFileOpsCatalog("/s", { destination: (() => ({ outcome: "off" })) as never }), { outcome: "off" });
+  assert.deepEqual(await readCaseFileOpsCatalog("/s", { destination: (() => ({ outcome: "unreadable", reason: "x" })) as never }),
+    { outcome: "unreadable", reason: "destination-unreadable" });
+  assert.deepEqual(await readCaseFileOpsCatalog("/s", { destination: named, snapshot: live("ok", opsPlan), lastGood: kept() }),
+    { outcome: "ok", plan: opsPlan });
+  assert.deepEqual(await readCaseFileOpsCatalog("/s", { destination: named, snapshot: live("http_error"), lastGood: kept(opsPlan) }),
+    { outcome: "last-good", plan: opsPlan, refusal: "http_error" });
+  assert.deepEqual(await readCaseFileOpsCatalog("/s", { destination: named, snapshot: live("http_error"), lastGood: kept() }),
+    { outcome: "unreadable", reason: "ops-http_error" });
+  // The real reads: a state dir naming no destination is off, never an error.
+  const dir = mkdtempSync(join(tmpdir(), "rmd-case-ops-"));
+  try { assert.deepEqual(await readCaseFileOpsCatalog(dir), { outcome: "off" }); }
+  finally { rmSync(dir, { recursive: true, force: true }); }
 });

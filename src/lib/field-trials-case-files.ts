@@ -7,6 +7,8 @@
  * read can change. A task with no PR link is searched on every build; an empty search is never remembered.
  */
 import type { FlowRow } from "./field-trials-flow.js";
+import { readLastGoodOpsCatalogSnapshot, readOpsCatalogSnapshotAsync } from "./ops-catalog-source.js";
+import { planDestinationRepository } from "./plan-destination.js";
 import type { Plan, Task } from "./plan.js";
 import type { GhReadCadenceDeps } from "./github-transport.js";
 import type { CaseFileCommandInput } from "./report-commands.js";
@@ -45,6 +47,28 @@ export type CaseFileOpsRead =
   | { outcome: "ok"; plan: Plan }
   | { outcome: "last-good"; plan: Plan; refusal: string }
   | { outcome: "unreadable"; reason: string };
+
+/** The reads {@link readCaseFileOpsCatalog} makes; each defaults to the one the daemon tick uses. */
+export interface CaseFileOpsReadDeps {
+  destination?: typeof planDestinationRepository;
+  snapshot?: typeof readOpsCatalogSnapshotAsync;
+  lastGood?: typeof readLastGoodOpsCatalogSnapshot;
+}
+
+/** W1-T14717: the snapshot script's ops catalog read. The destination names the catalog; a refused live read falls
+ * back to the daemon's last good snapshot (W1-T14564), and the refusal is kept either way. */
+export async function readCaseFileOpsCatalog(stateDir: string, deps: CaseFileOpsReadDeps = {}): Promise<CaseFileOpsRead> {
+  const { destination = planDestinationRepository, snapshot = readOpsCatalogSnapshotAsync, lastGood = readLastGoodOpsCatalogSnapshot } = deps;
+  const named = destination(stateDir);
+  if (named.outcome === "off") return { outcome: "off" };
+  if (named.outcome === "unreadable") return { outcome: "unreadable", reason: "destination-unreadable" };
+  const target = { repository: `${named.owner}/${named.repo}` };
+  const live = await snapshot(target, undefined, { stateDir });
+  if (live.outcome === "ok" && live.plan) return { outcome: "ok", plan: live.plan };
+  const kept = await lastGood(target, undefined, { stateDir });
+  if (kept.outcome === "ok" && kept.plan) return { outcome: "last-good", plan: kept.plan, refusal: live.outcome };
+  return { outcome: "unreadable", reason: `ops-${live.outcome}` };
+}
 
 export interface CaseFileCatalog {
   /** Every task id the public plan or the ops catalog holds. */
