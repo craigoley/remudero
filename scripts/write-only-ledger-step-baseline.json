@@ -1424,6 +1424,8 @@
     "worktree_retire.would_retire"
   ],
   "recordOnly": {
+    "ci-friction.pass": "An audit row for the operator (W1-T13989): it counts the units a ci-friction pass resumed from its journal and the units it ran fresh; nothing decides on it.",
+    "garden.unit_journal_failed": "A diagnostic (W1-T13989): a garden's unit journal could not be read or written, so its units re-run; it records the error once per pass and changes no garden output.",
     "config.randomised_finding": "An operator-facing finding naming the routing setting that can carry a randomised winner the mounts table cannot express; the config gardener re-reads it only to write each finding once per evidence day.",
     "config.randomised_recommendations_unread": "A diagnostic for a failed read of the randomised evidence; it records the error and changes no candidate.",
     "coverage_nightly.impact_map": "Observability for W1-T14530: one row per impact-map refresh; the map file and its run record carry the state lint-plan reads, and no decision reads the row.",
