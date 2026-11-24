@@ -32832,13 +32832,45 @@ export function deriveDayCostUsd(lines: ReadonlyArray<Record<string, unknown>>, 
   return deriveWindowCostUsd(lines, start, end);
 }
 
-export function deriveDayUnpricedRows(lines: ReadonlyArray<Record<string, unknown>>, now: number): number {
+/** `now`'s UTC-day produced rows, split into priced (with their price) and unpriced. */
+function dayProducedRows(lines: ReadonlyArray<Record<string, unknown>>, now: number) {
   const [start, end] = utcDayWindowMs(now);
-  return lines.filter((row) => {
+  const priced: Array<{ step: string; usd: number }> = [];
+  const unpriced: string[] = [];
+  for (const row of lines) {
     const timestamp = Date.parse(String(row.ts ?? ""));
+    if (!(timestamp >= start && timestamp < end) || spendRoleOf(row) !== "produced") continue;
+    const step = typeof row.step === "string" ? row.step : "";
     const cost = spendAmountUsd(row);
-    return timestamp >= start && timestamp < end && spendRoleOf(row) === "produced" && (cost === undefined || cost < 0);
-  }).length;
+    if (cost === undefined || cost < 0) unpriced.push(step);
+    else priced.push({ step, usd: cost });
+  }
+  return { priced, unpriced };
+}
+
+export function deriveDayUnpricedRows(lines: ReadonlyArray<Record<string, unknown>>, now: number): number {
+  return dayProducedRows(lines, now).unpriced.length;
+}
+
+/** W1-T14631: a price for each of the day's unpriced produced rows, from the same day's priced produced rows: the
+ *  step's p90 (nearest rank), else the day's largest. No priced row in the day leaves the unpriced rows unbounded. */
+export function deriveDayUnpricedSpendBound(lines: ReadonlyArray<Record<string, unknown>>, now: number):
+  | { rows: number; boundUsd: number; steps: Array<{ step: string; rows: number; perCallUsd: number; source: "step-p90" | "day-max" }> }
+  | { rows: number; unbounded: string } {
+  const { priced, unpriced } = dayProducedRows(lines, now);
+  if (unpriced.length === 0) return { rows: 0, boundUsd: 0, steps: [] };
+  if (priced.length === 0) {
+    return { rows: unpriced.length, unbounded: `no priced model call today to bound ${unpriced.length} unpriced call(s)` };
+  }
+  const dayMax = priced.reduce((max, row) => Math.max(max, row.usd), 0);
+  const counts = new Map<string, number>();
+  for (const step of unpriced) counts.set(step, (counts.get(step) ?? 0) + 1);
+  const steps = [...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([step, rows]) => {
+    const own = priced.filter((row) => row.step === step).map((row) => row.usd).sort((a, b) => a - b);
+    return own.length === 0 ? { step, rows, perCallUsd: dayMax, source: "day-max" as const }
+      : { step, rows, perCallUsd: own[Math.ceil(0.9 * own.length) - 1]!, source: "step-p90" as const };
+  });
+  return { rows: unpriced.length, boundUsd: steps.reduce((sum, s) => sum + s.rows * s.perCallUsd, 0), steps };
 }
 
 /** The WEEK-TO-DATE ledgered cost (W1-T159): the current UTC ISO week, same per-run reduction as
