@@ -9,7 +9,7 @@ import { test } from "node:test";
 import "#src/lib/live-analytics-snapshot-cache.js";
 import { OPS_CATALOG_REFRESHED_STEP, opsCatalogShadowFeed } from "#src/cli/commands/daemon.js";
 import {
-  OPS_CATALOG_BASELINE_SHARDS, createOpsCatalogShadowSource, readOpsCatalogSnapshotAsync,
+  createOpsCatalogShadowSource, readOpsCatalogSnapshotAsync,
   type OpsCatalogApi, type OpsCatalogBoundsIo, type OpsCatalogShadowInput,
 } from "#src/lib/ops-catalog-source.js";
 
@@ -93,7 +93,7 @@ test("W1-T14374 criterion 1: an ok refresh row carries shards and bytes, and a b
   assert.deepEqual([again.data.kind, again.data.shards, again.data.bytes], ["revalidate", 3, counts.bytes]);
 
   // A refusal by a derived bound: 600 shards need 601 blob GETs and the budget allows 100.
-  const many = shards(OPS_CATALOG_BASELINE_SHARDS + 100);
+  const many = shards(600);
   const direct = await readOpsCatalogSnapshotAsync(target, remote(many).api, { bounds: BUDGET });
   assert.deepEqual(direct.bound, { reason: "blob_read_budget", observed: 601, allowed: 100 });
   const refused = feedOver(createOpsCatalogShadowSource(target, remote(many).api, { bounds: BUDGET }));
@@ -102,7 +102,7 @@ test("W1-T14374 criterion 1: an ok refresh row carries shards and bytes, and a b
   assert.equal(row.data.outcome, "unreadable");
   assert.deepEqual(row.data.bound, { reason: "blob_read_budget", observed: 601, allowed: 100 });
   assert.deepEqual([row.data.shards, row.data.bytes], [direct.counts.shards, direct.counts.bytes]);
-  assert.equal(row.data.shards, OPS_CATALOG_BASELINE_SHARDS + 100);
+  assert.equal(row.data.shards, 600);
 
   // A refusal that no bound made carries counts it never learned as null, and no bound.
   fx.fail(true);
@@ -117,7 +117,7 @@ test("W1-T14374 criterion 2: no field names or quotes private content, counts an
   await refresh();
   fx.fail(true);
   await refresh();
-  const refused = feedOver(createOpsCatalogShadowSource(target, remote(shards(OPS_CATALOG_BASELINE_SHARDS + 100)).api, { bounds: BUDGET }));
+  const refused = feedOver(createOpsCatalogShadowSource(target, remote(shards(600)).api, { bounds: BUDGET }));
   t.after(() => refused.feed.stop());
   await refused.refresh();
   // A source whose bound carries a content field still writes only the bound's own three numbers and its closed reason.
@@ -156,7 +156,7 @@ test("W1-T14374 criterion 3: invariant:a-refresh-rows-existing-fields-are-unchan
   fx.fail(true);
   const down = await refresh();
   assert.deepEqual(old(down), { outcome: "stale", refusal_stage: "branch_ref", duration_ms: 0, kind: "revalidate", http_status_class: null });
-  const refused = feedOver(createOpsCatalogShadowSource(target, remote(shards(OPS_CATALOG_BASELINE_SHARDS + 100)).api, { bounds: BUDGET }));
+  const refused = feedOver(createOpsCatalogShadowSource(target, remote(shards(600)).api, { bounds: BUDGET }));
   t.after(() => refused.feed.stop());
   assert.deepEqual(old(await refused.refresh()),
     { outcome: "unreadable", refusal_stage: "shard_tree", duration_ms: 0, kind: "full", http_status_class: null });
