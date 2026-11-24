@@ -27,7 +27,7 @@
  * the step it would take and writes nothing.
  */
 import { createHash } from "node:crypto";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, parseDocument } from "yaml";
 import { systemClock, type Clock } from "./clock.js";
 import { MOVED_FROM_VALUE, defaultGitRunnerAsync, withoutOneMovedFromLine } from "./plan.js";
 import {
@@ -98,13 +98,13 @@ function stepOf(members: Planned[]): PlannedStep {
 /** W1-T14592: the one proof-discrimination line a moved shard's already-passing proof produces (plan-pr-emitter.ts sortShardProof). */
 const STALE_SHARD_PROOF = /^shard proof (".*") passes at origin\/main too$/;
 const TRUNCATED_DETAIL = /^… \d+ more line\(s\)$/;
-/** The acceptance proofs a record's own bytes declare; none when they do not parse. */
+/** The acceptance proofs a record's own bytes declare; none when they do not parse (that member is then never dropped). */
 function recordProofs(text: string | undefined): string[] {
-  try {
-    const doc = parseYaml(text ?? "") as unknown;
-    const rec = (Array.isArray(doc) ? doc[0] : doc) as { acceptance?: unknown } | null;
-    return Array.isArray(rec?.acceptance) ? rec.acceptance.flatMap(a => typeof (a as { proof?: unknown })?.proof === "string" ? [(a as { proof: string }).proof] : []) : [];
-  } catch (error) { void error; return []; }
+  const doc = parseDocument(text ?? "");
+  if (doc.errors.length > 0) return [];
+  const js = doc.toJS() as unknown;
+  const rec = (Array.isArray(js) ? js[0] : js) as { acceptance?: unknown } | null;
+  return Array.isArray(rec?.acceptance) ? rec.acceptance.flatMap(a => typeof (a as { proof?: unknown })?.proof === "string" ? [(a as { proof: string }).proof] : []) : [];
 }
 /**
  * W1-T14592: when a refusal is ONLY proof-discrimination and every line it shows is a moved shard proof that already
@@ -113,16 +113,14 @@ function recordProofs(text: string | undefined): string[] {
  */
 function staleProofDrops(verdict: PlanPrPreflightResult, members: readonly Planned[]): Array<{ id: string; proof: string }> | undefined {
   if (verdict.failures.length === 0 || verdict.failures.some(f => f.check !== "proof-discrimination")) return undefined;
-  const proofs: string[] = [];
-  for (const line of verdict.failures.flatMap(f => f.lines ?? [f.firstLine])) {
-    if (TRUNCATED_DETAIL.test(line)) continue;
-    const quoted = STALE_SHARD_PROOF.exec(line)?.[1];
-    let proof: unknown;
-    try { proof = quoted === undefined ? undefined : JSON.parse(quoted); } catch (error) { void error; }
-    if (typeof proof !== "string") return undefined;
-    proofs.push(proof);
-  }
-  const drops = members.flatMap(m => { const proof = recordProofs(m.text).find(p => proofs.includes(p)); return proof === undefined ? [] : [{ id: m.id, proof }]; });
+  const lines = verdict.failures.flatMap(f => f.lines ?? [f.firstLine]).filter(line => !TRUNCATED_DETAIL.test(line));
+  if (lines.some(line => !STALE_SHARD_PROOF.test(line))) return undefined;
+  // The emitter writes each line as `shard proof ${JSON.stringify(proof)} passes at origin/main too`: compare whole lines.
+  const shown = new Set(lines);
+  const drops = members.flatMap(m => {
+    const proof = recordProofs(m.text).find(p => shown.has(`shard proof ${JSON.stringify(p)} passes at origin/main too`));
+    return proof === undefined ? [] : [{ id: m.id, proof }];
+  });
   return drops.length > 0 ? drops : undefined;
 }
 
