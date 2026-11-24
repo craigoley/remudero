@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { runDaemon, type DaemonDeps } from "#src/lib/daemon.js";
 import type { Plan } from "#src/lib/plan.js";
+import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 // Through the shared helper, never a new direct importer of src/run-task.ts.
 import { dedicatedTargetPlanReloader } from "#test/helpers/run-task-test.js";
@@ -41,6 +42,7 @@ async function tick(reloadPlan: () => Promise<Plan | null>, rows: Row[], ticks: 
   await runDaemon(
     { tasks: [], byId: new Map() },
     {
+      ...hostIndependentDaemonDeps(),
       // Every task reads as merged, so a reloaded plan never dispatches: these ticks only reload.
       refreshMerged: () => () => true,
       checkStop: () => (n >= ticks ? "tick cap" : undefined),
