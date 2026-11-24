@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { mock, test } from "node:test";
 import type { Clock } from "#src/lib/clock.js";
 import { createLedgerProjector, openProjectorReadModel } from "#src/lib/ledger-projector.js";
-import { NOW_SLOW_STAGE_MS, createNowView, type NowViewContext, type NowViewOptions } from "#src/lib/now-view.js";
+import { NOW_REFRESH_MS, NOW_SLOW_STAGE_MS, createNowView, type NowViewContext, type NowViewOptions } from "#src/lib/now-view.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import { acquireLease } from "#src/lib/read-model-db.js";
 import { createReadModelTicker, readModelSwitchesPath, type ReadModelWorkerMessage } from "#src/lib/read-model-worker.js";
@@ -165,8 +165,8 @@ test("W1-T5066: a failed stage discards its partial build and retries cleanly", 
     log: (step, extra) => void logged.push({ step, ...extra }),
   });
   assert.deepEqual(view.materialize(w.ctx), []);
-  assert.deepEqual(logged, [{ step: "read_model.now_view_failed", instance: "core", error: "synthetic plan read failure" }]);
-  assert.equal(view.materialize(w.ctx).length, 1);
+  assert.deepEqual(logged, [{ step: "read_model.now_view_failed", instance: "core", error: "synthetic plan read failure", class: "plan-unreadable", retryAfterMs: NOW_REFRESH_MS }]);
+  assert.equal(view.materialize({ ...w.ctx, now: w.ctx.now + NOW_REFRESH_MS }).length, 1);
   assert.equal(reads, 2);
 });
 
