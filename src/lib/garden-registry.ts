@@ -827,11 +827,28 @@ export function selectorShadowMainFailures(
   };
 }
 
+/** W1-T13114: a GitHub 5xx or network blip on a CI-log read is transient. It used to surface at once as
+ *  `selector-shadow.cache_failed` (the run's log read as empty); retry it a few times first. A failure that persists
+ *  still throws, so the caller still records `cache_failed`. */
+const TRANSIENT_GH_READ = /HTTP 5\d\d|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up/i;
+export async function retryTransientGhRead<T>(read: () => Promise<T>, delayMs = 500, attempts = 3): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await read();
+    } catch (error) {
+      const detail = `${String((error as Error)?.message ?? error)} ${String((error as { stderr?: string })?.stderr ?? "")}`;
+      if (attempt >= attempts || !TRANSIENT_GH_READ.test(detail)) throw error;
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, delayMs * attempt));
+    }
+  }
+}
+
 /** W1-T4439/W1-T5409: one selector-shadow pass as the daemon builds it — the PR runs, their changed
  *  paths, main's failures at each run's base sha and (W1-T5925) a bounded replay of older failing runs,
  *  all read through `io` (absent: the gh transport). */
 export function selectorShadowGardenPass(
-  d: GardenerDeps, owner: string, repo: string, mintTaskId: (filingBranch: string) => string, io: SelectorShadowGhReads = {},
+  d: GardenerDeps, owner: string, repo: string, mintTaskId: (filingBranch: string) => string,
+  io: SelectorShadowGhReads & { retryDelayMs?: number } = {},
 ): (() => Promise<void>) & { due: () => boolean | Promise<boolean> } {
   const pass = async (): Promise<void> => {
     // New evidence is a newly complete CI run stored, or a replay slice of history read; nothing else in
@@ -849,6 +866,14 @@ export function selectorShadowGardenPass(
       const runs = await readSelectorShadowRunsAsync(owner, repo, undefined, {
         readJson: io.readJson,
         cachePath: join(d.stateDir, "selector-shadow-log-cache.json"),
+        readLog: (args) => {
+          const runId = Number(args[2]);
+          const delay = io.retryDelayMs;
+          return retryTransientGhRead(() => readCoverageShardLogsAsync(owner, repo, runId, {
+            ...(io.readJson ? { readJson: io.readJson } : {}),
+            ...(io.readText ? { readText: io.readText } : {}),
+          }), delay);
+        },
         warn: (message) => d.log("selector-shadow.cache_failed", { message }),
         onFlakes: selectorShadowFlakeLedger(d.log),
       });
