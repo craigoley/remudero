@@ -915,11 +915,13 @@ export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick
   for (const a of shadowed) deps.log(QUEUE_JUDGE_PREDICTION_STEP, predictionRow(a, bound, undefined, true));
 
   // 5a. An open floor escalation the corrected rule admits is closed by the judge that opened it.
-  if (sources.closeIssue) {
+  // The daemon wires the gardener's own `deps.closeIssue`; absent, the sources' lazy default (escalate.ts's port) closes it.
+  const closeIssue = deps.closeIssue ?? sources.closeIssue;
+  if (closeIssue) {
     for (const r of admittedFloorEscalations(own, packs)) {
       const url = String(r.issue_url);
       try {
-        await sources.closeIssue(url, `The queue judge's smallest-pin floor holds only a proposal that makes a task more urgent than it is; ${String(r.task_id)} ${String(r.from)} -> ${String(r.to)} lowers its urgency, so the judge now judges it as a lower. Closing automatically.`);
+        await closeIssue(url, `The queue judge's smallest-pin floor holds only a proposal that makes a task more urgent than it is; ${String(r.task_id)} ${String(r.from)} -> ${String(r.to)} lowers its urgency, so the judge now judges it as a lower. Closing automatically.`);
         deps.log(ESCALATION_CLOSED_STEP, { task_id: r.task_id, from: r.from, to: r.to, issue_url: url, reason: "the corrected floor rule admits a lower" });
       } catch (e) {
         deps.log(ESCALATION_CLOSE_FAILED_STEP, { task_id: r.task_id, issue_url: url, error: String((e as Error)?.message ?? e) });
