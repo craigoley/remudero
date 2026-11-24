@@ -46,7 +46,7 @@ function addedLineIsComment(path: string, line: string, lineNumber: number | und
   if (fileText !== undefined && lineNumber !== undefined) {
     return matchedLinesAreAllComments([`${lineNumber}:${line}`], { pattern: line, fileText, path });
   }
-  return matchedLinesAreAllComments([line], { pattern: line, fileText: "", path });
+  return matchedLinesAreAllComments([`0:${line}`], { pattern: line, fileText: "", path });
 }
 
 /** The first ADDED line of a unified diff (`git diff` or `gh pr diff`) that yields a grep proof the reviewer can run
