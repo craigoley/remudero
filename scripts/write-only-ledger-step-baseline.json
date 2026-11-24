@@ -1428,7 +1428,6 @@
     "config.randomised_recommendations_unread": "A diagnostic for a failed read of the randomised evidence; it records the error and changes no candidate.",
     "coverage_nightly.impact_map": "Observability for W1-T14530: one row per impact-map refresh; the map file and its run record carry the state lint-plan reads, and no decision reads the row.",
     "dispatch.ops_catalog_hold_cleared": "W1-T14532: a diagnostic naming the ops dispatch hold a cycle cleared; nothing reads it, and it changes no dispatch or move decision.",
-    "ops_catalog.growth_exceeded": "W1-T14557: an operator alert that an accepted ops catalog read grew past its daily allowance, once per UTC day; the read is accepted either way, so nothing decides on the row.",
     "dispatch.ops_selection_changed": "An audit row for the operator (W1-T13462): it names the previous and the new ops dispatch selection when the flag changes between cycles, never the repository; nothing decides on it.",
     "dispatch.selection_timing": "Observability for W1-T13286: per-probe selection timing that an operator reads to pick the next speed fix; no decision reads it (invariant measuring-changes-no-decision).",
     "github_app.token_refresh_late": "W1-T14537: a diagnostic that a scheduled App token refresh ran after the token it replaced had expired, with how late; it changes no refresh or credential decision.",
