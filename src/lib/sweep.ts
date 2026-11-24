@@ -111,6 +111,7 @@ import { RATCHET_JUDGE_DECIDED_STEP, armedRejudgeHold, judgeMergedRatchets, ratc
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB, defaultProbe as probeProcess, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
 import { ESTIMATE_LEARNING, classEstimate, classSurvival, classTypical, type LearnedEstimate, type Survival } from "./host-memory-learning.js";
+import { currentRunChildReservationId } from "./run-child-reservation.js";
 import {
   loadHostMemoryBudgetPolicy, ownContainerWorkLive, readContainerMemoryHeadroom, residentsOf, type ContainerMemoryHeadroom,
   type HostMemoryBudgetPolicy,
@@ -420,6 +421,7 @@ import {
   holdTaskForRefusal,
   noPrVerdictRowsFromLedger,
   readTaskShard,
+  readTaskShardAtMain,
   taskAwaitsAmendment,
   type RefusalAmendmentResult,
   type RefusalCandidate,
@@ -769,6 +771,16 @@ export function sweepArmTaskId(pr: { taskId?: string; prNumber: number }, armSes
   // W1-T5866: deliberately NOT {@link escalationTaskIdFor} — the arm gate reads rows already scoped to this PR's url
   // (armLedgerLinesForPr), and a legacy `unfiled`-keyed row must keep matching the id the arm passes.
   return armSessionPrs ? (pr.taskId ?? `PR-${pr.prNumber}`) : pr.taskId;
+}
+
+/** W1-T10832 — the head prefix of a PR only its OWNER merges: core's daily site data import
+ *  (`field-trials/daily-field-note`, src/lib/field-trials-site-import.ts). With `armSessionPrs` on, a
+ *  trailer-less PR arms as `PR-<n>`, so the branch shape alone cannot keep the sweep off it. */
+export const OWNER_MERGE_ONLY_HEAD_PREFIX = "field-trials/";
+
+/** W1-T10832 — is this head one the sweep never reviews, fixes, arms, merges or closes? */
+export function isOwnerMergeOnlyHead(head: string | undefined): boolean {
+  return typeof head === "string" && head.startsWith(OWNER_MERGE_ONLY_HEAD_PREFIX);
 }
 
 /** W1-T5813 — the arm's ledger gate reads only THIS PR's `review.posted` rows (a legacy row with
@@ -3596,6 +3608,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     const facts = { taskId: fixLedgerTaskIdFor(pr), prNumber: pr.prNumber, headSha: pr.headSha, ...contractRevisionFor(pr) };
     return await readPriorRoundHold(rows, facts, { readAmendmentMergedAt, readCheckCompletions: () => readRequiredCheckCompletions(pr) });
   };
+  const planRepairGitAsync = (dir: string) => async (args: string[]) =>
+    (deps.planRepairGitImpl ?? defaultGitCaptureAsync)("git", ["-C", dir, ...args]);
   // W1-T12199: amendments land through the sealed task-file landing. A test's injected git and gh
   // carry the landing too, so it never runs a real child against the checkout the test runs in.
   const taskFilesLandingOpts = (target: PlanDestinationRepository): LandTaskFilesOpts => ({
@@ -3608,7 +3622,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     ...(deps.planRepairGitImpl ? { git: (args: string[]) => planRepairGit("git", ["-C", target.checkoutDir, ...args]) } : {}),
     // W1-T13169: task ids are reserved in the public repository, so a landing into the plan destination releases one there.
     ...(target.checkoutDir === repoDir ? {} : {
-      reservationGitAsync: async (args: string[]) => (deps.planRepairGitImpl ?? defaultGitCaptureAsync)("git", ["-C", repoDir, ...args]),
+      reservationGitAsync: planRepairGitAsync(repoDir),
     }),
     ...(deps.ghJsonImpl ? { gh: (args: string[]) => {
       const out = ghJsonForBuild(args);
@@ -3718,6 +3732,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         });
         await primaryShadowAlerts.refuse(pr).catch(primaryShadowAlertFailed);
         return "shadow-refused";
+      }
+      // W1-T10832: an owner-merge-only head never reaches attemptArm, whatever armSessionPrs says.
+      if (isOwnerMergeOnlyHead(pr.headRefName)) {
+        log("automerge.arm_skipped", { pr_url: pr.prUrl, head_ref: pr.headRefName, outcome: "hold-refused",
+          reason: "owner-merge-only head (W1-T10832): only the owner merges it" });
+        return "hold-refused";
       }
       // W1-T5492: select attemptArm's existing clean-status fallback without another --auto write.
       const idleDeps: ArmDeps<true> | undefined = mode === "armed-idle" ? {
@@ -6108,6 +6128,17 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           results.push({ ...base, outcome: "task_closed" });
           continue;
         }
+        const isPublic = target === publicTaskRepository;
+        let atMain: Awaited<ReturnType<typeof readTaskShardAtMain>>;
+        if (!isPublic) {
+          try {
+            atMain = await readTaskShardAtMain(target.checkoutDir, c.taskId, planRepairGitAsync(target.checkoutDir));
+          } catch (e) {
+            results.push({ ...base, outcome: "lookup_unreadable", code: "ops-shard-unreadable", error: String((e as Error)?.message ?? e) });
+            continue;
+          }
+        }
+        const shardOf = (taskId: string) => isPublic ? readTaskShard(target.checkoutDir, taskId) : atMain;
         try {
           holdTaskForRefusal(join(config.root, "state"), task, c.refusals, c.runId, c.contractRevision);
         } catch (e) {
@@ -6115,11 +6146,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
         results.push(
           await draftRefusalAmendment(c, {
-            readShard: (taskId) => readTaskShard(target.checkoutDir, taskId),
+            readShard: shardOf,
             // W1-T12199: an amendment that waits, or that the open landing PR carries, is found by its staged
             // file. The per-task branch is still read for an amendment opened before this landing.
             probeExisting: async (branch) => {
-              const relPath = readTaskShard(target.checkoutDir, c.taskId)?.relPath;
+              const relPath = shardOf(c.taskId)?.relPath;
               const scoped = destination.outcome === "named"
                 ? (await landTaskFilesAsync(target.checkoutDir, [], { ...landingOpts(target), stageOnly: true })).waiting
                 : undefined;
@@ -13677,6 +13708,16 @@ export function isFixStrikeExhausted(pr: OpenPrView, policy: SweepPolicy): boole
 const ROLLUP_UNREAD_REASON = "checks and review unread this pass (rollup read failed) — re-reading next pass";
 
 export const DISPOSITION_RULES: readonly DispositionRule[] = [
+  {
+    // W1-T10832 — THE OWNER'S MERGE IS THE REVIEW. Core's daily site import PR is published only by the
+    // owner merging it, so no lane may review, fix, arm, merge or close it: FIRST, above every close-out row,
+    // because a PR left past the page's 72 h label stays open and is refreshed in place by core.
+    disposition: "wait",
+    when: (pr) => isOwnerMergeOnlyHead(pr.headRefName),
+    blocker: "operator-hold",
+    reason: (pr) => `owner-merge-only head ${pr.headRefName ?? ""} (W1-T10832): the owner's merge is the review — `
+      + "the sweep never reviews, arms or merges it",
+  },
   {
     // W1-T920 (DECISIONS.md #1987) — ROUTED THROUGH THE EXISTING "stale" disposition, never a new
     // one: that case already closes reversibly and already writes ONE `sweep.disposed` row, and
@@ -22097,8 +22138,10 @@ export function productionFixAdmissionResidents(
 ): FixAdmissionResidents {
   const reading = readLedger(root);
   if (reading === undefined || reading.state === "unreadable") return undefined;
+  // The child's resident memory is already in the pressure reading. Its reservation cannot be another fix ahead of it.
+  const ownReservationId = currentRunChildReservationId();
   const live = reading.entries.filter((entry) => entry.status === "owned" && !entry.occupancyReleased &&
-    (entry.workerClass === "fix" || entry.workerClass === "review"));
+    (entry.workerClass === "review" || (entry.workerClass === "fix" && entry.id !== ownReservationId)));
   const residents = residentsOf(readFile, live.map((entry) => entry.path));
   const out: { fix: number[]; review: number[] } = { fix: [], review: [] };
   let pendingFix = 0;
@@ -30326,7 +30369,7 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
   openPrs: readonly OpenPrView[],
   deps: Pick<SweepDeps, "ledgerPath" | "runId" | "updateBranch" | "mergeQueue" | "readActionsStatusSummary" |
     "readPrFileSource" | "behindMainByPr" | "baseChangedFilesByPr" | "inFlightTaskIds" | "now" | "readLedger" |
-    "appendLine" | "dryRun" | "readBranchProtectionStrict" | "refreshJudge" | "log">,
+    "appendLine" | "dryRun" | "readBranchProtectionStrict" | "refreshJudge" | "log" | "readLiveState">,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
   timing?: LightPassPreReviewTiming,
 ): Promise<number | undefined> {
@@ -30377,21 +30420,42 @@ export async function runLightPassReadyRefresh( // W1-T7214: W1-T6022's ready-ov
       return view.checksState !== "pending" && view.isDependabot !== true && (runTaskId === undefined || !inFlight.has(runTaskId)) &&
         valueGate.admit(c, view, "ready-light");
     });
-    const winner = oldestActivityFirst(eligible.map((c) => byNumber.get(c.prNumber)!), now);
-    const target = eligible.find((c) => c.prNumber === winner?.prNumber);
-    if (!target) return undefined;
-    const settleValue = () => valueGate.settle(target, byNumber.get(target.prNumber)!, "ready-light");
-    if (!(await (timing ? timing.measure("ready_value_gate", settleValue) : settleValue()))) return undefined;
-    const row = {
-      run_id: deps.runId, task_id: target.taskId ?? "SWEEP", pr_number: target.prNumber, pr_url: target.prUrl,
-      head_sha: target.headSha, ...(target.behindBy === undefined ? {} : { behind_by: target.behindBy }),
-      update_reason: target.updateReason,
-      ...(target.matchingBaseFiles === undefined ? {} : { matching_base_files: target.matchingBaseFiles }),
+    const rowFor = (c: ArmedStalledPr) => ({
+      run_id: deps.runId, task_id: c.taskId ?? "SWEEP", pr_number: c.prNumber, pr_url: c.prUrl,
+      head_sha: c.headSha, ...(c.behindBy === undefined ? {} : { behind_by: c.behindBy }),
+      update_reason: c.updateReason,
+      ...(c.matchingBaseFiles === undefined ? {} : { matching_base_files: c.matchingBaseFiles }),
       source: "light_pass",
-    };
+    });
+    // W1-T14315: the snapshot predates the base facts, so a PR that merged since reads its own files as main
+    // moving under it. Each selected PR is read live before its write; a merged, closed or moved one stands
+    // down and the slot passes to the next eligible candidate. An unreadable read refreshes as before.
+    let pool = eligible;
+    let target: ArmedStalledPr | undefined;
+    for (;;) {
+      const winner = oldestActivityFirst(pool.map((c) => byNumber.get(c.prNumber)!), now);
+      target = pool.find((c) => c.prNumber === winner?.prNumber);
+      if (!target) return undefined;
+      const selected = target;
+      const readLive = () => Promise.resolve().then(() => deps.readLiveState?.(byNumber.get(selected.prNumber)!))
+        .catch((): LiveStateResult => ({ ok: false }));
+      const live = await (timing ? timing.measure("ready_update", readLive) : readLive());
+      const notOpen = live?.ok !== true ? undefined : terminalStateReason(live.state) ??
+        (live.headSha !== undefined && live.headSha !== selected.headSha
+          ? `head moved from ${selected.headSha} to ${live.headSha}` : undefined);
+      if (notOpen === undefined) break;
+      appendLine(deps.ledgerPath, { ...rowFor(selected), step: "sweep.update_branch.skipped_not_open", reason: notOpen,
+        ...(live?.state === undefined ? {} : { live_state: live.state }),
+        ...(live?.headSha === undefined ? {} : { live_head_sha: live.headSha }) });
+      pool = pool.filter((c) => c !== selected);
+    }
+    const chosen = target;
+    const settleValue = () => valueGate.settle(chosen, byNumber.get(chosen.prNumber)!, "ready-light");
+    if (!(await (timing ? timing.measure("ready_value_gate", settleValue) : settleValue()))) return undefined;
+    const row = rowFor(chosen);
     appendLine(deps.ledgerPath, { ...row, step: "sweep.update_branch.attempted" });
     try {
-      const update = () => updateBranch(target);
+      const update = () => updateBranch(chosen);
       const outcome = await (timing ? timing.measure("ready_update", update) : update());
       appendLine(deps.ledgerPath, { ...row, step: `sweep.update_branch.${outcome}` });
     } catch (e) {
@@ -31150,11 +31214,11 @@ async function runSweepLightPassCore(
   lightPassSpawningReservations += spawning.length;
   planLaneReviewsInFlight += planFilings.length;
   for (const pr of [...spawning, ...planFilings]) lightPassReservedHeads.add(lightPassHeadKey(pr));
-  const spawningNumbers = new Set(spawning.map((pr) => pr.prNumber));
+  const spawningHeads = new Map(spawning.map((pr) => [pr.prNumber, lightPassHeadKey(pr)]));
   // The eligible spawning-lane PRs this pass could not admit, oldest first. A lane this pass frees
   // admits the next of them at once (`refillFreedLanes` below) instead of idling until another pass.
   const refillTail = selectReviewAdmissions(
-    openPrs.filter((pr) => !spawningNumbers.has(pr.prNumber) && !lightPassReservedHeads.has(lightPassHeadKey(pr))),
+    openPrs.filter((pr) => !spawningHeads.has(pr.prNumber) && !lightPassReservedHeads.has(lightPassHeadKey(pr))),
     policy, now, outcomes, openPrs.length, undefined, needsPerson, queuedAt,
   ).spawning;
   let refillArmed = false;
@@ -31162,14 +31226,16 @@ async function runSweepLightPassCore(
   // floor refills nothing; its tail re-derives next pass, exactly as a full pass closes admissions.
   let providerFloorMet = false;
   const basePostReview = deps.postReview;
-  const passPostReview: SweepDeps["postReview"] = basePostReview && (async (pr, mode, attempt, onPhase) => {
+  const passPostReview = basePostReview && (async (
+    pr: ReviewDispatchPr, mode?: ReviewDispatchMode, attempt?: string, onPhase?: (phase: string) => void, initial = true,
+  ) => {
     // W1-T11149: a spawning (code) review's judge and posting phases leave the CPU bound for the provider bound.
-    const phases = spawningNumbers.has(pr.prNumber) ? trackInProcessReviewPhase() : undefined;
+    const phases = initial && spawningHeads.has(pr.prNumber) ? trackInProcessReviewPhase() : undefined;
     try {
       const reviewStartedAtMs = performance.now();
       await basePostReview(pr, mode, attempt, (phase) => {
         phases?.phase(phase);
-        if (phase === "posted") releases.get(pr.prNumber)?.();
+        if (phase === "posted" && initial) releases.get(pr.prNumber)?.();
         else if (phases && isReviewProviderPhase(phase)) {
           releaseReviewSlot();
           onOwnLaneFreed();
@@ -31264,13 +31330,13 @@ async function runSweepLightPassCore(
       if (released) return;
       released = true;
       if (lightPassHeadReleases.get(headKey) === release) lightPassHeadReleases.delete(headKey);
-      if (spawningNumbers.has(pr.prNumber)) {
+      if (spawningHeads.has(pr.prNumber)) {
         lightPassSpawningReservations--;
         unsettledSpawning--;
       } else planLaneReviewsInFlight--;
       lightPassReservedHeads.delete(headKey);
       releaseReviewSlot();
-      if (spawningNumbers.has(pr.prNumber)) onOwnLaneFreed();
+      if (spawningHeads.has(pr.prNumber)) onOwnLaneFreed();
     };
     releases.set(pr.prNumber, release);
     // W1-T11340: a later pass that reclaims this head's stuck review releases it through the same, once-only path.
@@ -31467,7 +31533,7 @@ async function runSweepLightPassCore(
   // re-read now) and the SAME process-wide bound every pass shares. Each candidate's head is read
   // live first, so a stale snapshot never reviews a dead head. Only the review lane may act.
   const append = deps.appendLine ?? appendLedger;
-  const detachedRefills = new Set<number>();
+  const detachedRefills = new Set<string>();
   const refillDeps = (pr: OpenPrView, release: () => void): SweepDeps => ({
     ...deps,
     stuckStagePeers: openPrs,
@@ -31480,11 +31546,11 @@ async function runSweepLightPassCore(
       passPostReview(review, mode, attempt, (phase) => {
         if (phase === "posted") release();
         onPhase?.(phase);
-      })),
+      }, false)),
     actionable: isReviewLaneDisposition,
     standDownReasonFor: (d) => (isReviewLaneDisposition(d) ? undefined : "deferred to full sweep (light pass)"),
     detachReviewWait: (work) => {
-      detachedRefills.add(pr.prNumber);
+      detachedRefills.add(lightPassHeadKey(pr));
       void work.finally(release).catch((error) => {
         deps.log?.("sweep.post_review.failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String(error) });
       });
@@ -31511,8 +31577,15 @@ async function runSweepLightPassCore(
     refillViewReadAtMs = deps.now ? deps.now() : systemClock.now();
     const freshViews = fresh.map(pr => completedRefusalRetryView(promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad), selectionPrior));
     refillTail.splice(0, refillTail.length, ...selectReviewAdmissions(
-      freshViews.filter((pr) => !spawningNumbers.has(pr.prNumber) && !refilledHeads.has(lightPassHeadKey(pr)) &&
-        !lightPassReservedHeads.has(lightPassHeadKey(pr))),
+      freshViews.filter((pr) => {
+        const key = lightPassHeadKey(pr);
+        if (refilledHeads.has(key) || lightPassReservedHeads.has(key)) return false;
+        const admittedHead = spawningHeads.get(pr.prNumber);
+        if (admittedHead === undefined) return true;
+        // Once the earlier head releases its slot, the normal selector can consider its green successor.
+        return admittedHead !== key && !lightPassReservedHeads.has(admittedHead) &&
+          pr.checksState === "green" && pr.reviewState === "none" && pr.reviewOrphanedByPush === true;
+      }),
       policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson, queuedAt,
     ).spawning);
   };
@@ -31630,7 +31703,7 @@ async function runSweepLightPassCore(
       throw error;
     }
     void runSweep([next], refillDeps(next, release), policy).then(
-      () => { if (!detachedRefills.has(next.prNumber)) release(); },
+      () => { if (!detachedRefills.has(key)) release(); },
       (error) => {
         release();
         deps.log?.("sweep.post_review.failed", { pr_number: next.prNumber, head_sha: next.headSha, error: String(error) });

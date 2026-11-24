@@ -1,6 +1,6 @@
 import { stampMechanicalAsk } from "./inbox-retirement.js";
 import { reconcilePlan, reconcileShardStatus, requeueRevertedShard, type RevertedRequeue } from "./plan-reconcile.js";
-import { takePlanReconcileBatch } from "./plan-reconcile-batch.js";
+import { PLAN_RECONCILE_LANDING_BODY_BUDGET, PLAN_RECONCILE_LANDING_RECORD_LIMIT, takePlanReconcileBatch } from "./plan-reconcile-batch.js";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
 import { promisify } from "node:util";
@@ -8,6 +8,8 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync
 import { getHeapStatistics } from "node:v8";
 import { basename, dirname, join, posix, relative } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
+import { daemonGitCredentialSocketPath } from "./secret-boundary.js";
+import { socketHelperCommand } from "./worktree-git.js";
 import { validateConfig, type Config } from "./config.js";
 import { validateConfigShape } from "./config-schema.js";
 import { ruleEfficacyReport, escalateRepeatingRules, type RuleEfficacyReport, type RuleSignature } from "./rule-efficacy.js";
@@ -1619,7 +1621,9 @@ export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOp
       const statusEdit = (taskId: string) => (current: string) => requeueIds.has(taskId)
         ? requeueRevertedShard(current, taskId, lost.get(taskId)).text
         : reconcileShardStatus(current, taskId, (id) => credited.has(id)).text;
-      const batch = takePlanReconcileBatch(landable, (write) => relPathOf(write.taskId));
+      // W1-T14485: cut at the plan review's record bound, so each re-queue row and the landed count name only landed records.
+      const batch = takePlanReconcileBatch(landable, (write) => relPathOf(write.taskId),
+        { files: PLAN_RECONCILE_LANDING_RECORD_LIMIT, bodyChars: PLAN_RECONCILE_LANDING_BODY_BUDGET });
       const inputs = batch.map((write) =>
         ({ relPath: relPathOf(write.taskId), content: write.text, edit: statusEdit(write.taskId) }));
       if (inputs.length > 0) deps.land(inputs);
@@ -4213,6 +4217,40 @@ export function measurementCadenceChildAttempt(statePath: string, runId: string)
   return read.kind === "ok" && read.state.runId === runId && typeof read.state.attempt === "number" ? read.state.attempt : 1;
 }
 
+/** deploy/entrypoint.sh's global helper, verbatim: it names GH_TOKEN, which the shell git runs expands at call time. */
+export const ENV_TOKEN_CREDENTIAL_HELPER = '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f';
+
+/**
+ * W1-T14537: the child's git asks the daemon's git credential socket (W1-T5115) at the moment git calls the helper.
+ * The child renews GH_TOKEN on a timer on its own loop, and a long synchronous stretch blocks that timer: on 2026-11-23
+ * a child's sync `git fetch` of the ops checkout ran seven minutes past its token's expiry and failed. The socket mints
+ * on the daemon's socket thread, so neither process's blocked loop reaches git. The wiring is git's env form of `-c`,
+ * which every git the child spawns inherits, and nothing is written to a checkout: reset, `useHttpPath` (the mint scopes
+ * to the request's repository), the socket helper, then {@link ENV_TOKEN_CREDENTIAL_HELPER}. git asks that one only when
+ * the socket answers nothing (a daemon restart, a refused mint): the env path this replaces, as the fallback.
+ * Every value is a socket path or a helper command, never a credential. No socket: nothing is added.
+ */
+export function measurementCadenceChildGitCredentialEnv(base: NodeJS.ProcessEnv, socketPath: string | undefined): Record<string, string> {
+  if (socketPath === undefined) return {};
+  const inherited = Number(base.GIT_CONFIG_COUNT ?? 0);
+  const start = Number.isInteger(inherited) && inherited > 0 ? inherited : 0;
+  const entries: ReadonlyArray<readonly [string, string]> = [["credential.helper", ""], ["credential.useHttpPath", "true"],
+    ["credential.helper", socketHelperCommand(socketPath)], ["credential.helper", ENV_TOKEN_CREDENTIAL_HELPER]];
+  const out: Record<string, string> = { GIT_CONFIG_COUNT: String(start + entries.length) };
+  entries.forEach(([key, value], i) => {
+    out[`GIT_CONFIG_KEY_${start + i}`] = key;
+    out[`GIT_CONFIG_VALUE_${start + i}`] = value;
+  });
+  return out;
+}
+
+/** The daemon's git credential socket while it is bound (W1-T5115 starts it only on an App-configured host). */
+function boundDaemonGitCredentialSocket(config: Config | undefined): string | undefined {
+  if (!config) return undefined;
+  const path = daemonGitCredentialSocketPath(join(config.root, "state"));
+  return existsSync(path) ? path : undefined;
+}
+
 /** The production spawn: detached (a restart leaves it running), niced, stderr and exit kept in the child log. */
 export function childMeasurementCadenceSpawn(opts: {
   entry: string;
@@ -4225,8 +4263,13 @@ export function childMeasurementCadenceSpawn(opts: {
   parentHeapLimitBytes?: () => number;
   spawnChild?: typeof spawn;
   setPriority?: (pid: number, priority: number) => void;
+  /** W1-T14537 seam: the daemon's bound git credential socket. */
+  gitCredentialSocket?: () => string | undefined;
 }): MeasurementCadenceChildSpawn {
   return (runId, statePath) => {
+    const baseEnv = opts.env ?? process.env;
+    const socketPath = (opts.gitCredentialSocket ?? (() => boundDaemonGitCredentialSocket(opts.config)))();
+    const gitCredentialEnv = measurementCadenceChildGitCredentialEnv(baseEnv, socketPath);
     const heapLimitMb = opts.heapLimitMb ?? measurementCadenceChildHeapLimitMb(opts.parentHeapLimitBytes?.());
     const argv = [...(opts.execArgv ?? process.execArgv), `--max-old-space-size=${heapLimitMb}`, opts.entry, MEASUREMENT_CADENCE_CHILD_FLAG, statePath, runId];
     const logPath = measurementCadenceChildLogPath(statePath);
@@ -4240,7 +4283,9 @@ export function childMeasurementCadenceSpawn(opts: {
     try {
       child = (opts.spawnChild ?? spawn)(opts.execPath ?? process.execPath, argv, {
         cwd: opts.cwd,
-        env: opts.config ? { ...(opts.env ?? process.env), [MEASUREMENT_CADENCE_CHILD_CONFIG_ENV]: JSON.stringify(opts.config) } : (opts.env ?? process.env),
+        env: opts.config || socketPath !== undefined
+          ? { ...baseEnv, ...gitCredentialEnv, ...(opts.config ? { [MEASUREMENT_CADENCE_CHILD_CONFIG_ENV]: JSON.stringify(opts.config) } : {}) }
+          : baseEnv,
         detached: true,
         stdio: ["ignore", "ignore", stderrFd ?? "ignore"],
       });

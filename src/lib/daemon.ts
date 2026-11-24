@@ -1,6 +1,7 @@
 import { settledSpansByClass } from "./cost-anomaly.js";
 import { restartCycleLedgerRows, restartCycleRow } from "./restart-cycle.js";
 import { createHash } from "node:crypto";
+import type { DaemonHandoff, HandoffAttempt } from "./daemon-handoff.js";
 import { join } from "node:path";
 import type { LedgerRecord } from "./retro.js";
 import type { ReleaseEvidence } from "./operator-release.js";
@@ -123,7 +124,7 @@ import {
   type StaleReviewerRecurrenceState,
   type StaleReviewerSkipObservation,
 } from "./sweep.js";
-import { PLAN_TASK_MOVE_ACTION, runPlanTaskMoveTick, type PlanTaskMover } from "./plan-task-move-janitor.js";
+import { PLAN_TASK_MOVE_ACTION, planTaskMoveTickPhase, runPlanTaskMoveTick, type PlanTaskMover } from "./plan-task-move-janitor.js";
 // The same cycle-free sweep.ts value edge (W1-T2744).
 import {
   adoptChildWork,
@@ -160,6 +161,9 @@ import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, openDependentFanout, type DispatchValueContext } from "./dispatch-value.js";
+import {
+  DISPATCH_STARVED_STEP, dispatchReadySince, indexStarvationLedger, observeDispatchStarvation, utcDayOf,
+} from "./dispatch-starvation.js";
 import { CLAIM_SILENCE_FLOOR_MS, claimSilenceWindow, dispatchClaimRef, type DispatchClaimListing } from "./dispatch-claim.js";
 import {
   OPS_CATALOG_OUTCOMES, opsCatalogRefusalStage, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome, type OpsCatalogShadowInput,
@@ -289,6 +293,12 @@ export type DaemonStopReason = "stopped" | "blocked" | "max_reached" | "error" |
  * even the type-only return edge here as a cycle. Keep this export canonical for its other callers
  * rather than re-exporting it (W1-T2895). */
 export const DEFAULT_POLL_INTERVAL_MS = 60_000;
+/** W1-T14532: the row a cycle writes when it clears the ops dispatch hold the previous cycle held. */
+export const OPS_CATALOG_HOLD_CLEARED_STEP = "dispatch.ops_catalog_hold_cleared";
+/** W1-T14532: the row a cycle writes when it skips the move tick because an earlier one has not settled. */
+export const PLAN_TASK_MOVE_IN_FLIGHT_STEP = "plan.move.tick_in_flight";
+/** W1-T14532: at most one in-flight row an hour for the same unsettled tick. */
+export const PLAN_TASK_MOVE_IN_FLIGHT_ROW_MS = 60 * 60_000;
 
 export type IntakeRungDecision =
   | { rung: string; fire: true; reason: string }
@@ -684,6 +694,10 @@ export const DAEMON_EXIT_ENVIRONMENTAL = 77;
 /** A positively empty dedicated queue hands control to the zero-token shell supervisor. */
 export const DAEMON_EXIT_IDLE_STARVED = 78;
 
+/** W1-T14546: the daemon handed its run to a standby it started; the entrypoint watches that successor by pid.
+ * Keep deploy/entrypoint-supervise.sh's duplicate in sync: test/entrypoint-boot.test.ts is the falsifier. */
+export const DAEMON_EXIT_HANDED_OFF = 79;
+
 /** Restart at a fraction of V8's reported limit so NODE_OPTIONS changes cannot stale a byte bound.
  * The remaining quarter lets the detecting tick allocate to log and return (W1-T3335).
  * Forensics: docs/forensics/daemon.md. */
@@ -738,7 +752,8 @@ export const PER_TASK_FAILURE_RE = /^W\d+-T[0-9A-Za-z]+: Command failed: /;
  * Reuse entrypoint's 76 arm; a new code needs an image rebuild (W1-T3310, W1-T3319).
  * Task refusals once spent on-failure:5 (2026-09-10; W1-T490, W1-T2537, W1-T2546).
  * Exits 75/76/77 still reach docker after 100 bounded retries: docs/forensics/daemon.md. */
-export function daemonExitCodeForSummary(summary: Pick<DaemonSummary, "stopReason" | "stopDetail">): number {
+export function daemonExitCodeForSummary(summary: Pick<DaemonSummary, "stopReason" | "stopDetail" | "handedOff">): number {
+  if (summary.handedOff) return DAEMON_EXIT_HANDED_OFF;
   if (summary.stopReason !== "error") return daemonExitCode(summary.stopReason);
   const detail = summary.stopDetail;
   if (detail !== undefined && classifyFailure({ text: detail }) === "transient") return DAEMON_EXIT_ENVIRONMENTAL;
@@ -1257,6 +1272,24 @@ export interface ClaimStallInfo {
   refusedTicks: number;
 }
 
+/** W1-T14600: how long a managed-target job may wait for a lane of the core daemon before the operator is paged. A
+ *  BACKSTOP: the lane reservation admits the job; this fires only when that has not happened for an hour. */
+export const TARGET_JOB_STALL_BOUND_MS = 60 * 60_000;
+
+/** W1-T14600: a managed-target job deferred for capacity past {@link TARGET_JOB_STALL_BOUND_MS}, from its first deferral
+ *  in this process. `reason` is the deferral's own: no free lane, the enforced lane target, or the WIP budget. */
+export interface TargetJobStallInfo {
+  taskId: string;
+  origin: string;
+  repo: string;
+  deferredForMs: number;
+  reason: "no free lane" | "lane target" | "wip budget" | "lane reserved by another job";
+  inFlight: number;
+  /** The enforced lane target the deferral read; `null` when no lane governor enforces one. */
+  laneTarget: number | null;
+  wipBudget: number;
+}
+
 /** A claim-passing run (a `dispatch.claim` `created` row) is what ends a stall; the clear names it when known. */
 export interface ClaimStallClearedInfo {
   taskId?: string;
@@ -1358,6 +1391,8 @@ export interface DaemonSummary {
   ticks: number;
   /** Reporting failures after settlement; not proof that a ledger receipt was delivered. */
   reportingFaults?: Array<{ phase: string; detail: string }>;
+  /** W1-T14545: a freshness exit that handed off to a ready standby; the command exits {@link DAEMON_EXIT_HANDED_OFF}. */
+  handedOff?: true;
 }
 
 /** Injectable dependencies — the real command wires GitHub/run-task/usage/locks. */
@@ -1729,6 +1764,9 @@ export interface DaemonDeps {
   onClaimStall?: (info: ClaimStallInfo) => void | Promise<void>;
   /** The cleared half: the first run that passes its claim after the page. Optional, edge-triggered. */
   onClaimStallCleared?: (info: ClaimStallClearedInfo) => void | Promise<void>;
+  /** W1-T14600: a managed-target job deferred for capacity past {@link TARGET_JOB_STALL_BOUND_MS}. Fires once per deferral
+   *  episode in this process (the catalogue entry dedups across boots); a throw costs one row, never the loop. Optional. */
+  onTargetJobStalled?: (info: TargetJobStallInfo) => void | Promise<void>;
   /** W1-T3691 (design v) — called once per stuck sha, the FIRST tick a freshness restart already
    *  requested for this exact code sha reports coming back unchanged: the target looks genuinely
    *  pinned behind origin/main rather than transiently behind it, so this is a "needs a human"
@@ -1779,7 +1817,7 @@ export interface DaemonDeps {
   clearKick?: (taskId: string, repo?: string) => void;
   /** W1-T10799: the repo-scoped kick markers for a MANAGED TARGET with no daemon of its own, which only the core daemon
    *  may service. Never offered to {@link pendingKicks}' consumer, so a foreign marker cannot dispatch a core task. */
-  pendingTargetJobs?: () => Array<DaemonKick & { repo: string }>;
+  pendingTargetJobs?: () => Array<DaemonKick & { repo: string; requestedAt?: string }>;
   /** W1-T10799: runs ONE such job to its terminal verdict, through the maintained drain. The daemon passes its own deps so
    *  the job meets every governor this daemon applies, and awaits it: one job occupies the one reserved lane. A `held` or
    *  `resumed` outcome keeps the marker for a later tick; `ended` and `refused` closed it. */
@@ -1790,6 +1828,8 @@ export interface DaemonDeps {
   /** W1-T11327: read and delete the `RESTART_REQUESTED` marker, consumed once. A defined return asks this process to
    *  leave through its freshness exit (DAEMON_EXIT_STALE), leaving run children for the next boot to adopt. */
   consumeRestartRequest?: () => { origin: string; requestedAt: string; codeSha?: string } | null;
+  /** W1-T14545: a freshness restart hands off to a standby while `state/daemon-handoff.on` exists. Absent: today's exit. */
+  handoff?: DaemonHandoff;
   /** Pending bounded PR repair/review requests recorded by the authenticated console. The daemon
    * consumes at most one per poll and keeps final fix/review authority in its established command
    * path; the HTTP writer never starts a process. */
@@ -5061,6 +5101,16 @@ export async function runDaemon(
   // survives the very process replacement it caused (design v); updated once per tick below from
   // that tick's own `sweepCycleOutcome.reviewerCodeStale` reading.
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
+  // W1-T14490: a ready task ranked below the lanes it would fill is named once per UTC day, after the pick is final.
+  const starvationLedger = indexStarvationLedger(bootLedgerLines);
+  const logDispatchStarvation = (eligible: readonly Task[], picked: readonly Task[], context: DispatchValueContext | undefined) => {
+    const nowMs = daemonClock.now();
+    for (const row of observeDispatchStarvation({ eligible, picked, nowMs, lastRowDayById: starvationLedger.lastRowDayById,
+      readySinceById: dispatchReadySince(eligible, context, nowMs, starvationLedger.mergedAtById) })) {
+      starvationLedger.lastRowDayById.set(row.task, utcDayOf(nowMs));
+      log(DISPATCH_STARVED_STEP, { ...row });
+    }
+  };
   // W1-T13248: a page left open by an earlier process (a marker row in the boot read) keeps its close armed.
   claimStallCloseArmed = bootLedgerLines.some((raw) => raw.includes("dispatch.claim_stall.escalated"));
   const restartLedger =restartCycleLedgerRows(bootLedgerLines);
@@ -5456,6 +5506,31 @@ export async function runDaemon(
   const hasChildTask = (id: string): boolean => childTaskIds().includes(id);
   // W1-T10000: a run waiting for its child's admission is out-of-process work too; the restart abandons it.
   const pendingChildren = new Map<string, RunChildPending & { sinceMs: number }>();
+  // W1-T14576: a child leaves `children` only inside the lane pool, which a waiting native target job never reaches, so the
+  // target-job gate counts the children whose run has not settled. Watching a child never consumes or reorders its outcome.
+  const watchedChildren = new WeakSet<AdoptedRunChild>();
+  const settledChildren = new WeakSet<AdoptedRunChild>();
+  const unsettledChildCount = (): number => {
+    for (const child of children.values()) {
+      if (watchedChildren.has(child)) continue;
+      watchedChildren.add(child);
+      const settle = () => { settledChildren.add(child); };
+      void Promise.resolve(child.settled).then(settle, settle);
+    }
+    return [...children.values()].filter((child) => !settledChildren.has(child)).length;
+  };
+  // W1-T14576: a waiting target job's `target_job.capacity_deferred` row, at most once a minute per job, with its age.
+  const targetJobDeferrals = new Map<string, { firstMs: number; loggedMs?: number }>();
+  const logTargetJobDeferral = (job: DaemonKick & { repo: string; requestedAt?: string }, extra: Record<string, unknown>): void => {
+    const nowMs = daemonClock.now();
+    const seen = targetJobDeferrals.get(job.origin) ?? { firstMs: nowMs };
+    targetJobDeferrals.set(job.origin, seen);
+    if (seen.loggedMs !== undefined && nowMs - seen.loggedMs < TARGET_JOB_DEFERRAL_LOG_INTERVAL_MS) return;
+    seen.loggedMs = nowMs;
+    const requestedMs = job.requestedAt === undefined ? Number.NaN : Date.parse(job.requestedAt);
+    const sinceMs = Number.isFinite(requestedMs) ? Math.min(requestedMs, seen.firstMs) : seen.firstMs;
+    log("target_job.capacity_deferred", { task: job.taskId, origin: job.origin, repo: job.repo, ...extra, age_ms: Math.max(0, nowMs - sinceMs) });
+  };
   const pauseInFlightCensus = (): { units: PauseInFlightUnit[]; count: number; oldestAgeMs: number | null; unobserved: string[] } => {
     const nowMs = daemonClock.now();
     const units: PauseInFlightUnit[] = [];
@@ -5629,11 +5704,18 @@ export async function runDaemon(
   };
   const opsDispatchContexts = new WeakMap<Plan, OpsDispatchContext>();
   let lastOpsDispatchHold: string | undefined;
+  // W1-T14532: when this process last launched a move tick, and when it last said a tick was still in flight.
+  let planTaskMoveTickStartedAtMs: number | undefined;
+  let planTaskMoveInFlightRowAtMs: number | undefined;
+  // W1-T14536: the phase the last in-flight row named.
+  let planTaskMoveInFlightRowPhase: string | undefined;
+  /** The label a hold is recorded and handed on under: a known outcome as itself, anything else selection_unreadable. */
+  const opsDispatchHoldLabel = (reason: string): string => OPS_CATALOG_OUTCOMES.includes(reason as OpsCatalogOutcome) ||
+    ["selection_unreadable", "selection_changed", "invalid_dispatch_flag", "source_pending", "source_identity_unknown",
+      "primary_revision_unknown", "duplicate_task_id", "invalid_cross_catalog_dependency", "malformed"].includes(reason)
+    ? reason : "selection_unreadable";
   const holdOpsDispatch = (reason: string, observation: OpsTaskDispatchRead, record?: CompositionRecordFailure): void => {
-    const safeReason = OPS_CATALOG_OUTCOMES.includes(reason as OpsCatalogOutcome) ||
-      ["selection_unreadable", "selection_changed", "invalid_dispatch_flag", "source_pending", "source_identity_unknown",
-        "primary_revision_unknown", "duplicate_task_id", "invalid_cross_catalog_dependency", "malformed"].includes(reason)
-      ? reason : "selection_unreadable";
+    const safeReason = opsDispatchHoldLabel(reason);
     const stage = opsCatalogRefusalStage(observation.outcome === "off" ? undefined : observation.source);
     let revision: string | undefined;
     try {
@@ -5652,6 +5734,17 @@ export async function runDaemon(
         ...(record === undefined ? {} : { field: record.field, side: record.side }) });
     } catch (error) { void error; /* A diagnostic failure cannot authorize ops work or stop public selection. */ }
     lastOpsDispatchHold = signature;
+  };
+  // W1-T14532: a hold that clears writes one row naming the hold it clears; a cycle that held nothing writes none, so
+  // a hold that never clears and one that cleared silently no longer read the same in the ledger.
+  const clearOpsDispatchHold = (): void => {
+    if (lastOpsDispatchHold === undefined) return;
+    let cleared = "unknown";
+    try { cleared = String((JSON.parse(lastOpsDispatchHold) as unknown[])[0]); }
+    catch (error) { void error; /* An unreadable signature still clears; the row names it unknown. */ }
+    lastOpsDispatchHold = undefined;
+    try { log(OPS_CATALOG_HOLD_CLEARED_STEP, { outcome: cleared }); }
+    catch (error) { void error; /* The hold clears either way; only the diagnostic is lost. */ }
   };
   /** W1-T13681: why ops dispatch is held this iteration (the hold's own outcome label), or undefined while it is not. */
   const opsDispatchHoldReason = (): string | undefined => deps.readOpsTaskDispatch === undefined ? "ops_dispatch_unwired"
@@ -5684,36 +5777,73 @@ export async function runDaemon(
       return { outcome: "unavailable", reason: "selection_unreadable" };
     }
   };
+  /** W1-T14584: what a read observation means for ops dispatch, the hold or the composed plan, recording nothing. */
+  const judgeOpsDispatch = (primary: Plan, observation: Exclude<OpsTaskDispatchRead, { outcome: "off" }>):
+    { held: string; record?: CompositionRecordFailure } |
+    { held?: undefined; source: OpsCatalogShadowInput; publicCommit: string;
+      composition: Extract<ReturnType<typeof composeSecondaryPlan>, { outcome: "ok" }> } => {
+    if (observation.outcome === "unavailable") return { held: observation.reason };
+    const input = observation.source;
+    if (input.outcome !== "ok" || input.plan === undefined) return { held: input.outcome === "ok" ? "source_identity_unknown" : input.outcome };
+    if (!CATALOG_COMMIT.test(observation.publicCommit)) return { held: "primary_revision_unknown" };
+    if (typeof input.opsCommit !== "string" || !CATALOG_COMMIT.test(input.opsCommit) ||
+      typeof input.identityDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.identityDigest)) return { held: "source_identity_unknown" };
+    const composition = composeSecondaryPlan(primary, input.plan);
+    if (composition.outcome !== "ok") return { held: composition.outcome, record: composition.field === undefined ? undefined : composition };
+    return { source: input, publicCommit: observation.publicCommit, composition };
+  };
   const captureOpsDispatchPlan = (primary: Plan): { plan: Plan; observation: OpsTaskDispatchRead } => {
     const observation = readOpsDispatch(primary);
-    if (observation.outcome === "off") { lastOpsDispatchHold = undefined; return { plan: primary, observation }; }
-    if (observation.outcome === "unavailable") {
-      holdOpsDispatch(observation.reason, observation);
+    if (observation.outcome === "off") { clearOpsDispatchHold(); return { plan: primary, observation }; }
+    const judged = judgeOpsDispatch(primary, observation);
+    if (judged.held !== undefined) {
+      holdOpsDispatch(judged.held, observation, judged.record);
       return { plan: primary, observation };
     }
-    const input = observation.source;
-    if (input.outcome !== "ok" || input.plan === undefined) {
-      holdOpsDispatch(input.outcome === "ok" ? "source_identity_unknown" : input.outcome, observation);
-      return { plan: primary, observation };
-    }
-    if (!CATALOG_COMMIT.test(observation.publicCommit)) {
-      holdOpsDispatch("primary_revision_unknown", observation); return { plan: primary, observation };
-    }
-    if (typeof input.opsCommit !== "string" || !CATALOG_COMMIT.test(input.opsCommit) ||
-      typeof input.identityDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.identityDigest)) {
-      holdOpsDispatch("source_identity_unknown", observation); return { plan: primary, observation };
-    }
-    const composition = composeSecondaryPlan(primary, input.plan);
-    if (composition.outcome !== "ok") {
-      holdOpsDispatch(composition.outcome, observation, composition.field === undefined ? undefined : composition);
-      return { plan: primary, observation };
-    }
-    lastOpsDispatchHold = undefined;
+    const { composition } = judged;
+    clearOpsDispatchHold();
     // W1-T13749: a bad edge holds its own task and its dependants; every other task dispatches from the composed plan.
     noteOpsTaskHolds(composition.held);
-    opsDispatchContexts.set(composition.plan, { publicPlan: primary, publicCommit: observation.publicCommit,
-      source: input, opsIds: composition.secondaryIds });
+    opsDispatchContexts.set(composition.plan, { publicPlan: primary, publicCommit: judged.publicCommit,
+      source: judged.source, opsIds: composition.secondaryIds });
     return { plan: composition.plan, observation };
+  };
+  /** W1-T14584: the hold a dispatch tick hands its janitor tick, read fresh from the cached ops snapshot against `primary`:
+   *  the label captureOpsDispatchPlan would record, without its row, its recorded hold or its composed plan. */
+  const freshOpsDispatchHoldReason = (primary: Plan): string | undefined => {
+    if (deps.readOpsTaskDispatch === undefined) return "ops_dispatch_unwired";
+    const observation = readOpsDispatch(primary);
+    if (observation.outcome === "off") return undefined;
+    const { held } = judgeOpsDispatch(primary, observation);
+    return held === undefined ? undefined : opsDispatchHoldLabel(held);
+  };
+  // W1-T13681 + W1-T14584: at most one move-task tick in flight, started from a cycle's top or a dispatch tick; the hold is
+  // read only when a tick starts, and a start never gates dispatch.
+  const startPlanTaskMoveTick = (readHold: () => string | undefined): void => {
+    if (!deps.planTaskMover) return;
+    if (!detachedActionInFlight(PLAN_TASK_MOVE_ACTION)) {
+      planTaskMoveTickStartedAtMs = daemonClock.now();
+      planTaskMoveInFlightRowAtMs = undefined;
+      planTaskMoveInFlightRowPhase = undefined;
+      detachSweepAction(runPlanTaskMoveTick({ opsDispatchHold: readHold(), log, startedAtMs: planTaskMoveTickStartedAtMs },
+        deps.planTaskMover), { actionKind: PLAN_TASK_MOVE_ACTION, taskId: "DAEMON" });
+      return;
+    }
+    // W1-T14532: a tick that never settles holds every later one; say so, with its age, at most once an hour.
+    // W1-T14536: the row names the phase the tick is in, and a change of phase writes one more.
+    const nowMs = daemonClock.now();
+    const phase = planTaskMoveTickPhase(deps.planTaskMover);
+    if (planTaskMoveInFlightRowAtMs === undefined || nowMs - planTaskMoveInFlightRowAtMs >= PLAN_TASK_MOVE_IN_FLIGHT_ROW_MS ||
+      (phase !== undefined && phase !== planTaskMoveInFlightRowPhase)) {
+      planTaskMoveInFlightRowAtMs = nowMs;
+      planTaskMoveInFlightRowPhase = phase;
+      try {
+        log(PLAN_TASK_MOVE_IN_FLIGHT_STEP, {
+          phase: phase ?? null,
+          age_ms: planTaskMoveTickStartedAtMs === undefined ? null : Math.max(0, nowMs - planTaskMoveTickStartedAtMs),
+        });
+      } catch (error) { void error; /* The skip stands either way; only the diagnostic is lost. */ }
+    }
   };
   const opsAdmissionStillCurrent = (task: Task, snapshot: Plan): boolean => {
     const captured = opsDispatchContexts.get(snapshot);
@@ -6326,6 +6456,8 @@ export async function runDaemon(
   // One stale-exit path for both freshness boundaries. Both must preserve the same install, bounded pass, named
   // ledger and stale summary contract; duplicating that sequence would let them drift (W1-T2845).
   let preparedFreshnessExit: Promise<FreshnessPass> | undefined;
+  // W1-T14545: started with the exit's preparation, so the standby boots while this daemon drains.
+  let handoffStart: Promise<HandoffAttempt | undefined> | undefined;
   let advanceEvidence: { stale_since_ms: number; last_pass_completed_ms: number | null } | undefined;
   const prepareFreshnessExit = async (
     freshness: Extract<DaemonFreshness, { stale: true }>,
@@ -6333,6 +6465,7 @@ export async function runDaemon(
     advanceSinceMs?: number,
   ): Promise<FreshnessPass> => {
     closeDirectMergeAdmissions("freshness_exit");
+    if (deps.handoff?.enabled()) handoffStart ??= deps.handoff.begin(freshness.newSha);
     // Install BEFORE the loop stops, so the relaunched process inherits deps matching the new sha (W1-T151).
     if (freshness.installNeeded) {
       deps.runInstall?.();
@@ -6376,6 +6509,9 @@ export async function runDaemon(
     freshness: Extract<DaemonFreshness, { stale: true }>, dispatchLatchAtMs?: number, advanceSinceMs?: number,
   ): Promise<DaemonSummary> => {
     const preExitPass = await (preparedFreshnessExit ??= prepareFreshnessExit(freshness, dispatchLatchAtMs, advanceSinceMs));
+    // W1-T14545: the drain is done; a ready standby takes over, and anything else is today's exit.
+    const handoff = handoffStart ? await handoffStart : undefined;
+    const handedOff = handoff ? await handoff.ready() : false;
     const requested = freshness.restartRequest;
     const detail = requested
       ? `restart in place requested by ${requested.origin} at ${requested.requestedAt}`
@@ -6391,6 +6527,11 @@ export async function runDaemon(
     log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha, pre_exit_pass: preExitPass,
       ...(advanceSinceMs !== undefined && advanceEvidence ? advanceEvidence : {}),
       ...(sweepEndedEarly ? { sweep_ended_early: true } : {}) });
+    if (handoff && handedOff) {
+      const handedOffSummary = await summary("stale", `${detail}; handed off to standby ${handoff.runId}`);
+      handoff.yieldTo([...children.values()].map((child) => child.runId));
+      return { ...handedOffSummary, handedOff: true };
+    }
     return summary("stale", detail);
   };
   // W1-T11327: a RESTART_REQUESTED marker is a freshness decision with no advance, so it skips scoring, coalescing and
@@ -7537,6 +7678,11 @@ export async function runDaemon(
   releaseGatedCadences = (): void => { if (gatedCadencesReleased()) startDueRungsTimer(); };
 
   const tickMemory = { sampled: false };
+  // W1-T14600: the lane a capacity-deferred target job waits for, set for one tick only; and the pending
+  // jobs already paged in their current deferral episode (its start is `targetJobDeferrals`' firstMs).
+  let reservedForTargetJob: { origin: string } | undefined;
+  const targetJobReserve = (): number => (reservedForTargetJob ? 1 : 0);
+  const targetJobStallPaged = new Set<string>();
   for (;;) {
     tickLedgerActive = restartCyclePending;
     tickLedger = undefined;
@@ -7556,6 +7702,7 @@ export async function runDaemon(
     retroWatch.observe(tickStartedAtMs);
     resetIdleLaneTick();
     spendGatesOpen = false;
+    reservedForTargetJob = undefined;
 
     if (opts.max !== undefined && attempted.length >= opts.max) {
       return summary("max_reached", `${opts.max} task(s)`);
@@ -7763,11 +7910,8 @@ export async function runDaemon(
       planForBatch = captured.plan;
       opsDispatchObservation = captured.observation;
     }
-    // W1-T13681: at most one move-task tick in flight, detached after this iteration's ops hold is read; never gates dispatch.
-    if (deps.planTaskMover && !detachedActionInFlight(PLAN_TASK_MOVE_ACTION)) {
-      detachSweepAction(runPlanTaskMoveTick({ opsDispatchHold: opsDispatchHoldReason(), log }, deps.planTaskMover),
-        { actionKind: PLAN_TASK_MOVE_ACTION, taskId: "DAEMON" });
-    }
+    // W1-T13681: the move-task tick, detached after this iteration's ops hold is read.
+    startPlanTaskMoveTick(opsDispatchHoldReason);
     const isMerged = deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch);
     for (const taskId of pendingMergedCredit) {
       if (!isMerged(taskId)) continue;
@@ -8409,6 +8553,7 @@ export async function runDaemon(
     }, planForBatch));
     if (tickLedgerLines !== undefined) {
       const lines = tickLedgerLines;
+      indexStarvationLedger(lines, starvationLedger);
       for (const [taskId, deferral] of claimHeldDeferrals) {
         if (claimDroppedSince(lines, deferral.ref, deferral.sinceMs)) claimHeldDeferrals.delete(taskId);
       }
@@ -8463,26 +8608,58 @@ export async function runDaemon(
       }
     }
 
-    // W1-T10799: a managed target with no daemon of its own runs ONE bounded job here, in the lane this daemon
-    // reserves for it. Core's own kick has priority, a busy lane or a zero enforced lane target defers the job
-    // explicitly, and a second request in the same tick defers behind the first: this adds no capacity.
+    // W1-T10799: a managed target with no daemon of its own runs ONE bounded job here, in a lane of this daemon's shared
+    // lane and WIP accounting. Core's own kick has priority, and a second request in the same tick defers behind the first:
+    // this adds no capacity. W1-T14600: the job is admitted when a lane is free under min(lane target, WIP budget), the
+    // expression core budgets itself by; only a job that dispatched ends the tick, so a deferred, held or resumed job lets
+    // core selection run. A job waiting only for a free lane has one reserved for it this tick, and one deferred past the
+    // stall bound pages the operator once.
     if (!forcedNext && deps.pendingTargetJobs && deps.runTargetJob) {
-      let pending: Array<DaemonKick & { repo: string }>;
+      let pending: Array<DaemonKick & { repo: string; requestedAt?: string }> = [];
+      let pendingRead = true;
       try { pending = deps.pendingTargetJobs(); }
       catch (error) {
+        pendingRead = false;
         log("target_job.unknown", { reason: `durable jobs unreadable: ${String(error)}` });
-        ticks++;
-        await sleepUntilSweepWake(pollIntervalMs);
-        continue;
+      }
+      if (pendingRead) {
+        const isPending = (origin: string): boolean => pending.some((job) => job.origin === origin);
+        for (const origin of targetJobDeferrals.keys()) if (!isPending(origin)) targetJobDeferrals.delete(origin);
+        for (const origin of targetJobStallPaged) if (!isPending(origin)) targetJobStallPaged.delete(origin);
       }
       const [job, ...waiting] = pending;
       if (job) {
-        const laneTarget = enforcedLaneTarget(children.size, tickQueueAdmission?.wipLimit);
+        // W1-T14576: the job takes a FREE lane under the same limit core's own dispatch uses, never only an empty daemon.
+        const inFlight = unsettledChildCount();
+        const laneTarget = enforcedLaneTarget(inFlight, tickQueueAdmission?.wipLimit);
         const wipBudget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission });
-        if (children.size > 0 || laneTarget < 1 || wipBudget < 1) {
-          log("target_job.capacity_deferred", { task: job.taskId, origin: job.origin, repo: job.repo, in_flight: children.size });
+        const sharedLanes = Math.min(laneCount, wipBudget, laneTarget);
+        const lanePayload = { lane_target: Number.isFinite(laneTarget) ? laneTarget : null, wip_budget: wipBudget };
+        // W1-T14600: every deferral counts toward the stall bound from the job's first deferral in this process, whether
+        // or not its (throttled) row is written; past the bound the operator is paged once for the episode.
+        const deferJob = async (kick: DaemonKick & { repo: string; requestedAt?: string }, reason: TargetJobStallInfo["reason"]): Promise<void> => {
+          const nowMs = daemonClock.now();
+          const deferredForMs = nowMs - (targetJobDeferrals.get(kick.origin)?.firstMs ?? nowMs);
+          logTargetJobDeferral(kick, { in_flight: inFlight, reason, deferred_for_ms: deferredForMs, ...lanePayload });
+          if (deferredForMs < TARGET_JOB_STALL_BOUND_MS || targetJobStallPaged.has(kick.origin)) return;
+          targetJobStallPaged.add(kick.origin);
+          const info: TargetJobStallInfo = { taskId: kick.taskId, origin: kick.origin, repo: kick.repo, deferredForMs, reason,
+            inFlight, laneTarget: lanePayload.lane_target, wipBudget };
+          log("target_job.stalled", { task: info.taskId, origin: info.origin, repo: info.repo, deferred_for_ms: deferredForMs, reason,
+            in_flight: inFlight, ...lanePayload });
+          // The same backstop discipline as onClaimStall: a failed notification costs one row, never the loop.
+          try { await deps.onTargetJobStalled?.(info); }
+          catch (error) { log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) }); }
+        };
+        if (sharedLanes - inFlight < 1) {
+          const reason = sharedLanes >= 1 ? "no free lane" : laneTarget < 1 ? "lane target" : "wip budget";
+          // A lane core may use is never held for a job the lane target or the WIP budget defers.
+          if (reason === "no free lane") reservedForTargetJob = { origin: job.origin };
+          await deferJob(job, reason);
         } else {
-          for (const other of waiting) log("target_job.capacity_deferred", { task: other.taskId, origin: other.origin, repo: other.repo, reason: "lane reserved by another job" });
+          for (const other of waiting) await deferJob(other, "lane reserved by another job");
+          targetJobDeferrals.delete(job.origin);
+          targetJobStallPaged.delete(job.origin);
           let closed = false;
           let charged = false;
           try { closed = ["ended", "refused"].includes((await deps.runTargetJob(job, deps, () => {
@@ -8492,11 +8669,14 @@ export async function runDaemon(
           })).state); }
           catch (e) { log("target_job.error", { task: job.taskId, origin: job.origin, repo: job.repo, error: String((e as Error)?.message ?? e) }); }
           if (closed) continue;
+          // Dispatched and still open: the job spent this tick's lane, and the loop paces itself rather than re-reading
+          // the marker at once. Held or resumed without a dispatch, it spent nothing, and core selection runs below.
+          if (charged) {
+            ticks++;
+            await sleepUntilSweepWake(pollIntervalMs);
+            continue;
+          }
         }
-        // Held, resumed or deferred: the marker stays, and the loop paces itself rather than re-reading it at once.
-        ticks++;
-        await sleepUntilSweepWake(pollIntervalMs);
-        continue;
       }
     }
 
@@ -8724,7 +8904,8 @@ export async function runDaemon(
         : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit,
           openPrCount: tickTiming.probe("openPrCount", () => deps.openPrCount?.()), queueAdmission: tickQueueAdmission });
       const tickLaneTarget = enforcedLaneTarget(occupiedTasks.length, tickQueueAdmission?.wipLimit);
-      const budget = Math.max(0, Math.min(wipBudget, tickLaneTarget) - occupiedTasks.length);
+      // W1-T14600: a lane held for a capacity-deferred target job is one core does not fill this tick.
+      const budget = Math.max(0, Math.min(wipBudget, tickLaneTarget) - occupiedTasks.length - targetJobReserve());
       if (laneCount >= 2 && budget <= 0) {
         // Mirrors `runDrainLanes`' own WIP-deferred row: runnable work may exist, held back by the governor
         // rather than absent, which is distinct from an ordinary idle tick. Never reached at one lane.
@@ -8736,6 +8917,7 @@ export async function runDaemon(
           wip_limit: opts.wipLimit ?? null,
           observed_open_count: tickTiming.probe("openPrCount", () => deps.openPrCount?.()) ?? null,
           ...wipDeferredAdmissionFields(tickQueueAdmission),
+          ...(reservedForTargetJob ? { reserved_for_target_job: reservedForTargetJob.origin } : {}),
         });
       }
       const frontierOpts = {
@@ -8827,6 +9009,16 @@ export async function runDaemon(
     } else if (deps.checkAutoTriage) {
       lastAutoTriageSignals = [autoTriageSignals];
       autoTriageCadence.owe(autoTriageSignals);
+    }
+
+    // W1-T14600: a tick holding a lane for a target job admitted no new core task (its budget left that lane free). The
+    // lane pool would await every in-flight lane before the next tick, so the job would wait for the slowest; the tick
+    // paces instead, and the next one admits the job as soon as one in-flight child has settled.
+    if (reservedForTargetJob && dispatchSet.length === 0) {
+      await flushLifetimePressure();
+      ticks++;
+      await sleepUntilSweepWake(pollIntervalMs);
+      continue;
     }
 
     dispatchSet.unshift(...occupiedTasks);
@@ -9497,8 +9689,12 @@ export async function runDaemon(
       // A paused pass grows nothing: the grow writes the refill path's own pause hold.
       if (deps.checkPause?.()) return growIdleLanes();
       // W1-T11327: a requested restart releases child lanes and awaits in-process ones, as a decided restart does.
-      const requestedRestart = restartDecided || deps.checkStop?.() ? undefined : takeRestartRequest("dispatch_tick");
+      const leaving = Boolean(restartDecided || deps.checkStop?.());
+      const requestedRestart = leaving ? undefined : takeRestartRequest("dispatch_tick");
       if (requestedRestart) decideRestart(requestedRestart);
+      // W1-T14584: a cycle can last hours, so a busy one's dispatch tick starts the move janitor too, unless it is
+      // paused (above), stopping or restarting; its hold is read fresh against the live plan binding, recording nothing.
+      if (!leaving && !restartDecided) startPlanTaskMoveTick(() => freshOpsDispatchHoldReason(plan));
       // The light sweep reads this live binding; admitted workers retain their captured planForBatch.
       // W1-T13695: the grow decides after this tick's restart, freshness and plan reload were read.
       const reload = (): void | Promise<void> => {
@@ -9618,6 +9814,7 @@ export async function runDaemon(
         ...(restartDecided ? { restart_decided: true } : {}) });
       if (isRefill) log("dispatch.pick_scored", dispatchPickPayload(task, "lane-refill", refill!.eligible, refill!.context,
         [task], [...inFlightTasks].filter(t => t !== task), deps.observedByTask ?? NO_OBSERVED_SCOPE));
+      if (isRefill) logDispatchStarvation(refill!.eligible, [task], refill!.context);
       log("daemon.iteration", { task: task.id, attempted: attempted.length, max: opts.max ?? null,
         ...(resumableHandoffs.has(task.id) ? { resumes_handoff: resumableHandoffs.get(task.id)!.branch } : {}) });
       // The first wave is sampled once, by the tick (below): a refill is the lane change.
@@ -9677,6 +9874,7 @@ export async function runDaemon(
         const tickStarted = admitted.filter(t => !occupiedChildren.has(t));
         for (const task of tickStarted) log("dispatch.pick_scored", dispatchPickPayload(task, "tick", tickEligible,
           tickContext, tickStarted, occupiedTasks, deps.observedByTask ?? NO_OBSERVED_SCOPE));
+        logDispatchStarvation(tickEligible, tickStarted, tickContext);
         if (dispatchSet.length > 1 && admitted.length > 0) {
           log("dispatch.concurrent_set", { tasks: admitted.map((t) => t.id), lane_count: laneCount });
         }
@@ -10098,6 +10296,9 @@ export type BoundedTargetJobOutcome =
   | { state: "ended" | "refused"; reason: string; replayed: boolean }
   | { state: "held" | "resumed"; reason: string };
 
+/** W1-T14576: the shortest gap between two `target_job.capacity_deferred` rows for one waiting job. */
+export const TARGET_JOB_DEFERRAL_LOG_INTERVAL_MS = 60_000;
+
 /** The drain stop reasons that mean the core daemon's own governors declined, not that the task is unrunnable. */
 const CAPACITY_STOPS: ReadonlySet<StopReason> = new Set<StopReason>([
   "headroom_exhausted", "headroom_degraded", "cost_governor_deferred", "queue_governor_deferred", "memory_governor_deferred",
@@ -10159,6 +10360,12 @@ export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: Boun
   if (!task) return refuse(prior, "unknown task id");
   if (task.repo.toLowerCase() !== repo.toLowerCase()) return refuse(prior, "task repository conflicts with verified target");
   const identity = { owner: admission.owner, planRevision: planSha(synced.plan.tasks) };
+  // W1-T14576: the target's dispatch claim is the one its own instance takes too. A held claim means another runner owns
+  // the task, so this job closes rather than spending beside it; an unreadable claim is never free. Run-task's atomic
+  // claim reservation still refuses a race that starts after this read.
+  const claim = await deps.claimHeld(taskId, repo);
+  if (claim === undefined) return held("dispatch claim unreadable", "target_job.unknown");
+  if (claim) return refuse(prior, `${taskId} is already claimed on ${repo}; the claim's runner owns the task`);
 
   // One task, depth 1, max 1, one lane: the job can never re-enter the target plan's other tasks.
   const opts = applyCuratedSelection({ ...baseOpts, laneCount: 1, wipLimit: 1 }, { taskIds: [taskId], depth: 1 });

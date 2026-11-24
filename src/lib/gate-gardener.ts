@@ -488,15 +488,24 @@ interface DefuseJudge {
 // Loaded from the orchestrator's own checkout when a defuse runs, never at import (sandboxes copy only src/).
 const loadDefuseJudge = (): DefuseJudge => createRequire(import.meta.url)("../../scripts/pure-test-pool.mjs") as DefuseJudge;
 
-export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, options: ShiftedSuiteOptions & { measure: true }): ShiftedSuiteMeasurement;
-export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, options?: ShiftedSuiteOptions & { measure?: false }): boolean;
-/** Shared runner: measured TAP counts prove a crossing (W1-T7812) only when the named file
- *  reaches its own summary (W1-T8380). A partial exit 0 reaches no verdict. */
-export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, {
-  execFile = execFileSync,
-  measure = false,
-}: ShiftedSuiteOptions & { measure?: boolean } = {}): ShiftedSuiteMeasurement | boolean {
-  readFileSync(resolve(repoRoot, file)); // Node can report a green wrapper for a missing test path.
+/** Per-file `test:summary` counts, and top-level failures of a file's own child, one JSON line each. */
+const PER_FILE_REPORTER = `data:text/javascript;base64,${Buffer.from(`export default async function* (source) {
+  for await (const event of source) {
+    const data = event.data ?? {};
+    if (typeof data.file !== "string") continue;
+    if (event.type === "test:summary") yield JSON.stringify({ file: data.file, counts: data.counts }) + "\\n";
+    else if (event.type === "test:fail" && data.nesting === 0) yield JSON.stringify({ file: data.file, failed: data.name }) + "\\n";
+  }
+}
+`).toString("base64")}`;
+const PER_FILE_COUNTS = "per-file.ndjson";
+
+/** One shifted `node --test` child over `files` in a private TMPDIR: its exit status and TAP output, and what the
+ *  test judge's files and the per-file reporter's destination held when it ended. TAP is always the first reporter;
+ *  `reporters` adds any more, each with its destination. */
+function runShiftedChild(repoRoot: string, files: readonly string[], shiftDays: number, reporters: (privateRoot: string) => string[],
+  runChild: NonNullable<ShiftedSuiteOptions["execFile"]>) {
+  for (const file of files) readFileSync(resolve(repoRoot, file)); // Node can report a green wrapper for a missing test path.
   const privateRoot = mkdtempSync(join(tmpdir(), "rmd-shifted-suite-"));
   try {
     const judge = loadDefuseJudge();
@@ -508,8 +517,8 @@ export function runSuiteShifted(repoRoot: string, file: string, shiftDays: numbe
     const env: NodeJS.ProcessEnv = { ...process.env, FK_SHIFT_DAYS: String(shiftDays), TMPDIR: privateRoot };
     delete env.RMD_SELF_SYNC_DONE; // the test setup refuses to load under it (W1-T3069)
     delete env.NODE_TEST_CONTEXT; // inherited from a parent `node --test`, it makes this run report nothing and exit 0
-    const args = judge.judgedNodeTestArgs(["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", file], judged.args);
-    // Niced and bounded (test-slot.ts), but no host-wide slot: one file, and a gardener pass must not queue behind coverage.
+    const args = judge.judgedNodeTestArgs(["--test", "--test-reporter=tap", ...reporters(privateRoot), "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", ...files], judged.args);
+    // Niced and bounded (test-slot.ts), but no host-wide slot: one run, and a gardener pass must not queue behind coverage.
     const load = readHostLoad();
     const child = lowPriorityCommand(process.execPath, testRunArgv(args, testRunConcurrency(load, defaultTestSlots(load.cores))));
     const childEnv: NodeJS.ProcessEnv = { ...env, ...judged.env };
@@ -523,41 +532,98 @@ export function runSuiteShifted(repoRoot: string, file: string, shiftDays: numbe
     let output: string;
     let status = 0;
     try {
-      output = execFile(child.file, child.args, { cwd: repoRoot, env: childEnv, encoding: "utf8", stdio: "pipe", timeout: DEFUSE_RUN_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 });
+      output = runChild(child.file, child.args, { cwd: repoRoot, env: childEnv, encoding: "utf8", stdio: "pipe", timeout: DEFUSE_RUN_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 });
     } catch (error) {
       const failure = error as { status?: unknown; signal?: unknown; stdout?: string | Buffer };
       if (typeof failure.status !== "number" || failure.status === 0 || failure.signal) throw error;
       status = failure.status;
       output = String(failure.stdout ?? "");
     }
+    const label = files.length === 1 ? files[0]! : `of ${files.length} files`;
     const count = (name: string): number => {
       const match = new RegExp(`^# ${name} (\\d+)\\s*$`, "m").exec(output);
-      if (!match) throw new Error(`shifted suite ${file}: no # ${name} TAP summary`);
+      if (!match) throw new Error(`shifted suite ${label}: no # ${name} TAP summary`);
       const value = Number(match[1]);
-      if (!Number.isSafeInteger(value)) throw new Error(`shifted suite ${file}: invalid # ${name} TAP count`);
+      if (!Number.isSafeInteger(value)) throw new Error(`shifted suite ${label}: invalid # ${name} TAP count`);
       return value;
     };
-    const tests = count("tests"), pass = count("pass"), fail = count("fail"), cancelled = count("cancelled");
-    const skipped = count("skipped"), todo = count("todo");
-    if (tests === 0 || cancelled > 0 || pass + fail === 0 || tests !== pass + fail + cancelled + skipped + todo || (status !== 0 && fail === 0) || (status === 0 && fail > 0)) {
-      throw new Error(`shifted suite ${file}: incomplete TAP verdict (exit ${status}, tests ${tests}, pass ${pass}, fail ${fail}, cancelled ${cancelled})`);
-    }
-    const wrapper = `# Subtest: ${relative(repoRoot, resolve(repoRoot, file))}`;
-    if (!output.split("\n").some((line) => line.startsWith("# Subtest: ") && line !== wrapper)) {
-      throw new Error(`shifted suite ${file}: no named tests in TAP verdict`);
-    }
-    const verdict = judge.judgeRun([file], { status, pool: false, root: repoRoot, ...judged.read() });
-    if (verdict.tests !== tests || verdict.failed !== fail) {
-      throw new Error(`shifted suite ${file}: TAP counts disagree with the end-of-run tally (tests ${verdict.tests}, fail ${verdict.failed})`);
-    }
-    if (!verdict.complete && (status === 0 || verdict.reported !== verdict.given)) {
-      throw new Error(`the run reaches no verdict: ${judge.describeJudgedRun("defuse", verdict, { prefix: "test-judge" })}`);
-    }
-    const measurement = { passed: status === 0, pass, tests };
-    return measure ? measurement : measurement.passed;
+    const tap = { tests: count("tests"), pass: count("pass"), fail: count("fail"), cancelled: count("cancelled"), skipped: count("skipped"), todo: count("todo") };
+    const verdict = judge.judgeRun(files, { status, pool: false, root: repoRoot, ...judged.read() });
+    const agree = (): void => {
+      if (verdict.tests !== tap.tests || verdict.failed !== tap.fail) {
+        throw new Error(`shifted suite ${label}: TAP counts disagree with the end-of-run tally (tests ${verdict.tests}, fail ${verdict.failed})`);
+      }
+    };
+    // Read before the private root goes: a reporter destination lives in it.
+    const kept = existsSync(join(privateRoot, PER_FILE_COUNTS)) ? readFileSync(join(privateRoot, PER_FILE_COUNTS), "utf8") : "";
+    return { judge, status, output, tap, verdict, agree, perFileCounts: kept };
   } finally {
     rmSync(privateRoot, { recursive: true, force: true });
   }
+}
+
+export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, options: ShiftedSuiteOptions & { measure: true }): ShiftedSuiteMeasurement;
+export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, options?: ShiftedSuiteOptions & { measure?: false }): boolean;
+/** Shared runner: measured TAP counts prove a crossing (W1-T7812) only when the named file
+ *  reaches its own summary (W1-T8380). A partial exit 0 reaches no verdict. */
+export function runSuiteShifted(repoRoot: string, file: string, shiftDays: number, {
+  execFile = execFileSync,
+  measure = false,
+}: ShiftedSuiteOptions & { measure?: boolean } = {}): ShiftedSuiteMeasurement | boolean {
+  const { judge, status, output, tap, verdict, agree } = runShiftedChild(repoRoot, [file], shiftDays, () => [], execFile);
+  const { tests, pass, fail, cancelled, skipped, todo } = tap;
+  if (tests === 0 || cancelled > 0 || pass + fail === 0 || tests !== pass + fail + cancelled + skipped + todo || (status !== 0 && fail === 0) || (status === 0 && fail > 0)) {
+    throw new Error(`shifted suite ${file}: incomplete TAP verdict (exit ${status}, tests ${tests}, pass ${pass}, fail ${fail}, cancelled ${cancelled})`);
+  }
+  const wrapper = `# Subtest: ${relative(repoRoot, resolve(repoRoot, file))}`;
+  if (!output.split("\n").some((line) => line.startsWith("# Subtest: ") && line !== wrapper)) {
+    throw new Error(`shifted suite ${file}: no named tests in TAP verdict`);
+  }
+  agree();
+  if (!verdict.complete && (status === 0 || verdict.reported !== verdict.given)) {
+    throw new Error(`the run reaches no verdict: ${judge.describeJudgedRun("defuse", verdict, { prefix: "test-judge" })}`);
+  }
+  const measurement = { passed: status === 0, pass, tests };
+  return measure ? measurement : measurement.passed;
+}
+
+/** A batched file's measurement, or why it reached no verdict of its own. */
+export type ShiftedSuiteResult = ShiftedSuiteMeasurement | { error: Error };
+
+/**
+ * W1-T14578: one shifted child over every file in `files`, each measured from that one run by its own
+ * `test:summary`, so the census's near-crossing proof costs one child however many crossings it finds.
+ * A one-file batch is {@link runSuiteShifted}'s own judged run. A file whose child never reached its own
+ * summary maps to `{ error }`; a run with no verdict at all (no summary, timeout, disagreeing tally) throws.
+ */
+export function runSuitesShifted(repoRoot: string, files: readonly string[], shiftDays: number, { execFile = execFileSync }: ShiftedSuiteOptions = {}): Map<string, ShiftedSuiteResult> {
+  if (files.length === 1) {
+    const [file] = files as [string];
+    try {
+      return new Map([[file, runSuiteShifted(repoRoot, file, shiftDays, { execFile, measure: true })]]);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") throw error;
+      return new Map([[file, { error: error as Error }]]);
+    }
+  }
+  const { tap, agree, perFileCounts } = runShiftedChild(repoRoot, files, shiftDays,
+    (privateRoot) => ["--test-reporter-destination=stdout", `--test-reporter=${PER_FILE_REPORTER}`, `--test-reporter-destination=${join(privateRoot, PER_FILE_COUNTS)}`], execFile);
+  if (tap.tests === 0) throw new Error(`shifted suite of ${files.length} files: # tests 0`);
+  agree();
+  const counts = new Map<string, { tests: number; passed: number; failed: number; cancelled: number }>();
+  const crashed = new Set<string>();
+  for (const line of perFileCounts.split("\n").filter(Boolean)) {
+    const row = JSON.parse(line) as { file: string; counts?: { tests: number; passed: number; failed: number; cancelled: number }; failed?: string };
+    if (row.counts) counts.set(resolve(row.file), row.counts);
+    else if (row.failed !== undefined && resolve(repoRoot, row.failed) === resolve(row.file)) crashed.add(resolve(row.file));
+  }
+  return new Map(files.map((file): [string, ShiftedSuiteResult] => {
+    const own = counts.get(resolve(repoRoot, file));
+    if (!own) return [file, { error: new Error(`shifted suite ${file}: never reported its own summary in the batched run`) }];
+    if (own.tests === 0 || own.passed + own.failed === 0) return [file, { error: new Error(`shifted suite ${file}: no named tests in TAP verdict`) }];
+    if (own.cancelled > 0) return [file, { error: new Error(`shifted suite ${file}: incomplete verdict (cancelled ${own.cancelled})`) }];
+    return [file, { passed: own.failed === 0 && !crashed.has(resolve(repoRoot, file)), pass: own.passed, tests: own.tests }];
+  }));
 }
 
 /** Census adapter; the gardener keeps its existing boolean seam. */
@@ -1234,6 +1300,9 @@ export function gateGardenSpec(deps: GardenerDeps, probes: GateProbes, sources: 
       return inv;
     } }),
     fingerprint: (inv) => inv.candidates.map((a) => a.target).join(","),
+    // W1-T14578: a defuse candidate is a crossing no open or queued task covers. A pass whose draw
+    // lost left it unfiled, so an unchanged fingerprint over one is not work done.
+    unfinished: (inv) => inv.candidates.some((a) => a.class === "defuse"),
     metric: (inv, actionClass) => actionClass === "false-positive" ? inv.repairTally ?? { trials: 0, successes: 0 } : inv.tally,
     candidates: (inv) => inv.candidates,
     scorecard: (inv, plan) => ({ candidates: inv.candidates.length, tally: inv.tally, proposed: plan.actions.length }),

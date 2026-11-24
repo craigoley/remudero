@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
 import { MOVER_BRANCH_PREFIX, movedFromCommit, parseMoverReceipts, verifyMoverRemoval, type MoverOpsRead, verifyMoverRemovalPublic, type MoverRemovalVerdict, parseReviewerHistoryEvidence, parseWhitelistedProof, reviewRowNamesPr, resolveProofTestPath, resolveNameFilteredCandidatesAsync } from "../../lib/review.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
-import { existsSync, lstatSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isWorkerProviderId, loadConfig, type Config, type WorkerProviderId } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
@@ -43,7 +43,7 @@ import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/moun
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type CriterionVerdict, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure, type ReviewAdmission } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -102,6 +102,16 @@ function repeatedFlagValues(rest: string[], flag: string): string[] {
     if (rest[i] === flag) values.push(rest[++i]!);
   }
   return values;
+}
+
+/** W1-T12152: the review lane's prompt template — {@link buildReviewPrompt} and {@link reviewerVerdictContract} over a
+ *  placeholder task with one criterion, every task, PR and evidence slot a named marker. It is rendered before any task
+ *  text is filled in, so two PRs reviewed under one contract record one prompt revision. */
+export function reviewPromptTemplate(): string {
+  return buildReviewPrompt({ task: { id: "${TASK_ID}", acceptance: [{ claim: "${CLAIM}", proof: "${PROOF}" }] },
+    prUrl: "${PR_URL}", owner: "${OWNER}", repo: "${REPO}", headSha: "${HEAD_SHA}", evidencePath: "${EVIDENCE_PATH}",
+    proofEvidencePath: "${PROOF_EVIDENCE_PATH}", declaredFiles: ["${DECLARED_PATH}"], changedFiles: ["${CHANGED_PATH}"],
+    widenedFiles: [] }) + "\n" + reviewerVerdictContract(1);
 }
 
 export function reviewOptionsFromFlags(host: ReviewCommandHost, rest: string[]): Pick<ReviewCommandDeps, "planOnlyFiling" | "executionMode" | "judgeAtOwnStart" | "reviewAttemptId" | "excludeProviders" | "planLintRetryHead"> {
@@ -178,7 +188,7 @@ export const REVIEW_EXIT_CAUSES = [
   "repo-unresolvable", "closed-before-review", "subject-refused", "task-narrative-unavailable",
   "task-metadata-unavailable", "semantic-setup-unavailable", "own-task-record-missing",
   "shadow-verdict-withheld", "replayed-verdict-withheld", "verdict-not-posted",
-  "verdict-failure", "verdict-pending", "verdict-not-success", "review-claim-held",
+  "verdict-failure", "verdict-pending", "verdict-not-success", "review-claim-held", "reviewer-stale-at-start",
   ...REVIEW_EXIT_STEPS.map((step) => `threw-in-${step}` as const),
 ] as const;
 export type ReviewExitCause = (typeof REVIEW_EXIT_CAUSES)[number];
@@ -787,6 +797,118 @@ export function catalogReviewPoster(catalog: "public" | "ops" | undefined, post:
   };
 }
 
+/** W1-T14581: the ops-task review comment. Publication permits only acceptance text (W1-T12207), so each visible
+ *  claim carries its verdict mark — PASS, FAIL, or UNDETERMINED for a proof that reached no conclusion — and nothing
+ *  else: no reason, proof output, path or measurement. A reader of the PR can see WHICH claim failed. */
+export function opsReviewCommentBody(state: string, acceptance: readonly AcceptanceCriterion[],
+  criteria: ReadonlyArray<Pick<CriterionVerdict, "claim" | "met" | "proof_exec">>): string {
+  const marks = visibleCriteria([...acceptance]).map(criterion => {
+    const index = acceptance.indexOf(criterion);
+    const judged = criteria[index]?.claim === criterion.claim ? criteria[index] : criteria.find(c => c.claim === criterion.claim);
+    const mark = judged === undefined || !judged.met && judged.proof_exec === "inconclusive_load" ? "UNDETERMINED"
+      : judged.met ? "PASS" : "FAIL";
+    return `- ${mark}: ${criterion.claim}`;
+  });
+  return `**remudero-review=${state}** — detailed evidence retained on host\n\n${marks.join("\n")}`;
+}
+
+/** W1-T14581: the host-side review record of one reviewed head of an ops-catalog task — the full criterion reasons
+ *  and every reviewer finding (mechanism, remedy, anchor) its PR may not show. Console's PR view and the fix lane
+ *  read it through the `review_record_path` its `review.posted` row carries. Holdout criteria (W1-T166) and their
+ *  findings never enter it: the fix lane is worker-readable. */
+export interface OpsReviewRecord {
+  version: 1;
+  task_id: string;
+  pr_url: string;
+  head_sha: string;
+  state: string;
+  review_decision_digest: string;
+  criteria: Array<{ index: number; claim: string; met: boolean; proof_exec: string; proof: string; reason: string;
+    proof_failure_output?: string }>;
+  reasons: string[];
+  findings: Array<{ criterion_index: number; category: string; severity: string; mechanism: string; remedy: string | null;
+    anchor: FindingCapture["findings"][number]["anchor"] }>;
+}
+
+export function opsReviewRecord(input: { taskId: string; prUrl: string; headSha: string; state: string; decisionDigest: string;
+  criteria: readonly CriterionVerdict[]; reasons: readonly string[]; findings: FindingCapture["findings"] }): OpsReviewRecord {
+  return {
+    version: 1, task_id: input.taskId, pr_url: input.prUrl, head_sha: input.headSha, state: input.state,
+    review_decision_digest: input.decisionDigest,
+    criteria: input.criteria.flatMap((c, i) => c.holdout ? [] : [{ index: i + 1, claim: c.claim, met: c.met,
+      proof_exec: c.proof_exec, proof: c.proof, reason: c.reason,
+      ...(c.proofFailureOutput !== undefined ? { proof_failure_output: c.proofFailureOutput } : {}) }]),
+    reasons: [...input.reasons],
+    findings: input.findings.filter(f => input.criteria[f.criterion - 1]?.holdout !== true).map(f => ({
+      criterion_index: f.criterion, category: f.category, severity: f.severity, mechanism: f.mechanism, remedy: f.remedy,
+      anchor: f.anchor })),
+  };
+}
+
+const SAFE_SEGMENT = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}$/;
+
+/** W1-T14581: where a head's record lives under the state dir — one file per repo, PR and head; `undefined` when a
+ *  segment could escape the record tree. */
+export function opsReviewRecordPath(stateDir: string, target: { owner: string; repo: string; prNumber: number | string | undefined; headSha: string }): string | undefined {
+  const pr = String(target.prNumber);
+  if (!SAFE_SEGMENT.test(target.owner) || !SAFE_SEGMENT.test(target.repo) || !/^[1-9]\d{0,9}$/.test(pr) ||
+      !/^[a-f0-9]{7,64}$/.test(target.headSha)) return undefined;
+  return join(stateDir, "review-records", target.owner, target.repo, `pr-${pr}`, `${target.headSha}.json`);
+}
+
+/** W1-T14581: write a head's record atomically. A failure is returned, never thrown: the verdict is already decided,
+ *  and the caller ledgers why the row carries no record path. */
+export function writeOpsReviewRecord(stateDir: string, target: Parameters<typeof opsReviewRecordPath>[1], record: OpsReviewRecord):
+  { path: string } | { error: string } {
+  const path = opsReviewRecordPath(stateDir, target);
+  if (path === undefined) return { error: "review record target has an unsafe path segment" };
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const temp = `${path}.${process.pid}.tmp`;
+    writeFileSync(temp, `${JSON.stringify(record, null, 2)}\n`);
+    renameSync(temp, path);
+    return { path };
+  } catch (error) {
+    return { error: String((error as Error)?.message ?? error) };
+  }
+}
+
+export type OpsReviewRecordRead = { status: "found"; record: OpsReviewRecord } | { status: "absent" } | { status: "unreadable"; reason: string };
+
+/** W1-T14581: the fix lane's and Console's read of a head's record. Absent (no record was linked, or its file is gone)
+ *  and unreadable (a record exists but cannot be trusted) are different answers: only the second is a defect. */
+export function readOpsReviewRecord(path: string, read: (path: string) => string = p => readFileSync(p, "utf8")): OpsReviewRecordRead {
+  let text: string;
+  try {
+    text = read(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { status: "absent" };
+    return { status: "unreadable", reason: String((error as Error)?.message ?? error) };
+  }
+  try {
+    const record = JSON.parse(text) as Partial<OpsReviewRecord>;
+    if (record?.version !== 1 || typeof record.pr_url !== "string" || typeof record.head_sha !== "string" ||
+        !Array.isArray(record.criteria) || !Array.isArray(record.findings) || !Array.isArray(record.reasons)) {
+      return { status: "unreadable", reason: "review record has an unknown shape" };
+    }
+    return { status: "found", record: record as OpsReviewRecord };
+  } catch (error) {
+    return { status: "unreadable", reason: String((error as Error)?.message ?? error) };
+  }
+}
+
+/** W1-T14581: the record the NEWEST `review.posted` row for this PR head links. A newer row without a link (a public
+ *  review, or a record that failed to write) answers absent: an older head's or older verdict's record never stands
+ *  in for the current one. */
+export function opsReviewRecordForHead(rows: ReadonlyArray<Record<string, unknown>>, prUrl: string, headSha: string,
+  read?: (path: string) => string): OpsReviewRecordRead {
+  const posted = rows.filter(row => row.step === "review.posted" && row.pr_url === prUrl && row.head_sha === headSha).at(-1);
+  if (typeof posted?.review_record_path !== "string") return { status: "absent" };
+  const found = readOpsReviewRecord(posted.review_record_path, read);
+  return found.status === "found" && (found.record.pr_url !== prUrl || found.record.head_sha !== headSha)
+    ? { status: "unreadable", reason: "review record names another pull request head" } : found;
+}
+
 /** W1-T14146: what the reviewer's assignment receipt records of the reviewed work — the class of the PR's plan task,
  *  `deriveTaskClass` of its files as its implement run records it — and nothing when the review has no plan task
  *  (untasked, or its task unresolved at head), so the receipt names no class rather than the default one. */
@@ -970,6 +1092,8 @@ export async function runReview(host: ReviewCommandHost, args: {
    * call sites supply it immediately before posting; test-only direct calls retain their existing
    * isolated status-poster contract. */
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
+  /** W1-T12227: the path that admitted this review, named on `review.refused_after_finished_review`. */
+  admission?: ReviewAdmission;
 }): Promise<ReviewRunResult> {
   const phases: Record<string, number> = { started: systemClock.now() };
   // W1-T11149: the phase reaches the CPU bound (setup, proofs) or the provider bound (judge, posting), in process or as a child.
@@ -1374,6 +1498,8 @@ export async function runReview(host: ReviewCommandHost, args: {
           }) +
           "\n" +
           reviewerVerdictContract(criteria.length);
+        // W1-T12152: the assignment's prompt revision hashes this template, never the filled prompt above.
+        const promptTemplate = reviewPromptTemplate();
         const stopTelemetry = args.workerTelemetry?.startPolling();
         let reviewer: WorkerResult;
         const reviewerClockBoundMs =
@@ -1425,6 +1551,7 @@ export async function runReview(host: ReviewCommandHost, args: {
                 ...reviewerClockBound,
                 onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
                 streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
+                promptTemplate,
                 prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
               }),
             );
@@ -1495,6 +1622,7 @@ export async function runReview(host: ReviewCommandHost, args: {
               sandboxReadRoots: snapshot.dependencyReadRoots,
               runId: args.runId, taskId: task.id,
               clockBound: { boundMs: Math.min(reviewerClockBoundMs, 60_000) },
+              promptTemplate,
               prompt,
             }));
             assertReviewerSnapshotIntegrity(host, snapshot.cwd, headSha);
@@ -1783,6 +1911,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     reviewEngineRevision: REVIEW_ENGINE_REVISION,
     evaluatorProvenance,
     reviewerCodeFreshness,
+    finishedReview: { admission: args.admission ?? "direct", reviewerMs: phases.postStart - phases.started },
     fetchLifecycle: () => fetchPrLifecycleAsync(prUrl),
     readRequiredContexts: readRequiredStatusCheckContextsAsync,
     cannotEvaluateEscalation: (e, issues) => tryEscalate(task.catalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath: args.ledgerPath, runId: args.runId }),
@@ -1900,11 +2029,18 @@ export async function runReview(host: ReviewCommandHost, args: {
   const proofExec = verdict.criteria.map((c) => c.proof_exec);
   // The gate TEACHES: the FULL list of unmet criteria goes to the ledger (and the
   // PR comment below) — the status description names only the first (length-capped).
+  // W1-T14581: an ops task's reasons and findings stay on the host, in one record per head its row links.
+  const opsRecord = task.catalog !== "ops" ? undefined
+    : writeOpsReviewRecord(dirname(args.ledgerPath), { owner, repo, prNumber: reviewPrNumber(prUrl), headSha },
+      opsReviewRecord({ taskId: task.id, prUrl, headSha, state: verdict.state, decisionDigest, criteria: verdict.criteria,
+        reasons, findings: findingCapture.findings }));
+  if (opsRecord !== undefined && "error" in opsRecord) log("review.record_write_failed", { pr_number: reviewPrNumber(prUrl), head_sha: headSha, reason: opsRecord.error });
   const reviewPostedRow = {
     context: REVIEW_CONTEXT,
     state: verdict.state,
     head_sha: headSha,
     pr_url: prUrl,
+    ...(opsRecord !== undefined && "path" in opsRecord ? { review_record_path: opsRecord.path } : {}),
     ...(inputDigest !== undefined ? { review_input_digest: inputDigest } : {}),
     review_engine_revision: REVIEW_ENGINE_REVISION,
     ...(runtimeImageSha !== undefined ? { runtime_image_sha: runtimeImageSha } : {}),
@@ -2106,8 +2242,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   if (followUpSection) parts.push(followUpSection);
   // Ops publication permits only acceptance text; derived reasons, proof output and scope stay local.
   const body = task.catalog === "ops"
-    ? `**remudero-review=${verdict.state}** — detailed evidence retained on host\n\n` +
-      visibleCriteria(task.acceptance ?? []).map(criterion => `- ${criterion.claim}`).join("\n")
+    ? opsReviewCommentBody(verdict.state, task.acceptance ?? [], verdict.criteria)
     : `${parts.join("\n\n---\n\n")}\n\n${reviewWriterMarker(args.runId, inputDigest, codeSha)}`;
   postReviewCommentGuarded(prUrl, body, { commitSha: headSha });
   // W1-T63/P10-a: the console summary distinguishes a completed review from a
@@ -2822,9 +2957,10 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     }
   }
   if (taskId && publicTaskAbsent) {
-    const found = await findTaskInCatalogs(taskId, {
-      ...deps.taskLookup, stateDir: join(config.root, "state"), byId: new Map(),
-    });
+    const lookUp = () => findTaskInCatalogs(taskId, { ...deps.taskLookup, stateDir: join(config.root, "state"), byId: new Map() });
+    let found = await lookUp();
+    // W1-T12226: a push to the ops branch during the read refuses it; the next read sees the new commit. One retry only.
+    if (found.outcome === "unreadable" && found.reason === "ops-ref_moved") found = await lookUp();
     if (found.outcome === "unreadable") {
       log("review.catalog.unreadable", { reason: found.reason });
       console.error("rmd review: task catalog unreadable; no body fallback or review effect");
@@ -2989,6 +3125,13 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       reason: startFreshness.reason,
     });
   }
+  // W1-T12227: a fresh-tree child stale at its own start ends before its pending status and its reviewer; its gate retries.
+  if (!shadow && deps.reviewStartFreshness === undefined && startFreshness?.status === "stale") {
+    console.error(`rmd review: reviewer code ${startFreshness.codeSha.slice(0, 12)} is behind origin/main ` +
+      `${startFreshness.originMainSha.slice(0, 12)} at its own start; no pending status and no reviewer`);
+    exit.as("reviewer-stale-at-start");
+    return 2;
+  }
   const publicationFreshness = reviewerFreshnessForPublication(startFreshness, reviewerCodeFreshnessDep);
   let claimHeld: string | undefined;
   if (!shadow) try {
@@ -3152,6 +3295,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
           // the documented fallback (criterion 5) — never silent.
           headCheckoutDir: worktreePath,
           reviewerCodeFreshness: publicationFreshness,
+          admission: deps.reviewStartFreshness !== undefined ? "start-gate" : deps.judgeAtOwnStart === true ? "fresh-tree-child" : "operator",
           prCreatedAt: view.createdAt,
           readReviewStatusHistory: deps.readReviewStatusHistory,
           // The three base facts, threaded by NAME so a reader (and test/preexisting-proof-hits-wiring)

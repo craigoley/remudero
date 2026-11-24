@@ -358,10 +358,19 @@ render_app_private_key_mount() {
 # W1-T9500 — THE CREATOR NAMES THE INSTANCE. Inside the container the state root is
 # /home/node/Remudero, which matches no registry state_dir (those are host paths), so the daemon's
 # SRE lane could not tell which instance it was. An --instance install hands its launcher the name;
-# the legacy no-instance install renders an empty list and the container gets nothing.
+# the legacy no-instance install names the one registry row matching its container and state dir.
 render_instance_name_env() {
+  local derived=""
   if [ -n "$INSTANCE_NAME" ]; then
     printf 'INSTANCE_ENV_ARGS=(-e %q)\n' "RMD_INSTANCE_NAME=${INSTANCE_NAME}"
+    return 0
+  fi
+  if [ -f "$SCRIPT_DIR/launch-instance-name.sh" ]; then
+    . "$SCRIPT_DIR/launch-instance-name.sh"
+    derived="$(rmd_launch_instance_name --registry "${RMD_INSTANCE_REGISTRY-$DEFAULT_INSTANCE_REGISTRY}" --container "$CONTAINER_NAME" --state-dir "$STATE_DIR")"
+  fi
+  if [ -n "$derived" ]; then
+    printf 'INSTANCE_ENV_ARGS=(-e %q)\n' "RMD_INSTANCE_NAME=${derived}"
   else
     printf 'INSTANCE_ENV_ARGS=()\n'
   fi

@@ -862,30 +862,166 @@ elif command -v "$SYSCTL_BIN" >/dev/null 2>&1; then
   if [ -n "$_swap_pair" ]; then SWAP_TOTAL_KB="${_swap_pair% *}"; SWAP_USED_KB="${_swap_pair#* }"; fi
 fi
 
-# The latest janitor result, from the newest of the logs named in RMD_JANITOR_LOGS (colon-separated
-# paths or globs; default: the Azure host's cron log and the Mac's per-account logs). Two shapes:
-#   rmd-host-cleanup: / 57% -> 57% (-4 MB reclaimed this pass)      (Azure; before/after are %)
-#   janitor (<user>): freed ~0 GB; free space 25 GB -> 10 GB         (Mac)
-# A line that matches neither publishes `unknown` — a pass that reclaimed nothing is `0GB`, and an
-# unparseable line is never that. The timestamp is the log file's mtime: each pass appends, so it
-# is the moment of the last pass.
-JANITOR_LOGS="${RMD_JANITOR_LOGS:-${HOME}/host-cleanup.log:/tmp/remudero-janitor-*.log}"
-JANITOR_LOG="none"; JANITOR_TS="unknown"; JANITOR_BEFORE="unknown"; JANITOR_AFTER="unknown"; JANITOR_FREED="unknown"
-_janitor_files="$(printf '%s\n' "$JANITOR_LOGS" | tr ':' '\n' | while IFS= read -r _pat; do for _f in $_pat; do [ -f "$_f" ] && printf '%s\n' "$_f"; done; done)"
-if [ -n "$_janitor_files" ]; then
-  _newest="$(printf '%s\n' "$_janitor_files" | while IFS= read -r _f; do printf '%s\t%s\n' "$(stat -c %Y "$_f" 2>/dev/null || stat -f %m "$_f" 2>/dev/null || printf 0)" "$_f"; done | sort -rn | head -n 1)"
-  _tab="$(printf '\t')"
-  _newest_file="${_newest#*"$_tab"}"; _newest_epoch="${_newest%%"$_tab"*}"
-  JANITOR_LOG="$_newest_file"
-  _jline="$(grep -E '(rmd-host-cleanup: |janitor \().*->' "$_newest_file" 2>/dev/null | grep -v 'WATCH' | tail -n 1)"
-  _jparsed="$(printf '%s\n' "$_jline" | sed -nE \
-    -e 's#.*rmd-host-cleanup: [^ ]+ ([0-9]+)% -> ([0-9]+)% [(][-+~]?([0-9.]+) ?([KMGT]?B) reclaimed.*#\1% \2% \3\4#p' \
-    -e 's#.*janitor [(][^)]*[)]: freed ~?([0-9.]+) ?([KMGT]?B); free space ([0-9.]+) ?([KMGT]?B) -> ([0-9.]+) ?([KMGT]?B).*#\3\4 \5\6 \1\2#p' | head -n 1)"
-  if [ -n "$_jparsed" ]; then
-    JANITOR_BEFORE="${_jparsed%% *}"; _jrest="${_jparsed#* }"; JANITOR_AFTER="${_jrest%% *}"; JANITOR_FREED="${_jrest#* }"
-    case "$_newest_epoch" in ''|*[!0-9]*|0) : ;; *)
-      JANITOR_TS="$(date -u -d "@${_newest_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "${_newest_epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf 'unknown')" ;;
-    esac
+# Select the newest completed result across Azure and the two Mac jobs.
+JANITOR_LOGS="${RMD_JANITOR_LOGS:-${HOME}/host-cleanup.log:/tmp/remudero-janitor-*.log:${HOME}/Library/Logs/remudero/janitor.log:${HOME}/Library/Logs/remudero/tmp-reclaim.log}"
+JANITOR_LOG=none; JANITOR_TS=unknown; JANITOR_BEFORE=unknown; JANITOR_AFTER=unknown; JANITOR_FREED=unknown
+JANITOR_REMOVED=unknown; JANITOR_BYTES=unknown; JANITOR_PHASE_LINES=""
+JANITOR_STATE="${RMD_ROOT}/state/heartbeat-janitor.txt"
+read_janitor_pass() {
+  LC_ALL=C awk '
+    function count(v) { return v ~ /^[0-9]+$/ ? v : "unknown" }
+    function size(v) { gsub(/ /, "", v); return v ~ /^[0-9]+(\.[0-9]+)?[KMGT]?B$/ ? v : "unknown" }
+    function bytes(v,   unit, power) {
+      if (size(v) == "unknown") return "unknown"
+      unit = substr(v, length(v) - 1, 1)
+      power = unit ~ /^[KMGT]$/ ? index("KMGT", unit) : 0
+      return sprintf("%.0f", (v + 0) * (1024 ^ power))
+    }
+    function add(a, b) { return a == "unknown" || b == "unknown" ? "unknown" : sprintf("%.0f", a + b) }
+    function phase(name, root, n, b,   key) {
+      key = name "|" root
+      if (key in phase_entries) {
+        n = add(phase_entries[key], n); b = add(phase_bytes[key], b)
+      }
+      phase_entries[key] = n; phase_bytes[key] = b
+    }
+    function reset(   key) {
+      for (key in phase_entries) { delete phase_entries[key]; delete phase_bytes[key] }
+      kind = stamp = session_root = ""; dry = 0
+      before = after = freed = removed = total = "unknown"
+      tally_count = tally_bytes = tsx_count = tsx_bytes = 0
+      tallied = 0
+    }
+    function finish(complete,   key, b) {
+      if (kind != "" && !dry && (!awaiting_end || complete)) {
+        if (kind == "azure" && tallied) { removed = tally_count; total = tally_bytes }
+        saved = line " " (stamp == "" ? "mtime" : stamp) " " before " " after " " freed " " removed " " total "\n"
+        for (key in phase_entries) {
+          b = phase_bytes[key]
+          saved = saved (b == "unknown" ? -1 : b) "\t" key "|" phase_entries[key] "|" b "\n"
+        }
+      }
+      reset(); awaiting_end = 0
+    }
+    function start(name) { if (kind != "") finish(); kind = name; stamp = ts; line = NR }
+    function field(name, message,   i, fields) {
+      split(message, fields, " ")
+      for (i in fields) if (index(fields[i], name "=") == 1) return substr(fields[i], length(name) + 2)
+      return ""
+    }
+    BEGIN { reset() }
+    {
+      msg = $0; ts = ""
+      if (match(msg, /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z? /)) {
+        ts = substr(msg, 1, RLENGTH - 1); msg = substr(msg, RLENGTH + 1)
+      }
+      if (msg ~ /^rmd-host-cleanup: retention idle /) { finish(); awaiting_end = 1 }
+      else if (msg ~ /^rmd-host-cleanup: decision-report /) finish(1)
+      else if (msg ~ /^rmd-host-cleanup: DRY_RUN=1/) dry = 1
+      else if (msg ~ /^rmd-host-cleanup: [^ ]+ ([0-9]+%|unknown) -> ([0-9]+%|unknown)( |$)/) {
+        start("azure")
+        split(msg, parts, " "); before = parts[3]; after = parts[5]
+        if (msg ~ / MB reclaimed this pass\)$/) {
+          freed = size(substr(parts[6], 2 + (parts[6] ~ /^\([-+~]/)) parts[7])
+          if (parts[6] !~ /^\(-/) total = bytes(freed)
+        }
+      } else if (msg ~ /^rmd-host-cleanup: reclaim-total: nothing to reclaim /) tallied = 1
+      else if (msg ~ /^rmd-host-cleanup: reclaim-total [^ ]+ / &&
+          match(msg, /: reclaimed [^ ]+ MB \([^ ]+ bytes\) in [^ ]+ entries$/)) {
+        start_of_counts = RSTART
+        sub(/^rmd-host-cleanup: reclaim-total /, "", msg)
+        split(msg, parts, " "); name = parts[1]
+        start_of_counts -= length("rmd-host-cleanup: reclaim-total ")
+        root = substr(msg, length(name) + 2, start_of_counts - length(name) - 2)
+        split(substr(msg, start_of_counts + length(": reclaimed ")), parts, " ")
+        n = count(parts[6]); b = count(substr(parts[3], 2))
+        phase(name, root, n, b)
+        tallied = 1; tally_count = add(tally_count, n); tally_bytes = add(tally_bytes, b)
+      } else if (msg ~ /^=== janitor start:/) {
+        finish(); dry = (field("apply", msg) == "0")
+      } else if (msg ~ /^=== done: removed=/) {
+        start("mac")
+        if (field("removed-complete", msg) != "no") removed = add(count(field("removed", msg)), tsx_count)
+        freed = size(field("reclaimed", msg) "B"); total = add(bytes(freed), tsx_bytes)
+        free = field("free", msg); sub(/GiB$/, "", free); split(free, parts, "->")
+        before = size(parts[1] "GB"); after = size(parts[2] "GB")
+        finish()
+      } else if (msg ~ /^janitor \([^)]*\): freed /) {
+        start("mac")
+        sub(/^janitor \([^)]*\): freed ~?/, "", msg); split(msg, parts, /; free space | -> /)
+        freed = size(parts[1]); total = bytes(freed); before = size(parts[2]); after = size(parts[3])
+        finish()
+      } else if (msg ~ /^(generated-cache: )?pruned tsx cache files=/) {
+        if (kind == "temp") finish()
+        n = count(field("files", msg)); b = count(field("bytes", msg))
+        sub(/^.*\): /, "", msg)
+        if (msg ~ /^\//) phase("tsx", msg, n, b)
+        tsx_count = add(tsx_count, n); tsx_bytes = add(tsx_bytes, b)
+      } else if (msg ~ /^leftover stem=.* removed=[^ ]+ bytes=[^ ]+$/) {
+        if (kind == "temp") finish()
+        fields = split(msg, parts, " ")
+        phase("leftovers", "unknown", count(substr(parts[fields - 1], 9)), count(substr(parts[fields], 7)))
+      } else if (msg ~ /^Would delete:/) finish()
+      else if (msg ~ /^Deleted: [^ ]+ entries, /) {
+        start("temp")
+        split(msg, parts, " "); removed = count(parts[2]); freed = size(parts[4] parts[5])
+        total = bytes(freed); phase("temp", "unknown", removed, total)
+        awaiting_end = (msg ~ /; risky retained=/)
+      } else if (kind == "temp" && msg ~ /^tsx files pruned: /) {
+        split(msg, parts, " "); sub(/,$/, "", parts[4]); n = count(parts[4])
+        if (n == "unknown" || tsx_count == "unknown" || n != tsx_count) {
+          phase("tsx", "unknown", n, n == "0" ? 0 : "unknown")
+          tsx_bytes = n == "0" ? 0 : "unknown"
+        } else if (n == "0") phase("tsx", "unknown", 0, 0)
+        removed = add(removed, n); total = add(total, tsx_bytes)
+      } else if (kind == "temp" && msg ~ /^session scratch (dirs|files) deleted: /) {
+        split(msg, parts, " "); sub(/,$/, "", parts[5])
+        if (parts[3] == "dirs" && sub(/^.* \(root /, "", msg)) {
+          sub(/; age window .*$/, "", msg); session_root = msg
+        }
+        phase("session-" parts[3], session_root == "" ? "unknown" : session_root, count(parts[5]), bytes(parts[6] parts[7]))
+        if (parts[3] == "files") finish(1)
+      }
+    }
+    END { finish(); printf "%s", saved }' "$1" 2>/dev/null
+}
+
+_janitor_files="$(printf '%s\n' "$JANITOR_LOGS" | tr ':' '\n' | while IFS= read -r _pat; do
+  if [ -f "$_pat" ]; then printf '%s\n' "$_pat"; continue; fi
+  IFS=$'\n'
+  for _f in $_pat; do [ ! -f "$_f" ] || printf '%s\n' "$_f"; done
+done)"
+_janitor_latest=0; _janitor_key=""
+IFS=' ' read -r _saved_epoch _saved_key 2>/dev/null < "$JANITOR_STATE" || :
+while IFS= read -r _file; do
+  [ -n "$_file" ] || continue
+  _file_stat="$(stat -c '%Y %d:%i' "$_file" 2>/dev/null || stat -f '%m %d:%i' "$_file" 2>/dev/null)" || continue
+  [ "$JANITOR_LOG" != none ] || JANITOR_LOG="$_file"
+  _result="$(read_janitor_pass "$_file")" || continue
+  [ -n "$_result" ] || continue
+  read -r _line _stamp _before _after _freed _removed _bytes <<< "$_result"
+  _key=""
+  case "$_stamp" in
+    mtime)
+      # Untimestamped logs can grow after a summary. Pin the first observed mtime to its position.
+      _key="${_file_stat#* }:$_line"; _epoch="${_file_stat%% *}"
+      if [ "$_key" = "${_saved_key:-}" ]; then _epoch="$_saved_epoch"; fi ;;
+    *Z) _epoch="$(epoch_of "$_stamp")" ;;
+    *)
+      _epoch="$(date -d "$_stamp" +%s 2>/dev/null || date -j -f '%Y-%m-%dT%H:%M:%S' "$_stamp" +%s 2>/dev/null)" || continue ;;
+  esac
+  case "$_epoch" in ''|*[!0-9]*) continue ;; esac
+  [ "$_epoch" -gt "$_janitor_latest" ] || continue
+  _iso="$(date -u -d "@$_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || continue
+  _janitor_latest="$_epoch"; _janitor_key="$_key"; JANITOR_LOG="$_file"
+  JANITOR_TS="$_iso"; JANITOR_BEFORE="$_before"; JANITOR_AFTER="$_after"; JANITOR_FREED="$_freed"
+  JANITOR_REMOVED="$_removed"; JANITOR_BYTES="$_bytes"
+  JANITOR_PHASE_LINES="$(printf '%s\n' "$_result" | sed '1d' | LC_ALL=C sort -nr | awk 'NR <= 8 { sub(/^[^\t]*\t/, ""); print "janitor_phase_" NR "=" $0 }')"
+done <<< "$_janitor_files"
+if [ "${RMD_HEARTBEAT_DRY_RUN:-}" != 1 ] && [ -n "$_janitor_key" ] && [ "$_janitor_key" != "${_saved_key:-}" ] \
+  && _janitor_tmp="$(mktemp "$RMD_ROOT/state/.heartbeat-janitor.XXXXXX" 2>/dev/null)"; then
+  if ! { printf '%s %s\n' "$_janitor_latest" "$_janitor_key" > "$_janitor_tmp" && mv -f "$_janitor_tmp" "$JANITOR_STATE"; }; then
+    rm -f "$_janitor_tmp"
   fi
 fi
 
@@ -1920,6 +2056,9 @@ janitor_last_ts=${JANITOR_TS}
 janitor_last_before=${JANITOR_BEFORE}
 janitor_last_after=${JANITOR_AFTER}
 janitor_last_freed=${JANITOR_FREED}
+janitor_last_removed=${JANITOR_REMOVED}
+janitor_last_freed_bytes=${JANITOR_BYTES}
+${JANITOR_PHASE_LINES}
 prev_beat_ts=${PREV_BEAT_TS:-none}
 since_prev_beat_s=${SINCE_PREV_S:-unknown}
 restart_source=${RESTART_SOURCE}

@@ -119,8 +119,9 @@ test("W1-T3596: every declared instance carries all seven required fields", () =
   // which is the worst place to discover it.
   const text = readFileSync(REGISTRY, "utf8");
   const names = [...text.matchAll(/^ {2}([A-Za-z0-9_-]+):\s*$/gm)].map((m) => m[1]);
-  // ops runs live (W1-T13700), with the same seven fields as every other row.
-  assert.deepEqual(names.sort(), ["console", "core", "ops", "site"], "W1-T13498: the live topology is exactly these four");
+  // ops runs live (W1-T13700), with the same seven fields as every other row; oleyarcade joins as a
+  // shadow maintenance instance (W1-T14552), and wreckterra as a shadow product instance (W1-T14594).
+  assert.deepEqual(names.sort(), ["console", "core", "oleyarcade", "ops", "site", "wreckterra"], "W1-T14594: the topology is exactly these six");
 
   for (const name of names) {
     // Fields are the 4-space-indented keys following this name, up to the next 2-space key.

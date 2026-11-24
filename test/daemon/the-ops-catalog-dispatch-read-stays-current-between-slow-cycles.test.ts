@@ -222,14 +222,17 @@ test("W1-T13052 criterion 4: failed or hung refreshes leave the dispatch read st
   mock.timers.enable({ apis: ["setInterval"] });
   try {
     const clock = { now: 1_000_000 };
-    // A failed revalidation and a failed full reread read stale, never the kept snapshot.
+    // W1-T14564 (operator ruling 2026-11-23): a failed revalidation is answered by the kept snapshot, naming the refusal.
     const failing = catalog(ops);
     failing.publish(opsYaml("private title"));
     const failingSource = createOpsCatalogShadowSource({ repository: REPOSITORY }, failing.api);
     assert.equal((await failingSource.refresh()).outcome, "ok");
     failing.fail(true);
-    assert.deepEqual(await failingSource.refresh(), { outcome: "stale", refusalStage: "branch_ref" });
-    // A hung refresh: the timer never stacks a second read, and the completed evidence expires at the bound.
+    const served = await failingSource.refresh();
+    assert.equal(served.outcome, "ok");
+    assert.ok(served.plan !== undefined, "the kept snapshot's plan is served");
+    assert.deepEqual([served.lastGood?.refusal, served.lastGood?.refusalStage], ["stale", "branch_ref"]);
+    // A hung refresh: the timer never stacks a second read; past the bound the completed evidence is still served.
     const hung = catalog(ops);
     hung.publish(opsYaml("private title again"));
     const feed = opsCatalogShadowFeed(createOpsCatalogShadowSource({ repository: REPOSITORY }, hung.api),
@@ -246,7 +249,9 @@ test("W1-T13052 criterion 4: failed or hung refreshes leave the dispatch read st
       assert.equal(feed.forDispatch()?.outcome, "ok");
       assert.deepEqual(hung.reads.slice(atHold), [REF], "one hung refresh, never a second in flight");
       await advance(1, clock);
-      assert.deepEqual(feed.forDispatch(), { outcome: "stale", refusalStage: "snapshot_age" });
+      const expired = feed.forDispatch();
+      assert.equal(expired?.outcome, "ok");
+      assert.deepEqual(expired?.lastGood, { refusal: "stale", refusalStage: "snapshot_age", snapshotAgeMs: 120_000 });
     } finally {
       feed.stop();
     }

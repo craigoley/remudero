@@ -109,18 +109,137 @@ esac
 signal_forwarded=""
 child_pid=""
 child_rc=""
+successor_pid=""
+# A stop that arrives while no process can take it (between the daemon's exit 79 and the watch on its
+# successor) is kept here and forwarded once the successor is known, never dropped.
+pending_signal=""
 forward_signal() {
   sig="$1"
+  # W1-T14546: while the loop watches a handed-off successor, `child_pid` is only the poll's sleep;
+  # the daemon that holds the locks is the successor, so the signal goes to it, and the shell
+  # waits by pid (it cannot `wait` a process that is not its child) until it has exited.
+  if [ -n "$successor_pid" ]; then
+    log "received $sig — forwarding to handed-off successor pid $successor_pid so it can release its locks before exiting"
+    kill "-$sig" "$successor_pid" 2>/dev/null || true
+    while successor_alive "$successor_pid"; do sleep 0.2; done
+    if [ -n "$child_pid" ]; then kill "$child_pid" 2>/dev/null || true; fi
+    child_rc=0
+    signal_forwarded=1
+    return 0
+  fi
   if [ -n "$child_pid" ]; then
     log "received $sig — forwarding to pid $child_pid so it can release its locks before exiting"
     kill "-$sig" "$child_pid" 2>/dev/null || true
     child_rc=0
     wait "$child_pid" 2>/dev/null || child_rc=$?
     signal_forwarded=1
+    return 0
   fi
+  pending_signal="$sig"
 }
 trap 'forward_signal TERM' TERM
 trap 'forward_signal INT' INT
+
+# ── W1-T14546: a handed-off successor, watched by pid ───────────────────────────────────────
+# Duplicated from `DAEMON_EXIT_HANDED_OFF` (src/lib/daemon.ts), pinned like the codes above.
+# Defined below the signal-forwarding boundary because suites run this section on its own. The
+# daemon exits 79 only after a standby it started holds the run; the loop then watches that
+# successor by pid (it is not this shell's child) instead of starting a daemon.
+DAEMON_EXIT_HANDED_OFF=79
+HANDOFF_DIR="$CONFIG_ROOT/state/daemon-handoff"
+HANDOFF_WATCH_INTERVAL_S="${RMD_HANDOFF_WATCH_INTERVAL_S:-2}"
+case "$HANDOFF_WATCH_INTERVAL_S" in
+  '' | *[!0-9]* | 0)
+    log "RMD_HANDOFF_WATCH_INTERVAL_S is not a positive whole number of seconds — ignoring it and using 2"
+    HANDOFF_WATCH_INTERVAL_S=2
+    ;;
+esac
+
+# A live pid alone is not enough: a reused pid, or a successor that already exited and is waiting
+# to be reaped, must read as gone. Where /proc is readable the command line must still name the
+# daemon (a zombie's is empty).
+successor_alive() {
+  local pid="$1" cmd=""
+  kill -0 "$pid" 2>/dev/null || return 1
+  if [ -r "/proc/$pid/cmdline" ]; then
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || return 1
+    case "$cmd" in *daemon*) return 0 ;; *) return 1 ;; esac
+  fi
+  return 0
+}
+
+# Prints the successor's pid and run id from `successor.pid` ("<pid> <runId>"), or fails when the
+# file is missing, malformed or names no live daemon.
+handed_off_successor() {
+  local pid="" run=""
+  [ -f "$HANDOFF_DIR/successor.pid" ] || return 1
+  IFS=' ' read -r pid run < "$HANDOFF_DIR/successor.pid" || [ -n "$pid" ] || return 1
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  successor_alive "$pid" || return 1
+  printf '%s %s\n' "$pid" "${run:-}"
+}
+
+# W1-T14547: a successor that crashes within this window of its handoff is a bad sha; the daemon is
+# started once from its predecessor's code tree (named in record.env) instead of from the synced
+# checkout. Deliberate exits (0 and 75-79) are not crashes and never roll back.
+HANDOFF_ROLLBACK_WINDOW_S="${RMD_HANDOFF_ROLLBACK_WINDOW_S:-900}"
+rolled_back_sha=""
+rollback_cwd=""
+handoff_record_field() { sed -n "s/^$1=//p" "$HANDOFF_DIR/record.env" 2>/dev/null | head -n 1; }
+drain_lock_has_live_holder() {
+  local pid
+  pid="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG_ROOT/state/drain.lock" 2>/dev/null | head -n 1)"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+# Succeeds, printing "<predecessor tree> <predecessor sha> <successor sha> <seconds since the handoff>",
+# when the successor `$2` exiting `$1` must roll back: at most once per successor sha.
+handoff_rollback_due() {
+  local code="$1" run="$2" yielded now age tree
+  case "$code" in 0|75|76|77|78|79) return 1 ;; esac
+  [ -n "$run" ] && [ "$(handoff_record_field successor_run_id)" = "$run" ] || return 1
+  yielded="$(handoff_record_field yielded_at_ms)"
+  [[ "$yielded" =~ ^[0-9]+$ ]] || return 1
+  now="$(date +%s%3N)"
+  age=$(( (now - yielded) / 1000 ))
+  [ "$age" -lt "$HANDOFF_ROLLBACK_WINDOW_S" ] || return 1
+  tree="$(handoff_record_field predecessor_tree)"
+  [ -n "$tree" ] && [ -d "$tree" ] || return 1
+  [ "$(handoff_record_field successor_sha)" != "$rolled_back_sha" ] || return 1
+  drain_lock_has_live_holder && return 1
+  printf '%s %s %s %s\n' "$tree" "$(handoff_record_field predecessor_sha)" "$(handoff_record_field successor_sha)" "$age"
+}
+
+# Waits for the successor to exit, then sets `rc` to the code it wrote to `<pid>.exit`. No file
+# (a SIGKILL, an OOM kill, a crash before its exit hook) is a crash: rc 1.
+watch_successor() {
+  local pid="$1" exit_file="$HANDOFF_DIR/$1.exit" code="" held=""
+  successor_pid="$pid"
+  if [ -n "$pending_signal" ]; then
+    held="$pending_signal"
+    pending_signal=""
+    forward_signal "$held"
+  fi
+  while successor_alive "$pid"; do
+    sleep "$HANDOFF_WATCH_INTERVAL_S" &
+    child_pid=$!
+    wait "$child_pid" 2>/dev/null || true
+    child_pid=""
+    [ -z "$signal_forwarded" ] || break
+  done
+  successor_pid=""
+  if [ -n "$signal_forwarded" ]; then
+    rc="${child_rc:-0}"
+    return 0
+  fi
+  if [ -f "$exit_file" ] && { IFS= read -r code < "$exit_file" || [ -n "$code" ]; } && [[ "$code" =~ ^[0-9]{1,3}$ ]]; then
+    rc="$code"
+    log "handed-off successor pid $pid exited $rc"
+  else
+    rc=1
+    log "handed-off successor pid $pid exited with no exit file at $exit_file — treating it as a crash (exit 1)"
+  fi
+  rm -f -- "$exit_file"
+}
 
 if [ "${1:-}" = "./bin/rmd" ] && [ "${2:-}" = "daemon" ]; then
   export RMD_IDLE_STARVED_SUPERVISED=1
@@ -206,6 +325,23 @@ idle_starved_wait() {
 # crashing daemon read as a success. Backgrounded, not foreground, so the trap above can react
 # while it runs; `child_rc` starts empty every pass and only the trap sets it, so an unsignaled
 # exit leaves `rc` exactly what the plain `wait` below produces.
+# One `daemon.process.exit` row per daemon process: the loop's own child, or (W1-T14546) a handed-off
+# successor, which has no heap-line capture here (`heap_path` empty).
+persist_daemon_exit() {
+  local run_id="$1" code="$2" heap_path="$3"
+  if ! node --input-type=commonjs - "$CONFIG_ROOT/state/ledger.ndjson" "$run_id" "$code" "$heap_path" "$signal_forwarded" <<'DAEMON_EXIT_EVIDENCE'
+const fs = require('node:fs');
+const [ledger, runId, code, heapPath, forwarded] = process.argv.slice(2);
+const heapLine = heapPath ? fs.readFileSync(heapPath, 'utf8').trim() : '';
+fs.appendFileSync(ledger, JSON.stringify({
+  ts: new Date().toISOString(), run_id: runId, task_id: 'DAEMON', step: 'daemon.process.exit',
+  exit_code: Number(code), clean_exit: Boolean(forwarded) || [0, 75, 79].includes(Number(code)),
+  heap_limit_line: heapLine || null,
+}) + '\n');
+DAEMON_EXIT_EVIDENCE
+  then log "could not persist daemon exit evidence (exit $code)"; fi
+}
+
 freshness_restarts=0
 blocked_restarts=0
 environmental_restarts=0
@@ -294,20 +430,55 @@ async function forwardLine(line) {
     printf '\n%s\n' "$stderr_end" >&19 || log "stderr observer already exited"
     exec 19>&-
     wait "$daemon_stderr_pid" || log "stderr observer failed; exit status is still recorded"
-    if ! node --input-type=commonjs - "$CONFIG_ROOT/state/ledger.ndjson" "$REMUDERO_RUN_ID" "$rc" "$heap_line_path" "$signal_forwarded" <<'DAEMON_EXIT_EVIDENCE'
-const fs = require('node:fs');
-const [ledger, runId, code, heapPath, forwarded] = process.argv.slice(2);
-const heapLine = fs.readFileSync(heapPath, 'utf8').trim();
-fs.appendFileSync(ledger, JSON.stringify({
-  ts: new Date().toISOString(), run_id: runId, task_id: 'DAEMON', step: 'daemon.process.exit',
-  exit_code: Number(code), clean_exit: Boolean(forwarded) || Number(code) === 0 || Number(code) === 75,
-  heap_limit_line: heapLine || null,
-}) + '\n');
-DAEMON_EXIT_EVIDENCE
-    then log "could not persist daemon exit evidence (exit $rc)"; fi
+    persist_daemon_exit "$REMUDERO_RUN_ID" "$rc" "$heap_line_path"
     rm -f -- "$heap_line_path"
     unset REMUDERO_RUN_ID
   fi
+  # W1-T14547: a rolled-back run started from its predecessor's tree; every later start is from the checkout.
+  if [ -n "$rollback_cwd" ]; then
+    cd "$TREE" || die "cannot return to $TREE after a rollback run"
+    rollback_cwd=""
+  fi
+
+  # W1-T14546: exit 79 means a standby this daemon started already holds the run. Watch it by pid
+  # instead of starting a daemon (no sync_tree: the successor runs from its own daemon slot), then
+  # route the code it exits with through the cases below; a successor may itself hand off again.
+  while [ "$rc" -eq "$DAEMON_EXIT_HANDED_OFF" ]; do
+    successor=""
+    if ! successor="$(handed_off_successor)"; then
+      # A stop that reached the exiting daemon ends here: there is no successor to stop and nothing to start.
+      [ -z "$signal_forwarded" ] || { rm -f -- "$HANDOFF_DIR/successor.pid"; break; }
+      log "handoff_successor_missing: exited $rc (handed off) but $HANDOFF_DIR/successor.pid names no live daemon — cold-starting now"
+      rm -f -- "$HANDOFF_DIR/successor.pid"
+      sync_tree
+      log "checkout: $(git -C "$TREE" rev-parse HEAD) ($REF)"
+      resolve_rmd_on_path
+      supervise_follow_checkout "$freshness_restarts" "$blocked_restarts" "$environmental_restarts"
+      continue 2
+    fi
+    rm -f -- "$HANDOFF_DIR/successor.pid"
+    successor_run="${successor#* }"
+    successor="${successor%% *}"
+    log "exited $rc (handed off) — watching successor pid $successor${successor_run:+ ($successor_run)} instead of starting a daemon"
+    # A stop the exiting daemon already took is owed to the successor, which now holds the run.
+    if [ -n "$signal_forwarded" ]; then
+      pending_signal="${sig:-TERM}"
+      signal_forwarded=""
+    fi
+    watch_successor "$successor"
+    if [ "$supervise_daemon" -eq 1 ] && [ -n "$successor_run" ]; then
+      persist_daemon_exit "$successor_run" "$rc" ""
+    fi
+    if [ -z "$signal_forwarded" ] && rollback="$(handoff_rollback_due "$rc" "$successor_run")"; then
+      read -r rollback_tree rollback_sha bad_sha rollback_age <<< "$rollback"
+      rolled_back_sha="$bad_sha"
+      rm -f -- "$HANDOFF_DIR/record.env"
+      log "handoff_rolled_back: successor ${bad_sha:-unknown} ($successor_run) exited $rc ${rollback_age}s after the handoff — starting the daemon once from $rollback_tree at ${rollback_sha:-unknown}"
+      cd "$rollback_tree" || die "cannot enter rollback tree $rollback_tree"
+      rollback_cwd="$rollback_tree"
+      continue 2
+    fi
+  done
 
   # W1-T2586: A SIGNAL THIS SHELL ITSELF FORWARDED OUTRANKS EVERY OTHER CLASSIFICATION BELOW.
   # `signal_forwarded` is set ONLY inside `forward_signal`, ONLY after TERM/INT was actually sent

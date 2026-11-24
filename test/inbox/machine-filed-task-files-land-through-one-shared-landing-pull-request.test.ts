@@ -179,7 +179,7 @@ test("W1-T12199: one sealed landing pull request; a later amendment waits, dedup
     assert.equal(f.rows(REFUSAL_AMENDMENT_STEP)[0]!.pr_url, first.url);
     assert.match(f.origin.git("show", `refs/heads/${f.branch()}:${pathOf(A)}`), /refusal-amendment \(W1-T90001, run RUN-A,/);
     assert.equal(criteria(first.body).length, 1, "one criterion for the one file");
-    assert.match(criteria(first.body)[0]!, /W1-T90001.*\| grep: refusal-amendment \(W1-T90001 in plan\/tasks\.d\/W1-T90001-fixture\.yaml/);
+    assert.match(criteria(first.body)[0]!, /W1-T90001.*\| grep: refusal-amendment \(W1-T90001, run RUN-A, in plan\/tasks\.d\/W1-T90001-fixture\.yaml/);
     assert.equal(f.origin.git("for-each-ref", "refs/heads/refusal-amendment").trim(), "", "no per-task branch is pushed");
   });
 

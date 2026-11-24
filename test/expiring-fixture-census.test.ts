@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { dirname, join as joinPath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { runSuiteShifted, runSuitesShifted } from "#src/lib/gate-gardener.js";
 import { REPO_ROOT as PROJECT_ROOT } from "#test/helpers/repo-root.js";
 
 // @source-text-subject — this suite tests a census whose subject is source-code text.
@@ -800,4 +802,137 @@ test("derived stamps are opt-in per row: a sweep field derived from an anchor st
     tree({ "test/a.test.ts": `const T0 = Date.parse("${at(-13 * DAY)}");\n  lastActivityAt: new Date(T0).toISOString(),\n` }),
   );
   assert.equal(r.population, 0, "the sweep rows measured 3/3 false positives on derived stamps (runSweep injects its clock)");
+});
+
+type ShiftMeasurement = { passed: boolean; pass: number; tests: number };
+type ShiftResult = ShiftMeasurement | { error: unknown };
+type ProvedRow = { file: string; line: number; daysLeft: number; verification?: { verdict: string; shiftDays?: number; reason?: string } };
+const { NEAR_CROSSING_HOURS, proveNearCrossings } = (await import(pathToFileURL(SCRIPT).href)) as {
+  NEAR_CROSSING_HOURS: number;
+  proveNearCrossings: (reported: ProvedRow[], runSuites: (files: string[], days: number) => Map<string, ShiftResult>, controlShiftDays: number) => void;
+};
+
+/** `files` near-crossing files of `perFile` crossings each, plus one far crossing that no run proves. */
+function crossings(files: number, perFile: number): ProvedRow[] {
+  const rows: ProvedRow[] = [];
+  for (let f = 0; f < files; f++) {
+    for (let c = 0; c < perFile; c++) rows.push({ file: `test/near-${f}.test.ts`, line: c + 1, daysLeft: 0.1 + c / (perFile * 2) });
+  }
+  rows.push({ file: "test/far.test.ts", line: 1, daysLeft: 3 });
+  return rows;
+}
+
+test("W1-T14578: the census reads each fixture once per run", () => {
+  for (const [files, perFile] of [[3, 2], [8, 5]] as const) {
+    const rows = crossings(files, perFile);
+    const runs: Array<{ files: string[]; days: number }> = [];
+    proveNearCrossings(rows, (batch, days) => {
+      runs.push({ files: [...batch], days });
+      // near-0 fails the clock control; near-1 goes red only shifted; every other file stays green.
+      return new Map(batch.map((file): [string, ShiftResult] => [file,
+        file === "test/near-0.test.ts" && days < 1 ? { passed: false, pass: 1, tests: 2 }
+          : file === "test/near-1.test.ts" && days >= 1 ? { passed: false, pass: 1, tests: 2 }
+            : { passed: true, pass: 2, tests: 2 }]));
+    }, 0.001);
+    const near = Array.from({ length: files }, (_, f) => `test/near-${f}.test.ts`);
+    assert.equal(runs.length, 2, `${files} files x ${perFile} crossings: one control run and one shifted run, never one per crossing`);
+    assert.deepEqual(runs[0], { files: near, days: 0.001 }, "the control run reads every near-crossing fixture once");
+    assert.deepEqual(runs[1], { files: near.slice(1), days: 2 }, "the shifted run reads each fixture the control passed once");
+    for (const row of rows.filter((r) => r.file !== "test/far.test.ts")) {
+      const expected = row.file === "test/near-0.test.ts" ? "control_failed" : row.file === "test/near-1.test.ts" ? "confirmed" : "shifted_passed";
+      assert.equal(row.verification?.verdict, expected, `${row.file}:${row.line} is reported from its file's one read`);
+    }
+    assert.equal(rows.at(-1)!.verification, undefined, "a crossing beyond the 24 h tier runs no suite");
+  }
+  const rows = crossings(2, 2);
+  proveNearCrossings(rows, (batch, days) => {
+    if (days >= 1) throw new Error("shifted run timed out");
+    return new Map(batch.map((file): [string, ShiftResult] => [file, file === "test/near-0.test.ts" ? { error: new Error("never reported") } : { passed: true, pass: 1, tests: 1 }]));
+  }, 0.001);
+  assert.deepEqual(rows.slice(0, 4).map((r) => [r.file, r.verification?.verdict, r.verification?.reason]), [
+    ["test/near-0.test.ts", "run_error", "Error: never reported"], ["test/near-0.test.ts", "run_error", "Error: never reported"],
+    ["test/near-1.test.ts", "run_error", "Error: shifted run timed out"], ["test/near-1.test.ts", "run_error", "Error: shifted run timed out"],
+  ], "a file with no verdict of its own is a run_error, and a run that reached none is one for every file in it");
+  const silent = crossings(1, 1);
+  proveNearCrossings(silent, () => new Map(), 0.001);
+  assert.match(String(silent[0]!.verification?.reason), /test\/near-0\.test\.ts: the run returned no verdict for it/);
+  const far = crossings(0, 0);
+  proveNearCrossings(far, () => { throw new Error("a far crossing ran a suite"); }, 0.001);
+  assert.equal(far[0]!.verification, undefined);
+});
+
+/** A checkout holding the shifted runner's preloads, the real clock shift and `files`. */
+function shiftedRoot(files: Record<string, string>): string {
+  const root = mkdtempSync(joinPath(tmpdir(), "rmd-batched-shift-"));
+  mkdirSync(joinPath(root, "test", "setup"), { recursive: true });
+  mkdirSync(joinPath(root, "scripts"));
+  symlinkSync(joinPath(PROJECT_ROOT, "node_modules"), joinPath(root, "node_modules"), "dir");
+  writeFileSync(joinPath(root, "test", "setup", "tmp-hygiene.ts"), "export {};\n");
+  symlinkSync(joinPath(PROJECT_ROOT, "scripts", "clock-shift.mjs"), joinPath(root, "scripts", "clock-shift.mjs"));
+  for (const [file, text] of Object.entries(files)) writeFileSync(joinPath(root, file), text);
+  return root;
+}
+
+test("W1-T14578: one batched shifted run measures each file it reads", () => {
+  const crossing = Date.now() + DAY / 2;
+  const root = shiftedRoot({
+    "test/green.test.ts": 'import { test } from "node:test";\ntest("one", () => {});\ntest("two", () => {});\n',
+    "test/bomb.test.ts": `import { test } from "node:test";\nimport assert from "node:assert/strict";\ntest("fresh", () => {});\ntest("bomb", () => assert.ok(Date.now() < ${crossing}));\n`,
+    "test/empty.test.ts": "export {};\n",
+    "test/crash.test.ts": 'throw new Error("the module never loads");\n',
+    "test/exit.test.ts": 'import { test } from "node:test";\ntest("green", () => {});\nprocess.exitCode = 1;\n',
+    "test/slow.test.ts": 'import { test } from "node:test";\ntest("slow", { timeout: 20 }, () => new Promise((done) => setTimeout(done, 500)));\ntest("quick", () => {});\n',
+  });
+  try {
+    let children = 0;
+    const execFile: typeof execFileSync = ((file: string, args: string[], options: object) => {
+      children++;
+      return execFileSync(file, args, options);
+    }) as typeof execFileSync;
+    const files = ["test/green.test.ts", "test/bomb.test.ts", "test/empty.test.ts", "test/crash.test.ts", "test/exit.test.ts", "test/slow.test.ts"];
+    const control = runSuitesShifted(root, files, 0.001, { execFile });
+    const error = (file: string) => String((control.get(file) as { error: unknown }).error);
+    assert.deepEqual(control.get("test/green.test.ts"), { passed: true, pass: 2, tests: 2 });
+    assert.deepEqual(control.get("test/bomb.test.ts"), { passed: true, pass: 2, tests: 2 });
+    assert.match(error("test/empty.test.ts"), /test\/empty\.test\.ts: (no named tests|never reported)/);
+    assert.match(error("test/crash.test.ts"), /test\/crash\.test\.ts: never reported its own summary/);
+    assert.deepEqual(control.get("test/exit.test.ts"), { passed: false, pass: 1, tests: 1 }, "a child that exits red after green tests is red");
+    assert.match(error("test/slow.test.ts"), /test\/slow\.test\.ts: incomplete verdict \(cancelled 1\)/);
+    const shifted = runSuitesShifted(root, files.slice(0, 2), 2, { execFile });
+    assert.deepEqual(shifted.get("test/green.test.ts"), { passed: true, pass: 2, tests: 2 });
+    assert.deepEqual(shifted.get("test/bomb.test.ts"), { passed: false, pass: 1, tests: 2 });
+    assert.equal(children, 2, "each batch is one child process, whatever its file count");
+    assert.throws(() => runSuitesShifted(root, ["test/missing.test.ts", "test/green.test.ts"], 2), /ENOENT/);
+    assert.throws(() => runSuitesShifted(root, ["test/missing.test.ts"], 2), /ENOENT/);
+    assert.deepEqual(runSuitesShifted(root, ["test/bomb.test.ts"], 2), new Map([["test/bomb.test.ts", { passed: false, pass: 1, tests: 2 }]]));
+    assert.match(String((runSuitesShifted(root, ["test/crash.test.ts"], 2).get("test/crash.test.ts") as { error: unknown }).error), /no named tests/);
+    const empty = (() => "# tests 0\n# pass 0\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n") as unknown as typeof execFileSync;
+    assert.throws(() => runSuitesShifted(root, ["test/green.test.ts", "test/bomb.test.ts"], 2, { execFile: empty }), /shifted suite of 2 files: # tests 0/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T14578: the census bound is unchanged", () => {
+  assert.equal(NEAR_CROSSING_HOURS, 24, "the near-crossing tier stays 24 h");
+  const workflow = parseYaml(readFileSync(joinPath(PROJECT_ROOT, ".github", "workflows", "ci.yml"), "utf8")) as {
+    jobs: Record<string, { name?: string; "timeout-minutes"?: number }>;
+  };
+  const lightGates = Object.values(workflow.jobs).filter((job) => job.name === "light-gates");
+  assert.equal(lightGates.length, 1);
+  assert.equal(lightGates[0]!["timeout-minutes"], 15, "the light-gates time limit stays 15 minutes");
+  // Both runners spawn under the same per-child bound (DEFUSE_RUN_TIMEOUT_MS): 15 minutes.
+  const root = shiftedRoot({ "test/a.test.ts": "", "test/b.test.ts": "" });
+  try {
+    const timeouts: number[] = [];
+    const execFile = ((_file: string, _args: string[], options: { timeout: number }) => {
+      timeouts.push(options.timeout);
+      throw new Error("bounded");
+    }) as unknown as typeof execFileSync;
+    assert.throws(() => runSuitesShifted(root, ["test/a.test.ts", "test/b.test.ts"], 2, { execFile }), /bounded/);
+    assert.throws(() => runSuiteShifted(root, "test/a.test.ts", 2, { execFile }), /bounded/);
+    assert.deepEqual(timeouts, [15 * 60_000, 15 * 60_000]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

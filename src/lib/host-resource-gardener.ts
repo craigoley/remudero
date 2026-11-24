@@ -10,6 +10,8 @@ import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { gitDirOf } from "./typecheck-buildinfo.js";
 import { landedPrUrl, prepareGardenTaskIds, recordGardenMintTimeout, releaseGardenTaskIds, type GardenTaskIdMinter, runStepsEager, runStepsSyncOnly, type GardenCheckout, type GardenCheckoutAsync, type GardenWorkspacePort } from "./gardener.js";
 import { runStepsAsync, step, type Steps } from "./git-push.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
+import { createLiveLedgerTail } from "./live-ledger-tail.js";
 import { machineShardLandingRefusal, renderMachineShard, type MachineShardSpec } from "./machine-filing.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 
@@ -36,6 +38,7 @@ import { resolveRepoLayout } from "./repo-layout.js";
  */
 
 export const HOST_RESOURCE = "host_resource";
+const JANITOR_PASS_STEP = `${HOST_RESOURCE}.janitor_pass`;
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 
@@ -123,10 +126,20 @@ export interface HostSample {
   consumerDevices?: Record<string, string>;
   janitorTs?: string;
   janitorFreedKb?: number;
+  janitorFreedBytes?: number;
+  janitorRemoved?: number;
+  janitorPhases?: JanitorPhase[];
   /** Per whole disk: busy %, await and tps averaged over the beat interval; only devices read. */
   io?: Record<string, IoReading>;
   /** Per daemon container: its memory.high, ceiling and page-cache churn over the beat; only containers read. */
   memory?: Record<string, MemoryReading>;
+}
+
+interface JanitorPhase {
+  phase: string;
+  root: string;
+  entries_removed: number | "unreadable";
+  freed_bytes: number | "unreadable";
 }
 
 /** One daemon container's memory over one beat (scripts/fleet-heartbeat.sh `mem_<container>_*`). */
@@ -173,6 +186,11 @@ export function parseHeartbeatPayload(text: string): Record<string, string> {
 
 const digits = (v: string | undefined): number | undefined => (v !== undefined && /^\d+$/.test(v) ? Number(v) : undefined);
 
+function janitorCount(raw: string | undefined): number | undefined {
+  const n = digits(raw);
+  return n !== undefined && Number.isSafeInteger(n) ? n : undefined;
+}
+
 /** `4MB`, `0GB`, `25GB` → kb; `57%` and anything else → undefined (never 0). */
 export function parseSizeKb(v: string | undefined): number | undefined {
   const m = /^([0-9]+(?:\.[0-9]+)?)([KMGT]?)B$/.exec(v ?? "");
@@ -211,6 +229,23 @@ export function sampleFromPayload(host: string, payload: Record<string, string>)
   }
   const janitorTs = payload["janitor_last_ts"];
   const freed = parseSizeKb(payload["janitor_last_freed"]);
+  const janitorFreedBytes = "janitor_last_freed_bytes" in payload
+    ? janitorCount(payload["janitor_last_freed_bytes"])
+    : freed === undefined ? undefined : janitorCount(String(freed * 1024));
+  const janitorRemoved = janitorCount(payload["janitor_last_removed"]);
+  const janitorPhases: JanitorPhase[] = [];
+  for (let i = 1; i <= 8; i++) {
+    const [phase, ...fields] = (payload[`janitor_phase_${i}`] ?? "").split("|");
+    if (!phase || fields.length < 3) continue;
+    const bytes = fields.pop();
+    const entries = fields.pop();
+    janitorPhases.push({
+      phase,
+      root: fields.join("|") || "unknown",
+      entries_removed: janitorCount(entries) ?? "unreadable",
+      freed_bytes: janitorCount(bytes) ?? "unreadable",
+    });
+  }
   const io = ioFromPayload(payload);
   const memory = memoryFromPayload(payload);
   return {
@@ -223,6 +258,9 @@ export function sampleFromPayload(host: string, payload: Record<string, string>)
     consumerDevices,
     ...(janitorTs && Number.isFinite(Date.parse(janitorTs)) ? { janitorTs } : {}),
     ...(freed !== undefined ? { janitorFreedKb: freed } : {}),
+    ...(janitorFreedBytes !== undefined ? { janitorFreedBytes } : {}),
+    ...(janitorRemoved !== undefined ? { janitorRemoved } : {}),
+    ...(janitorPhases.length ? { janitorPhases } : {}),
     ...(io ? { io } : {}),
     ...(memory ? { memory } : {}),
   };
@@ -871,6 +909,7 @@ interface GardenState {
   acrLogin: Record<string, { ts: string; result: "ok" | "failed"; escalatedAt?: string }>;
   stateBackup: Record<string, { ts: string; verdict: string; escalatedAt?: string }>;
   cloneHealth: Record<string, CloneEpisode>;
+  janitorPasses: Record<string, string>;
 }
 
 /** W1-T13410: the install clone of one host, as its newest beats read. */
@@ -894,15 +933,15 @@ export function hostResourceOffPath(stateDir: string): string {
 
 function readState(stateDir: string): GardenState {
   const path = hostResourceStatePath(stateDir);
-  if (!existsSync(path)) return { episodes: {}, filed: {}, acrLogin: {}, stateBackup: {}, cloneHealth: {} };
+  const empty = { episodes: {}, filed: {}, acrLogin: {}, stateBackup: {}, cloneHealth: {}, janitorPasses: {} };
+  if (!existsSync(path)) return empty;
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<GardenState>;
-    return { episodes: parsed.episodes ?? {}, filed: parsed.filed ?? {}, acrLogin: parsed.acrLogin ?? {}, stateBackup: parsed.stateBackup ?? {}, cloneHealth: parsed.cloneHealth ?? {} };
+    return { episodes: parsed.episodes ?? {}, filed: parsed.filed ?? {}, acrLogin: parsed.acrLogin ?? {}, stateBackup: parsed.stateBackup ?? {}, cloneHealth: parsed.cloneHealth ?? {}, janitorPasses: parsed.janitorPasses ?? {} };
   } catch (error) {
-    // deliberate: an unreadable state file restarts every episode; the worst case is one repeat
-    // handoff, which the open-feedback and plan-origin checks turn into a no-op.
+    // A damaged state file resets episodes and pass cursors. Feedback and plan origins dedup handoffs.
     void error;
-    return { episodes: {}, filed: {}, acrLogin: {}, stateBackup: {}, cloneHealth: {} };
+    return empty;
   }
 }
 
@@ -1132,6 +1171,28 @@ export function runHostResourcePassAsync(ports: HostResourcePorts): Promise<Pass
   return runStepsAsync(hostResourcePassSteps(ports));
 }
 
+function janitorPassRow(sample: HostSample): Record<string, unknown> {
+  return {
+    host: sample.host,
+    janitor_ts: sample.janitorTs,
+    freed_bytes: sample.janitorFreedBytes ?? "unreadable",
+    entries_removed: sample.janitorRemoved ?? "unreadable",
+    phases: sample.janitorPhases ?? [],
+  };
+}
+
+function newerJanitorPass(ts: string, previous: string | undefined): boolean {
+  return Date.parse(ts) > (previous === undefined ? -Infinity : Date.parse(previous));
+}
+
+function recoverJanitorPasses(stateDir: string, passes: Map<string, string>, nowMs: number): void {
+  const read = createLiveLedgerTail(join(stateDir, LEDGER_FILENAME), Infinity, { keepLine: /"step"\s*:\s*"host_resource\.janitor_pass"/ });
+  for (const row of read(nowMs)) {
+    if (row.step !== JANITOR_PASS_STEP || typeof row.host !== "string" || typeof row.janitor_ts !== "string") continue;
+    if (newerJanitorPass(row.janitor_ts, passes.get(row.host))) passes.set(row.host, row.janitor_ts);
+  }
+}
+
 function* hostResourcePassSteps(ports: HostResourcePorts): Steps<PassResult> {
   const clock = ports.clock ?? systemClock;
   if (existsSync(hostResourceOffPath(ports.stateDir))) return { ran: false, appended: 0, findings: [] };
@@ -1354,7 +1415,22 @@ function* hostResourcePassSteps(ports: HostResourcePorts): Steps<PassResult> {
     delete state.episodes[key];
   }
   judgeFiled(state, all, nowMs, ports);
-  writeAtomic(hostResourceStatePath(ports.stateDir), JSON.stringify(state, null, 2) + "\n");
+  // Refresh the cursors after the last async step so overlapping passes emit and save in order.
+  const janitorPasses = new Map(Object.entries(readState(ports.stateDir).janitorPasses));
+  try {
+    if (incoming.some((sample) => sample.janitorTs && newerJanitorPass(sample.janitorTs, janitorPasses.get(sample.host)))) {
+      // An append may have survived a stop before the state file was saved.
+      recoverJanitorPasses(ports.stateDir, janitorPasses, nowMs);
+    }
+    for (const sample of incoming) {
+      if (!sample.janitorTs || !newerJanitorPass(sample.janitorTs, janitorPasses.get(sample.host))) continue;
+      ports.log(JANITOR_PASS_STEP, janitorPassRow(sample));
+      janitorPasses.set(sample.host, sample.janitorTs);
+    }
+  } finally {
+    state.janitorPasses = Object.fromEntries(janitorPasses);
+    writeAtomic(hostResourceStatePath(ports.stateDir), JSON.stringify(state, null, 2) + "\n");
+  }
   if (appended.length) ports.log(`${HOST_RESOURCE}.pass`, { hosts: new Set(all.map((s) => s.host)).size, falling: findings.length, escalated: findings.filter((f) => f.tier === "escalate").length });
   return { ran: true, appended: appended.length, findings };
 }

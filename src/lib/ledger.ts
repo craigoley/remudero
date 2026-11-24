@@ -232,13 +232,45 @@ export interface LedgerWriterDeps {
 }
 
 export class LedgerAppendConflict extends RmdError {
-  constructor(message: string) {
+  /** `unwritten`: the row is not in the ledger (never written, or withdrawn), so a caller may decide again. */
+  constructor(message: string, readonly unwritten = false) {
     super("read-model", GENERIC_EXIT_CODE, message);
   }
 }
 
 export function ledgerFileVersion(stat: BigIntStats): string {
   return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+}
+
+/** The rows appended to the same live file since the {@link ledgerFileVersion} `since`, and the version they end at. */
+export function readLiveLedgerGrowth(path: string, since: string):
+  { rows: Record<string, unknown>[]; version: string } | { refused: string } {
+  let fd: number | undefined;
+  try {
+    const [dev, ino, size] = since.split(":");
+    const from = BigInt(size ?? "");
+    fd = openSync(path, "r");
+    const stat = fstatSync(fd, { bigint: true });
+    const version = ledgerFileVersion(stat);
+    if (String(stat.dev) !== dev || String(stat.ino) !== ino) return { refused: "the live ledger was replaced" };
+    if (stat.size < from) return { refused: "the live ledger shrank" };
+    if (stat.size === from) return version === since ? { rows: [], version } : { refused: "the live ledger was rewritten" };
+    const tail = Buffer.alloc(Number(stat.size - from));
+    if (readSync(fd, tail, 0, tail.length, from) !== tail.length) return { refused: "short read of the appended rows" };
+    if (tail[tail.length - 1] !== 0x0a) return { refused: "the appended rows end without a newline" };
+    const rows: Record<string, unknown>[] = [];
+    for (const line of tail.toString("utf8").split("\n")) {
+      if (line.trim() === "") continue;
+      const row = JSON.parse(line) as unknown;
+      if (row === null || typeof row !== "object" || Array.isArray(row)) return { refused: "an appended row is not an object" };
+      rows.push(row as Record<string, unknown>);
+    }
+    return { rows, version };
+  } catch (error) {
+    return { refused: `could not read the appended rows: ${String(error)}` };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 function openLedgerForAppend(path: string, expectedLiveVersion: string | undefined): number {
@@ -258,7 +290,7 @@ function verifyLedgerBeforeAppend(fd: number, expectedLiveVersion: string): bigi
     throw new LedgerAppendConflict("live ledger has an unterminated tail");
   }
   if (ledgerFileVersion(fstatSync(fd, { bigint: true })) !== expectedLiveVersion) {
-    throw new LedgerAppendConflict("live ledger changed before the decline append");
+    throw new LedgerAppendConflict("live ledger changed before the decline append", true);
   }
   return size;
 }
@@ -280,7 +312,7 @@ function verifyAppendAtCheckedSize(path: string, fd: number, checkedSize: bigint
   withdrawAppendedRow(path, fd, checkedSize + BigInt(at), row.length, torn);
   throw new LedgerAppendConflict(torn
     ? "live ledger gained an unterminated row before the decline append"
-    : "live ledger gained a row before the decline append");
+    : "live ledger gained a row before the decline append", true);
 }
 
 /**
@@ -638,6 +670,7 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "dispatch.claim", // W1-T9001: promise recovery uses the earliest claim to bound its archive read.
   "memory_read.recovered", // W1-T7720: past recovery durations derive the sustained-unreadable bound.
   "sweep.fix.owner_residue_preserved", // W1-T6434: the next fix round reads the preserved patch it names.
+  "host_resource.janitor_pass", // Recover the cursor if the gardener stopped after appending the row.
   // The sweep reads these exact-head security decisions from the live ledger after async judgment.
   // Archiving them re-judges settled alerts or forgets an already admitted repair.
   "code_scanning.judged_fix",
@@ -732,6 +765,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "daemon.admission_held",
   "daemon.detached_action_abandoned", // restartCycleRow uses the bounded age after admission cancellation removes the wait row.
   "daemon.restart_cycle",
+  // W1-T14547: restartCycleRow marks a handed-off cycle by these and times it to the successor's first tick.
+  "daemon.handoff_yielded",
+  "daemon.standby_promoted",
+  "daemon.boot_phases",
   "daemon.freshness_drain.completed",
   "daemon.memory_exit",
   "daemon.memory_drain.completed",
@@ -1036,6 +1073,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T5903: runSweep reads this row back to write ONE skipped_queue row per PR and head; dropping
   // it on rotation would re-log the same stand-down every pass.
   "sweep.update_branch.skipped_queue",
+  // W1-T14315: a light-pass slot that found its PR merged, closed or moved writes this row instead of
+  // an update. It is kept beside its siblings so rotation cannot erase the evidence that no update ran.
+  "sweep.update_branch.skipped_not_open",
   // W1-T7735: the refresh value test reads its own decision rows back. Judge rulings are spent once
   // per head, a repeated skip writes no second row, and a request is consumed once. Outcomes join
   // decisions to derive the benefit weight. Each row dropped on rotation would re-spend a judge call
@@ -1081,6 +1121,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "plan.move.janitor_step",
   "plan.move.stand_down",
   "plan.move.step",
+  // W1-T14536: plan.move.tick_in_flight (PLAN_TASK_MOVE_IN_FLIGHT_STEP, daemon.ts) names the phase and age of a tick
+  // that has not settled.
+  "plan.move.tick_in_flight",
   // KEEP THE W1-T964 TRIO LAST, immediately before the Set's close: test/ledger-rotation.test.ts
   // anchors its mutation check on those three lines followed by `]);` and asserts the needle occurs
   // EXACTLY once. A block appended after them silently breaks that anchor.

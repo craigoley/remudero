@@ -17,8 +17,10 @@ import { join } from "node:path";
 
 import { affectedSelectionOrFullAsync, readAffectedSuitesInputAsync } from "./affected-suites.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
+import { loopAvailableDeadline, systemClock } from "./clock.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { loadMounts, mountsPath } from "./mounts.js";
+import { isDiffTooLarge, PR_DIFF_READ_TIMEOUT_MS } from "./pr-diff.js";
 import { JUDGE_SHADOW_COMPARED_KEY, resolveCiJudgeMount, runJudgeShadow } from "./risk-judge.js";
 import { spawnWorker } from "./worker.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
@@ -188,6 +190,7 @@ export function buildCiJudgePrompt(input: { pr: number; headSha: string; changed
 export interface CiJudgePr {
   number: number;
   headSha: string;
+  baseSha?: string;
 }
 
 /** Everything one daemon pass touches, as ports, so a test drives the whole pass offline. */
@@ -320,6 +323,34 @@ export function productionCiJudgePorts(opts: {
   const readJson = opts.ghJson ?? ((args: string[]) => ghJsonAsync(args));
   const ghText = opts.ghText ?? ((args: string[]) => ghTextAsync(args, { maxBuffer: 64 * 1024 * 1024 }));
   const slug = `${opts.owner}/${opts.repo}`;
+  const readDiff = async (pr: CiJudgePr, namesOnly: boolean): Promise<{ output: string; local: boolean }> => {
+    try {
+      const args = ["pr", "diff", String(pr.number), "--repo", slug];
+      if (namesOnly) args.push("--name-only");
+      return { output: await ghText(args), local: false };
+    } catch (error) {
+      const message = String((error as Error)?.message ?? error);
+      if (!isDiffTooLarge(message) || pr.baseSha === undefined) throw error;
+      const objectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i;
+      if (!objectId.test(pr.baseSha) || !objectId.test(pr.headSha)) throw error;
+      const comparison = `${pr.baseSha}...${pr.headSha}`;
+      const args = namesOnly ? ["--name-only", "-z"] : ["--patch", "--no-color"];
+      const controller = new AbortController();
+      const cancel = loopAvailableDeadline(systemClock, PR_DIFF_READ_TIMEOUT_MS, () => {
+        controller.abort(new Error(`local diff exceeded ${PR_DIFF_READ_TIMEOUT_MS}ms`));
+      });
+      try {
+        const output = await hostWorktreeGitAsync(opts.repoRoot, ["diff", ...args, comparison, "--"], {
+          maxBuffer: 1 << 26, signal: controller.signal,
+        });
+        return { output, local: true };
+      } catch (localError) {
+        throw new Error(`${message}; local diff failed: ${String((localError as Error)?.message ?? localError)}`, { cause: localError });
+      } finally {
+        cancel();
+      }
+    }
+  };
   const suiteIds: CiJudgePorts["suiteIds"] = opts.suiteIds ?? (async () =>
     (await hostWorktreeGitAsync(opts.repoRoot, ["ls-files", "--", "test"], { maxBuffer: 1 << 26 }))
       .split("\n").filter((path) => SUITE.test(path)));
@@ -328,12 +359,16 @@ export function productionCiJudgePorts(opts: {
     openPrs: async () => {
       const rows = await readJson(["api", `repos/${slug}/pulls?state=open&per_page=50`]);
       if (!Array.isArray(rows)) throw new Error("the open pull request list is not an array");
-      return rows.flatMap((row: { number?: unknown; head?: { sha?: unknown } }) =>
-        typeof row.number === "number" && typeof row.head?.sha === "string" ? [{ number: row.number, headSha: row.head.sha }] : []);
+      return rows.flatMap((row: { number?: unknown; head?: { sha?: unknown }; base?: { sha?: unknown } }) =>
+        typeof row.number === "number" && typeof row.head?.sha === "string"
+          ? [{ number: row.number, headSha: row.head.sha, ...(typeof row.base?.sha === "string" ? { baseSha: row.base.sha } : {}) }]
+          : []);
     },
-    changedFiles: async (pr) =>
-      (await ghText(["pr", "diff", String(pr.number), "--repo", slug, "--name-only"])).split("\n").map((l) => l.trim()).filter(Boolean),
-    diff: (pr) => ghText(["pr", "diff", String(pr.number), "--repo", slug]),
+    changedFiles: async (pr) => {
+      const { output, local } = await readDiff(pr, true);
+      return local ? output.split("\0").filter(Boolean) : output.split("\n").map((line) => line.trim()).filter(Boolean);
+    },
+    diff: async (pr) => (await readDiff(pr, false)).output,
     suiteIds,
     floor: opts.floor ?? ((changed) => affectedSelectionOrFullAsync(changed, () => readAffectedSuitesInputAsync(opts.repoRoot, changed))),
     judge: async (prompt, pr) => {

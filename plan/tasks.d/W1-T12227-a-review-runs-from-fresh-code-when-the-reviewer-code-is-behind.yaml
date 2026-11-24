@@ -20,25 +20,33 @@
     - W1-T11152
     - W1-T11928
   files:
+    - src/lib/run-child.ts
     - src/run-task.ts
     - src/cli/commands/review.ts
     - src/cli/commands/sweep.ts
     - src/lib/review.ts
+    - src/lib/child-entry-argv.ts
+    - src/lib/config-gardener.ts # 2026-11-23: the new review.refused_after_finished_review receipt joins the config gardener's PR-step list
     - test/review/a-review-runs-from-fresh-code-when-the-reviewer-code-is-behind.test.ts
-  status: queued
+    - test/a-review-is-judged-against-main-at-its-start.test.ts
+    - test/an-untasked-pr-silently-skips-the-semantic-reviewer.test.ts
+    - test/gardeners/the-config-gardener-reads-the-same-steps-once-gather-runs-owns-its-list.test.ts # 2026-11-23: pins the gardener's step set
+    - test/helpers/the-config-gardener-reads-only-the-ledger-steps-it-prices.ts # 2026-11-23: one fixture row per gardener step
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A review that the fix pipeline requires reads the freshness of the reviewer code before it starts a reviewer. If the reading is stale, the review runs from the fresh tree and no reviewer starts in this process. The test drives `buildRequiredFixReviewRunner`"
       proof: "grep: W1-T12227 criterion 1 in test/review/a-review-runs-from-fresh-code-when-the-reviewer-code-is-behind.test.ts"
-    - claim: "A review that runs as a run child reads the freshness at its start. If the reading is stale, the child starts no reviewer and the review runs from the fresh tree. The test drives the detached review work of the run child"
+    - claim: "A review that runs as a run child goes through the same start check before it starts a reviewer. If the reading is stale, the child starts no reviewer and the review runs from the fresh tree. The test drives `runDetachedReview` through `buildReviewerCodeFreshnessGate`"
       proof: "grep: W1-T12227 criterion 2 in test/review/a-review-runs-from-fresh-code-when-the-reviewer-code-is-behind.test.ts"
-    - claim: "A fresh-tree child whose own start reading is stale exits before it starts a reviewer, with the exit cause `stale-at-own-start`. The gate then runs the review one more time, from a tree at the new head of main. It does not try a third time"
+    - claim: "A fresh-tree child whose own start reading is stale exits before its pending status and before it starts a reviewer, with the exit cause `reviewer-stale-at-start`. The gate then runs the review one more time, from a tree at the new head of main. It does not try a third time"
       proof: "grep: W1-T12227 criterion 3 in test/review/a-review-runs-from-fresh-code-when-the-reviewer-code-is-behind.test.ts"
     - claim: "If the fresh tree cannot run, no reviewer starts and the row `review.skipped_stale_reviewer_code` gives the reason, as today. No path starts a reviewer on a stale reading"
       proof: "grep: W1-T12227 criterion 4 in test/review/a-review-runs-from-fresh-code-when-the-reviewer-code-is-behind.test.ts"
     - claim: "If the publication check refuses a terminal verdict for stale reviewer code after a reviewer ran, it writes one row `review.refused_after_finished_review`. The row has the pull request, the head, the path that admitted the review and the reviewer time spent. The row `review.post_refused` stays as today"
       proof: "grep: W1-T12227 criterion 5 in test/review/a-review-runs-from-fresh-code-when-the-reviewer-code-is-behind.test.ts"
-    - claim: "With a fresh reading at admission, the review runs in this process and that reading decides the publication, as today"
+    - claim: "invariant:fresh-reading-runs-as-today — with a fresh reading at admission, the review runs in this process and that reading decides the publication, as today"
+      kind: guard
       proof: "grep: W1-T12227 criterion 6 in test/review/a-review-runs-from-fresh-code-when-the-reviewer-code-is-behind.test.ts"
     - claim: "If the store has a compiled entry for the commit of the fresh tree, the child runs it. If the store has none, the runner starts one build for that commit and does not wait for it. A later review of the same commit runs the compiled entry"
       proof: "grep: W1-T12227 criterion 7 in test/review/a-review-runs-from-fresh-code-when-the-reviewer-code-is-behind.test.ts"
@@ -60,14 +68,25 @@
     Which of the three paths gave the 42 refusals is not established. The row of criterion 5 names the path, so the count per path is readable after the merge.
     This task depends on W1-T12225 and W1-T12226: it sends more reviews through the fresh tree, and that path failed in 26 of 56 runs.
   design: |
-    1. One function decides the path of a review before any reviewer spend. It reads the freshness once. Fresh: run in this process with that reading as the start reading. Stale: run from the fresh tree. Unreadable: keep the behaviour of today.
-    2. Call that function from the three places that start a review: the sweep gate (it does this already), `buildRequiredFixReviewRunner`, and the detached review work that `runDetachedReview` runs.
-    3. In the review command, a child with the flag `--judge-at-own-start` that reads stale returns before the pending status and before the reviewer. It reports the exit cause `stale-at-own-start` (W1-T12225). The gate makes a tree at the new head and runs the child one more time.
+    INVARIANT fresh-reading-runs-as-today: with a fresh reading at admission the review runs in this process and that
+    reading decides the publication, as today.
+    1. `decideReviewPath` in src/lib/run-child.ts decides the path of a review before any reviewer spend. It reads the freshness once. Fresh or unreadable: run in this process with that reading as the start reading (unreadable keeps the just-in-time read at publication, as today). Stale: run from the fresh tree through the gate's `fromFreshTree`. Inside the fresh tree, `buildFreshTreeReviewRunner` still sends a review whose shared tree is leased to its own per-attempt tree (W1-T14066).
+    2. `reviewerCodeStartGate` (the sweep gate, and the run child's review through `gatedDetachedReviewCommand`, W1-T12824) and `buildRequiredFixReviewRunner` (src/run-task.ts) call that function. On a stale reading the required fix review runs from the fresh tree through the sweep's gate and returns a withheld result, so the fix rung stands down as it does on a withheld verdict today.
+    3. In the review command, a child with the flag `--judge-at-own-start` that is not a shadow review and reads stale returns before the pending status and before the reviewer, with the exit cause `reviewer-stale-at-start` (W1-T12226's cause; its gate retry at the new head of main stays as built).
     4. In `publishReviewStatusLocked`, when the refusal is for a stale reading and the state is terminal, write `review.refused_after_finished_review` after `review.post_refused`. Take the path and the reviewer time from the caller. This row is a defect count: the target is 0.
-    5. In `buildFreshTreeReviewRunner`, when the store misses for the commit, start `buildIntoStore` for the tree once per commit. Do not wait for it. Write one row with the result of the build.
+    5. In `spawnRmdReviewForFreshTree`, when the store misses for the shared fresh tree, call `fillStoreForOwnTree` once per commit with source `fresh-tree-review`. Do not wait for it. The build writes its existing `child_entry.*` result row. A per-attempt tree is not built, because it is removed when it settles.
     Keep the fail-closed rule: a review runs with fresh code or it does not run.
     NOT IN SCOPE: the restart score (W1-T12230), and a verdict that was computed and could not post (W1-T11928).
   falsifier: |
-    Let `buildRequiredFixReviewRunner` run the review on a stale reading and criterion 1 must fail. Let the run child read only at publication and criterion 2 must fail. Let a stale child start its reviewer and criterion 3 must fail. Remove the new row and criterion 5 must fail. Remove the build and criterion 7 must fail. Restore and require all eight to pass.
+    Let `buildRequiredFixReviewRunner` run the review on a stale reading and criterion 1 must fail. Let the run child's review skip the start check and criterion 2 must fail. Let a stale child start its reviewer and criterion 3 must fail. Remove the new row and criterion 5 must fail. Remove the build and criterion 7 must fail. Restore and require all eight to pass.
   note: |
+    Amendment 2026-11-23 (hand scope scan stacked on W1-T12226, nothing committed): W1-T12824 moved the start gate, the
+    fresh-tree row and the detached review to src/lib/run-child.ts, and gated `runDetachedReview`, so the run child no
+    longer calls the review command with no start reading. W1-T12226 names a fresh-tree child's stale own-start exit
+    `reviewer-stale-at-start` and adds the one gate retry; this task keeps that name and makes the child exit before
+    judging. Two tests outside the old files change: test/a-review-is-judged-against-main-at-its-start.test.ts (the
+    W1-T9727 stale own-start case no longer reaches post_refused) and
+    test/an-untasked-pr-silently-skips-the-semantic-reviewer.test.ts (buildRequiredFixReviewRunner takes the gate). The
+    scan ran 115 related suites with the change; no other test changes. A shadow review is exempt from the early exit,
+    so calibration cases stay measured.
     After the merge, read the rows for 7 days. The count of `review.refused_after_finished_review` was 42 in the 7 days before; the target is 0. The restart decisions with the trigger "withheld reviews" were 11 of 45; they fall when the refusals fall.

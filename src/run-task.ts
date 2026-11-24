@@ -1253,7 +1253,7 @@ import {
   runAutomatedRetroSubprocess,
 } from "./lib/retro-subprocess.js";
 import { regenerateOrientation } from "./lib/orientation.js";
-import { childEntryArgv, childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, type ChildEntryStoreOptions } from "./lib/child-entry-argv.js";
+import { childEntryArgv, childEntrySpawnedRow, CHILD_ENTRY_SPAWNED_STEP, FILLABLE_MISSES as FILLABLE_STORE_MISSES, type ChildEntryStoreOptions } from "./lib/child-entry-argv.js";
 import {
   bodyWithFailingProofAtOpen,
   checkProofLaunchArgv,
@@ -1388,7 +1388,8 @@ import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-c
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
 import { foldTriageLaneOutcomes, triageOutcomesCommand } from "./lib/triage-lane-outcomes.js";
-import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, attemptAssignmentJoin, recordBenchmarkWorkerAttempt, benchmarkEvidenceLedgerPath, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput, terminalVerdictFields } from "./lib/benchmark-run.js";
+import { benchmarkNonDispatchSpawn, benchmarkRunAssignmentReceipt, benchmarkRunAttemptReceipt, benchmarkRunTerminalReceipt, benchmarkWorkerAttemptResources, executingHarnessRevision, withCallerOwnedReceipt, withReceiptIdentity, type BenchmarkStackEvidence, attemptAssignmentJoin, recordBenchmarkWorkerAttempt, benchmarkEvidenceLedgerPath, nonDispatchBenchmarkWork, observeBenchmarkWork, receiptOrphanedAssignments, sweepInflightLocksWithReceipts, type BenchmarkWorkInput, terminalVerdictFields, namedTaskWork, planTaskBenchmarkWork, type BenchmarkTaskWorkReader } from "./lib/benchmark-run.js";
+export { planTaskBenchmarkWork };
 import { repairReceiptFields, type RepairReceiptContext } from "./lib/repair-cost-evidence.js";
 
 // Read from this module's actual loaded path once, not from cwd or a later origin/main HEAD.
@@ -1523,6 +1524,10 @@ import {
 import type { DuplicateCorpusEntry } from "./lib/knowledge-dedup.js";
 import {
   addedExportsFromPatch,
+  addedModulesFromPatch,
+  exportsNewInPatch,
+  exportsWithoutProductionCaller,
+  type ProductionCallerTree,
   assertLintClean,
   changedTaskIds,
   rawChangedTaskIds,
@@ -1816,6 +1821,7 @@ import {
   type PlanLintOutcome,
   type ReviewEvaluatorProvenance,
   type NameFilterResolution,
+  type ReviewAdmission,
   registerReviewerCheckout,
   INSTRUMENT_SURFACE,
   INSTRUMENT_SURFACE_EXCLUSIONS,
@@ -1975,7 +1981,7 @@ export type FreshTreeReviewSeams = {
    *  non-zero exit it first hands `onFailure` the child's bounded stderr tail (W1-T4055). */
   spawnReview: (worktree: string, args: string[], onFailure?: (failure: string) => void,
     parentEnv?: NodeJS.ProcessEnv, onEntry?: (entry: FreshTreeEntry) => void,
-    store?: { storeRoot?: string }, onExit?: (exit: FreshTreeExit) => void) => Promise<number>;
+    store?: { storeRoot?: string; fill?: StoreFill }, onExit?: (exit: FreshTreeExit) => void) => Promise<number>;
   /** Tests may replace ownership; production holds the general reaper's real run-lock token. */
   withWorktreeLease?: <T>(worktree: string, action: () => Promise<T>) => Promise<T>;
   /** Remove a tree this process cut for one attempt through the async hardened Git leaf by default.
@@ -2000,7 +2006,13 @@ export type FreshTreeReviewSeams = {
   prepareWorktree?: (repoDir: string, worktreePath: string) => boolean;
   /** Where worktrees are cut. One per code sha, reused across PRs in the same pass. */
   worktreeRoot: string;
+  /** W1-T12227: on a store miss for the shared tree, build its compiled entries once per commit, unawaited, ledgered here. */
+  storeFill?: StoreFill;
 }
+
+type StoreFill = { log: StoreLog; build?: OwnTreeFillOptions["build"] };
+/** W1-T12227: the `source` a fresh-tree review's fill ledgers on child_entry.store_build_requested. */
+const FRESH_TREE_REVIEW_FILL_SOURCE = "fresh-tree-review";
 
 /** Existing loaded configuration is the opt-in boundary; never load/create config in an offline reader. */
 function selectedRegistryIntentForConfig(config: Config) {
@@ -2093,7 +2105,7 @@ export function buildFreshTreeReviewRunner(
   const prepared = new Map<string, string>();
   return async (prArg, rest, freshness, onFailure, onEntry, onExit) => {
     const sha = freshness.originMainSha;
-    const review = (tree: string) => deps.spawnReview(tree, [prArg, ...rest], onFailure, undefined, onEntry, undefined, onExit);
+    const review = (tree: string, store?: { fill?: StoreFill }) => deps.spawnReview(tree, [prArg, ...rest], onFailure, undefined, onEntry, store, onExit);
     // W1-T14066: a busy or unproven shared tree is never reviewed in, added over or removed. The
     // review cuts its own tree at the same sha instead, and skips only when that cannot be done.
     let ownTree = false;
@@ -2131,7 +2143,8 @@ export function buildFreshTreeReviewRunner(
           prepared.delete(sha);
           throw new Error(`cached reviewer worktree at ${reviewerTree} is no longer an exact clean detached checkout of ${sha}`);
         }
-        return review(reviewerTree);
+        // A per-attempt tree is removed when it settles, so only the shared tree fills the store (W1-T14066).
+        return review(reviewerTree, deps.storeFill === undefined ? undefined : { fill: deps.storeFill });
       };
       try {
         return await (deps.withWorktreeLease ?? withReviewerWorktreeLease)(reviewerTree, run);
@@ -2333,11 +2346,16 @@ export function spawnRmdReviewForFreshTree(
   onFailure?: (failure: string) => void,
   parentEnv: NodeJS.ProcessEnv = process.env,
   onEntry?: (entry: FreshTreeEntry) => void,
-  store: { storeRoot?: string } = {},
+  store: { storeRoot?: string; fill?: StoreFill } = {},
   onExit?: (exit: FreshTreeExit) => void,
 ): Promise<number> {
   return new Promise<number>((resolve, reject) => {
     const prepared = materializeMainEntryFromStore(worktree, store.storeRoot);
+    // W1-T12227: a commit the store has no build for gets one, not awaited; this child still runs tsx, a later one the bundle.
+    if (store.fill !== undefined && prepared.lookup.outcome === "miss" && FILLABLE_STORE_MISSES.has(prepared.lookup.reason)) {
+      fillStoreForOwnTree(worktree, prepared.lookup.hash ?? prepared.source?.hash, { storeRoot: store.storeRoot ?? defaultChildEntryStoreRoot(),
+        source: FRESH_TREE_REVIEW_FILL_SOURCE, log: store.fill.log, ...(store.fill.build === undefined ? {} : { build: store.fill.build }) });
+    }
     const exitDir = makeTempDir("review-exit");
     const exitFile = join(exitDir, "cause");
     const sourceArgs = prepared.source ? ["--main-entry-source", JSON.stringify(prepared.source)] : [];
@@ -2759,15 +2777,26 @@ export async function mainTipViaGit(repoDir: string): Promise<string> {
   return (await hostWorktreeGitAsync(repoDir, ["rev-parse", "origin/main"])).trim();
 }
 
+/** W1-T12227: the fix pipeline's required review, routed by {@link decideReviewPath}. On a stale reading no reviewer starts in
+ *  this process: the review runs from a fresh tree through the sweep's gate, and the rung gets a withheld result. */
 export function buildRequiredFixReviewRunner(
   next: typeof runReview,
   readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
+  stale: { gate: Pick<ReviewerCodeStartGate<ReviewCommandDeps>, "fromFreshTree">; readHead: (prUrl: string) => string },
 ): typeof runReview {
-  return async (args) => {
-    const startFreshness = await ownStartFreshness(readFreshness);
-    return next({ ...args, requireSemanticReview: true,
-      reviewerCodeFreshness: reviewerFreshnessForPublication(startFreshness, readFreshness) });
-  };
+  return (args) => decideReviewPath(() => ownStartFreshness(readFreshness),
+    (start) => next({ ...args, requireSemanticReview: true, admission: "required-fix",
+      reviewerCodeFreshness: reviewerFreshnessForPublication(start, readFreshness) }),
+    async (reading) => {
+      const headSha = stale.readHead(args.prUrl);
+      const pr = /\/pull\/(\d+)/.exec(args.prUrl)?.[1] ?? args.prUrl;
+      const code = await stale.gate.fromFreshTree(pr, ["--repo", `${args.owner}/${args.repo}`], { executionMode: "semantic" }, reading);
+      const behind = `reviewer code ${reading.codeSha.slice(0, 12)} is behind origin/main ${reading.originMainSha.slice(0, 12)}`;
+      const reason = code === undefined ? `${behind}; no fresh tree could run, so no reviewer started`
+        : `${behind}; the review ran from a fresh tree and exited ${code}`;
+      return { state: "pending", criteria: [], testTheater: false, summary: reason, floorDegraded: false, capped: false,
+        keywordOnly: false, planOnly: false, headSha, reviewerOutcome: "not_attempted_stale_reviewer_code", verdictWithheld: reason };
+    });
 }
 
 export function buildSweepEffects(
@@ -7765,6 +7794,8 @@ async function runReview(args: {
    * call sites supply it immediately before posting; test-only direct calls retain their existing
    * isolated status-poster contract. */
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
+  /** W1-T12227: the path that admitted this review. */
+  admission?: ReviewAdmission;
 }): Promise<ReviewRunResult> {
   return runReviewFromModule(reviewCommandHost(), args);
 }
@@ -10887,6 +10918,7 @@ function ledgerNonDispatchAssignment(
   config?: Config,
   runId?: string,
   taskId?: string,
+  readTask: BenchmarkTaskWorkReader = planTaskBenchmarkWork(join(repoRoot, "plan")),
 ): void {
   const path = benchmarkEvidenceLedgerPath(config);
   if (path === undefined) return;
@@ -10896,12 +10928,17 @@ function ledgerNonDispatchAssignment(
     step: "worker.assignment",
     lane,
     worker_assignment: assignment,
-    benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane), workerBoundaryStack),
+    // W1-T12152: a named task's class and risk, as a build assignment records them; else the lane and the named reason.
+    benchmark_run: benchmarkRunAssignmentReceipt(assignment, nonDispatchBenchmarkWork(lane, namedTaskWork(taskId, readTask)),
+      workerBoundaryStack),
   });
 }
 
-export function ledgeredNonDispatchSpawn(lane: string, raw: typeof spawnWorker = spawnWorker): typeof spawnWorker {
-  return benchmarkNonDispatchSpawn(lane, raw);
+/** The non-dispatch receipt wrapper, reading a named task's record from `planDir` (W1-T12152). */
+export function ledgeredNonDispatchSpawn(lane: string, raw: typeof spawnWorker = spawnWorker,
+  planDir: string = join(repoRoot, "plan")): typeof spawnWorker {
+  const laneReadingPlan = { lane, readTask: planTaskBenchmarkWork(planDir) };
+  return benchmarkNonDispatchSpawn(laneReadingPlan, raw);
 }
 
 /** A failed fallback call is a worker attempt, not a second task outcome. Telemetry and caller
@@ -10952,13 +10989,16 @@ function withGitCredentialSocket(args: SpawnWorkerArgs, socketPath: string, harn
 }
 
 /** W1-T5115: the sweep fix rung's spawn — sweep.ts's own `benchmarkNonDispatchSpawn("sweep-fix")` default — with the
- *  daemon's git credential socket on every fix worker it starts. */
+ *  daemon's git credential socket on every fix worker it starts. W1-T12152: it reads the plan record of the task a fix
+ *  worker names from the harness checkout's plan, so a fix assignment records that task's class and risk. */
 export function gitCredentialFixSpawn(
   socketPath: string,
   raw: typeof spawnWorker = spawnWorker,
   harnessCheckout: string = repoRoot,
+  readTask: BenchmarkTaskWorkReader = planTaskBenchmarkWork(join(harnessCheckout, "plan")),
 ): typeof spawnWorker {
-  const spawnFix = benchmarkNonDispatchSpawn("sweep-fix", raw);
+  const sweepFixLane = { lane: "sweep-fix", readTask };
+  const spawnFix = benchmarkNonDispatchSpawn(sweepFixLane, raw);
   return (args) => spawnFix(withGitCredentialSocket(args, socketPath, harnessCheckout));
 }
 
@@ -19382,18 +19422,20 @@ async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProducti
       // allSettled and failure propagation; this callback never replaces that promise.
     });
   };
+  // Every record path this run's ops landing carries bytes for (pin-derived, see `sources`).
+  const opsCarriedPaths = new Set<string>();
   const opsLanding = planReconcileLanding(target.checkoutDir, () => ({
     targetRepository: { owner: target.owner, repo: target.repo }, landingOwner: "measurement-cadence", log: deps.log,
-    planPrPreflight: async (sha, pr) => {
-      // A candidate based on a newer main must never overwrite it with bytes read from our older pin.
-      // Later main changes are left to the ordinary three-way PR merge and its required gates.
-      if ((await hostWorktreeGitAsync(target.checkoutDir, ["rev-parse", `${sha}^`])).trim() !== pin) throw new Error("ops-status-source-moved");
+    // A candidate based on a newer main must never overwrite it with bytes read from our older pin:
+    // W1-T14574 accepts a newer parent only when no commit since the pin touched a carried record.
+    // Later main changes are left to the ordinary three-way PR merge and its required gates.
+    planPrPreflight: preflightOnUnmovedRecords(args => hostWorktreeGitAsync(target.checkoutDir, args), pin, opsCarriedPaths, async (sha, pr) => {
       return planPrPreflightAtCommitAsync(target.checkoutDir, sha, {
         ...pr,
         codeRoot: deps.checkoutRoot,
         bodyProofRoot: "plan",
       }, { log: deps.log });
-    },
+    }),
   }), deps.land);
   const opsById = ops.byId;
   return {
@@ -19427,12 +19469,15 @@ async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProducti
             const prior = rules(before, write.taskId), gained = [...rules(after, write.taskId)].filter(rule => !prior.has(rule));
             for (const rule of gained) held.push({ taskId: write.taskId, rule }); return gained.length === 0;
           });
-          const batch = takePlanReconcileBatch(landable, write => taskPaths.get(write.taskId)!);
+          // W1-T14485: cut at the plan review's record bound, so `landed` counts only records that went into the landing.
+          const batch = takePlanReconcileBatch(landable, write => taskPaths.get(write.taskId)!,
+            { files: PLAN_RECONCILE_LANDING_RECORD_LIMIT, bodyChars: PLAN_RECONCILE_LANDING_BODY_BUDGET });
           const byPath = new Map<string, Set<string>>();
           for (const write of batch) { const path = taskPaths.get(write.taskId)!; const ids = byPath.get(path) ?? new Set<string>(); ids.add(write.taskId); byPath.set(path, ids); }
           const inputs = [...byPath].map(([relPath, ids]) => ({ relPath,
             content: mergedCatalogStatusBytes(sources.get(relPath)!, ids, relPath === "plan/tasks.yaml") }));
           if (inputs.length) {
+            for (const input of inputs) opsCarriedPaths.add(input.relPath);
             opsLanding.land(inputs); retainSettlement(opsLanding.settled()); landed += batch.length;
           }
         } catch (error) {
@@ -19850,6 +19895,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let newTaskIds: Set<string> | undefined;
   let newMonolithIds: Set<string> | undefined;
   let addedExports: AddedExport[] = [];
+  let addedModules: string[] = [];
+  let newExports: AddedExport[] = [];
   let pathExistsAtBase: ((repoRelPath: string) => boolean) | undefined;
   // W1-T3274: ids CARVED out of `scope` below because their entire diff against `baseRef` is a
   // status flip to a closed state (queued -> merged, e.g. `plan-reconcile --write`'s own write) —
@@ -19976,6 +20023,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         maxBuffer: 64 * 1024 * 1024,
       });
       addedExports = addedExportsFromPatch(diffText, pathExistsAtBase);
+      addedModules = addedModulesFromPatch(diffText);
+      newExports = exportsNewInPatch(addedExports, diffText);
     } catch (e) {
       console.error(`### rmd lint-plan: cannot resolve --base ${baseRef}: ${(e as Error).message}`);
       return 2;
@@ -20385,6 +20434,30 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // pointed at a fixture tree with no policy.yaml of its own is a no-op here
   // (nothing to check), never a spurious failure over a file that was never
   // meant to exist at that path.
+  // W1-T12173: the exports and modules this diff adds, read against HEAD's tree once per run.
+  const productionCallerTree: ProductionCallerTree = {
+    filesMentioning: (words) => {
+      try {
+        const spec = ["*.ts", "*.mts", "*.cts", "*.tsx", "*.js", "*.mjs", "*.cjs"];
+        const args = ["grep", "-l", "-I", "-F", "-w", ...words.flatMap((w) => ["-e", w]), "--", ...spec];
+        return hostWorktreeGit(checkoutRoot, args, { maxBuffer: 1 << 26 }).split("\n").filter(Boolean);
+      } catch (error) {
+        if ((error as { status?: number }).status === 1) return []; // git grep: no file names any word
+        throw error;
+      }
+    },
+    read: (rel) => (existsSync(join(checkoutRoot, rel)) ? readFileSync(join(checkoutRoot, rel), "utf8") : undefined),
+  };
+  try {
+    for (const f of exportsWithoutProductionCaller(newExports, addedModules, productionCallerTree)) {
+      if (f.severity === "block") failing++;
+      else warned++;
+      (f.severity === "block" ? console.error : console.warn)(`${f.severity === "block" ? "✗" : "  ⚠"} [${f.check}] ${f.message}`);
+    }
+  } catch (error) {
+    warned++;
+    console.warn(`  ⚠ lint-plan: [production-caller] not checked: ${(error as Error).message}`);
+  }
   for (const c of sourceConflicts) {
     failing++;
     console.error(`✗ ${c.id}: the plan repository and the code root hold different bytes for this id: ` +
@@ -27683,7 +27756,8 @@ export function dedicatedTargetPlanReloader(
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: {
     fetch?: () => unknown;
-    treeSha?: () => string | Promise<string>;
+    /** The plan tree's sha on origin/main, or `null` when origin/main holds no plan path at all. */
+    treeSha?: () => string | null | Promise<string | null>;
     resetWorkingTree?: () => unknown;
     load?: (planPath: string) => Plan | Promise<Plan>;
   } = {},
@@ -27692,7 +27766,9 @@ export function dedicatedTargetPlanReloader(
   // `planReloader` refuses. Wiring (below) never hands a self target here, but the guard keeps
   // this function correct in isolation, not merely correct-by-caller-discipline.
   if (target.isSelf) return undefined;
-  const repoDirForGit = dirname(target.planPath);
+  // W1-T14585: the CHECKOUT ROOT, never `dirname(planPath)` — a target with no plan has no `plan/`
+  // directory to run git from, so every call would fail before it could ask whether a plan exists.
+  const repoDirForGit = dirname(dirname(target.planPath));
   // FETCHES, UNLIKE `planReloader`'s self arm: self rides `checkFreshness`'s own per-tick fetch of
   // the SAME engine checkout (wired a few lines below this function's call site); nothing fetches
   // a non-self TARGET's checkout between dispatches (`worktreeAdd`, lib/worker.ts, only fetches it
@@ -27702,10 +27778,19 @@ export function dedicatedTargetPlanReloader(
     (async () => {
       await execFilePromise("git", ["-C", repoDirForGit, "fetch", "--quiet", "origin"]);
     });
+  // W1-T14585: `ls-tree`, not `rev-parse origin/main:plan`, so ABSENCE is a distinct answer. For a
+  // target with no plan, rev-parse failed every tick and each failure became one
+  // `daemon.plan_reload_failed` row, forever. `ls-tree` exits 0 with EMPTY output only when the path
+  // is missing from an existing origin/main; a missing ref or a broken repository still throws, and
+  // still reaches the generic failure row.
   const treeSha =
     deps.treeSha ??
-    (async () =>
-      (await execFilePromise("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], { encoding: "utf8" })).stdout.trim());
+    (async () => {
+      const { stdout } = await execFilePromise("git", ["-C", repoDirForGit, "ls-tree", "origin/main", "--", "plan"], { encoding: "utf8" });
+      const entry = stdout.trim();
+      // `<mode> <type> <sha>\tplan` — the sha is the third space-separated field.
+      return entry === "" ? null : entry.split(/\s+/)[2]!;
+    });
   // RESETS THE WORKING TREE, UNLIKE `planReloader`: `load` below is a plain filesystem read, never
   // a `git show <ref>:<path>`, so a fetched ref alone leaves it reading whatever boot's own
   // `git reset --hard origin/main` (the `!target.isSelf` branch above) last checked out. Self gets
@@ -27720,13 +27805,25 @@ export function dedicatedTargetPlanReloader(
       await execFilePromise("git", ["-C", repoDirForGit, "reset", "--hard", "--quiet", "origin/main"]);
     });
   const load = deps.load ?? ((pp: string) => loadPlan(pp));
-  let lastSha: string | undefined;
+  // `undefined` = not yet observed, `null` = origin/main holds no plan, a string = the plan tree sha.
+  let lastSha: string | null | undefined;
   return async () => {
     // A failed fetch propagates — caught by `runDaemon`'s own `daemon.plan_reload_failed` wrapper
     // (the SAME generic catch `planReloader`'s own treeSha throw already relies on), never
     // swallowed here. Keeping the plan we already have is the correct degrade either way.
     await fetch();
     const sha = await treeSha();
+    if (sha === null) {
+      // W1-T14585: NO PLAN IS A STATE, NOT A FAILURE. Report it once per change (after a present
+      // plan, or on the first tick) as an empty plan, then stay quiet while it stays absent. A plan
+      // deleted from origin/main also resets this checkout, so a later load never reads its files.
+      if (lastSha === null) return null;
+      const hadPlan = lastSha !== undefined;
+      lastSha = null;
+      if (hadPlan) await resetWorkingTree();
+      log("daemon.plan_absent", { ref: "origin/main", path: "plan" });
+      return { tasks: [], byId: new Map() };
+    }
     if (lastSha === undefined) {
       // First tick: record the boot's sha without reloading — see `planReloader`'s identical
       // comment for why reporting a reload here would be a lie. The working tree already matches
@@ -32661,7 +32758,7 @@ export function commitWorkerEdits(
       return { committed: false, undeclared: [], ignored_declared,
         reason: `declared path ignored by .gitignore: ${details.join(", ")}` };
     }
-    return { committed: false, undeclared: [], reason: "the worker changed nothing" };
+    return { committed: false, undeclared: [], reason: WORKER_CHANGED_NOTHING_REASON };
   }
 
   // W1-T4450: a REGISTERED REGENERABLE ARTIFACT (a gate's own baseline, whose failure message names
@@ -32757,7 +32854,7 @@ export function commitWorkerEdits(
       stageWorkerPaths(addable, args => hostWorktreeGit(repoDir, args, { env }));
     }, mergeHead === undefined ? undefined : resolve(repoDir, runGit(["rev-parse", "--git-path", "index"]).trim()));
     if (mergeHead === undefined && tree === runGit(["rev-parse", `${options.priorHeadSha}^{tree}`]).trim()) {
-      return { committed: false, undeclared, reason: "the worker changed nothing" };
+      return { committed: false, undeclared, reason: WORKER_CHANGED_NOTHING_REASON };
     }
     sha = runGit(["commit-tree", tree, "-p", options.priorHeadSha!, ...(mergeHead === undefined ? [] : ["-p", mergeHead]), "-m", commitMessage]).trim();
     try {
@@ -33006,6 +33103,9 @@ export function scopeAmendmentFromFixReport(report: string): string | undefined 
  *  two functions can never drift on what "the missing-line refusal" means. */
 const MISSING_COMMIT_MESSAGE_REASON = "no anchored COMMIT_MESSAGE line in the report";
 
+/** The reason a harness commit names when the worker left no edit to commit. */
+export const WORKER_CHANGED_NOTHING_REASON = "the worker changed nothing";
+
 
 
 /** W1-T4450: how much of a report a missing-line refusal carries into the ledger. */
@@ -33025,7 +33125,7 @@ export function harnessCommitForShellLessWorker(
   const ahead = deps.ahead ?? commitsAhead;
   const asked = parseReport(input.report)?.commitMessage;
   if (asked === undefined && input.derivedCommit === undefined) {
-    const reason = MISSING_COMMIT_MESSAGE_REASON;
+    const reason = workerLeftEdits(input) ? MISSING_COMMIT_MESSAGE_REASON : WORKER_CHANGED_NOTHING_REASON;
     // W1-T4450: the tail of the report that was parsed, so the next diagnosis has evidence instead
     // of a transcript a later round overwrote.
     input.log("implement.harness_commit_refused", { reason, report_tail: input.report.slice(-REFUSED_REPORT_TAIL_CHARS) });
@@ -33063,6 +33163,14 @@ export function harnessCommitForShellLessWorker(
   if (committed.sha) input.onCommit?.(committed.sha, committed.undeclared);
   input.say(`harness committed the worker's edits (${committed.sha?.slice(0, 8)}) — it had no shell of its own`);
   return ahead(input.worktreePath, "origin/main");
+}
+
+function workerLeftEdits(input: Pick<Parameters<typeof harnessCommitForShellLessWorker>[0], "leftEdits" | "worktreePath">): boolean {
+  try {
+    return (input.leftEdits ?? (() => worktreeHasUncommittedChanges(input.worktreePath)))();
+  } catch {
+    return true; // An unreadable worktree counts as one with edits, so the missing-line refusal stays.
+  }
 }
 
 /** W1-T4614: the head sha a worktree holds and the assignment its commit names — the fields `implement.done` and
@@ -44466,7 +44574,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "field-trials",
     syntax: "rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json] [--refresh-step <name>=<exit-code|skipped>]... [--refresh-script-blob <sha1>] [--refresh-record-only]",
     summary: "Join the ledger union and GitHub history into observational field-trials aggregates.",
-    detail: "W1-T4574: one operator-invoked, resumable snapshot pass. For each source repository (default config.fleetRepos as core, site and console; only core's ledger is on this host unless --ledger names another) it reads the audited three-form ledger union and up to --max-pages GitHub pages of pull requests, main commits, deployments and per-PR reviews, commits and first-commit check runs; an interrupted sweep resumes from its stored page and only a completed sweep advances its watermark. PRs link to plan tasks by the trailer, branch and ledger credit paths separately; unmatched and ambiguous links are counted. It derives five observational families by source, week and task class: model adoption (requested, selected and served models apart; source merge, runtime boot and first exposure apart), the automation funnel with missing-join and human-touch counts per stage, PR repair and correctness signals with an unknown bucket, flow and recovery times with open work censored (Kaplan-Meier) and DORA commit-to-deploy lead time, and learning-loop yield. A merge is never a deployment and a green check is never correctness. The snapshot is private under --out-dir (default <root>/state/field-trials). With --consent it writes a dated, pseudonymised candidate release that withholds small cells and is refused if any private join key appears; --revoke withdraws one. W1-T10831: --field-note <out> reads the latest private snapshot without refreshing it and writes a candidate-unreviewed envelope for the site's model-field-note-v1 importer: rows per selected model and task class over whole UTC days from the end of the last exported window, under the site's own disclosure rule and row limit, from sources with a live --consent receipt that are active aggregate-public in the pinned site registry (--site-registry names a newer revision); it never stamps a review. A failed refresh keeps the last known good release. W1-T10830: --refresh-step carries routing-review, case-files and snapshot exit states; --refresh-script-blob identifies the running collector. Refresh metadata appends one field-trials.refresh outcome through recordFieldTrialsRefresh; --refresh-record-only records a failed snapshot without rebuilding it. Consecutive step failures raise deduplicated alerts and recovery resolves them. It gates no PR, changes no routing, spends nothing and publishes nothing.",
+    detail: "W1-T4574: one operator-invoked, resumable snapshot pass. For each source repository (default config.fleetRepos as core, site and console; only core's ledger is on this host unless --ledger names another) it reads the audited three-form ledger union and up to --max-pages GitHub pages of pull requests, main commits, deployments and per-PR reviews, commits and first-commit check runs; an interrupted sweep resumes from its stored page and only a completed sweep advances its watermark. PRs link to plan tasks by the trailer, branch and ledger credit paths separately; unmatched and ambiguous links are counted. It derives five observational families by source, week and task class: model adoption (requested, selected and served models apart; source merge, runtime boot and first exposure apart), the automation funnel with missing-join and human-touch counts per stage, PR repair and correctness signals with an unknown bucket, flow and recovery times with open work censored (Kaplan-Meier) and DORA commit-to-deploy lead time, and learning-loop yield. A merge is never a deployment and a green check is never correctness. The snapshot is private under --out-dir (default <root>/state/field-trials). With --consent it writes a dated, pseudonymised candidate release that withholds small cells and is refused if any private join key appears; --revoke withdraws one. W1-T10831: --field-note <out> reads the latest private snapshot without refreshing it and writes a candidate-unreviewed envelope for the site's model-field-note-v1 importer: rows per selected model and task class over whole UTC days from the end of the last exported window, under the site's own disclosure rule and row limit, from sources with a live --consent receipt that are active aggregate-public in the pinned site registry (--site-registry names a newer revision); it never stamps a review. A failed refresh keeps the last known good release. W1-T10830: --refresh-step carries routing-review, case-files and snapshot exit states; --refresh-script-blob identifies the running collector. Refresh metadata appends one field-trials.refresh outcome through recordFieldTrialsRefresh; --refresh-record-only records a failed snapshot without rebuilding it. Consecutive step failures raise deduplicated alerts and recovery resolves them. W1-T10832: after a good refresh pass with --consent and online, it exports the field-note candidate and runs the site's own --daily-stage importer in a fresh checkout of craigoley/remudero-site main; on staged, once a token scoped to the site proves the App installation holds Contents and Pull requests write (else site-grant-missing names the grant), it keeps ONE ready import PR open on branch field-trials/daily-field-note over REST (opened, or updated in place), on unchanged or refused it opens nothing, and every outcome is carried in the field-trials.refresh row. Core never stamps reviewedBy or reviewedAt and never arms, approves or merges, and the sweep holds every field-trials/ head for its owner: the owner's merge is the review. It gates no PR, changes no routing and spends nothing.",
   },
   {
     name: "ci-failures",
@@ -45016,15 +45124,15 @@ function commandSyntax(name: string): string {
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
 import { reconcilePlan, reconcileShardStatus, revertedRequeues, type RevertedRequeue, type ReconcileSummary } from "./lib/plan-reconcile.js";
-import { takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
+import { PLAN_RECONCILE_LANDING_BODY_BUDGET, PLAN_RECONCILE_LANDING_RECORD_LIMIT, preflightOnUnmovedRecords, takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";
-import { buildIntoStore, childEntryStoreRoot, materializeMainEntryFromStore } from "./lib/child-entry-store.js";
+import { buildIntoStore, childEntryStoreRoot, defaultChildEntryStoreRoot, fillStoreForOwnTree, materializeMainEntryFromStore, type OwnTreeFillOptions, type StoreLog } from "./lib/child-entry-store.js";
 // W1-T9738: moved to the engine module, so a suite that drives it never imports this file; re-exported for callers here.
 import { buildEngineAfterStore } from "./lib/engine-tree.js";
 export { buildEngineAfterStore };
-import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, reviewerCodeStartGate, runChildModeIsOn, runDetachedReview, spawnRunChild, type DetachedReviewCommand, type DetachedWorkSpec,
+import { RUN_CHILD_FALLBACK_STEP, chainAbortSignal, createDetachedWorkHost, decideReviewPath, reviewerCodeStartGate, runChildModeIsOn, runDetachedReview, spawnRunChild, type DetachedReviewCommand, type DetachedWorkSpec,
   type FreshTreeEntry, type FreshTreeExit, type FreshTreeReview, type ReviewerCodeStartGate, type RunChildHandle, type RunChildPending, type SpawnRunChildPorts } from "./lib/run-child.js";
 export type { FreshTreeEntry, FreshTreeExit } from "./lib/run-child.js";
 import { createSweepFixAdmissionController, productionFixAdmissionResidents, installDetachedWorkHost, readFixDispatchEnvelope, runFixDispatchChild, timedFixStage, type FixDispatchChildPorts } from "./lib/sweep.js";
@@ -46195,6 +46303,7 @@ export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: stri
 export function gatedDetachedReviewCommand(root: string, log: (step: string, extra?: Record<string, unknown>) => void): DetachedReviewCommand {
   const seams: FreshTreeReviewSeams = {
     git: reviewerGit(root), addWorktree: realDeps().reviewWorktree.addWorktree, worktreeRoot: join(root, "..", "worktrees"), spawnReview: spawnRmdReviewForFreshTree,
+    storeFill: { log },
   };
   const gate = buildReviewerCodeFreshnessGate(() => checkReviewerCodeFreshnessAsync(root, process.env), log, reviewCommand,
     buildFreshTreeReviewRunner(root, seams));

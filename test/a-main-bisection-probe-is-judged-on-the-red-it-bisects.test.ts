@@ -148,7 +148,7 @@ function runClassCheck(t: { after: (fn: () => void) => void }, classes: (shard: 
   assert.ok(run, "coverage-ratchet must carry its shard-class step");
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}coverage-class-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  for (let shard = 1; shard <= 12; shard++) {
+  for (let shard = 1; shard <= 16; shard++) {
     mkdirSync(join(root, `coverage-shards/coverage-shard-${shard}`), { recursive: true });
     writeFileSync(join(root, `coverage-shards/coverage-shard-${shard}/class`), classes(shard));
   }

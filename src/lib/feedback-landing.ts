@@ -31,7 +31,7 @@ import { releaseTaskIdReservationAsync, type ReservationReleaseOutcome } from ".
 import { reservationHolderBranch, taskIdReservationRef } from "./task-id-reservation.js";
 import { loadPlanFromYaml } from "./plan.js";
 import { planDestinationRepository, type PlanDestination, type PlanDestinationRepository } from "./plan-destination.js";
-import { planReconcilePrBody, planReconcileProofFor } from "./plan-reconcile-batch.js";
+import { PLAN_RECONCILE_LANDING_RECORD_LIMIT, planReconcilePrBody, planReconcileProofFor } from "./plan-reconcile-batch.js";
 import { reconcileShardStatus, requeueShardStatusText } from "./plan-reconcile.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
@@ -101,9 +101,10 @@ const PLAN_RECONCILE_LANDING_BRANCH = "plan-reconcile-landing";
 /**
  * W1-T14452: the plan review's per-pull-request record bound (remudero-ops scripts/ops-gate.rb
  * MAX_RECORDS_PER_PULL_REQUEST). One reconcile landing carries at most this many inputs; the next
- * cadence pass derives the rest again from merge credit, so nothing is queued.
+ * cadence pass derives the rest again from merge credit, so nothing is queued. W1-T14485: the same
+ * constant both callers cut their batch at, so the lander's bound and the batch can never disagree.
  */
-export const PLAN_REVIEW_RECORDS_PER_PULL_REQUEST = 50;
+export const PLAN_REVIEW_RECORDS_PER_PULL_REQUEST = PLAN_RECONCILE_LANDING_RECORD_LIMIT;
 const PLAN_RECONCILE_LANDING_PR_TITLE = "chore(plan): reconcile credited task statuses";
 const CI_LEARNING_PENDING_REL_DIR = "state/ci-learning-pending";
 const FEEDBACK_PENDING_REL_DIR = "state/feedback-landing-pending";

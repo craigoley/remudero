@@ -17,7 +17,7 @@ export { createPlanRevisionStore, type PlanRevision, type PlanRevisionStore, typ
 import { readPlaneWorkerInput, readPlaneWorkerLog, runReadPlaneWorker } from "./read-plane.worker.js";
 import { runsBundled, startWorker } from "./child-entry-argv.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
-import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, githubInstallationBudget } from "./github-transport.js";
+import { ghExec, ghJsonAsync, ghLinesAsync, ghTextAsync, githubInstallationBudget, GhPaceFloorStandDownError } from "./github-transport.js";
 import type { InstallationBudgetThreadInput } from "./github-installation-budget.js";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -26,7 +26,7 @@ import { ledgerPathFor } from "./ledger-path.js";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
-import { escalationTaskId, ghIssueGateway, ghIssueGatewayAsync, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText } from "./escalate.js";
+import { escalationTaskId, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText } from "./escalate.js";
 import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, classifyChangesRequested, pullReviewsRestArgs, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation } from "./open-prs-rest.js";
 import { createHash } from "node:crypto";
 import { codeqlAlertsReadDue } from "./pr-blocker.js";
@@ -337,7 +337,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     github.resetFailureFlags?.();
     let openPrRows: OpenPrRest[] | undefined;
     let openPrError: string | undefined;
-    try { openPrRows = await fetchOpenPrsWithPostedIdsAsync(owner, repo, fetchAsync, pacer); }
+    try { openPrRows = await fetchTickOpenPrs(owner, repo, fetchAsync, pacer); }
     catch (error) {
       openPrError = String(error);
       log("read_plane.open_failed", { reason: openPrError });
@@ -2980,6 +2980,45 @@ export function* openPrViewSteps(
 
 type OpenPrCiFailureRead = (owner: string, repo: string, rollup: RollupCheck[] | undefined) => Promise<CiFailure[]>;
 
+const TICK_OPEN_PRS_QUERY =
+  "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){" +
+  "pullRequests(states:OPEN,first:100,orderBy:{field:CREATED_AT,direction:DESC}){" +
+  "nodes{number url headRefName headRefOid createdAt updatedAt body isDraft autoMergeRequest{enabledAt}}}}}";
+
+async function fetchTickOpenPrs(owner: string, repo: string, read: GhApiFetcher, pacer: GhCallPacer): Promise<OpenPrRest[]> {
+  try {
+    return await fetchOpenPrsWithPostedIdsAsync(owner, repo, read, pacer);
+  } catch (restError) {
+    if (!(restError instanceof GhPaceFloorStandDownError) || restError.resource !== "core") throw restError;
+    const admission = githubInstallationBudget().admit();
+    if (admission.ok || admission.reason !== "reserve") throw restError;
+    try {
+      // GraphQL has its own budget. This read supplies fresh PRs; REST-only check evidence stays unknown.
+      return await paceGhEntryAsync(pacer, isGhRateLimitError, async () => {
+        const answer = await read(["api", "graphql", "-f", `query=${TICK_OPEN_PRS_QUERY}`, "-f", `owner=${owner}`, "-f", `name=${repo}`]) as {
+          data?: { repository?: { pullRequests?: { nodes?: Array<OpenPrRest | null> } } };
+          errors?: unknown;
+        } | null;
+        if (answer?.errors !== undefined) throw new Error("GraphQL open PR list returned errors");
+        const nodes = answer?.data?.repository?.pullRequests?.nodes;
+        if (!Array.isArray(nodes)) throw new Error("GraphQL open PR list carried no nodes");
+        return nodes.map((node) => {
+          if (!node || !Number.isSafeInteger(node.number) || node.number <= 0 || typeof node.url !== "string" ||
+              typeof node.headRefName !== "string" || typeof node.headRefOid !== "string" || !node.headRefOid ||
+              typeof node.updatedAt !== "string" || typeof node.createdAt !== "string" || typeof node.body !== "string" ||
+              typeof node.isDraft !== "boolean" || node.autoMergeRequest === undefined) {
+            throw new Error("GraphQL open PR list returned incomplete PR metadata");
+          }
+          const { number, url, headRefName, headRefOid, createdAt, updatedAt, body, isDraft, autoMergeRequest } = node;
+          return { number, url, headRefName, headRefOid, createdAt, updatedAt, body, isDraft, autoMergeRequest, rollupUnreadable: true };
+        });
+      });
+    } catch (graphqlError) {
+      throw new Error(`${restError.message}. GraphQL fallback failed: ${String(graphqlError)}`, { cause: graphqlError });
+    }
+  }
+}
+
 export function fetchOpenPrsWithPostedIdsAsync(
   owner: string,
   repo: string,
@@ -3437,7 +3476,12 @@ export async function buildEscalationReconcileCandidatesAsync(
 ): Promise<EscalationReconcileCandidate[]> {
   let open: OpenIssue[];
   try {
-    open = await listRetirableEscalationIssuesAsync(injected.issues ?? ghIssueGatewayAsync(owner, repo));
+    open = await listRetirableEscalationIssuesAsync(injected.issues ?? ghIssueGatewayAsync(owner, repo))
+      .catch((error: unknown) => {
+        if (injected.issues || !(error instanceof GhPaceFloorStandDownError) || error.resource !== "core") throw error;
+        // GraphQL has a separate budget. Re-read both labels so a partial REST list cannot reach the closer.
+        return listRetirableEscalationIssuesAsync(ghIssueGatewayGraphql(owner, repo));
+      });
   } catch (error) {
     log?.("sweep.escalation_reconcile.list_failed", { error: String((error as Error)?.message ?? error) });
     return [];

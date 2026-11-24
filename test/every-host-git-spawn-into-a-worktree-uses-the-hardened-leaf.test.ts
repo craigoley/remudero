@@ -164,6 +164,7 @@ export const WIDENED_SITE_EXCEPTIONS: Readonly<Record<string, { count: number; r
       "CHECKOUT (W1-T10257): gitRun is addCowWorktree's git port default; it runs against the operator checkout " +
       "(repoDir, donorDir) and the new tree it is cutting itself, before any worker runs in it",
   },
+  "src/lib/field-trials-site-import.ts": { count: 1, reason: "FRESH CLONE (W1-T10832, operator's yes 2026-11-23): siteClone clones remudero-site into new scratch, which has no worktree to pin yet; it applies hostWorktreeGitEnv by hand" },
   "src/lib/hand-worktree.ts": { count: 4, reason: "CHECKOUT: findDonor/duplicateWork/createHandWorktree run against the source checkout (-C repoDir)" },
   "src/lib/host-resource-gardener.ts": { count: 1, reason: "CHECKOUT: gitHeartbeatSource reads the repo root" },
   "src/lib/hot-file-gardener.ts": { count: 1, reason: "CHECKOUT: readMainHistory reads the repo root" },

@@ -25,7 +25,7 @@ import { inflightLockPath } from "./inflight-lock.js";
 import { TASK_TYPES, type Task } from "./plan.js";
 import { WORKER_PROVIDER_IDS } from "./config-schema.js";
 import { isMergedLedgerRow, PR_TERMINAL_STEP, prUrlKey } from "./ledger-carry.js";
-import { LedgerAppendConflict, ledgerFileVersion, ledgerRotationLockPath, tryAcquireRotationLock } from "./ledger.js";
+import { LedgerAppendConflict, ledgerFileVersion, ledgerRotationLockPath, readLiveLedgerGrowth, tryAcquireRotationLock } from "./ledger.js";
 import { ledgerLivePath, ledgerRotationEntries, readLedgerUnionRecordsSync, realLedgerFs, type LedgerUnionRecordRead } from "./ledger-union.js";
 import { seededRandom, seedOf } from "./knowledge-value.js";
 import { mergeDifferenceSequence, type MergeDifferenceObservation, type MergeDifferenceSequence } from "./sequential-test.js";
@@ -563,6 +563,22 @@ export function workshopClosedSkillDraft(proposal: Proposal): boolean {
 type SkillDraftLog = (step: string, extra?: Record<string, unknown>, expectedLiveVersion?: string) => void;
 
 /**
+ * A close decision. `admitsGrowth` names the rows that may be appended after `liveVersion` without changing it;
+ * `refusal` replaces the append conflict when a row it does not admit was appended.
+ */
+type SkillDraftCloseDecision = {
+  reason: string; liveVersion?: string; admitsGrowth?: (row: Record<string, unknown>) => boolean; refusal?: string;
+};
+
+const SKILL_DRAFT_APPEND_ATTEMPTS = 3;
+
+function liveLedgerGrowth(livePath: string, since: string | undefined):
+  { rows: Record<string, unknown>[]; version: string | undefined } | { refused: string } {
+  if (since !== undefined) return readLiveLedgerGrowth(livePath, since);
+  return archiveVersion(livePath) === undefined ? { rows: [], version: undefined } : { refused: "the live ledger appeared" };
+}
+
+/**
  * Close one staged skill draft: the decline row first, then the close record on the registry entry.
  * A crash between the two can repeat one row; it cannot record a close for a draft that is still open.
  * Writes nothing under .claude/skills/. True when it closed.
@@ -570,7 +586,7 @@ type SkillDraftLog = (step: string, extra?: Record<string, unknown>, expectedLiv
 function closeSkillDraft(
   registryPath: string,
   proposalId: string,
-  reasonFor: string | ((entry: Proposal) => { reason: string; liveVersion?: string } | undefined),
+  reasonFor: string | ((entry: Proposal) => SkillDraftCloseDecision | undefined),
   log: SkillDraftLog,
   clock: Pick<Clock, "iso">,
 ): boolean {
@@ -579,19 +595,31 @@ function closeSkillDraft(
   return updateProposalRegistry(registryPath, (current) => {
     const entry = current.find((p) => p.id === proposalId);
     if (!entry || workshopClosedSkillDraft(entry)) return null;
-    const decision = typeof reasonFor === "string" ? { reason: reasonFor, liveVersion: undefined } : reasonFor(entry);
+    const decision: SkillDraftCloseDecision | undefined = typeof reasonFor === "string" ? { reason: reasonFor } : reasonFor(entry);
     if (decision === undefined) return null;
-    const { reason, liveVersion } = decision;
+    const { reason, admitsGrowth, refusal } = decision;
     const at = clock.iso();
     const closeId = randomUUID();
     const step = "panel.proposal_declined";
     const skillSha256 = storedSkillSha256(entry);
-    log(step, { ts: at, task_id: proposalId, origin: SKILL_WORKSHOP_ORIGIN, reason,
-      skill_draft_close_id: closeId, skill_draft_sha256: skillSha256 }, liveVersion);
-
-    // appendLedger can return after a short write. Confirm this attempt in the ledger, including rotations.
     const stateDir = dirname(registryPath);
     const livePath = ledgerLivePath(stateDir);
+    const extra = { ts: at, task_id: proposalId, origin: SKILL_WORKSHOP_ORIGIN, reason,
+      skill_draft_close_id: closeId, skill_draft_sha256: skillSha256 };
+    for (let version = decision.liveVersion, attempt = 1; ; attempt++) {
+      try {
+        log(step, extra, version);
+        break;
+      } catch (error) {
+        if (!(error instanceof LedgerAppendConflict) || !error.unwritten || admitsGrowth === undefined ||
+          version === undefined || attempt >= SKILL_DRAFT_APPEND_ATTEMPTS) throw error;
+        const growth = readLiveLedgerGrowth(livePath, version);
+        if ("refused" in growth || !growth.rows.every(admitsGrowth)) throw refusal === undefined ? error : new Error(refusal);
+        version = growth.version;
+      }
+    }
+
+    // appendLedger can return after a short write. Confirm this attempt in the ledger, including rotations.
     const { rows } = readLedgerUnionRecordsSync(stateDir, {
       step, since: at, liveFirst: true, pattern: new RegExp(closeId),
       where: (row) => row.skill_draft_close_id === closeId && row.task_id === proposalId &&
@@ -1799,12 +1827,13 @@ function withdrawLegacyOutcomeOnlyDrafts(registryPath: string, incomingIds: Read
           const union = readLedgerUnionRecordsSync(stateDir, {
             step: SKILL_DRAFT_VERDICT_STEPS, pattern, where: (row) => row.task_id === id, refuseIncomplete: true,
           });
-          if (!union.ok || union.torn > 0 || liveVersion !== archiveVersion(livePath)) {
-            throw new Error(`could not verify the ledger verdict for ${id}`);
-          }
+          const unverified = `could not verify the ledger verdict for ${id}`;
+          const admitsGrowth = (row: Record<string, unknown>) => !(SKILL_DRAFT_VERDICT_STEPS.includes(String(row.step)) && row.task_id === id);
+          const growth = liveLedgerGrowth(livePath, liveVersion);
+          if (!union.ok || union.torn > 0 || "refused" in growth || !growth.rows.every(admitsGrowth)) throw new Error(unverified);
           const verdicts = ledgerProposalVerdicts(union.rows);
           if (verdicts.isRatified(id) || verdicts.isDeclined(id) !== undefined) return undefined;
-          return { reason: `withdrawn: ${refusal}`, liveVersion };
+          return { reason: `withdrawn: ${refusal}`, liveVersion: growth.version, admitsGrowth, refusal: unverified };
         }, log, systemClock)));
       if (typeof closed === "object") throw new Error(closed.unmeasured);
       if (closed) {
@@ -1952,11 +1981,12 @@ function readLockedSkillDraftLedger(stateDir: string, livePath: string, step: re
       return { unmeasured: "incomplete ledger union: ledger rotated during read" };
     }
     if (archivesChanged) return { unmeasured: "incomplete ledger union: ledger archives changed during read" };
-    if (liveVersion === undefined || after === undefined || liveVersion !== ledgerFileVersion(after)) {
+    const growth = liveVersion === undefined || after === undefined ? undefined : readLiveLedgerGrowth(livePath, liveVersion);
+    if (growth === undefined || "refused" in growth || growth.rows.some((row) => step.includes(String(row.step)))) {
       return { unmeasured: "incomplete ledger union: live ledger changed during read" };
     }
     // An unreadable archive and a torn archive row leave the live file complete, so restore can still use it.
-    return union.ok && (tolerateMalformed || archiveTorn === 0) ? { rows: union.rows, liveVersion } : { ...incomplete, archivesUnreadable: true };
+    return union.ok && (tolerateMalformed || archiveTorn === 0) ? { rows: union.rows, liveVersion: growth.version } : { ...incomplete, archivesUnreadable: true };
   } catch (error) {
     const reason = `incomplete ledger union: could not verify ledger files: ${String(error)}`;
     return { unmeasured: reason };
@@ -2101,6 +2131,7 @@ export function expireUnansweredSkillDrafts(
             reason: `expired: unanswered for ${days(age)} days; the longest wait of any answered proposal is ` +
               `${days(measured.bound)} days (${measured.sample} answered)`,
             liveVersion: measured.liveVersion,
+            admitsGrowth: (row) => !SKILL_DRAFT_VERDICT_STEPS.includes(String(row.step)),
           };
         }, log, clock)));
       if (typeof closed === "object") return { expired, reason: `skill draft expiry stopped: ${closed.unmeasured}` };

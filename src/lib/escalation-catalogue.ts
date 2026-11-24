@@ -2,7 +2,7 @@ import { DISK_FAIL_BYTES, DISK_WARN_BYTES, humanBytes } from "./doctor.js";
 import {
   classifyEndedDaemonProcesses, crashLoopRunOf, DAEMON_ABNORMAL_EXIT_STEP, DAEMON_CLEAN_EXIT_OBSERVED_STEP, learnedCleanLifetime,
   type CrashLoopVerdict, type DaemonLifetimeRecord, type DaemonProcessEnd, type LearnedCleanLifetime, type LearnedCrashLoopSummary,
-  type ClaimStallClearedInfo, type ClaimStallInfo, type StarvationCensus, type StarvationClearedInfo,
+  type ClaimStallClearedInfo, type ClaimStallInfo, type StarvationCensus, type StarvationClearedInfo, type TargetJobStallInfo,
 } from "./daemon.js";
 import { ghRateLimitWindow, type GhRateLimitProvenance } from "./daemon-health.js";
 import { quantileOf } from "./daemon-memory-policy.js";
@@ -1243,6 +1243,75 @@ export async function escalateClaimStall(
   });
 }
 
+/** W1-T14600: the ledger marker of the page for a managed-target job the core daemon deferred past its bound. */
+export const TARGET_JOB_STALL_ESCALATED_STEP = "target_job.stall_escalated";
+
+/**
+ * W1-T14600: the page for a managed-target job the core daemon kept deferring for capacity (2026-11-23: WRECK-T1 waited
+ * past three hours, and nothing alerted). DEDUP IS PER ORIGIN, on the job's own progress: if the newest
+ * `target_job.stall_escalated` row for this origin postdates its newest `console.kick_dispatched` or `target_job.ended`
+ * row, the stall was already reported, by this process or an earlier one. The marker is written whether or not delivery
+ * succeeded (`escalateStarvation`'s discipline). The issue is closed by hand once the job ran.
+ */
+export async function escalateTargetJobStalled(
+  info: TargetJobStallInfo,
+  ctx: ClaimStallCtx,
+): Promise<void> {
+  const rows = await readLedgerUnionRecords(dirname(ctx.ledgerPath),
+    { step: [TARGET_JOB_STALL_ESCALATED_STEP, "console.kick_dispatched", "target_job.ended"] });
+  let lastEscalatedIdx = -1;
+  let lastProgressIdx = -1;
+  rows.forEach((row, i) => {
+    if (row.origin !== info.origin) return;
+    if (row.step === TARGET_JOB_STALL_ESCALATED_STEP) lastEscalatedIdx = i;
+    else lastProgressIdx = i;
+  });
+  if (lastEscalatedIdx !== -1 && lastEscalatedIdx > lastProgressIdx) return;
+
+  const waited = `${Math.round(info.deferredForMs / 60_000)} min`;
+  const numbers = `${info.inFlight} core run(s) in flight, lane target ${info.laneTarget ?? "unbounded"}, WIP budget ${info.wipBudget}`;
+  const options = [
+    {
+      label: "acknowledge and wait",
+      detail: "The core daemon holds the next free lane for this job and runs it when one frees. Close this issue by hand once it ran.",
+    },
+    ...(info.reason === "wip budget" ? [{
+      label: "free WIP room",
+      detail: "The shared WIP budget is full: merging or closing an open pull request gives the job room to start.",
+    }] : []),
+  ];
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: info.taskId,
+      runId: ctx.runId,
+      summary: `${info.taskId} for ${info.repo} has waited ${waited} for a core daemon lane`,
+      detail:
+        `W1-T14600: the core daemon has deferred the managed-target job ${info.taskId} (repository ${info.repo}, request ` +
+        `${info.origin}) for capacity for ${waited}. Reason: ${info.reason}; ${numbers}. A job waiting for a free lane has ` +
+        "one reserved for it; one held by the lane target or the WIP budget waits until that reading has room.",
+      options,
+      recommendation: info.reason === "wip budget" ? "free WIP room" : "acknowledge and wait",
+    },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: info.taskId,
+    step: TARGET_JOB_STALL_ESCALATED_STEP,
+    origin: info.origin,
+    repo: info.repo,
+    deferred_for_ms: info.deferredForMs,
+    reason: info.reason,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
 /**
  * W1-T13248: the cleared half — closes the issue the newest `dispatch.claim_stall.escalated` row named, unless a later
  * cleared row already did. The referent is the ledger, never a lookup; absent means a silent no-op. CANNOT-OBSERVE
@@ -1547,5 +1616,112 @@ export function escalateReplayStranded(
     same_as_offered: stranded.sameAsOffered,
     issue_url: issueUrl,
     delivered: issueUrl !== null,
+  });
+}
+
+/** W1-T14611: the ledger markers of the unresolved-instance SRE lane page — one per open, one per clear. */
+export const SRE_LANE_UNRESOLVED_ESCALATED_STEP = "sre_lane.unresolved_escalated";
+export const SRE_LANE_UNRESOLVED_CLEARED_STEP = "sre_lane.unresolved_cleared";
+
+export interface SreLaneUnresolvedInfo {
+  primary: string;
+  stateRoot: string;
+  registry: string;
+  reason: string;
+}
+
+/** The issue URL a delivered page for this state root (and primary, when given) left open, or null. */
+async function openSreLaneUnresolvedIssue(ctx: ClaimStallCtx, stateRoot: string, primary?: string): Promise<string | null> {
+  let issueUrl: string | null = null;
+  for (const l of await claimStallRows(ctx, [SRE_LANE_UNRESOLVED_ESCALATED_STEP, SRE_LANE_UNRESOLVED_CLEARED_STEP])) {
+    if (l.state_root !== stateRoot) continue;
+    if (l.step === SRE_LANE_UNRESOLVED_CLEARED_STEP) issueUrl = null;
+    else if (primary === undefined || l.primary === primary) issueUrl = typeof l.issue_url === "string" ? l.issue_url : null;
+  }
+  return issueUrl;
+}
+
+/**
+ * W1-T14611: the page for a primary daemon whose SRE lane is off because it could not find its instance. Dedup is on
+ * the primary instance name and the state root: a delivered page that no later clear closed is not opened again.
+ * The marker is written whether or not delivery succeeded (`escalateStarvation`'s discipline).
+ */
+export async function escalateSreLaneUnresolved(info: SreLaneUnresolvedInfo, ctx: ClaimStallCtx): Promise<void> {
+  if (await openSreLaneUnresolvedIssue(ctx, info.stateRoot, info.primary) !== null) return;
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: "daemon",
+      runId: ctx.runId,
+      summary: `The SRE lane is off on the primary daemon: it could not find its instance (${info.reason}). ` +
+        `Recycle it with --instance ${info.primary} or set RMD_INSTANCE_NAME.`,
+      detail:
+        `W1-T14611: the daemon on state root ${info.stateRoot} started with its SRE lane off. It read the registry ` +
+        `${info.registry}, whose live primary instance is '${info.primary}', but could not find its own instance: ` +
+        `${info.reason}. The daemon is live; it will close this issue when the SRE lane next starts on this state root.`,
+      options: [
+        {
+          label: "name the instance",
+          detail: `Recycle the daemon with \`deploy/recycle-container.sh --instance ${info.primary}\`, or launch it with RMD_INSTANCE_NAME=${info.primary}.`,
+        },
+        {
+          label: "acknowledge and wait",
+          detail: "If this daemon is not the primary instance, no action is needed; the issue closes when the lane next starts here.",
+        },
+      ],
+      recommendation: "name the instance",
+      consequence: "While the lane is off, the SRE governor cannot page a fleet stall.",
+    },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "daemon",
+    step: SRE_LANE_UNRESOLVED_ESCALATED_STEP,
+    primary: info.primary,
+    state_root: info.stateRoot,
+    registry: info.registry,
+    reason: info.reason,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
+ * W1-T14611: the cleared half — closes the issue the newest delivered page for this state root opened, unless a later
+ * cleared row already did. Absent means a silent no-op. CANNOT-OBSERVE MEANS WAIT (W1-T130), as the other clears.
+ */
+export async function escalateSreLaneUnresolvedCleared(info: { stateRoot: string; instance: string | null }, ctx: ClaimStallCtx): Promise<void> {
+  const issueUrl = await openSreLaneUnresolvedIssue(ctx, info.stateRoot);
+  if (issueUrl === null) return;
+  const comment = `W1-T14611: the SRE lane started on state root ${info.stateRoot}` +
+    `${info.instance !== null ? ` as instance '${info.instance}'` : ""}. Closing automatically.`;
+  const issues = ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo);
+  let delivered = false;
+  let failure: string | undefined;
+  if (!issues.closeWithComment) {
+    failure = "issue gateway cannot close issues";
+  } else {
+    try {
+      issues.closeWithComment(issueUrl, comment);
+      delivered = true;
+    } catch (e) {
+      // CANNOT-OBSERVE MEANS WAIT (W1-T130): never rethrown into the daemon loop; the row below carries it as `failure`.
+      failure = String((e as Error)?.message ?? e);
+    }
+  }
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "daemon",
+    step: SRE_LANE_UNRESOLVED_CLEARED_STEP,
+    state_root: info.stateRoot,
+    instance: info.instance,
+    issue_url: issueUrl,
+    delivered,
+    ...(failure ? { failure } : {}),
   });
 }

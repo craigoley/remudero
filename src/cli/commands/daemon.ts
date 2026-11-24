@@ -23,14 +23,17 @@ import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../
 import { ghExec, ghJsonAsync, ghTextAsync, githubInstallationBudget, takeGithubBudgetThrottles } from "../../lib/github-transport.js";
 import type { InstallationBudgetThreadInput } from "../../lib/github-installation-budget.js";
 import { daemonInstallationRegistry, startProcessInstallationBudget } from "../../lib/installation-budget-start.js";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { homedir, hostname } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { parseInstanceRegistry } from "../../lib/instance-registry.js";
+import { isTestRunner } from "../../lib/live-write-guard.js";
+import { homedir, hostname, tmpdir } from "node:os";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { configPath, isWorkerProviderId, loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
 import { cashDeploymentTarget } from "../../lib/config-schema.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
-import { daemonCrashSentinel, deliverQuotaExhaustionLate, escalateClaimStall, escalateClaimStallCleared, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared } from "../../lib/escalation-catalogue.js";
+import { daemonCrashSentinel, deliverQuotaExhaustionLate, escalateClaimStall, escalateClaimStallCleared, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateSreLaneUnresolved, escalateSreLaneUnresolvedCleared, escalateStarvation, escalateStarvationCleared, escalateTargetJobStalled, type SreLaneUnresolvedInfo } from "../../lib/escalation-catalogue.js";
 import { lostWorkerProviders, resolveProviderRoutingPolicy, type EffectiveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
 import {
   FOUNDRY_CLAUDE_API_KEY_ENV,
@@ -53,7 +56,7 @@ import { createThreadEventSync, registryThreadItems, type InboxResponderDeps } f
 import type { InboxCausalScope } from "../../lib/inbox-thread.js";
 import { gitRecommendationEvidence, RECOMMENDATION_SEED_PATH } from "../../lib/inbox-recommendation.js";
 import { censusRunDirs } from "../../lib/run-child-contract.js";
-import { loadTargetPlanQuarantiningDuplicates, plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
+import { loadTargetPlanOrEmptyWhenAbsent, plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
@@ -120,6 +123,10 @@ import { mainEvidenceReader } from "../../lib/stall-verifier.js";
 import { step } from "../../lib/git-push.js";
 import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from "../../lib/worker-home.js";
 import { acquireDrainLock, DrainLockError } from "../../lib/drain-lock.js";
+import { abortStandby, acquireLockWhenFree, awaitPromotion, leaveExitCodeForEntrypoint, logPromoted, standbyPorts,
+  type StandbyOptions, type StandbyPorts } from "../../lib/daemon-standby.js";
+import { createDaemonHandoff, daemonSlotsDir, type DaemonHandoff } from "../../lib/daemon-handoff.js";
+import { createSlotPreparer } from "../../lib/serve-slots.js";
 import { asyncGit, testRunnerOnItsOwnCheckout } from "../../lib/self-sync.js";
 import { withLiveEditLadders } from "../../lib/live-edit-ladder.js";
 import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, clearKick, consumeDrainNow, consumeRestartInPlace, clearPrAction, consumeStop, isQuietHours, kickFilePath, pauseDetail, pendingKicks, pendingPrActions, stopDetail } from "../../lib/fleet-control.js";
@@ -130,7 +137,7 @@ import { automaticBranchReapStateFileName, orphanRunBranchEvidenceReader } from 
 import { repoRoot, resolveOwnerRepo, writeDaemonTargetRecord } from "../../lib/repo-location.js";
 import { resolveRepoLayout } from "../../lib/repo-layout.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
-import { createOpsCatalogShadowSource, type OpsCatalogApi, type OpsCatalogShadowInput } from "../../lib/ops-catalog-source.js";
+import { createOpsCatalogShadowSource, servedAsLastGood, type OpsCatalogApi, type OpsCatalogShadowInput } from "../../lib/ops-catalog-source.js";
 import { liveInflightRuns, readCheckoutDepth } from "../../lib/report-commands.js";
 import { adoptRunChildren, createAdmittedPlanSlot, runChildModeIsOn, startRunChildProbe, tapPlanSnapshot, type AdoptedRunChild } from "../../lib/run-child.js";
 import { loadObservedOverlapMode, loadRunChildMode, type RunChildMode } from "../../lib/policy.js";
@@ -496,16 +503,18 @@ async function bootPlanDestination(
   stateDir: string,
   publicRepository: PlanDestinationRepository,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  opsSelection: OpsDispatchSelection,
 ): Promise<void> {
   const named = planDestinationRepository(stateDir);
   if (named.outcome === "off") return;
+  const dispatch = { dispatch_ops: opsSelection.outcome, dispatch_ops_reason: opsSelectionReason(opsSelection) };
   if (named.outcome === "unreadable") {
-    log("daemon.plan_destination", { outcome: "unreadable", kinds: [], reason: named.reason });
+    log("daemon.plan_destination", { outcome: "unreadable", kinds: [], reason: named.reason, ...dispatch });
     return;
   }
   const kinds = PLAN_DESTINATION_KINDS.filter((kind) => resolvePlanDestination(kind, stateDir, publicRepository).outcome === "destination");
   if (existsSync(join(named.checkoutDir, ".git"))) {
-    log("daemon.plan_destination", { outcome: "named", kinds, checkout: "present" });
+    log("daemon.plan_destination", { outcome: "named", kinds, checkout: "present", ...dispatch });
     return;
   }
   try {
@@ -513,12 +522,12 @@ async function bootPlanDestination(
     // The same awaited call as the clone of a target job's repository, so the clone does not block the event loop.
     // The output of `gh` is not written to a row or to a log.
     await ghTextAsync(["repo", "clone", `${named.owner}/${named.repo}`, named.checkoutDir], { timeout: 300_000 });
-    log("daemon.plan_destination", { outcome: "named", kinds, checkout: "cloned" });
+    log("daemon.plan_destination", { outcome: "named", kinds, checkout: "cloned", ...dispatch });
   } catch (e) {
     // The message holds the command line, which names the repository. The row keeps the exit status or the error code only.
     const { code } = e as { code?: unknown };
     const cause = typeof code === "number" ? `exit ${code}` : typeof code === "string" ? code : "error";
-    log("daemon.plan_destination", { outcome: "named", kinds, checkout: "clone_failed", reason: `gh repo clone failed (${cause})` });
+    log("daemon.plan_destination", { outcome: "named", kinds, checkout: "clone_failed", reason: `gh repo clone failed (${cause})`, ...dispatch });
   }
 }
 
@@ -565,13 +574,14 @@ export function daemonKickPort(root: string, target: { repo: string; isSelf: boo
  * {@link createNativeTargetJobRunner} consumes them; durable recovery survives a missing marker.
  */
 export function daemonTargetJobPort(root: string, self: { repo: string }): {
-  pendingTargetJobs: () => Array<DaemonKick & { repo: string }>;
+  pendingTargetJobs: () => Array<DaemonKick & { repo: string; requestedAt?: string }>;
 } {
   return {
     pendingTargetJobs: () => {
       const marked = pendingKicks(root).flatMap((kick) =>
         kick.repo !== undefined && kick.repo.toLowerCase() !== self.repo.toLowerCase() && existsSync(kickFilePath(root, kick.taskId, kick.repo))
-          ? [{ taskId: kick.taskId, origin: kick.origin, repo: kick.repo }] : []);
+          // W1-T14576: the marker's request time travels with it, so a waiting job's deferral row can say how long it waited.
+          ? [{ taskId: kick.taskId, origin: kick.origin, repo: kick.repo, requestedAt: kick.requestedAt }] : []);
       const durable = fileTargetJobStore(root).readAll().filter((job) => job.status === "admitted" && job.repo.toLowerCase() !== self.repo.toLowerCase());
       return [...marked, ...durable.filter((job) => !marked.some((kick) => kick.origin === job.origin))];
     },
@@ -886,19 +896,61 @@ export async function daemonSreLaneEnabled(
   stateRoot: string,
   installRoot: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  unresolved?: SreLaneUnresolvedPage,
 ): Promise<boolean> {
+  const registryPath = process.env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined
+    ? process.env.RMD_SELECTED_INSTANCE_REGISTRY.trim()
+    : process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(installRoot);
   const sreLane = {
-    instance: await resolveSreLaneInstance({
-      stateRoot,
-      registryPath: process.env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined
-        ? process.env.RMD_SELECTED_INSTANCE_REGISTRY.trim()
-        : process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(installRoot),
-    }),
+    instance: await resolveSreLaneInstance({ stateRoot, registryPath }),
     env: { RMD_SRE_LANE: process.env.RMD_SRE_LANE },
   };
   const row = sreLaneStartRow(sreLane);
   log(row.step, row.fields);
-  return sreLaneEnabled(sreLane);
+  const enabled = sreLaneEnabled(sreLane);
+  if (unresolved !== undefined) await pageUnresolvedSreLane(sreLane, enabled, { stateRoot, registryPath }, unresolved, log);
+  return enabled;
+}
+
+/** W1-T14611: the page a primary daemon's unresolved SRE lane raises, and the clear its next start sends. */
+export interface SreLaneUnresolvedPage {
+  escalate: (info: SreLaneUnresolvedInfo) => Promise<void>;
+  clear: (info: { stateRoot: string; instance: string | null }) => Promise<void>;
+}
+
+/** Pages on ANY state root, container or host: only disabled, unresolved, not RMD_SRE_LANE=0, and one live primary. */
+async function pageUnresolvedSreLane(
+  sreLane: Parameters<typeof sreLaneEnabled>[0],
+  enabled: boolean,
+  where: { stateRoot: string; registryPath: string },
+  unresolved: SreLaneUnresolvedPage,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<void> {
+  const { instance } = sreLane;
+  try {
+    if (enabled) {
+      await unresolved.clear({ stateRoot: where.stateRoot, instance: instance.resolved ? instance.name : null });
+      return;
+    }
+    if (instance.resolved || sreLane.env.RMD_SRE_LANE?.trim() === "0") return;
+    const primaries = await livePrimaryNames(where.registryPath);
+    if (!("names" in primaries) || primaries.names.length !== 1) return;
+    // Under the test runner a page reads only a fixture registry, never the live fleet's (the ops-catalog-source /
+    // board-snapshot-cache rule): a test boot on a temp root would otherwise page the real primary. Never in production.
+    if (isTestRunner() && !realpathSync(where.registryPath).startsWith(realpathSync(tmpdir()) + sep)) return;
+    await unresolved.escalate({ primary: primaries.names[0]!, stateRoot: where.stateRoot, registry: where.registryPath, reason: instance.why });
+  } catch (error) {
+    log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) });
+  }
+}
+
+async function livePrimaryNames(registryPath: string): Promise<{ names: string[] } | { unreadable: string }> {
+  try {
+    return { names: parseInstanceRegistry(await readFile(registryPath, "utf8")).instances
+      .filter((row) => row.live && row.primary === true).map((row) => row.name) };
+  } catch (error) {
+    return { unreadable: String((error as Error)?.message ?? error) };
+  }
 }
 
 /** W1-T12236 / W1-T13709 / W1-T13831: a pass of any scope, or none, may use a fresh, clean tick read.
@@ -925,7 +977,8 @@ function isOpsCatalogSlug(slug: string): boolean {
  * W1-T11770: the tick reads `current` synchronously and gets the last completed refresh. Each read starts at most one
  * refresh behind it, the W1-T7744 filing-prefetch shape, so a slow or hung read never delays a tick.
  */
-/** BACKSTOP: completed private evidence expires even if a successor refresh hangs. */
+/** BACKSTOP: completed private evidence expires even if a successor refresh hangs. W1-T14564: an ok snapshot past it is
+ *  still served, marked as the last good one; only evidence with no snapshot is held. */
 export const OPS_DISPATCH_SOURCE_MAX_AGE_MS = 120_000;
 
 /** W1-T13052: the daemon refreshes on its own timer, so evidence stays younger than the bound between slow cycles. */
@@ -948,11 +1001,14 @@ export function opsCatalogShadowFeed(
   stop(): void;
 } {
   let latest: OpsCatalogShadowInput | undefined;
-  let completedAt: number | undefined;
+  /** W1-T14564: the newest ok evidence and the start of the read that produced it; served while a later one fails. */
+  let latestOk: { input: OpsCatalogShadowInput; at: number } | undefined;
   let inFlight = false;
   // Only closed labels and numbers are copied: the input's private plan handle never reaches the row.
-  const logRefresh = (input: OpsCatalogShadowInput, durationMs: number): void => {
+  const logRefresh = (served: OpsCatalogShadowInput, durationMs: number): void => {
     if (!opts.log) return;
+    // W1-T14564: a refresh the kept snapshot answered reports its refusal in the row's own fields, as before.
+    const input = served.refused ?? served;
     try {
       opts.log(OPS_CATALOG_REFRESHED_STEP, {
         outcome: input.outcome, refusal_stage: input.refusalStage ?? null, duration_ms: durationMs,
@@ -960,6 +1016,9 @@ export function opsCatalogShadowFeed(
         // W1-T14374: counts and the bound's three numbers; each is copied by name, so no other field of either reaches the row.
         shards: input.counts?.shards ?? null, bytes: input.counts?.bytes ?? null,
         bound: input.bound ? { reason: input.bound.reason, observed: input.bound.observed, allowed: input.bound.allowed } : null,
+        // W1-T14564: and adds the refusal's own outcome and the served snapshot's age. Absent otherwise, so every other
+        // row keeps exactly its fields.
+        ...(served.lastGood ? { refusal: served.lastGood.refusal, snapshot_age_ms: served.lastGood.snapshotAgeMs } : {}),
       });
     } catch {
       // A diagnostic row that cannot be written never changes the evidence the refresh produced.
@@ -971,8 +1030,11 @@ export function opsCatalogShadowFeed(
     // Age counts from the start of the read that produced the evidence, never from its slow answer.
     const startedAt = clock.now();
     // refresh() answers failure as an outcome; an unexpected rejection remains unreadable.
-    void source.refresh().then((input) => { latest = input; completedAt = startedAt; }, (error: unknown) => {
-      latest = { outcome: "unreadable", refusalStage: "source_refresh" }; completedAt = startedAt; void error;
+    void source.refresh().then((input) => {
+      latest = input;
+      if (input.outcome === "ok") latestOk = { input, at: startedAt };
+    }, (error: unknown) => {
+      latest = { outcome: "unreadable", refusalStage: "source_refresh" }; void error;
     }).then(() => {
       if (!latest) return;
       logRefresh(latest, clock.now() - startedAt);
@@ -989,9 +1051,16 @@ export function opsCatalogShadowFeed(
   return {
     current: () => { start(); return latest; },
     forDispatch: () => {
-      if (latest?.outcome !== "ok") return latest;
-      const age = completedAt === undefined ? NaN : clock.now() - completedAt;
-      return !Number.isFinite(age) || age < 0 || age >= OPS_DISPATCH_SOURCE_MAX_AGE_MS ? { outcome: "stale", refusalStage: "snapshot_age" } : latest;
+      // W1-T14564 (operator ruling 2026-11-23): core never waits on the ops read. While any ok evidence exists it is
+      // served: current inside the bound, else marked as the last good snapshot with the refusal and its age. Only
+      // with no snapshot at all does a failure or the bound hold dispatch, as before: never an empty catalog.
+      if (latestOk === undefined) return latest;
+      const age = clock.now() - latestOk.at;
+      const current = latest === latestOk.input && Number.isFinite(age) && age >= 0 && age < OPS_DISPATCH_SOURCE_MAX_AGE_MS;
+      if (current) return latestOk.input;
+      const refusal = latest !== undefined && latest.outcome !== "ok" ? latest : { outcome: "stale" as const, refusalStage: "snapshot_age" as const };
+      const snapshotAgeMs = (Number.isFinite(age) && age >= 0 ? age : 0) + (latestOk.input.lastGood?.snapshotAgeMs ?? 0);
+      return servedAsLastGood(latestOk.input, { refusal: refusal.outcome, ...(refusal.refusalStage ? { refusalStage: refusal.refusalStage } : {}), snapshotAgeMs });
     },
     stop: () => { if (timer !== undefined) clearInterval(timer); },
   };
@@ -1008,15 +1077,25 @@ export function opsCatalogFilingFeeds(
   source: { refresh(): Promise<OpsCatalogShadowInput> } | undefined, clock: Clock,
   feed: { refreshEveryMs?: number; log?: (step: string, fields: Record<string, unknown>) => void },
   filing: Omit<CatalogFilingReaderOpts, "ops"> & { ops: (latest: OpsCatalogShadowInput | undefined) => OpsFilingBinding | undefined },
-): { opsShadow: ReturnType<typeof opsCatalogShadowFeed> | undefined; datedFiling: ReturnType<typeof catalogFilingReader> } {
+) {
   function warmOpsFiling(input: OpsCatalogShadowInput): void {
     if (input.outcome !== "ok") return;
     // A warm-up that cannot read leaves the selection's own prefetch-behind read, which names any refusal.
     datedFiling.refresh().then(undefined, (error: unknown) => { void error; });
   }
-  const opsShadow = source === undefined ? undefined : opsCatalogShadowFeed(source, clock, { ...feed, onSettled: warmOpsFiling });
+  let opsShadow: ReturnType<typeof opsCatalogShadowFeed> | undefined;
   const datedFiling = catalogFilingReader({ ...filing, ops: () => filing.ops(opsShadow?.forDispatch()) });
-  return { opsShadow, datedFiling };
+  const stopSource = () => {
+    opsShadow?.stop();
+    opsShadow = undefined;
+  };
+  const startSource = (next: NonNullable<typeof source>) => {
+    stopSource();
+    opsShadow = opsCatalogShadowFeed(next, clock, { ...feed, onSettled: warmOpsFiling });
+    return opsShadow;
+  };
+  if (source !== undefined) startSource(source);
+  return { get opsShadow() { return opsShadow; }, datedFiling, startSource, stopSource };
 }
 
 /**
@@ -1076,6 +1155,10 @@ function planDestinationFlag(stateDir: string, name: "dispatch_ops_tasks" | "mov
 
 function opsDispatchSelection(stateDir: string): OpsDispatchSelection {
   return planDestinationFlag(stateDir, "dispatch_ops_tasks", "invalid_dispatch_flag");
+}
+
+function opsSelectionReason(selection: OpsDispatchSelection): string | undefined {
+  return selection.outcome === "unavailable" ? selection.reason : undefined;
 }
 
 /** W1-T13681: `move_public_tasks` beside `dispatch_ops_tasks`, each read with the same rules on every tick. */
@@ -1162,9 +1245,34 @@ function firstTickReadOf<I extends { plan: Plan }, T>(
   };
 }
 
+
+/** W1-T14544: what a `--standby` boot carries from its prepare to its promotion; undefined for a normal boot. */
+interface StandbyBoot { startedAtMs: number; ports?: StandbyPorts; promoted: boolean }
+
+/**
+ * W1-T14544: a `--standby` boot that fails before it is promoted records `daemon.standby_aborted` and exits 1:
+ * it never held the lock, so it has nothing to release.
+ */
+async function daemonStandbyCommand(rest: string[], deps: NonNullable<Parameters<typeof daemonCommand>[1]>, host: DaemonCommandHost): Promise<number> {
+  const standby: StandbyBoot = { startedAtMs: (deps.standby?.clock ?? systemClock).now(), promoted: false };
+  try {
+    return await daemonCommand(rest, deps, host, standby);
+  } catch (error) {
+    if (standby.promoted || !standby.ports) throw error;
+    abortStandby(standby.ports, { criterion: "prepare_failed", detail: String((error as Error)?.message ?? error) }, standby.startedAtMs);
+    return 1;
+  }
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
+    /** W1-T14544: the standby's bounds and clock; production omits it and gets the module defaults. */
+    standby?: StandbyOptions;
+    /** W1-T14544: where a plan quarantine's escalation goes; production omits it and opens or comments on a GitHub issue. */
+    raiseEscalation?: (e: Escalation) => string;
+    /** W1-T14545: the blue-green handoff; production omits it and gets {@link createDaemonHandoff}. */
+    handoff?: DaemonHandoff;
     /** Injectable GitHub-gateway constructor for the merged-status projection. Defaults to the
      *  BATCHED {@link buildBatchedGithub} — one NON-search `gh pr list` per projection, which is
      *  what keeps merge state derivable while GitHub's GraphQL `search()` connection is
@@ -1257,9 +1365,11 @@ export async function daemonCommand(
     opsCatalogApi?: OpsCatalogApi;
   } = {},
   host: DaemonCommandHost,
+  standby?: StandbyBoot,
 ): Promise<number> {
+  if (standby === undefined && rest.includes("--standby")) return daemonStandbyCommand(rest, deps, host);
   if (selectedInstanceRegistryEnvPath() !== undefined && !instanceRegistryRuntimePresent()) {
-    return withInstanceRegistryRuntime(() => daemonCommand(rest, deps, host));
+    return withInstanceRegistryRuntime(() => daemonCommand(rest, deps, host, standby));
   }
   const bootPhases = startBootPhases(clockFromMillisFn(deps.now), Math.round(process.uptime() * 1000));
   bootPhases.mark("module_load");
@@ -1368,7 +1478,7 @@ export async function daemonCommand(
     "daemon",
     rest,
     ["--max", "--poll-ms", "--repo", "--plan", "--shadow-ops-catalog"],
-    ["--dry-run", "--allow-self-target", "--allow-stale"],
+    ["--dry-run", "--allow-self-target", "--allow-stale", "--standby"],
   );
   if (badArg) {
     writeSyncLine(2, badArg + "\n" + USAGE);
@@ -1467,6 +1577,8 @@ export async function daemonCommand(
   };
   ledgerSelectedRegistryReadTimeouts(log);
   setDanglingRefRepairLog(log);
+  // W1-T14544: from here a standby can say why it stopped; before it took nothing to undo.
+  if (standby) standby.ports = standbyPorts({ stateDir: join(config.root, "state"), runId, sha: daemonLoadedCodeSha, pid: process.pid, log }, deps.standby);
   startDaemonInstallationBudget(() => daemonInstallationRegistry(repoRoot), process.env, log, systemClock, `${target.owner}/${target.repo}`, opts.pollIntervalMs);
   // bundlemain: which entry this main started from (bin/rmd's choice), and a bundled main's first tick settles it.
   onMainEntryStep = startMainEntryWatch({ log, root: daemonModuleRepoDir });
@@ -1562,8 +1674,12 @@ export async function daemonCommand(
   // clone of the target repo (the daemon clones it for execution anyway), SYNCED to the latest
   // default branch so the scheduled plan is current — a stale clone would drain an old plan.
   let plan: Plan;
-  const raiseDuplicate = (e: Escalation): string =>
-    escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
+  const raiseDuplicate = (e: Escalation): string => deps.raiseEscalation
+    ? deps.raiseEscalation({ ...e, runId })
+    : escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
+  // W1-T14544: a standby's pre-lock plan read reaches GitHub for nothing. The plan read it runs once it holds the lock
+  // (syncBootPlan) quarantines the same declarations again and raises them then; until then the row names no issue.
+  const deferUntilLocked = (): string => "deferred-until-lock";
   const requestShardRepair = shardRepairRequester(join(config.root, "state"), log);
   const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
   const planReaders = daemonPlanReaders(target.planPath, reportPlanQuarantine);
@@ -1585,32 +1701,52 @@ export async function daemonCommand(
       ? startGardenOffLoop(name, intervalMs, { flight: gardenFlight, spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContextFor(name)) }) })
       : { stop() {} };
   // W1-T13585: a foreign target's plan can hold other repositories' tasks whose dependencies it cannot see.
-  const foreignTargetPlanLoad = (path: string) => loadTargetPlanQuarantiningDuplicates(path, target.repo);
-  if (!target.isSelf && !flagValue(rest, "--plan")) {
-    const repoDir = join(reposDir, target.repo);
-    if (!existsSync(repoDir)) {
-      mkdirSync(dirname(repoDir), { recursive: true });
-      ghExec(["repo", "clone", `${target.owner}/${target.repo}`, repoDir], { stdio: "inherit" });
-    } else {
-      execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
-      execFileSync("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
+  // W1-T14575: a target onboarded maintain-only has no plan at all; it boots on an empty one instead of exiting.
+  let absentPlanReported = false;
+  const foreignTargetPlanLoad = (path: string) => loadTargetPlanOrEmptyWhenAbsent(path, `${target.owner}/${target.repo}`, (step, extra) => {
+    if (step === "daemon.plan_absent") {
+      if (absentPlanReported) return;
+      absentPlanReported = true;
     }
-    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
-  } else if (target.isSelf && !flagValue(rest, "--plan")) {
-    // ── GIT SELF-SYNC (W1-T60): self-hosting must not read the daemon's own working tree
-    // either — same fail-closed gate as run-task/drain (see syncPlanOrRefuse).
-    const synced = await syncPlanOrRefuseAsync(target.planPath, {
-      allowStale,
-      log,
-      say: (msg: string) => writeSyncLine(2, `### rmd daemon — ${msg}`),
-      quarantine: reportPlanQuarantine,
-      planSnapshot: planReaders.boot,
-    });
-    if ("error" in synced) return 1;
-    plan = synced.plan;
-  } else {
+    log(step, extra);
+  });
+  // The boot plan read: a managed target's checkout is synced first, unless --plan names a file. Undefined: refused.
+  const syncBootPlan = async (): Promise<Plan | undefined> => {
+    if (!target.isSelf && !flagValue(rest, "--plan")) {
+      const repoDir = join(reposDir, target.repo);
+      if (!existsSync(repoDir)) {
+        mkdirSync(dirname(repoDir), { recursive: true });
+        ghExec(["repo", "clone", `${target.owner}/${target.repo}`, repoDir], { stdio: "inherit" });
+      } else {
+        execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
+        execFileSync("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
+      }
+      return loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
+    }
+    if (target.isSelf && !flagValue(rest, "--plan")) {
+      // ── GIT SELF-SYNC (W1-T60): self-hosting must not read the daemon's own working tree
+      // either — same fail-closed gate as run-task/drain (see syncPlanOrRefuse).
+      const synced = await syncPlanOrRefuseAsync(target.planPath, {
+        allowStale,
+        log,
+        say: (msg: string) => writeSyncLine(2, `### rmd daemon — ${msg}`),
+        quarantine: reportPlanQuarantine,
+        planSnapshot: planReaders.boot,
+      });
+      if ("error" in synced) return undefined;
+      return synced.plan;
+    }
     // An explicit --plan overrides the derived path — read it literally, no git sync.
-    plan = target.isSelf ? loadDaemonPlan(target.planPath, log, raiseDuplicate) : loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
+    return target.isSelf ? loadDaemonPlan(target.planPath, log, raiseDuplicate) : loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
+  };
+  if (standby) {
+    // W1-T14544: a standby syncs no checkout (the active daemon owns them until it lets go); it reads the plan as it
+    // stands, and runs the sync once it holds the lock.
+    plan = target.isSelf ? loadDaemonPlan(target.planPath, log, deferUntilLocked) : loadDaemonPlan(target.planPath, log, deferUntilLocked, foreignTargetPlanLoad);
+  } else {
+    const synced = await syncBootPlan();
+    if (synced === undefined) return 1;
+    plan = synced;
   }
   bootPhases.mark("plan_load");
 
@@ -1622,11 +1758,17 @@ export async function daemonCommand(
   let tickReadStartedAtMs: number | undefined;
   const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
   const targetCheckoutRoot = daemonTargetCheckoutRoot(target, config.root);
-  const targetRecordWrite = writeDaemonTargetRecord(join(config.root, "state"),
-    { owner: target.owner, repo: target.repo, isSelf: target.isSelf, checkoutRoot: targetCheckoutRoot });
-  if (!targetRecordWrite.written) log("daemon.target_record_failed", { reason: targetRecordWrite.reason });
   // W1-T12200: the host switch for new plan files. With no host file this writes no row and calls nothing.
-  await bootPlanDestination(join(config.root, "state"), { owner: self.owner, repo: self.repo, checkoutDir: effectiveRepoRoot }, log);
+  const opsStateDir = join(config.root, "state");
+  const bootOpsSelection = opsDispatchSelection(opsStateDir);
+  // W1-T14544: both write shared state, so a standby runs them only once it holds the lock.
+  const writeBootTargetState = async (): Promise<void> => {
+    const targetRecordWrite = writeDaemonTargetRecord(join(config.root, "state"),
+      { owner: target.owner, repo: target.repo, isSelf: target.isSelf, checkoutRoot: targetCheckoutRoot });
+    if (!targetRecordWrite.written) log("daemon.target_record_failed", { reason: targetRecordWrite.reason });
+    await bootPlanDestination(opsStateDir, { owner: self.owner, repo: self.repo, checkoutDir: effectiveRepoRoot }, log, bootOpsSelection);
+  };
+  if (!standby) await writeBootTargetState();
   // W1-T14302: the reader itself, not a wrapper, so the gateway also gets its revert read.
   const targetCommitTrailerIndex = buildCommitTrailerIndex({ slug: `${target.owner}/${target.repo}`, cwd: targetCheckoutRoot });
   const gatewayFor = createDaemonGatewayFactory(config.root, log, {
@@ -1872,7 +2014,19 @@ export async function daemonCommand(
   // daemon) already holds it; reclaim a stale (dead-pid) lock.
   const drainLockPath = join(config.root, "state", "drain.lock");
   let drainLock;
-  try {
+  let standbyPromotion: { prepareMs: number; waitMs: number; lockWaitMs: number; takeoverStartMs: number } | undefined;
+  if (standby?.ports) {
+    // W1-T14544: ready, then wait for the hand-over; the lock is taken only once its live holder has let go.
+    const promotion = await awaitPromotion(standby.ports, standby.startedAtMs);
+    if ("criterion" in promotion) { await stopReadPlane(); return 1; }
+    const locked = await acquireLockWhenFree(standby.ports, () => acquireDrainLock(drainLockPath));
+    if ("refused" in locked) { await stopReadPlane(); return 1; }
+    drainLock = locked.handle;
+    standby.promoted = true;
+    leaveExitCodeForEntrypoint(join(config.root, "state"), process.pid);
+    standbyPromotion = { ...promotion, lockWaitMs: locked.lockWaitMs, takeoverStartMs: standby.ports.clock.now() };
+    await writeBootTargetState();
+  } else try {
     drainLock = acquireDrainLock(drainLockPath);
   } catch (e) {
     if (e instanceof DrainLockError) {
@@ -1893,6 +2047,13 @@ export async function daemonCommand(
     ...(readPlane ? [{ resource: "read_plane", close: stopReadPlane }] : []),
   ];
   try {
+  if (standbyPromotion) {
+    // W1-T14544: the checkout sync a standby skipped runs now that it holds the lock; a refusal releases it.
+    const synced = await syncBootPlan();
+    if (synced === undefined) return 1;
+    plan = synced;
+    activePlanRef.current = synced;
+  }
   bootPhases.mark("wiring");
   const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());
   const landedClaimRerunReported = new Set<string>();
@@ -2375,32 +2536,48 @@ export async function daemonCommand(
     bootPhases.mark("loop_wiring");
     await dispatchFilingPrefetch.refresh(target.planPath);
     bootPhases.mark("filing_prefetch");
-    // W1-T11770: absent the flag, nothing is built, read or passed. Present, the first read starts here, unawaited.
-    const opsSelection = opsDispatchSelection(join(config.root, "state"));
-    const opsSourceRepository = shadowOpsCatalog ?? (opsSelection.outcome === "on" ? opsSelection.repository : undefined);
-    const source = opsSourceRepository === undefined ? undefined
-      : createOpsCatalogShadowSource({ repository: opsSourceRepository }, deps.opsCatalogApi);
+    const opsClock = clockFromMillisFn(deps.now);
+    const readOpsSelection = () => opsDispatchSelection(opsStateDir);
+    let previousOpsSelection = bootOpsSelection;
+    let opsSourceRepository = shadowOpsCatalog;
+    const explicitShadow = shadowOpsCatalog === undefined ? undefined
+      : opsCatalogShadowFeed(createOpsCatalogShadowSource({ repository: shadowOpsCatalog }, deps.opsCatalogApi), opsClock);
     // W1-T14214: an ops task is dated from the ops checkout's history at the commit the dispatch capture is bound to.
     // W1-T14218: each ok snapshot the source settles starts that read, so the first selection after a boot is dated.
-    const { opsShadow, datedFiling } = opsCatalogFilingFeeds(source === undefined ? undefined : shadowOpsCatalog ? source : {
-      refresh: () => {
-        const current = opsDispatchSelection(join(config.root, "state"));
-        return current.outcome === "on" && current.repository === opsSourceRepository
-          ? source.refresh() : Promise.resolve({ outcome: "stale" as const });
-      },
-    }, clockFromMillisFn(deps.now), {
-      ...(opsSelection.outcome === "on" ? { refreshEveryMs: OPS_DISPATCH_SOURCE_REFRESH_MS } : {}),
-      // W1-T13705: only the dispatch feed ledgers its refreshes; --shadow-ops-catalog keeps W1-T11770's one aggregate row.
-      ...(shadowOpsCatalog ? {} : { log }),
+    const filingFeeds = opsCatalogFilingFeeds(undefined, opsClock, {
+      refreshEveryMs: OPS_DISPATCH_SOURCE_REFRESH_MS, ...(explicitShadow ? {} : { log }),
     }, { publicReader: dispatchFilingPrefetch, log,
       ports: { parseFilingDates: filingDatesFromPlanHistory, gitFor: planSyncGitRunnerAsync },
-      ops: (latest) => opsFilingBinding(opsDispatchSelection(join(config.root, "state")), opsSourceRepository, latest) });
-    if (opsShadow) cleanup.push({ resource: "ops_catalog_refresh", close: opsShadow.stop });
-    opsShadow?.current();
-    const readOpsTaskDispatch = opsSelection.outcome === "off" ? undefined : (publicPlan: Plan): OpsTaskDispatchRead => {
-      const current = opsDispatchSelection(join(config.root, "state"));
-      if (current.outcome !== "on") return current;
-      if (!opsShadow || current.repository !== opsSourceRepository) return { outcome: "unavailable", reason: "selection_changed" };
+      ops: (latest) => opsFilingBinding(readOpsSelection(), opsSourceRepository, latest) });
+    cleanup.push({ resource: "ops_catalog_refresh", close: () => { filingFeeds.stopSource(); explicitShadow?.stop(); } });
+    const readOpsTaskDispatch = (publicPlan: Plan): OpsTaskDispatchRead => {
+      const current = readOpsSelection();
+      const fromReason = opsSelectionReason(previousOpsSelection), toReason = opsSelectionReason(current);
+      if (current.outcome !== previousOpsSelection.outcome || fromReason !== toReason) {
+        log("dispatch.ops_selection_changed", {
+          from: previousOpsSelection.outcome, to: current.outcome, from_reason: fromReason, to_reason: toReason,
+        });
+      }
+      previousOpsSelection = current;
+      if (current.outcome !== "on") {
+        filingFeeds.stopSource();
+        return current;
+      }
+      opsSourceRepository ??= current.repository;
+      if (current.repository !== opsSourceRepository) {
+        filingFeeds.stopSource();
+        return { outcome: "unavailable", reason: "selection_changed" };
+      }
+      let opsShadow = filingFeeds.opsShadow;
+      if (opsShadow === undefined) {
+        const repository = current.repository;
+        const source = createOpsCatalogShadowSource({ repository }, deps.opsCatalogApi);
+        opsShadow = filingFeeds.startSource({ refresh: () => {
+          const selection = readOpsSelection();
+          return selection.outcome === "on" && selection.repository === repository
+            ? source.refresh() : Promise.resolve({ outcome: "stale" as const });
+        } });
+      }
       opsShadow.current();
       const input = opsShadow.forDispatch();
       if (input === undefined) return { outcome: "unavailable", reason: "source_pending" };
@@ -2409,9 +2586,12 @@ export async function daemonCommand(
       if (publicCommit === undefined) return { outcome: "unavailable", reason: "primary_revision_unknown", source: input };
       return { outcome: "selected", source: input, publicCommit };
     };
+    readOpsTaskDispatch(plan);
+    if (filingFeeds.opsShadow === undefined) explicitShadow?.current();
+    const currentOpsCatalog = () => filingFeeds.opsShadow?.forDispatch() ?? explicitShadow?.forDispatch();
     const sweepTaskReaders = {
       reloadPlanForFixImpl: () => activePlanRef.current,
-      opsCatalogForContract: { repository: opsSourceRepository, current: () => opsShadow?.forDispatch() },
+      opsCatalogForContract: { get repository() { return opsSourceRepository; }, current: currentOpsCatalog },
     };
     const buildSweepHook: DaemonSweepHookBuilder = (...args) => {
       const sweep: (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> =
@@ -2424,6 +2604,7 @@ export async function daemonCommand(
     };
     const buildSweepLightHook: DaemonSweepLightHookBuilder = (...args) =>
       withSweepTaskReaders(sweepTaskReaders, (deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook)(...args));
+    if (standby?.ports && standbyPromotion) logPromoted(standby.ports, standbyPromotion);
     const summary = await runDaemonFn(
       plan,
       {
@@ -2456,24 +2637,24 @@ export async function daemonCommand(
           activePlanRef.current = fresh;
           daemonPlanCopies.observe(fresh);
         },
-        ...(readOpsTaskDispatch ? { readOpsTaskDispatch } : {}),
+        readOpsTaskDispatch,
         // W1-T13681: the move janitor reads move_public_tasks on every tick; absent or false, it does nothing.
         planTaskMover: createPlanTaskMover(planTaskMovePorts({
           publicRoot: targetCheckoutRoot, publicRepository: `${target.owner}/${target.repo}`,
           readSwitch: () => planTaskMoveSwitch(join(config.root, "state")),
-          readOpsCatalog: opsCatalogOutcomeReader(opsShadow),
+          readOpsCatalog: opsCatalogOutcomeReader({ forDispatch: currentOpsCatalog }),
           // W1-T14448: read once, here, before the loop: a restart resumes the wait on the step the last process opened.
           readLedgerLines: () => readReleaseLedgerLines(ledgerPathFor(config)),
           cliEntry: fileURLToPath(new URL(`../../run-task${import.meta.url.endsWith(".ts") ? ".ts" : ".js"}`, import.meta.url)),
         })),
-        ...(opsShadow ? {
-          secondaryCatalogShadowSource: opsShadow.current,
+        ...(explicitShadow ? {
+          secondaryCatalogShadowSource: explicitShadow.current,
           primaryPlanCommit: () => planReaders.revisions.revisionOf(activePlanRef.current)?.commit,
         } : {}),
         // W1-T3412: daemon selection uses the same complete-union calibration as the bounded
         // drain. A refused calibration returns undefined, preserving historic ordering.
         buildDispatchValueContext: (dispatchPlan, merged) =>
-          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, target.planPath, undefined, datedFiling(dispatchPlan)),
+          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, target.planPath, undefined, filingFeeds.datedFiling(dispatchPlan)),
         isOpenPr,
         isCreditIndeterminate,
         // W1-T3216: THE PRODUCER, on the lane that actually dispatches — the same omission
@@ -2723,6 +2904,7 @@ export async function daemonCommand(
         // W1-T13248: the page for a fleet whose slots go only to refused runs, and its close on the next claim-passing run.
         onClaimStall: (info) => escalateClaimStall(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         onClaimStallCleared: (info) => escalateClaimStallCleared(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+        onTargetJobStalled: (info) => escalateTargetJobStalled(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
         checkStop,
         // W1-T1216: LOCAL FIRST (design (i)), falling through to the shared cross-host hold
         // (`refs/rmd-pause/hold`) only when the local file is silent — see checkSharedPause's
@@ -2758,7 +2940,7 @@ export async function daemonCommand(
         checkFreshness: testRunnerOnItsOwnCheckout(repoRoot)
           ? withPendingCommitTasks(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, asyncGit(repoRoot))
           : withEscalationSpoolDrain(withLiveEditLadders(withPendingCommitTasks(daemonFreshnessReads(repoRoot, process.env, { loadedCodeSha: daemonLoadedCodeSha }).checkFreshness, asyncGit(repoRoot)), { ...liveEditLadderWiring(config), ...freshnessRestartLadder(policy.values.freshnessRestart) }), escalationSpoolDrainWiring(config)),
-        taskExpedite: catalogTaskExpedite(() => activePlanRef.current, () => opsShadow?.forDispatch()),
+        taskExpedite: catalogTaskExpedite(() => activePlanRef.current, currentOpsCatalog),
         // W1-T10919: read main's tree directly; a config-only fetch need not reset the consumer checkout.
         readTerminalPreDispatchRefusalRevisions: () => terminalPreDispatchRefusalRevisions(join(config.root, "state"), () => runnerConfigDigest(targetCheckoutRoot, "origin/main")),
         categorizedRefusalRejoinFor: (id) => lastProj?.get(id)?.categorizedRefusalRejoin,
@@ -2824,6 +3006,11 @@ export async function daemonCommand(
         } : {}),
         consumeDrainNow: () => consumeDrainNow(config.root),
         // W1-T11327: the progress watchdog's restart-in-place request, exited on with this process's own boot sha.
+        // W1-T14545: off unless state/daemon-handoff.on exists; read at each restart decision.
+        handoff: deps.handoff ?? createDaemonHandoff({ stateDir: join(config.root, "state"),
+          activeDir: effectiveRepoRoot, activeSha: daemonLoadedCodeSha, daemonArgs: rest, log,
+          prepareSlot: createSlotPreparer({ repoDir: effectiveRepoRoot, gensDir: daemonSlotsDir(join(config.root, "state")),
+            log: (step, extra) => log(step.replace(/^serve\./, "daemon."), extra) }) }),
         consumeRestartRequest: () => {
           const request = consumeRestartInPlace(config.root);
           return request && { ...request, ...(daemonLoadedCodeSha ? { codeSha: daemonLoadedCodeSha } : {}) };
@@ -2848,7 +3035,10 @@ export async function daemonCommand(
                 // it on anywhere. The starter is inert until called, so it is built on every start
                 // and dropped when off; either way one `sre_lane.started`/`sre_lane.disabled` row
                 // says so. `state/SRE_LANE_OFF` stays the pause switch.
-                ...(await daemonSreLaneEnabled(config.root, repoRoot, log) ? [
+                ...(await daemonSreLaneEnabled(config.root, repoRoot, log, {
+                  escalate: (info) => escalateSreLaneUnresolved(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+                  clear: (info) => escalateSreLaneUnresolvedCleared(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+                }) ? [
                   startBoundedDaemonSreLane(
                     (mergedLastDay) => daemonSreLaneInput({
                       stateDir: join(config.root, "state"),

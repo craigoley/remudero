@@ -287,6 +287,8 @@ test("the committed registry parses and puts core, site and console in the remud
       ["site", "remudero", "craigoley/remudero-site", true],
       ["console", "remudero", "craigoley/remudero-console", true],
       ["ops", "remudero", "craigoley/remudero-ops", true],
+      ["oleyarcade", "remudero", "craigoley/oley-arcade", true],
+      ["wreckterra", "remudero", "craigoley/wreckterra", true],
     ],
   );
 });
@@ -296,7 +298,9 @@ test("W1-T13700: the committed registry runs remudero-ops live, and every other 
   const parsed = parseInstanceRegistry(text);
   assert.deepEqual(
     parsed.instances.map((i) => [i.name, i.mode ?? "live"]),
-    [["core", "live"], ["site", "live"], ["console", "live"], ["ops", "live"]],
+    // W1-T14552: oleyarcade, added after this ruling, is the one shadow row; the four before it stay live.
+    // W1-T14594: wreckterra joins as a second shadow row.
+    [["core", "live"], ["site", "live"], ["console", "live"], ["ops", "live"], ["oleyarcade", "shadow"], ["wreckterra", "shadow"]],
   );
   // The ruling is written out: an absent mode also reads live, so only the ops block's own key tells
   // the promotion from a dropped one.
@@ -304,6 +308,15 @@ test("W1-T13700: the committed registry runs remudero-ops live, and every other 
   assert.equal(ops?.mode, "live");
   const block = text.slice(text.indexOf("\n  ops:"));
   assert.match(block, /^ {4}mode: live$/m);
+});
+
+test("W1-T14594: wreckterra joins in shadow mode and the five rows before it stay byte-identical", () => {
+  const text = readFileSync(join(REPO_ROOT, ".remudero", "daemon-instances.yaml"), "utf8");
+  const wreckterra = parseInstanceRegistry(text).instances.find((i) => i.name === "wreckterra");
+  assert.deepEqual([wreckterra?.mode, wreckterra?.project, wreckterra?.repo, wreckterra?.live], ["shadow", "remudero", "craigoley/wreckterra", true]);
+  // The registry as it stood before this row, byte for byte: re-pin it only when an existing row truly changes.
+  const before = text.slice(0, text.indexOf("\n  wreckterra:") + 1);
+  assert.equal(createHash("sha256").update(before).digest("hex"), "bbc6d75f82def9755921ff9853fe39dc528c776b767a70c8547daae704ed7a60");
 });
 
 // The two shell readers REFUSE an unknown field, so the project layer is only safe to add because

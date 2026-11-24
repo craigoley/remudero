@@ -114,7 +114,8 @@ import { DEFAULT_TEARDOWN_SCRATCH_SWEEP_MAX_AGE_MS, reapWorkerScratch, sweepStal
 import { assertLiveWriteAllowed, isTestRunner } from "./live-write-guard.js";
 // W1-T2777: share ensureInstallFresh's hash primitive; parallel implementations drift. See lib/install-hash.ts.
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
-import { configuredDependencySeedRoot } from "./dependency-seeds.js";
+import { configuredDependencySeedRoot, primeRefusalReceipt, SEED_PRIME_RECOVERY, seedPrimeChildEnv,
+  type DependencyGenerationRefusalReceipt, type DependencySeedResult } from "./dependency-seeds.js";
 import { refreshCanonicalSeed } from "./typecheck-buildinfo.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { ghExec, ghJson } from "./github-transport.js";
@@ -207,6 +208,7 @@ import {
   FOUNDRY_CLAUDE_ENDPOINT_ENV,
   type CodexCapacityDeps,
   type CodexModelTier,
+  type EconomyFirstReason,
   type ProviderCapacity,
   OPENWEIGHT_FUNCTIONS,
   ProviderCapacityBlockedError,
@@ -527,6 +529,9 @@ export interface WorkerSelectionAssignment {
   id: string;
   phase: "pre-execution";
   harness_owns_git?: boolean;
+  /** W1-T12152: the hash of the prompt template and tool list this call declared ({@link workerPromptRevision}), or the named
+   *  reason it has none. Written on every assignment {@link spawnWorker} emits. */
+  prompt_revision?: WorkerPromptRevision;
   requested: {
     model: string;
     effort: string;
@@ -592,6 +597,8 @@ export type RoutingRule =
   | "capability-preference"
   | "role-preference"
   | "fix-economy-first"
+  /** W1-T14549: a canary build's first attempt started on the Codex economy tier below its mount. */
+  | "build-economy-first"
   | "operator-preference"
   | "preference-bypassed"
   | "cash-fallback"
@@ -1229,6 +1236,9 @@ export interface SpawnWorkerArgs {
   /** Models whose drafts already failed this proposal's lint; context fit still applies first. */
   avoidModels?: readonly string[];
   prompt: string;
+  /** W1-T12152: this call's prompt template, taken BEFORE any task text is filled in. Its hash with the tool list is the
+   *  assignment's prompt revision; the filled `prompt` is never hashed for it, so no task text or secret enters one. */
+  promptTemplate?: string;
   /** Render the lane contract after routing; absent preserves the supplied prompt. */
   promptFor?: (route: { provider: WorkerProviderId; harnessOwnsGit: boolean }) => string;
   /** Resume an existing session (auto-choose round-trip, fix rounds). */
@@ -1275,6 +1285,8 @@ export interface SpawnWorkerArgs {
   /** Fix rounds may try a lower Codex tier while keeping the mount's Claude model and fallback. */
   economyFirst?: {
     codexCapability: CodexModelTier;
+    /** The lane asking (W1-T14549); absent reads as a fix round, as before. */
+    reason?: EconomyFirstReason;
     onDecision?: (reason: "economy-first" | "no-codex-capacity" | "operator-preference") => void;
   };
   /** Capacity-reader seams for provider-routing tests; production reads both subscriptions live. */
@@ -1284,7 +1296,7 @@ export interface SpawnWorkerArgs {
     readCodex?: (
       config: Config,
       request: Pick<CodexCapacityDeps, "requestedModel" | "requestedEffort" | "forceRefresh" | "selectedModel" |
-        "preferredModel" | "reservePercent" | "capabilities" | "codexCapability" | "headroomTiming">,
+        "preferredModel" | "reservePercent" | "capabilities" | "codexCapability" | "economyReason" | "headroomTiming">,
     ) => Promise<ProviderCapacity>;
     /** Test seam for the selected Codex spawn; production uses the real contained CLI adapter. */
     spawnCodex?: (
@@ -1923,7 +1935,8 @@ function routingRule(args: SpawnWorkerArgs, input: Parameters<typeof workerSelec
   if (args.routingFallback) return args.routingFallback.rule;
   if (args.routingTrial?.arm === "cash" && input.provider === "cash") return "cash-trial";
   if (input.mode !== "multi-provider") return input.mode;
-  if (input.capacity?.modelDecision?.capabilityOverride?.reason === "fix-economy-first") return "fix-economy-first";
+  const override = input.capacity?.modelDecision?.capabilityOverride?.reason;
+  if (override === "fix-economy-first" || override === "build-economy-first") return override;
   if (input.selection?.lane === "codex-credits") return "codex-credits";
   if (input.preferenceBypass) return "preference-bypassed";
   if (input.rolePreference) return "role-preference";
@@ -1984,6 +1997,24 @@ function routingDecision(args: SpawnWorkerArgs, input: Parameters<typeof workerS
   };
 }
 
+/** W1-T12152: the version every prompt-revision hash is taken under; bump it when the hashed inputs change. */
+export const PROMPT_REVISION_VERSION = "prompt-revision-v1" as const;
+
+export type WorkerPromptRevision = { source: "resolved-artifact"; revision: string } | { state: "unavailable"; reason: "prompt-template-not-declared" };
+
+/** W1-T12152: the prompt revision of a call — a sha256 over the declared template and the tools it is given and denied,
+ *  each tool list order-free. Two calls given the same template and tools record the same revision; a call that declared
+ *  no template records the named gap, never a hash of its filled prompt. */
+export function workerPromptRevision(
+  template: string | undefined, tools: readonly string[] | undefined, disallowedTools?: readonly string[],
+): WorkerPromptRevision {
+  if (typeof template !== "string" || template.length === 0) return { state: "unavailable", reason: "prompt-template-not-declared" };
+  const toolSet = (list: readonly string[] | undefined) => list === undefined ? null : [...new Set(list)].sort();
+  const revision = createHash("sha256")
+    .update(JSON.stringify([PROMPT_REVISION_VERSION, template, toolSet(tools), toolSet(disallowedTools) ?? []])).digest("hex");
+  return { source: "resolved-artifact", revision };
+}
+
 /** Emit the assignment to the caller's durable ledger sink. A sink failure is visible but never
  * changes a routing decision or causes a terminal row to pretend it has a matching event. */
 function emitWorkerSelectionAssignment(
@@ -1991,6 +2022,7 @@ function emitWorkerSelectionAssignment(
   input: Parameters<typeof workerSelectionAssignment>[1],
 ): string | undefined {
   const assignment = workerSelectionAssignment(args, input);
+  assignment.prompt_revision = workerPromptRevision(args.promptTemplate, args.tools, args.disallowedTools);
   if (args.promptFor) assignment.harness_owns_git = harnessOwnsGitForProvider(args, input.provider);
   console.error(JSON.stringify({ event: "worker.selection.assigned", assignment }));
   // W1-T4614: before the provider call, so every commit this worker makes in its run worktree names this assignment.
@@ -2876,6 +2908,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         requestedEffort: args.effort,
         ...(preferred ? { preferredModel: preferred } : {}),
         ...(codexCapability ? { codexCapability } : {}),
+        ...(codexCapability && economyFirst?.reason ? { economyReason: economyFirst.reason } : {}),
         reservePercent,
         headroomTiming,
         ...(args.model && capabilities ? { capabilities } : {}),
@@ -5536,6 +5569,20 @@ export type NodeModulesLinkOutcome =
   // Telling the caller stops a worker reading the resulting "module not found" as a defect in its own diff (W1-T2777).
   | "linked-lockfile-mismatch";
 
+interface SeedPrimeChildFailureReceipt {
+  kind: "child_failed";
+  exit: number | null;
+  signal: string | null;
+  code: string | null;
+  stderr_tail: string;
+  seed_root: string;
+  requester: { checkout: string; id?: string };
+  recovery: string;
+}
+
+type WorktreePrimeReceipt = DependencyGenerationRefusalReceipt | SeedPrimeChildFailureReceipt;
+type WorktreeNodeModulesOutcome = NodeModulesLinkOutcome | { outcome: "refused"; receipt: WorktreePrimeReceipt };
+
 /** Thrown by `worktreeAdd`, only when its caller opts in, instead of linking a SAME-package tree whose install inputs differ
  * from the worktree's (W1-T4193). `reasonClass` is the `blocked_toolchain` tag daemon.ts's `isSpawnInfraBlocked` defers
  * WITHOUT a strike: every daemon installs its install root before a freshness restart, so the mismatch clears. */
@@ -5559,20 +5606,24 @@ export class WorktreeNodeModulesRefusedError extends RmdError {
     readonly packageName: string,
     readonly worktreePath: string,
     readonly nodeModulesSource: string | undefined,
-    readonly outcome?: "no-source" | "failed",
+    readonly outcome?: "no-source" | "failed" | "refused",
+    receipt?: WorktreePrimeReceipt,
   ) {
     const sourceDir = nodeModulesSource ? dirname(nodeModulesSource) : "no source";
     // GENERIC_EXIT_CODE: what a plain `extends Error` already resolved to through exitCodeFor.
     super(
       "git",
       GENERIC_EXIT_CODE,
-      (outcome
+      receipt
+        ? `worktree ${worktreePath} refused before any worker runs: ${receipt.kind === "generation_refused"
+          ? receipt.reason : `dependency seed prime child failed (${receipt.code ?? receipt.signal ?? receipt.exit})`}. ${receipt.recovery}`
+        : (outcome
         ? `worktree ${worktreePath} refused before any worker runs: node_modules provisioning returned ${outcome} ` +
           `(source: ${nodeModulesSource ?? "none"}). Remedy: refresh the canonical `
         : `worktree ${worktreePath} refused before any worker runs: its package.json/package-lock.json hash differs from ` +
           `${sourceDir}'s, the same package (${packageName}) whose node_modules it would link. Remedy: refresh the canonical `) +
         "checkout (the install root is re-installed on the next freshness restart); never install inside the worktree",
-      { packageName, worktreePath, nodeModulesSource, ...(outcome ? { outcome } : {}) },
+      { packageName, worktreePath, nodeModulesSource, ...(outcome ? { outcome } : {}), ...(receipt ? { receipt } : {}) },
     );
     this.name = "WorktreeNodeModulesRefusedError";
   }
@@ -5729,23 +5780,49 @@ export function linkWorktreeNodeModules(
 export async function provisionWorktreeNodeModules(
   repoDir: string,
   worktreePath: string,
-  deps: Parameters<typeof linkWorktreeNodeModules>[2] = {},
-): Promise<NodeModulesLinkOutcome> {
+  deps: NonNullable<Parameters<typeof linkWorktreeNodeModules>[2]> & {
+    execPrime?: typeof execFileRouted;
+    requester?: string;
+  } = {},
+): Promise<WorktreeNodeModulesOutcome> {
   const root = configuredDependencySeedRoot();
   if (!root) return linkWorktreeNodeModules(repoDir, worktreePath, deps);
+  // Package-less worktrees have no dependency inputs to prime.
+  if (!existsSync(join(worktreePath, "package.json")) && !existsSync(join(worktreePath, "package-lock.json"))) {
+    (deps.warn ?? console.error)(`dependency seed provisioning refused: no dependency inputs in ${worktreePath}`);
+    return "failed";
+  }
   const source = (deps.resolveSource ?? resolveNodeModulesSource)(repoDir);
+  const requester = { checkout: worktreePath, ...(deps.requester === undefined ? {} : { id: deps.requester }) };
+  let output: { stdout: string; stderr: string } | undefined;
   try {
     // Seed identity, locking, copying and npm run in a bounded child, never on the daemon's event loop.
     const args = ["--experimental-strip-types", fileURLToPath(new URL("../../scripts/dependency-seeds.mjs", import.meta.url)),
-      "prime", worktreePath, "--root", root, ...(source ? ["--source", dirname(source)] : [])];
-    const { stdout } = await execFileRouted(process.execPath, args, {
-      cwd: worktreePath, encoding: "utf8", timeout: 120_000, killSignal: "SIGKILL",
+      "prime", worktreePath, "--root", root, ...(source ? ["--source", dirname(source)] : []),
+      ...(deps.requester === undefined ? [] : ["--requester", deps.requester])];
+    output = await (deps.execPrime ?? execFileRouted)(process.execPath, args, {
+      cwd: worktreePath, env: seedPrimeChildEnv(), encoding: "utf8", timeout: 120_000, killSignal: "SIGKILL",
     });
-    const result = JSON.parse(stdout) as { status: string };
-    return result.status === "present" ? "already-present" : "linked";
+    const result = JSON.parse(output.stdout) as Partial<DependencySeedResult> | null;
+    if (result?.status === "present") return "already-present";
+    if (result?.status === "materialized" && typeof result.key === "string" && typeof result.seed === "string" &&
+        typeof result.installed === "boolean" && ["apfs-clone", "readonly-links", "private-copy"].includes(result.method ?? "")) return "linked";
+    throw new Error("invalid dependency seed prime result");
   } catch (error) {
-    (deps.warn ?? console.error)(`dependency seed provisioning refused: ${(error as Error).message}`);
-    return "failed";
+    const child = error as { stderr?: unknown; code?: string | number; childExitCode?: number | null; signal?: string };
+    const stderr = String(child.stderr ?? output?.stderr ?? "");
+    const receipt = primeRefusalReceipt(stderr);
+    if (receipt) return { outcome: "refused", receipt };
+    return { outcome: "refused", receipt: {
+      kind: "child_failed",
+      exit: output ? 0 : typeof child.code === "number" ? child.code : child.childExitCode ?? null,
+      signal: child.signal ?? null,
+      code: output ? "INVALID_PRIME_RESULT" : typeof child.code === "string" ? child.code : stderr.match(/\bERR_[A-Z0-9_]+\b/)?.[0] ?? null,
+      stderr_tail: stderr.trimEnd().slice(-4096),
+      seed_root: root,
+      requester,
+      recovery: SEED_PRIME_RECOVERY,
+    } };
   }
 }
 
@@ -6663,6 +6740,7 @@ export function worktreeAdd(
     refuseSamePackageLockfileMismatch?: boolean;
     /** Trusted install resolver, shared by the pre-link check and root provisioning. */
     resolveSource?: (repoDir: string) => string | undefined;
+    execPrime?: typeof execFileRouted;
     /** Trusted harness install context; a private fixture may supply its own install, never task data. */
     typecheckInstallRoot?: string;
     typecheckRename?: (from: string, to: string) => void;
@@ -6759,14 +6837,16 @@ function prepareWorktreeDependencies(
 function recordWorktreeNodeModules(
   worktreePath: string,
   deps: WorktreeAddDepsArg,
-  outcome: NodeModulesLinkOutcome,
+  result: WorktreeNodeModulesOutcome,
   source: string | undefined,
 ): void {
-  deps.log?.("worktree.node_modules", { outcome, source: source ?? null });
-  if (deps.refuseSamePackageLockfileMismatch && (outcome === "no-source" || outcome === "failed") &&
-      existsSync(join(worktreePath, "package.json"))) {
+  const outcome = typeof result === "string" ? result : result.outcome;
+  const receipt = typeof result === "string" ? undefined : result.receipt;
+  deps.log?.("worktree.node_modules", { outcome, source: source ?? null, ...(receipt ? { receipt } : {}) });
+  if (outcome === "refused" || (deps.refuseSamePackageLockfileMismatch && (outcome === "no-source" || outcome === "failed") &&
+      existsSync(join(worktreePath, "package.json")))) {
     const name = readPackageName(worktreePath);
-    throw new WorktreeNodeModulesRefusedError(name.kind === "named" ? name.name : name.kind, worktreePath, source, outcome);
+    throw new WorktreeNodeModulesRefusedError(name.kind === "named" ? name.name : name.kind, worktreePath, source, outcome, receipt);
   }
 }
 
@@ -6958,7 +7038,9 @@ export async function worktreeAddAsync(
     } });
   });
   const source = satelliteSource ?? (deps.resolveSource ?? resolveNodeModulesSource)(repoDir);
-  const outcome = await provisionWorktreeNodeModules(repoDir, worktreePath, { resolveSource: () => source });
+  const outcome = await provisionWorktreeNodeModules(repoDir, worktreePath, {
+    resolveSource: () => source, execPrime: deps.execPrime, requester: branch,
+  });
   recordWorktreeNodeModules(worktreePath, deps, outcome, source);
   finishWorktreeAdd(repoDir, worktreePath, deps);
   let drift: CanonicalCheckoutDriftResult;

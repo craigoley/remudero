@@ -32,8 +32,9 @@ threshold. [Terra's own model metadata](https://learn.microsoft.com/en-us/azure/
 lists 922K input tokens; the local context row uses that ceiling and leaves room for output.
 Azure OpenAI's unbilled-429 policy is explicitly recorded on the price row.
 
-The live host allowance recorded 2026-10-27 is **dailyCapUsd 50, fleetCapUsd 50**: a shared $50
-UTC daily cap. The separate Foundry Claude $5 normal/$10 squeezed sublimit stays in force.
+The live host caps, read 2026-11-23, are **dailyCapUsd { normal: 10, squeezed: 50 }, fleetCapUsd 50**:
+$10 on a normal UTC day, and $50 only on a day no subscription has readable headroom. (On 2026-10-27
+the cap was a plain 50.) The separate Foundry Claude $5 normal/$10 squeezed sublimit stays in force.
 The inbox bake-off now includes three tools-enabled Terra candidates at low, medium and high;
 each replay uses a balanced mount and pins both deployment and effort. The ordinary inbox mount
 and cash economy row stay unchanged. A catalog-listed Terra with the readiness rows is classified

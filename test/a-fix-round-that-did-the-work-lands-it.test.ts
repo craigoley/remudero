@@ -146,7 +146,8 @@ test("W1-T4450: the fix lane re-asks once for a missing commit line", async () =
   // The control: a round that left no edits is not asked for a line it has nothing to commit.
   const idle = fixRung({ edits: false });
   await runFixRung(idle.run);
-  assert.equal(idle.spawns.length, 1);
+  assert.equal(idle.spawns.some((spawn) => spawn.prompt === COMMIT_LINE_RESUME_PROMPT), false);
+  assert.equal(idle.lines.some((l) => l.step === "fix.commit_line_requested"), false);
 });
 
 test("W1-T4450: each fix round keeps its own transcript", async () => {

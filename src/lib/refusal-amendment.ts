@@ -32,8 +32,8 @@ import {
   writePriorRefusal,
 } from "./dispatch-repair.js";
 import type { Task } from "./plan.js";
-import type { PlanPrPreflightCheck, PlanPrPreflightFinding } from "./plan-pr-emitter.js";
-import { parseCriterionRefusals, type CriterionRefusalClass } from "./review.js";
+import { escapeGrepLiteral, type PlanPrPreflightCheck, type PlanPrPreflightFinding } from "./plan-pr-emitter.js";
+import { parseCriterionRefusals, REFUSAL_AMENDMENT_MARKER, type CriterionRefusalClass } from "./review.js";
 import { isTaskShardName } from "./task-shard-name.js";
 
 /** The ledger step {@link runSweep}'s call site writes once per handled refusal, and the ONLY thing
@@ -334,7 +334,7 @@ export function refusalAmendmentComment(
   for (const r of refusals) {
     const implied = REFUSAL_IMPLICATION[r.refusalClass];
     lines.push(
-      `refusal-amendment (${taskId}, run ${runId}, ${at}): the worker refused criterion ${r.criterion} ` +
+      `${REFUSAL_AMENDMENT_MARKER}${taskId}, run ${runId}, ${at}): the worker refused criterion ${r.criterion} ` +
         `[${r.refusalClass}] — proposed ${implied.kind}: ${implied.proposal}`,
       `  worker evidence: ${r.detail}`,
     );
@@ -413,6 +413,11 @@ export function refusalAmendmentBranch(taskId: string): string {
   return `refusal-amendment/${taskId}`;
 }
 
+/** The PR-body proof: a BRE grep for the comment prefix of this run only. */
+export function refusalAmendmentProof(taskId: string, runId: string, relPath: string): string {
+  return `grep: ${escapeGrepLiteral(`${REFUSAL_AMENDMENT_MARKER}${taskId}, run ${runId},`)} in ${relPath}`;
+}
+
 /** Draft the ONE plan-only amendment PR for `candidate`. Never throws: a failure is an `error`
  *  outcome the caller leaves un-ledgered so the next pass retries. */
 export async function draftRefusalAmendment(
@@ -424,7 +429,7 @@ export async function draftRefusalAmendment(
   try {
     const shard = io.readShard(taskId);
     if (!shard) return { ...base, outcome: "no_shard" };
-    if (shard.text.includes(`refusal-amendment (${taskId}, run ${runId},`)) return { ...base, outcome: "already_flagged" };
+    if (shard.text.includes(`${REFUSAL_AMENDMENT_MARKER}${taskId}, run ${runId},`)) return { ...base, outcome: "already_flagged" };
     const branch = refusalAmendmentBranch(taskId);
     const existing = await io.probeExisting(branch);
     if (existing) return { ...base, outcome: "deduped", prUrl: existing.prUrl };
@@ -450,7 +455,7 @@ export async function draftRefusalAmendment(
         `the task proposing the change each category implies; it edits no claim, proof or files field. ` +
         `An Architect makes the change — nothing here is merged unreviewed.`,
       claim: `the shard records the worker's refusal of ${taskId} and the amendment it implies`,
-      proof: `grep: refusal-amendment (${taskId} in ${shard.relPath}`,
+      proof: refusalAmendmentProof(taskId, runId, shard.relPath),
     });
     return created.prUrl ? { ...base, outcome: "drafted", prUrl: created.prUrl } : { ...base, outcome: "waiting" };
   } catch (e) {
@@ -488,4 +493,23 @@ export function readTaskShard(repoDir: string, taskId: string): { relPath: strin
   }
   if (!shardRel) return undefined;
   return { relPath: shardRel, text: readFileSync(join(repoDir, shardRel), "utf8") };
+}
+
+/** The task's shard file at `repoDir`'s origin main, fetched first through `runGit` (rooted at
+ *  `repoDir`): undefined when main has no file for the task; any git failure throws. */
+export async function readTaskShardAtMain(
+  repoDir: string,
+  taskId: string,
+  runGit: (args: string[]) => Promise<string>,
+): Promise<{ relPath: string; text: string } | undefined> {
+  const tracking = "refs/remotes/origin/main";
+  await runGit(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", `+refs/heads/main:${tracking}`]);
+  const sha = (await runGit(["rev-parse", tracking])).trim();
+  const shardDir = relative(repoDir, join(resolveRepoLayout(repoDir).planDir, "tasks.d")).split(sep).join("/");
+  const relPath = (await runGit(["ls-tree", "--name-only", sha, "--", `${shardDir}/`]))
+    .split("\n")
+    .map((line) => line.trim())
+    .find((path) => isTaskShardName(path.slice(path.lastIndexOf("/") + 1), taskId) && /\.ya?ml$/.test(path));
+  if (relPath === undefined) return undefined;
+  return { relPath, text: await runGit(["show", `${sha}:${relPath}`]) };
 }
