@@ -990,11 +990,12 @@ export function boundConsoleReadRoutes(
   budgetMs: number = CONSOLE_READ_ROUTE_BUDGET_MS,
   memory?: { registry: ServeMemoryRegistry; scope: string },
   readModel?: { source: ViewBodySource; instance: string },
+  instance?: string,
 ): Route[] {
   const generation = createConsoleWriteGeneration();
   const snapshots = deps.consoleSnapshots;
   const store = snapshots && createConsoleSnapshotStore({ dir: snapshots.dir, codeRev: deps.consoleSha ?? CONSOLE_SHA_UNKNOWN, log: deps.log });
-  return routes.map((route) => invalidateSnapshotsOnWrite(legacyReadFromView(boundConsoleReadRoute(route, deps, budgetMs, { generation, store }, memory), readModel, budgetMs), generation));
+  return routes.map((route) => invalidateSnapshotsOnWrite(legacyReadFromView(boundConsoleReadRoute(route, deps, budgetMs, { generation, store, log: deps.log, ...(instance ? { instance } : {}) }, memory), readModel, budgetMs), generation));
 }
 
 /**
@@ -3590,7 +3591,7 @@ function assembleServeRoutes(
       bound: (reads, board, instance) => boundConsoleReadRoutes(reads.map((r) => projectConsoleStatusRoute(r, modelApprovals)), {
         ...deps, board, consoleSnapshots: deps.consoleSnapshots && instance ? { dir: join(deps.consoleSnapshots.dir, "instances", instance) } : undefined,
       }, CONSOLE_READ_ROUTE_BUDGET_MS, memory && { registry: memory, scope: instance ?? "instance" },
-      readModel && { source: readModel, instance: instance ?? CORE_INSTANCE }),
+      readModel && { source: readModel, instance: instance ?? CORE_INSTANCE }, instance),
       ...deps.instances,
       selectedRegistryObserver,
       assistantClaimRoot: deps.fleetControlRoot,
