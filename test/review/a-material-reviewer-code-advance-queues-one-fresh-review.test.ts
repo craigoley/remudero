@@ -85,11 +85,13 @@ function sweepFixture(t: TestContext, mainSha: string, over: Partial<OpenPrView>
   at: { history?: { dir: string; code: string }; ledgerPath?: string } = {}) {
   const history = at.history ?? HISTORY;
   const ledgerPath = at.ledgerPath ?? join(makeTempDir("t11847-sweep"), "ledger.ndjson");
-  const now = Date.parse("2026-11-11T13:30:00Z");
+  // W1-T14577: the sweep's clock and the last activity both come from the test clock, 90 minutes apart, so the
+  // activity never ages toward sweep.staleDays as real time passes.
+  const now = Date.now();
   const pr: OpenPrView = {
     prNumber: PR, prUrl: URL, taskId: TASK, headSha: HEAD, reviewInputDigest: DIGEST, reviewState: "success",
     checksState: "green", unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false,
-    lastActivityAt: "2026-11-11T12:00:00Z", ...over,
+    lastActivityAt: new Date(now - 90 * 60_000).toISOString(), ...over,
   };
   const reviews: ReviewDispatchMode[] = [];
   const armed: number[] = [];
@@ -429,4 +431,22 @@ test("W1-T14152 criterion 6: the sweep requeues for a verdict-logic advance, nev
   assert.deepEqual(advanced.reviews.map((mode) => mode.kind), ["full-review"]);
   await advanced.run({ ...advanced.pr, reviewState: "pending" });
   assert.equal(advanced.requeues().length, 1, "a second pass at the same main writes no second row");
+});
+
+test("W1-T14577: the reviewer advance fixture stays fresh at any clock", async (t) => {
+  // A test clock well past 2026-11-25, still advancing, so the fixture is dated from it.
+  const realNow = Date.now;
+  const shift = Date.parse("2027-06-01T13:30:00Z") - realNow.call(Date);
+  t.mock.method(Date, "now", () => realNow.call(Date) + shift);
+  const gh = shim(t);
+  const f = sweepFixture(t, HISTORY.code);
+  // The fixture's activity is inside sweep.staleDays of the test clock, the clock every ledger row is stamped by.
+  const ageMs = Date.now() - Date.parse(f.pr.lastActivityAt!);
+  assert.ok(ageMs >= 0 && ageMs < DEFAULT_SWEEP_POLICY.staleDays * 86_400_000, `activity ${f.pr.lastActivityAt} at ${Date.now()}`);
+  f.deliver();
+  const disposed = await f.run();
+  assert.equal(disposed?.disposition, "mergeable", JSON.stringify(disposed));
+  assert.equal(f.requeues().length, 0, "no reviewer-code advance, so nothing is requeued");
+  assert.equal(f.reviews.length, 0);
+  assert.equal(gh.posts().length, 0);
 });
