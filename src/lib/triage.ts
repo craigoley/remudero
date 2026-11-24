@@ -7,8 +7,8 @@ import { shapeCommitMessage } from "./commit-message.js";
 import { loadPlan } from "./plan.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import { diffEmptyAgainstScope } from "./review.js";
-import { feedbackEntryRepoPath, feedbackEntryPath, feedbackReadRoots, instanceStateDir, readFeedbackEntry } from "./feedback.js";
-import { planDestinationRepository, type PlanDestinationRepository } from "./plan-destination.js";
+import { feedbackEntryRepoPath, feedbackRecordHome, readFeedbackEntry } from "./feedback.js";
+import type { PlanDestinationRepository } from "./plan-destination.js";
 import { envelope } from "./untrusted-envelope.js";
 import { feedbackLineagePayload } from "./contributor-admission.js";
 import type { FeedbackEntry, FeedbackStatus } from "./feedback.js";
@@ -569,12 +569,8 @@ export function diffCitesFeedback(diff: string, feedbackId: string, proposalTask
  * bytes retain the public copy; different copies and unreadable selection refuse in the reader. */
 export function triageFeedbackHome(root: string, feedbackId: string): { root: string; destination?: PlanDestinationRepository } {
   readFeedbackEntry(root, feedbackId);
-  const named = planDestinationRepository(instanceStateDir());
-  const roots = feedbackReadRoots(root, named);
-  if (named.outcome === "named" && roots.length > 1 && !existsSync(feedbackEntryPath(root, feedbackId))) {
-    return { root: named.checkoutDir, destination: named };
-  }
-  return { root };
+  // W1-T14617: the destination is chosen by rule 2 (its origin/main), never by a file in its boot-time working tree.
+  return feedbackRecordHome(root, feedbackId);
 }
 
 // W1-T963: `nonPlanFilesInDiff` compares against a frozen fork-point, so it stays non-empty even

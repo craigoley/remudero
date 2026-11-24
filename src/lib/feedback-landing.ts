@@ -34,6 +34,7 @@ import { planDestinationRepository, type PlanDestination, type PlanDestinationRe
 import { PLAN_RECONCILE_LANDING_RECORD_LIMIT, planReconcilePrBody, planReconcileProofFor } from "./plan-reconcile-batch.js";
 import { reconcileShardStatus, requeueShardStatusText } from "./plan-reconcile.js";
 import { resolveRepoLayout } from "./repo-layout.js";
+import { opsCatalogFile, opsCatalogPaths, readOpsCheckoutAtMain, readOpsCheckoutAtMainSync, type OpsCheckoutAtMain } from "./ops-checkout-at-main.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { mergeFeedbackRecord, type FeedbackRecordMergeDecision } from "./feedback-record-merge.js";
 import { evidenceRevisionOf, validateEvidenceRevision } from "./feedback-evidence-revision.js";
@@ -1580,8 +1581,10 @@ export function planDestinationLandingOpts<O extends LandFeedbackOpts | LandFeed
   };
 }
 
-/** W1-T12203: a queued record lands where a checkout or its origin/main holds it. A new record follows the switch. */
-async function queuedRecordHome(root: string, checkoutDir: string, rel: string, kindOn: boolean): Promise<"public" | "destination"> {
+/** W1-T12203: a queued record lands where a checkout or its origin/main holds it. A new record follows the switch.
+ *  W1-T14617: the destination holds it by rule 2: its origin/main, or a capture neither its main nor its HEAD tracks,
+ *  never a file of its boot-time working tree. A destination whose main cannot be read leaves the record queued. */
+async function queuedRecordHome(root: string, checkoutDir: string, rel: string, kindOn: boolean): Promise<"public" | "destination" | "unread"> {
   const onMain = async (dir: string): Promise<boolean> => {
     try {
       await defaultGitAsync(dir)(["cat-file", "-e", `origin/main:${rel}`]);
@@ -1591,9 +1594,16 @@ async function queuedRecordHome(root: string, checkoutDir: string, rel: string, 
     }
   };
   if (existsSync(join(root, rel))) return "public";
-  if (existsSync(join(checkoutDir, rel))) return "destination";
+  let held: { from: "main" | "working-tree" } | undefined;
+  try {
+    held = opsCatalogFile(await readOpsCheckoutAtMain(checkoutDir, { paths: [rel], head: true }, defaultGitAsync(checkoutDir), { fetch: false }), rel);
+  } catch (error) {
+    void error; // the destination's main is unreadable, so neither repository is known to hold the record: it waits
+    return "unread";
+  }
+  if (held?.from === "working-tree") return "destination";
   if (await onMain(root)) return "public";
-  if (await onMain(checkoutDir)) return "destination";
+  if (held?.from === "main") return "destination";
   return kindOn ? "destination" : "public";
 }
 
@@ -1618,7 +1628,8 @@ async function sweepWithPlanDestination(
   }
   const toDestination = new Set<string>(), toPublic = new Set<string>();
   for (const rel of queued) {
-    ((await queuedRecordHome(root, named.checkoutDir, rel, kindOn)) === "destination" ? toDestination : toPublic).add(rel);
+    const home = await queuedRecordHome(root, named.checkoutDir, rel, kindOn);
+    if (home !== "unread") (home === "destination" ? toDestination : toPublic).add(rel);
   }
   const result = await sweepFeedbackLandingAsync(root, { ...opts, queueScope: toPublic });
   if (!kindOn && toDestination.size === 0) return result;
@@ -2063,7 +2074,22 @@ export function readStandingDecisions(root: string, stateDir?: string): string {
   // W1-T12201: while the host file names a repository, its checkout is a second root, whatever the kinds.
   const named = planDestinationRepository(stateDir);
   const standing = decisionsUnder(root);
-  return named.outcome === "named" ? [standing, decisionsUnder(named.checkoutDir)].filter(Boolean).join("\n") : standing;
+  return named.outcome === "named" ? [standing, decisionsAtMain(named.checkoutDir)].filter(Boolean).join("\n") : standing;
+}
+
+/** W1-T14617: the destination's DECISIONS.md and plan/decisions.d/*.md by rule 2 (its origin/main), never its
+ *  boot-time working tree. A main that cannot be read contributes nothing, as an unreadable path does below. */
+function decisionsAtMain(checkoutDir: string): string {
+  let read: OpsCheckoutAtMain;
+  try {
+    read = readOpsCheckoutAtMainSync(checkoutDir, { paths: ["DECISIONS.md", "plan/decisions.d/"], head: true }, defaultGit(checkoutDir));
+  } catch (error) {
+    void error; // an unresolvable `supersedes` escalates anyway, so an unread main is the safe empty contribution
+    return "";
+  }
+  const parts = [opsCatalogFile(read, "DECISIONS.md")?.text];
+  for (const rel of opsCatalogPaths(read, "plan/decisions.d")) if (rel.endsWith(".md")) parts.push(opsCatalogFile(read, rel)?.text);
+  return parts.filter((p) => p !== undefined).join("\n");
 }
 
 function decisionsUnder(root: string): string {

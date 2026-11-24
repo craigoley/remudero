@@ -427,6 +427,7 @@ import {
   type RefusalCandidate,
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
+import { firstOpsCatalogFile, readOpsCheckoutAtMain, taskShardScope } from "./ops-checkout-at-main.js";
 import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, heldFollowUpOf, heldFollowUpParents, heldFollowUpsOfTaskText, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type HeldFollowUp, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
@@ -6041,8 +6042,22 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const resolved = await taskFileRepository(taskId, (reloadPlanForFix() ?? plan).byId);
         const unknownCatalog = resolved.outcome === "resolved" && resolved.task === undefined &&
           planDestinationRepository(join(config.root, "state")).outcome !== "named";
-        return readParkedPrShard(unknownCatalog ? { outcome: "unreadable", reason: "destination-unreadable" } : resolved,
-          (checkoutDir) => readTaskShard(checkoutDir, taskId));
+        const resolution = unknownCatalog ? { outcome: "unreadable" as const, reason: "destination-unreadable" } : resolved;
+        if (resolution.outcome !== "resolved" || resolution.task === undefined || resolution.target === publicTaskRepository) {
+          return readParkedPrShard(resolution, () => readTaskShard(repoDir, taskId));
+        }
+        // W1-T14617: an ops task file is read at the ops checkout's origin/main, never its boot-time working tree. A git
+        // failure is a refusal that names the read; nothing falls back to the working tree or the public repository.
+        const target = resolution.target;
+        let atMain: { relPath: string; text: string } | undefined;
+        try {
+          atMain = firstOpsCatalogFile(await readOpsCheckoutAtMain(target.checkoutDir, taskShardScope(target.checkoutDir, taskId),
+            planRepairGitAsync(target.checkoutDir)));
+        } catch (e) {
+          return { outcome: "refused", target,
+            reason: `the task file cannot be read at origin/main of ${target.owner}/${target.repo}: ${String((e as Error)?.message ?? e)}` };
+        }
+        return readParkedPrShard(resolution, () => atMain);
       },
       // Task ids are one global sequence: the id is minted in the public repository, held by the target's landing branch.
       // W1-T13830: the reservation is awaited (W1-T13183), so its git runs off the daemon loop.
@@ -6138,7 +6153,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             continue;
           }
         }
-        const shardOf = (taskId: string) => isPublic ? readTaskShard(target.checkoutDir, taskId) : atMain;
+        const shardOf = (taskId: string) => isPublic ? readTaskShard(repoDir, taskId) : atMain;
         try {
           holdTaskForRefusal(join(config.root, "state"), task, c.refusals, c.runId, c.contractRevision);
         } catch (e) {
@@ -6513,17 +6528,33 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
       }
       const { checkoutDir: repairRepoDir, owner: repairOwner, repo: repairRepo } = resolved.target;
       let shardRelPath: string | undefined;
-      try {
-        shardRelPath = readdirSync(join(repairRepoDir, "plan", "tasks.d"))
-          .filter((f) => isTaskShardName(f, taskId) && /\.ya?ml$/.test(f))
-          .map((f) => join("plan", "tasks.d", f))[0];
-      } catch {
-        /* the shard directory is unreadable — fall through to the monolith below */
-      }
-      if (!shardRelPath) {
-        const monolith = join(repairRepoDir, "plan", "tasks.yaml");
-        if (existsSync(monolith) && readFileSync(monolith, "utf8").includes(`id: ${taskId}\n`)) {
-          shardRelPath = "plan/tasks.yaml";
+      // W1-T14617: an ops task's shard is read at the ops checkout's origin/main, the commit the repair worktree is cut
+      // from; the public task's shard is read from the public checkout, as before.
+      let opsShardText: string | undefined;
+      const opsShard = resolved.target === publicTaskRepository ? undefined
+        : await readTaskShardAtMain(repairRepoDir, taskId, planRepairGitAsync(repairRepoDir)).then(
+          (read) => ({ read }), (error: unknown) => ({ error: String((error as Error)?.message ?? error) }));
+      if (opsShard !== undefined) {
+        if ("error" in opsShard) {
+          log(PLAN_REPAIR_DISPATCH_STEP, { task_id: taskId, pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha,
+            outcome: "lookup_unreadable", code: "ops-shard-unreadable", error: opsShard.error });
+          return true;
+        }
+        shardRelPath = opsShard.read?.relPath;
+        opsShardText = opsShard.read?.text;
+      } else {
+        try {
+          shardRelPath = readdirSync(join(repoDir, "plan", "tasks.d"))
+            .filter((f) => isTaskShardName(f, taskId) && /\.ya?ml$/.test(f))
+            .map((f) => join("plan", "tasks.d", f))[0];
+        } catch {
+          /* the shard directory is unreadable — fall through to the monolith below */
+        }
+        if (!shardRelPath) {
+          const monolith = join(repoDir, "plan", "tasks.yaml");
+          if (existsSync(monolith) && readFileSync(monolith, "utf8").includes(`id: ${taskId}\n`)) {
+            shardRelPath = "plan/tasks.yaml";
+          }
         }
       }
       const planRepairLog = (outcome: string, extra: Record<string, unknown> = {}) =>
@@ -6551,7 +6582,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         planRepairLog("deduped", { plan_repair_pr: existing.prUrl });
         return true;
       }
-      const original = readFileSync(join(repairRepoDir, shardRelPath), "utf8");
+      const original = opsShardText ?? readFileSync(join(repoDir, shardRelPath), "utf8");
       const marker =
         `sweep-flagged proof — an Architect must correct this criterion's ` +
         `proof; W1-T3390 plan-only repair rung, PR #${pr.prNumber}, ${new Date(nowMsImpl()).toISOString()}`;
