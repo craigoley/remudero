@@ -32,6 +32,7 @@ const BOOT: LightPassScope = { reviewOnly: true, scope: "boot" };
 const IDLE: LightPassScope = { reviewOnly: true, scope: "idle" };
 const NO_PLAN: Plan = { tasks: [], byId: new Map() };
 const PR = 1223601;
+const PR_TIMESTAMP = new Date().toISOString();
 const TICK_STARTED_AT_MS = 1_000_000;
 
 function view(headSha: string): OpenPrView {
@@ -51,8 +52,8 @@ function generation(publishedAtMs: number, views: OpenPrView[], openPrError?: st
 function pullRow(headSha: string, repo = "r"): Record<string, unknown> {
   return {
     number: PR, html_url: `https://github.com/o/${repo}/pull/${PR}`, state: "open", draft: false,
-    title: `feat: ${PR}`, body: `Remudero-Task: W1-T${PR}`, updated_at: "2026-11-11T00:00:00Z",
-    created_at: "2026-11-11T00:00:00Z", head: { ref: `run-W1-T${PR}-1`, sha: headSha },
+    title: `feat: ${PR}`, body: `Remudero-Task: W1-T${PR}`,
+    updated_at: PR_TIMESTAMP, created_at: PR_TIMESTAMP, head: { ref: `run-W1-T${PR}-1`, sha: headSha },
   };
 }
 
