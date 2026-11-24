@@ -2049,13 +2049,18 @@ export async function daemonCommand(
       // A failed warm read decides nothing: the boot runs the same two reads and refuses or records there.
       void warmError;
     }
+    bootPhases.mark("standby_warm");
   }
   if (standby?.ports) {
     // W1-T14544: ready, then wait for the hand-over; the lock is taken only once its live holder has let go.
     const promotion = await awaitPromotion(standby.ports, standby.startedAtMs);
     if ("criterion" in promotion) { await stopReadPlane(); return 1; }
+    // W1-T14674: the ready standby's wait for the hand-over is its own phase, never part of wiring; the active daemon
+    // still works through it, so it is not dark time.
+    bootPhases.mark("promote_wait");
     const locked = await acquireLockWhenFree(standby.ports, () => acquireDrainLock(drainLockPath));
     if ("refused" in locked) { await stopReadPlane(); return 1; }
+    bootPhases.mark("lock_wait");
     drainLock = locked.handle;
     standby.promoted = true;
     leaveExitCodeForEntrypoint(join(config.root, "state"), process.pid);
@@ -2088,6 +2093,7 @@ export async function daemonCommand(
     if (synced === undefined) return 1;
     plan = synced;
     activePlanRef.current = synced;
+    bootPhases.mark("plan_sync");
   }
   bootPhases.mark("wiring");
   const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());

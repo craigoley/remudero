@@ -5332,6 +5332,8 @@ export async function runDaemon(
   // W1-T5344: per-task delivery-failure parks, rebuilt from the ledger so a restart does not reset
   // them; consulted by the dispatch filter's independent-failure hold below.
   const laneDeliveryParks = priorLaneDeliveryParks(bootLedgerLines);
+  // W1-T14674: the loop preamble's parts are named, so the boot's dark time after the lock is not one "other" figure.
+  deps.bootPhases?.mark("loop_history");
   // W1-T9680: one probe per credential refusal, shared by its lane's refill and the settle loop.
   const credentialProbes = new WeakMap<object, Promise<FleetCredentialProbe>>();
   const fleetCredentialFor = (err: object): Promise<FleetCredentialProbe> => {
@@ -5385,6 +5387,7 @@ export async function runDaemon(
       });
     } catch (error) { nearLimitFailure({ reason: error }); }
   }
+  deps.bootPhases?.mark("heap_telemetry");
   const heapShadow = heapShadowStateDir === undefined || !deps.readMemoryTelemetry ? undefined : createHeapShadow({
     path: heapSamplePath(heapShadowStateDir),
     clock: daemonClock,
@@ -5402,6 +5405,7 @@ export async function runDaemon(
       log("daemon.heap_ceiling_shadow_failed", { reason: String((e as Error)?.message ?? e).slice(0, 160) });
     }
   }
+  deps.bootPhases?.mark("heap_shadow");
   // W1-T4390: the SRE governor's port — injected, else over the fleet lane's state root (see DaemonDeps.sreGovernor).
   const sreFallbackRoot = deps.fleetLane;
   const sreGovernor: SreGovernorEnforcer | undefined =
