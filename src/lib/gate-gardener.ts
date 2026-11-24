@@ -504,7 +504,7 @@ const PER_FILE_COUNTS = "per-file.ndjson";
  *  test judge's files and the per-file reporter's destination held when it ended. TAP is always the first reporter;
  *  `reporters` adds any more, each with its destination. */
 function runShiftedChild(repoRoot: string, files: readonly string[], shiftDays: number, reporters: (privateRoot: string) => string[],
-  execFile: NonNullable<ShiftedSuiteOptions["execFile"]>) {
+  execFile = execFileSync as NonNullable<ShiftedSuiteOptions["execFile"]>) {
   for (const file of files) readFileSync(resolve(repoRoot, file)); // Node can report a green wrapper for a missing test path.
   const privateRoot = mkdtempSync(join(tmpdir(), "rmd-shifted-suite-"));
   try {
