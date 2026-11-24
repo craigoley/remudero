@@ -146,7 +146,7 @@ test("W1-T9911: the segmented checkpoint yields the whole-file snapshot", async 
       const text = name.endsWith(".gz") ? gunzipSync(bytes).toString() : bytes.toString();
       const stat = statSync(path);
       return { name, form: name.endsWith(".gz") ? "gzip" : "live", size: stat.size, mtimeMs: stat.mtimeMs,
-        sha256: createHash("sha256").update(bytes).digest("hex"), projection: "implement-forecast-v1",
+        sha256: createHash("sha256").update(bytes).digest("hex"), projection: "codex-notional-v1",
         rows: text.trimEnd().split("\n").map((line) => ({ fingerprint: createHash("sha256").update(line).digest("hex"),
           bytes: Buffer.byteLength(line), row: JSON.parse(line) })) };
     });
