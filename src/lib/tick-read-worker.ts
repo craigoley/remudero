@@ -39,7 +39,7 @@ import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
 import { loadPlan, DEFAULT_RISK, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
-import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, planCreditOverridePath, type CommitTrailerIndexReader, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
+import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, planCreditOverridePath, type CommitTrailerIndexReader, deriveStatus, isGhRateLimitError, projectPlan, projectionPhaseRecorder, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
 import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, dependabotCheckStates, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, REVIEW_INPUT_ADMISSION_BACKSTOP, type ReviewSetupRefusal, type BaseChangedFiles } from "./sweep.js";
 import { loadedReviewerCodeSha } from "./reviewer-health.js";
 import { readCiGateRequiredNames, resolveCiGateRequiredSource, type CiGateRequiredSource } from "./ci-gate-required.js";
@@ -362,8 +362,10 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       creditOverridePath: planCreditOverridePath(checkoutRoot),
     };
     let openBranches: PrRef[] | undefined;
+    // W1-T14644: both derivations are timed; the selection-timing row reads the sum, the records of the last.
+    const phases = projectionPhaseRecorder();
     const derive = () => projectPlan(plan, {
-      ledgerPath, github, skipUncreditedBuildWarning: true, ...creditIo,
+      ledgerPath, github, skipUncreditedBuildWarning: true, ...creditIo, observePhase: phases.observe,
       previousProjection: (id) => previous.get(id),
       observeOpenPrCount: (rows) => { openBranches = rows ? [...rows] : undefined; },
     });
@@ -418,7 +420,7 @@ export function createTickReadProducer(options: TickReadOptions, io: {
       .filter(([id, value]) => JSON.stringify(value) !== JSON.stringify(creditBefore[id]))
       .map(([id, after]) => ({ id, before: creditBefore[id], after }));
     const closedPrs: ClosedPrFact[] = closedPrFacts(closedRows, closedAt, new Set(openPrRows?.map((pr) => pr.number)));
-    return { plan, projection: [...projection], openBranches, openPrRows, openPrViews, openPrError, creditUpdates,
+    return { plan, projection: [...projection], projectionPhases: phases.read(), openBranches, openPrRows, openPrViews, openPrError, creditUpdates,
       creditCandidates, escalationCandidates, escalationIntake, boardItems,
       staleGateWorkflowsByPr, behindMainByPr, baseChangedFilesByPr, mergedFixPrNumbers, postFixCiFailuresByPr, closedPrs };
   };

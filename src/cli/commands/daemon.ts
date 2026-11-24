@@ -102,7 +102,7 @@ import {
   bootSweepDispatchClaimsAsync, dispatchClaimRef, realBootSweepHostProbe, releaseLandedDispatchClaims, listHeldDispatchClaims, claimMintedByRerun,
   type BootSweepInputs, type DispatchClaimReserverAsync,
 } from "../../lib/dispatch-claim.js";
-import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, planCreditOverridePath, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
+import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, planCreditOverridePath, projectPlan, projectionPhaseRecorder, type ProjectionPhases, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
 import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs, withSweepTaskReaders, type OpenPrView } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
 import { createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus } from "../../lib/daemon-memory-census.js";
@@ -1843,6 +1843,8 @@ export async function daemonCommand(
   // The open rows `projectPlan` observed this pass, kept for the observed-scope producer below:
   // the SAME batch the WIP governor counts, never a second read.
   let lastOpenRows: readonly PrRef[] | undefined;
+  // W1-T14644: the phases of the latest merged-set read, for the selection-timing row.
+  let lastRefreshPhases: ProjectionPhases | undefined;
   const refreshMerged: (planOverride?: Plan) => MergedSet = (planOverride = activePlanRef.current) => {
     if (freshReadGeneration(tickReadGeneration, { consumer: "refresh_merged", log })) {
       const projection = lastProj;
@@ -1853,14 +1855,16 @@ export async function daemonCommand(
     projectionGithub.resetFailureFlags?.();
     boardOpenPrCount.reset();
     lastOpenRows = undefined;
+    const phases = projectionPhaseRecorder();
     const proj = projectPlan(
       planOverride,
-      { ledgerPath, github: projectionGithub, skipUncreditedBuildWarning: true,
+      { ledgerPath, github: projectionGithub, skipUncreditedBuildWarning: true, observePhase: phases.observe,
         creditOverridePath: planCreditOverridePath(targetCheckoutRoot),
         observeOpenPrCount: (rows) => { lastOpenRows = rows; boardOpenPrCount.observe(rows); } },
       statusPath,
     );
     lastProj = proj;
+    lastRefreshPhases = phases.read();
     return (id: string) => proj.get(id)?.merged ?? false;
   };
   const isOpenPr: OpenPrCheck = (id) => {
@@ -2647,8 +2651,10 @@ export async function daemonCommand(
             lastOpenRows = snapshot.facts.openBranches;
             boardOpenPrCount.observe(snapshot.facts.openBranches);
           },
+          observePhases: (phases: ProjectionPhases) => { lastRefreshPhases = phases; },
           ledgerPath, statusPath, log,
         }) : undefined,
+        readRefreshMergedPhases: () => lastRefreshPhases,
         readLoopTelemetry: loopTelemetry.sample,
         readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId, footprint: daemonFootprint }),
         memoryGovernor: daemonMemoryGovernor,

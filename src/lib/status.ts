@@ -376,6 +376,25 @@ export interface GitHub {
 /** Reader for the append-only ledger; injectable for tests. */
 export type LedgerReader = (path: string) => Array<Record<string, unknown>>;
 
+/** W1-T14644: the phases of one projection pass, named for the selection-timing row. */
+export const PROJECTION_PHASES = ["ledger_credit_reads", "merged_projection", "open_projection", "github_reads"] as const;
+export type ProjectionPhase = (typeof PROJECTION_PHASES)[number];
+/** Wall time and the records a phase walked; a phase a pass never reached is absent. */
+export type ProjectionPhases = Partial<Record<ProjectionPhase, { ms: number; records: number }>>;
+
+/** W1-T14644: collects `observePhase` calls across the projections of one read: wall time adds up, the record
+ *  count is the latest pass's (a repeated pass walks the same records, so adding them would double the count). */
+export function projectionPhaseRecorder(): {
+  observe: (phase: ProjectionPhase, ms: number, records: number) => void;
+  read: () => ProjectionPhases;
+} {
+  const phases: ProjectionPhases = {};
+  return {
+    observe: (phase, ms, records) => { phases[phase] = { ms: (phases[phase]?.ms ?? 0) + ms, records }; },
+    read: () => Object.fromEntries(PROJECTION_PHASES.flatMap((phase) => phases[phase] ? [[phase, { ...phases[phase]! }]] : [])),
+  };
+}
+
 export interface DeriveDeps {
   /** Absolute path to state/ledger.ndjson (source (a)). */
   ledgerPath: string;
@@ -395,6 +414,12 @@ export interface DeriveDeps {
   unindexedForEquivalenceTest?: true;
   /** W1-T155: elapsedMs clock, default Date.now; inject to assert elapsed time without sleeping. */
   now?: () => number;
+  /** W1-T14644: told each phase's wall time and record count as {@link projectPlan} passes it, once per pass:
+   *  `ledger_credit_reads` (ledger lines), `github_reads` (merged + open rows fetched), `merged_projection`
+   *  (tasks derived as credited merged) and `open_projection` (every other task). Absent, nothing is timed. */
+  observePhase?: (phase: ProjectionPhase, ms: number, records: number) => void;
+  /** W1-T14644: the clock for `observePhase`, in milliseconds; defaults to `performance.now`. */
+  phaseNow?: () => number;
   /** MONOTONIC UNDER DARKNESS (W1-T179): last good projection, consulted only after read failure with no
    *  fresh rung, preventing credit -> queued regression; omitted=pre-W1-T179 behavior. */
   previousProjection?: (taskId: string) => StatusProjection | undefined;
@@ -4244,6 +4269,9 @@ export function projectPlan(
   deps: DeriveDeps,
   cachePath?: string,
 ): Map<string, StatusProjection> {
+  const observePhase = deps.observePhase;
+  const phaseNow = deps.phaseNow ?? (() => performance.now());
+  const phaseStarted = observePhase ? phaseNow() : 0;
   // MONOTONIC UNDER DARKNESS (W1-T179): absent an injected `previousProjection`, read THIS cache file's PRIOR
   // contents before overwriting them. Fails soft on a missing or corrupt cache.
   let effectiveDeps = deps;
@@ -4269,6 +4297,7 @@ export function projectPlan(
   const creditStoreAtStart = effectiveDeps.readCreditStore ? effectiveDeps.readCreditStore() : loadCreditStore(creditStorePathOnce);
   const flushCreditStore = effectiveDeps.writeCreditStore ?? ((store: CreditStore) => saveCreditStore(creditStorePathOnce, store));
   let creditStoreLive = creditStoreAtStart;
+  observePhase?.("ledger_credit_reads", Math.max(0, phaseNow() - phaseStarted), ledgerLinesOnce.length);
   // AND THE OVERRIDE RECORD, ONCE PER PLAN, LAZILY: each task asking loaded it afresh, a file read (a thrown
   // ENOENT where there is none) and a YAML parse per task, ~3,000 a pass, on every read-model build.
   let overrideRows: readonly CreditOverrideRow[] | undefined;
@@ -4290,7 +4319,9 @@ export function projectPlan(
   // EVERY projection — the 07-23 GraphQL-exhaustion multiplier. Fetch every merged PR's head ref ONCE and match
   // CLIENT-SIDE, on the STRUCTURED ref. A FAILED batch yields `null` for every task, so derivation falls back
   // per-task and, failing that, W1-T119 defers.
+  const githubStarted = observePhase ? phaseNow() : 0;
   const allMerged = effectiveDeps.github.listMergedHeadBranches?.();
+  let githubRows = allMerged?.length ?? 0;
   if (allMerged !== undefined) {
     let byTask: Map<string, PrRef[]> | null = null;
     if (allMerged !== null) {
@@ -4326,6 +4357,7 @@ export function projectPlan(
   // fetch. Free on `buildBatchedGithub`; one extra list read on `ghGateway`. A FAILED read yields `null` for
   // every task, so the rung skips and W1-T119 does the deferring — never a false "no open PR".
   const allOpen = effectiveDeps.github.listOpenHeadBranches?.();
+  githubRows += allOpen?.length ?? 0;
   if (allOpen !== undefined) {
     // W1-T3144: one board read, two consumers. Dispatch's WIP governor needs every open PR, while
     // the projection below intentionally indexes only plan tasks. Hand the already-fetched batch
@@ -4353,7 +4385,11 @@ export function projectPlan(
     // failed read stays `undefined` so the observation does not fire rather than reporting an unseen absence.
     openForSiblings = allOpen ?? undefined;
   }
+  // The grouping above is in-memory work over rows already fetched; it rides with the reads that fed it.
+  observePhase?.("github_reads", Math.max(0, phaseNow() - githubStarted), githubRows);
   const byId = new Map<string, StatusProjection>();
+  const projectionMs = { merged_projection: 0, open_projection: 0 };
+  const projectionRecords = { merged_projection: 0, open_projection: 0 };
   for (const task of plan.tasks) {
     // {@link DeriveDeps.reuseProjection} — absent by default, so this is a no-op for every
     // caller that does not opt in.
@@ -4362,6 +4398,7 @@ export function projectPlan(
       byId.set(task.id, reused);
       continue;
     }
+    const taskStarted = observePhase ? phaseNow() : 0;
     const p = deriveStatus(task, effectiveDeps);
     // W1-T2397: computed HERE rather than inside `deriveStatus` so it can never be mistaken for a precedence
     // input — attached after the projection is decided, and read only by a log.
@@ -4369,7 +4406,15 @@ export function projectPlan(
       const sib = openSiblingBuild(task.id, task.files, openForSiblings, effectiveDeps.github.changedFiles?.bind(effectiveDeps.github));
       if (sib) p.openSiblingBuild = sib;
     }
+    if (observePhase) {
+      const phase = p.merged ? "merged_projection" : "open_projection";
+      projectionMs[phase] += Math.max(0, phaseNow() - taskStarted);
+      projectionRecords[phase]++;
+    }
     byId.set(task.id, p);
+  }
+  if (observePhase) {
+    for (const phase of ["merged_projection", "open_projection"] as const) observePhase(phase, projectionMs[phase], projectionRecords[phase]);
   }
   // W1-T951: ONE flush for the whole plan sweep, skipped entirely when nothing new was discovered — the common
   // case once a plan's credits are mostly durable, so a steady-state poll loop costs zero writes.

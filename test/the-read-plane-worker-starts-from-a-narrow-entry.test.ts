@@ -104,9 +104,12 @@ function tree(): { options: TickReadOptions; planPath: string; root: string } {
   return { options, planPath, root };
 }
 
-/** The facts with each tree's own root replaced and the wall-clock board age dropped, so two reads compare. */
+/** The facts with each tree's own root replaced and the wall-clock board age and phase times dropped (the phases'
+ *  record counts stay), so two reads compare. */
 const portable = (facts: unknown, root: string): unknown =>
-  JSON.parse(JSON.stringify(facts).split(root).join("<root>"), (key, value) => (key === "ageHours" ? undefined : value));
+  JSON.parse(JSON.stringify(facts).split(root).join("<root>"), (key, value) => key === "ageHours" ? undefined
+    : key === "projectionPhases" ? Object.fromEntries(Object.entries(value as Record<string, { records: number }>).map(([phase, { records }]) => [phase, records]))
+      : value);
 
 async function withShim<T>(run: () => Promise<T>): Promise<T> {
   const gh = ghShim(ROUTES, { kind: "tick-read-worker" });

@@ -159,7 +159,7 @@ import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload,
 import { assertRunnable, readTaskPrecondition, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task, type TaskInputAnswer } from "./plan.js";
 import { composeSecondaryPlan, compositionHoldEdge, type CompositionHold, type CompositionRecordFailure } from "./task-lookup.js";
 import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
-import type { StatusProjection } from "./status.js";
+import type { ProjectionPhases, StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, openDependentFanout, type DispatchValueContext } from "./dispatch-value.js";
 import {
@@ -1588,6 +1588,9 @@ export interface DaemonDeps {
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: (plan?: Plan) => MergedSet;
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
+  /** W1-T14644: the phases of the latest merged-set read (ledger and credit reads, the merged and open projections,
+   *  GitHub reads), each with its record count; the selection-timing row carries them beside the `refreshMerged` probe. */
+  readRefreshMergedPhases?: () => ProjectionPhases | undefined;
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
     sync_spawn_top?: unknown[] }) & { takeLagInterval?: (consumer?: string) => { top: unknown; sync_spawn_ms: number;
       by_caller?: unknown[]; unnamed_ms?: number; // W1-T9577: the interval's callers by total, and the rest
@@ -2431,6 +2434,7 @@ function dispatchSelectionTiming(
   const probeMs: Record<string, number> = {};
   let measuredMs = 0;
   let candidatesExamined = 0;
+  let refreshPhases: ProjectionPhases | undefined;
   const elapsed = (since: number) => Math.max(0, clock.now() - since);
   const probe = <T>(name: string, read: () => T): T => {
     if (log === undefined) return read();
@@ -2457,6 +2461,14 @@ function dispatchSelectionTiming(
   return {
     probe,
     wrap,
+    /** W1-T14644: the merged-set read's own phases; an absent or empty reading adds nothing to the row. */
+    refreshPhases(read: (() => ProjectionPhases | undefined) | undefined) {
+      if (log === undefined || read === undefined) return;
+      try {
+        const phases = read();
+        if (phases !== undefined && Object.keys(phases).length > 0) refreshPhases = phases;
+      } catch (error) { void error; /* A timing row is best-effort and cannot hold a lane. */ }
+    },
     selectionInputs(plan: Plan, isMerged: MergedSet, limit: number, opts: NextRunnableOpts) {
       if (log === undefined || limit <= 0) return { isMerged, opts, finish: () => {} };
       const started = clock.now();
@@ -2491,6 +2503,7 @@ function dispatchSelectionTiming(
       try {
         log?.("dispatch.selection_timing", {
           site, total_ms: elapsed(startedAt), candidates_examined: candidatesExamined, probe_ms: { ...probeMs },
+          ...(refreshPhases ? { refresh_merged_phases: refreshPhases } : {}),
         });
       } catch (error) { void error; /* A timing row is best-effort and cannot hold a lane. */ }
     },
@@ -8738,6 +8751,7 @@ export async function runDaemon(
     // first runnable kick becomes this cycle's task; others wait (fb-1784988460437-9daa9b).
     const mergedTask: MergedResolver = (t) => isMerged(t.id);
     const tickTiming = dispatchSelectionTiming("tick", selectionTimingClock, timingSink);
+    tickTiming.refreshPhases(deps.readRefreshMergedPhases);
     // W1-T10348: the released set, resolved ONCE per tick by the resolver every admission site shares
     // (ledger rows plus operator-releases.json), and handed to the kick, the tick selection and the refill.
     let tickLedgerLines: readonly string[] | undefined;
@@ -9822,6 +9836,7 @@ export async function runDaemon(
             if (deps.refreshMergedAsync) {
               return timing.probe("refreshMerged", () => deps.refreshMergedAsync!(refillPlan)).then(
                 (isMerged) => {
+                  timing.refreshPhases(deps.readRefreshMergedPhases);
                   if (deps.readLiveState) return decideLive(refillPlan, isMerged);
                   return decideThenConclude({ plan: refillPlan, isMerged });
                 },
@@ -9829,6 +9844,7 @@ export async function runDaemon(
               );
             }
             const isMerged = timing.probe("refreshMerged", () => deps.refreshMerged(refillPlan));
+            timing.refreshPhases(deps.readRefreshMergedPhases);
             if (deps.readLiveState) return decideLive(refillPlan, isMerged);
             return decideThenConclude({ plan: refillPlan, isMerged });
           } catch (e) {
