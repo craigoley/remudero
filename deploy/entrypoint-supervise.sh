@@ -179,6 +179,36 @@ handed_off_successor() {
   printf '%s %s\n' "$pid" "${run:-}"
 }
 
+# W1-T14547: a successor that crashes within this window of its handoff is a bad sha; the daemon is
+# started once from its predecessor's code tree (named in record.env) instead of from the synced
+# checkout. Deliberate exits (0 and 75-79) are not crashes and never roll back.
+HANDOFF_ROLLBACK_WINDOW_S="${RMD_HANDOFF_ROLLBACK_WINDOW_S:-900}"
+rolled_back_sha=""
+rollback_cwd=""
+handoff_record_field() { sed -n "s/^$1=//p" "$HANDOFF_DIR/record.env" 2>/dev/null | head -n 1; }
+drain_lock_has_live_holder() {
+  local pid
+  pid="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG_ROOT/state/drain.lock" 2>/dev/null | head -n 1)"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+# Succeeds, printing "<predecessor tree> <predecessor sha> <successor sha> <seconds since the handoff>",
+# when the successor `$2` exiting `$1` must roll back: at most once per successor sha.
+handoff_rollback_due() {
+  local code="$1" run="$2" yielded now age tree
+  case "$code" in 0|75|76|77|78|79) return 1 ;; esac
+  [ -n "$run" ] && [ "$(handoff_record_field successor_run_id)" = "$run" ] || return 1
+  yielded="$(handoff_record_field yielded_at_ms)"
+  [[ "$yielded" =~ ^[0-9]+$ ]] || return 1
+  now="$(date +%s%3N)"
+  age=$(( (now - yielded) / 1000 ))
+  [ "$age" -lt "$HANDOFF_ROLLBACK_WINDOW_S" ] || return 1
+  tree="$(handoff_record_field predecessor_tree)"
+  [ -n "$tree" ] && [ -d "$tree" ] || return 1
+  [ "$(handoff_record_field successor_sha)" != "$rolled_back_sha" ] || return 1
+  drain_lock_has_live_holder && return 1
+  printf '%s %s %s %s\n' "$tree" "$(handoff_record_field predecessor_sha)" "$(handoff_record_field successor_sha)" "$age"
+}
+
 # Waits for the successor to exit, then sets `rc` to the code it wrote to `<pid>.exit`. No file
 # (a SIGKILL, an OOM kill, a crash before its exit hook) is a crash: rc 1.
 watch_successor() {
@@ -404,9 +434,14 @@ async function forwardLine(line) {
     rm -f -- "$heap_line_path"
     unset REMUDERO_RUN_ID
   fi
+  # W1-T14547: a rolled-back run started from its predecessor's tree; every later start is from the checkout.
+  if [ -n "$rollback_cwd" ]; then
+    cd "$TREE" || die "cannot return to $TREE after a rollback run"
+    rollback_cwd=""
+  fi
 
   # W1-T14546: exit 79 means a standby this daemon started already holds the run. Watch it by pid
-  # instead of starting a daemon (no sync_tree: the successor runs from its own engine tree), then
+  # instead of starting a daemon (no sync_tree: the successor runs from its own daemon slot), then
   # route the code it exits with through the cases below; a successor may itself hand off again.
   while [ "$rc" -eq "$DAEMON_EXIT_HANDED_OFF" ]; do
     successor=""
@@ -433,6 +468,15 @@ async function forwardLine(line) {
     watch_successor "$successor"
     if [ "$supervise_daemon" -eq 1 ] && [ -n "$successor_run" ]; then
       persist_daemon_exit "$successor_run" "$rc" ""
+    fi
+    if [ -z "$signal_forwarded" ] && rollback="$(handoff_rollback_due "$rc" "$successor_run")"; then
+      read -r rollback_tree rollback_sha bad_sha rollback_age <<< "$rollback"
+      rolled_back_sha="$bad_sha"
+      rm -f -- "$HANDOFF_DIR/record.env"
+      log "handoff_rolled_back: successor ${bad_sha:-unknown} ($successor_run) exited $rc ${rollback_age}s after the handoff — starting the daemon once from $rollback_tree at ${rollback_sha:-unknown}"
+      cd "$rollback_tree" || die "cannot enter rollback tree $rollback_tree"
+      rollback_cwd="$rollback_tree"
+      continue 2
     fi
   done
 
