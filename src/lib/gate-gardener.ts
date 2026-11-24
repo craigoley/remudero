@@ -501,7 +501,8 @@ const PER_FILE_REPORTER = `data:text/javascript;base64,${Buffer.from(`export def
 const PER_FILE_COUNTS = "per-file.ndjson";
 
 /** One shifted `node --test` child over `files` in a private TMPDIR: its exit status and TAP output, and what the
- *  test judge's files and the per-file reporter's destination held when it ended. */
+ *  test judge's files and the per-file reporter's destination held when it ended. TAP is always the first reporter;
+ *  `reporters` adds any more, each with its destination. */
 function runShiftedChild(repoRoot: string, files: readonly string[], shiftDays: number, reporters: (privateRoot: string) => string[],
   execFile: NonNullable<ShiftedSuiteOptions["execFile"]>) {
   for (const file of files) readFileSync(resolve(repoRoot, file)); // Node can report a green wrapper for a missing test path.
@@ -516,7 +517,7 @@ function runShiftedChild(repoRoot: string, files: readonly string[], shiftDays: 
     const env: NodeJS.ProcessEnv = { ...process.env, FK_SHIFT_DAYS: String(shiftDays), TMPDIR: privateRoot };
     delete env.RMD_SELF_SYNC_DONE; // the test setup refuses to load under it (W1-T3069)
     delete env.NODE_TEST_CONTEXT; // inherited from a parent `node --test`, it makes this run report nothing and exit 0
-    const args = judge.judgedNodeTestArgs(["--test", ...reporters(privateRoot), "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", ...files], judged.args);
+    const args = judge.judgedNodeTestArgs(["--test", "--test-reporter=tap", ...reporters(privateRoot), "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", "--import", "./scripts/clock-shift.mjs", ...files], judged.args);
     // Niced and bounded (test-slot.ts), but no host-wide slot: one run, and a gardener pass must not queue behind coverage.
     const load = readHostLoad();
     const child = lowPriorityCommand(process.execPath, testRunArgv(args, testRunConcurrency(load, defaultTestSlots(load.cores))));
@@ -569,7 +570,7 @@ export function runSuiteShifted(repoRoot: string, file: string, shiftDays: numbe
   execFile = execFileSync,
   measure = false,
 }: ShiftedSuiteOptions & { measure?: boolean } = {}): ShiftedSuiteMeasurement | boolean {
-  const { judge, status, output, tap, verdict, agree } = runShiftedChild(repoRoot, [file], shiftDays, () => ["--test-reporter=tap"], execFile);
+  const { judge, status, output, tap, verdict, agree } = runShiftedChild(repoRoot, [file], shiftDays, () => [], execFile);
   const { tests, pass, fail, cancelled, skipped, todo } = tap;
   if (tests === 0 || cancelled > 0 || pass + fail === 0 || tests !== pass + fail + cancelled + skipped + todo || (status !== 0 && fail === 0) || (status === 0 && fail > 0)) {
     throw new Error(`shifted suite ${file}: incomplete TAP verdict (exit ${status}, tests ${tests}, pass ${pass}, fail ${fail}, cancelled ${cancelled})`);
@@ -606,7 +607,7 @@ export function runSuitesShifted(repoRoot: string, files: readonly string[], shi
     }
   }
   const { tap, agree, perFileCounts } = runShiftedChild(repoRoot, files, shiftDays,
-    (privateRoot) => ["--test-reporter=tap", "--test-reporter-destination=stdout", `--test-reporter=${PER_FILE_REPORTER}`, `--test-reporter-destination=${join(privateRoot, PER_FILE_COUNTS)}`], execFile);
+    (privateRoot) => ["--test-reporter-destination=stdout", `--test-reporter=${PER_FILE_REPORTER}`, `--test-reporter-destination=${join(privateRoot, PER_FILE_COUNTS)}`], execFile);
   if (tap.tests === 0) throw new Error(`shifted suite of ${files.length} files: # tests 0`);
   agree();
   const counts = new Map<string, { tests: number; passed: number; failed: number; cancelled: number }>();
