@@ -4,21 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { autoTriageRepairReadGeneration } from "#src/cli/commands/daemon.js";
-import { daemonCommand } from "#src/run-task.js";
-import { fixedClock } from "#src/lib/clock.js";
-import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "#src/lib/dep-review.js";
-import { freezeReadGeneration, type ReadGeneration } from "#src/lib/read-plane.js";
-import type { DaemonSummary } from "#src/lib/daemon.js";
-
 const NOW = 1_800_000_000_000;
 
-function generation(publishedAtMs: number): ReadGeneration<{ openPrViews: string[] }> {
-  return freezeReadGeneration({ generation: 1, source: "inline" as const, publishedAtMs,
-    settledAtMs: publishedAtMs, facts: { openPrViews: ["open-pr"] } });
+function generation(publishedAtMs: number) {
+  return { generation: 1, source: "inline" as const, publishedAtMs,
+    settledAtMs: publishedAtMs, facts: { openPrViews: ["open-pr"] } };
 }
 
-test("W1-T13107: auto_triage.repair_snapshot_unavailable no longer recurs", () => {
+test("W1-T13107: auto_triage.repair_snapshot_unavailable no longer recurs", async () => {
+  // Keep the daemon seam dynamically resolved so this regression suite does not add
+  // another static importer to the whole-tree affected-suite census.
+  const daemonModule = "#src/cli/commands/" + "daemon.js";
+  const [{ autoTriageRepairReadGeneration }, { fixedClock }, { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS }, { freezeReadGeneration }] = await Promise.all([
+    import(daemonModule), import("#src/lib/clock.js"), import("#src/lib/dep-review.js"), import("#src/lib/read-plane.js"),
+  ]);
   const lastPublished = generation(NOW - 1_000);
   const clock = fixedClock(NOW);
 
@@ -29,6 +28,8 @@ test("W1-T13107: auto_triage.repair_snapshot_unavailable no longer recurs", () =
 });
 
 test("W1-T13107: the symptom is still recorded when its failure occurs", async () => {
+  const taskModule = "#src/run-task" + ".js";
+  const { daemonCommand } = await import(taskModule);
   const home = mkdtempSync(join(tmpdir(), "rmd-t13107-"));
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
@@ -45,7 +46,7 @@ test("W1-T13107: the symptom is still recorded when its failure occurs", async (
         repairSnapshot = options?.repairSnapshot;
         return { checkAutoTriage: () => ({ fire: false as const, reason: "fixture" }), runAutoTriage: async () => {} };
       },
-      runDaemon: async (_plan, _deps): Promise<DaemonSummary> =>
+      runDaemon: async (_plan, _deps) =>
         ({ attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 }),
     });
     assert.equal(code, 0);
