@@ -1024,6 +1024,7 @@ import {
   reserveTaskIdsKeepingHeld,
   nextPrefixedTaskIdStart,
   parsePrefixedTaskId,
+  productTaskIdPrefix,
   parseReservationHolderLine,
   gitRemoteRefReserver,
   gatedRemoteRefReserver,
@@ -17496,9 +17497,36 @@ export function cloneTargetPlan(source: string) {
     dispose();
     throw new TaskIdReservationError(`cannot read ${url}'s main plan (git ${args[0]}): ${r.stderr.trim()}`, { outcome: "unreachable" });
   }
+  return { run, dispose, planTexts: planTextsAt(dir) };
+}
+
+/** The text of every task record a checkout's plan holds: plan/tasks.yaml and each plan/tasks.d/ shard. */
+function planTextsAt(dir: string): string[] {
   const shards = join(dir, "plan", "tasks.d");
   const files = [join(dir, "plan", "tasks.yaml"), ...(existsSync(shards) ? readdirSync(shards).filter((f) => f.endsWith(".yaml")).map((f) => join(shards, f)) : [])];
-  return { run, dispose, planTexts: files.filter((f) => existsSync(f)).map((f) => readFileSync(f, "utf8")) };
+  return files.filter((f) => existsSync(f)).map((f) => readFileSync(f, "utf8"));
+}
+
+/** W1-T14735 — where a plan lane's ids come from. The instance's own repository mints W1 ids in core's refs/rmd-id
+ *  namespace. Any other target mints its own prefix ({@link productTaskIdPrefix}) on its own origin, because a W1 id
+ *  reserved there is never seen by core's writers (wreckterra#46 filed W1-T14727 while ops #724 held it on core). */
+export type PlanLaneIdNamespace =
+  | { kind: "core" }
+  | { kind: "product"; prefix: string; planTexts: string[] }
+  | { kind: "refused"; reason: string };
+
+export function planLaneIdNamespace(checkout: string, target: { owner: string; repo: string },
+  ownRepository: () => { owner: string; repo: string }): PlanLaneIdNamespace {
+  let own: { owner: string; repo: string };
+  try {
+    own = ownRepository();
+  } catch (e) {
+    void e; // The failure text can name a checkout path. The reason names the rule only.
+    return { kind: "refused", reason: "the instance's own repository cannot be read, so the plan lane cannot tell whether its ids are core's W1 ids" };
+  }
+  if (own.owner.toLowerCase() === target.owner.toLowerCase() && own.repo.toLowerCase() === target.repo.toLowerCase()) return { kind: "core" };
+  const planTexts = planTextsAt(checkout);
+  return { kind: "product", prefix: productTaskIdPrefix(planTexts, target.repo), planTexts };
 }
 
 /** W1-T4388 — `next-task-id --prefix <P> --repo <owner/name>`: the next `<P>-T<n>` above every one the
@@ -37325,22 +37353,11 @@ export async function planCommand(
     // wording in every mode) and the count is unknowable until the worker has run. Reserving a
     // bounded block up front is the only ordering that both refuses cheaply on collision and leaves
     // no id stranded — every id, used or not, is released in the `finally` below.
-    const mint = await mintNextTaskIdWithHistoryAsync({
-      planPath: join(idCwd, "plan", "tasks.yaml"),
-      repoRoot: idCwd,
-      openPrTexts: () => openPrMintTexts(owner, repo),
-    });
-    planIdBlock = reserveTaskIdBlock(mint.n, PLAN_MAX_NEW_TASKS, taskIdReservationsDir(config.root), {
-      info: { purpose: `rmd plan --mode=${mode} (run ${runId})` },
-    });
-    // W1-T949: AND RESERVE THE SAME BLOCK WHERE EVERY OTHER WRITER CAN SEE IT — the local block
-    // above resolves under this process's own `config.root`, a worker-sandbox path discarded on
-    // exit; two writers on two hosts never observe each other there. `reserveTaskIdBlockRemote`
-    // is the remote-substrate twin of `reserveTaskIdBlock`, one ref pushed per reserved id. An
-    // unreachable origin THROWS (caught below, a durable ledger event, never just a stringified
-    // message) rather than falling through — the paid worker is still unstarted when it does.
-    // Same closure-narrowing reason as the triage lane above.
-    const planReserveFrom = planIdBlock.ids[0];
+    // W1-T14735: a product target files its own prefix on its own origin; only core's own plan mints W1 ids.
+    const namespace: PlanLaneIdNamespace = view === undefined
+      ? planLaneIdNamespace(idCwd, { owner, repo }, () => resolveOwnerRepoAt(PUBLIC_CHECKOUT))
+      : { kind: "core" };
+    if (namespace.kind === "refused") { log("plan.error", { error: namespace.reason }); say(`plan refused — ${namespace.reason}`); removePlanWorktree(); return 1; }
     // Same non-throwing runner over `worktreePath` triage's own remote reserve uses — a
     // rejected push is NORMAL here (contention), so a throwing runner would make it
     // indistinguishable from an unreachable remote.
@@ -37348,19 +37365,62 @@ export async function planCommand(
       lane: "plan", log,
       run: gitRunAdapter((args) => hostWorktreeGitResult(idCwd, args)),
     });
-    const planRemoteIdBlock: RemoteReservationBlock = withIdReservationLogging(log, "plan.id_reservation_failed", () =>
-      reserveTaskIdBlockRemote(planReserveFrom, PLAN_MAX_NEW_TASKS, planRemoteReserver),
-    );
+    let planRemoteIdBlock: RemoteReservationBlock;
+    let minted: Record<string, unknown>;
+    if (namespace.kind === "product") {
+      const { prefix } = namespace;
+      // The surfaces `next-task-id --prefix` reads (W1-T4388). The origin's refs fail closed: a reservation is only
+      // a ref. Open PRs degrade, as the W1 mint's do (task-id.ts), and plan.id_minted names it.
+      const degraded: string[] = [];
+      let openPrTexts: string[] = [];
+      try {
+        openPrTexts = openPrMintTexts(owner, repo);
+      } catch (err) {
+        void err; // plan.id_minted names the degraded source, as the W1 mint's row does.
+        degraded.push("open-prs");
+      }
+      planRemoteIdBlock = withIdReservationLogging(log, "plan.id_reservation_failed", () => {
+        const listing = (args: string[]): string => {
+          const r = hostWorktreeGitResult(idCwd, args);
+          if (r.status !== 0) throw new TaskIdReservationError(`git ${args.join(" ")} failed: ${r.stderr.trim()}`, { outcome: "unreachable" });
+          return r.stdout;
+        };
+        const texts = [...namespace.planTexts, ...openPrTexts,
+          listing(["ls-remote", "--heads", "origin", `run-${prefix}-T*`]), listing(["ls-remote", "origin", `refs/rmd-id/${prefix}-T*`])];
+        return reserveTaskIdBlockRemote(nextPrefixedTaskIdStart(texts, prefix), PLAN_MAX_NEW_TASKS, planRemoteReserver,
+          { idFor: (n) => `${prefix}-T${n}` });
+      });
+      minted = { prefix, mint_id: planRemoteIdBlock.taskIds[0], degraded };
+    } else {
+      const mint = await mintNextTaskIdWithHistoryAsync({
+        planPath: join(idCwd, "plan", "tasks.yaml"),
+        repoRoot: idCwd,
+        openPrTexts: () => openPrMintTexts(owner, repo),
+      });
+      planIdBlock = reserveTaskIdBlock(mint.n, PLAN_MAX_NEW_TASKS, taskIdReservationsDir(config.root), {
+        info: { purpose: `rmd plan --mode=${mode} (run ${runId})` },
+      });
+      // W1-T949: AND RESERVE THE SAME BLOCK WHERE EVERY OTHER WRITER CAN SEE IT — the local block
+      // above resolves under this process's own `config.root`, a worker-sandbox path discarded on
+      // exit; two writers on two hosts never observe each other there. `reserveTaskIdBlockRemote`
+      // is the remote-substrate twin of `reserveTaskIdBlock`, one ref pushed per reserved id. An
+      // unreachable origin THROWS (caught below, a durable ledger event, never just a stringified
+      // message) rather than falling through — the paid worker is still unstarted when it does.
+      // Same closure-narrowing reason as the triage lane above.
+      const planReserveFrom = planIdBlock.ids[0];
+      planRemoteIdBlock = withIdReservationLogging(log, "plan.id_reservation_failed", () =>
+        reserveTaskIdBlockRemote(planReserveFrom, PLAN_MAX_NEW_TASKS, planRemoteReserver),
+      );
+      minted = {
+        mint_id: mint.id,
+        reserved_above_mint: planIdBlock.ids[0] !== mint.n,
+        max_seen: mint.maxSeen,
+        degraded: mint.degraded.map((d) => d.source),
+      };
+    }
     planHeld.push(...heldFromBlock(planRemoteIdBlock, planRemoteReserver));
     const reservedIds = planRemoteIdBlock.taskIds;
-    log("plan.id_minted", {
-      reserved: reservedIds,
-      mint_id: mint.id,
-      reserved_above_mint: planIdBlock.ids[0] !== mint.n,
-      remote_refs: planRemoteIdBlock.refs,
-      max_seen: mint.maxSeen,
-      degraded: mint.degraded.map((d) => d.source),
-    });
+    log("plan.id_minted", { reserved: reservedIds, remote_refs: planRemoteIdBlock.refs, ...minted });
     say(`reserved ${reservedIds.length} task id(s): ${reservedIds.join(", ")}`);
 
     // impl-FU — THE RELINT LOOP, the same shared runner the triage lane and the inbox draft rung
