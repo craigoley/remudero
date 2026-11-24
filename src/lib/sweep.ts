@@ -111,6 +111,7 @@ import { RATCHET_JUDGE_DECIDED_STEP, armedRejudgeHold, judgeMergedRatchets, ratc
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB, defaultProbe as probeProcess, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
 import { ESTIMATE_LEARNING, classEstimate, classSurvival, classTypical, type LearnedEstimate, type Survival } from "./host-memory-learning.js";
+import { currentRunChildReservationId } from "./run-child-reservation.js";
 import {
   loadHostMemoryBudgetPolicy, ownContainerWorkLive, readContainerMemoryHeadroom, residentsOf, type ContainerMemoryHeadroom,
   type HostMemoryBudgetPolicy,
@@ -22137,8 +22138,10 @@ export function productionFixAdmissionResidents(
 ): FixAdmissionResidents {
   const reading = readLedger(root);
   if (reading === undefined || reading.state === "unreadable") return undefined;
+  // The child's resident memory is already in the pressure reading. Its reservation cannot be another fix ahead of it.
+  const ownReservationId = currentRunChildReservationId();
   const live = reading.entries.filter((entry) => entry.status === "owned" && !entry.occupancyReleased &&
-    (entry.workerClass === "fix" || entry.workerClass === "review"));
+    (entry.workerClass === "review" || (entry.workerClass === "fix" && entry.id !== ownReservationId)));
   const residents = residentsOf(readFile, live.map((entry) => entry.path));
   const out: { fix: number[]; review: number[] } = { fix: [], review: [] };
   let pendingFix = 0;
