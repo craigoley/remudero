@@ -734,7 +734,8 @@ function heldTaskFiles(shard: { relPath: string; text: string }, taskId: string,
   const question = (`Pull request ${pr.prUrl} (task ${taskId}) cannot ${split ? "meet these criteria" : "merge"} without your ` +
     `input. ${[...claims].map(c => `"${c}"`).join("; ")}${claims.size > 0 ? ". " : ""}What it needs: ${ctx.text}`).slice(0, 1500);
   const findings = pr.unmetCriteria.map(c => `- ${c.claim}: ${c.reason ?? "unmet"}`).join("\n");
-  const { pr: _pr, note: _note, ...rest } = task;
+  // W1-T14747: moved_from is the provenance the mover (W1-T13680) wrote into the source copy; a new id was copied from no public commit.
+  const { pr: _pr, note: _note, moved_from: _moved, ...rest } = task;
   const dependsOn = Array.isArray(task.depends_on) ? task.depends_on : [];
   // W1-T14042: the parent keeps its invariants; a parent filed before W1-T11746 gains the one line the rule asks for.
   const design = typeof task.design === "string" ? task.design : "";
