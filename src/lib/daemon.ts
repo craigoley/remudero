@@ -185,6 +185,7 @@ import { clockFromDateFn, clockFromIsoFn, clockFromMillisFn, fixedClock, loopAva
 import { createNearLimitHeapTelemetry, NEAR_HEAP_FILE, type NearLimitHeapTelemetry, type NearLimitSample } from "./daemon-heap-near-limit.js";
 import { createHeapAdmissionHold, type HeapAdmissionHoldLatch, type HeapAdmissionHoldMode, type HeapHoldTrace } from "./daemon-heap-admission-hold.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { queueDispatchRunStarts } from "./ledger.js";
 import { reportRetirableWorktrees, type WorktreeRetireOptions } from "./worktree-retire.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
 import { getHeapStatistics } from "node:v8";
@@ -1296,6 +1297,79 @@ export interface ClaimStallClearedInfo {
   runId?: string;
 }
 
+/** W1-T14608: the measured bound a no-start episode is judged by, and which rule gave it. */
+export interface NoTaskStartedBound {
+  boundMs: number;
+  source: "pick-gap-p90" | "claim-silence-window";
+  samples: number;
+}
+
+/** W1-T14608: what the no-start page reports, including the step that ended the newest tick. */
+export interface NoTaskStartedInfo extends NoTaskStartedBound {
+  ticksWithoutStart: number;
+  sinceLastStartMs: number;
+  lastStartAt: string;
+  freeLanes: number;
+  dispatchable: number;
+  endStep: string | null;
+}
+
+/** W1-T14608: the first task started after a no-start page. */
+export interface NoTaskStartedClearedInfo {
+  taskId: string;
+  sinceLastStartMs: number;
+}
+
+const NO_START_MIN_GAPS = 8;
+const NO_START_MAX_GAPS = 50;
+const NO_START_GAP_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
+/** The rows the no-start bound reads: started runs, their claims, and the verdicts the claim-silence window pairs. */
+function noStartRows(lines: readonly string[]): Record<string, unknown>[] {
+  const rows: Record<string, unknown>[] = [];
+  for (const raw of lines) {
+    if (!raw.includes('"run.start"') && !raw.includes('"dispatch.claim"') && !raw.includes('"verdict"')) continue;
+    const row = ledgerRow(raw);
+    if (row !== undefined) rows.push(row);
+  }
+  return rows;
+}
+
+/** Start times of the started tasks (W1-T13249: claim-refused runs excluded), one per run, oldest first. */
+function taskStartTimes(rows: readonly Record<string, unknown>[]): number[] {
+  const seen = new Set<string>();
+  const times: number[] = [];
+  for (const row of queueDispatchRunStarts(rows)) {
+    const at = typeof row.ts === "string" ? Date.parse(row.ts) : NaN;
+    if (!Number.isFinite(at)) continue;
+    if (typeof row.run_id === "string") {
+      if (seen.has(row.run_id)) continue;
+      seen.add(row.run_id);
+    }
+    times.push(at);
+  }
+  return times.sort((a, b) => a - b);
+}
+
+/**
+ * PURE (W1-T14608). The bound past which a fleet with a free lane and a dispatchable task has started no task: the p90
+ * (nearest rank) of the newest 50 gaps between started tasks within 7 days, when there are at least 8; else the
+ * claim-silence window. Never shorter than two poll intervals.
+ */
+export function noStartBound(rows: readonly Record<string, unknown>[], pollIntervalMs: number): NoTaskStartedBound {
+  const floorMs = 2 * pollIntervalMs;
+  const starts = taskStartTimes(rows);
+  const newest = starts.at(-1) ?? 0;
+  const recent = starts.filter((at) => newest - at <= NO_START_GAP_WINDOW_MS);
+  const gaps = recent.slice(1).map((at, i) => at - recent[i]!).slice(-NO_START_MAX_GAPS);
+  if (gaps.length >= NO_START_MIN_GAPS) {
+    gaps.sort((a, b) => a - b);
+    return { boundMs: Math.max(gaps[Math.ceil(0.9 * gaps.length) - 1]!, floorMs), source: "pick-gap-p90", samples: gaps.length };
+  }
+  const window = claimSilenceWindow(rows);
+  return { boundMs: Math.max(window.windowMs ?? CLAIM_SILENCE_FLOOR_MS, floorMs), source: "claim-silence-window", samples: window.samples };
+}
+
 /** One refused-before-spend run of a tick, with the evidence its own ledger rows carried. */
 export interface ClaimRefusedRun {
   taskId: string;
@@ -1764,6 +1838,11 @@ export interface DaemonDeps {
   onClaimStall?: (info: ClaimStallInfo) => void | Promise<void>;
   /** The cleared half: the first run that passes its claim after the page. Optional, edge-triggered. */
   onClaimStallCleared?: (info: ClaimStallClearedInfo) => void | Promise<void>;
+  /** W1-T14608: two ticks past the measured pick gap, each with a free lane and a dispatchable task, started no task,
+   *  whatever path they took. Fires once per episode. Unwired, the daemon runs no part of the check. Optional. */
+  onNoTaskStarted?: (info: NoTaskStartedInfo) => void | Promise<void>;
+  /** The cleared half: the first task started after the page. Optional, edge-triggered. */
+  onNoTaskStartedCleared?: (info: NoTaskStartedClearedInfo) => void | Promise<void>;
   /** W1-T14600: a managed-target job deferred for capacity past {@link TARGET_JOB_STALL_BOUND_MS}. Fires once per deferral
    *  episode in this process (the catalogue entry dedups across boots); a throw costs one row, never the loop. Optional. */
   onTargetJobStalled?: (info: TargetJobStallInfo) => void | Promise<void>;
@@ -4782,7 +4861,15 @@ export async function runDaemon(
   // W1-T8235: the lanes this daemon fills — the figure the refill path sizes its pool by.
   const idleLaneCapacity = Math.max(1, opts.laneCount ?? 1);
   let livenessPulse: ReturnType<typeof startLivenessPulse> | undefined;
+  // W1-T14608: the no-start watch. Unwired, it does not exist: no ledger read, no predicate, no row.
+  const noStart = deps.onNoTaskStarted === undefined ? undefined : {
+    lastStartMs: undefined as number | undefined, ticks: 0, paged: false, bound: undefined as NoTaskStartedBound | undefined,
+    lastStep: undefined as string | undefined,
+    tick: undefined as { started: boolean; inFlight: number; admission: ReturnType<NonNullable<DaemonDeps["readQueueAdmission"]>>;
+      plan: Plan; isMerged: MergedSet; released?: ReadonlySet<string> } | undefined,
+  };
   const noteLog: typeof emitLog = (step, fields) => {
+    if (noStart !== undefined && step !== "daemon.tick" && !step.startsWith("dispatch.no_start.")) noStart.lastStep = step;
     const cause = idleLaneCauseForStep(step, fields);
     if (cause !== undefined) {
       idleLaneTickCause = cause;
@@ -6660,6 +6747,80 @@ export async function runDaemon(
     catch (error) { log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) }); }
   };
 
+  // W1-T14608: judge the tick that just ended, at the head of the next, before any branch of it can continue.
+  const noStartDispatchable = (tick: NonNullable<NonNullable<typeof noStart>["tick"]>): number => tick.plan.tasks.filter((task) => {
+    if (tick.isMerged(task.id) || pendingMergedCredit.has(task.id) || hasChildTask(task.id)) return false;
+    try { assertRunnable(tick.plan, task, (dep) => tick.isMerged(dep.id), tick.released, deps.taskInputAnswer); }
+    catch (e) {
+      if (e instanceof TaskAdmissionError) return false;
+      throw e;
+    }
+    return deps.isOpenPr?.(task.id) === undefined;
+  }).length;
+  const judgeNoStart = (): Promise<void> | undefined => {
+    if (noStart === undefined) return undefined;
+    const nowMs = daemonClock.now();
+    const prev = noStart.tick;
+    const endStep = noStart.lastStep ?? null;
+    noStart.tick = undefined;
+    noStart.lastStep = undefined;
+    try {
+      if (noStart.lastStartMs === undefined) {
+        const rows = noStartRows(ledgerReader?.() ?? []);
+        noStart.lastStartMs = taskStartTimes(rows).at(-1) ?? nowMs;
+        noStart.bound = noStartBound(rows, pollIntervalMs);
+        return undefined;
+      }
+      if (prev === undefined || prev.started) {
+        noStart.ticks = 0;
+        return undefined;
+      }
+      const sinceLastStartMs = nowMs - noStart.lastStartMs;
+      if (sinceLastStartMs < 2 * pollIntervalMs) return undefined;
+      const bound = (noStart.bound ??= noStartBound(noStartRows(ledgerReader?.() ?? []), pollIntervalMs));
+      if (sinceLastStartMs < bound.boundMs) return undefined;
+      const wipBudget = laneCount <= 1 ? laneCount
+        : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: prev.admission });
+      const freeLanes = Math.min(wipBudget, enforcedLaneTarget(prev.inFlight, prev.admission?.wipLimit)) - prev.inFlight;
+      const dispatchable = freeLanes >= 1 ? noStartDispatchable(prev) : 0;
+      noStart.ticks = dispatchable >= 1 ? noStart.ticks + 1 : 0;
+      if (noStart.ticks < 2 || noStart.paged) return undefined;
+      noStart.paged = true;
+      const info: NoTaskStartedInfo = { ticksWithoutStart: noStart.ticks, sinceLastStartMs, lastStartAt: fixedClock(noStart.lastStartMs).iso(),
+        ...bound, freeLanes, dispatchable, endStep };
+      log("dispatch.no_start.detected", { ticks_without_start: info.ticksWithoutStart, since_last_start_ms: sinceLastStartMs,
+        bound_ms: info.boundMs, bound_source: info.source, samples: info.samples, free_lanes: freeLanes, dispatchable,
+        end_step: info.endStep, last_start_at: info.lastStartAt });
+      const page = deps.onNoTaskStarted!;
+      return (async () => {
+        try { await page(info); }
+        catch (error) { log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) }); }
+      })();
+    } catch (error) {
+      noStart.ticks = 0;
+      log("dispatch.no_start.unassessed", { reason: String((error as Error)?.message ?? error).slice(0, 300) });
+      return undefined;
+    }
+  };
+  // W1-T14608: every task start ends the episode; a paged episode is cleared without holding the start up.
+  const noteTaskStart = (taskId: string): void => {
+    if (noStart === undefined) return;
+    const nowMs = daemonClock.now();
+    const sinceLastStartMs = Math.max(0, nowMs - (noStart.lastStartMs ?? nowMs));
+    const paged = noStart.paged;
+    if (noStart.tick !== undefined) noStart.tick.started = true;
+    noStart.lastStartMs = nowMs;
+    noStart.ticks = 0;
+    noStart.paged = false;
+    noStart.bound = undefined;
+    const clear = deps.onNoTaskStartedCleared;
+    if (!paged || clear === undefined) return;
+    void (async () => {
+      try { await clear({ taskId, sinceLastStartMs }); }
+      catch (error) { log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) }); }
+    })();
+  };
+
   const processDispatchResult = async (
     planForBatch: Plan,
     task: Task,
@@ -7693,6 +7854,8 @@ export async function runDaemon(
     // of the loop body so no branch below can skip it (W1-T1274). W1-T7126: it carries the memory sample when
     // no row has within one poll interval; a throwing sampler rides it as mem_telemetry, never escapes it.
     log("daemon.tick", { poll_interval_ms: pollIntervalMs, ...tickMemorySample(deps, daemonClock.now(), pollIntervalMs, tickMemory) });
+    const noStartPage = judgeNoStart();
+    if (noStartPage) await noStartPage;
     deps.bootPhases?.firstTick(log);
     observeRestartCycle();
     recordNearLimitHeapSample(deps, "tick");
@@ -8478,6 +8641,9 @@ export async function runDaemon(
     }
 
     spendGatesOpen = true;
+    if (noStart !== undefined && cadencesThisTick) {
+      noStart.tick = { started: false, inFlight: children.size, admission: tickQueueAdmission, plan: planForBatch, isMerged };
+    }
     let intakeHeld = false;
     if (cadencesThisTick) {
       const running = intakeRungs.joined();
@@ -8576,6 +8742,7 @@ export async function runDaemon(
         ...(tickReleases.durableUnreadable !== undefined ? { durable_error: tickReleases.durableUnreadable } : {}),
       });
     }
+    if (noStart?.tick) noStart.tick.released = tickReleases.ids;
     let forcedNext: Task | undefined;
     let forcedKick: DaemonKick | undefined;
     if (deps.pendingKicks) {
@@ -8666,6 +8833,7 @@ export async function runDaemon(
             if (charged) throw new Error("target job already charged");
             charged = true;
             attempted.push(job.taskId);
+            noteTaskStart(job.taskId);
           })).state); }
           catch (e) { log("target_job.error", { task: job.taskId, origin: job.origin, repo: job.repo, error: String((e as Error)?.message ?? e) }); }
           if (closed) continue;
@@ -9183,6 +9351,7 @@ export async function runDaemon(
     if (workerHold?.control === "PAUSE") {
       await stopInterphaseReviewClock();
       ticks++;
+      if (noStart) noStart.tick = undefined;
       logPause(workerHold.detail, {
         tick: ticks,
         detail: workerHold.detail,
@@ -9212,6 +9381,7 @@ export async function runDaemon(
     if (repaused) {
       await stopInterphaseReviewClock();
       ticks++;
+      if (noStart) noStart.tick = undefined;
       logPause(repaused, {
         tick: ticks,
         detail: repaused,
@@ -9800,6 +9970,7 @@ export async function runDaemon(
       if (poolControl.occupied?.has(task)) return;
       phaseStarts.push({ taskId: task.id, authorClass: task.author_class, atMs: startedAtMs });
       attempted.push(task.id);
+      noteTaskStart(task.id);
       noteBootFirstDispatch({ startedAtMs: daemonClock.now(), admitted: admitted.length });
       if (forcedKick?.taskId === task.id) {
         const kick = forcedKick;
