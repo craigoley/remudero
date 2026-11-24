@@ -376,6 +376,29 @@ test("W1-T14611 criterion 2: a failed escalation costs one daemon.escalation.fai
   assert.equal(f.created.length, 1);
 });
 
+test("W1-T14611: an unresolved SRE page records why its close could not be observed", async (t) => {
+  for (const mode of ["missing-close", "throwing-close"] as const) {
+    const f = fleet(t);
+    const base = { owner: "craigoley", repo: "remudero", ledgerPath: f.ledgerPath, runId: "DAEMON-14611", issues: f.issues };
+    await escalateSreLaneUnresolved({
+      primary: "core", stateRoot: f.stateRoot, registry: f.registry, reason: "instance lookup failed",
+    }, base);
+
+    const issues: IssueGateway = mode === "missing-close"
+      ? { create: f.issues.create, ensureLabel: f.issues.ensureLabel }
+      : {
+          ...f.issues,
+          closeWithComment: () => { throw new Error("close refused"); },
+        };
+    await escalateSreLaneUnresolvedCleared({ stateRoot: f.stateRoot, instance: "core" }, { ...base, issues });
+
+    const cleared = ledgerSteps(f, SRE_LANE_UNRESOLVED_CLEARED_STEP);
+    assert.equal(cleared.length, 1, `${mode} writes one clear observation`);
+    assert.equal(cleared[0]!.delivered, false);
+    assert.equal(cleared[0]!.failure, mode === "missing-close" ? "issue gateway cannot close issues" : "close refused");
+  }
+});
+
 // ── criterion 3: an instance that resolves today resolves the same way ──────────────────────────────────────────────
 
 test("W1-T14611 criterion 3: the helper names nothing unless exactly one row matches both container and state dir", (t) => {
