@@ -121,7 +121,7 @@ export class ProductCaseService {
         if (refresh.kind !== "left") throw error;
         if (options.planLedgerPath !== undefined) {
           try {
-            appendLedger(options.planLedgerPath, { run_id: `product-plan-${repository.name}`, task_id: "-", step: PRODUCT_PLAN_CHECKOUT_LEFT_STEP,
+            appendLedger(options.planLedgerPath, { run_id: `product-plan-${repository.name}`, task_id: "SERVE", step: PRODUCT_PLAN_CHECKOUT_LEFT_STEP,
               repository: `${repository.owner}/${repository.name}`, target_head: targetHead, reason: refresh.reason });
           } catch { /* a ledger that cannot take the row never changes the refusal, which still carries the reason */ }
         }
