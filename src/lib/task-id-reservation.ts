@@ -1322,6 +1322,23 @@ export function nextPrefixedTaskIdStart(texts: readonly string[], prefix: string
   return next;
 }
 
+/** W1-T14735 — the prefix a product's plan files new tasks under: the non-W1 prefix its task records declare most
+ *  (a tie goes to the first by name), else one named for the repository. Never `W1`, whose ids belong to core's
+ *  refs/rmd-id namespace, where a product's own reservations are never seen. */
+export function productTaskIdPrefix(planTexts: readonly string[], repoName: string): string {
+  const counts = new Map<string, number>();
+  for (const text of planTexts) {
+    for (const m of text.matchAll(/^[ \t-]*id:[ \t]*["']?([A-Z][A-Z0-9-]*-T[0-9]+)\b/gm)) {
+      const parsed = parsePrefixedTaskId(m[1]);
+      if (parsed && parsed.prefix !== "W1") counts.set(parsed.prefix, (counts.get(parsed.prefix) ?? 0) + 1);
+    }
+  }
+  const [declared] = [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (declared) return declared[0];
+  const named = repoName.toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return /^[A-Z]/.test(named) && named !== "W1" ? named : `R${named ? `-${named}` : ""}`;
+}
+
 // ── COLLISION DETECTION AT REVIEW TIME (W1-T4389) ─────────────────────────────────────────────
 // Everything above MINTS an id; this catches a PR that never minted (a hand filing, an offline mint,
 // a worker ignoring its brief). MEASURED 2026-09-23: remudero-console #1695 added CONSOLE-T58 in a
