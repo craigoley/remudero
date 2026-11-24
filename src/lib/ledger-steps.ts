@@ -771,6 +771,17 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["buildPlanReconcileCadenceInput"],
     outcomes: ["revert", "override"],
   },
+  {
+    // W1-T14654: operator ruling 2026-11-24, "Expedite lane".
+    step: "dispatch.expedited",
+    meaning:
+      "A task the expedite lane put ahead of the stride order started in a lane. Fields: `task`; `reason` (its trimmed " +
+      "`expedite` text, or `operator ruling` for an operator-ruling origin); `lanes`, the lane total of the pass that " +
+      "picked it; `share`, max(1, lanes - 1), the most expedited tasks allowed in flight; and `expedited_in_flight`, " +
+      "how many already were. One row per expedited start; a console kick or an ordinary pick writes none.",
+    writer: ["runDaemon"],
+    outcomes: ["started"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never

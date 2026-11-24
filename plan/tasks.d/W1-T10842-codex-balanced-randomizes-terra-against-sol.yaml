@@ -23,7 +23,7 @@
   #   worker evidence: Codex exec JSONL provides no actual served-model field, so every assignment cannot receive the required attribution through this transport.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
   # redesign: signature=b247e5f04e18dfff
-  status: queued
+  status: merged
   attempts: 0
   note: |
     operator grant 2026-11-01 (session) for #15520: scripts/expiring-fixture-census.mjs

@@ -18,7 +18,7 @@
     - src/lib/task-linter.ts
     - src/run-task.ts
     - test/plan/the-plan-lint-flags-a-new-exported-function-that-only-tests-call.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "For each function or class that the diff adds as an export under src, the lint searches the tree. It reports the export when no file outside test/ and outside its own file imports or calls it"

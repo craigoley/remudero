@@ -10,8 +10,9 @@
  * ONE PASS, AT MOST ONE EVAL. The pass takes the first open draft in registry order whose stored text passes the
  * W1-T13858 whole-draft check and has no eval and no claim for its sha256. It checks the gates in order: an up
  * fleet with measured headroom below the limit (skillEvalCapacityGate), then the spend fit (today's ledgered cost plus SKILL_EVAL_MAX_SPEND_USD at or under the
- * effective daily cost ceiling, no unpriced rows today, and for a stack that bills cash at least that much cash
- * allowance left). A closed gate records why the draft waits and spends nothing. With every gate open it claims
+ * effective daily cost ceiling; with unpriced model calls today, that cost plus their bound, each call charged at
+ * today's measured price (W1-T14631), plus the eval's limit at or under the ceiling; and for a stack that bills cash
+ * at least that much cash allowance left). A closed gate records why the draft waits and spends nothing. With every gate open it claims
  * the text on the registry entry, writes one claim row, and runs the same eval path as `rmd skill-eval`.
  *
  * ONE EVAL PER TEXT. Only a refusal with zero attempts dispatched releases the claim. A crash, a cancelled run or a
@@ -35,6 +36,9 @@ export const SKILL_EVAL_AUTO_STEPS = { waiting: "skill_eval.auto_waiting", claim
 export interface SkillEvalSpendFit {
   dayCostUsd: number;
   unpricedRows: number;
+  /** W1-T14631: sweep.ts's `deriveDayUnpricedSpendBound` over the same rows; absent when no priced call bounds them. */
+  unpricedBoundUsd?: number;
+  unpricedBound?: ReadonlyArray<{ step: string; rows: number; perCallUsd: number; source: "step-p90" | "day-max" }>;
   ceilingUsd: number;
   cash?: { remainingUsd: number } | { unreadable: string };
 }
@@ -70,7 +74,15 @@ const sha256 = (text: string): string => createHash("sha256").update(text).diges
 /** Why the spend reading keeps the eval from starting, or undefined when it fits. */
 function spendFitRefusal(fit: SkillEvalSpendFit | undefined): string | undefined {
   if (fit === undefined) return "spend-not-measured: no spend reading is wired, so the eval cannot show it fits";
-  if (fit.unpricedRows > 0) return "daily-cost-unpriced: some of today's ledger rows carry no price, so today's cost is not known";
+  if (fit.unpricedRows > 0) {
+    if (fit.unpricedBoundUsd === undefined) {
+      return `daily-cost-unpriced: ${fit.unpricedRows} unpriced model call(s) today and no priced call to bound them`;
+    }
+    if (fit.dayCostUsd + fit.unpricedBoundUsd + SKILL_EVAL_MAX_SPEND_USD > fit.ceilingUsd) {
+      return `daily-cost-unpriced: today's cost $${fit.dayCostUsd.toFixed(2)} plus $${fit.unpricedBoundUsd.toFixed(2)} for `
+        + `${fit.unpricedRows} unpriced call(s) plus the eval's $${SKILL_EVAL_MAX_SPEND_USD} limit is above the $${fit.ceilingUsd} ceiling`;
+    }
+  }
   if (fit.dayCostUsd + SKILL_EVAL_MAX_SPEND_USD > fit.ceilingUsd) {
     return `daily-cost-ceiling: today's ledgered cost plus the eval's $${SKILL_EVAL_MAX_SPEND_USD} limit is above the `
       + `$${fit.ceilingUsd} daily cost ceiling`;
@@ -81,6 +93,11 @@ function spendFitRefusal(fit: SkillEvalSpendFit | undefined): string | undefined
     return `cash-allowance: less than the eval's $${SKILL_EVAL_MAX_SPEND_USD} limit is left in today's cash allowance`;
   }
   return undefined;
+}
+
+/** The fit's unpriced-call bound as ledger fields, when it was measured. */
+function unpricedBoundFields(fit: SkillEvalSpendFit): Record<string, unknown> {
+  return fit.unpricedBoundUsd === undefined ? {} : { unpriced_bound_usd: fit.unpricedBoundUsd, unpriced_bound: fit.unpricedBound ?? [] };
 }
 
 /** A replace of one entry's auto record, only while its stored text is still `draftSha256`. */
@@ -138,7 +155,7 @@ export async function autoEvaluateSkillDrafts(input: SkillEvalAutoInput, evaluat
     });
     if (changed) {
       write(SKILL_EVAL_AUTO_STEPS.waiting, { reason: waitReason, ...(fit === undefined ? {} : { day_cost_usd: fit.dayCostUsd,
-        unpriced_rows: fit.unpricedRows, daily_cost_ceiling_usd: fit.ceilingUsd }) });
+        unpriced_rows: fit.unpricedRows, ...unpricedBoundFields(fit), daily_cost_ceiling_usd: fit.ceilingUsd }) });
     }
     return { proposalId, reason: `${proposalId} waits: ${waitReason}` };
   }
@@ -148,7 +165,8 @@ export async function autoEvaluateSkillDrafts(input: SkillEvalAutoInput, evaluat
     entry.skillEval?.draftSha256 === draftSha256 || (entry.skillEvalAuto?.state === "claimed" && entry.skillEvalAuto.draftSha256 === draftSha256)
       ? null : { draftSha256, state: "claimed", runId, at: clock.iso() });
   if (!claimed) return { proposalId, reason: `${proposalId}'s text changed before it was claimed; the next pass looks again` };
-  write(SKILL_EVAL_AUTO_STEPS.claimed, { max_spend_usd: SKILL_EVAL_MAX_SPEND_USD, approval: SKILL_EVAL_STANDING_APPROVAL.ref });
+  write(SKILL_EVAL_AUTO_STEPS.claimed, { max_spend_usd: SKILL_EVAL_MAX_SPEND_USD, approval: SKILL_EVAL_STANDING_APPROVAL.ref,
+    ...(fit === undefined ? {} : { unpriced_rows: fit.unpricedRows, ...unpricedBoundFields(fit) }) });
 
   const outcome = await evaluate(proposalId, { standingApproval: SKILL_EVAL_STANDING_APPROVAL }, runId);
   if (outcome.refusedBeforeDispatch) {

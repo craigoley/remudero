@@ -120,3 +120,63 @@ test("a task whose every criterion is a guard is not refused by this gate", () =
   const { code, out } = runMain([GUARD, { ...GUARD, claim: "b" }], staleRun);
   assert.equal(code, 0, out);
 });
+
+// ── W1-T14627 — AN OPS TASK'S GUARD RIDES IN THE PR BODY, AND COUNTS ONLY WHEN THE PR NAMES ITS TASK ──
+//
+// An ops-catalog task has no core plan record, so the gate reads the PR body (Actions holds no ops credential).
+// The body now carries the record's `kind: guard`; remudero-review refuses one the record does not declare.
+const bodyGate = gate as unknown as typeof gate & { BODY_CRITERIA_SOURCE: string };
+const { parseAcceptanceBlock } = await import("#src/lib/review.js");
+
+function runBody(body: string, headRefName: string) {
+  const sink = logs();
+  const code = gate.main(["--event-path", "event.json"], {
+    readPayload: () => ({ readable: true, body, headRefName, baseSha: "base-tip", headSha: "head" }),
+    mergeBase: () => ({ ok: true, mergeBase: "fork" }),
+    resolveCriteria: (judged: string) => ({ criteria: parseAcceptanceBlock(judged), source: bodyGate.BODY_CRITERIA_SOURCE }),
+    runProof: staleRun,
+    baseline: () => ({}),
+    log: sink.log,
+  });
+  return { code, out: sink.out.join("\n"), err: sink.err.join("\n") };
+}
+
+const GUARD_BODY = [
+  "## Acceptance",
+  "",
+  "- claim: the five existing rows parse unchanged",
+  "  proof: unit test: the committed registry keeps every other row",
+  "  kind: guard",
+  "- claim: the new row is named",
+  "  proof: grep: github_repo: craigoley/wreckterra in .remudero/daemon-instances.yaml",
+  "",
+].join("\n");
+
+test("W1-T14627: a body guard is skipped only for a PR that names its task", () => {
+  const guardedOnly = GUARD_BODY.split("\n").slice(0, 5).join("\n");
+  const named = runBody(`${guardedOnly}\n\nRemudero-Task: W1-T14594\n`, "feature/x");
+  assert.equal(named.code, 0, named.out + named.err);
+  assert.match(named.out, /1 criterion\(s\) declared `kind: guard`/);
+
+  const fromRef = runBody(guardedOnly, "run-W1-T14594-1795486508226");
+  assert.equal(fromRef.code, 0, "a run-shaped head ref names the task as the trailer does");
+
+  // No task, no record to back the guard: the criterion runs against the merge base and its staleness refuses.
+  const unnamed = runBody(guardedOnly, "feature/x");
+  assert.equal(unnamed.code, 1, unnamed.out);
+  assert.match(unnamed.err, /proof: unit test: the committed registry keeps every other row/);
+});
+
+test("W1-T14627: parseAcceptanceBlock reads a body kind: guard line", () => {
+  const criteria = parseAcceptanceBlock(GUARD_BODY) as Array<{ claim: string; proof: string; kind?: string }>;
+  assert.equal(criteria.length, 2, "the kind line continues the block instead of ending it");
+  assert.equal(criteria[0]!.kind, "guard");
+  assert.equal(criteria[1]!.kind, undefined);
+  // Only `guard` is a kind the body may carry; any other value ends the block as an unknown line always has.
+  const other = parseAcceptanceBlock(GUARD_BODY.replace("kind: guard", "kind: exempt"));
+  assert.equal(other.length, 1);
+  assert.equal((other[0] as { kind?: string }).kind, undefined);
+  // A kind line before any proof is not a guard mark.
+  const early = parseAcceptanceBlock("## Acceptance\n\n- claim: c\n  kind: guard\n  proof: grep: x in y\n");
+  assert.equal((early[0] as { kind?: string } | undefined)?.kind, undefined);
+});

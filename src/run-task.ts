@@ -1,6 +1,6 @@
 import { isImprovementBoundProposal, isReviewedImprovementDraft, runImprovementAction, type ImprovementPlanReceipt } from "./lib/improvement-thread.js";
 import { fileEligibleFollowups, followupFilingPresentation, type FollowupFinalizer } from "./lib/followup-filing.js";
-import { compositionHoldEdge, findTaskInCatalogs, catalogTaskContract, loadLocalReleasePlan, type TaskLookupOptions } from "./lib/task-lookup.js";
+import { compositionHoldEdge, findTaskInCatalogs, catalogTaskContract, loadLocalReleasePlan, readVerifyHumanCadencePlan, type TaskLookupOptions } from "./lib/task-lookup.js";
 import type { OpsCatalogApi } from "./lib/ops-catalog-source.js";
 import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, readReleaseLedgerLines, releaseContractPins, type ReleaseEvidence } from "./lib/operator-release.js";
 import {
@@ -413,7 +413,7 @@ import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import {
-  gardenFamilyRecord, isRulingShaped, ledgerCorpusSpan, machineJudgeFoundWork, machineJudgeInputsAsync, mechanicalDecisions, operatorRulingTimes, parkedEscalation, readOperatorReleaseRecords,
+  gardenFamilyRecord, ledgerCorpusSpan, machineJudgeFoundWork, machineJudgeInputsAsync, mechanicalDecisions, operatorRulingTimes, readOperatorReleaseRecords,
   recordOperatorRelease, runMachineFilingJudge, unionTaskActivity, type MachineJudgePorts, type MechanicalPort,
 } from "./lib/machine-filing-judge.js";
 import { countRounds, countStepRows, filingEvidenceOf, type SymptomReading } from "./lib/mechanical-rulings.js";
@@ -1458,7 +1458,7 @@ import {
 } from "./lib/coverage-improvement.js";
 import { mineVerdictRows, verdictCalibrationReport, VERDICT_OUTCOME_STEP, type UnmeasurableCause } from "./lib/verdict-calibration.js";
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./lib/autonomy.js";
-import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningHandFixInput, ciLearningLookbackDays, type HandFixInput, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningFromPlan, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type CreditedMergedIds, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
+import { decideMeasurementCadence, measurementCadenceCheck, ciLearningCadenceCheck, CI_LEARNING_MINT_CEILING, ciLearningHandFixInput, ciLearningLookbackDays, type HandFixInput, type CiLearningCadencePolicy, type CiLearningCadenceRunResult, measurementCadenceMarkerPath, ciLearningRecordVerdict, ciLearningShardYaml, fileCiLearningShards, mintCiLearningFromPlan, readMeasurementCadenceMarker, recordCiLearningAttempt, recordCiLearningCadenceFire, recordMeasurementCadenceFire, createWipeTestEvidenceReader, wipeTestSlotDraw, recordWipeTestCadenceFire, scheduleWipeTestAblation, renderVerbCensusDigestLine, priorVerifyHumanAgeBandKeys, parkedVerifyHumanCandidateTasks, planTaskLanded, verifyHumanFilingHistories, type VerifyHumanOpsRecords, runMeasurementCadenceReportAsync, runVerbCensus, verifyHumanCadence, wipeTestCadenceCheck, type MeasurementCadenceDecision, buildPlanReconcileCadenceInput, type CreditedMergedIds, type PlanReconcileHeld, type PlanReconcileCadenceOpts, type PlanReconcileCadenceInputOptions, type PlanReconcileShardRecord, type MeasurementCadenceReportOpts, type MeasurementCadenceRunResult, type VerifyHumanCadenceResult, type WipeTestCadenceDecision, type WipeTestCadencePolicy, type WipeTestCadenceRunResult } from "./lib/measurement-cadence.js";
 import {
   routedModelIdsFromCheckout,
   watchSuccessorModels,
@@ -22898,13 +22898,16 @@ export async function defaultVerifyHumanCadenceResult(
   clock: Clock = systemClock,
 ): Promise<VerifyHumanCadenceResult> {
   try {
-    const plan = loadPlan(join(repoRoot, "plan", "tasks.yaml"));
+    // W1-T14641: the public plan composed with the ops catalog, as the dispatch tick composes it, so a parked ops record
+    // is judged and released like a public one. An ops catalog that cannot be read leaves the public plan, named below.
+    const source = await readVerifyHumanCadencePlan(loadPlan(join(repoRoot, "plan", "tasks.yaml")), { stateDir: join(config.root, "state") });
+    const plan = source.plan;
     const ledgerPath = ledgerPathFor(config);
     const rows = await readLiveLedgerRowsOffLoop(ledgerPath);
     const judgedRows = await rowsWithArchivedVerifyHumanVerdictsAsync(ledgerPath, rows);
     const registryPath = join(config.root, "state", "inbox-proposals.json");
     const credited = readMergeCreditedTaskIds(ledgerPath).credited;
-    const shards = withWhyMeJudgmentInput(await parkedVerifyHumanShardsAsync(plan, repoRoot, clock, credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), clock.now(), { repository: githubRepoSlugOfCheckout(repoRoot), instance: process.env.RMD_INSTANCE_NAME });
+    const shards = withWhyMeJudgmentInput(await parkedVerifyHumanShardsAsync(plan, repoRoot, clock, credited, {}, source), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), clock.now(), { repository: githubRepoSlugOfCheckout(repoRoot), instance: process.env.RMD_INSTANCE_NAME });
     const releasedIds = resolveReleasedIds(releaseReadersFor(ledgerPath), plan);
     // W1-T10371: the operator's four rulings decide what they can; the machine-filing judge's landing owns the write.
     const ruledByRules = mechanicalDecisions({
@@ -22931,6 +22934,7 @@ export async function defaultVerifyHumanCadenceResult(
       release: productionVerifyHumanRelease(plan, repoRoot, ledgerPath, runId),
       releasedIds,
       releaseEscalatedKeys: releaseEscalatedKeys(rows),
+      opsRefusal: source.opsRefusal,
     });
     // W1-T4083: measure the release judge over the board's week of rotations, remembering what older
     // rotations showed in a state file, so a judge that never escalates is caught.
@@ -29445,6 +29449,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         planState: () => readCiFrictionPlanState(repoRoot),
         ownerSearch: gitCiFrictionOwnerSearch((args) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })),
         mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
+        awaitReleases: true,
       };
       return gardenPass(ciFrictionGardenSpec(d, sources), d);
     }
@@ -39610,43 +39615,31 @@ export async function verifyHumanSweepCommand(
   return 0;
 }
 
-/** Has this plan task LANDED, by the credit `deriveStatus` honours rather than the decorative yaml `status:`?
- *  `merged` or `done` status, an explicit `pr:` number (precedence source (b)), or a ledger merge credit. */
-export function planTaskLanded(task: Task | undefined, ledgerCredited?: ReadonlySet<string>): boolean {
-  if (!task) return false;
-  return task.status === "merged" || task.status === "done" || typeof task.pr === "number" || ledgerCredited?.has(task.id) === true;
-}
-
 /** The parked population, as {@link ShardUnderJudgement} — the ONE place plan records become
  *  judgeable input. Reads the plan and greps src/; writes nothing. */
 export async function parkedVerifyHumanShards(plan: Plan, root: string, clock: Clock, ledgerCredited?: ReadonlySet<string>, filingHistoryOptions: FilingHistoryOptions = {}): Promise<ShardUnderJudgement[]> {
-  const parked = parkedVerifyHumanCandidates(plan, root, clock, ledgerCredited, filingHistoryOptions);
+  const parked = parkedVerifyHumanCandidates(plan, root, clock, ledgerCredited, filingHistoryOptions, undefined);
   const out: ShardUnderJudgement[] = [];
   for (const task of parked.candidates) out.push(await parked.shard(task, idCitedInSrcSync(task.id, root)));
   return out;
 }
 
 /** W1-T12753: {@link parkedVerifyHumanShards} for the daemon's cadence: each src/ citation is an awaited git grep. */
-export async function parkedVerifyHumanShardsAsync(plan: Plan, root: string, clock: Clock, ledgerCredited?: ReadonlySet<string>, filingHistoryOptions: FilingHistoryOptions = {}): Promise<ShardUnderJudgement[]> {
-  const parked = parkedVerifyHumanCandidates(plan, root, clock, ledgerCredited, filingHistoryOptions);
+export async function parkedVerifyHumanShardsAsync(plan: Plan, root: string, clock: Clock, ledgerCredited?: ReadonlySet<string>, filingHistoryOptions: FilingHistoryOptions = {},
+  ops?: VerifyHumanOpsRecords): Promise<ShardUnderJudgement[]> {
+  const parked = parkedVerifyHumanCandidates(plan, root, clock, ledgerCredited, filingHistoryOptions, ops);
   const out: ShardUnderJudgement[] = [];
   for (const task of parked.candidates) out.push(await parked.shard(task, await idCitedInSrc(task.id, root)));
   return out;
 }
 
-function parkedVerifyHumanCandidates(plan: Plan, root: string, clock: Clock, ledgerCredited: ReadonlySet<string> | undefined, filingHistoryOptions: FilingHistoryOptions): { candidates: Task[]; shard: (task: Task, citedInSrc: boolean) => Promise<ShardUnderJudgement> } {
+/** W1-T14641: `ops` names the ops records in `plan`; their filing age is read from the ops checkout. src/ citations keep
+ *  reading the code checkout `root`, for an ops record as for a public one. */
+function parkedVerifyHumanCandidates(plan: Plan, root: string, clock: Clock, ledgerCredited: ReadonlySet<string> | undefined, filingHistoryOptions: FilingHistoryOptions,
+  ops: VerifyHumanOpsRecords | undefined): { candidates: Task[]; shard: (task: Task, citedInSrc: boolean) => Promise<ShardUnderJudgement> } {
   const nowMs = clock.now();
-  const candidates = plan.tasks.filter(task => {
-    // The machine-filing judge routes AND releases every machine record and every operator record that
-    // is not ruling-shaped (operator ruling 2026-09-29); only rulings stay on this operator-facing sweep.
-    // W1-T4860: "queued" and "landed" read the credit the dispatcher and board use, not the raw yaml `status:` —
-    // a ruling already executed and credited (`pr:`, `done`, ledger merge credit) is settled, never judged again.
-    // W1-T9043: a machine record the judge ESCALATED to a person is admitted too, so it rides the 14/30/60-day
-    // age-band re-asks a person already reads; an unjudged machine record stays the machine-filing judge's alone.
-    const heldForAPerson = task.author_class === "machine" ? parkedEscalation(task) : isRulingShaped(task);
-    return task.verify === "human" && task.status === "queued" && !planTaskLanded(task, ledgerCredited) && heldForAPerson;
-  });
-  const filingHistory = createTaskFilingHistoryInvocation(root, candidates.map(task => task.id), filingHistoryOptions);
+  const candidates = parkedVerifyHumanCandidateTasks(plan, ledgerCredited, ops);
+  const filingHistory = verifyHumanFilingHistories(root, candidates, ops, filingHistoryOptions);
   const shard = async (task: Task, citedInSrc: boolean): Promise<ShardUnderJudgement> => {
     const deps = task.depends_on ?? [];
     return {
@@ -39654,7 +39647,7 @@ function parkedVerifyHumanCandidates(plan: Plan, root: string, clock: Clock, led
       title: task.title ?? task.id,
       rationale: (task as { rationale?: string }).rationale ?? "",
       acceptance: (task.acceptance ?? []).map((c) => c.claim),
-      ...(await shardAgeDays(task.id, nowMs, filingHistory)),
+      ...(await shardAgeDays(task.id, nowMs, filingHistory(task.id))),
       depsAllMerged: deps.every((d) => planTaskLanded(plan.byId.get(d), ledgerCredited)),
       citedInSrc,
       ...(() => {
