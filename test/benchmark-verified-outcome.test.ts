@@ -139,10 +139,11 @@ test("cohort refreshes the read-only GitHub overlay on a cached ledger without r
     try { assert.equal(await runBenchmarkVerifiedOverlayPass(dir, snapshotPath), 1); }
     finally { console.error = originalError; }
     assert.equal(JSON.parse(errors[0]!).reason, "snapshot-unavailable");
+    // W1-T14602: the snapshot has no size bound, so a large one is parsed and only its content refuses it.
     writeFileSync(snapshotPath, " ".repeat(4 * 1024 * 1024 + 1));
     console.error = (line: string) => { errors.push(line); };
     try { assert.equal(await runBenchmarkVerifiedOverlayPass(dir, snapshotPath), 1); }
     finally { console.error = originalError; }
-    assert.equal(JSON.parse(errors[1]!).error_class, "type-error");
+    assert.equal(JSON.parse(errors[1]!).error_class, "syntax-error");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

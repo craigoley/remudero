@@ -157,7 +157,7 @@ export interface BenchmarkCohortPassResult {
 }
 
 /** W1-T14539: "joined", or the named reason a pass that reads the state snapshot ran without it. */
-export type CaseFileJoin = "joined" | "absent" | "unreadable" | "too-large" | "invalid" | "empty" | "as-of-spread";
+export type CaseFileJoin = "joined" | "absent" | "unreadable" | "invalid" | "empty" | "as-of-spread";
 
 /** W1-T14601: the join's freshness bound (joinVerifiedTaskOutcomes in benchmark-verified-outcome.ts). A state snapshot
  * whose files lie farther apart than this cannot be judged at one time without some of them reading stale. */
@@ -1136,15 +1136,13 @@ export function stateCaseFileSnapshotPath(stateDir: string): string {
   return join(stateDir, "field-trials", "case-files-latest.json");
 }
 
-/** Reads a bounded `task-case-file-v1` snapshot; throws ENOENT/EACCES/EPERM or a named TypeError. */
+/** Reads a `task-case-file-v1` snapshot of any size (W1-T14602); throws ENOENT/EACCES/EPERM or a named TypeError. */
 export function loadCaseFileSnapshot(caseFilePath: string, beforeRead?: () => void): TaskCaseFile[] {
-  const maxBytes = 4 * 1024 * 1024;
   const fd = openSync(caseFilePath, "r");
   let text: string;
   try {
     const before = fstatSync(fd);
     if (!before.isFile()) throw new TypeError("case-file-snapshot-not-a-file");
-    if (before.size > maxBytes) throw new TypeError("case-file-snapshot-too-large");
     beforeRead?.();
     const bytes = Buffer.allocUnsafe(before.size + 1);
     let used = 0;
@@ -1179,7 +1177,6 @@ export function readStateCaseFiles(stateDir: string):
   } catch (error) {
     const code = (error as NodeJS.ErrnoException | null)?.code;
     if (code === "ENOENT") return { reason: "absent" };
-    if (error instanceof TypeError && error.message === "case-file-snapshot-too-large") return { reason: "too-large" };
     if (code === "EACCES" || code === "EPERM" || code === "EISDIR"
       || (error instanceof TypeError && (error.message === "case-file-snapshot-not-a-file"
         || error.message === "case-file-snapshot-changed-during-read"))) return { reason: "unreadable" };
