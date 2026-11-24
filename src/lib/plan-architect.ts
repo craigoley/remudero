@@ -127,7 +127,11 @@ function step3Instructions(mode: PlanMode, brief: string): string[] {
       "",
       "  PROPOSED — scaffold it: add one or more NEW task(s) covering the initiative (see NEW TASK",
       "  PLACEMENT below for where a new task goes), and, if the initiative is big enough to need",
-      "  one, a new `MASTER-PLAN.md` §section.",
+      "  one, a new `MASTER-PLAN.md` §section. When the plan already has tasks and the initiative",
+      "  CHANGES direction (W1-T14675, an operator steering note), you may also rewrite an existing",
+      "  task the new direction changes, in place in its own file. Never delete a task, and never",
+      "  write `retirement:` (it is operator-only): name a task the direction makes obsolete in the",
+      "  PROPOSED line so the operator can retire it.",
       "  End with a line starting exactly `PROPOSED:` with a one-line summary, e.g.",
       "  `PROPOSED: add W1-T300 scaffolding the <initiative> initiative`.",
     ];

@@ -241,6 +241,7 @@ import type { ConsoleProjectionWorker, FeedbackProjectionInput } from "./console
 import { createConsoleSnapshotStore } from "./console-snapshot-store.js";
 import {
   createConsoleSnapshotCache,
+  prewarmReadRoutes,
   createConsoleWriteGeneration,
   invalidateSnapshotsOnWrite,
   RouteResponseBuffer,
@@ -938,6 +939,28 @@ export function consoleBlockingRequestPathViolations(routes: readonly Route[]): 
   return violations;
 }
 
+/**
+ * W1-T14683: `/v1/status` without its reader's fields. `recap` and `sinceCheckpoint` are the only per-token fields
+ * buildStatusRoute adds to the shared board snapshot; the shared copy carries an empty recap, and that reader's own
+ * read (already started) brings theirs. A body that is not a JSON object is not shared.
+ */
+export function statusBodyWithoutReader(body: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return undefined; // not JSON: never shared, so that reader waits for their own read as before
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const { recap: _recap, sinceCheckpoint: _since, ...shared } = parsed as Record<string, unknown>;
+  return JSON.stringify({ ...shared, recap: [] });
+}
+
+/** W1-T14683: every mounted instance's status read, prewarmed at boot so its first reader finds a good body. */
+export function instanceStatusPrewarmPaths(routes: readonly Route[]): string[] {
+  return routes.filter((route) => route.method === "GET" && /^\/v1\/i\/[^/]+\/status$/.test(route.path)).map((route) => route.path);
+}
+
 export function boundConsoleReadRoute(
   route: Route,
   deps: ServeDeps,
@@ -949,7 +972,8 @@ export function boundConsoleReadRoute(
   const fallbackBody = (staleness: ConsoleResponseStaleness) => fallbackBodyForCachedRead(route.path, deps, staleness);
   // W1-T5175: a drop rebuilds the cache WITHOUT restoring from disk what the drop just shed.
   const cache = (afterDrop: boolean) =>
-    createConsoleSnapshotCache(route, { ...options, ...(afterDrop ? { store: withoutRestore(options.store) } : {}), budgetMs, fallbackBody }).handler;
+    createConsoleSnapshotCache(route, { ...options, ...(afterDrop ? { store: withoutRestore(options.store) } : {}), budgetMs, fallbackBody,
+      ...(route.path === "/v1/status" ? { sharedBody: statusBodyWithoutReader } : {}) }).handler;
   if (!memory) return { ...route, handler: cache(false) };
   const droppable = droppableRouteCache(`legacy-cache:${memory.scope}:${route.path}`, LEGACY_CACHE_VIEWS[route.path], cache);
   memory.registry.add(droppable.holder);
@@ -3983,6 +4007,8 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
     readModel,
     memory,
   );
+  // W1-T14683: a serve that persists console snapshots (the real one) warms each instance's status off the request path.
+  if (deps.consoleSnapshots) void prewarmReadRoutes(routeAssembly.routes, instanceStatusPrewarmPaths(routeAssembly.routes), deps.log);
   // W1-T11817: the deadline counts under the demand window's own families, read only at request time.
   const readDeadline = createReadDeadline({
     ...readDeadlineConfig(process.env), ...deps.demand, log: deps.log, ledgerPath: deps.ledgerPath,

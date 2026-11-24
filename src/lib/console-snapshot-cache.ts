@@ -264,6 +264,22 @@ export interface ConsoleSnapshotCacheOptions {
   log?: (step: string, extra: Record<string, unknown>) => void;
   /** The instance this route serves, named in each refresh row. Default `core`. */
   instance?: string;
+  /**
+   * W1-T14683: strips every per-reader field from a good body so it can be shared across readers of one url;
+   * undefined means that body is not shareable. A route without it never shares a body between readers.
+   */
+  sharedBody?: (body: string) => string | undefined;
+}
+
+/** W1-T14683: the reason a cold reader is answered with another reader's last good body. */
+export const SHARED_LAST_GOOD_REASON = "the last good read of this url, shown while this reader's own read computes";
+
+/** The reader-free part of an entry key: the url, plus the route's qualification key when it has one. */
+export function sharedKeyOfEntryKey(key: string): string {
+  const unqualified = (readerKey: string): string => readerKey.slice(readerKey.lastIndexOf(" ") + 1);
+  if (!key.startsWith("[")) return unqualified(key);
+  const [readerKey, sourceKey] = JSON.parse(key) as [string, string];
+  return JSON.stringify([unqualified(readerKey), sourceKey]);
 }
 
 /** W1-T14682: the ledger step naming each refresh of a cached console read. */
@@ -310,6 +326,17 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
   const logRefresh = (outcome: "ready" | "budget" | "threw", ms: number, reason?: string): void => {
     options.log?.(CONSOLE_SNAPSHOT_REFRESH_STEP, { path: route.path, instance, ms: Math.round(ms), outcome, ...(reason === undefined ? {} : { reason }) });
   };
+  // W1-T14683: one reader-free last good body per url, so a one-off reader never starts from the cold fallback.
+  const lastGood = new Map<string, BufferedRouteResponse>();
+  const share = (key: string, cached: BufferedRouteResponse): void => {
+    if (!options.sharedBody || cached.status !== 200) return;
+    const body = options.sharedBody(cached.body);
+    if (body === undefined) return;
+    const sharedKey = sharedKeyOfEntryKey(key);
+    const known = lastGood.get(sharedKey);
+    if (known && known.generatedAtMs > cached.generatedAtMs) return;
+    lastGood.set(sharedKey, { ...cached, body, etag: snapshotEtag(body), jsonObject: isJsonObjectText({ ...cached, body }) });
+  };
 
   const periodOf = (entry: SnapshotEntry): number => Math.max(minRefreshMs, entry.computeMs * COMPUTE_DUTY_DIVISOR);
   const freshForOf = (entry: SnapshotEntry): number =>
@@ -346,6 +373,7 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
       // Older versions persisted cold/outage responses. Verify the live route within its normal
       // budget instead of letting yesterday's 503 fail a recovered generation's first smoke read.
       if (cached.status !== 200) continue;
+      share(key, cached);
       if (entries.has(key)) continue;
       entries.set(key, { key, cached, generation: generation.current(), lastReadAtMs: 0, computeMs: 0, warmArmed: false, restoredFrom: codeRev, persistedBody: cached.body });
     }
@@ -373,6 +401,7 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
         entry.generation = startedGeneration;
         entry.lastError = undefined;
         entry.restoredFrom = undefined;
+        share(entry.key, entry.cached);
         persist(entry);
         logRefresh("ready", clock.now() - startedAt);
       } catch (error) {
@@ -417,6 +446,12 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
     const staleness = { ...stalenessOf(entry, cached), status: cached ? ("stale" as const) : ("unavailable" as const), stale: true };
     if (cached) {
       writeBufferedResponse(req, res, cached, staleness);
+      return;
+    }
+    const shared = lastGood.get(sharedKeyOfEntryKey(entry.key));
+    if (shared) {
+      writeBufferedResponse(req, res, shared, { ...responseStaleness(clock.now(), shared.generatedAtMs, true, budgetMs, freshForOf(entry), entry.lastError),
+        status: "stale", stale: true, reason: entry.lastError === undefined ? SHARED_LAST_GOOD_REASON : `${SHARED_LAST_GOOD_REASON}; this reader's read failed: ${entry.lastError}` });
       return;
     }
     sendStaleJson(res, 200, options.fallbackBody(staleness), staleness);
