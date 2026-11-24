@@ -65,6 +65,7 @@ function viewFor(over: Partial<OpenPrView> = {}): OpenPrView {
     prNumber: PR_NUMBER, prUrl: PR_URL, taskId: TASK, headRefName: `run-${TASK}-1794900000000`,
     reviewState: "pending", reviewPendingSince: "2026-11-17T08:47:49Z",
     reviewPendingOwnerRunId: RUN, reviewPendingStatusRunId: RUN,
+    // expiring-fixture: exempt -- every sweep here runs on the pinned clock NOW (now: () => NOW), so this stamp never ages against the real date
     checksState: "green", unmetCriteria: [], priorStrikes: 0, lastActivityAt: "2026-11-17T08:47:00Z",
     headSha: HEAD, autoMergeArmed: false, reviewInputDigest: DIGEST, priorReviewAttemptsForInput: 0,
     ...over,
