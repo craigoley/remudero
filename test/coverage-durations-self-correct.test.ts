@@ -62,7 +62,7 @@ test("W1-T4071: the coverage command writes duration evidence for every selected
   const run = coverageStepRun();
   // The selection is recorded beside the evidence, both under coverage/, from the same command.
   assert.match(run, /--test-reporter=\.\/scripts\/test-duration-reporter\.mjs --test-reporter-destination=coverage\/test-durations\.json/);
-  assert.match(run, /--select-all --shard \$\{\{ matrix\.shard \}\}\/12 --base HEAD\^1[\s\S]*--workers 3 --selection-output coverage\/selected-files\.json/);
+  assert.match(run, /--select-all --shard \$\{\{ matrix\.shard \}\}\/16 --base HEAD\^1[\s\S]*--workers 3 --selection-output coverage\/selected-files\.json/);
   assert.match(run, /^coverage\/ledger-snapshot\.manifest$/m, "the weighed snapshot is uploaded for the proposal to fold onto");
 
   const root = fixtureRoot("coverage-evidence", names(7));

@@ -937,6 +937,10 @@ export const OPS_DISPATCH_SOURCE_REFRESH_MS = 45_000;
  *  W1-T14374: it also carries the snapshot's shard and byte counts and, for a derived-bound refusal, the bound. */
 export const OPS_CATALOG_REFRESHED_STEP = "dispatch.ops_catalog_refreshed";
 
+/** W1-T14557: one row on the UTC day's first accepted ops catalog read whose growth, moved records left out, passed the
+ *  daily allowance. The read is still accepted; only the heap and blob-budget bounds refuse one. Numbers only. */
+export const OPS_CATALOG_GROWTH_EXCEEDED_STEP = "ops_catalog.growth_exceeded";
+
 export function opsCatalogShadowFeed(
   source: { refresh(): Promise<OpsCatalogShadowInput> }, clock: Clock = systemClock,
   opts: {
@@ -963,6 +967,12 @@ export function opsCatalogShadowFeed(
         shards: input.counts?.shards ?? null, bytes: input.counts?.bytes ?? null,
         bound: input.bound ? { reason: input.bound.reason, observed: input.bound.observed, allowed: input.bound.allowed } : null,
       });
+      // W1-T14557: a catalog that grew past its daily allowance is still accepted; its day's first such read says so.
+      const exceeded = input.growthExceeded;
+      if (exceeded) {
+        opts.log(OPS_CATALOG_GROWTH_EXCEEDED_STEP, { reason: exceeded.reason, observed: exceeded.observed, allowed: exceeded.allowed,
+          shards: input.counts?.shards ?? null, bytes: input.counts?.bytes ?? null });
+      }
     } catch {
       // A diagnostic row that cannot be written never changes the evidence the refresh produced.
     }

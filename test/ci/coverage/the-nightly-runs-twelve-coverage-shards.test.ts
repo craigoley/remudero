@@ -1,4 +1,5 @@
-// W1-T13342 — the coverage nightly runs ci.yml's twelve coverage shards, so its shards fit their 45-minute ceiling
+// W1-T13342 — the coverage nightly runs ci.yml's coverage shard count (twelve then, sixteen since W1-T14558), so its
+// shards fit their 45-minute ceiling
 // with the premap step W1-T13275 added.
 // MEASURED 2026-11-17 (Actions jobs API, run 44033818223, the first nightly with the premap step): at eight shards,
 // shards 4 and 6 were cancelled at 45m. Their tests took 36 and 39 minutes, and compaction plus premapping added
@@ -21,18 +22,18 @@ const nightly = () =>
 const runs = (job: Job) => (job.steps ?? []).map((s) => s.run ?? "").join("\n");
 const range = (n: number) => Array.from({ length: n }, (_, k) => k + 1);
 
-test("W1-T13342 criterion 1: the nightly runs twelve shards, the same width as ci.yml's coverage lane", () => {
-  assert.equal(NIGHTLY_SHARD_COUNT, 12, "coverage-floor's nightly producer expects twelve shard exits");
+test("W1-T13342 criterion 1 and W1-T14558 criterion 2: the nightly runs sixteen shards, the same width as ci.yml's coverage lane", () => {
+  assert.equal(NIGHTLY_SHARD_COUNT, 16, "coverage-floor's nightly producer expects sixteen shard exits (W1-T14558)");
   assert.equal(NIGHTLY_SHARD_COUNT, CI_COVERAGE_SHARD_COUNT, "the nightly and the PR coverage lane split the suite alike");
   const { shards } = nightly().jobs;
   assert.deepEqual(shards!.strategy!.matrix!.shard, range(NIGHTLY_SHARD_COUNT));
   assert.equal(shards!.name, `coverage-nightly-shard (\${{ matrix.shard }}/${NIGHTLY_SHARD_COUNT})`);
   const selects = [...runs(shards!).matchAll(/--shard \$\{\{ matrix\.shard \}\}\/(\d+)/g)].map((m) => Number(m[1]));
   assert.ok(selects.length > 0, "the shard selects its slice of the suite");
-  assert.deepEqual([...new Set(selects)], [NIGHTLY_SHARD_COUNT], "every slice is a twelfth");
+  assert.deepEqual([...new Set(selects)], [NIGHTLY_SHARD_COUNT], "every slice is a sixteenth");
 });
 
-test("W1-T13342 criterion 2: every step that walks the shards walks all twelve", () => {
+test("W1-T13342 criterion 2: every step that walks the shards walks all sixteen", () => {
   const { merge, notify } = nightly().jobs;
   const mergeRuns = runs(merge!);
   for (const counts of mergeRuns.matchAll(/--shard-count (\d+)/g)) assert.equal(Number(counts[1]), NIGHTLY_SHARD_COUNT);
