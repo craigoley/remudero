@@ -10,7 +10,9 @@ import {
   decideMeasurementCadence, readMeasurementCadenceMarker, recordMeasurementCadenceFire,
 } from "#src/lib/measurement-cadence.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import {
+  COVERAGE_NIGHTLY_IMPACT_MAP_STEP,
   readCoverageNightlySummary,
   coverageNightlyGithubReader,
   type CoverageNightlyReader,
@@ -38,6 +40,15 @@ const cadence = {
 };
 const rows = (path: string): Record<string, unknown>[] => existsSync(path)
   ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
+const measuredRows = (path: string): Record<string, unknown>[] => rows(path).filter((row) => row.step !== COVERAGE_NIGHTLY_IMPACT_MAP_STEP);
+async function impactMapRows(path: string, count: number): Promise<Record<string, unknown>[]> {
+  for (let i = 0; i < 1000; i++) {
+    const found = rows(path).filter((row) => row.step === COVERAGE_NIGHTLY_IMPACT_MAP_STEP);
+    if (found.length >= count) return found;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`no ${count} ${COVERAGE_NIGHTLY_IMPACT_MAP_STEP} rows in ${path}`);
+}
 
 test("test/the-coverage-nightly-summary-reaches-the-ledger.test.ts: totals, run identity, deduplication and read failure", async () => {
   await withTempDir("nightly-intake-test", async (stateDir) => {
@@ -145,14 +156,19 @@ test("the GitHub reader asks for the newest completed main nightly, including a 
   });
 });
 
-test("a failed artifact download logs once, cleans up, and retries next cadence", async () => {
+test("a failed artifact download logs once, cleans up, and retries next cadence", async (t) => {
   await withTempDir("nightly-intake-test", async (stateDir) => {
     let downloads = 0;
+    let impactMapDownloads = 0;
     let downloadDir = "";
     const logs: string[] = [];
     const github = coverageNightlyGithubReader({
       ghJsonAsync: async () => ({ workflow_runs: [run] }),
       ghTextAsync: async (args) => {
+        if (args.includes("test-impact-map")) {
+          impactMapDownloads++;
+          throw Object.assign(new Error("gh exited 1"), { stderr: "no artifact matches any of the names or patterns provided" });
+        }
         downloads++;
         downloadDir = args[args.indexOf("--dir") + 1];
         if (downloads === 1) throw new Error("artifact expired");
@@ -160,20 +176,28 @@ test("a failed artifact download logs once, cleans up, and retries next cadence"
         return "";
       },
     });
-    const opts = { ledgerPath: join(stateDir, LEDGER_FILENAME), cadence, owner: "owner", repo: "repo", reader: github, log: (line: string) => logs.push(line) };
+    const opts = {
+      ledgerPath: join(stateDir, LEDGER_FILENAME), cadence, owner: "owner", repo: "repo", reader: github,
+      checkoutRoot: gitRepo({ scope: t }).dir, log: (line: string) => logs.push(line),
+    };
     assert.equal((await readCoverageNightlySummary({ ...opts, clock: fixedClock(at) })).status, "failed");
     assert.equal(existsSync(downloadDir), false);
-    assert.deepEqual(rows(opts.ledgerPath), []);
+    assert.deepEqual(measuredRows(opts.ledgerPath), []);
     assert.equal(logs.length, 1);
     assert.match(logs[0], /artifact expired/);
+    await impactMapRows(opts.ledgerPath, 1);
     assert.equal((await readCoverageNightlySummary({ ...opts, clock: fixedClock(at + day) })).status, "appended");
+    assert.deepEqual((await impactMapRows(opts.ledgerPath, 2)).map((row) => row.outcome), ["no-artifact", "unchanged"]);
     assert.equal(downloads, 2);
+    assert.equal(impactMapDownloads, 1);
   });
 });
 
-test("both default GitHub transports really spawn and propagate their child failure", { concurrency: false }, async () => {
+test("both default GitHub transports really spawn and propagate their child failure", { concurrency: false }, async (t) => {
   await withTempDir("nightly-intake-test", async (root) => {
+    const checkoutRoot = gitRepo({ scope: t }).dir;
     const shim = ghShim([
+      { when: "--name test-impact-map", stderr: "no artifact matches any of the names or patterns provided", exit: 1 },
       { when: "api repos/owner/repo/actions/workflows/", stderr: "nightly list unavailable", exit: 1 },
       { when: "run download 1234", stderr: "nightly artifact unavailable", exit: 1 },
     ]);
@@ -187,18 +211,23 @@ test("both default GitHub transports really spawn and propagate their child fail
         mkdirSync(stateDir);
         const logs: string[] = [];
         const result = await readCoverageNightlySummary({
-          ledgerPath: join(stateDir, LEDGER_FILENAME), cadence, owner: "owner", repo: "repo", clock: fixedClock(at),
+          ledgerPath: join(stateDir, LEDGER_FILENAME), cadence, owner: "owner", repo: "repo", clock: fixedClock(at), checkoutRoot,
           reader: useDefaultDownload ? coverageNightlyGithubReader({ ghJsonAsync: async () => ({ workflow_runs: [run] }) }) : undefined,
           log: (line) => logs.push(line),
         });
         assert.equal(result.status, "failed");
         assert.equal(logs.length, 1);
         assert.match(logs[0], useDefaultDownload ? /nightly artifact unavailable/ : /nightly list unavailable/);
-        assert.deepEqual(rows(join(stateDir, LEDGER_FILENAME)), []);
+        assert.deepEqual(measuredRows(join(stateDir, LEDGER_FILENAME)), []);
+        if (useDefaultDownload) {
+          assert.deepEqual((await impactMapRows(join(stateDir, LEDGER_FILENAME), 1)).map((row) => row.outcome), ["no-artifact"]);
+        }
       }
-      assert.equal(shim.calls().length, 2);
+      assert.equal(shim.calls().length, 3);
       assert.match(shim.calls()[0], /^api repos\/owner\/repo\/actions\/workflows\/coverage-nightly\.yml\/runs\?/);
-      assert.match(shim.calls()[1], /^run download 1234 --repo owner\/repo --name coverage-nightly --dir /);
+      const downloads = shim.calls().slice(1).sort();
+      assert.match(downloads[0], /^run download 1234 --repo owner\/repo --name coverage-nightly --dir /);
+      assert.match(downloads[1], /^run download 1234 --repo owner\/repo --name test-impact-map --dir /);
     } finally {
       if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
       if (previousCache === undefined) delete process.env.RMD_GH_CACHE_HOME; else process.env.RMD_GH_CACHE_HOME = previousCache;
