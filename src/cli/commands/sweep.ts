@@ -42,6 +42,7 @@ import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields }
 import { failureRecordingPoster, reviewCommand as reviewCommandFromModule, runReview as runReviewFromModule, type ReviewCommandDeps, type ReviewCommandHost } from "./review.js";
 import { runFixRung as runFixRungFromModule, type FixCommandHost } from "./fix.js";
 import type { RunTaskCommandHost } from "./run-task-verb.js";
+import { upsertFixRoundComment, type FixRoundCommentWriter } from "../../lib/fix-round-comment.js";
 
 type HostFn = (...args: any[]) => any;
 
@@ -151,6 +152,11 @@ export interface SweepCommandHost {
       baseChangedFilesByPr: Map<number, BaseChangedFiles>;
     }>;
   };
+}
+
+/** W1-T14628: a sweep fix round's deps with the writer of the PR's one fix-round comment, unless the caller handed its own. */
+export function sweepFixRungDeps<D extends { upsertFixRoundComment?: FixRoundCommentWriter }>(deps: D) {
+  return { ...deps, upsertFixRoundComment: deps.upsertFixRoundComment ?? upsertFixRoundComment };
 }
 
 export function buildSweepEffects(
@@ -672,10 +678,7 @@ export function buildSweepEffects(
         taskContractAdvanceAtHead(reviewRepoDir, pr) }),
     createFixRungWorktreeImpl: createFixRungWorktreeWithToolchain,
     captureWorktreeSnapshotImpl: captureWorktreeSnapshotViaGit,
-    runFixRungImpl: (opts) => {
-      const deps = { ...opts.deps, writeFixCensusSnapshot: writeFixCensusSnapshotAsync };
-      return runFixRung({ ...opts, deps });
-    },
+    runFixRungImpl: (opts) => runFixRung({ ...opts, deps: sweepFixRungDeps({ ...opts.deps, writeFixCensusSnapshot: writeFixCensusSnapshotAsync }) }),
     runPlanScopedFixRoundImpl: runPlanScopedFixRound,
     materializePlanRoundWorktreeImpl: materializePlanRoundWorktree,
     pushFixRoundImpl: (wt: string, branch: string, sha?: string, prior?: string,
