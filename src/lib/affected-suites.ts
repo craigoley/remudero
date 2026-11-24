@@ -892,14 +892,19 @@ export function selectAffectedSuites(changed: readonly string[], input: Affected
   if (input.files.has(cancelledCheckRequeue) && cancelledCheckRequeueEdges.some((edge) => changedSet.has(edge))) {
     pathReaders.push(cancelledCheckRequeue);
   }
-  // W1-T13160: coverage run 43866749772 missed this suite in the narrow arm after its retry failed.
-  const escalationRetirability = suitePath("test/escalation-retirability.test.ts");
-  const escalationRetirabilityEdges = [
+  // W1-T13160 and W1-T13161: the same sweep edges missed both suites in the narrow arm.
+  const sweepEdges = [
     "src/lib/sweep.ts",
     suitePath("test/sweep/flow-other-not-positively-mergeable.test.ts"),
   ];
-  if (input.files.has(escalationRetirability) && escalationRetirabilityEdges.some((edge) => changedSet.has(edge))) {
-    pathReaders.push(escalationRetirability);
+  if (sweepEdges.some((edge) => changedSet.has(edge))) {
+    for (const path of [
+      "test/escalation-retirability.test.ts",
+      "test/sweep/a-pull-request-that-needs-operator-input-is-never-parked.test.ts",
+    ]) {
+      const suite = suitePath(path);
+      if (input.files.has(suite)) pathReaders.push(suite);
+    }
   }
   const recent = input.recentFailures ?? [];
   for (const s of pathReaders) pick(s, "reads a changed file by path");

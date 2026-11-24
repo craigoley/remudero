@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -23,6 +24,11 @@ import { buildFixturePlanPrBody } from "#test/helpers/plan-pr-body-fixture.js";
 // the plan destination. The W1-T12200 rule: a file is edited in the repository that holds it; only a NEW file follows the
 // switch. The fixture runs the production sweep effects, so the switch is read where the sweep wires the remedy.
 
+
+/** W1-T14617: the git calls of the read at the ops checkout's origin/main. */
+const atMainRead = (args: readonly string[]) => args.includes("+refs/heads/main:refs/remotes/origin/main") ||
+  (args.includes("rev-parse") && args.at(-1) === "refs/remotes/origin/main") ||
+  (args.includes("ls-tree") && args.at(-1) === "plan/tasks.d/") || (args.includes("show") && /^[0-9a-f]{40}:plan\/tasks\.d\//.test(args.at(-1) ?? ""));
 const ID = "W1-T900344", PUBLIC = "fixture/remudero", OPS = "fixture-private/ops", HELD = "W1-T900345";
 const SHARD = `plan/tasks.d/${ID}-fixture.yaml`;
 const CLAIMS = ["the first criterion holds", "the second criterion needs a design answer", "the third criterion holds"];
@@ -73,8 +79,10 @@ function fixture(t: TestContext, catalog: "public" | "ops", host: HostSwitch) {
       assert.equal(path, `${base}/git/blobs/${blob}`);
       return { sha: blob, encoding: "base64", size: Buffer.byteLength(text), content: Buffer.from(text).toString("base64") };
     },
-    planRepairGitImpl: (_file, args) => {
+    planRepairGitImpl: (file, args) => {
       git.push([...args]);
+      // W1-T14617: the ops task file is read at the ops checkout's origin/main, with real git.
+      if (args[1] === opsDir && atMainRead(args)) return execFileSync(file, [...args], { encoding: "utf8", stdio: "pipe" });
       if (args.includes("rev-parse")) return args.at(-1) === "origin/main" ? "mainsha" : "fixture-sha";
       if (args.includes("hash-object")) return "fixture-blob";
       if (args.includes("write-tree")) return `tree-${args[1]}`;

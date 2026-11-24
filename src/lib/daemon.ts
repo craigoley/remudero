@@ -112,12 +112,13 @@ import type { HeadroomPolicy, UsageSnapshot } from "./headroom.js";
 // Type-only: daemon-health.ts imports a value from here; a value edge would cycle (W1-T372).
 // This module never shells GitHub itself.
 import type { GhRateLimitBuckets } from "./daemon-health.js";
-import type { CostGovernorResult, LightPassScopeName, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
+import type { CostGovernorResult, LightPassScopeName, MemoryGovernorResult, QueueGovernorResult, SweepConflictGarden } from "./sweep.js";
 // Value imports are cycle-free: sweep.ts imports nothing from here (W1-T3691, W1-T2744).
 import {
   detectStaleBody,
   trackStaleReviewerSkipRecurrence,
   renderHeldReviewQueueBlocker,
+  createEscalationTriageHistoryReader,
   type StaleBodyFinding,
   type StaleBodyPrView,
   type StaleReviewerRecurrenceAction,
@@ -185,6 +186,9 @@ import { clockFromDateFn, clockFromIsoFn, clockFromMillisFn, fixedClock, loopAva
 import { createNearLimitHeapTelemetry, NEAR_HEAP_FILE, type NearLimitHeapTelemetry, type NearLimitSample } from "./daemon-heap-near-limit.js";
 import { createHeapAdmissionHold, type HeapAdmissionHoldLatch, type HeapAdmissionHoldMode, type HeapHoldTrace } from "./daemon-heap-admission-hold.js";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { CONFLICT_GARDEN_ACT, CONFLICT_GARDEN_TIERS, CONFLICT_GARDEN_VERIFIED,
+  conflictGardenGovernorVerdict, type ConflictGardenTier } from "./conflict-gardener-governor.js";
+import { conflictGardenPass } from "./garden-registry.js";
 import { queueDispatchRunStarts } from "./ledger.js";
 import { reportRetirableWorktrees, type WorktreeRetireOptions } from "./worktree-retire.js";
 import { createGateObservationState, observeGate } from "./gate-observations.js";
@@ -1509,6 +1513,7 @@ export function decideAlertPoll(i: AlertPollInputs): AlertPollDecision {
 export type ReviewAdmissionGate = ((reviewClass?: "review" | "plan-review") => boolean) & {
   workerAdmissionHold?: (kind?: "review") => string | undefined;
   restartDecided?: () => boolean;
+  conflictGarden?: SweepConflictGarden;
 };
 
 /** One pending "run this task now" kick. `repo` is set for a repo-scoped marker (W1-T429) and absent for a
@@ -3786,6 +3791,7 @@ export interface SweepLiveness {
   inFlight: boolean;
   /** W1-T8170: successful completion, including a pass that settled after its wait bound. */
   lastCompletedAtMs?: number;
+  conflictGarden?: SweepConflictGarden;
 }
 
 async function runGatedSweep(
@@ -3846,6 +3852,7 @@ async function runGatedSweep(
       return reason;
     };
     continueReviewAdmissions.workerAdmissionHold = workerAdmissionHold;
+    if (!recyclePause) continueReviewAdmissions.conflictGarden = liveness?.conflictGarden;
     let endedEarly = false;
     if (restartDecided) continueReviewAdmissions.restartDecided = () => (endedEarly ||= restartDecided());
     const startedAtMs = Date.now();
@@ -5397,6 +5404,15 @@ export async function runDaemon(
   const sreFallbackRoot = deps.fleetLane;
   const sreGovernor: SreGovernorEnforcer | undefined =
     deps.sreGovernor ?? (sreFallbackRoot ? daemonSreGovernorEnforcer({ ledgerPath: sreFallbackRoot.ledgerPath, laneOffPath: sreLaneOffPath(sreFallbackRoot.stateDir) }) : undefined);
+  let conflictGovernorRead: Promise<void> | undefined;
+  let conflictGovernorState: { stopped: ReadonlySet<ConflictGardenTier>; error?: string } = {
+    stopped: new Set(CONFLICT_GARDEN_TIERS),
+  };
+  const conflictReceipts = sreFallbackRoot && createEscalationTriageHistoryReader({ slice: {
+    holder: "conflict-garden-governor", steps: [CONFLICT_GARDEN_ACT, CONFLICT_GARDEN_VERIFIED],
+  } });
+  if (sreFallbackRoot) sweepLiveness.conflictGarden = (stateDir, ports) =>
+    conflictGardenPass(stateDir, { ...ports, stopped: tier => conflictGovernorState.stopped.has(tier) });
   // One sampler state shared by the main loop and every in-flight ticker, so the two can never
   // double-read and staleness is measured against whichever read last. Seeded to 0 so the first long
   // phase after boot samples immediately (W1-T2565).
@@ -7873,7 +7889,8 @@ export async function runDaemon(
     // daemon stayed alive, and the freshness judges read a false FAIL. Placed as literally the first statement
     // of the loop body so no branch below can skip it (W1-T1274). W1-T7126: it carries the memory sample when
     // no row has within one poll interval; a throwing sampler rides it as mem_telemetry, never escapes it.
-    log("daemon.tick", { poll_interval_ms: pollIntervalMs, ...tickMemorySample(deps, daemonClock.now(), pollIntervalMs, tickMemory) });
+    log("daemon.tick", { poll_interval_ms: pollIntervalMs, ...tickMemorySample(deps, daemonClock.now(), pollIntervalMs, tickMemory),
+      ...(conflictReceipts ? { conflict_garden_stopped: [...conflictGovernorState.stopped], conflict_garden_error: conflictGovernorState.error } : {}) });
     const noStartPage = judgeNoStart();
     if (noStartPage) await noStartPage;
     deps.bootPhases?.firstTick(log);
@@ -7897,6 +7914,17 @@ export async function runDaemon(
     if (stopped) {
       log("daemon.stop", { detail: stopped });
       return summary("stopped", stopped);
+    }
+
+    if (sreFallbackRoot && conflictReceipts && !conflictGovernorRead) {
+      conflictGovernorRead = conflictReceipts(sreFallbackRoot.stateDir).then(read => {
+        if (!read.ok) throw new Error(`conflict governor history is incomplete: ${read.unread.join(", ")}`);
+        const stopped = new Set(CONFLICT_GARDEN_TIERS.filter(tier =>
+          conflictGardenGovernorVerdict(tier, read.rows, { nowMs: daemonClock.now() }).tier === "stopped"));
+        conflictGovernorState = { stopped };
+      }).catch((error: unknown) => {
+        conflictGovernorState = { stopped: new Set(CONFLICT_GARDEN_TIERS), error: String(error) };
+      }).finally(() => { conflictGovernorRead = undefined; });
     }
 
     // W1-T4390: the SRE governor, from a DIFFERENT loop than the lane it polices — so a wedged lane,

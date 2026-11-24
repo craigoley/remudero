@@ -157,7 +157,11 @@ export interface BenchmarkCohortPassResult {
 }
 
 /** W1-T14539: "joined", or the named reason a pass that reads the state snapshot ran without it. */
-export type CaseFileJoin = "joined" | "absent" | "unreadable" | "too-large" | "invalid";
+export type CaseFileJoin = "joined" | "absent" | "unreadable" | "too-large" | "invalid" | "empty" | "as-of-spread";
+
+/** W1-T14601: the join's freshness bound (joinVerifiedTaskOutcomes in benchmark-verified-outcome.ts). A state snapshot
+ * whose files lie farther apart than this cannot be judged at one time without some of them reading stale. */
+const CASE_FILE_FRESHNESS_MS = 15 * 60_000;
 
 type ManifestEntry = { name: string; path: string; form: Form; size: number; mtimeMs: number };
 
@@ -971,7 +975,7 @@ function eligibilityChangeKeys(baseline: SourceRecord[], current: SourceRecord[]
 function deriveSnapshot(
   sources: SourceRecord[], asOf: string, auditedSourceBytes: number, prior?: BenchmarkCohortSnapshot,
   dirtyKeys?: Set<string>, liveWatermark?: { prefixBytes: number; tailPendingBytes: number },
-  faults: SourceFault[] = [], caseFiles?: readonly TaskCaseFile[],
+  faults: SourceFault[] = [], caseFiles?: readonly TaskCaseFile[], verificationCutoff: string = asOf,
 ): BenchmarkCohortSnapshot {
   const started = systemClock.now();
   const { assignments, attempts, terminals, invalidAssignmentRows, attemptRowsWithoutAssignmentId,
@@ -1085,11 +1089,11 @@ function deriveSnapshot(
       unmatchedTerminals: [...terminals.keys()].filter((id) => !assignments.has(id)).length,
       invalidAssignmentRows, attemptRowsWithoutAssignmentId, terminalRowsWithoutAssignmentId,
       conflictingAssignments, duplicateRows },
-    cohorts: withCohortOutcomes(cohorts, joined, caseFiles, asOf),
+    cohorts: withCohortOutcomes(cohorts, joined, caseFiles, verificationCutoff),
     coverage,
-    verifiedTaskOutcome: caseFiles ? joinVerifiedTaskOutcomes(joined, caseFiles, asOf) : "unavailable-no-github-verification-join",
-    modelDrift: deriveModelDrift(driftExposures(joined, caseFiles, asOf), asOf),
-    selfForecastCalibration: selfForecastCalibration(sources, joined, caseFiles, asOf),
+    verifiedTaskOutcome: caseFiles ? joinVerifiedTaskOutcomes(joined, caseFiles, verificationCutoff) : "unavailable-no-github-verification-join",
+    modelDrift: deriveModelDrift(driftExposures(joined, caseFiles, verificationCutoff), verificationCutoff),
+    selfForecastCalibration: selfForecastCalibration(sources, joined, caseFiles, verificationCutoff),
     taskShape: { ...taskShape, strata: [...strata.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, stratum]) => stratum) },
     experimentEffect: "unavailable-no-randomized-allocation",
     pressure: { sourceBytes: sources.reduce((sum, source) => sum + source.size, 0), auditedSourceBytes,
@@ -1114,13 +1118,16 @@ export async function runBenchmarkCohortPass(
   stateDir: string,
   opts: { maxSources?: number; nowIso?: string; onLiveWatermark?: () => void;
     onBeforeLivePrefixVerify?: () => void; onBeforeLiveCacheVerify?: () => void; caseFiles?: TaskCaseFile[];
-    caseFilesFromState?: boolean } = {},
+    caseFilesFromState?: boolean; verificationCutoff?: string } = {},
 ): Promise<BenchmarkCohortPassResult> {
   const io: CheckpointIO = { checkpointReadBytes: 0, checkpointWrittenBytes: 0 };
   // W1-T14539: every writer joins the same daily snapshot, so no pass erases a join another pass made.
   const state = opts.caseFiles === undefined && opts.caseFilesFromState ? readStateCaseFiles(stateDir) : undefined;
   const caseFiles = opts.caseFiles ?? (state && "files" in state ? state.files : undefined);
-  const result = await cohortPass(stateDir, { ...opts, caseFiles }, io);
+  // W1-T14601: a state snapshot is judged at the time it describes, not at this pass's time; an explicit
+  // caseFiles argument keeps the pass time.
+  const verificationCutoff = opts.caseFiles === undefined && state && "files" in state ? state.cutoff : undefined;
+  const result = await cohortPass(stateDir, { ...opts, caseFiles, verificationCutoff }, io);
   return { ...result, ...io, ...(state ? { caseFileJoin: "files" in state ? "joined" as const : state.reason } : {}) };
 }
 
@@ -1164,9 +1171,11 @@ export function loadCaseFileSnapshot(caseFilePath: string, beforeRead?: () => vo
 }
 
 /** The state snapshot, or the reason the pass runs without it. A bad snapshot never fails the pass. */
-export function readStateCaseFiles(stateDir: string): { files: TaskCaseFile[] } | { reason: Exclude<CaseFileJoin, "joined"> } {
+export function readStateCaseFiles(stateDir: string):
+  { files: TaskCaseFile[]; cutoff: string } | { reason: Exclude<CaseFileJoin, "joined"> } {
+  let files: TaskCaseFile[];
   try {
-    return { files: loadCaseFileSnapshot(stateCaseFileSnapshotPath(stateDir)) };
+    files = loadCaseFileSnapshot(stateCaseFileSnapshotPath(stateDir));
   } catch (error) {
     const code = (error as NodeJS.ErrnoException | null)?.code;
     if (code === "ENOENT") return { reason: "absent" };
@@ -1176,6 +1185,22 @@ export function readStateCaseFiles(stateDir: string): { files: TaskCaseFile[] } 
         || error.message === "case-file-snapshot-changed-during-read"))) return { reason: "unreadable" };
     return { reason: "invalid" };
   }
+  const cutoff = snapshotCutoff(files);
+  return typeof cutoff === "string" ? { files, cutoff } : cutoff;
+}
+
+/** W1-T14601: the time a snapshot describes, its latest asOf, when every file lies within the join's freshness
+ * bound of it; otherwise the reason no single time can judge the snapshot. */
+function snapshotCutoff(files: readonly TaskCaseFile[]): string | { reason: "empty" | "as-of-spread" } {
+  if (files.length === 0) return { reason: "empty" };
+  let latest = -Infinity; let earliest = Infinity; let latestIso = "";
+  for (const file of files) {
+    const at = canonicalTimestamp(file.asOf) ? Date.parse(file.asOf) : NaN;
+    if (!Number.isFinite(at)) return { reason: "as-of-spread" };
+    if (at > latest) { latest = at; latestIso = file.asOf; }
+    if (at < earliest) earliest = at;
+  }
+  return latest - earliest > CASE_FILE_FRESHNESS_MS ? { reason: "as-of-spread" } : latestIso;
 }
 
 async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof runBenchmarkCohortPass>[1]>,
@@ -1232,7 +1257,7 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
     const cached = faults.size > 0 && checkpoint.lastGood.cohorts.length === 0
       ? { ...checkpoint.lastGood, state: "unavailable" as const } : checkpoint.lastGood;
     const snapshot = withVerifiedOutcome(cached, checkpoint.sources, [...faults.values()], opts.caseFiles,
-      opts.nowIso ?? systemClock.iso());
+      opts.verificationCutoff ?? opts.nowIso ?? systemClock.iso());
     // W1-T13867: the index left on disk holds the rows this pass reports, as a fresh pass's would.
     const overlay = { cohorts: snapshot.cohorts, verifiedTaskOutcome: snapshot.verifiedTaskOutcome,
       modelDrift: snapshot.modelDrift, selfForecastCalibration: snapshot.selfForecastCalibration };
@@ -1320,9 +1345,10 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
   const prior = checkpoint.sourceFaults.length > 0 && checkpoint.lastGood !== undefined
     && checkpoint.lastGood.quarantine === undefined
     ? undefined : checkpoint.lastGood;
-  const snapshot = deriveSnapshot(checkpoint.sources, opts.nowIso ?? systemClock.iso(), auditedSourceBytes,
+  const passAsOf = opts.nowIso ?? systemClock.iso();
+  const snapshot = deriveSnapshot(checkpoint.sources, passAsOf, auditedSourceBytes,
     prior, prior ? dirtyKeys : undefined, live ? { prefixBytes: live.size, tailPendingBytes } : undefined,
-    checkpoint.sourceFaults, opts.caseFiles);
+    checkpoint.sourceFaults, opts.caseFiles, opts.verificationCutoff ?? passAsOf);
   if (checkpoint.sourceFaults.length > 0 && snapshot.cohorts.length === 0) {
     snapshot.reason = checkpoint.sourceFaults[0].reason;
     if (checkpoint.lastGood?.asOf) snapshot.lastGoodAt = checkpoint.lastGood.asOf;
