@@ -6,7 +6,7 @@
   verify: auto
   risk: low
   priority: 1.31
-  status: queued
+  status: merged
   attempts: 0
   author_class: machine
   origin: "flow-blocker:awaiting-review:checks green, review orphaned by a push (reviewed on an earlier head, silent on this one)"
