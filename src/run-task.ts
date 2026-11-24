@@ -27724,7 +27724,8 @@ export function dedicatedTargetPlanReloader(
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: {
     fetch?: () => unknown;
-    treeSha?: () => string | Promise<string>;
+    /** The plan tree's sha on origin/main, or `null` when origin/main holds no plan path at all. */
+    treeSha?: () => string | null | Promise<string | null>;
     resetWorkingTree?: () => unknown;
     load?: (planPath: string) => Plan | Promise<Plan>;
   } = {},
@@ -27733,7 +27734,9 @@ export function dedicatedTargetPlanReloader(
   // `planReloader` refuses. Wiring (below) never hands a self target here, but the guard keeps
   // this function correct in isolation, not merely correct-by-caller-discipline.
   if (target.isSelf) return undefined;
-  const repoDirForGit = dirname(target.planPath);
+  // W1-T14585: the CHECKOUT ROOT, never `dirname(planPath)` — a target with no plan has no `plan/`
+  // directory to run git from, so every call would fail before it could ask whether a plan exists.
+  const repoDirForGit = dirname(dirname(target.planPath));
   // FETCHES, UNLIKE `planReloader`'s self arm: self rides `checkFreshness`'s own per-tick fetch of
   // the SAME engine checkout (wired a few lines below this function's call site); nothing fetches
   // a non-self TARGET's checkout between dispatches (`worktreeAdd`, lib/worker.ts, only fetches it
@@ -27743,10 +27746,19 @@ export function dedicatedTargetPlanReloader(
     (async () => {
       await execFilePromise("git", ["-C", repoDirForGit, "fetch", "--quiet", "origin"]);
     });
+  // W1-T14585: `ls-tree`, not `rev-parse origin/main:plan`, so ABSENCE is a distinct answer. For a
+  // target with no plan, rev-parse failed every tick and each failure became one
+  // `daemon.plan_reload_failed` row, forever. `ls-tree` exits 0 with EMPTY output only when the path
+  // is missing from an existing origin/main; a missing ref or a broken repository still throws, and
+  // still reaches the generic failure row.
   const treeSha =
     deps.treeSha ??
-    (async () =>
-      (await execFilePromise("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], { encoding: "utf8" })).stdout.trim());
+    (async () => {
+      const { stdout } = await execFilePromise("git", ["-C", repoDirForGit, "ls-tree", "origin/main", "--", "plan"], { encoding: "utf8" });
+      const entry = stdout.trim();
+      // `<mode> <type> <sha>\tplan` — the sha is the third space-separated field.
+      return entry === "" ? null : entry.split(/\s+/)[2]!;
+    });
   // RESETS THE WORKING TREE, UNLIKE `planReloader`: `load` below is a plain filesystem read, never
   // a `git show <ref>:<path>`, so a fetched ref alone leaves it reading whatever boot's own
   // `git reset --hard origin/main` (the `!target.isSelf` branch above) last checked out. Self gets
@@ -27761,13 +27773,25 @@ export function dedicatedTargetPlanReloader(
       await execFilePromise("git", ["-C", repoDirForGit, "reset", "--hard", "--quiet", "origin/main"]);
     });
   const load = deps.load ?? ((pp: string) => loadPlan(pp));
-  let lastSha: string | undefined;
+  // `undefined` = not yet observed, `null` = origin/main holds no plan, a string = the plan tree sha.
+  let lastSha: string | null | undefined;
   return async () => {
     // A failed fetch propagates — caught by `runDaemon`'s own `daemon.plan_reload_failed` wrapper
     // (the SAME generic catch `planReloader`'s own treeSha throw already relies on), never
     // swallowed here. Keeping the plan we already have is the correct degrade either way.
     await fetch();
     const sha = await treeSha();
+    if (sha === null) {
+      // W1-T14585: NO PLAN IS A STATE, NOT A FAILURE. Report it once per change (after a present
+      // plan, or on the first tick) as an empty plan, then stay quiet while it stays absent. A plan
+      // deleted from origin/main also resets this checkout, so a later load never reads its files.
+      if (lastSha === null) return null;
+      const hadPlan = lastSha !== undefined;
+      lastSha = null;
+      if (hadPlan) await resetWorkingTree();
+      log("daemon.plan_absent", { ref: "origin/main", path: "plan" });
+      return { tasks: [], byId: new Map() };
+    }
     if (lastSha === undefined) {
       // First tick: record the boot's sha without reloading — see `planReloader`'s identical
       // comment for why reporting a reload here would be a lie. The working tree already matches
