@@ -11065,6 +11065,9 @@ const MANDATORY_REGISTRIES: ReadonlyArray<{ path: string; declaration: string }>
   // script, its registration and its surface declaration are three halves of one indivisible commit
   // — which is precisely the circularity W1-T2521 named and W1-T3171 subtracts.
   { path: "src/lib/review.ts", declaration: "INSTRUMENT_SURFACE" },
+  // W1-T14655 (operator-approved 2026-11-24): a new ci.yml job owes a posture row, because the posture
+  // census refuses both a missing and a stale declaration. Same add-only, in-declaration guards.
+  { path: "src/lib/gate-posture.ts", declaration: "GATE_POSTURE_DECLARATIONS" },
 ];
 
 /** Each `@@` hunk's trailing context for `file`, in order; `undefined` where git emitted none.
