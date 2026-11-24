@@ -237,10 +237,12 @@ jobs:
           fi
       # W1-T11263: every job that can run test/selected-registry-shell-consumers.test.ts restores or builds the
       # pinned bash 3.2 and exports RMD_TEST_BASH32_REQUIRED=1, under which an UNMEASURED 3.2 leg fails the suite.
+      # RESTORE ONLY (actions/cache/restore): these jobs run PR code and download artifacts, so they must never
+      # write the cache (CodeQL cache poisoning). A miss builds from the sha-verified tarball and saves nothing.
       - name: Restore the pinned bash 3.2 build (W1-T11263)
         id: bash32-cache
         if: ${{ steps.admission.outputs.setup != 'false' }}
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bash32
           key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}
@@ -993,7 +995,7 @@ jobs:
       - name: Restore the pinned bash 3.2 build (W1-T11263)
         id: bash32-cache
         if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bash32
           key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}
@@ -1979,7 +1981,7 @@ jobs:
       # admits no step condition (W1-T5844), so the restore always runs and the build reads BASH32_NEEDED.
       - name: Restore the pinned bash 3.2 build (W1-T11263)
         id: bash32-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bash32
           key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}

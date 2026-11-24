@@ -179,7 +179,7 @@ function slowShard(files: string[]) {
   const plan = ws.run(step("test-slow-shard", (s) => s.id === "plan-reading").run!);
   assert.equal(plan.status, 0, plan.all);
   const outputs = { "plan-reading": plan.outputs };
-  const guards = jobs["test-slow-shard"]!.steps.filter((s) => /\bnpm ci\b|playwright install chromium/.test(s.run ?? "") || (s.uses ?? "").startsWith("actions/cache@"));
+  const guards = jobs["test-slow-shard"]!.steps.filter((s) => /\bnpm ci\b|playwright install chromium/.test(s.run ?? "") || /^actions\/cache(\/restore)?@/.test(s.uses ?? ""));
   assert.equal(guards.length, 4, "test-slow-shard must still carry npm ci, the Chromium cache, its install and the bash 3.2 cache (W1-T11263)");
   const installs = guards.map((s) => evalIf(s.if, outputs));
   const ran = ws.run(
