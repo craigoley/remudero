@@ -14466,6 +14466,30 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `resolved and no alert dismissed — escalating`,
   },
   {
+    // W1-T13560 — A GITHUB SUCCESS WITH NO FLEET REVIEW EVIDENCE AND A REFUSED POST IS SAID ONCE. The W1-T2860 row
+    // above re-reviews a success the ledger holds no completed `review.posted` for, but stops at one exact-input post
+    // refusal (`reviewPostRefused`). Past that stop the PR matched `mergeable`, and the arm's W1-T230 ledger gate
+    // refused it every pass — a missing-review-evidence hold nobody was told about. Ordered STRICTLY BEFORE
+    // `mergeable`, on the W1-T2860 row's own identity signals plus a POSITIVE refusal read. `blocked-ambiguous`
+    // dedups per `pr@sha`, so it escalates once per head; a new head or body is a new input with no refusal, so it
+    // re-earns the post-review row instead. A plan PR merges directly and is never armed, so it is left alone.
+    disposition: "blocked-ambiguous",
+    blocker: "escalated",
+    when: (pr) =>
+      pr.checksState === "green" &&
+      pr.requiredContextsUnreadable !== true &&
+      pr.reviewState === "success" &&
+      pr.reviewInputDigest !== undefined &&
+      pr.priorReviewAttemptsForInput === 0 &&
+      pr.reviewPostRefused === true &&
+      !mergesDirectlyAsPlanPr(pr),
+    reason: (pr) =>
+      `checks green and GitHub reports remudero-review success, but the ledger has no completed review.posted ` +
+      `evidence for this exact input and its one post attempt was refused — the arm refuses without a ` +
+      `review.posted for it, so #${pr.prNumber} cannot merge as it stands; push a new head or have an operator ` +
+      `review it — escalating once per head rather than re-disposing it mergeable every pass`,
+  },
+  {
     // POSITIVE MATCH ONLY (W1-T93): mergeable is NEVER inferred from the mere absence of a
     // failure. It requires required-checks green AND review success, named explicitly — P22's own
     // words, "required contexts green, review success, unmerged".

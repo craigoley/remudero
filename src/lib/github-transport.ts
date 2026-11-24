@@ -18,7 +18,7 @@ import { clockFromMillisFn, loopAvailableDeadline, systemClock } from "./clock.j
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { RmdError } from "./errors.js";
 import { brokerGhRead, ghBrokerClientSpawn, ghBrokerRouteFor, type GhBrokerClass, type GhBrokerResult } from "./gh-read-broker-client.js";
-import { refreshInstallationToken } from "./github-app.js";
+import { refreshInstallationToken, type EnsureFreshOutcome, type HeldTokenState } from "./github-app.js";
 import { createInstallationBudget, installationBudgetForThread, type InstallationBudget, type InstallationBudgetThreadInput, type GithubBudgetThrottledRow } from "./github-installation-budget.js";
 import { ghArgvNeedsNoCredential, githubRepoOfGhArgv, resolveGithubCredential, type GithubCredentialResolution } from "./github-credential.js";
 import {
@@ -210,6 +210,50 @@ function withGhCredentialEnv<T extends { env?: NodeJS.ProcessEnv }>(file: string
   return env === opts.env ? opts : { ...opts, env };
 }
 
+/** W1-T14543: the refresh loop's held-token view; only the cadence child installs one. */
+export interface GhHeldTokenGuard {
+  tokenState(token: string | undefined): HeldTokenState;
+  ensureFresh(): Promise<EnsureFreshOutcome>;
+}
+
+let heldTokenGuard: GhHeldTokenGuard | undefined;
+
+/** Installs `guard` for this process; returns its removal. */
+export function installGhHeldTokenGuard(guard: GhHeldTokenGuard): () => void {
+  heldTokenGuard = guard;
+  return () => { if (heldTokenGuard === guard) heldTokenGuard = undefined; };
+}
+
+/** Refused unsent: its token expired and was not renewed. */
+export class GhTokenExpiredRefusal extends RmdError {
+  readonly reason = "token_expired" as const;
+  constructor(args: readonly string[]) {
+    super("github", 1, `gh ${args.slice(0, 2).join(" ")} refused: token_expired (its App token expired and was not renewed; no request was sent)`,
+      { reason: "token_expired" });
+    this.name = "GhTokenExpiredRefusal";
+  }
+}
+
+/** Whether the spawn's credential is the expired held token. */
+function presentsExpiredHeldToken(guard: GhHeldTokenGuard, args: readonly string[], env: NodeJS.ProcessEnv | undefined): boolean {
+  if (guard.tokenState((env ?? process.env).GH_TOKEN) !== "expired") return false;
+  return guard.tokenState((ghCredentialEnv("gh", args, env) ?? process.env).GH_TOKEN) === "expired";
+}
+
+/** Async: renew an expired held token first, or refuse. */
+async function presentUnexpiredTokenAsync(args: readonly string[], env?: NodeJS.ProcessEnv): Promise<void> {
+  const guard = heldTokenGuard;
+  if (guard === undefined || !presentsExpiredHeldToken(guard, args, env)) return;
+  await guard.ensureFresh();
+  if (guard.tokenState((env ?? process.env).GH_TOKEN) !== "fresh") throw new GhTokenExpiredRefusal(args);
+}
+
+/** Sync: no awaiting a renewal, so refuse. */
+function presentUnexpiredTokenSync(args: readonly string[], env?: NodeJS.ProcessEnv): void {
+  const guard = heldTokenGuard;
+  if (guard !== undefined && presentsExpiredHeldToken(guard, args, env)) throw new GhTokenExpiredRefusal(args);
+}
+
 // W1-T10279: a live Mac broker paces reads from GitHub headers instead of the 180 s floor.
 // Writes and budget probes stay direct; without a broker, reads retain the floor.
 
@@ -278,6 +322,7 @@ export function ghExec(args: string[], opts: ExecFileSyncOptions = {}): string |
   if (socket === undefined) applyGhReadCadence(args);
   const spawned = socket === undefined ? { file: "gh", args } : ghBrokerClientSpawn(socket, args, ghBrokerClassOf(opts.env));
   refuseSentinelGhToken(spawned.file, spawned.args, opts.env);
+  presentUnexpiredTokenSync(args, opts.env);
   try {
     const out = execFileSync(spawned.file, spawned.args,
       ghOptionsWithDefaultTimeout(withGhCredentialEnv(spawned.file, spawned.args, opts))) as string | Buffer;
@@ -294,6 +339,7 @@ export function ghExecFile(file: string, args: string[], opts: ExecFileSyncOptio
   if (basename(file) === "gh") admitInstallationReadSync(args);
   const isGh = basename(file) === "gh";
   refuseSentinelGhToken(file, args, opts.env);
+  if (isGh) presentUnexpiredTokenSync(args, opts.env);
   try {
     const out = execFileSync(file, args, ghOptionsWithDefaultTimeout(withGhCredentialEnv(file, args, opts))) as string | Buffer;
     if (isGh && args[0] === "api" && args.includes("-i")) {
@@ -329,6 +375,7 @@ export function ghJson(
   const execOpts: { encoding: "utf8"; maxBuffer: number; timeout: number; killSignal: NodeJS.Signals; env?: NodeJS.ProcessEnv } =
     { encoding: "utf8", maxBuffer: DEFAULT_GH_MAX_BUFFER, timeout: DEFAULT_GH_CALL_TIMEOUT_MS, killSignal: DEFAULT_GH_SYNC_KILL_SIGNAL };
   // W1-T11926: only the real spawn takes a credential. An injected exec reaches no network.
+  presentUnexpiredTokenSync(args);
   let out: string;
   try {
     out = exec(spawned.file, spawned.args, exec === execFileSync ? withGhCredentialEnv(spawned.file, spawned.args, execOpts) : execOpts);
@@ -480,6 +527,7 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
   // Only real transport coalesces; injected executors may have independent side effects.
   if (execAsync !== execFileAsync) {
     await admitInstallationReadAsync(args);
+    await presentUnexpiredTokenAsync(args);
     try { return await run(); } catch (err) { noteInstallationRefusal(err); throw err; }
   }
   const key = ghArgsAreCoalescibleRead(args) ? `${readOpts.fresh === true ? "fresh:" : ""}${JSON.stringify(execArgs)}` : undefined;
@@ -492,6 +540,7 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
     const brokered = await ghBrokeredAsync(execArgs, readOpts);
     if (brokered !== undefined) return brokered;
     await applyGhReadCadenceAsync(args);
+    await presentUnexpiredTokenAsync(args);
     const inProcess = ghHttpReadFor(execArgs);
     return inProcess === undefined ? run() : inProcess.send();
   })().catch((err: unknown) => { noteInstallationRefusal(err); throw err; });
@@ -564,6 +613,7 @@ export async function ghTextAsync(
   // same-request reads. Prefix the key so a concurrent JSON reader can never receive raw text.
   if (execAsync !== execFileAsync) {
     await admitInstallationReadAsync(args);
+    await presentUnexpiredTokenAsync(args, env);
     try { return rememberHeaders(await read()); } catch (err) { noteInstallationRefusal(err); throw err; }
   }
   const key = opts.signal === undefined && env === undefined && ghArgsAreCoalescibleRead(args) ? `text:${encoding}:${opts.fresh === true ? "fresh:" : ""}${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
@@ -575,6 +625,7 @@ export async function ghTextAsync(
     const brokered = opts.signal === undefined && encoding === "utf8" ? await ghBrokeredAsync(args, opts, env) : undefined;
     if (brokered !== undefined) return rememberHeaders(brokered);
     await applyGhReadCadenceAsync(args);
+    await presentUnexpiredTokenAsync(args, env);
     const inProcess = opts.signal === undefined && encoding === "utf8" && env === undefined ? ghHttpReadFor(args, timeout) : undefined;
     if (inProcess === undefined) return rememberHeaders(await read());
     const stdout = await inProcess.send();
@@ -614,6 +665,7 @@ export async function ghLinesAsync(
     return;
   }
   await applyGhReadCadenceAsync(args);
+  await presentUnexpiredTokenAsync(args);
   const child = spawn("gh", args, { stdio: ["ignore", "pipe", "pipe"], env: ghCredentialEnv("gh", args, undefined) });
   // Not spawn's own `timeout`: a child that never started never exits, and that timer then holds the process open.
   // W1-T9651: bounded by loop-available time, so a held loop never kills a log that already finished.
