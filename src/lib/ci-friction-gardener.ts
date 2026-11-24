@@ -1331,8 +1331,6 @@ export function escalatedCiFrictionOrigins(records: readonly LedgerRecord[]): st
 
 /** How long an escalated cause must rank outside the top LADDER_DEPTH, on every pass, before its issue closes. */
 export const CI_FRICTION_RELEASE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
-/** BACKSTOP — invariant:at-most-five-closes-per-pass: one pass releases at most this many escalations. */
-export const CI_FRICTION_MAX_RELEASES_PER_PASS = 5;
 
 /** One comment on an escalation issue, as the release step reads it. */
 export interface CiFrictionIssueComment {
@@ -1424,7 +1422,7 @@ const releaseKept = (log: (step: string, extra?: Record<string, unknown>) => voi
  * Walk each escalated cause and decide whether its escalation has outlived its price. Pure but for ledger rows:
  * `remedy_below_ladder` on the first pass the cause ranks outside the top LADDER_DEPTH, `remedy_in_ladder` when a
  * pass sees it back inside (which ends the streak). A cause outside for {@link CI_FRICTION_RELEASE_AFTER_MS} on every
- * pass since is DUE, at most {@link CI_FRICTION_MAX_RELEASES_PER_PASS} a pass; {@link closeCiFrictionReleases}
+ * pass since is DUE, and every due escalation is released in the pass (W1-T14625: no per-pass cap); {@link closeCiFrictionReleases}
  * does the issue I/O. Ranking and pricing are read, never changed.
  */
 export function releaseCiFrictionEscalations(input: {
@@ -1472,10 +1470,6 @@ export function releaseCiFrictionEscalations(input: {
     }
     if (!(input.nowMs - Date.parse(since) >= CI_FRICTION_RELEASE_AFTER_MS)) {
       outcomes.push({ cause, origins, decision: "waiting" });
-      continue;
-    }
-    if (due.length >= CI_FRICTION_MAX_RELEASES_PER_PASS) {
-      keep(`the pass already released ${CI_FRICTION_MAX_RELEASES_PER_PASS} escalations (cap)`);
       continue;
     }
     const issueUrl = input.records.filter((r) => r.step === "ci-friction.remedy_escalated" && typeof r.origin === "string" && origins.includes(r.origin) &&
