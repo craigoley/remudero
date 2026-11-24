@@ -113,3 +113,14 @@ instances:
     codex_dir: /home/craigoleyagent/.codex
     container_config_dir: /home/craigoleyagent/.config/remudero-container
     image: synthwatcholey0620.azurecr.io/remudero:latest
+  wreckterra:
+    repo: wreckterra
+    project: remudero
+    github_repo: craigoley/wreckterra
+    mode: shadow
+    container_name: remudero-wreckterra-daemon
+    state_dir: /mnt/rmd/remudero-wreckterra-state
+    claude_dir: /home/craigoleyagent/.claude
+    codex_dir: /home/craigoleyagent/.codex
+    container_config_dir: /home/craigoleyagent/.config/remudero-container
+    image: synthwatcholey0620.azurecr.io/remudero:latest

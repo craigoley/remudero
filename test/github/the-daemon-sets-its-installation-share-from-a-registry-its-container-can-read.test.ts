@@ -186,8 +186,8 @@ test("W1-T12670 criterion 5: the real daemon start in a core-like container logs
   assert.equal(row.instance, "core");
   assert.equal(row.installation_id, INSTALLATION);
   assert.equal(row.role, "daemon");
-  // Every unretired registry row takes a share, the oleyarcade shadow instance (W1-T14552) included.
-  assert.equal(row.consumers, 8, "W1-T14552: core, site, console, ops and oleyarcade plus the hand-run, run-child and serve shares");
+  // Every unretired registry row takes a share, the oleyarcade (W1-T14552) and wreckterra (W1-T14594) shadow rows included.
+  assert.equal(row.consumers, 9, "W1-T14594: core, site, console, ops, oleyarcade and wreckterra plus the hand-run, run-child and serve shares");
   assert.equal(row.source, CHECKOUT_REGISTRY);
 });
 
