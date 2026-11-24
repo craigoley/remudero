@@ -152,7 +152,8 @@ test("a refused ready generation throws one receipt and the prime CLI prints it 
   const generation = primeGeneration(root, donor, consumer, env, true, dir);
   const payload = join(generation.seed, "node_modules", "tsx", "index.js");
   assert.equal(statSync(payload).mode & 0o222, 0, "a ready generation's payload is read-only");
-  chmodSync(payload, 0o644);
+  writable(payload);
+  const writableMode = statSync(payload).mode & 0o777;
   // An unreadable consumer row is listed as unread, never dropped.
   writeFileSync(join(generation.seed, "consumers", "unreadable.json"), "{not json");
 
@@ -167,7 +168,7 @@ test("a refused ready generation throws one receipt and the prime CLI prints it 
   assert.equal(receipt.seed, generation.seed);
   assert.equal(receipt.mode, "proof");
   assert.match(receipt.reason, /immutable dependency payload is writable or unverified/);
-  assert.deepEqual(receipt.offending, { path: payload, mode: 0o644, uid: process.getuid?.() ?? null });
+  assert.deepEqual(receipt.offending, { path: payload, mode: writableMode, uid: process.getuid?.() ?? null });
   assert.deepEqual(receipt.requester, { checkout: fresh, id: "run-w1-t12120" });
   assert.equal(receipt.disposition, "kept-referenced");
   assert.equal(receipt.recovery, SEED_PRIME_RECOVERY);
@@ -207,7 +208,7 @@ test("a refusal leaves the generation byte- and mode-unchanged and the sweep kee
   const donor = donorAt(join(dir, "donor"));
   const consumer = inputs(join(dir, "consumer"));
   const generation = primeGeneration(root, donor, consumer, env, true, dir);
-  chmodSync(join(generation.seed, "node_modules", "tsx", "index.js"), 0o644);
+  writable(join(generation.seed, "node_modules", "tsx", "index.js"));
   const before = snapshot(generation.seed);
 
   const refused = primeCli([inputs(join(dir, "fresh")), "--proof", "--root", root], env, dir);
@@ -243,7 +244,7 @@ test("a refused proof prime fails closed in ensureDeps and worktree provisioning
   const generation = primeGeneration(proofRoot, donor, inputs(join(dir, "consumer")), env, true, dir);
   const payload = join(generation.seed, "node_modules", "tsx", "index.js");
   const readOnly = statSync(payload).mode & 0o7777;
-  chmodSync(payload, 0o644);
+  writable(payload);
 
   await withEnv({ RMD_DEPENDENCY_SEED_ROOT: proofRoot }, async () => {
     const failures: unknown[] = [];
@@ -270,7 +271,7 @@ test("a refused proof prime fails closed in ensureDeps and worktree provisioning
   const devRoot = join(dir, "dev-seeds");
   const devEnv = seedPrimeChildEnv(process.env);
   const dev = primeGeneration(devRoot, donor, inputs(join(dir, "dev-consumer")), devEnv, false, dir);
-  chmodSync(join(dev.seed, "node_modules", "tsx", "index.js"), 0o644);
+  writable(join(dev.seed, "node_modules", "tsx", "index.js"));
   const repo = originRepo(t);
   const canonical = join(repo.dir, "node_modules");
   await withEnv({ RMD_DEPENDENCY_SEED_ROOT: devRoot }, async () => {
@@ -409,7 +410,7 @@ test("a loader fault and a refused generation compose without masking each other
   const root = join(dir, "seeds");
   const donor = donorAt(join(dir, "donor"));
   const generation = primeGeneration(root, donor, inputs(join(dir, "consumer")), seedPrimeChildEnv(process.env), false, dir);
-  chmodSync(join(generation.seed, "node_modules", "tsx", "index.js"), 0o644);
+  writable(join(generation.seed, "node_modules", "tsx", "index.js"));
   const before = snapshot(generation.seed);
   const repo = originRepo(t);
   const canonical = join(repo.dir, "node_modules");
