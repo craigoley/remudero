@@ -1584,7 +1584,7 @@ export function planDestinationLandingOpts<O extends LandFeedbackOpts | LandFeed
 /** W1-T12203: a queued record lands where a checkout or its origin/main holds it. A new record follows the switch.
  *  W1-T14617: the destination holds it by rule 2: its origin/main, or a capture neither its main nor its HEAD tracks,
  *  never a file of its boot-time working tree. A destination whose main cannot be read leaves the record queued. */
-async function queuedRecordHome(root: string, checkoutDir: string, rel: string, kindOn: boolean): Promise<"public" | "destination" | "unread"> {
+export async function queuedRecordHome(root: string, checkoutDir: string, rel: string, kindOn: boolean): Promise<"public" | "destination" | "unread"> {
   const onMain = async (dir: string): Promise<boolean> => {
     try {
       await defaultGitAsync(dir)(["cat-file", "-e", `origin/main:${rel}`]);

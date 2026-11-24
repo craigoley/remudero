@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -73,8 +74,13 @@ function fixture(t: TestContext, catalog: "public" | "ops", host: HostSwitch) {
       assert.equal(path, `${base}/git/blobs/${blob}`);
       return { sha: blob, encoding: "base64", size: Buffer.byteLength(text), content: Buffer.from(text).toString("base64") };
     },
-    planRepairGitImpl: (_file, args) => {
+    planRepairGitImpl: (file, args) => {
       git.push([...args]);
+      // W1-T14617: the ops task file is read at the ops checkout's origin/main, with real git against the seeded clone.
+      if (args[1] === opsDir && (args.includes("+refs/heads/main:refs/remotes/origin/main") || args.at(-1) === "refs/remotes/origin/main"
+        || (args.includes("ls-tree") && args.includes("-z")) || (args.includes("show") && args.some(a => a.includes(":plan/tasks.d/"))))) {
+        return execFileSync(file, [...args], { encoding: "utf8", stdio: "pipe" });
+      }
       if (args.includes("rev-parse")) return args.at(-1) === "origin/main" ? "mainsha" : "fixture-sha";
       if (args.includes("hash-object")) return "fixture-blob";
       if (args.includes("write-tree")) return `tree-${args[1]}`;

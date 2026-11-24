@@ -16,7 +16,7 @@ import { stringify as stringifyYaml } from "yaml";
 import { feedbackEntryPath, listFeedback, type FeedbackEntry, type FeedbackStatus } from "#src/lib/feedback.js";
 import { queuedFeedbackLandings } from "#src/lib/feedback-landing.js";
 import { planDestinationPath } from "#src/lib/plan-destination.js";
-import { gitRepo } from "#test/helpers/git-repo.js";
+import { originWithClone } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { captureRepairFeedbackWithPriorVerdictAsync } from "#test/helpers/run-task-test.js";
 
@@ -212,7 +212,9 @@ test("W1-T13334 criterion 4: invariant:one-copy-per-id — an id in both roots w
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root: configRoot }));
   writeFileSync(planDestinationPath(join(configRoot, "state")), JSON.stringify({ repository: "zz-private-owner/zz-private-plan", kinds: [] }));
-  const destination = gitRepo({ scope: t, kind: "feedback-kept-destination" });
+  // W1-T14617: the destination is a clone with an origin/main; its files here are captures neither main nor HEAD tracks,
+  // so they are read from its working tree.
+  const destination = originWithClone(join(home, "feedback-kept-destination"), { scope: t }).clone;
   symlinkSync(destination.dir, join(configRoot, "repos", "zz-private-plan"));
   const fx = world(t, [entry(0), entry(1)]);
   const shared = entry(1);
