@@ -171,7 +171,16 @@ export interface ProductionCallerFinding extends LintViolation {
 
 export const PRODUCTION_CALLER_SEVERITY: LintSeverity = "warn";
 const CODE_PATH = /\.(?:ts|mts|cts|tsx|js|mjs|cjs)$/;
-const isTestPath = (p: string) => /^tests?\/|\/(?:tests?|__tests__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/.test(p);
+const TEST_SOURCE_EXTENSIONS = new Set(["ts", "mts", "cts", "tsx", "js", "mjs", "cjs"]);
+const isTestPath = (p: string) => {
+  const parts = p.split("/");
+  const filename = parts.at(-1) ?? "";
+  const inTestDirectory = parts.slice(0, -1).some((part) => ["test", "tests", "__tests__"].includes(part));
+  const testNamedFile = [...TEST_SOURCE_EXTENSIONS].some((extension) =>
+    ["test", "spec"].some((kind) => filename.endsWith(`.${kind}.${extension}`)),
+  );
+  return inTestDirectory || testNamedFile;
+};
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // An identifier not read as a property (`x.name`); a spread (`...name`) still counts.
 const NOT_PROPERTY = "(?<![\\w$])(?<!(?:^|[^.])\\.)";
