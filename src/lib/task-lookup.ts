@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { isSafeTaskId } from "./fleet-control.js";
 import { defaultGitRunnerAsync, loadPlan, loadPlanAtRefAsync, loadPlanQuarantiningDuplicates, MOVED_FROM_VALUE, parseTasksFromYaml, PlanError, TASK_RISKS, TASK_STATUSES, TASK_TYPES, type Plan, type Task } from "./plan.js";
 import { planDestinationRepository } from "./plan-destination.js";
-import { readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
+import { readLastGoodOpsCatalogSnapshot, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogReadOptions, type OpsCatalogSnapshot } from "./ops-catalog-source.js";
 import type { PlanCriteriaAtHeadResult } from "./review.js";
 
 export interface TaskLookupOptions {
@@ -11,9 +11,17 @@ export interface TaskLookupOptions {
   api?: OpsCatalogApi;
   /** A caller that already read and pinned both catalogs can reuse that exact ops snapshot. */
   opsSnapshot?: OpsCatalogSnapshot;
+  /** W1-T14564: where the ops reads keep their blobs and last good binding; omitted, as each read resolves it. */
+  opsRead?: OpsCatalogReadOptions;
+  /** W1-T14564: the last good snapshot reader a refused ops read falls back to; a test passes its own. */
+  readLastGood?: typeof readLastGoodOpsCatalogSnapshot;
 }
+/** W1-T14564: an ops hit served from the last good snapshot: the refused read's reason and the snapshot's age. */
+export interface TaskLookupLastGood { refusal: string; snapshotAgeMs: number }
 export type TaskLookupResult =
-  | { outcome: "found"; task: Task & { catalog?: "public" | "ops" }; catalog: "public" | "ops"; commit?: string }
+  | { outcome: "found"; task: Task & { catalog?: "public" | "ops" }; catalog: "public" | "ops"; commit?: string;
+    /** Present only when the fresh ops read was refused and the last good snapshot answered. */
+    lastGood?: TaskLookupLastGood }
   | { outcome: "absent"; task?: undefined; catalog?: undefined }
   | { outcome: "unreadable"; reason: string; task?: undefined; catalog?: undefined };
 
@@ -192,9 +200,10 @@ export async function findTaskInCatalogs(taskId: string, sources: TaskLookupOpti
   const destination = planDestinationRepository(sources.stateDir);
   if (destination.outcome === "off") return { outcome: "absent" };
   if (destination.outcome === "unreadable") return { outcome: "unreadable", reason: "destination-unreadable" };
-  const snapshot = sources.opsSnapshot ?? await readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, sources.api);
+  const target = { repository: `${destination.owner}/${destination.repo}` };
+  const snapshot = sources.opsSnapshot ?? await readOpsCatalogSnapshotAsync(target, sources.api, sources.opsRead);
   if (snapshot.outcome !== "ok" || snapshot.plan === undefined) {
-    return { outcome: "unreadable", reason: `ops-${snapshot.outcome}` };
+    return lastGoodLookup(taskId, `ops-${snapshot.outcome}`, target, sources);
   }
   const task = snapshot.plan.byId.get(taskId);
   if (task === undefined) return { outcome: "absent" };
@@ -202,6 +211,23 @@ export async function findTaskInCatalogs(taskId: string, sources: TaskLookupOpti
     outcome: "found", task: { ...task, catalog: "ops" }, catalog: "ops", commit: snapshot.binding?.commit,
   };
   opsLookupPlans.set(result, snapshot.plan);
+  return result;
+}
+
+/**
+ * W1-T14564 (operator ruling 2026-11-23): a refused ops read never stops core work. The last good snapshot answers a
+ * hit, with the refusal and the snapshot's age on the result. With no snapshot, or a miss in it (a task filed since
+ * cannot be proved absent), the answer is today's unreadable: a refusal is never read as an empty catalog.
+ */
+async function lastGoodLookup(taskId: string, reason: string, target: { repository: string }, sources: TaskLookupOptions): Promise<TaskLookupResult> {
+  const lastGood = await (sources.readLastGood ?? readLastGoodOpsCatalogSnapshot)(target, sources.api, sources.opsRead);
+  const task = lastGood.outcome === "ok" ? lastGood.plan?.byId.get(taskId) : undefined;
+  if (lastGood.outcome !== "ok" || lastGood.plan === undefined || task === undefined) return { outcome: "unreadable", reason };
+  const result: Extract<TaskLookupResult, { outcome: "found" }> = {
+    outcome: "found", task: { ...task, catalog: "ops" }, catalog: "ops", commit: lastGood.binding?.commit,
+    lastGood: { refusal: reason, snapshotAgeMs: lastGood.ageMs },
+  };
+  opsLookupPlans.set(result, lastGood.plan);
   return result;
 }
 
@@ -232,6 +258,8 @@ export async function findReleasePlanInCatalogs(taskId: string, publicPlan: Plan
     const hold = composition?.outcome === "ok" ? composition.held.get(taskId) : undefined;
     return hold === undefined ? { outcome: "found", catalog: "public", plan: publicPlan } : { outcome: "held", hold };
   }
+  // W1-T14564: a release pins the record the tick hashes, so one from the last good snapshot keeps the refusal.
+  if (lookup.lastGood !== undefined) return { outcome: "unreadable", reason: lookup.lastGood.refusal };
   // An ops hit always kept its snapshot; were one ever missing, the composer reads it as malformed.
   const composition = composeSecondaryPlan(publicPlan, opsPlanForLookup(lookup) as Plan);
   if (composition.outcome !== "ok") return { outcome: "unreadable", reason: `compose-${composition.outcome}` };

@@ -92,7 +92,10 @@ test("W13319: real catalog refusals retain their exact outcome and name only the
   }
   const healthy=await run(fixture({monolith:mono}));assert.equal(healthy.outcome,"ok");assert.equal((healthy as unknown as {refusalStage?:unknown}).refusalStage,undefined);
   let failed=false;const fx=fixture({monolith:mono},{fail:()=>failed?new Error("private transport error"):undefined}),source=createOpsCatalogShadowSource(target,fx.api);
-  assert.equal((await source.refresh()).outcome,"ok");failed=true;const stale=await source.refresh();assert.equal(stale.outcome,"stale");assert.equal((stale as unknown as {refusalStage?:unknown}).refusalStage,"branch_ref");assert.equal(stale.plan,undefined);
+  assert.equal((await source.refresh()).outcome,"ok");failed=true;const stale=await source.refresh();
+  // W1-T14564 (operator ruling 2026-11-23): the kept snapshot answers the failed refresh; the refusal keeps its stage.
+  assert.equal(stale.outcome,"ok");assert.ok(stale.plan!==undefined);assert.equal(stale.lastGood?.refusal,"stale");assert.equal(stale.lastGood?.refusalStage,"branch_ref");
+  assert.equal(stale.refused?.outcome,"stale");assert.equal((stale.refused as unknown as {refusalStage?:unknown}).refusalStage,"branch_ref");assert.equal(stale.refused?.plan,undefined);
 });
 
 test("W13319: cold default transport reports the repository stage without changing auth refusal", async () => {
