@@ -1921,6 +1921,9 @@ export interface DaemonDeps {
   consumeRestartRequest?: () => { origin: string; requestedAt: string; codeSha?: string } | null;
   /** W1-T14545: a freshness restart hands off to a standby while `state/daemon-handoff.on` exists. Absent: today's exit. */
   handoff?: DaemonHandoff;
+  /** W1-T14662: whether a successor booting now would adopt the run child in `dir` (run-child.ts `runChildHandsOver`). Under
+   *  the handoff switch such a lane is not freshness-busy. Unwired, no child is adoptable and every live lane stays busy. */
+  runChildAdoptable?: (dir: string) => boolean;
   /** Pending bounded PR repair/review requests recorded by the authenticated console. The daemon
    * consumes at most one per poll and keeps final fix/review authority in its established command
    * path; the HTTP writer never starts a process. */
@@ -6053,12 +6056,18 @@ export async function runDaemon(
   };
 
   // W1-T10054: busy is only work a restart interrupts; passes and release-at-once actions are `background`.
-  const scoreFreshness = (changes: readonly DeployWorthChange[] | undefined, nowMs: number, liveLanes = 0, stallShare = 0) => {
+  // W1-T14662: `lanes` holds each live lane's run-child directory, undefined for a lane with no child. Under the handoff
+  // switch a lane whose child the successor adopts is handed over, not interrupted, so it is not busy.
+  const scoreFreshness = (changes: readonly DeployWorthChange[] | undefined, nowMs: number,
+    lanes: readonly (string | undefined)[] = [], stallShare = 0) => {
     const staleAtMs = staleSinceMs!;
     const reviews = inFlightReviewCount();
     const interruptible = restartInterruptibleDetachedActionCount();
+    const handsOver = lanes.length > 0 && deps.handoff?.enabled() === true;
+    const adoptableLanes = handsOver
+      ? lanes.filter((dir) => dir !== undefined && deps.runChildAdoptable?.(dir) === true).length : undefined;
     const busyReasons = [
-      ...(liveLanes > 0 ? ["lanes"] : []),
+      ...(lanes.length - (adoptableLanes ?? 0) > 0 ? ["lanes"] : []),
       ...(reviews > 0 ? ["reviews"] : []),
       ...(interruptible > 0 ? ["detached_work"] : []),
       ...(directMergeOperationsInFlight().length > 0 ? ["direct_merge"] : []),
@@ -6087,7 +6096,7 @@ export async function runDaemon(
     const decision = decideFreshnessRestart({ changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews,
       threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs, stallShare });
     freshnessPressure = decision.state;
-    return { decision, busy, busyReasons, background, withheldEvidence };
+    return { decision, busy, busyReasons, background, withheldEvidence, adoptableLanes };
   };
 
   const measureLoopStalls = (nowMs: number) => {
@@ -6102,12 +6111,12 @@ export async function runDaemon(
   // W1-T12231: the last score's change weight and stale reading, used with the current stall share to predict release.
   let freshnessOutlook: { weight: number; staleSinceMs: number } | undefined;
   const freshnessPhases: { decision_to_latch?: number; lanes?: number; pre_exit_pass?: number; drain?: number } = {};
-  const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, liveLanes = 0): "restart" | "defer" => {
+  const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, lanes: readonly (string | undefined)[] = []): "restart" | "defer" => {
     const nowMs = daemonClock.now();
     observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs);
     const staleAtMs = staleSinceMs!;
     const stall = measureLoopStalls(nowMs);
-    const { decision, busy, busyReasons, background, withheldEvidence } = scoreFreshness(freshness.changes, nowMs, liveLanes, stall.share);
+    const { decision, busy, busyReasons, background, withheldEvidence, adoptableLanes } = scoreFreshness(freshness.changes, nowMs, lanes, stall.share);
     freshnessOutlook = { weight: decision.weight, staleSinceMs: staleAtMs };
     const expedite = deps.taskExpedite ? pendingExpedite(freshness.changes, deps.taskExpedite) : undefined;
     const coalesced = coalesceFreshnessRestart({
@@ -6149,6 +6158,7 @@ export async function runDaemon(
       stale_since_ms: staleAtMs,
       busy,
       busy_reasons: busyReasons,
+      ...(adoptableLanes !== undefined ? { adoptable_lanes: adoptableLanes } : {}),
       background,
       weight: decision.weight,
       age_pressure: decision.agePressure,
@@ -9547,6 +9557,8 @@ export async function runDaemon(
     const passIds = new Set<string>();
     const phaseStarts: MachineShareStart[] = [];
     const inFlightTasks = new Set<Task>();
+    // W1-T14662: each live lane's run-child directory for the freshness question; a lane with no child reads undefined.
+    const freshnessLanes = (): (string | undefined)[] => [...inFlightTasks].map((task) => batchChildren.get(task)?.dir);
     // W1-T13695: a grow is a never-started lane's proposal: no finished task, and the reading that admitted it.
     type LaneGrow = { target: number; inFlight: number };
     const refillAdmissions = new WeakMap<Task, {
@@ -9691,7 +9703,7 @@ export async function runDaemon(
       const freshness = refillClosed || phaseBound || apiWindow ? undefined : freshnessReadsAsync ? settledFreshness :
         timing.probe("checkFreshness", () => checkFreshness?.() as DaemonFreshness | undefined);
       if (!freshnessReadsAsync) logNotStaleFreshness(freshness);
-      const freshnessAction = freshness?.stale ? decideFreshness(freshness, inFlightTasks.size) : undefined;
+      const freshnessAction = freshness?.stale ? decideFreshness(freshness, freshnessLanes()) : undefined;
       // W1-T9089: a restart decided here holds only the refills that would not run as a child.
       if (freshnessAction === "restart" && freshness?.stale) decideRestart(freshness);
       let reason =
@@ -9861,7 +9873,7 @@ export async function runDaemon(
     const actOnDispatchFreshness = (freshness: DaemonFreshness): void => {
       settledFreshness = freshness;
       logNotStaleFreshness(freshness);
-      if (freshness.stale && decideFreshness(freshness, inFlightTasks.size) === "restart") decideRestart(freshness);
+      if (freshness.stale && decideFreshness(freshness, freshnessLanes()) === "restart") decideRestart(freshness);
       wakeParkedLanes();
     };
     // W1-T13695: 2026-11-18, a pass that read a lane target of 1 at its start ran one lane for two hours while later
