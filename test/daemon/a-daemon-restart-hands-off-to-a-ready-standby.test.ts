@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { Clock } from "#src/lib/clock.js";
 import { DAEMON_EXIT_HANDED_OFF, DAEMON_EXIT_STALE, daemonExitCodeForSummary, runDaemon, type DaemonSummary } from "#src/lib/daemon.js";
+import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
 import { createDaemonHandoff, daemonHandoff, HANDOFF_HEADROOM_MARGIN_BYTES, handoffRecordPath, handoffSwitchPath, readHeadroom, spawnStandbyDaemon,
   successorPidPath, type DaemonHandoff, type HandoffPorts, type StandbyProcess } from "#src/lib/daemon-handoff.js";
 import { standbyPromotePath, standbyReadyPath } from "#src/lib/daemon-standby.js";
@@ -69,6 +70,7 @@ async function freshnessExit(t: TestContext, handoff: DaemonHandoff | undefined)
   let sweeps = 0;
   const rows: Row[] = [];
   const summary = await runDaemon(loadPlan(path), {
+    ...hostIndependentDaemonDeps(),
     now: () => new Date(nowMs),
     checkFreshness: () => stale,
     refreshMerged: () => () => false,
