@@ -47,4 +47,7 @@ test("W1-T14741 a pending claim whose owner is proven dead does not hold the dis
     const out = openPrsBehindMain([pr(dead)], BEHIND, POLICY, new Set(), BASE_FILES);
     assert.equal(out[0]?.updateReason, "distance-overlap", JSON.stringify(dead));
   }
+  // What releases the hold is the owner's proven death: the same claim with its owner alive holds the refresh.
+  assert.deepEqual(openPrsBehindMain([pr({ reviewPendingOwnerPidProven: false, reviewPendingOwnerDead: false } as Partial<OpenPrView>)], BEHIND, POLICY,
+    new Set(), BASE_FILES), []);
 });
