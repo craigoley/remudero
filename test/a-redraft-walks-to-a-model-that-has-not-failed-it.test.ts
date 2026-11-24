@@ -52,7 +52,8 @@ async function fixture(run: (f: {
           log: (step, extra = {}) => rows.push({ step, extra }),
           readStats: () => ({
             "gpt-oss-120b": { attempts: 10000, clean: 10000, contractFailures: 0, costUsd: 1 },
-            "gpt-5-nano": { attempts: 10000, clean: 0, contractFailures: 10000, costUsd: 100 },
+            // Under DRAFT_CLEAN_RATE_MIN_ATTEMPTS, so the clean-rate floor leaves nano on the ladder: this file tests avoidance.
+            "gpt-5-nano": { attempts: 10, clean: 0, contractFailures: 10, costUsd: 100 },
           }), random: seededRandom(9067),
           evaluate: () => ({ clean: !contractFailure, contractFailed: contractFailure }) };
         return spawnWorker({ ...args, providerRouting: { spawnOpenWeight: async (_args, _config, selection) => {
