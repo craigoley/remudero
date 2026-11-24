@@ -31,6 +31,23 @@ test("W1-T14627: review refuses a body guard its record does not declare", () =>
   assert.deepEqual(fromBody.unbacked, [PROOF]);
 });
 
+test("a body guard whose proof differs from every record proof is refused, naming that proof", () => {
+  const edited = "unit test: edited";
+  const body = parseAcceptanceBlock(BODY.replace(PROOF, edited));
+  const checked = markUnbackedBodyGuards([RECORD_GUARD], body, false);
+  assert.deepEqual(checked.unbacked, [edited]);
+  assert.equal(checked.criteria.length, 2);
+  const verdict = judge(checked.criteria);
+  assert.equal(verdict.state, "failure");
+  const refused = verdict.criteria.find((c) => c.proof === edited)!;
+  assert.equal(refused.met, false);
+  assert.match(refused.reason, new RegExp(BODY_GUARD_UNBACKED));
+  assert.ok(refused.reason.includes(edited));
+  // A record guard backs the body guard even when a plain record criterion shares its proof.
+  const plain = markUnbackedBodyGuards([RECORD, RECORD_GUARD], parseAcceptanceBlock(BODY), false);
+  assert.deepEqual(plain.unbacked, []);
+});
+
 test("a body guard its record declares, and a body with no guard, pass through unmarked", () => {
   const backed = markUnbackedBodyGuards([RECORD_GUARD], parseAcceptanceBlock(BODY), false);
   assert.deepEqual(backed.unbacked, []);

@@ -4692,7 +4692,7 @@ export function judgeCriterion(
       ...base,
       met: false,
       floorMet: false,
-      reason: `proof unmet: REFUSED — ${BODY_GUARD_UNBACKED}: the PR body marks this proof \`kind: guard\`, which ` +
+      reason: `proof unmet: REFUSED — ${BODY_GUARD_UNBACKED}: the PR body marks the proof "${criterion.proof.trim()}" \`kind: guard\`, which ` +
         "exempts it from proof-discrimination, but the task record does not declare it a guard; remove the body's " +
         "kind line or declare the guard in the record",
       proof_exec: "not_executable",
@@ -9152,14 +9152,28 @@ export const BODY_GUARD_UNBACKED = "body-guard-unbacked";
  */
 export function markUnbackedBodyGuards<T extends AcceptanceCriterion>(criteria: readonly T[], bodyCriteria: readonly AcceptanceCriterion[],
   fromBody: boolean): { criteria: T[]; unbacked: string[] } {
-  const bodyGuards = new Set(bodyCriteria.filter((c) => (c as { kind?: unknown }).kind === "guard").map((c) => c.proof.trim()));
+  const bodyGuardList = bodyCriteria.filter((c) => (c as { kind?: unknown }).kind === "guard");
+  const bodyGuards = new Set(bodyGuardList.map((c) => c.proof.trim()));
+  // A body guard is backed only by a record criterion that is itself `kind: guard` with the same trimmed proof.
+  const backedProofs = new Set(fromBody ? [] : criteria
+    .filter((c) => (c as { kind?: unknown }).kind === "guard").map((c) => c.proof.trim()));
   const unbacked: string[] = [];
-  const marked = criteria.map((criterion) => {
-    const recordGuard = !fromBody && (criterion as { kind?: unknown }).kind === "guard";
-    if (!bodyGuards.has(criterion.proof.trim()) || recordGuard) return criterion;
-    unbacked.push(criterion.proof.trim());
+  const marked: T[] = criteria.map((criterion) => {
+    const proof = criterion.proof.trim();
+    if (!bodyGuards.has(proof) || backedProofs.has(proof)) return criterion;
+    unbacked.push(proof);
     return { ...criterion, bodyGuardUnbacked: true };
   });
+  // A body guard whose proof matches NO record criterion has no row to mark: add one the review must refuse, naming
+  // the proof, so editing a proof and marking it guard cannot slip past both halves.
+  const present = new Set(criteria.map((c) => c.proof.trim()));
+  for (const guard of bodyGuardList) {
+    const proof = guard.proof.trim();
+    if (present.has(proof) || backedProofs.has(proof)) continue;
+    present.add(proof);
+    unbacked.push(proof);
+    marked.push({ ...guard, bodyGuardUnbacked: true } as unknown as T);
+  }
   return { criteria: marked, unbacked };
 }
 
