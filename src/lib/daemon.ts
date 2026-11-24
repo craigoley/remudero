@@ -487,8 +487,9 @@ export const RESTART_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60_000;
 /** W1-T8927: a seven-day sampling window, not a yield threshold; durations come only from completed observations. */
 /** Read the restart comparison's complete recent corpus once at boot, including phases archived out of the live tail;
  *  it carries the settled full passes too, so the sweep-bound seed survives a restart (W1-T9632). */
-export function readRestartHistoryLines(stateDir: string, nowMs = systemClock.now()): readonly string[] {
-  const read = readLedgerUnionRecordsSync(stateDir, {
+export function readRestartHistoryLines(stateDir: string, nowMs = systemClock.now(),
+  readUnion: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync): readonly string[] {
+  const read = readUnion(stateDir, {
     refuseIncomplete: true, sinceTs: fixedClock(nowMs - RESTART_HISTORY_WINDOW_MS).iso(),
     rotationWindowMs: RESTART_HISTORY_WINDOW_MS,
     step: ["run.start", "verdict", "pr.opened", "run.phase", "recon.done", "implement.done", "implement.unfinished", "fallback_push.cause", SWEEP_SETTLED_STEP],
