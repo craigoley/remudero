@@ -208,11 +208,7 @@ export const READ_MODEL_IDLE_STRETCH_MAX = 32;
  * than one tick ({@link READ_MODEL_TICK_MS}) is not timed reliably by the pass that ran it.
  */
 export const READ_MODEL_UNREAD_COST_FLOOR_MS = 250;
-/**
- * W1-T12270: how long a read-paced unit may go unread before it is stopped: today's largest wait, its cost after
- * {@link READ_MODEL_UNREAD_COST_FLOOR_MS} divided by the share, times {@link READ_MODEL_IDLE_STRETCH_MAX}. MEASURED
- * 2026-11-10: `now` took 1,614 s of 2,371 s of view-build time while few readers were connected.
- */
+/** W1-T12270: how long a read-paced unit may go unread before it stops: today's largest wait, from the floored cost. */
 export function readModelUnreadWindowMs(costMs: number): number {
   return (Math.max(costMs, READ_MODEL_UNREAD_COST_FLOOR_MS) / READ_MODEL_VIEW_SHARE) * READ_MODEL_IDLE_STRETCH_MAX;
 }
@@ -1081,10 +1077,7 @@ export interface ReadModelTicker {
   observe(instances: readonly ReadModelInstanceState[]): void;
   /** Main asked for a key of a demand view. True when the key is new, and its view is due at once. */
   want(view: string, key: string): boolean;
-  /**
-   * Builds `view` now, in a pass of its own ahead of whatever else is due: main is waiting on a wanted key for 300 ms.
-   * With `key`, only the per-instance units it names; a stopped unit is never built (W1-T12270).
-   */
+  /** Builds `view` now, in a pass of its own: main waits on a wanted key for 300 ms. W1-T12270: only `key`'s units, never a stopped one. */
   buildNow(view: string, key?: string): void;
   /**
    * Serve answered a read of `path`: each read-paced view it reads ({@link viewsReadBy}) goes back on its unstretched
@@ -2545,10 +2538,7 @@ export interface ReadModelViewLane {
   snapshot(write: SourceSnapshotWrite): void;
   /** Main asked for a key of a demand view. */
   want(view: string, key: string): ReadModelLaneWake;
-  /**
-   * Serve answered a read of `path`: both lanes, since either may own a unit it reads. A `subscribed` read (W1-T12270)
-   * never wakes an idle-ended heavy lane: it keeps read-paced units on their cadence and nothing else.
-   */
+  /** Serve answered a read of `path`: both lanes, since either may own a unit it reads. A `subscribed` one never wakes the heavy lane. */
   read(path: string, subscribed?: boolean): ReadModelLaneWake;
   holdsOf(threadId: number): ThreadHoldsSnapshot | undefined;
   close(): void;
@@ -3090,10 +3080,7 @@ export interface ReadModelWorkerHandle {
   noteGithubRead?(): void;
   /** Serve answered a read-scoped route for `instance` (a known one, else all): the read-paced views it reads keep their cadence (posted at most every {@link READ_MODEL_READ_NOTE_MS} per path, instance and `views` list, W1-T11979). */
   noteViewRead?(path: string, instance?: string, views?: string): void;
-  /**
-   * W1-T12270: an event-stream subscriber of `views` (every view when absent) is still connected. Posted like a read,
-   * at most once per {@link READ_MODEL_READ_NOTE_MS}, but it counts only for read-paced views.
-   */
+  /** W1-T12270: an event-stream subscriber of `views` (all when absent) is connected; posted like a read, for read-paced views only. */
   noteViewSubscribed?(views?: readonly string[]): void;
 }
 
