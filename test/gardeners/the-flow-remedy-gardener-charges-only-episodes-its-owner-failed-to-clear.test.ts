@@ -164,3 +164,16 @@ test("W1-T13524 criterion 4: the existing unowned, terminal failure and open-age
   assert.deepEqual(inventory([handoff, ...actedRed]).candidates.map(price => [price.key, price.prs]), [["own-red:required checks red", 1]]);
   assert.deepEqual(inventory(actedRed).candidates, [], "without the hand-off the owner-acted episode files nothing");
 });
+
+test("W1-T13524 criterion 2: a CI-lesson hand-off never makes a pending-checks wait eligible", () => {
+  // The handed check's own-red rows here only waited for pending checks: no owner failed to clear anything yet.
+  const handoff: LedgerRecord = { step: CI_LESSON_HANDOFF_STEP, gate: "ci-gate", red_heads: [{ pr: 37, sha: "red37" }] };
+  const waiting = [
+    disposed(37, -4, "own-red", "required checks red", { disposition: "wait", head_sha: "red37" }),
+    disposed(37, -2, "own-red", "required checks red", { disposition: "wait", head_sha: "red37" }),
+    disposed(37, -1, "awaiting-arm", "armed"),
+  ];
+  const result = inventory([handoff, ...waiting]);
+  assert.ok(result.episodes.some(episode => episode.pr === 37 && episode.charges.some(charge => charge.handedOff)), "the hand-off joined the rows");
+  assert.deepEqual(result.candidates, [], "a wait-only episode files nothing, even with a hand-off naming its check");
+});

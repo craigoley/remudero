@@ -452,6 +452,8 @@ function inventoryOf(records: readonly LedgerRecord[], tasks: readonly CiFrictio
  *  (W1-T14140). One aggregate-red episode can span heads where different checks read red; the hand-off owns only its own. */
 function eligibleSlice(e: Episode): Episode[] {
   if (e.eligible && !excludedFromFlowRemedy(e)) return [e];
+  // W1-T13524 criterion 2: a pending-checks wait or a held draft is never an owner failure, hand-off or not.
+  if (e.flow?.waitOnly || e.key.startsWith("held-draft:")) return [];
   // A CI-lesson hand-off is the evidence that the owner's rounds did not clear the check (W1-T14140): the lesson reopened
   // three times. So the charges it names stay eligible even when the owner acted inside the episode (W1-T13524).
   const handed = e.charges.filter(c => c.handedOff);
