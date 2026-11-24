@@ -1410,8 +1410,14 @@ export interface CiFrictionReleaseOutcome {
   reason?: string;
 }
 
+/** W1-T14624: a GitHub token's shape. A failure's text is quoted into a row, so a token in it never is. */
+export const GITHUB_TOKEN_TEXT_RE = /\bgh[pousr]_[A-Za-z0-9]{20,}\b/;
+
 const releaseKept = (log: (step: string, extra?: Record<string, unknown>) => void, due: Pick<CiFrictionDueRelease, "cause" | "origins" | "rank">, reason: string): void => {
-  log("ci-friction.remedy_release_kept", { cause: due.cause, origins: due.origins, rank: due.rank, reason });
+  const held = process.env.GH_TOKEN;
+  const redacted = reason.replace(new RegExp(GITHUB_TOKEN_TEXT_RE.source, "g"), "[redacted]");
+  log("ci-friction.remedy_release_kept", { cause: due.cause, origins: due.origins, rank: due.rank,
+    reason: held && held.length >= 8 ? redacted.split(held).join("[redacted]") : redacted });
 };
 
 /**
@@ -1779,6 +1785,9 @@ export interface CiFrictionGardenSources {
   draftShard?: typeof ciFrictionShardYaml;
   /** W1-T13219: closes an escalation that left the ladder; absent, the `gh api` gateway ({@link ghCiFrictionEscalationIssues}). */
   issues?: CiFrictionEscalationIssues;
+  /** W1-T14624: the pass is driven to completion (the garden child), so its async inventory waits for the
+   *  release I/O; without it a child that exits when its pass returns drops every release before its row. */
+  awaitReleases?: boolean;
 }
 
 /** How many of the costliest causes the ladder reports and the pass considers. */
@@ -1951,7 +1960,9 @@ export function ciFrictionEscalation(action: CiFrictionGardenAction): Escalation
 /** The repo's own CI friction as a gardener spec (gardener.ts, W1-T4110). */
 export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGardenSources): GardenSpec<CiFrictionGardenClass, CiFrictionInventory, CiFrictionGardenAction, GardenCheckout> {
   const clock: Clock = deps.clock ?? systemClock;
-  return {
+  // W1-T14624: this pass's release I/O. A garden child exits when its pass returns, so the awaited path waits for it.
+  let releasing: Promise<unknown> = Promise.resolve();
+  const spec: GardenSpec<CiFrictionGardenClass, CiFrictionInventory, CiFrictionGardenAction, GardenCheckout> = {
     name: "ci-friction",
     landingRefusal: machineShardLandingGuard(deps, sources.ownerSearch.fileExists),
     classes: CI_FRICTION_GARDEN_CLASSES,
@@ -1997,11 +2008,11 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       const rounds = [...ledgerRounds, ...ciFrictionHandFixRounds(hand?.fixes ?? [], ledgerRounds,
         priceCiFrictionCauses(ledgerRounds, gateFireRates, clock.now()), ownerSearch, gateFireRates)];
       const priced = priceCiFrictionCauses(rounds, gateFireRates, clock.now());
-      // W1-T13219: the release decision is read here; its issue I/O runs on the awaited transport, off this pass.
+      // W1-T13219: the release decision is read here; its issue I/O runs on the awaited transport. W1-T14624: inventoryAsync waits for it.
       const due = releaseCiFrictionEscalations({ records, priced, nowMs: clock.now(), log: deps.log }).due.filter((d) => !releasesInFlight.has(d.cause));
       if (due.length > 0) {
         for (const d of due) releasesInFlight.add(d.cause);
-        void closeCiFrictionReleases(due, sources.issues ?? ghCiFrictionEscalationIssues(), deps.log)
+        releasing = closeCiFrictionReleases(due, sources.issues ?? ghCiFrictionEscalationIssues(), deps.log)
           .finally(() => { for (const d of due) releasesInFlight.delete(d.cause); });
       }
       if (plan.degraded) deps.log("ci-friction.origins_degraded", { reason: plan.degraded });
@@ -2097,7 +2108,14 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       // PLAN-ONLY: the shard alone, so Standing rule 15's filing exemption applies.
       return { paths: [relPath], title: `chore(plan): the ci-friction gardener drafts a fix for ${action.target}`, body };
     },
+    // W1-T14624: a pass run to completion (the garden child) ends only after every due release wrote its row.
+    ...(sources.awaitReleases ? { inventoryAsync: async (): Promise<CiFrictionInventory> => {
+      const inventory = spec.inventory();
+      await releasing;
+      return inventory;
+    } } : {}),
   };
+  return spec;
 }
 
 // ── Replay: the ladder over a past window ──────────────────────────────────────────────────
