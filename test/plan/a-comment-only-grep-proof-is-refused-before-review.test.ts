@@ -68,6 +68,9 @@ test("W1-T11376: the shared predicate reads each grammar's own comment opener", 
   assert.equal(grepProofCanOnlyCertifyComments("note", "a.yaml", "# note\nkey: v\n"), true);
   assert.equal(grepProofCanOnlyCertifyComments("key", "a.yaml", "# note\nkey: v\n"), false);
   assert.equal(grepProofCanOnlyCertifyComments("absent", "a.ts", "const a = 1;\n"), false, "no match is not comment-only");
+  const marker = "refusal-amendment (W1-T90609, run R1,";
+  assert.equal(grepProofCanOnlyCertifyComments(marker, "plan/tasks.d/W1-T90609-x.yaml", `  # ${marker} 2026): note\n`), false, "a refusal amendment's marker proof is graded by its base");
+  assert.equal(grepProofCanOnlyCertifyComments(marker, "plan/W1-T90609-x.yaml", `  # ${marker} 2026): note\n`), true);
 });
 
 /** Run the public `rmd check-proof` entry from a throwaway checkout holding `content` at src/marker.ts. */

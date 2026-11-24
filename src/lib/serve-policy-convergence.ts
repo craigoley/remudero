@@ -23,7 +23,7 @@
  * it no handoff row and the next tick replaced serve; it now reads the live file and the newest rotations.
  */
 import { execFileSync } from "node:child_process";
-import { readFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { fixedClock } from "./clock.js";
 import {
@@ -57,6 +57,39 @@ import { createSelectedRegistryObserver, observeSelectedRegistrySync, selectedRe
 
 export const SERVE_POLICY_CONTAINER = "remudero-serve";
 export const SERVE_POLICY_FAILED_FILE = "SERVE_POLICY_FAILED";
+/** W1-T14591: how long a planned instance stays unmounted before it counts as drift: one watchdog cycle. */
+export const SERVE_INSTANCE_MOUNT_SETTLE_MS = 5 * 60_000;
+/** W1-T14591: state/<this>.json holds { name: firstSeenAtMs } for each planned instance serve does not mount. */
+export const SERVE_UNMOUNTED_INSTANCES_FILE = "SERVE_UNMOUNTED_INSTANCES";
+/** W1-T14591: instances-view.ts's SERVE_MOUNT_ACTION, pinned equal by test; importing it would grow the largest module cycle. */
+const SERVE_MOUNT_ACTION = "deploy/serve-container.sh --replace";
+
+/** W1-T14591: the instances `serve-container.sh --instance-mount-plan` lists whose destination is not in serve's
+ *  Mounts; undefined (unknown) when the Mounts cannot be read. */
+export function unmountedInstancesFrom(planText: string, readMounts: () => string): string[] | undefined {
+  const planned = planText.split("\n").map((line) => line.split("\t")).filter(([kind, name, dest]) => kind === "instance" && name && dest);
+  if (planned.length === 0) return [];
+  let mounts: unknown;
+  try {
+    mounts = JSON.parse(readMounts());
+  } catch {
+    return undefined; // no inspect or not JSON: unknown, never drift
+  }
+  if (!Array.isArray(mounts)) return undefined;
+  const destinations = new Set(mounts.map((m) => (m as { Destination?: unknown } | null)?.Destination));
+  return planned.filter(([, , dest]) => !destinations.has(dest)).map(([, name]) => name!);
+}
+
+/** W1-T14591: keep each unmounted name's first-seen time (a new one is now), drop every other name, and count
+ *  only the names unmounted for at least {@link SERVE_INSTANCE_MOUNT_SETTLE_MS}. */
+export function settleUnmountedInstances(record: Record<string, unknown>, unmounted: readonly string[], nowMs: number): { record: Record<string, number>; counted: string[] } {
+  const next: Record<string, number> = {};
+  for (const name of unmounted) {
+    const seen = record[name];
+    next[name] = typeof seen === "number" && Number.isFinite(seen) ? seen : nowMs;
+  }
+  return { record: next, counted: unmounted.filter((name) => nowMs - next[name]! >= SERVE_INSTANCE_MOUNT_SETTLE_MS) };
+}
 
 /** Supervisor rows that open a handoff, and rows after which none is in flight. W1-T9504: a deferral (W1-T8311's
  *  `deferUpgrade`) forks no standby, holds no lock and keeps the active generation, so nothing is mid-swap after it;
@@ -149,6 +182,7 @@ export interface ServePolicyInputs {
   drift: ResourcePolicyDrift[] | undefined;
   mountDrift?: MountPlanDrift[] | undefined;
   imageDrift?: ServeImageDrift;
+  unmountedInstances?: string[] | undefined;
   stopPresent: boolean | undefined;
   pausePresent: boolean | undefined;
   handoffInProgress: boolean | undefined;
@@ -166,6 +200,7 @@ export interface ServePolicyOutcome {
   drift?: ResourcePolicyDrift[];
   mountDrift?: MountPlanDrift[];
   imageDrift?: ServeImageDrift;
+  unmountedInstances?: string[];
 }
 
 export function describeDrift(drift: ResourcePolicyDrift[]): string {
@@ -177,11 +212,13 @@ export function describeMountDrift(drift: MountPlanDrift[]): string {
 }
 
 /** Each KNOWN drift, named; an unknown or empty reading contributes nothing. */
-function driftDetails(drift: ResourcePolicyDrift[] | undefined, mountDrift: MountPlanDrift[] | undefined, imageDrift?: ServeImageDrift): string[] {
+function driftDetails(drift: ResourcePolicyDrift[] | undefined, mountDrift: MountPlanDrift[] | undefined, imageDrift?: ServeImageDrift,
+  unmountedInstances?: string[]): string[] {
   return [
     ...(drift?.length ? [`serve resource policy drift (${describeDrift(drift)})`] : []),
     ...(mountDrift?.length ? [`serve mount plan drift (${describeMountDrift(mountDrift)})`] : []),
     ...(imageDrift && "expected" in imageDrift ? [`serve image drift (expected=${imageDrift.expected} actual=${imageDrift.actual})`] : []),
+    ...(unmountedInstances?.length ? [`serve instance mount missing (${unmountedInstances.join(", ")}; the action is ${SERVE_MOUNT_ACTION})`] : []),
   ];
 }
 
@@ -245,7 +282,7 @@ export function serveHandoffInProgressFromLedger(stateDir: string, fsDeps: Ledge
 }
 
 export function decideServePolicyConvergence(i: ServePolicyInputs): { replace: boolean; reason: string } {
-  const known = driftDetails(i.drift, i.mountDrift, i.imageDrift);
+  const known = driftDetails(i.drift, i.mountDrift, i.imageDrift, i.unmountedInstances);
   if (known.length === 0 && i.imageDrift && "kind" in i.imageDrift) return { replace: false, reason: `serve image unreadable — unknown is never drift (${i.imageDrift.reason})` };
   if (known.length === 0 && i.drift === undefined) return { replace: false, reason: "serve resource policy unreadable — unknown is never drift" };
   if (known.length === 0) return { replace: false, reason: "serve is on its resource policy and mount plan, or the plan is unknown" };
@@ -271,7 +308,8 @@ export function decideServePolicyConvergence(i: ServePolicyInputs): { replace: b
   return { replace: true, reason: `automatic serve replace: ${details}` };
 }
 
-export function servePolicyEscalation(drift: ResourcePolicyDrift[], error: string, mountDrift: MountPlanDrift[] = [], imageDrift?: ServeImageDrift): Escalation {
+export function servePolicyEscalation(drift: ResourcePolicyDrift[], error: string, mountDrift: MountPlanDrift[] = [], imageDrift?: ServeImageDrift,
+  unmountedInstances: string[] = []): Escalation {
   return {
     class: "BLOCKED",
     taskId: "SERVE-POLICY",
@@ -283,6 +321,7 @@ export function servePolicyEscalation(drift: ResourcePolicyDrift[], error: strin
       `- drift: ${describeDrift(drift)}`,
       ...(mountDrift.length ? [`- mount drift: ${describeMountDrift(mountDrift)}`] : []),
       ...(imageDrift && "expected" in imageDrift ? [`- image drift: expected=${imageDrift.expected} actual=${imageDrift.actual}`] : []),
+      ...(unmountedInstances.length ? [`- unmounted instances: ${unmountedInstances.join(", ")}`] : []),
       `- the tick retries after an hour (state/${SERVE_POLICY_FAILED_FILE} records the failure)`,
     ].join("\n"),
     options: [
@@ -320,6 +359,8 @@ export function runServePolicyCycle(
   deps: DeployDeps & {
     escalate?: (e: Escalation) => void;
     serveMountPlanDrift?: () => MountPlanDrift[] | undefined;
+    /** W1-T14591: the planned instances serve does not mount, settled unless `raw`; undefined is unknown. */
+    serveUnmountedInstances?: (nowMs: number, raw?: boolean) => string[] | undefined;
     serveImageDrift?: () => ServeImageDrift | undefined;
     serveImageInputs?: () => ServeImageInputs | undefined;
     /** W1-T13623: when serve last restarted ({@link serveLastRestartMsFromLedger}); absent, image drift is never spaced. */
@@ -333,10 +374,12 @@ export function runServePolicyCycle(
   const mountDrift = deps.serveMountPlanDrift?.();
   const imageDrift = readServeImage(deps);
   const nowMs = deps.now();
+  const unmountedInstances = deps.serveUnmountedInstances?.(nowMs);
   const decision = decideServePolicyConvergence({
     drift,
     mountDrift,
     imageDrift,
+    unmountedInstances,
     stopPresent: deps.stopPresent?.(),
     pausePresent: deps.pausePresent?.(),
     handoffInProgress: deps.serveHandoffInProgress?.(),
@@ -346,11 +389,15 @@ export function runServePolicyCycle(
     nowMs,
     dryRun: opts.dryRun,
   });
-  const rows = { drift: drift ?? [], ...(mountDrift ? { mountDrift } : {}), ...(imageDrift ? { imageDrift } : {}) };
-  if (driftDetails(drift, mountDrift, imageDrift).length === 0) return { replaced: false, reason: decision.reason, drift, mountDrift, imageDrift };
+  const counted = unmountedInstances?.length ? unmountedInstances : undefined;
+  const rows = { drift: drift ?? [], ...(mountDrift ? { mountDrift } : {}), ...(imageDrift ? { imageDrift } : {}),
+    ...(counted ? { unmountedInstances: counted, action: SERVE_MOUNT_ACTION } : {}) };
+  const outcome = (replaced: boolean, reason: string): ServePolicyOutcome =>
+    ({ replaced, reason, drift, mountDrift, imageDrift, ...(counted ? { unmountedInstances: counted } : {}) });
+  if (driftDetails(drift, mountDrift, imageDrift, counted).length === 0) return outcome(false, decision.reason);
   if (!decision.replace) {
     deps.log("deploy.serve_policy_held", { reason: decision.reason, ...rows });
-    return { replaced: false, reason: decision.reason, drift, mountDrift, imageDrift };
+    return outcome(false, decision.reason);
   }
   deps.log("deploy.serve_policy_replace", { reason: decision.reason, ...rows });
   let error: string | undefined;
@@ -360,12 +407,13 @@ export function runServePolicyCycle(
       // W1-T8311: an admission refusal changed nothing; the next tick asks again with a fresh reading
       const reason = `${decision.reason}, but fresh host pressure refused it (${held.held}: ${held.detail}) — the old console was kept`;
       deps.log("deploy.serve_policy_held", { reason, hold: held.held, ...rows });
-      return { replaced: false, reason, drift, mountDrift, imageDrift };
+      return outcome(false, reason);
     }
     // Only a reading known BEFORE the replace is re-checked: an unknown one never caused it.
     const after = drift === undefined ? [] : deps.servePolicyDrift();
     const mountsAfter = mountDrift === undefined ? [] : deps.serveMountPlanDrift?.();
     const imageAfter = imageDrift && "expected" in imageDrift ? readServeImage(deps) : undefined;
+    const instancesAfter = counted ? deps.serveUnmountedInstances?.(nowMs, true) : [];
     if (deps.serveHealthy?.() !== true) error = "serve is not running after the replace";
     else if (after === undefined || after.length > 0) error = `limits still off the policy after the replace (${after ? describeDrift(after) : "unreadable"})`;
     else if (mountsAfter === undefined || mountsAfter.length > 0) {
@@ -375,6 +423,9 @@ export function runServePolicyCycle(
       const measure = imageDrift && "basis" in imageDrift ? "behind its newest published input" : "off the daemon";
       error = `image still ${measure} after the replace (${"kind" in imageAfter ? imageAfter.reason : `expected=${imageAfter.expected} actual=${imageAfter.actual}`})`;
     }
+    else if (instancesAfter === undefined || instancesAfter.length > 0) {
+      error = `instances still not mounted after the replace (${instancesAfter ? instancesAfter.join(", ") : "unreadable"})`;
+    }
   } catch (err) {
     // the launcher's refusal is carried to the failure row, the back-off record and the escalation below
     error = err instanceof Error ? err.message : String(err);
@@ -382,12 +433,12 @@ export function runServePolicyCycle(
   if (error === undefined) {
     deps.clearServePolicyFailure?.();
     deps.log("deploy.serve_policy_replaced", rows);
-    return { replaced: true, reason: decision.reason, drift, mountDrift, imageDrift };
+    return outcome(true, decision.reason);
   }
   deps.recordServePolicyFailure?.(error, nowMs);
   deps.log("deploy.serve_policy_failed", { ...rows, error });
-  deps.escalate?.(servePolicyEscalation(drift ?? [], error, mountDrift, imageDrift));
-  return { replaced: false, reason: `serve replace failed: ${error}`, drift, mountDrift, imageDrift };
+  deps.escalate?.(servePolicyEscalation(drift ?? [], error, mountDrift, imageDrift, counted));
+  return outcome(false, `serve replace failed: ${error}`);
 }
 
 /** The real serve seams, or none when this state root is not the registry's primary instance. */
@@ -424,11 +475,44 @@ export function realServePolicyDeps(
   const selectedPacket = selectedFile === undefined ? undefined : trustedInstanceRegistryLaunchPacket(selectedInstance);
   const ledgerPath = deployLedgerPath(o.stateRoot);
   const failedPath = join(o.stateRoot, "state", SERVE_POLICY_FAILED_FILE);
+  const unmountedPath = join(o.stateRoot, "state", `${SERVE_UNMOUNTED_INSTANCES_FILE}.json`);
+  const launcher = join(o.installPath, "deploy", "serve-container.sh");
   const git = (args: readonly string[]): string => exec("git", ["-C", o.installPath, ...args]);
   return {
     servePolicyDrift: () => readResourcePolicyDrift(exec, o.installPath, "serve", SERVE_POLICY_CONTAINER, o.stateRoot),
     // serve-container.sh plans its binds for the state root `replaceServe` hands it as RMD_STATE_DIR
     serveMountPlanDrift: () => readMountPlanDrift(exec, o.installPath, o.stateRoot, SERVE_POLICY_CONTAINER),
+    serveUnmountedInstances: (nowMs, raw = false) => {
+      // the selected replace passes --instance, which mounts no instance, so there is nothing to compare
+      if (selectedPacket !== undefined || !existsSync(launcher)) return undefined;
+      let unmounted: string[] | undefined;
+      try {
+        const plan = exec("bash", ["-c", 'RMD_STATE_DIR="$1" exec bash "$2" "$3"', "instance-mount-plan", o.stateRoot, launcher,
+          "--instance-mount-plan"]);
+        unmounted = unmountedInstancesFrom(plan, () => exec("docker", ["inspect", SERVE_POLICY_CONTAINER, "--format", "{{json .Mounts}}"]));
+      } catch {
+        return undefined; // the launcher refused the plan: unknown, never drift
+      }
+      if (unmounted === undefined) return undefined;
+      let record: Record<string, unknown> = {};
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(unmountedPath, "utf8"));
+        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) record = parsed as Record<string, unknown>;
+      } catch {
+        record = {}; // no record or an unreadable one: the settle starts again, it is never skipped
+      }
+      const settled = settleUnmountedInstances(record, unmounted, nowMs);
+      try {
+        if (Object.keys(settled.record).length === 0) {
+          if (existsSync(unmountedPath)) unlinkSync(unmountedPath);
+        } else if (JSON.stringify(settled.record) !== JSON.stringify(record)) {
+          writeAtomic(unmountedPath, JSON.stringify(settled.record, null, 2));
+        }
+      } catch {
+        /* an unwritten record only delays a count: the next tick sees the name as new again */
+      }
+      return raw ? unmounted : settled.counted;
+    },
     serveImageDrift: () => {
       try {
         const actual = exec("docker", ["inspect", SERVE_POLICY_CONTAINER, "--format", "{{.Image}}"]).trim();
