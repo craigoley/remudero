@@ -74,4 +74,9 @@ test("W1-T14752 a successor with no standby log is watched as before", async (t)
   const r = run(t, false);
   assert.equal(r.status, 0, r.err);
   assert.match(r.err, /handed-off successor pid \d+ exited 0/);
+  // The watch is the same with a log: its exit is still reported, once, and the copy stops with it (no line twice).
+  const logged = run(t, true);
+  assert.equal(logged.status, 0, logged.err);
+  assert.equal(logged.err.match(/handed-off successor pid \d+ exited 0/g)?.length, 1);
+  assert.equal(logged.err.match(/standby: first tick as the live daemon/g)?.length, 1, "each copied line appears once");
 });
