@@ -144,7 +144,7 @@ export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
 import { newPublicTaskRecords, readCatalogNewTasksRow } from "./cli/commands/lint-plan.js";
 import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
-import { daemonBoot } from "./lib/daemon.js";
+import { daemonBoot, GH_CHECK_IDENTITY_UNREADABLE } from "./lib/daemon.js";
 import { describeProcessCwdProbe, pathIsAtOrBelow, readBoundedProcessCwdCensus as readProcessCwdCensus, type ProcessCwdCensus, type ProcessCwdCensusDeps, type UnreadableCwdDetail } from "./lib/process-cwd-census.js";
 export type { ProcessCwdCensus, ProcessCwdCensusDeps } from "./lib/process-cwd-census.js";
 import { settleRunChildBacklog } from "./lib/run-child.js";
@@ -7068,7 +7068,7 @@ async function restRollupFor(
     if (args[1] === checkPath) runs = value;
     if (args[1] === workflowPath && (value === null || typeof value !== "object" ||
         !Array.isArray((value as { workflow_runs?: unknown }).workflow_runs))) {
-      throw new Error("workflow producer identity response unavailable");
+      throw Object.assign(new Error("workflow producer identity response unavailable"), { code: GH_CHECK_IDENTITY_UNREADABLE });
     }
     return value;
   });
@@ -7077,7 +7077,7 @@ async function restRollupFor(
   for (const entries of named.values()) {
     const runIds = new Set(entries.flatMap(entry => entry.workflowRunId === undefined ? [] : [entry.workflowRunId]));
     if (runIds.size > 1 && entries.some(entry => !Number.isSafeInteger(entry.workflowId) || (entry.workflowId ?? 0) <= 0)) {
-      throw new Error("workflow producer identity incomplete for independent check runs");
+      throw Object.assign(new Error("workflow producer identity incomplete for independent check runs"), { code: GH_CHECK_IDENTITY_UNREADABLE });
     }
   }
   return attachPostedGateIds(rollup, runs);
