@@ -11,6 +11,7 @@ import { runDaemon } from "#src/lib/daemon.js";
 import { loadPlan } from "#src/lib/plan.js";
 import type { RunResult } from "#src/lib/run-result.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
 
 const scratch: string[] = [];
 after(() => { for (const dir of scratch) rmSync(dir, { recursive: true, force: true }); });
@@ -35,6 +36,7 @@ test("W1-T14702 a decided restart's exit names each step from the pool settle to
   let stop = false;
   let armed: { origin: string; requestedAt: string; codeSha: string } | undefined;
   const run = runDaemon(loadPlan(planPath), {
+    ...hostIndependentDaemonDeps(),
     refreshMerged: () => () => false,
     checkStop: () => stop ? "cleanup" : undefined,
     checkFreshness: () => ({ stale: false }),
