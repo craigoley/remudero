@@ -268,6 +268,41 @@ export async function findReleasePlanInCatalogs(taskId: string, publicPlan: Plan
   return { outcome: "found", catalog: "ops", plan: composition.plan };
 }
 
+/** W1-T14641: the plan the verify-human cadence judges and releases from, and why it holds no ops record when it does not. */
+export interface VerifyHumanCadencePlan {
+  /** Every public record as the public plan holds it, plus each ops record the dispatch tick composes. */
+  plan: Plan;
+  /** The ops records in `plan`; empty when the ops catalog is off or refused. */
+  opsIds: ReadonlySet<string>;
+  /** The destination's checkout, where an ops record's filing history is read. */
+  opsCheckoutDir?: string;
+  /** Present only when a destination is named and its catalog is not judged this pass: the refusal's name. */
+  opsRefusal?: string;
+}
+
+/**
+ * W1-T14641: the verify-human cadence's shard source. A named destination's ops snapshot is composed with the public
+ * plan by {@link composeSecondaryPlan}, the rule the dispatch tick composes by, so a release written against a record
+ * here pins the record the tick's release reader hashes. Each ops record it composes joins the public records, which
+ * stay exactly as the public plan holds them. INVARIANT unreadable-ops-judges-public-only: an unreadable destination, a
+ * refused snapshot or a malformed composition answers the public plan itself, with the refusal named. The snapshot's
+ * fields stay in this host's memory: nothing here writes a record anywhere.
+ */
+export async function readVerifyHumanCadencePlan(publicPlan: Plan, sources: TaskLookupOptions = {}): Promise<VerifyHumanCadencePlan> {
+  const publicOnly = (opsRefusal: string | undefined): VerifyHumanCadencePlan =>
+    ({ plan: publicPlan, opsIds: new Set(), ...(opsRefusal === undefined ? {} : { opsRefusal }) });
+  const destination = planDestinationRepository(sources.stateDir);
+  if (destination.outcome === "off") return publicOnly(undefined);
+  if (destination.outcome === "unreadable") return publicOnly("destination-unreadable");
+  const snapshot = sources.opsSnapshot
+    ?? await readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, sources.api, sources.opsRead);
+  if (snapshot.outcome !== "ok" || snapshot.plan === undefined) return publicOnly(`ops-${snapshot.outcome === "ok" ? "unreadable" : snapshot.outcome}`);
+  const composition = composeSecondaryPlan(publicPlan, snapshot.plan);
+  if (composition.outcome !== "ok") return publicOnly(`compose-${composition.outcome}`);
+  const tasks = [...publicPlan.tasks, ...snapshot.plan.tasks.filter(task => composition.secondaryIds.has(task.id))];
+  return { plan: { tasks, byId: new Map(tasks.map(task => [task.id, task])) }, opsIds: composition.secondaryIds, opsCheckoutDir: destination.checkoutDir };
+}
+
 async function readReleaseComposition(publicPlan: Plan, sources: TaskLookupOptions): Promise<SecondaryComposition | undefined> {
   const destination = planDestinationRepository(sources.stateDir);
   if (destination.outcome !== "named") return undefined;

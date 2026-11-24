@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 
 import { systemClock, type Clock } from "./clock.js";
@@ -68,6 +68,11 @@ export interface GardenState<C extends string> {
   /** W1-T12834: the id a refused landing minted for each finding, by its origin key, and the branch it was reserved on.
    *  The retry files the finding under it and mints none; the id goes back once the finding leaves the inventory. */
   refusedFindingIds?: RefusedFindingIds;
+  /** W1-T14640: the actions a refused landing was attributed to, by {@link gardenActionKey}; each is left out of
+   *  every later draft while its record's `blob` still matches ({@link RefusedGardenAction}). */
+  refusedActions?: Record<string, RefusedGardenAction>;
+  /** W1-T14640: the actions of a refused landing of several, not yet told apart: the next drafts bisect them. */
+  refusedSuspects?: { keys: string[]; at: string };
   /** W1-T12221: the last land's files wait for the shared landing PR of task files. No class acts while they
    *  wait; the landing PR that later carries them becomes `pending`. */
   waiting?: { paths: string[]; stateRoot: string; actionClass: C; baseline: Outcome; targets?: GardenTarget<C>[]; since: string };
@@ -663,6 +668,100 @@ export function gardenFindingKey(action: GardenAction<string>): string | undefin
   return typeof origin === "string" && origin !== "" ? origin : undefined;
 }
 
+/** W1-T14640: an action a refused landing was attributed to. `path` is its own task shard in the landing, when it had
+ *  one, and `blob` that shard's bytes in the planning checkout then; with no shard, `blob` is the action itself.
+ *  `digest` is the bytes of its lone draft, when it was drafted alone. */
+interface RefusedGardenAction {
+  path?: string;
+  blob: string;
+  digest?: string;
+  at: string;
+}
+
+/** W1-T14640: an action's identity across passes: the finding it files, else its class and target. */
+function gardenActionKey(action: GardenAction<string>): string {
+  return gardenFindingKey(action) ?? `${action.class}:${action.target}`;
+}
+
+/** W1-T14640: the landed path that is `action`'s own task shard (`<target>-<slug>.yaml`), when the landing holds one. */
+function gardenActionShard(action: GardenAction<string>, paths: readonly string[]): string | undefined {
+  return paths.find((p) => /\.ya?ml$/.test(p) && (basename(p).startsWith(`${action.target}-`) || basename(p).replace(/\.ya?ml$/, "") === action.target));
+}
+
+/** W1-T14640: what a refused action's record is matched on: its shard's bytes in the planning checkout, or itself. */
+function refusedActionBlob(repoRoot: string, action: GardenAction<string>, path: string | undefined): string {
+  const h = createHash("sha256");
+  if (path === undefined) h.update(`action\0${JSON.stringify(action)}`);
+  else h.update(`shard\0${path}\0${existsSync(join(repoRoot, path)) ? readFileSync(join(repoRoot, path), "utf8") : "\u0001absent"}`);
+  return h.digest("hex");
+}
+
+/**
+ * W1-T14640: the actions a pass drafts. An action a refused landing was attributed to is left out while its record
+ * matches — except a lone action with no shard of its own, whose redraft the byte guard judges as before. While the
+ * actions of a refused landing are suspects, the draft is the first half of those still proposed (log2(n) drafts).
+ */
+function gardenDraft<C extends string, A extends GardenAction<C>>(plan: GardenPlan<C, A>, state: GardenState<C>, repoRoot: string): { plan: GardenPlan<C, A>; dropped: string[]; bisecting: boolean } {
+  const records = state.refusedActions ?? {};
+  const refused = (a: A): boolean => {
+    const r = records[gardenActionKey(a)];
+    return r !== undefined && r.blob === refusedActionBlob(repoRoot, a, r.path);
+  };
+  const open = plan.actions.filter((a) => !refused(a));
+  const lone = open.length === 0 && plan.actions.length === 1 && records[gardenActionKey(plan.actions[0]!)]!.path === undefined;
+  const offered = lone ? plan.actions : open;
+  const suspects = new Set(state.refusedSuspects?.keys ?? []);
+  const suspected = offered.filter((a) => suspects.has(gardenActionKey(a)));
+  const actions = suspected.length > 0 ? suspected.slice(0, Math.ceil(suspected.length / 2)) : offered;
+  return { plan: { ...plan, actions }, dropped: lone ? [] : plan.actions.filter(refused).map(gardenActionKey), bisecting: suspected.length > 0 };
+}
+
+/**
+ * W1-T14640: what a refused landing of `drafted` leaves the state. A lone action is refused alone and recorded. Of
+ * several, an action whose shard the refusal's text names is recorded; else, inside a bisection, the refused half
+ * becomes the suspects, and a byte-identical redraft of a refused landing starts one. A new draft refused whole is
+ * tried whole again, as before. `lint` is a merged-plan lint refusal, which records a lone action only while bisecting.
+ */
+function attributeGardenRefusal<C extends string>(
+  state: GardenState<C>, drafted: readonly GardenAction<C>[], paths: readonly string[], repoRoot: string, at: string,
+  refusal: { outcome: GardenLandingRefusedError["outcome"] | "lint"; text?: string; digest?: string },
+): { state: GardenState<C>; recorded: string[]; suspects?: string[] } {
+  const keys = drafted.map(gardenActionKey);
+  const suspects = state.refusedSuspects?.keys ?? [];
+  const bisecting = keys.length > 0 && keys.every((k) => suspects.includes(k));
+  const record = (list: readonly GardenAction<C>[], digest?: string): GardenState<C> => {
+    const next = { ...(state.refusedActions ?? {}) };
+    for (const a of list) {
+      const path = gardenActionShard(a, paths);
+      next[gardenActionKey(a)] = { ...(path === undefined ? {} : { path }), blob: refusedActionBlob(repoRoot, a, path), ...(digest === undefined ? {} : { digest }), at };
+    }
+    return { ...state, refusedActions: next, ...(bisecting ? { refusedSuspects: undefined } : {}) };
+  };
+  if (drafted.length === 1) {
+    if (refusal.outcome === "lint" && !bisecting) return { state, recorded: [] };
+    return { state: record(drafted, refusal.digest), recorded: keys };
+  }
+  const named = refusal.text === undefined ? [] : drafted.filter((a) => {
+    const path = gardenActionShard(a, paths);
+    return path !== undefined && refusal.text!.includes(path);
+  });
+  if (named.length > 0 && named.length < drafted.length) return { state: record(named), recorded: named.map(gardenActionKey) };
+  if (bisecting || refusal.outcome === "repeat") return { state: { ...state, refusedSuspects: { keys, at } }, recorded: [], suspects: keys };
+  return { state, recorded: [] };
+}
+
+/** W1-T14640: a landing of `drafted` opened or waits: none of its actions is refused or suspect any longer. */
+function clearLandedActions<C extends string>(state: GardenState<C>, drafted: readonly GardenAction<C>[]): GardenState<C> {
+  const keys = new Set(drafted.map(gardenActionKey));
+  const records = Object.fromEntries(Object.entries(state.refusedActions ?? {}).filter(([k]) => !keys.has(k)));
+  const suspects = (state.refusedSuspects?.keys ?? []).filter((k) => !keys.has(k));
+  return {
+    ...state,
+    refusedActions: Object.keys(records).length > 0 ? records : undefined,
+    refusedSuspects: suspects.length > 0 ? { keys: suspects, at: state.refusedSuspects!.at } : undefined,
+  };
+}
+
 /** W1-T12834: what a pass tells its filing's preparation: the plan's actions and the ids refused findings hold. */
 const gardenFindingIds = new WeakMap<object, { name: string; actions: readonly GardenAction<string>[]; held: RefusedFindingIds }>();
 /** The minter each garden last reserved through, so an id whose finding left the inventory can be given back. */
@@ -911,6 +1010,11 @@ function gardenStateFault(parsed: unknown): string | undefined {
   const findingIds = parsed.refusedFindingIds;
   if (findingIds !== undefined && (!isRecord(findingIds) || Object.values(findingIds).some((f) => !isRecord(f) ||
     typeof f.id !== "string" || typeof f.branch !== "string" || typeof f.at !== "string"))) return "`refusedFindingIds` is malformed";
+  const actions = parsed.refusedActions;
+  if (actions !== undefined && (!isRecord(actions) || Object.values(actions).some((r) => !isRecord(r) || typeof r.blob !== "string" || typeof r.at !== "string" ||
+    (r.path !== undefined && typeof r.path !== "string") || (r.digest !== undefined && typeof r.digest !== "string")))) return "`refusedActions` is malformed";
+  const suspects = parsed.refusedSuspects;
+  if (suspects !== undefined && (!isRecord(suspects) || !Array.isArray(suspects.keys) || suspects.keys.some((k) => typeof k !== "string") || typeof suspects.at !== "string")) return "`refusedSuspects` is malformed";
   if (foldedEffects !== undefined && (!Array.isArray(foldedEffects) || foldedEffects.some((id) => typeof id !== "string"))) return "`foldedEffects` is not a list of ids";
   if (foldedLegacyEffects !== undefined && (!Array.isArray(foldedLegacyEffects) || foldedLegacyEffects.some((id) => typeof id !== "string"))) return "`foldedLegacyEffects` is not a list of ids";
   if (foldedEffectThrough !== undefined && (!Number.isSafeInteger(foldedEffectThrough) || (foldedEffectThrough as number) < 0)) return "`foldedEffectThrough` is not a sequence";
@@ -1488,27 +1592,56 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
     state = { ...state, refusedFindingIds: Object.keys(rest).length > 0 ? rest : undefined };
     writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
   }
-  const scorecard = spec.scorecard(inventory, plan);
-  const acting = plan.acting[0];
+  // W1-T14640: a refused action or suspect no candidate names any longer has left the inventory.
+  if (seen !== undefined && (state.refusedActions !== undefined || state.refusedSuspects !== undefined)) {
+    const live = new Set(seen.map(gardenActionKey));
+    const records = Object.fromEntries(Object.entries(state.refusedActions ?? {}).filter(([key]) => live.has(key)));
+    const suspects = (state.refusedSuspects?.keys ?? []).filter((key) => live.has(key));
+    const pruned: GardenState<C> = { ...state, refusedActions: Object.keys(records).length > 0 ? records : undefined,
+      refusedSuspects: suspects.length > 0 ? { keys: suspects, at: state.refusedSuspects!.at } : undefined };
+    if (JSON.stringify(pruned) !== JSON.stringify(state)) {
+      state = pruned;
+      writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
+    }
+  }
+  // W1-T14640: one refused action no longer wedges the class: it is left out, and a refused batch is bisected.
+  const draft = gardenDraft(plan, state, deps.repoRoot);
+  const drafted = draft.plan;
+  if (draft.dropped.length > 0) deps.log(`${spec.name}.garden_refused_actions_dropped`, { actions: draft.dropped });
+  if (draft.bisecting) deps.log(`${spec.name}.garden_refusal_bisected`, { suspects: state.refusedSuspects!.keys, drafted: drafted.actions.map(gardenActionKey) });
+  const scorecard = spec.scorecard(inventory, drafted);
+  const acting = drafted.acting[0];
   let prUrl: string | undefined;
   let waiting: GardenLandWaiting["waiting"] | undefined;
-  if (acting !== undefined && plan.actions.length > 0) {
+  // What a refusal is attributed over: the drafted landing's paths, and the refusal's own text when it has one.
+  let landingPaths: readonly string[] = [];
+  let refusalText: string | undefined;
+  const attribute = (outcome: GardenLandingRefusedError["outcome"] | "lint", digest?: string): void => {
+    const attributed = attributeGardenRefusal(state, drafted.actions, landingPaths, deps.repoRoot, clock.iso(), { outcome, text: refusalText, digest });
+    if (attributed.recorded.length > 0 || attributed.suspects) deps.log(`${spec.name}.garden_refusal_attributed`, { refused: attributed.recorded, suspects: attributed.suspects ?? null });
+    state = attributed.state;
+  };
+  if (acting !== undefined && drafted.actions.length > 0) {
     try {
       const ws = yield* step<W | GardenCheckoutAsync<W>>(() => deps.openWorkspace());
       let unfiled = "the filing ended before its PR opened";
       // W1-T12550: an opened PR or a landing failure/refusal keeps its outcome over a dispose error.
       let settled = false;
       let refused = false;
-      gardenFindingIds.set(ws, { name: spec.name, actions: plan.actions, held: state.refusedFindingIds ?? {} });
+      gardenFindingIds.set(ws, { name: spec.name, actions: drafted.actions, held: state.refusedFindingIds ?? {} });
       try {
         // A spec's apply only writes the tree; landing and disposal stay with the pass, awaited or not.
-        const heldIds = yield* step(() => spec.prepare?.(ws as unknown as W, plan, async));
-        const landing = spec.apply(ws as unknown as W, plan, scorecard, heldIds);
+        const heldIds = yield* step(() => spec.prepare?.(ws as unknown as W, drafted, async));
+        const landing = spec.apply(ws as unknown as W, drafted, scorecard, heldIds);
         const digest = landing && landingDigest(ws.root, landing.paths);
+        landingPaths = landing?.paths ?? [];
         // 2026-10-10: the backlog lane re-drafted one refused change every ~20 min (17:17-18:09Z), each a new
         // worktree and a full plan-PR preflight. Bytes once refused are never landed again; a new draft is.
         if (digest && digest === state.refusedLanding?.digest) throw new GardenLandingRefusedError(digest, "repeat", `the drafted change is byte-identical to the one refused at ${state.refusedLanding.at}`);
+        const lone = drafted.actions.length === 1 ? state.refusedActions?.[gardenActionKey(drafted.actions[0]!)] : undefined;
+        if (digest && digest === lone?.digest) throw new GardenLandingRefusedError(digest, "repeat", `the drafted change is byte-identical to the one refused at ${lone.at}`);
         const refused = landing && spec.landingRefusal?.(ws.root, landing.paths);
+        if (refused) refusalText = refused;
         if (refused) throw new GardenLandingRefusedError(digest!, "guard", `${spec.name} gardener: drafted shard failed lint-plan's machine-filing admission (${refused})`);
         if (landing) {
           let lint: MergedPlanLintFailure | undefined;
@@ -1523,8 +1656,13 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
             // The check working, not a filing failure: no streak, no fingerprint — the next pass rebuilds on fresh main.
             settled = true;
             deps.log(`${spec.name}.landing_refused`, { file: lint.file, message: lint.message });
-            deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: null, awaiting: state.pending?.prUrl ?? null, landing_refused: true });
-            return { ran: true, plan, scorecard };
+            // W1-T14640: the lint names its file, so a landing of several drops the action whose shard it is.
+            const before = state;
+            refusalText = lint.file;
+            attribute("lint");
+            if (state !== before) writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
+            deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: drafted.acting, actions: drafted.actions.length, pr_url: null, awaiting: state.pending?.prUrl ?? null, landing_refused: true });
+            return { ran: true, plan: drafted, scorecard };
           }
           const why = spec.review?.[acting];
           const landed: GardenLandResult = yield* step(() => ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing));
@@ -1559,8 +1697,8 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
     } catch (e) {
       recordGardenMintTimeout(e, spec.name, deps.log);
       if (e instanceof GardenMintTimedOutError) {
-        deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: null, mint_timed_out: true });
-        return { ran: true, plan, scorecard };
+        deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: drafted.acting, actions: drafted.actions.length, pr_url: null, mint_timed_out: true });
+        return { ran: true, plan: drafted, scorecard };
       }
       // A failed filing is not a pass: no fingerprint is recorded, so the same work is retried once
       // the doubling wait elapses, and a streak is raised to a person instead of going silent.
@@ -1569,6 +1707,7 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
       const refusal = e instanceof GardenLandingRefusedError ? e : undefined;
       // A repeat keeps the first refusal's time; only a newly refused draft replaces it.
       const refusedLanding = refusal?.outcome === "repeat" ? state.refusedLanding : refusal ? { digest: refusal.digest, at: clock.iso() } : state.refusedLanding;
+      if (refusal) attribute(refusal.outcome, refusal.digest);
       writeAtomic(statePath, JSON.stringify({ ...state, filingFailures: failures, refusedLanding }, null, 2) + "\n");
       deps.log(`${spec.name}.${refusal?.outcome === "repeat" ? "landing_repeat_skipped" : "garden_filing_failed"}`, { attempt: failures.count, reason, retry_after_ms: gardenFilingRetryAt(failures)! - clock.now(), ...(refusal ? { refusal: refusal.outcome, digest: refusal.digest } : {}) });
       if (failures.count === GARDEN_FILING_ESCALATE_AT && deps.escalate) {
@@ -1576,22 +1715,24 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
       }
       // The measurement stands whether or not its PR opened: a filing that keeps failing must not
       // also silence the scorecard (the ci-friction rows stopped for a day behind one bad title).
-      deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: null, awaiting: state.pending?.prUrl ?? null, filing_failed: failures.count });
-      return { ran: true, plan, scorecard };
+      deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: drafted.acting, actions: drafted.actions.length, pr_url: null, awaiting: state.pending?.prUrl ?? null, filing_failed: failures.count });
+      return { ran: true, plan: drafted, scorecard };
     }
   }
-  deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: plan.acting, actions: plan.actions.length, pr_url: prUrl ?? null, awaiting: state.pending?.prUrl ?? null, ...(waiting ? { waiting: waiting.paths } : {}) });
+  deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: drafted.acting, actions: drafted.actions.length, pr_url: prUrl ?? null, awaiting: state.pending?.prUrl ?? null, ...(waiting ? { waiting: waiting.paths } : {}) });
+  if (prUrl || waiting) state = clearLandedActions(state, drafted.actions);
   // Only a class whose changes landed as a PR is judged, and only on its own metric from this moment.
   const baseline = (c: C): Outcome => (judgedByDecision(spec, c) ? { trials: 0, successes: 0 } : metricOf(spec, inventory, c));
-  const targets = prUrl || waiting ? spec.pendingTargets?.(plan) ?? [] : [];
+  const targets = prUrl || waiting ? spec.pendingTargets?.(drafted) ?? [] : [];
   const waitingNow = waiting && acting !== undefined
     ? { ...waiting, actionClass: acting, baseline: baseline(acting), ...(targets.length ? { targets } : {}), since: clock.iso() }
     : state.waiting;
   const pending = prUrl && acting !== undefined ? { prUrl, actionClass: acting, baseline: baseline(acting), ...(targets.length ? { targets } : {}) } : state.pending;
   const pendingRecordedAt = prUrl && acting !== undefined ? (judgedByDecision(spec, acting) ? clock.iso() : undefined) : state.pendingRecordedAt;
-  const lastPass = prUrl ? { fingerprint, landed: prUrl } : { fingerprint };
+  // W1-T14640: a pass that left a refused action out has not done its work: a change to that shard is read again.
+  const lastPass = prUrl ? { fingerprint, landed: prUrl } : draft.dropped.length > 0 ? undefined : { fingerprint };
   writeAtomic(statePath, JSON.stringify({ ...state, pending, pendingRecordedAt, waiting: waitingNow, lastCheap: cheap, lastPass, filingFailures: undefined }, null, 2) + "\n");
-  return { ran: true, plan, prUrl, scorecard };
+  return { ran: true, plan: drafted, prUrl, scorecard };
 }
 
 /** W1-T12221: the landing PR that carries every waiting file becomes the pending PR, as if this garden had

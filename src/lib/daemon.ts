@@ -91,6 +91,8 @@ import {
   MACHINE_SHARE_STEP,
   type MachineShareInput,
   type MachineShareStart,
+  EXPEDITED_STEP,
+  type ExpeditedStart,
 } from "./drain.js";
 import { queueJudgeAvailability } from "./queue-judge-gardener.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
@@ -5774,6 +5776,8 @@ export async function runDaemon(
   let lastOverlapShadowSignature = "[]";
   let lastSecondaryCatalogShadowSignature: string | undefined;
   let lastMachineShareSignature: string | undefined;
+  // W1-T14654: each expedited pick's lane share, written as one dispatch.expedited row when that task starts.
+  const expeditedPicks = new Map<string, ExpeditedStart>();
   const machineShareStateDir = deps.fleetLane?.stateDir ?? deps.plainBackfill?.stateDir;
   const machineShareRotations = createLedgerRotationMemo((rows) => rows.filter((row) => row.step === "run.start"), { pattern: /run\.start/ });
   const machineShareRowsFor = async (lines: readonly string[] | undefined): Promise<readonly Record<string, unknown>[] | undefined> => {
@@ -8958,6 +8962,7 @@ export async function runDaemon(
       onPriorityReservationReleased: logPriorityRelease,
       dispatchValueContext: tickTiming.probe("buildDispatchValueContext", () => deps.buildDispatchValueContext?.(planForBatch, isMerged)),
       machineShare: machineShareFor(planForBatch, tickMachineShareRows),
+      onExpedited: (task, start) => { expeditedPicks.set(task.id, start); },
       beginSelectionPass: deps.beginSelectionPass,
       inputAnswer: deps.taskInputAnswer,
       isOpenPr: deps.isOpenPr,
@@ -9090,6 +9095,7 @@ export async function runDaemon(
     // evidence of spare capacity.
     let laneBudget = 0;
     bootFirstSelectionAtMs ??= daemonClock.now();
+    expeditedPicks.clear();
     const tickMerged = isMerged;
     if (forcedNext) {
       dispatchSet = hasChildTask(forcedNext.id) || occupiedTasks.length >= laneCount ? [] : [forcedNext];
@@ -9715,8 +9721,8 @@ export async function runDaemon(
           closedRows: string | undefined): void => {
           let openPrCount: number | undefined;
           try { openPrCount = timing.probe("openPrCount", () => deps.openPrCount?.()); } catch (e) { boardUnreadable = true; throw e; }
-          const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount,
-            queueAdmission: timing.probe("readQueueAdmission", () => deps.readQueueAdmission?.()) });
+          const queueAdmission = timing.probe("readQueueAdmission", () => deps.readQueueAdmission?.());
+          const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount, queueAdmission });
           const runBranchState = runBranchStateFrom(
             runBranchListing, timing.probe("readRunBranchEvidence", readRunBranchEvidence), resumableHandoffs,
             lazyClosedUnmerged(closedRows === undefined ? undefined : () => closedRows),
@@ -9734,6 +9740,8 @@ export async function runDaemon(
               ...[...refillProposals].map((proposal) => proposal.id)]),
             // W1-T8502: pack the pool disjoint from the occupied lanes too, so a head they block cannot crowd out the rest.
             inFlight: [...inFlightTasks, ...refillProposals],
+            // W1-T14654: the pool spans every lane, so the expedite share is read from the lanes this refill may fill.
+            expediteLanes: Math.min(budget, enforcedLaneTarget(inFlightTasks.size, queueAdmission?.wipLimit)),
             onPassedOver: observePassedOver("lane-refill"),
             onDeferredForPriority: (d) => { refillDeferrals.push(d); logPriorityDeferral(d); },
           });
@@ -10000,6 +10008,11 @@ export async function runDaemon(
       attempted.push(task.id);
       noteTaskStart(task.id);
       noteBootFirstDispatch({ startedAtMs: daemonClock.now(), admitted: admitted.length });
+      const expedited = expeditedPicks.get(task.id);
+      if (expedited !== undefined) {
+        expeditedPicks.delete(task.id);
+        log(EXPEDITED_STEP, { task: task.id, ...expedited });
+      }
       if (forcedKick?.taskId === task.id) {
         const kick = forcedKick;
         deps.clearKick?.(task.id, kick.repo);

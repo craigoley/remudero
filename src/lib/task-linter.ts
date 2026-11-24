@@ -846,8 +846,6 @@ const RESOLVABILITY_DIALECT_RE = /^(unit test|grep):\s*([\s\S]*)$/i;
  *  single titles from narratives. Cannot refuse a shape the primary control admits. The second
  *  caller uses the same bounds to suppress duplicate proof-dialect warnings. */
 export const SCENARIO_NARRATIVE_BOUNDS = {
-  /** A body longer than this reads as prose regardless of punctuation. */
-  maxBodyLength: 100,
   /** This many commas or more, alone, reads as a multi-clause narrative. */
   commasToRefuseAlone: 2,
   /** A `"; "` PLUS this many comma(s) also reads as a narrative — fewer commas than {@link
@@ -856,13 +854,13 @@ export const SCENARIO_NARRATIVE_BOUNDS = {
 } as const;
 
 /** True iff `body` reads as a multi-clause scenario narrative rather than a single test's title.
- *  See the module comment above for why a lone arrow does not, by itself, qualify. */
+ *  See the module comment above for why a lone arrow does not, by itself, qualify. No LENGTH decides
+ *  it (W1-T14653): a long single title is judged when the build runs the proof, not here. */
 function looksLikeScenarioNarrative(body: string): boolean {
   const commas = (body.match(/,/g) ?? []).length;
   return (
     commas >= SCENARIO_NARRATIVE_BOUNDS.commasToRefuseAlone ||
-    (body.includes("; ") && commas >= SCENARIO_NARRATIVE_BOUNDS.commasToRefuseWithSemicolon) ||
-    body.length > SCENARIO_NARRATIVE_BOUNDS.maxBodyLength
+    (body.includes("; ") && commas >= SCENARIO_NARRATIVE_BOUNDS.commasToRefuseWithSemicolon)
   );
 }
 

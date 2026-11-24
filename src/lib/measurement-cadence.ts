@@ -98,6 +98,8 @@ import { handRunCensus, type HandRunCensusCadenceOpts, type HandRunCensusCadence
 import { lintPlan, type LintResult } from "./task-linter.js";
 import { machineShardDesign, machineShardFilingRefusal, machineShardHeaderLines, machineShardLint } from "./machine-filing.js";
 import { mechanicalRulingRow, type MechanicalDecision } from "./mechanical-rulings.js";
+import { isRulingShaped, parkedEscalation } from "./machine-filing-judge.js";
+import { createTaskFilingHistoryInvocation, type FilingHistoryOptions, type TaskFilingHistoryInvocation } from "./task-filing-history.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import {
   judgeVerifyHumanShard,
@@ -1642,6 +1644,58 @@ export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOp
   };
 }
 
+/** Has this plan task LANDED, by the credit `deriveStatus` honours rather than the decorative yaml `status:`?
+ *  `merged` or `done` status, an explicit `pr:` number (precedence source (b)), or a ledger merge credit.
+ *  W1-T14641: moved from run-task.ts with the parked population it decides. */
+export function planTaskLanded(task: Task | undefined, ledgerCredited?: ReadonlySet<string>): boolean {
+  if (!task) return false;
+  return task.status === "merged" || task.status === "done" || typeof task.pr === "number" || ledgerCredited?.has(task.id) === true;
+}
+
+/** W1-T14641: the ops records one verify-human pass judges, and the ops checkout their filing history is read from. */
+export interface VerifyHumanOpsRecords {
+  opsIds: ReadonlySet<string>;
+  opsCheckoutDir?: string;
+}
+
+/** W1-T14641: an ops snapshot labels a shard `tasks.d/<file>` under its plan/ directory, where a public record carries
+ *  its checkout path. The judge's shard check reads `<dir>/tasks.d/<file>`, so an ops shard is read under plan/ for
+ *  that check alone; the monolith label `tasks.yaml` stays a non-shard, as a public monolith record is. */
+function asShardRecord(task: Task, ops: VerifyHumanOpsRecords | undefined): Task {
+  if (ops === undefined || !ops.opsIds.has(task.id) || !/^tasks\.d\//.test(task.sourcePath ?? "")) return task;
+  return { ...task, sourcePath: `plan/${task.sourcePath}` };
+}
+
+/**
+ * The verify-human cadence's parked population (W1-T14641: moved from run-task.ts's parkedVerifyHumanCandidates so a
+ * test can read it). The machine-filing judge routes AND releases every machine record and every operator record that
+ * is not ruling-shaped (operator ruling 2026-09-29); only rulings stay on this operator-facing sweep.
+ * W1-T4860: "queued" and "landed" read the credit the dispatcher and board use, not the raw yaml `status:` —
+ * a ruling already executed and credited (`pr:`, `done`, ledger merge credit) is settled, never judged again.
+ * W1-T9043: a machine record the judge ESCALATED to a person is admitted too, so it rides the 14/30/60-day
+ * age-band re-asks a person already reads; an unjudged machine record stays the machine-filing judge's alone.
+ * W1-T14641: an ops record of `ops` is admitted by the same rule, read as {@link asShardRecord} says.
+ */
+export function parkedVerifyHumanCandidateTasks(plan: Plan, ledgerCredited?: ReadonlySet<string>, ops?: VerifyHumanOpsRecords): Task[] {
+  return plan.tasks.filter(task => {
+    const heldForAPerson = task.author_class === "machine" ? parkedEscalation(asShardRecord(task, ops)) : isRulingShaped(task);
+    return task.verify === "human" && task.status === "queued" && !planTaskLanded(task, ledgerCredited) && heldForAPerson;
+  });
+}
+
+/** W1-T14641: the filing history each candidate's age is read from: a public record's from the code checkout `root`,
+ *  an ops record's from the ops checkout, where it was filed. Without an ops checkout every record reads `root`. */
+export function verifyHumanFilingHistories(root: string, candidates: readonly Task[], ops: VerifyHumanOpsRecords | undefined,
+  options: FilingHistoryOptions = {}): (taskId: string) => TaskFilingHistoryInvocation {
+  const opsRoot = ops?.opsCheckoutDir;
+  const fromOps = (id: string): boolean => opsRoot !== undefined && ops!.opsIds.has(id);
+  const ids = candidates.map(task => task.id);
+  const publicHistory = createTaskFilingHistoryInvocation(root, ids.filter(id => !fromOps(id)), options);
+  if (opsRoot === undefined) return () => publicHistory;
+  const opsHistory = createTaskFilingHistoryInvocation(opsRoot, ids.filter(fromOps), options);
+  return id => fromOps(id) ? opsHistory : publicHistory;
+}
+
 const VERIFY_HUMAN_AGE_BANDS = [14, 30, 60] as const;
 
 export type VerifyHumanCadenceDueReason = "state_changed" | "age_band";
@@ -1665,6 +1719,8 @@ export interface VerifyHumanCadenceResult {
   deferredToRules?: string[];
   /** W1-T4083: the release judge's running audit; absent when the audit did not run. */
   releaseAudit?: { releases: number; escalations: number; merged: number; failed: number; alerts: string[] };
+  /** W1-T14641: why this pass judged no ops catalog record although a destination is named; absent when it read one. */
+  opsRefusal?: string;
   status: "clear" | "judged" | "refused";
   refusedReason?: string;
 }
@@ -1690,6 +1746,8 @@ export interface VerifyHumanCadenceOpts {
   decidedByRules?: (shard: ShardUnderJudgement) => MechanicalDecision | undefined;
   /** W1-T10371: `<id>:<rule>:<verdict>` of every deferral already ledgered, so one is recorded once. */
   priorMechanicalKeys?: ReadonlySet<string>;
+  /** W1-T14641: the ops catalog's refusal for this pass ({@link VerifyHumanCadenceResult.opsRefusal}), carried as read. */
+  opsRefusal?: string;
 }
 
 function verifyHumanAgeBand(ageDays: number): number | undefined {
@@ -1761,6 +1819,7 @@ export async function verifyHumanCadence(opts: VerifyHumanCadenceOpts): Promise<
     ageBandReasks: due.filter((entry) => entry.reason === "age_band").map((entry) => entry.shard.id),
     released: [],
     ...(ruled.size > 0 ? { deferredToRules: [...ruled.keys()] } : {}),
+    ...(opts.opsRefusal === undefined ? {} : { opsRefusal: opts.opsRefusal }),
     status: due.length === 0 ? "clear" : "judged",
   };
 
