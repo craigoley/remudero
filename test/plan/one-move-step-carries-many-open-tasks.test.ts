@@ -13,7 +13,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
-import type { OpsCatalogApi, OpsCatalogBoundsIo } from "#src/lib/ops-catalog-source.js";
+import type { OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
 import { MOVE_RESERVATION_TRAILER, MOVED_TO_TRAILER, withMovedFromLine } from "#src/lib/plan-task-move.js";
 import type { PlanTaskMovePorts, PlanTaskMover } from "#src/lib/plan-task-move-janitor.js";
 import { blobAt, moveWorld, OPS, PUBLIC, record, shard, type ModelPull, type MoveWorld } from "#test/helpers/plan-move-world.js";
@@ -136,7 +136,7 @@ test("W1-T14345 criterion 1: a batch is as large as the readers' limits allow, s
   assert.ok(ids.every(id => w.holds("ops", id) && !w.holds("public", id)));
 });
 
-/** Seed the ops catalog with `count` records in one commit dated two days ago: the catalog its UTC day started from. */
+/** Seed the ops catalog with `count` records in one commit dated `at`. */
 function padOps(w: MoveWorld, count: number, at: string): void {
   const dir = w.ops.clone.dir;
   const run = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8",
@@ -151,20 +151,19 @@ function padOps(w: MoveWorld, count: number, at: string): void {
   run("push", "--quiet", "origin", "main");
 }
 
-test("W1-T14345 criterion 1: past the reader's baseline a batch of moved records is not limited by the daily growth bound (W1-T14557: moves are not growth)", async t => {
+test("W1-T14345 criterion 1: past the reader's baseline a batch carries every open task, however much the catalog grew that day", async t => {
   const ids = ["W1-T1", "W1-T2", "W1-T3", "W1-T4", "W1-T5"];
   const w = moveWorld(t, Object.fromEntries(ids.map(id => [id, record(id)])));
-  const now = Date.now();
-  padOps(w, 498, new Date(now - 2 * 86_400_000).toISOString());
-  // A catalog measured as growing two shards a day. Before W1-T14557 the copy stopped at two; the operator's ruling
-  // (2026-11-23, "Alert plus exempt moves") makes a moved copy (it carries moved_from) count for no growth, so the
-  // whole batch copies past the baseline and only the heap bound could still stop it.
-  const today: OpsCatalogBoundsIo = { dailyGrowth: () => ({ shards: 2, bytes: 1e9 }), clock: { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() } };
-  const { pr: copy } = await step(w, "copy", { bounds: today });
-  assert.equal(copy.files.length, ids.length, "THE CLAIM: the daily growth bound no longer stops a batch of moved records");
+  padOps(w, 498, new Date().toISOString());
+  // The ops catalog grew 498 shards today; the copy takes it past the 500-shard baseline. The catalog's growth is not
+  // bounded, so nothing stops the batch short of the open tasks it has.
+  const { pr: copy } = await step(w, "copy");
+  assert.deepEqual(sorted(copy.files), sorted(ids.map(shard)), "THE CLAIM: the batch carries every open task past the baseline");
   w.merge(copy);
-  w.merge((await step(w, "remove", { bounds: today })).pr);
-  assert.equal(w.pulls.length, 2, "one COPY and one REMOVE carried all five");
+  w.merge((await step(w, "remove")).pr);
+  const done = await w.run();
+  assert.equal(done.out.step, "complete", done.lines.join("\n"));
+  assert.ok(ids.every(id => w.holds("ops", id) && !w.holds("public", id)), "all five moved the same day in one step");
 });
 
 /** The janitor's ports over one move world: the switch on, every gate open, each move the real verb at both mains. */

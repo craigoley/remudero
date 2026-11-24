@@ -13,7 +13,7 @@ import { ghBrokerDir, ghBrokerRouteFor } from "#src/lib/gh-read-broker-client.js
 import { ghJsonAsync } from "#src/lib/github-transport.js";
 import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 import {
-  OPS_CATALOG_BASELINE_SHARDS, OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_TREE_ENTRIES, OPS_CATALOG_OUTCOMES,
+  OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_TREE_ENTRIES, OPS_CATALOG_OUTCOMES,
   OpsCatalogAuthMissingError, createOpsCatalogShadowSource, defaultOpsCatalogApi, readOpsCatalogSnapshotAsync, type OpsCatalogApi,
 } from "#src/lib/ops-catalog-source.js";
 
@@ -207,17 +207,17 @@ test("W1-T11768 criterion 2: bounds refuse as malformed, never partially", async
   refused("malformed", await run(fixture({ monolith: taskYaml("A") }, { fail: rootTreeIs(filler(OPS_CATALOG_MAX_TREE_ENTRIES + 1)) })));
   refused("malformed", await run(fixture({ monolith: taskYaml("A") }, { fail: rootTreeIs([{ path: "plan", type: "tree", mode: "040000", sha: sha1("plan") }, ...filler(OPS_CATALOG_MAX_TREE_ENTRIES - 1)]) })));
   const many: Record<string, string> = {};
-  for (let i = 0; i <= OPS_CATALOG_BASELINE_SHARDS; i++) many[`s${i}.yaml`] = taskYaml(`S${i}`);
-  // W1-T14368: past the shard baseline the derived bounds judge. A budget that cannot pay for the blobs refuses whole.
+  for (let i = 0; i <= 500; i++) many[`s${i}.yaml`] = taskYaml(`S${i}`);
+  // W1-T14368: the derived bounds judge every read. A budget that cannot pay for the blobs refuses whole.
   const manyFx = fixture({ monolith: taskYaml("A"), shards: many });
-  const unpaid = await readOpsCatalogSnapshotAsync(target, manyFx.api, { bounds: { blobReadAllowance: () => OPS_CATALOG_BASELINE_SHARDS } });
+  const unpaid = await readOpsCatalogSnapshotAsync(target, manyFx.api, { bounds: { blobReadAllowance: () => 500 } });
   refused("unreadable", unpaid);
-  assert.deepEqual(unpaid.bound, { reason: "blob_read_budget", observed: OPS_CATALOG_BASELINE_SHARDS + 2, allowed: OPS_CATALOG_BASELINE_SHARDS });
+  assert.deepEqual(unpaid.bound, { reason: "blob_read_budget", observed: 502, allowed: 500 });
   assert.equal(manyFx.calls.filter((p) => p.includes("/git/blobs/")).length, 0, "no blob is read before the refusal");
   refused("malformed", await run(fixture({ monolith: `# ${"x".repeat(OPS_CATALOG_MAX_BLOB_BYTES)}\n${taskYaml("A")}` })));
   const spread: Record<string, string> = {};
   for (let i = 0; i < 40; i++) spread[`s${i}.yaml`] = `# ${"y".repeat(OPS_CATALOG_MAX_BLOB_BYTES - 1000)}\n${taskYaml(`S${i}`)}`;
-  // W1-T14368: past the byte baseline the heap bound judges; with no heap left it refuses whole.
+  // W1-T14368: the heap bound judges every read; with no heap left it refuses whole.
   const heap = { used_heap_size: 2 ** 40, heap_size_limit: 2 ** 40 };
   const heavy = await readOpsCatalogSnapshotAsync(target, fixture({ monolith: taskYaml("A"), shards: spread }).api, { bounds: { heap: () => heap } });
   refused("malformed", heavy);
