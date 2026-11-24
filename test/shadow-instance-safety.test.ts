@@ -1586,6 +1586,26 @@ test("the independent sweep path cannot arm a shadow instance", async () => {
   assert.equal(sweepArmCalls, 0);
 });
 
+test("W1-T14731 a bound selected-mode binding survives the run's synchronous work", async () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-mode-bound-`));
+  try {
+    const selected = join(root, "selected.yaml");
+    writeFileSync(selected, registry("shadow").replace("  worker:", "  fixture:").replace("owner/repo", "owner/remudero"));
+    const rows: Array<Record<string, unknown>> = [];
+    const qualification = modeRuntime.createSelectedModeQualification({ mode: "shadow", instanceName: "fixture", registryPath: selected },
+      "owner/remudero", {}, (_step, fields) => { rows.push(fields); })!;
+    await qualification.bound();
+    // The run's synchronous work: it blocks the event loop past the read's 1500 ms budget. A read still pending
+    // here would time out; a bound one is already held.
+    execFileSync("sleep", ["1.7"]);
+    assert.equal(await qualification.observe("run-arm", async () => "armed", "https://github.com/owner/remudero/pull/1"), "armed");
+    assert.equal(rows.at(-1)?.selected_outcome, "would-shadow", JSON.stringify(rows));
+    assert.equal(rows.at(-1)?.reason, undefined, JSON.stringify(rows));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("private registry selection preserves owner holds and private-safe boundaries: real run and sweep", async (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}selected-mode-run-`));
   const origin = gitRepo({ bare: true }), seed = gitRepo({ cloneFrom: origin.dir });
