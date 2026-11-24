@@ -15,7 +15,7 @@ import { test } from "node:test";
 
 import { runFixRung } from "#src/cli/commands/fix.js";
 import { sweepFixRungDeps } from "#src/cli/commands/sweep.js";
-import { fixCommandHost, FixRoundPushError, harnessCommitForShellLessWorker } from "#src/run-task.js";
+import { fixCommandHost, FixRoundPushError, harnessCommitForShellLessWorker } from "#test/helpers/run-task-test.js";
 import { captureCiRemedyComponent, recordCiRemedyExecution, upsertCiRemedyRoundComment } from "#src/lib/ci-remedy-execution.js";
 import type { ImportedModuleEvidence } from "#src/lib/prevention-source-evidence.js";
 import {
