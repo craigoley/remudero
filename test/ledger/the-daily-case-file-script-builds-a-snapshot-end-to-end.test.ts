@@ -23,20 +23,24 @@ test("W1-T14602: the daily case-file script writes a snapshot and its carry for 
     { ts: at(29), task_id: task, run_id: runId, step: "worker.assignment",
       worker_assignment: { id: "a1", selected: { provider: "claude", model: "claude-opus-5-5" } } },
     { ts: at(20), task_id: task, run_id: runId, step: "pr.opened", pr_url: "https://github.com/craigoley/remudero/pull/41001" },
-    // A called task with no ledger PR row is searched, and a failed search keeps GitHub's reason.
+    // Called tasks with no ledger PR row are searched: one search answers a list with no hit, and
+    // one answers something that is not a list, which is kept as a read failure with its reason.
     { ts: at(10), task_id: "W1-T20002", run_id: "W1-T20002-1795000000001", step: "worker.assignment",
       worker_assignment: { id: "a2", selected: { provider: "claude", model: "claude-opus-5-5" } } },
+    { ts: at(9), task_id: "W1-T20003", run_id: "W1-T20003-1795000000002", step: "worker.assignment",
+      worker_assignment: { id: "a3", selected: { provider: "claude", model: "claude-opus-5-5" } } },
   ], { scope: t });
   const repo = ownedFixtureDir(t, "case-script-repo").dir;
   mkdirSync(join(repo, "plan"), { recursive: true });
   const record = (id: string) => [`- id: ${id}`, `  title: "Task ${id}"`, "  repo: remudero", "  depends_on: []",
     "  type: implement", "  verify: auto", "  risk: high", "  status: queued", "  attempts: 0"].join("\n");
-  writeFileSync(join(repo, "plan", "tasks.yaml"), `${record(task)}\n${record("W1-T20002")}\n`);
+  writeFileSync(join(repo, "plan", "tasks.yaml"), `${record(task)}\n${record("W1-T20002")}\n${record("W1-T20003")}\n`);
   const shim = ghShim([
     { when: "pr view 41001", stdout: JSON.stringify({ number: 41001, url: "https://github.com/craigoley/remudero/pull/41001",
       state: "MERGED", headRefOid: sha, headRefName: `run-${task}-1`, body: `Remudero-Task: ${task}`,
       mergedAt: at(5), statusCheckRollup: [] }) },
-    { when: "pr list", stderr: "HTTP 500: search unavailable", exit: 1 },
+    { when: "--search W1-T20002", stdout: JSON.stringify({ message: "Validation Failed" }) },
+    { when: "--search W1-T20003", stdout: "[]" },
   ]);
   const out = join(ledger.dir, "field-trials", "case-files-latest.json");
   const env = { ...process.env, PATH: `${shim.dir}:${process.env.PATH}`, RMD_FIELD_TRIALS_REPO_ROOT: repo,
@@ -46,11 +50,13 @@ test("W1-T14602: the daily case-file script writes a snapshot and its carry for 
     { cwd: REPO_ROOT, env, timeout: 120_000 });
   const summary = JSON.parse(stdout.trim().split("\n").at(-1)!);
   assert.equal(summary.event, "field_trials.case_files");
-  assert.equal(summary.candidates, 2);
+  assert.equal(summary.candidates, 3);
   assert.equal(summary.selected, 1);
   assert.equal(summary.searchUnreadable, 1);
   assert.equal(summary.readFailures.length, 1);
   assert.equal(summary.readFailures[0].target, "W1-T20002");
+  assert.match(summary.readFailures[0].error, /PR search returned no list/);
+  assert.equal(shim.calls().filter((call) => call.includes("--search W1-T20003")).length, 1);
   const files = JSON.parse(readFileSync(out, "utf8"));
   assert.deepEqual(files.map((file: { taskId: string }) => file.taskId), [task]);
   const carry = JSON.parse(readFileSync(join(ledger.dir, "field-trials", "case-files-carry.json"), "utf8"));
