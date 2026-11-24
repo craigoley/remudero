@@ -156,21 +156,35 @@ function coverageShard(files: string[], shard: number) {
 }
 
 /** ci-shard N/8 on a pull request: admission, classify, then the Test step with `node` stubbed. */
-function ciShard(files: string[], shard: number) {
+function ciShard(files: string[], shard: number, { linkTests = false } = {}) {
   const ws = workspace(files);
+  // The candidate lane's shard-1 fallback lists the checkout's test files, as a real runner's checkout has them.
+  if (linkTests) symlinkSync(join(REPO_ROOT, "test"), join(ws.dir, "test"));
   const admission = ws.run(step("ci", (s) => s.id === "admission").run!, { "${{ matrix.shard }}": String(shard) });
   assert.equal(admission.status, 0, admission.all);
   const classify = ws.run(step("ci", (s) => s.id === "classify").run!, {
     "${{ steps.admission.outputs.setup }}": admission.outputs.setup ?? "",
   });
   assert.equal(classify.status, 0, classify.all);
-  const tested = ws.run(
-    step("ci", (s) => s.name === "Test").run!,
-    { "${{ steps.classify.outputs.class }}": classify.outputs.class ?? "", "${{ matrix.shard }}": String(shard) },
-    { stubNode: true, env: { RENAME_ONLY: classify.outputs.rename_only ?? "false" } },
-  );
-  assert.equal(tested.status, 0, tested.all);
-  return { setup: admission.outputs.setup, fullFast: tested.calls.includes(`scripts/test-tier-manifest.mjs --run fast --shard ${shard}/8`), tested };
+  const subs = { "${{ steps.classify.outputs.class }}": classify.outputs.class ?? "", "${{ matrix.shard }}": String(shard) };
+  const env = { RENAME_ONLY: classify.outputs.rename_only ?? "false" };
+  // W1-T11263: the bash 3.2 step decides this shard's files before the dependency-evidence download, with the Test
+  // step's own selection commands. Run it where Actions would, with a provisioner, and compare the two.
+  const bash32 = step("ci", (s) => (s.name ?? "").startsWith("Provision bash 3.2 when this ci shard runs"));
+  writeFileSync(join(ws.dir, "bash32-provision.sh"), `echo "provision $*" >> "${join(ws.dir, "calls.log")}"\n: > "$2"\n`);
+  const probed = ws.run(bash32.run!, subs, { stubNode: true, env: { ...env, GITHUB_ENV: join(ws.dir, "github-env.txt") } });
+  assert.equal(probed.status, 0, probed.all);
+  assert.match(probed.calls, /^provision bash32-ci-files\.txt /m, "the bash 3.2 step hands its list to the provisioner");
+  const tested = ws.run(step("ci", (s) => s.name === "Test").run!, subs, { stubNode: true, env });
+  // In the candidate lane the stub node prints no selector summary, so Test's reporting lines after its selection
+  // exit non-zero here; the selection commands compared below run before them.
+  if (!linkTests) assert.equal(tested.status, 0, tested.all);
+  const selection = (calls: string) => calls.split("\n").filter((line) =>
+    /^node (--import tsx )?scripts\/(diff-class\.mjs --list-plan-reading-suites|test-tier-manifest\.mjs --select-candidates) /.test(line));
+  assert.deepEqual(selection(probed.calls), selection(tested.calls),
+    "the bash 3.2 step and the Test step select this shard's files with identical commands and arguments");
+  return { setup: admission.outputs.setup, fullFast: tested.calls.includes(`scripts/test-tier-manifest.mjs --run fast --shard ${shard}/8`), tested,
+    selection: selection(tested.calls) };
 }
 
 /** test-slow-shard on a pull request: classify, its install guards, then what "Run the slow tier" does. */
@@ -239,6 +253,15 @@ test("W1-T5699: ci.yml runs the full fast tier on every ci-shard and the slow ti
     const slow = slowShard(files);
     assert.equal(slow.cls, "NO_SRC", `${files}`);
     assert.deepEqual([...slow.installs, slow.slowRun], [true, true, true, true, true], `${files}: install and run the slow tier`);
+  }
+});
+
+test("W1-T11263: ci-shard's bash 3.2 step selects the candidate lane's files with the Test step's own commands", () => {
+  for (const files of [["plan/tasks.d/W1-T5699-a.yaml"], ["test/selected-registry-shell-consumers.test.ts"]]) {
+    for (const shard of [1, 2]) {
+      const r = ciShard(files, shard, { linkTests: true });
+      assert.ok(r.selection.length > 0, `${files} shard ${shard}: the candidate lane ran a selection command`);
+    }
   }
 });
 
