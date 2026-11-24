@@ -912,7 +912,8 @@ export async function daemonSreLaneEnabled(
   log(row.step, row.fields);
   const enabled = sreLaneEnabled(sreLane);
   if (unresolved !== undefined) {
-    const paged = pageUnresolvedSreLane(sreLane, enabled, { stateRoot, registryPath }, unresolved, log);
+    const registryFromEnv = process.env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined || Boolean(process.env.RMD_INSTANCE_REGISTRY?.trim());
+    const paged = pageUnresolvedSreLane(sreLane, enabled, { stateRoot, registryPath, registryFromEnv }, unresolved, log);
     if (background !== undefined) background(paged);
     else await paged;
   }
@@ -929,7 +930,7 @@ export interface SreLaneUnresolvedPage {
 async function pageUnresolvedSreLane(
   sreLane: Parameters<typeof sreLaneEnabled>[0],
   enabled: boolean,
-  where: { stateRoot: string; registryPath: string },
+  where: { stateRoot: string; registryPath: string; registryFromEnv: boolean },
   unresolved: SreLaneUnresolvedPage,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): Promise<void> {
@@ -942,9 +943,10 @@ async function pageUnresolvedSreLane(
     if (instance.resolved || sreLane.env.RMD_SRE_LANE?.trim() === "0") return;
     const primaries = await livePrimaryNames(where.registryPath);
     if (!("names" in primaries) || primaries.names.length !== 1) return;
-    // Under the test runner a page reads only a fixture registry, never the live fleet's (the ops-catalog-source /
-    // board-snapshot-cache rule): a test boot on a temp root would otherwise page the real primary. Never in production.
-    if (isTestRunner() && !realpathSync(where.registryPath).startsWith(realpathSync(tmpdir()) + sep)) return;
+    // Under the test runner a page reads only a fixture registry a test named by env under tmpdir, never the checkout's
+    // own: a checkout copied under tmpdir would otherwise page the real primary (W1-T14611). Never in production.
+    const fixture = where.registryFromEnv && realpathSync(where.registryPath).startsWith(realpathSync(tmpdir()) + sep);
+    if (isTestRunner() && !fixture) return;
     await unresolved.escalate({ primary: primaries.names[0]!, stateRoot: where.stateRoot, registry: where.registryPath, reason: instance.why });
   } catch (error) {
     log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) });
