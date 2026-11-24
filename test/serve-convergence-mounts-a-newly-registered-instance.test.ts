@@ -212,10 +212,13 @@ function stubbedSeams(t: { after: (fn: () => void) => void }) {
   writeFileSync(join(install, "deploy", "serve-container.sh"), "exit 1\n");
   writeFileSync(daemonInstanceRegistryPath(install),
     `instances:\n  core:\n    repo: remudero\n    primary: true\n    container_name: remudero-daemon\n    state_dir: ${state}\n`);
-  const f = { plan: [] as string[], mounted: [] as string[], calls: [] as string[][], replaced: 0 };
+  const f = { plan: [] as string[], mounted: [] as string[], calls: [] as string[][], replaced: 0, throwPlan: false };
   const exec = (cmd: string, args: string[]): string => {
     f.calls.push([cmd, ...args]);
-    if (cmd === "bash" && args.includes("--instance-mount-plan")) return f.plan.map((n) => `instance\t${n}\t${BASE}/${n}\n`).join("");
+    if (cmd === "bash" && args.includes("--instance-mount-plan")) {
+      if (f.throwPlan) throw new Error("launcher refused the plan");
+      return f.plan.map((n) => `instance\t${n}\t${BASE}/${n}\n`).join("");
+    }
     if (cmd === "docker" && args.at(-1) === "{{json .Mounts}}") return JSON.stringify(f.mounted.map((n) => ({ Destination: `${BASE}/${n}` })));
     if (cmd === "env") f.replaced++;
     return "";
@@ -279,6 +282,14 @@ test("W1-T14591 criterion 3: an unmounted instance counts only after it stays un
   assert.equal(settled.out.replaced, true, settled.out.reason);
   assert.deepEqual(settled.rows, ["deploy.serve_policy_replace", "deploy.serve_policy_replaced"]);
   assert.equal(record(), undefined, "a replace that mounts it removes it from the file");
+});
+
+test("W1-T14591: a launcher refusal leaves the instance mount reading unknown", (t) => {
+  const { f, seams, file } = stubbedSeams(t);
+  f.throwPlan = true;
+
+  assert.equal(seams.serveUnmountedInstances!(NOW), undefined);
+  assert.equal(existsSync(file), false, "an unknown reading leaves the settle record untouched");
 });
 
 test("W1-T14591 criterion 4: a counted instance is held by the existing holds, never by the image-only spacing", () => {
