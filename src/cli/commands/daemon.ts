@@ -60,7 +60,7 @@ import { loadTargetPlanOrEmptyWhenAbsent, plannedSequence, runDrain, type DrainD
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
-import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type DaemonFreshness, type OpsTaskDispatchRead, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe, type PauseInFlightUnit } from "../../lib/daemon.js";
+import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, RESTART_HISTORY_STEPS, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type DaemonFreshness, type OpsTaskDispatchRead, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe, type PauseInFlightUnit } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktreesAsync } from "../../lib/review-worktree-reclaim.js";
 import { reapRetiredReviewerTreesAsync } from "../../lib/reviewer-tree-reaper.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
@@ -144,7 +144,7 @@ import { adoptRunChildren, createAdmittedPlanSlot, runChildModeIsOn, startRunChi
 import { loadObservedOverlapMode, loadRunChildMode, type RunChildMode } from "../../lib/policy.js";
 import { observedScopeFromOpenPrs } from "../../lib/observed-overlap.js";
 import {
-  bootRunChildMode, createRunChildModeTracker, readRunChildModeUnion, readRunChildPolicy, runChildModeFor,
+  bootRunChildMode, createRunChildModeTracker, readRunChildModeUnion, readRunChildPolicy, RUN_CHILD_MODE_EVIDENCE_STEPS, runChildModeFor,
   type RunChildContractEscalation, type RunChildModeDecision,
 } from "../../lib/run-child-mode.js";
 import { type TickReadOptions, startTickReadWorker, tickReadWorkerUrl, fetchCiFailuresAsync, mergeLogEvidenceByRoot, planSyncGitRunnerAsync } from "../../lib/tick-read-worker.js";
@@ -2037,8 +2037,8 @@ export async function daemonCommand(
   if (rotationCache) {
     const stateDir = join(config.root, "state");
     try {
-      readRunChildModeUnion(stateDir, rotationCache.read);
-      readRestartHistoryLines(stateDir, undefined, rotationCache.read);
+      readRunChildModeUnion(stateDir, undefined, rotationCache.hook([...RUN_CHILD_MODE_EVIDENCE_STEPS]));
+      readRestartHistoryLines(stateDir, undefined, rotationCache.hook(RESTART_HISTORY_STEPS));
     } catch (warmError) {
       // A failed warm read decides nothing: the boot runs the same two reads and refuses or records there.
       void warmError;
@@ -2208,7 +2208,7 @@ export async function daemonCommand(
   const childMode = bootChildPolicy.mode === "on" || bootChildPolicy.mode === "auto";
   const childBoot = childMode
     ? bootRunChildMode({ stateDir: dirname(ledgerPath), auto: bootChildPolicy.mode === "auto", liveRows: bootLedgerLines, log,
-      ...(rotationCache ? { read: rotationCache.read } : {}) }) : undefined;
+      ...(rotationCache ? { rotationRecords: rotationCache.hook([...RUN_CHILD_MODE_EVIDENCE_STEPS]) } : {}) }) : undefined;
   const childModeTracker = childBoot?.tracker ?? createRunChildModeTracker(bootLedgerLines);
   const childLog = (step: string, extra: Record<string, unknown> = {}): void => {
     log(step, extra);
@@ -2696,7 +2696,7 @@ export async function daemonCommand(
         readRestartHistory: () => {
           if (rotationCache === undefined) return readRestartHistoryLines(dirname(ledgerPathFor(config)));
           // W1-T14635: the boot's last union read; the warm rows are dropped after it.
-          try { return readRestartHistoryLines(dirname(ledgerPathFor(config)), undefined, rotationCache.read); }
+          try { return readRestartHistoryLines(dirname(ledgerPathFor(config)), undefined, rotationCache.hook(RESTART_HISTORY_STEPS)); }
           finally { rotationCache.dispose(); }
         },
         taskInputAnswer: taskInputAnswerWithLedger(effectiveRepoRoot, ledgerPathFor(config)),

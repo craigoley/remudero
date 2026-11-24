@@ -6,7 +6,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLedgerRotationCache } from "#src/lib/ledger-rotation-cache.js";
 import { readLedgerUnionRecordsSync } from "#src/lib/ledger-union.js";
-import { readRestartHistoryLines } from "#src/lib/daemon.js";
+import { readRestartHistoryLines, RESTART_HISTORY_STEPS } from "#src/lib/daemon.js";
+import type { LedgerRotationCache } from "#src/lib/ledger-rotation-cache.js";
+import { readRunChildModeUnion, RUN_CHILD_MODE_EVIDENCE_STEPS } from "#src/lib/run-child-mode.js";
+
+/** A union read the way the boot's readers make one: their own sync read, with the cache's hook as rotationRecords. */
+const viaCache = (cache: LedgerRotationCache, dir: string, opts: { step?: string | string[]; refuseIncomplete?: boolean }) =>
+  readLedgerUnionRecordsSync(dir, { ...opts, rotationRecords: cache.hook(opts.step) });
 
 const row = (ts: string, step: string, extra: Record<string, unknown> = {}) => JSON.stringify({ ts, step, ...extra });
 
@@ -25,12 +31,12 @@ test("W1-T14635 a rotation read before the promotion is not read again by the bo
   const s = stateDir(t);
   const cache = createLedgerRotationCache();
   const opts = { step: ["run.start", "verdict"], refuseIncomplete: true };
-  const warm = cache.read(s.dir, opts);
+  const warm = viaCache(cache, s.dir, opts);
   assert.deepEqual(cache.counts(), { hits: 0, misses: 1 });
   // The active daemon keeps writing to the live file between the warm read and the promotion.
   writeFileSync(s.live, [row("2026-11-24T11:00:00.000Z", "run.start", { run_id: "R2" }),
     row("2026-11-24T11:30:00.000Z", "verdict", { run_id: "R2" })].join("\n") + "\n");
-  const boot = cache.read(s.dir, opts);
+  const boot = viaCache(cache, s.dir, opts);
   assert.deepEqual(cache.counts(), { hits: 1, misses: 1 }, "the boot answered the rotation from the cache");
   assert.equal(warm.rows.length, 3);
   assert.deepEqual(boot.rows, readLedgerUnionRecordsSync(s.dir, opts).rows, "the boot's rows equal an uncached read");
@@ -40,22 +46,22 @@ test("W1-T14635 a rotation read before the promotion is not read again by the bo
 test("W1-T14635 a rotation that changed after the warm read is read again", (t) => {
   const s = stateDir(t);
   const cache = createLedgerRotationCache();
-  cache.read(s.dir, { step: "run.start" });
+  viaCache(cache, s.dir, { step: "run.start" });
   writeFileSync(s.rotation, gzipSync(row("2026-11-24T09:00:00.000Z", "run.start", { run_id: "R9" }) + "\n"));
   utimesSync(s.rotation, new Date(), new Date(Date.now() + 5000));
-  const again = cache.read(s.dir, { step: "run.start" });
+  const again = viaCache(cache, s.dir, { step: "run.start" });
   assert.deepEqual(cache.counts(), { hits: 0, misses: 2 });
-  assert.deepEqual(again.rows.map((r) => r.run_id), ["R9", "R2"]);
+  assert.deepEqual(again.rows.map((r: Record<string, unknown>) => r.run_id), ["R9", "R2"]);
 });
 
 test("W1-T14635 the cache keeps only the asked steps, and a different filter is its own entry", (t) => {
   const s = stateDir(t);
   const cache = createLedgerRotationCache();
-  assert.equal(cache.read(s.dir, { step: "verdict" }).rows.length, 1);
-  assert.equal(cache.read(s.dir, {}).rows.length, 4, "an unfiltered read is not answered from the verdict-only entry");
+  assert.equal(viaCache(cache, s.dir, { step: "verdict" }).rows.length, 1);
+  assert.equal(viaCache(cache, s.dir, {}).rows.length, 4, "an unfiltered read is not answered from the verdict-only entry");
   assert.deepEqual(cache.counts(), { hits: 0, misses: 2 });
   cache.dispose();
-  cache.read(s.dir, { step: "verdict" });
+  viaCache(cache, s.dir, { step: "verdict" });
   assert.deepEqual(cache.counts(), { hits: 0, misses: 3 }, "dispose dropped the kept rows");
 });
 
@@ -63,8 +69,19 @@ test("W1-T14635 the restart history read through the cache equals the uncached r
   const s = stateDir(t);
   const cache = createLedgerRotationCache();
   const now = Date.parse("2026-11-24T12:00:00.000Z");
-  readRestartHistoryLines(s.dir, now, cache.read);
-  const cached = readRestartHistoryLines(s.dir, now, cache.read);
+  readRestartHistoryLines(s.dir, now, cache.hook(RESTART_HISTORY_STEPS));
+  const cached = readRestartHistoryLines(s.dir, now, cache.hook(RESTART_HISTORY_STEPS));
   assert.deepEqual(cached, readRestartHistoryLines(s.dir, now));
+  assert.equal(cache.counts().hits, 1);
+});
+
+test("W1-T14635 the run-child union read through the cache equals the uncached read", (t) => {
+  const s = stateDir(t);
+  writeFileSync(s.live, row("2026-11-24T11:00:00.000Z", "run_child.settled", { run_id: "R2" }) + "\n");
+  const cache = createLedgerRotationCache();
+  const hook = cache.hook([...RUN_CHILD_MODE_EVIDENCE_STEPS]);
+  readRunChildModeUnion(s.dir, undefined, hook);
+  const cached = readRunChildModeUnion(s.dir, undefined, hook);
+  assert.deepEqual(cached, readRunChildModeUnion(s.dir));
   assert.equal(cache.counts().hits, 1);
 });
