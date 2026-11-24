@@ -2,14 +2,21 @@ import { isDeepStrictEqual } from "node:util";
 import { saveCodeHealthCoverageSource } from "./code-health-store.js";
 import { validateCodeHealthProvenance } from "./code-health-projection.js";
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
+import { writeAtomicAsync } from "./fs-race-safe.js";
 import { ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { appendLedger } from "./ledger.js";
 import { openLedgerUnion } from "./ledger-union.js";
+import { PINNING_IMPACT_MAP_FILE } from "./pinning-tests.js";
+import { readImpactMap } from "./test-impact-map.js";
 import { withTempDir } from "./tmp.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 export const COVERAGE_NIGHTLY_MEASURED_STEP = "coverage_nightly.measured";
+export const COVERAGE_NIGHTLY_IMPACT_MAP_STEP = "coverage_nightly.impact_map";
+export const IMPACT_MAP_RUN_RECORD_FILE = "test-impact-map.run.json";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface CoverageNightlyRun {
@@ -23,6 +30,8 @@ export interface CoverageNightlyRun {
 export interface CoverageNightlyReader {
   newestCompletedRun(owner: string, repo: string): Promise<CoverageNightlyRun | undefined>;
   summaryForRun(owner: string, repo: string, run: CoverageNightlyRun): Promise<unknown>;
+  /** Downloads the run's test-impact-map artifact into `dir`; absent, no map is refreshed. */
+  impactMapForRun?(owner: string, repo: string, run: CoverageNightlyRun, dir: string): Promise<"downloaded" | "no-artifact">;
 }
 
 function completedMainRun(value: unknown): CoverageNightlyRun {
@@ -55,6 +64,19 @@ export function coverageNightlyGithubReader(
         ]);
         return JSON.parse(readFileSync(join(dir, "coverage-nightly-summary.json"), "utf8"));
       });
+    },
+    async impactMapForRun(owner, repo, run, dir) {
+      try {
+        await (deps.ghTextAsync ?? ghTextAsync)([
+          "run", "download", String(run.id), "--repo", `${owner}/${repo}`,
+          "--name", "test-impact-map", "--dir", dir,
+        ]);
+        return "downloaded";
+      } catch (error) {
+        const detail = `${error instanceof Error ? error.message : String(error)} ${String((error as { stderr?: unknown }).stderr ?? "")}`;
+        if (/no valid artifacts found|no artifact matches/i.test(detail)) return "no-artifact";
+        throw error;
+      }
     },
   };
 }
@@ -94,6 +116,97 @@ function validatedSummary(value: unknown, run: CoverageNightlyRun, repository: s
   ].map((key) => [key, s[key]])) };
 }
 
+export type ImpactMapRefreshResult =
+  | { outcome: "refreshed"; map_sha: string; bytes: number }
+  | { outcome: "unchanged" }
+  | { outcome: "no-artifact" | "invalid" | "failed"; reason: string };
+
+async function recordedRunId(path: string): Promise<unknown> {
+  try {
+    return (JSON.parse(await readFile(path, "utf8")) as { run_id?: unknown } | null)?.run_id;
+  } catch {
+    return undefined; // An absent or unreadable run record only means this run is downloaded again.
+  }
+}
+
+async function refreshImpactMapFile(opts: {
+  owner: string; repo: string; run: CoverageNightlyRun; reader: Required<Pick<CoverageNightlyReader, "impactMapForRun">>;
+  checkoutRoot: string; clock: Clock;
+}): Promise<ImpactMapRefreshResult> {
+  const { run } = opts;
+  const commonDir = resolve(opts.checkoutRoot, (await hostWorktreeGitAsync(opts.checkoutRoot, ["rev-parse", "--git-common-dir"])).trim());
+  const target = join(commonDir, PINNING_IMPACT_MAP_FILE);
+  const recordPath = join(dirname(target), IMPACT_MAP_RUN_RECORD_FILE);
+  if (await recordedRunId(recordPath) === String(run.id)) return { outcome: "unchanged" };
+  const recordRun = (): Promise<void> => writeAtomicAsync(recordPath,
+    `${JSON.stringify({ run_id: String(run.id), sha: run.head_sha, refreshed_at: opts.clock.iso() })}\n`);
+  return withTempDir("test-impact-map", async (dir): Promise<ImpactMapRefreshResult> => {
+    let got: "downloaded" | "no-artifact";
+    try {
+      got = await opts.reader.impactMapForRun(opts.owner, opts.repo, run, dir);
+    } catch (error) {
+      return { outcome: "failed", reason: `download failed: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    if (got === "no-artifact") {
+      await recordRun();
+      return { outcome: "no-artifact", reason: `run ${run.id} has no test-impact-map artifact` };
+    }
+    const staged = join(dir, "test-impact-map.json");
+    const read = await readFile(staged).then((bytes) => ({ bytes }), (error: unknown) => ({ error }));
+    const { map, problem } = readImpactMap(staged, () => {
+      if ("error" in read) throw read.error;
+      return read.bytes.toString("utf8");
+    });
+    if (!map || "error" in read) {
+      await recordRun();
+      return { outcome: "invalid", reason: problem ?? "impact map unreadable" };
+    }
+    if (map.sha !== run.head_sha) {
+      await recordRun();
+      return { outcome: "invalid", reason: `impact map sha ${map.sha} is not the run's head sha ${run.head_sha}` };
+    }
+    await writeAtomicAsync(target, read.bytes);
+    await recordRun();
+    return { outcome: "refreshed", map_sha: map.sha, bytes: read.bytes.length };
+  });
+}
+
+/** One refresh of the test impact map from `run`; appends one coverage_nightly.impact_map row and never throws. */
+export async function refreshTestImpactMap(opts: {
+  ledgerPath: string; owner: string; repo: string; run: CoverageNightlyRun;
+  reader: Required<Pick<CoverageNightlyReader, "impactMapForRun">>;
+  checkoutRoot?: string; clock?: Clock; log?(line: string): void;
+}): Promise<ImpactMapRefreshResult> {
+  const clock = opts.clock ?? systemClock;
+  let result: ImpactMapRefreshResult;
+  try {
+    result = await refreshImpactMapFile({ ...opts, checkoutRoot: opts.checkoutRoot ?? process.cwd(), clock });
+  } catch (error) {
+    result = { outcome: "failed", reason: error instanceof Error ? error.message : String(error) };
+  }
+  try {
+    appendLedger(opts.ledgerPath, {
+      step: COVERAGE_NIGHTLY_IMPACT_MAP_STEP, task_id: "coverage-nightly", repository: `${opts.owner}/${opts.repo}`,
+      run_id: String(opts.run.id), head_sha: opts.run.head_sha, ...result,
+    }, { clock });
+  } catch (error) {
+    (opts.log ?? ((line: string) => console.error(line)))(`coverage-nightly impact map row was not written: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return result;
+}
+
+let runningImpactMapRefresh: Promise<void> | undefined;
+
+function startImpactMapRefresh(opts: Omit<Parameters<typeof refreshTestImpactMap>[0], "reader"> & { reader: CoverageNightlyReader }): Promise<void> | undefined {
+  const { reader } = opts;
+  if (runningImpactMapRefresh !== undefined || reader.impactMapForRun === undefined) return undefined;
+  const impactMapForRun = reader.impactMapForRun.bind(reader);
+  runningImpactMapRefresh = refreshTestImpactMap({ ...opts, reader: { impactMapForRun } })
+    .then(() => undefined, (error: unknown) => (opts.log ?? console.error)(`coverage-nightly impact map refresh failed: ${String(error)}`))
+    .finally(() => { runningImpactMapRefresh = undefined; });
+  return runningImpactMapRefresh;
+}
+
 export type CoverageNightlyIntakeResult =
   | { status: "appended" | "duplicate"; runId: string }
   | { status: "not-due" | "failed"; reason: string }
@@ -109,6 +222,8 @@ export async function readCoverageNightlySummary(opts: {
   };
   clock?: Clock;
   reader?: CoverageNightlyReader;
+  /** The checkout whose git common dir holds the test impact map; default the process cwd. */
+  checkoutRoot?: string;
   log?(line: string): void;
 }): Promise<CoverageNightlyIntakeResult> {
   const clock = opts.clock ?? systemClock;
@@ -129,6 +244,7 @@ export async function readCoverageNightlySummary(opts: {
     const candidate = await reader.newestCompletedRun(opts.owner, opts.repo);
     if (candidate === undefined) return { status: "no-run" };
     const run = completedMainRun(candidate);
+    void startImpactMapRefresh({ ledgerPath: opts.ledgerPath, owner: opts.owner, repo: opts.repo, run, reader, checkoutRoot: opts.checkoutRoot, clock, log });
     const runId = String(run.id);
     const repository = `${opts.owner}/${opts.repo}`;
     let incomplete = false;
