@@ -14,7 +14,7 @@ import { buildFieldTrialsCaseFiles, caseLedgerWindowDays, creditsTask, parseCarr
 const repoRoot = process.env.RMD_FIELD_TRIALS_REPO_ROOT ?? "/app";
 const stateDir = process.env.RMD_FIELD_TRIALS_CORE_LEDGER ?? "/home/node/Remudero/state";
 const out = process.env.RMD_FIELD_TRIALS_CASE_OUT ?? join(stateDir, "field-trials", "case-files-latest.json");
-// W1-T14602: what the last build learned (PR links, empty searches, finished PR reads), so tonight reads only what changed.
+// W1-T14602: what the last build learned (PR links, finished PR reads), so tonight reads only what changed.
 const carryPath = join(dirname(out), "case-files-carry.json");
 
 const read = await readFieldTrialsLedger(stateDir);

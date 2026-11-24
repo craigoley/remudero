@@ -3,8 +3,8 @@
  *
  * Every plan task with a worker call in the ledger read gets a case file when it has a credited PR: no count,
  * window or size bound picks which called task is measured. GitHub work stays small by carrying state from the
- * last build: a task's credited PR number, a search that found none (repeated only after the task is called
- * again), and the read of a PR GitHub reports MERGED or CLOSED, which no later read can change.
+ * last build: a task's credited PR number and the read of a PR GitHub reports MERGED or CLOSED, which no later
+ * read can change. A task with no PR link is searched on every build; an empty search is never remembered.
  */
 import type { FlowRow } from "./field-trials-flow.js";
 import type { GhReadCadenceDeps } from "./github-transport.js";
@@ -21,8 +21,6 @@ export interface FieldTrialsCaseFileCarry {
   version: typeof FIELD_TRIALS_CASE_FILE_CARRY_VERSION;
   /** Task id -> its credited PR number, from a ledger row or a search. */
   links: Record<string, number>;
-  /** Task id -> the time a search found no credited PR. */
-  searchedNone: Record<string, string>;
   /** PR number -> its read, kept only once GitHub reported it MERGED or CLOSED. */
   finishedPrs: Record<string, CarriedPrRead>;
 }
@@ -69,18 +67,17 @@ export interface CaseFileReadFailure { read: "search" | "view"; target: string; 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 export function emptyCarry(): FieldTrialsCaseFileCarry {
-  return { version: FIELD_TRIALS_CASE_FILE_CARRY_VERSION, links: {}, searchedNone: {}, finishedPrs: {} };
+  return { version: FIELD_TRIALS_CASE_FILE_CARRY_VERSION, links: {}, finishedPrs: {} };
 }
 
 /** A carry file's parsed JSON, or an empty carry when it is not one this version wrote. */
 export function parseCarry(value: unknown): FieldTrialsCaseFileCarry {
   const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
   const map = (field: unknown) => field && typeof field === "object" && !Array.isArray(field) ? field as Record<string, unknown> : undefined;
-  const links = map(record?.links); const searchedNone = map(record?.searchedNone); const finishedPrs = map(record?.finishedPrs);
-  if (record?.version !== FIELD_TRIALS_CASE_FILE_CARRY_VERSION || !links || !searchedNone || !finishedPrs) return emptyCarry();
+  const links = map(record?.links); const finishedPrs = map(record?.finishedPrs);
+  if (record?.version !== FIELD_TRIALS_CASE_FILE_CARRY_VERSION || !links || !finishedPrs) return emptyCarry();
   const carry = emptyCarry();
   for (const [taskId, number] of Object.entries(links)) if (Number.isSafeInteger(number) && (number as number) > 0) carry.links[taskId] = number as number;
-  for (const [taskId, at] of Object.entries(searchedNone)) if (typeof at === "string" && Number.isFinite(Date.parse(at))) carry.searchedNone[taskId] = at;
   for (const [number, read] of Object.entries(finishedPrs)) {
     const entry = map(read);
     if (typeof entry?.readAt === "string" && map(entry.raw) && finished(entry.raw as Record<string, unknown>)) {
@@ -140,7 +137,7 @@ export async function planFieldTrialsCaseFiles(source: FieldTrialsCaseFileSource
     if (!seen || (row.ts ?? "") > seen.ts) ledgerPr.set(row.taskId, { number: row.prNumber, ts: row.ts ?? "" });
   }
   const counts = { candidates: candidates.length, outsidePlan, linkedByLedger: 0, linkedByCarry: 0, searches: 0,
-    searchMatched: 0, searchAmbiguous: 0, searchUnreadable: 0, searchSkippedNoNewCall: 0, prReads: 0,
+    searchMatched: 0, searchAmbiguous: 0, searchUnreadable: 0, prReads: 0,
     prReadsCarried: 0, prReadsFailed: 0, rateLimitWaits: 0 };
   const prNumbers = new Map<string, number>();
   const readFailures: CaseFileReadFailure[] = [];
@@ -149,18 +146,16 @@ export async function planFieldTrialsCaseFiles(source: FieldTrialsCaseFileSource
     if (fromLedger !== undefined) { prNumbers.set(taskId, fromLedger); counts.linkedByLedger += 1; continue; }
     const fromCarry = prior.links[taskId];
     if (fromCarry !== undefined) { prNumbers.set(taskId, fromCarry); counts.linkedByCarry += 1; continue; }
-    const none = prior.searchedNone[taskId];
-    // A search that found nothing is repeated only once the task has been called again since.
-    if (none !== undefined && lastCall.get(taskId)! <= none) { carry.searchedNone[taskId] = none; counts.searchSkippedNoNewCall += 1; continue; }
+    // Every unlinked task is searched on every build: a PR can open after an earlier empty search with no
+    // `pr.opened` row, so an empty search is never remembered. The rate-limit backoff paces the cost.
     counts.searches += 1;
     try {
-      const searchedAt = pacing.nowIso();
       const credited = (await paced(pacing, firstWaitMs, () => searchPrs(taskId), counts)).filter((pr) => creditsTask(pr, taskId));
       if (credited.length > 1) { counts.searchAmbiguous += 1; continue; }
       if (credited.length === 1 && Number.isSafeInteger(credited[0]!.number)) {
         prNumbers.set(taskId, credited[0]!.number as number);
         counts.searchMatched += 1;
-      } else carry.searchedNone[taskId] = searchedAt;
+      }
     } catch (error) {
       counts.searchUnreadable += 1;
       readFailures.push({ read: "search", target: taskId, error: errorText(error) });

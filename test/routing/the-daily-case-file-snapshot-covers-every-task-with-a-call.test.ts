@@ -90,16 +90,19 @@ test("W1-T14602 criterion 2: a finished PR is carried with no GitHub call, a cha
   assert.deepEqual(sleeps, [5], "a rate-limit reply waits and retries the same search");
   assert.equal(plan.summary.rateLimitWaits, 1);
   assert.equal(plan.prNumbers.get(taskId(100)), 40100);
-  // The next night: links and empty searches are carried, the finished reads stay carried, and an OPEN PR is not.
-  const next = setup(rows, { carry: parseCarry(JSON.parse(JSON.stringify(plan.carry))) });
-  const again = await next.plan();
-  assert.deepEqual(next.searches, [], "a task searched with no new call since is not searched again");
-  assert.equal(again.summary.searchSkippedNoNewCall, 39);
-  assert.deepEqual(next.views.sort(), [40003, 40100], "an OPEN read is never carried");
-  // A task called again after its empty search is searched again.
-  const called = setup([...rows, call(101, daysAgo(-1))], { carry: parseCarry(JSON.parse(JSON.stringify(plan.carry))) });
-  await called.plan();
-  assert.deepEqual(called.searches, [taskId(101)]);
+  // The next night: links and finished reads are carried, an OPEN PR is not, and EVERY still-unlinked task is
+  // searched again with no new call — a PR may have opened since, with no `pr.opened` row.
+  const nextCarry = parseCarry(JSON.parse(JSON.stringify(plan.carry)));
+  const nextSearches: string[] = [];
+  const next = setup(rows, { carry: nextCarry });
+  const again = await next.plan(async (id) => {
+    nextSearches.push(id);
+    // The PR of W1-T20101 opened after last night's empty search.
+    return id === taskId(101) ? [{ number: 40101, body: `Remudero-Task: ${id}`, headRefName: "x" }] : [];
+  });
+  assert.equal(nextSearches.length, 39, "all 39 still-unlinked tasks are searched, none skipped as 'searched before'");
+  assert.equal(again.prNumbers.get(taskId(101)), 40101, "a PR opened after an empty search is linked on the next build");
+  assert.deepEqual(next.views.sort(), [40003, 40100, 40101], "an OPEN read is never carried");
   // A carry this version did not write, or a damaged entry, starts from nothing.
   assert.deepEqual(parseCarry({ version: "other" }), emptyCarry());
   assert.deepEqual(parseCarry({ ...carry, finishedPrs: { 1: { readAt: now, raw: { state: "OPEN" } } } }).finishedPrs, {});
