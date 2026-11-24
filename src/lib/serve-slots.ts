@@ -19,10 +19,10 @@
  * (scripts/build-child-entries.mjs) in a child process, so serve's workers can start from them (W1-T9370).
  * W1-T10058: unless that tree's existing build is verified current, in a child too, as a memory-deferred retry's is.
  */
-import { execFile } from "node:child_process";
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
+import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { reclaimStaleGitLocks, type StaleLockReclaimOptions } from "./git-lock-reclaim.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import type { PreparedSlot, ServeSupervisorOptions } from "./serve-supervisor.js";
@@ -34,14 +34,18 @@ export const SLOT_INSTALL_TIMEOUT_MS = 15 * 60_000;
 /** Runs one command off the loop and resolves its stdout; rejects with its stderr. */
 export type RunCommand = (command: string, args: string[], cwd: string) => Promise<string>;
 
-export const runCommand: RunCommand = (command, args, cwd) =>
-  new Promise((resolvePromise, reject) => {
-    execFile(command, args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: SLOT_INSTALL_TIMEOUT_MS }, (err, stdout, stderr) => {
-      if (err) reject(new Error(`${stderr.trim() || `${err.code ?? err.signal ?? err.name}: ${err.message}`}\n` +
-        `${command} ${args.join(" ")} failed in ${cwd}`));
-      else resolvePromise(stdout);
-    });
-  });
+/** Bounded by LOOP-AVAILABLE time (W1-T9651), never execFile's wall-clock `timeout`: the daemon's handoff prepares
+ *  its slot through this, and a held loop must not destroy a finished child's stdout. */
+export const runCommand: RunCommand = async (command, args, cwd) => {
+  try {
+    return (await execFileLoopBounded(command, args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: SLOT_INSTALL_TIMEOUT_MS })).stdout;
+  } catch (error) {
+    const err = error as { stderr?: unknown; code?: unknown; signal?: unknown; name?: string; message?: string };
+    const stderr = typeof err.stderr === "string" ? err.stderr.trim() : "";
+    throw new Error(`${stderr || `${String(err.code ?? err.signal ?? err.name)}: ${err.message ?? String(error)}`}\n` +
+      `${command} ${args.join(" ")} failed in ${cwd}`);
+  }
+};
 
 function readMarker(dir: string): string | undefined {
   try {
