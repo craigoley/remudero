@@ -21,6 +21,7 @@ import { escalateTargetJobStalled, TARGET_JOB_STALL_ESCALATED_STEP } from "#src/
 import type { IssueGateway } from "#src/lib/escalate.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import type { RunResult } from "#src/lib/run-result.js";
+import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const T0 = Date.parse("2026-11-24T00:00:00.000Z");
@@ -97,6 +98,7 @@ async function drive(opts: DriveOpts) {
     }
   };
   const deps = {
+    ...hostIndependentDaemonDeps(),
     now: () => new Date(nowMs),
     sleep: async () => {
       for (const s of take((c) => c.at !== undefined && c.at <= tick + 1)) s.settle();
