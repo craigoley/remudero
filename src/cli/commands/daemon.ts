@@ -1200,6 +1200,18 @@ function firstTickReadOf<I extends { plan: Plan }, T>(
   };
 }
 
+/** Keep auto-triage on the last published open-PR facts while a replacement read is in flight. */
+export function autoTriageRepairReadGeneration<T>(
+  current: ReadGeneration<T> | undefined,
+  lastPublished: ReadGeneration<T> | undefined,
+  log?: (step: string, extra?: Record<string, unknown>) => void,
+  clock?: Clock,
+): ReadGeneration<T> | undefined {
+  return freshReadGeneration(current ?? lastPublished, {
+    consumer: "auto_triage_repair", log, clock, maxAgeMs: DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS,
+  });
+}
+
 
 /** W1-T14544: what a `--standby` boot carries from its prepare to its promotion; undefined for a normal boot. */
 interface StandbyBoot { startedAtMs: number; ports?: StandbyPorts; promoted: boolean }
@@ -1710,6 +1722,9 @@ export async function daemonCommand(
   // GitHub read path.
   let lastProj: Map<string, StatusProjection> | undefined;
   let tickReadGeneration: ReadGeneration<TickReadFacts> | undefined;
+  // Auto-triage can run while the next read is in flight. Keep its last published
+  // generation available; the read plane's live slot is deliberately invalidated then.
+  let lastRepairSnapshotGeneration: ReadGeneration<TickReadFacts> | undefined;
   let tickReadStartedAtMs: number | undefined;
   const boardSnapshotFor = memoiseBoardSnapshotByRepo(config.root, log);
   const targetCheckoutRoot = daemonTargetCheckoutRoot(target, config.root);
@@ -2376,7 +2391,7 @@ export async function daemonCommand(
   // Without this line `deps.checkAutoTriage` is undefined and the whole rung is dead code, which is
   // exactly how #1066 merged: consumer wired, producer never.
   const autoTriageHooks = target.isSelf ? (deps.buildAutoTriageHooks ?? buildAutoTriageDaemonHooks)({ config, repairSnapshot: () => {
-    const generation = freshReadGeneration(tickReadGeneration, { consumer: "auto_triage_repair", log, maxAgeMs: DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS });
+    const generation = autoTriageRepairReadGeneration(tickReadGeneration, lastRepairSnapshotGeneration, log, tickReadClock);
     if (!generation || generation.facts.openPrError) {
       log("auto_triage.repair_snapshot_unavailable", {
         reasonCode: tickReadGeneration === undefined ? "unpublished-generation" : !generation ? "stale-generation" : "open-pr-read-error",
@@ -2574,6 +2589,7 @@ export async function daemonCommand(
           invalidate: () => { tickReadGeneration = undefined; tickReadStartedAtMs = tickReadClock.now(); },
           publish: (snapshot: ReadGeneration<TickReadFacts>) => {
             tickReadGeneration = snapshot;
+            lastRepairSnapshotGeneration = snapshot;
             lastProj = new Map(snapshot.facts.projection);
             boardOpenPrCount.reset();
             // The same open rows the synchronous `refreshMerged` keeps: production ticks take this path.
