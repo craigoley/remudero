@@ -1194,7 +1194,7 @@ function startBootPhases(clock: Pick<Clock, "now">, uptimeMs: number): BootPhase
 }
 
 /** W1-T12228: `plan/policy.yaml`'s `freshnessRestart` rows as the daemon's options, beside `sweepWallClockBoundMs`. */
-export function freshnessRestartOpts(rows: FreshnessRestartValues): Pick<DaemonOpts, "freshnessScoreLimit" | "freshnessStalenessHorizonMs" | "freshnessQuietWindowMs" | "freshnessMinLifetimeMs" | "freshnessLikelyFraction" | "freshnessMaxDrainWaitMs"> {
+export function freshnessRestartOpts(rows: FreshnessRestartValues): Pick<DaemonOpts, "freshnessScoreLimit" | "freshnessStalenessHorizonMs" | "freshnessQuietWindowMs" | "freshnessMinLifetimeMs" | "freshnessLikelyFraction" | "freshnessMaxDrainWaitMs" | "freshnessLoopOnlyHorizonMs"> {
   return {
     freshnessScoreLimit: rows.scoreLimit,
     freshnessStalenessHorizonMs: rows.stalenessHorizonMs,
@@ -1202,6 +1202,8 @@ export function freshnessRestartOpts(rows: FreshnessRestartValues): Pick<DaemonO
     freshnessMinLifetimeMs: rows.minLifetimeMs,
     ...(rows.likelyFraction === undefined ? {} : { freshnessLikelyFraction: rows.likelyFraction }),
     ...(rows.maxDrainWaitMs === undefined ? {} : { freshnessMaxDrainWaitMs: rows.maxDrainWaitMs }),
+    // W1-T12230: the loop-only horizon reaches the daemon; absent, it keeps one horizon for both classes.
+    ...(rows.loopOnlyHorizonMs === undefined ? {} : { freshnessLoopOnlyHorizonMs: rows.loopOnlyHorizonMs }),
   };
 }
 

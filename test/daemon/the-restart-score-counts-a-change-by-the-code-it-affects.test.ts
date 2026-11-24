@@ -7,7 +7,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
+import { freshnessRestartOpts } from "#src/cli/commands/daemon.js";
 import { runDaemon, type DaemonFreshness, type DaemonOpts } from "#src/lib/daemon.js";
+import { judgeAdvanceByClosure, type DaemonClosure } from "#src/lib/daemon-closure.js";
 import {
   coalesceFreshnessRestart,
   countFreshnessChangeClasses,
@@ -23,6 +25,7 @@ import { loadPolicy, policyPath, PolicyError, validatePolicy } from "#src/lib/po
 import { classifyAdvanceCommit, daemonFreshnessFromService, type AdvanceClosure, type ServiceFreshness } from "#src/lib/self-sync.js";
 import { trackInFlightReview } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { hostIndependentDaemonDeps } from "#test/helpers/daemon-host-pins.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const MINUTE = 60_000;
@@ -61,6 +64,22 @@ test("W1-T12230 criterion 1: each commit of an advance gets one class, and a com
   assert.equal(classifyAdvanceCommit([], inside), "loop", "no files");
   assert.equal(classifyAdvanceCommit([" "], inside), "loop", "a blank file");
   assert.equal(classifyAdvanceCommit(["docs/x.md"], inside), "loop", "none of the three rules fits");
+
+  // The production closure verdict records `inside`, so a commit of a material advance is classed by its own files.
+  const closureAt = (tag: string, paths: string[]): DaemonClosure =>
+    ({ status: "read", sha: sha(tag), entry: "src/cli/index.ts", paths: new Set(paths) });
+  const verdict = judgeAdvanceByClosure(["src/lib/daemon.ts", "src/lib/worker-only.ts"],
+    closureAt("e0", ["src/lib/daemon.ts"]), closureAt("f1", ["src/lib/daemon.ts"]));
+  assert.deepEqual(verdict, { status: "read", material: true, outside: 1, inside: ["src/lib/daemon.ts"] });
+  assert.equal(classifyAdvanceCommit(["src/lib/worker-only.ts"], verdict), "worker_only", "outside the closure of a material advance");
+  assert.equal(classifyAdvanceCommit(["src/lib/daemon.ts"], verdict), "loop");
+  // A module the advance adds is in the new side's closure, one it deletes in the old side's.
+  const added = judgeAdvanceByClosure(["src/lib/new.ts", "src/lib/gone.ts"], closureAt("e0", ["src/lib/gone.ts"]), closureAt("f1", ["src/lib/new.ts"]));
+  assert.equal(classifyAdvanceCommit(["src/lib/new.ts"], added), "loop");
+  assert.equal(classifyAdvanceCommit(["src/lib/gone.ts"], added), "loop");
+  const missed = judgeAdvanceByClosure(["scripts/a.mjs"], closureAt("e0", ["src/lib/daemon.ts"]), closureAt("f1", ["src/lib/daemon.ts"]));
+  assert.deepEqual(missed, { status: "read", material: false, outside: 1, inside: [] });
+  assert.equal(classifyAdvanceCommit(["scripts/a.mjs"], missed), "worker_only");
 
   // The freshness reading carries the class on each change, on the stale arm and the dirty arm alike.
   const commits = [
@@ -136,6 +155,7 @@ async function busyDaemon(read: (nowMs: number) => DaemonFreshness, opts: Daemon
   try {
     const summary = await Promise.race([
       runDaemon(loadPlan(path), {
+        ...hostIndependentDaemonDeps(),
         refreshMerged: () => () => true,
         runOne: async (taskId) => ({ taskId, runId: "unused", merged: true, costUsd: 0, verdict: "merged" }),
         now: () => new Date(nowMs),
@@ -158,6 +178,23 @@ async function busyDaemon(read: (nowMs: number) => DaemonFreshness, opts: Daemon
   return rows;
 }
 const decisions = (rows: Row[]) => rows.filter((row) => row.step === "daemon.freshness_decision");
+
+test("W1-T12230 criterion 3: the policy row loopOnlyHorizonMs reaches runDaemon through the daemon command's options", async () => {
+  const raw = parseYaml(readFileSync(policyPath(REPO_ROOT), "utf8")) as Record<string, Record<string, Record<string, unknown>>>;
+  raw.freshnessRestart!.stalenessHorizonMs = { ...raw.freshnessRestart!.stalenessHorizonMs!, value: HOUR };
+  raw.freshnessRestart!.loopOnlyHorizonMs = { ...raw.freshnessRestart!.loopOnlyHorizonMs!, value: 3 * HOUR };
+  const opts = freshnessRestartOpts(validatePolicy(raw).values.freshnessRestart);
+  assert.equal(opts.freshnessStalenessHorizonMs, HOUR);
+  assert.equal(opts.freshnessLoopOnlyHorizonMs, 3 * HOUR, "the daemon command passes the row on");
+  const shipped = freshnessRestartOpts(loadPolicy(policyPath(REPO_ROOT)).values.freshnessRestart);
+  assert.equal(shipped.freshnessLoopOnlyHorizonMs, FRESHNESS_LOOP_ONLY_HORIZON_MS, "the shipped row reaches the daemon");
+  const reading = (): DaemonFreshness => ({ stale: true, oldSha: sha("e0"), newSha: loop.sha, changes: [loop] });
+  const rows = decisions(await busyDaemon(reading, opts, 30 * MINUTE));
+  const restart = rows.find((row) => row.extra.action === "restart")!;
+  assert.equal(restart.atMs - T0, 3 * HOUR, "a loop-only advance restarts at the policy row, not at stalenessHorizonMs");
+  assert.equal(restart.extra.horizon_ms, 3 * HOUR);
+  assert.ok(rows.some((row) => row.atMs - T0 === HOUR && row.extra.action === "defer"), "an hour in, it still defers");
+});
 
 test("W1-T12230 criterion 4: with a reviewer commit the staleness reaches the score limit at stalenessHorizonMs after its first read", async () => {
   // Pure: the reviewer part runs from when the daemon first read that commit, not from the first stale reading.
@@ -214,7 +251,9 @@ test("W1-T12230 criterion 5: freshnessRestart has the bounded row loopOnlyHorizo
 test("W1-T12230 criterion 6: the decision row carries the count in each class and the horizon, from the real freshness reading", async () => {
   const svc = behind(
     [{ sha: sha("b2"), files: ["src/lib/daemon.ts"] }, { sha: sha("c3"), files: ["scripts/a.mjs"] }, { sha: sha("c4"), files: ["src/lib/w.ts"] }],
-    { status: "read", material: true, outside: 2, inside: ["src/lib/daemon.ts"] },
+    judgeAdvanceByClosure(["src/lib/daemon.ts", "scripts/a.mjs", "src/lib/w.ts"],
+      { status: "read", sha: sha("e0"), entry: "src/cli/index.ts", paths: new Set(["src/lib/daemon.ts"]) },
+      { status: "read", sha: sha("b2"), entry: "src/cli/index.ts", paths: new Set(["src/lib/daemon.ts"]) }),
   );
   const freshness = daemonFreshnessFromService(svc) as DaemonFreshness;
   assert.equal(freshness.stale, true);
