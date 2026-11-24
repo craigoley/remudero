@@ -384,8 +384,9 @@ test("W1-T14368 criterion 3: plan-task-migration judges the ops catalog its copy
   const heavy = { ...read.size!, bytes: OLD_BYTES };
   assert.equal(reason(() => judgeOpsCopy(heavy, original, publicCommit, { heap: () => ({ used_heap_size: 2 ** 40, heap_size_limit: 2 ** 40 }) })),
     "catalog_incompatible", "a copy past the heap the reader has left is refused before it lands");
-  assert.equal(reason(() => judgeOpsCopy({ ...read.size!, treeEntries: 9_999, shardDir: false }, original, publicCommit)), "catalog_incompatible",
-    "the copy's own tree entries count");
-  assert.equal(reason(() => judgeOpsCopy(read.size!, shard("W1-T9", 256 * 1024), publicCommit)), "catalog_incompatible", "and its own blob");
+  // W1-T14638: no count of tree entries and no one shard's size refuses a copy.
+  assert.equal(reason(() => judgeOpsCopy({ ...read.size!, treeEntries: 9_999, shardDir: false }, original, publicCommit)), undefined,
+    "the copy's own tree entries are not counted against a ceiling");
+  assert.equal(reason(() => judgeOpsCopy(read.size!, shard("W1-T9", 256 * 1024), publicCommit)), undefined, "and its own blob is not bounded by a fixed size");
   assert.equal((await catalog(ops.dir, commit)).size, undefined, "the public read carries no ops size");
 });
