@@ -414,8 +414,15 @@ function priceEpisodes(episodes: readonly Episode[], now: number): Price[] {
 /** W1-T12548: an open own-red episode older than this is eligible whatever the p90 of cleared ones is. */
 export const FLOW_OWN_RED_OPEN_AGE_MS = 60 * 60_000;
 
+/** An episode of pending-checks waits or a held draft is nobody's failure: no arm, and no CI hand-off, admits it. */
+function neverFlowEligible(e: Episode): boolean {
+  return e.flow !== undefined && (e.flow.waitOnly || e.key.startsWith("held-draft:"));
+}
+
+/** An owner-acted episode is priced as today but is not eligible on the unowned, failed or open-age arms; only a CI-lesson
+ *  hand-off (its own arm) can still put up the charges it names. */
 function excludedFromFlowRemedy(e: Episode): boolean {
-  return e.flow !== undefined && (e.flow.ownerActed || e.flow.waitOnly || e.key.startsWith("held-draft:"));
+  return neverFlowEligible(e) || e.flow?.ownerActed === true;
 }
 
 /** Marks which episodes are worth a remedy: no owner, a failed end, an open wait past the p90 of cleared ones,
@@ -451,7 +458,7 @@ function inventoryOf(records: readonly LedgerRecord[], tasks: readonly CiFrictio
 /** What an episode puts up for a remedy: all of an eligible episode, else only the charges a CI-lesson hand-off names
  *  (W1-T14140). One aggregate-red episode can span heads where different checks read red; the hand-off owns only its own. */
 function eligibleSlice(e: Episode): Episode[] {
-  if (excludedFromFlowRemedy(e)) return [];
+  if (neverFlowEligible(e)) return [];
   if (e.eligible) return [e];
   const handed = e.charges.filter(c => c.handedOff);
   return handed.length ? [{ ...e, charges: handed }] : [];
@@ -721,7 +728,7 @@ export function flowGardenSpec(deps: GardenerDeps, sources: FlowGardenSources): 
     const plan = sources.planState ? sources.planState() : readLadderPlan(deps.repoRoot, FLOW_LADDER);
     if (plan.degraded) deps.log("flow.origins_degraded", { reason: plan.degraded });
     if (plan.unreadable?.length) throw new Error(`flow plan shards unreadable: ${plan.unreadable.join(", ")}`);
-    const prs = [...new Set(episodesOf(records, new Map(), clock.now()).filter(e => e.outcome === "open" && e.owner !== "NONE").map(e => e.pr))];
+    const prs = [...new Set(episodesOf(records, new Map(), clock.now()).filter(e => e.outcome === "open").map(e => e.pr))];
     const outcomes = sources.prOutcomes ? sources.prOutcomes(prs) : readOutcomes(prs, sources);
     return inventoryOf(records, plan.tasks, outcomes, clock.now(), fileable);
   };

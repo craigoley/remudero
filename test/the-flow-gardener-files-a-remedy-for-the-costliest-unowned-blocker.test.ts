@@ -327,7 +327,10 @@ test("flow production sources read all archive forms, main trailers and merge ac
   ] });
   writeFileSync(join(ledger.dir, "ledger.legacy.ndjson.gz"), gzipSync(JSON.stringify(row(3, -2)) + "\n" + JSON.stringify(row(3, 0)) + "\n"));
   const shim = ghShim([{ when: "api graphql", stdout: JSON.stringify({ data: { repository: {
+    // W1-T13524: an unowned open episode's merge or close time is read too, so the still-open PRs 1 and 3 answer as open.
+    p1: { state: "OPEN", mergedAt: null, closedAt: null, mergedBy: null },
     p2: { state: "MERGED", mergedAt: iso(0), closedAt: iso(0), mergedBy: { login: "operator" } },
+    p3: { state: "OPEN", mergedAt: null, closedAt: null, mergedBy: null },
   } } }) }]);
   t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
   const oldPath = process.env.PATH;

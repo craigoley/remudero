@@ -64,7 +64,8 @@ test("W1-T13524 criterion 1: owner fix, review and acted observations suppress a
     { step: "ci_learning.ladder_handoff", gate: "check", red_heads: [{ pr: 4, sha: "abcdef1" }] },
     { step: "review.posted", pr_url: url(4), ts: iso(-3) },
   ]);
-  assert.equal(handoff.next, undefined);
+  // A CI-lesson hand-off is its own arm: an owner round inside the episode does not withdraw the charge the hand-off names.
+  assert.equal(handoff.next?.price.key, "own-red:handed off");
 });
 
 test("W1-T13524 criterion 2: terminal observations, pending waits and held drafts never qualify", () => {
@@ -76,13 +77,13 @@ test("W1-T13524 criterion 2: terminal observations, pending waits and held draft
     [15, { state: "closed", at: iso(-3) }],
   ]);
   const result = inventory([
-    disposed(10, -5, "own-red", "prior red"), disposed(10, -3, "own-red", "at merge"), disposed(10, -2, "own-red", "after merge"),
+    disposed(10, -5, "own-red", "prior red"), disposed(10, -3, "own-red", "at merge"), disposed(10, -2, "escalated", "after merge"),
     disposed(11, -3, "awaiting-review", "prior review"), disposed(11, -1.5, "held-draft", "after close"), disposed(11, -1, "own-red", "later"),
     { step: "pr.terminal", pr_number: 11, state: "closed", closed_at: iso(-2), ts: iso(0) },
     disposed(12, -4, "awaiting-ci", "checks pending under ceiling", { disposition: "wait" }),
     disposed(12, -2, "awaiting-ci", "checks pending under ceiling", { disposition: "wait" }),
     disposed(13, -4, "held-draft", "draft held"), disposed(13, -2, "held-draft", "draft held"),
-    disposed(15, -3, "own-red", "at close"), disposed(15, -2, "own-red", "after close"),
+    disposed(15, -3, "escalated", "at close"), disposed(15, -2, "escalated", "after close"),
     disposed(16, -3, "escalated", "after ledger merge"),
     { step: "pr.terminal", pr_number: 16, state: "merged", merged_at: iso(-3.5), ts: iso(-2) },
   ], outcomes);
@@ -101,6 +102,24 @@ test("W1-T13524 criterion 2: terminal observations, pending waits and held draft
     disposed(14, -2, "awaiting-ci", "checks pending", { disposition: "blocked-ambiguous" }),
   ], new Map([[14, { state: "closed", at: iso(0) }]]));
   assert.equal(stale.next?.price.key, "awaiting-ci:checks pending");
+
+  // An UNOWNED pull request with no `pr.terminal` row: its merge time still comes from the outcome read, so the rows at and
+  // after the merge charge nothing (the read is asked for every open episode, not only an owned one's).
+  const asked: number[][] = [];
+  const unowned = flowGardenSpec({
+    repoRoot: "/unused", stateDir: "/unused", clock: fixedClock(NOW),
+    log: () => {}, openWorkspace: () => { throw new Error("unexpected workspace"); },
+  }, {
+    owner: "acme", repo: "remudero", mintTaskId: () => "W1-T9001", ownerSearch,
+    ledgerRecords: () => [
+      disposed(17, -5, "escalated", "before merge"), disposed(17, -3, "escalated", "before merge"),
+      disposed(17, -2, "escalated", "before merge"),
+    ],
+    planState: () => ({ tasks: [] }),
+    prOutcomes: prs => { asked.push([...prs]); return new Map([[17, { state: "merged", at: iso(-3), mergedBy: "operator" }]]); },
+  }).inventory();
+  assert.deepEqual(asked, [[17]]);
+  assert.deepEqual(unowned.charges.map(charge => [charge.pr, charge.end]), [[17, NOW - 3 * HOUR]]);
 });
 
 test("W1-T13524 criterion 3: filing needs eligible overlap with the widened before-window and explains its episodes", () => {
