@@ -35,6 +35,39 @@ export const PRODUCT_PLAN_LEDGER_READ_BOUND_MS = 15_000;
 /** PRIMARY CONTROL: maintained quotas on the plan-operation journal; none of it grants spend or planning authority. */
 export const PRODUCT_PLAN_OPERATION_LIMITS = { operations: 256, stateBytes: 2 * 1024 * 1024, briefBytes: 60 * 1024, evidenceBytes: 256 * 1024 } as const;
 
+/** W1-T14675: the provenance reference a Console steering note carries, with the moment it was written. */
+export const PRODUCT_STEER_REFERENCE_PREFIX = "console:repository-steer@";
+const PRODUCED_PLAN_OUTCOMES = new Set(["proposed", "succeeded"]);
+
+/**
+ * W1-T14675 INVARIANT steer-can-add: the operator's steering notes that no plan has answered yet. A note is an
+ * operator-provenance decision whose reference is {@link PRODUCT_STEER_REFERENCE_PREFIX}<ISO instant>; it is
+ * unanswered when no plan evidence that produced a plan (proposed or succeeded) was observed after it. A plan
+ * that was only queued, or failed, answers nothing, so the next request still steers.
+ */
+export function unansweredSteerNotes(product: Pick<StoredProduct, "brief" | "stageEvidence">): Array<{ key: string; value: string; at: string }> {
+  const answered = product.stageEvidence
+    .filter((entry) => entry.stage === "plan" && PRODUCED_PLAN_OUTCOMES.has(entry.outcome))
+    .reduce((latest, entry) => Math.max(latest, Date.parse(entry.observedAt) || 0), 0);
+  return (product.brief.decisions ?? []).flatMap((decision) => {
+    const reference = decision.provenance.kind === "operator" ? decision.provenance.reference : undefined;
+    if (!reference?.startsWith(PRODUCT_STEER_REFERENCE_PREFIX)) return [];
+    const at = reference.slice(PRODUCT_STEER_REFERENCE_PREFIX.length);
+    const ms = Date.parse(at);
+    return Number.isFinite(ms) && ms > answered ? [{ key: decision.key, value: decision.value, at }] : [];
+  });
+}
+
+/**
+ * W1-T14675: the plan mode for a product. A target with no plan is `create`. A target with a plan is `clarify`,
+ * which only rewrites tasks that exist, unless the operator has steered since the last produced plan: then it is
+ * `create`, whose PROPOSED arm adds the tasks the new direction needs (and may rewrite the ones it changes).
+ */
+export function productPlanModeFor(product: Pick<StoredProduct, "brief" | "stageEvidence">, targetHasPlan: boolean): "create" | "clarify" {
+  if (!targetHasPlan) return "create";
+  return unansweredSteerNotes(product).length > 0 ? "create" : "clarify";
+}
+
 /** Names a durable, reviewed handoff: the target task's `origin:` must carry exactly this (or an explicit association). */
 export const productPlanOrigin = (productId: string, planEvidenceId: string) => `product-plan#${productId}/${planEvidenceId}`;
 
@@ -648,7 +681,7 @@ export class ProductPlanOperationService {
         const config = this.options.runnerConfig === undefined ? await readTargetRunnerConfig(checkout, head)
           : await this.options.runnerConfig(checkout, head);
         if (config.state !== "present") throw new Fault(runnerConfigRefusal[config.state]);
-        const mode = await this.planMode(subject, head);
+        const mode = productPlanModeFor(product, await this.planMode(subject, head) === "clarify");
         const planEvidenceId = `pplan-${operationId.slice(0, 24)}`;
         const brief = this.briefArgument(product, planEvidenceId, operationId, head);
         if (Buffer.byteLength(brief) > PRODUCT_PLAN_OPERATION_LIMITS.briefBytes) throw new Fault("invalid_input");
@@ -788,7 +821,12 @@ export class ProductPlanOperationService {
   private briefArgument(product: StoredProduct, planEvidenceId: string, operationId: string, targetHead: string): string {
     const envelope = product.brief.resourceEnvelope!;
     const constraints = (product.brief.constraints ?? []).map((item) => `- ${item}`).join("\n");
-    const parts = [productCasePlanText(product.brief), constraints ? `Constraints:\n${constraints}` : "",
+    const steer = unansweredSteerNotes(product);
+    // W1-T14675: the operator's newest direction leads, so a create run plans THAT against the existing plan.
+    const direction = steer.length === 0 ? "" : ["New operator direction to plan now. The target already has a plan: add the tasks this needs,",
+      "rewrite existing tasks it changes, and name in your PROPOSED summary any task it makes obsolete (never delete one):",
+      ...steer.map((note) => `- ${note.value} (${note.at})`)].join("\n");
+    const parts = [direction, productCasePlanText(product.brief), constraints ? `Constraints:\n${constraints}` : "",
       `Resource envelope: budgetUsd=${envelope.budgetUsd} maxConcurrentBuilds=${envelope.maxConcurrentBuilds} existingSetupOnly=${envelope.existingSetupOnly}`,
       `Task origin: ${productPlanOrigin(product.id, planEvidenceId)}`, `Operation: ${operationId}`].filter(Boolean);
     const items = productPlanCoverageInventory(product.brief);
