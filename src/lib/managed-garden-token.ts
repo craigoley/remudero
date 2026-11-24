@@ -132,8 +132,9 @@ export function mintInstallationTokenSync(
   let body: { token?: unknown; expires_at?: unknown; status?: unknown; error?: unknown };
   try {
     body = JSON.parse(String(child.stdout ?? ""));
-  } catch {
-    return fail("exchange response unparsable");
+  } catch (err) {
+    log(TOKEN_REFRESH_FAILED_STEP, { reason: "exchange response unparsable", error: err instanceof Error ? err.message : String(err), mode: "sync" });
+    return { ok: false, reason: "exchange response unparsable" };
   }
   if (typeof body.status === "number") return fail(`exchange rejected: ${body.status}`);
   if (body.error !== undefined) return fail(body.error === "TimeoutError" ? "exchange timed out" : `exchange request failed: ${String(body.error)}`);
