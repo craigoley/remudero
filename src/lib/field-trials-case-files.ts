@@ -49,16 +49,10 @@ export type CaseFileOpsRead =
   | { outcome: "unreadable"; reason: string };
 
 /** The reads {@link readCaseFileOpsCatalog} makes; each defaults to the one the daemon tick uses. */
-export interface CaseFileOpsReadDeps {
-  destination?: typeof planDestinationRepository;
-  snapshot?: typeof readOpsCatalogSnapshotAsync;
-  lastGood?: typeof readLastGoodOpsCatalogSnapshot;
-}
-
 /** W1-T14717: the snapshot script's ops catalog read. The destination names the catalog; a refused live read falls
  * back to the daemon's last good snapshot (W1-T14564), and the refusal is kept either way. */
-export async function readCaseFileOpsCatalog(stateDir: string, deps: CaseFileOpsReadDeps = {}): Promise<CaseFileOpsRead> {
-  const { destination = planDestinationRepository, snapshot = readOpsCatalogSnapshotAsync, lastGood = readLastGoodOpsCatalogSnapshot } = deps;
+export async function readCaseFileOpsCatalog(stateDir: string, destination = planDestinationRepository,
+  snapshot = readOpsCatalogSnapshotAsync, lastGood = readLastGoodOpsCatalogSnapshot): Promise<CaseFileOpsRead> {
   const named = destination(stateDir);
   if (named.outcome === "off") return { outcome: "off" };
   if (named.outcome === "unreadable") return { outcome: "unreadable", reason: "destination-unreadable" };
