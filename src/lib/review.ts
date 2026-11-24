@@ -41,7 +41,7 @@ import { makeTempDir } from "./tmp.js";
 import { createProofCache, ProofCacheUnavailableError, type ProofCache, type ProofCacheRelease } from "./proof-cache.js";
 import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
-import { dependencySeedRootChoice, SEED_LOCK_RECLAIMED } from "./dependency-seeds.js";
+import { dependencySeedRootChoice, primeRefusalReceipt, SEED_LOCK_RECLAIMED, type DependencyGenerationRefusalReceipt } from "./dependency-seeds.js";
 import { configPath } from "./config.js";
 import { proofTestRunnerArgs } from "./test-run-timeout.js";
 import {
@@ -2127,7 +2127,8 @@ export function defaultProofTimeoutMs(): number {
   return loadDefaultPolicy().values.proofTimeoutMs;
 }
 const npmCiPrimed = new Set<string>();
-const npmCiPending = new Map<string, Promise<void>>();
+const npmCiPending = new Map<string, { install: Promise<void>; seed: boolean }>();
+const refusedProofPrimes = new Map<string, DependencyGenerationRefusalReceipt>();
 /** Process-wide latch for {@link ensureBrowsersOnce} — see its doc comment for why
  * this is NOT keyed by cwd the way {@link npmCiPrimed} is. */
 let browserPreflightDone = false;
@@ -2787,9 +2788,9 @@ const DEPENDENCY_SEED_SCRIPT = fileURLToPath(new URL("../../scripts/dependency-s
 
 type ProofInstallPlan = { arm: "npm-ci" } | { arm: "seed"; store: "account" | "state-dir"; root: string };
 type PrimeResult = { status?: unknown; key?: unknown; installed?: unknown; lockReclaimed?: unknown };
-type InstallAttempt = { error?: string; prime?: PrimeResult; key?: string };
+type InstallAttempt = { error?: string; prime?: PrimeResult; key?: string; receipt?: DependencyGenerationRefusalReceipt };
 /** Why a tree takes npm ci (null when nothing was tried first), and the seed key a failed prime reached, if any. */
-type NpmCiFallback = { fallback: string | null; key: string | null };
+type NpmCiFallback = { fallback: string | null; key: string | null; receipt?: DependencyGenerationRefusalReceipt };
 type ProofStateDir = { dir: string; usable: boolean };
 /** A proof prime announces its key before waiting, and also names it in keyed errors. */
 const FAILED_PRIME_SEED_KEY = /\[seed ([a-f0-9]{64})\]/;
@@ -2809,6 +2810,7 @@ interface ProofInstallRecord {
   seed_store: "account" | "state-dir" | null;
   ok: boolean;
   reason: string | null;
+  receipt?: DependencyGenerationRefusalReceipt;
 }
 
 /** How a checkout with no node_modules is installed. The account's opt-in is used as before for every checkout; an
@@ -2866,10 +2868,11 @@ function afterSeedPrime(cwd: string, plan: Extract<ProofInstallPlan, { arm: "see
   }
   const reason = attempt.error ?? `the seed prime materialized nothing (${String(result?.status)})`;
   const key = attempt.key ?? null;
+  const receipt = attempt.receipt ? { receipt: attempt.receipt } : {};
   if (plan.store === "account" || lstatSync(join(cwd, "node_modules"), { throwIfNoEntry: false })?.isSymbolicLink()) {
-    return { install: "none", seed_key: key, seed_store: plan.store, ok: false, reason };
+    return { install: "none", seed_key: key, seed_store: plan.store, ok: false, reason, ...receipt };
   }
-  return { fallback: reason, key };
+  return { fallback: reason, key, ...receipt };
 }
 
 const NO_FALLBACK: NpmCiFallback = { fallback: null, key: null };
@@ -2878,6 +2881,7 @@ function npmCiRecord(plan: ProofInstallPlan, seeded: NpmCiFallback, attempt: Ins
   return {
     install: "npm-ci", seed_key: seeded.key, seed_store: plan.arm === "seed" ? plan.store : null,
     ok: attempt.error === undefined, reason: seeded.fallback ?? attempt.error ?? null,
+    ...(seeded.receipt ? { receipt: seeded.receipt } : {}),
   };
 }
 
@@ -2890,6 +2894,7 @@ function unplannedRecord(error: unknown): ProofInstallRecord {
  *  ledger. Its sender is SWEEP, the lane that admits and runs a fleet review (PRODUCER_IDENTITIES). A row that cannot be
  *  written is reported and never fails the priming. */
 function recordProofInstall(cwd: string, stateDir: ProofStateDir, record: ProofInstallRecord, startedMs: number): void {
+  if (!record.ok && record.receipt) refusedProofPrimes.set(cwd, record.receipt);
   if (!reviewerOwnedCheckouts.has(resolve(cwd))) return;
   try {
     appendLedger(join(stateDir.dir, LEDGER_FILENAME), {
@@ -2911,6 +2916,12 @@ function failedInstallSeedKey(error: unknown, reason: string): string | undefine
   return FAILED_PRIME_SEED_KEY.exec(stderr || reason)?.[1];
 }
 
+function failedInstall(plan: ProofInstallPlan, error: unknown): InstallAttempt {
+  const receipt = plan.arm === "seed" ? primeRefusalReceipt((error as { stderr?: unknown } | null)?.stderr) : undefined;
+  const reason = receipt?.reason ?? installFailure(error);
+  return { error: reason, key: receipt?.generation ?? failedInstallSeedKey(error, reason), receipt };
+}
+
 function proofInstallTimeout(plan: ProofInstallPlan): number | undefined {
   // The state-dir child bounds its lock wait and package install separately.
   return plan.arm === "seed" && plan.store === "state-dir" ? undefined : 120_000;
@@ -2921,8 +2932,8 @@ function attemptInstallSync(exec: typeof execFileSync, cwd: string, plan: ProofI
   try {
     return readInstall(plan, String(exec(command, args, { cwd, env, stdio: "pipe", timeout: proofInstallTimeout(plan), killSignal: "SIGKILL" }) ?? ""));
   } catch (error) {
-    const reason = installFailure(error);
-    return { error: reason, key: failedInstallSeedKey(error, reason) };
+    // execFileSync puts a failed prime's receipt in the thrown error's stderr buffer.
+    return failedInstall(plan, error);
   }
 }
 
@@ -2931,8 +2942,8 @@ async function attemptInstallAsync(exec: typeof execFileAsync, cwd: string, plan
   try {
     return readInstall(plan, await exec(command, args, { cwd, env, timeout: proofInstallTimeout(plan), killSignal: "SIGKILL" }));
   } catch (error) {
-    const reason = installFailure(error);
-    return { error: reason, key: failedInstallSeedKey(error, reason) };
+    // The async spawner also attaches stderr, including any receipt the child wrote.
+    return failedInstall(plan, error);
   }
 }
 
@@ -2956,7 +2967,8 @@ export function ensureDeps(
   requiredRunnerPath?: string,
   priming: ProofPriming = {},
 ): boolean {
-  const runnerIsPresent = () => requiredRunnerPath === undefined || existsSync(requiredRunnerPath);
+  const runnerIsPresent = () => !refusedProofPrimes.has(cwd) && (requiredRunnerPath === undefined || existsSync(requiredRunnerPath));
+  if (npmCiPending.get(cwd)?.seed) return false;
   if (npmCiPrimed.has(cwd)) return runnerIsPresent();
   npmCiPrimed.add(cwd); // mark attempted regardless of outcome — never retry-storm a cwd
   if (!existsSync(join(cwd, "package.json"))) return runnerIsPresent();
@@ -3000,10 +3012,10 @@ export function ensureDeps(
 export async function ensureDepsAsync(
   cwd: string, requiredRunnerPath?: string, priming: ProofPriming = {}, exec: typeof execFileAsync = execFileAsync,
 ): Promise<boolean> {
-  const runnerIsPresent = () => requiredRunnerPath === undefined || existsSync(requiredRunnerPath);
+  const runnerIsPresent = () => !refusedProofPrimes.has(cwd) && (requiredRunnerPath === undefined || existsSync(requiredRunnerPath));
   const pending = npmCiPending.get(cwd);
   if (pending) {
-    await pending;
+    await pending.install;
     return runnerIsPresent();
   }
   if (npmCiPrimed.has(cwd)) return runnerIsPresent();
@@ -3032,7 +3044,7 @@ export async function ensureDepsAsync(
     const record = "fallback" in seeded ? npmCiRecord(plan, seeded, await attemptInstallAsync(exec, cwd, { arm: "npm-ci" })) : seeded;
     recordProofInstall(cwd, stateDir, record, startedMs);
   })();
-  npmCiPending.set(cwd, install);
+  npmCiPending.set(cwd, { install, seed: plan.arm === "seed" });
   try { await install; }
   finally { npmCiPending.delete(cwd); }
   return runnerIsPresent();
@@ -3311,8 +3323,11 @@ function vitestNameFilterScope(w: WhitelistedProof, cwd: string): string[] {
  * the process boundary; `GENERIC_EXIT_CODE` preserves behaviour. Public `runnerPath` serves the catch;
  * `details` also carries it so ledger readers need not parse the message. */
 class ProofRunnerUnavailableError extends RmdError {
-  constructor(readonly runnerPath: string) {
-    super("usage", GENERIC_EXIT_CODE, `proof runner is absent from this checkout: ${runnerPath}`, { runnerPath });
+  constructor(readonly runnerPath: string | undefined, receipt?: DependencyGenerationRefusalReceipt) {
+    super("usage", GENERIC_EXIT_CODE,
+      receipt ? `proof dependency prime refused: ${receipt.reason}. ${receipt.recovery}`
+        : runnerPath ? `proof runner is absent from this checkout: ${runnerPath}` : "proof dependencies are unavailable",
+      { runnerPath, ...(receipt ? { receipt } : {}) });
   }
 }
 
@@ -3899,7 +3914,7 @@ export function execWhitelistedProof(
   if (deps.preparedArgs === undefined && whitelisted.kind === "test") {
     const runner = checkoutRunnerPath(whitelisted, cwd);
     if (!ensureDeps(cwd, execFileSync, runner, PROOF_TREE_PRIMING)) {
-      throw new ProofRunnerUnavailableError(runner!);
+      throw new ProofRunnerUnavailableError(runner, refusedProofPrimes.get(cwd));
     }
     args = argsWithCheckoutRunner(whitelisted, args, cwd);
     // Same placement as ensureDeps: a `grep` proof never launches a browser; a resolved set with no browser import skips this CDN-facing step.
@@ -4081,7 +4096,9 @@ export async function execWhitelistedProofAsync(
   }
   if (whitelisted.kind === "test") {
     const runner = checkoutRunnerPath(whitelisted, cwd);
-    if (!(await ensureDepsAsync(cwd, runner, PROOF_TREE_PRIMING))) throw new ProofRunnerUnavailableError(runner!);
+    if (!(await ensureDepsAsync(cwd, runner, PROOF_TREE_PRIMING))) {
+      throw new ProofRunnerUnavailableError(runner, refusedProofPrimes.get(cwd));
+    }
     args = argsWithCheckoutRunner(whitelisted, args, cwd);
     if (preflightFiles === undefined || preflightFiles.length === 0 || resolvedTestFilesNeedBrowserPreflight(cwd, preflightFiles)) {
       if (deps.preflightBrowsers) deps.preflightBrowsers(cwd);
@@ -4985,7 +5002,7 @@ export function judgeCriterion(
             proofExec = "not_executable";
             proofSkip = "runner-absent";
             reason =
-              `${reason} — NOTE: proof runner is absent from this checkout (${e.runnerPath}); ` +
+              `${reason} — NOTE: ${e.message}; ` +
               "not executed, keyword floor applied";
           } else if (e instanceof PureProofNeverExecutedError) {
             proofExec = "exec_error"; // met/reason stay EXACTLY the keyword-floor verdict for every OTHER thrown cause
