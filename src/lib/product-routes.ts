@@ -267,7 +267,7 @@ export function buildProductCaseRoutes(options: ProductCaseOptions): Route[] {
       return;
     }
     const result = await service.execute(actor, command);
-    if (!result.ok) { reply(codes[result.code], { error: result.code }); return; }
+    if (!result.ok) { reply(codes[result.code], { error: result.code, ...(result.detail ? { detail: result.detail } : {}) }); return; }
     reply(200, { ...result.value });
   } }];
 }

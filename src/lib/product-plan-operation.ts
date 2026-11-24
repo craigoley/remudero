@@ -304,7 +304,7 @@ export type ProductPlanOperationCode = ProductStoreCode
   | "envelope_missing" | "handoff_unavailable" | "task_stale";
 export type ProductPlanOperationResult =
   | { ok: true; value: { observation: ProductPlanObservation; replayed: boolean }; code?: never }
-  | { ok: false; code: ProductPlanOperationCode; value?: never };
+  | { ok: false; code: ProductPlanOperationCode; value?: never; detail?: string };
 
 export interface PlanRepository { id: number; owner: string; name: string; defaultBranch: string }
 /** The two target reads this operation needs; `ProductBuildTarget` satisfies it, and nothing here imports it. */
@@ -468,7 +468,15 @@ async function serializedJournal<T>(path: string, work: () => Promise<T>): Promi
 }
 
 class Fault extends RmdError {
+  /** Why, in words, when the code alone leaves the operator nothing to act on (W1-T14723: a stale checkout says why it was not moved). */
+  detail?: string;
   constructor(readonly code: ProductPlanOperationCode) { super("usage", GENERIC_EXIT_CODE, `product plan operation: ${code}`); }
+}
+
+/** W1-T14723: attach a reason in words to a plan refusal, so the refusal the operator sees can name it. */
+export function withPlanRefusalDetail(error: unknown, detail: string): unknown {
+  if (error instanceof Fault) error.detail = detail.slice(0, 600);
+  return error;
 }
 
 /** Verify the default checkout before freezing a new command; replay never resolves or retargets it. */
@@ -602,7 +610,8 @@ export class ProductPlanOperationService {
       if (!this.readProduct(actor, parsed.data.productId).repository) throw new Fault("repository_missing");
       return { ok: true, value: await this.mutate(this.paths(actor), () => this.propose(actor, parsed.data)) };
     } catch (error) {
-      return { ok: false, code: error instanceof Fault ? error.code : error instanceof InflightLockError ? "busy" : "unavailable" };
+      if (error instanceof Fault) return { ok: false, code: error.code, ...(error.detail ? { detail: error.detail } : {}) };
+      return { ok: false, code: error instanceof InflightLockError ? "busy" : "unavailable" };
     }
   }
 

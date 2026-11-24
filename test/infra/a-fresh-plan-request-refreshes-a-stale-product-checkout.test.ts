@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { hostname } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { test, type TestContext } from "node:test";
-import { ProductCaseService } from "#src/lib/product-case.js";
+import { PRODUCT_PLAN_CHECKOUT_LEFT_STEP, ProductCaseService } from "#src/lib/product-case.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -72,7 +72,8 @@ function fixture(t: TestContext) {
     { operations: Record<string, { targetHead: string; command: { repoRoot: string } }> };
   // The live head GitHub reports is the origin's main, read at the moment of the request.
   const liveHead = () => execFileSync("git", ["--git-dir", origin, "rev-parse", "refs/heads/main"], { encoding: "utf8", env: gitEnv }).trim();
-  const service = () => new ProductCaseService({ root: control, repoRoot: source, store,
+  const ledgerPath = join(control, "state", "ledger.ndjson");
+  const service = () => new ProductCaseService({ root: control, repoRoot: source, store, planLedgerPath: ledgerPath,
     instances: { registryPath, stateBase: join(root, "instances") },
     provider: { async read() { return { state: "found", repository }; } },
     planText: async (args) => {
@@ -90,7 +91,7 @@ function fixture(t: TestContext) {
   const command = (requestId = "stale-propose-00001", expectedRevision = 2) => ({ version: "product-case-v1", action: "propose",
     command: { requestId, productId, expectedRevision, expectedObjectiveRevision: 1 } });
   const lockPath = join(control, "state", `managed-checkout-${repository.name}.lock`);
-  return { root, control, origin, upstream, checkout, old, advance, liveHead, calls, journals, journal, service, command, store, productId, lockPath };
+  return { root, control, origin, upstream, checkout, old, advance, liveHead, calls, journals, journal, service, command, store, productId, lockPath, ledgerPath };
 }
 
 /** Every byte a plan reads from the checkout, plus the fetch record: a refusal must leave all of it as it was. */
@@ -133,31 +134,31 @@ test("W1-T14301 criterion 1: a fresh proposal fast-forwards a clean checkout tha
 
 test("W1-T14301 criterion 2: a checkout that is not clean and only behind, and any replay, are left byte-identical", async (t) => {
   type Fixture = ReturnType<typeof fixture>;
-  const cases: { name: string; code: string; change(f: Fixture): void }[] = [
-    { name: "dirty", code: "task_stale", change(f) { writeFileSync(join(f.checkout, "scratch.txt"), "local edit\n"); } },
-    { name: "diverged", code: "task_stale", change(f) { git(f.checkout, "commit", "-q", "--allow-empty", "-m", "a local commit"); } },
-    { name: "off-branch", code: "task_stale", change(f) {
+  const cases: { name: string; code: string; why: RegExp; change(f: Fixture): void }[] = [
+    { name: "dirty", code: "task_stale", why: /: it is dirty$/, change(f) { writeFileSync(join(f.checkout, "scratch.txt"), "local edit\n"); } },
+    { name: "diverged", code: "task_stale", why: /: it has commits origin\/main lacks$/, change(f) { git(f.checkout, "commit", "-q", "--allow-empty", "-m", "a local commit"); } },
+    { name: "off-branch", code: "task_stale", why: /: it is on feature, not main$/, change(f) {
       // The origin carries the branch too, so only the default-branch rule keeps the checkout where it is.
       git(f.upstream, "push", "-q", "origin", "main:feature");
       git(f.checkout, "checkout", "-q", "-b", "feature");
     } },
-    { name: "foreign", code: "repository_conflict", change(f) {
+    { name: "foreign", code: "repository_conflict", why: /: its origin is not the verified repository$/, change(f) {
       // A foreign origin that holds the very live head: a refresh that trusted it would move the checkout.
       const foreign = join(f.root, "github", "foreign", `${repository.name}.git`);
       mkdirSync(dirname(foreign), { recursive: true });
       execFileSync("git", ["clone", "--quiet", "--bare", f.origin, foreign], { env: gitEnv });
       git(f.checkout, "remote", "set-url", "origin", foreign);
     } },
-    { name: "borrowed", code: "task_stale", change(f) {
+    { name: "borrowed", code: "task_stale", why: /: a live worker borrows it \(/, change(f) {
       const borrower = join(f.root, "worktrees", "run-borrower");
       mkdirSync(dirname(borrower), { recursive: true });
       git(f.checkout, "worktree", "add", "-q", "--detach", borrower, "HEAD");
       writeFileSync(`${borrower}.lock`, JSON.stringify({ pid: process.pid, runId: "run-borrower" }));
     } },
-    { name: "locked", code: "task_stale", change(f) {
+    { name: "locked", code: "task_stale", why: /: another dispatch holds /, change(f) {
       writeFileSync(f.lockPath, JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date().toISOString() }));
     } },
-    { name: "failed-fetch", code: "task_stale", change(f) {
+    { name: "failed-fetch", code: "task_stale", why: /: could not fetch origin \(/, change(f) {
       git(f.checkout, "remote", "set-url", "origin", join(f.root, "gone", repository.owner, `${repository.name}.git`));
     } },
   ];
@@ -167,7 +168,10 @@ test("W1-T14301 criterion 2: a checkout that is not clean and only behind, and a
     scenario.change(f);
     const before = snapshot(f.checkout);
     const result = await f.service().execute(actor, f.command());
-    assert.deepEqual(result, { ok: false, code: scenario.code }, scenario.name);
+    assert.equal(result.ok, false, scenario.name);
+    assert.equal(result.code, scenario.code, scenario.name);
+    // W1-T14723: the refusal names why the refresh left the checkout.
+    assert.match(result.detail ?? "", new RegExp(`^core's copy of wreckterra was not moved to [0-9a-f]{12}${scenario.why.source}`), scenario.name);
     assert.deepEqual(snapshot(f.checkout), before, `${scenario.name}: the checkout is byte-identical`);
     assert.equal(f.calls.length, 0, scenario.name);
     assert.deepEqual(f.journals(), [], `${scenario.name}: refused before journaling`);
@@ -194,4 +198,20 @@ test("W1-T14301 criterion 2: a checkout that is not clean and only behind, and a
   assert.deepEqual(snapshot(f.checkout), before, "replay: the checkout is byte-identical");
   assert.deepEqual(f.journal().operations, recorded, "replay: the recorded operation is not retargeted");
   assert.equal(f.calls.length, 1);
+});
+
+test("W1-T14723: a stale-checkout refusal names the reason the fast-forward was refused", async (t) => {
+  const f = fixture(t);
+  f.advance("feat: the target moved on");
+  writeFileSync(join(f.checkout, "scratch.txt"), "local edit\n");
+  const result = await f.service().execute(actor, f.command());
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "task_stale");
+  assert.match(result.detail ?? "", /^core's copy of wreckterra was not moved to [0-9a-f]{12}: it is dirty$/);
+  const rows = readFileSync(f.ledgerPath, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((row) => row.step === PRODUCT_PLAN_CHECKOUT_LEFT_STEP);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.repository, "craigoley/wreckterra");
+  assert.equal(rows[0]!.target_head, f.liveHead());
+  assert.equal(rows[0]!.reason, "it is dirty");
 });
