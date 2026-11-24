@@ -154,6 +154,16 @@ test("W1-T13524 criterion 4: the existing unowned, terminal failure and open-age
   assert.equal(inventory(unownedRows).ladder[0]?.state, "skipped");
   assert.ok(result.next);
 
+  // An unowned blocker stays eligible when a fix round or an acted row falls inside it: the owner-acted exclusion
+  // applies only to the failed and open-age arms (design item 1).
+  const unownedActed = [
+    { step: "fix.dispatch", pr_number: 38, ts: iso(-3) },
+    disposed(38, -4, "escalated", "unowned"), disposed(38, -2, "escalated", "unowned", { acted: true }),
+  ];
+  const unownedResult = inventory(unownedActed);
+  assert.deepEqual(unownedResult.episodes.filter(episode => episode.eligible).map(episode => episode.pr), [38]);
+  assert.deepEqual(unownedResult.candidates.map(price => price.key), ["escalated:unowned"]);
+
   // A CI-lesson hand-off (W1-T14140) still files the charges it names when the owner acted in the episode: the lesson
   // reopened three times, so the owner's rounds did not clear the check.
   const handoff: LedgerRecord = { step: CI_LESSON_HANDOFF_STEP, gate: "ci-gate", red_heads: [{ pr: 36, sha: "red36" }] };

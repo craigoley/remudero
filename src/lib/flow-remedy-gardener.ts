@@ -414,8 +414,15 @@ function priceEpisodes(episodes: readonly Episode[], now: number): Price[] {
 /** W1-T12548: an open own-red episode older than this is eligible whatever the p90 of cleared ones is. */
 export const FLOW_OWN_RED_OPEN_AGE_MS = 60 * 60_000;
 
-function excludedFromFlowRemedy(e: Episode): boolean {
-  return e.flow !== undefined && (e.flow.ownerActed || e.flow.waitOnly || e.key.startsWith("held-draft:"));
+/** W1-T13524 design item 3: a pending-checks wait or a held draft is never an owner failure, on any arm. */
+function neverFlowEligible(e: Episode): boolean {
+  return e.flow !== undefined && (e.flow.waitOnly || e.key.startsWith("held-draft:"));
+}
+
+/** W1-T13524 design item 1: an owner-acted episode is never eligible on the failed or open-age arms. The unowned arm
+ *  stays: a blocker with no owner is not cleared by a round its owner never ran (invariant:owner-failures-still-file). */
+function ownerActed(e: Episode): boolean {
+  return e.flow?.ownerActed === true;
 }
 
 /** Marks which episodes are worth a remedy: no owner, a failed end, an open wait past the p90 of cleared ones,
@@ -429,8 +436,9 @@ export function markEligibility(episodes: Episode[], now: number): Map<string, n
   }
   for (const e of episodes) {
     const threshold = thresholds.get(e.key);
-    const arm = excludedFromFlowRemedy(e) ? undefined
+    const arm = neverFlowEligible(e) ? undefined
       : e.owner === "NONE" ? "unowned"
+      : ownerActed(e) ? undefined
       : e.outcome === "failed" ? "failed"
       : e.outcome === "open" && threshold !== undefined && (now - e.start) / 3_600_000 > threshold ? "past p90"
       : e.outcome === "open" && e.key.startsWith("own-red:") && now - e.start > FLOW_OWN_RED_OPEN_AGE_MS ? "open own-red"
@@ -451,9 +459,9 @@ function inventoryOf(records: readonly LedgerRecord[], tasks: readonly CiFrictio
 /** What an episode puts up for a remedy: all of an eligible episode, else only the charges a CI-lesson hand-off names
  *  (W1-T14140). One aggregate-red episode can span heads where different checks read red; the hand-off owns only its own. */
 function eligibleSlice(e: Episode): Episode[] {
-  if (e.eligible && !excludedFromFlowRemedy(e)) return [e];
+  if (e.eligible) return [e];
   // W1-T13524 criterion 2: a pending-checks wait or a held draft is never an owner failure, hand-off or not.
-  if (e.flow?.waitOnly || e.key.startsWith("held-draft:")) return [];
+  if (neverFlowEligible(e)) return [];
   // A CI-lesson hand-off is the evidence that the owner's rounds did not clear the check (W1-T14140): the lesson reopened
   // three times. So the charges it names stay eligible even when the owner acted inside the episode (W1-T13524).
   const handed = e.charges.filter(c => c.handedOff);
