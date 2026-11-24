@@ -50,6 +50,26 @@ export const SPEND_STEP_ROLES: Readonly<Record<string, SpendRole>> = {
   "isolation.probe": "produced",
 };
 
+/**
+ * W1-T14631: steps whose rows name a model but call none, so the pre-label rule must not read them as spend. Each
+ * reason says what the row records and where its call, if any, is priced. A step here carries no cost field.
+ */
+export const NON_CALL_MODEL_STEPS: ReadonlySet<string> = new Set([
+  "memory_budget.backtest", // the memory calibration report; its model is the forecast method, not an LLM
+  "review.follow_up_finding", // one row per review follow-up; the review's cost is on review.reviewer
+  "model.successor.read", // a model catalog read
+  "serve.feedback_expander_resolved", // the mount resolved for feedback expansion; no call yet
+  "queue_judge.prompt_bound", // the judge prompt's size bound; the judge call is priced on its own row
+  "pr.head_provider", // the provider that made a PR head; the worker's cost is on its own row
+  "review.provider_provenance", // the provider record of a review; the review's cost is on review.reviewer
+  "prompt_evolution.shadow", // a local reflection over fix transcripts
+  "retro.preflight_started", // a test suite run; the retro's worker cost is on retro.synthesized
+  "retro.preflight_passed", // a test suite run result
+  "retro.preflight_failed", // a test suite run result
+  "retro.preflight_repair_stood_down", // a repair not started; a repair that runs is priced on retro.preflight_repair
+  "judge.fallback", // a provider switch; the retried judge call is priced on its own row
+]);
+
 function finiteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
@@ -70,10 +90,12 @@ export function notionalSpendUsd(row: Record<string, unknown>): number | undefin
   return row.provider === "codex" ? finiteNumber(row.notional_cost_usd) : spendAmountUsd(row);
 }
 
-/** The row's role: its own `spend_role` label, else its step's entry, else the pre-label rule (a string `model`). */
+/** The row's role: its own `spend_role` label, else its step's entry, else none for a non-call step, else the
+ *  pre-label rule (a string `model`). */
 export function spendRoleOf(row: Record<string, unknown>): SpendRole | undefined {
   if (row.spend_role === "produced" || row.spend_role === "restated") return row.spend_role;
   if (typeof row.step === "string" && Object.hasOwn(SPEND_STEP_ROLES, row.step)) return SPEND_STEP_ROLES[row.step];
+  if (typeof row.step === "string" && NON_CALL_MODEL_STEPS.has(row.step)) return undefined;
   return typeof row.model === "string" && row.model !== "" ? "produced" : undefined;
 }
 
