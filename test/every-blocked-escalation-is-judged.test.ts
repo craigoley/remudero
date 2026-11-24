@@ -20,7 +20,7 @@
 // SCOPE FENCE wires exactly ONE site (the daemon's task-scoped block path — the one the
 // measurement above pins as the dominant cause). `src/lib/escalation-catalogue.ts` carries three
 // OTHER BLOCKED-class producers (`escalateCircuitBreak`, `escalateLifetimeCapExceeded`,
-// `escalateCrashLoop`) that call `tryEscalate`/`escalate` directly and have NO `judge` dependency
+// `escalateCrashLoop`; W1-T14611 adds `escalateSreLaneUnresolved`) that call `tryEscalate`/`escalate` directly and have NO `judge` dependency
 // in their own `ctx` type at all — structurally incapable of ever demoting. The census below drives
 // all three for real and asserts exactly that: named, current, unconverted. Follow-up work, not
 // this task's concern (its own scope fence: "this wires an EXISTING judge onto an EXISTING call
@@ -38,6 +38,7 @@ import {
   escalateCircuitBreak,
   escalateLifetimeCapExceeded,
   escalateCrashLoop,
+  escalateSreLaneUnresolved,
 } from "../src/lib/escalation-catalogue.js";
 import { ESCALATION_JUDGED_STEP, FLEET_NOTICE_LABEL, NEEDS_HUMAN_LABEL, configureEscalationTriage } from "../src/lib/escalate.js";
 import type { Escalation, EscalationJudgeVerdict, IssueGateway } from "../src/lib/escalate.js";
@@ -308,13 +309,13 @@ test("W1-T3401: with NO escalationJudge injected, escalateBlock still wires a re
 
 // ── criterion 3: a census names every OTHER BLOCKED-class producer this task leaves unconverted ─
 
-test("W1-T3401 census: the three sibling BLOCKED producers in escalation-catalogue.ts remain unjudged by construction — named, not silently left", () => {
+test("W1-T3401 census: the sibling BLOCKED producers in escalation-catalogue.ts remain unjudged by construction — named, not silently left", async () => {
   // Each of these three functions' own `ctx` type carries `issues?: IssueGateway` and NOTHING
   // shaped like a judge — there is no seam through which a demotion could ever reach them, unlike
   // the now-converted `escalateBlock`. Driven for real (never a source-text read of run-task.ts),
   // each with its OWN ledger, so this is a measurement of current behavior, not an assertion about
   // prose.
-  const cases: Array<{ name: string; run: (issues: IssueGateway, ledgerPath: string) => void }> = [
+  const cases: Array<{ name: string; run: (issues: IssueGateway, ledgerPath: string) => void | Promise<void> }> = [
     {
       name: "escalateCircuitBreak",
       run: (issues, ledgerPath) =>
@@ -333,12 +334,20 @@ test("W1-T3401 census: the three sibling BLOCKED producers in escalation-catalog
           { owner: "craigoley", repo: "remudero", ledgerPath, runId: "R3", issues },
         ),
     },
+    {
+      name: "escalateSreLaneUnresolved",
+      run: (issues, ledgerPath) =>
+        escalateSreLaneUnresolved(
+          { primary: "core", stateRoot: "/srv/fixture-state", registry: "/srv/fixture-registry.yaml", reason: "no row names this state root" },
+          { owner: "craigoley", repo: "remudero", ledgerPath, runId: "R4", issues },
+        ),
+    },
   ];
 
   for (const c of cases) {
     const ledgerPath = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}blocked-census-`)), "ledger.ndjson");
     const calls: Array<{ title: string; body: string; labels: string[]; comments: string[] }> = [];
-    c.run(recordingIssues(calls), ledgerPath);
+    await c.run(recordingIssues(calls), ledgerPath);
     assert.equal(calls.length, 1, `${c.name} must still open exactly one issue`);
     assert.ok(calls[0]?.labels.includes(NEEDS_HUMAN_LABEL), `${c.name} still delivers unconditionally to needs-human`);
     assert.ok(!calls[0]?.labels.includes(FLEET_NOTICE_LABEL), `${c.name} has no route to fleet-notice — it never consults a judge`);

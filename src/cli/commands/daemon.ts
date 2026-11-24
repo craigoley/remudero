@@ -23,14 +23,17 @@ import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../
 import { ghExec, ghJsonAsync, ghTextAsync, githubInstallationBudget, takeGithubBudgetThrottles } from "../../lib/github-transport.js";
 import type { InstallationBudgetThreadInput } from "../../lib/github-installation-budget.js";
 import { daemonInstallationRegistry, startProcessInstallationBudget } from "../../lib/installation-budget-start.js";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { homedir, hostname } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { parseInstanceRegistry } from "../../lib/instance-registry.js";
+import { isTestRunner } from "../../lib/live-write-guard.js";
+import { homedir, hostname, tmpdir } from "node:os";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { configPath, isWorkerProviderId, loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
 import { cashDeploymentTarget } from "../../lib/config-schema.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
-import { daemonCrashSentinel, deliverQuotaExhaustionLate, escalateClaimStall, escalateClaimStallCleared, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateStarvation, escalateStarvationCleared, escalateTargetJobStalled } from "../../lib/escalation-catalogue.js";
+import { daemonCrashSentinel, deliverQuotaExhaustionLate, escalateClaimStall, escalateClaimStallCleared, escalateCrashLoop, escalateDiskHeadroomBreach, escalateHeadroomParkCeiling, escalateHeadroomReserve, escalateQuotaExhaustion, escalateReplayStranded, escalateSreLaneUnresolved, escalateSreLaneUnresolvedCleared, escalateStarvation, escalateStarvationCleared, escalateTargetJobStalled, type SreLaneUnresolvedInfo } from "../../lib/escalation-catalogue.js";
 import { lostWorkerProviders, resolveProviderRoutingPolicy, type EffectiveProviderRoutingPolicy } from "../../lib/provider-routing-policy.js";
 import {
   FOUNDRY_CLAUDE_API_KEY_ENV,
@@ -893,19 +896,61 @@ export async function daemonSreLaneEnabled(
   stateRoot: string,
   installRoot: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
+  unresolved?: SreLaneUnresolvedPage,
 ): Promise<boolean> {
+  const registryPath = process.env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined
+    ? process.env.RMD_SELECTED_INSTANCE_REGISTRY.trim()
+    : process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(installRoot);
   const sreLane = {
-    instance: await resolveSreLaneInstance({
-      stateRoot,
-      registryPath: process.env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined
-        ? process.env.RMD_SELECTED_INSTANCE_REGISTRY.trim()
-        : process.env.RMD_INSTANCE_REGISTRY?.trim() || daemonInstanceRegistryPath(installRoot),
-    }),
+    instance: await resolveSreLaneInstance({ stateRoot, registryPath }),
     env: { RMD_SRE_LANE: process.env.RMD_SRE_LANE },
   };
   const row = sreLaneStartRow(sreLane);
   log(row.step, row.fields);
-  return sreLaneEnabled(sreLane);
+  const enabled = sreLaneEnabled(sreLane);
+  if (unresolved !== undefined) await pageUnresolvedSreLane(sreLane, enabled, { stateRoot, registryPath }, unresolved, log);
+  return enabled;
+}
+
+/** W1-T14611: the page a primary daemon's unresolved SRE lane raises, and the clear its next start sends. */
+export interface SreLaneUnresolvedPage {
+  escalate: (info: SreLaneUnresolvedInfo) => Promise<void>;
+  clear: (info: { stateRoot: string; instance: string | null }) => Promise<void>;
+}
+
+/** Pages on ANY state root, container or host: only disabled, unresolved, not RMD_SRE_LANE=0, and one live primary. */
+async function pageUnresolvedSreLane(
+  sreLane: Parameters<typeof sreLaneEnabled>[0],
+  enabled: boolean,
+  where: { stateRoot: string; registryPath: string },
+  unresolved: SreLaneUnresolvedPage,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+): Promise<void> {
+  const { instance } = sreLane;
+  try {
+    if (enabled) {
+      await unresolved.clear({ stateRoot: where.stateRoot, instance: instance.resolved ? instance.name : null });
+      return;
+    }
+    if (instance.resolved || sreLane.env.RMD_SRE_LANE?.trim() === "0") return;
+    const primaries = await livePrimaryNames(where.registryPath);
+    if (!("names" in primaries) || primaries.names.length !== 1) return;
+    // Under the test runner a page reads only a fixture registry, never the live fleet's (the ops-catalog-source /
+    // board-snapshot-cache rule): a test boot on a temp root would otherwise page the real primary. Never in production.
+    if (isTestRunner() && !realpathSync(where.registryPath).startsWith(realpathSync(tmpdir()) + sep)) return;
+    await unresolved.escalate({ primary: primaries.names[0]!, stateRoot: where.stateRoot, registry: where.registryPath, reason: instance.why });
+  } catch (error) {
+    log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) });
+  }
+}
+
+async function livePrimaryNames(registryPath: string): Promise<{ names: string[] } | { unreadable: string }> {
+  try {
+    return { names: parseInstanceRegistry(await readFile(registryPath, "utf8")).instances
+      .filter((row) => row.live && row.primary === true).map((row) => row.name) };
+  } catch (error) {
+    return { unreadable: String((error as Error)?.message ?? error) };
+  }
 }
 
 /** W1-T12236 / W1-T13709 / W1-T13831: a pass of any scope, or none, may use a fresh, clean tick read.
@@ -2990,7 +3035,10 @@ export async function daemonCommand(
                 // it on anywhere. The starter is inert until called, so it is built on every start
                 // and dropped when off; either way one `sre_lane.started`/`sre_lane.disabled` row
                 // says so. `state/SRE_LANE_OFF` stays the pause switch.
-                ...(await daemonSreLaneEnabled(config.root, repoRoot, log) ? [
+                ...(await daemonSreLaneEnabled(config.root, repoRoot, log, {
+                  escalate: (info) => escalateSreLaneUnresolved(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+                  clear: (info) => escalateSreLaneUnresolvedCleared(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
+                }) ? [
                   startBoundedDaemonSreLane(
                     (mergedLastDay) => daemonSreLaneInput({
                       stateDir: join(config.root, "state"),
