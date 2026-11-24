@@ -217,3 +217,34 @@ test("W1-T14544 a promoted standby leaves its exit code for the entrypoint", (t)
   proc.emit("exit", 75);
   assert.equal(readFileSync(handoffExitPath(state, 4242), "utf8"), "75\n");
 });
+
+test("W1-T14544 a standby raises a quarantined plan declaration only once it holds the lock", async (t) => {
+  // Two shards declare one id: the plan read quarantines both and escalates. A standby must not reach GitHub before the lock.
+  const task = (id: string) => `- id: ${id}\n  title: task ${id}\n  repo: remudero\n  type: implement\n  depends_on: []\n  status: queued\n`;
+  const w = world(t, task("W1-T1"));
+  mkdirSync(join(w.home, "tasks.d"), { recursive: true });
+  writeFileSync(join(w.home, "tasks.d", "W1-T60-first.yaml"), task("W1-T60"));
+  writeFileSync(join(w.home, "tasks.d", "W1-T60-second.yaml"), task("W1-T60"));
+  const raised: { locked: boolean }[] = [];
+  let raisedAtReady: number | undefined;
+  const exitListeners = process.listeners("exit");
+  const code = await standby(w, ["--plan", w.planPath], {
+    raiseEscalation: () => {
+      raised.push({ locked: existsSync(join(w.state, "drain.lock")) });
+      return "https://github.com/o/r/issues/1";
+    },
+    runDaemon: async () => stopped,
+    standby: { pollMs: 5 },
+  }, async () => {
+    await until(() => existsSync(standbyReadyPath(w.state, RUN_ID)), "the ready marker");
+    raisedAtReady = raised.length;
+    writeFileSync(standbyPromotePath(w.state, RUN_ID), "");
+  });
+  for (const l of process.listeners("exit").filter((l) => !exitListeners.includes(l))) process.removeListener("exit", l);
+  assert.equal(code, 0);
+  assert.equal(raisedAtReady, 0, "no escalation while the standby waits without the lock");
+  assert.ok(raised.length > 0, "the plan read after the lock raises the quarantine");
+  assert.ok(raised.every((r) => r.locked), "every escalation ran with the lock held");
+  const deferred = rows(w).filter((r) => r.step === "plan.duplicate_escalated" && r.issue_url === "deferred-until-lock");
+  assert.ok(deferred.length > 0, "the pre-lock read says it deferred, naming no issue");
+});

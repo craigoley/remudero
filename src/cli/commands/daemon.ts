@@ -1204,6 +1204,8 @@ export async function daemonCommand(
   deps: {
     /** W1-T14544: the standby's bounds and clock; production omits it and gets the module defaults. */
     standby?: StandbyOptions;
+    /** W1-T14544: where a plan quarantine's escalation goes; production omits it and opens or comments on a GitHub issue. */
+    raiseEscalation?: (e: Escalation) => string;
     /** Injectable GitHub-gateway constructor for the merged-status projection. Defaults to the
      *  BATCHED {@link buildBatchedGithub} — one NON-search `gh pr list` per projection, which is
      *  what keeps merge state derivable while GitHub's GraphQL `search()` connection is
@@ -1605,8 +1607,12 @@ export async function daemonCommand(
   // clone of the target repo (the daemon clones it for execution anyway), SYNCED to the latest
   // default branch so the scheduled plan is current — a stale clone would drain an old plan.
   let plan: Plan;
-  const raiseDuplicate = (e: Escalation): string =>
-    escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
+  const raiseDuplicate = (e: Escalation): string => deps.raiseEscalation
+    ? deps.raiseEscalation({ ...e, runId })
+    : escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
+  // W1-T14544: a standby's pre-lock plan read reaches GitHub for nothing. The plan read it runs once it holds the lock
+  // (syncBootPlan) quarantines the same declarations again and raises them then; until then the row names no issue.
+  const deferUntilLocked = (): string => "deferred-until-lock";
   const requestShardRepair = shardRepairRequester(join(config.root, "state"), log);
   const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
   const planReaders = daemonPlanReaders(target.planPath, reportPlanQuarantine);
@@ -1661,7 +1667,7 @@ export async function daemonCommand(
   if (standby) {
     // W1-T14544: a standby syncs no checkout (the active daemon owns them until it lets go); it reads the plan as it
     // stands, and runs the sync once it holds the lock.
-    plan = target.isSelf ? loadDaemonPlan(target.planPath, log, raiseDuplicate) : loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
+    plan = target.isSelf ? loadDaemonPlan(target.planPath, log, deferUntilLocked) : loadDaemonPlan(target.planPath, log, deferUntilLocked, foreignTargetPlanLoad);
   } else {
     const synced = await syncBootPlan();
     if (synced === undefined) return 1;
