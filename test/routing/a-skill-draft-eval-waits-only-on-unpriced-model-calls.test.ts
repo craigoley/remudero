@@ -206,12 +206,50 @@ test("W1-T14631 criterion 4: readSkillEvalSpendFit counts only the unpriced call
   assert.deepEqual(fit.unpricedBound, bound.steps);
 });
 
+const calibrationSummaryStep = "review.calibration.result";
+
+test("W1-T14660 criterion 1 treats calibration summaries as restatements and respects explicit labels", () => {
+  const caseRow = { step: "review.calibration.case", model: "reviewer" };
+  const scored = { step: calibrationSummaryStep, outcome: "scored", model: "reviewer",
+    cost_usd: { total: null, perCase: null } };
+  const refused = { step: calibrationSummaryStep, outcome: "refused", model: "reviewer" };
+  assert.equal(spendRoleOf(scored), "restated");
+  assert.equal(spendRoleOf(refused), "restated");
+  assert.equal(spendRoleOf({ ...scored, spend_role: "produced" }), "produced");
+  assert.equal(spendRoleOf(caseRow), "produced");
+  assert.equal(isProducedSpendRow({ ...caseRow, cost_usd: 0.75 }), true);
+});
+
+test("W1-T14660 criterion 2 the spend fit bounds the unpriced case when a summary is present", () => {
+  const caseRow = { ts: TS, task_id: "CALIBRATION", step: "review.calibration.case", model: "reviewer" };
+  const cases = [{ ...caseRow, run_id: "CAL-1", cost_usd: 0.75 }, { ...caseRow, run_id: "CAL-2" }];
+  const summary = { ts: TS, task_id: "CALIBRATION", run_id: "CAL-SUMMARY", step: calibrationSummaryStep,
+    model: "reviewer", outcome: "scored", cost_usd: { total: 0.75, perCase: 0.75 } };
+  const rows = [...cases, summary];
+  const fit = (input: ReadonlyArray<Record<string, unknown>>) => readSkillEvalSpendFit(
+    spendRoot([...input]), { billing: "subscription", model: "reviewer" }, fixedClock(NOW_MS), loadDefaultPolicy());
+  const withSummary = fit(rows);
+  assert.deepEqual(withSummary, fit(cases));
+  assert.equal(withSummary.dayCostUsd, 0.75);
+  assert.equal(withSummary.unpricedRows, 1);
+  assert.equal(withSummary.unpricedBoundUsd, 0.75);
+  assert.deepEqual(withSummary.unpricedBound, [
+    { step: "review.calibration.case", rows: 1, perCallUsd: 0.75, source: "step-p90" },
+  ]);
+  const spendSeries = (input: ReadonlyArray<Record<string, unknown>>) =>
+    buildAnalyticsTimeSeries([...input], NOW).find((series) => series.id === "cost.modeled.usd");
+  const seriesWithSummary = spendSeries(rows);
+  assert.ok(seriesWithSummary);
+  assert.deepEqual(seriesWithSummary, spendSeries(cases));
+});
+
 // ── criterion 5 ───────────────────────────────────────────────────────────────────────────────────────────────
 
 test("W1-T14631 criterion 5: invariant:spend-dollars-unchanged every dollar figure is as on origin/main; only non-call rows leave the unpriced counts", () => {
   const rows: Record<string, unknown>[] = [
     ...nonCallRows(),
-    ...Object.keys(SPEND_STEP_ROLES).map((step, i) => ({ ts: TS, run_id: `S-${i}`, step, model: "sonnet", cost_usd: (i + 1) * 0.25 })),
+    ...Object.keys(SPEND_STEP_ROLES).filter((step) => step !== calibrationSummaryStep)
+      .map((step, i) => ({ ts: TS, run_id: `S-${i}`, step, model: "sonnet", cost_usd: (i + 1) * 0.25 })),
     { ts: TS, run_id: "PRE-1", step: "review.reviewer", model: "opus", total_cost_usd: 2.5 },
     { ts: TS, run_id: "CASH-1", step: "inbox.draft_synthesized", provider: "cash", model: "cash-model", cost_usd: 0.75 },
     { ts: TS, run_id: "CASH-2", step: "inbox.draft_synthesized", provider: "cash", model: "cash-model", token_usage_state: "unavailable", cost_usd: 0.5 },
