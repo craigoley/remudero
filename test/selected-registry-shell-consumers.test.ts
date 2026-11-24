@@ -99,18 +99,42 @@ if [ "$1" = -l ]; then cat "$CRONTAB_SNAPSHOT"; else cat > "$CRONTAB_SNAPSHOT"; 
 /**
  * A real historical Bash 3.2, never vendored and never substituted: the host's /bin/bash when it reports 3.2 (macOS),
  * else an absolute RMD_TEST_BASH32 executable whose BASH_VERSION is 3.2. Undefined otherwise; every 3.2 leg then
- * skips under {@link BASH32_SKIP}, so a current bash is never counted as a 3.2 qualification.
+ * skips under {@link BASH32_SKIP}, so a current bash is never counted as a 3.2 qualification. Under CI (W1-T11263),
+ * where ci.yml builds a pinned 3.2 and exports RMD_TEST_BASH32, an unresolved leg throws instead of skipping.
  */
 const BASH32_SKIP = "needs a real bash 3.2 (native /bin/bash 3.2 or RMD_TEST_BASH32); W1-T11263 builds one in CI";
-function bash32(): { shell: string; env: NodeJS.ProcessEnv; version: string } | undefined {
-  const candidates = [process.platform === "darwin" ? "/bin/bash" : undefined, process.env.RMD_TEST_BASH32]
+function bash32(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform):
+  { shell: string; env: NodeJS.ProcessEnv; version: string } | undefined {
+  const candidates = [platform === "darwin" ? "/bin/bash" : undefined, env.RMD_TEST_BASH32]
     .filter((shell): shell is string => typeof shell === "string" && isAbsolute(shell));
   for (const shell of candidates) {
     const version = spawnSync(shell, ["-c", 'printf "%s" "$BASH_VERSION"'], { encoding: "utf8" });
     if (version.status === 0 && /^3\.2\./.test(version.stdout)) return { shell, env: {} as NodeJS.ProcessEnv, version: version.stdout };
   }
+  if (env.CI) {
+    throw new Error(`the bash 3.2 leg is unmeasured in CI: neither native /bin/bash nor RMD_TEST_BASH32=${
+      env.RMD_TEST_BASH32 ?? "(unset)"} reports 3.2 (ci.yml's W1-T11263 build step exports it)`);
+  }
   return undefined;
 }
+test("bash 3.2 resolution (W1-T11263 criterion 2): under CI an unmeasured or non-3.2 leg fails; outside CI it stays UNMEASURED", t => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}bash32-resolver-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fake = (name: string, version: string) => {
+    const path = join(root, name);
+    writeFileSync(path, `#!/bin/sh\nprintf '%s' '${version}'\n`, { mode: 0o700 });
+    return path;
+  };
+  const old = fake("bash-3.2", "3.2.57(1)-release"), current = fake("bash-current", "5.2.37(1)-release");
+  const unmeasured = /the bash 3\.2 leg is unmeasured in CI/;
+  for (const value of [undefined, current, "bash-3.2", join(root, "absent")]) {
+    assert.throws(() => bash32({ CI: "true", RMD_TEST_BASH32: value }, "linux"), unmeasured, `CI with RMD_TEST_BASH32=${value}`);
+    assert.equal(bash32({ RMD_TEST_BASH32: value }, "linux"), undefined, `outside CI RMD_TEST_BASH32=${value} reads UNMEASURED`);
+  }
+  for (const env of [{ CI: "true", RMD_TEST_BASH32: old }, { RMD_TEST_BASH32: old }]) {
+    assert.deepEqual(bash32(env, "linux"), { shell: old, env: {}, version: "3.2.57(1)-release" }, "a binary reporting 3.2 is measured");
+  }
+});
 const CURRENT_BASH = { shell: "bash", env: {} as NodeJS.ProcessEnv };
 type Interpreter = { shell: string; env: NodeJS.ProcessEnv };
 /**

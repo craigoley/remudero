@@ -59,6 +59,10 @@ permissions:
 # step does not, so a SOURCE pull request keeps one instrumented test verdict at either value.
 env:
   RMD_AFFECTED_SUITE_LIVE: "0"
+  # W1-T11263: sha256 of https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz (2,529,838 bytes), whose GNU .sig
+  # verified GOOD on 2026-11-24 against key 7C01 35FB 088A AF6C 66C6 50B9 BB58 69F0 64EA 74AB (Chet Ramey)
+  # from https://ftp.gnu.org/gnu/gnu-keyring.gpg. Each job that runs the shell-consumer suite builds it.
+  BASH32_SHA256: "26c99025b59e30779300b68adb764f824974d267a4d7cc1b347d14a2393f9fb4"
 
 # R-50: a force-push mid-run left the superseded PR run competing for the same CI-minute budget as
 # its replacement, so group by PR number and let a PR's own runs cancel their predecessor.
@@ -230,6 +234,44 @@ jobs:
             npx playwright install chromium
           else
             echo "CI admission: no browser download for an idle source shard."
+          fi
+      # W1-T11263: test/selected-registry-shell-consumers.test.ts fails under CI when its bash 3.2 legs
+      # would be UNMEASURED, so every job that can run it restores or builds the pinned bash 3.2.
+      - name: Restore the pinned bash 3.2 build (W1-T11263)
+        id: bash32-cache
+        if: ${{ steps.admission.outputs.setup != 'false' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bash32
+          key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}
+      - name: Build the pinned bash 3.2 from GNU source on a cache miss and export RMD_TEST_BASH32 (W1-T11263)
+        env:
+          BASH32_NEEDED: ${{ steps.admission.outputs.setup != 'false' }}
+          BASH32_CACHE_HIT: ${{ steps.bash32-cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/bash32"
+          if [ "$BASH32_NEEDED" = "true" ]; then
+            if [ "$BASH32_CACHE_HIT" != "true" ]; then
+              SRC="$RUNNER_TEMP/bash32-src"
+              mkdir -p "$SRC" "$OUT"
+              curl --fail --silent --show-error --location --retry 3 --output "$SRC/bash-3.2.tar.gz" https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz
+              echo "${BASH32_SHA256}  $SRC/bash-3.2.tar.gz" | sha256sum --check --strict
+              tar -xzf "$SRC/bash-3.2.tar.gz" -C "$SRC"
+              cd "$SRC/bash-3.2"
+              ./configure --quiet --without-bash-malloc CFLAGS="-O2 -std=gnu89 -Wno-error=implicit-function-declaration -Wno-error=implicit-int"
+              make -s
+              cp bash "$OUT/bash"
+            fi
+            VERSION="$("$OUT/bash" --version | sed -n 1p)"
+            if ! printf '%s' "$VERSION" | grep -q 'version 3\.2\.'; then
+              echo "::error::W1-T11263: $OUT/bash reports '${VERSION}', not bash 3.2."
+              exit 1
+            fi
+            echo "W1-T11263: RMD_TEST_BASH32=$OUT/bash (${VERSION})."
+            echo "RMD_TEST_BASH32=$OUT/bash" >> "$GITHUB_ENV"
+          else
+            echo "W1-T11263: this job runs no tests for this event and diff class, so no bash 3.2 is built."
           fi
       - name: Typecheck
         # §5 TIER 2, quality gate 4/4 (W1-T98): this step is TS-strict's actual enforcement. A
@@ -943,6 +985,43 @@ jobs:
       - name: Install Playwright's Chromium (the slow tier includes browser-backed console suites)
         if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
         run: npx playwright install chromium
+      # W1-T11263: the same pinned bash 3.2 as the ci job's identical steps, which say why.
+      - name: Restore the pinned bash 3.2 build (W1-T11263)
+        id: bash32-cache
+        if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bash32
+          key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}
+      - name: Build the pinned bash 3.2 from GNU source on a cache miss and export RMD_TEST_BASH32 (W1-T11263)
+        env:
+          BASH32_NEEDED: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
+          BASH32_CACHE_HIT: ${{ steps.bash32-cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/bash32"
+          if [ "$BASH32_NEEDED" = "true" ]; then
+            if [ "$BASH32_CACHE_HIT" != "true" ]; then
+              SRC="$RUNNER_TEMP/bash32-src"
+              mkdir -p "$SRC" "$OUT"
+              curl --fail --silent --show-error --location --retry 3 --output "$SRC/bash-3.2.tar.gz" https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz
+              echo "${BASH32_SHA256}  $SRC/bash-3.2.tar.gz" | sha256sum --check --strict
+              tar -xzf "$SRC/bash-3.2.tar.gz" -C "$SRC"
+              cd "$SRC/bash-3.2"
+              ./configure --quiet --without-bash-malloc CFLAGS="-O2 -std=gnu89 -Wno-error=implicit-function-declaration -Wno-error=implicit-int"
+              make -s
+              cp bash "$OUT/bash"
+            fi
+            VERSION="$("$OUT/bash" --version | sed -n 1p)"
+            if ! printf '%s' "$VERSION" | grep -q 'version 3\.2\.'; then
+              echo "::error::W1-T11263: $OUT/bash reports '${VERSION}', not bash 3.2."
+              exit 1
+            fi
+            echo "W1-T11263: RMD_TEST_BASH32=$OUT/bash (${VERSION})."
+            echo "RMD_TEST_BASH32=$OUT/bash" >> "$GITHUB_ENV"
+          else
+            echo "W1-T11263: this job runs no tests for this event and diff class, so no bash 3.2 is built."
+          fi
       - name: Select the merge group's suites (W1-T5940 — the same selection ci-shard makes)
         env:
           GROUP_BASE: ${{ github.event.merge_group.base_sha }}
@@ -1888,6 +1967,43 @@ jobs:
             exit 0
           fi
           npx playwright install chromium
+      # W1-T11263: the same pinned bash 3.2 as the ci job's identical steps, which say why. This job
+      # admits no step condition (W1-T5844), so the restore always runs and the build reads BASH32_NEEDED.
+      - name: Restore the pinned bash 3.2 build (W1-T11263)
+        id: bash32-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bash32
+          key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}
+      - name: Build the pinned bash 3.2 from GNU source on a cache miss and export RMD_TEST_BASH32 (W1-T11263)
+        env:
+          BASH32_NEEDED: ${{ steps.classify.outputs.class == 'SOURCE' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+          BASH32_CACHE_HIT: ${{ steps.bash32-cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/bash32"
+          if [ "$BASH32_NEEDED" = "true" ]; then
+            if [ "$BASH32_CACHE_HIT" != "true" ]; then
+              SRC="$RUNNER_TEMP/bash32-src"
+              mkdir -p "$SRC" "$OUT"
+              curl --fail --silent --show-error --location --retry 3 --output "$SRC/bash-3.2.tar.gz" https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz
+              echo "${BASH32_SHA256}  $SRC/bash-3.2.tar.gz" | sha256sum --check --strict
+              tar -xzf "$SRC/bash-3.2.tar.gz" -C "$SRC"
+              cd "$SRC/bash-3.2"
+              ./configure --quiet --without-bash-malloc CFLAGS="-O2 -std=gnu89 -Wno-error=implicit-function-declaration -Wno-error=implicit-int"
+              make -s
+              cp bash "$OUT/bash"
+            fi
+            VERSION="$("$OUT/bash" --version | sed -n 1p)"
+            if ! printf '%s' "$VERSION" | grep -q 'version 3\.2\.'; then
+              echo "::error::W1-T11263: $OUT/bash reports '${VERSION}', not bash 3.2."
+              exit 1
+            fi
+            echo "W1-T11263: RMD_TEST_BASH32=$OUT/bash (${VERSION})."
+            echo "RMD_TEST_BASH32=$OUT/bash" >> "$GITHUB_ENV"
+          else
+            echo "W1-T11263: this job runs no tests for this event and diff class, so no bash 3.2 is built."
+          fi
       - name: Fetch the newest nightly test impact map for the shadow selector (W1-T6107)
         env:
           GH_TOKEN: ${{ github.token }}
