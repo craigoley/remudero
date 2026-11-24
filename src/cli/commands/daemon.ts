@@ -944,7 +944,12 @@ async function pageUnresolvedSreLane(
     if (!("names" in primaries) || primaries.names.length !== 1) return;
     // Under the test runner a page reads only a fixture registry, never the live fleet's (the ops-catalog-source /
     // board-snapshot-cache rule): a test boot on a temp root would otherwise page the real primary. Never in production.
-    if (isTestRunner() && !realpathSync(where.registryPath).startsWith(realpathSync(tmpdir()) + sep)) return;
+    // W1-T14716: the checkout's own registry is never a fixture, even when the whole checkout sits under tmpdir (the
+    // guard-mutation ratchet's scratch copy), so a registry inside repoRoot never pages under test either.
+    if (isTestRunner()) {
+      const registry = realpathSync(where.registryPath);
+      if (!registry.startsWith(realpathSync(tmpdir()) + sep) || registry.startsWith(realpathSync(repoRoot) + sep)) return;
+    }
     await unresolved.escalate({ primary: primaries.names[0]!, stateRoot: where.stateRoot, registry: where.registryPath, reason: instance.why });
   } catch (error) {
     log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) });
