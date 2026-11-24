@@ -339,7 +339,7 @@ export async function mintInstallationToken(
   return { ok: true, token: body.token, expiresAtMs };
 }
 
-export function keyReadErrorCode(err: unknown): string {
+function keyReadErrorCode(err: unknown): string {
   const code = (err as NodeJS.ErrnoException | undefined)?.code;
   return typeof code === "string" && code !== "" ? code : "unknown";
 }
@@ -492,7 +492,7 @@ function nextFailedRefreshDelayMs(expiresAtMs: number | undefined, now: number):
   return Math.max(0, Math.min(REFRESH_FAILURE_RETRY_MS, latestSafeStart - now));
 }
 
-/** The handle {@link startInstallationTokenRefresh} returns. `expiresAtMs` and `renewSync` exist only when armed. */
+/** The handle {@link startInstallationTokenRefresh} returns. `expiresAtMs` and `renewNow` exist only when armed. */
 export interface InstallationTokenRefresh {
   armed: boolean;
   ready?: Promise<void>;
@@ -500,8 +500,8 @@ export interface InstallationTokenRefresh {
   stop?: () => void;
   /** W1-T14623: the held token's expiry, or `undefined` before the first successful mint. */
   expiresAtMs?: () => number | undefined;
-  /** W1-T14623: mint now, blocking, and write `GH_TOKEN` on success. Present only when `mintSync` was given. */
-  renewSync?: () => RefreshResult;
+  /** W1-T14623: run one refresh now, without waiting for the timer, and re-arm it from the result. */
+  renewNow?: () => Promise<RefreshResult>;
 }
 
 /**
@@ -525,8 +525,6 @@ export function startInstallationTokenRefresh(opts: {
   setTimer?: (fn: () => void, ms: number) => { unref?: () => void };
   clearTimer?: (timer: { unref?: () => void }) => void;
   now?: () => number;
-  /** W1-T14623: the synchronous exchange {@link InstallationTokenRefresh.renewSync} runs; absent, there is no renewSync. */
-  mintSync?: (config: InstallationTokenConfig, opts: Pick<RefreshOptions, "now" | "retainedKey" | "log">) => InstallationTokenResult;
 }): InstallationTokenRefresh {
   const env = opts.env ?? process.env;
   if (!env[GH_APP_ID_ENV] || !env[GH_APP_INSTALLATION_ID_ENV] || !env[GH_APP_PRIVATE_KEY_PATH_ENV]) {
@@ -636,19 +634,10 @@ export function startInstallationTokenRefresh(opts: {
     stopped = true;
     clear();
   };
-  // W1-T14623: a caller that cannot await renews here, through its injected exchange; success re-arms the timer.
-  const mintSync = opts.mintSync;
-  const renewSync = mintSync === undefined ? undefined : (): RefreshResult => {
-    const result = mintSync({ appId: env[GH_APP_ID_ENV] ?? "",
-      installationId: env[GH_APP_INSTALLATION_ID_ENV] ?? "", privateKeyPath: env[GH_APP_PRIVATE_KEY_PATH_ENV] ?? "" },
-    { now, retainedKey, log: opts.log });
-    if (!result.ok || result.token === undefined || result.expiresAtMs === undefined) return { ok: false, reason: result.reason ?? "exchange response missing token" };
-    env.GH_TOKEN = result.token;
-    lastSuccessfulExpiresAtMs = result.expiresAtMs;
-    failures = 0;
+  // W1-T14623: a caller that finds the held token expired (its timer could not fire) renews here; runOnce re-arms.
+  const renewNow = (): Promise<RefreshResult> => {
     clear();
-    rearm(nextRefreshDelayMs(result.expiresAtMs, now(), refreshLeadMs(cycles)));
-    return { ok: true, expiresAtMs: result.expiresAtMs };
+    return runOnce();
   };
-  return { armed: true, ready, firstResult, stop, expiresAtMs: () => lastSuccessfulExpiresAtMs, ...(renewSync ? { renewSync } : {}) };
+  return { armed: true, ready, firstResult, stop, expiresAtMs: () => lastSuccessfulExpiresAtMs, renewNow };
 }

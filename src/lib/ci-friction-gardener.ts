@@ -12,7 +12,7 @@ import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./g
 import { prepareGardenTaskIds, gardenLedgerBucket, gardenUnitJournal, type GardenTaskIdMinter } from "./gardener.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { ghExec, ghTextAsync } from "./github-transport.js";
-import { refuseExpiredGardenToken } from "./managed-garden-token.js";
+import { refuseExpiredGardenToken, renewExpiredGardenToken } from "./managed-garden-token.js";
 import { gateFireRatesPath, type GateFireRate, type GateFireRateReport } from "./gate-fire-rate.js";
 import { ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook } from "./ledger-union.js";
 import { readOriginMainSha } from "./inbox.js";
@@ -64,17 +64,6 @@ export type CiFrictionCauseKind = "check" | "main_merge" | "conflict" | "fix_ref
 export type CiFrictionHandFix = { pr: number; at: string; files: string[] };
 export type CiFrictionHandFixRead = { state: "observed"; fixes: CiFrictionHandFix[]; asOf?: string; source?: "cache" | "api" } | { state: "unmeasured"; reason: string; fixes: CiFrictionHandFix[] };
 
-/** The hand-fix read's default spawn. W1-T14623: a `gh` call first renews a held token past its expiry, and is
- *  refused with `token_expired` (never spawned) when that renewal fails. */
-export function ciFrictionHandFixRun(repoRoot: string, gh: (args: string[]) => string = (args) => ghExec(args, { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }),
-): (command: string, args: string[]) => string {
-  return (command, args) => {
-    if (command !== "gh") return execFileSync(command, args, { cwd: repoRoot, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
-    refuseExpiredGardenToken();
-    return gh(args);
-  };
-}
-
 /** One paginated list, walked newest-updated-first. The cache keeps a `cursor` (the newest `updated_at` the last read
  *  saw) and the `mainSha` that read was made against. A hand fix is a merged PR, so it can only arrive with a new
  *  commit on origin/main: while that sha is unchanged the cached fixes answer with no gh call; once it moved, the
@@ -82,7 +71,11 @@ export function ciFrictionHandFixRun(repoRoot: string, gh: (args: string[]) => s
  *  local merge commits, not N PR API reads. */
 export function readCiFrictionHandFixes(
   repoRoot: string, stateDir: string, owner: string, repo: string, clock: Clock = systemClock,
-  run: (command: string, args: string[]) => string = ciFrictionHandFixRun(repoRoot),
+  run: (command: string, args: string[]) => string = (command, args) => {
+    if (command !== "gh") return execFileSync(command, args, { cwd: repoRoot, encoding: "utf8", timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+    refuseExpiredGardenToken(); // W1-T14623: a dead token refuses the read; it is never spawned
+    return ghExec(args, { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  },
   originMain: (root: string) => string | undefined = readOriginMainSha,
 ): CiFrictionHandFixRead {
   const since = clock.now() - 14 * 86_400_000;
@@ -1366,13 +1359,16 @@ export const CI_FRICTION_ISSUE_URL_RE = /^https:\/\/github\.com\/([^/]+)\/([^/]+
 /** The fleet's own comment text, written under whatever login the daemon's token holds. */
 export const CI_FRICTION_FLEET_COMMENT_RE = /^(?:Another escalation observed the same condition \(|Still open as of \S+ \(issue-revalidation garden, |Closed by the ci-friction gardener)/;
 
+/** W1-T14623: a release's read and close come late in a long pass. Each first renews a held token past its expiry,
+ *  and is refused with `token_expired` (never spawned) when that renewal fails. */
+export async function ciFrictionReleaseGh(args: string[], gh: (args: string[]) => Promise<string> = (a) => ghTextAsync(a)): Promise<string> {
+  await renewExpiredGardenToken();
+  return gh(args);
+}
+
 /** The escalation issues over the awaited `gh` transport: comments read over REST, the close through the
  *  escalation issue gateway ({@link ghIssueGatewayAsync}), the one audited write path. */
-export function ghCiFrictionEscalationIssues(exec: (args: string[]) => Promise<string> = (args) => {
-  // W1-T14623: a release's read and close come late in a long pass; they never spend an expired token.
-  refuseExpiredGardenToken();
-  return ghTextAsync(args);
-}): CiFrictionEscalationIssues {
+export function ghCiFrictionEscalationIssues(exec: (args: string[]) => Promise<string> = (args) => ciFrictionReleaseGh(args)): CiFrictionEscalationIssues {
   const parts = (url: string): RegExpExecArray => {
     const m = CI_FRICTION_ISSUE_URL_RE.exec(url);
     if (!m) throw new Error(`not a GitHub issue URL: ${url}`);
