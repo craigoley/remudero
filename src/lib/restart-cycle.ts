@@ -146,7 +146,8 @@ export function restartCycleRow(rows: readonly Row[], startAtMs: number): Restar
   // W1-T14547: a handoff is the yielded row after the exit and the standby's promotion after that, before this boot.
   const yielded = before.find(r => r.row.step === "daemon.handoff_yielded" && r.ms >= exit.ms);
   const promoted = yielded && before.find(r => r.row.step === "daemon.standby_promoted" && r.ms >= yielded.ms);
-  const firstTick = promoted && ordered.find(r => (r.row.step === "daemon.tick" || r.row.step === "daemon.tick_phases") && r.ms >= startAtMs &&
+  // daemon.boot_phases is written once, at the successor's first loop tick (startBootPhases.firstTick).
+  const firstTick = promoted && ordered.find(r => r.row.step === "daemon.boot_phases" && r.ms >= startAtMs &&
     (!nextBoot || r.ms < nextBoot.ms));
   const handoff = yielded && promoted ? { handed_off: true, standby_ready_ms: finite(promoted.row.prepare_ms) ? promoted.row.prepare_ms : null,
     yield_to_first_tick_ms: firstTick ? firstTick.ms - yielded.ms : null } : { handed_off: false };

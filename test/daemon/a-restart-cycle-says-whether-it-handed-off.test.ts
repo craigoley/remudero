@@ -17,7 +17,7 @@ function cold(): Row[] {
     row(300, "daemon.freshness_exit", { phases_ms: { drain: 90, total: 100 } }),
     row(301, "daemon_selfrestart_for_freshness", { old_sha: "old", new_sha: "new", stale_since_ms: epoch + 100 }),
     row(400, "daemon.boot", { run_id: "new" }),
-    row(450, "daemon.tick", {}),
+    row(450, "daemon.boot_phases", {}),
     row(500, "review.posted", { pr_url: "https://github.com/o/r/pull/1" }),
   ];
 }
@@ -48,7 +48,7 @@ test("W1-T14547 a restart cycle says whether it handed off", () => {
   assert.equal(restartCycleRow(unpromoted, epoch + 400)?.handed_off, false);
 
   // A promoted successor that never ticked yet, and a promoted row with no prepare time, keep the fields with null.
-  const quiet = handedOff().filter((r) => r.step !== "daemon.tick").map((r) => r.step === "daemon.standby_promoted" ? { ...r, prepare_ms: "?" } : r);
+  const quiet = handedOff().filter((r) => r.step !== "daemon.boot_phases").map((r) => r.step === "daemon.standby_promoted" ? { ...r, prepare_ms: "?" } : r);
   const q = restartCycleRow(quiet, epoch + 400);
   assert.equal(q?.handed_off, true);
   assert.equal(q?.standby_ready_ms, null);
