@@ -91,6 +91,11 @@ test("W1-T14730 a rollback first moves the shared checkout to the predecessor sh
   const r = run(w, daemon(w, { successorSha: w.older, successorExit: 1 }));
   assert.equal(r.status, 0, r.err);
   assert.match(r.err, /handoff_rolled_back/);
+  // The checkout followed the successor while it ran, then moved back before the rolled-back start.
+  const moved = r.err.indexOf(`moved from ${w.newer} to ${w.older}`);
+  const back = r.err.indexOf(`moved from ${w.older} to ${w.newer}`);
+  assert.ok(moved >= 0, "the checkout followed the successor while it held the run");
+  assert.ok(back > r.err.indexOf("handoff_rolled_back") && back > moved, "the rollback moved it back to the predecessor's sha");
   assert.deepEqual(r.heads, [w.newer, w.newer], "the rolled-back start runs the predecessor's code from the checkout");
   assert.equal(r.head, w.newer);
 });
