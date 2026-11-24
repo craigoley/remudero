@@ -6,6 +6,9 @@ test("W1-T10550: check:ci-log:ci-shard is prevented, not retried", () => {
   const output = [
     "test/worker/check-ci-log-ci-shard.test.ts(8,1): error TS2304: own test error",
     "/runner/repo/test/other/check-ci-log-ci-shard.test.ts(9,1): error TS2304: sibling test error",
+    // Same-suffix sibling: a bare endsWith would match it; the '/' boundary must not.
+    "est/worker/check-ci-log-ci-shard.test.ts(10,1): error TS2304: same-suffix sibling error",
+    "/runner/repo/xtest/worker/check-ci-log-ci-shard.test.ts(11,1): error TS2304: prefixed sibling error",
   ].join("\n");
 
   assert.deepEqual(
