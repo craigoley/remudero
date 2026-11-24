@@ -182,11 +182,34 @@ export const DAEMON_CRASHLOOP_CLEARED_STEP = "daemon.crashloop.cleared";
 export const LEARNED_CRASHLOOP_SUMMARY = "daemon crash-loop: abnormal exits shorter than its learned clean lifetime";
 const EXIT_CODE_SOURCE = "no supervisor exit row in this ledger tail";
 
+/** PRIMARY CONTROL (GitHub's, not ours): GitHub refuses an issue title longer than 256 characters. */
+export const GITHUB_ISSUE_TITLE_LIMIT = 256;
+/** W1-T14733: the hidden line that keys an incident's one status comment to its run, so each boot edits it in place. */
+export const CRASHLOOP_STATUS_MARKER = (runFirst: string): string => `<!-- rmd-crashloop-status:${runFirst} -->`;
+
+/**
+ * W1-T14733: a learned incident's summary names what its exits stopped on, so the title says what is failing and a new
+ * cause is a new incident. An exit with no summary keeps the causeless summary. The cause is cut only where the whole
+ * title would pass GitHub's own title limit.
+ */
+export function learnedCrashLoopSummary(cause: string | null): string {
+  if (cause === null) return LEARNED_CRASHLOOP_SUMMARY;
+  const room = GITHUB_ISSUE_TITLE_LIMIT - "[BLOCKED] DAEMON: ".length - `${LEARNED_CRASHLOOP_SUMMARY} — `.length;
+  const oneLine = cause.replace(/\s+/g, " ").trim();
+  return `${LEARNED_CRASHLOOP_SUMMARY} — ${oneLine.length > room ? `${oneLine.slice(0, room - 1)}…` : oneLine}`;
+}
+
 /** An open learned crash-loop incident, keyed by the first process of its run. */
 export interface CrashLoopIncident {
   runFirst: string;
   issueUrl: string | null;
   p90Ms?: number;
+  /** W1-T14733: the stopDetail it was raised for; null for exits that said none, undefined for an incident raised before. */
+  cause?: string | null;
+  /** W1-T14733: its escalation summary, which is its identity in the spool. */
+  summary?: string;
+  /** W1-T14733: when it was raised, the earliest its status comment can be. */
+  escalatedTs?: string;
 }
 
 export interface CrashSentinelCtx {
@@ -210,6 +233,7 @@ function lifetimeRowOf(end: DaemonProcessEnd, runId: string): Record<string, unk
   return {
     ...base,
     step: DAEMON_ABNORMAL_EXIT_STEP,
+    stop_detail: end.stopDetail ?? null,
     exit_code: end.exitCode ?? null,
     exit_code_source: end.exitCode === undefined ? EXIT_CODE_SOURCE : "entrypoint wait (container die status)",
     heap_limit_bytes: memory?.heapLimitBytes ?? end.heapLimitBytes ?? null,
@@ -227,7 +251,8 @@ function lifetimeRecordOf(row: Record<string, unknown>): DaemonLifetimeRecord | 
   if (row.step !== DAEMON_ABNORMAL_EXIT_STEP && row.step !== DAEMON_CLEAN_EXIT_OBSERVED_STEP) return undefined;
   const lifetimeMs = row.lifetime_ms;
   if (typeof row.prior_run_id !== "string" || typeof row.ended_ts !== "string" || typeof lifetimeMs !== "number") return undefined;
-  return { runId: row.prior_run_id, endedTs: row.ended_ts, lifetimeMs, clean: row.step === DAEMON_CLEAN_EXIT_OBSERVED_STEP };
+  return { runId: row.prior_run_id, endedTs: row.ended_ts, lifetimeMs, clean: row.step === DAEMON_CLEAN_EXIT_OBSERVED_STEP,
+    ...(row.step === DAEMON_ABNORMAL_EXIT_STEP ? { stopDetail: typeof row.stop_detail === "string" ? row.stop_detail : null } : {}) };
 }
 
 /** One exit's evidence line: lifetime, exit code, last memory sample and heap-limit line, as far as the ledger knows. */
@@ -250,16 +275,16 @@ function learnedLine(learned: LearnedCleanLifetime): string {
   return `median ${minutes(learned.medianMs)} min, p90 ${minutes(learned.p90Ms)} min, from ${learned.samples} cleanly-ended processes`;
 }
 
-function learnedCrashLoopEscalation(run: DaemonLifetimeRecord[], allRows: Record<string, unknown>[], learned: LearnedCleanLifetime, runId: string) {
+function learnedCrashLoopEscalation(run: DaemonLifetimeRecord[], allRows: Record<string, unknown>[], learned: LearnedCleanLifetime, runId: string, cause: string | null) {
   const runIds = new Set(run.map((r) => r.runId));
   const evidence = allRows.filter((row) => row.step === DAEMON_ABNORMAL_EXIT_STEP && runIds.has(String(row.prior_run_id))).map(exitEvidence);
   return {
     class: "BLOCKED" as const,
     taskId: "DAEMON",
     runId,
-    summary: LEARNED_CRASHLOOP_SUMMARY,
+    summary: learnedCrashLoopSummary(cause),
     detail:
-      `W1-T11421: ${run.length} consecutive daemon processes ended with no clean-exit row before the next boot, ` +
+      `${cause === null ? "" : `Stopped on: ${cause}\n\n`}W1-T11421: ${run.length} consecutive daemon processes ended with no clean-exit row before the next boot, ` +
       `each living less than this instance's learned clean lifetime (${learnedLine(learned)}). In the container an ` +
       `abnormal exit is a heap abort (exit 134), a kill or a crash: the entrypoint records its wait status and ` +
       `heap-limit stderr line, then exits the container with that status and ` +
@@ -281,7 +306,10 @@ function incidentState(lines: ReadonlyArray<Record<string, unknown>>): { open?: 
     if (line.step === DAEMON_CRASHLOOP_ESCALATED_STEP && line.basis === "learned") {
       escalatedRuns.add(line.run_first);
       open = { runFirst: line.run_first, issueUrl: typeof line.issue_url === "string" ? line.issue_url : null,
-        ...(typeof line.clean_lifetime_p90_ms === "number" ? { p90Ms: line.clean_lifetime_p90_ms } : {}) };
+        ...(typeof line.clean_lifetime_p90_ms === "number" ? { p90Ms: line.clean_lifetime_p90_ms } : {}),
+        ...(line.cause === null || typeof line.cause === "string" ? { cause: line.cause } : {}),
+        ...(typeof line.summary === "string" ? { summary: line.summary } : {}),
+        ...(typeof line.ts === "string" ? { escalatedTs: line.ts } : {}) };
     } else if (line.step === DAEMON_CRASHLOOP_CLEARED_STEP) {
       cleared.add(line.run_first);
     }
@@ -290,11 +318,11 @@ function incidentState(lines: ReadonlyArray<Record<string, unknown>>): { open?: 
 }
 
 /** Hand recovery to the launcher's durable withdraw-or-close path before clearing the incident. */
-export function clearDaemonCrashLoopIncident(incident: CrashLoopIncident, reason: string, ctx: CrashSentinelCtx): void {
+export function clearDaemonCrashLoopIncident(incident: CrashLoopIncident, reason: string, ctx: CrashSentinelCtx, ended?: string): void {
   const stateDir = dirname(ctx.ledgerPath);
-  const identity = { taskId: "DAEMON", summary: LEARNED_CRASHLOOP_SUMMARY };
+  const identity = { taskId: "DAEMON", summary: incident.summary ?? LEARNED_CRASHLOOP_SUMMARY };
   const meta = { source: "daemon-crashloop", host: hostname(), clock: systemClock };
-  const comment = `W1-T11421: ${reason}, so the crash loop has ended — closing.`;
+  const comment = `W1-T11421: ${reason}, so ${ended ?? "the crash loop has ended"} — closing.`;
   const deliveredUrl = deliveredEscalationUrl(stateDir, identity);
   withdrawSpooledEscalation(stateDir, identity, comment, meta);
   // Older incidents were posted directly rather than through the spool; retain their known URL.
@@ -305,6 +333,43 @@ export function clearDaemonCrashLoopIncident(incident: CrashLoopIncident, reason
     run_id: ctx.runId, task_id: "DAEMON", step: DAEMON_CRASHLOOP_CLEARED_STEP,
     run_first: incident.runFirst, issue_url: incident.issueUrl, reason, close_queued: Boolean(incident.issueUrl || deliveredUrl),
   });
+}
+
+/**
+ * W1-T14733: write an incident's one status comment. A gateway that can list and edit comments edits the comment its
+ * marker names; one that cannot, or a list or edit that fails, posts it as a new comment; a refused post is spooled
+ * for the daemon's host-spool drain. The outcome names which, and the error that forced a fallback.
+ */
+export function writeCrashLoopStatus(issues: IssueGateway, open: CrashLoopIncident, body: string, ctx: CrashSentinelCtx):
+  { delivered: boolean; queued: boolean; outcome: "edited" | "posted" | "spooled" | "unwritten"; error?: string } {
+  const url = open.issueUrl!;
+  let error: string | undefined;
+  if (issues.listCommentsSince && issues.editComment) {
+    try {
+      const prior = issues.listCommentsSince(url, open.escalatedTs ?? new Date(0).toISOString())
+        .filter((comment) => comment.body.includes(CRASHLOOP_STATUS_MARKER(open.runFirst))).at(-1);
+      if (prior) {
+        issues.editComment(prior.id, body);
+        return { delivered: true, queued: false, outcome: "edited" };
+      }
+    } catch (failure) {
+      error = `status edit: ${String((failure as Error)?.message ?? failure)}`.slice(0, 240);
+    }
+  }
+  try {
+    if (issues.comment) {
+      issues.comment(url, body);
+      return { delivered: true, queued: false, outcome: "posted", ...(error ? { error } : {}) };
+    }
+  } catch (failure) {
+    error = `status post: ${String((failure as Error)?.message ?? failure)}`.slice(0, 240);
+  }
+  try {
+    spoolIssueAction(dirname(ctx.ledgerPath), { kind: "comment", url, body }, { source: "daemon-crashloop", host: hostname(), clock: systemClock });
+    return { delivered: false, queued: true, outcome: "spooled", ...(error ? { error } : {}) };
+  } catch (failure) {
+    return { delivered: false, queued: false, outcome: "unwritten", error: `status spool: ${String((failure as Error)?.message ?? failure)}`.slice(0, 240) };
+  }
 }
 
 /**
@@ -343,15 +408,39 @@ export function runDaemonCrashSentinel(
     incident = "cleared";
   }
   const run = crashLoopRunOf(history, learned);
-  if (open) {
+  /** Raise one incident for `causeRun`, the trailing exits that share `cause`, and ledger it. */
+  const escalateRun = (causeRun: DaemonLifetimeRecord[], cause: string | null): CrashLoopIncident => {
+    const summary = learnedCrashLoopSummary(cause);
+    const issueUrl = tryEscalate(learnedCrashLoopEscalation(causeRun, allRows, learned, ctx.runId, cause),
+      { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId });
+    appendLedger(ctx.ledgerPath, {
+      run_id: ctx.runId, task_id: "DAEMON", step: DAEMON_CRASHLOOP_ESCALATED_STEP, basis: "learned",
+      run_first: causeRun[0].runId, run_newest: causeRun[causeRun.length - 1].runId, run_length: run.length,
+      clean_lifetime_median_ms: learned.medianMs, clean_lifetime_p90_ms: learned.p90Ms,
+      issue_url: issueUrl, delivered: issueUrl !== null, cause, summary,
+    });
+    return { runFirst: causeRun[0].runId, issueUrl, p90Ms: learned.p90Ms, cause, summary, escalatedTs: nowIso };
+  };
+  // W1-T14733: the newest exit in the run names what the loop stops on now. An open incident raised for another cause
+  // is closed naming the new one, and the new cause is raised as its own incident, so its title tells the operator.
+  const newest = run.at(-1);
+  const newestCause = newest?.stopDetail ?? null;
+  if (open && newest && abnormalRows.some((row) => row.prior_run_id === newest.runId) && newestCause !== (open.cause ?? null)) {
+    let first = run.length - 1;
+    while (first > 0 && (run[first - 1].stopDetail ?? null) === newestCause) first--;
+    clearDaemonCrashLoopIncident(open, `the stop cause changed to ${newestCause === null ? "an exit that named none" : JSON.stringify(newestCause)}`, ctx,
+      "this incident's cause has ended and the new one is raised as its own incident");
+    open = escalateRun(run.slice(first), newestCause);
+    incident = "reescalated";
+  } else if (open) {
     if (!open.issueUrl && run.length >= 2) {
-      const issueUrl = tryEscalate(learnedCrashLoopEscalation(run, allRows, learned, ctx.runId),
+      const issueUrl = tryEscalate(learnedCrashLoopEscalation(run, allRows, learned, ctx.runId, open.cause ?? null),
         { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId });
       appendLedger(ctx.ledgerPath, {
         run_id: ctx.runId, task_id: "DAEMON", step: DAEMON_CRASHLOOP_ESCALATED_STEP, basis: "learned",
         run_first: open.runFirst, run_newest: run[run.length - 1].runId, run_length: run.length,
         clean_lifetime_median_ms: learned.medianMs, clean_lifetime_p90_ms: open.p90Ms ?? learned.p90Ms,
-        issue_url: issueUrl, delivered: issueUrl !== null,
+        issue_url: issueUrl, delivered: issueUrl !== null, cause: open.cause ?? null, summary: open.summary ?? learnedCrashLoopSummary(open.cause ?? null),
       });
       if (issueUrl) open = { ...open, issueUrl };
     }
@@ -366,48 +455,25 @@ export function runDaemonCrashSentinel(
       const row = allRows.find((candidate) => candidate.step === DAEMON_ABNORMAL_EXIT_STEP && candidate.prior_run_id === id);
       if (row) rowsToUpdate.set(id, row);
     }
-    for (const row of rowsToUpdate.values()) {
-      let delivered = false;
-      let queued = false;
-      try {
-        const issues = ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo);
-        if (open.issueUrl && issues.comment) {
-          issues.comment(open.issueUrl, `Another abnormal exit (${run.length} short exits in the trailing run; ${learnedLine(learned)}):\n${exitEvidence(row)}`);
-          delivered = true;
-        }
-      } catch {
-        // Keep a refused update outside the rotating lifetime ledger; the daemon's host-spool drain retries it.
+    // W1-T14733: every pending exit is folded into ONE status comment, edited in place each boot, never a comment per
+    // exit: the newest exit's evidence and the run's length say what the incident needs to.
+    const statusRow = [...rowsToUpdate.values()].at(-1);
+    if (statusRow && open.issueUrl) {
+      const body = `${CRASHLOOP_STATUS_MARKER(open.runFirst)}\nCrash-loop status, edited in place at each boot (W1-T14733): ` +
+        `${run.length} short exits in the trailing run, first ${run[0]?.runId ?? open.runFirst}, newest ${String(statusRow.prior_run_id)}; ` +
+        `stopped on: ${open.cause ?? "no stop detail"}; ${learnedLine(learned)}.\nNewest exit:\n${exitEvidence(statusRow)}`;
+      const status = writeCrashLoopStatus(ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), open, body, ctx);
+      for (const row of rowsToUpdate.values()) {
+        appendLedger(ctx.ledgerPath, {
+          run_id: ctx.runId, task_id: "DAEMON", step: DAEMON_CRASHLOOP_UPDATED_STEP,
+          run_first: open.runFirst, prior_run_id: row.prior_run_id, run_length: run.length, issue_url: open.issueUrl,
+          delivered: status.delivered, queued: status.queued, status_comment: status.outcome, ...(status.error ? { error: status.error } : {}),
+        });
       }
-      if (!delivered && open.issueUrl) {
-        try {
-          const meta = { source: "daemon-crashloop", host: hostname(), clock: systemClock };
-          spoolIssueAction(dirname(ctx.ledgerPath), {
-            kind: "comment", url: open.issueUrl,
-            body: `Another abnormal exit (${run.length} short exits in the trailing run; ${learnedLine(learned)}):\n${exitEvidence(row)}`,
-          }, meta);
-          queued = true;
-        } catch {
-          // The unqueued ledger row remains retryable while it is retained.
-        }
-      }
-      appendLedger(ctx.ledgerPath, {
-        run_id: ctx.runId, task_id: "DAEMON", step: DAEMON_CRASHLOOP_UPDATED_STEP,
-        run_first: open.runFirst, prior_run_id: row.prior_run_id, run_length: run.length, issue_url: open.issueUrl, delivered, queued,
-      });
       incident = "updated";
     }
   } else if (run.length >= 2 && !state.escalatedRuns.has(run[0].runId)) {
-    const issueUrl = tryEscalate(
-      learnedCrashLoopEscalation(run, allRows, learned, ctx.runId),
-      { issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo), ledgerPath: ctx.ledgerPath, runId: ctx.runId },
-    );
-    appendLedger(ctx.ledgerPath, {
-      run_id: ctx.runId, task_id: "DAEMON", step: DAEMON_CRASHLOOP_ESCALATED_STEP, basis: "learned",
-      run_first: run[0].runId, run_newest: run[run.length - 1].runId, run_length: run.length,
-      clean_lifetime_median_ms: learned.medianMs, clean_lifetime_p90_ms: learned.p90Ms,
-      issue_url: issueUrl, delivered: issueUrl !== null,
-    });
-    open = { runFirst: run[0].runId, issueUrl, p90Ms: learned.p90Ms };
+    open = escalateRun(run, newestCause);
     incident = "opened";
   }
   return {
