@@ -187,7 +187,7 @@ import type { GithubPostureFinding } from "./github-posture.js";
 import { clockFromDateFn, clockFromIsoFn, clockFromMillisFn, fixedClock, loopAvailableDeadline, systemClock, type Clock } from "../lib/clock.js";
 import { createNearLimitHeapTelemetry, NEAR_HEAP_FILE, type NearLimitHeapTelemetry, type NearLimitSample } from "./daemon-heap-near-limit.js";
 import { createHeapAdmissionHold, type HeapAdmissionHoldLatch, type HeapAdmissionHoldMode, type HeapHoldTrace } from "./daemon-heap-admission-hold.js";
-import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, type LedgerRotationHook } from "./ledger-union.js";
 import { CONFLICT_GARDEN_ACT, CONFLICT_GARDEN_TIERS, CONFLICT_GARDEN_VERIFIED,
   conflictGardenGovernorVerdict, type ConflictGardenTier } from "./conflict-gardener-governor.js";
 import { conflictGardenPass } from "./garden-registry.js";
@@ -489,11 +489,16 @@ export const RESTART_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60_000;
 /** W1-T8927: a seven-day sampling window, not a yield threshold; durations come only from completed observations. */
 /** Read the restart comparison's complete recent corpus once at boot, including phases archived out of the live tail;
  *  it carries the settled full passes too, so the sweep-bound seed survives a restart (W1-T9632). */
-export function readRestartHistoryLines(stateDir: string, nowMs = systemClock.now()): readonly string[] {
+/** The steps {@link readRestartHistoryLines} reads; a standby's rotation cache keys its warm read by the same list (W1-T14635). */
+export const RESTART_HISTORY_STEPS: readonly string[] = ["run.start", "verdict", "pr.opened", "run.phase", "recon.done", "implement.done",
+  "implement.unfinished", "fallback_push.cause", SWEEP_SETTLED_STEP];
+export function readRestartHistoryLines(stateDir: string, nowMs = systemClock.now(),
+  rotationRecords?: LedgerRotationHook): readonly string[] {
   const read = readLedgerUnionRecordsSync(stateDir, {
+    ...(rotationRecords ? { rotationRecords } : {}),
     refuseIncomplete: true, sinceTs: fixedClock(nowMs - RESTART_HISTORY_WINDOW_MS).iso(),
     rotationWindowMs: RESTART_HISTORY_WINDOW_MS,
-    step: ["run.start", "verdict", "pr.opened", "run.phase", "recon.done", "implement.done", "implement.unfinished", "fallback_push.cause", SWEEP_SETTLED_STEP],
+    step: [...RESTART_HISTORY_STEPS],
   });
   if (!read.ok) throw new Error(`restart history unreadable: ${[...read.unread, ...read.unclassified].join(", ")}`);
   return read.rows.map((row) => JSON.stringify(row));

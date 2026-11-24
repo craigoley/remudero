@@ -12,7 +12,7 @@
 
 import { resolve } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { readLedgerUnionRecordsSync, type LedgerRotationHook } from "./ledger-union.js";
 import type { RunChildMode } from "./policy.js";
 
 export const RUN_CHILD_MODE_DECISION_STEP = "run_child.mode_decision";
@@ -240,8 +240,11 @@ export function readRunChildPolicy(read: () => RunChildMode): { mode: RunChildMo
 /** W1-T9816: every evidence row of the ledger union under `stateDir`, plus what could not be read. */
 export function readRunChildModeUnion(
   stateDir: string, read: typeof readLedgerUnionRecordsSync = readLedgerUnionRecordsSync,
+  /** W1-T14635: a standby's rotation cache, so a boot after the warm read parses only the live file. */
+  rotationRecords?: LedgerRotationHook,
 ): { rows: Array<Record<string, unknown>>; unread: string[] } {
-  const union = read(stateDir, { step: [...RUN_CHILD_MODE_EVIDENCE_STEPS], pattern: RUN_CHILD_MODE_EVIDENCE_PATTERN, refuseIncomplete: true });
+  const union = read(stateDir, { step: [...RUN_CHILD_MODE_EVIDENCE_STEPS], pattern: RUN_CHILD_MODE_EVIDENCE_PATTERN, refuseIncomplete: true,
+    ...(rotationRecords ? { rotationRecords } : {}) });
   return { rows: union.rows, unread: union.ok ? [] : [...union.unread] };
 }
 
@@ -254,8 +257,9 @@ export function bootRunChildMode(a: {
   stateDir: string; auto: boolean; liveRows: Iterable<Record<string, unknown>>;
   log: (step: string, extra: Record<string, unknown>) => void;
   read?: typeof readLedgerUnionRecordsSync;
+  rotationRecords?: LedgerRotationHook;
 }): { tracker: RunChildModeTracker; settledRunIds: Set<string> } {
-  const union = readRunChildModeUnion(a.stateDir, a.read);
+  const union = readRunChildModeUnion(a.stateDir, a.read, a.rotationRecords);
   const tracker = createRunChildModeTracker(a.auto ? runChildModeWindow(union.rows) : a.liveRows, undefined, a.auto ? union.unread : []);
   bootTrackers.set(resolve(a.stateDir), tracker);
   if (union.unread.length) {
