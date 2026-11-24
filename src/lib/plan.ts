@@ -1194,8 +1194,10 @@ function cachedBlobParser(
 }
 
 /** W1-T4421 — {@link mergePlanBlobs} with {@link loadPlanQuarantiningDuplicates}'s quarantine; `blobs[0]`, the monolith, stays fatal.
- *  W1-T6262: optional per-path content reuse; all duplicates and dependencies are checked on every merge. */
-export function mergePlanBlobsQuarantiningDuplicates(blobs: Array<{ label: string; text: string }>, cache?: PlanBlobCache): {
+ *  W1-T6262: optional per-path content reuse; all duplicates and dependencies are checked on every merge.
+ *  W1-T14712: `keepsUnseenDependency` as {@link loadPlanQuarantiningDuplicates} takes it, for a target's dispatch read. */
+export function mergePlanBlobsQuarantiningDuplicates(blobs: Array<{ label: string; text: string }>, cache?: PlanBlobCache,
+  keepsUnseenDependency?: KeepsUnseenDependency): {
   plan: Plan;
   quarantined: QuarantinedTask[];
 } {
@@ -1209,7 +1211,7 @@ export function mergePlanBlobsQuarantiningDuplicates(blobs: Array<{ label: strin
     (label, err, text) => invalid.push(...invalidShard(label, err, text)),
     cache ? cachedBlobParser(cache, next, counts) : parseTasksFromYaml,
   );
-  const read = quarantineDuplicates(tasks, duplicateFiles, blobs[0]?.label ?? "plan", invalid);
+  const read = quarantineDuplicates(tasks, duplicateFiles, blobs[0]?.label ?? "plan", invalid, keepsUnseenDependency);
   if (cache) {
     cache.entries = next;
     Object.assign(cache, counts);

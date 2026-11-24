@@ -13,11 +13,13 @@ import { ghBrokerDir, ghBrokerRouteFor } from "#src/lib/gh-read-broker-client.js
 import { ghJsonAsync } from "#src/lib/github-transport.js";
 import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
 import {
-  OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_TREE_ENTRIES, OPS_CATALOG_OUTCOMES,
+  OPS_CATALOG_OUTCOMES,
   OpsCatalogAuthMissingError, createOpsCatalogShadowSource, defaultOpsCatalogApi, readOpsCatalogSnapshotAsync, type OpsCatalogApi,
 } from "#src/lib/ops-catalog-source.js";
 
 const REPO = "acme-private/ops-secret-slug";
+/** The per-blob byte ceiling W1-T14638 removed (256 KiB): a fixture past it proves no fixed size refuses a shard. */
+const OLD_BLOB_CEILING = 256 * 1024;
 const sha1 = (b: Buffer | string): string => createHash("sha1").update(b).digest("hex");
 const blobSha = (text: string): string => sha1(Buffer.concat([Buffer.from(`blob ${Buffer.byteLength(text)}\0`), Buffer.from(text)]));
 const taskYaml = (id: string, title = "PRIVATE_TITLE_SENTINEL"): string =>
@@ -209,8 +211,10 @@ test("W1-T11768 criterion 2: structural defects are malformed", async () => {
 test("W1-T11768 criterion 2: bounds refuse as malformed, never partially", async () => {
   refused("malformed", await run(fixture({ monolith: taskYaml("A") }, { fail: (p) => p.endsWith(`/git/trees/${sha1("root")}`) ? { sha: sha1("root"), truncated: true, tree: [] } : undefined })));
   const filler = (n: number) => Array.from({ length: n }, (_, i) => ({ path: `f${i}`, type: "blob", mode: "100644", sha: sha1(String(i)) }));
-  refused("malformed", await run(fixture({ monolith: taskYaml("A") }, { fail: rootTreeIs(filler(OPS_CATALOG_MAX_TREE_ENTRIES + 1)) })));
-  refused("malformed", await run(fixture({ monolith: taskYaml("A") }, { fail: rootTreeIs([{ path: "plan", type: "tree", mode: "040000", sha: sha1("plan") }, ...filler(OPS_CATALOG_MAX_TREE_ENTRIES - 1)]) })));
+  // W1-T14638: no count of tree entries refuses a catalog; a root tree far past the old fixed ceiling still reads.
+  const wide = await run(fixture({ monolith: taskYaml("A") }, { fail: rootTreeIs([{ path: "plan", type: "tree", mode: "040000", sha: sha1("plan") }, ...filler(12_000)]) }));
+  assert.equal(wide.outcome, "ok");
+  assert.ok(wide.counts.treeEntries > 12_000, "the read counted every entry it admitted");
   const many: Record<string, string> = {};
   for (let i = 0; i <= 500; i++) many[`s${i}.yaml`] = taskYaml(`S${i}`);
   // W1-T14368: the derived bounds judge every read. A budget that cannot pay for the blobs refuses whole.
@@ -219,9 +223,12 @@ test("W1-T11768 criterion 2: bounds refuse as malformed, never partially", async
   refused("unreadable", unpaid);
   assert.deepEqual(unpaid.bound, { reason: "blob_read_budget", observed: 502, allowed: 500 });
   assert.equal(manyFx.calls.filter((p) => p.includes("/git/blobs/")).length, 0, "no blob is read before the refusal");
-  refused("malformed", await run(fixture({ monolith: `# ${"x".repeat(OPS_CATALOG_MAX_BLOB_BYTES)}\n${taskYaml("A")}` })));
+  // W1-T14638: no byte size of one shard refuses a catalog; a monolith past the old fixed per-blob ceiling still reads.
+  const large = await run(fixture({ monolith: `# ${"x".repeat(OLD_BLOB_CEILING)}\n${taskYaml("A")}` }));
+  assert.equal(large.outcome, "ok");
+  assert.ok(large.counts.bytes > OLD_BLOB_CEILING);
   const spread: Record<string, string> = {};
-  for (let i = 0; i < 40; i++) spread[`s${i}.yaml`] = `# ${"y".repeat(OPS_CATALOG_MAX_BLOB_BYTES - 1000)}\n${taskYaml(`S${i}`)}`;
+  for (let i = 0; i < 40; i++) spread[`s${i}.yaml`] = `# ${"y".repeat(OLD_BLOB_CEILING - 1000)}\n${taskYaml(`S${i}`)}`;
   // W1-T14368: the heap bound judges every read; with no heap left it refuses whole.
   const heap = { used_heap_size: 2 ** 40, heap_size_limit: 2 ** 40 };
   const heavy = await readOpsCatalogSnapshotAsync(target, fixture({ monolith: taskYaml("A"), shards: spread }).api, { bounds: { heap: () => heap } });
@@ -236,7 +243,7 @@ test("W1-T11768 criterion 2: a blob with a wrong size, bad base64 or non-utf8 by
   refused("malformed", await run(fixture({ monolith: mono }, { fail: patch({ size: 1 }) })));
   refused("malformed", await run(fixture({ monolith: mono }, { fail: patch({ content: "!!!not base64!!!" }) })));
   refused("malformed", await run(fixture({ monolith: mono }, { fail: patch({ encoding: "utf-8" }) })));
-  refused("malformed", await run(fixture({ monolith: mono }, { fail: patch({ content: "A".repeat(OPS_CATALOG_MAX_BLOB_BYTES * 2) }) })));
+  refused("malformed", await run(fixture({ monolith: mono }, { fail: patch({ content: "A".repeat(OLD_BLOB_CEILING * 2) }) })));
   const bad = Buffer.from([0xff, 0xfe, 0xfd]);
   const badSha = sha1(Buffer.concat([Buffer.from("blob 3\0"), bad]));
   refused("malformed", await run(fixture({ monolith: mono }, { fail: (p) => p.endsWith(`/git/trees/${sha1("plan")}`)

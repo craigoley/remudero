@@ -57,8 +57,8 @@ import {
   type RemoteReserveAsyncInput, type RemoteReserveDeps,
 } from "./task-id-reservation.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { basename, dirname, join, relative, sep } from "node:path";
-import { pathToFileURL } from "node:url";
+import { basename, dirname, join, relative, resolve as resolvePath, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { recyclePauseDetail } from "./recycle-yield.js";
 import { checkSharedPause, isRecyclePauseDetail, realSharedPauseGitDeps, type SharedPauseGitDeps } from "./fleet-control.js";
@@ -8999,7 +8999,8 @@ export interface OpenPrView {
    *  these against the pass's fresh merge credit before the close is allowed to stand. */
   planResequenceUnmetDependencies?: readonly string[];
   /** W1-T4633 — set when an unmet-dependency close was WITHHELD because the pass's merge-credit read
-   *  could not speak for a dependency (no read, or a dependency outside the read's plan). The PR is
+   *  could not speak for a dependency (no read, or a dependency outside the read's plan), or (W1-T13226)
+   *  when every unmet dependency is in flight in its own open implementation PR. The PR is
    *  left open; runSweep logs this reason as `sweep.plan_resequence_close.held`. */
   planResequenceHeld?: string;
   /** Rolled-up remudero-review state on the head. */
@@ -9021,7 +9022,7 @@ export interface OpenPrView {
    *  dead, which keep {@link reviewPendingIsStale}'s timeout behaviour. Only the real gateway sets
    *  this, from the durable pending ledger row. */
   reviewPendingOwnerDead?: boolean;
-  reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete" | "inconclusive-load";
+  reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete" | "inconclusive-load" | "start-failed";
   reviewPendingOwnerGoneReason?: string;
   /** W1-T14035 — the `run_id` of the current head's `review.pending_posted` row the producer judged. Evidence only. */
   reviewPendingOwnerRunId?: string;
@@ -11087,6 +11088,12 @@ export function projectMergedTaskCandidates(
  *     `planResequenceHeld` records why — the PR is left open, never closed.
  * `merged === true` alone is the evidence: whether the crediting PR IMPLEMENTED the task
  * (`creditIsImplementation`) is a supersession question, not whether the dependency merged.
+ *
+ * W1-T13226 — A DEPENDENCY IN FLIGHT IN ITS OWN OPEN PR IS NOT A RESEQUENCE. MEASURED 2026-11-16:
+ * remudero-console #2568 (CONSOLE-T184) was closed for CONSOLE-T182 while #2564, carrying that
+ * trailer, was open and green. A still-unmet id that another open, non-plan-filing PR (never the
+ * judged PR itself) credits is HELD: every such id ⇒ the reason is cleared and `planResequenceHeld`
+ * names each dependency's PR; only some ⇒ the close stands, naming only the ids with no open PR.
  * PURE.
  */
 export function recheckResequenceCloseAgainstFreshCredit(
@@ -11108,17 +11115,43 @@ export function recheckResequenceCloseAgainstFreshCredit(
       };
     }
     const stillUnmet = unmet.filter((id) => !mergedTaskIds.has(id));
-    if (stillUnmet.length === unmet.length) return pr;
     if (stillUnmet.length === 0) {
       return { ...pr, planResequenceIneligible: undefined, planResequenceUnmetDependencies: undefined };
     }
+    const openPrByTask = openImplementationPrByTask(prs, pr.prNumber);
+    const inFlight = stillUnmet.filter((id) => openPrByTask.has(id));
+    const closable = stillUnmet.filter((id) => !openPrByTask.has(id));
+    if (closable.length === 0) {
+      return {
+        ...pr,
+        planResequenceIneligible: undefined,
+        planResequenceUnmetDependencies: undefined,
+        planResequenceHeld: inFlight
+          .map((id) => `unmet dependency ${id} has open PR #${openPrByTask.get(id)} — held until it merges or closes`)
+          .join("; "),
+      };
+    }
+    if (closable.length === unmet.length) return pr;
     return {
       ...pr,
       planResequenceIneligible:
-        `unmet dependenc${stillUnmet.length === 1 ? "y" : "ies"} in the current plan: ${stillUnmet.join(", ")}`,
-      planResequenceUnmetDependencies: stillUnmet,
+        `unmet dependenc${closable.length === 1 ? "y" : "ies"} in the current plan: ${closable.join(", ")}`,
+      planResequenceUnmetDependencies: closable,
     };
   });
+}
+
+/** W1-T13226 — the task each OPEN implementation PR credits, mapped to its lowest PR number. Only a
+ *  positively non-plan-filing PR (`isPlanFiling === false`) with a task id counts — a filing PR
+ *  carries the task's record, not its build — and never `judged`, so a PR cannot hold itself. PURE. */
+function openImplementationPrByTask(prs: readonly OpenPrView[], judged: number): Map<string, number> {
+  const byTask = new Map<string, number>();
+  for (const other of prs) {
+    if (other.prNumber === judged || other.isPlanFiling !== false || !other.taskId) continue;
+    const known = byTask.get(other.taskId);
+    if (known === undefined || other.prNumber < known) byTask.set(other.taskId, other.prNumber);
+  }
+  return byTask;
 }
 
 function stampTaskMergedBy(prs: readonly OpenPrView[], candidates: readonly CreditCandidate[] | undefined): OpenPrView[] {
@@ -14612,6 +14645,9 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
         if (pr.reviewPendingOwnerDead === true) {
           if (pr.reviewPendingOwnerGone === "refused-after-pending") {
             return `checks green, the pending review's post was refused after it began (${pr.reviewPendingOwnerGoneReason}) — re-running the review lane on #${pr.prNumber}`;
+          }
+          if (pr.reviewPendingOwnerGone === "start-failed") {
+            return `checks green, the pending review's reviewer failed to start (${pr.reviewPendingOwnerGoneReason}) and no review is running — re-running the review lane on #${pr.prNumber}`;
           }
           if (pr.reviewPendingOwnerGone === "inconclusive-load") {
             return `checks green, its proof was inconclusive under host load and the host is quieter now — re-running the review lane on #${pr.prNumber}`;
@@ -18574,9 +18610,94 @@ export function inconclusiveLoadLowered(
   return now !== undefined && now < Math.min(...recorded);
 }
 
+/** W1-T13380: the reviewer outcome a review run records when its reviewer could not start (a spawn error). */
+export const REVIEWER_START_FAILED_OUTCOME = "spawn_error";
+
+/** W1-T13380: the HEAD sha of a checkout, read from its git files (no spawn), as reviewer-health's checkoutHeadSha reads it. */
+function checkoutHeadOf(root: string): string {
+  const dotGit = join(root, ".git");
+  let gitDir = dotGit;
+  try {
+    const named = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotGit, "utf8"));
+    if (named) gitDir = resolvePath(root, named[1]!.trim());
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EISDIR") throw error;
+  }
+  const head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
+  const ref = /^ref:\s*(\S+)$/.exec(head)?.[1];
+  if (ref === undefined) return head;
+  const commonFile = join(gitDir, "commondir");
+  const common = existsSync(commonFile) ? resolvePath(gitDir, readFileSync(commonFile, "utf8").trim()) : gitDir;
+  for (const dir of [gitDir, common]) {
+    if (existsSync(join(dir, ref))) return readFileSync(join(dir, ref), "utf8").trim();
+  }
+  const packed = existsSync(join(common, "packed-refs")) ? readFileSync(join(common, "packed-refs"), "utf8") : "";
+  const line = packed.split("\n").find((l) => l.endsWith(` ${ref}`));
+  if (line === undefined) throw new Error(`${ref} is not resolvable in ${common}`);
+  return line.split(" ")[0]!;
+}
+
+let loadedCodeSha: { value: string | null } | undefined;
+/** W1-T13380: the reviewer code this process runs, read once. Read here, not imported: reviewer-health reaches this module. */
+function runningReviewerCodeSha(): string | null {
+  if (loadedCodeSha === undefined) {
+    try {
+      const sha = checkoutHeadOf(fileURLToPath(new URL("../../", import.meta.url)));
+      loadedCodeSha = { value: /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(sha) ? sha : null };
+    } catch {
+      loadedCodeSha = { value: null }; // deliberate: an unreadable checkout counts no start failure toward the hold
+    }
+  }
+  return loadedCodeSha.value;
+}
+
+/** W1-T13380 — the reviewer start failures at this view's head and input. `standing` is the newest one's reason when no newer
+ *  claim or post at this head follows it and the pending claim's own run wrote one after its claim: that run ended, and no
+ *  review is running. `held` is W1-T13193's hold shape, set when one reason reached {@link REVIEW_INPUT_ADMISSION_BACKSTOP}
+ *  for the running reviewer code (or a healed tree, W1-T13838) since the PR's last post. */
+function reviewStartFailures(pr: SweepPrView, lines: ReadonlyArray<Record<string, unknown>>, runningReviewerCodeSha: string | null):
+  { standing?: string; held?: ReviewSetupRefusal } {
+  const healed = new Set<unknown>();
+  const groups = new Map<string, ReviewSetupRefusal>();
+  let standing: string | undefined;
+  let ownerFailed = false;
+  for (const row of lines) {
+    if (row.step === "review.ran_from_healed_tree" && typeof row.healed_sha === "string") healed.add(row.healed_sha);
+    if (row.pr_url !== pr.prUrl) continue;
+    if (row.step === "review.posted") groups.clear();
+    if (row.head_sha !== pr.headSha) continue;
+    if (row.step === "review.posted" || row.step === "review.pending_posted") {
+      standing = undefined;
+      if (row.run_id === pr.reviewPendingOwnerRunId) ownerFailed = false;
+      continue;
+    }
+    if (row.step !== "review.semantic_incomplete") continue;
+    const failed = row.reviewer_outcome === REVIEWER_START_FAILED_OUTCOME && typeof row.reason === "string" &&
+      (pr.reviewInputDigest === undefined || row.review_input_digest === pr.reviewInputDigest);
+    standing = failed ? String(row.reason) : undefined;
+    if (!failed) continue;
+    if (row.run_id === pr.reviewPendingOwnerRunId) ownerFailed = true;
+    const codeSha = typeof row.reviewer_code_sha === "string" ? row.reviewer_code_sha : null;
+    if (codeSha !== runningReviewerCodeSha && (codeSha === null || !healed.has(codeSha))) continue;
+    const reason = `reviewer-start-failed:${String(row.reason)}`;
+    const group = groups.get(reason) ?? { reason, count: 0, reviewerCodeSha: runningReviewerCodeSha, runningReviewerCodeSha };
+    group.count++;
+    groups.set(reason, group);
+  }
+  let held: ReviewSetupRefusal | undefined;
+  for (const group of groups.values()) {
+    if (group.count >= REVIEW_INPUT_ADMISSION_BACKSTOP && (held === undefined || group.count > held.count)) held = group;
+  }
+  return { ...(standing !== undefined && ownerFailed ? { standing } : {}), ...(held === undefined ? {} : { held }) };
+}
+
 function promiseHarvestRetryView(
-  pr: SweepPrView, lines: ReadonlyArray<Record<string, unknown>>, sample: () => HostLoadSample = sampleHostLoad,
+  view: SweepPrView, lines: ReadonlyArray<Record<string, unknown>>, sample: () => HostLoadSample = sampleHostLoad,
 ): SweepPrView {
+  // W1-T13380: the sweep runs each review in process, so this process's code sha is the next review's (as W1-T13193's producer).
+  const started = reviewStartFailures(view, lines, runningReviewerCodeSha());
+  const pr: SweepPrView = started.held === undefined || view.reviewSetupRefused !== undefined ? view
+    : { ...view, reviewSetupRefused: started.held };
   // A completed harvest hold proves no review owns this pending status; reuse the unattended-review route.
   // W1-T14035: a hold cause keeps its precedence over the producer's `owner-pid-dead`, as before; the producer's proof rides
   // along as a sweep-local flag that only the alongside-CI row and reviewDemandLooping read.
@@ -18585,6 +18706,10 @@ function promiseHarvestRetryView(
     ? { ...pr, ...proven, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "promise-harvest-incomplete" }
     : inconclusiveLoadLowered(pr, lines, sample)
     ? { ...pr, ...proven, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "inconclusive-load" }
+    : pr.reviewState === "pending" && started.standing !== undefined &&
+      (pr.reviewPendingOwnerGone === undefined || pr.reviewPendingOwnerGone === "owner-pid-dead") &&
+      (pr.reviewPendingStatusRunId === undefined || pr.reviewPendingStatusRunId === pr.reviewPendingOwnerRunId)
+    ? { ...pr, ...proven, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "start-failed", reviewPendingOwnerGoneReason: started.standing }
     : pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerGone === undefined
       ? { ...pr, reviewPendingOwnerGone: "owner-pid-dead" } : pr;
 }

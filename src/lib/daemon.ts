@@ -2745,10 +2745,15 @@ function refillLaneLocalRejection(err: unknown): boolean {
   return ghLaneReadFailure(err) !== undefined || laneDeliveryFailure(err) !== undefined;
 }
 
+/** A run's check rollup could not name which workflow produced its same-named check runs: a read of GitHub that
+ *  disagreed with itself, which ends that run's lane and never the daemon (2026-11-24 17:06Z cold start). */
+export const GH_CHECK_IDENTITY_UNREADABLE = "GH_CHECK_IDENTITY_UNREADABLE";
+
 function ghLaneReadFailure(err: unknown): { detail: string } | undefined {
   if (typeof err !== "object" || err === null) return undefined;
   const failure = err as NodeJS.ErrnoException & { stderr?: string | Buffer };
   const message = String(failure.message ?? "");
+  if (failure.code === GH_CHECK_IDENTITY_UNREADABLE) return { detail: message };
   if (!/(?:^|\s)gh(?:\s|$)/i.test(message)) return undefined;
   if (!/commits\/[^/\s]+\/(?:check-runs|status)\b/i.test(message)) return undefined;
   const detail = [message, failure.stderr == null ? "" : String(failure.stderr), failure.code ?? ""]
@@ -6131,7 +6136,8 @@ export async function runDaemon(
   let freshnessDecidedAtMs: number | undefined;
   // W1-T12231: the last score's change weight and stale reading, used with the current stall share to predict release.
   let freshnessOutlook: { weight: number; staleSinceMs: number } | undefined;
-  const freshnessPhases: { decision_to_latch?: number; lanes?: number; pre_exit_pass?: number; drain?: number } = {};
+  const freshnessPhases: { decision_to_latch?: number; lanes?: number; pre_exit_pass?: number; drain?: number;
+    settle?: Record<string, number | Record<string, number>> } = {};
   const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, lanes: readonly (string | undefined)[] = []): "restart" | "defer" => {
     const nowMs = daemonClock.now();
     observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs, freshness.changes);
@@ -6420,6 +6426,8 @@ export async function runDaemon(
   type FreshnessPass = "skipped_ran_since_latch" | "skipped_ran_since_stale" | "awaited_in_flight" | "no_sweep_at_exit";
   type ExitPass = {
     kind: FreshnessPass; settled: Promise<void>; overlapped: boolean; overlapMs: number; limitAtMs?: number;
+    /** With a hand-over started, the drain deadline: a ready standby ends the wait here (Craig 2026-11-24). */
+    standbyLimitAtMs?: number;
     /** Records pre_exit_pass once: when the pass settles, or at its limit when the exit goes without it (#19797 review). */
     record?: () => void;
   };
@@ -6429,13 +6437,26 @@ export async function runDaemon(
   const passWithinLimit = async (pass: ExitPass): Promise<void> => {
     if (pass.limitAtMs === undefined) return pass.settled;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let standbyTimer: ReturnType<typeof setTimeout> | undefined;
     const limit = new Promise<"limit">((resolve) => { timer = setTimeout(() => resolve("limit"), Math.max(0, pass.limitAtMs! - daemonClock.now())); });
-    const outcome = await Promise.race([pass.settled.then(() => "settled" as const), limit]);
+    // A pass is in process, so what it has not posted is redone by the successor; a standby that is not ready keeps
+    // the wait to its limit, as before.
+    const standbyAtMs = pass.standbyLimitAtMs;
+    const attemptStarted = handoffStart;
+    const standby = standbyAtMs === undefined || attemptStarted === undefined ? undefined
+      : new Promise<"standby_ready">((resolve) => {
+        standbyTimer = setTimeout(() => {
+          void attemptStarted.then(async (attempt) => { if (attempt && await attempt.ready()) resolve("standby_ready"); });
+        }, Math.max(0, standbyAtMs - daemonClock.now()));
+      });
+    const outcome = await Promise.race([pass.settled.then(() => "settled" as const), limit, ...(standby ? [standby] : [])]);
     clearTimeout(timer);
-    if (outcome === "limit") {
+    clearTimeout(standbyTimer);
+    if (outcome !== "settled") {
       pass.record?.();
+      const limitAtMs = outcome === "standby_ready" ? standbyAtMs! : pass.limitAtMs;
       log("daemon.freshness_pre_exit_pass_abandoned", { pre_exit_pass: pass.kind, max_drain_wait_ms: freshnessMaxDrainWaitMs,
-        limit_at: fixedClock(pass.limitAtMs).iso() });
+        limit_at: fixedClock(limitAtMs).iso(), ...(outcome === "standby_ready" ? { ended_by: "standby_ready" } : {}) });
     }
   };
   const drainBeforeRestart = async (
@@ -6638,6 +6659,9 @@ export async function runDaemon(
     const pass: ExitPass = { kind: preExitPass, settled: Promise.resolve(),
       overlapped: dispatchLatchAtMs !== undefined && pendingPass !== undefined, overlapMs: 0,
       ...(pendingPass ? { limitAtMs: (dispatchLatchAtMs ?? passStartedAtMs) + freshnessMaxDrainWaitMs } : {}) };
+    // With a hand-over started, a ready standby ends the wait for the pass at the latch's drain deadline.
+    const latchWindow = dispatchLatchAtMs !== undefined && latchDrain?.latchAtMs === dispatchLatchAtMs ? latchDrain.windowDeadlineMs : undefined;
+    if (pendingPass && handoffStart && latchWindow !== undefined && latchWindow < pass.limitAtMs!) pass.standbyLimitAtMs = latchWindow;
     const recordPass = () => {
       if (!pendingPass || freshnessPhases.pre_exit_pass !== undefined) return;
       freshnessPhases.pre_exit_pass = Math.max(0, daemonClock.now() - passStartedAtMs);
@@ -10121,6 +10145,15 @@ export async function runDaemon(
       });
     }, refillLane, lanes, admitAtStart, onStarted, poolControl);
     let poolOutcome: LanePoolOutcome<Task, RunResult>;
+    // W1-T14684: from the pool's settle to a decided restart's exit, each step's time is named in the exit's phases_ms.
+    let settleMarkMs = daemonClock.now();
+    const settleParts: Record<string, number> = {};
+    const settleProcess: Record<string, number> = {};
+    const markSettle = (part: string): void => {
+      const atMs = daemonClock.now();
+      settleParts[part] = (settleParts[part] ?? 0) + Math.max(0, atMs - settleMarkMs);
+      settleMarkMs = atMs;
+    };
     try {
       let phase = "dispatch.concurrent_set";
       try {
@@ -10142,6 +10175,7 @@ export async function runDaemon(
       } finally {
         // Even a phase-level logging failure cannot abandon promises the pool already owns.
         poolOutcome = await admittedWork;
+        settleMarkMs = daemonClock.now();
         // W1-T11129: the pool's last lane, and any a fault or detach retired, never reaches refillLane: close its interval.
         // Never throws: readLaneCpu reads an unreadable or throwing counter as unread, and the rest is pure.
         laneCpuTransition(() => { for (const task of admitted) laneCpuBuilds.delete(task.id); });
@@ -10151,17 +10185,20 @@ export async function runDaemon(
         const abandoning = [...pendingChildren.values()];
         pendingChildren.clear();
         await Promise.allSettled(abandoning.map((pending) => pending.abort()));
+        markSettle("abandon_pending");
       }
       try { log("dispatch.settled_set", settledSetPayload(admitted, poolOutcome.settled, laneCount)); }
       catch (reason) { phaseFaults.push({ phase: "dispatch.settled_set", reason: reason }); }
     } finally {
       repositoryMaintenanceQueueBusy = false;
       await stopTicker();
+      markSettle("stop_ticker");
     }
     const reporting = createSettlementReporting();
     try {
     const settled = poolOutcome.settled;
     await flushLifetimePressure(reporting.report);
+    markSettle("lifetime_pressure");
     if (!childMode || !restartDecided) restartInterphaseReviewClock();
     if (admitted.length === 0 && newBuildHeld && poolOutcome.fault === undefined && phaseFaults.length === 0) {
       // Persistent hold is an in-process, paced NEW-build deferral, never a failure/STOP.
@@ -10309,6 +10346,7 @@ export async function runDaemon(
       laneDeliveryParks.delete(t.id); // W1-T5344: a settled run ends this task's delivery-failure streak
       toProcess.push({ task: t, result, snapshot: snapshots[i] });
     }
+    markSettle("classify");
     if (poolOutcome.fault !== undefined) {
       const { task, lane, phase, reason } = poolOutcome.fault;
       try { log("dispatch.pool_failed", { task: task.id, lane, phase, error: String((reason as Error)?.message ?? reason) }); }
@@ -10343,7 +10381,10 @@ export async function runDaemon(
       const apiWindowDisposition = reasonAboutApiWindow(apiWindowHoldState, task.id, result.verdict, pollIntervalMs, maxApiWindowHoldMs);
       apiWindowHoldState = apiWindowDisposition.state;
       apiWindowHoldMs = apiWindowDisposition.holdMs;
+      const processStartedAtMs = settleMarkMs;
       const outcome = await processDispatchResult(snapshot.plan, task, result, snapshot.isMerged, reporting.report);
+      markSettle("process");
+      settleProcess[task.id] = (settleProcess[task.id] ?? 0) + Math.max(0, settleMarkMs - processStartedAtMs);
       batchChildren.get(task)?.acknowledge?.({ status: "fulfilled", value: result });
       if (outcome.kind === "genuine_blocker") {
         if (deps.isOpenPr === undefined || deps.isCreditIndeterminate === undefined) {
@@ -10361,6 +10402,7 @@ export async function runDaemon(
       }
     }
     await settleClaimStall();
+    markSettle("claim_stall");
     if (fatalError || phaseFaults.length > 0 || reporting.faults.length > 0) {
       // A pool fault closes starts, but genuine workers still earn their result/cost/merge credit.
       // Preserve original classification/detail; named logging faults remain separate secondary facts.
@@ -10378,6 +10420,8 @@ export async function runDaemon(
 
     if (restartDecided && !deps.checkStop?.() && !deps.checkPause?.()) {
       await stopInterphaseReviewClock();
+      markSettle("interphase_stop");
+      freshnessPhases.settle = { ...settleParts, process_by_task: { ...settleProcess } };
       return stopForFreshness(restartDecided, restartWait.decidedAtMs);
     }
     restartWindow = undefined;

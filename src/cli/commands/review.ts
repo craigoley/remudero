@@ -50,7 +50,7 @@ import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib
 import { isDispatchedRunBranch } from "../../lib/sweep.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "../../lib/sweep.js";
 import { readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest } from "../../lib/sweep.js";
-import { REVIEW_RUN_SETTLED_STEPS } from "../../lib/sweep.js";
+import { REVIEW_RUN_SETTLED_STEPS, REVIEWER_START_FAILED_OUTCOME } from "../../lib/sweep.js";
 import { ghJson, renderWorkerSettings, cashDivertSpawnFields, spawnWorker, workerLedgerFields, workerTranscript, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment, WorkerAbandonedError, worktreeRemoveAsync } from "../../lib/worker.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "../../lib/worktree-git.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/merged-ratchet-verdict.ts imports its siblings.
@@ -2971,10 +2971,14 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   );
   const reviewKey = reviewLedgerKeyFor(taskId, view.number);
   // W1-T10269: a shadow review publishes nothing and its rows are renamed; every terminal row names the judging code's sha.
-  const log = (step: string, extra: Record<string, unknown> = {}) =>
+  // W1-T13380: `startFailure` is the reason this run recorded when its reviewer could not start.
+  let startFailure: string | undefined;
+  const log = (step: string, extra: Record<string, unknown> = {}) => {
+    if (step === "review.semantic_incomplete" && extra.reviewer_outcome === REVIEWER_START_FAILED_OUTCOME) startFailure = String(extra.reason);
     appendLedger(ledgerPath, { run_id: runId, task_id: reviewKey, step: reviewerShadowStep(step, shadow), lane: "review",
       ...(reviewAttemptId === undefined ? {} : { review_attempt_id: reviewAttemptId, review_input_digest: inputDigest }), ...extra,
       ...reviewerHealthRowFields(step, flagValue(rest, REVIEWER_INCIDENT_FLAG)) });
+  };
   const adoptionComment = flagValue(rest, "--admission-adopt-comment");
   if (!shadow) {
     await observeAdmissionDisposition(config.contributorAdmission,
@@ -3299,6 +3303,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   }
   const publicationFreshness = reviewerFreshnessForPublication(startFreshness, reviewerCodeFreshnessDep);
   let claimHeld: string | undefined;
+  let claimPosted = false;
   if (!shadow) try {
     const claimLedger = await readLedgerUnionRecords(dirname(ledgerPath), {
       selectRotation: () => false,
@@ -3310,7 +3315,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     const checkedStatus = hasClaim ? await readBoundPendingClaimStatus(owner, repo, view.headRefOid,
       deps.fetchPendingStatus ?? ((args) => ghJsonAsync(args, undefined, undefined, { fresh: true }))) : undefined;
     claimHeld ??= checkedStatus?.reason;
-    claimHeld ??= pendingClaimHeldByAnotherRun(await postReviewPendingDep({
+    const claim = claimHeld !== undefined ? undefined : await postReviewPendingDep({
       owner,
       repo,
       sha: view.headRefOid,
@@ -3322,7 +3327,9 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       reviewEngineRevision: REVIEW_ENGINE_REVISION,
       fetchLifecycle: () => fetchPrLifecycleAsync(view.url),
       fetchStatus: checkedStatus === undefined ? undefined : () => checkedStatus.combined,
-    }), runId, claimLedger, view.headRefOid);
+    });
+    claimPosted = claim?.posted === true;
+    if (claim !== undefined) claimHeld = pendingClaimHeldByAnotherRun(claim, runId, claimLedger, view.headRefOid);
   } catch (e) {
     log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
   }
@@ -3489,6 +3496,17 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   exit.step = "publish";
   if (shadow && verdict.verdictWithheld) exit.as("shadow-verdict-withheld");
   if (shadow) return verdict.verdictWithheld ? 2 : 0;
+  // W1-T13380: a reviewer that never started leaves no review running, so this run replaces its own claim with the truth.
+  if (claimPosted && startFailure !== undefined) {
+    try {
+      await postStatusDep({ post: catalogReviewPoster(taskCatalog, postReviewStatus), owner, repo, sha: view.headRefOid,
+        state: "pending", description: `pending (owned by run ${runId}) — no review running: the reviewer failed to start ` +
+          `(${startFailure}); retry due`, taskId: reviewKey, evidence: "no_evidence", ledgerPath, runId, prUrl: view.url,
+        reviewInputDigest: inputDigest, reviewEngineRevision: REVIEW_ENGINE_REVISION, fetchLifecycle: () => fetchPrLifecycleAsync(view.url) });
+    } catch (e) {
+      log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
+    }
+  }
 
   // A final review decision is immutable, but GitHub's commit status is last-write-wins. A stale
   // daemon may have posted pending after that decision; replay must check the live context and

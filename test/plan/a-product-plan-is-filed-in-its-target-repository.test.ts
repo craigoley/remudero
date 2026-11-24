@@ -4,6 +4,8 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSyn
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { planDestinationPath, resolvePlanDestinationForTarget } from "#src/lib/plan-destination.js";
+import { productTaskIdPrefix } from "#src/lib/task-id-reservation.js";
+import { planLaneIdNamespace } from "#test/helpers/run-task-test.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -13,7 +15,6 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 // the one this checkout's origin names (craigoley/remudero); the product is another repository on the host.
 const ID = "fb-product-target";
 const REL = `plan/feedback/${ID}.yaml`;
-const NEW_TASK = "plan/tasks.d/W1-T5-a-new-filing.yaml";
 const OPS = "fixture/remudero-ops";
 const OWN = "craigoley/remudero";
 const PRODUCT_OWNER = "fixture-owner";
@@ -21,9 +22,11 @@ const PRODUCT_NAME = "fixture-product";
 const PRODUCT = `${PRODUCT_OWNER}/${PRODUCT_NAME}`;
 
 type Repository = "own" | "ops" | "product";
-interface Observed { cwdOrigin?: string; prompt?: string }
+interface Observed { cwdOrigin?: string; prompt?: string; filed?: string }
+const SEED_PLAN = "- id: W1-T4\n  title: seed\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  attempts: 0\n";
 
-function fixture(t: TestContext) {
+/** `productPlan` seeds the product's plan/tasks.yaml; every other repository holds {@link SEED_PLAN}. */
+function fixture(t: TestContext, opts: { productPlan?: string } = {}) {
   const root = ownedFixtureDir(t, "product-plan-target").dir;
   const home = join(root, "home");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
@@ -36,7 +39,7 @@ function fixture(t: TestContext) {
     const origin = gitRepo({ bare: true, scope: t });
     const seed = gitRepo({ scope: t });
     mkdirSync(join(seed.dir, "plan", "tasks.d"), { recursive: true });
-    writeFileSync(join(seed.dir, "plan", "tasks.yaml"), "- id: W1-T4\n  title: seed\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  attempts: 0\n");
+    writeFileSync(join(seed.dir, "plan", "tasks.yaml"), name === "product" ? opts.productPlan ?? SEED_PLAN : SEED_PLAN);
     if (name !== "ops") {
       mkdirSync(join(seed.dir, "plan", "feedback"), { recursive: true });
       writeFileSync(join(seed.dir, REL), `id: ${ID}\nts: '2026-11-14T00:00:00.000Z'\nraw: file a task for the fixture\nattachments: []\norigin: human\nstatus: new\nproposal_pr: null\n`);
@@ -100,11 +103,12 @@ function fixture(t: TestContext) {
     import {execFileSync} from "node:child_process";
     import {planCommand,triageCommand} from "#test/helpers/run-task-test.js";
     import {withLiveWritesAllowed} from "#src/lib/live-write-guard.js";
-    const {root,REPO_ROOT,ID,NEW_TASK,diffFile,observedPath,outcomePath,command}=JSON.parse(process.env.PRODUCT_CASE);
+    const {root,REPO_ROOT,ID,diffFile,observedPath,outcomePath,command}=JSON.parse(process.env.PRODUCT_CASE);
     const observed={};
-    const task=(origin)=>["- id: W1-T5","  title: a new filing","  repo: remudero","  origin: "+origin,"  depends_on: []","  type: implement",
-      "  verify: auto","  status: queued","  attempts: 0","  files: [test/fixture.test.ts]","  acceptance:","    - claim: fixture",
-      "      proof: 'unit test: fixture'",""].join("\n");
+    let filedId="W1-T5";
+    const task=(origin)=>["- id: "+filedId,"  title: a new filing","  repo: remudero","  origin: "+origin,"  depends_on: []","  type: implement",
+      "  verify: auto","  status: queued","  attempts: 0","  design: 'NO-INVARIANTS: a fixture filing with no prior behavior'","  files: [test/fixture.test.ts]","  acceptance:","    - claim: fixture",
+      "      proof: 'grep: seed in plan/tasks.yaml'",""].join("\n");
     const result=(text)=>({sessionId:"fixture",costUsd:0,text,blocks:[text],stderr:"",subtype:"success",isError:false,apiError:false,
       numTurns:1,model:"fixture",effort:"high",tokens:{input:0,output:0,cacheRead:0,cacheCreation:0},totalCostUsd:0,
       billingMode:"subscription",verdict:"success",qualitySuspect:false,compactionEvents:[],childEnvKeys:[]});
@@ -112,11 +116,15 @@ function fixture(t: TestContext) {
       if((args.tools??[]).length===0)return result("{}");
       observed.prompt=args.prompt;
       observed.cwdOrigin=execFileSync("git",["remote","get-url","origin"],{cwd:args.cwd,encoding:"utf8"}).trim();
+      // The worker files the first id the harness reserved for it, as its prompt says.
+      filedId=/RESERVED these ids for this run: ([A-Z0-9-]+)/.exec(args.prompt)?.[1]??filedId;
+      const NEW_TASK="plan/tasks.d/"+filedId+"-a-new-filing.yaml";
+      observed.filed=NEW_TASK;
       mkdirSync(join(args.cwd,"plan","tasks.d"),{recursive:true});
       writeFileSync(join(args.cwd,NEW_TASK),task(command==="triage"?"feedback#"+ID:"architect"));
       writeFileSync(diffFile,["diff --git a/"+NEW_TASK+" b/"+NEW_TASK,"new file mode 100644","--- /dev/null","+++ b/"+NEW_TASK,
-        "@@ -0,0 +1,2 @@","+- id: W1-T5","+  origin: feedback#"+ID,""].join("\n"));
-      return result(command==="triage"?"PROPOSED: file W1-T5 for the feedback":"PROPOSED: file W1-T5 for the fixture");
+        "@@ -0,0 +1,2 @@","+- id: "+filedId,"+  origin: feedback#"+ID,""].join("\n"));
+      return result(command==="triage"?"PROPOSED: file "+filedId+" for the feedback":"PROPOSED: file "+filedId+" for the fixture");
     };
     let outcome;
     try{
@@ -139,7 +147,7 @@ function fixture(t: TestContext) {
     try {
       execFileSync(process.execPath, ["--import", loader, "--input-type=module", "-e", child, command, ...repoRootArgs], {
         cwd: REPO_ROOT, encoding: "utf8", timeout: 180000, maxBuffer: 16 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, HOME: home, PATH: `${shim.dir}:${saved}`, PRODUCT_CASE: JSON.stringify({ root, REPO_ROOT, ID, NEW_TASK,
+        env: { ...process.env, HOME: home, PATH: `${shim.dir}:${saved}`, PRODUCT_CASE: JSON.stringify({ root, REPO_ROOT, ID,
           diffFile, observedPath, outcomePath, command }) },
       });
     } catch (error) { return { error: String(error), observed: {} }; }
@@ -163,11 +171,12 @@ test("W1-T14320 criterion 1: with the task kind on, rmd plan against another rep
   assert.ok(!String(result.observed.prompt).includes("plan destination"), "the worker gets no read-only public view");
   const [branch] = f.runBranches("product", "PLAN");
   assert.ok(branch, f.ledger());
-  assert.deepEqual(f.changed("product", branch), [NEW_TASK]);
+  assert.deepEqual(f.changed("product", branch), [result.observed.filed]);
   assert.equal(f.posts(PRODUCT), 1, "the pull request is opened in the product's repository");
   assert.equal(f.posts(OPS), 0, "no pull request is opened in the plan destination");
   assert.deepEqual(f.runBranches("ops", "PLAN"), [], "nothing is pushed to the plan destination");
-  assert.equal(f.idRefs("product"), "refs/rmd-id/W1-T5", "the id is reserved in the product's repository");
+  // W1-T14735: a product whose plan declares no prefix of its own files one named for it, never a W1 id.
+  assert.equal(f.idRefs("product"), "refs/rmd-id/FIXTURE-PRODUCT-T1", "the id is reserved in the product's repository");
   assert.equal(f.idRefs("ops"), "", "no id is reserved in the plan destination");
   assert.equal(f.idRefs("own"), "", "no id is reserved in the instance's own repository");
 });
@@ -204,7 +213,7 @@ test("W1-T14320 criterion 2: invariant:destination-is-for-own-plans — with the
     assert.equal(ownRun.observed.cwdOrigin, f.origins.ops.dir, `the instance's own ${command} is cut in the destination`);
     const [opsBranch] = f.runBranches("ops", lane);
     assert.ok(opsBranch, f.ledger());
-    assert.deepEqual(f.changed("ops", opsBranch), [NEW_TASK]);
+    assert.deepEqual(f.changed("ops", opsBranch), [ownRun.observed.filed]);
     assert.deepEqual(f.runBranches("own", lane), [], `the instance's own ${command} files nothing in the public repository`);
 
     const productRun = f.run(command, "product");
@@ -213,9 +222,55 @@ test("W1-T14320 criterion 2: invariant:destination-is-for-own-plans — with the
     assert.deepEqual(f.runBranches("ops", lane), [opsBranch], `the product's ${command} adds nothing to the destination`);
     const [productBranch] = f.runBranches("product", lane);
     assert.ok(productBranch, f.ledger());
-    assert.ok(f.changed("product", productBranch).includes(NEW_TASK));
+    assert.ok(f.changed("product", productBranch).includes(String(productRun.observed.filed)));
   }
   assert.equal(f.posts(OPS), 2, "the destination has the own plan's and the own triage's pull requests, and no other");
   assert.equal(f.posts(PRODUCT), 2);
   assert.equal(f.posts(OWN), 0);
+});
+
+/** The reserved ids a plan worker was handed, read from the prompt line the harness writes. */
+const handed = (prompt: string | undefined): string[] =>
+  (/RESERVED these ids for this run: ([^.]+)\./.exec(String(prompt))?.[1] ?? "").split(", ").filter(Boolean);
+const WRECK_PLAN = Array.from({ length: 16 }, (_, i) => SEED_PLAN.replace("W1-T4", `WRECK-T${i + 1}`)).join("");
+
+test("W1-T14735 a target plan with its own prefix mints and reserves the next prefixed id", (t) => {
+  const f = fixture(t, { productPlan: WRECK_PLAN });
+  const result = f.run("plan", "product");
+  assert.equal(result.error, undefined, f.ledger());
+  const ids = handed(result.observed.prompt);
+  assert.equal(ids[0], "WRECK-T17", "the worker is handed the next id in the product's own prefix");
+  assert.ok(ids.every((id) => id.startsWith("WRECK-T")), ids.join(", "));
+  assert.equal(f.idRefs("product"), "refs/rmd-id/WRECK-T17", `the filed id stays reserved on the product's origin\n${f.ledger()}`);
+  assert.equal(f.idRefs("own"), "", "nothing is reserved on core for a product's plan");
+  const [branch] = f.runBranches("product", "PLAN");
+  assert.deepEqual(f.changed("product", branch), ["plan/tasks.d/WRECK-T17-a-new-filing.yaml"]);
+  // The prefix a product files: its most-declared non-W1 prefix, a tie to the first by name, else one named for it.
+  assert.equal(productTaskIdPrefix(["- id: CONSOLE-T2\n- id: API-T9\n- id: CONSOLE-T3\n- id: W1-T1\n- id: W1-T2\n- id: W1-T3\n"], "x"), "CONSOLE");
+  assert.equal(productTaskIdPrefix(["id: UI-T1\n", "id: API-T1\n"], "x"), "API");
+  assert.equal(productTaskIdPrefix(["depends_on: [WRECK-T1]\n"], "oley-arcade"), "OLEY-ARCADE", "a mention is not a declaration");
+  assert.equal(productTaskIdPrefix([], "3d.demo"), "R-3D-DEMO");
+  assert.equal(productTaskIdPrefix([], "w1"), "R-W1");
+  assert.equal(productTaskIdPrefix([], "..."), "R");
+});
+
+test("W1-T14735 a W1 id reserved on core is never handed to a target plan", (t) => {
+  const f = fixture(t);
+  // Core holds W1-T5, the id the product's own W1-only plan would mint next.
+  const main = f.origins.own.git("rev-parse", "main").trim();
+  f.origins.own.git("update-ref", "refs/rmd-id/W1-T5", main);
+  const result = f.run("plan", "product");
+  assert.equal(result.error, undefined, f.ledger());
+  const ids = handed(result.observed.prompt);
+  assert.ok(ids.length > 0, String(result.observed.prompt));
+  assert.deepEqual(ids.filter((id) => id.startsWith("W1-")), [], "no W1 id is handed to a product's plan");
+  assert.ok(!f.idRefs("product").includes("refs/rmd-id/W1-"), f.idRefs("product"));
+  assert.equal(f.idRefs("own"), "refs/rmd-id/W1-T5", "core's reservation is untouched");
+  // The namespace: core's own repository keeps W1; another target gets its prefix; an unreadable own repository refuses.
+  const own = () => ({ owner: "Craigoley", repo: "Remudero" });
+  assert.deepEqual(planLaneIdNamespace(f.root, { owner: "craigoley", repo: "remudero" }, own), { kind: "core" });
+  assert.equal((planLaneIdNamespace(f.root, { owner: PRODUCT_OWNER, repo: PRODUCT_NAME }, own) as { prefix?: string }).prefix, "FIXTURE-PRODUCT");
+  const unread = planLaneIdNamespace(f.root, { owner: PRODUCT_OWNER, repo: PRODUCT_NAME }, () => { throw new Error("/secret/path"); });
+  assert.equal(unread.kind, "refused");
+  assert.ok(!JSON.stringify(unread).includes("/secret/path"), "the refusal never names a checkout path");
 });

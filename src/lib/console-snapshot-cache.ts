@@ -260,6 +260,10 @@ export interface ConsoleSnapshotCacheOptions {
   store?: ConsoleSnapshotStore;
   /** Overrides {@link CONSOLE_SNAPSHOT_FRESH_FOR_MS} for this route. */
   freshForMs?: number;
+  /** W1-T14682: receives one `serve.console_snapshot_refresh` row per refresh settle and per missed read budget. */
+  log?: (step: string, extra: Record<string, unknown>) => void;
+  /** The instance this route serves, named in each refresh row. Default `core`. */
+  instance?: string;
   /**
    * W1-T14683: strips every per-reader field from a good body so it can be shared across readers of one url;
    * undefined means that body is not shareable. A route without it never shares a body between readers.
@@ -277,6 +281,9 @@ export function sharedKeyOfEntryKey(key: string): string {
   const [readerKey, sourceKey] = JSON.parse(key) as [string, string];
   return JSON.stringify([unqualified(readerKey), sourceKey]);
 }
+
+/** W1-T14682: the ledger step naming each refresh of a cached console read. */
+export const CONSOLE_SNAPSHOT_REFRESH_STEP = "serve.console_snapshot_refresh";
 
 interface SnapshotEntry {
   key: string;
@@ -315,6 +322,10 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
   const setTimer = options.setTimer ?? defaultSetTimer;
   const { budgetMs } = options;
   const entries = new Map<string, SnapshotEntry>();
+  const instance = options.instance ?? "core";
+  const logRefresh = (outcome: "ready" | "budget" | "threw", ms: number, reason?: string): void => {
+    options.log?.(CONSOLE_SNAPSHOT_REFRESH_STEP, { path: route.path, instance, ms: Math.round(ms), outcome, ...(reason === undefined ? {} : { reason }) });
+  };
   // W1-T14683: one reader-free last good body per url, so a one-off reader never starts from the cold fallback.
   const lastGood = new Map<string, BufferedRouteResponse>();
   const share = (key: string, cached: BufferedRouteResponse): void => {
@@ -392,9 +403,11 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
         entry.restoredFrom = undefined;
         share(entry.key, entry.cached);
         persist(entry);
+        logRefresh("ready", clock.now() - startedAt);
       } catch (error) {
         const reason = String((error as Error)?.message ?? error);
         entry.lastError = reason;
+        logRefresh("threw", clock.now() - startedAt, reason);
       } finally {
         entry.computeMs = Math.max(0, clock.now() - startedAt);
         entry.refreshPromise = undefined;
@@ -424,6 +437,7 @@ export function createConsoleSnapshotCache(route: Route, options: ConsoleSnapsho
     const refreshDone = refresh(entry, req);
     const outcome = await Promise.race([refreshDone.then(() => "ready" as const), deadline]);
     clearTimeout(deadlineTimer);
+    if (outcome === "budget") logRefresh("budget", budgetMs);
     const cached = entry.cached;
     if (outcome === "ready" && cached && entry.generation === generation.current()) {
       writeBufferedResponse(req, res, cached, stalenessOf(entry, cached));

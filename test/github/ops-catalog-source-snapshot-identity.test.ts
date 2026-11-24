@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
-  OPS_CATALOG_MAX_BLOB_BYTES, readOpsCatalogSnapshotAsync, createOpsCatalogShadowSource, type OpsCatalogApi,
+  readOpsCatalogSnapshotAsync, createOpsCatalogShadowSource, type OpsCatalogApi,
 } from "#src/lib/ops-catalog-source.js";
 
 const REPO = "acme-private/ops-secret-slug";
@@ -112,10 +112,13 @@ test("W1-T11768 criterion 1: bytes altered under the original blob sha are refus
   assert.equal(snap.plan, undefined);
 });
 
+/** W1-T14638: a blob size no fixed ceiling bounds. It is past the 256 KiB per-blob ceiling that once refused it. */
+const LARGE_BLOB_BYTES = 512 * 1024;
+
 test("W1-T11768 criterion 1: a max-size blob with GitHub-wrapped base64 remains readable", async () => {
   const prefix = `${taskYaml("OPS-BOUNDARY")}# `;
-  const text = `${prefix}${"x".repeat(OPS_CATALOG_MAX_BLOB_BYTES - Buffer.byteLength(prefix) - 1)}\n`;
-  assert.equal(Buffer.byteLength(text), OPS_CATALOG_MAX_BLOB_BYTES);
+  const text = `${prefix}${"x".repeat(LARGE_BLOB_BYTES - Buffer.byteLength(prefix) - 1)}\n`;
+  assert.equal(Buffer.byteLength(text), LARGE_BLOB_BYTES);
   const fx = fixture({ monolith: text });
   const wrappedApi: OpsCatalogApi = async (path) => {
     const response = await fx.api(path);
@@ -126,7 +129,7 @@ test("W1-T11768 criterion 1: a max-size blob with GitHub-wrapped base64 remains 
   const snap = await readOpsCatalogSnapshotAsync({ repository: REPO }, wrappedApi);
   assert.equal(snap.outcome, "ok");
   assert.deepEqual(snap.plan?.tasks.map((t) => t.id), ["OPS-BOUNDARY"]);
-  assert.equal(snap.counts.bytes, OPS_CATALOG_MAX_BLOB_BYTES);
+  assert.equal(snap.counts.bytes, LARGE_BLOB_BYTES);
 });
 
 test("W1-T11768 criterion 1: the same catalog binds the same digest and a different one differs", async () => {

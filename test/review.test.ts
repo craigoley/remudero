@@ -1832,7 +1832,7 @@ test("judgeCriterion: a proof naming a short, concrete, FABRICATED test name is 
   assert.match(v.reason, /does not exist/i);
 });
 
-test("judgeCriterion (W1-T161 falsifier): the #349 fixture — a real PASSING test under a different name — yields NO block, reproducing the live incident and proving the fix", () => {
+test("judgeCriterion (W1-T161, W1-T14715): the #349 fixture — one title naming no test on the head — is executed_fail, so a paraphrase must resolve to its real title", () => {
   // The exact proof text recorded on plan/tasks.yaml:5540 (W1-T149's own third
   // acceptance criterion), verbatim.
   const criterion = {
@@ -1847,10 +1847,11 @@ test("judgeCriterion (W1-T161 falsifier): the #349 fixture — a real PASSING te
   // shape: …"), so --test-name-pattern against this paraphrase matches zero —
   // the injected executor reproduces that observed shape.
   const v = judgeCriterion(criterion, reportTokens, undefined, { cwd: "/tmp/x", exec: () => "no-match" });
-  // FALSIFIER: the pre-fix path returned executed_fail here, hard-blocking a
-  // green-code PR until a human re-reviewed it by hand (#349's own stuck state).
-  assert.notEqual(v.proof_exec, "executed_fail", "the #349 stuck class must not recur");
-  assert.equal(v.proof_exec, "not_executable");
+  // W1-T14715 (the operator's resolve check, 2026-11-24): one comma and an em dash do not make this a narrative
+  // to the filing linter, which accepts it as ONE title — so the build must resolve it or fail it. W1-T161 once
+  // degraded it to not_executable; a paraphrase of a real test now names that test's real title instead.
+  assert.equal(v.proof_exec, "executed_fail", "a single title that names no test fails, whatever it paraphrases");
+  assert.equal(v.met, false);
 });
 
 // ── W1-T112 round-4: a name-filtered proof scopes the WHOLE suite glob (100+ files, several

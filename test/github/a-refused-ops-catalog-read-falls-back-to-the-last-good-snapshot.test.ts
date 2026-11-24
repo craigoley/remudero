@@ -7,8 +7,10 @@ import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { opsCatalogShadowFeed, OPS_CATALOG_REFRESHED_STEP, OPS_DISPATCH_SOURCE_MAX_AGE_MS } from "#src/cli/commands/daemon.js";
 import type { Clock } from "#src/lib/clock.js";
+import { HEAP_LIMIT_EXIT_FRACTION } from "#src/lib/daemon-memory-policy.js";
 import {
-  createOpsCatalogShadowSource, opsCatalogBlobCacheDir, opsCatalogLastGoodFile, readLastGoodOpsCatalogSnapshot, type OpsCatalogApi, type OpsCatalogLastGood,
+  OPS_SNAPSHOT_HEAP_BYTES_PER_CATALOG_BYTE, createOpsCatalogShadowSource, opsCatalogBlobCacheDir, opsCatalogHeapByteBound, opsCatalogLastGoodFile,
+  readLastGoodOpsCatalogSnapshot, type OpsCatalogApi, type OpsCatalogLastGood,
 } from "#src/lib/ops-catalog-source.js";
 import type { Plan } from "#src/lib/plan.js";
 import { findReleasePlanInCatalogs, findTaskInCatalogs, opsPlanForLookup } from "#src/lib/task-lookup.js";
@@ -149,6 +151,38 @@ test("W1-T14564: a missing, mismatched or damaged kept file is no snapshot", asy
   writeFileSync(opsCatalogLastGoodFile(unparsable.stateDir, REPOSITORY), JSON.stringify({ version: 1, repository: "fixture-private/else", acceptedAt: ACCEPTED_AT,
     binding: { repositoryId: REPOSITORY_ID, ref: "refs/heads/main", commit: unparsable.commit, tasksYamlBlob: blobSha(bad), shardTreeSha: "", shardBlobs: {} } }));
   assert.equal(reason(await read(unparsable)), "record_malformed", "a record for another repository never answers");
+});
+
+/** A heap reading whose derived bound is `bytes` catalog bytes. */
+const heapAllowing = (bytes: number) => ({ used_heap_size: 0, heap_size_limit: Math.ceil((bytes + 1) * OPS_SNAPSHOT_HEAP_BYTES_PER_CATALOG_BYTE / HEAP_LIMIT_EXIT_FRACTION) });
+
+test("W1-T14638: the last good record and its blobs are judged on the derived heap bound, never a fixed count or size", async t => {
+  const reason = (r: OpsCatalogLastGood) => r.outcome === "none" ? r.reason : "ok";
+  const accepted = async () => { const fx = fixture(t); await findTaskInCatalogs(ID, sourcesOf(fx)); fx.refuse(); return fx; };
+  assert.ok(opsCatalogHeapByteBound(heapAllowing(300_000)) >= 300_000, "the helper's heap allows what the test asks of it");
+
+  // A binding naming more shards than the old fixed entry ceiling is a record; its missing blobs, not its count, end it.
+  const wide = await accepted();
+  const names = Object.fromEntries(Array.from({ length: 10_001 }, (_, i) => [`s${i}.yaml`, sha1(String(i))]));
+  writeFileSync(opsCatalogLastGoodFile(wide.stateDir, REPOSITORY), JSON.stringify({ version: 1, repository: REPOSITORY, acceptedAt: ACCEPTED_AT,
+    binding: { repositoryId: REPOSITORY_ID, ref: "refs/heads/main", commit: wide.commit, tasksYamlBlob: blobSha(wide.monolith), shardTreeSha: "", shardBlobs: names } }));
+  assert.equal(reason(await readLastGoodOpsCatalogSnapshot({ repository: REPOSITORY }, wide.api, { stateDir: wide.stateDir })), "blob_missing");
+
+  // A blob past the old 256 KiB per-blob ceiling is served; one past the heap bound is not loaded, and stays kept.
+  const large = await accepted();
+  const text = `${large.monolith}# ${"x".repeat(300 * 1024)}\n`;
+  const dir = opsCatalogBlobCacheDir(large.stateDir, REPOSITORY_ID);
+  writeFileSync(join(dir, blobSha(text)), text);
+  writeFileSync(opsCatalogLastGoodFile(large.stateDir, REPOSITORY), JSON.stringify({ version: 1, repository: REPOSITORY, acceptedAt: ACCEPTED_AT,
+    binding: { repositoryId: REPOSITORY_ID, ref: "refs/heads/main", commit: large.commit, tasksYamlBlob: blobSha(text), shardTreeSha: "", shardBlobs: {} } }));
+  const read = (bounds?: { heap: () => { used_heap_size: number; heap_size_limit: number } }) =>
+    readLastGoodOpsCatalogSnapshot({ repository: REPOSITORY }, large.api, { stateDir: large.stateDir, ...(bounds ? { bounds } : {}) });
+  const served = await read({ heap: () => heapAllowing(1024 * 1024) });
+  assert.equal(served.outcome, "ok");
+  assert.equal(served.outcome === "ok" ? served.counts.bytes : 0, Buffer.byteLength(text));
+  assert.equal(reason(await read({ heap: () => heapAllowing(100 * 1024) })), "blob_missing", "a blob the heap cannot hold is not loaded");
+  assert.ok(readdirSync(dir).includes(blobSha(text)), "a valid blob the heap could not hold is kept");
+  assert.equal(reason(await read({ heap: () => ({ used_heap_size: 2 ** 40, heap_size_limit: 2 ** 40 }) })), "record_malformed", "with no heap left even the record is not loaded");
 });
 
 test("W1-T14564: an ok ops read answers exactly as before", async t => {
