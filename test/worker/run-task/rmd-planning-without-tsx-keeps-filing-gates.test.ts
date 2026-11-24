@@ -69,7 +69,7 @@ if (mode === "app-server") {
 } else {
   process.stdin.on("data", (chunk) => { input += chunk.toString("utf8"); });
   process.stdin.on("end", () => {
-    const id = /RESERVED these ids for this run: (W1-T\\d+)/.exec(input)?.[1] ?? "NO-RESERVED-ID";
+    const id = /RESERVED these ids for this run: ([A-Z][A-Z0-9-]*-T\\d+)/.exec(input)?.[1] ?? "NO-RESERVED-ID";
     for (const [file, text] of Object.entries(scenario.files)) {
       const target = file.split("{{ID}}").join(id);
       mkdirSync(dirname(target), { recursive: true });
@@ -242,7 +242,8 @@ function assertArchitectRan(run: Proposed, label: string): StubCall {
   assert.ok(execs.length >= 1, `${label}: the real Codex launch reached the Architect stub\n${run.evidence}`);
   assert.ok(run.calls.some((call) => call.method === "model/list"), `${label}: the real probe's handshake completed against the stub`);
   const first = execs[0]!;
-  assert.ok(first.id && /^W1-T\d+$/.test(first.id), `${label}: the Architect was handed a reserved id`);
+  // W1-T14735: a target files its own prefix, here one named for it, because its seeded plan declares only W1.
+  assert.ok(first.id && /^TARGET-T\d+$/.test(first.id), `${label}: the Architect was handed a reserved id in the target's own prefix`);
   const minted = run.ledger.find((row) => row.step === "plan.id_minted");
   assert.equal((minted?.reserved as string[] | undefined)?.length, 5, `${label}: the five-id reservation ran before the Architect`);
   const start = run.ledger.find((row) => row.step === "plan.start");
