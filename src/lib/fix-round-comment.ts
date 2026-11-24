@@ -10,9 +10,8 @@
  * The writer never throws: a failed read or write logs `fix.round_comment_failed` and returns `failed`, so a comment
  * can never fail the round that pushed.
  */
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { ghTextAsync } from "./github-transport.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 export const FIX_ROUND_COMMENT_MARKER = "<!-- rmd-fix-round:v1 -->";
 /** The fleet App as the REST issue-comments API spells its author. */
@@ -47,12 +46,10 @@ export type FixRoundCommentResult =
 
 export type Log = (step: string, extra?: Record<string, unknown>) => void;
 
-const execFileAsync = promisify(execFile);
-
-/** The paths that differ between the round's prior and pushed heads, read with `git diff` in the worktree. */
+/** The paths that differ between the round's prior and pushed heads, read with `git diff` in the worktree through
+ *  the hardened worktree leaf. */
 export async function fixRoundChangedFiles(cwd: string, priorHead: string, pushedHead: string): Promise<string[]> {
-  const { stdout } = await execFileAsync("git", ["-C", cwd, "diff", "--name-only", priorHead, pushedHead],
-    { encoding: "utf8", maxBuffer: 1 << 26, timeout: 60_000 });
+  const stdout = await hostWorktreeGitAsync(cwd, ["diff", "--name-only", priorHead, pushedHead], { maxBuffer: 1 << 26 });
   return stdout.split("\n").filter((line) => line !== "");
 }
 
