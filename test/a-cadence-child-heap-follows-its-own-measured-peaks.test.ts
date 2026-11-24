@@ -59,13 +59,13 @@ function spawnRecorder(statePath: string) {
   return { limits, launch: (runId: string) => spawn(runId, statePath) };
 }
 
-function writeState(statePath: string, state: MeasurementCadenceChildState & { peakHeapUsedMb?: number }): void {
+function writeState(statePath: string, state: MeasurementCadenceChildState & { peakHeapCommittedMb?: number }): void {
   writeFileSync(statePath, `${JSON.stringify(state)}\n`);
 }
 
-function doneRun(statePath: string, runId: string, peakHeapUsedMb: number): void {
+function doneRun(statePath: string, runId: string, peakHeapCommittedMb: number): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  writeState(statePath, { runId, pid: 4242, attempt: 1, startedAt: "2026-11-24T10:00:00.000Z", status: "done", result: {} as any, peakHeapUsedMb });
+  writeState(statePath, { runId, pid: 4242, attempt: 1, startedAt: "2026-11-24T10:00:00.000Z", status: "done", result: {} as any, peakHeapCommittedMb });
 }
 
 test("W1-T14713 criterion 1: recorded ~1 GB peaks give a limit near them plus a variance-derived headroom, well under the parent's", () => {
@@ -149,6 +149,7 @@ test("W1-T14713 criterion 3: invariant:a-child-is-never-starved-below-its-own-pe
   spawn.launch(`RUN-${LIVE_LIKE.length}`); // the restart's attempt 2
   const restartLimit = spawn.limits.at(-1) ?? NaN;
   assert.ok(restartLimit > diedUnder, `the restart after a heap abort gets more than the ${diedUnder} MB it died under: ${restartLimit}`);
+  assert.equal(restartLimit, 2 * diedUnder, "and the step is geometric: twice the limit it died under");
 
   // A second abort, after a daemon restart (no exit line: the limit comes from the state's phase), rises again.
   writeState(statePath, {
@@ -157,7 +158,15 @@ test("W1-T14713 criterion 3: invariant:a-child-is-never-starved-below-its-own-pe
   });
   writeFileSync(measurementCadenceChildLogPath(statePath), "FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory\n");
   spawn.launch("RUN-NEXT");
-  assert.ok((spawn.limits.at(-1) ?? NaN) > restartLimit, `a second abort raises it again: ${spawn.limits.slice(-3).join(" -> ")}`);
+  assert.equal(spawn.limits.at(-1), 2 * restartLimit, `a second abort doubles it again: ${spawn.limits.slice(-3).join(" -> ")}`);
+  // A third abort would double past the parent's limit: the parent's limit is the ceiling.
+  writeState(statePath, {
+    runId: "RUN-NEXT", pid: 4244, attempt: 1, startedAt: "2026-11-24T12:00:00.000Z", status: "running",
+    phase: { verb: "hand_run_census", heapUsedMb: 1020, heapLimitMb: 2 * restartLimit, at: "2026-11-24T12:20:00.000Z" },
+  });
+  writeFileSync(measurementCadenceChildLogPath(statePath), "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\n");
+  spawn.launch("RUN-NEXT");
+  assert.equal(spawn.limits.at(-1), Math.min(PARENT_MB, 4 * restartLimit), "the doubling stops at the parent's limit");
 
   // A death that is not a heap abort records nothing: the next launch keeps the derived limit.
   const quiet = join(scratch(), "measurement-cadence-child.json");
@@ -178,9 +187,33 @@ test("W1-T14713 criterion 3: invariant:a-child-is-never-starved-below-its-own-pe
     return {} as MeasurementCadenceRunResult;
   });
   assert.equal(code, 0);
-  const recorded = JSON.parse(readFileSync(childState, "utf8")) as { status: string; peakHeapUsedMb?: number; phase?: { heapUsedMb: number } };
+  const recorded = JSON.parse(readFileSync(childState, "utf8")) as { status: string; peakHeapCommittedMb?: number; phase?: { heapUsedMb: number } };
   assert.equal(recorded.status, "done");
-  assert.ok(typeof recorded.peakHeapUsedMb === "number" && recorded.peakHeapUsedMb >= (recorded.phase?.heapUsedMb ?? Infinity), `the child records its peak: ${JSON.stringify(recorded)}`);
+  assert.ok(typeof recorded.peakHeapCommittedMb === "number" && recorded.peakHeapCommittedMb >= (recorded.phase?.heapUsedMb ?? Infinity), `the child records its committed peak: ${JSON.stringify(recorded)}`);
+
+  // The peak is the committed heap's max over every sample, including the interval sampler's between phase boundaries:
+  // here the committed heap spikes to 3000 MB only while the run is between phases, and only the sampler can see it.
+  const sampled = join(scratch(), "measurement-cadence-child.json");
+  let calls = 0;
+  let spiked!: () => void;
+  const spikeSeen = new Promise<void>((resolve) => { spiked = resolve; });
+  const committedBytes = () => {
+    calls += 1;
+    if (calls === 2) { spiked(); return 3000 * MB; }
+    return (calls === 1 ? 900 : 1100) * MB;
+  };
+  const keepAlive = setTimeout(() => {}, 10_000); // the sampler is unref'd: this keeps the loop up while it runs
+  await measurementCadenceChildMain(sampled, "RUN-SAMPLED", async () => {
+    noteMeasurementCadencePhase("rule_efficacy"); // call 1: 900 MB at the boundary
+    await spikeSeen; // call 2 can only be the interval sampler
+    return {} as MeasurementCadenceRunResult;
+  }, { committedBytes, everyMs: 1 });
+  clearTimeout(keepAlive);
+  const sampledState = JSON.parse(readFileSync(sampled, "utf8")) as { peakHeapCommittedMb?: number };
+  assert.equal(sampledState.peakHeapCommittedMb, 3000, "the sampler's between-phase spike is the recorded peak");
+  const callsAtExit = calls;
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(calls, callsAtExit, "the sampler is cleared when the child's run ends");
 });
 
 test("W1-T14713: an unreadable or unhelpful heap history degrades to the parent's limit and never blocks the launch", () => {
@@ -209,10 +242,11 @@ test("W1-T14713: an unreadable or unhelpful heap history degrades to the parent'
   writeState(statePath, { runId: "RUN-2", pid: 1, attempt: 1, startedAt: "2026-11-24T10:00:00.000Z", status: "running" });
   writeFileSync(measurementCadenceChildLogPath(statePath), "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\n");
   assert.equal(cadence.nextMeasurementCadenceChildHeapLimitMb(statePath, PARENT_MB * MB), PARENT_MB, "an abort under an unknown limit gives the parent's");
-  const derived = measurementCadenceChildHeapLimitMb(PARENT_MB * MB, peaks(LIVE_LIKE));
-  const superseded = measurementCadenceChildHeapLimitMb(PARENT_MB * MB, [...peaks(LIVE_LIKE), { runId: "RUN-L", attempt: 1, abortedUnderMb: 900 }]);
-  assert.ok(superseded > 900 && superseded === derived, `an abort the recorded peaks already passed keeps the derived limit: ${superseded} vs ${derived}`);
-  assert.equal(measurementCadenceChildHeapLimitMb(PARENT_MB * MB, [...peaks([970, 970]), { runId: "RUN-T", attempt: 1, abortedUnderMb: 970 }]), PARENT_MB, "an abort with no headroom to add gives the parent's limit");
+  assert.equal(
+    measurementCadenceChildHeapLimitMb(PARENT_MB * MB, [...peaks(LIVE_LIKE), { runId: "RUN-L", attempt: 1, abortedUnderMb: 900 }]),
+    1800,
+    "an abort under 900 MB, even one the recorded peaks passed, gives twice that",
+  );
 
   // A malformed or non-array history reads empty; one that cannot be read or written does not stop the launch.
   writeFileSync(historyPath, "{not json");
