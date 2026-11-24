@@ -59,5 +59,6 @@ test("W1-T4397: the suites that read doctrine still run for a doctrine edit", ()
   assert.ok(!plan.includes(index), "a plan edit does not select the doctrine index reader");
   assert.match(plain.stderr, new RegExp(`selected_count=${plan.length} previous_count=${base.size}`));
   const ci = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  assert.equal((ci.match(/--list-plan-reading-suites --changed-files changed-files\.txt/g) ?? []).length, 2, "both lanes pass the changed list");
+  // W1-T11263: ci-shard's early bash 3.2 step is a third lane that passes the changed list.
+  assert.equal((ci.match(/--list-plan-reading-suites --changed-files changed-files\.txt/g) ?? []).length, 3, "every lane passes the changed list");
 });
