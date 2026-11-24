@@ -439,3 +439,18 @@ test("W1-T12236: the tick read worker keeps the file lists across a restart", as
     assert.equal(await produce(), 0, "a new worker on the same state directory used the kept list");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("W1-T14577: the restart fixture stays fresh at any clock", async (t) => {
+  // A test clock well past 2026-11-25, still advancing so the gh pacer and cache see time pass.
+  const realNow = Date.now;
+  const shift = Date.parse("2027-06-01T00:00:00Z") - realNow.call(Date);
+  t.mock.method(Date, "now", () => realNow.call(Date) + shift);
+  const f = fixture();
+  try {
+    const gh = f.useShim("head-a");
+    await f.hook()(IDLE);
+    assert.ok(listReads(gh, f.repo) >= 1, "the idle hook read its own views");
+    assert.equal(f.logs.filter((row) => row.step === "sweep_light.error").length, 0, JSON.stringify(f.logs));
+    assert.deepEqual(f.posted, [{ prNumber: PR, headSha: "head-a" }], "the pull request is still reviewed, not aged out");
+  } finally { await f.cleanup(); }
+});
