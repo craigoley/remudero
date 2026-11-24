@@ -4062,18 +4062,20 @@ export function buildApproveProposalRoute(deps: PanelGraphDeps): Route {
 interface ReframeProposalInput {
   proposalId: string;
   feedback: string;
+  idempotencyKey?: string;
 }
 
 function validateReframeProposal(body: unknown): { error: string } | ReframeProposalInput {
   if (!isRecord(body)) return { error: "body must be a JSON object" };
   if (typeof body.proposalId !== "string" || !body.proposalId.trim()) return { error: "proposalId is required" };
   if (typeof body.feedback !== "string" || !body.feedback.trim()) return { error: "feedback is required" };
-  return { proposalId: body.proposalId, feedback: body.feedback };
+  const key = validateIdempotencyKey(body);
+  if (typeof key === "object") return key;
+  return { proposalId: body.proposalId, feedback: body.feedback, ...(key === undefined ? {} : { idempotencyKey: key }) };
 }
 
-/** Write-scoped reframe: verbatim operator feedback to {@link RatifyCliGateway.reframe} for any
- * active proposal, without a readiness gate or ratification. Ledger
- * `panel.proposal_reframe_requested` with the feedback immediately. */
+/** Write-scoped reframe: verbatim operator feedback to {@link RatifyCliGateway.reframe}; ledger
+ * `panel.proposal_reframe_requested`. */
 export function buildReframeProposalRoute(deps: PanelGraphDeps): Route {
   return buildInboxVerbRoute("reframe", deps);
 }
@@ -4130,6 +4132,7 @@ export function buildSnoozeProposalRoute(deps: PanelGraphDeps): Route {
 interface DeclineProposalInput {
   proposalId: string;
   reason: string;
+  idempotencyKey?: string;
 }
 
 type ProposalVerdictActor = InboxVerbActor & { terminalVerdict?: boolean };
@@ -4138,7 +4141,85 @@ function validateDeclineProposal(body: unknown): { error: string } | DeclineProp
   if (!isRecord(body)) return { error: "body must be a JSON object" };
   if (typeof body.proposalId !== "string" || !body.proposalId.trim()) return { error: "proposalId is required" };
   if (typeof body.reason !== "string" || !body.reason.trim()) return { error: "reason is required" };
-  return { proposalId: body.proposalId, reason: body.reason };
+  const key = validateIdempotencyKey(body);
+  if (typeof key === "object") return key;
+  return { proposalId: body.proposalId, reason: body.reason, ...(key === undefined ? {} : { idempotencyKey: key }) };
+}
+
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9:_-]{1,200}$/;
+const IDEMPOTENCY_KEY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function validateIdempotencyKey(body: Record<string, unknown>): string | undefined | { error: string } {
+  if (body.idempotencyKey === undefined) return undefined;
+  if (typeof body.idempotencyKey !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(body.idempotencyKey)) {
+    return { error: "idempotencyKey must be 1..200 characters of A-Z a-z 0-9 : _ -" };
+  }
+  return body.idempotencyKey;
+}
+
+interface InboxDecisionKeyEntry {
+  proposalId: string;
+  decision: string;
+  textDigest: string;
+  status: number;
+  body: unknown;
+  at: number;
+}
+
+function inboxDecisionKeysPath(stateDir: string): string {
+  return join(stateDir, "inbox-decision-keys.json");
+}
+
+function readInboxDecisionKeys(stateDir: string): Record<string, InboxDecisionKeyEntry> {
+  try {
+    const parsed = JSON.parse(readFileSync(inboxDecisionKeysPath(stateDir), "utf8")) as unknown;
+    if (!isRecord(parsed)) return {};
+    const out: Record<string, InboxDecisionKeyEntry> = {};
+    for (const [key, raw] of Object.entries(parsed)) {
+      if (!isRecord(raw)) continue;
+      const { proposalId, decision, textDigest, status, body, at } = raw;
+      if (typeof proposalId === "string" && typeof decision === "string" && typeof textDigest === "string"
+        && typeof status === "number" && typeof at === "number") out[key] = { proposalId, decision, textDigest, status, body, at };
+    }
+    return out;
+  } catch {
+    // deliberate: a missing or torn store remembers no key.
+    return {};
+  }
+}
+
+/** A keyed repeat answers the first outcome with `duplicate: true`; a key reused for another decision is 409. */
+function withDecisionKey(
+  deps: PanelGraphDeps,
+  key: string | undefined,
+  identity: { proposalId: string; decision: string; text: string },
+  respond: InboxVerbRespond,
+  run: (respond: InboxVerbRespond) => void,
+): void {
+  if (key === undefined) {
+    run(respond);
+    return;
+  }
+  const stateDir = join(deps.inboxRoot, "state");
+  const now = (deps.inboxClock ?? systemClock).now();
+  const textDigest = createHash("sha256").update(identity.text).digest("hex");
+  const held = readInboxDecisionKeys(stateDir);
+  const prior = held[key];
+  if (prior !== undefined && now - prior.at < IDEMPOTENCY_KEY_TTL_MS) {
+    if (prior.proposalId !== identity.proposalId || prior.decision !== identity.decision || prior.textDigest !== textDigest) {
+      respond(409, { error: "idempotency_key_reused", detail: "this idempotencyKey was already used for a different proposal, decision or text" });
+      return;
+    }
+    respond(prior.status, { ...(isRecord(prior.body) ? prior.body : {}), duplicate: true });
+    return;
+  }
+  run((status, body, headers) => {
+    const fresh: Record<string, InboxDecisionKeyEntry> = {};
+    for (const [id, entry] of Object.entries(held)) if (now - entry.at < IDEMPOTENCY_KEY_TTL_MS) fresh[id] = entry;
+    fresh[key] = { proposalId: identity.proposalId, decision: identity.decision, textDigest, status, body, at: now };
+    writeAtomic(inboxDecisionKeysPath(stateDir), JSON.stringify(fresh) + "\n");
+    respond(status, body, headers);
+  });
 }
 
 /** Both inbox verdict routes classify the proposal, then let {@link applyProposalVerdict} decide and record. */
@@ -4171,10 +4252,8 @@ function proposalVerdictResponse(
   respond(200, { ok: true, proposalId: input.proposalId, ...(kind === "decline" ? { declined: true } : { restored: true }) });
 }
 
-/** Write-scoped decline (W1-T2604): explicit operator decision, never inferred from prose.
- * Retain the registry entry (W1-T2451); check its receipt first. Restore reverses it, latest wins
- * (W1-T3407). Any active nonratified, nondeclined proposal qualifies; no task/branch/gateway call.
- * P19 silent-drop history: docs/forensics/panel-graph.md. */
+/** Write-scoped decline (W1-T2604): an explicit operator decision. Restore reverses it, latest wins
+ * (W1-T3407). History: docs/forensics/panel-graph.md. */
 export function buildDeclineProposalRoute(deps: PanelGraphDeps): Route {
   return buildInboxVerbRoute("decline", deps);
 }
@@ -4321,7 +4400,8 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
   const verdict = (kind: ProposalVerdictKind) =>
     validatedInboxAction(validateDeclineProposal, (input, actor, respond) =>
       withSkillDraftVerdictLock(dirname(deps.ledgerPath), input.proposalId, () =>
-        proposalVerdictResponse(kind, deps, input, actor, respond)));
+        withDecisionKey(deps, input.idempotencyKey, { proposalId: input.proposalId, decision: kind, text: input.reason }, respond,
+          (answer) => proposalVerdictResponse(kind, deps, input, actor, answer))));
   const improvementReviewRequired = (proposalId: string, respond: InboxVerbRespond): boolean => {
     if (!proposalId.startsWith("improvement:")) return false;
     respond(409, { error: "improvement_review_required", detail: "Use this improvement's saved conversation to change its goal, request a draft, or review and file its exact draft." });
@@ -4361,20 +4441,21 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       deps.ratify.approve(input.proposalId);
       respond(200, { ok: true, proposalId: input.proposalId, started: true });
     }),
-    reframe: validatedInboxAction(validateReframeProposal, (input, actor, respond) => {
-      if (improvementReviewRequired(input.proposalId, respond)) return;
-      const { proposals, classifications } = classifyInboxDecision(deps, input.proposalId);
-      if (!proposals.some((p) => p.id === input.proposalId)) {
-        respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
-        return;
-      }
-      const origin = actor.origin;
-      if (refuseInformationalProposal(proposals, classifications, input.proposalId, respond)) return;
-      clearInboxArchive(join(deps.inboxRoot, "state"), input.proposalId);
-      appendPanelLedger(deps.ledgerPath, "panel.proposal_reframe_requested", input.proposalId, origin, { feedback: input.feedback });
-      deps.ratify.reframe(input.proposalId, input.feedback);
-      respond(200, { ok: true, proposalId: input.proposalId, started: true });
-    }),
+    reframe: validatedInboxAction(validateReframeProposal, (input, actor, respond) =>
+      withDecisionKey(deps, input.idempotencyKey, { proposalId: input.proposalId, decision: "reframe", text: input.feedback }, respond, (answer) => {
+        if (improvementReviewRequired(input.proposalId, answer)) return;
+        const { proposals, classifications } = classifyInboxDecision(deps, input.proposalId);
+        if (!proposals.some((p) => p.id === input.proposalId)) {
+          answer(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` });
+          return;
+        }
+        const origin = actor.origin;
+        if (refuseInformationalProposal(proposals, classifications, input.proposalId, answer)) return;
+        clearInboxArchive(join(deps.inboxRoot, "state"), input.proposalId);
+        appendPanelLedger(deps.ledgerPath, "panel.proposal_reframe_requested", input.proposalId, origin, { feedback: input.feedback });
+        deps.ratify.reframe(input.proposalId, input.feedback);
+        answer(200, { ok: true, proposalId: input.proposalId, started: true });
+      })),
     keep: validatedInboxAction<{ proposalId: string; kept: boolean; reason?: string }>((body: unknown) => {
       const id = validateApproveProposal(body);
       if ("error" in id) return id;
