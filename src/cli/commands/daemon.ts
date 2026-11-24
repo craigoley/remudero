@@ -1629,34 +1629,43 @@ export async function daemonCommand(
       : { stop() {} };
   // W1-T13585: a foreign target's plan can hold other repositories' tasks whose dependencies it cannot see.
   const foreignTargetPlanLoad = (path: string) => loadTargetPlanQuarantiningDuplicates(path, target.repo);
-  if (standby) {
-    // W1-T14544: a standby syncs no checkout (the active daemon owns them until it lets go); it reads the plan as it stands.
-    plan = target.isSelf ? loadDaemonPlan(target.planPath, log, raiseDuplicate) : loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
-  } else if (!target.isSelf && !flagValue(rest, "--plan")) {
-    const repoDir = join(reposDir, target.repo);
-    if (!existsSync(repoDir)) {
-      mkdirSync(dirname(repoDir), { recursive: true });
-      ghExec(["repo", "clone", `${target.owner}/${target.repo}`, repoDir], { stdio: "inherit" });
-    } else {
-      execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
-      execFileSync("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
+  // The boot plan read: a managed target's checkout is synced first, unless --plan names a file. Undefined: refused.
+  const syncBootPlan = async (): Promise<Plan | undefined> => {
+    if (!target.isSelf && !flagValue(rest, "--plan")) {
+      const repoDir = join(reposDir, target.repo);
+      if (!existsSync(repoDir)) {
+        mkdirSync(dirname(repoDir), { recursive: true });
+        ghExec(["repo", "clone", `${target.owner}/${target.repo}`, repoDir], { stdio: "inherit" });
+      } else {
+        execFileSync("git", ["-C", repoDir, "fetch", "--quiet", "origin"], { stdio: "pipe" });
+        execFileSync("git", ["-C", repoDir, "reset", "--hard", "--quiet", "origin/main"], { stdio: "pipe" });
+      }
+      return loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
     }
-    plan = loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
-  } else if (target.isSelf && !flagValue(rest, "--plan")) {
-    // ── GIT SELF-SYNC (W1-T60): self-hosting must not read the daemon's own working tree
-    // either — same fail-closed gate as run-task/drain (see syncPlanOrRefuse).
-    const synced = await syncPlanOrRefuseAsync(target.planPath, {
-      allowStale,
-      log,
-      say: (msg: string) => writeSyncLine(2, `### rmd daemon — ${msg}`),
-      quarantine: reportPlanQuarantine,
-      planSnapshot: planReaders.boot,
-    });
-    if ("error" in synced) return 1;
-    plan = synced.plan;
-  } else {
+    if (target.isSelf && !flagValue(rest, "--plan")) {
+      // ── GIT SELF-SYNC (W1-T60): self-hosting must not read the daemon's own working tree
+      // either — same fail-closed gate as run-task/drain (see syncPlanOrRefuse).
+      const synced = await syncPlanOrRefuseAsync(target.planPath, {
+        allowStale,
+        log,
+        say: (msg: string) => writeSyncLine(2, `### rmd daemon — ${msg}`),
+        quarantine: reportPlanQuarantine,
+        planSnapshot: planReaders.boot,
+      });
+      if ("error" in synced) return undefined;
+      return synced.plan;
+    }
     // An explicit --plan overrides the derived path — read it literally, no git sync.
+    return target.isSelf ? loadDaemonPlan(target.planPath, log, raiseDuplicate) : loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
+  };
+  if (standby) {
+    // W1-T14544: a standby syncs no checkout (the active daemon owns them until it lets go); it reads the plan as it
+    // stands, and runs the sync once it holds the lock.
     plan = target.isSelf ? loadDaemonPlan(target.planPath, log, raiseDuplicate) : loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
+  } else {
+    const synced = await syncBootPlan();
+    if (synced === undefined) return 1;
+    plan = synced;
   }
   bootPhases.mark("plan_load");
 
@@ -1957,6 +1966,13 @@ export async function daemonCommand(
     ...(readPlane ? [{ resource: "read_plane", close: stopReadPlane }] : []),
   ];
   try {
+  if (standbyPromotion) {
+    // W1-T14544: the checkout sync a standby skipped runs now that it holds the lock; a refusal releases it.
+    const synced = await syncBootPlan();
+    if (synced === undefined) return 1;
+    plan = synced;
+    activePlanRef.current = synced;
+  }
   bootPhases.mark("wiring");
   const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());
   const landedClaimRerunReported = new Set<string>();
