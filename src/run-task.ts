@@ -10867,8 +10867,18 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
   stackEvidence: BenchmarkStackEvidence = {}, initialWork: BenchmarkWorkInput = {}) {
   const assignments = new Set<string>();
   let work = initialWork;
+  // W1-T12154: whether the run wrote any worker.assignment row, and the last phase or row it reached.
+  let workerAssignmentWritten = false;
+  let lastPhase: string | undefined;
+  let lastStep: string | undefined;
   return (step: string, extra: Record<string, unknown> = {}): void => {
     work = observeBenchmarkWork(work, step, extra);
+    const unassigned = step === "verdict" && !workerAssignmentWritten ? {
+      worker_assigned: false,
+      last_stage: typeof extra.stage === "string" && extra.stage.length > 0 ? extra.stage : lastPhase ?? lastStep ?? "none",
+    } : {};
+    if (step === "run.phase" && typeof extra.waiting_on === "string" && extra.waiting_on.length > 0) lastPhase = extra.waiting_on;
+    lastStep = step;
     let fields: Record<string, unknown>;
     let durableAssignmentId: string | undefined;
     try {
@@ -10892,10 +10902,10 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
           typeof extra.selection_assignment_id === "string" && assignments.has(extra.selection_assignment_id),
         );
       }
-      fields = { ...extra, ...(benchmarkRun ? { benchmark_run: benchmarkRun } : {}) };
+      fields = { ...extra, ...unassigned, ...(benchmarkRun ? { benchmark_run: benchmarkRun } : {}) };
     } catch {
       // Keep the source row and mark the receipt unavailable; telemetry cannot block dispatch.
-      fields = { ...extra, benchmark_run_unavailable_reason: "receipt-build-failed" };
+      fields = { ...extra, ...unassigned, benchmark_run_unavailable_reason: "receipt-build-failed" };
     }
     if (step === "worker.attempt") {
       // A metric write is never allowed to change a worker's actual result or retry path.
@@ -10903,6 +10913,7 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
     } else {
       write(step, fields);
       if (durableAssignmentId) assignments.add(durableAssignmentId);
+      if (step === "worker.assignment") workerAssignmentWritten = true;
     }
   };
 }

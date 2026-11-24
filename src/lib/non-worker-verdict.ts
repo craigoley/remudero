@@ -35,6 +35,14 @@ export function infrastructureRefusal(line: Record<string, unknown>): string | u
   return undefined;
 }
 
+/** W1-T12154: true for a run that ended before any worker was assigned. A row written after W1-T12154 carries
+ *  `worker_assigned: false` (run-task.ts `benchmarkRunLedgerLogger`); an older row falls back to
+ *  {@link infrastructureRefusal}, unless the caller saw the run write a `worker.assignment`. */
+export function endedBeforeWorkerAssignment(verdict: Record<string, unknown>, workerAssignmentSeen = false): boolean {
+  if (verdict.worker_assigned === false) return true;
+  return !workerAssignmentSeen && infrastructureRefusal(verdict) !== undefined;
+}
+
 export function lifetimeInfrastructureRefusal(line: Record<string, unknown>): string | undefined {
   return infrastructureRefusal(line) ??
     (typeof line.verdict === "string" && LIFETIME_ONLY_REFUSAL_VERDICTS.has(line.verdict) ? line.verdict : undefined);
