@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,12 +11,14 @@ import {
   consumerShardYaml,
   evaluateHost,
   fileConsumerVia,
+  hostResourceStatePath,
   incidentOrigin,
   isPersistentGrower,
   parseHeartbeatPayload,
   projectSeries,
   readSamples,
   runHostResourcePass,
+  runHostResourcePassAsync,
   samplesPath,
   sampleFromPayload,
   startHostResourceGardener,
@@ -25,7 +27,10 @@ import {
   type HostResourcePorts,
   type HostSample,
 } from "#src/lib/host-resource-gardener.js";
+import { appendLedger, rotateLedger } from "#src/lib/ledger.js";
+import { LEDGER_FILENAME } from "#src/lib/ledger-path.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 
 const HOUR = 3_600_000;
 const NOW = Date.parse("2026-09-30T12:00:00.000Z");
@@ -146,6 +151,46 @@ test("W1-T4804: a falling series projects time to full robust to an outlier", ()
   // A rising or flat series never projects a time to full.
   assert.equal(projectSeries(points.map((p) => ({ x: p.x, y: 5 })))!.hoursToFull, undefined);
   assert.equal(projectSeries(points.slice(0, 2)), undefined, "two points are not a trend");
+});
+
+test("janitor rows read legacy heartbeat sizes and keep unreadable phase measurements", () => {
+  const old = sampleFromPayload("azure", parseHeartbeatPayload(payload({})))!;
+  assert.equal(old.janitorFreedBytes, 4 * 1024 ** 2);
+  assert.equal(old.janitorRemoved, undefined);
+
+  const current = sampleFromPayload("azure", parseHeartbeatPayload(payload({
+    janitor_last_removed: "9007199254740993",
+    janitor_last_freed_bytes: "unknown",
+    janitor_phase_1: "malformed",
+    janitor_phase_2: "tsx|/tmp/cache|secondary|unreadable|0",
+    janitor_phase_3: "prune|/tmp/other|1|unknown",
+  })))!;
+  assert.equal(current.janitorFreedKb, 4 * 1024);
+  assert.equal(current.janitorFreedBytes, undefined);
+  assert.equal(current.janitorRemoved, undefined);
+  assert.deepEqual(current.janitorPhases, [
+    { phase: "tsx", root: "/tmp/cache|secondary", entries_removed: "unreadable", freed_bytes: 0 },
+    { phase: "prune", root: "/tmp/other", entries_removed: 1, freed_bytes: "unreadable" },
+  ]);
+});
+
+test("a rotated janitor row restores the cursor after an interrupted save", async (t) => {
+  const { dir } = ownedFixtureDir(t, "janitor-restart");
+  const ledgerPath = join(dir, LEDGER_FILENAME);
+  const stamp = "2026-09-30T08:00:00Z";
+  appendLedger(ledgerPath, {
+    run_id: "janitor-before-restart", task_id: "DAEMON", step: "host_resource.janitor_pass",
+    host: "azure", janitor_ts: stamp,
+  }, { ceilingBytes: Number.MAX_SAFE_INTEGER });
+  appendFileSync(ledgerPath, `${JSON.stringify({ step: "unretained.noise", detail: "x".repeat(4_096) })}\n`);
+  assert.equal(rotateLedger(ledgerPath, { ceilingBytes: 2_000 }).rotated, true);
+
+  const beat = payload({ janitor_last_ts: stamp });
+  const p = ports(dir, { readHeartbeats: async () => [{ host: "azure", payload: beat }, { host: "mini", payload: beat }] });
+  await runHostResourcePassAsync(p);
+  const recordedHosts = p.rows.filter(({ step }) => step === "host_resource.janitor_pass").map(({ extra }) => extra?.host);
+  assert.deepEqual(recordedHosts, ["mini"]);
+  assert.deepEqual(JSON.parse(readFileSync(hostResourceStatePath(dir), "utf8")).janitorPasses, { azure: stamp, mini: stamp });
 });
 
 test("W1-T4804: the tier follows the projection relative to janitor cadence", () => {

@@ -14,7 +14,9 @@
     - test/fleet-heartbeat.test.ts
   origin: "operator-session#fresh-beat-dead-container-2026-09-05"
   plan_refs: ["W1-T483", "W1-T484", "W1-T2349", "W1-T2586", "W1-T2870"]
-  status: queued
+  status: blocked
+  retirement: closed
+  superseded_by: W1-T13178
   attempts: 0
   rationale: |
     OBSERVED ON THE AZURE FLEET AT 2026-09-05T08:40:01Z. Docker reported
@@ -104,3 +106,4 @@
     This task does not weaken the finite crash-loop bound. It closes the monitoring gap that let
     the bound do its job silently. The implementation must preserve the operator's deliberate
     clean-stop behavior and must not restart anything automatically.
+    Retired as closed 2026-11-24 (backlog thread reconcile, on the W1-T2387 / #8404 precedent): #4063 was its filing PR read as a merge; #18882 re-filed the remaining work as W1-T13177 and W1-T13178.

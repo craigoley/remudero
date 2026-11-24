@@ -1,9 +1,31 @@
+import { createHash } from "node:crypto";
+import { lstatSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, type WorkerProviderId } from "./config.js";
 import { fixedClock, systemClock } from "./clock.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
-import { routingDrawValue, type RoutingDrawSeed } from "./worker-provider.js";
+import { seededRandom, seedOf } from "./knowledge-value.js";
 import { mergeCashRequestEfforts, summarizeCashRequestEfforts, type CashRequestEffortEvidence } from "./cash-request-effort.js";
+
+export interface RoutingDrawKey {
+  unit: "spawn" | "task";
+  taskId: string;
+  attempt: string;
+  point: string;
+}
+
+export interface RoutingDrawSeed extends RoutingDrawKey {
+  order?: readonly WorkerProviderId[];
+}
+
+export function routingDrawSeed(key: RoutingDrawKey): number {
+  return seedOf(["routing-draw/v1", key.unit, key.taskId, key.attempt, key.point].join("\u0000"));
+}
+
+export function routingDrawValue(key: RoutingDrawKey): { value: number; seed: string } {
+  const seed = routingDrawSeed(key);
+  return { value: seededRandom(seed)(), seed: seed.toString(16).padStart(8, "0") };
+}
 
 /**
  * Live routing experiments (operator ruling 2026-09-24, DECISIONS.md). An assignment joins an
@@ -79,6 +101,190 @@ export const ROUTING_EXPERIMENTS: readonly RoutingExperiment[] = [
   })),
 ];
 
+type CodexArm = "control" | "paid";
+
+export const CODEX_BALANCED_TRIAL_VERSION = "codex-balanced-trial-v1";
+export const CODEX_BALANCED_TREATMENT_MODEL = "gpt-6.1-terra";
+export const CODEX_BALANCED_ASSIGNMENT_METHOD = "sha256(benchmark-aa-allocation-v1, seed, taskId) parity";
+const TRIAL_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** PRIMARY CONTROL: the v1 A/A receipt validity window used by the paid-pilot receipt validator. */
+const CODEX_AA_RECEIPT_MAX_AGE_MS = 24 * 3_600_000;
+export const hashCodexBalancedTrial = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+
+/** The routing fields in the immutable registration written by benchmark-aa balanced. */
+interface CodexTrialRegistration {
+  version: typeof CODEX_BALANCED_TRIAL_VERSION;
+  trialId: string;
+  lead: string;
+  digest: string;
+  registeredAt: string;
+  cash: { windowMs: number; subscriptionUsd: number };
+  assignment: { unit: "task"; method: typeof CODEX_BALANCED_ASSIGNMENT_METHOD; allocation: Record<CodexArm, number> };
+  aa: { receipt: { version: string; trialId: string; asOf: string; verdict: string; reportHash: string;
+    stackHash: string; allocationReceiptHash: string } };
+  pilotRequest: { pilotId: string; approval: { reference: string }; design: string; paired: unknown; reviewerReplay?: unknown;
+    assignmentSeed: string; arms: Record<CodexArm, { provider: string; model: string; effort: string }>;
+    population: { taskId: string }[] };
+}
+
+function readTrialJson<T extends object = Row>(path: string): T | undefined {
+  try {
+    const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? value as T : undefined;
+  } catch (error) {
+    if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+export function readCodexBalancedTrialProtocols(stateDir: string): CodexTrialRegistration[] {
+  let entries: string[];
+  try { entries = readdirSync(stateDir); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const protocols: CodexTrialRegistration[] = [];
+  for (const name of entries) {
+    if (!name.startsWith(CODEX_BALANCED_TRIAL_VERSION + ".") || !name.endsWith(".json")) continue;
+    const trialId = name.slice(CODEX_BALANCED_TRIAL_VERSION.length + 1, -5);
+    if (!TRIAL_ID.test(trialId)) continue;
+    const protocol = readTrialJson<CodexTrialRegistration>(join(stateDir, name));
+    if (!protocol) continue;
+    const { digest, ...body } = protocol;
+    const request = protocol.pilotRequest;
+    const control = request?.arms?.control;
+    const paid = request?.arms?.paid;
+    if (digest !== hashCodexBalancedTrial(body) || protocol.version !== CODEX_BALANCED_TRIAL_VERSION || protocol.trialId !== trialId
+      || typeof protocol.lead !== "string" || !protocol.lead.endsWith("-sol")
+      || typeof protocol.cash?.windowMs !== "number" || !Number.isFinite(protocol.cash.windowMs)
+      || protocol.cash.windowMs <= 0 || protocol.cash.subscriptionUsd !== 0
+      || protocol.assignment?.unit !== "task" || protocol.assignment.method !== CODEX_BALANCED_ASSIGNMENT_METHOD
+      || protocol.assignment.allocation?.control !== 0.5 || protocol.assignment.allocation.paid !== 0.5
+      || request?.pilotId !== trialId || request.approval?.reference !== "#7418" || request.design !== "unpaired"
+      || request.paired !== null || request.reviewerReplay !== undefined
+      || typeof request.assignmentSeed !== "string" || request.assignmentSeed === "" || !Array.isArray(request.population)
+      || control?.provider !== "codex" || control.model !== protocol.lead || !["low", "medium"].includes(control.effort)
+      || paid?.provider !== "codex" || paid.model !== CODEX_BALANCED_TREATMENT_MODEL || paid.effort !== control.effort) continue;
+    protocols.push(protocol);
+  }
+  return protocols;
+}
+
+function guardrailPath(stateDir: string, digest: string): string {
+  return join(stateDir, CODEX_BALANCED_TRIAL_VERSION + "." + digest + ".guardrail");
+}
+
+function codexBalancedTrialActive(stateDir: string, protocol: CodexTrialRegistration, now: number): boolean {
+  const start = Date.parse(protocol.registeredAt);
+  if (!(now >= start && now < start + protocol.cash.windowMs)
+    || lstatSync(guardrailPath(stateDir, protocol.digest), { throwIfNoEntry: false }) !== undefined) return false;
+  const cited = protocol.aa?.receipt;
+  if (typeof cited?.trialId !== "string" || !TRIAL_ID.test(cited.trialId)) return false;
+  const age = now - Date.parse(cited.asOf);
+  if (!(age >= 0 && age <= CODEX_AA_RECEIPT_MAX_AGE_MS)) return false;
+  const report = readTrialJson(join(stateDir, "benchmark-aa-prospective", cited.trialId,
+    "calibration-receipt." + cited.trialId + ".json"));
+  if (!report) return false;
+  const { receipt, ...body } = report;
+  const observed = receipt as (Partial<typeof cited> & { state?: string; winnerDeclared?: boolean }) | undefined;
+  return body.version === "benchmark-aa-v1" && observed?.version === "benchmark-aa-receipt-v1"
+    && cited.version === observed.version && observed.trialId === cited.trialId && observed.asOf === cited.asOf
+    && observed.state === "observed" && observed.verdict === "no-integrity-concern-detected" && observed.verdict === cited.verdict
+    && observed.winnerDeclared === false && observed.reportHash === cited.reportHash && observed.reportHash === hashCodexBalancedTrial(body)
+    && observed.stackHash === cited.stackHash && observed.allocationReceiptHash === cited.allocationReceiptHash;
+}
+
+export function latchCodexBalancedGuardrail(stateDir: string, digest: string, reason: string): void {
+  try { writeFileSync(guardrailPath(stateDir, digest), reason + "\n", { flag: "wx", mode: 0o600 }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+}
+
+export interface CodexRoutingExperiment {
+  id: string;
+  kind: "codex-vs-codex";
+  capability: "balanced";
+  effort: string;
+  arms: Record<CodexArm, { provider: "codex"; model: RegExp; modelId: string }>;
+  seed: string;
+  allocation: CodexTrialRegistration["assignment"]["allocation"];
+}
+
+export function codexRoutingExperiment(protocol: CodexTrialRegistration): CodexRoutingExperiment {
+  const pin = (id: CodexArm) => {
+    const { model } = protocol.pilotRequest.arms[id];
+    const escaped = model.replace(/[$.*+?^{}()|[\]\\]/g, "\\$&");
+    return { provider: "codex" as const, model: new RegExp("^" + escaped + "$"), modelId: model };
+  };
+  return {
+    id: `codex-balanced:${protocol.trialId}:${protocol.digest}`, kind: "codex-vs-codex",
+    capability: "balanced", effort: protocol.pilotRequest.arms.control.effort,
+    arms: { control: pin("control"), paid: pin("paid") },
+    seed: protocol.pilotRequest.assignmentSeed, allocation: protocol.assignment.allocation,
+  };
+}
+
+export interface CodexExperimentAssignment {
+  id: string;
+  trialId: string;
+  protocolDigest: string;
+  unit: "task";
+  assignedArm: CodexArm;
+  assignedProbability: number;
+  assignedModel: string;
+  seed: string;
+}
+
+export function codexExperimentArmForTask(input: {
+  stateDir: string; taskId: string; provider: string; capability?: string; effort?: string;
+  model?: string; currentSol?: string; nowMs?: number;
+}): CodexExperimentAssignment | undefined {
+  const taskId = experimentTaskIdentity(input.taskId);
+  if (input.provider !== "codex" || input.capability !== "balanced" || !["low", "medium"].includes(input.effort ?? "")
+    || taskId === undefined || input.currentSol === undefined || input.model !== input.currentSol) return undefined;
+  let matches: CodexTrialRegistration[];
+  try {
+    const now = input.nowMs ?? systemClock.now();
+    matches = readCodexBalancedTrialProtocols(input.stateDir).filter(protocol =>
+      protocol.pilotRequest.arms.control.effort === input.effort
+      && protocol.lead === input.currentSol
+      && protocol.pilotRequest.population.some(task => task?.taskId === taskId)
+      && codexBalancedTrialActive(input.stateDir, protocol, now));
+  } catch (error) {
+    // Stand down on unreadable registration or guardrail state. The ordinary Codex selection still serves.
+    console.error("codex balanced trial state unreadable", (error as NodeJS.ErrnoException).code ?? "unknown");
+    return undefined;
+  }
+  if (matches.length !== 1) return undefined;
+  const protocol = matches[0]!;
+  const experiment = codexRoutingExperiment(protocol);
+  const { arm, probability } = experimentArmForTask(experiment, taskId);
+  return { id: experiment.id, trialId: protocol.trialId, protocolDigest: protocol.digest, unit: "task",
+    assignedArm: arm, assignedProbability: probability, assignedModel: experiment.arms[arm].modelId, seed: experiment.seed };
+}
+
+type CodexAssignmentIdentity = { runId?: string; taskId: string; assignmentId: string; requestedModel?: string };
+
+export function intentionToTreatRow(
+  identity: CodexAssignmentIdentity, assignment: CodexExperimentAssignment, receipt?: {
+    servedModel: string | null; servedModelReason?: string; servedModelSource?: string;
+    costUsd?: number; success: boolean; guardrail?: string;
+  },
+) {
+  return {
+    run_id: identity.runId ?? "unattributed", task_id: identity.taskId,
+    assignment_id: identity.assignmentId, experiment: assignment, requested_model: identity.requestedModel,
+    ...(receipt && {
+      served_model: receipt.servedModel, served_model_reason: receipt.servedModelReason, served_model_source: receipt.servedModelSource,
+      billing_mode: "subscription", observed_cost_usd: receipt.costUsd ?? null, success: receipt.success,
+      crossover: receipt.servedModel === null ? null : receipt.servedModel !== assignment.assignedModel,
+      guardrail: receipt.guardrail,
+    }),
+  };
+}
+
 /** A generic lane label cannot be the randomization unit for independent work. */
 export function experimentTaskIdentity(taskId: string | undefined): string | undefined {
   return taskId && /^(?:W\d+-T\d+|PR-\d+|RETRO-\d+|T\d+)$/.test(taskId) ? taskId : undefined;
@@ -112,13 +318,13 @@ export function routingExperimentFor(
  * every attempt of a task reads the same value: the SAME weights still decide the served provider
  * (no share moves), while the assigned arm below is a pure function of the task.
  */
-export function experimentDrawSeed(experiment: RoutingExperiment, taskId: string): RoutingDrawSeed {
+export function experimentDrawSeed(experiment: RoutingExperiment | CodexRoutingExperiment, taskId: string): RoutingDrawSeed {
   return {
     unit: "task",
     taskId,
     attempt: "every-attempt",
     point: `experiment:${experiment.id}`,
-    order: Object.keys(experiment.arms) as WorkerProviderId[],
+    order: "kind" in experiment ? ["codex"] : Object.keys(experiment.arms) as WorkerProviderId[],
   };
 }
 
@@ -134,9 +340,19 @@ export interface ExperimentIntentionToTreat {
 }
 
 /** The arm a task is assigned: its task-keyed draw split equally across the declared arms. */
-export function experimentArmForTask(experiment: RoutingExperiment, taskId: string): { arm: string; probability: number } {
+export function experimentArmForTask(experiment: RoutingExperiment, taskId: string): { arm: string; probability: number };
+export function experimentArmForTask(experiment: CodexRoutingExperiment, taskId: string): { arm: CodexArm; probability: number };
+export function experimentArmForTask(experiment: RoutingExperiment | CodexRoutingExperiment, taskId: string): { arm: string; probability: number } {
+  const seed = experimentDrawSeed(experiment, taskId);
+  if ("kind" in experiment) {
+    // Use the registration's benchmark A/B parity draw, including its arm order.
+    const parity = createHash("sha256").update(["benchmark-aa-allocation-v1", experiment.seed, seed.taskId].join("\0"))
+      .digest().readUInt32BE(0) % 2;
+    const arm = parity === 0 ? "paid" : "control";
+    return { arm, probability: experiment.allocation[arm] };
+  }
   const arms = Object.values(experiment.arms) as string[];
-  const { value } = routingDrawValue(experimentDrawSeed(experiment, taskId));
+  const { value } = routingDrawValue(seed);
   return { arm: arms[Math.min(arms.length - 1, Math.floor(value * arms.length))]!, probability: 1 / arms.length };
 }
 
@@ -365,6 +581,40 @@ export interface RoutingAbCommandOpts {
   print?: (line: string) => void;
 }
 
+function codexExperimentReports(rows: readonly Row[]) {
+  const epochs = new Map<string, { assignments: Map<string, Row>; receipts: Map<string, Row> }>();
+  for (const row of rows) {
+    const isAssignment = row.step === "codex_experiment.assignment";
+    if (!isAssignment && row.step !== "codex_experiment.receipt") continue;
+    const id = str((row.experiment as Partial<CodexExperimentAssignment> | undefined)?.id);
+    const assignmentId = str(row.assignment_id);
+    if (!id || !assignmentId) continue;
+    const epoch = epochs.get(id) ?? { assignments: new Map<string, Row>(), receipts: new Map<string, Row>() };
+    (isAssignment ? epoch.assignments : epoch.receipts).set(assignmentId, row);
+    epochs.set(id, epoch);
+  }
+  return [...epochs.entries()].map(([id, { assignments, receipts }]) => {
+    const firstByTask = new Map<string, Row>();
+    for (const row of assignments.values()) {
+      const task = str(row.task_id);
+      if (task && (!firstByTask.has(task) || String(row.ts) < String(firstByTask.get(task)?.ts))) firstByTask.set(task, row);
+    }
+    const merged = new Set(rows.filter(row => row.step === "verdict.merged" && firstByTask.has(String(row.task_id))
+      && String(row.ts) >= String(firstByTask.get(String(row.task_id))?.ts)).map(row => row.task_id));
+    const arms = (["control", "paid"] as const).map(arm => {
+      const tasks = [...firstByTask.entries()].filter(([, row]) => (row.experiment as CodexExperimentAssignment).assignedArm === arm);
+      return { arm, model: (tasks[0]?.[1].experiment as CodexExperimentAssignment | undefined)?.assignedModel ?? null,
+        tasks: tasks.length, merged: tasks.filter(([task]) => merged.has(task)).length };
+    });
+    const matched = [...assignments.keys()].map(id => receipts.get(id));
+    return { id, assignments: assignments.size, arms,
+      crossovers: matched.filter(receipt => receipt?.crossover === true).length,
+      missingServedModel: matched.filter(receipt => str(receipt?.served_model) === undefined).length,
+      guardrails: [...new Set(matched.flatMap(receipt => str(receipt?.guardrail) ?? []))],
+    };
+  });
+}
+
 /** `rmd routing-ab [--json]`: every live experiment's arms, read over the whole ledger union. */
 export async function routingAbCommand(rest: string[], opts: RoutingAbCommandOpts): Promise<number> {
   const print = opts.print ?? ((line: string) => console.log(line));
@@ -377,8 +627,9 @@ export async function routingAbCommand(rest: string[], opts: RoutingAbCommandOpt
   const rows = await (opts.readRows ?? ((dir: string) => readLedgerUnionRecords(dir)))(stateDir);
   const today = opts.today ?? systemClock.iso().slice(0, 10);
   const reports = ROUTING_EXPERIMENTS.map((experiment) => evaluateRoutingExperiment(rows, experiment, today, opts.classifyAttempt));
+  const codexReports = codexExperimentReports(rows);
   if (rest.includes("--json")) {
-    print(JSON.stringify({ stateDir, rowsRead: rows.length, reports }));
+    print(JSON.stringify({ stateDir, rowsRead: rows.length, reports, ...(codexReports.length > 0 && { codexReports }) }));
     return 0;
   }
   print(`state dir: ${stateDir} (${rows.length} ledger rows read)`);
@@ -396,6 +647,11 @@ export async function routingAbCommand(rest: string[], opts: RoutingAbCommandOpt
           `${arm.infrastructureAttempts} infrastructure attempts, ${arm.infrastructureOnlyTasks} infrastructure-only tasks excluded`,
       );
     }
+  }
+  for (const report of codexReports) {
+    print(`${report.id}: ${report.assignments} assignments, ${report.crossovers} crossovers, ${report.missingServedModel} without served-model evidence`);
+    for (const arm of report.arms) print(`  ${arm.arm} (${arm.model ?? "unobserved"}): ${arm.tasks} tasks, ${arm.merged} merged`);
+    if (report.guardrails.length > 0) print(`  guardrails fired: ${report.guardrails.join(", ")}`);
   }
   return 0;
 }
