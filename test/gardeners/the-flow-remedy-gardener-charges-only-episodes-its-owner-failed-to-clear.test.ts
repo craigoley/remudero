@@ -76,13 +76,13 @@ test("W1-T13524 criterion 2: terminal observations, pending waits and held draft
     [15, { state: "closed", at: iso(-3) }],
   ]);
   const result = inventory([
-    disposed(10, -5, "own-red", "prior red"), disposed(10, -3, "own-red", "at merge"), disposed(10, -2, "escalated", "after merge"),
+    disposed(10, -5, "own-red", "prior red"), disposed(10, -3, "own-red", "at merge"), disposed(10, -2, "own-red", "after merge"),
     disposed(11, -3, "awaiting-review", "prior review"), disposed(11, -1.5, "held-draft", "after close"), disposed(11, -1, "own-red", "later"),
     { step: "pr.terminal", pr_number: 11, state: "closed", closed_at: iso(-2), ts: iso(0) },
     disposed(12, -4, "awaiting-ci", "checks pending under ceiling", { disposition: "wait" }),
     disposed(12, -2, "awaiting-ci", "checks pending under ceiling", { disposition: "wait" }),
     disposed(13, -4, "held-draft", "draft held"), disposed(13, -2, "held-draft", "draft held"),
-    disposed(15, -3, "escalated", "at close"), disposed(15, -2, "escalated", "after close"),
+    disposed(15, -3, "own-red", "at close"), disposed(15, -2, "own-red", "after close"),
     disposed(16, -3, "escalated", "after ledger merge"),
     { step: "pr.terminal", pr_number: 16, state: "merged", merged_at: iso(-3.5), ts: iso(-2) },
   ], outcomes);
