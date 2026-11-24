@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { dirname, join, relative, sep } from "node:path";
 import { resolveRepoLayout } from "./repo-layout.js";
 import {
-  OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_TREE_ENTRIES, opsCatalogBoundRefusal, type OpsCatalogBoundsIo,
+  OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_TREE_ENTRIES,
 } from "./ops-catalog-source.js";
 import { parse as parseYaml } from "yaml";
 import { defaultGitRunnerAsync, readBlobsAtRefAsync, type Plan, type Task } from "./plan.js";
@@ -138,15 +138,15 @@ export async function catalog(root: string, commit: string, external = false):
  * shard of the copy's bytes (the original and its one moved_from line). A copy the reader would refuse is refused
  * here, before it lands and stops ops dispatch.
  */
-export function judgeOpsCopy(size: OpsCatalogSize, original: string, publicCommit: string, io: OpsCatalogBoundsIo = {}): void {
-  judgeOpsBatch(size, [original], publicCommit, io);
+export function judgeOpsCopy(size: OpsCatalogSize, original: string, publicCommit: string): void {
+  judgeOpsBatch(size, [original], publicCommit);
 }
 
 /**
  * W1-T14345: the same judgement for the catalog one batched COPY would produce: every copy's bytes and shard at once.
  * The catalog's growth is not bounded, so a step may carry any number of copies the reader's other bounds admit.
  */
-export function judgeOpsBatch(size: OpsCatalogSize, originals: readonly string[], publicCommit: string, io: OpsCatalogBoundsIo = {}): void {
+export function judgeOpsBatch(size: OpsCatalogSize, originals: readonly string[], publicCommit: string): void {
   let bytes = 0;
   for (const original of originals) {
     const indent = /\n([ \t]+)\S/.exec(original)?.[1] ?? "";
@@ -157,8 +157,6 @@ export function judgeOpsBatch(size: OpsCatalogSize, originals: readonly string[]
   // Each copy adds one shard-tree entry, and the shard tree's own entry in the plan tree when the batch starts one.
   const treeEntries = size.treeEntries + originals.length + (size.shardDir ? 0 : 1);
   if (treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) return unknown("catalog_incompatible");
-  const produced = { shards: size.shards + originals.length, bytes: size.bytes + bytes };
-  if (opsCatalogBoundRefusal(produced, io)) return unknown("catalog_incompatible");
 }
 /** remudero-ops scripts/ops-gate.rb REQUIRED_KEYS without "id", NON_EMPTY_KEYS, RISKS, PROOF_PREFIXES and DEMONSTRATION_RE. */
 const OPS_GATE_REQUIRED_KEYS = ["title", "repo", "type", "verify", "risk", "status", "attempts", "acceptance"] as const;
@@ -456,7 +454,7 @@ export interface MigrationSelection {
  *  W1-T14345: it fills a batch of up to {@link MOVE_BATCH_BOUND} open tasks, oldest filing first, that the ops catalog
  *  has room for; a batch of one is selected exactly as before. */
 export async function selectPlanTaskMigration(
-  o: Options, reader: MigrationGraphqlReader = graphqlRead, bounds: OpsCatalogBoundsIo = {},
+  o: Options, reader: MigrationGraphqlReader = graphqlRead,
 ): Promise<MigrationSelection> {
   const publicRefs = await refs(o.publicRoot, o.publicRepo), opsRefs = await refs(o.opsRoot, o.opsRepo);
   const pub = await catalog(o.publicRoot, o.publicCommit), ops = await catalog(o.opsRoot, o.opsCommit, true);
@@ -505,7 +503,7 @@ export async function selectPlanTaskMigration(
     // W1-T14368: the bounds judge the ops catalog this copy would produce, not the one it read. W1-T14345: with every
     // copy the batch already holds; a copy the catalog has no room for ends the batch, and refuses it only when alone.
     if (ops.size) {
-      try { judgeOpsBatch(ops.size, [...batch.map(member => String(member.yaml)), original.text], o.publicCommit, bounds); }
+      try { judgeOpsBatch(ops.size, [...batch.map(member => String(member.yaml)), original.text], o.publicCommit); }
       catch (error) { if (batch.length === 0 || !(error instanceof PreviewUnknown)) throw error; break; }
     }
     carried.push(carriedOf(task, original.path));
