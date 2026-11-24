@@ -73,6 +73,7 @@
     6. Add `change_classes` and `horizon_ms` to `daemon.freshness_decision`.
     7. `judgeAdvanceByClosure` records `inside`, the changed paths that lie in the closure, so a commit of a material advance is classed by its own files.
     The fast releases stay first: install inputs, withheld reviews and an unreadable advance.
+    NO-INVARIANTS: the prior behavior this keeps is pinned by its own criteria: 2 (a reviewer and a loop commit score 1, as today), 4 (the reviewer horizon, as today) and 7 (the fast releases, as today); a commit that cannot be classed fails toward loop (criterion 1).
     NOT IN SCOPE: the quiet window (W1-T10059), what makes the daemon busy (W1-T10054), and the image recycle.
   falsifier: |
     Score a `worker_only` commit 1 and criterion 2 must fail. Use one horizon for both classes and criterion 3 must fail. Class a commit that cannot be classed as `worker_only` and criterion 1 must fail. Restore and require all eight to pass.
