@@ -4,7 +4,7 @@ import { grillChoiceError, parseGrillOptions, parseGrillRecommendation } from ".
 import { existsSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { shapeCommitMessage } from "./commit-message.js";
-import { loadPlan } from "./plan.js";
+import { loadPlan, loadPlanKeepingUnseenDependencies } from "./plan.js";
 import { ACCEPTANCE_PROOF_GRAMMAR } from "./proof-grammar.js";
 import { diffEmptyAgainstScope } from "./review.js";
 import { feedbackEntryRepoPath, feedbackEntryPath, feedbackReadRoots, instanceStateDir, readFeedbackEntry } from "./feedback.js";
@@ -321,16 +321,21 @@ export function unresolvedCitationReferents(citation: string, evidence: Citation
   return { resolved, unresolved, advisoryPrs: [...new Set(advisoryPrs)] };
 }
 
-/** Evidence read from a triage worktree: its merged plan's ids and its files, never outside it. */
-export function worktreeCitationEvidence(worktreeRoot: string): CitationEvidence {
+/** Evidence read from a triage lane's catalogs: each root's merged plan ids and its files, never outside a root.
+ *  A lane that files into the ops catalog passes that worktree as `opsRoot`, so a task id or path of either catalog
+ *  resolves; the ops plan keeps a dependency it cannot see, as the ops catalog's other readers do (W1-T13390). */
+export function worktreeCitationEvidence(worktreeRoot: string, opsRoot?: string): CitationEvidence {
   const planIds = new Set(loadPlan(join(worktreeRoot, "plan", "tasks.yaml")).byId.keys());
-  const root = resolve(worktreeRoot);
+  if (opsRoot !== undefined) {
+    for (const id of loadPlanKeepingUnseenDependencies(join(opsRoot, "plan", "tasks.yaml"), () => true).byId.keys()) planIds.add(id);
+  }
+  const roots = [resolve(worktreeRoot), ...(opsRoot === undefined ? [] : [resolve(opsRoot)])];
   return {
     planIds,
-    pathExists: (p) => {
+    pathExists: (p) => roots.some((root) => {
       const abs = resolve(root, p);
       return abs.startsWith(root + sep) && existsSync(abs);
-    },
+    }),
   };
 }
 

@@ -36629,7 +36629,7 @@ async function triageCommandLocked(
         // Ground truth: what did the worker ACTUALLY touch (before the harness's own status write)?
         const changedFiles = worktreeChangedFiles(worktreePath);
         const verdict = parseTriageVerdict(workerTranscript(worker));
-        const citation = verdict?.kind === "already_decided" ? unresolvedCitationReferents(verdict.citation, worktreeCitationEvidence(entryRoot)) : undefined;
+        const citation = verdict?.kind === "already_decided" ? unresolvedCitationReferents(verdict.citation, worktreeCitationEvidence(entryRoot, view === undefined ? undefined : worktreePath)) : undefined;
         const decision = decideTriage({ verdict, changedFiles, citation });
         // A verdictless repair may retain only the proposal whose complete file scope it preserves.
         const result = decision.action === "error" && decision.cause === "unparseable_verdict" &&
