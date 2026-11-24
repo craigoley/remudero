@@ -6025,10 +6025,10 @@ export async function runDaemon(
   // W1-T6093: remember observations at both the first-cycle guard and the shared decision boundary.
   const observeFreshnessAdvance = (newSha: string, nowMs: number, heldSinceMs?: number, changes?: readonly DeployWorthChange[]): void => {
     staleSinceMs = Math.min(staleSinceMs ?? nowMs, heldSinceMs ?? nowMs);
-    // W1-T12230: the first stale reading dates its commits from the stale reading (a live edit can hold one); a commit
-    // first read later, from that reading.
-    const readAtMs = changeFirstReadMs.size === 0 ? staleSinceMs : nowMs;
-    for (const change of changes ?? []) if (!changeFirstReadMs.has(change.sha)) changeFirstReadMs.set(change.sha, readAtMs);
+    // W1-T12230: the first stale reading, and one a live edit held (the tree was behind earlier), date their commits from
+    // the stale reading; a commit first read later, from that reading.
+    const readAtMs = changeFirstReadMs.size === 0 || heldSinceMs !== undefined ? staleSinceMs : nowMs;
+    for (const change of changes ?? []) changeFirstReadMs.set(change.sha, Math.min(changeFirstReadMs.get(change.sha) ?? readAtMs, readAtMs));
     if (newSha !== lastAdvanceSha) {
       lastAdvanceSha = newSha;
       lastAdvanceAtMs = nowMs;

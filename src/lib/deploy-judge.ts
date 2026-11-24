@@ -390,9 +390,10 @@ export interface FreshnessDecision {
   stallPressure?: number;
   pressure: number;
   state: DeployRestartPressureState;
-  /** W1-T12230: the count of the advance's commits in each class (an unclassed commit counts as `loop`). */
+  /** W1-T12230: the count of the advance's commits in each class (an unclassed commit counts as `loop`). Present when
+   *  the caller passed `loopOnlyHorizonMs`, as the daemon does. */
   changeClasses?: Record<FreshnessChangeClass, number>;
-  /** W1-T12230: the horizon of the staleness part that set `agePressure`. */
+  /** W1-T12230: the horizon of the staleness part that set `agePressure`. Present with `changeClasses`. */
   horizonMs?: number;
 }
 
@@ -478,8 +479,8 @@ export function decideFreshnessRestart(input: {
   const stallPressure = Math.floor(threshold.value * stallShare);
   const pressure = weight + agePressure + withheldPressure + stallPressure;
   const state = { total: weight, scoredShas: scored.state.scoredShas };
-  const scores = { weight, agePressure, pressure, state, changeClasses: countFreshnessChangeClasses(input.changes), horizonMs,
-    ...(stallShare > 0 ? { stallPressure } : {}) };
+  const classes = input.loopOnlyHorizonMs === undefined ? {} : { changeClasses: countFreshnessChangeClasses(input.changes), horizonMs };
+  const scores = { weight, agePressure, pressure, state, ...classes, ...(stallShare > 0 ? { stallPressure } : {}) };
   const pressureTerms = `change ${weight} + staleness ${agePressure}`;
   const stallTerm = stallShare > 0 ? ` + stall ${stallPressure}` : "";
   const restartTrigger = input.changes === undefined ? "unreadable"

@@ -519,7 +519,9 @@ export function classifyAdvanceCommit(files: readonly string[], closure: Advance
   return files.some((file) => file.startsWith("src/") || file.startsWith("scripts/")) ? "worker_only" : "loop";
 }
 
-function classifyAdvanceCommits(changes: readonly AdvanceCommit[] | undefined, closure: AdvanceClosure | undefined): AdvanceCommit[] | undefined {
+/** With no closure reading every commit stays unclassed, which the judge counts as `loop`, as it would class it. */
+function classifyAdvanceCommits(changes: AdvanceCommit[] | undefined, closure: AdvanceClosure | undefined): AdvanceCommit[] | undefined {
+  if (closure === undefined) return changes;
   return changes?.map((change) => ({ ...change, changeClass: classifyAdvanceCommit(change.files, closure) }));
 }
 

@@ -10,6 +10,7 @@ import { parse as parseYaml } from "yaml";
 import { runDaemon, type DaemonFreshness, type DaemonOpts } from "#src/lib/daemon.js";
 import {
   coalesceFreshnessRestart,
+  countFreshnessChangeClasses,
   decideFreshnessRestart,
   FRESHNESS_COALESCE_WINDOW_MS,
   FRESHNESS_LOOP_ONLY_HORIZON_MS,
@@ -72,9 +73,13 @@ test("W1-T12230 criterion 1: each commit of an advance gets one class, and a com
   assert.deepEqual((read as { changes: Array<{ changeClass?: string }> }).changes.map((change) => change.changeClass), ["reviewer", "loop", "worker_only"]);
   const unread = daemonFreshnessFromService(behind(commits, { status: "unreadable", reason: "no tree" }));
   assert.deepEqual((unread as { changes: Array<{ changeClass?: string }> }).changes.map((change) => change.changeClass), ["reviewer", "loop", "loop"]);
-  const dirty = daemonFreshnessFromService({ ...behind(commits, undefined), dirty: true, dirty_paths: ["x"] } as ServiceFreshness);
+  const dirty = daemonFreshnessFromService({ ...behind(commits, { status: "unreadable", reason: "no tree" }), dirty: true, dirty_paths: ["x"] } as ServiceFreshness);
   assert.equal(dirty.stale, false);
   assert.deepEqual((dirty.notStale as { changes: Array<{ changeClass?: string }> }).changes.map((change) => change.changeClass), ["reviewer", "loop", "loop"]);
+  // No closure reading: the commits stay unclassed, which the judge counts as loop.
+  const unclassed = daemonFreshnessFromService(behind(commits, undefined));
+  assert.deepEqual((unclassed as { changes: Array<{ changeClass?: string }> }).changes.map((change) => change.changeClass), [undefined, undefined, undefined]);
+  assert.deepEqual(countFreshnessChangeClasses((unclassed as { changes: DeployWorthChange[] }).changes), { reviewer: 0, loop: 3, worker_only: 0 });
 });
 
 test("W1-T12230 criterion 2: a worker_only commit adds no change pressure, a reviewer and a loop commit add 1 each", () => {
@@ -86,7 +91,8 @@ test("W1-T12230 criterion 2: a worker_only commit adds no change pressure, a rev
   assert.equal(decide([reviewer, loop, workerOnly]).weight, 2);
   assert.equal(decide([workerOnly, { ...workerOnly, sha: sha("c4") }]).weight, 0);
   assert.equal(decide([reviewer, loop]).weight, 2);
-  assert.deepEqual(decide([reviewer, loop, workerOnly]).changeClasses, { reviewer: 1, loop: 1, worker_only: 1 });
+  assert.deepEqual(decideFreshnessRestart({ changes: [reviewer, loop, workerOnly], busy: true, staleSinceMs: T0, nowMs: T0, state: fresh(),
+    threshold: LIMIT, loopOnlyHorizonMs: HOUR }).changeClasses, { reviewer: 1, loop: 1, worker_only: 1 });
 });
 
 test("W1-T12230 criterion 3: a loop-only advance reaches the score limit at loopOnlyHorizonMs, not at stalenessHorizonMs", () => {
