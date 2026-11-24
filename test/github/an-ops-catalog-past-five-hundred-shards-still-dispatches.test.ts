@@ -127,38 +127,41 @@ test("W1-T14368 criterion 1: a catalog of 600 shards and 3 MB, grown at the meas
     "the refresh after the move fetched only the new shards' blobs");
 });
 
-test("W1-T14368 criterion 2: a runaway jump from the last accepted snapshot is refused with a named reason and both numbers, and heals as the catalog's own measured growth allows", async () => {
+// W1-T14557: a jump past the day's allowance no longer refuses the catalog. It is read and accepted, and the day's first
+// such read names the jump and the growth allowed; only the heap and blob-budget bounds still refuse.
+test("W1-T14368 criterion 2: a runaway jump from the last accepted snapshot is named with both numbers once a day, and the catalog is still accepted (W1-T14557)", async () => {
   const daily = OPS_CATALOG_MEASURED_DAILY_GROWTH;
   const base = { mono: MONO, shards: shards(0, 482, 5_000) };
   const t = clock(T0);
   const io: OpsCatalogBoundsIo = { clock: t };
   const r = remote(base);
-  assert.equal((await readOpsCatalogSnapshotAsync(target, r.api, { bounds: io })).outcome, "ok");
+  const first = await readOpsCatalogSnapshotAsync(target, r.api, { bounds: io });
+  assert.equal(first.outcome, "ok");
+  assert.equal(first.growthExceeded, undefined, "a catalog inside its baseline reports no growth");
 
-  // Shards: 218 more an hour later, where one day's measured growth allows 118. Refused before any new blob is fetched.
+  // Shards: 218 more an hour later, where one day's measured growth allows 118. Read and accepted, and named.
   const runaway = { mono: MONO, shards: { ...base.shards, ...shards(482, 218, 5_000) } };
   r.move(runaway);
-  r.reset();
   t.at = T0 + 3_600_000;
   const jumped = await readOpsCatalogSnapshotAsync(target, r.api, { bounds: io });
-  assert.equal(jumped.outcome, "malformed", said(jumped));
-  assert.equal(jumped.refusalStage, "shard_tree");
-  assert.deepEqual(jumped.bound, { reason: "shard_growth", observed: 218, allowed: daily.shards }, "the refusal names the jump and the growth allowed");
-  assert.equal(jumped.plan, undefined);
-  assert.equal(r.blobGets(), 0, "refused whole, before a blob of the runaway is fetched");
+  assert.equal(jumped.outcome, "ok", said(jumped));
+  assert.equal(jumped.bound, undefined, "growth is no refusal");
+  assert.deepEqual(jumped.growthExceeded, { reason: "shard_growth", observed: 218, allowed: daily.shards }, "the report names the jump and the growth allowed");
+  assert.equal(jumped.plan?.tasks.length, 700);
 
-  // The dispatch source says the same: stale after its earlier success, with the bound attached for its row.
+  // The dispatch source answers ok, with the day's report attached for its row as a non-enumerable diagnostic.
   const s = remote(base);
   const source = createOpsCatalogShadowSource(target, s.api, { bounds: io });
   t.at = T0;
   assert.equal((await source.refresh()).outcome, "ok");
   s.move(runaway);
   t.at = T0 + 3_600_000;
-  const stale = await source.refresh();
-  assert.equal(stale.outcome, "stale");
-  assert.equal(stale.plan, undefined);
-  assert.deepEqual(stale.bound, { reason: "shard_growth", observed: 218, allowed: daily.shards });
-  assert.deepEqual(Object.keys(stale).sort(), ["outcome", "refusalStage"], "the bound is a non-enumerable diagnostic");
+  const grown = await source.refresh();
+  assert.equal(grown.outcome, "ok");
+  assert.equal(grown.plan?.tasks.length, 700);
+  assert.deepEqual(grown.growthExceeded, { reason: "shard_growth", observed: 218, allowed: daily.shards });
+  assert.deepEqual(Object.keys(grown).sort(), ["identityDigest", "outcome"], "the report is a non-enumerable diagnostic");
+  assert.equal((await source.refresh()).growthExceeded, undefined, "a revalidation of the same commit reports nothing");
 
   // Bytes: 38 new shards (within the shard growth) carrying 760,000 bytes, where a day's measured growth is 633,709.
   const b = remote(base);
@@ -167,15 +170,8 @@ test("W1-T14368 criterion 2: a runaway jump from the last accepted snapshot is r
   b.move({ mono: MONO, shards: { ...base.shards, ...shards(482, 38, 20_000) } });
   t.at = T0 + 3_600_000;
   const heavy = await readOpsCatalogSnapshotAsync(target, b.api, { bounds: io });
-  assert.equal(heavy.outcome, "malformed", said(heavy));
-  assert.equal(heavy.refusalStage, "blob_verification");
-  assert.deepEqual(heavy.bound, { reason: "byte_growth", observed: 38 * 20_000, allowed: daily.bytes });
-
-  // The refusal heals as time passes: two UTC days after the accepted snapshot, 218 shards is two days' growth.
-  t.at = T0 + 2 * DAY;
-  const healed = await readOpsCatalogSnapshotAsync(target, r.api, { bounds: io });
-  assert.equal(healed.outcome, "ok", said(healed));
-  assert.equal(healed.counts.shards, 700);
+  assert.equal(heavy.outcome, "ok", said(heavy));
+  assert.deepEqual(heavy.growthExceeded, { reason: "byte_growth", observed: 38 * 20_000, allowed: daily.bytes });
 
   // A catalog that keeps growing faster than the fallback teaches the reader its rate: 150 a day for two days in a row.
   const g = remote(base);
@@ -184,24 +180,14 @@ test("W1-T14368 criterion 2: a runaway jump from the last accepted snapshot is r
   assert.equal((await readOpsCatalogSnapshotAsync(target, g.api, { bounds: io })).outcome, "ok");
   g.move({ mono: MONO, shards: { ...base.shards, ...shards(482, 150, 1_000) } });
   t.at = day(1);
-  assert.deepEqual((await readOpsCatalogSnapshotAsync(target, g.api, { bounds: io })).bound, { reason: "shard_growth", observed: 150, allowed: daily.shards },
-    "one fast day is refused");
+  const fast = await readOpsCatalogSnapshotAsync(target, g.api, { bounds: io });
+  assert.equal(fast.outcome, "ok");
+  assert.deepEqual(fast.growthExceeded, { reason: "shard_growth", observed: 150, allowed: daily.shards }, "one fast day is named");
   g.move({ mono: MONO, shards: { ...base.shards, ...shards(482, 300, 1_000) } });
   t.at = day(2);
   const learned = await readOpsCatalogSnapshotAsync(target, g.api, { bounds: io });
-  assert.equal(learned.outcome, "ok", `a second day at 150 read ${said(learned)}`);
-
-  // One jump teaches nothing: a single day of +1,000 stays refused the next day.
-  const j = remote(base);
-  t.at = day(0);
-  assert.equal((await readOpsCatalogSnapshotAsync(target, j.api, { bounds: io })).outcome, "ok");
-  j.move({ mono: MONO, shards: { ...base.shards, ...shards(482, 1_000, 600) } });
-  t.at = day(1);
-  assert.equal((await readOpsCatalogSnapshotAsync(target, j.api, { bounds: io })).bound?.reason, "shard_growth");
-  j.move({ mono: MONO, shards: { ...base.shards, ...shards(482, 1_010, 600) } });
-  t.at = day(2);
-  assert.deepEqual((await readOpsCatalogSnapshotAsync(target, j.api, { bounds: io })).bound,
-    { reason: "shard_growth", observed: 1_010, allowed: 2 * daily.shards });
+  assert.equal(learned.outcome, "ok", said(learned));
+  assert.equal(learned.growthExceeded, undefined, "a second day at 150 is the learned rate, so it is not named");
 });
 
 test("W1-T14368 criterion 2: the last accepted snapshot survives a restart through the state dir", async () => {
@@ -219,7 +205,10 @@ test("W1-T14368 criterion 2: the last accepted snapshot survives a restart throu
     const restarted = remote({ mono: MONO, shards: { ...base.shards, ...shards(482, 300, 1_000) } });
     t.at = T0 + 60_000;
     const snap = await readOpsCatalogSnapshotAsync(target, restarted.api, { stateDir: state, bounds: io });
-    assert.deepEqual(snap.bound, { reason: "shard_growth", observed: 300, allowed: OPS_CATALOG_MEASURED_DAILY_GROWTH.shards });
+    assert.equal(snap.outcome, "ok", "W1-T14557: growth past the allowance is accepted");
+    assert.deepEqual(snap.growthExceeded, { reason: "shard_growth", observed: 300, allowed: OPS_CATALOG_MEASURED_DAILY_GROWTH.shards },
+      "judged against the snapshot the first process accepted");
+    assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).exceededDay, Math.floor((T0 + 60_000) / DAY), "the reported day survives too");
     // A damaged record is no record: the read answers from the bounds that need none, and the next ok read rewrites it.
     fs.writeFileSync(file, "{not json");
     const fresh = remote({ mono: MONO, shards: shards(0, 600, 1_000) });
