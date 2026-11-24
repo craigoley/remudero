@@ -3455,6 +3455,10 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         for (const skip of draftChoice.skipped ?? []) recordDraftRouting(args.draftRouting.log, "draft.routing.skip", {
           lane: args.draftRouting.lane, proposal_id: args.draftRouting.proposalId, ...skip, reason: "refused-or-failed",
         });
+        for (const skip of draftChoice.floorSkipped ?? []) recordDraftRouting(args.draftRouting.log, "draft.routing.skip", {
+          lane: args.draftRouting.lane, proposal_id: args.draftRouting.proposalId, deployment: skip.deployment,
+          attempts: skip.attempts, clean_rate: skip.cleanRate, reason: "clean-rate-below-floor",
+        });
         openWeight = { ...openWeight, model: draftChoice.deployment,
           alternatives: draftChoice.arms.map((arm) => arm.deployment).filter((model) => model !== draftChoice!.deployment) };
       }
