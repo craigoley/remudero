@@ -49,4 +49,14 @@ test("W1-T14653: a title with two commas is still refused as prose", () => {
 
   const semicolon = "unit test: the daemon starts; it reads its plan, then dispatches";
   assert.equal(proofResolvabilityViolations(taskWithProof(semicolon)).length, 1);
+
+  // The refusal is for the commas, never the length: the same long body is refused with two
+  // commas and accepted without them.
+  const longBody =
+    "the daemon starts and reads its plan and then dispatches the next queued task " +
+    "to the worker that the router picked for its kind of work";
+  assert.ok(longBody.length > 100);
+  assert.deepEqual(proofResolvabilityViolations(taskWithProof(`unit test: ${longBody}`)), []);
+  const longProse = longBody.replace(" and reads", ", reads").replace(" and then", ", then");
+  assert.equal(proofResolvabilityViolations(taskWithProof(`unit test: ${longProse}`)).length, 1);
 });
