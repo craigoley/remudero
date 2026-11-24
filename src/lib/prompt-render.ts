@@ -26,6 +26,7 @@ import {
   type RegistrationChange,
   type ActionableGateFailure,
   type CiFailure,
+  type ConflictIntent,
   type MergeConflictEvidence,
   type ProofDiscriminationEvidence,
   type PriorPartialWork,
@@ -144,7 +145,7 @@ export interface FixEvidence {
   };
   ciFailures?: CiFailure[];
   /** W1-T106: the merge-conflict mode's ONLY input — conflicting files + both sides' log since merge-base. */
-  mergeConflict?: MergeConflictEvidence;
+  mergeConflict?: MergeConflictEvidence & { intent?: ConflictIntent };
   /** W1-T2236: the `gate-fix` mode's ONLY input — see this interface's own doc, above. */
   actionableGateFailures?: ActionableGateFailure[];
   /** W1-T3306: exact stale or non-executable proof rows from a capped green verdict. */
@@ -708,6 +709,15 @@ export function renderFixPrompt(opts: {
           "",
           `log since merge-base — THEIR side (origin/main):`,
           neutralizeFenceMarkers(mc?.theirsLog || "(not captured)"),
+          ...(mc?.intent ? [
+            "",
+            "Intent on OUR side (PR body):",
+            neutralizeFenceMarkers(mc.intent.prBody),
+            "",
+            "Intent on THEIR side (main commit subjects and bodies since merge-base, by conflicted file):",
+            ...mc.intent.mainByPath.map(({ path, log }) =>
+              `${neutralizeFenceMarkers(path)}\n${neutralizeFenceMarkers(log || "(no commits captured)")}`),
+          ] : []),
         ].join("\n"),
         "ci-log",
       ),

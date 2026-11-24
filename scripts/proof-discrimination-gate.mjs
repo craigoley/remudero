@@ -36,7 +36,25 @@ export function resolveMergeBase(baseSha, headSha, { root = REPO_ROOT, git = def
 export function criteriaForReview(body, headSha, { root = REPO_ROOT, resolveAtHead = resolvePlanCriteriaAtHead } = {}) {
   const resolved = resolveAtHead(body, root, "plan/tasks.yaml", headSha);
   if (resolved.criteria.length > 0) return { criteria: resolved.criteria, source: resolved.source ?? "task acceptance" };
-  return { criteria: parseAcceptanceBlock(body), source: "PR body Acceptance block" };
+  return { criteria: parseAcceptanceBlock(body), source: BODY_CRITERIA_SOURCE };
+}
+
+/** The source {@link criteriaForReview} names when it fell back to the PR body. */
+export const BODY_CRITERIA_SOURCE = "PR body Acceptance block";
+
+/**
+ * W1-T14627: a body `kind: guard` is exempt only on a PR that names its task. An ops-catalog task's record is out of
+ * this job's reach (Actions holds no ops credential), so the body carries the record's guard here and remudero-review,
+ * which reads the record, refuses a body guard the record does not declare. A PR naming no task has no record to
+ * back a guard, so its body guards are executed like any other criterion. Criteria from the core plan pass unchanged.
+ */
+export function honouredGuards(criteria, source, taskId) {
+  if (source !== BODY_CRITERIA_SOURCE || taskId !== undefined) return criteria;
+  return criteria.map((criterion) => {
+    if (criterion.kind !== "guard") return criterion;
+    const { kind: _guard, ...executed } = criterion;
+    return executed;
+  });
 }
 
 /** Run the public diagnostic command instead of duplicating any proof parsing or execution. */
@@ -219,8 +237,8 @@ export function main(argv, {
   // W1-T4206: the reviewer's identity surfaces, in its order — the body trailer, then a run-shaped head ref.
   const identity = resolveTaskIdentity({ body: payload.body, headRefName: payload.headRefName });
   const { criteria, source } = resolveCriteria(bodyWithRecoveredIdentity(payload.body, identity), payload.headSha, { root });
-  const result = evaluateProofDiscrimination(criteria, base.mergeBase, runProof);
   const taskId = identity.taskId;
+  const result = evaluateProofDiscrimination(honouredGuards(criteria, source, taskId), base.mergeBase, runProof);
   const allowed = staleAllowanceFor(taskId, baseline(root));
   const verdict = judgeStaleAgainstAllowance(result.stale.length, allowed);
   // W1-T3729 design (ii): SKIPPED IS REPORTED, NEVER SILENT — on every verdict path below, so a

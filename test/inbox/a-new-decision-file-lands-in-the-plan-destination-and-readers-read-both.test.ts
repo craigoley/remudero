@@ -172,9 +172,8 @@ test("W1-T12201 criterion 3: readStandingDecisions reads the public root and the
   mkdirSync(join(publicDir, "plan", "decisions.d"), { recursive: true });
   writeFileSync(join(publicDir, "DECISIONS.md"), "public root decision");
   writeFileSync(join(publicDir, "plan", "decisions.d", "one.md"), "public shard");
-  const opsShards = join(root, "repos", OPS.repo, "plan", "decisions.d");
-  mkdirSync(opsShards, { recursive: true });
-  writeFileSync(join(opsShards, "two.md"), "destination shard");
+  // W1-T14617: the destination's decisions are read at its origin/main, so the shard is committed there.
+  originWithClone(join(root, "repos", OPS.repo), { scope: t, seed: { "plan/decisions.d/two.md": "destination shard" } });
 
   assert.equal(readStandingDecisions(publicDir, stateDir), "public root decision\npublic shard", "no host file: the public root only");
   writeSwitch(stateDir, []);

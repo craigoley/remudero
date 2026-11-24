@@ -17,7 +17,7 @@
     - src/lib/review.ts
     - src/lib/worker.ts
     - test/a-refused-proof-prime-fails-closed-with-a-generation-receipt.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "when materializeDependencySeed refuses a ready generation, the thrown refusal carries one receipt naming the generation key and seed path, the mode (proof or development), the verifier's reason and the first offending path with its mode and owner uid, every registered consumer with its checkout, mount namespace and whether that checkout's marker still references the generation, the requesting checkout and its run or claim id when the caller supplies one, and a recovery disposition of kept-referenced or kept-unreferenced naming a fresh process-scoped generation root as the recovery; the prime CLI prints that receipt as JSON and exits non-zero"
