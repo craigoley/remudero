@@ -4011,9 +4011,110 @@ export function fileCiLearningShards(
 
 // ── W1-T5723: the cadence runs in a child (in-process it froze the loop; a restart killed it) ──
 
-/** The child's V8 heap is the daemon's own: a fixed 2048 MB (a quarter of it) killed every child from 2026-10-08. */
-export function measurementCadenceChildHeapLimitMb(parentHeapLimitBytes: number = getHeapStatistics().heap_size_limit): number {
-  return Math.max(1, Math.round(parentHeapLimitBytes / (1024 * 1024)));
+/** One finished child run in the heap history: its largest recorded heapUsed, or the limit a heap abort killed it under. */
+export interface MeasurementCadenceChildHeapRecord {
+  runId: string;
+  attempt: number;
+  peakMb?: number;
+  abortedUnderMb?: number;
+}
+
+/** The percentile the derivation starts from; the history keeps the fewest runs that resolve it, 1/(1 - p). */
+const MEASUREMENT_CADENCE_CHILD_HEAP_PERCENTILE = 0.95;
+const MEASUREMENT_CADENCE_CHILD_HEAP_HISTORY_RUNS = Math.ceil(1 / (1 - MEASUREMENT_CADENCE_CHILD_HEAP_PERCENTILE));
+
+/**
+ * The child's V8 heap limit. W1-T5723: the parent's whole limit, after a fixed 2048 MB killed every child from 2026-10-08.
+ * W1-T14713: on 2026-11-24 a child holding 976 MB of heap under that 7826 MB limit held 5-6.6 GB of RSS (V8 defers
+ * collection when it has room), so the limit follows the child's own recorded peaks: max(largest peak, p95 + sigma *
+ * sqrt(1 + 1/n)), the headroom being one standard deviation of a new run's prediction error from the recorded spread.
+ * Fewer than two peaks have no variance: the parent's limit. A heap abort under L proved the headroom above p95 too
+ * small, so the next limit is L + max(L - p95, headroom): it at least doubles it. The parent's limit is the ceiling.
+ */
+export function measurementCadenceChildHeapLimitMb(
+  parentHeapLimitBytes: number = getHeapStatistics().heap_size_limit,
+  history: readonly MeasurementCadenceChildHeapRecord[] = [],
+): number {
+  const parentMb = Math.max(1, Math.round(parentHeapLimitBytes / (1024 * 1024)));
+  const finite = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x) && x > 0;
+  const peaks = history.flatMap((r) => (finite(r.peakMb) ? [r.peakMb] : [])).sort((a, b) => a - b);
+  const n = peaks.length;
+  if (n < 2) return parentMb;
+  const mean = peaks.reduce((a, b) => a + b, 0) / n;
+  const sigma = Math.sqrt(peaks.reduce((a, x) => a + (x - mean) ** 2, 0) / (n - 1));
+  const p95 = peaks[Math.ceil(MEASUREMENT_CADENCE_CHILD_HEAP_PERCENTILE * n) - 1];
+  const headroom = sigma * Math.sqrt(1 + 1 / n);
+  let limit = Math.max(peaks[n - 1], p95 + headroom);
+  for (const r of history) {
+    if (r.abortedUnderMb === undefined) continue;
+    const died = r.abortedUnderMb;
+    const above = finite(died) ? died + Math.max(died - p95, headroom) : Number.NaN;
+    // An abort under an unknown limit, or with no headroom to add, says nothing about how much more it needs.
+    limit = Math.max(limit, above > died ? above : parentMb);
+  }
+  return Math.min(parentMb, Math.ceil(limit));
+}
+
+/** The bounded per-run heap history, beside the child's state file. */
+export function measurementCadenceChildHeapHistoryPath(statePath: string): string {
+  return `${statePath.replace(/\.json$/, "")}.heap-peaks.json`;
+}
+
+export function readMeasurementCadenceChildHeapHistory(statePath: string): MeasurementCadenceChildHeapRecord[] {
+  let text: string;
+  try {
+    text = readFileSync(measurementCadenceChildHeapHistoryPath(statePath), "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") process.stderr.write(`measurement cadence heap history unreadable: ${String(e)}\n`);
+    return []; // no history: the parent's limit, as before W1-T14713
+  }
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed.filter((r): r is MeasurementCadenceChildHeapRecord => typeof r?.runId === "string" && typeof r.attempt === "number") : [];
+  } catch (e) {
+    process.stderr.write(`measurement cadence heap history malformed: ${String(e)}\n`);
+    return [];
+  }
+}
+
+const HEAP_ABORT_STDERR = /JavaScript heap out of memory|Reached heap limit/;
+
+/**
+ * Reads the previous run out of the state file and its stderr log (before a launch truncates the log) into the heap
+ * history: a finished run's recorded peak, or the limit a heap abort killed it under. Each run attempt is kept once.
+ */
+export function recordMeasurementCadenceChildHeapRun(statePath: string): MeasurementCadenceChildHeapRecord | undefined {
+  const read = readChildState(statePath);
+  if (read.kind !== "ok") return undefined;
+  const state = read.state;
+  let record: MeasurementCadenceChildHeapRecord | undefined;
+  if (state.status === "done") {
+    if (typeof state.peakHeapUsedMb === "number") record = { runId: state.runId, attempt: state.attempt, peakMb: state.peakHeapUsedMb };
+  } else if (state.status !== "failed") {
+    const detail = measurementCadenceChildDeathDetail(statePath);
+    if (HEAP_ABORT_STDERR.test(detail)) {
+      const launched = /heap_limit_mb=(\d+)/.exec(detail)?.[1];
+      const abortedUnderMb = launched !== undefined ? Number(launched) : state.phase?.heapLimitMb;
+      record = { runId: state.runId, attempt: state.attempt, abortedUnderMb: abortedUnderMb ?? Number.NaN };
+    }
+  }
+  if (!record) return undefined;
+  const entry = record;
+  const history = readMeasurementCadenceChildHeapHistory(statePath);
+  if (history.some((r) => r.runId === entry.runId && r.attempt === entry.attempt)) return undefined;
+  const kept = [...history, entry].slice(-MEASUREMENT_CADENCE_CHILD_HEAP_HISTORY_RUNS);
+  writeAtomic(measurementCadenceChildHeapHistoryPath(statePath), `${JSON.stringify(kept)}\n`);
+  return entry;
+}
+
+/** The limit the next launch gets: the previous run recorded first, then the derivation over the history. */
+export function nextMeasurementCadenceChildHeapLimitMb(statePath: string, parentHeapLimitBytes?: number): number {
+  try {
+    recordMeasurementCadenceChildHeapRun(statePath);
+  } catch (e) {
+    process.stderr.write(`measurement cadence heap history not recorded: ${String((e as Error)?.message ?? e)}\n`); // the launch goes on
+  }
+  return measurementCadenceChildHeapLimitMb(parentHeapLimitBytes, readMeasurementCadenceChildHeapHistory(statePath));
 }
 /** BACKSTOP: a dead child's run gets this many attempts in all, then is discarded. */
 export const MEASUREMENT_CADENCE_CHILD_MAX_ATTEMPTS = 2;
@@ -4048,6 +4149,8 @@ export interface MeasurementCadenceChildState {
   result?: MeasurementCadenceRunResult;
   error?: string;
   phase?: MeasurementCadencePhase;
+  /** W1-T14713: the largest heapUsed the child recorded (MB), read into the heap history after the run. */
+  peakHeapUsedMb?: number;
 }
 
 export interface MeasurementCadencePhase {
@@ -4223,14 +4326,21 @@ export async function measurementCadenceChildMain(
       ? read.state
       : { runId, pid: process.pid, attempt: 1, startedAt: systemClock.date().toISOString(), status: "running" };
   };
-  cadencePhaseSink = (verb) => {
+  const mb = (bytes: number) => Math.round(bytes / (1024 * 1024));
+  let peakHeapUsedMb = 0;
+  const sampleHeap = () => {
     const heap = getHeapStatistics();
-    const mb = (bytes: number) => Math.round(bytes / (1024 * 1024));
-    writeChildState(statePath, { ...recorded(), phase: { verb, heapUsedMb: mb(heap.used_heap_size), heapLimitMb: mb(heap.heap_size_limit), at: systemClock.iso() } });
+    peakHeapUsedMb = Math.max(peakHeapUsedMb, mb(heap.used_heap_size));
+    return heap;
+  };
+  cadencePhaseSink = (verb) => {
+    const heap = sampleHeap();
+    writeChildState(statePath, { ...recorded(), peakHeapUsedMb, phase: { verb, heapUsedMb: mb(heap.used_heap_size), heapLimitMb: mb(heap.heap_size_limit), at: systemClock.iso() } });
   };
   try {
     const result = await run();
-    writeChildState(statePath, { ...recorded(), status: "done", result });
+    sampleHeap();
+    writeChildState(statePath, { ...recorded(), status: "done", result, peakHeapUsedMb });
     return 0;
   } catch (e) {
     writeChildState(statePath, { ...recorded(), status: "failed", error: String((e as Error)?.message ?? e) });
@@ -4329,7 +4439,7 @@ export function childMeasurementCadenceSpawn(opts: {
     const baseEnv = opts.env ?? process.env;
     const socketPath = (opts.gitCredentialSocket ?? (() => boundDaemonGitCredentialSocket(opts.config)))();
     const gitCredentialEnv = measurementCadenceChildGitCredentialEnv(baseEnv, socketPath);
-    const heapLimitMb = opts.heapLimitMb ?? measurementCadenceChildHeapLimitMb(opts.parentHeapLimitBytes?.());
+    const heapLimitMb = opts.heapLimitMb ?? nextMeasurementCadenceChildHeapLimitMb(statePath, opts.parentHeapLimitBytes?.());
     const argv = [...(opts.execArgv ?? process.execArgv), `--max-old-space-size=${heapLimitMb}`, opts.entry, MEASUREMENT_CADENCE_CHILD_FLAG, statePath, runId];
     const logPath = measurementCadenceChildLogPath(statePath);
     let stderrFd: number | undefined;

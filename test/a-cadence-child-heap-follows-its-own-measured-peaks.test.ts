@@ -6,7 +6,7 @@
  * These drive the exported pure derivation and the production spawn over a real state file and a fake spawner.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -20,6 +20,8 @@ import {
   type MeasurementCadenceChildState,
   type MeasurementCadenceRunResult,
 } from "#src/lib/measurement-cadence.js";
+// The history's own exports by namespace, so the criteria above load and fail on their assertions at the base.
+import * as cadence from "#src/lib/measurement-cadence.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const MB = 1024 * 1024;
@@ -179,4 +181,50 @@ test("W1-T14713 criterion 3: invariant:a-child-is-never-starved-below-its-own-pe
   const recorded = JSON.parse(readFileSync(childState, "utf8")) as { status: string; peakHeapUsedMb?: number; phase?: { heapUsedMb: number } };
   assert.equal(recorded.status, "done");
   assert.ok(typeof recorded.peakHeapUsedMb === "number" && recorded.peakHeapUsedMb >= (recorded.phase?.heapUsedMb ?? Infinity), `the child records its peak: ${JSON.stringify(recorded)}`);
+});
+
+test("W1-T14713: an unreadable or unhelpful heap history degrades to the parent's limit and never blocks the launch", () => {
+  const dir = scratch();
+  const statePath = join(dir, "measurement-cadence-child.json");
+  const historyPath = cadence.measurementCadenceChildHeapHistoryPath(statePath);
+
+  assert.equal(cadence.recordMeasurementCadenceChildHeapRun(statePath), undefined, "no state file: nothing to record");
+  writeFileSync(statePath, "{not json");
+  assert.equal(cadence.recordMeasurementCadenceChildHeapRun(statePath), undefined, "an unreadable state file: nothing to record");
+
+  // A run that failed in JS, and a done run from a child that recorded no peak, add nothing.
+  writeState(statePath, { runId: "RUN-F", pid: 1, attempt: 1, startedAt: "2026-11-24T10:00:00.000Z", status: "failed", error: "boom" });
+  assert.equal(cadence.recordMeasurementCadenceChildHeapRun(statePath), undefined, "a failed run is not a peak");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  writeState(statePath, { runId: "RUN-OLD", pid: 1, attempt: 1, startedAt: "2026-11-24T10:00:00.000Z", status: "done", result: {} as any });
+  assert.equal(cadence.recordMeasurementCadenceChildHeapRun(statePath), undefined, "a done run without a recorded peak adds nothing");
+
+  // One run attempt is kept once, however many launches read it.
+  doneRun(statePath, "RUN-1", 970);
+  assert.deepEqual(cadence.recordMeasurementCadenceChildHeapRun(statePath), { runId: "RUN-1", attempt: 1, peakMb: 970 });
+  assert.equal(cadence.recordMeasurementCadenceChildHeapRun(statePath), undefined, "the same attempt is not recorded twice");
+  assert.equal(cadence.readMeasurementCadenceChildHeapHistory(statePath).length, 1);
+
+  // A heap abort whose limit is unknown says nothing about how much more it needs: the parent's limit.
+  writeState(statePath, { runId: "RUN-2", pid: 1, attempt: 1, startedAt: "2026-11-24T10:00:00.000Z", status: "running" });
+  writeFileSync(measurementCadenceChildLogPath(statePath), "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\n");
+  assert.equal(cadence.nextMeasurementCadenceChildHeapLimitMb(statePath, PARENT_MB * MB), PARENT_MB, "an abort under an unknown limit gives the parent's");
+  const derived = measurementCadenceChildHeapLimitMb(PARENT_MB * MB, peaks(LIVE_LIKE));
+  const superseded = measurementCadenceChildHeapLimitMb(PARENT_MB * MB, [...peaks(LIVE_LIKE), { runId: "RUN-L", attempt: 1, abortedUnderMb: 900 }]);
+  assert.ok(superseded > 900 && superseded === derived, `an abort the recorded peaks already passed keeps the derived limit: ${superseded} vs ${derived}`);
+  assert.equal(measurementCadenceChildHeapLimitMb(PARENT_MB * MB, [...peaks([970, 970]), { runId: "RUN-T", attempt: 1, abortedUnderMb: 970 }]), PARENT_MB, "an abort with no headroom to add gives the parent's limit");
+
+  // A malformed or non-array history reads empty; one that cannot be read or written does not stop the launch.
+  writeFileSync(historyPath, "{not json");
+  assert.deepEqual(cadence.readMeasurementCadenceChildHeapHistory(statePath), []);
+  writeFileSync(historyPath, `${JSON.stringify({ runId: "x" })}\n`);
+  assert.deepEqual(cadence.readMeasurementCadenceChildHeapHistory(statePath), []);
+  writeFileSync(historyPath, `${JSON.stringify([{ runId: "ok", attempt: 1, peakMb: 900 }, { peakMb: 5 }, null])}\n`);
+  assert.deepEqual(cadence.readMeasurementCadenceChildHeapHistory(statePath), [{ runId: "ok", attempt: 1, peakMb: 900 }], "malformed rows are dropped");
+
+  const blocked = join(dir, "blocked.json");
+  mkdirSync(cadence.measurementCadenceChildHeapHistoryPath(blocked)); // a directory where the history file belongs
+  doneRun(blocked, "RUN-B", 970);
+  assert.deepEqual(cadence.readMeasurementCadenceChildHeapHistory(blocked), [], "an unreadable history reads empty");
+  assert.equal(cadence.nextMeasurementCadenceChildHeapLimitMb(blocked, PARENT_MB * MB), PARENT_MB, "and a history it cannot write still launches, on the parent's limit");
 });
