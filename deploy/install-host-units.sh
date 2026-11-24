@@ -759,19 +759,26 @@ verdict_field() {
 # RMD_SELF_SYNC_DONE=1 skips checkCliFreshness, which would fetch and fast-forward the tree the
 # workers run on -- the very mutation refresh_deploy_code's idle gate exists to withhold.
 read_progress_verdict() {
-  local code rmd out tmo=()
+  local code rmd out rc err errfile tmo=()
   daemon_code_resolve 2>/dev/null || :
   code="${DAEMON_CODE:-$STATE_DIR/remudero}"
   rmd="$code/bin/rmd"
   PROGRESS_VERDICT=""; PROGRESS_STATE=""; PROGRESS_ACTION=""
   [ -x "$rmd" ] || return 0
   command -v timeout >/dev/null 2>&1 && tmo=(timeout 120)
+  # W1-T14732: the verb's stderr is kept so an unreadable verdict can name why (exit code, last line).
+  errfile="$(mktemp 2>/dev/null)" || errfile=/dev/null
   # W1-T9627: the revival log is the verdict's evidence of a container that died before node wrote
   # any ledger row, so the verb reads it by name (src/lib/progress-watchdog.ts preNodeDeathRun).
-  if ! out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 RMD_REVIVAL_LOG="$REVIVAL_LOG" ${tmo[@]+"${tmo[@]}"} "$rmd" progress-watchdog --json --state-root "$STATE_DIR/state" 2>/dev/null)"; then
-    echo "rmd-relaunch: progress-watchdog -- verdict unreadable; acting as before." >&2
+  rc=0
+  out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 RMD_REVIVAL_LOG="$REVIVAL_LOG" ${tmo[@]+"${tmo[@]}"} "$rmd" progress-watchdog --json --state-root "$STATE_DIR/state" 2>"$errfile")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    err="$(grep -v '^[[:space:]]*$' "$errfile" 2>/dev/null | tail -n 1)"
+    [ "$errfile" = /dev/null ] || rm -f -- "$errfile"
+    echo "rmd-relaunch: progress-watchdog -- verdict unreadable (exit ${rc}$([ "$rc" -eq 124 ] && echo ', timed out'): ${err:-no stderr}); acting as before." >&2
     return 0
   fi
+  [ "$errfile" = /dev/null ] || rm -f -- "$errfile"
   PROGRESS_VERDICT="$(printf '%s\n' "$out" | grep -E '^\{' | tail -n 1 || true)"
   PROGRESS_STATE="$(verdict_field state)"
   PROGRESS_ACTION="$(verdict_field action)"
