@@ -25,7 +25,7 @@ const CURRENT_CODE = () => ({ status: "fresh" as const, codeSha: REVIEWER_CODE, 
 const BODY = "W1-T3901 proof discrimination observes the current head.";
 const TEST_CRITERION = {
   claim: "W1-T3901 executable test proof observes the current head",
-  proof: "unit test: observes current head, and reports it",
+  proof: "unit test: observes current head, records it, and reports it",
 };
 
 function priorVerdict(execProof: ProofExecutor, semantic?: boolean): ReviewVerdict {

@@ -1368,7 +1368,7 @@ const BARE_TEST_NAME_MAX_LEN = 60;
 
 /** Does a name-filtered `unit test:` proof BODY read as a long PROSE DESCRIPTION of behaviour rather than a short,
  *  bare TEST-NAME-shaped string (W1-T161, #349/W1-T149)? {@link certainHeadRefusals} skips such a body; {@link
- *  judgeCriterion}'s zero-match arm asks {@link readsAsProseByPunctuation} instead (W1-T14658). Length and
+ *  judgeCriterion}'s zero-match arm asks {@link readsAsScenarioNarrative} instead (W1-T14658, W1-T14715). Length and
  *  punctuation only. TRAP: #349's proof paraphrased a REAL, PASSING test and hard-blocked a green PR. */
 export function looksLikeProseDescription(body: string): boolean {
   const trimmed = body.trim();
@@ -1376,12 +1376,16 @@ export function looksLikeProseDescription(body: string): boolean {
   return PROSE_PUNCTUATION_RE.test(trimmed);
 }
 
-/** Does a name-filtered `unit test:` body read as PROSE by its punctuation ALONE ({@link PROSE_PUNCTUATION_RE})?
- *  {@link judgeCriterion} lets only such a body degrade to `prose-no-match` on a zero match (W1-T14658, invariant
- *  title-resolves-or-fails). Filing accepts a single title of any length since W1-T14653, so {@link
- *  BARE_TEST_NAME_MAX_LEN} no longer decides it there: a long, punctuation-free title must resolve or fail. */
-function readsAsProseByPunctuation(body: string): boolean {
-  return PROSE_PUNCTUATION_RE.test(body.trim());
+/** Does a name-filtered `unit test:` body read as a MULTI-CLAUSE NARRATIVE: two commas, or `"; "` with one?
+ *  {@link judgeCriterion} lets only such a body degrade to `prose-no-match` on a zero match (W1-T14715, invariant
+ *  prefixed-title-resolves-or-fails). Every other body is one title, and it must resolve or fail, whatever its
+ *  length (W1-T14658) and whatever a single comma, colon, dash or parenthesis it carries, so a "W1-Txxxx: ..." title
+ *  that matches nothing fails. THE RULE IS task-linter.ts's `looksLikeScenarioNarrative` with its
+ *  `SCENARIO_NARRATIVE_BOUNDS`, restated here because task-linter.ts imports this module. Filing and build must agree,
+ *  and test/a-task-id-prefixed-title-that-matches-nothing-fails-at-build.test.ts holds the two to one answer. */
+function readsAsScenarioNarrative(body: string): boolean {
+  const commas = (body.match(/,/g) ?? []).length;
+  return commas >= 2 || (body.includes("; ") && commas >= 1);
 }
 
 /** Split a `grep:` body into pattern and optional path. The path is the trailing token after the LAST `\s+in\s+`
@@ -4937,7 +4941,7 @@ export function judgeCriterion(
           } else if (outcome === "no-match") {
             // ZERO tests matched the name pattern on a COMPLETED run. EITHER a proof-authoring mismatch — the house
             // convention writes a `unit test:` proof as PROSE describing behaviour, see {@link
-            // readsAsProseByPunctuation} — OR genuine test theater, a proof naming a specific, fabricated test
+            // readsAsScenarioNarrative} — OR genuine test theater, a proof naming a specific, fabricated test
             // (W1-T161/#349). Told apart by a deterministic shape check, never by re-running or calling a model.
             // W1-T4003: the grep dialect has the same plan-only forward-reference shape as `unit test:`. The
             // executor returns `no-match` when a filing names a future symbol in an already-existing declared file;
@@ -4955,7 +4959,7 @@ export function judgeCriterion(
               proofExec = "not_yet_built";
               proofSkip = "forward-reference";
               reason = filingForwardReason(reason, whitelisted, filingTarget);
-            } else if (readsAsProseByPunctuation(whitelisted.label)) {
+            } else if (readsAsScenarioNarrative(whitelisted.label)) {
               // A prose paraphrase, not a bare name: NOT a failing test. Degrade to `not_executable`, the keyword
               // floor standing as computed, and ANNOTATE why, so an author sees "names no matching test" rather than
               // a misleading "executed and FAILED" — a false block on green, test-passing code.
