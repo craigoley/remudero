@@ -141,8 +141,14 @@ test("migration preview respects the actual private reader capacity contract", a
     assert.equal(result.answer.outcome, "unknown");
     assert.equal(result.answer.permission, "not_granted");
   });
-  // W1-T14368: past 500 shards or 8 MiB the reader's derived bounds judge the catalog the copy would produce. Each of
-  // these is driven past one of them with an injected reading, and the same selection without it is the control.
+  // The catalog's growth is not bounded: past 500 shards the copy's one more shard is admitted, however fast it grew.
+  await t.test("many private YAML shards are no refusal", async sub => {
+    const f = fixture(sub, undefined, "[]\n", {}, Object.fromEntries(Array.from({ length: 501 }, (_, i) => [`plan/tasks.d/empty-${i}.yaml`, "[]\n"])));
+    const admitted = await selectInProcess(f, {});
+    assert.equal(admitted.selection?.candidate?.id, "W1-T1", `a copy past the shard baseline is admitted ${JSON.stringify(admitted)}`);
+  });
+  // W1-T14368: past 8 MiB the reader's heap bound judges the catalog the copy would produce. It is driven past it with
+  // an injected reading, and the same selection without it is the control.
   const derived: Array<{ name: string; seed: Record<string, string>; bounds: OpsCatalogBoundsIo }> = [
     { name: "too many private snapshot bytes", seed: Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`plan/tasks.d/empty-${i}.yaml`, emptyAtBytes(blob)])),
       // A heap with no headroom left below the daemon's heap-limit exit: no byte past the baseline fits.
@@ -154,13 +160,6 @@ test("migration preview respects the actual private reader capacity contract", a
     assert.equal(refused.reason, "catalog_incompatible", JSON.stringify(refused));
     const control = await selectInProcess(f, {});
     assert.equal(control.selection?.candidate?.id, "W1-T1", `positive control: without the reading the copy is admitted ${JSON.stringify(control)}`);
-  });
-  // W1-T14557 (operator ruling 2026-11-23, "Alert plus exempt moves"): past 500 shards a copy beyond the day's growth
-  // is no longer refused, because a moved copy is not growth. Before the ruling this reading refused the copy.
-  await t.test("too many private YAML shards", async sub => {
-    const f = fixture(sub, undefined, "[]\n", {}, Object.fromEntries(Array.from({ length: 501 }, (_, i) => [`plan/tasks.d/empty-${i}.yaml`, "[]\n"])));
-    const admitted = await selectInProcess(f, { dailyGrowth: () => ({ shards: 0, bytes: 0 }) });
-    assert.equal(admitted.selection?.candidate?.id, "W1-T1", `a copy past the daily growth is admitted ${JSON.stringify(admitted)}`);
   });
 });
 

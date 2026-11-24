@@ -43,6 +43,8 @@ import type { ViewSource } from "./views.js";
 export const INSTANCES_VIEW_NAME = "instances";
 export const INSTANCES_VIEW_VERSION = 1;
 export const INSTANCES_QUALIFICATION_GENERATION = "W1-T10430.inbox-capability.v1";
+/** W1-T14586: the operator action that mounts a registered instance serve does not serve. */
+export const SERVE_MOUNT_ACTION = "deploy/serve-container.sh --replace";
 /** The views serve answers for every instance it projects. */
 export const INSTANCE_VIEWS: readonly string[] = ["now", "repositories", "read-model", INSTANCES_VIEW_NAME];
 /** The writes each served instance answers under its prefix (`instanceRouteSet`'s controls and the answers `now` names). */
@@ -64,6 +66,8 @@ export interface InstanceEntry {
   prefix: string;
   /** Projected by this serve, with its state dir mounted; false is "recreate serve to mount it". */
   served: boolean;
+  /** Present only when registered and not served: the operator action that mounts it. */
+  mountAction?: string;
   /** `unknown` until its projector has read a `daemon.*` row; `since` is the newest one's time while down. */
   liveness: { state: "up" | "down" | "unknown"; since?: string };
   readModel: { lease: "held" | "elsewhere" | "none" };
@@ -278,6 +282,7 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
           id, registered: registered !== undefined,
           ...(registered ? { project: registered.project, repo: registered.repo, mode: registered.mode ?? "live" } : {}),
           prefix, served,
+          ...(registered && !served ? { mountAction: SERVE_MOUNT_ACTION } : {}),
           liveness: served ? instanceLiveness(slot.db, now) : { state: "unknown" },
           readModel: { lease: slot?.state.lease ?? "none" },
           capabilities: served ? servedCapabilities(dir, id === core, observation?.state) : { views: [], writes: [] },
@@ -310,7 +315,7 @@ export function createInstancesView<S extends ProjectedState>(opts: InstancesVie
       if (legacy.status === 503) return { data: { instances: unregistered, hostRegistry: view.hostRegistry, ...(view.drift ? { drift: view.drift } : {}), registryError: legacy.body.reason }, asOfMs: now };
       const byId = new Map(view.instances.map((i) => [i.id, i]));
       const registered = legacy.body.projects.flatMap((p) => p.repos.flatMap((r) => r.instances.map((i): InstanceEntry => {
-        const base = byId.get(i.name) ?? { id: i.name, prefix: i.prefix, served: false, liveness: { state: "unknown" }, readModel: { lease: "none" }, capabilities: { views: [], writes: [] } };
+        const base = byId.get(i.name) ?? { id: i.name, prefix: i.prefix, served: false, mountAction: SERVE_MOUNT_ACTION, liveness: { state: "unknown" }, readModel: { lease: "none" }, capabilities: { views: [], writes: [] } };
         return { ...base, id: i.name, registered: true, project: p.id, repo: r.repo, prefix: i.prefix };
       })));
       const drift = { hostOnly: legacy.body.drift?.hostOnly ?? [], repoOnly: legacy.body.drift?.repoOnly ?? [], unmounted: view.drift?.unmounted ?? [], unregistered: view.drift?.unregistered ?? [] };

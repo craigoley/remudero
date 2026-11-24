@@ -10,7 +10,8 @@
   files: [src/run-task.ts, src/lib/status.ts, test/boot-board-walk-is-open-only.test.ts]
   origin: "operator-brief#boot-board-walk-2026-08-26"
   plan_refs: ["W1-T377", "W1-T2311", "W1-T1066"]
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   rationale: |
     MEASURED 2026-08-26 IN THE DAEMON'S OWN CONTAINER, WITH ITS OWN ENVIRONMENT.
@@ -146,3 +147,5 @@
   falsifier: |
     If test/open-prs-rest.test.ts already asserts that the daemon's boot path fetches only open
     pull requests, this task is already built and must be closed rather than implemented.
+  note: |
+    Retired as closed 2026-11-24 (backlog thread reconcile, on the W1-T2387 / #8404 precedent): its real build was craigoley/remudero#2972, which carries no Remudero-Task trailer.
