@@ -152,6 +152,14 @@ export const AGED_FIELDS = [
     offsetDays: 0,
   },
   {
+    field: "registeredAt",
+    threshold: "Codex balanced trial assignment window (seven days)",
+    source: "src/lib/routing-experiments.ts",
+    evidence: ["Date.parse(protocol.registeredAt)", "now >= start", "protocol.cash.windowMs"],
+    offsetDays: 7,
+    consumers: ["codexExperimentArmForTask"],
+  },
+  {
     field: "retroAttemptAt",
     threshold: "automated retro attempt backoff",
     source: "src/lib/retro.ts",

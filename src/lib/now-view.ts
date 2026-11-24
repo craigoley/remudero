@@ -18,7 +18,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve as resolvePath } from "node:path";
 import {
   computeBoardSnapshot,
@@ -45,6 +45,7 @@ import { TOKEN_REFRESHED_STEP, TOKEN_REFRESH_FAILED_STEP } from "./github-app.js
 import { feedbackDir, listFeedback, type FeedbackEntry } from "./feedback.js";
 import { overlayQueuedFeedbackEntries, queuedFeedbackDir } from "./feedback-landing.js";
 import { heldDependencyRoots } from "./held-dependency-roots.js";
+import { SERVE_MOUNT_ACTION } from "./instances-view.js";
 import {
   consumeHumanGateCounts,
   measureFeedbackAge,
@@ -105,6 +106,8 @@ export const NOW_VIEW_NAME = "now";
 export const NOW_VIEW_VERSION = 3;
 /** Re-materialize at least this often with no new row: `elapsedMs`, the liveness bound and the 6 h cooldown move with the clock. */
 export const NOW_REFRESH_MS = 30_000;
+/** W1-T14586 PRIMARY CONTROL: the longest wait between retries of an instance whose build keeps failing the same way. */
+export const NOW_FAILED_BACKOFF_CAP_MS = 10 * 60_000;
 /** The host probes' cadence (design §3.5), per instance. */
 export const NOW_HOST_PROBE_MS = 60_000;
 /** Queued rows carried in full; every task id is still in `groups`. */
@@ -1297,6 +1300,16 @@ export function createNowView(opts: NowViewOptions): {
     body?: { key: string; data: NowViewData; sources: ViewSource[] };
   }
   const builds = new Map<string, NowBuild>();
+  /** W1-T14586: per instance, its failing build's class, error and back-off; one entry never paces another instance. */
+  const failed = new Map<string, { class: "unmounted" | "plan-unreadable" | "build-failed"; error: string; failures: number; firstAtMs: number; retryAtMs: number; planKey: string; mounted: boolean }>();
+  const failureKey = (instance: NowInstance): string => {
+    try {
+      return planKey(instance);
+    } catch (error) {
+      // deliberate: an unkeyable plan is a key of its own, so a key that reads again ends the back-off.
+      return `unkeyed:${(error as Error).message}`;
+    }
+  };
   /** Each instance's stage timings since its last `prepare`, for the worker's `read_model.slow_view` row. */
   const ran = new Map<string, Record<string, number>>();
   /** The `decisions` stage's parts as `decisions.<part>` stages, each the ms since the previous lap: a cold or slow
@@ -1439,6 +1452,11 @@ export function createNowView(opts: NowViewOptions): {
       if (ms > NOW_SLOW_STAGE_MS) log("read_model.now_slow_stage", { instance: instance.name, stage, ms });
       if (done) b.stage++;
     }
+    const episode = failed.get(instance.name);
+    if (episode) {
+      failed.delete(instance.name);
+      log("read_model.now_view_recovered", { instance: instance.name, class: episode.class, failures: episode.failures, failingForMs: now - episode.firstAtMs });
+    }
     return true;
   }
 
@@ -1449,11 +1467,25 @@ export function createNowView(opts: NowViewOptions): {
     for (const { state, db, lease } of ctx.instances) {
       const instance = byName.get(state.instance);
       if (!instance || !db || state.lease !== "held") continue;
+      const prior = failed.get(instance.name);
+      const seen = prior && { planKey: failureKey(instance), mounted: existsSync(instance.ledgerDir) };
+      if (prior && seen && ctx.now < prior.retryAtMs && seen.planKey === prior.planKey && seen.mounted === prior.mounted) continue;
       try {
         run(instance, { state, db, ...(lease ? { lease } : {}) });
       } catch (error) {
+        const stage = builds.get(instance.name)?.stage;
         builds.delete(instance.name);
-        log("read_model.now_view_failed", { instance: state.instance, error: (error as Error).message });
+        const message = (error as Error).message;
+        const at = seen ?? { planKey: failureKey(instance), mounted: existsSync(instance.ledgerDir) };
+        const kind = !at.mounted ? "unmounted" : stage === 0 ? "plan-unreadable" : "build-failed";
+        if (prior && prior.class === kind && prior.error === message) {
+          prior.failures += 1;
+          Object.assign(prior, at, { retryAtMs: ctx.now + Math.min(NOW_REFRESH_MS * 2 ** (prior.failures - 1), NOW_FAILED_BACKOFF_CAP_MS) });
+        } else {
+          failed.set(instance.name, { class: kind, error: message, failures: 1, firstAtMs: ctx.now, retryAtMs: ctx.now + NOW_REFRESH_MS, ...at });
+          log("read_model.now_view_failed", { instance: state.instance, error: message, class: kind, retryAfterMs: NOW_REFRESH_MS,
+            ...(kind === "unmounted" ? { action: SERVE_MOUNT_ACTION } : {}) });
+        }
       }
     }
   }
@@ -1567,7 +1599,8 @@ export function createNowView(opts: NowViewOptions): {
     heldSizes() {
       const maps = { instances: byName, "held-state": held, "legacy-memo-index": legacyMemos, "retention-signatures": retentionReported,
         "plan-index": planCache, "feedback-listings": feedbackListings, "reconciled-feedback": reconciledFeedback,
-        "dependency-sources": dependencySources, "gate-memo-index": gateMemos, "gate-row-index": gateRows, "behind-memo": behindMemo, builds, stages: ran };
+        "dependency-sources": dependencySources, "gate-memo-index": gateMemos, "gate-row-index": gateRows, "behind-memo": behindMemo, builds, stages: ran,
+        "failed-builds": failed };
       for (const [name, map] of Object.entries(maps)) if (map.size) holds.unsized(`now:${name}`, map.size,
         "map values include shared inputs, handles or separately named payloads; exclusive bytes unavailable", "keys");
       else holds.forget(`now:${name}`);
