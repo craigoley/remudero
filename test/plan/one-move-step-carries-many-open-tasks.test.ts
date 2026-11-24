@@ -14,7 +14,8 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 import type { OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
-import { MOVE_RESERVATION_TRAILER, MOVED_TO_TRAILER, withMovedFromLine } from "#src/lib/plan-task-move.js";
+import { batchFits, GITHUB_PULL_REQUEST_BODY_LIMIT, MOVE_RESERVATION_TRAILER, MOVED_TO_TRAILER, withMovedFromLine } from "#src/lib/plan-task-move.js";
+import { withRateLimitBackoff } from "#src/lib/plan-task-migration.js";
 import type { PlanTaskMovePorts, PlanTaskMover } from "#src/lib/plan-task-move-janitor.js";
 import { blobAt, moveWorld, OPS, PUBLIC, record, shard, type ModelPull, type MoveWorld } from "#test/helpers/plan-move-world.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -119,21 +120,112 @@ test("W1-T14345 criterion 1: a step's COPY pull request carries its whole batch 
   assert.equal(w.pulls.length, 2);
 });
 
-test("W1-T14714 criterion 1 (W1-T14345 criterion 1): with no merge-credit lookup cap a batch is the open-PR files page, so 130 open records drain in two steps", async t => {
-  assert.equal(MOVE_BATCH_BOUND, 100, "the open-PR files page (100): no merge-credit lookup cap holds a batch");
+/**
+ * W1-T14714: GitHub's paging, which the model's one-answer reader does not show: each connection serves 100 nodes and an
+ * end cursor, and a follow-up query (MigrationOpenPage) asks for the page after it. `asked` counts the follow-ups.
+ */
+function pagingReader(w: MoveWorld) {
+  const asked: string[] = [];
+  const slice = (nodes: unknown[], from: number, next: (rest: unknown[]) => Json) =>
+    ({ totalCount: nodes.length, pageInfo: { hasNextPage: from + 100 < nodes.length, endCursor: from + 100 < nodes.length ? String(from + 100) : null }, nodes: next(nodes.slice(from, from + 100)) as unknown as unknown[] });
+  const files = (pr: Json, from = 0) => slice((pr.files as { nodes: unknown[] }).nodes, from, rest => rest as unknown as Json);
+  const openOf = () => ((w.answer("") as { data: { public: { open: { nodes: Json[] } } } }).data.public.open.nodes);
+  const openPage = (from: number) => slice(openOf(), from, rest => (rest as Json[]).map(pr => ({ ...pr, files: files(pr) })) as unknown as Json);
+  const graphql = async (query: string): Promise<unknown> => {
+    if (!query.startsWith("query MigrationOpenPage")) {
+      const full = w.answer(query) as { data: { public: Json } };
+      return { data: { ...full.data, public: { ...full.data.public, open: openPage(0) } } };
+    }
+    asked.push(query);
+    const filesAfter = /pullRequest\(number:(\d+)\)\{files\(first:100,after:"(\d+)"\)/.exec(query);
+    if (filesAfter) return { data: { public: { pullRequest: { files: files(openOf().find(pr => pr.number === Number(filesAfter[1]))!, Number(filesAfter[2])) } } } };
+    const listAfter = /open:pullRequests\([^)]*after:"(\d+)"\)/.exec(query);
+    return { data: { public: { open: openPage(Number(listAfter![1])) } } };
+  };
+  return { graphql, asked };
+}
+
+test("W1-T14714 criterion 1 (W1-T14345 criterion 1): no count holds a batch, so 130 open records move in one step and its 130-file REMOVE pull request is read whole while open", async t => {
+  assert.equal(MOVE_BATCH_BOUND, undefined, "no batch bound is exported: no count ends a batch");
   const ids = Array.from({ length: 130 }, (_, i) => `W1-T${i + 1}`);
   const w = moveWorld(t, Object.fromEntries(ids.map(id => [id, record(id)])));
-  const rounds: number[] = [];
-  for (let round = 0; round < 4 && ids.some(id => w.holds("public", id)); round++) {
-    const { pr: copy } = await step(w, "copy");
-    rounds.push(copy.files.length);
-    w.merge(copy);
-    const { pr: removal } = await step(w, "remove");
-    assert.deepEqual(sorted(removal.files), sorted(copy.files), "the removal is exactly the copied batch");
-    w.merge(removal);
-  }
-  assert.deepEqual(rounds, [MOVE_BATCH_BOUND, ids.length - MOVE_BATCH_BOUND!], "THE CLAIM: a full batch, then the rest");
+  const paging = pagingReader(w);
+  const { pr: copy } = await step(w, "copy", { graphql: paging.graphql });
+  assert.equal(copy.files.length, 130, "THE CLAIM: one step carries every open record");
+  w.merge(copy);
+  const { pr: removal } = await step(w, "remove", { graphql: paging.graphql });
+  assert.deepEqual(sorted(removal.files), sorted(copy.files), "the removal is exactly the copied batch");
+  const whileOpen = await w.run(false, { graphql: paging.graphql });
+  assert.equal(whileOpen.status, 0, `the open 130-file removal is read across its pages, never UNKNOWN: ${whileOpen.lines.join("\n")}`);
+  assert.doesNotMatch(whileOpen.lines.join("\n"), /incomplete_open_prs/);
+  assert.ok(paging.asked.some(q => q.includes(`pullRequest(number:${removal.number})`)), "the removal's second files page was asked for");
+  w.merge(removal);
   assert.ok(ids.every(id => w.holds("ops", id) && !w.holds("public", id)));
+});
+
+test("W1-T14714 criterion 2: the open-PR read follows every page of the open list and of each pull request's files, so a record whose shard is the 150th file of the 120th open pull request is owned and left out", async t => {
+  const w = moveWorld(t, Object.fromEntries(["W1-T1", "W1-T2", "W1-T3"].map(id => [id, record(id)])));
+  for (let i = 0; i < 119; i++) w.openPull("public", { head: `feature-${i}`, files: [`src/f${i}.ts`] });
+  const wide = w.openPull("public", { head: "wide-change", files: [...Array.from({ length: 149 }, (_, i) => `docs/d${i}.md`), shard("W1-T2")] });
+  const paging = pagingReader(w);
+  const { pr: copy } = await step(w, "copy", { graphql: paging.graphql });
+  assert.deepEqual(sorted(copy.files), [shard("W1-T1"), shard("W1-T3")], "THE CLAIM: the record the wide pull request touches is left out");
+  assert.ok(paging.asked.some(q => /open:pullRequests\([^)]*after:"100"/.test(q)), "the open list's second page was asked for");
+  assert.ok(paging.asked.some(q => q.includes(`pullRequest(number:${wide.number})`)), "the wide pull request's second files page was asked for");
+
+  await t.test("a page that says it has a next page but names no cursor reads UNKNOWN", async st => {
+    const v = moveWorld(st, { "W1-T1": record("W1-T1") });
+    const broken = async (query: string) => {
+      const full = v.answer(query) as { data: { public: Json } };
+      return { data: { ...full.data, public: { ...full.data.public, open: { totalCount: 1, pageInfo: { hasNextPage: true, endCursor: null }, nodes: [] } } } };
+    };
+    const run = await v.run(false, { graphql: broken });
+    assert.match(run.lines.join("\n"), /incomplete_open_prs/);
+  });
+
+  await t.test("a follow-up page that answers with errors reads UNKNOWN", async st => {
+    const v = moveWorld(st, { "W1-T1": record("W1-T1") });
+    for (let i = 0; i < 101; i++) v.openPull("public", { head: `feature-${i}`, files: [`src/f${i}.ts`] });
+    const pages = pagingReader(v);
+    const run = await v.run(false, { graphql: async q => q.startsWith("query MigrationOpenPage") ? { errors: [{ message: "boom" }] } : pages.graphql(q) });
+    assert.match(run.lines.join("\n"), /api_unreadable/);
+  });
+});
+
+test("W1-T14714 criterion 3: a batch ends only where its COPY or REMOVE pull request body would pass the body limit, GitHub's 65,536 characters by default", async t => {
+  assert.equal(GITHUB_PULL_REQUEST_BODY_LIMIT, 65_536);
+  const ids = Array.from({ length: 5 }, (_, i) => `W1-T${i + 1}`);
+  const w = moveWorld(t, Object.fromEntries(ids.map(id => [id, record(id)])));
+  const o = { publicCommit: w.main("public"), opsRepo: OPS, opsCommit: w.main("ops") };
+  const member = (id: string) => ({ id, path: shard(id), blob: "b".repeat(40) });
+  const three = ids.slice(0, 3).map(member), four = ids.slice(0, 4).map(member);
+  const refs = new Map<string, string>();
+  // The longest body three members make, so a limit of exactly that admits three and refuses a fourth.
+  const fits = (limit: number) => batchFits(o, refs, limit);
+  let limit = 0;
+  while (!fits(limit)(three)) limit++;
+  assert.equal(fits(limit)(four), false, "a fourth member's receipts pass the limit");
+  const { pr: copy } = await step(w, "copy", { bodyLimit: limit });
+  assert.deepEqual(sorted(copy.files), ids.slice(0, 3).map(shard), "THE CLAIM: the batch ends at the member that would pass the limit");
+  assert.ok(copy.body.length <= limit);
+  assert.ok(batchFits(o, refs)(Array.from({ length: 100 }, (_, i) => member(`W1-T${i + 1}`))), "a hundred short records fit GitHub's own limit");
+});
+
+test("W1-T14714 criterion 4: a rate-limited read waits and is made again, for the retry-after GitHub names or else the doubling floor; any other failure throws at once", async () => {
+  const waits: number[] = [];
+  const sleep = async (ms: number) => { waits.push(ms); };
+  const failing = (errors: unknown[]) => { let n = 0; return async () => { if (n < errors.length) throw errors[n++]; return { data: "ok" }; }; };
+  const limited = Object.assign(new Error("HTTP 429: too many requests"), { status: 429 });
+  assert.deepEqual(await withRateLimitBackoff(failing([limited, limited, limited]), sleep)("q"), { data: "ok" }, "THE CLAIM: the read is made again until it answers");
+  assert.deepEqual(waits, [60_000, 120_000, 240_000]);
+  waits.length = 0;
+  const named = Object.assign(new Error("API rate limit exceeded. Retry-After: 7"), { status: 403 });
+  await withRateLimitBackoff(failing([named]), sleep)("q");
+  assert.deepEqual(waits, [7_000]);
+  waits.length = 0;
+  await assert.rejects(withRateLimitBackoff(failing([new Error("HTTP 502: bad gateway")]), sleep)("q"), /bad gateway/);
+  assert.deepEqual(waits, [], "no wait for a failure that is not a rate limit");
+  await withRateLimitBackoff(failing([]))("q");
 });
 
 /** Seed the ops catalog with `count` records in one commit dated `at`. */
@@ -277,7 +369,7 @@ test("W1-T14345 criterion 3: a step interrupted after COPY converges for the who
   assert.deepEqual([held.out.step, held.out.id, held.out.reason], ["held", "W1-T2", "ops_copy_differs"], "and no new pick while it is pending");
 });
 
-test("W1-T14345 criterion 4 (W1-T14714 criterion 2): invariant:a-one-task-move-is-unchanged — a batch of one writes exactly origin/main's branches, files, receipts and pull requests", async t => {
+test("W1-T14345 criterion 4: invariant:a-one-task-move-is-unchanged — a batch of one writes exactly origin/main's branches, files, receipts and pull requests", async t => {
   const ID = "W1-T1", ORIGINAL = record(ID, "  files: [src/lib/moved.ts]\n");
   const w = moveWorld(t, { [ID]: ORIGINAL });
   const publicCommit = w.main("public"), opsBase = w.main("ops"), reservation = w.pub.origin.git("rev-parse", `refs/rmd-id/${ID}`);
