@@ -2,7 +2,7 @@ import { DISK_FAIL_BYTES, DISK_WARN_BYTES, humanBytes } from "./doctor.js";
 import {
   classifyEndedDaemonProcesses, crashLoopRunOf, DAEMON_ABNORMAL_EXIT_STEP, DAEMON_CLEAN_EXIT_OBSERVED_STEP, learnedCleanLifetime,
   type CrashLoopVerdict, type DaemonLifetimeRecord, type DaemonProcessEnd, type LearnedCleanLifetime, type LearnedCrashLoopSummary,
-  type ClaimStallClearedInfo, type ClaimStallInfo, type StarvationCensus, type StarvationClearedInfo,
+  type ClaimStallClearedInfo, type ClaimStallInfo, type StarvationCensus, type StarvationClearedInfo, type TargetJobStallInfo,
 } from "./daemon.js";
 import { ghRateLimitWindow, type GhRateLimitProvenance } from "./daemon-health.js";
 import { quantileOf } from "./daemon-memory-policy.js";
@@ -1238,6 +1238,75 @@ export async function escalateClaimStall(
     samples: info.samples,
     refused_ticks: info.refusedTicks,
     release_command: release,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/** W1-T14600: the ledger marker of the page for a managed-target job the core daemon deferred past its bound. */
+export const TARGET_JOB_STALL_ESCALATED_STEP = "target_job.stall_escalated";
+
+/**
+ * W1-T14600: the page for a managed-target job the core daemon kept deferring for capacity (2026-11-23: WRECK-T1 waited
+ * past three hours, and nothing alerted). DEDUP IS PER ORIGIN, on the job's own progress: if the newest
+ * `target_job.stall_escalated` row for this origin postdates its newest `console.kick_dispatched` or `target_job.ended`
+ * row, the stall was already reported, by this process or an earlier one. The marker is written whether or not delivery
+ * succeeded (`escalateStarvation`'s discipline). The issue is closed by hand once the job ran.
+ */
+export async function escalateTargetJobStalled(
+  info: TargetJobStallInfo,
+  ctx: ClaimStallCtx,
+): Promise<void> {
+  const rows = await readLedgerUnionRecords(dirname(ctx.ledgerPath),
+    { step: [TARGET_JOB_STALL_ESCALATED_STEP, "console.kick_dispatched", "target_job.ended"] });
+  let lastEscalatedIdx = -1;
+  let lastProgressIdx = -1;
+  rows.forEach((row, i) => {
+    if (row.origin !== info.origin) return;
+    if (row.step === TARGET_JOB_STALL_ESCALATED_STEP) lastEscalatedIdx = i;
+    else lastProgressIdx = i;
+  });
+  if (lastEscalatedIdx !== -1 && lastEscalatedIdx > lastProgressIdx) return;
+
+  const waited = `${Math.round(info.deferredForMs / 60_000)} min`;
+  const numbers = `${info.inFlight} core run(s) in flight, lane target ${info.laneTarget ?? "unbounded"}, WIP budget ${info.wipBudget}`;
+  const options = [
+    {
+      label: "acknowledge and wait",
+      detail: "The core daemon holds the next free lane for this job and runs it when one frees. Close this issue by hand once it ran.",
+    },
+    ...(info.reason === "wip budget" ? [{
+      label: "free WIP room",
+      detail: "The shared WIP budget is full: merging or closing an open pull request gives the job room to start.",
+    }] : []),
+  ];
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: info.taskId,
+      runId: ctx.runId,
+      summary: `${info.taskId} for ${info.repo} has waited ${waited} for a core daemon lane`,
+      detail:
+        `W1-T14600: the core daemon has deferred the managed-target job ${info.taskId} (repository ${info.repo}, request ` +
+        `${info.origin}) for capacity for ${waited}. Reason: ${info.reason}; ${numbers}. A job waiting for a free lane has ` +
+        "one reserved for it; one held by the lane target or the WIP budget waits until that reading has room.",
+      options,
+      recommendation: info.reason === "wip budget" ? "free WIP room" : "acknowledge and wait",
+    },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: info.taskId,
+    step: TARGET_JOB_STALL_ESCALATED_STEP,
+    origin: info.origin,
+    repo: info.repo,
+    deferred_for_ms: info.deferredForMs,
+    reason: info.reason,
     issue_url: issueUrl,
     delivered: issueUrl !== null,
   });

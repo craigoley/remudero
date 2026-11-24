@@ -1553,21 +1553,27 @@ function dialectGrepMatchedLinesExcludingSelfLine(pattern: string, path: string,
   return dialectGrepOutputLines(stdout).filter((line) => !selfLine.test(line.replace(/^\d+:/, "")));
 }
 
-/** A passing `grep -arn` line's source text, with grep's `<path>:<line>:` prefix removed when present. */
-function dialectGrepMatchedSourceText(line: string): string {
-  const m = line.match(/^(?:.*?:)?\d+:(.*)$/);
-  return (m ? m[1] : line).trim();
-}
-
-function dialectGrepMatchedLineNumber(line: string): number | undefined {
-  const m = line.match(/^(?:.*?:)?(\d+):/);
-  if (!m) return undefined;
+/** A `grep -n` line's number and source text, read from an anchored `<n>:` or `<path>:<n>:` prefix only. */
+export function parseGrepOutputLine(line: string, path?: string): { lineNumber?: number; text: string } {
+  const rest = path !== undefined && line.startsWith(`${path}:`) && /^\d+:/.test(line.slice(path.length + 1)) ? line.slice(path.length + 1) : line;
+  const m = /^(\d+):/.exec(rest) ?? (path === undefined ? /^\S*?:(\d+):/.exec(rest) : null);
+  if (m === null) return { text: line.trim() };
   const n = Number(m[1]);
-  return Number.isSafeInteger(n) && n > 0 ? n : undefined;
+  const after = rest.slice(m[0].length);
+  const text = (/[\n\r\u2028\u2029]/.test(after) ? line : after).trim();
+  return Number.isSafeInteger(n) && n > 0 ? { lineNumber: n, text } : { text };
 }
 
-function dialectGrepMatchedLineIsComment(line: string): boolean {
-  const text = dialectGrepMatchedSourceText(line);
+function dialectGrepMatchedSourceText(line: string, path?: string): string {
+  return parseGrepOutputLine(line, path).text;
+}
+
+function dialectGrepMatchedLineNumber(line: string, path?: string): number | undefined {
+  return parseGrepOutputLine(line, path).lineNumber;
+}
+
+function dialectGrepMatchedLineIsComment(line: string, path?: string): boolean {
+  const text = dialectGrepMatchedSourceText(line, path);
   return text.startsWith("//") || text.startsWith("/*") || text.startsWith("*");
 }
 
@@ -1703,12 +1709,13 @@ function yamlCommentMaskByLine(lines: readonly string[]): boolean[][] {
 function matchedLineIsCommentInGrammar(
   line: string,
   grammar: CommentGrammar,
+  path: string | undefined,
   sourceLine?: string,
   mask?: readonly boolean[],
 ): boolean {
-  if (grammar === "js") return dialectGrepMatchedLineIsComment(line);
+  if (grammar === "js") return dialectGrepMatchedLineIsComment(line, path);
   if (grammar === "none") return false;
-  if (sourceLine === undefined || mask === undefined) return dialectGrepMatchedSourceText(line).startsWith("#");
+  if (sourceLine === undefined || mask === undefined) return dialectGrepMatchedSourceText(line, path).startsWith("#");
   const first = sourceLine.length - sourceLine.trimStart().length;
   return first < sourceLine.length && mask[first] === true;
 }
@@ -1735,15 +1742,16 @@ export function matchedLinesAreAllComments(
     const grammar = commentGrammarForPath(context.path);
     const masks = commentMaskByLine(context.fileText, grammar);
     return matchedLines.every((line) => {
-      const lineNumber = dialectGrepMatchedLineNumber(line);
-      if (lineNumber === undefined) return matchedLineIsCommentInGrammar(line, grammar);
+      const lineNumber = dialectGrepMatchedLineNumber(line, context.path);
+      if (lineNumber === undefined) return matchedLineIsCommentInGrammar(line, grammar, context.path);
       const sourceLine = sourceLines[lineNumber - 1];
       const mask = masks[lineNumber - 1];
-      if (sourceLine === undefined || mask === undefined) return matchedLineIsCommentInGrammar(line, grammar);
-      return allLiteralOccurrencesAreComments(sourceLine, mask, context.pattern) ?? matchedLineIsCommentInGrammar(line, grammar, sourceLine, mask);
+      if (sourceLine === undefined || mask === undefined) return matchedLineIsCommentInGrammar(line, grammar, context.path);
+      return allLiteralOccurrencesAreComments(sourceLine, mask, context.pattern) ??
+        matchedLineIsCommentInGrammar(line, grammar, context.path, sourceLine, mask);
     });
   }
-  return matchedLines.every(dialectGrepMatchedLineIsComment);
+  return matchedLines.every((line) => dialectGrepMatchedLineIsComment(line));
 }
 
 const COMMENT_OPENERS: Record<CommentGrammar, readonly string[]> = { js: ["//", "/*"], yaml: ["#"], none: [] };
@@ -1766,9 +1774,19 @@ function grepMatchedLines(pattern: string, fileText: string): string[] {
   return out;
 }
 
+export const REFUSAL_AMENDMENT_MARKER = "refusal-amendment (";
+const REFUSAL_AMENDMENT_MARKER_PROOF = new RegExp(
+  `^${REFUSAL_AMENDMENT_MARKER.replace("(", "\\(")}[A-Z][A-Z0-9]*-T[0-9]+[A-Za-z]?, run ` +
+    String.raw`(?:[^\\.[\]*^$?]|\\[\\.[\]*^$]|\[\?\])+,$`,
+);
+export function isRefusalAmendmentMarkerProof(pattern: string, path: string): boolean {
+  return /^plan\/tasks\.d\/(?:[^/]+\/)*[^/]+\.ya?ml$/.test(path) && REFUSAL_AMENDMENT_MARKER_PROOF.test(pattern);
+}
+
 /** A grep proof that can only certify comments (review: `executed_stale`): its pattern opens with the
  *  path's comment opener, or every line it matches in `fileText` is a comment. */
 export function grepProofCanOnlyCertifyComments(pattern: string, path: string, fileText?: string): boolean {
+  if (isRefusalAmendmentMarkerProof(pattern, path)) return false;
   const literal = pattern.replace(/^[\s"'`]+/, "");
   if (COMMENT_OPENERS[commentGrammarForPath(path)].some((opener) => literal.startsWith(opener))) return true;
   if (fileText === undefined) return false;
@@ -4802,6 +4820,7 @@ export function judgeCriterion(
           if (outcome === "pass") {
             if (
               whitelisted.kind === "grep" &&
+              !isRefusalAmendmentMarkerProof(whitelisted.args[2] ?? "", grepTarget ?? "") &&
               matchedLinesAreAllComments(whitelisted.matchedLines ?? [], matchedLineCommentContext(whitelisted, execCtx.cwd))
             ) {
               proofExec = "executed_stale";

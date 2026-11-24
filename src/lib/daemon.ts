@@ -1272,6 +1272,24 @@ export interface ClaimStallInfo {
   refusedTicks: number;
 }
 
+/** W1-T14600: how long a managed-target job may wait for a lane of the core daemon before the operator is paged. A
+ *  BACKSTOP: the lane reservation admits the job; this fires only when that has not happened for an hour. */
+export const TARGET_JOB_STALL_BOUND_MS = 60 * 60_000;
+
+/** W1-T14600: a managed-target job deferred for capacity past {@link TARGET_JOB_STALL_BOUND_MS}, from its first deferral
+ *  in this process. `reason` is the deferral's own: no free lane, the enforced lane target, or the WIP budget. */
+export interface TargetJobStallInfo {
+  taskId: string;
+  origin: string;
+  repo: string;
+  deferredForMs: number;
+  reason: "no free lane" | "lane target" | "wip budget" | "lane reserved by another job";
+  inFlight: number;
+  /** The enforced lane target the deferral read; `null` when no lane governor enforces one. */
+  laneTarget: number | null;
+  wipBudget: number;
+}
+
 /** A claim-passing run (a `dispatch.claim` `created` row) is what ends a stall; the clear names it when known. */
 export interface ClaimStallClearedInfo {
   taskId?: string;
@@ -1746,6 +1764,9 @@ export interface DaemonDeps {
   onClaimStall?: (info: ClaimStallInfo) => void | Promise<void>;
   /** The cleared half: the first run that passes its claim after the page. Optional, edge-triggered. */
   onClaimStallCleared?: (info: ClaimStallClearedInfo) => void | Promise<void>;
+  /** W1-T14600: a managed-target job deferred for capacity past {@link TARGET_JOB_STALL_BOUND_MS}. Fires once per deferral
+   *  episode in this process (the catalogue entry dedups across boots); a throw costs one row, never the loop. Optional. */
+  onTargetJobStalled?: (info: TargetJobStallInfo) => void | Promise<void>;
   /** W1-T3691 (design v) — called once per stuck sha, the FIRST tick a freshness restart already
    *  requested for this exact code sha reports coming back unchanged: the target looks genuinely
    *  pinned behind origin/main rather than transiently behind it, so this is a "needs a human"
@@ -7657,6 +7678,11 @@ export async function runDaemon(
   releaseGatedCadences = (): void => { if (gatedCadencesReleased()) startDueRungsTimer(); };
 
   const tickMemory = { sampled: false };
+  // W1-T14600: the lane a capacity-deferred target job waits for, set for one tick only; and the pending
+  // jobs already paged in their current deferral episode (its start is `targetJobDeferrals`' firstMs).
+  let reservedForTargetJob: { origin: string } | undefined;
+  const targetJobReserve = (): number => (reservedForTargetJob ? 1 : 0);
+  const targetJobStallPaged = new Set<string>();
   for (;;) {
     tickLedgerActive = restartCyclePending;
     tickLedger = undefined;
@@ -7676,6 +7702,7 @@ export async function runDaemon(
     retroWatch.observe(tickStartedAtMs);
     resetIdleLaneTick();
     spendGatesOpen = false;
+    reservedForTargetJob = undefined;
 
     if (opts.max !== undefined && attempted.length >= opts.max) {
       return summary("max_reached", `${opts.max} task(s)`);
@@ -8581,30 +8608,58 @@ export async function runDaemon(
       }
     }
 
-    // W1-T10799: a managed target with no daemon of its own runs ONE bounded job here, in the lane this daemon
-    // reserves for it. Core's own kick has priority, a busy lane or a zero enforced lane target defers the job
-    // explicitly, and a second request in the same tick defers behind the first: this adds no capacity.
+    // W1-T10799: a managed target with no daemon of its own runs ONE bounded job here, in a lane of this daemon's shared
+    // lane and WIP accounting. Core's own kick has priority, and a second request in the same tick defers behind the first:
+    // this adds no capacity. W1-T14600: the job is admitted when a lane is free under min(lane target, WIP budget), the
+    // expression core budgets itself by; only a job that dispatched ends the tick, so a deferred, held or resumed job lets
+    // core selection run. A job waiting only for a free lane has one reserved for it this tick, and one deferred past the
+    // stall bound pages the operator once.
     if (!forcedNext && deps.pendingTargetJobs && deps.runTargetJob) {
-      let pending: Array<DaemonKick & { repo: string }>;
+      let pending: Array<DaemonKick & { repo: string; requestedAt?: string }> = [];
+      let pendingRead = true;
       try { pending = deps.pendingTargetJobs(); }
       catch (error) {
+        pendingRead = false;
         log("target_job.unknown", { reason: `durable jobs unreadable: ${String(error)}` });
-        ticks++;
-        await sleepUntilSweepWake(pollIntervalMs);
-        continue;
       }
-      for (const origin of targetJobDeferrals.keys()) if (!pending.some((job) => job.origin === origin)) targetJobDeferrals.delete(origin);
+      if (pendingRead) {
+        const isPending = (origin: string): boolean => pending.some((job) => job.origin === origin);
+        for (const origin of targetJobDeferrals.keys()) if (!isPending(origin)) targetJobDeferrals.delete(origin);
+        for (const origin of targetJobStallPaged) if (!isPending(origin)) targetJobStallPaged.delete(origin);
+      }
       const [job, ...waiting] = pending;
       if (job) {
         // W1-T14576: the job takes a FREE lane under the same limit core's own dispatch uses, never only an empty daemon.
         const inFlight = unsettledChildCount();
         const laneTarget = enforcedLaneTarget(inFlight, tickQueueAdmission?.wipLimit);
         const wipBudget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission });
-        if (Math.min(laneCount, wipBudget, laneTarget) - inFlight < 1) {
-          logTargetJobDeferral(job, { in_flight: inFlight });
+        const sharedLanes = Math.min(laneCount, wipBudget, laneTarget);
+        const lanePayload = { lane_target: Number.isFinite(laneTarget) ? laneTarget : null, wip_budget: wipBudget };
+        // W1-T14600: every deferral counts toward the stall bound from the job's first deferral in this process, whether
+        // or not its (throttled) row is written; past the bound the operator is paged once for the episode.
+        const deferJob = async (kick: DaemonKick & { repo: string; requestedAt?: string }, reason: TargetJobStallInfo["reason"]): Promise<void> => {
+          const nowMs = daemonClock.now();
+          const deferredForMs = nowMs - (targetJobDeferrals.get(kick.origin)?.firstMs ?? nowMs);
+          logTargetJobDeferral(kick, { in_flight: inFlight, reason, deferred_for_ms: deferredForMs, ...lanePayload });
+          if (deferredForMs < TARGET_JOB_STALL_BOUND_MS || targetJobStallPaged.has(kick.origin)) return;
+          targetJobStallPaged.add(kick.origin);
+          const info: TargetJobStallInfo = { taskId: kick.taskId, origin: kick.origin, repo: kick.repo, deferredForMs, reason,
+            inFlight, laneTarget: lanePayload.lane_target, wipBudget };
+          log("target_job.stalled", { task: info.taskId, origin: info.origin, repo: info.repo, deferred_for_ms: deferredForMs, reason,
+            in_flight: inFlight, ...lanePayload });
+          // The same backstop discipline as onClaimStall: a failed notification costs one row, never the loop.
+          try { await deps.onTargetJobStalled?.(info); }
+          catch (error) { log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) }); }
+        };
+        if (sharedLanes - inFlight < 1) {
+          const reason = sharedLanes >= 1 ? "no free lane" : laneTarget < 1 ? "lane target" : "wip budget";
+          // A lane core may use is never held for a job the lane target or the WIP budget defers.
+          if (reason === "no free lane") reservedForTargetJob = { origin: job.origin };
+          await deferJob(job, reason);
         } else {
+          for (const other of waiting) await deferJob(other, "lane reserved by another job");
           targetJobDeferrals.delete(job.origin);
-          for (const other of waiting) logTargetJobDeferral(other, { reason: "lane reserved by another job" });
+          targetJobStallPaged.delete(job.origin);
           let closed = false;
           let charged = false;
           try { closed = ["ended", "refused"].includes((await deps.runTargetJob(job, deps, () => {
@@ -8614,11 +8669,14 @@ export async function runDaemon(
           })).state); }
           catch (e) { log("target_job.error", { task: job.taskId, origin: job.origin, repo: job.repo, error: String((e as Error)?.message ?? e) }); }
           if (closed) continue;
+          // Dispatched and still open: the job spent this tick's lane, and the loop paces itself rather than re-reading
+          // the marker at once. Held or resumed without a dispatch, it spent nothing, and core selection runs below.
+          if (charged) {
+            ticks++;
+            await sleepUntilSweepWake(pollIntervalMs);
+            continue;
+          }
         }
-        // Held, resumed or deferred: the marker stays, and the loop paces itself rather than re-reading it at once.
-        ticks++;
-        await sleepUntilSweepWake(pollIntervalMs);
-        continue;
       }
     }
 
@@ -8846,7 +8904,8 @@ export async function runDaemon(
         : laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit,
           openPrCount: tickTiming.probe("openPrCount", () => deps.openPrCount?.()), queueAdmission: tickQueueAdmission });
       const tickLaneTarget = enforcedLaneTarget(occupiedTasks.length, tickQueueAdmission?.wipLimit);
-      const budget = Math.max(0, Math.min(wipBudget, tickLaneTarget) - occupiedTasks.length);
+      // W1-T14600: a lane held for a capacity-deferred target job is one core does not fill this tick.
+      const budget = Math.max(0, Math.min(wipBudget, tickLaneTarget) - occupiedTasks.length - targetJobReserve());
       if (laneCount >= 2 && budget <= 0) {
         // Mirrors `runDrainLanes`' own WIP-deferred row: runnable work may exist, held back by the governor
         // rather than absent, which is distinct from an ordinary idle tick. Never reached at one lane.
@@ -8858,6 +8917,7 @@ export async function runDaemon(
           wip_limit: opts.wipLimit ?? null,
           observed_open_count: tickTiming.probe("openPrCount", () => deps.openPrCount?.()) ?? null,
           ...wipDeferredAdmissionFields(tickQueueAdmission),
+          ...(reservedForTargetJob ? { reserved_for_target_job: reservedForTargetJob.origin } : {}),
         });
       }
       const frontierOpts = {
@@ -8949,6 +9009,16 @@ export async function runDaemon(
     } else if (deps.checkAutoTriage) {
       lastAutoTriageSignals = [autoTriageSignals];
       autoTriageCadence.owe(autoTriageSignals);
+    }
+
+    // W1-T14600: a tick holding a lane for a target job admitted no new core task (its budget left that lane free). The
+    // lane pool would await every in-flight lane before the next tick, so the job would wait for the slowest; the tick
+    // paces instead, and the next one admits the job as soon as one in-flight child has settled.
+    if (reservedForTargetJob && dispatchSet.length === 0) {
+      await flushLifetimePressure();
+      ticks++;
+      await sleepUntilSweepWake(pollIntervalMs);
+      continue;
     }
 
     dispatchSet.unshift(...occupiedTasks);

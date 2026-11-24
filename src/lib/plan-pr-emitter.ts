@@ -1,4 +1,4 @@
-import { CHECK_PROOF_CHILD_ENTRY, checkProofChildArgv } from "./check-proof.js";
+import { CHECK_PROOF_CHILD_ENTRY, COMMENT_ONLY_DISCRIMINATION_LINE, checkProofChildArgv } from "./check-proof.js";
 import { childEntryArgv } from "./child-entry-argv.js";
 /**
  * The shared gate-contract module for every machine flow that opens a plan PR (W1-T136: `rmd retro` and
@@ -745,7 +745,7 @@ export interface PlanPrPreflightReading {
   output: string;
   timedOutMs?: number; // killed at this budget: `status` is no verdict at all
 }
-export type ProofCheckStatus = number | null | { timedOutMs: number }; // check-proof's exit, or the budget it was killed at
+export type ProofCheckStatus = number | null | { timedOutMs: number } | { commentOnly: true }; // check-proof's exit, the budget it was killed at, or its comment-only exit 5
 export { inTreeCheckBudgetMs };
 
 const LINT_PLAN_SCRIPT = "scripts/lint-plan-precheck.mjs";
@@ -898,7 +898,10 @@ async function runInTreeAsync(cwd: string, relPath: string, argv: string[], budg
   return runChildAsync(file, args, cwd, env, budgetMs);
 }
 
-const proofCheckStatus = (r: PlanPrPreflightReading): ProofCheckStatus => (r.timedOutMs === undefined ? r.status : { timedOutMs: r.timedOutMs });
+const proofCheckStatus = (r: PlanPrPreflightReading): ProofCheckStatus =>
+  r.timedOutMs !== undefined ? { timedOutMs: r.timedOutMs }
+    : r.status === CHECK_PROOF_STALE_EXIT && r.output.split("\n").includes(COMMENT_ONLY_DISCRIMINATION_LINE) ? { commentOnly: true } : r.status;
+const commentOnlyStatus = (status: ProofCheckStatus): boolean => status !== null && typeof status === "object" && "commentOnly" in status;
 
 export type CheckProofChildLog = (step: string, extra?: Record<string, unknown>) => void;
 const CHECK_PROOF_CHILD_NAME = "check-proof-main";
@@ -1085,19 +1088,20 @@ interface ProofTimeouts {
   budgetMs?: number;
 }
 function timedOutProof(kind: string, proof: string, status: ProofCheckStatus, timeouts: ProofTimeouts): status is { timedOutMs: number } {
-  if (status === null || typeof status !== "object") return false;
+  if (status === null || typeof status !== "object" || !("timedOutMs" in status)) return false;
   timeouts.lines.push(`${kind} proof ${JSON.stringify(proof)} timed out after ${status.timedOutMs} ms`);
   timeouts.budgetMs = status.timedOutMs;
   return true;
 }
 function sortBodyProof(proof: string, status: ProofCheckStatus, red: string[], unreadable: string[], timeouts: ProofTimeouts): void {
   if (status === 0 || timedOutProof("PR-body", proof, status, timeouts)) return;
-  if (status !== null && RED_BODY_PROOF_EXIT[status]) red.push(`PR-body proof ${JSON.stringify(proof)} ${RED_BODY_PROOF_EXIT[status]}`);
+  if (commentOnlyStatus(status)) red.push(`PR-body proof ${JSON.stringify(proof)} matches only comment lines`);
+  else if (typeof status === "number" && RED_BODY_PROOF_EXIT[status]) red.push(`PR-body proof ${JSON.stringify(proof)} ${RED_BODY_PROOF_EXIT[status]}`);
   else unreadable.push(`PR-body proof ${JSON.stringify(proof)} could not be checked (check-proof exit ${status})`);
 }
 function sortShardProof(proof: string, status: ProofCheckStatus, red: string[], timeouts: ProofTimeouts): void {
   if (timedOutProof("shard", proof, status, timeouts)) return;
-  if (status === CHECK_PROOF_STALE_EXIT) red.push(`shard proof ${JSON.stringify(proof)} passes at origin/main too`);
+  if (status === CHECK_PROOF_STALE_EXIT || commentOnlyStatus(status)) red.push(`shard proof ${JSON.stringify(proof)} passes at origin/main too`);
 }
 function discriminationReading(red: string[], unreadable: string[], timeouts: ProofTimeouts, shardProofList: string[] | undefined): PlanPrPreflightReading {
   if (shardProofList === undefined) unreadable.push("the changed task shards could not be read against origin/main");

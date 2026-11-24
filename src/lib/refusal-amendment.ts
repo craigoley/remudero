@@ -33,7 +33,7 @@ import {
 } from "./dispatch-repair.js";
 import type { Task } from "./plan.js";
 import { escapeGrepLiteral, type PlanPrPreflightCheck, type PlanPrPreflightFinding } from "./plan-pr-emitter.js";
-import { parseCriterionRefusals, type CriterionRefusalClass } from "./review.js";
+import { parseCriterionRefusals, REFUSAL_AMENDMENT_MARKER, type CriterionRefusalClass } from "./review.js";
 import { isTaskShardName } from "./task-shard-name.js";
 
 /** The ledger step {@link runSweep}'s call site writes once per handled refusal, and the ONLY thing
@@ -334,7 +334,7 @@ export function refusalAmendmentComment(
   for (const r of refusals) {
     const implied = REFUSAL_IMPLICATION[r.refusalClass];
     lines.push(
-      `refusal-amendment (${taskId}, run ${runId}, ${at}): the worker refused criterion ${r.criterion} ` +
+      `${REFUSAL_AMENDMENT_MARKER}${taskId}, run ${runId}, ${at}): the worker refused criterion ${r.criterion} ` +
         `[${r.refusalClass}] — proposed ${implied.kind}: ${implied.proposal}`,
       `  worker evidence: ${r.detail}`,
     );
@@ -415,7 +415,7 @@ export function refusalAmendmentBranch(taskId: string): string {
 
 /** The PR-body proof: a BRE grep for the comment prefix of this run only. */
 export function refusalAmendmentProof(taskId: string, runId: string, relPath: string): string {
-  return `grep: ${escapeGrepLiteral(`refusal-amendment (${taskId}, run ${runId},`)} in ${relPath}`;
+  return `grep: ${escapeGrepLiteral(`${REFUSAL_AMENDMENT_MARKER}${taskId}, run ${runId},`)} in ${relPath}`;
 }
 
 /** Draft the ONE plan-only amendment PR for `candidate`. Never throws: a failure is an `error`
@@ -429,7 +429,7 @@ export async function draftRefusalAmendment(
   try {
     const shard = io.readShard(taskId);
     if (!shard) return { ...base, outcome: "no_shard" };
-    if (shard.text.includes(`refusal-amendment (${taskId}, run ${runId},`)) return { ...base, outcome: "already_flagged" };
+    if (shard.text.includes(`${REFUSAL_AMENDMENT_MARKER}${taskId}, run ${runId},`)) return { ...base, outcome: "already_flagged" };
     const branch = refusalAmendmentBranch(taskId);
     const existing = await io.probeExisting(branch);
     if (existing) return { ...base, outcome: "deduped", prUrl: existing.prUrl };

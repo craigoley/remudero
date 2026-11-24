@@ -66,6 +66,7 @@
 #   ./deploy/serve-container.sh                    # create it; refuses if one already exists
 #   ./deploy/serve-container.sh --replace          # stop + rm the existing one first
 #   ./deploy/serve-container.sh --dry-run          # print the docker run, change nothing
+#   ./deploy/serve-container.sh --instance-mount-plan  # list the instance mounts a launch adds, change nothing
 #   TAG=<sha> ./deploy/serve-container.sh          # pin a build instead of :latest
 #   RMD_STATE_DIR=/path ./deploy/serve-container.sh    # if the bind mount is not the daemon's
 #   RMD_CLAUDE_JSON_PATH=/path ./deploy/serve-container.sh   # if ~/.claude.json is not the host's
@@ -245,12 +246,14 @@ claude_fleet_auth_plan() {
 REPLACE=0
 DRY_RUN=0
 FLEET_AUTH_PLAN_ONLY=0
+INSTANCE_MOUNT_PLAN_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --instance) INSTANCE_NAME="${2:?--instance needs a name}"; shift 2 ;;
     --replace)   REPLACE=1; shift ;;
     --dry-run)   DRY_RUN=1; shift ;;
     --fleet-auth-plan) FLEET_AUTH_PLAN_ONLY=1; shift ;;
+    --instance-mount-plan) INSTANCE_MOUNT_PLAN_ONLY=1; shift ;;
     --tag)       TAG="${2:?--tag needs a value}"; REF="${REGISTRY}.azurecr.io/${IMAGE}:${TAG}"; shift 2 ;;
     -h|--help)   sed -n '1,80p' "$0"; exit 0 ;;
     *)           echo "serve-container: unknown argument $1" >&2; exit 2 ;;
@@ -401,6 +404,144 @@ if [ -f "${SCRIPT_ROOT}/deploy/scratch-mounts.sh" ]; then
     SERVE_REPO_DIR="${SERVE_SCRATCH_REPO_DIR}"
   fi
   SERVE_DAEMON_CHECKOUT="$(scratch_daemon_checkout "${STATE_DIR}" "${DAEMON_CONTAINER}")" || SERVE_DAEMON_CHECKOUT="${STATE_DIR}/remudero"
+fi
+
+INSTANCE_STATE_BASE="/home/node/rmd-instances"
+INSTANCE_STATE_ARGS=()
+list_registry_state_dirs() {
+  awk '
+    { sub(/[[:space:]]+#.*/, "") }
+    /^[[:space:]]*$/ { next }
+    /^[^ ]/ { if (name != "") print name, dir, retired, container; name = ""; inside = ($0 ~ /^instances:[[:space:]]*$/); next }
+    inside && $0 ~ /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
+      if (name != "") print name, dir, retired, container
+      name = $1; sub(/:$/, "", name); dir = "-"; retired = "false"; container = "-"; next
+    }
+    inside && name != "" && $0 ~ /^    state_dir:/ { dir = $2 }
+    inside && name != "" && $0 ~ /^    retired:/ { retired = $2 }
+    inside && name != "" && $0 ~ /^    container_name:/ { container = $2 }
+    END { if (name != "") print name, dir, retired, container }
+  ' "$1"
+}
+# W1-T12126: managed repos may overlay a foreign daemon's durable root.
+# Read only Mounts from its declared container; never infer repos from a code checkout.
+FOREIGN_REPOS_NAMES=() FOREIGN_REPOS_DIRS=() FOREIGN_REPOS_CONTAINERS=() FOREIGN_REPOS_SNAPSHOTS=()
+FOREIGN_REPOS_REGISTRY_ROWS=""
+foreign_repos_snapshot() {
+  local state_dir="$1" container="$2" mounts=""
+  if [ "$container" = "-" ]; then
+    if declare -F scratch_enabled >/dev/null 2>&1 && scratch_enabled; then
+      printf '%s\n' unavailable
+    else
+      printf '%s\n' legacy
+    fi
+    return 0
+  fi
+  case "$container" in ""|-*|*[!A-Za-z0-9_.-]*)
+    echo "serve-container: REFUSING — foreign repos container name is unavailable or malformed." >&2
+    return 1 ;;
+  esac
+  if ! mounts="$(docker inspect "$container" --format '{{json .Mounts}}' 2>/dev/null)"; then
+    printf '%s\n' unavailable
+    return 0
+  fi
+  # W1-T12192: the scratch plan binds the coverage overlay below repos in every daemon container.
+  # That one bind is a known placement. Every other mount below repos still refuses.
+  node - "$state_dir" "$mounts" "${SCRATCH_REPOS_COVERAGE_DEST:-}" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+try {
+  const root = "/home/node/Remudero", repos = root + "/repos";
+  const validPath = value => typeof value === "string" && path.isAbsolute(value) &&
+    !/[\r\n\t:|]/.test(value) && path.normalize(value) === value;
+  const mounts = JSON.parse(process.argv[3]);
+  if (!Array.isArray(mounts) || mounts.some(m => !m || !validPath(m.Destination)))
+    throw Error("malformed Mounts");
+  const roots = mounts.filter(m => m.Destination === root);
+  const relevant = mounts.filter(m => m.Destination === repos || repos.startsWith(m.Destination + "/"));
+  const below = mounts.filter(m => m.Destination.startsWith(repos + "/"));
+  const overlayDest = process.argv[4] || "";
+  const knownOverlay = m => m.Destination === overlayDest && m.Type === "bind" && validPath(m.Source);
+  if (roots.length !== 1 || relevant.some(m => m.Type !== "bind" || !validPath(m.Source)) ||
+      new Set(relevant.map(m => m.Destination)).size !== relevant.length ||
+      below.length > 1 || !below.every(knownOverlay))
+    throw Error("ambiguous or unsupported repos placement");
+  const directory = p => {
+    const canonical = fs.realpathSync(p), st = fs.statSync(canonical);
+    if (!validPath(canonical) || !st.isDirectory()) throw Error("repos source is not a directory");
+    fs.accessSync(canonical, fs.constants.R_OK | fs.constants.X_OK);
+    return [canonical, st.dev + ":" + st.ino];
+  };
+  const registryRoot = directory(process.argv[2]), mountedRoot = directory(roots[0].Source);
+  if (registryRoot[0] !== mountedRoot[0] || registryRoot[1] !== mountedRoot[1]) throw Error("declared instance root disagrees with Mounts");
+  const selected = relevant.sort((a, b) => b.Destination.length - a.Destination.length)[0];
+  if (!selected) throw Error("repos source is absent");
+  const source = directory(selected.Source + repos.slice(selected.Destination.length));
+  // Directory identity, not mtime: normal repository writes are not placement drift.
+  console.log([source[0], source[1], mountedRoot[0], mountedRoot[1], selected.Destination].join("\t"));
+} catch (error) {
+  console.error("serve-container: REFUSING — foreign repos placement unavailable: " + error.message);
+  process.exitCode = 1;
+}
+NODE
+}
+
+foreign_repos_recheck() {
+  local i current=""
+  [ -n "$FOREIGN_REPOS_REGISTRY_ROWS" ] || return 0
+  if [ "$(list_registry_state_dirs "$INSTANCE_REGISTRY")" != "$FOREIGN_REPOS_REGISTRY_ROWS" ]; then
+    echo "serve-container: REFUSING — foreign repos registry placement changed; launch refused." >&2
+    exit 1
+  fi
+  for ((i=0; i<${#FOREIGN_REPOS_NAMES[@]}; i++)); do
+    if ! current="$(foreign_repos_snapshot "${FOREIGN_REPOS_DIRS[i]}" "${FOREIGN_REPOS_CONTAINERS[i]}")" ||
+       [ "$current" != "${FOREIGN_REPOS_SNAPSHOTS[i]}" ]; then
+      echo "serve-container: REFUSING — instance ${FOREIGN_REPOS_NAMES[i]} repos placement changed or became unavailable." >&2
+      exit 1
+    fi
+  done
+}
+# W1-T14591: the one loop that names the instance mounts a launch adds. `plan` prints each one
+# and adds nothing; a launch with --instance mounts none.
+instance_mount_rows() {
+  [ -z "${INSTANCE_NAME}" ] && [ -r "${INSTANCE_REGISTRY}" ] || return 0
+  FOREIGN_REPOS_REGISTRY_ROWS="$(list_registry_state_dirs "${INSTANCE_REGISTRY}")"
+  while read -r other_name other_dir other_retired other_container; do
+    if [ "${other_name}" = "core" ] || [ "${other_retired}" = "true" ] || [ "${other_dir}" = "${STATE_DIR}" ]; then
+      continue
+    fi
+    if [ "${other_dir}" = "-" ] || [ ! -d "${other_dir}/state" ]; then
+      echo "serve-container: NOTE — instance ${other_name}'s state (${other_dir}/state) is absent here; the gateway will answer /v1/i/${other_name}/ as unavailable." >&2
+      continue
+    fi
+    other_repos_snapshot="$(foreign_repos_snapshot "${other_dir}" "${other_container}")" || exit 1
+    FOREIGN_REPOS_NAMES+=("${other_name}")
+    FOREIGN_REPOS_DIRS+=("${other_dir}")
+    FOREIGN_REPOS_CONTAINERS+=("${other_container}")
+    FOREIGN_REPOS_SNAPSHOTS+=("${other_repos_snapshot}")
+    if [ "${other_repos_snapshot}" = unavailable ]; then
+      echo "serve-container: NOTE — instance ${other_name} repos placement unavailable; the gateway will answer /v1/i/${other_name}/ as unavailable." >&2
+      continue
+    fi
+    if [ "${1:-}" = plan ]; then
+      printf 'instance\t%s\t%s\n' "${other_name}" "${INSTANCE_STATE_BASE}/${other_name}"
+      continue
+    fi
+    INSTANCE_STATE_ARGS+=(-v "${other_dir}:${INSTANCE_STATE_BASE}/${other_name}:ro" -v "${other_dir}/state:${INSTANCE_STATE_BASE}/${other_name}/state")
+    if [ "${other_repos_snapshot}" != legacy ]; then
+      other_repos_source="${other_repos_snapshot%%$'\t'*}"
+      if [ "${other_repos_source}" != "${other_dir%/}/repos" ]; then
+        INSTANCE_STATE_ARGS+=(-v "${other_repos_source}:${INSTANCE_STATE_BASE}/${other_name}/repos:ro")
+      fi
+    fi
+    { ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root "${other_dir}"; }
+    echo "serve-container: instance ${other_name} state ${other_dir} mounted at ${INSTANCE_STATE_BASE}/${other_name} (read-only except state/)"
+  done <<< "${FOREIGN_REPOS_REGISTRY_ROWS}"
+}
+
+if [ "${INSTANCE_MOUNT_PLAN_ONLY}" -eq 1 ]; then
+  instance_mount_rows plan
+  exit 0
 fi
 
 # ── W1-T13278: A REPLACE SWAPS IN A WARM REPLACEMENT BEFORE THE OLD CONSOLE STOPS ────────────────
@@ -737,132 +878,7 @@ if [ "${CONTAINER_EXISTS}" -eq 1 ] && [ "${REPLACE}" -ne 1 ] && [ "${DRY_RUN}" -
   exit 1
 fi
 
-INSTANCE_STATE_BASE="/home/node/rmd-instances"
-INSTANCE_STATE_ARGS=()
-list_registry_state_dirs() {
-  awk '
-    { sub(/[[:space:]]+#.*/, "") }
-    /^[[:space:]]*$/ { next }
-    /^[^ ]/ { if (name != "") print name, dir, retired, container; name = ""; inside = ($0 ~ /^instances:[[:space:]]*$/); next }
-    inside && $0 ~ /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {
-      if (name != "") print name, dir, retired, container
-      name = $1; sub(/:$/, "", name); dir = "-"; retired = "false"; container = "-"; next
-    }
-    inside && name != "" && $0 ~ /^    state_dir:/ { dir = $2 }
-    inside && name != "" && $0 ~ /^    retired:/ { retired = $2 }
-    inside && name != "" && $0 ~ /^    container_name:/ { container = $2 }
-    END { if (name != "") print name, dir, retired, container }
-  ' "$1"
-}
-# W1-T12126: managed repos may overlay a foreign daemon's durable root.
-# Read only Mounts from its declared container; never infer repos from a code checkout.
-FOREIGN_REPOS_NAMES=() FOREIGN_REPOS_DIRS=() FOREIGN_REPOS_CONTAINERS=() FOREIGN_REPOS_SNAPSHOTS=()
-FOREIGN_REPOS_REGISTRY_ROWS=""
-foreign_repos_snapshot() {
-  local state_dir="$1" container="$2" mounts=""
-  if [ "$container" = "-" ]; then
-    if declare -F scratch_enabled >/dev/null 2>&1 && scratch_enabled; then
-      printf '%s\n' unavailable
-    else
-      printf '%s\n' legacy
-    fi
-    return 0
-  fi
-  case "$container" in ""|-*|*[!A-Za-z0-9_.-]*)
-    echo "serve-container: REFUSING — foreign repos container name is unavailable or malformed." >&2
-    return 1 ;;
-  esac
-  if ! mounts="$(docker inspect "$container" --format '{{json .Mounts}}' 2>/dev/null)"; then
-    printf '%s\n' unavailable
-    return 0
-  fi
-  # W1-T12192: the scratch plan binds the coverage overlay below repos in every daemon container.
-  # That one bind is a known placement. Every other mount below repos still refuses.
-  node - "$state_dir" "$mounts" "${SCRATCH_REPOS_COVERAGE_DEST:-}" <<'NODE'
-const fs = require("node:fs");
-const path = require("node:path");
-try {
-  const root = "/home/node/Remudero", repos = root + "/repos";
-  const validPath = value => typeof value === "string" && path.isAbsolute(value) &&
-    !/[\r\n\t:|]/.test(value) && path.normalize(value) === value;
-  const mounts = JSON.parse(process.argv[3]);
-  if (!Array.isArray(mounts) || mounts.some(m => !m || !validPath(m.Destination)))
-    throw Error("malformed Mounts");
-  const roots = mounts.filter(m => m.Destination === root);
-  const relevant = mounts.filter(m => m.Destination === repos || repos.startsWith(m.Destination + "/"));
-  const below = mounts.filter(m => m.Destination.startsWith(repos + "/"));
-  const overlayDest = process.argv[4] || "";
-  const knownOverlay = m => m.Destination === overlayDest && m.Type === "bind" && validPath(m.Source);
-  if (roots.length !== 1 || relevant.some(m => m.Type !== "bind" || !validPath(m.Source)) ||
-      new Set(relevant.map(m => m.Destination)).size !== relevant.length ||
-      below.length > 1 || !below.every(knownOverlay))
-    throw Error("ambiguous or unsupported repos placement");
-  const directory = p => {
-    const canonical = fs.realpathSync(p), st = fs.statSync(canonical);
-    if (!validPath(canonical) || !st.isDirectory()) throw Error("repos source is not a directory");
-    fs.accessSync(canonical, fs.constants.R_OK | fs.constants.X_OK);
-    return [canonical, st.dev + ":" + st.ino];
-  };
-  const registryRoot = directory(process.argv[2]), mountedRoot = directory(roots[0].Source);
-  if (registryRoot[0] !== mountedRoot[0] || registryRoot[1] !== mountedRoot[1]) throw Error("declared instance root disagrees with Mounts");
-  const selected = relevant.sort((a, b) => b.Destination.length - a.Destination.length)[0];
-  if (!selected) throw Error("repos source is absent");
-  const source = directory(selected.Source + repos.slice(selected.Destination.length));
-  // Directory identity, not mtime: normal repository writes are not placement drift.
-  console.log([source[0], source[1], mountedRoot[0], mountedRoot[1], selected.Destination].join("\t"));
-} catch (error) {
-  console.error("serve-container: REFUSING — foreign repos placement unavailable: " + error.message);
-  process.exitCode = 1;
-}
-NODE
-}
-
-foreign_repos_recheck() {
-  local i current=""
-  [ -n "$FOREIGN_REPOS_REGISTRY_ROWS" ] || return 0
-  if [ "$(list_registry_state_dirs "$INSTANCE_REGISTRY")" != "$FOREIGN_REPOS_REGISTRY_ROWS" ]; then
-    echo "serve-container: REFUSING — foreign repos registry placement changed; launch refused." >&2
-    exit 1
-  fi
-  for ((i=0; i<${#FOREIGN_REPOS_NAMES[@]}; i++)); do
-    if ! current="$(foreign_repos_snapshot "${FOREIGN_REPOS_DIRS[i]}" "${FOREIGN_REPOS_CONTAINERS[i]}")" ||
-       [ "$current" != "${FOREIGN_REPOS_SNAPSHOTS[i]}" ]; then
-      echo "serve-container: REFUSING — instance ${FOREIGN_REPOS_NAMES[i]} repos placement changed or became unavailable." >&2
-      exit 1
-    fi
-  done
-}
-
-if [ -z "${INSTANCE_NAME}" ] && [ -r "${INSTANCE_REGISTRY}" ]; then
-  FOREIGN_REPOS_REGISTRY_ROWS="$(list_registry_state_dirs "${INSTANCE_REGISTRY}")"
-  while read -r other_name other_dir other_retired other_container; do
-    if [ "${other_name}" = "core" ] || [ "${other_retired}" = "true" ] || [ "${other_dir}" = "${STATE_DIR}" ]; then
-      continue
-    fi
-    if [ "${other_dir}" = "-" ] || [ ! -d "${other_dir}/state" ]; then
-      echo "serve-container: NOTE — instance ${other_name}'s state (${other_dir}/state) is absent here; the gateway will answer /v1/i/${other_name}/ as unavailable." >&2
-      continue
-    fi
-    other_repos_snapshot="$(foreign_repos_snapshot "${other_dir}" "${other_container}")" || exit 1
-    FOREIGN_REPOS_NAMES+=("${other_name}")
-    FOREIGN_REPOS_DIRS+=("${other_dir}")
-    FOREIGN_REPOS_CONTAINERS+=("${other_container}")
-    FOREIGN_REPOS_SNAPSHOTS+=("${other_repos_snapshot}")
-    if [ "${other_repos_snapshot}" = unavailable ]; then
-      echo "serve-container: NOTE — instance ${other_name} repos placement unavailable; the gateway will answer /v1/i/${other_name}/ as unavailable." >&2
-      continue
-    fi
-    INSTANCE_STATE_ARGS+=(-v "${other_dir}:${INSTANCE_STATE_BASE}/${other_name}:ro" -v "${other_dir}/state:${INSTANCE_STATE_BASE}/${other_name}/state")
-    if [ "${other_repos_snapshot}" != legacy ]; then
-      other_repos_source="${other_repos_snapshot%%$'\t'*}"
-      if [ "${other_repos_source}" != "${other_dir%/}/repos" ]; then
-        INSTANCE_STATE_ARGS+=(-v "${other_repos_source}:${INSTANCE_STATE_BASE}/${other_name}/repos:ro")
-      fi
-    fi
-    { ! declare -F registry_shadow_mount_root >/dev/null 2>&1 || registry_shadow_mount_root "${other_dir}"; }
-    echo "serve-container: instance ${other_name} state ${other_dir} mounted at ${INSTANCE_STATE_BASE}/${other_name} (read-only except state/)"
-  done <<< "${FOREIGN_REPOS_REGISTRY_ROWS}"
-fi
+instance_mount_rows
 
 RESOURCE_POLICY_SERVE_ARGS=() # W1-T4102: serve's host share; see deploy/resource-policy.sh
 RESOURCE_POLICY_SERVE_HIGH_MIB="" # read back from the cgroup after start; see resource_policy_probe_memory_high
