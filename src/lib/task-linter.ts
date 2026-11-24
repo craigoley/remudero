@@ -1,6 +1,7 @@
 import { operatorReleaseContractChanged } from "./operator-release.js";
 import { createHash } from "node:crypto";
-import { relative, sep } from "node:path";
+import { posix, relative, sep } from "node:path";
+import { maskLiterals, stripComments } from "./test-impact-map.js";
 import type { AcceptanceCriterion, MachineFilingAdmissionContext, Plan, Task, TaskStatus } from "./plan.js";
 import { PlanError, RETIREMENT_REASONS, machineFilingAdmissionViolations, mergePlanBlobs, unmetDependencies, withoutOneMovedFromLine } from "./plan.js";
 import { isInPlanScope } from "./plan-architect.js";
@@ -101,7 +102,8 @@ export type LintCheck =
   | "superseded-by"
   | "doctrine-citation-unresolved"
   | "design-invariant-proof"
-  | "needs-input";
+  | "needs-input"
+  | "production-caller";
 export type LintSeverity = "block" | "warn";
 
 export interface LintViolation {
@@ -153,6 +155,146 @@ export function addedExportsFromPatch(
     out.set(`${path}\0${m[1]}`, { path, symbol: m[1] });
   }
   return [...out.values()];
+}
+
+// W1-T12173: a new function, class or module that only tests reach.
+export interface ProductionCallerTree {
+  filesMentioning(words: readonly string[]): string[];
+  read(path: string): string | undefined;
+}
+
+export interface ProductionCallerFinding extends LintViolation {
+  path: string;
+  symbol?: string;
+  testUsers: string[];
+}
+
+export const PRODUCTION_CALLER_SEVERITY: LintSeverity = "warn";
+const CODE_PATH = /\.(?:ts|mts|cts|tsx|js|mjs|cjs)$/;
+const isTestPath = (p: string) => /^tests?\/|\/(?:tests?|__tests__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/.test(p);
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// An identifier not read as a property (`x.name`); a spread (`...name`) still counts.
+const NOT_PROPERTY = "(?<![\\w$])(?<!(?:^|[^.])\\.)";
+
+/** `addedExports` less each one a `-` line of its file declared: an edited declaration is not a new export. */
+export function exportsNewInPatch(addedExports: readonly AddedExport[], diffText: string): AddedExport[] {
+  const flip = (l: string) => (/^(?:\+\+\+|---)/.test(l) ? l : l.startsWith("-") ? `+${l.slice(1)}` : l.startsWith("+") ? ` ${l.slice(1)}` : l);
+  const removed = new Set(addedExportsFromPatch(diffText.split("\n").map(flip).join("\n")).map((e) => `${e.path}\0${e.symbol}`));
+  return addedExports.filter((e) => !removed.has(`${e.path}\0${e.symbol}`));
+}
+
+export function addedModulesFromPatch(diffText: string): string[] {
+  const out = new Set<string>();
+  let fromNull = false;
+  for (const raw of diffText.split("\n")) {
+    if (raw.startsWith("diff --git")) fromNull = false;
+    else if (raw.startsWith("--- ")) fromNull = raw.trim() === "--- /dev/null";
+    else if (raw.startsWith("+++ ") && fromNull) {
+      const path = raw.replace(/^\+\+\+\s+(?:b\/)?/, "").trim();
+      if (path.startsWith("src/") && CODE_PATH.test(path) && !path.endsWith(".d.ts") && !isTestPath(path)) out.add(path);
+    }
+  }
+  return [...out];
+}
+
+interface ImportEdge { base: string | undefined; names: Set<string>; ns?: string; reexportAll: boolean; dynamic: boolean }
+interface ParsedSource { edges: ImportEdge[]; code: string }
+
+function specifierBase(from: string, spec: string): string | undefined {
+  const alias = /^#([\w.-]+)\/(.+)$/.exec(spec);
+  if (alias) return `${alias[1]}/${alias[2]}`;
+  return spec.startsWith(".") ? posix.normalize(posix.join(posix.dirname(from), spec)) : undefined;
+}
+
+function baseNames(base: string | undefined, path: string): boolean {
+  if (base === undefined) return false;
+  const stem = base.replace(/\.(?:js|mjs|cjs|ts)$/, "");
+  return [base, `${stem}.ts`, `${stem}.mts`, `${stem}.tsx`, `${base}.ts`, `${base}.js`, `${base}.mjs`, `${base}/index.ts`].includes(path);
+}
+
+function parseSource(path: string, text: string): ParsedSource {
+  const kept = stripComments(text);
+  const code = maskLiterals(kept);
+  const edges: ImportEdge[] = [];
+  // Strings are blanked in `code`, so a keyword there at the same offset is real code.
+  const live = (at: number, word: string) => code.startsWith(word, at);
+  for (const m of kept.matchAll(/\b(import|export)(\s+type\b)?\s*([^'"`;]*?)\bfrom\s*["']([^"']+)["']/g)) {
+    if (!live(m.index, m[1]!) || m[2]) continue;
+    const clause = m[3]!;
+    const names = new Set<string>();
+    const braces = /\{([^}]*)\}/.exec(clause)?.[1] ?? "";
+    for (const part of braces.split(",")) {
+      const n = /^\s*(type\s+)?([\w$]+)/.exec(part);
+      if (n && !n[1]) names.add(n[2]!);
+    }
+    edges.push({ base: specifierBase(path, m[4]!), names, ns: /\*\s*as\s+([\w$]+)/.exec(clause)?.[1],
+      reexportAll: m[1] === "export" && /^\s*\*\s*$/.test(clause), dynamic: false });
+  }
+  const loads = /\b(?:import\s*\(\s*|require\s*\(\s*|createRequire\([^)]*\)\(\s*|new\s+URL\(\s*|import\s+)["'`]([^"'`]+)["'`]/g;
+  for (const m of kept.matchAll(loads)) {
+    if (live(m.index, m[0]!.slice(0, 3))) edges.push({ base: specifierBase(path, m[1]!), names: new Set(), reexportAll: false, dynamic: true });
+  }
+  return { edges, code };
+}
+
+/** Each added function/class export or added module no file outside test/ (and outside its own file) imports or calls. */
+export function exportsWithoutProductionCaller(
+  addedExports: readonly AddedExport[],
+  addedModules: readonly string[],
+  tree: ProductionCallerTree,
+): ProductionCallerFinding[] {
+  if (addedExports.length === 0 && addedModules.length === 0) return [];
+  const texts = new Map<string, string>();
+  const text = (f: string) => texts.get(f) ?? texts.set(f, tree.read(f) ?? "").get(f)!;
+  const parsed = new Map<string, ParsedSource>();
+  const parse = (f: string) => parsed.get(f) ?? parsed.set(f, parseSource(f, text(f))).get(f)!;
+  const exports = addedExports.filter((e) => new RegExp(
+    `\\bexport\\s+(?:default\\s+)?(?:async\\s+)?(?:function\\b\\s*\\*?|(?:abstract\\s+)?class\\s)\\s*${escapeRe(e.symbol)}(?![\\w$])`,
+  ).test(parse(e.path).code));
+  const modules = addedModules.filter((m) => !isTestPath(m));
+  if (exports.length === 0 && modules.length === 0) return [];
+  const stem = (p: string) => posix.basename(p.replace(/\/index\.[^/]+$/, "")).replace(/\.[^.]+$/, "");
+  const words = new Set([...exports.flatMap((e) => [e.symbol, stem(e.path)]), ...modules.map(stem)]);
+  const files = [...new Set(tree.filesMentioning([...words]))].filter((f) => CODE_PATH.test(f)).sort();
+  const loads = (f: string, target: string) => text(f).includes(stem(target)) && parse(f).edges.some((e) => baseNames(e.base, target));
+  // A new module counts as a caller only once something outside test/ reaches it.
+  const added = new Set(modules);
+  const reached = new Set<string>();
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const m of modules) {
+      if (reached.has(m) || !files.some((f) => f !== m && !isTestPath(f) && (!added.has(f) || reached.has(f)) && loads(f, m))) continue;
+      reached.add(m);
+      grew = true;
+    }
+  }
+  const counts = (f: string) => isTestPath(f) || !added.has(f) || reached.has(f);
+  const findings: ProductionCallerFinding[] = [];
+  const finding = (path: string, symbol: string | undefined, testUsers: string[], what: string, fix: string): ProductionCallerFinding => ({
+    check: "production-caller", severity: PRODUCTION_CALLER_SEVERITY, path, symbol, testUsers,
+    message: `${path}: ${what}, and no file outside test/${symbol ? ` or ${path}` : ""} imports or calls it` +
+      `${testUsers.length ? `; only ${testUsers.join(", ")} use it` : ""}. ${fix}`,
+  });
+  for (const e of exports) {
+    const via = [e.path, ...files.filter((f) => f !== e.path && /\bexport\s*\*/.test(text(f)) && parse(f).edges.some((x) => x.reexportAll && baseNames(x.base, e.path)))];
+    const name = escapeRe(e.symbol);
+    const uses = (f: string) => f !== e.path && counts(f) && text(f).includes(e.symbol) && parse(f).edges.some((x) => via.some((t) => baseNames(x.base, t)) && (
+      x.names.has(e.symbol) ||
+      (x.ns !== undefined && new RegExp(`${NOT_PROPERTY}${escapeRe(x.ns)}\\s*\\.\\s*${name}(?![\\w$])`).test(parse(f).code)) ||
+      (x.dynamic && new RegExp(`(?<![\\w$])${name}(?![\\w$])`).test(parse(f).code))));
+    const users = files.filter(uses);
+    if (users.some((f) => !isTestPath(f))) continue;
+    const own = (parse(e.path).code.match(new RegExp(`${NOT_PROPERTY}${name}(?![\\w$])`, "gm")) ?? []).length > 1;
+    findings.push(finding(e.path, e.symbol, users, `the diff adds the export ${e.symbol}`,
+      `Add a call to ${e.symbol} from the production code that needs it, or do not export it` +
+      `${own ? ` (${e.path} calls it itself, so only a test needs the export)` : ""}.`));
+  }
+  for (const m of modules) {
+    if (reached.has(m)) continue;
+    findings.push(finding(m, undefined, files.filter((f) => isTestPath(f) && loads(f, m)), "the diff adds this module",
+      `Add an import of ${m} to the production module that runs it, or remove it.`));
+  }
+  return findings;
 }
 
 // ── SIZING (Rule 19) ─────────────────────────────────────────────────────────
