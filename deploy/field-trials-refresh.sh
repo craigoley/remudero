@@ -177,7 +177,7 @@ if (( CREDENTIAL_EXIT != 0 )); then
   docker exec --workdir /home/node/Remudero/daemon-install remudero-daemon \
     /bin/sh -c 'umask 077; exec "$@"' field-trials-refresh /home/node/Remudero/daemon-install/bin/rmd field-trials \
     --offline --ledger core=/home/node/Remudero/state --out-dir /home/node/Remudero/state/field-trials \
-    "${CASE_ARG[@]}" ${CONSENT_EXEC_ARG[@]+"${CONSENT_EXEC_ARG[@]}"} "${REFRESH_ARG[@]}"
+    ${CASE_ARG[@]+"${CASE_ARG[@]}"} ${CONSENT_EXEC_ARG[@]+"${CONSENT_EXEC_ARG[@]}"} "${REFRESH_ARG[@]}"
   return $?
 fi
 docker run --rm --network host --volumes-from remudero-daemon \
@@ -191,7 +191,7 @@ docker run --rm --network host --volumes-from remudero-daemon \
   --source core=craigoley/remudero --source site=craigoley/remudero-site --source console=craigoley/remudero-console \
   --ledger core=/home/node/Remudero/state --ledger site=/field-trials/site --ledger console=/field-trials/console \
   --out-dir /home/node/Remudero/state/field-trials --max-pages "$MAX_PAGES" \
-  "${CASE_ARG[@]}" ${CONSENT_ARG[@]+"${CONSENT_ARG[@]}"} "${REFRESH_ARG[@]}"
+  ${CASE_ARG[@]+"${CASE_ARG[@]}"} ${CONSENT_ARG[@]+"${CONSENT_ARG[@]}"} "${REFRESH_ARG[@]}"
 }
 SNAPSHOT_EXIT=0
 collect_snapshot || SNAPSHOT_EXIT=$?
