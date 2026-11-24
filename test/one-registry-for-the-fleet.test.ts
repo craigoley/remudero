@@ -310,6 +310,15 @@ test("W1-T13700: the committed registry runs remudero-ops live, and every other 
   assert.match(block, /^ {4}mode: live$/m);
 });
 
+test("W1-T14594: wreckterra joins in shadow mode and the five rows before it stay byte-identical", () => {
+  const text = readFileSync(join(REPO_ROOT, ".remudero", "daemon-instances.yaml"), "utf8");
+  const wreckterra = parseInstanceRegistry(text).instances.find((i) => i.name === "wreckterra");
+  assert.deepEqual([wreckterra?.mode, wreckterra?.project, wreckterra?.repo, wreckterra?.live], ["shadow", "remudero", "craigoley/wreckterra", true]);
+  // The registry as it stood before this row, byte for byte: re-pin it only when an existing row truly changes.
+  const before = text.slice(0, text.indexOf("\n  wreckterra:") + 1);
+  assert.equal(createHash("sha256").update(before).digest("hex"), "bbc6d75f82def9755921ff9853fe39dc528c776b767a70c8547daae704ed7a60");
+});
+
 // The two shell readers REFUSE an unknown field, so the project layer is only safe to add because
 // both now list `project`, `github_repo` and `retired` as known-and-ignored. Each check below has
 // a control: the same fixture with an unknown field is refused, proving the probe can see a refusal.
