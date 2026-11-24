@@ -235,48 +235,6 @@ jobs:
           else
             echo "CI admission: no browser download for an idle source shard."
           fi
-      # W1-T11263: every job that can run test/selected-registry-shell-consumers.test.ts restores or builds the
-      # pinned bash 3.2 and exports RMD_TEST_BASH32_REQUIRED=1, under which an UNMEASURED 3.2 leg fails the suite.
-      - name: Restore the pinned bash 3.2 build (W1-T11263)
-        id: bash32-cache
-        if: ${{ steps.admission.outputs.setup != 'false' }}
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/bash32
-          key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}
-      - name: Build the pinned bash 3.2 from GNU source on a cache miss and export RMD_TEST_BASH32 (W1-T11263)
-        env:
-          BASH32_NEEDED: ${{ steps.admission.outputs.setup != 'false' }}
-          BASH32_CACHE_HIT: ${{ steps.bash32-cache.outputs.cache-hit }}
-        run: |
-          set -euo pipefail
-          OUT="$RUNNER_TEMP/bash32"
-          if [ "$BASH32_NEEDED" = "true" ]; then
-            if [ "$BASH32_CACHE_HIT" != "true" ]; then
-              SRC="$RUNNER_TEMP/bash32-src"
-              mkdir -p "$SRC" "$OUT"
-              curl --fail --silent --show-error --location --retry 3 --output "$SRC/bash-3.2.tar.gz" https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz
-              echo "${BASH32_SHA256}  $SRC/bash-3.2.tar.gz" | sha256sum --check --strict
-              tar -xzf "$SRC/bash-3.2.tar.gz" -C "$SRC"
-              cd "$SRC/bash-3.2"
-              BASH32_CFLAGS="-O2 -std=gnu89 -fpermissive -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
-              # support/ helpers (bashversion, mksyntax) build with CC_FOR_BUILD/CFLAGS_FOR_BUILD, not CFLAGS: CC carries the
-              # dialect flags (CC_FOR_BUILD defaults to $(CC)) and both flag sets are passed, so gcc 14 never sees C99 rules.
-              ./configure --quiet --without-bash-malloc CC="gcc -std=gnu89 -fpermissive" CFLAGS="$BASH32_CFLAGS" CFLAGS_FOR_BUILD="$BASH32_CFLAGS"
-              make -s
-              cp bash "$OUT/bash"
-            fi
-            VERSION="$("$OUT/bash" --version | sed -n 1p)"
-            if ! printf '%s' "$VERSION" | grep -q 'version 3\.2\.'; then
-              echo "::error::W1-T11263: $OUT/bash reports '${VERSION}', not bash 3.2."
-              exit 1
-            fi
-            echo "W1-T11263: RMD_TEST_BASH32=$OUT/bash (${VERSION})."
-            echo "RMD_TEST_BASH32=$OUT/bash" >> "$GITHUB_ENV"
-            echo "RMD_TEST_BASH32_REQUIRED=1" >> "$GITHUB_ENV"
-          else
-            echo "W1-T11263: this job runs no tests for this event and diff class, so no bash 3.2 is built."
-          fi
       - name: Typecheck
         # §5 TIER 2, quality gate 4/4 (W1-T98): this step is TS-strict's actual enforcement. A
         # strict-mode violation anywhere in src/**/test/** fails it and blocks merge via ci-gate.
