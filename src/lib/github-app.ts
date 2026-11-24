@@ -483,8 +483,21 @@ export type EnsureFreshOutcome = "fresh" | "renewed" | "token_expired";
 /** W1-T14543: an armed loop's view of its held token, for a caller about to present it. Neither method returns it. */
 export interface HeldTokenAccess {
   tokenState(token: string | undefined): HeldTokenState;
-  /** Past expiry with the timer overdue, renews once (concurrent calls share it); a retry not yet due is refused. */
-  ensureFresh(): Promise<EnsureFreshOutcome>;
+  /** Past expiry (or, W1-T14677, inside `minRemainingMs` of it) with the timer overdue, renews once (concurrent calls
+   *  share it). A retry not yet due is refused when the token has expired, and reads "fresh" while it has not. */
+  ensureFresh(minRemainingMs?: number): Promise<EnsureFreshOutcome>;
+}
+
+/** W1-T14677: the time a garden pass's GitHub read needs left on its token. A nearer expiry is renewed first. */
+export const HELD_TOKEN_READ_MARGIN_MS = 5 * 60 * 1000;
+/** W1-T14677: this process's most recently armed loop, until it stops. A long pass reaches its renewal through it. */
+let armedHeldToken: HeldTokenAccess | undefined;
+
+/** W1-T14677: before a GitHub read, renew this process's held token when it has less than `minRemainingMs` left, so
+ *  a pass that outlives its token never presents it. `not_armed`: no loop holds a token here, and nothing is done. */
+export async function ensureHeldTokenFresh(minRemainingMs: number = HELD_TOKEN_READ_MARGIN_MS): Promise<EnsureFreshOutcome | "not_armed"> {
+  const held = armedHeldToken;
+  return held === undefined ? "not_armed" : held.ensureFresh(minRemainingMs);
 }
 
 /** The margin's attempt count at the measured cycle (timer lateness plus exchange), up to half a life. */
@@ -643,25 +656,30 @@ export function startInstallationTokenRefresh(opts: {
     return now() < lastSuccessfulExpiresAtMs ? "fresh" : "expired";
   };
   // W1-T14543: a held loop cannot fire the timer, so a read past expiry renews here. A retry not yet due stays the timer's.
-  const ensureFresh = async (): Promise<EnsureFreshOutcome> => {
+  const ensureFresh = async (minRemainingMs = 0): Promise<EnsureFreshOutcome> => {
     const replaced = lastSuccessfulExpiresAtMs;
-    if (replaced === undefined || now() < replaced) return "fresh";
+    if (replaced === undefined || now() < replaced - minRemainingMs) return "fresh";
     if (inflight === undefined) {
       const at = now();
-      if (stopped || at < dueAt) return "token_expired";
+      if (stopped || at < dueAt) return at < replaced ? "fresh" : "token_expired";
       const due = dueAt;
       if (timer) clear(timer);
       void track(runOnce());
       noteLate(replaced, at, due, "read");
     }
     const result = await inflight!;
-    return result.ok && lastSuccessfulExpiresAtMs !== undefined && now() < lastSuccessfulExpiresAtMs ? "renewed" : "token_expired";
+    const held = lastSuccessfulExpiresAtMs;
+    if (result.ok && held !== undefined && now() < held - minRemainingMs) return "renewed";
+    return held !== undefined && now() < held ? "fresh" : "token_expired";
   };
   const firstResult = track(runOnce());
   const ready = firstResult.then(() => undefined);
+  const access: HeldTokenAccess = { tokenState, ensureFresh };
+  armedHeldToken = access;
   const stop = (): void => {
     stopped = true;
     if (timer) clear(timer);
+    if (armedHeldToken === access) armedHeldToken = undefined;
   };
   return { armed: true, ready, firstResult, stop, tokenState, ensureFresh };
 }
