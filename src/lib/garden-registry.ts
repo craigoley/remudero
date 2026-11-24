@@ -46,6 +46,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 import { randomUUID } from "node:crypto";
 import { GARDENER_RUNTIME_FILE, medianMs, parseGardenerRuntime, standingDueInterval, type DueInterval, type GardenerRuntimeEvent } from "./gardener-runtime.js";
 import { GARDENER_ORIGIN_ENV, gardenerOriginEnv } from "./worker-containment.js";
+import { CONFLICT_GARDEN_REPORT, runConflictGarden, type ConflictGardenPorts, type ConflictGardenPr } from "./conflict-gardener.js";
 
 /** The gardens the daemon runs off its loop, in the order its `gardens` list has always wired them. */
 export const REGISTERED_GARDEN_NAMES = [
@@ -86,6 +87,7 @@ export const REGISTERED_GARDEN_NAMES = [
 ] as const;
 
 export type RegisteredGardenName = (typeof REGISTERED_GARDEN_NAMES)[number];
+type PacedGardenName = RegisteredGardenName | "conflict";
 
 /** Operator 2026-11-01 ("something that manages this running as a part of rmd on any repo its managing"): the
  *  gardens that also run on a non-self managed target, over THAT repository. Every other garden stays self-only. */
@@ -256,13 +258,13 @@ export interface GardenPacing {
 
 /** A pacing record's file. `repository` (`owner/repo`) keys a per-target garden's record on a non-self target, so
  *  two targets never share one; the self repo's record keeps its unkeyed name. */
-export function gardenPacingPath(stateDir: string, name: RegisteredGardenName, repository?: string): string {
+export function gardenPacingPath(stateDir: string, name: PacedGardenName, repository?: string): string {
   const key = repository === undefined ? "" : `-${repository.toLowerCase().replace(/[^a-z0-9._-]+/g, "__")}`;
   return join(stateDir, `${name}${key}-garden-pacing.json`);
 }
 
 /** The recorded pacing; an absent or damaged record is none, so the next poll runs a pass. */
-export function readGardenPacing(stateDir: string, name: RegisteredGardenName, repository?: string): GardenPacing | undefined {
+export function readGardenPacing(stateDir: string, name: PacedGardenName, repository?: string): GardenPacing | undefined {
   try {
     const parsed = JSON.parse(readFileSync(gardenPacingPath(stateDir, name, repository), "utf8")) as Partial<GardenPacing>;
     if (!Number.isFinite(Date.parse(String(parsed.lastPassAt))) || !Number.isFinite(Date.parse(String(parsed.lastNewAt)))) return undefined;
@@ -294,7 +296,7 @@ export function gardenPacingDue(stateDir: string, name: RegisteredGardenName, op
   return gardenQuietSpanDue(pacing, opts.clock ?? systemClock);
 }
 
-export async function gardenPacingDueAsync(stateDir: string, name: RegisteredGardenName, opts: { clock?: Clock; inputs?: () => string | Promise<string> } = {}): Promise<boolean> {
+export async function gardenPacingDueAsync(stateDir: string, name: PacedGardenName, opts: { clock?: Clock; inputs?: () => string | Promise<string> } = {}): Promise<boolean> {
   const pacing = readGardenPacing(stateDir, name);
   if (pacing === undefined) return true;
   if (name === "host-resource" || name === "flow-remedy") {
@@ -308,7 +310,7 @@ export async function gardenPacingDueAsync(stateDir: string, name: RegisteredGar
 }
 
 /** Record one finished pass of a paced garden: `found` is whether it found anything new. */
-export function recordGardenPacing(stateDir: string, name: RegisteredGardenName, found: boolean, opts: { clock?: Clock; inputs?: string; repository?: string } = {}): void {
+export function recordGardenPacing(stateDir: string, name: PacedGardenName, found: boolean, opts: { clock?: Clock; inputs?: string; repository?: string } = {}): void {
   const at = (opts.clock ?? systemClock).iso();
   const prior = readGardenPacing(stateDir, name, opts.repository);
   const pacing: GardenPacing = { lastPassAt: at, lastNewAt: found || prior === undefined ? at : prior.lastNewAt,
@@ -895,6 +897,22 @@ export function flowGardenPass(
   };
   return Object.assign(pass, { due: () => flowPassDue(d.stateDir, d.clock) });
 }
+
+/** The conflict pass stays beside the full sweep's snapshot, claims and broker. */
+export const conflictGardenPass: <Pr extends ConflictGardenPr>(stateDir: string, ports: ConflictGardenPorts<Pr>) => Promise<void> =
+async function conflictGardenPass(stateDir, ports) {
+  const clock = fixedClock(ports.now());
+  const { prs, mainSha } = ports.snapshot();
+  const inputs = JSON.stringify([mainSha, prs.map(pr => [pr.prNumber, pr.headSha, pr.mergeableState, pr.mergeConflictSource, pr.checksState])
+    .sort((a, b) => Number(a[0]) - Number(b[0]))]);
+  if (!await gardenPacingDueAsync(stateDir, "conflict", { clock, inputs: () => inputs })) return;
+  let found = false;
+  await runConflictGarden({ ...ports, record: row => {
+    ports.record(row);
+    if (row.step === CONFLICT_GARDEN_REPORT) found = row.new_evidence === true;
+  } });
+  recordGardenPacing(stateDir, "conflict", found, { clock: fixedClock(ports.now()), inputs });
+};
 
 /** W1-T8864: one issue-revalidation pass as the daemon builds it. Paced: a pass whose verdicts all match
  *  the previous ones widens the wait (never under the garden's hourly floor), and a changed verdict snaps
