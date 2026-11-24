@@ -381,6 +381,11 @@ export interface NextRunnableOpts extends TaskPreconditionOptions {
    *  which prefers candidates disjoint from them too, and are never returned (matched by id). Absent or
    *  empty, the pack is byte-identical to the pack without it. */
   inFlight?: readonly Task[];
+  /** W1-T14654: the lane total the expedite share is derived from. Absent, `inFlight.length + limit`: right for a
+   *  pass that fills the free lanes, too many for a refill whose pool spans every lane. */
+  expediteLanes?: number;
+  /** W1-T14654: observation only, once per returned task the expedite lane admitted. */
+  onExpedited?: (task: Task, start: ExpeditedStart) => void;
   /** W1-T8514: measured run lengths for the priority reservation's backfill release. Absent, a reservation
    *  holds without release. */
   priorityBackfill?: PriorityBackfillEstimates;
@@ -483,6 +488,43 @@ function applyMachineShare(ordered: Task[], opts: NextRunnableOpts): Task[] {
       queue_judge_fresh: !(staleMs !== undefined && staleMs > QUEUE_JUDGE_STALE_MS), ...(staleMs === undefined ? {} : { queue_judge_stale_ms: staleMs }) });
   }
   return next;
+}
+
+/** W1-T14654 (operator ruling 2026-11-24, "Expedite lane"): the row an expedited start writes. */
+export const EXPEDITED_STEP = "dispatch.expedited";
+const OPERATOR_RULING_ORIGIN = "operator-ruling#";
+
+/** Why a task goes ahead of the stride order: its trimmed `expedite` text, else "operator ruling" for an
+ *  operator-ruling origin, else undefined. Only a non-blank string declares an expedite. */
+export function expediteReason(task: Task): string | undefined {
+  const declared = typeof task.expedite === "string" ? task.expedite.trim() : "";
+  if (declared !== "") return declared;
+  return typeof task.origin === "string" && task.origin.startsWith(OPERATOR_RULING_ORIGIN) ? "operator ruling" : undefined;
+}
+
+/** One expedited pick: `share` = max(1, lanes - 1) expedited tasks may be in flight, `expedited_in_flight` already are. */
+export interface ExpeditedStart { reason: string; lanes: number; share: number; expedited_in_flight: number }
+
+/** INVARIANT holds-still-hold: `ordered` is already the eligible set. Expedited tasks move to the front in their own
+ *  order, after any resumable lead, up to the lanes the share leaves; the ones past it sit this pass out, so the
+ *  ordinary queue always keeps a lane. With no expedited task the order is returned untouched. */
+function applyExpediteLane(ordered: Task[], limit: number, inFlight: readonly Task[], opts: NextRunnableOpts):
+  { ordered: Task[]; lane?: Omit<ExpeditedStart, "reason"> } {
+  const inFlightIds = new Set(inFlight.map((t) => t.id));
+  const expedited = ordered.filter((t) => !inFlightIds.has(t.id) && expediteReason(t) !== undefined);
+  if (expedited.length === 0) return { ordered };
+  const lanes = opts.expediteLanes ?? inFlight.length + limit;
+  const share = Math.max(1, lanes - 1);
+  const running = inFlight.filter((t) => expediteReason(t) !== undefined).length;
+  const admitted = new Set(expedited.slice(0, Math.max(0, share - running)));
+  const resumable = opts.resumableTaskIds ?? new Set<string>();
+  const kept = ordered.filter((t) => admitted.has(t) || !expedited.includes(t));
+  const next = [
+    ...kept.filter((t) => resumable.has(t.id)),
+    ...kept.filter((t) => admitted.has(t) && !resumable.has(t.id)),
+    ...kept.filter((t) => !admitted.has(t) && !resumable.has(t.id)),
+  ];
+  return { ordered: next, lane: { lanes, share, expedited_in_flight: running } };
 }
 
 /** Total order. With a ready cost-of-delay context (W1-T9323): stride pass, priority as the first tiebreak,
@@ -858,11 +900,19 @@ function taskPreconditionHolds(task: Task, opts: NextRunnableOpts): boolean {
  *  Admission stays in dispatch-overlap.ts; selection consults its same overlap predicate. */
 export function runnableCandidates(plan: Plan, isMerged: MergedSet, limit: number, opts: NextRunnableOpts = {}): Task[] {
   if (limit <= 0) return [];
-  const eligible = dispatchEligibleCandidates(plan, isMerged, opts);
-  const collected = packDisjointFirst(eligible, limit, opts.observedByTask ?? NO_OBSERVED_SCOPE, opts.inFlight ?? [], opts);
+  const inFlight = opts.inFlight ?? [];
+  const expedite = applyExpediteLane(dispatchEligibleCandidates(plan, isMerged, opts), limit, inFlight, opts);
+  const collected = packDisjointFirst(expedite.ordered, limit, opts.observedByTask ?? NO_OBSERVED_SCOPE, inFlight, opts);
   // W1-T2397: observe, then dispatch anyway — the same placement `nextRunnable` uses, one level over,
   // so it cannot alter the batch. This is the DAEMON's selector: `runDaemon` calls this one.
   for (const t of collected) observeOpenSibling(t, opts);
+  const lane = expedite.lane;
+  if (lane !== undefined) {
+    for (const t of collected) {
+      const reason = expediteReason(t);
+      if (reason !== undefined) opts.onExpedited?.(t, { reason, ...lane });
+    }
+  }
   return collected;
 }
 
