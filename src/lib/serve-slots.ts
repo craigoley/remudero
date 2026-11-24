@@ -22,7 +22,7 @@
 import { existsSync, linkSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
-import { execFileLoopBounded } from "./loop-bounded-child.js";
+import { execFileRouted } from "./spawn-helper.js";
 import { reclaimStaleGitLocks, type StaleLockReclaimOptions } from "./git-lock-reclaim.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import type { PreparedSlot, ServeSupervisorOptions } from "./serve-supervisor.js";
@@ -38,7 +38,7 @@ export type RunCommand = (command: string, args: string[], cwd: string) => Promi
  *  its slot through this, and a held loop must not destroy a finished child's stdout. */
 export const runCommand: RunCommand = async (command, args, cwd) => {
   try {
-    return (await execFileLoopBounded(command, args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: SLOT_INSTALL_TIMEOUT_MS })).stdout;
+    return (await execFileRouted(command, args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: SLOT_INSTALL_TIMEOUT_MS })).stdout;
   } catch (error) {
     const err = error as { stderr?: unknown; code?: unknown; signal?: unknown; name?: string; message?: string };
     const stderr = typeof err.stderr === "string" ? err.stderr.trim() : "";
