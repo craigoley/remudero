@@ -319,3 +319,12 @@ describe("a daemon start writes the parts of its start time", () => {
     assert.equal(start.rows.length, 0);
   });
 });
+
+test("W1-T14674 a daemon start names the loop preamble's parts before its first tick", async (t) => {
+  const start = await startDaemon(t);
+  const row = start.rows[0]!;
+  for (const part of ["loop_history", "heap_telemetry", "heap_shadow"]) {
+    assert.equal(typeof row[`${part}_ms`], "number", `${part}_ms: ${JSON.stringify(row)}`);
+  }
+  assert.equal(row.other_ms, 5, "what follows the heap shadow, the run-child adoption here, is still other_ms");
+});
