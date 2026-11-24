@@ -37,10 +37,10 @@ export interface CaseLedgerRead {
   malformed: number;
   /** Present only when a damaged row was seen; each entry is a bounded fault, never raw text. */
   malformedSources?: CaseMalformedSource[];
-  /** True only when the task's EVIDENCE rows (every step outside {@link CASE_TELEMETRY_STEPS}) exceed the bound. */
+  /** W1-T14630: always false. No count refuses or cuts a case file; the field stays for hand-built reads. */
   truncated: boolean;
-  /** Distinct heartbeat rows matched but not kept (see {@link CASE_TELEMETRY_STEPS}). The reader always sets
-   * it; a hand-built read may omit it, which reads as 0. */
+  /** Distinct heartbeat rows matched but not kept, because the status projection reads none of their values
+   * (see {@link reduceHeartbeats}). The reader always sets it; a hand-built read may omit it, which reads as 0. */
   telemetryRowsDropped?: number;
 }
 
@@ -103,72 +103,97 @@ export interface CaseMalformedSource {
 export { malformedRowCouldBelong };
 
 /** Heartbeat steps. No case-file field reads them: `buildTaskCaseFile` joins run.start, worker.assignment,
- * worker.attempt, pr.opened and verdict, and `taskShapeCovariates` counts run.start and fix.dispatch. The
- * status projection `assembleCaseFile` derives reads only their RECENCY — `lastActivityTs` (newest own-run
- * row), the latest `worker.state` transition, and `worker.activity`'s latest event — so a newest-per-step
- * tail is enough. It also sets `firstSignalAt` from a run's first activity, which a dropped head loses;
- * that field is display-only and no case-file field reads it. A run evidenced ONLY by dropped heartbeats
- * (its run.start outside the window) leaves `runs` instead of appearing with every field null. */
+ * worker.attempt, pr.opened and verdict, and `taskShapeCovariates` counts run.start and fix.dispatch. The status
+ * projection `assembleCaseFile` derives (status.ts `deriveRunState`) folds them in ledger order; see
+ * {@link reduceHeartbeats} for the rows that fold reads. */
 export const CASE_TELEMETRY_STEPS: ReadonlySet<string> = new Set(["worker.activity", "run.running_long", "worker.state"]);
 
-/** BACKSTOP: heartbeat rows kept per step per task, newest by `ts`. Measured 2026-09-28: 1661-4609
- * heartbeats per long-running task beside 17-26 evidence rows. Overflow is counted, never refused. */
-export const MAX_CASE_TELEMETRY_ROWS_PER_STEP = 500;
+interface KeptRow { row: Record<string, unknown>; seq: number }
 
-interface KeptRow { row: Record<string, unknown>; identity: string; at: number; seq: number }
+const json = (value: unknown): string => JSON.stringify(value) ?? "undefined";
 
-/** Keep the newest `budget` rows by (ts, arrival); an evicted row's fingerprint stays so a replay of it in a
- * later rotation is neither re-kept nor counted twice. Rows are bounded; fingerprints of dropped ones are not. */
-function keepNewest(kept: KeptRow[], budget: number, seen: Set<string>, dropped: Set<string>): void {
-  if (kept.length <= budget) return;
-  kept.sort((a, b) => a.at - b.at || a.seq - b.seq);
-  for (const evicted of kept.splice(0, kept.length - budget)) {
-    seen.delete(evicted.identity);
-    dropped.add(fingerprintLedgerLine(evicted.identity));
+/** W1-T14630: the slots a heartbeat row can fill. Between two of a task's evidence rows (a segment), the
+ * `deriveRunState` fold of one run's heartbeats depends only on: the last row with a string `ts` (lastActivityTs);
+ * the last `worker.state` row of each `state` value (the last valid one sets workerState and workerStateSince);
+ * and, per `worker.activity` class (raw `event_kind`, and whether its event time is truthy), the first and last
+ * row (firstSignalAt, lastEventAt/Kind, currentTool, and the last valid non-executing event that clears the tool
+ * fields), and the last row per value of each field a later event carries forward (worker_role, provider,
+ * requested_model, served_model, a tool completion, tool_reason, tool_started_at). Slots key on raw values, not on
+ * status.ts's validity checks, so the last VALID row of each kind is always the last row of its own slot: the
+ * kept set grows with the distinct values seen, never with the heartbeat count, and the fold over it equals the
+ * fold over every row. */
+function heartbeatSlots(row: Record<string, unknown>, step: string): { first: string[]; last: string[] } {
+  const run = json(row.run_id);
+  const last = [`${run}|ts|${typeof row.ts === "string"}`];
+  const first: string[] = [];
+  if (step === "worker.state") last.push(`${run}|state|${json(row.state)}`);
+  if (step === "worker.activity") {
+    const eventAt = typeof row.event_at === "string" ? row.event_at : typeof row.ts === "string" ? row.ts : undefined;
+    const cls = `${run}|activity|${json(row.event_kind)}|${Boolean(eventAt)}`;
+    first.push(cls);
+    last.push(cls, `${cls}|role|${json(row.worker_role)}`,
+      ...(["provider", "requested_model", "served_model", "tool_reason", "tool_started_at"] as const)
+        .map((field) => `${cls}|${field}|${typeof row[field] === "string"}`),
+      `${cls}|done|${typeof row.tool_completed_at === "string"}|${typeof row.tool_duration_ms === "number"}`);
   }
+  return { first, last };
+}
+
+/** The rows one segment keeps, in arrival order. */
+function reduceHeartbeats(segment: Map<string, KeptRow>): KeptRow[] {
+  return [...new Set(segment.values())].sort((a, b) => a.seq - b.seq);
+}
+
+interface TaskRead {
+  kept: KeptRow[];
+  /** The open heartbeat segment's slots, each holding the row that fills it. */
+  segment: Map<string, KeptRow>;
+  segmentRows: number;
+  seen: Set<string>;
+  dropped: number;
+  blocking: number;
 }
 
 export interface TaskCaseLedgersInput {
   windowDays?: number;
-  /** Bound on a task's EVIDENCE rows; exceeding it refuses the read as `task-row-bound-exceeded`. */
-  maxRows?: number;
-  /** Heartbeat rows kept per {@link CASE_TELEMETRY_STEPS} step; defaults to {@link MAX_CASE_TELEMETRY_ROWS_PER_STEP}. */
-  maxTelemetryRowsPerStep?: number;
   /** Stream-opening I/O for the one union pass; tests count opens through it. */
   io?: LedgerUnionStreamIO;
 }
 
-/** Stream the three-form union ONCE for every requested task. Only exact task-owned rows are
- * retained, with a hard per-task memory bound; a damaged row refuses only a task it could belong to.
- * Heartbeat rows are bounded apart from evidence rows, so they never exhaust the evidence bound. */
+/** Stream the three-form union ONCE for every requested task. Every exact task-owned evidence row is retained, and
+ * heartbeats only as the rows the status projection reads (W1-T14630); a damaged row refuses only a task it could
+ * belong to. No row count refuses or cuts a read. */
 export async function readTaskCaseLedgers(
   stateDir: string, taskIds: readonly string[], asOf: string, opts: TaskCaseLedgersInput = {},
 ): Promise<Map<string, CaseLedgerRead>> {
   const windowDays = opts.windowDays ?? 30;
-  const maxRows = opts.maxRows ?? 2_000;
-  const telemetryBudget = opts.maxTelemetryRowsPerStep ?? MAX_CASE_TELEMETRY_ROWS_PER_STEP;
-  if (!Number.isInteger(windowDays) || windowDays < 1 || !Number.isInteger(maxRows) || maxRows < 1
-    || !Number.isInteger(telemetryBudget) || telemetryBudget < 1)
-    throw new TypeError("case-file windowDays, maxRows and maxTelemetryRowsPerStep must be positive integers");
+  if (!Number.isInteger(windowDays) || windowDays < 1) throw new TypeError("case-file windowDays must be a positive integer");
   const windowStart = fixedClock(Date.parse(asOf) - windowDays * 86_400_000).iso();
   const forms = { gzip: 0, plain: 0, live: 0 };
-  const perTask = new Map(taskIds.map((taskId) => [taskId, { evidence: [] as KeptRow[], telemetry: new Map<string, KeptRow[]>(),
-    seen: new Set<string>(), dropped: new Set<string>(), blocking: 0, truncated: false }]));
+  // `seen` holds every kept or reduced row's fingerprint, so a row a later rotation replays is skipped either way.
+  const perTask = new Map(taskIds.map((taskId): [string, TaskRead] => [taskId, { kept: [], segment: new Map(),
+    segmentRows: 0, seen: new Set(), dropped: 0, blocking: 0 }]));
+  const closeSegment = (task: TaskRead): void => {
+    if (task.segmentRows === 0) return;
+    const reduced = reduceHeartbeats(task.segment);
+    task.dropped += task.segmentRows - reduced.length;
+    task.kept.push(...reduced);
+    task.segment = new Map();
+    task.segmentRows = 0;
+  };
   let seq = 0;
   const unread: string[] = [];
   const sources = new Map<string, CaseMalformedSource>();
   let malformed = 0;
   const settle = (reason?: string): Map<string, CaseLedgerRead> => new Map([...perTask].map(([taskId, task]) => {
-    const refusal = reason ?? (unread.length ? "ledger-source-unreadable" : task.blocking ? "ledger-source-malformed"
-      : task.truncated ? "task-row-bound-exceeded" : undefined);
-    for (const kept of task.telemetry.values()) keepNewest(kept, telemetryBudget, task.seen, task.dropped);
+    const refusal = reason ?? (unread.length ? "ledger-source-unreadable" : task.blocking ? "ledger-source-malformed" : undefined);
+    closeSegment(task);
     // Kept rows return in arrival order: the status projection's run-state scan is order-sensitive.
-    const rows = refusal ? [] : [...task.evidence, ...[...task.telemetry.values()].flat()]
-      .sort((a, b) => a.seq - b.seq).map((entry) => entry.row);
+    const rows = refusal ? [] : task.kept.map((entry) => entry.row);
     return [taskId, { rows, state: refusal ? "unavailable" : "observed",
       ...(refusal ? { reason: refusal } : {}), asOf, windowStart, forms: { ...forms }, unread: [...unread], malformed,
       ...(malformed ? { malformedSources: [...sources.values()].map((entry) => ({ ...entry })) } : {}),
-      truncated: task.truncated, telemetryRowsDropped: task.dropped.size }];
+      truncated: false, telemetryRowsDropped: task.dropped }];
   }));
   try {
     const rotations = ledgerRotationEntries(readdirSync(stateDir), stateDir);
@@ -197,24 +222,22 @@ export async function readTaskCaseLedgers(
     }, opts.io)) {
       const task = typeof row.task_id === "string" ? perTask.get(row.task_id) : undefined;
       if (!task || !ownedRun(row.task_id as string, row.run_id)) continue;
-      // Rotations retain replayed lines; the identity set holds only kept rows.
-      const identity = JSON.stringify(row);
+      // Rotations retain replayed lines: a row seen once is neither kept nor counted again.
+      const identity = fingerprintLedgerLine(JSON.stringify(row));
       if (task.seen.has(identity)) continue;
+      task.seen.add(identity);
       const step = typeof row.step === "string" && CASE_TELEMETRY_STEPS.has(row.step) ? row.step : undefined;
       if (step === undefined) {
-        if (task.evidence.length >= maxRows) { task.truncated = true; continue; }
-        task.seen.add(identity);
-        task.evidence.push({ row, identity, at: 0, seq: seq++ });
+        // An evidence row ends the heartbeat segment before it: the fold reads them in that order.
+        closeSegment(task);
+        task.kept.push({ row, seq: seq++ });
         continue;
       }
-      if (task.dropped.size && task.dropped.has(fingerprintLedgerLine(identity))) continue;
-      const kept = task.telemetry.get(step) ?? [];
-      task.telemetry.set(step, kept);
-      task.seen.add(identity);
-      const at = Date.parse(row.ts as string);
-      kept.push({ row, identity, at: Number.isNaN(at) ? Number.NEGATIVE_INFINITY : at, seq: seq++ });
-      // Compacting at twice the budget keeps memory bounded while sorting only once per `budget` arrivals.
-      if (kept.length >= 2 * telemetryBudget) keepNewest(kept, telemetryBudget, task.seen, task.dropped);
+      const entry = { row, seq: seq++ };
+      const slots = heartbeatSlots(row, step);
+      for (const slot of slots.first) if (!task.segment.has(`first|${slot}`)) task.segment.set(`first|${slot}`, entry);
+      for (const slot of slots.last) task.segment.set(`last|${slot}`, entry);
+      task.segmentRows += 1;
     }
   } catch (error) {
     return settle(`ledger-read-failed:${error instanceof Error ? error.name : "unknown"}`);
