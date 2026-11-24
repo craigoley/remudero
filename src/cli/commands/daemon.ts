@@ -53,7 +53,7 @@ import { createThreadEventSync, registryThreadItems, type InboxResponderDeps } f
 import type { InboxCausalScope } from "../../lib/inbox-thread.js";
 import { gitRecommendationEvidence, RECOMMENDATION_SEED_PATH } from "../../lib/inbox-recommendation.js";
 import { censusRunDirs } from "../../lib/run-child-contract.js";
-import { loadTargetPlanQuarantiningDuplicates, plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
+import { loadTargetPlanOrEmptyWhenAbsent, plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
@@ -1651,7 +1651,15 @@ export async function daemonCommand(
       ? startGardenOffLoop(name, intervalMs, { flight: gardenFlight, spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContextFor(name)) }) })
       : { stop() {} };
   // W1-T13585: a foreign target's plan can hold other repositories' tasks whose dependencies it cannot see.
-  const foreignTargetPlanLoad = (path: string) => loadTargetPlanQuarantiningDuplicates(path, target.repo);
+  // W1-T14575: a target onboarded maintain-only has no plan at all; it boots on an empty one instead of exiting.
+  let absentPlanReported = false;
+  const foreignTargetPlanLoad = (path: string) => loadTargetPlanOrEmptyWhenAbsent(path, `${target.owner}/${target.repo}`, (step, extra) => {
+    if (step === "daemon.plan_absent") {
+      if (absentPlanReported) return;
+      absentPlanReported = true;
+    }
+    log(step, extra);
+  });
   // The boot plan read: a managed target's checkout is synced first, unless --plan names a file. Undefined: refused.
   const syncBootPlan = async (): Promise<Plan | undefined> => {
     if (!target.isSelf && !flagValue(rest, "--plan")) {
