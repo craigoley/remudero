@@ -765,6 +765,10 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "daemon.admission_held",
   "daemon.detached_action_abandoned", // restartCycleRow uses the bounded age after admission cancellation removes the wait row.
   "daemon.restart_cycle",
+  // W1-T14547: restartCycleRow marks a handed-off cycle by these and times it to the successor's first tick.
+  "daemon.handoff_yielded",
+  "daemon.standby_promoted",
+  "daemon.boot_phases",
   "daemon.freshness_drain.completed",
   "daemon.memory_exit",
   "daemon.memory_drain.completed",
