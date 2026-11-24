@@ -183,13 +183,14 @@ test("W1-T14544 a standby starts no garden and syncs no checkout before it holds
   // Promoted over the same checkout, it runs the sync it skipped once it holds the lock, then the loop.
   const v = world(t);
   let fetchedAtReady: boolean | undefined;
-  let inLoop: { fetched: boolean; locked: boolean } | undefined;
+  let inLoop: { fetched: boolean; locked: boolean; gardens: number } | undefined;
   const exitListeners = process.listeners("exit");
   const promoted = await standby(v, [], {
     repoRoot: checkout.dir,
-    runDaemon: async () => {
+    runDaemon: async (_plan: unknown, loopDeps: { gardens?: unknown[] }) => {
       inLoop = { fetched: existsSync(join(checkout.dir, ".git", "FETCH_HEAD")),
-        locked: JSON.parse(readFileSync(join(v.state, "drain.lock"), "utf8")).pid === process.pid };
+        locked: JSON.parse(readFileSync(join(v.state, "drain.lock"), "utf8")).pid === process.pid,
+        gardens: (loopDeps.gardens ?? []).filter((start) => typeof start === "function").length };
       return stopped;
     },
     standby: { pollMs: 5 },
@@ -201,7 +202,10 @@ test("W1-T14544 a standby starts no garden and syncs no checkout before it holds
   for (const l of process.listeners("exit").filter((l) => !exitListeners.includes(l))) process.removeListener("exit", l);
   assert.equal(promoted, 0);
   assert.equal(fetchedAtReady, false, "still no sync while it waits");
-  assert.deepEqual(inLoop, { fetched: true, locked: true }, "the plan sync ran after the lock, before the loop");
+  assert.equal(inLoop?.fetched, true, "the plan sync ran after the lock, before the loop");
+  assert.equal(inLoop?.locked, true);
+  // The garden off-loops are starters the loop runs; here they reach it only now, with the lock held.
+  assert.ok((inLoop?.gardens ?? 0) > 0, "the loop receives the garden starters once promoted");
   assert.equal(existsSync(daemonTargetRecordPath(v.state)), true);
 });
 
