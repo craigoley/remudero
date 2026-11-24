@@ -144,7 +144,7 @@ export { IMPLEMENT_REFUSAL_REPORT_CONTRACT, IMPLEMENT_WAIT_TARGET_CONTRACT, RUN_
 export type { WorkerStateSensor, SyncedPlan, BoundaryCheckpointRestore, AddedTestsAtHead, PrHeadGateway, OwnershipVerdict, RemotePresenceProbeFailure, FallbackPushCause, PollDeps, PrOpenHandoffDeclineReason, ExternalWaitFreshness, CiGateOutcome, ReviewRunResult, FixRungOutcome, LiveHeadResult, WorktreeSnapshot, FixRebaseMergeFacts, FixRoundCommit, ReadFixRoundCommits, WorkerErrorVerdict, NoPrVerdict, AlreadySatisfiedClaim, AlreadySatisfiedRefusal, AlreadySatisfiedResolution, AlreadySatisfiedVerdict, ReconArtifact, ProbeKeyInputs, ProbeProof, ProbeVerdictCache, RunTaskContext, ManagedCheckoutRefresh, SourceSizeGatePostureResult, RunErrorCause, CensusPushRefusal, CensusChildResult, CensusChildRunner, FixRoundPushReceipt, CoveragePrecheck, CoverageRunResult, CoveragePrecheckPorts, CensusPushRungOutcome, MaterializationErrorClass, MaterializationFailure, WorkerEditCommit, RequiredCompanion, PublishAbandonedFixOwnerAheadDeps };
 import { newPublicTaskRecords, readCatalogNewTasksRow } from "./cli/commands/lint-plan.js";
 import { daemonCommand as daemonCommandFromModule, daemonTargetCheckoutRoot, readPushedRunBranchesOutput, readPushedRunBranchesOutputAsync, type DaemonCommandHost, type GardenBuildContext } from "./cli/commands/daemon.js";
-import { daemonBoot } from "./lib/daemon.js";
+import { daemonBoot, GH_CHECK_IDENTITY_UNREADABLE } from "./lib/daemon.js";
 import { describeProcessCwdProbe, pathIsAtOrBelow, readBoundedProcessCwdCensus as readProcessCwdCensus, type ProcessCwdCensus, type ProcessCwdCensusDeps, type UnreadableCwdDetail } from "./lib/process-cwd-census.js";
 export type { ProcessCwdCensus, ProcessCwdCensusDeps } from "./lib/process-cwd-census.js";
 import { settleRunChildBacklog } from "./lib/run-child.js";
@@ -255,7 +255,7 @@ import { censusSatisfiedTasks } from "../scripts/satisfied-task-census.mjs";
 import { MEASURED_ROOTS } from "../scripts/comment-load-ratchet.mjs";
 // @ts-expect-error executable gate module has no declaration file.
 import { evaluateGate as acceptanceBodyGate, isPlanOnlyDiff } from "../scripts/acceptance-author-gate.mjs";
-import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, copyFileSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { inboxVerbViaServe, proposalVerdictInProcess, proposalVerdictViaServe, publishLocalServePort, resolveLocalServePort, retractLocalServePort } from "./lib/inbox-cli-serve.js";
 import { cpus as osCpus, homedir, hostname, loadavg as osLoadavg, tmpdir } from "node:os";
@@ -908,7 +908,7 @@ import { discoverSourceTextReaders, readerJoins, type SourceTextReader } from ".
 // MECHANICAL remedy (a new file's baseline row, never a raised ceiling) before the implement
 // worker's final commit. See {@link commitWorkerEditsWithCensusFix} below for the call site.
 import { runCensusFix, type CensusFixResult } from "./lib/census-fix.js";
-import { COVERAGE_SOURCE_FILE, coverageNarrowRowFields, coverageNarrowSuites, judgeCoverage, type CoverageRun, type CoverageVerdict } from "./lib/coverage-narrow.js";
+import { COVERAGE_FIX_PUSH_SITE, COVERAGE_SOURCE_FILE, coverageNarrowRowFields, coverageNarrowSuites, coverageVerdictRefuses, judgeCoverage, type CoverageRun, type CoverageVerdict } from "./lib/coverage-narrow.js";
 // W1-T4108 — the same suite selector CI's shadow selector and `--coverage`'s report-only step
 // already share (affectedSuitesStep, lib/ci-parity.ts), reused here so the new scoped-coverage
 // default step can never independently derive a second notion of "which suites reach a changed
@@ -4566,9 +4566,9 @@ async function strictPlanOf(read: RevisionLoad, revision: PlanRevision, runGit: 
 }
 
 /** W1-T9763: the daemon's boot sync, lane sync (the coalescer's), reload and tick read share ONE store, so one
- *  revision is one instance for all of them. */
+ *  revision is one instance for all of them. W1-T14712: a foreign target hands its own (`targetPlanRevisionStore`). */
 export function daemonPlanReaders(planPath: string, quarantine: (quarantined: QuarantinedTask[]) => void,
-  runGit?: GitRunnerAsync): {
+  runGit?: GitRunnerAsync, revisions: PlanRevisionStore = createPlanRevisionStore()): {
   revisions: PlanRevisionStore;
   boot: (opts: { allowStale?: boolean }) => Promise<SyncedPlan>;
   sync: (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => Promise<SyncedPlan>;
@@ -4577,7 +4577,6 @@ export function daemonPlanReaders(planPath: string, quarantine: (quarantined: Qu
     (input: TickReadInput) => Promise<ReadGeneration<TickReadFacts>>;
   inlineTickRead: (options: TickReadOptions, io: Parameters<typeof createTickReadProducer>[1]) => (input: TickReadRequest) => Promise<TickReadFacts>;
 } {
-  const revisions = createPlanRevisionStore();
   const repoDir = dirname(dirname(planPath));
   const sync = (dir: string, relPath: string, opts: { allowStale?: boolean }) =>
     syncPlanFromOriginAsync(dir, relPath, { ...opts, quarantine, revisions, ...(runGit ? { runGit } : {}) });
@@ -7069,7 +7068,7 @@ async function restRollupFor(
     if (args[1] === checkPath) runs = value;
     if (args[1] === workflowPath && (value === null || typeof value !== "object" ||
         !Array.isArray((value as { workflow_runs?: unknown }).workflow_runs))) {
-      throw new Error("workflow producer identity response unavailable");
+      throw Object.assign(new Error("workflow producer identity response unavailable"), { code: GH_CHECK_IDENTITY_UNREADABLE });
     }
     return value;
   });
@@ -7078,7 +7077,7 @@ async function restRollupFor(
   for (const entries of named.values()) {
     const runIds = new Set(entries.flatMap(entry => entry.workflowRunId === undefined ? [] : [entry.workflowRunId]));
     if (runIds.size > 1 && entries.some(entry => !Number.isSafeInteger(entry.workflowId) || (entry.workflowId ?? 0) <= 0)) {
-      throw new Error("workflow producer identity incomplete for independent check runs");
+      throw Object.assign(new Error("workflow producer identity incomplete for independent check runs"), { code: GH_CHECK_IDENTITY_UNREADABLE });
     }
   }
   return attachPostedGateIds(rollup, runs);
@@ -11592,7 +11591,11 @@ const coverageSandboxRefusal = (reason: unknown): CoverageRunResult => ({ status
 const coverageSandboxStart = (binary: string, sandbox: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string | undefined> =>
   execFileRouted(binary, [...sandbox, process.execPath, "-e", ""], { cwd, env, encoding: "utf8", timeout: 10_000, killSignal: "SIGKILL" }).then(
     () => undefined, (error: { stderr?: unknown; message: string }) => String(error.stderr ?? "").trim().split("\n")[0] || error.message);
-const realCoverageRun = async (wt: string, suites: string[], timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> => {
+const realCoverageRun = (wt: string, suites: string[], timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> =>
+  sandboxedCoverageNode(wt, [join(wt, "scripts", "diff-coverage-local.mjs"), "--base", "origin/main", "--lcov", "coverage/precheck-lcov.info", ...suites], timeoutMs, maxOutputBytes);
+/** W1-T13391: CI's failed-file retry (scripts/test-with-retry.mjs), uninstrumented. */
+const COVERAGE_RETRY_ARGS = ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts"];
+const sandboxedCoverageNode = async (wt: string, nodeArgs: string[], timeoutMs: number, maxOutputBytes: number): Promise<CoverageRunResult> => {
   const status = proofSandboxStatus();
   if (status.mode !== "bwrap") return coverageSandboxRefusal(status.reason);
   const home = makeTempDir("proof-home");
@@ -11606,7 +11609,7 @@ const realCoverageRun = async (wt: string, suites: string[], timeoutMs: number, 
     }
     const startFailure = await coverageSandboxStart(status.binary, sandbox, wt, env);
     if (startFailure !== undefined) return coverageSandboxRefusal(startFailure);
-    const argv = [...sandbox, process.execPath, join(wt, "scripts", "diff-coverage-local.mjs"), "--base", "origin/main", "--lcov", "coverage/precheck-lcov.info", ...suites];
+    const argv = [...sandbox, process.execPath, ...nodeArgs];
     return await spawnCoverageChild(status.binary, argv, wt, env, timeoutMs, maxOutputBytes);
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -11679,7 +11682,7 @@ function coverageRefusalText(output: string): string {
  * OWN measured durations for exactly the suites it runs (never a fixed number of seconds); a run over that
  * bound is `unavailable`, not `uncovered`.
  */
-export async function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts = {}): Promise<CoveragePrecheck> {
+export async function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts = {}, site?: string): Promise<CoveragePrecheck> {
   if (ports.repo !== undefined && !fixCensusAppliesToRepo(ports.repo, () => {})) {
     return { outcome: "not-applicable", repo: ports.repo, reason: `core's diff-coverage selector does not apply to ${ports.repo}` };
   }
@@ -11715,21 +11718,62 @@ export async function coveragePrecheck(wt: string, ports: CoveragePrecheckPorts 
   const tiers = tierFiles(selection.suites, manifest) as { fast: string[]; slow: string[] };
   const passes = [tiers.fast.length > 0 ? tiers.fast : tiers.slow];
   if (tiers.fast.length > 0 && tiers.slow.length > 0) passes.push([...tiers.fast, ...tiers.slow]);
-  return judgeCoverage({
-    narrow, narrowUnreadable, selection, passes, ceiling: PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING,
-    bounded: async (suites) => {
-      const predictedMs = suites.reduce((sum, f) => sum + (weightedDurationMs(f, manifest) as number), 0);
-      const boundMs = Math.max(manifest.thresholdMs, Math.ceil(predictedMs * (DURATION_STALENESS_FACTOR as number)));
-      return { predictedMs, boundMs, r: await run(wt, suites, boundMs) };
-    },
-    head: () => (ports.head ?? ((w) => hostWorktreeGitAsync(w, ["rev-parse", "HEAD"]).then((t) => t.trim())))(wt),
-    isUncovered: (output) => COVERAGE_UNCOVERED_HEADLINE.test(output),
-    refusalText: coverageRefusalText,
-    isMissingSf: (output) => COVERAGE_MISSING_SF.test(output),
-  });
+  const boundOf = (suites: string[]) => {
+    const predictedMs = suites.reduce((sum, f) => sum + (weightedDurationMs(f, manifest) as number), 0);
+    return { predictedMs, boundMs: Math.max(manifest.thresholdMs, Math.ceil(predictedMs * (DURATION_STALENESS_FACTOR as number))) };
+  };
+  const maxOutput = ports.maxOutputBytes ?? COVERAGE_RUN_MAX_BUFFER;
+  let base: Promise<CoverageBase> | undefined;
+  try {
+    return await judgeCoverage({
+      narrow, narrowUnreadable, selection, passes, ceiling: PREFLIGHT_SCOPED_COVERAGE_SUITE_CEILING,
+      bounded: async (suites) => {
+        const { predictedMs, boundMs } = boundOf(suites);
+        return { predictedMs, boundMs, r: await run(wt, suites, boundMs) };
+      },
+      head: () => (ports.head ?? ((w) => hostWorktreeGitAsync(w, ["rev-parse", "HEAD"]).then((t) => t.trim())))(wt),
+      isUncovered: (output) => COVERAGE_UNCOVERED_HEADLINE.test(output),
+      refusalText: coverageRefusalText,
+      isMissingSf: (output) => COVERAGE_MISSING_SF.test(output),
+      rerun: site !== COVERAGE_FIX_PUSH_SITE ? undefined : async (suites, at) => {
+        const { boundMs } = boundOf(suites);
+        if (at === "head") return { boundMs, r: await sandboxedCoverageNode(wt, [...COVERAGE_RETRY_ARGS, ...suites], boundMs, maxOutput) };
+        const tree = await (base ??= cutCoverageBase(wt));
+        if (tree.reason !== undefined) return { boundMs, r: { status: null, output: "", timedOut: false, spawnError: tree.reason } };
+        if (suites.some((s) => !existsSync(join(tree.dir, s)))) return { absent: true };
+        return { boundMs, r: await sandboxedCoverageNode(tree.dir, [...COVERAGE_RETRY_ARGS, ...suites], boundMs, maxOutput) };
+      },
+    });
+  } finally {
+    if (base !== undefined) await releaseCoverageBase(wt, await base);
+  }
 }
 
-/** W1-T4797: ledger the precheck's outcome and reason, then hand back a refusal only for `uncovered`. */
+/** W1-T13391: a detached checkout of the head's merge base with origin/main, sharing the head's install only when
+ *  package-lock.json is byte-identical; otherwise no suite is judged there. */
+type CoverageBase = { dir: string; reason?: string };
+async function cutCoverageBase(wt: string): Promise<CoverageBase> {
+  const dir = makeTempDir("coverage-base");
+  try {
+    const sha = (await hostWorktreeGitAsync(wt, ["merge-base", "origin/main", "HEAD"])).trim();
+    await buildBaseProofDir([], wt, { detachedAsync: { path: dir, revision: sha, run: async (args) => { await hostWorktreeGitAsync(wt, args); } } }).pendingCheckout;
+    if (!readFileSync(join(dir, "package-lock.json")).equals(readFileSync(join(wt, "package-lock.json")))) {
+      return { dir, reason: "the merge base's package-lock.json differs from the head's" };
+    }
+    symlinkSync(realpathSync(join(wt, "node_modules")), join(dir, "node_modules"));
+    return { dir };
+  } catch (e) {
+    return { dir, reason: `the merge base could not be checked out: ${String((e as Error)?.message ?? e).slice(0, 300)}` };
+  }
+}
+async function releaseCoverageBase(wt: string, tree: CoverageBase): Promise<void> {
+  await hostWorktreeGitAsync(wt, ["worktree", "remove", "--force", tree.dir]).catch((e: unknown) =>
+    console.error(`(coverage base teardown failed for ${tree.dir}: ${String((e as Error)?.message ?? e).slice(0, 300)})`));
+  rmSync(tree.dir, { recursive: true, force: true });
+}
+
+/** W1-T4797: ledger the precheck's outcome and reason, then hand back a refusal only for `uncovered`, or (W1-T13391)
+ *  for `tests-failed` at a fix round's push. */
 export function coveragePushRefusal(
   result: CoveragePrecheck,
   log: (step: string, extra?: Record<string, unknown>) => void,
@@ -11739,12 +11783,17 @@ export function coveragePushRefusal(
     site,
     outcome: result.outcome,
     reason: result.outcome === "uncovered" ? "diff-coverage would refuse this head" : result.reason,
-    ...(result.outcome === "covered" || result.outcome === "uncovered" || result.outcome === "uncovered-narrow" ? { suites: result.suites } : {}),
+    ...(result.outcome === "covered" || result.outcome === "uncovered" || result.outcome === "uncovered-narrow" || result.outcome === "tests-failed" ? { suites: result.suites } : {}),
     ...(result.outcome === "not-applicable" ? { repo: result.repo } : {}),
-    ...(result.outcome === "uncovered" ? { refusal: result.text } : {}),
+    ...(result.outcome === "uncovered" || result.outcome === "tests-failed" ? { refusal: result.text } : {}),
+    ...(result.outcome === "tests-failed" ? { failing: result.failing, refused: coverageVerdictRefuses(result, site) } : {}),
     // W1-T9483: advisory only — the lines to cover and the head they were judged on, never a refusal.
     ...coverageNarrowRowFields(result),
   });
+  if (!coverageVerdictRefuses(result, site)) return undefined;
+  if (result.outcome === "tests-failed") {
+    return { text: `${COVERAGE_PUSH_CHECK}: a selected suite fails at this head —\n${result.text}`, censuses: ["selected-suite"], offeredBaselines: [] };
+  }
   if (result.outcome !== "uncovered") return undefined;
   return { text: `${COVERAGE_PUSH_CHECK}: CI's coverage-ratchet would refuse this head —\n${result.text}`, censuses: ["diff-coverage"], offeredBaselines: [] };
 }
@@ -11775,7 +11824,7 @@ export async function pushFixRoundPrechecked(
     log("push.conflict_marker_refused", { site: "rung.fix_push", files: markerFiles });
     throw new FixRoundPushError("run-error", { text, censuses: ["conflict-marker"], offeredBaselines: [] }, text);
   }
-  const refusal = coveragePushRefusal(await coveragePrecheck(wt, ports), log, "rung.fix_push");
+  const refusal = coveragePushRefusal(await coveragePrecheck(wt, ports, COVERAGE_FIX_PUSH_SITE), log, COVERAGE_FIX_PUSH_SITE);
   if (refusal) throw new FixRoundPushError("run-error", refusal, refusal.text);
   try {
     return guard !== undefined && push === pushFixRound
@@ -27858,8 +27907,9 @@ export function resolveReloadPlan(
   allowStale: boolean,
   log: (step: string, extra?: Record<string, unknown>) => void,
   selfDeps: Parameters<typeof planReloader>[3] = {},
+  targetDeps: Parameters<typeof dedicatedTargetPlanReloader>[2] = {},
 ): (() => Promise<Plan | null>) | undefined {
-  return target.isSelf ? planReloader(target, allowStale, log, selfDeps) : dedicatedTargetPlanReloader(target, log);
+  return target.isSelf ? planReloader(target, allowStale, log, selfDeps) : dedicatedTargetPlanReloader(target, log, targetDeps);
 }
 
 /**

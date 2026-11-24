@@ -1195,6 +1195,8 @@ export interface WhitelistedProof {
   failureTail?: string;
   /** Actual executor readings, retained when its result or error is replayed. */
   executionLoad?: ProofLoadRecord;
+  /** W1-T14036: milliseconds this run waited on a dependency install; absent when it waited on none. */
+  dependencyInstallMs?: number;
 }
 
 const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
@@ -2687,6 +2689,11 @@ export function proofChildCommand(
   return lowPriorityCommand(command, testRunArgv(args, concurrency), exists);
 }
 
+/** W1-T14036: how many proof executions of one fold run at once: the proof child's slot count, capped by free cores. */
+export function proofExecutionSlots(load: HostLoad = readHostLoad()): number {
+  return Math.max(1, Math.min(defaultTestSlots(load.cores), testRunConcurrency(load)));
+}
+
 export const defaultProofSpawner: ProofSpawner = (command, args, cwd, timeoutMs) => {
   const child = prepareProofChild(command, args, cwd);
   try {
@@ -4104,7 +4111,12 @@ export async function execWhitelistedProofAsync(
   }
   if (whitelisted.kind === "test") {
     const runner = checkoutRunnerPath(whitelisted, cwd);
-    if (!(await ensureDepsAsync(cwd, runner, PROOF_TREE_PRIMING))) {
+    const installStartedMs = performance.now();
+    const priming = ensureDepsAsync(cwd, runner, PROOF_TREE_PRIMING);
+    const installing = npmCiPending.has(cwd);
+    const primed = await priming;
+    if (installing) whitelisted.dependencyInstallMs = (whitelisted.dependencyInstallMs ?? 0) + performance.now() - installStartedMs;
+    if (!primed) {
       throw new ProofRunnerUnavailableError(runner, refusedProofPrimes.get(cwd));
     }
     args = argsWithCheckoutRunner(whitelisted, args, cwd);
@@ -6838,6 +6850,114 @@ function proofSandboxRecord(before: number): Pick<ReviewVerdict, "proofSandboxDe
   return status.mode === "unsandboxed" ? { proofSandboxDegraded: status.reason } : {};
 }
 
+type ProofObservation =
+  | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string; failureOutput?: string; failureTail?: string; load?: ProofLoadRecord }
+  | { error: unknown; load?: ProofLoadRecord };
+
+/** One settled execution of a fold: what the fold stores under its key, its run time and its install wait. */
+export interface ProofExecutionResult {
+  key: string; whitelisted: WhitelistedProof; cwd: string; observation: ProofObservation; runMs: number; installMs: number;
+}
+
+/** W1-T14036: run a fold's pending executions, at most `slots` at once, and return them in the pending map's order. */
+export async function runPendingProofExecutions(
+  pending: ReadonlyMap<string, { whitelisted: WhitelistedProof; cwd: string }>, asyncExec: AsyncProofExecutor, slots: number,
+): Promise<ProofExecutionResult[]> {
+  const entries = [...pending];
+  const results: ProofExecutionResult[] = new Array(entries.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < entries.length) {
+      const index = next++;
+      const [key, { whitelisted, cwd }] = entries[index]!;
+      const startedMs = performance.now();
+      delete whitelisted.dependencyInstallMs;
+      let observation: ProofObservation;
+      try {
+        const outcome = await asyncExec(whitelisted, cwd);
+        observation = {
+          outcome, matchedLines: whitelisted.matchedLines, loadError: whitelisted.loadError, failureOutput: whitelisted.failureOutput,
+          failureTail: whitelisted.failureTail, load: whitelisted.executionLoad,
+        };
+      } catch (error) {
+        // Preserve this exact proof error for the next deterministic verdict fold.
+        observation = { error, load: whitelisted.executionLoad };
+      }
+      const installMs = Math.round(whitelisted.dependencyInstallMs ?? 0);
+      const runMs = Math.max(0, Math.round(performance.now() - startedMs) - installMs);
+      results[index] = { key, whitelisted, cwd, observation, runMs, installMs };
+    }
+  };
+  const width = Math.max(1, Math.min(Number.isFinite(slots) ? Math.floor(slots) : 1, entries.length));
+  await Promise.all(Array.from({ length: width }, worker));
+  return results;
+}
+
+/** W1-T14036: start the base checkout's priming while the first fold's head runs, after the head's own install, so
+ *  the two never contend; a base run awaits the same install. */
+function primeBaseCheckoutEarly(
+  pending: ReadonlyMap<string, { whitelisted: WhitelistedProof; cwd: string }>, evidence: ReviewEvidence,
+): Promise<void> | undefined {
+  const base = evidence.baseCheckoutDir;
+  if (!base || evidence.baseIsCheckout !== true || !reviewerOwnedCheckouts.has(resolve(base))) return undefined;
+  const tests = [...pending.values()].filter(({ whitelisted }) => whitelisted.kind === "test");
+  const runners = new Set(tests.map(({ whitelisted }) => checkoutRunnerPath(whitelisted, base)));
+  if (runners.size !== 1) return undefined;
+  const headInstall = npmCiPending.get(evidence.headCheckoutDir!)?.install;
+  return (async () => {
+    try {
+      await headInstall;
+    } catch {
+      // Not thrown: the head run reports its own install failure; this wait only orders the base install after it.
+    }
+    try {
+      await ensureDepsAsync(base, [...runners][0], PROOF_TREE_PRIMING);
+    } catch (error) {
+      // The base run then primes again and fails exactly as it would have.
+      npmCiPrimed.delete(base);
+      console.error(`review: the early priming of ${base} failed: ${installFailure(error)}`);
+    }
+  })();
+}
+
+const PROOF_EXECUTION_STEP = "review.proof_execution";
+const PROOF_PHASE_STEP = "review.proof_phase";
+let proofPhases = 0;
+
+/** W1-T14036: the proof phase's timing rows, written only for a review of a checkout the reviewer cut. */
+function proofPhaseRecorder(evidence: ReviewEvidence): {
+  executions: (fold: number, slots: number, results: readonly ProofExecutionResult[]) => void;
+  phase: (folds: number, converged: boolean) => void;
+} {
+  const head = evidence.headCheckoutDir!;
+  const ledger = reviewerOwnedCheckouts.has(resolve(head)) ? join(proofStateDir().dir, LEDGER_FILENAME) : undefined;
+  const phase = `${process.pid}-${++proofPhases}`, startedMs = performance.now();
+  let executions = 0, maxSlots = 0;
+  const append = (row: Record<string, unknown> & { step: string }): void => {
+    if (ledger === undefined) return;
+    try {
+      appendLedger(ledger, { run_id: "review-proof-phase", task_id: "SWEEP", phase, head_checkout: head, ...row });
+    } catch (error) {
+      console.error(`review: a ${row.step} row was not recorded: ${installFailure(error)}`);
+    }
+  };
+  return {
+    executions: (fold, slots, results) => {
+      executions += results.length;
+      maxSlots = Math.max(maxSlots, slots);
+      for (const { whitelisted, cwd, observation, runMs, installMs } of results) append({
+        step: PROOF_EXECUTION_STEP, fold, side: cwd === evidence.baseCheckoutDir ? "base" : "head", kind: whitelisted.kind,
+        proof: whitelisted.label, checkout: cwd, run_ms: runMs, install_ms: installMs, start_load: observation.load?.start ?? null,
+        slots, outcome: "error" in observation ? "error" : observation.outcome,
+      });
+    },
+    phase: (folds, converged) => append({
+      step: PROOF_PHASE_STEP, outcome: converged ? "converged" : "not_converged", folds, executions, max_slots: maxSlots,
+      total_ms: Math.round(performance.now() - startedMs),
+    }),
+  };
+}
+
 /** Resolve each requested head/base observation without blocking, then fold with the same judge. */
 export async function judgeReviewAsync(
   criteria: AcceptanceCriterion[],
@@ -6845,10 +6965,9 @@ export async function judgeReviewAsync(
 ): Promise<ReviewVerdict> {
   if (!evidence.headCheckoutDir) return judgeReview(criteria, evidence);
   const unsandboxedBefore = unsandboxedProofSpawns;
-  type Observation =
-    | { outcome: ReturnType<ProofExecutor>; matchedLines?: string[]; loadError?: string; failureOutput?: string; failureTail?: string; load?: ProofLoadRecord }
-    | { error: unknown; load?: ProofLoadRecord };
-  const observed = new Map<string, Observation>();
+  const observed = new Map<string, ProofObservation>();
+  const recorder = proofPhaseRecorder(evidence);
+  let basePriming: Promise<void> | undefined;
   const proofFormCorrections = new Map<string, string | undefined>();
   const missingExportNotes = new Map<string, string | undefined>();
   const keyOf = (w: WhitelistedProof, cwd: string) => JSON.stringify([cwd, w.command, [...w.args]]);
@@ -6876,24 +6995,24 @@ export async function judgeReviewAsync(
     const verdict = judgeReview(criteria, { ...evidence, execProof: replay, proofFormCorrections, missingExportNotes,
       sampleLoad: () => ({}) });
     const pendingForms = verdict.criteria.filter(c => c.proof_exec === "executed_fail" && !proofFormCorrections.has(c.proof));
-    if (pending.size === 0 && pendingForms.length === 0) return { ...verdict, ...proofSandboxRecord(unsandboxedBefore) };
-    for (const [key, { whitelisted, cwd }] of pending) {
-      try {
-        const outcome = await asyncExec(whitelisted, cwd);
-        observed.set(key, {
-          outcome, matchedLines: whitelisted.matchedLines, loadError: whitelisted.loadError, failureOutput: whitelisted.failureOutput,
-          failureTail: whitelisted.failureTail,
-          load: whitelisted.executionLoad,
-        });
-      } catch (error) {
-        // Preserve this exact proof error for the next deterministic verdict fold.
-        observed.set(key, { error, load: whitelisted.executionLoad });
-        const output = (error as { loadOutput?: unknown })?.loadOutput;
-        if (whitelisted.kind === "test" && cwd === evidence.baseCheckoutDir && typeof output === "string") {
-          const noteKey = JSON.stringify([cwd, evidence.headCheckoutDir, output]);
-          if (!missingExportNotes.has(noteKey)) missingExportNotes.set(noteKey,
-            await baseLacksPrAddedExports(output, cwd, evidence.headCheckoutDir));
-        }
+    if (pending.size === 0 && pendingForms.length === 0) {
+      await basePriming;
+      recorder.phase(pass + 1, true);
+      return { ...verdict, ...proofSandboxRecord(unsandboxedBefore) };
+    }
+    const slots = pending.size > 1 ? proofExecutionSlots() : 1;
+    const running = runPendingProofExecutions(pending, asyncExec, slots);
+    if (pass === 0) basePriming = primeBaseCheckoutEarly(pending, evidence);
+    const results = await running;
+    recorder.executions(pass, slots, results);
+    for (const { key, whitelisted, cwd, observation } of results) {
+      observed.set(key, observation);
+      if (!("error" in observation)) continue;
+      const output = (observation.error as { loadOutput?: unknown })?.loadOutput;
+      if (whitelisted.kind === "test" && cwd === evidence.baseCheckoutDir && typeof output === "string") {
+        const noteKey = JSON.stringify([cwd, evidence.headCheckoutDir, output]);
+        if (!missingExportNotes.has(noteKey)) missingExportNotes.set(noteKey,
+          await baseLacksPrAddedExports(output, cwd, evidence.headCheckoutDir));
       }
     }
     for (const criterion of pendingForms) {
@@ -6904,6 +7023,8 @@ export async function judgeReviewAsync(
       }));
     }
   }
+  await basePriming;
+  recorder.phase(criteria.length * 3 + 2, false);
   throw new Error("async proof observations did not converge");
 }
 

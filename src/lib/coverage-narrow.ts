@@ -14,6 +14,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildAffectedSuitesGraph } from "./affected-suites.js";
+import { parseCiFailingTests } from "./ci-incidents.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 /** W1-T5309 — the source files CI's diff-coverage gate judges (scripts/diff-coverage.mjs `changedSourceFiles`):
@@ -48,7 +49,19 @@ export type CoverageVerdict =
   | { outcome: "covered"; reason: string; suites: number }
   | { outcome: "uncovered"; text: string; suites: number }
   | { outcome: "uncovered-narrow"; reason: string; text: string; suites: number; head: string }
-  | { outcome: "unavailable"; reason: string };
+  | { outcome: "unavailable"; reason: string }
+  | { outcome: "tests-failed"; reason: string; failing: string[]; text: string; suites: number };
+
+/** W1-T13391: one bounded run of `suites` without coverage instrumentation, or a suite the merge base does not have. */
+export type SuiteRerun = { boundMs: number; r: CoverageRun } | { absent: true };
+
+/** W1-T13391: the push site of a fix round, the only site where a `tests-failed` head is refused. */
+export const COVERAGE_FIX_PUSH_SITE = "rung.fix_push";
+
+/** W1-T13391: whether the precheck's verdict refuses the push at `site`. */
+export function coverageVerdictRefuses(result: { outcome: string }, site: string): boolean {
+  return result.outcome === "uncovered" || (result.outcome === "tests-failed" && site === COVERAGE_FIX_PUSH_SITE);
+}
 
 /**
  * The narrow pass's suites: the diff's own added or changed test files (still on disk) plus every tracked test
@@ -131,6 +144,53 @@ export interface CoverageJudgement {
   refusalText: (output: string) => string;
   /** A changed src file with no `SF:` record in the report — widen to the slow-tier siblings. */
   isMissingSf: (output: string) => boolean;
+  /** W1-T13391: CI's failed-file retry at the head, or one suite at the merge base. Absent (every push but a fix
+   *  round's): no failure is attributed and the verdict is origin/main's. */
+  rerun?: (suites: string[], at: "head" | "merge-base") => Promise<SuiteRerun>;
+}
+
+const REAL_TEST_FAILURE = /^diff-coverage-local: the instrumented suite exited \d+ .*this is a real test failure/m;
+
+/** The suites of `among` that a TAP log names as failing, with each failing test's title. */
+function namedFailures(output: string, among: readonly string[]): { suites: string[]; lines: string[] } {
+  const failing = parseCiFailingTests(output).map((t) => ({ file: t.file.split("\\").join("/"), title: t.title }));
+  const named = (s: string) => failing.filter((t) => t.file === s || t.file.endsWith(`/${s}`));
+  const suites = among.filter((s) => named(s).length > 0);
+  return { suites, lines: suites.flatMap((s) => named(s).map((t) => `  - ${s}: ${t.title}`)) };
+}
+
+type Attribution = { head: string[]; main: string[]; lines: string[]; unjudged: string[] };
+
+const unrun = (r: CoverageRun, boundMs: number) =>
+  r.timedOut ? `timed out over its ${boundMs}ms bound` : r.spawnError !== undefined ? `spawn failed: ${r.spawnError.slice(0, 300)}` : undefined;
+
+/**
+ * W1-T13391: who owns a failing selected suite, judged as CI judges it. A suite that passes its uninstrumented retry
+ * is no failure; one that still fails and also fails at the merge base is main's; one that passes there, or that the
+ * merge base does not have, is the round's. A run that cannot finish judges nothing.
+ */
+async function attributeFailure(failing: string[], rerun: NonNullable<CoverageJudgement["rerun"]>): Promise<Attribution> {
+  const none = (why: string): Attribution => ({ head: [], main: [], lines: [], unjudged: [why] });
+  if (failing.length === 0) return none("the instrumented suite failed but its output names no selected suite");
+  const retry = await rerun(failing, "head");
+  if ("absent" in retry) return none(`the uninstrumented retry of ${failing.join(", ")} did not run`);
+  const retryUnrun = unrun(retry.r, retry.boundMs);
+  if (retryUnrun !== undefined) return none(`the uninstrumented retry of ${failing.join(", ")} ${retryUnrun}`);
+  if (retry.r.status === 0) return none(`${failing.join(", ")} passed without coverage instrumentation`);
+  const still = namedFailures(retry.r.output, failing);
+  if (still.suites.length === 0) return none(`the uninstrumented retry exited ${retry.r.status} and names no selected suite`);
+  const a: Attribution = { head: [], main: [], lines: still.lines, unjudged: [] };
+  for (const suite of still.suites) {
+    const base = await rerun([suite], "merge-base");
+    if ("absent" in base) {
+      a.head.push(suite);
+      continue;
+    }
+    const baseUnrun = unrun(base.r, base.boundMs);
+    if (baseUnrun !== undefined) a.unjudged.push(`${suite} at the merge base ${baseUnrun}`);
+    else (base.r.status === 0 ? a.head : a.main).push(suite);
+  }
+  return a;
 }
 
 const reasonOf = (e: unknown) => String((e as Error)?.message ?? e).slice(0, 300);
@@ -149,12 +209,30 @@ export async function judgeCoverage(j: CoverageJudgement): Promise<CoverageVerdi
   const skippedNarrow = run === undefined && j.narrow.length > j.ceiling
     ? `; ${j.narrow.length} own and direct-importer suite(s) were not measured (over preflight's scoped ceiling of ${j.ceiling})`
     : unmeasured > 0 ? `; ${unmeasured} changed source file(s) had too many direct-importer suites to measure (over preflight's scoped ceiling of ${j.ceiling})` : "";
-  const unavailable = (reason: string): Extract<CoverageVerdict, { outcome: "unavailable" }> => ({ outcome: "unavailable", reason: `${reason}${skippedNarrow}` });
+  let mainNote = "";
+  const unavailable = (reason: string): Extract<CoverageVerdict, { outcome: "unavailable" }> => ({ outcome: "unavailable", reason: `${reason}${mainNote}${skippedNarrow}` });
+  const attributions = new Map<string, Promise<Attribution>>();
+  const failed = async (output: string, suites: string[], rerun: NonNullable<CoverageJudgement["rerun"]>): Promise<{ refused?: CoverageVerdict; main?: string; unjudged?: string }> => {
+    const failing = namedFailures(output, suites).suites;
+    const key = failing.join("\n");
+    if (!attributions.has(key)) attributions.set(key, attributeFailure(failing, rerun));
+    const a = await attributions.get(key)!;
+    if (a.main.length > 0) mainNote = `; main already fails ${a.main.join(", ")} at the merge base`;
+    const main = a.main.length > 0 ? `${a.main.length} selected suite(s) fail at the merge base too, so main already has this failure: ${a.main.join(", ")}` : undefined;
+    if (a.head.length === 0) return { main, unjudged: a.unjudged[0] };
+    const text = [`selected suite(s) fail at this head with and without coverage instrumentation, and not at its merge base with origin/main: ${a.head.join(", ")}`,
+      ...a.lines.filter((l) => a.head.some((s) => l.startsWith(`  - ${s}: `)))].join("\n").slice(0, 4000);
+    return { main, refused: { outcome: "tests-failed", reason: `${a.head.length} selected suite(s) fail at this head and pass at its merge base${mainNote}`, failing: a.head, text, suites: suites.length } };
+  };
   if (run !== undefined) {
     const { r } = await j.bounded(ran);
     if (!r.timedOut && r.spawnError === undefined) {
       if (r.status === 0) return { outcome: "covered", reason: `${ran.length} own and direct-importer suite(s) cover every added src line`, suites: ran.length };
       if (j.isUncovered(r.output)) narrowGap = measuredGap(j.refusalText(r.output), run.measured);
+      else if (j.rerun !== undefined && REAL_TEST_FAILURE.test(r.output)) {
+        const verdict = await failed(r.output, ran, j.rerun);
+        if (verdict.refused !== undefined) return verdict.refused;
+      }
     }
   }
   const advisory = async (why: string): Promise<CoverageVerdict | undefined> => {
@@ -186,6 +264,12 @@ export async function judgeCoverage(j: CoverageJudgement): Promise<CoverageVerdi
     if (r.status === 0) return { outcome: "covered", reason: `${suites.length} scoped suite(s) cover every added src line`, suites: suites.length };
     if (j.isUncovered(r.output)) return { outcome: "uncovered", text: j.refusalText(r.output), suites: suites.length };
     if (!j.isMissingSf(r.output)) {
+      if (j.rerun !== undefined && REAL_TEST_FAILURE.test(r.output)) {
+        const verdict = await failed(r.output, suites, j.rerun);
+        if (verdict.refused !== undefined) return verdict.refused;
+        if (verdict.main !== undefined) return { outcome: "unavailable", reason: `${verdict.main}${skippedNarrow}` };
+        if (verdict.unjudged !== undefined) return unavailable(verdict.unjudged.slice(0, 300));
+      }
       const why = /^diff-coverage-local: .*$/m.exec(r.output)?.[0] ?? `exited ${r.status}`;
       return unavailable(why.slice(0, 300));
     }

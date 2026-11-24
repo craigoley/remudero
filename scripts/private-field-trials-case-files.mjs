@@ -9,7 +9,8 @@ import { refreshInstallationToken } from "../src/lib/github-app.ts";
 import { loadPlan } from "../src/lib/plan.ts";
 import { resolveRepoLayout } from "../src/lib/repo-layout.ts";
 import { readTaskCaseLedgers } from "../src/lib/task-case-file.ts";
-import { buildFieldTrialsCaseFiles, caseLedgerWindowDays, creditsTask, ghPrListingPage, parseCarry } from "../src/lib/field-trials-case-files.ts";
+import { buildFieldTrialsCaseFiles, caseLedgerWindowDays, creditsTask, ghPrListingPage, parseCarry, readCaseFileCatalog,
+  readCaseFileOpsCatalog } from "../src/lib/field-trials-case-files.ts";
 
 const repoRoot = process.env.RMD_FIELD_TRIALS_REPO_ROOT ?? "/app";
 const stateDir = process.env.RMD_FIELD_TRIALS_CORE_LEDGER ?? "/home/node/Remudero/state";
@@ -24,11 +25,14 @@ if (process.env.GH_APP_ID && process.env.GH_APP_INSTALLATION_ID && process.env.G
   const token = await refreshInstallationToken({ env: process.env });
   if (!token.ok) console.error(`field-trials case-files: GitHub App token unavailable (${token.reason}); exact PR reads may be unavailable`);
 }
+// W1-T14717: new core tasks are filed in the ops catalog, so select from both; a refused read falls back to the
+// daemon's last good snapshot (W1-T14564) and is named in the summary either way.
+const catalog = await readCaseFileCatalog(plan, () => readCaseFileOpsCatalog(stateDir));
 let carry;
 try { carry = parseCarry(JSON.parse(readFileSync(carryPath, "utf8"))); } catch { carry = undefined; }
 
 const result = await buildFieldTrialsCaseFiles(
-  { rows: read.rows, planIds: new Set(plan.byId.keys()), carry },
+  { rows: read.rows, planIds: catalog.planIds, carry, opsCatalog: catalog.opsCatalog },
   // W1-T14728: one REST listing of every PR, newest update first, in place of a search per task.
   ghPrListingPage(ghTextAsync, "craigoley/remudero"),
   async (number) => JSON.parse(await ghTextAsync(["pr", "view", String(number), "--repo", "craigoley/remudero",
@@ -51,7 +55,7 @@ const result = await buildFieldTrialsCaseFiles(
     }
     let printed = "";
     const code = await caseFileCommand(["--tasks", selected.join(","), "--json"], {
-      repoRoot, stateDir, resolveOwnerRepo: () => ({ owner: "craigoley", repo: "remudero" }),
+      repoRoot, stateDir, resolveOwnerRepo: () => ({ owner: "craigoley", repo: "remudero" }), readTask: catalog.readTask,
       // The ledger read reaches back to the oldest selected call, so no called run falls outside its case file.
       readLedgers: (dir, taskIds, asOf) => readTaskCaseLedgers(dir, taskIds, asOf,
         { windowDays: caseLedgerWindowDays(asOf, oldestCallTs) }),
