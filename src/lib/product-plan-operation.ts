@@ -51,7 +51,7 @@ export function unansweredSteerNotes(product: Pick<StoredProduct, "brief" | "sta
     .reduce((latest, entry) => Math.max(latest, Date.parse(entry.observedAt) || 0), 0);
   return (product.brief.decisions ?? []).flatMap((decision) => {
     const reference = decision.provenance.kind === "operator" ? decision.provenance.reference : undefined;
-    if (!reference?.startsWith(PRODUCT_STEER_REFERENCE_PREFIX)) return [];
+    if (reference === undefined || !reference.startsWith(PRODUCT_STEER_REFERENCE_PREFIX)) return [];
     const at = reference.slice(PRODUCT_STEER_REFERENCE_PREFIX.length);
     const ms = Date.parse(at);
     return Number.isFinite(ms) && ms > answered ? [{ key: decision.key, value: decision.value, at }] : [];
