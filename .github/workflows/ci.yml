@@ -235,8 +235,8 @@ jobs:
           else
             echo "CI admission: no browser download for an idle source shard."
           fi
-      # W1-T11263: test/selected-registry-shell-consumers.test.ts fails under CI when its bash 3.2 legs
-      # would be UNMEASURED, so every job that can run it restores or builds the pinned bash 3.2.
+      # W1-T11263: every job that can run test/selected-registry-shell-consumers.test.ts restores or builds the
+      # pinned bash 3.2 and exports RMD_TEST_BASH32_REQUIRED=1, under which an UNMEASURED 3.2 leg fails the suite.
       - name: Restore the pinned bash 3.2 build (W1-T11263)
         id: bash32-cache
         if: ${{ steps.admission.outputs.setup != 'false' }}
@@ -259,7 +259,7 @@ jobs:
               echo "${BASH32_SHA256}  $SRC/bash-3.2.tar.gz" | sha256sum --check --strict
               tar -xzf "$SRC/bash-3.2.tar.gz" -C "$SRC"
               cd "$SRC/bash-3.2"
-              ./configure --quiet --without-bash-malloc CFLAGS="-O2 -std=gnu89 -Wno-error=implicit-function-declaration -Wno-error=implicit-int"
+              ./configure --quiet --without-bash-malloc CFLAGS="-O2 -std=gnu89 -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
               make -s
               cp bash "$OUT/bash"
             fi
@@ -270,6 +270,7 @@ jobs:
             fi
             echo "W1-T11263: RMD_TEST_BASH32=$OUT/bash (${VERSION})."
             echo "RMD_TEST_BASH32=$OUT/bash" >> "$GITHUB_ENV"
+            echo "RMD_TEST_BASH32_REQUIRED=1" >> "$GITHUB_ENV"
           else
             echo "W1-T11263: this job runs no tests for this event and diff class, so no bash 3.2 is built."
           fi
@@ -1008,7 +1009,7 @@ jobs:
               echo "${BASH32_SHA256}  $SRC/bash-3.2.tar.gz" | sha256sum --check --strict
               tar -xzf "$SRC/bash-3.2.tar.gz" -C "$SRC"
               cd "$SRC/bash-3.2"
-              ./configure --quiet --without-bash-malloc CFLAGS="-O2 -std=gnu89 -Wno-error=implicit-function-declaration -Wno-error=implicit-int"
+              ./configure --quiet --without-bash-malloc CFLAGS="-O2 -std=gnu89 -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
               make -s
               cp bash "$OUT/bash"
             fi
@@ -1019,6 +1020,7 @@ jobs:
             fi
             echo "W1-T11263: RMD_TEST_BASH32=$OUT/bash (${VERSION})."
             echo "RMD_TEST_BASH32=$OUT/bash" >> "$GITHUB_ENV"
+            echo "RMD_TEST_BASH32_REQUIRED=1" >> "$GITHUB_ENV"
           else
             echo "W1-T11263: this job runs no tests for this event and diff class, so no bash 3.2 is built."
           fi
@@ -1990,7 +1992,7 @@ jobs:
               echo "${BASH32_SHA256}  $SRC/bash-3.2.tar.gz" | sha256sum --check --strict
               tar -xzf "$SRC/bash-3.2.tar.gz" -C "$SRC"
               cd "$SRC/bash-3.2"
-              ./configure --quiet --without-bash-malloc CFLAGS="-O2 -std=gnu89 -Wno-error=implicit-function-declaration -Wno-error=implicit-int"
+              ./configure --quiet --without-bash-malloc CFLAGS="-O2 -std=gnu89 -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
               make -s
               cp bash "$OUT/bash"
             fi
@@ -2001,6 +2003,7 @@ jobs:
             fi
             echo "W1-T11263: RMD_TEST_BASH32=$OUT/bash (${VERSION})."
             echo "RMD_TEST_BASH32=$OUT/bash" >> "$GITHUB_ENV"
+            echo "RMD_TEST_BASH32_REQUIRED=1" >> "$GITHUB_ENV"
           else
             echo "W1-T11263: this job runs no tests for this event and diff class, so no bash 3.2 is built."
           fi

@@ -180,7 +180,7 @@ function slowShard(files: string[]) {
   assert.equal(plan.status, 0, plan.all);
   const outputs = { "plan-reading": plan.outputs };
   const guards = jobs["test-slow-shard"]!.steps.filter((s) => /\bnpm ci\b|playwright install chromium/.test(s.run ?? "") || (s.uses ?? "").startsWith("actions/cache@"));
-  assert.equal(guards.length, 3, "test-slow-shard must still carry npm ci, the Chromium cache and its install");
+  assert.equal(guards.length, 4, "test-slow-shard must still carry npm ci, the Chromium cache, its install and the bash 3.2 cache (W1-T11263)");
   const installs = guards.map((s) => evalIf(s.if, outputs));
   const ran = ws.run(
     step("test-slow-shard", (s) => (s.name ?? "").startsWith("Run the slow tier")).run!,
@@ -220,7 +220,7 @@ test("W1-T5699: ci.yml runs the full fast tier on every ci-shard and the slow ti
     }
     const slow = slowShard(files);
     assert.equal(slow.cls, "NO_SRC", `${files}`);
-    assert.deepEqual([...slow.installs, slow.slowRun], [true, true, true, true], `${files}: install and run the slow tier`);
+    assert.deepEqual([...slow.installs, slow.slowRun], [true, true, true, true, true], `${files}: install and run the slow tier`);
   }
 });
 
