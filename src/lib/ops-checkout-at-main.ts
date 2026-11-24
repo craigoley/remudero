@@ -16,7 +16,7 @@
  * any object whose bytes do not hash to the id asked for.
  */
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { inflateSync } from "node:zlib";
 import { headShaFromRefFiles } from "./checkout-head.js";
@@ -68,8 +68,18 @@ function untrackedFiles(checkoutDir: string, query: OpsCheckoutQuery, tracked: (
   for (const path of candidates) {
     if (!asks(query, path) || tracked(path)) continue;
     const abs = join(checkoutDir, path);
-    if (!existsSync(abs) || !statSync(abs).isFile()) continue;
-    out.set(path, { text: readFileSync(abs, "utf8"), source: "untracked" });
+    let fd: number | undefined;
+    try {
+      fd = openSync(abs, "r");
+      if (!fstatSync(fd).isFile()) continue;
+      out.set(path, { text: readFileSync(fd, "utf8"), source: "untracked" });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "EISDIR") continue;
+      throw error;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
   }
   return out;
 }

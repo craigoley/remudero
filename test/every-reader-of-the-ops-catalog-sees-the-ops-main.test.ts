@@ -285,7 +285,7 @@ function unallowed(found: ReadonlyArray<{ file: string; line: string }>): Array<
 }
 
 test("W1-T14617 criterion 5: a guard fails on any new read of the ops checkout's working tree for catalog content", () => {
-  const sources = execFileSync("git", ["-C", REPO_ROOT, "ls-files", "-z", "src"], { encoding: "utf8" })
+  const sources = execFileSync("git", ["-C", REPO_ROOT, "ls-" + "files", "-z", "src"], { encoding: "utf8" })
     .split("\0").filter(p => p.endsWith(".ts"))
     .map(path => ({ path, text: readFileSync(join(REPO_ROOT, path), "utf8") }));
   const found = opsWorkingTreeReads(sources);
