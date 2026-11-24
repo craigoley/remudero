@@ -4,8 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { autoTriageRepairReadGeneration } from "#src/cli/commands/daemon.js";
-import { daemonCommand } from "#src/run-task.js";
+import { autoTriageRepairReadGeneration, daemonCommand } from "#src/cli/commands/daemon.js";
 import { fixedClock } from "#src/lib/clock.js";
 import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "#src/lib/dep-review.js";
 import { freezeReadGeneration, type ReadGeneration } from "#src/lib/read-plane.js";
