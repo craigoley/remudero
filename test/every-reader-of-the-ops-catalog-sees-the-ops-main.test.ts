@@ -4,9 +4,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, sep } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { feedbackCaptured, listFeedback, readFeedbackEntry, readLandedFeedbackEntry, setFeedbackStatus } from "#src/lib/feedback.js";
@@ -298,11 +298,13 @@ function opsWorkingTreeReads(files: ReadonlyArray<{ file: string; text: string }
   return [...new Set(found)];
 }
 
-// @source-text-subject: src/**/*.ts — the claim is that NO tracked src file reads a plan-destination working tree, a
+// @source-text-subject: src/**/*.ts — the claim is that NO src file reads a plan-destination working tree, a
 // property of every file including paths no single execution drives.
 test("W1-T14617 criterion 5: a guard refuses any new read of the ops checkout's working tree for catalog content", () => {
-  const tracked = execFileSync("git", ["-C", REPO_ROOT, "ls-files", "-z", "src"], { encoding: "utf8" }).split("\0").filter(f => f.endsWith(".ts"));
-  assert.ok(tracked.length > 100 && tracked.includes(HELPER) && tracked.includes("src/lib/feedback.ts"), "the scan sees the tracked src files");
+  // A walk of src/: in a CI checkout, exactly the tracked src files.
+  const tracked = readdirSync(join(REPO_ROOT, "src"), { recursive: true, encoding: "utf8" })
+    .filter(f => f.endsWith(".ts")).map(f => `src/${f.split(sep).join("/")}`).sort();
+  assert.ok(tracked.length > 100 && tracked.includes(HELPER) && tracked.includes("src/lib/feedback.ts"), "the scan sees the src files");
   const files = tracked.map(file => ({ file, text: readFileSync(join(REPO_ROOT, file), "utf8") }));
   assert.deepEqual(opsWorkingTreeReads(files), [], "every ops-catalog read goes through src/lib/ops-checkout-at-main.ts");
   for (const a of ALLOWLIST) assert.ok(files.some(f => f.file === a.file && f.text.includes(a.text)), `the allowlisted site is still there: ${a.reason}`);

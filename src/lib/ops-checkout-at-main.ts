@@ -136,8 +136,8 @@ export function firstOpsCatalogFile(read: OpsCheckoutAtMain): { relPath: string;
 /** Rule 2 for one repo-relative path: main's bytes, absent, or the bytes of a working-tree file neither tracks. */
 export function opsCatalogFile(read: OpsCheckoutAtMain, relPath: string): { from: "main" | "working-tree"; text: string } | undefined {
   if (!read.headListed) throw new Error("rule 2 needs the HEAD listing: read the scope with head: true");
-  const main = read.files.get(relPath);
-  if (main !== undefined) return { from: "main", text: main };
+  const atMain = read.files.get(relPath);
+  if (atMain !== undefined) return { from: "main", text: atMain };
   if (read.mainPaths.has(relPath) || read.headPaths.has(relPath)) return undefined;
   const abs = join(read.checkoutDir, relPath);
   return existsSync(abs) && statSync(abs).isFile() ? { from: "working-tree", text: readFileSync(abs, "utf8") } : undefined;
