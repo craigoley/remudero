@@ -42,11 +42,11 @@ test("W1-T13107: the symptom is still recorded when its failure occurs", async (
   let repairSnapshot: (() => unknown) | undefined;
   try {
     const code = await daemonCommand(["--allow-self-target", "--plan", planPath, "--max", "0"], {
-      buildAutoTriageHooks: (options) => {
+      buildAutoTriageHooks: (options: { repairSnapshot?: () => unknown } | undefined) => {
         repairSnapshot = options?.repairSnapshot;
         return { checkAutoTriage: () => ({ fire: false as const, reason: "fixture" }), runAutoTriage: async () => {} };
       },
-      runDaemon: async (_plan, _deps) =>
+      runDaemon: async (_plan: unknown, _deps: unknown) =>
         ({ attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 }),
     });
     assert.equal(code, 0);
