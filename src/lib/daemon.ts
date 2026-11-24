@@ -1174,6 +1174,8 @@ export interface DaemonOpts {
   freshnessLikelyFraction?: number;
   /** W1-T12231: `freshnessRestart.maxDrainWaitMs` (default {@link FRESHNESS_MAX_DRAIN_WAIT_MS}). */
   freshnessMaxDrainWaitMs?: number;
+  /** W1-T12230: `freshnessRestart.loopOnlyHorizonMs` (default `freshnessStalenessHorizonMs`, one horizon for both). */
+  freshnessLoopOnlyHorizonMs?: number;
 }
 
 /** A non-stale freshness verdict must name the decision arm that produced it. `unassessed` deliberately retains the
@@ -4800,6 +4802,7 @@ export async function runDaemon(
   const freshnessThreshold = opts.freshnessScoreLimit === undefined ? DEPLOY_RESTART_SCORE_THRESHOLD
     : { value: opts.freshnessScoreLimit, reason: "plan/policy.yaml freshnessRestart.scoreLimit" };
   const freshnessStalenessHorizonMs = opts.freshnessStalenessHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
+  const freshnessLoopOnlyHorizonMs = opts.freshnessLoopOnlyHorizonMs ?? freshnessStalenessHorizonMs;
   const freshnessQuietWindow = opts.freshnessQuietWindowMs === undefined ? FRESHNESS_COALESCE_WINDOW_MS
     : { value: opts.freshnessQuietWindowMs, reason: "plan/policy.yaml freshnessRestart.quietWindowMs" };
   const freshnessLikelyFraction = opts.freshnessLikelyFraction ?? FRESHNESS_LIKELY_FRACTION;
@@ -4823,6 +4826,8 @@ export async function runDaemon(
   // W1-T4945 — this lifetime's freshness pressure, and when it first read stale; see `decideFreshness`.
   let freshnessPressure: DeployRestartPressureState = { total: 0, scoredShas: [] };
   let staleSinceMs: number | undefined;
+  // W1-T12230: when this lifetime first read each commit of a stale advance, by sha.
+  const changeFirstReadMs = new Map<string, number>();
   let lastAdvanceSha: string | undefined;
   let lastAdvanceAtMs: number | undefined;
   let advancesCoalesced = 0;
@@ -6028,7 +6033,7 @@ export async function runDaemon(
     let pressureEvidence: Record<string, unknown> = {};
     if (outcome.arm === "dirty" && outcome.behind && outcome.newSha) {
       const nowMs = daemonClock.now();
-      observeFreshnessAdvance(outcome.newSha, nowMs);
+      observeFreshnessAdvance(outcome.newSha, nowMs, undefined, outcome.changes);
       const { decision, withheldEvidence } = scoreFreshness(outcome.changes, nowMs);
       pressureEvidence = { behind: true, stale_since_ms: staleSinceMs, weight: decision.weight,
         age_pressure: decision.agePressure, pressure: decision.pressure, ...withheldEvidence };
@@ -6055,8 +6060,12 @@ export async function runDaemon(
   };
 
   // W1-T6093: remember observations at both the first-cycle guard and the shared decision boundary.
-  const observeFreshnessAdvance = (newSha: string, nowMs: number, heldSinceMs?: number): void => {
+  const observeFreshnessAdvance = (newSha: string, nowMs: number, heldSinceMs?: number, changes?: readonly DeployWorthChange[]): void => {
     staleSinceMs = Math.min(staleSinceMs ?? nowMs, heldSinceMs ?? nowMs);
+    // W1-T12230: the first stale reading, and one a live edit held (the tree was behind earlier), date their commits from
+    // the stale reading; a commit first read later, from that reading.
+    const readAtMs = changeFirstReadMs.size === 0 || heldSinceMs !== undefined ? staleSinceMs : nowMs;
+    for (const change of changes ?? []) changeFirstReadMs.set(change.sha, Math.min(changeFirstReadMs.get(change.sha) ?? readAtMs, readAtMs));
     if (newSha !== lastAdvanceSha) {
       lastAdvanceSha = newSha;
       lastAdvanceAtMs = nowMs;
@@ -6102,8 +6111,16 @@ export async function runDaemon(
               withheld_unreadable: withheld.unreadable,
               ...(withheld.unparseable > 0 ? { withheld_reviews_unparseable: withheld.unparseable } : {}),
             };
+    // W1-T12230: each class's staleness runs from the first read of its earliest commit (observeFreshnessAdvance).
+    const classSinceMs: { reviewer?: number; loop?: number } = {};
+    for (const change of changes ?? []) {
+      const changeClass = change.changeClass ?? "loop";
+      const readAtMs = changeFirstReadMs.get(change.sha) ?? staleAtMs;
+      if (changeClass !== "worker_only") classSinceMs[changeClass] = Math.min(classSinceMs[changeClass] ?? readAtMs, readAtMs);
+    }
     const decision = decideFreshnessRestart({ changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews,
-      threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs, stallShare });
+      threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs, loopOnlyHorizonMs: freshnessLoopOnlyHorizonMs,
+      classSinceMs, stallShare });
     freshnessPressure = decision.state;
     return { decision, busy, busyReasons, background, withheldEvidence, adoptableLanes };
   };
@@ -6122,7 +6139,7 @@ export async function runDaemon(
   const freshnessPhases: { decision_to_latch?: number; lanes?: number; pre_exit_pass?: number; drain?: number } = {};
   const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, lanes: readonly (string | undefined)[] = []): "restart" | "defer" => {
     const nowMs = daemonClock.now();
-    observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs);
+    observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs, freshness.changes);
     const staleAtMs = staleSinceMs!;
     const stall = measureLoopStalls(nowMs);
     const { decision, busy, busyReasons, background, withheldEvidence, adoptableLanes } = scoreFreshness(freshness.changes, nowMs, lanes, stall.share);
@@ -6131,7 +6148,7 @@ export async function runDaemon(
     const coalesced = coalesceFreshnessRestart({
       decision, newSha: freshness.newSha, lastAdvanceAtMs: lastAdvanceAtMs!,
       staleSinceMs: staleAtMs, nowMs, window: freshnessQuietWindow, installInputsChanged: changesInstallInputs(freshness.changes),
-      threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs,
+      threshold: freshnessThreshold, ageHorizonMs: decision.horizonMs ?? freshnessStalenessHorizonMs,
       lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: freshnessMinLifetimeMs, stallShare: stall.share,
       ...(expedite ? { expedite } : {}),
     });
@@ -6179,6 +6196,9 @@ export async function runDaemon(
       ...lifetimeEvidence,
       score_limit: freshnessThreshold.value,
       staleness_horizon_ms: freshnessStalenessHorizonMs,
+      // W1-T12230: the commits of the advance in each class, and the horizon of the staleness part that decided.
+      change_classes: decision.changeClasses,
+      horizon_ms: decision.horizonMs,
       quiet_window_ms: freshnessQuietWindow.value,
     });
     return action;
@@ -8100,7 +8120,7 @@ export async function runDaemon(
       // (W1-T312, W1-T380, W1-T382). One-shot: the three-clocks guard (W1-T126) fires at the next
       // tick boundary, and the operator holds above still outrank it (W1-T936).
       if (cyclesEntered === 0) {
-        observeFreshnessAdvance(freshness.newSha, daemonClock.now(), freshness.staleSinceMs);
+        observeFreshnessAdvance(freshness.newSha, daemonClock.now(), freshness.staleSinceMs, freshness.changes);
         log("daemon.freshness_deferred", {
           old_sha: freshness.oldSha,
           new_sha: freshness.newSha,

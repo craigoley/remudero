@@ -456,7 +456,9 @@ test("DAEMON WIRING: the production runOne supplies a material freshness handoff
         stale: true,
         oldSha,
         newSha,
-        changes: [...advanced].reverse(),
+        // W1-T12230: the reading classes each commit. This fixture's tree holds no daemon entry, so its closure is
+        // unreadable and every commit fails toward `loop`, which scores 1 as before.
+        changes: [...advanced].reverse().map((change) => ({ ...change, changeClass: "loop" })),
       },
       "an advance that restarts a busy daemon crosses the handoff boundary, carrying the commits it advanced by (W1-T4945)",
     );

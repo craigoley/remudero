@@ -169,8 +169,10 @@ export function judgeAdvanceByClosure(changedPaths: readonly string[], before: D
   }
   const inside = (path: string) => (before as Extract<DaemonClosure, { status: "read" }>).paths.has(path) ||
     (after as Extract<DaemonClosure, { status: "read" }>).paths.has(path);
-  const outside = changedPaths.filter((path) => !inside(path)).length;
-  return { status: "read", material: outside < changedPaths.length, outside };
+  // W1-T12230: name the changed paths in the closure, so each commit of the advance is classed by its own files.
+  const within = changedPaths.filter(inside);
+  const outside = changedPaths.length - within.length;
+  return { status: "read", material: outside < changedPaths.length, outside, inside: within };
 }
 
 /**
