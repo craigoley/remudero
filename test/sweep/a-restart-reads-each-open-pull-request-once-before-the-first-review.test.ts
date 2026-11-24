@@ -49,10 +49,13 @@ function generation(publishedAtMs: number, views: OpenPrView[], openPrError?: st
 }
 
 function pullRow(headSha: string, repo = "r"): Record<string, unknown> {
+  // W1-T14577: a day before the test clock. The sweep ages updated_at against sweep.staleDays at Date.now(),
+  // so a fixed date would turn this pull request stale once enough real time passed.
+  const recent = new Date(Date.now() - 86_400_000).toISOString();
   return {
     number: PR, html_url: `https://github.com/o/${repo}/pull/${PR}`, state: "open", draft: false,
-    title: `feat: ${PR}`, body: `Remudero-Task: W1-T${PR}`, updated_at: "2026-11-11T00:00:00Z",
-    created_at: "2026-11-11T00:00:00Z", head: { ref: `run-W1-T${PR}-1`, sha: headSha },
+    title: `feat: ${PR}`, body: `Remudero-Task: W1-T${PR}`, updated_at: recent,
+    created_at: recent, head: { ref: `run-W1-T${PR}-1`, sha: headSha },
   };
 }
 
