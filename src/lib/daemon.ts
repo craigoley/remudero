@@ -1,6 +1,7 @@
 import { settledSpansByClass } from "./cost-anomaly.js";
 import { restartCycleLedgerRows, restartCycleRow } from "./restart-cycle.js";
 import { createHash } from "node:crypto";
+import type { DaemonHandoff, HandoffAttempt } from "./daemon-handoff.js";
 import { join } from "node:path";
 import type { LedgerRecord } from "./retro.js";
 import type { ReleaseEvidence } from "./operator-release.js";
@@ -748,7 +749,8 @@ export const PER_TASK_FAILURE_RE = /^W\d+-T[0-9A-Za-z]+: Command failed: /;
  * Reuse entrypoint's 76 arm; a new code needs an image rebuild (W1-T3310, W1-T3319).
  * Task refusals once spent on-failure:5 (2026-09-10; W1-T490, W1-T2537, W1-T2546).
  * Exits 75/76/77 still reach docker after 100 bounded retries: docs/forensics/daemon.md. */
-export function daemonExitCodeForSummary(summary: Pick<DaemonSummary, "stopReason" | "stopDetail">): number {
+export function daemonExitCodeForSummary(summary: Pick<DaemonSummary, "stopReason" | "stopDetail" | "handedOff">): number {
+  if (summary.handedOff) return DAEMON_EXIT_HANDED_OFF;
   if (summary.stopReason !== "error") return daemonExitCode(summary.stopReason);
   const detail = summary.stopDetail;
   if (detail !== undefined && classifyFailure({ text: detail }) === "transient") return DAEMON_EXIT_ENVIRONMENTAL;
@@ -1368,6 +1370,8 @@ export interface DaemonSummary {
   ticks: number;
   /** Reporting failures after settlement; not proof that a ledger receipt was delivered. */
   reportingFaults?: Array<{ phase: string; detail: string }>;
+  /** W1-T14545: a freshness exit that handed off to a ready standby; the command exits {@link DAEMON_EXIT_HANDED_OFF}. */
+  handedOff?: true;
 }
 
 /** Injectable dependencies — the real command wires GitHub/run-task/usage/locks. */
@@ -1800,6 +1804,8 @@ export interface DaemonDeps {
   /** W1-T11327: read and delete the `RESTART_REQUESTED` marker, consumed once. A defined return asks this process to
    *  leave through its freshness exit (DAEMON_EXIT_STALE), leaving run children for the next boot to adopt. */
   consumeRestartRequest?: () => { origin: string; requestedAt: string; codeSha?: string } | null;
+  /** W1-T14545: a freshness restart hands off to a standby while `state/daemon-handoff.on` exists. Absent: today's exit. */
+  handoff?: DaemonHandoff;
   /** Pending bounded PR repair/review requests recorded by the authenticated console. The daemon
    * consumes at most one per poll and keeps final fix/review authority in its established command
    * path; the HTTP writer never starts a process. */
@@ -6391,6 +6397,8 @@ export async function runDaemon(
   // One stale-exit path for both freshness boundaries. Both must preserve the same install, bounded pass, named
   // ledger and stale summary contract; duplicating that sequence would let them drift (W1-T2845).
   let preparedFreshnessExit: Promise<FreshnessPass> | undefined;
+  // W1-T14545: started with the exit's preparation, so the standby boots while this daemon drains.
+  let handoffStart: Promise<HandoffAttempt | undefined> | undefined;
   let advanceEvidence: { stale_since_ms: number; last_pass_completed_ms: number | null } | undefined;
   const prepareFreshnessExit = async (
     freshness: Extract<DaemonFreshness, { stale: true }>,
@@ -6398,6 +6406,7 @@ export async function runDaemon(
     advanceSinceMs?: number,
   ): Promise<FreshnessPass> => {
     closeDirectMergeAdmissions("freshness_exit");
+    if (deps.handoff?.enabled()) handoffStart ??= deps.handoff.begin(freshness.newSha);
     // Install BEFORE the loop stops, so the relaunched process inherits deps matching the new sha (W1-T151).
     if (freshness.installNeeded) {
       deps.runInstall?.();
@@ -6441,6 +6450,9 @@ export async function runDaemon(
     freshness: Extract<DaemonFreshness, { stale: true }>, dispatchLatchAtMs?: number, advanceSinceMs?: number,
   ): Promise<DaemonSummary> => {
     const preExitPass = await (preparedFreshnessExit ??= prepareFreshnessExit(freshness, dispatchLatchAtMs, advanceSinceMs));
+    // W1-T14545: the drain is done; a ready standby takes over, and anything else is today's exit.
+    const handoff = handoffStart ? await handoffStart : undefined;
+    const handedOff = handoff ? await handoff.ready() : false;
     const requested = freshness.restartRequest;
     const detail = requested
       ? `restart in place requested by ${requested.origin} at ${requested.requestedAt}`
@@ -6456,6 +6468,11 @@ export async function runDaemon(
     log("daemon_selfrestart_for_freshness", { old_sha: freshness.oldSha, new_sha: freshness.newSha, pre_exit_pass: preExitPass,
       ...(advanceSinceMs !== undefined && advanceEvidence ? advanceEvidence : {}),
       ...(sweepEndedEarly ? { sweep_ended_early: true } : {}) });
+    if (handoff && handedOff) {
+      const handedOffSummary = await summary("stale", `${detail}; handed off to standby ${handoff.runId}`);
+      handoff.yieldTo([...children.values()].map((child) => child.runId));
+      return { ...handedOffSummary, handedOff: true };
+    }
     return summary("stale", detail);
   };
   // W1-T11327: a RESTART_REQUESTED marker is a freshness decision with no advance, so it skips scoring, coalescing and
