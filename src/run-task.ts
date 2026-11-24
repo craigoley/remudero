@@ -4566,9 +4566,9 @@ async function strictPlanOf(read: RevisionLoad, revision: PlanRevision, runGit: 
 }
 
 /** W1-T9763: the daemon's boot sync, lane sync (the coalescer's), reload and tick read share ONE store, so one
- *  revision is one instance for all of them. */
+ *  revision is one instance for all of them. W1-T14712: a foreign target hands its own (`targetPlanRevisionStore`). */
 export function daemonPlanReaders(planPath: string, quarantine: (quarantined: QuarantinedTask[]) => void,
-  runGit?: GitRunnerAsync): {
+  runGit?: GitRunnerAsync, revisions: PlanRevisionStore = createPlanRevisionStore()): {
   revisions: PlanRevisionStore;
   boot: (opts: { allowStale?: boolean }) => Promise<SyncedPlan>;
   sync: (repoDir: string, relPath: string, opts: { allowStale?: boolean }) => Promise<SyncedPlan>;
@@ -4577,7 +4577,6 @@ export function daemonPlanReaders(planPath: string, quarantine: (quarantined: Qu
     (input: TickReadInput) => Promise<ReadGeneration<TickReadFacts>>;
   inlineTickRead: (options: TickReadOptions, io: Parameters<typeof createTickReadProducer>[1]) => (input: TickReadRequest) => Promise<TickReadFacts>;
 } {
-  const revisions = createPlanRevisionStore();
   const repoDir = dirname(dirname(planPath));
   const sync = (dir: string, relPath: string, opts: { allowStale?: boolean }) =>
     syncPlanFromOriginAsync(dir, relPath, { ...opts, quarantine, revisions, ...(runGit ? { runGit } : {}) });
@@ -27858,8 +27857,9 @@ export function resolveReloadPlan(
   allowStale: boolean,
   log: (step: string, extra?: Record<string, unknown>) => void,
   selfDeps: Parameters<typeof planReloader>[3] = {},
+  targetDeps: Parameters<typeof dedicatedTargetPlanReloader>[2] = {},
 ): (() => Promise<Plan | null>) | undefined {
-  return target.isSelf ? planReloader(target, allowStale, log, selfDeps) : dedicatedTargetPlanReloader(target, log);
+  return target.isSelf ? planReloader(target, allowStale, log, selfDeps) : dedicatedTargetPlanReloader(target, log, targetDeps);
 }
 
 /**
