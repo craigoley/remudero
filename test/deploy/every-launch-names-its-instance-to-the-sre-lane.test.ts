@@ -493,9 +493,35 @@ test("W1-T14611 criterion 3: names that resolve today resolve the same way, and 
   }
   assert.deepEqual(calls, ["clear", "clear"], "only the two started lanes send a clear; nothing escalates");
 
-  // A registry with no live primary pages nothing either, and nor does an unresolved daemon outside a container.
+  // A registry with no live primary pages nothing either, on the container root or on a host root.
   const noPrimary = fleet(t, ["  core:", "    github_repo: craigoley/remudero", "    state_dir: /srv/host-core-state"]);
   await laneStart(t, { stateRoot: noPrimary.stateRoot, registry: noPrimary.registry, page: spy });
-  await laneStart(t, { stateRoot: join(f.home, "laptop-root"), registry: f.registry, page: spy });
+  await laneStart(t, { stateRoot: join(noPrimary.home, "laptop-root"), registry: noPrimary.registry, page: spy });
+  // Nor does a host-side daemon whose lane is switched off.
+  await laneStart(t, { stateRoot: join(f.home, "laptop-root"), registry: f.registry, sreLane: "0", page: spy });
   assert.deepEqual(calls, ["clear", "clear"]);
+});
+
+test("W1-T14611 criterion 2: an unresolved daemon pages on ANY state root, host-side as well as in a container", async (t) => {
+  const f = fleet(t);
+  // The class: the page depends on disabled + unresolved + one live primary only, never on where the state root is.
+  const roots = [CONTAINER_ROOT, join(f.home, "laptop-root"), "/srv/unregistered-host-state"];
+  for (const stateRoot of roots) {
+    const rows = await laneStart(t, { stateRoot, registry: f.registry, page: page(f) });
+    assert.equal(rows[0]?.step, "sre_lane.disabled", stateRoot);
+    assert.match(String(rows[0]?.fields.reason), /is not exactly one instance's state_dir/, stateRoot);
+  }
+  const escalated = ledgerSteps(f, SRE_LANE_UNRESOLVED_ESCALATED_STEP);
+  assert.deepEqual(escalated.map((e) => [e.state_root, e.primary, e.registry, e.delivered]),
+    roots.map((root) => [root, "core", f.registry, true]), "one page per unresolved state root");
+  assert.equal(f.created.length, roots.length);
+  assert.ok(f.created[1]!.includes(roots[1]!), "the host-side page names its own state root");
+
+  // A restart of the host-side daemon in the same episode does not page again; naming it closes only its own page.
+  await laneStart(t, { stateRoot: roots[1]!, registry: f.registry, page: page(f) });
+  assert.equal(f.created.length, roots.length);
+  const named = await laneStart(t, { stateRoot: roots[1]!, registry: f.registry, instanceName: "core", page: page(f) });
+  assert.equal(named[0]?.step, "sre_lane.started");
+  assert.deepEqual(f.closed, [escalated[1]!.issue_url]);
+  assert.deepEqual(ledgerSteps(f, SRE_LANE_UNRESOLVED_CLEARED_STEP).map((c) => c.state_root), [roots[1]]);
 });

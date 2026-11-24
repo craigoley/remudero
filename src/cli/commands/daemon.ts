@@ -917,9 +917,7 @@ export interface SreLaneUnresolvedPage {
   clear: (info: { stateRoot: string; instance: string | null }) => Promise<void>;
 }
 
-/** The state mount of every daemon container (deploy/recycle-container.sh STATE_MOUNT_DEST). */
-const DAEMON_CONTAINER_STATE_ROOT = "/home/node/Remudero";
-
+/** Pages on ANY state root, container or host: only disabled, unresolved, not RMD_SRE_LANE=0, and one live primary. */
 async function pageUnresolvedSreLane(
   sreLane: Parameters<typeof sreLaneEnabled>[0],
   enabled: boolean,
@@ -933,7 +931,7 @@ async function pageUnresolvedSreLane(
       await unresolved.clear({ stateRoot: where.stateRoot, instance: instance.resolved ? instance.name : null });
       return;
     }
-    if (instance.resolved || sreLane.env.RMD_SRE_LANE?.trim() === "0" || where.stateRoot !== DAEMON_CONTAINER_STATE_ROOT) return;
+    if (instance.resolved || sreLane.env.RMD_SRE_LANE?.trim() === "0") return;
     const primaries = await livePrimaryNames(where.registryPath);
     if (!("names" in primaries) || primaries.names.length !== 1) return;
     await unresolved.escalate({ primary: primaries.names[0]!, stateRoot: where.stateRoot, registry: where.registryPath, reason: instance.why });
