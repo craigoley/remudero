@@ -191,6 +191,26 @@ test("W1-T14733 criterion 4: a cause change with no clean exit between re-escala
   await drainEscalationSpool(stateDir, poster);
   assert.deepEqual(drained, [], "so the drain posts nothing more");
 
+  // Twenty refusals whose spool write ALSO fails (a file stands where the spool directory goes): each exit stays
+  // pending with queued false, and the next working boot folds them all into one write that names the newest exit.
+  {
+    const p2 = writeLedger([], { scope: t }).path;
+    const g2 = gateway();
+    let at2 = loop(p2, "DAEMON-a", healthy(p2, g2.issues), 3, FIRST_CAUSE, g2.issues);
+    writeFileSync(escalationSpoolDir(dirname(p2)), "not a directory");
+    at2 = loop(p2, "DAEMON-w", at2, REFUSED, FIRST_CAUSE, { ...refusing.issues, create: g2.issues.create });
+    const latest = new Map<unknown, Record<string, unknown>>();
+    for (const r of lines(p2)) if (r.step === "daemon.crashloop.updated") latest.set(r.prior_run_id, r);
+    assert.equal([...latest.values()].filter((r) => r.delivered === false && r.queued === false).length, REFUSED, "every exit is pending and unspooled");
+    boot(p2, "DAEMON-w-after", at2, g2.issues);
+    assert.equal(g2.posts.length + g2.edits.length, 1, "THE CLAIM: one status write folds twenty pending exits");
+    assert.match(g2.posts[0]!.body, /23 short exits in the trailing run, first DAEMON-a0, newest DAEMON-w19;/, "naming the newest exit, not the oldest pending one");
+    assert.match(g2.posts[0]!.body, /- DAEMON-w19: booted/, "and quoting the newest exit's evidence");
+    const folded = lines(p2).filter((r) => r.step === "daemon.crashloop.updated" && r.run_id === "DAEMON-w-after");
+    assert.equal(folded.length, REFUSED + 1, "every pending exit and this boot's newest one are delivered by that write");
+    assert.ok(folded.every((r) => r.delivered === true));
+  }
+
   // Twenty refusals with no direct write after them: the drain posts the one spooled status, once.
   at = loop(path, "DAEMON-r", at, REFUSED, FIRST_CAUSE, { ...refusing.issues, create: g.issues.create });
   await drainEscalationSpool(stateDir, poster);
