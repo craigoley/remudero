@@ -56,7 +56,7 @@ import { createThreadEventSync, registryThreadItems, type InboxResponderDeps } f
 import type { InboxCausalScope } from "../../lib/inbox-thread.js";
 import { gitRecommendationEvidence, RECOMMENDATION_SEED_PATH } from "../../lib/inbox-recommendation.js";
 import { censusRunDirs } from "../../lib/run-child-contract.js";
-import { loadTargetPlanOrEmptyWhenAbsent, plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
+import { loadTargetPlanForReload, loadTargetPlanOrEmptyWhenAbsent, plannedSequence, runDrain, targetPlanRevisionStore, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
@@ -912,7 +912,8 @@ export async function daemonSreLaneEnabled(
   log(row.step, row.fields);
   const enabled = sreLaneEnabled(sreLane);
   if (unresolved !== undefined) {
-    const paged = pageUnresolvedSreLane(sreLane, enabled, { stateRoot, registryPath }, unresolved, log);
+    const registryFromEnv = process.env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined || Boolean(process.env.RMD_INSTANCE_REGISTRY?.trim());
+    const paged = pageUnresolvedSreLane(sreLane, enabled, { stateRoot, registryPath, registryFromEnv }, unresolved, log);
     if (background !== undefined) background(paged);
     else await paged;
   }
@@ -929,7 +930,7 @@ export interface SreLaneUnresolvedPage {
 async function pageUnresolvedSreLane(
   sreLane: Parameters<typeof sreLaneEnabled>[0],
   enabled: boolean,
-  where: { stateRoot: string; registryPath: string },
+  where: { stateRoot: string; registryPath: string; registryFromEnv: boolean },
   unresolved: SreLaneUnresolvedPage,
   log: (step: string, extra?: Record<string, unknown>) => void,
 ): Promise<void> {
@@ -942,9 +943,10 @@ async function pageUnresolvedSreLane(
     if (instance.resolved || sreLane.env.RMD_SRE_LANE?.trim() === "0") return;
     const primaries = await livePrimaryNames(where.registryPath);
     if (!("names" in primaries) || primaries.names.length !== 1) return;
-    // Under the test runner a page reads only a fixture registry, never the live fleet's (the ops-catalog-source /
-    // board-snapshot-cache rule): a test boot on a temp root would otherwise page the real primary. Never in production.
-    if (isTestRunner() && !realpathSync(where.registryPath).startsWith(realpathSync(tmpdir()) + sep)) return;
+    // Under the test runner a page reads only a fixture registry a test named by env under tmpdir, never the checkout's
+    // own: a checkout copied under tmpdir would otherwise page the real primary (W1-T14611). Never in production.
+    const fixture = where.registryFromEnv && realpathSync(where.registryPath).startsWith(realpathSync(tmpdir()) + sep);
+    if (isTestRunner() && !fixture) return;
     await unresolved.escalate({ primary: primaries.names[0]!, stateRoot: where.stateRoot, registry: where.registryPath, reason: instance.why });
   } catch (error) {
     log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) });
@@ -1703,7 +1705,9 @@ export async function daemonCommand(
   const deferUntilLocked = (): string => "deferred-until-lock";
   const requestShardRepair = shardRepairRequester(join(config.root, "state"), log);
   const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
-  const planReaders = daemonPlanReaders(target.planPath, reportPlanQuarantine);
+  // W1-T14712: a foreign target's lane runs sync through a store that keeps another repository's unseen dependency.
+  const planReaders = daemonPlanReaders(target.planPath, reportPlanQuarantine, undefined,
+    targetPlanRevisionStore(target.isSelf ? undefined : `${target.owner}/${target.repo}`));
   const gardenContext: GardenBuildContext = { config, repoRoot: effectiveRepoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs, codeSha: daemonLoadedCodeSha };
   // A per-target garden on a non-self target reads THAT repository and its checkout; every other garden reads self.
   const gardenContextFor = (name: RegisteredGardenName): GardenBuildContext => registeredGardenTargetArgs(name, target).length === 0 ? gardenContext
@@ -3015,7 +3019,7 @@ export async function daemonCommand(
         // load source. Selection itself lives in `resolveReloadPlan` (its own doc, above) so this
         // callsite stays a single reachable line regardless of which arm a given caller exercises.
         reloadPlan: flagValue(rest, "--plan") ? undefined : resolveReloadPlan(target, allowStale, log,
-          { load: planReaders.reload }),
+          { load: planReaders.reload }, { load: (path: string) => loadTargetPlanForReload(path, `${target.owner}/${target.repo}`) }),
         // Console UP NEXT write-actions (fb-1784988460437-9daa9b): the daemon
         // consumes markers the write-token API drops, dispatching a kicked task
         // through its normal assertRunnable-gated path and honouring "drain now".
