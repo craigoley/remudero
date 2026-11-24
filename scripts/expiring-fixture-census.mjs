@@ -572,7 +572,14 @@ export function refusePopulationDrop(currentByFile, recordedByFile = RECORDED_PO
   return drops.sort((a, b) => a.file.localeCompare(b.file));
 }
 
-export function proveNearCrossings(reported, runSuite, controlShiftDays) {
+/**
+ * W1-T14578: prove every crossing inside the 24 h tier from ONE control run and ONE shifted run, each
+ * reading every near-crossing file once, so the census's run time does not grow with its crossing
+ * count (core #20566 was cancelled at light-gates' limit re-running suites one file at a time).
+ * `runSuites(files, days)` maps each file to its measurement, or to `{ error }` when that file
+ * reached no verdict of its own; a throw is no verdict for every file in the run.
+ */
+export function proveNearCrossings(reported, runSuites, controlShiftDays) {
   const byFile = new Map();
   for (const row of reported) {
     if (row.daysLeft > 0 && row.daysLeft * 24 < NEAR_CROSSING_HOURS) {
@@ -581,22 +588,48 @@ export function proveNearCrossings(reported, runSuite, controlShiftDays) {
       byFile.set(row.file, rows);
     }
   }
-  for (const [file, rows] of byFile) {
-    const shiftDays = Math.ceil(Math.max(...rows.map((r) => r.daysLeft))) + 1;
-    let verification;
+  if (byFile.size === 0) return;
+  // Inside 24 h every crossing has under a day left, so one shift past the latest passes them all.
+  const shiftDays = Math.ceil(Math.max(...[...byFile.values()].flat().map((r) => r.daysLeft))) + 1;
+  const run = (files, days) => {
+    let results;
     try {
-      const control = runSuite(file, controlShiftDays);
-      if (!control.passed) {
-        verification = { verdict: "control_failed", reason: `suite failed the +${controlShiftDays}d clock control (${control.pass}/${control.tests} pass)`, ...control };
-      } else {
-        const shifted = runSuite(file, shiftDays);
-        verification = { verdict: shifted.passed ? "shifted_passed" : "confirmed", shiftDays, ...shifted };
-      }
+      results = runSuites(files, days);
     } catch (error) {
-      verification = { verdict: "run_error", reason: String(error) };
+      return () => ({ error });
     }
-    for (const row of rows) row.verification = verification;
+    return (file) => results.get(file) ?? { error: new Error(`shifted suite ${file}: the run returned no verdict for it`) };
+  };
+  const verdicts = new Map();
+  const control = run([...byFile.keys()], controlShiftDays);
+  const shiftable = [];
+  for (const file of byFile.keys()) {
+    const measured = control(file);
+    if ("error" in measured) verdicts.set(file, { verdict: "run_error", reason: String(measured.error) });
+    else if (!measured.passed) {
+      verdicts.set(file, { verdict: "control_failed", reason: `suite failed the +${controlShiftDays}d clock control (${measured.pass}/${measured.tests} pass)`, ...measured });
+    } else shiftable.push(file);
   }
+  if (shiftable.length > 0) {
+    const shifted = run(shiftable, shiftDays);
+    for (const file of shiftable) {
+      const measured = shifted(file);
+      verdicts.set(file, "error" in measured ? { verdict: "run_error", reason: String(measured.error) }
+        : { verdict: measured.passed ? "shifted_passed" : "confirmed", shiftDays, ...measured });
+    }
+  }
+  for (const [file, rows] of byFile) for (const row of rows) row.verification = verdicts.get(file);
+}
+
+/** A one-file `runSuite(file, days)` seam as the batched `runSuites(files, days)` {@link proveNearCrossings} takes. */
+export function perFileRunSuites(runSuite) {
+  return (files, days) => new Map(files.map((file) => {
+    try {
+      return [file, runSuite(file, days)];
+    } catch (error) {
+      return [file, { error }];
+    }
+  }));
 }
 
 /** Headline and exit share this decision: near crossings need verdicts; further crossings keep attribution. */
@@ -774,6 +807,7 @@ export async function main({
   env = process.env,
   append = null,
   runSuite,
+  runSuites,
   repoRoot = process.cwd(),
 } = {}) {
   assertAged();
@@ -797,7 +831,8 @@ export async function main({
   });
   if (result.reported.some((r) => r.daysLeft > 0 && r.daysLeft * 24 < NEAR_CROSSING_HOURS)) {
     const shared = await loadGateGardener();
-    proveNearCrossings(result.reported, runSuite ?? ((file, days) => shared.runSuiteShiftedMeasured(repoRoot, file, days)), shared.DEFUSE_CONTROL_SHIFT_DAYS);
+    const batched = runSuites ?? (runSuite ? perFileRunSuites(runSuite) : (files, days) => shared.runSuitesShifted(repoRoot, files, days));
+    proveNearCrossings(result.reported, batched, shared.DEFUSE_CONTROL_SHIFT_DAYS);
   }
   const populationDrop = refusePopulationDrop(result.populationByFile, recordedPopulationByFile);
   const report = formatReport({ ...result, populationDrop });

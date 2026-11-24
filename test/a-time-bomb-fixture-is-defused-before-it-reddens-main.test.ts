@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { fixedClock } from "#src/lib/clock.js";
 import { gateGardenSpec, loadGateProbes, renderDefuseShard, type GateDefuseSources } from "#src/lib/gate-gardener.js";
-import { runGarden, type GardenCheckout } from "#src/lib/gardener.js";
+import { gardenStatePath, runGarden, type GardenCheckout } from "#src/lib/gardener.js";
 import { loadPlanFromYaml } from "#src/lib/plan.js";
 import { lintPlanCommand } from "#src/run-task.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
@@ -310,4 +310,29 @@ test("W1-T5539: the defuse proof matches its own title under the executor's grep
   assertExecutorGrepLine(execFileSync("grep", ["-arn", "--", pattern, target], { encoding: "utf8" }), target, matchingLine);
   writeFileSync(target, `test("W1-T6013: test/ad[1]*.test.ts stays defused across 2026-10-18T00:00:00.000Z", () => {});\n`);
   assert.throws(() => execFileSync("grep", ["-arn", "--", pattern, target], { encoding: "utf8", stdio: "pipe" }));
+});
+
+test("W1-T14578: a crossing already inside the lead gets a defuse task", async () => {
+  // 14 days left on a 21-day lead: inside the lead the first time the gardener looks, and it never enters it.
+  const f = await fixture(14);
+  const statePath = gardenStatePath(f.deps.stateDir, "gate");
+  // The first pass sees the crossing but files nothing: its defuse draw lost (Beta(1, 10^6) never reaches even odds).
+  writeFileSync(statePath, JSON.stringify({ classes: { defuse: { alpha: 1, beta: 1_000_000 } } }) + "\n");
+  const first = runGarden(gateGardenSpec(f.deps, f.probes, f.sources), f.deps);
+  assert.deepEqual(first.plan?.acting, []);
+  assert.equal(f.landed.length, 0);
+  const seen = JSON.parse(readFileSync(statePath, "utf8")) as { lastPass?: { fingerprint: string; landed?: string } };
+  assert.equal(seen.lastPass?.fingerprint, ORIGIN, "the first pass recorded the uncovered crossing it saw");
+  assert.equal(seen.lastPass?.landed, undefined);
+  // The next day the draw wins; nothing entered the lead, so the candidate set (the fingerprint) is unchanged.
+  writeFileSync(statePath, JSON.stringify({ ...seen, classes: { defuse: { alpha: 1_000_000, beta: 1 } } }) + "\n");
+  const later = { ...f.deps, clock: fixedClock(NOW + DAY) };
+  const pass = runGarden(gateGardenSpec(later, f.probes, f.sources), later);
+  assert.deepEqual(pass.plan?.acting, ["defuse"], "an unchanged fingerprint over an uncovered crossing is not work done");
+  assert.equal(f.landed.length, 1);
+  assert.match(f.landed[0]!.body, new RegExp(`${ORIGIN} has a machine-filed remedy`));
+  // Once filed and landed, the same inventory is trusted: the crossing is not filed twice.
+  const again = { ...f.deps, clock: fixedClock(NOW + 2 * DAY) };
+  runGarden(gateGardenSpec(again, f.probes, { ...f.sources, openOrigins: () => [ORIGIN] }), again);
+  assert.equal(f.landed.length, 1);
 });
