@@ -2034,7 +2034,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     : writeOpsReviewRecord(dirname(args.ledgerPath), { owner, repo, prNumber: reviewPrNumber(prUrl), headSha },
       opsReviewRecord({ taskId: task.id, prUrl, headSha, state: verdict.state, decisionDigest, criteria: verdict.criteria,
         reasons, findings: findingCapture.findings }));
-  if (opsRecord !== undefined && "error" in opsRecord) log("review.record_write_failed", { pr_url: prUrl, head_sha: headSha, reason: opsRecord.error });
+  if (opsRecord !== undefined && "error" in opsRecord) log("review.record_write_failed", { pr_number: reviewPrNumber(prUrl), head_sha: headSha, reason: opsRecord.error });
   const reviewPostedRow = {
     context: REVIEW_CONTEXT,
     state: verdict.state,
