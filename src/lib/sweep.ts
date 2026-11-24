@@ -30406,7 +30406,7 @@ export async function runSweep(
     };
     const verification = new Map<number, Promise<OpenPrView | undefined>>();
     const ports: ConflictGardenPorts<OpenPrView> = {
-      now: deps.now ?? (() => systemClock.now()),
+      clock: clockFromMillisFn(deps.now ?? (() => systemClock.now())),
       snapshot: () => ({ prs: [...openPrs, ...memoryHeld], mainSha: mainTipSha }),
       readLedger: async () => (await readConflictGardenLedger(stateDir)).filter(row =>
         typeof row.pr_url !== "string" || row.pr_url.toLowerCase().startsWith(gardenRepo.prPrefix.toLowerCase())),

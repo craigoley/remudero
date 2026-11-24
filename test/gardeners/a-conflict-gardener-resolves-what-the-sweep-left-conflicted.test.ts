@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { runConflictGarden, type ConflictGardenPorts } from "#src/lib/conflict-gardener.js";
+import { fixedClock } from "#src/lib/clock.js";
 import { conflictGardenGovernorVerdict } from "#src/lib/conflict-gardener-governor.js";
 import { runSweep, type OpenPrView } from "#src/lib/sweep.js";
 import { conflictGardenPass } from "#src/lib/garden-registry.js";
@@ -27,7 +28,7 @@ const act = (tier: string, extra: Record<string, unknown> = {}): Record<string, 
 function fixture(prs: OpenPrView[], rows: Record<string, unknown>[], overrides: Partial<ConflictGardenPorts<OpenPrView>> = {}) {
   const events: Record<string, unknown>[] = [];
   const ports: ConflictGardenPorts<OpenPrView> = {
-    now: () => NOW, snapshot: () => ({ prs, mainSha: "main" }), readLedger: async () => [...rows, ...events],
+    clock: fixedClock(NOW), snapshot: () => ({ prs, mainSha: "main" }), readLedger: async () => [...rows, ...events],
     record: row => { events.push(row); }, dependents: () => 0, hold: async () => undefined,
     verify: async candidate => ({ outcome: "pending", head: candidate.headSha }),
     prepare: async () => ({ ready: true }), act: async () => ({ outcome: "no-op", reason: "no merge" }),

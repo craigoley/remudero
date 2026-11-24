@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { Clock } from "./clock.js";
 import { buildFixProgressInput, resolveFixProgress, type FixProgressJudge } from "./fix-progress-judge.js";
 import {
   CONFLICT_GARDEN_ACT, CONFLICT_GARDEN_TIERS, CONFLICT_GARDEN_VERIFIED, CONFLICT_GARDEN_WINDOW_MS,
@@ -20,7 +21,7 @@ export interface ConflictGardenPr {
 }
 
 export interface ConflictGardenPorts<Pr extends ConflictGardenPr> {
-  now: () => number;
+  clock: Clock;
   snapshot: () => { prs: readonly Pr[]; mainSha: string | undefined };
   readLedger: () => Promise<readonly Row[]>;
   record: (row: Row & { step: string }) => void;
@@ -80,12 +81,12 @@ function conflictHistory(rows: readonly Row[], now: number) {
 }
 
 export async function runConflictGarden<Pr extends ConflictGardenPr>(ports: ConflictGardenPorts<Pr>): Promise<void> {
-  const now = ports.now();
+  const now = ports.clock.now();
   const cutoff = now - CONFLICT_GARDEN_WINDOW_MS;
   const readErrors: Row[] = [];
   const report: Row = { ranked: [], skipped: [], read_errors: readErrors };
   let found = false;
-  const record = (row: Row & { step: string }) => ports.record({ ...row, ts: new Date(ports.now()).toISOString() });
+  const record = (row: Row & { step: string }) => ports.record({ ...row, ts: ports.clock.iso() });
   try {
     const { prs, mainSha } = ports.snapshot();
     const ledger = [...await ports.readLedger()].sort((a, b) => stamp(a) - stamp(b));
@@ -115,7 +116,7 @@ export async function runConflictGarden<Pr extends ConflictGardenPr>(ports: Conf
         const row = { step: CONFLICT_GARDEN_VERIFIED, act_id: receipt.act_id, tier: receipt.tier,
           pr_number: pr.prNumber, head_sha: receipt.new_head_sha, observed_head_sha: seen.head,
           outcome: seen.outcome, harmful: harmful || prior?.harmful === true,
-          saw_pushed_head: sawPushedHead || seen.head === receipt.new_head_sha, ts: new Date(ports.now()).toISOString() };
+          saw_pushed_head: sawPushedHead || seen.head === receipt.new_head_sha, ts: ports.clock.iso() };
         record(row);
         window.push(row);
         verifications.set(row.act_id, row);
@@ -216,7 +217,7 @@ export async function runConflictGarden<Pr extends ConflictGardenPr>(ports: Conf
           skipped.push({ pr_number: pr.prNumber, reason: `${tier}: ${prepared.reason}` });
           continue;
         }
-        const verdict = conflictGardenGovernorVerdict(tier, window, { nowMs: ports.now(), prNumber: pr.prNumber });
+        const verdict = conflictGardenGovernorVerdict(tier, window, { nowMs: ports.clock.now(), prNumber: pr.prNumber });
         if (verdict.tier === "stopped" || verdict.tier === "slow" || ports.stopped?.(tier)) {
           skipped.push({ pr_number: pr.prNumber, reason: `${tier}: ${verdict.tier === "live" || verdict.tier === "shadow"
             ? "the daemon governor withheld the tier" : verdict.reason}` });
@@ -230,7 +231,7 @@ export async function runConflictGarden<Pr extends ConflictGardenPr>(ports: Conf
         const receipt = {
           step: CONFLICT_GARDEN_ACT, act_id: randomUUID(), pr_number: pr.prNumber, head_sha: pr.headSha,
           main_sha: mainSha, tier, outcome: act.outcome, reason: act.reason, new_head_sha: moved,
-          parent_green: "parentGreen" in act && act.parentGreen === true, ts: new Date(ports.now()).toISOString(),
+          parent_green: "parentGreen" in act && act.parentGreen === true, ts: ports.clock.iso(),
         };
         record(receipt);
         acts.push(receipt);
@@ -247,7 +248,8 @@ export async function runConflictGarden<Pr extends ConflictGardenPr>(ports: Conf
       if (attempted) consumed++;
     }
   } catch (error) {
-    report.error = String(error);
+    const reason = String(error);
+    report.error = reason;
   } finally {
     record({ step: CONFLICT_GARDEN_REPORT, ...report, new_evidence: found });
   }

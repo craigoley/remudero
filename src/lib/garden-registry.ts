@@ -901,7 +901,7 @@ export function flowGardenPass(
 /** The conflict pass stays beside the full sweep's snapshot, claims and broker. */
 export const conflictGardenPass: <Pr extends ConflictGardenPr>(stateDir: string, ports: ConflictGardenPorts<Pr>) => Promise<void> =
 async function conflictGardenPass(stateDir, ports) {
-  const clock = fixedClock(ports.now());
+  const clock = ports.clock;
   const { prs, mainSha } = ports.snapshot();
   const inputs = JSON.stringify([mainSha, prs.map(pr => [pr.prNumber, pr.headSha, pr.mergeableState, pr.mergeConflictSource, pr.checksState])
     .sort((a, b) => Number(a[0]) - Number(b[0]))]);
@@ -911,7 +911,7 @@ async function conflictGardenPass(stateDir, ports) {
     ports.record(row);
     if (row.step === CONFLICT_GARDEN_REPORT) found = row.new_evidence === true;
   } });
-  recordGardenPacing(stateDir, "conflict", found, { clock: fixedClock(ports.now()), inputs });
+  recordGardenPacing(stateDir, "conflict", found, { clock: ports.clock, inputs });
 };
 
 /** W1-T8864: one issue-revalidation pass as the daemon builds it. Paced: a pass whose verdicts all match
