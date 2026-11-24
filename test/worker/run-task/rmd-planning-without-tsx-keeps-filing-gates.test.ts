@@ -276,6 +276,7 @@ const GOOD_SHARD = `- id: {{ID}}
     ${SEED_ID} (plan/tasks.yaml).
   design: |
     Bound the retry loop at three attempts and surface the last error to the caller.
+    NO-INVARIANTS: the retry loop has no bound today, so no prior behavior is kept.
   acceptance:
     - claim: The retry loop stops after three attempts
       proof: "unit test: test/retry.test.ts"

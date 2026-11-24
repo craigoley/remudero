@@ -374,10 +374,13 @@ test("THE REPLAY: W1-T286 as the triage worker actually wrote it is caught BEFOR
     // PLUS a seventh, declared-scope (W1-T504), added by this suite: the shard's own `note:` says
     // its missing `files:` is deliberate (the alert API never named the flagged paths), but the new
     // check has no such carve-out, so the real W1-T286 record now also legitimately trips it.
-    assert.equal(violations.length, 7, `expected the seven that now fail lint-plan; got ${JSON.stringify(violations.map((v) => v.check))}`);
+    // W1-T14737: and an eighth, design-invariant-proof: the record declares neither INVARIANT nor NO-INVARIANTS, which
+    // review's changed-task lint refuses on any new task, so the filing lane's own relint now refuses it too.
+    assert.equal(violations.length, 8, `expected the eight that now fail lint-plan; got ${JSON.stringify(violations.map((v) => v.check))}`);
     assert.equal(violations.filter((v) => v.check === "proof-dialect").length, 4);
     assert.equal(violations.filter((v) => v.check === "proof-resolvability").length, 2);
     assert.equal(violations.filter((v) => v.check === "declared-scope").length, 1);
+    assert.equal(violations.filter((v) => v.check === "design-invariant-proof").length, 1);
     assert.ok(violations.every((v) => v.severity === "block"));
 
     // And it is worker-fixable, so the loop would have relinted rather than refused outright.

@@ -30,6 +30,9 @@ function taskYaml(id: string, status: string, proof = CORE_PROOF, repo = "remude
     `  status: ${status}`,
     "  attempts: 0",
     "  files: [src/lib/triage.ts]",
+    // W1-T14737: a filed task declares its invariants, as review demands of every new task.
+    "  design: |",
+    "    NO-INVARIANTS: a fixture repair with no prior behavior to keep",
     "  acceptance:",
     "    - claim: the triage filing remains executable",
     `      proof: ${JSON.stringify(proof)}`,
