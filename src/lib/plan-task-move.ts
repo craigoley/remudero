@@ -97,7 +97,7 @@ function stepOf(members: Planned[]): PlannedStep {
     message: `chore(plan): ${subject}\n\n${prose}\n\n${members.map(lines).join("")}` };
 }
 
-/** GitHub refuses a pull request body longer than this: "body is too long (maximum is 65536 characters)". */
+/** PRIMARY CONTROL (GitHub's, not ours): GitHub refuses a pull request body longer than this: "body is too long (maximum is 65536 characters)". */
 export const GITHUB_PULL_REQUEST_BODY_LIMIT = 65_536;
 /** A step's pull request body: its commit message after the subject. */
 const bodyOf = (step: PlannedStep): string => step.message.slice(step.message.indexOf("\n\n") + 2);
