@@ -1766,9 +1766,19 @@ function grepMatchedLines(pattern: string, fileText: string): string[] {
   return out;
 }
 
+export const REFUSAL_AMENDMENT_MARKER = "refusal-amendment (";
+const REFUSAL_AMENDMENT_MARKER_PROOF = new RegExp(
+  `^${REFUSAL_AMENDMENT_MARKER.replace("(", "\\(")}[A-Z][A-Z0-9]*-T[0-9]+[A-Za-z]?, run ` +
+    String.raw`(?:[^\\.[\]*^$?]|\\[\\.[\]*^$]|\[\?\])+,$`,
+);
+export function isRefusalAmendmentMarkerProof(pattern: string, path: string): boolean {
+  return /^plan\/tasks\.d\/(?:[^/]+\/)*[^/]+\.ya?ml$/.test(path) && REFUSAL_AMENDMENT_MARKER_PROOF.test(pattern);
+}
+
 /** A grep proof that can only certify comments (review: `executed_stale`): its pattern opens with the
  *  path's comment opener, or every line it matches in `fileText` is a comment. */
 export function grepProofCanOnlyCertifyComments(pattern: string, path: string, fileText?: string): boolean {
+  if (isRefusalAmendmentMarkerProof(pattern, path)) return false;
   const literal = pattern.replace(/^[\s"'`]+/, "");
   if (COMMENT_OPENERS[commentGrammarForPath(path)].some((opener) => literal.startsWith(opener))) return true;
   if (fileText === undefined) return false;
@@ -4802,6 +4812,7 @@ export function judgeCriterion(
           if (outcome === "pass") {
             if (
               whitelisted.kind === "grep" &&
+              !isRefusalAmendmentMarkerProof(whitelisted.args[2] ?? "", grepTarget ?? "") &&
               matchedLinesAreAllComments(whitelisted.matchedLines ?? [], matchedLineCommentContext(whitelisted, execCtx.cwd))
             ) {
               proofExec = "executed_stale";
