@@ -7,6 +7,9 @@
  * read can change. A task with no PR link is searched on every build; an empty search is never remembered.
  */
 import type { FlowRow } from "./field-trials-flow.js";
+import { readLastGoodOpsCatalogSnapshot, readOpsCatalogSnapshotAsync } from "./ops-catalog-source.js";
+import { planDestinationRepository } from "./plan-destination.js";
+import type { Plan, Task } from "./plan.js";
 import type { GhReadCadenceDeps } from "./github-transport.js";
 import type { CaseFileCommandInput } from "./report-commands.js";
 import type { TaskCaseFile } from "./task-case-file.js";
@@ -33,6 +36,57 @@ export interface FieldTrialsCaseFileSource {
   /** Every task id in the plan; a called task outside it is counted, never given a case file. */
   planIds: ReadonlySet<string>;
   carry: FieldTrialsCaseFileCarry | undefined;
+  /** W1-T14717: how the ops catalog was read for `planIds` (see {@link readCaseFileCatalog}); the summary names it. */
+  opsCatalog?: string;
+}
+
+/** W1-T14717: one read of the ops catalog: off (no destination), the live snapshot, the last good snapshot after a
+ * refusal, or no plan at all with the reason. */
+export type CaseFileOpsRead =
+  | { outcome: "off" }
+  | { outcome: "ok"; plan: Plan }
+  | { outcome: "last-good"; plan: Plan; refusal: string }
+  | { outcome: "unreadable"; reason: string };
+
+/** The reads {@link readCaseFileOpsCatalog} makes; each defaults to the one the daemon tick uses. */
+/** W1-T14717: the snapshot script's ops catalog read. The destination names the catalog; a refused live read falls
+ * back to the daemon's last good snapshot (W1-T14564), and the refusal is kept either way. */
+export async function readCaseFileOpsCatalog(stateDir: string, destination = planDestinationRepository,
+  snapshot = readOpsCatalogSnapshotAsync, lastGood = readLastGoodOpsCatalogSnapshot): Promise<CaseFileOpsRead> {
+  const named = destination(stateDir);
+  if (named.outcome === "off") return { outcome: "off" };
+  if (named.outcome === "unreadable") return { outcome: "unreadable", reason: "destination-unreadable" };
+  const target = { repository: `${named.owner}/${named.repo}` };
+  const live = await snapshot(target, undefined, { stateDir });
+  if (live.outcome === "ok" && live.plan) return { outcome: "ok", plan: live.plan };
+  const kept = await lastGood(target, undefined, { stateDir });
+  if (kept.outcome === "ok" && kept.plan) return { outcome: "last-good", plan: kept.plan, refusal: live.outcome };
+  return { outcome: "unreadable", reason: `ops-${live.outcome}` };
+}
+
+export interface CaseFileCatalog {
+  /** Every task id the public plan or the ops catalog holds. */
+  planIds: ReadonlySet<string>;
+  /** The task a case file is built for: the public record, else the ops record. */
+  readTask: (taskId: string) => Task | undefined;
+  /** "off", "ok", "last-good-<refusal>" or "unreadable-<reason>". */
+  opsCatalog: string;
+}
+
+/** W1-T14717 INVARIANT every-called-task-is-a-candidate: since W1-T14343 new core tasks are filed in the ops catalog,
+ * so the snapshot selects from the public plan and the ops catalog together. An unreadable catalog never stops the
+ * build: the public plan still answers, and the refusal is named, never read as an empty catalog. */
+export async function readCaseFileCatalog(publicPlan: Plan, readOps: () => Promise<CaseFileOpsRead>): Promise<CaseFileCatalog> {
+  let read: CaseFileOpsRead;
+  try { read = await readOps(); }
+  catch (error) { read = { outcome: "unreadable", reason: `ops-read-failed:${error instanceof Error ? error.name : "unknown"}` }; }
+  const tasks = new Map(publicPlan.byId);
+  if (read.outcome === "ok" || read.outcome === "last-good") {
+    for (const task of read.plan.tasks) if (!tasks.has(task.id)) tasks.set(task.id, task);
+  }
+  const opsCatalog = read.outcome === "last-good" ? `last-good-${read.refusal}`
+    : read.outcome === "unreadable" ? `unreadable-${read.reason}` : read.outcome;
+  return { planIds: new Set(tasks.keys()), readTask: (taskId) => tasks.get(taskId), opsCatalog };
 }
 
 /** `gh pr list --search <taskId>`; throws on a failed read. */
@@ -56,7 +110,7 @@ export interface FieldTrialsCaseFilePlan {
   /** The oldest worker call among the selected tasks, so the case-file ledger read reaches back to it. */
   oldestCallTs: string | null;
   carry: FieldTrialsCaseFileCarry;
-  summary: Record<string, number>;
+  summary: Record<string, number | string>;
   /** Every GitHub read that failed for a reason other than a rate limit, with GitHub's own message. */
   readFailures: CaseFileReadFailure[];
 }
@@ -187,7 +241,8 @@ export async function planFieldTrialsCaseFiles(source: FieldTrialsCaseFileSource
     if (oldestCallTs === null || row.ts < oldestCallTs) oldestCallTs = row.ts;
   }
   return { selected, prNumbers, prReads, oldestCallTs, carry, readFailures,
-    summary: { ...counts, selected: selected.length, withoutPr: candidates.length - selected.length } };
+    summary: { ...counts, selected: selected.length, withoutPr: candidates.length - selected.length,
+      ...(source.opsCatalog === undefined ? {} : { opsCatalog: source.opsCatalog }) } };
 }
 
 /** Days the case-file ledger read must reach back from `asOf` to include the oldest selected call. */
@@ -200,7 +255,7 @@ export function caseLedgerWindowDays(asOf: string, oldestCallTs: string | null):
 export async function buildFieldTrialsCaseFiles(source: FieldTrialsCaseFileSource, searchPrs: SearchPrs, viewPr: ViewPr,
   pacing: CaseFilePacing, buildCaseFiles: (plan: FieldTrialsCaseFilePlan) => Promise<TaskCaseFile[]>,
   firstWaitMs: number = RATE_LIMIT_FIRST_WAIT_MS,
-): Promise<{ files: TaskCaseFile[]; carry: FieldTrialsCaseFileCarry; summary: Record<string, number>;
+): Promise<{ files: TaskCaseFile[]; carry: FieldTrialsCaseFileCarry; summary: Record<string, number | string>;
   readFailures: CaseFileReadFailure[] }> {
   const plan = await planFieldTrialsCaseFiles(source, searchPrs, viewPr, pacing, firstWaitMs);
   const files = plan.selected.length > 0 ? await buildCaseFiles(plan) : [];
