@@ -4074,9 +4074,8 @@ function validateReframeProposal(body: unknown): { error: string } | ReframeProp
   return { proposalId: body.proposalId, feedback: body.feedback, ...(key === undefined ? {} : { idempotencyKey: key }) };
 }
 
-/** Write-scoped reframe: verbatim operator feedback to {@link RatifyCliGateway.reframe} for any
- * active proposal, without a readiness gate or ratification. Ledger
- * `panel.proposal_reframe_requested` with the feedback immediately. */
+/** Write-scoped reframe: verbatim operator feedback to {@link RatifyCliGateway.reframe}; ledger
+ * `panel.proposal_reframe_requested`. */
 export function buildReframeProposalRoute(deps: PanelGraphDeps): Route {
   return buildInboxVerbRoute("reframe", deps);
 }
@@ -4147,12 +4146,9 @@ function validateDeclineProposal(body: unknown): { error: string } | DeclineProp
   return { proposalId: body.proposalId, reason: body.reason, ...(key === undefined ? {} : { idempotencyKey: key }) };
 }
 
-// ── W1-T13196: a decision's idempotency key ─────────────────────────────────────────────────
-
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9:_-]{1,200}$/;
 const IDEMPOTENCY_KEY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** The optional `idempotencyKey` of a decision body: absent is `undefined`, anything present must match the pattern. */
 function validateIdempotencyKey(body: Record<string, unknown>): string | undefined | { error: string } {
   if (body.idempotencyKey === undefined) return undefined;
   if (typeof body.idempotencyKey !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(body.idempotencyKey)) {
@@ -4187,17 +4183,12 @@ function readInboxDecisionKeys(stateDir: string): Record<string, InboxDecisionKe
     }
     return out;
   } catch {
-    // deliberate: no store, or a torn one, remembers no key - the decision then runs its ordinary path, as it did before keys.
+    // deliberate: a missing or torn store remembers no key.
     return {};
   }
 }
 
-/**
- * A decision that carries an `idempotencyKey` acts once: a repeat of the same decision answers the FIRST outcome with
- * `duplicate: true`, without classifying or recording; the same key for another proposal, decision or text is refused
- * 409 `idempotency_key_reused`. A request with no key runs `run` exactly as before. The handlers are synchronous, so the
- * lookup, the action and the store of its outcome form one uninterrupted section of serve's loop.
- */
+/** A keyed repeat answers the first outcome with `duplicate: true`; a key reused for another decision is 409. */
 function withDecisionKey(
   deps: PanelGraphDeps,
   key: string | undefined,
@@ -4261,10 +4252,8 @@ function proposalVerdictResponse(
   respond(200, { ok: true, proposalId: input.proposalId, ...(kind === "decline" ? { declined: true } : { restored: true }) });
 }
 
-/** Write-scoped decline (W1-T2604): explicit operator decision, never inferred from prose.
- * Retain the registry entry (W1-T2451); check its receipt first. Restore reverses it, latest wins
- * (W1-T3407). Any active nonratified, nondeclined proposal qualifies; no task/branch/gateway call.
- * P19 silent-drop history: docs/forensics/panel-graph.md. */
+/** Write-scoped decline (W1-T2604): an explicit operator decision. Restore reverses it, latest wins
+ * (W1-T3407). History: docs/forensics/panel-graph.md. */
 export function buildDeclineProposalRoute(deps: PanelGraphDeps): Route {
   return buildInboxVerbRoute("decline", deps);
 }
