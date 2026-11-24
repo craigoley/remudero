@@ -489,7 +489,7 @@ test("decisions come from core's stores for core only and one failing instance l
   assert.equal(only(bodies).decisionsReasons, undefined);
   assert.deepEqual(only(bodies, "instance=site").decisionsReasons, { grill: "feedback questions live in core only", task_question: "the question store core answers is core's own" });
   assert.equal(bodies.some((b) => b.key === "instance=bare"), false);
-  assert.deepEqual(logged, [{ step: "read_model.now_view_failed", instance: "bare", error: "plan unreadable" }]);
+  assert.deepEqual(logged, [{ step: "read_model.now_view_failed", instance: "bare", error: "plan unreadable", class: "plan-unreadable", retryAfterMs: NOW_REFRESH_MS }]);
   const unrooted = viewOf(clock, [{ name: "core", ledgerDir: core.ledgerDir }]).materialize(ctxOf(clock, [core]));
   assert.deepEqual(only(unrooted).decisionsReasons, { grill: "no feedback root is configured", task_question: "no feedback root is configured" });
 });

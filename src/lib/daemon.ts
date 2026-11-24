@@ -5669,11 +5669,13 @@ export async function runDaemon(
   let planTaskMoveInFlightRowAtMs: number | undefined;
   // W1-T14536: the phase the last in-flight row named.
   let planTaskMoveInFlightRowPhase: string | undefined;
+  /** The label a hold is recorded and handed on under: a known outcome as itself, anything else selection_unreadable. */
+  const opsDispatchHoldLabel = (reason: string): string => OPS_CATALOG_OUTCOMES.includes(reason as OpsCatalogOutcome) ||
+    ["selection_unreadable", "selection_changed", "invalid_dispatch_flag", "source_pending", "source_identity_unknown",
+      "primary_revision_unknown", "duplicate_task_id", "invalid_cross_catalog_dependency", "malformed"].includes(reason)
+    ? reason : "selection_unreadable";
   const holdOpsDispatch = (reason: string, observation: OpsTaskDispatchRead, record?: CompositionRecordFailure): void => {
-    const safeReason = OPS_CATALOG_OUTCOMES.includes(reason as OpsCatalogOutcome) ||
-      ["selection_unreadable", "selection_changed", "invalid_dispatch_flag", "source_pending", "source_identity_unknown",
-        "primary_revision_unknown", "duplicate_task_id", "invalid_cross_catalog_dependency", "malformed"].includes(reason)
-      ? reason : "selection_unreadable";
+    const safeReason = opsDispatchHoldLabel(reason);
     const stage = opsCatalogRefusalStage(observation.outcome === "off" ? undefined : observation.source);
     let revision: string | undefined;
     try {
@@ -5735,36 +5737,73 @@ export async function runDaemon(
       return { outcome: "unavailable", reason: "selection_unreadable" };
     }
   };
+  /** W1-T14584: what a read observation means for ops dispatch, the hold or the composed plan, recording nothing. */
+  const judgeOpsDispatch = (primary: Plan, observation: Exclude<OpsTaskDispatchRead, { outcome: "off" }>):
+    { held: string; record?: CompositionRecordFailure } |
+    { held?: undefined; source: OpsCatalogShadowInput; publicCommit: string;
+      composition: Extract<ReturnType<typeof composeSecondaryPlan>, { outcome: "ok" }> } => {
+    if (observation.outcome === "unavailable") return { held: observation.reason };
+    const input = observation.source;
+    if (input.outcome !== "ok" || input.plan === undefined) return { held: input.outcome === "ok" ? "source_identity_unknown" : input.outcome };
+    if (!CATALOG_COMMIT.test(observation.publicCommit)) return { held: "primary_revision_unknown" };
+    if (typeof input.opsCommit !== "string" || !CATALOG_COMMIT.test(input.opsCommit) ||
+      typeof input.identityDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.identityDigest)) return { held: "source_identity_unknown" };
+    const composition = composeSecondaryPlan(primary, input.plan);
+    if (composition.outcome !== "ok") return { held: composition.outcome, record: composition.field === undefined ? undefined : composition };
+    return { source: input, publicCommit: observation.publicCommit, composition };
+  };
   const captureOpsDispatchPlan = (primary: Plan): { plan: Plan; observation: OpsTaskDispatchRead } => {
     const observation = readOpsDispatch(primary);
     if (observation.outcome === "off") { clearOpsDispatchHold(); return { plan: primary, observation }; }
-    if (observation.outcome === "unavailable") {
-      holdOpsDispatch(observation.reason, observation);
+    const judged = judgeOpsDispatch(primary, observation);
+    if (judged.held !== undefined) {
+      holdOpsDispatch(judged.held, observation, judged.record);
       return { plan: primary, observation };
     }
-    const input = observation.source;
-    if (input.outcome !== "ok" || input.plan === undefined) {
-      holdOpsDispatch(input.outcome === "ok" ? "source_identity_unknown" : input.outcome, observation);
-      return { plan: primary, observation };
-    }
-    if (!CATALOG_COMMIT.test(observation.publicCommit)) {
-      holdOpsDispatch("primary_revision_unknown", observation); return { plan: primary, observation };
-    }
-    if (typeof input.opsCommit !== "string" || !CATALOG_COMMIT.test(input.opsCommit) ||
-      typeof input.identityDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.identityDigest)) {
-      holdOpsDispatch("source_identity_unknown", observation); return { plan: primary, observation };
-    }
-    const composition = composeSecondaryPlan(primary, input.plan);
-    if (composition.outcome !== "ok") {
-      holdOpsDispatch(composition.outcome, observation, composition.field === undefined ? undefined : composition);
-      return { plan: primary, observation };
-    }
+    const { composition } = judged;
     clearOpsDispatchHold();
     // W1-T13749: a bad edge holds its own task and its dependants; every other task dispatches from the composed plan.
     noteOpsTaskHolds(composition.held);
-    opsDispatchContexts.set(composition.plan, { publicPlan: primary, publicCommit: observation.publicCommit,
-      source: input, opsIds: composition.secondaryIds });
+    opsDispatchContexts.set(composition.plan, { publicPlan: primary, publicCommit: judged.publicCommit,
+      source: judged.source, opsIds: composition.secondaryIds });
     return { plan: composition.plan, observation };
+  };
+  /** W1-T14584: the hold a dispatch tick hands its janitor tick, read fresh from the cached ops snapshot against `primary`:
+   *  the label captureOpsDispatchPlan would record, without its row, its recorded hold or its composed plan. */
+  const freshOpsDispatchHoldReason = (primary: Plan): string | undefined => {
+    if (deps.readOpsTaskDispatch === undefined) return "ops_dispatch_unwired";
+    const observation = readOpsDispatch(primary);
+    if (observation.outcome === "off") return undefined;
+    const { held } = judgeOpsDispatch(primary, observation);
+    return held === undefined ? undefined : opsDispatchHoldLabel(held);
+  };
+  // W1-T13681 + W1-T14584: at most one move-task tick in flight, started from a cycle's top or a dispatch tick; the hold is
+  // read only when a tick starts, and a start never gates dispatch.
+  const startPlanTaskMoveTick = (readHold: () => string | undefined): void => {
+    if (!deps.planTaskMover) return;
+    if (!detachedActionInFlight(PLAN_TASK_MOVE_ACTION)) {
+      planTaskMoveTickStartedAtMs = daemonClock.now();
+      planTaskMoveInFlightRowAtMs = undefined;
+      planTaskMoveInFlightRowPhase = undefined;
+      detachSweepAction(runPlanTaskMoveTick({ opsDispatchHold: readHold(), log, startedAtMs: planTaskMoveTickStartedAtMs },
+        deps.planTaskMover), { actionKind: PLAN_TASK_MOVE_ACTION, taskId: "DAEMON" });
+      return;
+    }
+    // W1-T14532: a tick that never settles holds every later one; say so, with its age, at most once an hour.
+    // W1-T14536: the row names the phase the tick is in, and a change of phase writes one more.
+    const nowMs = daemonClock.now();
+    const phase = planTaskMoveTickPhase(deps.planTaskMover);
+    if (planTaskMoveInFlightRowAtMs === undefined || nowMs - planTaskMoveInFlightRowAtMs >= PLAN_TASK_MOVE_IN_FLIGHT_ROW_MS ||
+      (phase !== undefined && phase !== planTaskMoveInFlightRowPhase)) {
+      planTaskMoveInFlightRowAtMs = nowMs;
+      planTaskMoveInFlightRowPhase = phase;
+      try {
+        log(PLAN_TASK_MOVE_IN_FLIGHT_STEP, {
+          phase: phase ?? null,
+          age_ms: planTaskMoveTickStartedAtMs === undefined ? null : Math.max(0, nowMs - planTaskMoveTickStartedAtMs),
+        });
+      } catch (error) { void error; /* The skip stands either way; only the diagnostic is lost. */ }
+    }
   };
   const opsAdmissionStillCurrent = (task: Task, snapshot: Plan): boolean => {
     const captured = opsDispatchContexts.get(snapshot);
@@ -7814,30 +7853,8 @@ export async function runDaemon(
       planForBatch = captured.plan;
       opsDispatchObservation = captured.observation;
     }
-    // W1-T13681: at most one move-task tick in flight, detached after this iteration's ops hold is read; never gates dispatch.
-    if (deps.planTaskMover && !detachedActionInFlight(PLAN_TASK_MOVE_ACTION)) {
-      planTaskMoveTickStartedAtMs = daemonClock.now();
-      planTaskMoveInFlightRowAtMs = undefined;
-      planTaskMoveInFlightRowPhase = undefined;
-      detachSweepAction(runPlanTaskMoveTick({ opsDispatchHold: opsDispatchHoldReason(), log, startedAtMs: planTaskMoveTickStartedAtMs },
-        deps.planTaskMover), { actionKind: PLAN_TASK_MOVE_ACTION, taskId: "DAEMON" });
-    } else if (deps.planTaskMover) {
-      // W1-T14532: a tick that never settles holds every later one; say so, with its age, at most once an hour.
-      // W1-T14536: the row names the phase the tick is in, and a change of phase writes one more.
-      const nowMs = daemonClock.now();
-      const phase = planTaskMoveTickPhase(deps.planTaskMover);
-      if (planTaskMoveInFlightRowAtMs === undefined || nowMs - planTaskMoveInFlightRowAtMs >= PLAN_TASK_MOVE_IN_FLIGHT_ROW_MS ||
-        (phase !== undefined && phase !== planTaskMoveInFlightRowPhase)) {
-        planTaskMoveInFlightRowAtMs = nowMs;
-        planTaskMoveInFlightRowPhase = phase;
-        try {
-          log(PLAN_TASK_MOVE_IN_FLIGHT_STEP, {
-            phase: phase ?? null,
-            age_ms: planTaskMoveTickStartedAtMs === undefined ? null : Math.max(0, nowMs - planTaskMoveTickStartedAtMs),
-          });
-        } catch (error) { void error; /* The skip stands either way; only the diagnostic is lost. */ }
-      }
-    }
+    // W1-T13681: the move-task tick, detached after this iteration's ops hold is read.
+    startPlanTaskMoveTick(opsDispatchHoldReason);
     const isMerged = deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch);
     for (const taskId of pendingMergedCredit) {
       if (!isMerged(taskId)) continue;
@@ -9571,8 +9588,12 @@ export async function runDaemon(
       // A paused pass grows nothing: the grow writes the refill path's own pause hold.
       if (deps.checkPause?.()) return growIdleLanes();
       // W1-T11327: a requested restart releases child lanes and awaits in-process ones, as a decided restart does.
-      const requestedRestart = restartDecided || deps.checkStop?.() ? undefined : takeRestartRequest("dispatch_tick");
+      const leaving = Boolean(restartDecided || deps.checkStop?.());
+      const requestedRestart = leaving ? undefined : takeRestartRequest("dispatch_tick");
       if (requestedRestart) decideRestart(requestedRestart);
+      // W1-T14584: a cycle can last hours, so a busy one's dispatch tick starts the move janitor too, unless it is
+      // paused (above), stopping or restarting; its hold is read fresh against the live plan binding, recording nothing.
+      if (!leaving && !restartDecided) startPlanTaskMoveTick(() => freshOpsDispatchHoldReason(plan));
       // The light sweep reads this live binding; admitted workers retain their captured planForBatch.
       // W1-T13695: the grow decides after this tick's restart, freshness and plan reload were read.
       const reload = (): void | Promise<void> => {

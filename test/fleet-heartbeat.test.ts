@@ -28,7 +28,7 @@
  */
 import assert from "node:assert/strict";
 import childProcess, { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -1232,6 +1232,8 @@ test("W1-T4804: the heartbeat publishes swap inode and janitor fields or unknown
     assert.equal(field(beat.published, "janitor_last_before"), "57%");
     assert.equal(field(beat.published, "janitor_last_after"), "57%");
     assert.equal(field(beat.published, "janitor_last_freed"), "4MB", "the WATCH line is not the janitor's result");
+    assert.equal(field(beat.published, "janitor_last_removed"), "unknown");
+    assert.equal(field(beat.published, "janitor_last_freed_bytes"), "unknown");
     assert.match(String(field(beat.published, "janitor_last_ts")), /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
     assert.match(String(field(beat.published, "consumer_state_kb")), /^[0-9]+$/, "a readable consumer is sized");
 
@@ -1262,12 +1264,39 @@ test("W1-T4804: the heartbeat publishes swap inode and janitor fields or unknown
         env: { RMD_MEMINFO: join(junk.dir, "absent"), RMD_SYSCTL: join(junk.dir, "no-sysctl"), RMD_JANITOR_LOGS: join(junk.dir, "host-cleanup.log") },
       });
       assert.equal(blind.status, 0, blind.stderr);
-      for (const key of ["swap_used_kb", "swap_total_kb", "root_fs_total_kb", "root_fs_inodes_free", "janitor_last_ts", "janitor_last_before", "janitor_last_after", "janitor_last_freed"]) {
+      for (const key of ["swap_used_kb", "swap_total_kb", "root_fs_total_kb", "root_fs_inodes_free", "janitor_last_ts", "janitor_last_before", "janitor_last_after", "janitor_last_freed", "janitor_last_removed", "janitor_last_freed_bytes"]) {
         assert.equal(field(blind.published, key), "unknown", `${key} must be unknown, not invented`);
       }
     } finally {
       rmSync(junk.dir, { recursive: true, force: true });
     }
+  } finally {
+    rmSync(scratch.dir, { recursive: true, force: true });
+  }
+});
+
+test("an untimestamped janitor pass keeps its observed time as the log grows", () => {
+  const scratch = w1t4804Scratch({
+    "host-cleanup.log": "rmd-host-cleanup: / 72% -> 72% (0 MB reclaimed this pass)\nrmd-host-cleanup: reclaim-total: nothing to reclaim in any root this pass\n",
+  });
+  try {
+    const path = scratch.path("host-cleanup.log");
+    const state = scratch.path("state");
+    mkdirSync(state);
+    writeFileSync(join(state, "heartbeat-count.txt"), "1\n");
+    const env = { RMD_ROOT: scratch.dir, RMD_JANITOR_LOGS: path };
+    const first = runBeat({ env });
+    assert.equal(first.status, 0, first.stderr);
+    const pass = field(first.published, "janitor_last_ts");
+    assert.match(pass ?? "", /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+    assert.equal(field(first.published, "janitor_last_removed"), "0");
+
+    appendFileSync(path, "WATCH: /tmp/still-present is over 100 MB\n");
+    const next = new Date(Date.parse(pass!) + 60_000);
+    utimesSync(path, next, next);
+    const repeated = runBeat({ env });
+    assert.equal(repeated.status, 0, repeated.stderr);
+    assert.equal(field(repeated.published, "janitor_last_ts"), pass);
   } finally {
     rmSync(scratch.dir, { recursive: true, force: true });
   }
