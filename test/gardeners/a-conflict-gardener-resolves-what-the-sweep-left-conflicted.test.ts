@@ -168,6 +168,59 @@ test("W1-T11172 criterion 4 starts in shadow, slows repeats, and ages harm out",
   assert.deepEqual(stopped.events.filter(row => row.step === "conflict_garden.act").map(row => row.tier), ["deterministic"]);
 });
 
+const reportOf = (events: Record<string, unknown>[]) => events.find(row => row.step === "conflict_garden.report");
+
+test("W1-T11172 a verification read that fails is reported and holds the PR instead of acting", async () => {
+  const receipt = act("round", { outcome: "round", pr_number: 1, act_id: "act-read", head_sha: "head-1", new_head_sha: "pushed" });
+  const { ports, events } = fixture([pr(1)], [dirty(1, -12), receipt], {
+    verify: async () => { throw new Error("rollup unreadable"); },
+    act: async () => assert.fail("a PR with an unreadable verification must wait"),
+  });
+  await runConflictGarden(ports);
+  const report = reportOf(events);
+  assert.deepEqual(report?.read_errors, [{ pr_number: 1, act_id: "act-read", reason: "Error: rollup unreadable" }]);
+  assert.deepEqual(report?.skipped, [{ pr_number: 1, reason: "awaiting verification or judgment" }]);
+  assert.equal(events.some(row => row.step === "conflict_garden.act"), false);
+});
+
+test("W1-T11172 an unreadable hold is named in the skip reason", async () => {
+  const { ports, events } = fixture([pr(1)], [dirty(1, -12)], {
+    hold: async () => { throw new Error("hold ref unreadable"); },
+    act: async () => assert.fail("a PR whose hold cannot be read must not be acted on"),
+  });
+  await runConflictGarden(ports);
+  assert.deepEqual(reportOf(events)?.skipped, [
+    { pr_number: 1, reason: "conflict eligibility unreadable: Error: hold ref unreadable" },
+  ]);
+  assert.deepEqual(reportOf(events)?.ranked, []);
+});
+
+test("W1-T11172 a verification that fails right after an act is reported against that act", async () => {
+  const { ports, events } = fixture([pr(1)], [dirty(1, -12), act("deterministic")], {
+    act: async () => ({ outcome: "pushed", reason: "clean local merge", newHead: "merged" }),
+    verify: async () => { throw new Error("gateway down"); },
+  });
+  await runConflictGarden(ports);
+  const receipt = events.find(row => row.step === "conflict_garden.act");
+  assert.equal(receipt?.outcome, "pushed");
+  assert.equal(receipt?.new_head_sha, "merged");
+  assert.deepEqual(reportOf(events)?.read_errors, [
+    { pr_number: 1, act_id: receipt?.act_id, reason: "Error: gateway down" },
+  ]);
+  assert.equal(events.some(row => row.step === "conflict_garden.verified"), false);
+});
+
+test("W1-T11172 a snapshot that cannot be read still writes a report carrying the error", async () => {
+  const { ports, events } = fixture([], [], {
+    snapshot: () => { throw new Error("snapshot unavailable"); },
+  });
+  await runConflictGarden(ports);
+  const reports = events.filter(row => row.step === "conflict_garden.report");
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0]?.error, "Error: snapshot unavailable");
+  assert.equal(reports[0]?.new_evidence, false);
+});
+
 test("the full sweep reaches the paced conflict pass and verifies its exact pushed head", async t => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-conflict-garden-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
