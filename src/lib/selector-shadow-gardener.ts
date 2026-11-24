@@ -10,6 +10,7 @@ import { defaultPreflightSpawn, type PreflightSpawn } from "./commit-message.js"
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import { clockFromMillisFn, systemClock, type Clock } from "./clock.js";
 import { landedPrUrl, prepareGardenTaskIds, releaseGardenTaskIds, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenTaskIdMinter, type GardenTaskIdRelease } from "./gardener.js";
+import { pullsForCommitRestArgs } from "./fold-debt-pull.js";
 import { ghExec, ghJson, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { ledgerRotationDigests, readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { linkWorktreeNodeModules } from "./worker.js";
@@ -594,13 +595,39 @@ export async function readSelectorShadowRunsAsync(
   return runs;
 }
 
-/** Fetch the changed side of the exact PR-run comparison only when a miss needs a task. */
+/** W1-T13526: the one pull request a head commit belongs to, as its number and base sha. A run GitHub lists with an
+ *  empty `pull_requests` has neither; commits/<head>/pulls answers from the commit. Only an open or a merged pull
+ *  request counts (a closed one never carried the head into main), and several candidates are as unresolved as none:
+ *  the base of a guessed pull request would read another change's paths. */
+export async function resolveSelectorShadowPullFromHead(
+  owner: string, repo: string, headSha: string, readJson: (args: string[]) => unknown = ghJsonAsync,
+): Promise<{ baseSha: string; prNumber: number } | { reason: string }> {
+  const pulls = await readJson(pullsForCommitRestArgs(owner, repo, headSha));
+  if (!Array.isArray(pulls)) throw new Error(`selector shadow: GitHub returned no pull request list for ${headSha}`);
+  const standing = (pulls as Array<{ number?: unknown; state?: unknown; merged_at?: unknown; base?: { sha?: unknown } }>)
+    .filter((pull) => pull !== null && typeof pull === "object" && (pull.state === "open" || typeof pull.merged_at === "string"));
+  if (standing.length === 0) return { reason: `no open or merged pull request carries ${headSha}` };
+  if (standing.length > 1) return { reason: `${standing.length} pull requests carry ${headSha}, so its base is ambiguous` };
+  const pull = standing[0]!;
+  if (!nonnegativeInteger(pull.number) || typeof pull.base?.sha !== "string" || pull.base.sha === "") {
+    return { reason: `the pull request carrying ${headSha} has no number or base sha` };
+  }
+  return { baseSha: pull.base.sha, prNumber: pull.number };
+}
+
+/** Fetch the changed side of the exact PR-run comparison only when a miss needs a task. A miss whose run named no
+ *  base resolves it from its head commit first (W1-T13526); one still without a base throws, never reads as `[]`. */
 export async function readSelectorShadowChangedPaths(
   owner: string, repo: string, miss: Pick<SelectorShadowMiss, "baseSha" | "headSha">,
   readJson: (args: string[]) => unknown = ghJsonAsync,
 ): Promise<string[]> {
-  if (!miss.baseSha) return [];
-  const response = await readJson(["api", `repos/${owner}/${repo}/compare/${miss.baseSha}...${miss.headSha}`]) as {
+  let baseSha = miss.baseSha;
+  if (!baseSha) {
+    const resolved = await resolveSelectorShadowPullFromHead(owner, repo, miss.headSha, readJson);
+    if ("reason" in resolved) throw new Error(`selector shadow: no base for ${miss.headSha}: ${resolved.reason}`);
+    baseSha = resolved.baseSha;
+  }
+  const response = await readJson(["api", `repos/${owner}/${repo}/compare/${baseSha}...${miss.headSha}`]) as {
     files?: Array<{ filename?: string }>;
   } | null;
   if (response === null || typeof response !== "object") throw new Error(`selector shadow: GitHub returned no comparison object for ${miss.headSha}`);
@@ -1463,7 +1490,7 @@ const invariantClaimLines = (invariants: MachineShardInvariants): string[] =>
  *  guessing imports. */
 export function selectorShadowMissTask(miss: SelectorShadowMiss, taskId: string, changedPaths: readonly string[] = []): string {
   const origin = selectorShadowCauseOrigin(miss.file);
-  const edge = `${changedPaths.length ? changedPaths.join(", ") : miss.headSha} -> ${miss.file}`;
+  const edge = `${changedPaths.length ? changedPaths.join(", ") : SELECTOR_SHADOW_NO_PATH_EDGE} -> ${miss.file}`;
   const proofTitle = `${taskId}: the selector covers the recorded suite for every recorded edge`;
   // W1-T13035: one proof behind both claims is shared-proof, which the plan preflight blocks on a new shard.
   const replayTitle = `${taskId}: the shadow record reads the recorded suite as selected for every recorded edge`;
@@ -1541,6 +1568,12 @@ const SELECTOR_SHADOW_REPAIRED_STATUSES = new Set(["merged", "done"]);
 /** Changed-path reads (one GitHub compare each) an evidence-only pass may spend on naming edges. */
 const SELECTOR_SHADOW_EDGE_READS_PER_PASS = 8;
 const SELECTOR_SHADOW_EDGES_KEPT = 40;
+/** W1-T13526: what an edge's left side reads when no changed path was recorded; a head sha never stands in for one. */
+const SELECTOR_SHADOW_NO_PATH_EDGE = "no changed path recorded";
+/** The ledger step for a miss whose changed paths stayed unread: it files nothing and stores no edge. */
+export const SELECTOR_SHADOW_EDGE_UNREPLAYABLE_STEP = "selector-shadow.edge_unreplayable";
+/** A stored edge whose left side is a bare commit sha (an older pass's fallback): no path can be replayed from it. */
+const SELECTOR_SHADOW_BARE_SHA_EDGE = /^[0-9a-f]{7,40} -> /;
 
 /** The daemon checkout's plan, read only when an unseen miss needs a home. */
 export function selectorShadowPlanTasks(repoRoot: string): SelectorShadowPlanTask[] {
@@ -1681,7 +1714,10 @@ export async function runSelectorShadowGardener(
   if (prior.filedKeys !== undefined && !Array.isArray(prior.filedKeys)) throw new Error("selector shadow: invalid filed-keys state");
   const seen = new Set(prior.filedKeys ?? []);
   const causes: Record<string, string> = { ...(prior.causes ?? {}) };
-  const edges: Record<string, string[]> = { ...(prior.edges ?? {}) };
+  // W1-T13526: an older pass stored the head sha as an edge when no changed path was read; drop it on read.
+  const edges: Record<string, string[]> = Object.fromEntries(Object.entries(prior.edges ?? {})
+    .map(([file, held]): [string, string[]] => [file, held.filter((edge) => !SELECTOR_SHADOW_BARE_SHA_EDGE.test(edge))])
+    .filter(([, held]) => held.length > 0));
   const structural: Record<string, string> = { ...(prior.structural ?? {}) };
   const noteEdge = (file: string, edge: string): void => {
     const held = edges[file] ?? [];
@@ -1749,7 +1785,24 @@ export async function runSelectorShadowGardener(
     return (readFileIfExists(join(deps.repoRoot, "src", "lib", "affected-suites.ts")) ?? "").includes(file);
   };
   const edgeOf = (miss: SelectorShadowMiss, paths: readonly string[]): string =>
-    `${paths.length ? paths.join(", ") : miss.headSha} -> ${miss.file}`;
+    `${paths.length ? paths.join(", ") : SELECTOR_SHADOW_NO_PATH_EDGE} -> ${miss.file}`;
+  let edgeReads = 0;
+  /** The miss's changed paths, or why they stay unread. `bounded` marks a read this pass did not attempt. */
+  const readEdge = async (miss: SelectorShadowMiss): Promise<{ paths: string[] } | { reason: string; bounded: boolean }> => {
+    if (edgeReads >= SELECTOR_SHADOW_EDGE_READS_PER_PASS) {
+      return { reason: `the per-pass changed-path read bound (${SELECTOR_SHADOW_EDGE_READS_PER_PASS}) was spent`, bounded: true };
+    }
+    edgeReads++;
+    try {
+      const paths = await readChangedPaths(miss);
+      return { paths };
+    } catch (error) {
+      return { reason: String((error as Error)?.message ?? error), bounded: false };
+    }
+  };
+  const unreplayable = (miss: SelectorShadowMiss, reason: string): void => {
+    deps.log(SELECTOR_SHADOW_EDGE_UNREPLAYABLE_STEP, { ci_run_id: miss.runId, head_sha: miss.headSha, file: miss.file, reason });
+  };
   /** Land one plan-task file for a miss, returning the PR url and the id minted for it. */
   const land = async (miss: SelectorShadowMiss, build: (taskId: string) => { contents: string; title: string; body: (relativePath: string) => string }) => {
     const workspace = await deps.openWorkspace();
@@ -1778,7 +1831,6 @@ export async function runSelectorShadowGardener(
     }
   };
   let filedThisPass = false;
-  let edgeReads = 0;
   for (const miss of unseen) {
     const key = selectorShadowMissKey(miss);
     const plannedHome = [...planned].find(([path]) => sameTestFile(path, miss.file))?.[1];
@@ -1788,16 +1840,14 @@ export async function runSelectorShadowGardener(
     const escalate = home !== undefined && structuralHome === undefined && plannedHome?.structural !== true &&
       plannedHome?.retired !== true && repaired(home, miss.file);
     if (home !== undefined && !escalate) {
-      let paths: string[] = [];
-      if (edgeReads < SELECTOR_SHADOW_EDGE_READS_PER_PASS) {
-        edgeReads++;
-        try {
-          paths = await readChangedPaths(miss);
-        } catch (error) {
-          deps.log("selector-shadow.edge_unread", { file: miss.file, head_sha: miss.headSha, error: String((error as Error)?.message ?? error) });
-        }
+      const read = await readEdge(miss);
+      if ("paths" in read) {
+        if (read.paths.length > 0) noteEdge(miss.file, edgeOf(miss, read.paths));
+      } else {
+        unreplayable(miss, read.reason);
+        // A read this pass never attempted is asked again next pass; an attempted one that failed is settled.
+        if (read.bounded) continue;
       }
-      noteEdge(miss.file, edgeOf(miss, paths));
       seen.add(key);
       causes[miss.file] = home;
       deps.log("selector-shadow.miss_evidence", {
@@ -1808,12 +1858,26 @@ export async function runSelectorShadowGardener(
       continue;
     }
     if (filedThisPass) continue;
+    const read = await readEdge(miss);
+    if (!("paths" in read)) {
+      // W1-T13526: nothing is filed and no edge is stored; a head sha is never an edge.
+      unreplayable(miss, read.reason);
+      if (!read.bounded) seen.add(key);
+      continue;
+    }
     filedThisPass = true;
-    const changedPaths = await readChangedPaths(miss);
+    const changedPaths = read.paths;
     const edge = edgeOf(miss, changedPaths);
     if (escalate) {
-      noteEdge(miss.file, edge);
-      const every = edges[miss.file]!;
+      if (changedPaths.length > 0) noteEdge(miss.file, edge);
+      const every = edges[miss.file] ?? [];
+      if (every.length === 0) {
+        // W1-T13526: a structural task is built from path edges only; a suite with none gets no task.
+        unreplayable(miss, "no changed path edge is recorded for the suite");
+        seen.add(key);
+        filedThisPass = false;
+        continue;
+      }
       const filed = await land(miss, (taskId) => ({
         contents: selectorShadowStructuralTask(miss.file, taskId, every, home),
         title: `fix(selector): file structural repair for ${miss.file.split("/").at(-1)}`,
@@ -1832,7 +1896,7 @@ export async function runSelectorShadowGardener(
     }));
     seen.add(key);
     causes[miss.file] = filed.taskId;
-    noteEdge(miss.file, edge);
+    if (changedPaths.length > 0) noteEdge(miss.file, edge);
     deps.log("selector-shadow.miss_filed", { task_id: filed.taskId, pr_url: filed.prUrl, edge });
   }
   writeAtomic(path, JSON.stringify({ filedKeys: [...seen], causes, edges, structural, report: accumulated }) + "\n");
