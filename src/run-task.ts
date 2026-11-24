@@ -29280,6 +29280,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     },
     log,
     ...(escalate ? { escalate } : {}),
+    closeIssue: buildEscalationCloserAsync(owner, repo),
   });
   const withDue = (pass: () => void | Promise<void>, due: () => boolean | Promise<boolean>): RegisteredGardenPass => Object.assign(pass, { due });
   const gardenPass = <C extends string, I, A extends GardenAction<C>>(spec: GardenSpec<C, I, A, GardenCheckout>, d: GardenerDeps): RegisteredGardenPass => withDue(async () => {

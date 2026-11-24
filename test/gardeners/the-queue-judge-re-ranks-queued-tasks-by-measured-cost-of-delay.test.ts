@@ -14,7 +14,7 @@ import type { MainCommit } from "#src/lib/hot-file-gardener.js";
 import type { PlanInventory } from "#src/lib/plan-gardener.js";
 import { parseTasksFromYaml, type Task } from "#src/lib/plan.js";
 import {
-  applyQueueJudgeActions, buildQueueJudgeSources, classRecords, creditedCount, fsChurn, gitFilingDates, QUEUE_JUDGE_CLASSES, queueJudgeGardenSpec, queueJudgeInventory,
+  admittedFloorEscalations, applyQueueJudgeActions, buildQueueJudgeSources, classRecords, creditedCount, fsChurn, gitFilingDates, QUEUE_JUDGE_CLASSES, queueJudgeGardenSpec, queueJudgeInventory,
   QueueJudgeUnavailableError, rankingPath, readRanking, type QueueJudgeSources,
 } from "#src/lib/queue-judge-gardener.js";
 import { queueJudgeRunTaskPorts } from "#src/run-task.js";
@@ -141,6 +141,64 @@ test("W1-T9925: an operator-pinned priority is never lowered and a judged loweri
   assert.equal(inv.moves.length, 0);
   assert.deepEqual(lowWorld.escalations.map((e) => e.taskId), ["W1-T3"]);
   assert.match(lowWorld.read("W1-T3"), /priority: 2$/m);
+});
+
+test("W1-T14651: a lowering proposal is judged as a lower, never held by the smallest-pin floor", async (t) => {
+  // T1 is pinned at 5; T3 sits at 2 (more urgent than the pin) and the judge proposes 4, still below the floor but LESS urgent than T3 now.
+  const w = world(t, {
+    tasks: [["W1-T1", { priority: "5  # operator-2026-10-15: protective" }], ["W1-T3", { priority: "2" }]],
+    filed: { "W1-T3": NOW - 10 * HOUR }, rows: [startRow("W1-T9", NOW - HOUR)],
+    answers: [answer(move("W1-T3", 4, ["age"]))],
+  });
+  const inv = await queueJudgeInventory(w.full, w.deps);
+  assert.equal(w.escalations.length, 0, "a lower opens no needs-human issue");
+  assert.deepEqual(inv.moves.map((m) => [m.target, m.class, m.from, m.to]), [["W1-T3", "lower", 2, 4]]);
+});
+
+test("W1-T14651: the judge closes its own open floor escalations that the corrected rule admits", async (t) => {
+  const url = "https://example.test/issues/77";
+  const prior: Row[] = [
+    { step: "queue_judge.escalated", task_id: "W1-T3", from: 2, to: 4, evidence_signature: "sig", issue_url: url, ts: iso(NOW - 5 * HOUR) },
+    // A raise under the floor stays held, so its issue stays open.
+    { step: "queue_judge.escalated", task_id: "W1-T6", from: 3, to: 0.5, evidence_signature: "sig", issue_url: "https://example.test/issues/78", ts: iso(NOW - 5 * HOUR) },
+    startRow("W1-T9", NOW - HOUR),
+  ];
+  const w = world(t, {
+    tasks: [["W1-T1", { priority: "5  # operator-2026-10-15: protective" }], ["W1-T3", { priority: "2" }], ["W1-T6", { priority: "3" }]],
+    filed: { "W1-T3": NOW - 10 * HOUR }, rows: prior,
+  });
+  const closed: Array<{ url: string; comment: string }> = [];
+  const deps: GardenerDeps = { ...w.deps, closeIssue: (u, comment) => { closed.push({ url: u, comment }); } };
+  await queueJudgeInventory(w.full, deps);
+  assert.deepEqual(closed.map((c) => c.url), [url]);
+  assert.match(closed[0]!.comment, /lowers its urgency/);
+  const row = w.logs.find((l) => l.step === "queue_judge.escalation_closed");
+  assert.equal(row?.extra.issue_url, url);
+  // Its own closing is on the record: a later pass does not close it twice.
+  w.state.now += 100 * HOUR;
+  w.churn.changed = 99;
+  w.answers.push('{"moves":[]}');
+  await queueJudgeInventory(w.full, deps);
+  assert.equal(closed.length, 1);
+});
+
+test("W1-T14651: a failed close of a floor escalation is ledgered and the pass goes on", async (t) => {
+  const w = world(t, {
+    tasks: [["W1-T3", { priority: "2" }]],
+    filed: { "W1-T3": NOW - 10 * HOUR },
+    rows: [{ step: "queue_judge.escalated", task_id: "W1-T3", from: 2, to: 4, evidence_signature: "sig", issue_url: "https://example.test/issues/9", ts: iso(NOW - HOUR) }],
+  });
+  const deps: GardenerDeps = { ...w.deps, closeIssue: () => { throw new Error("gh refused"); } };
+  const inv = await queueJudgeInventory(w.full, deps);
+  assert.equal(inv.asked, true);
+  assert.equal(w.logs.some((l) => l.step === "queue_judge.escalation_closed"), false);
+  assert.match(String(w.logs.find((l) => l.step === "queue_judge.escalation_close_failed")?.extra.error), /gh refused/);
+});
+
+test("W1-T14651: a pinned task's escalated lowering is not an admitted floor escalation", () => {
+  const rows: Row[] = [{ step: "queue_judge.escalated", task_id: "W1-T1", from: 1, to: 3, issue_url: "u1" }];
+  const packs = new Map([["W1-T1", { priority: 1, pinned: true }]]) as unknown as Parameters<typeof admittedFloorEscalations>[1];
+  assert.deepEqual(admittedFloorEscalations(rows, packs), []);
 });
 
 test("W1-T9925: a pass over an empty queue is a no-op", async (t) => {
