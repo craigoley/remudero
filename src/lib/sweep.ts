@@ -14466,6 +14466,30 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
       `resolved and no alert dismissed — escalating`,
   },
   {
+    // W1-T13560 — A GITHUB SUCCESS WITH NO FLEET REVIEW EVIDENCE AND A REFUSED POST IS SAID ONCE. The W1-T2860 row
+    // above re-reviews a success the ledger holds no completed `review.posted` for, but stops at one exact-input post
+    // refusal (`reviewPostRefused`). Past that stop the PR matched `mergeable`, and the arm's W1-T230 ledger gate
+    // refused it every pass — a missing-review-evidence hold nobody was told about. Ordered STRICTLY BEFORE
+    // `mergeable`, on the W1-T2860 row's own identity signals plus a POSITIVE refusal read. `blocked-ambiguous`
+    // dedups per `pr@sha`, so it escalates once per head; a new head or body is a new input with no refusal, so it
+    // re-earns the post-review row instead. A plan PR merges directly and is never armed, so it is left alone.
+    disposition: "blocked-ambiguous",
+    blocker: "escalated",
+    when: (pr) =>
+      pr.checksState === "green" &&
+      pr.requiredContextsUnreadable !== true &&
+      pr.reviewState === "success" &&
+      pr.reviewInputDigest !== undefined &&
+      pr.priorReviewAttemptsForInput === 0 &&
+      pr.reviewPostRefused === true &&
+      !mergesDirectlyAsPlanPr(pr),
+    reason: (pr) =>
+      `checks green and GitHub reports remudero-review success, but the ledger has no completed review.posted ` +
+      `evidence for this exact input and its one post attempt was refused — the arm refuses without a ` +
+      `review.posted for it, so #${pr.prNumber} cannot merge as it stands; push a new head or have an operator ` +
+      `review it — escalating once per head rather than re-disposing it mergeable every pass`,
+  },
+  {
     // POSITIVE MATCH ONLY (W1-T93): mergeable is NEVER inferred from the mere absence of a
     // failure. It requires required-checks green AND review success, named explicitly — P22's own
     // words, "required contexts green, review success, unmerged".
@@ -32808,13 +32832,45 @@ export function deriveDayCostUsd(lines: ReadonlyArray<Record<string, unknown>>, 
   return deriveWindowCostUsd(lines, start, end);
 }
 
-export function deriveDayUnpricedRows(lines: ReadonlyArray<Record<string, unknown>>, now: number): number {
+/** `now`'s UTC-day produced rows, split into priced (with their price) and unpriced. */
+function dayProducedRows(lines: ReadonlyArray<Record<string, unknown>>, now: number) {
   const [start, end] = utcDayWindowMs(now);
-  return lines.filter((row) => {
+  const priced: Array<{ step: string; usd: number }> = [];
+  const unpriced: string[] = [];
+  for (const row of lines) {
     const timestamp = Date.parse(String(row.ts ?? ""));
+    if (!(timestamp >= start && timestamp < end) || spendRoleOf(row) !== "produced") continue;
+    const step = typeof row.step === "string" ? row.step : "";
     const cost = spendAmountUsd(row);
-    return timestamp >= start && timestamp < end && spendRoleOf(row) === "produced" && (cost === undefined || cost < 0);
-  }).length;
+    if (cost === undefined || cost < 0) unpriced.push(step);
+    else priced.push({ step, usd: cost });
+  }
+  return { priced, unpriced };
+}
+
+export function deriveDayUnpricedRows(lines: ReadonlyArray<Record<string, unknown>>, now: number): number {
+  return dayProducedRows(lines, now).unpriced.length;
+}
+
+/** W1-T14631: a price for each of the day's unpriced produced rows, from the same day's priced produced rows: the
+ *  step's p90 (nearest rank), else the day's largest. No priced row in the day leaves the unpriced rows unbounded. */
+export function deriveDayUnpricedSpendBound(lines: ReadonlyArray<Record<string, unknown>>, now: number):
+  | { rows: number; boundUsd: number; steps: Array<{ step: string; rows: number; perCallUsd: number; source: "step-p90" | "day-max" }> }
+  | { rows: number; unbounded: string } {
+  const { priced, unpriced } = dayProducedRows(lines, now);
+  if (unpriced.length === 0) return { rows: 0, boundUsd: 0, steps: [] };
+  if (priced.length === 0) {
+    return { rows: unpriced.length, unbounded: `no priced model call today to bound ${unpriced.length} unpriced call(s)` };
+  }
+  const dayMax = priced.reduce((max, row) => Math.max(max, row.usd), 0);
+  const counts = new Map<string, number>();
+  for (const step of unpriced) counts.set(step, (counts.get(step) ?? 0) + 1);
+  const steps = [...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([step, rows]) => {
+    const own = priced.filter((row) => row.step === step).map((row) => row.usd).sort((a, b) => a - b);
+    return own.length === 0 ? { step, rows, perCallUsd: dayMax, source: "day-max" as const }
+      : { step, rows, perCallUsd: own[Math.ceil(0.9 * own.length) - 1]!, source: "step-p90" as const };
+  });
+  return { rows: unpriced.length, boundUsd: steps.reduce((sum, s) => sum + s.rows * s.perCallUsd, 0), steps };
 }
 
 /** The WEEK-TO-DATE ledgered cost (W1-T159): the current UTC ISO week, same per-run reduction as

@@ -113,17 +113,16 @@ test("W1-T4839: a repeat before the repair merged, or on a retired task, stays e
   assert.equal(h.stepCount("selector-shadow.miss_evidence"), 2);
 });
 
-test("W1-T4839: an unreadable edge falls back to the head sha and still files nothing", async () => {
+test("W1-T4839: an unreadable edge is ledgered as unreplayable, stores no edge and still files nothing", async () => {
   const h = harness();
   await runSelectorShadowGardener(h.deps, () => [missedRun(1)], () => [], h.mint, () => []);
   await runSelectorShadowGardener(h.deps, () => [missedRun(1), missedRun(2)], async () => { throw new Error("compare unavailable"); }, h.mint, () => []);
   assert.equal(h.landed.length, 1);
-  const unread = h.events.find((e) => e.step === "selector-shadow.edge_unread");
-  assert.equal(unread?.extra?.error, "compare unavailable");
+  const unreplayable = h.events.find((e) => e.step === "selector-shadow.edge_unreplayable");
+  assert.deepEqual(unreplayable?.extra, { ci_run_id: 2, head_sha: "head-2", file: TEST_FILE, reason: "compare unavailable" });
   const state = JSON.parse(readFileSync(join(h.root, "state", "selector-shadow-gardener.json"), "utf8")) as { edges: Record<string, string[]> };
-  assert.ok(state.edges[TEST_FILE]!.includes(`head-2 -> ${TEST_FILE}`));
+  assert.ok(!(state.edges[TEST_FILE] ?? []).some((edge) => edge.startsWith("head-2")), "no head sha is stored as an edge");
 });
-
 
 test("selector shadow preserves the exact missed subject while executable proofs avoid filename concern collisions", async () => {
   const { selectorShadowMissTask, selectorShadowStructuralTask } = await import("#src/lib/selector-shadow-gardener.js");
