@@ -595,31 +595,31 @@ function withoutTsxLoader(execArgv: readonly string[]): string[] {
 }
 
 /**
- * W1-T8778: the node argv for one garden child. With no caller-given execArgv/entry (`implicit`) and a current
- * precompiled run-task bundle (childEntryArgv), the child runs it under plain node: the inherited tsx loader flags
- * are dropped, the heap cap follows every other flag, and no tsx cache is opened. Any other answer, and any
- * explicit execArgv/entry, runs exactly as before. Either way `child_entry.spawned` records the kind and why.
+ * Resolve the garden's run-task entry and loader together. An explicit caller can supply its own
+ * invocation or a fallback for a missing bundle. The daemon supplies neither.
  */
 export function gardenChildNodeArgv(
   name: string,
   args: readonly string[],
   heapLimitMb: number,
-  inherited: { execArgv: readonly string[]; entry: string },
+  fallback: { execArgv: readonly string[]; entry?: string } | undefined,
   implicit: boolean,
   log: (step: string, extra?: Record<string, unknown>) => void,
   root: string = HARNESS_ROOT,
 ): string[] {
   const cap = `--max-old-space-size=${heapLimitMb}`;
-  const legacy = [...inherited.execArgv, cap, inherited.entry, "garden", "run", name, ...args];
-  if (!implicit) return legacy;
-  const launch = childEntryArgv(root, "run-task", "src/run-task.ts", ["garden", "run", name, ...args], undefined, { log });
+  const childArgs = ["garden", "run", name, ...args];
+  const explicit = fallback?.entry === undefined ? undefined : [...fallback.execArgv, cap, fallback.entry, ...childArgs];
+  if (!implicit && explicit) return explicit;
+  const launch = childEntryArgv(root, "run-task", "src/run-task.ts", childArgs, undefined, { log });
   log(CHILD_ENTRY_SPAWNED_STEP, childEntrySpawnedRow("run-task", `garden run ${name}`, launch));
-  return launch.kind === "bundle" ? [...withoutTsxLoader(inherited.execArgv), cap, ...launch.argv] : legacy;
+  if (launch.kind === "tsx" && explicit) return explicit;
+  return [...(fallback ? withoutTsxLoader(fallback.execArgv) : []), cap, ...launch.argv];
 }
 
 /**
- * The production pass: `rmd garden run <name>` as a child of THIS process's own node and loader, so the
- * child runs the same source tree and inherits the same config root, state and ledger actor. Self-sync is
+ * The production pass: `rmd garden run <name>` in a child with its own entry and loader. The
+ * child inherits the config root, state and ledger actor. Self-sync is
  * skipped in the child: the parent already decided which code it runs. The child runs under
  * {@link GARDEN_CHILD_HEAP_LIMIT_MB}, niced, and in the idle IO class where an `ionice` binary exists. In a
  * daemon-owned process each child also holds a "garden" host-memory reservation for its lifetime (about 1 GB each,
@@ -647,8 +647,9 @@ export function childGardenPassSpawn(
   } = {},
 ): GardenPassSpawn {
   const execPath = opts.execPath ?? process.execPath;
-  const execArgv = opts.execArgv ?? process.execArgv;
-  const entry = opts.entry ?? process.argv[1] ?? "";
+  const explicit = opts.execArgv !== undefined || opts.entry !== undefined
+    ? { execArgv: opts.execArgv ?? [], entry: opts.entry }
+    : undefined;
   const heapLimitMb = opts.heapLimitMb ?? GARDEN_CHILD_HEAP_LIMIT_MB;
   const setPriority = opts.setPriority ?? osSetPriority;
   const log = opts.log ?? ((step, extra) => void process.stderr.write(`${JSON.stringify({ step, ...extra })}\n`));
@@ -687,8 +688,7 @@ export function childGardenPassSpawn(
       return null;
     }
     return new Promise<number | null>((resolve, reject) => {
-      // The cap follows the inherited flags: V8 takes the last `--max-old-space-size` it is given.
-      const nodeArgv = gardenChildNodeArgv(name, args, heapLimitMb, { execArgv, entry }, opts.execArgv === undefined && opts.entry === undefined, log);
+      const nodeArgv = gardenChildNodeArgv(name, args, heapLimitMb, explicit, explicit === undefined, log);
       const child = spawn(execPath, nodeArgv, {
         cwd: opts.cwd,
         env: { ...(opts.env ?? process.env), [SELF_SYNC_GUARD_ENV]: "1",

@@ -6,7 +6,9 @@ import { setPriority as osSetPriority } from "node:os";
 import { promisify } from "node:util";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { getHeapStatistics } from "node:v8";
-import { basename, dirname, join, posix, relative } from "node:path";
+import { basename, dirname, join, posix, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { childEntryArgv } from "./child-entry-argv.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { daemonGitCredentialSocketPath } from "./secret-boundary.js";
 import { socketHelperCommand } from "./worktree-git.js";
@@ -4266,12 +4268,18 @@ export function childMeasurementCadenceSpawn(opts: {
   /** W1-T14537 seam: the daemon's bound git credential socket. */
   gitCredentialSocket?: () => string | undefined;
 }): MeasurementCadenceChildSpawn {
+  const harnessRoot = fileURLToPath(new URL("../../", import.meta.url));
   return (runId, statePath) => {
     const baseEnv = opts.env ?? process.env;
     const socketPath = (opts.gitCredentialSocket ?? (() => boundDaemonGitCredentialSocket(opts.config)))();
     const gitCredentialEnv = measurementCadenceChildGitCredentialEnv(baseEnv, socketPath);
     const heapLimitMb = opts.heapLimitMb ?? measurementCadenceChildHeapLimitMb(opts.parentHeapLimitBytes?.());
-    const argv = [...(opts.execArgv ?? process.execArgv), `--max-old-space-size=${heapLimitMb}`, opts.entry, MEASUREMENT_CADENCE_CHILD_FLAG, statePath, runId];
+    const cap = `--max-old-space-size=${heapLimitMb}`;
+    const args = [MEASUREMENT_CADENCE_CHILD_FLAG, statePath, runId];
+    const argv = opts.execArgv === undefined
+      ? [cap, ...childEntryArgv(harnessRoot, "measurement-cadence-child", resolve(opts.cwd ?? process.cwd(), opts.entry), args,
+        undefined, { root: false }).argv]
+      : [...opts.execArgv, cap, opts.entry, ...args];
     const logPath = measurementCadenceChildLogPath(statePath);
     let stderrFd: number | undefined;
     try {
