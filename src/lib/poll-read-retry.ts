@@ -6,7 +6,13 @@
  */
 const GH_READ_FAILURE = /^Command failed: gh |^gh api response body was unreadable/m;
 
+/** A check rollup could not name which workflow produced its same-named check runs. GitHub lists a head's workflow
+ *  runs a few seconds after their check runs appear (2026-11-24: a run failed 7.4 s after its PR opened), so a later
+ *  read is complete; one still unreadable after the last wait ends that run's lane and never the daemon (W1-T14710). */
+export const GH_CHECK_IDENTITY_UNREADABLE = "GH_CHECK_IDENTITY_UNREADABLE";
+
 export function isGhReadFailure(error: unknown): boolean {
+  if ((error as { code?: unknown } | null)?.code === GH_CHECK_IDENTITY_UNREADABLE) return true;
   return GH_READ_FAILURE.test(error instanceof Error ? error.message : String(error));
 }
 

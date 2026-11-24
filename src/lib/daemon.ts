@@ -1,6 +1,7 @@
 import { settledSpansByClass } from "./cost-anomaly.js";
 import { restartCycleLedgerRows, restartCycleRow } from "./restart-cycle.js";
 import { createHash } from "node:crypto";
+import { GH_CHECK_IDENTITY_UNREADABLE } from "./poll-read-retry.js";
 import type { DaemonHandoff, HandoffAttempt } from "./daemon-handoff.js";
 import { join } from "node:path";
 import type { LedgerRecord } from "./retro.js";
@@ -2745,9 +2746,8 @@ function refillLaneLocalRejection(err: unknown): boolean {
   return ghLaneReadFailure(err) !== undefined || laneDeliveryFailure(err) !== undefined;
 }
 
-/** A run's check rollup could not name which workflow produced its same-named check runs: a read of GitHub that
- *  disagreed with itself, which ends that run's lane and never the daemon (2026-11-24 17:06Z cold start). */
-export const GH_CHECK_IDENTITY_UNREADABLE = "GH_CHECK_IDENTITY_UNREADABLE";
+// A run's unreadable check-run producer identity ends that run's lane and never the daemon (W1-T14710).
+export { GH_CHECK_IDENTITY_UNREADABLE };
 
 function ghLaneReadFailure(err: unknown): { detail: string } | undefined {
   if (typeof err !== "object" || err === null) return undefined;
