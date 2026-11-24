@@ -213,6 +213,8 @@ test("W1-T13334 criterion 4: invariant:one-copy-per-id — an id in both roots w
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root: configRoot }));
   writeFileSync(planDestinationPath(join(configRoot, "state")), JSON.stringify({ repository: "zz-private-owner/zz-private-plan", kinds: [] }));
   const destination = gitRepo({ scope: t, kind: "feedback-kept-destination" });
+  // W1-T14617: the destination is read at its origin/main; these entries are captures neither main nor HEAD tracks.
+  destination.git("update-ref", "refs/remotes/origin/main", "HEAD");
   symlinkSync(destination.dir, join(configRoot, "repos", "zz-private-plan"));
   const fx = world(t, [entry(0), entry(1)]);
   const shared = entry(1);
