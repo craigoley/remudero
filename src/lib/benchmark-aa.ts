@@ -888,7 +888,7 @@ export async function benchmarkAaCommand(rest: string[], build: (input: Benchmar
   }
   let cohort: BenchmarkAaReportInput["cohort"];
   if (values["no-cohort"] !== true) {
-    try { cohort = await (input.readCohort ?? (async (dir: string) => (await runBenchmarkCohortPass(dir, { maxSources: 4 })).snapshot))(stateDir); }
+    try { cohort = await (input.readCohort ?? (async (dir: string) => (await runBenchmarkCohortPass(dir)).snapshot))(stateDir); }
     catch {
       const reason = "cohort-projection-failed";
       cohort = { state: "unavailable", reason };
