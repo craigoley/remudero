@@ -18,7 +18,9 @@ const round = (pr: number, name = `test:${TEST}`): CiFrictionRound => ({ pr, cau
 const prsOf = (rounds: readonly CiFrictionRound[]) => rounds.map((r) => r.pr);
 
 test("a ci-friction round whose pull request's own diff reaches the failing test is dropped, as its birth round is", () => {
-  const files = new Map([[TEST, 'import { x } from "../src/lib/x.js";\nimport "./helper.js";\nexport const t = x;\n']]);
+  // Built at run time: import-like text inside a string literal would read as this file's own relative import.
+  const imports = (specifier: string) => ["import", "{ x }", "from", JSON.stringify(specifier)].join(" ");
+  const files = new Map([[TEST, `${imports("../src/lib/x.js")};\n${imports("./helper.js")};\nexport const t = x;\n`]]);
   const diffs = new Map<number, string[]>([[1, [TEST]], [2, [SOURCE]], [3, ["docs/unrelated.md"]], [4, ["src/lib/other.ts"]]]);
   const search = {
     changedByPr: (pr: number) => diffs.get(pr),
