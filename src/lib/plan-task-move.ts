@@ -27,7 +27,7 @@
  * the step it would take and writes nothing.
  */
 import { createHash } from "node:crypto";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, parseDocument } from "yaml";
 import { systemClock, type Clock } from "./clock.js";
 import { MOVED_FROM_VALUE, defaultGitRunnerAsync, withoutOneMovedFromLine } from "./plan.js";
 import {
@@ -93,6 +93,35 @@ function stepOf(members: Planned[]): PlannedStep {
   const [subject, prose] = what[first.step];
   return { step: first.step, repository: first.repository, members, title: `chore(plan): ${subject}`,
     message: `chore(plan): ${subject}\n\n${prose}\n\n${members.map(lines).join("")}` };
+}
+
+/** W1-T14592: the one proof-discrimination line a moved shard's already-passing proof produces (plan-pr-emitter.ts sortShardProof). */
+const STALE_SHARD_PROOF = /^shard proof (".*") passes at origin\/main too$/;
+const TRUNCATED_DETAIL = /^… \d+ more line\(s\)$/;
+/** The acceptance proofs a record's own bytes declare; none when they do not parse (that member is then never dropped). */
+function recordProofs(text: string | undefined): string[] {
+  const doc = parseDocument(text ?? "");
+  if (doc.errors.length > 0) return [];
+  const js = doc.toJS() as unknown;
+  const rec = (Array.isArray(js) ? js[0] : js) as { acceptance?: unknown } | null;
+  return Array.isArray(rec?.acceptance) ? rec.acceptance.flatMap(a => typeof (a as { proof?: unknown })?.proof === "string" ? [(a as { proof: string }).proof] : []) : [];
+}
+/**
+ * W1-T14592: when a refusal is ONLY proof-discrimination and every line it shows is a moved shard proof that already
+ * passes on core, the members carrying one of those proofs (each with the proof that names it); otherwise undefined.
+ * A truncated detail shows the first proofs only: the rebuild's own refusal names the rest.
+ */
+function staleProofDrops(verdict: PlanPrPreflightResult, members: readonly Planned[]): Array<{ id: string; proof: string }> | undefined {
+  if (verdict.failures.length === 0 || verdict.failures.some(f => f.check !== "proof-discrimination")) return undefined;
+  const lines = verdict.failures.flatMap(f => f.lines ?? [f.firstLine]).filter(line => !TRUNCATED_DETAIL.test(line));
+  if (lines.some(line => !STALE_SHARD_PROOF.test(line))) return undefined;
+  // The emitter writes each line as `shard proof ${JSON.stringify(proof)} passes at origin/main too`: compare whole lines.
+  const shown = new Set(lines);
+  const drops = members.flatMap(m => {
+    const proof = recordProofs(m.text).find(p => shown.has(`shard proof ${JSON.stringify(p)} passes at origin/main too`));
+    return proof === undefined ? [] : [{ id: m.id, proof }];
+  });
+  return drops.length > 0 ? drops : undefined;
 }
 
 const defaultCreatePull = async (repository: string, pr: PullRequest): Promise<{ number: number; url: string }> => {
@@ -286,56 +315,75 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
     // W1-T14447: a main that moved past its pin is admitted only when its range touches none of the step's records on
     // either side (the selection judged its own reads; this judges the step's). The step is still written on the pin.
     await liveHeadJudge(o, { public: pub.paths, ops: ops.paths })(state, planned.members.map(m => ({ id: m.id, path: m.path, files: [m.path] })));
-    const [lead] = planned.members as [Planned, ...Planned[]];
-    const batched = planned.members.length > 1;
-    // A batch of one prints and records exactly what a one-task step always did; a batch adds every member's id.
-    const ids = batched ? { ids: planned.members.map(m => m.id) } : {};
-    // A copy's evidence also names every completed move, once per step.
-    const evidence = { ...(batched ? { tasks: planned.members.map(m => ({ id: m.id, path: m.path, reason: m.reason ?? null, ...m.evidence })) } : lead.evidence),
-      ...(planned.step === "copy" ? { completed } : {}) };
-    if (!apply) return report(planned.step, { id: lead.id, ...ids, would: true, repository: planned.repository, path: lead.path, reason: lead.reason ?? null, evidence });
     // ── Write: one commit, the emitter's preflight, one branch push, one pull request, one ledger row. ──
     const repository = planned.repository === "public" ? o.publicRepo : o.opsRepo;
     const root = planned.repository === "public" ? o.publicRoot : o.opsRoot;
     const parent = planned.repository === "public" ? o.publicCommit : o.opsCommit;
     const base = planned.repository === "public" ? state.publicBranch : state.opsBranch;
-    let tree = `${parent}^{tree}`;
-    for (const member of planned.members) {
-      const blob = member.text === undefined ? undefined : (await git(root, ["hash-object", "-w", "--stdin"], member.text)).trim();
-      tree = await treeWith(root, tree, member.path, blob);
+    // W1-T14592: every refusal this step met, and the copy members each proof-discrimination refusal dropped.
+    const refusals: Array<{ check: string; first_lines: string[] }> = [];
+    const dropped: Array<{ id: string; proof: string }> = [];
+    for (;;) {
+      const [lead] = planned.members as [Planned, ...Planned[]];
+      const batched = planned.members.length > 1;
+      // A batch of one prints and records exactly what a one-task step always did; a batch adds every member's id.
+      const ids = batched ? { ids: planned.members.map(m => m.id) } : {};
+      // A copy's evidence also names every completed move, once per step.
+      const evidence = { ...(batched ? { tasks: planned.members.map(m => ({ id: m.id, path: m.path, reason: m.reason ?? null, ...m.evidence })) } : lead.evidence),
+        ...(planned.step === "copy" ? { completed } : {}) };
+      if (!apply) return report(planned.step, { id: lead.id, ...ids, would: true, repository: planned.repository, path: lead.path, reason: lead.reason ?? null, evidence });
+      let tree = `${parent}^{tree}`;
+      for (const member of planned.members) {
+        const blob = member.text === undefined ? undefined : (await git(root, ["hash-object", "-w", "--stdin"], member.text)).trim();
+        tree = await treeWith(root, tree, member.path, blob);
+      }
+      const commit = await commitOn(root, parent, tree, planned.message);
+      // A one-task step names its task, which the review requires of a single receipt; a batch's branch names its shape.
+      const branch = `${MOVE_BRANCH_PREFIX}${batched ? "batch" : lead.id}-${clock.now()}`;
+      const body = `${planned.message.slice(planned.message.indexOf("\n\n") + 2)}`;
+      const verdict = await (ports.preflight ?? defaultPreflight)(root, commit, { title: planned.title, body, headRef: branch,
+        ...(planned.repository === "ops" ? { codeRoot: o.publicRoot, bodyProofRoot: "plan" as const } : {}) });
+      const allowed = planPrPreflightAllows(verdict, { lane: "move-task", branch });
+      if (!allowed) refusals.push(...verdict.failures.map(f => ({ check: f.check, first_lines: f.lines ?? [f.firstLine] })));
+      // A preflight check that could not run is reported, never refusing (the emitter's rule); the row names it.
+      const row = (outcome: string, extra: Json = {}) => ports.ledger({ run_id: branch, task_id: lead.id, step: MOVE_STEP, move_step: planned.step, outcome,
+        repository, public_commit: o.publicCommit, ops_commit: o.opsCommit, commit, preflight_unreadable: verdict.unreadable.map(f => f.check),
+        // W1-T14592: what each unreadable check printed, so the row names why it could not run.
+        ...(verdict.unreadable.length > 0 ? { unreadable_lines: verdict.unreadable.map(f => ({ check: f.check, first_line: f.firstLine })) } : {}),
+        ...(batched ? { task_ids: ids.ids } : {}), ...(refusals.length > 0 ? { failures: refusals } : {}), ...(dropped.length > 0 ? { dropped } : {}), ...extra });
+      if (!allowed) {
+        // W1-T14592: a copy refused ONLY because some members' proofs already pass on core drops exactly those members
+        // and is judged again by the same preflight; anything else, or a refusal that names no member, stands down.
+        const drops = planned.step === "copy" ? staleProofDrops(verdict, planned.members) : undefined;
+        const kept = drops === undefined ? [] : planned.members.filter(m => !drops.some(d => d.id === m.id));
+        if (drops !== undefined && kept.length > 0) {
+          dropped.push(...drops);
+          planned = stepOf(kept);
+          continue;
+        }
+        row("preflight_refused");
+        print(JSON.stringify({ step: planned.step, applied: false, id: lead.id, ...ids, outcome: "preflight_refused", failures: verdict.failures.map(f => f.check),
+          ...(dropped.length > 0 ? { dropped } : {}) }));
+        return 1;
+      }
+      let pr: { number: number; url: string };
+      let outcome = "push_failed";
+      try {
+        await git(root, ["push", "--quiet", `https://github.com/${repository}.git`, `${commit}:refs/heads/${branch}`]);
+        outcome = "pull_request_failed";
+        pr = await (ports.createPull ?? defaultCreatePull)(repository, { title: planned.title, body, head: branch, base });
+      } catch (error) {
+        // Either half leaves no pull request: the next run reads the same state and takes the same step on a new branch.
+        void error;
+        row(outcome);
+        print(JSON.stringify({ step: planned.step, applied: false, id: lead.id, ...ids, outcome }));
+        return 1;
+      }
+      row("opened", { pull_request: pr.number });
+      print(JSON.stringify({ step: planned.step, applied: true, id: lead.id, ...ids, repository, branch, commit, pullRequest: pr.number, url: pr.url,
+        publicCommit: o.publicCommit, opsCommit: o.opsCommit, reason: lead.reason ?? null, evidence }));
+      return 0;
     }
-    const commit = await commitOn(root, parent, tree, planned.message);
-    // A one-task step names its task, which the review requires of a single receipt; a batch's branch names its shape.
-    const branch = `${MOVE_BRANCH_PREFIX}${batched ? "batch" : lead.id}-${clock.now()}`;
-    const body = `${planned.message.slice(planned.message.indexOf("\n\n") + 2)}`;
-    const verdict = await (ports.preflight ?? defaultPreflight)(root, commit, { title: planned.title, body, headRef: branch,
-      ...(planned.repository === "ops" ? { codeRoot: o.publicRoot, bodyProofRoot: "plan" as const } : {}) });
-    // A preflight check that could not run is reported, never refusing (the emitter's rule); the row names it.
-    const row = (outcome: string, extra: Json = {}) => ports.ledger({ run_id: branch, task_id: lead.id, step: MOVE_STEP, move_step: planned.step, outcome,
-      repository, public_commit: o.publicCommit, ops_commit: o.opsCommit, commit, preflight_unreadable: verdict.unreadable.map(f => f.check),
-      ...(batched ? { task_ids: ids.ids } : {}), ...extra });
-    if (!planPrPreflightAllows(verdict, { lane: "move-task", branch })) {
-      row("preflight_refused");
-      print(JSON.stringify({ step: planned.step, applied: false, id: lead.id, ...ids, outcome: "preflight_refused", failures: verdict.failures.map(f => f.check) }));
-      return 1;
-    }
-    let pr: { number: number; url: string };
-    let outcome = "push_failed";
-    try {
-      await git(root, ["push", "--quiet", `https://github.com/${repository}.git`, `${commit}:refs/heads/${branch}`]);
-      outcome = "pull_request_failed";
-      pr = await (ports.createPull ?? defaultCreatePull)(repository, { title: planned.title, body, head: branch, base });
-    } catch (error) {
-      // Either half leaves no pull request: the next run reads the same state and takes the same step on a new branch.
-      void error;
-      row(outcome);
-      print(JSON.stringify({ step: planned.step, applied: false, id: lead.id, ...ids, outcome }));
-      return 1;
-    }
-    row("opened", { pull_request: pr.number });
-    print(JSON.stringify({ step: planned.step, applied: true, id: lead.id, ...ids, repository, branch, commit, pullRequest: pr.number, url: pr.url,
-      publicCommit: o.publicCommit, opsCommit: o.opsCommit, reason: lead.reason ?? null, evidence }));
-    return 0;
   } catch (error) {
     // Raw Git/API/parser errors can carry private paths or record bytes: report the named reason only.
     return report("unknown", { reason: error instanceof PreviewUnknown ? error.reason : "unreadable_evidence" });
