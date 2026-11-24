@@ -6,7 +6,8 @@
 // These tests replay that shape through the real sentinel and the real ledger.
 
 import assert from "node:assert/strict";
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { classifyEndedDaemonProcesses } from "#src/lib/daemon.js";
 import {
@@ -19,6 +20,8 @@ import {
   type CrashSentinelCtx,
 } from "#src/lib/escalation-catalogue.js";
 import type { IssueComment, IssueGateway } from "#src/lib/escalate.js";
+import { systemClock } from "#src/lib/clock.js";
+import { drainEscalationSpool, escalationSpoolDir } from "#src/lib/host-escalation-spool.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const MIN = 60_000;
@@ -160,26 +163,53 @@ test("W1-T14733 criterion 3: each further exit with the same cause edits the inc
   }
 });
 
-test("W1-T14733 criterion 4: a cause change with no clean exit between re-escalates at the new cause's first exit, and a boot with many undelivered exits makes one status write", (t) => {
+test("W1-T14733 criterion 4: a cause change with no clean exit between re-escalates at the new cause's first exit, and a boot with many undelivered exits makes one status write", async (t) => {
   const path = writeLedger([], { scope: t }).path;
+  const stateDir = dirname(path);
+  const spooledStatus = () => readdirSync(escalationSpoolDir(stateDir)).filter((n) => n.startsWith("comment-crashloop-status-") && n.endsWith(".json"));
   const g = gateway();
   let at = loop(path, "DAEMON-a", healthy(path, g.issues), 3, FIRST_CAUSE, g.issues);
-  // Five exits whose status writes were refused leave five undelivered updated rows.
+  // Twenty boots whose status writes were refused: each refusal REPLACES the incident's one spooled status.
+  const REFUSED = 20;
   const refusing = gateway({ failPost: true, editable: false });
-  at = loop(path, "DAEMON-p", at, 5, FIRST_CAUSE, { ...refusing.issues, create: g.issues.create });
-  const pending = lines(path).filter((r) => r.step === "daemon.crashloop.updated" && r.delivered === false);
-  assert.ok(pending.length >= 4, "the refused writes are pending");
+  at = loop(path, "DAEMON-p", at, REFUSED, FIRST_CAUSE, { ...refusing.issues, create: g.issues.create });
+  const undelivered = lines(path).filter((r) => r.step === "daemon.crashloop.updated" && r.delivered === false);
+  assert.equal(undelivered.length, REFUSED, "every refused boot left its exit undelivered");
+  assert.equal(spooledStatus().length, 1, "THE CLAIM: twenty undelivered exits hold ONE spooled status, not twenty comments");
+  const spooledBody = String(JSON.parse(readFileSync(join(escalationSpoolDir(stateDir), spooledStatus()[0]!), "utf8")).body);
+  assert.match(spooledBody, /newest DAEMON-p18;/, "the spooled status is the newest refusal's");
+
+  // The next boot with a working gateway: one status write, and the stale spooled copy is withdrawn, not posted.
   const before = g.posts.length + g.edits.length;
   boot(path, "DAEMON-q", at, g.issues);
-  assert.equal(g.posts.length + g.edits.length - before, 1, "THE CLAIM: one status write folds every pending exit");
+  assert.equal(g.posts.length + g.edits.length - before, 1, "THE CLAIM: one status write for the incident");
+  assert.equal(g.posts.length, 1, "the first status write is a post");
+  assert.match(String(g.posts.at(-1)?.body), /23 short exits in the trailing run, first DAEMON-a0, newest DAEMON-p19;/, "naming the newest exit");
+  assert.deepEqual(spooledStatus(), [], "the direct write withdrew the spooled status");
+  const drained: string[] = [];
+  const poster = { escalate: async () => "", close: async () => {}, comment: async (_u: string, b: string) => { drained.push(b); }, clock: systemClock };
+  await drainEscalationSpool(stateDir, poster);
+  assert.deepEqual(drained, [], "so the drain posts nothing more");
+
+  // Twenty refusals with no direct write after them: the drain posts the one spooled status, once.
+  at = loop(path, "DAEMON-r", at, REFUSED, FIRST_CAUSE, { ...refusing.issues, create: g.issues.create });
+  await drainEscalationSpool(stateDir, poster);
+  assert.equal(drained.length, 1, "THE CLAIM: the drain makes one status write for twenty undelivered exits");
+  assert.match(drained[0]!, /newest DAEMON-r18;/);
+  at = loop(path, "DAEMON-u", at, 1, FIRST_CAUSE, g.issues);
 
   // The cause switches with no clean exit between: the run continues, the incident does not.
-  process_(path, "DAEMON-q", at, MIN, FIRST_CAUSE);
-  at = loop(path, "DAEMON-s", at + 2 * MIN, 2, SECOND_CAUSE, g.issues);
-  boot(path, "DAEMON-t", at, g.issues);
+  const created = g.created.length;
+  boot(path, "DAEMON-s0", at, g.issues);
+  process_(path, "DAEMON-s0", at, MIN, SECOND_CAUSE);
+  assert.equal(g.created.length, created, "no new incident before the new cause has exited");
+  const verdict = boot(path, "DAEMON-s1", at + 2 * MIN, g.issues);
+  assert.equal(verdict.summary?.incident, "reescalated", "re-escalated at the boot that judges the new cause's first exit");
+  assert.equal(g.created.length, created + 1);
   const escalated = lines(path).filter((r) => r.step === "daemon.crashloop.escalated");
-  assert.deepEqual(escalated.map((r) => r.run_first), ["DAEMON-a0", "DAEMON-s0"], "re-escalated at the new cause's first exit");
-  assert.equal(escalated[1]!.run_length, 10, "the run itself is unbroken: 3 + 5 + 1 exits on the first cause, then the second cause's first");
+  assert.deepEqual(escalated.map((r) => [r.run_first, r.run_newest, r.cause]),
+    [["DAEMON-a0", "DAEMON-a1", FIRST_CAUSE], ["DAEMON-s0", "DAEMON-s0", SECOND_CAUSE]], "the new incident starts at the new cause's first exit");
+  assert.equal(escalated[1]!.run_length, 3 + REFUSED + REFUSED + 1 + 1, "the run itself is unbroken: 3 + 20 + 20 + 1 exits on the first cause, then the second cause's first");
 });
 
 test("W1-T14733 criterion 5: invariant:a-healthy-instance-is-quiet — clean processes at their learned lifetime open, re-escalate and comment nothing", (t) => {

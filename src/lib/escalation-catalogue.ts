@@ -19,7 +19,9 @@ import { dirname } from "node:path";
 import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { systemClock, type Clock } from "./clock.js";
-import { deliveredEscalationUrl, spoolIssueAction, withdrawSpooledEscalation } from "./host-escalation-spool.js";
+import {
+  crashLoopStatusSpoolKey, deliveredEscalationUrl, spoolIssueAction, withdrawSpooledEscalation, withdrawSpooledIssueAction,
+} from "./host-escalation-spool.js";
 
 /**
  * P29(ii)'s escalation side — called once `nextRunnable`'s `isCircuitTripped` (status.ts's
@@ -338,11 +340,15 @@ export function clearDaemonCrashLoopIncident(incident: CrashLoopIncident, reason
 /**
  * W1-T14733: write an incident's one status comment. A gateway that can list and edit comments edits the comment its
  * marker names; one that cannot, or a list or edit that fails, posts it as a new comment; a refused post is spooled
- * for the daemon's host-spool drain. The outcome names which, and the error that forced a fallback.
+ * for the daemon's host-spool drain under ONE key per incident, so a later refusal replaces the spooled status rather
+ * than queuing a comment per exit, and a later direct write withdraws it. The outcome names which, and the error that
+ * forced a fallback.
  */
 export function writeCrashLoopStatus(issues: IssueGateway, open: CrashLoopIncident, body: string, ctx: CrashSentinelCtx):
   { delivered: boolean; queued: boolean; outcome: "edited" | "posted" | "spooled" | "unwritten"; error?: string } {
   const url = open.issueUrl!;
+  const stateDir = dirname(ctx.ledgerPath);
+  const key = crashLoopStatusSpoolKey(url, open.runFirst);
   let error: string | undefined;
   if (issues.listCommentsSince && issues.editComment) {
     try {
@@ -350,6 +356,7 @@ export function writeCrashLoopStatus(issues: IssueGateway, open: CrashLoopIncide
         .filter((comment) => comment.body.includes(CRASHLOOP_STATUS_MARKER(open.runFirst))).at(-1);
       if (prior) {
         issues.editComment(prior.id, body);
+        withdrawSpooledIssueAction(stateDir, key);
         return { delivered: true, queued: false, outcome: "edited" };
       }
     } catch (failure) {
@@ -361,6 +368,7 @@ export function writeCrashLoopStatus(issues: IssueGateway, open: CrashLoopIncide
   try {
     if (issues.comment) {
       issues.comment(url, body);
+      withdrawSpooledIssueAction(stateDir, key);
       return { delivered: true, queued: false, outcome: "posted", ...(error ? { error } : {}) };
     }
   } catch (failure) {
@@ -368,7 +376,7 @@ export function writeCrashLoopStatus(issues: IssueGateway, open: CrashLoopIncide
     error = `status post: ${String((failure as Error)?.message ?? failure)}`.slice(0, 240);
   }
   try {
-    spoolIssueAction(dirname(ctx.ledgerPath), { kind: "comment", url, body }, { source: "daemon-crashloop", host: hostname(), clock: systemClock });
+    spoolIssueAction(stateDir, { kind: "comment", url, body, key }, { source: "daemon-crashloop", host: hostname(), clock: systemClock });
     return { delivered: false, queued: true, outcome: "spooled", ...(error ? { error } : {}) };
   } catch (failure) {
     return { delivered: false, queued: false, outcome: "unwritten", error: `status spool: ${String((failure as Error)?.message ?? failure)}`.slice(0, 240) };
@@ -452,12 +460,12 @@ export function runDaemonCrashSentinel(
     for (const update of updates) if (typeof update.prior_run_id === "string") latestByRun.set(update.prior_run_id, update);
     const pendingIds = new Set([...latestByRun]
       .filter(([, update]) => update.delivered === false && update.queued !== true).map(([id]) => id));
+    // Pending exits first, then this boot's, so the map's last row is the newest exit the status names.
     const rowsToUpdate = new Map<string, Record<string, unknown>>();
-    for (const row of abnormalRows) rowsToUpdate.set(String(row.prior_run_id), row);
-    for (const id of pendingIds) {
-      const row = allRows.find((candidate) => candidate.step === DAEMON_ABNORMAL_EXIT_STEP && candidate.prior_run_id === id);
-      if (row) rowsToUpdate.set(id, row);
+    for (const row of allRows) {
+      if (row.step === DAEMON_ABNORMAL_EXIT_STEP && pendingIds.has(String(row.prior_run_id))) rowsToUpdate.set(String(row.prior_run_id), row);
     }
+    for (const row of abnormalRows) { rowsToUpdate.delete(String(row.prior_run_id)); rowsToUpdate.set(String(row.prior_run_id), row); }
     // W1-T14733: every pending exit is folded into ONE status comment, edited in place each boot, never a comment per
     // exit: the newest exit's evidence and the run's length say what the incident needs to.
     const statusRow = [...rowsToUpdate.values()].at(-1);
