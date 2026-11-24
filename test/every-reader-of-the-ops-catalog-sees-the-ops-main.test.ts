@@ -9,11 +9,14 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join, sep } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { Config } from "#src/lib/config.js";
-import { feedbackCaptured, listFeedback, readFeedbackEntry, readLandedFeedbackEntry, setFeedbackStatus } from "#src/lib/feedback.js";
+import { captureFeedback, feedbackCaptured, listFeedback, readFeedbackEntry, readLandedFeedbackEntry, setFeedbackStatus,
+  stageFeedbackCaptureAsync } from "#src/lib/feedback.js";
 import { queuedRecordHome, readStandingDecisions } from "#src/lib/feedback-landing.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { opsCatalogFile, readOpsCheckoutAtMain, readOpsCheckoutAtMainSync } from "#src/lib/ops-checkout-at-main.js";
 import { mergePlanBlobs } from "#src/lib/plan.js";
 import { planDestinationPath } from "#src/lib/plan-destination.js";
-import { buildSweepEffects, type BuildSweepEffectsDeps } from "#src/lib/sweep.js";
+import { buildSweepEffects, PLAN_REPAIR_DISPATCH_STEP, type BuildSweepEffectsDeps, type OpenPrView } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { triageFeedbackHome } from "#src/lib/triage.js";
 import { gitRepo, originWithClone } from "#test/helpers/git-repo.js";
@@ -75,11 +78,11 @@ function opsHost(t: TestContext, opts: { hostFile?: boolean } = {}) {
   const oldHome = process.env.HOME;
   process.env.HOME = home;
   t.after(() => { process.env.HOME = oldHome; });
-  return { home, root, stateDir: join(root, "state"), publicDir, opsDir, ops };
+  return { home, root, stateDir: join(root, "state"), publicDir, opsDir, ops, pusher };
 }
 
 /** The sweep's production parked-PR host over the fixture: real git, recorded, with a switch that fails a read at main. */
-function parkedPrHost(h: ReturnType<typeof opsHost>, publicText = "[]") {
+function parkedPrHost(h: ReturnType<typeof opsHost>, publicText = "[]", overrides: Partial<BuildSweepEffectsDeps> = {}) {
   const catalog = task(MAIN_ONLY_TASK, "ops main") + task(CHANGED_TASK, "new ops main");
   const hash = (s: string) => createHash("sha1").update(s).digest("hex");
   const commit = hash(catalog), tree = hash(commit + "tree"), planTree = hash(commit + "plan");
@@ -110,10 +113,12 @@ function parkedPrHost(h: ReturnType<typeof opsHost>, publicText = "[]") {
     ghJsonImpl: args => assert.fail(`reading a task file makes no GitHub call: ${args.join(" ")}`),
     buildPlanPrBodyImpl: buildFixturePlanPrBody,
     planPrPreflightImpl: () => ({ ok: true, failures: [], unreadable: [] }),
+    ...overrides,
   };
-  const parked = buildSweepEffects(deps).parkedPr;
+  const effects = buildSweepEffects(deps);
+  const parked = effects.parkedPr;
   assert.ok(parked, "the production sweep effects wire the remedy");
-  return { parked, git, options };
+  return { parked, effects, git, options };
 }
 
 test("W1-T14617 criterion 1: the parked-PR remedy reads an ops task record at the ops checkout's origin/main", async (t) => {
@@ -190,6 +195,88 @@ test("W1-T14617 criterion 3: queuedRecordHome and readStandingDecisions read the
   // The standing decisions are ops main's DECISIONS.md and plan/decisions.d, not the working tree's.
   assert.equal(readFileSync(join(h.opsDir, "DECISIONS.md"), "utf8"), "old ops decision\n");
   assert.equal(readStandingDecisions(h.publicDir, h.stateDir), "main ops decision\n\nmain ops shard\n");
+});
+
+test("W1-T14617: the plan-only repair rung reads an ops task record at the ops checkout's origin/main", async (t) => {
+  const h = opsHost(t);
+  const rows: Array<Record<string, unknown>> = [], worktrees: string[] = [];
+  const options = { failAtMain: false };
+  const { effects } = parkedPrHost(h, "[]", {
+    log: (step, extra) => rows.push({ step, ...extra }),
+    // Real git for the read at ops main; the repair's own commit, push and worktree are recorded only.
+    planRepairGitImpl: (file, args) => {
+      const atMain = args[1] === h.opsDir && (args.includes("+refs/heads/main:refs/remotes/origin/main")
+        || args.at(-1) === "refs/remotes/origin/main" || args.includes("ls-tree") || args.includes("show"));
+      if (atMain && options.failAtMain && args.includes("ls-tree")) throw new Error("fatal: the fixture's ls-tree at main failed");
+      if (atMain) return execFileSync(file, [...args], { encoding: "utf8", stdio: "pipe" });
+      return args.includes("rev-parse") ? "planrepairsha0123456789\n" : "";
+    },
+    worktreeAddImpl: (_repoDir, worktreePath) => { worktrees.push(worktreePath); mkdirSync(join(worktreePath, "plan", "tasks.d"), { recursive: true }); },
+    gitPushRunBranchImpl: () => {},
+    worktreeRemoveImpl: () => {},
+    ghJsonImpl: args => args.includes("--method") ? { html_url: "https://github.com/fixture-private/ops/pull/617", number: 617 } : [],
+  });
+  const pr = (taskId: string) => ({ prNumber: 617, prUrl: "https://github.com/fixture/remudero/pull/617", taskId, headSha: "head",
+    reviewState: "success", checksState: "green", unmetCriteria: [], priorStrikes: 3, autoMergeArmed: false,
+    lastActivityAt: "2026-11-24T00:00:00.000Z" }) as unknown as OpenPrView; // expiring-fixture: exempt -- never compared with the clock
+  const evidence = { proofs: [{ claim: "fixture behavior", proof: "unit test: missing fixture", proofExec: "not_executable" as const }] };
+
+  assert.equal(await withLiveWritesAllowed(() => effects.dispatchPlanOnlyRepair!(pr(MAIN_ONLY_TASK), evidence)), true);
+  const dispatched = rows.filter(r => r.step === PLAN_REPAIR_DISPATCH_STEP);
+  assert.equal(dispatched.at(-1)?.outcome, "dispatched", JSON.stringify(dispatched));
+  const flagged = readFileSync(join(worktrees[0]!, shardOf(MAIN_ONLY_TASK)), "utf8");
+  assert.match(flagged, /title: ops main fixture/, "the flagged shard is main's record, which the stale working tree lacks");
+
+  options.failAtMain = true;
+  assert.equal(await withLiveWritesAllowed(() => effects.dispatchPlanOnlyRepair!(pr(CHANGED_TASK), evidence)), true);
+  const refused = rows.filter(r => r.step === PLAN_REPAIR_DISPATCH_STEP).at(-1);
+  assert.equal(refused?.outcome, "lookup_unreadable");
+  assert.equal(refused?.code, "ops-shard-unreadable");
+  assert.equal(worktrees.length, 1, "a refused read cuts no worktree");
+});
+
+test("W1-T14617: an unreadable ops main refuses the feedback readers, keeps a queued record waiting and adds no decision", async (t) => {
+  const h = opsHost(t);
+  h.ops.clone.git("update-ref", "-d", "refs/remotes/origin/main");
+  assert.throws(() => readFeedbackEntry(h.publicDir, FB.mainOnly), /the plan destination checkout's origin\/main is unreadable/);
+  assert.throws(() => listFeedback(h.publicDir), /origin\/main is unreadable/);
+  assert.equal(await queuedRecordHome(h.publicDir, h.opsDir, fbPath(FB.mainOnly), true), "unread");
+  assert.equal(readStandingDecisions(h.publicDir, h.stateDir), "", "an unread ops main contributes nothing");
+});
+
+test("W1-T14617: a capture of an id only ops main holds returns that entry and writes nothing", async (t) => {
+  const h = opsHost(t);
+  const staged = await stageFeedbackCaptureAsync(h.publicDir, undefined, { id: FB.mainOnly, raw: "a second capture" });
+  assert.equal(staged.entry.raw, "only on ops main");
+  assert.equal(staged.queued, false);
+  assert.equal(captureFeedback(h.publicDir, { id: FB.changed, raw: "a second capture" }).raw, "main bytes");
+  assert.equal(existsSync(join(h.publicDir, fbPath(FB.mainOnly))), false);
+  assert.equal(readFileSync(join(h.opsDir, fbPath(FB.changed)), "utf8"), fb(FB.changed, "old bytes"), "the working tree is not written");
+});
+
+test("W1-T14617: the sync read at main spawns nothing while main and HEAD stay, and shows only a moved main's new blob", async (t) => {
+  const h = opsHost(t);
+  const calls: string[][] = [];
+  const git = (args: string[]) => { calls.push(args); return execFileSync("git", ["-C", h.opsDir, ...args], { encoding: "utf8" }); };
+  const scope = { paths: ["plan/feedback/"], head: true };
+  const first = readOpsCheckoutAtMainSync(h.opsDir, scope, git);
+  assert.ok(calls.some(args => args[0] === "ls-tree"), "the first read lists main");
+  const spawned = calls.length;
+  // Packed refs and a detached HEAD at the same commit are read from the ref files: still no spawn.
+  h.ops.clone.git("pack-refs", "--all");
+  h.ops.clone.git("checkout", "--quiet", "--detach");
+  assert.equal(readOpsCheckoutAtMainSync(h.opsDir, scope, git), first);
+  assert.equal(calls.length, spawned);
+  // Main moves: listed again, and only the new blob is shown.
+  writeFileSync(join(h.pusher.dir, fbPath("fb-1795000000009-999999")), fb("fb-1795000000009-999999", "a later entry"));
+  h.pusher.git("add", "-A"); h.pusher.git("commit", "--quiet", "-m", "later"); h.pusher.git("push", "--quiet", "origin", "main");
+  h.ops.clone.git("fetch", "--quiet", "origin");
+  const moved = readOpsCheckoutAtMainSync(h.opsDir, scope, git);
+  assert.notEqual(moved.mainSha, first.mainSha);
+  assert.deepEqual(calls.slice(spawned).filter(args => args[0] === "show").map(args => args[1]), [`${moved.mainSha}:${fbPath("fb-1795000000009-999999")}`]);
+  // Rule 2 needs the HEAD listing.
+  const unlisted = await readOpsCheckoutAtMain(h.opsDir, { paths: ["plan/feedback/"] }, git, { fetch: false });
+  assert.throws(() => opsCatalogFile(unlisted, fbPath(FB.mainOnly)), /needs the HEAD listing/);
 });
 
 /** A `git` on PATH that records every invocation, then runs the real one. */

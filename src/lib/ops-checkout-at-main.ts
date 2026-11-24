@@ -106,11 +106,11 @@ export function* readOpsCheckoutAtMainSteps(checkoutDir: string, scope: OpsCatal
   const read = yield* atMainSteps(checkoutDir, scope, runGit, {
     fetch: false, blobs: keptBlobs, ...(refs === undefined ? {} : { mainSha: refs.mainSha, headSha: refs.headSha }),
   });
-  if (key !== undefined && refs !== undefined) {
-    if (keptReads.size >= 256) keptReads.clear(); // BACKSTOP on memory, not a control
-    keptReads.set(key, { ...read, headSha: refs.headSha });
-  }
-  return read;
+  if (key === undefined || refs === undefined) return read;
+  if (keptReads.size >= 256) keptReads.clear(); // BACKSTOP on memory, not a control
+  const keep = { ...read, headSha: refs.headSha };
+  keptReads.set(key, keep);
+  return keep;
 }
 
 /** The sync arm, for the sync readers; `runGit` must return a string. See {@link readOpsCheckoutAtMainSteps}. */
