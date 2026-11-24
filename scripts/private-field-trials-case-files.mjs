@@ -9,7 +9,7 @@ import { refreshInstallationToken } from "../src/lib/github-app.ts";
 import { loadPlan } from "../src/lib/plan.ts";
 import { resolveRepoLayout } from "../src/lib/repo-layout.ts";
 import { readTaskCaseLedgers } from "../src/lib/task-case-file.ts";
-import { buildFieldTrialsCaseFiles, caseLedgerWindowDays, creditsTask, parseCarry, readCaseFileCatalog,
+import { buildFieldTrialsCaseFiles, caseLedgerWindowDays, creditsTask, ghPrListingPage, parseCarry, readCaseFileCatalog,
   readCaseFileOpsCatalog } from "../src/lib/field-trials-case-files.ts";
 
 const repoRoot = process.env.RMD_FIELD_TRIALS_REPO_ROOT ?? "/app";
@@ -33,12 +33,8 @@ try { carry = parseCarry(JSON.parse(readFileSync(carryPath, "utf8"))); } catch {
 
 const result = await buildFieldTrialsCaseFiles(
   { rows: read.rows, planIds: catalog.planIds, carry, opsCatalog: catalog.opsCatalog },
-  async (taskId) => {
-    const list = JSON.parse(await ghTextAsync(["pr", "list", "--repo", "craigoley/remudero", "--state", "all",
-      "--search", taskId, "--limit", "20", "--json", "number,body,headRefName,updatedAt"]));
-    if (!Array.isArray(list)) throw new Error("PR search returned no list");
-    return list;
-  },
+  // W1-T14728: one REST listing of every PR, newest update first, in place of a search per task.
+  ghPrListingPage(ghTextAsync, "craigoley/remudero"),
   async (number) => JSON.parse(await ghTextAsync(["pr", "view", String(number), "--repo", "craigoley/remudero",
     "--json", "number,url,state,headRefOid,headRefName,body,mergedAt,statusCheckRollup"])),
   { nowIso: () => systemClock.iso(), sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) },
