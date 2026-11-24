@@ -6734,6 +6734,10 @@ export async function spawnFoundryClaudeWorker(
         max_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
         output_config: { effort: selection.effort === "default" ? "medium" : selection.effort },
         ...(tools.length ? { tools } : {}),
+        // W1-T14629: a run allowed a second turn resends its whole history, so top-level automatic caching lets
+        // each later turn read the earlier ones (0.05x-0.1x input) instead of paying for them again. A one-turn
+        // call has nothing to reuse and would only pay the write premium, so its body stays as it was.
+        ...(maxTurns > 1 ? { cache_control: { type: "ephemeral" } } : {}),
       });
       const { envelope, attempt: { requestId, reservation } } = await cashRequestJson<CashBudgetAttempt>({
         args, deployment: selection.model, source: `cash ${label}`, endpoint, body,
