@@ -235,7 +235,7 @@ test("W1-T5923: ci.yml premaps each coverage shard, records its instrumented dur
   const steps = workflow.jobs["coverage-ratchet"]!.steps!;
   const run = (name: string) => steps.find((step) => step.name?.startsWith(name))?.run ?? "";
   const collect = run("Test with coverage");
-  assert.match(collect, /--select-all --shard \$\{\{ matrix\.shard \}\}\/12 --base HEAD\^1 \\\n\s+--instrumented-manifest scripts\/test-tier-coverage-manifest\.json/);
+  assert.match(collect, /--select-all --shard \$\{\{ matrix\.shard \}\}\/16 --base HEAD\^1 \\\n\s+--instrumented-manifest scripts\/test-tier-coverage-manifest\.json/);
   assert.match(collect, /--test-reporter=\.\/scripts\/test-duration-reporter\.mjs --test-reporter-destination=coverage\/test-durations\.json/);
   const stage = run("Stage this coverage shard");
   assert.match(stage, /coverage-merge-ratchet\.mjs --premap-output coverage-artifact\/raw coverage\/raw/);

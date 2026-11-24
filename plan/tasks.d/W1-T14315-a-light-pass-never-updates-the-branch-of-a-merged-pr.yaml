@@ -17,7 +17,7 @@
     - test/sweep/a-light-pass-never-updates-a-merged-pr.test.ts
     - test/a-ready-pr-main-moved-under-is-refreshed-on-the-light-pass.test.ts
     - test/a-main-merge-refresh-is-taken-only-when-it-is-worth-a-ci-run.test.ts
-  status: queued
+  status: merged
   attempts: 0
   rationale: |
     WHY: the light pass has one refresh slot, and it spends it on PRs that are already merged.

@@ -21,7 +21,7 @@
     - src/cli/commands/fix.ts # 2026-11-23: fix lane's prompt template
     - src/cli/commands/review.ts # 2026-11-23: review lane's prompt template
     - test/routing/every-assignment-names-its-risk-its-task-class-and-its-prompt-revision.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "An assignment for fix or review work on a pull request with a task records that task's risk and task class, as a build assignment does"

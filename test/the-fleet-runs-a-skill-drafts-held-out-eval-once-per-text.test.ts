@@ -48,7 +48,7 @@ const REWRITTEN = markdownWith(["Run the type checker before the tests.", "Rebui
 const OUTCOME_ONLY = markdownWith(Object.values(PROCEDURAL_STEP_TEXT));
 const HEADROOM = { billingMode: "subscription" as const, session: { percentUsed: 20 }, weekly: [{ label: "all models", percentUsed: 40 }] };
 const IDLE: ReplayIdleSignal = { liveness: { state: "up", quiet: true }, headroom: HEADROOM };
-const BUSY: ReplayIdleSignal = { liveness: { state: "up" }, headroom: HEADROOM };
+const BUSY: ReplayIdleSignal = { liveness: { state: "up" }, headroom: { ...HEADROOM, session: { percentUsed: 99 } } };
 const OPEN_FIT: SkillEvalSpendFit = { dayCostUsd: 10, unpricedRows: 0, ceilingUsd: 500 };
 const STACK = {
   pin: { provider: "claude", model: "model-under-test", effort: "high", billing: "subscription" as const, stackHash: "stack-1" },
@@ -285,7 +285,7 @@ async function assertWaits(fx: Fixture, pattern: RegExp): Promise<void> {
 test("W1-T13861 criterion 4: invariant:gates-wait-never-bypass a busy fleet waits", async () => {
   const fx = fixture();
   fx.gates.idle = BUSY;
-  await assertWaits(fx, /not in quiet mode/);
+  await assertWaits(fx, /session \(5h\) is at 99%/);
 });
 
 test("W1-T13861 criterion 4: a day whose cost plus the eval limit is above the daily ceiling waits", async () => {
@@ -325,7 +325,7 @@ test("W1-T13861 criterion 4: an input with no spend reading waits, and a new rea
   await autoEvaluateSkillDrafts(fx.deps);
   assert.equal(fx.dispatched.length, 0);
   assert.deepEqual(stepRows(fx, SKILL_EVAL_AUTO_STEPS.waiting).map((row) => String(row.reason).split(":")[0]),
-    ["spend-not-measured", "refusing to replay"]);
+    ["spend-not-measured", "refusing a skill eval"]);
 });
 
 test("W1-T13861 criterion 4: the production spend reading is the day's ledgered cost, the effective ceiling and, for cash, the allowance", () => {
@@ -436,7 +436,7 @@ test("W1-T13861 criterion 6: the operator verb still needs --confirm-spend, and 
   assert.equal(copy.state === "refused" && copy.reason, "spend-not-confirmed");
   const real = await runSkillEval({ ...base, standingApproval: SKILL_EVAL_STANDING_APPROVAL });
   assert.equal(real.state === "refused" && real.reason, "too-few-held-out-tasks", "the real value passes consent; every other check still applies");
-  const busy = await runSkillEval({ ...base, idle: BUSY, standingApproval: SKILL_EVAL_STANDING_APPROVAL });
+  const busy = await runSkillEval({ ...base, idle: { liveness: { state: "down" }, headroom: HEADROOM }, standingApproval: SKILL_EVAL_STANDING_APPROVAL });
   assert.equal(busy.state === "refused" && busy.reason, "fleet-not-idle");
 });
 

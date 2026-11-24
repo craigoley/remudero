@@ -19,7 +19,7 @@
   files:
     - src/lib/config-gardener.ts
     - test/gardeners/a-gardener-proposes-a-restart-limit-or-horizon-from-cycle-costs.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The config gardener reads the last 20 complete `daemon.restart_cycle` rows that are later than the last change of the two policy rows. With fewer than 20 rows it proposes nothing and its pass row says how many it has"

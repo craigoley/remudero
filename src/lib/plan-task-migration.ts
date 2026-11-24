@@ -171,8 +171,8 @@ export function judgeOpsCopy(size: OpsCatalogSize, original: string, publicCommi
 /**
  * W1-T14345: the same judgement for the catalog one batched COPY would produce: every copy's bytes and shard at once.
  * Besides the read catalog, the copy is judged against the catalog at the start of its UTC day (the reader anchors its
- * daily growth on the first catalog it accepts that day), so the steps of one day together never ask the catalog for
- * more growth than the reader's bound allows: the step rate follows the catalog's daily growth.
+ * daily growth on the first catalog it accepts that day). W1-T14557: growth no longer refuses a read, and a copy
+ * carries moved_from, which the reader's growth leaves out, so of the derived bounds only the heap's can refuse a batch.
  */
 export function judgeOpsBatch(size: OpsCatalogSize, originals: readonly string[], publicCommit: string, io: OpsCatalogBoundsIo = {}): void {
   let bytes = 0;
@@ -187,8 +187,10 @@ export function judgeOpsBatch(size: OpsCatalogSize, originals: readonly string[]
   if (treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) return unknown("catalog_incompatible");
   const clock = io.clock ?? systemClock;
   const produced = { shards: size.shards + originals.length, bytes: size.bytes + bytes };
+  // W1-T14557: the reader no longer refuses a catalog on its growth, and a copy is a moved record, which its growth
+  // leaves out; so a copy is refused only on what the reader still refuses: more bytes than the heap left can hold.
   for (const reference of [{ at: clock.now(), shards: size.shards, bytes: size.bytes }, ...(size.dayStart ? [size.dayStart] : [])]) {
-    if (opsCatalogBoundRefusal(produced, reference, { ...io, clock })) return unknown("catalog_incompatible");
+    if (opsCatalogBoundRefusal(produced, reference, { ...io, clock })?.reason === "heap_bytes") return unknown("catalog_incompatible");
   }
 }
 /** remudero-ops scripts/ops-gate.rb REQUIRED_KEYS without "id", NON_EMPTY_KEYS, RISKS, PROOF_PREFIXES and DEMONSTRATION_RE. */

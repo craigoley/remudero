@@ -8,8 +8,8 @@
  * under .claude/skills/.
  *
  * ONE PASS, AT MOST ONE EVAL. The pass takes the first open draft in registry order whose stored text passes the
- * W1-T13858 whole-draft check and has no eval and no claim for its sha256. It checks the gates in order: the quiet
- * fleet (replayIdleGate), then the spend fit (today's ledgered cost plus SKILL_EVAL_MAX_SPEND_USD at or under the
+ * W1-T13858 whole-draft check and has no eval and no claim for its sha256. It checks the gates in order: an up
+ * fleet with measured headroom below the limit (skillEvalCapacityGate), then the spend fit (today's ledgered cost plus SKILL_EVAL_MAX_SPEND_USD at or under the
  * effective daily cost ceiling, no unpriced rows today, and for a stack that bills cash at least that much cash
  * allowance left). A closed gate records why the draft waits and spends nothing. With every gate open it claims
  * the text on the registry entry, writes one claim row, and runs the same eval path as `rmd skill-eval`.
@@ -20,10 +20,10 @@
  */
 import { createHash } from "node:crypto";
 import { systemClock, type Clock } from "./clock.js";
-import { replayIdleGate, type ReplayIdleSignal } from "./golden-corpus.js";
+import type { ReplayIdleSignal } from "./golden-corpus.js";
 import { loadProposalRegistry, SKILL_DRAFT_ID_PREFIX, updateProposalRegistry, type Proposal, type SkillEvalAutoRecord } from "./inbox.js";
 import type { LedgerLine } from "./ledger.js";
-import { SKILL_EVAL_MAX_SPEND_USD, SKILL_EVAL_STANDING_APPROVAL } from "./skill-eval.js";
+import { SKILL_EVAL_MAX_SPEND_USD, SKILL_EVAL_STANDING_APPROVAL, skillEvalCapacityGate } from "./skill-eval.js";
 import { outcomeOnlyDraftRefusal, readSkillDraftVerdicts, workshopClosedSkillDraft } from "./skill-workshop.js";
 
 /** The two rows this pass writes; declared in ledger-steps.ts. */
@@ -124,7 +124,7 @@ export async function autoEvaluateSkillDrafts(input: SkillEvalAutoInput, evaluat
   const write = (step: string, fields: Record<string, unknown>): void =>
     input.log({ ...fields, run_id: runId, task_id: proposalId, step, draft_sha256: draftSha256 });
 
-  const idle = replayIdleGate(await input.readIdle());
+  const idle = skillEvalCapacityGate(await input.readIdle());
   const fit = idle.enabled ? input.readSpendFit?.() : undefined;
   const waitReason = idle.enabled ? spendFitRefusal(fit) : idle.reason;
   if (waitReason !== undefined) {
