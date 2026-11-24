@@ -60,6 +60,9 @@ test("W1-T14732 an unreadable progress verdict still sets no state or action", a
   const r = read(t, ["echo boom >&2", "exit 1"]);
   assert.equal(r.status, 0, r.err);
   assert.match(r.out, /^rc=0 state=\[\] action=\[\] verdict=\[\]$/m);
+  // The unreadable verdict that sets nothing is the named one, and its capture is removed with it.
+  assert.match(r.err, /verdict unreadable \(exit 1: boom\); acting as before\./);
+  assert.deepEqual(r.tmp, []);
 
   // A readable verdict is read as before, and its stderr capture is removed too.
   const ok = read(t, ["echo 'a warning' >&2", `echo '{"state":"progressing","action":"none"}'`]);
