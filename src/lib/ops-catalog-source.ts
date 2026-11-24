@@ -52,9 +52,10 @@ export function opsCatalogRefusalStage(input: unknown): OpsCatalogRefusalStage |
   }
 }
 
-// BACKSTOP: each bound below fires only on a catalog far past anything a task plan holds, and refuses it whole.
-export const OPS_CATALOG_MAX_TREE_ENTRIES = 10_000;
-export const OPS_CATALOG_MAX_BLOB_BYTES = 256 * 1024; // BACKSTOP: the W1-T9493 per-blob bound.
+// ── W1-T14638: no fixed entry-count or per-blob byte ceiling judges a catalog ──
+//
+// A catalog is never refused for how many tree entries it names or how large one shard is. What can refuse a read is
+// GitHub's own `truncated` flag, the blob SHA and UTF-8 checks, and the two bounds below, derived from measured cost.
 
 // ── W1-T14368: in place of W1-T11768's fixed shard and byte backstops, the bounds are derived from measured cost ──
 //
@@ -338,14 +339,11 @@ async function readTree(api: OpsCatalogApi, repo: string, treeSha: string, pass:
     pass.hits++;
     pass.reusedPreviousPass = true;
     counts.treeEntries += entries.length;
-    if (counts.treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) throw new Refusal("malformed");
   } else {
     pass.fetched++;
     const tree = rec(await get(api, `${repo}/git/trees/${treeSha}`));
-    if (tree.sha !== treeSha || tree.truncated !== false || !Array.isArray(tree.tree)
-      || tree.tree.length > OPS_CATALOG_MAX_TREE_ENTRIES) throw new Refusal("malformed");
+    if (tree.sha !== treeSha || tree.truncated !== false || !Array.isArray(tree.tree)) throw new Refusal("malformed");
     counts.treeEntries += tree.tree.length;
-    if (counts.treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) throw new Refusal("malformed");
     entries = tree.tree.map((raw) => {
       const e = rec(raw);
       if (typeof e.path !== "string" || typeof e.type !== "string" || typeof e.mode !== "string") throw new Refusal("malformed");
@@ -394,8 +392,11 @@ export function opsCatalogBlobCacheDir(stateDir: string, repositoryId: number): 
   return join(stateDir, "cache", "ops-blobs", String(repositoryId));
 }
 
-/** The verified blob a file holds, or undefined: no file, an unreadable one, or one failing a check (removed). */
-function readBlobFile(files: BlobFiles, blobSha: string): KeptBlob | undefined {
+/**
+ * The verified blob a file holds, or undefined: no file, an unreadable one, or one failing a check (removed). A file
+ * of more than `maxBytes` (the heap the read may spend) is never loaded: it answers undefined and is kept.
+ */
+function readBlobFile(files: BlobFiles, blobSha: string, maxBytes: number): KeptBlob | undefined {
   const path = join(files.dir, blobSha);
   let bytes: Buffer;
   let fd: number | undefined;
@@ -407,12 +408,13 @@ function readBlobFile(files: BlobFiles, blobSha: string): KeptBlob | undefined {
       throw error;
     }
     const stat = fs.fstatSync(fd);
-    // The per-blob bound applies before the read, so an oversized file is never loaded.
-    if (!stat.isFile() || stat.size > OPS_CATALOG_MAX_BLOB_BYTES) {
+    if (!stat.isFile()) {
       fs.closeSync(fd);
       fd = undefined;
       return removeBlobFile(path);
     }
+    // The derived heap bound applies before the read, so a file the heap cannot hold is never loaded.
+    if (stat.size > maxBytes) return undefined;
     bytes = fs.readFileSync(fd);
   } catch (error) {
     void error; // An unreadable file is a miss: the blob is fetched from GitHub, as with no cache.
@@ -516,7 +518,7 @@ async function readBlob(api: OpsCatalogApi, repo: string, blobSha: string, pass:
   const known = knownBlobText(api, repositoryId, blobSha);
   const previous = pass.kept.blobs.get(blobSha);
   // W1-T13970: memory first, then the state-dir file, then GitHub. A file's blob joins the api's kept blobs.
-  const filed = known === undefined && previous === undefined && pass.blobFiles ? readBlobFile(pass.blobFiles, blobSha) : undefined;
+  const filed = known === undefined && previous === undefined && pass.blobFiles ? readBlobFile(pass.blobFiles, blobSha, pass.limits.heapBytes) : undefined;
   if (filed) keepBlob(api, repositoryId, blobSha, filed);
   const kept = known ?? previous ?? filed;
   if (kept) {
@@ -531,8 +533,12 @@ async function readBlob(api: OpsCatalogApi, repo: string, blobSha: string, pass:
   const blob = rec(await get(api, `${repo}/git/blobs/${blobSha}`));
   if (blob.sha !== blobSha || blob.encoding !== "base64" || typeof blob.content !== "string") throw new Refusal("malformed");
   const encoded = blob.content.replace(/[\r\n]/g, "");
-  if (encoded.length > Math.ceil(OPS_CATALOG_MAX_BLOB_BYTES / 3) * 4
-    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) throw new Refusal("malformed");
+  // The derived heap bound judges the blob before it is decoded, so bytes the heap cannot hold are never allocated.
+  const allowed = pass.limits.heapBytes;
+  if (encoded.length > Math.ceil(allowed / 3) * 4) {
+    throw new Refusal("malformed", undefined, { reason: "heap_bytes", observed: Math.floor(encoded.length / 4) * 3, allowed });
+  }
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) throw new Refusal("malformed");
   const bytes = Buffer.from(encoded, "base64");
   counts.bytes += bytes.length;
   checkBytes(pass);
@@ -544,9 +550,8 @@ async function readBlob(api: OpsCatalogApi, repo: string, blobSha: string, pass:
   return verified.text;
 }
 
-/** The checks every kept blob passes, from GitHub or from a parent: the per-blob bound, git's blob SHA-1, strict UTF-8. */
+/** The checks every kept blob passes, from GitHub or from a parent: git's blob SHA-1 and strict UTF-8. */
 function verifiedBlob(blobSha: string, bytes: Uint8Array): KeptBlob {
-  if (bytes.length > OPS_CATALOG_MAX_BLOB_BYTES) throw new Refusal("malformed");
   if (createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex") !== blobSha) throw new Refusal("malformed");
   let text: string;
   try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
@@ -709,14 +714,12 @@ function adopt(
 let processDefaultApi: OpsCatalogApi | undefined;
 const sharedDefaultOpsCatalogApi = (): OpsCatalogApi => (processDefaultApi ??= defaultOpsCatalogApi());
 
-/** W1-T14368: an offer names at most one blob per tree entry a read admits, each pair at its longest. */
-const OFFER_HEADER_MAX_BYTES = JSON.stringify({ repositoryId: Number.MAX_SAFE_INTEGER, blobs: [] }).length
-  + OPS_CATALOG_MAX_TREE_ENTRIES * (JSON.stringify(["f".repeat(40), OPS_CATALOG_MAX_BLOB_BYTES]).length + 1);
-/** BACKSTOP: the most blob bytes one offer to a run child carries. A catalog of more is not offered; the child reads it
- *  from GitHub, where the derived bounds judge it (W1-T14368). It sizes an offer and judges no read. */
-export const OPS_CATALOG_OFFER_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024;
-/** BACKSTOP: the most a run child reads of an offer: the payload's bytes plus the header line. */
-export const OPS_CATALOG_MAX_OFFER_BYTES = OPS_CATALOG_OFFER_MAX_PAYLOAD_BYTES + OFFER_HEADER_MAX_BYTES;
+/**
+ * BACKSTOP: the most bytes one offer to a run child carries, its header line and blob bytes together. A catalog whose
+ * offer is larger is not offered; the child reads it from GitHub, where the derived bounds judge it (W1-T14368). It sizes
+ * an offer and judges no read: no count of entries and no one shard's size is bounded here (W1-T14638).
+ */
+export const OPS_CATALOG_MAX_OFFER_BYTES = 8 * 1024 * 1024;
 interface OfferedOpsCatalogBlobCounts { offered: number; kept: number; refused: number }
 
 /**
@@ -746,8 +749,7 @@ function offerHeader(line: Uint8Array): { repositoryId: number; blobs: Array<[st
     return undefined;
   }
   const { repositoryId, blobs } = (raw ?? {}) as { repositoryId?: unknown; blobs?: unknown };
-  if (typeof repositoryId !== "number" || !Number.isSafeInteger(repositoryId) || repositoryId < 1 || !Array.isArray(blobs)
-    || blobs.length > OPS_CATALOG_MAX_TREE_ENTRIES) return undefined;
+  if (typeof repositoryId !== "number" || !Number.isSafeInteger(repositoryId) || repositoryId < 1 || !Array.isArray(blobs)) return undefined;
   const pairs: Array<[string, number]> = [];
   for (const pair of blobs as unknown[]) {
     if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== "string" || !SHA.test(pair[0])
@@ -766,11 +768,11 @@ export function acceptOfferedOpsCatalogBlobs(
 ): OfferedOpsCatalogBlobCounts {
   if (!payload || payload.length > OPS_CATALOG_MAX_OFFER_BYTES) return { offered: 0, kept: 0, refused: 0 };
   const end = payload.indexOf(0x0a);
-  const header = end > 0 && end <= OFFER_HEADER_MAX_BYTES ? offerHeader(payload.subarray(0, end)) : undefined;
+  const header = end > 0 ? offerHeader(payload.subarray(0, end)) : undefined;
   if (!header) return { offered: 0, kept: 0, refused: 0 };
   const offered = header.blobs.length;
   const declared = header.blobs.reduce((sum, [, length]) => sum + length, 0);
-  if (declared > OPS_CATALOG_OFFER_MAX_PAYLOAD_BYTES || end + 1 + declared !== payload.length) return { offered, kept: 0, refused: offered };
+  if (end + 1 + declared !== payload.length) return { offered, kept: 0, refused: offered };
   let at = end + 1;
   let kept = 0;
   for (const [blobSha, length] of header.blobs) {
@@ -918,9 +920,6 @@ export function createOpsCatalogShadowSource(
 // (pruneBlobFiles after each ok read). A refused read rebuilds the accepted plan from the two, verifying every blob
 // against its sha again. Any missing or mismatched blob is no snapshot: a refusal is never read as an empty catalog.
 
-/** BACKSTOP: a binding names at most OPS_CATALOG_MAX_TREE_ENTRIES shards, each well under 200 bytes of JSON. */
-const LAST_GOOD_FILE_MAX_BYTES = 4 * 1024 * 1024;
-
 export function opsCatalogLastGoodFile(stateDir: string, repository: string): string {
   return join(stateDir, "cache", "ops-catalog-last-good", `${encodeURIComponent(repository.toLowerCase())}.json`);
 }
@@ -947,7 +946,7 @@ export type OpsCatalogLastGood =
   | { outcome: "none"; reason: OpsCatalogLastGoodMiss };
 
 /** The kept record, read through one descriptor that does not follow a link (the loadGrowth discipline). */
-function readLastGoodRecord(path: string): { record?: { repository: string; acceptedAt: number; binding: OpsCatalogBinding }; miss?: OpsCatalogLastGoodMiss } {
+function readLastGoodRecord(path: string, maxBytes: number): { record?: { repository: string; acceptedAt: number; binding: OpsCatalogBinding }; miss?: OpsCatalogLastGoodMiss } {
   let fd: number;
   try { fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK); }
   catch (error) {
@@ -956,7 +955,7 @@ function readLastGoodRecord(path: string): { record?: { repository: string; acce
   }
   try {
     const stat = fs.fstatSync(fd);
-    if (!stat.isFile() || stat.size > LAST_GOOD_FILE_MAX_BYTES) return { miss: "record_malformed" };
+    if (!stat.isFile() || stat.size > maxBytes) return { miss: "record_malformed" };
     const raw = rec(JSON.parse(fs.readFileSync(fd, "utf8")));
     const b = rec(raw.binding), blobs = rec(b.shardBlobs);
     if (raw.version !== 1 || typeof raw.repository !== "string" || !count(raw.acceptedAt)) throw new Refusal("malformed");
@@ -964,7 +963,7 @@ function readLastGoodRecord(path: string): { record?: { repository: string; acce
       || typeof b.ref !== "string" || !b.ref.startsWith("refs/heads/") || typeof b.shardTreeSha !== "string"
       || (b.shardTreeSha !== "" && !SHA.test(b.shardTreeSha))) throw new Refusal("malformed");
     const names = Object.keys(blobs);
-    if (names.length > OPS_CATALOG_MAX_TREE_ENTRIES || !names.every((n) => !n.includes("/") && isShardFile(n))) throw new Refusal("malformed");
+    if (!names.every((n) => !n.includes("/") && isShardFile(n))) throw new Refusal("malformed");
     const shardBlobs = Object.fromEntries(names.sort().map((n) => [n, sha(blobs[n])]));
     const binding: OpsCatalogBinding = { repositoryId: b.repositoryId, ref: b.ref, commit: sha(b.commit), tasksYamlBlob: sha(b.tasksYamlBlob),
       shardTreeSha: b.shardTreeSha, shardBlobs };
@@ -989,7 +988,9 @@ export async function readLastGoodOpsCatalogSnapshot(
 ): Promise<OpsCatalogLastGood> {
   const stateDir = blobStateDir(api, opts);
   if (stateDir === undefined) return { outcome: "none", reason: "no_state_dir" };
-  const read = readLastGoodRecord(opsCatalogLastGoodFile(stateDir, target.repository));
+  // The record and each blob it names are judged on the derived heap bound, never a fixed count or size (W1-T14638).
+  const heapBytes = opsCatalogHeapByteBound((opts.bounds?.heap ?? getHeapStatistics)());
+  const read = readLastGoodRecord(opsCatalogLastGoodFile(stateDir, target.repository), heapBytes);
   const record = read.record;
   if (!record) return { outcome: "none", reason: read.miss ?? "no_record" };
   if (record.repository !== target.repository.toLowerCase()) return { outcome: "none", reason: "record_malformed" };
@@ -998,8 +999,8 @@ export async function readLastGoodOpsCatalogSnapshot(
   const blobs: Array<{ label: string; text: string }> = [];
   let bytes = 0;
   for (const [label, blobSha] of [["tasks.yaml", binding.tasksYamlBlob], ...Object.entries(binding.shardBlobs).map(([n, s]) => [`tasks.d/${n}`, s])]) {
-    // readBlobFile verifies the bytes against the sha and the per-blob bound; a file failing either is removed.
-    const blob = readBlobFile(files, blobSha!);
+    // readBlobFile verifies the bytes against the sha and strict UTF-8; a file failing either is removed.
+    const blob = readBlobFile(files, blobSha!, heapBytes);
     if (!blob) return { outcome: "none", reason: "blob_missing" };
     blobs.push({ label: label!, text: blob.text });
     bytes += blob.bytes;

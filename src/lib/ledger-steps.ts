@@ -782,6 +782,28 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["runDaemon"],
     outcomes: ["started"],
   },
+  {
+    // W1-T14036: one row per proof execution of a review, so the proof phase's time is measurable.
+    step: "review.proof_execution",
+    meaning:
+      "One proof execution of a review's proof phase, on a checkout the reviewer cut. Fields: `phase` (shared with " +
+      "the phase's review.proof_phase row), `fold`, `side` (head or base), `kind` (test or grep), `proof`, `checkout`, " +
+      "`run_ms` (the run without the install wait), `install_ms` (the wait on a dependency install, 0 when the checkout " +
+      "was already primed), `start_load` (the host load at its start), `slots` (how many executions of the fold could " +
+      "run at once) and `outcome` (the executor's outcome, or error). Nothing decides on it.",
+    writer: ["proofPhaseRecorder"],
+    outcomes: ["head", "base"],
+  },
+  {
+    // W1-T14036: one row per proof phase of a review.
+    step: "review.proof_phase",
+    meaning:
+      "The end of one review's proof phase, on a checkout the reviewer cut. Fields: `phase`, `outcome` (converged, " +
+      "or not_converged when the folds ran out), `folds`, `executions`, `max_slots` and `total_ms`, the phase's " +
+      "whole time. Nothing decides on it.",
+    writer: ["proofPhaseRecorder"],
+    outcomes: ["converged", "not_converged"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never

@@ -1,15 +1,13 @@
 import { createHash } from "node:crypto";
 import { dirname, join, relative, sep } from "node:path";
 import { resolveRepoLayout } from "./repo-layout.js";
-import {
-  OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_TREE_ENTRIES, opsCatalogBoundRefusal, type OpsCatalogBoundsIo,
-} from "./ops-catalog-source.js";
+import { opsCatalogBoundRefusal, type OpsCatalogBoundsIo } from "./ops-catalog-source.js";
 import { parse as parseYaml } from "yaml";
 import { defaultGitRunnerAsync, readBlobsAtRefAsync, type Plan, type Task } from "./plan.js";
 import { createPlanRevisionStore } from "./plan-revision-store.js";
 import { dispatchOrder } from "./drain.js";
 import { taskIdFromRunBranch, creditsByAnchoredTrailer } from "./status.js";
-import { ghJsonAsync } from "./github-transport.js";
+import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS, ghJsonAsync } from "./github-transport.js";
 import { RmdError } from "./errors.js";
 
 type Json = Record<string, unknown>;
@@ -19,18 +17,31 @@ export type CatalogOriginal = { path: string; text: string; blob: string; single
 type Original = CatalogOriginal;
 /** One GraphQL read: the CLI's own GitHub read, or a caller's pinned reader (W1-T13680). */
 export type MigrationGraphqlReader = (query: string) => Promise<unknown>;
-const graphqlRead: MigrationGraphqlReader = query => ghJsonAsync(["api", "graphql", "-f", `query=${query}`], undefined, undefined, { fresh: true });
-// BACKSTOP: refuse a runaway explicit preview whole, never truncate a population into absence.
-const MAX_CANDIDATE_LOOKUPS = 32;
-/** The page the open-PR read takes of each public pull request's files: a pull request of more files reads UNKNOWN. */
-const OPEN_PR_FILES_PAGE = 100;
 /**
- * W1-T14345 PRIMARY CONTROL: the most tasks one move step carries, derived from the readers' own limits: each batched task costs one
- * merge-credit lookup, and the step's public REMOVE pull request must stay readable by the open-PR files page. The ops
- * gate's own per-pull-request limit (50 records, remudero-ops scripts/ops-gate.rb) is above both. The catalog's room
- * (judgeOpsBatch) may stop a batch sooner.
+ * W1-T14714: a rate-limited read waits and is made again, for as long as GitHub keeps refusing on rate: the wait is the
+ * refusal's retry-after when it names one, else the transport's refusal floor doubled per refusal. Any other failure throws.
  */
-export const MOVE_BATCH_BOUND = Math.min(MAX_CANDIDATE_LOOKUPS, OPEN_PR_FILES_PAGE);
+export function withRateLimitBackoff(read: MigrationGraphqlReader, sleep: (ms: number) => Promise<void> = ms => new Promise(done => setTimeout(done, ms))): MigrationGraphqlReader {
+  return async query => {
+    for (let attempt = 0; ; attempt++) {
+      try { return await read(query); }
+      catch (error) {
+        if (classifyGhLimitFailure(error) === undefined) throw error;
+        const after = defaultGhRetryAfterSeconds(error);
+        await sleep(after !== undefined ? after * 1000 : DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS * 2 ** attempt);
+      }
+    }
+  };
+}
+const graphqlRead: MigrationGraphqlReader = withRateLimitBackoff(query => ghJsonAsync(["api", "graphql", "-f", `query=${query}`], undefined, undefined, { fresh: true }));
+/** The page GitHub serves of a connection; the open-PR read follows every next page of the list and of each PR's files. */
+const GRAPHQL_PAGE = 100;
+/**
+ * W1-T14714 (operator ruling 2026-11-24, "remove all three caps"): no count holds a batch. A batch ends only where the
+ * caller's fits() says its copy or remove pull request would pass GitHub's own body limit, or where the catalog's room
+ * (judgeOpsBatch) ends it.
+ */
+export type BatchFits = (batch: ReadonlyArray<{ id: string; path: string; blob: string }>) => boolean;
 /** W1-T14345 (operator ruling 2026-11-22): an open record is queued or blocked; merged and done records stay as history. */
 const OPEN_STATUSES: ReadonlySet<string> = new Set(["queued", "blocked"]);
 // The measured public corpus is 34,444,886 bytes. Leave 16 MiB for framing below the shared 64 MiB Git buffer.
@@ -92,14 +103,13 @@ export async function catalog(root: string, commit: string, external = false):
     if (!m) return unknown("catalog_unreadable");
     const size = Number(m[2]), path = m[3]!;
     declaredBytes += size;
-    // Refuse known oversized inputs before materializing their payloads. The private per-blob limit is the
-    // actual reader's exported contract; the catalog's own size is judged on the copy (W1-T14368).
+    // Refuse known oversized inputs before materializing their payloads. No per-blob limit applies: the catalog's
+    // own size is judged on the copy by the reader's derived bounds (W1-T14368, W1-T14638).
     if (!Number.isSafeInteger(size) || declaredBytes > MAX_CATALOG_BYTES) return unknown("catalog_unreadable");
-    if (external && size > OPS_CATALOG_MAX_BLOB_BYTES) return unknown("catalog_incompatible");
     const shard = path.startsWith(shardDir) && !path.slice(shardDir.length).includes("/") && /\.ya?ml$/.test(path);
     return path === monolith || shard ? { path, blob: m[1]!, size, shard } : unknown("catalog_unreadable");
   });
-  if (!files.some(f => f.path === monolith) || files.length > 10_000) return unknown("catalog_unreadable");
+  if (!files.some(f => f.path === monolith)) return unknown("catalog_unreadable");
   let size: OpsCatalogSize | undefined;
   if (external) {
     // The API reader counts each visited immediate tree, including entries outside the selected
@@ -110,7 +120,6 @@ export async function catalog(root: string, commit: string, external = false):
     let treeEntries = 0;
     for (const tree of trees) {
       treeEntries += (await git(["ls-tree", "-z", tree])).split("\0").filter(Boolean).length;
-      if (treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) return unknown("catalog_incompatible");
     }
     size = { shards: files.filter(file => file.shard).length, bytes: declaredBytes, treeEntries, shardDir: hasShards };
   }
@@ -151,12 +160,8 @@ export function judgeOpsBatch(size: OpsCatalogSize, originals: readonly string[]
   for (const original of originals) {
     const indent = /\n([ \t]+)\S/.exec(original)?.[1] ?? "";
     const copyBytes = Buffer.byteLength(original) + Buffer.byteLength(`${indent}moved_from: remudero@${publicCommit}\n`);
-    if (copyBytes > OPS_CATALOG_MAX_BLOB_BYTES) return unknown("catalog_incompatible");
     bytes += copyBytes;
   }
-  // Each copy adds one shard-tree entry, and the shard tree's own entry in the plan tree when the batch starts one.
-  const treeEntries = size.treeEntries + originals.length + (size.shardDir ? 0 : 1);
-  if (treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) return unknown("catalog_incompatible");
   const produced = { shards: size.shards + originals.length, bytes: size.bytes + bytes };
   if (opsCatalogBoundRefusal(produced, io)) return unknown("catalog_incompatible");
 }
@@ -247,10 +252,13 @@ const prFields = "number state headRefName body mergeCommit{oid}";
 /** W1-T13680: the receipt line a mover's ops copy pull request carries; a closed unmerged one is a refused move. */
 export const MOVE_COPY_RECEIPT = "Remudero-Move-Copy:";
 const moverFields = "number state headRefName body repository{databaseId nameWithOwner}";
+const FILES_PAGE = "totalCount pageInfo{hasNextPage endCursor} nodes{path}";
+const OPEN_ORDER = "states:OPEN,orderBy:{field:CREATED_AT,direction:ASC}";
+const OPEN_PAGE = `totalCount pageInfo{hasNextPage endCursor} nodes{number state headRefName headRefOid body files(first:${GRAPHQL_PAGE}){${FILES_PAGE}}}`;
 function query(o: Options, taskId?: string, control?: Json, movers = false): string {
   const [owner, name] = o.publicRepo.split("/"), [opsOwner, opsName] = o.opsRepo.split("/");
   const pin = "databaseId nameWithOwner defaultBranchRef{name target{oid}}";
-  const open = `open:pullRequests(states:OPEN,first:100,orderBy:{field:CREATED_AT,direction:ASC}){totalCount pageInfo{hasNextPage endCursor} nodes{number state headRefName headRefOid body files(first:${OPEN_PR_FILES_PAGE}){totalCount pageInfo{hasNextPage} nodes{path}}}}`;
+  const open = `open:pullRequests(${OPEN_ORDER},first:${GRAPHQL_PAGE}){${OPEN_PAGE}}`;
   const merged = `merged:pullRequests(states:MERGED,first:100,orderBy:{field:UPDATED_AT,direction:DESC}){totalCount pageInfo{hasNextPage endCursor} nodes{${prFields}}}`;
   const search = (alias: string, term: string) => `${alias}:search(query:${JSON.stringify(`repo:${o.publicRepo} is:pr is:merged ${term}`)},type:ISSUE,first:100){issueCount pageInfo{hasNextPage} nodes{... on PullRequest{${prFields} repository{databaseId nameWithOwner}}}}`;
   const moves = (alias: string, repo: string, term: string) => `${alias}:search(query:${JSON.stringify(`repo:${repo} is:pr ${term}`)},type:ISSUE,first:100){issueCount pageInfo{hasNextPage} nodes{... on PullRequest{${moverFields}}}}`;
@@ -275,6 +283,40 @@ function page(value: unknown): { nodes: Json[]; total: number; next: boolean; cu
   const p = object(value), info = object(p.pageInfo);
   if (!Array.isArray(p.nodes) || !Number.isSafeInteger(p.totalCount) || Number(p.totalCount) < p.nodes.length || typeof info.hasNextPage !== "boolean" || !(info.endCursor === null || typeof info.endCursor === "string" || info.endCursor === undefined)) return unknown("incomplete_evidence");
   return { nodes: p.nodes.map(object), total: Number(p.totalCount), next: info.hasNextPage, cursor: typeof info.endCursor === "string" ? info.endCursor : null };
+}
+/**
+ * W1-T14714: the whole open-PR read. The first page rides the preview query; every next page of the open list, and of
+ * each open pull request's files, is read by cursor until GitHub says there is none. What comes back is one page with no
+ * next, so {@link openSnapshot} judges it exactly as before. A read that answers with errors, or with no next cursor
+ * while saying there is a next page, is UNKNOWN.
+ */
+async function wholeOpen(o: Options, first: unknown, read: MigrationGraphqlReader): Promise<Json> {
+  const [owner, name] = o.publicRepo.split("/");
+  const repo = (inner: string) => `query MigrationOpenPage{public:repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}){${inner}}}`;
+  const ask = async (inner: string): Promise<Json> => {
+    const raw = object(await read(repo(inner)));
+    if (raw.errors !== undefined) return unknown("api_unreadable");
+    return object(object(raw.data).public);
+  };
+  const after = (cursor: unknown) => typeof cursor === "string" ? cursor : unknown("incomplete_open_prs");
+  const rows = (connection: Json): unknown[] => Array.isArray(connection.nodes) ? connection.nodes : unknown("incomplete_open_prs");
+  let list = object(first);
+  const nodes: Json[] = rows(list).map(object);
+  while (object(list.pageInfo).hasNextPage === true) {
+    list = object((await ask(`open:pullRequests(${OPEN_ORDER},first:${GRAPHQL_PAGE},after:${JSON.stringify(after(object(list.pageInfo).endCursor))}){${OPEN_PAGE}}`)).open);
+    nodes.push(...rows(list).map(object));
+  }
+  for (const pr of nodes) {
+    let files = object(pr.files);
+    const paths: unknown[] = [...rows(files)];
+    while (object(files.pageInfo).hasNextPage === true) {
+      const next = await ask(`pullRequest(number:${Number(pr.number)}){files(first:${GRAPHQL_PAGE},after:${JSON.stringify(after(object(files.pageInfo).endCursor))}){${FILES_PAGE}}}`);
+      files = object(object(next.pullRequest).files);
+      paths.push(...rows(files));
+    }
+    pr.files = { totalCount: object(pr.files).totalCount, pageInfo: { hasNextPage: false, endCursor: null }, nodes: paths };
+  }
+  return { totalCount: object(first).totalCount, pageInfo: { hasNextPage: false, endCursor: null }, nodes };
 }
 function openSnapshot(value: unknown): Json[] {
   const p = page(value);
@@ -341,7 +383,7 @@ export async function readState(o: Options, primaryRefs: Map<string, string>, pr
   const numbers = new Set<number>();
   for (const pr of recent.nodes) { credited(pr); if (numbers.has(Number(pr.number))) return unknown("incomplete_merge_credit"); numbers.add(Number(pr.number)); }
   return { repositoryId, opsId, publicBranch: publicPin.branch, opsBranch: opsPin.branch, publicLive: publicPin.live, opsLive: opsPin.live,
-    open: openSnapshot(primary.open), recent: recent.nodes, mergedTotal: recent.total,
+    open: openSnapshot(await wholeOpen(o, primary.open, read.reader ?? graphqlRead)), recent: recent.nodes, mergedTotal: recent.total,
     ...(id && control ? { trailer: searchRows(data.byTrailer, repositoryId, o.publicRepo), branch: searchRows(data.byBranch, repositoryId, o.publicRepo), control: searchRows(data.control, repositoryId, o.publicRepo),
       refusedMoves: moverRows(data.refusedMoves, opsId, o.opsRepo, ["CLOSED", "MERGED"]) } : {}),
     ...(movers ? { publicMoves: moverRows(data.publicMoves, repositoryId, o.publicRepo, ["OPEN"]), opsMoves: moverRows(data.opsMoves, opsId, o.opsRepo, ["OPEN"]) } : {}) };
@@ -453,10 +495,11 @@ export interface MigrationSelection {
 
 /** The selection the preview verb prints (W1-T13680 exports it for `rmd move-task`): pinned catalogs, ownership, the
  *  merge-credit search and a stable re-read. It throws {@link PreviewUnknown} on any unread or changed evidence.
- *  W1-T14345: it fills a batch of up to {@link MOVE_BATCH_BOUND} open tasks, oldest filing first, that the ops catalog
- *  has room for; a batch of one is selected exactly as before. */
+ *  W1-T14345: it fills a batch of open tasks, oldest filing first, that the ops catalog has room for; a batch of one is
+ *  selected exactly as before. W1-T14714: no count ends the batch; {@link BatchFits} ends it where a pull request would
+ *  pass GitHub's body limit. */
 export async function selectPlanTaskMigration(
-  o: Options, reader: MigrationGraphqlReader = graphqlRead, bounds: OpsCatalogBoundsIo = {},
+  o: Options, reader: MigrationGraphqlReader = graphqlRead, bounds: OpsCatalogBoundsIo = {}, fits?: BatchFits,
 ): Promise<MigrationSelection> {
   const publicRefs = await refs(o.publicRoot, o.publicRepo), opsRefs = await refs(o.opsRoot, o.opsRepo);
   const pub = await catalog(o.publicRoot, o.publicCommit), ops = await catalog(o.opsRoot, o.opsCommit, true);
@@ -494,8 +537,6 @@ export async function selectPlanTaskMigration(
       !publicRefs.has(`refs/rmd-id/${task.id}`) ? "reservation_absent" : undefined;
     if (unmovable) { refused.push({ id: task.id, reason: unmovable }); continue; }
     if (!control) return unknown("merge_credit_control_unreadable");
-    // A full lookup budget ends the batch; with nothing selected it is still a runaway, refused whole.
-    if (lookups === MAX_CANDIDATE_LOOKUPS) { if (batch.length === 0) return unknown("merge_credit_budget_exhausted"); break; }
     lookups++;
     const checked = await readState(o, publicRefs, opsRefs, { id: task.id, control, reader });
     const carrying = [...carried, carriedOf(task, original.path)];
@@ -508,9 +549,11 @@ export async function selectPlanTaskMigration(
       try { judgeOpsBatch(ops.size, [...batch.map(member => String(member.yaml)), original.text], o.publicCommit, bounds); }
       catch (error) { if (batch.length === 0 || !(error instanceof PreviewUnknown)) throw error; break; }
     }
+    // W1-T14714: a member whose receipts would carry a pull request past GitHub's body limit ends the batch; never alone.
+    const member = { id: task.id, path: original.path, blob: original.blob };
+    if (fits && batch.length > 0 && !fits([...batch.map(m => ({ id: String(m.id), path: String(m.sourcePath), blob: String(m.sourceBlob) })), member])) break;
     carried.push(carriedOf(task, original.path));
     batch.push({ id: task.id, sourcePath: original.path, sourceCommit: o.publicCommit, sourceBlob: original.blob, yaml: original.text, originalBytesBase64: Buffer.from(original.text).toString("base64"), prospectiveMovedFrom: `remudero@${o.publicCommit}` });
-    if (batch.length >= MOVE_BATCH_BOUND) break;
   }
   // Independently re-read selected ownership, both source heads and each selected task's API credit before answering.
   const finalPublic = await refs(o.publicRoot, o.publicRepo), finalOps = await refs(o.opsRoot, o.opsRepo);

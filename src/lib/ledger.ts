@@ -972,6 +972,9 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   "review.claim_repeated",
   // PR-13355: the stalled-stage backstop (sweep.ts) reads it; a review refusing at a head is no live owner.
   "review.semantic_setup_refused",
+  // W1-T13380: the sweep retries a reviewer start failure once and holds a repeated one (sweep.ts reviewStartFailures).
+  "review.semantic_incomplete",
+  "review.ran_from_healed_tree",
   // W1-T1017: W1-T322's ships-unwired advisory floor line. The deciding reader is not code — it is
   // the operator adjudicating W1-T323's advisory-versus-blocking flip against this exact corpus.
   // Why: rotation was dropping 95%+ of these rows (W1-T1017; docs/forensics/ledger.md).

@@ -31,7 +31,7 @@ import { parse as parseYaml, parseDocument } from "yaml";
 import { systemClock, type Clock } from "./clock.js";
 import { MOVED_FROM_VALUE, defaultGitRunnerAsync, withoutOneMovedFromLine } from "./plan.js";
 import {
-  MOVE_COPY_RECEIPT, PreviewUnknown, catalog, liveHeadJudge, migrationOptions, readState, refs, selectPlanTaskMigration, unknown,
+  MOVE_COPY_RECEIPT, PreviewUnknown, type BatchFits, catalog, liveHeadJudge, migrationOptions, readState, refs, selectPlanTaskMigration, unknown,
   type CatalogOriginal, type MigrationGraphqlReader, type MigrationOptions, type PreviewState,
 } from "./plan-task-migration.js";
 import { planPrPreflightAllows, planPrPreflightAtCommitAsync, ratifyPrCreateRestArgs, type PlanPrPreflightResult } from "./plan-pr-emitter.js";
@@ -64,6 +64,8 @@ export interface MovePorts {
   clock?: Clock;
   /** W1-T14345: the readings the ops catalog's derived bounds take; the live ones by default. */
   bounds?: OpsCatalogBoundsIo;
+  /** W1-T14714: the longest pull request body a batch may make; GitHub's own limit by default. */
+  bodyLimit?: number;
   print?: (line: string) => void;
 }
 
@@ -93,6 +95,30 @@ function stepOf(members: Planned[]): PlannedStep {
   const [subject, prose] = what[first.step];
   return { step: first.step, repository: first.repository, members, title: `chore(plan): ${subject}`,
     message: `chore(plan): ${subject}\n\n${prose}\n\n${members.map(lines).join("")}` };
+}
+
+/** PRIMARY CONTROL (GitHub's, not ours): GitHub refuses a pull request body longer than this: "body is too long (maximum is 65536 characters)". */
+export const GITHUB_PULL_REQUEST_BODY_LIMIT = 65_536;
+/** A step's pull request body: its commit message after the subject. */
+const bodyOf = (step: PlannedStep): string => step.message.slice(step.message.indexOf("\n\n") + 2);
+type ReceiptOptions = { publicCommit: string; opsRepo: string; opsCommit: string };
+/** The receipt lines one member adds to a COPY step. */
+const copyReceipt = (o: ReceiptOptions, id: string, path: string, blob: string, reservation: string) =>
+  `${MOVE_COPY_RECEIPT} ${id} path=${path} blob=${blob} from=remudero@${o.publicCommit}\n${MOVE_RESERVATION_TRAILER} ${id} ${reservation}\n`;
+/** The receipt lines one member adds to a REMOVE step. */
+const removeReceipt = (o: ReceiptOptions, id: string, path: string, blob: string, reservation: string) =>
+  `${MOVED_TO_TRAILER} ${o.opsRepo}@${o.opsCommit} ${id} path=${path} blob=${blob}\n${MOVE_RESERVATION_TRAILER} ${id} ${reservation}\n`;
+/**
+ * W1-T14714: a batch fits when both pull requests it makes, the ops COPY and the public REMOVE of exactly those records,
+ * stay within GitHub's body limit. The remove is sized on today's ops commit, which has the length its real one will.
+ */
+export function batchFits(o: ReceiptOptions, publicRefs: ReadonlyMap<string, string>, limit = GITHUB_PULL_REQUEST_BODY_LIMIT): BatchFits {
+  return batch => (["copy", "remove"] as const).every(step => {
+    const receipt = step === "copy" ? copyReceipt : removeReceipt;
+    const members = batch.map((m): Planned => ({ step, id: m.id, repository: step === "copy" ? "ops" : "public", path: m.path, title: "", evidence: {},
+      message: `\n\n${receipt(o, m.id, m.path, m.blob, publicRefs.get(`refs/rmd-id/${m.id}`) ?? "0".repeat(40))}` }));
+    return bodyOf(stepOf(members)).length <= limit;
+  });
 }
 
 /** W1-T14592: the one proof-discrimination line a moved shard's already-passing proof produces (plan-pr-emitter.ts sortShardProof). */
@@ -230,7 +256,7 @@ function plannedConverge(o: MigrationOptions, state: PreviewState, publicRefs: M
   return { step: "remove", id, repository: "public", path: pub.path, blob: bound.blob, evidence: { ...evidence, reservation },
     title: `chore(plan): move ${id} to the ops catalog`,
     message: `chore(plan): move ${id} to the ops catalog\n\nThe ops catalog holds this record byte for byte plus its moved_from line.\n\n` +
-      `${MOVED_TO_TRAILER} ${o.opsRepo}@${o.opsCommit} ${id} path=${pub.path} blob=${bound.blob}\n${MOVE_RESERVATION_TRAILER} ${id} ${reservation}\n` };
+      removeReceipt(o, id, pub.path, bound.blob, reservation) };
 }
 
 /** The whole transaction, one step per run. Exits 0 when the read completed (a step, a wait, a hold or nothing to do),
@@ -296,7 +322,7 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
         reservationUnchanged: event.reservation !== undefined && publicRefs.get(`refs/rmd-id/${event.id}`) === event.reservation }));
     if (step !== undefined) planned = step;
     else {
-      const selection = await selectPlanTaskMigration(o, reader, ports.bounds);
+      const selection = await selectPlanTaskMigration(o, reader, ports.bounds, batchFits(o, publicRefs, ports.bodyLimit));
       if (selection.candidate === undefined) return report(completed.length > 0 ? "complete" : "none", { completed, refused: selection.refused.length });
       const members: Planned[] = [];
       for (const candidate of selection.batch) {
@@ -308,7 +334,7 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
           evidence: { sourceCommit: o.publicCommit, sourceBlob: candidate.sourceBlob, reservation },
           title: `chore(plan): move ${id} into the ops catalog`,
           message: `chore(plan): move ${id} into the ops catalog\n\nThe public record, byte for byte, plus one moved_from line after its id line.\n\n` +
-            `${MOVE_COPY_RECEIPT} ${id} path=${path} blob=${String(candidate.sourceBlob)} from=remudero@${o.publicCommit}\n${MOVE_RESERVATION_TRAILER} ${id} ${reservation}\n` });
+            copyReceipt(o, id, path, String(candidate.sourceBlob), reservation) });
       }
       planned = stepOf(members);
     }
@@ -340,7 +366,7 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
       const commit = await commitOn(root, parent, tree, planned.message);
       // A one-task step names its task, which the review requires of a single receipt; a batch's branch names its shape.
       const branch = `${MOVE_BRANCH_PREFIX}${batched ? "batch" : lead.id}-${clock.now()}`;
-      const body = `${planned.message.slice(planned.message.indexOf("\n\n") + 2)}`;
+      const body = bodyOf(planned);
       const verdict = await (ports.preflight ?? defaultPreflight)(root, commit, { title: planned.title, body, headRef: branch,
         ...(planned.repository === "ops" ? { codeRoot: o.publicRoot, bodyProofRoot: "plan" as const } : {}) });
       const allowed = planPrPreflightAllows(verdict, { lane: "move-task", branch });

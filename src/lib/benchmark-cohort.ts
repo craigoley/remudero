@@ -1125,7 +1125,8 @@ function deriveSnapshot(
   return snapshot;
 }
 
-/** One source per ordinary pass by default; a failed projection never changes daemon work. */
+/** W1-T14727: every changed source in one pass by default (no count decides how many); `maxSources` is a test
+ * seam only. A failed projection never changes daemon work. */
 export async function runBenchmarkCohortPass(
   stateDir: string,
   opts: { maxSources?: number; nowIso?: string; onLiveWatermark?: () => void;
@@ -1214,8 +1215,10 @@ function snapshotCutoff(files: readonly TaskCaseFile[]): string | { reason: "emp
 
 async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof runBenchmarkCohortPass>[1]>,
   io: CheckpointIO): Promise<BenchmarkCohortPassResult> {
-  const maxSources = opts.maxSources ?? 1;
-  if (!Number.isInteger(maxSources) || maxSources < 1) throw new TypeError("maxSources must be a positive integer");
+  const maxSources = opts.maxSources;
+  if (maxSources !== undefined && (!Number.isInteger(maxSources) || maxSources < 1)) {
+    throw new TypeError("maxSources must be a positive integer");
+  }
   const readIdentity: { identity: string | null } = { identity: null };
   const checkpoint = readCheckpoint(stateDir, io, readIdentity);
   // A pass that stops before joining leaves no earlier join on disk; the rewrite yields to a newer index.
@@ -1286,7 +1289,7 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
   let scannedSources = 0;
   let auditedSourceBytes = 0;
   const scannedNames = new Set<string>();
-  for (const entry of changed.slice(0, maxSources)) {
+  for (const entry of maxSources === undefined ? changed : changed.slice(0, maxSources)) {
     const rotations = current.filter((candidate) => candidate.form !== "live");
     const index = rotations.findIndex((candidate) => candidate.name === entry.name);
     const precedingRotation = entry.form === "live" ? rotations.at(-1)?.name : rotations[index - 1]?.name;
@@ -1379,8 +1382,6 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
     snapshot, scannedSources, pendingSources: 0, tailPendingBytes, checkpointBytes };
 }
 
-const BENCHMARK_COHORT_DAEMON_MAX_SOURCES = 4;
-
 export interface BenchmarkCohortCadenceDeps {
   stateDir: () => string;
   clock?: Clock;
@@ -1408,7 +1409,7 @@ function benchmarkCohortInputs(stateDir: string): BenchmarkCohortInputs | { erro
       return [basename(entry.path), stat.size, stat.mtimeMs];
     });
     const cases = statSync(stateCaseFileSnapshotPath(stateDir), { throwIfNoEntry: false });
-    return { config: JSON.stringify([BENCHMARK_COHORT_VERSION, stateDir, BENCHMARK_COHORT_DAEMON_MAX_SOURCES]),
+    return { config: JSON.stringify([BENCHMARK_COHORT_VERSION, stateDir]),
       sealed: JSON.stringify(rotations), live: live ? { ino: live.ino, size: live.size } : null,
       caseFiles: JSON.stringify(cases ? [cases.ino, cases.size, cases.mtimeMs] : null) };
   } catch (error) {
@@ -1498,14 +1499,14 @@ export function runBenchmarkCohortPassOffLoop(
 
 /** W1-T9845: the pass the daemon hook runs by default, off the daemon loop. */
 export const benchmarkCohortDaemonPass = (stateDir: string): Promise<BenchmarkCohortPassResult> =>
-  runBenchmarkCohortPassOffLoop(stateDir, { maxSources: BENCHMARK_COHORT_DAEMON_MAX_SOURCES, caseFilesFromState: true });
+  runBenchmarkCohortPassOffLoop(stateDir, { caseFilesFromState: true });
 
 /** Direct, internal maintenance entrypoint: no new public `rmd` verb or model worker. */
 export async function runBenchmarkCohortIdlePass(
   stateDir: string, run: typeof runBenchmarkCohortPass = runBenchmarkCohortPass,
 ): Promise<number> {
   try {
-    const result = await run(stateDir, { maxSources: 4, caseFilesFromState: true });
+    const result = await run(stateDir, { caseFilesFromState: true });
     console.log(JSON.stringify({ event: "benchmark_cohort.idle_pass", state: result.state,
       case_file_join: result.caseFileJoin ?? null,
       scanned_sources: result.scannedSources, pending_sources: result.pendingSources,
@@ -1529,7 +1530,7 @@ export async function runBenchmarkVerifiedOverlayPass(
 ): Promise<number> {
   try {
     const parsed = loadCaseFileSnapshot(caseFilePath, beforeRead);
-    const result = await runBenchmarkCohortPass(stateDir, { maxSources: 4, caseFiles: parsed });
+    const result = await runBenchmarkCohortPass(stateDir, { caseFiles: parsed });
     console.log(JSON.stringify({ event: "benchmark_cohort.verified_overlay", state: result.state,
       verified_task_outcome: result.snapshot.verifiedTaskOutcome,
       // W1-T13867: each cohort row's own outcome counts, so the analyst can score each model by result.
