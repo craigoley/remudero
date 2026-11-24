@@ -54,3 +54,21 @@ test("W1-T14547 a restart cycle says whether it handed off", () => {
   assert.equal(q?.standby_ready_ms, null);
   assert.equal(q?.yield_to_first_tick_ms, null);
 });
+
+// The live order, 2026-11-24 12:12-12:15Z: the old daemon yields, the successor writes daemon.boot once it holds the
+// lock, and only at its first loop tick does it write daemon.standby_promoted, beside daemon.boot_phases.
+test("W1-T14634 a handoff counts when the promoted row follows the successor boot", () => {
+  const rows = cold().filter((r) => r.step !== "daemon.boot_phases");
+  rows.push(row(305, "daemon.handoff_yielded", { standby_run_id: "new", children_left_running: [] }),
+    row(560, "daemon.standby_promoted", { prepare_ms: 9_600, promote_wait_ms: 503, lock_wait_ms: 0, takeover_ms: 163_048 }),
+    row(561, "daemon.boot_phases", {}));
+  const cycle = restartCycleRow(rows, epoch + 400);
+  assert.equal(cycle?.handed_off, true);
+  assert.equal(cycle?.standby_ready_ms, 9_600);
+  assert.equal(cycle?.yield_to_first_tick_ms, 256, "yield at 305, first tick at 561");
+
+  // A promoted row from a LATER lifetime is not this cycle's handoff.
+  const later = cold().concat([row(305, "daemon.handoff_yielded", { standby_run_id: "new" }),
+    row(900, "daemon.boot", { run_id: "later" }), row(950, "daemon.standby_promoted", { prepare_ms: 1 })]);
+  assert.equal(restartCycleRow(later, epoch + 400)?.handed_off, false);
+});
