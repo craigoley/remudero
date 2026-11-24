@@ -55,6 +55,9 @@ test("W1-T14655: a new ci job with its gate-posture row is not entangled", () =>
 });
 
 test("W1-T14655: a gate-posture edit outside its declaration or deleting a row stays entangled", () => {
+  // The contrast pair: the confined, add-only row is carved out, so each variant below is entangled BECAUSE of
+  // the one thing it changes, never because the posture file was not a registry at all.
+  assert.equal(verdict(newJobDiff([[POSTURE_CTX, [POSTURE_ROW]]])).entangled, false, "the confined add-only row is the carved-out baseline");
   // Logic beside the registry, in the same file, is not a registration.
   const unconfined = verdict(newJobDiff([[POSTURE_CTX, [POSTURE_ROW]], ["export function censusGatePostures(", ["+  return { ...census, missingDeclarations: [] };"]]]));
   assert.equal(unconfined.entangled, true, "a hunk outside GATE_POSTURE_DECLARATIONS is still a mixture");
