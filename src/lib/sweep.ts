@@ -422,11 +422,13 @@ import {
   noPrVerdictRowsFromLedger,
   readTaskShard,
   readTaskShardAtMain,
+  taskShardQuery,
   taskAwaitsAmendment,
   type RefusalAmendmentResult,
   type RefusalCandidate,
 } from "./refusal-amendment.js";
 import { landTaskFilesAsync, landingIdentity, stagedTaskFiles, type LandTaskFilesOpts } from "./feedback-landing.js";
+import { readOpsCheckoutAtMain } from "./ops-checkout-at-main.js";
 import { PARKED_PR_REMEDY_STEP, openEscalationRelease, actOnParkedPr, designHoldCoverage, heldFollowUpOf, heldFollowUpParents, heldFollowUpsOfTaskText, parkedPrFacts, parkedPrRemedy, planPreflightRefusalChecks, planRoundExhaustedRemedy, readParkedPrShard, remedyStalledCriterion, standDownHoldRemedied, standDownHoldRemedy, takeParkedPrRemedy, type HeldFollowUp, type ParkedPrHost } from "./parked-pr-remedy.js";
 
 /** W1-T6434: the bounded, already-scrubbed view of a preserved fix-owner patch. */
@@ -6041,8 +6043,20 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const resolved = await taskFileRepository(taskId, (reloadPlanForFix() ?? plan).byId);
         const unknownCatalog = resolved.outcome === "resolved" && resolved.task === undefined &&
           planDestinationRepository(join(config.root, "state")).outcome !== "named";
-        return readParkedPrShard(unknownCatalog ? { outcome: "unreadable", reason: "destination-unreadable" } : resolved,
-          (checkoutDir) => readTaskShard(checkoutDir, taskId));
+        const resolution = unknownCatalog ? { outcome: "unreadable" as const, reason: "destination-unreadable" } : resolved;
+        if (resolution.outcome !== "resolved" || resolution.task === undefined || resolution.target === publicTaskRepository) {
+          return readParkedPrShard(resolution, (checkoutDir) => readTaskShard(checkoutDir, taskId));
+        }
+        // W1-T14617: an ops task file is read at the ops checkout's origin/main, never its boot-time working tree.
+        const { target } = resolution;
+        try {
+          const [first] = (await readOpsCheckoutAtMain(target.checkoutDir, taskShardQuery(target.checkoutDir, taskId),
+            planRepairGitAsync(target.checkoutDir))).files;
+          return readParkedPrShard(resolution, () => first === undefined ? undefined : { relPath: first[0], text: first[1].text });
+        } catch (error) {
+          return { outcome: "refused", target,
+            reason: `the task file cannot be read at origin/main in ${target.owner}/${target.repo}: ${String((error as Error)?.message ?? error)}` };
+        }
       },
       // Task ids are one global sequence: the id is minted in the public repository, held by the target's landing branch.
       // W1-T13830: the reservation is awaited (W1-T13183), so its git runs off the daemon loop.
