@@ -11824,6 +11824,9 @@ components:
                   served:
                     type: boolean
                     description: Projected by this serve with its state dir mounted; false is "recreate serve to mount it".
+                  mountAction:
+                    type: string
+                    description: "Present only when registered and not served: the operator action that mounts it."
                   liveness:
                     type: object
                     required: [state]

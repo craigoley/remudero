@@ -19418,18 +19418,20 @@ async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProducti
       // allSettled and failure propagation; this callback never replaces that promise.
     });
   };
+  // Every record path this run's ops landing carries bytes for (pin-derived, see `sources`).
+  const opsCarriedPaths = new Set<string>();
   const opsLanding = planReconcileLanding(target.checkoutDir, () => ({
     targetRepository: { owner: target.owner, repo: target.repo }, landingOwner: "measurement-cadence", log: deps.log,
-    planPrPreflight: async (sha, pr) => {
-      // A candidate based on a newer main must never overwrite it with bytes read from our older pin.
-      // Later main changes are left to the ordinary three-way PR merge and its required gates.
-      if ((await hostWorktreeGitAsync(target.checkoutDir, ["rev-parse", `${sha}^`])).trim() !== pin) throw new Error("ops-status-source-moved");
+    // A candidate based on a newer main must never overwrite it with bytes read from our older pin:
+    // W1-T14574 accepts a newer parent only when no commit since the pin touched a carried record.
+    // Later main changes are left to the ordinary three-way PR merge and its required gates.
+    planPrPreflight: preflightOnUnmovedRecords(args => hostWorktreeGitAsync(target.checkoutDir, args), pin, opsCarriedPaths, async (sha, pr) => {
       return planPrPreflightAtCommitAsync(target.checkoutDir, sha, {
         ...pr,
         codeRoot: deps.checkoutRoot,
         bodyProofRoot: "plan",
       }, { log: deps.log });
-    },
+    }),
   }), deps.land);
   const opsById = ops.byId;
   return {
@@ -19471,6 +19473,7 @@ async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProducti
           const inputs = [...byPath].map(([relPath, ids]) => ({ relPath,
             content: mergedCatalogStatusBytes(sources.get(relPath)!, ids, relPath === "plan/tasks.yaml") }));
           if (inputs.length) {
+            for (const input of inputs) opsCarriedPaths.add(input.relPath);
             opsLanding.land(inputs); retainSettlement(opsLanding.settled()); landed += batch.length;
           }
         } catch (error) {
@@ -45089,7 +45092,7 @@ function commandSyntax(name: string): string {
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
 import { reconcilePlan, reconcileShardStatus, revertedRequeues, type RevertedRequeue, type ReconcileSummary } from "./lib/plan-reconcile.js";
-import { PLAN_RECONCILE_LANDING_BODY_BUDGET, PLAN_RECONCILE_LANDING_RECORD_LIMIT, takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
+import { PLAN_RECONCILE_LANDING_BODY_BUDGET, PLAN_RECONCILE_LANDING_RECORD_LIMIT, preflightOnUnmovedRecords, takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";

@@ -169,8 +169,13 @@ test("W1-T12207 criterion 4: the real claim CLI and default ops transport reserv
   assert.equal(git(["ls-remote", origin, `refs/rmd-dispatch/${ID}`]).trim(), held);
   writeFileSync(join(publicRoot, "plan", "tasks.yaml"), "[]\n"); git(["add", "plan/tasks.yaml"]); git(["commit", "-m", "fixture restored public plan"]); git(["push", "origin", "main"]);
   shim.addRoute({ when: `api repos/${REPOSITORY}`, stderr: "HTTP 503 temporary fixture outage", exit: 1 });
-  assert.throws(() => execFileSync(process.execPath, claimArgs, { cwd: publicRoot, env, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] }), /task catalog unreadable/);
-  assert.equal(git(["ls-remote", origin, `refs/rmd-dispatch/${ID}`]).trim(), held, "an unknown ops source never changes the claim");
+  // W1-T14564 (operator ruling 2026-11-23): a 503 ops outage is served from the last good snapshot the first claim's
+  // read kept, so the claim reaches the ref check (the task is already held) instead of refusing the catalog.
+  const beforeOutage = shim.calls().length;
+  assert.throws(() => execFileSync(process.execPath, claimArgs, { cwd: publicRoot, env, encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] }),
+    (error: Error & { stderr?: string }) => /already claimed/.test(String(error.stderr)) && !/task catalog unreadable/.test(String(error.stderr)));
+  assert.ok(shim.calls().length > beforeOutage, "positive control: the claim did try the refused ops read");
+  assert.equal(git(["ls-remote", origin, `refs/rmd-dispatch/${ID}`]).trim(), held, "a served snapshot never changes the claim");
 });
 
 test("W1-T12207 criterion 5: unreadable public destination or ops evidence never becomes an absent task or a body fallback", async t => {

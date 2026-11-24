@@ -4964,6 +4964,8 @@ export interface components {
           prefix: string;
           /** Projected by this serve with its state dir mounted; false is "recreate serve to mount it". */
           served: boolean;
+          /** Present only when registered and not served: the operator action that mounts it. */
+          mountAction?: string;
           /** A band over the newest projected `daemon.*` row: `down` past the fleet's stale-heartbeat bound (or a quiet-mode pulse's, whichever is longer), `unknown` before any. */
           liveness: {
             state: "up" | "down" | "unknown";
