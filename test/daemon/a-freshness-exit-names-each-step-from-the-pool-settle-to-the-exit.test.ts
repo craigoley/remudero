@@ -1,4 +1,4 @@
-// W1-T14684: a decided restart's freshness exit names, in phases_ms.settle, how long each step took from the lane
+// W1-T14702: a decided restart's freshness exit names, in phases_ms.settle, how long each step took from the lane
 // pool's settle to the exit. The 2026-11-24 16:07Z hand-over lost 8 min 40 s there and no row said where.
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -22,7 +22,7 @@ function deferred<T>() {
 }
 const result = (id: string): RunResult => ({ taskId: id, runId: id, merged: false, verdict: "no_pr", costUsd: 0 });
 
-test("W1-T14684 a decided restart's exit names each step from the pool settle to the exit", async () => {
+test("W1-T14702 a decided restart's exit names each step from the pool settle to the exit", async () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14684-`));
   scratch.push(root);
   const planPath = join(root, "tasks.yaml");
