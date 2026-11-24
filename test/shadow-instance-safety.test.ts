@@ -1639,7 +1639,10 @@ test("private registry selection preserves owner holds and private-safe boundari
             model: "default", effort: "default", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
             modelUsage: {}, compactionEvents: [], qualitySuspect: false } satisfies WorkerResult;
         },
-        containmentExec: async token => ({ transcript: `touch ../${token}.txt: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }),
+        // W1-T14731: a run's synchronous work (git, here a sleep) blocks the event loop past the registry read's
+        // 1500 ms budget. A binding still being read then times out, and the arm reports `timeout`, not the revision.
+        containmentExec: async token => { execFileSync("sleep", ["1.7"]);
+          return { transcript: `touch ../${token}.txt: Operation not permitted`, outsideWriteCreated: false, insideWriteCreated: true, costUsd: 0 }; },
         isolationExec: async () => ({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 }),
         runReview: async () => {
           writeFileSync(selected, selectedText("live"));
