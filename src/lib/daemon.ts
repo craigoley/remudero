@@ -1793,7 +1793,7 @@ export interface DaemonDeps {
   clearKick?: (taskId: string, repo?: string) => void;
   /** W1-T10799: the repo-scoped kick markers for a MANAGED TARGET with no daemon of its own, which only the core daemon
    *  may service. Never offered to {@link pendingKicks}' consumer, so a foreign marker cannot dispatch a core task. */
-  pendingTargetJobs?: () => Array<DaemonKick & { repo: string }>;
+  pendingTargetJobs?: () => Array<DaemonKick & { repo: string; requestedAt?: string }>;
   /** W1-T10799: runs ONE such job to its terminal verdict, through the maintained drain. The daemon passes its own deps so
    *  the job meets every governor this daemon applies, and awaits it: one job occupies the one reserved lane. A `held` or
    *  `resumed` outcome keeps the marker for a later tick; `ended` and `refused` closed it. */
@@ -5472,6 +5472,31 @@ export async function runDaemon(
   const hasChildTask = (id: string): boolean => childTaskIds().includes(id);
   // W1-T10000: a run waiting for its child's admission is out-of-process work too; the restart abandons it.
   const pendingChildren = new Map<string, RunChildPending & { sinceMs: number }>();
+  // W1-T14576: a child leaves `children` only inside the lane pool, which a waiting native target job never reaches, so the
+  // target-job gate counts the children whose run has not settled. Watching a child never consumes or reorders its outcome.
+  const watchedChildren = new WeakSet<AdoptedRunChild>();
+  const settledChildren = new WeakSet<AdoptedRunChild>();
+  const unsettledChildCount = (): number => {
+    for (const child of children.values()) {
+      if (watchedChildren.has(child)) continue;
+      watchedChildren.add(child);
+      const settle = () => { settledChildren.add(child); };
+      void Promise.resolve(child.settled).then(settle, settle);
+    }
+    return [...children.values()].filter((child) => !settledChildren.has(child)).length;
+  };
+  // W1-T14576: a waiting target job's `target_job.capacity_deferred` row, at most once a minute per job, with its age.
+  const targetJobDeferrals = new Map<string, { firstMs: number; loggedMs?: number }>();
+  const logTargetJobDeferral = (job: DaemonKick & { repo: string; requestedAt?: string }, extra: Record<string, unknown>): void => {
+    const nowMs = daemonClock.now();
+    const seen = targetJobDeferrals.get(job.origin) ?? { firstMs: nowMs };
+    targetJobDeferrals.set(job.origin, seen);
+    if (seen.loggedMs !== undefined && nowMs - seen.loggedMs < TARGET_JOB_DEFERRAL_LOG_INTERVAL_MS) return;
+    seen.loggedMs = nowMs;
+    const requestedMs = job.requestedAt === undefined ? Number.NaN : Date.parse(job.requestedAt);
+    const sinceMs = Number.isFinite(requestedMs) ? Math.min(requestedMs, seen.firstMs) : seen.firstMs;
+    log("target_job.capacity_deferred", { task: job.taskId, origin: job.origin, repo: job.repo, ...extra, age_ms: Math.max(0, nowMs - sinceMs) });
+  };
   const pauseInFlightCensus = (): { units: PauseInFlightUnit[]; count: number; oldestAgeMs: number | null; unobserved: string[] } => {
     const nowMs = daemonClock.now();
     const units: PauseInFlightUnit[] = [];
@@ -8554,14 +8579,18 @@ export async function runDaemon(
         await sleepUntilSweepWake(pollIntervalMs);
         continue;
       }
+      for (const origin of targetJobDeferrals.keys()) if (!pending.some((job) => job.origin === origin)) targetJobDeferrals.delete(origin);
       const [job, ...waiting] = pending;
       if (job) {
-        const laneTarget = enforcedLaneTarget(children.size, tickQueueAdmission?.wipLimit);
+        // W1-T14576: the job takes a FREE lane under the same limit core's own dispatch uses, never only an empty daemon.
+        const inFlight = unsettledChildCount();
+        const laneTarget = enforcedLaneTarget(inFlight, tickQueueAdmission?.wipLimit);
         const wipBudget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount: deps.openPrCount?.(), queueAdmission: tickQueueAdmission });
-        if (children.size > 0 || laneTarget < 1 || wipBudget < 1) {
-          log("target_job.capacity_deferred", { task: job.taskId, origin: job.origin, repo: job.repo, in_flight: children.size });
+        if (Math.min(laneCount, wipBudget, laneTarget) - inFlight < 1) {
+          logTargetJobDeferral(job, { in_flight: inFlight });
         } else {
-          for (const other of waiting) log("target_job.capacity_deferred", { task: other.taskId, origin: other.origin, repo: other.repo, reason: "lane reserved by another job" });
+          targetJobDeferrals.delete(job.origin);
+          for (const other of waiting) logTargetJobDeferral(other, { reason: "lane reserved by another job" });
           let closed = false;
           let charged = false;
           try { closed = ["ended", "refused"].includes((await deps.runTargetJob(job, deps, () => {
@@ -10181,6 +10210,9 @@ export type BoundedTargetJobOutcome =
   | { state: "ended" | "refused"; reason: string; replayed: boolean }
   | { state: "held" | "resumed"; reason: string };
 
+/** W1-T14576: the shortest gap between two `target_job.capacity_deferred` rows for one waiting job. */
+export const TARGET_JOB_DEFERRAL_LOG_INTERVAL_MS = 60_000;
+
 /** The drain stop reasons that mean the core daemon's own governors declined, not that the task is unrunnable. */
 const CAPACITY_STOPS: ReadonlySet<StopReason> = new Set<StopReason>([
   "headroom_exhausted", "headroom_degraded", "cost_governor_deferred", "queue_governor_deferred", "memory_governor_deferred",
@@ -10242,6 +10274,12 @@ export async function runBoundedTargetJob(kick: BoundedTargetJobKick, deps: Boun
   if (!task) return refuse(prior, "unknown task id");
   if (task.repo.toLowerCase() !== repo.toLowerCase()) return refuse(prior, "task repository conflicts with verified target");
   const identity = { owner: admission.owner, planRevision: planSha(synced.plan.tasks) };
+  // W1-T14576: the target's dispatch claim is the one its own instance takes too. A held claim means another runner owns
+  // the task, so this job closes rather than spending beside it; an unreadable claim is never free. Run-task's atomic
+  // claim reservation still refuses a race that starts after this read.
+  const claim = await deps.claimHeld(taskId, repo);
+  if (claim === undefined) return held("dispatch claim unreadable", "target_job.unknown");
+  if (claim) return refuse(prior, `${taskId} is already claimed on ${repo}; the claim's runner owns the task`);
 
   // One task, depth 1, max 1, one lane: the job can never re-enter the target plan's other tasks.
   const opts = applyCuratedSelection({ ...baseOpts, laneCount: 1, wipLimit: 1 }, { taskIds: [taskId], depth: 1 });
