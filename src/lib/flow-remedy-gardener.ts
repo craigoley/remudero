@@ -451,8 +451,9 @@ function inventoryOf(records: readonly LedgerRecord[], tasks: readonly CiFrictio
 /** What an episode puts up for a remedy: all of an eligible episode, else only the charges a CI-lesson hand-off names
  *  (W1-T14140). One aggregate-red episode can span heads where different checks read red; the hand-off owns only its own. */
 function eligibleSlice(e: Episode): Episode[] {
-  if (excludedFromFlowRemedy(e)) return [];
-  if (e.eligible) return [e];
+  if (e.eligible && !excludedFromFlowRemedy(e)) return [e];
+  // A CI-lesson hand-off is the evidence that the owner's rounds did not clear the check (W1-T14140): the lesson reopened
+  // three times. So the charges it names stay eligible even when the owner acted inside the episode (W1-T13524).
   const handed = e.charges.filter(c => c.handedOff);
   return handed.length ? [{ ...e, charges: handed }] : [];
 }

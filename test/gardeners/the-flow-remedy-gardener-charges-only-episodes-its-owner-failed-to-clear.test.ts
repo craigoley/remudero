@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CI_FRICTION_EFFECT_MAX_WINDOW_MS } from "#src/lib/ci-friction-remedy.js";
 import { fixedClock } from "#src/lib/clock.js";
-import { draftShard, FLOW_LADDER, flowGardenSpec, type PrOutcome } from "#src/lib/flow-remedy-gardener.js";
+import { CI_LESSON_HANDOFF_STEP, draftShard, FLOW_LADDER, flowGardenSpec, type PrOutcome } from "#src/lib/flow-remedy-gardener.js";
 import { PR_BLOCKER_OWNERS, type PrBlocker } from "#src/lib/pr-blocker.js";
 import { measureRemedy, prHoursMetric } from "#src/lib/remedy-effect.js";
 import type { LedgerRecord } from "#src/lib/retro.js";
@@ -64,7 +64,12 @@ test("W1-T13524 criterion 1: owner fix, review and acted observations suppress a
     { step: "ci_learning.ladder_handoff", gate: "check", red_heads: [{ pr: 4, sha: "abcdef1" }] },
     { step: "review.posted", pr_url: url(4), ts: iso(-3) },
   ]);
-  assert.equal(handoff.next, undefined);
+  // A CI-lesson hand-off is not an eligible-looking episode: it is the CI learning ladder's third reopen (W1-T14140),
+  // the record that the owner's rounds did not clear the check. Its charges file as on origin/main; the episode's own
+  // arms stay closed, so the rationale counts it under the hand-off.
+  assert.equal(handoff.next?.price.key, "own-red:handed off");
+  assert.deepEqual(handoff.next?.charges.map(charge => charge.handedOff), [true]);
+  assert.equal(handoff.next?.eligibilityCounts?.["CI hand-off"], 1);
 });
 
 test("W1-T13524 criterion 2: terminal observations, pending waits and held drafts never qualify", () => {
@@ -148,4 +153,14 @@ test("W1-T13524 criterion 4: the existing unowned, terminal failure and open-age
   ]);
   assert.equal(inventory(unownedRows).ladder[0]?.state, "skipped");
   assert.ok(result.next);
+
+  // A CI-lesson hand-off (W1-T14140) still files the charges it names when the owner acted in the episode: the lesson
+  // reopened three times, so the owner's rounds did not clear the check.
+  const handoff: LedgerRecord = { step: CI_LESSON_HANDOFF_STEP, gate: "ci-gate", red_heads: [{ pr: 36, sha: "red36" }] };
+  const actedRed = [
+    disposed(36, -4, "own-red", "required checks red", { acted: true, head_sha: "red36" }),
+    disposed(36, -2, "awaiting-arm", "armed"),
+  ];
+  assert.deepEqual(inventory([handoff, ...actedRed]).candidates.map(price => [price.key, price.prs]), [["own-red:required checks red", 1]]);
+  assert.deepEqual(inventory(actedRed).candidates, [], "without the hand-off the owner-acted episode files nothing");
 });
