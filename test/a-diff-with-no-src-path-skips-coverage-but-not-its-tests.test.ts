@@ -193,6 +193,14 @@ function slowShard(files: string[]) {
     { stubNode: true },
   );
   assert.equal(ran.status, 0, ran.all);
+  // W1-T11263: the bash 3.2 gate reads the files of exactly the --run slow invocation this shard runs.
+  const tierArgs = /^npm run --silent test:slow -- (.+)$/m.exec(ran.calls)?.[1];
+  if (tierArgs !== undefined) {
+    assert.equal(/ bash32-slow-files\.txt (.+)$/m.exec(ran.calls)?.[1], `--run slow ${tierArgs}`,
+      "the bash 3.2 probe and the slow tier run get identical arguments");
+    assert.equal(JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")).scripts["test:slow"],
+      "node scripts/test-tier-manifest.mjs --run slow", "test:slow is the --run slow invocation the probe mirrors");
+  }
   return { cls: plan.outputs.class, installs, slowRun: /npm run --silent test:slow -- --shard 1\/2 --base origin\/main/.test(ran.calls) };
 }
 

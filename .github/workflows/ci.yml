@@ -238,7 +238,8 @@ jobs:
       # W1-T11263: every job that can run test/selected-registry-shell-consumers.test.ts restores or builds the
       # pinned bash 3.2 and exports RMD_TEST_BASH32_REQUIRED=1, under which an UNMEASURED 3.2 leg fails the suite.
       # RESTORE ONLY (actions/cache/restore): these jobs run PR code and download artifacts, so they must never
-      # write the cache (CodeQL cache poisoning). A miss builds from the sha-verified tarball and saves nothing.
+      # write the cache (CodeQL cache poisoning). A miss builds from the sha-verified tarball, only in a shard
+      # whose selected files include the suite (see the provisioner below), and saves nothing.
       - name: Restore the pinned bash 3.2 build (W1-T11263)
         id: bash32-cache
         if: ${{ steps.admission.outputs.setup != 'false' }}
@@ -246,15 +247,22 @@ jobs:
         with:
           path: ${{ runner.temp }}/bash32
           key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}
-      - name: Build the pinned bash 3.2 from GNU source on a cache miss and export RMD_TEST_BASH32 (W1-T11263)
-        env:
-          BASH32_NEEDED: ${{ steps.admission.outputs.setup != 'false' }}
-          BASH32_CACHE_HIT: ${{ steps.bash32-cache.outputs.cache-hit }}
+      - name: Stage the pinned bash 3.2 provisioner (W1-T11263)
+        # Writes $RUNNER_TEMP/bash32-provision.sh, byte-identical in every job. The step that runs this shard's
+        # tests calls it with the exact file list it runs, so only a shard that runs
+        # test/selected-registry-shell-consumers.test.ts builds bash 3.2 and exports RMD_TEST_BASH32(_REQUIRED).
         run: |
+          cat > "$RUNNER_TEMP/bash32-provision.sh" <<'BASH32_PROVISION'
+          # W1-T11263: bash32-provision.sh <the test files this shard runs> <env file to write>
           set -euo pipefail
+          LIST="$1"
+          ENV_FILE="$2"
+          SUITE="test/selected-registry-shell-consumers.test.ts"
           OUT="$RUNNER_TEMP/bash32"
-          if [ "$BASH32_NEEDED" = "true" ]; then
-            if [ "$BASH32_CACHE_HIT" != "true" ]; then
+          [ -f "$LIST" ] || { echo "::error::W1-T11263: no selected test-file list at ${LIST}."; exit 1; }
+          : > "$ENV_FILE"
+          if grep -qxF "$SUITE" "$LIST"; then
+            if [ ! -x "$OUT/bash" ]; then
               SRC="$RUNNER_TEMP/bash32-src"
               mkdir -p "$SRC" "$OUT"
               curl --fail --silent --show-error --location --retry 3 --output "$SRC/bash-3.2.tar.gz" https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz
@@ -273,12 +281,12 @@ jobs:
               echo "::error::W1-T11263: $OUT/bash reports '${VERSION}', not bash 3.2."
               exit 1
             fi
-            echo "W1-T11263: RMD_TEST_BASH32=$OUT/bash (${VERSION})."
-            echo "RMD_TEST_BASH32=$OUT/bash" >> "$GITHUB_ENV"
-            echo "RMD_TEST_BASH32_REQUIRED=1" >> "$GITHUB_ENV"
+            echo "W1-T11263: this shard runs ${SUITE}; RMD_TEST_BASH32=$OUT/bash (${VERSION})."
+            printf 'export RMD_TEST_BASH32=%q RMD_TEST_BASH32_REQUIRED=1\n' "$OUT/bash" > "$ENV_FILE"
           else
-            echo "W1-T11263: this job runs no tests for this event and diff class, so no bash 3.2 is built."
+            echo "W1-T11263: this shard does not run ${SUITE}, so no bash 3.2 is built."
           fi
+          BASH32_PROVISION
       - name: Typecheck
         # §5 TIER 2, quality gate 4/4 (W1-T98): this step is TS-strict's actual enforcement. A
         # strict-mode violation anywhere in src/**/test/** fails it and blocks merge via ci-gate.
@@ -445,6 +453,12 @@ jobs:
               if [ "${{ matrix.shard }}" = "1" ]; then
                 echo "W1-T3191 fast-lane: candidate enumeration FAILED or was empty — shard 1 owns the FULL suite fallback."
                 echo "- plan-reading shard summary: candidate_count=0, assigned_count=all, predicted_duration_ms=unknown, fallback=full-suite, shard=1/8" >> "$GITHUB_STEP_SUMMARY"
+                # W1-T11263: npm run test:ci runs every test/**/*.test.ts file.
+                if [ -f "${RUNNER_TEMP:-}/bash32-provision.sh" ]; then
+                  find test -type f -name '*.test.ts' > bash32-all-suites.txt
+                  bash "${RUNNER_TEMP}/bash32-provision.sh" bash32-all-suites.txt "${RUNNER_TEMP}/bash32.env" || exit 1
+                  . "${RUNNER_TEMP}/bash32.env"
+                fi
                 npm run test:ci
                 exit $?
               fi
@@ -551,6 +565,11 @@ jobs:
           echo "$SUMMARY"
           echo "- W1-T3191 fast-lane: ran **${ASSIGNED_COUNT} of ${COUNT}** candidates (${COUNT} of ${TOTAL} repository suites are in the conservative set); ${SUMMARY#test-tier-manifest: }" >> "$GITHUB_STEP_SUMMARY"
           sed 's/^/    /' assigned-plan-reading-suites.txt >> "$GITHUB_STEP_SUMMARY"
+          # W1-T11263: --run-candidates below runs exactly the files --select-candidates assigned above.
+          if [ -f "${RUNNER_TEMP:-}/bash32-provision.sh" ]; then
+            bash "${RUNNER_TEMP}/bash32-provision.sh" assigned-plan-reading-suites.txt "${RUNNER_TEMP}/bash32.env" || exit 1
+            . "${RUNNER_TEMP}/bash32.env"
+          fi
           RMD_TEST_DURATION_OUTPUT="${RUNNER_TEMP}/test-duration/shard-${{ matrix.shard }}.json"
           export RMD_TEST_DURATION_OUTPUT
           set +e
@@ -999,15 +1018,22 @@ jobs:
         with:
           path: ${{ runner.temp }}/bash32
           key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}
-      - name: Build the pinned bash 3.2 from GNU source on a cache miss and export RMD_TEST_BASH32 (W1-T11263)
-        env:
-          BASH32_NEEDED: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
-          BASH32_CACHE_HIT: ${{ steps.bash32-cache.outputs.cache-hit }}
+      - name: Stage the pinned bash 3.2 provisioner (W1-T11263)
+        # Writes $RUNNER_TEMP/bash32-provision.sh, byte-identical in every job. The step that runs this shard's
+        # tests calls it with the exact file list it runs, so only a shard that runs
+        # test/selected-registry-shell-consumers.test.ts builds bash 3.2 and exports RMD_TEST_BASH32(_REQUIRED).
         run: |
+          cat > "$RUNNER_TEMP/bash32-provision.sh" <<'BASH32_PROVISION'
+          # W1-T11263: bash32-provision.sh <the test files this shard runs> <env file to write>
           set -euo pipefail
+          LIST="$1"
+          ENV_FILE="$2"
+          SUITE="test/selected-registry-shell-consumers.test.ts"
           OUT="$RUNNER_TEMP/bash32"
-          if [ "$BASH32_NEEDED" = "true" ]; then
-            if [ "$BASH32_CACHE_HIT" != "true" ]; then
+          [ -f "$LIST" ] || { echo "::error::W1-T11263: no selected test-file list at ${LIST}."; exit 1; }
+          : > "$ENV_FILE"
+          if grep -qxF "$SUITE" "$LIST"; then
+            if [ ! -x "$OUT/bash" ]; then
               SRC="$RUNNER_TEMP/bash32-src"
               mkdir -p "$SRC" "$OUT"
               curl --fail --silent --show-error --location --retry 3 --output "$SRC/bash-3.2.tar.gz" https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz
@@ -1026,12 +1052,12 @@ jobs:
               echo "::error::W1-T11263: $OUT/bash reports '${VERSION}', not bash 3.2."
               exit 1
             fi
-            echo "W1-T11263: RMD_TEST_BASH32=$OUT/bash (${VERSION})."
-            echo "RMD_TEST_BASH32=$OUT/bash" >> "$GITHUB_ENV"
-            echo "RMD_TEST_BASH32_REQUIRED=1" >> "$GITHUB_ENV"
+            echo "W1-T11263: this shard runs ${SUITE}; RMD_TEST_BASH32=$OUT/bash (${VERSION})."
+            printf 'export RMD_TEST_BASH32=%q RMD_TEST_BASH32_REQUIRED=1\n' "$OUT/bash" > "$ENV_FILE"
           else
-            echo "W1-T11263: this job runs no tests for this event and diff class, so no bash 3.2 is built."
+            echo "W1-T11263: this shard does not run ${SUITE}, so no bash 3.2 is built."
           fi
+          BASH32_PROVISION
       - name: Select the merge group's suites (W1-T5940 — the same selection ci-shard makes)
         env:
           GROUP_BASE: ${{ github.event.merge_group.base_sha }}
@@ -1061,11 +1087,22 @@ jobs:
           fi
           RMD_TEST_DURATION_OUTPUT="${RUNNER_TEMP}/test-duration/slow.json"
           export RMD_TEST_DURATION_OUTPUT
+          # W1-T11263: the files one --run slow invocation runs, read through test-tier-manifest's own main() with the
+          # same arguments and a spawn that records instead of running; each call below sits on the line above its run.
+          bash32_for_slow_run() {
+            node --input-type=module -e 'const m = await import(process.cwd() + "/scripts/test-tier-manifest.mjs"); const files = new Set(); const env = { ...process.env }; delete env.RMD_TEST_DURATION_OUTPUT; const spawn = (cmd, args = []) => { for (const a of args) if (typeof a === "string" && a.endsWith(".test.ts")) files.add(a); return { status: 0, stdout: "", stderr: "", signal: null }; }; m.main(process.argv.slice(2), { spawn, env, log: () => {} }); (await import("node:fs")).writeFileSync(process.argv[1], [...files].join("\n") + "\n");' bash32-slow-files.txt "$@"
+            if [ -f "${RUNNER_TEMP:-}/bash32-provision.sh" ]; then
+              bash "${RUNNER_TEMP}/bash32-provision.sh" bash32-slow-files.txt "${RUNNER_TEMP}/bash32.env" || exit 1
+              . "${RUNNER_TEMP}/bash32.env"
+            fi
+          }
           if [ "${{ steps.plan-reading.outputs.class }}" = "PUSH" ]; then
             # W1-T4396: main's push lane. One bounded failed-file retry, as the fast shards get.
             echo "W1-T4396: push to main — running the slow tier."
+            bash32_for_slow_run --run slow --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base HEAD --retry
             node scripts/test-tier-manifest.mjs --run slow --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base HEAD --retry
           else
+            bash32_for_slow_run --run slow --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base "origin/${GITHUB_BASE_REF}"
             npm run --silent test:slow -- --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base "origin/${GITHUB_BASE_REF}"
           fi
       - name: Upload slow-tier duration evidence (structured Node test events, W1-T3302)
@@ -1978,22 +2015,29 @@ jobs:
           fi
           npx playwright install chromium
       # W1-T11263: the same pinned bash 3.2 as the ci job's identical steps, which say why. This job
-      # admits no step condition (W1-T5844), so the restore always runs and the build reads BASH32_NEEDED.
+      # admits no step condition (W1-T5844), so the restore always runs; the test step gates the build.
       - name: Restore the pinned bash 3.2 build (W1-T11263)
         id: bash32-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bash32
           key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}
-      - name: Build the pinned bash 3.2 from GNU source on a cache miss and export RMD_TEST_BASH32 (W1-T11263)
-        env:
-          BASH32_NEEDED: ${{ steps.classify.outputs.class == 'SOURCE' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
-          BASH32_CACHE_HIT: ${{ steps.bash32-cache.outputs.cache-hit }}
+      - name: Stage the pinned bash 3.2 provisioner (W1-T11263)
+        # Writes $RUNNER_TEMP/bash32-provision.sh, byte-identical in every job. The step that runs this shard's
+        # tests calls it with the exact file list it runs, so only a shard that runs
+        # test/selected-registry-shell-consumers.test.ts builds bash 3.2 and exports RMD_TEST_BASH32(_REQUIRED).
         run: |
+          cat > "$RUNNER_TEMP/bash32-provision.sh" <<'BASH32_PROVISION'
+          # W1-T11263: bash32-provision.sh <the test files this shard runs> <env file to write>
           set -euo pipefail
+          LIST="$1"
+          ENV_FILE="$2"
+          SUITE="test/selected-registry-shell-consumers.test.ts"
           OUT="$RUNNER_TEMP/bash32"
-          if [ "$BASH32_NEEDED" = "true" ]; then
-            if [ "$BASH32_CACHE_HIT" != "true" ]; then
+          [ -f "$LIST" ] || { echo "::error::W1-T11263: no selected test-file list at ${LIST}."; exit 1; }
+          : > "$ENV_FILE"
+          if grep -qxF "$SUITE" "$LIST"; then
+            if [ ! -x "$OUT/bash" ]; then
               SRC="$RUNNER_TEMP/bash32-src"
               mkdir -p "$SRC" "$OUT"
               curl --fail --silent --show-error --location --retry 3 --output "$SRC/bash-3.2.tar.gz" https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz
@@ -2012,12 +2056,12 @@ jobs:
               echo "::error::W1-T11263: $OUT/bash reports '${VERSION}', not bash 3.2."
               exit 1
             fi
-            echo "W1-T11263: RMD_TEST_BASH32=$OUT/bash (${VERSION})."
-            echo "RMD_TEST_BASH32=$OUT/bash" >> "$GITHUB_ENV"
-            echo "RMD_TEST_BASH32_REQUIRED=1" >> "$GITHUB_ENV"
+            echo "W1-T11263: this shard runs ${SUITE}; RMD_TEST_BASH32=$OUT/bash (${VERSION})."
+            printf 'export RMD_TEST_BASH32=%q RMD_TEST_BASH32_REQUIRED=1\n' "$OUT/bash" > "$ENV_FILE"
           else
-            echo "W1-T11263: this job runs no tests for this event and diff class, so no bash 3.2 is built."
+            echo "W1-T11263: this shard does not run ${SUITE}, so no bash 3.2 is built."
           fi
+          BASH32_PROVISION
       - name: Fetch the newest nightly test impact map for the shadow selector (W1-T6107)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -2159,6 +2203,11 @@ jobs:
           if ! grep -q . coverage-test-files.txt; then
             echo "coverage-ratchet: duration-balanced test selection returned no files; refusing an empty coverage shard."
             exit 1
+          fi
+          # W1-T11263: the exact list this shard runs.
+          if [ -f "${RUNNER_TEMP:-}/bash32-provision.sh" ]; then
+            bash "${RUNNER_TEMP}/bash32-provision.sh" coverage-test-files.txt "${RUNNER_TEMP}/bash32.env" || exit 1
+            . "${RUNNER_TEMP}/bash32.env"
           fi
           mapfile -t COVERAGE_TEST_FILES < coverage-test-files.txt
           mkdir -p coverage/raw
