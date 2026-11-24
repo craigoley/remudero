@@ -63,7 +63,15 @@ export interface DeployWorthChange {
   /** W1-T14360: the task ids this commit's own `Remudero-Task:` lines name, read from its body, never its subject.
    *  Absent when it names none or could not be read. */
   tasks?: readonly string[];
+  /** W1-T12230: what the commit asks of a restart, from the freshness reading (self-sync.ts `classifyAdvanceCommit`).
+   *  Absent when the reading did not class it, which counts as `loop`. */
+  changeClass?: FreshnessChangeClass;
 }
+
+/** W1-T12230 — `reviewer`: a path a review's verdict depends on; `loop`: code the daemon loop loads; `worker_only`:
+ *  src/ or scripts/ that only a worker loads, from its own fresh worktree. */
+export type FreshnessChangeClass = "reviewer" | "loop" | "worker_only";
+export const FRESHNESS_CHANGE_CLASSES: readonly FreshnessChangeClass[] = ["reviewer", "loop", "worker_only"];
 
 export interface DeployWorthVerdict {
   score: DeployImpactScore;
@@ -361,6 +369,10 @@ export const FRESHNESS_DECISION_STEP = "daemon.freshness_decision";
  * any other material advance; the self-path list, the self-scoped commit test and #11861's declaration weighing are gone.
  */
 export function freshnessAdvanceWorth(change: DeployWorthChange): DeployWorthVerdict {
+  // W1-T12230: a worker gets a fresh worktree and scripts/ is read per call, so a restart delivers it nothing.
+  if (change.changeClass === "worker_only") {
+    return { score: 0, reason: "worker-only change: no daemon process loads it, so a restart delivers nothing", source: "deterministic" };
+  }
   // B1 (2026-10-17): an image input is NOT full weight here. A daemon process restart reruns the mounted checkout on
   // the image it already has, so it cannot deliver a rebuilt image; the recycle does (deployer.ts).
   return sourceDeployWorth(change);
@@ -378,6 +390,41 @@ export interface FreshnessDecision {
   stallPressure?: number;
   pressure: number;
   state: DeployRestartPressureState;
+  /** W1-T12230: the count of the advance's commits in each class (an unclassed commit counts as `loop`). */
+  changeClasses?: Record<FreshnessChangeClass, number>;
+  /** W1-T12230: the horizon of the staleness part that set `agePressure`. */
+  horizonMs?: number;
+}
+
+/** W1-T12230: the count of commits in each class; a commit the reading did not class is `loop`. */
+export function countFreshnessChangeClasses(changes: readonly DeployWorthChange[] | undefined): Record<FreshnessChangeClass, number> {
+  const counts: Record<FreshnessChangeClass, number> = { reviewer: 0, loop: 0, worker_only: 0 };
+  for (const change of changes ?? []) counts[change.changeClass ?? "loop"]++;
+  return counts;
+}
+
+/** W1-T12230 — the staleness pressure and the horizon that set it. A `reviewer` commit's part runs from its first read
+ *  against `stalenessHorizonMs`, a `loop` commit's against `loopOnlyHorizonMs`; the larger part wins. A reading with no
+ *  commit list has one part, from the first stale reading, as before; one of only `worker_only` commits has none. */
+function freshnessAgePressure(input: {
+  changes: readonly DeployWorthChange[] | undefined;
+  staleSinceMs: number;
+  nowMs: number;
+  limit: number;
+  stalenessHorizonMs: number;
+  loopOnlyHorizonMs: number;
+  classSinceMs?: Partial<Record<"reviewer" | "loop", number>>;
+}): { agePressure: number; horizonMs: number } {
+  const part = (sinceMs: number, horizonMs: number) => Math.floor((input.limit * Math.max(0, input.nowMs - sinceMs)) / horizonMs);
+  if (input.changes === undefined || input.changes.length === 0) {
+    return { agePressure: part(input.staleSinceMs, input.stalenessHorizonMs), horizonMs: input.stalenessHorizonMs };
+  }
+  const classes = countFreshnessChangeClasses(input.changes);
+  const since = (cls: "reviewer" | "loop") => input.classSinceMs?.[cls] ?? input.staleSinceMs;
+  const reviewer = classes.reviewer > 0 ? part(since("reviewer"), input.stalenessHorizonMs) : undefined;
+  const loop = classes.loop > 0 ? part(since("loop"), input.loopOnlyHorizonMs) : undefined;
+  if (reviewer !== undefined && (loop === undefined || reviewer >= loop)) return { agePressure: reviewer, horizonMs: input.stalenessHorizonMs };
+  return { agePressure: loop ?? 0, horizonMs: input.loopOnlyHorizonMs };
 }
 
 function boundedStallShare(share = 0): number {
@@ -406,9 +453,14 @@ export function decideFreshnessRestart(input: {
    *  Above 0 the review lane is stalled on exactly this lag, so it adds a full threshold of pressure. */
   withheldReviews?: number;
   stallShare?: number;
+  /** W1-T12230: the horizon of an advance with `loop` commits and no `reviewer` one. Defaults to `ageHorizonMs`. */
+  loopOnlyHorizonMs?: number;
+  /** W1-T12230: when the daemon first read the earliest commit of each class. A class absent here runs from
+   *  `staleSinceMs`. */
+  classSinceMs?: Partial<Record<"reviewer" | "loop", number>>;
 }): FreshnessDecision {
   const threshold = input.threshold ?? DEPLOY_RESTART_SCORE_THRESHOLD;
-  const horizonMs = input.ageHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
+  const stalenessHorizonMs = input.ageHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
   const scored = accumulateDeployRestartPressure(input.changes ?? [], input.state, {
     threshold,
     nowMs: input.nowMs,
@@ -416,14 +468,18 @@ export function decideFreshnessRestart(input: {
     scoreChange: freshnessAdvanceWorth,
   });
   const weight = input.changes === undefined ? Math.max(scored.total, threshold.value) : scored.total;
-  const agePressure = Math.floor((threshold.value * Math.max(0, input.nowMs - input.staleSinceMs)) / horizonMs);
+  const { agePressure, horizonMs } = freshnessAgePressure({
+    changes: input.changes, staleSinceMs: input.staleSinceMs, nowMs: input.nowMs, limit: threshold.value, stalenessHorizonMs,
+    loopOnlyHorizonMs: input.loopOnlyHorizonMs ?? stalenessHorizonMs, ...(input.classSinceMs ? { classSinceMs: input.classSinceMs } : {}),
+  });
   const withheld = input.withheldReviews ?? 0;
   const withheldPressure = withheld > 0 ? threshold.value : 0;
   const stallShare = boundedStallShare(input.stallShare);
   const stallPressure = Math.floor(threshold.value * stallShare);
   const pressure = weight + agePressure + withheldPressure + stallPressure;
   const state = { total: weight, scoredShas: scored.state.scoredShas };
-  const scores = { weight, agePressure, pressure, state, ...(stallShare > 0 ? { stallPressure } : {}) };
+  const scores = { weight, agePressure, pressure, state, changeClasses: countFreshnessChangeClasses(input.changes), horizonMs,
+    ...(stallShare > 0 ? { stallPressure } : {}) };
   const pressureTerms = `change ${weight} + staleness ${agePressure}`;
   const stallTerm = stallShare > 0 ? ` + stall ${stallPressure}` : "";
   const restartTrigger = input.changes === undefined ? "unreadable"
@@ -579,6 +635,12 @@ export function coalesceFreshnessRestart(input: {
   }
   return { action: "hold", reason: `coalescing ${input.newSha}: waiting for a quiet advance window`, heldMs, windowEndsAtMs };
 }
+
+/** W1-T12230: the horizon at which the staleness of an advance with `loop` commits and no `reviewer` one reaches the
+ *  score limit. The record asked for 3 h against a 1 h `stalenessHorizonMs`; W1-T12552 has since shipped that row at
+ *  4 h, and the loop-only row may never sit below it, so the row starts here. Mirrors `plan/policy.yaml`
+ *  `freshnessRestart.loopOnlyHorizonMs`; with no row the daemon uses its staleness horizon for both classes. */
+export const FRESHNESS_LOOP_ONLY_HORIZON_MS = 4 * 60 * 60_000;
 
 /** W1-T12231: the share of the score limit at which a busy daemon starts to treat its freshness restart as likely.
  *  Mirrors `plan/policy.yaml` `freshnessRestart.likelyFraction`. */

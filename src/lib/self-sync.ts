@@ -482,8 +482,11 @@ export type ServiceFreshness =
       } | null;
     } & RecentFetchMark;
 
-/** W1-T9092: whether an advance touched the closure of the process's entry. `unreadable` is material. */
-export type AdvanceClosure = { status: "read"; material: boolean; outside: number } | { status: "unreadable"; reason: string };
+/** W1-T9092: whether an advance touched the closure of the process's entry. `unreadable` is material.
+ *  W1-T12230: `inside`, when the verdict records it, names the changed paths that lie in the closure. */
+export type AdvanceClosure =
+  | { status: "read"; material: boolean; outside: number; inside?: readonly string[] }
+  | { status: "unreadable"; reason: string };
 
 export type RecentFetchMark = { source?: "recent-fetch"; refAgeMs?: number }; // W1-T6033: set only when a recent ref stood in
 
@@ -491,6 +494,33 @@ export interface AdvanceCommit {
   sha: string;
   subject?: string;
   files: string[];
+  /** W1-T12230: set by {@link daemonFreshnessFromService}; see {@link classifyAdvanceCommit}. */
+  changeClass?: AdvanceCommitClass;
+}
+
+/** W1-T12230: what one commit of an advance asks of a daemon restart (deploy-judge.ts `FreshnessChangeClass`). */
+export type AdvanceCommitClass = "reviewer" | "loop" | "worker_only";
+
+/**
+ * W1-T12230 — class one commit of an advance. `reviewer`: it changes a path a review's verdict depends on
+ * ({@link reviewAdvanceIsMaterial}). `loop`: not `reviewer`, and it changes a file in the daemon's import closure.
+ * `worker_only`: it changes src/ or scripts/ and is neither. Whether a file is in the closure comes from the closure
+ * reading: its `inside` list when recorded, else a read verdict that the whole advance missed the closure. An absent or
+ * unreadable closure, a closure the advance met with no `inside` list, a commit with no files or a blank one, and a
+ * commit none of the three rules fits all cannot be classed, and are `loop`: the judge fails toward a restart.
+ */
+export function classifyAdvanceCommit(files: readonly string[], closure: AdvanceClosure | undefined): AdvanceCommitClass {
+  if (files.length === 0 || files.some((file) => file.trim().length === 0)) return "loop";
+  if (reviewAdvanceIsMaterial(files)) return "reviewer";
+  if (closure?.status !== "read") return "loop";
+  const inside = closure.inside;
+  const inClosure = inside === undefined ? closure.material : files.some((file) => inside.includes(file.trim()));
+  if (inClosure) return "loop";
+  return files.some((file) => file.startsWith("src/") || file.startsWith("scripts/")) ? "worker_only" : "loop";
+}
+
+function classifyAdvanceCommits(changes: readonly AdvanceCommit[] | undefined, closure: AdvanceClosure | undefined): AdvanceCommit[] | undefined {
+  return changes?.map((change) => ({ ...change, changeClass: classifyAdvanceCommit(change.files, closure) }));
 }
 
 export function parseAdvanceCommits(text: string): AdvanceCommit[] {
@@ -749,7 +779,7 @@ export function daemonFreshnessFromService(svc: ServiceFreshness) {
         // PRIMARY CONTROL: match the live-edit ladder's 20-path ledger display bound.
         ...(svc.dirty_paths ? { dirty_paths: svc.dirty_paths.slice(0, 20) } : {}),
         ...(svc.behind ? { oldSha: svc.behind.oldSha, newSha: svc.behind.newSha } : {}),
-        ...(svc.behind?.changes ? { changes: svc.behind.changes } : {}),
+        ...(svc.behind?.changes ? { changes: classifyAdvanceCommits(svc.behind.changes, svc.behind.closure) } : {}),
       },
     } as const;
   }
@@ -767,7 +797,8 @@ export function daemonFreshnessFromService(svc: ServiceFreshness) {
       },
     } as const;
   }
-  const { oldSha, newSha, changes } = svc.behind;
+  const { oldSha, newSha, closure } = svc.behind;
+  const changes = classifyAdvanceCommits(svc.behind.changes, closure);
   const stale = { stale: true, oldSha, newSha, ...(changes ? { changes } : {}) } as const;
   return stale as typeof stale & { installNeeded?: boolean };
 }

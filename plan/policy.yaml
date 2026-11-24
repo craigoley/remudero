@@ -1877,6 +1877,9 @@ pausePolicy:
 #     the predicted restart plus maxDrainWaitMs is held before the decision. A build run is never held by it.
 #   maxDrainWaitMs: the latest the drain's time limit, derived from the work in flight, may be after the decision
 #     (min 559000, today's sweepWallClockBoundMs).
+# W1-T12230: loopOnlyHorizonMs is the staleness horizon of an advance whose commits change code the daemon loop loads
+#   but no path a review depends on; one with a reviewer commit keeps stalenessHorizonMs. The loader refuses a value
+#   below stalenessHorizonMs, so it starts at that row's 4 h; the record's 3 h assumed the 1 h horizon before W1-T12552.
 freshnessRestart:
   scoreLimit: { value: 18, origin: "lifted:src/lib/deploy-judge.ts (DEPLOY_RESTART_SCORE_THRESHOLD)", min: 6, max: 54 }
   stalenessHorizonMs: { value: 14400000, origin: "lifted:src/lib/deploy-judge.ts (DEPLOY_RESTART_RATE_CEILING_MS)", min: 900000, max: 14400000 }
@@ -1884,6 +1887,7 @@ freshnessRestart:
   minLifetimeMs: { value: 10800000, origin: "lifted:src/lib/deploy-judge.ts (FRESHNESS_MIN_LIFETIME_MS)", min: 0, max: 21600000 }
   likelyFraction: { value: 0.5, origin: "lifted:src/lib/deploy-judge.ts (FRESHNESS_LIKELY_FRACTION)", min: 0.25, max: 0.9 }
   maxDrainWaitMs: { value: 1800000, origin: "lifted:src/lib/deploy-judge.ts (FRESHNESS_MAX_DRAIN_WAIT_MS)", min: 559000, max: 3600000 }
+  loopOnlyHorizonMs: { value: 14400000, origin: "lifted:src/lib/deploy-judge.ts (FRESHNESS_LOOP_ONLY_HORIZON_MS)", min: 3600000, max: 43200000 }
 
 # W1-T14343: THE PUBLIC CATALOG TAKES NO NEW TASK RECORD. Since 2026-11-17 a new task record is filed in the plan
 # destination (`rmd plan-destination task`), yet that switch is host state, so hosted CI could not see it and 542 new
