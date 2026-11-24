@@ -320,6 +320,12 @@
       "grepHint": "Forensics: scripts/clock-shift.mjs"
     },
     {
+      "path": "docs/forensics/codex-subscription-notional-cost.md",
+      "title": "Codex subscription calls and their notional cost (W1-T14476)",
+      "summary": "Read-only recon, 2026-11-23. Code read at core `origin/main` 0a05a6a. Ledger read on the core fleet's host",
+      "grepHint": "Codex subscription calls and their notional cost (W1-T14476)"
+    },
+    {
       "path": "docs/forensics/commit-message.md",
       "title": "Forensics: src/lib/commit-message.ts",
       "summary": "Every measured fact, incident and design argument the comments in `src/lib/commit-message.ts`",

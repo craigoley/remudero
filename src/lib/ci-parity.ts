@@ -37,7 +37,7 @@ const BOUNDED_SUITE_SPAWN_MAX_BUFFER = 64 * 1024 * 1024;
 const SELF_SYNC_GUARD_ENV_NAME = "RMD_SELF_SYNC_DONE";
 const TSX_LOADER_PATH = require.resolve("tsx");
 const WORKER_CONTAINMENT_URL = new URL("./worker-containment.ts", import.meta.url).href;
-export const CI_COVERAGE_SHARD_COUNT = 12;
+export const CI_COVERAGE_SHARD_COUNT = 16;
 const COVERAGE_FREE_RESERVE_BYTES = 20 * 1024 ** 3;
 const MAX_COVERAGE_SCRATCH_PATH = 60;
 /** The host's scratch mount, the default scratch root when it is a mount (deploy/scratch-mounts.sh). */

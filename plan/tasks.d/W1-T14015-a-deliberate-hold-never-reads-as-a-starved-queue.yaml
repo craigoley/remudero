@@ -7,7 +7,7 @@
   verify: auto
   principles:
     tdd: strict
-  budget_usd: 8.00
+  budget_usd: 4.50
   risk: high # spans the drain dispatch census and the starvation notice; one new filter reason both must read
   origin: "operator-session#pr-backlog-round5-2026-11-20"
   plan_refs:

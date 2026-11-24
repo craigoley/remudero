@@ -1,4 +1,4 @@
-// W1-T13270 — the coverage-shard matrix runs twelve shards, on its own count apart from ci-shard's eight.
+// W1-T13270 — the coverage-shard matrix runs sixteen shards (W1-T14558; twelve under W1-T13270), on its own count apart from ci-shard's eight.
 // MEASURED 2026-11-16 (Actions jobs API, 88 coverage-shard jobs): the slowest steady shard took 38-46 min against
 // its 49-min ceiling, and ci-gate's 75-min WAIT_CAP leaves no room to raise it. Twelve shards cut each shard's
 // files and its post-test coverage work by a third. W1-T4436 (#7029) needed four fix rounds for consumers that
@@ -35,8 +35,8 @@ function countsIn(run: string) {
   return { shard, shardCount };
 }
 
-test("W1-T13270 criterion 1: one coverage shard count, 12, is read the same from every place it is spelled", () => {
-  assert.equal(CI_COVERAGE_SHARD_COUNT, 12, "src/lib/ci-parity.ts");
+test("W1-T13270 criterion 1 and W1-T14558 criterion 1: one coverage shard count, 16, is read the same from every place it is spelled", () => {
+  assert.equal(CI_COVERAGE_SHARD_COUNT, 16, "src/lib/ci-parity.ts");
   assert.equal(FLOOR_CI_COUNT, CI_COVERAGE_SHARD_COUNT, "scripts/coverage-floor.mjs CI_COVERAGE_SHARD_COUNT");
   const merged = PRODUCERS.find((p: { artifact: string }) => p.artifact === "coverage-merged");
   assert.equal(merged.shards, CI_COVERAGE_SHARD_COUNT, "the merge-group producer's provenance counts ci.yml's shards");
@@ -71,7 +71,7 @@ test("W1-T13270 criterion 1: one coverage shard count, 12, is read the same from
   assert.deepEqual(countsIn(runOf(nightlyJobs.merge)).shardCount, [NIGHTLY_SHARD_COUNT, NIGHTLY_SHARD_COUNT]);
 });
 
-test("W1-T13270 criterion 2: invariant ci-shard-unchanged, every ci-shard spelling stays at 8", () => {
+test("W1-T13270 criterion 2 and W1-T14558 criterion 3: invariant ci-shard-unchanged, every ci-shard spelling stays at 8", () => {
   assert.equal(DEFAULT_CI_SHARD_COUNT, 8, "scripts/test-tier-manifest.mjs DEFAULT_CI_SHARD_COUNT");
   const job = workflow(".github/workflows/ci.yml").jobs.ci;
   assert.equal(job.name, `ci-shard (\${{ matrix.shard }}/${DEFAULT_CI_SHARD_COUNT})`);
