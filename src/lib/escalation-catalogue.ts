@@ -2,13 +2,14 @@ import { DISK_FAIL_BYTES, DISK_WARN_BYTES, humanBytes } from "./doctor.js";
 import {
   classifyEndedDaemonProcesses, crashLoopRunOf, DAEMON_ABNORMAL_EXIT_STEP, DAEMON_CLEAN_EXIT_OBSERVED_STEP, learnedCleanLifetime,
   type CrashLoopVerdict, type DaemonLifetimeRecord, type DaemonProcessEnd, type LearnedCleanLifetime, type LearnedCrashLoopSummary,
-  type ClaimStallClearedInfo, type ClaimStallInfo, type StarvationCensus, type StarvationClearedInfo, type TargetJobStallInfo,
+  type ClaimStallClearedInfo, type ClaimStallInfo, type NoTaskStartedClearedInfo, type NoTaskStartedInfo, type StarvationCensus,
+  type StarvationClearedInfo, type TargetJobStallInfo,
 } from "./daemon.js";
 import { ghRateLimitWindow, type GhRateLimitProvenance } from "./daemon-health.js";
 import { quantileOf } from "./daemon-memory-policy.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
 import { ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, tryEscalate, tryEscalateAsync, type AsyncIssueGateway, type Escalation, type IssueGateway } from "./escalate.js";
-import { appendLedger, matchesRepoScopedTask } from "./ledger.js";
+import { appendLedger, matchesRepoScopedTask, queueDispatchRunStarts } from "./ledger.js";
 import type { ReplayStranded } from "./inbox-replay.js";
 import type { Task } from "./plan.js";
 import { DEFAULT_MAX_TASK_LIFETIME_DISPATCHES, readLedgerLines } from "./status.js";
@@ -1356,6 +1357,119 @@ export async function escalateClaimStallCleared(
   });
 }
 
+/** W1-T14608: the ledger markers of the no-start page — one per open, one per clear. */
+const NO_START_ESCALATED_STEP = "dispatch.no_start.escalated";
+const NO_START_CLEARED_STEP = "dispatch.no_start.cleared";
+
+/**
+ * W1-T14608: the page for a fleet that started no task past its measured pick gap while a lane was free and a task was
+ * dispatchable. DEDUP IS ON THE NEWEST STARTED RUN (W1-T13249's rule), never on the `run.start` of a refused run: if the
+ * newest escalated row postdates it, the episode was already reported. The marker is written whether or not delivery
+ * succeeded.
+ */
+export async function escalateNoTaskStarted(info: NoTaskStartedInfo, ctx: ClaimStallCtx): Promise<void> {
+  const rows = await claimStallRows(ctx, [NO_START_ESCALATED_STEP, "run.start", "dispatch.claim"]);
+  const starts = new Set(queueDispatchRunStarts(rows));
+  let lastEscalatedIdx = -1;
+  let lastStartIdx = -1;
+  rows.forEach((row, i) => {
+    if (row.step === NO_START_ESCALATED_STEP) lastEscalatedIdx = i;
+    else if (starts.has(row)) lastStartIdx = i;
+  });
+  if (lastEscalatedIdx !== -1 && lastEscalatedIdx > lastStartIdx) return;
+
+  const minutes = (ms: number): string => `${Math.round(ms / 60_000)} min`;
+  const bound = info.source === "pick-gap-p90"
+    ? `the p90 of the fleet's newest ${info.samples} gaps between started tasks`
+    : `the fleet's claim-silence window (${info.samples} measured claim-to-verdict builds; fewer than 8 gaps between started tasks)`;
+  const ended = info.endStep ?? "no recorded step";
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: "daemon",
+      runId: ctx.runId,
+      summary: `fleet has started no task for ${minutes(info.sinceLastStartMs)} with ${info.freeLanes} free lane(s) and ` +
+        `${info.dispatchable} dispatchable task(s); the newest tick ended on ${ended}`,
+      detail:
+        `W1-T14608: the newest task started at ${info.lastStartAt}, ${minutes(info.sinceLastStartMs)} ago, past the bound of ` +
+        `${minutes(info.boundMs)} (${info.source}: ${bound}). For ${info.ticksWithoutStart} ticks in a row past that bound, ` +
+        `${info.freeLanes} lane(s) were free and ${info.dispatchable} task(s) were dispatchable, and no task started. The newest ` +
+        `tick ended on \`${ended}\`. The daemon is live; it closes this issue when a task next starts.`,
+      options: [
+        {
+          label: "inspect the stalled path",
+          detail: `Read the core daemon's rows for \`${ended}\` and the branch that writes them: each tick ended there before a task started.`,
+        },
+        {
+          label: "acknowledge and wait",
+          detail: "If the stall is expected, no action is needed: the issue closes itself when a task next starts.",
+        },
+      ],
+      recommendation: "inspect the stalled path",
+    },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "daemon",
+    step: NO_START_ESCALATED_STEP,
+    ticks_without_start: info.ticksWithoutStart,
+    since_last_start_ms: info.sinceLastStartMs,
+    last_start_at: info.lastStartAt,
+    bound_ms: info.boundMs,
+    bound_source: info.source,
+    samples: info.samples,
+    free_lanes: info.freeLanes,
+    dispatchable: info.dispatchable,
+    end_step: info.endStep,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
+ * W1-T14608: the cleared half. It closes the issue the newest `dispatch.no_start.escalated` row named, unless a later
+ * cleared row already did; with none open it does nothing. A close that fails leaves the issue open and costs one
+ * `delivered: false` row.
+ */
+export async function escalateNoTaskStartedCleared(info: NoTaskStartedClearedInfo, ctx: ClaimStallCtx): Promise<void> {
+  let issueUrl: string | null = null;
+  for (const l of await claimStallRows(ctx, [NO_START_ESCALATED_STEP, NO_START_CLEARED_STEP])) {
+    if (l.step === NO_START_ESCALATED_STEP) issueUrl = typeof l.issue_url === "string" ? l.issue_url : null;
+    else if (l.step === NO_START_CLEARED_STEP) issueUrl = null;
+  }
+  if (!issueUrl) return;
+  const comment = `W1-T14608: ${info.taskId} started, so the fleet is starting tasks again. Closing automatically; ` +
+    "a fresh stall opens its own issue.";
+  const issues = ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo);
+  let delivered = false;
+  let failure: string | undefined;
+  if (!issues.closeWithComment) {
+    failure = "issue gateway cannot close issues";
+  } else {
+    try {
+      issues.closeWithComment(issueUrl, comment);
+      delivered = true;
+    } catch (e) {
+      // Never rethrown into the daemon loop; the row below carries it as `failure`.
+      failure = String((e as Error)?.message ?? e);
+    }
+  }
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: info.taskId,
+    step: NO_START_CLEARED_STEP,
+    since_last_start_ms: info.sinceLastStartMs,
+    issue_url: issueUrl,
+    delivered,
+    ...(failure ? { failure } : {}),
+  });
+}
+
 /**
  * W1-T13255's rows, each carrying its `stage`. `failed` is one failing pass. `recovered` ends a streak that has no
  * issue to close, and its `passes` is a sample for the bound. `escalated` and `cleared` are the issue's open and close.
@@ -1616,5 +1730,112 @@ export function escalateReplayStranded(
     same_as_offered: stranded.sameAsOffered,
     issue_url: issueUrl,
     delivered: issueUrl !== null,
+  });
+}
+
+/** W1-T14611: the ledger markers of the unresolved-instance SRE lane page — one per open, one per clear. */
+export const SRE_LANE_UNRESOLVED_ESCALATED_STEP = "sre_lane.unresolved_escalated";
+export const SRE_LANE_UNRESOLVED_CLEARED_STEP = "sre_lane.unresolved_cleared";
+
+export interface SreLaneUnresolvedInfo {
+  primary: string;
+  stateRoot: string;
+  registry: string;
+  reason: string;
+}
+
+/** The issue URL a delivered page for this state root (and primary, when given) left open, or null. */
+async function openSreLaneUnresolvedIssue(ctx: ClaimStallCtx, stateRoot: string, primary?: string): Promise<string | null> {
+  let issueUrl: string | null = null;
+  for (const l of await claimStallRows(ctx, [SRE_LANE_UNRESOLVED_ESCALATED_STEP, SRE_LANE_UNRESOLVED_CLEARED_STEP])) {
+    if (l.state_root !== stateRoot) continue;
+    if (l.step === SRE_LANE_UNRESOLVED_CLEARED_STEP) issueUrl = null;
+    else if (primary === undefined || l.primary === primary) issueUrl = typeof l.issue_url === "string" ? l.issue_url : null;
+  }
+  return issueUrl;
+}
+
+/**
+ * W1-T14611: the page for a primary daemon whose SRE lane is off because it could not find its instance. Dedup is on
+ * the primary instance name and the state root: a delivered page that no later clear closed is not opened again.
+ * The marker is written whether or not delivery succeeded (`escalateStarvation`'s discipline).
+ */
+export async function escalateSreLaneUnresolved(info: SreLaneUnresolvedInfo, ctx: ClaimStallCtx): Promise<void> {
+  if (await openSreLaneUnresolvedIssue(ctx, info.stateRoot, info.primary) !== null) return;
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: "daemon",
+      runId: ctx.runId,
+      summary: `The SRE lane is off on the primary daemon: it could not find its instance (${info.reason}). ` +
+        `Recycle it with --instance ${info.primary} or set RMD_INSTANCE_NAME.`,
+      detail:
+        `W1-T14611: the daemon on state root ${info.stateRoot} started with its SRE lane off. It read the registry ` +
+        `${info.registry}, whose live primary instance is '${info.primary}', but could not find its own instance: ` +
+        `${info.reason}. The daemon is live; it will close this issue when the SRE lane next starts on this state root.`,
+      options: [
+        {
+          label: "name the instance",
+          detail: `Recycle the daemon with \`deploy/recycle-container.sh --instance ${info.primary}\`, or launch it with RMD_INSTANCE_NAME=${info.primary}.`,
+        },
+        {
+          label: "acknowledge and wait",
+          detail: "If this daemon is not the primary instance, no action is needed; the issue closes when the lane next starts here.",
+        },
+      ],
+      recommendation: "name the instance",
+      consequence: "While the lane is off, the SRE governor cannot page a fleet stall.",
+    },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "daemon",
+    step: SRE_LANE_UNRESOLVED_ESCALATED_STEP,
+    primary: info.primary,
+    state_root: info.stateRoot,
+    registry: info.registry,
+    reason: info.reason,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
+ * W1-T14611: the cleared half — closes the issue the newest delivered page for this state root opened, unless a later
+ * cleared row already did. Absent means a silent no-op. CANNOT-OBSERVE MEANS WAIT (W1-T130), as the other clears.
+ */
+export async function escalateSreLaneUnresolvedCleared(info: { stateRoot: string; instance: string | null }, ctx: ClaimStallCtx): Promise<void> {
+  const issueUrl = await openSreLaneUnresolvedIssue(ctx, info.stateRoot);
+  if (issueUrl === null) return;
+  const comment = `W1-T14611: the SRE lane started on state root ${info.stateRoot}` +
+    `${info.instance !== null ? ` as instance '${info.instance}'` : ""}. Closing automatically.`;
+  const issues = ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo);
+  let delivered = false;
+  let failure: string | undefined;
+  if (!issues.closeWithComment) {
+    failure = "issue gateway cannot close issues";
+  } else {
+    try {
+      issues.closeWithComment(issueUrl, comment);
+      delivered = true;
+    } catch (e) {
+      // CANNOT-OBSERVE MEANS WAIT (W1-T130): never rethrown into the daemon loop; the row below carries it as `failure`.
+      failure = String((e as Error)?.message ?? e);
+    }
+  }
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "daemon",
+    step: SRE_LANE_UNRESOLVED_CLEARED_STEP,
+    state_root: info.stateRoot,
+    instance: info.instance,
+    issue_url: issueUrl,
+    delivered,
+    ...(failure ? { failure } : {}),
   });
 }

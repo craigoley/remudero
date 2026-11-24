@@ -3386,9 +3386,19 @@ fi
 # W1-T9500 — THE CREATOR NAMES THE INSTANCE. Inside the container the state root is
 # /home/node/Remudero, which matches no registry state_dir (those are host paths), so the daemon
 # could not tell which instance it was and the SRE lane never started on core. A recycle run with
-# --instance holds the name; the legacy no-instance path has none to give and adds nothing.
+# --instance holds the name; the legacy no-instance path names the one row matching container and state dir.
+if [ -f "${SCRIPT_DIR:-}/launch-instance-name.sh" ]; then
+  . "${SCRIPT_DIR}/launch-instance-name.sh"
+fi
 if [ -n "${INSTANCE_NAME}" ] && [ "${SELECTED_REGISTRY_ACTIVE}" != 1 ]; then
   DOCKER_RUN_ARGS+=(-e "RMD_INSTANCE_NAME=${INSTANCE_NAME}")
+elif [ "${SELECTED_REGISTRY_ACTIVE}" != 1 ] && declare -F rmd_launch_instance_name >/dev/null 2>&1; then
+  # Only the env var: INSTANCE_NAME stays empty, so no --instance branch decision changes.
+  LAUNCH_INSTANCE_NAME="$(rmd_launch_instance_name --registry "${RMD_INSTANCE_REGISTRY-$DEFAULT_INSTANCE_REGISTRY}" --container "${CONTAINER_NAME}" --state-dir "${STATE_DIR}")"
+  if [ -n "${LAUNCH_INSTANCE_NAME}" ]; then
+    echo "recycle-container: naming the container's instance '${LAUNCH_INSTANCE_NAME}' from the registry row for ${CONTAINER_NAME}"
+    DOCKER_RUN_ARGS+=(-e "RMD_INSTANCE_NAME=${LAUNCH_INSTANCE_NAME}")
+  fi
 fi
 LAUNCH_IMAGE="${REF}"
 if [ "${SELECTED_REGISTRY_ACTIVE}" = 1 ]; then LAUNCH_IMAGE="${PULLED_IMAGE_ID}"; fi

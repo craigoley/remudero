@@ -1,4 +1,4 @@
-import { legacyHostScript, withoutRegistrySelection } from "#test/helpers/gh-shim.js";
+import { legacyHostScript, withGhShim, withoutRegistrySelection } from "#test/helpers/gh-shim.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -45,12 +45,13 @@ function withInstanceName(t: TestContext, value: string | undefined): void {
 
 /** Boot `rmd daemon` on a temp root the registry does NOT name (as inside a container), and return
  *  the gardens it hands the loop and the `sre_lane.*` rows it ledgered. */
-async function startContainerisedDaemon(t: TestContext, instanceName: string, onRun?: () => void): Promise<{ gardens: unknown[]; laneRows: Array<Record<string, unknown>> }> {
+async function startContainerisedDaemon(t: TestContext, instanceName: string, onRun?: () => void, seedLedger?: string): Promise<{ gardens: unknown[]; laneRows: Array<Record<string, unknown>> }> {
   const home = mkdtempSync(join(tmpdir(), "rmd-w1t9500-"));
   const root = join(home, "Remudero");
   mkdirSync(join(home, ".config", "remudero"), { recursive: true });
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
   mkdirSync(join(root, "state"), { recursive: true });
+  if (seedLedger !== undefined) writeFileSync(join(root, "state", "ledger.ndjson"), seedLedger.split("<root>").join(root));
   const registryPath = join(home, "daemon-instances.yaml");
   // The registry names HOST paths, exactly as the live one does; none of them is this daemon's root.
   writeFileSync(registryPath, [
@@ -144,6 +145,19 @@ test("W1-T9500: an unknown instance name disables the lane by name", async (t) =
   assert.equal(daemonRuns, 0);
 });
 
+test("W1-T14611: a daemon that starts its lane by name closes the page an unnamed start left open", async (t) => {
+  const open = JSON.stringify({ ts: "2026-11-01T00:00:00.000Z", run_id: "DAEMON-1", task_id: "daemon", step: "sre_lane.unresolved_escalated",
+    primary: "core", state_root: "<root>", issue_url: "https://github.com/craigoley/remudero/issues/9301", delivered: true });
+  const { laneRows } = await withGhShim([], async (shim) => {
+    const started = await startContainerisedDaemon(t, "core", undefined, `${open}\n`);
+    assert.ok(shim.calls().some((call) => call.includes("issues/9301")), `the real gateway closes the open page:\n${shim.calls().join("\n")}`);
+    return started;
+  });
+  assert.deepEqual(laneRows.map((row) => [row.step, row.delivered ?? null]), [
+    ["sre_lane.unresolved_escalated", true], ["sre_lane.started", null], ["sre_lane.unresolved_cleared", true],
+  ]);
+});
+
 // ── the creator names the instance: deploy/recycle-container.sh ─────────────────────────────────
 
 /** A stub `docker` (the W1-T5281/W1-T9409 technique) recording every call; `inspect` reports the
@@ -202,7 +216,7 @@ interface Recycle {
 
 /** Run the REAL recycle against a temp state dir and a stub docker; `instance` adds `--instance`
  *  against a one-record fixture registry, otherwise the legacy path is scoped by RMD_STATE_DIR. */
-function recycle(t: TestContext, opts: { instance?: string; containerEnv?: string }): Recycle {
+function recycle(t: TestContext, opts: { instance?: string; containerEnv?: string; rowContainer?: string }): Recycle {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1t9500-recycle-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const dirs = { bin: join(root, "bin"), rec: join(root, "rec"), state: join(root, "state-dir"), claude: join(root, "claude"), codex: join(root, "codex"), config: join(root, "config"), tmp: join(root, "tmp") };
@@ -217,7 +231,7 @@ function recycle(t: TestContext, opts: { instance?: string; containerEnv?: strin
     `  ${opts.instance ?? "core"}:`,
     "    repo: remudero",
     `    state_dir: ${dirs.state}`,
-    "    container_name: remudero-daemon",
+    `    container_name: ${opts.rowContainer ?? "remudero-daemon"}`,
     "    image: test-registry.azurecr.io/remudero:latest",
     `    claude_dir: ${dirs.claude}`,
     `    codex_dir: ${dirs.codex}`,
@@ -274,11 +288,15 @@ test("W1-T9500: the recycle names the instance to the container it runs", (t) =>
   assert.deepEqual(instanceNameArgs(named.runArgv), ["core"], "the container is told which instance it is");
   // The image and its command come after every option, so the variable is an option, not an argument.
   assert.ok(named.runArgv.indexOf("RMD_INSTANCE_NAME=core") < named.runArgv.indexOf("./bin/rmd"));
-  // The legacy no-instance path names nothing: it has no instance to name.
+  // W1-T14611: the legacy no-instance path names the one row matching its container and state dir.
   const legacy = recycle(t, {});
   assert.equal(legacy.status, 0, legacy.output);
   assert.ok(legacy.runArgv, `a replacement docker run must have happened:\n${legacy.output}`);
-  assert.deepEqual(instanceNameArgs(legacy.runArgv), []);
+  assert.deepEqual(instanceNameArgs(legacy.runArgv), ["core"]);
+  // A registry whose row does not match names nothing.
+  const unmatched = recycle(t, { rowContainer: "some-other-daemon" });
+  assert.equal(unmatched.status, 0, unmatched.output);
+  assert.deepEqual(instanceNameArgs(unmatched.runArgv ?? []), []);
 });
 
 test("W1-T9500: a container that carries its instance name is recycled again", (t) => {
@@ -348,7 +366,7 @@ test("W1-T9500: the installed launcher names the instance to the container it ru
   const run = launcher.slice(launcher.indexOf("docker run -d --name"));
   assert.ok(run.indexOf('"${INSTANCE_ENV_ARGS[@]+"${INSTANCE_ENV_ARGS[@]}"}"') > 0, "the docker run must pass INSTANCE_ENV_ARGS");
   assert.ok(run.indexOf("INSTANCE_ENV_ARGS") < run.indexOf("./bin/rmd daemon"), "as an option, before the image");
-  // The legacy no-instance install names nothing.
+  // W1-T14611: the legacy no-instance install names the repo registry's row for its container and state dir.
   const legacyLauncher = join(root, "legacy-launcher.sh");
   const legacy = install([], {
     RMD_UNIT_DIR: join(root, "systemd-legacy"),
@@ -358,5 +376,5 @@ test("W1-T9500: the installed launcher names the instance to the container it ru
     RMD_NODE_MAX_OLD_SPACE_MB: "8192",
   });
   assert.equal(legacy.status, 0, legacy.stderr);
-  assert.deepEqual(launcherInstanceArgs(readFileSync(legacyLauncher, "utf8")), []);
+  assert.deepEqual(launcherInstanceArgs(readFileSync(legacyLauncher, "utf8")), ["-e", "RMD_INSTANCE_NAME=core"]);
 });

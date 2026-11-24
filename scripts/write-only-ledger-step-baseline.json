@@ -1424,6 +1424,8 @@
     "worktree_retire.would_retire"
   ],
   "recordOnly": {
+    "dispatch.no_start.detected": "W1-T14608: the daemon's own row for a no-start page; the operator reads it, and the catalogue's escalated row carries the dedup",
+    "dispatch.no_start.unassessed": "W1-T14608: a diagnostic for a no-start judgement that could not be made; it records the error and pages nothing",
     "target_job.stalled": "W1-T14600: the operator page for a target job the core daemon deferred past its bound; the catalogue's own dedup reads the escalated row",
     "target_job.stall_escalated": "W1-T14600: the operator page for a target job the core daemon deferred past its bound; the catalogue's own dedup reads the escalated row",
     "ci-friction.pass": "An audit row for the operator (W1-T13989): it counts the units a ci-friction pass resumed from its journal and the units it ran fresh; nothing decides on it.",
@@ -1455,6 +1457,8 @@
     "read_model.now_view_recovered": "Observability for W1-T14586: closes a read_model.now_view_failed episode with its failure count and duration; the now view's own map holds the back-off and no decision reads the row.",
     "queue_judge.noop_skipped": "A receipt that the queue judge dropped an action whose base shard already carries its priority and exact marker; nothing decides from it, and the next pass judges the task afresh.",
     "task_files_landing.refusal_remembered": "A receipt that the task-files landing wrote a record-intrinsic refusal of a blob to its state-dir memory; the landing answers later offers of those bytes from that memory, never from this row.",
-    "judge.fallback": "An audit row for the one fallback a garden judge takes off a failed cash arm (W1-T13988): it names the from and to provider, the model and the cause for an operator reading the ledger; nothing decides on it."
+    "judge.fallback": "An audit row for the one fallback a garden judge takes off a failed cash arm (W1-T13988): it names the from and to provider, the model and the cause for an operator reading the ledger; nothing decides on it.",
+    "sre_lane.unresolved_escalated": "W1-T14611: the marker of the page for a primary daemon whose SRE lane could not find its instance; only its own escalation pair in escalation-catalogue.ts reads it, to page once and to find the issue to close.",
+    "sre_lane.unresolved_cleared": "W1-T14611: the marker that the SRE lane started again and closed that page; only its own escalation pair in escalation-catalogue.ts reads it, so a closed page is not closed twice."
   }
 }
