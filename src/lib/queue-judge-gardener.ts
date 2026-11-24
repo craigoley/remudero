@@ -810,7 +810,7 @@ function pinEscalation(a: QueueJudgeAction, floor: boolean): Escalation {
   };
 }
 
-export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick<GardenerDeps, "log" | "escalate">): Promise<QueueJudgeInventory> {
+export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick<GardenerDeps, "log" | "escalate" | "closeIssue">): Promise<QueueJudgeInventory> {
   const plan = sources.plan();
   if (plan.open.length === 0) return emptyInventory("empty-queue", 0);
   const now = sources.clock.date();
