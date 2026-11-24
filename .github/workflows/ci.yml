@@ -253,7 +253,7 @@ jobs:
         # test/selected-registry-shell-consumers.test.ts builds bash 3.2 and exports RMD_TEST_BASH32(_REQUIRED).
         run: |
           cat > "$RUNNER_TEMP/bash32-provision.sh" <<'BASH32_PROVISION'
-          # W1-T11263: bash32-provision.sh <the test files this shard runs> <env file to write>
+          # W1-T11263: bash32-provision.sh <the test files this shard runs> <env file to write, KEY=VALUE lines>
           set -euo pipefail
           LIST="$1"
           ENV_FILE="$2"
@@ -282,7 +282,7 @@ jobs:
               exit 1
             fi
             echo "W1-T11263: this shard runs ${SUITE}; RMD_TEST_BASH32=$OUT/bash (${VERSION})."
-            printf 'export RMD_TEST_BASH32=%q RMD_TEST_BASH32_REQUIRED=1\n' "$OUT/bash" > "$ENV_FILE"
+            printf 'RMD_TEST_BASH32=%s\nRMD_TEST_BASH32_REQUIRED=1\n' "$OUT/bash" > "$ENV_FILE"
           else
             echo "W1-T11263: this shard does not run ${SUITE}, so no bash 3.2 is built."
           fi
@@ -457,7 +457,7 @@ jobs:
                 if [ -f "${RUNNER_TEMP:-}/bash32-provision.sh" ]; then
                   find test -type f -name '*.test.ts' > bash32-all-suites.txt
                   bash "${RUNNER_TEMP}/bash32-provision.sh" bash32-all-suites.txt "${RUNNER_TEMP}/bash32.env" || exit 1
-                  . "${RUNNER_TEMP}/bash32.env"
+                  set -a; . "${RUNNER_TEMP}/bash32.env"; set +a
                 fi
                 npm run test:ci
                 exit $?
@@ -568,7 +568,7 @@ jobs:
           # W1-T11263: --run-candidates below runs exactly the files --select-candidates assigned above.
           if [ -f "${RUNNER_TEMP:-}/bash32-provision.sh" ]; then
             bash "${RUNNER_TEMP}/bash32-provision.sh" assigned-plan-reading-suites.txt "${RUNNER_TEMP}/bash32.env" || exit 1
-            . "${RUNNER_TEMP}/bash32.env"
+            set -a; . "${RUNNER_TEMP}/bash32.env"; set +a
           fi
           RMD_TEST_DURATION_OUTPUT="${RUNNER_TEMP}/test-duration/shard-${{ matrix.shard }}.json"
           export RMD_TEST_DURATION_OUTPUT
@@ -1024,7 +1024,7 @@ jobs:
         # test/selected-registry-shell-consumers.test.ts builds bash 3.2 and exports RMD_TEST_BASH32(_REQUIRED).
         run: |
           cat > "$RUNNER_TEMP/bash32-provision.sh" <<'BASH32_PROVISION'
-          # W1-T11263: bash32-provision.sh <the test files this shard runs> <env file to write>
+          # W1-T11263: bash32-provision.sh <the test files this shard runs> <env file to write, KEY=VALUE lines>
           set -euo pipefail
           LIST="$1"
           ENV_FILE="$2"
@@ -1053,7 +1053,7 @@ jobs:
               exit 1
             fi
             echo "W1-T11263: this shard runs ${SUITE}; RMD_TEST_BASH32=$OUT/bash (${VERSION})."
-            printf 'export RMD_TEST_BASH32=%q RMD_TEST_BASH32_REQUIRED=1\n' "$OUT/bash" > "$ENV_FILE"
+            printf 'RMD_TEST_BASH32=%s\nRMD_TEST_BASH32_REQUIRED=1\n' "$OUT/bash" > "$ENV_FILE"
           else
             echo "W1-T11263: this shard does not run ${SUITE}, so no bash 3.2 is built."
           fi
@@ -1067,6 +1067,32 @@ jobs:
           fi
           node --import tsx -e 'const r = process.cwd() + "/"; const m = await import(r + "scripts/test-tier-manifest.mjs"); await m.writeMergeGroupSelection(process.argv[1], process.argv[2], { load: (p) => import(r + p) });' \
             "$GROUP_BASE" merge-group-suites.txt || echo full > merge-group-suites.txt
+      - name: Provision bash 3.2 when this slow shard runs the shell-consumer suite (W1-T11263)
+        # "Run the slow tier" chooses its files inside its own step, so this step recomputes that choice first: the
+        # same merge-group exit and the same --run slow arguments, read through test-tier-manifest's own main() with
+        # a spawn that records instead of running. slowShard() in
+        # test/a-diff-with-no-src-path-skips-coverage-but-not-its-tests.test.ts runs both steps and compares them.
+        if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
+        run: |
+          BASH32_SLOW_LANE="run"
+          MERGE_GROUP_SEL="$(head -n 1 merge-group-suites.txt 2>/dev/null || true)"
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ] && [ -n "$MERGE_GROUP_SEL" ] && [ "$MERGE_GROUP_SEL" != "full" ] \
+            && node scripts/test-tier-manifest.mjs --select-candidates merge-group-suites.txt --shard 1/8 --base HEAD > /dev/null; then
+            BASH32_SLOW_LANE="merge-group"
+          fi
+          if [ "${{ steps.plan-reading.outputs.class }}" = "PUSH" ]; then
+            BASH32_SLOW_ARGS=(--run slow --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base HEAD --retry)
+          else
+            BASH32_SLOW_ARGS=(--run slow --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base "origin/${GITHUB_BASE_REF}")
+          fi
+          if [ -f "${RUNNER_TEMP:-}/bash32-provision.sh" ]; then
+            : > bash32-slow-files.txt
+            if [ "$BASH32_SLOW_LANE" = "run" ]; then
+              node --input-type=module -e 'const m = await import(process.cwd() + "/scripts/test-tier-manifest.mjs"); const files = new Set(); const env = { ...process.env }; delete env.RMD_TEST_DURATION_OUTPUT; const spawn = (cmd, args = []) => { for (const a of args) if (typeof a === "string" && a.endsWith(".test.ts")) files.add(a); return { status: 0, stdout: "", stderr: "", signal: null }; }; m.main(process.argv.slice(2), { spawn, env, log: () => {} }); (await import("node:fs")).writeFileSync(process.argv[1], [...files].join("\n") + "\n");' bash32-slow-files.txt "${BASH32_SLOW_ARGS[@]}"
+            fi
+            bash "${RUNNER_TEMP}/bash32-provision.sh" bash32-slow-files.txt "${RUNNER_TEMP}/bash32.env"
+            cat "${RUNNER_TEMP}/bash32.env" >> "$GITHUB_ENV"
+          fi
       - name: Run the slow tier (scripts/test-tier-manifest.json's slow-tier files; none recorded yet still exits 0)
         run: |
           MERGE_GROUP_SEL="$(head -n 1 merge-group-suites.txt 2>/dev/null || true)"
@@ -1087,22 +1113,11 @@ jobs:
           fi
           RMD_TEST_DURATION_OUTPUT="${RUNNER_TEMP}/test-duration/slow.json"
           export RMD_TEST_DURATION_OUTPUT
-          # W1-T11263: the files one --run slow invocation runs, read through test-tier-manifest's own main() with the
-          # same arguments and a spawn that records instead of running; each call below sits on the line above its run.
-          bash32_for_slow_run() {
-            node --input-type=module -e 'const m = await import(process.cwd() + "/scripts/test-tier-manifest.mjs"); const files = new Set(); const env = { ...process.env }; delete env.RMD_TEST_DURATION_OUTPUT; const spawn = (cmd, args = []) => { for (const a of args) if (typeof a === "string" && a.endsWith(".test.ts")) files.add(a); return { status: 0, stdout: "", stderr: "", signal: null }; }; m.main(process.argv.slice(2), { spawn, env, log: () => {} }); (await import("node:fs")).writeFileSync(process.argv[1], [...files].join("\n") + "\n");' bash32-slow-files.txt "$@"
-            if [ -f "${RUNNER_TEMP:-}/bash32-provision.sh" ]; then
-              bash "${RUNNER_TEMP}/bash32-provision.sh" bash32-slow-files.txt "${RUNNER_TEMP}/bash32.env" || exit 1
-              . "${RUNNER_TEMP}/bash32.env"
-            fi
-          }
           if [ "${{ steps.plan-reading.outputs.class }}" = "PUSH" ]; then
             # W1-T4396: main's push lane. One bounded failed-file retry, as the fast shards get.
             echo "W1-T4396: push to main — running the slow tier."
-            bash32_for_slow_run --run slow --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base HEAD --retry
             node scripts/test-tier-manifest.mjs --run slow --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base HEAD --retry
           else
-            bash32_for_slow_run --run slow --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base "origin/${GITHUB_BASE_REF}"
             npm run --silent test:slow -- --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base "origin/${GITHUB_BASE_REF}"
           fi
       - name: Upload slow-tier duration evidence (structured Node test events, W1-T3302)
@@ -2028,7 +2043,7 @@ jobs:
         # test/selected-registry-shell-consumers.test.ts builds bash 3.2 and exports RMD_TEST_BASH32(_REQUIRED).
         run: |
           cat > "$RUNNER_TEMP/bash32-provision.sh" <<'BASH32_PROVISION'
-          # W1-T11263: bash32-provision.sh <the test files this shard runs> <env file to write>
+          # W1-T11263: bash32-provision.sh <the test files this shard runs> <env file to write, KEY=VALUE lines>
           set -euo pipefail
           LIST="$1"
           ENV_FILE="$2"
@@ -2057,7 +2072,7 @@ jobs:
               exit 1
             fi
             echo "W1-T11263: this shard runs ${SUITE}; RMD_TEST_BASH32=$OUT/bash (${VERSION})."
-            printf 'export RMD_TEST_BASH32=%q RMD_TEST_BASH32_REQUIRED=1\n' "$OUT/bash" > "$ENV_FILE"
+            printf 'RMD_TEST_BASH32=%s\nRMD_TEST_BASH32_REQUIRED=1\n' "$OUT/bash" > "$ENV_FILE"
           else
             echo "W1-T11263: this shard does not run ${SUITE}, so no bash 3.2 is built."
           fi
@@ -2207,7 +2222,7 @@ jobs:
           # W1-T11263: the exact list this shard runs.
           if [ -f "${RUNNER_TEMP:-}/bash32-provision.sh" ]; then
             bash "${RUNNER_TEMP}/bash32-provision.sh" coverage-test-files.txt "${RUNNER_TEMP}/bash32.env" || exit 1
-            . "${RUNNER_TEMP}/bash32.env"
+            set -a; . "${RUNNER_TEMP}/bash32.env"; set +a
           fi
           mapfile -t COVERAGE_TEST_FILES < coverage-test-files.txt
           mkdir -p coverage/raw

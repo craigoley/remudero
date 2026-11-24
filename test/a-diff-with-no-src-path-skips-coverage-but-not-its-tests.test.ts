@@ -182,22 +182,32 @@ function slowShard(files: string[]) {
   const guards = jobs["test-slow-shard"]!.steps.filter((s) => /\bnpm ci\b|playwright install chromium/.test(s.run ?? "") || /^actions\/cache(\/restore)?@/.test(s.uses ?? ""));
   assert.equal(guards.length, 4, "test-slow-shard must still carry npm ci, the Chromium cache, its install and the bash 3.2 cache (W1-T11263)");
   const installs = guards.map((s) => evalIf(s.if, outputs));
+  const subs = {
+    "${{ matrix.shard }}": "1",
+    "${{ needs.test-slow-plan.outputs.count }}": "2",
+    "${{ steps.plan-reading.outputs.established }}": plan.outputs.established ?? "",
+    "${{ steps.plan-reading.outputs.class }}": plan.outputs.class ?? "",
+  };
+  // W1-T11263: the bash 3.2 step recomputes the slow tier's selection; run it where Actions would, with a provisioner.
+  const bash32 = step("test-slow-shard", (s) => (s.name ?? "").startsWith("Provision bash 3.2 when this slow shard runs"));
+  writeFileSync(join(ws.dir, "bash32-provision.sh"), `echo "provision $*" >> "${join(ws.dir, "calls.log")}"\n: > "$2"\n`);
+  const probed = evalIf(bash32.if, outputs)
+    ? ws.run(bash32.run!, subs, { stubNode: true, env: { GITHUB_ENV: join(ws.dir, "github-env.txt") } })
+    : undefined;
+  if (probed) assert.equal(probed.status, 0, probed.all);
   const ran = ws.run(
     step("test-slow-shard", (s) => (s.name ?? "").startsWith("Run the slow tier")).run!,
-    {
-      "${{ matrix.shard }}": "1",
-      "${{ needs.test-slow-plan.outputs.count }}": "2",
-      "${{ steps.plan-reading.outputs.established }}": plan.outputs.established ?? "",
-      "${{ steps.plan-reading.outputs.class }}": plan.outputs.class ?? "",
-    },
+    subs,
     { stubNode: true },
   );
   assert.equal(ran.status, 0, ran.all);
   // W1-T11263: the bash 3.2 gate reads the files of exactly the --run slow invocation this shard runs.
   const tierArgs = /^npm run --silent test:slow -- (.+)$/m.exec(ran.calls)?.[1];
   if (tierArgs !== undefined) {
-    assert.equal(/ bash32-slow-files\.txt (.+)$/m.exec(ran.calls)?.[1], `--run slow ${tierArgs}`,
+    assert.ok(probed, "a shard that runs the slow tier also runs the bash 3.2 step");
+    assert.equal(/ bash32-slow-files\.txt (.+)$/m.exec(probed.calls)?.[1], `--run slow ${tierArgs}`,
       "the bash 3.2 probe and the slow tier run get identical arguments");
+    assert.match(probed.calls, /^provision bash32-slow-files\.txt /m, "the probe's list reaches the provisioner");
     assert.equal(JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")).scripts["test:slow"],
       "node scripts/test-tier-manifest.mjs --run slow", "test:slow is the --run slow invocation the probe mirrors");
   }
