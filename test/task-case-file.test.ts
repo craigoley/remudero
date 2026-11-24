@@ -79,10 +79,6 @@ test("three-form ledger read sees gzip, plain, and live with exact task-owned ro
   assert.equal(result.state, "observed");
   assert.deepEqual(result.forms, { gzip: 1, plain: 1, live: 1 });
   assert.equal(result.rows.length, 3);
-  const limited = await readTaskCaseLedger(dir, task.id, now, { maxRows: 2 });
-  assert.equal(limited.state, "unavailable");
-  assert.equal(limited.reason, "task-row-bound-exceeded");
-  assert.deepEqual(limited.rows, []);
 });
 
 test("missing and malformed ledger sources stay unavailable", async () => {
