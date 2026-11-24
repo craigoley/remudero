@@ -567,13 +567,14 @@ export function daemonKickPort(root: string, target: { repo: string; isSelf: boo
  * {@link createNativeTargetJobRunner} consumes them; durable recovery survives a missing marker.
  */
 export function daemonTargetJobPort(root: string, self: { repo: string }): {
-  pendingTargetJobs: () => Array<DaemonKick & { repo: string }>;
+  pendingTargetJobs: () => Array<DaemonKick & { repo: string; requestedAt?: string }>;
 } {
   return {
     pendingTargetJobs: () => {
       const marked = pendingKicks(root).flatMap((kick) =>
         kick.repo !== undefined && kick.repo.toLowerCase() !== self.repo.toLowerCase() && existsSync(kickFilePath(root, kick.taskId, kick.repo))
-          ? [{ taskId: kick.taskId, origin: kick.origin, repo: kick.repo }] : []);
+          // W1-T14576: the marker's request time travels with it, so a waiting job's deferral row can say how long it waited.
+          ? [{ taskId: kick.taskId, origin: kick.origin, repo: kick.repo, requestedAt: kick.requestedAt }] : []);
       const durable = fileTargetJobStore(root).readAll().filter((job) => job.status === "admitted" && job.repo.toLowerCase() !== self.repo.toLowerCase());
       return [...marked, ...durable.filter((job) => !marked.some((kick) => kick.origin === job.origin))];
     },
