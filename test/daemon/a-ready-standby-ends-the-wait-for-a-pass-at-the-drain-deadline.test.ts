@@ -1,4 +1,4 @@
-// TASKID: with a hand-over started, a ready standby ends the exit's wait for an in-flight pass at the latch's drain
+// W1-T14709: with a hand-over started, a ready standby ends the exit's wait for an in-flight pass at the latch's drain
 // deadline, not at latch + maxDrainWaitMs (Craig's yes, 2026-11-24 17:43Z). On hand-over 4 (2026-11-24) the exit's
 // drain bound was 558,831 ms, yet it waited 971,936 ms for the pass while the standby had long been ready.
 import assert from "node:assert/strict";
@@ -91,7 +91,7 @@ async function fixture(t: TestContext, handoff?: DaemonHandoff) {
   return { daemon, finished: () => finished, advance, row: (step: string) => rows.find((r) => r.step === step)?.extra };
 }
 
-test("TASKID with a ready standby the exit stops waiting for an in-flight pass at the drain deadline", async (t) => {
+test("W1-T14709 with a ready standby the exit stops waiting for an in-flight pass at the drain deadline", async (t) => {
   const standby = standbyHandoff(true);
   const h = await fixture(t, standby.handoff);
   await h.advance(40, 109);
@@ -107,7 +107,7 @@ test("TASKID with a ready standby the exit stops waiting for an in-flight pass a
   assert.equal(abandoned?.pre_exit_pass, "awaited_in_flight");
 });
 
-test("TASKID without a ready standby the exit still waits for the pass past the drain deadline", async (t) => {
+test("W1-T14709 without a ready standby the exit still waits for the pass past the drain deadline", async (t) => {
   for (const handoff of [standbyHandoff(false).handoff, undefined]) {
     await t.test(handoff ? "a standby that is not ready" : "no hand-over", async (tt) => {
       const h = await fixture(tt, handoff);
