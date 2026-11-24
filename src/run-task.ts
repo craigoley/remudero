@@ -1524,6 +1524,10 @@ import {
 import type { DuplicateCorpusEntry } from "./lib/knowledge-dedup.js";
 import {
   addedExportsFromPatch,
+  addedModulesFromPatch,
+  exportsNewInPatch,
+  exportsWithoutProductionCaller,
+  type ProductionCallerTree,
   assertLintClean,
   changedTaskIds,
   rawChangedTaskIds,
@@ -19891,6 +19895,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   let newTaskIds: Set<string> | undefined;
   let newMonolithIds: Set<string> | undefined;
   let addedExports: AddedExport[] = [];
+  let addedModules: string[] = [];
+  let newExports: AddedExport[] = [];
   let pathExistsAtBase: ((repoRelPath: string) => boolean) | undefined;
   // W1-T3274: ids CARVED out of `scope` below because their entire diff against `baseRef` is a
   // status flip to a closed state (queued -> merged, e.g. `plan-reconcile --write`'s own write) —
@@ -20017,6 +20023,8 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
         maxBuffer: 64 * 1024 * 1024,
       });
       addedExports = addedExportsFromPatch(diffText, pathExistsAtBase);
+      addedModules = addedModulesFromPatch(diffText);
+      newExports = exportsNewInPatch(addedExports, diffText);
     } catch (e) {
       console.error(`### rmd lint-plan: cannot resolve --base ${baseRef}: ${(e as Error).message}`);
       return 2;
@@ -20426,6 +20434,30 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   // pointed at a fixture tree with no policy.yaml of its own is a no-op here
   // (nothing to check), never a spurious failure over a file that was never
   // meant to exist at that path.
+  // W1-T12173: the exports and modules this diff adds, read against HEAD's tree once per run.
+  const productionCallerTree: ProductionCallerTree = {
+    filesMentioning: (words) => {
+      try {
+        const spec = ["*.ts", "*.mts", "*.cts", "*.tsx", "*.js", "*.mjs", "*.cjs"];
+        const args = ["grep", "-l", "-I", "-F", "-w", ...words.flatMap((w) => ["-e", w]), "--", ...spec];
+        return hostWorktreeGit(checkoutRoot, args, { maxBuffer: 1 << 26 }).split("\n").filter(Boolean);
+      } catch (error) {
+        if ((error as { status?: number }).status === 1) return []; // git grep: no file names any word
+        throw error;
+      }
+    },
+    read: (rel) => (existsSync(join(checkoutRoot, rel)) ? readFileSync(join(checkoutRoot, rel), "utf8") : undefined),
+  };
+  try {
+    for (const f of exportsWithoutProductionCaller(newExports, addedModules, productionCallerTree)) {
+      if (f.severity === "block") failing++;
+      else warned++;
+      (f.severity === "block" ? console.error : console.warn)(`${f.severity === "block" ? "✗" : "  ⚠"} [${f.check}] ${f.message}`);
+    }
+  } catch (error) {
+    warned++;
+    console.warn(`  ⚠ lint-plan: [production-caller] not checked: ${(error as Error).message}`);
+  }
   for (const c of sourceConflicts) {
     failing++;
     console.error(`✗ ${c.id}: the plan repository and the code root hold different bytes for this id: ` +
