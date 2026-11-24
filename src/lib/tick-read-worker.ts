@@ -3619,8 +3619,20 @@ export function buildEscalationReconcileCandidates(
 
 /** W1-T13995: the pull request, Head line and checks an escalation's body names, only when all three read exactly. */
 function escalatedCondition(owner: string, repo: string, body: string | undefined): { condition?: EscalationConditionEvidence } {
-  const named = new Set([...(body ?? "").matchAll(/https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)/g)]
-    .map((m) => `${m[1]!.toLowerCase()}/${m[2]!.toLowerCase()}#${m[3]}`));
+  // Each https URL token is parsed, and its host compared exactly, rather than matching a host-shaped pattern in free text.
+  const named = new Set<string>();
+  for (const token of (body ?? "").matchAll(/https:\/\/[^\s<>()[\]"'`]+/g)) {
+    let url: URL;
+    try {
+      url = new URL(token[0]);
+    } catch (error) {
+      void error; // an unparseable token names no pull request
+      continue;
+    }
+    if (url.protocol !== "https:" || url.hostname !== "github.com") continue;
+    const m = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?!\d)/.exec(url.pathname);
+    if (m) named.add(`${m[1]!.toLowerCase()}/${m[2]!.toLowerCase()}#${m[3]}`);
+  }
   const prNumber = prReferentFromIssueText(body);
   const head = escalationHeadSha(body);
   const checks = escalationNamedChecks(body);
