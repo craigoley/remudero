@@ -139,32 +139,50 @@ export function withoutBirthRounds(rounds: readonly CiFrictionRound[], search: P
   });
 }
 
-type CiFrictionOwnerSearch = OwnerSearch & { historyRevision?: () => string };
+/** W1-T14708: `addedSince(base)` names the paths a commit in `base..revision` added, or is undefined when `base` is not
+ *  an ancestor of the pinned revision. A unit's adding pull request can change only through such a commit. */
+type CiFrictionOwnerSearch = OwnerSearch & { historyRevision?: () => string; addedSince?: (base: string) => ReadonlySet<string> | undefined };
 
+/** W1-T14708: one journal for every pass, not one per ledger hour: an adding pull request does not depend on the ledger,
+ *  and a pass that outlives the hour or a restart must find what it computed. */
+export const CI_FRICTION_UNIT_JOURNAL_PERIOD = "adding-pr:v2";
+const ADDING_PR_DIGEST = "adding-pr:v2";
+type AddingPrUnit = { pr: number | null; revision: string };
+const isAddingPrUnit = (value: unknown): value is AddingPrUnit => typeof value === "object" && value !== null &&
+  /^[0-9a-f]{40}$/.test(String((value as AddingPrUnit).revision)) &&
+  ((value as AddingPrUnit).pr === null || Number.isSafeInteger((value as AddingPrUnit).pr));
+
+/** W1-T14708 (invariant:a-pass-outlives-restarts): each unit is the pull request that added one test file, saved with
+ *  the revision it was read at. A later pass reuses it while no commit since that revision added the file, so a merge
+ *  that does not touch the file keeps it, and a pass cut off by a restart resumes on the next daemon. */
 function journaledBirthRounds(
-  rounds: readonly CiFrictionRound[], search: CiFrictionOwnerSearch, deps: GardenerDeps, period: number,
+  rounds: readonly CiFrictionRound[], search: CiFrictionOwnerSearch, deps: GardenerDeps,
 ): CiFrictionRound[] {
-  const { addedByPr, historyRevision } = search;
+  const { addedByPr, historyRevision, addedSince } = search;
   if (!addedByPr || !historyRevision) return withoutBirthRounds(rounds, search);
-  const journal = gardenUnitJournal(deps.stateDir, "ci-friction", period, {
-    log: deps.log,
-    isResult: (value): value is number | null => value === null || (typeof value === "number" && Number.isSafeInteger(value)),
-  });
+  const journal = gardenUnitJournal(deps.stateDir, "ci-friction", CI_FRICTION_UNIT_JOURNAL_PERIOD, { log: deps.log, isResult: isAddingPrUnit });
   const seen = new Map<string, number | undefined>();
-  let digest: string | undefined;
+  const addedAfter = new Map<string, ReadonlySet<string> | undefined>();
+  const stillValid = (file: string, saved: AddingPrUnit, revision: string): boolean => {
+    if (saved.revision === revision) return true;
+    if (!addedSince) return false;
+    if (!addedAfter.has(saved.revision)) addedAfter.set(saved.revision, addedSince(saved.revision));
+    const added = addedAfter.get(saved.revision);
+    return added !== undefined && !added.has(file);
+  };
   let resumed = 0;
   let fresh = 0;
   const filtered = withoutBirthRounds(rounds, { addedByPr: (file) => {
     if (seen.has(file)) return seen.get(file);
-    digest ??= createHash("sha256").update(`adding-pr:v1:${historyRevision()}`).digest("hex");
-    const saved = journal.get(file, digest);
-    if (saved !== undefined) {
+    const revision = historyRevision();
+    const saved = journal.get(file, ADDING_PR_DIGEST);
+    if (saved !== undefined && stillValid(file, saved, revision)) {
       resumed++;
-      seen.set(file, saved ?? undefined);
-      return saved ?? undefined;
+      seen.set(file, saved.pr ?? undefined);
+      return saved.pr ?? undefined;
     }
     const pr = addedByPr(file);
-    journal.done(file, digest, pr ?? null);
+    journal.done(file, ADDING_PR_DIGEST, { pr: pr ?? null, revision });
     fresh++;
     seen.set(file, pr);
     return pr;
@@ -1201,6 +1219,17 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
   return {
     pin: () => gitCiFrictionOwnerSearch(git, refName),
     historyRevision: pinned,
+    addedSince: (base) => {
+      const source = pinned();
+      try {
+        git(["merge-base", "--is-ancestor", base, source]);
+      } catch {
+        // Exit 1 (not an ancestor) and an unknown object both mean the saved revision cannot vouch for its units, and
+        // both have one remedy: undefined reruns them, so no unit is reused on an unreadable history.
+        return undefined;
+      }
+      return new Set(git(["log", "--diff-filter=A", "--name-only", "--format=", `${base}..${source}`]).split("\n").filter(Boolean));
+    },
     readSource: (file) => git(["show", `${pinned()}:${file}`]),
     addedByPr: (file) => {
       if (!addedBy.has(file)) {
@@ -1987,11 +2016,10 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       return `${head}:${gardenLedgerBucket(clock)}:${liveAccessStamp()}:${fileStamp(report)}:${archives}`;
     },
     inventory: () => {
-      const period = gardenLedgerBucket(clock);
       const records = sources.ledgerRecords();
       const plan = sources.planState();
       const ownerSearch: CiFrictionOwnerSearch = sources.ownerSearch.pin?.() ?? sources.ownerSearch;
-      const ledgerRounds = journaledBirthRounds(ciFrictionRoundsFromLedger(records), ownerSearch, deps, period);
+      const ledgerRounds = journaledBirthRounds(ciFrictionRoundsFromLedger(records), ownerSearch, deps);
       const hand = sources.handFixes?.();
       if (hand?.state === "unmeasured") deps.log("ci-friction.hand_fixes_unmeasured", { reason: hand.reason });
       const gateFireRates = sources.gateFireRates?.();
