@@ -25,6 +25,11 @@
     - src/lib/deploy-judge.ts
     - src/lib/daemon.ts
     - test/daemon/the-restart-score-counts-a-change-by-the-code-it-affects.test.ts
+    # 2026-11-24 amendment (PR #20683 review): the closure verdict must name the changed paths it holds, the daemon
+    # command must pass the new row to runDaemon, and the CI-wait wiring test pins each reading's change list.
+    - src/lib/daemon-closure.ts
+    - src/cli/commands/daemon.ts
+    - test/daemon-external-wait-freshness.test.ts
   status: queued
   attempts: 0
   acceptance:
@@ -62,8 +67,9 @@
     2. Carry the class on each change that the freshness reading gives the daemon.
     3. In `decideFreshnessRestart`, score a `worker_only` change 0. Compute the staleness pressure as the larger of two parts: the time since the first `reviewer` change against `stalenessHorizonMs`, and the time since the first `loop` change against `loopOnlyHorizonMs`.
     4. Give `coalesceFreshnessRestart` the same horizon for its `upper_age` release.
-    5. Add `loopOnlyHorizonMs` to the block `freshnessRestart`: value 10800000 (180 minutes), bounds 3600000 to 43200000, on one line.
+    5. Add `loopOnlyHorizonMs` to the block `freshnessRestart`: value 10800000 (180 minutes), bounds 3600000 to 43200000, on one line. Pass it from `freshnessRestartOpts` to `runDaemon`.
     6. Add `change_classes` and `horizon_ms` to `daemon.freshness_decision`.
+    7. `judgeAdvanceByClosure` records `inside`, the changed paths that lie in the closure, so a commit of a material advance is classed by its own files.
     The fast releases stay first: install inputs, withheld reviews and an unreadable advance.
     NOT IN SCOPE: the quiet window (W1-T10059), what makes the daemon busy (W1-T10054), and the image recycle.
   falsifier: |
