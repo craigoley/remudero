@@ -897,6 +897,8 @@ export async function daemonSreLaneEnabled(
   installRoot: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   unresolved?: SreLaneUnresolvedPage,
+  /** W1-T14649: the boot passes this so the page, a whole-ledger-union read, settles off the boot path; it never rejects. */
+  background?: (paged: Promise<void>) => void,
 ): Promise<boolean> {
   const registryPath = process.env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined
     ? process.env.RMD_SELECTED_INSTANCE_REGISTRY.trim()
@@ -908,7 +910,11 @@ export async function daemonSreLaneEnabled(
   const row = sreLaneStartRow(sreLane);
   log(row.step, row.fields);
   const enabled = sreLaneEnabled(sreLane);
-  if (unresolved !== undefined) await pageUnresolvedSreLane(sreLane, enabled, { stateRoot, registryPath }, unresolved, log);
+  if (unresolved !== undefined) {
+    const paged = pageUnresolvedSreLane(sreLane, enabled, { stateRoot, registryPath }, unresolved, log);
+    if (background !== undefined) background(paged);
+    else await paged;
+  }
   return enabled;
 }
 
@@ -3056,7 +3062,7 @@ export async function daemonCommand(
                 ...(await daemonSreLaneEnabled(config.root, repoRoot, log, {
                   escalate: (info) => escalateSreLaneUnresolved(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
                   clear: (info) => escalateSreLaneUnresolvedCleared(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-                }) ? [
+                }, (paged) => { void paged; }) ? [
                   startBoundedDaemonSreLane(
                     (mergedLastDay) => daemonSreLaneInput({
                       stateDir: join(config.root, "state"),
