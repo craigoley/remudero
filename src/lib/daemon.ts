@@ -6421,6 +6421,8 @@ export async function runDaemon(
   type FreshnessPass = "skipped_ran_since_latch" | "skipped_ran_since_stale" | "awaited_in_flight" | "no_sweep_at_exit";
   type ExitPass = {
     kind: FreshnessPass; settled: Promise<void>; overlapped: boolean; overlapMs: number; limitAtMs?: number;
+    /** With a hand-over started, the drain deadline: a ready standby ends the wait here (Craig 2026-11-24). */
+    standbyLimitAtMs?: number;
     /** Records pre_exit_pass once: when the pass settles, or at its limit when the exit goes without it (#19797 review). */
     record?: () => void;
   };
@@ -6430,13 +6432,26 @@ export async function runDaemon(
   const passWithinLimit = async (pass: ExitPass): Promise<void> => {
     if (pass.limitAtMs === undefined) return pass.settled;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let standbyTimer: ReturnType<typeof setTimeout> | undefined;
     const limit = new Promise<"limit">((resolve) => { timer = setTimeout(() => resolve("limit"), Math.max(0, pass.limitAtMs! - daemonClock.now())); });
-    const outcome = await Promise.race([pass.settled.then(() => "settled" as const), limit]);
+    // A pass is in process, so what it has not posted is redone by the successor; a standby that is not ready keeps
+    // the wait to its limit, as before.
+    const standbyAtMs = pass.standbyLimitAtMs;
+    const attemptStarted = handoffStart;
+    const standby = standbyAtMs === undefined || attemptStarted === undefined ? undefined
+      : new Promise<"standby_ready">((resolve) => {
+        standbyTimer = setTimeout(() => {
+          void attemptStarted.then(async (attempt) => { if (attempt && await attempt.ready()) resolve("standby_ready"); });
+        }, Math.max(0, standbyAtMs - daemonClock.now()));
+      });
+    const outcome = await Promise.race([pass.settled.then(() => "settled" as const), limit, ...(standby ? [standby] : [])]);
     clearTimeout(timer);
-    if (outcome === "limit") {
+    clearTimeout(standbyTimer);
+    if (outcome !== "settled") {
       pass.record?.();
+      const limitAtMs = outcome === "standby_ready" ? standbyAtMs! : pass.limitAtMs;
       log("daemon.freshness_pre_exit_pass_abandoned", { pre_exit_pass: pass.kind, max_drain_wait_ms: freshnessMaxDrainWaitMs,
-        limit_at: fixedClock(pass.limitAtMs).iso() });
+        limit_at: fixedClock(limitAtMs).iso(), ...(outcome === "standby_ready" ? { ended_by: "standby_ready" } : {}) });
     }
   };
   const drainBeforeRestart = async (
@@ -6639,6 +6654,9 @@ export async function runDaemon(
     const pass: ExitPass = { kind: preExitPass, settled: Promise.resolve(),
       overlapped: dispatchLatchAtMs !== undefined && pendingPass !== undefined, overlapMs: 0,
       ...(pendingPass ? { limitAtMs: (dispatchLatchAtMs ?? passStartedAtMs) + freshnessMaxDrainWaitMs } : {}) };
+    // With a hand-over started, a ready standby ends the wait for the pass at the latch's drain deadline.
+    const latchWindow = dispatchLatchAtMs !== undefined && latchDrain?.latchAtMs === dispatchLatchAtMs ? latchDrain.windowDeadlineMs : undefined;
+    if (pendingPass && handoffStart && latchWindow !== undefined && latchWindow < pass.limitAtMs!) pass.standbyLimitAtMs = latchWindow;
     const recordPass = () => {
       if (!pendingPass || freshnessPhases.pre_exit_pass !== undefined) return;
       freshnessPhases.pre_exit_pass = Math.max(0, daemonClock.now() - passStartedAtMs);
