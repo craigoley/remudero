@@ -160,6 +160,9 @@ import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason
 import type { StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, openDependentFanout, type DispatchValueContext } from "./dispatch-value.js";
+import {
+  DISPATCH_STARVED_STEP, dispatchReadySince, indexStarvationLedger, observeDispatchStarvation, utcDayOf,
+} from "./dispatch-starvation.js";
 import { CLAIM_SILENCE_FLOOR_MS, claimSilenceWindow, dispatchClaimRef, type DispatchClaimListing } from "./dispatch-claim.js";
 import {
   OPS_CATALOG_OUTCOMES, opsCatalogRefusalStage, readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome, type OpsCatalogShadowInput,
@@ -5071,6 +5074,16 @@ export async function runDaemon(
   // survives the very process replacement it caused (design v); updated once per tick below from
   // that tick's own `sweepCycleOutcome.reviewerCodeStale` reading.
   const bootLedgerLines = deps.readLedgerLines?.() ?? [];
+  // W1-T14490: a ready task ranked below the lanes it would fill is named once per UTC day, after the pick is final.
+  const starvationLedger = indexStarvationLedger(bootLedgerLines);
+  const logDispatchStarvation = (eligible: readonly Task[], picked: readonly Task[], context: DispatchValueContext | undefined) => {
+    const nowMs = daemonClock.now();
+    for (const row of observeDispatchStarvation({ eligible, picked, nowMs, lastRowDayById: starvationLedger.lastRowDayById,
+      readySinceById: dispatchReadySince(eligible, context, nowMs, starvationLedger.mergedAtById) })) {
+      starvationLedger.lastRowDayById.set(row.task, utcDayOf(nowMs));
+      log(DISPATCH_STARVED_STEP, { ...row });
+    }
+  };
   // W1-T13248: a page left open by an earlier process (a marker row in the boot read) keeps its close armed.
   claimStallCloseArmed = bootLedgerLines.some((raw) => raw.includes("dispatch.claim_stall.escalated"));
   const restartLedger =restartCycleLedgerRows(bootLedgerLines);
@@ -8454,6 +8467,7 @@ export async function runDaemon(
     }, planForBatch));
     if (tickLedgerLines !== undefined) {
       const lines = tickLedgerLines;
+      indexStarvationLedger(lines, starvationLedger);
       for (const [taskId, deferral] of claimHeldDeferrals) {
         if (claimDroppedSince(lines, deferral.ref, deferral.sinceMs)) claimHeldDeferrals.delete(taskId);
       }
@@ -9663,6 +9677,7 @@ export async function runDaemon(
         ...(restartDecided ? { restart_decided: true } : {}) });
       if (isRefill) log("dispatch.pick_scored", dispatchPickPayload(task, "lane-refill", refill!.eligible, refill!.context,
         [task], [...inFlightTasks].filter(t => t !== task), deps.observedByTask ?? NO_OBSERVED_SCOPE));
+      if (isRefill) logDispatchStarvation(refill!.eligible, [task], refill!.context);
       log("daemon.iteration", { task: task.id, attempted: attempted.length, max: opts.max ?? null,
         ...(resumableHandoffs.has(task.id) ? { resumes_handoff: resumableHandoffs.get(task.id)!.branch } : {}) });
       // The first wave is sampled once, by the tick (below): a refill is the lane change.
@@ -9722,6 +9737,7 @@ export async function runDaemon(
         const tickStarted = admitted.filter(t => !occupiedChildren.has(t));
         for (const task of tickStarted) log("dispatch.pick_scored", dispatchPickPayload(task, "tick", tickEligible,
           tickContext, tickStarted, occupiedTasks, deps.observedByTask ?? NO_OBSERVED_SCOPE));
+        logDispatchStarvation(tickEligible, tickStarted, tickContext);
         if (dispatchSet.length > 1 && admitted.length > 0) {
           log("dispatch.concurrent_set", { tasks: admitted.map((t) => t.id), lane_count: laneCount });
         }
