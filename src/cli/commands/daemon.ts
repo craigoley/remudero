@@ -1294,6 +1294,8 @@ export async function daemonCommand(
     applyMemoryPolicy?: typeof applyDaemonMemoryPolicy;
     /** W1-T11770: the GET-only api behind `--shadow-ops-catalog`. Production omits it and gets the source's default. */
     opsCatalogApi?: OpsCatalogApi;
+    /** W1-T14544: test seam for observing the post-lock plan quarantine escalation. */
+    raisePlanEscalation?: (escalation: Escalation) => string;
   } = {},
   host: DaemonCommandHost,
   standby?: StandbyBoot,
@@ -1606,7 +1608,11 @@ export async function daemonCommand(
   // default branch so the scheduled plan is current — a stale clone would drain an old plan.
   let plan: Plan;
   const raiseDuplicate = (e: Escalation): string =>
-    escalate({ ...e, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId });
+    (deps.raisePlanEscalation ?? ((escalation) => escalate({ ...escalation, runId }, { issues: ghIssueGateway(target.owner, target.repo), ledgerPath, runId })))(e);
+  const deferredPlanEscalations: Escalation[] = [];
+  const raisePlanEscalation = standby
+    ? (e: Escalation): string => { deferredPlanEscalations.push(e); return "deferred until standby promotion"; }
+    : raiseDuplicate;
   const requestShardRepair = shardRepairRequester(join(config.root, "state"), log);
   const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
   const planReaders = daemonPlanReaders(target.planPath, reportPlanQuarantine);
@@ -1631,7 +1637,7 @@ export async function daemonCommand(
   const foreignTargetPlanLoad = (path: string) => loadTargetPlanQuarantiningDuplicates(path, target.repo);
   if (standby) {
     // W1-T14544: a standby syncs no checkout (the active daemon owns them until it lets go); it reads the plan as it stands.
-    plan = target.isSelf ? loadDaemonPlan(target.planPath, log, raiseDuplicate) : loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
+    plan = target.isSelf ? loadDaemonPlan(target.planPath, log, raisePlanEscalation) : loadDaemonPlan(target.planPath, log, raisePlanEscalation, foreignTargetPlanLoad);
   } else if (!target.isSelf && !flagValue(rest, "--plan")) {
     const repoDir = join(reposDir, target.repo);
     if (!existsSync(repoDir)) {
@@ -1656,7 +1662,7 @@ export async function daemonCommand(
     plan = synced.plan;
   } else {
     // An explicit --plan overrides the derived path — read it literally, no git sync.
-    plan = target.isSelf ? loadDaemonPlan(target.planPath, log, raiseDuplicate) : loadDaemonPlan(target.planPath, log, raiseDuplicate, foreignTargetPlanLoad);
+    plan = target.isSelf ? loadDaemonPlan(target.planPath, log, raisePlanEscalation) : loadDaemonPlan(target.planPath, log, raisePlanEscalation, foreignTargetPlanLoad);
   }
   bootPhases.mark("plan_load");
 
@@ -1935,6 +1941,15 @@ export async function daemonCommand(
     standby.promoted = true;
     leaveExitCodeForEntrypoint(join(config.root, "state"), process.pid);
     standbyPromotion = { ...promotion, lockWaitMs: locked.lockWaitMs, takeoverStartMs: standby.ports.clock.now() };
+    for (const escalation of deferredPlanEscalations) {
+      try {
+        const issueUrl = raiseDuplicate(escalation);
+        log("plan.quarantine_escalated_after_promotion", { id: escalation.taskId, issue_url: issueUrl });
+      } catch (error) {
+        log("plan.quarantine_escalation_failed_after_promotion", { id: escalation.taskId,
+          reason: String((error as Error)?.message ?? error).slice(0, 300) });
+      }
+    }
     await writeBootTargetState();
   } else try {
     drainLock = acquireDrainLock(drainLockPath);

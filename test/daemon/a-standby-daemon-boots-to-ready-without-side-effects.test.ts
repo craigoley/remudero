@@ -181,6 +181,34 @@ test("W1-T14544 a standby starts no garden and syncs no checkout before it holds
   assert.equal(existsSync(daemonTargetRecordPath(w.state)), false);
 });
 
+test("W1-T14544 a standby defers every plan quarantine escalation until it holds the lock", async (t) => {
+  const duplicate = ["W1-T14544", "W1-T14544"].map((id) =>
+    `- id: ${id}\n  title: duplicate fixture\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: medium\n  status: queued\n`).join("");
+  const w = world(t, duplicate);
+  mkdirSync(join(w.home, "tasks.d"), { recursive: true });
+  writeFileSync(join(w.home, "tasks.d", "invalid.yaml"), "- id: W1-T14545\n  title: invalid shard\n  verify: not-a-verify-mode\n");
+  const calls: Array<{ id: string; lockHeld: boolean }> = [];
+  const code = await standby(w, ["--plan", w.planPath], {
+    runDaemon: async () => stopped,
+    raisePlanEscalation: (escalation: { taskId: string }) => {
+      calls.push({ id: escalation.taskId, lockHeld: existsSync(join(w.state, "drain.lock")) });
+      return "fixture://quarantine-escalation";
+    },
+    standby: { pollMs: 5 },
+  }, async () => {
+    await until(() => existsSync(standbyReadyPath(w.state, RUN_ID)), "the ready marker");
+    assert.deepEqual(calls, [], "duplicate-id quarantine causes no GitHub-backed escalation before promotion");
+    assert.equal(existsSync(join(w.state, "drain.lock")), false);
+    writeFileSync(standbyPromotePath(w.state, RUN_ID), "");
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(calls, [
+    { id: "W1-T14544", lockHeld: true },
+    { id: "W1-T14545", lockHeld: true },
+  ], "duplicate-id and invalid-shard quarantines are escalated only after lock acquisition");
+  assert.equal(rows(w).filter((r) => r.step === "plan.quarantine_escalated_after_promotion").length, 2);
+});
+
 test("W1-T14544 a promoted standby leaves its exit code for the entrypoint", (t) => {
   const state = join(ownedFixtureDir(t, "standby-exit").dir, "state");
   const proc = new EventEmitter();
