@@ -3,13 +3,14 @@
   repo: remudero
   depends_on: []
   type: implement
-  verify: auto
+  verify: human  # parked with the retirement: any risk ruling judged the record before this edit
   risk: low
   priority: 1.25
   # refusal-amendment (W1-T11297, run W1-T11297-1795019683145, 2026-11-18T16:45:22.499Z): the worker refused criterion 1 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: Preventing the recorded round requires a change to the sender census or its pre-CI invocation, both outside the declared files.
   #   this task is held from dispatch until its record changes; an Architect must make the change above
-  status: queued
+  status: blocked
+  retirement: retired  # retired by rule 2 (cause stopped) of the operator's mechanical rulings (2026-10-21, W1-T10371): the symptom had 0 occurrence(s) across 7 day(s), never seen. Retired by the machine-filing judge, 2026-11-24T10:25:14.630Z
   attempts: 0
   author_class: machine
   origin: "ci-friction:check:test:test/every-message-names-one-declared-sender.test.ts"
