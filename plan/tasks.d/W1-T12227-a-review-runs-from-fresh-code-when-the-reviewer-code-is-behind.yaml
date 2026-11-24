@@ -32,7 +32,7 @@
     - test/an-untasked-pr-silently-skips-the-semantic-reviewer.test.ts
     - test/gardeners/the-config-gardener-reads-the-same-steps-once-gather-runs-owns-its-list.test.ts # 2026-11-23: pins the gardener's step set
     - test/helpers/the-config-gardener-reads-only-the-ledger-steps-it-prices.ts # 2026-11-23: one fixture row per gardener step
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A review that the fix pipeline requires reads the freshness of the reviewer code before it starts a reviewer. If the reading is stale, the review runs from the fresh tree and no reviewer starts in this process. The test drives `buildRequiredFixReviewRunner`"
