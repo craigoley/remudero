@@ -18,7 +18,7 @@ import type { Config } from "#src/lib/config-schema.js";
 import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import { ledgerPathFor } from "#src/lib/ledger-path.js";
 import {
-  OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_OFFER_BYTES, OPS_CATALOG_OFFER_MAX_PAYLOAD_BYTES, OpsCatalogAuthMissingError,
+  OPS_CATALOG_MAX_OFFER_BYTES, OpsCatalogAuthMissingError,
   acceptOfferedOpsCatalogBlobs, keptOpsCatalogBlobsForChild, readOpsCatalogSnapshotAsync,
   type OpsCatalogApi, type OpsCatalogSnapshot,
 } from "#src/lib/ops-catalog-source.js";
@@ -282,19 +282,19 @@ test("W1-T13691 criterion 2: an offered blob is kept only after the checks a Git
   assert.equal(r.calls.filter((p) => p.endsWith("/git/ref/heads/main")).length, 2, "and the final ref");
   assert.deepEqual(view(snap), view(await readOpsCatalogSnapshotAsync(r.target, cold(r))));
 
-  // The per-blob bound: a blob past it is dropped even with a correct SHA-1.
-  const big = Buffer.alloc(OPS_CATALOG_MAX_BLOB_BYTES + 1, 0x61);
-  const bigSha = createHash("sha1").update(`blob ${big.length}\0`).update(big).digest("hex");
-  assert.deepEqual(acceptOfferedOpsCatalogBlobs(offer(REPO_ID, [[bigSha, big]]), cold(r)), { offered: 1, kept: 0, refused: 1 });
-  // The total bound: an offer past its payload bound keeps nothing (W1-T14368: the child reads a larger catalog from GitHub).
-  const many = Array.from({ length: OPS_CATALOG_OFFER_MAX_PAYLOAD_BYTES / OPS_CATALOG_MAX_BLOB_BYTES + 1 }, (_, i) => {
-    const bytes = Buffer.alloc(i === 0 ? 1024 : OPS_CATALOG_MAX_BLOB_BYTES, 0x61 + (i % 20));
-    return [createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex"), bytes] as [string, Buffer];
-  });
-  assert.ok(offer(REPO_ID, many).length <= OPS_CATALOG_MAX_OFFER_BYTES, "positive control: the offer itself is within the read bound");
-  const counted = acceptOfferedOpsCatalogBlobs(offer(REPO_ID, many), cold(r));
-  assert.equal(counted.kept, 0);
-  assert.equal(counted.refused, many.length);
+  // W1-T14638: no per-blob bound: a blob past the old 256 KiB ceiling is kept when its SHA-1 is correct.
+  const OLD_BLOB_CEILING = 256 * 1024;
+  const blobOf = (i: number, length: number): [string, Buffer] => {
+    const bytes = Buffer.alloc(length, 0x61 + (i % 20));
+    return [createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex"), bytes];
+  };
+  const big = blobOf(0, OLD_BLOB_CEILING + 1);
+  assert.deepEqual(acceptOfferedOpsCatalogBlobs(offer(REPO_ID, [big]), cold(r)), { offered: 1, kept: 1, refused: 0 });
+  // The total bound: an offer past its byte bound keeps nothing (W1-T14368: the child reads a larger catalog from GitHub).
+  const many = Array.from({ length: OPS_CATALOG_MAX_OFFER_BYTES / OLD_BLOB_CEILING + 1 }, (_, i) => blobOf(i, i === 0 ? 1024 : OLD_BLOB_CEILING));
+  assert.ok(offer(REPO_ID, many).length > OPS_CATALOG_MAX_OFFER_BYTES, "the offer is past the read bound");
+  assert.deepEqual(acceptOfferedOpsCatalogBlobs(offer(REPO_ID, many), cold(r)), { offered: 0, kept: 0, refused: 0 });
+  assert.equal(acceptOfferedOpsCatalogBlobs(offer(REPO_ID, many.slice(0, 8)), cold(r)).kept, 8, "positive control: the same blobs within the bound are kept");
   // A blob that is not UTF-8 is dropped, as readBlob refuses it.
   const binary = Buffer.from([0xff, 0xfe, 0x00]);
   const binarySha = createHash("sha1").update(`blob ${binary.length}\0`).update(binary).digest("hex");

@@ -4,6 +4,7 @@ import { systemClock } from "./clock.js";
 import { captureImportedModule, importedModuleOf, type ImportedModuleEvidence } from "./prevention-source-evidence.js";
 import { fileURLToPath } from "node:url";
 import type { RepairCostContext } from "./repair-cost-evidence.js";
+import type { FixRoundCommentInput, FixRoundCommentResult, FixRoundCommentWriter } from "./fix-round-comment.js";
 
 const COMPONENT = "ci-log-named-source-paths";
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -76,6 +77,18 @@ export function ciRemedyExecutionOf(value: unknown): CiRemedyExecution {
       dependencies: { existsSyncSha256: String(dependencies.existsSyncSha256), joinSha256: String(dependencies.joinSha256), importedModuleSha256: String(dependencies.importedModuleSha256), clockSha256: String(dependencies.clockSha256), nodeVersion: dependencies.nodeVersion } },
     inputs: { failingChecks: inputs.failingChecks, matchedPaths: inputs.matchedPaths, reachablePaths: inputs.reachablePaths,
       ownership: inputs.ownership as "compared" | "no-base" | "unreadable" } };
+}
+
+/** W1-T14628: a strike that answered red CI checks, through this component, reports its landed push on the PR's one
+ *  fix-round comment. The site names the component, and each row the writer logs carries this execution's invocation
+ *  id (or why none was recorded), so the comment row joins the `fix.remedy_path_execution` row of the same round.
+ *  The fix round calls this once per landed push in place of its plain call, with the writer it was handed; the
+ *  writer never throws. */
+export function upsertCiRemedyRoundComment(execution: CiRemedyExecution, input: FixRoundCommentInput,
+  log: (step: string, extra?: Record<string, unknown>) => void, upsertFixRoundComment: FixRoundCommentWriter): Promise<FixRoundCommentResult> {
+  const remedy = execution.state === "observed" ? { remedy_invocation_id: execution.invocationId } : { remedy_execution: execution.reason };
+  return upsertFixRoundComment({ ...input, round: { ...input.round, site: `${input.round.site} (${COMPONENT})` } },
+    (step, extra) => log(step, { ...extra, ...remedy }));
 }
 
 interface ExecutionRow { step: string; ts: string | null; host: string | null; runId?: string | null;

@@ -76,6 +76,11 @@ export function restartCycleRow(rows: readonly Row[], startAtMs: number): Restar
   const materialTimes = [...decisions, ...(marker ? [marker] : [])].map(r => r.row.stale_since_ms).filter(finite);
   const materialMs = materialTimes.length ? Math.min(...materialTimes) : undefined;
   const nextBoot = ordered.find(r => r.row.step === "daemon.boot" && r.ms > startAtMs);
+  // The successor's own boot row names the code it runs. A handoff's standby checks out main when it is spawned, so
+  // the decision's new_sha (origin as the old daemon last read it) can name an older commit than the one that booted.
+  const successorBoot = ordered.find(r => r.row.step === "daemon.boot" && r.ms === startAtMs);
+  const successorHeadSha = typeof successorBoot?.row.head_sha === "string" && successorBoot.row.head_sha !== ""
+    ? successorBoot.row.head_sha : undefined;
   const first = ordered.find(r => r.row.step === "review.posted" && r.ms > startAtMs && (!nextBoot || r.ms < nextBoot.ms));
   const windowStart = materialMs ?? priorBoot?.ms ?? decision?.ms ?? exit.ms;
   const windowEnd = first?.ms ?? nextBoot?.ms ?? startAtMs;
@@ -161,7 +166,8 @@ export function restartCycleRow(rows: readonly Row[], startAtMs: number): Restar
   return {
     first_material_change_at: iso(materialMs), decided_at: iso(decision?.ms), exit_at: iso(exit.ms)!, started_at: iso(startAtMs)!,
     first_verdict_at: iso(first?.ms), trigger: decision?.row.reason ?? (exit.row.restart_request as Row | undefined)?.origin ?? null,
-    old_sha: marker?.row.old_sha ?? decision?.row.old_sha ?? null, new_sha: marker?.row.new_sha ?? decision?.row.new_sha ?? null,
+    old_sha: marker?.row.old_sha ?? decision?.row.old_sha ?? null,
+    new_sha: successorHeadSha ?? marker?.row.new_sha ?? decision?.row.new_sha ?? null,
     phases_ms: exit.row.phases_ms ?? null,
     reviews_not_started: stops.length - refused.length, reviews_refused_after_finish: refused.length, refused_review_ms: refusedMs,
     admissions_held: window.filter(r => r.row.step === "daemon.admission_held" &&

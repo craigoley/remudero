@@ -12,7 +12,8 @@ import { headroomExhausted, UNREADABLE_DEGRADED_LIMIT } from "./headroom.js";
 import type { UsageSnapshot } from "./headroom.js";
 import type { CostGovernorResult, MemoryGovernorResult, QueueGovernorResult } from "./sweep.js";
 import { checkDispatchGovernors, checkNewBuildReservation, consultMemoryReads, governorDeferPayload, newBuildReservationPayload, type DispatchGovernorDeps, type DispatchGovernorVerdict, type MemoryReadHold, type MemoryReadTracker, type NewBuildReservationVerdict } from "./dispatch-governor.js";
-import { loadPlanQuarantiningDuplicates, unmetDependencies, unmetTaskPrecondition, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
+import { loadPlanKeepingUnseenDependencies, loadPlanQuarantiningDuplicates, unmetDependencies, unmetTaskPrecondition, type KeepsUnseenDependency, type Plan, type Task, type TaskPreconditionOptions, type UnmetTaskPrecondition } from "./plan.js";
+import { createPlanRevisionStore, type PlanRevisionStore } from "./plan-revision-store.js";
 import {
   NO_OBSERVED_SCOPE,
   partitionByFileOverlap,
@@ -708,7 +709,27 @@ export function normalizeRepoName(value: string): string {
  * the target itself still fails the read with loadPlan's PlanError. Quarantine is unchanged.
  */
 export function loadTargetPlanQuarantiningDuplicates(path: string, targetRepo: string): ReturnType<typeof loadPlanQuarantiningDuplicates> {
-  return loadPlanQuarantiningDuplicates(path, undefined, undefined, (task) => !taskTargetsRepo(task.repo, targetRepo));
+  return loadPlanQuarantiningDuplicates(path, undefined, undefined, keepsForeignTaskUnseenDependency(targetRepo));
+}
+
+/** W1-T14712 — the keep rule of every plan read for `targetRepo`: exactly the tasks dispatch refuses as another
+ *  repository's ({@link taskTargetsRepo}, the same comparison) keep a dependency the plan does not hold. A task of the
+ *  target, or one naming no repository, resolves strictly. INVARIANT only-foreign-tasks-keep-unseen-deps. */
+export function keepsForeignTaskUnseenDependency(targetRepo: string): KeepsUnseenDependency {
+  return (task) => !taskTargetsRepo(task.repo, targetRepo);
+}
+
+/** W1-T14712 — the plan store a daemon's boot, lane, reload and tick reads share. A run of a foreign target's task syncs
+ *  its plan through this store; strict, the ops catalog's core records (`repo: remudero`, depending on public ids)
+ *  threw and every lane stopped the daemon with error. No foreign target (the daemon's own repo) keeps the strict store. */
+export function targetPlanRevisionStore(foreignTargetRepo: string | undefined): PlanRevisionStore {
+  return createPlanRevisionStore(foreignTargetRepo === undefined ? {} : { keepsUnseenDependency: keepsForeignTaskUnseenDependency(foreignTargetRepo) });
+}
+
+/** W1-T14712 — a foreign target's plan reload: loadPlan's strict read, keeping another repository's unseen dependency
+ *  as its boot read does, so a changed ops catalog reloads instead of failing every reload. */
+export function loadTargetPlanForReload(path: string, targetRepo: string): Plan {
+  return loadPlanKeepingUnseenDependencies(path, keepsForeignTaskUnseenDependency(targetRepo));
 }
 
 /** W1-T14575 — true only when stat answers ENOENT for BOTH the monolith and its sibling `tasks.d`: the shape of a

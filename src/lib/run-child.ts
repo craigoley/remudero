@@ -9,7 +9,7 @@ import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, rmdirSync, rmSync, statSync, truncateSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import { setPriority as osSetPriority } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
@@ -35,10 +35,11 @@ import {
 import {
   RUN_CHILD_SCHEMA, classifyRunDir, fromRunChildFailure, isTerminalState, readSpec, readStatus, realRunChildProbe, runDir, writeSpec, writeStatus,
   type RunChildEntryKind, type RunChildFailureClass, type RunChildProbe, type RunChildSpec, type RunChildSpecOptions, type RunChildStatus,
+  type RunDirClassification,
 } from "./run-child-contract.js";
 import { waitingStarts } from "./host-memory-admission.js";
 import { copySelectedRegistryIntent, qualifySelectedRegistryIntent } from "./selected-registry-consumers.js";
-import { adoptRunChildReservation, reserveRunChild } from "./run-child-reservation.js";
+import { adoptRunChildReservation, reserveRunChild, runChildReservationAdoptable } from "./run-child-reservation.js";
 import type { RunResult } from "./run-result.js";
 import { isWorkerProviderId, type WorkerProviderId } from "./config.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
@@ -1290,6 +1291,70 @@ function settlementReceipt(taskId: string, runId: string, log: Log): NonNullable
   };
 }
 
+/** W1-T14662: why {@link adoptRunChildren} would pass over a run directory; `live` says whether a misidentified one is counted. */
+export type RunChildAdoptionRefusal =
+  | { reason: "probe" | "settled" | "spec_unreadable" | "other_instance" }
+  | { reason: "misidentified"; live: boolean; spec: RunChildSpec }
+  | { reason: "work_malformed"; spec: RunChildSpec }
+  | { reason: "unreadable"; spec: RunChildSpec; detail: string | undefined };
+
+type RunChildAdoptionAssessment =
+  | { refusal: RunChildAdoptionRefusal }
+  | { refusal?: undefined; spec: RunChildSpec; classified: RunDirClassification; work: DetachedWorkSpec | undefined };
+
+interface RunChildAdoptionQuestion { instance: string; settledRunIds: ReadonlySet<string>; probe?: RunChildProbe }
+
+/** Boot adoption's guards over one run directory, in the order it has always read them; the reads ride on an adopted verdict. */
+function assessRunChildAdoption(dir: string, input: RunChildAdoptionQuestion): RunChildAdoptionAssessment {
+  const name = basename(dir);
+  if (name.startsWith("probe-")) return { refusal: { reason: "probe" } };
+  if (input.settledRunIds.has(name)) return { refusal: { reason: "settled" } };
+  const spec = readSpec(dir);
+  if (!spec.ok) return { refusal: { reason: "spec_unreadable" } };
+  if (spec.value.instance !== input.instance) return { refusal: { reason: "other_instance" } };
+  // A LIVE process under a directory whose spec names another run is a misidentified child; a dead one is only debris.
+  if (spec.value.runId !== name) {
+    return { refusal: { reason: "misidentified", live: classifyRunDir(dir, input.probe).kind === "live", spec: spec.value } };
+  }
+  const classified = classifyRunDir(dir, input.probe);
+  const work = readWorkSpec(dir);
+  // A spec naming work this reader cannot read is never adopted as a build run: that would give a review a lane.
+  if (work === "malformed") return { refusal: { reason: "work_malformed", spec: spec.value } };
+  if (classified.kind === "unreadable") return { refusal: { reason: "unreadable", spec: spec.value, detail: classified.detail } };
+  return { spec: spec.value, classified, work };
+}
+
+/** W1-T14662: undefined when boot adoption would reattach the run in `dir`, else why not. Reads only; adopts nothing. */
+export function runChildAdoptionRefusal(dir: string, input: RunChildAdoptionQuestion): RunChildAdoptionRefusal | undefined {
+  return assessRunChildAdoption(dir, input).refusal;
+}
+
+/**
+ * W1-T14662: a successor booting now would reattach this run child live with its reservation: run-child mode `on` or `auto`
+ * (the modes whose boot adopts), a directory under the state root's `runs/`, the guards {@link adoptRunChildren} and
+ * {@link adoptRunChildReservation} apply, and a live process. Reads only: nothing is adopted or reserved by asking.
+ */
+export function runChildHandsOver(
+  dir: string, input: RunChildAdoptionQuestion & { mode: RunChildMode | undefined; stateRoot: string },
+): boolean {
+  // Boot adoption reads only `<state>/runs/`: a directory anywhere else is never reattached.
+  if ((input.mode !== "on" && input.mode !== "auto") || dirname(dir) !== join(input.stateRoot, "runs")) return false;
+  return runChildAdoptionRefusal(dir, input) === undefined && runChildReservationAdoptable(dir, input.probe) !== undefined;
+}
+
+/**
+ * W1-T14662: the composition root's adoptability question for `DaemonDeps.runChildAdoptable`, built once per boot. The mode
+ * is read at each ask (a successor reads it at its own boot); the instance name once, on the first ask.
+ */
+export function runChildAdoptableAt(boot: {
+  stateRoot: string; readMode: () => RunChildMode | undefined; instance: () => string;
+  settledRunIds: ReadonlySet<string>; probe?: RunChildProbe;
+}): (dir: string) => boolean {
+  let instance: string | undefined;
+  return (dir) => runChildHandsOver(dir, { mode: boot.readMode(), stateRoot: boot.stateRoot,
+    instance: instance ??= boot.instance(), settledRunIds: boot.settledRunIds, probe: boot.probe });
+}
+
 /** Reattach this instance's unfinished runs before boot sweeps can mistake their workers for orphans. */
 export function adoptRunChildren(input: {
   stateRoot: string; instance: string; log: Log; settledRunIds: ReadonlySet<string>;
@@ -1300,34 +1365,27 @@ export function adoptRunChildren(input: {
   const pass = { live: 0, adopted: 0, unreadable: 0, misidentified: 0 };
   const adopted: AdoptedRunChild[] = [];
   for (const entry of existsSync(root) ? readdirSync(root, { withFileTypes: true }) : []) {
-    if (!entry.isDirectory() || entry.name.startsWith("probe-") || input.settledRunIds.has(entry.name)) continue;
+    if (!entry.isDirectory()) continue;
     const dir = join(root, entry.name);
-    const spec = readSpec(dir);
-    if (!spec.ok || spec.value.instance !== input.instance) continue;
-    if (spec.value.runId !== entry.name) {
-      // A LIVE process under a directory whose spec names another run is a misidentified child; a dead one is only debris.
-      if (classifyRunDir(dir, ports.probe).kind === "live") {
-        pass.live += 1;
-        pass.misidentified += 1;
-        input.log("run_child.adoption_misidentified", { run_id: entry.name, spec_run_id: spec.value.runId, task_id: spec.value.taskId });
-      }
-      continue;
+    const assessed = assessRunChildAdoption(dir, { instance: input.instance, settledRunIds: input.settledRunIds, probe: ports.probe });
+    const refusal = assessed.refusal;
+    if (refusal?.reason === "misidentified" && refusal.live) {
+      pass.live += 1;
+      pass.misidentified += 1;
+      input.log("run_child.adoption_misidentified", { run_id: entry.name, spec_run_id: refusal.spec.runId, task_id: refusal.spec.taskId });
     }
-    const classified = classifyRunDir(dir, ports.probe);
-    const { taskId, runId } = spec.value;
+    if (refusal?.reason === "work_malformed") {
+      pass.unreadable += 1;
+      input.log("run_child.adoption_unreadable", { task_id: refusal.spec.taskId, run_id: refusal.spec.runId, reason: "work spec malformed or of an unknown kind" });
+    }
+    if (refusal?.reason === "unreadable") {
+      pass.unreadable += 1;
+      input.log("run_child.adoption_unreadable", { task_id: refusal.spec.taskId, run_id: refusal.spec.runId, reason: refusal.detail });
+    }
+    if (assessed.refusal !== undefined) continue;
+    const { classified, work } = assessed;
+    const { taskId, runId } = assessed.spec;
     const pid = classified.status?.identity.pid ?? 0;
-    const work = readWorkSpec(dir);
-    if (work === "malformed") {
-      // A spec naming work this reader cannot read is never adopted as a build run: that would give a review a lane.
-      pass.unreadable += 1;
-      input.log("run_child.adoption_unreadable", { task_id: taskId, run_id: runId, reason: "work spec malformed or of an unknown kind" });
-      continue;
-    }
-    if (classified.kind === "unreadable") {
-      pass.unreadable += 1;
-      input.log("run_child.adoption_unreadable", { task_id: taskId, run_id: runId, reason: classified.detail });
-      continue;
-    }
     const reservation = classified.kind === "live"
       ? (ports.reserve ?? adoptRunChildReservation)(dir, { ledger: { root: join(input.stateRoot, "..") } }, ports.probe) : undefined;
     if (classified.kind === "live") {

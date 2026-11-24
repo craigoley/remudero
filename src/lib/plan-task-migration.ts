@@ -1,9 +1,7 @@
 import { createHash } from "node:crypto";
 import { dirname, join, relative, sep } from "node:path";
 import { resolveRepoLayout } from "./repo-layout.js";
-import {
-  OPS_CATALOG_MAX_BLOB_BYTES, OPS_CATALOG_MAX_TREE_ENTRIES, opsCatalogBoundRefusal, type OpsCatalogBoundsIo,
-} from "./ops-catalog-source.js";
+import { opsCatalogBoundRefusal, type OpsCatalogBoundsIo } from "./ops-catalog-source.js";
 import { parse as parseYaml } from "yaml";
 import { defaultGitRunnerAsync, readBlobsAtRefAsync, type Plan, type Task } from "./plan.js";
 import { createPlanRevisionStore } from "./plan-revision-store.js";
@@ -92,14 +90,13 @@ export async function catalog(root: string, commit: string, external = false):
     if (!m) return unknown("catalog_unreadable");
     const size = Number(m[2]), path = m[3]!;
     declaredBytes += size;
-    // Refuse known oversized inputs before materializing their payloads. The private per-blob limit is the
-    // actual reader's exported contract; the catalog's own size is judged on the copy (W1-T14368).
+    // Refuse known oversized inputs before materializing their payloads. No per-blob limit applies: the catalog's
+    // own size is judged on the copy by the reader's derived bounds (W1-T14368, W1-T14638).
     if (!Number.isSafeInteger(size) || declaredBytes > MAX_CATALOG_BYTES) return unknown("catalog_unreadable");
-    if (external && size > OPS_CATALOG_MAX_BLOB_BYTES) return unknown("catalog_incompatible");
     const shard = path.startsWith(shardDir) && !path.slice(shardDir.length).includes("/") && /\.ya?ml$/.test(path);
     return path === monolith || shard ? { path, blob: m[1]!, size, shard } : unknown("catalog_unreadable");
   });
-  if (!files.some(f => f.path === monolith) || files.length > 10_000) return unknown("catalog_unreadable");
+  if (!files.some(f => f.path === monolith)) return unknown("catalog_unreadable");
   let size: OpsCatalogSize | undefined;
   if (external) {
     // The API reader counts each visited immediate tree, including entries outside the selected
@@ -110,7 +107,6 @@ export async function catalog(root: string, commit: string, external = false):
     let treeEntries = 0;
     for (const tree of trees) {
       treeEntries += (await git(["ls-tree", "-z", tree])).split("\0").filter(Boolean).length;
-      if (treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) return unknown("catalog_incompatible");
     }
     size = { shards: files.filter(file => file.shard).length, bytes: declaredBytes, treeEntries, shardDir: hasShards };
   }
@@ -151,12 +147,8 @@ export function judgeOpsBatch(size: OpsCatalogSize, originals: readonly string[]
   for (const original of originals) {
     const indent = /\n([ \t]+)\S/.exec(original)?.[1] ?? "";
     const copyBytes = Buffer.byteLength(original) + Buffer.byteLength(`${indent}moved_from: remudero@${publicCommit}\n`);
-    if (copyBytes > OPS_CATALOG_MAX_BLOB_BYTES) return unknown("catalog_incompatible");
     bytes += copyBytes;
   }
-  // Each copy adds one shard-tree entry, and the shard tree's own entry in the plan tree when the batch starts one.
-  const treeEntries = size.treeEntries + originals.length + (size.shardDir ? 0 : 1);
-  if (treeEntries > OPS_CATALOG_MAX_TREE_ENTRIES) return unknown("catalog_incompatible");
   const produced = { shards: size.shards + originals.length, bytes: size.bytes + bytes };
   if (opsCatalogBoundRefusal(produced, io)) return unknown("catalog_incompatible");
 }

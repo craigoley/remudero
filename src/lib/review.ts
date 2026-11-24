@@ -1367,13 +1367,21 @@ const PROSE_PUNCTUATION_RE = /[,;:()]|--|—|–|\.\.\./;
 const BARE_TEST_NAME_MAX_LEN = 60;
 
 /** Does a name-filtered `unit test:` proof BODY read as a long PROSE DESCRIPTION of behaviour rather than a short,
- *  bare TEST-NAME-shaped string (W1-T161, #349/W1-T149)? {@link judgeCriterion} uses it ONLY to interpret a ZERO-MATCH
- *  outcome: prose degrades to `not_executable`, a bare name stays `executed_fail` (W1-T72's guard). Length and
+ *  bare TEST-NAME-shaped string (W1-T161, #349/W1-T149)? {@link certainHeadRefusals} skips such a body; {@link
+ *  judgeCriterion}'s zero-match arm asks {@link readsAsProseByPunctuation} instead (W1-T14658). Length and
  *  punctuation only. TRAP: #349's proof paraphrased a REAL, PASSING test and hard-blocked a green PR. */
 export function looksLikeProseDescription(body: string): boolean {
   const trimmed = body.trim();
   if (trimmed.length > BARE_TEST_NAME_MAX_LEN) return true;
   return PROSE_PUNCTUATION_RE.test(trimmed);
+}
+
+/** Does a name-filtered `unit test:` body read as PROSE by its punctuation ALONE ({@link PROSE_PUNCTUATION_RE})?
+ *  {@link judgeCriterion} lets only such a body degrade to `prose-no-match` on a zero match (W1-T14658, invariant
+ *  title-resolves-or-fails). Filing accepts a single title of any length since W1-T14653, so {@link
+ *  BARE_TEST_NAME_MAX_LEN} no longer decides it there: a long, punctuation-free title must resolve or fail. */
+function readsAsProseByPunctuation(body: string): boolean {
+  return PROSE_PUNCTUATION_RE.test(body.trim());
 }
 
 /** Split a `grep:` body into pattern and optional path. The path is the trailing token after the LAST `\s+in\s+`
@@ -4929,7 +4937,7 @@ export function judgeCriterion(
           } else if (outcome === "no-match") {
             // ZERO tests matched the name pattern on a COMPLETED run. EITHER a proof-authoring mismatch — the house
             // convention writes a `unit test:` proof as PROSE describing behaviour, see {@link
-            // looksLikeProseDescription} — OR genuine test theater, a proof naming a specific, fabricated test
+            // readsAsProseByPunctuation} — OR genuine test theater, a proof naming a specific, fabricated test
             // (W1-T161/#349). Told apart by a deterministic shape check, never by re-running or calling a model.
             // W1-T4003: the grep dialect has the same plan-only forward-reference shape as `unit test:`. The
             // executor returns `no-match` when a filing names a future symbol in an already-existing declared file;
@@ -4947,7 +4955,7 @@ export function judgeCriterion(
               proofExec = "not_yet_built";
               proofSkip = "forward-reference";
               reason = filingForwardReason(reason, whitelisted, filingTarget);
-            } else if (looksLikeProseDescription(whitelisted.label)) {
+            } else if (readsAsProseByPunctuation(whitelisted.label)) {
               // A prose paraphrase, not a bare name: NOT a failing test. Degrade to `not_executable`, the keyword
               // floor standing as computed, and ANNOTATE why, so an author sees "names no matching test" rather than
               // a misleading "executed and FAILED" — a false block on green, test-passing code.
@@ -11065,6 +11073,9 @@ const MANDATORY_REGISTRIES: ReadonlyArray<{ path: string; declaration: string }>
   // script, its registration and its surface declaration are three halves of one indivisible commit
   // — which is precisely the circularity W1-T2521 named and W1-T3171 subtracts.
   { path: "src/lib/review.ts", declaration: "INSTRUMENT_SURFACE" },
+  // W1-T14655 (operator-approved 2026-11-24): a new ci.yml job owes a posture row, because the posture
+  // census refuses both a missing and a stale declaration. Same add-only, in-declaration guards.
+  { path: "src/lib/gate-posture.ts", declaration: "GATE_POSTURE_DECLARATIONS" },
 ];
 
 /** Each `@@` hunk's trailing context for `file`, in order; `undefined` where git emitted none.

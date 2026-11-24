@@ -1174,6 +1174,8 @@ export interface DaemonOpts {
   freshnessLikelyFraction?: number;
   /** W1-T12231: `freshnessRestart.maxDrainWaitMs` (default {@link FRESHNESS_MAX_DRAIN_WAIT_MS}). */
   freshnessMaxDrainWaitMs?: number;
+  /** W1-T12230: `freshnessRestart.loopOnlyHorizonMs` (default `freshnessStalenessHorizonMs`, one horizon for both). */
+  freshnessLoopOnlyHorizonMs?: number;
 }
 
 /** A non-stale freshness verdict must name the decision arm that produced it. `unassessed` deliberately retains the
@@ -1921,6 +1923,9 @@ export interface DaemonDeps {
   consumeRestartRequest?: () => { origin: string; requestedAt: string; codeSha?: string } | null;
   /** W1-T14545: a freshness restart hands off to a standby while `state/daemon-handoff.on` exists. Absent: today's exit. */
   handoff?: DaemonHandoff;
+  /** W1-T14662: whether a successor booting now would adopt the run child in `dir` (run-child.ts `runChildHandsOver`). Under
+   *  the handoff switch such a lane is not freshness-busy. Unwired, no child is adoptable and every live lane stays busy. */
+  runChildAdoptable?: (dir: string) => boolean;
   /** Pending bounded PR repair/review requests recorded by the authenticated console. The daemon
    * consumes at most one per poll and keeps final fix/review authority in its established command
    * path; the HTTP writer never starts a process. */
@@ -4792,6 +4797,7 @@ export async function runDaemon(
   const freshnessThreshold = opts.freshnessScoreLimit === undefined ? DEPLOY_RESTART_SCORE_THRESHOLD
     : { value: opts.freshnessScoreLimit, reason: "plan/policy.yaml freshnessRestart.scoreLimit" };
   const freshnessStalenessHorizonMs = opts.freshnessStalenessHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
+  const freshnessLoopOnlyHorizonMs = opts.freshnessLoopOnlyHorizonMs ?? freshnessStalenessHorizonMs;
   const freshnessQuietWindow = opts.freshnessQuietWindowMs === undefined ? FRESHNESS_COALESCE_WINDOW_MS
     : { value: opts.freshnessQuietWindowMs, reason: "plan/policy.yaml freshnessRestart.quietWindowMs" };
   const freshnessLikelyFraction = opts.freshnessLikelyFraction ?? FRESHNESS_LIKELY_FRACTION;
@@ -4815,6 +4821,8 @@ export async function runDaemon(
   // W1-T4945 — this lifetime's freshness pressure, and when it first read stale; see `decideFreshness`.
   let freshnessPressure: DeployRestartPressureState = { total: 0, scoredShas: [] };
   let staleSinceMs: number | undefined;
+  // W1-T12230: when this lifetime first read each commit of a stale advance, by sha.
+  const changeFirstReadMs = new Map<string, number>();
   let lastAdvanceSha: string | undefined;
   let lastAdvanceAtMs: number | undefined;
   let advancesCoalesced = 0;
@@ -5332,6 +5340,8 @@ export async function runDaemon(
   // W1-T5344: per-task delivery-failure parks, rebuilt from the ledger so a restart does not reset
   // them; consulted by the dispatch filter's independent-failure hold below.
   const laneDeliveryParks = priorLaneDeliveryParks(bootLedgerLines);
+  // W1-T14674: the loop preamble's parts are named, so the boot's dark time after the lock is not one "other" figure.
+  deps.bootPhases?.mark("loop_history");
   // W1-T9680: one probe per credential refusal, shared by its lane's refill and the settle loop.
   const credentialProbes = new WeakMap<object, Promise<FleetCredentialProbe>>();
   const fleetCredentialFor = (err: object): Promise<FleetCredentialProbe> => {
@@ -5385,6 +5395,7 @@ export async function runDaemon(
       });
     } catch (error) { nearLimitFailure({ reason: error }); }
   }
+  deps.bootPhases?.mark("heap_telemetry");
   const heapShadow = heapShadowStateDir === undefined || !deps.readMemoryTelemetry ? undefined : createHeapShadow({
     path: heapSamplePath(heapShadowStateDir),
     clock: daemonClock,
@@ -5402,6 +5413,7 @@ export async function runDaemon(
       log("daemon.heap_ceiling_shadow_failed", { reason: String((e as Error)?.message ?? e).slice(0, 160) });
     }
   }
+  deps.bootPhases?.mark("heap_shadow");
   // W1-T4390: the SRE governor's port — injected, else over the fleet lane's state root (see DaemonDeps.sreGovernor).
   const sreFallbackRoot = deps.fleetLane;
   const sreGovernor: SreGovernorEnforcer | undefined =
@@ -6016,7 +6028,7 @@ export async function runDaemon(
     let pressureEvidence: Record<string, unknown> = {};
     if (outcome.arm === "dirty" && outcome.behind && outcome.newSha) {
       const nowMs = daemonClock.now();
-      observeFreshnessAdvance(outcome.newSha, nowMs);
+      observeFreshnessAdvance(outcome.newSha, nowMs, undefined, outcome.changes);
       const { decision, withheldEvidence } = scoreFreshness(outcome.changes, nowMs);
       pressureEvidence = { behind: true, stale_since_ms: staleSinceMs, weight: decision.weight,
         age_pressure: decision.agePressure, pressure: decision.pressure, ...withheldEvidence };
@@ -6043,8 +6055,12 @@ export async function runDaemon(
   };
 
   // W1-T6093: remember observations at both the first-cycle guard and the shared decision boundary.
-  const observeFreshnessAdvance = (newSha: string, nowMs: number, heldSinceMs?: number): void => {
+  const observeFreshnessAdvance = (newSha: string, nowMs: number, heldSinceMs?: number, changes?: readonly DeployWorthChange[]): void => {
     staleSinceMs = Math.min(staleSinceMs ?? nowMs, heldSinceMs ?? nowMs);
+    // W1-T12230: the first stale reading, and one a live edit held (the tree was behind earlier), date their commits from
+    // the stale reading; a commit first read later, from that reading.
+    const readAtMs = changeFirstReadMs.size === 0 || heldSinceMs !== undefined ? staleSinceMs : nowMs;
+    for (const change of changes ?? []) changeFirstReadMs.set(change.sha, Math.min(changeFirstReadMs.get(change.sha) ?? readAtMs, readAtMs));
     if (newSha !== lastAdvanceSha) {
       lastAdvanceSha = newSha;
       lastAdvanceAtMs = nowMs;
@@ -6053,12 +6069,18 @@ export async function runDaemon(
   };
 
   // W1-T10054: busy is only work a restart interrupts; passes and release-at-once actions are `background`.
-  const scoreFreshness = (changes: readonly DeployWorthChange[] | undefined, nowMs: number, liveLanes = 0, stallShare = 0) => {
+  // W1-T14662: `lanes` holds each live lane's run-child directory, undefined for a lane with no child. Under the handoff
+  // switch a lane whose child the successor adopts is handed over, not interrupted, so it is not busy.
+  const scoreFreshness = (changes: readonly DeployWorthChange[] | undefined, nowMs: number,
+    lanes: readonly (string | undefined)[] = [], stallShare = 0) => {
     const staleAtMs = staleSinceMs!;
     const reviews = inFlightReviewCount();
     const interruptible = restartInterruptibleDetachedActionCount();
+    const handsOver = lanes.length > 0 && deps.handoff?.enabled() === true;
+    const adoptableLanes = handsOver
+      ? lanes.filter((dir) => dir !== undefined && deps.runChildAdoptable?.(dir) === true).length : undefined;
     const busyReasons = [
-      ...(liveLanes > 0 ? ["lanes"] : []),
+      ...(lanes.length - (adoptableLanes ?? 0) > 0 ? ["lanes"] : []),
       ...(reviews > 0 ? ["reviews"] : []),
       ...(interruptible > 0 ? ["detached_work"] : []),
       ...(directMergeOperationsInFlight().length > 0 ? ["direct_merge"] : []),
@@ -6084,10 +6106,18 @@ export async function runDaemon(
               withheld_unreadable: withheld.unreadable,
               ...(withheld.unparseable > 0 ? { withheld_reviews_unparseable: withheld.unparseable } : {}),
             };
+    // W1-T12230: each class's staleness runs from the first read of its earliest commit (observeFreshnessAdvance).
+    const classSinceMs: { reviewer?: number; loop?: number } = {};
+    for (const change of changes ?? []) {
+      const changeClass = change.changeClass ?? "loop";
+      const readAtMs = changeFirstReadMs.get(change.sha) ?? staleAtMs;
+      if (changeClass !== "worker_only") classSinceMs[changeClass] = Math.min(classSinceMs[changeClass] ?? readAtMs, readAtMs);
+    }
     const decision = decideFreshnessRestart({ changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews,
-      threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs, stallShare });
+      threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs, loopOnlyHorizonMs: freshnessLoopOnlyHorizonMs,
+      classSinceMs, stallShare });
     freshnessPressure = decision.state;
-    return { decision, busy, busyReasons, background, withheldEvidence };
+    return { decision, busy, busyReasons, background, withheldEvidence, adoptableLanes };
   };
 
   const measureLoopStalls = (nowMs: number) => {
@@ -6101,19 +6131,20 @@ export async function runDaemon(
   let freshnessDecidedAtMs: number | undefined;
   // W1-T12231: the last score's change weight and stale reading, used with the current stall share to predict release.
   let freshnessOutlook: { weight: number; staleSinceMs: number } | undefined;
-  const freshnessPhases: { decision_to_latch?: number; lanes?: number; pre_exit_pass?: number; drain?: number } = {};
-  const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, liveLanes = 0): "restart" | "defer" => {
+  const freshnessPhases: { decision_to_latch?: number; lanes?: number; pre_exit_pass?: number; drain?: number;
+    settle?: Record<string, number | Record<string, number>> } = {};
+  const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, lanes: readonly (string | undefined)[] = []): "restart" | "defer" => {
     const nowMs = daemonClock.now();
-    observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs);
+    observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs, freshness.changes);
     const staleAtMs = staleSinceMs!;
     const stall = measureLoopStalls(nowMs);
-    const { decision, busy, busyReasons, background, withheldEvidence } = scoreFreshness(freshness.changes, nowMs, liveLanes, stall.share);
+    const { decision, busy, busyReasons, background, withheldEvidence, adoptableLanes } = scoreFreshness(freshness.changes, nowMs, lanes, stall.share);
     freshnessOutlook = { weight: decision.weight, staleSinceMs: staleAtMs };
     const expedite = deps.taskExpedite ? pendingExpedite(freshness.changes, deps.taskExpedite) : undefined;
     const coalesced = coalesceFreshnessRestart({
       decision, newSha: freshness.newSha, lastAdvanceAtMs: lastAdvanceAtMs!,
       staleSinceMs: staleAtMs, nowMs, window: freshnessQuietWindow, installInputsChanged: changesInstallInputs(freshness.changes),
-      threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs,
+      threshold: freshnessThreshold, ageHorizonMs: decision.horizonMs ?? freshnessStalenessHorizonMs,
       lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: freshnessMinLifetimeMs, stallShare: stall.share,
       ...(expedite ? { expedite } : {}),
     });
@@ -6149,6 +6180,7 @@ export async function runDaemon(
       stale_since_ms: staleAtMs,
       busy,
       busy_reasons: busyReasons,
+      ...(adoptableLanes !== undefined ? { adoptable_lanes: adoptableLanes } : {}),
       background,
       weight: decision.weight,
       age_pressure: decision.agePressure,
@@ -6160,6 +6192,9 @@ export async function runDaemon(
       ...lifetimeEvidence,
       score_limit: freshnessThreshold.value,
       staleness_horizon_ms: freshnessStalenessHorizonMs,
+      // W1-T12230: the commits of the advance in each class, and the horizon of the staleness part that decided.
+      change_classes: decision.changeClasses,
+      horizon_ms: decision.horizonMs,
       quiet_window_ms: freshnessQuietWindow.value,
     });
     return action;
@@ -6386,6 +6421,8 @@ export async function runDaemon(
   type FreshnessPass = "skipped_ran_since_latch" | "skipped_ran_since_stale" | "awaited_in_flight" | "no_sweep_at_exit";
   type ExitPass = {
     kind: FreshnessPass; settled: Promise<void>; overlapped: boolean; overlapMs: number; limitAtMs?: number;
+    /** With a hand-over started, the drain deadline: a ready standby ends the wait here (Craig 2026-11-24). */
+    standbyLimitAtMs?: number;
     /** Records pre_exit_pass once: when the pass settles, or at its limit when the exit goes without it (#19797 review). */
     record?: () => void;
   };
@@ -6395,13 +6432,26 @@ export async function runDaemon(
   const passWithinLimit = async (pass: ExitPass): Promise<void> => {
     if (pass.limitAtMs === undefined) return pass.settled;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let standbyTimer: ReturnType<typeof setTimeout> | undefined;
     const limit = new Promise<"limit">((resolve) => { timer = setTimeout(() => resolve("limit"), Math.max(0, pass.limitAtMs! - daemonClock.now())); });
-    const outcome = await Promise.race([pass.settled.then(() => "settled" as const), limit]);
+    // A pass is in process, so what it has not posted is redone by the successor; a standby that is not ready keeps
+    // the wait to its limit, as before.
+    const standbyAtMs = pass.standbyLimitAtMs;
+    const attemptStarted = handoffStart;
+    const standby = standbyAtMs === undefined || attemptStarted === undefined ? undefined
+      : new Promise<"standby_ready">((resolve) => {
+        standbyTimer = setTimeout(() => {
+          void attemptStarted.then(async (attempt) => { if (attempt && await attempt.ready()) resolve("standby_ready"); });
+        }, Math.max(0, standbyAtMs - daemonClock.now()));
+      });
+    const outcome = await Promise.race([pass.settled.then(() => "settled" as const), limit, ...(standby ? [standby] : [])]);
     clearTimeout(timer);
-    if (outcome === "limit") {
+    clearTimeout(standbyTimer);
+    if (outcome !== "settled") {
       pass.record?.();
+      const limitAtMs = outcome === "standby_ready" ? standbyAtMs! : pass.limitAtMs;
       log("daemon.freshness_pre_exit_pass_abandoned", { pre_exit_pass: pass.kind, max_drain_wait_ms: freshnessMaxDrainWaitMs,
-        limit_at: fixedClock(pass.limitAtMs).iso() });
+        limit_at: fixedClock(limitAtMs).iso(), ...(outcome === "standby_ready" ? { ended_by: "standby_ready" } : {}) });
     }
   };
   const drainBeforeRestart = async (
@@ -6604,6 +6654,9 @@ export async function runDaemon(
     const pass: ExitPass = { kind: preExitPass, settled: Promise.resolve(),
       overlapped: dispatchLatchAtMs !== undefined && pendingPass !== undefined, overlapMs: 0,
       ...(pendingPass ? { limitAtMs: (dispatchLatchAtMs ?? passStartedAtMs) + freshnessMaxDrainWaitMs } : {}) };
+    // With a hand-over started, a ready standby ends the wait for the pass at the latch's drain deadline.
+    const latchWindow = dispatchLatchAtMs !== undefined && latchDrain?.latchAtMs === dispatchLatchAtMs ? latchDrain.windowDeadlineMs : undefined;
+    if (pendingPass && handoffStart && latchWindow !== undefined && latchWindow < pass.limitAtMs!) pass.standbyLimitAtMs = latchWindow;
     const recordPass = () => {
       if (!pendingPass || freshnessPhases.pre_exit_pass !== undefined) return;
       freshnessPhases.pre_exit_pass = Math.max(0, daemonClock.now() - passStartedAtMs);
@@ -8081,7 +8134,7 @@ export async function runDaemon(
       // (W1-T312, W1-T380, W1-T382). One-shot: the three-clocks guard (W1-T126) fires at the next
       // tick boundary, and the operator holds above still outrank it (W1-T936).
       if (cyclesEntered === 0) {
-        observeFreshnessAdvance(freshness.newSha, daemonClock.now(), freshness.staleSinceMs);
+        observeFreshnessAdvance(freshness.newSha, daemonClock.now(), freshness.staleSinceMs, freshness.changes);
         log("daemon.freshness_deferred", {
           old_sha: freshness.oldSha,
           new_sha: freshness.newSha,
@@ -9547,6 +9600,8 @@ export async function runDaemon(
     const passIds = new Set<string>();
     const phaseStarts: MachineShareStart[] = [];
     const inFlightTasks = new Set<Task>();
+    // W1-T14662: each live lane's run-child directory for the freshness question; a lane with no child reads undefined.
+    const freshnessLanes = (): (string | undefined)[] => [...inFlightTasks].map((task) => batchChildren.get(task)?.dir);
     // W1-T13695: a grow is a never-started lane's proposal: no finished task, and the reading that admitted it.
     type LaneGrow = { target: number; inFlight: number };
     const refillAdmissions = new WeakMap<Task, {
@@ -9691,7 +9746,7 @@ export async function runDaemon(
       const freshness = refillClosed || phaseBound || apiWindow ? undefined : freshnessReadsAsync ? settledFreshness :
         timing.probe("checkFreshness", () => checkFreshness?.() as DaemonFreshness | undefined);
       if (!freshnessReadsAsync) logNotStaleFreshness(freshness);
-      const freshnessAction = freshness?.stale ? decideFreshness(freshness, inFlightTasks.size) : undefined;
+      const freshnessAction = freshness?.stale ? decideFreshness(freshness, freshnessLanes()) : undefined;
       // W1-T9089: a restart decided here holds only the refills that would not run as a child.
       if (freshnessAction === "restart" && freshness?.stale) decideRestart(freshness);
       let reason =
@@ -9861,7 +9916,7 @@ export async function runDaemon(
     const actOnDispatchFreshness = (freshness: DaemonFreshness): void => {
       settledFreshness = freshness;
       logNotStaleFreshness(freshness);
-      if (freshness.stale && decideFreshness(freshness, inFlightTasks.size) === "restart") decideRestart(freshness);
+      if (freshness.stale && decideFreshness(freshness, freshnessLanes()) === "restart") decideRestart(freshness);
       wakeParkedLanes();
     };
     // W1-T13695: 2026-11-18, a pass that read a lane target of 1 at its start ran one lane for two hours while later
@@ -10085,6 +10140,15 @@ export async function runDaemon(
       });
     }, refillLane, lanes, admitAtStart, onStarted, poolControl);
     let poolOutcome: LanePoolOutcome<Task, RunResult>;
+    // W1-T14684: from the pool's settle to a decided restart's exit, each step's time is named in the exit's phases_ms.
+    let settleMarkMs = daemonClock.now();
+    const settleParts: Record<string, number> = {};
+    const settleProcess: Record<string, number> = {};
+    const markSettle = (part: string): void => {
+      const atMs = daemonClock.now();
+      settleParts[part] = (settleParts[part] ?? 0) + Math.max(0, atMs - settleMarkMs);
+      settleMarkMs = atMs;
+    };
     try {
       let phase = "dispatch.concurrent_set";
       try {
@@ -10106,6 +10170,7 @@ export async function runDaemon(
       } finally {
         // Even a phase-level logging failure cannot abandon promises the pool already owns.
         poolOutcome = await admittedWork;
+        settleMarkMs = daemonClock.now();
         // W1-T11129: the pool's last lane, and any a fault or detach retired, never reaches refillLane: close its interval.
         // Never throws: readLaneCpu reads an unreadable or throwing counter as unread, and the rest is pure.
         laneCpuTransition(() => { for (const task of admitted) laneCpuBuilds.delete(task.id); });
@@ -10115,17 +10180,20 @@ export async function runDaemon(
         const abandoning = [...pendingChildren.values()];
         pendingChildren.clear();
         await Promise.allSettled(abandoning.map((pending) => pending.abort()));
+        markSettle("abandon_pending");
       }
       try { log("dispatch.settled_set", settledSetPayload(admitted, poolOutcome.settled, laneCount)); }
       catch (reason) { phaseFaults.push({ phase: "dispatch.settled_set", reason: reason }); }
     } finally {
       repositoryMaintenanceQueueBusy = false;
       await stopTicker();
+      markSettle("stop_ticker");
     }
     const reporting = createSettlementReporting();
     try {
     const settled = poolOutcome.settled;
     await flushLifetimePressure(reporting.report);
+    markSettle("lifetime_pressure");
     if (!childMode || !restartDecided) restartInterphaseReviewClock();
     if (admitted.length === 0 && newBuildHeld && poolOutcome.fault === undefined && phaseFaults.length === 0) {
       // Persistent hold is an in-process, paced NEW-build deferral, never a failure/STOP.
@@ -10273,6 +10341,7 @@ export async function runDaemon(
       laneDeliveryParks.delete(t.id); // W1-T5344: a settled run ends this task's delivery-failure streak
       toProcess.push({ task: t, result, snapshot: snapshots[i] });
     }
+    markSettle("classify");
     if (poolOutcome.fault !== undefined) {
       const { task, lane, phase, reason } = poolOutcome.fault;
       try { log("dispatch.pool_failed", { task: task.id, lane, phase, error: String((reason as Error)?.message ?? reason) }); }
@@ -10307,7 +10376,10 @@ export async function runDaemon(
       const apiWindowDisposition = reasonAboutApiWindow(apiWindowHoldState, task.id, result.verdict, pollIntervalMs, maxApiWindowHoldMs);
       apiWindowHoldState = apiWindowDisposition.state;
       apiWindowHoldMs = apiWindowDisposition.holdMs;
+      const processStartedAtMs = settleMarkMs;
       const outcome = await processDispatchResult(snapshot.plan, task, result, snapshot.isMerged, reporting.report);
+      markSettle("process");
+      settleProcess[task.id] = (settleProcess[task.id] ?? 0) + Math.max(0, settleMarkMs - processStartedAtMs);
       batchChildren.get(task)?.acknowledge?.({ status: "fulfilled", value: result });
       if (outcome.kind === "genuine_blocker") {
         if (deps.isOpenPr === undefined || deps.isCreditIndeterminate === undefined) {
@@ -10325,6 +10397,7 @@ export async function runDaemon(
       }
     }
     await settleClaimStall();
+    markSettle("claim_stall");
     if (fatalError || phaseFaults.length > 0 || reporting.faults.length > 0) {
       // A pool fault closes starts, but genuine workers still earn their result/cost/merge credit.
       // Preserve original classification/detail; named logging faults remain separate secondary facts.
@@ -10342,6 +10415,8 @@ export async function runDaemon(
 
     if (restartDecided && !deps.checkStop?.() && !deps.checkPause?.()) {
       await stopInterphaseReviewClock();
+      markSettle("interphase_stop");
+      freshnessPhases.settle = { ...settleParts, process_by_task: { ...settleProcess } };
       return stopForFreshness(restartDecided, restartWait.decidedAtMs);
     }
     restartWindow = undefined;

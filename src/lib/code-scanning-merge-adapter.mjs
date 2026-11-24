@@ -1,5 +1,6 @@
 import {createHash} from "node:crypto";
-import {classifyCodeScanningMergePolicy, CODE_SCANNING_MAX_CHANGED_FILES, isCodeqlConfigurationWarning} from './code-scanning-merge-policy.mjs';
+import {classifyCodeScanningMergePolicy, CODE_SCANNING_MAX_CHANGED_FILES, CODEQL_CONFIGURATION_NOT_FOUND,
+  isCodeqlConfigurationWarning} from './code-scanning-merge-policy.mjs';
 import {changesSemgrepRuntime, semgrepRuntimeMetadataRequests} from './semgrep-runtime-merge-policy.mjs';
 
 export const SECURITY_MERGE_CONTEXT = 'security-merge-policy';
@@ -103,8 +104,12 @@ export async function readSecurityMergeDecision(target, read) {
   return next.value;
 }
 
-/** W1-T14493: the two reasons that mean "the exact-head CodeQL result has not arrived yet", not that anything failed. */
-const CODEQL_AWAITED_REASONS = new Set(['trusted-exact-head-codeql-result-missing', 'security-analysis-pending']);
+/** W1-T14493: the reasons that mean "the exact-head CodeQL result has not arrived yet", not that anything failed.
+ *  W1-T14681: GitHub's neutral "N configuration(s) not found" check can land while another language's Analyze job is
+ *  still running (#20683 b9ae6d7c0), and GitHub re-judges it when that job uploads. So while the run is in flight that
+ *  reason waits too; once every analysis has finished it posts error as before. */
+const CODEQL_AWAITED_REASONS = new Set(['trusted-exact-head-codeql-result-missing', 'security-analysis-pending',
+  CODEQL_CONFIGURATION_NOT_FOUND]);
 const CODEQL_WORKFLOW_PATH = '.github/workflows/codeql.yml';
 /** BACKSTOP (W1-T14493): a CodeQL run still queued or running this long after it started is treated as stuck, and the
  *  status goes back to error so the wait is visible as a fault. A healthy run takes well under this. */

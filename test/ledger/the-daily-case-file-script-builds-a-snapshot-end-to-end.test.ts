@@ -1,0 +1,121 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { test } from "node:test";
+import { promisify } from "node:util";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+const run = promisify(execFile);
+const task = "W1-T20001";
+const runId = `${task}-1795000000000`;
+const sha = "d".repeat(40);
+
+// W1-T14602: the nightly script itself, run as the host runs it — a real ledger, a real plan, `gh` answered by a shim.
+test("W1-T14602: the daily case-file script writes a snapshot and its carry for every called task", async (t) => {
+  const now = Date.now();
+  const at = (minutesAgo: number) => new Date(now - minutesAgo * 60_000).toISOString();
+  const ledger = writeLedger([
+    { ts: at(30), task_id: task, run_id: runId, step: "run.start" },
+    { ts: at(29), task_id: task, run_id: runId, step: "worker.assignment",
+      worker_assignment: { id: "a1", selected: { provider: "claude", model: "claude-opus-5-5" } } },
+    { ts: at(20), task_id: task, run_id: runId, step: "pr.opened", pr_url: "https://github.com/craigoley/remudero/pull/41001" },
+    // Called tasks with no ledger PR row are searched: one search answers a list with no hit, and
+    // one answers something that is not a list, which is kept as a read failure with its reason.
+    { ts: at(10), task_id: "W1-T20002", run_id: "W1-T20002-1795000000001", step: "worker.assignment",
+      worker_assignment: { id: "a2", selected: { provider: "claude", model: "claude-opus-5-5" } } },
+    { ts: at(9), task_id: "W1-T20003", run_id: "W1-T20003-1795000000002", step: "worker.assignment",
+      worker_assignment: { id: "a3", selected: { provider: "claude", model: "claude-opus-5-5" } } },
+  ], { scope: t });
+  const repo = ownedFixtureDir(t, "case-script-repo").dir;
+  mkdirSync(join(repo, "plan"), { recursive: true });
+  const record = (id: string) => [`- id: ${id}`, `  title: "Task ${id}"`, "  repo: remudero", "  depends_on: []",
+    "  type: implement", "  verify: auto", "  risk: high", "  status: queued", "  attempts: 0"].join("\n");
+  writeFileSync(join(repo, "plan", "tasks.yaml"), `${record(task)}\n${record("W1-T20002")}\n${record("W1-T20003")}\n`);
+  const shim = ghShim([
+    { when: "pr view 41001", stdout: JSON.stringify({ number: 41001, url: "https://github.com/craigoley/remudero/pull/41001",
+      state: "MERGED", headRefOid: sha, headRefName: `run-${task}-1`, body: `Remudero-Task: ${task}`,
+      mergedAt: at(5), statusCheckRollup: [] }) },
+    { when: "--search W1-T20002", stdout: JSON.stringify({ message: "Validation Failed" }) },
+    { when: "--search W1-T20003", stdout: "[]" },
+  ]);
+  const out = join(ledger.dir, "field-trials", "case-files-latest.json");
+  const env = { ...process.env, PATH: `${shim.dir}:${process.env.PATH}`, RMD_FIELD_TRIALS_REPO_ROOT: repo,
+    RMD_FIELD_TRIALS_CORE_LEDGER: ledger.dir, RMD_FIELD_TRIALS_CASE_OUT: out,
+    GH_APP_ID: "", GH_APP_INSTALLATION_ID: "", GH_APP_PRIVATE_KEY_PATH: "" };
+  const { stdout } = await run(process.execPath, ["--import", "tsx", join(REPO_ROOT, "scripts", "private-field-trials-case-files.mjs")],
+    { cwd: REPO_ROOT, env, timeout: 120_000 });
+  const summary = JSON.parse(stdout.trim().split("\n").at(-1)!);
+  assert.equal(summary.event, "field_trials.case_files");
+  assert.equal(summary.candidates, 3);
+  assert.equal(summary.selected, 1);
+  assert.equal(summary.searchUnreadable, 1);
+  assert.equal(summary.readFailures.length, 1);
+  assert.equal(summary.readFailures[0].target, "W1-T20002");
+  assert.match(summary.readFailures[0].error, /PR search returned no list/);
+  assert.equal(shim.calls().filter((call) => call.includes("--search W1-T20003")).length, 1);
+  const files = JSON.parse(readFileSync(out, "utf8"));
+  assert.deepEqual(files.map((file: { taskId: string }) => file.taskId), [task]);
+  const carry = JSON.parse(readFileSync(join(ledger.dir, "field-trials", "case-files-carry.json"), "utf8"));
+  assert.equal(carry.links[task], 41001);
+  assert.equal(carry.finishedPrs["41001"].raw.state, "MERGED");
+  assert.equal(existsSync(`${out}.tmp`), false);
+  // The second night reads the carried, finished PR with no `gh pr view`.
+  const before = shim.calls().filter((call) => call.includes("pr view")).length;
+  await run(process.execPath, ["--import", "tsx", join(REPO_ROOT, "scripts", "private-field-trials-case-files.mjs")],
+    { cwd: REPO_ROOT, env, timeout: 120_000 });
+  assert.equal(shim.calls().filter((call) => call.includes("pr view")).length, before);
+});
+
+/** Run the real script over one called task that has no ledger PR row, with `gh pr list` answered by `listStdout`. */
+async function runWithSearch(t: import("node:test").TestContext, listStdout: string, extraRoutes: Parameters<typeof ghShim>[0] = []) {
+  const now = Date.now();
+  const called = "W1-T20003";
+  const ledger = writeLedger([
+    { ts: new Date(now - 10 * 60_000).toISOString(), task_id: called, run_id: `${called}-1795000000002`, step: "worker.assignment",
+      worker_assignment: { id: "a3", selected: { provider: "claude", model: "claude-opus-5-5" } } },
+  ], { scope: t });
+  const repo = ownedFixtureDir(t, "case-script-search-repo").dir;
+  mkdirSync(join(repo, "plan"), { recursive: true });
+  writeFileSync(join(repo, "plan", "tasks.yaml"), [`- id: ${called}`, `  title: "Task ${called}"`, "  repo: remudero", "  depends_on: []",
+    "  type: implement", "  verify: auto", "  risk: high", "  status: queued", "  attempts: 0"].join("\n") + "\n");
+  const shim = ghShim([...extraRoutes, { when: "pr list", stdout: listStdout }]);
+  const out = join(ledger.dir, "field-trials", "case-files-latest.json");
+  const env = { ...process.env, PATH: `${shim.dir}:${process.env.PATH}`, RMD_FIELD_TRIALS_REPO_ROOT: repo,
+    RMD_FIELD_TRIALS_CORE_LEDGER: ledger.dir, RMD_FIELD_TRIALS_CASE_OUT: out,
+    GH_APP_ID: "", GH_APP_INSTALLATION_ID: "", GH_APP_PRIVATE_KEY_PATH: "" };
+  const { stdout } = await run(process.execPath, ["--import", "tsx", join(REPO_ROOT, "scripts", "private-field-trials-case-files.mjs")],
+    { cwd: REPO_ROOT, env, timeout: 120_000 });
+  return { called, out, ledger, shim, summary: JSON.parse(stdout.trim().split("\n").at(-1)!) };
+}
+
+// W1-T14602: a search that answers with a PR list links the task, so the script's search seam returns that list.
+test("W1-T14602: the daily case-file script links an unlinked called task to the PR its search returns", async (t) => {
+  const { called, out, ledger, shim, summary } = await runWithSearch(t,
+    JSON.stringify([{ number: 41003, body: `Remudero-Task: W1-T20003`, headRefName: "feature/other", updatedAt: new Date().toISOString() }]),
+    [{ when: "pr view 41003", stdout: JSON.stringify({ number: 41003, url: "https://github.com/craigoley/remudero/pull/41003",
+      state: "MERGED", headRefOid: sha, headRefName: "feature/other", body: "Remudero-Task: W1-T20003",
+      mergedAt: new Date().toISOString(), statusCheckRollup: [] }) }]);
+  assert.equal(summary.searchMatched, 1);
+  assert.equal(summary.searchUnreadable, 0);
+  assert.equal(summary.selected, 1);
+  assert.deepEqual(summary.readFailures, []);
+  assert.ok(shim.calls().some((call) => call.includes("pr list") && call.includes(called)));
+  const files = JSON.parse(readFileSync(out, "utf8"));
+  assert.deepEqual(files.map((file: { taskId: string }) => file.taskId), [called]);
+  const carry = JSON.parse(readFileSync(join(ledger.dir, "field-trials", "case-files-carry.json"), "utf8"));
+  assert.equal(carry.links[called], 41003);
+});
+
+// W1-T14602: a search reply that is not a list is a failed search with a reason, never a silent empty match.
+test("W1-T14602: the daily case-file script reports a PR search that returns no list", async (t) => {
+  const { called, summary } = await runWithSearch(t, JSON.stringify({ message: "not a list" }));
+  assert.equal(summary.searchUnreadable, 1);
+  assert.equal(summary.selected, 0);
+  assert.equal(summary.readFailures.length, 1);
+  assert.equal(summary.readFailures[0].target, called);
+  assert.match(summary.readFailures[0].error, /PR search returned no list/);
+});

@@ -86,8 +86,8 @@ export interface MeasuredRemedy {
   escalate: boolean;
 }
 
-/** How far back a widened before-window reads, in multiples of the longest measuring window. */
-const WIDEN_FACTOR = 3;
+/** How far back a widened before-window reads. */
+export const REMEDY_WIDENED_BEFORE_WINDOW_MS = 3 * CI_FRICTION_EFFECT_MAX_WINDOW_MS;
 
 const empty = (): ShareWindow => ({ k: 0, n: 0 });
 
@@ -113,7 +113,7 @@ export function measureRemedy(task: { id: string; origin: string }, metric: Caus
   if ("unreadable" in after) return unmeasurable("metric-unreadable", after.unreadable, before, empty(), windowDays, afterFull);
   let widened = false;
   if (before.k === 0 || before.n === 0) {
-    const wide = metric.window(parsed.key, credit - WIDEN_FACTOR * CI_FRICTION_EFFECT_MAX_WINDOW_MS, credit);
+    const wide = metric.window(parsed.key, credit - REMEDY_WIDENED_BEFORE_WINDOW_MS, credit);
     if ("unreadable" in wide) return unmeasurable("metric-unreadable", wide.unreadable, before, after, windowDays, afterFull);
     if (wide.k > 0 && wide.n > 0) { before = wide; widened = true; }
   }

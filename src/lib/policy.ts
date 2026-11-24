@@ -271,6 +271,9 @@ export interface FreshnessRestartValues {
   /** W1-T12231: the latest a freshness drain's time limit may be after the restart decision. Present only when its
    *  row is; absent, the daemon uses deploy-judge.ts `FRESHNESS_MAX_DRAIN_WAIT_MS`. */
   maxDrainWaitMs?: number;
+  /** W1-T12230: the staleness horizon of an advance with daemon-loop commits and no reviewer one. Present only when its
+   *  row is, and never below `stalenessHorizonMs`; absent, the daemon uses `stalenessHorizonMs` for both. */
+  loopOnlyHorizonMs?: number;
 }
 
 /** One field's provenance, as recorded on load — see this module's header. */
@@ -404,6 +407,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "freshnessRestart.minLifetimeMs": "lifted",
   "freshnessRestart.likelyFraction": "lifted",
   "freshnessRestart.maxDrainWaitMs": "lifted",
+  "freshnessRestart.loopOnlyHorizonMs": "lifted",
 };
 
 /**
@@ -741,7 +745,7 @@ const DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS = 559_000;
 /** W1-T12228: the freshness restart's four values when `plan/policy.yaml` has no `freshnessRestart` block — today's
  *  constants in src/lib/deploy-judge.ts (`DEPLOY_RESTART_SCORE_THRESHOLD`, `DEPLOY_RESTART_RATE_CEILING_MS`,
  *  `FRESHNESS_COALESCE_WINDOW_MS`, `FRESHNESS_MIN_LIFETIME_MS`). Mirrored here, not imported, so this loader stays leaf. */
-export const DEFAULT_FRESHNESS_RESTART: Omit<FreshnessRestartValues, "likelyFraction" | "maxDrainWaitMs"> = {
+export const DEFAULT_FRESHNESS_RESTART: Omit<FreshnessRestartValues, "likelyFraction" | "maxDrainWaitMs" | "loopOnlyHorizonMs"> = {
   scoreLimit: 18,
   stalenessHorizonMs: 3_600_000,
   quietWindowMs: 600_000,
@@ -1026,7 +1030,7 @@ export function validatePolicy(raw: unknown): Policy {
     ? numberField(`freshnessRestart.${key}`, freshnessRestartRaw[key], origin, bounds)
     : DEFAULT_FRESHNESS_RESTART[key];
   // W1-T12231: the two rows the daemon defaults itself; a present one is bounds-checked like the four above.
-  const freshnessOptionalRow = (key: "likelyFraction" | "maxDrainWaitMs"): Partial<FreshnessRestartValues> =>
+  const freshnessOptionalRow = (key: "likelyFraction" | "maxDrainWaitMs" | "loopOnlyHorizonMs"): Partial<FreshnessRestartValues> =>
     freshnessRestartRaw?.[key] === undefined ? {} : { [key]: numberField(`freshnessRestart.${key}`, freshnessRestartRaw[key], origin, bounds) };
   const freshnessRestart: FreshnessRestartValues = {
     scoreLimit: freshnessRow("scoreLimit"),
@@ -1035,7 +1039,15 @@ export function validatePolicy(raw: unknown): Policy {
     minLifetimeMs: freshnessRow("minLifetimeMs"),
     ...freshnessOptionalRow("likelyFraction"),
     ...freshnessOptionalRow("maxDrainWaitMs"),
+    ...freshnessOptionalRow("loopOnlyHorizonMs"),
   };
+  // W1-T12230: a loop-only advance never waits less than one a review is stalled on.
+  if (freshnessRestart.loopOnlyHorizonMs !== undefined && freshnessRestart.loopOnlyHorizonMs < freshnessRestart.stalenessHorizonMs) {
+    throw new PolicyError(
+      `policy.yaml: 'freshnessRestart.loopOnlyHorizonMs.value' (${freshnessRestart.loopOnlyHorizonMs}) is below ` +
+        `freshnessRestart.stalenessHorizonMs (${freshnessRestart.stalenessHorizonMs}).`,
+    );
+  }
 
   return {
     values: {

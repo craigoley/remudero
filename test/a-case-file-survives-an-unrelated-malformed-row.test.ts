@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { gzipSync } from "node:zlib";
 import type { LedgerUnionStreamIO } from "../src/lib/ledger-union.js";
 import type { Task } from "../src/lib/plan.js";
-import { caseFileCommand, MAX_CASE_FILE_BATCH_TASKS } from "../src/lib/report-commands.js";
+import { caseFileCommand } from "../src/lib/report-commands.js";
 import type { StatusProjection } from "../src/lib/status.js";
 import { buildTaskCaseFile, readTaskCaseLedger, readTaskCaseLedgers } from "../src/lib/task-case-file.js";
 
@@ -130,12 +130,12 @@ test("a batch case-file read streams the ledger once and returns every task unde
     assert.deepEqual(files.map((file) => file.taskId), ["W1-T4608", "W1-T4611", "W1-T4620"]);
     assert.deepEqual([...new Set(files.map((file) => file.asOf))], [asOf]);
     assert.ok(files.every((file) => file.version === "task-case-file-v1" && file.ledger.state === "observed"));
-    const tooMany = Array.from({ length: MAX_CASE_FILE_BATCH_TASKS + 1 }, (_, index) => `W1-T${index + 1}`).join(",");
-    for (const args of [["--tasks", "W1-T1,nope"], ["--tasks", ","], ["--tasks", tooMany], ["--tasks"],
+    // W1-T14602: a batch has no task-count bound, so a long list is not one of these refusals.
+    for (const args of [["--tasks", "W1-T1,nope"], ["--tasks", ","], ["--tasks"],
       ["W1-T1", "--tasks", "W1-T2"], ["--tasks-file", join(dir, "absent.txt")]]) {
       assert.equal(await caseFileCommand(args, input), 2, args.join(" "));
     }
-    assert.match(errors.join("\n"), /nope is not a task id[\s\S]*no task ids given[\s\S]*exceed the batch bound[\s\S]*unexpected argument --tasks[\s\S]*unexpected argument W1-T1[\s\S]*absent\.txt is unreadable/);
+    assert.match(errors.join("\n"), /nope is not a task id[\s\S]*no task ids given[\s\S]*unexpected argument --tasks[\s\S]*unexpected argument W1-T1[\s\S]*absent\.txt is unreadable/);
     assert.equal(await caseFileCommand(["--tasks", "W1-T4608,W1-T404"], input), 2);
     assert.match(errors.at(-1) ?? "", /W1-T404 is not in the plan/);
     assert.equal(await caseFileCommand(["W1-T4608", "--bogus"], input), 2);

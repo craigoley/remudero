@@ -1422,6 +1422,7 @@
     "target_job.stalled": "W1-T14600: the operator page for a target job the core daemon deferred past its bound; the catalogue's own dedup reads the escalated row",
     "target_job.stall_escalated": "W1-T14600: the operator page for a target job the core daemon deferred past its bound; the catalogue's own dedup reads the escalated row",
     "ci-friction.pass": "An audit row for the operator (W1-T13989): it counts the units a ci-friction pass resumed from its journal and the units it ran fresh; nothing decides on it.",
+    "ci-friction.stage": "W1-T14677: one timing row per ci-friction inventory stage, for the operator to see where a long pass spent its time; nothing decides on it",
     "garden.unit_journal_failed": "A diagnostic (W1-T13989): a garden's unit journal could not be read or written, so its units re-run; it records the error once per pass and changes no garden output.",
     "config.randomised_finding": "An operator-facing finding naming the routing setting that can carry a randomised winner the mounts table cannot express; the config gardener re-reads it only to write each finding once per evidence day.",
     "config.randomised_recommendations_unread": "A diagnostic for a failed read of the randomised evidence; it records the error and changes no candidate.",
