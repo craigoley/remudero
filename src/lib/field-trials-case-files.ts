@@ -59,7 +59,14 @@ export interface FieldTrialsCaseFilePlan {
   oldestCallTs: string | null;
   carry: FieldTrialsCaseFileCarry;
   summary: Record<string, number>;
+  /** Every GitHub read that failed for a reason other than a rate limit, with GitHub's own message. */
+  readFailures: CaseFileReadFailure[];
 }
+
+/** A failed search or PR read: the task is left without a read, never given a guessed one. */
+export interface CaseFileReadFailure { read: "search" | "view"; target: string; error: string }
+
+const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 export function emptyCarry(): FieldTrialsCaseFileCarry {
   return { version: FIELD_TRIALS_CASE_FILE_CARRY_VERSION, links: {}, searchedNone: {}, finishedPrs: {} };
@@ -136,6 +143,7 @@ export async function planFieldTrialsCaseFiles(source: FieldTrialsCaseFileSource
     searchMatched: 0, searchAmbiguous: 0, searchUnreadable: 0, searchSkippedNoNewCall: 0, prReads: 0,
     prReadsCarried: 0, prReadsFailed: 0, rateLimitWaits: 0 };
   const prNumbers = new Map<string, number>();
+  const readFailures: CaseFileReadFailure[] = [];
   for (const taskId of candidates) {
     const fromLedger = ledgerPr.get(taskId)?.number;
     if (fromLedger !== undefined) { prNumbers.set(taskId, fromLedger); counts.linkedByLedger += 1; continue; }
@@ -153,8 +161,9 @@ export async function planFieldTrialsCaseFiles(source: FieldTrialsCaseFileSource
         prNumbers.set(taskId, credited[0]!.number as number);
         counts.searchMatched += 1;
       } else carry.searchedNone[taskId] = searchedAt;
-    } catch {
+    } catch (error) {
       counts.searchUnreadable += 1;
+      readFailures.push({ read: "search", target: taskId, error: errorText(error) });
     }
   }
   for (const [taskId, number] of prNumbers) carry.links[taskId] = number;
@@ -171,8 +180,9 @@ export async function planFieldTrialsCaseFiles(source: FieldTrialsCaseFileSource
       const read = { readAt, raw };
       prReads.set(number, read);
       if (finished(raw)) carry.finishedPrs[String(number)] = read;
-    } catch {
+    } catch (error) {
       counts.prReadsFailed += 1;
+      readFailures.push({ read: "view", target: String(number), error: errorText(error) });
     }
   }
   const selected = candidates.filter((taskId) => prNumbers.has(taskId));
@@ -181,7 +191,7 @@ export async function planFieldTrialsCaseFiles(source: FieldTrialsCaseFileSource
     if (row.step !== "worker.assignment" || !row.taskId || !row.ts || !prNumbers.has(row.taskId)) continue;
     if (oldestCallTs === null || row.ts < oldestCallTs) oldestCallTs = row.ts;
   }
-  return { selected, prNumbers, prReads, oldestCallTs, carry,
+  return { selected, prNumbers, prReads, oldestCallTs, carry, readFailures,
     summary: { ...counts, selected: selected.length, withoutPr: candidates.length - selected.length } };
 }
 
@@ -195,8 +205,9 @@ export function caseLedgerWindowDays(asOf: string, oldestCallTs: string | null):
 export async function buildFieldTrialsCaseFiles(source: FieldTrialsCaseFileSource, searchPrs: SearchPrs, viewPr: ViewPr,
   pacing: CaseFilePacing, buildCaseFiles: (plan: FieldTrialsCaseFilePlan) => Promise<TaskCaseFile[]>,
   firstWaitMs: number = RATE_LIMIT_FIRST_WAIT_MS,
-): Promise<{ files: TaskCaseFile[]; carry: FieldTrialsCaseFileCarry; summary: Record<string, number> }> {
+): Promise<{ files: TaskCaseFile[]; carry: FieldTrialsCaseFileCarry; summary: Record<string, number>;
+  readFailures: CaseFileReadFailure[] }> {
   const plan = await planFieldTrialsCaseFiles(source, searchPrs, viewPr, pacing, firstWaitMs);
   const files = plan.selected.length > 0 ? await buildCaseFiles(plan) : [];
-  return { files, carry: plan.carry, summary: plan.summary };
+  return { files, carry: plan.carry, summary: plan.summary, readFailures: plan.readFailures };
 }

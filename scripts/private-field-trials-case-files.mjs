@@ -74,4 +74,4 @@ for (const [path, body] of [[carryPath, result.carry], [out, result.files]]) {
   renameSync(temporary, path);
 }
 console.log(JSON.stringify({ event: "field_trials.case_files", asOf: result.files[0]?.asOf ?? null, ...result.summary,
-  ledger: read.state, path: out }));
+  ledger: read.state, path: out, readFailures: result.readFailures }));

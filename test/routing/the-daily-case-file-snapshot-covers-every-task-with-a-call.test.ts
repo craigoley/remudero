@@ -110,6 +110,11 @@ test("W1-T14602 criterion 2: a finished PR is carried with no GitHub call, a cha
   const failed = await failing.plan();
   assert.equal(failed.summary.prReadsFailed, 1);
   assert.equal(failed.prReads.size, 0);
+  assert.deepEqual(failed.readFailures, [{ read: "view", target: "40007", error: "HTTP 502" }], "the failure keeps GitHub's reason");
+  const unsearchable = setup([call(8, daysAgo(1))]);
+  const searchFailed = await unsearchable.plan(async () => { throw new Error("HTTP 500"); });
+  assert.deepEqual(searchFailed.readFailures, [{ read: "search", target: taskId(8), error: "HTTP 500" }]);
+  assert.equal(searchFailed.summary.searchUnreadable, 1);
 });
 
 const taskOf = (id: string) => ({ id, title: `Task ${id}`, repo: "remudero", depends_on: [], type: "implement",
