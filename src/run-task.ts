@@ -29449,6 +29449,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
         planState: () => readCiFrictionPlanState(repoRoot),
         ownerSearch: gitCiFrictionOwnerSearch((args) => execFileSync("git", ["-C", repoRoot, ...args], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 })),
         mintTaskId: ciLearningTaskIdMinter(repoRoot, log, undefined, mintOptions),
+        awaitReleases: true,
       };
       return gardenPass(ciFrictionGardenSpec(d, sources), d);
     }
