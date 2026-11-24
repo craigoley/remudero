@@ -362,7 +362,8 @@ test("W1-T4767: an unreadable ledger fails the garden pass without a zero scorec
   writeFileSync(join(stateDir, "ledger.2026-01-02T00-00-00-000Z.ndjson.gz"), "invalid gzip");
   assert.throws(() => runGarden(spec, deps), /ci-friction ledger union unreadable: unread ledger file/);
   assert.equal(readFileSync(statePath, "utf8"), previous, "failed evidence leaves the prior pass receipt intact");
-  assert.deepEqual(events, ["ci-friction.scorecard"], "a failed read emits no clean scorecard or task");
+  // W1-T14677: each stage's duration row is timing, not a result; a failed read still writes no clean scorecard or task.
+  assert.deepEqual(events.filter((step) => step !== "ci-friction.stage"), ["ci-friction.scorecard"], "a failed read emits no clean scorecard or task");
 });
 
 test("W1-T4767: a readable empty ledger remains a valid measured input", () => {

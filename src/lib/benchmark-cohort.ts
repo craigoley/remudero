@@ -11,6 +11,7 @@ import { joinVerifiedTaskOutcomes, type BenchmarkVerifiedOutcome, type VerifiedA
 import { deriveModelDrift, MODEL_DRIFT_VERSION, unavailableModelDrift, type ModelDriftReport,
   type ModelExposure } from "./model-drift.js";
 import type { TaskCaseFile } from "./task-case-file.js";
+import { notionalSpendUsd } from "./spend-rows.js";
 import { readSelfForecastRecord, scoreSelfForecasts, SELF_FORECAST_CALIBRATION_VERSION,
   unavailableSelfForecastCalibration, type SelfForecastCalibration, type SelfForecastPair } from "./self-forecast.js";
 
@@ -19,8 +20,10 @@ export const BENCHMARK_COHORT_VERSION = "benchmark-cohort-v1" as const;
 type Form = "gzip" | "plain" | "live";
 type EvidenceRow = { fingerprint: string; bytes: number; row: Record<string, unknown> };
 /** W1-T4636: the row projection a source was scanned under. A live source scanned before
- * `implement.done` was retained lacks those rows, so it is rescanned whole, never appended to. */
-const SOURCE_PROJECTION = "implement-forecast-v1" as const;
+ * `implement.done` was retained lacks those rows, so it is rescanned whole, never appended to.
+ * W1-T14571: a source scanned before a call row kept `provider` and `notional_cost_usd` read every Codex call as free,
+ * so any source under an older projection, archive or live, is rescanned whole on the next pass. */
+const SOURCE_PROJECTION = "codex-notional-v1" as const;
 type SourceRecord = {
   name: string;
   form: Form;
@@ -517,7 +520,8 @@ function projectRow(row: Record<string, unknown>): Record<string, unknown> {
   return {
     ts: row.ts, run_id: row.run_id, step: row.step, selection_assignment_id: row.selection_assignment_id,
     success: row.success, served_model: row.served_model, billing_mode: row.billing_mode,
-    total_cost_usd: row.total_cost_usd, evidence_action: row.evidence_action,
+    total_cost_usd: row.total_cost_usd, provider: row.provider, notional_cost_usd: row.notional_cost_usd,
+    evidence_action: row.evidence_action,
   };
 }
 
@@ -642,6 +646,12 @@ function blankTaskShape(denominator: number): TaskShapeStrata {
 
 function finiteCost(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/** INVARIANT codex-is-never-free (W1-T14571): a call's comparison cost is its notional price, so a Codex call reads its
+ * `notional_cost_usd`, never the billed 0 in `total_cost_usd`, and a Codex call with no notional figure is unpriced. */
+function callCost(call: Record<string, unknown> | undefined): number | null {
+  return call ? finiteCost(notionalSpendUsd(call)) : null;
 }
 
 /** W1-T13867: a snapshot carried past a pass that made no join of its own names the unavailable reason, rows and
@@ -820,7 +830,7 @@ function cohortAssignments(sources: SourceRecord[], faults: SourceFault[]): Coho
       assignedAt: typeof row.ts === "string" ? row.ts : null,
       taskClass: dimensions.taskClass, selectedModel: dimensions.model, servedModel,
       billingMode: billingMode === "api" || billingMode === "subscription" ? billingMode : null,
-      costUsd: finiteCost(sameRunCall?.total_cost_usd), attempted: !!sameRunCall,
+      costUsd: callCost(sameRunCall), attempted: !!sameRunCall,
       exposure: { at: canonicalTimestamp(row.ts) ? row.ts : null,
         fleet: typeof row.host === "string" && row.host ? row.host : null,
         harnessRevision: dimensions.harnessRevision, taskClass: dimensions.taskClass,
@@ -1034,7 +1044,7 @@ function deriveSnapshot(
         ["workerCall", typeof call?.success === "boolean"],
         ["servedModel", typeof call?.served_model === "string" && call.served_model.length > 0],
         ["billingMode", call?.billing_mode === "api" || call?.billing_mode === "subscription"],
-        ["cost", finiteCost(call?.total_cost_usd) !== null],
+        ["cost", callCost(call) !== null],
       ] as const) {
         if (!call) coverage[field].noAttempt += 1;
         else if (observed) coverage[field].observed += 1;
@@ -1053,14 +1063,16 @@ function deriveSnapshot(
       if (call.success === true) group.workerCallSuccess += 1;
       if (call.success === false) group.workerCallFailure += 1;
       if (typeof call.served_model === "string" && call.served_model.length > 0) group.servedModelObserved += 1;
-      const cost = finiteCost(call.total_cost_usd);
-      if (cost !== null && call.billing_mode === "api") group.apiCostUsd += cost;
-      if (cost !== null && call.billing_mode === "subscription") group.subscriptionNotionalUsd += cost;
+      // An api figure is billed money, so it never takes a notional value.
+      const billed = finiteCost(call.total_cost_usd);
+      const notional = callCost(call);
+      if (billed !== null && call.billing_mode === "api") group.apiCostUsd += billed;
+      if (notional !== null && call.billing_mode === "subscription") group.subscriptionNotionalUsd += notional;
       for (const [field, observed] of [
         ["workerCall", typeof call.success === "boolean"],
         ["servedModel", typeof call.served_model === "string" && call.served_model.length > 0],
         ["billingMode", call.billing_mode === "api" || call.billing_mode === "subscription"],
-        ["cost", cost !== null],
+        ["cost", notional !== null],
       ] as const) {
         if (observed) coverage[field].observed += 1;
         else coverage[field].notRecorded += 1;
@@ -1222,7 +1234,8 @@ async function cohortPass(stateDir: string, opts: NonNullable<Parameters<typeof 
   const faults = new Map((checkpoint.sourceFaults ?? []).map((fault) => [fault.name, fault]));
   const changed = current.filter((entry) => {
     const prior = known.get(entry.name);
-    if (prior) return prior.size !== entry.size || prior.mtimeMs !== entry.mtimeMs || prior.form !== entry.form;
+    if (prior) return prior.size !== entry.size || prior.mtimeMs !== entry.mtimeMs || prior.form !== entry.form
+      || prior.projection !== SOURCE_PROJECTION;
     const fault = faults.get(entry.name);
     return !fault || !fault.audited || fault.size !== entry.size || fault.mtimeMs !== entry.mtimeMs || fault.form !== entry.form;
   });

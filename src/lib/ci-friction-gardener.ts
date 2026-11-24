@@ -11,6 +11,7 @@ import { ghIssueGatewayAsync, type Escalation } from "./escalate.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
 import { prepareGardenTaskIds, gardenLedgerBucket, gardenUnitJournal, type GardenTaskIdMinter } from "./gardener.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { ensureHeldTokenFresh } from "./github-app.js";
 import { ghExec, ghTextAsync } from "./github-transport.js";
 import { gateFireRatesPath, type GateFireRate, type GateFireRateReport } from "./gate-fire-rate.js";
 import { ledgerLivePath, ledgerRotationDigests, ledgerRotationEntries, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook } from "./ledger-union.js";
@@ -1518,10 +1519,12 @@ export function releaseCiFrictionEscalations(input: {
  * and the next pass tries again. Never rejects. Returns the causes released.
  */
 export async function closeCiFrictionReleases(due: readonly CiFrictionDueRelease[], issues: CiFrictionEscalationIssues,
-  log: (step: string, extra?: Record<string, unknown>) => void): Promise<string[]> {
+  log: (step: string, extra?: Record<string, unknown>) => void, fresh?: () => Promise<unknown>): Promise<string[]> {
   const released: string[] = [];
   for (const d of due) {
     if (d.issueUrl !== undefined) {
+      // W1-T14677: each issue's reads run on a token with time left, never the pass-start one.
+      await fresh?.();
       let comments: CiFrictionIssueComment[];
       try {
         comments = await issues.listComments(d.issueUrl);
@@ -1811,7 +1814,15 @@ export interface CiFrictionGardenSources {
   /** W1-T14624: the pass is driven to completion (the garden child), so its async inventory waits for the
    *  release I/O; without it a child that exits when its pass returns drops every release before its row. */
   awaitReleases?: boolean;
+  /** W1-T14677: before a GitHub read on the awaited path, renew a token near its expiry; absent, {@link ensureHeldTokenFresh}. */
+  freshToken?: () => Promise<unknown>;
 }
+
+/** W1-T14677: one row per inventory stage, so a long pass says where its time went. */
+export const CI_FRICTION_STAGE_STEP = "ci-friction.stage";
+/** W1-T14677: the stages of a ci-friction inventory, in pass order. */
+export const CI_FRICTION_STAGES = ["unit_collection", "unit_scoring", "hand_fix_read", "release_decisions", "scorecard"] as const;
+export type CiFrictionStage = typeof CI_FRICTION_STAGES[number];
 
 /** How many of the costliest causes the ladder reports and the pass considers. */
 const LADDER_DEPTH = 8;
@@ -1985,6 +1996,63 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
   const clock: Clock = deps.clock ?? systemClock;
   // W1-T14624: this pass's release I/O. A garden child exits when its pass returns, so the awaited path waits for it.
   let releasing: Promise<unknown> = Promise.resolve();
+  const freshToken = sources.freshToken ?? (() => ensureHeldTokenFresh());
+  /** W1-T14677: the inventory in stages. It yields before each stage that reads GitHub, so the awaited path renews a
+   *  token near expiry there, and it logs each stage's duration. The sync path runs it straight through and keeps
+   *  W1-T14623's refusal of an expired token; only an `awaited` pass renews. */
+  function* inventorySteps(awaited: boolean): Generator<"github_read", CiFrictionInventory, void> {
+    const timed = <T>(name: CiFrictionStage, run: () => T): T => {
+      const startedAt = clock.now();
+      try {
+        return run();
+      } finally {
+        deps.log(CI_FRICTION_STAGE_STEP, { name, started_at: fixedClock(startedAt).iso(), duration_ms: Math.max(0, clock.now() - startedAt) });
+      }
+    };
+    const { records, plan, ownerSearch, collected } = timed("unit_collection", () => {
+      const records = sources.ledgerRecords();
+      const plan = sources.planState();
+      const ownerSearch: CiFrictionOwnerSearch = sources.ownerSearch.pin?.() ?? sources.ownerSearch;
+      return { records, plan, ownerSearch, collected: ciFrictionRoundsFromLedger(records) };
+    });
+    const ledgerRounds = timed("unit_scoring", () => journaledBirthRounds(collected, ownerSearch, deps));
+    yield "github_read";
+    const hand = timed("hand_fix_read", () => sources.handFixes?.());
+    if (hand?.state === "unmeasured") deps.log("ci-friction.hand_fixes_unmeasured", { reason: hand.reason });
+    const gateFireRates = sources.gateFireRates?.();
+    const unnamedGates = ciFrictionGatePricedPrs(gateFireRates).unnamed;
+    if (unnamedGates.length > 0 && (hand?.fixes.length ?? 0) > 0) deps.log("ci-friction.hand_fixes_unpriced", {
+      reason: "the gate-fire-rate report prices red pull requests it does not name; manual changes carry no proxy minutes",
+      gates: unnamedGates.slice(0, 8), gate_count: unnamedGates.length });
+    const rounds = [...ledgerRounds, ...ciFrictionHandFixRounds(hand?.fixes ?? [], ledgerRounds,
+      priceCiFrictionCauses(ledgerRounds, gateFireRates, clock.now()), ownerSearch, gateFireRates)];
+    const priced = priceCiFrictionCauses(rounds, gateFireRates, clock.now());
+    // W1-T13219: the release decision is read here; its issue I/O runs on the awaited transport. W1-T14624: inventoryAsync waits for it.
+    const due = timed("release_decisions", () => releaseCiFrictionEscalations({ records, priced, nowMs: clock.now(), log: deps.log })
+      .due.filter((d) => !releasesInFlight.has(d.cause)));
+    if (due.length > 0) {
+      for (const d of due) releasesInFlight.add(d.cause);
+      releasing = closeCiFrictionReleases(due, sources.issues ?? ghCiFrictionEscalationIssues(), deps.log, awaited ? freshToken : undefined)
+        .finally(() => { for (const d of due) releasesInFlight.delete(d.cause); });
+    }
+    if (plan.degraded) deps.log("ci-friction.origins_degraded", { reason: plan.degraded });
+    if (plan.unreadable) deps.log("ci-friction.plan_shard_unreadable", { shards: plan.unreadable });
+    const { next, ladder } = ciFrictionLadder({
+      priced,
+      rounds,
+      tasks: plan.tasks,
+      receipts: new Set(landedCiFrictionOrigins(records)),
+      escalated: new Set(escalatedCiFrictionOrigins(records)),
+      holds: records,
+      ownerSearch,
+      nowMs: clock.now(),
+    });
+    const workflowGaps = ownerSearch.workflowGaps?.() ?? [];
+    if (workflowGaps.length > 0) deps.log("ci-friction.workflow_ownership_unresolved", { gaps: workflowGaps });
+    const registrations = plan.tasks.flatMap((task) => task.preventionSource && !("state" in task.preventionSource) ? [task.preventionSource] : []).slice(0, 32);
+    const preventionSources = { registrations, unavailable: plan.tasks.length - registrations.length };
+    return { priced, rounds, ladder, preventionSources, ...(workflowGaps.length > 0 ? { workflowGaps } : {}), ...(hand ? { handFixState: { state: hand.state, count: hand.fixes.length } } : {}), ...(next ? { next, untracked: next.price } : {}), ...(plan.degraded ? { degraded: plan.degraded } : {}) };
+  }
   const spec: GardenSpec<CiFrictionGardenClass, CiFrictionInventory, CiFrictionGardenAction, GardenCheckout> = {
     name: "ci-friction",
     landingRefusal: machineShardLandingGuard(deps, sources.ownerSearch.fileExists),
@@ -2016,44 +2084,10 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
       return `${head}:${gardenLedgerBucket(clock)}:${liveAccessStamp()}:${fileStamp(report)}:${archives}`;
     },
     inventory: () => {
-      const records = sources.ledgerRecords();
-      const plan = sources.planState();
-      const ownerSearch: CiFrictionOwnerSearch = sources.ownerSearch.pin?.() ?? sources.ownerSearch;
-      const ledgerRounds = journaledBirthRounds(ciFrictionRoundsFromLedger(records), ownerSearch, deps);
-      const hand = sources.handFixes?.();
-      if (hand?.state === "unmeasured") deps.log("ci-friction.hand_fixes_unmeasured", { reason: hand.reason });
-      const gateFireRates = sources.gateFireRates?.();
-      const unnamedGates = ciFrictionGatePricedPrs(gateFireRates).unnamed;
-      if (unnamedGates.length > 0 && (hand?.fixes.length ?? 0) > 0) deps.log("ci-friction.hand_fixes_unpriced", {
-        reason: "the gate-fire-rate report prices red pull requests it does not name; manual changes carry no proxy minutes",
-        gates: unnamedGates.slice(0, 8), gate_count: unnamedGates.length });
-      const rounds = [...ledgerRounds, ...ciFrictionHandFixRounds(hand?.fixes ?? [], ledgerRounds,
-        priceCiFrictionCauses(ledgerRounds, gateFireRates, clock.now()), ownerSearch, gateFireRates)];
-      const priced = priceCiFrictionCauses(rounds, gateFireRates, clock.now());
-      // W1-T13219: the release decision is read here; its issue I/O runs on the awaited transport. W1-T14624: inventoryAsync waits for it.
-      const due = releaseCiFrictionEscalations({ records, priced, nowMs: clock.now(), log: deps.log }).due.filter((d) => !releasesInFlight.has(d.cause));
-      if (due.length > 0) {
-        for (const d of due) releasesInFlight.add(d.cause);
-        releasing = closeCiFrictionReleases(due, sources.issues ?? ghCiFrictionEscalationIssues(), deps.log)
-          .finally(() => { for (const d of due) releasesInFlight.delete(d.cause); });
-      }
-      if (plan.degraded) deps.log("ci-friction.origins_degraded", { reason: plan.degraded });
-      if (plan.unreadable) deps.log("ci-friction.plan_shard_unreadable", { shards: plan.unreadable });
-      const { next, ladder } = ciFrictionLadder({
-        priced,
-        rounds,
-        tasks: plan.tasks,
-        receipts: new Set(landedCiFrictionOrigins(records)),
-        escalated: new Set(escalatedCiFrictionOrigins(records)),
-        holds: records,
-        ownerSearch,
-        nowMs: clock.now(),
-      });
-      const workflowGaps = ownerSearch.workflowGaps?.() ?? [];
-      if (workflowGaps.length > 0) deps.log("ci-friction.workflow_ownership_unresolved", { gaps: workflowGaps });
-      const registrations = plan.tasks.flatMap((task) => task.preventionSource && !("state" in task.preventionSource) ? [task.preventionSource] : []).slice(0, 32);
-      const preventionSources = { registrations, unavailable: plan.tasks.length - registrations.length };
-      return { priced, rounds, ladder, preventionSources, ...(workflowGaps.length > 0 ? { workflowGaps } : {}), ...(hand ? { handFixState: { state: hand.state, count: hand.fixes.length } } : {}), ...(next ? { next, untracked: next.price } : {}), ...(plan.degraded ? { degraded: plan.degraded } : {}) };
+      const steps = inventorySteps(false);
+      let step = steps.next();
+      while (!step.done) step = steps.next();
+      return step.value;
     },
     // The ladder decides whether work remains — never a recorded fingerprint alone, which a pass that
     // drew no action or failed to land could have left behind.
@@ -2061,7 +2095,10 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
     fingerprint: (inv) => `${inv.priced.map((p) => `${ciFrictionCauseKey(p.cause)}:${p.minutes}`).join(",")}|${inv.next ? inv.next.origin : ""}`,
     candidates: (inv) => draftCandidates(inv),
     scorecard: (inv, plan) => {
+      const startedAt = clock.now();
       appendCiFrictionTrendRow(ciFrictionGardenLogPath(deps.stateDir), clock.iso(), inv.priced);
+      deps.log(CI_FRICTION_STAGE_STEP, { name: "scorecard" satisfies CiFrictionStage, started_at: fixedClock(startedAt).iso(),
+        duration_ms: Math.max(0, clock.now() - startedAt) });
       return {
         ownership_reconsiderations: plan.actions.flatMap(action => action.decision.kind === "draft" && action.decision.reconsideration ? [action.decision.reconsideration] : []),
         prevention_sources: inv.preventionSources?.registrations ?? [],
@@ -2132,9 +2169,14 @@ export function ciFrictionGardenSpec(deps: GardenerDeps, sources: CiFrictionGard
     },
     // W1-T14624: a pass run to completion (the garden child) ends only after every due release wrote its row.
     ...(sources.awaitReleases ? { inventoryAsync: async (): Promise<CiFrictionInventory> => {
-      const inventory = spec.inventory();
+      const steps = inventorySteps(true);
+      let step = steps.next();
+      while (!step.done) {
+        await freshToken();
+        step = steps.next();
+      }
       await releasing;
-      return inventory;
+      return step.value;
     } } : {}),
   };
   return spec;
