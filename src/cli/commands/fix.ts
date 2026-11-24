@@ -45,7 +45,7 @@ import { observeFeedbackInputs, type AdmissionObserver } from "../../lib/contrib
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
 import { observeAdmissionDisposition } from "../../lib/action-executor.js";
 import { fixLaneBenchmarkWork } from "../../lib/benchmark-run.js";
-import { captureCiRemedyComponent, recordCiRemedyExecution } from "../../lib/ci-remedy-execution.js";
+import { captureCiRemedyComponent, recordCiRemedyExecution, upsertCiRemedyRoundComment, type CiRemedyExecution } from "../../lib/ci-remedy-execution.js";
 import { loadPlan, visibleCriteria, type AcceptanceCriterion, type Plan } from "../../lib/plan.js";
 import { loadMounts, mountsPath, type Mount } from "../../lib/mounts.js";
 import { codexCapabilityBelow, codexCapabilityForRequestedModel } from "../../lib/worker-provider.js";
@@ -2820,6 +2820,9 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
   const offeredCensusBaselines = () => (censusRefusalIsCurrent() ? pushRefusal!.offeredBaselines : []);
   let roundPushFailure: Extract<FixRoundLanding, { landed: false }> | undefined;
   let roundPushReceipt: FixRoundPushReceipt | undefined;
+  // W1-T14628: what the fix-round comment says about the round now pushing, and the CI remedy execution its strike recorded.
+  let roundRemedyExecution: CiRemedyExecution | undefined;
+  let roundCommentContext: { site: string; priorHead: string | undefined; redChecks: string[]; remedy: CiRemedyExecution | undefined } | undefined;
   // W1-T11170, operator-approved scope widening: a session-head worker round may push only its
   // merge commit on the exact PR head, after validating this rung's branch claim and re-reading
   // the session ownership evidence. The push adapter invokes this after its merged-tree and
@@ -2844,6 +2847,8 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
   const landRoundPush = async (push: () => unknown, headSha: string | undefined, site: string): Promise<FixRungOutcome | "refused" | undefined> => {
     roundPushFailure = undefined;
     roundPushReceipt = undefined;
+    roundCommentContext = { site, priorHead: currentPrHeadSha, redChecks: [...new Set((currentCiFailures ?? []).map((f) => f.name))],
+      remedy: site === "rung.strike" ? roundRemedyExecution : undefined };
     const filingRefusal = await filingRoundRefusal(review.headSha, headSha);
     if (filingRefusal) {
       deps.log("fix.commit_refused", { site, head_sha: review.headSha, reason: filingRefusal });
@@ -2876,6 +2881,20 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: `${reason}: ${text}` };
     }
   };
+  // W1-T14628: once per push that landed (the remote head equals the pushed head), the PR's one fix-round comment is
+  // created or edited. A refused or failed push never reaches here; a failed write is logged and never fails the round.
+  // The writer is a dependency: production wires the real one, and a round handed none posts nothing.
+  const commentLandedRound = async (pushedHead: string): Promise<void> => {
+    const context = roundCommentContext;
+    roundCommentContext = undefined;
+    const { upsertFixRoundComment } = deps;
+    if (upsertFixRoundComment === undefined || context?.priorHead === undefined || context.priorHead === pushedHead) return;
+    const input = { prUrl: opts.prUrl, branch: opts.branch, cwd: opts.worktreePath,
+      round: { site: context.site, priorHead: context.priorHead, pushedHead, redChecks: context.redChecks } };
+    if (context.remedy !== undefined && context.redChecks.length > 0) {
+      await upsertCiRemedyRoundComment(context.remedy, input, deps.log, upsertFixRoundComment);
+    } else await upsertFixRoundComment(input, deps.log);
+  };
   const lsRemoteBranchHead = async (wt: string, branch: string) =>
     (await hostWorktreeGitAsync(wt, ["ls-remote", "origin", `refs/heads/${branch}`])).split(/\s/)[0] || undefined;
   const roundLanding = async (committed: string | undefined): Promise<FixRoundLanding> => {
@@ -2891,7 +2910,10 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     const remoteHead = read.head;
     const unreadable = read.unreadable;
     const seen = remoteHead === undefined ? {} : { remoteHead };
-    if (headSha !== undefined && remoteHead === headSha) return { landed: true, remoteHead };
+    if (headSha !== undefined && remoteHead === headSha) {
+      await commentLandedRound(remoteHead);
+      return { landed: true, remoteHead };
+    }
     if (unreadable !== undefined) return { landed: false, outcome: "remote_unreadable", reason: unreadable };
     return { landed: false, outcome: "not_on_remote", ...seen,
       reason: `refs/heads/${opts.branch} holds ${remoteHead ?? "<absent>"}, not the round's commit ${headSha ?? "<unread>"}` };
@@ -3666,6 +3688,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           commit: (o) => commitGeneratorOutput(o),
           push: async (o) => {
             generatorPush = await landRoundPush(() => deps.push(o.cwd, o.branch, o.expectedHeadSha, undefined, ownedSessionPushGuard), o.expectedHeadSha, "rung.generator_fix");
+            if (generatorPush === undefined) await roundLanding(o.expectedHeadSha); // W1-T14628: a landed generator push edits the comment too
           },
         },
       });
@@ -3764,6 +3787,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       failingChecks: (currentCiFailures ?? []).length, matchedPaths: logNamedPaths.length,
       reachablePaths: namedReachablePaths.length, ownership: logNamedMain.outcome,
     });
+    roundRemedyExecution = remedyExecution;
     try {
       deps.log("fix.remedy_path_execution", { prevention_execution: remedyExecution,
         run_id: opts.runId, repair_pr_url: opts.prUrl });

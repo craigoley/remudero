@@ -1,4 +1,4 @@
-import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, releaseContractPins, type ReleaseEvidence } from "./operator-release.js";
+import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, releaseContractPins, releasePinMatches, type ReleaseEvidence } from "./operator-release.js";
 import { stampVerificationAsk } from "./inbox-retirement.js";
 /**
  * lib/machine-filing-judge.ts — the LLM judge in the middle of machine-filed work (operator ruling
@@ -652,7 +652,7 @@ export function staleRulingPins(records: RulingPins[], main: Map<string, string>
     // and a retirement (W1-T9694) is current while the tree reads the record as it was written.
     const current = (task?.status === "queued" && task.retirement === undefined && (pin === record.sourcePin || pin === record.pin)) ||
       ((record.action === "retire" || record.action === "withdraw" || record.action === "rule-retire") && pin === record.pin);
-    const operatorCurrent = record.operatorReleasePin === undefined || (task !== undefined && operatorReleasePin(task) === record.operatorReleasePin);
+    const operatorCurrent = record.operatorReleasePin === undefined || (task !== undefined && releasePinMatches(task, record.operatorReleasePin));
     return current && operatorCurrent ? [] : [{ id: record.id, pin: record.pin, main_pin: pin }];
   });
 }
@@ -1403,7 +1403,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       !releaseEvidence.reapproval.has(t.id) && needsMachineJudgement(t, released) &&
       // W1-T10348: a release is masked only by a settled RELEASE; a settled escalation is what it overrules.
       (released.has(t.id)
-        ? state.settledReleases?.[t.id] !== operatorReleasePin(t) && state.refusedReleases?.[t.id] !== operatorReleasePin(t)
+        ? !releasePinMatches(t, (state.settledReleases ?? {})[t.id]) && !releasePinMatches(t, (state.refusedReleases ?? {})[t.id])
         : state.settled?.[t.id] !== taskRulingPin(t) && !excluded.has(judgementFamily(t)) && state.declined?.[t.id] !== taskRulingPin(t)),
   );
   const policy = ports.riskPolicy?.() ?? DEFAULT_RISK_POLICY;
@@ -1421,13 +1421,13 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   state.settledReleases = Object.fromEntries(
     Object.entries(state.settledReleases ?? {}).filter(([id, pin]) => {
       const t = plan.byId.get(id);
-      return t !== undefined && pin === operatorReleasePin(t);
+      return t !== undefined && releasePinMatches(t, pin);
     }),
   );
   state.refusedReleases = Object.fromEntries(
     Object.entries(state.refusedReleases ?? {}).filter(([id, pin]) => {
       const t = plan.byId.get(id);
-      return t !== undefined && pin === operatorReleasePin(t);
+      return t !== undefined && releasePinMatches(t, pin);
     }),
   );
   const records = new Map<string, FamilyTrackRecord>();

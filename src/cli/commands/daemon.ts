@@ -56,7 +56,7 @@ import { createThreadEventSync, registryThreadItems, type InboxResponderDeps } f
 import type { InboxCausalScope } from "../../lib/inbox-thread.js";
 import { gitRecommendationEvidence, RECOMMENDATION_SEED_PATH } from "../../lib/inbox-recommendation.js";
 import { censusRunDirs } from "../../lib/run-child-contract.js";
-import { loadTargetPlanOrEmptyWhenAbsent, plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
+import { loadTargetPlanForReload, loadTargetPlanOrEmptyWhenAbsent, plannedSequence, runDrain, targetPlanRevisionStore, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
@@ -1703,7 +1703,9 @@ export async function daemonCommand(
   const deferUntilLocked = (): string => "deferred-until-lock";
   const requestShardRepair = shardRepairRequester(join(config.root, "state"), log);
   const reportPlanQuarantine = quarantineReporter(log, raiseDuplicate, requestShardRepair);
-  const planReaders = daemonPlanReaders(target.planPath, reportPlanQuarantine);
+  // W1-T14712: a foreign target's lane runs sync through a store that keeps another repository's unseen dependency.
+  const planReaders = daemonPlanReaders(target.planPath, reportPlanQuarantine, undefined,
+    targetPlanRevisionStore(target.isSelf ? undefined : `${target.owner}/${target.repo}`));
   const gardenContext: GardenBuildContext = { config, repoRoot: effectiveRepoRoot, owner: self.owner, repo: self.repo, log, raiseDuplicate, pollIntervalMs: opts.pollIntervalMs, codeSha: daemonLoadedCodeSha };
   // A per-target garden on a non-self target reads THAT repository and its checkout; every other garden reads self.
   const gardenContextFor = (name: RegisteredGardenName): GardenBuildContext => registeredGardenTargetArgs(name, target).length === 0 ? gardenContext
@@ -3015,7 +3017,7 @@ export async function daemonCommand(
         // load source. Selection itself lives in `resolveReloadPlan` (its own doc, above) so this
         // callsite stays a single reachable line regardless of which arm a given caller exercises.
         reloadPlan: flagValue(rest, "--plan") ? undefined : resolveReloadPlan(target, allowStale, log,
-          { load: planReaders.reload }),
+          { load: planReaders.reload }, { load: (path: string) => loadTargetPlanForReload(path, `${target.owner}/${target.repo}`) }),
         // Console UP NEXT write-actions (fb-1784988460437-9daa9b): the daemon
         // consumes markers the write-token API drops, dispatching a kicked task
         // through its normal assertRunnable-gated path and honouring "drain now".

@@ -1,5 +1,5 @@
 import type { DocumentOptions } from "yaml";
-import { PlanBlobCache, mergePlanBlobs, mergePlanBlobsQuarantiningDuplicates, type Plan, type QuarantinedTask } from "./plan.js";
+import { PlanBlobCache, mergePlanBlobs, mergePlanBlobsQuarantiningDuplicates, type KeepsUnseenDependency, type Plan, type QuarantinedTask } from "./plan.js";
 import { freezeReadGeneration } from "./read-plane.js";
 
 /** W1-T9763: `key` names the parsed identity; the primary uses `<tasks.yaml blob>:<tasks.d tree>`. */
@@ -21,9 +21,11 @@ export interface PlanRevisionStore {
 }
 
 /** A plan is frozen, so a reader that mutates it throws instead of changing every reader's plan, and held weakly, so
- *  one no reader holds is released; `retainLatest` keeps the newest for a reader holding nothing between requests. */
+ *  one no reader holds is released; `retainLatest` keeps the newest for a reader holding nothing between requests.
+ *  W1-T14712: `keepsUnseenDependency` reaches every merge, so a target's store keeps what its boot read keeps. */
 export function createPlanRevisionStore(
-  opts: { retainLatest?: boolean; strict?: boolean; yamlLogLevel?: DocumentOptions["logLevel"]; dependencyMode?: "preserve-external" } = {},
+  opts: { retainLatest?: boolean; strict?: boolean; yamlLogLevel?: DocumentOptions["logLevel"]; dependencyMode?: "preserve-external";
+    keepsUnseenDependency?: KeepsUnseenDependency } = {},
 ): PlanRevisionStore {
   const blobCache = new PlanBlobCache();
   // Bind the mode to this store, never an individual revision or the shared blob cache.
@@ -52,8 +54,9 @@ export function createPlanRevisionStore(
       const already = hit(revision.key);
       if (already) return already;
       const read = opts.strict || dependencyMode === "preserve-external"
-        ? { plan: mergePlanBlobs(blobs, opts.yamlLogLevel === undefined ? undefined : { logLevel: opts.yamlLogLevel }, { dependencyMode }), quarantined: [] }
-        : mergePlanBlobsQuarantiningDuplicates(blobs, blobCache);
+        ? { plan: mergePlanBlobs(blobs, opts.yamlLogLevel === undefined ? undefined : { logLevel: opts.yamlLogLevel },
+          { dependencyMode, keepsUnseenDependency: opts.keepsUnseenDependency }), quarantined: [] }
+        : mergePlanBlobsQuarantiningDuplicates(blobs, blobCache, opts.keepsUnseenDependency);
       parsed++;
       freezeReadGeneration(read.plan);
       held.set(revision.key, new WeakRef(read.plan));
