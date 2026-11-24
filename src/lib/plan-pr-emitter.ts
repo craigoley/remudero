@@ -1,4 +1,4 @@
-import { CHECK_PROOF_CHILD_ENTRY, checkProofChildArgv } from "./check-proof.js";
+import { CHECK_PROOF_CHILD_ENTRY, COMMENT_ONLY_DISCRIMINATION_LINE, checkProofChildArgv } from "./check-proof.js";
 import { childEntryArgv } from "./child-entry-argv.js";
 /**
  * The shared gate-contract module for every machine flow that opens a plan PR (W1-T136: `rmd retro` and
@@ -16,7 +16,7 @@ import { childEntryArgv } from "./child-entry-argv.js";
  * FALSIFIER: test/plan-pr-emitter.test.ts and the acceptance-block/retro-acceptance test suites.
  */
 
-import type { AcceptanceCriterion } from "./plan.js";
+import { withoutOneMovedFromLine, type AcceptanceCriterion } from "./plan.js";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import {
@@ -30,7 +30,7 @@ import { readFileIfExists } from "./fs-race-safe.js";
 import { resolvePlanDestination } from "./plan-destination.js";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { acceptanceBlockDiagnostics, acceptanceHeaderLine, parseAcceptanceBlock, parseWhitelistedProof, wrappedGrepPattern } from "./review.js";
+import { acceptanceBlockDiagnostics, acceptanceHeaderLine, movedFromCommit, parseAcceptanceBlock, parseWhitelistedProof, wrappedGrepPattern } from "./review.js";
 import { breMetacharsIn } from "./bre-metachars.js";
 import { emDashSeparatedProof, refuseNonDiscriminatingCriteria } from "./body-repair.js";
 import {
@@ -745,7 +745,7 @@ export interface PlanPrPreflightReading {
   output: string;
   timedOutMs?: number; // killed at this budget: `status` is no verdict at all
 }
-export type ProofCheckStatus = number | null | { timedOutMs: number }; // check-proof's exit, or the budget it was killed at
+export type ProofCheckStatus = number | null | { timedOutMs: number } | { commentOnly: true }; // check-proof's exit, the budget it was killed at, or its comment-only exit 5
 export { inTreeCheckBudgetMs };
 
 const LINT_PLAN_SCRIPT = "scripts/lint-plan-precheck.mjs";
@@ -898,7 +898,10 @@ async function runInTreeAsync(cwd: string, relPath: string, argv: string[], budg
   return runChildAsync(file, args, cwd, env, budgetMs);
 }
 
-const proofCheckStatus = (r: PlanPrPreflightReading): ProofCheckStatus => (r.timedOutMs === undefined ? r.status : { timedOutMs: r.timedOutMs });
+const proofCheckStatus = (r: PlanPrPreflightReading): ProofCheckStatus =>
+  r.timedOutMs !== undefined ? { timedOutMs: r.timedOutMs }
+    : r.status === CHECK_PROOF_STALE_EXIT && r.output.split("\n").includes(COMMENT_ONLY_DISCRIMINATION_LINE) ? { commentOnly: true } : r.status;
+const commentOnlyStatus = (status: ProofCheckStatus): boolean => status !== null && typeof status === "object" && "commentOnly" in status;
 
 export type CheckProofChildLog = (step: string, extra?: Record<string, unknown>) => void;
 const CHECK_PROOF_CHILD_NAME = "check-proof-main";
@@ -1031,6 +1034,21 @@ function introducedProofs(headText: string, baseText: string | undefined): strin
 }
 const CHANGED_SHARDS_ARGS = ["diff", "--name-only", "--diff-filter=AM", "origin/main...HEAD", "--", PLAN_TASK_SHARD_PREFIX];
 
+/** W1-T14603 (operator ruling 2026-11-24 "Exempt moved copies"): the `<commit>:<path>` blob a shard names as its public
+ *  original, when it carries exactly one moved_from line of the mover's shape; otherwise undefined, and it is judged. */
+function movedCopyOriginal(head: Buffer, rel: string): string | undefined {
+  const text = head.toString("utf8");
+  const commit = withoutOneMovedFromLine(text) === undefined ? undefined : movedFromCommit(text);
+  return commit === undefined ? undefined : `${commit}:${rel}`;
+}
+/** True only when the shard's bytes, less its one moved_from line, equal the public original's byte for byte: such a
+ *  copy introduces no proof. Any other edit, or an original the code root could not read, is judged (fail closed). */
+function isExactMoveCopy(head: Buffer, original: Buffer | undefined): boolean {
+  const text = head.toString("utf8");
+  const stripped = withoutOneMovedFromLine(text);
+  return original !== undefined && stripped !== undefined && Buffer.from(text, "utf8").equals(head) && Buffer.from(stripped, "utf8").equals(original);
+}
+
 /** Proofs this tree INTRODUCES in changed task shards (undefined when unreadable): a MERGED task's own proofs pass at
  *  base by construction, so a status edit to its shard (plan-reconcile) is not this PR's to discriminate. */
 function changedShardProofs(cwd: string): string[] | undefined {
@@ -1043,16 +1061,23 @@ function changedShardProofs(cwd: string): string[] | undefined {
   }
   return proofs;
 }
-async function changedShardProofsAsync(cwd: string): Promise<string[] | undefined> {
+/** W1-T14603: with a code root (an ops tree), an exact catalog-move copy introduces no proof. The sync form above stays
+ *  as it was (amended design item 3): another blocking git read there would evade the sync-spawn census, and move
+ *  steps run this awaited preflight (plan-task-move.ts defaultPreflight). */
+async function changedShardProofsAsync(cwd: string, codeRoot?: string): Promise<string[] | undefined> {
   const diff = await runChildAsync("git", CHANGED_SHARDS_ARGS, cwd);
   if (diff.status !== 0) return undefined;
+  const show = (root: string, spec: string): Promise<Buffer | undefined> =>
+    execFileAsync("git", ["show", spec], { cwd: root, encoding: "buffer", maxBuffer: 1 << 26 }).then(
+      (r) => r.stdout,
+      () => undefined, // a failed `git show` (a shard new on this tree, an unreadable commit) reads as no blob, as the sync form's does
+    );
   const proofs: string[] = [];
   for (const rel of diff.output.split("\n").filter(Boolean)) {
-    const base = await execFileAsync("git", ["show", `origin/main:${rel}`], { cwd, encoding: "utf8", maxBuffer: 1 << 26 }).then(
-      (r) => r.stdout,
-      () => undefined, // a failed `git show` (the shard is new on this tree) reads as no base, as the sync form's does
-    );
-    proofs.push(...introducedProofs(await readFile(join(cwd, rel), "utf8"), base));
+    const head = await readFile(join(cwd, rel));
+    const original = codeRoot === undefined ? undefined : movedCopyOriginal(head, rel);
+    if (codeRoot !== undefined && original !== undefined && isExactMoveCopy(head, await show(codeRoot, original))) continue;
+    proofs.push(...introducedProofs(head.toString("utf8"), (await show(cwd, `origin/main:${rel}`))?.toString("utf8")));
   }
   return proofs;
 }
@@ -1063,19 +1088,20 @@ interface ProofTimeouts {
   budgetMs?: number;
 }
 function timedOutProof(kind: string, proof: string, status: ProofCheckStatus, timeouts: ProofTimeouts): status is { timedOutMs: number } {
-  if (status === null || typeof status !== "object") return false;
+  if (status === null || typeof status !== "object" || !("timedOutMs" in status)) return false;
   timeouts.lines.push(`${kind} proof ${JSON.stringify(proof)} timed out after ${status.timedOutMs} ms`);
   timeouts.budgetMs = status.timedOutMs;
   return true;
 }
 function sortBodyProof(proof: string, status: ProofCheckStatus, red: string[], unreadable: string[], timeouts: ProofTimeouts): void {
   if (status === 0 || timedOutProof("PR-body", proof, status, timeouts)) return;
-  if (status !== null && RED_BODY_PROOF_EXIT[status]) red.push(`PR-body proof ${JSON.stringify(proof)} ${RED_BODY_PROOF_EXIT[status]}`);
+  if (commentOnlyStatus(status)) red.push(`PR-body proof ${JSON.stringify(proof)} matches only comment lines`);
+  else if (typeof status === "number" && RED_BODY_PROOF_EXIT[status]) red.push(`PR-body proof ${JSON.stringify(proof)} ${RED_BODY_PROOF_EXIT[status]}`);
   else unreadable.push(`PR-body proof ${JSON.stringify(proof)} could not be checked (check-proof exit ${status})`);
 }
 function sortShardProof(proof: string, status: ProofCheckStatus, red: string[], timeouts: ProofTimeouts): void {
   if (timedOutProof("shard", proof, status, timeouts)) return;
-  if (status === CHECK_PROOF_STALE_EXIT) red.push(`shard proof ${JSON.stringify(proof)} passes at origin/main too`);
+  if (status === CHECK_PROOF_STALE_EXIT || commentOnlyStatus(status)) red.push(`shard proof ${JSON.stringify(proof)} passes at origin/main too`);
 }
 function discriminationReading(red: string[], unreadable: string[], timeouts: ProofTimeouts, shardProofList: string[] | undefined): PlanPrPreflightReading {
   if (shardProofList === undefined) unreadable.push("the changed task shards could not be read against origin/main");
@@ -1106,12 +1132,13 @@ async function proofDiscriminationAsync(
   checkProof: (cwd: string, proof: string) => Promise<ProofCheckStatus>,
   bodyProofCwd = cwd,
   shardProofCwd = cwd,
+  codeRoot?: string,
 ): Promise<PlanPrPreflightReading> {
   const red: string[] = [];
   const unreadable: string[] = [];
   const timeouts: ProofTimeouts = { lines: [] };
   for (const proof of bodyProofsOf(body)) sortBodyProof(proof, await checkProof(bodyProofCwd, proof), red, unreadable, timeouts);
-  const shardProofList = await changedShardProofsAsync(cwd);
+  const shardProofList = await changedShardProofsAsync(cwd, codeRoot);
   for (const proof of new Set(shardProofList ?? [])) sortShardProof(proof, await checkProof(shardProofCwd, proof), red, timeouts);
   return discriminationReading(red, unreadable, timeouts, shardProofList);
 }
@@ -1236,6 +1263,7 @@ export async function planPrPreflightAsync(
     (cwd, proof) => d.checkProof(cwd, proof, budgetMs(), checks.log, checks.storeRoot, codeRoot),
     input.bodyProofRoot === "plan" ? input.cwd : codeRoot ?? input.cwd,
     codeRoot ?? input.cwd,
+    codeRoot,
   ));
   await read("pr-title", () => prTitleReading(input.title));
   await read("shard-census", () => d.shardCensus(codeRoot ?? input.cwd, budgetMs()));

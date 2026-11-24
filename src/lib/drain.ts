@@ -1,3 +1,5 @@
+import { statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { operatorReleaseContractChanged, qualifyReleaseEvidence, releaseContractPins, type ReleaseEvidence } from "./operator-release.js";
 /** Bounded, deterministic DAG dispatch through run-task (WS-1). Dependencies use
  *  {@link unmetDependencies}, status is GitHub-derived, and headroom uses headroom.ts (W1-T4).
@@ -665,6 +667,32 @@ export function normalizeRepoName(value: string): string {
  */
 export function loadTargetPlanQuarantiningDuplicates(path: string, targetRepo: string): ReturnType<typeof loadPlanQuarantiningDuplicates> {
   return loadPlanQuarantiningDuplicates(path, undefined, undefined, (task) => !taskTargetsRepo(task.repo, targetRepo));
+}
+
+/** W1-T14575 — true only when stat answers ENOENT for BOTH the monolith and its sibling `tasks.d`: the shape of a
+ *  repository onboarded maintain-only. Any other stat error, or either path present, is a plan that exists. */
+export function targetPlanAbsent(path: string, stat: (p: string) => unknown = statSync): boolean {
+  const missing = (p: string): boolean => {
+    try {
+      stat(p);
+      return false;
+    } catch (err) {
+      // ENOENT is the absence this answers; any other stat error is a plan that exists but cannot be read,
+      // so it answers false and the loader then refuses the boot with its own PlanError.
+      return (err as NodeJS.ErrnoException)?.code === "ENOENT";
+    }
+  };
+  return missing(path) && missing(join(dirname(path), "tasks.d"));
+}
+
+/** W1-T14575 — {@link loadTargetPlanQuarantiningDuplicates} for a daemon's boot: a target with no plan at all
+ *  ({@link targetPlanAbsent}) loads an empty plan and writes one `daemon.plan_absent` row, so it boots and idles.
+ *  A plan that is present but unreadable or malformed still throws the loader's PlanError. */
+export function loadTargetPlanOrEmptyWhenAbsent(path: string, targetRepo: string,
+  log: (step: string, extra?: Record<string, unknown>) => void, stat?: (p: string) => unknown): ReturnType<typeof loadPlanQuarantiningDuplicates> {
+  if (!targetPlanAbsent(path, stat)) return loadTargetPlanQuarantiningDuplicates(path, targetRepo);
+  log("daemon.plan_absent", { repo: targetRepo, plan_path: path });
+  return { plan: { tasks: [], byId: new Map() }, quarantined: [] };
 }
 
 /** W1-T988: single-target safety guard, not multi-repo routing. Foreign tasks would otherwise edit

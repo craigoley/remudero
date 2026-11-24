@@ -22,6 +22,7 @@ import {
 
 const CHECK_PROOF_USAGE = "usage: rmd check-proof <proof> [--allow-full-suite] [--base <ref>] [--repo <owner/name>]";
 export const CHECK_PROOF_CHILD_ENTRY = "src/check-proof-main.ts";
+export const COMMENT_ONLY_DISCRIMINATION_LINE = "discrimination: executed_stale — every matching line is a comment";
 export const MISSING_EXPORT_OBSERVATION_FLAG = "--observe-missing-exports";
 
 /** A missing materialised file alone proves nothing: independently read the literal Git tree. */
@@ -903,7 +904,7 @@ export function checkProofCommand(
     outcome === "pass" && w.kind === "grep" &&
     commentOnlyGrepProofRefusal(proof, (rel) => existsSync(join(process.cwd(), rel)) ? readFileSync(join(process.cwd(), rel), "utf8") : undefined) !== undefined
   ) {
-    console.log("discrimination: executed_stale — every matching line is a comment");
+    console.log(COMMENT_ONLY_DISCRIMINATION_LINE);
     return CHECK_PROOF_EXIT.executedStale;
   }
   const headExit =

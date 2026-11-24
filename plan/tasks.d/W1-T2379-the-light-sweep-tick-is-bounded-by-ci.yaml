@@ -123,7 +123,8 @@
       proof: "unit test: test/light-pass-tick-is-not-bounded-by-ci.test.ts"
     - claim: "stopping the ticker still lets work already in flight finish rather than aborting it"
       proof: "unit test: test/light-pass-tick-is-not-bounded-by-ci.test.ts"
-  status: queued
+  status: blocked
+  retirement: closed
   attempts: 0
   plan_refs: ["W1-T1066", "W1-T1110", "W1-T1127", "W1-T1211", "W1-T1272", "W1-T526"]
   note: |
@@ -202,3 +203,4 @@
     and #3095 has no trailer THERE either. A build carrying no trailer on ANY surface and no
     `run-<taskId>-` head is a THIRD gap, distinct from the one W1-T2387 closes, and it is not filed
     here.
+    Retired as closed 2026-11-24 (backlog thread reconcile, on the W1-T2387 / #8404 precedent): its real build was craigoley/remudero#3095, which carries no Remudero-Task trailer.

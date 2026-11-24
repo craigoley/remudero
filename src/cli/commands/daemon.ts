@@ -53,7 +53,7 @@ import { createThreadEventSync, registryThreadItems, type InboxResponderDeps } f
 import type { InboxCausalScope } from "../../lib/inbox-thread.js";
 import { gitRecommendationEvidence, RECOMMENDATION_SEED_PATH } from "../../lib/inbox-recommendation.js";
 import { censusRunDirs } from "../../lib/run-child-contract.js";
-import { loadTargetPlanQuarantiningDuplicates, plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
+import { loadTargetPlanOrEmptyWhenAbsent, plannedSequence, runDrain, type DrainDeps, type MergedSet, type OpenPrCheck } from "../../lib/drain.js";
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
@@ -122,6 +122,8 @@ import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from
 import { acquireDrainLock, DrainLockError } from "../../lib/drain-lock.js";
 import { abortStandby, acquireLockWhenFree, awaitPromotion, leaveExitCodeForEntrypoint, logPromoted, standbyPorts,
   type StandbyOptions, type StandbyPorts } from "../../lib/daemon-standby.js";
+import { createDaemonHandoff, daemonSlotsDir, type DaemonHandoff } from "../../lib/daemon-handoff.js";
+import { createSlotPreparer } from "../../lib/serve-slots.js";
 import { asyncGit, testRunnerOnItsOwnCheckout } from "../../lib/self-sync.js";
 import { withLiveEditLadders } from "../../lib/live-edit-ladder.js";
 import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, clearKick, consumeDrainNow, consumeRestartInPlace, clearPrAction, consumeStop, isQuietHours, kickFilePath, pauseDetail, pendingKicks, pendingPrActions, stopDetail } from "../../lib/fleet-control.js";
@@ -569,13 +571,14 @@ export function daemonKickPort(root: string, target: { repo: string; isSelf: boo
  * {@link createNativeTargetJobRunner} consumes them; durable recovery survives a missing marker.
  */
 export function daemonTargetJobPort(root: string, self: { repo: string }): {
-  pendingTargetJobs: () => Array<DaemonKick & { repo: string }>;
+  pendingTargetJobs: () => Array<DaemonKick & { repo: string; requestedAt?: string }>;
 } {
   return {
     pendingTargetJobs: () => {
       const marked = pendingKicks(root).flatMap((kick) =>
         kick.repo !== undefined && kick.repo.toLowerCase() !== self.repo.toLowerCase() && existsSync(kickFilePath(root, kick.taskId, kick.repo))
-          ? [{ taskId: kick.taskId, origin: kick.origin, repo: kick.repo }] : []);
+          // W1-T14576: the marker's request time travels with it, so a waiting job's deferral row can say how long it waited.
+          ? [{ taskId: kick.taskId, origin: kick.origin, repo: kick.repo, requestedAt: kick.requestedAt }] : []);
       const durable = fileTargetJobStore(root).readAll().filter((job) => job.status === "admitted" && job.repo.toLowerCase() !== self.repo.toLowerCase());
       return [...marked, ...durable.filter((job) => !marked.some((kick) => kick.origin === job.origin))];
     },
@@ -1223,6 +1226,8 @@ export async function daemonCommand(
     standby?: StandbyOptions;
     /** W1-T14544: where a plan quarantine's escalation goes; production omits it and opens or comments on a GitHub issue. */
     raiseEscalation?: (e: Escalation) => string;
+    /** W1-T14545: the blue-green handoff; production omits it and gets {@link createDaemonHandoff}. */
+    handoff?: DaemonHandoff;
     /** Injectable GitHub-gateway constructor for the merged-status projection. Defaults to the
      *  BATCHED {@link buildBatchedGithub} — one NON-search `gh pr list` per projection, which is
      *  what keeps merge state derivable while GitHub's GraphQL `search()` connection is
@@ -1651,7 +1656,15 @@ export async function daemonCommand(
       ? startGardenOffLoop(name, intervalMs, { flight: gardenFlight, spawnPass: gardenPassSpawn, log, observe: (event) => gardenerRuntime.record(event), ...(injectedPassSpawn ? {} : { due: registeredGardenDueProbe(name, gardenContextFor(name)) }) })
       : { stop() {} };
   // W1-T13585: a foreign target's plan can hold other repositories' tasks whose dependencies it cannot see.
-  const foreignTargetPlanLoad = (path: string) => loadTargetPlanQuarantiningDuplicates(path, target.repo);
+  // W1-T14575: a target onboarded maintain-only has no plan at all; it boots on an empty one instead of exiting.
+  let absentPlanReported = false;
+  const foreignTargetPlanLoad = (path: string) => loadTargetPlanOrEmptyWhenAbsent(path, `${target.owner}/${target.repo}`, (step, extra) => {
+    if (step === "daemon.plan_absent") {
+      if (absentPlanReported) return;
+      absentPlanReported = true;
+    }
+    log(step, extra);
+  });
   // The boot plan read: a managed target's checkout is synced first, unless --plan names a file. Undefined: refused.
   const syncBootPlan = async (): Promise<Plan | undefined> => {
     if (!target.isSelf && !flagValue(rest, "--plan")) {
@@ -2947,6 +2960,11 @@ export async function daemonCommand(
         } : {}),
         consumeDrainNow: () => consumeDrainNow(config.root),
         // W1-T11327: the progress watchdog's restart-in-place request, exited on with this process's own boot sha.
+        // W1-T14545: off unless state/daemon-handoff.on exists; read at each restart decision.
+        handoff: deps.handoff ?? createDaemonHandoff({ stateDir: join(config.root, "state"),
+          activeDir: effectiveRepoRoot, activeSha: daemonLoadedCodeSha, daemonArgs: rest, log,
+          prepareSlot: createSlotPreparer({ repoDir: effectiveRepoRoot, gensDir: daemonSlotsDir(join(config.root, "state")),
+            log: (step, extra) => log(step.replace(/^serve\./, "daemon."), extra) }) }),
         consumeRestartRequest: () => {
           const request = consumeRestartInPlace(config.root);
           return request && { ...request, ...(daemonLoadedCodeSha ? { codeSha: daemonLoadedCodeSha } : {}) };
