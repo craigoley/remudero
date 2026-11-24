@@ -3062,7 +3062,7 @@ export async function daemonCommand(
                 ...(await daemonSreLaneEnabled(config.root, repoRoot, log, {
                   escalate: (info) => escalateSreLaneUnresolved(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
                   clear: (info) => escalateSreLaneUnresolvedCleared(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-                }, (paged) => { void paged; }) ? [
+                }, (paged) => { cleanup.push({ resource: "sre_lane_page", close: () => paged }); }) ? [
                   startBoundedDaemonSreLane(
                     (mergedLastDay) => daemonSreLaneInput({
                       stateDir: join(config.root, "state"),
