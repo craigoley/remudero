@@ -152,7 +152,7 @@ function landingFixture(opt: { destination?: boolean } = {}) {
   return {
     root, origin, prs, rows, logReads, checks, control, issues, branchSha, mainSha, snapshot, openPrs,
     pushes: () => pushes,
-    land: (ids: string[], extra: { stageOnly?: boolean } = {}): Promise<TaskFilesLandingResult> =>
+    land: (ids: string[], extra: Partial<Parameters<typeof landTaskFilesAsync>[2]> = {}): Promise<TaskFilesLandingResult> =>
       withLiveWritesAllowed(() => landTaskFilesAsync(checkout.dir, ids.map(inputOf), { ...opts(), ...extra })),
     moveMain: (): void => {
       author.git("fetch", "--quiet", "origin");
@@ -265,6 +265,24 @@ test("W1-T14748 criterion 2: an unread gate log, or one that names no staged fil
       assert.deepEqual(f.staged(), [A, B, C].map(pathOf).sort(), "no edit is dropped");
     });
   }
+});
+
+test("W1-T14748 criterion 2: an escalation that throws is named in the row and the hold stands", async () => {
+  const f = landingFixture();
+  const redHead = await redLanding(f, GATE);
+  const pushes = f.pushes();
+  f.control.jobLog = () => { throw new Error("gh: Resource not accessible by integration (HTTP 403)"); };
+  const escalateGateFindingsUnread = async (): Promise<string> => { throw new Error("the issue tracker is down"); };
+  const held = await f.land([], { escalateGateFindingsUnread });
+  assert.equal(held.pushed, false, "nothing is pushed");
+  assert.equal(f.pushes(), pushes);
+  assert.equal(f.branchSha(), redHead);
+  assert.deepEqual(f.staged(), [A, B, C].map(pathOf).sort(), "no edit is dropped");
+  const unread = f.stepRows("task_files_landing.gate_findings_unread");
+  assert.equal(unread.length, 1);
+  assert.equal(unread[0]!.escalation, "failed: the issue tracker is down");
+  await f.land([], { escalateGateFindingsUnread });
+  assert.equal(f.stepRows("task_files_landing.gate_findings_unread").length, 1, "the same head is not retried");
 });
 
 test("W1-T14748 criterion 3: a non-gate red, a landing outside the plan destination, a conflict and a core-preflight refusal are handled as before", async (t) => {
