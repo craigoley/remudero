@@ -259,7 +259,10 @@ jobs:
               echo "${BASH32_SHA256}  $SRC/bash-3.2.tar.gz" | sha256sum --check --strict
               tar -xzf "$SRC/bash-3.2.tar.gz" -C "$SRC"
               cd "$SRC/bash-3.2"
-              ./configure --quiet --without-bash-malloc CFLAGS="-O2 -std=gnu89 -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
+              BASH32_CFLAGS="-O2 -std=gnu89 -fpermissive -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
+              # support/ helpers (bashversion, mksyntax) build with CC_FOR_BUILD/CFLAGS_FOR_BUILD, not CFLAGS: CC carries the
+              # dialect flags (CC_FOR_BUILD defaults to $(CC)) and both flag sets are passed, so gcc 14 never sees C99 rules.
+              ./configure --quiet --without-bash-malloc CC="gcc -std=gnu89 -fpermissive" CFLAGS="$BASH32_CFLAGS" CFLAGS_FOR_BUILD="$BASH32_CFLAGS"
               make -s
               cp bash "$OUT/bash"
             fi
@@ -1009,7 +1012,10 @@ jobs:
               echo "${BASH32_SHA256}  $SRC/bash-3.2.tar.gz" | sha256sum --check --strict
               tar -xzf "$SRC/bash-3.2.tar.gz" -C "$SRC"
               cd "$SRC/bash-3.2"
-              ./configure --quiet --without-bash-malloc CFLAGS="-O2 -std=gnu89 -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
+              BASH32_CFLAGS="-O2 -std=gnu89 -fpermissive -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
+              # support/ helpers (bashversion, mksyntax) build with CC_FOR_BUILD/CFLAGS_FOR_BUILD, not CFLAGS: CC carries the
+              # dialect flags (CC_FOR_BUILD defaults to $(CC)) and both flag sets are passed, so gcc 14 never sees C99 rules.
+              ./configure --quiet --without-bash-malloc CC="gcc -std=gnu89 -fpermissive" CFLAGS="$BASH32_CFLAGS" CFLAGS_FOR_BUILD="$BASH32_CFLAGS"
               make -s
               cp bash "$OUT/bash"
             fi
@@ -1992,7 +1998,10 @@ jobs:
               echo "${BASH32_SHA256}  $SRC/bash-3.2.tar.gz" | sha256sum --check --strict
               tar -xzf "$SRC/bash-3.2.tar.gz" -C "$SRC"
               cd "$SRC/bash-3.2"
-              ./configure --quiet --without-bash-malloc CFLAGS="-O2 -std=gnu89 -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
+              BASH32_CFLAGS="-O2 -std=gnu89 -fpermissive -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
+              # support/ helpers (bashversion, mksyntax) build with CC_FOR_BUILD/CFLAGS_FOR_BUILD, not CFLAGS: CC carries the
+              # dialect flags (CC_FOR_BUILD defaults to $(CC)) and both flag sets are passed, so gcc 14 never sees C99 rules.
+              ./configure --quiet --without-bash-malloc CC="gcc -std=gnu89 -fpermissive" CFLAGS="$BASH32_CFLAGS" CFLAGS_FOR_BUILD="$BASH32_CFLAGS"
               make -s
               cp bash "$OUT/bash"
             fi
