@@ -59,7 +59,8 @@ function ciFixture(t: TestContext, existingRepo?: ReturnType<typeof gitRepo>, fi
     ledgerRecords: () => rows,
     planState: () => ({ tasks: [] }),
     ownerSearch: gitCiFrictionOwnerSearch((args) => {
-      if (args[0] === "log") {
+      // The adding-PR lookup for one file; W1-T14708's range read of added paths is not a unit.
+      if (args[0] === "log" && args.includes("--format=%s")) {
         const file = args.at(-1)!;
         searched.push(file);
         if (file === stopAt) throw new Error("interrupted lookup");
@@ -109,10 +110,16 @@ test("W1-T13989 criterion 3: unknown inputs and damaged journals run the unit ag
   f.inventory();
   const files = ["test/a.test.ts", "test/b.test.ts", "test/c.test.ts"];
   assert.deepEqual(f.searched.splice(0), files);
+  // W1-T14708: a new revision that adds none of these files and a new ledger hour are known inputs, so the units resume.
   f.repo.git("commit", "-qm", "chore(garden): change the pinned revision", "--allow-empty");
   f.inventory();
-  assert.deepEqual(f.searched.splice(0), files);
+  assert.deepEqual(f.searched.splice(0), []);
   f.advance(gardener.GARDEN_LEDGER_BUCKET_MS);
+  f.inventory();
+  assert.deepEqual(f.searched.splice(0), []);
+  // A pinned revision that does not descend from the saved one is unknown input: every unit runs again.
+  f.repo.git("checkout", "-q", "--orphan", "rewritten");
+  f.repo.git("commit", "-qm", "chore(garden): rewrite the pinned history");
   f.inventory();
   assert.deepEqual(f.searched.splice(0), files);
   const path = gardener.gardenUnitJournalPath(f.dir, "ci-friction");
