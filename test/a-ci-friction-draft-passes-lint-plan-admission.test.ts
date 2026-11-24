@@ -2,7 +2,7 @@
  * The ci-friction gardener's filing PRs must pass the lint-plan job they open against. #10428 let a
  * check resolve to the workflow job that declares it, so #10434 and #10446 filed shards owned by
  * `.github/workflows/ci.yml` — and both went red on lint-plan's machine-filing admission, because the
- * gardener's own pre-landing lint never ran that check. These tests run the gardener's real ladder and
+ * gardener's own pre-landing lint never ran that check. A workflow-owned cause now names the script its job runs. These tests run the gardener's real ladder and
  * emitter, then lint the shard it wrote with the repo's plan linter exactly as lint-plan --base does.
  */
 import assert from "node:assert/strict";
@@ -23,7 +23,9 @@ function fixture(kind: string, ownerFile: string, gate = "gate") {
   writeFileSync(join(repo.dir, ".github", "workflows", "ci.yml"), "name: ci\non: [pull_request]\njobs:\n  gate:\n    runs-on: ubuntu-latest\n    steps: []\n");
   mkdirSync(join(repo.dir, "notes"), { recursive: true });
   writeFileSync(join(repo.dir, "notes", "friction.md"), "notes\n");
-  repo.git("add", ".github/workflows/ci.yml", "notes/friction.md");
+  mkdirSync(join(repo.dir, "scripts"), { recursive: true });
+  writeFileSync(join(repo.dir, "scripts", "gate-runner.mjs"), "console.log('gate');\n");
+  repo.git("add", ".github/workflows/ci.yml", "notes/friction.md", "scripts/gate-runner.mjs");
   repo.git("commit", "-q", "-m", "seed owners");
   const stateDir = join(repo.dir, "state");
   mkdirSync(stateDir, { recursive: true });
@@ -57,14 +59,14 @@ function fixture(kind: string, ownerFile: string, gate = "gate") {
 }
 
 test("a workflow-owned ci-friction draft files a shard lint-plan's machine-filing admission passes", () => {
-  const fx = fixture("ci-friction-workflow-draft", ".github/workflows/ci.yml");
+  const fx = fixture("ci-friction-workflow-draft", "scripts/gate-runner.mjs");
   const pass = fx.pass();
   assert.equal(pass.prUrl, "https://github.com/acme/remudero/pull/1", `the draft landed (events: ${fx.events.join(", ")})`);
   assert.equal(fx.landed.length, 1);
   const [path] = fx.landed[0]!;
   const plan = loadPlanFromYaml(readFileSync(join(fx.repo.dir, path!), "utf8"), path!);
   const task = plan.tasks[0]!;
-  assert.equal(task.files?.[0], ".github/workflows/ci.yml", "the shard names the workflow that owns the check");
+  assert.equal(task.files?.[0], "scripts/gate-runner.mjs", "the shard names the script the owning job runs, never the workflow");
   const lint = lintTask(task, {
     duplicateSlug: ciFrictionShardStem(task.origin!.slice("ci-friction:".length)),
     machineFilingAdmission: { plan, releasedIds: new Set(), pathExists: (p) => existsSync(join(fx.repo.dir, p)) },
@@ -81,7 +83,7 @@ test("the ci-friction gardener refuses to land a draft machine-filing admission 
 });
 
 function admittedNewDraft(gate: string) {
-  const fx = fixture("ci-friction-rule-word-draft", ".github/workflows/ci.yml", gate);
+  const fx = fixture("ci-friction-rule-word-draft", "scripts/gate-runner.mjs", gate);
   assert.equal(fx.pass().prUrl, "https://github.com/acme/remudero/pull/1");
   const path = fx.landed[0]![0]!;
   const plan = loadPlanFromYaml(readFileSync(join(fx.repo.dir, path), "utf8"), path);

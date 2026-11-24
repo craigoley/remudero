@@ -36,7 +36,7 @@ function ladder(key: string, details: string[], search: ReturnType<typeof gitCiF
 
 test("a bare review status retains measured friction without inventing a workflow repair", t => {
   const f = fixture(t);
-  assert.deepEqual(f.search().workflowOwner!("remudero-review")?.files, [WORKFLOW], "positive control sees the declared producer");
+  assert.deepEqual(f.search().workflowOwner!("remudero-review")?.files, ["src/review-step.ts"], "positive control sees the script the declared producer runs");
   const details = [
     "ci-log round — rule-checks: test/census-discovery-is-blind-to-a-second-idiom.test.ts; remudero-review",
     "ci-log round — coverage-ratchet: diff-coverage: BLOCKED; remudero-review",
@@ -74,11 +74,13 @@ test("a concrete review-step failure remains owned and its remedy requires an ex
 test("a source coverage refusal preserves observations without inventing a workflow defect", t => {
   const f = fixture(t);
   const workflow = ".github/workflows/ci.yml";
-  writeFileSync(join(f.repo.dir, workflow), "jobs:\n  coverage-ratchet-required:\n    name: coverage-ratchet\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo coverage\n");
+  writeFileSync(join(f.repo.dir, workflow), "jobs:\n  coverage-ratchet-required:\n    name: coverage-ratchet\n    runs-on: ubuntu-latest\n    steps:\n      - run: node scripts/coverage-verdict.mjs\n");
+  mkdirSync(join(f.repo.dir, "scripts"), { recursive: true });
+  writeFileSync(join(f.repo.dir, "scripts/coverage-verdict.mjs"), "console.log('coverage');\n");
   f.repo.git("add", "."); f.repo.git("commit", "-qm", "declare the coverage verdict producer");
   f.repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
   const search = f.search();
-  assert.deepEqual(search.workflowOwner!("coverage-ratchet")?.files, [workflow], "the producer was actually resolved");
+  assert.deepEqual(search.workflowOwner!("coverage-ratchet")?.files, ["scripts/coverage-verdict.mjs"], "the producer's script was actually resolved");
   const key = "check:ci-log:coverage-ratchet:error-diff-coverage-blocked-this-diff-adds-source-line-s-wit";
   const details = [
     "coverage-ratchet: ##[error]diff-coverage: BLOCKED -- this diff adds source line(s) with zero covering tests; src/lib/gate-gardener.ts:242",
@@ -91,7 +93,7 @@ test("a source coverage refusal preserves observations without inventing a workf
   assert.equal(result.next?.price.rounds, 2);
   assert.match(result.next?.decision.kind === "escalate" ? result.next.decision.why : "", /coverage.*mechanism.*UNKNOWN/i);
   assert.deepEqual(locateCiFrictionOwner("check:ci-log:coverage-ratchet:coverage-report-failed", ["coverage-ratchet: COVERAGE-REPORT-FAILED artifact upload failed"], f.search())?.files,
-    [workflow], "actual infrastructure evidence keeps its original workflow route");
+    ["scripts/coverage-verdict.mjs"], "actual infrastructure evidence keeps its original workflow route, owned by the script it runs");
 });
 
 

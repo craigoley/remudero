@@ -284,6 +284,9 @@ export interface OwnerSearch {
   evidence?: (key: string, details: readonly string[], owner?: CiFrictionOwner) => CiFrictionOwnershipEvidence;
   /** The pull request whose merge added `file`, from that commit's `(#N)` subject; undefined when history does not say. */
   addedByPr?: (file: string) => number | undefined;
+  /** The files the merge of pull request `pr` changed, from that commit's `(#N)` subject; undefined when history does
+   *  not say (an unmerged PR, or one older than the history window), which keeps its rounds. */
+  changedByPr?: (pr: number) => readonly string[] | undefined;
 }
 
 export interface CiFrictionOwnershipEvidence {
@@ -301,6 +304,19 @@ export interface CiFrictionOwner {
 }
 
 const OWNER_LIMIT = 2;
+
+/** Whether `file` is a workflow definition — never a remedy's owner, because the fleet App cannot push one and a
+ *  workflow-owned task is held in the operator-build hold. */
+export function isWorkflowFile(file: string): boolean {
+  return /^\.github\/workflows\//.test(file);
+}
+
+/** A workflow-declared owner as a remedy owner: the script its job runs, never the workflow file. An owner that still
+ *  names a workflow file (a search that did not resolve the job's script) is no owner, so the cause escalates. */
+function scriptOwned(owner: CiFrictionOwner | undefined, testPath: string | undefined): CiFrictionOwner | undefined {
+  if (!owner || owner.files.length === 0 || owner.files.some(isWorkflowFile)) return undefined;
+  return { ...owner, ...(testPath ? { failingTest: testPath } : {}) };
+}
 
 function ciLogSignatures(check: string, detail: string): string[] {
   const own: string[] = [];
@@ -394,8 +410,7 @@ export function locateCiFrictionOwner(key: string, details: readonly string[], s
     !/^test\/[\w./-]+\.test\.[mc]?[jt]s$/.test(term) &&
     /^(?:timed out\b|pool (?:defect|failure)\b|red with no failing test\b|COVERAGE-REPORT-FAILED\b)|\bartifacts?\b/i.test(term));
   if (family && infrastructure) {
-    const workflow = search.workflowOwner?.(family);
-    return workflow ? { ...workflow, ...(testPath ? { failingTest: testPath } : {}) } : undefined;
+    return scriptOwned(search.workflowOwner?.(family), testPath);
   }
   if (testPath && search.fileExists(testPath)) {
     const source = testSourcePaths(testPath, search.readSource?.(testPath), { runtimeOnly: true })
@@ -410,7 +425,7 @@ export function locateCiFrictionOwner(key: string, details: readonly string[], s
   const generic = (term: string) => /^(ci|test|tests|coverage|build|check|checks)$/i.test(term.replace(/\s*\(\d+\/\d+\)\s*$/, "").trim());
   const signatures = distinctive.filter(term => !generic(term)).map(term => ({ term, files: search.filesContaining(term) })).filter(m => m.files.length > 0);
   const workflow = signatures.length === 0 && family ? search.workflowOwner?.(family) : undefined;
-  if (workflow) return { ...workflow, ...(testPath ? { failingTest: testPath } : {}) };
+  if (workflow) return scriptOwned(workflow, testPath);
   let matches = signatures.length > 0 ? signatures : terms.filter(term => !generic(term)).map((term) => ({ term, files: search.filesContaining(term) })).filter((m) => m.files.length > 0);
   if (matches.length === 0 && key.startsWith("fix_refusal:")) {
     const prefixes = [...new Set(terms.flatMap((term) => {

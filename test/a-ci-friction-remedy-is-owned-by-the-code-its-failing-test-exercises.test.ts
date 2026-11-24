@@ -9,6 +9,8 @@ import { gitRepo } from "#test/helpers/git-repo.js";
 const TEST = "test/memory-tracker.test.ts";
 const SOURCE = "src/lib/dispatch-governor.ts";
 const WORKFLOW = ".github/workflows/ci.yml";
+const TESTS_SCRIPT = "scripts/run-tests.mjs";
+const COVERAGE_SCRIPT = "scripts/coverage-shard.mjs";
 
 function fixture(t: TestContext) {
   const repo = gitRepo({ kind: "ci-friction-test-owner" });
@@ -22,7 +24,9 @@ function fixture(t: TestContext) {
     repo.git("commit", "-qm", "fixture");
     repo.git("update-ref", "refs/remotes/origin/main", "HEAD");
   };
-  put(WORKFLOW, "jobs:\n  tests:\n    name: test\n  coverage:\n    name: coverage-shard\n");
+  put(WORKFLOW, `jobs:\n  tests:\n    name: test\n    steps:\n      - run: node ${TESTS_SCRIPT}\n  coverage:\n    name: coverage-shard\n    steps:\n      - run: node ${COVERAGE_SCRIPT}\n`);
+  put(TESTS_SCRIPT, "export {};\n");
+  put(COVERAGE_SCRIPT, "export {};\n");
   put(TEST, 'import { missing } from "../src/absent.js";\nimport { govern } from "../src/lib/dispatch-governor.js";\n');
   put(SOURCE, "export const govern = () => true;\n");
   commit();
@@ -75,7 +79,7 @@ test("W1-T9059: a timeout signature is owned by the workflow, never by the garde
   f.commit();
   for (const signature of signatures) {
     const owner = locateCiFrictionOwner("check:ci-log:coverage-shard:infrastructure", [`coverage-shard: ${signature}`], f.search());
-    assert.deepEqual(owner?.files, [WORKFLOW], signature);
+    assert.deepEqual(owner?.files, [COVERAGE_SCRIPT], signature);
   }
   f.put(WORKFLOW, "jobs:\n  unrelated:\n    runs-on: ubuntu-latest\n");
   f.commit();
@@ -90,7 +94,7 @@ test("W1-T9059: a test without a resolving source import owns its failure alone"
     f.commit();
     assert.deepEqual(locateCiFrictionOwner(`check:test:${TEST}`, [], f.search())?.files, [TEST]);
   }
-  assert.deepEqual(locateCiFrictionOwner("check:test:test/missing.test.ts", [], f.search())?.files, [WORKFLOW]);
+  assert.deepEqual(locateCiFrictionOwner("check:test:test/missing.test.ts", [], f.search())?.files, [TESTS_SCRIPT]);
 });
 
 test("W1-T9059: test ownership takes the first existing source or script import", t => {

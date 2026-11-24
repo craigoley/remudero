@@ -43,6 +43,7 @@ import {
   type ReplayStep,
   replayCiFrictionLadder,
 } from "./ci-friction-remedy.js";
+import { testSourcePaths } from "./flake-incident-gardener.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { trailerTaskIds } from "./field-trials-github.js";
 import type { LedgerRecord } from "./retro.js";
@@ -127,15 +128,32 @@ export function readCiFrictionHandFixes(
   }
 }
 
-/** A test file's red on the pull request that added that file is the PR's own development, not friction: W1-T9823
- *  was filed on #12294's round, the PR that created its test. Every other round, and any round whose test has no
- *  readable adding PR, is kept. */
-export function withoutBirthRounds(rounds: readonly CiFrictionRound[], search: Pick<OwnerSearch, "addedByPr">): CiFrictionRound[] {
-  const addedByPr = search.addedByPr;
-  if (!addedByPr) return [...rounds];
+/** A test file's red on the pull request that added that file, or whose own diff reaches it, is the PR's own
+ *  development, not friction: W1-T9823 was filed on #12294's round, the PR that created its test. A pull request's
+ *  diff reaches a failing test when it changes the test file itself or a src/ or scripts/ module the test imports at
+ *  runtime. Every other round, and any round whose test has no readable history, is kept. */
+export function withoutBirthRounds(
+  rounds: readonly CiFrictionRound[], search: Partial<Pick<OwnerSearch, "addedByPr" | "changedByPr" | "readSource" | "fileExists">>,
+): CiFrictionRound[] {
+  const { addedByPr, changedByPr } = search;
+  if (!addedByPr && !changedByPr) return [...rounds];
+  const reached = new Map<string, string[]>();
+  const reaches = (file: string): string[] => {
+    let own = reached.get(file);
+    if (!own) {
+      // The imports are read from fetched main, only for a test that is still there.
+      const source = search.fileExists?.(file) ? search.readSource?.(file) : undefined;
+      own = [file, ...testSourcePaths(file, source, { runtimeOnly: true }).filter((path) => /^(?:src|scripts)\//.test(path))];
+      reached.set(file, own);
+    }
+    return own;
+  };
   return rounds.filter((round) => {
     const file = round.cause.kind === "check" ? /^test:(test\/[\w./-]+\.test\.[mc]?[jt]s)(?::flaky)?$/.exec(round.cause.name)?.[1] : undefined;
-    return file === undefined || addedByPr(file) !== round.pr;
+    if (file === undefined) return true;
+    if (addedByPr?.(file) === round.pr) return false;
+    const changed = changedByPr?.(round.pr);
+    return changed === undefined || !reaches(file).some((path) => changed.includes(path));
   });
 }
 
@@ -154,7 +172,7 @@ function journaledBirthRounds(
   let digest: string | undefined;
   let resumed = 0;
   let fresh = 0;
-  const filtered = withoutBirthRounds(rounds, { addedByPr: (file) => {
+  const filtered = withoutBirthRounds(rounds, { ...search, addedByPr: (file) => {
     if (seen.has(file)) return seen.get(file);
     digest ??= createHash("sha256").update(`adding-pr:v1:${historyRevision()}`).digest("hex");
     const saved = journal.get(file, digest);
@@ -1179,6 +1197,43 @@ export function isCiFrictionTestFile(file: string): boolean {
   return /(?:^|\/)test\//.test(file) || /\.test\.[mc]?[jt]s$/.test(file);
 }
 
+/** The scripts under src/ or scripts/ a workflow job's `run:` steps invoke, in order of appearance: a path named in a
+ *  step, or in the package script an `npm run <name>` (or `npm test`) names, followed through nested `npm run`s. Only
+ *  files that exist count, and never a test or the ci-friction remedy source itself. */
+export function workflowJobScripts(
+  runs: readonly string[], source: { exists: (file: string) => boolean; readPackage: () => string | undefined },
+): string[] {
+  let packageScripts: Record<string, unknown> | undefined;
+  const named = (name: string): string | undefined => {
+    if (packageScripts === undefined) {
+      const text = source.readPackage();
+      const parsed: unknown = text === undefined ? {} : JSON.parse(text);
+      const scripts = (parsed as { scripts?: unknown }).scripts;
+      packageScripts = scripts && typeof scripts === "object" && !Array.isArray(scripts) ? scripts as Record<string, unknown> : {};
+    }
+    const body = packageScripts[name];
+    return typeof body === "string" ? body : undefined;
+  };
+  const found: string[] = [];
+  const visited = new Set<string>();
+  const scan = (text: string): void => {
+    for (const hit of text.matchAll(/(?<![\w./-])(?:\.\/)?((?:src|scripts)\/[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:ts|mjs|js|sh))(?![\w/-])|\bnpm\s+(?:run(?:-script)?\s+(?:-{1,2}[\w-]+\s+)*([\w:.-]+)|(test)\b)/g)) {
+      const file = hit[1];
+      if (file !== undefined) {
+        if (!found.includes(file) && !file.split("/").includes("..") && !isCiFrictionTestFile(file) && !/^src\/lib\/ci-friction-[^/]+\.ts$/.test(file) && source.exists(file)) found.push(file);
+        continue;
+      }
+      const name = hit[2] ?? hit[3]!;
+      if (visited.has(name)) continue;
+      visited.add(name);
+      const body = named(name);
+      if (body !== undefined) scan(body);
+    }
+  };
+  for (const run of runs) scan(run);
+  return found;
+}
+
 /** Pin fetched main for literal source reads and declared workflow identities (W1-T6311).
  *  Missing paths are absence and failed git reads refuse the pass; a workflow shape it cannot name, or two
  *  owners it cannot tell apart, is a gap for that check alone ({@link OwnerSearch.workflowGaps}). */
@@ -1198,6 +1253,13 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
   let workflowDocs: Array<{ file: string; document: ReturnType<typeof parseDocument> }> | undefined;
   const identity = (name: string) => kebabSlug(ciCheckFamily(name), 200);
   const addedBy = new Map<string, number | undefined>();
+  let changedBy: Map<number, string[]> | undefined;
+  const exists = (file: string): boolean => {
+    const listed = git(["ls-tree", "-r", "--name-only", pinned(), "--", file]).split("\n");
+    if (!listed.includes(file)) return false;
+    git(["cat-file", "-e", `${pinned()}:${file}`]);
+    return true;
+  };
   return {
     pin: () => gitCiFrictionOwnerSearch(git, refName),
     historyRevision: pinned,
@@ -1211,6 +1273,15 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
       }
       return addedBy.get(file);
     },
+    changedByPr: (pr) => {
+      // One read of the history window, on first use: each squash merge's `(#N)` subject names the files it changed.
+      changedBy ??= new Map(git(["log", pinned(), CI_FRICTION_HISTORY_SINCE, "--format=%x01%s", "--name-only"]).split("\x01").flatMap((block) => {
+        const [subject = "", ...files] = block.split("\n");
+        const number = /\(#(\d+)\)\s*$/.exec(subject.trim())?.[1];
+        return number === undefined ? [] : [[Number(number), files.map((file) => file.trim()).filter(Boolean)] as const];
+      }));
+      return changedBy.get(pr);
+    },
     workflowGaps: () => [...workflowGaps].map(([family, reason]) => ({ family, reason })),
     workflowOwner: (family) => {
       const source = pinned();
@@ -1218,7 +1289,7 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
       workflowDocs ??= git(["ls-tree", "-r", "--name-only", source, "--", ".github/workflows"])
         .split("\n").filter(path => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(path)).sort()
         .map(file => ({ file, document: parseDocument(git(["show", `${source}:${file}`])) }));
-      const matches: Array<{ file: string; jobId: string; witness: unknown; queued: boolean }> = [];
+      const matches: Array<{ file: string; jobId: string; witness: unknown; queued: boolean; runs: string[] }> = [];
       // A workflow shape this reader cannot name is a gap for the checks it might own, never a failed pass:
       // `related` gaps are jobs whose unexpandable name could be this check; `unread` ones are whole files.
       const related: string[] = [];
@@ -1238,7 +1309,7 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
             unread.push(`${file}: unsupported job ${jobId}`);
             continue;
           }
-          const job = raw as { name?: unknown; if?: unknown; uses?: unknown; strategy?: { matrix?: unknown } };
+          const job = raw as { name?: unknown; if?: unknown; uses?: unknown; steps?: unknown; strategy?: { matrix?: unknown } };
           const name = job.name === undefined ? jobId : job.name;
           if (typeof name !== "string") {
             unread.push(`${file}: unsupported name for ${jobId}`);
@@ -1255,7 +1326,8 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
           const caller = typeof job.uses === "string";
           if (!declared.some(check => caller ? family.toLowerCase().startsWith(`${check.toLowerCase()} / `) : identity(check) === identity(family))) continue;
           matches.push({ file, jobId, witness: { file, jobId, name, matrix: name.includes("${{") ? job.strategy?.matrix : undefined },
-            queued: runsOnMergeGroup(workflow.on, job.if) });
+            queued: runsOnMergeGroup(workflow.on, job.if),
+            runs: Array.isArray(job.steps) ? job.steps.flatMap((step: { run?: unknown } | null) => typeof step?.run === "string" ? [step.run] : []) : [] });
         }
       }
       // Two jobs may report one check name: ci.yml's `ci-gate` produces the required context on every PR
@@ -1275,9 +1347,20 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
       const match = owners[0];
       if (!match) return undefined;
       const variants = matches.filter(other => other !== match).map(other => `${other.file}:${other.jobId}`);
-      workflowWitnesses.set(`${identity(family)}:${match.file}`, match.witness);
-      return { files: [match.file], why: [`${match.file}: declares job ${match.jobId} for ${family}`
-        + (variants.length > 0 ? ` and runs it on merge_group (re-run variant not on the queue: ${variants.join(", ")})` : "")] };
+      // The workflow only declares the job: the owner a remedy changes is the script that job runs, and a job that
+      // runs none, or several nothing tells apart, is no owner (a workflow file is never one).
+      const scripts = workflowJobScripts(match.runs, { exists, readPackage: () => (exists("package.json") ? git(["show", `${pinned()}:package.json`]) : undefined) });
+      const gapped = scripts.length === 1 ? undefined
+        : scripts.length === 0 ? `workflow job ${match.file}:${match.jobId} for ${family} runs no script under src/ or scripts/ at ${source}`
+        : `workflow job ${match.file}:${match.jobId} for ${family} runs ${scripts.length} scripts and nothing says which owns the failure at ${source}: ${scripts.join(", ")}`;
+      if (gapped !== undefined) {
+        workflowGaps.set(family, gapped);
+        return undefined;
+      }
+      const script = scripts[0]!;
+      workflowWitnesses.set(`${identity(family)}:${script}`, { job: match.witness, runs: digest(match.runs), script: git(["rev-parse", `${source}:${script}`]).trim() });
+      return { files: [script], why: [`${script}: run by job ${match.jobId} of ${match.file} for ${family}`
+        + (variants.length > 0 ? ` and the job runs on merge_group (re-run variant not on the queue: ${variants.join(", ")})` : "")] };
     },
     evidence: (key, details, owner) => {
       const source = pinned();
@@ -1306,13 +1389,7 @@ export function gitCiFrictionOwnerSearch(git: CiFrictionGit, refName = "origin/m
         return [{ file, hits: Number(m[2]) }];
       });
     },
-    fileExists: (file) => {
-      const source = pinned();
-      const listed = git(["ls-tree", "-r", "--name-only", source, "--", file]).split("\n");
-      if (!listed.includes(file)) return false;
-      git(["cat-file", "-e", `${source}:${file}`]);
-      return true;
-    },
+    fileExists: exists,
   };
 }
 
