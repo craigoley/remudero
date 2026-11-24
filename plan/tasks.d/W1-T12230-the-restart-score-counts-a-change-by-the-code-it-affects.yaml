@@ -25,6 +25,8 @@
     - src/lib/deploy-judge.ts
     - src/lib/daemon.ts
     - test/daemon/the-restart-score-counts-a-change-by-the-code-it-affects.test.ts
+    - "src/cli/commands/daemon.ts"
+    - "src/lib/daemon-closure.ts"
   status: queued
   attempts: 0
   acceptance:
