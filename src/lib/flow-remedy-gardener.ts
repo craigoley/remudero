@@ -732,7 +732,8 @@ export function flowGardenSpec(deps: GardenerDeps, sources: FlowGardenSources): 
     const plan = sources.planState ? sources.planState() : readLadderPlan(deps.repoRoot, FLOW_LADDER);
     if (plan.degraded) deps.log("flow.origins_degraded", { reason: plan.degraded });
     if (plan.unreadable?.length) throw new Error(`flow plan shards unreadable: ${plan.unreadable.join(", ")}`);
-    const prs = [...new Set(episodesOf(records, new Map(), clock.now()).filter(e => e.outcome === "open" && e.owner !== "NONE").map(e => e.pr))];
+    // W1-T13524 criterion 2: an unowned PR's rows after its merge or close charge nothing, so its outcome is read too.
+    const prs = [...new Set(episodesOf(records, new Map(), clock.now()).filter(e => e.outcome === "open").map(e => e.pr))];
     const outcomes = sources.prOutcomes ? sources.prOutcomes(prs) : readOutcomes(prs, sources);
     return inventoryOf(records, plan.tasks, outcomes, clock.now(), fileable);
   };

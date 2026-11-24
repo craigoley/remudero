@@ -187,3 +187,13 @@ test("W1-T13524 criterion 2: a CI-lesson hand-off never makes a pending-checks w
   assert.ok(result.episodes.some(episode => episode.pr === 37 && episode.charges.some(charge => charge.handedOff)), "the hand-off joined the rows");
   assert.deepEqual(result.candidates, [], "a wait-only episode files nothing, even with a hand-off naming its check");
 });
+
+test("W1-T13524 criterion 2: an unowned pull request's rows after its merge charge nothing without a terminal row", () => {
+  // The merge is known only from the outcome read: no pr.terminal row names it, and the blocker has no owner.
+  const result = inventory([
+    disposed(17, -5, "escalated", "needs a person"), disposed(17, -3, "escalated", "needs a person"),
+    disposed(17, -2, "escalated", "needs a person"),
+  ], new Map([[17, { state: "merged", at: iso(-3), mergedBy: "remudero-fleet" }]]));
+  assert.deepEqual(result.episodes.map(episode => [episode.pr, episode.start, episode.outcome]), [[17, NOW - 5 * HOUR, "cleared"]]);
+  assert.deepEqual(result.charges.map(charge => [charge.pr, charge.start, charge.end]), [[17, NOW - 5 * HOUR, NOW - 3 * HOUR]]);
+});
