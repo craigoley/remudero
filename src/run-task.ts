@@ -27724,7 +27724,8 @@ export function dedicatedTargetPlanReloader(
   log: (step: string, extra?: Record<string, unknown>) => void,
   deps: {
     fetch?: () => unknown;
-    treeSha?: () => string | Promise<string>;
+    /** The plan tree's sha on origin/main, or `null` when origin/main holds no plan path at all. */
+    treeSha?: () => string | null | Promise<string | null>;
     resetWorkingTree?: () => unknown;
     load?: (planPath: string) => Plan | Promise<Plan>;
   } = {},
@@ -27733,7 +27734,9 @@ export function dedicatedTargetPlanReloader(
   // `planReloader` refuses. Wiring (below) never hands a self target here, but the guard keeps
   // this function correct in isolation, not merely correct-by-caller-discipline.
   if (target.isSelf) return undefined;
-  const repoDirForGit = dirname(target.planPath);
+  // W1-T14585: the CHECKOUT ROOT, never `dirname(planPath)` — a target with no plan has no `plan/`
+  // directory to run git from, so every call would fail before it could ask whether a plan exists.
+  const repoDirForGit = dirname(dirname(target.planPath));
   // FETCHES, UNLIKE `planReloader`'s self arm: self rides `checkFreshness`'s own per-tick fetch of
   // the SAME engine checkout (wired a few lines below this function's call site); nothing fetches
   // a non-self TARGET's checkout between dispatches (`worktreeAdd`, lib/worker.ts, only fetches it
@@ -27743,10 +27746,19 @@ export function dedicatedTargetPlanReloader(
     (async () => {
       await execFilePromise("git", ["-C", repoDirForGit, "fetch", "--quiet", "origin"]);
     });
+  // W1-T14585: `ls-tree`, not `rev-parse origin/main:plan`, so ABSENCE is a distinct answer. For a
+  // target with no plan, rev-parse failed every tick and each failure became one
+  // `daemon.plan_reload_failed` row, forever. `ls-tree` exits 0 with EMPTY output only when the path
+  // is missing from an existing origin/main; a missing ref or a broken repository still throws, and
+  // still reaches the generic failure row.
   const treeSha =
     deps.treeSha ??
-    (async () =>
-      (await execFilePromise("git", ["-C", repoDirForGit, "rev-parse", "origin/main:plan"], { encoding: "utf8" })).stdout.trim());
+    (async () => {
+      const { stdout } = await execFilePromise("git", ["-C", repoDirForGit, "ls-tree", "origin/main", "--", "plan"], { encoding: "utf8" });
+      const entry = stdout.trim();
+      // `<mode> <type> <sha>\tplan` — the sha is the third space-separated field.
+      return entry === "" ? null : entry.split(/\s+/)[2]!;
+    });
   // RESETS THE WORKING TREE, UNLIKE `planReloader`: `load` below is a plain filesystem read, never
   // a `git show <ref>:<path>`, so a fetched ref alone leaves it reading whatever boot's own
   // `git reset --hard origin/main` (the `!target.isSelf` branch above) last checked out. Self gets
@@ -27761,13 +27773,25 @@ export function dedicatedTargetPlanReloader(
       await execFilePromise("git", ["-C", repoDirForGit, "reset", "--hard", "--quiet", "origin/main"]);
     });
   const load = deps.load ?? ((pp: string) => loadPlan(pp));
-  let lastSha: string | undefined;
+  // `undefined` = not yet observed, `null` = origin/main holds no plan, a string = the plan tree sha.
+  let lastSha: string | null | undefined;
   return async () => {
     // A failed fetch propagates — caught by `runDaemon`'s own `daemon.plan_reload_failed` wrapper
     // (the SAME generic catch `planReloader`'s own treeSha throw already relies on), never
     // swallowed here. Keeping the plan we already have is the correct degrade either way.
     await fetch();
     const sha = await treeSha();
+    if (sha === null) {
+      // W1-T14585: NO PLAN IS A STATE, NOT A FAILURE. Report it once per change (after a present
+      // plan, or on the first tick) as an empty plan, then stay quiet while it stays absent. A plan
+      // deleted from origin/main also resets this checkout, so a later load never reads its files.
+      if (lastSha === null) return null;
+      const hadPlan = lastSha !== undefined;
+      lastSha = null;
+      if (hadPlan) await resetWorkingTree();
+      log("daemon.plan_absent", { ref: "origin/main", path: "plan" });
+      return { tasks: [], byId: new Map() };
+    }
     if (lastSha === undefined) {
       // First tick: record the boot's sha without reloading — see `planReloader`'s identical
       // comment for why reporting a reload here would be a lie. The working tree already matches
@@ -44518,7 +44542,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "field-trials",
     syntax: "rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json] [--refresh-step <name>=<exit-code|skipped>]... [--refresh-script-blob <sha1>] [--refresh-record-only]",
     summary: "Join the ledger union and GitHub history into observational field-trials aggregates.",
-    detail: "W1-T4574: one operator-invoked, resumable snapshot pass. For each source repository (default config.fleetRepos as core, site and console; only core's ledger is on this host unless --ledger names another) it reads the audited three-form ledger union and up to --max-pages GitHub pages of pull requests, main commits, deployments and per-PR reviews, commits and first-commit check runs; an interrupted sweep resumes from its stored page and only a completed sweep advances its watermark. PRs link to plan tasks by the trailer, branch and ledger credit paths separately; unmatched and ambiguous links are counted. It derives five observational families by source, week and task class: model adoption (requested, selected and served models apart; source merge, runtime boot and first exposure apart), the automation funnel with missing-join and human-touch counts per stage, PR repair and correctness signals with an unknown bucket, flow and recovery times with open work censored (Kaplan-Meier) and DORA commit-to-deploy lead time, and learning-loop yield. A merge is never a deployment and a green check is never correctness. The snapshot is private under --out-dir (default <root>/state/field-trials). With --consent it writes a dated, pseudonymised candidate release that withholds small cells and is refused if any private join key appears; --revoke withdraws one. W1-T10831: --field-note <out> reads the latest private snapshot without refreshing it and writes a candidate-unreviewed envelope for the site's model-field-note-v1 importer: rows per selected model and task class over whole UTC days from the end of the last exported window, under the site's own disclosure rule and row limit, from sources with a live --consent receipt that are active aggregate-public in the pinned site registry (--site-registry names a newer revision); it never stamps a review. A failed refresh keeps the last known good release. W1-T10830: --refresh-step carries routing-review, case-files and snapshot exit states; --refresh-script-blob identifies the running collector. Refresh metadata appends one field-trials.refresh outcome through recordFieldTrialsRefresh; --refresh-record-only records a failed snapshot without rebuilding it. Consecutive step failures raise deduplicated alerts and recovery resolves them. It gates no PR, changes no routing, spends nothing and publishes nothing.",
+    detail: "W1-T4574: one operator-invoked, resumable snapshot pass. For each source repository (default config.fleetRepos as core, site and console; only core's ledger is on this host unless --ledger names another) it reads the audited three-form ledger union and up to --max-pages GitHub pages of pull requests, main commits, deployments and per-PR reviews, commits and first-commit check runs; an interrupted sweep resumes from its stored page and only a completed sweep advances its watermark. PRs link to plan tasks by the trailer, branch and ledger credit paths separately; unmatched and ambiguous links are counted. It derives five observational families by source, week and task class: model adoption (requested, selected and served models apart; source merge, runtime boot and first exposure apart), the automation funnel with missing-join and human-touch counts per stage, PR repair and correctness signals with an unknown bucket, flow and recovery times with open work censored (Kaplan-Meier) and DORA commit-to-deploy lead time, and learning-loop yield. A merge is never a deployment and a green check is never correctness. The snapshot is private under --out-dir (default <root>/state/field-trials). With --consent it writes a dated, pseudonymised candidate release that withholds small cells and is refused if any private join key appears; --revoke withdraws one. W1-T10831: --field-note <out> reads the latest private snapshot without refreshing it and writes a candidate-unreviewed envelope for the site's model-field-note-v1 importer: rows per selected model and task class over whole UTC days from the end of the last exported window, under the site's own disclosure rule and row limit, from sources with a live --consent receipt that are active aggregate-public in the pinned site registry (--site-registry names a newer revision); it never stamps a review. A failed refresh keeps the last known good release. W1-T10830: --refresh-step carries routing-review, case-files and snapshot exit states; --refresh-script-blob identifies the running collector. Refresh metadata appends one field-trials.refresh outcome through recordFieldTrialsRefresh; --refresh-record-only records a failed snapshot without rebuilding it. Consecutive step failures raise deduplicated alerts and recovery resolves them. W1-T10832: after a good refresh pass with --consent and online, it exports the field-note candidate and runs the site's own --daily-stage importer in a fresh checkout of craigoley/remudero-site main; on staged, once a token scoped to the site proves the App installation holds Contents and Pull requests write (else site-grant-missing names the grant), it keeps ONE ready import PR open on branch field-trials/daily-field-note over REST (opened, or updated in place), on unchanged or refused it opens nothing, and every outcome is carried in the field-trials.refresh row. Core never stamps reviewedBy or reviewedAt and never arms, approves or merges, and the sweep holds every field-trials/ head for its owner: the owner's merge is the review. It gates no PR, changes no routing and spends nothing.",
   },
   {
     name: "ci-failures",

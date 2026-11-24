@@ -111,6 +111,7 @@ import { RATCHET_JUDGE_DECIDED_STEP, armedRejudgeHold, judgeMergedRatchets, ratc
 import { MAX_PLAN_REPAIR_STRIKES, planCappedRepair, judgeCappedRepair } from "./classify.js";
 import { DEFAULT_ESTIMATE_MIB, defaultProbe as probeProcess, readMemoryLedger, type HostMemoryReading } from "./host-memory-ledger.js";
 import { ESTIMATE_LEARNING, classEstimate, classSurvival, classTypical, type LearnedEstimate, type Survival } from "./host-memory-learning.js";
+import { currentRunChildReservationId } from "./run-child-reservation.js";
 import {
   loadHostMemoryBudgetPolicy, ownContainerWorkLive, readContainerMemoryHeadroom, residentsOf, type ContainerMemoryHeadroom,
   type HostMemoryBudgetPolicy,
@@ -770,6 +771,16 @@ export function sweepArmTaskId(pr: { taskId?: string; prNumber: number }, armSes
   // W1-T5866: deliberately NOT {@link escalationTaskIdFor} — the arm gate reads rows already scoped to this PR's url
   // (armLedgerLinesForPr), and a legacy `unfiled`-keyed row must keep matching the id the arm passes.
   return armSessionPrs ? (pr.taskId ?? `PR-${pr.prNumber}`) : pr.taskId;
+}
+
+/** W1-T10832 — the head prefix of a PR only its OWNER merges: core's daily site data import
+ *  (`field-trials/daily-field-note`, src/lib/field-trials-site-import.ts). With `armSessionPrs` on, a
+ *  trailer-less PR arms as `PR-<n>`, so the branch shape alone cannot keep the sweep off it. */
+export const OWNER_MERGE_ONLY_HEAD_PREFIX = "field-trials/";
+
+/** W1-T10832 — is this head one the sweep never reviews, fixes, arms, merges or closes? */
+export function isOwnerMergeOnlyHead(head: string | undefined): boolean {
+  return typeof head === "string" && head.startsWith(OWNER_MERGE_ONLY_HEAD_PREFIX);
 }
 
 /** W1-T5813 — the arm's ledger gate reads only THIS PR's `review.posted` rows (a legacy row with
@@ -3721,6 +3732,12 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         });
         await primaryShadowAlerts.refuse(pr).catch(primaryShadowAlertFailed);
         return "shadow-refused";
+      }
+      // W1-T10832: an owner-merge-only head never reaches attemptArm, whatever armSessionPrs says.
+      if (isOwnerMergeOnlyHead(pr.headRefName)) {
+        log("automerge.arm_skipped", { pr_url: pr.prUrl, head_ref: pr.headRefName, outcome: "hold-refused",
+          reason: "owner-merge-only head (W1-T10832): only the owner merges it" });
+        return "hold-refused";
       }
       // W1-T5492: select attemptArm's existing clean-status fallback without another --auto write.
       const idleDeps: ArmDeps<true> | undefined = mode === "armed-idle" ? {
@@ -13692,6 +13709,16 @@ const ROLLUP_UNREAD_REASON = "checks and review unread this pass (rollup read fa
 
 export const DISPOSITION_RULES: readonly DispositionRule[] = [
   {
+    // W1-T10832 — THE OWNER'S MERGE IS THE REVIEW. Core's daily site import PR is published only by the
+    // owner merging it, so no lane may review, fix, arm, merge or close it: FIRST, above every close-out row,
+    // because a PR left past the page's 72 h label stays open and is refreshed in place by core.
+    disposition: "wait",
+    when: (pr) => isOwnerMergeOnlyHead(pr.headRefName),
+    blocker: "operator-hold",
+    reason: (pr) => `owner-merge-only head ${pr.headRefName ?? ""} (W1-T10832): the owner's merge is the review — `
+      + "the sweep never reviews, arms or merges it",
+  },
+  {
     // W1-T920 (DECISIONS.md #1987) — ROUTED THROUGH THE EXISTING "stale" disposition, never a new
     // one: that case already closes reversibly and already writes ONE `sweep.disposed` row, and
     // no new ledger step ships without a named reader. A NEW ROW, not a change to the bare-number
@@ -22111,8 +22138,10 @@ export function productionFixAdmissionResidents(
 ): FixAdmissionResidents {
   const reading = readLedger(root);
   if (reading === undefined || reading.state === "unreadable") return undefined;
+  // The child's resident memory is already in the pressure reading. Its reservation cannot be another fix ahead of it.
+  const ownReservationId = currentRunChildReservationId();
   const live = reading.entries.filter((entry) => entry.status === "owned" && !entry.occupancyReleased &&
-    (entry.workerClass === "fix" || entry.workerClass === "review"));
+    (entry.workerClass === "review" || (entry.workerClass === "fix" && entry.id !== ownReservationId)));
   const residents = residentsOf(readFile, live.map((entry) => entry.path));
   const out: { fix: number[]; review: number[] } = { fix: [], review: [] };
   let pendingFix = 0;
