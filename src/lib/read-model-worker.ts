@@ -200,9 +200,30 @@ export const READ_MODEL_SKIP_AUDIT_EVERY = 20;
 export const READ_MODEL_READ_HOT_MS = 2 * 60_000;
 /**
  * BACKSTOP: maximum unread interval multiplier, doubled per unread build and reset by any read.
- * `now@core` (~4.8 s cost, ~12 s interval) then runs every ~6.4 min at ~1/32 of its read cost.
+ * `now@core` (~4.8 s cost, ~12 s interval) reaches it at ~6.4 min, which is also its unread window (W1-T12270).
  */
 export const READ_MODEL_IDLE_STRETCH_MAX = 32;
+/**
+ * PRIMARY CONTROL (W1-T12270): the least cost a read-paced unit's unread window is computed from. A build cheaper
+ * than one tick ({@link READ_MODEL_TICK_MS}) is not timed reliably by the pass that ran it.
+ */
+export const READ_MODEL_UNREAD_COST_FLOOR_MS = 250;
+/**
+ * W1-T12270: how long a read-paced unit may go unread before it is stopped: today's largest wait, its cost after
+ * {@link READ_MODEL_UNREAD_COST_FLOOR_MS} divided by the share, times {@link READ_MODEL_IDLE_STRETCH_MAX}. MEASURED
+ * 2026-11-10: `now` took 1,614 s of 2,371 s of view-build time while few readers were connected.
+ */
+export function readModelUnreadWindowMs(costMs: number): number {
+  return (Math.max(costMs, READ_MODEL_UNREAD_COST_FLOOR_MS) / READ_MODEL_VIEW_SHARE) * READ_MODEL_IDLE_STRETCH_MAX;
+}
+/**
+ * W1-T12270: the source a stopped unit's bodies carry until the first build after the next read. A read is answered
+ * at once, never held for that build (a `now` build takes up to ~5 s): the answer says the body is stale, and its
+ * `asOf` and `lagMs` give the age of the body. The marker also moves the body's ETag, so a conditional GET sending
+ * the ETag from before the stop gets the body, not a 304.
+ */
+export const READ_MODEL_IDLE_SOURCE_PREFIX = "read-model:idle:";
+const carriesIdleSource = (body: ViewBody | undefined): boolean => body?.sources.some((source) => source.name.startsWith(READ_MODEL_IDLE_SOURCE_PREFIX)) === true;
 /**
  * BACKSTOP (W1-T11933): an {@link ReadModelView.idleFloor} unit unread for {@link READ_MODEL_READ_HOT_MS}
  * waits at least this long between builds; a read restores cost / share cadence on the next tick.
@@ -227,11 +248,15 @@ export function heavyLaneKeptWarm(views: Readonly<Record<string, string | undefi
   return mode === "serve" || mode === "auto";
 }
 /** `GET /v1/views/versions` (view-events.ts's VIEW_VERSIONS_PATH): a console polling every view's version reads them all. */
-const READ_MODEL_EVERY_VIEW_PATHS: ReadonlySet<string> = new Set(["/v1/views/versions"]);
+const READ_MODEL_SUBSCRIBED_PATH = "/v1/views/versions";
+const READ_MODEL_EVERY_VIEW_PATHS: ReadonlySet<string> = new Set([READ_MODEL_SUBSCRIBED_PATH]);
 /** W1-T11979: the versions poll's optional comma-separated list of the views its page shows. */
 export const READ_MODEL_VERSIONS_VIEWS_PARAM = "views";
-/** A legacy read that serves a view's body inside its own answer: `/v1/status` carries `needs-you`'s human gates. */
-const READ_MODEL_LEGACY_VIEW_READS: Readonly<Record<string, string>> = { "/v1/status": "needs-you" };
+/**
+ * A legacy read that serves a view's body inside its own answer: `/v1/status` carries `needs-you`'s human gates, and
+ * `/v1/recent` the now view's recent feed (serve-memory.ts LEGACY_CACHE_VIEWS).
+ */
+const READ_MODEL_LEGACY_VIEW_READS: Readonly<Record<string, string>> = { "/v1/status": "needs-you", "/v1/recent": NOW_VIEW_NAME };
 /** Work outstanding without a commit for this long is stalled; serve watches silent workers too. */
 export const READ_MODEL_STALL_MS = 60_000;
 /**
@@ -405,6 +430,8 @@ export interface ReadModelViewContext {
   shadow?: ShadowReadiness[];
   /** W1-T13457: the body the home store last committed for a view's key, so a view can carry it across a restart instead of publishing a warming one over it. */
   committed?(view: string, key: string): ViewBody | undefined;
+  /** W1-T12270: the first build after a read-paced unit was stopped: a view that holds its own measurements takes them again. */
+  resumed?: true;
 }
 
 /** A view the worker materializes. `materialize` returns one body per key (`""` when unkeyed). */
@@ -434,6 +461,8 @@ export interface ReadModelView {
    * Its cadence follows its readers: kept while it or a view built from it was read within
    * {@link READ_MODEL_READ_HOT_MS}, stretched while nobody reads it, restored by the next read. Serve
    * judges every source at request time, so a body read before its rebuild says it is stale.
+   * W1-T12270: once its view serves and its shadow readiness reads ready, a unit unread for
+   * {@link readModelUnreadWindowMs} is stopped until the next read.
    */
   readPaced?: true;
   /** Its cadence floors while unread: {@link READ_MODEL_IDLE_FLOOR_MS} between builds, never for a `demand` view. */
@@ -1050,10 +1079,17 @@ export interface ReadModelTicker {
   observe(instances: readonly ReadModelInstanceState[]): void;
   /** Main asked for a key of a demand view. True when the key is new, and its view is due at once. */
   want(view: string, key: string): boolean;
-  /** Builds `view` now, in a pass of its own ahead of whatever else is due: main is waiting on a wanted key for 300 ms. */
-  buildNow(view: string): void;
-  /** Serve answered a read of `path`: each read-paced view it reads ({@link viewsReadBy}) goes back on its unstretched cadence. */
-  read(path: string): void;
+  /**
+   * Builds `view` now, in a pass of its own ahead of whatever else is due: main is waiting on a wanted key for 300 ms.
+   * With `key`, only the per-instance units it names; a stopped unit is never built (W1-T12270).
+   */
+  buildNow(view: string, key?: string): void;
+  /**
+   * Serve answered a read of `path`: each read-paced view it reads ({@link viewsReadBy}) goes back on its unstretched
+   * cadence, and a stopped unit is due at once. `subscribed` (W1-T12270): a connected event-stream subscriber, which
+   * counts only for read-paced views, so no other view's idle floor moves.
+   */
+  read(path: string, subscribed?: boolean): void;
   lane(move: ReadModelLaneMove): void;
   peer(entry: ReadModelBodyEntry): void;
 }
@@ -1071,12 +1107,14 @@ interface ViewUnit {
   storedCostIno?: string;
   /** What its last build call took (absent until one ran); `startedAt` is the first call of a bounded build in flight. */
   costMs?: number;
-  /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}, times `stretch`. */
+  /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}, times `stretch`. Infinity: a stopped read-paced unit (W1-T12270). */
   dueAt: number;
   /** A read-paced unit's multiplier on that wait: 1 while read, doubled by each build finished unread. */
   stretch?: number;
   /** When it would be due unstretched; a read pulls `dueAt` back to it. */
   baseDueAt?: number;
+  /** W1-T12270: its next build is the first after a stop, so it measures again ({@link ReadModelViewContext.resumed}). */
+  resumed?: true;
   /** An idle-floor unit's last build was finished unread, so `dueAt` waits {@link READ_MODEL_IDLE_FLOOR_MS}. */
   floored?: true;
   startedAt?: number;
@@ -1764,8 +1802,11 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     return whole === undefined && own === undefined ? pacedFrom : Math.max(whole ?? Number.NEGATIVE_INFINITY, own ?? Number.NEGATIVE_INFINITY);
   }
 
-  /** A finished build's next due time: cost / share, stretched for a read-paced unit nobody has read lately. */
-  function paced(unit: ViewUnit, finished: number): number {
+  /**
+   * A finished build's next due time: cost / share, stretched for a read-paced unit nobody has read lately. W1-T12270:
+   * a read-paced unit unread for its unread window gets none, once {@link stopsUnread} allows it.
+   */
+  function paced(unit: ViewUnit, finished: number, shadow: readonly ShadowReadiness[] | undefined): number {
     const waitMs = unit.costMs! / READ_MODEL_VIEW_SHARE;
     unit.baseDueAt = finished + waitMs;
     const idleMs = finished - lastReadOf(unit);
@@ -1774,7 +1815,44 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       return unit.floored ? finished + Math.max(waitMs, READ_MODEL_IDLE_FLOOR_MS) : unit.baseDueAt;
     }
     unit.stretch = idleMs < READ_MODEL_READ_HOT_MS ? 1 : Math.min(READ_MODEL_IDLE_STRETCH_MAX, (unit.stretch ?? 1) * 2);
+    if (idleMs >= readModelUnreadWindowMs(unit.costMs!) && stopsUnread(unit.view.name, shadow)) {
+      markIdle(unit, idleMs);
+      return Number.POSITIVE_INFINITY;
+    }
     return finished + waitMs * unit.stretch;
+  }
+
+  /**
+   * W1-T12270: an unread read-paced unit may stop only while its view serves and its shadow readiness, as this worker
+   * already holds it, reads ready. Until then unattended shadow qualification needs fresh bodies with no reader
+   * connected (operator decision of 2026-11-20), so the shadow readiness gate counts as a reader.
+   */
+  function stopsUnread(view: string, shadow: readonly ShadowReadiness[] | undefined): boolean {
+    const mode = switches.views[view];
+    return (mode === "serve" || mode === "auto") && shadow?.some((readiness) => readiness.view === view && readiness.ready) === true;
+  }
+
+  /** W1-T12270: each body a stopped unit holds is posted again, stale, with a source that says how old it is. */
+  function markIdle(unit: ViewUnit, idleMs: number): void {
+    const view = unit.view.name, instance = unit.slot?.instance.name;
+    for (const entry of [...latest.values()]) {
+      if (entry.view !== view || carriesIdleSource(entry.body) || !demandKeyBelongsTo(unit, entry.key)) continue;
+      const idle: ViewSource = {
+        name: `${READ_MODEL_IDLE_SOURCE_PREFIX}${view}${instance === undefined ? "" : `@${instance}`}`, kind: "read-model",
+        ...(instance === undefined ? {} : { instance }), asOf: entry.body.generatedAt, state: "stale", phase: "refreshing",
+        reason: `not rebuilt since ${entry.body.generatedAt}: nobody read it for ${Math.round(idleMs / 1000)} s; the next read rebuilds it`,
+      };
+      const sources = [...entry.body.sources, idle];
+      // Posted, never persisted: a restart carries the committed body, which says it is carried.
+      publishEntry({ ...entry, etag: `${entry.etag.replace(/"$/, "")}.idle"`, body: { ...entry.body, stale: true, asOf: oldestAsOf(sources), sources } }, true);
+    }
+  }
+
+  /** W1-T12270: a stopped unit is due at once, and its next build measures again rather than reusing inputs. */
+  function resume(unit: ViewUnit, at: number): void {
+    unit.dueAt = at;
+    unit.resumed = true;
+    unit.lastInputDigest = undefined;
   }
 
   function inputDigest(ctx: ReadModelViewContext, readAsOf: Map<string, string | null> | undefined, view: ReadModelView): InputDigest | undefined {
@@ -1850,7 +1928,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     let why: string | undefined;
     let digest: InputDigest | undefined;
     const builtKeys: string[] = [];
-    const scoped = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
+    const scope = unit.slot ? { ...ctx, instances: ctx.instances.filter(({ state }) => state === unit.slot!.state) } : ctx;
+    const scoped: ReadModelViewContext = unit.resumed ? { ...scope, resumed: true } : scope;
     const buildStartedMs = (unit.startedAt ??= started);
     let live: ReadModelView | undefined;
     try {
@@ -1914,7 +1993,10 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (!skipped) {
       unit.lastInputDigest = succeeded ? digest : undefined;
       unit.builtKeys = succeeded ? builtKeys : undefined;
-      if (succeeded) unit.lastBuiltAt = finished;
+      if (succeeded) {
+        unit.lastBuiltAt = finished;
+        unit.resumed = undefined;
+      }
     }
     const elapsedMs = finished - started;
     unit.costMs = skipped ? unit.costMs ?? elapsedMs : elapsedMs;
@@ -1938,7 +2020,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
     const laneCostMs = Math.max(peakMs, unit.coldCostMs ?? 0);
     if (succeeded) persistUnitCost(unit, laneCostMs);
-    unit.dueAt = ready ? paced(unit, finished) : finished;
+    unit.dueAt = ready ? paced(unit, finished, ctx.shadow) : finished;
     if (ready) {
       unit.startedAt = undefined;
       unit.peakMs = undefined;
@@ -2041,6 +2123,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       : storedReadiness(viewShadowPath(opts.stateDir), home, now, qualifications, inboxPopulations, inboxPopulations ? [INBOX_VIEW_NAME] : undefined) : undefined;
     const ctx: ReadModelViewContext = { now, switches, ...(home ? { sourceStore: home, committed: (view: string, key: string) => committedBody(home, view, key) } : {}), instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
+    // W1-T12270: a unit stopped while its view could stop resumes, at its stretch, once its view no longer may.
+    for (const unit of units) if (unit.dueAt === Number.POSITIVE_INFINITY && owns(unit) && !stopsUnread(unit.view.name, shadow)) resume(unit, now);
     if (only) return build(only, now, ctx, generation, soloMs);
     const left = passMs - (clock.now() - tickStart);
     let spent = 0;
@@ -2160,7 +2244,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
           const data = legacy.data as { snapshotKey?: unknown; section?: unknown; page?: { index?: unknown } } | null;
           if (population && page && data?.snapshotKey === population.snapshotKey && data.section === page.section && data.page?.index === page.index) legacy = { ...legacy, qualificationGeneration: population.generation };
         }
-        const shadow = body && legacy ? viewShadow() : undefined;
+        // W1-T12270: a stopped unit's body is not compared: measured against a fresh legacy side it is only old.
+        const shadow = body && legacy && !carriesIdleSource(body) ? viewShadow() : undefined;
         if (!body || !legacy || !shadow) {
           if (request.view === INBOX_VIEW_NAME && inboxScope && request.requests > 0) viewShadow()?.observeRequests(request.view, request.requests);
           return false;
@@ -2173,7 +2258,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       }
     },
     prepareShadow(request: ShadowRequest): ShadowRequest | undefined {
-      const entry = latest.get(`${request.view}\u0000${request.key}`), body = entry?.body;
+      const entry = latest.get(`${request.view}\u0000${request.key}`), body = carriesIdleSource(entry?.body) ? undefined : entry?.body;
       try {
         const legacy = body ? legacyOf(request.view, request.key, clock.now(), body.data) : undefined;
         return body && legacy ? { ...request, paired: { body, legacy, ...(entry?.qualificationGeneration === undefined ? {} : { qualificationGeneration: entry.qualificationGeneration }) } } : undefined;
@@ -2182,26 +2267,39 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         return undefined;
       }
     },
-    buildNow(view: string): void {
+    buildNow(view: string, key?: string): void {
       const now = clock.now();
       if (viewsOnly) {
         if (observedAt === Number.NEGATIVE_INFINITY) return;
         for (const slot of slots) attachViews(slot, now);
       }
-      for (const unit of units) if (unit.view.name === view && owns(unit) && built(view)) materialize(now, now, unit);
+      // W1-T12270: only the units the wanted key names, and never a stopped one: a stop ends only on a read of it.
+      for (const unit of units) {
+        if (unit.view.name !== view || !owns(unit) || !built(view) || unit.dueAt === Number.POSITIVE_INFINITY) continue;
+        if (key !== undefined && unit.slot && !demandKeyBelongsTo(unit, key)) continue;
+        materialize(now, now, unit);
+      }
       postState(now);
     },
-    read(path: string): void {
+    read(path: string, subscribed = false): void {
       const now = clock.now();
-      const read = new Set(viewsReadBy(path, views.map((view) => view.name), readers));
+      // W1-T12270 invariant unpaced-views-unchanged: a subscriber's read reaches only read-paced views.
+      const read = new Set(viewsReadBy(path, views.map((view) => view.name), readers).filter((name) => !subscribed || views.some((view) => view.name === name && view.readPaced === true)));
       const { direct, instance } = readScopeOf(path);
       const only = (name: string): string | undefined =>
         instance !== undefined && name === direct && views.some((view) => view.name === name && view.perInstance) ? instance : undefined;
       for (const view of read) readAt.set(only(view) === undefined ? view : `${view}@${only(view)}`, now);
       for (const unit of units) {
-        if (!read.has(unit.view.name) || ((unit.stretch ?? 1) === 1 && unit.floored !== true)) continue;
+        if (!read.has(unit.view.name)) continue;
         const scope = only(unit.view.name);
         if (scope !== undefined && unit.slot?.instance.name !== scope) continue;
+        if (unit.dueAt === Number.POSITIVE_INFINITY) {
+          // W1-T12270: the first read after a stop builds the unit on the next tick, ahead of every other due unit.
+          resume(unit, 0);
+          unit.stretch = 1;
+          continue;
+        }
+        if ((unit.stretch ?? 1) === 1 && unit.floored !== true) continue;
         unit.stretch = 1;
         unit.floored = undefined;
         if (unit.baseDueAt !== undefined) unit.dueAt = Math.min(unit.dueAt, unit.baseDueAt);
@@ -2210,7 +2308,8 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     want(view: string, key: string): boolean {
       if (!opts.demand || !demandViews.includes(view)) return false;
       const fresh = opts.demand.want(view, key);
-      if (fresh) for (const unit of units) if (unit.view.name === view) {
+      // W1-T12270: a per-instance unit is due only for a key naming its instance.
+      if (fresh) for (const unit of units) if (unit.view.name === view && (!unit.slot || demandKeyBelongsTo(unit, key))) {
         unit.dueAt = 0;
         unit.lastInputDigest = undefined;
       }
@@ -2314,7 +2413,7 @@ export type ReadModelViewsInput =
   | { type: "bodies"; built: SlowLaneBodies }
   | { type: "snapshot"; snapshot: SourceSnapshotWrite }
   | { type: "want"; view: string; key: string }
-  | { type: "read"; path: string }
+  | { type: "read"; path: string; subscribed?: true }
   | ({ type: "lane" } & ReadModelLaneMove)
   | { type: "peer"; entry: ReadModelBodyEntry }
   | { type: "stop" };
@@ -2354,11 +2453,11 @@ export function runReadModelViewWorker(
     else if (msg.type === "want") {
       // A new key is built in a pass of its own, now: main is waiting on it for 300 ms.
       try {
-        if (ticker.want(msg.view, msg.key)) ticker.buildNow(msg.view);
+        if (ticker.want(msg.view, msg.key)) ticker.buildNow(msg.view, msg.key);
       } catch (error) {
         log("read_model.want_failed", { view: msg.view, error: (error as Error).message });
       }
-    } else if (msg.type === "read") ticker.read(msg.path);
+    } else if (msg.type === "read") ticker.read(msg.path, msg.subscribed === true);
     else if (msg.type === "snapshot") ticker.acceptSnapshot(msg.snapshot);
     else if (msg.type === "lane") ticker.lane(msg);
     else if (msg.type === "peer") ticker.peer(msg.entry);
@@ -2440,8 +2539,11 @@ export interface ReadModelViewLane {
   snapshot(write: SourceSnapshotWrite): void;
   /** Main asked for a key of a demand view. */
   want(view: string, key: string): ReadModelLaneWake;
-  /** Serve answered a read of `path`: both lanes, since either may own a unit it reads. */
-  read(path: string): ReadModelLaneWake;
+  /**
+   * Serve answered a read of `path`: both lanes, since either may own a unit it reads. A `subscribed` read (W1-T12270)
+   * never wakes an idle-ended heavy lane: it keeps read-paced units on their cadence and nothing else.
+   */
+  read(path: string, subscribed?: boolean): ReadModelLaneWake;
   holdsOf(threadId: number): ThreadHoldsSnapshot | undefined;
   close(): void;
 }
@@ -2624,7 +2726,11 @@ export function threadViews(opts: {
       send({ type: "want", view, key });
       return woke;
     },
-    read: (path) => {
+    read: (path, subscribed) => {
+      if (subscribed) {
+        send({ type: "read", path, subscribed: true });
+        return { woke: "none" };
+      }
       const woke = wake();
       send({ type: "read", path });
       return woke;
@@ -2821,7 +2927,10 @@ export function runReadModelWorker(
     if (answerThreadHeaps(port, msg, threads, views.holdsOf)) return;
     if (msg.type === "shadow") return void views.shadow(msg as unknown as ShadowRequest);
     if (msg.type === "want") return void views.want((msg as unknown as { view: string }).view, (msg as unknown as { key: string }).key);
-    if (msg.type === "read") return void views.read((msg as unknown as { path: string }).path);
+    if (msg.type === "read") {
+      const read = msg as unknown as { path: string; subscribed?: unknown };
+      return void views.read(read.path, read.subscribed === true);
+    }
     if (msg.type !== "stop") return;
     Atomics.store(signal, 0, 1);
     finish();
@@ -2975,6 +3084,11 @@ export interface ReadModelWorkerHandle {
   noteGithubRead?(): void;
   /** Serve answered a read-scoped route for `instance` (a known one, else all): the read-paced views it reads keep their cadence (posted at most every {@link READ_MODEL_READ_NOTE_MS} per path, instance and `views` list, W1-T11979). */
   noteViewRead?(path: string, instance?: string, views?: string): void;
+  /**
+   * W1-T12270: an event-stream subscriber of `views` (every view when absent) is still connected. Posted like a read,
+   * at most once per {@link READ_MODEL_READ_NOTE_MS}, but it counts only for read-paced views.
+   */
+  noteViewSubscribed?(views?: readonly string[]): void;
 }
 
 export interface ReadModelWorkerOptions {
@@ -3387,6 +3501,22 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
     return state ? ledgerSource(state, now) : { ...describeSource(source), state: "stale", phase: "warming", reason: "read model warming: this body was committed before serve started" };
   });
 
+  const postRead = (route: string, instance: string | undefined, views: string | undefined, subscribed: boolean): void => {
+    const now = clock.now();
+    const scoped = scopedReadPath(route, instance !== undefined && opts.instances.some((known) => known.name === instance) ? instance : undefined);
+    let path = scoped;
+    if (views !== undefined) {
+      const known = new Set(lexicon ??= readModelViewLexicon(opts.instances));
+      for (const body of bodies.values()) known.add(body.view);
+      path = `${scoped}${scoped.includes("?") ? "&" : "?"}${READ_MODEL_VERSIONS_VIEWS_PARAM}=${encodeURIComponent(canonicalVersionsViews(views, known))}`;
+    }
+    // A subscriber's note is spaced apart from a read of the same path, which it must never suppress.
+    const noted = subscribed ? `subscribed:${path}` : path;
+    if (!worker || now - (readNotedAt.get(noted) ?? Number.NEGATIVE_INFINITY) < READ_MODEL_READ_NOTE_MS) return;
+    readNotedAt.set(noted, now);
+    worker.postMessage(subscribed ? { type: "read", path, subscribed: true } : { type: "read", path });
+  };
+
   const handle: ReadModelWorkerHandle = {
     bodies,
     committedBodies: () => {
@@ -3458,19 +3588,8 @@ export function createReadModelWorker(opts: ReadModelWorkerOptions): ReadModelWo
       return () => bodyListeners.delete(listener);
     },
     noteGithubRead: () => workerWarm?.noteRead(),
-    noteViewRead: (route, instance, views) => {
-      const now = clock.now();
-      const scoped = scopedReadPath(route, instance !== undefined && opts.instances.some((known) => known.name === instance) ? instance : undefined);
-      let path = scoped;
-      if (views !== undefined) {
-        const known = new Set(lexicon ??= readModelViewLexicon(opts.instances));
-        for (const body of bodies.values()) known.add(body.view);
-        path = `${scoped}${scoped.includes("?") ? "&" : "?"}${READ_MODEL_VERSIONS_VIEWS_PARAM}=${encodeURIComponent(canonicalVersionsViews(views, known))}`;
-      }
-      if (!worker || now - (readNotedAt.get(path) ?? Number.NEGATIVE_INFINITY) < READ_MODEL_READ_NOTE_MS) return;
-      readNotedAt.set(path, now);
-      worker.postMessage({ type: "read", path });
-    },
+    noteViewRead: (route, instance, views) => postRead(route, instance, views, false),
+    noteViewSubscribed: (views) => postRead(READ_MODEL_SUBSCRIBED_PATH, undefined, views?.join(","), true),
     start: () => {
       if (worker || stopping || paused) return;
       started = true;

@@ -22,7 +22,8 @@
  * new event REPLACES the one pending for its key, so memory is bounded by keys, not by time stalled.
  *
  * NOT READ ATTENTION: an open stream never extends serve's recycle patience (coordinator decision; see
- * `stampReadWith` in serve.ts). Refetches are ordinary view reads and are stamped as reads.
+ * `stampReadWith` in serve.ts). Refetches are ordinary view reads and are stamped as reads. It does keep a
+ * read-paced view it watches on its cadence (W1-T12270), through the worker's `noteViewSubscribed`.
  */
 import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -66,7 +67,7 @@ export interface ViewEventsOptions {
   names: readonly string[];
   /** Views that serve their body with no switch entry (the read model's own status). */
   servedByDefault?: readonly string[];
-  readModel?: Pick<ReadModelWorkerHandle, "bodies" | "body" | "judge" | "switches" | "onBody" | "autoMode">;
+  readModel?: Pick<ReadModelWorkerHandle, "bodies" | "body" | "judge" | "switches" | "onBody" | "autoMode" | "noteViewSubscribed">;
   clock?: Clock;
   bootId?: string;
   every?: (run: () => void, ms: number) => () => void;
@@ -245,8 +246,14 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
     }
     const now = clock.now();
     for (const judged of current(now).values()) emit(judged, "judge", now);
-    for (const sub of subs) stalled(sub, now);
+    for (const sub of subs) if (!stalled(sub, now)) subscribed(sub);
   };
+
+  /**
+   * W1-T12270: a connected subscriber reads its views whether or not an event reaches it, so a read-paced view it
+   * watches keeps its cadence and is never stopped under it. Only read-paced views count it (the worker's rule).
+   */
+  const subscribed = (sub: Subscriber): void => opts.readModel?.noteViewSubscribed?.(sub.views ? [...sub.views] : undefined);
 
   const heartbeat = (): void => {
     for (const sub of subs) if (sub.pending.size === 0) sub.res.write(": hb\n\n");
@@ -302,6 +309,7 @@ export function createViewEvents(opts: ViewEventsOptions): ViewEvents {
       const sub: Subscriber = { res, pending: new Map(), ...(views ? { views } : {}) };
       if (subs.size === 0) run(readModel);
       subs.add(sub);
+      subscribed(sub);
       const now = clock.now();
       res.write(`retry: ${VIEW_EVENTS_RETRY_MS}\n\n`);
       res.write(frame("hello", { bootId, serverNow: clock.iso(), ...versions(now, views) }, `${bootId}:${seq}`));
