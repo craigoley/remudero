@@ -27,11 +27,11 @@ import { appendFileSync, existsSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { CI_COVERAGE_SHARD_COUNT } from "./coverage-floor.mjs";
 import { isMainModule, parseArgv } from "./lib/argv.mjs";
 import { closeJudgedRun, judgedNodeTestArgs, prepareJudgedRun } from "./pure-test-pool.mjs";
 import {
   COVERAGE_SHARD_WORKERS,
-  DEFAULT_CI_SHARD_COUNT,
   instrumentedManifest,
   listTestFiles,
   loadManifest,
@@ -49,7 +49,8 @@ export function addedTestFiles(base, { cwd = ROOT, spawn = spawnSync } = {}) {
   return r.stdout.split("\n").filter((f) => f.endsWith(".test.ts") && existsSync(join(cwd, f))).sort();
 }
 
-/** The predicted wall time of the slowest coverage shard: the time a pull request already waits. */
+/** The predicted wall time of the slowest coverage shard: the time a pull request already waits.
+ *  W1-T14648: packed at the coverage lane's own width, CI_COVERAGE_SHARD_COUNT, not the ci lane's. */
 export function screenBudgetMs(root = ROOT) {
   const manifest = instrumentedManifest(
     loadManifest(join(root, "scripts/test-tier-manifest.json")),
@@ -57,7 +58,7 @@ export function screenBudgetMs(root = ROOT) {
   );
   const testFiles = listTestFiles(root);
   reportManifestFallbacks(testFiles, manifest);
-  const shards = packFilesByMakespan(testFiles, manifest, DEFAULT_CI_SHARD_COUNT, COVERAGE_SHARD_WORKERS);
+  const shards = packFilesByMakespan(testFiles, manifest, CI_COVERAGE_SHARD_COUNT, COVERAGE_SHARD_WORKERS);
   return Math.max(0, ...shards.map((files) => predictMakespanMs(files, manifest, COVERAGE_SHARD_WORKERS)));
 }
 
