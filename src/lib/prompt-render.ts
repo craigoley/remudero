@@ -1445,6 +1445,7 @@ export function ownTscDiagnostics(output: string, file: string): string[] {
     .filter((line) => /\berror TS\d+:/.test(line))
     .filter((line) => {
       const at = norm(line).split("(")[0];
-      return own.endsWith(at) || at.endsWith(own);
+      // Match whole path components: a sibling with the same basename is not this test.
+      return own === at || own.endsWith(`/${at}`) || at.endsWith(`/${own}`);
     });
 }
