@@ -60,7 +60,7 @@ import { loadTargetPlanOrEmptyWhenAbsent, plannedSequence, runDrain, type DrainD
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
-import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type DaemonFreshness, type OpsTaskDispatchRead, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe, type PauseInFlightUnit } from "../../lib/daemon.js";
+import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, RESTART_HISTORY_STEPS, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type DaemonFreshness, type OpsTaskDispatchRead, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe, type PauseInFlightUnit } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktreesAsync } from "../../lib/review-worktree-reclaim.js";
 import { reapRetiredReviewerTreesAsync } from "../../lib/reviewer-tree-reaper.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
@@ -123,6 +123,7 @@ import { mainEvidenceReader } from "../../lib/stall-verifier.js";
 import { step } from "../../lib/git-push.js";
 import { ensureWorkerKeychain, sweepStaleWorkerHomes, workerKeychainPaths } from "../../lib/worker-home.js";
 import { acquireDrainLock, DrainLockError } from "../../lib/drain-lock.js";
+import { createLedgerRotationCache } from "../../lib/ledger-rotation-cache.js";
 import { abortStandby, acquireLockWhenFree, awaitPromotion, leaveExitCodeForEntrypoint, logPromoted, standbyPorts,
   type StandbyOptions, type StandbyPorts } from "../../lib/daemon-standby.js";
 import { createDaemonHandoff, daemonSlotsDir, type DaemonHandoff } from "../../lib/daemon-handoff.js";
@@ -143,7 +144,7 @@ import { adoptRunChildren, createAdmittedPlanSlot, runChildModeIsOn, startRunChi
 import { loadObservedOverlapMode, loadRunChildMode, type RunChildMode } from "../../lib/policy.js";
 import { observedScopeFromOpenPrs } from "../../lib/observed-overlap.js";
 import {
-  bootRunChildMode, createRunChildModeTracker, readRunChildPolicy, runChildModeFor,
+  bootRunChildMode, createRunChildModeTracker, readRunChildModeUnion, readRunChildPolicy, RUN_CHILD_MODE_EVIDENCE_STEPS, runChildModeFor,
   type RunChildContractEscalation, type RunChildModeDecision,
 } from "../../lib/run-child-mode.js";
 import { type TickReadOptions, startTickReadWorker, tickReadWorkerUrl, fetchCiFailuresAsync, mergeLogEvidenceByRoot, planSyncGitRunnerAsync } from "../../lib/tick-read-worker.js";
@@ -897,6 +898,8 @@ export async function daemonSreLaneEnabled(
   installRoot: string,
   log: (step: string, extra?: Record<string, unknown>) => void,
   unresolved?: SreLaneUnresolvedPage,
+  /** W1-T14649: the boot passes this so the page, a whole-ledger-union read, settles off the boot path; it never rejects. */
+  background?: (paged: Promise<void>) => void,
 ): Promise<boolean> {
   const registryPath = process.env.RMD_SELECTED_INSTANCE_REGISTRY !== undefined
     ? process.env.RMD_SELECTED_INSTANCE_REGISTRY.trim()
@@ -908,7 +911,11 @@ export async function daemonSreLaneEnabled(
   const row = sreLaneStartRow(sreLane);
   log(row.step, row.fields);
   const enabled = sreLaneEnabled(sreLane);
-  if (unresolved !== undefined) await pageUnresolvedSreLane(sreLane, enabled, { stateRoot, registryPath }, unresolved, log);
+  if (unresolved !== undefined) {
+    const paged = pageUnresolvedSreLane(sreLane, enabled, { stateRoot, registryPath }, unresolved, log);
+    if (background !== undefined) background(paged);
+    else await paged;
+  }
   return enabled;
 }
 
@@ -2030,6 +2037,19 @@ export async function daemonCommand(
   const drainLockPath = join(config.root, "state", "drain.lock");
   let drainLock;
   let standbyPromotion: { prepareMs: number; waitMs: number; lockWaitMs: number; takeoverStartMs: number } | undefined;
+  // W1-T14635: the rotations the boot's two union reads walk are read now, while the active daemon still works, and kept
+  // for those reads; once promoted the boot reads only what the cache misses (the live file and any newer rotation).
+  const rotationCache = standby?.ports ? createLedgerRotationCache() : undefined;
+  if (rotationCache) {
+    const stateDir = join(config.root, "state");
+    try {
+      readRunChildModeUnion(stateDir, undefined, rotationCache.hook([...RUN_CHILD_MODE_EVIDENCE_STEPS]));
+      readRestartHistoryLines(stateDir, undefined, rotationCache.hook(RESTART_HISTORY_STEPS));
+    } catch (warmError) {
+      // A failed warm read decides nothing: the boot runs the same two reads and refuses or records there.
+      void warmError;
+    }
+  }
   if (standby?.ports) {
     // W1-T14544: ready, then wait for the hand-over; the lock is taken only once its live holder has let go.
     const promotion = await awaitPromotion(standby.ports, standby.startedAtMs);
@@ -2193,7 +2213,8 @@ export async function daemonCommand(
   // `auto` adopts whatever it decides: a child an earlier `on` started outlives a demotion and must still be adopted.
   const childMode = bootChildPolicy.mode === "on" || bootChildPolicy.mode === "auto";
   const childBoot = childMode
-    ? bootRunChildMode({ stateDir: dirname(ledgerPath), auto: bootChildPolicy.mode === "auto", liveRows: bootLedgerLines, log }) : undefined;
+    ? bootRunChildMode({ stateDir: dirname(ledgerPath), auto: bootChildPolicy.mode === "auto", liveRows: bootLedgerLines, log,
+      ...(rotationCache ? { rotationRecords: rotationCache.hook([...RUN_CHILD_MODE_EVIDENCE_STEPS]) } : {}) }) : undefined;
   const childModeTracker = childBoot?.tracker ?? createRunChildModeTracker(bootLedgerLines);
   const childLog = (step: string, extra: Record<string, unknown> = {}): void => {
     log(step, extra);
@@ -2679,7 +2700,10 @@ export async function daemonCommand(
         // W1-T10348: the operator releases rotation cannot shed, beside the ledger they were written to.
         readDurableReleases: () => readOperatorReleaseRecords(dirname(ledgerPathFor(config))),
         readRestartHistory: () => {
-          return readRestartHistoryLines(dirname(ledgerPathFor(config)));
+          if (rotationCache === undefined) return readRestartHistoryLines(dirname(ledgerPathFor(config)));
+          // W1-T14635: the boot's last union read; the warm rows are dropped after it.
+          try { return readRestartHistoryLines(dirname(ledgerPathFor(config)), undefined, rotationCache.hook(RESTART_HISTORY_STEPS)); }
+          finally { rotationCache.dispose(); }
         },
         taskInputAnswer: taskInputAnswerWithLedger(effectiveRepoRoot, ledgerPathFor(config)),
         // W1-T9680: a worker push's token — the credential socket's own scoped mint, else the ambient GH_TOKEN.
@@ -3056,7 +3080,7 @@ export async function daemonCommand(
                 ...(await daemonSreLaneEnabled(config.root, repoRoot, log, {
                   escalate: (info) => escalateSreLaneUnresolved(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
                   clear: (info) => escalateSreLaneUnresolvedCleared(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-                }) ? [
+                }, (paged) => { cleanup.push({ resource: "sre_lane_page", close: () => paged }); }) ? [
                   startBoundedDaemonSreLane(
                     (mergedLastDay) => daemonSreLaneInput({
                       stateDir: join(config.root, "state"),

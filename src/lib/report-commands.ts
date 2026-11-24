@@ -1349,13 +1349,6 @@ export interface CaseFileCommandInput extends ReportRepoContext {
   usage?: string;
 }
 
-/**
- * BACKSTOP: the batch form's per-task GitHub reads are sequential, one PR view each. A cohort
- * snapshot (27 tasks in the 2026-09-27 A/A) sits far below this; a list beyond it is refused
- * whole rather than issuing an unbounded run of reads.
- */
-export const MAX_CASE_FILE_BATCH_TASKS = 200;
-
 const CASE_FILE_TASK_ID = /^W\d+-T\d+$/;
 
 /** `--tasks <id,id,...>` and `--tasks-file <path>` (ids split on commas or whitespace), deduped in order. */
@@ -1381,7 +1374,6 @@ function caseFileBatchIds(rest: string[]): string[] | string {
   const invalid = unique.find((id) => !CASE_FILE_TASK_ID.test(id));
   if (invalid !== undefined) return `${invalid} is not a task id`;
   if (unique.length === 0) return "no task ids given";
-  if (unique.length > MAX_CASE_FILE_BATCH_TASKS) return `${unique.length} task ids exceed the batch bound of ${MAX_CASE_FILE_BATCH_TASKS}`;
   return unique;
 }
 

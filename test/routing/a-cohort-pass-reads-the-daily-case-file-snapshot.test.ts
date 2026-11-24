@@ -76,7 +76,7 @@ test("W1-T14539 criterion 1: a pass that reads the state snapshot joins it, and 
   } finally { f.close(); }
 });
 
-test("W1-T14539 criterion 2: a missing, unreadable, oversized or invalid snapshot leaves the pass unjoined and names why", async () => {
+test("W1-T14539 criterion 2: a missing, unreadable or invalid snapshot leaves the pass unjoined and names why", async () => {
   const f = fixture();
   try {
     const absent = await runBenchmarkCohortPass(f.stateDir, { nowIso: cutoff, caseFilesFromState: true });
@@ -89,8 +89,9 @@ test("W1-T14539 criterion 2: a missing, unreadable, oversized or invalid snapsho
     const invalid = await runBenchmarkCohortPass(f.stateDir, { nowIso: cutoff, caseFilesFromState: true });
     assert.equal(invalid.caseFileJoin, "invalid");
     for (const outcome of outcomes(invalid)) assert.equal(outcome, NO_JOIN);
+    // W1-T14602: no size bound; a large snapshot is read, and only its content can refuse it.
     f.writeCases(" ".repeat(4 * 1024 * 1024 + 1));
-    assert.deepEqual(readStateCaseFiles(f.stateDir), { reason: "too-large" });
+    assert.deepEqual(readStateCaseFiles(f.stateDir), { reason: "invalid" });
     rmSync(stateCaseFileSnapshotPath(f.stateDir));
     mkdirSync(stateCaseFileSnapshotPath(f.stateDir));
     assert.deepEqual(readStateCaseFiles(f.stateDir), { reason: "unreadable" });

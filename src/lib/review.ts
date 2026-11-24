@@ -4686,6 +4686,20 @@ export function judgeCriterion(
     });
   }
 
+  // W1-T14627: the PR body exempted this proof from proof-discrimination as a guard its own record does not declare.
+  if ((criterion as { bodyGuardUnbacked?: unknown }).bodyGuardUnbacked === true) {
+    return unable({
+      ...base,
+      met: false,
+      floorMet: false,
+      reason: `proof unmet: REFUSED — ${BODY_GUARD_UNBACKED}: the PR body marks the proof "${criterion.proof.trim()}" \`kind: guard\`, which ` +
+        "exempts it from proof-discrimination, but the task record does not declare it a guard; remove the body's " +
+        "kind line or declare the guard in the record",
+      proof_exec: "not_executable",
+      holdout: !!criterion.holdout,
+    });
+  }
+
   if (refusal) {
     return unable({
       ...base,
@@ -9112,6 +9126,12 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
         unsplitLabelledClaims[criteria.length - 1] = undefined;
         continue;
       }
+      // W1-T14627: an indented `kind: guard` line after a criterion's proof marks it a regression guard, as a plan
+      // record's `kind: guard` does (W1-T4419). Only `guard` is read; any other kind still ends the block.
+      if (last.proof && (last as { kind?: unknown }).kind === undefined && /^kind\s*:\s*["']?guard["']?$/i.test(line.trim())) {
+        (last as { kind?: string }).kind = "guard";
+        continue;
+      }
     }
     // A blank line before any bullet is tolerated (header, then a gap, then bullets); once bullets have begun, any
     // blank or unrecognized line ends the block.
@@ -9119,6 +9139,42 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
     break;
   }
   return criteria;
+}
+
+/** W1-T14627: the refusal a body guard earns when no task record declares it. */
+export const BODY_GUARD_UNBACKED = "body-guard-unbacked";
+
+/**
+ * W1-T14627: proof-discrimination honours a PR body's `kind: guard` on a PR that names its task, because Actions cannot
+ * read an ops-catalog record. This is the other half: each criterion review judges whose proof the body marks guard,
+ * while the criterion itself is not one, is marked `bodyGuardUnbacked` and refused. `fromBody` says the criteria came
+ * from the body (no record resolved), so no body guard has a record behind it. Matching is by trimmed proof text.
+ */
+export function markUnbackedBodyGuards<T extends AcceptanceCriterion>(criteria: readonly T[], bodyCriteria: readonly AcceptanceCriterion[],
+  fromBody: boolean): { criteria: T[]; unbacked: string[] } {
+  const bodyGuardList = bodyCriteria.filter((c) => (c as { kind?: unknown }).kind === "guard");
+  const bodyGuards = new Set(bodyGuardList.map((c) => c.proof.trim()));
+  // A body guard is backed only by a record criterion that is itself `kind: guard` with the same trimmed proof.
+  const backedProofs = new Set(fromBody ? [] : criteria
+    .filter((c) => (c as { kind?: unknown }).kind === "guard").map((c) => c.proof.trim()));
+  const unbacked: string[] = [];
+  const marked: T[] = criteria.map((criterion) => {
+    const proof = criterion.proof.trim();
+    if (!bodyGuards.has(proof) || backedProofs.has(proof)) return criterion;
+    unbacked.push(proof);
+    return { ...criterion, bodyGuardUnbacked: true };
+  });
+  // A body guard whose proof matches NO record criterion has no row to mark: add one the review must refuse, naming
+  // the proof, so editing a proof and marking it guard cannot slip past both halves.
+  const present = new Set(criteria.map((c) => c.proof.trim()));
+  for (const guard of bodyGuardList) {
+    const proof = guard.proof.trim();
+    if (present.has(proof) || backedProofs.has(proof)) continue;
+    present.add(proof);
+    unbacked.push(proof);
+    marked.push({ ...guard, bodyGuardUnbacked: true } as unknown as T);
+  }
+  return { criteria: marked, unbacked };
 }
 
 /** {@link acceptanceBlockDiagnostics}'s report. */
@@ -11009,6 +11065,9 @@ const MANDATORY_REGISTRIES: ReadonlyArray<{ path: string; declaration: string }>
   // script, its registration and its surface declaration are three halves of one indivisible commit
   // — which is precisely the circularity W1-T2521 named and W1-T3171 subtracts.
   { path: "src/lib/review.ts", declaration: "INSTRUMENT_SURFACE" },
+  // W1-T14655 (operator-approved 2026-11-24): a new ci.yml job owes a posture row, because the posture
+  // census refuses both a missing and a stale declaration. Same add-only, in-declaration guards.
+  { path: "src/lib/gate-posture.ts", declaration: "GATE_POSTURE_DECLARATIONS" },
 ];
 
 /** Each `@@` hunk's trailing context for `file`, in order; `undefined` where git emitted none.

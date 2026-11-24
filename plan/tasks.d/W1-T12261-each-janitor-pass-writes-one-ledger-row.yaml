@@ -23,7 +23,7 @@
     - test/host-resource-gardener.test.ts
     - test/fleet-heartbeat.test.ts
     - src/lib/ledger.ts # 2026-11-24: the janitor pass row is kept from archive so a stopped gardener recovers its cursor
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "The heartbeat carries, for the newest janitor pass, one line for each phase and root that the janitor log names, with the count of entries removed and the bytes freed"

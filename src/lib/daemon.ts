@@ -91,6 +91,8 @@ import {
   MACHINE_SHARE_STEP,
   type MachineShareInput,
   type MachineShareStart,
+  EXPEDITED_STEP,
+  type ExpeditedStart,
 } from "./drain.js";
 import { queueJudgeAvailability } from "./queue-judge-gardener.js";
 import { preDispatchContractRevision } from "./dispatch-repair.js";
@@ -185,7 +187,7 @@ import type { GithubPostureFinding } from "./github-posture.js";
 import { clockFromDateFn, clockFromIsoFn, clockFromMillisFn, fixedClock, loopAvailableDeadline, systemClock, type Clock } from "../lib/clock.js";
 import { createNearLimitHeapTelemetry, NEAR_HEAP_FILE, type NearLimitHeapTelemetry, type NearLimitSample } from "./daemon-heap-near-limit.js";
 import { createHeapAdmissionHold, type HeapAdmissionHoldLatch, type HeapAdmissionHoldMode, type HeapHoldTrace } from "./daemon-heap-admission-hold.js";
-import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, type LedgerRotationHook } from "./ledger-union.js";
 import { CONFLICT_GARDEN_ACT, CONFLICT_GARDEN_TIERS, CONFLICT_GARDEN_VERIFIED,
   conflictGardenGovernorVerdict, type ConflictGardenTier } from "./conflict-gardener-governor.js";
 import { conflictGardenPass } from "./garden-registry.js";
@@ -487,11 +489,16 @@ export const RESTART_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60_000;
 /** W1-T8927: a seven-day sampling window, not a yield threshold; durations come only from completed observations. */
 /** Read the restart comparison's complete recent corpus once at boot, including phases archived out of the live tail;
  *  it carries the settled full passes too, so the sweep-bound seed survives a restart (W1-T9632). */
-export function readRestartHistoryLines(stateDir: string, nowMs = systemClock.now()): readonly string[] {
+/** The steps {@link readRestartHistoryLines} reads; a standby's rotation cache keys its warm read by the same list (W1-T14635). */
+export const RESTART_HISTORY_STEPS: readonly string[] = ["run.start", "verdict", "pr.opened", "run.phase", "recon.done", "implement.done",
+  "implement.unfinished", "fallback_push.cause", SWEEP_SETTLED_STEP];
+export function readRestartHistoryLines(stateDir: string, nowMs = systemClock.now(),
+  rotationRecords?: LedgerRotationHook): readonly string[] {
   const read = readLedgerUnionRecordsSync(stateDir, {
+    ...(rotationRecords ? { rotationRecords } : {}),
     refuseIncomplete: true, sinceTs: fixedClock(nowMs - RESTART_HISTORY_WINDOW_MS).iso(),
     rotationWindowMs: RESTART_HISTORY_WINDOW_MS,
-    step: ["run.start", "verdict", "pr.opened", "run.phase", "recon.done", "implement.done", "implement.unfinished", "fallback_push.cause", SWEEP_SETTLED_STEP],
+    step: [...RESTART_HISTORY_STEPS],
   });
   if (!read.ok) throw new Error(`restart history unreadable: ${[...read.unread, ...read.unclassified].join(", ")}`);
   return read.rows.map((row) => JSON.stringify(row));
@@ -5774,6 +5781,8 @@ export async function runDaemon(
   let lastOverlapShadowSignature = "[]";
   let lastSecondaryCatalogShadowSignature: string | undefined;
   let lastMachineShareSignature: string | undefined;
+  // W1-T14654: each expedited pick's lane share, written as one dispatch.expedited row when that task starts.
+  const expeditedPicks = new Map<string, ExpeditedStart>();
   const machineShareStateDir = deps.fleetLane?.stateDir ?? deps.plainBackfill?.stateDir;
   const machineShareRotations = createLedgerRotationMemo((rows) => rows.filter((row) => row.step === "run.start"), { pattern: /run\.start/ });
   const machineShareRowsFor = async (lines: readonly string[] | undefined): Promise<readonly Record<string, unknown>[] | undefined> => {
@@ -8958,6 +8967,7 @@ export async function runDaemon(
       onPriorityReservationReleased: logPriorityRelease,
       dispatchValueContext: tickTiming.probe("buildDispatchValueContext", () => deps.buildDispatchValueContext?.(planForBatch, isMerged)),
       machineShare: machineShareFor(planForBatch, tickMachineShareRows),
+      onExpedited: (task, start) => { expeditedPicks.set(task.id, start); },
       beginSelectionPass: deps.beginSelectionPass,
       inputAnswer: deps.taskInputAnswer,
       isOpenPr: deps.isOpenPr,
@@ -9090,6 +9100,7 @@ export async function runDaemon(
     // evidence of spare capacity.
     let laneBudget = 0;
     bootFirstSelectionAtMs ??= daemonClock.now();
+    expeditedPicks.clear();
     const tickMerged = isMerged;
     if (forcedNext) {
       dispatchSet = hasChildTask(forcedNext.id) || occupiedTasks.length >= laneCount ? [] : [forcedNext];
@@ -9715,8 +9726,8 @@ export async function runDaemon(
           closedRows: string | undefined): void => {
           let openPrCount: number | undefined;
           try { openPrCount = timing.probe("openPrCount", () => deps.openPrCount?.()); } catch (e) { boardUnreadable = true; throw e; }
-          const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount,
-            queueAdmission: timing.probe("readQueueAdmission", () => deps.readQueueAdmission?.()) });
+          const queueAdmission = timing.probe("readQueueAdmission", () => deps.readQueueAdmission?.());
+          const budget = laneDispatchBudget({ laneCount, wipLimit: opts.wipLimit, openPrCount, queueAdmission });
           const runBranchState = runBranchStateFrom(
             runBranchListing, timing.probe("readRunBranchEvidence", readRunBranchEvidence), resumableHandoffs,
             lazyClosedUnmerged(closedRows === undefined ? undefined : () => closedRows),
@@ -9734,6 +9745,8 @@ export async function runDaemon(
               ...[...refillProposals].map((proposal) => proposal.id)]),
             // W1-T8502: pack the pool disjoint from the occupied lanes too, so a head they block cannot crowd out the rest.
             inFlight: [...inFlightTasks, ...refillProposals],
+            // W1-T14654: the pool spans every lane, so the expedite share is read from the lanes this refill may fill.
+            expediteLanes: Math.min(budget, enforcedLaneTarget(inFlightTasks.size, queueAdmission?.wipLimit)),
             onPassedOver: observePassedOver("lane-refill"),
             onDeferredForPriority: (d) => { refillDeferrals.push(d); logPriorityDeferral(d); },
           });
@@ -10000,6 +10013,11 @@ export async function runDaemon(
       attempted.push(task.id);
       noteTaskStart(task.id);
       noteBootFirstDispatch({ startedAtMs: daemonClock.now(), admitted: admitted.length });
+      const expedited = expeditedPicks.get(task.id);
+      if (expedited !== undefined) {
+        expeditedPicks.delete(task.id);
+        log(EXPEDITED_STEP, { task: task.id, ...expedited });
+      }
       if (forcedKick?.taskId === task.id) {
         const kick = forcedKick;
         deps.clearKick?.(task.id, kick.repo);

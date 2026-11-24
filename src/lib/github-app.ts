@@ -477,6 +477,16 @@ export const TOKEN_EXPIRED_STEP = "github_app.token_expired";
 export const TOKEN_REFRESH_LATE_STEP = "github_app.token_refresh_late";
 const ATTEMPT_CYCLE_SAMPLES = 8;
 
+/** W1-T14543: whether a presented token is the one the refresh loop holds, and if so whether it has expired. */
+export type HeldTokenState = "not_held" | "fresh" | "expired";
+export type EnsureFreshOutcome = "fresh" | "renewed" | "token_expired";
+/** W1-T14543: an armed loop's view of its held token, for a caller about to present it. Neither method returns it. */
+export interface HeldTokenAccess {
+  tokenState(token: string | undefined): HeldTokenState;
+  /** Past expiry with the timer overdue, renews once (concurrent calls share it); a retry not yet due is refused. */
+  ensureFresh(): Promise<EnsureFreshOutcome>;
+}
+
 /** The margin's attempt count at the measured cycle (timer lateness plus exchange), up to half a life. */
 export function refreshLeadMs(attemptCycleMs: readonly number[]): number {
   const attempts = REFRESH_MARGIN_MS / (EXCHANGE_TIMEOUT_MS + REFRESH_FAILURE_RETRY_MS);
@@ -513,7 +523,7 @@ export function startInstallationTokenRefresh(opts: {
   setTimer?: (fn: () => void, ms: number) => { unref?: () => void };
   clearTimer?: (timer: { unref?: () => void }) => void;
   now?: () => number;
-}): { armed: boolean; ready?: Promise<void>; firstResult?: Promise<RefreshResult>; stop?: () => void } {
+}): { armed: boolean; ready?: Promise<void>; firstResult?: Promise<RefreshResult>; stop?: () => void } & Partial<HeldTokenAccess> {
   const env = opts.env ?? process.env;
   if (!env[GH_APP_ID_ENV] || !env[GH_APP_INSTALLATION_ID_ENV] || !env[GH_APP_PRIVATE_KEY_PATH_ENV]) {
     return { armed: false };
@@ -530,6 +540,9 @@ export function startInstallationTokenRefresh(opts: {
   const cycles: number[] = [];
   let failures = 0;
   const warned = new Set<string>();
+  let heldToken: string | undefined;
+  let inflight: Promise<RefreshResult> | undefined;
+  const clear = opts.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
   // Arming the next timer must never depend on anything that can itself throw — `setTimer`
   // returning is the only thing this loop's survival rides on.
   const rearm = (delay: number): void => {
@@ -571,6 +584,7 @@ export function startInstallationTokenRefresh(opts: {
         settled();
         if (result.ok && result.expiresAtMs !== undefined) {
           lastSuccessfulExpiresAtMs = result.expiresAtMs;
+          heldToken = env.GH_TOKEN;
           failures = 0;
           immediateFailureRetryUsed = false;
           rearm(nextRefreshDelayMs(result.expiresAtMs, now(), refreshLeadMs(cycles)));
@@ -599,25 +613,55 @@ export function startInstallationTokenRefresh(opts: {
         return { ok: false, reason: "refresh threw" };
       },
     );
-  const tick = (): void => {
-    if (stopped) return;
-    const replaced = lastSuccessfulExpiresAtMs;
-    const at = now();
-    void runOnce();
-    if (replaced === undefined || at <= replaced || warned.has(`late:${replaced}`)) return;
+  const track = (attempt: Promise<RefreshResult>): Promise<RefreshResult> => {
+    inflight = attempt;
+    const settle = (): void => { if (inflight === attempt) inflight = undefined; };
+    attempt.then(settle, settle);
+    return attempt;
+  };
+  // After runOnce: the refresh never waits on this row, and a failed write must not throw out of a timer.
+  const noteLate = (replaced: number, at: number, dueAtStart: number, trigger?: "read"): void => {
+    if (at <= replaced || warned.has(`late:${replaced}`)) return;
     warned.add(`late:${replaced}`);
-    // After runOnce: the refresh never waits on this row, and a failed write must not throw out of a timer.
     try {
-      opts.log?.(TOKEN_REFRESH_LATE_STEP, { expires_at: fixedClock(replaced).iso(), late_ms: at - replaced, timer_lag_ms: Math.max(0, at - dueAt) });
+      opts.log?.(TOKEN_REFRESH_LATE_STEP, { expires_at: fixedClock(replaced).iso(), late_ms: at - replaced, timer_lag_ms: Math.max(0, at - dueAtStart),
+        ...(trigger === undefined ? {} : { trigger }) });
     } catch (err) {
       process.stderr.write(`github_app: ${TOKEN_REFRESH_LATE_STEP} row not written: ${String((err as Error)?.message ?? err)}\n`);
     }
   };
-  const firstResult = runOnce();
+  const tick = (): void => {
+    if (stopped) return;
+    const replaced = lastSuccessfulExpiresAtMs;
+    const at = now();
+    const due = dueAt;
+    void track(runOnce());
+    if (replaced !== undefined) noteLate(replaced, at, due);
+  };
+  const tokenState = (token: string | undefined): HeldTokenState => {
+    if (token === undefined || token !== heldToken || lastSuccessfulExpiresAtMs === undefined) return "not_held";
+    return now() < lastSuccessfulExpiresAtMs ? "fresh" : "expired";
+  };
+  // W1-T14543: a held loop cannot fire the timer, so a read past expiry renews here. A retry not yet due stays the timer's.
+  const ensureFresh = async (): Promise<EnsureFreshOutcome> => {
+    const replaced = lastSuccessfulExpiresAtMs;
+    if (replaced === undefined || now() < replaced) return "fresh";
+    if (inflight === undefined) {
+      const at = now();
+      if (stopped || at < dueAt) return "token_expired";
+      const due = dueAt;
+      if (timer) clear(timer);
+      void track(runOnce());
+      noteLate(replaced, at, due, "read");
+    }
+    const result = await inflight!;
+    return result.ok && lastSuccessfulExpiresAtMs !== undefined && now() < lastSuccessfulExpiresAtMs ? "renewed" : "token_expired";
+  };
+  const firstResult = track(runOnce());
   const ready = firstResult.then(() => undefined);
   const stop = (): void => {
     stopped = true;
-    if (timer) (opts.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout)))(timer);
+    if (timer) clear(timer);
   };
-  return { armed: true, ready, firstResult, stop };
+  return { armed: true, ready, firstResult, stop, tokenState, ensureFresh };
 }

@@ -155,9 +155,9 @@ export function renderProofDialectPage(grammar, headerRe, bulletRe, dialect, nar
   lines.push(
     "A `unit test:` body reads as a multi-clause SCENARIO NARRATIVE, not a single test's title, " +
       "and is refused by `proof-resolvability` (`looksLikeScenarioNarrative`, src/lib/task-linter.ts), " +
-      "when it is over " +
-      `${narrativeBounds.maxBodyLength} characters, or carries ${narrativeBounds.commasToRefuseAlone}+ ` +
-      `commas, or carries \`"; "\` plus ${narrativeBounds.commasToRefuseWithSemicolon}+ comma(s).`,
+      `when it carries ${narrativeBounds.commasToRefuseAlone}+ commas, or carries \`"; "\` plus ` +
+      `${narrativeBounds.commasToRefuseWithSemicolon}+ comma(s). No length limit applies: a long single ` +
+      "title passes filing, and whether it resolves is judged when the build runs the proof.",
   );
   lines.push("");
   lines.push("## Verdict -> exit code (`rmd check-proof`, `CHECK_PROOF_EXIT`)");

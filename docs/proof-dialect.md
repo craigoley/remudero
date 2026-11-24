@@ -82,7 +82,7 @@ Refusals:
 
 ## Scenario-narrative bounds (`SCENARIO_NARRATIVE_BOUNDS`)
 
-A `unit test:` body reads as a multi-clause SCENARIO NARRATIVE, not a single test's title, and is refused by `proof-resolvability` (`looksLikeScenarioNarrative`, src/lib/task-linter.ts), when it is over 100 characters, or carries 2+ commas, or carries `"; "` plus 1+ comma(s).
+A `unit test:` body reads as a multi-clause SCENARIO NARRATIVE, not a single test's title, and is refused by `proof-resolvability` (`looksLikeScenarioNarrative`, src/lib/task-linter.ts), when it carries 2+ commas, or carries `"; "` plus 1+ comma(s). No length limit applies: a long single title passes filing, and whether it resolves is judged when the build runs the proof.
 
 ## Verdict -> exit code (`rmd check-proof`, `CHECK_PROOF_EXIT`)
 
