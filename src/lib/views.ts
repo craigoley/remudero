@@ -263,6 +263,8 @@ export interface ViewBodySource {
   autoMode?(view: string): EffectiveViewMode | undefined;
   /** The current producer's required shadow qualification, independent of any warm body's provenance. */
   qualificationGeneration?(view: string): string | undefined;
+  /** Posts a read of `path` to the worker, so the views it reads keep their cadence (read-model-worker.ts viewsReadBy). */
+  noteViewRead?(path: string, instance?: string): void;
 }
 
 /** `auto` serves exactly while the view's shadow readiness reads ready, and is `shadow` otherwise. */
@@ -464,6 +466,8 @@ export function buildReadModelViewRoutes(opts: ReadModelViewRoutesOptions): Rout
       if (typeof reads === "string") return refuse(reads);
       const answers = await Promise.all(reads.map(async (read) => {
         const params = new URLSearchParams(read.params);
+        // W1-T12270: serve notes the batch's own path, which names no view; each read in it is a read of its view.
+        opts.readModel?.noteViewRead?.(`/v1/views/${read.view}`, params.get("instance") ?? undefined);
         const { shadowSampled: sampled, answer } = answerRead(read.view, params, read.ifNoneMatch);
         const got = await answer;
         if (sampled && opts.shadow) opts.shadow(read.view, viewKey(params), params);
