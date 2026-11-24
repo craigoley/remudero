@@ -6131,7 +6131,8 @@ export async function runDaemon(
   let freshnessDecidedAtMs: number | undefined;
   // W1-T12231: the last score's change weight and stale reading, used with the current stall share to predict release.
   let freshnessOutlook: { weight: number; staleSinceMs: number } | undefined;
-  const freshnessPhases: { decision_to_latch?: number; lanes?: number; pre_exit_pass?: number; drain?: number } = {};
+  const freshnessPhases: { decision_to_latch?: number; lanes?: number; pre_exit_pass?: number; drain?: number;
+    settle?: Record<string, number | Record<string, number>> } = {};
   const decideFreshness = (freshness: Extract<DaemonFreshness, { stale: true }>, lanes: readonly (string | undefined)[] = []): "restart" | "defer" => {
     const nowMs = daemonClock.now();
     observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs, freshness.changes);
@@ -10121,6 +10122,15 @@ export async function runDaemon(
       });
     }, refillLane, lanes, admitAtStart, onStarted, poolControl);
     let poolOutcome: LanePoolOutcome<Task, RunResult>;
+    // W1-T14684: from the pool's settle to a decided restart's exit, each step's time is named in the exit's phases_ms.
+    let settleMarkMs = daemonClock.now();
+    const settleParts: Record<string, number> = {};
+    const settleProcess: Record<string, number> = {};
+    const markSettle = (part: string): void => {
+      const atMs = daemonClock.now();
+      settleParts[part] = (settleParts[part] ?? 0) + Math.max(0, atMs - settleMarkMs);
+      settleMarkMs = atMs;
+    };
     try {
       let phase = "dispatch.concurrent_set";
       try {
@@ -10142,6 +10152,7 @@ export async function runDaemon(
       } finally {
         // Even a phase-level logging failure cannot abandon promises the pool already owns.
         poolOutcome = await admittedWork;
+        settleMarkMs = daemonClock.now();
         // W1-T11129: the pool's last lane, and any a fault or detach retired, never reaches refillLane: close its interval.
         // Never throws: readLaneCpu reads an unreadable or throwing counter as unread, and the rest is pure.
         laneCpuTransition(() => { for (const task of admitted) laneCpuBuilds.delete(task.id); });
@@ -10151,17 +10162,20 @@ export async function runDaemon(
         const abandoning = [...pendingChildren.values()];
         pendingChildren.clear();
         await Promise.allSettled(abandoning.map((pending) => pending.abort()));
+        markSettle("abandon_pending");
       }
       try { log("dispatch.settled_set", settledSetPayload(admitted, poolOutcome.settled, laneCount)); }
       catch (reason) { phaseFaults.push({ phase: "dispatch.settled_set", reason: reason }); }
     } finally {
       repositoryMaintenanceQueueBusy = false;
       await stopTicker();
+      markSettle("stop_ticker");
     }
     const reporting = createSettlementReporting();
     try {
     const settled = poolOutcome.settled;
     await flushLifetimePressure(reporting.report);
+    markSettle("lifetime_pressure");
     if (!childMode || !restartDecided) restartInterphaseReviewClock();
     if (admitted.length === 0 && newBuildHeld && poolOutcome.fault === undefined && phaseFaults.length === 0) {
       // Persistent hold is an in-process, paced NEW-build deferral, never a failure/STOP.
@@ -10309,6 +10323,7 @@ export async function runDaemon(
       laneDeliveryParks.delete(t.id); // W1-T5344: a settled run ends this task's delivery-failure streak
       toProcess.push({ task: t, result, snapshot: snapshots[i] });
     }
+    markSettle("classify");
     if (poolOutcome.fault !== undefined) {
       const { task, lane, phase, reason } = poolOutcome.fault;
       try { log("dispatch.pool_failed", { task: task.id, lane, phase, error: String((reason as Error)?.message ?? reason) }); }
@@ -10343,7 +10358,10 @@ export async function runDaemon(
       const apiWindowDisposition = reasonAboutApiWindow(apiWindowHoldState, task.id, result.verdict, pollIntervalMs, maxApiWindowHoldMs);
       apiWindowHoldState = apiWindowDisposition.state;
       apiWindowHoldMs = apiWindowDisposition.holdMs;
+      const processStartedAtMs = settleMarkMs;
       const outcome = await processDispatchResult(snapshot.plan, task, result, snapshot.isMerged, reporting.report);
+      markSettle("process");
+      settleProcess[task.id] = (settleProcess[task.id] ?? 0) + Math.max(0, settleMarkMs - processStartedAtMs);
       batchChildren.get(task)?.acknowledge?.({ status: "fulfilled", value: result });
       if (outcome.kind === "genuine_blocker") {
         if (deps.isOpenPr === undefined || deps.isCreditIndeterminate === undefined) {
@@ -10361,6 +10379,7 @@ export async function runDaemon(
       }
     }
     await settleClaimStall();
+    markSettle("claim_stall");
     if (fatalError || phaseFaults.length > 0 || reporting.faults.length > 0) {
       // A pool fault closes starts, but genuine workers still earn their result/cost/merge credit.
       // Preserve original classification/detail; named logging faults remain separate secondary facts.
@@ -10378,6 +10397,8 @@ export async function runDaemon(
 
     if (restartDecided && !deps.checkStop?.() && !deps.checkPause?.()) {
       await stopInterphaseReviewClock();
+      markSettle("interphase_stop");
+      freshnessPhases.settle = { ...settleParts, process_by_task: { ...settleProcess } };
       return stopForFreshness(restartDecided, restartWait.decidedAtMs);
     }
     restartWindow = undefined;
