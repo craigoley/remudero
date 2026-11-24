@@ -6,7 +6,8 @@ import { checkoutHeadStamp } from "./checkout-head.js";
 import { bodyCreditedMergeTimes, ciFrictionRecordVerdict, ciFrictionRecencyWeight, gitCiFrictionOwnerSearch, type CiFrictionPlanState } from "./ci-friction-gardener.js";
 import { CI_FRICTION_EFFECT_MAX_WINDOW_MS, CI_FRICTION_ESCALATE_RUNG, type CiFrictionRemedyTask, type OwnerSearch, type RemedyEffect } from "./ci-friction-remedy.js";
 import type { Escalation } from "./escalate.js";
-import { measureRemedy, prHoursMetric } from "./remedy-effect.js";
+import { rowPrNumber } from "./fix-progress-judge.js";
+import { measureRemedy, prHoursMetric, REMEDY_WIDENED_BEFORE_WINDOW_MS } from "./remedy-effect.js";
 import { slug } from "./feedback-docket.js";
 import { prepareGardenTaskIds, gardenLedgerBucket, type GardenTaskIdMinter, type GardenAction, type GardenCheckout, type GardenerDeps, type GardenSpec } from "./gardener.js";
 import { ghExec } from "./github-transport.js";
@@ -23,11 +24,15 @@ import { feedbackContentDigest } from "./contributor-admission.js";
 
 export interface PrOutcome { state: "open" | "closed" | "merged"; at?: string; mergedBy?: string }
 export interface Charge { pr: number; key: string; start: number; end: number; hours: number; reason: string; owner: string; handedOff?: boolean }
+type EligibilityArm = "unowned" | "failed" | "past p90" | "open own-red" | "CI hand-off";
+const FLOW_ROUND_STEPS = new Set(["fix.dispatch", "sweep.review_admitted", "review.posted"]);
+
 export interface Episode {
   pr: number; key: string; owner: string; start: number; end: number;
   outcome: "open" | "cleared" | "failed" | "unknown"; eligible: boolean;
   charges: Charge[];
   handedOff?: boolean;
+  flow?: { ownerActed: boolean; waitOnly: boolean; eligibilityArm?: EligibilityArm };
 }
 export interface Price { key: string; hours: number; prs: number; owners: string[]; thresholdHours?: number }
 export interface Prior { task: CiFrictionRemedyTask; effect?: RemedyEffect }
@@ -35,6 +40,7 @@ export interface FlowAction extends GardenAction<"draft"> {
   price: Price; origin: string; rung: number; prior?: Prior; escalation?: string;
   charges: Charge[]; population: number[];
   admissionShadow?: boolean;
+  eligibilityCounts?: Record<EligibilityArm, number>;
 }
 export interface Inventory {
   charges: Charge[]; episodes: Episode[]; priced: Price[]; candidates: Price[];
@@ -94,7 +100,11 @@ export const FLOW_LADDER: LadderKind = {
   title: a => `THE FLOW GARDENER'S COSTLIEST UNOWNED BLOCKER — ${a.price.key} cost ${a.price.hours.toFixed(2)} PR-hours`,
   commitTitle: cause => `chore(plan): draft a flow remedy for ${cause}`,
   claim: cause => `${flowCauseLabel(cause)} is cleared by its owner without manual intervention`,
-  ownerLine: a => `Owner ${a.price.owners.includes("NONE") ? "NONE is absent" : a.price.owners.join(", ") + " failed to clear eligible episodes"}.`,
+  ownerLine: a => {
+    const owner = a.price.owners.includes("NONE") ? "NONE is absent" : a.price.owners.join(", ") + " failed to clear eligible episodes";
+    const counts = Object.entries(a.eligibilityCounts ?? {}).map(([arm, count]) => `${arm} ${count}`).join(", ");
+    return `Owner ${owner}.${counts ? ` Eligible episodes by arm: ${counts}.` : ""}`;
+  },
   evidenceLine: (pr, hours, reason) => `- PR #${pr}: ${hours.toFixed(2)} PR-hours — ${reason}`,
   escalationSummary: cause => `Flow blocker: ${cause} still costs PR-hours`,
   declaredOwners: true,
@@ -289,9 +299,45 @@ function handedOffChecks(records: readonly LedgerRecord[]): Map<number, { gate: 
   return byPr;
 }
 
-export function episodesOf(records: readonly LedgerRecord[], outcomes: ReadonlyMap<number, PrOutcome>, now: number): Episode[] {
+function flowEpisodeEvidence(records: readonly LedgerRecord[], now: number) {
+  const rounds = new Map<number, number[]>();
+  const terminals = new Map<number, PrOutcome>();
+  for (const row of records) {
+    if (row.step === undefined || (row.step !== PR_TERMINAL_STEP && !FLOW_ROUND_STEPS.has(row.step))) continue;
+    const pr = rowPrNumber(row);
+    if (pr === undefined || !Number.isSafeInteger(pr) || pr <= 0) continue;
+    if (row.step === PR_TERMINAL_STEP) {
+      if (row.state !== "closed" && row.state !== "merged") continue;
+      const at = row.state === "merged" ? row.merged_at : row.closed_at;
+      const previous = terminals.get(pr);
+      if (typeof at === "string" && Date.parse(at) <= now && (!previous || Date.parse(at) >= Date.parse(previous.at!))) {
+        terminals.set(pr, { state: row.state, at });
+      }
+    } else {
+      if (row.step === "review.posted" &&
+        (row.status_recovered === true || row.status_confirmed === true || row.review_source === "github-comment")) continue;
+      const at = Date.parse(row.ts ?? "");
+      if (Number.isFinite(at) && at <= now) {
+        const times = rounds.get(pr) ?? [];
+        times.push(at);
+        rounds.set(pr, times);
+      }
+    }
+  }
+  return { rounds, terminals };
+}
+
+function flowTerminal(ledger: PrOutcome | undefined, current: PrOutcome | undefined): PrOutcome | undefined {
+  // An open PR can have an earlier close receipt from before it was reopened.
+  if (!ledger || current?.state === "open" || (current && current.state !== ledger.state)) return current;
+  return { ...current, ...ledger };
+}
+
+/** The ordinary flow ladder joins owner actions and terminal cutoffs. The fix-lane ladder uses the observed pass gaps. */
+export function episodesOf(records: readonly LedgerRecord[], outcomes: ReadonlyMap<number, PrOutcome>, now: number, forFlowRemedy = false): Episode[] {
   const byPr = new Map<number, LedgerRecord[]>();
   const handoffs = handedOffChecks(records);
+  const evidence = forFlowRemedy ? flowEpisodeEvidence(records, now) : undefined;
   for (const r of records) {
     if (r.step !== "sweep.disposed" || !Number.isSafeInteger(r.pr_number) || Number(r.pr_number) <= 0 ||
         !PR_BLOCKERS.includes(r.blocker as PrBlocker) || typeof r.ts !== "string" || !Number.isFinite(Date.parse(r.ts)) ||
@@ -304,16 +350,31 @@ export function episodesOf(records: readonly LedgerRecord[], outcomes: ReadonlyM
   const episodes: Episode[] = [];
   for (const [pr, observations] of byPr) {
     const rows = [...new Map(observations.sort((a, b) => Date.parse(a.ts!) - Date.parse(b.ts!)).map(r => [r.ts!, r])).values()];
+    const terminal = forFlowRemedy ? flowTerminal(evidence?.terminals.get(pr), outcomes.get(pr)) : outcomes.get(pr);
+    const terminalAt = Date.parse(terminal?.at ?? "");
+    const cutoff = forFlowRemedy && terminal?.state !== "open" && Number.isFinite(terminalAt) ? terminalAt : Infinity;
+    const actions = evidence ? [
+      ...(evidence.rounds.get(pr) ?? []),
+      ...observations.filter(row => row.acted === true).map(row => Date.parse(row.ts!)),
+    ] : [];
+    const actedDuring = (from: number, to: number) => actions.some(at => at >= from && at < to);
     let episode: Episode | undefined;
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i]!;
       const start = Date.parse(r.ts!);
+      if (start >= cutoff) break;
       const key = `${r.blocker}:${reasonClass(String(r.reason))}`;
       if (!episode || episode.key !== key || episode.owner !== r.blocker_owner) {
-        if (episode) { episode.outcome = "cleared"; episode.end = start; }
+        if (episode) {
+          episode.outcome = "cleared";
+          episode.end = start;
+          if (episode.flow) episode.flow.ownerActed = actedDuring(episode.start, start);
+        }
         episode = { pr, key, owner: String(r.blocker_owner), start, end: start, outcome: "open", eligible: false, charges: [] };
+        if (forFlowRemedy) episode.flow = { ownerActed: false, waitOnly: true };
         episodes.push(episode);
       }
+      if (episode.flow) episode.flow.waitOnly &&= r.disposition === "wait";
       // Join the evidence on the PR: the row is the handed check's when it names that check, or when it was written at a
       // head where the check read red. Sweep gives one aggregate reason for most red rollups and names no check in it.
       const named = redChecksOf(r);
@@ -321,17 +382,16 @@ export function episodesOf(records: readonly LedgerRecord[], outcomes: ReadonlyM
       if (handed) episode.handedOff = true;
       const next = rows[i + 1];
       if (next) {
-        const end = Date.parse(next.ts!);
+        const end = Math.min(Date.parse(next.ts!), cutoff);
         episode.end = end;
         episode.charges.push({ pr, key, start, end, hours: (end - start) / 3_600_000, reason: String(r.reason), owner: episode.owner,
           ...(handed ? { handedOff: true } : {}) });
       }
     }
     if (!episode) continue;
-    const terminal = outcomes.get(pr);
+    if (episode.flow) episode.flow.ownerActed = actedDuring(episode.start, cutoff);
     if (terminal && terminal.state !== "open") {
-      const at = Date.parse(terminal.at ?? "");
-      episode.end = Number.isFinite(at) ? Math.max(episode.end, at) : episode.end;
+      episode.end = Number.isFinite(terminalAt) ? Math.max(episode.end, terminalAt) : episode.end;
       episode.outcome = terminal.state === "closed" ? "failed" : terminal.mergedBy === undefined ? "unknown" : isFleet(terminal.mergedBy) ? "cleared" : "failed";
     }
   }
@@ -354,6 +414,10 @@ function priceEpisodes(episodes: readonly Episode[], now: number): Price[] {
 /** W1-T12548: an open own-red episode older than this is eligible whatever the p90 of cleared ones is. */
 export const FLOW_OWN_RED_OPEN_AGE_MS = 60 * 60_000;
 
+function excludedFromFlowRemedy(e: Episode): boolean {
+  return e.flow !== undefined && (e.flow.ownerActed || e.flow.waitOnly || e.key.startsWith("held-draft:"));
+}
+
 /** Marks which episodes are worth a remedy: no owner, a failed end, an open wait past the p90 of cleared ones,
  *  or an own-red episode open past {@link FLOW_OWN_RED_OPEN_AGE_MS}. */
 export function markEligibility(episodes: Episode[], now: number): Map<string, number> {
@@ -365,16 +429,21 @@ export function markEligibility(episodes: Episode[], now: number): Map<string, n
   }
   for (const e of episodes) {
     const threshold = thresholds.get(e.key);
-    e.eligible = e.owner === "NONE" || e.outcome === "failed" ||
-      (e.outcome === "open" && threshold !== undefined && (now - e.start) / 3_600_000 > threshold) ||
-      (e.outcome === "open" && e.key.startsWith("own-red:") && now - e.start > FLOW_OWN_RED_OPEN_AGE_MS);
+    const arm = excludedFromFlowRemedy(e) ? undefined
+      : e.owner === "NONE" ? "unowned"
+      : e.outcome === "failed" ? "failed"
+      : e.outcome === "open" && threshold !== undefined && (now - e.start) / 3_600_000 > threshold ? "past p90"
+      : e.outcome === "open" && e.key.startsWith("own-red:") && now - e.start > FLOW_OWN_RED_OPEN_AGE_MS ? "open own-red"
+      : undefined;
+    e.eligible = arm !== undefined;
+    if (e.flow) e.flow.eligibilityArm = arm;
   }
   return thresholds;
 }
 
 function inventoryOf(records: readonly LedgerRecord[], tasks: readonly CiFrictionRemedyTask[], outcomes: ReadonlyMap<number, PrOutcome>,
   now: number, fileable?: LadderFileable): Inventory {
-  const episodes = episodesOf(records, outcomes, now);
+  const episodes = episodesOf(records, outcomes, now, true);
   const thresholds = markEligibility(episodes, now);
   return ladderOf(FLOW_LADDER, episodes, records, tasks, now, thresholds, fileable);
 }
@@ -382,9 +451,16 @@ function inventoryOf(records: readonly LedgerRecord[], tasks: readonly CiFrictio
 /** What an episode puts up for a remedy: all of an eligible episode, else only the charges a CI-lesson hand-off names
  *  (W1-T14140). One aggregate-red episode can span heads where different checks read red; the hand-off owns only its own. */
 function eligibleSlice(e: Episode): Episode[] {
+  if (excludedFromFlowRemedy(e)) return [];
   if (e.eligible) return [e];
   const handed = e.charges.filter(c => c.handedOff);
   return handed.length ? [{ ...e, charges: handed }] : [];
+}
+
+function flowEligibilityCounts(episodes: readonly Episode[]): Record<EligibilityArm, number> {
+  const counts = { unowned: 0, failed: 0, "past p90": 0, "open own-red": 0, "CI hand-off": 0 };
+  for (const episode of episodes) counts[episode.flow?.eligibilityArm ?? "CI hand-off"]++;
+  return counts;
 }
 
 /**
@@ -399,7 +475,11 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
   const charges = episodes.flatMap(e => e.charges);
   const priced = priceEpisodes(episodes, now);
   const eligible = episodes.flatMap(eligibleSlice);
-  const candidates = priceEpisodes(eligible, now).map(p => ({ ...p, thresholdHours: thresholds.get(p.key) }));
+  const ordinaryFlow = kind.prefix === FLOW_LADDER.prefix;
+  const recentCauses = ordinaryFlow ? new Set(eligible.flatMap(e => e.charges)
+    .filter(c => Math.min(c.end, now) > Math.max(c.start, now - REMEDY_WIDENED_BEFORE_WINDOW_MS)).map(c => c.key)) : undefined;
+  const candidates = priceEpisodes(eligible, now).filter(p => recentCauses === undefined || recentCauses.has(p.key))
+    .map(p => ({ ...p, thresholdHours: thresholds.get(p.key) }));
   const ladder: Inventory["ladder"] = [];
   let next: FlowAction | undefined;
   // A filing PR the sweep recorded closed unmerged (`pr.terminal`, W1-T5318) holds nothing: its cause drafts again.
@@ -444,9 +524,11 @@ export function ladderOf(kind: LadderKind, episodes: Episode[], records: readonl
     if (receipts.has(origin) && !mine.some(t => t.origin === origin)) state = "in_progress";
     if (escalated.has(origin)) state = "escalated";
     if (state === "draft" && rung >= (kind.shadowAdmission ? 2 : CI_FRICTION_ESCALATE_RUNG)) state = "escalate";
-    const action: FlowAction | undefined = !next && (state === "draft" || state === "escalate") ? {
+    const causeEpisodes = !next && (state === "draft" || state === "escalate") ? eligible.filter(e => e.key === price.key) : undefined;
+    const action: FlowAction | undefined = causeEpisodes ? {
       class: "draft", target: origin, origin, rung, price, prior,
-      charges: eligible.filter(e => e.key === price.key).flatMap(e => e.charges),
+      charges: causeEpisodes.flatMap(e => e.charges),
+      ...(ordinaryFlow ? { eligibilityCounts: flowEligibilityCounts(causeEpisodes) } : {}),
       population: candidates.map(p => p.hours), reason: `${price.key} cost ${price.hours.toFixed(2)} PR-hours; owner ${price.owners.join(", ")}`,
       ...(state === "escalate" ? { escalation: unverifiable ?? `${rung - 1} remedy rungs did not reduce the share of PR-hours` } : {}) } : undefined;
     const skipped = action && state === "draft" ? fileable?.(action) : undefined;
@@ -634,11 +716,12 @@ export function ladderGardenSpec(deps: GardenerDeps, input: LadderSpecInput): Ga
 export function flowGardenSpec(deps: GardenerDeps, sources: FlowGardenSources): GardenSpec<"draft", Inventory, FlowAction, GardenCheckout> {
   const clock = deps.clock ?? systemClock;
   const inventory = (fileable?: LadderFileable): Inventory => {
-    const records = sources.ledgerRecords ? sources.ledgerRecords() : readLadderRecords(deps.stateDir, FLOW_LADDER, ["sweep.disposed", CI_LESSON_HANDOFF_STEP]);
+    const records = sources.ledgerRecords ? sources.ledgerRecords()
+      : readLadderRecords(deps.stateDir, FLOW_LADDER, ["sweep.disposed", CI_LESSON_HANDOFF_STEP, ...FLOW_ROUND_STEPS]);
     const plan = sources.planState ? sources.planState() : readLadderPlan(deps.repoRoot, FLOW_LADDER);
     if (plan.degraded) deps.log("flow.origins_degraded", { reason: plan.degraded });
     if (plan.unreadable?.length) throw new Error(`flow plan shards unreadable: ${plan.unreadable.join(", ")}`);
-    const prs = [...new Set(episodesOf(records, new Map(), clock.now()).filter(e => e.outcome === "open" && e.owner !== "NONE").map(e => e.pr))];
+    const prs = [...new Set(episodesOf(records, new Map(), clock.now()).filter(e => e.outcome === "open").map(e => e.pr))];
     const outcomes = sources.prOutcomes ? sources.prOutcomes(prs) : readOutcomes(prs, sources);
     return inventoryOf(records, plan.tasks, outcomes, clock.now(), fileable);
   };
