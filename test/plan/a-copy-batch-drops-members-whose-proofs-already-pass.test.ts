@@ -115,6 +115,15 @@ test("W1-T14592 criterion 2: the member-dropping row and every preflight_refused
     assert.equal(refused!.outcome, "preflight_refused");
     assert.deepEqual(refused!.failures as Json[], [{ check: "lint-plan", first_lines: ["lint-plan-precheck: W1-T2 REFUSES"] }]);
   });
+
+  await t.test("a check that could not run is named with what it printed", async st => {
+    const v = world(st);
+    const unreadable = { check: "task-id-existence" as const, firstLine: "task-id-existence: FAILED -- could not read declared plan ids at base" };
+    await v.run(true, { preflight: async () => ({ ok: false, failures: [{ check: "lint-plan", firstLine: "REFUSES" }], unreadable: [unreadable] }) });
+    const [refused] = copyRows(v);
+    assert.deepEqual(refused!.preflight_unreadable, ["task-id-existence"]);
+    assert.deepEqual(refused!.unreadable_lines, [{ check: "task-id-existence", first_line: unreadable.firstLine }]);
+  });
 });
 
 test("W1-T14592 criterion 3: invariant:preflight-unchanged — the pushed copy is the commit the preflight last admitted, and any other refusal stands down after one preflight as before", async t => {

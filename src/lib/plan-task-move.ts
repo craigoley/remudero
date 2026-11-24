@@ -350,6 +350,8 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
       // A preflight check that could not run is reported, never refusing (the emitter's rule); the row names it.
       const row = (outcome: string, extra: Json = {}) => ports.ledger({ run_id: branch, task_id: lead.id, step: MOVE_STEP, move_step: planned.step, outcome,
         repository, public_commit: o.publicCommit, ops_commit: o.opsCommit, commit, preflight_unreadable: verdict.unreadable.map(f => f.check),
+        // W1-T14592: what each unreadable check printed, so the row names why it could not run.
+        ...(verdict.unreadable.length > 0 ? { unreadable_lines: verdict.unreadable.map(f => ({ check: f.check, first_line: f.firstLine })) } : {}),
         ...(batched ? { task_ids: ids.ids } : {}), ...(refusals.length > 0 ? { failures: refusals } : {}), ...(dropped.length > 0 ? { dropped } : {}), ...extra });
       if (!allowed) {
         // W1-T14592: a copy refused ONLY because some members' proofs already pass on core drops exactly those members
