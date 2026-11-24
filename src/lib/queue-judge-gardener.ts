@@ -204,6 +204,8 @@ export interface QueueJudgeSources {
   judgeText: (prompt: string) => Promise<string>;
   /** Tasks with a run in flight and the files they declare, for the file-overlap holder. */
   inFlight?: (rows: readonly Row[]) => ReadonlyMap<string, readonly string[]>;
+  /** Closes an escalation issue the judge opened and its corrected rule no longer holds; absent, the issue stays open. */
+  closeIssue?: (url: string, comment: string) => void | Promise<void>;
 }
 
 const newestFirst = (rows: readonly Row[]): Row[] => [...rows].sort((a, b) => Date.parse(String(b.ts)) - Date.parse(String(a.ts)));
@@ -808,7 +810,7 @@ function pinEscalation(a: QueueJudgeAction, floor: boolean): Escalation {
   };
 }
 
-export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick<GardenerDeps, "log" | "escalate" | "closeIssue">): Promise<QueueJudgeInventory> {
+export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick<GardenerDeps, "log" | "escalate">): Promise<QueueJudgeInventory> {
   const plan = sources.plan();
   if (plan.open.length === 0) return emptyInventory("empty-queue", 0);
   const now = sources.clock.date();
@@ -913,11 +915,11 @@ export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick
   for (const a of shadowed) deps.log(QUEUE_JUDGE_PREDICTION_STEP, predictionRow(a, bound, undefined, true));
 
   // 5a. An open floor escalation the corrected rule admits is closed by the judge that opened it.
-  if (deps.closeIssue) {
+  if (sources.closeIssue) {
     for (const r of admittedFloorEscalations(own, packs)) {
       const url = String(r.issue_url);
       try {
-        await deps.closeIssue(url, `The queue judge's smallest-pin floor holds only a proposal that makes a task more urgent than it is; ${String(r.task_id)} ${String(r.from)} -> ${String(r.to)} lowers its urgency, so the judge now judges it as a lower. Closing automatically.`);
+        await sources.closeIssue(url, `The queue judge's smallest-pin floor holds only a proposal that makes a task more urgent than it is; ${String(r.task_id)} ${String(r.from)} -> ${String(r.to)} lowers its urgency, so the judge now judges it as a lower. Closing automatically.`);
         deps.log(ESCALATION_CLOSED_STEP, { task_id: r.task_id, from: r.from, to: r.to, issue_url: url, reason: "the corrected floor rule admits a lower" });
       } catch (e) {
         deps.log(ESCALATION_CLOSE_FAILED_STEP, { task_id: r.task_id, issue_url: url, error: String((e as Error)?.message ?? e) });
@@ -1023,6 +1025,14 @@ export function buildQueueJudgeSources(deps: GardenerDeps, overrides: Partial<Qu
     credited: () => creditedCount(deps.stateDir),
     judgeText: () => Promise.reject(new Error("the queue judge's spawn is not wired")),
     promptWindow: () => ({ tokens: undefined, reason: "the queue judge's route window is not wired" }),
+    // The escalation issues port's close (escalate.ts), resolved lazily so the owner/repo read happens only when an issue closes.
+    closeIssue: async (url, comment) => {
+      const [{ ghIssueGatewayAsync }, { resolveOwnerRepoAtAsync }] = await Promise.all([import("./escalate.js"), import("./owner-repo.js")]);
+      const { owner, repo } = await resolveOwnerRepoAtAsync(deps.repoRoot);
+      const issues = ghIssueGatewayAsync(owner, repo);
+      if (!issues.closeWithComment) throw new Error("issue gateway cannot close issues");
+      await issues.closeWithComment(url, comment);
+    },
     ...overrides,
   };
   return sources;
