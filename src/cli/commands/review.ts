@@ -52,7 +52,9 @@ import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "../../lib
 import { readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest } from "../../lib/sweep.js";
 import { REVIEW_RUN_SETTLED_STEPS } from "../../lib/sweep.js";
 import { ghJson, renderWorkerSettings, cashDivertSpawnFields, spawnWorker, workerLedgerFields, workerTranscript, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment, WorkerAbandonedError, worktreeRemoveAsync } from "../../lib/worker.js";
-import { hostWorktreeGit } from "../../lib/worktree-git.js";
+import { hostWorktreeGit, hostWorktreeGitAsync } from "../../lib/worktree-git.js";
+// @ts-expect-error a plain .mjs script with no declaration file, as src/lib/merged-ratchet-verdict.ts imports its siblings.
+import { PROOF_DISCRIMINATION_JOB, PROOF_DISCRIMINATION_WORKFLOW, RESULT_FORMAT, RESULT_MARKER, bodyDigest, discriminationProofs, proofDiscriminationDigests } from "../../../scripts/proof-discrimination-gate.mjs";
 import { releaseReviewWorktree } from "../../lib/review-worktree-reclaim.js";
 import { step } from "../../lib/git-push.js";
 import { acquireDrainLock, type DrainLockHandle } from "../../lib/drain-lock.js";
@@ -785,6 +787,148 @@ export async function reviewHostedCiFileEvidence(
   }
 }
 
+// ── W1-T11157: CI'S PROOF-DISCRIMINATION RECORD, COMPARED IN SHADOW ───────────────────────────────────────────────
+// Operator trust decision 2026-11-03: the record is authenticated only as the log of a successful GitHub Actions job of
+// the proof-discrimination workflow at this exact head, read through the App gateway; the executor is the gate's import
+// closure plus its toolchain inputs and workflow (scripts/proof-discrimination-gate.mjs computes it for both sides); and
+// a hosted outcome counts toward no verdict. The review still runs every proof and only ledgers agreement.
+
+/** One row per review that ran proofs at a head checkout: per-proof agreement, or why the record was not eligible. */
+export const PROOF_REUSE_SHADOW_STEP = "review.proof_reuse_shadow";
+
+interface HostedProofOutcome { proof: string; head: string; base: string; verdict: string }
+interface ProofDiscriminationRecord {
+  format?: string; head_sha?: string; base_sha?: string; body_digest?: string; criteria_source?: string;
+  executor_digest?: string | null; workflow_digest?: string | null; too_large?: boolean; proofs?: HostedProofOutcome[];
+}
+export type ProofDiscriminationRecordRead =
+  | { kind: "record"; record: ProofDiscriminationRecord; runId: number; jobId: number }
+  | { kind: "ineligible"; reason: string };
+interface ProofRecordIo {
+  json: (args: string[]) => Promise<unknown>;
+  lines: (args: string[], onLine: (line: string) => void) => Promise<void>;
+}
+
+const WORKFLOW_PATH: string = PROOF_DISCRIMINATION_WORKFLOW;
+
+/** The record for `headSha`: the latest successful pull_request run of the workflow at that head, its successful
+ *  proof-discrimination job, and the one record line in that job's log. Three App-gateway reads. */
+export async function readProofDiscriminationRecord(
+  target: { owner: string; repo: string; headSha: string },
+  io: ProofRecordIo = { json: ghJsonAsync, lines: ghLinesAsync },
+): Promise<ProofDiscriminationRecordRead> {
+  const repoPath = `repos/${target.owner}/${target.repo}`;
+  const workflowFile = WORKFLOW_PATH.slice(WORKFLOW_PATH.lastIndexOf("/") + 1);
+  const listed = await io.json(["api", `${repoPath}/actions/workflows/${workflowFile}/runs?head_sha=${target.headSha}&status=success&per_page=20`]) as
+    { workflow_runs?: Array<{ id?: unknown; head_sha?: unknown; path?: unknown; conclusion?: unknown; event?: unknown }> } | undefined;
+  const runIds = (listed?.workflow_runs ?? []).filter(run => typeof run.id === "number" && run.head_sha === target.headSha &&
+    run.conclusion === "success" && run.event === "pull_request" &&
+    (run.path === WORKFLOW_PATH || String(run.path).startsWith(`${WORKFLOW_PATH}@`))).map(run => run.id as number);
+  if (runIds.length === 0) return { kind: "ineligible", reason: "no successful proof-discrimination run at this head" };
+  const runId = Math.max(...runIds);
+  const listedJobs = await io.json(["api", `${repoPath}/actions/runs/${runId}/jobs?per_page=50`]) as
+    { jobs?: Array<{ id?: unknown; name?: unknown; head_sha?: unknown; conclusion?: unknown; run_id?: unknown }> } | undefined;
+  const job = (listedJobs?.jobs ?? []).find(entry => typeof entry.id === "number" && entry.name === PROOF_DISCRIMINATION_JOB &&
+    entry.head_sha === target.headSha && entry.conclusion === "success" && entry.run_id === runId);
+  if (job === undefined) return { kind: "ineligible", reason: `run ${runId} has no successful ${PROOF_DISCRIMINATION_JOB} job at this head` };
+  const jobId = job.id as number;
+  const recordLines: string[] = [];
+  await io.lines(["api", `${repoPath}/actions/jobs/${jobId}/logs`], line => {
+    const text = line.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z ?/, "").replace(/\r$/, "");
+    if (text.startsWith(RESULT_MARKER)) recordLines.push(text.slice(RESULT_MARKER.length));
+  });
+  if (recordLines.length !== 1) {
+    return { kind: "ineligible", reason: `job ${jobId} published ${recordLines.length} result records, not one` };
+  }
+  let record: ProofDiscriminationRecord;
+  try {
+    record = JSON.parse(recordLines[0]!) as ProofDiscriminationRecord;
+  } catch (error) {
+    return { kind: "ineligible", reason: `result record unreadable: ${String(error).slice(0, 200)}` };
+  }
+  if (record?.format !== RESULT_FORMAT) return { kind: "ineligible", reason: `result record format ${String(record?.format)} is not ${RESULT_FORMAT}` };
+  return { kind: "record", record, runId, jobId };
+}
+
+/** Every path a unified diff names, both sides of a rename or copy included. */
+export function diffTouchedPaths(diff: string): string[] {
+  const paths = new Set<string>();
+  for (const line of diff.split("\n")) {
+    const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
+    if (header) {
+      paths.add(header[1]!);
+      paths.add(header[2]!);
+      continue;
+    }
+    const moved = /^(?:rename|copy) (?:from|to) (.+)$/.exec(line);
+    if (moved) paths.add(moved[1]!);
+  }
+  return [...paths];
+}
+
+/** check-proof's verdict names as the host's proof outcomes; an unmapped verdict never agrees. */
+const HOSTED_VERDICT_AS_HOST: Readonly<Record<string, CriterionVerdict["proof_exec"]>> = {
+  pass: "executed_pass", fail: "executed_fail", executed_stale: "executed_stale",
+};
+
+async function trackedPathsAsync(dir: string): Promise<string[]> {
+  return (await hostWorktreeGitAsync(dir, ["ls-files", "-z"], { maxBuffer: 1 << 26 })).split("\0").filter(Boolean);
+}
+
+interface ProofReuseShadowInput {
+  prUrl: string; headSha: string; diff: string; body: string | undefined; criteria: readonly AcceptanceCriterion[];
+  headCheckoutDir: string; hostCriteria: readonly Pick<CriterionVerdict, "proof" | "proof_exec">[]; hostProofMs: number;
+  listTracked?: (dir: string) => Promise<string[]>;
+}
+
+/** The {@link PROOF_REUSE_SHADOW_STEP} row for one review. Reads the head checkout only and never throws: the verdict
+ *  is already built and this row is all it produces. `would_save_ms` is the host proof time an eligible reuse skips. */
+export async function proofReuseShadowRow(read: ProofDiscriminationRecordRead, input: ProofReuseShadowInput): Promise<Record<string, unknown>> {
+  try {
+    return await compareProofReuse(read, input);
+  } catch (error) {
+    return { pr_url: input.prUrl, head_sha: input.headSha, host_proof_ms: input.hostProofMs, eligible: false, would_save_ms: 0,
+      reason: `shadow comparison failed: ${String((error as Error)?.message ?? error).slice(0, 300)}` };
+  }
+}
+
+async function compareProofReuse(read: ProofDiscriminationRecordRead, input: ProofReuseShadowInput): Promise<Record<string, unknown>> {
+  const row = { pr_url: input.prUrl, head_sha: input.headSha, host_proof_ms: input.hostProofMs };
+  const hosted = read.kind === "record" ? { hosted_run_id: read.runId, hosted_job_id: read.jobId } : {};
+  const ineligible = (reason: string) => ({ ...row, eligible: false, reason, would_save_ms: 0, ...hosted });
+  if (read.kind === "ineligible") return ineligible(read.reason);
+  const record = read.record;
+  if (record.head_sha !== input.headSha) return ineligible("result record names another head");
+  if (record.too_large === true) return ineligible("record too large");
+  if (input.body === undefined) return ineligible("no PR body snapshot to compare");
+  if (record.body_digest !== bodyDigest(input.body)) return ineligible("body digest mismatch");
+  const hostProofs: string[] = discriminationProofs(input.criteria);
+  const hostedProofs = (record.proofs ?? []).map(outcome => outcome.proof);
+  if (JSON.stringify([...hostProofs].sort()) !== JSON.stringify([...hostedProofs].sort())) {
+    return ineligible(`criteria mismatch: ${hostedProofs.length} hosted proof(s), ${hostProofs.length} at the host`);
+  }
+  let digests: { files: string[]; executor_digest: string; workflow_digest: string | null };
+  try {
+    const tracked = await (input.listTracked ?? trackedPathsAsync)(input.headCheckoutDir);
+    digests = proofDiscriminationDigests(tracked, (path: string) => readFileSync(join(input.headCheckoutDir, path)));
+  } catch (error) {
+    return ineligible(`executor digest unreadable: ${String((error as Error)?.message ?? error).slice(0, 200)}`);
+  }
+  const executor = new Set(digests.files);
+  const touched = diffTouchedPaths(input.diff).filter(path => executor.has(path) || path === WORKFLOW_PATH || path.startsWith("test/setup/"));
+  if (touched.length > 0) return ineligible(`diff touches the executor: ${touched.slice(0, 5).join(", ")}${touched.length > 5 ? ` and ${touched.length - 5} more` : ""}`);
+  if (digests.executor_digest !== record.executor_digest) return ineligible("executor digest mismatch");
+  if (digests.workflow_digest !== record.workflow_digest) return ineligible("workflow digest mismatch");
+  const proofs = (record.proofs ?? []).map(outcome => {
+    const host = input.hostCriteria.find(criterion => criterion.proof.trim() === outcome.proof)?.proof_exec ?? "not_judged";
+    return { proof: outcome.proof, hosted: outcome.verdict, hosted_head: outcome.head, hosted_base: outcome.base, host,
+      agree: HOSTED_VERDICT_AS_HOST[outcome.verdict] === host };
+  });
+  const agreed = proofs.filter(proof => proof.agree).length;
+  return { ...row, eligible: true, ...hosted, criteria_source: record.criteria_source, would_save_ms: input.hostProofMs,
+    agreed, disagreed: proofs.length - agreed, proofs };
+}
+
 // Project at the final write: status guards may replace a description with a private failure reason.
 // W1-T14035: a pending ops post keeps the run its guarded description names, so an ops hold names its owner as a public
 // one does; it carries no code provenance, as no pending post does.
@@ -1412,6 +1556,12 @@ export async function runReview(host: ReviewCommandHost, args: {
   // W1-T13868: review.finding rows name why a reviewer's served model is null; the provenance type stays unchanged.
   let reviewerServedModelReason: string | undefined;
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
+  // W1-T11157 (shadow): CI's record for this head is read beside the host's proof run; nothing reads it before the
+  // binding verdict below is built, and the comparison only ledgers agreement.
+  const proofReuseRead = args.headCheckoutDir !== undefined && discriminationProofs(criteria).length > 0
+    ? readProofDiscriminationRecord({ owner, repo, headSha }).catch((error: unknown): ProofDiscriminationRecordRead =>
+      ({ kind: "ineligible", reason: `record unreadable: ${String((error as Error)?.message ?? error).slice(0, 300)}` }))
+    : undefined;
   const hostedCiFilePassed = await reviewHostedCiFileEvidence({ owner, repo, headSha, criteria,
     headCheckoutDir: args.headCheckoutDir, log });
   const proofEvidence: Parameters<typeof preparedDecision.judge>[0] = {
@@ -1438,7 +1588,9 @@ export async function runReview(host: ReviewCommandHost, args: {
   };
   // The proofs run here when a reviewer follows, else in the binding judge below; either way the CPU work starts now.
   reportPhase("proofs");
+  const preliminaryStartedAt = systemClock.now();
   const preliminaryProofs = attemptReviewer ? await preparedDecision.judge(proofEvidence) : undefined;
+  const preliminaryProofMs = systemClock.now() - preliminaryStartedAt;
   let reviewerSubtype: string | undefined;
   let reviewerExit: WorkerResult["exit"];
   let reviewerSpawnFailed = false;
@@ -1718,6 +1870,11 @@ export async function runReview(host: ReviewCommandHost, args: {
     openTaskIds: args.openTaskIds,
   });
   phases.judge = systemClock.now();
+  if (proofReuseRead !== undefined) {
+    log(PROOF_REUSE_SHADOW_STEP, await proofReuseShadowRow(await proofReuseRead, { prUrl, headSha, diff, body: inputBody,
+      criteria, headCheckoutDir: args.headCheckoutDir!, hostCriteria: computed.criteria,
+      hostProofMs: preliminaryProofMs + phases.judge - phases.lint }));
+  }
 
   // W1-T359: ADVISORY rubric layer — invoked AFTER `computed` above, over the
   // SAME `diff`/`report` the binding verdict just judged, and consulted by

@@ -140,7 +140,7 @@ import { resolveRepoLayout } from "../../lib/repo-layout.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
 import { createOpsCatalogShadowSource, servedAsLastGood, type OpsCatalogApi, type OpsCatalogShadowInput } from "../../lib/ops-catalog-source.js";
 import { liveInflightRuns, readCheckoutDepth } from "../../lib/report-commands.js";
-import { adoptRunChildren, createAdmittedPlanSlot, runChildModeIsOn, startRunChildProbe, tapPlanSnapshot, type AdoptedRunChild } from "../../lib/run-child.js";
+import { adoptRunChildren, createAdmittedPlanSlot, runChildAdoptableAt, runChildModeIsOn, startRunChildProbe, tapPlanSnapshot, type AdoptedRunChild } from "../../lib/run-child.js";
 import { loadObservedOverlapMode, loadRunChildMode, type RunChildMode } from "../../lib/policy.js";
 import { observedScopeFromOpenPrs } from "../../lib/observed-overlap.js";
 import {
@@ -2051,13 +2051,18 @@ export async function daemonCommand(
       // A failed warm read decides nothing: the boot runs the same two reads and refuses or records there.
       void warmError;
     }
+    bootPhases.mark("standby_warm");
   }
   if (standby?.ports) {
     // W1-T14544: ready, then wait for the hand-over; the lock is taken only once its live holder has let go.
     const promotion = await awaitPromotion(standby.ports, standby.startedAtMs);
     if ("criterion" in promotion) { await stopReadPlane(); return 1; }
+    // W1-T14674: the ready standby's wait for the hand-over is its own phase, never part of wiring; the active daemon
+    // still works through it, so it is not dark time.
+    bootPhases.mark("promote_wait");
     const locked = await acquireLockWhenFree(standby.ports, () => acquireDrainLock(drainLockPath));
     if ("refused" in locked) { await stopReadPlane(); return 1; }
+    bootPhases.mark("lock_wait");
     drainLock = locked.handle;
     standby.promoted = true;
     leaveExitCodeForEntrypoint(join(config.root, "state"), process.pid);
@@ -2090,6 +2095,7 @@ export async function daemonCommand(
     if (synced === undefined) return 1;
     plan = synced;
     activePlanRef.current = synced;
+    bootPhases.mark("plan_sync");
   }
   bootPhases.mark("wiring");
   const bootClaimLock = fixedClock(clockFromMillisFn(deps.now).now());
@@ -2232,6 +2238,10 @@ export async function daemonCommand(
     void child.settled.then(() => adoptedRunIds.delete(child.runId), () => adoptedRunIds.delete(child.runId));
   }
   bootPhases.mark("run_child_adoption");
+  // W1-T14662: would a successor booting now adopt this run child? The boot's state root, instance and settled runs, the mode
+  // read now (the successor's boot reads it then; `off`, `shadow` or unreadable adopts nothing) and the real probe.
+  const runChildAdoptable = runChildAdoptableAt({ stateRoot: join(config.root, "state"), readMode: () => readRunChildPolicy(childPolicy).mode,
+    instance: () => defaultInstance(config.root).name, settledRunIds: childBoot?.settledRunIds ?? new Set<string>() });
   // W1-T9089: a failing contract under `on` no longer demotes; it escalates once per evidence window.
   const childContract: (decision: RunChildModeDecision | undefined) => boolean =
     host.daemonRunChildContract(deps.runChildContractEscalate ?? raiseDuplicate, log);
@@ -3049,6 +3059,7 @@ export async function daemonCommand(
           }),
         } : {}),
         consumeDrainNow: () => consumeDrainNow(config.root),
+        runChildAdoptable,
         // W1-T11327: the progress watchdog's restart-in-place request, exited on with this process's own boot sha.
         // W1-T14545: off unless state/daemon-handoff.on exists; read at each restart decision.
         handoff: deps.handoff ?? createDaemonHandoff({ stateDir: join(config.root, "state"),
