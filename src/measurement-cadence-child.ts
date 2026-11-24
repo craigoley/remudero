@@ -3,6 +3,7 @@
 // W1-T6495: it measures the config the daemon named, never one from $HOME, resolved inside the run (a bad one fails).
 import type { Clock } from "./lib/clock.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
+import { installGhHeldTokenGuard } from "./lib/github-transport.js";
 import { appendLedger, type LedgerLine } from "./lib/ledger.js";
 import { ledgerPathFor } from "./lib/ledger-path.js";
 import { MEASUREMENT_CADENCE_CHILD_FLAG, measurementCadenceChildAttempt, measurementCadenceChildMain, measurementCadenceChildRun, namedMeasurementCadenceChildConfig } from "./lib/measurement-cadence.js";
@@ -32,9 +33,13 @@ export async function withMeasurementCadenceChildToken(opts: {
     log: (step, extra) => ledger({ run_id: opts.runId, task_id: "DAEMON", lane: "measurement-cadence", step, ...extra } as LedgerLine),
   });
   if (token.ready) await token.ready;
+  // W1-T14543: this child's gh calls never present the held token past its expiry; the daemon installs no guard.
+  const { tokenState, ensureFresh } = token;
+  const uninstall = tokenState && ensureFresh ? installGhHeldTokenGuard({ tokenState, ensureFresh }) : undefined;
   try {
     return await opts.run();
   } finally {
+    uninstall?.();
     token.stop?.();
   }
 }

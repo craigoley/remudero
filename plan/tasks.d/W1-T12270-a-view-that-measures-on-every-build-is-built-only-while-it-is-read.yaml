@@ -26,7 +26,7 @@
     - test/view-etags-are-deterministic.test.ts
     - test/lib/an-idle-serve-view-rebuilds-at-its-idle-floor.test.ts
     - test/console-api/read-model/a-read-model-view-whose-inputs-are-unchanged-is-not-rebuilt.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A read-paced unit whose view serves, and that no reader has read for the unread window, is not built again until a read arrives. The window is computed from the cost after its floor. Its `read_model.view_builds` row counts no build for it"
