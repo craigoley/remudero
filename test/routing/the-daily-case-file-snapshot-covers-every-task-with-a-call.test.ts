@@ -6,7 +6,7 @@ import { test, type TestContext } from "node:test";
 import { loadCaseFileSnapshot } from "#src/lib/benchmark-cohort.js";
 import { buildFieldTrialsCaseFiles, caseLedgerWindowDays, emptyCarry, isRateLimited, parseCarry,
   planFieldTrialsCaseFiles, type CaseFilePacing, type FieldTrialsCaseFileCarry, type FieldTrialsCaseFilePlan,
-  type FieldTrialsCaseFileSource, type SearchPrs, type ViewPr } from "#src/lib/field-trials-case-files.js";
+  type FieldTrialsCaseFileSource, type ListPrsPage, type ViewPr } from "#src/lib/field-trials-case-files.js";
 import type { FlowRow } from "#src/lib/field-trials-flow.js";
 import type { Task } from "#src/lib/plan.js";
 import { caseFileCommand, parseCasePrSnapshot } from "#src/lib/report-commands.js";
@@ -35,17 +35,17 @@ const prRaw = (number: number, state: "OPEN" | "MERGED" | "CLOSED", task: string
 function setup(rows: FlowRow[], over: { carry?: FieldTrialsCaseFileCarry; outside?: string[]; nowIso?: () => string;
   viewPr?: ViewPr } = {}) {
   const views: number[] = [];
-  const searches: string[] = [];
+  const pages: number[] = [];
   const ids = new Set(rows.map((row) => row.taskId).filter((id): id is string => !!id && !over.outside?.includes(id)));
   const source: FieldTrialsCaseFileSource = { rows, planIds: ids, carry: over.carry };
-  const searchPrs: SearchPrs = async (id) => { searches.push(id); return []; };
+  const listPage: ListPrsPage = async (page) => { pages.push(page); return []; };
   const viewPr: ViewPr = over.viewPr ?? (async (number) => { views.push(number); return prRaw(number, "MERGED", taskId(number - 40000)); });
   const pacing: CaseFilePacing = { nowIso: over.nowIso ?? (() => now), sleep: async () => {} };
-  const plan = (search: SearchPrs = searchPrs, pace: CaseFilePacing = pacing, waitMs?: number): Promise<FieldTrialsCaseFilePlan> =>
-    planFieldTrialsCaseFiles(source, search, viewPr, pace, waitMs);
+  const plan = (list: ListPrsPage = listPage, pace: CaseFilePacing = pacing, waitMs?: number): Promise<FieldTrialsCaseFilePlan> =>
+    planFieldTrialsCaseFiles(source, list, viewPr, pace, waitMs);
   const build = (files: (plan: FieldTrialsCaseFilePlan) => Promise<TaskCaseFile[]>) =>
-    buildFieldTrialsCaseFiles(source, searchPrs, viewPr, pacing, files);
-  return { plan, build, views, searches };
+    buildFieldTrialsCaseFiles(source, listPage, viewPr, pacing, files);
+  return { plan, build, views, pages };
 }
 
 test("W1-T14602 criterion 1: every called plan task is a candidate, with no count bound and no 14-day window", async () => {
@@ -76,32 +76,36 @@ test("W1-T14602 criterion 2: a finished PR is carried with no GitHub call, a cha
   const views: number[] = [];
   const first = setup(rows, { carry: parseCarry(JSON.parse(JSON.stringify(carry))),
     viewPr: async (number) => { views.push(number); return prRaw(number, "OPEN", taskId(number - 40000)); } });
-  const searches = first.searches;
+  const pages: number[] = [];
   const sleeps: number[] = [];
-  const plan = await first.plan(async (id) => {
+  // W1-T14728: every unlinked task is looked up in one PR listing, not searched one by one.
+  const plan = await first.plan(async (page) => {
     if (limited > 0) { limited -= 1; throw new Error("gh: API rate limit exceeded for installation"); }
-    searches.push(id);
-    return id === taskId(100) ? [{ number: 40100, body: `Remudero-Task: ${id}`, headRefName: "x" }] : [];
+    pages.push(page);
+    return page === 1 ? [{ number: 40100, body: `Remudero-Task: ${taskId(100)}`, headRefName: "x", updatedAt: daysAgo(1) }] : [];
   }, { nowIso: () => now, sleep: async (ms) => { sleeps.push(ms); } }, 5);
   assert.deepEqual(views, [40003, 40100], "only the PRs that can still change are read");
   assert.equal(plan.summary.prReadsCarried, 2);
   assert.equal(plan.prReads.get(40001)?.readAt, daysAgo(3), "a carried read keeps the time it was made");
-  assert.equal(searches.length, 40, "every unlinked task is searched: 40 is past the old 25-search bound");
-  assert.deepEqual(sleeps, [5], "a rate-limit reply waits and retries the same search");
+  assert.deepEqual(pages, [1, 2], "all 40 unlinked tasks are answered by one listing: past the old 25-search bound");
+  assert.equal(plan.summary.withoutPr, 39);
+  assert.deepEqual(sleeps, [5], "a rate-limit reply waits and retries the same page");
   assert.equal(plan.summary.rateLimitWaits, 1);
   assert.equal(plan.prNumbers.get(taskId(100)), 40100);
-  // The next night: links and finished reads are carried, an OPEN PR is not, and EVERY still-unlinked task is
-  // searched again with no new call — a PR may have opened since, with no `pr.opened` row.
+  // The next night: links, finished reads and the listing index are carried, an OPEN PR is not, and EVERY
+  // still-unlinked task is looked up again — a PR may have opened since, with no `pr.opened` row.
   const nextCarry = parseCarry(JSON.parse(JSON.stringify(plan.carry)));
-  const nextSearches: string[] = [];
+  const nextPages: number[] = [];
   const next = setup(rows, { carry: nextCarry });
-  const again = await next.plan(async (id) => {
-    nextSearches.push(id);
-    // The PR of W1-T20101 opened after last night's empty search.
-    return id === taskId(101) ? [{ number: 40101, body: `Remudero-Task: ${id}`, headRefName: "x" }] : [];
+  const again = await next.plan(async (page) => {
+    nextPages.push(page);
+    // The PR of W1-T20101 opened after last night's listing; the older PR sits below the watermark.
+    return [{ number: 40101, body: `Remudero-Task: ${taskId(101)}`, headRefName: "x", updatedAt: now },
+      { number: 40100, body: `Remudero-Task: ${taskId(100)}`, headRefName: "x", updatedAt: daysAgo(2) }];
   });
-  assert.equal(nextSearches.length, 39, "all 39 still-unlinked tasks are searched, none skipped as 'searched before'");
-  assert.equal(again.prNumbers.get(taskId(101)), 40101, "a PR opened after an empty search is linked on the next build");
+  assert.deepEqual(nextPages, [1], "the next listing stops at the watermark");
+  assert.equal(again.prNumbers.get(taskId(101)), 40101, "a PR opened after an empty listing is linked on the next build");
+  assert.equal(again.summary.withoutPr, 38, "all 38 still-unlinked tasks are looked up, none skipped as 'searched before'");
   assert.deepEqual(next.views.sort(), [40003, 40100, 40101], "an OPEN read is never carried");
   // A carry this version did not write, or a damaged entry, starts from nothing.
   assert.deepEqual(parseCarry({ version: "other" }), emptyCarry());
@@ -114,10 +118,10 @@ test("W1-T14602 criterion 2: a finished PR is carried with no GitHub call, a cha
   assert.equal(failed.summary.prReadsFailed, 1);
   assert.equal(failed.prReads.size, 0);
   assert.deepEqual(failed.readFailures, [{ read: "view", target: "40007", error: "HTTP 502" }], "the failure keeps GitHub's reason");
-  const unsearchable = setup([call(8, daysAgo(1))]);
-  const searchFailed = await unsearchable.plan(async () => { throw new Error("HTTP 500"); });
-  assert.deepEqual(searchFailed.readFailures, [{ read: "search", target: taskId(8), error: "HTTP 500" }]);
-  assert.equal(searchFailed.summary.searchUnreadable, 1);
+  const unlistable = setup([call(8, daysAgo(1))]);
+  const listFailed = await unlistable.plan(async () => { throw new Error("HTTP 500"); });
+  assert.deepEqual(listFailed.readFailures, [{ read: "list", target: "page 1", error: "HTTP 500" }]);
+  assert.equal(listFailed.summary.listFailed, 1);
 });
 
 const taskOf = (id: string) => ({ id, title: `Task ${id}`, repo: "remudero", depends_on: [], type: "implement",
