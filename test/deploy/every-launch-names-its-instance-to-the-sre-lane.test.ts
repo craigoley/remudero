@@ -525,3 +525,27 @@ test("W1-T14611 criterion 2: an unresolved daemon pages on ANY state root, host-
   assert.deepEqual(f.closed, [escalated[1]!.issue_url]);
   assert.deepEqual(ledgerSteps(f, SRE_LANE_UNRESOLVED_CLEARED_STEP).map((c) => c.state_root), [roots[1]]);
 });
+
+test("W1-T14611 criterion 2: under the test runner a registry outside the temp dir (the live fleet's) pages nothing", async (t) => {
+  // A test boot of daemonCommand reads the checkout's own registry; it must never page the real primary through gh.
+  // Moving TMPDIR to a sibling directory makes the fixture registry read as one outside the temp dir.
+  const f = fleet(t);
+  const savedTmp = process.env.TMPDIR;
+  const elsewhere = join(f.home, "elsewhere-tmp");
+  mkdirSync(elsewhere);
+  process.env.TMPDIR = elsewhere;
+  let rows: LaneRow[];
+  try {
+    rows = await laneStart(t, { stateRoot: join(f.home, "laptop-root"), registry: f.registry, page: page(f) });
+  } finally {
+    if (savedTmp === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = savedTmp;
+  }
+  assert.deepEqual(rows.map((r) => r.step), ["sre_lane.disabled"], "the lane is off, with no failure row");
+  assert.equal(f.created.length, 0);
+  assert.equal(ledgerSteps(f, SRE_LANE_UNRESOLVED_ESCALATED_STEP).length, 0);
+
+  // The same registry back inside the temp dir pages, so the guard is the only difference.
+  await laneStart(t, { stateRoot: join(f.home, "laptop-root"), registry: f.registry, page: page(f) });
+  assert.equal(f.created.length, 1);
+});

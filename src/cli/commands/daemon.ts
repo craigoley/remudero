@@ -23,11 +23,12 @@ import { productionDispatchBreakJudge, productionFixProgressJudge } from "../../
 import { ghExec, ghJsonAsync, ghTextAsync, githubInstallationBudget, takeGithubBudgetThrottles } from "../../lib/github-transport.js";
 import type { InstallationBudgetThreadInput } from "../../lib/github-installation-budget.js";
 import { daemonInstallationRegistry, startProcessInstallationBudget } from "../../lib/installation-budget-start.js";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { parseInstanceRegistry } from "../../lib/instance-registry.js";
-import { homedir, hostname } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { isTestRunner } from "../../lib/live-write-guard.js";
+import { homedir, hostname, tmpdir } from "node:os";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { configPath, isWorkerProviderId, loadConfig, providerRoutingOwnsHeadroom, resolveHeadroomEnabled, workerHomeDir, type Config } from "../../lib/config.js";
 import { cashDeploymentTarget } from "../../lib/config-schema.js";
@@ -934,6 +935,9 @@ async function pageUnresolvedSreLane(
     if (instance.resolved || sreLane.env.RMD_SRE_LANE?.trim() === "0") return;
     const primaries = await livePrimaryNames(where.registryPath);
     if (!("names" in primaries) || primaries.names.length !== 1) return;
+    // Under the test runner a page reads only a fixture registry, never the live fleet's (the ops-catalog-source /
+    // board-snapshot-cache rule): a test boot on a temp root would otherwise page the real primary. Never in production.
+    if (isTestRunner() && !realpathSync(where.registryPath).startsWith(realpathSync(tmpdir()) + sep)) return;
     await unresolved.escalate({ primary: primaries.names[0]!, stateRoot: where.stateRoot, registry: where.registryPath, reason: instance.why });
   } catch (error) {
     log("daemon.escalation.failed", { task: "daemon", error: String((error as Error)?.message ?? error) });
