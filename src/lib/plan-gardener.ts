@@ -212,6 +212,25 @@ export function planGardenMarker(a: PlanGardenAction): string {
   return `plan gardener: ${a.class} ${a.target}${a.into ? ` into ${a.into}` : ""}`;
 }
 
+/** W1-T14640: the shard without its `needs_input:` block (the line and every deeper-indented line under it). The
+ *  question is moot once a merge or retirement settles the task, and lint-plan refuses it off `status: queued`. */
+function withoutNeedsInput(text: string): string {
+  const lines = text.split("\n");
+  const kept: string[] = [];
+  const child = (line: string): boolean => /^ {3,}\S/.test(line);
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^ {2}needs_input:/.test(lines[i]!)) {
+      kept.push(lines[i]!);
+      continue;
+    }
+    // A blank line inside the block (a block-scalar question) is the block's while a deeper line follows it.
+    let end = i + 1;
+    for (let next = end; next < lines.length && (child(lines[next]!) || lines[next]!.trim() === ""); next++) if (child(lines[next]!)) end = next + 1;
+    i = end - 1;
+  }
+  return kept.join("\n");
+}
+
 /** Reconcile each queued target in its own shard; record a completion's landing commit in its marker. */
 export function applyPlanActions(repoRoot: string, shards: Map<string, string>, actions: PlanGardenAction[]): string[] {
   const changed: string[] = [];
@@ -224,7 +243,7 @@ export function applyPlanActions(repoRoot: string, shards: Map<string, string>, 
     // A landed task was BUILT: `done` alone. `retirement:` means it never will be, and is read only on a
     // blocked task (test/retirement-reaches-its-reader.test.ts); the marker below keeps the reason.
     const status = a.landingCommit ? "  status: done" : `  status: blocked\n  retirement: ${a.retirement}`;
-    writeFileSync(path, text.replace(/^ {2}status: queued[ \t]*$/m, `${status}\n  # ${planGardenMarker(a)}${a.landingCommit ? ` commit ${a.landingCommit}` : ""} — ${a.reason}`));
+    writeFileSync(path, withoutNeedsInput(text.replace(/^ {2}status: queued[ \t]*$/m, `${status}\n  # ${planGardenMarker(a)}${a.landingCommit ? ` commit ${a.landingCommit}` : ""} — ${a.reason}`)));
     changed.push(rel);
   }
   return changed.sort();
