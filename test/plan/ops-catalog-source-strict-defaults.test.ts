@@ -67,7 +67,12 @@ test("W1-T12185 criterion 4: malformed and duplicate snapshots still refuse; sta
   assert.equal((await source.refresh()).outcome, "ok");
   fail = true;
   const stale = await source.refresh();
-  assert.equal(stale.outcome, "stale");
-  assert.equal(stale.plan, undefined);
+  // W1-T14564 (operator ruling 2026-11-23): the previous snapshot is served as the last good one; the refusal keeps
+  // its old shape on `refused`, with no plan, and no thrown text reaches either.
+  assert.equal(stale.outcome, "ok");
+  assert.equal(stale.lastGood?.refusal, "stale");
+  assert.equal(stale.refused?.outcome, "stale");
+  assert.equal(stale.refused?.plan, undefined);
   assert.doesNotMatch(JSON.stringify(stale), /PRIVATE_TITLE_SENTINEL/);
+  assert.doesNotMatch(JSON.stringify(stale.refused), /PRIVATE_TITLE_SENTINEL/);
 });
