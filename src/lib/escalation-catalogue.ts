@@ -346,7 +346,7 @@ export function writeCrashLoopStatus(issues: IssueGateway, open: CrashLoopIncide
   let error: string | undefined;
   if (issues.listCommentsSince && issues.editComment) {
     try {
-      const prior = issues.listCommentsSince(url, open.escalatedTs ?? new Date(0).toISOString())
+      const prior = issues.listCommentsSince(url, open.escalatedTs ?? "1970-01-01T00:00:00.000Z")
         .filter((comment) => comment.body.includes(CRASHLOOP_STATUS_MARKER(open.runFirst))).at(-1);
       if (prior) {
         issues.editComment(prior.id, body);
