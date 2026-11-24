@@ -41,7 +41,10 @@ import { RmdError } from "./errors.js";
 import { hostWorktreeGit, hostWorktreeGitAsync, recordedWorktreeGitDir } from "./worktree-git.js";
 import { aliasRewriteFields, rewriteAddedTestImports, type AddedTestAliasRewrite } from "./added-test-alias-rewrite.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
-import { seededRandom, seedOf } from "./knowledge-value.js";
+import { seedOf } from "./knowledge-value.js";
+import { CODEX_BALANCED_TREATMENT_MODEL, codexExperimentArmForTask, intentionToTreatRow, latchCodexBalancedGuardrail,
+  routingDrawValue, type RoutingDrawKey, type RoutingDrawSeed } from "./routing-experiments.js";
+export { routingDrawSeed, routingDrawValue, type RoutingDrawKey, type RoutingDrawSeed } from "./routing-experiments.js";
 import { withFleetCashAllowanceLock } from "./cash-allowance-lock.js";
 import { resolveHeadroomLimitPct, type HeadroomPolicy, type SdkUsageCase, type UsageSnapshot, type WeeklyWindow } from "./headroom.js";
 import type { Config, WorkerProviderId } from "./config.js";
@@ -373,6 +376,7 @@ export interface CodexModelDecisionOption {
   selected: boolean;
   windows: ProviderCapacityWindow[];
   reason?: CodexModelIneligibleReason;
+  balancedTrialEligible?: true;
   /** W1-T10382: eligible only because its credits carry it past the reserve. */
   lane?: ProviderLane;
 }
@@ -658,39 +662,15 @@ export function providerEligibility(capacity: ProviderCapacity, reservePercent: 
 }
 
 /** W1-T4617: record selection probability for outcome weighting. One uniform draw uses FNV-1a
- * {@link seedOf} + mulberry32 {@link seededRandom}, keyed by `(task id, attempt, decision point)`.
+ * with mulberry32, keyed by `(task id, attempt, decision point)`.
  * Unlike the old arrival-correlated golden-ratio counter, it is clock/weight independent and
  * reproducible; expected shares equal normalized `(headroom - reserve)^2` weights. */
 export const ROUTING_DRAW_METHOD = "fnv1a-mulberry32/v1";
-
-/** What a draw is keyed on. `unit: "task"` means every attempt of the task shares it (an experiment arm). */
-export interface RoutingDrawKey {
-  unit: "spawn" | "task";
-  taskId: string;
-  attempt: string;
-  point: string;
-}
-
-/** Hash a draw key into its 32-bit seed. The fields are NUL-joined so no two keys share a seed string. */
-export function routingDrawSeed(key: RoutingDrawKey): number {
-  return seedOf(["routing-draw/v1", key.unit, key.taskId, key.attempt, key.point].join("\u0000"));
-}
-
-/** A key's uniform draw in [0, 1) and the seed it came from, rendered as eight hex digits. */
-export function routingDrawValue(key: RoutingDrawKey): { value: number; seed: string } {
-  const seed = routingDrawSeed(key);
-  return { value: seededRandom(seed)(), seed: seed.toString(16).padStart(8, "0") };
-}
 
 /** The decision point of one spawn: a digest of what it asks for, so a fix rung and a reviewer draw apart. */
 export function spawnDecisionPoint(request: { model?: string; effort?: string; sandboxIntent?: string; prompt: string }): string {
   const text = [request.model ?? "", request.effort ?? "", request.sandboxIntent ?? "", request.prompt].join("\u0000");
   return `spawn:${seedOf(text).toString(16).padStart(8, "0")}`;
-}
-
-/** A keyed draw, plus the order the cumulative walk takes (absent: most headroom first). */
-export interface RoutingDrawSeed extends RoutingDrawKey {
-  order?: readonly WorkerProviderId[];
 }
 
 /** One recorded draw: its method, value, seed and each drawn candidate's selection probability. */
@@ -1085,6 +1065,11 @@ export function codexCandidatesForCapability(
   if (!byEffort) return FALLBACK_CODEX_MODELS[tier];
   const row = (requestedEffort && byEffort[requestedEffort]) || byEffort.medium;
   return row ?? FALLBACK_CODEX_MODELS[tier];
+}
+
+export function balancedTrialControl(capabilities: CapabilityLadder | undefined, effort: string): string | undefined {
+  if (capabilities?.codex.balanced?.[effort] === undefined) return undefined;
+  return codexCandidatesForCapability(capabilities, "balanced", effort).find(model => model.endsWith("-sol"));
 }
 
 /** Fail-soft default for absent/malformed mounts' `capabilities.cash`. W1-T3598 requires the same
@@ -1679,6 +1664,9 @@ export function selectCodexModel(
       windows: capacity.windows.map((window) => ({ ...window })),
       ...(reason ? { reason } : {}),
       ...(reason === undefined && quota.lane ? { lane: quota.lane } : {}),
+      ...(tier === "balanced" && (requestedEffort === "low" || requestedEffort === "medium")
+        && canonicalCodexModelId(model) === CODEX_BALANCED_TREATMENT_MODEL && effortSupported && quota.eligible && quota.lane === undefined
+        ? { balancedTrialEligible: true as const } : {}),
     };
   });
   const ranked = candidates.map((model, preference) => {
@@ -4193,10 +4181,12 @@ async function withPrivateRegistryCodexProfile<T>(
   }
 }
 
+type CodexSpawnSelection = Pick<ProviderCapacity, "model" | "effort" | "modelDecision">;
+
 export async function spawnCodexWorker(
   args: CodexSpawnArgs,
   config: Config,
-  selection?: Pick<ProviderCapacity, "model" | "effort">,
+  selection?: CodexSpawnSelection,
 ): Promise<CodexWorkerResult> {
   const selected = runtimeInstanceRegistryPrivateFile();
   if (selected !== undefined) {
@@ -4220,10 +4210,55 @@ export async function spawnCodexWorker(
     const nativeCacheRoot = process.platform !== "win32" && !codexReadOnly(args) && args.sandboxIntent !== "disposable-review" &&
       await verifiedGitWorktree(args.cwd)
       ? prepareWorkerNativeCache() : undefined;
-    if (selected === undefined) return spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection, undefined, nativeCacheRoot);
+    const spawn = (route: CodexSpawnSelection | undefined, profile?: PrivateRegistryCodexProfile) =>
+      spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, route, profile, nativeCacheRoot);
+    if (selected === undefined) return spawnCodexBalancedSelection(args, config, selection, route => spawn(route));
     return withPrivateRegistryCodexProfile(args, config, selected, profile =>
-      spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, selection, profile, nativeCacheRoot), nativeCacheRoot);
+      spawnCodexBalancedSelection(args, config, selection, route => spawn(route, profile)), nativeCacheRoot);
   });
+}
+
+async function spawnCodexBalancedSelection(args: CodexSpawnArgs, config: Config, selection: CodexSpawnSelection | undefined,
+  spawn: (route: CodexSpawnSelection | undefined) => Promise<CodexWorkerResult>): Promise<CodexWorkerResult> {
+  const decision = selection?.modelDecision;
+  const taskId = args.taskId;
+  if (!taskId || !selection || !decision || decision.requestedCapability !== "balanced"
+    || (selection.effort !== "low" && selection.effort !== "medium") || decision.requestedEffort !== selection.effort
+    || decision.capabilityFallbackReason || decision.preferredModel || decision.switchback
+    || config.workerProviders?.codexModel !== undefined || config.workerProviders?.codexModels?.balanced !== undefined)
+    return spawn(selection);
+  const currentSol = balancedTrialControl(resolveCapabilityLadder(config, {}), selection.effort);
+  const stateDir = join(config.root, "state");
+  const assignment = codexExperimentArmForTask({ stateDir, taskId, provider: "codex", capability: decision.requestedCapability,
+    effort: selection.effort, model: selection.model, currentSol });
+  if (assignment === undefined) return spawn(selection);
+  const treatment = assignment.assignedArm === "paid" &&
+    decision.options.some(option => option.id === assignment.assignedModel && option.balancedTrialEligible)
+    && modelAllowed(assignment.assignedModel, config);
+  const route = treatment ? { ...selection, model: assignment.assignedModel } : selection;
+  const identity = { runId: args.runId, taskId, assignmentId: randomUUID(), requestedModel: route.model };
+  const ledger = ledgerPathFor(config);
+  appendLedger(ledger, { ...intentionToTreatRow(identity, assignment), step: "codex_experiment.assignment" });
+  const recordReceipt = (served: ObservedServedModel & { servedModelSource?: CodexServedModelSource },
+    success: boolean, costUsd?: number): void => {
+    const guardrail = served.servedModel === null ? "missingness.servedModel"
+      : costUsd === undefined ? "missingness.cost"
+      : costUsd !== 0 ? "accounting.cashEstimate" : undefined;
+    if (guardrail !== undefined) latchCodexBalancedGuardrail(stateDir, assignment.protocolDigest, guardrail);
+    appendLedger(ledger, { ...intentionToTreatRow(identity, assignment, { ...served, success, costUsd, guardrail }),
+      step: "codex_experiment.receipt" });
+  };
+  let result: CodexWorkerResult;
+  try { result = await spawn(route); }
+  catch (error) {
+    try {
+      recordReceipt(observedServedModelOf(error) ?? { servedModel: null,
+        servedModelReason: "Codex attempt threw before reporting a served model" }, false);
+    } finally { throw error; }
+  }
+  recordReceipt({ servedModel: result.servedModel ?? null, servedModelReason: result.servedModelReason,
+    servedModelSource: result.servedModelSource }, !result.isError, result.costUsd);
+  return result;
 }
 
 /**

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
@@ -10,13 +9,13 @@ import { citeAaReceipt, paidArmPauseReasons, parsePaidPilotRequest, PAID_PILOT_C
 import { systemClock, type Clock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import { readCodexModelCatalog } from "./model-availability.js";
+import { loadMounts, mountsPath, type CapabilityLadder } from "./mounts.js";
+import { balancedTrialControl } from "./worker-provider.js";
+import { CODEX_BALANCED_ASSIGNMENT_METHOD as ASSIGNMENT_METHOD, CODEX_BALANCED_TRIAL_VERSION as VERSION,
+  CODEX_BALANCED_TREATMENT_MODEL as TERRA, hashCodexBalancedTrial as hash } from "./routing-experiments.js";
 
-const SOL = "gpt-6.1-sol";
-const TERRA = "gpt-6.1-terra";
-const VERSION = "codex-balanced-trial-v1";
 const GUARDRAILS = ["recovery.repairRunsObserved", "laterDefects", "missingness.servedModel", "missingness.billingMode",
   "missingness.cost", "accounting.cashEstimate"] as const;
-const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 export interface CodexBalancedTrialRequest {
   phase: "aa" | "ab";
@@ -37,6 +36,7 @@ export interface CodexBalancedTrialInput {
   }>;
   clock?: Clock;
   readCatalog?: () => Promise<string[]>;
+  readCapabilities?: () => CapabilityLadder | undefined;
 }
 
 interface RegisteredPopulation {
@@ -49,9 +49,9 @@ export interface CodexBalancedTrialProtocol {
   version: typeof VERSION;
   trialId: string;
   registeredAt: string;
-  lead: typeof SOL;
+  lead: string;
   liveAssignment: false;
-  assignment: { unit: "task"; method: "sha256(benchmark-aa-allocation-v1, seed, taskId) parity"; allocation: { control: 0.5; paid: 0.5 } };
+  assignment: { unit: "task"; method: typeof ASSIGNMENT_METHOD; allocation: { control: 0.5; paid: 0.5 } };
   primaryOutcome: "verified-completion";
   analysis: "intention-to-treat";
   guardrails: typeof GUARDRAILS;
@@ -76,15 +76,21 @@ function readJson(path: string, name: string): { ok: true; value: unknown } | Re
   }
 }
 
-function parseRequest(value: unknown): { ok: true; request: CodexBalancedTrialRequest; manifest: AaTrialManifest } | Refusal {
+function parseRequest(value: unknown, readCapabilities: NonNullable<CodexBalancedTrialInput["readCapabilities"]>):
+  { ok: true; request: CodexBalancedTrialRequest; manifest: AaTrialManifest; control: string } | Refusal {
   if (value === null || typeof value !== "object") return refuse("request-invalid");
   const request = value as CodexBalancedTrialRequest;
   if (request.phase !== "aa" && request.phase !== "ab") return refuse("phase-invalid");
   const parsed = parseAaTrialManifest(request.manifest);
   if (!parsed.ok) return parsed;
   const { stack } = parsed.manifest;
-  if (stack.provider !== "codex" || stack.model !== SOL || !["low", "medium"].includes(stack.effort))
+  if (stack.provider !== "codex" || !["low", "medium"].includes(stack.effort))
     return refuse("aa-needs-codex-sol-balanced-low-or-medium");
+  let control: string | undefined;
+  try { control = balancedTrialControl(readCapabilities(), stack.effort); }
+  catch (error) { return refuse("balanced-sol-unreadable:" + (error instanceof Error ? error.message : String(error))); }
+  if (control === undefined) return refuse("balanced-sol-unavailable");
+  if (stack.model !== control) return refuse("aa-needs-codex-sol-balanced-low-or-medium");
   if (!Array.isArray(request.selections)) return refuse("selection-evidence-missing");
   const selections = new Map<string, CodexBalancedTrialRequest["selections"][number]>();
   for (const row of request.selections) {
@@ -97,7 +103,7 @@ function parseRequest(value: unknown): { ok: true; request: CodexBalancedTrialRe
       && assignment.selected.effort === stack.effort;
   });
   if (tasks.length === 0) return refuse("codex-balanced-population-empty");
-  return { ok: true, request, manifest: { ...parsed.manifest, tasks, labels: ["A1", "A2"] } };
+  return { ok: true, request, manifest: { ...parsed.manifest, tasks, labels: ["A1", "A2"] }, control };
 }
 
 function registeredAa(stateDir: string, manifest: AaTrialManifest) {
@@ -116,9 +122,9 @@ function registeredAa(stateDir: string, manifest: AaTrialManifest) {
 
 // One effort per calibration preserves the existing A/A invariant: both labels run one identical stack.
 export async function registerCodexBalancedTrial(input: CodexBalancedTrialInput): Promise<CodexBalancedTrialResult> {
-  const parsed = parseRequest(input.request);
+  const parsed = parseRequest(input.request, input.readCapabilities ?? (() => loadMounts(mountsPath(loadConfig().root)).capabilities));
   if (!parsed.ok) return parsed;
-  const { request, manifest } = parsed;
+  const { request, manifest, control } = parsed;
   const clock = input.clock ?? systemClock;
   let cited: ReturnType<typeof citeAaReceipt> | undefined;
   if (request.phase === "ab") {
@@ -153,7 +159,7 @@ export async function registerCodexBalancedTrial(input: CodexBalancedTrialInput)
   const pilotRequest = pilot.request;
   if (pilotRequest.approval.reference !== "#7418") return refuse("pilot-approval-must-cite-7418");
   if (pilotRequest.design !== "unpaired" || pilotRequest.reviewerReplay !== undefined) return refuse("task-randomization-required");
-  for (const [arm, model] of [["control", SOL], ["paid", TERRA]] as const) {
+  for (const [arm, model] of [["control", control], ["paid", TERRA]] as const) {
     const pin = pilotRequest.arms[arm];
     if (pin.provider !== "codex" || pin.model !== model || pin.effort !== manifest.stack.effort) return refuse(`trial-arm-mismatch:${arm}`);
   }
@@ -164,14 +170,14 @@ export async function registerCodexBalancedTrial(input: CodexBalancedTrialInput)
   if (pilotRequest.population.length !== eligible.size || pilotRequest.population.some(task => !eligible.has(task.taskId)
     || !manifest.tasks.some(entry => entry.taskId === task.taskId && entry.taskClass === task.taskClass && entry.risk === task.risk))
     || pilotRequest.strataRevision !== manifest.strataRevision) return refuse("pilot-population-mismatch");
-  const terms = { assignment: { unit: "task", method: "sha256(benchmark-aa-allocation-v1, seed, taskId) parity",
+  const terms = { assignment: { unit: "task", method: ASSIGNMENT_METHOD,
     allocation: { control: 0.5, paid: 0.5 } } as CodexBalancedTrialProtocol["assignment"], primaryOutcome: "verified-completion" as const,
     analysis: "intention-to-treat" as const, guardrails: GUARDRAILS, stoppingRule: PAID_PILOT_STOPPING_RULE,
     cash: { ceilingUsd: PAID_PILOT_CASH_CEILING_USD, windowMs: PAID_PILOT_WINDOW_MS,
       api: "reserve-before-each-attempt" as const, subscriptionUsd: 0 as const } };
   const protocolText = JSON.stringify({ ...terms, operatorProtocol: pilotRequest.protocolText });
   const body: Omit<CodexBalancedTrialProtocol, "digest"> = { version: VERSION, trialId: pilotRequest.pilotId,
-    registeredAt: clock.iso(), lead: SOL, liveAssignment: false, ...terms,
+    registeredAt: clock.iso(), lead: control, liveAssignment: false, ...terms,
     aa: { protocolDigest: aa.protocol.digest, populationDigest: population.digest, receipt: cited.citation },
     pilotRequest: { ...pilotRequest, protocolText } };
   const protocol: CodexBalancedTrialProtocol = { ...body, digest: hash(body) };
@@ -188,7 +194,7 @@ export async function registerCodexBalancedTrial(input: CodexBalancedTrialInput)
   return { ok: true, phase: "ab", protocol, path };
 }
 
-// W1-T10842 persists the returned cash reservation under its admission lock before spawning.
+// API callers must persist the reservation under their admission lock before spawning.
 export function codexBalancedAttemptAdmission(input: { protocol: PaidPilotProtocol; evidence: PaidPilotEvidence;
   nowIso: string; billing: "api" | "subscription"; reserveUsd: number }) {
   if (input.billing === "subscription") return { admitted: true, reserveUsd: 0, reasons: [] };

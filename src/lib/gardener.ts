@@ -127,6 +127,66 @@ export function gardenEffectsPath(stateDir: string, name: string): string {
   return join(stateDir, `${name}-gardener-effects.json`);
 }
 
+export function gardenUnitJournalPath(stateDir: string, name: string): string {
+  return join(stateDir, `${name}-gardener-unit-journal.json`);
+}
+
+/** A disposable checkpoint of completed, repeatable work for one garden and due period. */
+export function gardenUnitJournal<T = unknown>(
+  stateDir: string,
+  name: string,
+  period: number | string,
+  options: { log?: GardenerDeps["log"]; isResult?: (value: unknown) => value is T } = {},
+) {
+  const path = gardenUnitJournalPath(stateDir, name);
+  const units = new Map<string, { digest: string; result?: T }>();
+  let failureLogged = false;
+  const report = (operation: "read" | "write", error: unknown) => {
+    if (failureLogged) return;
+    failureLogged = true;
+    options.log?.("garden.unit_journal_failed", { name, period, operation, reason: String((error as Error)?.message ?? error) });
+  };
+  try {
+    const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (!isRecord(raw) || raw.version !== 1 || !["number", "string"].includes(typeof raw.period) || !isRecord(raw.units)) {
+      throw new Error("invalid unit journal envelope");
+    }
+    if (raw.period === period) {
+      for (const [key, unit] of Object.entries(raw.units)) {
+        if (!isRecord(unit) || typeof unit.digest !== "string" || (options.isResult && !options.isResult(unit.result))) {
+          throw new Error("invalid unit journal entry");
+        }
+        units.set(key, { digest: unit.digest, result: unit.result as T });
+      }
+    }
+  } catch (error) {
+    // An unreadable journal reads as empty, so every unit re-runs; report() writes one
+    // garden.unit_journal_failed row (a missing file is the normal first pass).
+    units.clear();
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") report("read", error);
+  }
+
+  const matching = (key: string, digest: string) => {
+    const unit = units.get(key);
+    return unit?.digest === digest ? unit : undefined;
+  };
+  return {
+    has: (key: string, digest: string) => matching(key, digest) !== undefined,
+    get: (key: string, digest: string) => matching(key, digest)?.result,
+    done(key: string, digest: string, result?: T): void {
+      const unit = { digest, result };
+      try {
+        const snapshot = Object.fromEntries([...units, [key, unit]]);
+        writeAtomic(path, JSON.stringify({ version: 1, period, units: snapshot }) + "\n");
+        units.set(key, unit);
+      } catch (error) {
+        // An unwritten unit is not remembered, so the next pass re-runs it; report() writes one row.
+        report("write", error);
+      }
+    },
+  };
+}
+
 export class GardenEffectsUnreadableError extends RmdError {
   constructor(readonly path: string, readonly failureClass: GardenStateFailure, detail: string) {
     super("gardener", GENERIC_EXIT_CODE, `gardener effects ${path} are ${failureClass}: ${detail}; repair or remove the file and the next pass retries`, { path, failureClass });

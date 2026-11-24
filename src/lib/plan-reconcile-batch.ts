@@ -86,3 +86,43 @@ export function takePlanReconcileBatch<T extends { readonly taskId: string }>(
   }
   return batch;
 }
+
+/** A git runner bound to one checkout: resolves with stdout, rejects on a nonzero exit. */
+export type PlanReconcileSourceGit = (args: readonly string[]) => Promise<string>;
+
+const COMMIT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
+/**
+ * W1-T14574: INVARIANT a-moved-carried-record-never-lands-stale. The ops status landing builds its
+ * candidate on the CURRENT ops main, but each record it carries holds bytes derived from the run's
+ * pinned commit. A candidate whose parent descends from the pin is safe exactly when no commit
+ * since the pin touched a carried record; any other parent, and any git failure, refuses (fail closed).
+ */
+export async function assertCarriedRecordsUnmoved(
+  git: PlanReconcileSourceGit, pin: string, parent: string, carriedPaths: Iterable<string>,
+): Promise<void> {
+  const carried = [...new Set(carriedPaths)];
+  let changed: string[];
+  try {
+    if (!COMMIT_ID.test(pin) || !COMMIT_ID.test(parent) || carried.length === 0) throw new Error("not a judgeable landing");
+    await git(["merge-base", "--is-ancestor", pin, parent]);
+    const names = await git(["diff", "--name-only", "--no-renames", "-z", pin, parent, "--", ...carried.map((path) => `:(literal)${path}`)]);
+    changed = names.split("\0").filter((path) => carried.includes(path));
+  } catch (error) {
+    throw new Error("ops-status-source-moved", { cause: error });
+  }
+  if (changed.length > 0) throw new Error("ops-status-source-moved", { cause: new Error(`changed since the pin: ${changed.join(", ")}`) });
+}
+
+/** The landing's plan PR preflight, run only after the candidate's parent passes {@link assertCarriedRecordsUnmoved}. */
+export function preflightOnUnmovedRecords<P, R>(
+  git: PlanReconcileSourceGit, pin: string, carriedPaths: Iterable<string>, inner: (sha: string, pr: P) => R | Promise<R>,
+): (sha: string, pr: P) => Promise<R> {
+  return async (sha, pr) => {
+    let parent: string;
+    try { parent = (await git(["rev-parse", "--verify", `${sha}^`])).trim(); }
+    catch (error) { throw new Error("ops-status-source-moved", { cause: error }); }
+    await assertCarriedRecordsUnmoved(git, pin, parent, carriedPaths);
+    return inner(sha, pr);
+  };
+}
