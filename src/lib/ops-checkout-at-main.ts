@@ -44,7 +44,13 @@ export interface OpsCheckoutAtMain {
   headListed: boolean;
 }
 
-function parseTree(out: string): Array<{ path: string; oid: string }> {
+/** `ls-tree -z` (with ids, for the blob cache), or `ls-tree --name-only` (W1-T14528's sequence, kept for its callers). */
+function listArgs(sha: string, paths: readonly string[], withIds: boolean): string[] {
+  return withIds ? ["ls-tree", "-z", sha, "--", ...paths] : ["ls-tree", "--name-only", sha, "--", ...paths];
+}
+
+function parseTree(out: string, withIds: boolean): Array<{ path: string; oid?: string }> {
+  if (!withIds) return out.split("\n").map((line) => line.trim()).filter((path) => path !== "").map((path) => ({ path }));
   return out.split("\0").flatMap((line) => {
     const m = /^\d+ blob ([0-9a-f]+)\t(.+)$/.exec(line.replace(/^\n+/, ""));
     return m === null ? [] : [{ oid: m[1], path: m[2] }];
@@ -59,14 +65,15 @@ function* atMainSteps(
     yield* step(() => git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", `+refs/heads/main:${OPS_MAIN_TRACKING_REF}`]));
   }
   const mainSha = opts.mainSha ?? String(yield* step(() => git(["rev-parse", OPS_MAIN_TRACKING_REF]))).trim();
-  const listed = parseTree(String(yield* step(() => git(["ls-tree", "-z", mainSha, "--", ...scope.paths]))));
+  const withIds = opts.blobs !== undefined;
+  const listed = parseTree(String(yield* step(() => git(listArgs(mainSha, scope.paths, withIds)))), withIds);
   const files = new Map<string, string>();
   for (const { path, oid } of listed) {
     if (scope.select !== undefined && !scope.select(path)) continue;
-    let text = opts.blobs?.get(oid);
+    let text = oid === undefined ? undefined : opts.blobs?.get(oid);
     if (text === undefined) {
       text = String(yield* step(() => git(["show", `${mainSha}:${path}`])));
-      if (opts.blobs !== undefined) {
+      if (opts.blobs !== undefined && oid !== undefined) {
         if (opts.blobs.size >= 4096) opts.blobs.clear(); // BACKSTOP on memory: a blob never changes, so a reread is only slower
         opts.blobs.set(oid, text);
       }
@@ -74,7 +81,7 @@ function* atMainSteps(
     files.set(path, text);
   }
   const headPaths = scope.head === true
-    ? new Set(parseTree(String(yield* step(() => git(["ls-tree", "-z", opts.headSha ?? "HEAD", "--", ...scope.paths])))).map((e) => e.path))
+    ? new Set(parseTree(String(yield* step(() => git(listArgs(opts.headSha ?? "HEAD", scope.paths, withIds)))), withIds).map((e) => e.path))
     : new Set<string>();
   return { checkoutDir, mainSha, mainPaths: new Set(listed.map((e) => e.path)), files, headPaths, headListed: scope.head === true };
 }

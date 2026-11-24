@@ -77,7 +77,7 @@ function fixture(t: TestContext, catalog: "public" | "ops", host: "named" | "abs
       git.push([...args]);
       // W1-T14617: the ops task file is read at the ops checkout's origin/main, with real git against the seeded clone.
       if (args[1] === opsDir && (args.includes("+refs/heads/main:refs/remotes/origin/main") || args.at(-1) === "refs/remotes/origin/main"
-        || (args.includes("ls-tree") && args.includes("-z")) || (args.includes("show") && args.some(a => a.includes(":plan/tasks.d/"))))) {
+        || (args.includes("ls-tree") && args.at(-1) === "plan/tasks.d/") || (args.includes("show") && args.some(a => a.includes(":plan/tasks.d/"))))) {
         return execFileSync(file, [...args], { encoding: "utf8", stdio: "pipe" });
       }
       // The new task file a refused landing sets aside: main holds no file at its path.
