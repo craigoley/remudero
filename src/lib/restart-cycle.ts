@@ -143,9 +143,11 @@ export function restartCycleRow(rows: readonly Row[], startAtMs: number): Restar
   const gaveUpMs = reviews && fixes ? sum([...reviews, ...fixes].map(item => item.age_ms)) : null;
   const last = ordered.findLast(r => r.row.step === "review.posted" && r.ms < exit.ms);
   const gapMs = last && first ? first.ms - last.ms : null;
-  // W1-T14547: a handoff is the yielded row after the exit and the standby's promotion after that, before this boot.
+  // W1-T14547: a handoff is the yielded row after the exit and the standby's promotion after that. The successor writes
+  // the promoted row at its first loop tick, after its own daemon.boot, so it is read up to the next boot, not this one.
   const yielded = before.find(r => r.row.step === "daemon.handoff_yielded" && r.ms >= exit.ms);
-  const promoted = yielded && before.find(r => r.row.step === "daemon.standby_promoted" && r.ms >= yielded.ms);
+  const promoted = yielded && ordered.find(r => r.row.step === "daemon.standby_promoted" && r.ms >= yielded.ms &&
+    (!nextBoot || r.ms < nextBoot.ms));
   // daemon.boot_phases is written once, at the successor's first loop tick (startBootPhases.firstTick).
   const firstTick = promoted && ordered.find(r => r.row.step === "daemon.boot_phases" && r.ms >= startAtMs &&
     (!nextBoot || r.ms < nextBoot.ms));
