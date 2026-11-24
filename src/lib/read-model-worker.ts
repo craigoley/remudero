@@ -419,6 +419,8 @@ export interface ReadModelLaneMove {
   costMs?: number;
   coldCostMs?: number;
   restoredCost?: boolean;
+  /** W1-T12270: the unit was stopped unread, so the lane it moves to keeps it stopped until a read. */
+  stopped?: true;
 }
 
 export interface ReadModelViewContext {
@@ -1107,8 +1109,10 @@ interface ViewUnit {
   storedCostIno?: string;
   /** What its last build call took (absent until one ran); `startedAt` is the first call of a bounded build in flight. */
   costMs?: number;
-  /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}, times `stretch`. Infinity: a stopped read-paced unit (W1-T12270). */
+  /** Not rebuilt before this: its last cost divided by {@link READ_MODEL_VIEW_SHARE}, times `stretch`. */
   dueAt: number;
+  /** W1-T12270: a read-paced unit stopped unread: `dueAt` is Infinity until a read, or its view may no longer stop. */
+  stopped?: true;
   /** A read-paced unit's multiplier on that wait: 1 while read, doubled by each build finished unread. */
   stretch?: number;
   /** When it would be due unstretched; a read pulls `dueAt` back to it. */
@@ -1817,6 +1821,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     unit.stretch = idleMs < READ_MODEL_READ_HOT_MS ? 1 : Math.min(READ_MODEL_IDLE_STRETCH_MAX, (unit.stretch ?? 1) * 2);
     if (idleMs >= readModelUnreadWindowMs(unit.costMs!) && stopsUnread(unit.view.name, shadow)) {
       markIdle(unit, idleMs);
+      unit.stopped = true;
       return Number.POSITIVE_INFINITY;
     }
     return finished + waitMs * unit.stretch;
@@ -1850,6 +1855,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
 
   /** W1-T12270: a stopped unit is due at once, and its next build measures again rather than reusing inputs. */
   function resume(unit: ViewUnit, at: number): void {
+    unit.stopped = undefined;
     unit.dueAt = at;
     unit.resumed = true;
     unit.lastInputDigest = undefined;
@@ -2028,7 +2034,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     if (opts.lane && ready && yielded > 0 && laneCostMs > soloMs !== (opts.lane === "heavy")) {
       unit.heavy = opts.lane === "fast";
       opts.post({ type: "view_lane", ...named, heavy: unit.heavy, dueAt: unit.dueAt, costMs: peakMs,
-        ...(unit.coldCostMs === undefined ? {} : { coldCostMs: unit.coldCostMs }) });
+        ...(unit.coldCostMs === undefined ? {} : { coldCostMs: unit.coldCostMs }), ...(unit.stopped ? { stopped: true as const } : {}) });
       letGo(unit);
       reportHeld(true);
     }
@@ -2108,7 +2114,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
   const demanded = (unit: ViewUnit): boolean => unit.view.demand !== true || !opts.demand || opts.demand.keys(unit.view.name).length > 0;
   /** W1-T13536: a view thread asks on every pass; the counter store is re-read at most once per refresh interval. */
   const storedReadiness = storedShadowReadinessReader(clock);
-  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && unit.dueAt <= now && demanded(unit)).sort((a, b) => a.dueAt - b.dueAt);
+  const dueUnits = (now: number): ViewUnit[] => units.filter((unit) => owns(unit) && built(unit.view.name) && !unit.stopped && unit.dueAt <= now && demanded(unit)).sort((a, b) => a.dueAt - b.dueAt);
 
   /**
    * Build oldest due units within the pass left since `tickStart`, fitting each by last cost.
@@ -2124,7 +2130,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     const ctx: ReadModelViewContext = { now, switches, ...(home ? { sourceStore: home, committed: (view: string, key: string) => committedBody(home, view, key) } : {}), instances: slots.map((slot) => ({ state: slot.state, ...(slot.db ? { db: slot.db } : {}), ...(slot.lease ? { lease: slot.lease } : {}) })), ...(shadow ? { shadow } : {}) };
     const generation = slots.reduce((sum, slot) => sum + slot.state.generation, 0);
     // W1-T12270: a unit stopped while its view could stop resumes, at its stretch, once its view no longer may.
-    for (const unit of units) if (unit.dueAt === Number.POSITIVE_INFINITY && owns(unit) && !stopsUnread(unit.view.name, shadow)) resume(unit, now);
+    for (const unit of units) if (unit.stopped && owns(unit) && !stopsUnread(unit.view.name, shadow)) resume(unit, now);
     if (only) return build(only, now, ctx, generation, soloMs);
     const left = passMs - (clock.now() - tickStart);
     let spent = 0;
@@ -2275,7 +2281,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       }
       // W1-T12270: only the units the wanted key names, and never a stopped one: a stop ends only on a read of it.
       for (const unit of units) {
-        if (unit.view.name !== view || !owns(unit) || !built(view) || unit.dueAt === Number.POSITIVE_INFINITY) continue;
+        if (unit.view.name !== view || !owns(unit) || !built(view) || unit.stopped) continue;
         if (key !== undefined && unit.slot && !demandKeyBelongsTo(unit, key)) continue;
         materialize(now, now, unit);
       }
@@ -2293,7 +2299,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         if (!read.has(unit.view.name)) continue;
         const scope = only(unit.view.name);
         if (scope !== undefined && unit.slot?.instance.name !== scope) continue;
-        if (unit.dueAt === Number.POSITIVE_INFINITY) {
+        if (unit.stopped) {
           // W1-T12270: the first read after a stop builds the unit on the next tick, ahead of every other due unit.
           resume(unit, 0);
           unit.stretch = 1;
@@ -2334,7 +2340,7 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
         if (move.view !== undefined && (unit.view.name !== move.view || unit.slot?.instance.name !== move.instance)) continue;
         unit.costSeeded = true;
         unit.restoredColdCost = move.restoredCost === true;
-        Object.assign(unit, { heavy: move.heavy, dueAt: move.dueAt, coldCostMs: move.coldCostMs }, move.costMs === undefined ? {} : { costMs: move.costMs });
+        Object.assign(unit, { heavy: move.heavy, dueAt: move.dueAt, coldCostMs: move.coldCostMs, stopped: move.stopped === true ? true : undefined }, move.costMs === undefined ? {} : { costMs: move.costMs });
         letGo(unit);
       }
       reportHeld(true);
