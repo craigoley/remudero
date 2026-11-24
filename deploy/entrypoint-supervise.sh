@@ -209,6 +209,28 @@ handoff_rollback_due() {
   printf '%s %s %s %s\n' "$tree" "$(handoff_record_field predecessor_sha)" "$(handoff_record_field successor_sha)" "$age"
 }
 
+# W1-T14730: the host watchdog and the deploy read the daemon's code as `$TREE`'s HEAD, but a successor runs from its own
+# daemon slot, so after a handoff the shared checkout is moved to the sha the live daemon runs: to the successor's
+# when it takes the run, back to the predecessor's on a rollback. `$1` is the sha. Best effort: a failure only logs,
+# because the daemon itself never runs from this checkout while a slot holds the run.
+follow_live_sha() {
+  local sha="$1" head out
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 0
+  head="$(git -C "$TREE" rev-parse HEAD 2>/dev/null)"
+  [ "$head" != "$sha" ] || return 0
+  git -C "$TREE" cat-file -e "${sha}^{commit}" 2>/dev/null || git -C "$TREE" fetch -q origin 2>/dev/null || :
+  if ! git -C "$TREE" cat-file -e "${sha}^{commit}" 2>/dev/null; then
+    log "handoff_tree_unmoved: $TREE stays at ${head:-unknown}: commit $sha is not in it after a fetch"
+    return 0
+  fi
+  clear_redundant_untracked "$sha"
+  if out="$(git -C "$TREE" checkout -q --detach "$sha" 2>&1)"; then
+    log "handoff_tree_followed: $TREE moved from ${head:-unknown} to $sha, the sha the live daemon runs"
+  else
+    log "handoff_tree_unmoved: $TREE stays at ${head:-unknown}: git refused to move it to $sha: ${out//$'\n'/ }"
+  fi
+}
+
 # Waits for the successor to exit, then sets `rc` to the code it wrote to `<pid>.exit`. No file
 # (a SIGKILL, an OOM kill, a crash before its exit hook) is a crash: rc 1.
 watch_successor() {
@@ -465,6 +487,8 @@ async function forwardLine(line) {
       pending_signal="${sig:-TERM}"
       signal_forwarded=""
     fi
+    [ -n "$successor_run" ] && [ "$(handoff_record_field successor_run_id)" = "$successor_run" ] &&
+      follow_live_sha "$(handoff_record_field successor_sha)"
     # W1-T14752: a standby's stdout and stderr go to its own log file (spawnStandbyDaemon), so once it holds the run
     # that file is copied to this container's stderr until the successor exits; docker logs would otherwise go silent.
     successor_log_pid=""
@@ -487,6 +511,7 @@ async function forwardLine(line) {
       rolled_back_sha="$bad_sha"
       rm -f -- "$HANDOFF_DIR/record.env"
       log "handoff_rolled_back: successor ${bad_sha:-unknown} ($successor_run) exited $rc ${rollback_age}s after the handoff — starting the daemon once from $rollback_tree at ${rollback_sha:-unknown}"
+      follow_live_sha "$rollback_sha"
       cd "$rollback_tree" || die "cannot enter rollback tree $rollback_tree"
       rollback_cwd="$rollback_tree"
       continue 2
