@@ -10,7 +10,7 @@ import { registerHooks } from 'node:module';
 registerHooks({ resolve(specifier, context, next) {
   return next(specifier === './clock.js' && context.parentURL?.endsWith('/dependency-seeds.ts') ? './clock.ts' : specifier, context);
 } });
-const { configuredDependencySeedRoot, defaultDependencySeedRoot, dependencySeedConfigPath, materializeDependencySeed, observeDependencySeedReuse, sweepDependencySeeds } = await import('../src/lib/dependency-seeds.ts');
+const { configuredDependencySeedRoot, defaultDependencySeedRoot, dependencySeedConfigPath, materializeDependencySeed, observeDependencySeedReuse, primeRefusalReceipt, sweepDependencySeeds } = await import('../src/lib/dependency-seeds.ts');
 
 /** True when `seed` lies in a macOS home only its owner can enter (mode and ACL): no other
  * non-root account can then hold a file open there, so the owner's own lsof is the complete view. */
@@ -244,14 +244,21 @@ export function main(argv = process.argv.slice(2)) {
     catch (error) { if (error.code === 'EEXIST') throw new Error('existing seed configuration must be reviewed before replacing it'); throw error; }
     console.log(JSON.stringify({ config: file, root }));
   } else if (command === 'prime' && checkout) {
-    console.log(JSON.stringify(materializeDependencySeed(checkout, { root, sourceDir: flag('--source'), proof: args.includes('--proof') })));
+    console.log(JSON.stringify(materializeDependencySeed(checkout, {
+      root, sourceDir: flag('--source'), proof: args.includes('--proof'), requester: flag('--requester'),
+    })));
   } else if (command === 'report') {
     if (args.includes('--apply')) throw new Error('report is read-only; --apply is not accepted');
     console.log(JSON.stringify(observeDependencySeedReuse(root), null, 2));
   } else if (command === 'sweep') {
     console.log(JSON.stringify(sweepDependencySeeds(root, { apply: args.includes('--apply'), isOpen: seedIsOpen }), null, 2));
-  } else throw new Error('usage: dependency-seeds.mjs enable [--root PATH] | prime CHECKOUT [--source DONOR] [--proof] [--root PATH] | report [--root PATH] | sweep [--root PATH] [--apply] | allocate PATH --owner ID --kind coverage|v8|dependency|browser --consumers PID,... | cleanup PATH --owner ID --receipt FILE [--apply]');
+  } else throw new Error('usage: dependency-seeds.mjs enable [--root PATH] | prime CHECKOUT [--source DONOR] [--proof] [--root PATH] [--requester ID] | report [--root PATH] | sweep [--root PATH] [--apply] | allocate PATH --owner ID --kind coverage|v8|dependency|browser --consumers PID,... | cleanup PATH --owner ID --receipt FILE [--apply]');
     return 0;
-  } catch (error) { console.error(`dependency-seeds: ${error.message}`); return 1; }
+  } catch (error) {
+    const receipt = primeRefusalReceipt(error);
+    if (receipt) console.error(JSON.stringify(receipt));
+    else console.error(`dependency-seeds: ${error.message}`);
+    return 1;
+  }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) process.exitCode = main();

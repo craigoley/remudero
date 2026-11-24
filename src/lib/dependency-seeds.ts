@@ -1,7 +1,7 @@
 /** Account-owned dependency generations. Checkout workspaces and caches stay private. */
 import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants, cpSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync, opendirSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync, writeSync, type Stats } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { systemClock } from "./clock.js";
@@ -17,6 +17,7 @@ export interface DependencySeedOptions {
   root?: string;
   sourceDir?: string;
   proof?: boolean;
+  requester?: string;
   platform?: NodeJS.Platform;
   npmVersion?: string;
   env?: NodeJS.ProcessEnv;
@@ -25,6 +26,77 @@ export interface DependencySeedOptions {
   lockWaitMs?: number;
 }
 export type DependencySeedResult = { status: "present" } | { status: "materialized"; key: string; seed: string; method: SeedMethod; installed: boolean; replaced?: true; lockReclaimed?: true };
+
+export const SEED_PRIME_RECOVERY = "Prime into a fresh absolute RMD_DEPENDENCY_SEED_ROOT for this process.";
+type SeedOffense = { path: string; mode: number | null; uid: number | null };
+type SeedConsumerReceipt = {
+  registration: string;
+  checkout: string | null;
+  mountNamespace: string | null;
+  references: boolean | "unread";
+  error?: string;
+};
+export interface DependencyGenerationRefusalReceipt {
+  kind: "generation_refused";
+  generation: string;
+  seed: string;
+  mode: "proof" | "development";
+  reason: string;
+  offending: SeedOffense | null;
+  consumers: SeedConsumerReceipt[];
+  consumerRegistryError?: string;
+  requester: { checkout: string; id?: string };
+  disposition: "kept-referenced" | "kept-unreferenced";
+  recovery: string;
+}
+
+export type DependencyGenerationRefusedError = Error & {
+  readonly name: "DependencyGenerationRefusedError";
+  readonly receipt: DependencyGenerationRefusalReceipt;
+};
+
+function generationRefused(receipt: DependencyGenerationRefusalReceipt): DependencyGenerationRefusedError {
+  return Object.assign(new Error(receipt.reason), { name: "DependencyGenerationRefusedError" as const, receipt });
+}
+
+export function primeRefusalReceipt(output: unknown): DependencyGenerationRefusalReceipt | undefined {
+  if (output instanceof Error && output.name === "DependencyGenerationRefusedError" && "receipt" in output) {
+    return (output as DependencyGenerationRefusedError).receipt;
+  }
+  if (typeof output !== "string" && !Buffer.isBuffer(output)) return undefined;
+  const line = String(output).split("\n").findLast(line => line.startsWith("{"));
+  if (!line) return undefined;
+  try {
+    const receipt = JSON.parse(line) as Partial<DependencyGenerationRefusalReceipt>;
+    if (receipt?.kind === "generation_refused" && typeof receipt.generation === "string" &&
+        typeof receipt.seed === "string" && typeof receipt.reason === "string" && Array.isArray(receipt.consumers) &&
+        typeof receipt.requester?.checkout === "string" && typeof receipt.recovery === "string" &&
+        (receipt.mode === "proof" || receipt.mode === "development") &&
+        (receipt.disposition === "kept-referenced" || receipt.disposition === "kept-unreferenced")) {
+      return receipt as DependencyGenerationRefusalReceipt;
+    }
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+  }
+  return undefined;
+}
+
+/** NODE_OPTIONS uses space-separated arguments with double-quoted spans and escapes inside quotes. */
+export function seedPrimeChildEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...parent };
+  const words = env.NODE_OPTIONS?.match(/(?:[^ "]|"(?:[^"\\]|\\.)*")+/g) ?? [];
+  const kept: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    const name = word.replace(/"((?:[^"\\]|\\.)*)"/g, (_, quoted: string) => quoted.replace(/\\(.)/g, "$1"));
+    const loader = /^(?:--(?:import|require|loader|experimental-loader)|-r)(=|$)/.exec(name.replaceAll("_", "-"));
+    if (!loader) kept.push(word);
+    else if (loader[1] !== "=") i++;
+  }
+  if (kept.length > 0) env.NODE_OPTIONS = kept.join(" ");
+  else delete env.NODE_OPTIONS;
+  return env;
+}
 
 /** Legacy owner records remain readable. New record names identify a particular lock owner. */
 const LOCK_OWNER = "owner.json";
@@ -230,7 +302,9 @@ export function dependencySeedIdentity(checkout: string, opts: DependencySeedOpt
 
 function ownedDirectory(path: string): void {
   const stat = lstatSync(path);
-  if (!stat.isDirectory() || stat.isSymbolicLink() || (process.getuid && process.getuid() !== 0 && stat.uid !== process.getuid())) throw new Error(`dependency seed directory is not account-owned: ${path}`);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (process.getuid && process.getuid() !== 0 && stat.uid !== process.getuid())) {
+    throw Object.assign(new Error(`dependency seed directory is not account-owned: ${path}`), { offending: seedOffense(path, stat) });
+  }
 }
 
 function makeStore(root: string): void {
@@ -409,10 +483,25 @@ function verifyPackages(checkout: string, modules: string): void {
   }
 }
 
+function seedOffense(path: string, stat: Stats | undefined): SeedOffense {
+  return { path, mode: stat ? stat.mode & 0o7777 : null, uid: stat?.uid ?? null };
+}
+
+function inspectSeedOffense(path: string): SeedOffense {
+  try {
+    return seedOffense(path, lstatSync(path, { throwIfNoEntry: false }));
+  } catch (error) {
+    if (!(error as NodeJS.ErrnoException).code) throw error;
+    return seedOffense(path, undefined);
+  }
+}
+
 /** Reuse must not lend a writable or escaping payload. Never repair a published seed in place. */
 function verifyImmutableGeneration(seed: string, files: Record<string, string>): void {
   ownedDirectory(seed);
-  if (realpathSync(seed) !== resolve(seed)) throw new Error("immutable dependency generation traverses a link");
+  if (realpathSync(seed) !== resolve(seed)) {
+    throw Object.assign(new Error("immutable dependency generation traverses a link"), { offending: inspectSeedOffense(seed) });
+  }
   const seen = new Set<string>();
   const visit = (path: string): void => {
     if (seen.has(path)) return;
@@ -420,21 +509,43 @@ function verifyImmutableGeneration(seed: string, files: Record<string, string>):
     const st = lstatSync(path);
     if (st.isSymbolicLink()) {
       const target = realpathSync(path);
-      if (!target.startsWith(`${seed}${sep}`)) throw new Error("immutable dependency link escapes generation");
+      if (!target.startsWith(`${seed}${sep}`)) {
+        throw Object.assign(new Error("immutable dependency link escapes generation"), { offending: seedOffense(path, st) });
+      }
       visit(target);
       return;
     }
     if ((!st.isDirectory() && !st.isFile()) || (st.mode & 0o222) || st.uid !== process.getuid?.())
-      throw new Error("immutable dependency payload is writable or unverified");
+      throw Object.assign(new Error("immutable dependency payload is writable or unverified"), { offending: seedOffense(path, st) });
     if (st.isDirectory()) for (const name of readdirSync(path)) visit(join(path, name));
   };
   visit(join(seed, "node_modules"));
   for (const [name, content] of Object.entries(files)) {
-    if (readFileSync(join(seed, name), "utf8") !== content) throw new Error("immutable dependency inputs changed");
+    const path = join(seed, name);
+    if (readFileSync(path, "utf8") !== content) {
+      throw Object.assign(new Error("immutable dependency inputs changed"), { offending: inspectSeedOffense(path) });
+    }
   }
   for (const name of Object.keys(files).filter(name => name.endsWith(`${sep}package.json`))) {
     const local = join(seed, dirname(name), "node_modules");
     if (existsSync(local)) visit(local);
+  }
+}
+
+function checkReadyGeneration<T>(seed: string, generation: string, checkout: string, opts: DependencySeedOptions, check: () => T): T {
+  try {
+    return check();
+  } catch (error) {
+    const failure = error as NodeJS.ErrnoException & { offending?: SeedOffense };
+    const { consumers, consumerRegistryError } = seedConsumerReceipts(seed);
+    throw generationRefused({
+      kind: "generation_refused", generation, seed, mode: opts.proof ? "proof" : "development",
+      reason: failure.message, offending: failure.offending ?? (failure.path ? inspectSeedOffense(failure.path) : null),
+      consumers, ...(consumerRegistryError === undefined ? {} : { consumerRegistryError }),
+      requester: { checkout, ...(opts.requester === undefined ? {} : { id: opts.requester }) },
+      disposition: consumers.some(row => row.references === true) ? "kept-referenced" : "kept-unreferenced",
+      recovery: SEED_PRIME_RECOVERY,
+    });
   }
 }
 
@@ -457,9 +568,12 @@ function verifyExistingDependencies(checkout: string, modules: string, opts: Dep
       typeof reference.seed !== "string" || !isAbsolute(reference.seed)) {
     throw new Error("occupied dependency generation identity mismatch");
   }
-  const ready = JSON.parse(readFileSync(join(reference.seed, "ready.json"), "utf8")) as SeedMetadata;
-  if (ready.version !== VERSION || ready.key !== expected.key) throw new Error("occupied dependency generation is not ready");
-  verifyImmutableGeneration(reference.seed, expected.files);
+  const seed = reference.seed;
+  checkReadyGeneration(seed, expected.key, checkout, opts, () => {
+    const ready = JSON.parse(readFileSync(join(seed, "ready.json"), "utf8")) as SeedMetadata;
+    if (ready.version !== VERSION || ready.key !== expected.key) throw new Error("occupied dependency generation is not ready");
+    verifyImmutableGeneration(seed, expected.files);
+  });
 }
 
 function linkPackages(seedModules: string, dest: string): void {
@@ -547,7 +661,7 @@ function readRegularJson<T>(path: string): T | undefined {
 /** W1-T11468: the inputs of the verified generation `modules` was materialized from for `owner`, or
  * undefined when its marker does not name `owner` or its generation is not ready. A generation that
  * fails verifyImmutableGeneration throws: a node_modules its seed cannot verify is never replaced. */
-function ownMaterializationInputs(owner: string, modules: string): Record<string, string> | undefined {
+function ownMaterializationInputs(owner: string, modules: string, checkout: string, opts: DependencySeedOptions): Record<string, string> | undefined {
   if (!lstatSync(modules).isDirectory()) return undefined;
   // An absent, non-regular or unparseable marker names no checkout: the destination is not provably this checkout's, so it is left to the old refusal.
   const marker = readRegularJson<{ version?: unknown; key?: unknown; checkout?: unknown; seed?: unknown; method?: unknown }>(join(modules, CONSUMER_MARKER));
@@ -556,13 +670,14 @@ function ownMaterializationInputs(owner: string, modules: string): Record<string
       typeof marker.key !== "string" || typeof marker.seed !== "string" || !isAbsolute(marker.seed)) return undefined;
   const ready = readRegularJson<SeedMetadata>(join(marker.seed, "ready.json"));
   if (!ready || ready.version !== VERSION || ready.key !== marker.key) return undefined;
-  verifyImmutableGeneration(marker.seed, ready.files);
+  const seed = marker.seed;
+  checkReadyGeneration(seed, marker.key, checkout, opts, () => verifyImmutableGeneration(seed, ready.files));
   return ready.files;
 }
 
 /** W1-T11468: the node_modules directories (root, then workspaces) to replace when the checkout's
  * own verified materialization was made from inputs its lockfile has since left; otherwise undefined. */
-function ownStaleMaterialization(checkout: string, dest: string): string[] | undefined {
+function ownStaleMaterialization(checkout: string, dest: string, opts: DependencySeedOptions): string[] | undefined {
   const current = readInputs(checkout);
   const targets: Array<[string, string]> = [[checkout, dest]];
   for (const name of Object.keys(current).filter(name => name.endsWith(`${sep}package.json`))) {
@@ -571,7 +686,7 @@ function ownStaleMaterialization(checkout: string, dest: string): string[] | und
   }
   let stale = false;
   for (const [owner, modules] of targets) {
-    const files = ownMaterializationInputs(owner, modules);
+    const files = ownMaterializationInputs(owner, modules, checkout, opts);
     if (!files) return undefined;
     const names = new Set([...Object.keys(files), ...Object.keys(current)]);
     if ([...names].some(name => files[name] !== current[name])) stale = true;
@@ -604,7 +719,7 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
   // The one exception: a proof prime replaces a link-only install of its own, because a proof run must not borrow tools from a seed.
   if (occupied && opts.proof && removeOwnLinkOnlyMaterialization(checkout, dest)) occupied = false;
   // W1-T11468: this checkout's own verified materialization of inputs its lockfile has left is replaced.
-  const replacing = occupied ? ownStaleMaterialization(checkout, dest) : undefined;
+  const replacing = occupied ? ownStaleMaterialization(checkout, dest, opts) : undefined;
   if (occupied && !replacing) { verifyExistingDependencies(checkout, dest, opts); return { status: "present" }; }
   const root = opts.root ?? configuredDependencySeedRoot() ?? defaultDependencySeedRoot();
   makeStore(root);
@@ -693,11 +808,14 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
       writeJsonAtomic(join(stage, "ready.json"), meta);
       renameSync(stage, seed);
     }
-    ownedDirectory(seed);
-    const ready = JSON.parse(readFileSync(join(seed, "ready.json"), "utf8")) as SeedMetadata;
-    if (ready.version !== VERSION || ready.key !== meta.key) throw new Error("dependency seed readiness metadata mismatch");
-    verifyImmutableGeneration(seed, meta.files);
-    verifyPackages(checkout, join(seed, "node_modules"));
+    const ready = checkReadyGeneration(seed, meta.key, checkout, opts, () => {
+      ownedDirectory(seed);
+      const ready = JSON.parse(readFileSync(join(seed, "ready.json"), "utf8")) as SeedMetadata;
+      if (ready.version !== VERSION || ready.key !== meta.key) throw new Error("dependency seed readiness metadata mismatch");
+      verifyImmutableGeneration(seed, meta.files);
+      verifyPackages(checkout, join(seed, "node_modules"));
+      return ready;
+    });
     const method: SeedMethod = meta.platform === "darwin" ? "apfs-clone" : opts.proof ? "private-copy" : "readonly-links";
     if (method === "readonly-links") { linkPackages(join(seed, "node_modules"), targetStage); setWritable(targetStage, true); }
     else { copyModules(join(seed, "node_modules"), targetStage, method === "apfs-clone"); setWritable(targetStage, true); }
@@ -728,6 +846,7 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
     renameSync(targetStage, dest);
     return { status: "materialized", key: meta.key, seed, method, installed, ...reclaimed };
   } catch (error) {
+    if (primeRefusalReceipt(error)) throw error;
     throw withSeedKey(error, meta.key, opts.proof);
   } finally {
     for (const path of [stage, targetStage]) if (existsSync(path)) { setWritable(path, true); rmSync(path, { recursive: true, force: true }); }
@@ -740,6 +859,54 @@ export function materializeDependencySeed(checkout: string, opts: DependencySeed
  * same path. Anything else, and any record on Linux, stays unverified. */
 export function legacyHostNamespace(checkout: string, platform: string = process.platform): string | undefined {
   return platform === "darwin" && /^\/(Users|private|var\/folders|tmp)\//.test(checkout) ? "host" : undefined;
+}
+
+function readSeedConsumer(seed: string, name: string): { checkout: string; mountNamespace?: string } {
+  const row = JSON.parse(readFileSync(join(seed, "consumers", name), "utf8"));
+  if (typeof row.checkout !== "string" || !isAbsolute(row.checkout)) throw new Error("invalid consumer reference");
+  return row;
+}
+
+function consumerReferencesSeed(seed: string, checkout: string, mountNamespace?: string): boolean | "foreign" {
+  const currentNamespace = process.platform === "linux" ? readlinkSync("/proc/self/ns/mnt") : "host";
+  if ((mountNamespace ?? legacyHostNamespace(checkout)) !== currentNamespace) return "foreign";
+  try {
+    const ref = JSON.parse(readFileSync(join(checkout, "node_modules", CONSUMER_MARKER), "utf8")) as { seed: string };
+    return ref.seed === seed;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return false;
+  }
+}
+
+function seedConsumerReceipts(seed: string): { consumers: SeedConsumerReceipt[]; consumerRegistryError?: string } {
+  let names: string[];
+  try {
+    ownedDirectory(seed);
+    if (realpathSync(seed) !== resolve(seed)) throw new Error("immutable dependency generation traverses a link");
+    const registry = join(seed, "consumers");
+    ownedDirectory(registry);
+    names = readdirSync(registry);
+  } catch (error) {
+    const reason = (error as Error).message;
+    return { consumers: [], consumerRegistryError: reason };
+  }
+  const consumers = names.map((registration): SeedConsumerReceipt => {
+    const receipt: SeedConsumerReceipt = { registration, checkout: null, mountNamespace: null, references: "unread" };
+    try {
+      if (!lstatSync(join(seed, "consumers", registration)).isFile()) throw new Error("consumer registration is not a regular file");
+      const { checkout, mountNamespace } = readSeedConsumer(seed, registration);
+      receipt.checkout = checkout;
+      receipt.mountNamespace = mountNamespace ?? null;
+      const references = consumerReferencesSeed(seed, checkout, mountNamespace);
+      if (references === "foreign") receipt.error = "foreign or unverified consumer mount namespace";
+      else receipt.references = references;
+    } catch (error) {
+      return { ...receipt, error: (error as Error).message };
+    }
+    return receipt;
+  });
+  return { consumers };
 }
 
 /** GC requires a successful all-account open-file check, six idle hours and zero checkout references. */
@@ -759,15 +926,10 @@ export function sweepDependencySeeds(root: string, opts: { apply?: boolean; now?
       if (meta.key !== key || meta.version !== VERSION || !Number.isFinite(meta.lastUsed)) throw new Error("invalid readiness metadata");
       if ((opts.now ?? systemClock.now()) - meta.lastUsed < DEPENDENCY_SEED_MIN_IDLE_MS) reason = "used within six hours";
       for (const name of readdirSync(join(seed, "consumers"))) {
-        const { checkout, mountNamespace } = JSON.parse(readFileSync(join(seed, "consumers", name), "utf8")) as { checkout: string; mountNamespace?: string };
-        if (typeof checkout !== "string" || !isAbsolute(checkout)) throw new Error("invalid consumer reference");
-        const currentNamespace = process.platform === "linux" ? readlinkSync("/proc/self/ns/mnt") : "host";
-        if ((mountNamespace ?? legacyHostNamespace(checkout)) !== currentNamespace) { reason = "foreign or unverified consumer mount namespace"; continue; }
-        const marker = join(checkout, "node_modules", CONSUMER_MARKER);
-        try {
-          const ref = JSON.parse(readFileSync(marker, "utf8")) as { seed: string };
-          if (ref.seed === seed) reason = "referenced by checkout";
-        } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        const { checkout, mountNamespace } = readSeedConsumer(seed, name);
+        const references = consumerReferencesSeed(seed, checkout, mountNamespace);
+        if (references === "foreign") reason = "foreign or unverified consumer mount namespace";
+        else if (references) reason = "referenced by checkout";
       }
       if (!reason) {
         if (!opts.isOpen) reason = "open-file scan unavailable";

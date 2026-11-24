@@ -1732,3 +1732,110 @@ export function escalateReplayStranded(
     delivered: issueUrl !== null,
   });
 }
+
+/** W1-T14611: the ledger markers of the unresolved-instance SRE lane page — one per open, one per clear. */
+export const SRE_LANE_UNRESOLVED_ESCALATED_STEP = "sre_lane.unresolved_escalated";
+export const SRE_LANE_UNRESOLVED_CLEARED_STEP = "sre_lane.unresolved_cleared";
+
+export interface SreLaneUnresolvedInfo {
+  primary: string;
+  stateRoot: string;
+  registry: string;
+  reason: string;
+}
+
+/** The issue URL a delivered page for this state root (and primary, when given) left open, or null. */
+async function openSreLaneUnresolvedIssue(ctx: ClaimStallCtx, stateRoot: string, primary?: string): Promise<string | null> {
+  let issueUrl: string | null = null;
+  for (const l of await claimStallRows(ctx, [SRE_LANE_UNRESOLVED_ESCALATED_STEP, SRE_LANE_UNRESOLVED_CLEARED_STEP])) {
+    if (l.state_root !== stateRoot) continue;
+    if (l.step === SRE_LANE_UNRESOLVED_CLEARED_STEP) issueUrl = null;
+    else if (primary === undefined || l.primary === primary) issueUrl = typeof l.issue_url === "string" ? l.issue_url : null;
+  }
+  return issueUrl;
+}
+
+/**
+ * W1-T14611: the page for a primary daemon whose SRE lane is off because it could not find its instance. Dedup is on
+ * the primary instance name and the state root: a delivered page that no later clear closed is not opened again.
+ * The marker is written whether or not delivery succeeded (`escalateStarvation`'s discipline).
+ */
+export async function escalateSreLaneUnresolved(info: SreLaneUnresolvedInfo, ctx: ClaimStallCtx): Promise<void> {
+  if (await openSreLaneUnresolvedIssue(ctx, info.stateRoot, info.primary) !== null) return;
+  const issueUrl = tryEscalate(
+    {
+      class: "BLOCKED",
+      taskId: "daemon",
+      runId: ctx.runId,
+      summary: `The SRE lane is off on the primary daemon: it could not find its instance (${info.reason}). ` +
+        `Recycle it with --instance ${info.primary} or set RMD_INSTANCE_NAME.`,
+      detail:
+        `W1-T14611: the daemon on state root ${info.stateRoot} started with its SRE lane off. It read the registry ` +
+        `${info.registry}, whose live primary instance is '${info.primary}', but could not find its own instance: ` +
+        `${info.reason}. The daemon is live; it will close this issue when the SRE lane next starts on this state root.`,
+      options: [
+        {
+          label: "name the instance",
+          detail: `Recycle the daemon with \`deploy/recycle-container.sh --instance ${info.primary}\`, or launch it with RMD_INSTANCE_NAME=${info.primary}.`,
+        },
+        {
+          label: "acknowledge and wait",
+          detail: "If this daemon is not the primary instance, no action is needed; the issue closes when the lane next starts here.",
+        },
+      ],
+      recommendation: "name the instance",
+      consequence: "While the lane is off, the SRE governor cannot page a fleet stall.",
+    },
+    {
+      issues: ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo),
+      ledgerPath: ctx.ledgerPath,
+      runId: ctx.runId,
+    },
+  );
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "daemon",
+    step: SRE_LANE_UNRESOLVED_ESCALATED_STEP,
+    primary: info.primary,
+    state_root: info.stateRoot,
+    registry: info.registry,
+    reason: info.reason,
+    issue_url: issueUrl,
+    delivered: issueUrl !== null,
+  });
+}
+
+/**
+ * W1-T14611: the cleared half — closes the issue the newest delivered page for this state root opened, unless a later
+ * cleared row already did. Absent means a silent no-op. CANNOT-OBSERVE MEANS WAIT (W1-T130), as the other clears.
+ */
+export async function escalateSreLaneUnresolvedCleared(info: { stateRoot: string; instance: string | null }, ctx: ClaimStallCtx): Promise<void> {
+  const issueUrl = await openSreLaneUnresolvedIssue(ctx, info.stateRoot);
+  if (issueUrl === null) return;
+  const comment = `W1-T14611: the SRE lane started on state root ${info.stateRoot}` +
+    `${info.instance !== null ? ` as instance '${info.instance}'` : ""}. Closing automatically.`;
+  const issues = ctx.issues ?? ghIssueGateway(ctx.owner, ctx.repo);
+  let delivered = false;
+  let failure: string | undefined;
+  if (!issues.closeWithComment) {
+    failure = "issue gateway cannot close issues";
+  } else {
+    try {
+      issues.closeWithComment(issueUrl, comment);
+      delivered = true;
+    } catch (e) {
+      // CANNOT-OBSERVE MEANS WAIT (W1-T130): never rethrown into the daemon loop; the row below carries it as `failure`.
+      failure = String((e as Error)?.message ?? e);
+    }
+  }
+  appendLedger(ctx.ledgerPath, {
+    run_id: ctx.runId,
+    task_id: "daemon",
+    step: SRE_LANE_UNRESOLVED_CLEARED_STEP,
+    state_root: info.stateRoot,
+    instance: info.instance,
+    issue_url: issueUrl,
+    delivered,
+    ...(failure ? { failure } : {}),
+  });
+}
