@@ -438,6 +438,17 @@ const STORE_CASES: ReadonlyArray<{ name: string; arrange: (f: ReturnType<typeof 
     f.dropLoose();
     installPack(f.objects, f.oid, Buffer.concat([entryHeader(7, 4), Buffer.alloc(20, 0xab), deflated(Buffer.from([0, 0, 0, 0]))]));
   } },
+  { name: "a delta with a zero opcode", refusal: /delta has a zero opcode/, arrange: f => {
+    f.dropLoose();
+    const base = Buffer.from(`base for ${f.text}`);
+    const baseOid = createHash("sha1").update(`blob ${base.length}\0`).update(base).digest("hex");
+    const loosePath = join(f.objects, baseOid.slice(0, 2), baseOid.slice(2));
+    mkdirSync(dirname(loosePath), { recursive: true });
+    writeFileSync(loosePath, deflated(`blob ${base.length}\0${base}`));
+    installPack(f.objects, f.oid, Buffer.concat([
+      entryHeader(7, 3), Buffer.from(baseOid, "hex"), deflated(Buffer.from([base.length, 0, 0])),
+    ]));
+  } },
   { name: "an offset delta that names itself, a chain past the bound", refusal: /delta chain is too deep/, arrange: f => {
     f.dropLoose();
     installPack(f.objects, f.oid, Buffer.concat([entryHeader(6, 4), Buffer.from([0]), deflated(Buffer.from([0, 0, 0, 0]))]));
