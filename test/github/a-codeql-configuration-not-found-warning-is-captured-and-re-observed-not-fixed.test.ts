@@ -378,3 +378,51 @@ test("W1-T13470 criterion 4: no new success path — every input keeps origin/ma
   assert.deepEqual(writes, [], "the sweep makes no GitHub write for this shape");
   assert.equal(calls.some((call) => /statuses|dispatches/.test(call)), false, "no commit status and no workflow dispatch");
 });
+
+/** W1-T14681 — the publish step over a pinned read: the PR, its one file, the given checks and this head's workflow runs. */
+const NOW_14681 = Date.parse("2026-11-24T16:26:00Z");
+const codeqlRun = (over: Record<string, unknown> = {}) => ({ id: 45437, path: ".github/workflows/codeql.yml", head_sha: HEAD,
+  status: "in_progress", run_started_at: new Date(NOW_14681 - 2 * 60_000).toISOString(), repository: { full_name: "craigoley/remudero" }, ...over });
+async function publish(checks: Check[], runs: unknown[]) {
+  const statuses: { state: string; description: string }[] = [];
+  const read = async (path: string) => {
+    if (path.includes("/actions/runs?")) return { total_count: runs.length, workflow_runs: runs };
+    if (path.includes("/files?")) return [{ filename: "src/lib/a.ts" }];
+    if (path.includes("/check-runs?")) return { total_count: checks.length, check_runs: checks };
+    return PR_ROW;
+  };
+  const result = await adapter.publishSecurityMergeDecision({ owner: "craigoley", repo: "remudero", prNumber: PR, expectedHead: HEAD },
+    { read, status: async (s: { state: string; description: string }) => { statuses.push(s); }, now: () => NOW_14681 }, undefined);
+  return { result, statuses };
+}
+
+test("W1-T14681: a configuration-not-found warning with an exact-head analysis still running posts pending", async () => {
+  // #20683 b9ae6d7c0: the neutral check landed after the actions and python analyses, while javascript-typescript ran on.
+  for (const status of ["queued", "in_progress"]) {
+    const { result, statuses } = await publish([warning()], [codeqlRun({ status })]);
+    assert.equal(result.decision.reason, REASON, "the decision keeps its own reason");
+    assert.equal(result.decision.mergeAllowed, false, "a waiting warning grants nothing");
+    assert.equal(statuses.length, 1);
+    assert.equal(statuses[0]!.state, "pending", `a ${status} CodeQL run`);
+    assert.equal(statuses[0]!.description, `unknown: ${REASON}`);
+  }
+});
+
+test("W1-T14681: a configuration-not-found warning with every analysis complete still posts unknown", async () => {
+  const overdue = new Date(NOW_14681 - adapter.CODEQL_RUN_PENDING_BOUND_MS - 1).toISOString();
+  const cases: [string, unknown[]][] = [
+    ["a completed run", [codeqlRun({ status: "completed" })]],
+    ["no run at this head", []],
+    ["a run past the bound", [codeqlRun({ run_started_at: overdue })]],
+    ["a newer completed re-run over an older running one", [codeqlRun({ id: 2, status: "in_progress" }), codeqlRun({ id: 3, status: "completed" })]],
+  ];
+  for (const [label, runs] of cases) {
+    const { result, statuses } = await publish([warning()], runs);
+    assert.equal(result.decision.state, "unknown", label);
+    assert.equal(result.decision.reason, REASON, label);
+    assert.equal(statuses[0]!.state, "error", label);
+  }
+  // GitHub's re-judgement after the last analysis is the only way out: the clean check beside a running run is success.
+  const cleared = await publish([warning({ id: 2 }), clean({ id: 3 })], [codeqlRun()]);
+  assert.equal(cleared.statuses[0]!.state, "success");
+});
