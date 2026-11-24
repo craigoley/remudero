@@ -20,17 +20,15 @@ type Original = CatalogOriginal;
 /** One GraphQL read: the CLI's own GitHub read, or a caller's pinned reader (W1-T13680). */
 export type MigrationGraphqlReader = (query: string) => Promise<unknown>;
 const graphqlRead: MigrationGraphqlReader = query => ghJsonAsync(["api", "graphql", "-f", `query=${query}`], undefined, undefined, { fresh: true });
-// BACKSTOP: refuse a runaway explicit preview whole, never truncate a population into absence.
-const MAX_CANDIDATE_LOOKUPS = 32;
 /** The page the open-PR read takes of each public pull request's files: a pull request of more files reads UNKNOWN. */
 const OPEN_PR_FILES_PAGE = 100;
 /**
- * W1-T14345 PRIMARY CONTROL: the most tasks one move step carries, derived from the readers' own limits: each batched task costs one
- * merge-credit lookup, and the step's public REMOVE pull request must stay readable by the open-PR files page. The ops
- * gate's own per-pull-request limit (50 records, remudero-ops scripts/ops-gate.rb) is above both. The catalog's room
- * (judgeOpsBatch) may stop a batch sooner.
+ * W1-T14345 PRIMARY CONTROL: the most tasks one move step carries. The step's public REMOVE pull request must stay
+ * readable by the open-PR files page, so a batch is that page. Operator ruling 2026-11-24 removed the 32-lookup
+ * backstop that also held it and the ops gate's 50-records-per-pull-request limit: every merge-credit lookup a batch
+ * needs is made. The catalog's room (judgeOpsBatch) may stop a batch sooner.
  */
-export const MOVE_BATCH_BOUND = Math.min(MAX_CANDIDATE_LOOKUPS, OPEN_PR_FILES_PAGE);
+export const MOVE_BATCH_BOUND = OPEN_PR_FILES_PAGE;
 /** W1-T14345 (operator ruling 2026-11-22): an open record is queued or blocked; merged and done records stay as history. */
 const OPEN_STATUSES: ReadonlySet<string> = new Set(["queued", "blocked"]);
 // The measured public corpus is 34,444,886 bytes. Leave 16 MiB for framing below the shared 64 MiB Git buffer.
@@ -494,8 +492,6 @@ export async function selectPlanTaskMigration(
       !publicRefs.has(`refs/rmd-id/${task.id}`) ? "reservation_absent" : undefined;
     if (unmovable) { refused.push({ id: task.id, reason: unmovable }); continue; }
     if (!control) return unknown("merge_credit_control_unreadable");
-    // A full lookup budget ends the batch; with nothing selected it is still a runaway, refused whole.
-    if (lookups === MAX_CANDIDATE_LOOKUPS) { if (batch.length === 0) return unknown("merge_credit_budget_exhausted"); break; }
     lookups++;
     const checked = await readState(o, publicRefs, opsRefs, { id: task.id, control, reader });
     const carrying = [...carried, carriedOf(task, original.path)];

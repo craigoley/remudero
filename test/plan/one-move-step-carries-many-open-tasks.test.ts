@@ -119,9 +119,9 @@ test("W1-T14345 criterion 1: a step's COPY pull request carries its whole batch 
   assert.equal(w.pulls.length, 2);
 });
 
-test("W1-T14345 criterion 1: a batch is as large as the readers' limits allow, so forty open records drain in two steps", async t => {
-  assert.equal(MOVE_BATCH_BOUND, 32, "the least of the merge-credit lookup cap (32) and the open-PR files page (100)");
-  const ids = Array.from({ length: 40 }, (_, i) => `W1-T${i + 1}`);
+test("W1-T14714 criterion 1 (W1-T14345 criterion 1): with no merge-credit lookup cap a batch is the open-PR files page, so 130 open records drain in two steps", async t => {
+  assert.equal(MOVE_BATCH_BOUND, 100, "the open-PR files page (100): no merge-credit lookup cap holds a batch");
+  const ids = Array.from({ length: 130 }, (_, i) => `W1-T${i + 1}`);
   const w = moveWorld(t, Object.fromEntries(ids.map(id => [id, record(id)])));
   const rounds: number[] = [];
   for (let round = 0; round < 4 && ids.some(id => w.holds("public", id)); round++) {
@@ -277,7 +277,7 @@ test("W1-T14345 criterion 3: a step interrupted after COPY converges for the who
   assert.deepEqual([held.out.step, held.out.id, held.out.reason], ["held", "W1-T2", "ops_copy_differs"], "and no new pick while it is pending");
 });
 
-test("W1-T14345 criterion 4: invariant:a-one-task-move-is-unchanged — a batch of one writes exactly origin/main's branches, files, receipts and pull requests", async t => {
+test("W1-T14345 criterion 4 (W1-T14714 criterion 2): invariant:a-one-task-move-is-unchanged — a batch of one writes exactly origin/main's branches, files, receipts and pull requests", async t => {
   const ID = "W1-T1", ORIGINAL = record(ID, "  files: [src/lib/moved.ts]\n");
   const w = moveWorld(t, { [ID]: ORIGINAL });
   const publicCommit = w.main("public"), opsBase = w.main("ops"), reservation = w.pub.origin.git("rev-parse", `refs/rmd-id/${ID}`);
