@@ -2319,18 +2319,22 @@ export async function regenerateConflictViaGit(
         return { outcome: "lease-mismatch", paths, reason: "head or main moved during conflict regeneration" };
       }
       await run(worktreePath, ["merge-base", "--is-ancestor", pr.headSha, newHeadSha]);
+      if (deps.owned?.kind === "session") {
+        // W1-T11170: a session branch takes only a merge commit (first parent the PR head); anything else is refused
+        // before any ownership read or push.
+        const parents = (await run(worktreePath, ["rev-list", "--parents", "-n", "1", newHeadSha])).trim().split(/\s+/);
+        if (parents[1] !== pr.headSha || parents.length !== 3) {
+          return { outcome: "error", paths, reason: `the session write is not a merge commit on ${pr.headSha}` };
+        }
+      }
       let held: string | undefined;
       try { held = await deps.owned?.recheck?.(); }
       catch (error) { held = `the ownership re-read failed: ${spawnFailureText(error)}`; }
       if (held !== undefined) return { outcome: "lease-mismatch", paths, reason: `ownership re-read before the push: ${held}` };
       assertLiveWriteAllowed("git-push", `regenerating conflicts on ${pr.headRefName}`);
       if (deps.owned?.kind === "session") {
-        // W1-T11170: a session branch takes only this merge commit (first parent the PR head), by a plain push with no
-        // force flag of any kind, after one more ownership read: an owner who pushed in between wins.
-        const parents = (await run(worktreePath, ["rev-list", "--parents", "-n", "1", newHeadSha])).trim().split(/\s+/);
-        if (parents[1] !== pr.headSha || parents.length !== 3) {
-          return { outcome: "error", paths, reason: `the session write is not a merge commit on ${pr.headSha}` };
-        }
+        // A session branch is written by a plain push with no force flag of any kind, after the ownership read
+        // above: an owner who pushed in between wins.
         try {
           if (deps.git) await run(worktreePath, ["push", "origin", `HEAD:${ref}`]);
           else await gitPushRunBranchAsync(worktreePath, { destination: pr.headRefName, expectedHeadSha: newHeadSha });
