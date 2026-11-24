@@ -8999,7 +8999,8 @@ export interface OpenPrView {
    *  these against the pass's fresh merge credit before the close is allowed to stand. */
   planResequenceUnmetDependencies?: readonly string[];
   /** W1-T4633 — set when an unmet-dependency close was WITHHELD because the pass's merge-credit read
-   *  could not speak for a dependency (no read, or a dependency outside the read's plan). The PR is
+   *  could not speak for a dependency (no read, or a dependency outside the read's plan), or (W1-T13226)
+   *  when every unmet dependency is in flight in its own open implementation PR. The PR is
    *  left open; runSweep logs this reason as `sweep.plan_resequence_close.held`. */
   planResequenceHeld?: string;
   /** Rolled-up remudero-review state on the head. */
@@ -11087,6 +11088,12 @@ export function projectMergedTaskCandidates(
  *     `planResequenceHeld` records why — the PR is left open, never closed.
  * `merged === true` alone is the evidence: whether the crediting PR IMPLEMENTED the task
  * (`creditIsImplementation`) is a supersession question, not whether the dependency merged.
+ *
+ * W1-T13226 — A DEPENDENCY IN FLIGHT IN ITS OWN OPEN PR IS NOT A RESEQUENCE. MEASURED 2026-11-16:
+ * remudero-console #2568 (CONSOLE-T184) was closed for CONSOLE-T182 while #2564, carrying that
+ * trailer, was open and green. A still-unmet id that another open, non-plan-filing PR (never the
+ * judged PR itself) credits is HELD: every such id ⇒ the reason is cleared and `planResequenceHeld`
+ * names each dependency's PR; only some ⇒ the close stands, naming only the ids with no open PR.
  * PURE.
  */
 export function recheckResequenceCloseAgainstFreshCredit(
@@ -11108,17 +11115,43 @@ export function recheckResequenceCloseAgainstFreshCredit(
       };
     }
     const stillUnmet = unmet.filter((id) => !mergedTaskIds.has(id));
-    if (stillUnmet.length === unmet.length) return pr;
     if (stillUnmet.length === 0) {
       return { ...pr, planResequenceIneligible: undefined, planResequenceUnmetDependencies: undefined };
     }
+    const openPrByTask = openImplementationPrByTask(prs, pr.prNumber);
+    const inFlight = stillUnmet.filter((id) => openPrByTask.has(id));
+    const closable = stillUnmet.filter((id) => !openPrByTask.has(id));
+    if (closable.length === 0) {
+      return {
+        ...pr,
+        planResequenceIneligible: undefined,
+        planResequenceUnmetDependencies: undefined,
+        planResequenceHeld: inFlight
+          .map((id) => `unmet dependency ${id} has open PR #${openPrByTask.get(id)} — held until it merges or closes`)
+          .join("; "),
+      };
+    }
+    if (closable.length === unmet.length) return pr;
     return {
       ...pr,
       planResequenceIneligible:
-        `unmet dependenc${stillUnmet.length === 1 ? "y" : "ies"} in the current plan: ${stillUnmet.join(", ")}`,
-      planResequenceUnmetDependencies: stillUnmet,
+        `unmet dependenc${closable.length === 1 ? "y" : "ies"} in the current plan: ${closable.join(", ")}`,
+      planResequenceUnmetDependencies: closable,
     };
   });
+}
+
+/** W1-T13226 — the task each OPEN implementation PR credits, mapped to its lowest PR number. Only a
+ *  positively non-plan-filing PR (`isPlanFiling === false`) with a task id counts — a filing PR
+ *  carries the task's record, not its build — and never `judged`, so a PR cannot hold itself. PURE. */
+function openImplementationPrByTask(prs: readonly OpenPrView[], judged: number): Map<string, number> {
+  const byTask = new Map<string, number>();
+  for (const other of prs) {
+    if (other.prNumber === judged || other.isPlanFiling !== false || !other.taskId) continue;
+    const known = byTask.get(other.taskId);
+    if (known === undefined || other.prNumber < known) byTask.set(other.taskId, other.prNumber);
+  }
+  return byTask;
 }
 
 function stampTaskMergedBy(prs: readonly OpenPrView[], candidates: readonly CreditCandidate[] | undefined): OpenPrView[] {
