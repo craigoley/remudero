@@ -14193,17 +14193,26 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     };
   }
   let priorPending = hasInputIdentity ? undefined : lastPendingReviewStatusFromLedger(lines, opts.taskId);
+  // W1-T14764: a claim whose own run later posted a terminal verdict for this input is a FINISHED review, not a claim.
+  // A new review of the input (reachable only once a reviewer-code advance cleared that verdict) is a re-review.
+  let finishedPriorRunId: string | undefined;
   if (hasInputIdentity) {
+    const runsWithATerminalVerdict = new Set<unknown>();
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i]!;
       if (
-        line.step !== "review.pending_posted" ||
         line.task_id !== opts.taskId ||
         line.pr_url !== opts.prUrl ||
         line.head_sha !== opts.sha ||
         line.review_input_digest !== opts.reviewInputDigest
       ) {
         continue;
+      }
+      if (line.step === "review.posted" && postedReviewStatusRecord(line) !== undefined) runsWithATerminalVerdict.add(line.run_id);
+      if (line.step !== "review.pending_posted") continue;
+      if (typeof line.run_id === "string" && runsWithATerminalVerdict.has(line.run_id)) {
+        finishedPriorRunId = line.run_id;
+        break;
       }
       priorPending = pendingReviewStatusRecord(line);
       break;
@@ -14289,6 +14298,9 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       : takenOverFrom
       ? `remudero-review: review in progress (owned by run ${opts.runId}) — took over a stale claim ` +
         `(>= ${Math.round(REVIEW_LOCK_TTL_MS / 60_000)}m old) from run ${takenOverFrom.runId} (W1-T3647)`
+      : finishedPriorRunId !== undefined
+      ? `remudero-review: review in progress (owned by run ${opts.runId}) — re-review of this input at reviewer code ` +
+        `${opts.reviewEngineRevision?.slice(0, 7) ?? "unknown"} (prior run ${finishedPriorRunId})`
       : `remudero-review: review in progress (owned by run ${opts.runId})`
   ).slice(0, 140);
   const ownerIdentity = opts.ownerIdentity ?? { pid: process.pid, startedAt: new Date().toISOString() };
@@ -14322,6 +14334,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
       ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
       ...(takenOverFrom ? { took_over_run_id: takenOverFrom.runId } : {}),
+      ...(!takenOverFrom && finishedPriorRunId !== undefined ? { prior_run_id: finishedPriorRunId } : {}),
     });
     const linesReadBeforeThisClaim = lines;
     const takeoversCountedForTheLedgerOnly = takenOverFrom ? priorReviewClaimTakeovers(linesReadBeforeThisClaim, { ...opts }) + 1 : 0;
