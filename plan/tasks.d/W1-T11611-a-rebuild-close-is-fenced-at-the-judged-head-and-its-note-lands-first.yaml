@@ -6,7 +6,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 8.00
+  budget_usd: 4.50
   risk: high # it changes the order and fencing of an existing autonomous close of an unmerged PR; it adds no new close and no new GitHub write verb
   origin: architect
   plan_refs:

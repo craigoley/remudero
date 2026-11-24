@@ -7,21 +7,32 @@
  * filing time, the existing tests that import a src module the task declares AND name a word its
  * title, design or rationale uses, so the filer can add them to files: before the build.
  *
+ * W1-T14512: the advisory also reads the nightly test impact map and lists the tests that ran a function the
+ * design names, and warns when no design symbol is in the declared files.
+ *
  * INVARIANT pinning-tests-never-blocks: every violation here has severity warn.
+ * INVARIANT token-arm-unchanged: without a usable map the listed tests and their order are as before.
  * INVARIANT pinning-tests-bounded: the check stops at its time budget and says so.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import { buildAffectedSuitesGraph, stripComments } from "./affected-suites.js";
 import type { Clock } from "./clock.js";
 import type { Task } from "./plan.js";
 import type { LintViolation } from "./task-linter.js";
+import { IMPACT_MAP_STALENESS_BOUND, impactDrift, readImpactMap } from "./test-impact-map.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 
 export const PINNING_TESTS_BUDGET_MS = 10_000;
 /** The message names at most this many tests; the stderr event lists every one. */
 export const PINNING_TESTS_NAMED = 10;
+/** The message names at most this many tests when the impact map was read. */
+export const PINNING_TESTS_NAMED_WITH_MAP = 25;
+/** The impact map's path under the code root's git common dir. */
+export const PINNING_IMPACT_MAP_FILE = "rmd/test-impact-map.json";
+const EVENT_LISTED = 200;
+const ELSEWHERE_NAMED = 5;
 
 export interface PinningTestInput {
   /** path -> text of each test file the reader's prefilter found. */
@@ -31,16 +42,31 @@ export interface PinningTestInput {
   clock: Clock;
   /** When the clock started; the reader's time counts against the budget. Defaults to the first reading. */
   startedAt?: number;
+  /** What the impact map arm found; absent, only the token arm runs. */
+  impact?: PinningImpact;
 }
 
-export interface PinningTestListing { path: string; tokens: string[]; score: number }
+export interface PinningTestListing { path: string; tokens: string[]; score: number; arms: Array<"token" | "impact">; ran: string[] }
+
+/** One suite the map says ran a design symbol; each symbol that N suites ran adds 1/N. */
+export interface PinningImpactListing { path: string; ran: string[]; score: number }
+
+export type PinningImpact =
+  | { outcome: "ran"; sha: string; distance: number; symbols: string[]; listed: PinningImpactListing[] }
+  | { outcome: "no-map"; path: string }
+  | { outcome: "unusable"; path: string; reason: string; sha?: string };
+
+/** A design symbol declared only outside the task's declared src files. */
+export interface PinningElsewhere { symbol: string; file: string }
 
 export type PinningTestCandidates =
-  | { outcome: "ran"; modules: string[]; listed: PinningTestListing[]; tokens: string[]; ms: number }
+  | { outcome: "ran"; modules: string[]; listed: PinningTestListing[]; tokens: string[]; ms: number;
+    impact?: PinningImpact; elsewhere?: PinningElsewhere[] }
   | { outcome: "over_budget"; budgetMs: number; ms: number }
   | { outcome: "unreadable"; reason: string };
 
 type PinningTask = Pick<Task, "id" | "type" | "title" | "files" | "design" | "rationale" | "note">;
+type OverBudget = Extract<PinningTestCandidates, { outcome: "over_budget" }>;
 
 const WORD = /[A-Za-z_$][\w$]*/g;
 const QUOTED = /"([^"\n]{8,80})"/g;
@@ -71,11 +97,16 @@ export function declaredSrcPaths(task: Pick<Task, "files">): string[] {
 /** The task's words a declared module also holds: camelCase / PascalCase / UPPER_SNAKE words of 6 or more
  *  characters from title, design and rationale, and the design's double-quoted strings of 8-80 characters that are
  *  not a bare path. */
-function keptTokens(task: PinningTask, moduleTexts: readonly string[]): string[] {
+function taskWords(task: PinningTask): string[] {
   const words = new Set<string>();
   for (const text of [task.title, task.design ?? "", task.rationale ?? ""]) {
     for (const m of text.matchAll(WORD)) if (m[0].length >= 6 && (isCamel(m[0]) || isUpperSnake(m[0]))) words.add(m[0]);
   }
+  return [...words];
+}
+
+function keptTokens(task: PinningTask, moduleTexts: readonly string[]): string[] {
+  const words = new Set(taskWords(task));
   for (const m of (task.design ?? "").matchAll(QUOTED)) if (!BARE_PATH.test(m[1]!)) words.add(m[1]!);
   return [...words].filter((w) => moduleTexts.some((t) => t.includes(w))).sort();
 }
@@ -100,7 +131,12 @@ export function pinningTestCandidates(task: PinningTask, input: PinningTestInput
     moduleTexts.push(stripComments(text));
   }
   const tokens = keptTokens(task, moduleTexts);
-  if (modules.length === 0 || tokens.length === 0) return { outcome: "ran", modules, listed: [], tokens, ms: elapsed() };
+  const impact = input.impact;
+  const done = (tokenListed: PinningTestListing[]): PinningTestCandidates => ({
+    outcome: "ran", modules, listed: mergeArms(tokenListed, impact?.outcome === "ran" ? impact.listed : []), tokens,
+    ms: elapsed(), ...(impact ? { impact } : {}),
+  });
+  if (modules.length === 0 || tokens.length === 0) return done([]);
   const declared = new Set(task.files ?? []);
   const named = `${task.design ?? ""}\n${task.note ?? ""}`;
   // Match the tokens first, on each test's comment-free text: only a test that names one needs a graph node.
@@ -121,32 +157,157 @@ export function pinningTestCandidates(task: PinningTask, input: PinningTestInput
   }));
   const namedBy = new Map<string, number>();
   for (const hits of matched.values()) for (const t of hits) namedBy.set(t, (namedBy.get(t) ?? 0) + 1);
-  const listed = [...matched].map(([path, hits]) => ({
-    path, tokens: hits, score: hits.reduce((sum, t) => sum + 1 / namedBy.get(t)!, 0),
-  })).sort((a, b) => b.score - a.score || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  return { outcome: "ran", modules, listed, tokens, ms: elapsed() };
+  return done([...matched].map(([path, hits]) => ({
+    path, tokens: hits, score: hits.reduce((sum, t) => sum + 1 / namedBy.get(t)!, 0), arms: ["token"], ran: [],
+  })));
 }
 
-/** The advisory: one warn naming at most 10 listed tests, or one warn that the check ran out of time. */
+const byScore = (a: { score: number; path: string }, b: { score: number; path: string }): number =>
+  b.score - a.score || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+
+function mergeArms(tokenListed: PinningTestListing[], impactListed: readonly PinningImpactListing[]): PinningTestListing[] {
+  const byPath = new Map(tokenListed.map((l) => [l.path, l]));
+  for (const l of impactListed) {
+    const t = byPath.get(l.path);
+    byPath.set(l.path, t ? { ...t, score: t.score + l.score, arms: ["token", "impact"], ran: l.ran }
+      : { path: l.path, tokens: [], score: l.score, arms: ["impact"], ran: l.ran });
+  }
+  return [...byPath.values()].sort(byScore);
+}
+
+/** The design words a declaration can name: the token words, but a PascalCase word only at 8 or more characters. */
+function designSymbols(task: PinningTask): string[] {
+  return taskWords(task).filter((w) => isUpperSnake(w) || /^[a-z]/.test(w) || w.length >= 8).sort();
+}
+
+interface Declaration { symbol: string; path: string; line: number }
+
+/** One git grep -o over src/ (at `rev`, or the working tree) for a function, class, const, let, var or method
+ *  declaration of each symbol. */
+function declarationsOf(codeRoot: string, symbols: readonly string[], rev?: string): Declaration[] {
+  if (symbols.length === 0) return [];
+  const alt = symbols.join("|");
+  const patterns = [
+    `(function[[:space:]]*\\*?|class|const|let|var)[[:space:]]+(${alt})([^[:alnum:]_$]|$)`,
+    `^[[:space:]]*((public|private|protected|static|async|readonly|override|get|set)[[:space:]]+)*\\*?(${alt})` +
+      "[[:space:]]*(<.*>)?\\(([^=]|=[^>])*\\{[[:space:]]*$",
+  ];
+  let out = "";
+  try {
+    out = hostWorktreeGit(codeRoot, ["grep", "-n", "-o", "-I", "-E", ...patterns.flatMap((p) => ["-e", p]),
+      ...(rev ? [rev] : []), "--", "src/"], { maxBuffer: 1 << 26 });
+  } catch (error) {
+    if ((error as { status?: unknown }).status !== 1) throw error; // exit 1 is git grep's "no match"
+  }
+  const name = new RegExp(`(?<![\\w$])(${alt})(?![\\w$])`);
+  const seen = new Set<string>();
+  const found: Declaration[] = [];
+  for (const raw of out.split("\n")) {
+    const m = /^(.+?):(\d+):(.*)$/.exec(rev && raw.startsWith(`${rev}:`) ? raw.slice(rev.length + 1) : raw);
+    const symbol = m ? name.exec(m[3]!)?.[1] : undefined;
+    if (!m || !symbol || seen.has(`${symbol}:${m[1]}:${m[2]}`)) continue;
+    seen.add(`${symbol}:${m[1]}:${m[2]}`);
+    found.push({ symbol, path: m[1]!, line: Number(m[2]) });
+  }
+  return found;
+}
+
+/** The map arm: the suites that ran a function the design names, read from the map at `mapPath`. No file is
+ *  no-map; a bad map, a HEAD that does not descend from its sha, or one past the staleness bound is unusable. */
+export function impactArmPinningTests(
+  task: PinningTask, input: { codeRoot: string; mapPath: string; over: () => OverBudget | undefined },
+): PinningImpact | OverBudget {
+  const { codeRoot, mapPath } = input;
+  if (!existsSync(mapPath)) return { outcome: "no-map", path: mapPath };
+  const { map, problem } = readImpactMap(mapPath);
+  const afterRead = input.over();
+  if (afterRead) return afterRead;
+  if (!map) return { outcome: "unusable", path: mapPath, reason: problem ?? "the map could not be read" };
+  const drift = impactDrift(codeRoot, map.sha, "HEAD");
+  const reason = drift.problem ?? (drift.distance === undefined ? "no distance from HEAD"
+    : drift.distance > IMPACT_MAP_STALENESS_BOUND
+      ? `HEAD is ${drift.distance} commits past the map, over the bound of ${IMPACT_MAP_STALENESS_BOUND}` : undefined);
+  if (reason !== undefined) return { outcome: "unusable", path: mapPath, reason, sha: map.sha };
+  const decls = declarationsOf(codeRoot, designSymbols(task), map.sha);
+  const afterSearch = input.over();
+  if (afterSearch) return afterSearch;
+  const ranBy = new Map<string, Set<number>>();
+  for (const d of decls) {
+    let inner: number[] | undefined;
+    for (const row of map.files[d.path]?.functions ?? []) {
+      if (row[0]! <= d.line && d.line <= row[1]! && (!inner || row[1]! - row[0]! < inner[1]! - inner[0]!)) inner = row;
+    }
+    if (!inner) continue;
+    const ids = ranBy.get(d.symbol) ?? new Set<number>();
+    for (const i of inner.slice(2)) ids.add(i);
+    ranBy.set(d.symbol, ids);
+  }
+  const declared = new Set(task.files ?? []);
+  const named = `${task.design ?? ""}\n${task.note ?? ""}`;
+  const byPath = new Map<string, PinningImpactListing>();
+  for (const [symbol, ids] of [...ranBy].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    for (const i of ids) {
+      const path = map.suites[i];
+      if (path === undefined || declared.has(path) || named.includes(path) || !existsSync(join(codeRoot, path))) continue;
+      const l = byPath.get(path) ?? { path, ran: [], score: 0 };
+      l.ran.push(symbol);
+      l.score += 1 / ids.size;
+      byPath.set(path, l);
+    }
+  }
+  const symbols = [...new Set(decls.map((d) => d.symbol))].sort();
+  return { outcome: "ran", sha: map.sha, distance: drift.distance!, symbols, listed: [...byPath.values()].sort(byScore) };
+}
+
+/** The design symbols declared in src/ at the code root, when none is declared in a declared src file. */
+function movedCode(task: PinningTask, codeRoot: string): PinningElsewhere[] {
+  const src = declaredSrcPaths(task);
+  if (src.length === 0) return [];
+  const decls = declarationsOf(codeRoot, designSymbols(task));
+  if (decls.length === 0 || decls.some((d) => src.includes(d.path))) return [];
+  const first = new Map<string, string>();
+  for (const d of [...decls].sort((a, b) => (a.symbol + a.path < b.symbol + b.path ? -1 : 1))) {
+    if (!first.has(d.symbol)) first.set(d.symbol, d.path);
+  }
+  return [...first].slice(0, ELSEWHERE_NAMED).map(([symbol, file]) => ({ symbol, file }));
+}
+
+/** The advisory: one warn naming at most 10 listed tests (25 with the map), one warn when the code may have moved,
+ *  or one warn that the check ran out of time. */
 export function pinningTestViolations(task: Pick<Task, "id">, candidates: PinningTestCandidates): LintViolation[] {
   if (candidates.outcome === "over_budget") {
     return [{ check: "pinning-tests", severity: "warn",
       message: `pinning-tests did not run: over its ${candidates.budgetMs} ms budget after ${candidates.ms} ms` }];
   }
-  if (candidates.outcome !== "ran" || candidates.listed.length === 0) return [];
-  const shown = candidates.listed.slice(0, PINNING_TESTS_NAMED).map((l) => `${l.path} (${l.tokens.join(", ")})`);
+  if (candidates.outcome !== "ran") return [];
+  const out: LintViolation[] = [];
+  const withMap = candidates.impact?.outcome === "ran";
+  const why = (l: PinningTestListing): string =>
+    [l.tokens.join(", "), l.ran.length > 0 ? `ran ${l.ran.join(", ")}` : ""].filter(Boolean).join("; ");
+  const shown = candidates.listed.slice(0, withMap ? PINNING_TESTS_NAMED_WITH_MAP : PINNING_TESTS_NAMED)
+    .map((l) => `${l.path} (${why(l)})`);
   const more = candidates.listed.length - shown.length;
-  return [{
+  const noMap = candidates.impact?.outcome === "no-map" ? ` No impact map was read; put the test-impact-map artifact ` +
+    `of a coverage-nightly run at ${candidates.impact.path} to also list the tests that run the changed code.` : "";
+  if (shown.length > 0) out.push({
     check: "pinning-tests",
     severity: "warn",
-    message: `task ${task.id} declares ${candidates.modules.join(", ")}. These existing tests import it and name what ` +
-      `its design changes: ${shown.join("; ")}${more > 0 ? ` and ${more} more` : ""}. They may pin the old behaviour. ` +
+    message: `task ${task.id}${candidates.modules.length > 0 ? ` declares ${candidates.modules.join(", ")}` : ""}. ` +
+      `These existing tests import it and name what its design changes${withMap ? ", or ran a function its design names" : ""}: ` +
+      `${shown.join("; ")}${more > 0 ? ` and ${more} more` : ""}. They may pin the old behaviour. ` +
       "A build that changes a test outside files: is refused by the acceptance-author gate " +
       "(canonical-task-scope-exceeded) until a scope amendment merges. This is ADVISORY, never blocking, because a " +
       "test can name a symbol without pinning the changed behaviour. TO CLEAR IT: add each test that pins the old " +
       "behaviour to files:, or name its path in design or note and say why it does not change. " +
-      "Copy this list into the filing PR body.",
-  }];
+      `Copy this list into the filing PR body.${noMap}`,
+  });
+  if (candidates.elsewhere && candidates.elsewhere.length > 0) out.push({
+    check: "pinning-tests",
+    severity: "warn",
+    message: `task ${task.id} names ${candidates.elsewhere.map((e) => `${e.symbol} (declared in ${e.file})`).join(", ")}, ` +
+      "but none of its declared src files declares a symbol its design names. The code may have moved: check files:.",
+  });
+  return out;
 }
 
 /** Whether the --base pass checks this task: an implement task that is new, or whose files:, design or
@@ -184,15 +345,32 @@ export function readPinningTestInput(codeRoot: string, declaredModules: readonly
  *  is listed, so the event counts every checked task). A read failure is outcome unreadable and lists nothing. */
 export function runPinningTests(task: PinningTask, codeRoot: string, clock: Clock): PinningTestCandidates {
   const startedAt = clock.now();
+  const over = (): OverBudget | undefined => {
+    const ms = clock.now() - startedAt;
+    return ms > PINNING_TESTS_BUDGET_MS ? { outcome: "over_budget", budgetMs: PINNING_TESTS_BUDGET_MS, ms } : undefined;
+  };
   let result: PinningTestCandidates;
   try {
-    const read = readPinningTestInput(codeRoot, declaredSrcPaths(task));
-    result = pinningTestCandidates(task, { ...read, clock, startedAt });
+    const commonDir = resolve(codeRoot, hostWorktreeGit(codeRoot, ["rev-parse", "--git-common-dir"]).trim());
+    const impact = impactArmPinningTests(task, { codeRoot, mapPath: join(commonDir, PINNING_IMPACT_MAP_FILE), over });
+    if (impact.outcome === "over_budget") result = impact;
+    else {
+      const elsewhere = movedCode(task, codeRoot);
+      const read = over() ?? readPinningTestInput(codeRoot, declaredSrcPaths(task));
+      result = "outcome" in read ? read : pinningTestCandidates(task, { ...read, clock, startedAt, impact });
+      if (result.outcome === "ran" && elsewhere.length > 0) result = { ...result, elsewhere };
+    }
   } catch (error) {
     result = { outcome: "unreadable", reason: String((error as Error)?.message ?? error) };
   }
+  const impactEvent = (i: PinningImpact | undefined) => i === undefined ? {} : {
+    impact: i.outcome === "ran" ? { outcome: i.outcome, sha: i.sha, distance: i.distance, symbols: i.symbols }
+      : i.outcome === "no-map" ? { outcome: i.outcome, path: i.path } : { outcome: i.outcome, sha: i.sha, reason: i.reason },
+  };
   const event = result.outcome === "ran"
-    ? { listed: result.listed.map((l) => l.path), tokens: result.tokens, ms: result.ms }
+    ? { listed: result.listed.slice(0, EVENT_LISTED).map((l) => l.path), listedCount: result.listed.length,
+      tokens: result.tokens, ms: result.ms, ...impactEvent(result.impact),
+      ...(result.elsewhere ? { elsewhere: result.elsewhere } : {}) }
     : result.outcome === "over_budget" ? { ms: result.ms } : { reason: result.reason };
   console.error(JSON.stringify({ event: "lint_plan.pinning_tests", task: task.id, outcome: result.outcome, ...event }));
   return result;

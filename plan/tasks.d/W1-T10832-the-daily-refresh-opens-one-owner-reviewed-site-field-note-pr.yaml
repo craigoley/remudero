@@ -27,6 +27,8 @@
     - test/deploy/the-field-trials-refresh-passes-the-host-consent-file.test.ts
     - "src/lib/field-trials-refresh.ts"
     - "src/lib/sweep.ts"
+    - docs/cli-reference.md # 2026-11-23: the rmd field-trials entry names the daily site import
+    - test/every-host-git-spawn-into-a-worktree-uses-the-hardened-leaf.test.ts # 2026-11-23: the site clone is a reasoned widened-site exception
   rationale: |
     READ 2026-10-27: core origin/main 07dbdcc77, remudero-site main b80fbbb, the host read-only.
 

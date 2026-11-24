@@ -243,9 +243,11 @@ test("coverage entry refuses a shard whose file process exited 0 before its own 
   }
 });
 
-test("coverage shard scheduling is CPU-bounded while the shard count stays CI's twelve (W1-T13270)", () => {
-  assert.equal(CI_COVERAGE_SHARD_COUNT, 12);
-  assert.equal(coverageShardConcurrency(16), 12);
+test("coverage shard scheduling is CPU-bounded while the shard count stays CI's sixteen (W1-T13270, W1-T14558)", () => {
+  assert.equal(CI_COVERAGE_SHARD_COUNT, 16);
+  assert.equal(coverageShardConcurrency(32), 16);
+  assert.equal(coverageShardConcurrency(16), 16);
+  assert.equal(coverageShardConcurrency(12), 12);
   assert.equal(coverageShardConcurrency(8), 8);
   assert.equal(coverageShardConcurrency(4), 4);
   assert.equal(coverageShardConcurrency(2), 2);

@@ -27,9 +27,9 @@ import { sameTestFile } from "./test-path-resolver.js";
 // observation, so this bounds the reads, not the evidence (30 failures in 60 runs needed a ~50% rate).
 export const SELECTOR_SHADOW_RUN_LIMIT = 60;
 export const SELECTOR_SHADOW_SHARDS = 8;
-/** W1-T13270: the coverage matrix moved from 8 to 12 shards. A run is read at the width its own job names
- *  carry (`coverage-shard (k/N)`), so stored 8-shard runs and new 12-shard runs both stay evidence. */
-export const SELECTOR_SHADOW_SHARD_COUNTS: readonly number[] = Object.freeze([SELECTOR_SHADOW_SHARDS, 12]);
+/** W1-T13270: the coverage matrix moved from 8 to 12 shards, and W1-T14558 to 16. A run is read at the width its own
+ *  job names carry (`coverage-shard (k/N)`), so stored 8- and 12-shard runs and new 16-shard runs all stay evidence. */
+export const SELECTOR_SHADOW_SHARD_COUNTS: readonly number[] = Object.freeze([SELECTOR_SHADOW_SHARDS, 12, 16]);
 const SHARD_PREFIX = /coverage-shard \((\d+)\/(\d+)\)/;
 
 /** The one matrix width a run's evidence lines name, or undefined when they disagree or name an unknown width.

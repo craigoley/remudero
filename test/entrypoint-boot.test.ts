@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { DAEMON_EXIT_BLOCKED, DAEMON_EXIT_IDLE_STARVED, DAEMON_EXIT_STALE } from "../src/lib/daemon.js";
+import { DAEMON_EXIT_BLOCKED, DAEMON_EXIT_HANDED_OFF, DAEMON_EXIT_IDLE_STARVED, DAEMON_EXIT_STALE } from "../src/lib/daemon.js";
 import { IDLE_STARVED_PULSE_MS, IDLE_STARVED_PULSE_STEP } from "../src/lib/poll-interval.js";
 import { RMD_TMP_PREFIX } from "../src/lib/tmp.js";
 
@@ -846,6 +846,15 @@ test("W1-T490: the entrypoint's freshness code is the SAME NUMBER as DAEMON_EXIT
   // POSITIVE CONTROL on that match: the same predicate must FAIL against a mutated script, or it
   // would pass for a file that no longer carries the assignment at all.
   assert.equal(/^DAEMON_EXIT_STALE=(\d+)$/m.test(script.replace(/^DAEMON_EXIT_STALE=\d+$/m, "# gone")), false);
+});
+
+test("Node and shell must agree on the handed-off exit code", () => {
+  // W1-T14546: the same duplication W1-T490 pins for 75, with the same positive control.
+  const script = readFileSync(SUPERVISE, "utf8");
+  const m = script.match(/^DAEMON_EXIT_HANDED_OFF=(\d+)$/m);
+  assert.ok(m, "the second stage must define DAEMON_EXIT_HANDED_OFF as a plain assignment this test can read");
+  assert.equal(Number(m![1]), DAEMON_EXIT_HANDED_OFF, "entrypoint and daemon.ts disagree about the handed-off exit code");
+  assert.equal(/^DAEMON_EXIT_HANDED_OFF=(\d+)$/m.test(script.replace(/^DAEMON_EXIT_HANDED_OFF=\d+$/m, "# gone")), false);
 });
 
 test("idle_starved: an empty PR board stays quiet, then a new PR wakes within two 300-second pulses", () => {

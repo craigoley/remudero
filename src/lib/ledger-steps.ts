@@ -563,6 +563,22 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["OBSERVED", "UNKNOWN"],
   },
   {
+    // W1-T14549: the Luna build canary.
+    step: "implement.luna_canary",
+    meaning: "An implement run of a risk:low src task drew its Luna build canary arm: `luna` (the first attempt asks the " +
+      "Codex economy tier, with `start_reason` economy-first, no-codex-capacity or operator-preference), `control` (as on " +
+      "main) or `held` (the arm's evidence stopped it, or the policy is off or invalid, named in `reason`).",
+    writer: ["runTaskBody"],
+    outcomes: ["luna", "control", "held"],
+  },
+  {
+    step: "implement.luna_canary_escalated",
+    meaning: "The first attempt of a Luna-arm build failed, so its next attempt runs on the mount route. The row names " +
+      "the failed assignment and the model it ran on.",
+    writer: ["runTaskBody"],
+    outcomes: ["escalated"],
+  },
+  {
     step: "fix.economy_escalated",
     meaning: "A fix round moved from the Codex economy tier to the mount tier after a failed round. " +
       "The row joins the failed round, names the failure and records the served model when available.",

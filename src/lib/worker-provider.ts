@@ -377,9 +377,12 @@ export interface CodexModelDecisionOption {
   lane?: ProviderLane;
 }
 
+/** Which lane started a spawn on the tier below its mount: a first fix round (W1-T13967) or a canary build (W1-T14549). */
+export type EconomyFirstReason = "fix-economy-first" | "build-economy-first";
+
 export interface CodexModelDecision {
   requestedCapability: CodexModelTier;
-  capabilityOverride?: { from: CodexModelTier; reason: "fix-economy-first" };
+  capabilityOverride?: { from: CodexModelTier; reason: EconomyFirstReason };
   requestedEffort: string;
   mappedCandidates: string[];
   options: CodexModelDecisionOption[];
@@ -1623,7 +1626,8 @@ export function selectCodexModel(
   capabilities?: CapabilityLadder,
   policy: { preferredModel?: CodexModelPreference; reservePercent?: number;
     switchback?: { window: VersionSwitchbackWindow; taskId: string; at: string };
-    headroomTiming?: ProviderHeadroomTiming; codexCapability?: CodexModelTier } = {},
+    headroomTiming?: ProviderHeadroomTiming; codexCapability?: CodexModelTier;
+    economyReason?: EconomyFirstReason } = {},
 ): ProviderCapacity {
   const reading = rateLimits && typeof rateLimits === "object" ? rateLimits as CodexRateLimitResult : {};
   const visible = [...visibleCodexModels(models).values()];
@@ -1707,7 +1711,7 @@ export function selectCodexModel(
   selected ??= eligible[0];
   const decisionBase: CodexModelDecision = {
     requestedCapability: tier,
-    ...(tier !== mountTier ? { capabilityOverride: { from: mountTier, reason: "fix-economy-first" } } : {}),
+    ...(tier !== mountTier ? { capabilityOverride: { from: mountTier, reason: policy.economyReason ?? "fix-economy-first" } } : {}),
     requestedEffort: requestedEffortLabel,
     mappedCandidates,
     options,
@@ -1812,6 +1816,8 @@ export interface CodexCapacityDeps {
   requestedEffort?: string;
   /** A first fix round probes the tier below the mount's own. */
   codexCapability?: CodexModelTier;
+  /** The lane that asked for {@link codexCapability}; absent reads as a fix round. */
+  economyReason?: EconomyFirstReason;
   /** Process environment used only for PATH resolution of an unconfigured Codex binary. */
   resolveEnv?: NodeJS.ProcessEnv;
   /** Bypass the routing cache at an attribution boundary. */
@@ -2274,6 +2280,7 @@ function selectCodexRuntime(
       reservePercent: deps.reservePercent,
       switchback: deps.switchback,
       codexCapability: deps.codexCapability,
+      ...(deps.economyReason ? { economyReason: deps.economyReason } : {}),
       ...(deps.headroomTiming ? { headroomTiming: deps.headroomTiming } : {}),
     });
   const capacity: ProviderCapacity = !deps.selectedModel && !read.readable && !read.exhausted

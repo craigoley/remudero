@@ -13,6 +13,8 @@ const BASE = "a".repeat(40);
 const HEAD = "b".repeat(40);
 const SINCE = "2026-10-13T12:00:00.000Z";
 const START = Date.parse(SINCE) / 1000;
+/** History older than the engine day, so the learned back-off alone governs these cases. */
+const AGED = START - 86_400;
 type Row = Record<string, unknown>;
 
 function emptyWake(at: number, duration = 70, admitted = false): Row[] {
@@ -69,7 +71,7 @@ function fixture(t: TestContext, history: Row[]) {
 
 test("W1-T9031: consecutive empty engine wakes defer the next engine wake", (t) => {
   for (const count of [1, 2, 5]) {
-    const f = fixture(t, Array.from({ length: count }, (_, i) => emptyWake(START - (count - i) * 1000)).flat());
+    const f = fixture(t, Array.from({ length: count }, (_, i) => emptyWake(AGED - (count - i) * 1000)).flat());
     const first = f.run();
     assert.equal(first.status, 0, first.stderr);
     const deferred = f.rows().at(-1)!;
@@ -86,8 +88,8 @@ test("W1-T9031: consecutive empty engine wakes defer the next engine wake", (t) 
 });
 
 test("W1-T9031: live and archive overlap preserves consecutive empty engine wakes", (t) => {
-  const first = emptyWake(START - 2000);
-  const second = emptyWake(START - 1000);
+  const first = emptyWake(AGED - 2000);
+  const second = emptyWake(AGED - 1000);
   const f = fixture(t, [first[1]!, ...second]);
   f.rotate(first, true);
 
@@ -132,9 +134,9 @@ test("W1-T9031: an engine wake that admits work resets the deferral", (t) => {
 
 test("W1-T9031: rotation forms and changing revisions preserve the pending boundary", (t) => {
   const f = fixture(t, []);
-  const first = emptyWake(START - 2000, 90);
+  const first = emptyWake(AGED - 2000, 90);
   f.rotate(first.slice(0, 2), true);
-  f.rotate([...first.slice(2), ...emptyWake(START - 1000, 110)], false);
+  f.rotate([...first.slice(2), ...emptyWake(AGED - 1000, 110)], false);
   assert.equal(f.run().status, 0);
   assert.equal(f.rows().at(-1)!.deferral_s, 200);
   assert.equal(f.rows().at(-1)!.empty_wake_run, 2);
@@ -148,7 +150,7 @@ test("W1-T9031: rotation forms and changing revisions preserve the pending bound
 
 test("W1-T9031: a reverted pending engine still wakes and uncertainty bypasses backoff", (t) => {
   for (const kind of ["revert", "baseline", "head", "history"]) {
-    const f = fixture(t, emptyWake(START - 1000));
+    const f = fixture(t, emptyWake(AGED - 1000));
     assert.equal(f.run().status, 0);
     if (kind === "history") f.rotate([{ ts: "unreadable", step: "daemon.boot" }], false);
     const wake = f.run({ elapsed: 70, engine: kind === "head" ? "unknown" : kind === "revert" ? BASE : HEAD, baseline: kind === "baseline" ? "unknown" : BASE });
