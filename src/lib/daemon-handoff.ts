@@ -119,6 +119,7 @@ export function daemonHandoff(ports: HandoffPorts): DaemonHandoff {
       try {
         slot = await ports.prepareSlot(ports.activeDir);
       } catch (error) {
+        // recorded: aborted() logs daemon.handoff_aborted with this reason, and the old daemon keeps running.
         return aborted("slot", reason(error), { sha: newSha, headroom });
       }
       const runId = ports.newRunId();
@@ -126,6 +127,7 @@ export function daemonHandoff(ports: HandoffPorts): DaemonHandoff {
       try {
         standby = ports.spawnStandby(slot, runId);
       } catch (error) {
+        // recorded: aborted() logs daemon.handoff_aborted with this reason, and the old daemon keeps running.
         return aborted("spawn", reason(error), { sha: slot.sha, slot: slot.dir, headroom });
       }
       ports.log("daemon.handoff_requested", { sha: slot.sha, decided_sha: newSha, slot: slot.dir, slot_deps: slot.deps ?? null,
