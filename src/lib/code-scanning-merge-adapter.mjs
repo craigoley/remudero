@@ -103,8 +103,35 @@ export async function readSecurityMergeDecision(target, read) {
   return next.value;
 }
 
+/** W1-T14493: the two reasons that mean "the exact-head CodeQL result has not arrived yet", not that anything failed. */
+const CODEQL_AWAITED_REASONS = new Set(['trusted-exact-head-codeql-result-missing', 'security-analysis-pending']);
+const CODEQL_WORKFLOW_PATH = '.github/workflows/codeql.yml';
+/** BACKSTOP (W1-T14493): a CodeQL run still queued or running this long after it started is treated as stuck, and the
+ *  status goes back to error so the wait is visible as a fault. A healthy run takes well under this. */
+export const CODEQL_RUN_PENDING_BOUND_MS = 60 * 60_000;
+
+/** True only when this repository's CodeQL workflow run for the exact head is queued or in progress and started within
+ *  {@link CODEQL_RUN_PENDING_BOUND_MS}. An absent, finished, unreadable, ambiguous or overdue run reads false. */
+export async function codeqlRunInFlight(target, headSha, read, now) {
+  try {
+    const page = await read(`repos/${target.owner}/${target.repo}/actions/runs?head_sha=${headSha}&per_page=100`);
+    if (!Array.isArray(page?.workflow_runs) || !Number.isSafeInteger(page.total_count) || page.total_count > page.workflow_runs.length) return false;
+    const runs = page.workflow_runs.filter(run => run?.path === CODEQL_WORKFLOW_PATH && run.head_sha === headSha &&
+      run.repository?.full_name === `${target.owner}/${target.repo}`);
+    if (runs.length === 0 || runs.some(run => !Number.isSafeInteger(run.id) || run.id <= 0)) return false;
+    const latest = runs.reduce((a, b) => (a.id > b.id ? a : b));
+    if (latest.status !== 'queued' && latest.status !== 'in_progress') return false;
+    const started = Date.parse(latest.run_started_at ?? latest.created_at);
+    return Number.isFinite(started) && now - started <= CODEQL_RUN_PENDING_BOUND_MS;
+  } catch {
+    return false;
+  }
+}
+
 /** Publish only a SHA-scoped status, never merge permission for another head.
- * UNKNOWN is an actionable error, not a forever-pending or success-shaped result.
+ * UNKNOWN is an actionable error, not a forever-pending or success-shaped result. The one exception (W1-T14493): while
+ * the exact head's CodeQL run is still queued or running, a decision that only awaits its result posts pending. That
+ * blocks merge exactly as error does, and it turns back into error once the run finishes or passes its bound.
  * The trusted completion producer may reobserve pending analysis; each call repeats every guard.
  */
 export async function publishSecurityMergeDecision(target, api, targetUrl) {
@@ -115,8 +142,10 @@ export async function publishSecurityMergeDecision(target, api, targetUrl) {
   if (live?.head?.sha !== observed.headSha || live.state !== 'open' || live.base?.sha !== observed.baseSha ||
       live.base?.ref !== 'main' || live.base?.repo?.full_name !== 'craigoley/remudero')
     return {...observed,decision:unknown('head-or-base-changed-before-publication'),published:false};
-  await api.status({sha:observed.headSha,context:SECURITY_MERGE_CONTEXT,
-    state:observed.decision.mergeAllowed ? 'success' : observed.decision.state === 'blocked' ? 'failure' : 'error',
+  const state = observed.decision.mergeAllowed ? 'success' : observed.decision.state === 'blocked' ? 'failure' :
+    CODEQL_AWAITED_REASONS.has(observed.decision.reason) &&
+      await codeqlRunInFlight(target, observed.headSha, api.read, api.now?.() ?? Date.now()) ? 'pending' : 'error';
+  await api.status({sha:observed.headSha,context:SECURITY_MERGE_CONTEXT,state,
     description:`${observed.decision.state}: ${observed.decision.reason}`.slice(0,140),target_url:targetUrl});
-  return {...observed,published:true};
+  return {...observed,published:true,postedState:state};
 }
