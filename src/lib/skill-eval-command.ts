@@ -41,7 +41,7 @@ import type { SkillEvalSpendFit } from "./skill-eval-auto.js";
 import { runSkillEval, selectHeldOutTasks, SKILL_EVAL_ATTEMPTABLE_TASK_TYPES, SKILL_EVAL_STEPS, type SkillEvalRunInput,
   type SkillEvalVerdictReason } from "./skill-eval.js";
 import { readLedgerLines } from "./status.js";
-import { deriveDayCostUsd, deriveDayUnpricedRows } from "./sweep.js";
+import { deriveDayCostUsd, deriveDayUnpricedRows, deriveDayUnpricedSpendBound } from "./sweep.js";
 import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, skillFileStagedAtMs, type InjectableSkill } from "./skill-workshop.js";
 import { withTempDir } from "./tmp.js";
 import { readOpenWeightAllowance } from "./worker-provider.js";
@@ -268,7 +268,8 @@ export async function evaluateStagedSkillDraft(proposalId: string, approval: Ski
 
 /**
  * W1-T13861: the spend reading the auto pass checks before it claims a draft. The day's ledgered cost and its
- * unpriced rows are the cost governor's own reading (live ledger); the ceiling is the effective one (the state/
+ * unpriced rows are the cost governor's own reading (live ledger), with the unpriced rows' bound from the same lines
+ * (W1-T14631); the ceiling is the effective one (the state/
  * override within the committed bound, else plan/policy.yaml). The cash allowance is read only for a stack that
  * bills cash, and observing it reserves nothing.
  */
@@ -277,7 +278,9 @@ export function readSkillEvalSpendFit(config: Config, pin: Pick<SkillEvalRunInpu
   const nowMs = clock.now();
   // ledger-read-intent: live
   const lines = readLedgerLines(ledgerPathFor(config));
+  const bound = deriveDayUnpricedSpendBound(lines, nowMs);
   const fit: SkillEvalSpendFit = { dayCostUsd: deriveDayCostUsd(lines, nowMs), unpricedRows: deriveDayUnpricedRows(lines, nowMs),
+    ...("boundUsd" in bound ? { unpricedBoundUsd: bound.boundUsd, unpricedBound: bound.steps } : {}),
     ceilingUsd: resolveDailyCostCeiling(config.root, policy).usd };
   if (pin.billing !== "api") return fit;
   try {

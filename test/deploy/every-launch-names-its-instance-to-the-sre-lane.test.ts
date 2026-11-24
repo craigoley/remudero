@@ -254,7 +254,8 @@ interface LaneRow { step: string; fields: Record<string, unknown> }
 /** Run daemonSreLaneEnabled on `stateRoot` with the registry and env given; returns its logged rows. */
 async function laneStart(
   t: TestContext,
-  opts: { stateRoot: string; registry: string; instanceName?: string; sreLane?: string; page?: Parameters<typeof daemonSreLaneEnabled>[3]; enabled?: (on: boolean) => void },
+  opts: { stateRoot: string; registry: string; instanceName?: string; sreLane?: string; page?: Parameters<typeof daemonSreLaneEnabled>[3]; enabled?: (on: boolean) => void;
+    background?: Parameters<typeof daemonSreLaneEnabled>[4] },
 ): Promise<LaneRow[]> {
   const saved = Object.fromEntries(["RMD_INSTANCE_NAME", "RMD_INSTANCE_REGISTRY", "RMD_SELECTED_INSTANCE_REGISTRY", "RMD_SRE_LANE"].map((n) => [n, process.env[n]]));
   t.after(() => {
@@ -270,7 +271,7 @@ async function laneStart(
   if (opts.sreLane === undefined) delete process.env.RMD_SRE_LANE;
   else process.env.RMD_SRE_LANE = opts.sreLane;
   const rows: LaneRow[] = [];
-  const on = await daemonSreLaneEnabled(opts.stateRoot, opts.stateRoot, (step, fields = {}) => rows.push({ step, fields }), opts.page);
+  const on = await daemonSreLaneEnabled(opts.stateRoot, opts.stateRoot, (step, fields = {}) => rows.push({ step, fields }), opts.page, opts.background);
   opts.enabled?.(on);
   for (const [name, value] of Object.entries(saved)) {
     if (value === undefined) delete process.env[name];
@@ -548,4 +549,39 @@ test("W1-T14611 criterion 2: under the test runner a registry outside the temp d
   // The same registry back inside the temp dir pages, so the guard is the only difference.
   await laneStart(t, { stateRoot: join(f.home, "laptop-root"), registry: f.registry, page: page(f) });
   assert.equal(f.created.length, 1);
+});
+
+test("W1-T14649 a boot does not wait for the SRE lane page to settle", async (t) => {
+  const f = fleet(t);
+  let settle: () => void = () => {};
+  const held = new Promise<void>((resolve) => { settle = resolve; });
+  let cleared = false;
+  const slow: NonNullable<Parameters<typeof daemonSreLaneEnabled>[3]> = {
+    escalate: async () => { await held; },
+    clear: async () => { await held; cleared = true; },
+  };
+  let paged: Promise<void> | undefined;
+  let on: boolean | undefined;
+  const start = laneStart(t, { stateRoot: f.stateRoot, registry: f.registry, instanceName: "core", page: slow,
+    background: (p) => { paged = p; }, enabled: (value) => { on = value; } });
+  let timer: NodeJS.Timeout | undefined;
+  const winner = await Promise.race([start.then(() => "boot" as const),
+    new Promise<"page">((resolve) => { timer = setTimeout(() => resolve("page"), 2000); })]);
+  clearTimeout(timer);
+  if (winner === "page") settle(); // let the awaited page finish so the failing run still ends
+  assert.equal(winner, "boot", "the lane start returned while its page was still held");
+  assert.equal(on, true, "the lane start returned its answer");
+  assert.ok(paged !== undefined, "the page was handed to the background");
+  assert.equal(cleared, false, "the boot returned before the page's ledger read settled");
+  settle();
+  await paged;
+  assert.equal(cleared, true, "the page still runs to completion");
+});
+
+test("W1-T14649 a lane start with no background still awaits its page", async (t) => {
+  const f = fleet(t);
+  let cleared = false;
+  await laneStart(t, { stateRoot: f.stateRoot, registry: f.registry, instanceName: "core",
+    page: { escalate: async () => {}, clear: async () => { await Promise.resolve(); cleared = true; } } });
+  assert.equal(cleared, true);
 });
