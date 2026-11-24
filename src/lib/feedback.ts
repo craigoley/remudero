@@ -16,6 +16,7 @@ import { homedir } from "node:os";
 import { basename, join, relative, resolve, sep } from "node:path";
 import { configPath } from "./config.js";
 import { readFileIfExists } from "./fs-race-safe.js";
+import { readOpsCheckoutAtMainSync, type OpsCheckoutFile, type OpsCheckoutQuery } from "./ops-checkout-at-main.js";
 import { planDestinationRepository, resolvePlanDestination, type PlanDestinationRepository, type PlanDestinationRepositoryRead } from "./plan-destination.js";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import {
@@ -577,13 +578,36 @@ function hostFeedbackRoots(root: string): string[] {
   return feedbackReadRoots(root, planDestinationRepository(instanceStateDir()));
 }
 
+/** W1-T14617: the destination root's feedback files by the ops-main rule (readOpsCheckoutAtMainSync). */
+function opsFeedbackFiles(opsRoot: string, query: OpsCheckoutQuery): Map<string, OpsCheckoutFile> {
+  try {
+    return readOpsCheckoutAtMainSync(opsRoot, query, { untracked: true }).files;
+  } catch (error) {
+    throw new FeedbackError(`the plan destination checkout's main is unreadable: ${String((error as Error)?.message ?? error)}`);
+  }
+}
+
+/** W1-T14617: entry `id` in the destination root, or undefined when the ops-main rule finds none. */
+function opsFeedbackEntry(opsRoot: string, id: string): { path: string; text: string } | undefined {
+  const rel = feedbackEntryRelPath(opsRoot, id);
+  const file = opsFeedbackFiles(opsRoot, { paths: [rel] }).get(rel);
+  if (file === undefined) return undefined;
+  return { path: file.source === "main" ? `${opsRoot} origin/main:${rel}` : feedbackEntryPath(opsRoot, id), text: file.text };
+}
+
+/** W1-T14617: whether any feedback root holds entry `id`: the public file, or the destination by the ops-main rule. */
+function feedbackHeld(root: string, id: string): boolean {
+  const [publicRoot, opsRoot] = hostFeedbackRoots(root);
+  return existsSync(feedbackEntryPath(publicRoot!, id)) || (opsRoot !== undefined && opsFeedbackEntry(opsRoot, id) !== undefined);
+}
+
 /** W1-T12203: the root that holds entry `id`, and the destination when that root is the destination checkout.
  *  A file in the public root is edited there, also while the kind is on. */
 function feedbackRecordHome(root: string, id: string): { root: string; destination?: PlanDestinationRepository } {
   const named = planDestinationRepository(instanceStateDir());
   const roots = feedbackReadRoots(root, named);
   if (named.outcome !== "named" || roots.length === 1 || existsSync(feedbackEntryPath(root, id))) return { root };
-  return existsSync(feedbackEntryPath(named.checkoutDir, id)) ? { root: named.checkoutDir, destination: named } : { root };
+  return opsFeedbackEntry(roots[1]!, id) !== undefined ? { root: named.checkoutDir, destination: named } : { root };
 }
 
 /** W1-T12203: where a NEW capture is written and landed. A console capture (`stateRoot`) is moved into the landing
@@ -1050,7 +1074,7 @@ function* stageFeedbackCaptureSteps(
 
 /** W1-T9615: true when entry `id` is in the checkout or waits in `stateRoot`'s landing queue — a staging caller's dedup read. */
 export function feedbackCaptured(root: string, id: string, stateRoot?: string): boolean {
-  return existsSync(feedbackEntryPath(root, id)) || (stateRoot !== undefined && existsSync(join(queuedFeedbackDir(stateRoot), `${id}.yaml`)));
+  return feedbackHeld(root, id) || (stateRoot !== undefined && existsSync(join(queuedFeedbackDir(stateRoot), `${id}.yaml`)));
 }
 
 /** The entry a capture of `opts` already has: by submission key, then the checkout, the queue (`queuedIds`) and origin/main. */
@@ -1063,7 +1087,7 @@ function* existingCaptureSteps(
   }
   if (opts.id === undefined) return null;
   const id = opts.id;
-  if (hostFeedbackRoots(root).some((r) => existsSync(feedbackEntryPath(r, id)))) return readFeedbackEntry(root, id);
+  if (feedbackHeld(root, id)) return readFeedbackEntry(root, id);
   if (queuedIds && stateRoot !== undefined) {
     const queued = readQueuedFeedbackRecords(stateRoot).get(feedbackEntryRepoPath(opts.id));
     if (queued) return queued as unknown as FeedbackEntry;
@@ -1157,12 +1181,15 @@ function feedbackEntryFrom(parsed: unknown, id: string): FeedbackEntry {
 }
 
 export function readFeedbackEntry(root: string, id: string): FeedbackEntry {
-  const looked = hostFeedbackRoots(root).map((r) => feedbackEntryPath(r, id));
-  const held = looked.filter((p) => existsSync(p));
+  const roots = hostFeedbackRoots(root);
+  const looked = roots.map((r) => feedbackEntryPath(r, id));
+  const held: Array<{ path: string; text: string }> = [];
+  if (existsSync(looked[0]!)) held.push({ path: looked[0]!, text: readFileSync(looked[0]!, "utf8") });
+  const ops = roots[1] === undefined ? undefined : opsFeedbackEntry(roots[1], id);
+  if (ops !== undefined) held.push(ops);
   if (held.length === 0) throw new FeedbackError(`no feedback entry "${id}" (looked in ${looked.join(" and ")})`);
-  const text = readFileSync(held[0], "utf8");
-  if (held.length === 2) assertOneFeedbackCopy(id, { path: held[0], text }, { path: held[1], text: readFileSync(held[1], "utf8") });
-  return feedbackEntryFrom(parseYaml(text), id);
+  if (held.length === 2) assertOneFeedbackCopy(id, held[0]!, held[1]!);
+  return feedbackEntryFrom(parseYaml(held[0]!.text), id);
 }
 
 /** W1-T13334: the text and the parse of each feedback file, by directory and file name, kept while the file's stat
@@ -1184,8 +1211,13 @@ function feedbackFileStat(path: string, nowMs: number): { identity: string; sett
 export function listFeedback(root: string, opts: { status?: FeedbackStatus } = {}): FeedbackEntry[] {
   const files = new Map<string, { path: string; text: string; dir: string; identity: string; settled: boolean }>();
   const nowMs = systemClock.now();
-  for (const r of hostFeedbackRoots(root)) {
+  const roots = hostFeedbackRoots(root);
+  for (const r of roots) {
     const dir = feedbackDir(r);
+    if (r === roots[1]) {
+      listOpsFeedback(r, files);
+      continue;
+    }
     if (!existsSync(dir)) {
       keptFeedbackFiles.delete(dir);
       continue;
@@ -1217,6 +1249,23 @@ export function listFeedback(root: string, opts: { status?: FeedbackStatus } = {
     return structuredClone(entry);
   });
   return opts.status ? entries.filter((e) => e.status === opts.status) : entries;
+}
+
+/** W1-T14617: the destination root's half of {@link listFeedback}, by the ops-main rule. A blob id, or an untracked
+ *  file's own text, is the kept identity, so a changed main is read again. */
+function listOpsFeedback(opsRoot: string, files: Map<string, { path: string; text: string; dir: string; identity: string; settled: boolean }>): void {
+  const dir = feedbackDir(opsRoot);
+  const listed = opsFeedbackFiles(opsRoot, { dir: relative(opsRoot, dir).split(sep).join("/"), match: (name) => name.endsWith(".yaml") });
+  const names = new Map([...listed].map(([rel, file]) => [rel.slice(rel.lastIndexOf("/") + 1), file]));
+  const kept = keptFeedbackFiles.get(dir);
+  for (const name of kept?.keys() ?? []) if (!names.has(name)) kept!.delete(name);
+  for (const [f, file] of names) {
+    const path = file.source === "main" ? `${opsRoot} origin/main:${relative(opsRoot, join(dir, f)).split(sep).join("/")}` : join(dir, f);
+    const copy = { path, dir, identity: file.oid === undefined ? `untracked:${file.text}` : `blob:${file.oid}`, settled: true, text: file.text };
+    const held = files.get(f);
+    if (held === undefined) files.set(f, copy);
+    else assertOneFeedbackCopy(f.replace(/\.yaml$/, ""), held, copy);
+  }
 }
 
 /** A private, already-read canonical parent for an unchanged older capture. This is source

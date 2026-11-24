@@ -33,6 +33,7 @@ import { loadPlanFromYaml } from "./plan.js";
 import { planDestinationRepository, type PlanDestination, type PlanDestinationRepository } from "./plan-destination.js";
 import { PLAN_RECONCILE_LANDING_RECORD_LIMIT, planReconcilePrBody, planReconcileProofFor } from "./plan-reconcile-batch.js";
 import { reconcileShardStatus, requeueShardStatusText } from "./plan-reconcile.js";
+import { readOpsCheckoutAtMainSync } from "./ops-checkout-at-main.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { slug as kebabSlug } from "./feedback-docket.js";
 import { mergeFeedbackRecord, type FeedbackRecordMergeDecision } from "./feedback-record-merge.js";
@@ -1591,9 +1592,11 @@ async function queuedRecordHome(root: string, checkoutDir: string, rel: string, 
     }
   };
   if (existsSync(join(root, rel))) return "public";
-  if (existsSync(join(checkoutDir, rel))) return "destination";
+  // W1-T14617: the ops side is read at ops main; a file its stale HEAD tracks and main does not is not held there.
+  const ops = readOpsCheckoutAtMainSync(checkoutDir, { paths: [rel] }, { untracked: true }).files.get(rel);
+  if (ops?.source === "untracked") return "destination";
   if (await onMain(root)) return "public";
-  if (await onMain(checkoutDir)) return "destination";
+  if (ops?.source === "main") return "destination";
   return kindOn ? "destination" : "public";
 }
 
@@ -2063,7 +2066,20 @@ export function readStandingDecisions(root: string, stateDir?: string): string {
   // W1-T12201: while the host file names a repository, its checkout is a second root, whatever the kinds.
   const named = planDestinationRepository(stateDir);
   const standing = decisionsUnder(root);
-  return named.outcome === "named" ? [standing, decisionsUnder(named.checkoutDir)].filter(Boolean).join("\n") : standing;
+  return named.outcome === "named" ? [standing, decisionsAtOpsMain(named.checkoutDir)].filter(Boolean).join("\n") : standing;
+}
+
+/** W1-T14617: {@link decisionsUnder} for the destination checkout, read at its origin/main by the ops-main rule. */
+function decisionsAtOpsMain(checkoutDir: string): string {
+  try {
+    const read = (query: Parameters<typeof readOpsCheckoutAtMainSync>[1]) =>
+      [...readOpsCheckoutAtMainSync(checkoutDir, query, { untracked: true }).files.values()].map((file) => file.text);
+    return [...read({ paths: ["DECISIONS.md"] }), ...read({ dir: "plan/decisions.d", match: (name) => name.endsWith(".md") })].join("\n");
+  } catch (error) {
+    // An unreadable main contributes nothing, as an unreadable path does in decisionsUnder: an unresolvable `supersedes` escalates.
+    void error;
+    return "";
+  }
 }
 
 function decisionsUnder(root: string): string {
