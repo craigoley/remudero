@@ -489,6 +489,28 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["evidence_not_ci", "not_open", "head_moved_again", "merge_conflict", "checks_pending", "checks_green", "checks_none", "checks_unreadable", "failures_unreadable", "pr_unreadable"],
   },
   {
+    // W1-T14138: the shadow measurement of what learnings a fix round's failure would match.
+    step: "fix.learnings_shadow",
+    meaning:
+      "One per fix round, at its first prompt assembly: the learnings its failing checks and review would " +
+      "match by symbol or error signature, each with its match kinds (a file-only match is never recorded), " +
+      "the task-keyed arm (offered or withheld), the budget in characters and the failing check names. " +
+      "Neither arm injects anything: the fix prompt is the same in both. unreadable: the learnings corpus " +
+      "could not be read, so no match is recorded for the round.",
+    writer: ["runFixRung"],
+    outcomes: ["recorded", "unreadable"],
+  },
+  {
+    // W1-T14138: the round's result, joined to the shadow row by round_key.
+    step: "fix.learnings_outcome",
+    meaning:
+      "One per fix round, once known: the CI conclusion on the head the round pushed (green, red, other) " +
+      "or no_push when it pushed nothing, with the pushed head. W1-T14139 reads it against the arm on the " +
+      "round's fix.learnings_shadow row to decide when to inject.",
+    writer: ["runFixRung"],
+    outcomes: ["green", "red", "no_push", "other"],
+  },
+  {
     // W1-T12546: the rung adopts a published head instead of standing down at rung.evidence_head.
     step: "fix.evidence_head_adopted",
     meaning:

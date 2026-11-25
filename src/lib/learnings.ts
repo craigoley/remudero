@@ -2167,6 +2167,23 @@ function matchCounts(
   };
 }
 
+/** W1-T14138: how one entry matched a selection, strongest first; the per-entry view of {@link selectLearnings}'s aggregate. */
+export type LearningMatchKind = "error" | "symbol" | "file";
+
+/** W1-T14138: the kinds by which `entry` matches `taskFiles` and the context text; the same counts the selector admits on. */
+export function learningMatchKinds(
+  entry: LearningEntry,
+  taskFiles: string[] | undefined,
+  context?: LearningsSelectionContext,
+): LearningMatchKind[] {
+  const counts = matchCounts(entry, taskFiles ?? [], selectionHaystack(context), context?.knownSymbols);
+  const kinds: LearningMatchKind[] = [];
+  if (counts.error > 0) kinds.push("error");
+  if (counts.symbol > 0) kinds.push("symbol");
+  if (counts.file > 0) kinds.push("file");
+  return kinds;
+}
+
 // W1-T4093 FILL BY STRENGTH (see selectLearnings): weights mirror error>symbol>file precedence.
 const ERROR_MATCH_WEIGHT = 3;
 const SYMBOL_MATCH_WEIGHT = 2;

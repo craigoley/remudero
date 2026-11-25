@@ -903,6 +903,8 @@ export const DECISION_RELEVANT_LEDGER_STEPS: ReadonlySet<string> = new Set([
   // W1-T4207: `lastCommitRefusalPromptLines` (run-task.ts) reads its `subtype` to name the last refused paths.
   "fix.done",
   "fix.live_round_resumed", // The sweep uses this row to end the round's CI wait.
+  "fix.learnings_shadow", // W1-T14138: summarizeFixLearningsShadow joins both rows across rotation; W1-T14139 decides on the result.
+  "fix.learnings_outcome",
   "fix.self_check", // W1-T14136: what a fix round's pre-push review left uncleared, kept for the after-deploy measure.
   "fix.progress_judged", // the sweep labels each judged PR from its newest judgement; rotated away, the label reverts to the stale strike ratio.
   "fix.stall_remedy", // W1-T12710: the remedies a stalled criterion had; the operator is asked once.

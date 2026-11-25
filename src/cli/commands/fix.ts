@@ -21,7 +21,7 @@ import { existsSync } from "node:fs";
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { loadConfig, type Config } from "../../lib/config.js";
+import { globalArtifactPath, loadConfig, userOverallLearningsHome, type Config } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
 import { isPrMergedNow, mergeTargetFromPrUrl } from "../../lib/arm-auto-merge.js";
 import { ciFailureLedgerEntry } from "../../lib/ci-friction-gardener.js";
@@ -52,7 +52,8 @@ import { codexCapabilityBelow, codexCapabilityForRequestedModel } from "../../li
 import { fixArmEvidence, fixRoutingWeights, readFixRoutingRows, type FixLearnedArms } from "../../lib/fix-routing-learner.js";
 import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, SKILL_WITHHOLDING_SHARE, skillWithheldUnderRetirement, stagedSkillRetirements } from "../../lib/skill-workshop.js";
 import { SKILL_ARM_EPOCH, TASK_ARM_UNIT, taskArmWithheld } from "../../lib/task-arm.js";
-import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../../lib/learnings.js";
+import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, projectLearningsHome } from "../../lib/learnings.js";
+import { recordFixLearningsOutcome, recordFixLearningsShadow } from "../../lib/fix-learnings-shadow.js";
 import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockRegion, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
@@ -2986,6 +2987,9 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     { unit: TASK_ARM_UNIT, epoch: SKILL_ARM_EPOCH },
   );
   let fixSkillSelectionLogged = false;
+  // W1-T14138: the rounds whose learnings shadow / outcome row is already written; one of each per round.
+  const fixLearningsShadowed = new Set<string>();
+  const fixLearningsOutcomed = new Set<string>();
   while (review.state !== "success" || proofDiscriminationStillNeedsRepair()) {
     consultedThisRound = false;
     if (recheck && currentPrHeadSha === recheck.headSha && noReviewYet) {
@@ -4670,6 +4674,18 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // At the first prompt assembly, as the implement lane does — emitted even at zero selection.
     if (!fixSkillSelectionLogged) deps.log("skills.selection", fixSkillSelection.observation);
     fixSkillSelectionLogged = true;
+    // W1-T14138: one `fix.learnings_shadow` row per round MEASURES what its failure would match; nothing below reads
+    // the result, so the prompt is unchanged in both arms. Its `fix.learnings_outcome` row follows at the round's CI result.
+    const learningsRoundKey = `${opts.runId}:${attempt}:${priorHeadSha}`;
+    if (!fixLearningsShadowed.has(learningsRoundKey)) {
+      fixLearningsShadowed.add(learningsRoundKey);
+      recordFixLearningsShadow({
+        taskId: opts.taskId, pr: prNumber, attempt, round, roundKey: learningsRoundKey, evidence,
+        homes: { projectDir: projectLearningsHome(opts.worktreePath), userOverallDir: userOverallLearningsHome(opts.config),
+          globalArtifactPath: globalArtifactPath(opts.config) },
+        log: (step, extra) => deps.log(step, extra),
+      });
+    }
     const prompt = [
       renderFixPrompt({
         harnessCommits: fixHarnessOwnsGit,
@@ -5327,7 +5343,17 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     };
     let workerProofResults: FixProgressWorkerProofResult[] = [];
     let selfCheckCostUsd = 0;
-    const logFixDoneRow = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding, waitFields?: Record<string, unknown>) => deps.log("fix.done", {
+    const logLearningsOutcome = (pushedHeadSha: string | undefined, ciState?: string): void => {
+      if (fixLearningsOutcomed.has(learningsRoundKey)) return;
+      fixLearningsOutcomed.add(learningsRoundKey);
+      recordFixLearningsOutcome({ taskId: opts.taskId, roundKey: learningsRoundKey, attempt, pushedHeadSha, ciState,
+        log: (step, extra) => deps.log(step, extra) });
+    };
+    const logFixDoneRow = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding, waitFields?: Record<string, unknown>) => {
+      if (pushedHeadSha === undefined) logLearningsOutcome(undefined);
+      logFixDoneRowFields(pushedHeadSha, subtype, landing, waitFields);
+    };
+    const logFixDoneRowFields = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding, waitFields?: Record<string, unknown>) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       round_id: roundId,
       ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() ?? releasedClaimId } : {}),
@@ -5890,6 +5916,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     const resumed = host.ciGateState(waited) === "red" ? undefined : handed;
     const ci = resumed?.failure === "check" ? { state: "red" as const, sha: resumed.headSha } : waited;
     const handoff = ciHandoff(ci);
+    logLearningsOutcome(landing.remoteHead ?? expectedHeadShaForPush, host.ciGateState(ci));
     if (handoff) return finish(handoff);
     const claimLostAfterCi = branchClaimLost();
     if (claimLostAfterCi) return finish(claimLostAfterCi);
