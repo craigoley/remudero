@@ -83,7 +83,7 @@ test("W1-T13531 criterion 2 — case-file failure reaches the GitHub snapshot wi
   await eachBash(t, (scope, bash) => {
     const result = refresh(scope, bash, "available", "failed");
     assert.equal(result.status, 1, result.stderr);
-    assert.ok(result.args.includes("--max-pages"));
+    assert.ok(result.args.includes("--source"));
     assert.ok(!result.args.includes("--case-files"));
   });
 });
