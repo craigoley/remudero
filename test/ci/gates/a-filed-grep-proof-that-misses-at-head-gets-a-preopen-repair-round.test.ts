@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import type { AcceptanceCriterion } from "#src/lib/plan.js";
-import type { OpenPullRequestProofResult } from "#src/lib/pr-open.js";
+import {
+  defaultProofRunnerAsync,
+  openPullRequestCheckedAsync,
+  PrOpenRefusedError,
+  type OpenPullRequestProofResult,
+} from "#src/lib/pr-open.js";
 import { renderPreopenGatePrompt, withFiledProofCheck, type PreopenGateResult } from "#src/lib/preopen-gate.js";
 
 const criterion = (proof: string, extra: Partial<AcceptanceCriterion> = {}): AcceptanceCriterion =>
@@ -10,7 +18,7 @@ const pass: PreopenGateResult = { kind: "pass", durationMs: 5 };
 const answering = (status: number | null, extra: Partial<OpenPullRequestProofResult> = {}) =>
   async (): Promise<OpenPullRequestProofResult> => ({ status, ...extra });
 
-test("unit test: a filed grep proof that misses at head gets a preopen repair round", async () => {
+test("W1-T14789 criterion 1: a filed grep proof that misses at head gets a preopen repair round", async () => {
   const asked: Array<{ proof: string; base: string | undefined; cwd: string }> = [];
   const gate = withFiledProofCheck(
     async () => pass,
@@ -29,7 +37,7 @@ test("unit test: a filed grep proof that misses at head gets a preopen repair ro
   assert.match(renderPreopenGatePrompt(result.failedSteps, true), /- filed-proof: /, "the repair prompt hands the worker the step");
 });
 
-test("unit test: a filed proof miss keeps the base gate's steps in order and a base failure alone stays a fail", async () => {
+test("W1-T14789 criterion 2: a filed proof miss keeps the base gate's steps in order and a base failure alone stays a fail", async () => {
   const failing: PreopenGateResult = { kind: "fail", failedSteps: ["typecheck", "lint"], durationMs: 9, failedDetail: { typecheck: "TS2322" } };
   const both = await withFiledProofCheck(async () => failing, [criterion("grep: absent in src/a.ts")], answering(1))("/w");
   assert.ok(both.kind === "fail");
@@ -42,7 +50,7 @@ test("unit test: a filed proof miss keeps the base gate's steps in order and a b
   assert.deepEqual(baseOnly, failing, "a matching proof adds nothing to a failing base gate");
 });
 
-test("unit test: a matching, inconclusive, non-grep or credited proof leaves the gate as it was", async () => {
+test("W1-T14789 criterion 2: a matching, inconclusive, non-grep or credited proof leaves the gate as it was", async () => {
   let runs = 0;
   const counting = async (): Promise<OpenPullRequestProofResult> => { runs++; return { status: 0 }; };
   const gate = withFiledProofCheck(
@@ -70,7 +78,32 @@ test("unit test: a matching, inconclusive, non-grep or credited proof leaves the
   }
 });
 
-test("unit test: a gate that measured nothing is returned unchanged and runs no filed proof", async () => {
+test("W1-T14789 criterion 4: a proof the gate flags is still refused at PR open exactly as before", async (t) => {
+  const missing = { claim: "the marker was added", proof: "grep: MISSING_MARKER in src/example.ts" };
+  const repo = gitRepo({ scope: t, kind: "preopen-filed-proof-open-unchanged" });
+  mkdirSync(join(repo.dir, "src"));
+  mkdirSync(join(repo.dir, "plan"));
+  writeFileSync(join(repo.dir, "src/example.ts"), "export const OTHER = true;\n");
+  writeFileSync(join(repo.dir, "plan/tasks.yaml"), [
+    "- id: W1-T9", "  title: synthetic acceptance", "  repo: remudero", "  type: implement", "  acceptance:",
+    `    - ${JSON.stringify({ ...missing, kind: "guard" })}`, "",
+  ].join("\n"));
+  repo.git("add", "-A");
+  repo.git("commit", "-qm", "chore: synthetic base");
+  repo.git("update-ref", "refs/remotes/origin/main", repo.git("rev-parse", "HEAD"));
+
+  const gated = await withFiledProofCheck(async () => pass, [criterion(missing.proof)], defaultProofRunnerAsync)(repo.dir);
+  assert.ok(gated.kind === "fail", "the pre-open gate names the proof that matches nothing at head");
+  assert.match(gated.failedSteps[0], /^filed-proof: `grep: MISSING_MARKER in src\/example\.ts` matches nothing at your head/);
+
+  await assert.rejects(
+    async () => openPullRequestCheckedAsync("", "run-W1-T9-1792776000000", repo.dir, "origin/main", defaultProofRunnerAsync),
+    (e: unknown) => e instanceof PrOpenRefusedError && e.refusalClass === "branch-gap" && /at head/.test(e.message),
+    "PR open still refuses a proof that fails after the repair round, with the unchanged refusal class",
+  );
+});
+
+test("W1-T14789 criterion 2: a gate that measured nothing is returned unchanged and runs no filed proof", async () => {
   let runs = 0;
   const runner = async (): Promise<OpenPullRequestProofResult> => { runs++; return { status: 1 }; };
   const unmeasured: PreopenGateResult = { kind: "unmeasured", reason: "no sandbox", durationMs: 1 };
