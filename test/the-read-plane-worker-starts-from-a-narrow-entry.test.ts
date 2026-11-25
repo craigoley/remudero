@@ -105,8 +105,9 @@ function tree(): { options: TickReadOptions; planPath: string; root: string } {
 }
 
 /** The facts with each tree's own root replaced and the wall-clock board age dropped, so two reads compare. */
+// ageHours and W1-T14644's projectionPhases are clock readings, so two reads of the same scripted state differ there.
 const portable = (facts: unknown, root: string): unknown =>
-  JSON.parse(JSON.stringify(facts).split(root).join("<root>"), (key, value) => (key === "ageHours" ? undefined : value));
+  JSON.parse(JSON.stringify(facts).split(root).join("<root>"), (key, value) => (key === "ageHours" || key === "projectionPhases" ? undefined : value));
 
 async function withShim<T>(run: () => Promise<T>): Promise<T> {
   const gh = ghShim(ROUTES, { kind: "tick-read-worker" });

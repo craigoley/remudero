@@ -267,11 +267,12 @@ capabilities:
   # open-weight, and belongs on this ladder anyway because it is cash-billed the same as every other
   # row. `src/lib/mounts.ts`'s `parseCapabilities` still accepts the deprecated `openweight:` key as
   # an alias for an already-deployed host's table; remove that alias once none remain.
-  # W1-T4079 (operator ruling 2026-09-22): gpt-6-luna leads every row gpt-5.6-luna appears in, with
-  # 5.6 directly behind it. selectOpenWeightModel passes over a deployment until it is READY (price,
-  # temperature and context rows exist, and it has not answered 404 within OPENWEIGHT_ABSENT_TTL_MS),
-  # Luna now has Microsoft's Global Standard price, context and request-shape rows, so it is
-  # selectable. A live 404 still moves to 5.6 for the absence TTL.
+  # W1-T4079 (operator ruling 2026-09-22): gpt-6-luna took every cash row gpt-5.6-luna appeared in.
+  # W1-T4081 RETIRED gpt-5.6-luna and gpt-5.6-terra from these rows once gpt-6-luna had been selected
+  # and had completed work on 44 distinct days (cash ledger, read 2026-11-25). selectOpenWeightModel
+  # passes over a deployment until it is READY (price, temperature and context rows exist, and it has
+  # not answered 404 within OPENWEIGHT_ABSENT_TTL_MS), so a live 404 on gpt-6-luna moves to the next
+  # candidate of its row for the absence TTL.
   cash:
     # W1-T3614 — THE TWO ROWS LEAD WITH DIFFERENT DEPLOYMENTS, AND THAT IS THE POINT. Neither model
     # wins outright; the winner is decided by the INPUT:OUTPUT ratio of the lane, measured against
@@ -293,9 +294,9 @@ capabilities:
     # trailing gpt-oss there is unreachable for that lane and is kept only for a smaller caller.
     economy:
       # Haiku 5.5 is an economy fallback; per-task trials must earn promotion ahead of these winners.
-      low:    [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna, claude-haiku-5-5]
-      medium: [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna, claude-haiku-5-5]
-      high:   [gpt-oss-120b, gpt-5-nano, gpt-6-luna, gpt-5.6-luna, claude-haiku-5-5]
+      low:    [gpt-oss-120b, gpt-5-nano, gpt-6-luna, claude-haiku-5-5]
+      medium: [gpt-oss-120b, gpt-5-nano, gpt-6-luna, claude-haiku-5-5]
+      high:   [gpt-oss-120b, gpt-5-nano, gpt-6-luna, claude-haiku-5-5]
     # Terra 6.1 precedes Sol 6.1 after the cheap balanced candidates (W1-T10839).
     # NORMAL CASH ORDER STAYS MEASURED: economy/balanced continue to lead with the per-task winners
     # from W1-T3614. Luna is nevertheless a real cash deployment, independently of subscription
@@ -303,17 +304,17 @@ capabilities:
     # selectOpenWeightModel(..., { cashSqueezed: true }) promotes it only when the subscription
     # auction has already blocked and this cash request is the squeeze fallback.
     balanced:
-      low:    [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-6.2-sol, gpt-6.1-sol]
-      medium: [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-6.2-sol, gpt-6.1-sol]
-      high:   [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-6.2-sol, gpt-6.1-sol]
+      low:    [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-6.1-terra, gpt-6.2-sol, gpt-6.1-sol]
+      medium: [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-6.1-terra, gpt-6.2-sol, gpt-6.1-sol]
+      high:   [gpt-5-nano, gpt-oss-120b, gpt-6-luna, gpt-6.1-terra, gpt-6.2-sol, gpt-6.1-sol]
     # LUNA TAKES gpt-5-mini's PLACE; TERRA IS THE ESCALATION BEHIND IT. Luna is cheaper
     # than mini on both axes ($0.20/$1.20 vs $0.25/$2.00) and spent 0 reasoning tokens on an
     # identical trivial prompt where mini spent 64 of 76, so mini was REMOVED rather than demoted.
-    # Terra 6.1 trails both Lunas; Terra 5.6 remains the final escalation (W1-T10839).
+    # Terra 6.1 trails Luna as the escalation; Terra 5.6 was retired from this ladder (W1-T4081).
     frontier:
-      low:    [gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-5.6-terra]
-      medium: [gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-5.6-terra]
-      high:   [gpt-6-luna, gpt-5.6-luna, gpt-6.1-terra, gpt-5.6-terra]
+      low:    [gpt-6-luna, gpt-6.1-terra]
+      medium: [gpt-6-luna, gpt-6.1-terra]
+      high:   [gpt-6-luna, gpt-6.1-terra]
 
 # ── The Architect mount (the bookend: plan authorship, orchestration) ──────────
 # claude-opus-5-5/high — the sole top-tier mount; strictly above every worker below. Governs ONLY

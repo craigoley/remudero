@@ -112,13 +112,13 @@ test("W1-T10839: the Responses deployment set carries Sol and Terra and its erro
 
 test("W1-T10839: cash balanced puts Terra ahead of Sol and cash frontier swaps in Terra 6.1", () => {
   for (const effort of ["low", "medium", "high"]) {
-    const balanced = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", TERRA, SOL62, SOL];
-    const frontier = ["gpt-6-luna", "gpt-5.6-luna", TERRA, "gpt-5.6-terra"];
+    const balanced = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", TERRA, SOL62, SOL];
+    const frontier = ["gpt-6-luna", TERRA];
     assert.deepEqual(table.cash!.balanced[effort], balanced);
     assert.deepEqual(table.cash!.frontier[effort], frontier);
     assert.deepEqual(openWeightCandidatesForCapability(undefined, "balanced", effort), balanced);
     assert.deepEqual(openWeightCandidatesForCapability(undefined, "frontier", effort), frontier);
-    assert.deepEqual(table.cash!.economy[effort], ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "gpt-5.6-luna", "claude-haiku-5-5"]);
+    assert.deepEqual(table.cash!.economy[effort], ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "claude-haiku-5-5"]);
     assert.deepEqual(table.codex.economy[effort], effort === "medium"
       ? ["gpt-6-luna", "gpt-5.3-codex-spark", "gpt-5.6-luna", "gpt-5.4-mini"]
       : ["gpt-5.3-codex-spark", "gpt-6-luna", "gpt-5.6-luna", "gpt-5.4-mini"]);

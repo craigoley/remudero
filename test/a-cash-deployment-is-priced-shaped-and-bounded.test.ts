@@ -24,7 +24,7 @@ test("W1-T3689: every deployment named in the cash ladder is priced, shaped and 
   assert.ok(named.size > 0, "the ladder must name at least one deployment");
   // W1-T3689's OWN claim, not just the census: gpt-5-mini must actually be one of the named rows,
   // so this proof cannot pass vacuously against a merge base where the ladder never named it at all.
-  assert.ok(named.has("gpt-5.6-luna"), "luna leads the cash ladder");
+  assert.ok(named.has("gpt-6-luna"), "luna leads the cash ladder");
   assert.ok(!named.has("gpt-5-mini"), "gpt-5-mini was removed, not demoted — a trailing row would imply a fallback worth reaching");
 
   // W1-T4079: a successor may lead a row before its deployment and price exist; selection passes
@@ -65,16 +65,16 @@ test("cash economy and balanced rows retain Luna as the independent squeeze cand
   const cash = mounts.capabilities?.cash;
   assert.ok(cash, "the cash ladder must exist");
   for (const effort of ["low", "medium", "high"] as const) {
-    assert.deepEqual(cash.economy[effort], ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "gpt-5.6-luna", "claude-haiku-5-5"]);
-    assert.deepEqual(cash.balanced[effort], ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", "gpt-6.2-sol", "gpt-6.1-sol"]);
+    assert.deepEqual(cash.economy[effort], ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "claude-haiku-5-5"]);
+    assert.deepEqual(cash.balanced[effort], ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.2-sol", "gpt-6.1-sol"]);
   }
 });
 
-// Terra earns its place on CAPABILITY, not price: it is 10x luna on both axes and may lead the
-// frontier band only. A test keeps the price table saying so.
+// Terra earns its place on CAPABILITY, not price: it is dearer than luna on both axes and may lead
+// no band. W1-T4081 retired the 5.6 pair; this keeps the same claim on the 6.x pair.
 test("terra is recorded as dearer than luna on both axes, so nothing routes to it to save money", () => {
-  const terra = OPENWEIGHT_PRICES["gpt-5.6-terra"]!;
-  const luna = OPENWEIGHT_PRICES["gpt-5.6-luna"]!;
+  const terra = OPENWEIGHT_PRICES["gpt-6.1-terra"]!;
+  const luna = OPENWEIGHT_PRICES["gpt-6-luna"]!;
   assert.ok(terra.inputUsdPerMillion > luna.inputUsdPerMillion, "terra must be dearer on input");
   assert.ok(terra.outputUsdPerMillion > luna.outputUsdPerMillion, "terra must be dearer on output");
   assert.equal(OPENWEIGHT_PRICES["gpt-5-mini"], undefined, "gpt-5-mini is gone from the price table");
@@ -86,12 +86,12 @@ test("terra leads NOTHING — it is the escalation behind luna, never a lane's f
   let frontierRows = 0;
   for (const [capability, efforts] of Object.entries(cash)) {
     for (const [effort, row] of Object.entries(efforts)) {
-      assert.notEqual(row[0], "gpt-5.6-terra", `cash.${capability}.${effort} must not LEAD with terra — it is 10x luna`);
+      assert.notEqual(row[0], "gpt-6.1-terra", `cash.${capability}.${effort} must not LEAD with terra`);
       if (capability === "frontier") {
         frontierRows++;
         const firstReady = row.find((id) => !OPENWEIGHT_AWAITING_READINESS.has(id));
         assert.equal(firstReady, "gpt-6-luna", `frontier.${effort} leads with the priced and shaped GPT-6 Luna`);
-        assert.ok(row.includes("gpt-5.6-terra"), `frontier.${effort} keeps terra reachable as the escalation`);
+        assert.ok(row.includes("gpt-6.1-terra"), `frontier.${effort} keeps terra reachable as the escalation`);
       }
     }
   }
