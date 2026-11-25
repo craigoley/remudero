@@ -78,6 +78,7 @@ test("W1-T14879 a standby starts its filing read before its rotation warm", asyn
 test("W1-T14879 a standby whose rotation warm fails still boots with its one filing read", async (t) => {
   const { code, order } = await standbyBoot(t, true);
   assert.equal(code, 0, "a failed warm decides nothing");
+  assert.deepEqual(order.filter((step) => step.startsWith("warm:")), ["warm:read_pending"], "the warm ran, and threw, beside the read");
   assert.equal(order.filter((step) => step === "filing_read_started").length, 1, `one filing read: ${JSON.stringify(order)}`);
   assert.equal(order.at(-1), "loop:read_settled", "the loop starts after the read settled");
 });
