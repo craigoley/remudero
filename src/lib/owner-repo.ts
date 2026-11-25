@@ -103,10 +103,16 @@ function originConfigKey(root: string): string | undefined {
   const gitEnv = Object.entries(process.env).filter(([name]) => name.startsWith("GIT_")).sort(([a], [b]) => a.localeCompare(b));
   try {
     const dotGit = join(root, ".git");
-    const entry = statSync(dotGit);
+    // Read the entry once rather than stat-then-read: a `.git` directory answers EISDIR, a worktree's file its pointer.
+    let pointerText: string | undefined;
+    try {
+      pointerText = readFileSync(dotGit, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "EISDIR") throw error;
+    }
     let gitDir = dotGit;
-    if (entry.isFile()) {
-      const pointer = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotGit, "utf8"));
+    if (pointerText !== undefined) {
+      const pointer = /^gitdir:\s*(.+)$/m.exec(pointerText);
       if (!pointer) return undefined;
       gitDir = isAbsolute(pointer[1]!.trim()) ? pointer[1]!.trim() : resolve(root, pointer[1]!.trim());
     }
