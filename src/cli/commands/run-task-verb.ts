@@ -37,8 +37,7 @@ import { billingMode, readBinaryPin, type BillingMode } from "../../lib/env.js";
 import { renderAnchorBlock } from "../../lib/compaction.js";
 import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "../../lib/unfinished-checkpoint.js";
 import { hashInstallInputs } from "../../lib/install-hash.js";
-import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, type PreopenGateResult } from "../../lib/preopen-gate.js";
-import { withFiledGrepProofs } from "../../lib/preopen-filed-grep-proofs.js";
+import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, withFiledProofCheck, type PreopenGateResult } from "../../lib/preopen-gate.js";
 import { readPreopenGateRows } from "../../lib/preopen-gate-health.js";
 import { implementPromptParts, renderDiagnosePrompt, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts, renderPrerequisiteOutcomeBlock, renderReconPrompt, scopeGuardOutOfScopeFiles, withPrerequisiteOutcomes, type PriorPartialWork } from "../../lib/prompt-render.js";
 import type { RunResult } from "../../lib/run-result.js";
@@ -7379,9 +7378,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       return baseGate ? baseGate(path) : { kind: "pass", durationMs: 0 };
     };
     // The task's own filed `grep:` proofs, at the worker's head: a miss is a named step in this repair round, not a terminal pr_open.refused.
-    const preopenGate = reconciledGate === undefined ? undefined : withFiledGrepProofs(
+    const preopenGate = reconciledGate === undefined ? undefined : withFiledProofCheck(
       reconciledGate,
-      () => (opsCriteriaAtOpen ?? coreCriteriaAtOpen)?.criteria ?? task.acceptance ?? [],
+      (opsCriteriaAtOpen ?? coreCriteriaAtOpen)?.criteria ?? task.acceptance ?? [],
       opts.prOpenProofRunner ?? ((proof, base, root, target) => defaultProofRunnerAsync(proof, base, root, target, { store: { log } })),
       { owner, repo: task.repo },
     );
