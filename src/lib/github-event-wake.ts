@@ -477,7 +477,7 @@ export type WakeTimingFields = {
   slow_count: number;
 };
 
-/** A delivery handled for longer than this also writes its own github.wake.slow row (GitHub gives up at 10 s). */
+/** A delivery whose arrival loop lag plus handling passes this also writes a github.wake.slow row (GitHub gives up at 10 s). */
 export const GITHUB_WAKE_SLOW_MS = 5_000;
 
 export function createWakeTimings(): WakeTimings {
@@ -668,7 +668,8 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
   const monotonicMs = opts.monotonicMs ?? (() => performance.now());
   const loopLagMs = opts.loopLagMs ?? createLoopLagSampler();
   const recordTiming = (req: IncomingMessage, action: string | undefined, handleMs: number, lagMs: number): void => {
-    const slow = handleMs > GITHUB_WAKE_SLOW_MS;
+    // The wait before the handler ran counts: a stalled loop delays a delivery without lengthening its handling.
+    const slow = handleMs + lagMs > GITHUB_WAKE_SLOW_MS;
     if (opts.timings) {
       opts.timings.handle_ms.push(handleMs);
       opts.timings.loop_lag_ms_max = Math.max(opts.timings.loop_lag_ms_max, lagMs);

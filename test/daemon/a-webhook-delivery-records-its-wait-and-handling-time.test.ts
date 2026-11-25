@@ -172,6 +172,23 @@ test("W1-T14808: a slow webhook delivery writes one slow row", async () => {
   assert.ok(11_000 > GITHUB_WAKE_SLOW_MS);
 });
 
+test("W1-T14808: a delivery held by a stalled event loop writes a slow row though its handling was quick", async () => {
+  let clockMs = 0;
+  const rows = await withRoute(
+    {
+      monotonicMs: () => (clockMs += 5),
+      loopLagMs: () => 10_500,
+    },
+    async (send) => {
+      assert.equal(await send("stalled-1"), 202);
+    },
+  );
+  assert.deepEqual(
+    rows.filter((r) => r.step === "github.wake.slow").map((r) => [r.delivery_id, r.handle_ms, r.loop_lag_ms]),
+    [["stalled-1", 5, 10_500]],
+  );
+});
+
 test("W1-T14808: a refused delivery is timed, and a slow one is logged with no timings attached", async () => {
   const timings = createWakeTimings();
   let clockMs = 0;
