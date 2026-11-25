@@ -1460,6 +1460,11 @@
     "sre_lane.unresolved_escalated": "W1-T14611: the marker of the page for a primary daemon whose SRE lane could not find its instance; only its own escalation pair in escalation-catalogue.ts reads it, to page once and to find the issue to close.",
     "sre_lane.unresolved_cleared": "W1-T14611: the marker that the SRE lane started again and closed that page; only its own escalation pair in escalation-catalogue.ts reads it, so a closed page is not closed twice.",
     "selector-shadow.edge_unreplayable": "W1-T13526: the diagnostic row for a miss whose changed paths stayed unread (no base, an unreadable compare or the per-pass read bound spent); it files nothing and stores no edge, and an operator reads it to see why a miss was not filed.",
-    "product_plan.checkout_left": "W1-T14723: an audit row naming why a product re-plan's checkout was left behind the live head; the refusal body carries the same reason to the Console"
+    "product_plan.checkout_left": "W1-T14723: an audit row naming why a product re-plan's checkout was left behind the live head; the refusal body carries the same reason to the Console",
+    "plan.reservations_unreadable": "W1-T14642: a diagnostic that the reservation ref read failed; the gardener treats the reservations as unknown and the next pass reads again, so nothing re-reads the row.",
+    "plan.ops_checkout_unreadable": "W1-T14642: a diagnostic that the ops catalog checkout could not be read; the pass leaves the ops catalog alone and the next pass reads again, so nothing re-reads the row.",
+    "plan.ops_landing": "W1-T14642: an audit row for the operator naming the ops landing PR and how many records landed, waited or were refused; the PR carries the state, so nothing re-reads the row.",
+    "plan.ops_landing_skipped": "W1-T14642: an audit row naming why an ops landing was not attempted (no named plan destination); nothing decides on it.",
+    "plan.ops_landing_failed": "W1-T14642: a diagnostic for a failed ops landing with its error; the next pass retries the landing, so nothing re-reads the row."
   }
 }
