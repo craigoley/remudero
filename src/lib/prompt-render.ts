@@ -1227,6 +1227,17 @@ export function renderCapabilityGrantContext(receipts: readonly CapabilityReceip
 }
 
 /**
+ * W1-T13768: whether the `rule_headlines` implement-prompt part is built for a mount on `provider`.
+ * A Codex worker loads AGENTS.md as its project doc, which already carries the headline index, so the
+ * part would hand it the same ~21 KB twice. A Claude worker runs with `settingSources: []`, so
+ * CLAUDE.md never reaches it and it keeps the part. An unpinned mount (`undefined` — the auction picks
+ * the provider at spawn) is not known to be Codex, so it keeps the part too. PURE.
+ */
+export function ruleHeadlinesEnabledForProvider(enabled: boolean, provider: string | undefined): boolean {
+  return enabled && provider !== "codex";
+}
+
+/**
  * Render the implement prompt: cited CONTEXT + TASK + explicit output contract.
  *
  * Cache-aware assembly keeps stable doctrine/rule headlines before per-task context, recon,
