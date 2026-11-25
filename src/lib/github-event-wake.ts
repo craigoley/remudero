@@ -24,7 +24,7 @@ import {
 } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, join } from "node:path";
-import { monitorEventLoopDelay, performance } from "node:perf_hooks";
+import { performance } from "node:perf_hooks";
 import type { Clock } from "./clock.js";
 import { writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
 import { RawBodyTooLargeError, readBoundedRawBody, type Route } from "./service.js";
@@ -462,7 +462,7 @@ export function wakeSummaryRow(counters: WakeCounters, window: { start: string; 
   return { window_start: window.start, window_end: window.end, ...counters, by_event: { ...counters.by_event } };
 }
 
-/** W1-T14808: every delivery's handling time and the worst event-loop stall seen at its arrival, until the next flush. */
+/** W1-T14808: every delivery's handling time and the longest wait before a handler ran, until the next flush. */
 export interface WakeTimings {
   handle_ms: number[];
   loop_lag_ms_max: number;
@@ -477,7 +477,7 @@ export type WakeTimingFields = {
   slow_count: number;
 };
 
-/** A delivery whose arrival loop lag plus handling passes this also writes a github.wake.slow row (GitHub gives up at 10 s). */
+/** A delivery whose own wait plus handling passes this also writes a github.wake.slow row (GitHub gives up at 10 s). */
 export const GITHUB_WAKE_SLOW_MS = 5_000;
 
 export function createWakeTimings(): WakeTimings {
@@ -495,19 +495,41 @@ export function wakeTimingFields(timings: WakeTimings): WakeTimingFields {
   };
 }
 
-/** Reads, then resets, the longest event-loop stall since the previous read, in ms. Created on first use. */
-export function createLoopLagSampler(): () => number {
-  let histogram: ReturnType<typeof monitorEventLoopDelay> | undefined;
-  return () => {
-    if (!histogram) {
-      histogram = monitorEventLoopDelay({ resolution: 10 });
-      histogram.enable();
+/** A gap between heartbeats longer than this is an event-loop stall. */
+export const ARRIVAL_STALL_MIN_MS = 100;
+/** A delivery whose handler starts this soon after a stall ends was queued behind it. */
+export const ARRIVAL_QUEUED_WINDOW_MS = 250;
+const ARRIVAL_BEAT_MS = 20;
+
+/** W1-T14808: each delivery's own wait before its handler ran, from heartbeat gaps (pure; times in ms). */
+export interface ArrivalWaitTracker {
+  beat(nowMs: number): void;
+  waitAt(nowMs: number): number;
+}
+
+/** A handler that starts inside a stall no beat has closed yet waited since the last beat; one that starts within
+ *  {@link ARRIVAL_QUEUED_WINDOW_MS} of a closed stall's end was queued behind all of it; any other waited 0. */
+export function createArrivalWaitTracker(startMs: number): ArrivalWaitTracker {
+  let lastBeat = startMs;
+  let stall: { start: number; end: number } | undefined;
+  return {
+    beat(nowMs) {
+      if (nowMs - lastBeat > ARRIVAL_STALL_MIN_MS) stall = { start: lastBeat, end: nowMs };
+      lastBeat = nowMs;
+    },
+    waitAt(nowMs) {
+      if (nowMs - lastBeat > ARRIVAL_STALL_MIN_MS) return Math.round(nowMs - lastBeat);
+      if (stall && nowMs - stall.end <= ARRIVAL_QUEUED_WINDOW_MS) return Math.round(nowMs - stall.start);
       return 0;
-    }
-    const maxMs = histogram.max / 1e6;
-    histogram.reset();
-    return Math.round(maxMs);
+    },
   };
+}
+
+/** The production wait read: a tracker fed by an unref'd heartbeat that starts when the route is built. */
+export function startArrivalWaitMonitor(clock: () => number = () => performance.now()): () => number {
+  const tracker = createArrivalWaitTracker(clock());
+  setInterval(() => tracker.beat(clock()), ARRIVAL_BEAT_MS).unref();
+  return () => tracker.waitAt(clock());
 }
 
 /** Writes the window since the last successful write each interval, then zeroes `counters` (and `timings`); a
@@ -577,11 +599,12 @@ export interface GithubEventWakeOptions {
   counters?: WakeCounters;
   /** Receives verified, allowlisted and deduplicated `check_run:completed` deliveries. */
   onCheckRunCompleted?: (info: CheckRunCompletedInfo) => void | Promise<void>;
-  /** W1-T14808: when set, every delivery's handling time and arrival loop lag are added here. */
+  /** W1-T14808: when set, every delivery's handling time and its own wait before the handler are added here. */
   timings?: WakeTimings;
-  /** Injectable for a test: a monotonic ms clock (default `performance.now`) and the loop-lag read. */
+  /** Injectable for a test: a monotonic ms clock (default `performance.now`), the wait read and the slow bound. */
   monotonicMs?: () => number;
   loopLagMs?: () => number;
+  slowMs?: number;
 }
 
 /**
@@ -666,10 +689,12 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
   };
 
   const monotonicMs = opts.monotonicMs ?? (() => performance.now());
-  const loopLagMs = opts.loopLagMs ?? createLoopLagSampler();
+  const loopLagMs = opts.loopLagMs ?? startArrivalWaitMonitor(monotonicMs);
+  const slowMs = opts.slowMs ?? GITHUB_WAKE_SLOW_MS;
+  const seenActions = new WeakMap<IncomingMessage, string | undefined>();
   const recordTiming = (req: IncomingMessage, action: string | undefined, handleMs: number, lagMs: number): void => {
     // The wait before the handler ran counts: a stalled loop delays a delivery without lengthening its handling.
-    const slow = handleMs + lagMs > GITHUB_WAKE_SLOW_MS;
+    const slow = handleMs + lagMs > slowMs;
     if (opts.timings) {
       opts.timings.handle_ms.push(handleMs);
       opts.timings.loop_lag_ms_max = Math.max(opts.timings.loop_lag_ms_max, lagMs);
@@ -685,7 +710,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
     });
   };
 
-  return {
+  const route: Route = {
     method: "POST",
     path: "/v1/hooks/github",
     scope: "write",
@@ -695,11 +720,6 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
     // W1-T2568 (design i): GitHub's HMAC replaces the bearer token for this one route (service.ts's Route.selfAuthenticated).
     selfAuthenticated: true,
     handler: async (req, res) => {
-      // W1-T14808: timed from the handler's first line to the response's close, whichever branch answers.
-      const startedMs = monotonicMs();
-      const lagMs = loopLagMs();
-      let seenAction: string | undefined;
-      res.once("close", () => recordTiming(req, seenAction, Math.round(monotonicMs() - startedMs), lagMs));
       if (!opts.secret) {
         log("github.wake.unavailable", { reason: "no_secret_configured" });
         sendJson(res, 503, { error: "webhook_not_configured" });
@@ -761,7 +781,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
 
       const event = firstHeader(req, "x-github-event");
       const action = extractAction(body);
-      seenAction = action;
+      seenActions.set(req, action);
       if (!event || !(isAllowlistedGithubEvent(event, action) || isOwnerEscalationReply(event, action, body))) {
         if (opts.counters) countWake(opts.counters, "ignored", event, action);
         else log("github.wake.ignored", { reason: "unsupported_event_or_action", event, action });
@@ -816,6 +836,21 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
         ...(summary ? { semantic_check_summary: summary } : {}),
       });
       sendJson(res, 202, { accepted: true });
+    },
+  };
+  const handle = route.handler;
+  return {
+    ...route,
+    // W1-T14808: timed from the handler's first line until it has settled AND the response has closed.
+    handler: async (req, res, ctx) => {
+      const startedMs = monotonicMs();
+      const lagMs = loopLagMs();
+      const closed = new Promise<void>((resolve) => res.once("close", () => resolve()));
+      try {
+        await handle(req, res, ctx);
+      } finally {
+        void closed.then(() => recordTiming(req, seenActions.get(req), Math.round(monotonicMs() - startedMs), lagMs));
+      }
     },
   };
 }

@@ -1,6 +1,7 @@
 // W1-T14808: every webhook delivery is timed, so the ones GitHub drops at 10 s have a measured cause.
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
+import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -10,7 +11,8 @@ import {
   GITHUB_WAKE_SLOW_MS,
   createDeliveryDedupStore,
   createGitHubEventWakeHandler,
-  createLoopLagSampler,
+  createArrivalWaitTracker,
+  startArrivalWaitMonitor,
   createWakeCounters,
   createWakeTimings,
   startWakeSummaryFlush,
@@ -31,7 +33,7 @@ type Row = { step: string } & Record<string, unknown>;
 
 async function withRoute(
   extra: Partial<GithubEventWakeOptions>,
-  run: (send: (id: string, event?: string, action?: string) => Promise<number>, rows: Row[]) => Promise<void>,
+  run: (send: (id: string, event?: string, action?: string) => Promise<number>, rows: Row[], url: string) => Promise<void>,
 ): Promise<Row[]> {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14808-`));
   const rows: Row[] = [];
@@ -64,7 +66,7 @@ async function withRoute(
     return res.status;
   };
   try {
-    await run(send, rows);
+    await run(send, rows, url);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(root, { recursive: true, force: true });
@@ -209,18 +211,93 @@ test("W1-T14808: a refused delivery is timed, and a slow one is logged with no t
   );
 });
 
-test("W1-T14808: the default loop-lag read measures a real event-loop stall", async () => {
-  const read = createLoopLagSampler();
-  assert.equal(read(), 0, "the first read starts the monitor");
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  const until = Date.now() + 120;
+test("W1-T14808: each delivery's own wait is read from the heartbeat gap it was queued behind", () => {
+  const t = createArrivalWaitTracker(0);
+  for (let ms = 20; ms <= 200; ms += 20) t.beat(ms);
+  assert.equal(t.waitAt(205), 0, "a delivery on a healthy loop waited nothing");
+  assert.equal(t.waitAt(9_200), 9_000, "a handler starting inside a stall no beat has closed waited since the last beat");
+  t.beat(9_201);
+  assert.deepEqual(
+    [9_202, 9_230, 9_290].map((ms) => t.waitAt(ms)),
+    [9_002, 9_030, 9_090],
+    "every delivery queued behind the stall gets all of it, not only the first",
+  );
+  for (let ms = 9_221; ms <= 11_201; ms += 20) t.beat(ms);
+  assert.equal(t.waitAt(11_205), 0, "a delivery 2 s after an idle stall ended waited nothing");
+});
+
+/** A separate process posts `ids` once the parent says it is about to stall, so they queue behind the stall. */
+const BURST_CLIENT = `
+const { createHmac } = require("node:crypto");
+const [url, ...ids] = process.argv.slice(1);
+process.stdin.once("data", async () => {
+  await Promise.all(ids.map(async (id) => {
+    const body = JSON.stringify({ action: "completed", repository: { full_name: ${JSON.stringify(REPOSITORY)} } });
+    const sig = "sha256=" + createHmac("sha256", process.env.W1_T14808_SECRET).update(body, "utf8").digest("hex");
+    const res = await fetch(url, { method: "POST", body, headers: { "content-type": "application/json",
+      "x-github-delivery": id, "x-github-event": "check_run", "x-hub-signature-256": sig } });
+    await res.arrayBuffer();
+    process.stdout.write(id + ":" + res.status + "\\n");
+  }));
+});
+process.stdout.write("ready\\n");
+`;
+
+test("W1-T14808: a burst queued behind a real event-loop stall writes a slow row for every delivery", async () => {
+  const timings = createWakeTimings();
+  const ids = ["b1", "b2", "b3", "b4", "b5"];
+  const rows = await withRoute({ timings, slowMs: 1_000 }, async (_send, _rows, url) => {
+    const child = spawn(process.execPath, ["-e", BURST_CLIENT, url, ...ids], {
+      env: { ...process.env, W1_T14808_SECRET: SECRET },
+      stdio: ["pipe", "pipe", "inherit"],
+    });
+    let out = "";
+    const done = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    await new Promise<void>((resolve) => child.stdout!.once("data", () => resolve()));
+    child.stdout!.on("data", (chunk: Buffer) => void (out += chunk.toString()));
+    child.stdin!.end("go\n");
+    // Give the child time to connect, then stall this process so its five requests queue behind the stall.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const until = Date.now() + 1_600;
+    while (Date.now() < until) {
+      // Block the event loop on purpose.
+    }
+    await done;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(out.trim().split("\n").sort().join(","), ids.map((id) => `${id}:202`).join(","));
+  });
+  const slow = rows.filter((r) => r.step === "github.wake.slow");
+  assert.deepEqual(slow.map((r) => r.delivery_id).sort(), ids, "every delivery queued behind the stall is slow, not only the first");
+  for (const row of slow) assert.ok(Number(row.loop_lag_ms) >= 1_000, `${String(row.delivery_id)} waited ${String(row.loop_lag_ms)} ms`);
+  assert.equal(timings.slow_count, 5);
+});
+
+test("W1-T14808: a quick delivery long after a real stall ended is not slow", async () => {
+  const timings = createWakeTimings();
+  const rows = await withRoute({ timings, slowMs: 1_000 }, async (send) => {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const until = Date.now() + 1_500;
+    while (Date.now() < until) {
+      // Block the event loop on purpose.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal(await send("after-idle-stall"), 202);
+  });
+  assert.equal(rows.filter((r) => r.step === "github.wake.slow").length, 0);
+  assert.equal(timings.slow_count, 0);
+});
+
+test("W1-T14808: the default monitor reads a real stall and resets after it", async () => {
+  const read = startArrivalWaitMonitor();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(read(), 0, "a healthy loop reads no wait");
+  const until = Date.now() + 400;
   while (Date.now() < until) {
     // Block the event loop on purpose.
   }
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  const stall = read();
-  assert.ok(stall >= 80, `a 120 ms block reads as a stall of at least 80 ms (read ${stall})`);
-  assert.ok(read() < stall, "the read resets the maximum");
+  assert.ok(read() >= 300, "a handler starting inside the stall reads it");
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  assert.equal(read(), 0, "long after the stall ended, a new delivery waited nothing");
 });
 
 test("W1-T14808: the default clock and sampler time a real delivery", async () => {

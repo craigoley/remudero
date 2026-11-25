@@ -810,7 +810,7 @@ const SEED_ROWS: readonly SeedRow[] = [
     meaning:
       "One minute of GitHub webhook deliveries at serve: counts of coalesced accepts, ignored and duplicate deliveries " +
       "by event, and the timing of every delivery in the window: `timed_count`, `handle_ms_p50`, `handle_ms_max`, " +
-      "`loop_lag_ms_max` (the longest event-loop stall seen at a delivery's arrival) and `slow_count` (wait plus handling over 5 s). " +
+      "`loop_lag_ms_max` (the longest wait any delivery had before its handler ran) and `slow_count` (wait plus handling over 5 s). " +
       "A window with no delivery writes no row. Nothing decides on it.",
     writer: ["startWakeSummaryFlush"],
     outcomes: ["deliveries counted or timed in the window"],
@@ -819,8 +819,9 @@ const SEED_ROWS: readonly SeedRow[] = [
     // W1-T14808: GitHub gives up on a delivery at 10 s and never redelivers it.
     step: "github.wake.slow",
     meaning:
-      "One webhook delivery took serve more than 5 s: the event-loop stall seen at its arrival plus its time from the " +
-      "handler's first line to the response's close. Fields: " +
+      "One webhook delivery took serve more than 5 s: its own wait before the handler ran (`loop_lag_ms`, the " +
+      "event-loop stall it was queued behind, from a 20 ms heartbeat) plus its handling until the handler settled and " +
+      "the response closed (`handle_ms`). Fields: " +
       "`delivery_id`, `event`, `action`, `handle_ms` and `loop_lag_ms`. No payload and no secret. Nothing decides on it; " +
       "it is evidence for why GitHub timed a delivery out.",
     writer: ["createGitHubEventWakeHandler"],
