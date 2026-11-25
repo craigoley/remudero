@@ -62,19 +62,76 @@ deny() {
 # rule was refused twice while it was being written, and a floor that refuses a grep about itself
 # gets disabled the same afternoon. Requiring `gh` after a SEPARATOR was worse — it silently stopped
 # rule 6 refusing `…; do gh pr view; sleep 20; done`, since `do` is not a separator, and that mutant
-# passed every existing test. So: strip quoted text, then match `gh` that is not part of a longer
-# word or a path. This is a TRIPWIRE, not a parser; an indirectly-named invocation escapes it, and
-# that limit is asserted in test/gh-read-cadence-floor.test.ts rather than papered over.
+# passed every existing test. So: keep only the text bash would EXECUTE, then match `gh` that is not
+# part of a longer word or a path. This is a TRIPWIRE, not a parser; an indirectly-named invocation
+# escapes it, and that limit is asserted in test/gh-read-cadence-floor.test.ts rather than papered over.
+#
+# W1-T14048 — THE NAME OF THE CLI IS NOT AN INVOCATION OF IT. REPRODUCED against a live read broker: a
+# `cat > notes.md <<EOF` whose body says `gh pr view 1`, a `git commit -m "$(cat <<'EOF' …` message that
+# names it, and a quoted message spanning lines were all ROUTED ("re-run as rmd gh"), because the old
+# test stripped quotes line by line with sed and knew nothing of heredoc bodies or comments.
+# `gh_code_text` is the one place that decides what is code: heredoc bodies and `#` comments are
+# dropped, single-quoted text is dropped, double-quoted text is dropped EXCEPT a `$(…)` or backtick
+# substitution inside it (that RUNS: W1-T1066's recorded poll, `until [ "$(gh run view …)" = completed ]`,
+# stays an invocation), and an UNQUOTED heredoc body keeps only its substitutions (the shell expands
+# those). Quotes are tracked across lines and through `"$(cat <<'EOF' … EOF)"`, so a `"` inside a
+# heredoc body cannot flip the state.
+gh_code_text() {  # stdin: shell text -> the text bash executes, quoted/heredoc/comment text removed
+  awk '
+    function top() { return sp > 0 ? st[sp] : "C" }
+    function push(k) { st[++sp] = k; pd[sp] = 0 }
+    BEGIN { sp = 0; nh = 0; hi = 0 }
+    {
+      L = $0
+      if (hi) {
+        line = L; if (htab[hi]) sub(/^\t+/, "", line)
+        if (line == hword[hi]) { if (++hi > nh) { hi = 0; nh = 0 }; next }
+        if (!hq[hi]) { r = L; while (match(r, /(\$\([^)]*\)|`[^`]*`)/) > 0) { print substr(r, RSTART, RLENGTH); r = substr(r, RSTART + RLENGTH) } }
+        next
+      }
+      n = length(L); o = ""
+      for (i = 1; i <= n; i++) {
+        c = substr(L, i, 1); t = top()
+        if (t == "S") { if (c == "\047") sp--; continue }
+        if (t == "D") {
+          if (c == "\\") { i++; continue }
+          if (c == "\"") { sp--; continue }
+          if (c == "$" && substr(L, i + 1, 1) == "(") { push("P"); o = o "$("; i++; continue }
+          if (c == "`") { push("B"); o = o "`"; continue }
+          continue
+        }
+        if (c == "\\") { if (i < n) o = o substr(L, i + 1, 1); i++; continue }
+        if (c == "\047") { push("S"); continue }
+        if (c == "\"") { push("D"); continue }
+        if (c == "`") { if (t == "B") { sp--; o = o c } else { push("B"); o = o c }; continue }
+        if (c == "$" && substr(L, i + 1, 1) == "(") { push("P"); o = o "$("; i++; continue }
+        if (t == "P") {
+          if (c == "(") pd[sp]++
+          else if (c == ")") { if (pd[sp] == 0) { sp--; o = o ")"; continue } pd[sp]-- }
+        }
+        if (c == "#") { p = substr(L, i - 1, 1); if (i == 1 || p == " " || p == "\t" || p == ";" || p == "&" || p == "|" || p == "(") break }
+        if (c == "<" && substr(L, i, 2) == "<<") {
+          if (substr(L, i, 3) == "<<<") { o = o "<<<"; i += 2; continue }
+          rest = substr(L, i)
+          if (match(rest, /^<<-?[ \t]*[\047"\\]*[A-Za-z_][A-Za-z0-9_]*/) > 0) {
+            w = substr(rest, 1, RLENGTH); tb = (w ~ /^<<-/)
+            sub(/^<<-?[ \t]*/, "", w); quoted = (w ~ /^[\047"\\]/)
+            sub(/^[\047"\\]*/, "", w)
+            hword[++nh] = w; htab[nh] = tb; hq[nh] = quoted
+            i += RLENGTH - 1
+            nx = substr(L, i + 1, 1); if (nx == "\047" || nx == "\"") i++
+            o = o " "
+            continue
+          }
+        }
+        o = o c
+      }
+      print o
+      if (nh && !hi) hi = 1
+    }'
+}
 invokes_gh() {
-  # A COMMAND SUBSTITUTION INSIDE QUOTES IS STILL AN INVOCATION. W1-T1066's own recorded poll,
-  # `until [ "$(gh run view …)" = completed ]; do sleep 20; done`, became ALLOWED under a
-  # quotes-only strip. Substitution forms are matched on the RAW text first.
-  if printf '%s' "$1" | grep -Eq '[$`]\([[:space:]]*gh[[:space:]]|`[[:space:]]*gh[[:space:]]'; then
-    return 0
-  fi
-  printf '%s' "$1" \
-    | sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g' \
-    | grep -Eq '(^|[^A-Za-z0-9_/.-])gh[[:space:]]'
+  printf '%s\n' "$1" | gh_code_text | grep -Eq '(^|[^A-Za-z0-9_/.-])gh[[:space:]]'
 }
 
 # `rmd gh [--class c] [--client x] [--fresh] -- <args>` runs `gh <args>`, so rules 2, 4, 5 and 10 all judge this text.
@@ -1436,7 +1493,7 @@ gh_segment_api_is_write() {  # $1 = one hr_tokens line; true when it runs a `gh 
 #    redirections left out) is classified once here, and rules 2, 5 and 10 read the result. Each rule KEEPS
 #    its raw-text grep too, so nothing it refused before passes. Bash only, as rule 16: with no jq `cmd` is
 #    the raw JSON, the argv is not parsed and every rule keeps just its raw-text grep (fail open as before).
-#    Rule 7 and `invokes_gh` are W1-T5670's and W1-T9281's, and are left alone.
+#    Rule 7 and `invokes_gh` are W1-T5670's and W1-T9281's; W1-T14048 made `invokes_gh` read executed text only.
 #    FALSIFIER: test/github/every-gh-rule-judges-the-argv-gh-receives.test.ts.
 gh_av_local=0 gh_av_nonlocal=0 gh_av_auth_mut=0 gh_av_pr_merge=0 gh_av_api_merge=0
 gh_av_write=0 gh_av_exempt=0 gh_av_inv_num="" gh_av_inv_repo=""
