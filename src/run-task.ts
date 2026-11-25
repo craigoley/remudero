@@ -383,7 +383,7 @@ export {
   mergeDirectViaRest,
 };
 export type { ArmDeps, ArmOutcome, ArmAttemptResult, DirectMergePreflightEvidence, DisarmOutcome, ArmLane };
-import { providerHeadroomTiming, resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
+import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, readOpenBoardSnapshot, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
@@ -413,7 +413,7 @@ import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import {
-  gardenFamilyRecord, ledgerCorpusSpan, machineJudgeFoundWork, machineJudgeInputsAsync, mechanicalDecisions, operatorRulingTimes, readOperatorReleaseRecords,
+  gardenFamilyRecord, ledgerCorpusSpan, machineJudgeFoundWork, machineJudgeInputsAsync, machineJudgePlanSource, mechanicalDecisions, operatorRulingTimes, readOperatorReleaseRecords,
   recordOperatorRelease, runMachineFilingJudge, unionTaskActivity, type MachineJudgePorts, type MechanicalPort,
 } from "./lib/machine-filing-judge.js";
 import { countRounds, countStepRows, filingEvidenceOf, type SymptomReading } from "./lib/mechanical-rulings.js";
@@ -3054,7 +3054,7 @@ import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js
 import { applyCorrection } from "./lib/correct.js";
 import { projectHeldTaskQuestionGates, renderHeldTaskQuestions } from "./lib/human-gate.js";
 import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, runLockRecord, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreeRemoveIfPresent, worktreeRemoveIfPresentAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, wireCredentialHelperSocket, workerContinuation, workerExecutionForProvider, taskInputAnswerWithLedger } from "./lib/worker.js";
-import { healedReviewerTreeTools } from "./lib/worker.js";
+import { healedReviewerTreeTools, workerHeadroomTiming } from "./lib/worker.js";
 import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
@@ -29011,7 +29011,7 @@ export interface GardenCheckoutOpts {
   fetcher?: GhApiFetcher;
   clock?: Clock;
   /** W1-T5348: the plan-PR preflight over the committed tree; injected only by a test. */
-  preflight?: (input: { cwd: string; title: string; body: string; codeRoot?: string }) => PlanPrPreflightResult;
+  preflight?: (input: { cwd: string; title: string; body: string; codeRoot?: string }) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
   /** W1-T12221: the shared landing of task files: its state root (`config.root`) and its seams. Absent,
    *  every land opens its own PR. */
   taskFilesLanding?: Pick<LandTaskFilesOpts, "stateRoot" | "gh" | "planPrPreflight">;
@@ -29387,6 +29387,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     },
     log,
     ...(escalate ? { escalate } : {}),
+    closeIssue: buildEscalationCloserAsync(owner, repo),
   });
   const withDue = (pass: () => void | Promise<void>, due: () => boolean | Promise<boolean>): RegisteredGardenPass => Object.assign(pass, { due });
   const gardenPass = <C extends string, I, A extends GardenAction<C>>(spec: GardenSpec<C, I, A, GardenCheckout>, d: GardenerDeps): RegisteredGardenPass => withDue(async () => {
@@ -37896,7 +37897,7 @@ export async function spawnEscalatedInboxDraft(
   if (!policy.routableProviders.includes("claude")) return undefined;
   const capacity = await readCapacity(args.config);
   // W1-T14200: judged on the same reset curve as the auction, so a final-rung reserve admits the rescue too.
-  if (!providerEligibility(capacity, policy.reservePercent, providerHeadroomTiming(systemClock.now(), args.config.root)).eligible) return undefined;
+  if (!providerEligibility(capacity, policy.reservePercent, workerHeadroomTiming(systemClock.now())).eligible) return undefined;
   const spawnArgs = {
     ...buildInboxDraftSpawnArgs({
       ...args,
@@ -39508,7 +39509,11 @@ export function productionMachineFilingJudgePorts(opts: {
 }): MachineJudgePorts {
   let mount: Mount | undefined;
   const fetcher = opts.fetcher ?? ghJson;
+  // W1-T14656: the ops records of the plan the pass read, and why none are judged when the ops catalog is not.
+  let ops: { ids: ReadonlySet<string>; refusal?: string } = { ids: new Set() };
   return {
+    ops: () => ops,
+    codeRoot: opts.repoRoot,
     mechanical: productionMechanicalPort({ repoRoot: opts.repoRoot, stateDir: opts.stateDir, clock: opts.clock }),
     flakeEvidence: flakeJudgeEvidencePort({
       stateDir: opts.stateDir, log: opts.log, clock: opts.clock ?? systemClock,
@@ -39525,7 +39530,10 @@ export function productionMachineFilingJudgePorts(opts: {
       const tasks = committed.tasks.map(task => ({
         ...task, sourcePath: join(opts.repoRoot, task.sourcePath!.slice(mainSha.length + 1)),
       }));
-      return { tasks, byId: new Map(tasks.map(task => [task.id, task])) };
+      // W1-T14656: composed with the ops catalog, so a queued ops record is judged like a public one.
+      const source = await machineJudgePlanSource({ tasks, byId: new Map(tasks.map(task => [task.id, task])) }, { stateDir: opts.stateDir });
+      ops = { ids: source.opsIds, ...(source.opsRefusal === undefined ? {} : { refusal: source.opsRefusal }) };
+      return source.plan;
     },
     riskJudge: (input) => {
       if (!mount) {
@@ -39600,7 +39608,20 @@ export function productionMachineFilingJudgePorts(opts: {
     },
     openWorkspace: () => gardenCheckoutAsync({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock,
       ...(opts.taskFilesLanding ? { taskFilesLanding: opts.taskFilesLanding, ...gardenTaskDestination(opts.taskFilesLanding.stateRoot, opts.repoRoot, opts.owner, opts.repo) } : {}) }),
-    prState: (prUrl) => gardenPrState(opts.owner, opts.repo, prUrl, fetcher),
+    // W1-T14656: the pull request's own repository answers its state: an ops landing is not in the public one.
+    prState: (prUrl) => {
+      const at = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\//.exec(prUrl);
+      return gardenPrState(at?.[1] ?? opts.owner, at?.[2] ?? opts.repo, prUrl, fetcher);
+    },
+    // W1-T14656: a rewrite of an ops record lands as a plan PR of the ops repository: a worktree of its checkout, the
+    // plan-PR preflight over the ops tree read with this checkout's lint code, the same commit and PR open as a public landing.
+    openOpsWorkspace: async () => {
+      const at = planDestinationRepository(opts.stateDir);
+      if (at.outcome !== "named") throw new Error("machine judge: no ops repository is named to land an ops record rewrite");
+      return gardenCheckoutAsync({ name: "machine-judge", repoDir: at.checkoutDir, worktreesRoot: opts.worktreesRoot, owner: at.owner, repo: at.repo,
+        log: opts.log, fetcher, clock: opts.clock,
+        preflight: (input) => planPrPreflightAsync({ ...input, codeRoot: opts.repoRoot }, { log: opts.log }) });
+    },
     stageProposal: (proposal) => void stageInboxProposalOnce(join(opts.stateDir, "inbox-proposals.json"), proposal),
     log: opts.log,
     clock: opts.clock ?? systemClock,
@@ -39697,12 +39718,16 @@ export async function verifyHumanSweepCommand(
   }
 
   const config = deps.config ?? loadConfig();
-  const plan = loadPlan(join(root, "plan", "tasks.yaml"));
+  // W1-T14656: the public plan composed with the ops catalog, as the judge and the cadence read it, so a parked ops
+  // record is listed and judged with the public ones. An ops catalog that cannot be read leaves the public plan, named.
+  const source = await machineJudgePlanSource(loadPlan(join(root, "plan", "tasks.yaml")), { stateDir: join(config.root, "state") });
+  const plan = source.plan;
+  if (source.opsRefusal !== undefined) console.log(`verify-human-sweep: the ops catalog is not judged this pass (${source.opsRefusal}); the public records are.`);
   const ledgerPath = ledgerPathFor(config);
   // status.ts's reader, which already parses and already skips an unreadable line — no second
   // JSON pass, and one bad line never hides the verdicts around it.
   const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
-  const shards = withWhyMeJudgmentInput(await parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), (deps.clock ?? systemClock).now(), { repository: githubRepoSlugOfCheckout(root), instance: process.env.RMD_INSTANCE_NAME });
+  const shards = withWhyMeJudgmentInput(await parkedVerifyHumanShardsAsync(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited, {}, source), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), (deps.clock ?? systemClock).now(), { repository: githubRepoSlugOfCheckout(root), instance: process.env.RMD_INSTANCE_NAME });
   const priorVerdicts = priorVerifyHumanVerdicts(rowsWithArchivedVerifyHumanVerdicts(ledgerPath, rows));
 
   if (dryRun) {

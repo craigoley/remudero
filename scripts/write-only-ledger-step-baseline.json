@@ -1416,6 +1416,8 @@
     "worktree_retire.would_retire"
   ],
   "recordOnly": {
+    "queue_judge.escalation_closed": "W1-T14651: an audit row for the operator that the judge closed one of its own floor escalations the corrected rule admits; the closed issue carries the state, so nothing re-reads the row.",
+    "queue_judge.escalation_close_failed": "W1-T14651: a diagnostic for a failed close of a floor escalation; it records the error and the next pass retries the close, so nothing re-reads the row.",
     "dispatch.expedited": "W1-T14654: an audit row for the operator, one per expedited start with its reason and lane share; nothing decides on it",
     "review.proof_execution": "W1-T14036: phase-time measurement rows read by operator analysis, not by code",
     "review.proof_phase": "W1-T14036: phase-time measurement rows read by operator analysis, not by code",
