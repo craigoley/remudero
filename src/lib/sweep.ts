@@ -33821,6 +33821,7 @@ export interface EscalationReconcileCandidate {
    *  {@link renderMootedCloseComment}; `"action"` or omitted — the untyped legacy corpus — keeps
    *  today's close path byte-identical. */
   askType?: AskType;
+  condition?: EscalationConditionEvidence;
   /** The referent's state, derived by the caller via the #737/#741-corrected deriveStatus. */
   derived: {
     merged: boolean;
@@ -33909,6 +33910,56 @@ export function renderMootedCloseComment(c: EscalationReconcileCandidate): strin
   ].join("\n");
 }
 
+/** W1-T13995: the pull request, head and checks an escalation's text names, and what the read plane saw on it. */
+export interface EscalationConditionEvidence {
+  prNumber: number;
+  escalatedHead: string;
+  checks: string[];
+  prUrl?: string;
+  currentHead?: string;
+  checksGreen?: boolean;
+  /** True when any person commented on the issue, or the comments were not read. */
+  personReplied?: boolean;
+}
+
+/** The checks a metadata-only clarification escalation names, or undefined when they cannot be read exactly. */
+export function escalationNamedChecks(body: string | undefined): string[] | undefined {
+  const lists = [...(body ?? "").matchAll(/metadata-only required checks (.+?) need title\/body repair/g)].map((m) => m[1]!);
+  if (lists.length === 0 || lists.some((list) => list !== lists[0])) return undefined;
+  const names = lists[0]!.split(", ");
+  if (names.some((name) => !/^[A-Za-z0-9][A-Za-z0-9_.\/-]*$/.test(name)) || new Set(names).size !== names.length) return undefined;
+  return names;
+}
+
+/** The head and checks when an escalation's condition cleared: its open pull request moved past the escalated head,
+ *  every named check is green at the new head, and no person commented on it. Otherwise undefined. */
+export function escalationConditionCleared(
+  c: EscalationReconcileCandidate,
+): { prNumber: number; prUrl?: string; head: string; checks: string[] } | undefined {
+  const e = c.condition;
+  if (!e || c.derived.merged || c.derived.closed || c.derived.indeterminate) return undefined;
+  if (e.currentHead === undefined || e.currentHead === e.escalatedHead || e.checks.length === 0) return undefined;
+  if (e.checksGreen !== true || e.personReplied !== false) return undefined;
+  return { prNumber: e.prNumber, prUrl: e.prUrl, head: e.currentHead, checks: e.checks };
+}
+
+/** The close comment for {@link escalationConditionCleared}: names the pull request, both heads and the checks. */
+export function renderConditionClearedCloseComment(
+  c: EscalationReconcileCandidate,
+  cleared: { prNumber: number; prUrl?: string; head: string; checks: string[] },
+): string {
+  const link = cleared.prUrl ? ` (${cleared.prUrl})` : "";
+  const checks = cleared.checks.map((name) => `\`${name}\``).join(", ");
+  return [
+    "Closed by the escalation-lifecycle reconciler (W1-T13995): the condition cleared.",
+    "",
+    `Pull request #${cleared.prNumber}${link} for **${c.taskId}** moved from head ${c.condition?.escalatedHead} to head ` +
+      `${cleared.head}, and ${checks} passed at ${cleared.head}.`,
+    "",
+    "_Nobody answered this escalation here. If it still needs a decision, reopen it._",
+  ].join("\n");
+}
+
 /** Reconcile OPEN needs-human issues against their referent's CURRENT derived state. A separate
  *  entry point mirroring {@link runCreditBackfill}: its input domain is one OPEN issue per
  *  candidate, disjoint from `runSweep`'s open PRs. Best-effort and per-issue throw-contained, so
@@ -33938,7 +33989,8 @@ export async function runEscalationReconcile(
     }
     // STILL LIVE: the referent is neither merged nor closed-without-merging — leave the
     // escalation untouched (an open PR, or a task with no PR yet, is a live decision).
-    if (!c.derived.merged && !c.derived.closed) {
+    const cleared = escalationConditionCleared(c);
+    if (!c.derived.merged && !c.derived.closed && !cleared) {
       results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "left-live" });
       continue;
     }
@@ -33957,7 +34009,9 @@ export async function runEscalationReconcile(
     }
     // W1-T347: a question-typed issue is MOOTED by a terminal referent, never resolved by one.
     // Action-typed and untyped (the legacy pre-W1-T346 corpus) issues keep today's comment.
-    const comment = c.askType === "question" ? renderMootedCloseComment(c) : renderReconcileCloseComment(c);
+    const comment = cleared
+      ? renderConditionClearedCloseComment(c, cleared)
+      : c.askType === "question" ? renderMootedCloseComment(c) : renderReconcileCloseComment(c);
     try {
       await deps.closeIssue(c.issueUrl, comment);
     } catch (e) {
@@ -33973,23 +34027,26 @@ export async function runEscalationReconcile(
     }
     // W1-T162: name the resolution kind in the ledger too, not just the GitHub comment —
     // "merged" (or a task credited via correction) vs. "closed" (closed without merging).
-    const resolution = c.derived.merged ? "merged" : "closed";
+    const resolution = c.derived.merged ? "merged" : c.derived.closed ? "closed" : "condition-cleared";
+    const prUrl = cleared ? cleared.prUrl : c.derived.prUrl;
+    const prNumber = cleared ? cleared.prNumber : c.derived.prNumber;
     appendLine(deps.ledgerPath, {
       run_id: deps.runId,
       task_id: c.taskId,
       step: "sweep.escalation_closed",
       issue_url: c.issueUrl,
       resolution,
-      pr_url: c.derived.prUrl,
-      pr_number: c.derived.prNumber,
+      pr_url: prUrl,
+      pr_number: prNumber,
       source: c.derived.source,
+      ...(cleared ? { head_sha: cleared.head, checks: cleared.checks } : {}),
     });
     log("sweep.escalation_closed", {
       issue_url: c.issueUrl,
       task_id: c.taskId,
       resolution,
-      pr_url: c.derived.prUrl,
-      pr_number: c.derived.prNumber,
+      pr_url: prUrl,
+      pr_number: prNumber,
     });
     closed++;
     results.push({ issueUrl: c.issueUrl, taskId: c.taskId, outcome: "closed" });
