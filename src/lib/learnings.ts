@@ -2167,6 +2167,18 @@ function matchCounts(
   };
 }
 
+export type LearningMatchKind = keyof LearningMatchCounts;
+
+/** The ways ONE entry matches a task: the same counts {@link selectLearnings} admits and ranks it by. */
+export function learningMatchKinds(
+  entry: LearningEntry,
+  taskFiles: string[] | undefined,
+  context?: LearningsSelectionContext,
+): LearningMatchKind[] {
+  const counts = matchCounts(entry, taskFiles ?? [], selectionHaystack(context), context?.knownSymbols);
+  return (["error", "symbol", "file"] as const).filter((kind) => counts[kind] > 0);
+}
+
 // W1-T4093 FILL BY STRENGTH (see selectLearnings): weights mirror error>symbol>file precedence.
 const ERROR_MATCH_WEIGHT = 3;
 const SYMBOL_MATCH_WEIGHT = 2;

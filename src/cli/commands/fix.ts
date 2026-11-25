@@ -53,6 +53,7 @@ import { fixArmEvidence, fixRoutingWeights, readFixRoutingRows, type FixLearnedA
 import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, SKILL_WITHHOLDING_SHARE, skillWithheldUnderRetirement, stagedSkillRetirements } from "../../lib/skill-workshop.js";
 import { SKILL_ARM_EPOCH, TASK_ARM_UNIT, taskArmWithheld } from "../../lib/task-arm.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../../lib/learnings.js";
+import { fixLearningsCiConclusion, fixLearningsDoneConclusion, fixLearningsOutcomeRow, recordFixLearningsShadow, type FixLearningsConclusion, type FixLearningsRound } from "../../lib/fix-learnings-shadow.js";
 import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockRegion, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
@@ -2581,6 +2582,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
   const readHostedProofs: HostedFixProofReader = opts.hostedProofReader ?? ((headSha, proofs) =>
     readHostedFixProofResults({ owner: opts.reviewBase.owner, repo: opts.reviewBase.repo, headSha, proofs }));
   let roundModelFields: { requested_model: string | null; served_model: string | null; served_model_reason?: string } | undefined;
+  let learningsRound: FixLearningsRound | undefined; // W1-T14138: open from a round's first prompt until its outcome is written
   const deps = { ...opts.deps, log: (step: string, extra?: Record<string, unknown>) => {
     // W1-T10339: a stand-down (and a design handoff) records the head, task contract and body it read, so the sweep
     // dispatches this PR again only once one of them has changed.
@@ -2599,7 +2601,14 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       ? { ...(step === "fix.dispatch" ? { requested_model: roundModelFields.requested_model } : roundModelFields), ...completed } : completed;
     roundRows.push({ ...attributed, task_id: opts.taskId, step });
     opts.deps.log(step, attributed);
+    if (step === "fix.done" && learningsRound) settleLearningsRound(fixLearningsDoneConclusion(learningsRound, attributed ?? {}));
   } };
+  const settleLearningsRound = (conclusion: FixLearningsConclusion | undefined): void => {
+    if (!learningsRound || !conclusion) return;
+    deps.log("fix.learnings_outcome", fixLearningsOutcomeRow(learningsRound, conclusion,
+      () => [...(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), ...roundRows]));
+    learningsRound = undefined;
+  };
   // W1-T7096: production call sites opt into the LLM judge. A caller that wires none (a test
   // fixture) keeps the former bounds as an explicit, judge-shaped stand-in — never a silent LLM spawn.
   const progressJudge: FixProgressJudge = deps.fixProgressJudge ?? (opts.useProductionProgressJudge
@@ -4670,6 +4679,13 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // At the first prompt assembly, as the implement lane does — emitted even at zero selection.
     if (!fixSkillSelectionLogged) deps.log("skills.selection", fixSkillSelection.observation);
     fixSkillSelectionLogged = true;
+    // W1-T14138: one shadow row per round, at its first prompt assembly; neither arm adds anything to the prompt below.
+    // A round that pushed and whose CI was never observed is left without an outcome row.
+    if (learningsRound === undefined || learningsRound.pushed !== undefined) {
+      learningsRound = recordFixLearningsShadow({ taskId: opts.taskId, runId: opts.runId, prNumber, attempt, round,
+        repoDir: opts.worktreePath, config: opts.config, evidence });
+      deps.log("fix.learnings_shadow", learningsRound.row);
+    }
     const prompt = [
       renderFixPrompt({
         harnessCommits: fixHarnessOwnsGit,
@@ -5889,6 +5905,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // hand-off (a failing review on the same head) arrived during that same poll; a hand-off ends only a wait not yet red.
     const resumed = host.ciGateState(waited) === "red" ? undefined : handed;
     const ci = resumed?.failure === "check" ? { state: "red" as const, sha: resumed.headSha } : waited;
+    if (learningsRound) settleLearningsRound(fixLearningsCiConclusion(learningsRound, host.ciGateState(ci), ciGateSha(ci)));
     const handoff = ciHandoff(ci);
     if (handoff) return finish(handoff);
     const claimLostAfterCi = branchClaimLost();
