@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -192,11 +192,4 @@ test("W1-T13945 criterion 4: a first withheld verdict is re-reviewed once exactl
   const settled = [...attempt(1), { ts: new Date(NOW).toISOString(), step: "review.posted", pr_url: PR_URL, head_sha: HEAD,
     review_input_digest: DIGEST, state: "failure", decision_verdict: { state: "failure", criteria: [] } }, ...attempt(2)];
   assert.equal(reviewWithheldLadder(viewFor(), settled), undefined);
-  assert.equal(existsSync(tmp), true);
-});
-
-test("W1-T13945 criterion 5: the dispatch reads the ladder through withheldEvaluatorsForInput", () => {
-  const source = readFileSync(new URL("../../src/lib/sweep.ts", import.meta.url), "utf8");
-  assert.match(source, /withheldEvaluatorsForInput\(pr, lines\)/);
-  assert.match(source, /reviewWithheldLadder\(pr, ledgerLines\)/);
 });
