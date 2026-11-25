@@ -39,3 +39,17 @@ test("W1-T14870 criterion 2: the nothing_to_move row carries the refusals, and a
   assert.equal(standDowns().length, 2, "a changed list writes a new row");
   assert.deepEqual(standDowns()[1]!.data.refusals, []);
 });
+
+test("W1-T14870 criterion 2: a refusal that only records history is counted, not listed, so the row stays small", async () => {
+  // Review of #20939: listing all ~5,400 refusals on the real plan made one row about 225 KB.
+  const history: Json[] = Array.from({ length: 5_000 }, (_, i) => ({ id: `W1-T${100_000 + i}`, reason: i % 2 === 0 ? "merged" : "retired" }));
+  const open: Json[] = [{ id: "W1-T7", reason: "owned" }, { id: "W1-T8", reason: "reservation_absent" }];
+  const mover = createPlanTaskMover({ readSwitch: () => ON, readOpsCatalog: () => "ok", readHeads: async () => pin,
+    move: async () => ({ status: 0, out: { step: "none", refused: history.length + open.length, refusals: [...history, ...open] } }), readPull: async () => ({ state: "OPEN" }), onMain: async () => true });
+  const rows: Array<{ step: string; data: Json }> = [];
+  await runPlanTaskMoveTick({ opsDispatchHold: undefined, log: (step, data) => { rows.push({ step, data }); } }, mover);
+  const row = rows.find(r => r.step === PLAN_MOVE_STAND_DOWN)!.data;
+  assert.deepEqual(row.refusals, open, "THE CLAIM: each refusal that is not history is named with its reason");
+  assert.deepEqual(row.refused_by_reason, { merged: 2_500, owned: 1, reservation_absent: 1, retired: 2_500 }, "every refusal is counted by reason");
+  assert.ok(JSON.stringify(row).length < 4_096, `the row stays small: ${JSON.stringify(row).length} bytes`);
+});
