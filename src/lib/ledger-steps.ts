@@ -804,6 +804,27 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["proofPhaseRecorder"],
     outcomes: ["converged", "not_converged"],
   },
+  {
+    // W1-T14808: serve's webhook route, one row a minute.
+    step: "github.wake.summary",
+    meaning:
+      "One minute of GitHub webhook deliveries at serve: counts of coalesced accepts, ignored and duplicate deliveries " +
+      "by event, and the timing of every delivery in the window: `timed_count`, `handle_ms_p50`, `handle_ms_max`, " +
+      "`loop_lag_ms_max` (the longest event-loop stall seen at a delivery's arrival) and `slow_count` (over 5 s). " +
+      "A window with no delivery writes no row. Nothing decides on it.",
+    writer: ["startWakeSummaryFlush"],
+    outcomes: ["deliveries counted or timed in the window"],
+  },
+  {
+    // W1-T14808: GitHub gives up on a delivery at 10 s and never redelivers it.
+    step: "github.wake.slow",
+    meaning:
+      "One webhook delivery took serve more than 5 s from the handler's first line to the response's close. Fields: " +
+      "`delivery_id`, `event`, `action`, `handle_ms` and `loop_lag_ms`. No payload and no secret. Nothing decides on it; " +
+      "it is evidence for why GitHub timed a delivery out.",
+    writer: ["createGitHubEventWakeHandler"],
+    outcomes: ["handle_ms over 5000"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never

@@ -219,13 +219,16 @@ import {
   createGitHubEventWakeHandler,
   createPersistentDeliveryDedupStore,
   createWakeCounters,
+  createWakeTimings,
   githubDeliveryDedupPath,
   startWakeSummaryFlush,
   sweepWakeMarkerPath,
   wakeSummaryRow,
+  wakeTimingFields,
   type CheckRunCompletedInfo,
   type GithubEventWakeSemanticMode,
   type WakeCounters,
+  type WakeTimings,
 } from "./github-event-wake.js";
 import { createGithubKeepWarm } from "./github-refresh-pacer.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY, policyPath } from "./policy.js";
@@ -573,6 +576,7 @@ export interface ServeDeps {
     semanticCheckMode?: GithubEventWakeSemanticMode;
     aggregateCheckNames?: readonly string[];
     counters?: WakeCounters;
+    timings?: WakeTimings;
   };
   /** W1-T4391: CI-flake producer seams; each defaults to the real job-log read, "main" and the system clock. */
   ciIncidents?: {
@@ -3610,6 +3614,7 @@ function assembleServeRoutes(
       semanticCheckMode: deps.githubEventWake?.semanticCheckMode,
       aggregateCheckNames: deps.githubEventWake?.aggregateCheckNames,
       counters: deps.githubEventWake?.counters,
+      timings: deps.githubEventWake?.timings,
       log: deps.log,
       onCheckRunCompleted,
     }),
@@ -3931,13 +3936,16 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
   const serveDrain = createServeDrain({ boundMs: SERVE_RESTART_DRAIN_BOUND_MS, log: deps.log });
   let viewEventsHandover: (reason: string) => void = () => {};
   const wakeCounters = createWakeCounters();
+  const wakeTimings = createWakeTimings();
   const routeReads = createRouteReadRollup({ stateDir: join(deps.fleetControlRoot, "state"), log: deps.log, write: (row) => deps.log?.(ROUTE_READS_STEP, { ...row }) });
   let stopRouteReads = (): void => {};
   let stopDemand = (): void => {};
   const stopWakeSummary = startWakeSummaryFlush({
     counters: wakeCounters,
+    timings: wakeTimings,
     clock: systemClock,
-    write: (window) => deps.log?.("github.wake.summary", { ...wakeSummaryRow(wakeCounters, window) }),
+    write: (window) =>
+      deps.log?.("github.wake.summary", { ...wakeSummaryRow(wakeCounters, window), ...wakeTimingFields(wakeTimings) }),
   });
   // W1-T9370: each worker module's first start (bundle or .ts source) is ledgered as worker.entry_resolved.
   setWorkerEntryLog(deps.log);
@@ -4017,7 +4025,7 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
       newPathApprovalIssuer: deps.newPathApprovalIssuer ?? newPathApprovalIssuerConfig(),
       consoleSha,
       confirmNonces,
-      githubEventWake: deps.githubEventWake && { ...deps.githubEventWake, counters: wakeCounters },
+      githubEventWake: deps.githubEventWake && { ...deps.githubEventWake, counters: wakeCounters, timings: wakeTimings },
       routeReadRollup: routeReads,
       // W1-T13602: bound late; the demand window is built from the routes this call returns, and is read only at request time.
       onViewAnswer: (view, status, code, stale, source) => demand.recordView(view, status, code, stale, undefined, source),

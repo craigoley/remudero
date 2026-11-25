@@ -24,6 +24,7 @@ import {
 } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, join } from "node:path";
+import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import type { Clock } from "./clock.js";
 import { writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
 import { RawBodyTooLargeError, readBoundedRawBody, type Route } from "./service.js";
@@ -461,10 +462,59 @@ export function wakeSummaryRow(counters: WakeCounters, window: { start: string; 
   return { window_start: window.start, window_end: window.end, ...counters, by_event: { ...counters.by_event } };
 }
 
-/** Writes the window since the last successful write each interval, then zeroes `counters`; a throwing
- *  `write` keeps every count and the window start. Unref'd; the returned stop is the shutdown flush. */
+/** W1-T14808: every delivery's handling time and the worst event-loop stall seen at its arrival, until the next flush. */
+export interface WakeTimings {
+  handle_ms: number[];
+  loop_lag_ms_max: number;
+  slow_count: number;
+}
+
+export type WakeTimingFields = {
+  timed_count: number;
+  handle_ms_p50: number;
+  handle_ms_max: number;
+  loop_lag_ms_max: number;
+  slow_count: number;
+};
+
+/** A delivery handled for longer than this also writes its own github.wake.slow row (GitHub gives up at 10 s). */
+export const GITHUB_WAKE_SLOW_MS = 5_000;
+
+export function createWakeTimings(): WakeTimings {
+  return { handle_ms: [], loop_lag_ms_max: 0, slow_count: 0 };
+}
+
+export function wakeTimingFields(timings: WakeTimings): WakeTimingFields {
+  const sorted = [...timings.handle_ms].sort((a, b) => a - b);
+  return {
+    timed_count: sorted.length,
+    handle_ms_p50: sorted.length === 0 ? 0 : sorted[Math.ceil(sorted.length / 2) - 1]!,
+    handle_ms_max: sorted.length === 0 ? 0 : sorted[sorted.length - 1]!,
+    loop_lag_ms_max: timings.loop_lag_ms_max,
+    slow_count: timings.slow_count,
+  };
+}
+
+/** Reads, then resets, the longest event-loop stall since the previous read, in ms. Created on first use. */
+export function createLoopLagSampler(): () => number {
+  let histogram: ReturnType<typeof monitorEventLoopDelay> | undefined;
+  return () => {
+    if (!histogram) {
+      histogram = monitorEventLoopDelay({ resolution: 10 });
+      histogram.enable();
+      return 0;
+    }
+    const maxMs = histogram.max / 1e6;
+    histogram.reset();
+    return Math.round(maxMs);
+  };
+}
+
+/** Writes the window since the last successful write each interval, then zeroes `counters` (and `timings`); a
+ *  throwing `write` keeps every count and the window start. Unref'd; the returned stop is the shutdown flush. */
 export function startWakeSummaryFlush(opts: {
   counters: WakeCounters;
+  timings?: WakeTimings;
   write: (window: { start: string; end: string }) => void;
   clock: Clock;
   intervalMs?: number;
@@ -472,8 +522,8 @@ export function startWakeSummaryFlush(opts: {
   let start = opts.clock.iso();
   const flush = (): void => {
     const end = opts.clock.iso();
-    const { counters } = opts;
-    if (counters.accepted_coalesced + counters.ignored + counters.duplicate > 0) {
+    const { counters, timings } = opts;
+    if (counters.accepted_coalesced + counters.ignored + counters.duplicate + (timings?.handle_ms.length ?? 0) > 0) {
       try {
         opts.write({ start, end });
       } catch (e) {
@@ -481,6 +531,7 @@ export function startWakeSummaryFlush(opts: {
         return;
       }
       Object.assign(counters, createWakeCounters());
+      if (timings) Object.assign(timings, createWakeTimings());
     }
     start = end;
   };
@@ -526,6 +577,11 @@ export interface GithubEventWakeOptions {
   counters?: WakeCounters;
   /** Receives verified, allowlisted and deduplicated `check_run:completed` deliveries. */
   onCheckRunCompleted?: (info: CheckRunCompletedInfo) => void | Promise<void>;
+  /** W1-T14808: when set, every delivery's handling time and arrival loop lag are added here. */
+  timings?: WakeTimings;
+  /** Injectable for a test: a monotonic ms clock (default `performance.now`) and the loop-lag read. */
+  monotonicMs?: () => number;
+  loopLagMs?: () => number;
 }
 
 /**
@@ -609,6 +665,25 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
     checkRunCallbackTails.set(key, queued);
   };
 
+  const monotonicMs = opts.monotonicMs ?? (() => performance.now());
+  const loopLagMs = opts.loopLagMs ?? createLoopLagSampler();
+  const recordTiming = (req: IncomingMessage, action: string | undefined, handleMs: number, lagMs: number): void => {
+    const slow = handleMs > GITHUB_WAKE_SLOW_MS;
+    if (opts.timings) {
+      opts.timings.handle_ms.push(handleMs);
+      opts.timings.loop_lag_ms_max = Math.max(opts.timings.loop_lag_ms_max, lagMs);
+      if (slow) opts.timings.slow_count++;
+    }
+    if (!slow) return;
+    log("github.wake.slow", {
+      delivery_id: firstHeader(req, "x-github-delivery"),
+      event: firstHeader(req, "x-github-event"),
+      action,
+      handle_ms: handleMs,
+      loop_lag_ms: lagMs,
+    });
+  };
+
   return {
     method: "POST",
     path: "/v1/hooks/github",
@@ -619,6 +694,11 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
     // W1-T2568 (design i): GitHub's HMAC replaces the bearer token for this one route (service.ts's Route.selfAuthenticated).
     selfAuthenticated: true,
     handler: async (req, res) => {
+      // W1-T14808: timed from the handler's first line to the response's close, whichever branch answers.
+      const startedMs = monotonicMs();
+      const lagMs = loopLagMs();
+      let seenAction: string | undefined;
+      res.once("close", () => recordTiming(req, seenAction, Math.round(monotonicMs() - startedMs), lagMs));
       if (!opts.secret) {
         log("github.wake.unavailable", { reason: "no_secret_configured" });
         sendJson(res, 503, { error: "webhook_not_configured" });
@@ -680,6 +760,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
 
       const event = firstHeader(req, "x-github-event");
       const action = extractAction(body);
+      seenAction = action;
       if (!event || !(isAllowlistedGithubEvent(event, action) || isOwnerEscalationReply(event, action, body))) {
         if (opts.counters) countWake(opts.counters, "ignored", event, action);
         else log("github.wake.ignored", { reason: "unsupported_event_or_action", event, action });
