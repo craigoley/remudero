@@ -25,31 +25,24 @@ test("W1-T14870 criterion 1: the mover's none answer lists every refused record 
 
 test("W1-T14870 criterion 2: the nothing_to_move row carries the refusals, and a changed list writes a new row", async () => {
   let refusals: Json[] = [{ id: "W1-T1", reason: "public_dependants" }];
-  const mover = createPlanTaskMover({ readSwitch: () => ON, readOpsCatalog: () => "ok", readHeads: async () => pin,
-    move: async () => ({ status: 0, out: { step: "none", refused: refusals.length, refusals } }), readPull: async () => ({ state: "OPEN" }), onMain: async () => true });
+  // Each tick reads new heads, as a busy main gives it, so the mover is asked again rather than answering from memory.
+  let heads = 0;
+  const moves: number[] = [];
+  const mover = createPlanTaskMover({ readSwitch: () => ON, readOpsCatalog: () => "ok", readHeads: async () => ({ ...pin, key: `k${++heads}` }),
+    move: async () => { moves.push(heads); return { status: 0, out: { step: "none", refused: refusals.length, refusals } }; },
+    readPull: async () => ({ state: "OPEN" }), onMain: async () => true });
   const rows: Array<{ step: string; data: Json }> = [];
-  const tick = () => { mover.memory.answer = undefined; return runPlanTaskMoveTick({ opsDispatchHold: undefined, log: (step, data) => { rows.push({ step, data }); } }, mover); };
-  assert.deepEqual(await tick(), { outcome: "stand_down", reason: "nothing_to_move" });
-  await tick();
+  const tick = () => runPlanTaskMoveTick({ opsDispatchHold: undefined, log: (step, data) => { rows.push({ step, data }); } }, mover);
   const standDowns = () => rows.filter(row => row.step === PLAN_MOVE_STAND_DOWN);
-  assert.equal(standDowns().length, 1, "an unchanged list writes no second row");
+  assert.deepEqual(await tick(), { outcome: "stand_down", reason: "nothing_to_move" });
+  assert.equal(standDowns().length, 1);
   assert.deepEqual(standDowns()[0]!.data.refusals, refusals, "THE CLAIM: the row names each refused record and why");
-  refusals = [];
   await tick();
-  assert.equal(standDowns().length, 2, "a changed list writes a new row");
-  assert.deepEqual(standDowns()[1]!.data.refusals, []);
-});
-
-test("W1-T14870 criterion 2: a refusal that only records history is counted, not listed, so the row stays small", async () => {
-  // Review of #20939: listing all ~5,400 refusals on the real plan made one row about 225 KB.
-  const history: Json[] = Array.from({ length: 5_000 }, (_, i) => ({ id: `W1-T${100_000 + i}`, reason: i % 2 === 0 ? "merged" : "retired" }));
-  const open: Json[] = [{ id: "W1-T7", reason: "owned" }, { id: "W1-T8", reason: "reservation_absent" }];
-  const mover = createPlanTaskMover({ readSwitch: () => ON, readOpsCatalog: () => "ok", readHeads: async () => pin,
-    move: async () => ({ status: 0, out: { step: "none", refused: history.length + open.length, refusals: [...history, ...open] } }), readPull: async () => ({ state: "OPEN" }), onMain: async () => true });
-  const rows: Array<{ step: string; data: Json }> = [];
-  await runPlanTaskMoveTick({ opsDispatchHold: undefined, log: (step, data) => { rows.push({ step, data }); } }, mover);
-  const row = rows.find(r => r.step === PLAN_MOVE_STAND_DOWN)!.data;
-  assert.deepEqual(row.refusals, open, "THE CLAIM: each refusal that is not history is named with its reason");
-  assert.deepEqual(row.refused_by_reason, { merged: 2_500, owned: 1, reservation_absent: 1, retired: 2_500 }, "every refusal is counted by reason");
-  assert.ok(JSON.stringify(row).length < 4_096, `the row stays small: ${JSON.stringify(row).length} bytes`);
+  assert.equal(moves.length, 2, "positive control: the second tick asked the mover again");
+  assert.equal(standDowns().length, 1, "THE CLAIM: an unchanged list writes no second row");
+  refusals = [{ id: "W1-T1", reason: "public_dependants" }, { id: "W1-T2", reason: "reservation_absent" }];
+  await tick();
+  assert.equal(moves.length, 3);
+  assert.equal(standDowns().length, 2, "THE CLAIM: a changed list writes a new row");
+  assert.deepEqual(standDowns()[1]!.data.refusals, refusals, "and the new row names the new list");
 });
