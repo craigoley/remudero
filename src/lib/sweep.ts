@@ -15023,6 +15023,13 @@ export function armedButStalled(prs: readonly OpenPrView[]): ArmedStalledPr[] {
 /** W1-T3277 — ordinary open PRs whose base has rotted far enough to deserve the same single
  *  update-branch press the armed/stalled rung already owns. The commit distance is injected data:
  *  `sweep.ts` stays pure and never performs a GitHub/git comparison itself. */
+/** W1-T14741 — the head's pending review is claimed by a run (its pending row or its status names one) not proven dead. */
+function reviewClaimLive(pr: OpenPrView): boolean {
+  return pr.reviewState === "pending" &&
+    (pr.reviewPendingOwnerRunId !== undefined || pr.reviewPendingStatusRunId !== undefined) &&
+    !pendingClaimOwnerProvenDead(pr);
+}
+
 export function openPrsBehindMain(
   prs: readonly OpenPrView[],
   behindMainByPr: ReadonlyMap<number, number>,
@@ -15040,6 +15047,9 @@ export function openPrsBehindMain(
     // A person's CHANGES_REQUESTED hold blocks the merge whatever the base: a refresh only re-runs CI and
     // the review it is waiting behind.
     if (changesRequestedHold(pr) !== undefined) continue;
+    // W1-T14741: a claimed review's verdict is bound to this head, and a refresh refuses its post (#20731, 2026-11-24:
+    // refreshed 9 min into a 31-min review). An unclaimed pending, or a claim whose owner is proven dead, holds nothing.
+    if (reviewClaimLive(pr)) continue;
     const behindBy = behindMainByPr.get(pr.prNumber);
     if (behindBy === undefined) continue;
     if (pr.mergeState === "dirty" || pr.mergeable === false) continue;
