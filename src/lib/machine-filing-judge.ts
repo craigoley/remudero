@@ -40,7 +40,7 @@ import { ghExec } from "./github-transport.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { loadMounts, mountsPath } from "./mounts.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
-import { isGardenLandWaiting, type GardenWorkspacePort, type PrState } from "./gardener.js";
+import { isGardenLandRefused, isGardenLandWaiting, type GardenWorkspacePort, type PrState } from "./gardener.js";
 import { stagedTaskFiles } from "./feedback-landing.js";
 import type { Proposal } from "./inbox.js";
 import { machineFilingAdmissionViolations, parseTasksFromYaml, type MachineFilingAdmissionContext, type Plan, type Task } from "./plan.js";
@@ -1731,7 +1731,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
         state.waitingLanding = { ...result.waiting, ids, records: landed, repoRoot, since: ports.clock.iso() };
         report.waiting = ids;
       } else {
-        report.prUrl = result;
+        report.prUrl = isGardenLandRefused(result) ? result.opened : result;
         if (report.prUrl) state.pending = { prUrl: report.prUrl, ids, records: landed, repoRoot };
         else report.unlanded = ids;
       }

@@ -2903,7 +2903,7 @@ type SetAsideIdRelease = {
 /** W1-T13169: why a landing into the plan destination with no git of the public repository releases nothing. */
 const NO_RESERVATION_REPOSITORY = "the landing target is the plan destination, which holds no refs/rmd-id, and no git of the public repository was given";
 
-function taskIdOfTaskFileText(text: string): string | undefined {
+export function taskIdOfTaskFileText(text: string): string | undefined {
   return /^\s*(?:-\s+)?id:\s*["']?(W1-T\d+)["']?\s*$/m.exec(text)?.[1];
 }
 

@@ -294,13 +294,34 @@ export interface GardenLandOpts {
 export interface GardenLandWaiting {
   /** `filed` (W1-T12222): a checkout that files only task files holds the new file, so the filing is done. */
   waiting: { paths: string[]; stateRoot: string; filed?: true };
+  /** W1-T14657: the paths of this land the plan-PR preflight refused; the rest wait. */
+  refused?: GardenLandRefusal[];
+}
+
+/** W1-T14657: one path a landing did not carry because the plan-PR preflight (or its staging) refused it, with the
+ *  task ids its findings and its own record name, so the gardener drops exactly the actions that filed it. */
+export interface GardenLandRefusal {
+  path: string;
+  reason: string;
+  task_ids?: string[];
+}
+
+/** W1-T14657: a landing that refused some of its paths. `opened` is the PR carrying the paths it did not refuse;
+ *  absent, nothing opened. */
+export interface GardenLandRefused {
+  refused: GardenLandRefusal[];
+  opened?: string;
 }
 
 /** W1-T12222: what {@link landedPrUrl} returns for a filing that waits: no PR carries it yet, and this names its files. */
 export const GARDEN_WAITING_FILING_PREFIX = "task-files-landing:waiting:";
 
 /** A PR url for "opened", nothing for "not landed", or a wait. */
-export type GardenLandResult = string | undefined | GardenLandWaiting;
+export type GardenLandResult = string | undefined | GardenLandWaiting | GardenLandRefused;
+
+export function isGardenLandRefused(result: unknown): result is GardenLandRefused {
+  return typeof result === "object" && result !== null && "refused" in result && !("waiting" in result);
+}
 
 export function isGardenLandWaiting(result: unknown): result is GardenLandWaiting {
   return typeof result === "object" && result !== null && "waiting" in result;
@@ -310,6 +331,7 @@ export function isGardenLandWaiting(result: unknown): result is GardenLandWaitin
  *  W1-T12222: except a new file from a checkout that files only task files: it waits for the sealed landing, and the
  *  filing counts as made, so the caller records it and does not file the finding again. Its reference is not a url. */
 export function landedPrUrl(result: GardenLandResult, who: string): string | undefined {
+  if (isGardenLandRefused(result)) return result.opened;
   if (isGardenLandWaiting(result)) {
     if (result.waiting.filed === true && result.waiting.paths.length > 0) return `${GARDEN_WAITING_FILING_PREFIX}${result.waiting.paths.join(",")}`;
     throw new Error(`${who}: a land of new files waited for the task-file landing`);
@@ -720,11 +742,11 @@ function gardenDraft<C extends string, A extends GardenAction<C>>(plan: GardenPl
  * W1-T14640: what a refused landing of `drafted` leaves the state. A lone action is refused alone and recorded. Of
  * several, an action whose shard the refusal's text names is recorded; else, inside a bisection, the refused half
  * becomes the suspects, and a byte-identical redraft of a refused landing starts one. A new draft refused whole is
- * tried whole again, as before. `lint` is a merged-plan lint refusal, which records a lone action only while bisecting.
+ * tried whole again, as before, unless the refusal is `exact`. `lint` is a merged-plan lint refusal, which records a lone action only while bisecting.
  */
 function attributeGardenRefusal<C extends string>(
   state: GardenState<C>, drafted: readonly GardenAction<C>[], paths: readonly string[], repoRoot: string, at: string,
-  refusal: { outcome: GardenLandingRefusedError["outcome"] | "lint"; text?: string; digest?: string },
+  refusal: { outcome: GardenLandingRefusedError["outcome"] | "lint"; text?: string; digest?: string; exact?: true },
 ): { state: GardenState<C>; recorded: string[]; suspects?: string[] } {
   const keys = drafted.map(gardenActionKey);
   const suspects = state.refusedSuspects?.keys ?? [];
@@ -745,7 +767,8 @@ function attributeGardenRefusal<C extends string>(
     const path = gardenActionShard(a, paths);
     return path !== undefined && refusal.text!.includes(path);
   });
-  if (named.length > 0 && named.length < drafted.length) return { state: record(named), recorded: named.map(gardenActionKey) };
+  // W1-T14657: the plan-PR preflight named these paths itself, so naming every drafted shard is a verdict, not a guess.
+  if (named.length > 0 && (refusal.exact === true || named.length < drafted.length)) return { state: record(named), recorded: named.map(gardenActionKey) };
   if (bisecting || refusal.outcome === "repeat") return { state: { ...state, refusedSuspects: { keys, at } }, recorded: [], suspects: keys };
   return { state, recorded: [] };
 }
@@ -797,7 +820,7 @@ function trackGardenIds(ws: GardenFilingWorkspace, mint: GardenTaskIdMinter): He
         held.land = "threw";
         throw e;
       }
-      const settle = (url: unknown) => ((held.land = isGardenLandWaiting(url) ? "waiting" : url ? "opened" : "not_opened"), url);
+      const settle = (url: unknown) => ((held.land = isGardenLandWaiting(url) ? "waiting" : (isGardenLandRefused(url) ? url.opened : url) ? "opened" : "not_opened"), url);
       if (!isPromiseLike(out)) return settle(out);
       return Promise.resolve(out).then(settle, (e: unknown) => {
         held.land = "threw";
@@ -1616,10 +1639,13 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
   // What a refusal is attributed over: the drafted landing's paths, and the refusal's own text when it has one.
   let landingPaths: readonly string[] = [];
   let refusalText: string | undefined;
-  const attribute = (outcome: GardenLandingRefusedError["outcome"] | "lint", digest?: string): void => {
-    const attributed = attributeGardenRefusal(state, drafted.actions, landingPaths, deps.repoRoot, clock.iso(), { outcome, text: refusalText, digest });
+  // W1-T14657: the actions a preflight-refused landing named, which the landing's other paths must not clear.
+  let preflightRefused: string[] = [];
+  const attribute = (outcome: GardenLandingRefusedError["outcome"] | "lint", digest?: string, exact?: true): string[] => {
+    const attributed = attributeGardenRefusal(state, drafted.actions, landingPaths, deps.repoRoot, clock.iso(), { outcome, text: refusalText, digest, ...(exact ? { exact } : {}) });
     if (attributed.recorded.length > 0 || attributed.suspects) deps.log(`${spec.name}.garden_refusal_attributed`, { refused: attributed.recorded, suspects: attributed.suspects ?? null });
     state = attributed.state;
+    return attributed.recorded;
   };
   if (acting !== undefined && drafted.actions.length > 0) {
     try {
@@ -1668,8 +1694,24 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
           const landed: GardenLandResult = yield* step(() => ws.land(why ? { ...landing, body: judgedByOutcomeNote(spec.name, acting, why) + landing.body } : landing));
           // W1-T12221: a wait is a filing in flight, not a failure: no streak, no refused draft, no id released.
           if (isGardenLandWaiting(landed)) waiting = landed.waiting;
-          else prUrl = landed;
+          else prUrl = isGardenLandRefused(landed) ? landed.opened : landed;
           settled = prUrl !== undefined;
+          // W1-T14657: the preflight named the paths it refused, so the actions that filed them are dropped now,
+          // whatever the landing's other paths did: no bisection, and no filing-failure streak for a check working.
+          const refusals = isGardenLandRefused(landed) ? landed.refused : isGardenLandWaiting(landed) ? landed.refused ?? [] : [];
+          if (refusals.length > 0) {
+            refusalText = refusals.map((r) => r.path).join("\n");
+            deps.log(`${spec.name}.garden_landing_preflight_refused`, { paths: refusals.map((r) => r.path), task_ids: [...new Set(refusals.flatMap((r) => r.task_ids ?? []))], landed: prUrl ?? waiting?.paths ?? [] });
+            const before = state;
+            preflightRefused = attribute("not_opened", undefined, true);
+            if (state !== before) writeAtomic(statePath, JSON.stringify(state, null, 2) + "\n");
+            if (prUrl === undefined && waiting === undefined && preflightRefused.length > 0) {
+              unfiled = `the plan-PR preflight refused ${refusals.map((r) => r.path).join(", ")}`;
+              settled = true;
+              deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: drafted.acting, actions: drafted.actions.length, pr_url: null, awaiting: state.pending?.prUrl ?? null, landing_refused: true });
+              return { ran: true, plan: drafted, scorecard };
+            }
+          }
           if (prUrl === undefined && waiting === undefined) throw new GardenLandingRefusedError(digest!, "not_opened", `${spec.name} gardener: the landing's PR did not open (plan_pr.preflight_refused or _timed_out names why)`);
         }
       } catch (e) {
@@ -1720,7 +1762,7 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
     }
   }
   deps.log(`${spec.name}.scorecard`, { ...scorecard, acting: drafted.acting, actions: drafted.actions.length, pr_url: prUrl ?? null, awaiting: state.pending?.prUrl ?? null, ...(waiting ? { waiting: waiting.paths } : {}) });
-  if (prUrl || waiting) state = clearLandedActions(state, drafted.actions);
+  if (prUrl || waiting) state = clearLandedActions(state, drafted.actions.filter((a) => !preflightRefused.includes(gardenActionKey(a))));
   // Only a class whose changes landed as a PR is judged, and only on its own metric from this moment.
   const baseline = (c: C): Outcome => (judgedByDecision(spec, c) ? { trials: 0, successes: 0 } : metricOf(spec, inventory, c));
   const targets = prUrl || waiting ? spec.pendingTargets?.(drafted) ?? [] : [];
@@ -1730,7 +1772,7 @@ function* gardenPassBody<C extends string, I, A extends GardenAction<C>, W exten
   const pending = prUrl && acting !== undefined ? { prUrl, actionClass: acting, baseline: baseline(acting), ...(targets.length ? { targets } : {}) } : state.pending;
   const pendingRecordedAt = prUrl && acting !== undefined ? (judgedByDecision(spec, acting) ? clock.iso() : undefined) : state.pendingRecordedAt;
   // W1-T14640: a pass that left a refused action out has not done its work: a change to that shard is read again.
-  const lastPass = prUrl ? { fingerprint, landed: prUrl } : draft.dropped.length > 0 ? undefined : { fingerprint };
+  const lastPass = prUrl ? { fingerprint, landed: prUrl } : draft.dropped.length > 0 || preflightRefused.length > 0 ? undefined : { fingerprint };
   writeAtomic(statePath, JSON.stringify({ ...state, pending, pendingRecordedAt, waiting: waitingNow, lastCheap: cheap, lastPass, filingFailures: undefined }, null, 2) + "\n");
   return { ran: true, plan: drafted, prUrl, scorecard };
 }
