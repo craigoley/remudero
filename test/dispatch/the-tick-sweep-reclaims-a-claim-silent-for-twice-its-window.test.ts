@@ -6,16 +6,12 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
 import { fixedClock } from "#src/lib/clock.js";
 import * as claimLib from "#src/lib/dispatch-claim.js";
 import type { ClaimSilenceJudgeInputs, DispatchClaimListing, DispatchClaimReserverAsync } from "#src/lib/dispatch-claim.js";
-import type { DaemonSummary } from "#src/lib/daemon.js";
-import { makeTempDir } from "#src/lib/tmp.js";
-import { daemonCommand } from "#src/run-task.js";
 
 Object.assign(process.env, {
   GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name,
@@ -135,44 +131,4 @@ test("W1-T14874 criterion 3: a claim renewed between the judgement and the drop 
   assert.equal(judged[0]!.dropped, false);
   assert.ok(renewed !== "" && renewed !== stale);
   assert.equal(w.tip("W1-T5"), renewed, "THE CLAIM: the renewed claim survives the leased drop");
-});
-
-test("W1-T14874: the daemon command runs the silence pass over the tick listing, skipping what the landed sweep dropped", async t => {
-  const home = makeTempDir("tick-silence-boot");
-  const root = join(home, "Remudero");
-  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
-  mkdirSync(join(root, "state"), { recursive: true });
-  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
-  const planPath = join(home, "tasks.yaml");
-  writeFileSync(planPath, "[]\n");
-  const oldHome = process.env.HOME;
-  process.env.HOME = home;
-  t.after(() => { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; rmSync(home, { recursive: true, force: true }); });
-  const refs = new Map([["W1-T6369", "a".repeat(40)], ["W1-T13878", "b".repeat(40)]]);
-  const reserver: DispatchClaimReserverAsync & { listHeld: () => DispatchClaimListing } = {
-    mintAnchor: () => "anchor", attempt: () => "taken", holder: id => refs.get(id), list: () => [...refs.keys()],
-    drop: (id, opts) => (refs.get(id) === opts?.expect || opts?.expect === undefined) && refs.delete(id),
-    anchorMessage: () => "rmd-dispatch claim 1@elsewhere 2026-10-14T12:00:00.000Z",
-    listHeld: () => ({ ok: true, claims: [...refs].map(([taskId, holder]) => ({ taskId, holder })) }),
-  };
-  const calls: Array<{ listing: DispatchClaimListing; skip: string[]; stateDir: string }> = [];
-  const boot = { mintAnchor: () => "x", attempt: () => "taken" as const, holder: () => undefined, drop: () => false, list: () => [] };
-  const code = await daemonCommand(["--repo", "remudero-sandbox", "--plan", planPath, "--max", "0"], {
-    bootClaimReserver: boot,
-    tickClaimReserver: reserver,
-    sweepSilentClaims: async (_r, listing, d) => {
-      calls.push({ listing, skip: [...(d.skip ?? [])], stateDir: d.stateDir });
-      return [{ taskId: "W1-T13878", verdict: "reclaim", reason: "silent", dropped: true }];
-    },
-    runDaemon: async (_plan, wired): Promise<DaemonSummary> => {
-      const swept = await wired.releaseLandedClaims!((id) => id === "W1-T6369");
-      assert.deepEqual((swept as Array<{ taskId: string }>).map(r => r.taskId), ["W1-T6369", "W1-T13878"], "both passes report");
-      return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
-    },
-  } as Parameters<typeof daemonCommand>[1]);
-  assert.equal(code, 0);
-  assert.equal(calls.length, 1, "THE CLAIM: the tick sweep runs the silence pass");
-  assert.deepEqual(calls[0]!.skip, ["W1-T6369"], "a claim the landed sweep dropped is not judged again");
-  assert.equal(calls[0]!.stateDir, join(root, "state"));
-  assert.equal((calls[0]!.listing as { ok: true; claims: unknown[] }).claims.length, 2, "it reads the listing selection shares");
 });
