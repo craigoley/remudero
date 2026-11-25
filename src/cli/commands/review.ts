@@ -791,10 +791,11 @@ export async function reviewHostedCiFileEvidence(
 // ── W1-T11157: CI'S PROOF-DISCRIMINATION RECORD, COMPARED IN SHADOW ───────────────────────────────────────────────
 // Operator trust decision 2026-11-03: the record is authenticated only as the log of a successful GitHub Actions job of
 // the proof-discrimination workflow at this exact head, read through the App gateway; the executor is the gate's import
-// closure plus its toolchain inputs and workflow (scripts/proof-discrimination-gate.mjs computes it for both sides); and
-// a hosted outcome counts toward no verdict. The review still runs every proof and only ledgers agreement.
+// closure plus its toolchain inputs and workflow (scripts/proof-discrimination-gate.mjs computes it for both sides).
+// W1-T14745 lets a hosted PASS count (see {@link planProofReuse}) while the host still executes an audited share of those
+// proofs, derived from the agreement this row records; every other hosted outcome is still compared, never counted.
 
-/** One row per review that ran proofs at a head checkout: per-proof agreement, or why the record was not eligible. */
+/** One row per review that ran proofs at a head checkout: per-proof agreement of the proofs the host executed, or why the record was not eligible. */
 export const PROOF_REUSE_SHADOW_STEP = "review.proof_reuse_shadow";
 
 interface HostedProofOutcome { proof: string; head: string; base: string; verdict: string }
