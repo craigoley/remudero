@@ -1253,7 +1253,16 @@ The inspection must show the expected source, destination, and `rw=false`. The s
 the file path and presence; it never prints the secret. The daemon and worker containers do not
 receive this mount or `RMD_GITHUB_WEBHOOK_SECRET_FILE`.
 
-In the GitHub repository's **Settings → Webhooks**, add a repository webhook with:
+One **organization** webhook covers every repository the fleet manages, including any repository
+created or onboarded later (W1-T14806). Serve routes each delivery to the daemon that owns the
+payload's repository: core resolves to its own state root, and every other live instance in the
+instance registry resolves to its mounted `state/`, read per delivery so a newly onboarded instance
+is woken with no restart. A repository with no live daemon answers `202 {"error":"unmanaged_repository"}`
+and nothing is written. Retire a repository webhook only after the organization webhook shows
+accepted deliveries for that repository.
+
+In the organization's **Settings → Webhooks** (`https://github.com/organizations/<org>/settings/hooks`),
+add one webhook with:
 
 - Payload URL: `https://console.remudero.com/v1/hooks/github`
 - Content type: `application/json`
