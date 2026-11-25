@@ -117,7 +117,9 @@ instances:
     repo: wreckterra
     project: remudero
     github_repo: craigoley/wreckterra
-    mode: shadow
+    # W1-T14794 — PROMOTED TO LIVE (operator ruling 2026-11-25: "yes, switch wreckterra to live"). Host step, an operator
+    # act after this merges: set this row of /etc/remudero/daemon-instances.yaml to `mode: live`, then restart the daemon.
+    mode: live
     container_name: remudero-wreckterra-daemon
     state_dir: /mnt/rmd/remudero-wreckterra-state
     claude_dir: /home/craigoleyagent/.claude

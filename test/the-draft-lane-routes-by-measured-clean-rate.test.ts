@@ -38,7 +38,7 @@ test("W1-T4067: an untried arm that fits the context is sampled with positive pr
   for (let i = 0; i < 4000; i++) seen.add(chooseDraftDeployment({}, candidates, random).deployment);
   assert.equal(seen.size, candidates.length);
   assert.ok(seen.has("gpt-oss-120b"));
-  assert.ok(seen.has("gpt-5.6-luna"));
+  assert.ok(seen.has("gpt-6-luna"));
   const tooLarge = selectOpenWeightModel(undefined, "sonnet", "low", 200_000 * 4, { ready: () => true });
   assert.ok(![tooLarge.model, ...tooLarge.alternatives].includes("gpt-oss-120b"));
 });
@@ -126,7 +126,6 @@ test("W1-T4067: measured success cannot resurrect a deployment removed by contex
   const { attempts } = await draftFixture(async (_args, _cfg, selection) => result(good, selection.model),
     () => ({ "gpt-oss-120b": { attempts: 1000, clean: 1000, contractFailures: 0, costUsd: 0.0001 } }), "x".repeat(800_000));
   assert.ok(!attempts.includes("gpt-oss-120b"));
-  assert.ok(!attempts.includes("gpt-5.6-luna"));
 });
 
 test("W1-T4067: all contract failures exhaust each eligible rung once", async () => {
@@ -136,7 +135,7 @@ test("W1-T4067: all contract failures exhaust each eligible rung once", async ()
   assert.equal(attempts.length, 1 + expected.alternatives.length);
   assert.equal(new Set(attempts).size, attempts.length);
   assert.deepEqual([...attempts].sort(),
-    ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "gpt-5.6-luna", "claude-haiku-5-5"].sort());
+    ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "claude-haiku-5-5"].sort());
   const outcomes = rows.filter((r) => r.step === "draft.routing.outcome");
   assert.equal(outcomes.length, attempts.length);
   assert.ok(outcomes.every((r) => r.extra.contract_failed === true));

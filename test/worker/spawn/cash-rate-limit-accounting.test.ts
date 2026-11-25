@@ -47,7 +47,7 @@ async function attempt(t: TestContext, fetchImpl: typeof fetch, options: {
 }
 
 test("cash rate-limit accounting zero-settles only definite Azure OpenAI throttles", async t => {
-  for (const model of ["gpt-5-nano", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-luna", "gpt-6.1-sol"]) {
+  for (const model of ["gpt-5-nano", "gpt-6-luna", "gpt-6.1-sol"]) {
     await t.test(model, async child => {
       let calls = 0;
       const { result, rows } = await attempt(child, async () => { calls++; return new Response(null, { status: 429 }); }, {

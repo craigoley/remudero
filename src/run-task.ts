@@ -1636,6 +1636,7 @@ import {
   sortRowsByJson,
   type DispatchValueContext,
   type CostOfDelaySnapshot,
+  type OperatorHoldState,
 } from "./lib/dispatch-value.js";
 import {
   fixArmEvidence,
@@ -26912,6 +26913,9 @@ export function dispatchValueContextForSelection(
   planPath: string,
   readLedger: typeof readLedgerUnionRecordsSync = dispatchSelectionLedgerUnion,
   readFiling: DispatchFilingReader = dispatchFilingPrefetch,
+  // W1-T14643: the release and answer state this lane's dispatch consults, so the censored tier-wait sample
+  // holds back exactly the records dispatch holds back.
+  holds?: OperatorHoldState,
 ): DispatchValueContext | undefined {
   const union = readLedger(stateDir, {
     step: [...DISPATCH_VALUE_LEDGER_STEPS, "dispatch.cost_of_delay.fallback", "dispatch.cost_of_delay.ready", "dispatch.refused_already_merged"],
@@ -26946,7 +26950,7 @@ export function dispatchValueContextForSelection(
   const openIds = new Set(plan.tasks.filter(task => !isMerged(task.id)).map(task => task.id));
   const seed = filing.kind === "ready" ? filing.snapshot.planTreeSha : planSeed(plan.tasks);
   const calibrated = buildDispatchValueContext(
-    plan.tasks, evidence, openIds, nowMs, true, seed,
+    plan.tasks, evidence, openIds, nowMs, true, seed, undefined, holds,
   );
   if (calibrated.kind === "refused") {
     log("dispatch.value.refused", { reason: calibrated.reasons.join(",") });
@@ -26958,7 +26962,7 @@ export function dispatchValueContextForSelection(
     refused_classes: calibrated.refusals,
   });
   const scheduled = filing.kind === "ready"
-    ? buildDispatchValueContext(plan.tasks, evidence, openIds, nowMs, true, seed, filing.snapshot) : filing;
+    ? buildDispatchValueContext(plan.tasks, evidence, openIds, nowMs, true, seed, filing.snapshot, holds) : filing;
   if (scheduled.kind === "refused") {
     fallback(scheduled.reasons, seed);
     return Object.freeze({ ...calibrated.context, costOfDelayFallback: true });
@@ -27342,8 +27346,10 @@ async function drainCommand(
         refreshMerged,
         // W1-T3412: the full-union read stays in this command layer and runs once for each
         // selection pass. `drain.ts` receives only this immutable context and remains pure.
+        // W1-T14643: the drain's dispatch reads releases and no answer reader, so its censored sample does the same.
         buildDispatchValueContext: (dispatchPlan, merged) =>
-          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, planPath),
+          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, planPath, undefined, undefined,
+            { releasedIds: () => resolveReleasedIds(releaseReadersFor(ledgerPathFor(config)), dispatchPlan) }),
         isOpenPr,
         isCreditIndeterminate,
         // W1-T3216: THE PRODUCER. `resolveReleasedIds` (drain.ts) turns these lines into the
