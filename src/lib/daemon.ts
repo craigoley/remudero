@@ -6726,8 +6726,10 @@ export async function runDaemon(
       overlapped: dispatchLatchAtMs !== undefined && pendingPass !== undefined, overlapMs: 0,
       ...(pendingPass ? { limitAtMs: (dispatchLatchAtMs ?? passStartedAtMs) + freshnessMaxDrainWaitMs } : {}) };
     // With a hand-over started, a ready standby ends the wait for the pass at the latch's drain deadline.
-    const latchWindow = dispatchLatchAtMs !== undefined && latchDrain?.latchAtMs === dispatchLatchAtMs ? latchDrain.windowDeadlineMs : undefined;
-    if (pendingPass && handoffStart && latchWindow !== undefined && latchWindow < pass.limitAtMs!) pass.standbyLimitAtMs = latchWindow;
+    // W1-T14824 (OPERATOR RULING 2026-11-25 13:52Z, "End it once the standby is ready"): from the drain deadline itself, not
+    // the end of the latch's drain window, so a standby that is ready, or becomes ready, past the deadline ends the wait.
+    const latchDeadline = dispatchLatchAtMs !== undefined && latchDrain?.latchAtMs === dispatchLatchAtMs ? latchDrain.deadline.deadlineMs : undefined;
+    if (pendingPass && handoffStart && latchDeadline !== undefined && latchDeadline < pass.limitAtMs!) pass.standbyLimitAtMs = latchDeadline;
     const recordPass = () => {
       if (!pendingPass || freshnessPhases.pre_exit_pass !== undefined) return;
       freshnessPhases.pre_exit_pass = Math.max(0, daemonClock.now() - passStartedAtMs);

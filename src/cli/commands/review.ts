@@ -28,7 +28,7 @@ import { escalate, ghIssueGateway, ghIssueGatewayAsync, tryEscalate, tryEscalate
 import { combinedStatusRestArgs, compareRestArgs, mapRestPr, rollupForAsync, tryFetchReviewReuseFacts, type ReviewReuseFacts, type RestPullRow } from "../../lib/open-prs-rest.js";
 import { ghJsonAsync, ghLinesAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { appendLedger, REVIEW_LANE_ABORTED_STEP } from "../../lib/ledger.js";
-import { requiredSemanticDecisionDigest } from "../../lib/required-semantic-review.js";
+import { NO_CRITERIA_FAIL_SUMMARY, NO_CRITERIA_REVIEWER_OUTCOME, requiredSemanticDecisionDigest } from "../../lib/required-semantic-review.js";
 import { deriveTaskClass } from "../../lib/task-class.js";
 import { withReceiptWork } from "../../lib/benchmark-run.js";
 import { classifyReviewOutcome, DOWNGRADE_UNCLASSIFIED, recordedReviewVerdictLines, reviewReplayLedgerFields, unclassifiedDowngrades, type ReviewReplayInput, type ReviewOutcomeDecision } from "../../lib/review-outcome-class.js";
@@ -1813,7 +1813,12 @@ export async function runReview(host: ReviewCommandHost, args: {
   // W1-T63/P10-a: LEGIBLE outcome of the reviewer spawn — a floor-only PASS
   // (never attempted, or attempted but walled/spawn-failed) is never
   // byte-identical in the ledger/console to a review the reviewer COMPLETED.
-  const outcome = reviewerOutcome({
+  // W1-T14826: under required semantic review, a code PR naming no criteria (and no verified mover removal) has nothing
+  // for a reviewer to judge; its own outcome lets the gate post the floor's FAIL once instead of withholding it on every
+  // run. A deterministic or advisory run keeps the bare `not_attempted` (W1-T14156 criterion 3).
+  const noCriteriaFinal = args.requireSemanticReview === true && criteria.length === 0 && !planOnlySkip && !attemptReviewer &&
+    args.moverRemoval?.verified !== true;
+  const outcome = noCriteriaFinal ? NO_CRITERIA_REVIEWER_OUTCOME : reviewerOutcome({
     attempted: attemptReviewer,
     subtype: reviewerSubtype,
     exit: reviewerExit,
@@ -1939,6 +1944,9 @@ export async function runReview(host: ReviewCommandHost, args: {
   let { verdict, suppressed } = applyVerdictStability(computed, headSha,
     prior?.reviewContractDigest === contractDigest ? prior : undefined);
   verdict = { ...verdict, reviewContractDigest: contractDigest };
+  if (outcome === NO_CRITERIA_REVIEWER_OUTCOME && verdict.state === "failure") {
+    verdict = { ...verdict, summary: NO_CRITERIA_FAIL_SUMMARY };
+  }
 
   // Ask again once per head and input when an unclassified downgrade survives stability and the floor did not fail.
   const downgradeUnclassified = suppressed || preliminaryProofs?.floorState === "failure" ? []
