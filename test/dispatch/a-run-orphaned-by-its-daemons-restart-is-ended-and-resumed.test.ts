@@ -256,8 +256,10 @@ async function resumeOrphan(t: TestContext, origin: ReturnType<typeof gitRemote>
         otherOpenPrReader: async () => [],
         prOpenRefusalIssues: { create: () => "https://github.com/fixture/remudero/issues/1", listOpen: () => [], ensureLabel: () => true },
         prCreateExec: () => { prCreates++; return ""; },
-        prOpenProofRunner: async () => {
-          proofCalls++;
+        prOpenProofRunner: async (_proof, base) => {
+          // W1-T14789: the pre-open gate also asks this runner for the filed grep proofs, head-only (no merge base); only the
+          // opener's own proof-freshness runs (against the merge base) count here.
+          if (base !== undefined) proofCalls++;
           return { status: 5, stdout: "verdict:    executed_stale\ncause:      the proof passes at the merge base" };
         },
         externalWaitFreshness: () => options.yieldAfterGate && gateCompleted ? {
