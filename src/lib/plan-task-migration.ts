@@ -226,6 +226,8 @@ export function opsGateShapeProblems(task: Json): string[] {
   return problems;
 }
 /** W1-T14424: a single-task record's ops-gate problems, read as the gate's YAML 1.1 reader reads its bytes. */
+/** W1-T14858: remudero-ops scripts/ops-gate.rb HISTORY_STATUSES — the statuses it judges as moved history. */
+export const OPS_GATE_HISTORY_STATUSES: ReadonlySet<string> = new Set(["merged", "done", "retired", "superseded", "closed", "dropped"]);
 function opsGateShapeRefused(original: Original): boolean {
   const raw: unknown = parseYaml(original.text, { version: "1.1", logLevel: "silent" });
   return !Array.isArray(raw) || raw.length !== 1 || !rubyHash(raw[0]) || opsGateShapeProblems(raw[0]).length > 0;
@@ -542,7 +544,9 @@ export async function selectPlanTaskMigration(
     if (taskOwned(t.id, [...(t.files ?? []), orig.path], publicRefs, initial.open)) return "owned";
     if (!orig.single || !orig.shard) return "not_single_shard";
     if (alreadyMoved(orig)) return "already_moved";
-    if (!isHistory(t) && opsGateShapeRefused(orig)) return "ops_gate_shape";
+    // W1-T14858: the ops gate judges a record as moved history by its status alone, so a retired record whose status is
+    // still open-shaped (blocked, queued) is moved live work there and must pass the shape rules.
+    if (!OPS_GATE_HISTORY_STATUSES.has(t.status) && opsGateShapeRefused(orig)) return "ops_gate_shape";
     if (!publicRefs.has(`refs/rmd-id/${t.id}`)) return "reservation_absent";
     return undefined;
   };
