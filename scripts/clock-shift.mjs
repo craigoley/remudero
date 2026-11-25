@@ -1,6 +1,10 @@
 // scripts/clock-shift.mjs — shift Date.now()/`new Date()` AND fs stat times forward under FK_SHIFT_DAYS,
 // so a suite runs as though the wall clock had already moved and any fixture that depends on it shows
-// itself. Usage: `FK_SHIFT_DAYS=400 node --test --import tsx --import scripts/clock-shift.mjs <file>`.
+// itself. Usage: `FK_SHIFT_DAYS=400 node --test --import tsx --import ./test/setup/tmp-hygiene.ts --import scripts/clock-shift.mjs <file>`.
+//
+// ISOLATION FIRST (W1-T14780): a non-zero shift refuses to load unless test/setup/tmp-hygiene.ts already ran
+// (it pins RMD_TEST_LIVE_DENY_ROOT). Without it, a suite that calls main() appended shifted cli.invoked rows to
+// the LIVE ledger, and every Field Trials read after that was partial (five 2027-dated rows, 2026-11-23).
 //
 // INVARIANT: only the no-arg `Date.now()`/`new Date()` forms move. `Date.parse`, `Date.UTC` and a
 // dated `new Date(...)` call keep resolving to their real instant, so a fixture literal ages
@@ -20,6 +24,12 @@ import { fileURLToPath } from "node:url";
 
 const DAYS = Number(process.env.FK_SHIFT_DAYS ?? 0);
 const SHIFT = DAYS * 86_400_000;
+
+if (Number.isFinite(SHIFT) && SHIFT !== 0 && !process.env.RMD_TEST_LIVE_DENY_ROOT) {
+  throw new Error("clock-shift: FK_SHIFT_DAYS is set but test isolation is not active, so a shifted run could write the "
+    + "live ledger. Load test/setup/tmp-hygiene.ts first: FK_SHIFT_DAYS=<n> node --test --import tsx "
+    + "--import ./test/setup/tmp-hygiene.ts --import scripts/clock-shift.mjs <file>");
+}
 
 if (Number.isFinite(SHIFT) && SHIFT !== 0) {
   const RealDate = Date;
