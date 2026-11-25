@@ -680,3 +680,125 @@ export function timeToLikelyFreshnessRestart(input: {
     timeToRestartMs: Math.max(0, reachedAtMs - input.nowMs, lifetimeEndsAtMs - input.nowMs),
   };
 }
+
+/**
+ * W1-T14663 — THE RESTART IS PRICED FROM ITS OWN MEASURED COST. The hold (minimum lifetime), the score limit and the
+ * staleness horizon were set by hand (2026-09-08 replay, 2026-10-17 ruling). With a handoff a restart costs minutes, and
+ * 214 defer rows against 2 restarts (2026-11-24) show the fixed floor holding a fix that the daemon could take. The
+ * daemon's own `daemon.restart_cycle` rows (W1-T12229) measure what a restart cost and what the waiting cost, and
+ * W1-T14547 says which kind each one was, so the three numbers are derived from them. A restart costs the dispatch pause
+ * plus the review verdict gap: two lanes dark at once, so the two add.
+ *
+ * Over the last {@link MEASURED_RESTART_WINDOW} complete cycles of the kind the next restart will be, with C the median
+ * restart cost, W the median cost the merged-but-not-running change waited for, and S the median time it waited:
+ *   - the waiting cost accrues at W / S per ms, so it passes one restart's cost after H = C / (W / S) = C * S / W ms.
+ *     That H is the staleness horizon (the rate bound) and the minimum lifetime. A costly restart (C up) raises it.
+ *   - the score limit is the fallback limit times C / W: today's scale, moved by how a restart's cost compares to what
+ *     waiting costs. Cheap restarts take smaller changes, costly ones wait for more.
+ *   - the loop-only horizon keeps its fallback ratio to the staleness horizon, and is never below it.
+ * The fallback values are used, and named on the row, while the sample is too small.
+ */
+export const MEASURED_RESTART_WINDOW = 20;
+/** Fewer than three points show no spread, so they cannot say the sample is large enough. */
+export const MEASURED_RESTART_SAMPLE_FLOOR = 3;
+
+type LedgerFields = Readonly<Record<string, unknown>>;
+
+/** One complete `daemon.restart_cycle` row, in the units the derivation uses. */
+export interface MeasuredRestart {
+  handedOff: boolean;
+  /** The dispatch pause: the yield to the successor's first tick on a handed-off cycle, the exit to the start on a cold one. */
+  pauseMs: number;
+  verdictGapMs: number;
+  /** What the advance's waiting cost: refused review work plus the wait of each review it stopped. */
+  waitingCostMs: number;
+  /** From the first material change to the exit. */
+  stalenessMs: number;
+}
+
+const nonNegative = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
+const atMs = (value: unknown): number => typeof value === "string" ? Date.parse(value) : NaN;
+
+/** The complete cycles among `rows`, oldest first. A row that lacks a measured part, or does not say whether it handed
+ *  off, is left out: a guess would price the restart from a number nobody measured. */
+export function measuredRestarts(rows: readonly LedgerFields[]): MeasuredRestart[] {
+  const found: Array<{ startedMs: number; cycle: MeasuredRestart }> = [];
+  for (const row of rows) {
+    if (row.step !== "daemon.restart_cycle" || typeof row.handed_off !== "boolean") continue;
+    const startedMs = atMs(row.started_at), exitMs = atMs(row.exit_at), materialMs = atMs(row.first_material_change_at);
+    const pauseMs = row.handed_off ? row.yield_to_first_tick_ms : startedMs - exitMs;
+    if (!nonNegative(pauseMs) || !nonNegative(row.verdict_gap_ms) || !nonNegative(row.waiting_cost_ms) || !(exitMs - materialMs > 0)) continue;
+    found.push({ startedMs, cycle: { handedOff: row.handed_off, pauseMs, verdictGapMs: row.verdict_gap_ms,
+      waitingCostMs: row.waiting_cost_ms, stalenessMs: exitMs - materialMs } });
+  }
+  return found.sort((a, b) => a.startedMs - b.startedMs).map((entry) => entry.cycle);
+}
+
+export interface RestartBoundsFallback {
+  minLifetimeMs: number;
+  threshold: RecordedDeployRestartThreshold;
+  stalenessHorizonMs: number;
+  /** Absent when the policy has no `freshnessRestart.loopOnlyHorizonMs`: one horizon for both classes. */
+  loopOnlyHorizonMs?: number;
+}
+
+export interface RestartBounds {
+  source: "measured" | "fallback";
+  minLifetimeMs: number;
+  threshold: RecordedDeployRestartThreshold;
+  stalenessHorizonMs: number;
+  loopOnlyHorizonMs?: number;
+  /** The row field: what the bounds were derived from, or why the fallback was used. */
+  evidence: Record<string, unknown>;
+}
+
+const median = (values: readonly number[]): number => {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+};
+
+/** The squared coefficient of variation: how noisy the measurement is. A mean of zero has none to measure. */
+function squaredSpread(values: readonly number[]): number {
+  const mean = values.reduce((total, value) => total + value, 0) / values.length;
+  if (!(mean > 0)) return Number.POSITIVE_INFINITY;
+  const variance = values.reduce((total, value) => total + (value - mean) ** 2, 0) / (values.length - 1);
+  return variance / mean ** 2;
+}
+
+/** The fewest cycles whose mean sits two standard errors clear of zero, n >= 4 * cv^2, for each measured cost. */
+export function minimumRestartSample(costsMs: readonly number[], waitingMs: readonly number[]): number {
+  const spread = Math.max(squaredSpread(costsMs), squaredSpread(waitingMs));
+  return Number.isFinite(spread) ? Math.max(MEASURED_RESTART_SAMPLE_FLOOR, Math.ceil(4 * spread)) : Number.POSITIVE_INFINITY;
+}
+
+export function deriveRestartBounds(input: { cycles: readonly MeasuredRestart[]; handsOff: boolean; fallback: RestartBoundsFallback }): RestartBounds {
+  const { fallback } = input;
+  const kind = input.handsOff ? "handed_off" : "cold";
+  const sample = input.cycles.filter((cycle) => cycle.handedOff === input.handsOff).slice(-MEASURED_RESTART_WINDOW);
+  const fallbackWith = (reason: string, more: Record<string, unknown> = {}): RestartBounds => ({
+    source: "fallback", minLifetimeMs: fallback.minLifetimeMs, threshold: fallback.threshold, stalenessHorizonMs: fallback.stalenessHorizonMs,
+    ...(fallback.loopOnlyHorizonMs === undefined ? {} : { loopOnlyHorizonMs: fallback.loopOnlyHorizonMs }),
+    evidence: { source: "fallback", reason, kind, sample: sample.length, ...more },
+  });
+  const costs = sample.map((cycle) => cycle.pauseMs + cycle.verdictGapMs);
+  const waits = sample.map((cycle) => cycle.waitingCostMs);
+  if (sample.length < MEASURED_RESTART_SAMPLE_FLOOR) return fallbackWith("too_few_restarts", { min_sample: MEASURED_RESTART_SAMPLE_FLOOR });
+  const restartCostMs = median(costs), waitingCostMs = median(waits), stalenessMs = median(sample.map((cycle) => cycle.stalenessMs));
+  // A restart that cost nothing, or a wait that cost nothing, gives no ratio: the fixed values stay.
+  if (!(restartCostMs > 0) || !(waitingCostMs > 0)) return fallbackWith("no_cost_to_compare");
+  const needed = minimumRestartSample(costs, waits);
+  if (sample.length < needed) return fallbackWith("too_few_restarts", { min_sample: Number.isFinite(needed) ? needed : null });
+  const horizonMs = Math.round((restartCostMs * stalenessMs) / waitingCostMs);
+  const limit = Math.max(1, Math.round((fallback.threshold.value * restartCostMs) / waitingCostMs));
+  const loopRatio = fallback.loopOnlyHorizonMs === undefined || !(fallback.stalenessHorizonMs > 0) ? 1
+    : Math.max(1, fallback.loopOnlyHorizonMs / fallback.stalenessHorizonMs);
+  const loopOnlyHorizonMs = fallback.loopOnlyHorizonMs === undefined ? undefined : Math.round(horizonMs * loopRatio);
+  return {
+    source: "measured", minLifetimeMs: horizonMs, stalenessHorizonMs: horizonMs,
+    threshold: { value: limit, reason: `derived from the last ${sample.length} measured ${kind} restarts: restart cost ${Math.round(restartCostMs)} ms against waiting cost ${Math.round(waitingCostMs)} ms` },
+    ...(loopOnlyHorizonMs === undefined ? {} : { loopOnlyHorizonMs }),
+    evidence: { source: "measured", kind, sample: sample.length, min_sample: needed, restart_cost_ms: Math.round(restartCostMs),
+      waiting_cost_ms: Math.round(waitingCostMs), staleness_ms: Math.round(stalenessMs) },
+  };
+}
