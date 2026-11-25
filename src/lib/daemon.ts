@@ -7999,6 +7999,8 @@ export async function runDaemon(
   // W1-T14768: each iteration names how long each awaited stage held it, in one row written at the next tick. Measured
   // 2026-11-24: one iteration ran 65.6 minutes with no row naming the stage it awaited, and a restart marker sat unread.
   const cycleStages: Array<{ stage: string; ms: number }> = [];
+  // W1-T14878: the settle stage's own parts, named on every cycle's row and not only on a decided restart's exit.
+  let cycleSettleParts: Record<string, number> | undefined;
   let cycleStageName: string | undefined;
   let cycleStageAtMs = 0;
   let cycleStartedAtMs: number | undefined;
@@ -8031,8 +8033,9 @@ export async function runDaemon(
       const durations: Record<string, number> = {};
       for (const { stage, ms } of cycleStages) durations[`${stage}_ms`] = (durations[`${stage}_ms`] ?? 0) + ms;
       log("daemon.cycle_phases", { ...durations, total_ms: Math.max(0, cycleStageAtMs - cycleStartedAtMs),
-        stages: cycleStages.map(({ stage }) => stage) });
+        stages: cycleStages.map(({ stage }) => stage), ...(cycleSettleParts ? { settle_parts: { ...cycleSettleParts } } : {}) });
       cycleStages.length = 0;
+      cycleSettleParts = undefined;
     }
     cycleStartedAtMs = daemonClock.now();
     cycleStage("tick_head");
@@ -10256,6 +10259,7 @@ export async function runDaemon(
     // W1-T14684: from the pool's settle to a decided restart's exit, each step's time is named in the exit's phases_ms.
     let settleMarkMs = daemonClock.now();
     const settleParts: Record<string, number> = {};
+    cycleSettleParts = settleParts;
     const settleProcess: Record<string, number> = {};
     const markSettle = (part: string): void => {
       const atMs = daemonClock.now();
@@ -10586,6 +10590,7 @@ export async function runDaemon(
     }
 
     await stopInterphaseReviewClock();
+    markSettle("interphase_stop");
     } catch (reason) {
       // Semantic failures still propagate after independently attempting both owned finalizers.
       const cleanupFaults: unknown[] = [];
