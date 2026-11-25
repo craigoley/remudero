@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { planLoadRefusalViolations } from "#src/run-task.js";
+import { planLoadRefusalViolations } from "#src/lib/plan-load-refusal.js";
 
 test("W1-T13116: triage.relint_plan_lint_unavailable no longer recurs", () => {
   const found = planLoadRefusalViolations({ ran: false, reason: "task W1-T9 depends on unknown W1-T0" });
