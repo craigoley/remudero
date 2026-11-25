@@ -1226,15 +1226,36 @@ export function renderCapabilityGrantContext(receipts: readonly CapabilityReceip
   ].join("\n");
 }
 
+/** The spawn fields {@link withProviderRuleHeadlines} reads and rewrites; `SpawnWorkerArgs` satisfies it. */
+export interface RuleHeadlinesSpawn {
+  prompt: string;
+  continuation?: { contextPrompt: string };
+  promptFor?(route: { provider: string; harnessOwnsGit: boolean }): string;
+}
+
 /**
- * W1-T13768: whether the `rule_headlines` implement-prompt part is built for a mount on `provider`.
- * A Codex worker loads AGENTS.md as its project doc, which already carries the headline index, so the
- * part would hand it the same ~21 KB twice. A Claude worker runs with `settingSources: []`, so
- * CLAUDE.md never reaches it and it keeps the part. An unpinned mount (`undefined` — the auction picks
- * the provider at spawn) is not known to be Codex, so it keeps the part too. PURE.
+ * W1-T13768: keep the `rule_headlines` part off any prompt the router sends to Codex, whose project doc
+ * already carries the index. An unpinned mount's provider is known only after routing, so the choice is
+ * made in `promptFor`, for the prompt and for a fresh-session handoff that quotes it. Every other
+ * provider gets the given bytes. A spawn that carries no such part is returned unchanged.
  */
-export function ruleHeadlinesEnabledForProvider(enabled: boolean, provider: string | undefined): boolean {
-  return enabled && provider !== "codex";
+export function withProviderRuleHeadlines<T extends RuleHeadlinesSpawn>(spawnArgs: T, ruleHeadlinesPart: string): T {
+  // The render joins the part onto the doctrine with one newline; removing both is the render without it.
+  const section = `\n${ruleHeadlinesPart}`;
+  const given: RuleHeadlinesSpawn["continuation"] = spawnArgs.continuation;
+  const carried = spawnArgs.prompt.includes(section) || given?.contextPrompt.includes(section);
+  if (!ruleHeadlinesPart || !carried) return spawnArgs;
+  const continuation = given && { ...given };
+  return {
+    ...spawnArgs,
+    ...(continuation ? { continuation } : {}),
+    promptFor: (route: { provider: string; harnessOwnsGit: boolean }) => {
+      const forRoute = (text: string) => (route.provider === "codex" ? text.replace(section, "") : text);
+      // The router reads the handoff right after this call, so it takes the same route's choice.
+      if (given && continuation) continuation.contextPrompt = forRoute(given.contextPrompt);
+      return forRoute(spawnArgs.promptFor?.(route) ?? spawnArgs.prompt);
+    },
+  };
 }
 
 /**
