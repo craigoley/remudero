@@ -78,8 +78,10 @@ test("W1-T13364 criterion 1: invariant:the-primary-judge-is-unchanged — each j
 
 test("W1-T13364 criterion 2: the real file loads and each row carries the DeepSeek-V4-Flash cash shadow arm, a deployment with a context, a price and a request shape", () => {
   const real = loadMounts(mountsPath(REPO_ROOT));
-  assert.deepEqual(resolveCiJudgeMount(real).shadow, { provider: "cash", deployment: DEEPSEEK });
-  assert.deepEqual(resolveFixProgressJudgeMount(real).shadow, { provider: "cash", deployment: DEEPSEEK });
+  // W1-T14841 (Craig, 2026-11-25): both rows draw from the auto pool; DeepSeek-V4-Flash answers while it is empty.
+  const arm = { provider: "auto", deployment: "auto", fallback: { provider: "cash", deployment: DEEPSEEK } };
+  assert.deepEqual(resolveCiJudgeMount(real).shadow, arm);
+  assert.deepEqual(resolveFixProgressJudgeMount(real).shadow, arm);
   assert.ok(OPENWEIGHT_CONTEXT_WINDOWS[DEEPSEEK]!.totalTokens > 0);
   assert.ok(openWeightPriceFor(DEEPSEEK).inputUsdPerMillion > 0);
   assert.ok(OPENWEIGHT_RESPONSE_FORMATS[DEEPSEEK]!.length > 0);

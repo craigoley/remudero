@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { loadConfig, type Config } from "./config.js";
-import { askDecisionModel, DECISION_MODEL_SURFACE, DECISION_OUTPUT_MARGIN_TOKENS, resolveDecisionTarget, type DecisionAnsweredRow } from "./decision-model.js";
+import { askDecisionModel, DECISION_MODEL_SURFACE, DECISION_OUTPUT_MARGIN_TOKENS, DECISION_READER_REVISION, resolveDecisionTarget, type DecisionAnsweredRow } from "./decision-model.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
 import {
-  loadMounts, mountsPath, type CashShadowArm, type DecisionCandidate, type DecisionShadowArm, type JudgeMount, type JudgePrimary, type JudgeShadowArm,
+  loadMounts, mountsPath, type AutoShadowArm, type CashShadowArm, type DecisionCandidate, type DecisionShadowArm, type JudgeMount, type JudgePrimary, type JudgeShadowArm,
   type JudgeShadowOnlyRole, type JudgeThreshold, type Mounts,
 } from "./mounts.js";
 import { resolveOwnerRepoAtAsync } from "./owner-repo.js";
@@ -205,8 +205,12 @@ function shadowRecorder(log: ShadowLog, common: Record<string, unknown>): Shadow
  *  It never throws and returns nothing the caller acts on; a refusal for capacity or budget is ledgered and changes
  *  nothing. A row with no shadow arm spends nothing. */
 export async function runJudgeShadow<T>(request: JudgeShadowRequest<T>): Promise<JudgeShadowOutcome> {
-  const arm = request.mount.shadow;
-  if (arm === undefined) return { kind: "skipped" };
+  const named = request.mount.shadow;
+  if (named === undefined) return { kind: "skipped" };
+  // W1-T14841: an auto arm whose role pool is empty asks its fallback, on that arm's own path.
+  const fallback = named.provider === "auto" ? emptyPoolFallback(named, request.surface, request.mount, request.primaryArgs, request.decisions) : undefined;
+  if (fallback !== undefined) return runJudgeShadow({ ...request, mount: { ...request.mount, shadow: fallback } });
+  const arm = named;
   if (arm.provider === "decisions" || arm.provider === "auto") {
     // W1-T12417: not awaited, so the caller never waits on the decision model. W1-T12422: nor on its pool's member.
     void shadowJudgeCall({ role: request.surface as FixedOptionJudgeRole, key: request.key, mount: request.mount, primaryArgs: request.primaryArgs,
@@ -621,8 +625,24 @@ async function poolShadow<T>(call: ShadowJudgeCall<T>): Promise<void> {
   }
   const input = call.input ?? call.primaryArgs.prompt;
   const member = shadowPoolMember(call.role, createHash("sha256").update(input).digest("hex"), pool);
-  if (member === undefined) return;
+  const fallback = call.mount.shadow?.provider === "auto" ? call.mount.shadow.fallback : undefined;
+  if (member === undefined) return fallback === undefined ? undefined : shadowJudgeCall({ ...call, mount: { ...call.mount, shadow: fallback } });
   return shadowJudgeCall({ ...call, mount: { ...call.mount, shadow: member.arm } });
+}
+
+/** W1-T14841: an auto arm's fallback when the role's pool has no member or cannot be read, else `undefined` (the pool
+ *  is asked). An auto arm with no fallback is never redirected: its empty pool asks nothing, as before. */
+function emptyPoolFallback<T>(arm: AutoShadowArm, role: string, mount: JudgeMount, primaryArgs: SpawnWorkerArgs,
+  decisions: ShadowJudgeCall<T>["decisions"]): CashShadowArm | DecisionShadowArm | undefined {
+  if (arm.fallback === undefined) return undefined;
+  try {
+    const pool = (decisions?.pool ?? productionPool({ primaryArgs } as ShadowJudgeCall<T>, decisions?.config ?? loadConfig))(role);
+    return pool.length === 0 ? arm.fallback : undefined;
+  } catch (error) {
+    // An unreadable pool keeps the role's named fallback rather than asking nothing.
+    process.stderr.write(`judge shadow pool unreadable for ${role}, asking its fallback: ${error instanceof Error ? error.message : String(error)}\n`);
+    return arm.fallback;
+  }
 }
 
 /** W1-T12422: the roles whose shadow is `auto` in this mounts table, by their shadow role name. */
@@ -631,6 +651,16 @@ export function judgeShadowAutoRoles(mounts: Mounts): string[] {
     ["fix-progress", mounts.fix_progress_judge], ["verify-human", mounts.verify_human_judge]];
   return [...rows.filter(([, row]) => row?.shadow?.provider === "auto").map(([role]) => role),
     ...Object.entries(mounts.judge_shadows ?? {}).filter(([, arm]) => arm?.provider === "auto").map(([role]) => role)];
+}
+
+/** PRIMARY CONTROL (W1-T14841): how many days a model's newest pool figures for a `shadow: auto` role stand before the
+ *  bake-off replays it once more. W1-T14853's field-trials judge family names a replay stale at the same bound. */
+export const JUDGE_REPLAY_STALE_DAYS = 7;
+
+/** W1-T14841: what a model's judge replay is keyed on beyond its own readiness digest: the sorted `shadow: auto` roles
+ *  and the decision reader's revision. A change to either replays every judge-trialed model once. */
+export function judgeReplayKey(mounts: Mounts): string {
+  return JSON.stringify({ roles: [...judgeShadowAutoRoles(mounts)].sort(), reader: DECISION_READER_REVISION });
 }
 
 /** W1-T12422: the corpus a role's direct judge replay reads (W1-T12421's corpora). The risk judge has its own; every

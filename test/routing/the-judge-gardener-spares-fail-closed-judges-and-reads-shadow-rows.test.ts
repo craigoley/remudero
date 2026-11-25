@@ -101,19 +101,21 @@ test("W1-T13501 criterion 3: the real ci_judge and fix_progress_judge lines get 
   for (const [role, key] of [["ci-judge", "ci_judge"], ["fix-progress", "fix_progress_judge"]] as const) {
     const dir = root(t);
     const from = realLine(key);
-    assert.match(from, /, shadow: \{ deployment: DeepSeek-V4-Flash \} \}$/, `${key} carries its shadow arm`);
+    // W1-T14841: the row shadows auto with DeepSeek-V4-Flash as its flat fallback, so it stays one flow map.
+    assert.match(from, /, shadow: auto, shadow_fallback: DeepSeek-V4-Flash \}$/, `${key} carries its shadow arm`);
     const actions = configCandidates(inventory(record(role)), dir, rng);
     assert.equal(actions.length, 1, key);
     assert.equal(actions[0]!.edits.length, 1);
     const edit = actions[0]!.edits[0]!;
     assert.equal(edit.path, ".remudero/mounts.yaml");
     assert.equal(edit.from, from);
-    assert.equal(edit.to, from.replace(", shadow: {", ", provider: cash, shadow: {"));
+    assert.equal(edit.to, from.replace(", shadow: auto", ", provider: cash, shadow: auto"));
 
     const edited = root(t, TABLE.split("\n").map((line) => (line === edit.from ? edit.to : line)).join("\n"));
     const moved = loadMounts(mountsPath(edited));
     assert.equal(moved[key]!.provider, "cash");
-    assert.equal(moved[key]!.shadow!.deployment, "DeepSeek-V4-Flash");
+    const arm = moved[key]!.shadow!;
+    assert.equal(arm.provider === "auto" ? arm.fallback?.deployment : undefined, "DeepSeek-V4-Flash");
   }
 });
 
@@ -122,7 +124,7 @@ test("W1-T13501 criterion 4: a row over several lines, a row with two levels of 
   const ci = realLine("ci_judge");
   const refused: Array<[string, string, string]> = [
     ["several lines", "decision-summary", TABLE.replace(summary, summary.replace(" max_turns:", "\n  max_turns:"))],
-    ["two nesting levels", "ci-judge", TABLE.replace(ci, ci.replace("DeepSeek-V4-Flash }", "DeepSeek-V4-Flash, note: { a: 1 } }"))],
+    ["two nesting levels", "ci-judge", TABLE.replace(ci, ci.replace("DeepSeek-V4-Flash }", "DeepSeek-V4-Flash, note: { a: { b: 1 } } }"))],
   ];
   for (const provider of ["claude", "codex", "cash"]) {
     refused.push([`flat row on ${provider}`, "decision-summary", TABLE.replace(summary, summary.replace(/ \}$/, `, provider: ${provider} }`))]);

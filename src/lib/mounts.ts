@@ -135,6 +135,9 @@ export interface DecisionShadowArm {
 export interface AutoShadowArm {
   provider: "auto";
   deployment: "auto";
+  /** W1-T14841: the arm asked when the role's pool has no member: the row's `shadow_fallback`, a cash deployment id or a
+   *  decision_models row, beside `shadow: auto`. It keeps the row one flow map with at most one nested mapping. */
+  fallback?: CashShadowArm | DecisionShadowArm;
 }
 
 /** W1-T12417: what a role's `shadow:` names: a cash deployment, or a decision model. W1-T12422: or its pool. */
@@ -373,8 +376,15 @@ function parseThreshold(raw: unknown, where: string): JudgeThreshold {
 function parseJudgeMount(raw: unknown, where: string, tiers: Record<string, number>, efforts: Record<string, number>,
   decisionModels?: Record<string, DecisionCandidate>): JudgeMount {
   const mount: JudgeMount = parseMount(raw, where, tiers, efforts);
-  const { shadow, threshold } = raw as Record<string, unknown>;
-  return { ...mount, ...(shadow === undefined ? {} : { shadow: parseShadowArm(shadow, where, decisionModels) }),
+  const { shadow, shadow_fallback: shadowFallback, threshold } = raw as Record<string, unknown>;
+  let arm = shadow === undefined ? undefined : parseShadowArm(shadow, where, decisionModels);
+  if (shadowFallback !== undefined) {
+    if (arm?.provider !== "auto") throw new MountsError(`mount ${where}: 'shadow_fallback' is read only beside 'shadow: auto'.`);
+    const fallback = parseShadowArm(shadowFallback, `${where}.shadow_fallback`, decisionModels);
+    if (fallback.provider === "auto") throw new MountsError(`mount ${where}: 'shadow_fallback' must name a cash deployment or a decision model, not auto.`);
+    arm = { ...arm, fallback };
+  }
+  return { ...mount, ...(arm === undefined ? {} : { shadow: arm }),
     ...(threshold === undefined ? {} : { threshold: parseThreshold(threshold, where) }) };
 }
 
