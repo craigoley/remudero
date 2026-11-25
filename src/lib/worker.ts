@@ -4291,7 +4291,8 @@ const FLIGHT_FINGERPRINT_CHARS = 16;
 /** Turns the rolling window keeps per run; older turns fall out, so the hot path's cost is capped however long a run is. */
 export const FLIGHT_SIGNAL_WINDOW_TURNS = 24;
 /** Occurrences inside the window that trip either live predicate. Five, not the module's N>=3 default: re-running one
- * test after an edit is a healthy repeat, and an unmeasured live alarm must not fire on it. */
+ * test after an edit is a healthy repeat, and an unmeasured live alarm must not fire on it. PRIMARY CONTROL: this is
+ * the sole trip condition of the live predicates, not a backstop behind another limit (and it only ledgers, never halts). */
 export const LIVE_FLIGHT_SIGNAL_THRESHOLD = 5;
 /** Runs whose windows stay resident at once; the oldest is dropped first, so a long-lived process stays bounded. */
 const FLIGHT_SIGNAL_MAX_RUNS = 64;
