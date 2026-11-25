@@ -33,7 +33,9 @@ import { loadConfig } from "./config.js";
 import { appendLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { execFileRouted } from "./spawn-helper.js";
-import { PROOF_ENV_ALLOWLIST, PROOF_SANDBOX_BINARY, proofChildEnv, proofLinkedModuleRoots, proofSandboxArgv } from "./review.js";
+import { PROOF_ENV_ALLOWLIST, PROOF_SANDBOX_BINARY, parseWhitelistedProof, proofChildEnv, proofLinkedModuleRoots, proofSandboxArgv, type SuiteRegistryTarget } from "./review.js";
+import type { AcceptanceCriterion } from "./plan.js";
+import type { AsyncOpenPullRequestProofRunner } from "./pr-open.js";
 import { redactProofOutput } from "./proofExecutor.js";
 import { TEST_SLOT_DIR_ENV, TEST_SLOTS_ENV } from "./test-slot.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
@@ -817,6 +819,40 @@ export function preopenGateStepDetail(result: PreopenGateResult): GateStepDetail
   return { ...(result.failedDetail ? { failedDetail: result.failedDetail } : {}), ...(result.environmentSteps ? { environmentSteps: result.environmentSteps } : {}) };
 }
 
+/** `rmd check-proof` exit 1: an executed proof failed. The only verdict that blames the worker's tree. */
+const FILED_PROOF_FAILED_EXIT = 1;
+
+/**
+ * The task's own filed `grep:` proofs, asked at the worker's head after the base gate. A proof that matches nothing
+ * there (a criterion label the worker never wrote) is one named failed step in the existing repair round, instead of
+ * a terminal `pr_open.refused` branch-gap at open. Only `grep:` proofs run (a suite proof is costly and PR open runs
+ * it); a pass or an inconclusive run adds nothing. A gate that measured nothing is returned as it was.
+ */
+export function withFiledProofCheck(
+  baseGate: (worktreePath: string) => Promise<PreopenGateResult>,
+  criteria: readonly AcceptanceCriterion[],
+  runProof: AsyncOpenPullRequestProofRunner,
+  target?: SuiteRegistryTarget,
+): (worktreePath: string) => Promise<PreopenGateResult> {
+  return async (worktreePath) => {
+    const base = await baseGate(worktreePath);
+    if (base.kind === "unmeasured" || base.kind === "skipped") return base;
+    const misses: string[] = [];
+    for (const criterion of criteria) {
+      if (criterion.satisfied_by) continue;
+      const proof = criterion.proof.trim();
+      if (parseWhitelistedProof(proof, target)?.kind !== "grep") continue;
+      const run = await runProof(proof, undefined, worktreePath, target);
+      if (run.status !== FILED_PROOF_FAILED_EXIT || run.error || run.signal) continue;
+      misses.push(
+        `filed-proof: \`${proof}\` matches nothing at your head. The task's acceptance requires that text in that file: ` +
+          "write it where the criterion is proven (a criterion label goes in the title of the test that proves it)",
+      );
+    }
+    if (misses.length === 0) return base;
+    return { ...base, kind: "fail", failedSteps: [...(base.kind === "fail" ? base.failedSteps : []), ...misses] };
+  };
+}
 
 /** The failing step a push-gate refusal is handed back under, with the hook's own words after it. */
 export const PUSH_GATE_STEP_NAME = "push-gate";
