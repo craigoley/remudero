@@ -95,3 +95,22 @@ test("W1-T14643 criterion 3: a well-sampled tier keeps a wait within its own med
   assert.ok(units[0] <= units[1] && units[1] <= units[2], `the envelope runs ${units.map(u => u / HOUR).join(" <= ")} h`);
   assert.ok(units[1] >= (tier(context, 1)?.wait_ms ?? Infinity), "a lower tier never ages faster than a higher tier waits");
 });
+
+test("W1-T14643 criterion 3: an unequal sample (200/200/50) keeps the smaller tier's own 40 h inside its band", () => {
+  // `count` starts at `median` h with five evenly filled levels a quarter hour apart: the median is exact and
+  // the within-tier variance is about 0.13 h^2, so a 50-start tier's band is about 0.12 h.
+  const level = (idBase: number, priority: number, count: number, median: number): Started[] =>
+    Array.from({ length: count }, (_, i) => ({ id: `W1-T${idBase + i}`, priority, wait: median + ((i % 5) - 2) * 0.25 }));
+  const started = [...level(10000, 1, 200, 10), ...level(10500, 2, 200, 10), ...level(11000, 3, 50, 40)];
+  const waiting = [1, 2, 3].map(priority => ({ task: task(`W1-T1200${priority}`, { priority }), filedAgo: HOUR }));
+  const context = calibrate(started, waiting);
+  const sigma2 = 0.125 * 200 / 199;
+  const bandOf = (n: number) => 1.96 * Math.sqrt(Math.PI / 2 * sigma2 / n) * HOUR;
+  for (const [priority, median, n] of [[1, 10, 200], [2, 10, 200], [3, 40, 50]] as const) {
+    const wait = tier(context, priority)?.wait_ms ?? NaN;
+    assert.ok(Math.abs(wait - median * HOUR) <= bandOf(n), `P${priority} reads ${wait / HOUR} h against its own ${median} h`);
+  }
+  const units = [1, 2, 3].map(priority => unitOf(context, `W1-T1200${priority}`));
+  assert.ok(units[0] <= units[1] && units[1] <= units[2], `the envelope runs ${units.map(u => u / HOUR).join(" <= ")} h`);
+  assert.ok(Math.abs(units[2] - 40 * HOUR) <= bandOf(50), "the lowest tier ages in its own 40 h wait");
+});

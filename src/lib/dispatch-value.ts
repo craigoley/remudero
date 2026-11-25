@@ -224,7 +224,9 @@ export interface OperatorHoldState {
 function heldOnOperatorInputBy(holds: OperatorHoldState | undefined): (task: Pick<DispatchValueTask, "id" | "needs_input" | "verify">) => boolean {
   let released: ReadonlySet<string> | undefined;
   return task => {
-    if (task.needs_input !== undefined && !holds?.inputAnswer?.(task.id)?.trim()) return true;
+    const answer = holds?.inputAnswer?.(task.id);
+    const answered = typeof answer === "string" && answer.trim() !== "";
+    if (task.needs_input !== undefined && answered === false) return true;
     if (task.verify !== "human") return false;
     released ??= holds?.releasedIds?.() ?? new Set<string>();
     return !released.has(task.id);
@@ -238,12 +240,6 @@ function sampleVariance(values: readonly number[]): number | undefined {
   return values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / (values.length - 1);
 }
 
-function medianOf(values: readonly number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = sorted.length >> 1;
-  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-}
-
 /** The sampling variance of a median is about pi/2 times the variance of the mean, for the same sample. */
 const MEDIAN_VARIANCE_FACTOR = Math.PI / 2;
 
@@ -251,18 +247,18 @@ const MEDIAN_VARIANCE_FACTOR = Math.PI / 2;
  * W1-T14643: the empirical-Bayes prior weight `k` in `n / (n + k)`, derived from the data and never fixed.
  * `k = (pi/2) * sigma2 / tau2`: `sigma2` is a wait's own variance within a tier (its median's sampling variance
  * is `pi/2 * sigma2 / n`), `tau2` the variance between the tiers' true medians: the variance of the measured
- * medians less their sampling variance. It is read from the better-sampled half of the tiers (at least two), so
- * a sparse tier's noise cannot count as a real gap between tiers; a tier of one stale wait is judged against
- * what the well-sampled tiers agree on. No spread between those tiers means complete pooling (`k` infinite); no
- * spread within a tier means its median is exact (`k` zero), so a well-sampled tier keeps its own median.
+ * medians less their sampling variance. It is read from every tier that can state its own spread (two or more
+ * starts), never from a favoured half: a tier of 50 starts at 40 h beside two of 200 at 10 h is a real gap, and
+ * widens `tau2`, so each tier's weight `n / (n + k)` follows its own sample size. A tier of one start has no
+ * spread of its own to state, so it adds nothing to `tau2`: a lone stale wait is judged against what the other
+ * tiers show. No spread between the tiers means complete pooling (`k` infinite); no spread within a tier means
+ * its median is exact (`k` zero), so a well-sampled tier keeps its own median. Fewer than two such tiers cannot
+ * show a between-tier spread, so nothing is shrunk (`k` zero).
  */
 function shrinkagePriorWeight(sigma2: number, medians: readonly number[], sampleSizes: readonly number[]): number {
   if (!(sigma2 > 0) || medians.length < 2) return 0;
-  const cut = medianOf(sampleSizes);
-  let better = medians.map((_, i) => i).filter(i => sampleSizes[i] >= cut);
-  if (better.length < 2) better = medians.map((_, i) => i).sort((a, b) => sampleSizes[b] - sampleSizes[a]).slice(0, 2);
-  const between = sampleVariance(better.map(i => medians[i])) ?? 0;
-  const sampling = medianOf(better.map(i => MEDIAN_VARIANCE_FACTOR * sigma2 / sampleSizes[i]));
+  const between = sampleVariance(medians) ?? 0;
+  const sampling = sampleSizes.reduce((sum, n) => sum + MEDIAN_VARIANCE_FACTOR * sigma2 / n, 0) / sampleSizes.length;
   const tau2 = Math.max(0, between - sampling);
   return tau2 > 0 ? MEDIAN_VARIANCE_FACTOR * sigma2 / tau2 : Number.POSITIVE_INFINITY;
 }
@@ -762,8 +758,9 @@ function costOfDelayContext(
   const withinTier = tiers.reduce((sum, { sample }) => sample.events.length < 2 ? sum
     : { df: sum.df + sample.events.length - 1, ss: sum.ss + (sampleVariance(sample.events) as number) * (sample.events.length - 1) }, { df: 0, ss: 0 });
   const sigma2 = withinTier.df > 0 ? withinTier.ss / withinTier.df : (sampleVariance(pooled.events) ?? 0);
-  const measuredTiers = tiers.filter(t => t.own !== undefined);
-  const priorWeight = shrinkagePriorWeight(sigma2, measuredTiers.map(t => t.own as number), measuredTiers.map(t => t.n));
+  // Only a tier with two or more starts can state a spread of its own, so only those measure the between-tier one.
+  const spreadTiers = tiers.filter(t => t.own !== undefined && t.sample.events.length >= 2);
+  const priorWeight = shrinkagePriorWeight(sigma2, spreadTiers.map(t => t.own as number), spreadTiers.map(t => t.n));
   // n / (n + k): k zero keeps a tier's own median, k infinite gives it wholly to its neighbours.
   const keepOf = (n: number): number => n / (n + priorWeight);
   const nearestMeasured = (from: number, step: 1 | -1): Tier | undefined => {
