@@ -5653,6 +5653,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       { ...registryIntent.input, instanceName: registryIntent.instanceName }, log, opts.selectedModeFileIO)
     : createSelectedModeQualification(Object.hasOwn(opts, "selectedRegistryIntent") ? undefined : config.selectedRegistryMode, `${owner}/${task.repo}`,
       { envPath: selectedInstanceRegistryEnvPath(), instanceName: process.env.RMD_INSTANCE_NAME }, log, opts.selectedModeFileIO);
+  // W1-T14731: the binding is read asynchronously; hold it before any later step (a review, a worker) can edit the
+  // registry, or the run binds the edited file and never sees the revision it is meant to refuse.
+  await selectedModeQualification?.bound();
 
   // Budget is a RUNAWAY TRIPWIRE, not an allowance (§9). The HARD cap defaults to
   // DEFAULT_BUDGET_USD ($100 — an order of magnitude above any observed task) when a

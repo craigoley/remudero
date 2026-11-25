@@ -34,6 +34,7 @@ import { buildModelFieldNoteCandidate, FIELD_NOTE_WINDOWS_VERSION, parseFieldNot
 export type { AdoptionSelectedCell } from "./field-trials-field-note.js";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { quarantinedLedgerFingerprints } from "./field-trials-ledger-quarantine.js";
 import { loadConfig } from "./config.js";
 import { ghInteractiveRead } from "./github-transport.js";
 import { syncFieldNoteSiteImport, type FieldNoteExport, type SiteImportOutcome, type SiteRelease } from "./field-trials-site-import.js";
@@ -276,6 +277,9 @@ export interface FieldTrialsLedgerRead {
   malformedRows: number;
   duplicateRows: number;
   futureRows: number;
+  /** W1-T14781: rows skipped by name from the reviewed quarantine; present only when one matched. */
+  quarantinedRows?: number;
+  quarantinedFingerprints?: string[];
   /** Absent in historical v1 snapshots; absence is not a measured zero. */
   invalidTimestampRows?: number;
   unreadSources: number;
@@ -289,7 +293,8 @@ export function unavailableLedger(reason: string): FieldTrialsLedgerRead {
 }
 
 /** The audited three-form union: every form counted, exact replayed lines counted as duplicates once. */
-export async function readFieldTrialsLedger(stateDir: string, nowMs = systemClock.now()): Promise<FieldTrialsLedgerRead> {
+export async function readFieldTrialsLedger(stateDir: string, nowMs = systemClock.now(),
+  quarantine: ReadonlySet<string> = quarantinedLedgerFingerprints()): Promise<FieldTrialsLedgerRead> {
   let names: string[];
   try { names = readdirSync(stateDir); }
   catch {
@@ -306,6 +311,7 @@ export async function readFieldTrialsLedger(stateDir: string, nowMs = systemCloc
   let malformedRows = 0;
   let duplicateRows = 0;
   let futureRows = 0;
+  const quarantined: string[] = [];
   let invalidTimestampRows = 0;
   let unreadSources = 0;
   let newestTs: string | null = null;
@@ -318,6 +324,8 @@ export async function readFieldTrialsLedger(stateDir: string, nowMs = systemCloc
       const fingerprint = fingerprintLedgerLine(raw);
       if (seen.has(fingerprint)) { duplicateRows += 1; return; }
       seen.add(fingerprint);
+      // A quarantined line is skipped by name and never marks the read partial (W1-T14781).
+      if (quarantine.has(fingerprint)) { quarantined.push(fingerprint); return; }
       const ts = iso(accepted.ts);
       if (ts === null) { invalidTimestampRows += 1; return; }
       // A stray clock-forward row cannot create a future cohort or advance the source watermark.
@@ -329,7 +337,8 @@ export async function readFieldTrialsLedger(stateDir: string, nowMs = systemCloc
   const partial = unreadSources > 0 ? "ledger-source-unreadable" : malformedRows > 0 ? "ledger-source-malformed"
     : invalidTimestampRows > 0 ? "ledger-source-invalid-timestamp" : futureRows > 0 ? "ledger-source-future-dated" : null;
   return { state: partial ? "observed-partial" : "observed", reason: partial, forms, malformedRows, duplicateRows,
-    futureRows, invalidTimestampRows, unreadSources, newestTs, rows };
+    futureRows, invalidTimestampRows, unreadSources, newestTs, rows,
+    ...(quarantined.length > 0 ? { quarantinedRows: quarantined.length, quarantinedFingerprints: quarantined } : {}) };
 }
 
 export interface FieldTrialsSource {

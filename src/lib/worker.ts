@@ -2815,7 +2815,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // W1-T14200: ONE clock and reset curve for this whole decision: the Codex read, the auction, its draw key,
   // the recorded assignment and the published status. A fallback spawn reuses the blocked auction's.
   const headroomTiming = args.routingFallback?.headroomTiming ??
-    providerHeadroomTiming((args.providerRouting?.now ?? Date.now)(), config.root, args.providerRouting?.loadHeadroomPolicy);
+    workerHeadroomTiming((args.providerRouting?.now ?? Date.now)(), args.providerRouting?.loadHeadroomPolicy);
   if (routingPolicy.fallback) {
     console.error(JSON.stringify({
       event: "worker.provider_routing_policy_fallback",
@@ -3454,6 +3454,10 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         })), args.draftRouting.random);
         for (const skip of draftChoice.skipped ?? []) recordDraftRouting(args.draftRouting.log, "draft.routing.skip", {
           lane: args.draftRouting.lane, proposal_id: args.draftRouting.proposalId, ...skip, reason: "refused-or-failed",
+        });
+        for (const skip of draftChoice.floorSkipped ?? []) recordDraftRouting(args.draftRouting.log, "draft.routing.skip", {
+          lane: args.draftRouting.lane, proposal_id: args.draftRouting.proposalId, deployment: skip.deployment,
+          attempts: skip.attempts, clean_rate: skip.cleanRate, reason: "clean-rate-below-floor",
         });
         openWeight = { ...openWeight, model: draftChoice.deployment,
           alternatives: draftChoice.arms.map((arm) => arm.deployment).filter((model) => model !== draftChoice!.deployment) };
@@ -5464,6 +5468,15 @@ export const ADHOC_LANE_REAP_GRACE_MS = 14 * 24 * 60 * 60 * 1000;
  * means this process could not have started. */
 function installRootDir(): string {
   return join(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
+}
+
+/**
+ * W1-T14754 — the headroom curve a worker's routing decision judges with, from this install's own plan/policy.yaml: the
+ * checkout the daemon loads its curve from. `config.root` is the state root, which holds no plan/, so every decision
+ * fell back to the default curve and a reviewed curve edit never reached a worker.
+ */
+export function workerHeadroomTiming(nowMs: number, loadCurve?: () => HeadroomPolicy, root: string = installRootDir()): ProviderHeadroomTiming {
+  return loadCurve ? providerHeadroomTiming(nowMs, root, loadCurve) : providerHeadroomTiming(nowMs, root);
 }
 
 /** W1-T2699: point `cwd`'s PER-WORKTREE git config at the socket-based credential helper, resetting any

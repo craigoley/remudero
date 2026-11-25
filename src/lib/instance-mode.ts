@@ -84,6 +84,9 @@ type BoundMode = { kind: "ready"; mode: "shadow" | "live"; binding: SelectedRegi
 export interface SelectedModeQualification {
   observe<T>(action: SelectedModeAction, operation: () => T | Promise<T>, prUrl?: string): Promise<T>;
   observeSync<T>(action: SelectedModeAction, operation: () => T, prUrl?: string): T;
+  /** W1-T14731: settles once the initial binding is read. The read is asynchronous, so a caller that holds the
+   *  mode for its run awaits this before any later step can edit the registry; it never rejects. */
+  bound(): Promise<void>;
 }
 const unavailable = (reason: string, digest?: string): ModeEvidence => ({
   selected_outcome: "would-refuse", reason, ...(digest === undefined ? {} : { binding_digest: digest }),
@@ -205,6 +208,7 @@ export function createSelectedModeQualification(
     }
   };
   return Object.freeze({
+    bound: async (): Promise<void> => { await initial; },
     observe: async <T>(action: SelectedModeAction, operation: () => T | Promise<T>, prUrl?: string): Promise<T> => {
       const target = modeTarget(ownerRepo, prUrl);
       const evidence = target.reason === undefined ? await current() : unavailable(target.reason);

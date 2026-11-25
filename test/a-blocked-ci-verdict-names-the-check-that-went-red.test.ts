@@ -260,3 +260,42 @@ test("W1-T14710 a check rollup whose producer identity is unreadable throws with
       (error: Error & { code?: string }) => error.message === message && error.code === GH_CHECK_IDENTITY_UNREADABLE);
   }
 });
+
+/** Two same-named checks from workflow runs 11 and 12; `listed` says which runs GitHub's head listing names on each read. */
+function identityRaceDeps(listed: (read: number) => number[], sleeps: number[]): PollDeps {
+  let listings = 0;
+  return {
+    readJson: async (args) => {
+      const request = args.join(" ");
+      if (request.includes("/pulls/1")) return { number: 1, state: "open", merged: false, merged_at: null, head: { sha: "deadbeef" } };
+      if (request.includes("/check-runs")) {
+        // Run 12 went red, so a read that completes reaches a verdict.
+        return { check_runs: [11, 12].map((run) => ({ name: "ci-gate", status: "completed", conclusion: run === 12 ? "failure" : "success",
+          details_url: `https://github.com/acme/remudero/actions/runs/${run}/job/${run}0` })) };
+      }
+      if (request.includes("/status")) return { statuses: [] };
+      if (request.includes("/actions/runs?head_sha=")) return { workflow_runs: listed(listings++).map((id) => ({ id, workflow_id: id === 11 ? 7 : 8 })) };
+      throw new Error(`unexpected REST request: ${request}`);
+    },
+    sleep: async (ms) => { sleeps.push(ms); },
+    requiredContexts: () => undefined,
+  };
+}
+
+test("W1-T14711 a check rollup whose producer identity is listed on a later read lets the CI wait go on", async () => {
+  const sleeps: number[] = [];
+  const rows: string[] = [];
+  const outcome = await waitForCiGreen(PR_URL, (step) => rows.push(step), 0,
+    identityRaceDeps((read) => read === 0 ? [11] : [11, 12], sleeps));
+  assert.equal(ciGateState(outcome), "red", `the wait reached the red check's verdict: ${JSON.stringify(outcome)}`);
+  assert.equal(rows.filter((step) => step === "poll.read_retry").length, 1, "the incomplete read is re-asked once");
+  assert.equal(sleeps[0], 5_000, "after the poll's first wait");
+});
+
+test("W1-T14711 a producer identity still unreadable after every wait throws with its code", async () => {
+  const sleeps: number[] = [];
+  await assert.rejects(waitForCiGreen(PR_URL, () => {}, 0, identityRaceDeps(() => [11], sleeps)),
+    (error: Error & { code?: string }) => error.code === GH_CHECK_IDENTITY_UNREADABLE
+      && error.message === "workflow producer identity incomplete for independent check runs");
+  assert.deepEqual(sleeps.filter((ms) => ms >= 5_000), [5_000, 10_000, 20_000, 30_000, 60_000], "every wait was spent first");
+});

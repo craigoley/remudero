@@ -31,7 +31,7 @@ import { parse as parseYaml, parseDocument } from "yaml";
 import { systemClock, type Clock } from "./clock.js";
 import { MOVED_FROM_VALUE, defaultGitRunnerAsync, withoutOneMovedFromLine } from "./plan.js";
 import {
-  MOVE_COPY_RECEIPT, PreviewUnknown, type BatchFits, catalog, liveHeadJudge, migrationOptions, readState, refs, selectPlanTaskMigration, unknown,
+  MOVE_COPY_RECEIPT, PreviewUnknown, type BatchFits, catalog, liveHeadJudge, migrationOptions, publicReferences, readState, refs, selectPlanTaskMigration, unknown,
   type CatalogOriginal, type MigrationGraphqlReader, type MigrationOptions, type PreviewState,
 } from "./plan-task-migration.js";
 import { planPrPreflightAllows, planPrPreflightAtCommitAsync, ratifyPrCreateRestArgs, type PlanPrPreflightResult } from "./plan-pr-emitter.js";
@@ -240,11 +240,12 @@ async function commitOn(root: string, parent: string, tree: string, message: str
 }
 
 function plannedConverge(o: MigrationOptions, state: PreviewState, publicRefs: Map<string, string>, id: string,
-  pub: CatalogOriginal, opsCopy: CatalogOriginal, bound: { text: string; blob: string; commit: string }): Planned | { held: string } {
+  pub: CatalogOriginal, opsCopy: CatalogOriginal, bound: { text: string; blob: string; commit: string },
+  referred: ReadonlySet<string>): Planned | { held: string } {
   if (withoutOneMovedFromLine(opsCopy.text) !== bound.text) return { held: "ops_copy_differs" };
   if (opsCopy.path !== pub.path) return { held: "path_differs" };
   const amended = pub.blob !== bound.blob ? "amended" : undefined;
-  const owner = amended ?? publicOwner(id, pub.path, publicRefs, state.open);
+  const owner = amended ?? (referred.has(id) ? "public_referrers" : publicOwner(id, pub.path, publicRefs, state.open));
   const evidence = { boundCommit: bound.commit, boundBlob: bound.blob, publicBlob: pub.blob, opsBlob: opsCopy.blob, owner: owner ?? null };
   if (owner !== undefined) {
     return { step: "rollback", id, repository: "ops", path: opsCopy.path, reason: owner, evidence,
@@ -283,6 +284,10 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
     const shared = ops.plan.tasks.filter(task => pub.plan.byId.has(task.id)).map(task => task.id).sort();
     // W1-T14345: every pending id at once. An owned one is rolled back first, then the rest removed together; a held
     // one is left out, and holds the step only when nothing else can converge.
+    // A copy a public record that stays still names (depends_on or superseded_by) is rolled back: removing it would
+    // leave that reference dangling, so the REMOVE's checks would fail at every pass. Shared referrers move with it.
+    const sharedIds = new Set(shared);
+    const referred = publicReferences(pub.plan.tasks.filter(task => !sharedIds.has(task.id)));
     const converge = async (): Promise<PlannedStep | { held: string; id: string } | undefined> => {
       const held: Array<{ held: string; id: string }> = [];
       const steps: Planned[] = [];
@@ -293,7 +298,7 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
         const opsCopy = ops.originals.get(id)!, pubCopy = pub.originals.get(id)!;
         const text = await readBytes(o.publicRoot, `${source}:${opsCopy.path}`);
         if (text === undefined) { held.push({ held: "bound_original_unreadable", id }); continue; }
-        const step = plannedConverge(o, state, publicRefs, id, pubCopy, opsCopy, { text, blob: blobOf(text), commit: source });
+        const step = plannedConverge(o, state, publicRefs, id, pubCopy, opsCopy, { text, blob: blobOf(text), commit: source }, referred);
         if ("held" in step) held.push({ ...step, id }); else steps.push(step);
       }
       const rollbacks = steps.filter(step => step.step === "rollback");

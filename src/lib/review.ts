@@ -14110,6 +14110,13 @@ export async function drainReviewOutbox(opts: DrainReviewOutboxOpts): Promise<Re
  * See plan/policy.yaml's "THE 30000 REGRESSION": a passing suite took 52.9s locally and over 60s on the reviewer. */
 export const REVIEW_LOCK_TTL_MS = 14 * 180_000;
 
+/** W1-T14764 — the rows besides a terminal `review.posted` by which a run settles its own claim on a head: the members of
+ *  sweep.ts's REVIEW_RUN_SETTLED_STEPS other than `review.posted` (listed here, not imported, because sweep.ts imports this
+ *  module). A `review.posted` settles a claim only with a terminal success/failure state: an error or pending post leaves
+ *  the input re-claimable as a takeover (W1-T11930 pins that). A test holds this set equal to sweep.ts's. */
+export const REVIEW_CLAIM_SETTLING_STEPS: ReadonlySet<string> = new Set(["review.stood_down", "review.post_refused",
+  "review.replay_input", "review.skipped_closed_lifecycle"]);
+
 export interface PostReviewPendingOpts {
   owner: string;
   repo: string;
@@ -14193,17 +14200,24 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
     };
   }
   let priorPending = hasInputIdentity ? undefined : lastPendingReviewStatusFromLedger(lines, opts.taskId);
+  // W1-T14764: a claim whose own run later posted a terminal verdict for this input is a FINISHED review, not a claim.
+  // A new review of the input (reachable only once a reviewer-code advance cleared that verdict) is a re-review.
+  let finishedPriorRunId: string | undefined;
   if (hasInputIdentity) {
+    const settledRuns = new Set<unknown>();
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i]!;
-      if (
-        line.step !== "review.pending_posted" ||
-        line.task_id !== opts.taskId ||
-        line.pr_url !== opts.prUrl ||
-        line.head_sha !== opts.sha ||
-        line.review_input_digest !== opts.reviewInputDigest
-      ) {
-        continue;
+      if (line.pr_url !== opts.prUrl || line.head_sha !== opts.sha) continue;
+      // The other settling rows (review.stood_down, review.post_refused, ...) are written without a digest or task id;
+      // where a row carries one, it must name this input.
+      if (line.review_input_digest !== undefined && line.review_input_digest !== opts.reviewInputDigest) continue;
+      if (line.task_id !== undefined && line.task_id !== opts.taskId) continue;
+      if (REVIEW_CLAIM_SETTLING_STEPS.has(String(line.step)) ||
+          line.step === "review.posted" && postedReviewStatusRecord(line) !== undefined) settledRuns.add(line.run_id);
+      if (line.step !== "review.pending_posted" || line.task_id !== opts.taskId || line.review_input_digest !== opts.reviewInputDigest) continue;
+      if (typeof line.run_id === "string" && settledRuns.has(line.run_id)) {
+        finishedPriorRunId = line.run_id;
+        break;
       }
       priorPending = pendingReviewStatusRecord(line);
       break;
@@ -14289,6 +14303,9 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       : takenOverFrom
       ? `remudero-review: review in progress (owned by run ${opts.runId}) — took over a stale claim ` +
         `(>= ${Math.round(REVIEW_LOCK_TTL_MS / 60_000)}m old) from run ${takenOverFrom.runId} (W1-T3647)`
+      : finishedPriorRunId !== undefined
+      ? `remudero-review: review in progress (owned by run ${opts.runId}) — re-review of this input at reviewer code ` +
+        `${opts.reviewEngineRevision?.slice(0, 7) ?? "unknown"} (prior run ${finishedPriorRunId})`
       : `remudero-review: review in progress (owned by run ${opts.runId})`
   ).slice(0, 140);
   const ownerIdentity = opts.ownerIdentity ?? { pid: process.pid, startedAt: new Date().toISOString() };
@@ -14322,6 +14339,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
       ...(opts.reviewInputDigest !== undefined ? { review_input_digest: opts.reviewInputDigest } : {}),
       ...(opts.reviewEngineRevision !== undefined ? { review_engine_revision: opts.reviewEngineRevision } : {}),
       ...(takenOverFrom ? { took_over_run_id: takenOverFrom.runId } : {}),
+      ...(!takenOverFrom && finishedPriorRunId !== undefined ? { prior_run_id: finishedPriorRunId } : {}),
     });
     const linesReadBeforeThisClaim = lines;
     const takeoversCountedForTheLedgerOnly = takenOverFrom ? priorReviewClaimTakeovers(linesReadBeforeThisClaim, { ...opts }) + 1 : 0;

@@ -373,7 +373,7 @@ test("W1-T14200 criterion 3: every production caller of providerEligibility pass
   const runTask = readFileSync(join(srcRoot, "run-task.ts"), "utf8");
   const rescue = runTask.slice(runTask.indexOf("export async function spawnEscalatedInboxDraft("));
   assert.match(rescue.slice(0, rescue.indexOf("\n}\n")),
-    /providerEligibility\(capacity, policy\.reservePercent, providerHeadroomTiming\(systemClock\.now\(\), args\.config\.root\)\)\.eligible/);
+    /providerEligibility\(capacity, policy\.reservePercent, workerHeadroomTiming\(systemClock\.now\(\)\)\)\.eligible/);
   // The codex reader keeps no flat-reserve test of its own beside providerEligibility's.
   assert.doesNotMatch(readFileSync(join(srcRoot, "lib", "worker-provider.ts"), "utf8"), />=\s*100 - reserve\b/);
 });

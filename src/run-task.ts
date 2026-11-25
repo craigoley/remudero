@@ -383,7 +383,7 @@ export {
   mergeDirectViaRest,
 };
 export type { ArmDeps, ArmOutcome, ArmAttemptResult, DirectMergePreflightEvidence, DisarmOutcome, ArmLane };
-import { providerHeadroomTiming, resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
+import { resolveProviderRoutingPolicy } from "./lib/provider-routing-policy.js";
 import { selectRuntimeReviewWidth } from "./lib/review-capacity.js";
 import { createBoardSnapshotCache, readOpenBoardSnapshot, type BoardSnapshotCache } from "./lib/board-snapshot-cache.js";
 import { createChangedFilesCache, type ChangedFilesCache } from "./lib/changed-files-cache.js";
@@ -392,7 +392,7 @@ import { sameHost } from "./lib/host-identity.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenClosePr, gardenPassDue, gardenPendingSignal, isGardenLandWaiting, isPromiseLike, landedPrUrl, runStepsEager, runGardenAsync, type GardenAction, type GardenLandOpts, type GardenLandResult, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
+import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenClosePr, gardenPassDue, gardenPendingSignal, isGardenLandRefused, isGardenLandWaiting, isPromiseLike, landedPrUrl, runStepsEager, runGardenAsync, type GardenAction, type GardenLandOpts, type GardenLandRefusal, type GardenLandResult, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDueAsync, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, selectorShadowMainFailures, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { flakeJudgeEvidencePort } from "./lib/flake-incident-gardener.js";
 import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.js";
@@ -413,7 +413,7 @@ import { flowGardenSpec } from "./lib/flow-remedy-gardener.js";
 import { fixLaneGardenSpec } from "./lib/fix-lane-gardener.js";
 import { conflictedFilePaths, hotFileGardenSpec, readMainHistory, type HotFileGardenSources } from "./lib/hot-file-gardener.js";
 import {
-  gardenFamilyRecord, ledgerCorpusSpan, machineJudgeFoundWork, machineJudgeInputsAsync, mechanicalDecisions, operatorRulingTimes, readOperatorReleaseRecords,
+  gardenFamilyRecord, ledgerCorpusSpan, machineJudgeFoundWork, machineJudgeInputsAsync, machineJudgePlanSource, mechanicalDecisions, operatorRulingTimes, readOperatorReleaseRecords,
   recordOperatorRelease, runMachineFilingJudge, unionTaskActivity, type MachineJudgePorts, type MechanicalPort,
 } from "./lib/machine-filing-judge.js";
 import { countRounds, countStepRows, filingEvidenceOf, type SymptomReading } from "./lib/mechanical-rulings.js";
@@ -858,6 +858,7 @@ import {
   stagedTaskFiles,
   stagedTaskFileOrigins,
   taskFileOrigin,
+  taskIdOfTaskFileText,
   taskFilesLandingBranchAsync,
   type LandTaskFilesOpts,
   type TaskFileInput,
@@ -3053,7 +3054,7 @@ import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js
 import { applyCorrection } from "./lib/correct.js";
 import { projectHeldTaskQuestionGates, renderHeldTaskQuestions } from "./lib/human-gate.js";
 import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, runLockRecord, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreeRemoveIfPresent, worktreeRemoveIfPresentAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, wireCredentialHelperSocket, workerContinuation, workerExecutionForProvider, taskInputAnswerWithLedger } from "./lib/worker.js";
-import { healedReviewerTreeTools } from "./lib/worker.js";
+import { healedReviewerTreeTools, workerHeadroomTiming } from "./lib/worker.js";
 import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
@@ -28808,6 +28809,7 @@ async function repairRequestedShard(
     opts.log("plan.shard_repair_waiting", { ...at, blob, path: rel, kept: verdict.kept });
     return { wait: true };
   }
+  if (isGardenLandRefused(prUrl)) prUrl = prUrl.opened;
   if (prUrl === undefined) {
     opts.log("plan.shard_repair_not_landed", { ...at, blob, reason: "the plan-PR preflight refused the repair; plan_pr.preflight_refused names why" });
     return { retry: true, blob };
@@ -29009,7 +29011,7 @@ export interface GardenCheckoutOpts {
   fetcher?: GhApiFetcher;
   clock?: Clock;
   /** W1-T5348: the plan-PR preflight over the committed tree; injected only by a test. */
-  preflight?: (input: { cwd: string; title: string; body: string; codeRoot?: string }) => PlanPrPreflightResult;
+  preflight?: (input: { cwd: string; title: string; body: string; codeRoot?: string }) => PlanPrPreflightResult | Promise<PlanPrPreflightResult>;
   /** W1-T12221: the shared landing of task files: its state root (`config.root`) and its seams. Absent,
    *  every land opens its own PR. */
   taskFilesLanding?: Pick<LandTaskFilesOpts, "stateRoot" | "gh" | "planPrPreflight">;
@@ -29096,20 +29098,43 @@ function* landSealedTaskFiles(opts: GardenCheckoutOpts, paths: readonly string[]
     }
   }
   const result = yield* step(() => land(inputs));
-  const carried = paths.every((p) => result.landed.includes(p));
-  const queued = paths.every((p) => result.landed.includes(p) || result.waiting.includes(p));
+  const refusals = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path));
+  // W1-T14657: the paths the landing did not refuse are the ones it was to carry: a landing of several lands them.
+  const refusedPaths = new Set(refusals.map((r) => r.path));
+  const owed = paths.filter((p) => !refusedPaths.has(p));
+  const carried = owed.every((p) => result.landed.includes(p));
+  const queued = owed.every((p) => result.landed.includes(p) || result.waiting.includes(p));
   // W1-T12222: a file that is in the queue keeps the ids of its land, so a partly refused land of new files waits.
   const partly = opts.taskFilesOnly === true && paths.some((p) => result.landed.includes(p) || result.waiting.includes(p));
-  const outcome = result.prUrl !== undefined && carried ? "opened" : queued || partly ? "waiting" : "not_landed";
-  const refused = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path)).map((r) => ({
+  const outcome = result.prUrl !== undefined && carried && owed.length > 0 ? "opened" : (queued && owed.length > 0) || partly ? "waiting" : "not_landed";
+  const refused = refusals.map((r) => ({
     path: r.path, reason: r.reason,
     ...(r.reserved_id === undefined ? {} : { reserved_id: r.reserved_id }),
     ...(r.id_release === undefined ? {} : { id_release: r.id_release }),
   }));
+  // W1-T14657: what the gardener is told: each refused path with the task ids its findings and its own record name.
+  const told: GardenLandRefusal[] = refusals.map((r) => {
+    const own = taskIdOfTaskFileText(inputs.find((i) => i.relPath === r.path)?.content ?? "");
+    const ids = [...new Set([...(own === undefined ? [] : [own]), ...(r.reserved_id === undefined ? [] : [r.reserved_id]), ...(r.failures ?? []).flatMap((f) => f.task_ids ?? [])])];
+    return { path: r.path, reason: r.reason, ...(ids.length > 0 ? { task_ids: ids } : {}) };
+  });
   opts.log(`${opts.name}.garden_sealed_landing`, { outcome, paths, pr_url: outcome === "opened" ? result.prUrl : null, ...(refused.length ? { refused } : {}), ...(result.error ? { error: result.error } : {}) });
-  if (outcome === "opened") return result.prUrl;
-  if (outcome === "waiting") return { waiting: { paths: paths.filter((p) => result.landed.includes(p) || result.waiting.includes(p)), stateRoot: opts.taskFilesLanding!.stateRoot, ...(opts.taskFilesOnly === true ? { filed: true as const } : {}) } };
-  return undefined;
+  if (outcome === "opened") return told.length > 0 ? { opened: result.prUrl!, refused: told } : result.prUrl;
+  if (outcome === "waiting") return { waiting: { paths: paths.filter((p) => result.landed.includes(p) || result.waiting.includes(p)), stateRoot: opts.taskFilesLanding!.stateRoot, ...(opts.taskFilesOnly === true ? { filed: true as const } : {}) }, ...(told.length > 0 ? { refused: told } : {}) };
+  return told.length > 0 ? { refused: told } : undefined;
+}
+
+/** W1-T14657: the paths of `paths` the tasks a preflight red names are filed in, with those ids: a refusal that names
+ *  no task of this landing attributes nothing, and the land stays unlanded as before. */
+function preflightRefusedPaths(root: string, paths: readonly string[], failures: PlanPrPreflightResult["failures"]): GardenLandRefusal[] {
+  const named = new Set(failures.flatMap((f) => f.task_ids ?? []));
+  const refused: GardenLandRefusal[] = [];
+  for (const path of paths) {
+    const own = existsSync(join(root, path)) ? taskIdOfTaskFileText(readFileSync(join(root, path), "utf8")) : undefined;
+    const id = own !== undefined && named.has(own) ? own : [...named].find((n) => basename(path).startsWith(`${n}-`));
+    if (id !== undefined) refused.push({ path, reason: `the plan-PR preflight refused ${id}`, task_ids: [id] });
+  }
+  return refused;
 }
 
 function* gardenLandSteps(
@@ -29191,7 +29216,11 @@ function* gardenCommitAndOpen(
   assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${to.owner}/${to.repo}`);
   // W1-T5348: a tree CI would refuse is never pushed — the lane's not-landed outcome instead of a red PR.
   const verdict = yield* step(() => io.preflight({ cwd: root, title: fitted.header, body: fullTitle + body }));
-  if (!planPrPreflightAllows(verdict, { lane: opts.name, branch, log: opts.log })) return undefined;
+  if (!planPrPreflightAllows(verdict, { lane: opts.name, branch, log: opts.log })) {
+    // W1-T14657: the refused task ids reach the gardener as the paths they are filed in.
+    const refused = preflightRefusedPaths(root, paths, verdict.failures);
+    return refused.length > 0 ? { refused } : undefined;
+  }
   yield* step(() => io.git("push", "-q", "origin", `HEAD:refs/heads/${branch}`));
   try {
     const create = { title: fitted.header, body: fullTitle + body, head: branch, base: "main" };
@@ -29358,6 +29387,7 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     },
     log,
     ...(escalate ? { escalate } : {}),
+    closeIssue: buildEscalationCloserAsync(owner, repo),
   });
   const withDue = (pass: () => void | Promise<void>, due: () => boolean | Promise<boolean>): RegisteredGardenPass => Object.assign(pass, { due });
   const gardenPass = <C extends string, I, A extends GardenAction<C>>(spec: GardenSpec<C, I, A, GardenCheckout>, d: GardenerDeps): RegisteredGardenPass => withDue(async () => {
@@ -37867,7 +37897,7 @@ export async function spawnEscalatedInboxDraft(
   if (!policy.routableProviders.includes("claude")) return undefined;
   const capacity = await readCapacity(args.config);
   // W1-T14200: judged on the same reset curve as the auction, so a final-rung reserve admits the rescue too.
-  if (!providerEligibility(capacity, policy.reservePercent, providerHeadroomTiming(systemClock.now(), args.config.root)).eligible) return undefined;
+  if (!providerEligibility(capacity, policy.reservePercent, workerHeadroomTiming(systemClock.now())).eligible) return undefined;
   const spawnArgs = {
     ...buildInboxDraftSpawnArgs({
       ...args,
@@ -39479,7 +39509,11 @@ export function productionMachineFilingJudgePorts(opts: {
 }): MachineJudgePorts {
   let mount: Mount | undefined;
   const fetcher = opts.fetcher ?? ghJson;
+  // W1-T14656: the ops records of the plan the pass read, and why none are judged when the ops catalog is not.
+  let ops: { ids: ReadonlySet<string>; refusal?: string } = { ids: new Set() };
   return {
+    ops: () => ops,
+    codeRoot: opts.repoRoot,
     mechanical: productionMechanicalPort({ repoRoot: opts.repoRoot, stateDir: opts.stateDir, clock: opts.clock }),
     flakeEvidence: flakeJudgeEvidencePort({
       stateDir: opts.stateDir, log: opts.log, clock: opts.clock ?? systemClock,
@@ -39496,7 +39530,10 @@ export function productionMachineFilingJudgePorts(opts: {
       const tasks = committed.tasks.map(task => ({
         ...task, sourcePath: join(opts.repoRoot, task.sourcePath!.slice(mainSha.length + 1)),
       }));
-      return { tasks, byId: new Map(tasks.map(task => [task.id, task])) };
+      // W1-T14656: composed with the ops catalog, so a queued ops record is judged like a public one.
+      const source = await machineJudgePlanSource({ tasks, byId: new Map(tasks.map(task => [task.id, task])) }, { stateDir: opts.stateDir });
+      ops = { ids: source.opsIds, ...(source.opsRefusal === undefined ? {} : { refusal: source.opsRefusal }) };
+      return source.plan;
     },
     riskJudge: (input) => {
       if (!mount) {
@@ -39571,7 +39608,20 @@ export function productionMachineFilingJudgePorts(opts: {
     },
     openWorkspace: () => gardenCheckoutAsync({ name: "machine-judge", repoDir: opts.repoRoot, worktreesRoot: opts.worktreesRoot, owner: opts.owner, repo: opts.repo, log: opts.log, fetcher, clock: opts.clock,
       ...(opts.taskFilesLanding ? { taskFilesLanding: opts.taskFilesLanding, ...gardenTaskDestination(opts.taskFilesLanding.stateRoot, opts.repoRoot, opts.owner, opts.repo) } : {}) }),
-    prState: (prUrl) => gardenPrState(opts.owner, opts.repo, prUrl, fetcher),
+    // W1-T14656: the pull request's own repository answers its state: an ops landing is not in the public one.
+    prState: (prUrl) => {
+      const at = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\//.exec(prUrl);
+      return gardenPrState(at?.[1] ?? opts.owner, at?.[2] ?? opts.repo, prUrl, fetcher);
+    },
+    // W1-T14656: a rewrite of an ops record lands as a plan PR of the ops repository: a worktree of its checkout, the
+    // plan-PR preflight over the ops tree read with this checkout's lint code, the same commit and PR open as a public landing.
+    openOpsWorkspace: async () => {
+      const at = planDestinationRepository(opts.stateDir);
+      if (at.outcome !== "named") throw new Error("machine judge: no ops repository is named to land an ops record rewrite");
+      return gardenCheckoutAsync({ name: "machine-judge", repoDir: at.checkoutDir, worktreesRoot: opts.worktreesRoot, owner: at.owner, repo: at.repo,
+        log: opts.log, fetcher, clock: opts.clock,
+        preflight: (input) => planPrPreflightAsync({ ...input, codeRoot: opts.repoRoot }, { log: opts.log }) });
+    },
     stageProposal: (proposal) => void stageInboxProposalOnce(join(opts.stateDir, "inbox-proposals.json"), proposal),
     log: opts.log,
     clock: opts.clock ?? systemClock,
@@ -39668,12 +39718,16 @@ export async function verifyHumanSweepCommand(
   }
 
   const config = deps.config ?? loadConfig();
-  const plan = loadPlan(join(root, "plan", "tasks.yaml"));
+  // W1-T14656: the public plan composed with the ops catalog, as the judge and the cadence read it, so a parked ops
+  // record is listed and judged with the public ones. An ops catalog that cannot be read leaves the public plan, named.
+  const source = await machineJudgePlanSource(loadPlan(join(root, "plan", "tasks.yaml")), { stateDir: join(config.root, "state") });
+  const plan = source.plan;
+  if (source.opsRefusal !== undefined) console.log(`verify-human-sweep: the ops catalog is not judged this pass (${source.opsRefusal}); the public records are.`);
   const ledgerPath = ledgerPathFor(config);
   // status.ts's reader, which already parses and already skips an unreadable line — no second
   // JSON pass, and one bad line never hides the verdicts around it.
   const rows = readLedgerLines(ledgerPath) as unknown as Record<string, unknown>[];
-  const shards = withWhyMeJudgmentInput(await parkedVerifyHumanShards(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), (deps.clock ?? systemClock).now(), { repository: githubRepoSlugOfCheckout(root), instance: process.env.RMD_INSTANCE_NAME });
+  const shards = withWhyMeJudgmentInput(await parkedVerifyHumanShardsAsync(plan, root, deps.clock ?? systemClock, readMergeCreditedTaskIds(ledgerPath).credited, {}, source), join(config.root, "state"), readPersistedInbox(join(config.root, "state")), (deps.clock ?? systemClock).now(), { repository: githubRepoSlugOfCheckout(root), instance: process.env.RMD_INSTANCE_NAME });
   const priorVerdicts = priorVerifyHumanVerdicts(rowsWithArchivedVerifyHumanVerdicts(ledgerPath, rows));
 
   if (dryRun) {

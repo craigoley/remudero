@@ -49,6 +49,8 @@ export const COST_OF_DELAY_RULE =
 export const QUEUE_JUDGE_PREDICTION_STEP = "queue_judge.prediction";
 export const QUEUE_JUDGE_OUTCOME_STEP = "queue_judge.outcome";
 const ESCALATED_STEP = "queue_judge.escalated";
+const ESCALATION_CLOSED_STEP = "queue_judge.escalation_closed";
+const ESCALATION_CLOSE_FAILED_STEP = "queue_judge.escalation_close_failed";
 const UNAVAILABLE_STEP = "queue_judge.unavailable";
 /** Written only when the judge answered: a pass that ended in {@link UNAVAILABLE_STEP} throws before it. */
 export const QUEUE_JUDGE_SCORECARD_STEP = "queue_judge.scorecard";
@@ -111,7 +113,7 @@ export function queueJudgePromptBound(window: QueueJudgeRouteWindow): { maxChars
 }
 
 /** The queue judge's own rows are read without a window: a prediction is scored whenever its task resolves. */
-const OWN_STEPS = [QUEUE_JUDGE_PREDICTION_STEP, QUEUE_JUDGE_OUTCOME_STEP, ESCALATED_STEP] as const;
+const OWN_STEPS = [QUEUE_JUDGE_PREDICTION_STEP, QUEUE_JUDGE_OUTCOME_STEP, ESCALATED_STEP, ESCALATION_CLOSED_STEP] as const;
 /** The rest of the evidence, each step named: the read is never an unfiltered union (W1-T5363). */
 const EVIDENCE_STEPS = [
   "run.start", "verdict", "verdict.merged", "review.posted", "backlog.scorecard", "sweep.disposed",
@@ -202,6 +204,8 @@ export interface QueueJudgeSources {
   judgeText: (prompt: string) => Promise<string>;
   /** Tasks with a run in flight and the files they declare, for the file-overlap holder. */
   inFlight?: (rows: readonly Row[]) => ReadonlyMap<string, readonly string[]>;
+  /** Closes an escalation issue the judge opened and its corrected rule no longer holds; absent, the issue stays open. */
+  closeIssue?: (url: string, comment: string) => void | Promise<void>;
 }
 
 const newestFirst = (rows: readonly Row[]): Row[] => [...rows].sort((a, b) => Date.parse(String(b.ts)) - Date.parse(String(a.ts)));
@@ -424,6 +428,26 @@ export function readQueueJudgeAnswer(text: string): QueueJudgeAnswerReading {
   return { moves, malformedRows };
 }
 
+/**
+ * The judge's own open floor escalations that the corrected rule admits: a recorded proposal that LOWERED a queued task's
+ * urgency (`to` larger than `from`), whose task is not an operator pin the proposal would move to a larger number.
+ * Those were escalated under the smallest-pin floor only because the rule ignored the task's current priority.
+ * One row per issue; an issue already closed or without a url is never returned.
+ */
+export function admittedFloorEscalations(own: readonly Row[], packs: ReadonlyMap<string, EvidencePack>): Row[] {
+  const closed = new Set(own.filter((r) => r.step === ESCALATION_CLOSED_STEP && typeof r.issue_url === "string").map((r) => String(r.issue_url)));
+  const out = new Map<string, Row>();
+  for (const r of own) {
+    if (r.step !== ESCALATED_STEP || typeof r.issue_url !== "string" || closed.has(r.issue_url) || out.has(r.issue_url)) continue;
+    if (typeof r.task_id !== "string" || typeof r.from !== "number" || typeof r.to !== "number" || r.to <= r.from) continue;
+    const pack = packs.get(r.task_id);
+    if (!pack || pack.priority === null) continue;
+    if (pack.pinned && r.to > pack.priority) continue;
+    out.set(r.issue_url, r);
+  }
+  return [...out.values()];
+}
+
 export interface QueueJudgeAction extends GardenAction<QueueJudgeClass> {
   from: number | null;
   to: number;
@@ -440,8 +464,9 @@ export interface MoveRefusal { id: string; reason: string }
 /**
  * The deterministic checks after the judge, row by row. An unknown id, a task that is not queued, a value outside
  * lint's [0, 99], a cited evidence ref (or claimed dependent, incident, PR) that is not in the pack: each refuses its
- * own row. A pinned priority is never moved to a larger number and nothing may sit below the smallest operator pin:
- * those proposals become escalations, never writes.
+ * own row. A pinned priority is never moved to a larger number and nothing may be RAISED above the smallest operator
+ * pin: those proposals become escalations, never writes. A proposal that lowers a task's urgency never makes it more
+ * urgent than it is, so the smallest-pin floor does not hold it: it is judged as a lower.
  */
 export function checkMoves(moves: readonly JudgeMove[], packs: ReadonlyMap<string, EvidencePack>, judged: ReadonlyMap<string, EvidencePack> = packs): { accepted: QueueJudgeAction[]; refused: MoveRefusal[]; escalate: QueueJudgeAction[] } {
   const accepted: QueueJudgeAction[] = [], escalate: QueueJudgeAction[] = [], refused: MoveRefusal[] = [];
@@ -467,8 +492,8 @@ export function checkMoves(moves: readonly JudgeMove[], packs: ReadonlyMap<strin
       class: pack.priority === null || m.priority < pack.priority ? "raise" : "lower", target: m.id, reason: m.reason, from: pack.priority, to: m.priority,
       evidence: m.evidence, signature: pack.signature, expectedCostOfDelay: m.expected_cost_of_delay, expectedOutcome: o, pinned: pack.pinned, heldBy: pack.heldBy,
     };
-    // An operator's frame: a pin never moves to a larger number, and nothing sits more urgent than the smallest pin.
-    if ((pack.pinned && pack.priority !== null && m.priority > pack.priority) || (floor !== undefined && m.priority < floor)) escalate.push(action);
+    // An operator's frame: a pin never moves to a larger number, and nothing is raised above the smallest pin.
+    if ((pack.pinned && pack.priority !== null && m.priority > pack.priority) || (floor !== undefined && m.priority < floor && action.class === "raise")) escalate.push(action);
     else accepted.push(action);
   }
   return { accepted, refused, escalate };
@@ -785,7 +810,7 @@ function pinEscalation(a: QueueJudgeAction, floor: boolean): Escalation {
   };
 }
 
-export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick<GardenerDeps, "log" | "escalate">): Promise<QueueJudgeInventory> {
+export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick<GardenerDeps, "log" | "escalate" | "closeIssue">): Promise<QueueJudgeInventory> {
   const plan = sources.plan();
   if (plan.open.length === 0) return emptyInventory("empty-queue", 0);
   const now = sources.clock.date();
@@ -889,6 +914,21 @@ export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick
   }
   for (const a of shadowed) deps.log(QUEUE_JUDGE_PREDICTION_STEP, predictionRow(a, bound, undefined, true));
 
+  // 5a. An open floor escalation the corrected rule admits is closed by the judge that opened it.
+  // The daemon wires the gardener's own `deps.closeIssue`; absent, the sources' lazy default (escalate.ts's port) closes it.
+  const closeIssue = deps.closeIssue ?? sources.closeIssue;
+  if (closeIssue) {
+    for (const r of admittedFloorEscalations(own, packs)) {
+      const url = String(r.issue_url);
+      try {
+        await closeIssue(url, `The queue judge's smallest-pin floor holds only a proposal that makes a task more urgent than it is; ${String(r.task_id)} ${String(r.from)} -> ${String(r.to)} lowers its urgency, so the judge now judges it as a lower. Closing automatically.`);
+        deps.log(ESCALATION_CLOSED_STEP, { task_id: r.task_id, from: r.from, to: r.to, issue_url: url, reason: "the corrected floor rule admits a lower" });
+      } catch (e) {
+        deps.log(ESCALATION_CLOSE_FAILED_STEP, { task_id: r.task_id, issue_url: url, error: String((e as Error)?.message ?? e) });
+      }
+    }
+  }
+
   // 5. A proposal to move a pinned priority to a larger number is ONE escalation, never a write.
   const escalated: string[] = [];
   const already = new Set(own.filter((r) => r.step === ESCALATED_STEP).map((r) => `${String(r.task_id)}>${String(r.to)}@${String(r.evidence_signature)}`));
@@ -987,6 +1027,14 @@ export function buildQueueJudgeSources(deps: GardenerDeps, overrides: Partial<Qu
     credited: () => creditedCount(deps.stateDir),
     judgeText: () => Promise.reject(new Error("the queue judge's spawn is not wired")),
     promptWindow: () => ({ tokens: undefined, reason: "the queue judge's route window is not wired" }),
+    // The escalation issues port's close (escalate.ts), resolved lazily so the owner/repo read happens only when an issue closes.
+    closeIssue: async (url, comment) => {
+      const [{ ghIssueGatewayAsync }, { resolveOwnerRepoAtAsync }] = await Promise.all([import("./escalate.js"), import("./owner-repo.js")]);
+      const { owner, repo } = await resolveOwnerRepoAtAsync(deps.repoRoot);
+      const issues = ghIssueGatewayAsync(owner, repo);
+      if (!issues.closeWithComment) throw new Error("issue gateway cannot close issues");
+      await issues.closeWithComment(url, comment);
+    },
     ...overrides,
   };
   return sources;

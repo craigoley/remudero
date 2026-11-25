@@ -1,6 +1,7 @@
 import { settledSpansByClass } from "./cost-anomaly.js";
 import { restartCycleLedgerRows, restartCycleRow } from "./restart-cycle.js";
 import { createHash } from "node:crypto";
+import { GH_CHECK_IDENTITY_UNREADABLE } from "./poll-read-retry.js";
 import type { DaemonHandoff, HandoffAttempt } from "./daemon-handoff.js";
 import { join } from "node:path";
 import type { LedgerRecord } from "./retro.js";
@@ -2745,9 +2746,8 @@ function refillLaneLocalRejection(err: unknown): boolean {
   return ghLaneReadFailure(err) !== undefined || laneDeliveryFailure(err) !== undefined;
 }
 
-/** A run's check rollup could not name which workflow produced its same-named check runs: a read of GitHub that
- *  disagreed with itself, which ends that run's lane and never the daemon (2026-11-24 17:06Z cold start). */
-export const GH_CHECK_IDENTITY_UNREADABLE = "GH_CHECK_IDENTITY_UNREADABLE";
+// A run's unreadable check-run producer identity ends that run's lane and never the daemon (W1-T14710).
+export { GH_CHECK_IDENTITY_UNREADABLE };
 
 function ghLaneReadFailure(err: unknown): { detail: string } | undefined {
   if (typeof err !== "object" || err === null) return undefined;
@@ -4267,6 +4267,8 @@ export async function daemonBoot(
    *  the filesystem. Why: a shallow clone breaks every history read silently — log searches, follows and
    *  merge-base checks all stay plausible over a truncated corpus — and nothing asked (W1-T2332). */
   checkoutDepth?: { shallow: boolean; commitCount: number },
+  /** W1-T14757: the clock each boot sweep is timed on; defaults to the wall clock, a test seam. */
+  sweepClock: Pick<Clock, "now"> = systemClock,
 ): Promise<BootAssertion> {
   const assertion = assertCleanBoot(env, allowApiKey, nodeRuntime, declaredNodeVersion);
   log("daemon.boot", {
@@ -4278,8 +4280,18 @@ export async function daemonBoot(
     ...(bootHeadSha ? { head_sha: bootHeadSha } : {}),
     ...(checkoutDepth ? { checkout_shallow: checkoutDepth.shallow, checkout_commit_count: checkoutDepth.commitCount } : {}),
   });
+  // W1-T14757: each sweep's time, so a slow boot names the sweep that held its first tick.
+  const sweepsMs: Record<string, number> = {};
+  const sweepsStartMs = sweepClock.now();
+  let sweepMarkMs = sweepsStartMs;
+  const sweepDone = (name: string): void => {
+    const atMs = sweepClock.now();
+    sweepsMs[`${name}_ms`] = atMs - sweepMarkMs;
+    sweepMarkMs = atMs;
+  };
   // W1-T9754/W1-T13437: the helper starts while this process is small, unless the switch is "off"; one row either way.
   bootSpawnHelper(log, env, "daemon.spawn_helper");
+  sweepDone("spawn_helper");
   // The boot-rate invariant: the shape-not-cause check. Logged either way, so the invariant's own
   // pass or fail is part of the boot record, not only its breaches (W1-T215).
   if (crashLoopCheck) {
@@ -4313,6 +4325,7 @@ export async function daemonBoot(
       if (verdict.breached) crashLoopCheck.onBreach(verdict);
     }
   }
+  sweepDone("crashloop_check");
   // The boot-time worker-keychain unlock, explicit and ledgered, so the credential store comes up as
   // a named boot step rather than as a side effect of unlocking the operator's login keychain. A
   // failure is ledgered with its credential-named class and the boot continues: each spawn re-runs
@@ -4333,10 +4346,12 @@ export async function daemonBoot(
       });
     }
   }
+  sweepDone("worker_keychain");
   if (sweepTmp) {
     const swept = sweepTmp();
     log("daemon.tmp_sweep", { removed: swept.removed.length, kept: swept.kept.length });
   }
+  sweepDone("tmp_sweep");
   // Stale in-flight locks (R-35). Purely an observability fix: lock acquisition already steals a dead
   // holder's lock, so nothing here unblocks dispatch. It exists because a stale lock is otherwise only
   // cleared by the next acquire of that same task, and a circuit-broken task is never re-dispatched,
@@ -4353,6 +4368,7 @@ export async function daemonBoot(
       unverifiable_foreign_host: swept.unverifiableForeignHost.length,
     });
   }
+  sweepDone("lock_sweep");
   // Resolve and log the real toolchain binary once at boot. A refusal is logged, never thrown onward:
   // the boot continues (T197, W1-T113 part i).
   if (resolveClaudeBin) {
@@ -4367,6 +4383,7 @@ export async function daemonBoot(
       });
     }
   }
+  sweepDone("claude_bin");
   // The boot-time half of the orphan sweep. A failure is logged, never thrown onward: the boot
   // continues rather than dying over a process-listing hiccup (W1-T117 part ii).
   if (sweepOrphanWorkers) {
@@ -4377,6 +4394,7 @@ export async function daemonBoot(
       log("daemon.orphan_sweep", { error: String((err as Error)?.message ?? err) });
     }
   }
+  sweepDone("orphan_sweep");
   // The boot-time half of the feedback-landing sweep. A failure is logged, never thrown onward: the
   // boot continues rather than dying over a git or GitHub hiccup (W1-T530 part ii).
   if (sweepFeedbackLanding) {
@@ -4391,6 +4409,11 @@ export async function daemonBoot(
       log("daemon.feedback_landing_sweep", { error: String((err as Error)?.message ?? err) });
     }
   }
+  sweepDone("feedback_landing_sweep");
+  // A boot handed no sweep has nothing to time, so it writes no row.
+  const sweptAny = [crashLoopCheck, unlockWorkerKeychain, sweepTmp, sweepLocks, resolveClaudeBin, sweepOrphanWorkers,
+    sweepFeedbackLanding].some((sweep) => sweep !== undefined);
+  if (sweptAny) log("daemon.boot_sweeps", { ...sweepsMs, total_ms: sweepClock.now() - sweepsStartMs });
   return assertion;
 }
 
@@ -4901,7 +4924,7 @@ export async function runDaemon(
       plan: Plan; isMerged: MergedSet; released?: ReadonlySet<string> } | undefined,
   };
   const noteLog: typeof emitLog = (step, fields) => {
-    if (noStart !== undefined && step !== "daemon.tick" && !step.startsWith("dispatch.no_start.")) noStart.lastStep = step;
+    if (noStart !== undefined && step !== "daemon.tick" && step !== "daemon.cycle_phases" && !step.startsWith("dispatch.no_start.")) noStart.lastStep = step;
     const cause = idleLaneCauseForStep(step, fields);
     if (cause !== undefined) {
       idleLaneTickCause = cause;
@@ -7932,6 +7955,18 @@ export async function runDaemon(
   let reservedForTargetJob: { origin: string } | undefined;
   const targetJobReserve = (): number => (reservedForTargetJob ? 1 : 0);
   const targetJobStallPaged = new Set<string>();
+  // W1-T14768: each iteration names how long each awaited stage held it, in one row written at the next tick. Measured
+  // 2026-11-24: one iteration ran 65.6 minutes with no row naming the stage it awaited, and a restart marker sat unread.
+  const cycleStages: Array<{ stage: string; ms: number }> = [];
+  let cycleStageName: string | undefined;
+  let cycleStageAtMs = 0;
+  let cycleStartedAtMs: number | undefined;
+  const cycleStage = (name: string | undefined): void => {
+    const atMs = daemonClock.now();
+    if (cycleStageName !== undefined) cycleStages.push({ stage: cycleStageName, ms: Math.max(0, atMs - cycleStageAtMs) });
+    cycleStageName = name;
+    cycleStageAtMs = atMs;
+  };
   for (;;) {
     tickLedgerActive = restartCyclePending;
     tickLedger = undefined;
@@ -7949,6 +7984,17 @@ export async function runDaemon(
     observeRestartCycle();
     recordNearLimitHeapSample(deps, "tick");
     if (tickMemory.sampled) startMemoryReadAfterRow(deps, log);
+    // W1-T14768: after the tick's memory read starts, which must follow its own tick row.
+    if (cycleStartedAtMs !== undefined) {
+      cycleStage(undefined);
+      const durations: Record<string, number> = {};
+      for (const { stage, ms } of cycleStages) durations[`${stage}_ms`] = (durations[`${stage}_ms`] ?? 0) + ms;
+      log("daemon.cycle_phases", { ...durations, total_ms: Math.max(0, cycleStageAtMs - cycleStartedAtMs),
+        stages: cycleStages.map(({ stage }) => stage) });
+      cycleStages.length = 0;
+    }
+    cycleStartedAtMs = daemonClock.now();
+    cycleStage("tick_head");
     const tickStartedAtMs = daemonClock.now();
     // W1-T11790: before STOP and PAUSE, so a recycle's own PAUSE (the 2026-11-08 shape) still sees an overrunning retro.
     retroWatch.observe(tickStartedAtMs);
@@ -8175,7 +8221,9 @@ export async function runDaemon(
     }
     // W1-T13681: the move-task tick, detached after this iteration's ops hold is read.
     startPlanTaskMoveTick(opsDispatchHoldReason);
+    cycleStage("refresh_merged");
     const isMerged = deps.refreshMergedAsync ? await deps.refreshMergedAsync(planForBatch) : deps.refreshMerged(planForBatch);
+    cycleStage("boot_review_and_gates");
     for (const taskId of pendingMergedCredit) {
       if (!isMerged(taskId)) continue;
       pendingMergedCredit.delete(taskId);
@@ -8441,8 +8489,10 @@ export async function runDaemon(
     const cadencesStartedAtMs = daemonClock.now();
     // W1-T9321: the three per-iteration sweeps (orphan, feedback landing, GitHub posture) share one slot,
     // `tickSweeps`; a tick that skips them behind the boot gate owes them to the due timer.
+    cycleStage("tick_sweeps");
     if (cadencesThisTick) await tickSweeps.run();
     else if (tickSweepsWired) tickSweeps.owe();
+    cycleStage("read_only_rungs");
 
     if (cadencesThisTick) {
       const running = readOnlyRungs.joined();
@@ -8488,7 +8538,9 @@ export async function runDaemon(
       // after it waits out the full staleness bound instead of re-probing seconds later. Stamped before
       // the guard below because an unreadable read is still an attempt (W1-T2565).
       headroomSampler.lastSampleMs = daemonClock.now();
+      cycleStage("read_usage");
       const snap = await deps.readUsage();
+      cycleStage("headroom");
       if (snap) {
         // A GOOD read clears the degraded-mode counter — only CONSECUTIVE
         // misses count toward escalation, not a lifetime total.
@@ -8744,6 +8796,7 @@ export async function runDaemon(
     if (noStart !== undefined && cadencesThisTick) {
       noStart.tick = { started: false, inFlight: children.size, admission: tickQueueAdmission, plan: planForBatch, isMerged };
     }
+    cycleStage("intake");
     let intakeHeld = false;
     if (cadencesThisTick) {
       const running = intakeRungs.joined();
@@ -8774,10 +8827,12 @@ export async function runDaemon(
     // no wait-and-continue: the gates above exist to REFUSE a dispatch, but the retro gates nothing and
     // only delayed reaching dispatch by a full poll interval (W1-T2265). Forensics: docs/forensics/daemon.md.
     // W1-T9321: one slot, `retroCadence`, so the due timer can pay a gated tick's owed run; a hold still ends the tick.
+    cycleStage("retro");
     if (cadencesThisTick && deps.checkRetroTrigger) {
       if (await retroCadence.run()) continue;
     } else if (deps.checkRetroTrigger) retroCadence.owe();
 
+    cycleStage("wipe_test");
     let wipeTestHeld = false;
     if (cadencesThisTick) {
       const running = wipeTestRung.joined();
@@ -8803,7 +8858,9 @@ export async function runDaemon(
     }
     if (wipeTestHeld) continue;
 
+    cycleStage("claim_sweep");
     if (deps.claimSweepSettled) await deps.claimSweepSettled;
+    cycleStage("selection");
     // Console "run" kick: a queued-row Run dispatches that task by id this cycle, ahead of the ordinary
     // ordering but still through the normal gate. A kicked id that is unknown, already merged, or refused
     // by {@link assertRunnable} is cleared and its named reason ledgered, never silently dropped. The
@@ -10123,6 +10180,7 @@ export async function runDaemon(
     };
     // Only these named phase boundaries are contained. Other logging keeps its existing contract.
     const phaseFaults: Array<{ phase: string; reason: unknown }> = [];
+    cycleStage("lanes");
     const admittedWork = runLanePool(admitted, (id, task) => {
       const startedAtMs = preparedStartTimes.get(id)!;
       const kick = forcedKick?.taskId === id ? forcedKick : undefined;
@@ -10180,6 +10238,7 @@ export async function runDaemon(
       } finally {
         // Even a phase-level logging failure cannot abandon promises the pool already owns.
         poolOutcome = await admittedWork;
+        cycleStage("settle");
         settleMarkMs = daemonClock.now();
         // W1-T11129: the pool's last lane, and any a fault or detach retired, never reaches refillLane: close its interval.
         // Never throws: readLaneCpu reads an unreadable or throwing counter as unread, and the rest is pure.

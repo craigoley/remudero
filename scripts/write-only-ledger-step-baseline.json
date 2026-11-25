@@ -1416,6 +1416,8 @@
     "worktree_retire.would_retire"
   ],
   "recordOnly": {
+    "queue_judge.escalation_closed": "W1-T14651: an audit row for the operator that the judge closed one of its own floor escalations the corrected rule admits; the closed issue carries the state, so nothing re-reads the row.",
+    "queue_judge.escalation_close_failed": "W1-T14651: a diagnostic for a failed close of a floor escalation; it records the error and the next pass retries the close, so nothing re-reads the row.",
     "dispatch.expedited": "W1-T14654: an audit row for the operator, one per expedited start with its reason and lane share; nothing decides on it",
     "review.proof_execution": "W1-T14036: phase-time measurement rows read by operator analysis, not by code",
     "review.proof_phase": "W1-T14036: phase-time measurement rows read by operator analysis, not by code",
@@ -1456,6 +1458,7 @@
     "task_files_landing.gate_findings_unread": "A receipt that the landing held on an unread destination-gate log and escalated once for that head; the once-per-head record is the landing's state file, never this row.",
     "sre_lane.unresolved_escalated": "W1-T14611: the marker of the page for a primary daemon whose SRE lane could not find its instance; only its own escalation pair in escalation-catalogue.ts reads it, to page once and to find the issue to close.",
     "sre_lane.unresolved_cleared": "W1-T14611: the marker that the SRE lane started again and closed that page; only its own escalation pair in escalation-catalogue.ts reads it, so a closed page is not closed twice.",
-    "selector-shadow.edge_unreplayable": "W1-T13526: the diagnostic row for a miss whose changed paths stayed unread (no base, an unreadable compare or the per-pass read bound spent); it files nothing and stores no edge, and an operator reads it to see why a miss was not filed."
+    "selector-shadow.edge_unreplayable": "W1-T13526: the diagnostic row for a miss whose changed paths stayed unread (no base, an unreadable compare or the per-pass read bound spent); it files nothing and stores no edge, and an operator reads it to see why a miss was not filed.",
+    "product_plan.checkout_left": "W1-T14723: an audit row naming why a product re-plan's checkout was left behind the live head; the refusal body carries the same reason to the Console"
   }
 }

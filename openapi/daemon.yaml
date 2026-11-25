@@ -2206,6 +2206,10 @@ components:
             - project_not_found
             - project_conflict
             - not_configured
+        detail:
+          type: string
+          maxLength: 1024
+          description: Why, in words, when the code alone leaves the operator nothing to act on (W1-T14723).
     ProductBuildCommand:
       type: object
       additionalProperties: false

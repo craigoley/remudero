@@ -121,7 +121,8 @@ test("managed product checkout refuses missing unreadable foreign and stale repo
     scenario.change(f);
     const ahead = scenario.name === "stale" ? git(f.checkout, "rev-parse", "HEAD") : undefined;
     const result = await f.service().execute(actor, f.command());
-    assert.deepEqual(result, { ok: false, code: scenario.code }, scenario.name);
+    assert.equal(result.ok, false, scenario.name);
+    assert.equal(result.code, scenario.code, scenario.name);
     // W1-T14301: only a checkout BEHIND the live head moves; one ahead of it keeps its own head and still refuses.
     if (ahead !== undefined) assert.equal(git(f.checkout, "rev-parse", "HEAD"), ahead, "an ahead checkout is never moved");
     assert.equal(f.calls.length, 0, scenario.name);

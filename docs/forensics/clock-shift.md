@@ -69,3 +69,12 @@ still matters.
       // resolving to exactly what they say, or a literal would shift along with the clock and the
       // probe would answer nothing.
 ```
+
+## Isolation first (W1-T14780)
+
+The usage line above, quoted from an older revision, omitted the test preload. A run that followed it, without
+`--test` too, had neither live-ledger guard signal (`RMD_TEST_LIVE_DENY_ROOT`, `NODE_TEST_CONTEXT`), and suites
+that call `main()` appended five `cli.invoked` rows dated 2027-10-14 to the live ledger. A non-zero shift now
+refuses to load unless `test/setup/tmp-hygiene.ts` ran first. The command is:
+
+    FK_SHIFT_DAYS=400 node --test --import tsx --import ./test/setup/tmp-hygiene.ts --import scripts/clock-shift.mjs <file>

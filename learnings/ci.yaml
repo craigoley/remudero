@@ -443,7 +443,8 @@
 
 - id: codeql-read-model-lane
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire codeql-read-model-lane
+  lifecycle: superseded
   files: [src/lib/ledger-projector.ts, src/lib/read-model-worker.ts, src/lib/board-projection.ts, src/lib/read-model-db.ts]
   error_signatures: ["CodeQL"]
   fact: >-
@@ -690,7 +691,8 @@
 
 - id: dispatch-function-owns-its-precondition
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire dispatch-function-owns-its-precondition
+  lifecycle: superseded
   files: [src/run-task.ts]
   fact: >-
     Put a dispatch precondition inside the function whose behavior it guards, so that function
@@ -701,7 +703,8 @@
 
 - id: stack-tip-merges-its-base
   subsystem: ci
-  lifecycle: active
+  # knowledge gardener: retire stack-tip-merges-its-base
+  lifecycle: superseded
   files:
     - "scripts/*"
     - "plan/tasks.d/**"
