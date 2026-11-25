@@ -2,10 +2,10 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import {
   GITHUB_WAKE_SLOW_MS,
@@ -231,10 +231,12 @@ test("W1-T14808: each delivery's own wait runs from the turn before the last com
  *  earlier one answers, and that wait is not serve's to measure. */
 const BURST_CLIENT = `
 const { createHmac } = require("node:crypto");
+const { writeFileSync } = require("node:fs");
 const net = require("node:net");
 const [url, ...ids] = process.argv.slice(1);
 const { hostname, port, pathname } = new URL(url);
 process.stdin.once("data", () => {
+  let unwritten = ids.length;
   for (const id of ids) {
     const body = JSON.stringify({ action: "completed", repository: { full_name: ${JSON.stringify(REPOSITORY)} } });
     const sig = "sha256=" + createHmac("sha256", process.env.W1_T14808_SECRET).update(body, "utf8").digest("hex");
@@ -242,7 +244,10 @@ process.stdin.once("data", () => {
       "content-length: " + Buffer.byteLength(body), "connection: close", "x-github-delivery: " + id,
       "x-github-event: check_run", "x-hub-signature-256: " + sig].join("\\r\\n");
     let reply = "";
-    const socket = net.connect(Number(port), hostname, () => socket.write(head + "\\r\\n\\r\\n" + body));
+    // Once every request is in the kernel, mark it, so the parent's stall starts only after they all queued.
+    const socket = net.connect(Number(port), hostname, () => socket.write(head + "\\r\\n\\r\\n" + body, () => {
+      if (--unwritten === 0 && process.env.W1_T14808_SENT) writeFileSync(process.env.W1_T14808_SENT, "");
+    }));
     socket.on("data", (chunk) => void (reply += chunk));
     socket.on("close", () => process.stdout.write(id + ":" + reply.split(" ")[1] + "\\n"));
   }
@@ -250,25 +255,37 @@ process.stdin.once("data", () => {
 process.stdout.write("ready\\n");
 `;
 
+/** Block the event loop until the child marks every request written (bounded), then for `ms` more: the child's
+ *  requests are then queued behind this stall however slowly a loaded host schedules the child. */
+function stallAfterSent(sent: string, ms: number): void {
+  const deadline = Date.now() + 30_000;
+  while (!existsSync(sent)) {
+    if (Date.now() > deadline) throw new Error("the burst client never wrote its requests");
+  }
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    // Block the event loop on purpose.
+  }
+}
+
 test("W1-T14808: a burst queued behind a real event-loop stall writes a slow row for every delivery", async () => {
   const timings = createWakeTimings();
   const ids = ["b1", "b2", "b3", "b4", "b5"];
   const rows = await withRoute({ timings, slowMs: 1_000 }, async (_send, _rows, url) => {
+    const sent = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14808-sent-`)), "sent");
     const child = spawn(process.execPath, ["-e", BURST_CLIENT, url, ...ids], {
-      env: { ...process.env, W1_T14808_SECRET: SECRET },
+      env: { ...process.env, W1_T14808_SECRET: SECRET, W1_T14808_SENT: sent },
       stdio: ["pipe", "pipe", "inherit"],
     });
     let out = "";
     const done = new Promise<void>((resolve) => child.once("exit", () => resolve()));
     await new Promise<void>((resolve) => child.stdout!.once("data", () => resolve()));
     child.stdout!.on("data", (chunk: Buffer) => void (out += chunk.toString()));
-    // Stall at once, so the five requests the child writes now all queue behind the stall.
+    // Stall at once, and past the moment the child has written all five requests, so they all queue behind it.
     child.stdin!.end("go\n");
-    const until = Date.now() + 1_600;
-    while (Date.now() < until) {
-      // Block the event loop on purpose.
-    }
+    stallAfterSent(sent, 1_600);
     await done;
+    rmSync(dirname(sent), { recursive: true, force: true });
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(out.trim().split("\n").sort().join(","), ids.map((id) => `${id}:202`).join(","));
   });
@@ -281,8 +298,9 @@ test("W1-T14808: a burst queued behind a real event-loop stall writes a slow row
 test("W1-T14808: a delivery queued through two back-to-back stalls is charged both", async () => {
   const timings = createWakeTimings();
   const rows = await withRoute({ timings, slowMs: 1_000 }, async (_send, _rows, url) => {
+    const sent = join(mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14808-sent-`)), "sent");
     const child = spawn(process.execPath, ["-e", BURST_CLIENT, url, "pair-1"], {
-      env: { ...process.env, W1_T14808_SECRET: SECRET },
+      env: { ...process.env, W1_T14808_SECRET: SECRET, W1_T14808_SENT: sent },
       stdio: ["pipe", "pipe", "inherit"],
     });
     const done = new Promise<void>((resolve) => child.once("exit", () => resolve()));
@@ -297,10 +315,11 @@ test("W1-T14808: a delivery queued through two back-to-back stalls is charged bo
     };
     setTimeout(() => {
       child.stdin!.end("go\n");
-      block();
+      stallAfterSent(sent, 700);
     }, 5);
     setTimeout(block, 5);
     await done;
+    rmSync(dirname(sent), { recursive: true, force: true });
   });
   const slow = rows.filter((r) => r.step === "github.wake.slow");
   assert.deepEqual(slow.map((r) => r.delivery_id), ["pair-1"]);
