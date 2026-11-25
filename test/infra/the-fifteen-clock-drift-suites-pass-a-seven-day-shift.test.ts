@@ -3,11 +3,13 @@
  * future. Each now takes its "now" from the clock the code under test reads: this process's clock for in-process
  * code, the host clock for a child whose clock the shift preload never moves, or the same shift for a child that
  * models the same host. This suite runs each of the 15 as its own child, exactly as the sweep's runner does, at
- * the 7-day shift that first named them and at the sweep's own shift, so none of them can drift back unseen.
+ * the 7-day shift that first named them and at the sweep's own shift, so none of them can drift back unseen. Each
+ * child runs only that suite's drifting tests: whole-suite reruns took ~335 s per shift and overran CI's
+ * flake-screen, which reruns an added suite several times at once.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,76 +27,163 @@ const { classifySweep, SUITE_PRELOAD, suiteName, SWEEP_SHIFT_DAYS } = (await imp
   SWEEP_SHIFT_DAYS: number;
 };
 
-const FIFTEEN = [
-  "test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts",
-  "test/console-api/serve/product-routes.test.ts",
-  "test/daemon/a-paused-instance-says-when-it-has-drained.test.ts",
-  "test/daemon/a-worktree-janitor-reports-what-it-would-retire.test.ts",
-  "test/daemon/repository-maintenance-escalation-heals-itself.test.ts",
-  "test/deploy/preserve-retire-keep-declarations-hold-every-action.test.ts",
-  "test/dispatch/product-plan-operation.test.ts",
-  "test/expiring-fixture-census.test.ts",
-  "test/fix-lane/rmd-fix-never-reports-a-round-fixed-when-its-progress-judgment-failed.test.ts",
-  "test/github/every-mac-session-reads-github-through-one-broker.test.ts",
-  "test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts",
-  "test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts",
-  "test/sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views.test.ts",
-  "test/sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views.test.ts",
-  "test/sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store.test.ts",
-] as const;
+/**
+ * The drifting tests of each suite: every test that failed at this task's merge base (5b1ca1b321) under the 7-day
+ * shift, the sweep's 400-day shift or both, and passed there unshifted. Each child runs only these, by exact name,
+ * so the pin costs seconds, not the suites' ~335 s whole-file runtime, and every name must report its own `ok`.
+ * Slowest first (measured on the Mac), so the pool's last child is a short one.
+ * `bash4`: the test drives a ci.yml step body that calls `mapfile`, which macOS's /bin/bash 3.2 lacks, so it fails
+ * there at any clock; it runs wherever `bash` has `mapfile` (every CI runner).
+ */
+const DRIFTING: readonly { file: string; tests: readonly string[]; bash4?: readonly string[] }[] = [
+  // Failed at base only at +400 days.
+  { file: "test/sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views.test.ts", tests: [
+    "W1-T13831 criterion 3: with no fresh, clean, newer generation a pass with no scope reads its own views",
+  ] },
+  { file: "test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts", tests: [
+    "W1-T12790 criterion 1: a no_task landing awaits its 2 s preflight check, and a 50 ms timer keeps firing",
+    "W1-T12790 criterion 2: a grill landing awaits its 2 s preflight check, and a 50 ms timer keeps firing",
+    "W1-T12790 criterion 2: a private-home entry lands in its own repository through the async landing, and the timer keeps firing",
+  ] },
+  { file: "test/daemon/a-paused-instance-says-when-it-has-drained.test.ts", tests: [
+    "W1-T12939 criterion 3: the beat prints not-paused for an instance with no hold",
+    "W1-T12939 criterion 3: the beat never prints drained for an unreadable, stale or census-less ledger",
+  ] },
+  { file: "test/console-api/serve/product-routes.test.ts", tests: [
+    "W1-T10823: the served plan proposal reaches the maintained native handoff; served product proposal uses the verified managed checkout default",
+    "W1-T14388 criterion 1: the fixture child writes its rows only after the test has observed pending, however late the response is",
+  ] },
+  { file: "test/fix-lane/rmd-fix-never-reports-a-round-fixed-when-its-progress-judgment-failed.test.ts", tests: [
+    "W1-T12701 criterion 2: the verb refuses, never fixed, when the judge throws ProviderCapacityBlockedError",
+    "W1-T12701 criterion 3: the verb prints one no-round line with the provider cause, never dispatched",
+    "W1-T12701 criterion 4: a verb run whose rung wrote fix.dispatch still reads fixed and exits 0",
+  ] },
+  { file: "test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts", tests: [
+    "W1-T12755 criterion 6: through the real list read, a 403 rate limit on the second pass still admits the review",
+  ] },
+  { file: "test/sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views.test.ts", tests: [
+    "W1-T13709 criterion 2: a stale served generation uses the hook's own read and keeps its source",
+  ] },
+  { file: "test/dispatch/product-plan-operation.test.ts", tests: [
+    "W1-T10823: the real CLI launcher correlates the native plan brief across distinct PIDs",
+    "W1-T13875: a nonzero child exit preserves an opened proposal across resumes",
+    "W1-T13875: a resume of a refused hand-off reads no ledger evidence after keeping a proposal recovered from nonadjacent compacted rotations",
+  ] },
+  { file: "test/daemon/a-worktree-janitor-reports-what-it-would-retire.test.ts", tests: [
+    "W1-T11941 criterion 1: the roots come from the operator checkout's git worktree list, and each qualifying tree gets one would-retire row naming its reason",
+  ] },
+  // Failed at base only at +400 days.
+  { file: "test/github/every-mac-session-reads-github-through-one-broker.test.ts", tests: [
+    "W1-T10279: rmd gh prints what gh would, refuses writes, and needs a live broker to broker",
+  ] },
+  { file: "test/sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store.test.ts", tests: [
+    "a failed snapshot write preserves the terminal heads and the next build can publish",
+    "W1-T12271 criterion 3: same-size, same-mtime corruption holds warm and restarted dispatch",
+    "W1-T12271 criterion 3: cached rotation read EIO holds dispatch even when stat and R_OK succeed",
+  ] },
+  { file: "test/expiring-fixture-census.test.ts", tests: [
+    "W1-T14578: one batched shifted run measures each file it reads",
+  ] },
+  { file: "test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts", tests: [
+    "W1-T5892: an old event cannot make a 49-hour-old floor fresh at execution",
+    "W1-T5892: the CLI writes the decision for the shard and refuses an altered pin",
+    "W1-T5892: the final merge group is full when live selection is enabled and flag-off stays unchanged",
+    "W1-T5892: an admitted floor becoming unreadable or split refuses without replacement",
+    "W1-T5892: builtin consumers reject absent admission identities and missing shard receipts",
+  ], bash4: [
+    "W1-T5892: sparse admission shares the producers' policy identity without dependencies",
+    "W1-T5892: one admission precedes all shards and every consumer uses its published pin",
+    "W1-T5892: refused admission and publication failure make every shard full with one named reason",
+  ] },
+  { file: "test/daemon/repository-maintenance-escalation-heals-itself.test.ts", tests: [
+    "W1-T10750: the gc prune window is derived from the fleet live state",
+  ] },
+  { file: "test/deploy/preserve-retire-keep-declarations-hold-every-action.test.ts", tests: [
+    "a dry run never prunes worktree records, and an apply run still prunes an unmarked store's stale record",
+  ] },
+];
+const FIFTEEN = DRIFTING.map((suite) => suite.file);
+assert.equal(new Set(FIFTEEN).size, 15, "fifteen distinct suites");
+const BASH_HAS_MAPFILE = spawnSync("bash", ["-c", "type mapfile"], { stdio: "ignore" }).status === 0;
+/** The names this host can run: the bash-4 tests only where `bash` has `mapfile`. */
+const pinned = (suite: (typeof DRIFTING)[number]) => [...suite.tests, ...(BASH_HAS_MAPFILE ? suite.bash4 ?? [] : [])];
+const exactName = (name: string) => `^${name.replace(/[\\^$.*+?()[\]{}|/]/g, "\\$&")}$`;
 
-type Run = { failed: boolean; output: string };
+type Run = { failed: boolean; output: string; names: readonly string[] };
 
 function withoutTestContext(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const { NODE_TEST_CONTEXT: _context, ...rest } = env;
   return rest;
 }
 
-/** One suite as the sweep's `runSuite` runs it: TAP, the test preload, the shift preload and a private TMPDIR. */
-function runShifted(file: string, days: number): Promise<Run> {
+/**
+ * One suite's drifting tests as the sweep's `runSuite` runs the suite: TAP, the test preload, the shift preload and a
+ * private TMPDIR, plus one exact `--test-name-pattern` per pinned test.
+ */
+function runShifted(suite: (typeof DRIFTING)[number], days: number): Promise<Run> {
   const isolatedTmp = mkdtempSync(join(tmpdir(), "rmd-w1-t14786-"));
+  const names = pinned(suite);
   return new Promise((resolve) => {
     execFile(process.execPath,
-      ["--test", "--test-reporter=tap", "--import", "tsx", "--import", join(REPO_ROOT, SUITE_PRELOAD),
-        "--import", join(REPO_ROOT, "scripts", "clock-shift.mjs"), file],
-      { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
+      ["--test", "--test-reporter=tap", ...names.map((name) => `--test-name-pattern=${exactName(name)}`),
+        "--import", "tsx", "--import", join(REPO_ROOT, SUITE_PRELOAD),
+        "--import", join(REPO_ROOT, "scripts", "clock-shift.mjs"), suite.file],
+      { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 180_000,
         // Without NODE_TEST_CONTEXT the child reports its own TAP, as it does under the sweep's script runner.
         env: { ...withoutTestContext(process.env), TMPDIR: isolatedTmp, FK_SHIFT_DAYS: String(days) } },
       (error, stdout, stderr) => {
         rmSync(isolatedTmp, { recursive: true, force: true });
-        resolve({ failed: error !== null, output: `${stdout}${stderr}` });
+        resolve({ failed: error !== null, output: `${stdout}${stderr}`, names });
       });
   });
 }
 
-/** Every suite at one shift, a few children at a time. */
-async function runAll(days: number): Promise<Map<string, Run>> {
-  const results = new Map<string, Run>();
-  const queue = [...FIFTEEN];
+/**
+ * Every suite at both shifts through ONE pool of a few children, the 7-day runs queued first: the second test's
+ * children start while the first test's last ones finish, so the two tests cost about one pass of the pool.
+ */
+function runShifts(shifts: readonly number[]): Map<number, Promise<Map<string, Run>>> {
+  const queue = shifts.flatMap((days) => DRIFTING.map((suite) => ({ suite, days })));
+  const results = new Map(shifts.map((days) => [days, new Map<string, Run>()]));
+  const settled = new Map(shifts.map((days) => {
+    let resolve!: (runs: Map<string, Run>) => void;
+    return [days, { promise: new Promise<Map<string, Run>>((r) => { resolve = r; }), resolve }];
+  }));
   const workers = Array.from({ length: Math.max(1, Math.min(4, availableParallelism() - 1)) }, async () => {
-    for (let file = queue.shift(); file !== undefined; file = queue.shift()) results.set(file, await runShifted(file, days));
+    for (let job = queue.shift(); job !== undefined; job = queue.shift()) {
+      const runs = results.get(job.days)!;
+      runs.set(job.suite.file, await runShifted(job.suite, job.days));
+      if (runs.size === DRIFTING.length) settled.get(job.days)!.resolve(runs);
+    }
   });
-  await Promise.all(workers);
-  return results;
+  void Promise.all(workers);
+  return new Map([...settled].map(([days, { promise }]) => [days, promise]));
 }
+let pool: Map<number, Promise<Map<string, Run>>> | undefined;
+const runAll = (days: number) => (pool ??= runShifts([7, SWEEP_SHIFT_DAYS])).get(days)!;
 
-/** A run counts only when its own TAP summary says it ran tests and failed none. */
+/**
+ * A run counts only when its own TAP summary says it ran tests and failed none, and every pinned name reported its
+ * own `ok` line: a name that matched nothing would otherwise pass by not running.
+ */
 function verdict(run: Run): string {
   const tests = Number(/^# tests (\d+)$/m.exec(run.output)?.[1] ?? 0);
   const fails = Number(/^# fail (\d+)$/m.exec(run.output)?.[1] ?? -1);
-  if (!run.failed && tests > 0 && fails === 0) return "pass";
+  const passed = new Set(run.output.split("\n").map((line) => /^\s*ok \d+ - (.*)$/.exec(line)?.[1]).filter((name) => name !== undefined));
+  const unrun = run.names.filter((name) => !passed.has(name));
+  if (!run.failed && tests >= run.names.length && fails === 0 && unrun.length === 0) return "pass";
   const notOk = run.output.split("\n").filter((line) => /^\s*not ok /.test(line)).slice(0, 3).join(" | ");
-  return `fail (tests ${tests}, fail ${fails}${notOk ? `: ${notOk}` : ""})`;
+  return `fail (tests ${tests}, fail ${fails}${notOk ? `: ${notOk}` : ""}${unrun.length ? `; no ok for ${unrun.length} pinned` : ""})`;
 }
 
-test("W1-T14786 the fifteen clock drift suites pass under a seven day clock shift", { timeout: 1_800_000 }, async () => {
+test("W1-T14786 the fifteen clock drift suites pass under a seven day clock shift", { timeout: 300_000 }, async () => {
   const results = await runAll(7);
   assert.equal(results.size, FIFTEEN.length);
   const failing = [...results].map(([file, run]) => [file, verdict(run)]).filter(([, v]) => v !== "pass");
   assert.deepEqual(failing, [], "every suite passes 7 days from now");
 });
 
-test("W1-T14786 the clock sweep reports no new drift for the fifteen suites", { timeout: 1_800_000 }, async () => {
+test("W1-T14786 the clock sweep reports no new drift for the fifteen suites", { timeout: 300_000 }, async () => {
   const results = await runAll(SWEEP_SHIFT_DAYS);
   // Positive control: a child that never reported its own summary would read as "not failed" to the classifier.
   assert.deepEqual([...results].map(([file, run]) => [file, verdict(run)]).filter(([, v]) => v !== "pass"), [],
