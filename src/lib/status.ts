@@ -413,6 +413,10 @@ export interface DeriveDeps {
   /** W1-T3144/W1-T4465: observe projectPlan's complete open batch; undefined=failed, omitted=unused.
    *  Full PrRef[] lets admission classify ownership from the SAME snapshot without a second fetch. */
   observeOpenPrCount?: (openPrs: readonly PrRef[] | undefined) => void;
+  /** W1-T14644: told once per pass where its time went (see {@link ProjectPlanPhases}); omitted means no phase is clocked. */
+  observePhases?: (phases: ProjectPlanPhases) => void;
+  /** W1-T14644: the phase clock, in milliseconds; `performance.now()` by default, injectable so a test can drive it. */
+  phaseClock?: () => number;
   /** LIVENESS BOUND (W1-T179): tolerated ledger silence for unresolved dispatches absent an open PR; injectable. */
   livenessBoundMs?: number;
   /** W1-T2392: id -> prose-naming merged PRs, built once from projectPlan's existing list (W1-T257 counts
@@ -4237,6 +4241,23 @@ function planRevertRestoration(plan: Plan): NonNullable<DeriveDeps["revertRestor
   };
 }
 
+/** W1-T14644: one phase of a projection pass, its elapsed milliseconds and the records it handled. */
+export interface ProjectPlanPhase { ms: number; records: number }
+
+/**
+ * W1-T14644: where one {@link projectPlan} pass spent its time, the answer to "what did the refreshMerged probe wait for".
+ * `ledger_credit_reads`: the ledger read, its index, the credit store and override load (records: ledger rows + credit
+ * store entries). `credited_merged`: deriving the tasks that came out merged (records: those tasks). `open`: deriving
+ * every other task (records: those tasks). `github_reads`: the batched merged and open listings (records: PR rows
+ * returned). A per-task GitHub fallback read inside a derivation is counted in the derivation phase that made it.
+ */
+export interface ProjectPlanPhases {
+  ledger_credit_reads: ProjectPlanPhase;
+  credited_merged: ProjectPlanPhase;
+  open: ProjectPlanPhase;
+  github_reads: ProjectPlanPhase;
+}
+
 /** Derive every task in a plan and cache the projection to `cachePath` (state/status.json). Returns a taskId ->
  *  projection map. Writes ONLY the cache. */
 export function projectPlan(
@@ -4253,6 +4274,8 @@ export function projectPlan(
       effectiveDeps = { ...deps, previousProjection: (taskId) => previousByTaskId.get(taskId) };
     }
   }
+  const phaseNow = effectiveDeps.observePhases ? (effectiveDeps.phaseClock ?? (() => performance.now())) : undefined;
+  const phaseStart = phaseNow?.() ?? 0;
   // READ THE LEDGER ONCE (W1-T187): `deriveStatus` parses the WHOLE ledger per call and the loop below calls it
   // once PER TASK — clocked at 5-8s per projection against the console's <2s budget. The path cannot change
   // mid-loop, so it is parsed once and every task is handed the SAME array.
@@ -4286,11 +4309,16 @@ export function projectPlan(
       creditStoreLive = store;
     },
   };
+  const readsEndedAt = phaseNow?.() ?? 0;
+  let githubReadMs = 0;
+  let githubReadRecords = 0;
   // BATCHED rung (c2) CORROBORATION (W1-T257): the per-task corroboration fires for EVERY uncredited task on
   // EVERY projection — the 07-23 GraphQL-exhaustion multiplier. Fetch every merged PR's head ref ONCE and match
   // CLIENT-SIDE, on the STRUCTURED ref. A FAILED batch yields `null` for every task, so derivation falls back
   // per-task and, failing that, W1-T119 defers.
+  const mergedReadAt = phaseNow?.() ?? 0;
   const allMerged = effectiveDeps.github.listMergedHeadBranches?.();
+  if (phaseNow) { githubReadMs += phaseNow() - mergedReadAt; githubReadRecords += allMerged?.length ?? 0; }
   if (allMerged !== undefined) {
     let byTask: Map<string, PrRef[]> | null = null;
     if (allMerged !== null) {
@@ -4325,7 +4353,9 @@ export function projectPlan(
   // BATCHED rung (c3) CORROBORATION (W1-T377) — the same batch-once shape, over the OPEN slice of the SAME
   // fetch. Free on `buildBatchedGithub`; one extra list read on `ghGateway`. A FAILED read yields `null` for
   // every task, so the rung skips and W1-T119 does the deferring — never a false "no open PR".
+  const openReadAt = phaseNow?.() ?? 0;
   const allOpen = effectiveDeps.github.listOpenHeadBranches?.();
+  if (phaseNow) { githubReadMs += phaseNow() - openReadAt; githubReadRecords += allOpen?.length ?? 0; }
   if (allOpen !== undefined) {
     // W1-T3144: one board read, two consumers. Dispatch's WIP governor needs every open PR, while
     // the projection below intentionally indexes only plan tasks. Hand the already-fetched batch
@@ -4354,14 +4384,18 @@ export function projectPlan(
     openForSiblings = allOpen ?? undefined;
   }
   const byId = new Map<string, StatusProjection>();
+  const creditedMergedPhase: ProjectPlanPhase = { ms: 0, records: 0 };
+  const openPhase: ProjectPlanPhase = { ms: 0, records: 0 };
   for (const task of plan.tasks) {
     // {@link DeriveDeps.reuseProjection} — absent by default, so this is a no-op for every
     // caller that does not opt in.
     const reused = effectiveDeps.reuseProjection?.(task);
     if (reused !== undefined) {
       byId.set(task.id, reused);
+      if (phaseNow) (reused.merged ? creditedMergedPhase : openPhase).records++;
       continue;
     }
+    const deriveStartedAt = phaseNow?.() ?? 0;
     const p = deriveStatus(task, effectiveDeps);
     // W1-T2397: computed HERE rather than inside `deriveStatus` so it can never be mistaken for a precedence
     // input — attached after the projection is decided, and read only by a log.
@@ -4370,6 +4404,20 @@ export function projectPlan(
       if (sib) p.openSiblingBuild = sib;
     }
     byId.set(task.id, p);
+    if (phaseNow) {
+      const phase = p.merged ? creditedMergedPhase : openPhase;
+      phase.ms += phaseNow() - deriveStartedAt;
+      phase.records++;
+    }
+  }
+  if (phaseNow) {
+    const round = (ms: number) => Math.max(0, Math.round(ms * 1000) / 1000);
+    effectiveDeps.observePhases?.({
+      ledger_credit_reads: { ms: round(readsEndedAt - phaseStart), records: ledgerLinesOnce.length + Object.keys(creditStoreAtStart).length },
+      credited_merged: { ms: round(creditedMergedPhase.ms), records: creditedMergedPhase.records },
+      open: { ms: round(openPhase.ms), records: openPhase.records },
+      github_reads: { ms: round(githubReadMs), records: githubReadRecords },
+    });
   }
   // W1-T951: ONE flush for the whole plan sweep, skipped entirely when nothing new was discovered — the common
   // case once a plan's credits are mostly durable, so a steady-state poll loop costs zero writes.

@@ -102,7 +102,7 @@ import {
   bootSweepDispatchClaimsAsync, dispatchClaimRef, realBootSweepHostProbe, releaseLandedDispatchClaims, listHeldDispatchClaims, claimMintedByRerun,
   type BootSweepInputs, type DispatchClaimReserverAsync,
 } from "../../lib/dispatch-claim.js";
-import { loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, planCreditOverridePath, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
+import { type ProjectPlanPhases, loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, planCreditOverridePath, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
 import { DEFAULT_SWEEP_POLICY, productionFixPressure, readIdleLightCadence, readObservedReviewMedianMs, withSweepTaskReaders, type OpenPrView } from "../../lib/sweep.js";
 import { startMainEntryWatch } from "../../lib/main-entry.js";
 import { createLiveSetKeeper, createPlanCopyBook, daemonHolderSource, observedPlanSync, startDaemonMemoryCensus } from "../../lib/daemon-memory-census.js";
@@ -2656,6 +2656,8 @@ export async function daemonCommand(
     const buildSweepLightHook: DaemonSweepLightHookBuilder = (...args) =>
       withSweepTaskReaders(sweepTaskReaders, (deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook)(...args));
     if (standby?.ports && standbyPromotion) logPromoted(standby.ports, standbyPromotion);
+    // W1-T14644: the latest refresh's projection phases, held until the selection timing row takes them.
+    let pendingRefreshMergedPhases: ProjectPlanPhases | undefined;
     const summary = await runDaemonFn(
       plan,
       {
@@ -2667,6 +2669,7 @@ export async function daemonCommand(
         refreshMerged,
         refreshMergedAsync: firstTickRead ? buildDaemonReadRefresher({
           read: firstTickRead, plan: () => activePlanRef.current, previous: () => lastProj,
+          observePhases: (phases: ProjectPlanPhases) => { pendingRefreshMergedPhases = phases; },
           invalidate: () => { tickReadGeneration = undefined; tickReadStartedAtMs = tickReadClock.now(); },
           publish: (snapshot: ReadGeneration<TickReadFacts>) => {
             tickReadGeneration = snapshot;
@@ -2679,6 +2682,7 @@ export async function daemonCommand(
           },
           ledgerPath, statusPath, log,
         }) : undefined,
+        takeRefreshMergedPhases: () => { const taken = pendingRefreshMergedPhases; pendingRefreshMergedPhases = undefined; return taken; },
         readLoopTelemetry: loopTelemetry.sample,
         readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId, footprint: daemonFootprint }),
         memoryGovernor: daemonMemoryGovernor,

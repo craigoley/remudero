@@ -162,7 +162,7 @@ import { checkDispatchGovernors, checkNewBuildReservation, governorDeferPayload,
 import { assertRunnable, readTaskPrecondition, PlanError, TaskAdmissionError, type MergedResolver, type Plan, type Task, type TaskInputAnswer } from "./plan.js";
 import { composeSecondaryPlan, compositionHoldEdge, type CompositionHold, type CompositionRecordFailure } from "./task-lookup.js";
 import { resolveReleases, closedUnmergedRunBranchRefs, type DispatchFilterReason, type ReleaseResolution } from "./drain.js";
-import type { StatusProjection } from "./status.js";
+import type { ProjectPlanPhases, StatusProjection } from "./status.js";
 import { ENVIRONMENTAL_BLOCK_COOLDOWN_MS, INDEPENDENT_BLOCK_RELEASED_STEP, isEnvironmentalBlock, PRE_RESTORE_RUN_VERDICT_STAGES, type IndependentBlockRelease } from "./status.js";
 import { explainDispatchScore, openDependentFanout, type DispatchValueContext } from "./dispatch-value.js";
 import {
@@ -1598,6 +1598,8 @@ export interface DaemonDeps {
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: (plan?: Plan) => MergedSet;
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
+  /** W1-T14644: where the last refreshMerged read's projection spent its time, handed over once; undefined when it measured nothing. */
+  takeRefreshMergedPhases?: () => ProjectPlanPhases | undefined;
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
     sync_spawn_top?: unknown[] }) & { takeLagInterval?: (consumer?: string) => { top: unknown; sync_spawn_ms: number;
       by_caller?: unknown[]; unnamed_ms?: number; // W1-T9577: the interval's callers by total, and the rest
@@ -2444,6 +2446,7 @@ function dispatchSelectionTiming(
   const probeMs: Record<string, number> = {};
   let measuredMs = 0;
   let candidatesExamined = 0;
+  let refreshMergedPhases: ProjectPlanPhases | undefined;
   const elapsed = (since: number) => Math.max(0, clock.now() - since);
   const probe = <T>(name: string, read: () => T): T => {
     if (log === undefined) return read();
@@ -2470,6 +2473,8 @@ function dispatchSelectionTiming(
   return {
     probe,
     wrap,
+    /** W1-T14644: the refreshMerged probe's phases, written beside its total; undefined adds nothing. */
+    noteRefreshMergedPhases(phases: ProjectPlanPhases | undefined) { if (log !== undefined) refreshMergedPhases = phases; },
     selectionInputs(plan: Plan, isMerged: MergedSet, limit: number, opts: NextRunnableOpts) {
       if (log === undefined || limit <= 0) return { isMerged, opts, finish: () => {} };
       const started = clock.now();
@@ -2504,6 +2509,7 @@ function dispatchSelectionTiming(
       try {
         log?.("dispatch.selection_timing", {
           site, total_ms: elapsed(startedAt), candidates_examined: candidatesExamined, probe_ms: { ...probeMs },
+          ...(refreshMergedPhases ? { refresh_merged_phases: refreshMergedPhases } : {}),
         });
       } catch (error) { void error; /* A timing row is best-effort and cannot hold a lane. */ }
     },
@@ -9987,9 +9993,12 @@ export async function runDaemon(
             // W1-T5846: with the async port wired the merged set is read through it, never `refreshMerged`, whose
             // stale-generation fallback (W1-T5762) is a synchronous live read on the event loop. Only a deps
             // object that supplies no async port keeps the synchronous read, and its refill stays synchronous.
+            // W1-T14644: drop phases an earlier read left, so the row names only this probe's own.
+            deps.takeRefreshMergedPhases?.();
             if (deps.refreshMergedAsync) {
               return timing.probe("refreshMerged", () => deps.refreshMergedAsync!(refillPlan)).then(
                 (isMerged) => {
+                  timing.noteRefreshMergedPhases(deps.takeRefreshMergedPhases?.());
                   if (deps.readLiveState) return decideLive(refillPlan, isMerged);
                   return decideThenConclude({ plan: refillPlan, isMerged });
                 },
@@ -9997,6 +10006,7 @@ export async function runDaemon(
               );
             }
             const isMerged = timing.probe("refreshMerged", () => deps.refreshMerged(refillPlan));
+            timing.noteRefreshMergedPhases(deps.takeRefreshMergedPhases?.());
             if (deps.readLiveState) return decideLive(refillPlan, isMerged);
             return decideThenConclude({ plan: refillPlan, isMerged });
           } catch (e) {
