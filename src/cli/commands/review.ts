@@ -18,6 +18,7 @@ import { disarmOutcomeWithdrawn, disarmAutoMerge, armIfVerdictPermitsAsync, type
 import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/composition-root.js";
 import { writeReviewEvidenceRecord } from "../../lib/review-evidence-record.js";
 import { SPECIALIST_TOOLS } from "../../lib/specialist-panel.js";
+import { ReviewerToolCallCounter } from "../../lib/reviewer-tool-kinds.js";
 import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, reviewerHealthRowFields, reviewerShadowStep } from "../../lib/reviewer-health.js";
 import { isCalibrationCaseOf, reviewerModelPin } from "../../lib/reviewer-calibration.js";
 import { withTempDir } from "../../lib/tmp.js";
@@ -1664,10 +1665,15 @@ export async function runReview(host: ReviewCommandHost, args: {
         const reviewerSpawnWorker: typeof spawnWorker = (spawnArgs) => reviewerSpawn(withReceiptWork(spawnArgs, reviewedWork));
         // W1-T4615: assigned before the provider call, so every later stream event names the routed model.
         let reviewerAssignment: WorkerSelectionAssignment | undefined;
+        // W1-T14037: the proofs the orchestrator recorded at this head; a reviewer shell call that re-runs one is its own kind.
+        const recordedHeadProofs = () => preparedDecision.proofExecutions()
+          .filter((execution) => execution.cwd === args.headCheckoutDir).map(({ command, args: argv }) => ({ command, args: argv }));
+        let reviewerToolCalls = new ReviewerToolCallCounter(recordedHeadProofs);
         try {
           let priorSignal: string | undefined;
           for (;;) {
             reviewerAssignment = undefined as WorkerSelectionAssignment | undefined;
+            reviewerToolCalls = new ReviewerToolCallCounter(recordedHeadProofs);
             reviewer = args.account(
               await reviewerSpawnWorker({
                 cwd: snapshot.cwd,
@@ -1702,7 +1708,10 @@ export async function runReview(host: ReviewCommandHost, args: {
                 // a terminal verdict when this bound trips.
                 ...reviewerClockBound,
                 onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
-                streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
+                streamObserver: (event) => {
+                  reviewerToolCalls.observe(event);
+                  args.workerTelemetry?.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment));
+                },
                 promptTemplate,
                 prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
               }),
@@ -1746,6 +1755,8 @@ export async function runReview(host: ReviewCommandHost, args: {
           downgrades: semantic.filter((s) => s === false).length,
           // W1-T11428: criteria this reviewer could not inspect; W1-T11432 reads the provider beside it.
           unable: reviewerUnable.filter((u) => u !== undefined).length,
+          // W1-T14037: tool calls by kind; `proof_rerun` re-ran a proof the orchestrator already recorded at this head.
+          tool_calls: reviewerToolCalls.snapshot(),
           ...(args.excludeProviders?.length ? { exclude_providers: [...args.excludeProviders] } : {}),
           ...(reviewerAssignment?.routing.exclusion_unhonoured
             ? { exclusion_unhonoured: reviewerAssignment.routing.exclusion_unhonoured } : {}),
