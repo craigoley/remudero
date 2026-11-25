@@ -2429,10 +2429,9 @@ export async function daemonCommand(
     // if git is unavailable the field is omitted and the supervisor fails eager (one extra
     // restart at an idle gap), which is strictly safer than recording a wrong sha.
     daemonLoadedCodeSha,
-    // W1-T530: the boot-time half of the feedback-landing sweep, wired at last (appended after
-    // `bootHeadSha` per that param's own "no positional caller shifts" discipline) — see the
-    // shared `feedbackLandingRungs` defined above this call (its boot form, awaited since W1-T9695).
-    feedbackLandingRungs?.atBoot,
+    // W1-T14787: no boot-time feedback-landing pass. It is the per-poll pass, and the first tick owes that pass to the
+    // due-rungs timer, which lands it off the loop. Awaited here it held a promoted standby dark 34.6 s (2026-11-25).
+    undefined,
     // W1-T991: `undefined` ⇒ daemonBoot's own default (THIS process's real
     // process.execPath/version) — never overridden here, only in tests.
     undefined,
