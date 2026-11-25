@@ -17,6 +17,7 @@
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, ghInteractiveRead } from "./github-transport.js";
 import { GITHUB_WRITE_RESERVE_FRACTION } from "./github-installation-budget.js";
+import { ensureHeldTokenFresh } from "./github-app.js";
 
 export const FIELD_TRIALS_GITHUB_VERSION = "field-trials-github-v1" as const;
 
@@ -725,7 +726,13 @@ export async function ingestFieldTrialsGithub(fetch: GithubPageFetch, repos: rea
 }
 
 /** W1-T14778: the refresh's seam: {@link ghApiFetch} behind {@link rateLimitPacer}, over the same read. */
+/** W1-T14855: every read, the rate-limit probe included, first renews this process's held App token when it is near
+ *  expiry, and again after the pacer has waited for a reset, so a pass longer than the token's hour never presents a
+ *  dead one. With no armed loop (no GH_APP_*) `ensureHeldTokenFresh` is `not_armed` and nothing changes. */
 export function pacedGhApiFetch(read: (args: string[]) => Promise<string> = defaultGhApiRead,
-  pacer: Parameters<typeof rateLimitPacer>[1] = {}): GithubPageFetch {
-  return ghApiFetch(read, { beforeRead: rateLimitPacer(read, pacer), ...(pacer.sleep === undefined ? {} : { sleep: pacer.sleep }) });
+  pacer: Parameters<typeof rateLimitPacer>[1] & { freshToken?: () => Promise<unknown> } = {}): GithubPageFetch {
+  const fresh = pacer.freshToken ?? (() => ensureHeldTokenFresh());
+  const pace = rateLimitPacer(read, pacer);
+  const beforeRead = async (): Promise<void> => { await fresh(); await pace(); await fresh(); };
+  return ghApiFetch(read, { beforeRead, ...(pacer.sleep === undefined ? {} : { sleep: pacer.sleep }) });
 }

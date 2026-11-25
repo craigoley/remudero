@@ -226,6 +226,8 @@ export function opsGateShapeProblems(task: Json): string[] {
   return problems;
 }
 /** W1-T14424: a single-task record's ops-gate problems, read as the gate's YAML 1.1 reader reads its bytes. */
+/** W1-T14858: remudero-ops scripts/ops-gate.rb HISTORY_STATUSES — the statuses it judges as moved history. */
+export const OPS_GATE_HISTORY_STATUSES: ReadonlySet<string> = new Set(["merged", "done", "retired", "superseded", "closed", "dropped"]);
 function opsGateShapeRefused(original: Original): boolean {
   const raw: unknown = parseYaml(original.text, { version: "1.1", logLevel: "silent" });
   return !Array.isArray(raw) || raw.length !== 1 || !rubyHash(raw[0]) || opsGateShapeProblems(raw[0]).length > 0;
@@ -527,10 +529,49 @@ export async function selectPlanTaskMigration(
   const carried: CarriedTask[] = [];
   const carriedOf = (task: Task, path: string): CarriedTask => ({ id: task.id, path, files: [...(task.files ?? []), path] });
   let lookups = 0;
+  // W1-T14825: a record public records still name moves WITH them. Its group is the record plus every public record
+  // that names it through depends_on or superseded_by, transitively; a retired, merged or done namer moves as history.
+  // The whole group joins one batch or none of it does, so no removal ever leaves a public reference dangling.
+  const namers = new Map<string, Task[]>();
+  for (const t of pub.plan.tasks) for (const id of publicReferences([t])) (namers.get(id) ?? namers.set(id, []).get(id)!).push(t);
+  const inBatch = new Set<string>(), historyIds = new Set<string>();
+  const isHistory = (t: Task) => !OPEN_STATUSES.has(t.status) || t.retirement !== undefined;
+  /** Why `t` cannot join a group, or undefined; a history member skips only the open-work rules. */
+  const groupRefusal = (t: Task): string | undefined => {
+    const orig = pub.originals.get(t.id)!;
+    if (!isHistory(t) && knownMerged.has(t.id)) return "merged";
+    if (t.repo !== o.publicRepo.split("/")[1]) return "target_not_bound";
+    if (taskOwned(t.id, [...(t.files ?? []), orig.path], publicRefs, initial.open)) return "owned";
+    if (!orig.single || !orig.shard) return "not_single_shard";
+    if (alreadyMoved(orig)) return "already_moved";
+    // W1-T14858: the ops gate judges a record as moved history by its status alone, so a retired record whose status is
+    // still open-shaped (blocked, queued) is moved live work there and must pass the shape rules.
+    if (!OPS_GATE_HISTORY_STATUSES.has(t.status) && opsGateShapeRefused(orig)) return "ops_gate_shape";
+    if (!publicRefs.has(`refs/rmd-id/${t.id}`)) return "reservation_absent";
+    return undefined;
+  };
+  /** The record's group, or undefined when any member cannot move or would leave a superseded_by unresolved in ops. */
+  const groupOf = (lead: Task): Task[] | undefined => {
+    const group = new Map<string, Task>([[lead.id, lead]]);
+    const queue = [lead];
+    while (queue.length > 0) {
+      for (const namer of namers.get(queue.shift()!.id) ?? []) {
+        if (group.has(namer.id) || inBatch.has(namer.id)) continue;
+        group.set(namer.id, namer);
+        queue.push(namer);
+      }
+    }
+    const members = [...group.values()];
+    if (members.some(m => m !== lead && groupRefusal(m) !== undefined)) return undefined;
+    const lands = (id: string) => group.has(id) || inBatch.has(id) || ops.plan.byId.has(id);
+    if (members.some(m => m.superseded_by !== undefined && !lands(m.superseded_by))) return undefined;
+    return members;
+  };
   for (const task of ordered) {
+    if (inBatch.has(task.id)) continue;
     const original = pub.originals.get(task.id)!;
     const reason = knownMerged.has(task.id) ? "merged" : task.repo !== o.publicRepo.split("/")[1] ? "target_not_bound" : taskOwned(task.id, [...(task.files ?? []), original.path], publicRefs, initial.open) ? "owned" :
-      publicPrerequisites.has(task.id) ? "public_dependants" : !original.single || !original.shard ? "not_single_shard" : alreadyMoved(original) ? "already_moved" : undefined;
+      publicPrerequisites.has(task.id) && groupOf(task) === undefined ? "public_dependants" : !original.single || !original.shard ? "not_single_shard" : alreadyMoved(original) ? "already_moved" : undefined;
     if (reason) { refused.push({ id: task.id, reason }); continue; }
     if (task.retirement !== undefined) {
       refused.push({ id: task.id, reason: "retired" });
@@ -544,23 +585,38 @@ export async function selectPlanTaskMigration(
       !publicRefs.has(`refs/rmd-id/${task.id}`) ? "reservation_absent" : undefined;
     if (unmovable) { refused.push({ id: task.id, reason: unmovable }); continue; }
     if (!control) return unknown("merge_credit_control_unreadable");
-    lookups++;
-    const checked = await readState(o, publicRefs, opsRefs, { id: task.id, control, reader });
-    const carrying = [...carried, carriedOf(task, original.path)];
-    stable(initial, checked, carrying); await judge(checked, carrying);
-    if (moveRefused(checked, task.id, original.blob)) { refused.push({ id: task.id, reason: "move_refused" }); continue; }
-    if (searchedMerged(checked, task.id, control)) { refused.push({ id: task.id, reason: "merged" }); continue; }
+    // W1-T14825: an unnamed record is a group of one, selected exactly as before.
+    const group = publicPrerequisites.has(task.id) ? groupOf(task)! : [task];
+    let groupRefused: string | undefined;
+    const carrying = [...carried];
+    for (const member of group) {
+      const memberOriginal = pub.originals.get(member.id)!;
+      lookups++;
+      const checked = await readState(o, publicRefs, opsRefs, { id: member.id, control, reader });
+      carrying.push(carriedOf(member, memberOriginal.path));
+      stable(initial, checked, carrying); await judge(checked, carrying);
+      if (moveRefused(checked, member.id, memberOriginal.blob)) { groupRefused = "move_refused"; break; }
+      // A merged or done record moves as history: its merge credit is what it records, not a reason to stay.
+      if (!isHistory(member) && searchedMerged(checked, member.id, control)) { groupRefused = "merged"; break; }
+    }
+    if (groupRefused) { refused.push({ id: task.id, reason: group.length > 1 ? `group_${groupRefused}` : groupRefused }); continue; }
+    const texts = group.map(member => pub.originals.get(member.id)!.text);
     // W1-T14368: the bounds judge the ops catalog this copy would produce, not the one it read. W1-T14345: with every
     // copy the batch already holds; a copy the catalog has no room for ends the batch, and refuses it only when alone.
     if (ops.size) {
-      try { judgeOpsBatch(ops.size, [...batch.map(member => String(member.yaml)), original.text], o.publicCommit, bounds); }
+      try { judgeOpsBatch(ops.size, [...batch.map(member => String(member.yaml)), ...texts], o.publicCommit, bounds); }
       catch (error) { if (batch.length === 0 || !(error instanceof PreviewUnknown)) throw error; break; }
     }
     // W1-T14714: a member whose receipts would carry a pull request past GitHub's body limit ends the batch; never alone.
-    const member = { id: task.id, path: original.path, blob: original.blob };
-    if (fits && batch.length > 0 && !fits([...batch.map(m => ({ id: String(m.id), path: String(m.sourcePath), blob: String(m.sourceBlob) })), member])) break;
-    carried.push(carriedOf(task, original.path));
-    batch.push({ id: task.id, sourcePath: original.path, sourceCommit: o.publicCommit, sourceBlob: original.blob, yaml: original.text, originalBytesBase64: Buffer.from(original.text).toString("base64"), prospectiveMovedFrom: `remudero@${o.publicCommit}` });
+    const members = group.map(member => { const orig = pub.originals.get(member.id)!; return { id: member.id, path: orig.path, blob: orig.blob }; });
+    if (fits && batch.length > 0 && !fits([...batch.map(m => ({ id: String(m.id), path: String(m.sourcePath), blob: String(m.sourceBlob) })), ...members])) break;
+    for (const member of group) {
+      const orig = pub.originals.get(member.id)!;
+      carried.push(carriedOf(member, orig.path));
+      inBatch.add(member.id);
+      if (isHistory(member)) historyIds.add(member.id);
+      batch.push({ id: member.id, sourcePath: orig.path, sourceCommit: o.publicCommit, sourceBlob: orig.blob, yaml: orig.text, originalBytesBase64: Buffer.from(orig.text).toString("base64"), prospectiveMovedFrom: `remudero@${o.publicCommit}` });
+    }
   }
   // Independently re-read selected ownership, both source heads and each selected task's API credit before answering.
   const finalPublic = await refs(o.publicRoot, o.publicRepo), finalOps = await refs(o.opsRoot, o.opsRepo);
@@ -568,7 +624,7 @@ export async function selectPlanTaskMigration(
     const last = await readState(o, finalPublic, finalOps, { id: member ? String(member.id) : undefined, control, reader });
     stable(initial, last, carried); await judge(last, carried);
     if (member && control) {
-      if (searchedMerged(last, String(member.id), control)) return unknown("candidate_credit_changed");
+      if (!historyIds.has(String(member.id)) && searchedMerged(last, String(member.id), control)) return unknown("candidate_credit_changed");
       const task = pub.plan.byId.get(String(member.id))!;
       if (taskOwned(task.id, [...(task.files ?? []), String(member.sourcePath)], finalPublic, last.open)) return unknown("ownership_changed");
     }

@@ -37,6 +37,7 @@ import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { quarantinedLedgerFingerprints } from "./field-trials-ledger-quarantine.js";
 import { loadConfig } from "./config.js";
 import { ghInteractiveRead } from "./github-transport.js";
+import { startInstallationTokenRefresh } from "./github-app.js";
 import { syncFieldNoteSiteImport, type FieldNoteExport, type SiteImportOutcome, type SiteRelease } from "./field-trials-site-import.js";
 import { BENCHMARK_PAID_PILOT_VERSION, loadPaidPilotProtocol } from "./benchmark-paid-pilot.js";
 import { parseRefreshSteps, recordFieldTrialsRefresh, refreshSection, type FieldTrialsRefresh, type RefreshStep } from "./field-trials-refresh.js";
@@ -292,9 +293,14 @@ export function unavailableLedger(reason: string): FieldTrialsLedgerRead {
     invalidTimestampRows: 0, unreadSources: 0, newestTs: null, rows: [] };
 }
 
+/** Milliseconds since `start` on the monotonic clock. */
+const monotonicSince = (start: number) => (): number => performance.now() - start;
+
 /** The audited three-form union: every form counted, exact replayed lines counted as duplicates once. */
 export async function readFieldTrialsLedger(stateDir: string, nowMs = systemClock.now(),
-  quarantine: ReadonlySet<string> = quarantinedLedgerFingerprints()): Promise<FieldTrialsLedgerRead> {
+  quarantine: ReadonlySet<string> = quarantinedLedgerFingerprints(),
+  /** W1-T14837: time since the read began, so a row the daemon appended during a long read is not future-dated. */
+  elapsedMs: () => number = monotonicSince(performance.now())): Promise<FieldTrialsLedgerRead> {
   let names: string[];
   try { names = readdirSync(stateDir); }
   catch {
@@ -329,8 +335,8 @@ export async function readFieldTrialsLedger(stateDir: string, nowMs = systemCloc
       const ts = iso(accepted.ts);
       if (ts === null) { invalidTimestampRows += 1; return; }
       // A stray clock-forward row cannot create a future cohort or advance the source watermark.
-      if (ts !== null && Date.parse(ts) > nowMs + 5 * 60_000) { futureRows += 1; return; }
-      if (ts !== null && (newestTs === null || ts > newestTs)) newestTs = ts;
+      if (Date.parse(ts) > nowMs + 5 * 60_000 + elapsedMs()) { futureRows += 1; return; }
+      if (newestTs === null || ts > newestTs) newestTs = ts;
       if (flowRelevant(accepted)) rows.push(projectFlowRow(accepted, fingerprint));
     },
   })) void row;
@@ -1555,6 +1561,8 @@ export interface FieldTrialsCommandInput {
   print?: (line: string) => void;
   printError?: (line: string) => void;
   fetch?: GithubPageFetch;
+  /** W1-T14855: the App token refresh loop a GitHub pass holds; absent, {@link startInstallationTokenRefresh}. */
+  startTokenRefresh?: typeof startInstallationTokenRefresh;
   readLedger?: (stateDir: string) => Promise<FieldTrialsLedgerRead>;
   resolveConfig?: () => { root: string; fleetRepos?: string[] };
   /** Read the GitHub comparison proving that the vendored accepting parser commit is on site main. */
@@ -1768,9 +1776,19 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
   const defaultLedgers = sourcePairs.size === 0 && ledgerPairs.size === 0 ? new Map([["core", join(config.root, "state")]]) : ledgerPairs;
   const githubPath = join(outDir, "field-trials-github-v1.json");
   const github = parseGithubStore(readJson(githubPath));
-  const githubPass = values.offline === true ? { state: "skipped" as const, asOf: nowIso, pagesRead: 0, repos: {} }
-    : await ingestFieldTrialsGithub(input.fetch ?? pacedGhApiFetch(), repos.map(([, repo]) => repo), github, nowIso, maxPages,
-      checkpointEvery(GITHUB_CHECKPOINT_MS, () => writeJsonAtomically(githubPath, github)));
+  // W1-T14855: the CLI preamble mints one token per process, and this pass can outlive its hour, so a GitHub pass
+  // holds a refreshed token for its whole length; every paced read renews it first when it is near expiry.
+  const renewal = values.offline === true ? undefined
+    : (input.startTokenRefresh ?? startInstallationTokenRefresh)({ log: (step, extra) => printError(`rmd: ${step} ${extra ? JSON.stringify(extra) : ""}`.trim()) });
+  let githubPass: FieldTrialsGithubPass;
+  try {
+    if (renewal?.armed) await renewal.ready;
+    githubPass = values.offline === true ? { state: "skipped" as const, asOf: nowIso, pagesRead: 0, repos: {} }
+      : await ingestFieldTrialsGithub(input.fetch ?? pacedGhApiFetch(), repos.map(([, repo]) => repo), github, nowIso, maxPages,
+        checkpointEvery(GITHUB_CHECKPOINT_MS, () => writeJsonAtomically(githubPath, github)));
+  } finally {
+    renewal?.stop?.();
+  }
   writeJsonAtomically(githubPath, github);
   const sources: FieldTrialsSource[] = [];
   for (const [label, repo] of repos) {
