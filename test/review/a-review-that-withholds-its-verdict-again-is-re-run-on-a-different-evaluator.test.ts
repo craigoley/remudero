@@ -85,7 +85,8 @@ test("W1-T13945 criterion 1: two withheld attempts on codex re-admit with codex 
   assert.equal(ladder?.rung, 2);
   assert.deepEqual(ladder?.excludeProviders, ["codex"]);
 
-  const view = viewFor({ reviewWithheld: ladder });
+  // `reviewWithheld` is sweep-local (not an OpenPrView member), so it rides on the view the way runSweep attaches it.
+  const view = { ...viewFor(), reviewWithheld: ladder } as OpenPrView;
   const derived = deriveDisposition({ ...view, reviewPendingOwnerGone: "owner-pid-dead" } as OpenPrView, DEFAULT_SWEEP_POLICY, NOW);
   assert.equal(derived.disposition, "post-review");
   for (const text of ["review-PR19673-1", "review-PR19673-2", "codex", "gpt-6.2-sol", "reviewer output incomplete"]) {

@@ -7310,7 +7310,7 @@ function reviewSetupRefusalHolds(pr: OpenPrView, policy: SweepPolicy, ageDays: n
  *  has already withheld its verdict. The review is not admitted: the hold is escalated once (see
  *  {@link REVIEW_WITHHELD_EXHAUSTED_STEP}) and holds until the head or the review input digest changes. */
 function reviewWithheldExhaustedHolds(pr: OpenPrView, policy: SweepPolicy, ageDays: number, now: number, facts?: DispositionFacts): boolean {
-  if (pr.reviewWithheld?.rung !== 4) return false;
+  if (withheldLadderOf(pr)?.rung !== 4) return false;
   const self = DISPOSITION_RULES.findIndex((rule) => rule.when === reviewWithheldExhaustedHolds);
   return DISPOSITION_RULES.slice(self + 1).find((rule) => rule.when(pr, policy, ageDays, now, facts))?.disposition === "post-review";
 }
@@ -7360,7 +7360,14 @@ function reviewDemandLooping(pr: OpenPrView, policy: SweepPolicy, _ageDays: numb
  *  {@link OpenPrView} and never set by a producer: {@link promiseHarvestRetryView} sets it when a hold cause replaced the
  *  producer's `owner-pid-dead`, so the alongside-CI row still sees the producer's proof of death. The green-check rows
  *  never read it. */
-type SweepPrView = OpenPrView & { reviewPendingOwnerPidProven?: true };
+type SweepPrView = OpenPrView & { reviewPendingOwnerPidProven?: true; reviewWithheld?: ReviewWithheldLadder };
+
+/** W1-T13945 — the withheld-verdict ladder the sweep derived for this view. Sweep-local like `reviewPendingOwnerPidProven`:
+ *  it is derived from the ledger inside the sweep, never assigned by an `OpenPrView` producer, so it is not an `OpenPrView`
+ *  member. Undefined: fewer than two attempts withheld at this input. */
+function withheldLadderOf(pr: OpenPrView): ReviewWithheldLadder | undefined {
+  return (pr as SweepPrView).reviewWithheld;
+}
 
 /** W1-T14035 — the view producer's own process proof that the pending owner is dead: the producer's `owner-pid-dead`, or
  *  the sweep-local {@link SweepPrView} flag where a hold cause has since taken the cause field. A derived cause alone
@@ -9287,8 +9294,6 @@ export interface OpenPrView {
   /** W1-T13193 — the review setup refusals at this exact input by the running reviewer code, set only when one
    *  reason reached {@link REVIEW_INPUT_ADMISSION_BACKSTOP}. Undefined: no hold, the review is admitted as before. */
   reviewSetupRefused?: ReviewSetupRefusal;
-  /** W1-T13945 — the withheld-verdict ladder at this exact input, set by the sweep only when two or more attempts withheld. */
-  reviewWithheld?: ReviewWithheldLadder;
   /** Most recent completed `review.posted` timestamp for the same exact input counted above.
    *  Refusals never move this clock, having judged no content. Undefined means no completed
    *  attempt is known, and {@link reviewInputBackoffElapsed} then fails toward escalation. */
@@ -14206,7 +14211,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     disposition: "blocked-ambiguous",
     blocker: "other",
     when: reviewWithheldExhaustedHolds,
-    reason: (pr) => `review withheld-verdict hold: ${pr.reviewWithheld?.reason ?? "every eligible evaluator withheld"} — ` +
+    reason: (pr) => `review withheld-verdict hold: ${withheldLadderOf(pr)?.reason ?? "every eligible evaluator withheld"} — ` +
       "not re-admitted until the head or the review input changes",
   },
   {
@@ -14714,8 +14719,9 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           if (pr.reviewPendingOwnerGone === "promise-harvest-incomplete") {
             return `checks green, its promise harvest did not complete — re-running the review lane on #${pr.prNumber}`;
           }
-          if (pr.reviewWithheld?.rung === 2) {
-            return `checks green, remudero-review owner proven dead and ${pr.reviewWithheld.reason} — re-running the review lane on #${pr.prNumber}`;
+          const withheldLadder = withheldLadderOf(pr);
+          if (withheldLadder?.rung === 2) {
+            return `checks green, remudero-review owner proven dead and ${withheldLadder.reason} —re-running the review lane on #${pr.prNumber}`;
           }
           return `checks green, remudero-review owner proven dead — re-running the review lane on #${pr.prNumber}`;
         }
@@ -26351,7 +26357,7 @@ export async function runSweep(
       derived.blocker === "other" &&
       selectDispositionRule(dispositionView, policy, actNowMs, dispositionFacts).rule?.when === reviewSetupRefusalHolds;
     // W1-T13945: the withheld-verdict hold, named so the dedup and action arms escalate it once per head and input.
-    const withheldExhaustedHeld = pr.reviewWithheld?.rung === 4 && derived.disposition === "blocked-ambiguous" &&
+    const withheldExhaustedHeld = withheldLadderOf(pr)?.rung === 4 && derived.disposition === "blocked-ambiguous" &&
       derived.blocker === "other" &&
       selectDispositionRule(dispositionView, policy, actNowMs, dispositionFacts).rule?.when === reviewWithheldExhaustedHolds;
     // W1-T9232: a build head cut before its own shard merged is refreshed from main and re-reviewed, never escalated
@@ -29596,7 +29602,7 @@ export async function runSweep(
             case "blocked-ambiguous":
               if (withheldExhaustedHeld && standDownHold === undefined && !strikeLadderDue && !sloLadderDue) {
                 // W1-T13945: one hold row naming each attempt, then one escalation; the row keys the dedup above.
-                const ladder = pr.reviewWithheld!;
+                const ladder = withheldLadderOf(pr)!;
                 appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: REVIEW_WITHHELD_EXHAUSTED_STEP,
                   pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest,
                   attempts: ladder.attempts.map((attempt) => ({ run_id: attempt.runId, provider: attempt.provider ?? null,
