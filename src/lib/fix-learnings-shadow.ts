@@ -74,7 +74,8 @@ export interface FixLearningsShadowInput {
   /** The dispatched round's own id: the key its outcome, `fix.dispatch` and `fix.done` rows share. */
   roundId: string;
   evidence: FixLearningsEvidence;
-  homes: LayeredLearningsHomes;
+  /** Resolved inside the recorder, so a home that cannot be resolved is recorded rather than thrown. */
+  homes: () => LayeredLearningsHomes;
   budgetChars?: number;
   log: (step: string, extra: Record<string, unknown>) => void;
 }
@@ -149,11 +150,11 @@ export function recordFixLearningsShadow(input: FixLearningsShadowInput): FixLea
     arm, arm_unit: FIX_LEARNINGS_UNIT, arm_epoch: FIX_LEARNINGS_EPOCH, share: FIX_LEARNINGS_SHARE,
     budget_chars: budget, check_names: checkNames,
   };
-  const context = { text: fixLearningsSelectionText(input.evidence) };
   const matches: FixLearningsMatch[] = [];
   try {
+    const context = { text: fixLearningsSelectionText(input.evidence) };
     // taskFiles is undefined on purpose: with no path, only a symbol or an error hit admits an entry.
-    const { entries } = loadLayeredLearningsForTaskFiles(input.homes, undefined, context);
+    const { entries } = loadLayeredLearningsForTaskFiles(input.homes(), undefined, context);
     for (const entry of selectLearnings(entries, undefined, budget, context).selected) {
       const kinds = learningMatchKinds(entry, undefined, context).filter((kind): kind is FixLearningsMatchKind => kind !== "file");
       if (kinds.length > 0) matches.push({ id: entry.id, kinds });

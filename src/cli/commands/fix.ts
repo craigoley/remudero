@@ -4890,8 +4890,8 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     learningsRound?.settle();
     learningsRound = recordFixLearningsShadow({
       taskId: opts.taskId, pr: prNumber, attempt, round, roundId, evidence,
-      homes: { projectDir: projectLearningsHome(opts.worktreePath), userOverallDir: userOverallLearningsHome(opts.config),
-        globalArtifactPath: globalArtifactPath(opts.config) },
+      homes: () => ({ projectDir: projectLearningsHome(opts.worktreePath), userOverallDir: userOverallLearningsHome(opts.config),
+        globalArtifactPath: globalArtifactPath(opts.config) }),
       log: (step, extra) => deps.log(step, extra),
     }).round;
     let fixResult: WorkerResult;

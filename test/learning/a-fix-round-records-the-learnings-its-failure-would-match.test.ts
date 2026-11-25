@@ -91,6 +91,7 @@ async function fixRound(
   ciFailures = failingChecks,
   overrides: Partial<RungDeps> = {},
   rows: Row[] = [],
+  config?: Config,
 ): Promise<RoundResult> {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}fix-learnings-`));
   const worktree = join(root, "worktree");
@@ -111,7 +112,7 @@ async function fixRound(
       task, taskId, runId: `run-${taskId}-1`, prUrl: "https://github.com/acme/remudero/pull/7",
       branch: `run-${taskId}-1791151948510`, worktreePath: worktree, initialSessionId: "", initialReview,
       ciFailures,
-      mount, settingsFile: join(worktree, "settings.json"), config: { root } as Config, budgetUsd: 1, strikeCap: 1,
+      mount, settingsFile: join(worktree, "settings.json"), config: config ?? ({ root } as Config), budgetUsd: 1, strikeCap: 1,
       reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: worktree, reviewerMount: mount },
       deps: {
         approvedSkillsDir: join(root, ".claude", "skills"),
@@ -268,7 +269,7 @@ test("W1-T14138: the shadow row records an unreadable corpus instead of failing 
     const logged: Row[] = [];
     const result = recordFixLearningsShadow({
       taskId: "W1-T1", attempt: 1, round: "fresh", roundId: "k", evidence: { ciFailures: failingChecks },
-      homes: { projectDir: dir }, log: (step, extra) => logged.push({ ...extra, step }),
+      homes: () => ({ projectDir: dir }), log: (step, extra) => logged.push({ ...extra, step }),
     });
     assert.equal(logged.length, 1);
     assert.equal(logged[0]!.outcome, "unreadable");
@@ -277,6 +278,15 @@ test("W1-T14138: the shadow row records an unreadable corpus instead of failing 
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("W1-T14138: a rung whose shared learnings homes cannot be resolved runs its round and records why", async () => {
+  const { rows, prompts } = await fixRound(taskInArm("offered"), true, failingChecks, {}, [], {} as Config);
+  assert.equal(prompts.length, 1, "the round still spawned its worker");
+  const shadow = stepRows(rows, "fix.learnings_shadow")[0]!;
+  assert.equal(shadow.outcome, "unreadable");
+  assert.match(String(shadow.reason), /\S/, "the row names why");
+  assert.equal(onlyOutcome(rows).ci_conclusion, "no_push");
 });
 
 test("W1-T14138: the summary reports, per arm, match rate by kind, outcome rates and rounds to green", () => {
