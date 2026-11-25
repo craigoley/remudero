@@ -5,8 +5,9 @@ import { test } from "node:test";
 import { fixedClock } from "#src/lib/clock.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
+import { REVIEW_RUN_SETTLED_STEPS } from "#src/lib/sweep.js";
 import {
-  REVIEW_LOCK_TTL_MS, REVIEW_REQUEUED_STEP, REVIEWER_CODE_ADVANCED, postReviewPending, reviewInputDigest,
+  REVIEW_CLAIM_SETTLING_STEPS, REVIEW_LOCK_TTL_MS, REVIEW_REQUEUED_STEP, REVIEWER_CODE_ADVANCED, postReviewPending, reviewInputDigest,
 } from "#src/lib/review.js";
 
 /**
@@ -70,6 +71,23 @@ test("W1-T14764 a re-review after a finished run posts pending without took_over
     assert.equal(row.prior_run_id, "run-A");
     assert.deepEqual(readLedgerLines(ledgerPath).filter((r) => r.step === "review.claim_repeated"), []);
   });
+  // Every other row by which a run settles its claim, written as review.ts's CLI writes it: no digest, often no task id.
+  for (const step of REVIEW_CLAIM_SETTLING_STEPS) {
+    const ts = new Date().toISOString();
+    await seeded([
+      { ...INPUT, ts, run_id: "run-A", step: "review.pending_posted", owner_pid: 1, owner_started_at: ts },
+      { ts, run_id: "run-A", step, pr_url: PR_URL, head_sha: SHA, reason: "fixture" },
+    ], async (ledgerPath) => {
+      const posts: string[] = [];
+      assert.equal(await claim(ledgerPath, "run-B", posts), true, `${step}: the re-review claims the input`);
+      assert.match(posts[0]!, /re-review of this input .*\(prior run run-A\)$/, `${step} settles run-A's claim`);
+      assert.equal(pendingRows(ledgerPath).at(-1)!.took_over_run_id, undefined, `${step}: no takeover recorded`);
+    });
+  }
+});
+
+test("W1-T14764 the claim-settling steps are sweep's settled steps other than review.posted", () => {
+  assert.deepEqual([...REVIEW_CLAIM_SETTLING_STEPS].sort(), [...REVIEW_RUN_SETTLED_STEPS].filter((s) => s !== "review.posted").sort());
 });
 
 test("W1-T14764 a pending row with no terminal row from its run is still taken over once stale", async () => {
@@ -79,6 +97,8 @@ test("W1-T14764 a pending row with no terminal row from its run is still taken o
     // Another run's verdict, and run-A's verdict on another head, settle nothing for run-A's claim on this input.
     { ...INPUT, ts, run_id: "run-Z", step: "review.posted", state: "error" },
     { ...INPUT, ts, run_id: "run-A", step: "review.posted", state: "success", head_sha: "5".repeat(40) },
+    { ts, run_id: "run-Z", step: "review.stood_down", pr_url: PR_URL, head_sha: SHA },
+    { ts, run_id: "run-A", step: "review.stood_down", pr_url: PR_URL, head_sha: SHA, review_input_digest: "another-body" },
   ], async (ledgerPath) => {
     const posts: string[] = [];
     assert.equal(await claim(ledgerPath, "run-B", posts), true);
