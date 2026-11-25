@@ -4591,8 +4591,9 @@ test("runFixRung: a FAILED/INDETERMINATE read at the judge-escalation check (sit
   const exhaustionReads = indeterminateLogs.filter((l) => (l as { site?: string }).site === "rung.exhaustion");
   assert.equal(exhaustionReads.length, 1, "site (ii)'s indeterminate read is ledgered exactly once");
   assert.deepEqual(exhaustionReads[0], { site: "rung.exhaustion" });
-  assert.ok(indeterminateLogs.every((l) => ["rung.exhaustion", "rung.strike"].includes(String((l as { site?: string }).site))),
-    "every other indeterminate read is site (i)'s, ledgered under its own name");
+  // W1-T14750: the strike's own pre-push re-read is ledgered under its own site name too.
+  assert.ok(indeterminateLogs.every((l) => ["rung.exhaustion", "rung.strike", "rung.strike.pre_push"].includes(String((l as { site?: string }).site))),
+    "every other indeterminate read is site (i)'s or the pre-push re-read's, ledgered under its own name");
 });
 
 // ── W1-T168 (the #349/#360 stuck class): the fix rung must ESCAPE a review
@@ -4898,8 +4899,9 @@ test("runFixRung: a FAILED/INDETERMINATE live-state read does NOT stand down —
 
   assert.equal(spawnCalls.length, 1, "the strike still fires — an unreadable state is never treated as terminal");
   assert.equal(outcome.outcome, "fixed");
-  assert.equal(indeterminateLogs.length, 1, "the failed/indeterminate read is LEDGERED — never a silent swallow");
-  assert.deepEqual(indeterminateLogs[0], { site: "rung.strike" });
+  // W1-T14750: the strike's pre-push re-read fails open too, and is ledgered under its own site name.
+  assert.deepEqual(indeterminateLogs, [{ site: "rung.strike" }, { site: "rung.strike.pre_push" }],
+    "each failed/indeterminate read is LEDGERED — never a silent swallow");
 });
 
 // ── Round-2 fix, W1-T177 SITE (v): the cold/sweep `dispatchFix` pre-flight
