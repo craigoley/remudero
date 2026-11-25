@@ -28,7 +28,7 @@ const source = { id: candidate.taskId, origin: "architect", risk: "low" as const
 
 function draft(c = candidate): DraftRungOutcome {
   const task = parse(inboxDraftExampleFragmentYaml())[0];
-  task.verify = "human";
+  task.verify = "auto"; // W1-T14659: an approved proposal files verify: auto; its approval IS the human judgment
   task.origin = `followup#${c.entryId}`;
   task.rationale = followupProvenance(c);
   return { ok: true, proposalId: `followup:${c.entryId}`, candidate: {
@@ -103,7 +103,7 @@ test("an eligible task or research follow-up is filed as one plan-only shard wit
           const shard = parse(readFileSync(join(root, filed.writtenPaths[0]), "utf8"))[0];
           assert.equal(shard.id, "W1-T20001");
           assert.equal(shard.origin, origin);
-          assert.equal(shard.verify, "human");
+          assert.equal(shard.verify, "auto");
           assert.equal(shard.rationale,
             `Source task: ${c.taskId}; PR: ${c.prUrl}; head: ${headSha}; run: ${c.runId}\n${c.text}`);
           assert.ok(shard.rationale.includes(c.text));
