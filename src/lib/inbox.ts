@@ -2887,6 +2887,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           subtype: worker.subtype,
           prompt_chars: worker.promptChars ?? prompt.length,
           plan_index_chars: planIndexChars,
+          num_turns: worker.numTurns,
           ...workerLedgerFields(worker),
         });
         parsed = parseDraftedCandidate(workerTranscript(worker), proposal, currentPlanText);
@@ -2928,6 +2929,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
               subtype: escalated.subtype,
               prompt_chars: escalated.promptChars ?? escalationPrompt.length,
               plan_index_chars: planIndexChars,
+              num_turns: escalated.numTurns,
               ...workerLedgerFields(escalated),
             });
             lastWorker = escalated;

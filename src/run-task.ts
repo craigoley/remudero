@@ -392,7 +392,7 @@ import { sameHost } from "./lib/host-identity.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenClosePr, gardenPassDue, gardenPendingSignal, isGardenLandWaiting, isPromiseLike, landedPrUrl, runStepsEager, runGardenAsync, type GardenAction, type GardenLandOpts, type GardenLandResult, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
+import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenClosePr, gardenPassDue, gardenPendingSignal, isGardenLandRefused, isGardenLandWaiting, isPromiseLike, landedPrUrl, runStepsEager, runGardenAsync, type GardenAction, type GardenLandOpts, type GardenLandRefusal, type GardenLandResult, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDueAsync, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, selectorShadowMainFailures, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { flakeJudgeEvidencePort } from "./lib/flake-incident-gardener.js";
 import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.js";
@@ -858,6 +858,7 @@ import {
   stagedTaskFiles,
   stagedTaskFileOrigins,
   taskFileOrigin,
+  taskIdOfTaskFileText,
   taskFilesLandingBranchAsync,
   type LandTaskFilesOpts,
   type TaskFileInput,
@@ -28808,6 +28809,7 @@ async function repairRequestedShard(
     opts.log("plan.shard_repair_waiting", { ...at, blob, path: rel, kept: verdict.kept });
     return { wait: true };
   }
+  if (isGardenLandRefused(prUrl)) prUrl = prUrl.opened;
   if (prUrl === undefined) {
     opts.log("plan.shard_repair_not_landed", { ...at, blob, reason: "the plan-PR preflight refused the repair; plan_pr.preflight_refused names why" });
     return { retry: true, blob };
@@ -29096,20 +29098,43 @@ function* landSealedTaskFiles(opts: GardenCheckoutOpts, paths: readonly string[]
     }
   }
   const result = yield* step(() => land(inputs));
-  const carried = paths.every((p) => result.landed.includes(p));
-  const queued = paths.every((p) => result.landed.includes(p) || result.waiting.includes(p));
+  const refusals = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path));
+  // W1-T14657: the paths the landing did not refuse are the ones it was to carry: a landing of several lands them.
+  const refusedPaths = new Set(refusals.map((r) => r.path));
+  const owed = paths.filter((p) => !refusedPaths.has(p));
+  const carried = owed.every((p) => result.landed.includes(p));
+  const queued = owed.every((p) => result.landed.includes(p) || result.waiting.includes(p));
   // W1-T12222: a file that is in the queue keeps the ids of its land, so a partly refused land of new files waits.
   const partly = opts.taskFilesOnly === true && paths.some((p) => result.landed.includes(p) || result.waiting.includes(p));
-  const outcome = result.prUrl !== undefined && carried ? "opened" : queued || partly ? "waiting" : "not_landed";
-  const refused = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path)).map((r) => ({
+  const outcome = result.prUrl !== undefined && carried && owed.length > 0 ? "opened" : (queued && owed.length > 0) || partly ? "waiting" : "not_landed";
+  const refused = refusals.map((r) => ({
     path: r.path, reason: r.reason,
     ...(r.reserved_id === undefined ? {} : { reserved_id: r.reserved_id }),
     ...(r.id_release === undefined ? {} : { id_release: r.id_release }),
   }));
+  // W1-T14657: what the gardener is told: each refused path with the task ids its findings and its own record name.
+  const told: GardenLandRefusal[] = refusals.map((r) => {
+    const own = taskIdOfTaskFileText(inputs.find((i) => i.relPath === r.path)?.content ?? "");
+    const ids = [...new Set([...(own === undefined ? [] : [own]), ...(r.reserved_id === undefined ? [] : [r.reserved_id]), ...(r.failures ?? []).flatMap((f) => f.task_ids ?? [])])];
+    return { path: r.path, reason: r.reason, ...(ids.length > 0 ? { task_ids: ids } : {}) };
+  });
   opts.log(`${opts.name}.garden_sealed_landing`, { outcome, paths, pr_url: outcome === "opened" ? result.prUrl : null, ...(refused.length ? { refused } : {}), ...(result.error ? { error: result.error } : {}) });
-  if (outcome === "opened") return result.prUrl;
-  if (outcome === "waiting") return { waiting: { paths: paths.filter((p) => result.landed.includes(p) || result.waiting.includes(p)), stateRoot: opts.taskFilesLanding!.stateRoot, ...(opts.taskFilesOnly === true ? { filed: true as const } : {}) } };
-  return undefined;
+  if (outcome === "opened") return told.length > 0 ? { opened: result.prUrl!, refused: told } : result.prUrl;
+  if (outcome === "waiting") return { waiting: { paths: paths.filter((p) => result.landed.includes(p) || result.waiting.includes(p)), stateRoot: opts.taskFilesLanding!.stateRoot, ...(opts.taskFilesOnly === true ? { filed: true as const } : {}) }, ...(told.length > 0 ? { refused: told } : {}) };
+  return told.length > 0 ? { refused: told } : undefined;
+}
+
+/** W1-T14657: the paths of `paths` the tasks a preflight red names are filed in, with those ids: a refusal that names
+ *  no task of this landing attributes nothing, and the land stays unlanded as before. */
+function preflightRefusedPaths(root: string, paths: readonly string[], failures: PlanPrPreflightResult["failures"]): GardenLandRefusal[] {
+  const named = new Set(failures.flatMap((f) => f.task_ids ?? []));
+  const refused: GardenLandRefusal[] = [];
+  for (const path of paths) {
+    const own = existsSync(join(root, path)) ? taskIdOfTaskFileText(readFileSync(join(root, path), "utf8")) : undefined;
+    const id = own !== undefined && named.has(own) ? own : [...named].find((n) => basename(path).startsWith(`${n}-`));
+    if (id !== undefined) refused.push({ path, reason: `the plan-PR preflight refused ${id}`, task_ids: [id] });
+  }
+  return refused;
 }
 
 function* gardenLandSteps(
@@ -29191,7 +29216,11 @@ function* gardenCommitAndOpen(
   assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${to.owner}/${to.repo}`);
   // W1-T5348: a tree CI would refuse is never pushed — the lane's not-landed outcome instead of a red PR.
   const verdict = yield* step(() => io.preflight({ cwd: root, title: fitted.header, body: fullTitle + body }));
-  if (!planPrPreflightAllows(verdict, { lane: opts.name, branch, log: opts.log })) return undefined;
+  if (!planPrPreflightAllows(verdict, { lane: opts.name, branch, log: opts.log })) {
+    // W1-T14657: the refused task ids reach the gardener as the paths they are filed in.
+    const refused = preflightRefusedPaths(root, paths, verdict.failures);
+    return refused.length > 0 ? { refused } : undefined;
+  }
   yield* step(() => io.git("push", "-q", "origin", `HEAD:refs/heads/${branch}`));
   try {
     const create = { title: fitted.header, body: fullTitle + body, head: branch, base: "main" };

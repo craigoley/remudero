@@ -28,7 +28,10 @@ export type LightPassViewsRead<V> =
   | { fallback: false; source: LightPassViewsSource; views: V[]; readStartedAtMs: number }
   | { fallback: true; source: LightPassViewsSource; views: V[]; reason: LightPassViewsFallbackReason; readStartedAtMs: number };
 
-interface LastGoodList<V> { views: V[]; readStartedAtMs: number; source: LightPassViewsSource }
+/** `viewReadAtMs[i]` is when `views[i]` was last fully read; `fullyReadCount` counts the views the list's own read read fully. */
+interface LastGoodList<V> { views: V[]; viewReadAtMs: number[]; fullyReadCount: number; readStartedAtMs: number; source: LightPassViewsSource }
+/** How a view says its rollup was not read (W1-T13195's `rollupUnreadable`), and which PR it is a view of. */
+export interface LightPassViewCompleteness<V> { key: (view: V) => string | number; unread: (view: V) => boolean }
 type ServedViews<V> = Promise<V[]> & { servedReadStartedAtMs?: number };
 
 /** True for GitHub's rate-limit refusal, by the error's stderr or, when the transport kept none, its message. */
@@ -48,12 +51,36 @@ export function createLightPassOpenPrList<V>(opts: {
   runId: string;
   deadlineMs: number;
   maxAgeMs: number;
+  /** W1-T13237: without it every view counts as fully read and the list is stored whole. */
+  completeness?: LightPassViewCompleteness<V>;
 }): { read(served: ServedViews<V> | undefined, own: () => Promise<V[]>, rule?: { boot?: boolean },
   onSource?: (source: LightPassViewsSource) => void): Promise<LightPassViewsRead<V>> } {
   let lastGood: LastGoodList<V> | undefined;
   let inFlight: { promise: Promise<V[]>; readStartedAtMs: number } | undefined;
+  /**
+   * W1-T13237: a read whose every view was fully read is the list, as before. A view whose rollup was
+   * unread never enters it: that PR keeps its previous fully read view (with that view's own read time,
+   * so a carried view never outlives the age bound) or is absent, and a pass decides nothing about it.
+   */
+  const lastGoodFrom = (views: V[], readStartedAtMs: number, source: LightPassViewsSource): LastGoodList<V> => {
+    const c = opts.completeness;
+    if (c === undefined || !views.some((v) => c.unread(v))) {
+      return { views, viewReadAtMs: views.map(() => readStartedAtMs), fullyReadCount: views.length, readStartedAtMs, source };
+    }
+    const previous = new Map<string | number, { view: V; readAtMs: number }>();
+    lastGood?.views.forEach((v, i) => previous.set(c.key(v), { view: v, readAtMs: lastGood?.viewReadAtMs[i] ?? 0 }));
+    const kept: V[] = [];
+    const keptAt: number[] = [];
+    let fullyReadCount = 0;
+    for (const v of views) {
+      if (!c.unread(v)) { kept.push(v); keptAt.push(readStartedAtMs); fullyReadCount += 1; continue; }
+      const before = previous.get(c.key(v));
+      if (before !== undefined) { kept.push(before.view); keptAt.push(before.readAtMs); }
+    }
+    return { views: kept, viewReadAtMs: keptAt, fullyReadCount, readStartedAtMs, source };
+  };
   const keep = (read: Promise<V[]>, source: LightPassViewsSource, readStartedAtMs: number): Promise<V[]> => {
-    read.then((views) => { lastGood = { views, readStartedAtMs, source }; }, (error: unknown) => {
+    read.then((views) => { lastGood = lastGoodFrom(views, readStartedAtMs, source); }, (error: unknown) => {
       // Reason: not erased; the pass that awaits this read gets the same error and writes it to its row.
       void error;
     });
@@ -76,12 +103,15 @@ export function createLightPassOpenPrList<V>(opts: {
       run_id: opts.runId, reason,
       snapshot_age_ms: lastGood === undefined ? null : opts.clock.now() - lastGood.readStartedAtMs,
       pr_count: lastGood?.views.length ?? 0,
+      // W1-T13237: the list's own age, and how many of its views its read read fully.
+      list_age_ms: lastGood === undefined ? null : opts.clock.now() - lastGood.readStartedAtMs,
+      fully_read_count: lastGood?.fullyReadCount ?? 0,
       ...(error === undefined ? {} : { error: String((error as Error)?.message ?? error) }),
     });
   };
   const fallback = (list: LastGoodList<V>, reason: LightPassViewsFallbackReason, error?: unknown): LightPassViewsRead<V> => {
     record(reason, error);
-    return { fallback: true, source: list.source, views: structuredClone(list.views), reason, readStartedAtMs: list.readStartedAtMs };
+    return { fallback: true, source: list.source, views: structuredClone(list.views.filter((_v, i) => opts.clock.now() - (list.viewReadAtMs[i] ?? 0) <= opts.maxAgeMs)), reason, readStartedAtMs: list.readStartedAtMs };
   };
   return {
     async read(served, own, rule, onSource) {

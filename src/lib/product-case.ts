@@ -8,13 +8,14 @@ import {
   type ProductBuildCode, type ProductBuildOptions, type ProductBuildReceipt, type ProductBuildExecution,
 } from "./product-build.js";
 import {
-  productCasePlanText, productPlanAssociationReferences, productPlanTrustedReviewer, productPlanProposalSchema, ProductPlanOperationService, refreshProductPlanCheckout, verifyProductPlanCheckout, verifyProductPlanEvidence,
+  productCasePlanText, productPlanAssociationReferences, productPlanTrustedReviewer, productPlanProposalSchema, ProductPlanOperationService, ensureProductPlanCheckout, refreshProductPlanCheckout, verifyProductPlanCheckout, withPlanRefusalDetail, verifyProductPlanEvidence,
   type PlanHandoffPort, type PlanRepository, type ProductPlanObservation, type ProductPlanOperationCode,
 } from "./product-plan-operation.js";
 import { ProductIntentStore } from "./product-intent-store.js";
 import { productEvidenceOutcomeSchema, productIdSchema, productRequestIdSchema, productEvidenceReceiptSchema, productPhoneReceiptSchema, productTransitionSchema, productWriteSchema, type ProductRunReceipt, type ProductEvidenceReceipt, type ProductDeployReceipt, type ProductPhoneReceipt, type StoredProduct } from "./product-intent.js";
 import { ProductDeploymentService, probeDeploymentUrl, type ProductDeploymentCode } from "./product-deployment.js";
 import { ghProductRepositoryProvider, productRepositoryCommandSchema, ProductRepositoryService, type ProductRepositoryCode } from "./product-repository.js";
+import { appendLedger } from "./ledger.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import { readLocalQualificationReceipt } from "./local-qualification-receipt.js";
 import { ghTextAsync } from "./github-transport.js";
@@ -72,10 +73,12 @@ export interface ProductCaseOptions extends ProductBuildOptions {
   planCheckout?: (repository: PlanRepository, targetHead: string) => string | undefined | Promise<string | undefined>;
   planIsAlive?: (pid: number) => boolean;
 }
-export type ProductCaseResult = { ok: true; value: ProductCaseReply; code?: never } | { ok: false; code: ProductCaseCode; value?: never };
+export type ProductCaseResult = { ok: true; value: ProductCaseReply; code?: never } | { ok: false; code: ProductCaseCode; value?: never; detail?: string };
 class CaseFault extends RmdError {
-  constructor(readonly code: ProductCaseCode) { super("usage", GENERIC_EXIT_CODE, `product case: ${code}`); }
+  constructor(readonly code: ProductCaseCode, readonly detail?: string) { super("usage", GENERIC_EXIT_CODE, `product case: ${code}`); }
 }
+/** W1-T14723: the ledger row naming why a product re-plan's checkout was left behind the live head. */
+export const PRODUCT_PLAN_CHECKOUT_LEFT_STEP = "product_plan.checkout_left";
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const deploymentIdentity = (receipt: ProductDeployReceipt) => digest([
   receipt.actor, receipt.productId, receipt.objectiveRevision, receipt.repository.id,
@@ -110,9 +113,32 @@ export class ProductCaseService {
       if (root === undefined) return undefined;
       const managed = join(root, "repos", repository.name);
       // W1-T14301: the port runs only for a fresh proposal. A clean checkout only behind the live head moves forward first,
-      // under run-task's managed-checkout lock; one it leaves is refused below exactly as before, so its reason is not read.
-      await refreshProductPlanCheckout(managed, repository, targetHead, join(root, "state", `managed-checkout-${repository.name}.lock`));
-      return verifyProductPlanCheckout(managed, repository, targetHead);
+      // under run-task's managed-checkout lock; one it leaves is refused below, and the refusal carries why it was left.
+      let checkout = managed;
+      let refresh = await refreshProductPlanCheckout(managed, repository, targetHead, join(root, "state", `managed-checkout-${repository.name}.lock`));
+      if (refresh.unmovable) {
+        // W1-T14724 INVARIANT steer-never-waits-on-a-build: a clean working checkout core cannot move (a build borrows it,
+        // or serve cannot fetch into it: instance repos are mounted read-only into serve) sends the
+        // re-plan to core's plan-only copy, refreshed and verified by the same rules under its own lock.
+        const planRoot = options.root ?? root;
+        const plan = await ensureProductPlanCheckout(planRoot, managed, repository);
+        const planned = await refreshProductPlanCheckout(plan, repository, targetHead,
+          join(planRoot, "state", `product-plan-checkout-${repository.owner}-${repository.name}.lock`));
+        // A plan-only copy that is not at the live head changes nothing: the working checkout's own refusal and reason stand.
+        if (planned.kind !== "left") { checkout = plan; refresh = planned; }
+      }
+      try { return await verifyProductPlanCheckout(checkout, repository, targetHead); }
+      catch (error) {
+        // W1-T14723 INVARIANT stale-refusal-names-its-cause: a refused checkout carries the reason the refresh left it.
+        if (refresh.kind !== "left") throw error;
+        if (options.planLedgerPath !== undefined) {
+          try {
+            appendLedger(options.planLedgerPath, { run_id: `product-plan-${repository.name}`, task_id: "SERVE", step: PRODUCT_PLAN_CHECKOUT_LEFT_STEP,
+              repository: `${repository.owner}/${repository.name}`, target_head: targetHead, reason: refresh.reason });
+          } catch { /* a ledger that cannot take the row never changes the refusal, which still carries the reason */ }
+        }
+        throw withPlanRefusalDetail(error, `core's copy of ${repository.name} was not moved to ${targetHead.slice(0, 12)}: ${refresh.reason}`);
+      }
     };
     this.plans = new ProductPlanOperationService({ root: options.root, store: this.store, provider: options.provider ?? ghProductRepositoryProvider(),
       target: options.target ?? ghProductBuildTarget({ repoRoot: options.repoRoot, text: options.planText }), bootstrapConfirmed, gateway: options.planGateway,
@@ -158,7 +184,7 @@ export class ProductCaseService {
           replayed = await this.plan(actor, product, input.command);
         } else if (input.action === "propose") {
           const proposed = await this.plans.execute(actor, input.command);
-          if (!proposed.ok) throw new CaseFault(proposed.code);
+          if (!proposed.ok) throw new CaseFault(proposed.code, proposed.detail);
           replayed = proposed.value.replayed; planOperation = proposed.value.observation;
         } else if (input.action === "observe-deployment") {
           const observed = await this.observeDeployment(actor, product, input.command);
@@ -188,7 +214,8 @@ export class ProductCaseService {
       return { ok: true, value: { productId: id, revision: product.revision, objectiveRevision: product.objectiveRevision,
         replayed, evidence, mobileCoverage, ...(build ? { build } : {}), ...(planOperation ? { planOperation } : {}) } };
     } catch (error) {
-      return { ok: false, code: error instanceof CaseFault ? error.code : "unavailable" };
+      if (error instanceof CaseFault) return { ok: false, code: error.code, ...(error.detail ? { detail: error.detail } : {}) };
+      return { ok: false, code: "unavailable" };
     }
   }
 
