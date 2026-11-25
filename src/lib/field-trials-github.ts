@@ -117,7 +117,11 @@ export function rateLimitPacer(read: (args: string[]) => Promise<string>, opts: 
       probedAt = now();
       let core: Record<string, unknown> | undefined;
       try { core = record(record(record(JSON.parse(await read(["api", "rate_limit"])))?.resources)?.core); }
-      catch { return; }
+      catch {
+        // deliberate: an unreadable rate_limit probe only skips pacing until the next probe a
+        // minute later; a read that then hits the limit still waits and retries in ghApiFetch.
+        return;
+      }
       const limit = Number(core?.limit), remaining = Number(core?.remaining), reset = Number(core?.reset);
       if (![limit, remaining, reset].every(Number.isFinite) || remaining > limit * reserveFraction) return;
       await sleep(Math.max(1_000, reset * 1000 - now() + 1_000));
