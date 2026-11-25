@@ -73,10 +73,29 @@ const defaultStageSpawn: NonNullable<PreflightFastDeps["spawn"]> = (file, args, 
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.error ? String(result.error) : result.stderr ?? "" };
 };
 
-/** Clone into fresh scratch: no repository exists to pin yet, so the leaf's config hardening is applied by hand. */
-function siteClone(spawn: NonNullable<PreflightFastDeps["spawn"]>, cwd: string, url: string, target: string) {
+/** W1-T14779: a token for reading the private site, or why none could be minted. */
+export type SiteCloneToken = (ownerRepo: string) => Promise<{ ok: true; token: string } | { ok: false; reason: string }>;
+
+/** The production seam: the daemon's App identity (GH_APP_*), minted for remudero-site only. */
+export function appCloneToken(env: NodeJS.ProcessEnv = process.env, mint: typeof mintScopedToken = mintScopedToken): SiteCloneToken {
+  return async (ownerRepo) => {
+    const minted = await mint(ownerRepo, 10 * 60_000, { env }).catch((error: unknown) => ({ ok: false, reason: String(error), token: undefined }));
+    return minted.ok && minted.token ? { ok: true, token: minted.token } : { ok: false, reason: minted.reason ?? "no token returned" };
+  };
+}
+
+/** Clone into fresh scratch: no repository exists to pin yet, so the leaf's config hardening is applied by hand.
+ *  A token reaches git only as a child-env extraheader, never argv or `.git/config` (W1-T14779). */
+function siteClone(spawn: NonNullable<PreflightFastDeps["spawn"]>, cwd: string, url: string, target: string, token?: string) {
   const { GIT_DIR: _gitDir, GIT_WORK_TREE: _workTree, ...env } = hostWorktreeGitEnv({
     worktree: cwd, gitDir: join(cwd, ".git"), source: "git-directory" });
+  if (token !== undefined) {
+    const index = Number(env.GIT_CONFIG_COUNT ?? 0);
+    env[`GIT_CONFIG_KEY_${index}`] = "http.https://github.com/.extraheader";
+    env[`GIT_CONFIG_VALUE_${index}`] = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+    env.GIT_CONFIG_COUNT = String(index + 1);
+  }
+  env.GIT_TERMINAL_PROMPT = "0";
   return spawn("git", ["clone", "--quiet", "--single-branch", "--branch", SITE_IMPORT_BASE, url, target], { cwd, env });
 }
 
@@ -166,15 +185,20 @@ async function publish(fetch: GhApiFetcher, siteDir: string, workDir: string,
  * own stage mode, and — only on `staged` — one open import PR. Every outcome is a value, never a throw.
  */
 export async function syncFieldNoteSiteImport(input: SiteImportInput,
-  deps: Pick<PreflightFastDeps, "spawn"> & { fetch?: GhApiFetcher; siteUrl?: string; writeProof?: SiteWriteProof } = {}): Promise<SiteImportOutcome> {
+  deps: Pick<PreflightFastDeps, "spawn"> & { fetch?: GhApiFetcher; siteUrl?: string; writeProof?: SiteWriteProof; cloneToken?: SiteCloneToken } = {}): Promise<SiteImportOutcome> {
   const spawn = deps.spawn ?? defaultStageSpawn;
   mkdirSync(input.workRoot, { recursive: true, mode: 0o700 });
   const workDir = mkdtempSync(join(input.workRoot, "site-import-"));
   try {
     const siteDir = join(workDir, "site");
     const url = deps.siteUrl ?? `https://github.com/${SITE_IMPORT_OWNER}/${SITE_IMPORT_REPO}.git`;
-    const clone = siteClone(spawn, workDir, url, siteDir);
-    if (clone.status !== 0) return { state: "site-checkout-failed", reason: `git-clone-exit-${clone.status}: ${clone.stderr.trim()}` };
+    // A local fixture URL needs no credential; the private site on github.com does.
+    const tokenSource = deps.cloneToken ?? (deps.siteUrl === undefined ? appCloneToken() : undefined);
+    const minted = tokenSource === undefined ? undefined : await tokenSource(`${SITE_IMPORT_OWNER}/${SITE_IMPORT_REPO}`);
+    if (minted !== undefined && !minted.ok) return { state: "site-checkout-failed", reason: `site-clone-token-unavailable: ${minted.reason}` };
+    const clone = siteClone(spawn, workDir, url, siteDir, minted?.token);
+    const cloneError = minted?.token === undefined ? clone.stderr.trim() : clone.stderr.trim().split(minted.token).join("<token>");
+    if (clone.status !== 0) return { state: "site-checkout-failed", reason: `git-clone-exit-${clone.status}: ${cloneError}` };
     const released = readReleases(siteDir);
     if (typeof released === "string") return { state: "site-checkout-failed", reason: released };
     const exported = input.exportCandidate(released);
