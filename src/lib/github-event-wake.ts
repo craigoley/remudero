@@ -496,9 +496,10 @@ export function wakeTimingFields(timings: WakeTimings): WakeTimingFields {
 }
 
 const ARRIVAL_BEAT_MS = 20;
+const ARRIVAL_MARK_ITERATIONS = 8;
 
 /** W1-T14808: each delivery's own wait before its handler ran (pure; times in ms). `turn` records a completed
- *  event-loop turn; `waitAt` is the time since the turn before the last one. */
+ *  event-loop turn by its start time; `waitAt` is the time since the turn before the last one. */
 export interface ArrivalWaitTracker {
   turn(nowMs: number): void;
   waitAt(nowMs: number): number;
@@ -527,12 +528,14 @@ export function createArrivalWaitTracker(startMs: number): ArrivalWaitTracker {
   };
 }
 
-/** The production wait read. Each unref'd beat queues an immediate, which runs in the check phase after the poll
- *  that reads requests, so it marks a completed turn. Started when the route is built; the selfAuthenticated route's
- *  handler runs synchronously in the request's own poll callback (service.ts), before that turn's mark. */
+/** The production wait read. Each unref'd beat is stamped as it fires and marked {@link ARRIVAL_MARK_ITERATIONS} check
+ *  phases later: a stall between the two stays charged, and a slow host cannot retire a stall while its burst is still
+ *  being accepted, one connection an iteration. The route's handler runs in the request's own poll callback. */
 export function startArrivalWaitMonitor(clock: () => number = () => performance.now()): () => number {
   const tracker = createArrivalWaitTracker(clock());
-  setInterval(() => setImmediate(() => tracker.turn(clock())), ARRIVAL_BEAT_MS).unref();
+  const markAfter = (iterations: number, beatMs: number): void =>
+    void setImmediate(() => (iterations > 1 ? markAfter(iterations - 1, beatMs) : tracker.turn(beatMs)));
+  setInterval(() => markAfter(ARRIVAL_MARK_ITERATIONS, clock()), ARRIVAL_BEAT_MS).unref();
   return () => tracker.waitAt(clock());
 }
 

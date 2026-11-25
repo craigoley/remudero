@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import {
   GITHUB_WAKE_SLOW_MS,
   createDeliveryDedupStore,
@@ -353,6 +353,60 @@ test("W1-T14808: the default monitor reads a real stall and resets after it", as
   assert.ok(read() >= 300, "a handler starting inside the stall reads it");
   await new Promise((resolve) => setTimeout(resolve, 600));
   assert.ok(read() < 100, "long after the stall ended, a new delivery waited about one beat");
+});
+
+/** The default monitor with its beat and loop iterations driven by hand, so host scheduling cannot reorder them. */
+function handDrivenMonitor(t: TestContext) {
+  let nowMs = 0;
+  let beat = (): void => {};
+  const immediates: Array<() => void> = [];
+  const interval = (fn: () => void) => {
+    beat = fn;
+    return { unref() {} };
+  };
+  t.mock.method(globalThis, "setInterval", interval as unknown as typeof setInterval);
+  t.mock.method(globalThis, "setImmediate", ((fn: () => void) => void immediates.push(fn)) as unknown as typeof setImmediate);
+  const read = startArrivalWaitMonitor(() => nowMs);
+  return {
+    beatAt(ms: number): void {
+      nowMs = ms;
+      beat();
+    },
+    iterate(ms: number, times: number): void {
+      nowMs = ms;
+      for (let i = 0; i < times; i++) for (const immediate of immediates.splice(0)) immediate();
+    },
+    readAt(ms: number): number {
+      nowMs = ms;
+      return read();
+    },
+  };
+}
+
+test("W1-T14808: a stall between a beat and its turn mark is still charged after the next beat", (t) => {
+  const loop = handDrivenMonitor(t);
+  loop.beatAt(20);
+  loop.iterate(20, 20);
+  loop.beatAt(40);
+  loop.iterate(1_640, 20); // the loop stalled before this beat's mark could run
+  loop.beatAt(1_660);
+  loop.iterate(1_660, 20); // the overdue beat's turn, which is the one that accepts the queued connections
+  assert.equal(loop.readAt(1_661), 1_621);
+  t.mock.restoreAll();
+});
+
+test("W1-T14808: a slowly scheduled loop keeps charging a stall while it accepts the burst behind it", (t) => {
+  const loop = handDrivenMonitor(t);
+  loop.beatAt(20);
+  loop.iterate(20, 20);
+  loop.beatAt(1_640); // the first beat after a stall
+  loop.iterate(1_641, 1);
+  loop.beatAt(1_665); // the host preempted the loop past a whole beat, mid-burst
+  loop.iterate(1_666, 5);
+  assert.equal(loop.readAt(1_667), 1_667, "the fifth connection's read still carries the stall");
+  loop.iterate(1_668, 20);
+  assert.equal(loop.readAt(1_669), 29, "once the loop has run on, a new delivery is charged none of it");
+  t.mock.restoreAll();
 });
 
 test("W1-T14808: the default clock and sampler time a real delivery", async () => {
