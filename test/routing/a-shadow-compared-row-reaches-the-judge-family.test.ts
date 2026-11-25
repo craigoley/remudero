@@ -14,7 +14,7 @@ import { buildModelFieldNoteCandidate, PINNED_SITE_CONSENT_REGISTRY } from "#src
 import { buildFieldTrialsFlowSnapshot, buildFieldTrialsRelease, periodOf, projectFlowRow, readFieldTrialsLedger, type FieldTrialsConsent,
   type FieldTrialsFlowSnapshot, type FieldTrialsLedgerRead } from "#src/lib/field-trials-flow.js";
 import { JUDGE_REPLAY_STALE_DAYS, judgeReplayAges, judgeTrialCells, judgeTrialRows, type JudgeTrialCell } from "#src/lib/field-trials-judges.js";
-import { judgeCalibrationRow } from "#src/lib/judge-calibration.js";
+import { emptyJudgeVerdictFold, foldJudgeVerdictRow, judgeCalibrationRow, typedAnswersWithOutcomes } from "#src/lib/judge-calibration.js";
 import { shadowJudgeCall, type ShadowJudgeCall } from "#src/lib/judge-shadow.js";
 import { loadMounts, mountsPath, type JudgeMount } from "#src/lib/mounts.js";
 import { scoreTypedAnswers, type TypedAnswerRow } from "#src/lib/typed-answer-scores.js";
@@ -31,7 +31,7 @@ const OPTIONS = ["automate", "needs_operator", "backlog"];
 const mount: JudgeMount = { model: "haiku", effort: "low", maxTurns: 400, contextBudget: 60000,
   shadow: { provider: "decisions", deployment: LUNA.deployment, candidate: LUNA } };
 
-type Reply = { kind: "distribution"; top: string } | { kind: "abstained" } | { kind: "rejected" } | { kind: "budget" };
+type Reply = { kind: "distribution"; top: string; cannotTell?: number } | { kind: "abstained" } | { kind: "rejected" } | { kind: "budget" };
 
 /** One real decision-arm shadow call. Returns the decision.answered row the request wrote and the judge_shadow row. */
 async function decisionShadow(o: { hour: number; head: string; primary: string; reply: Reply; latency: number; cost: number }): Promise<Row[]> {
@@ -41,7 +41,8 @@ async function decisionShadow(o: { hour: number; head: string; primary: string; 
     o.reply.kind === "abstained" ? { name: "verify_human", outcome: "abstained", reason: "cannot-tell" }
       : o.reply.kind === "rejected" ? { name: "verify_human", outcome: "rejected", reason: "verify_human summed to 0.974, not 1" }
         : { name: "verify_human", outcome: "distribution", confidence: null, distribution: OPTIONS.map((option) =>
-          ({ option, probability: option === (o.reply as { top: string }).top ? 0.8 : 0.1 })) };
+          ({ option, probability: option === (o.reply as { top: string }).top ? 0.8 : 0.1 })),
+          ...((o.reply as { cannotTell?: number }).cannotTell === undefined ? {} : { cannotTell: (o.reply as { cannotTell: number }).cannotTell }) };
   const call: ShadowJudgeCall<string> = { role: "verify-human", key: `shard-${o.head}`, mount, input: "judge this record",
     primaryArgs: { cwd: REPO_ROOT, prompt: "judge this record", tools: [] } as unknown as SpawnWorkerArgs, primary: { costUsd: 0.0004 },
     primaryAnswer: o.primary, parse: (text) => text.trim(), agreementKey: (v) => v, head: { sha: o.head },
@@ -99,6 +100,14 @@ test("W1-T14853 criterion 1: a judge_shadow.compared row is one typed answer of 
     ["gpt-oss-120b", "text", "generative", { kind: "single", option: "overlap" }, "overlap", "c3c3c3c3"]);
   const textCell = cellOf(cash, `core|${WEEK}|live|refresh-value|gpt-oss-120b|text|-`);
   assert.deepEqual([textCell.agreement, textCell.singles, textCell.settledUsd.median], [{ compared: 2, agreed: 1, rate: 0.5 }, 2, 0.0004]);
+
+  // A compared row that only says whether the reply parsed (decision-summary) carries no option, so it is no answer either way.
+  const parseOnly = (hour: number, parses: boolean): Row => ({ ts: `2026-10-06T${String(hour).padStart(2, "0")}:00:00.000Z`, step: "judge_shadow.compared",
+    role: "decision-summary", decision_key: "a32d45d68a3b06aa", primary_model: "gpt-6-luna", primary_provider: null, primary_cost_usd: 0,
+    shadow_effort: "low", shadow_model: "gpt-oss-120b", shadow_cost_usd: 0.0006, parses });
+  assert.equal(judgeCalibrationRow(parseOnly(5, true)), undefined);
+  assert.equal(judgeCalibrationRow(parseOnly(6, false)), undefined);
+  assert.equal(cellsOf([parseOnly(5, true), parseOnly(6, false)]).length, 0, "no decision-summary cell reports a parse as a rejection");
 });
 
 test("W1-T14853 criterion 2: a skipped decision-arm row is an abstained or a rejected answer, and a budget refusal is no answer", async () => {
@@ -129,16 +138,34 @@ test("W1-T14853 criterion 3: invariant:one-request-one-answer — a decision-arm
   // A decision model asked as a judge's primary writes decision.answered alone; it is not a shadow request and still counts.
   const primaryOnly = { ...requests[0]!.find((row) => row.step === "decision.answered")!, ts: "2026-10-06T11:00:00.000Z", head_sha: "d1d1d1d1", latency_ms: 999 };
   assert.equal(cellOf([...requests.flat(), primaryOnly], DECISION_CELL).decisions, 4);
+
+  // The judge calibration fold (the analytics body's reader) counts each request once too.
+  const fold = emptyJudgeVerdictFold();
+  for (const row of [...requests.flat(), primaryOnly]) foldJudgeVerdictRow(fold, row);
+  const scored = scoreTypedAnswers(typedAnswersWithOutcomes(fold)).groups.filter((group) => group.role === "verify-human" && group.model === "decisions-eastus");
+  assert.equal(scored.reduce((sum, group) => sum + group.answers, 0), 4, "three shadow requests and one primary request");
+  assert.equal(scored.reduce((sum, group) => sum + group.abstained, 0), 1, "the abstention counts once");
+  // The same rows folded through the checkpoint (judgeCalibrationRow, then JSON) still count once.
+  const viaCheckpoint = emptyJudgeVerdictFold();
+  for (const row of [...requests.flat(), primaryOnly]) {
+    const kept = judgeCalibrationRow(row);
+    if (kept) foldJudgeVerdictRow(viaCheckpoint, JSON.parse(JSON.stringify(kept)) as Row);
+  }
+  assert.equal(scoreTypedAnswers(typedAnswersWithOutcomes(viaCheckpoint)).groups
+    .filter((group) => group.role === "verify-human").reduce((sum, group) => sum + group.answers, 0), 4);
 });
 
 test("W1-T14853 criterion 4: invariant:one-compared-key — the scorer's agreement equals each compared row's own agreement field", async () => {
   const rows = [
     ...await decisionShadow({ hour: 12, head: "a2a2a2a2", primary: "automate", reply: { kind: "distribution", top: "automate" }, latency: 300, cost: 0.0002 }),
     ...await decisionShadow({ hour: 13, head: "b3b3b3b3", primary: "needs_operator", reply: { kind: "distribution", top: "backlog" }, latency: 301, cost: 0.0002 }),
-    cashCompared(14, "20918@e4e4e4e4", "overlap", "overlap"), cashCompared(15, "20919@f5f5f5f5", "independent", "overlap"),
+    // A dominant cannot-tell mass: the writer compares the declared options, and so must the reader.
+    ...await decisionShadow({ hour: 14, head: "c4c4c4c4", primary: "automate", reply: { kind: "distribution", top: "automate", cannotTell: 0.7 }, latency: 302, cost: 0.0002 }),
+    cashCompared(15, "20918@e4e4e4e4", "overlap", "overlap"), cashCompared(16, "20919@f5f5f5f5", "independent", "overlap"),
   ];
   const compared = rows.filter((row) => row.step === "judge_shadow.compared" && typeof row.primary_answer === "string");
-  assert.equal(compared.length, 4);
+  assert.equal(compared.length, 5);
+  assert.equal(compared.find((row) => row.head_sha === "c4c4c4c4")!.cannot_tell, 0.7, "positive control: the writer kept the cannot-tell mass");
   for (const row of compared) {
     const scored = scoreTypedAnswers(typedOf(row)).groups[0]!;
     assert.deepEqual(scored.agreement, { compared: 1, agreed: row.agreement === true ? 1 : 0, rate: row.agreement === true ? 1 : 0 });

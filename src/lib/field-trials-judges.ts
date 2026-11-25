@@ -24,9 +24,9 @@
  * A RECORD, NEVER A DECISION INPUT: no gate, route or gardener reads these cells.
  */
 import { DECISION_ANSWERED_STEP } from "./decision-model.js";
-import { isJudgeShadowArmRefusal, JUDGE_SHADOW_ARM_STEPS, JUDGE_SHADOW_REFUSED_STEP, JUDGE_SHADOW_ROW_STEPS, judgeCalibrationRow,
-  judgeShadowArmIdentity, judgeShadowRowIdentity } from "./judge-calibration.js";
-import { JUDGE_REPLAY_ANSWERED_STEP, JUDGE_REPLAY_DECISION_ROLE_PREFIX, JUDGE_REPLAY_FINISHED_STEP } from "./judge-replay-batch.js";
+import { decisionRequestOf, isJudgeShadowArmRefusal, JUDGE_SHADOW_ARM_STEPS, JUDGE_SHADOW_REFUSED_STEP, JUDGE_SHADOW_ROW_STEPS,
+  judgeCalibrationRow, judgeShadowArmIdentity, judgeShadowRowIdentity } from "./judge-calibration.js";
+import { JUDGE_REPLAY_ANSWERED_STEP, JUDGE_REPLAY_FINISHED_STEP } from "./judge-replay-batch.js";
 import { scoreTypedAnswers, type TypedAnswerRow, type TypedAnswerScoreGroup } from "./typed-answer-scores.js";
 import { MODEL_SURFACES, type ModelSurface } from "./worker-provider.js";
 
@@ -58,13 +58,10 @@ export interface JudgeTrialProjection {
   answers: TypedAnswerRow[];
   /** W1-T13365: a refused shadow call. It has no answer; these fields name its cell and its private keys. */
   refused?: NonNullable<ReturnType<typeof judgeShadowRowIdentity>>;
-  /** W1-T14853: one decision-model request's key (role, head, latency and dollars), private. A decision-arm
-   *  judge_shadow row and the live decision.answered row of the same request share it, so the request counts once. */
+  /** W1-T14853: the decision-model request this row belongs to (judge-calibration's decisionRequestOf), private. A
+   *  decision-arm judge_shadow row and the live decision.answered row of the same request share it. */
   request?: { key: string; side: "decision" | "shadow" };
 }
-
-const requestKey = (role: unknown, head: unknown, latency: unknown, dollars: unknown): string =>
-  JSON.stringify([role ?? null, head ?? null, latency ?? null, dollars ?? null]);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -91,10 +88,7 @@ export function projectJudgeTrialRow(row: Record<string, unknown>): JudgeTrialPr
   const arm = (JUDGE_SHADOW_ARM_STEPS as readonly unknown[]).includes(row.step);
   const refused = row.step === JUDGE_SHADOW_REFUSED_STEP ? judgeShadowRowIdentity(row)
     : arm && isJudgeShadowArmRefusal(row) ? judgeShadowArmIdentity(row) : undefined;
-  const live = !replay && typeof row.role === "string" && !row.role.startsWith(JUDGE_REPLAY_DECISION_ROLE_PREFIX);
-  const request = arm && row.model_surface === "decisions" ? { key: requestKey(row.role, row.head_sha, row.latency_ms, row.shadow_cost_usd), side: "shadow" as const }
-    : row.step === DECISION_ANSWERED_STEP && live ? { key: requestKey(row.role, row.head_sha, row.latency_ms, row.settled_usd), side: "decision" as const }
-      : undefined;
+  const request = decisionRequestOf(row);
   return {
     basis: replay ? "replay" : "live", finished, corpusDigest: replay ? text(row.corpus_digest) : null,
     latencyMs: finished ? null : amount(row.latency_ms),
