@@ -2101,6 +2101,8 @@ export async function daemonCommand(
     { resource: "stop_marker", close: () => { consumeStop(config.root); } },
     ...(readPlane ? [{ resource: "read_plane", close: stopReadPlane }] : []),
   ];
+  // W1-T14873: the SRE lane page reads the whole ledger union; the exit waits for it only after the lock is released.
+  const afterRelease: Array<{ resource: string; settled: Promise<void> }> = [];
   try {
   if (standbyPromotion) {
     // W1-T14544: the checkout sync a standby skipped runs now that it holds the lock; a refusal releases it.
@@ -3117,7 +3119,7 @@ export async function daemonCommand(
                 ...(await daemonSreLaneEnabled(config.root, repoRoot, log, {
                   escalate: (info) => escalateSreLaneUnresolved(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
                   clear: (info) => escalateSreLaneUnresolvedCleared(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-                }, (paged) => { cleanup.push({ resource: "sre_lane_page", close: () => paged }); }) ? [
+                }, (paged) => { afterRelease.push({ resource: "sre_lane_page", settled: paged }); }) ? [
                   startBoundedDaemonSreLane(
                     (mergedLastDay) => daemonSreLaneInput({
                       stateDir: join(config.root, "state"),
@@ -3458,7 +3460,7 @@ export async function daemonCommand(
     // reason still resolves through `daemonExitCode` itself, unchanged.
     return daemonExitCodeForSummary(summary);
   } finally {
-    await closeDaemonCleanup(cleanup, log, clockFromMillisFn(deps.now));
+    await closeDaemonCleanup(cleanup, log, clockFromMillisFn(deps.now), afterRelease);
   }
   } finally {
     archivedLifetime.history?.close?.();
@@ -3477,6 +3479,8 @@ export async function closeDaemonCleanup(
   cleanup: Array<{ resource: string; close: () => void | Promise<void> }>,
   log: (step: string, extra?: Record<string, unknown>) => void,
   clock: Pick<Clock, "now">,
+  /** W1-T14873: work the exit still finishes, but only after the drain lock is released, so no successor waits on it. */
+  afterRelease: Array<{ resource: string; settled: Promise<void> }> = [],
 ): Promise<void> {
   const ordered = [...cleanup].reverse();
   const closesMs: Record<string, number> = {};
@@ -3505,6 +3509,20 @@ export async function closeDaemonCleanup(
     }
     const key = `${resource}_ms`;
     closesMs[key] = (closesMs[key] ?? 0) + clock.now() - closeStartMs;
+  }
+  if (afterRelease.length === 0) return;
+  const afterMs: Record<string, number> = {};
+  const afterStartMs = clock.now();
+  for (const { resource, settled } of afterRelease) {
+    const settleStartMs = clock.now();
+    await settled.catch((error: unknown) => { console.error("daemon after-release work failed", { resource, error: String(error) }); });
+    afterMs[`${resource}_ms`] = clock.now() - settleStartMs;
+  }
+  try {
+    log("daemon.exit_after_release", { ...afterMs, total_ms: clock.now() - afterStartMs });
+  } catch (error) {
+    // A timing row that cannot be written changes nothing: the lock is already released.
+    console.error("daemon after-release reporting failed", { error: String(error) });
   }
 }
 
