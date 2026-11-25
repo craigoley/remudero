@@ -38,6 +38,7 @@ import { renderAnchorBlock } from "../../lib/compaction.js";
 import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSubject, judgeCheckpointStop, prTitleForTask, prTitleFromBranchCommits, renderContinuationPrompt, type CheckpointStop } from "../../lib/unfinished-checkpoint.js";
 import { hashInstallInputs } from "../../lib/install-hash.js";
 import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, type PreopenGateResult } from "../../lib/preopen-gate.js";
+import { withFiledGrepProofs } from "../../lib/preopen-filed-grep-proofs.js";
 import { readPreopenGateRows } from "../../lib/preopen-gate-health.js";
 import { implementPromptParts, renderDiagnosePrompt, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts, renderPrerequisiteOutcomeBlock, renderReconPrompt, scopeGuardOutOfScopeFiles, withPrerequisiteOutcomes, type PriorPartialWork } from "../../lib/prompt-render.js";
 import type { RunResult } from "../../lib/run-result.js";
@@ -7372,11 +7373,18 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // W1-T10752: while main's merge into the restored checkpoint is open, the gate also refuses a tree that still holds unmerged
     // index entries or conflict markers in a conflicted path, as an ordinary repair round naming each path.
     const reconcilePaths = restoredReconcile?.paths ?? [];
-    const preopenGate = reconcilePaths.length === 0 ? baseGate : async (path: string): Promise<PreopenGateResult> => {
+    const reconciledGate = reconcilePaths.length === 0 ? baseGate : async (path: string): Promise<PreopenGateResult> => {
       const unresolved = unresolvedMainConflicts(path, reconcilePaths);
       if (unresolved.length > 0) return { kind: "fail", failedSteps: unresolved.map((p) => `main-merge-conflict: ${p} still has unresolved conflict markers or unmerged entries`), durationMs: 0 };
       return baseGate ? baseGate(path) : { kind: "pass", durationMs: 0 };
     };
+    // The task's own filed `grep:` proofs, at the worker's head: a miss is a named step in this repair round, not a terminal pr_open.refused.
+    const preopenGate = reconciledGate === undefined ? undefined : withFiledGrepProofs(
+      reconciledGate,
+      () => (opsCriteriaAtOpen ?? coreCriteriaAtOpen)?.criteria ?? task.acceptance ?? [],
+      opts.prOpenProofRunner ?? ((proof, base, root, target) => defaultProofRunnerAsync(proof, base, root, target, { store: { log } })),
+      { owner, repo: task.repo },
+    );
     if (preopenGate !== undefined && !parseReport(fullText(impl))?.prUrl) {
       const workerYield = await yieldAtWorkerBoundary("worker", "preopen_gate");
       if (workerYield) return workerYield;
