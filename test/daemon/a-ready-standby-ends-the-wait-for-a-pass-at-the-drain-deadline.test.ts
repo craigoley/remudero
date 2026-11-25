@@ -34,7 +34,15 @@ function standbyHandoff(ready: boolean): { handoff: DaemonHandoff; yielded: () =
   return { handoff: { enabled: () => true, begin: async () => attempt }, yielded: () => yielded };
 }
 
-async function fixture(t: TestContext, handoff?: DaemonHandoff) {
+/** W1-T14824: a standby that becomes ready only when the test says so, as the real attempt polls its ready marker. */
+function lateStandbyHandoff(): { handoff: DaemonHandoff; ready: () => void } {
+  const marker = deferred<boolean>();
+  const attempt: HandoffAttempt = { runId: "standby-1", pid: 4242, slot: { dir: "/slots/b", sha: "b".repeat(40) } as HandoffSlot,
+    ready: () => marker.promise, yieldTo: () => {}, abort: () => {} };
+  return { handoff: { enabled: () => true, begin: async () => attempt }, ready: () => marker.resolve(true) };
+}
+
+async function fixture(t: TestContext, handoff?: DaemonHandoff, opts: { latchedReview?: boolean } = {}) {
   assert.equal(inFlightReviewCount(), 0);
   const dir = mkdtempSync(join(tmpdir(), "rmd-standby-pass-"));
   const path = join(dir, "tasks.yaml");
@@ -77,7 +85,8 @@ async function fixture(t: TestContext, handoff?: DaemonHandoff) {
     rmSync(dir, { recursive: true, force: true });
   });
   await pump();
-  void trackInFlightReview(async () => { await review.promise; }, { taskId: "LATCHED" });
+  // W1-T14824: with nothing in flight at the latch, the derived drain deadline is the latch itself, as on hand-over 5.
+  if (opts.latchedReview !== false) void trackInFlightReview(async () => { await review.promise; }, { taskId: "LATCHED" });
   // The latch at 10 ms, a background pass from 30 ms, and the exit at 40 ms; the latched review settles at 45 ms.
   at(10); stale = true; await wake(); await wake();
   assert.ok(rows.some((r) => r.step === "daemon.freshness_decision" && r.extra.action === "restart"));
@@ -116,4 +125,37 @@ test("W1-T14709 without a ready standby the exit still waits for the pass past t
       assert.equal(h.row("daemon.freshness_pre_exit_pass_abandoned")?.ended_by, undefined);
     });
   }
+});
+
+// W1-T14824, OPERATOR RULING 2026-11-25 13:52Z ("End it once the standby is ready"): the standby limit starts at the latch's
+// drain deadline, not at the end of its drain window. On hand-over 5 (2026-11-25) the deadline was the latch, the standby
+// was ready 301 s later, and the exit still waited to the window's end at 559 s.
+test("W1-T14824 a standby that becomes ready after the drain deadline ends the wait for the pass at once", async (t) => {
+  const standby = lateStandbyHandoff();
+  const h = await fixture(t, standby.handoff, { latchedReview: false });
+  await h.advance(40, 60);
+  assert.equal(h.finished(), false, "the standby is not ready yet, so the exit waits for the pass");
+  standby.ready();
+  await h.advance(60, 61);
+  assert.equal(h.finished(), true, "the standby's ready ends the wait, well before the window ends at 110 ms");
+  const summary = await h.daemon;
+  assert.equal(summary.handedOff, true);
+  assert.equal(h.row("daemon.freshness_pre_exit_pass_abandoned")?.ended_by, "standby_ready");
+});
+
+test("W1-T14824 without a ready standby the exit still waits for the pass past the drain window", async (t) => {
+  for (const handoff of [standbyHandoff(false).handoff, undefined]) {
+    await t.test(handoff ? "a standby that is not ready" : "no hand-over", async (tt) => {
+      const h = await fixture(tt, handoff, { latchedReview: false });
+      await h.advance(40, 120);
+      assert.equal(h.finished(), false, "the exit waits on, past the window, as before");
+      assert.equal(h.row("daemon.freshness_pre_exit_pass_abandoned")?.ended_by, undefined);
+    });
+  }
+  // The same latch with a standby already ready ends the wait at the drain deadline, not at the window's end.
+  await t.test("a ready standby, for contrast", async (tt) => {
+    const h = await fixture(tt, standbyHandoff(true).handoff, { latchedReview: false });
+    await h.advance(40, 41);
+    assert.equal(h.finished(), true, "the drain deadline (the latch) has passed and the standby is ready");
+  });
 });
