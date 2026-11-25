@@ -3,43 +3,75 @@
  * other answer the test names each public record the composer refuses, so a CI failure says which record to fix.
  */
 import assert from "node:assert/strict";
+import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { loadPlan, parseTasksFromYaml, type Plan } from "#src/lib/plan.js";
-import { compositionHoldEdge, composeSecondaryPlan } from "#src/lib/task-lookup.js";
+import { loadPlanQuarantiningDuplicates, mergePlanBlobs, type Plan, type Task } from "#src/lib/plan.js";
+import { composeSecondaryPlan } from "#src/lib/task-lookup.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-const EMPTY_OPS: Plan = { tasks: [], byId: new Map() };
-const ONE_TASK_OPS_TEXT = [
-  "- id: W1-T99990001",
-  "  title: one-task ops catalog fixture",
-  "  repo: remudero",
-  "  type: implement",
-  "  priority: 1",
-  "  depends_on: []",
-  "",
-].join("\n");
-const oneTaskOps = (): Plan => {
-  const tasks = parseTasksFromYaml(ONE_TASK_OPS_TEXT, "ops/one-task.yaml");
-  return { tasks, byId: new Map(tasks.map(task => [task.id, task])) };
-};
+const EMPTY: Plan = { tasks: [], byId: new Map() };
+const loaded = loadPlanQuarantiningDuplicates(join(REPO_ROOT, "plan", "tasks.yaml"));
+const publicPlan = loaded.plan;
+const shardCount = readdirSync(join(REPO_ROOT, "plan", "tasks.d")).filter(name => name.endsWith(".yaml")).length;
 
-const publicPlan = loadPlan(join(REPO_ROOT, "plan", "tasks.yaml"));
-const publicIds = new Set(publicPlan.tasks.map(task => task.id));
+const planOf = (tasks: Task[]): Plan => ({ tasks, byId: new Map(tasks.map(task => [task.id, task])) });
 
-test("the real public plan composes ok with an empty ops catalog and with a one-task ops catalog", () => {
-  for (const [label, ops] of [["empty ops catalog", EMPTY_OPS], ["one-task ops catalog", oneTaskOps()]] as const) {
-    const composition = composeSecondaryPlan(publicPlan, ops);
-    if (composition.outcome !== "ok") {
-      assert.fail(`${label}: composer refused the whole composition (${JSON.stringify(composition)})`);
-    }
-    const refused = [...composition.held]
-      .filter(([id]) => publicIds.has(id))
-      .map(([id, hold]) => `${id} (${compositionHoldEdge(hold)})`);
-    assert.deepEqual(refused, [], `${label}: composer refuses these public records`);
-    // Positive control: the composer really saw the corpus, so an empty refusal list is not an empty read.
-    assert.equal(composition.plan.tasks.length, publicPlan.tasks.length - composition.pendingMoveIds.size + ops.tasks.length,
-      `${label}: every public and ops record should compose`);
+/** The floor: a census over nothing must not pass. */
+const floorCheck = (plan: Plan, shards: number): boolean => shards > 0 && plan.tasks.length >= shards;
+
+/** Ids of the public records the composer's record check refuses, found by composing each record alone. */
+function refusedRecordIds(plan: Plan): string[] {
+  const refused: string[] = [];
+  for (const record of plan.tasks) {
+    if (composeSecondaryPlan(planOf([record]), EMPTY).outcome !== "ok") refused.push(record.id);
   }
-  assert.ok(publicPlan.tasks.length > 0, "the real public plan must hold tasks");
+  return refused;
+}
+
+function failureMessage(label: string, plan: Plan, composition: { outcome: string }): string {
+  return `${label}: composer answered ${composition.outcome}; refused public records: ${refusedRecordIds(plan).join(", ") || "(none found alone)"}`;
+}
+
+test("W1-T13459 criterion 1: the real public plan quarantines nothing, holds at least one task per shard, and composes ok with an empty ops plan", () => {
+  assert.deepEqual(loaded.quarantined, [], "a quarantined shard must not hide from the composer");
+  assert.ok(shardCount > 0, "plan/tasks.d must hold shard files");
+  assert.ok(publicPlan.tasks.length >= shardCount, `plan holds ${publicPlan.tasks.length} tasks for ${shardCount} shards`);
+  const composition = composeSecondaryPlan(publicPlan, EMPTY);
+  assert.equal(composition.outcome, "ok", failureMessage("empty ops plan", publicPlan, composition));
+});
+
+test("W1-T13459 criterion 2: a one-task preserve-external ops plan depending on a public id composes ok and is secondary", () => {
+  let n = 99990001;
+  while (publicPlan.byId.has(`W1-T${n}`)) n++;
+  const opsId = `W1-T${n}`;
+  const dependency = publicPlan.tasks[0]!.id;
+  const text = [
+    `- id: ${opsId}`,
+    "  title: one-task ops catalog fixture",
+    "  repo: remudero",
+    "  type: implement",
+    "  priority: 1",
+    `  depends_on: [${dependency}]`,
+    "",
+  ].join("\n");
+  const ops = mergePlanBlobs([{ label: "ops/one-task.yaml", text }], {}, { dependencyMode: "preserve-external" });
+  assert.equal(ops.tasks.length, 1);
+  const composition = composeSecondaryPlan(publicPlan, ops);
+  assert.equal(composition.outcome, "ok", failureMessage("one-task ops plan", publicPlan, composition));
+  if (composition.outcome !== "ok") return;
+  assert.ok(composition.secondaryIds.has(opsId), "the ops id must be among the secondary ids");
+});
+
+test("W1-T13459 criterion 3: the finder names exactly the record whose verify is a mapping, and the floor refuses an empty plan", () => {
+  assert.deepEqual(refusedRecordIds(publicPlan), [], "no real public record may be refused alone");
+  const source = publicPlan.tasks[0]!;
+  let n = 99990101;
+  while (publicPlan.byId.has(`W1-T${n}`)) n++;
+  const bad = { ...source, id: `W1-T${n}`, verify: { proof: "x" } } as unknown as Task;
+  const copy = planOf([...publicPlan.tasks, bad]);
+  assert.deepEqual(refusedRecordIds(copy), [bad.id]);
+  assert.equal(floorCheck(EMPTY, shardCount), false, "an empty plan must not pass the floor");
+  assert.equal(floorCheck(EMPTY, 0), false);
+  assert.equal(floorCheck(publicPlan, shardCount), true);
 });
