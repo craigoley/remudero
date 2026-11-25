@@ -751,6 +751,8 @@ export interface ReviewEvidence {
   priorInconclusiveLoad1?: number;
   /** Exact-proof prior loads recovered for this head by the production decision preparation. */
   priorInconclusiveLoads?: ReadonlyMap<string, number>;
+  /** W1-T13945: per proof, the load1 the prior pending review of this head STARTED that proof at (not the busier reading). */
+  priorInconclusiveStartLoads?: ReadonlyMap<string, number>;
   /** Host-load seam for the proof start/end readings; defaults to {@link sampleHostLoad}. */
   sampleLoad?: () => HostLoadSample;
   /** W1-T3525: reuse caller-resolved owner/repo (e.g. resolveDaemonTarget, W1-T1062), never re-derive.
@@ -4371,6 +4373,8 @@ export interface ProofExecContext {
    *  {@link ReviewEvidence.sampleLoad}. */
   hostedCiFilePassed?: ReadonlyMap<string, "passed" | "failed">;
   priorInconclusiveLoad1?: number;
+  /** W1-T13945: the load1 the prior pending review of this head started this proof at; see rung 3 in {@link judgeCriterion}. */
+  priorInconclusiveStartLoad1?: number;
   sampleLoad?: () => HostLoadSample;
   executionLoadsRecorded?: boolean;
   /** Source observed by the bounded async review path, not an unverified report string. */
@@ -5066,7 +5070,20 @@ export function judgeCriterion(
             );
           } else if (whitelisted.kind === "test" && endedByTimeoutSignalOrSpawnError(e)) {
             // A timeout, a signal or a sandbox exec_error ended the run: it reached no verdict about the criterion.
-            inconclusiveUnderLoad(`could not complete (${e instanceof Error ? e.message.split("\n")[0].slice(0, 120) : "exec error"})`);
+            const ranAt = whitelisted.executionLoad?.start.load1;
+            const priorStart = execCtx.priorInconclusiveStartLoad1;
+            const cause = e instanceof Error ? e.message.split("\n")[0].slice(0, 120) : "exec error";
+            if (priorStart !== undefined && typeof ranAt === "number" && ranAt <= priorStart) {
+              // W1-T13945 rung 3: a second attempt that started at or below the prior attempt's load and still could not
+              // complete is not load-attributed again — the proof itself is slow or broken, so the review fails.
+              proofExec = "exec_error";
+              proofSkip = "exec-error";
+              met = false;
+              proofLoad = whitelisted.executionLoad;
+              reason = `${reason} — FAIL: proof (${whitelisted.kind}: ${whitelisted.label}) could not complete twice ` +
+                `(${cause}); the prior attempt started at load1 ${priorStart} and this one at load1 ${ranAt}, so host load ` +
+                "does not explain it — fix the slow or broken proof";
+            } else inconclusiveUnderLoad(`could not complete (${cause})`);
           } else {
             proofExec = "exec_error";
             proofSkip = "exec-error";
@@ -6064,10 +6081,15 @@ export async function preparePromisedReviewDecision(args: {
   }) : undefined;
   const priorVerdict = priorRow?.decision_verdict as ReviewVerdict | undefined;
   const priorInconclusiveLoads = new Map<string, number>();
+  const priorInconclusiveStartLoads = new Map<string, number>();
   if (priorRow?.head_sha === input.headSha && priorRow?.state === "pending") {
     for (const criterion of priorVerdict?.criteria ?? []) {
       const load = recordedLoad1(criterion.load);
       if (criterion.proof_exec === "inconclusive_load" && load !== undefined) priorInconclusiveLoads.set(criterion.proof, load);
+      const startLoad = criterion.load?.start.load1;
+      if (criterion.proof_exec === "inconclusive_load" && typeof startLoad === "number") {
+        priorInconclusiveStartLoads.set(criterion.proof, startLoad);
+      }
     }
   }
   let withinFoldReuses = 0;
@@ -6079,7 +6101,7 @@ export async function preparePromisedReviewDecision(args: {
       const verdict = await judgeReviewAsync([...input.acceptance], {
         ...evidence, diff: input.diff, report: input.report, implementationReport: input.implementationReport,
         headCheckoutDir, promisedFollowUpObservation: observation,
-        priorInconclusiveLoads,
+        priorInconclusiveLoads, priorInconclusiveStartLoads,
         ...(useDefault ? { asyncExecProof: defaultProofExecutor } : {}),
       });
       if (!useDefault) return verdict;
@@ -6578,8 +6600,9 @@ export function judgeReview(
       c,
       reportTokens,
       evidence.semantic?.[i],
-      execCtx && evidence.priorInconclusiveLoads
-        ? { ...execCtx, priorInconclusiveLoad1: evidence.priorInconclusiveLoads.get(c.proof) } : execCtx,
+      execCtx && (evidence.priorInconclusiveLoads || evidence.priorInconclusiveStartLoads)
+        ? { ...execCtx, priorInconclusiveLoad1: evidence.priorInconclusiveLoads?.get(c.proof),
+          priorInconclusiveStartLoad1: evidence.priorInconclusiveStartLoads?.get(c.proof) } : execCtx,
       evidence.reportIsSubstitute,
       evidence.semanticClauses?.[i],
       evidence.reportSubstituteCause,

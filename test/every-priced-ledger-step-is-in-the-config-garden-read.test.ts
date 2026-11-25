@@ -99,6 +99,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "sweep.review_eligible": A_LANE_RUN_ID,
   "sweep.review_requeued": A_LANE_RUN_ID, // W1-T11847: the reviewer-code requeue names pr_url, under the sweep pass's run_id
   "sweep.review_setup_refused.escalated": A_LANE_RUN_ID, // W1-T13193: the held setup refusal's one escalation, under the sweep pass's run_id
+  "review.withheld_exhausted": A_LANE_RUN_ID, // W1-T13945: the rung-4 hold row, written under the sweep pass's run_id
   "sweep.review_rerun_contradiction": A_LANE_RUN_ID, // W1-T12994: a review the disposition asked for and its dedup refused, under the sweep pass's run_id
   "sweep.review_reuse_unreadable": A_LANE_RUN_ID, // the hydration receipt's own sweep-review-reuse- run id has no run.start
   "sweep.reviewer_freshness_probe": A_LANE_RUN_ID, // W1-T5771: the freshness re-probe, under SWEEP-/DAEMON- run ids
