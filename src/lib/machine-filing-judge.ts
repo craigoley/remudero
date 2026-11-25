@@ -1,4 +1,4 @@
-import { operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, releaseContractPins, type ReleaseEvidence } from "./operator-release.js";
+import { legacyOperatorReleasePin, operatorReleaseContractChanged, operatorReleasePin, qualifyReleaseEvidence, releaseContractPins, releasePinMatches, type ReleaseEvidence } from "./operator-release.js";
 import { stampVerificationAsk } from "./inbox-retirement.js";
 /**
  * lib/machine-filing-judge.ts — the LLM judge in the middle of machine-filed work (operator ruling
@@ -139,6 +139,27 @@ export function recordOperatorRelease(stateDir: string, task: Task, atIso: strin
   records.set(task.id, { ...(previous !== null && typeof previous === "object" ? previous : {}),
     at: atIso, pin, ...(legacy === undefined ? {} : { legacy }) });
   writeAtomic(path, JSON.stringify({ releases: Object.fromEntries(records) }) + "\n");
+}
+
+/** W1-T14721: re-records, under the current formula, each durable release whose pin matches only the legacy one
+ *  (priority and expedite inside it), keeping its original `at` and its old pin as `legacy`. Such a pin matches only
+ *  while the task's priority is unchanged, so the first re-rank after W1-T14661 voided it. A record already current, one
+ *  matching neither formula, a string entry and a reapproval hold (not in this file) are left as they are, so the
+ *  operator authors qualifyReleaseEvidence returns are the same after it. One atomic write, none when nothing moved. */
+export function reRecordLegacyOperatorReleasePins(stateDir: string, tasks: ReadonlyMap<string, Task>): string[] {
+  const records = readOperatorReleaseFileRecords(stateDir);
+  const moved: string[] = [];
+  for (const [id, record] of records) {
+    const task = tasks.get(id);
+    if (task === undefined || record === null || typeof record !== "object" || Array.isArray(record)) continue;
+    const pin = (record as Record<string, unknown>).pin;
+    const current = operatorReleasePin(task);
+    if (pin === current || pin !== legacyOperatorReleasePin(task)) continue;
+    records.set(id, { ...record, pin: current, legacy: pin });
+    moved.push(id);
+  }
+  if (moved.length > 0) writeAtomic(join(stateDir, OPERATOR_RELEASES_FILE), JSON.stringify({ releases: Object.fromEntries(records) }) + "\n");
+  return moved;
 }
 
 export interface FamilyTrackRecord {
@@ -652,7 +673,7 @@ export function staleRulingPins(records: RulingPins[], main: Map<string, string>
     // and a retirement (W1-T9694) is current while the tree reads the record as it was written.
     const current = (task?.status === "queued" && task.retirement === undefined && (pin === record.sourcePin || pin === record.pin)) ||
       ((record.action === "retire" || record.action === "withdraw" || record.action === "rule-retire") && pin === record.pin);
-    const operatorCurrent = record.operatorReleasePin === undefined || (task !== undefined && operatorReleasePin(task) === record.operatorReleasePin);
+    const operatorCurrent = record.operatorReleasePin === undefined || (task !== undefined && releasePinMatches(task, record.operatorReleasePin));
     return current && operatorCurrent ? [] : [{ id: record.id, pin: record.pin, main_pin: pin }];
   });
 }
@@ -836,6 +857,8 @@ export interface MachineJudgeReport {
   waiting?: string[];
   /** W1-T8830: the parked escalations asked again this pass, whatever they answered. */
   reasked?: string[];
+  /** W1-T14721: durable operator releases this pass re-recorded from the legacy pin formula to the current one. */
+  rerecorded?: string[];
   /** W1-T9694: flake-incident records retired as main-inherited, routed to main-health. */
   retired?: string[];
   /** W1-T9043: machine escalations withdrawn after {@link MACHINE_JUDGE_UNANSWERED_WITHDRAW_DAYS} days with no ruling. */
@@ -1391,6 +1414,10 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   const excluded = new Set(ports.excludeFamilies ?? []);
   const releaseEvidence = qualifyReleaseEvidence(ports.releaseLedgerLines?.() ?? [], ports.operatorReleases?.() ?? readOperatorReleaseRecords(ports.stateDir), releaseContractPins(plan.tasks));
   if (releaseEvidence.unknownHistory) throw new Error("operator release history is unreadable: malformed ledger record");
+  // W1-T14721: the durable file at ports.stateDir is the one the production operatorReleases port reads; a pass re-records
+  // its legacy-formula releases once, after they qualified, so the next re-rank finds the current pin.
+  const rerecorded = reRecordLegacyOperatorReleasePins(ports.stateDir, plan.byId);
+  if (rerecorded.length > 0) report.rerecorded = rerecorded;
   for (const task of plan.tasks) if (operatorReleaseContractChanged(task) && releaseEvidence.authors.get(task.id) !== "operator") releaseEvidence.reapproval.add(task.id);
   const priorReapproval = new Set(state.operatorReapprovalRequired ?? []);
   state.operatorReapprovalRequired = [...releaseEvidence.reapproval].sort();
@@ -1403,7 +1430,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
       !releaseEvidence.reapproval.has(t.id) && needsMachineJudgement(t, released) &&
       // W1-T10348: a release is masked only by a settled RELEASE; a settled escalation is what it overrules.
       (released.has(t.id)
-        ? state.settledReleases?.[t.id] !== operatorReleasePin(t) && state.refusedReleases?.[t.id] !== operatorReleasePin(t)
+        ? !releasePinMatches(t, (state.settledReleases ?? {})[t.id]) && !releasePinMatches(t, (state.refusedReleases ?? {})[t.id])
         : state.settled?.[t.id] !== taskRulingPin(t) && !excluded.has(judgementFamily(t)) && state.declined?.[t.id] !== taskRulingPin(t)),
   );
   const policy = ports.riskPolicy?.() ?? DEFAULT_RISK_POLICY;
@@ -1421,13 +1448,13 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   state.settledReleases = Object.fromEntries(
     Object.entries(state.settledReleases ?? {}).filter(([id, pin]) => {
       const t = plan.byId.get(id);
-      return t !== undefined && pin === operatorReleasePin(t);
+      return t !== undefined && releasePinMatches(t, pin);
     }),
   );
   state.refusedReleases = Object.fromEntries(
     Object.entries(state.refusedReleases ?? {}).filter(([id, pin]) => {
       const t = plan.byId.get(id);
-      return t !== undefined && pin === operatorReleasePin(t);
+      return t !== undefined && releasePinMatches(t, pin);
     }),
   );
   const records = new Map<string, FamilyTrackRecord>();

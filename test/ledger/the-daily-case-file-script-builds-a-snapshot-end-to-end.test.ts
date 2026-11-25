@@ -23,8 +23,7 @@ test("W1-T14602: the daily case-file script writes a snapshot and its carry for 
     { ts: at(29), task_id: task, run_id: runId, step: "worker.assignment",
       worker_assignment: { id: "a1", selected: { provider: "claude", model: "claude-opus-5-5" } } },
     { ts: at(20), task_id: task, run_id: runId, step: "pr.opened", pr_url: "https://github.com/craigoley/remudero/pull/41001" },
-    // Called tasks with no ledger PR row are searched: one search answers a list with no hit, and
-    // one answers something that is not a list, which is kept as a read failure with its reason.
+    // W1-T14728: called tasks with no ledger PR row are looked up in one PR listing; neither is credited there.
     { ts: at(10), task_id: "W1-T20002", run_id: "W1-T20002-1795000000001", step: "worker.assignment",
       worker_assignment: { id: "a2", selected: { provider: "claude", model: "claude-opus-5-5" } } },
     { ts: at(9), task_id: "W1-T20003", run_id: "W1-T20003-1795000000002", step: "worker.assignment",
@@ -39,8 +38,7 @@ test("W1-T14602: the daily case-file script writes a snapshot and its carry for 
     { when: "pr view 41001", stdout: JSON.stringify({ number: 41001, url: "https://github.com/craigoley/remudero/pull/41001",
       state: "MERGED", headRefOid: sha, headRefName: `run-${task}-1`, body: `Remudero-Task: ${task}`,
       mergedAt: at(5), statusCheckRollup: [] }) },
-    { when: "--search W1-T20002", stdout: JSON.stringify({ message: "Validation Failed" }) },
-    { when: "--search W1-T20003", stdout: "[]" },
+    { when: "pulls?state=all", stdout: "[]" },
   ]);
   const out = join(ledger.dir, "field-trials", "case-files-latest.json");
   const env = { ...process.env, PATH: `${shim.dir}:${process.env.PATH}`, RMD_FIELD_TRIALS_REPO_ROOT: repo,
@@ -52,11 +50,10 @@ test("W1-T14602: the daily case-file script writes a snapshot and its carry for 
   assert.equal(summary.event, "field_trials.case_files");
   assert.equal(summary.candidates, 3);
   assert.equal(summary.selected, 1);
-  assert.equal(summary.searchUnreadable, 1);
-  assert.equal(summary.readFailures.length, 1);
-  assert.equal(summary.readFailures[0].target, "W1-T20002");
-  assert.match(summary.readFailures[0].error, /PR search returned no list/);
-  assert.equal(shim.calls().filter((call) => call.includes("--search W1-T20003")).length, 1);
+  assert.equal(summary.withoutPr, 2);
+  assert.deepEqual(summary.readFailures, []);
+  assert.equal(shim.calls().filter((call) => call.includes("--search")).length, 0, "no per-task search");
+  assert.equal(shim.calls().filter((call) => call.includes("pulls?state=all")).length, 1, "one listing page answers both");
   const files = JSON.parse(readFileSync(out, "utf8"));
   assert.deepEqual(files.map((file: { taskId: string }) => file.taskId), [task]);
   const carry = JSON.parse(readFileSync(join(ledger.dir, "field-trials", "case-files-carry.json"), "utf8"));
@@ -70,7 +67,7 @@ test("W1-T14602: the daily case-file script writes a snapshot and its carry for 
   assert.equal(shim.calls().filter((call) => call.includes("pr view")).length, before);
 });
 
-/** Run the real script over one called task that has no ledger PR row, with `gh pr list` answered by `listStdout`. */
+/** Run the real script over one called task that has no ledger PR row, with the PR listing answered by `listStdout`. */
 async function runWithSearch(t: import("node:test").TestContext, listStdout: string, extraRoutes: Parameters<typeof ghShim>[0] = []) {
   const now = Date.now();
   const called = "W1-T20003";
@@ -82,7 +79,8 @@ async function runWithSearch(t: import("node:test").TestContext, listStdout: str
   mkdirSync(join(repo, "plan"), { recursive: true });
   writeFileSync(join(repo, "plan", "tasks.yaml"), [`- id: ${called}`, `  title: "Task ${called}"`, "  repo: remudero", "  depends_on: []",
     "  type: implement", "  verify: auto", "  risk: high", "  status: queued", "  attempts: 0"].join("\n") + "\n");
-  const shim = ghShim([...extraRoutes, { when: "pr list", stdout: listStdout }]);
+  const shim = ghShim([...extraRoutes, { when: "pulls?state=all&sort=updated&direction=desc&per_page=100&page=1", stdout: listStdout },
+    { when: "pulls?state=all", stdout: "[]" }]);
   const out = join(ledger.dir, "field-trials", "case-files-latest.json");
   const env = { ...process.env, PATH: `${shim.dir}:${process.env.PATH}`, RMD_FIELD_TRIALS_REPO_ROOT: repo,
     RMD_FIELD_TRIALS_CORE_LEDGER: ledger.dir, RMD_FIELD_TRIALS_CASE_OUT: out,
@@ -92,30 +90,32 @@ async function runWithSearch(t: import("node:test").TestContext, listStdout: str
   return { called, out, ledger, shim, summary: JSON.parse(stdout.trim().split("\n").at(-1)!) };
 }
 
-// W1-T14602: a search that answers with a PR list links the task, so the script's search seam returns that list.
+// W1-T14602 (W1-T14728: from the PR listing): a listed PR crediting the task links it.
 test("W1-T14602: the daily case-file script links an unlinked called task to the PR its search returns", async (t) => {
   const { called, out, ledger, shim, summary } = await runWithSearch(t,
-    JSON.stringify([{ number: 41003, body: `Remudero-Task: W1-T20003`, headRefName: "feature/other", updatedAt: new Date().toISOString() }]),
+    JSON.stringify([{ number: 41003, body: `Remudero-Task: W1-T20003`, head: { ref: "feature/other" }, updated_at: new Date().toISOString() }]),
     [{ when: "pr view 41003", stdout: JSON.stringify({ number: 41003, url: "https://github.com/craigoley/remudero/pull/41003",
       state: "MERGED", headRefOid: sha, headRefName: "feature/other", body: "Remudero-Task: W1-T20003",
       mergedAt: new Date().toISOString(), statusCheckRollup: [] }) }]);
-  assert.equal(summary.searchMatched, 1);
-  assert.equal(summary.searchUnreadable, 0);
+  assert.equal(summary.linkedByListing, 1);
+  assert.equal(summary.listFailed, 0);
   assert.equal(summary.selected, 1);
   assert.deepEqual(summary.readFailures, []);
-  assert.ok(shim.calls().some((call) => call.includes("pr list") && call.includes(called)));
+  assert.ok(shim.calls().some((call) => call.includes("api") && call.includes("repos/craigoley/remudero/pulls?state=all")));
   const files = JSON.parse(readFileSync(out, "utf8"));
   assert.deepEqual(files.map((file: { taskId: string }) => file.taskId), [called]);
   const carry = JSON.parse(readFileSync(join(ledger.dir, "field-trials", "case-files-carry.json"), "utf8"));
-  assert.equal(carry.links[called], 41003);
+  assert.deepEqual(carry.listedPrs["41003"], [called], "the listing index is carried");
 });
 
-// W1-T14602: a search reply that is not a list is a failed search with a reason, never a silent empty match.
+// W1-T14602 (W1-T14728: a listing page): a reply that is not a list is a failed read with a reason, never a silent empty match.
 test("W1-T14602: the daily case-file script reports a PR search that returns no list", async (t) => {
-  const { called, summary } = await runWithSearch(t, JSON.stringify({ message: "not a list" }));
-  assert.equal(summary.searchUnreadable, 1);
+  const { summary } = await runWithSearch(t, JSON.stringify({ message: "not a list" }));
+  assert.equal(summary.listFailed, 1);
   assert.equal(summary.selected, 0);
+  assert.equal(summary.withoutPr, 0, "the task is unknown, not counted as having no PR");
+  assert.equal(summary.unlinkedListingFailed, 1);
   assert.equal(summary.readFailures.length, 1);
-  assert.equal(summary.readFailures[0].target, called);
-  assert.match(summary.readFailures[0].error, /PR search returned no list/);
+  assert.equal(summary.readFailures[0].target, "page 1");
+  assert.match(summary.readFailures[0].error, /PR listing page 1 returned no list/);
 });

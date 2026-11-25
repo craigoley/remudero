@@ -99,18 +99,46 @@ if [ "$1" = -l ]; then cat "$CRONTAB_SNAPSHOT"; else cat > "$CRONTAB_SNAPSHOT"; 
 /**
  * A real historical Bash 3.2, never vendored and never substituted: the host's /bin/bash when it reports 3.2 (macOS),
  * else an absolute RMD_TEST_BASH32 executable whose BASH_VERSION is 3.2. Undefined otherwise; every 3.2 leg then
- * skips under {@link BASH32_SKIP}, so a current bash is never counted as a 3.2 qualification.
+ * skips under {@link BASH32_SKIP}, so a current bash is never counted as a 3.2 qualification. With
+ * RMD_TEST_BASH32_REQUIRED=1 (W1-T11263: each ci.yml job that builds the pinned 3.2 exports it beside RMD_TEST_BASH32)
+ * an unresolved leg throws instead of skipping; CI alone does not, so a nightly that builds no 3.2 is unaffected.
  */
 const BASH32_SKIP = "needs a real bash 3.2 (native /bin/bash 3.2 or RMD_TEST_BASH32); W1-T11263 builds one in CI";
-function bash32(): { shell: string; env: NodeJS.ProcessEnv; version: string } | undefined {
-  const candidates = [process.platform === "darwin" ? "/bin/bash" : undefined, process.env.RMD_TEST_BASH32]
+function bash32(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform):
+  { shell: string; env: NodeJS.ProcessEnv; version: string } | undefined {
+  const candidates = [platform === "darwin" ? "/bin/bash" : undefined, env.RMD_TEST_BASH32]
     .filter((shell): shell is string => typeof shell === "string" && isAbsolute(shell));
   for (const shell of candidates) {
     const version = spawnSync(shell, ["-c", 'printf "%s" "$BASH_VERSION"'], { encoding: "utf8" });
     if (version.status === 0 && /^3\.2\./.test(version.stdout)) return { shell, env: {} as NodeJS.ProcessEnv, version: version.stdout };
   }
+  if (env.RMD_TEST_BASH32_REQUIRED === "1") {
+    throw new Error(`the bash 3.2 leg is unmeasured in CI: neither native /bin/bash nor RMD_TEST_BASH32=${
+      env.RMD_TEST_BASH32 ?? "(unset)"} reports 3.2 (ci.yml's W1-T11263 build step exports it)`);
+  }
   return undefined;
 }
+test("bash 3.2 resolution (W1-T11263 criterion 2): with RMD_TEST_BASH32_REQUIRED=1 an unmeasured or non-3.2 leg fails; without it, CI included, it stays UNMEASURED", t => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}bash32-resolver-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fake = (name: string, version: string) => {
+    const path = join(root, name);
+    writeFileSync(path, `#!/bin/sh\nprintf '%s' '${version}'\n`, { mode: 0o700 });
+    return path;
+  };
+  const old = fake("bash-3.2", "3.2.57(1)-release"), current = fake("bash-current", "5.2.37(1)-release");
+  const unmeasured = /the bash 3\.2 leg is unmeasured in CI/;
+  for (const value of [undefined, current, "bash-3.2", join(root, "absent")]) {
+    assert.throws(() => bash32({ CI: "true", RMD_TEST_BASH32_REQUIRED: "1", RMD_TEST_BASH32: value }, "linux"), unmeasured,
+      `required with RMD_TEST_BASH32=${value}`);
+    for (const env of [{ RMD_TEST_BASH32: value }, { CI: "true", RMD_TEST_BASH32: value }, { RMD_TEST_BASH32_REQUIRED: "0", RMD_TEST_BASH32: value }]) {
+      assert.equal(bash32(env, "linux"), undefined, `${JSON.stringify(env)} reads UNMEASURED, as on main`);
+    }
+  }
+  for (const env of [{ RMD_TEST_BASH32_REQUIRED: "1", RMD_TEST_BASH32: old }, { RMD_TEST_BASH32: old }]) {
+    assert.deepEqual(bash32(env, "linux"), { shell: old, env: {}, version: "3.2.57(1)-release" }, "a binary reporting 3.2 is measured");
+  }
+});
 const CURRENT_BASH = { shell: "bash", env: {} as NodeJS.ProcessEnv };
 type Interpreter = { shell: string; env: NodeJS.ProcessEnv };
 /**
@@ -875,6 +903,7 @@ test("bash 3.2 runs the old and maintained shell consumers and launchers with un
   assert.equal(qualified32.stdout, before.stdout);
   assert.deepEqual(qualified32.calls, before.calls);
   const h32 = registryShellFixture(t); h32.capture();
+  const maintainedPath = h32.env.PATH;
   const historicalBin = join(h32.root, "historical-bin"); mkdirSync(historicalBin);
   symlinkSync(historical.shell, join(historicalBin, "bash"));
   h32.env.PATH = `${historicalBin}:${h32.env.PATH}`;
@@ -882,31 +911,61 @@ test("bash 3.2 runs the old and maintained shell consumers and launchers with un
   const oldDeploy32 = join(h32.root, "old-deploy"); mkdirSync(oldDeploy32);
   for (const name of readdirSync(join(REPO_ROOT, "deploy"))) symlinkSync(
     join(name === "install-host-units.sh" ? pinned : REPO_ROOT, "deploy", name), join(oldDeploy32, name));
-  const oldInstall32 = h32.run(join(oldDeploy32, "install-host-units.sh"), ["--install"], {}, historical.shell);
+  // W1-T11263 step 3: since #20624 (W1-T14611) a no-instance install names the ONE registry row matching its container
+  // and state dir, which the pinned pre-#20624 installer cannot. The strict old-vs-new equality therefore runs against
+  // a registry whose only row matches neither side (both render INSTANCE_ENV_ARGS=()); the matching row is proven below.
+  const unmatched = join(h32.root, "unmatched-registry.yaml");
+  writeFileSync(unmatched, readFileSync(h32.legacy, "utf8").replace(`state_dir: ${h32.state}\n`,
+    `state_dir: ${join(h32.root, "no-matching-state")}\n`));
+  assert.notEqual(readFileSync(unmatched, "utf8"), readFileSync(h32.legacy, "utf8"), "the unmatched registry moves the row's state_dir");
+  const noRow = { RMD_INSTANCE_REGISTRY: unmatched };
+  const launcherText = () => readFileSync(join(h32.output, "launcher"), "utf8");
+  const namesInstance = (calls: ReturnType<typeof h32.receipts>) => JSON.stringify(calls).includes("RMD_INSTANCE_NAME");
+  const oldInstall32 = h32.run(join(oldDeploy32, "install-host-units.sh"), ["--install"], noRow, historical.shell);
   assert.equal(oldInstall32.status, 0, oldInstall32.stdout + oldInstall32.stderr);
-  const oldBoot32 = h32.run(join(h32.output, "launcher"), ["--boot"], {}, historical.shell);
+  const oldBoot32 = h32.run(join(h32.output, "launcher"), ["--boot"], noRow, historical.shell);
   assert.equal(oldBoot32.status, 0, oldBoot32.stdout + oldBoot32.stderr);
   const oldDocker32 = h32.receipts().filter(c => c.bin === "docker");
   writeFileSync(join(h32.root, "calls.ndjson"), "");
-  const newInstall32 = h32.run(join(REPO_ROOT, "deploy/install-host-units.sh"), ["--install"], {}, historical.shell);
+  const newInstall32 = h32.run(join(REPO_ROOT, "deploy/install-host-units.sh"), ["--install"], noRow, historical.shell);
   assert.equal(newInstall32.status, oldInstall32.status, newInstall32.stdout + newInstall32.stderr);
-  const newBoot32 = h32.run(join(h32.output, "launcher"), ["--boot"], {}, historical.shell);
+  assert.match(launcherText(), /^INSTANCE_ENV_ARGS=\(\)$/m, "the maintained installer finds no matching row to name");
+  const newBoot32 = h32.run(join(h32.output, "launcher"), ["--boot"], noRow, historical.shell);
   assert.equal(newBoot32.status, oldBoot32.status, newBoot32.stdout + newBoot32.stderr);
   assert.equal(newBoot32.stdout, oldBoot32.stdout);
   const newDocker32 = h32.receipts().filter(c => c.bin === "docker");
+  assert.ok(newDocker32.some(c => c.args[0] === "run") && !namesInstance(newDocker32), "no launch names an instance without a matching row");
   assert.deepEqual(newDocker32, oldDocker32,
     "Bash 3.2 old and new installers and rendered launchers keep no-option Docker effects");
   const qualifiedOffset = h32.receipts().length;
   const install32 = h32.run(join(REPO_ROOT, "deploy/install-host-units.sh"),
-    ["--install", "--selected-registry-shadow", h32.session], {}, historical.shell);
+    ["--install", "--selected-registry-shadow", h32.session], noRow, historical.shell);
   assert.equal(install32.status, 0, install32.stderr);
-  const boot32 = h32.run(join(h32.output, "launcher"), ["--boot"], {}, historical.shell);
+  const boot32 = h32.run(join(h32.output, "launcher"), ["--boot"], noRow, historical.shell);
   assert.equal(boot32.status, oldBoot32.status, boot32.stdout + boot32.stderr);
   assert.equal(boot32.stdout, oldBoot32.stdout);
   assert.deepEqual(h32.receipts().slice(qualifiedOffset).filter(c => c.bin === "docker"), newDocker32,
     "Bash 3.2 qualification leaves generated launcher Docker arguments and effects unchanged");
   assert.ok(h32.receipts().some(c => c.bin === "docker" && c.args[0] === "run"));
   assert.ok(h32.rows().some(r => r.action === "launcher"));
+  // The matching row (the fixture's own registry): bash 3.2 gives exactly the Docker effects, -e RMD_INSTANCE_NAME
+  // included, that the maintained bash gives for the same install and boot. Nothing is stripped before comparing.
+  const matchedRun = (shell: string, path: string) => {
+    writeFileSync(join(h32.root, "calls.ndjson"), "");
+    const install = h32.run(join(REPO_ROOT, "deploy/install-host-units.sh"), ["--install"], { PATH: path }, shell);
+    assert.equal(install.status, 0, install.stdout + install.stderr);
+    assert.match(launcherText(), /^INSTANCE_ENV_ARGS=\(-e RMD_INSTANCE_NAME=core\)$/m, `${shell}: the matching row names its instance`);
+    const boot = h32.run(join(h32.output, "launcher"), ["--boot"], { PATH: path }, shell);
+    assert.equal(boot.status, 0, boot.stdout + boot.stderr);
+    return { stdout: boot.stdout, docker: h32.receipts().filter(c => c.bin === "docker") };
+  };
+  const matched32 = matchedRun(historical.shell, h32.env.PATH!);
+  const matchedMaintained = matchedRun("bash", maintainedPath!);
+  assert.ok(matched32.docker.some(c => c.args[0] === "run" && c.args.some((arg, i) => arg === "-e" && c.args[i + 1] === "RMD_INSTANCE_NAME=core")),
+    "the bash 3.2 launch passes -e RMD_INSTANCE_NAME=core");
+  assert.equal(matched32.stdout, matchedMaintained.stdout);
+  assert.deepEqual(matched32.docker, matchedMaintained.docker,
+    "Bash 3.2 gives exactly the maintained bash's Docker effects, -e RMD_INSTANCE_NAME included, for a matching row");
   t.diagnostic(`old/new scripts and generated launchers executed with Bash ${historical.version}`);
 });
 

@@ -13,6 +13,7 @@ import {
   type PollDeps,
 } from "#src/run-task.js";
 import type { Config } from "#src/lib/config.js";
+import { GH_CHECK_IDENTITY_UNREADABLE } from "#src/lib/daemon.js";
 import type { ProbeExecResult } from "#src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
@@ -231,5 +232,31 @@ test("BEHAVIORAL: runTask writes the enriched blocked_ci reason to its terminal 
     rmSync(gh.dir, { recursive: true, force: true });
     cleanupGit();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T14710 a check rollup whose producer identity is unreadable throws with the code that ends only its lane", async () => {
+  for (const [message, workflowRuns] of [
+    ["workflow producer identity incomplete for independent check runs", { workflow_runs: [{ id: 11, workflow_id: 7 }] }],
+    ["workflow producer identity response unavailable", { not_runs: true }],
+  ] as const) {
+    const deps: PollDeps = {
+      readJson: async (args) => {
+        const request = args.join(" ");
+        if (request.includes("/pulls/1")) return { number: 1, state: "open", merged: false, merged_at: null, head: { sha: "deadbeef" } };
+        if (request.includes("/check-runs")) {
+          // Two same-named checks from two workflow runs; the listing below names only one of them.
+          return { check_runs: [11, 12].map((run) => ({ name: "ci-gate", status: "completed", conclusion: "success",
+            details_url: `https://github.com/acme/remudero/actions/runs/${run}/job/${run}0` })) };
+        }
+        if (request.includes("/status")) return { statuses: [] };
+        if (request.includes("/actions/runs?head_sha=")) return workflowRuns;
+        throw new Error(`unexpected REST request: ${request}`);
+      },
+      sleep: async () => {},
+      requiredContexts: () => undefined,
+    };
+    await assert.rejects(waitForCiGreen(PR_URL, () => {}, 0, deps),
+      (error: Error & { code?: string }) => error.message === message && error.code === GH_CHECK_IDENTITY_UNREADABLE);
   }
 });

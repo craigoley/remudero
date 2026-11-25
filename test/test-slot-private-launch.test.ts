@@ -85,6 +85,10 @@ test("private NOT_RUN cannot become a ran or successful result in the worker too
 });
 test("private NOT_RUN refuses author static work and native calibration before their heavy children", async t => {
   occupied(t); const f = makeRuntimeFixture(); t.after(() => f.cleanup());
+  // Hermetic: the runtime profile refuses any NODE_OPTIONS flag it does not model (a cloud shell's
+  // --use-openssl-ca), which would answer before the slot check this test pins.
+  const savedNodeOptions = process.env.NODE_OPTIONS; delete process.env.NODE_OPTIONS;
+  t.after(() => { if (savedNodeOptions === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = savedNodeOptions; });
   const author = await import(pathToFileURL(resolve("scripts/preflight-author.mjs")).href);
   const calibrator = await import(pathToFileURL(resolve("scripts/calibrate-author-runtime.mjs")).href);
   const select = () => ({ fullRun: false, suites: ["test/a.test.ts"], reasons: ["physical fixture"] });

@@ -117,8 +117,8 @@ test("migration preview reads a measured healthy catalog above 32 MiB and still 
 });
 
 test("migration preview respects the actual private reader capacity contract", async t => {
-  // Published reader limits, not host-admission overrides: 256 KiB/blob, 8 MiB total,
-  // 500 YAML shards and 10,000 cumulative tree entries. All cases use real Git; the fixed bounds run the CLI.
+  // The reader's derived bounds, not host-admission overrides (W1-T14638 removed the fixed per-blob and tree-entry
+  // ceilings). All cases use real Git; the fixed bounds run the CLI.
   const emptyAtBytes = (bytes: number) => "[]\n#" + "x".repeat(bytes - 5) + "\n";
   const maximum = 8 * 1024 * 1024;
   const blob = 256 * 1024;
@@ -131,14 +131,16 @@ test("migration preview respects the actual private reader capacity contract", a
     assert.equal(result.answer.candidate.id, "W1-T1");
     assert.equal(result.answer.permission, "not_granted");
   });
+  // W1-T14638: no count of tree entries and no one shard's byte size refuses a private snapshot; both cases were refused
+  // by fixed ceilings (256 KiB per blob, 10,000 cumulative tree entries) and now read as the control does.
   const cases = [
-    { name: "a blob larger than the private reader accepts", text: emptyAtBytes(blob + 1), seed: {} },
-    { name: "unselected root entries still count toward the private tree bound", text: "[]\n", seed: Object.fromEntries(Array.from({ length: 10000 }, (_, i) => [`metadata-${i}`, ""])) },
+    { name: "a blob larger than the old per-blob ceiling is no refusal", text: emptyAtBytes(blob + 1), seed: {} },
+    { name: "unselected root entries past the old tree-entry ceiling are no refusal", text: "[]\n", seed: Object.fromEntries(Array.from({ length: 10000 }, (_, i) => [`metadata-${i}`, ""])) },
   ];
   for (const entry of cases) await t.test(entry.name, sub => {
     const result = fixture(sub, undefined, entry.text, {}, entry.seed).run();
-    assert.equal(result.status, 1, JSON.stringify(result.answer));
-    assert.equal(result.answer.outcome, "unknown");
+    assert.equal(result.status, 0, JSON.stringify(result.answer));
+    assert.equal(result.answer.candidate.id, "W1-T1");
     assert.equal(result.answer.permission, "not_granted");
   });
   // The catalog's growth is not bounded: past 500 shards the copy's one more shard is admitted, however fast it grew.

@@ -2745,10 +2745,15 @@ function refillLaneLocalRejection(err: unknown): boolean {
   return ghLaneReadFailure(err) !== undefined || laneDeliveryFailure(err) !== undefined;
 }
 
+/** A run's check rollup could not name which workflow produced its same-named check runs: a read of GitHub that
+ *  disagreed with itself, which ends that run's lane and never the daemon (2026-11-24 17:06Z cold start). */
+export const GH_CHECK_IDENTITY_UNREADABLE = "GH_CHECK_IDENTITY_UNREADABLE";
+
 function ghLaneReadFailure(err: unknown): { detail: string } | undefined {
   if (typeof err !== "object" || err === null) return undefined;
   const failure = err as NodeJS.ErrnoException & { stderr?: string | Buffer };
   const message = String(failure.message ?? "");
+  if (failure.code === GH_CHECK_IDENTITY_UNREADABLE) return { detail: message };
   if (!/(?:^|\s)gh(?:\s|$)/i.test(message)) return undefined;
   if (!/commits\/[^/\s]+\/(?:check-runs|status)\b/i.test(message)) return undefined;
   const detail = [message, failure.stderr == null ? "" : String(failure.stderr), failure.code ?? ""]
