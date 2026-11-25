@@ -59,6 +59,10 @@ permissions:
 # step does not, so a SOURCE pull request keeps one instrumented test verdict at either value.
 env:
   RMD_AFFECTED_SUITE_LIVE: "0"
+  # W1-T11263: sha256 of https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz (2,529,838 bytes), whose GNU .sig
+  # verified GOOD on 2026-11-24 against key 7C01 35FB 088A AF6C 66C6 50B9 BB58 69F0 64EA 74AB (Chet Ramey)
+  # from https://ftp.gnu.org/gnu/gnu-keyring.gpg. Each job that runs the shell-consumer suite builds it.
+  BASH32_SHA256: "26c99025b59e30779300b68adb764f824974d267a4d7cc1b347d14a2393f9fb4"
 
 # R-50: a force-push mid-run left the superseded PR run competing for the same CI-minute budget as
 # its replacement, so group by PR number and let a PR's own runs cancel their predecessor.
@@ -168,9 +172,6 @@ jobs:
             BROWSER="$(node scripts/ci-shard-admission.mjs --changed-files admission-files.txt --shard 2)" || BROWSER="true"
             case "$BROWSER" in false) ;; *) BROWSER="true" ;; esac
           fi
-          if [ "$SETUP" != "false" ] && [ "${{ matrix.shard }}" = "1" ] && [ -n "$(node scripts/flake-screen.mjs --list 2>/dev/null || echo unknown)" ]; then
-            BROWSER="true"
-          fi
           echo "setup=${SETUP}" >> "$GITHUB_OUTPUT"
           echo "browser=${BROWSER}" >> "$GITHUB_OUTPUT"
           echo "- ci shard ${{ matrix.shard }}/8: setup=${SETUP}, browser=${BROWSER} (W1-T5697: shard 1 keeps setup for Typecheck; its browser serves Test, or a ci.yml diff's guard-mutation suites); full required coverage is unchanged." >> "$GITHUB_STEP_SUMMARY"
@@ -186,16 +187,6 @@ jobs:
             npm ci
           else
             echo "CI admission: no dependency install for an idle source shard."
-          fi
-      - name: Read this run's dependency evidence
-        if: ${{ needs.commitlint.outputs.dependency_digest != '' && steps.admission.outputs.setup != 'false' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "ci-dependency-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --dir "$RUNNER_TEMP/ci-dependency-evidence"; then
-            chmod 400 "$RMD_CI_DEPENDENCY_EVIDENCE"
-          else
-            echo "::warning::Dependency artifact unavailable; machine-filing lint remains UNKNOWN."
           fi
       - name: Determine Playwright's pinned browser version (cache key input)
         id: playwright-version
@@ -231,6 +222,58 @@ jobs:
           else
             echo "CI admission: no browser download for an idle source shard."
           fi
+      # W1-T11263: every job that can run test/selected-registry-shell-consumers.test.ts restores or builds the
+      # pinned bash 3.2 and exports RMD_TEST_BASH32_REQUIRED=1, under which an UNMEASURED 3.2 leg fails the suite.
+      # RESTORE ONLY (actions/cache/restore): these jobs run PR code and download artifacts, so they must never
+      # write the cache (CodeQL cache poisoning). A miss builds from the sha-verified tarball, only in a shard
+      # whose selected files include the suite (see the provisioner below), and saves nothing.
+      - name: Restore the pinned bash 3.2 build (W1-T11263)
+        id: bash32-cache
+        if: ${{ steps.admission.outputs.setup != 'false' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bash32
+          key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}
+      - name: Stage the pinned bash 3.2 provisioner (W1-T11263)
+        # Writes $RUNNER_TEMP/bash32-provision.sh, byte-identical in every job. The step that runs this shard's
+        # tests calls it with the exact file list it runs, so only a shard that runs
+        # test/selected-registry-shell-consumers.test.ts builds bash 3.2 and exports RMD_TEST_BASH32(_REQUIRED).
+        run: |
+          cat > "$RUNNER_TEMP/bash32-provision.sh" <<'BASH32_PROVISION'
+          # W1-T11263: bash32-provision.sh <the test files this shard runs> <env file to write, KEY=VALUE lines>
+          set -euo pipefail
+          LIST="$1"
+          ENV_FILE="$2"
+          SUITE="test/selected-registry-shell-consumers.test.ts"
+          OUT="$RUNNER_TEMP/bash32"
+          [ -f "$LIST" ] || { echo "::error::W1-T11263: no selected test-file list at ${LIST}."; exit 1; }
+          : > "$ENV_FILE"
+          if grep -qxF "$SUITE" "$LIST"; then
+            if [ ! -x "$OUT/bash" ]; then
+              SRC="$RUNNER_TEMP/bash32-src"
+              mkdir -p "$SRC" "$OUT"
+              curl --fail --silent --show-error --location --retry 3 --output "$SRC/bash-3.2.tar.gz" https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz
+              echo "${BASH32_SHA256}  $SRC/bash-3.2.tar.gz" | sha256sum --check --strict
+              tar -xzf "$SRC/bash-3.2.tar.gz" -C "$SRC"
+              cd "$SRC/bash-3.2"
+              BASH32_CFLAGS="-O2 -std=gnu89 -fpermissive -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
+              # support/ helpers (bashversion, mksyntax) build with CC_FOR_BUILD/CFLAGS_FOR_BUILD, not CFLAGS: CC carries the
+              # dialect flags (CC_FOR_BUILD defaults to $(CC)) and both flag sets are passed, so gcc 14 never sees C99 rules.
+              ./configure --quiet --without-bash-malloc CC="gcc -std=gnu89 -fpermissive" CFLAGS="$BASH32_CFLAGS" CFLAGS_FOR_BUILD="$BASH32_CFLAGS"
+              make -s
+              cp bash "$OUT/bash"
+            fi
+            VERSION="$("$OUT/bash" --version | sed -n 1p)"
+            if ! printf '%s' "$VERSION" | grep -q 'version 3\.2\.'; then
+              echo "::error::W1-T11263: $OUT/bash reports '${VERSION}', not bash 3.2."
+              exit 1
+            fi
+            echo "W1-T11263: this shard runs ${SUITE}; RMD_TEST_BASH32=$OUT/bash (${VERSION})."
+            printf 'RMD_TEST_BASH32=%s\nRMD_TEST_BASH32_REQUIRED=1\n' "$OUT/bash" > "$ENV_FILE"
+          else
+            echo "W1-T11263: this shard does not run ${SUITE}, so no bash 3.2 is built."
+          fi
+          BASH32_PROVISION
       - name: Typecheck
         # §5 TIER 2, quality gate 4/4 (W1-T98): this step is TS-strict's actual enforcement. A
         # strict-mode violation anywhere in src/**/test/** fails it and blocks merge via ci-gate.
@@ -329,6 +372,67 @@ jobs:
             echo "- W1-T5940: merge group selection: **full run** (the selection was unusable)." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "- W1-T5940: merge group selection: **$(grep -c . merge-group-suites.txt)** suite(s) of $(find test -type f -name '*.test.ts' | grep -c .)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Provision bash 3.2 when this ci shard runs the shell-consumer suite (W1-T11263)
+        # Before "Read this run's dependency evidence", so the bash 3.2 build finishes before any artifact is
+        # downloaded in this job. It decides this shard's files with the Test step's own lane rules and command lines
+        # (rename-only, the TEST_ONLY / merge-group / plan-reading candidates through --select-candidates, the shard-1
+        # full fallback; the SOURCE lane runs only the fast tier, which never holds the slow-tier suite). ciShard() in
+        # test/a-diff-with-no-src-path-skips-coverage-but-not-its-tests.test.ts runs both steps and compares them.
+        if: ${{ steps.admission.outputs.setup != 'false' }}
+        env:
+          RENAME_ONLY: ${{ steps.classify.outputs.rename_only }}
+        run: |
+          CLASS="${{ steps.classify.outputs.class }}"
+          : > bash32-ci-files.txt
+          if [ "${RENAME_ONLY:-false}" != "true" ]; then
+            TEST_ONLY_RUN="$(head -n 1 test-only-run.txt 2>/dev/null || true)"
+            case "$TEST_ONLY_RUN" in
+              files) CLASS="TEST_ONLY" ;;
+              full) ;;
+              *) TEST_ONLY_RUN="" ;;
+            esac
+            TIER_BASE="HEAD"
+            if [ -n "${GITHUB_BASE_REF}" ]; then
+              TIER_BASE="origin/${GITHUB_BASE_REF}"
+            fi
+            MERGE_GROUP_SEL="$(head -n 1 merge-group-suites.txt 2>/dev/null || true)"
+            if [ "$CLASS" = "SOURCE" ] && [ "${GITHUB_EVENT_NAME}" = "merge_group" ] && [ -n "$MERGE_GROUP_SEL" ] && [ "$MERGE_GROUP_SEL" != "full" ]; then
+              CLASS="AFFECTED"
+            fi
+            if [ "$CLASS" != "SOURCE" ]; then
+              if [ "$CLASS" = "TEST_ONLY" ]; then
+                SUITES="$(tail -n +2 test-only-run.txt)"
+              elif [ "$CLASS" = "AFFECTED" ]; then
+                SUITES="$(cat merge-group-suites.txt 2>/dev/null || true)"
+              else
+                SUITES="$(node --import tsx scripts/diff-class.mjs --list-plan-reading-suites --changed-files changed-files.txt)" || SUITES=""
+              fi
+              if [ -z "$SUITES" ]; then
+                if [ "${{ matrix.shard }}" = "1" ]; then
+                  find test -type f -name '*.test.ts' > bash32-ci-files.txt
+                fi
+              else
+                printf '%s\n' "$SUITES" > plan-reading-suites.txt
+                node scripts/test-tier-manifest.mjs \
+                  --select-candidates plan-reading-suites.txt --shard ${{ matrix.shard }}/8 --base "$TIER_BASE" \
+                  > bash32-ci-files.txt 2> /dev/null || : > bash32-ci-files.txt
+              fi
+            fi
+          fi
+          if [ -f "${RUNNER_TEMP:-}/bash32-provision.sh" ]; then
+            bash "${RUNNER_TEMP}/bash32-provision.sh" bash32-ci-files.txt "${RUNNER_TEMP}/bash32.env"
+            cat "${RUNNER_TEMP}/bash32.env" >> "$GITHUB_ENV"
+          fi
+      - name: Read this run's dependency evidence
+        if: ${{ needs.commitlint.outputs.dependency_digest != '' && steps.admission.outputs.setup != 'false' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "ci-dependency-evidence-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --dir "$RUNNER_TEMP/ci-dependency-evidence"; then
+            chmod 400 "$RMD_CI_DEPENDENCY_EVIDENCE"
+          else
+            echo "::warning::Dependency artifact unavailable; machine-filing lint remains UNKNOWN."
           fi
       - name: Test
         # W1-T255: routed through scripts/test-with-retry.mjs (`npm run test:ci`), not plain
@@ -536,10 +640,6 @@ jobs:
           else
             echo "workflow-guard-mutation: not shard 1, or ci.yml is not in this diff — the guard population cannot have moved."
           fi
-      - name: Flake-screen the test files this pull request adds (scripts/flake-screen.mjs — shard 1 reruns them under load for the predicted coverage makespan; one failed run fails the shard)
-        env:
-          RMD_JOB_STARTED_MS: ${{ steps.admission.outputs.started_ms }}
-        run: node scripts/flake-screen.mjs --shard ${{ matrix.shard }}
       - name: Upload this shard's flake-retry evidence (best-effort input to ci-required's per-test aggregator, W1-T2904)
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -943,6 +1043,54 @@ jobs:
       - name: Install Playwright's Chromium (the slow tier includes browser-backed console suites)
         if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
         run: npx playwright install chromium
+      # W1-T11263: the same pinned bash 3.2 as the ci job's identical steps, which say why.
+      - name: Restore the pinned bash 3.2 build (W1-T11263)
+        id: bash32-cache
+        if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bash32
+          key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}
+      - name: Stage the pinned bash 3.2 provisioner (W1-T11263)
+        # Writes $RUNNER_TEMP/bash32-provision.sh, byte-identical in every job. The step that runs this shard's
+        # tests calls it with the exact file list it runs, so only a shard that runs
+        # test/selected-registry-shell-consumers.test.ts builds bash 3.2 and exports RMD_TEST_BASH32(_REQUIRED).
+        run: |
+          cat > "$RUNNER_TEMP/bash32-provision.sh" <<'BASH32_PROVISION'
+          # W1-T11263: bash32-provision.sh <the test files this shard runs> <env file to write, KEY=VALUE lines>
+          set -euo pipefail
+          LIST="$1"
+          ENV_FILE="$2"
+          SUITE="test/selected-registry-shell-consumers.test.ts"
+          OUT="$RUNNER_TEMP/bash32"
+          [ -f "$LIST" ] || { echo "::error::W1-T11263: no selected test-file list at ${LIST}."; exit 1; }
+          : > "$ENV_FILE"
+          if grep -qxF "$SUITE" "$LIST"; then
+            if [ ! -x "$OUT/bash" ]; then
+              SRC="$RUNNER_TEMP/bash32-src"
+              mkdir -p "$SRC" "$OUT"
+              curl --fail --silent --show-error --location --retry 3 --output "$SRC/bash-3.2.tar.gz" https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz
+              echo "${BASH32_SHA256}  $SRC/bash-3.2.tar.gz" | sha256sum --check --strict
+              tar -xzf "$SRC/bash-3.2.tar.gz" -C "$SRC"
+              cd "$SRC/bash-3.2"
+              BASH32_CFLAGS="-O2 -std=gnu89 -fpermissive -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
+              # support/ helpers (bashversion, mksyntax) build with CC_FOR_BUILD/CFLAGS_FOR_BUILD, not CFLAGS: CC carries the
+              # dialect flags (CC_FOR_BUILD defaults to $(CC)) and both flag sets are passed, so gcc 14 never sees C99 rules.
+              ./configure --quiet --without-bash-malloc CC="gcc -std=gnu89 -fpermissive" CFLAGS="$BASH32_CFLAGS" CFLAGS_FOR_BUILD="$BASH32_CFLAGS"
+              make -s
+              cp bash "$OUT/bash"
+            fi
+            VERSION="$("$OUT/bash" --version | sed -n 1p)"
+            if ! printf '%s' "$VERSION" | grep -q 'version 3\.2\.'; then
+              echo "::error::W1-T11263: $OUT/bash reports '${VERSION}', not bash 3.2."
+              exit 1
+            fi
+            echo "W1-T11263: this shard runs ${SUITE}; RMD_TEST_BASH32=$OUT/bash (${VERSION})."
+            printf 'RMD_TEST_BASH32=%s\nRMD_TEST_BASH32_REQUIRED=1\n' "$OUT/bash" > "$ENV_FILE"
+          else
+            echo "W1-T11263: this shard does not run ${SUITE}, so no bash 3.2 is built."
+          fi
+          BASH32_PROVISION
       - name: Select the merge group's suites (W1-T5940 — the same selection ci-shard makes)
         env:
           GROUP_BASE: ${{ github.event.merge_group.base_sha }}
@@ -952,6 +1100,32 @@ jobs:
           fi
           node --import tsx -e 'const r = process.cwd() + "/"; const m = await import(r + "scripts/test-tier-manifest.mjs"); await m.writeMergeGroupSelection(process.argv[1], process.argv[2], { load: (p) => import(r + p) });' \
             "$GROUP_BASE" merge-group-suites.txt || echo full > merge-group-suites.txt
+      - name: Provision bash 3.2 when this slow shard runs the shell-consumer suite (W1-T11263)
+        # "Run the slow tier" chooses its files inside its own step, so this step recomputes that choice first: the
+        # same merge-group exit and the same --run slow arguments, read through test-tier-manifest's own main() with
+        # a spawn that records instead of running. slowShard() in
+        # test/a-diff-with-no-src-path-skips-coverage-but-not-its-tests.test.ts runs both steps and compares them.
+        if: ${{ steps.plan-reading.outputs.class != 'SOURCE' && steps.plan-reading.outputs.established != 'true' }}
+        run: |
+          BASH32_SLOW_LANE="run"
+          MERGE_GROUP_SEL="$(head -n 1 merge-group-suites.txt 2>/dev/null || true)"
+          if [ "${GITHUB_EVENT_NAME}" = "merge_group" ] && [ -n "$MERGE_GROUP_SEL" ] && [ "$MERGE_GROUP_SEL" != "full" ] \
+            && node scripts/test-tier-manifest.mjs --select-candidates merge-group-suites.txt --shard 1/8 --base HEAD > /dev/null; then
+            BASH32_SLOW_LANE="merge-group"
+          fi
+          if [ "${{ steps.plan-reading.outputs.class }}" = "PUSH" ]; then
+            BASH32_SLOW_ARGS=(--run slow --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base HEAD --retry)
+          else
+            BASH32_SLOW_ARGS=(--run slow --shard ${{ matrix.shard }}/${{ needs.test-slow-plan.outputs.count }} --base "origin/${GITHUB_BASE_REF}")
+          fi
+          if [ -f "${RUNNER_TEMP:-}/bash32-provision.sh" ]; then
+            : > bash32-slow-files.txt
+            if [ "$BASH32_SLOW_LANE" = "run" ]; then
+              node --input-type=module -e 'const m = await import(process.cwd() + "/scripts/test-tier-manifest.mjs"); const files = new Set(); const env = { ...process.env }; delete env.RMD_TEST_DURATION_OUTPUT; const spawn = (cmd, args = []) => { for (const a of args) if (typeof a === "string" && a.endsWith(".test.ts")) files.add(a); return { status: 0, stdout: "", stderr: "", signal: null }; }; m.main(process.argv.slice(2), { spawn, env, log: () => {} }); (await import("node:fs")).writeFileSync(process.argv[1], [...files].join("\n") + "\n");' bash32-slow-files.txt "${BASH32_SLOW_ARGS[@]}"
+            fi
+            bash "${RUNNER_TEMP}/bash32-provision.sh" bash32-slow-files.txt "${RUNNER_TEMP}/bash32.env"
+            cat "${RUNNER_TEMP}/bash32.env" >> "$GITHUB_ENV"
+          fi
       - name: Run the slow tier (scripts/test-tier-manifest.json's slow-tier files; none recorded yet still exits 0)
         run: |
           MERGE_GROUP_SEL="$(head -n 1 merge-group-suites.txt 2>/dev/null || true)"
@@ -1711,6 +1885,78 @@ jobs:
           echo "reason=$REASON" >> "$GITHUB_OUTPUT"
           echo "coverage-floor: global $DECISION — $REASON"
 
+  # W1-T14633: the flake screen (scripts/flake-screen.mjs) is its own job. As a step of ci-shard (1/8) it
+  # waited on commitlint (`ci` needs it; shard 1 started at p50 10.1 min) and then screened for the
+  # predicted coverage makespan, so shard 1 ended after coverage-ratchet in 43 of 50 runs (W1-T14513).
+  # It needs what coverage-shard needs and no more: it reads nothing commitlint produces (no
+  # dependency digest, no producer sha), only the git diff, the committed ledgers and the lockfile.
+  # INVARIANT: its only job `if:` is the pull_request guard (a push, a merge group and a dispatch add no
+  # test file to screen, and MERGE_GROUP_REQUIRED never waits for it), and the screen step has no `if:` — a
+  # skipped screen reads as a passed one. A failed coverage-ledger skips it, as it skips coverage-shard;
+  # the REQUIRED coverage-ratchet refuses that run. A pull request that adds no test file skips only the
+  # install steps; the screen step itself runs and says it had nothing to screen. ci-gate.yml REQUIRES it.
+  # `--shard 1`: scripts/flake-screen.mjs screens only when told it is the one screening runner, which
+  # this job now is; the script, its budget and its repeats are unchanged.
+  flake-screen:
+    name: flake-screen
+    runs-on: ubuntu-26.04
+    needs: [coverage-ledger]
+    if: github.event_name == 'pull_request'
+    # W1-T1009: HEAVY band, the 35m of the ci-shard job the screen left: its window is the predicted
+    # coverage makespan less this job's own elapsed time, so it ends inside it. 1m coverage-ledger
+    # plus 35m stays strictly below ci-gate.yml's WAIT_CAP_SECONDS (4500s).
+    timeout-minutes: 35
+    steps:
+      - name: Stamp this job's start (the screen's window opens here, before checkout and install)
+        id: stamp
+        run: |
+          echo "started_ms=$(date +%s%3N)" >> "$GITHUB_OUTPUT"
+      # A plain checkout: the W1-T13825 bounded-checkout-and-retry pair is admitted only for ci and
+      # coverage-ratchet (test/helpers/checkout-retry-pair.ts), and a REQUIRED job carries no continue-on-error.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: List the test files this pull request adds (an unreadable list installs, fail-closed)
+        id: added
+        run: |
+          if [ -n "${GITHUB_BASE_REF}" ]; then
+            git fetch --no-tags origin "${GITHUB_BASE_REF}" || true
+          fi
+          ADDED="$(node scripts/flake-screen.mjs --list 2>/dev/null || echo unknown)"
+          if [ -n "$ADDED" ]; then
+            echo "setup=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "setup=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "- flake-screen: added test files: ${ADDED:-none}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Install (clean, from lockfile)
+        if: ${{ steps.added.outputs.setup == 'true' }}
+        run: npm ci
+      - name: Determine Playwright's pinned browser version (cache key input)
+        if: ${{ steps.added.outputs.setup == 'true' }}
+        id: playwright-version
+        run: |
+          VERSION="$(node -e "console.log(require('./package-lock.json').packages['node_modules/playwright'].version)")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright's Chromium download
+        if: ${{ steps.added.outputs.setup == 'true' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+      - name: Install Playwright's Chromium (an added suite may drive a real headless browser)
+        if: ${{ steps.added.outputs.setup == 'true' }}
+        # NO `--with-deps` (test/workflow-playwright-install.test.ts), as in the ci-shard install step.
+        run: npx playwright install chromium
+      - name: Flake-screen the test files this pull request adds (scripts/flake-screen.mjs — reruns them under load for the predicted coverage makespan; one failed run fails the job)
+        env:
+          RMD_JOB_STARTED_MS: ${{ steps.stamp.outputs.started_ms }}
+        run: node scripts/flake-screen.mjs --shard 1
+
   coverage-ratchet:
     # §5 TIER 2, quality gate 1/4 (W1-T25) — coverage never goes down.
     # scripts/coverage-ratchet.mjs compares this run's lcov totals against the recorded floor in
@@ -1888,6 +2134,54 @@ jobs:
             exit 0
           fi
           npx playwright install chromium
+      # W1-T11263: the same pinned bash 3.2 as the ci job's identical steps, which say why. This job
+      # admits no step condition (W1-T5844), so the restore always runs; the test step gates the build.
+      - name: Restore the pinned bash 3.2 build (W1-T11263)
+        id: bash32-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bash32
+          key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}
+      - name: Stage the pinned bash 3.2 provisioner (W1-T11263)
+        # Writes $RUNNER_TEMP/bash32-provision.sh, byte-identical in every job. The step that runs this shard's
+        # tests calls it with the exact file list it runs, so only a shard that runs
+        # test/selected-registry-shell-consumers.test.ts builds bash 3.2 and exports RMD_TEST_BASH32(_REQUIRED).
+        run: |
+          cat > "$RUNNER_TEMP/bash32-provision.sh" <<'BASH32_PROVISION'
+          # W1-T11263: bash32-provision.sh <the test files this shard runs> <env file to write, KEY=VALUE lines>
+          set -euo pipefail
+          LIST="$1"
+          ENV_FILE="$2"
+          SUITE="test/selected-registry-shell-consumers.test.ts"
+          OUT="$RUNNER_TEMP/bash32"
+          [ -f "$LIST" ] || { echo "::error::W1-T11263: no selected test-file list at ${LIST}."; exit 1; }
+          : > "$ENV_FILE"
+          if grep -qxF "$SUITE" "$LIST"; then
+            if [ ! -x "$OUT/bash" ]; then
+              SRC="$RUNNER_TEMP/bash32-src"
+              mkdir -p "$SRC" "$OUT"
+              curl --fail --silent --show-error --location --retry 3 --output "$SRC/bash-3.2.tar.gz" https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz
+              echo "${BASH32_SHA256}  $SRC/bash-3.2.tar.gz" | sha256sum --check --strict
+              tar -xzf "$SRC/bash-3.2.tar.gz" -C "$SRC"
+              cd "$SRC/bash-3.2"
+              BASH32_CFLAGS="-O2 -std=gnu89 -fpermissive -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
+              # support/ helpers (bashversion, mksyntax) build with CC_FOR_BUILD/CFLAGS_FOR_BUILD, not CFLAGS: CC carries the
+              # dialect flags (CC_FOR_BUILD defaults to $(CC)) and both flag sets are passed, so gcc 14 never sees C99 rules.
+              ./configure --quiet --without-bash-malloc CC="gcc -std=gnu89 -fpermissive" CFLAGS="$BASH32_CFLAGS" CFLAGS_FOR_BUILD="$BASH32_CFLAGS"
+              make -s
+              cp bash "$OUT/bash"
+            fi
+            VERSION="$("$OUT/bash" --version | sed -n 1p)"
+            if ! printf '%s' "$VERSION" | grep -q 'version 3\.2\.'; then
+              echo "::error::W1-T11263: $OUT/bash reports '${VERSION}', not bash 3.2."
+              exit 1
+            fi
+            echo "W1-T11263: this shard runs ${SUITE}; RMD_TEST_BASH32=$OUT/bash (${VERSION})."
+            printf 'RMD_TEST_BASH32=%s\nRMD_TEST_BASH32_REQUIRED=1\n' "$OUT/bash" > "$ENV_FILE"
+          else
+            echo "W1-T11263: this shard does not run ${SUITE}, so no bash 3.2 is built."
+          fi
+          BASH32_PROVISION
       - name: Fetch the newest nightly test impact map for the shadow selector (W1-T6107)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -2029,6 +2323,11 @@ jobs:
           if ! grep -q . coverage-test-files.txt; then
             echo "coverage-ratchet: duration-balanced test selection returned no files; refusing an empty coverage shard."
             exit 1
+          fi
+          # W1-T11263: the exact list this shard runs.
+          if [ -f "${RUNNER_TEMP:-}/bash32-provision.sh" ]; then
+            bash "${RUNNER_TEMP}/bash32-provision.sh" coverage-test-files.txt "${RUNNER_TEMP}/bash32.env" || exit 1
+            set -a; . "${RUNNER_TEMP}/bash32.env"; set +a
           fi
           mapfile -t COVERAGE_TEST_FILES < coverage-test-files.txt
           mkdir -p coverage/raw
@@ -2790,7 +3089,7 @@ jobs:
     # is empty. FALSIFIER: test/the-ci-gate-reports-on-the-merge-group-commit.test.ts.
     name: ci-gate
     runs-on: ubuntu-26.04
-    needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow-plan, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ledger, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
+    needs: [squash-trailer-gate, ci, flake-screen, flake-retry-aggregate, ci-required, test-slow-plan, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ledger, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
     # `always()` must still aggregate a FAILED dependency, but alone it also survives normal
     # cancellation and keeps a superseded PR run's concurrency slot occupied (W1-T4604).
     # GitHub re-evaluates this job condition when cancelling: the second arm releases that run.

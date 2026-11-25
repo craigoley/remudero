@@ -29,7 +29,7 @@ test("auditMergedTaskClaims runs every executable proof through the injected exe
     {
       id: "T-unresolved",
       acceptance: [
-        { claim: "a stale/renamed test", proof: "unit test: the retry loop backs off, waiting longer each time" },
+        { claim: "a stale/renamed test", proof: "unit test: the retry loop backs off, waits longer each time, and gives up" },
       ],
     },
   ];
