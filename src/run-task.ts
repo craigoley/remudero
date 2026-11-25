@@ -3166,6 +3166,7 @@ import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchRea
 // were not exported before this move and stay that way, used here under their original names.
 import { repoRoot, resolveOwnerRepo, resolveRepoRoot } from "./lib/repo-location.js";
 import { resolveVerbPlanRoot, type VerbPlanRoot } from "./lib/repo-location.js";
+import { resolveVerbTask } from "./lib/verb-task-lookup.js";
 import { planAmendmentReceipt, refusalExcerptFromFixReport, taskAwaitsAmendment } from "./lib/refusal-amendment.js";
 import { fetchPrDiff, ghPrDiffAsync, prDiffSourceAsync } from "./lib/pr-diff.js";
 import { boundGitCall, fetchOriginRetryingRefLock, fetchOriginRetryingRefLockAsync, GATEWAY_FETCH_TIMEOUT_MS, GIT_FETCH_KILL_GRACE_MS, killAfterGrace, type AsyncGitRunner } from "./lib/git-fetch-retry.js";
@@ -43964,15 +43965,15 @@ async function correctCommand(rest: string[]): Promise<number> {
     return 2;
   }
 
-  const located = verbTaskPlan(taskId);
+  const located = await resolveVerbTask(taskId, (id) => verbTaskPlan(id), instanceStateDirIfConfigured);
   if (!located.ok) {
     console.error(`rmd correct: unknown task '${taskId}' (${located.error})`);
     return 2;
   }
-  const task = located.plan.byId.get(taskId)!;
+  const task = located.task;
 
   const config = loadConfig();
-  const owner = located.target?.owner ?? resolveOwnerRepo().owner;
+  const owner = located.owner ?? resolveOwnerRepo().owner;
   const github = ghGateway(owner, task.repo);
   const ledgerPath = ledgerPathFor(config);
   const result = applyCorrection(task, prFlag, { ledgerPath, github }, { reason: flagValue(rest, "--reason") });
@@ -44019,12 +44020,13 @@ async function releaseCommand(rest: string[]): Promise<number> {
   }
 
   // W1-T10925: in a consumer instance cwd is the ENGINE checkout, whose plan never holds the target's ids.
-  const located = verbTaskPlan(taskId);
+  // W1-T14828: and since 11-17 most open tasks live only in the ops catalog.
+  const located = await resolveVerbTask(taskId, (id) => verbTaskPlan(id), instanceStateDirIfConfigured);
   if (!located.ok) {
     console.error(`rmd release: unknown task '${taskId}' (${located.error})`);
     return 2;
   }
-  const task = located.plan.byId.get(taskId)!;
+  const task = located.task;
 
   const config = loadConfig();
   const ledgerPath = ledgerPathFor(config);
@@ -44037,7 +44039,7 @@ async function releaseCommand(rest: string[]): Promise<number> {
     actor: process.env.USER ?? "operator",
     releasedBy: `operator (\`rmd release ${taskId}\`)`,
     closeIssue: (url, comment) => {
-      const owner = located.target?.owner ?? resolveOwnerRepo().owner;
+      const owner = located.owner ?? resolveOwnerRepo().owner;
       ghIssueGateway(owner, task.repo).closeWithComment?.(url, comment);
     },
   });
