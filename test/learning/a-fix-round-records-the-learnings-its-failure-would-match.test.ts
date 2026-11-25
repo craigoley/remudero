@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +20,7 @@ import type { CiFailure } from "#src/lib/sweep.js";
 import { taskArmWithheld } from "#src/lib/task-arm.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import { runFixRung } from "#test/helpers/run-task-test.js";
 
 // W1-T14138: each fix round records which learnings its failing checks would match, in a task-keyed arm, and
@@ -63,19 +63,11 @@ async function fixRung(opts: {
   const taskId = opts.taskId ?? OFFERED_TASK;
   const ci = opts.ci ?? ["green"];
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}fix-learnings-`));
-  const repo = join(root, "repo");
-  const git = (...args: string[]): string => execFileSync("git", ["-C", repo, ...args], {
-    encoding: "utf8",
-    env: {
-      ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
-      GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid",
-    },
-  }).trim();
+  const fixture = gitRepo({ kind: "fix-learnings" });
+  const { dir: repo, git } = fixture;
   try {
     mkdirSync(join(repo, "learnings"), { recursive: true });
     if (opts.corpus !== undefined) writeFileSync(join(repo, "learnings", "ci.yaml"), opts.corpus);
-    execFileSync("git", ["init", "-q", repo]);
-    git("commit", "-q", "--allow-empty", "-m", "base");
     const base = git("rev-parse", "HEAD");
     const task = { id: taskId, title: "wire the producer", files: ["src/changed.ts"], acceptance: criteria };
     const runId = `${taskId}-1791151948510`;
@@ -120,6 +112,7 @@ async function fixRung(opts: {
     });
     return { prompts, rows, pushed };
   } finally {
+    fixture.cleanup();
     rmSync(root, { recursive: true, force: true });
   }
 }
@@ -216,6 +209,7 @@ test("selection reads unmet claims, findings and only the newest part of a log t
     ].join("\n"));
     const round = recordFixLearningsShadow({
       taskId: OFFERED_TASK, runId: "r", prNumber: undefined, attempt: 1, round: "resume", repoDir: root, config: { root } as Config,
+      priorRows: [],
       evidence: {
         ciFailures: [{ name: "c", logTail: `OLD-LOG-SIG${"x".repeat(FIX_LEARNINGS_LOG_TAIL_CHARS)}` }],
         review: {
@@ -230,7 +224,8 @@ test("selection reads unmet claims, findings and only the newest part of a log t
   }
 });
 
-const openRound = (): FixLearningsRound => ({ row: { shadow_id: "s", task_id: "W1-T1", arm: "offered" } });
+const openRound = (priorRows: Array<Record<string, unknown>> = []): FixLearningsRound =>
+  ({ row: { shadow_id: "s", task_id: "W1-T1", arm: "offered" }, priorRows });
 
 test("only a push on a known head waits for CI, and only a conclusion on that head is recorded", () => {
   const unnamed = openRound();
@@ -250,9 +245,8 @@ test("only a push on a known head waits for CI, and only a conclusion on that he
   assert.equal(fixLearningsCiConclusion(round, "green", undefined), "green");
 });
 
-test("rounds to green joins this task's dispatched and pushed rounds, and says when the ledger is unreadable", () => {
-  const round = { ...openRound(), roundId: "r4" };
-  const rows = [
+test("rounds to green joins this task's dispatched and pushed rounds from earlier runs and this one", () => {
+  const earlier = [
     { step: "fix.dispatch", task_id: "W1-T1", round_id: "r1" },
     { step: "fix.done", task_id: "W1-T1", round_id: "r1", pushed_head_sha: "a" },
     { step: "fix.done", task_id: "W1-T1", round_id: "r2", pushed_head_sha: "b" },
@@ -260,10 +254,10 @@ test("rounds to green joins this task's dispatched and pushed rounds, and says w
     { step: "fix.dispatch", task_id: "W1-T2", round_id: "other" },
     { step: "fix.dispatch", task_id: "W1-T1" },
   ];
-  assert.equal(fixLearningsOutcomeRow(round, "green", () => rows).rounds_to_green, 3);
-  const unread = fixLearningsOutcomeRow(round, "green", () => { throw new Error("ledger gone"); });
-  assert.equal(unread.rounds_to_green, null);
-  assert.match(String(unread.rounds_to_green_error), /ledger gone/);
+  const round = { ...openRound(earlier), roundId: "r4" };
+  const thisRung = [{ step: "fix.dispatch", task_id: "W1-T1", round_id: "r4" }];
+  assert.equal(fixLearningsOutcomeRow(round, "green", thisRung).rounds_to_green, 3);
+  assert.equal(fixLearningsOutcomeRow(round, "red", thisRung).rounds_to_green, undefined);
 });
 
 test("the summary reports match and outcome rates per arm, counting each round once", () => {

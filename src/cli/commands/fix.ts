@@ -2605,8 +2605,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
   } };
   const settleLearningsRound = (conclusion: FixLearningsConclusion | undefined): void => {
     if (!learningsRound || !conclusion) return;
-    deps.log("fix.learnings_outcome", fixLearningsOutcomeRow(learningsRound, conclusion,
-      () => [...(deps.ledgerLines ?? (() => readLedgerLines(deps.ledgerPath)))(), ...roundRows]));
+    deps.log("fix.learnings_outcome", fixLearningsOutcomeRow(learningsRound, conclusion, roundRows));
     learningsRound = undefined;
   };
   // W1-T7096: production call sites opt into the LLM judge. A caller that wires none (a test
@@ -4683,7 +4682,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // A round that pushed and whose CI was never observed is left without an outcome row.
     if (learningsRound === undefined || learningsRound.pushed !== undefined) {
       learningsRound = recordFixLearningsShadow({ taskId: opts.taskId, runId: opts.runId, prNumber, attempt, round,
-        repoDir: opts.worktreePath, config: opts.config, evidence });
+        repoDir: opts.worktreePath, config: opts.config, evidence, priorRows: roundLedger });
       deps.log("fix.learnings_shadow", learningsRound.row);
     }
     const prompt = [

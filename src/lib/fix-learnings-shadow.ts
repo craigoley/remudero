@@ -28,6 +28,8 @@ export type FixLearningsConclusion = "green" | "red" | "no_push";
 export interface FixLearningsRound {
   /** The `fix.learnings_shadow` row's fields. */
   readonly row: { shadow_id: string; task_id: string; arm: FixLearningsArm } & Record<string, unknown>;
+  /** The ledger as the round's first prompt read it: the earlier rounds `rounds_to_green` counts. */
+  readonly priorRows: ReadonlyArray<Record<string, unknown>>;
   /** The round's id, known once its `fix.done` row is seen. */
   roundId?: string;
   /** Set when the round pushed; `head` is absent when the push landed on a head nobody could name. */
@@ -53,6 +55,7 @@ export function recordFixLearningsShadow(input: {
   repoDir: string;
   config: Config;
   evidence: FixEvidence;
+  priorRows: ReadonlyArray<Record<string, unknown>>;
 }): FixLearningsRound {
   const { taskId, evidence } = input;
   const withheld = taskArmWithheld({ taskId, unit: "fix-learnings", share: FIX_LEARNINGS_SHARE, epoch: FIX_LEARNINGS_EPOCH });
@@ -74,6 +77,7 @@ export function recordFixLearningsShadow(input: {
     selection = { matched: null, selection_error: String(error).slice(0, 500) };
   }
   return {
+    priorRows: input.priorRows,
     row: {
       shadow_id: randomUUID(),
       run_id: input.runId,
@@ -108,25 +112,21 @@ export function fixLearningsCiConclusion(round: FixLearningsRound, state: string
 }
 
 /** The `fix.learnings_outcome` row. On green, `rounds_to_green` counts this task's rounds that dispatched a
- *  worker (`fix.dispatch`) or pushed (`fix.done`), this one included; an unreadable ledger makes it null. */
+ *  worker (`fix.dispatch`) or pushed (`fix.done`) in `priorRows` and this rung's `rungRows`, this one included. */
 export function fixLearningsOutcomeRow(
   round: FixLearningsRound,
   conclusion: FixLearningsConclusion,
-  readRows: () => ReadonlyArray<Record<string, unknown>>,
+  rungRows: ReadonlyArray<Record<string, unknown>>,
 ): Record<string, unknown> {
   const { shadow_id, run_id, task_id, pr_number, attempt, arm } = round.row;
   const row = { shadow_id, run_id, task_id, pr_number, attempt, arm, round_id: round.roundId, conclusion,
     pushed_head_sha: round.pushed?.head };
   if (conclusion !== "green") return row;
-  try {
-    const rounds = new Set([round.roundId, ...readRows()
-      .filter((r) => r.task_id === task_id &&
-        (r.step === "fix.dispatch" || (r.step === "fix.done" && typeof r.pushed_head_sha === "string")))
-      .map((r) => r.round_id)].filter((id) => typeof id === "string"));
-    return { ...row, rounds_to_green: rounds.size };
-  } catch (error) {
-    return { ...row, rounds_to_green: null, rounds_to_green_error: String(error).slice(0, 500) };
-  }
+  const rounds = new Set([round.roundId, ...[...round.priorRows, ...rungRows]
+    .filter((r) => r.task_id === task_id &&
+      (r.step === "fix.dispatch" || (r.step === "fix.done" && typeof r.pushed_head_sha === "string")))
+    .map((r) => r.round_id)].filter((id) => typeof id === "string"));
+  return { ...row, rounds_to_green: rounds.size };
 }
 
 export interface FixLearningsArmSummary {
