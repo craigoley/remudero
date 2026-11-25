@@ -9,10 +9,10 @@ import {
 // `spawnOpenWeightWorker` carried a blanket "Do not add `response_format` here",
 // measured against gpt-oss-120b, which returns MALFORMED JSON under json_object. That measurement
 // is a property of ONE DEPLOYMENT, not of the field. Probed 2026-09-16 with the adapter's own URL
-// and api-version: the gpt-5.6 deployments answer json_object with HTTP 200 and clean JSON.
+// and api-version: the gpt-6 deployments answer json_object with HTTP 200 and clean JSON.
 
 test("a deployment that declares json_object gets the field on its request", () => {
-  assert.deepEqual(openWeightResponseFormatField("gpt-5.6-luna", "json_object"), {
+  assert.deepEqual(openWeightResponseFormatField("gpt-6.1-sol", "json_object"), {
     response_format: { type: "json_object" },
   });
 });
@@ -34,7 +34,7 @@ test("an UNMEASURED deployment declares nothing and may not be asked", () => {
 });
 
 test("asking for nothing sends nothing — prose stays every lane's default", () => {
-  assert.deepEqual(openWeightResponseFormatField("gpt-5.6-luna", undefined), {});
+  assert.deepEqual(openWeightResponseFormatField("gpt-6.1-sol", undefined), {});
   assert.deepEqual(openWeightResponseFormatField("gpt-oss-120b", undefined), {});
 });
 
@@ -51,5 +51,5 @@ test("the refusal names the deployment and what it does support, so a caller can
 });
 
 test("an unsupported FORMAT on a declaring deployment still refuses", () => {
-  assert.throws(() => openWeightResponseFormatField("gpt-5.6-luna", "json_schema"), OpenWeightUnsupportedResponseFormatError);
+  assert.throws(() => openWeightResponseFormatField("gpt-6.1-sol", "json_schema"), OpenWeightUnsupportedResponseFormatError);
 });

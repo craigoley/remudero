@@ -111,7 +111,7 @@ test("W1-T10855: reasoning_effort is sent only for an admitted effort", async (t
       }
     }
   }
-  for (const model of ["gpt-oss-120b", "gpt-5-nano", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-luna"]) {
+  for (const model of ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna"]) {
     for (const tools of [[], ["Read"]]) {
       const high = await request(t, model, "high", tools);
       const low = await request(t, model, "low", tools);

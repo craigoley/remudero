@@ -26,6 +26,10 @@ export interface DispatchValueTask {
   files?: string[];
   /** W1-T9323: dispatch priority (smaller outranks); absent ranks lowest. It weights the cost-of-delay urgency ({@link dispatchUrgency}). */
   priority?: number;
+  /** W1-T14643: a record held until an operator answers a question; its wait is the operator's, not the schedule's. */
+  needs_input?: unknown;
+  /** W1-T14643: `human` records are parked for an operator and never dispatched by the machine. */
+  verify?: string;
 }
 
 /** Precomputed evidence consumed by the otherwise-pure dispatch comparator. */
@@ -89,7 +93,7 @@ export interface TierWait {
   readonly wait_ms: number;
   readonly events: number;
   readonly censored: number;
-  readonly source: "own" | "pooled" | "pooled-lower-bound";
+  readonly source: "own" | "shrunk" | "pooled" | "pooled-lower-bound";
   readonly bound?: "lower";
 }
 
@@ -200,6 +204,65 @@ function censoredMedianWaitMs(events: readonly number[], censored: readonly numb
     atRisk -= left;
   }
   return undefined;
+}
+
+/**
+ * W1-T14643: the release and answer state dispatch itself consults, so the censored sample holds back exactly
+ * the records dispatch holds back. Absent state is dispatch's own default: nothing released, nothing answered.
+ * `releasedIds` is a thunk so the release ledger is read only when an open `verify: human` record exists.
+ */
+export interface OperatorHoldState {
+  readonly releasedIds?: () => ReadonlySet<string>;
+  readonly inputAnswer?: (taskId: string) => string | undefined;
+}
+
+/**
+ * W1-T14643: a record held on operator input waits on the operator, so its age is not a censored wait. The two
+ * predicates are plan.ts's own: `needsInputRefusal` (a needs_input question with no answer) and `assertRunnable`
+ * (a verify: human record that no operator released). A released or answered record is runnable, so it counts.
+ */
+function heldOnOperatorInputBy(holds: OperatorHoldState | undefined): (task: Pick<DispatchValueTask, "id" | "needs_input" | "verify">) => boolean {
+  let released: ReadonlySet<string> | undefined;
+  return task => {
+    // The answer reader is consulted only for a record that asks a question, as plan.ts's needsInputRefusal does.
+    if (task.needs_input !== undefined) {
+      const answer = holds?.inputAnswer?.(task.id);
+      if (typeof answer !== "string" || answer.trim() === "") return true;
+    }
+    if (task.verify !== "human") return false;
+    released ??= holds?.releasedIds?.() ?? new Set<string>();
+    return !released.has(task.id);
+  };
+}
+
+/** Variance of the sample's mean-centred values (n - 1), or undefined for fewer than two. */
+function sampleVariance(values: readonly number[]): number | undefined {
+  if (values.length < 2) return undefined;
+  const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+  return values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / (values.length - 1);
+}
+
+/** The sampling variance of a median is about pi/2 times the variance of the mean, for the same sample. */
+const MEDIAN_VARIANCE_FACTOR = Math.PI / 2;
+
+/**
+ * W1-T14643: the empirical-Bayes prior weight `k` in `n / (n + k)`, derived from the data and never fixed.
+ * `k = (pi/2) * sigma2 / tau2`: `sigma2` is a wait's own variance within a tier (its median's sampling variance
+ * is `pi/2 * sigma2 / n`), `tau2` the variance between the tiers' true medians: the variance of the measured
+ * medians less their sampling variance. It is read from every tier that can state its own spread (two or more
+ * starts), never from a favoured half: a tier of 50 starts at 40 h beside two of 200 at 10 h is a real gap, and
+ * widens `tau2`, so each tier's weight `n / (n + k)` follows its own sample size. A tier of one start has no
+ * spread of its own to state, so it adds nothing to `tau2`: a lone stale wait is judged against what the other
+ * tiers show. No spread between the tiers means complete pooling (`k` infinite); no spread within a tier means
+ * its median is exact (`k` zero), so a well-sampled tier keeps its own median. Fewer than two such tiers cannot
+ * show a between-tier spread, so nothing is shrunk (`k` zero).
+ */
+function shrinkagePriorWeight(sigma2: number, medians: readonly number[], sampleSizes: readonly number[]): number {
+  if (!(sigma2 > 0) || medians.length < 2) return 0;
+  const between = sampleVariance(medians) ?? 0;
+  const sampling = sampleSizes.reduce((sum, n) => sum + MEDIAN_VARIANCE_FACTOR * sigma2 / n, 0) / sampleSizes.length;
+  const tau2 = Math.max(0, between - sampling);
+  return tau2 > 0 ? MEDIAN_VARIANCE_FACTOR * sigma2 / tau2 : Number.POSITIVE_INFINITY;
 }
 
 /** A tier's sort key: its declared priority, or +Infinity for the absent-priority tier below every declared one. */
@@ -387,6 +450,7 @@ export function buildDispatchValueContext(
   unionComplete = true,
   seed?: string,
   snapshot?: CostOfDelaySnapshot,
+  holds?: OperatorHoldState,
 ): DispatchValueCalibration {
   if (!unionComplete) return { kind: "refused", reasons: ["incomplete-union"] };
   if (snapshot) rows = sortRowsByJson(rows);
@@ -411,7 +475,7 @@ export function buildDispatchValueContext(
   }
   const context: DispatchValueContext = { scoreByClass, openDependentFanoutByTaskId: openDependentFanout(tasks, openTaskIds) };
   if (snapshot) {
-    const scheduled = costOfDelayContext(tasks, rows, openTaskIds, nowMs, snapshot, context, estimates);
+    const scheduled = costOfDelayContext(tasks, rows, openTaskIds, nowMs, snapshot, context, estimates, holds);
     if (scheduled.kind === "refused") return scheduled;
     Object.assign(context, scheduled.context);
   }
@@ -599,6 +663,7 @@ function costOfDelayContext(
   tasks: readonly DispatchValueTask[], rows: ReadonlyArray<Record<string, unknown>>,
   openIds: ReadonlySet<string>, nowMs: number, snapshot: CostOfDelaySnapshot,
   context: DispatchValueContext, estimates: ReadonlyMap<string, ClassValueEstimate>,
+  holds?: OperatorHoldState,
 ): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "costOfDelayInputsByTaskId" | "costOfDelayUnscored" | "costOfDelayImputed" | "costOfDelayTierWaits" | "costOfDelayDependentValues" | "costOfDelayDependentCycle"> }
   | { kind: "refused"; reasons: readonly string[] } {
   if (!snapshot.planTreeSha || !Number.isFinite(nowMs)) return { kind: "refused", reasons: ["unreadable-snapshot"] };
@@ -667,8 +732,9 @@ function costOfDelayContext(
     const key = keyById.get(id);
     if (key !== undefined) sampleOf(key).events.push(at - filedAt);
   }
+  const heldOnOperatorInput = heldOnOperatorInputBy(holds);
   for (const task of tasks) {
-    if (!openIds.has(task.id)) continue;
+    if (!openIds.has(task.id) || heldOnOperatorInput(task)) continue;
     const sample = sampleOf(tierKey(task));
     const filedAt = snapshot.filedAtByTaskId.get(task.id);
     // Censored only when no start follows its filing. Filed before the window's earliest row, a task may have
@@ -684,11 +750,38 @@ function costOfDelayContext(
   if (!(pooledWaitMs > 0)) return { kind: "refused", reasons: ["no-wait-evidence"] };
   const costOfDelayTierWaits: TierWait[] = [];
   const unitByTier = new Map<number, number>();
-  let envelope = 0;
-  for (const [key, sample] of [...byTier].sort(([a], [b]) => a - b)) {
+  const tiers = [...byTier].sort(([a], [b]) => a - b).map(([key, sample]) => {
     const own = censoredMedianWaitMs(sample.events, sample.censored);
-    const source = own !== undefined && own > 0 ? "own" : pooledMedian !== undefined ? "pooled" : "pooled-lower-bound";
-    const waitMs = source === "own" ? own as number : pooledWaitMs;
+    return { key, sample, own: own !== undefined && own > 0 ? own : undefined, n: sample.events.length + sample.censored.length };
+  });
+  type Tier = (typeof tiers)[number];
+  // W1-T14643: the within-tier variance of a wait, pooled over the tiers that hold two or more starts; with
+  // none, the variance of every start together (an over-estimate, so it shrinks less than it could).
+  const withinTier = tiers.reduce((sum, { sample }) => sample.events.length < 2 ? sum
+    : { df: sum.df + sample.events.length - 1, ss: sum.ss + (sampleVariance(sample.events) as number) * (sample.events.length - 1) }, { df: 0, ss: 0 });
+  const sigma2 = withinTier.df > 0 ? withinTier.ss / withinTier.df : (sampleVariance(pooled.events) ?? 0);
+  // Only a tier with two or more starts can state a spread of its own, so only those measure the between-tier one.
+  const spreadTiers = tiers.filter(t => t.own !== undefined && t.sample.events.length >= 2);
+  const priorWeight = shrinkagePriorWeight(sigma2, spreadTiers.map(t => t.own as number), spreadTiers.map(t => t.n));
+  // n / (n + k): k zero keeps a tier's own median, k infinite gives it wholly to its neighbours.
+  const keepOf = (n: number): number => n / (n + priorWeight);
+  const nearestMeasured = (from: number, step: 1 | -1): Tier | undefined => {
+    for (let i = from + step; i >= 0 && i < tiers.length; i += step) if (tiers[i].own !== undefined) return tiers[i];
+    return undefined;
+  };
+  let envelope = 0;
+  tiers.forEach(({ key, sample, own, n }, index) => {
+    // W1-T14643: a tier's own median is shrunk toward the pooled median of its nearest measured tiers above and
+    // below, each weighted by its sample, so one stale sample cannot set the aging unit of every tier below it.
+    const neighbours = [nearestMeasured(index, -1), nearestMeasured(index, 1)].filter((t): t is Tier => t !== undefined);
+    const neighbourN = neighbours.reduce((sum, t) => sum + t.n, 0);
+    // A neighbour is itself read through its sample size, so a sparse one reverts to the pooled wait.
+    const neighbourMs = neighbourN === 0 ? 0 : neighbours.reduce((sum, t) =>
+      sum + (keepOf(t.n) * (t.own as number) + (1 - keepOf(t.n)) * pooledWaitMs) * t.n, 0) / neighbourN;
+    const keep = keepOf(n);
+    const shrunk = own !== undefined && neighbourN > 0 && keep < 1;
+    const source = own === undefined ? (pooledMedian !== undefined ? "pooled" : "pooled-lower-bound") : shrunk ? "shrunk" : "own";
+    const waitMs = own === undefined ? pooledWaitMs : shrunk ? keep * own + (1 - keep) * neighbourMs : own;
     costOfDelayTierWaits.push({
       priority: Number.isFinite(key) ? key : null, wait_ms: waitMs, events: sample.events.length, censored: sample.censored.length,
       source, ...(source === "pooled-lower-bound" ? { bound: "lower" as const } : {}),
@@ -696,7 +789,7 @@ function costOfDelayContext(
     // A lower tier ages in the largest wait at or above it, so it never closes a gap faster than a higher tier waits.
     envelope = Math.max(envelope, waitMs);
     unitByTier.set(key, envelope);
-  }
+  });
   // Priority weights the urgency (it is not a one-rank head start); an absent priority is the lowest tier.
   const open = tasks.filter(task => openIds.has(task.id)).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const tierOf = priorityTiers(open);

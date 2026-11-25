@@ -102,14 +102,14 @@ test("W1-T9967: a tier with no crossing of its own borrows the pooled wait and t
 
 test("W1-T9967: a lower tier never closes its gap faster than a higher tier wait", () => {
   const started = [
-    ...[0, 1, 2].map(i => ({ id: `W1-T${6900 + i}`, priority: 1, wait: 24 * HOUR, startAgo: 30 * HOUR })),
-    ...[0, 1, 2].map(i => ({ id: `W1-T${6910 + i}`, priority: 2, wait: 2 * HOUR, startAgo: 30 * HOUR })),
+    ...Array.from({ length: 3 }, (_, i) => ({ id: `W1-T${6900 + i}`, priority: 1, wait: 24 * HOUR, startAgo: 30 * HOUR })),
+    ...Array.from({ length: 3 }, (_, i) => ({ id: `W1-T${6930 + i}`, priority: 2, wait: 2 * HOUR, startAgo: 30 * HOUR })),
   ];
-  const fresh = task("W1-T6920", { priority: 1 });
-  const old = task("W1-T6921", { priority: 2 });
+  const fresh = task("W1-T6990", { priority: 1 });
+  const old = task("W1-T6991", { priority: 2 });
   const at = (age: number) => calibrate(started, [{ task: fresh, filedAgo: 0 }, { task: old, filedAgo: age }]);
   const held = at(12 * HOUR);
-  // The P2 tier's own wait is 2 h; in it a 12 h P2 would score 2^-1 * (1 + log2(7)) = 1.9. It ages in P1's 24 h.
+  // Each tier's starts all wait the same, so there is no spread within a tier to shrink: P2 keeps its own 2 h.
   assert.equal(tier(held, 2)?.wait_ms, 2 * HOUR);
   assert.equal(tier(held, 2)?.source, "own");
   assert.deepEqual(dispatchOrder([old, fresh], held).map(t => t.id), [fresh.id, old.id]);
