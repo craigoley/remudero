@@ -191,14 +191,19 @@ test("a lane whose push outcome is unknown releases nothing, and a lane that pus
 /** A batch approve of two proposals over the REAL gateway, in a world the caller may break first. */
 function batchWorld(break_: (w: ReturnType<typeof world>) => void) {
   const ids = ["P-ONE", "P-TWO"];
-  const w = world("t9488-batch", () => {});
+  // Each drafted `verify: auto` task declares its own seeded file: a dispatchable task with no `files:` is a declared-scope block.
+  const w = world("t9488-batch", (dir) => {
+    mkdirSync(join(dir, "src", "lib"), { recursive: true });
+    writeFileSync(join(dir, "src", "lib", "plan.ts"), "");
+    writeFileSync(join(dir, "src", "lib", "inbox.ts"), "");
+  });
   break_(w);
   writeFileSync(join(w.root, "state", "inbox-proposals.json"), JSON.stringify({ proposals: ids.map((id) => ({ id, summary: `ratify ${id}`, evidenceAnchors: [] })) }));
   writeFileSync(
     join(w.root, "state", "inbox-drafts.json"),
     JSON.stringify(Object.fromEntries(ids.map((id, i) => [id, {
       proposalId: id,
-      fragmentYaml: `- id: NEW-${i + 1}\n  title: ${i === 0 ? "a quiet zebra crossing" : "a loud giraffe parade"}\n  repo: remudero\n  type: implement\n  design: |\n    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve\n  verify: auto\n  origin: architect\n`,
+      fragmentYaml: `- id: NEW-${i + 1}\n  title: ${i === 0 ? "a quiet zebra crossing" : "a loud giraffe parade"}\n  repo: remudero\n  type: implement\n  files: [${i === 0 ? "src/lib/plan.ts" : "src/lib/inbox.ts"}]\n  design: |\n    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve\n  verify: auto\n  origin: architect\n`,
       stampLine: `- ${id} (plan) — RATIFIED -> NEW-${i + 1}.`,
       anchorFingerprint: "",
     }]))),
