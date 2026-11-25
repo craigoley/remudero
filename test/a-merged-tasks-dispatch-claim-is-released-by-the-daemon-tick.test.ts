@@ -323,3 +323,44 @@ test("W1-T8616: the daemon command wires the tick sweep to the claim reserver an
   assert.equal(released[0]!.ref, dispatchClaimRef("W1-T6369"));
   assert.equal(released[0]!.dropped, true);
 });
+
+// W1-T14874: the silence pass rides the same tick sweep, so its wiring is proven beside the landed sweep's.
+test("W1-T14874: the daemon command runs the silence pass over the tick listing, skipping what the landed sweep dropped", async t => {
+  const home = makeTempDir("tick-silence-boot");
+  const root = join(home, "Remudero");
+  mkdirSync(join(home, ".config", "remudero"), { recursive: true });
+  mkdirSync(join(root, "state"), { recursive: true });
+  writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ claudeBin: "/bin/true", root }));
+  const planPath = join(home, "tasks.yaml");
+  writeFileSync(planPath, "[]\n");
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; rmSync(home, { recursive: true, force: true }); });
+  const refs = new Map([["W1-T6369", "a".repeat(40)], ["W1-T13878", "b".repeat(40)]]);
+  const reserver: DispatchClaimReserverAsync & { listHeld: () => DispatchClaimListing } = {
+    mintAnchor: () => "anchor", attempt: () => "taken", holder: id => refs.get(id), list: () => [...refs.keys()],
+    drop: (id, opts) => (refs.get(id) === opts?.expect || opts?.expect === undefined) && refs.delete(id),
+    anchorMessage: () => "rmd-dispatch claim 1@elsewhere 2026-10-14T12:00:00.000Z",
+    listHeld: () => ({ ok: true, claims: [...refs].map(([taskId, holder]) => ({ taskId, holder })) }),
+  };
+  const calls: Array<{ listing: DispatchClaimListing; skip: string[]; stateDir: string }> = [];
+  const boot = { mintAnchor: () => "x", attempt: () => "taken" as const, holder: () => undefined, drop: () => false, list: () => [] };
+  const code = await daemonCommand(["--repo", "remudero-sandbox", "--plan", planPath, "--max", "0"], {
+    bootClaimReserver: boot,
+    tickClaimReserver: reserver,
+    sweepSilentClaims: async (_r, listing, d) => {
+      calls.push({ listing, skip: [...(d.skip ?? [])], stateDir: d.stateDir });
+      return [{ taskId: "W1-T13878", verdict: "reclaim", reason: "silent", dropped: true }];
+    },
+    runDaemon: async (_plan, wired): Promise<DaemonSummary> => {
+      const swept = await wired.releaseLandedClaims!((id) => id === "W1-T6369");
+      assert.deepEqual((swept as Array<{ taskId: string }>).map(r => r.taskId), ["W1-T6369", "W1-T13878"], "both passes report");
+      return { attempted: [], merged: [], stopReason: "stopped", costUsd: 0, ticks: 0 };
+    },
+  } as Parameters<typeof daemonCommand>[1]);
+  assert.equal(code, 0);
+  assert.equal(calls.length, 1, "THE CLAIM: the tick sweep runs the silence pass");
+  assert.deepEqual(calls[0]!.skip, ["W1-T6369"], "a claim the landed sweep dropped is not judged again");
+  assert.equal(calls[0]!.stateDir, join(root, "state"));
+  assert.equal((calls[0]!.listing as { ok: true; claims: unknown[] }).claims.length, 2, "it reads the listing selection shares");
+});
