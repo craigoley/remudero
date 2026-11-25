@@ -1691,6 +1691,17 @@ jobs:
               conclusion="failure"
               title="${check_name}: setup did not succeed (${SETUP_FAILED}), so no gate ran"
             fi
+            # W1-T14816: the post links the job that ran the steps, and a failing check carries its
+            # steps' error lines as output[text], read from a file so the post's argv stays one line.
+            # A failure here posts no text; the name, conclusion, title and summary never depend on it.
+            job_url="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/actions/runs/${POSTING_RUN_ID}/job/${POSTING_JOB_ID}"
+            text_args=()
+            text_file=""
+            if text_file="$(mktemp)" \
+              && node scripts/bundled-gate-report.mjs --text --job-url "$job_url" "$check_name" "$@" > "$text_file" 2>/dev/null \
+              && [ -s "$text_file" ]; then
+              text_args=(-F "output[text]=@${text_file}")
+            fi
             while true; do
               if error=$(gh api "repos/${GITHUB_REPOSITORY}/check-runs" \
                 -f "name=${check_name}" \
@@ -1700,17 +1711,21 @@ jobs:
                 -f "conclusion=${conclusion}" \
                 -f "output[title]=${title}" \
                 -f "output[summary]=W1-T4399: reported by this job's ${check_name} step(s) (outcome(s): $*)" \
+                -f "details_url=${job_url}" \
+                ${text_args[@]+"${text_args[@]}"} \
                 2>&1 >/dev/null); then
                 break
               fi
               if [ "$attempt" -ge 4 ] || ! [[ "$error" =~ HTTP\ (429|500|502|503|504) || "$error" == "unexpected end of JSON input" ]]; then
                 echo "check-run post failed for ${check_name} after ${attempt} attempt(s): ${error}" >&2
+                [ -z "$text_file" ] || rm -f "$text_file"
                 return 1
               fi
               echo "check-run post for ${check_name} hit a transient GitHub error; retrying attempt $((attempt + 1))/4" >&2
               sleep "$((2 ** attempt))"
               attempt=$((attempt + 1))
             done
+            [ -z "$text_file" ] || rm -f "$text_file"
             echo "W1-T4399: reported ${check_name} = ${conclusion} (step outcome(s): $*); title: ${title}"
           }
           report "rule-checks" "${OUTCOME_RULE_CHECKS}"
