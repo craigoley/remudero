@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPlan, type Plan } from "../src/lib/plan.js";
-import type { RunResult } from "../src/run-task.js";
+import type { RunResult } from "../src/lib/run-result.js";
 import type { UsageSnapshot } from "../src/lib/headroom.js";
 import { laneDispatchBudget, runDrain } from "../src/lib/drain.js";
 import { runDaemon as runDaemonForTargetWip } from "#src/lib/daemon.js";

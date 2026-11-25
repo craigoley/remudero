@@ -348,12 +348,37 @@ function declaresOnlyTestsOrProse(files: readonly string[] | undefined): boolean
   return (files ?? []).length > 0 && (files ?? []).every((f) => ["test", "prose"].includes(pathClass(f)));
 }
 
-function backstopText(task: { title: string; prompt?: string; files?: readonly string[]; acceptance?: readonly { claim?: string }[]; origin?: string; author_class?: string }): string {
-  // This exact generated claim names programming-language tokens, not credentials. Mask only that
-  // one complete claim when its machine origin binds to a declared source; all other text is read.
-  const subject = /^comment-compression:(src\/lib\/[A-Za-z0-9_-]+\.ts)$/.exec(task.origin ?? "")?.[1];
-  const syntaxClaim = "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved.";
-  const claims = (task.acceptance ?? []).map((c) => task.author_class === "machine" && subject && task.files?.includes(subject) && c.claim === syntaxClaim
+type BackstopRecord = { title: string; prompt?: string; files?: readonly string[]; acceptance?: readonly { claim?: string }[]; origin?: string; author_class?: string };
+
+/** The claim the comment-compression filer generates: its "tokens" are programming-language tokens, not credentials. */
+const COMPRESSION_CLAIM = "Comment volume is measurably reduced while executable tokens and existing behavioral assertions are preserved.";
+const COMPRESSION_ORIGIN = /^comment-compression:((?:src|scripts|deploy|bin|hooks|\.github\/workflows)\/[\w./-]+)$/;
+
+/** A machine comment-compression record's subject, when its origin names one and the record declares it. */
+function compressionSubject(task: BackstopRecord): string | undefined {
+  const subject = COMPRESSION_ORIGIN.exec(task.origin ?? "")?.[1];
+  if (task.author_class !== "machine" || subject === undefined || subject.split("/").some((p) => p === "." || p === "..")) return undefined;
+  return task.files?.includes(subject) ? subject : undefined;
+}
+
+/** W1-T13481: the subject of a record that changes only its own comment-compression subject plus tests and
+ *  claims only what the filer generates — the executable-token claim and its `executable-code-unchanged`
+ *  invariant — a mechanical proof the judge rules on, even on a privileged path. Any other declared source
+ *  path, or any other claim, leaves the record escalating. */
+function ownCompressionSubject(task: BackstopRecord): string | undefined {
+  const subject = compressionSubject(task);
+  if (subject === undefined) return undefined;
+  const invariant = `invariant:executable-code-unchanged — A regression named for this task compares ${subject} with its ` +
+    "pre-compression source through the shared comparator, so a changed statement fails it.";
+  const claims = (task.acceptance ?? []).map((c) => c.claim);
+  if (!claims.includes(COMPRESSION_CLAIM) || !claims.every((c) => c === COMPRESSION_CLAIM || c === invariant)) return undefined;
+  return (task.files ?? []).every((f) => f === subject || pathClass(f) === "test") ? subject : undefined;
+}
+
+function backstopText(task: BackstopRecord): string {
+  // Mask only that one complete generated claim when its machine origin binds to a declared source; all other text is read.
+  const subject = compressionSubject(task);
+  const claims = (task.acceptance ?? []).map((c) => subject !== undefined && c.claim === COMPRESSION_CLAIM
     ? "Comment volume is measurably reduced while executable syntax and existing behavioral assertions are preserved." : c.claim ?? "");
   return withoutOwnCauseKey([task.title, task.prompt ?? "", ...claims].join("\n"), task);
 }
@@ -363,15 +388,9 @@ function backstopText(task: { title: string; prompt?: string; files?: readonly s
  *  cause key a machine filer quotes from its `origin:`. The path rules read every declared path by its
  *  {@link pathClass}; the deletion and merge-policy text rules stand down for a record that declares only
  *  tests or prose, which {@link backstopConcern} hands to the judge instead. */
-export function deterministicEscalation(task: {
-  title: string;
-  prompt?: string;
-  files?: readonly string[];
-  acceptance?: readonly { claim?: string }[];
-  origin?: string;
-  author_class?: string;
-}): string | undefined {
-  const path = (task.files ?? []).find((f) => pathClass(f) === "privileged");
+export function deterministicEscalation(task: BackstopRecord): string | undefined {
+  const own = ownCompressionSubject(task);
+  const path = (task.files ?? []).find((f) => f !== own && pathClass(f) === "privileged");
   if (path) return `it declares ${path}, a secrets, auth, CI, deploy, merge-policy or ruling path`;
   const text = backstopText(task);
   const proseOnly = declaresOnlyTestsOrProse(task.files);
@@ -385,8 +404,15 @@ export function deterministicEscalation(task: {
 
 /** A named concern for the risk judge (W1-T10350): a deletion or merge-policy word in a record that declares
  *  only tests or prose, which {@link deterministicEscalation} no longer escalates on its own. The judge still
- *  applies the operator's escalation rule. Undefined when nothing was handed over. */
-export function backstopConcern(task: Parameters<typeof deterministicEscalation>[0]): string | undefined {
+ *  applies the operator's escalation rule. Also the privileged subject of an own-subject comment compression
+ *  (W1-T13481), which the backstop hands over instead of escalating. Undefined when nothing was handed over. */
+export function backstopConcern(task: BackstopRecord): string | undefined {
+  const own = ownCompressionSubject(task);
+  if (own !== undefined && pathClass(own) === "privileged" && deterministicEscalation(task) === undefined) {
+    return `CONCERN: it declares ${own}, a secrets, auth, CI, deploy, merge-policy or ruling path, but only as its own ` +
+      "comment-compression subject, proved by an executable-token comparison against the pre-compression source; " +
+      "rule on whether that proof holds what the file runs unchanged.";
+  }
   if (!declaresOnlyTestsOrProse(task.files) || deterministicEscalation(task) !== undefined) return undefined;
   const text = backstopText(task);
   for (const [why, re, soft] of BACKSTOP_TEXT) {

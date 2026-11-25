@@ -500,7 +500,9 @@ test("GUARDED SITE approve push and pr-create: the REAL un-injected gateway reac
         "P-GUARD": {
           proposalId: "P-GUARD",
           fragmentYaml:
-            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n",
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n" +
+            // A new `verify: auto` implement task needs one criterion (shard-shape, promoted to block on a draft).
+            "  acceptance:\n    - claim: the fixture task is filed\n      proof: 'unit test: the fixture task is filed'\n",
           stampLine: "- P-GUARD (plan) — RATIFIED -> NEW-1.",
           anchorFingerprint: "",
         },
@@ -600,7 +602,9 @@ test("GUARDED SITE approve fresh-clone + full drive: ensureRepoDir clones, and t
         "P-FULL": {
           proposalId: "P-FULL",
           fragmentYaml:
-            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n",
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n" +
+            // A new `verify: auto` implement task needs one criterion (shard-shape, promoted to block on a draft).
+            "  acceptance:\n    - claim: the fixture task is filed\n      proof: 'unit test: the fixture task is filed'\n",
           stampLine: "- P-FULL (plan) — RATIFIED -> NEW-1.",
           anchorFingerprint: "",
         },
@@ -681,8 +685,10 @@ test("W1-T968: rmd approve batch reports a standing prior arm as armed although 
       drafts[id] = {
         proposalId: id,
         fragmentYaml:
-          `- id: NEW-${i + 1}\n  title: ${title}\n  repo: remudero\n  type: implement\n  verify: human\n` +
-          `  origin: architect\n  files: [${file}]\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n`,
+          `- id: NEW-${i + 1}\n  title: ${title}\n  repo: remudero\n  type: implement\n  verify: auto\n` +
+          `  origin: architect\n  files: [${file}]\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n` +
+          // A new `verify: auto` implement task needs one criterion (shard-shape, promoted to block on a draft).
+          `  acceptance:\n    - claim: batch member ${i + 1} is filed\n      proof: 'unit test: batch member ${i + 1} is filed'\n`,
         stampLine: `- ${id} (plan) — RATIFIED -> NEW-${i + 1}.`,
         anchorFingerprint: "",
       };
@@ -786,7 +792,9 @@ test("GUARDED SITE approve resume: findPushedBranch/completeRatificationBranch d
         "P-RESUME": {
           proposalId: "P-RESUME",
           fragmentYaml:
-            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n",
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n" +
+            // A new `verify: auto` implement task needs one criterion (shard-shape, promoted to block on a draft).
+            "  acceptance:\n    - claim: the fixture task is filed\n      proof: 'unit test: the fixture task is filed'\n",
           stampLine: "- P-RESUME (plan) — RATIFIED -> NEW-1.",
           anchorFingerprint: "",
         },
@@ -871,7 +879,9 @@ async function withApproveFullHarness(
         [proposalId]: {
           proposalId,
           fragmentYaml:
-            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n",
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n" +
+            // A new `verify: auto` implement task needs one criterion (shard-shape, promoted to block on a draft).
+            "  acceptance:\n    - claim: the fixture task is filed\n      proof: 'unit test: the fixture task is filed'\n",
           stampLine: `- ${proposalId} (plan) — RATIFIED -> NEW-1.`,
           anchorFingerprint: "",
         },
@@ -970,7 +980,9 @@ test("GUARDED SITE approve degraded-mint refusal: the REAL gateway throws before
         "P-DEGRADE": {
           proposalId: "P-DEGRADE",
           fragmentYaml:
-            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n",
+            "- id: NEW-1\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n" +
+            // A new `verify: auto` implement task needs one criterion (shard-shape, promoted to block on a draft).
+            "  acceptance:\n    - claim: the fixture task is filed\n      proof: 'unit test: the fixture task is filed'\n",
           stampLine: "- P-DEGRADE (plan) — RATIFIED -> NEW-1.",
           anchorFingerprint: "",
         },

@@ -27,8 +27,10 @@ const TITLES: Record<string, string> = {
 };
 const newDraft = (id: string) => ({
   proposalId: id, anchorFingerprint: "", stampLine: `- ${id} (plan) — RATIFIED -> NEW-1.`,
-  fragmentYaml: `- id: NEW-1\n  title: ${TITLES[id]}\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n` +
-    `  files: [src/lib/plan.ts]\n  design: "NO-INVARIANTS: a fixture task."\n`,
+  fragmentYaml: `- id: NEW-1\n  title: ${TITLES[id]}\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n` +
+    `  files: [src/lib/plan.ts]\n  design: "NO-INVARIANTS: a fixture task."\n` +
+    // A new `verify: auto` implement task needs one criterion (shard-shape, promoted to block on a draft).
+    `  acceptance:\n    - claim: the approval files its task\n      proof: 'unit test: the approval files its task'\n`,
 });
 
 interface World {
