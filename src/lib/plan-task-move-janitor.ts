@@ -138,15 +138,15 @@ async function lastStepState(ports: PlanTaskMovePorts, pin: MovePin, last: { sid
 /** One tick. It never throws: any failure is a stand-down, and the next tick reads everything again. */
 export async function runPlanTaskMoveTick(inputs: PlanTaskMoveTickInputs, mover: PlanTaskMover): Promise<PlanTaskMoveTickOutcome> {
   const { ports, memory } = mover;
-  const standDown = (reason: string, detail?: string): PlanTaskMoveTickOutcome => {
-    const signature = JSON.stringify([reason, detail ?? null]);
+  const standDown = (reason: string, detail?: string, extra: Record<string, unknown> = {}): PlanTaskMoveTickOutcome => {
+    const signature = JSON.stringify([reason, detail ?? null, extra]);
     if (memory.standDown === signature) memory.standDownTicks = (memory.standDownTicks ?? 0) + 1;
     else {
       // W1-T14448: the row names how long the reason it replaces held; after a reset (off, a step) none is held.
       const previous = memory.standDown === undefined ? {} : { previous_ticks: memory.standDownTicks ?? 0 };
       memory.standDown = signature;
       memory.standDownTicks = 1;
-      try { inputs.log(PLAN_MOVE_STAND_DOWN, { reason, ...(detail === undefined ? {} : { detail }), ...previous }); }
+      try { inputs.log(PLAN_MOVE_STAND_DOWN, { reason, ...(detail === undefined ? {} : { detail }), ...extra, ...previous }); }
       catch (error) { void error; /* A row that cannot be written never takes a step. */ }
     }
     return { outcome: "stand_down", reason, ...(detail === undefined ? {} : { detail }) };
@@ -182,7 +182,9 @@ export async function runPlanTaskMoveTick(inputs: PlanTaskMoveTickInputs, mover:
     const step = text(dry.out.step) ?? "unknown";
     if (step === "wait") return standDown("mover_pull_request_open");
     if (step === "held") return standDown("move_held", text(dry.out.reason));
-    if (step === "none" || step === "complete") return standDown("nothing_to_move");
+    // W1-T14870: the row names every record selection refused and why; a change in that list writes a new row.
+    if (step === "none" || step === "complete") return standDown("nothing_to_move", undefined,
+      Array.isArray(dry.out.refusals) ? { refusals: dry.out.refusals } : {});
     if (step !== "copy" && !CONVERGING.has(step)) return standDown("preview_unknown", text(dry.out.reason));
     if (step === "copy") {
       if (inputs.opsDispatchHold !== undefined) return standDown("ops_dispatch_held", inputs.opsDispatchHold);
