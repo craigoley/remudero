@@ -11,7 +11,9 @@ import { applyWorkerMcpBoundary, applyWorkerMcpIsolation, denyMcpSuccessCredit, 
   type WorkerMcpIsolationEvidence } from "./worker-mcp-isolation.js";
 import { securityMergeHead, securityMetadataGhArgs } from "./security-merge-admission.js";
 import { parseHarvestableFollowUps } from "./promised-follow-ups.js";
-import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
+import {
+  createWorkerToolLineage, observeWorkerToolLineage, type ReviewerCommandKindCounts, type WorkerToolLineageOptions,
+} from "./worker-tool-lineage.js";
 import { unavailableWorkerInitSummary, workerInitSummaryFromMessage, type WorkerInitSummary } from "./worker-init-summary.js";
 import { connect as connectTcp, createServer as createTcpServer, type Socket, type Server } from "node:net";
 import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest } from "node:http";
@@ -294,6 +296,8 @@ export function workerExitOfError(e: unknown): WorkerExit {
 
 export interface WorkerResult {
   capabilityContract?: WorkerCapabilityContract;
+  /** W1-T14037: a reviewer spawn's command calls by kind (from its tool lineage); absent on every other spawn. */
+  reviewerCommandKinds?: ReviewerCommandKindCounts;
   /** Characters in the rendered prompt supplied to the provider adapter. */
   promptChars?: number;
   /** Internal producer receipt for W1-T11119; created only from a terminal provider stream. */
@@ -1433,6 +1437,8 @@ export interface SpawnWorkerArgs {
    * run-task.ts wires the REAL observer at its own spawn call sites, so `worker.state` comes from live runs and not only from
    * a test (Standing rule 14; W1-T942). */
   streamObserver?: WorkerStreamObserver;
+  /** W1-T14037: a reviewer spawn's recorded proof commands; its tool lineage then kinds each command call. Omitted: unchanged. */
+  reviewer?: WorkerToolLineageOptions["reviewer"];
   /** THE CLOCK BOUND. Omitted means no `AbortController` is constructed at all. When set, {@link
    * createWorkerClockBoundWatchdog} aborts THIS call's query once `boundMs` elapses since the last observed stream activity —
    * never on total run age — and `spawnWorker` throws {@link WorkerAbandonedError} carrying the evidence. run-task.ts wires
@@ -3927,6 +3933,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             root: config.root,
             runId: args.runId,
             taskId: args.taskId,
+            ...(args.reviewer ? { reviewer: args.reviewer } : {}),
             ...(args.runId && args.canaryAttemptId && args.workerSpawnAttemptId ? { providerExchangeBinding: {
               runId: args.runId, canaryAttemptId: args.canaryAttemptId, workerSpawnAttemptId: args.workerSpawnAttemptId,
             } } : {}),
@@ -4416,6 +4423,8 @@ export async function collectWorkerResult(
     root?: string;
     runId?: string;
     taskId?: string;
+    /** W1-T14037: see {@link SpawnWorkerArgs.reviewer}. */
+    reviewer?: WorkerToolLineageOptions["reviewer"];
     stderrChunks?: string[];
     stderrOutput?: BoundedOutput;
     stderrFailure?: () => StderrFailure | undefined;
@@ -4450,7 +4459,8 @@ export async function collectWorkerResult(
   // spawnWorker is local, free setup. Keep resource-duration timestamps on the shared wall-clock port; the optional
   // injected clock below remains dedicated to stream-observer/quiet-floor behavior (W1-T477).
   const startedAtMs = systemClock.now();
-  const toolLineage = createWorkerToolLineage({ provider: "claude", root: opts.root, runId: opts.runId, taskId: opts.taskId });
+  const toolLineage = createWorkerToolLineage({ provider: "claude", root: opts.root, runId: opts.runId, taskId: opts.taskId,
+    ...(opts.reviewer ? { reviewer: opts.reviewer } : {}) });
   let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
   const blockOutput = new BoundedOutput(WORKER_OUTPUT_BYTES, "\n");
   let textOutput = new BoundedOutput(WORKER_OUTPUT_BYTES);
@@ -4714,7 +4724,9 @@ export async function collectWorkerResult(
   const firstTextOffsetMs = firstTextAtMs === undefined ? undefined : firstTextAtMs - startedAtMs;
   const firstTextInvalidAtEnd = firstTextOffsetMs !== undefined
     && (!Number.isFinite(workerDurationMs) || workerDurationMs < 0 || workerDurationMs < firstTextOffsetMs);
+  const reviewerCommandKinds = toolLineage.commandKinds();
   const result: WorkerResult = {
+    ...(reviewerCommandKinds ? { reviewerCommandKinds } : {}),
     ...(opts.lostGrants?.length ? { lostGrants: opts.lostGrants } : {}),
     ...(opts.credentialHelperUnwired ? { credentialHelperUnwired: opts.credentialHelperUnwired } : {}),
     sessionId,

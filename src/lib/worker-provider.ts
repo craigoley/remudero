@@ -4,7 +4,9 @@ import { assertCurrentCanaryPilotReservation, assertCurrentCanaryPilotSettlement
   reserveCurrentCanaryPilotRequest, settleCurrentCanaryPilotRequest } from "./model-canary-pilot-budget.js";
 import { setTimeout as abortableDelay } from "node:timers/promises";
 import { recordCashRequestEffort, type CashRequestEffortCount } from "./cash-request-effort.js";
-import { createWorkerToolLineage, observeWorkerToolLineage } from "./worker-tool-lineage.js";
+import {
+  createWorkerToolLineage, observeWorkerToolLineage, type ReviewerCommandKindCounts, type WorkerToolLineageOptions,
+} from "./worker-tool-lineage.js";
 import { CASH_RESPONSES_DEPLOYMENTS, CashResponsesConversation } from "./cash-responses.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync, spawn as spawnChild, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -112,6 +114,8 @@ interface CodexSpawnArgs {
   sandboxReadRoots?: string[];
   runId?: string;
   taskId?: string;
+  /** W1-T14037: a reviewer spawn's recorded proof commands; its tool lineage then kinds each command call. Omitted: unchanged. */
+  reviewer?: WorkerToolLineageOptions["reviewer"];
   containment?: {
     spawn?: (
       opts: ContainedSpawnOptions,
@@ -238,6 +242,8 @@ export function buildWorkerCapabilityContract(provider: string, facts: {
 interface CodexWorkerResult {
   provider: "codex";
   capabilityContract?: WorkerCapabilityContract;
+  /** W1-T14037: see `WorkerResult.reviewerCommandKinds`; absent unless the spawn carried `reviewer`. */
+  reviewerCommandKinds?: ReviewerCommandKindCounts;
   /** W1-T6148: what the harness did with a codex writer's edits; absent when its caller commits them. */
   harnessCommit?: CodexHarnessCommit;
   sessionId: string;
@@ -7333,7 +7339,8 @@ async function spawnCodexWorkerInPrivateTemp(
 ): Promise<CodexWorkerResult> {
   const bin = resolveCodexBin(config);
   const startedAt = Date.now();
-  const toolLineage = createWorkerToolLineage({ provider: "codex", root: config.root, runId: args.runId, taskId: args.taskId });
+  const toolLineage = createWorkerToolLineage({ provider: "codex", root: config.root, runId: args.runId, taskId: args.taskId,
+    ...(args.reviewer ? { reviewer: args.reviewer } : {}) });
   let lineageEnd: "stream-ended" | "interrupted" = "interrupted";
   const stdout = new CodexJsonlAccumulator(startedAt, join(privateTmpDir, "stdout-pending.jsonl"), raw => {
     observeWorkerToolLineage(toolLineage, raw);
@@ -7501,6 +7508,7 @@ async function spawnCodexWorkerInPrivateTemp(
       } : undefined,
     });
     const harnessCommit = harnessCommits && !isError ? commitCodexWriterEdits(args.cwd, parsed.text) : undefined;
+    const reviewerCommandKinds = toolLineage.commandKinds();
     if (harnessCommit && args.runId) appendLedger(ledgerPathFor(config), {
       run_id: args.runId,
       task_id: args.taskId ?? "unattributed",
@@ -7522,6 +7530,7 @@ async function spawnCodexWorkerInPrivateTemp(
       blocks: parsed.blocks,
       ...(parsed.outputTruncation ? { outputTruncation: parsed.outputTruncation } : {}),
       ...(stderrTruncation ? { stderrTruncation } : {}),
+      ...(reviewerCommandKinds ? { reviewerCommandKinds } : {}),
       stderr,
       outputRetention,
       subtype: parsed.isError ? parsed.subtype : exitCode !== 0 ? `error_exit_${exitCode}`
