@@ -299,8 +299,8 @@ test("W1-T13700: the committed registry runs remudero-ops live, and every other 
   assert.deepEqual(
     parsed.instances.map((i) => [i.name, i.mode ?? "live"]),
     // W1-T14552: oleyarcade, added after this ruling, is the one shadow row; the four before it stay live.
-    // W1-T14594: wreckterra joins as a second shadow row.
-    [["core", "live"], ["site", "live"], ["console", "live"], ["ops", "live"], ["oleyarcade", "shadow"], ["wreckterra", "shadow"]],
+    // W1-T14594: wreckterra joins as a second shadow row; W1-T14794 promotes it to live.
+    [["core", "live"], ["site", "live"], ["console", "live"], ["ops", "live"], ["oleyarcade", "shadow"], ["wreckterra", "live"]],
   );
   // The ruling is written out: an absent mode also reads live, so only the ops block's own key tells
   // the promotion from a dropped one.
@@ -310,10 +310,26 @@ test("W1-T13700: the committed registry runs remudero-ops live, and every other 
   assert.match(block, /^ {4}mode: live$/m);
 });
 
+test("W1-T14794 the committed registry runs wreckterra live", () => {
+  const text = readFileSync(join(REPO_ROOT, ".remudero", "daemon-instances.yaml"), "utf8");
+  assert.equal(parseInstanceRegistry(text).instances.find((i) => i.name === "wreckterra")?.mode, "live");
+  // Written out, as the ops row is: an absent mode also reads live, so only the row's own key tells a promotion.
+  assert.match(text.slice(text.indexOf("\n  wreckterra:")), /^ {4}mode: live$/m);
+});
+
+test("W1-T14794 every other registry row keeps its mode", () => {
+  const text = readFileSync(join(REPO_ROOT, ".remudero", "daemon-instances.yaml"), "utf8");
+  assert.deepEqual(
+    parseInstanceRegistry(text).instances.filter((i) => i.name !== "wreckterra").map((i) => [i.name, i.mode ?? "live"]),
+    [["core", "live"], ["site", "live"], ["console", "live"], ["ops", "live"], ["oleyarcade", "shadow"]],
+  );
+});
+
 test("W1-T14594: wreckterra joins in shadow mode and the five rows before it stay byte-identical", () => {
   const text = readFileSync(join(REPO_ROOT, ".remudero", "daemon-instances.yaml"), "utf8");
   const wreckterra = parseInstanceRegistry(text).instances.find((i) => i.name === "wreckterra");
-  assert.deepEqual([wreckterra?.mode, wreckterra?.project, wreckterra?.repo, wreckterra?.live], ["shadow", "remudero", "craigoley/wreckterra", true]);
+  // W1-T14794: the row joined in shadow and has since been promoted to live by operator ruling.
+  assert.deepEqual([wreckterra?.mode, wreckterra?.project, wreckterra?.repo, wreckterra?.live], ["live", "remudero", "craigoley/wreckterra", true]);
   // The registry as it stood before this row, byte for byte: re-pin it only when an existing row truly changes.
   const before = text.slice(0, text.indexOf("\n  wreckterra:") + 1);
   assert.equal(createHash("sha256").update(before).digest("hex"), "bbc6d75f82def9755921ff9853fe39dc528c776b767a70c8547daae704ed7a60");
