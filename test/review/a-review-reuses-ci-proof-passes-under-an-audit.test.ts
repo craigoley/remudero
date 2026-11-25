@@ -188,6 +188,9 @@ describe("test/review/a-review-reuses-ci-proof-passes-under-an-audit.test.ts", (
     assert.equal(audited.reuse, undefined, "no agreement on record: the host executes every proof");
     assert.equal(audited.audit.audit_share, 1);
     assert.equal(audited.audit.audited, 1);
+    const unreadable = await planProofReuse(record(), { ...input, agreement: { rows: [], unreadable: "EIO" } });
+    assert.equal(unreadable.reuse, undefined, "an unreadable ledger audits every proof");
+    assert.equal(unreadable.audit.agreement_unreadable, "EIO", "and the row says why");
     const disagreed = await planProofReuse(record(), { ...input, agreement: { rows: [CLEAN_RECORD, { ...CLEAN_RECORD, ts: "2026-11-24T11:00:00.000Z", agreed: 9, disagreed: 1 }] } });
     assert.equal(disagreed.reuse, undefined, "a disagreement returns the audit to every proof");
     for (const [label, over, reason] of [
