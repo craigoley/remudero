@@ -325,7 +325,8 @@ test("a daily row-budget breach remains partial evidence rather than a healthy z
     writeFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), ndjson(Array.from({ length: 100001 }, (_, n) => ({
       ts: "2026-10-02T10:00:00Z", step: "worker.assignment", task_id: `W1-T${n}`,
     }))));
-    const source = (await dailyRoutingReview({ ...f, asOf })).snapshot.sources[0];
+    // W1-T14836: the review has no default row bound; an explicit one still binds and stays partial.
+    const source = (await dailyRoutingReview({ ...f, asOf, retention: { maxRetainedRows: 100_000 } })).snapshot.sources[0];
     assert.equal(source.rowsRead, 100001);
     assert.equal(source.retainedRowsOmitted, 1);
     assert.equal(source.state, "observed-partial");
@@ -462,7 +463,8 @@ test("daily completeness controls name unread rotations and changes between the 
     };
     const appended = (await dailyRoutingReview({ ...f, asOf, openUnion: appendUnrelated })).snapshot.sources[0];
     assert.equal(appended.retainedRows, 3);
-    assert.ok(appended.reasons.includes("ledger-source-changed-during-review"), "corpus identity covers unretained rows too");
+    // W1-T14836: rows appended to the live ledger after the audit are later rows, not a changed corpus.
+    assert.ok(!appended.reasons.includes("ledger-source-changed-during-review"), "an append keeps the audited corpus");
   } finally { f.close(); }
 });
 

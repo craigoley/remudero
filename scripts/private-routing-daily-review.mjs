@@ -30,6 +30,38 @@ function corpusIdentity(stateDir) {
     .map(name => { const st = statSync(join(stateDir, name)); return [name, st.ino, st.size, st.mtimeMs, st.ctimeMs]; });
 }
 
+/** SHA-256 of a file's first `length` bytes, or null when fewer bytes are there. */
+function prefixDigest(path, length) {
+  const hash = createHash("sha256");
+  const buffer = Buffer.alloc(1024 * 1024);
+  const fd = openSync(path, constants.O_RDONLY);
+  try {
+    let read = 0;
+    while (read < length) {
+      const count = readSync(fd, buffer, 0, Math.min(buffer.length, length - read), read);
+      if (count === 0) return null;
+      hash.update(buffer.subarray(0, count));
+      read += count;
+    }
+  } finally { closeSync(fd); }
+  return hash.digest("hex");
+}
+
+/** W1-T14836: the daemon appends to the live ledger all the time, so a live file with the same inode whose earlier
+ *  bytes are unchanged is the corpus the audit read plus later rows. Rotations must match exactly. */
+function sameCorpus(before, after, liveBefore, stateDir) {
+  if (typeof before !== "string" || typeof after !== "string") return false;
+  const split = (identity) => {
+    const entries = JSON.parse(identity);
+    return { live: entries.find(([name]) => name === "ledger.ndjson"), rotations: JSON.stringify(entries.filter(([name]) => name !== "ledger.ndjson")) };
+  };
+  const was = split(before), now = split(after);
+  if (was.rotations !== now.rotations) return false;
+  if (!was.live || !now.live) return was.live === now.live;
+  if (was.live[1] !== now.live[1] || now.live[2] < was.live[2] || !liveBefore) return false;
+  return prefixDigest(join(stateDir, "ledger.ndjson"), liveBefore.size) === liveBefore.digest;
+}
+
 function reportReads(row, time, windowStart) {
   const step = String(row.step);
   return ["worker.assignment", "verdict.merged", "fix.dispatch"].includes(step)
@@ -49,8 +81,12 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
   if (rotations.length + forms.live === 0)
     return { ...source, state: "unavailable", reasons: ["ledger-source-missing"], forms, rowsRead: 0, rows: [] };
   const rows = [];
-  let corpusBefore;
-  try { corpusBefore = JSON.stringify(corpusIdentity(source.stateDir)); }
+  let corpusBefore, liveBefore;
+  try {
+    corpusBefore = JSON.stringify(corpusIdentity(source.stateDir));
+    const live = JSON.parse(corpusBefore).find(([name]) => name === "ledger.ndjson");
+    liveBefore = live && { size: live[2], digest: prefixDigest(join(source.stateDir, "ledger.ndjson"), live[2]) };
+  }
   catch (error) { corpusBefore = { unreadable: String(error.message) }; }
   const resolvedRows = new WeakSet();
   let routingResolvedFutureRows = 0;
@@ -59,7 +95,8 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
   const finding = (value) => { if (findings.length < 200) findings.push(value); else findingsOmitted++; };
   const windowStart = Date.parse(asOf) - DAY;
   let retainedRowsOmitted = 0, retainedBytes = 0, byteBound = false, rowBound = false, dedupe = null;
-  const { maxRetainedBytes = 32 * 1024 * 1024, maxRetainedRows = 100_000, ...exactOptions } = retention;
+  // W1-T14836: no default retention bound; an explicit maxRetainedBytes or maxRetainedRows still binds.
+  const { maxRetainedBytes = Infinity, maxRetainedRows = Infinity, ...exactOptions } = retention;
   const exactDedupe = { ...exactOptions, createLedgerExactDedupe };
   const reportSeen = new Set();
   const reportSteps = new Set();
@@ -146,7 +183,7 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
   let corpusAfter;
   try { corpusAfter = JSON.stringify(corpusIdentity(source.stateDir)); }
   catch (error) { corpusAfter = { unreadable: String(error.message) }; }
-  if (reportSeen.size || typeof corpusBefore !== "string" || typeof corpusAfter !== "string" || corpusBefore !== corpusAfter) reasons.push("ledger-source-changed-during-review");
+  if (reportSeen.size || !sameCorpus(corpusBefore, corpusAfter, liveBefore, source.stateDir)) reasons.push("ledger-source-changed-during-review");
   if (rowBound) reasons.push("ledger-retention-row-bound");
   if (byteBound) reasons.push("ledger-retention-byte-bound");
   if (unreadSources) reasons.push("ledger-source-unreadable");
@@ -163,7 +200,7 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
     complete: reasons.length === 0 };
   return { ...source, state: reasons.length ? "observed-partial" : "observed", reasons, forms,
     rowsRead, retainedRows: rows.length, retainedBytes: deliveredBytes, auditedRetainedBytes: retainedBytes,
-    retainedRowsMissing: reportSeen.size, maxRetainedBytes, dedupe: dedupe && { rows: dedupe.rows, state: dedupe.state, reason: dedupe.reason },
+    retainedRowsMissing: reportSeen.size, maxRetainedBytes: Number.isFinite(maxRetainedBytes) ? maxRetainedBytes : null, dedupe: dedupe && { rows: dedupe.rows, state: dedupe.state, reason: dedupe.reason },
     corpusControl: { formsExpected: forms, formsRead, index: dedupe },
     completeness, dedupeRows, retainedRowsOmitted, malformedRows, oversizedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
 }
