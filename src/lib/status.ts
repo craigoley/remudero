@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { createLedgerRotationMemo, readLedgerUnionRecordsMemoized, readLedgerUnionRecordsSync, type LedgerGrepFsDeps, type LedgerRotationHook, type LedgerRotationMemo, type LedgerRotationMemoPass } from "./ledger-union.js";
 import { PLAN_ONLY_REVIEW_MARKER_STEP } from "./ledger-carry.js";
-import type { DependencyMergeEvidence, Plan, Task, TaskStatus } from "./plan.js";
+import { MOVED_FROM_VALUE, type DependencyMergeEvidence, type Plan, type Task, type TaskStatus } from "./plan.js";
 import { planDestinationRepository, type PlanDestinationRepository } from "./plan-destination.js";
 import { readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome } from "./ops-catalog-source.js";
 import { findTaskInCatalogs } from "./task-lookup.js";
@@ -78,24 +78,48 @@ export async function readCatalogStatusContext(publicPlan: Plan, stateDir: strin
     return statusCatalogContext(snapshot.outcome === "ok" ? "unreadable" : snapshot.outcome, publicPlan);
   }
   const ops = snapshot.plan;
-  if (ops.tasks.some(task => publicPlan.byId.has(task.id))) return statusCatalogContext("duplicate_task_id", publicPlan);
-  const snapshotTasks = [...publicPlan.tasks, ...ops.tasks], snapshotById = new Map(snapshotTasks.map(task => [task.id, task]));
-  if (publicPlan.tasks.some(task => task.depends_on.some(id => ops.byId.has(id))) ||
+  // W1-T14827: the mover's ops copy names its public record (moved_from) under the same shard file until the public
+  // removal lands. That id is read once, as the ops copy; any other id both catalogs hold is still a duplicate.
+  const shared = ops.tasks.filter(task => publicPlan.byId.has(task.id));
+  if (shared.some(task => !isInFlightMove(task, publicPlan.byId.get(task.id)!))) return statusCatalogContext("duplicate_task_id", publicPlan);
+  const publicView = shared.length === 0 ? publicPlan
+    : viewWithout(publicPlan, new Set(shared.map(task => task.id)));
+  const snapshotTasks = [...publicView.tasks, ...ops.tasks], snapshotById = new Map(snapshotTasks.map(task => [task.id, task]));
+  if (publicView.tasks.some(task => task.depends_on.some(id => ops.byId.has(id))) ||
       ops.tasks.some(task => task.depends_on.some(id => !snapshotById.has(id)))) {
     return statusCatalogContext("invalid_cross_catalog_dependency", publicPlan);
   }
   const tasks: Task[] = [];
   for (const source of snapshotTasks) {
-    const expectedCatalog = publicPlan.byId.has(source.id) ? "public" : "ops";
-    const found = await findTaskInCatalogs(source.id, { byId: publicPlan.byId, stateDir, api, opsSnapshot: snapshot });
+    const expectedCatalog = publicView.byId.has(source.id) ? "public" : "ops";
+    const found = await findTaskInCatalogs(source.id, { byId: publicView.byId, stateDir, api, opsSnapshot: snapshot });
     if (found.outcome !== "found" || found.catalog !== expectedCatalog) return statusCatalogContext("unreadable", publicPlan);
     if (expectedCatalog === "ops" && found.commit !== snapshot.binding.commit) return statusCatalogContext("ref_moved", publicPlan);
     tasks.push(found.task);
   }
   const plan: Plan = { tasks, byId: new Map(tasks.map(task => [task.id, task])) };
-  const opsTasks = tasks.filter(task => !publicPlan.byId.has(task.id));
+  const opsTasks = tasks.filter(task => !publicView.byId.has(task.id));
   const resolvedOps: Plan = { tasks: opsTasks, byId: new Map(opsTasks.map(task => [task.id, task])) };
   return statusCatalogContext("ok", plan, resolvedOps, destination, snapshot.binding.commit);
+}
+
+/** A shard's file name, or undefined for a record not read from a `tasks.d/` shard (the monolith, a hand-built task). */
+function shardFileName(sourcePath: string | undefined): string | undefined {
+  const parts = sourcePath?.split("/") ?? [];
+  return parts.length >= 2 && parts[parts.length - 2] === "tasks.d" ? parts[parts.length - 1] : undefined;
+}
+
+/** W1-T14827: an ops copy the mover wrote for `publicTask`: moved_from names the public repository's commit (the ops
+ *  gate's shape) and the copy sits under the public record's shard file name. */
+function isInFlightMove(opsTask: Task, publicTask: Task): boolean {
+  const file = shardFileName(opsTask.sourcePath);
+  return opsTask.moved_from !== undefined && MOVED_FROM_VALUE.test(opsTask.moved_from) &&
+    file !== undefined && file === shardFileName(publicTask.sourcePath);
+}
+
+function viewWithout(plan: Plan, ids: ReadonlySet<string>): Plan {
+  const tasks = plan.tasks.filter(task => !ids.has(task.id));
+  return { tasks, byId: new Map(tasks.map(task => [task.id, task])) };
 }
 
 /** GitHub-derived merge-state, cached in state/status.json; YAML status is decorative.
