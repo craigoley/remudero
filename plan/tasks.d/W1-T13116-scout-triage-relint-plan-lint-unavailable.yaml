@@ -6,7 +6,9 @@
   verify: auto
   risk: low
   priority: 2.97
-  status: queued
+  status: blocked
+  retirement: retired
+  # 2026-11-25 operator session (Craig's red list): #20822 was closed; W1-T14805 rebuilds it with its module in scope, so the fleet must not build this task too. Superseded by ops-catalog task named here (not in this plan, so no superseded_by field).
   attempts: 0
   author_class: machine
   origin: "scout:triage.relint_plan_lint_unavailable"
