@@ -1,3 +1,4 @@
+import { endedBeforeWorkerAssignment } from "./non-worker-verdict.js";
 import { spendRoleOf, spendAmountUsd } from "./spend-rows.js";
 
 export type TimeSeriesPoint = {
@@ -39,6 +40,8 @@ const utcDayFormatter = new Intl.DateTimeFormat("en-CA", {
 type HistoricalBucket = {
   observed: boolean;
   completedRuns: number;
+  /** W1-T12154: runs that ended before a worker was assigned — never in `completedRuns` or `durationsMs`. */
+  runsBeforeWorkerAssignment: number;
   tokensTotal: number;
   cacheRead: number;
   inputTokens: number;
@@ -52,6 +55,7 @@ function emptyHistoricalBucket(): HistoricalBucket {
   return {
     observed: false,
     completedRuns: 0,
+    runsBeforeWorkerAssignment: 0,
     tokensTotal: 0,
     cacheRead: 0,
     inputTokens: 0,
@@ -104,6 +108,8 @@ function median(values: readonly number[]): number | undefined {
 export interface HistoricalSeriesAccumulator {
   add(line: Record<string, unknown>): void;
   build(nowIso: string | null): LedgerTimeSeries[];
+  /** W1-T12154: per UTC day, the started runs that ended before a worker was assigned (days with none omitted). */
+  runsBeforeWorkerAssignment(): Record<string, number>;
 }
 
 function dayRange(nowIso: string): string[] {
@@ -170,6 +176,7 @@ function buildHistoricalSeries(state: Map<string, HistoricalBucket>, nowIso: str
 export function createHistoricalSeriesAccumulator(): HistoricalSeriesAccumulator {
   const state = new Map<string, HistoricalBucket>();
   const starts = new Map<string, number>();
+  const assigned = new Set<string>();
   return {
     add(line) {
       const day = timestampDay(line.ts);
@@ -184,9 +191,13 @@ export function createHistoricalSeriesAccumulator(): HistoricalSeriesAccumulator
         const prior = starts.get(runId);
         if (prior === undefined || timestamp < prior) starts.set(runId, timestamp);
       }
+      if (step === "worker.assignment" && runId) assigned.add(runId);
       if (step === "verdict" && runId && Number.isFinite(timestamp)) {
         const started = starts.get(runId);
-        if (started !== undefined) {
+        // A run whose own rows hold an assignment is counted as before, whatever its verdict row carries.
+        if (started !== undefined && !assigned.has(runId) && endedBeforeWorkerAssignment(line)) {
+          bucket.runsBeforeWorkerAssignment += 1;
+        } else if (started !== undefined) {
           bucket.completedRuns += 1;
           bucket.durationsMs.push(Math.max(0, timestamp - started));
         }
@@ -207,6 +218,11 @@ export function createHistoricalSeriesAccumulator(): HistoricalSeriesAccumulator
     },
     build(nowIso) {
       return buildHistoricalSeries(state, nowIso);
+    },
+    runsBeforeWorkerAssignment() {
+      const counts: Record<string, number> = {};
+      for (const [day, bucket] of state) if (bucket.runsBeforeWorkerAssignment > 0) counts[day] = bucket.runsBeforeWorkerAssignment;
+      return counts;
     },
   };
 }

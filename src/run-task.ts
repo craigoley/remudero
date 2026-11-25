@@ -10865,10 +10865,17 @@ export function predecessorTranscriptPromptLines(paths: readonly string[]): stri
   ];
 }
 
+/** The stage one run row names: a `run.phase` row's `waiting_on`, else the row's own `stage`, else its step. */
+function runStageOf(step: string, extra: Record<string, unknown>): string {
+  if (step === "run.phase" && typeof extra.waiting_on === "string" && extra.waiting_on.length > 0) return extra.waiting_on;
+  return typeof extra.stage === "string" && extra.stage.length > 0 ? extra.stage : step;
+}
+
 export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<string, unknown>) => void,
   stackEvidence: BenchmarkStackEvidence = {}, initialWork: BenchmarkWorkInput = {}) {
   const assignments = new Set<string>();
   let work = initialWork;
+  let lastStage: string | undefined;
   return (step: string, extra: Record<string, unknown> = {}): void => {
     work = observeBenchmarkWork(work, step, extra);
     let fields: Record<string, unknown>;
@@ -10899,6 +10906,9 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
       // Keep the source row and mark the receipt unavailable; telemetry cannot block dispatch.
       fields = { ...extra, benchmark_run_unavailable_reason: "receipt-build-failed" };
     }
+    // W1-T12154: a verdict with no assignment says so, and how far its run got, so no rate counts it as a worker's.
+    if (step === "verdict" && assignments.size === 0) fields = { ...fields, worker_assigned: false, last_stage: lastStage ?? "none" };
+    else if (step !== "verdict") lastStage = runStageOf(step, extra);
     if (step === "worker.attempt") {
       // A metric write is never allowed to change a worker's actual result or retry path.
       try { write(step, fields); } catch { /* measured as absent on the next source audit */ }

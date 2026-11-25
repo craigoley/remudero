@@ -35,6 +35,16 @@ export function infrastructureRefusal(line: Record<string, unknown>): string | u
   return undefined;
 }
 
+/** W1-T12154: a `verdict` row whose run ended before any worker was assigned. A row written after this task carries
+ *  `worker_assigned: false` (run-task.ts `benchmarkRunLedgerLogger`); an older row carries no such field, so it falls
+ *  back to {@link infrastructureRefusal}, the verdicts already known to end a run before its worker. MEASURED
+ *  2026-11-10: 600 of 1,030 implement runs in the core instance's ledger ended with no worker assignment. */
+export function endedBeforeWorkerAssignment(line: Record<string, unknown>): boolean {
+  if (line.step !== "verdict") return false;
+  if (line.worker_assigned === false) return true;
+  return line.worker_assigned === undefined && infrastructureRefusal(line) !== undefined;
+}
+
 export function lifetimeInfrastructureRefusal(line: Record<string, unknown>): string | undefined {
   return infrastructureRefusal(line) ??
     (typeof line.verdict === "string" && LIFETIME_ONLY_REFUSAL_VERDICTS.has(line.verdict) ? line.verdict : undefined);
