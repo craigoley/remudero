@@ -8,7 +8,7 @@ import {
   type ProductBuildCode, type ProductBuildOptions, type ProductBuildReceipt, type ProductBuildExecution,
 } from "./product-build.js";
 import {
-  productCasePlanText, productPlanAssociationReferences, productPlanTrustedReviewer, productPlanProposalSchema, ProductPlanOperationService, refreshProductPlanCheckout, verifyProductPlanCheckout, withPlanRefusalDetail, verifyProductPlanEvidence,
+  productCasePlanText, productPlanAssociationReferences, productPlanTrustedReviewer, productPlanProposalSchema, ProductPlanOperationService, ensureProductPlanCheckout, refreshProductPlanCheckout, verifyProductPlanCheckout, withPlanRefusalDetail, verifyProductPlanEvidence,
   type PlanHandoffPort, type PlanRepository, type ProductPlanObservation, type ProductPlanOperationCode,
 } from "./product-plan-operation.js";
 import { ProductIntentStore } from "./product-intent-store.js";
@@ -114,8 +114,20 @@ export class ProductCaseService {
       const managed = join(root, "repos", repository.name);
       // W1-T14301: the port runs only for a fresh proposal. A clean checkout only behind the live head moves forward first,
       // under run-task's managed-checkout lock; one it leaves is refused below, and the refusal carries why it was left.
-      const refresh = await refreshProductPlanCheckout(managed, repository, targetHead, join(root, "state", `managed-checkout-${repository.name}.lock`));
-      try { return await verifyProductPlanCheckout(managed, repository, targetHead); }
+      let checkout = managed;
+      let refresh = await refreshProductPlanCheckout(managed, repository, targetHead, join(root, "state", `managed-checkout-${repository.name}.lock`));
+      if (refresh.unmovable) {
+        // W1-T14724 INVARIANT steer-never-waits-on-a-build: a clean working checkout core cannot move (a build borrows it,
+        // or serve cannot fetch into it: instance repos are mounted read-only into serve) sends the
+        // re-plan to core's plan-only copy, refreshed and verified by the same rules under its own lock.
+        const planRoot = options.root ?? root;
+        const plan = await ensureProductPlanCheckout(planRoot, managed, repository);
+        const planned = await refreshProductPlanCheckout(plan, repository, targetHead,
+          join(planRoot, "state", `product-plan-checkout-${repository.owner}-${repository.name}.lock`));
+        // A plan-only copy that is not at the live head changes nothing: the working checkout's own refusal and reason stand.
+        if (planned.kind !== "left") { checkout = plan; refresh = planned; }
+      }
+      try { return await verifyProductPlanCheckout(checkout, repository, targetHead); }
       catch (error) {
         // W1-T14723 INVARIANT stale-refusal-names-its-cause: a refused checkout carries the reason the refresh left it.
         if (refresh.kind !== "left") throw error;

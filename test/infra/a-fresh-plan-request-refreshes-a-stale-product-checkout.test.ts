@@ -6,6 +6,7 @@ import { hostname } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { test, type TestContext } from "node:test";
 import { PRODUCT_PLAN_CHECKOUT_LEFT_STEP, ProductCaseService } from "#src/lib/product-case.js";
+import { ensureProductPlanCheckout, refreshProductPlanCheckout } from "#src/lib/product-plan-operation.js";
 import { ProductIntentStore } from "#src/lib/product-intent-store.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -149,12 +150,6 @@ test("W1-T14301 criterion 2: a checkout that is not clean and only behind, and a
       execFileSync("git", ["clone", "--quiet", "--bare", f.origin, foreign], { env: gitEnv });
       git(f.checkout, "remote", "set-url", "origin", foreign);
     } },
-    { name: "borrowed", code: "task_stale", why: /: a live worker borrows it \(/, change(f) {
-      const borrower = join(f.root, "worktrees", "run-borrower");
-      mkdirSync(dirname(borrower), { recursive: true });
-      git(f.checkout, "worktree", "add", "-q", "--detach", borrower, "HEAD");
-      writeFileSync(`${borrower}.lock`, JSON.stringify({ pid: process.pid, runId: "run-borrower" }));
-    } },
     { name: "locked", code: "task_stale", why: /: another dispatch holds /, change(f) {
       writeFileSync(f.lockPath, JSON.stringify({ pid: process.pid, host: hostname(), startedAt: new Date().toISOString() }));
     } },
@@ -214,4 +209,70 @@ test("W1-T14723: a stale-checkout refusal names the reason the fast-forward was 
   assert.equal(rows[0]!.repository, "craigoley/wreckterra");
   assert.equal(rows[0]!.target_head, f.liveHead());
   assert.equal(rows[0]!.reason, "it is dirty");
+});
+
+/** W1-T14724: a build worktree with a live run lock, registered on the daemon's working checkout. */
+function borrow(f: ReturnType<typeof fixture>) {
+  const borrower = join(f.root, "worktrees", "run-borrower");
+  mkdirSync(dirname(borrower), { recursive: true });
+  git(f.checkout, "worktree", "add", "-q", "--detach", borrower, "HEAD");
+  writeFileSync(`${borrower}.lock`, JSON.stringify({ pid: process.pid, runId: "run-borrower" }));
+}
+
+test("W1-T14724: a live build on the instance checkout does not refuse a product re-plan", async (t) => {
+  const f = fixture(t);
+  const live = f.advance("feat: the target moved on");
+  borrow(f);
+  const before = snapshot(f.checkout);
+  const result = await f.service().execute(actor, f.command());
+  assert.ok(result.ok, JSON.stringify(result));
+  const plan = join(f.control, "product-plan-checkouts", repository.owner, repository.name);
+  assert.deepEqual(f.calls, [{ repoRoot: plan, head: live }], "one native plan, in core's plan-only checkout at the live head");
+  assert.equal(Object.values(f.journal().operations)[0]!.command.repoRoot, plan);
+  assert.deepEqual(snapshot(f.checkout), before, "the borrowed working checkout is byte-identical");
+  assert.equal(git(plan, "worktree", "list", "--porcelain").split("\n").filter((line) => line.startsWith("worktree ")).length, 1,
+    "no build worktree is registered on the plan-only checkout");
+});
+
+test("W1-T14724: a checkout serve cannot fetch into does not refuse a product re-plan", async (t) => {
+  const f = fixture(t);
+  const live = f.advance("feat: the target moved on");
+  // Serve mounts an instance daemon's repos read-only: any fetch that must write refs into the checkout fails.
+  mkdirSync(join(f.checkout, ".git", "refs", "remotes", "origin"), { recursive: true });
+  writeFileSync(join(f.checkout, ".git", "refs", "remotes", "origin", "main.lock"), "");
+  const before = snapshot(f.checkout);
+  const result = await f.service().execute(actor, f.command());
+  assert.ok(result.ok, JSON.stringify(result));
+  const plan = join(f.control, "product-plan-checkouts", repository.owner, repository.name);
+  assert.deepEqual(f.calls, [{ repoRoot: plan, head: live }], "one native plan, in core's plan-only checkout at the live head");
+  assert.deepEqual(snapshot(f.checkout), before, "the unwritable working checkout is byte-identical");
+});
+
+test("W1-T14724: the plan-only checkout is created and fast-forwarded to the live head", async (t) => {
+  const f = fixture(t);
+  const first = f.advance("feat: the target moved on");
+  const plan = await ensureProductPlanCheckout(f.control, f.checkout, repository);
+  assert.equal(plan, join(f.control, "product-plan-checkouts", repository.owner, repository.name));
+  assert.equal(git(plan, "rev-parse", "HEAD"), first, "created from the working checkout's origin at its default branch");
+  assert.equal(await ensureProductPlanCheckout(f.control, f.checkout, repository), plan, "an existing plan-only checkout is reused");
+  const second = f.advance("feat: the target moved on again");
+  const lock = join(f.control, "state", "product-plan-checkout.lock");
+  assert.deepEqual(await refreshProductPlanCheckout(plan, repository, second, lock), { kind: "fast_forwarded" });
+  assert.equal(git(plan, "rev-parse", "HEAD"), second);
+});
+
+test("W1-T14724: a plan-only checkout is never created from an unreadable, foreign or unreachable origin", async (t) => {
+  const plans = (control: string) => join(control, "product-plan-checkouts", repository.owner);
+  const missing = fixture(t);
+  await ensureProductPlanCheckout(missing.control, join(missing.root, "absent"), repository);
+  assert.equal(existsSync(plans(missing.control)), false, "an unreadable working checkout clones nothing");
+  const foreign = fixture(t);
+  git(foreign.checkout, "remote", "set-url", "origin", "https://github.com/foreign/wreckterra.git");
+  await ensureProductPlanCheckout(foreign.control, foreign.checkout, repository);
+  assert.equal(existsSync(plans(foreign.control)), false, "a foreign origin clones nothing");
+  const gone = fixture(t);
+  git(gone.checkout, "remote", "set-url", "origin", join(gone.root, "gone", repository.owner, `${repository.name}.git`));
+  const plan = await ensureProductPlanCheckout(gone.control, gone.checkout, repository);
+  assert.equal(existsSync(plan), false, "a failed clone leaves no checkout");
+  assert.deepEqual(readdirSync(plans(gone.control)), [], "and no partial staging copy");
 });
