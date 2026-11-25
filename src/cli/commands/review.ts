@@ -1827,6 +1827,9 @@ export async function runReview(host: ReviewCommandHost, args: {
     recordReplay(decision);
     log("review.semantic_incomplete", { reason: semanticRefusal, head_sha: headSha, pr_url: prUrl,
       reviewer_outcome: outcome, review_decision_digest: decisionDigest,
+      // W1-T13945: the evaluator that withheld, so a repeat withhold at this input is re-run on another provider.
+      ...(evaluatorProvenance.provider !== null ? { provider: evaluatorProvenance.provider } : {}),
+      ...(evaluatorProvenance.routedModel ? { routed_model: evaluatorProvenance.routedModel } : {}),
       ...(inputDigest !== undefined ? { review_input_digest: inputDigest } : {}),
       ...(semanticRefusal === DOWNGRADE_UNCLASSIFIED ? { downgrade_unclassified: replayInput.downgrade_unclassified } : {}) });
     say(`remudero-review: verdict WITHHELD — ${semanticRefusal}; no verdict publication or merge effect`);

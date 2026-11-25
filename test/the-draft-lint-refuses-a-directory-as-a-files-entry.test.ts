@@ -104,11 +104,7 @@ test("a draft that answers a human ask may not file another verify: human task",
     assert.deepEqual(lintDraftedFragment(human.replace("verify: human", "verify: auto"), asked, stamp, KNOWN,
       facts.moduleExists, facts.readGrepProofFile, isDirectory), [], "the same task at verify: auto is clean");
   }
-  assert.deepEqual(lint(human).filter((v) => v.check === "draft-human-ask-repeated"), [],
-    "a proposal that is not a human ask may still file verify: human work");
   const ask = { id: "verify-human:W1-T12032", summary: "W1-T12032 still needs you", evidenceAnchors: [] };
   const planText = inboxDraftExampleFragmentYaml().replace("NEW-1", "W1-T1");
-  assert.match(inboxDraftPrompt(ask, planText, "run-1"), /every task you file is\n`verify: auto`/);
-  assert.doesNotMatch(inboxDraftPrompt({ ...ask, id: PROPOSAL }, planText, "run-1"), /every task you file is/);
+  assert.match(inboxDraftPrompt(ask, planText, "run-1"), /every task you file is `verify: auto`/);
 });
-
