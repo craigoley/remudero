@@ -172,9 +172,6 @@ jobs:
             BROWSER="$(node scripts/ci-shard-admission.mjs --changed-files admission-files.txt --shard 2)" || BROWSER="true"
             case "$BROWSER" in false) ;; *) BROWSER="true" ;; esac
           fi
-          if [ "$SETUP" != "false" ] && [ "${{ matrix.shard }}" = "1" ] && [ -n "$(node scripts/flake-screen.mjs --list 2>/dev/null || echo unknown)" ]; then
-            BROWSER="true"
-          fi
           echo "setup=${SETUP}" >> "$GITHUB_OUTPUT"
           echo "browser=${BROWSER}" >> "$GITHUB_OUTPUT"
           echo "- ci shard ${{ matrix.shard }}/8: setup=${SETUP}, browser=${BROWSER} (W1-T5697: shard 1 keeps setup for Typecheck; its browser serves Test, or a ci.yml diff's guard-mutation suites); full required coverage is unchanged." >> "$GITHUB_STEP_SUMMARY"
@@ -643,10 +640,6 @@ jobs:
           else
             echo "workflow-guard-mutation: not shard 1, or ci.yml is not in this diff — the guard population cannot have moved."
           fi
-      - name: Flake-screen the test files this pull request adds (scripts/flake-screen.mjs — shard 1 reruns them under load for the predicted coverage makespan; one failed run fails the shard)
-        env:
-          RMD_JOB_STARTED_MS: ${{ steps.admission.outputs.started_ms }}
-        run: node scripts/flake-screen.mjs --shard ${{ matrix.shard }}
       - name: Upload this shard's flake-retry evidence (best-effort input to ci-required's per-test aggregator, W1-T2904)
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -1892,6 +1885,78 @@ jobs:
           echo "reason=$REASON" >> "$GITHUB_OUTPUT"
           echo "coverage-floor: global $DECISION — $REASON"
 
+  # W1-T14633: the flake screen (scripts/flake-screen.mjs) is its own job. As a step of ci-shard (1/8) it
+  # waited on commitlint (`ci` needs it; shard 1 started at p50 10.1 min) and then screened for the
+  # predicted coverage makespan, so shard 1 ended after coverage-ratchet in 43 of 50 runs (W1-T14513).
+  # It needs what coverage-shard needs and no more: it reads nothing commitlint produces (no
+  # dependency digest, no producer sha), only the git diff, the committed ledgers and the lockfile.
+  # INVARIANT: its only job `if:` is the pull_request guard (a push, a merge group and a dispatch add no
+  # test file to screen, and MERGE_GROUP_REQUIRED never waits for it), and the screen step has no `if:` — a
+  # skipped screen reads as a passed one. A failed coverage-ledger skips it, as it skips coverage-shard;
+  # the REQUIRED coverage-ratchet refuses that run. A pull request that adds no test file skips only the
+  # install steps; the screen step itself runs and says it had nothing to screen. ci-gate.yml REQUIRES it.
+  # `--shard 1`: scripts/flake-screen.mjs screens only when told it is the one screening runner, which
+  # this job now is; the script, its budget and its repeats are unchanged.
+  flake-screen:
+    name: flake-screen
+    runs-on: ubuntu-26.04
+    needs: [coverage-ledger]
+    if: github.event_name == 'pull_request'
+    # W1-T1009: HEAVY band, the 35m of the ci-shard job the screen left: its window is the predicted
+    # coverage makespan less this job's own elapsed time, so it ends inside it. 1m coverage-ledger
+    # plus 35m stays strictly below ci-gate.yml's WAIT_CAP_SECONDS (4500s).
+    timeout-minutes: 35
+    steps:
+      - name: Stamp this job's start (the screen's window opens here, before checkout and install)
+        id: stamp
+        run: |
+          echo "started_ms=$(date +%s%3N)" >> "$GITHUB_OUTPUT"
+      # A plain checkout: the W1-T13825 bounded-checkout-and-retry pair is admitted only for ci and
+      # coverage-ratchet (test/helpers/checkout-retry-pair.ts), and a REQUIRED job carries no continue-on-error.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: List the test files this pull request adds (an unreadable list installs, fail-closed)
+        id: added
+        run: |
+          if [ -n "${GITHUB_BASE_REF}" ]; then
+            git fetch --no-tags origin "${GITHUB_BASE_REF}" || true
+          fi
+          ADDED="$(node scripts/flake-screen.mjs --list 2>/dev/null || echo unknown)"
+          if [ -n "$ADDED" ]; then
+            echo "setup=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "setup=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "- flake-screen: added test files: ${ADDED:-none}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Install (clean, from lockfile)
+        if: ${{ steps.added.outputs.setup == 'true' }}
+        run: npm ci
+      - name: Determine Playwright's pinned browser version (cache key input)
+        if: ${{ steps.added.outputs.setup == 'true' }}
+        id: playwright-version
+        run: |
+          VERSION="$(node -e "console.log(require('./package-lock.json').packages['node_modules/playwright'].version)")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+      - name: Cache Playwright's Chromium download
+        if: ${{ steps.added.outputs.setup == 'true' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+      - name: Install Playwright's Chromium (an added suite may drive a real headless browser)
+        if: ${{ steps.added.outputs.setup == 'true' }}
+        # NO `--with-deps` (test/workflow-playwright-install.test.ts), as in the ci-shard install step.
+        run: npx playwright install chromium
+      - name: Flake-screen the test files this pull request adds (scripts/flake-screen.mjs — reruns them under load for the predicted coverage makespan; one failed run fails the job)
+        env:
+          RMD_JOB_STARTED_MS: ${{ steps.stamp.outputs.started_ms }}
+        run: node scripts/flake-screen.mjs --shard 1
+
   coverage-ratchet:
     # §5 TIER 2, quality gate 1/4 (W1-T25) — coverage never goes down.
     # scripts/coverage-ratchet.mjs compares this run's lcov totals against the recorded floor in
@@ -3070,7 +3135,7 @@ jobs:
     # is empty. FALSIFIER: test/the-ci-gate-reports-on-the-merge-group-commit.test.ts.
     name: ci-gate
     runs-on: ubuntu-26.04
-    needs: [squash-trailer-gate, ci, flake-retry-aggregate, ci-required, test-slow-plan, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ledger, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic, bash32-cache-seed]
+    needs: [squash-trailer-gate, ci, flake-screen, flake-retry-aggregate, ci-required, test-slow-plan, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ledger, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic, bash32-cache-seed]
     # `always()` must still aggregate a FAILED dependency, but alone it also survives normal
     # cancellation and keeps a superseded PR run's concurrency slot occupied (W1-T4604).
     # GitHub re-evaluates this job condition when cancelling: the second arm releases that run.

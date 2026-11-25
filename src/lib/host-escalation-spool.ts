@@ -184,7 +184,7 @@ export function recordHostDeliveredEscalation(stateDir: string, e: Escalation, u
 
 /** Queue a close or a comment on an issue the host cannot reach. A close also drops any still-spooled
  *  observation of that issue's condition: posted after the close, it would only reopen it. */
-export function spoolIssueAction(stateDir: string, action: { kind: SpoolActionKind; url: string; body: string }, meta: SpoolMeta): void {
+export function spoolIssueAction(stateDir: string, action: { kind: SpoolActionKind; url: string; body: string; key?: string }, meta: SpoolMeta): void {
   const dir = escalationSpoolDir(stateDir);
   if (action.kind === "close") {
     for (const name of deliveredNamesFor(dir, action.url)) {
@@ -193,8 +193,25 @@ export function spoolIssueAction(stateDir: string, action: { kind: SpoolActionKi
       ledger(stateDir, "HOST-ESCALATION", HOST_ESCALATION_STEPS.withdrawn, { key: name.replace(/\.json$/, ""), closed: action.url });
     }
   }
-  const key = actionKey(action.kind, action.url, action.body);
-  upsert(stateDir, { ...base(key, meta, `${action.kind} ${action.url}`), ...action }, "HOST-ESCALATION");
+  const { key: given, ...rest } = action;
+  const key = given ?? actionKey(action.kind, action.url, action.body);
+  upsert(stateDir, { ...base(key, meta, `${action.kind} ${action.url}`), ...rest }, "HOST-ESCALATION");
+}
+
+/**
+ * W1-T14733: the one spool key of a crash-loop incident's status comment. Spooled under it, a later refused status
+ * REPLACES the earlier one (upsert keeps the newest body), so the drain posts one status, never one per exit.
+ */
+export function crashLoopStatusSpoolKey(url: string, runFirst: string): string {
+  return `comment-crashloop-status-${digest(url, runFirst)}`;
+}
+
+/** W1-T14733: drop a spooled comment a direct write has made stale; absent is a no-op. */
+export function withdrawSpooledIssueAction(stateDir: string, key: string): void {
+  const pending = join(escalationSpoolDir(stateDir), `${key}.json`);
+  if (!readJson(pending)) return;
+  rmSync(pending, { force: true });
+  ledger(stateDir, "HOST-ESCALATION", HOST_ESCALATION_STEPS.withdrawn, { key });
 }
 
 /**

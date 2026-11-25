@@ -489,7 +489,20 @@ async function forwardLine(line) {
     fi
     [ -n "$successor_run" ] && [ "$(handoff_record_field successor_run_id)" = "$successor_run" ] &&
       follow_live_sha "$(handoff_record_field successor_sha)"
+    # W1-T14752: a standby's stdout and stderr go to its own log file (spawnStandbyDaemon), so once it holds the run
+    # that file is copied to this container's stderr until the successor exits; docker logs would otherwise go silent.
+    successor_log_pid=""
+    if [ -n "$successor_run" ] && [ -f "$CONFIG_ROOT/state/daemon-standby/${successor_run}.log" ]; then
+      tail -n +1 -F --pid="$successor" -- "$CONFIG_ROOT/state/daemon-standby/${successor_run}.log" >&2 2>/dev/null &
+      successor_log_pid=$!
+    fi
     watch_successor "$successor"
+    if [ -n "$successor_log_pid" ]; then
+      # tail ends itself within a second of the successor's exit, after its last lines; a stop cuts it short.
+      successor_alive "$successor" && kill "$successor_log_pid" 2>/dev/null
+      wait "$successor_log_pid" 2>/dev/null || :
+      successor_log_pid=""
+    fi
     if [ "$supervise_daemon" -eq 1 ] && [ -n "$successor_run" ]; then
       persist_daemon_exit "$successor_run" "$rc" ""
     fi

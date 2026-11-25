@@ -92,8 +92,10 @@ test("W1-T1009: the Playwright-carrying jobs are bounded inside the heavy band",
     // files are the Playwright-driven serve.* suites, so it needs the install step and is banded
     // heavy with the other two. This list is the deliberate reconsideration the comment above asks
     // for, not a silent drift.
-    ["ci", "coverage-ratchet", "test-slow-shard"].sort(),
-    "expected exactly `ci`, `coverage-ratchet` and `test-slow-shard` to carry a `playwright install` step — " +
+    // W1-T14633 added the fourth: the flake screen left ci-shard (1/8) for its own job, which installs the
+    // browser an added suite may need, and keeps that shard's 35m heavy bound.
+    ["ci", "coverage-ratchet", "flake-screen", "test-slow-shard"].sort(),
+    "expected exactly `ci`, `coverage-ratchet`, `flake-screen` and `test-slow-shard` to carry a `playwright install` step — " +
       "if this changed, the heavy/light timeout banding needs to change with it",
   );
 

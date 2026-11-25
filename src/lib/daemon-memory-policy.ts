@@ -33,7 +33,9 @@ import { configPath } from "./config.js";
 import { FOOTPRINT_MAX_SAMPLES, FOOTPRINT_RETAIN_MS } from "./daemon-footprint.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { loadRunChildMode, type RunChildMode } from "./policy.js";
-import { readRunChildModeUnion, runChildModeEvidence, runChildModeFor, runChildModeWindow } from "./run-child-mode.js";
+import {
+  bootRunChildModeTracker, readRunChildModeUnion, runChildModeEvidence, runChildModeFor, runChildModeWindow, type RunChildModeTracker,
+} from "./run-child-mode.js";
 
 /** `plan/policy.yaml`'s optional `daemonMemory:` section, resolved. */
 export interface DaemonMemoryPolicy {
@@ -981,14 +983,21 @@ export function priorBootAtLimit(samples: readonly HeapSample[], prior: LearnedH
  *  unreadable policy or evidence) runs builds in-process, where an exit would cost the run, so it stays report-only. */
 export function runChildrenAdoptedGate(
   stateDir: string, readMode: () => RunChildMode = loadRunChildMode, readUnion: typeof readRunChildModeUnion = readRunChildModeUnion,
+  /** The tracker this process's boot folds (W1-T11341): its evidence is the union the boot already read, kept live, so
+   *  the gate need not read the whole ledger union again (W1-T14756: that read held the first heap proposal ~110 s). */
+  tracker: Pick<RunChildModeTracker, "evidence"> | undefined = bootRunChildModeTracker(stateDir),
 ): HeapCeilingGate {
   try {
     const mode = readMode();
     if (mode === "on") return { applies: true, reason: "sweep.runChild.mode on: runs are adopted children" };
     if (mode !== "auto") return { applies: false, reason: `sweep.runChild.mode ${mode}: runs are in-process` };
-    const union = readUnion(stateDir);
-    if (union.unread.length > 0) return { applies: false, reason: `auto's evidence is unreadable (${union.unread.join(", ")})` };
-    const decided = runChildModeFor("auto", runChildModeEvidence(runChildModeWindow(union.rows))).mode;
+    let evidence = tracker?.evidence();
+    if (evidence === undefined) {
+      const union = readUnion(stateDir);
+      if (union.unread.length > 0) return { applies: false, reason: `auto's evidence is unreadable (${union.unread.join(", ")})` };
+      evidence = runChildModeEvidence(runChildModeWindow(union.rows));
+    }
+    const decided = runChildModeFor("auto", evidence).mode;
     return decided === "on"
       ? { applies: true, reason: "sweep.runChild.mode auto decided on: runs are adopted children" }
       : { applies: false, reason: `sweep.runChild.mode auto decided ${decided}: runs are in-process` };
@@ -996,6 +1005,7 @@ export function runChildrenAdoptedGate(
     return { applies: false, reason: `run-child mode unreadable: ${errnoOrReason(error)}` };
   }
 }
+
 
 /** What the launcher does with the file: the learned ceiling in place of every inherited `--max-old-space-size`, or the
  *  inherited value and why. bin/rmd runs this same rule in plain node before it starts a daemon (no tsx at launch). */
