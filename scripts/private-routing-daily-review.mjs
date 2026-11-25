@@ -10,13 +10,16 @@ import { observeReviewFlow, REVIEW_FLOW_STEPS } from "../src/lib/review-flow-obs
 import { readCiLessonExposure } from "../src/lib/ci-lesson-recurrence.ts";
 import { goalObservationFromRow } from "../src/lib/goals.ts";
 import { fixedClock, systemClock } from "../src/lib/clock.ts";
-import { ledgerRotationEntries, openLedgerUnion } from "../src/lib/ledger-union.ts";
+import { fingerprintLedgerLine, ledgerRotationEntries, openLedgerUnion } from "../src/lib/ledger-union.ts";
+import { quarantinedLedgerFingerprints } from "../src/lib/field-trials-ledger-quarantine.ts";
 import { createLedgerExactDedupe, LedgerExactDedupeLimitError } from "../src/lib/ledger-exact-dedupe.ts";
 import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS } from "../src/lib/routing-experiments.ts";
 import { attributeAttemptOutcome } from "../src/lib/attempt-outcome-attribution.ts";
 import { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } from "../src/lib/routing-quarantine-resolution.ts";
 
 const DAY = 86_400_000;
+/** Milliseconds since `start` on the monotonic clock. */
+const monotonicSince = (start) => () => performance.now() - start;
 const since = ROUTING_EXPERIMENTS.map((item) => item.startedOn).sort()[0];
 const collectorSha256 = createHash("sha256").update(readFileSync(fileURLToPath(import.meta.url))).digest("hex");
 function sourceRevisionAtRuntime() {
@@ -71,7 +74,7 @@ function reportReads(row, time, windowStart) {
       || step.endsWith(".gardener_judged") || step.endsWith(".gardener_failed") || step.startsWith("goal."));
 }
 
-async function readSource(source, asOf, resolutions, openUnion, retention) {
+async function readSource(source, asOf, resolutions, openUnion, retention, elapsedMs, quarantine) {
   let names;
   try { names = readdirSync(source.stateDir); }
   catch { return { ...source, state: "unavailable", reasons: ["ledger-source-unreadable"], rowsRead: 0, rows: [] }; }
@@ -89,6 +92,11 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
   }
   catch (error) { corpusBefore = { unreadable: String(error.message) }; }
   const resolvedRows = new WeakSet();
+  const quarantinedRows = new WeakSet();
+  let quarantinedCount = 0;
+  // W1-T14837: "now" moves with the scan. A row the daemon appended while a long scan ran is a later row, and only a
+  // stamp past the clock at the moment it is read, plus the 5-minute allowance, is future-dated.
+  const futureAfter = () => Date.parse(asOf) + 5 * 60_000 + elapsedMs();
   let routingResolvedFutureRows = 0;
   const findings = [];
   let findingsOmitted = 0;
@@ -133,18 +141,21 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
             if (retainedBytes + bytes > maxRetainedBytes) byteBound = true;
           }
         }
+        // W1-T14837: a row named in the Field Trials quarantine (Craig's 2026-11-25 fingerprint ruling) is skipped.
+        if (quarantine.has(fingerprintLedgerLine(raw))) { quarantinedRows.add(row); return; }
         const resolution = resolveRoutingQuarantineRow(resolutions, source.label, row, raw, asOf);
         if (resolution) resolvedRows.add(row);
-        if (!Number.isFinite(timestamp) || timestamp > Date.parse(asOf) + 5 * 60_000) finding({
+        if (!Number.isFinite(timestamp) || timestamp > futureAfter()) finding({
           kind: Number.isFinite(timestamp) ? "future-timestamp" : "invalid-timestamp", rowHash: createHash("sha256").update(raw).digest("hex"),
           timestamp: typeof row.ts === "string" ? row.ts.slice(0, 80) : null, step: typeof row.step === "string" ? row.step.slice(0, 80) : null,
           ...(resolution ? { resolutionScope: resolution.scope, resolvedAt: resolution.resolvedAt } : {}),
         });
       },
     })) {
+      if (quarantinedRows.delete(row)) { quarantinedCount++; continue; }
       const time = Date.parse(row.ts);
       if (!Number.isFinite(time)) { invalidTimestampRows++; continue; }
-      if (time > Date.parse(asOf) + 5 * 60_000) { futureRows++; if (resolvedRows.has(row)) routingResolvedFutureRows++; continue; }
+      if (time > futureAfter()) { futureRows++; if (resolvedRows.has(row)) routingResolvedFutureRows++; continue; }
       // Normal writes arriving during the scan belong to the next snapshot, not a clock warning.
       if (time > Date.parse(asOf)) continue;
       rowsRead++;
@@ -202,7 +213,7 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
     rowsRead, retainedRows: rows.length, retainedBytes: deliveredBytes, auditedRetainedBytes: retainedBytes,
     retainedRowsMissing: reportSeen.size, maxRetainedBytes: Number.isFinite(maxRetainedBytes) ? maxRetainedBytes : null, dedupe: dedupe && { rows: dedupe.rows, state: dedupe.state, reason: dedupe.reason },
     corpusControl: { formsExpected: forms, formsRead, index: dedupe },
-    completeness, dedupeRows, retainedRowsOmitted, malformedRows, oversizedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
+    completeness, dedupeRows, retainedRowsOmitted, malformedRows, oversizedRows, quarantinedRows: quarantinedCount, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
 }
 
 function privateWrite(path, value) {
@@ -211,7 +222,8 @@ function privateWrite(path, value) {
   renameSync(temp, path);
 }
 
-export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso(), quarantineResolutions, openUnion = openLedgerUnion, retention = {} }) {
+export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso(), quarantineResolutions, openUnion = openLedgerUnion, retention = {},
+  elapsedMs = monotonicSince(performance.now()), quarantinedFingerprints = quarantinedLedgerFingerprints() }) {
   for (const limit of [retention.maxRetainedBytes, retention.maxRetainedRows]) {
     if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) throw new TypeError("invalid ledger retention bound");
   }
@@ -246,7 +258,7 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
   const results = [];
   const corpusControls = [];
   for (const source of sources) {
-    const { rows, corpusControl, ...quality } = await readSource(source, asOf, resolutions, openUnion, retention);
+    const { rows, corpusControl, ...quality } = await readSource(source, asOf, resolutions, openUnion, retention, elapsedMs, quarantinedFingerprints);
     corpusControls.push({ label: source.label, ...(corpusControl ?? { formsExpected: quality.forms ?? null,
       formsRead: { gzip: 0, plain: 0, live: 0 }, index: null }) });
     const trialReasons = quality.reasons.filter(reason => reason !== "ledger-source-future-dated"

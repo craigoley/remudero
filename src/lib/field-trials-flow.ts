@@ -293,9 +293,14 @@ export function unavailableLedger(reason: string): FieldTrialsLedgerRead {
     invalidTimestampRows: 0, unreadSources: 0, newestTs: null, rows: [] };
 }
 
+/** Milliseconds since `start` on the monotonic clock. */
+const monotonicSince = (start: number) => (): number => performance.now() - start;
+
 /** The audited three-form union: every form counted, exact replayed lines counted as duplicates once. */
 export async function readFieldTrialsLedger(stateDir: string, nowMs = systemClock.now(),
-  quarantine: ReadonlySet<string> = quarantinedLedgerFingerprints()): Promise<FieldTrialsLedgerRead> {
+  quarantine: ReadonlySet<string> = quarantinedLedgerFingerprints(),
+  /** W1-T14837: time since the read began, so a row the daemon appended during a long read is not future-dated. */
+  elapsedMs: () => number = monotonicSince(performance.now())): Promise<FieldTrialsLedgerRead> {
   let names: string[];
   try { names = readdirSync(stateDir); }
   catch {
@@ -330,8 +335,8 @@ export async function readFieldTrialsLedger(stateDir: string, nowMs = systemCloc
       const ts = iso(accepted.ts);
       if (ts === null) { invalidTimestampRows += 1; return; }
       // A stray clock-forward row cannot create a future cohort or advance the source watermark.
-      if (ts !== null && Date.parse(ts) > nowMs + 5 * 60_000) { futureRows += 1; return; }
-      if (ts !== null && (newestTs === null || ts > newestTs)) newestTs = ts;
+      if (Date.parse(ts) > nowMs + 5 * 60_000 + elapsedMs()) { futureRows += 1; return; }
+      if (newestTs === null || ts > newestTs) newestTs = ts;
       if (flowRelevant(accepted)) rows.push(projectFlowRow(accepted, fingerprint));
     },
   })) void row;
