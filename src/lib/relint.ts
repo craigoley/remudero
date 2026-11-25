@@ -156,7 +156,9 @@ export function lintFiledTasks(
   if (!localRepoName) {
     try { localRepoName = resolveOwnerRepoAt(worktreeRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
   }
-  const taskLintOpts: LintOpts = { ...opts, localRepoName };
+  // W1-T14737 INVARIANT self-lint-matches-review: a filed id is always new, and review's changed-task lint demands an
+  // INVARIANT/NO-INVARIANTS declaration of every new task, so this pass does too; the plan PR then never opens to a refusal.
+  const taskLintOpts: LintOpts = { requireDesignInvariantDeclaration: true, ...opts, localRepoName };
   const admissionOpts: LintOpts = opts.machineFilingAdmission
     ? opts
     : {

@@ -528,6 +528,7 @@ export const GATE_POSTURE_DECLARATIONS: Readonly<Record<string, GatePostureDecla
   "ci:coverage-ratchet": repair(true, "coverage gaps are repaired by tests or reviewed coverage data"),
   "ci:coverage-ratchet-required": repair(true, "coverage aggregation reflects repairable child coverage checks"),
   "ci:depcruise": repair(true, "dependency violations name the forbidden edge"),
+  "ci:flake-screen": repair(true, "a flake-screen failure names the added test file that failed a rerun and its passing-run count"),
   "ci:flake-retry-aggregate": repair(true, "retry aggregate failures name unstable tests or host clusters"),
   "ci:jscpd-gate": repair(true, "duplication findings name code to extract or justify"),
   "ci:leak-grep": close(true, "secret leakage is a genuine harm bar"),

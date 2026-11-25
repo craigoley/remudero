@@ -2855,6 +2855,17 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       deps.log("fix.done", { site, head_sha: review.headSha, subtype: "commit_refused" });
       return { outcome: "stood_down", review, strikes, retriggers, reason: filingRefusal, standDownReason: filingRefusal };
     }
+    // W1-T14750: the PR may have merged or closed while the worker ran; such a round gets no push, no round comment and
+    // no CI spend. The round never landed, so it spends no strike. An unreadable state fails open (W1-T177).
+    const prePushSite = `${site}.pre_push`;
+    const prePushStandDown = await fixRungStandDownReason(deps.readLiveState, opts.prUrl, prePushSite, deps.log);
+    if (prePushStandDown) {
+      roundCommentContext = undefined;
+      roundPushFailure = { landed: false, outcome: "refused", reason: `pr terminal before push: ${prePushStandDown.reason}` };
+      deps.log("fix.stood_down", { site: prePushSite, head_sha: headSha, pr_head_sha: review.headSha, strikes, reason: prePushStandDown.reason });
+      deps.say(`fix rung: standing down before push — ${prePushStandDown.reason}`);
+      return { outcome: "stood_down", review, strikes, retriggers, reason: prePushStandDown.reason, standDownReason: prePushStandDown.reason };
+    }
     try {
       const pushed = await push();
       if (isFixRoundPushReceipt(pushed)) roundPushReceipt = pushed;

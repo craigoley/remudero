@@ -40,6 +40,7 @@ import { ghExec } from "./github-transport.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { loadMounts, mountsPath } from "./mounts.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
+import { readVerifyHumanCadencePlan, type TaskLookupOptions, type VerifyHumanCadencePlan } from "./task-lookup.js";
 import { isGardenLandWaiting, type GardenWorkspacePort, type PrState } from "./gardener.js";
 import { stagedTaskFiles } from "./feedback-landing.js";
 import type { Proposal } from "./inbox.js";
@@ -422,7 +423,9 @@ export async function judgeMachineShard(
   task: Task,
   record: FamilyTrackRecord,
   ports: { riskJudge: (input: RiskJudgeInput) => Promise<RiskJudgeVerdict>; policy: RiskPolicy; clock: Clock; evidence?: string;
-    log?: MachineJudgePorts["log"] },
+    log?: MachineJudgePorts["log"];
+    /** W1-T14656: the code checkout an ops record's `files:` and the judge mount are read from; its own checkout holds only plan records. */
+    codeRoot?: string },
 ): Promise<MachineJudgement> {
   const bar = earnedConfidenceBar(ports.policy.confidenceThreshold, record.mean);
   const backstop = deterministicEscalation(task);
@@ -432,12 +435,13 @@ export async function judgeMachineShard(
   }
   let verdict: RiskJudgeVerdict;
   try {
-    verdict = await ports.riskJudge(machineJudgeInput(task, record, undefined, ports.evidence));
+    const codeRoot = ports.codeRoot;
+    verdict = await ports.riskJudge(machineJudgeInput(task, record, codeRoot === undefined ? undefined : (p) => existsSync(join(codeRoot, p)), ports.evidence));
   } catch (e) {
     return { kind: "unavailable", task, reason: `the risk judge threw: ${String((e as Error)?.message ?? e)}` };
   }
   if (ports.log) {
-    const root = shardRepoRoot(task);
+    const root = ports.codeRoot ?? shardRepoRoot(task);
     let model: string | undefined;
     let modelReason = "the judged record has no checkout with a mounts file";
     try {
@@ -803,6 +807,33 @@ export interface MachineJudgePorts {
    *  (a ledgered release, `rmd release`, an `rmd note`). A ruling at or after the escalation stops its withdrawal.
    *  Absent or throwing: nothing is withdrawn this pass. */
   operatorRulings?: () => (taskId: string) => string | undefined;
+  /** W1-T14656: the ops records in the plan `plan` answers, and why the ops catalog is not judged when it is not.
+   *  Absent: every record is public. */
+  ops?: () => { ids: ReadonlySet<string>; refusal?: string };
+  /** W1-T14656: a workspace over the ops checkout, where a rewrite of an ops record lands as a remudero-ops plan PR.
+   *  Absent: ops records are judged but never rewritten. */
+  openOpsWorkspace?: GardenWorkspacePort;
+  /** W1-T14656: the code checkout an ops record's declared files and the judge mount are read from. */
+  codeRoot?: string;
+}
+
+/** W1-T14656: the code checkout to judge `task` against: the public one for an ops record, else its own. */
+function codeRootFor(ports: Pick<MachineJudgePorts, "ops" | "codeRoot">, task: Task): { codeRoot: string } | Record<string, never> {
+  return ports.codeRoot !== undefined && ports.ops?.().ids.has(task.id) === true ? { codeRoot: ports.codeRoot } : {};
+}
+
+/** W1-T14656: the plan the machine-filing judge and `rmd verify-human-sweep` read: the public plan composed with the
+ *  ops catalog by {@link readVerifyHumanCadencePlan}, so a queued ops record is judged and released like a public one.
+ *  Each ops record's `sourcePath` is anchored in the ops checkout (`<checkout>/<plan>/tasks.d/<file>`), the shape the
+ *  judge addresses a record's landing file by; a public record is untouched. INVARIANT unreadable-ops-judges-public-only:
+ *  an ops catalog that is off, unreadable or refused leaves the public plan, with the refusal named. */
+export async function machineJudgePlanSource(publicPlan: Plan, sources: TaskLookupOptions = {}): Promise<VerifyHumanCadencePlan> {
+  const source = await readVerifyHumanCadencePlan(publicPlan, sources);
+  if (source.opsCheckoutDir === undefined || source.opsIds.size === 0) return source;
+  const planDir = resolveRepoLayout(source.opsCheckoutDir).planDir;
+  const tasks = source.plan.tasks.map((task) =>
+    source.opsIds.has(task.id) && task.sourcePath !== undefined ? { ...task, sourcePath: join(planDir, task.sourcePath) } : task);
+  return { ...source, plan: { tasks, byId: new Map(tasks.map((task) => [task.id, task])) } };
 }
 
 /** What the machine judge reads that a pass can change: the plan tree it judges (and its risk policy, which
@@ -847,6 +878,8 @@ export interface MachineJudgeReport {
   escalated: string[];
   unavailable: string[];
   refused: string[];
+  /** W1-T14656: why the ops catalog's records were not judged this pass, when a destination is named and its catalog was not read. */
+  opsRefusal?: string;
   /** Records whose landing threw: ledgered and skipped, never aborting the rest of the pass. */
   failed: string[];
   /** Records whose ruling the landing tree already carries: nothing to land, and not a failure. */
@@ -1022,7 +1055,7 @@ async function reaskParkedEscalations(c: {
           ruling: { ...pinned, action: "proceed", judgedAt: ports.clock.iso(),
             reasons: [...pinned.reasons, `confidence bar crossing: ${entry.inputs.bar} -> ${inputs.bar}; recorded confidence ${pinned.confidence} now clears the bar`] },
         }
-      : await judgeMachineShard(task, record, { riskJudge: ports.riskJudge, policy: c.policy, clock: ports.clock, log: ports.log });
+      : await judgeMachineShard(task, record, { riskJudge: ports.riskJudge, policy: c.policy, clock: ports.clock, log: ports.log, ...codeRootFor(ports, task) });
     if (judged.kind === "unavailable") {
       c.report.unavailable.push(task.id);
       ports.log("machine_judge.unavailable", { task_id: task.id, reason: judged.reason, reask: true });
@@ -1180,7 +1213,7 @@ async function reconsiderReleasedFlakes(c: {
     }
     const family = judgementFamily(task);
     if (!c.records.has(family)) c.records.set(family, familyRecordForPass(c.plan, family, c.isMerged, c.ports, c.state, c.released));
-    const judged = await judgeMachineShard(task, c.records.get(family)!, { riskJudge: c.ports.riskJudge, policy: c.policy, clock: c.ports.clock, log: c.ports.log, evidence: flakeEvidenceLine(facts) });
+    const judged = await judgeMachineShard(task, c.records.get(family)!, { riskJudge: c.ports.riskJudge, policy: c.policy, clock: c.ports.clock, log: c.ports.log, evidence: flakeEvidenceLine(facts), ...codeRootFor(c.ports, task) });
     if (judged.kind === "unavailable") {
       c.report.unavailable.push(task.id);
       c.ports.log("machine_judge.unavailable", { task_id: task.id, reason: judged.reason, flake_reconsidered: true });
@@ -1504,7 +1537,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
         }
       : cached !== undefined
         ? { kind: "ruled", task, bar: cached.bar, record: records.get(family)!, ruling: cached.ruling }
-        : await judgeMachineShard(task, records.get(family)!, { riskJudge: ports.riskJudge, policy, clock: ports.clock, log: ports.log, ...(flakeLine ? { evidence: flakeLine } : {}) });
+        : await judgeMachineShard(task, records.get(family)!, { riskJudge: ports.riskJudge, policy, clock: ports.clock, log: ports.log, ...(flakeLine ? { evidence: flakeLine } : {}), ...codeRootFor(ports, task) });
     if (judged.kind === "unavailable") {
       report.unavailable.push(task.id);
       ports.log("machine_judge.unavailable", { task_id: task.id, reason: judged.reason });
@@ -1539,10 +1572,23 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   }
   // Persisted before landing, so a landing that throws never costs these rulings again.
   writeAtomic(statePath, JSON.stringify(state) + "\n");
+  // W1-T14656: one landing PR carries one repository. The public records land first; the ops records' rewrites land on
+  // a pass with no public rewrite, through the ops workspace, and wait (their rulings kept in `state.rulings`) otherwise.
+  const opsRead = ports.ops?.();
+  if (opsRead?.refusal !== undefined) report.opsRefusal = opsRead.refusal;
+  const opsIds = opsRead?.ids ?? new Set<string>();
+  const ofGroup = (items: { task: Task }[], ops: boolean): void => {
+    for (let i = items.length - 1; i >= 0; i--) if (opsIds.has(items[i]!.task.id) !== ops) items.splice(i, 1);
+  };
+  const publicWork = [...ruled, ...retire, ...withdraw, ...mechRetire].some((item) => !opsIds.has(item.task.id));
+  const landingOps = !publicWork && ports.openOpsWorkspace !== undefined && ports.writeRoot === undefined;
+  for (const items of [ruled, retire, withdraw, mechRetire] as { task: Task }[][]) ofGroup(items, landingOps);
   if (ruled.length === 0 && retire.length === 0 && withdraw.length === 0 && mechRetire.length === 0) return report;
 
-  const ws = ports.writeRoot === undefined ? await ports.openWorkspace?.() : undefined;
+  const ws = landingOps ? await ports.openOpsWorkspace!() : ports.writeRoot === undefined ? await ports.openWorkspace?.() : undefined;
   const root = ports.writeRoot ?? ws?.root;
+  // An ops record's declared files are public code, which the ops checkout does not hold.
+  const codeRoot = landingOps ? ports.codeRoot ?? root : root;
   if (root === undefined) throw new Error("machine judge: neither a workspace nor a write root was supplied");
   try {
     let landed: (RulingPins & { action: string })[] = [];
@@ -1631,7 +1677,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
         const relPath = shardRelPath(r.task)!;
         const text = readFileIfExists(join(root, relPath));
         const judgedPin = taskRulingPin({ ...r.task, verify: "auto" });
-        const admission = { plan, isMerged: (t: Task) => isMerged(t.id), pathExists: (p: string) => existsSync(join(root, p)) };
+        const admission = { plan, isMerged: (t: Task) => isMerged(t.id), pathExists: (p: string) => existsSync(join(codeRoot!, p)) };
         let out = text === undefined
           ? { refused: `${relPath} is absent from the landing tree` }
           : r.byOperator && operatorReleasePin(shardRecord(text, relPath)) !== operatorReleasePin(r.task)

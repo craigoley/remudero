@@ -438,6 +438,8 @@ export interface GardenerDeps<W extends GardenCheckout = GardenCheckout, P exten
   clock?: Clock;
   /** Raises a failure streak to a person (escalate.ts); absent, the streak is ledgered only. */
   escalate?: (escalation: Escalation) => string;
+  /** Closes an escalation issue the gardener itself opened and its rule no longer holds; absent, it stays open. */
+  closeIssue?: (url: string, comment: string) => void | Promise<void>;
   /** What a pending PR waits on, read from local files with no GitHub call ({@link gardenPendingSignal});
    *  absent or undefined, a pending PR is paced on the clock alone. */
   pendingSignal?: (prUrl: string) => string | undefined;

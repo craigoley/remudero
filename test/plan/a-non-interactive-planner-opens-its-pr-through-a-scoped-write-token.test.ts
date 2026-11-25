@@ -182,7 +182,7 @@ test("planCommand mints afresh at POST only, keeps reads and worker env clear, a
           const id = "W1-T5";
           mkdirSync(join(args.cwd, "plan", "tasks.d"), { recursive: true });
           writeFileSync(join(args.cwd, "plan", "tasks.d", `${id}-fixture.yaml`),
-            `- id: ${id}\n  title: fixture task\n  repo: remudero\n  origin: architect\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  attempts: 0\n  files: [test/fixture.test.ts]\n  acceptance:\n    - claim: fixture\n      proof: 'unit test: fixture'\n`);
+            `- id: ${id}\n  title: fixture task\n  repo: remudero\n  origin: architect\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  attempts: 0\n  design: 'NO-INVARIANTS: a fixture filing with no prior behavior'\n  files: [test/fixture.test.ts]\n  acceptance:\n    - claim: fixture\n      proof: 'unit test: fixture'\n`);
           const text = `PROPOSED: file ${id} for the credential fixture`;
           return { text, blocks: [text], stderr: "", costUsd: 0, subtype: "success", isError: false,
             sessionId: "fixture", numTurns: 1, apiError: false, model: "claude-opus-5", effort: "high",
