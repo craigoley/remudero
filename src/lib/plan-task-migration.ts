@@ -493,6 +493,13 @@ export interface MigrationSelection {
   controls: Json; candidate: Json | undefined; batch: Json[]; refused: Array<{ id: string; reason: string }>;
 }
 
+/** Every id a public record names through depends_on or superseded_by. The mover leaves such a record public: its
+ *  removal would leave the naming record's reference dangling, and the public plan read refuses that, so the REMOVE
+ *  step's checks fail forever. W1-T13178 was copied while W1-T2874 named it as superseded_by. */
+export function publicReferences(tasks: ReadonlyArray<Task>): Set<string> {
+  return new Set(tasks.flatMap(task => [...task.depends_on, ...(task.superseded_by === undefined ? [] : [task.superseded_by])]));
+}
+
 /** The selection the preview verb prints (W1-T13680 exports it for `rmd move-task`): pinned catalogs, ownership, the
  *  merge-credit search and a stable re-read. It throws {@link PreviewUnknown} on any unread or changed evidence.
  *  W1-T14345: it fills a batch of open tasks, oldest filing first, that the ops catalog has room for; a batch of one is
@@ -510,7 +517,7 @@ export async function selectPlanTaskMigration(
   // A positive search control is an actual known run PR, not an invented task or an age-based grant.
   const control = [...initial.recent].reverse().find(pr => taskIdFromRunBranch(String(pr.headRefName)) !== undefined);
   const refused: Array<{ id: string; reason: string }> = [];
-  const publicPrerequisites = new Set(pub.plan.tasks.flatMap(task => task.depends_on));
+  const publicPrerequisites = publicReferences(pub.plan.tasks);
   // Oldest filing first; records filed in one commit keep the reverse dispatch order the preview always read.
   const ranks = await filingRanks(o.publicRoot, o.publicCommit, [...new Set([...pub.originals.values()].filter(x => x.shard).map(x => dirname(x.path)))]);
   const rank = (task: Task) => ranks.get(pub.originals.get(task.id)!.path) ?? Number.MAX_SAFE_INTEGER;
