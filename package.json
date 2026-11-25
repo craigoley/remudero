@@ -121,7 +121,7 @@
     "changelog": "commit-and-tag-version"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.325",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.330",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "acorn": "8.19.0",
     "playwright": "^1.65.1",
@@ -138,8 +138,8 @@
     "@swc/core": "^1.16.22",
     "@types/node": "^24.19.1",
     "commit-and-tag-version": "^13.3.0",
-    "dependency-cruiser": "18.7.2",
-    "fast-check": "^4.10.2",
+    "dependency-cruiser": "18.8.0",
+    "fast-check": "^4.11.0",
     "jscpd": "^5.4.3"
   },
   "_dependencyRationale": {
