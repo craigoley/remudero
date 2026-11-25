@@ -443,3 +443,42 @@ test("a state backup refuses a directory link cycle without publishing", () => {
   assert.throws(() => snapshotState(state, backups), /directory link cycle/);
   assert.deepEqual(readdirSync(backups), []);
 });
+
+// ── W1-T14890: on 2026-11-25 core's nightly snapshot failed on a dangling daemon-slots/a/node_modules/.bin/tsc link, and
+// it copied the deploy slots' git checkouts (5.1 GB) that the next handoff rebuilds from git. ─────────────────────────
+
+function seedDaemonSlots(state: string): void {
+  mkdirSync(join(state, "daemon-slots", "a", "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(state, "daemon-slots", "a", "package.json"), "{}");
+  symlinkSync(join(state, "daemon-slots", "a", "node_modules", "typescript", "bin", "tsc"), join(state, "daemon-slots", "a", "node_modules", ".bin", "tsc"));
+  mkdirSync(join(state, "daemon-slots", "worktrees", "reviewer-0123456789ab"), { recursive: true });
+  writeFileSync(join(state, "daemon-slots", "worktrees", "reviewer-0123456789ab", "README.md"), "tree");
+}
+
+test("W1-T14890 the snapshot excludes daemon-slots", () => {
+  const state = seedStateDir();
+  seedDaemonSlots(state);
+  const snapshot = snapshotState(state, tmpDir("rmd-slot-backups-"));
+  assert.equal(snapshot.entries.some((rel) => rel.startsWith("daemon-slots")), false, "no daemon-slots entry is staged");
+  assert.equal(existsSync(join(snapshot.archiveDir, "daemon-slots")), false, "the archive holds no daemon-slots tree");
+});
+
+test("W1-T14890 a dangling link under daemon-slots does not fail the snapshot", () => {
+  const state = seedStateDir();
+  seedDaemonSlots(state);
+  const snapshot = snapshotState(state, tmpDir("rmd-dangling-backups-"));
+  assert.ok(snapshot.entries.includes(STATE_BACKUP_LEDGER_RELPATH), "the snapshot completes with the ledger");
+  symlinkSync("missing-register", join(state, "critical-register"));
+  assert.throws(() => snapshotState(state, tmpDir("rmd-dangling-backups-")), StateBackupError, "a dangling link outside daemon-slots still refuses");
+});
+
+test("W1-T14890 the snapshot keeps every non-slot state file", () => {
+  const state = seedStateDir();
+  seedDaemonSlots(state);
+  mkdirSync(join(state, "review-records"), { recursive: true });
+  writeFileSync(join(state, "review-records", "pr-1.json"), "{}");
+  const snapshot = snapshotState(state, tmpDir("rmd-keep-backups-"));
+  for (const rel of [STATE_BACKUP_LEDGER_RELPATH, STATE_BACKUP_PROPOSALS_REGISTER_RELPATH, "drain.lock", join("inflight", "W1-T1.lock"), "worker-keychain-password", join("review-records", "pr-1.json")]) {
+    assert.ok(snapshot.entries.includes(rel), `${rel} is in the snapshot`);
+  }
+});
