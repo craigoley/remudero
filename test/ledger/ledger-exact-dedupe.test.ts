@@ -90,6 +90,16 @@ test("W1-T14473: an oversized row is skipped and reported, in one chunk or acros
 
 const OLD_DEFAULT_DISK_BYTES = 256 * 1024 * 1024;
 
+/** The real database, except its insert fails as SQLite does when the disk has no space (SQLITE_FULL). */
+function diskFullOnInsert(path: string): DatabaseSync {
+  const db = new DatabaseSync(path);
+  const prepare = db.prepare.bind(db);
+  db.prepare = ((sql: string) => sql.startsWith("INSERT")
+    ? { run: () => { throw Object.assign(new Error("database or disk is full"), { errcode: 13 }); } }
+    : prepare(sql)) as typeof db.prepare;
+  return db;
+}
+
 test("W1-T14801 criterion 1: with no maxDiskBytes the index grows past the old 256 MiB default and stays observed", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t14801-"));
   const index = createLedgerExactDedupe({ scratchDir: dir });
@@ -112,27 +122,29 @@ test("W1-T14801 criterion 1: with no maxDiskBytes the index grows past the old 2
 
 test("W1-T14801 criterion 2: invariant:an-explicit-bound-still-binds", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t14801-"));
-  const index = createLedgerExactDedupe({ scratchDir: dir, maxDiskBytes: 65536 });
   try {
-    assert.throws(() => { for (let n = 0; n < 100; n++) index.add(`${n}${"x".repeat(2000)}`); }, /ledger-dedupe-disk-bound/);
-    assert.equal(index.stats().state, "partial");
-    assert.equal(index.stats().reason, "ledger-dedupe-disk-bound");
-    assert.equal(index.stats().maxDiskBytes, 65536);
-  } finally { index.close(); rmSync(dir, { recursive: true, force: true }); }
+    for (const maxDiskBytes of [65536, 1024 * 1024]) {
+      const index = createLedgerExactDedupe({ scratchDir: dir, maxDiskBytes });
+      try {
+        assert.throws(() => { for (let n = 0; n < 1000; n++) index.add(`${n}${"x".repeat(2000)}`); }, /ledger-dedupe-disk-bound/,
+          `a ${maxDiskBytes}-byte bound is named as the bound`);
+        assert.equal(index.stats().state, "partial");
+        assert.equal(index.stats().reason, "ledger-dedupe-disk-bound");
+        assert.equal(index.stats().maxDiskBytes, maxDiskBytes);
+      } finally { index.close(); }
+    }
+    // The name never depends on the disk's free space: an SQLITE_FULL at the bound is the bound even when the disk
+    // has less room left than the bound itself.
+    const index = createLedgerExactDedupe({ scratchDir: dir, maxDiskBytes: 12288, openDatabase: diskFullOnInsert });
+    try { assert.throws(() => index.add("row"), /ledger-dedupe-disk-bound/); }
+    finally { index.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("W1-T14801 criterion 3: a disk-full write is named ledger-dedupe-disk-full", () => {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t14801-"));
-  // The real database, except its insert fails as SQLite does when the disk has no space (SQLITE_FULL).
-  const openDatabase = (path: string) => {
-    const db = new DatabaseSync(path);
-    const prepare = db.prepare.bind(db);
-    db.prepare = ((sql: string) => sql.startsWith("INSERT")
-      ? { run: () => { throw Object.assign(new Error("database or disk is full"), { errcode: 13 }); } }
-      : prepare(sql)) as typeof db.prepare;
-    return db;
-  };
-  // Unset, and a bound no disk has room for: neither failure is the caller's bound.
+  const openDatabase = diskFullOnInsert;
+  // Unset, and a bound far above the index's size: neither failure is the caller's bound.
   for (const maxDiskBytes of [undefined, Number.MAX_SAFE_INTEGER]) {
     const index = createLedgerExactDedupe({ scratchDir: dir, maxDiskBytes, openDatabase });
     try {
@@ -142,11 +154,5 @@ test("W1-T14801 criterion 3: a disk-full write is named ledger-dedupe-disk-full"
       assert.equal(index.stats().state, "partial");
     } finally { index.close(); }
   }
-  // An unreadable free-space figure cannot show the disk was full: a bounded index keeps the bound's name.
-  const bounded = createLedgerExactDedupe({ scratchDir: dir, maxDiskBytes: Number.MAX_SAFE_INTEGER, openDatabase });
-  try {
-    for (const name of readdirSync(dir)) rmSync(join(dir, name), { recursive: true, force: true });
-    assert.throws(() => bounded.add("row"), /ledger-dedupe-disk-bound/);
-  } finally { bounded.close(); }
   rmSync(dir, { recursive: true, force: true });
 });

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, statfsSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -33,21 +33,14 @@ export function createLedgerExactDedupe(options: LedgerExactDedupeOptions = {}) 
   try {
     dir = mkdtempSync(join(options.scratchDir ?? tmpdir(), "rmd-ledger-exact-"));
     db = openDatabase(join(dir, "seen.sqlite"));
-    db.exec(`PRAGMA page_size = 4096; ${maxDiskBytes === undefined ? "" : `PRAGMA max_page_count = ${Math.floor(maxDiskBytes / 4096)};`}
+    const maxPages = maxDiskBytes === undefined ? undefined : Math.floor(maxDiskBytes / 4096);
+    db.exec(`PRAGMA page_size = 4096; ${maxPages === undefined ? "" : `PRAGMA max_page_count = ${maxPages};`}
       PRAGMA cache_size = -${Math.floor(cacheBytes / 1024)}; PRAGMA mmap_size = 0;
       PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF; PRAGMA temp_store = MEMORY;
       CREATE TABLE seen (raw BLOB PRIMARY KEY) WITHOUT ROWID; BEGIN`);
     const insert = db.prepare("INSERT OR IGNORE INTO seen VALUES (?)");
+    const pageCount = db.prepare("PRAGMA page_count");
     let rows = 0;
-    const freeBytes = (): number => {
-      try {
-        const fs = statfsSync(dir!);
-        return fs.bavail * fs.bsize;
-      } catch {
-        // deliberate: an unreadable free-space figure cannot show the disk was full, so the bound keeps its own name.
-        return Infinity;
-      }
-    };
     let failure: LedgerExactDedupeLimitError | undefined;
     return {
       isError: (error: unknown): error is LedgerExactDedupeLimitError => error instanceof LedgerExactDedupeLimitError,
@@ -55,22 +48,24 @@ export function createLedgerExactDedupe(options: LedgerExactDedupeOptions = {}) 
       add(raw: string): boolean {
         if (failure) throw failure;
         if (raw.length * 2 > maxRowBytes) throw new LedgerExactDedupeLimitError("ledger-row-byte-bound");
+        // A failed write can roll the file back, so the bound is judged from the page count before the write.
+        const pagesBefore = maxPages === undefined ? 0 : (pageCount.get() as { page_count: number }).page_count;
         try {
           // UTF-8 replaces lone surrogates. UTF-16 code units preserve exact JS string identity.
           const added = insert.run(Buffer.from(raw, "utf16le")).changes !== 0;
           if (added) rows++;
           return added;
         } catch (error) {
-          // SQLITE_FULL names the caller's bound only when the disk still had room for all of it.
+          // SQLITE_FULL is the caller's bound only when this row, plus a B-tree split's few pages, could not fit under it.
           const full = (error as { errcode?: number }).errcode === 13;
-          const atBound = full && maxDiskBytes !== undefined && freeBytes() >= maxDiskBytes;
+          const atBound = full && maxPages !== undefined && pagesBefore + Math.ceil((raw.length * 2) / 4096) + 4 >= maxPages;
           failure = new LedgerExactDedupeLimitError(atBound ? "ledger-dedupe-disk-bound"
             : full ? "ledger-dedupe-disk-full" : "ledger-dedupe-index-failed", { cause: error });
           throw failure;
         }
       },
       stats() {
-        const pages = db!.prepare("PRAGMA page_count").get() as { page_count: number };
+        const pages = pageCount.get() as { page_count: number };
         return { rows, diskBytes: statSync(join(dir!, "seen.sqlite")).size, allocatedBytes: pages.page_count * 4096,
           maxDiskBytes: maxDiskBytes ?? null, cacheTargetBytes: Math.floor(cacheBytes / 1024) * 1024, maxRowBytes,
           state: failure ? "partial" : "observed", reason: failure?.reason ?? null };
