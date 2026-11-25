@@ -896,7 +896,7 @@ export async function proofReuseShadowRow(read: ProofDiscriminationRecordRead, i
     return await compareProofReuse(read, input);
   } catch (error) {
     return { pr_url: input.prUrl, head_sha: input.headSha, host_proof_ms: input.hostProofMs, eligible: false, would_save_ms: 0,
-      reason: `shadow comparison failed: ${String((error as Error)?.message ?? error).slice(0, 300)}` };
+      reason: `shadow comparison failed: ${String((error as Error)?.message ?? error).slice(0, 300)}`, ...input.plan?.row };
   }
 }
 
@@ -1635,15 +1635,14 @@ export async function runReview(host: ReviewCommandHost, args: {
   // W1-T13868: review.finding rows name why a reviewer's served model is null; the provenance type stays unchanged.
   let reviewerServedModelReason: string | undefined;
   const attemptReviewer = args.spawnReviewer !== false && reviewerSpawnMount !== undefined && criteria.length > 0 && !planOnlySkip;
-  // W1-T11157 (shadow): CI's record for this head is read beside the host's proof run; nothing reads it before the
-  // binding verdict below is built, and the comparison only ledgers agreement.
+  // W1-T11157: CI's record for this head, read while hosted CI file evidence is; the reuse plan below awaits it.
   const proofReuseRead = args.headCheckoutDir !== undefined && discriminationProofs(criteria).length > 0
     ? readProofDiscriminationRecord({ owner, repo, headSha }).catch((error: unknown): ProofDiscriminationRecordRead =>
       ({ kind: "ineligible", reason: `record unreadable: ${String((error as Error)?.message ?? error).slice(0, 300)}` }))
     : undefined;
   const hostedCiFilePassed = await reviewHostedCiFileEvidence({ owner, repo, headSha, criteria,
     headCheckoutDir: args.headCheckoutDir, log });
-  // W1-T14745: the record is awaited BEFORE any proof runs, so a counted hosted PASS replaces its host run.
+  // W1-T14745: awaited BEFORE any proof runs, so a counted hosted PASS replaces its host run.
   const auditPath = proofReuseAuditPath(dirname(args.ledgerPath), { owner, repo });
   const reusePlan = proofReuseRead === undefined ? undefined : await planProofReuse(await proofReuseRead, {
     prUrl, headSha, diff, body: inputBody, criteria, headCheckoutDir: args.headCheckoutDir!,

@@ -7,7 +7,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, test, type TestContext } from "node:test";
 import {
-  PROOF_REUSE_SHADOW_STEP, planProofReuse, recordProofReuseOutcome, runReview, type ProofDiscriminationRecordRead, type ReviewCommandHost,
+  PROOF_REUSE_SHADOW_STEP, planProofReuse, proofReuseShadowRow, recordProofReuseOutcome, runReview, type ProofDiscriminationRecordRead,
+  type ReviewCommandHost,
 } from "#src/cli/commands/review.js";
 import {
   PROOF_REUSE_DISAGREEMENT_STEP, hostedPassIsReusable, proofReuseAudited, proofReuseAuditPath, proofReuseAuditShare, proofReuseKey,
@@ -373,6 +374,10 @@ describe("test/review/a-review-reuses-ci-proof-passes-under-an-audit.test.ts", (
       audit: { kind: "read", agreed: 1e12, held: new Set(), hostMs: 0, hostRuns: 0 } });
     assert.equal(untimed.passes.size, 1);
     assert.equal(untimed.row.saved_ms, null, "no timing on record is not a zero saving");
+    const failedRow = await proofReuseShadowRow(record, { ...input, hostProofMs: 1, plan: { ...untimed, checked: undefined },
+      criteria: undefined as never, hostCriteria: [] });
+    assert.match(String(failedRow.reason), /^shadow comparison failed: /);
+    assert.deepEqual(failedRow.reused, [PROOF], "a row whose comparison failed still names what was reused");
     const broken = await planProofReuse(record, { ...input, criteria: undefined as never, audit: lost });
     assert.equal(broken.passes.size, 0);
     assert.match(String(broken.row.reuse_error), /^reuse planning failed: /);
