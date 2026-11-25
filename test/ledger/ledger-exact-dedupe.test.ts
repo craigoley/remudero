@@ -73,3 +73,16 @@ test("exact index refuses invalid limits before allocating scratch", () => {
     assert.throws(() => createLedgerExactDedupe(limits), /bound/);
   }
 });
+
+test("W1-T14473: an oversized row is skipped and reported, in one chunk or across chunks, and the next row still reads", async () => {
+  const big = "x".repeat(40);
+  const chunks = async function* (parts: string[]) { yield* parts; };
+  const seen: number[] = [];
+  const whole = await collect(ndjsonLines(chunks(["a\n", `${big}\n`, "b\n"]), 20, undefined, () => seen.push(1)));
+  assert.deepEqual(whole, ["a", "b"]);
+  const split = await collect(ndjsonLines(chunks(["a\nxxxxxxxxxxxxxxx", "xxxxxxxxxxxxxxx", "xxxx\nb\n", big]), 20, undefined, () => seen.push(2)));
+  assert.deepEqual(split, ["a", "b"], "the rest of a row past the bound is dropped up to its newline, and a final oversized tail too");
+  assert.deepEqual(seen, [1, 2, 2]);
+  await assert.rejects(collect(ndjsonLines(chunks(["a\n", `${big}\n`]), 20)), /ledger-row-byte-bound/,
+    "without a callback an oversized row still ends the read");
+});

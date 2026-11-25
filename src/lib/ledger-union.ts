@@ -77,23 +77,33 @@ const gunzipAsync = promisify(nodeGunzip);
  * breaks on U+2028/U+2029 (Node 24), splitting a valid row into two damaged ones.
  */
 export async function* ndjsonLines(input: AsyncIterable<Buffer | string>, maxRowBytes = Infinity,
-  rowLimitError: () => Error = () => new RangeError("ledger-row-byte-bound")): AsyncGenerator<string> {
+  rowLimitError: () => Error = () => new RangeError("ledger-row-byte-bound"),
+  /** W1-T14473: given, a row over `maxRowBytes` (up to its LF) is dropped and reported, not the end of the stream. */
+  onOversizedRow?: () => void): AsyncGenerator<string> {
   const decoder = new StringDecoder("utf8");
   let pending = "";
+  let discarding = false;
   const line = (text: string): string => (text.endsWith("\r") ? text.slice(0, -1) : text);
+  const oversized = (): void => {
+    if (!onOversizedRow) throw rowLimitError();
+    onOversizedRow();
+  };
   for await (const chunk of input) {
     pending += typeof chunk === "string" ? chunk : decoder.write(chunk);
     let start = 0;
     for (let newline = pending.indexOf("\n"); newline >= 0; newline = pending.indexOf("\n", start)) {
-      if ((newline - start) * 2 > maxRowBytes) throw rowLimitError();
-      yield line(pending.slice(start, newline));
+      if (discarding) discarding = false;
+      else if ((newline - start) * 2 > maxRowBytes) oversized();
+      else yield line(pending.slice(start, newline));
       start = newline + 1;
     }
     pending = pending.slice(start);
-    if (pending.length * 2 > maxRowBytes) throw rowLimitError();
+    if (!discarding && pending.length * 2 > maxRowBytes) { oversized(); discarding = true; }
+    if (discarding) pending = "";
   }
   pending += decoder.end();
-  if (pending.length * 2 > maxRowBytes) throw rowLimitError();
+  if (discarding) return;
+  if (pending.length * 2 > maxRowBytes) { oversized(); return; }
   if (pending) yield line(pending);
 }
 
@@ -459,6 +469,10 @@ export interface OpenLedgerUnionOptions extends LedgerUnionOptions {
    *  Set holds only the rows this read keeps. */
   where?: (row: Record<string, unknown>) => boolean;
   exactDedupe?: LedgerExactDedupeOptions;
+  /** W1-T14473: false keeps a row out of the exact-dedupe index; the row is still filtered and yielded. */
+  exactDedupeWhere?: (row: Record<string, unknown>) => boolean;
+  /** W1-T14473: given, a row over the exact-dedupe row bound is reported here and skipped, not the end of the read. */
+  onOversizedRow?: (finding: { path: string; form: LedgerFileForm | "live"; rowOrdinal: number }) => void;
   onExactDedupeStats?: (stats: ReturnType<LedgerExactIndex["stats"]>) => void;
   onSourceRead?: (source: { path: string; form: LedgerFileForm | "live" }) => void;
   /** Controls replay Sets; an explicit exact index owns dedupe independently. */
@@ -682,7 +696,11 @@ export async function* openLedgerUnion(
       }
       const skip = opts.rotationStartOffset?.name === basename(entry.path) ? opts.rotationStartOffset.offset : 0;
       for await (const raw of ndjsonLines(skip > 0 ? skipBytes(input, skip) : input,
-        opts.exactDedupe?.maxRowBytes ?? (exact ? 1024 * 1024 : Infinity), exact?.rowLimitError)) {
+        opts.exactDedupe?.maxRowBytes ?? (exact ? 1024 * 1024 : Infinity), exact?.rowLimitError,
+        opts.onOversizedRow && (() => {
+          rowOrdinal += 1;
+          opts.onOversizedRow!({ path: entry.path, form: entry.path === livePath ? "live" : entry.form, rowOrdinal });
+        }))) {
         opts.signal?.throwIfAborted();
         rowOrdinal += 1;
         if (pendingLiveBad) {
@@ -721,7 +739,7 @@ export async function* openLedgerUnion(
         if (!recordMatchesFilters(parsed, opts, minimumTs)) continue;
         if (opts.where !== undefined && !opts.where(parsed)) continue;
         if (exact) {
-          if (!exact.add(line)) continue;
+          if ((opts.exactDedupeWhere === undefined || opts.exactDedupeWhere(parsed)) && !exact.add(line)) continue;
         } else if (opts.dedupe !== false && opts.dedupeWindowPerStep === undefined) {
           if (seen.has(line)) continue;
           seen.add(line);
