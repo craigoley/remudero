@@ -4071,6 +4071,8 @@ export interface DaemonProcessEnd {
   heapLimitLine?: string;
   exitCode?: number;
   heapLimitBytes?: number;
+  /** W1-T14733: the stopDetail of the process's own daemon.summary, when it wrote one: what it stopped on. */
+  stopDetail?: string;
 }
 
 const finiteNumber = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
@@ -4155,6 +4157,7 @@ export function classifyEndedDaemonProcesses(
       ...(heapLine ? { heapLimitLine: heapLine } : {}),
       exitCode: finiteNumber(exit?.exit_code),
       heapLimitBytes: finiteNumber(policy?.heap_size_limit),
+      ...(typeof summary?.stopDetail === "string" ? { stopDetail: summary.stopDetail } : {}),
     });
   });
   return ended;
@@ -4180,6 +4183,8 @@ export interface DaemonLifetimeRecord {
   endedTs: string;
   lifetimeMs: number;
   clean: boolean;
+  /** W1-T14733: what an abnormal exit stopped on, when its summary said; null when it said nothing. */
+  stopDetail?: string | null;
 }
 
 /** Pure: the trailing run of abnormal exits, oldest first, each shorter than the learned median. A clean exit or a
@@ -4201,7 +4206,7 @@ export interface LearnedCrashLoopSummary {
   learned: LearnedCleanLifetime;
   runLength: number;
   abnormalExits: number;
-  incident: "none" | "opened" | "updated" | "cleared" | "open";
+  incident: "none" | "opened" | "updated" | "cleared" | "open" | "reescalated";
 }
 
 /** W1-T9754: the spawn helper's environment switch, now defined beside the boot routine it gates (W1-T13664). */
@@ -4262,6 +4267,8 @@ export async function daemonBoot(
    *  the filesystem. Why: a shallow clone breaks every history read silently — log searches, follows and
    *  merge-base checks all stay plausible over a truncated corpus — and nothing asked (W1-T2332). */
   checkoutDepth?: { shallow: boolean; commitCount: number },
+  /** W1-T14757: the clock each boot sweep is timed on; defaults to the wall clock, a test seam. */
+  sweepClock: Pick<Clock, "now"> = systemClock,
 ): Promise<BootAssertion> {
   const assertion = assertCleanBoot(env, allowApiKey, nodeRuntime, declaredNodeVersion);
   log("daemon.boot", {
@@ -4273,8 +4280,18 @@ export async function daemonBoot(
     ...(bootHeadSha ? { head_sha: bootHeadSha } : {}),
     ...(checkoutDepth ? { checkout_shallow: checkoutDepth.shallow, checkout_commit_count: checkoutDepth.commitCount } : {}),
   });
+  // W1-T14757: each sweep's time, so a slow boot names the sweep that held its first tick.
+  const sweepsMs: Record<string, number> = {};
+  const sweepsStartMs = sweepClock.now();
+  let sweepMarkMs = sweepsStartMs;
+  const sweepDone = (name: string): void => {
+    const atMs = sweepClock.now();
+    sweepsMs[`${name}_ms`] = atMs - sweepMarkMs;
+    sweepMarkMs = atMs;
+  };
   // W1-T9754/W1-T13437: the helper starts while this process is small, unless the switch is "off"; one row either way.
   bootSpawnHelper(log, env, "daemon.spawn_helper");
+  sweepDone("spawn_helper");
   // The boot-rate invariant: the shape-not-cause check. Logged either way, so the invariant's own
   // pass or fail is part of the boot record, not only its breaches (W1-T215).
   if (crashLoopCheck) {
@@ -4308,6 +4325,7 @@ export async function daemonBoot(
       if (verdict.breached) crashLoopCheck.onBreach(verdict);
     }
   }
+  sweepDone("crashloop_check");
   // The boot-time worker-keychain unlock, explicit and ledgered, so the credential store comes up as
   // a named boot step rather than as a side effect of unlocking the operator's login keychain. A
   // failure is ledgered with its credential-named class and the boot continues: each spawn re-runs
@@ -4328,10 +4346,12 @@ export async function daemonBoot(
       });
     }
   }
+  sweepDone("worker_keychain");
   if (sweepTmp) {
     const swept = sweepTmp();
     log("daemon.tmp_sweep", { removed: swept.removed.length, kept: swept.kept.length });
   }
+  sweepDone("tmp_sweep");
   // Stale in-flight locks (R-35). Purely an observability fix: lock acquisition already steals a dead
   // holder's lock, so nothing here unblocks dispatch. It exists because a stale lock is otherwise only
   // cleared by the next acquire of that same task, and a circuit-broken task is never re-dispatched,
@@ -4348,6 +4368,7 @@ export async function daemonBoot(
       unverifiable_foreign_host: swept.unverifiableForeignHost.length,
     });
   }
+  sweepDone("lock_sweep");
   // Resolve and log the real toolchain binary once at boot. A refusal is logged, never thrown onward:
   // the boot continues (T197, W1-T113 part i).
   if (resolveClaudeBin) {
@@ -4362,6 +4383,7 @@ export async function daemonBoot(
       });
     }
   }
+  sweepDone("claude_bin");
   // The boot-time half of the orphan sweep. A failure is logged, never thrown onward: the boot
   // continues rather than dying over a process-listing hiccup (W1-T117 part ii).
   if (sweepOrphanWorkers) {
@@ -4372,6 +4394,7 @@ export async function daemonBoot(
       log("daemon.orphan_sweep", { error: String((err as Error)?.message ?? err) });
     }
   }
+  sweepDone("orphan_sweep");
   // The boot-time half of the feedback-landing sweep. A failure is logged, never thrown onward: the
   // boot continues rather than dying over a git or GitHub hiccup (W1-T530 part ii).
   if (sweepFeedbackLanding) {
@@ -4386,6 +4409,11 @@ export async function daemonBoot(
       log("daemon.feedback_landing_sweep", { error: String((err as Error)?.message ?? err) });
     }
   }
+  sweepDone("feedback_landing_sweep");
+  // A boot handed no sweep has nothing to time, so it writes no row.
+  const sweptAny = [crashLoopCheck, unlockWorkerKeychain, sweepTmp, sweepLocks, resolveClaudeBin, sweepOrphanWorkers,
+    sweepFeedbackLanding].some((sweep) => sweep !== undefined);
+  if (sweptAny) log("daemon.boot_sweeps", { ...sweepsMs, total_ms: sweepClock.now() - sweepsStartMs });
   return assertion;
 }
 

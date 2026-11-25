@@ -54,8 +54,8 @@ test("W1-T1027: every playwright-carrying job exists and has exactly one install
   const steps = playwrightInstallSteps(jobs);
   assert.deepEqual(
     steps.map(([jobId]) => jobId).sort(),
-    ["ci", "coverage-ratchet", "test-slow-shard"],
-    "expected `ci`, `coverage-ratchet`, and `test-slow-shard` to carry a playwright install step",
+    ["ci", "coverage-ratchet", "flake-screen", "test-slow-shard"],
+    "expected `ci`, `coverage-ratchet`, `flake-screen` and `test-slow-shard` to carry a playwright install step",
   );
 });
 
@@ -94,7 +94,9 @@ test("W1-T1027: no install step carries a retry, a lock wait, or a per-attempt t
 test("W1-T1027: admitted source work retains the exact no-apt install command", async () => {
   const jobs = await loadCiJobs();
   const runs = Object.fromEntries(playwrightInstallSteps(jobs));
-  assert.equal(Object.keys(runs).length, 3, "expected exactly three install steps");
+  assert.equal(Object.keys(runs).length, 4, "expected exactly four install steps");
+  // W1-T14633: the flake screen's own job installs the browser an added suite may need, with the exact command.
+  assert.equal(runs["flake-screen"], "npx playwright install chromium");
   assert.equal(
     runs["test-slow-shard"],
     "npx playwright install chromium",
@@ -111,10 +113,11 @@ test("W1-T1027: admitted source work retains the exact no-apt install command", 
   assert.match(runs["coverage-ratchet"], /npx playwright install chromium\s*$/, "a SOURCE coverage diff must retain the exact Chromium command");
 });
 
-test("W1-T1027: no fourth job silently grows a playwright install step", async () => {
+test("W1-T1027: no fifth job silently grows a playwright install step", async () => {
   const jobs = await loadCiJobs();
   const jobIds = playwrightInstallSteps(jobs).map(([jobId]) => jobId);
-  assert.equal(new Set(jobIds).size, 3, "a fourth job carrying this step would need its own timeout banding too");
+  // W1-T14633 grew the fourth, flake-screen, banded heavy at 35m in test/workflow-job-timeouts.test.ts.
+  assert.equal(new Set(jobIds).size, 4, "a fifth job carrying this step would need its own timeout banding too");
 });
 
 // ── THE FALSIFIER: the browser still installs, and text still measures, WITHOUT the fonts ────

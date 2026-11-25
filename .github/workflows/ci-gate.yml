@@ -106,7 +106,8 @@ jobs:
         "source-size",
         "coverage-session-blanking",
         "baseline-monotonic",
-        "test-slow"
+        "test-slow",
+        "flake-screen"
         ]
       # W1-T5515: the REQUIRED names a `merge_group` commit produces — those whose ci.yml job runs on
       # that event (neither `if: false` nor the pull_request-only guard). Read ONLY under the

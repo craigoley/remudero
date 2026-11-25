@@ -26,7 +26,7 @@ import { ledgerPathFor } from "./ledger-path.js";
 import { createBoardSnapshotCache } from "./board-snapshot-cache.js";
 import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
-import { escalationTaskId, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText } from "./escalate.js";
+import { escalationTaskId, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText, escalationHeadSha } from "./escalate.js";
 import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, classifyChangesRequested, pullReviewsRestArgs, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation } from "./open-prs-rest.js";
 import { createHash } from "node:crypto";
 import { codeqlAlertsReadDue } from "./pr-blocker.js";
@@ -40,7 +40,7 @@ import { type BoardItem } from "./board-review.js";
 import { loadPlan, DEFAULT_RISK, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
 import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, planCreditOverridePath, type CommitTrailerIndexReader, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
-import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, dependabotCheckStates, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, REVIEW_INPUT_ADMISSION_BACKSTOP, type ReviewSetupRefusal, type BaseChangedFiles } from "./sweep.js";
+import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, dependabotCheckStates, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type EscalationConditionEvidence, escalationNamedChecks, MAX_ESCALATION_CLOSES_PER_CYCLE, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, REVIEW_INPUT_ADMISSION_BACKSTOP, type ReviewSetupRefusal, type BaseChangedFiles } from "./sweep.js";
 import { loadedReviewerCodeSha } from "./reviewer-health.js";
 import { readCiGateRequiredNames, resolveCiGateRequiredSource, type CiGateRequiredSource } from "./ci-gate-required.js";
 import { ghJson } from "./worker.js";
@@ -49,6 +49,7 @@ import { defaultIsPidAlive } from "./drain-lock.js";
 import { repoRoot, resolveOwnerRepo } from "./repo-location.js";
 import { OwnerRepoUnresolvableError } from "./owner-repo.js";
 import { reviewTaskIdFromBody } from "./report-commands.js";
+import { isFleetAuthoredText } from "./escalation-answers.js";
 
 /** REST rollups preserve check-run order: retain external_id and the exact head/constituent
  * outcome beside each row without changing the shared REST mapper's unrelated callers. */
@@ -391,10 +392,10 @@ export function createTickReadProducer(options: TickReadOptions, io: {
     credits = beforeCreditRead;
     creditCandidates = credit();
     let escalationIntake: EscalationIntake | undefined;
-    const escalationCandidates = await buildEscalationReconcileCandidatesAsync(owner, repo, plan, ledgerPath, log, {
+    const escalationCandidates = await attachEscalationConditions(owner, repo, await buildEscalationReconcileCandidatesAsync(owner, repo, plan, ledgerPath, log, {
       github, issues: io.issues, evidenceRootFor, creditIo,
       onIntake: (intake) => { escalationIntake = intake; },
-    });
+    }), openPrRows, fetchAsync);
     const boardItems = openPrRows ? defaultBoardReviewItems(config, {
       resolveOwnerRepo: () => ({ owner, repo }), fetchOpenPrs: () => openPrRows,
       loadPlan: () => plan, projectPlan: () => projection,
@@ -3568,6 +3569,7 @@ export function buildEscalationReconcileCandidates(
         issueUrl: issue.url,
         issueNumber: issue.number,
         taskId,
+        ...escalatedCondition(owner, repo, issue.body),
         derived: {
           merged: state === "MERGED",
           closed: state === "CLOSED",
@@ -3590,6 +3592,7 @@ export function buildEscalationReconcileCandidates(
       issueUrl: issue.url,
       issueNumber: issue.number,
       taskId,
+      ...escalatedCondition(owner, repo, issue.body),
       derived: {
         merged: implementationGuardedMerged,
         closed: closedWithoutMerge,
@@ -3612,6 +3615,99 @@ export function buildEscalationReconcileCandidates(
     /* observability only — never fatal */
   }
   return candidates;
+}
+
+/** W1-T13995: the pull request, Head line and checks an escalation's body names, only when all three read exactly. */
+function escalatedCondition(owner: string, repo: string, body: string | undefined): { condition?: EscalationConditionEvidence } {
+  // Each https URL token is parsed, and its host compared exactly, rather than matching a host-shaped pattern in free text.
+  const named = new Set<string>();
+  for (const token of (body ?? "").matchAll(/https:\/\/[^\s<>()[\]"'`]+/g)) {
+    let url: URL;
+    try {
+      url = new URL(token[0]);
+    } catch (error) {
+      void error; // an unparseable token names no pull request
+      continue;
+    }
+    if (url.protocol !== "https:" || url.hostname !== "github.com") continue;
+    const m = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?!\d)/.exec(url.pathname);
+    if (m) named.add(`${m[1]!.toLowerCase()}/${m[2]!.toLowerCase()}#${m[3]}`);
+  }
+  const prNumber = prReferentFromIssueText(body);
+  const head = escalationHeadSha(body);
+  const checks = escalationNamedChecks(body);
+  if (prNumber === undefined || named.size !== 1 || !named.has(`${owner.toLowerCase()}/${repo.toLowerCase()}#${prNumber}`)) return {};
+  if (head === undefined || !/^[0-9a-f]{40}$/.test(head) || checks === undefined) return {};
+  return { condition: { prNumber, escalatedHead: head, checks } };
+}
+
+type EscalationConditionPr = {
+  number: number;
+  url: string;
+  headRefOid: string;
+  statusCheckRollup?: ReadonlyArray<{ name?: string; context?: string; status?: string; conclusion?: string; state?: string; headSha?: string }>;
+  rollupUnreadable?: true;
+};
+
+function checksGreenAtHead(pr: EscalationConditionPr, names: readonly string[]): boolean {
+  const rollup = pr.statusCheckRollup;
+  if (pr.rollupUnreadable || !rollup) return false;
+  return names.every((name) => {
+    const entries = rollup.filter((e) => e.name === name || e.context === name);
+    return entries.length > 0 && entries.every((e) =>
+      (e.headSha === undefined || e.headSha === pr.headRefOid) &&
+      (e.conclusion ?? e.state ?? "").toUpperCase() === "SUCCESS" &&
+      (e.status === undefined || e.status.toUpperCase() === "COMPLETED"));
+  });
+}
+
+/** Whether any person commented on the issue, at any time. A failed or full page counts as a reply. */
+async function personCommented(owner: string, repo: string, issueNumber: number, read: GhApiFetcher): Promise<boolean> {
+  let rows: unknown;
+  try {
+    rows = await read(["api", `repos/${owner}/${repo}/issues/${issueNumber}/comments?per_page=100`]);
+  } catch {
+    // deliberate: an unread thread may hold a person's reply, so it counts as one and the issue stays open.
+    return true;
+  }
+  if (!Array.isArray(rows) || rows.length >= 100) return true;
+  for (const row of rows as Array<{ created_at?: unknown; body?: unknown; user?: { login?: unknown; type?: unknown } | null } | null>) {
+    const at = typeof row?.created_at === "string" ? Date.parse(row.created_at) : NaN;
+    if (!row || !Number.isFinite(at)) return true;
+    const login = typeof row.user?.login === "string" ? row.user.login : "";
+    const bot = String(row.user?.type ?? "").toLowerCase() === "bot" || /\[bot\]$/i.test(login);
+    if (!bot && !(typeof row.body === "string" && isFleetAuthoredText(row.body))) return true;
+  }
+  return false;
+}
+
+/** W1-T13995: pair each escalation that names an open pull request with its current head and the named checks' state
+ *  there. Comments are read (one page each, at most MAX_ESCALATION_CLOSES_PER_CYCLE a pass) only when the head moved
+ *  and the checks are green; an escalation left unread never reads as cleared. */
+export async function attachEscalationConditions(
+  owner: string, repo: string, candidates: EscalationReconcileCandidate[],
+  openPrRows: readonly EscalationConditionPr[] | undefined, read: GhApiFetcher,
+): Promise<EscalationReconcileCandidate[]> {
+  if (!openPrRows) return candidates;
+  const rows = new Map(openPrRows.map((pr) => [pr.number, pr]));
+  let reads = 0;
+  const out: EscalationReconcileCandidate[] = [];
+  for (const c of candidates) {
+    const pr = c.condition && rows.get(c.condition.prNumber);
+    if (!c.condition || !pr || c.issueNumber === undefined) {
+      out.push(c);
+      continue;
+    }
+    const condition: EscalationConditionEvidence = {
+      ...c.condition, prUrl: pr.url, currentHead: pr.headRefOid, checksGreen: checksGreenAtHead(pr, c.condition.checks),
+    };
+    if (condition.currentHead !== condition.escalatedHead && condition.checksGreen && reads < MAX_ESCALATION_CLOSES_PER_CYCLE) {
+      reads++;
+      condition.personReplied = await personCommented(owner, repo, c.issueNumber, read);
+    }
+    out.push({ ...c, condition });
+  }
+  return out;
 }
 
 // ── W1-T9722: the read-plane worker's entry ─────────────────────────────────────────────────────────────

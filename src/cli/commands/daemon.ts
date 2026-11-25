@@ -3438,27 +3438,53 @@ export async function daemonCommand(
     // reason still resolves through `daemonExitCode` itself, unchanged.
     return daemonExitCodeForSummary(summary);
   } finally {
-    for (const { resource, close } of cleanup.reverse()) {
-      try {
-        await close();
-      } catch (error) {
-        try {
-          log("daemon.cleanup_failed", { resource, error: String(error) });
-          if (resource === "git_credential_socket") log(LEDGER_REQUEST_STEP, {
-            host: "github.com", decision: "refuse", status: "error", reason: `git credential socket did not close: ${String(error)}`,
-          });
-        } catch (logError) {
-          // A failed ledger cannot replace the boot/loop error or skip sibling releases.
-          console.error("daemon cleanup reporting failed", { resource, error: String(error), reason: String(logError) });
-        }
-      }
-    }
+    await closeDaemonCleanup(cleanup, log, clockFromMillisFn(deps.now));
   }
   } finally {
     archivedLifetime.history?.close?.();
     if (!readPlaneStopped) {
       await stopReadPlane().catch((error: unknown) => log("daemon.cleanup_failed", { resource: "read_plane", error: String(error) }));
     }
+  }
+}
+
+/**
+ * Closes the daemon's resources in reverse order, so the drain lock pushed first is released last. W1-T14762: each
+ * close is timed, and one daemon.exit_cleanup row names every close's ms before the last release, because a
+ * successor waits on that lock and no row said which close held it out (67 s on the 11-24 22:12Z hand-over).
+ */
+export async function closeDaemonCleanup(
+  cleanup: Array<{ resource: string; close: () => void | Promise<void> }>,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  clock: Pick<Clock, "now">,
+): Promise<void> {
+  const ordered = [...cleanup].reverse();
+  const closesMs: Record<string, number> = {};
+  const startMs = clock.now();
+  for (const [index, { resource, close }] of ordered.entries()) {
+    if (index === ordered.length - 1) {
+      try {
+        log("daemon.exit_cleanup", { ...closesMs, total_ms: clock.now() - startMs, released_last: resource });
+      } catch {
+        // A timing row that cannot be written never holds the last release.
+      }
+    }
+    const closeStartMs = clock.now();
+    try {
+      await close();
+    } catch (error) {
+      try {
+        log("daemon.cleanup_failed", { resource, error: String(error) });
+        if (resource === "git_credential_socket") log(LEDGER_REQUEST_STEP, {
+          host: "github.com", decision: "refuse", status: "error", reason: `git credential socket did not close: ${String(error)}`,
+        });
+      } catch (logError) {
+        // A failed ledger cannot replace the boot/loop error or skip sibling releases.
+        console.error("daemon cleanup reporting failed", { resource, error: String(error), reason: String(logError) });
+      }
+    }
+    const key = `${resource}_ms`;
+    closesMs[key] = (closesMs[key] ?? 0) + clock.now() - closeStartMs;
   }
 }
 
