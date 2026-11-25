@@ -82,8 +82,8 @@ export async function readCatalogStatusContext(publicPlan: Plan, stateDir: strin
   // removal lands. That id is read once, as the ops copy; any other id both catalogs hold is still a duplicate.
   const shared = ops.tasks.filter(task => publicPlan.byId.has(task.id));
   if (shared.some(task => !isInFlightMove(task, publicPlan.byId.get(task.id)!))) return statusCatalogContext("duplicate_task_id", publicPlan);
-  const publicView = shared.length === 0 ? publicPlan
-    : viewWithout(publicPlan, new Set(shared.map(task => task.id)));
+  const inFlight = new Set(shared.map(task => task.id));
+  const publicView = shared.length === 0 ? publicPlan : viewWithout(publicPlan, inFlight);
   const snapshotTasks = [...publicView.tasks, ...ops.tasks], snapshotById = new Map(snapshotTasks.map(task => [task.id, task]));
   if (publicView.tasks.some(task => task.depends_on.some(id => ops.byId.has(id))) ||
       ops.tasks.some(task => task.depends_on.some(id => !snapshotById.has(id)))) {
@@ -98,7 +98,9 @@ export async function readCatalogStatusContext(publicPlan: Plan, stateDir: strin
     tasks.push(found.task);
   }
   const plan: Plan = { tasks, byId: new Map(tasks.map(task => [task.id, task])) };
-  const opsTasks = tasks.filter(task => !publicView.byId.has(task.id));
+  // opsPlan is what an ops landing may write. An in-flight id stays out, so its status writes go to the public shard:
+  // an edited ops copy no longer matches the bytes the mover removes on (ops_copy_differs).
+  const opsTasks = tasks.filter(task => !publicView.byId.has(task.id) && !inFlight.has(task.id));
   const resolvedOps: Plan = { tasks: opsTasks, byId: new Map(opsTasks.map(task => [task.id, task])) };
   return statusCatalogContext("ok", plan, resolvedOps, destination, snapshot.binding.commit);
 }

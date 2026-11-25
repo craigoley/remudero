@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
+import type { OpsCatalogApi } from "../src/lib/ops-catalog-source.js";
+import { originWithClone } from "./helpers/git-repo.js";
+import { ownedFixtureDir } from "./helpers/owned-fixture-dir.js";
 import { buildPlanReconcileCadenceInput, planReconcileCadence, type MeasurementCadenceReportOpts } from "../src/lib/measurement-cadence.js";
 import { VERDICT_OUTCOME_STEP } from "../src/lib/verdict-calibration.js";
 import { buildPlanReconcileProductionInput, defaultCreditedMergedIds, buildCreditCandidates, buildCoverageNightlyDaemonHook, buildMeasurementCadenceDaemonHooks } from "../src/run-task.js";
@@ -112,6 +115,140 @@ test("W1-T3970: production adapter lands threshold drift and refuses an unlanded
   });
   assert.ok(refused);
   assert.throws(() => planReconcileCadence(refused!), /simulated landing refusal/);
+});
+
+// W1-T14827: the production reconcile over two real catalogs while one id's move is in flight (in both of them).
+const MOVED_ID = "W1-T900001", PUBLIC_ID = "W1-T900002", OPS_ID = "W1-T900003";
+type FixtureStatus = "queued" | "merged";
+const shardPath = (id: string) => `plan/tasks.d/${id}.yaml`;
+const catalogShard = (id: string, status: FixtureStatus, moved = false) =>
+  `- id: ${id}\n${moved ? `  moved_from: remudero@${"f".repeat(40)}\n` : ""}  title: Reconcile the fixture status\n` +
+  "  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  risk: medium\n" +
+  `  status: ${status}\n  origin: test#reconcile\n  files: [src/fixture.ts]\n  acceptance:\n` +
+  "    - claim: the fixture has its exported value\n      proof: \"grep: publicValue in src/fixture.ts\"\n";
+
+function movingCatalogs(t: TestContext, moved: { public: FixtureStatus; ops: FixtureStatus }, opsOnly: readonly string[] = [OPS_ID]) {
+  const root = ownedFixtureDir(t, "w1-t14827-catalogs").dir;
+  const stateDir = join(root, "state"), publicRoot = join(root, "repos", "remudero"), opsRoot = join(root, "repos", "ops");
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(join(stateDir, "plan-destination.json"), JSON.stringify({ repository: "fixture-private/ops", kinds: [] }));
+  mkdirSync(join(publicRoot, "plan", "tasks.d"), { recursive: true });
+  mkdirSync(join(publicRoot, "src"));
+  writeFileSync(join(publicRoot, "src", "fixture.ts"), "export const publicValue = true;\n");
+  writeFileSync(join(publicRoot, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(join(publicRoot, shardPath(MOVED_ID)), catalogShard(MOVED_ID, moved.public));
+  writeFileSync(join(publicRoot, shardPath(PUBLIC_ID)), catalogShard(PUBLIC_ID, "queued"));
+  const { clone } = originWithClone(opsRoot, { scope: t, seed: {
+    "plan/tasks.yaml": "[]\n",
+    [shardPath(MOVED_ID)]: catalogShard(MOVED_ID, moved.ops, true),
+    ...Object.fromEntries(opsOnly.map((id) => [shardPath(id), catalogShard(id, "queued")])),
+  } });
+  const opsApi: OpsCatalogApi = async (path) => {
+    const prefix = "repos/fixture-private/ops";
+    assert.ok(path === prefix || path.startsWith(`${prefix}/`), `GET only the named repository: ${path}`);
+    const tail = path.slice(prefix.length), head = clone.git("rev-parse", "HEAD");
+    if (tail === "") return { id: 42, full_name: "fixture-private/ops", default_branch: "main" };
+    if (tail === "/git/ref/heads/main") return { object: { type: "commit", sha: head } };
+    if (tail === `/git/commits/${head}`) return { sha: head, tree: { sha: clone.git("rev-parse", `${head}^{tree}`) } };
+    if (tail.startsWith("/git/trees/")) {
+      const sha = tail.slice("/git/trees/".length);
+      const rows = execFileSync("git", ["-C", opsRoot, "ls-tree", "-z", sha], { encoding: "utf8" }).split("\0").filter(Boolean);
+      return { sha, truncated: false, tree: rows.map((row) => {
+        const match = /^(\d+) (blob|tree) ([a-f0-9]+)\t(.+)$/.exec(row);
+        assert.ok(match, row);
+        return { mode: match[1], type: match[2], sha: match[3], path: match[4] };
+      }) };
+    }
+    if (tail.startsWith("/git/blobs/")) {
+      const sha = tail.slice("/git/blobs/".length), content = execFileSync("git", ["-C", opsRoot, "cat-file", "blob", sha]);
+      return { sha, encoding: "base64", size: content.length, content: content.toString("base64") };
+    }
+    return assert.fail(`unexpected ops source path ${path}`);
+  };
+  /** One cadence fire through the production composition; every landing it makes is then merged into its catalog. */
+  const fire = async (credited: ReadonlySet<string>) => {
+    const calls: Array<{ root: string; inputs: Array<{ relPath: string; content: string }> }> = [];
+    const input = await buildPlanReconcileProductionInput({
+      checkoutRoot: publicRoot,
+      stateDir,
+      opsApi,
+      readShards: () => readdirSync(join(publicRoot, "plan", "tasks.d")).sort().map((file) => {
+        const path = join(publicRoot, "plan", "tasks.d", file);
+        return { taskId: file.replace(/\.yaml$/, ""), path, text: readFileSync(path, "utf8") };
+      }),
+      creditedMergedIds: () => credited,
+      lint: () => new Map(),
+      land: (root, inputs) => {
+        calls.push({ root, inputs: inputs.map(({ relPath, content }) => ({ relPath, content })) });
+        return { landed: true, files: inputs.map((each) => each.relPath) };
+      },
+    });
+    assert.ok(input);
+    assert.equal(input.catalogOutcome, "ok");
+    const report = planReconcileCadence(input);
+    await input.settled();
+    for (const call of calls) {
+      for (const each of call.inputs) writeFileSync(join(call.root, each.relPath), each.content);
+      if (call.root === opsRoot) {
+        clone.git("add", "-A");
+        clone.git("commit", "--quiet", "-m", "chore: merge the status landing");
+      }
+    }
+    const landedIn = (root: string) => calls.filter((call) => call.root === root).flatMap((call) => call.inputs.map((each) => each.relPath));
+    return { report, public: landedIn(publicRoot), ops: landedIn(opsRoot) };
+  };
+  return { fire };
+}
+
+for (const moved of [
+  { public: "queued", ops: "queued" },
+  { public: "queued", ops: "merged" },
+  { public: "merged", ops: "queued" },
+  { public: "merged", ops: "merged" },
+] as const) {
+  test(`W1-T14827 criterion 1: a moved id (public ${moved.public}, ops ${moved.ops}) never joins the ops landing`, async (t) => {
+    const catalogs = movingCatalogs(t, moved);
+    const credited = new Set([MOVED_ID, PUBLIC_ID, OPS_ID]);
+    const publicDrift = moved.public === "queued" ? [MOVED_ID, PUBLIC_ID] : [PUBLIC_ID];
+
+    const first = await catalogs.fire(credited);
+    assert.deepEqual([...first.report.taskIds].sort(), [...publicDrift, OPS_ID], "each drifted id is counted once");
+    assert.deepEqual(first.public, publicDrift.map(shardPath), "the moved id's public record flips with the public group");
+    assert.deepEqual(first.ops, [shardPath(OPS_ID)], "the other ops record lands; the in-flight ops copy is not written");
+
+    const second = await catalogs.fire(credited);
+    assert.equal(second.report.status, "clear", JSON.stringify(second.report));
+    assert.deepEqual([second.public, second.ops], [[], []]);
+  });
+}
+
+test("W1-T14827 criterion 1: a moved id's lost-credit re-queue stays with the public group", async (t) => {
+  const catalogs = movingCatalogs(t, { public: "merged", ops: "merged" });
+  const credited = Object.assign(new Set([PUBLIC_ID, OPS_ID]), {
+    requeue: [{ taskId: MOVED_ID, merged: false, creditOverride: { reason: "fixture revert", pr: 1 } }],
+  });
+  const first = await catalogs.fire(credited);
+  assert.deepEqual(first.report.requeued, [MOVED_ID]);
+  assert.deepEqual(first.ops, [shardPath(OPS_ID)]);
+  // The public group decides the re-queue: it lands there, or the public lint names it as held (the ops lint is empty).
+  assert.ok(first.public.includes(shardPath(MOVED_ID)) || first.report.held?.some((held) => held.taskId === MOVED_ID),
+    JSON.stringify({ report: first.report, public: first.public }));
+});
+
+test("W1-T14827 criterion 3: ten drifted ops records land beside an in-flight id the ops copy already reads merged", async (t) => {
+  const opsOnly = Array.from({ length: 10 }, (_, i) => `W1-T${900100 + i}`);
+  const catalogs = movingCatalogs(t, { public: "queued", ops: "merged" }, opsOnly);
+  const first = await catalogs.fire(new Set([MOVED_ID, ...opsOnly]));
+  assert.equal(first.report.drift, 11);
+  assert.deepEqual(first.public, [shardPath(MOVED_ID)]);
+  assert.deepEqual(first.ops, opsOnly.map(shardPath));
+});
+
+test("W1-T14827 criterion 3: an ops catalog holding only in-flight copies leaves one drifted public record landing", async (t) => {
+  const catalogs = movingCatalogs(t, { public: "queued", ops: "queued" }, []);
+  const first = await catalogs.fire(new Set([MOVED_ID]));
+  assert.equal(first.report.status, "landed");
+  assert.deepEqual([first.public, first.ops], [[shardPath(MOVED_ID)], []]);
 });
 
 test("W1-T3970: production adapter's omitted land seam invokes the real local landing bridge", async () => {

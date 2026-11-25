@@ -91,8 +91,8 @@ test("W1-T14827 criterion 1: an id both catalogs hold only because its move is i
   const moved = context.plan.byId.get("W1-T900001") as { moved_from?: string; catalog?: string } | undefined;
   assert.equal(moved?.moved_from, `remudero@${PUBLIC_COMMIT}`, "the moved id resolves to the ops copy");
   assert.equal(moved?.catalog, "ops");
-  assert.deepEqual(context.opsPlan?.tasks.map(task => task.id).sort(), ["W1-T900001", "W1-T900003"],
-    "the ops catalog the reconcile flips holds the moved record and every other ops record");
+  assert.deepEqual(context.opsPlan?.tasks.map(task => task.id), ["W1-T900003"],
+    "the records an ops landing may write exclude the moved id, whose status still lands on its public shard");
   assert.equal(context.plan.byId.get("W1-T900002")?.moved_from, undefined, "a public-only record stays public");
   assert.match(context.commit ?? "", /^[0-9a-f]{40}$/);
 });
