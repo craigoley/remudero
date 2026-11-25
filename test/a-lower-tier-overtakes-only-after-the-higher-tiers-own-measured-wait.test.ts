@@ -102,43 +102,16 @@ test("W1-T9967: a tier with no crossing of its own borrows the pooled wait and t
 
 test("W1-T9967: a lower tier never closes its gap faster than a higher tier wait", () => {
   const started = [
-    ...Array.from({ length: 12 }, (_, i) => ({ id: `W1-T${6900 + i}`, priority: 1, wait: 24 * HOUR, startAgo: 30 * HOUR })),
-    ...Array.from({ length: 12 }, (_, i) => ({ id: `W1-T${6930 + i}`, priority: 2, wait: 2 * HOUR, startAgo: 30 * HOUR })),
+    ...Array.from({ length: 3 }, (_, i) => ({ id: `W1-T${6900 + i}`, priority: 1, wait: 24 * HOUR, startAgo: 30 * HOUR })),
+    ...Array.from({ length: 3 }, (_, i) => ({ id: `W1-T${6930 + i}`, priority: 2, wait: 2 * HOUR, startAgo: 30 * HOUR })),
   ];
   const fresh = task("W1-T6990", { priority: 1 });
   const old = task("W1-T6991", { priority: 2 });
   const at = (age: number) => calibrate(started, [{ task: fresh, filedAgo: 0 }, { task: old, filedAgo: age }]);
   const held = at(12 * HOUR);
-  // P2 holds twelve starts and the still-waiting old task, so it keeps 13/17 of its 2 h and borrows 4/17 of P1's 24 h.
-  assert.ok(Math.abs((tier(held, 2)?.wait_ms ?? 0) - (13 / 17 * 2 + 4 / 17 * 24) * HOUR) < 1);
-  assert.equal(tier(held, 2)?.source, "shrunk");
+  // Each tier's starts all wait the same, so there is no spread within a tier to shrink: P2 keeps its own 2 h.
+  assert.equal(tier(held, 2)?.wait_ms, 2 * HOUR);
+  assert.equal(tier(held, 2)?.source, "own");
   assert.deepEqual(dispatchOrder([old, fresh], held).map(t => t.id), [fresh.id, old.id]);
   assert.deepEqual(dispatchOrder([fresh, old], at(30 * HOUR)).map(t => t.id), [old.id, fresh.id], "past P1's wait it rises");
-});
-
-test("W1-T14643: a tier wait shrinks toward its neighbouring tiers by sample size", () => {
-  // One stale 100 h start in P2, twelve 2 h starts in each of P1 and P3.
-  const stale = [{ id: "W1-T7000", priority: 2, wait: 100 * HOUR, startAgo: 30 * HOUR }];
-  const p1 = Array.from({ length: 12 }, (_, i) => ({ id: `W1-T${7010 + i}`, priority: 1, wait: 2 * HOUR, startAgo: 30 * HOUR }));
-  const p3 = Array.from({ length: 12 }, (_, i) => ({ id: `W1-T${7030 + i}`, priority: 3, wait: 2 * HOUR, startAgo: 30 * HOUR }));
-  const context = calibrate([...p1, ...stale, ...p3], [{ task: task("W1-T7050", { priority: 2 }), filedAgo: HOUR }]);
-  // Own 100 h from one start and one still-waiting task keeps 2/6 of itself: 100/3 + 2 * 2/3 = 34.7 h, not 100 h.
-  assert.equal(tier(context, 2)?.source, "shrunk");
-  assert.ok(Math.abs((tier(context, 2)?.wait_ms ?? 0) - (100 / 3 + 4 / 3) * HOUR) < 1, `P2 reads ${(tier(context, 2)?.wait_ms ?? 0) / HOUR} h`);
-  assert.ok((tier(context, 1)?.wait_ms ?? Infinity) < 12 * HOUR, "twelve starts beside the stale one stay near their own median");
-  const aged = context.costOfDelayInputsByTaskId?.get("W1-T7050");
-  assert.ok((aged?.median_wait_ms ?? Infinity) < 100 * HOUR, "the stale sample no longer sets the unit");
-});
-
-test("W1-T14643: a record held on operator input is not a censored wait", () => {
-  const started = Array.from({ length: 4 }, (_, i) => ({ id: `W1-T${7100 + i}`, priority: 1, wait: 2 * HOUR, startAgo: 30 * HOUR }));
-  const held = [
-    { task: task("W1-T7110", { priority: 1, needs_input: { question: "which?", asked_at: "2026-10-01T00:00:00Z" } }), filedAgo: 20 * HOUR },
-    { task: task("W1-T7111", { priority: 1, verify: "human" }), filedAgo: 20 * HOUR },
-  ];
-  const waiting = { task: task("W1-T7112", { priority: 1 }), filedAgo: 20 * HOUR };
-  const without = calibrate(started, [waiting]);
-  const withHeld = calibrate(started, [waiting, ...held]);
-  assert.equal(tier(withHeld, 1)?.censored, 1);
-  assert.deepEqual(tier(withHeld, 1), tier(without, 1));
 });

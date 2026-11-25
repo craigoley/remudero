@@ -207,14 +207,65 @@ function censoredMedianWaitMs(events: readonly number[], censored: readonly numb
 }
 
 /**
- * W1-T14643: pseudo-samples of neighbouring-tier evidence each tier starts from. A tier's own median keeps
- * `n / (n + K)` of the estimate for `n` waits (started plus censored); the rest is its neighbours' medians.
+ * W1-T14643: the release and answer state dispatch itself consults, so the censored sample holds back exactly
+ * the records dispatch holds back. Absent state is dispatch's own default: nothing released, nothing answered.
+ * `releasedIds` is a thunk so the release ledger is read only when an open `verify: human` record exists.
  */
-export const TIER_WAIT_NEIGHBOUR_WEIGHT = 4;
+export interface OperatorHoldState {
+  readonly releasedIds?: () => ReadonlySet<string>;
+  readonly inputAnswer?: (taskId: string) => string | undefined;
+}
 
-/** W1-T14643: a record held on operator input waits on the operator, so its age is not a censored wait. */
-const heldOnOperatorInput = (task: Pick<DispatchValueTask, "needs_input" | "verify">): boolean =>
-  (task.needs_input !== undefined && task.needs_input !== null) || task.verify === "human";
+/**
+ * W1-T14643: a record held on operator input waits on the operator, so its age is not a censored wait. The two
+ * predicates are plan.ts's own: `needsInputRefusal` (a needs_input question with no answer) and `assertRunnable`
+ * (a verify: human record that no operator released). A released or answered record is runnable, so it counts.
+ */
+function heldOnOperatorInputBy(holds: OperatorHoldState | undefined): (task: Pick<DispatchValueTask, "id" | "needs_input" | "verify">) => boolean {
+  let released: ReadonlySet<string> | undefined;
+  return task => {
+    if (task.needs_input !== undefined && !holds?.inputAnswer?.(task.id)?.trim()) return true;
+    if (task.verify !== "human") return false;
+    released ??= holds?.releasedIds?.() ?? new Set<string>();
+    return !released.has(task.id);
+  };
+}
+
+/** Variance of the sample's mean-centred values (n - 1), or undefined for fewer than two. */
+function sampleVariance(values: readonly number[]): number | undefined {
+  if (values.length < 2) return undefined;
+  const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+  return values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / (values.length - 1);
+}
+
+function medianOf(values: readonly number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/** The sampling variance of a median is about pi/2 times the variance of the mean, for the same sample. */
+const MEDIAN_VARIANCE_FACTOR = Math.PI / 2;
+
+/**
+ * W1-T14643: the empirical-Bayes prior weight `k` in `n / (n + k)`, derived from the data and never fixed.
+ * `k = (pi/2) * sigma2 / tau2`: `sigma2` is a wait's own variance within a tier (its median's sampling variance
+ * is `pi/2 * sigma2 / n`), `tau2` the variance between the tiers' true medians: the variance of the measured
+ * medians less their sampling variance. It is read from the better-sampled half of the tiers (at least two), so
+ * a sparse tier's noise cannot count as a real gap between tiers; a tier of one stale wait is judged against
+ * what the well-sampled tiers agree on. No spread between those tiers means complete pooling (`k` infinite); no
+ * spread within a tier means its median is exact (`k` zero), so a well-sampled tier keeps its own median.
+ */
+function shrinkagePriorWeight(sigma2: number, medians: readonly number[], sampleSizes: readonly number[]): number {
+  if (!(sigma2 > 0) || medians.length < 2) return 0;
+  const cut = medianOf(sampleSizes);
+  let better = medians.map((_, i) => i).filter(i => sampleSizes[i] >= cut);
+  if (better.length < 2) better = medians.map((_, i) => i).sort((a, b) => sampleSizes[b] - sampleSizes[a]).slice(0, 2);
+  const between = sampleVariance(better.map(i => medians[i])) ?? 0;
+  const sampling = medianOf(better.map(i => MEDIAN_VARIANCE_FACTOR * sigma2 / sampleSizes[i]));
+  const tau2 = Math.max(0, between - sampling);
+  return tau2 > 0 ? MEDIAN_VARIANCE_FACTOR * sigma2 / tau2 : Number.POSITIVE_INFINITY;
+}
 
 /** A tier's sort key: its declared priority, or +Infinity for the absent-priority tier below every declared one. */
 const tierKey = (task: Pick<DispatchValueTask, "priority">): number =>
@@ -401,6 +452,7 @@ export function buildDispatchValueContext(
   unionComplete = true,
   seed?: string,
   snapshot?: CostOfDelaySnapshot,
+  holds?: OperatorHoldState,
 ): DispatchValueCalibration {
   if (!unionComplete) return { kind: "refused", reasons: ["incomplete-union"] };
   if (snapshot) rows = sortRowsByJson(rows);
@@ -425,7 +477,7 @@ export function buildDispatchValueContext(
   }
   const context: DispatchValueContext = { scoreByClass, openDependentFanoutByTaskId: openDependentFanout(tasks, openTaskIds) };
   if (snapshot) {
-    const scheduled = costOfDelayContext(tasks, rows, openTaskIds, nowMs, snapshot, context, estimates);
+    const scheduled = costOfDelayContext(tasks, rows, openTaskIds, nowMs, snapshot, context, estimates, holds);
     if (scheduled.kind === "refused") return scheduled;
     Object.assign(context, scheduled.context);
   }
@@ -613,6 +665,7 @@ function costOfDelayContext(
   tasks: readonly DispatchValueTask[], rows: ReadonlyArray<Record<string, unknown>>,
   openIds: ReadonlySet<string>, nowMs: number, snapshot: CostOfDelaySnapshot,
   context: DispatchValueContext, estimates: ReadonlyMap<string, ClassValueEstimate>,
+  holds?: OperatorHoldState,
 ): { kind: "ready"; context: Pick<DispatchValueContext, "costOfDelayByTaskId" | "stridePassByTaskId" | "costOfDelayInputsByTaskId" | "costOfDelayUnscored" | "costOfDelayImputed" | "costOfDelayTierWaits" | "costOfDelayDependentValues" | "costOfDelayDependentCycle"> }
   | { kind: "refused"; reasons: readonly string[] } {
   if (!snapshot.planTreeSha || !Number.isFinite(nowMs)) return { kind: "refused", reasons: ["unreadable-snapshot"] };
@@ -681,6 +734,7 @@ function costOfDelayContext(
     const key = keyById.get(id);
     if (key !== undefined) sampleOf(key).events.push(at - filedAt);
   }
+  const heldOnOperatorInput = heldOnOperatorInputBy(holds);
   for (const task of tasks) {
     if (!openIds.has(task.id) || heldOnOperatorInput(task)) continue;
     const sample = sampleOf(tierKey(task));
@@ -702,17 +756,31 @@ function costOfDelayContext(
     const own = censoredMedianWaitMs(sample.events, sample.censored);
     return { key, sample, own: own !== undefined && own > 0 ? own : undefined, n: sample.events.length + sample.censored.length };
   });
+  type Tier = (typeof tiers)[number];
+  // W1-T14643: the within-tier variance of a wait, pooled over the tiers that hold two or more starts; with
+  // none, the variance of every start together (an over-estimate, so it shrinks less than it could).
+  const withinTier = tiers.reduce((sum, { sample }) => sample.events.length < 2 ? sum
+    : { df: sum.df + sample.events.length - 1, ss: sum.ss + (sampleVariance(sample.events) as number) * (sample.events.length - 1) }, { df: 0, ss: 0 });
+  const sigma2 = withinTier.df > 0 ? withinTier.ss / withinTier.df : (sampleVariance(pooled.events) ?? 0);
+  const measuredTiers = tiers.filter(t => t.own !== undefined);
+  const priorWeight = shrinkagePriorWeight(sigma2, measuredTiers.map(t => t.own as number), measuredTiers.map(t => t.n));
+  // n / (n + k): k zero keeps a tier's own median, k infinite gives it wholly to its neighbours.
+  const keepOf = (n: number): number => n / (n + priorWeight);
+  const nearestMeasured = (from: number, step: 1 | -1): Tier | undefined => {
+    for (let i = from + step; i >= 0 && i < tiers.length; i += step) if (tiers[i].own !== undefined) return tiers[i];
+    return undefined;
+  };
   let envelope = 0;
   tiers.forEach(({ key, sample, own, n }, index) => {
-    // W1-T14643: a tier's own median is shrunk toward its adjacent tiers' own medians, each weighted by its
-    // sample, in proportion to how few waits the tier itself holds, so one stale sample cannot set a tier's unit.
-    const neighbours = [tiers[index - 1], tiers[index + 1]].filter((t): t is (typeof tiers)[number] => t !== undefined && t.own !== undefined && t.n > 0);
+    // W1-T14643: a tier's own median is shrunk toward the pooled median of its nearest measured tiers above and
+    // below, each weighted by its sample, so one stale sample cannot set the aging unit of every tier below it.
+    const neighbours = [nearestMeasured(index, -1), nearestMeasured(index, 1)].filter((t): t is Tier => t !== undefined);
     const neighbourN = neighbours.reduce((sum, t) => sum + t.n, 0);
     // A neighbour is itself read through its sample size, so a sparse one reverts to the pooled wait.
     const neighbourMs = neighbourN === 0 ? 0 : neighbours.reduce((sum, t) =>
-      sum + (t.n / (t.n + TIER_WAIT_NEIGHBOUR_WEIGHT) * (t.own as number) + TIER_WAIT_NEIGHBOUR_WEIGHT / (t.n + TIER_WAIT_NEIGHBOUR_WEIGHT) * pooledWaitMs) * t.n, 0) / neighbourN;
-    const keep = n / (n + TIER_WAIT_NEIGHBOUR_WEIGHT);
-    const shrunk = own !== undefined && neighbourN > 0;
+      sum + (keepOf(t.n) * (t.own as number) + (1 - keepOf(t.n)) * pooledWaitMs) * t.n, 0) / neighbourN;
+    const keep = keepOf(n);
+    const shrunk = own !== undefined && neighbourN > 0 && keep < 1;
     const source = own === undefined ? (pooledMedian !== undefined ? "pooled" : "pooled-lower-bound") : shrunk ? "shrunk" : "own";
     const waitMs = own === undefined ? pooledWaitMs : shrunk ? keep * own + (1 - keep) * neighbourMs : own;
     costOfDelayTierWaits.push({
