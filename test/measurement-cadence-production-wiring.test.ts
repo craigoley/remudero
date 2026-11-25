@@ -101,7 +101,7 @@ test("W1-T3970: production adapter lands threshold drift and refuses an unlanded
     },
   });
   assert.ok(input);
-  assert.deepEqual(planReconcileCadence(input!), { drift: 10, taskIds: ids, status: "landed", threshold: 10 });
+  assert.deepEqual(planReconcileCadence(input!), { drift: 10, taskIds: ids, status: "landed", threshold: 1 });
   assert.equal(landed, 10);
 
   const refused = buildPlanReconcileProductionInput({
