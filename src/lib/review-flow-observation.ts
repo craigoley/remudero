@@ -10,7 +10,7 @@ const identity = (value: unknown): value is string => typeof value === "string" 
  * missing posts remain source gaps, never actionable waiting or a latency SLO over all PRs. */
 export function observeReviewFlow(rows: readonly Row[], asOf: string, windowStart: string) {
   const now = Date.parse(asOf), start = Date.parse(windowStart);
-  if (!Number.isFinite(now) || !Number.isFinite(start) || start > now || rows.length > 100_000) throw new Error("invalid bounded review observation");
+  if (!Number.isFinite(now) || !Number.isFinite(start) || start > now) throw new Error("invalid bounded review observation");
   const diagnostics = { duplicates: 0, missingIdentity: 0, invalidTimestamp: 0, nonterminalPosts: 0, orphanInputs: 0 };
   const groups = new Map<string, { prUrl: string; headSha: string; inputDigest: string; eligible: number[];
     admitted: number[]; attempted: number[]; posted: Array<{ ts: number; state: string; reviewerOutcome: string | null }> }>();
