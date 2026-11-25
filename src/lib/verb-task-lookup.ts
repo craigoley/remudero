@@ -1,12 +1,20 @@
 import { planDestinationRepository, type PlanDestinationRepositoryRead } from "./plan-destination.js";
 import type { Plan, Task } from "./plan.js";
-import type { VerbPlanRoot } from "./repo-location.js";
 import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
 
-/** W1-T10925's public resolution: the plan root (cwd's, or the instance target's) whose plan holds the id. */
+/** W1-T10925's public resolution: the plan root (cwd's, or the instance target's) whose plan holds the id.
+ *  Declared structurally: even a type import of the argv-reading repo location module is refused in src/lib.
+ *  The typecheck of run-task.ts's verbTaskPlan against this type catches drift. */
 export type PublicVerbPlan =
-  | (Extract<VerbPlanRoot, { ok: true }> & { plan: Plan; planPath: string })
-  | Extract<VerbPlanRoot, { ok: false }>;
+  | {
+      ok: true;
+      root: string;
+      via: "repo-root" | "cwd" | "target";
+      target?: { owner: string; repo: string; isSelf: boolean; checkoutRoot: string };
+      plan: Plan;
+      planPath: string;
+    }
+  | { ok: false; searched: string[]; error: string };
 
 /** The task a per-task operator verb acts on, its catalog, and the owner/repo the verb writes to.
  *  `owner` undefined means the caller's default owner, as before. */
