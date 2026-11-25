@@ -230,6 +230,12 @@ function workerRows(): Row[] {
   }).flat();
 }
 
+/** Twenty filed evidence follow-ups beside the worker rows: their cells put plain words such as "unknown" in the release. */
+function learningRows(): Row[] {
+  return Array.from({ length: 20 }, (_, i) => ({ ts: "2026-10-06T04:00:00.000Z", step: "evidence_coverage.filed", action: "filed",
+    host: "host-alpha-private", actor: "daemon", task_id: `task-evidence-${i}`, run_id: `run-evidence-${i}` }));
+}
+
 function snapshotOf(ledger: FieldTrialsLedgerRead): FieldTrialsFlowSnapshot {
   return buildFieldTrialsFlowSnapshot({ asOf: AS_OF, sources: [{ label: "core", repo: REPO, ledger }], github: { version: "field-trials-github-v1", repos: {} } });
 }
@@ -251,9 +257,13 @@ test("W1-T14853 criterion 6: invariant:the-release-is-byte-identical — compare
     ...await decisionShadow({ hour: 17, head: "c7c7c7c7", primary: "automate", reply: { kind: "distribution", top: "automate" }, latency: 300, cost: 0.0002 }),
     ...await decisionShadow({ hour: 18, head: "d8d8d8d8", primary: "automate", reply: { kind: "abstained" }, latency: 200, cost: 0.0001 }),
     cashCompared(19, "20920@e9e9e9e9", "overlap", "independent"),
+    // The risk judge keys a row with no task or pull request as the bare word "unknown" (lib/risk-judge.ts).
+    { ts: "2026-10-06T20:00:00.000Z", step: "judge_shadow.compared", role: "risk-judge", decision_key: "unknown", primary_model: "gpt-6-luna",
+      primary_provider: null, primary_cost_usd: 0, shadow_effort: "low", shadow_model: "gpt-oss-120b", shadow_cost_usd: 0.0004,
+      primary_answer: "low", shadow_answer: "low", agreement: true },
   ];
-  const without = snapshotOf(await readLedger(workerRows()));
-  const withRows = snapshotOf(await readLedger([...workerRows(), ...shadowRows]));
+  const without = snapshotOf(await readLedger([...workerRows(), ...learningRows()]));
+  const withRows = snapshotOf(await readLedger([...workerRows(), ...learningRows(), ...shadowRows]));
   const family = JSON.stringify(withRows.families.judges);
   assert.ok(family.includes("decisions-eastus") && family.includes("gpt-oss-120b"), "positive control: the family holds both arms' cells");
   for (const secret of ["c7c7c7c7", "d8d8d8d8", "e9e9e9e9", "20920@e9e9e9e9", "shard-c7c7c7c7"]) {
@@ -263,6 +273,10 @@ test("W1-T14853 criterion 6: invariant:the-release-is-byte-identical — compare
   const release = (snapshot: FieldTrialsFlowSnapshot) => buildFieldTrialsRelease(snapshot, CONSENT, "salt-one");
   assert.equal(release(without).state, "candidate", "positive control: the worker rows release a candidate");
   assert.equal(JSON.stringify(release(withRows)), JSON.stringify(release(without)));
+  assert.ok(family.includes("risk-judge"), "positive control: the bare-word keyed row is in the family");
+  assert.equal(withRows.privateKeys.includes("unknown"), false, "a bare word is never a private join key");
+  assert.equal(release({ ...withRows, privateKeys: [...withRows.privateKeys, "unknown"] }).state, "refused",
+    "positive control: a bare word taken as a private key would refuse the whole release");
   const note = (snapshot: FieldTrialsFlowSnapshot) => buildModelFieldNoteCandidate({ snapshot, consent: CONSENT, registry: PINNED_SITE_CONSENT_REGISTRY,
     windows: { version: "field-note-windows-v1", windows: [] }, salt: "salt-one", nowIso: "2026-10-20T07:00:00.000Z" });
   assert.equal(note(without).state, "candidate", "positive control: the worker rows write a field-note candidate");

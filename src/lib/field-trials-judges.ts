@@ -34,6 +34,10 @@ export const SHADOW_JUDGE_PAIRED_STEP = "shadow_judge.paired";
 /** The ledger steps only the judge family reads. */
 export const JUDGE_TRIAL_STEPS = [DECISION_ANSWERED_STEP, SHADOW_JUDGE_PAIRED_STEP, JUDGE_REPLAY_ANSWERED_STEP, JUDGE_REPLAY_FINISHED_STEP,
   ...JUDGE_SHADOW_ROW_STEPS, ...JUDGE_SHADOW_ARM_STEPS] as const;
+/** W1-T14853: a decision key that is one bare lowercase word names no input: the risk judge keys a row with no task
+ *  or pull request as `unknown` (lib/risk-judge.ts). Such a word is never a private join key, because the release
+ *  refuses itself when a private key appears in its own text, and plain words do. */
+export const PLACEHOLDER_DECISION_KEY = /^[a-z]+$/;
 /** W1-T14853: a decision-model replay whose newest answer is older than this before the snapshot's asOf is stale. A
  *  record only: nothing reads the flag to decide. */
 export const JUDGE_REPLAY_STALE_DAYS = 7;
@@ -144,7 +148,7 @@ export function judgeTrialRows(source: string, rows: readonly JudgeTrialSourceRo
     if (judge === undefined) continue;
     if (judge.request?.side === "decision" && shadowRequests.has(judge.request.key)) continue;
     if (row.runId !== null) privateKeys.add(row.runId);
-    if (judge.decisionKey !== null) privateKeys.add(judge.decisionKey);
+    if (judge.decisionKey !== null && !PLACEHOLDER_DECISION_KEY.test(judge.decisionKey)) privateKeys.add(judge.decisionKey);
     const corpusDigest = judge.basis === "live" ? null
       : judge.corpusDigest ?? (row.runId === null ? undefined : digestOfRun.get(row.runId)) ?? JUDGE_CORPUS_DIGEST_UNRECORDED;
     if (judge.refused) {
