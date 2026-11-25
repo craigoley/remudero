@@ -4,7 +4,7 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `ci-judge`, field `servedModel`.
 
-  Coverage: 1596/1943 joined worker calls (82.1%) in the trailing 7-day window;
+  Coverage: 1683/1992 joined worker calls (84.5%) in the trailing 7-day window;
   below the field's 90.0% floor — a chronic gap no baseline excuses.
 
   First seen: 2026-10-08T16:51:25.889Z.
@@ -49,7 +49,7 @@ answered_by: null
 evidence_coverage_last_reopened: "82.1"
 evidence_coverage_revision:
   version: 1
-  mainSha: 6ac1583d17a3ec3c13a35d719160b62d595768b9
+  mainSha: bbfaa33819f2bee80097d0e7178ed1f1c6043eba
   expectedRecord: >
     id: evidence-coverage-ci-judge-served-model
 
@@ -59,7 +59,7 @@ evidence_coverage_revision:
       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
       `ci-judge`, field `servedModel`.
 
-      Coverage: 828/1231 joined worker calls (67.3%) in the trailing 7-day window;
+      Coverage: 1596/1943 joined worker calls (82.1%) in the trailing 7-day window;
       below the field's 90.0% floor — a chronic gap no baseline excuses.
 
       First seen: 2026-10-08T16:51:25.889Z.
@@ -72,11 +72,15 @@ evidence_coverage_revision:
 
       Evidence coverage reopened 2026-10-29T17:59:07.863Z: 22.2% (106/478); window
       2026-10-22T17:59:07.863Z through 2026-10-29T17:59:07.863Z; overrides rejected.
+
+      Evidence coverage reopened 2026-11-24T21:53:07.150Z: 82.1% (1596/1943); window
+      2026-11-17T21:53:07.150Z through 2026-11-24T21:53:07.150Z; overrides accepted
+      closed by https://github.com/craigoley/remudero/pull/15643.
     attachments: []
 
     origin: cli
 
-    status: accepted
+    status: grilling
 
     reply_to: null
 
@@ -106,11 +110,11 @@ evidence_coverage_revision:
 
     answered_by: null
 
-    evidence_coverage_last_reopened: "22.2"
+    evidence_coverage_last_reopened: "82.1"
 
     evidence_coverage_revision:
       version: 1
-      mainSha: b82cd411946585c6a11d8ff1c34e73796848f433
+      mainSha: 6ac1583d17a3ec3c13a35d719160b62d595768b9
       expectedRecord: >
         id: evidence-coverage-ci-judge-served-model
 
@@ -120,7 +124,7 @@ evidence_coverage_revision:
           Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
           `ci-judge`, field `servedModel`.
 
-          Coverage: 574/1031 joined worker calls (55.7%) in the trailing 7-day window;
+          Coverage: 828/1231 joined worker calls (67.3%) in the trailing 7-day window;
           below the field's 90.0% floor — a chronic gap no baseline excuses.
 
           First seen: 2026-10-08T16:51:25.889Z.
@@ -171,7 +175,7 @@ evidence_coverage_revision:
 
         evidence_coverage_revision:
           version: 1
-          mainSha: c7f43c157ff3804771de5f9960584ab8ecb7c837
+          mainSha: b82cd411946585c6a11d8ff1c34e73796848f433
           expectedRecord: >
             id: evidence-coverage-ci-judge-served-model
 
@@ -181,7 +185,7 @@ evidence_coverage_revision:
               Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
               `ci-judge`, field `servedModel`.
 
-              Coverage: 472/965 joined worker calls (48.9%) in the trailing 7-day window;
+              Coverage: 574/1031 joined worker calls (55.7%) in the trailing 7-day window;
               below the field's 90.0% floor — a chronic gap no baseline excuses.
 
               First seen: 2026-10-08T16:51:25.889Z.
@@ -232,7 +236,7 @@ evidence_coverage_revision:
 
             evidence_coverage_revision:
               version: 1
-              mainSha: 6886c58df8ad4484c0a4dd1b0e61acd16dd1fc7d
+              mainSha: c7f43c157ff3804771de5f9960584ab8ecb7c837
               expectedRecord: >
                 id: evidence-coverage-ci-judge-served-model
 
@@ -242,7 +246,7 @@ evidence_coverage_revision:
                   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                   `ci-judge`, field `servedModel`.
 
-                  Coverage: 462/815 joined worker calls (56.7%) in the trailing 7-day window;
+                  Coverage: 472/965 joined worker calls (48.9%) in the trailing 7-day window;
                   below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                   First seen: 2026-10-08T16:51:25.889Z.
@@ -293,7 +297,7 @@ evidence_coverage_revision:
 
                 evidence_coverage_revision:
                   version: 1
-                  mainSha: ba5bd4f639a1011d035063b42f6a0d390ceaa016
+                  mainSha: 6886c58df8ad4484c0a4dd1b0e61acd16dd1fc7d
                   expectedRecord: >
                     id: evidence-coverage-ci-judge-served-model
 
@@ -303,7 +307,7 @@ evidence_coverage_revision:
                       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                       `ci-judge`, field `servedModel`.
 
-                      Coverage: 449/776 joined worker calls (57.9%) in the trailing 7-day window;
+                      Coverage: 462/815 joined worker calls (56.7%) in the trailing 7-day window;
                       below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                       First seen: 2026-10-08T16:51:25.889Z.
@@ -354,7 +358,7 @@ evidence_coverage_revision:
 
                     evidence_coverage_revision:
                       version: 1
-                      mainSha: 59923bb4f7037bdf74cbf8a746f9a4f12b1d3876
+                      mainSha: ba5bd4f639a1011d035063b42f6a0d390ceaa016
                       expectedRecord: >
                         id: evidence-coverage-ci-judge-served-model
 
@@ -364,7 +368,7 @@ evidence_coverage_revision:
                           Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                           `ci-judge`, field `servedModel`.
 
-                          Coverage: 465/777 joined worker calls (59.8%) in the trailing 7-day window;
+                          Coverage: 449/776 joined worker calls (57.9%) in the trailing 7-day window;
                           below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                           First seen: 2026-10-08T16:51:25.889Z.
@@ -415,7 +419,7 @@ evidence_coverage_revision:
 
                         evidence_coverage_revision:
                           version: 1
-                          mainSha: c1030e0d477b97322558d4d4d484d03b299d7e93
+                          mainSha: 59923bb4f7037bdf74cbf8a746f9a4f12b1d3876
                           expectedRecord: >
                             id: evidence-coverage-ci-judge-served-model
 
@@ -425,7 +429,7 @@ evidence_coverage_revision:
                               Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                               `ci-judge`, field `servedModel`.
 
-                              Coverage: 454/757 joined worker calls (60.0%) in the trailing 7-day window;
+                              Coverage: 465/777 joined worker calls (59.8%) in the trailing 7-day window;
                               below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                               First seen: 2026-10-08T16:51:25.889Z.
@@ -476,7 +480,7 @@ evidence_coverage_revision:
 
                             evidence_coverage_revision:
                               version: 1
-                              mainSha: 8840b91c2ebf90cdd6f479611070bfebf1c541a5
+                              mainSha: c1030e0d477b97322558d4d4d484d03b299d7e93
                               expectedRecord: >
                                 id: evidence-coverage-ci-judge-served-model
 
@@ -486,7 +490,7 @@ evidence_coverage_revision:
                                   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                   `ci-judge`, field `servedModel`.
 
-                                  Coverage: 454/720 joined worker calls (63.1%) in the trailing 7-day window;
+                                  Coverage: 454/757 joined worker calls (60.0%) in the trailing 7-day window;
                                   below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                   First seen: 2026-10-08T16:51:25.889Z.
@@ -537,7 +541,7 @@ evidence_coverage_revision:
 
                                 evidence_coverage_revision:
                                   version: 1
-                                  mainSha: 64e89ff8e75f3b974ccaf7806dd58d2bfdfe5158
+                                  mainSha: 8840b91c2ebf90cdd6f479611070bfebf1c541a5
                                   expectedRecord: >
                                     id: evidence-coverage-ci-judge-served-model
 
@@ -547,7 +551,7 @@ evidence_coverage_revision:
                                       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                       `ci-judge`, field `servedModel`.
 
-                                      Coverage: 420/640 joined worker calls (65.6%) in the trailing 7-day window;
+                                      Coverage: 454/720 joined worker calls (63.1%) in the trailing 7-day window;
                                       below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                       First seen: 2026-10-08T16:51:25.889Z.
@@ -598,7 +602,7 @@ evidence_coverage_revision:
 
                                     evidence_coverage_revision:
                                       version: 1
-                                      mainSha: f93618eab1625d23b19d8672a958646a1f3de3c4
+                                      mainSha: 64e89ff8e75f3b974ccaf7806dd58d2bfdfe5158
                                       expectedRecord: >
                                         id: evidence-coverage-ci-judge-served-model
 
@@ -608,7 +612,7 @@ evidence_coverage_revision:
                                           Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                           `ci-judge`, field `servedModel`.
 
-                                          Coverage: 180/443 joined worker calls (40.6%) in the trailing 7-day window;
+                                          Coverage: 420/640 joined worker calls (65.6%) in the trailing 7-day window;
                                           below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                           First seen: 2026-10-08T16:51:25.889Z.
@@ -659,7 +663,7 @@ evidence_coverage_revision:
 
                                         evidence_coverage_revision:
                                           version: 1
-                                          mainSha: 7fbfd3ae80fe3d192cf38d5e5efc8fd46cee717b
+                                          mainSha: f93618eab1625d23b19d8672a958646a1f3de3c4
                                           expectedRecord: >
                                             id: evidence-coverage-ci-judge-served-model
 
@@ -669,8 +673,8 @@ evidence_coverage_revision:
                                               Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                               `ci-judge`, field `servedModel`.
 
-                                              Coverage: 9/203 joined worker calls (4.4%) in the trailing 7-day window; below
-                                              the field's 90.0% floor — a chronic gap no baseline excuses.
+                                              Coverage: 180/443 joined worker calls (40.6%) in the trailing 7-day window;
+                                              below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                               First seen: 2026-10-08T16:51:25.889Z.
 
@@ -720,7 +724,7 @@ evidence_coverage_revision:
 
                                             evidence_coverage_revision:
                                               version: 1
-                                              mainSha: 9023ecc08515ab728e1437ac25e0644077280194
+                                              mainSha: 7fbfd3ae80fe3d192cf38d5e5efc8fd46cee717b
                                               expectedRecord: >
                                                 id: evidence-coverage-ci-judge-served-model
 
@@ -730,7 +734,7 @@ evidence_coverage_revision:
                                                   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                                   `ci-judge`, field `servedModel`.
 
-                                                  Coverage: 9/175 joined worker calls (5.1%) in the trailing 7-day window; below
+                                                  Coverage: 9/203 joined worker calls (4.4%) in the trailing 7-day window; below
                                                   the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                                   First seen: 2026-10-08T16:51:25.889Z.
@@ -781,7 +785,7 @@ evidence_coverage_revision:
 
                                                 evidence_coverage_revision:
                                                   version: 1
-                                                  mainSha: 247f574101efed966c92c149c64bce1aef97f0de
+                                                  mainSha: 9023ecc08515ab728e1437ac25e0644077280194
                                                   expectedRecord: >
                                                     id: evidence-coverage-ci-judge-served-model
 
@@ -791,7 +795,7 @@ evidence_coverage_revision:
                                                       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                                       `ci-judge`, field `servedModel`.
 
-                                                      Coverage: 9/153 joined worker calls (5.9%) in the trailing 7-day window; below
+                                                      Coverage: 9/175 joined worker calls (5.1%) in the trailing 7-day window; below
                                                       the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                                       First seen: 2026-10-08T16:51:25.889Z.
@@ -842,7 +846,7 @@ evidence_coverage_revision:
 
                                                     evidence_coverage_revision:
                                                       version: 1
-                                                      mainSha: 7c87a20708cd5e5e9c3dade851edb4942725b080
+                                                      mainSha: 247f574101efed966c92c149c64bce1aef97f0de
                                                       expectedRecord: >
                                                         id: evidence-coverage-ci-judge-served-model
 
@@ -852,7 +856,7 @@ evidence_coverage_revision:
                                                           Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                                           `ci-judge`, field `servedModel`.
 
-                                                          Coverage: 9/137 joined worker calls (6.6%) in the trailing 7-day window; below
+                                                          Coverage: 9/153 joined worker calls (5.9%) in the trailing 7-day window; below
                                                           the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                                           First seen: 2026-10-08T16:51:25.889Z.
@@ -903,7 +907,7 @@ evidence_coverage_revision:
 
                                                         evidence_coverage_revision:
                                                           version: 1
-                                                          mainSha: c223fe68126537e9df1d6b8d75a748414757d8c9
+                                                          mainSha: 7c87a20708cd5e5e9c3dade851edb4942725b080
                                                           expectedRecord: >
                                                             id: evidence-coverage-ci-judge-served-model
 
@@ -913,8 +917,8 @@ evidence_coverage_revision:
                                                               Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                                               `ci-judge`, field `servedModel`.
 
-                                                              Coverage: 36/284 joined worker calls (12.7%) in the trailing 7-day window;
-                                                              below the field's 90.0% floor — a chronic gap no baseline excuses.
+                                                              Coverage: 9/137 joined worker calls (6.6%) in the trailing 7-day window; below
+                                                              the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                                               First seen: 2026-10-08T16:51:25.889Z.
 
@@ -964,7 +968,7 @@ evidence_coverage_revision:
 
                                                             evidence_coverage_revision:
                                                               version: 1
-                                                              mainSha: 0ea4d3fe2d57a897a42c34bb7ff08829f09dd2bf
+                                                              mainSha: c223fe68126537e9df1d6b8d75a748414757d8c9
                                                               expectedRecord: >
                                                                 id: evidence-coverage-ci-judge-served-model
 
@@ -974,7 +978,7 @@ evidence_coverage_revision:
                                                                   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                                                   `ci-judge`, field `servedModel`.
 
-                                                                  Coverage: 36/294 joined worker calls (12.2%) in the trailing 7-day window;
+                                                                  Coverage: 36/284 joined worker calls (12.7%) in the trailing 7-day window;
                                                                   below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                                                   First seen: 2026-10-08T16:51:25.889Z.
@@ -1025,7 +1029,7 @@ evidence_coverage_revision:
 
                                                                 evidence_coverage_revision:
                                                                   version: 1
-                                                                  mainSha: 15e26bb965c42530215254ba80439493830deb45
+                                                                  mainSha: 0ea4d3fe2d57a897a42c34bb7ff08829f09dd2bf
                                                                   expectedRecord: >
                                                                     id: evidence-coverage-ci-judge-served-model
 
@@ -1035,7 +1039,7 @@ evidence_coverage_revision:
                                                                       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                                                       `ci-judge`, field `servedModel`.
 
-                                                                      Coverage: 36/266 joined worker calls (13.5%) in the trailing 7-day window;
+                                                                      Coverage: 36/294 joined worker calls (12.2%) in the trailing 7-day window;
                                                                       below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                                                       First seen: 2026-10-08T16:51:25.889Z.
@@ -1086,7 +1090,7 @@ evidence_coverage_revision:
 
                                                                     evidence_coverage_revision:
                                                                       version: 1
-                                                                      mainSha: 02104c2005bf5154c14daaad5b77e386ffa0149e
+                                                                      mainSha: 15e26bb965c42530215254ba80439493830deb45
                                                                       expectedRecord: >
                                                                         id: evidence-coverage-ci-judge-served-model
 
@@ -1096,7 +1100,7 @@ evidence_coverage_revision:
                                                                           Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                                                           `ci-judge`, field `servedModel`.
 
-                                                                          Coverage: 26/289 joined worker calls (9.0%) in the trailing 7-day window;
+                                                                          Coverage: 36/266 joined worker calls (13.5%) in the trailing 7-day window;
                                                                           below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                                                           First seen: 2026-10-08T16:51:25.889Z.
@@ -1147,7 +1151,7 @@ evidence_coverage_revision:
 
                                                                         evidence_coverage_revision:
                                                                           version: 1
-                                                                          mainSha: ed891be856eda042208e38f621e56ef0971c5dca
+                                                                          mainSha: 02104c2005bf5154c14daaad5b77e386ffa0149e
                                                                           expectedRecord: >
                                                                             id: evidence-coverage-ci-judge-served-model
 
@@ -1157,7 +1161,7 @@ evidence_coverage_revision:
                                                                               Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                                                               `ci-judge`, field `servedModel`.
 
-                                                                              Coverage: 72/336 joined worker calls (21.4%) in the trailing 7-day window;
+                                                                              Coverage: 26/289 joined worker calls (9.0%) in the trailing 7-day window;
                                                                               below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                                                               First seen: 2026-10-08T16:51:25.889Z.
@@ -1208,7 +1212,7 @@ evidence_coverage_revision:
 
                                                                             evidence_coverage_revision:
                                                                               version: 1
-                                                                              mainSha: 4edd4e93757d2cc3ab53143c6bccdb21ba5fdf84
+                                                                              mainSha: ed891be856eda042208e38f621e56ef0971c5dca
                                                                               expectedRecord: >
                                                                                 id: evidence-coverage-ci-judge-served-model
 
@@ -1218,7 +1222,7 @@ evidence_coverage_revision:
                                                                                   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                                                                   `ci-judge`, field `servedModel`.
 
-                                                                                  Coverage: 76/347 joined worker calls (21.9%) in the trailing 7-day window;
+                                                                                  Coverage: 72/336 joined worker calls (21.4%) in the trailing 7-day window;
                                                                                   below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                                                                   First seen: 2026-10-08T16:51:25.889Z.
@@ -1269,7 +1273,7 @@ evidence_coverage_revision:
 
                                                                                 evidence_coverage_revision:
                                                                                   version: 1
-                                                                                  mainSha: a83d8acb75d195a3008e690f423ebbe04015ad48
+                                                                                  mainSha: 4edd4e93757d2cc3ab53143c6bccdb21ba5fdf84
                                                                                   expectedRecord: >
                                                                                     id: evidence-coverage-ci-judge-served-model
 
@@ -1279,7 +1283,7 @@ evidence_coverage_revision:
                                                                                       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                                                                       `ci-judge`, field `servedModel`.
 
-                                                                                      Coverage: 95/377 joined worker calls (25.2%) in the trailing 7-day window;
+                                                                                      Coverage: 76/347 joined worker calls (21.9%) in the trailing 7-day window;
                                                                                       below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                                                                       First seen: 2026-10-08T16:51:25.889Z.
@@ -1330,7 +1334,7 @@ evidence_coverage_revision:
 
                                                                                     evidence_coverage_revision:
                                                                                       version: 1
-                                                                                      mainSha: 648b3a6030b468e42ee875bce17a60281cc1a368
+                                                                                      mainSha: a83d8acb75d195a3008e690f423ebbe04015ad48
                                                                                       expectedRecord: >
                                                                                         id: evidence-coverage-ci-judge-served-model
 
@@ -1340,7 +1344,7 @@ evidence_coverage_revision:
                                                                                           Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                                                                           `ci-judge`, field `servedModel`.
 
-                                                                                          Coverage: 95/354 joined worker calls (26.8%) in the trailing 7-day window;
+                                                                                          Coverage: 95/377 joined worker calls (25.2%) in the trailing 7-day window;
                                                                                           below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                                                                           First seen: 2026-10-08T16:51:25.889Z.
@@ -1391,7 +1395,7 @@ evidence_coverage_revision:
 
                                                                                         evidence_coverage_revision:
                                                                                           version: 1
-                                                                                          mainSha: 693cc1991c68d3339d88f613958e4e869b1f7d53
+                                                                                          mainSha: 648b3a6030b468e42ee875bce17a60281cc1a368
                                                                                           expectedRecord: >
                                                                                             id: evidence-coverage-ci-judge-served-model
 
@@ -1401,7 +1405,7 @@ evidence_coverage_revision:
                                                                                               Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                                                                               `ci-judge`, field `servedModel`.
 
-                                                                                              Coverage: 98/405 joined worker calls (24.2%) in the trailing 7-day window;
+                                                                                              Coverage: 95/354 joined worker calls (26.8%) in the trailing 7-day window;
                                                                                               below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                                                                               First seen: 2026-10-08T16:51:25.889Z.
@@ -1452,7 +1456,7 @@ evidence_coverage_revision:
 
                                                                                             evidence_coverage_revision:
                                                                                               version: 1
-                                                                                              mainSha: e90d4b09f15ddeaa740249e249461a0a5c4cda13
+                                                                                              mainSha: 693cc1991c68d3339d88f613958e4e869b1f7d53
                                                                                               expectedRecord: >
                                                                                                 id: evidence-coverage-ci-judge-served-model
 
@@ -1462,7 +1466,7 @@ evidence_coverage_revision:
                                                                                                   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                                                                                   `ci-judge`, field `servedModel`.
 
-                                                                                                  Coverage: 106/478 joined worker calls (22.2%) in the trailing 7-day window;
+                                                                                                  Coverage: 98/405 joined worker calls (24.2%) in the trailing 7-day window;
                                                                                                   below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                                                                                   First seen: 2026-10-08T16:51:25.889Z.
@@ -1479,7 +1483,7 @@ evidence_coverage_revision:
 
                                                                                                 origin: cli
 
-                                                                                                status: proposed
+                                                                                                status: accepted
 
                                                                                                 reply_to: null
 
@@ -1513,7 +1517,7 @@ evidence_coverage_revision:
 
                                                                                                 evidence_coverage_revision:
                                                                                                   version: 1
-                                                                                                  mainSha: cfa32ee06fa43b109da3f8e49f5de664990a38c5
+                                                                                                  mainSha: e90d4b09f15ddeaa740249e249461a0a5c4cda13
                                                                                                   expectedRecord: >
                                                                                                     id: evidence-coverage-ci-judge-served-model
 
@@ -1523,8 +1527,8 @@ evidence_coverage_revision:
                                                                                                       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                                                                                       `ci-judge`, field `servedModel`.
 
-                                                                                                      Coverage: 7/37 joined worker calls (18.9%) in the trailing 7-day window; below
-                                                                                                      the field's 90.0% floor — a chronic gap no baseline excuses.
+                                                                                                      Coverage: 106/478 joined worker calls (22.2%) in the trailing 7-day window;
+                                                                                                      below the field's 90.0% floor — a chronic gap no baseline excuses.
 
                                                                                                       First seen: 2026-10-08T16:51:25.889Z.
 
@@ -1533,18 +1537,35 @@ evidence_coverage_revision:
                                                                                                       lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
                                                                                                       reads), or record why this lane legitimately lacks it. The evidence-coverage
                                                                                                       gardener updates this entry in place while the gap persists.
+
+                                                                                                      Evidence coverage reopened 2026-10-29T17:59:07.863Z: 22.2% (106/478); window
+                                                                                                      2026-10-22T17:59:07.863Z through 2026-10-29T17:59:07.863Z; overrides rejected.
                                                                                                     attachments: []
 
                                                                                                     origin: cli
 
-                                                                                                    status: rejected
+                                                                                                    status: proposed
 
                                                                                                     reply_to: null
 
-                                                                                                    proposal_pr: null
+                                                                                                    proposal_pr: https://github.com/craigoley/remudero/pull/15643
 
-                                                                                                    summary: null
-
+                                                                                                    summary:
+                                                                                                      headline: Restore or justify missing served model evidence
+                                                                                                      what_happened: The `ci-judge` lane records `servedModel` for only 106 of 478
+                                                                                                        worker calls (22.2%) in the latest seven-day window, below the 90% floor.
+                                                                                                        The gap has persisted since October 8 and reopened October 29; overrides
+                                                                                                        were rejected.
+                                                                                                      decision: Restore `servedModel` at the lane’s ledger write site, or document why
+                                                                                                        this lane legitimately lacks the field.
+                                                                                                      options:
+                                                                                                        - label: Restore the field
+                                                                                                          consequence: Record `servedModel` for `ci-judge` worker calls and close the
+                                                                                                            coverage gap.
+                                                                                                          intent: approve
+                                                                                                        - label: Document the exception
+                                                                                                          consequence: Record why `ci-judge` legitimately does not provide `servedModel`.
+                                                                                                          intent: reframe
                                                                                                     expansion: null
 
                                                                                                     submission_key: null
@@ -1552,52 +1573,113 @@ evidence_coverage_revision:
                                                                                                     thread_id: null
 
                                                                                                     answered_by: null
+
+                                                                                                    evidence_coverage_last_reopened: "22.2"
+
+                                                                                                    evidence_coverage_revision:
+                                                                                                      version: 1
+                                                                                                      mainSha: cfa32ee06fa43b109da3f8e49f5de664990a38c5
+                                                                                                      expectedRecord: >
+                                                                                                        id: evidence-coverage-ci-judge-served-model
+
+                                                                                                        ts: 2026-10-08T16:51:28.736Z
+
+                                                                                                        raw: >-
+                                                                                                          Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+                                                                                                          `ci-judge`, field `servedModel`.
+
+                                                                                                          Coverage: 7/37 joined worker calls (18.9%) in the trailing 7-day window; below
+                                                                                                          the field's 90.0% floor — a chronic gap no baseline excuses.
+
+                                                                                                          First seen: 2026-10-08T16:51:25.889Z.
+
+
+                                                                                                          This follow-up never gates a PR or blocks work. Restore the field at the
+                                                                                                          lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+                                                                                                          reads), or record why this lane legitimately lacks it. The evidence-coverage
+                                                                                                          gardener updates this entry in place while the gap persists.
+                                                                                                        attachments: []
+
+                                                                                                        origin: cli
+
+                                                                                                        status: rejected
+
+                                                                                                        reply_to: null
+
+                                                                                                        proposal_pr: null
+
+                                                                                                        summary: null
+
+                                                                                                        expansion: null
+
+                                                                                                        submission_key: null
+
+                                                                                                        thread_id: null
+
+                                                                                                        answered_by: null
+                                                                                                      expectedPlan:
+                                                                                                        plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+                                                                                                        plan/tasks.d: e3c8eaa6813cf0e890d1f94323ce0d0b87be8a05
+                                                                                                      measurement:
+                                                                                                        lane: ci-judge
+                                                                                                        field: servedModel
+                                                                                                        observed: 106
+                                                                                                        denominator: 478
+                                                                                                        floor: 0.9
+                                                                                                        at: 2026-10-29T17:59:07.863Z
+                                                                                                        since: 2026-10-22T17:59:07.863Z
+                                                                                                        line: "Coverage: 106/478 joined worker calls (22.2%) in the trailing 7-day
+                                                                                                          window; below the field's 90.0% floor — a chronic gap no baseline
+                                                                                                          excuses."
+                                                                                                      closure:
+                                                                                                        eligible: true
+                                                                                                        reason: rejected with a measured gap
                                                                                                   expectedPlan:
                                                                                                     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                                                                                    plan/tasks.d: e3c8eaa6813cf0e890d1f94323ce0d0b87be8a05
+                                                                                                    plan/tasks.d: 391aef7817cbca835d4bde7824a85e4f2e36ee08
                                                                                                   measurement:
                                                                                                     lane: ci-judge
                                                                                                     field: servedModel
-                                                                                                    observed: 106
-                                                                                                    denominator: 478
+                                                                                                    observed: 98
+                                                                                                    denominator: 405
                                                                                                     floor: 0.9
-                                                                                                    at: 2026-10-29T17:59:07.863Z
-                                                                                                    since: 2026-10-22T17:59:07.863Z
-                                                                                                    line: "Coverage: 106/478 joined worker calls (22.2%) in the trailing 7-day
+                                                                                                    at: 2026-10-30T07:35:31.215Z
+                                                                                                    since: 2026-10-23T07:35:31.215Z
+                                                                                                    line: "Coverage: 98/405 joined worker calls (24.2%) in the trailing 7-day
                                                                                                       window; below the field's 90.0% floor — a chronic gap no baseline
                                                                                                       excuses."
                                                                                                   closure:
-                                                                                                    eligible: true
-                                                                                                    reason: rejected with a measured gap
+                                                                                                    eligible: false
+                                                                                                    reason: record is open
                                                                                               expectedPlan:
                                                                                                 plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                                                                                plan/tasks.d: 391aef7817cbca835d4bde7824a85e4f2e36ee08
+                                                                                                plan/tasks.d: aca553155ad25a92ff5c4c44170ca314c305b8ea
                                                                                               measurement:
                                                                                                 lane: ci-judge
                                                                                                 field: servedModel
-                                                                                                observed: 98
-                                                                                                denominator: 405
+                                                                                                observed: 95
+                                                                                                denominator: 354
                                                                                                 floor: 0.9
-                                                                                                at: 2026-10-30T07:35:31.215Z
-                                                                                                since: 2026-10-23T07:35:31.215Z
-                                                                                                line: "Coverage: 98/405 joined worker calls (24.2%) in the trailing 7-day
+                                                                                                at: 2026-10-31T04:44:46.001Z
+                                                                                                since: 2026-10-24T04:44:46.001Z
+                                                                                                line: "Coverage: 95/354 joined worker calls (26.8%) in the trailing 7-day
                                                                                                   window; below the field's 90.0% floor — a chronic gap no baseline
                                                                                                   excuses."
                                                                                               closure:
                                                                                                 eligible: false
-                                                                                                reason: record is open
+                                                                                                reason: task W1-T11006 is unknown
                                                                                           expectedPlan:
                                                                                             plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                                                                            plan/tasks.d: aca553155ad25a92ff5c4c44170ca314c305b8ea
+                                                                                            plan/tasks.d: dfa3d2d48298daddc5077700195fef9420ffc109
                                                                                           measurement:
                                                                                             lane: ci-judge
                                                                                             field: servedModel
                                                                                             observed: 95
-                                                                                            denominator: 354
+                                                                                            denominator: 377
                                                                                             floor: 0.9
-                                                                                            at: 2026-10-31T04:44:46.001Z
-                                                                                            since: 2026-10-24T04:44:46.001Z
-                                                                                            line: "Coverage: 95/354 joined worker calls (26.8%) in the trailing 7-day
+                                                                                            at: 2026-10-31T11:12:26.962Z
+                                                                                            since: 2026-10-24T11:12:26.962Z
+                                                                                            line: "Coverage: 95/377 joined worker calls (25.2%) in the trailing 7-day
                                                                                               window; below the field's 90.0% floor — a chronic gap no baseline
                                                                                               excuses."
                                                                                           closure:
@@ -1605,16 +1687,16 @@ evidence_coverage_revision:
                                                                                             reason: task W1-T11006 is unknown
                                                                                       expectedPlan:
                                                                                         plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                                                                        plan/tasks.d: dfa3d2d48298daddc5077700195fef9420ffc109
+                                                                                        plan/tasks.d: 0fa93a69660b55ce08511aee469d7087b9d119de
                                                                                       measurement:
                                                                                         lane: ci-judge
                                                                                         field: servedModel
-                                                                                        observed: 95
-                                                                                        denominator: 377
+                                                                                        observed: 76
+                                                                                        denominator: 347
                                                                                         floor: 0.9
-                                                                                        at: 2026-10-31T11:12:26.962Z
-                                                                                        since: 2026-10-24T11:12:26.962Z
-                                                                                        line: "Coverage: 95/377 joined worker calls (25.2%) in the trailing 7-day
+                                                                                        at: 2026-11-02T07:24:22.683Z
+                                                                                        since: 2026-10-26T07:24:22.683Z
+                                                                                        line: "Coverage: 76/347 joined worker calls (21.9%) in the trailing 7-day
                                                                                           window; below the field's 90.0% floor — a chronic gap no baseline
                                                                                           excuses."
                                                                                       closure:
@@ -1622,16 +1704,16 @@ evidence_coverage_revision:
                                                                                         reason: task W1-T11006 is unknown
                                                                                   expectedPlan:
                                                                                     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                                                                    plan/tasks.d: 0fa93a69660b55ce08511aee469d7087b9d119de
+                                                                                    plan/tasks.d: e8a21f4c24e90469bb3292ed2765b40762e07d78
                                                                                   measurement:
                                                                                     lane: ci-judge
                                                                                     field: servedModel
-                                                                                    observed: 76
-                                                                                    denominator: 347
+                                                                                    observed: 72
+                                                                                    denominator: 336
                                                                                     floor: 0.9
-                                                                                    at: 2026-11-02T07:24:22.683Z
-                                                                                    since: 2026-10-26T07:24:22.683Z
-                                                                                    line: "Coverage: 76/347 joined worker calls (21.9%) in the trailing 7-day
+                                                                                    at: 2026-11-02T14:35:23.804Z
+                                                                                    since: 2026-10-26T14:35:23.804Z
+                                                                                    line: "Coverage: 72/336 joined worker calls (21.4%) in the trailing 7-day
                                                                                       window; below the field's 90.0% floor — a chronic gap no baseline
                                                                                       excuses."
                                                                                   closure:
@@ -1639,49 +1721,49 @@ evidence_coverage_revision:
                                                                                     reason: task W1-T11006 is unknown
                                                                               expectedPlan:
                                                                                 plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                                                                plan/tasks.d: e8a21f4c24e90469bb3292ed2765b40762e07d78
+                                                                                plan/tasks.d: 7ba9e997aed4efb7e7835fc86ce46579e3b749e8
                                                                               measurement:
                                                                                 lane: ci-judge
                                                                                 field: servedModel
-                                                                                observed: 72
-                                                                                denominator: 336
+                                                                                observed: 26
+                                                                                denominator: 289
                                                                                 floor: 0.9
-                                                                                at: 2026-11-02T14:35:23.804Z
-                                                                                since: 2026-10-26T14:35:23.804Z
-                                                                                line: "Coverage: 72/336 joined worker calls (21.4%) in the trailing 7-day
-                                                                                  window; below the field's 90.0% floor — a chronic gap no baseline
-                                                                                  excuses."
+                                                                                at: 2026-11-04T06:10:33.408Z
+                                                                                since: 2026-10-28T06:10:33.408Z
+                                                                                line: "Coverage: 26/289 joined worker calls (9.0%) in the trailing 7-day window;
+                                                                                  below the field's 90.0% floor — a chronic gap no baseline excuses."
                                                                               closure:
                                                                                 eligible: false
                                                                                 reason: task W1-T11006 is unknown
                                                                           expectedPlan:
                                                                             plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                                                            plan/tasks.d: 7ba9e997aed4efb7e7835fc86ce46579e3b749e8
+                                                                            plan/tasks.d: 2239627b1dd86605f1e1d4e08f3e5283bb2ccec5
                                                                           measurement:
                                                                             lane: ci-judge
                                                                             field: servedModel
-                                                                            observed: 26
-                                                                            denominator: 289
+                                                                            observed: 36
+                                                                            denominator: 266
                                                                             floor: 0.9
-                                                                            at: 2026-11-04T06:10:33.408Z
-                                                                            since: 2026-10-28T06:10:33.408Z
-                                                                            line: "Coverage: 26/289 joined worker calls (9.0%) in the trailing 7-day window;
-                                                                              below the field's 90.0% floor — a chronic gap no baseline excuses."
+                                                                            at: 2026-11-06T08:46:53.885Z
+                                                                            since: 2026-10-30T08:46:53.885Z
+                                                                            line: "Coverage: 36/266 joined worker calls (13.5%) in the trailing 7-day
+                                                                              window; below the field's 90.0% floor — a chronic gap no baseline
+                                                                              excuses."
                                                                           closure:
                                                                             eligible: false
                                                                             reason: task W1-T11006 is unknown
                                                                       expectedPlan:
                                                                         plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                                                        plan/tasks.d: 2239627b1dd86605f1e1d4e08f3e5283bb2ccec5
+                                                                        plan/tasks.d: 999fe5226704a6099311f7dbd67d397ed2e13f3f
                                                                       measurement:
                                                                         lane: ci-judge
                                                                         field: servedModel
                                                                         observed: 36
-                                                                        denominator: 266
+                                                                        denominator: 294
                                                                         floor: 0.9
-                                                                        at: 2026-11-06T08:46:53.885Z
-                                                                        since: 2026-10-30T08:46:53.885Z
-                                                                        line: "Coverage: 36/266 joined worker calls (13.5%) in the trailing 7-day
+                                                                        at: 2026-11-07T06:10:59.966Z
+                                                                        since: 2026-10-31T06:10:59.966Z
+                                                                        line: "Coverage: 36/294 joined worker calls (12.2%) in the trailing 7-day
                                                                           window; below the field's 90.0% floor — a chronic gap no baseline
                                                                           excuses."
                                                                       closure:
@@ -1689,16 +1771,16 @@ evidence_coverage_revision:
                                                                         reason: task W1-T11006 is unknown
                                                                   expectedPlan:
                                                                     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                                                    plan/tasks.d: 999fe5226704a6099311f7dbd67d397ed2e13f3f
+                                                                    plan/tasks.d: 8414346dcfa3464c122d7cec7688b74ec2b1d516
                                                                   measurement:
                                                                     lane: ci-judge
                                                                     field: servedModel
                                                                     observed: 36
-                                                                    denominator: 294
+                                                                    denominator: 284
                                                                     floor: 0.9
-                                                                    at: 2026-11-07T06:10:59.966Z
-                                                                    since: 2026-10-31T06:10:59.966Z
-                                                                    line: "Coverage: 36/294 joined worker calls (12.2%) in the trailing 7-day
+                                                                    at: 2026-11-07T12:25:59.947Z
+                                                                    since: 2026-10-31T12:25:59.947Z
+                                                                    line: "Coverage: 36/284 joined worker calls (12.7%) in the trailing 7-day
                                                                       window; below the field's 90.0% floor — a chronic gap no baseline
                                                                       excuses."
                                                                   closure:
@@ -1706,97 +1788,97 @@ evidence_coverage_revision:
                                                                     reason: task W1-T11006 is unknown
                                                               expectedPlan:
                                                                 plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                                                plan/tasks.d: 8414346dcfa3464c122d7cec7688b74ec2b1d516
+                                                                plan/tasks.d: c61e5b2d8b470ca45b44dd3797e2e563d37b1ba8
                                                               measurement:
                                                                 lane: ci-judge
                                                                 field: servedModel
-                                                                observed: 36
-                                                                denominator: 284
+                                                                observed: 9
+                                                                denominator: 137
                                                                 floor: 0.9
-                                                                at: 2026-11-07T12:25:59.947Z
-                                                                since: 2026-10-31T12:25:59.947Z
-                                                                line: "Coverage: 36/284 joined worker calls (12.7%) in the trailing 7-day
-                                                                  window; below the field's 90.0% floor — a chronic gap no baseline
-                                                                  excuses."
+                                                                at: 2026-11-09T02:20:22.244Z
+                                                                since: 2026-11-02T02:20:22.244Z
+                                                                line: "Coverage: 9/137 joined worker calls (6.6%) in the trailing 7-day window;
+                                                                  below the field's 90.0% floor — a chronic gap no baseline excuses."
                                                               closure:
                                                                 eligible: false
                                                                 reason: task W1-T11006 is unknown
                                                           expectedPlan:
                                                             plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                                            plan/tasks.d: c61e5b2d8b470ca45b44dd3797e2e563d37b1ba8
+                                                            plan/tasks.d: 055cd0013370175d28ba95a3d85a052dbfa17c89
                                                           measurement:
                                                             lane: ci-judge
                                                             field: servedModel
                                                             observed: 9
-                                                            denominator: 137
+                                                            denominator: 153
                                                             floor: 0.9
-                                                            at: 2026-11-09T02:20:22.244Z
-                                                            since: 2026-11-02T02:20:22.244Z
-                                                            line: "Coverage: 9/137 joined worker calls (6.6%) in the trailing 7-day window;
+                                                            at: 2026-11-09T08:29:32.579Z
+                                                            since: 2026-11-02T08:29:32.579Z
+                                                            line: "Coverage: 9/153 joined worker calls (5.9%) in the trailing 7-day window;
                                                               below the field's 90.0% floor — a chronic gap no baseline excuses."
                                                           closure:
                                                             eligible: false
                                                             reason: task W1-T11006 is unknown
                                                       expectedPlan:
                                                         plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                                        plan/tasks.d: 055cd0013370175d28ba95a3d85a052dbfa17c89
+                                                        plan/tasks.d: c854a340633f6a0ef92bfef44767dc27f3b11fcd
                                                       measurement:
                                                         lane: ci-judge
                                                         field: servedModel
                                                         observed: 9
-                                                        denominator: 153
+                                                        denominator: 175
                                                         floor: 0.9
-                                                        at: 2026-11-09T08:29:32.579Z
-                                                        since: 2026-11-02T08:29:32.579Z
-                                                        line: "Coverage: 9/153 joined worker calls (5.9%) in the trailing 7-day window;
+                                                        at: 2026-11-09T14:30:04.016Z
+                                                        since: 2026-11-02T14:30:04.016Z
+                                                        line: "Coverage: 9/175 joined worker calls (5.1%) in the trailing 7-day window;
                                                           below the field's 90.0% floor — a chronic gap no baseline excuses."
                                                       closure:
                                                         eligible: false
                                                         reason: task W1-T11006 is unknown
                                                   expectedPlan:
                                                     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                                    plan/tasks.d: c854a340633f6a0ef92bfef44767dc27f3b11fcd
+                                                    plan/tasks.d: 721aed91c1761612d2914a48ffc20918c5b9eb0a
                                                   measurement:
                                                     lane: ci-judge
                                                     field: servedModel
                                                     observed: 9
-                                                    denominator: 175
+                                                    denominator: 203
                                                     floor: 0.9
-                                                    at: 2026-11-09T14:30:04.016Z
-                                                    since: 2026-11-02T14:30:04.016Z
-                                                    line: "Coverage: 9/175 joined worker calls (5.1%) in the trailing 7-day window;
+                                                    at: 2026-11-09T20:41:48.053Z
+                                                    since: 2026-11-02T20:41:48.053Z
+                                                    line: "Coverage: 9/203 joined worker calls (4.4%) in the trailing 7-day window;
                                                       below the field's 90.0% floor — a chronic gap no baseline excuses."
                                                   closure:
                                                     eligible: false
                                                     reason: task W1-T11006 is unknown
                                               expectedPlan:
                                                 plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                                plan/tasks.d: 721aed91c1761612d2914a48ffc20918c5b9eb0a
+                                                plan/tasks.d: 8f2c78d44495f455711c601d52b000be4f70b7f1
                                               measurement:
                                                 lane: ci-judge
                                                 field: servedModel
-                                                observed: 9
-                                                denominator: 203
+                                                observed: 180
+                                                denominator: 443
                                                 floor: 0.9
-                                                at: 2026-11-09T20:41:48.053Z
-                                                since: 2026-11-02T20:41:48.053Z
-                                                line: "Coverage: 9/203 joined worker calls (4.4%) in the trailing 7-day window;
-                                                  below the field's 90.0% floor — a chronic gap no baseline excuses."
+                                                at: 2026-11-10T21:09:01.108Z
+                                                since: 2026-11-03T21:09:01.108Z
+                                                line: "Coverage: 180/443 joined worker calls (40.6%) in the trailing 7-day
+                                                  window; below the field's 90.0% floor — a chronic gap no baseline
+                                                  excuses."
                                               closure:
                                                 eligible: false
                                                 reason: task W1-T11006 is unknown
                                           expectedPlan:
                                             plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                            plan/tasks.d: 8f2c78d44495f455711c601d52b000be4f70b7f1
+                                            plan/tasks.d: 9f889e3a6759f0ee1e70a898197f15bcd1103d77
                                           measurement:
                                             lane: ci-judge
                                             field: servedModel
-                                            observed: 180
-                                            denominator: 443
+                                            observed: 420
+                                            denominator: 640
                                             floor: 0.9
-                                            at: 2026-11-10T21:09:01.108Z
-                                            since: 2026-11-03T21:09:01.108Z
-                                            line: "Coverage: 180/443 joined worker calls (40.6%) in the trailing 7-day
+                                            at: 2026-11-12T14:10:35.081Z
+                                            since: 2026-11-05T14:10:35.081Z
+                                            line: "Coverage: 420/640 joined worker calls (65.6%) in the trailing 7-day
                                               window; below the field's 90.0% floor — a chronic gap no baseline
                                               excuses."
                                           closure:
@@ -1804,16 +1886,16 @@ evidence_coverage_revision:
                                             reason: task W1-T11006 is unknown
                                       expectedPlan:
                                         plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                        plan/tasks.d: 9f889e3a6759f0ee1e70a898197f15bcd1103d77
+                                        plan/tasks.d: 5a24cf9db945ffa98083612b8448505fe74259c0
                                       measurement:
                                         lane: ci-judge
                                         field: servedModel
-                                        observed: 420
-                                        denominator: 640
+                                        observed: 454
+                                        denominator: 720
                                         floor: 0.9
-                                        at: 2026-11-12T14:10:35.081Z
-                                        since: 2026-11-05T14:10:35.081Z
-                                        line: "Coverage: 420/640 joined worker calls (65.6%) in the trailing 7-day
+                                        at: 2026-11-14T10:59:21.278Z
+                                        since: 2026-11-07T10:59:21.278Z
+                                        line: "Coverage: 454/720 joined worker calls (63.1%) in the trailing 7-day
                                           window; below the field's 90.0% floor — a chronic gap no baseline
                                           excuses."
                                       closure:
@@ -1821,16 +1903,16 @@ evidence_coverage_revision:
                                         reason: task W1-T11006 is unknown
                                   expectedPlan:
                                     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                    plan/tasks.d: 5a24cf9db945ffa98083612b8448505fe74259c0
+                                    plan/tasks.d: 4eb612098e36942ad303105c0a12f2bc73ede9fc
                                   measurement:
                                     lane: ci-judge
                                     field: servedModel
                                     observed: 454
-                                    denominator: 720
+                                    denominator: 757
                                     floor: 0.9
-                                    at: 2026-11-14T10:59:21.278Z
-                                    since: 2026-11-07T10:59:21.278Z
-                                    line: "Coverage: 454/720 joined worker calls (63.1%) in the trailing 7-day
+                                    at: 2026-11-14T23:52:58.348Z
+                                    since: 2026-11-07T23:52:58.348Z
+                                    line: "Coverage: 454/757 joined worker calls (60.0%) in the trailing 7-day
                                       window; below the field's 90.0% floor — a chronic gap no baseline
                                       excuses."
                                   closure:
@@ -1838,16 +1920,16 @@ evidence_coverage_revision:
                                     reason: task W1-T11006 is unknown
                               expectedPlan:
                                 plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                plan/tasks.d: 4eb612098e36942ad303105c0a12f2bc73ede9fc
+                                plan/tasks.d: be3bf22a44aa36f148f91137d2ed351acfb2bb75
                               measurement:
                                 lane: ci-judge
                                 field: servedModel
-                                observed: 454
-                                denominator: 757
+                                observed: 465
+                                denominator: 777
                                 floor: 0.9
-                                at: 2026-11-14T23:52:58.348Z
-                                since: 2026-11-07T23:52:58.348Z
-                                line: "Coverage: 454/757 joined worker calls (60.0%) in the trailing 7-day
+                                at: 2026-11-15T12:22:06.571Z
+                                since: 2026-11-08T12:22:06.571Z
+                                line: "Coverage: 465/777 joined worker calls (59.8%) in the trailing 7-day
                                   window; below the field's 90.0% floor — a chronic gap no baseline
                                   excuses."
                               closure:
@@ -1855,16 +1937,16 @@ evidence_coverage_revision:
                                 reason: task W1-T11006 is unknown
                           expectedPlan:
                             plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                            plan/tasks.d: be3bf22a44aa36f148f91137d2ed351acfb2bb75
+                            plan/tasks.d: 70ee01fb4624b7bef5094232f01c86ffee8824df
                           measurement:
                             lane: ci-judge
                             field: servedModel
-                            observed: 465
-                            denominator: 777
+                            observed: 449
+                            denominator: 776
                             floor: 0.9
-                            at: 2026-11-15T12:22:06.571Z
-                            since: 2026-11-08T12:22:06.571Z
-                            line: "Coverage: 465/777 joined worker calls (59.8%) in the trailing 7-day
+                            at: 2026-11-16T12:27:43.330Z
+                            since: 2026-11-09T12:27:43.330Z
+                            line: "Coverage: 449/776 joined worker calls (57.9%) in the trailing 7-day
                               window; below the field's 90.0% floor — a chronic gap no baseline
                               excuses."
                           closure:
@@ -1872,16 +1954,16 @@ evidence_coverage_revision:
                             reason: task W1-T11006 is unknown
                       expectedPlan:
                         plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                        plan/tasks.d: 70ee01fb4624b7bef5094232f01c86ffee8824df
+                        plan/tasks.d: b3e0437299ae72b33d5843c52ac676c32cee24c2
                       measurement:
                         lane: ci-judge
                         field: servedModel
-                        observed: 449
-                        denominator: 776
+                        observed: 462
+                        denominator: 815
                         floor: 0.9
-                        at: 2026-11-16T12:27:43.330Z
-                        since: 2026-11-09T12:27:43.330Z
-                        line: "Coverage: 449/776 joined worker calls (57.9%) in the trailing 7-day
+                        at: 2026-11-17T09:35:10.871Z
+                        since: 2026-11-10T09:35:10.871Z
+                        line: "Coverage: 462/815 joined worker calls (56.7%) in the trailing 7-day
                           window; below the field's 90.0% floor — a chronic gap no baseline
                           excuses."
                       closure:
@@ -1889,16 +1971,16 @@ evidence_coverage_revision:
                         reason: task W1-T11006 is unknown
                   expectedPlan:
                     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                    plan/tasks.d: b3e0437299ae72b33d5843c52ac676c32cee24c2
+                    plan/tasks.d: 86b4199647db308bf5057ddc507686f979344b7e
                   measurement:
                     lane: ci-judge
                     field: servedModel
-                    observed: 462
-                    denominator: 815
+                    observed: 472
+                    denominator: 965
                     floor: 0.9
-                    at: 2026-11-17T09:35:10.871Z
-                    since: 2026-11-10T09:35:10.871Z
-                    line: "Coverage: 462/815 joined worker calls (56.7%) in the trailing 7-day
+                    at: 2026-11-20T04:28:27.876Z
+                    since: 2026-11-13T04:28:27.876Z
+                    line: "Coverage: 472/965 joined worker calls (48.9%) in the trailing 7-day
                       window; below the field's 90.0% floor — a chronic gap no baseline
                       excuses."
                   closure:
@@ -1906,16 +1988,16 @@ evidence_coverage_revision:
                     reason: task W1-T11006 is unknown
               expectedPlan:
                 plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                plan/tasks.d: 86b4199647db308bf5057ddc507686f979344b7e
+                plan/tasks.d: 3d4ebb2ea3e096baf3d44dbd4fe0b714895ca105
               measurement:
                 lane: ci-judge
                 field: servedModel
-                observed: 472
-                denominator: 965
+                observed: 574
+                denominator: 1031
                 floor: 0.9
-                at: 2026-11-20T04:28:27.876Z
-                since: 2026-11-13T04:28:27.876Z
-                line: "Coverage: 472/965 joined worker calls (48.9%) in the trailing 7-day
+                at: 2026-11-21T08:48:11.171Z
+                since: 2026-11-14T08:48:11.171Z
+                line: "Coverage: 574/1031 joined worker calls (55.7%) in the trailing 7-day
                   window; below the field's 90.0% floor — a chronic gap no baseline
                   excuses."
               closure:
@@ -1923,16 +2005,16 @@ evidence_coverage_revision:
                 reason: task W1-T11006 is unknown
           expectedPlan:
             plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-            plan/tasks.d: 3d4ebb2ea3e096baf3d44dbd4fe0b714895ca105
+            plan/tasks.d: f674dac17e7f102872ecbd0c1b1ed513e3fa721b
           measurement:
             lane: ci-judge
             field: servedModel
-            observed: 574
-            denominator: 1031
+            observed: 828
+            denominator: 1231
             floor: 0.9
-            at: 2026-11-21T08:48:11.171Z
-            since: 2026-11-14T08:48:11.171Z
-            line: "Coverage: 574/1031 joined worker calls (55.7%) in the trailing 7-day
+            at: 2026-11-22T19:29:10.142Z
+            since: 2026-11-15T19:29:10.142Z
+            line: "Coverage: 828/1231 joined worker calls (67.3%) in the trailing 7-day
               window; below the field's 90.0% floor — a chronic gap no baseline
               excuses."
           closure:
@@ -1940,38 +2022,38 @@ evidence_coverage_revision:
             reason: task W1-T11006 is unknown
       expectedPlan:
         plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-        plan/tasks.d: f674dac17e7f102872ecbd0c1b1ed513e3fa721b
+        plan/tasks.d: 0cbfce743242697b15eed6887025a2c6ff82c297
       measurement:
         lane: ci-judge
         field: servedModel
-        observed: 828
-        denominator: 1231
+        observed: 1596
+        denominator: 1943
         floor: 0.9
-        at: 2026-11-22T19:29:10.142Z
-        since: 2026-11-15T19:29:10.142Z
-        line: "Coverage: 828/1231 joined worker calls (67.3%) in the trailing 7-day
+        at: 2026-11-24T21:53:07.150Z
+        since: 2026-11-17T21:53:07.150Z
+        line: "Coverage: 1596/1943 joined worker calls (82.1%) in the trailing 7-day
           window; below the field's 90.0% floor — a chronic gap no baseline
           excuses."
       closure:
-        eligible: false
-        reason: task W1-T11006 is unknown
+        eligible: true
+        reason: complete plan has no referenced tasks
+        completePlan: true
+        tasks: []
+        pr: https://github.com/craigoley/remudero/pull/15643
   expectedPlan:
     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-    plan/tasks.d: 0cbfce743242697b15eed6887025a2c6ff82c297
+    plan/tasks.d: 9eed10e7e3123114ef897dec9acd5cea99ed9b34
   measurement:
     lane: ci-judge
     field: servedModel
-    observed: 1596
-    denominator: 1943
+    observed: 1683
+    denominator: 1992
     floor: 0.9
-    at: 2026-11-24T21:53:07.150Z
-    since: 2026-11-17T21:53:07.150Z
-    line: "Coverage: 1596/1943 joined worker calls (82.1%) in the trailing 7-day
+    at: 2026-11-25T19:43:22.109Z
+    since: 2026-11-18T19:43:22.109Z
+    line: "Coverage: 1683/1992 joined worker calls (84.5%) in the trailing 7-day
       window; below the field's 90.0% floor — a chronic gap no baseline
       excuses."
   closure:
-    eligible: true
-    reason: complete plan has no referenced tasks
-    completePlan: true
-    tasks: []
-    pr: https://github.com/craigoley/remudero/pull/15643
+    eligible: false
+    reason: record is open
