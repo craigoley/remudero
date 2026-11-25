@@ -26,6 +26,10 @@ export interface DispatchValueTask {
   files?: string[];
   /** W1-T9323: dispatch priority (smaller outranks); absent ranks lowest. It weights the cost-of-delay urgency ({@link dispatchUrgency}). */
   priority?: number;
+  /** W1-T14643: a record held until an operator answers a question; its wait is the operator's, not the schedule's. */
+  needs_input?: unknown;
+  /** W1-T14643: `human` records are parked for an operator and never dispatched by the machine. */
+  verify?: string;
 }
 
 /** Precomputed evidence consumed by the otherwise-pure dispatch comparator. */
@@ -89,7 +93,7 @@ export interface TierWait {
   readonly wait_ms: number;
   readonly events: number;
   readonly censored: number;
-  readonly source: "own" | "pooled" | "pooled-lower-bound";
+  readonly source: "own" | "shrunk" | "pooled" | "pooled-lower-bound";
   readonly bound?: "lower";
 }
 
@@ -201,6 +205,16 @@ function censoredMedianWaitMs(events: readonly number[], censored: readonly numb
   }
   return undefined;
 }
+
+/**
+ * W1-T14643: pseudo-samples of neighbouring-tier evidence each tier starts from. A tier's own median keeps
+ * `n / (n + K)` of the estimate for `n` waits (started plus censored); the rest is its neighbours' medians.
+ */
+export const TIER_WAIT_NEIGHBOUR_WEIGHT = 4;
+
+/** W1-T14643: a record held on operator input waits on the operator, so its age is not a censored wait. */
+const heldOnOperatorInput = (task: Pick<DispatchValueTask, "needs_input" | "verify">): boolean =>
+  (task.needs_input !== undefined && task.needs_input !== null) || task.verify === "human";
 
 /** A tier's sort key: its declared priority, or +Infinity for the absent-priority tier below every declared one. */
 const tierKey = (task: Pick<DispatchValueTask, "priority">): number =>
@@ -668,7 +682,7 @@ function costOfDelayContext(
     if (key !== undefined) sampleOf(key).events.push(at - filedAt);
   }
   for (const task of tasks) {
-    if (!openIds.has(task.id)) continue;
+    if (!openIds.has(task.id) || heldOnOperatorInput(task)) continue;
     const sample = sampleOf(tierKey(task));
     const filedAt = snapshot.filedAtByTaskId.get(task.id);
     // Censored only when no start follows its filing. Filed before the window's earliest row, a task may have
@@ -684,11 +698,23 @@ function costOfDelayContext(
   if (!(pooledWaitMs > 0)) return { kind: "refused", reasons: ["no-wait-evidence"] };
   const costOfDelayTierWaits: TierWait[] = [];
   const unitByTier = new Map<number, number>();
-  let envelope = 0;
-  for (const [key, sample] of [...byTier].sort(([a], [b]) => a - b)) {
+  const tiers = [...byTier].sort(([a], [b]) => a - b).map(([key, sample]) => {
     const own = censoredMedianWaitMs(sample.events, sample.censored);
-    const source = own !== undefined && own > 0 ? "own" : pooledMedian !== undefined ? "pooled" : "pooled-lower-bound";
-    const waitMs = source === "own" ? own as number : pooledWaitMs;
+    return { key, sample, own: own !== undefined && own > 0 ? own : undefined, n: sample.events.length + sample.censored.length };
+  });
+  let envelope = 0;
+  tiers.forEach(({ key, sample, own, n }, index) => {
+    // W1-T14643: a tier's own median is shrunk toward its adjacent tiers' own medians, each weighted by its
+    // sample, in proportion to how few waits the tier itself holds, so one stale sample cannot set a tier's unit.
+    const neighbours = [tiers[index - 1], tiers[index + 1]].filter((t): t is (typeof tiers)[number] => t !== undefined && t.own !== undefined && t.n > 0);
+    const neighbourN = neighbours.reduce((sum, t) => sum + t.n, 0);
+    // A neighbour is itself read through its sample size, so a sparse one reverts to the pooled wait.
+    const neighbourMs = neighbourN === 0 ? 0 : neighbours.reduce((sum, t) =>
+      sum + (t.n / (t.n + TIER_WAIT_NEIGHBOUR_WEIGHT) * (t.own as number) + TIER_WAIT_NEIGHBOUR_WEIGHT / (t.n + TIER_WAIT_NEIGHBOUR_WEIGHT) * pooledWaitMs) * t.n, 0) / neighbourN;
+    const keep = n / (n + TIER_WAIT_NEIGHBOUR_WEIGHT);
+    const shrunk = own !== undefined && neighbourN > 0;
+    const source = own === undefined ? (pooledMedian !== undefined ? "pooled" : "pooled-lower-bound") : shrunk ? "shrunk" : "own";
+    const waitMs = own === undefined ? pooledWaitMs : shrunk ? keep * own + (1 - keep) * neighbourMs : own;
     costOfDelayTierWaits.push({
       priority: Number.isFinite(key) ? key : null, wait_ms: waitMs, events: sample.events.length, censored: sample.censored.length,
       source, ...(source === "pooled-lower-bound" ? { bound: "lower" as const } : {}),
@@ -696,7 +722,7 @@ function costOfDelayContext(
     // A lower tier ages in the largest wait at or above it, so it never closes a gap faster than a higher tier waits.
     envelope = Math.max(envelope, waitMs);
     unitByTier.set(key, envelope);
-  }
+  });
   // Priority weights the urgency (it is not a one-rank head start); an absent priority is the lowest tier.
   const open = tasks.filter(task => openIds.has(task.id)).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const tierOf = priorityTiers(open);
