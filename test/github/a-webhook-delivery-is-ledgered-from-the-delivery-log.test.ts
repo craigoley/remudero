@@ -100,7 +100,7 @@ test("W1-T14881 criterion 1: a pass ledgers one github.delivery row per new deli
   assert.deepEqual(deliveryIds(rows), [id(4), id(5), id(6)], "a later pass pages back to its cursor and stops there");
 });
 
-test("W1-T14881 criterion 2: invariant:cursor-resumes — a second pass after a restart ledgers no delivery twice and skips none", async (t) => {
+test("W1-T14881 criterion 2: a second pass after a restart ledgers no delivery twice and skips none (invariant:cursor-resumes)", async (t) => {
   const { stateDir, rows, log } = scene(t);
   const up = deliveryLog(3);
   for (let n = 1; n <= 3; n++) up.add(n);
