@@ -35,7 +35,10 @@ function read(t: TestContext, rmdBody: string[]): { status: number | null; out: 
   writeFileSync(join(code, "bin", "rmd"), ["#!/usr/bin/env bash", ...rmdBody, ""].join("\n"));
   chmodSync(join(code, "bin", "rmd"), 0o755);
   writeFileSync(join(root, "ladder.sh"), ladder());
+  // The launcher runs under `set -euo pipefail`, so the ladder is sourced under it too: a pipeline in it that
+  // returns non-zero aborts the launcher there, and must abort this harness the same way.
   const r = spawnSync("bash", ["-c", [
+    "set -euo pipefail",
     `STATE_DIR="${join(root, "state")}"; REVIVAL_LOG="${join(root, "revivals.log")}"; DAEMON_CODE="${code}"`,
     "daemon_code_resolve() { :; }",
     `. "${join(root, "ladder.sh")}"`,
@@ -52,14 +55,23 @@ test("W1-T14732 an unreadable progress verdict names the exit code and the last 
   assert.match(r.err, /rmd-relaunch: progress-watchdog -- verdict unreadable \(exit 3: RangeError: Invalid string length\); acting as before\./);
   assert.deepEqual(r.tmp, [], "the stderr capture is removed");
 
+  // An empty capture (a timeout writes no stderr) must not abort the strict launcher before the line is written.
   const slow = read(t, ["exit 124"]);
+  assert.equal(slow.status, 0, slow.err);
+  assert.match(slow.out, /^rc=0 state=\[\] action=\[\] verdict=\[\]$/m);
   assert.match(slow.err, /verdict unreadable \(exit 124, timed out: no stderr\)/);
+  assert.deepEqual(slow.tmp, [], "an empty stderr capture is removed too");
 });
 
 test("W1-T14732 an unreadable progress verdict still sets no state or action", async (t) => {
   const r = read(t, ["echo boom >&2", "exit 1"]);
   assert.equal(r.status, 0, r.err);
   assert.match(r.out, /^rc=0 state=\[\] action=\[\] verdict=\[\]$/m);
+  // A verb that fails silently under the strict launcher still sets nothing and returns 0.
+  const silent = read(t, ["exit 2"]);
+  assert.equal(silent.status, 0, silent.err);
+  assert.match(silent.out, /^rc=0 state=\[\] action=\[\] verdict=\[\]$/m);
+  assert.match(silent.err, /verdict unreadable \(exit 2: no stderr\); acting as before\./);
   // The unreadable verdict that sets nothing is the named one, and its capture is removed with it.
   assert.match(r.err, /verdict unreadable \(exit 1: boom\); acting as before\./);
   assert.deepEqual(r.tmp, []);

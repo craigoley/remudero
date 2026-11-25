@@ -773,7 +773,7 @@ read_progress_verdict() {
   rc=0
   out="$(cd "$code" && RMD_SELF_SYNC_DONE=1 RMD_REVIVAL_LOG="$REVIVAL_LOG" ${tmo[@]+"${tmo[@]}"} "$rmd" progress-watchdog --json --state-root "$STATE_DIR/state" 2>"$errfile")" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    err="$(grep -v '^[[:space:]]*$' "$errfile" 2>/dev/null | tail -n 1)"
+    err="$(grep -v '^[[:space:]]*$' "$errfile" 2>/dev/null | tail -n 1 || true)"
     [ "$errfile" = /dev/null ] || rm -f -- "$errfile"
     echo "rmd-relaunch: progress-watchdog -- verdict unreadable (exit ${rc}$([ "$rc" -eq 124 ] && echo ', timed out'): ${err:-no stderr}); acting as before." >&2
     return 0
