@@ -3067,6 +3067,54 @@ jobs:
     steps:
       - run: echo "runs as a step of the commitlint job now — see W1-T4399"
 
+  bash32-cache-seed:
+    # W1-T14703 (W1-T11263 follow-up): the ONE writer of the bash 3.2 build cache. ci-shard, test-slow-shard
+    # and coverage-shard restore it and never save (CodeQL cache poisoning: they run PR code and download
+    # artifacts). This job runs only on a push to main, checks out nothing, downloads no artifact, and saves
+    # a build of the sha256-verified GNU tarball. PR runs may restore a cache written on the default branch.
+    # No job-level if: (only the PR guard may sit there), so each step carries the push-to-main gate and the
+    # job is a no-op on a pull request.
+    name: bash32-cache-seed
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Restore the pinned bash 3.2 build (W1-T11263)
+        id: bash32-cache
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bash32
+          key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}
+      - name: Build the pinned bash 3.2 from GNU source on a cache miss (W1-T11263)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bash32-cache.outputs.cache-hit != 'true' }}
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/bash32"
+          SRC="$RUNNER_TEMP/bash32-src"
+          mkdir -p "$SRC" "$OUT"
+          curl --fail --silent --show-error --location --retry 3 --output "$SRC/bash-3.2.tar.gz" https://ftp.gnu.org/gnu/bash/bash-3.2.tar.gz
+          echo "${BASH32_SHA256}  $SRC/bash-3.2.tar.gz" | sha256sum --check --strict
+          tar -xzf "$SRC/bash-3.2.tar.gz" -C "$SRC"
+          cd "$SRC/bash-3.2"
+          BASH32_CFLAGS="-O2 -std=gnu89 -fpermissive -Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=incompatible-pointer-types -Wno-error=int-conversion"
+          ./configure --quiet --without-bash-malloc CC="gcc -std=gnu89 -fpermissive" CFLAGS="$BASH32_CFLAGS" CFLAGS_FOR_BUILD="$BASH32_CFLAGS"
+          make -s
+          cp bash "$OUT/bash"
+          VERSION="$("$OUT/bash" --version | sed -n 1p)"
+          if ! printf '%s' "$VERSION" | grep -q 'version 3\.2\.'; then
+            echo "::error::W1-T11263: $OUT/bash reports '${VERSION}', not bash 3.2."
+            exit 1
+          fi
+          echo "W1-T11263: built $OUT/bash (${VERSION}) for the cache."
+      - name: Save the pinned bash 3.2 build (W1-T11263)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bash32-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bash32
+          key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}
+
   ci-gate:
     # W1-T4400 — THE REQUIRED AGGREGATE, WITHOUT HOLDING A RUNNER. ci-gate.yml's pull_request job used
     # to start with this workflow and poll until every required check finished: a waiter billed for
@@ -3089,7 +3137,7 @@ jobs:
     # is empty. FALSIFIER: test/the-ci-gate-reports-on-the-merge-group-commit.test.ts.
     name: ci-gate
     runs-on: ubuntu-26.04
-    needs: [squash-trailer-gate, ci, flake-screen, flake-retry-aggregate, ci-required, test-slow-plan, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ledger, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic]
+    needs: [squash-trailer-gate, ci, flake-screen, flake-retry-aggregate, ci-required, test-slow-plan, test-slow-shard, test-slow, commitlint, leak-grep, coverage-ledger, coverage-ratchet, coverage-ratchet-required, mutation-ratchet, learnings-budget-ratchet, jscpd-gate, claims, assertion-discrimination, lint-plan, depcruise, containment-probe, api-client-drift, no-hand-rolled-fetch, prompt-surface-gate, task-id-existence, source-size, comment-load-ratchet, baseline-monotonic, bash32-cache-seed]
     # `always()` must still aggregate a FAILED dependency, but alone it also survives normal
     # cancellation and keeps a superseded PR run's concurrency slot occupied (W1-T4604).
     # GitHub re-evaluates this job condition when cancelling: the second arm releases that run.

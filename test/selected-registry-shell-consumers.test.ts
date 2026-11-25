@@ -770,6 +770,10 @@ test("selected shell revisions invalidate generated child and heartbeat observat
   assert.equal(run(source).reason, "digest_mismatch", "exact restoration refuses the revision again");
 });
 
+/** W1-T14778 removed the refresh's GitHub page bound on purpose. The pinned old revision still passes
+ *  `--max-pages 24`, and that one argument is the only effect in which the two versions may differ. */
+const withoutRetiredPageBound = (call: string) => call.replace(" --max-pages 24 ", " ");
+
 test("selected shell qualification preserves mixed version legacy effects", t => {
   const f = refreshFixture(t);
   const pinned = join(REPO_ROOT, "test/fixtures/selected-registry-old");
@@ -791,7 +795,7 @@ test("selected shell qualification preserves mixed version legacy effects", t =>
     const bytes = readFileSync(script);
     const blob = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
     assert.ok(calls.at(-1)?.endsWith(`--refresh-script-blob ${blob}`), "each version reports its own actual script blob");
-    return calls.map(call => call.replace(`--refresh-script-blob ${blob}`, "--refresh-script-blob VERIFIED_VERSION"));
+    return calls.map(call => withoutRetiredPageBound(call.replace(`--refresh-script-blob ${blob}`, "--refresh-script-blob VERIFIED_VERSION")));
   };
   assert.deepEqual(withoutVersionReceipt(old.calls, join(pinned, "deploy/field-trials-refresh.sh")),
     withoutVersionReceipt(before.calls, join(REPO_ROOT, "deploy/field-trials-refresh.sh")),
@@ -888,7 +892,7 @@ test("bash 3.2 runs the old and maintained shell consumers and launchers with un
     const bytes = readFileSync(script);
     const blob = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
     assert.ok(calls.at(-1)?.endsWith(`--refresh-script-blob ${blob}`), "each version reports its own actual script blob");
-    return calls.map(call => call.replace(`--refresh-script-blob ${blob}`, "--refresh-script-blob VERIFIED_VERSION"));
+    return calls.map(call => withoutRetiredPageBound(call.replace(`--refresh-script-blob ${blob}`, "--refresh-script-blob VERIFIED_VERSION")));
   };
   for (const script of [join(pinned, "deploy/field-trials-refresh.sh"), join(REPO_ROOT, "deploy/field-trials-refresh.sh")]) {
     const result = f.run([], script, historical.shell, historical.env);

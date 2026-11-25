@@ -1902,6 +1902,13 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
       "entry uses one local committed ledger, with no independent network choice per shard",
   },
   {
+    job: "bash32-cache-seed",
+    mirrored: false,
+    reason:
+      "W1-T14703 (W1-T11263 follow-up) — GitHub-only push-to-main writer of the pinned bash 3.2 build cache; " +
+      "it runs no test and has no local equivalent",
+  },
+  {
     job: "coverage-ratchet",
     mirrored: true,
     run: (repoRoot, spawn, coverageFreeBytes = undefined, coverageLockDiscriminator = undefined, testSlot = undefined, coverageResources = undefined) => {

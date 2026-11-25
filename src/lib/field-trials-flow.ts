@@ -33,14 +33,15 @@ import { buildModelFieldNoteCandidate, FIELD_NOTE_WINDOWS_VERSION, parseFieldNot
   type AdoptionSelectedCell, type FieldNoteWindow, type FieldNoteWindows } from "./field-trials-field-note.js";
 export type { AdoptionSelectedCell } from "./field-trials-field-note.js";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
-import { fixedClock, systemClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
+import { quarantinedLedgerFingerprints } from "./field-trials-ledger-quarantine.js";
 import { loadConfig } from "./config.js";
 import { ghInteractiveRead } from "./github-transport.js";
 import { syncFieldNoteSiteImport, type FieldNoteExport, type SiteImportOutcome, type SiteRelease } from "./field-trials-site-import.js";
 import { BENCHMARK_PAID_PILOT_VERSION, loadPaidPilotProtocol } from "./benchmark-paid-pilot.js";
 import { parseRefreshSteps, recordFieldTrialsRefresh, refreshSection, type FieldTrialsRefresh, type RefreshStep } from "./field-trials-refresh.js";
 import type { IssueGateway } from "./escalate.js";
-import { DEFAULT_MAX_PAGES, ghApiFetch, ingestFieldTrialsGithub, observedCurrentHeadGreen, parseGithubStore, RUN_BRANCH_RE,
+import { ingestFieldTrialsGithub, pacedGhApiFetch, observedCurrentHeadGreen, parseGithubStore, RUN_BRANCH_RE,
   type FieldTrialsGithubPass, type FieldTrialsGithubStore, type GithubCursor, type GithubPageFetch,
   type GithubPull, type GithubRepoStore } from "./field-trials-github.js";
 import { fingerprintLedgerLine, ledgerLivePath, ledgerRotationEntries, openLedgerUnion, readLedgerUnionRecords } from "./ledger-union.js";
@@ -276,6 +277,9 @@ export interface FieldTrialsLedgerRead {
   malformedRows: number;
   duplicateRows: number;
   futureRows: number;
+  /** W1-T14781: rows skipped by name from the reviewed quarantine; present only when one matched. */
+  quarantinedRows?: number;
+  quarantinedFingerprints?: string[];
   /** Absent in historical v1 snapshots; absence is not a measured zero. */
   invalidTimestampRows?: number;
   unreadSources: number;
@@ -289,7 +293,8 @@ export function unavailableLedger(reason: string): FieldTrialsLedgerRead {
 }
 
 /** The audited three-form union: every form counted, exact replayed lines counted as duplicates once. */
-export async function readFieldTrialsLedger(stateDir: string, nowMs = systemClock.now()): Promise<FieldTrialsLedgerRead> {
+export async function readFieldTrialsLedger(stateDir: string, nowMs = systemClock.now(),
+  quarantine: ReadonlySet<string> = quarantinedLedgerFingerprints()): Promise<FieldTrialsLedgerRead> {
   let names: string[];
   try { names = readdirSync(stateDir); }
   catch {
@@ -306,6 +311,7 @@ export async function readFieldTrialsLedger(stateDir: string, nowMs = systemCloc
   let malformedRows = 0;
   let duplicateRows = 0;
   let futureRows = 0;
+  const quarantined: string[] = [];
   let invalidTimestampRows = 0;
   let unreadSources = 0;
   let newestTs: string | null = null;
@@ -318,6 +324,8 @@ export async function readFieldTrialsLedger(stateDir: string, nowMs = systemCloc
       const fingerprint = fingerprintLedgerLine(raw);
       if (seen.has(fingerprint)) { duplicateRows += 1; return; }
       seen.add(fingerprint);
+      // A quarantined line is skipped by name and never marks the read partial (W1-T14781).
+      if (quarantine.has(fingerprint)) { quarantined.push(fingerprint); return; }
       const ts = iso(accepted.ts);
       if (ts === null) { invalidTimestampRows += 1; return; }
       // A stray clock-forward row cannot create a future cohort or advance the source watermark.
@@ -329,7 +337,8 @@ export async function readFieldTrialsLedger(stateDir: string, nowMs = systemCloc
   const partial = unreadSources > 0 ? "ledger-source-unreadable" : malformedRows > 0 ? "ledger-source-malformed"
     : invalidTimestampRows > 0 ? "ledger-source-invalid-timestamp" : futureRows > 0 ? "ledger-source-future-dated" : null;
   return { state: partial ? "observed-partial" : "observed", reason: partial, forms, malformedRows, duplicateRows,
-    futureRows, invalidTimestampRows, unreadSources, newestTs, rows };
+    futureRows, invalidTimestampRows, unreadSources, newestTs, rows,
+    ...(quarantined.length > 0 ? { quarantinedRows: quarantined.length, quarantinedFingerprints: quarantined } : {}) };
 }
 
 export interface FieldTrialsSource {
@@ -1556,6 +1565,13 @@ export interface FieldTrialsCommandInput {
   siteImport?: Parameters<typeof syncFieldNoteSiteImport>[1];
 }
 
+/** W1-T14778: a long pass persists its GitHub store at most this often, so a killed pass resumes near where it stopped. */
+const GITHUB_CHECKPOINT_MS = 30_000;
+function checkpointEvery(intervalMs: number, write: () => void, clock: Clock = systemClock): () => void {
+  let last = clock.now();
+  return () => { if (clock.now() - last >= intervalMs) { last = clock.now(); write(); } };
+}
+
 const USAGE = "usage: rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] "
   + "[--consent <file>] [--case-files <file>] [--finding-evidence <file>] [--finding-evidence-keys <file>] "
   + "[--controlled-registered <epoch-id> | --controlled-epoch <file>] [--controlled-protocol <file>] [--site-parser-commit <sha>] "
@@ -1684,8 +1700,10 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
   }
   const sourcePairs = pairs(values.source as string[] | undefined);
   const ledgerPairs = pairs(values.ledger as string[] | undefined);
-  const maxPages = values["max-pages"] === undefined ? DEFAULT_MAX_PAGES : Number(values["max-pages"]);
-  if (typeof sourcePairs === "string" || typeof ledgerPairs === "string" || !Number.isSafeInteger(maxPages) || maxPages < 1) {
+  // W1-T14778: no default page count; an omitted --max-pages reads until the pass's work is done.
+  const maxPages = values["max-pages"] === undefined ? undefined : Number(values["max-pages"]);
+  if (typeof sourcePairs === "string" || typeof ledgerPairs === "string"
+    || (maxPages !== undefined && (!Number.isSafeInteger(maxPages) || maxPages < 1))) {
     print(`${USAGE} (invalid: ${typeof sourcePairs === "string" ? sourcePairs : typeof ledgerPairs === "string" ? ledgerPairs : "--max-pages"})`);
     return 2;
   }
@@ -1751,7 +1769,8 @@ export async function fieldTrialsCommand(rest: string[], build: (input: FieldTri
   const githubPath = join(outDir, "field-trials-github-v1.json");
   const github = parseGithubStore(readJson(githubPath));
   const githubPass = values.offline === true ? { state: "skipped" as const, asOf: nowIso, pagesRead: 0, repos: {} }
-    : await ingestFieldTrialsGithub(input.fetch ?? ghApiFetch(), repos.map(([, repo]) => repo), github, nowIso, maxPages);
+    : await ingestFieldTrialsGithub(input.fetch ?? pacedGhApiFetch(), repos.map(([, repo]) => repo), github, nowIso, maxPages,
+      checkpointEvery(GITHUB_CHECKPOINT_MS, () => writeJsonAtomically(githubPath, github)));
   writeJsonAtomically(githubPath, github);
   const sources: FieldTrialsSource[] = [];
   for (const [label, repo] of repos) {

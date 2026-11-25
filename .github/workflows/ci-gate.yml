@@ -187,6 +187,7 @@ jobs:
         "gate-monotonic",
         "flake-retry-aggregate",
         "coverage-ledger",
+        "bash32-cache-seed",
         "test-slow-plan",
         "test-slow-shard (*/*)",
         "ci-shard (1/8)",

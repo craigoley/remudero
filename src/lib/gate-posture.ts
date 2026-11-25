@@ -517,6 +517,7 @@ export const GATE_POSTURE_DECLARATIONS: Readonly<Record<string, GatePostureDecla
   "ci:api-client-drift": repair(true, "generated client drift is repaired by regenerating the client"),
   "ci:assertion-discrimination": repair(true, "assertion failures name the behavioral assertion to repair"),
   "ci:baseline-monotonic": repair(true, "upward baselines must be justified or lowered"),
+  "ci:bash32-cache-seed": repair(true, "a cache-seed failure names the bash 3.2 download, checksum or build step to repair"),
   "ci:ci": repair(true, "unit/type failures are computable implementation repairs"),
   "ci:ci-required": repair(true, "the required aggregator reflects repairable child checks"),
   "ci:ci-gate": repair(true, "the required aggregate reflects repairable child checks (W1-T4400: runs ci-gate.yml's own step)"),

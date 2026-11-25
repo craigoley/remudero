@@ -145,3 +145,11 @@ Learnings used when offered: 26%. Dangling Why pointers: 1.
 - retire ci-gate-refusals-repaired-by-hand: Workers offered it have rarely used it, compared with other learnings.
 
 Learnings used when offered: 26%. Dangling Why pointers: 1.
+
+## Pass 2026-11-25T02:25:56.466Z
+
+- retire codeql-read-model-lane: Workers offered it have rarely used it, compared with other learnings.
+- retire dispatch-function-owns-its-precondition: Workers offered it have rarely used it, compared with other learnings.
+- retire stack-tip-merges-its-base: Workers offered it have rarely used it, compared with other learnings.
+
+Learnings used when offered: 23%. Dangling Why pointers: 1.
