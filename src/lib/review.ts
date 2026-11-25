@@ -44,7 +44,7 @@ import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import { dependencySeedRootChoice, primeRefusalReceipt, SEED_LOCK_RECLAIMED, type DependencyGenerationRefusalReceipt } from "./dependency-seeds.js";
 import { configPath } from "./config.js";
 import { proofTestRunnerArgs } from "./test-run-timeout.js";
-import { hostedReuseOutcome, type HostedProofReuse } from "./proof-reuse-audit.js";
+import type { HostedProofPass } from "./proof-reuse-audit.js";
 import {
   COMPANION_PATH_CLASSES,
   type CompanionPathClass,
@@ -719,6 +719,8 @@ export interface CriterionVerdict {
   holdout?: boolean;
   /** The worker's explicit refusal, if this criterion was declined under the closed grammar above. */
   refusal?: CriterionRefusal;
+  /** W1-T14745: set when `executed_pass` is CI's hosted PASS, counted without a run on this host. */
+  hosted_reuse?: HostedProofPass;
   /** W1-T11209: the reviewer clause's full length, present only when the clause was cut to its budget. */
   clauseChars?: number;
   /** W1-T13849: the class a reviewer FAIL named, present only where a clause reached the floor-met fold. */
@@ -747,9 +749,8 @@ export interface ReviewEvidence {
   /** W1-T11132 arm (b), filled by W1-T11200: per `unit test:` proof file, whether hosted CI concluded `passed` or
    *  `failed` at THIS head. ABSENT (the field, or a file) switches the arm off: a proof that fails stays `executed_fail`. */
   hostedCiFilePassed?: ReadonlyMap<string, "passed" | "failed">;
-  /** W1-T14745: proofs whose hosted PASS at this exact head is counted instead of executed (head: pass, merge base: the
-   *  miss CI recorded). Read only by {@link preparePromisedReviewDecision}'s default executor; absent runs every proof. */
-  hostedProofReuse?: HostedProofReuse;
+  /** W1-T14745: by criterion proof text, the hosted PASS at this exact head counted in place of a host run. */
+  hostedProofPasses?: ReadonlyMap<string, HostedProofPass>;
   /** W1-T11132: the recorded load of a prior `inconclusive_load` review of this head. A failure that reproduces while the
    *  proof starts BELOW it is conclusive (`executed_fail`) rather than load-attributed again. */
   priorInconclusiveLoad1?: number;
@@ -1203,8 +1204,6 @@ export interface WhitelistedProof {
   executionLoad?: ProofLoadRecord;
   /** W1-T14036: milliseconds this run waited on a dependency install; absent when it waited on none. */
   dependencyInstallMs?: number;
-  /** W1-T14745: set when the answer was CI's recorded outcome counted in place of a run, never an execution. */
-  hostedReuse?: true;
 }
 
 const TEST_PATH_RE = /\btest\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?\b/;
@@ -4378,6 +4377,8 @@ export interface ProofExecContext {
   /** W1-T11132 — see {@link ReviewEvidence.hostedCiFilePassed}, {@link ReviewEvidence.priorInconclusiveLoad1} and
    *  {@link ReviewEvidence.sampleLoad}. */
   hostedCiFilePassed?: ReadonlyMap<string, "passed" | "failed">;
+  /** W1-T14745: see {@link ReviewEvidence.hostedProofPasses}. */
+  hostedProofPasses?: ReadonlyMap<string, HostedProofPass>;
   priorInconclusiveLoad1?: number;
   /** W1-T13945: the load1 the prior pending review of this head started this proof at; see rung 3 in {@link judgeCriterion}. */
   priorInconclusiveStartLoad1?: number;
@@ -4813,6 +4814,7 @@ export function judgeCriterion(
   let proofSkip: ProofSkipReason | undefined;
   // W1-T11132: the host load around a proof that did not pass, so a re-review can tell "failed under load" apart.
   let proofLoad: ProofLoadRecord | undefined;
+  let hostedReuse: HostedProofPass | undefined;
   // W1-T9860: a cited test path absent at the head is resolved by its unique basename, and the verdict says so.
   let resolutionNote: string | undefined;
   if (execCtx) {
@@ -4859,7 +4861,13 @@ export function judgeCriterion(
         filingScopeHead && grepTarget !== undefined && execCtx.forwardReferenceFiles?.has(grepTarget) === true
           ? grepTarget
           : undefined;
-      if (forwardReference) {
+      hostedReuse = execCtx.hostedProofPasses?.get(criterion.proof.trim());
+      if (hostedReuse !== undefined) {
+        proofExec = "executed_pass";
+        met = true;
+        reason = `proof executed and PASSED on the PR head in CI, not on this host (${whitelisted.kind}: ${whitelisted.label}) ` +
+          `— hosted PASS counted from proof-discrimination run ${hostedReuse.hosted_run_id} job ${hostedReuse.hosted_job_id}`;
+      } else if (forwardReference) {
         proofExec = "not_yet_built";
         proofSkip = "forward-reference";
         reason =
@@ -5166,6 +5174,7 @@ export function judgeCriterion(
     ...(downgradeClass !== undefined ? { downgrade_class: downgradeClass } : {}),
     ...(followUp !== undefined ? { followUp } : {}),
     ...(reviewerUnavailable !== undefined ? { reviewerUnavailable } : {}),
+    ...(hostedReuse !== undefined ? { hosted_reuse: hostedReuse } : {}),
     ...(proofExec === "executed_fail" && proofFailureOutput ? { proofFailureOutput } : {}),
     ...(proofExec === "executed_fail" || proofExec === "cannot_evaluate"
       ? { failureTail: failureTail || "(the proof printed nothing)" } : {}), floorMet, holdout: !!criterion.holdout,
@@ -6080,14 +6089,7 @@ export async function preparePromisedReviewDecision(args: {
     ledgerPath, taskId: task.id, prUrl, implementationReport: input.implementationReport,
     prCreatedAt: args.prCreatedAt, fetchPrCreatedAt: args.fetchPrCreatedAt,
   });
-  // W1-T14745: set per judge from the evidence; a proof it names answers from CI's record, every other one executes.
-  let hostedReuse: { keys: ReadonlySet<string>; headCwd: string | undefined; baseCwd: string | undefined } | undefined;
-  const defaultProofExecutor = memoizeAsyncProofExecutor(async (whitelisted, cwd) => {
-    const counted = hostedReuseOutcome(hostedReuse, whitelisted, cwd);
-    if (counted === undefined) return execWhitelistedProofAsync(whitelisted, cwd);
-    whitelisted.hostedReuse = true;
-    return counted;
-  });
+  const defaultProofExecutor = memoizeAsyncProofExecutor(execWhitelistedProofAsync);
   // W1-T11340: the PR's own lifetime bounds a first review's archive scan (the admitting lane's view supplies it).
   const priorRow = existsSync(ledgerPath) ? await priorPostedReviewRow(ledgerPath, task.id, prUrl, {
     prCreatedAt: args.prCreatedAt, fetchPrCreatedAt: args.fetchPrCreatedAt,
@@ -6111,8 +6113,6 @@ export async function preparePromisedReviewDecision(args: {
     proofExecutions: () => defaultProofExecutor.observations(),
     judge: async evidence => {
       const useDefault = !!headCheckoutDir && !evidence.asyncExecProof && !evidence.execProof;
-      hostedReuse = useDefault && evidence.hostedProofReuse
-        ? { keys: evidence.hostedProofReuse.keys, headCwd: headCheckoutDir, baseCwd: evidence.baseCheckoutDir } : undefined;
       const verdict = await judgeReviewAsync([...input.acceptance], {
         ...evidence, diff: input.diff, report: input.report, implementationReport: input.implementationReport,
         headCheckoutDir, promisedFollowUpObservation: observation,
@@ -6378,8 +6378,6 @@ export function memoizeProofExecutor(exec: ProofExecutor, sample: () => HostLoad
 interface AsyncProofExecutionObservation {
   cwd: string; command: string; args: string[]; outcome?: ReturnType<ProofExecutor>; error?: string;
   load?: ProofLoadRecord;
-  /** W1-T14745: the outcome is CI's recorded one, counted without a run on this host. */
-  hostedReuse?: true;
 }
 
 export function memoizeAsyncProofExecutor(exec: AsyncProofExecutor, sample: () => HostLoadSample = sampleHostLoad): AsyncProofExecutor &
@@ -6398,7 +6396,6 @@ export function memoizeAsyncProofExecutor(exec: AsyncProofExecutor, sample: () =
       try {
         const outcome = await exec(whitelisted, cwd);
         record.outcome = outcome;
-        if (whitelisted.hostedReuse === true) record.hostedReuse = true;
         record.load = whitelisted.executionLoad ?? { start, end: sample() };
         return { outcome, matchedLines: whitelisted.matchedLines?.slice(), loadError: whitelisted.loadError,
           failureOutput: whitelisted.failureOutput, failureTail: whitelisted.failureTail, load: record.load };
@@ -6597,6 +6594,7 @@ export function judgeReview(
         proofFormCorrections: evidence.proofFormCorrections,
         missingExportNotes: evidence.missingExportNotes,
         hostedCiFilePassed: evidence.hostedCiFilePassed,
+        hostedProofPasses: evidence.hostedProofPasses,
         priorInconclusiveLoad1: evidence.priorInconclusiveLoad1,
         sampleLoad: evidence.sampleLoad,
         executionLoadsRecorded: true,

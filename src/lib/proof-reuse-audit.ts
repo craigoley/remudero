@@ -1,104 +1,161 @@
 import { createHash } from "node:crypto";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
-// W1-T14745: a review that counts CI's proof-discrimination PASS instead of executing the proof still executes a
-// share of those proofs, so the trust it extends stays measured. The share is DERIVED from the agreement the ledger
-// recorded between CI's outcomes and the host's own runs (the `review.proof_reuse_shadow` rows), never a constant a
-// reader must believe: it falls as agreements accumulate and returns to every proof after any disagreement.
+// W1-T14745: a review counts CI's hosted PASS for a proof instead of running it, and still runs some of those proofs so
+// the trust stays measured. What that share is derived from is journalled per repository beside the review ledger.
+// INVARIANT reuse-never-passes-what-the-host-would-fail: only a hosted PASS is counted, and a proof the host ran at a
+// head without passing it stays on the host at that head.
 
-/** The floor under the audit share: even a long clean record keeps one reused proof in twenty on the host. */
-export const PROOF_REUSE_MIN_AUDIT_SHARE = 0.05;
-/** The rule of three: after n agreements and no disagreement the 95% upper bound on the disagreement rate is 3/n. */
-export const PROOF_REUSE_CONFIDENCE_FACTOR = 3;
+/** The ledger row of an audited proof the host judged differently from CI. */
+export const PROOF_REUSE_DISAGREEMENT_STEP = "proof_reuse.disagreement";
 
-/** The slice of a `review.proof_reuse_shadow` row the audit reads. */
-export interface ProofReuseAgreementRow { ts?: unknown; eligible?: unknown; agreed?: unknown; disagreed?: unknown }
+/** A hosted PASS counted in place of a host run, and where CI recorded it. */
+export interface HostedProofPass { hosted_run_id: number; hosted_job_id: number }
+
+/** One review's measurements, one journal line. `agreed` and `held` are {@link proofReuseKey}s. */
+export interface ProofReuseAuditEntry {
+  head_sha: string;
+  /** Audited proofs the host passed too. */
+  agreed: string[];
+  /** Audited proofs the host failed: above zero, every earlier agreement is discarded. */
+  disagreed: number;
+  /** Proofs the host must keep running at this head. */
+  held: string[];
+  /** Host proof time and the number of proofs it covered: what a skipped proof's saving is estimated from. */
+  host_ms: number;
+  host_runs: number;
+}
+
+export type ProofReuseAudit =
+  | { kind: "read"; agreed: number; held: ReadonlySet<string>; hostMs: number; hostRuns: number }
+  | { kind: "unreadable"; reason: string };
+
+export function proofReuseAuditPath(stateDir: string, repository: { owner: string; repo: string }): string {
+  return join(stateDir, `proof-reuse-audit.${repository.owner}.${repository.repo}.jsonl`);
+}
+
+export function proofReuseKey(headSha: string, proof: string): string {
+  return createHash("sha256").update(`${headSha}\0${proof}`).digest("hex");
+}
 
 /**
- * Consecutive agreements recorded since the NEWEST disagreement (every agreement when none was recorded). A row that
- * was not eligible compared nothing and neither adds nor breaks the run. Rows are read newest first by `ts`; a row
- * with no readable stamp sorts as the oldest, so it can never hide a newer disagreement.
+ * The probability a hosted PASS is executed on the host anyway: the posterior mean of the disagreement rate after
+ * `agreed` agreements and none since the last reset, Beta(1, agreed + 1), over the uniform prior's mean. So it is 1
+ * with no history and falls as agreements accumulate, with no chosen rate, floor or credible level.
  */
-export function agreementStreak(rows: readonly ProofReuseAgreementRow[]): number {
-  const stamp = (row: ProofReuseAgreementRow): number => typeof row.ts === "string" && Number.isFinite(Date.parse(row.ts)) ? Date.parse(row.ts) : -Infinity;
-  const count = (value: unknown): number => typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
-  let streak = 0;
-  for (const row of [...rows].sort((a, b) => stamp(b) - stamp(a))) {
-    if (row.eligible !== true) continue;
-    if (count(row.disagreed) > 0) return streak;
-    streak += count(row.agreed);
-  }
-  return streak;
+export function proofReuseAuditShare(agreed: number): number {
+  return Number.isFinite(agreed) && agreed > 0 ? 2 / (agreed + 2) : 1;
 }
 
-/** The fraction of reused proofs the host executes anyway: every proof until three agreements are on record. */
-export function proofReuseAuditShare(streak: number): number {
-  if (!Number.isFinite(streak) || streak <= 0) return 1;
-  return Math.min(1, Math.max(PROOF_REUSE_MIN_AUDIT_SHARE, PROOF_REUSE_CONFIDENCE_FACTOR / streak));
-}
-
-/** Is this proof at this head one of the audited share? A pure function of both, so a re-review of the same head
- *  audits the same proofs and a test can name which ones. */
+/** A pure function of head, proof and share: a re-review at the same share selects the same proofs. */
 export function proofReuseAudited(headSha: string, proof: string, share: number): boolean {
-  if (share >= 1) return true;
-  if (!(share > 0)) return false;
-  const digest = createHash("sha256").update(`${headSha}\0${proof}`).digest();
-  return digest.readUInt32BE(0) / 2 ** 32 < share;
+  return share >= 1 || Number.parseInt(proofReuseKey(headSha, proof).slice(0, 8), 16) / 2 ** 32 < share;
 }
 
-/** The outcome strings a CI record names for a proof's merge-base run. Only a base that was measured (`fail`,
- *  `no-match`) or whose target the base verifiably lacked (`ABSENT`) establishes discrimination; `UNKNOWN`,
- *  `UNREADABLE`, `COULD` (could not execute or link) and `pass` do not, and those proofs run on the host. */
-const DISCRIMINATING_BASE = new Set(["fail", "no-match", "ABSENT"]);
+/** CI's merge-base outcomes that establish discrimination: measured, or a target the base verifiably lacked. */
+const DISCRIMINATING_BASE: ReadonlySet<unknown> = new Set(["fail", "no-match", "ABSENT"]);
 
-/** The one shape of CI outcome a review counts without executing: head pass at a base that discriminates. A hosted
- *  FAIL, `executed_stale`, `refused` or unreadable outcome, and any base that proved nothing, is never reusable. */
+/** The one hosted outcome a review counts: a pass at the head that discriminates against the merge base. */
 export function hostedPassIsReusable(outcome: { head?: unknown; base?: unknown; verdict?: unknown }): boolean {
-  return outcome.verdict === "pass" && outcome.head === "pass" && typeof outcome.base === "string" && DISCRIMINATING_BASE.has(outcome.base);
+  return outcome.verdict === "pass" && outcome.head === "pass" && DISCRIMINATING_BASE.has(outcome.base);
 }
 
-/** The proofs whose hosted PASS is counted, each by its identity (see {@link hostedProofReuseKey}). */
-export interface HostedProofReuse { keys: ReadonlySet<string> }
-
-/** A whitelisted proof's identity for reuse: its executable and exact argv, the same pair the memo keys a run by. */
-export function hostedProofReuseKey(proof: { command: string; args: readonly string[] }): string {
-  return JSON.stringify([proof.command, [...proof.args]]);
+function isAuditEntry(value: unknown): value is ProofReuseAuditEntry {
+  const entry = value as Partial<ProofReuseAuditEntry> | null;
+  const keys = (list: unknown) => Array.isArray(list) && list.every(key => typeof key === "string");
+  return !!entry && keys(entry.agreed) && keys(entry.held) && [entry.disagreed, entry.host_ms, entry.host_runs].every(Number.isFinite);
 }
 
-/** What counting a hosted PASS answers for one execution the review asks for, or `undefined` when the host runs it:
- *  at the head the PASS itself, at the merge base the miss the record's base outcome established. */
-export function hostedReuseOutcome(
-  reuse: { keys: ReadonlySet<string>; headCwd: string | undefined; baseCwd: string | undefined } | undefined,
-  proof: { command: string; args: readonly string[] }, cwd: string,
-): "pass" | "fail" | undefined {
-  if (reuse === undefined || !reuse.keys.has(hostedProofReuseKey(proof))) return undefined;
-  if (reuse.headCwd !== undefined && cwd === reuse.headCwd) return "pass";
-  if (reuse.baseCwd !== undefined && cwd === reuse.baseCwd) return "fail";
-  return undefined;
-}
-
-/** How many ledger rotations the agreement history reads beyond the live file. */
-const AGREEMENT_ROTATIONS = 2;
-
-/** The recorded agreement rows, newest source first, or the reason none could be read. Never throws: a ledger that
- *  cannot be read is an empty record, and an empty record audits every proof. */
-export async function readProofReuseAgreement(
-  ledgerDir: string, step: string,
-  read: (dir: string, opts: { step: string; maxRotations: number; keep: (line: string) => boolean }) => Promise<{ rawLines: string[] }>,
-): Promise<{ rows: ProofReuseAgreementRow[]; unreadable?: string }> {
+/**
+ * One repository's audit state: the distinct agreements since the newest disagreement, and every held proof. A missing
+ * journal is no history. An unreadable one, or a ledger row saying a disagreement never reached the journal, is
+ * `unreadable`, on which a review runs every proof. A torn line may have been a disagreement, so it resets the count.
+ */
+export function readProofReuseAudit(
+  path: string, repository: string, ledgerRows: () => readonly Record<string, unknown>[],
+  read: (path: string) => string = file => readFileSync(file, "utf8"),
+): ProofReuseAudit {
   try {
-    const { rawLines } = await read(ledgerDir, { step, maxRotations: AGREEMENT_ROTATIONS, keep: line => line.includes(`"eligible":true`) });
-    const rows: ProofReuseAgreementRow[] = [];
-    for (const line of rawLines) {
-      try {
-        const parsed = JSON.parse(line) as ProofReuseAgreementRow & { step?: unknown };
-        if (parsed.step === step) rows.push(parsed);
-      } catch {
-        // deliberate: a torn line is unreadable and counts as no row at all (a lost agreement widens the audit; a
-        // lost disagreement is the one case this cannot see, and the next readable one restores the full audit)
-      }
+    const disagreements = ledgerRows().filter(row => row.step === PROOF_REUSE_DISAGREEMENT_STEP && row.repo === repository);
+    const lost = disagreements.find(row => typeof row.audit_error === "string");
+    if (lost !== undefined) return { kind: "unreadable", reason: `a disagreement was never journalled: ${String(lost.audit_error)}` };
+    let text = "";
+    try {
+      text = read(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    return { rows };
+    const agreed = new Set<string>();
+    const held = new Set(disagreements.map(row => proofReuseKey(String(row.head_sha), String(row.proof))));
+    let hostMs = 0, hostRuns = 0;
+    for (const line of text.split("\n")) {
+      if (line === "") continue;
+      let entry: unknown;
+      try {
+        entry = JSON.parse(line);
+      } catch (error) {
+        entry = { unparsed: String(error) }; // not an entry, so it resets the count below
+      }
+      if (!isAuditEntry(entry)) {
+        agreed.clear();
+        continue;
+      }
+      if (entry.disagreed > 0) agreed.clear();
+      else for (const key of entry.agreed) agreed.add(key);
+      for (const key of entry.held) held.add(key);
+      hostMs += entry.host_ms;
+      hostRuns += entry.host_runs;
+    }
+    return { kind: "read", agreed: agreed.size, held, hostMs, hostRuns };
   } catch (error) {
-    return { rows: [], unreadable: String((error as Error)?.message ?? error).slice(0, 200) };
+    return { kind: "unreadable", reason: String((error as Error)?.message ?? error).slice(0, 200) };
   }
+}
+
+/** Append one review's line. Returns why it could not, for the caller to ledger; `undefined` when it was written. */
+export function recordProofReuseAudit(path: string, entry: ProofReuseAuditEntry): string | undefined {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, `${JSON.stringify(entry)}\n`);
+    return undefined;
+  } catch (error) {
+    return String((error as Error)?.message ?? error).slice(0, 200);
+  }
+}
+
+/** Host outcomes that are an answer other than pass. A run that reached none (load, spawn failure) disputes nothing
+ *  unless the review failed the criterion on it; either way the proof is held. */
+const HOST_REFUSED: ReadonlySet<string> = new Set(["executed_fail", "executed_stale", "stale_self_path", "cannot_evaluate"]);
+const HOST_NEVER_RAN: ReadonlySet<string> = new Set(["not_executable", "not_yet_built"]);
+
+export interface ProofReuseDisagreement { proof: string; host: string }
+
+/** What the audit reads of a criterion verdict (review.ts imports this module, so the type is not imported back). */
+export interface JudgedProof { proof: string; proof_exec: string; floorMet?: boolean; hosted_reuse?: HostedProofPass }
+
+/** What one judged fold measured: the journal line it adds (none when it measured nothing) and its disagreements. */
+export function settleProofReuseAudit(args: {
+  headSha: string; audited: ReadonlySet<string>; hostMs: number; criteria: readonly JudgedProof[];
+}): { entry: ProofReuseAuditEntry | undefined; disagreements: ProofReuseDisagreement[] } {
+  const entry: ProofReuseAuditEntry = { head_sha: args.headSha, agreed: [], disagreed: 0, held: [], host_ms: args.hostMs, host_runs: 0 };
+  const disagreements: ProofReuseDisagreement[] = [];
+  const seen = new Set<string>();
+  for (const criterion of args.criteria) {
+    const proof = criterion.proof.trim();
+    if (proof === "" || criterion.hosted_reuse !== undefined || seen.has(proof)) continue;
+    seen.add(proof);
+    const host = criterion.proof_exec;
+    const audited = args.audited.has(proof);
+    if (!HOST_NEVER_RAN.has(host)) entry.host_runs++;
+    if (host === "executed_pass") {
+      if (audited) entry.agreed.push(proofReuseKey(args.headSha, proof));
+      continue;
+    }
+    if (audited && (HOST_REFUSED.has(host) || host === "exec_error" && criterion.floorMet === false)) disagreements.push({ proof, host });
+    if (audited || !HOST_NEVER_RAN.has(host)) entry.held.push(proofReuseKey(args.headSha, proof));
+  }
+  entry.disagreed = disagreements.length;
+  const measured = entry.agreed.length > 0 || entry.held.length > 0;
+  return { entry: measured ? entry : undefined, disagreements };
 }

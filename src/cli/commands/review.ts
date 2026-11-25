@@ -53,7 +53,7 @@ import { readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest 
 import { REVIEW_RUN_SETTLED_STEPS, REVIEWER_START_FAILED_OUTCOME } from "../../lib/sweep.js";
 import { ghJson, renderWorkerSettings, cashDivertSpawnFields, spawnWorker, workerLedgerFields, workerTranscript, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment, WorkerAbandonedError, worktreeRemoveAsync } from "../../lib/worker.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "../../lib/worktree-git.js";
-import { agreementStreak, hostedPassIsReusable, hostedProofReuseKey, proofReuseAudited, proofReuseAuditShare, readProofReuseAgreement, type HostedProofReuse, type ProofReuseAgreementRow } from "../../lib/proof-reuse-audit.js";
+import { PROOF_REUSE_DISAGREEMENT_STEP, hostedPassIsReusable, proofReuseAudited, proofReuseAuditPath, proofReuseAuditShare, proofReuseKey, readProofReuseAudit, recordProofReuseAudit, settleProofReuseAudit, type HostedProofPass, type ProofReuseAudit } from "../../lib/proof-reuse-audit.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/merged-ratchet-verdict.ts imports its siblings.
 import { PROOF_DISCRIMINATION_JOB, PROOF_DISCRIMINATION_WORKFLOW, RESULT_FORMAT, RESULT_MARKER, bodyDigest, discriminationProofs, proofDiscriminationDigests } from "../../../scripts/proof-discrimination-gate.mjs";
 import { releaseReviewWorktree } from "../../lib/review-worktree-reclaim.js";
@@ -792,10 +792,11 @@ export async function reviewHostedCiFileEvidence(
 // Operator trust decision 2026-11-03: the record is authenticated only as the log of a successful GitHub Actions job of
 // the proof-discrimination workflow at this exact head, read through the App gateway; the executor is the gate's import
 // closure plus its toolchain inputs and workflow (scripts/proof-discrimination-gate.mjs computes it for both sides).
-// W1-T14745 lets a hosted PASS count (see {@link planProofReuse}) while the host still executes an audited share of those
-// proofs, derived from the agreement this row records; every other hosted outcome is still compared, never counted.
+// W1-T14745 counts a hosted PASS in place of a host run (planProofReuse) while an audit still runs some of those proofs
+// (src/lib/proof-reuse-audit.ts); every other hosted outcome is compared and never counted.
 
-/** One row per review that ran proofs at a head checkout: per-proof agreement of the proofs the host executed, or why the record was not eligible. */
+/** One row per review that ran proofs at a head checkout: the proofs reused and audited, per-proof agreement of the
+ *  proofs the host judged, or why the record was not eligible. */
 export const PROOF_REUSE_SHADOW_STEP = "review.proof_reuse_shadow";
 
 interface HostedProofOutcome { proof: string; head: string; base: string; verdict: string }
@@ -883,15 +884,13 @@ interface ProofReuseEligibilityInput {
 }
 interface ProofReuseShadowInput extends ProofReuseEligibilityInput {
   hostCriteria: readonly Pick<CriterionVerdict, "proof" | "proof_exec">[]; hostProofMs: number;
-  /** W1-T14745: proofs this review counted from CI's record without running them. Their host outcome is not a
-   *  measurement, so they take no part in the comparison; the audited share and every other proof do. */
-  reused?: ReadonlySet<string>;
-  /** The audit's own fields, carried on the row so the agreement it recorded can be read back with the share. */
-  audit?: Record<string, unknown>;
+  /** W1-T14745: what this review reused and audited; its eligibility, decided before any proof ran, is the row's. */
+  plan?: ProofReusePlan;
 }
 
 /** The {@link PROOF_REUSE_SHADOW_STEP} row for one review. Reads the head checkout only and never throws: the verdict
- *  is already built and this row is all it produces. `would_save_ms` is the host proof time an eligible reuse skips. */
+ *  is already built and this row is all it produces. A row that reused proofs carries `saved_ms`, their estimated host
+ *  time (null with no timing on record); any other carries `would_save_ms`, the host proof time of an eligible record. */
 export async function proofReuseShadowRow(read: ProofDiscriminationRecordRead, input: ProofReuseShadowInput): Promise<Record<string, unknown>> {
   try {
     return await compareProofReuse(read, input);
@@ -938,73 +937,75 @@ async function proofReuseEligibility(read: ProofDiscriminationRecordRead, input:
 
 async function compareProofReuse(read: ProofDiscriminationRecordRead, input: ProofReuseShadowInput): Promise<Record<string, unknown>> {
   const row = { pr_url: input.prUrl, head_sha: input.headSha, host_proof_ms: input.hostProofMs };
-  const checked = await proofReuseEligibility(read, input);
-  if (!checked.eligible) return { ...row, eligible: false, reason: checked.reason, would_save_ms: 0, ...checked.hosted, ...input.audit };
+  const checked = input.plan?.checked ?? await proofReuseEligibility(read, input);
+  if (!checked.eligible) return { ...row, eligible: false, reason: checked.reason, would_save_ms: 0, ...checked.hosted, ...input.plan?.row };
   const record = checked.record;
-  const proofs = (record.proofs ?? []).filter(outcome => input.reused?.has(outcome.proof) !== true).map(outcome => {
+  // A reused proof was not measured on the host, so it takes no part in the comparison.
+  const proofs = (record.proofs ?? []).filter(outcome => input.plan?.passes.has(outcome.proof) !== true).map(outcome => {
     const host = input.hostCriteria.find(criterion => criterion.proof.trim() === outcome.proof)?.proof_exec ?? "not_judged";
     return { proof: outcome.proof, hosted: outcome.verdict, hosted_head: outcome.head, hosted_base: outcome.base, host,
       agree: HOSTED_VERDICT_AS_HOST[outcome.verdict] === host };
   });
   const agreed = proofs.filter(proof => proof.agree).length;
-  return { ...row, eligible: true, ...checked.hosted, criteria_source: record.criteria_source, would_save_ms: input.hostProofMs,
-    agreed, disagreed: proofs.length - agreed, proofs, ...input.audit };
+  const saving = (input.plan?.passes.size ?? 0) > 0 ? {} : { would_save_ms: input.hostProofMs };
+  return { ...row, eligible: true, ...checked.hosted, criteria_source: record.criteria_source, ...saving,
+    agreed, disagreed: proofs.length - agreed, proofs, ...input.plan?.row };
 }
 
-/** W1-T14745: the reuse a review applies before it runs a proof, and the row fields that say what it did. */
+/** W1-T14745: what a review reuses from CI's record before it runs any proof. */
 export interface ProofReusePlan {
-  /** Handed to the proof executor; `undefined` when nothing is counted from CI and every proof runs on the host. */
-  reuse: HostedProofReuse | undefined;
-  /** The proofs counted from CI's record at this head. */
-  reused: ReadonlySet<string>;
-  /** Fields of the {@link PROOF_REUSE_SHADOW_STEP} row: the share, the streak behind it, and what each side did. */
-  audit: Record<string, unknown>;
+  /** By proof text, the hosted passes counted in place of a host run. */
+  passes: ReadonlyMap<string, HostedProofPass>;
+  /** The hosted passes the audit sends to the host this time. */
+  audited: ReadonlySet<string>;
+  /** The plan's fields on the {@link PROOF_REUSE_SHADOW_STEP} row. */
+  row: Record<string, unknown>;
+  checked?: ProofReuseEligibility;
 }
 
-/** What to count from CI's record and what the host still executes. A hosted PASS is counted only when the record is
- *  eligible (see {@link proofReuseEligibility}, which includes "the diff does not touch the executor"), CI's head
- *  outcome is a pass and its merge-base outcome discriminates; every hosted FAIL, stale or unreadable outcome stays on
- *  the host. Of the countable proofs the host runs the audited share, which is derived from the recorded agreement and
- *  is every proof when no agreement is on record or the newest recorded row disagreed. Never throws. */
+/** Of the record's countable passes, which are reused and which the audit runs: every one when the audit state is
+ *  unreadable, each held proof, and otherwise the share its agreements leave. An ineligible record reuses nothing.
+ *  Never throws. */
 export async function planProofReuse(
-  read: ProofDiscriminationRecordRead,
-  input: ProofReuseEligibilityInput & { target?: { owner: string; repo: string }; agreement: { rows: readonly ProofReuseAgreementRow[]; unreadable?: string } },
+  read: ProofDiscriminationRecordRead, input: ProofReuseEligibilityInput & { audit: ProofReuseAudit },
 ): Promise<ProofReusePlan> {
-  const none = (reason: string): ProofReusePlan => ({ reuse: undefined, reused: new Set(), audit: { reuse_applied: false, reuse_reason: reason } });
+  const passes = new Map<string, HostedProofPass>();
+  const audited = new Set<string>();
   try {
     const checked = await proofReuseEligibility(read, input);
-    if (!checked.eligible) return none(checked.reason);
-    const streak = agreementStreak(input.agreement.rows);
-    const share = proofReuseAuditShare(streak);
-    const countable = (checked.record.proofs ?? []).filter(hostedPassIsReusable);
-    const audited = countable.filter(outcome => proofReuseAudited(input.headSha, outcome.proof, share));
-    const auditedSet = new Set(audited.map(outcome => outcome.proof));
-    const reused = new Set(countable.map(outcome => outcome.proof).filter(proof => !auditedSet.has(proof)));
-    const keysOf = (wanted: (proof: string) => boolean): Set<string> => {
-      const found = new Set<string>();
-      for (const criterion of input.criteria) {
-        const proof = criterion.proof?.trim() ?? "";
-        if (!wanted(proof)) continue;
-        const resolved = resolveProofTestPath(proof, input.headCheckoutDir, { target: input.target }).proof;
-        for (const text of new Set([proof, resolved])) {
-          const parsed = parseWhitelistedProof(text, input.target);
-          if (parsed !== null) found.add(hostedProofReuseKey(parsed));
-        }
-      }
-      return found;
-    };
-    // An executable shared with a proof the host still runs is never counted: the audit would otherwise be skipped.
-    const hostRuns = keysOf(proof => !reused.has(proof));
-    const keys = new Set([...keysOf(proof => reused.has(proof))].filter(key => !hostRuns.has(key)));
-    return {
-      reuse: keys.size > 0 ? { keys } : undefined, reused,
-      audit: { reuse_applied: keys.size > 0, audit_share: share, agreement_streak: streak, countable: countable.length,
-        reused: reused.size, audited: audited.length,
-        ...(input.agreement.unreadable === undefined ? {} : { agreement_unreadable: input.agreement.unreadable }) },
-    };
+    if (!checked.eligible || read.kind !== "record") return { passes, audited, row: { reused: [], audited: [] }, checked };
+    const { audit } = input;
+    const share = audit.kind === "read" ? proofReuseAuditShare(audit.agreed) : 1;
+    for (const outcome of (checked.record.proofs ?? []).filter(hostedPassIsReusable)) {
+      const proof = outcome.proof;
+      if (audit.kind !== "read" || audit.held.has(proofReuseKey(input.headSha, proof)) || proofReuseAudited(input.headSha, proof, share)) {
+        audited.add(proof);
+      } else passes.set(proof, { hosted_run_id: read.runId, hosted_job_id: read.jobId });
+    }
+    const saved = passes.size === 0 ? {} : { saved_ms: audit.kind === "read" && audit.hostRuns > 0
+      ? Math.round(passes.size * audit.hostMs / audit.hostRuns) : null };
+    const state = audit.kind === "read" ? { audit_agreed: audit.agreed } : { audit_unreadable: audit.reason };
+    return { passes, audited, checked,
+      row: { reused: [...passes.keys()], audited: [...audited], audit_share: share, ...state, ...saved } };
   } catch (error) {
-    return none(`reuse planning failed: ${String((error as Error)?.message ?? error).slice(0, 300)}`);
+    const reuse_error = `reuse planning failed: ${String((error as Error)?.message ?? error).slice(0, 300)}`;
+    return { passes: new Map(), audited: new Set(), row: { reused: [], audited: [], reuse_error } };
   }
+}
+
+/** Journal what one judged fold measured and ledger each disagreement with it. A line the journal could not take is
+ *  named on those rows (which then stop all reuse, see readProofReuseAudit) and returned for the shadow row. */
+export function recordProofReuseOutcome(args: Parameters<typeof settleProofReuseAudit>[0] & {
+  auditPath: string; repo: string; prUrl: string; log: (step: string, extra: Record<string, unknown>) => void;
+}): { audit_error?: string } {
+  const { entry, disagreements } = settleProofReuseAudit(args);
+  const error = entry === undefined ? undefined : recordProofReuseAudit(args.auditPath, entry);
+  const failed = error === undefined ? {} : { audit_error: error };
+  for (const { proof, host } of disagreements) {
+    args.log(PROOF_REUSE_DISAGREEMENT_STEP, { pr_url: args.prUrl, repo: args.repo, head_sha: args.headSha, proof,
+      hosted: "pass", host, ...failed });
+  }
+  return failed;
 }
 
 // Project at the final write: status guards may replace a description with a private failure reason.
@@ -1642,15 +1643,22 @@ export async function runReview(host: ReviewCommandHost, args: {
     : undefined;
   const hostedCiFilePassed = await reviewHostedCiFileEvidence({ owner, repo, headSha, criteria,
     headCheckoutDir: args.headCheckoutDir, log });
-  // W1-T14745: CI's record, when it is eligible, answers the proofs it passed (less the audited share) in place of a
-  // host run; the plan below says which, and the row at the end carries what it did.
+  // W1-T14745: the record is awaited BEFORE any proof runs, so a counted hosted PASS replaces its host run.
+  const auditPath = proofReuseAuditPath(dirname(args.ledgerPath), { owner, repo });
   const reusePlan = proofReuseRead === undefined ? undefined : await planProofReuse(await proofReuseRead, {
-    prUrl, headSha, diff, body: inputBody, criteria, headCheckoutDir: args.headCheckoutDir!, target: { owner, repo },
-    agreement: await readProofReuseAgreement(dirname(args.ledgerPath), PROOF_REUSE_SHADOW_STEP, readLedgerUnionRawLinesAsync),
+    prUrl, headSha, diff, body: inputBody, criteria, headCheckoutDir: args.headCheckoutDir!,
+    audit: readProofReuseAudit(auditPath, `${owner}/${repo}`, priorReviewRows),
   });
+  // The first judged fold is the measurement: the binding fold after it reuses the same executions.
+  let auditRecord: { audit_error?: string } | undefined;
+  const settleAudit = (judged: ReviewVerdict, hostMs: number): void => {
+    if (reusePlan === undefined || auditRecord !== undefined || signal?.aborted === true) return;
+    auditRecord = recordProofReuseOutcome({ auditPath, repo: `${owner}/${repo}`, prUrl, headSha,
+      audited: reusePlan.audited, criteria: judged.criteria, hostMs, log });
+  };
   const proofEvidence: Parameters<typeof preparedDecision.judge>[0] = {
     hostedCiFilePassed,
-    hostedProofReuse: reusePlan?.reuse,
+    hostedProofPasses: reusePlan?.passes,
     diff,
     report,
     headRefName: args.headRefName,
@@ -1676,6 +1684,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   const preliminaryStartedAt = systemClock.now();
   const preliminaryProofs = attemptReviewer ? await preparedDecision.judge(proofEvidence) : undefined;
   const preliminaryProofMs = systemClock.now() - preliminaryStartedAt;
+  if (preliminaryProofs !== undefined) settleAudit(preliminaryProofs, preliminaryProofMs);
   let reviewerSubtype: string | undefined;
   let reviewerExit: WorkerResult["exit"];
   let reviewerSpawnFailed = false;
@@ -1718,7 +1727,8 @@ export async function runReview(host: ReviewCommandHost, args: {
             side: cwd === args.headCheckoutDir ? "head" : cwd === args.baseCheckoutDir ? "base" : "other" })),
           capped: preliminaryProofs!.capped, floorDegraded: preliminaryProofs!.floorDegraded,
           criteria: preliminaryProofs!.criteria.map((criterion, index) => ({ index: index + 1,
-            proof: criterion.proof, proof_exec: criterion.proof_exec, floorMet: criterion.floorMet, reason: criterion.reason })),
+            proof: criterion.proof, proof_exec: criterion.proof_exec, floorMet: criterion.floorMet, reason: criterion.reason,
+            hosted_reuse: criterion.hosted_reuse })),
         }), { mode: 0o600 });
         const prompt =
           buildReviewPrompt({
@@ -1973,10 +1983,12 @@ export async function runReview(host: ReviewCommandHost, args: {
     openTaskIds: args.openTaskIds,
   });
   phases.judge = systemClock.now();
+  settleAudit(computed, phases.judge - phases.lint);
   if (proofReuseRead !== undefined) {
     log(PROOF_REUSE_SHADOW_STEP, await proofReuseShadowRow(await proofReuseRead, { prUrl, headSha, diff, body: inputBody,
       criteria, headCheckoutDir: args.headCheckoutDir!, hostCriteria: computed.criteria,
-      hostProofMs: preliminaryProofMs + phases.judge - phases.lint, reused: reusePlan?.reused, audit: reusePlan?.audit }));
+      hostProofMs: preliminaryProofMs + phases.judge - phases.lint,
+      plan: reusePlan && { ...reusePlan, row: { ...reusePlan.row, ...auditRecord } } }));
   }
 
   // W1-T359: ADVISORY rubric layer — invoked AFTER `computed` above, over the
