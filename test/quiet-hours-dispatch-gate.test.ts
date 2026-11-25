@@ -109,6 +109,7 @@ test("W1-T2655: omitting quiet hours is byte-identical to a quiet-hours dep that
   // RSS and swap, which move between the two runs; its tier and decision fields are still compared.
   // W1-T13286: `dispatch.selection_timing` times the selection on a real clock; its site, candidate count
   // and probe names are still compared.
+  // W1-T14768: `daemon.cycle_phases` times each loop stage on a real clock; its stage names are still compared.
   const unmeasured = <T,>(reading: T) =>
     reading && typeof reading === "object" ? { ...reading, rss_bytes: 0, swap_bytes: 0, charged_bytes: 0, share: 0 } : reading;
   const untimed = (lines: typeof clear.lines) =>
@@ -118,7 +119,8 @@ test("W1-T2655: omitting quiet hours is byte-identical to a quiet-hours dep that
           : l.step === "daemon.boot_first_dispatch" ? { ...l, extra: { ...l.extra, boot_at: 0, first_selection_ms: 0, first_run_start_ms: 0 } }
             : l.step === "daemon.memory_pressure" ? { ...l, extra: { ...unmeasured(l.extra), baseline: unmeasured(l.extra.baseline) } }
               : l.step === "dispatch.selection_timing" ? { ...l, extra: { ...l.extra, total_ms: 0, probe_ms: Object.fromEntries(Object.keys(l.extra.probe_ms as object).map((k) => [k, 0])) } }
-                : l);
+                : l.step === "daemon.cycle_phases" ? { ...l, extra: Object.fromEntries(Object.entries(l.extra).map(([k, v]) => [k, k.endsWith("_ms") ? 0 : v])) }
+                  : l);
   assert.deepEqual(untimed(clear.lines), untimed(absent.lines));
   assert.equal(clear.lines.some((l) => l.step === "daemon.quiet_hours"), false);
 });

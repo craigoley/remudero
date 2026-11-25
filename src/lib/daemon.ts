@@ -4896,7 +4896,7 @@ export async function runDaemon(
       plan: Plan; isMerged: MergedSet; released?: ReadonlySet<string> } | undefined,
   };
   const noteLog: typeof emitLog = (step, fields) => {
-    if (noStart !== undefined && step !== "daemon.tick" && !step.startsWith("dispatch.no_start.")) noStart.lastStep = step;
+    if (noStart !== undefined && step !== "daemon.tick" && step !== "daemon.cycle_phases" && !step.startsWith("dispatch.no_start.")) noStart.lastStep = step;
     const cause = idleLaneCauseForStep(step, fields);
     if (cause !== undefined) {
       idleLaneTickCause = cause;
@@ -7950,6 +7950,13 @@ export async function runDaemon(
     // no row has within one poll interval; a throwing sampler rides it as mem_telemetry, never escapes it.
     log("daemon.tick", { poll_interval_ms: pollIntervalMs, ...tickMemorySample(deps, daemonClock.now(), pollIntervalMs, tickMemory),
       ...(conflictReceipts ? { conflict_garden_stopped: [...conflictGovernorState.stopped], conflict_garden_error: conflictGovernorState.error } : {}) });
+    const noStartPage = judgeNoStart();
+    if (noStartPage) await noStartPage;
+    deps.bootPhases?.firstTick(log);
+    observeRestartCycle();
+    recordNearLimitHeapSample(deps, "tick");
+    if (tickMemory.sampled) startMemoryReadAfterRow(deps, log);
+    // W1-T14768: after the tick's memory read starts, which must follow its own tick row.
     if (cycleStartedAtMs !== undefined) {
       cycleStage(undefined);
       const durations: Record<string, number> = {};
@@ -7960,12 +7967,6 @@ export async function runDaemon(
     }
     cycleStartedAtMs = daemonClock.now();
     cycleStage("tick_head");
-    const noStartPage = judgeNoStart();
-    if (noStartPage) await noStartPage;
-    deps.bootPhases?.firstTick(log);
-    observeRestartCycle();
-    recordNearLimitHeapSample(deps, "tick");
-    if (tickMemory.sampled) startMemoryReadAfterRow(deps, log);
     const tickStartedAtMs = daemonClock.now();
     // W1-T11790: before STOP and PAUSE, so a recycle's own PAUSE (the 2026-11-08 shape) still sees an overrunning retro.
     retroWatch.observe(tickStartedAtMs);
