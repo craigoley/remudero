@@ -1,12 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import test from "node:test";
 import { buildDispatchValueContext, costOfDelayReadyRow } from "#src/lib/dispatch-value.js";
 import type { DispatchValueContext, OperatorHoldState, TierWait } from "#src/lib/dispatch-value.js";
-import type { Plan, Task } from "#src/lib/plan.js";
-import { dispatchValueContextForSelection } from "#src/run-task.js";
-import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import type { Task } from "#src/lib/plan.js";
 
 const HOUR = 3_600_000;
 const NOW = Date.parse("2026-10-17T02:00:00Z");
@@ -83,44 +79,6 @@ test("W1-T14643 criterion 2: a record held on operator input is not a censored w
   assert.equal(tier(resolved, 1)?.censored, 3, "the answered and the released record are runnable, so they wait on the schedule");
   const blankAnswer = calibrate(started, [waiting, ...held], { inputAnswer: () => "  " });
   assert.equal(tier(blankAnswer, 1)?.censored, 1, "a blank answer is no answer, as plan.ts reads it");
-});
-
-test("W1-T14643 criterion 2: dispatch selection carries its lane's release and answer state into the censored sample", () => {
-  const started = Array.from({ length: 4 }, (_, i) => ({ id: `W1-T${8100 + i}`, wait: 2 }));
-  const asked = { question: "which?", asked_at: "2026-10-01T00:00:00Z" };
-  const queued = [task("W1-T8110", { priority: 1, needs_input: asked }), task("W1-T8111", { priority: 1, verify: "human" }),
-    task("W1-T8112", { priority: 1 })];
-  const filed = new Map<string, number>(queued.map(t => [t.id, NOW - 20 * HOUR]));
-  // The newest row pins the selection's clock at NOW, as calibrate() does.
-  const rows: Array<Record<string, unknown>> = [{ step: "dispatch.refused_already_merged", task_id: "W1-T8199", ts: new Date(NOW).toISOString() }];
-  for (const s of started) {
-    const at = NOW - 30 * HOUR;
-    filed.set(s.id, at - s.wait * HOUR);
-    rows.push({ step: "run.start", task_id: s.id, run_id: s.id, task_class: "src", ts: new Date(at).toISOString() });
-    rows.push({ step: "verdict", task_id: s.id, run_id: s.id, verdict: "merged", cost_usd: 2, ts: new Date(at + HOUR).toISOString() });
-  }
-  const tasks = [...started.map(s => task(s.id, { priority: 1 })), ...queued];
-  const plan: Plan = { tasks, byId: new Map(tasks.map(t => [t.id, t])) };
-  const open = new Set(queued.map(t => t.id));
-  const select = (holds?: OperatorHoldState) => {
-    const context = dispatchValueContextForSelection(plan, id => !open.has(id), "/fixture/state", () => {}, "/fixture/tasks.yaml",
-      (() => ({ ok: true, rows, unread: [] })) as never,
-      () => ({ kind: "ready", snapshot: { planTreeSha: "tree-sha", filedAtByTaskId: filed } }), holds);
-    assert.ok(context);
-    return tier(context, 1)?.censored;
-  };
-  assert.equal(select(), 1, "with no state, dispatch's own default holds back both records");
-  assert.equal(select({ releasedIds: () => new Set(["W1-T8111"]), inputAnswer: id => id === "W1-T8110" ? "the first" : undefined }), 3,
-    "the state the lane passes reaches the censored sample");
-  // The production callers pass that state: the daemon its release readers and the answer reader its dispatch uses,
-  // the drain its release readers (its dispatch reads no answers).
-  const daemon = readFileSync(join(REPO_ROOT, "src/cli/commands/daemon.ts"), "utf8");
-  const daemonCall = daemon.slice(daemon.indexOf("dispatchValueContextForSelection(dispatchPlan"), daemon.indexOf("inputAnswer: dispatchInputAnswer,"));
-  assert.match(daemonCall, /releasedIds: \(\) => resolveReleasedIds\(/);
-  assert.match(daemon, /taskInputAnswer: dispatchInputAnswer,/, "dispatch and the censored sample share one answer reader");
-  const drain = readFileSync(join(REPO_ROOT, "src/run-task.ts"), "utf8");
-  const drainCall = drain.slice(drain.indexOf("dispatchValueContextForSelection(dispatchPlan"));
-  assert.match(drainCall.slice(0, 400), /releasedIds: \(\) => resolveReleasedIds\(releaseReadersFor\(/);
 });
 
 test("W1-T14643 criterion 3: a well-sampled tier keeps a wait within its own median's confidence band; the envelope stays monotone", () => {

@@ -225,7 +225,10 @@ function heldOnOperatorInputBy(holds: OperatorHoldState | undefined): (task: Pic
   let released: ReadonlySet<string> | undefined;
   return task => {
     // The answer reader is consulted only for a record that asks a question, as plan.ts's needsInputRefusal does.
-    if (task.needs_input !== undefined && !holds?.inputAnswer?.(task.id)?.trim()) return true;
+    if (task.needs_input !== undefined) {
+      const answer = holds?.inputAnswer?.(task.id);
+      if (typeof answer !== "string" || answer.trim() === "") return true;
+    }
     if (task.verify !== "human") return false;
     released ??= holds?.releasedIds?.() ?? new Set<string>();
     return !released.has(task.id);
