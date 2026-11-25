@@ -15,7 +15,8 @@
  * change deployed or was correct; field-trials-flow.ts reads these facts and keeps those separate.
  */
 import { fixedClock } from "./clock.js";
-import { ghInteractiveRead } from "./github-transport.js";
+import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, ghInteractiveRead } from "./github-transport.js";
+import { GITHUB_WRITE_RESERVE_FRACTION } from "./github-installation-budget.js";
 
 export const FIELD_TRIALS_GITHUB_VERSION = "field-trials-github-v1" as const;
 
@@ -23,7 +24,6 @@ export const FIELD_TRIALS_GITHUB_VERSION = "field-trials-github-v1" as const;
 export const GITHUB_PAGE_SIZE = 100;
 /** BACKSTOP: pages one pass may read across every repository. A pass that reaches it stores the page
  *  to resume from, so a large backlog spreads over several operator passes and is never dropped. */
-export const DEFAULT_MAX_PAGES = 300;
 /** BACKSTOP: bytes one `gh api` page may print before the read is treated as failed. */
 const GH_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 
@@ -65,18 +65,63 @@ export function pageOf(body: string): GithubPage {
   return Array.isArray(items) ? { ok: true, items } : { ok: false, reason: "github-page-not-a-list" };
 }
 
+/** A secondary limit names no reset, and clears in about a minute. */
+const RATE_LIMIT_RETRY_MS = 60_000;
+const sleepFor = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+
+/** W1-T14778: what {@link ghApiFetch} needs to wait out a rate limit instead of failing the read. */
+export interface GhApiFetchPacing {
+  /** Runs before every read; the production pacer waits while the installation is near its reserve. */
+  beforeRead?: () => Promise<void>;
+  sleep?: (ms: number) => Promise<void>;
+}
+
 /** The default seam: `gh api <path>` through the paced, bounded GitHub transport. A failed or refused
- *  read is a reason, never a throw, so the pass records where to resume. */
-export function ghApiFetch(read: (args: string[]) => Promise<string> = async (args) => String(await ghInteractiveRead(args,
-  { encoding: "utf8", maxBuffer: GH_MAX_BUFFER_BYTES }))): GithubPageFetch {
+ *  read is a reason, never a throw, so the pass records where to resume. A RATE-LIMITED read is
+ *  neither (W1-T14778): it waits (Retry-After, else a minute) and retries the same path. */
+const defaultGhApiRead = async (args: string[]): Promise<string> => String(await ghInteractiveRead(args,
+  { encoding: "utf8", maxBuffer: GH_MAX_BUFFER_BYTES }));
+
+export function ghApiFetch(read: (args: string[]) => Promise<string> = defaultGhApiRead, pacing: GhApiFetchPacing = {}): GithubPageFetch {
+  const sleep = pacing.sleep ?? sleepFor;
   return async (path) => {
     let body: string;
-    try { body = await read(["api", path]); }
-    catch {
-      const reason = "github-read-failed";
-      return { ok: false, reason };
+    for (;;) {
+      await pacing.beforeRead?.();
+      try { body = await read(["api", path]); break; }
+      catch (error) {
+        if (classifyGhLimitFailure(error) === undefined) {
+          const reason = "github-read-failed";
+          return { ok: false, reason };
+        }
+        const afterSeconds = defaultGhRetryAfterSeconds(error);
+        await sleep(afterSeconds === undefined ? RATE_LIMIT_RETRY_MS : afterSeconds * 1000);
+      }
     }
     return pageOf(body);
+  };
+}
+
+/** W1-T14778: the production pacer. It reads `rate_limit` (which spends no quota) at most once a
+ *  minute, and while the core bucket is at or under the daemon's write reserve it waits for the
+ *  reset, so one long pass never spends the share the daemon and its writes rely on. */
+export function rateLimitPacer(read: (args: string[]) => Promise<string>, opts: { now?: () => number;
+  sleep?: (ms: number) => Promise<void>; reserveFraction?: number } = {}): () => Promise<void> {
+  const now = opts.now ?? Date.now;
+  const sleep = opts.sleep ?? sleepFor;
+  const reserveFraction = opts.reserveFraction ?? GITHUB_WRITE_RESERVE_FRACTION;
+  let probedAt = Number.NEGATIVE_INFINITY;
+  return async () => {
+    while (now() - probedAt >= RATE_LIMIT_RETRY_MS) {
+      probedAt = now();
+      let core: Record<string, unknown> | undefined;
+      try { core = record(record(record(JSON.parse(await read(["api", "rate_limit"])))?.resources)?.core); }
+      catch { return; }
+      const limit = Number(core?.limit), remaining = Number(core?.remaining), reset = Number(core?.reset);
+      if (![limit, remaining, reset].every(Number.isFinite) || remaining > limit * reserveFraction) return;
+      await sleep(Math.max(1_000, reset * 1000 - now() + 1_000));
+      probedAt = Number.NEGATIVE_INFINITY;
+    }
   };
 }
 
@@ -254,7 +299,7 @@ async function readHeadGreen(fetch: GithubPageFetch, repo: string, pull: GithubP
   const observation = headObservation(pull);
   if (observation === null || budget.left <= 0) return false;
   const candidate = observation.pending[0];
-  const read = async (path: string) => { budget.left -= 1; observation.readAt = asOf; return fetch(path); };
+  const read = async (path: string) => { spend(budget, 1); observation.readAt = asOf; return fetch(path); };
   if (candidate) {
     const path = candidate.commitAssociationPending ? `repos/${repo}/commits/${pull.headSha}/pulls?per_page=${GITHUB_PAGE_SIZE}&page=1`
       : candidate.producer ? `repos/${repo}/actions/jobs/${candidate.jobId}` : `repos/${repo}/actions/runs/${candidate.runId}`;
@@ -392,7 +437,10 @@ export function parseGithubStore(value: unknown): FieldTrialsGithubStore {
   return store as unknown as FieldTrialsGithubStore;
 }
 
-type Budget = { left: number };
+/** `spent` counts requests, so an unbounded (infinite) `left` still reports finite per-phase counts. */
+type Budget = { left: number; spent?: number };
+function spend(budget: Budget, requests: number): void { budget.left -= requests; budget.spent = (budget.spent ?? 0) + requests; }
+const spentOf = (budget: Budget): number => budget.spent ?? 0;
 
 function laterIso(a: string | null, b: string | null): string | null {
   return a === null ? b : b === null || a >= b ? a : b;
@@ -406,7 +454,7 @@ async function sweepListPage(fetch: GithubPageFetch, path: string, cursor: Githu
     Object.assign(cursor, { resumePage: page, state: "partial", reason: "page-budget-exhausted" });
     return;
   }
-  budget.left -= 1;
+  spend(budget, 1);
   const result = await fetch(`${path}${path.includes("?") ? "&" : "?"}per_page=${GITHUB_PAGE_SIZE}&page=${page}`);
   if (!result.ok) {
     if (page === 1) cursor.head = { state: "unavailable", asOf, reason: result.reason };
@@ -434,7 +482,7 @@ async function sweepListPage(fetch: GithubPageFetch, path: string, cursor: Githu
 async function readDetail(fetch: GithubPageFetch, repo: string, pull: GithubPull, budget: Budget,
   asOf: string): Promise<GithubPull["detail"] | null> {
   if (budget.left < 3) return null;
-  budget.left -= 3;
+  spend(budget, 3);
   const reviews = await fetch(`repos/${repo}/pulls/${pull.number}/reviews?per_page=${GITHUB_PAGE_SIZE}`);
   const commits = await fetch(`repos/${repo}/pulls/${pull.number}/commits?per_page=${GITHUB_PAGE_SIZE}`);
   if (!reviews.ok) return { state: "unavailable", reason: reviews.reason };
@@ -483,9 +531,9 @@ export interface FieldTrialsGithubRepoPass {
 }
 
 async function ingestRepo(fetch: GithubPageFetch, repo: string, store: GithubRepoStore, budget: Budget,
-  asOf: string): Promise<FieldTrialsGithubRepoPass> {
+  asOf: string, checkpoint: () => void = () => {}): Promise<FieldTrialsGithubRepoPass> {
   const requests = { fresh: 0, backfill: 0, statuses: 0, details: 0, headGreens: 0 };
-  const initialBudget = budget.left;
+  const initialSpent = spentOf(budget);
   const resources: Array<{ key: keyof GithubRepoStore["cursors"]; path: string;
     timeOf: (item: unknown) => string | null; upsert: (item: unknown) => void }> = [
     { key: "pulls", path: `repos/${repo}/pulls?state=all&sort=updated&direction=desc`,
@@ -520,6 +568,7 @@ async function ingestRepo(fetch: GithubPageFetch, repo: string, store: GithubRep
     const resuming = (cursor.resumePage ?? 1) > 1;
     const head = resuming ? blankCursor() : cursor;
     await sweepListPage(fetch, resource.path, head, budget, asOf, resource.timeOf, resource.upsert);
+    checkpoint();
     if (resuming) {
       cursor.pagesRead += head.pagesRead;
       cursor.sweepHigh = laterIso(cursor.sweepHigh, head.sweepHigh ?? head.watermark);
@@ -528,7 +577,7 @@ async function ingestRepo(fetch: GithubPageFetch, repo: string, store: GithubRep
     }
     if (head.head?.state === "unavailable" && head.head.asOf === asOf) blocked.add(resource.key);
   }
-  requests.fresh = initialBudget - budget.left;
+  requests.fresh = spentOf(budget) - initialSpent;
   const detailCandidates = () => Object.values(store.pulls).filter(needsDetail)
     .sort((a, b) => Number(a.detail.state === "observed") - Number(b.detail.state === "observed")
       || (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "") || b.number - a.number);
@@ -557,7 +606,7 @@ async function ingestRepo(fetch: GithubPageFetch, repo: string, store: GithubRep
   if (mode === "head-green") detailReserve = 0;
   const headReserve = !hasHeadWork || mode === "legacy-detail" ? 0 : Math.min(4, Math.max(0, budget.left - detailReserve - statusReserve));
   if (scarce) store.evidenceLane = mode === "head-green" ? "legacy-detail" : "head-green";
-  const backfillStart = budget.left;
+  const backfillStart = spentOf(budget);
   let next = Number.isInteger(store.backfillResourceIndex) ? (store.backfillResourceIndex ?? 0) % resources.length : 0;
   if (next < 0) next = 0;
   while (budget.left > detailReserve + statusReserve + headReserve) {
@@ -571,43 +620,49 @@ async function ingestRepo(fetch: GithubPageFetch, repo: string, store: GithubRep
     const resource = resources[chosen]!;
     const cursor = store.cursors[resource.key];
     await sweepListPage(fetch, resource.path, cursor, budget, asOf, resource.timeOf, resource.upsert);
+    checkpoint();
     if (cursor.reason !== null && cursor.reason !== "page-budget-exhausted") blocked.add(resource.key);
     next = (chosen + 1) % resources.length;
     store.backfillResourceIndex = next;
   }
-  requests.backfill = backfillStart - budget.left;
-  const statusesStart = budget.left;
+  requests.backfill = spentOf(budget) - backfillStart;
+  const statusesStart = spentOf(budget);
   for (const deployment of statusCandidates()) {
     if (budget.left <= detailReserve + headReserve) break;
-    budget.left -= 1;
+    spend(budget, 1);
     const statuses = await fetch(`repos/${repo}/deployments/${deployment.id}/statuses?per_page=${GITHUB_PAGE_SIZE}`);
     const newest = statuses.ok ? record(statuses.items[0]) : undefined;
     deployment.status = !statuses.ok ? { state: "unavailable", reason: statuses.reason }
       : newest === undefined ? { state: "no-status", at: null } : { state: String(newest.state), at: iso(newest.created_at) };
+    checkpoint();
   }
-  requests.statuses = statusesStart - budget.left;
-  const detailsStart = budget.left;
-  const legacyBudget = { left: budget.left - headReserve };
+  requests.statuses = spentOf(budget) - statusesStart;
+  const detailsStart = spentOf(budget);
+  const legacyBudget: Budget = { left: budget.left - headReserve };
   for (const pull of detailCandidates()) {
     const detail = await readDetail(fetch, repo, pull, legacyBudget, asOf);
-    if (detail !== null) pull.detail = detail;
+    if (detail !== null) { pull.detail = detail; checkpoint(); }
   }
   budget.left = legacyBudget.left + headReserve;
-  requests.details = detailsStart - budget.left;
-  const headsStart = budget.left;
-  for (let reads = 0; reads < headReserve && budget.left > 0; reads++) {
+  budget.spent = spentOf(budget) + spentOf(legacyBudget);
+  requests.details = spentOf(budget) - detailsStart;
+  const headsStart = spentOf(budget);
+  // W1-T14778: an unbounded pass reads every head it can progress; only an operator override keeps a reserve.
+  const headReads = Number.isFinite(budget.left) ? headReserve : Number.POSITIVE_INFINITY;
+  for (let reads = 0; reads < headReads && budget.left > 0; reads++) {
     const pull = headCandidates()[0];
     if (!pull) break;
     const observation = headObservation(pull)!;
     if (observation.history.state === "complete" && observation.pending.length === 0 && observation.firstObserved === null) {
       observation.history = { state: "pending", nextPage: 1, pagesRead: 0, reason: null }; observation.seenCheckIds = [];
     }
-    const before = budget.left;
+    const before = spentOf(budget);
     if (!await readHeadGreen(fetch, repo, pull, budget, asOf)) blockedHeads.add(pull.nodeId);
+    checkpoint();
     if (observation.pending.length === 0 && observation.firstObserved === null && observation.history.state === "complete") blockedHeads.add(pull.nodeId);
-    if (before === budget.left) break;
+    if (before === spentOf(budget)) break;
   }
-  requests.headGreens = headsStart - budget.left;
+  requests.headGreens = spentOf(budget) - headsStart;
   const pulls = Object.values(store.pulls);
   return { pulls: { ...store.cursors.pulls }, commits: { ...store.cursors.commits }, deployments: { ...store.cursors.deployments },
     detailsPending: pulls.filter((pull) => pull.detail.state === "pending").length,
@@ -629,17 +684,22 @@ export interface FieldTrialsGithubPass {
 }
 
 /**
- * One resumable pass over every repository. The page budget is shared evenly, so one large
- * repository cannot starve the others. The store is mutated in place and returned with the pass.
+ * One resumable pass over every repository (W1-T14778). With no `maxPages` the pass reads until every
+ * cursor completes and every pending read it can progress is made; the transport paces it against the
+ * installation's rate limit. An operator `maxPages` override is shared evenly, so one large repository
+ * cannot starve the others. `checkpoint` runs after each read that changed the store, so a caller can
+ * persist a long pass as it goes. The store is mutated in place and returned with the pass.
  */
 export async function ingestFieldTrialsGithub(fetch: GithubPageFetch, repos: readonly string[],
-  store: FieldTrialsGithubStore, asOf: string, maxPages: number = DEFAULT_MAX_PAGES): Promise<FieldTrialsGithubPass> {
-  if (!Number.isSafeInteger(maxPages) || maxPages < 0) throw new RangeError("field-trials page budget must be a nonnegative safe integer");
+  store: FieldTrialsGithubStore, asOf: string, maxPages?: number, checkpoint?: () => void): Promise<FieldTrialsGithubPass> {
+  if (maxPages !== undefined && (!Number.isSafeInteger(maxPages) || maxPages < 0)) {
+    throw new RangeError("field-trials page budget must be a nonnegative safe integer");
+  }
   const pass: FieldTrialsGithubPass = { state: "complete", asOf, pagesRead: 0, requestsMade: 0, repos: {} };
-  const share = Math.floor(maxPages / Math.max(1, repos.length));
+  const share = maxPages === undefined ? Number.POSITIVE_INFINITY : Math.floor(maxPages / Math.max(1, repos.length));
   for (const [index, repo] of repos.entries()) {
     const repoStore = store.repos[repo] ??= emptyRepoStore();
-    const budget = { left: share + (index < maxPages % Math.max(1, repos.length) ? 1 : 0) };
+    const budget = { left: maxPages === undefined ? share : share + (index < maxPages % Math.max(1, repos.length) ? 1 : 0) };
     let requests = 0;
     let pages = 0;
     const countedFetch: GithubPageFetch = async (path) => {
@@ -648,7 +708,7 @@ export async function ingestFieldTrialsGithub(fetch: GithubPageFetch, repos: rea
       if (result.ok) pages += 1;
       return result;
     };
-    pass.repos[repo] = await ingestRepo(countedFetch, repo, repoStore, budget, asOf);
+    pass.repos[repo] = await ingestRepo(countedFetch, repo, repoStore, budget, asOf, checkpoint);
     const cursors = Object.values(repoStore.cursors);
     pass.pagesRead += pages;
     pass.requestsMade = (pass.requestsMade ?? 0) + requests;
@@ -657,4 +717,10 @@ export async function ingestFieldTrialsGithub(fetch: GithubPageFetch, repos: rea
   }
   if (repos.length > 0 && Object.values(pass.repos).every((repo) => repo.pulls.state === "unavailable")) pass.state = "unavailable";
   return pass;
+}
+
+/** W1-T14778: the refresh's seam: {@link ghApiFetch} behind {@link rateLimitPacer}, over the same read. */
+export function pacedGhApiFetch(read: (args: string[]) => Promise<string> = defaultGhApiRead,
+  pacer: Parameters<typeof rateLimitPacer>[1] = {}): GithubPageFetch {
+  return ghApiFetch(read, { beforeRead: rateLimitPacer(read, pacer), ...(pacer.sleep === undefined ? {} : { sleep: pacer.sleep }) });
 }

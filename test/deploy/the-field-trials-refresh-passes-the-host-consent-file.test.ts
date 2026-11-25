@@ -87,7 +87,7 @@ test("W1-T10832: the refresh passes the private consent file only when it is own
   for (const placement of ["owner-only", "override", "group-readable", "symlink", "absent"] as const) {
     const run = pass(placement);
     assert.equal(run.result.status, 0, `${placement}: ${run.result.stderr}`);
-    const snapshot = run.calls.find(call => call.includes(" field-trials ") && call.includes("--max-pages"));
+    const snapshot = run.calls.find(call => call.includes(" field-trials ") && call.includes("--source core="));
     assert.ok(snapshot, `${placement}: the snapshot step ran`);
     assert.ok(run.calls.some(call => call.includes("private-routing-daily-review.mjs")), `${placement}: routing review ran`);
     assert.ok(run.calls.some(call => call.includes("private-field-trials-case-files.mjs")), `${placement}: case files ran`);
