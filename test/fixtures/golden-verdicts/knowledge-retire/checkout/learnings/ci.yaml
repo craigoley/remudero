@@ -1,3 +1,9 @@
-- id: ci-gate-refusals-repaired-by-hand
-  # knowledge gardener: retire ci-gate-refusals-repaired-by-hand
+- id: codeql-read-model-lane
+  # knowledge gardener: retire codeql-read-model-lane
+  lifecycle: superseded
+- id: dispatch-function-owns-its-precondition
+  # knowledge gardener: retire dispatch-function-owns-its-precondition
+  lifecycle: superseded
+- id: stack-tip-merges-its-base
+  # knowledge gardener: retire stack-tip-merges-its-base
   lifecycle: superseded

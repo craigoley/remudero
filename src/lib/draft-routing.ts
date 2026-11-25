@@ -45,7 +45,13 @@ export interface DraftChoice {
   posterior: DraftPosterior;
   arms: DraftPosterior[];
   skipped?: Array<{ deployment: string; count: number; until: string }>;
+  /** Deployments dropped for a measured clean rate under {@link DRAFT_CLEAN_RATE_FLOOR}, each with the rate and the attempts behind it. */
+  floorSkipped?: Array<{ deployment: string; attempts: number; cleanRate: number }>;
 }
+
+/** A route with at least this many recorded attempts and a clean rate under the floor is dropped while another remains. */
+export const DRAFT_CLEAN_RATE_MIN_ATTEMPTS = 50;
+export const DRAFT_CLEAN_RATE_FLOOR = 0.05;
 
 export type DraftRoutingLog = (step: string, extra?: Record<string, unknown>) => void;
 
@@ -141,8 +147,17 @@ export function chooseDraftDeployment(stats: DraftStats, candidates: readonly Dr
     return Number.isFinite(until) && now < until ? [{ deployment: arm.deployment, count: recent.length, until: fixedClock(until).iso() }] : [];
   });
   const skipped = blocked.length < candidates.length ? blocked : [];
+  // The floor only drops a route while another eligible, unblocked route remains: it never empties the set.
+  const unblocked = candidates.filter((arm) => !skipped.some((skip) => skip.deployment === arm.deployment));
+  const belowFloor = unblocked.flatMap(({ deployment }) => {
+    const measured = stats[deployment];
+    return measured && measured.attempts >= DRAFT_CLEAN_RATE_MIN_ATTEMPTS && measured.clean / measured.attempts < DRAFT_CLEAN_RATE_FLOOR
+      ? [{ deployment, attempts: measured.attempts, cleanRate: measured.clean / measured.attempts }] : [];
+  });
+  const floorSkipped = belowFloor.length < unblocked.length ? belowFloor : [];
   const arms = candidates.flatMap((arm, index): DraftPosterior[] => {
     if (skipped.some((skip) => skip.deployment === arm.deployment)) return [];
+    if (floorSkipped.some((skip) => skip.deployment === arm.deployment)) return [];
     const measured = stats[arm.deployment];
     const attempts = measured?.attempts ?? 0;
     const clean = Math.min(attempts, measured?.clean ?? 0);
@@ -158,7 +173,8 @@ export function chooseDraftDeployment(stats: DraftStats, candidates: readonly Dr
     return [{ ...arm, alpha, beta, sampledCleanRate, costPerAttemptUsd, cleanPerDollar: sampledCleanRate / costPerAttemptUsd }];
   });
   const posterior = arms.reduce((best, arm) => arm.cleanPerDollar > best.cleanPerDollar ? arm : best);
-  return { deployment: posterior.deployment, reason: "thompson-clean-per-dollar", posterior, arms, ...(skipped.length ? { skipped } : {}) };
+  return { deployment: posterior.deployment, reason: "thompson-clean-per-dollar", posterior, arms, ...(skipped.length ? { skipped } : {}),
+    ...(floorSkipped.length ? { floorSkipped } : {}) };
 }
 
 /** Correlate legacy outcomes by run and proposal, never crediting an earlier relint's deployment. */
