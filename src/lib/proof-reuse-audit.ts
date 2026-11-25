@@ -120,7 +120,8 @@ export function recordProofReuseAudit(path: string, entry: ProofReuseAuditEntry)
     appendFileSync(path, `${JSON.stringify(entry)}\n`);
     return undefined;
   } catch (error) {
-    return String((error as Error)?.message ?? error).slice(0, 200);
+    const reason = String((error as Error)?.message ?? error).slice(0, 200);
+    return reason;
   }
 }
 

@@ -1647,7 +1647,11 @@ export async function runReview(host: ReviewCommandHost, args: {
   const auditPath = proofReuseAuditPath(dirname(args.ledgerPath), { owner, repo });
   const reusePlan = proofReuseRead === undefined ? undefined : await planProofReuse(await proofReuseRead, {
     prUrl, headSha, diff, body: inputBody, criteria, headCheckoutDir: args.headCheckoutDir!,
-    audit: readProofReuseAudit(auditPath, `${owner}/${repo}`, priorReviewRows),
+    audit: await readLedgerUnionRawLinesAsync(dirname(args.ledgerPath), { step: PROOF_REUSE_DISAGREEMENT_STEP, maxRotations: 0,
+      refuseIncomplete: true }).then(read => readProofReuseAudit(auditPath, `${owner}/${repo}`, () => {
+      if (!read.ok) throw new Error(`disagreement rows unreadable: ${read.unread.join(", ")}`);
+      return read.rawLines.map(line => JSON.parse(line) as Record<string, unknown>);
+    })),
   });
   // The first judged fold is the measurement: the binding fold after it reuses the same executions.
   let auditRecord: { audit_error?: string } | undefined;

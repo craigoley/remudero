@@ -110,7 +110,7 @@ function unexpected(): never { throw new Error("unexpected review fixture depend
 
 /** One review of the fixture head through the real {@link runReview}, with gh answering `routes`. */
 async function review(t: TestContext, head: Head, ledgerPath: string, routes: Array<{ when: string; stdout?: string }>,
-  over: { criteria?: typeof CRITERIA; diff?: string; reviewer?: (cwd: string) => void } = {}) {
+  over: { criteria?: typeof CRITERIA; diff?: string; reviewer?: (cwd: string) => void; ledger?: Array<Record<string, unknown>> } = {}) {
   setProofSandboxForTests({ mode: "unsandboxed", reason: "disposable proof fixture" });
   t.after(() => setProofSandboxForTests());
   const criteria = over.criteria ?? CRITERIA;
@@ -131,7 +131,7 @@ async function review(t: TestContext, head: Head, ledgerPath: string, routes: Ar
     reviewerClockBoundMs: () => 60_000,
     reviewSubjectGit: unexpected,
   };
-  writeFileSync(ledgerPath, "");
+  writeFileSync(ledgerPath, (over.ledger ?? []).map(row => `${JSON.stringify(row)}\n`).join(""));
   const rows: Array<Record<string, unknown>> = [];
   const reviewer = over.reviewer;
   return withGhShim([...routes, { when: "pr diff", stdout: over.diff ?? DIFF }, { when: "api", stdout: "{}" }], async () => {
@@ -310,6 +310,12 @@ describe("test/review/a-review-reuses-ci-proof-passes-under-an-audit.test.ts", (
       assert.equal(typeof again.row.would_save_ms, "number", "nothing reused: still a would-be saving");
       assert.equal(again.row.saved_ms, undefined);
     }
+    const s = state(head, "ledgered");
+    seed(s.journal, 1000);
+    const row = { ts: "2026-11-24T10:00:00.000Z", step: PROOF_REUSE_DISAGREEMENT_STEP, repo: REPOSITORY, head_sha: head.headSha, proof: PROOF };
+    const ledgered = await review(t, head, s.ledgerPath, routes, { ledger: [row] });
+    assert.deepEqual(ledgered.row.audited, [PROOF], "the ledger's disagreement row holds the proof with no journal line for it");
+    assert.equal(ledgered.result.criteria[0]?.proof_exec, "executed_fail");
   });
 
   test("W1-T14745 criterion 4: the shadow row keeps being written, naming the reused and audited proofs and the time reuse saved", async t => {
