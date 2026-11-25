@@ -8,6 +8,7 @@ import {
   operatorReviewArgs, reviewCommand, runReview, type ReviewCommandDeps, type ReviewCommandHost,
 } from "#src/cli/commands/review.js";
 import type { Config } from "#src/lib/config.js";
+import { shadowJudgeSampled } from "#src/lib/shadow-judge.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, collectWorkerResult, spawnWorker } from "#src/lib/worker.js";
 import {
   classifyReviewerCommand, createWorkerToolLineage, REDIRECT_RE, REDIRECT_WITH_TARGET_RE, type RecordedProofCommand,
@@ -164,7 +165,8 @@ test("W1-T14037 criterion 1: collectWorkerResult carries the counts only for a s
 // ── the review flow: the reviewer spawn is handed this head's recorded proofs and the review.reviewer row counts each kind ──
 
 const HEAD = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
-const PR_URL = "https://github.com/craigoley/remudero/pull/9996";
+const PR_NUMBER = 9996;
+const prUrl = (pr: number) => `https://github.com/craigoley/remudero/pull/${pr}`;
 const PROOF_PATTERN = "export async function reviewCommand(";
 const BODY = [
   "## Acceptance",
@@ -197,12 +199,15 @@ interface ReviewRun {
   spawns: SpawnArgs[];
   prompt: string;
   proofEvidence: unknown;
+  /** The primary reviewer's queries only. W1-T14867: a sampled shadow judge reuses the same query seam. */
   queried: number;
+  shadowQueried: number;
 }
 
 /** One `rmd review` of a fixture PR whose reviewer re-runs the recorded grep, runs another test, and reads. `keepReviewer`
  *  false strips the reviewer field before the spawn, so the two runs differ ONLY in that field. */
-async function reviewOnce(keepReviewer: boolean): Promise<ReviewRun> {
+async function reviewOnce(keepReviewer: boolean, pr: number = PR_NUMBER): Promise<ReviewRun> {
+  const PR_URL = prUrl(pr);
   const root = mkdtempSync(join(tmpdir(), "rmd-t14037-review-"));
   const binDir = mkdtempSync(join(tmpdir(), "rmd-t14037-review-bin-"));
   const oldPath = process.env.PATH;
@@ -212,7 +217,7 @@ async function reviewOnce(keepReviewer: boolean): Promise<ReviewRun> {
   const shim = ghShim([
     { when: "/statuses?", stdout: "[[]]" },
     { when: "/commits/", stdout: '{"statuses":[]}' },
-    { when: "/pulls/", stdout: JSON.stringify({ number: 9996, html_url: PR_URL, updated_at: "t", body: BODY, state: "open",
+    { when: "/pulls/", stdout: JSON.stringify({ number: pr, html_url: PR_URL, updated_at: "t", body: BODY, state: "open",
       merged: false, head: { ref: branch, sha: HEAD } }) },
     { when: "pr view", stdout: '{"state":"OPEN"}' },
     { when: "pr diff", stdout: "diff --git a/src/x.ts b/src/x.ts\n--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1 +1 @@\n-a\n+b\n" },
@@ -220,6 +225,7 @@ async function reviewOnce(keepReviewer: boolean): Promise<ReviewRun> {
   ]);
   const oldLog = console.log;
   let queried = 0;
+  let shadowQueried = 0;
   const use = (id: string, name: string, input: unknown) =>
     ({ type: "assistant", message: { id: `m-${id}`, content: [{ type: "tool_use", id, name, input }] } });
   const reviewerQueryFn = (() => (async function* () {
@@ -231,7 +237,9 @@ async function reviewOnce(keepReviewer: boolean): Promise<ReviewRun> {
     yield { type: "result", subtype: "success", is_error: false, result: "REVIEW_VERDICT 1: PASS", session_id: "s-14037",
       total_cost_usd: 0.01, num_turns: 4 };
   })()) as unknown as Parameters<typeof runReview>[1]["reviewerQueryFn"];
+  // W1-T14867: the 1-in-20 shadow is counted apart, so the primary reviewer's count stays exact when it is sampled.
   const shadowQueryFn = (() => (async function* () {
+    shadowQueried++;
     yield { type: "result", subtype: "success", is_error: false, result: "REVIEW_VERDICT 1: PASS", session_id: "s-14037-shadow",
       total_cost_usd: 0, num_turns: 1 };
   })()) as unknown as Parameters<typeof runReview>[1]["reviewerQueryFn"];
@@ -252,11 +260,11 @@ async function reviewOnce(keepReviewer: boolean): Promise<ReviewRun> {
     }
     const isShadowJudge = spawns.length > 0;
     spawns.push(args);
-    const forwarded: SpawnArgs = { ...args, keychain: { platform: "linux", readCredentialFile: () => "{}" } };
-    if (!keepReviewer) delete forwarded.reviewer;
     // The review's shadow judge samples 1 in 20 by a hash that includes the head sha, so on some heads it spawns again
     // with the same queryFn. Answer it apart, so `queried` counts only the reviewer's own query on every head.
-    if (isShadowJudge) forwarded.queryFn = shadowQueryFn;
+    const forwarded: SpawnArgs = { ...args, keychain: { platform: "linux", readCredentialFile: () => "{}" },
+      queryFn: isShadowJudge ? shadowQueryFn : reviewerQueryFn };
+    if (!keepReviewer) delete forwarded.reviewer;
     return spawnWorker(forwarded);
   };
   try {
@@ -268,9 +276,9 @@ async function reviewOnce(keepReviewer: boolean): Promise<ReviewRun> {
     process.env.PATH = `${shim.dir}:${binDir}:${oldPath}`;
     console.log = () => {};
     const deps: ReviewCommandDeps = {
-      fetchView: (viewArgs) => viewArgs.join(" ").endsWith("/pulls/9996")
-        ? { number: 9996, html_url: PR_URL, updated_at: "t", body: BODY, state: "open", merged: false, head: { ref: branch, sha: HEAD } }
-        : { headRefOid: HEAD, headRefName: branch, body: BODY, url: PR_URL, number: 9996 },
+      fetchView: (viewArgs) => viewArgs.join(" ").endsWith(`/pulls/${pr}`)
+        ? { number: pr, html_url: PR_URL, updated_at: "t", body: BODY, state: "open", merged: false, head: { ref: branch, sha: HEAD } }
+        : { headRefOid: HEAD, headRefName: branch, body: BODY, url: PR_URL, number: pr },
       fetchHead: () => {},
       loadConfig: () => ({ root, installRoot: REPO_ROOT, claudeBin: "/bin/true", enabledProviders: ["claude"] }) as Config,
       postReviewPending: async () => ({ posted: true }),
@@ -281,12 +289,12 @@ async function reviewOnce(keepReviewer: boolean): Promise<ReviewRun> {
       runReview: (args) => runReview(host, { ...args, arm: () => "armed", disarm: () => "not-armed", reviewerQueryFn, reviewerSpawnWorker }),
       reviewerCodeFreshness: () => ({ status: "fresh", codeSha: HEAD, originMainSha: HEAD, advance: "none" }),
     } satisfies ReviewCommandDeps;
-    await reviewCommand(host, "9996", operatorReviewArgs(["--repo", "craigoley/remudero"]), deps);
+    await reviewCommand(host, String(pr), operatorReviewArgs(["--repo", "craigoley/remudero"]), deps);
     const ledgerPath = join(root, "state", "ledger.ndjson");
     const ledger = existsSync(ledgerPath)
       ? readFileSync(ledgerPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>)
       : [];
-    return { ledger, spawns, prompt, proofEvidence, queried };
+    return { ledger, spawns, prompt, proofEvidence, queried, shadowQueried };
   } finally {
     console.log = oldLog;
     process.env.PATH = oldPath;
@@ -349,4 +357,15 @@ test("W1-T14037 criterion 2: with and without the reviewer field the verdict, fl
   // Only worker.tool_lineage receipts and the review.reviewer row gain fields: the same steps are written either way.
   const steps = (run: ReviewRun) => [...new Set(run.ledger.map((row) => String(row.step)))].sort();
   assert.deepEqual(steps(withKinds), steps(without));
+});
+
+test("W1-T14867: a sampled shadow judge does not count as the reviewer's query", async () => {
+  // The shadow is sampled by a hash of the PR URL, the head and the decision digest; pick a PR the hash samples.
+  const digest = rowOf(await reviewOnce(true), "review.posted")?.review_decision_digest;
+  assert.equal(typeof digest, "string", "the first review posts its decision digest");
+  let pr = PR_NUMBER + 1;
+  while (!shadowJudgeSampled(`review:${prUrl(pr)}:${HEAD}:${String(digest)}`)) pr++;
+  const run = await reviewOnce(true, pr);
+  assert.ok(run.shadowQueried >= 1, `PR ${pr} samples the shadow judge, which really queries (spawns: ${run.spawns.length})`);
+  assert.equal(run.queried, 1, "the reviewer's own query is counted once, the shadow's apart from it");
 });

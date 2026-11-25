@@ -602,6 +602,20 @@ function tightestRemaining(capacity: ProviderCapacity): number {
   return Math.min(...windows.map((window) => 100 - window.usedPercent));
 }
 
+/**
+ * W1-T14868: the headroom a provider can still spend before its windows refuse it, judged against each
+ * window's OWN ceiling. In a window's final rung the ceiling rises above the flat reserve, so the reserve it
+ * held is spendable before the reset and weighs in the draw; judged against the flat reserve instead, a window
+ * at 95 percent a day before its reset weighed 1 against a healthy provider's hundreds and its subscription
+ * expired unused. Without a clock, or with no reset on a window, the ceiling is the flat reserve as before.
+ */
+export function usableHeadroomPercent(capacity: ProviderCapacity, tightestRemainingPercent: number, reservePercent: number,
+  timing?: ProviderHeadroomTiming): number {
+  const windows = providerAllocationWindows(capacity).filter(validCapacityWindow);
+  if (!timing || windows.length === 0) return tightestRemainingPercent - reservePercent;
+  return Math.min(...windows.map((window) => windowReserveCeiling(window, reservePercent, timing) - window.usedPercent));
+}
+
 /** One subscription as the auction saw it: whether it could take work, why not, and its headroom. */
 export interface ProviderEligibility {
   eligible: boolean;
@@ -737,7 +751,7 @@ export function selectWorkerProvider(
         provider: capacity.provider,
         capacity,
         tightestRemainingPercent,
-        allocationWeight: Math.max(1, tightestRemainingPercent - reservePercent) ** 2,
+        allocationWeight: Math.max(1, usableHeadroomPercent(capacity, tightestRemainingPercent, reservePercent, timing)) ** 2,
         ...(lane ? { lane } : {}),
       };
     })

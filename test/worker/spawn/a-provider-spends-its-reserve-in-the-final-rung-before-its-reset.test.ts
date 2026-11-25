@@ -422,3 +422,41 @@ test("W1-T14200 criterion 4: invariant:the-reserve-holds-outside-the-final-rung"
     assert.deepEqual(timed, flat, `codex ${used}% resetting in 30 h`);
   }
 });
+
+// The 2026-11-25T19:23Z host reading: Claude at 19 percent headroom; Codex at 5 percent, 20 h before its reset.
+const T14868_NOW = Date.parse("2026-11-25T19:23:53Z");
+const T14868_TIMING: ProviderHeadroomTiming = { nowMs: T14868_NOW, policy: buildDefaultHeadroomPolicy() };
+const T14868_CLAUDE: ProviderCapacity = { provider: "claude", readable: true, windows: [{ name: "7d", usedPercent: 81 }] };
+const t14868Codex = (hours: number, usedPercent = 95, credits?: ProviderCapacity["credits"]): ProviderCapacity => ({
+  provider: "codex", readable: true, ...(credits ? { credits } : {}),
+  windows: [{ name: "7d", usedPercent, resetsAt: Math.floor(T14868_NOW / 1000) + hours * 3600 }] });
+const t14868Share = (codex: ProviderCapacity, timing?: ProviderHeadroomTiming) => selectWorkerProvider([T14868_CLAUDE, codex], 5,
+  0.999, undefined, timing).draw?.probabilities.find((entry) => entry.provider === "codex")?.probability;
+
+test("W1-T14868 criterion 1: a final-rung window weighs its headroom against its own ceiling, so expiring subscription is drawn", () => {
+  // In its final day the 5 percent reserve is spendable: 5^2 against Claude's (19 - 5)^2, not 1 against 196.
+  const finalDay = selectWorkerProvider([T14868_CLAUDE, t14868Codex(20)], 5, 0.999, undefined, T14868_TIMING);
+  assert.equal(finalDay.provider, "codex");
+  assert.equal(finalDay.lane, undefined, "drawn on its subscription, never its credits");
+  assert.equal(finalDay.allocationWeight, 25);
+  assert.equal(t14868Share(t14868Codex(20), T14868_TIMING), 25 / (25 + 196));
+  // Funded credits change nothing while the subscription itself carries the draw.
+  const funded = { hasCredits: true, unlimited: false, balance: 35051.74 };
+  assert.equal(t14868Share(t14868Codex(20, 95, funded), T14868_TIMING), 25 / (25 + 196));
+});
+
+test("W1-T14868 criterion 2: invariant:subscription-before-credits — outside a final rung the weights are origin/main's, and credits still draw only when no subscription has headroom", () => {
+  // Outside the final rung the reserve holds: Codex at 95 percent 30 h out is not drawn at all.
+  assert.equal(t14868Share(t14868Codex(30), T14868_TIMING), undefined);
+  // Outside the final rung (and with no clock) the weight is the flat-reserve weight: (10 - 5)^2.
+  assert.equal(selectWorkerProvider([T14868_CLAUDE, t14868Codex(30, 90)], 5, 0.999, undefined, T14868_TIMING).allocationWeight, 25);
+  assert.equal(selectWorkerProvider([T14868_CLAUDE, t14868Codex(20, 90)], 5, 0.999).allocationWeight, 25);
+  assert.equal(selectWorkerProvider([T14868_CLAUDE, t14868Codex(20)], 5, 0, undefined, T14868_TIMING).allocationWeight, 196);
+  // Credits past the reserve never draw beside Claude's subscription headroom; they carry only once it is spent.
+  const funded = { hasCredits: true, unlimited: false, balance: 35051.74 };
+  assert.equal(t14868Share(t14868Codex(30, 95, funded), T14868_TIMING), undefined);
+  const spent: ProviderCapacity = { ...T14868_CLAUDE, windows: [{ name: "7d", usedPercent: 99 }] };
+  const carried = selectWorkerProvider([spent, t14868Codex(30, 95, funded)], 5, 0, undefined, T14868_TIMING);
+  assert.equal(carried.provider, "codex");
+  assert.equal(carried.lane, "codex-credits");
+});

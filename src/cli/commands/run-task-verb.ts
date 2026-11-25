@@ -40,7 +40,7 @@ import { checkpointCommitSubject, checkpointRemaining, classifyRoundTip, isWipSu
 import { hashInstallInputs } from "../../lib/install-hash.js";
 import { PREOPEN_GATE_STEP, preopenGateLedgerFields, renderPreopenGatePrompt, runPreopenGate, updatePreopenGateAlert, withFiledProofCheck, type PreopenGateResult } from "../../lib/preopen-gate.js";
 import { readPreopenGateRows } from "../../lib/preopen-gate-health.js";
-import { implementPromptParts, renderDiagnosePrompt, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts, renderPrerequisiteOutcomeBlock, renderReconPrompt, scopeGuardOutOfScopeFiles, withPrerequisiteOutcomes, type PriorPartialWork } from "../../lib/prompt-render.js";
+import { implementPromptParts, renderDiagnosePrompt, renderFixPrompt, renderImplementPrompt, renderImplementPromptWithParts, renderPrerequisiteOutcomeBlock, renderReconPrompt, scopeGuardOutOfScopeFiles, withPrerequisiteOutcomes, withProviderRuleHeadlines, type PriorPartialWork } from "../../lib/prompt-render.js";
 import type { RunResult } from "../../lib/run-result.js";
 import { dropTierRowsBeforePush, prePushGateRefusal } from "../../lib/pre-push-refusal.js";
 import type { Tier } from "../../lib/tier.js";
@@ -5616,7 +5616,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     runId,
     runReviewFn,
     say,
-    spawn,
+    spawn: dispatchSpawn,
     task,
     opsCriteriaAtOpen,
     opsTaskContract,
@@ -5626,6 +5626,9 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     workerStateSensor,
     spawnInjected = false,
   } = ctx;
+  let routedRuleHeadlines = ""; // W1-T13768: empty until the implement prompt's part is built.
+  // W1-T13768: every spawn below passes here, so a first attempt, a retry and a resumed handoff route alike.
+  const spawn: typeof spawnWorker = (args) => dispatchSpawn(withProviderRuleHeadlines(args, routedRuleHeadlines));
   // W1-T4655: set BEFORE the write, so no thrown-run exit (endThrownRun) writes a second verdict.
   let verdictWritten = false;
   let prOpened = false;
@@ -6863,6 +6866,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
       undefined,
       "CLAUDE.md",
     );
+    routedRuleHeadlines = ruleHeadlinesPart; // W1-T13768: `spawn` now drops it from a Codex-routed prompt.
     // W1-T3101 — approved, opted-in skills for this task class, spending the SAME knowledge budget
     // matchedLearnings already spends. Each eligible skill is withheld on a seeded share of tasks
     // (taskArmWithheld, W1-T14137), so buildSkillEffectivenessReport has a randomized control cohort.
