@@ -3,7 +3,6 @@
 // the real inventory and the production seams over real git; the ops catalog is a fake GitHub api over a real checkout.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +11,7 @@ import { test } from "node:test";
 import type { GardenLandOpts, GardenerDeps } from "#src/lib/gardener.js";
 import { mergePlanBlobs } from "#src/lib/plan.js";
 import {
+  assertOpsCheckoutAtPin,
   opsLandingInputs,
   orphanedHolds,
   planCandidates,
@@ -23,7 +23,7 @@ import {
 } from "#src/lib/plan-gardener.js";
 import type { OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
+import { gitRepo, originWithClone, type GitRepo } from "#test/helpers/git-repo.js";
 
 const shardText = (id: string, o: { deps?: string[]; status?: string; retirement?: string; type?: string; needsInput?: true } = {}) => [
   `- id: ${id}`, `  title: "the task ${id}"`, "  repo: remudero", `  depends_on: [${(o.deps ?? []).join(", ")}]`, `  type: ${o.type ?? "implement"}`,
@@ -33,6 +33,9 @@ const shardText = (id: string, o: { deps?: string[]; status?: string; retirement
 ].join("\n");
 
 type Spec = Parameters<typeof shardText>[1];
+
+/** The ops main commit a fake read is pinned at. */
+const OPS_PIN = "a".repeat(40);
 
 /** A public checkout holding `tasks` as one shard each, committed so the inventory's git reads work. */
 function publicWorld(tasks: Array<[string, Spec]>) {
@@ -57,7 +60,7 @@ function opsCatalog(tasks: Array<[string, Spec]>): PlanOpsRead {
     sources.set(rel, shardText(id, o));
   }
   const parsed = mergePlanBlobs([...sources].map(([rel, text]) => ({ label: rel.replace(/^plan\//, ""), text })), {}, { dependencyMode: "preserve-external" });
-  return { outcome: "ok", tasks: parsed.tasks, shards, sources };
+  return { outcome: "ok", pin: OPS_PIN, tasks: parsed.tasks, shards, sources };
 }
 
 const queuedOps = (...tasks: Array<[string, Spec]>) => opsCatalog(tasks);
@@ -106,18 +109,15 @@ test("W1-T14642 criterion 2: an id a reservation holds is not unknown, and an un
 
 test("W1-T14642 criterion 2: the production reservation read lists every refs/rmd-id ref of origin and is unknown when origin cannot be read", async () => {
   const w = productionWorld({}, "acme/ops");
-  const origin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t14642-origin-`));
-  const run = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email, GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email } }).trim();
-  run(origin, "init", "-q");
-  run(origin, "commit", "-q", "--allow-empty", "-m", "x");
-  const head = run(origin, "rev-parse", "HEAD");
-  for (const id of ["W1-T9", "W1-T9B"]) run(origin, "update-ref", `refs/rmd-id/${id}`, head);
-  run(w.repoRoot, "init", "-q");
-  run(w.repoRoot, "remote", "add", "origin", origin);
+  const origin = gitRepo({ kind: "w1t14642-origin" });
+  const head = origin.git("rev-parse", "HEAD");
+  for (const id of ["W1-T9", "W1-T9B"]) origin.git("update-ref", `refs/rmd-id/${id}`, head);
+  const publicCheckout = gitRepo({ kind: "w1t14642-public-checkout" });
+  publicCheckout.addRemote("origin", origin.dir);
   const rows: string[] = [];
-  const seam = productionPlanGardenOps({ repoRoot: w.repoRoot, stateDir: w.stateDir, stateRoot: w.root, log: (s) => void rows.push(s) });
+  const seam = productionPlanGardenOps({ repoRoot: publicCheckout.dir, stateDir: w.stateDir, stateRoot: w.root, log: (s) => void rows.push(s) });
   assert.deepEqual([...(await seam.reservedIds!())!].sort(), ["W1-T9", "W1-T9B"]);
-  run(w.repoRoot, "remote", "set-url", "origin", join(origin, "nowhere"));
+  publicCheckout.git("remote", "set-url", "origin", join(origin.dir, "nowhere"));
   assert.equal(await seam.reservedIds!(), undefined);
   assert.deepEqual(rows, ["plan.reservations_unreadable"]);
 });
@@ -146,7 +146,8 @@ test("W1-T14642 criterion 3: a blocked record with no retirement and no needs_in
 test("W1-T14642 criterion 4: one landing never mixes catalogs: the public PR carries public paths and the ops landing ops paths", async () => {
   const root = publicWorld([["W1-T1", { status: "blocked", retirement: "retired" }], ["W1-T2", { deps: ["W1-T1"] }]]);
   const landed: Array<readonly { relPath: string; content: string }[]> = [];
-  const seam: PlanGardenOps = { read: async () => queuedOps(["OPS-T1", { deps: ["W1-T1"] }]), land: (inputs) => void landed.push(inputs) };
+  const pins: string[] = [];
+  const seam: PlanGardenOps = { read: async () => queuedOps(["OPS-T1", { deps: ["W1-T1"] }]), land: (inputs, pin) => void (landed.push(inputs), pins.push(pin)) };
   const deps = { stateDir: join(root, "state"), repoRoot: root, openWorkspace: () => { throw new Error("no workspace"); }, log: () => {} } as unknown as GardenerDeps;
   const spec = planGardenSpec(deps, seam);
   // A sync caller cannot await the read, so it sees the ops catalog as unreadable: no ops task is proposed.
@@ -157,6 +158,7 @@ test("W1-T14642 criterion 4: one landing never mixes catalogs: the public PR car
   const published = spec.apply({ root, land: () => undefined, dispose: () => {} }, { actions, acting: ["retire"] } as never, {}) as GardenLandOpts;
   assert.deepEqual(published.paths, ["plan/tasks.d/W1-T2-x.yaml"], "the public PR carries the public record only");
   assert.deepEqual(landed.map((l) => l.map((i) => i.relPath)), [["plan/tasks.d/OPS-T1-x.yaml"]]);
+  assert.deepEqual(pins, [OPS_PIN], "the ops landing is told the pin its bytes were read at");
   assert.match(readFileSync(join(root, "plan/tasks.d/W1-T2-x.yaml"), "utf8"), /retirement: retired/);
   assert.equal(readFileSync(join(root, "plan/tasks.d/W1-T1-x.yaml"), "utf8").includes("plan gardener"), false);
 });
@@ -185,25 +187,20 @@ function fakeOpsApi(repository: string, commit: string, files: Record<string, st
   };
 }
 
-/** `<root>/state`, an empty public plan, and a real ops checkout at `<root>/repos/ops` holding `files` committed. */
+/** `<root>/state`, an empty public plan, and a real ops checkout at `<root>/repos/ops`: a clone of an origin whose one
+ *  main commit holds `files`, so the checkout can fetch its main as the ops status landing's checkout does. */
 function productionWorld(files: Record<string, string>, destination?: string) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t14642-prod-`));
   mkdirSync(join(root, "state"));
   const repoRoot = join(root, "public");
   mkdirSync(join(repoRoot, "plan", "tasks.d"), { recursive: true });
   writeFileSync(join(repoRoot, "plan", "tasks.yaml"), "[]\n");
-  const ops = join(root, "repos", "ops");
-  mkdirSync(join(ops, "plan", "tasks.d"), { recursive: true });
-  for (const [name, text] of Object.entries(files)) writeFileSync(join(ops, "plan", "tasks.d", name), text);
-  const git = (...args: string[]) => execFileSync("git", ["-C", ops, ...args], {
-    encoding: "utf8",
-    env: { ...process.env, GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email, GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email },
-  }).trim();
-  git("init", "-q");
-  git("add", "-A");
-  git("commit", "-q", "--allow-empty", "-m", "the ops catalog");
+  mkdirSync(join(root, "repos"));
+  const seed = Object.fromEntries(Object.entries(files).map(([name, text]) => [`plan/tasks.d/${name}`, text]));
+  const { clone: ops } = originWithClone(join(root, "repos", "ops"), { seed });
+  mkdirSync(join(ops.dir, "plan", "tasks.d"), { recursive: true });
   if (destination !== undefined) writeFileSync(join(root, "state", "plan-destination.json"), JSON.stringify({ repository: destination, kinds: ["task"] }));
-  return { root, repoRoot, stateDir: join(root, "state"), commit: git("rev-parse", "HEAD") };
+  return { root, repoRoot, stateDir: join(root, "state"), ops, commit: ops.git("rev-parse", "HEAD") };
 }
 
 test("W1-T14642 criterion 1: the production read pins the ops catalog, reads each record's bytes at the pin and is off without a destination", async () => {
@@ -243,7 +240,7 @@ test("W1-T14642 criterion 1: the production ops landing goes to the plan destina
       return { prUrl: "https://github.com/acme/ops/pull/5", landed: inputs.map((i) => i.relPath), waiting: [], refused: [], setAside: [], pushed: true };
     },
   });
-  seam.land([{ relPath: "plan/tasks.d/OPS-T1-x.yaml", content: "x", claim: "c", proof: "grep: x in plan/tasks.d/OPS-T1-x.yaml" }]);
+  seam.land([{ relPath: "plan/tasks.d/OPS-T1-x.yaml", content: "x", claim: "c", proof: "grep: x in plan/tasks.d/OPS-T1-x.yaml" }], w.commit);
   await seam.settled();
   assert.deepEqual(calls, [{ root: join(w.root, "repos", "ops"), paths: ["plan/tasks.d/OPS-T1-x.yaml"], target: { owner: "acme", repo: "ops" }, stateRoot: w.root }]);
   assert.deepEqual(rows.map(([s]) => s), ["plan.ops_landing"]);
@@ -255,14 +252,86 @@ test("W1-T14642 criterion 2: a failed ops landing is logged and the pass's wait 
   const rows: Array<[string, Record<string, unknown> | undefined]> = [];
   const input = { relPath: "plan/tasks.d/OPS-T1-x.yaml", content: "x", claim: "c", proof: "grep: x in y" };
   const failing = productionPlanGardenOps({ repoRoot: w.repoRoot, stateDir: w.stateDir, stateRoot: w.root, log: (s, f) => void rows.push([s, f]), landTaskFiles: async () => { throw new Error("push refused"); } });
-  failing.land([input]);
+  failing.land([input], w.commit);
   await failing.settled();
   assert.deepEqual(rows.map(([s]) => s), ["plan.ops_landing_failed"]);
   assert.equal(rows[0]![1]!.error, "push refused");
   const none = productionWorld({});
   const skipped: string[] = [];
   const idle = productionPlanGardenOps({ repoRoot: none.repoRoot, stateDir: none.stateDir, stateRoot: none.root, log: (s) => void skipped.push(s), landTaskFiles: async () => { throw new Error("never called"); } });
-  idle.land([input]);
+  idle.land([input], none.commit);
   await idle.settled();
   assert.deepEqual(skipped, ["plan.ops_landing_skipped"]);
+});
+
+/** Git in the production world's ops checkout. */
+function opsGit(w: { ops: GitRepo }, ...args: string[]): string {
+  return w.ops.git(...args);
+}
+
+test("W1-T14642 criterion 1: the ops landing carries the status landing's preflight: a candidate built over a moved carried record is refused", async () => {
+  const w = productionWorld({}, "acme/ops");
+  const carried = "plan/tasks.d/OPS-T1-x.yaml";
+  const opsDir = join(w.root, "repos", "ops");
+  // A candidate on the pin itself; one over a main that moved under another record; then main moves under the carried record.
+  const overPin = opsGit(w, "commit-tree", `${w.commit}^{tree}`, "-p", w.commit, "-m", "a candidate over the pin");
+  writeFileSync(join(opsDir, "plan", "tasks.d", "OTHER-x.yaml"), "- id: OTHER\n");
+  opsGit(w, "add", "-A"); opsGit(w, "commit", "-q", "-m", "an unrelated record");
+  opsGit(w, "commit", "-q", "--allow-empty", "-m", "a candidate over the unrelated move");
+  const overUnrelated = opsGit(w, "rev-parse", "HEAD");
+  writeFileSync(join(opsDir, carried), "- id: OPS-T1\n");
+  opsGit(w, "add", "-A"); opsGit(w, "commit", "-q", "-m", "the carried record moved");
+  opsGit(w, "commit", "-q", "--allow-empty", "-m", "a candidate over the moved record");
+  const overMoved = opsGit(w, "rev-parse", "HEAD");
+  const innerCalls: Array<{ dir: string; sha: string; pr: Record<string, unknown> }> = [];
+  let offered: ((sha: string, pr: { title: string; body: string; headRef: string }) => Promise<unknown>) | undefined;
+  const seam = productionPlanGardenOps({
+    repoRoot: w.repoRoot, stateDir: w.stateDir, stateRoot: w.root, log: () => {},
+    planPrPreflight: async (dir, sha, pr) => { innerCalls.push({ dir, sha, pr }); return { ok: true, failures: [], unreadable: [] }; },
+    landTaskFiles: async (_root, inputs, opts) => {
+      offered = opts.planPrPreflight as typeof offered;
+      return { landed: inputs.map((i) => i.relPath), waiting: [], refused: [], setAside: [], pushed: true };
+    },
+  });
+  seam.land([{ relPath: carried, content: "x", claim: "c", proof: "grep: x in y" }], w.commit);
+  await seam.settled();
+  assert.ok(offered, "the ops landing is given a plan PR preflight, as the status landing is");
+  const pr = { title: "t", body: "b", headRef: "h" };
+  await offered!(overPin, pr);
+  await offered!(overUnrelated, pr);
+  assert.deepEqual(innerCalls.map((c) => [c.dir, c.sha, c.pr.bodyProofRoot, c.pr.codeRoot]),
+    [overPin, overUnrelated].map((sha) => [opsDir, sha, "plan", w.repoRoot]),
+    "a candidate that leaves the carried record as the pin had it reaches the plan preflight, read against the plan folder");
+  await assert.rejects(offered!(overMoved, pr), /ops-status-source-moved/);
+  assert.equal(innerCalls.length, 2, "a refused candidate never reaches the plan preflight");
+});
+
+test("W1-T14642 criterion 4: an ops checkout that lacks the API-pinned commit leaves the ops catalog unavailable, and the public pass gardens as before", async () => {
+  const files = { "OPS-T1-x.yaml": shardText("OPS-T1", { deps: ["GONE-T9"] }) };
+  const w = productionWorld(files, "acme/ops");
+  const root = publicWorld([["W1-T1", {}]]);
+  const rows: string[] = [];
+  const ahead = "f".repeat(40);
+  const seam = productionPlanGardenOps({ repoRoot: root, stateDir: w.stateDir, stateRoot: w.root, log: (s) => void rows.push(s), api: fakeOpsApi("acme/ops", ahead, files) });
+  assert.deepEqual(await seam.read(), { outcome: "unavailable", reason: "ops-checkout-unreadable" });
+  assert.deepEqual(rows, ["plan.ops_checkout_unreadable"]);
+  const spec = planGardenSpec({ stateDir: w.stateDir, repoRoot: root, openWorkspace: () => { throw new Error("no workspace"); }, log: () => {} } as unknown as GardenerDeps, seam);
+  const inv = await spec.inventoryAsync!();
+  const publicOnly = planInventory(root, w.stateDir);
+  assert.deepEqual([inv.all.map((t) => t.id), inv.open.map((t) => t.id), inv.ops, inv.known], [publicOnly.all.map((t) => t.id), publicOnly.open.map((t) => t.id), undefined, undefined]);
+  assert.deepEqual(spec.candidates(inv, () => 0), []);
+});
+
+test("W1-T14642 criterion 4: the checkout must hold the pin: at the pin it is used as it is, a lagging one is fetched, and a pin it cannot fetch refuses", async () => {
+  const w = productionWorld({}, "acme/ops");
+  const dir = join(w.root, "repos", "ops");
+  await assertOpsCheckoutAtPin(dir, w.commit);
+  await assert.rejects(assertOpsCheckoutAtPin(dir, "e".repeat(40)), /ops-status-source-moved/);
+  // Main moves on at origin while the checkout stays behind: the fetched main is the pin, so the checkout is used.
+  w.ops.git("commit", "-q", "--allow-empty", "-m", "ops main moves on");
+  const newer = w.ops.git("rev-parse", "HEAD");
+  w.ops.git("push", "-q", "origin", "HEAD:main");
+  w.ops.git("reset", "-q", "--hard", w.commit);
+  await assertOpsCheckoutAtPin(dir, newer);
+  assert.equal(w.ops.git("rev-parse", "HEAD"), w.commit, "the fetch never switches the checkout's branch");
 });

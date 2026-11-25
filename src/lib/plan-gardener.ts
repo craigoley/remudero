@@ -8,6 +8,8 @@ import { bestNearDuplicate } from "./knowledge-dedup.js";
 import { readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "./ops-catalog-source.js";
 import { loadPlan, type RetirementReason, type Task } from "./plan.js";
 import { planDestinationRepository } from "./plan-destination.js";
+import { planPrPreflightAtCommitAsync, type PlanPrPreflightInput } from "./plan-pr-emitter.js";
+import { preflightOnUnmovedRecords } from "./plan-reconcile-batch.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { loadCreditStore } from "./status.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
@@ -42,6 +44,8 @@ export interface PlanGardenAction extends GardenAction<PlanGardenClass> {
 
 /** W1-T14642: the ops catalog as one read left it, at one pinned commit. */
 export interface PlanOpsCatalog {
+  /** The ops main commit every record's bytes below were read at: the landing's unmoved-records guard is judged against it. */
+  pin: string;
   tasks: Task[];
   /** Task id → the record's path in the ops repository, for tasks that sit alone in their own shard. */
   shards: Map<string, string>;
@@ -56,8 +60,8 @@ export type PlanOpsRead = { outcome: "off" } | { outcome: "unavailable"; reason:
 /** W1-T14642: the plan gardener's two ops seams: the catalog read, and the ops plan landing an ops edit goes through. */
 export interface PlanGardenOps {
   read: () => PlanOpsRead | Promise<PlanOpsRead>;
-  /** Starts a landing of edited records in the ops repository; the production landing is awaited by its owner. */
-  land: (inputs: readonly TaskFileInput[]) => void;
+  /** Starts a landing of edited records, read at `pin`, in the ops repository; the production landing is awaited by its owner. */
+  land: (inputs: readonly TaskFileInput[], pin: string) => void;
   /** Every id `refs/rmd-id/` holds, so a reserved, unfiled id is not called unknown; undefined when it cannot be read. */
   reservedIds?: () => Promise<ReadonlySet<string> | undefined>;
 }
@@ -108,7 +112,7 @@ export function planInventory(repoRoot: string, stateDir: string, opsRead: PlanO
   const open = all.filter((t) => t.status === "queued" && !t.retirement && !credited[t.id] && !inMain.has(t.id));
   return {
     open, all, shards: planShards(repoRoot),
-    ...(ops ? { ops: { tasks: ops.tasks, shards: ops.shards, sources: ops.sources } } : {}),
+    ...(ops ? { ops: { pin: ops.pin, tasks: ops.tasks, shards: ops.shards, sources: ops.sources } } : {}),
     ...(opsRead.outcome === "unavailable" || reserved === "unreadable" ? {} : { known: new Set([...all.map((t) => t.id), ...reserved]) }),
   };
 }
@@ -315,7 +319,8 @@ export function applyPlanActions(repoRoot: string, shards: Map<string, string>, 
 /**
  * W1-T14642: the ops landing's inputs for the ops-catalog `actions`: each record's pinned bytes with the action applied,
  * and the criterion the landing PR states for it. A record that no longer reads as queued is left out. The landing
- * itself refuses a record whose blob on the ops main differs from the one these bytes were read from.
+ * itself is guarded twice: its preflight ({@link opsPlanLandingPreflight}) refuses a candidate when any commit since the
+ * pin touched a carried record, and the staged copy refuses a record whose blob on the ops main moved after staging.
  */
 export function opsLandingInputs(ops: PlanOpsCatalog, actions: readonly PlanGardenAction[]): { inputs: TaskFileInput[]; landed: PlanGardenAction[] } {
   const inputs: TaskFileInput[] = [];
@@ -396,7 +401,7 @@ export function planGardenSpec(deps: GardenerDeps, opsSeam?: PlanGardenOps): Gar
       // An ops record is not in this checkout: it lands through the ops plan landing, beside the public PR.
       if (opsSeam && readOps) {
         const { inputs } = opsLandingInputs(readOps, plan.actions.filter((a) => !shards.has(a.target)));
-        if (inputs.length > 0) opsSeam.land(inputs);
+        if (inputs.length > 0) opsSeam.land(inputs, readOps.pin);
       }
       if (paths.length === 0) return undefined;
       const landed = plan.actions.filter((a) => paths.includes(shards.get(a.target) ?? ""));
@@ -418,6 +423,44 @@ export function planGardenSpec(deps: GardenerDeps, opsSeam?: PlanGardenOps): Gar
  * LAND: an ops edit goes through the sealed task-files landing into the plan destination, never into the public tree,
  * so one landing never mixes public and ops paths.
  */
+/**
+ * The part of the ops status landing every ops plan landing shares (buildCatalogPlanReconcileInput in run-task.ts calls
+ * it too): the ops checkout must hold `pin`, the commit the catalog was read at. A checkout that lags the API-pinned main
+ * is fetched, without switching its branch, and is only used when the fetched main is that same commit; otherwise this
+ * throws `ops-status-source-moved`, and a git failure throws as it is.
+ */
+export async function assertOpsCheckoutAtPin(checkoutDir: string, pin: string): Promise<void> {
+  if ((await hostWorktreeGitAsync(checkoutDir, ["rev-parse", "HEAD"])).trim() === pin) return;
+  await hostWorktreeGitAsync(checkoutDir, ["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"]);
+  if ((await hostWorktreeGitAsync(checkoutDir, ["rev-parse", "origin/main"])).trim() !== pin) throw new Error("ops-status-source-moved");
+}
+
+export interface OpsPlanLandingPreflightOptions {
+  /** The ops repository's checkout the landing builds its candidate in. */
+  checkoutDir: string;
+  pin: string;
+  /** The record paths the landing carries pin-derived bytes for; read when the preflight runs, so it may fill after this is built. */
+  carriedPaths: Iterable<string>;
+  /** The public code root the plan lint and the task-id check run from. */
+  codeRoot: string;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** The plan PR preflight run after the unmoved-records guard; a test's stand-in. */
+  inner?: typeof planPrPreflightAtCommitAsync;
+}
+
+/**
+ * The plan PR preflight of an ops plan landing, shared by the ops status reconcile and the plan gardener: a candidate based
+ * on a newer ops main must never overwrite it with bytes read at the older pin (W1-T14574), so the plan preflight (plan-body
+ * proofs read against the candidate's plan folder) runs only when no commit since the pin touched a carried record.
+ */
+export function opsPlanLandingPreflight(o: OpsPlanLandingPreflightOptions): (sha: string, pr: Omit<PlanPrPreflightInput, "cwd">) => Promise<Awaited<ReturnType<typeof planPrPreflightAtCommitAsync>>> {
+  const inner = o.inner ?? planPrPreflightAtCommitAsync;
+  return preflightOnUnmovedRecords(
+    (args) => hostWorktreeGitAsync(o.checkoutDir, args), o.pin, o.carriedPaths,
+    (sha, pr: Omit<PlanPrPreflightInput, "cwd">) => inner(o.checkoutDir, sha, { ...pr, codeRoot: o.codeRoot, bodyProofRoot: "plan" }, { log: o.log }),
+  );
+}
+
 export interface ProductionPlanGardenOpsOptions {
   repoRoot: string;
   stateDir: string;
@@ -427,6 +470,8 @@ export interface ProductionPlanGardenOpsOptions {
   api?: OpsCatalogApi;
   /** The sealed landing, replaceable so a test lands nothing. */
   landTaskFiles?: typeof landTaskFilesAsync;
+  /** The plan PR preflight the landing runs once its unmoved-records guard passes; the real one when absent. */
+  planPrPreflight?: typeof planPrPreflightAtCommitAsync;
 }
 
 export function productionPlanGardenOps(o: ProductionPlanGardenOpsOptions): PlanGardenOps & { settled: () => Promise<void> } {
@@ -454,17 +499,25 @@ export function productionPlanGardenOps(o: ProductionPlanGardenOpsOptions): Plan
     const pin = snapshot.binding.commit;
     const shards = new Map<string, string>();
     const sources = new Map<string, string>();
-    for (const task of snapshot.plan.tasks) {
-      const source = task.sourcePath;
-      if (!source || !/^tasks\.d\/[^/]+\.ya?ml$/.test(source)) continue;
-      const path = `plan/${source}`;
-      if (!sources.has(path)) sources.set(path, await hostWorktreeGitAsync(destination.checkoutDir, ["show", `${pin}:${path}`]));
-      // Only a record that sits alone in its file can be edited without touching a neighbour.
-      if (soleTaskId(sources.get(path)!) === task.id) shards.set(task.id, path);
+    try {
+      // The records' bytes are read at the pin, so the checkout must hold it, exactly as the ops status reconcile requires.
+      await assertOpsCheckoutAtPin(destination.checkoutDir, pin);
+      for (const task of snapshot.plan.tasks) {
+        const source = task.sourcePath;
+        if (!source || !/^tasks\.d\/[^/]+\.ya?ml$/.test(source)) continue;
+        const path = `plan/${source}`;
+        if (!sources.has(path)) sources.set(path, await hostWorktreeGitAsync(destination.checkoutDir, ["show", `${pin}:${path}`]));
+        // Only a record that sits alone in its file can be edited without touching a neighbour.
+        if (soleTaskId(sources.get(path)!) === task.id) shards.set(task.id, path);
+      }
+    } catch (error) {
+      // A checkout that lags or lacks the pin leaves the ops catalog unknown, never failing the public pass.
+      o.log("plan.ops_checkout_unreadable", { error: String((error as Error)?.message ?? error) });
+      return { outcome: "unavailable", reason: "ops-checkout-unreadable" };
     }
-    return { outcome: "ok", tasks: snapshot.plan.tasks, shards, sources };
+    return { outcome: "ok", pin, tasks: snapshot.plan.tasks, shards, sources };
   };
-  const land = (inputs: readonly TaskFileInput[]): void => {
+  const land = (inputs: readonly TaskFileInput[], pin: string): void => {
     const destination = planDestinationRepository(o.stateDir);
     if (destination.outcome !== "named") {
       o.log("plan.ops_landing_skipped", { reason: `plan-destination-${destination.outcome}`, records: inputs.length });
@@ -472,6 +525,11 @@ export function productionPlanGardenOps(o: ProductionPlanGardenOpsOptions): Plan
     }
     const opts: LandTaskFilesOpts = {
       stateRoot: o.stateRoot, targetRepository: { owner: destination.owner, repo: destination.repo }, log: o.log, lane: "plan",
+      // The ops status landing's preflight: refuse a candidate whose carried records moved since the pin.
+      planPrPreflight: opsPlanLandingPreflight({
+        checkoutDir: destination.checkoutDir, pin, carriedPaths: inputs.map((i) => i.relPath), codeRoot: o.repoRoot, log: o.log,
+        ...(o.planPrPreflight ? { inner: o.planPrPreflight } : {}),
+      }),
     };
     landings.push(landTaskFiles(destination.checkoutDir, [...inputs], opts).then((result) => {
       o.log("plan.ops_landing", { records: inputs.length, pr_url: result.prUrl ?? null, landed: result.landed.length, waiting: result.waiting.length, refused: result.refused.length, ...(result.error ? { error: result.error } : {}) });
