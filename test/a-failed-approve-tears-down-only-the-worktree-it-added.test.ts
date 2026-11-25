@@ -154,7 +154,9 @@ function resumableApprove(kind: string, id: string) {
     JSON.stringify({
       [id]: {
         proposalId: id,
-        fragmentYaml: "- id: NEW-1\n  title: a quiet zebra crossing\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts a new crossing task only; no prior behavior changes.\n",
+        fragmentYaml: "- id: NEW-1\n  title: a quiet zebra crossing\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts a new crossing task only; no prior behavior changes.\n" +
+          // A new `verify: auto` implement task needs one criterion (shard-shape, promoted to block on a draft).
+          "  acceptance:\n    - claim: the crossing task is filed\n      proof: 'unit test: the crossing task is filed'\n",
         stampLine: `- ${id} (plan) — RATIFIED -> NEW-1.`,
         anchorFingerprint: "",
       },

@@ -518,7 +518,9 @@ test("W1-T240 claim 4: `rmd approve`'s real dispatch (approveCommand) actually r
         "P-APPROVE": {
           proposalId: "P-APPROVE",
           fragmentYaml:
-            "- id: W1-T240-FIXTURE\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n",
+            "- id: W1-T240-FIXTURE\n  title: fixture drafted task\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts one new task only; no prior behavior changes.\n" +
+            // A new `verify: auto` implement task needs one criterion (shard-shape, promoted to block on a draft).
+            "  acceptance:\n    - claim: the fixture task is filed\n      proof: 'unit test: the fixture task is filed'\n",
           stampLine: "- P-APPROVE (plan) — RATIFIED -> W1-T240-FIXTURE.",
           anchorFingerprint: "",
         },

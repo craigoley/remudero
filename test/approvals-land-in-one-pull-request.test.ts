@@ -309,7 +309,9 @@ async function driveRealGatewayApprove(opts: { headRead?: "fails"; armedOnHead?:
       "P-JOIN": {
         proposalId: "P-JOIN",
         fragmentYaml:
-          "- id: NEW-1\n  title: second approval joins the open pass\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts a new shard only; no prior behavior changes.\n",
+          "- id: NEW-1\n  title: second approval joins the open pass\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts a new shard only; no prior behavior changes.\n" +
+          // A new `verify: auto` implement task needs one criterion (shard-shape, promoted to block on a draft).
+          "  acceptance:\n    - claim: the second approval joins the open pass\n      proof: 'unit test: the second approval joins the open pass'\n",
         stampLine: "- P-JOIN (plan) — RATIFIED -> NEW-1.",
         anchorFingerprint: "",
       },

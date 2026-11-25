@@ -203,7 +203,9 @@ function batchWorld(break_: (w: ReturnType<typeof world>) => void) {
     join(w.root, "state", "inbox-drafts.json"),
     JSON.stringify(Object.fromEntries(ids.map((id, i) => [id, {
       proposalId: id,
-      fragmentYaml: `- id: NEW-${i + 1}\n  title: ${i === 0 ? "a quiet zebra crossing" : "a loud giraffe parade"}\n  repo: remudero\n  type: implement\n  files: [${i === 0 ? "src/lib/plan.ts" : "src/lib/inbox.ts"}]\n  design: |\n    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve\n  verify: auto\n  origin: architect\n`,
+      fragmentYaml: `- id: NEW-${i + 1}\n  title: ${i === 0 ? "a quiet zebra crossing" : "a loud giraffe parade"}\n  repo: remudero\n  type: implement\n  files: [${i === 0 ? "src/lib/plan.ts" : "src/lib/inbox.ts"}]\n  design: |\n    NO-INVARIANTS: synthetic lint fixture with no inherited behavior to preserve\n  verify: auto\n  origin: architect\n` +
+        // A new `verify: auto` implement task needs one criterion (shard-shape, promoted to block on a draft).
+        `  acceptance:\n    - claim: batch member ${i + 1} files its shard\n      proof: 'unit test: batch member ${i + 1} files its shard'\n`,
       stampLine: `- ${id} (plan) — RATIFIED -> NEW-${i + 1}.`,
       anchorFingerprint: "",
     }]))),
