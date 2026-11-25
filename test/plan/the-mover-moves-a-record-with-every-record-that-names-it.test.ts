@@ -72,3 +72,16 @@ test("W1-T14825 criterion 3: invariant:a-group-with-an-unmovable-member-stays-wh
   assert.equal((await c.run()).out.step, "copy");
   assert.equal(changeOf(c), added("W1-T5", "W1-T6"));
 });
+
+test("W1-T14858 criterion 1: a retired namer whose status the ops gate reads as live work, with a shape the gate refuses, keeps its whole group on core", async t => {
+  // The 2026-11-25 ops #859 shape: W1-T2874 is retired (retirement: closed) with status blocked, and a proof with no
+  // dialect prefix. The ops gate judges it as moved live work by its status and refuses the copy.
+  const bareProof = RETIRED_NAMING("W1-T2", "W1-T1").replace('proof: "grep: fixture in test/fixture.test.ts"', 'proof: "the fixture holds"');
+  const w = moveWorld(t, { "W1-T1": record("W1-T1"), "W1-T2": bareProof, "W1-T3": record("W1-T3") });
+  assert.equal((await w.run()).out.step, "copy");
+  assert.equal(changeOf(w), added("W1-T3"), "THE CLAIM: neither the named record nor its refused namer is copied");
+  // Positive control: the same namer with a prefixed proof moves with the record it names.
+  const c = moveWorld(t, { "W1-T1": record("W1-T1"), "W1-T2": RETIRED_NAMING("W1-T2", "W1-T1"), "W1-T3": record("W1-T3") });
+  assert.equal((await c.run()).out.step, "copy");
+  assert.equal(changeOf(c), added("W1-T1", "W1-T2", "W1-T3"));
+});
