@@ -71,25 +71,81 @@ export interface FixLearningsShadowInput {
   pr?: number;
   attempt: number;
   round: string;
-  /** The key `fix.learnings_outcome` joins on. */
-  roundKey: string;
+  /** The dispatched round's own id: the key its outcome, `fix.dispatch` and `fix.done` rows share. */
+  roundId: string;
   evidence: FixLearningsEvidence;
   homes: LayeredLearningsHomes;
   budgetChars?: number;
   log: (step: string, extra: Record<string, unknown>) => void;
 }
 
+export type FixLearningsCiConclusion = "green" | "red" | "no_push" | "other";
+
+/** What the round's CI wait read: the gate's state, and the head it read it on when it names one. */
+export interface FixLearningsCi {
+  state: string;
+  sha?: string;
+}
+
+/** The CI gate's state on the pushed head, folded to the answers the experiment reads. A state read on another head says
+ *  nothing about the pushed one, so it is `other`. */
+export function fixLearningsCiConclusion(pushedHeadSha: string | undefined, ci?: FixLearningsCi): FixLearningsCiConclusion {
+  if (pushedHeadSha === undefined) return "no_push";
+  if (ci?.sha !== undefined && ci.sha !== pushedHeadSha) return "other";
+  return ci?.state === "green" || ci?.state === "red" ? ci.state : "other";
+}
+
+/** One dispatched round awaiting its outcome. It writes exactly one `fix.learnings_outcome` row. */
+export interface FixLearningsRound {
+  /** The round's push settled. A landed head waits for CI; no head is written at once as `no_push`, or as `other` when
+   *  the remote head could not be read and whether it pushed is unknown. */
+  landed(pushedHeadSha: string | undefined, landing?: { landed: boolean; outcome?: string }): void;
+  /** Write the outcome from what is known now; a call after the row is written does nothing. */
+  settle(ci?: FixLearningsCi): void;
+}
+
+function openRound(input: FixLearningsShadowInput): FixLearningsRound {
+  let written = false;
+  let pushed: string | undefined;
+  const write = (ciConclusion: FixLearningsCiConclusion, extra: Record<string, unknown>): void => {
+    if (written) return;
+    written = true;
+    input.log(FIX_LEARNINGS_OUTCOME_STEP, {
+      task_id: input.taskId, round_id: input.roundId, attempt: input.attempt, ci_conclusion: ciConclusion, ...extra,
+    });
+  };
+  const settle = (ci?: FixLearningsCi): void => write(fixLearningsCiConclusion(pushed, ci), {
+    ...(pushed === undefined ? {} : { pushed_head_sha: pushed }),
+    ...(ci === undefined ? {} : { ci_state: ci.state, ...(ci.sha === undefined ? {} : { ci_head_sha: ci.sha }) }),
+  });
+  return {
+    landed(pushedHeadSha, landing) {
+      pushed = pushedHeadSha;
+      if (pushedHeadSha !== undefined) return;
+      if (landing?.outcome === "remote_unreadable") write("other", { push_unread: true });
+      else settle();
+    },
+    settle,
+  };
+}
+
+export interface FixLearningsShadow {
+  arm: FixLearningsArm;
+  matches: FixLearningsMatch[];
+  round: FixLearningsRound;
+}
+
 /**
- * Write the round's one `fix.learnings_shadow` row and return what it recorded. A failure to read the corpus is
- * recorded on the row (`outcome: "unreadable"`), never thrown: the measurement must not stop a fix round.
- * Both arms record the same match; the arm only labels the row.
+ * Write the round's one `fix.learnings_shadow` row, and return what it recorded with the round its outcome is written
+ * on. A failure to read the corpus is recorded on the row (`outcome: "unreadable"`), never thrown: the measurement must
+ * not stop a fix round. Both arms record the same match; the arm only labels the row.
  */
-export function recordFixLearningsShadow(input: FixLearningsShadowInput): { arm: FixLearningsArm; matches: FixLearningsMatch[] } {
+export function recordFixLearningsShadow(input: FixLearningsShadowInput): FixLearningsShadow {
   const arm = fixLearningsArm(input.taskId);
   const budget = input.budgetChars ?? DEFAULT_KNOWLEDGE_BUDGET_CHARS;
   const checkNames = (input.evidence.ciFailures ?? []).map((failure) => failure.name);
   const base = {
-    task_id: input.taskId, pr: input.pr, strike: input.attempt, round: input.round, round_key: input.roundKey,
+    task_id: input.taskId, pr: input.pr, attempt: input.attempt, round: input.round, round_id: input.roundId,
     arm, arm_unit: FIX_LEARNINGS_UNIT, arm_epoch: FIX_LEARNINGS_EPOCH, share: FIX_LEARNINGS_SHARE,
     budget_chars: budget, check_names: checkNames,
   };
@@ -105,39 +161,10 @@ export function recordFixLearningsShadow(input: FixLearningsShadowInput): { arm:
   } catch (error) {
     input.log(FIX_LEARNINGS_SHADOW_STEP, { ...base, outcome: "unreadable", reason: String((error as Error)?.message ?? error).slice(0, 300),
       matched: [] });
-    return { arm, matches };
+    return { arm, matches, round: openRound(input) };
   }
   input.log(FIX_LEARNINGS_SHADOW_STEP, { ...base, outcome: "recorded", matched: matches });
-  return { arm, matches };
-}
-
-export type FixLearningsCiConclusion = "green" | "red" | "no_push" | "other";
-
-/** The CI gate's state on the pushed head, folded to the three answers the experiment reads. */
-export function fixLearningsCiConclusion(pushedHeadSha: string | undefined, ciState: string | undefined): FixLearningsCiConclusion {
-  if (pushedHeadSha === undefined) return "no_push";
-  if (ciState === "green" || ciState === "red") return ciState;
-  return "other";
-}
-
-export interface FixLearningsOutcomeInput {
-  taskId: string;
-  roundKey: string;
-  attempt: number;
-  pushedHeadSha?: string;
-  ciState?: string;
-  log: (step: string, extra: Record<string, unknown>) => void;
-}
-
-/** Write the round's one `fix.learnings_outcome` row: the CI conclusion on the head the round pushed, or that it pushed nothing. */
-export function recordFixLearningsOutcome(input: FixLearningsOutcomeInput): FixLearningsCiConclusion {
-  const ciConclusion = fixLearningsCiConclusion(input.pushedHeadSha, input.ciState);
-  input.log(FIX_LEARNINGS_OUTCOME_STEP, {
-    task_id: input.taskId, round_key: input.roundKey, strike: input.attempt, ci_conclusion: ciConclusion,
-    ...(input.pushedHeadSha === undefined ? {} : { pushed_head_sha: input.pushedHeadSha }),
-    ...(input.ciState === undefined ? {} : { ci_state: input.ciState }),
-  });
-  return ciConclusion;
+  return { arm, matches, round: openRound(input) };
 }
 
 export interface FixLearningsArmSummary {
@@ -148,7 +175,8 @@ export interface FixLearningsArmSummary {
   /** Rounds with an outcome row, and each conclusion's share of them. */
   roundsWithOutcome: number;
   outcomeRates: Record<FixLearningsCiConclusion, number>;
-  /** Per task: rounds up to and including the first green one; absent when no round went green. */
+  /** Per task: its fix rounds (`fix.dispatch` and `fix.done` rows) up to and including the first green one; absent when
+   *  no round went green. */
   roundsToGreen: Record<string, number>;
 }
 
@@ -156,42 +184,50 @@ type Row = Record<string, unknown>;
 
 const rate = (n: number, of: number): number => (of === 0 ? 0 : n / of);
 
-/** Pure: what W1-T14139 reads to decide when to inject. Joins each shadow row to its outcome row by `round_key`. */
+/** Pure: what W1-T14139 reads to decide when to inject. Rows are in ledger order; `round_id` joins a shadow row to its
+ *  outcome row and to the task's `fix.dispatch` and `fix.done` rows. */
 export function summarizeFixLearningsShadow(rows: readonly Row[]): Record<FixLearningsArm, FixLearningsArmSummary> {
   const outcomes = new Map<string, Row>();
-  for (const row of rows) if (row.step === FIX_LEARNINGS_OUTCOME_STEP && typeof row.round_key === "string") outcomes.set(row.round_key, row);
-  const empty = (): FixLearningsArmSummary & { _outcomes: Record<FixLearningsCiConclusion, number>; _kinds: Record<FixLearningsMatchKind, number> } => ({
-    rounds: 0, roundsWithMatch: 0, matchRateByKind: { error: 0, symbol: 0 }, roundsWithOutcome: 0,
-    outcomeRates: { green: 0, red: 0, no_push: 0, other: 0 }, roundsToGreen: {},
-    _outcomes: { green: 0, red: 0, no_push: 0, other: 0 }, _kinds: { error: 0, symbol: 0 },
+  for (const row of rows) if (row.step === FIX_LEARNINGS_OUTCOME_STEP && typeof row.round_id === "string") outcomes.set(row.round_id, row);
+  const empty = () => ({
+    rounds: 0, roundsWithMatch: 0, roundsWithOutcome: 0, roundsToGreen: {} as Record<string, number>,
+    outcomes: { green: 0, red: 0, no_push: 0, other: 0 }, kinds: { error: 0, symbol: 0 },
   });
   const acc = { offered: empty(), withheld: empty() };
-  const perTask = new Map<string, number>();
-  const settled = new Set<string>();
+  const arms = new Map<string, FixLearningsArm>();
   for (const row of rows) {
-    if (row.step !== FIX_LEARNINGS_SHADOW_STEP || row.outcome === "unreadable") continue;
+    if (row.step !== FIX_LEARNINGS_SHADOW_STEP) continue;
     const arm: FixLearningsArm = row.arm === "withheld" ? "withheld" : "offered";
+    if (typeof row.round_id === "string") arms.set(row.round_id, arm);
+    if (row.outcome === "unreadable") continue;
     const a = acc[arm];
     a.rounds++;
     const matched = Array.isArray(row.matched) ? (row.matched as FixLearningsMatch[]) : [];
     if (matched.length > 0) a.roundsWithMatch++;
-    for (const kind of ["error", "symbol"] as const) if (matched.some((m) => m.kinds?.includes(kind))) a._kinds[kind]++;
-    const outcome = typeof row.round_key === "string" ? outcomes.get(row.round_key) : undefined;
+    for (const kind of ["error", "symbol"] as const) if (matched.some((m) => m.kinds?.includes(kind))) a.kinds[kind]++;
+    const outcome = typeof row.round_id === "string" ? outcomes.get(row.round_id) : undefined;
     if (!outcome) continue;
     const conclusion = outcome.ci_conclusion as FixLearningsCiConclusion;
     a.roundsWithOutcome++;
-    a._outcomes[conclusion in a._outcomes ? conclusion : "other"]++;
-    const task = typeof row.task_id === "string" ? row.task_id : undefined;
-    if (task === undefined || settled.has(task)) continue;
-    perTask.set(task, (perTask.get(task) ?? 0) + 1);
-    if (conclusion === "green") { settled.add(task); a.roundsToGreen[task] = perTask.get(task)!; }
+    a.outcomes[conclusion in a.outcomes ? conclusion : "other"]++;
+  }
+  const taskRounds = new Map<string, Set<string>>();
+  const settled = new Set<string>();
+  for (const { step, task_id: task, round_id: roundId, ci_conclusion: conclusion } of rows) {
+    if (typeof task !== "string" || typeof roundId !== "string" || settled.has(task)) continue;
+    const seen = taskRounds.get(task) ?? new Set<string>();
+    if (step === "fix.dispatch" || step === "fix.done") taskRounds.set(task, seen.add(roundId));
+    const arm = arms.get(roundId);
+    if (step !== FIX_LEARNINGS_OUTCOME_STEP || conclusion !== "green" || arm === undefined) continue;
+    settled.add(task);
+    acc[arm].roundsToGreen[task] = seen.add(roundId).size;
   }
   const finish = (a: ReturnType<typeof empty>): FixLearningsArmSummary => ({
     rounds: a.rounds, roundsWithMatch: a.roundsWithMatch,
-    matchRateByKind: { error: rate(a._kinds.error, a.rounds), symbol: rate(a._kinds.symbol, a.rounds) },
+    matchRateByKind: { error: rate(a.kinds.error, a.rounds), symbol: rate(a.kinds.symbol, a.rounds) },
     roundsWithOutcome: a.roundsWithOutcome,
-    outcomeRates: { green: rate(a._outcomes.green, a.roundsWithOutcome), red: rate(a._outcomes.red, a.roundsWithOutcome),
-      no_push: rate(a._outcomes.no_push, a.roundsWithOutcome), other: rate(a._outcomes.other, a.roundsWithOutcome) },
+    outcomeRates: { green: rate(a.outcomes.green, a.roundsWithOutcome), red: rate(a.outcomes.red, a.roundsWithOutcome),
+      no_push: rate(a.outcomes.no_push, a.roundsWithOutcome), other: rate(a.outcomes.other, a.roundsWithOutcome) },
     roundsToGreen: a.roundsToGreen,
   });
   return { offered: finish(acc.offered), withheld: finish(acc.withheld) };

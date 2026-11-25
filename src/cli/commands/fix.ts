@@ -53,7 +53,7 @@ import { fixArmEvidence, fixRoutingWeights, readFixRoutingRows, type FixLearnedA
 import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, SKILL_WITHHOLDING_SHARE, skillWithheldUnderRetirement, stagedSkillRetirements } from "../../lib/skill-workshop.js";
 import { SKILL_ARM_EPOCH, TASK_ARM_UNIT, taskArmWithheld } from "../../lib/task-arm.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, projectLearningsHome } from "../../lib/learnings.js";
-import { recordFixLearningsOutcome, recordFixLearningsShadow } from "../../lib/fix-learnings-shadow.js";
+import { recordFixLearningsShadow, type FixLearningsRound } from "../../lib/fix-learnings-shadow.js";
 import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockRegion, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
@@ -2508,7 +2508,9 @@ export function fixPromptTemplate(evidence: FixEvidence, harnessCommits: boolean
 export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): ReturnType<RunTaskCommandHost["runFixRung"]> {
   opts = noEditRecoveryOptions(opts);
   const recheck = opts.readEarlyCiFailures && earlyCiRecheck(opts, opts.readEarlyCiFailures);
+  let learningsRound: FixLearningsRound | undefined; // W1-T14138: the dispatched round awaiting its outcome row
   const finish = (outcome: FixRungOutcome): FixRungOutcome => {
+    learningsRound?.settle(); // an exit that never read CI still records what the round pushed
     const note = recheck?.note();
     return note ? { ...outcome, reason: `${outcome.reason}. ${note}` } : outcome;
   };
@@ -2987,9 +2989,6 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     { unit: TASK_ARM_UNIT, epoch: SKILL_ARM_EPOCH },
   );
   let fixSkillSelectionLogged = false;
-  // W1-T14138: the rounds whose learnings shadow / outcome row is already written; one of each per round.
-  const fixLearningsShadowed = new Set<string>();
-  const fixLearningsOutcomed = new Set<string>();
   while (review.state !== "success" || proofDiscriminationStillNeedsRepair()) {
     consultedThisRound = false;
     if (recheck && currentPrHeadSha === recheck.headSha && noReviewYet) {
@@ -4674,18 +4673,6 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // At the first prompt assembly, as the implement lane does — emitted even at zero selection.
     if (!fixSkillSelectionLogged) deps.log("skills.selection", fixSkillSelection.observation);
     fixSkillSelectionLogged = true;
-    // W1-T14138: one `fix.learnings_shadow` row per round MEASURES what its failure would match; nothing below reads
-    // the result, so the prompt is unchanged in both arms. Its `fix.learnings_outcome` row follows at the round's CI result.
-    const learningsRoundKey = `${opts.runId}:${attempt}:${priorHeadSha}`;
-    if (!fixLearningsShadowed.has(learningsRoundKey)) {
-      fixLearningsShadowed.add(learningsRoundKey);
-      recordFixLearningsShadow({
-        taskId: opts.taskId, pr: prNumber, attempt, round, roundKey: learningsRoundKey, evidence,
-        homes: { projectDir: projectLearningsHome(opts.worktreePath), userOverallDir: userOverallLearningsHome(opts.config),
-          globalArtifactPath: globalArtifactPath(opts.config) },
-        log: (step, extra) => deps.log(step, extra),
-      });
-    }
     const prompt = [
       renderFixPrompt({
         harnessCommits: fixHarnessOwnsGit,
@@ -4898,6 +4885,15 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     const roundId = `${opts.runId}:${attempt + retriggers}:${fixRoundStartedAtMs}`;
     const fixReceipt = host.fixWorkerReceipt(deps.spawn, deps.log, host.fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
       { prUrl: opts.prUrl, roundId }, { root: opts.config.root }, remedyExecution);
+    // W1-T14138: one `fix.learnings_shadow` row per dispatched round MEASURES what its failure would match. The prompt
+    // is already assembled and nothing reads the match into it, so both arms are prompted alike.
+    learningsRound?.settle();
+    learningsRound = recordFixLearningsShadow({
+      taskId: opts.taskId, pr: prNumber, attempt, round, roundId, evidence,
+      homes: { projectDir: projectLearningsHome(opts.worktreePath), userOverallDir: userOverallLearningsHome(opts.config),
+        globalArtifactPath: globalArtifactPath(opts.config) },
+      log: (step, extra) => deps.log(step, extra),
+    }).round;
     let fixResult: WorkerResult;
     // W1-T1219: the spawn's elapsed ms on the SUCCESS path, the field `fix.spawn_abandoned` carries
     // on failure, folded into `fix.dispatch` so a completed spawn's duration is measurable at all.
@@ -4971,6 +4967,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         ...(fixResult.servedModel == null ? { served_model_reason: fixResult.servedModelReason ??
           "the provider reported no served model for this call" } : {}) };
     } catch (e) {
+      learningsRound.settle(); // a spawn that threw pushed nothing
       if (!isSpawnInfraBlockedError(e)) throw e;
       // No subprocess ever launched, nothing was billed: an INFRA-tagged $0 line, NEVER a
       // `fix.dispatch` line (the only step `priorStrikesFor` counts), so forensics can separate "the
@@ -5343,17 +5340,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     };
     let workerProofResults: FixProgressWorkerProofResult[] = [];
     let selfCheckCostUsd = 0;
-    const logLearningsOutcome = (pushedHeadSha: string | undefined, ciState?: string): void => {
-      if (fixLearningsOutcomed.has(learningsRoundKey)) return;
-      fixLearningsOutcomed.add(learningsRoundKey);
-      recordFixLearningsOutcome({ taskId: opts.taskId, roundKey: learningsRoundKey, attempt, pushedHeadSha, ciState,
-        log: (step, extra) => deps.log(step, extra) });
-    };
-    const logFixDoneRow = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding, waitFields?: Record<string, unknown>) => {
-      if (pushedHeadSha === undefined) logLearningsOutcome(undefined);
-      logFixDoneRowFields(pushedHeadSha, subtype, landing, waitFields);
-    };
-    const logFixDoneRowFields = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding, waitFields?: Record<string, unknown>) => deps.log("fix.done", {
+    const logFixDoneRow = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding, waitFields?: Record<string, unknown>) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       round_id: roundId,
       ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() ?? releasedClaimId } : {}),
@@ -5387,6 +5374,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     });
     // W1-T5955: the round ends here, so its branch claim does too; the CI wait holds none.
     const logFixDone = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding): void => {
+      learningsRound?.landed(pushedHeadSha, landing);
       logFixDoneRow(pushedHeadSha, subtype, landing);
       releaseRoundClaim();
     };
@@ -5398,6 +5386,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       const claimRunId = deps.branchClaim?.id();
       if (kept !== undefined && typeof kept !== "string" && pushedHeadSha !== undefined && claimRunId !== undefined) {
         keptForWait = { headSha: pushedHeadSha, claimRunId };
+        learningsRound?.landed(pushedHeadSha, landing);
         logFixDoneRow(pushedHeadSha, undefined, landing,
           { ...kept, ci_wait_holds_claim: true, round_started_at_ms: fixRoundStartedAtMs });
       } else logFixDone(pushedHeadSha, undefined, landing);
@@ -5907,16 +5896,22 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       }
       deps.log(step, { ...extra, round_id: roundId, round_started_at_ms: fixRoundStartedAtMs, branch_claim_run_id: keptForWait.claimRunId });
     };
-    const waited = opts.waitForOwnHeadCi === undefined
-      ? await deps.waitForCiGreen(opts.prUrl, logCiWait)
-      : await opts.waitForOwnHeadCi(opts.prUrl, logCiWait, keptForWait?.headSha);
+    let waited: Awaited<ReturnType<typeof deps.waitForCiGreen>>;
+    try {
+      waited = opts.waitForOwnHeadCi === undefined
+        ? await deps.waitForCiGreen(opts.prUrl, logCiWait)
+        : await opts.waitForOwnHeadCi(opts.prUrl, logCiWait, keptForWait?.headSha);
+    } catch (error) {
+      learningsRound.settle(); // the pushed head's CI was never read
+      throw error;
+    }
     const handed = opts.liveRoundHandoff?.();
     // W1-T13991: origin/main's precedence. A terminal red the wait itself read takes the CI repair path, even when a
     // hand-off (a failing review on the same head) arrived during that same poll; a hand-off ends only a wait not yet red.
     const resumed = host.ciGateState(waited) === "red" ? undefined : handed;
     const ci = resumed?.failure === "check" ? { state: "red" as const, sha: resumed.headSha } : waited;
     const handoff = ciHandoff(ci);
-    logLearningsOutcome(landing.remoteHead ?? expectedHeadShaForPush, host.ciGateState(ci));
+    learningsRound.settle({ state: host.ciGateState(ci), sha: ciGateSha(ci) });
     if (handoff) return finish(handoff);
     const claimLostAfterCi = branchClaimLost();
     if (claimLostAfterCi) return finish(claimLostAfterCi);

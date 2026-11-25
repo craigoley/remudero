@@ -492,7 +492,7 @@ const SEED_ROWS: readonly SeedRow[] = [
     // W1-T14138: the shadow measurement of what learnings a fix round's failure would match.
     step: "fix.learnings_shadow",
     meaning:
-      "One per fix round, at its first prompt assembly: the learnings its failing checks and review would " +
+      "One per dispatched fix round, before its worker starts: the learnings its failing checks and review would " +
       "match by symbol or error signature, each with its match kinds (a file-only match is never recorded), " +
       "the task-keyed arm (offered or withheld), the budget in characters and the failing check names. " +
       "Neither arm injects anything: the fix prompt is the same in both. unreadable: the learnings corpus " +
@@ -501,12 +501,12 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["recorded", "unreadable"],
   },
   {
-    // W1-T14138: the round's result, joined to the shadow row by round_key.
+    // W1-T14138: the round's result, joined to the shadow row by round_id.
     step: "fix.learnings_outcome",
     meaning:
-      "One per fix round, once known: the CI conclusion on the head the round pushed (green, red, other) " +
-      "or no_push when it pushed nothing, with the pushed head. W1-T14139 reads it against the arm on the " +
-      "round's fix.learnings_shadow row to decide when to inject.",
+      "One per dispatched fix round, once known: the CI conclusion on the head the round pushed (green, red, " +
+      "or other when CI gave neither on that head or the push could not be read), or no_push when it pushed " +
+      "nothing. W1-T14139 reads it against the arm on the round's fix.learnings_shadow row to decide when to inject.",
     writer: ["runFixRung"],
     outcomes: ["green", "red", "no_push", "other"],
   },

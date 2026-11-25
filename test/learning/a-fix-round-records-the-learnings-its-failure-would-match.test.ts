@@ -7,7 +7,6 @@ import { test } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import {
   fixLearningsArm,
-  recordFixLearningsOutcome,
   recordFixLearningsShadow,
   summarizeFixLearningsShadow,
   type FixLearningsArm,
@@ -66,6 +65,13 @@ const failingChecks = [{
   logTail: "TypeError at src/widgets/table.ts:12\n  renderWidgetTable is not a function\nwidget-gate refused: row missing",
 }];
 
+const workerResult = (extra: Partial<WorkerResult> = {}): WorkerResult => ({
+  sessionId: "fix", costUsd: 0, numTurns: 1, text: "fixed", blocks: [], stderr: "",
+  subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
+  model: "sonnet", effort: "medium", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+  modelUsage: {}, compactionEvents: [], qualitySuspect: false, ...extra,
+});
+
 const taskInArm = (arm: FixLearningsArm): string => {
   for (let i = 1; ; i++) {
     const id = `W1-T9${String(i).padStart(3, "0")}`;
@@ -75,8 +81,17 @@ const taskInArm = (arm: FixLearningsArm): string => {
 
 interface RoundResult { rows: Row[]; prompts: string[] }
 
-/** One fix rung of `taskId` through the fix lane, with `withLearnings` choosing whether the repo holds a corpus. */
-async function fixRound(taskId: string, withLearnings: boolean, ciFailures = failingChecks): Promise<RoundResult> {
+type RungDeps = Parameters<typeof runFixRung>[0]["deps"];
+
+/** One fix rung of `taskId` through the fix lane, with `withLearnings` choosing whether the repo holds a corpus.
+ *  `rows` collects what the rung logged, so a caller that expects a throw still reads them. */
+async function fixRound(
+  taskId: string,
+  withLearnings: boolean,
+  ciFailures = failingChecks,
+  overrides: Partial<RungDeps> = {},
+  rows: Row[] = [],
+): Promise<RoundResult> {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}fix-learnings-`));
   const worktree = join(root, "worktree");
   mkdirSync(worktree, { recursive: true });
@@ -90,7 +105,6 @@ async function fixRound(taskId: string, withLearnings: boolean, ciFailures = fai
     floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
     headSha: "a".repeat(40), reviewerOutcome: "success",
   };
-  const rows: Row[] = [];
   const prompts: string[] = [];
   try {
     await runFixRung({
@@ -104,18 +118,14 @@ async function fixRound(taskId: string, withLearnings: boolean, ciFailures = fai
         ledgerLines: () => [], ledgerPath: join(worktree, "ledger.ndjson"),
         spawn: async (args: { prompt: string }) => {
           prompts.push(args.prompt);
-          return {
-            sessionId: "fix", costUsd: 0, numTurns: 1, text: "fixed", blocks: [], stderr: "",
-            subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
-            model: "sonnet", effort: "medium", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
-            modelUsage: {}, compactionEvents: [], qualitySuspect: false,
-          } satisfies WorkerResult;
+          return workerResult();
         },
         waitForCiGreen: async () => "green",
         runReview: async () => ({ ...initialReview, state: "success", criteria: criteria.map((c) => ({ ...c, met: true })), headSha: "d".repeat(40) }),
         push: () => {}, fetchPrBody: async () => "implemented", fetchPrDiffFiles: async () => task.files,
         issues: { create: () => "https://github.com/acme/remudero/issues/1", listOpen: () => [], comment: () => {} },
         log: (step, extra) => rows.push({ ...extra, step }), say: () => {}, account: (worker) => worker,
+        ...overrides,
       },
     });
   } finally {
@@ -125,6 +135,25 @@ async function fixRound(taskId: string, withLearnings: boolean, ciFailures = fai
 }
 
 const stepRows = (rows: Row[], step: string): Row[] => rows.filter((row) => row.step === step);
+
+const PUSHED = "b".repeat(40);
+
+/** A push the remote branch confirms, so the round waits on CI for `PUSHED`. */
+const landedPush: Partial<RungDeps> = {
+  push: () => ({ fixRoundPushedHead: PUSHED }),
+  readRemoteBranchHead: async () => PUSHED,
+  readHeadShaForProvenance: () => PUSHED,
+};
+
+/** The one outcome row of a rung's first round, after checking it joins that round's shadow row. */
+function onlyOutcome(rows: Row[]): Row {
+  const shadow = stepRows(rows, "fix.learnings_shadow");
+  const outcomes = stepRows(rows, "fix.learnings_outcome");
+  assert.equal(shadow.length, 1, "one shadow row");
+  assert.equal(outcomes.length, 1, "one outcome row per round");
+  assert.equal(outcomes[0]!.round_id, shadow[0]!.round_id, "the outcome joins its shadow row");
+  return outcomes[0]!;
+}
 
 test("W1-T14138 criterion 1: a fix round writes one shadow row naming the learnings its failing checks would match, with kinds and arm", async () => {
   for (const arm of ["offered", "withheld"] as const) {
@@ -138,6 +167,9 @@ test("W1-T14138 criterion 1: a fix round writes one shadow row naming the learni
     assert.equal(row.arm_epoch, "fix-learnings-shadow-v1");
     assert.equal(row.task_id, taskId);
     assert.equal(row.pr, 7);
+    assert.equal(row.attempt, 1);
+    assert.equal(row.round, "resume");
+    assert.equal(row.round_id, stepRows(rows, "fix.dispatch")[0]!.round_id, "the row is keyed on the dispatched round");
     assert.deepEqual(row.check_names, ["widget-gate"], "the failing check names are recorded");
     assert.equal(typeof row.budget_chars, "number");
     const matched = row.matched as { id: string; kinds: string[] }[];
@@ -180,21 +212,53 @@ test("W1-T14138 criterion 3: the fix prompt is byte-identical with and without l
 });
 
 test("W1-T14138 criterion 4: a round's outcome row records the CI conclusion on the head it pushed, or that it pushed nothing", async () => {
-  const { rows } = await fixRound(taskInArm("offered"), true);
-  const shadow = stepRows(rows, "fix.learnings_shadow")[0]!;
-  const outcomes = stepRows(rows, "fix.learnings_outcome");
-  assert.equal(outcomes.length, 1, "one outcome row per round");
-  assert.equal(outcomes[0]!.ci_conclusion, "no_push", "the worker changed nothing, so nothing was pushed");
-  assert.equal(outcomes[0]!.round_key, shadow.round_key, "the outcome joins its shadow row");
-  assert.equal(outcomes[0]!.pushed_head_sha, undefined);
+  for (const conclusion of ["green", "red"] as const) {
+    const { rows } = await fixRound(taskInArm("offered"), true, failingChecks,
+      { ...landedPush, waitForCiGreen: async () => conclusion });
+    const outcome = onlyOutcome(rows);
+    assert.equal(outcome.ci_conclusion, conclusion);
+    assert.equal(outcome.pushed_head_sha, PUSHED, "the row names the head CI was read on");
+    assert.equal(outcome.attempt, 1);
+  }
+  // A push double that names no head never reached a remote, so the round pushed nothing.
+  const nothing = onlyOutcome((await fixRound(taskInArm("offered"), true)).rows);
+  assert.equal(nothing.ci_conclusion, "no_push");
+  assert.equal(nothing.pushed_head_sha, undefined);
+});
 
-  const logged: Row[] = [];
-  const log = (step: string, extra: Record<string, unknown>) => logged.push({ ...extra, step });
-  const base = { taskId: "W1-T1", roundKey: "k", attempt: 1, log };
-  assert.equal(recordFixLearningsOutcome({ ...base, pushedHeadSha: "b".repeat(40), ciState: "green" }), "green");
-  assert.equal(recordFixLearningsOutcome({ ...base, pushedHeadSha: "c".repeat(40), ciState: "red" }), "red");
-  assert.equal(recordFixLearningsOutcome({ ...base, pushedHeadSha: "d".repeat(40), ciState: "timeout" }), "other");
-  assert.deepEqual(logged.map((r) => [r.ci_conclusion, r.pushed_head_sha]), [["green", "b".repeat(40)], ["red", "c".repeat(40)], ["other", "d".repeat(40)]]);
+test("W1-T14138: a CI state read on another head, or neither green nor red, is not the pushed head's conclusion", async () => {
+  for (const ci of [{ state: "green" as const, sha: "c".repeat(40) }, "timeout" as const]) {
+    const { rows } = await fixRound(taskInArm("offered"), true, failingChecks, { ...landedPush, waitForCiGreen: async () => ci });
+    const outcome = onlyOutcome(rows);
+    assert.equal(outcome.ci_conclusion, "other");
+    assert.equal(outcome.pushed_head_sha, PUSHED);
+  }
+});
+
+test("W1-T14138: a round whose remote head cannot be read after the push records other, never no_push", async () => {
+  const { rows } = await fixRound(taskInArm("offered"), true, failingChecks,
+    { ...landedPush, readRemoteBranchHead: async () => { throw new Error("remote unreachable"); } });
+  const outcome = onlyOutcome(rows);
+  assert.equal(outcome.ci_conclusion, "other");
+  assert.equal(outcome.push_unread, true);
+});
+
+test("W1-T14138: a round that ends before its fix.done row, or by a throw, still writes its outcome", async () => {
+  const abandoned = await fixRound(taskInArm("offered"), true, failingChecks,
+    { spawn: async () => workerResult({ notStarted: "admission-abandoned" }) });
+  assert.equal(onlyOutcome(abandoned.rows).ci_conclusion, "no_push");
+
+  const crashed: Row[] = [];
+  await assert.rejects(fixRound(taskInArm("offered"), true, failingChecks,
+    { spawn: async () => { throw new Error("spawn broke"); } }, crashed), /spawn broke/);
+  assert.equal(onlyOutcome(crashed).ci_conclusion, "no_push");
+
+  const unwaited: Row[] = [];
+  await assert.rejects(fixRound(taskInArm("offered"), true, failingChecks,
+    { ...landedPush, waitForCiGreen: async () => { throw new Error("ci wait broke"); } }, unwaited), /ci wait broke/);
+  const outcome = onlyOutcome(unwaited);
+  assert.equal(outcome.ci_conclusion, "other", "the head was pushed and its CI never read");
+  assert.equal(outcome.pushed_head_sha, PUSHED);
 });
 
 test("W1-T14138: the shadow row records an unreadable corpus instead of failing the round", () => {
@@ -203,7 +267,7 @@ test("W1-T14138: the shadow row records an unreadable corpus instead of failing 
     writeFileSync(join(dir, "ci.yaml"), "- id: [unclosed\n  fact: {");
     const logged: Row[] = [];
     const result = recordFixLearningsShadow({
-      taskId: "W1-T1", attempt: 1, round: "fresh", roundKey: "k", evidence: { ciFailures: failingChecks },
+      taskId: "W1-T1", attempt: 1, round: "fresh", roundId: "k", evidence: { ciFailures: failingChecks },
       homes: { projectDir: dir }, log: (step, extra) => logged.push({ ...extra, step }),
     });
     assert.equal(logged.length, 1);
@@ -215,20 +279,27 @@ test("W1-T14138: the shadow row records an unreadable corpus instead of failing 
   }
 });
 
-test("W1-T14138: the summary reports, per arm, match rate by kind and outcome rates", () => {
-  const shadow = (arm: string, key: string, task: string, matched: unknown[]): Row =>
-    ({ step: "fix.learnings_shadow", arm, round_key: key, task_id: task, outcome: "recorded", matched });
-  const outcome = (key: string, ci_conclusion: string): Row => ({ step: "fix.learnings_outcome", round_key: key, ci_conclusion });
+test("W1-T14138: the summary reports, per arm, match rate by kind, outcome rates and rounds to green", () => {
+  const shadow = (arm: string, key: string, task: string, matched: unknown[], outcome = "recorded"): Row =>
+    ({ step: "fix.learnings_shadow", arm, round_id: key, task_id: task, outcome, matched });
+  const outcome = (key: string, task: string, ci_conclusion: string): Row =>
+    ({ step: "fix.learnings_outcome", round_id: key, task_id: task, ci_conclusion });
+  const done = (step: "fix.dispatch" | "fix.done", key: string, task: string): Row => ({ step, round_id: key, task_id: task });
   const summary = summarizeFixLearningsShadow([
-    shadow("offered", "a", "T1", [{ id: "x", kinds: ["error", "symbol"] }]), outcome("a", "red"),
-    shadow("offered", "b", "T1", []), outcome("b", "green"),
-    shadow("withheld", "c", "T2", [{ id: "y", kinds: ["symbol"] }]), outcome("c", "no_push"),
+    // A round that predates the shadow rows still counts toward its task's rounds to green.
+    done("fix.dispatch", "earlier", "T1"), done("fix.done", "earlier", "T1"),
+    shadow("offered", "a", "T1", [{ id: "x", kinds: ["error", "symbol"] }]), done("fix.dispatch", "a", "T1"),
+    done("fix.done", "a", "T1"), outcome("a", "T1", "red"),
+    shadow("offered", "b", "T1", []), done("fix.dispatch", "b", "T1"), outcome("b", "T1", "green"),
+    shadow("withheld", "c", "T2", [{ id: "y", kinds: ["symbol"] }]), done("fix.done", "c", "T2"), outcome("c", "T2", "no_push"),
+    // An unreadable corpus measured no match, so its round is outside the rates.
+    shadow("withheld", "d", "T3", [], "unreadable"), outcome("d", "T3", "red"),
   ]);
   assert.equal(summary.offered.rounds, 2);
   assert.equal(summary.offered.roundsWithMatch, 1);
   assert.deepEqual(summary.offered.matchRateByKind, { error: 0.5, symbol: 0.5 });
   assert.deepEqual(summary.offered.outcomeRates, { green: 0.5, red: 0.5, no_push: 0, other: 0 });
-  assert.deepEqual(summary.offered.roundsToGreen, { T1: 2 });
+  assert.deepEqual(summary.offered.roundsToGreen, { T1: 3 });
   assert.equal(summary.withheld.rounds, 1);
   assert.deepEqual(summary.withheld.outcomeRates, { green: 0, red: 0, no_push: 1, other: 0 });
   assert.deepEqual(summary.withheld.roundsToGreen, {});
