@@ -76,37 +76,47 @@ function world(t: { after: (fn: () => void) => void }, tasks: Array<[string, str
 const answerFor = (...moves: JudgeMove[]): string => JSON.stringify({ moves });
 const PIN = "5  # operator-2026-10-15: protective";
 
-test("W1-T14651 checkMoves: a lower under the smallest-pin floor is accepted, a raise under it still escalates", () => {
-  // W1-T14651 criterion 4: a target priority at or above the current one (less urgent, or no move) is never escalated for the floor.
-  const p = packs(pack("W1-T1", 5, true), pack("W1-T3", 2, false));
-  // W1-T14651 criterion 1: an unpinned task moved to a less urgent priority under the smallest pin is an accepted lower.
-  // 2 -> 4 is below the floor (5) but less urgent than the task now: a lower, never held.
-  const lower = checkMoves([move("W1-T3", 4)], p);
+// The proofs for these criteria grep the TITLES below (a code line, not a comment), so each criterion is named in a title.
+test("W1-T14651 criterion 1: checkMoves returns an unpinned priority-1 task moved to 2 under a smallest pin of 3 as an accepted lower", () => {
+  // 1 -> 2 is below the floor (3) but less urgent than the task now: a lower, never held.
+  const lower = checkMoves([move("W1-T3", 2)], packs(pack("W1-T1", 3, true), pack("W1-T3", 1, false)));
   assert.deepEqual(lower.accepted.map((a) => [a.target, a.class]), [["W1-T3", "lower"]]);
   assert.equal(lower.escalate.length, 0);
-  // W1-T14651 criterion 2: a raise under the floor, and a pinned task moved to a larger number, still escalate.
-  // 2 -> 2 is not a move at all, and 3 -> 1 is a raise below the floor: held.
-  const raise = checkMoves([move("W1-T7", 1)], packs(pack("W1-T1", 5, true), pack("W1-T7", 3, false)));
+});
+
+test("W1-T14651 criterion 2: a raise below the floor and a pinned move to a larger number still escalate", () => {
+  // 4 -> 2 under a smallest pin of 3 is a raise below the floor: held.
+  const raise = checkMoves([move("W1-T7", 2)], packs(pack("W1-T1", 3, true), pack("W1-T7", 4, false)));
   assert.deepEqual(raise.escalate.map((a) => [a.target, a.class]), [["W1-T7", "raise"]]);
   assert.equal(raise.accepted.length, 0);
   // A task with no declared priority is raised by any value, so the floor still holds it.
-  const none = checkMoves([move("W1-T8", 4)], packs(pack("W1-T1", 5, true), pack("W1-T8", null, false)));
+  const none = checkMoves([move("W1-T8", 2)], packs(pack("W1-T1", 3, true), pack("W1-T8", null, false)));
   assert.deepEqual(none.escalate.map((a) => a.target), ["W1-T8"]);
   // A pinned priority is never moved to a larger number.
-  const pinned = checkMoves([move("W1-T1", 6)], p);
+  const pinned = checkMoves([move("W1-T1", 4)], packs(pack("W1-T1", 3, true)));
   assert.deepEqual(pinned.escalate.map((a) => a.target), ["W1-T1"]);
 });
 
+test("W1-T14651 criterion 4: invariant only-more-urgent-crosses-the-floor, no target at or above the current priority is escalated", () => {
+  const floor = 5;
+  for (let current = 1; current <= 4; current += 1) {
+    for (let target = current; target <= 6; target += 1) {
+      const r = checkMoves([move("W1-T3", target)], packs(pack("W1-T1", floor, true), pack("W1-T3", current, false)));
+      assert.equal(r.escalate.length, 0, `${current} -> ${target} is not more urgent, so the floor never holds it`);
+    }
+  }
+});
+
 test("W1-T14651: a lowering proposal is judged as a lower and opens no needs-human issue", async (t) => {
-  // W1-T14651 criterion 1: through the judge, the lower opens no needs-human issue.
+  // Through the judge, the lower opens no needs-human issue.
   const w = world(t, [["W1-T1", PIN], ["W1-T3", "2"]], [startRow("W1-T9", NOW - HOUR)], answerFor(move("W1-T3", 4)));
   const inv = await queueJudgeInventory(w.full, w.deps);
   assert.equal(w.escalations.length, 0, "a lower opens no needs-human issue");
   assert.deepEqual(inv.moves.map((m) => [m.target, m.class, m.from, m.to]), [["W1-T3", "lower", 2, 4]]);
 });
 
-test("W1-T14651: the judge closes its own open floor escalations that the corrected rule admits", async (t) => {
-  // W1-T14651 criterion 3: an open floor escalation the corrected rule admits is closed with a reason and one row.
+test("W1-T14651 criterion 3: the judge closes its own open floor escalations that the corrected rule admits", async (t) => {
+  // An open floor escalation the corrected rule admits is closed with a reason and one row.
   const url = "https://example.test/issues/77";
   const prior: Row[] = [
     { step: "queue_judge.escalated", task_id: "W1-T3", from: 2, to: 4, evidence_signature: "sig", issue_url: url, ts: iso(NOW - 5 * HOUR) },
@@ -139,8 +149,8 @@ test("W1-T14651: a failed close of a floor escalation is ledgered and the pass g
   assert.match(String(w.logs.find((l) => l.step === "queue_judge.escalation_close_failed")?.extra.error), /gh refused/);
 });
 
-test("W1-T14651: a pinned task's escalated move to a larger number is never closed as admitted", () => {
-  // W1-T14651 criterion 2: a pinned task moved to a larger number stays escalated.
+test("W1-T14651 criterion 2: a pinned task's escalated move to a larger number is never closed as admitted", () => {
+  // A pinned task moved to a larger number stays escalated.
   const rows: Row[] = [{ step: "queue_judge.escalated", task_id: "W1-T1", from: 1, to: 3, issue_url: "u1" }];
   assert.deepEqual(admittedFloorEscalations(rows, packs(pack("W1-T1", 1, true))), []);
   // The same row on an unpinned task is admitted.
