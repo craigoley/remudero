@@ -153,7 +153,7 @@ import { tsImport } from "tsx/esm/api";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import { createIndexedLifetimeAccounting, tallyAuditedLifetimeDispatches, type LifetimeIndexFailure } from "./lib/lifetime-identity-index.js";
 import { defaultCreditOverridePath, planCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
-  type CreditOverrideRow, type CreditReadState, type CreditStore } from "./lib/status.js";
+  type CreditOverrideRow, type CreditReadState, type CreditStore, type ProjectPlanPhases } from "./lib/status.js";
 import type { DependencyMergeEvidence } from "./lib/plan.js";
 export { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import {
@@ -29830,11 +29830,14 @@ export function buildDaemonReadRefresher(options: {
   ledgerPath: string;
   statusPath: string;
   log: (step: string, extra?: Record<string, unknown>) => void;
+  /** W1-T14644: told where this read's projection spent its time; a read that measured nothing tells nothing. */
+  observePhases?: (phases: ProjectPlanPhases) => void;
 }): (plan?: Plan) => Promise<MergedSet> {
   return async (plan = options.plan()) => {
     options.invalidate();
     const previous = options.previous();
     const snapshot = await options.read({ plan, previousProjection: previous ? [...previous] : undefined });
+    if (snapshot.facts.projectionPhases) options.observePhases?.(snapshot.facts.projectionPhases);
     applyTickCreditUpdates(snapshot.facts, options.ledgerPath, options.log);
     const stage = `${options.statusPath}.${process.pid}.tmp`;
     mkdirSync(dirname(options.statusPath), { recursive: true });
