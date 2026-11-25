@@ -78,4 +78,7 @@ test("W1-T14787 the per-poll feedback-landing pass is still wired into the loop"
   assert.equal(run.code, 0);
   assert.ok(run.loopDeps, "positive control: the command reached runDaemon");
   assert.equal(typeof run.loopDeps!.sweepFeedbackLanding, "function", "the loop's tick sweeps still land the inbox");
+  // The pass moved from the boot to the loop: the loop owns it, and the boot is handed none (base passed one here).
+  assert.ok(run.bootArgs, "positive control: the command reached daemonBoot");
+  assert.equal(run.bootArgs![FEEDBACK_LANDING_ARG], undefined, "the pass lives only in the loop, not the boot");
 });
