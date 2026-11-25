@@ -108,4 +108,18 @@ test("W1-T14788 a settle with no restart decided still awaits the lifetime-press
   } finally {
     await h.finish();
   }
+  // Contrast under the same pressure: only a decided restart leaves the judging to the successor (base awaited it here).
+  const restarted = harness();
+  try {
+    await waitFor(() => restarted.state.started >= 2);
+    restarted.state.armed = { origin: "progress-watchdog", requestedAt: new Date(restarted.state.now).toISOString(), codeSha: "c".repeat(40) };
+    const summary = await Promise.race([restarted.run, delay(10_000).then(() => undefined)]);
+    assert.ok(summary, "with a restart decided, the settle does not await the judging");
+    assert.equal(restarted.state.judgingDone, false, "the restart's settle left the judging unfinished");
+    const exit = restarted.rows.find((r) => r.step === "daemon.freshness_exit");
+    assert.deepEqual([...((exit?.lifetime_pressure_left_to_successor ?? []) as string[])].sort(), ["A", "B"],
+      "the tasks the no-restart settle judged are the ones a decided restart leaves to the successor");
+  } finally {
+    await restarted.finish();
+  }
 });
