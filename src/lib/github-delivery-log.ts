@@ -97,6 +97,7 @@ function readCursors(path: string): Record<string, string> {
     const parsed = record(JSON.parse(fs.readFileSync(path, "utf8")));
     return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string" && /^\d+$/.test(entry[1])));
   } catch {
+    // Missing and unreadable coincide for the one consumer: either way the next pass reads the newest page only.
     return {};
   }
 }
