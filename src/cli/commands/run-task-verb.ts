@@ -18,6 +18,7 @@ import { type FixRoundReapplyPorts } from "../../lib/fix-round-reapply.js";
 import { fixRoundBranchClaim, productionFixProgressJudge, type JobRequeueOutcome } from "../../lib/sweep.js";
 import { ghExec, ghJsonAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { composeSecondaryPlan, findTaskInCatalogs, opsPlanForLookup } from "../../lib/task-lookup.js";
+import { opsTaskRecordContract, renderTaskRecordContext, taskRecordDelivery, type TaskRecordContract } from "../../lib/task-record-context.js";
 import { renderAcceptanceBlock } from "../../lib/plan-pr-emitter.js";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, writeFileSync } from "node:fs";
@@ -1147,6 +1148,8 @@ export interface RunTaskContext {
   spawn: typeof spawnWorker;
   task: Task & { catalog?: "public" | "ops" };
   opsCriteriaAtOpen?: CanonicalOpsCriteriaAtOpen;
+  /** W1-T14795: an ops-catalog task's own contract, inlined in place of a record pointer its worker cannot open. */
+  opsTaskContract?: TaskRecordContract;
   /** W1-T12936: Core public-plan criteria pinned at one commit, for a target whose own plan lacks the task. */
   coreCriteriaAtOpen?: CanonicalOpsCriteriaAtOpen;
   taskId: string;
@@ -2691,21 +2694,13 @@ function workerVisibleRecordPath(
   return rel;
 }
 
+/** The pointer form, kept for run-task.ts's re-export; the body lives in lib/task-record-context.ts (W1-T14795). */
 function taskRecordContextLine(
   taskId: string,
   recordPath: string | undefined,
   criteria: ReadonlyArray<AcceptanceCriterion> = [],
 ): string {
-  if (!recordPath) return "";
-  const rendered = criteria.map(
-    (c, i) => `    (${String.fromCharCode(97 + i)}) ${c.claim}\n        proof: ${c.proof}`,
-  );
-  return (
-    `- YOUR TASK'S OWN RECORD IS AT ${recordPath} — READ IT FIRST. It carries the design, ` +
-    "rationale and acceptance criteria that recon would otherwise have relayed, and nothing " +
-    `else in this prompt contains them. ${citation(`plan#${taskId}`)}` +
-    (rendered.length ? `\n    Acceptance criteria, verbatim from that record:\n${rendered.join("\n")}` : "")
-  );
+  return renderTaskRecordContext({ taskId, recordPath, criteria });
 }
 
 function nonEmptyLines(s: string): string[] {
@@ -2715,7 +2710,7 @@ function nonEmptyLines(s: string): string[] {
     .filter((l) => l.length > 0);
 }
 
-function reconObservedToContext(helperHost: Pick<RunTaskHelperHost, "renderReconClaimLines">, recon: WorkerResult, taskId: string, recordPath?: string): string {
+function reconObservedToContext(helperHost: Pick<RunTaskHelperHost, "renderReconClaimLines">, recon: WorkerResult, taskId: string, recordPath?: string, contract?: TaskRecordContract): string {
   const { renderReconClaimLines } = helperHost;
   const parsed = parseReconReport(workerTranscript(recon));
   const lines = nonEmptyLines(parsed?.observed ?? "");
@@ -2723,7 +2718,7 @@ function reconObservedToContext(helperHost: Pick<RunTaskHelperHost, "renderRecon
   // Each line becomes a cited CONTEXT claim (provenance from recon). The record line leads: it is
   // stable per task, while recon's output is per-run (cache-aware ordering, W1-T35). Gaps come
   // LAST so the prompt reads observations-then-caveats, and each carries the prefix above.
-  return [taskRecordContextLine(taskId, recordPath), ...renderReconClaimLines(taskId, lines, gaps)]
+  return [renderTaskRecordContext({ taskId, recordPath, contract }), ...renderReconClaimLines(taskId, lines, gaps)]
     .filter((s) => s.length > 0)
     .join("\n");
 }
@@ -2733,6 +2728,7 @@ function reconDegradedContextNote(
   taskId: string,
   recordPath?: string,
   acceptance: ReadonlyArray<AcceptanceCriterion> = [],
+  contract?: TaskRecordContract,
 ): string {
   const lines = [
     `- RECON CONTEXT ABSENT: the recon worker errored twice in a row (${subtype}) and the ` +
@@ -2753,7 +2749,7 @@ function reconDegradedContextNote(
   // The bullet itself now lives in {@link taskRecordContextLine}, shared with the HEALTHY path —
   // extracted rather than copied so the two cannot drift and this path cannot gain a second copy.
   // Output here is byte-identical to before the extraction; only the criteria travel on this side.
-  const recordLine = taskRecordContextLine(taskId, recordPath, acceptance);
+  const recordLine = renderTaskRecordContext({ taskId, recordPath, criteria: acceptance, contract });
   if (recordLine) lines.push(recordLine);
   return lines.join("\n");
 }
@@ -2762,6 +2758,7 @@ function reconMaskedContextNote(
   taskId: string,
   recordPath?: string,
   acceptance: ReadonlyArray<AcceptanceCriterion> = [],
+  contract?: TaskRecordContract,
 ): string {
   const lines = [
     "- RECON CONTEXT MASKED: this run is arm B of a RECON-factor wipe-test pair (W1-T2512) — " +
@@ -2770,7 +2767,7 @@ function reconMaskedContextNote(
       "rely only on the CONTEXT/TASK below and your own read-only inspection. " +
       `${citation(`recon#${taskId}`)}`,
   ];
-  const recordLine = taskRecordContextLine(taskId, recordPath, acceptance);
+  const recordLine = renderTaskRecordContext({ taskId, recordPath, criteria: acceptance, contract });
   if (recordLine) lines.push(recordLine);
   return lines.join("\n");
 }
@@ -2848,7 +2845,7 @@ function writeReconArtifact(root: string, artifact: ReconArtifact): void {
   writeFileSync(p, JSON.stringify(artifact, null, 2));
 }
 
-function reconArtifactToContext(helperHost: Pick<RunTaskHelperHost, "renderReconClaimLines">, artifact: ReconArtifact, taskId: string, recordPath?: string): string {
+function reconArtifactToContext(helperHost: Pick<RunTaskHelperHost, "renderReconClaimLines">, artifact: ReconArtifact, taskId: string, recordPath?: string, contract?: TaskRecordContract): string {
   const { renderReconClaimLines } = helperHost;
   const lines = nonEmptyLines(artifact.observed);
   const gaps = nonEmptyLines(artifact.couldnt_verify);
@@ -2856,7 +2853,7 @@ function reconArtifactToContext(helperHost: Pick<RunTaskHelperHost, "renderRecon
     `- REUSED RECON ARTIFACT from a prior dispatch of this task (written ${artifact.written_at}): ` +
     "the claims below are EVIDENCE to VERIFY-AND-EXTEND, not settled fact — confirm each before " +
     `building on it, the same as you would recon's own OBSERVED output. ${citation(`recon#${taskId}`)}`;
-  return [header, taskRecordContextLine(taskId, recordPath), ...renderReconClaimLines(taskId, lines, gaps)]
+  return [header, renderTaskRecordContext({ taskId, recordPath, contract }), ...renderReconClaimLines(taskId, lines, gaps)]
     .filter((s) => s.length > 0)
     .join("\n");
 }
@@ -5251,6 +5248,7 @@ export async function runTask(
       spawn,
       task,
       opsCriteriaAtOpen,
+      opsTaskContract: opsTaskRecordContract(lookup),
       coreCriteriaAtOpen,
       taskId,
       workerAbandonMs,
@@ -5621,6 +5619,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     spawn,
     task,
     opsCriteriaAtOpen,
+    opsTaskContract,
     coreCriteriaAtOpen,
     taskId,
     workerAbandonMs,
@@ -6783,12 +6782,12 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // `reusedReconArtifact`/`reconDegradedSubtype`/`recon`, so it is checked first even though
     // it was introduced last.
     const reconContext = reconMasked
-      ? reconMaskedContextNote(taskId, recordPath, task.acceptance ?? [])
+      ? reconMaskedContextNote(taskId, recordPath, task.acceptance ?? [], opsTaskContract)
       : reusedReconArtifact
-        ? reconArtifactToContext(reusedReconArtifact, taskId, recordPath)
+        ? reconArtifactToContext(reusedReconArtifact, taskId, recordPath, opsTaskContract)
         : reconDegradedSubtype
-          ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [])
-          : reconObservedToContext(recon!, taskId, recordPath);
+          ? reconDegradedContextNote(reconDegradedSubtype, taskId, recordPath, task.acceptance ?? [], opsTaskContract)
+          : reconObservedToContext(recon!, taskId, recordPath, opsTaskContract);
     const learningsSelectionText = [
       task.title,
       task.rationale ?? "",
@@ -6901,7 +6900,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     // run is about to spawn with, so `rmd receipt <pr>` (src/lib/receipt.ts's buildReceipt) has a
     // ground-truth field to read instead of a fabricated one. Rides the SAME `prompt.linted` line
     // (a one-line addition, per the task's own design), never a second ledger step.
-    log("prompt.linted", { provenance: "clean", prompt_template_hash: createHash("sha256").update(prompt).digest("hex") });
+    log("prompt.linted", { provenance: "clean", prompt_template_hash: createHash("sha256").update(prompt).digest("hex"), record_delivery: taskRecordDelivery(opsTaskContract) });
     say("prompt provenance-linted: clean");
     // W1-T2297: RECORDS the composition of the prompt this run just spawned with. `prompt.linted`
     // above already fingerprints the WHOLE rendered prompt; this ledgers the per-PART breakdown

@@ -63,6 +63,11 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
   const exactDedupe = { ...exactOptions, createLedgerExactDedupe };
   const reportSeen = new Set();
   const reportSteps = new Set();
+  // W1-T14473: history before the earliest experiment never enters the exact-dedupe index, and a row over the
+  // index's row bound is counted and skipped, so neither old history nor one oversized row ends the read.
+  const sinceMs = Date.parse(`${since}T00:00:00Z`);
+  const insideTrials = row => !(Date.parse(row.ts) < sinceMs);
+  let oversizedRows = 0;
   let rowsRead = 0, malformedRows = 0, unreadSources = 0, futureRows = 0, invalidTimestampRows = 0, newestTs = null;
   const formsRead = { gzip: 0, plain: 0, live: 0 };
   const budgetReasons = [];
@@ -70,6 +75,8 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
     for await (const row of openUnion(source.stateDir, {
       dedupe: false,
       exactDedupe,
+      exactDedupeWhere: insideTrials,
+      onOversizedRow: (item) => { oversizedRows++; finding({ kind: "oversized-row", form: item.form, path: item.path, rowOrdinal: item.rowOrdinal }); },
       onExactDedupeStats: value => { dedupe = value; },
       onSourceRead: ({ form }) => { formsRead[form]++; },
       onUnreadDirectory: () => { unreadSources++; },
@@ -119,6 +126,9 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
     try {
     for await (const row of openUnion(source.stateDir, {
       since: `${since}T00:00:00Z`, step: [...reportSteps], exactDedupe,
+      // deliberate: the audit read above already counted each oversized row; a new one appended since then
+      // also changes the corpus identity, which names ledger-source-changed-during-review.
+      onOversizedRow: () => {},
       onUnreadDirectory: () => { unreadSources++; },
       onUnreadArchive: () => { unreadSources++; }, onUnreadLive: () => { unreadSources++; },
       onAcceptedRecord: (row, raw) => {
@@ -141,6 +151,7 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
   if (byteBound) reasons.push("ledger-retention-byte-bound");
   if (unreadSources) reasons.push("ledger-source-unreadable");
   if (malformedRows) reasons.push("ledger-source-malformed");
+  if (oversizedRows) reasons.push("ledger-row-over-bound");
   if (invalidTimestampRows) reasons.push("ledger-source-invalid-timestamp");
   if (futureRows) reasons.push("ledger-source-future-dated");
   if (!rowsRead) reasons.push("ledger-positive-control-missing");
@@ -154,7 +165,7 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
     rowsRead, retainedRows: rows.length, retainedBytes: deliveredBytes, auditedRetainedBytes: retainedBytes,
     retainedRowsMissing: reportSeen.size, maxRetainedBytes, dedupe: dedupe && { rows: dedupe.rows, state: dedupe.state, reason: dedupe.reason },
     corpusControl: { formsExpected: forms, formsRead, index: dedupe },
-    completeness, dedupeRows, retainedRowsOmitted, malformedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
+    completeness, dedupeRows, retainedRowsOmitted, malformedRows, oversizedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
 }
 
 function privateWrite(path, value) {

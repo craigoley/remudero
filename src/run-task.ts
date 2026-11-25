@@ -153,7 +153,7 @@ import { tsImport } from "tsx/esm/api";
 import { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import { createIndexedLifetimeAccounting, tallyAuditedLifetimeDispatches, type LifetimeIndexFailure } from "./lib/lifetime-identity-index.js";
 import { defaultCreditOverridePath, planCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
-  type CreditOverrideRow, type CreditReadState, type CreditStore } from "./lib/status.js";
+  type CreditOverrideRow, type CreditReadState, type CreditStore, type ProjectPlanPhases } from "./lib/status.js";
 import type { DependencyMergeEvidence } from "./lib/plan.js";
 export { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import {
@@ -399,7 +399,7 @@ import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.
 import { issueRevalidationJudgeText, issueTaskId, loadIssueRevalidationPolicy, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
 import { reconcileManagedImprovementEffects } from "./lib/opportunity-outcomes.js";
 import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
-import { planGardenSpec } from "./lib/plan-gardener.js";
+import { assertOpsCheckoutAtPin, opsPlanLandingPreflight, planGardenSpec, productionPlanGardenOps } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { queueJudgeGardenSpec, queueJudgeRouteWindow, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
 import { redesignGardenSpec } from "./lib/redesign-gardener.js";
@@ -1636,6 +1636,7 @@ import {
   sortRowsByJson,
   type DispatchValueContext,
   type CostOfDelaySnapshot,
+  type OperatorHoldState,
 } from "./lib/dispatch-value.js";
 import {
   fixArmEvidence,
@@ -19472,16 +19473,9 @@ async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProducti
   if (context.outcome !== "ok" || !target || !pin || !ops || ops.tasks.length === 0) return { ...publicInput, catalogOutcome: context.outcome };
   const sources = new Map<string, string>(), taskPaths = new Map<string, string>();
   try {
-    const head = (await hostWorktreeGitAsync(target.checkoutDir, ["rev-parse", "HEAD"])).trim();
-    if (head !== pin) {
-      // The checkout may lag the API-pinned default branch. Fetch objects and the tracking ref without
-      // switching its branch; only proceed when the fetched main is the same commit as the read snapshot.
-      await hostWorktreeGitAsync(target.checkoutDir, ["fetch", "--quiet", "--no-tags", "origin",
-        "+refs/heads/main:refs/remotes/origin/main"]);
-      if ((await hostWorktreeGitAsync(target.checkoutDir, ["rev-parse", "origin/main"])).trim() !== pin) {
-        throw new Error("ops-status-source-moved");
-      }
-    }
+    // The checkout may lag the API-pinned default branch: the shared plan-landing helper fetches without switching
+    // its branch and proceeds only when the fetched main is the same commit as the read snapshot.
+    await assertOpsCheckoutAtPin(target.checkoutDir, pin);
     for (const task of ops.tasks) {
       const source = task.sourcePath;
       if (!source || !/^(?:tasks\.yaml|tasks\.d\/[^/]+\.ya?ml)$/.test(source)) throw new Error("ops-status-source-unbound");
@@ -19507,13 +19501,7 @@ async function buildCatalogPlanReconcileInput(deps: CatalogPlanReconcileProducti
     // A candidate based on a newer main must never overwrite it with bytes read from our older pin:
     // W1-T14574 accepts a newer parent only when no commit since the pin touched a carried record.
     // Later main changes are left to the ordinary three-way PR merge and its required gates.
-    planPrPreflight: preflightOnUnmovedRecords(args => hostWorktreeGitAsync(target.checkoutDir, args), pin, opsCarriedPaths, async (sha, pr) => {
-      return planPrPreflightAtCommitAsync(target.checkoutDir, sha, {
-        ...pr,
-        codeRoot: deps.checkoutRoot,
-        bodyProofRoot: "plan",
-      }, { log: deps.log });
-    }),
+    planPrPreflight: opsPlanLandingPreflight({ checkoutDir: target.checkoutDir, pin, carriedPaths: opsCarriedPaths, codeRoot: deps.checkoutRoot, log: deps.log }),
   }), deps.land);
   const opsById = ops.byId;
   return {
@@ -26925,6 +26913,9 @@ export function dispatchValueContextForSelection(
   planPath: string,
   readLedger: typeof readLedgerUnionRecordsSync = dispatchSelectionLedgerUnion,
   readFiling: DispatchFilingReader = dispatchFilingPrefetch,
+  // W1-T14643: the release and answer state this lane's dispatch consults, so the censored tier-wait sample
+  // holds back exactly the records dispatch holds back.
+  holds?: OperatorHoldState,
 ): DispatchValueContext | undefined {
   const union = readLedger(stateDir, {
     step: [...DISPATCH_VALUE_LEDGER_STEPS, "dispatch.cost_of_delay.fallback", "dispatch.cost_of_delay.ready", "dispatch.refused_already_merged"],
@@ -26959,7 +26950,7 @@ export function dispatchValueContextForSelection(
   const openIds = new Set(plan.tasks.filter(task => !isMerged(task.id)).map(task => task.id));
   const seed = filing.kind === "ready" ? filing.snapshot.planTreeSha : planSeed(plan.tasks);
   const calibrated = buildDispatchValueContext(
-    plan.tasks, evidence, openIds, nowMs, true, seed,
+    plan.tasks, evidence, openIds, nowMs, true, seed, undefined, holds,
   );
   if (calibrated.kind === "refused") {
     log("dispatch.value.refused", { reason: calibrated.reasons.join(",") });
@@ -26971,7 +26962,7 @@ export function dispatchValueContextForSelection(
     refused_classes: calibrated.refusals,
   });
   const scheduled = filing.kind === "ready"
-    ? buildDispatchValueContext(plan.tasks, evidence, openIds, nowMs, true, seed, filing.snapshot) : filing;
+    ? buildDispatchValueContext(plan.tasks, evidence, openIds, nowMs, true, seed, filing.snapshot, holds) : filing;
   if (scheduled.kind === "refused") {
     fallback(scheduled.reasons, seed);
     return Object.freeze({ ...calibrated.context, costOfDelayFallback: true });
@@ -27355,8 +27346,10 @@ async function drainCommand(
         refreshMerged,
         // W1-T3412: the full-union read stays in this command layer and runs once for each
         // selection pass. `drain.ts` receives only this immutable context and remains pure.
+        // W1-T14643: the drain's dispatch reads releases and no answer reader, so its censored sample does the same.
         buildDispatchValueContext: (dispatchPlan, merged) =>
-          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, planPath),
+          dispatchValueContextForSelection(dispatchPlan, merged, dirname(ledgerPath), log, planPath, undefined, undefined,
+            { releasedIds: () => resolveReleasedIds(releaseReadersFor(ledgerPathFor(config)), dispatchPlan) }),
         isOpenPr,
         isCreditIndeterminate,
         // W1-T3216: THE PRODUCER. `resolveReleasedIds` (drain.ts) turns these lines into the
@@ -29446,7 +29439,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "plan": {
       const d = deps("plan");
       const repairs = { stateDir, repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log, taskFilesLanding: { stateRoot: config.root } };
-      return withShardRepairs(stateDir, () => runShardRepairPass(repairs), gardenPass(planGardenSpec(d), d), log);
+      // W1-T14642: the pass reads the ops catalog too, and an ops edit lands through the sealed landing into the plan destination.
+      const ops = productionPlanGardenOps({ repoRoot, stateDir, stateRoot: config.root, log });
+      const planPass = gardenPass(planGardenSpec(d, ops), d);
+      const planAndOps: RegisteredGardenPass = Object.assign(async () => { await planPass(); await ops.settled(); }, { due: planPass.due });
+      return withShardRepairs(stateDir, () => runShardRepairPass(repairs), planAndOps, log);
     }
     case "backlog": {
       // A filing streak escalates once (gardener.ts), so a refused change reaches a person rather than looping.
@@ -29874,11 +29871,14 @@ export function buildDaemonReadRefresher(options: {
   ledgerPath: string;
   statusPath: string;
   log: (step: string, extra?: Record<string, unknown>) => void;
+  /** W1-T14644: told where this read's projection spent its time; a read that measured nothing tells nothing. */
+  observePhases?: (phases: ProjectPlanPhases) => void;
 }): (plan?: Plan) => Promise<MergedSet> {
   return async (plan = options.plan()) => {
     options.invalidate();
     const previous = options.previous();
     const snapshot = await options.read({ plan, previousProjection: previous ? [...previous] : undefined });
+    if (snapshot.facts.projectionPhases) options.observePhases?.(snapshot.facts.projectionPhases);
     applyTickCreditUpdates(snapshot.facts, options.ledgerPath, options.log);
     const stage = `${options.statusPath}.${process.pid}.tmp`;
     mkdirSync(dirname(options.statusPath), { recursive: true });
@@ -45295,7 +45295,7 @@ function commandSyntax(name: string): string {
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
 import { reconcilePlan, reconcileShardStatus, revertedRequeues, type RevertedRequeue, type ReconcileSummary } from "./lib/plan-reconcile.js";
-import { PLAN_RECONCILE_LANDING_BODY_BUDGET, PLAN_RECONCILE_LANDING_RECORD_LIMIT, preflightOnUnmovedRecords, takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
+import { PLAN_RECONCILE_LANDING_BODY_BUDGET, PLAN_RECONCILE_LANDING_RECORD_LIMIT, takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
 import { isTaskShardName } from "./lib/task-shard-name.js";

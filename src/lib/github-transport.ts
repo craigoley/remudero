@@ -943,11 +943,19 @@ function ghCallSiteOutsideTransport(frames = Infinity): string {
   Error.stackTraceLimit = frames;
   const stack = new Error().stack ?? "";
   Error.stackTraceLimit = limit;
+  return ghCallSiteFromStack(stack, GH_TRANSPORT_FILE, join(dirname(GH_TRANSPORT_FILE), "..", ".."));
+}
+
+/** W1-T14807: the first repository frame outside the transport; node:, node_modules and outside-root frames skipped. */
+export function ghCallSiteFromStack(stack: string, transportFile: string, repoRoot: string): string {
   for (const line of stack.split("\n")) {
-    const frame = /((?:file:\/\/)?\/[^\s()]+):(\d+):\d+\)?$/.exec(line);
+    const frame = /(?:^|[\s(])((?:file:\/\/)?\/[^\s()]+):(\d+):\d+\)?$/.exec(line);
     if (!frame) continue;
     const file = frame[1].startsWith("file://") ? fileURLToPath(frame[1]) : frame[1];
-    if (file !== GH_TRANSPORT_FILE) return `${relative(join(dirname(GH_TRANSPORT_FILE), "..", ".."), file)}:${frame[2]}`;
+    if (file === transportFile) continue;
+    const fromRoot = relative(repoRoot, file);
+    if (fromRoot.startsWith("..") || isAbsolute(fromRoot) || fromRoot.split(sep).includes("node_modules")) continue;
+    return `${fromRoot}:${frame[2]}`;
   }
   return "unknown";
 }

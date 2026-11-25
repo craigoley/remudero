@@ -1664,6 +1664,11 @@ export async function runReview(host: ReviewCommandHost, args: {
         const reviewerSpawnWorker: typeof spawnWorker = (spawnArgs) => reviewerSpawn(withReceiptWork(spawnArgs, reviewedWork));
         // W1-T4615: assigned before the provider call, so every later stream event names the routed model.
         let reviewerAssignment: WorkerSelectionAssignment | undefined;
+        // W1-T14037: the proofs the orchestrator recorded at this head; a reviewer command call that re-runs one is its own
+        // kind in worker.tool_lineage. Recorded only: nothing reads the kind to decide anything.
+        const recordedProofCommands = preparedDecision.proofExecutions()
+          .filter((execution) => execution.cwd === args.headCheckoutDir)
+          .map(({ command, args: argv, cwd }) => ({ command, args: [...argv], cwd }));
         try {
           let priorSignal: string | undefined;
           for (;;) {
@@ -1702,7 +1707,10 @@ export async function runReview(host: ReviewCommandHost, args: {
                 // a terminal verdict when this bound trips.
                 ...reviewerClockBound,
                 onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
-                streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
+                streamObserver: args.workerTelemetry
+                  ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment))
+                  : undefined,
+                reviewer: { recordedProofCommands, cwd: snapshot.cwd },
                 promptTemplate,
                 prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
               }),
@@ -1746,6 +1754,8 @@ export async function runReview(host: ReviewCommandHost, args: {
           downgrades: semantic.filter((s) => s === false).length,
           // W1-T11428: criteria this reviewer could not inspect; W1-T11432 reads the provider beside it.
           unable: reviewerUnable.filter((u) => u !== undefined).length,
+          // W1-T14037: reviewer command calls by kind; `proof-rerun` re-ran a proof the orchestrator recorded at this head.
+          ...(reviewer.reviewerCommandKinds ? { command_kinds: reviewer.reviewerCommandKinds } : {}),
           ...(args.excludeProviders?.length ? { exclude_providers: [...args.excludeProviders] } : {}),
           ...(reviewerAssignment?.routing.exclusion_unhonoured
             ? { exclusion_unhonoured: reviewerAssignment.routing.exclusion_unhonoured } : {}),

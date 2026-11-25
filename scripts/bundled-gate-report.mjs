@@ -21,6 +21,13 @@
 // name). A step's report is read from `$GATE_REPORT_DIR/<step-id>.log` when present. Prints the
 // title on one line. The caller keeps its own conclusion and falls back to the check name if this
 // script fails, so a defect here can never stop a required context from being posted.
+//
+// W1-T14816 — TEXT MODE: `node scripts/bundled-gate-report.mjs --text [--job-url <url>] <check-name> <constituent>...`
+// prints the check run's `output[text]`: a link to the job that ran the steps, then, for each
+// failing constituent step, at most TEXT_LINES_PER_STEP of its report's lines that carry a failure,
+// the whole text capped at TEXT_CHAR_CAP characters with a last line saying how many lines were cut.
+// A missing or empty report prints one line saying so. The caller posts no text when this mode
+// fails, so the check run's name, conclusion, title and summary never depend on it.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -75,11 +82,85 @@ export function readReports(constituents, reportDir, { exists = existsSync, read
   });
 }
 
+/** At most this many failure lines per failing step, and this many characters of text in all
+ *  (GitHub refuses an `output[text]` over 65535 characters). */
+export const TEXT_LINES_PER_STEP = 40;
+export const TEXT_CHAR_CAP = 60000;
+
+/** A line that carries a failure: GitHub's rendered or raw error command, a gate's own BLOCKED
+ *  headline, a TAP failure, a mocha/eslint-style cross, or a FAIL token. */
+const FAILURE_LINE = /##\[error\]|::error|^[a-z][a-z0-9-]*: BLOCKED\b|^\s*not ok\b|✖|\bFAIL\b/;
+/** An ANSI colour sequence: the reports are tee'd from coloured output. */
+const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`, "g");
+
+/** The lines of `report` that carry a failure, ANSI colour removed, in log order. */
+export function failureLines(report) {
+  return String(report ?? "")
+    .replace(ANSI, "")
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => FAILURE_LINE.test(line));
+}
+
+/** The lines one failing step contributes, before the overall cap: its failure lines (at most
+ *  TEXT_LINES_PER_STEP), or one line saying its report is missing or empty. `cut` counts the
+ *  failure lines left out by the per-step limit. */
+function stepLines(c) {
+  if (c.report === undefined) return { lines: [`(no report log for step ${c.id}; open the job for its output)`], cut: 0 };
+  if (String(c.report).trim() === "") return { lines: [`(the report log for step ${c.id} is empty; open the job for its output)`], cut: 0 };
+  const found = failureLines(c.report);
+  if (found.length === 0) return { lines: [`(no line of step ${c.id}'s report carries a failure marker; open the job for its output)`], cut: 0 };
+  return { lines: found.slice(0, TEXT_LINES_PER_STEP), cut: Math.max(0, found.length - TEXT_LINES_PER_STEP) };
+}
+
+/**
+ * The check run's `output[text]`: the job link (when given), then each failing constituent step's
+ * id, outcome and failure lines in a code block. A passing check carries only the job link. The
+ * whole text stays within TEXT_CHAR_CAP; every line the per-step limit or the cap left out is
+ * counted on the last line.
+ */
+export function describeFailingText(checkName, constituents, { jobUrl } = {}) {
+  const head = jobUrl ? [`Job that ran this check's step(s): ${jobUrl}`] : [];
+  const failing = describeBundledCheck(checkName, constituents).conclusion === "failure"
+    ? constituents.filter((c) => isFailingOutcome(c.outcome))
+    : [];
+  const out = [...head];
+  let size = out.join("\n").length;
+  let cut = 0;
+  const room = (line) => size + line.length + 1 <= TEXT_CHAR_CAP - 200; // leave room for the cut line and fences
+  for (const c of failing) {
+    const step = stepLines(c);
+    cut += step.cut;
+    const opening = [``, `step ${c.id}: ${c.outcome}`, "```text"];
+    if (!opening.every(room)) { cut += step.lines.length; continue; }
+    for (const line of opening) { out.push(line); size += line.length + 1; }
+    for (const line of step.lines) {
+      if (room(line)) { out.push(line); size += line.length + 1; } else cut += 1;
+    }
+    out.push("```");
+    size += 4;
+  }
+  if (cut > 0) out.push("", `${cut} failure line(s) cut; the job's full log has them.`);
+  return out.join("\n");
+}
+
+/** Leading `--text` and `--job-url <url>` flags, then the title mode's own arguments. */
+function parseFlags(argv) {
+  const rest = [...argv];
+  const flags = { text: false, jobUrl: undefined };
+  for (;;) {
+    if (rest[0] === "--text") { flags.text = true; rest.shift(); continue; }
+    if (rest[0] === "--job-url") { rest.shift(); flags.jobUrl = rest.shift(); continue; }
+    return { flags, rest };
+  }
+}
+
 export function main(argv = process.argv.slice(2), { env = process.env, log = console.log, ...io } = {}) {
-  const [checkName, ...args] = argv;
-  if (!checkName) throw new Error("usage: bundled-gate-report.mjs <check-name> <step-id>=<outcome>...");
+  const { flags, rest } = parseFlags(argv);
+  const [checkName, ...args] = rest;
+  if (!checkName) throw new Error("usage: bundled-gate-report.mjs [--text [--job-url <url>]] <check-name> <step-id>=<outcome>...");
   const constituents = readReports(args.map((a) => parseConstituent(a, checkName)), env.GATE_REPORT_DIR, io);
-  log(describeBundledCheck(checkName, constituents).title);
+  log(flags.text ? describeFailingText(checkName, constituents, { jobUrl: flags.jobUrl }) : describeBundledCheck(checkName, constituents).title);
   return 0;
 }
 

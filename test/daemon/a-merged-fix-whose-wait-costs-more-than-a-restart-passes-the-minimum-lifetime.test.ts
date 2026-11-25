@@ -30,7 +30,9 @@ import { gitRepo } from "#test/helpers/git-repo.js";
 const MINUTE = 60_000;
 const START = Date.parse("2026-11-22T14:00:00Z");
 const LIMIT = judge.DEPLOY_RESTART_SCORE_THRESHOLD.value;
-const window = { value: 10 * MINUTE, reason: "measured follow-on boots were 1–10 minutes apart" };
+// W1-T14751: an idle daemon now restarts once this window closes, so every case here sits inside a burst of merges that
+// is still landing, where the floor alone decides and the expedite is what this file measures.
+const window = { value: 60 * MINUTE, reason: "a burst of merges still landing" };
 const REASON = "inbox drafts each carry a 2,051,287-character plan index (live cost leak)";
 // Production's freshnessRestart rows (plan/policy.yaml): a 4 h staleness horizon and a 3 h minimum lifetime.
 const HORIZON_MS = 240 * MINUTE;
@@ -89,7 +91,8 @@ async function oneLifetime(changes: readonly Change[], extra: Partial<DaemonDeps
     readLedgerLines: () => [],
     log: (step, row = {}) => rows.push({ step, atMs: nowMs, extra: row }),
     ...extra,
-  }, { sweepWallClockBoundMs: 24 * 60 * MINUTE, freshnessStalenessHorizonMs: HORIZON_MS, freshnessMinLifetimeMs: LIFETIME_MS });
+  }, { sweepWallClockBoundMs: 24 * 60 * MINUTE, freshnessStalenessHorizonMs: HORIZON_MS, freshnessMinLifetimeMs: LIFETIME_MS,
+    freshnessQuietWindowMs: window.value });
   const decisions = rows.filter((row) => row.step === judge.FRESHNESS_DECISION_STEP);
   return { summary, rows, decisions };
 }

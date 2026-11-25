@@ -1416,6 +1416,8 @@
     "worktree_retire.would_retire"
   ],
   "recordOnly": {
+    "worker.flight_signal.tripped": "W1-T4049: an observe-only mid-run trip of the repetition or error-loop predicate, once per run per predicate; nothing halts or decides on it until its trip precision is measured.",
+    "worker.flight_signal.error": "W1-T4049: a diagnostic that a live flight-signal predicate threw; the stream loop carries on, so nothing re-reads the row.",
     "review.withheld_exhausted": "W1-T13945: the hold record for an input whose every eligible evaluator withheld its verdict, naming each attempt for the operator; only its writer reads it, to escalate once per head and input.",
     "queue_judge.escalation_closed": "W1-T14651: an audit row for the operator that the judge closed one of its own floor escalations the corrected rule admits; the closed issue carries the state, so nothing re-reads the row.",
     "queue_judge.escalation_close_failed": "W1-T14651: a diagnostic for a failed close of a floor escalation; it records the error and the next pass retries the close, so nothing re-reads the row.",
@@ -1460,6 +1462,11 @@
     "sre_lane.unresolved_escalated": "W1-T14611: the marker of the page for a primary daemon whose SRE lane could not find its instance; only its own escalation pair in escalation-catalogue.ts reads it, to page once and to find the issue to close.",
     "sre_lane.unresolved_cleared": "W1-T14611: the marker that the SRE lane started again and closed that page; only its own escalation pair in escalation-catalogue.ts reads it, so a closed page is not closed twice.",
     "selector-shadow.edge_unreplayable": "W1-T13526: the diagnostic row for a miss whose changed paths stayed unread (no base, an unreadable compare or the per-pass read bound spent); it files nothing and stores no edge, and an operator reads it to see why a miss was not filed.",
-    "product_plan.checkout_left": "W1-T14723: an audit row naming why a product re-plan's checkout was left behind the live head; the refusal body carries the same reason to the Console"
+    "product_plan.checkout_left": "W1-T14723: an audit row naming why a product re-plan's checkout was left behind the live head; the refusal body carries the same reason to the Console",
+    "plan.reservations_unreadable": "W1-T14642: a diagnostic that the reservation ref read failed; the gardener treats the reservations as unknown and the next pass reads again, so nothing re-reads the row.",
+    "plan.ops_checkout_unreadable": "W1-T14642: a diagnostic that the ops catalog checkout could not be read; the pass leaves the ops catalog alone and the next pass reads again, so nothing re-reads the row.",
+    "plan.ops_landing": "W1-T14642: an audit row for the operator naming the ops landing PR and how many records landed, waited or were refused; the PR carries the state, so nothing re-reads the row.",
+    "plan.ops_landing_skipped": "W1-T14642: an audit row naming why an ops landing was not attempted (no named plan destination); nothing decides on it.",
+    "plan.ops_landing_failed": "W1-T14642: a diagnostic for a failed ops landing with its error; the next pass retries the landing, so nothing re-reads the row."
   }
 }

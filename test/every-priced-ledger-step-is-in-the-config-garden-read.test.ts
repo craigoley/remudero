@@ -135,6 +135,9 @@ const EXEMPT: Readonly<Record<string, string>> = {
   "flake_incident.filed": A_LANE_RUN_ID, // W1-T6406: the flake-incident gardener's filing, under the garden's own run id
   "plan.shard_repair_opened": A_LANE_RUN_ID,
   "plan.shard_repair_skipped": A_LANE_RUN_ID,
+  // W1-T14642: the plan gardener's ops plan landing receipt, under the garden pass's GARDEN-plan- run id; its pr_url names
+  // the remudero-ops plan PR, never a worker run's own.
+  "plan.ops_landing": A_LANE_RUN_ID,
   "test.pass": A_LANE_RUN_ID,
   // Command lanes: review, dep-review, approve/inbox, alert-fix, onboarding, the CI mutation ratchet.
   "automerge.capped_override_granted": A_LANE_RUN_ID,

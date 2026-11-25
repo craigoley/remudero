@@ -25,10 +25,10 @@ const ORIGIN_CODEX_ECONOMY = {
   medium: ["gpt-6-luna", "gpt-5.3-codex-spark", "gpt-5.6-luna", "gpt-5.4-mini"],
   high: ["gpt-5.3-codex-spark", "gpt-6-luna", "gpt-5.6-luna", "gpt-5.4-mini"],
 };
-const CASH_ECONOMY = ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "gpt-5.6-luna", "claude-haiku-5-5"];
+const CASH_ECONOMY = ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "claude-haiku-5-5"];
 // Cash keeps its prior order with Sol 6.2 inserted directly before Sol 6.1.
-const CASH_BALANCED = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", SOL62, SOL61];
-const CASH_FRONTIER = ["gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", "gpt-5.6-terra"];
+const CASH_BALANCED = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-6.1-terra", SOL62, SOL61];
+const CASH_FRONTIER = ["gpt-6-luna", "gpt-6.1-terra"];
 const ORIGIN_CASH = {
   economy: { low: CASH_ECONOMY, medium: CASH_ECONOMY, high: CASH_ECONOMY },
   balanced: { low: CASH_BALANCED, medium: CASH_BALANCED, high: CASH_BALANCED },

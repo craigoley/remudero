@@ -199,6 +199,19 @@ test("native Semgrep preserves Scan permissions, events, bounded execution and a
   assert.doesNotMatch(read(".github/workflows/semgrep.yml"), /secrets\.|packages:|pull_request_target|docker\.io|ghcr\.io/);
 });
 
+// W1-T14822: the SARIF upload is pinned to the same full SHA as codeql.yml's codeql-action, so a
+// Dependabot bump that moves the whole codeql-action family keeps this contract without a test edit.
+function codeqlActionPin(): string {
+  const pins = [...read(".github/workflows/codeql.yml").matchAll(/github\/codeql-action\/[\w-]+@([0-9a-f]{40})\b/g)].map((m) => m[1]);
+  assert.ok(pins.length > 0, "codeql.yml pins no codeql-action step to a full SHA");
+  assert.equal(new Set(pins).size, 1, `codeql.yml pins codeql-action to more than one SHA: ${[...new Set(pins)].join(", ")}`);
+  return pins[0]!;
+}
+
+test("W1-T14822 the SARIF upload pin is read from codeql.yml's single codeql-action pin", () => {
+  assert.match(codeqlActionPin(), /^[0-9a-f]{40}$/);
+});
+
 test("native Semgrep retains all four rule packs, PR-only baseline and SARIF upload contract", () => {
   const steps = load().jobs.semgrep!.steps;
   assert.equal(steps[0]!.with?.["fetch-depth"], 0);
@@ -209,7 +222,7 @@ test("native Semgrep retains all four rule packs, PR-only baseline and SARIF upl
   assert.match(scan.run!, /--baseline-commit \$\{BASELINE_REF\}/);
   assert.match(scan.run!, /--sarif --output semgrep\.sarif/);
   const upload = step("Upload SARIF to code scanning");
-  assert.equal(upload.uses, "github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066");
+  assert.equal(upload.uses, `github/codeql-action/upload-sarif@${codeqlActionPin()}`);
   assert.equal(upload.if, "always()");
   assert.deepEqual(upload.with, { sarif_file: "semgrep.sarif", category: "semgrep" });
   assert.ok(fileURLToPath(root).endsWith("/"));
