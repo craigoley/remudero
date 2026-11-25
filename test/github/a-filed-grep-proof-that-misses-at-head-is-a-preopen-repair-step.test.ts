@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AcceptanceCriterion } from "#src/lib/plan.js";
 import { defaultProofRunnerAsync, type OpenPullRequestProofResult } from "#src/lib/pr-open.js";
 import { filedGrepProofMisses, withFiledGrepProofs, FILED_GREP_PROOF_STEP_NAME } from "#src/lib/preopen-filed-grep-proofs.js";
 import { renderPreopenGatePrompt, type PreopenGateResult } from "#src/lib/preopen-gate.js";
+import { gitRepo } from "#test/helpers/git-repo.js";
 
 const grepCriterion = (claim: string, proof: string): AcceptanceCriterion => ({ claim, proof }) as AcceptanceCriterion;
 const pass: PreopenGateResult = { kind: "pass", durationMs: 5 };
@@ -78,21 +77,16 @@ test("unit test: an unmeasured or skipped pre-open gate is returned unchanged an
   assert.equal(runs, 0);
 });
 
-test("unit test: the filed grep proof step runs the real check-proof against the worker's uncommitted tree", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "rmd-w14789-"));
-  try {
-    mkdirSync(join(dir, "src"));
-    writeFileSync(join(dir, "src", "x.txt"), "hello label\n");
-    execFileSync("git", ["init", "-q", dir]);
-    const criteria = [
-      grepCriterion("written", "grep: hello label in src/x.txt"),
-      grepCriterion("never written", "grep: Criterion 9 label in src/x.txt"),
-    ];
-    const misses = await filedGrepProofMisses(criteria, dir, (proof, base, cwd, target) => defaultProofRunnerAsync(proof, base, cwd, target));
-    assert.equal(misses.length, 1, "exactly the unwritten label is a miss");
-    assert.match(misses[0], /Criterion 9 label/);
-    assert.doesNotMatch(misses[0], /hello label/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+test("unit test: the filed grep proof step runs the real check-proof against the worker's uncommitted tree", async (t) => {
+  const repo = gitRepo({ scope: t });
+  mkdirSync(join(repo.dir, "src"));
+  writeFileSync(join(repo.dir, "src", "x.txt"), "hello label\n");
+  const criteria = [
+    grepCriterion("written", "grep: hello label in src/x.txt"),
+    grepCriterion("never written", "grep: Criterion 9 label in src/x.txt"),
+  ];
+  const misses = await filedGrepProofMisses(criteria, repo.dir, (proof, base, cwd, target) => defaultProofRunnerAsync(proof, base, cwd, target));
+  assert.equal(misses.length, 1, "exactly the unwritten label is a miss");
+  assert.match(misses[0], /Criterion 9 label/);
+  assert.doesNotMatch(misses[0], /hello label/);
 });
