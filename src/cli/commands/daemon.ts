@@ -1287,6 +1287,12 @@ async function daemonStandbyCommand(rest: string[], deps: NonNullable<Parameters
   }
 }
 
+/** W1-T14635: the standby reads the rotations the boot's two union reads walk, while the active daemon still works. */
+function warmStandbyRotations(stateDir: string, cache: ReturnType<typeof createLedgerRotationCache>): void {
+  readRunChildModeUnion(stateDir, undefined, cache.hook([...RUN_CHILD_MODE_EVIDENCE_STEPS]));
+  readRestartHistoryLines(stateDir, undefined, cache.hook(RESTART_HISTORY_STEPS));
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -1391,6 +1397,9 @@ export async function daemonCommand(
     /** W1-T14860: dispatch's filing reader. Production omits it and uses the process's one prefetch; a test injects a
      *  recorder to see when the standby starts its read. */
     filingPrefetch?: { refresh(planPath: string): Promise<unknown> };
+    /** W1-T14879: the standby's rotation warm read. Production omits it and reads the two unions; a test injects a
+     *  recorder to see that the filing read starts before it. */
+    standbyWarm?: (stateDir: string, cache: ReturnType<typeof createLedgerRotationCache>) => void;
   } = {},
   host: DaemonCommandHost,
   standby?: StandbyBoot,
@@ -2052,12 +2061,16 @@ export async function daemonCommand(
   let standbyFilingRead: Promise<unknown> | undefined;
   // W1-T14635: the rotations the boot's two union reads walk are read now, while the active daemon still works, and kept
   // for those reads; once promoted the boot reads only what the cache misses (the live file and any newer rotation).
+  // W1-T14860: the filing read is read-only, so the standby starts it while the active daemon still works, and the boot
+  // awaits that same read after the lock instead of starting one there. A plan the post-lock sync moves is seen one
+  // selection later, which the prefetched reader already allows (W1-T7744). W1-T14879: it starts before the rotation warm
+  // below, whose synchronous reads took 108 s on the 2026-11-25 21:12Z hand-over, so the git read runs beside them.
+  if (standby?.ports) standbyFilingRead = filingPrefetch.refresh(target.planPath);
   const rotationCache = standby?.ports ? createLedgerRotationCache() : undefined;
   if (rotationCache) {
     const stateDir = join(config.root, "state");
     try {
-      readRunChildModeUnion(stateDir, undefined, rotationCache.hook([...RUN_CHILD_MODE_EVIDENCE_STEPS]));
-      readRestartHistoryLines(stateDir, undefined, rotationCache.hook(RESTART_HISTORY_STEPS));
+      (deps.standbyWarm ?? warmStandbyRotations)(stateDir, rotationCache);
     } catch (warmError) {
       // A failed warm read decides nothing: the boot runs the same two reads and refuses or records there.
       void warmError;
@@ -2065,10 +2078,6 @@ export async function daemonCommand(
     bootPhases.mark("standby_warm");
   }
   if (standby?.ports) {
-    // W1-T14860: the filing read is read-only, so the standby starts it now, while the active daemon still works, and the
-    // boot awaits that same read after the lock instead of starting one there. A plan the post-lock sync moves is seen
-    // one selection later, which the prefetched reader already allows (W1-T7744).
-    standbyFilingRead = filingPrefetch.refresh(target.planPath);
     // W1-T14544: ready, then wait for the hand-over; the lock is taken only once its live holder has let go.
     const promotion = await awaitPromotion(standby.ports, standby.startedAtMs);
     if ("criterion" in promotion) { await stopReadPlane(); return 1; }
