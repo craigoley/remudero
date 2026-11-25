@@ -157,7 +157,7 @@ test("W1-T14656 criterion 2: an ops record's rewrite lands through the ops works
   assert.deepEqual(first.proceeded, [PUBLIC_ID], "the public record is released first");
   assert.deepEqual(publicLanded.map(l => l.paths), [[`plan/tasks.d/${PUBLIC_ID}.yaml`]], "its landing carries no ops record");
   assert.equal(ops.opened(), 0, "no ops workspace is opened while a public record lands: no landing mixes the catalogs");
-  assert.deepEqual(opsLanded, []);
+  assert.equal(opsLanded.length, 0);
 
   // The public landing merged: its rewrite is what the public checkout now holds.
   cpSync(join(fx.root, "public-1", "plan"), join(fx.publicDir, "plan"), { recursive: true });
@@ -194,12 +194,12 @@ test("W1-T14656 criterion 4: with the ops snapshot not ok the judge and the swee
   const publicLanded: { paths: string[]; title: string }[] = [], opsLanded: { paths: string[]; title: string }[] = [];
   const pub = workspace(fx.publicDir, "public", fx.root, publicLanded, "https://github.com/fixture/public/pull/1");
   const ops = workspace(fx.opsDir, "ops", fx.root, opsLanded, "https://github.com/fixture-private/ops-catalog/pull/2");
-  const { ports, logs } = judgePorts(fx, source, { openWorkspace: pub.port, openOpsWorkspace: ops.port });
+  const { ports } = judgePorts(fx, source, { openWorkspace: pub.port, openOpsWorkspace: ops.port });
   const report = await judge.runMachineFilingJudge(ports);
   assert.deepEqual(report.proceeded, [PUBLIC_ID], "THE CLAIM: the public record is judged exactly as before");
   assert.equal(ops.opened(), 0, "the ops catalog is not touched");
-  assert.deepEqual(opsLanded, []);
-  assert.equal(logs.find(l => l.step === "machine_judge.ops_unjudged")?.extra?.refusal, "ops-auth_missing", "the pass names the ops refusal");
+  assert.equal(opsLanded.length, 0);
+  assert.equal(report.opsRefusal, "ops-auth_missing", "the pass names the ops refusal");
 
   const off = await judge.machineJudgePlanSource(fx.publicPlan(), { stateDir: join(fx.root, "no-state") });
   assert.equal(off.opsRefusal, undefined, "an ops catalog that is off is not a refusal");

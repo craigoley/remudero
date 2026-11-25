@@ -878,6 +878,8 @@ export interface MachineJudgeReport {
   escalated: string[];
   unavailable: string[];
   refused: string[];
+  /** W1-T14656: why the ops catalog's records were not judged this pass, when a destination is named and its catalog was not read. */
+  opsRefusal?: string;
   /** Records whose landing threw: ledgered and skipped, never aborting the rest of the pass. */
   failed: string[];
   /** Records whose ruling the landing tree already carries: nothing to land, and not a failure. */
@@ -1573,7 +1575,7 @@ export async function runMachineFilingJudge(ports: MachineJudgePorts): Promise<M
   // W1-T14656: one landing PR carries one repository. The public records land first; the ops records' rewrites land on
   // a pass with no public rewrite, through the ops workspace, and wait (their rulings kept in `state.rulings`) otherwise.
   const opsRead = ports.ops?.();
-  if (opsRead?.refusal !== undefined) ports.log("machine_judge.ops_unjudged", { refusal: opsRead.refusal });
+  if (opsRead?.refusal !== undefined) report.opsRefusal = opsRead.refusal;
   const opsIds = opsRead?.ids ?? new Set<string>();
   const ofGroup = (items: { task: Task }[], ops: boolean): void => {
     for (let i = items.length - 1; i >= 0; i--) if (opsIds.has(items[i]!.task.id) !== ops) items.splice(i, 1);
