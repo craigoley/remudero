@@ -11,7 +11,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
-import { availableParallelism, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -31,7 +31,7 @@ const { classifySweep, SUITE_PRELOAD, suiteName, SWEEP_SHIFT_DAYS } = (await imp
  * The drifting tests of each suite: every test that failed at this task's merge base (5b1ca1b321) under the 7-day
  * shift, the sweep's 400-day shift or both, and passed there unshifted. Each child runs only these, by exact name,
  * so the pin costs seconds, not the suites' ~335 s whole-file runtime, and every name must report its own `ok`.
- * Slowest first (measured on the Mac), so the pool's last child is a short one.
+ * Slowest first (measured on the Mac).
  * `bash4`: the test drives a ci.yml step body that calls `mapfile`, which macOS's /bin/bash 3.2 lacks, so it fails
  * there at any clock; it runs wherever `bash` has `mapfile` (every CI runner).
  */
@@ -128,7 +128,7 @@ function runShifted(suite: (typeof DRIFTING)[number], days: number): Promise<Run
       ["--test", "--test-reporter=tap", ...names.map((name) => `--test-name-pattern=${exactName(name)}`),
         "--import", "tsx", "--import", join(REPO_ROOT, SUITE_PRELOAD),
         "--import", join(REPO_ROOT, "scripts", "clock-shift.mjs"), suite.file],
-      { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 180_000,
+      { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
         // Without NODE_TEST_CONTEXT the child reports its own TAP, as it does under the sweep's script runner.
         env: { ...withoutTestContext(process.env), TMPDIR: isolatedTmp, FK_SHIFT_DAYS: String(days) } },
       (error, stdout, stderr) => {
@@ -139,8 +139,7 @@ function runShifted(suite: (typeof DRIFTING)[number], days: number): Promise<Run
 }
 
 /**
- * Every suite at both shifts through ONE pool of a few children, the 7-day runs queued first: the second test's
- * children start while the first test's last ones finish, so the two tests cost about one pass of the pool.
+ * Every suite at the given shifts, one child at a time, resolving each shift's results as its last child finishes.
  */
 function runShifts(shifts: readonly number[]): Map<number, Promise<Map<string, Run>>> {
   const queue = shifts.flatMap((days) => DRIFTING.map((suite) => ({ suite, days })));
@@ -149,7 +148,9 @@ function runShifts(shifts: readonly number[]): Map<number, Promise<Map<string, R
     let resolve!: (runs: Map<string, Run>) => void;
     return [days, { promise: new Promise<Map<string, Run>>((r) => { resolve = r; }), resolve }];
   }));
-  const workers = Array.from({ length: Math.max(1, Math.min(4, availableParallelism() - 1)) }, async () => {
+  // One child at a time: the flake screen already runs eight copies of this file at once, so a pool here multiplied
+  // into 32 shifted children on a 4-core runner and both tests timed out (#20913). Run alone, the cases take ~2 min.
+  const workers = Array.from({ length: 1 }, async () => {
     for (let job = queue.shift(); job !== undefined; job = queue.shift()) {
       const runs = results.get(job.days)!;
       runs.set(job.suite.file, await runShifted(job.suite, job.days));
@@ -159,8 +160,12 @@ function runShifts(shifts: readonly number[]): Map<number, Promise<Map<string, R
   void Promise.all(workers);
   return new Map([...settled].map(([days, { promise }]) => [days, promise]));
 }
-let pool: Map<number, Promise<Map<string, Run>>> | undefined;
-const runAll = (days: number) => (pool ??= runShifts([7, SWEEP_SHIFT_DAYS])).get(days)!;
+// Each shift runs only when a test asks for it, so a proof run that selects one test spawns one shift's children.
+const pools = new Map<number, Promise<Map<string, Run>>>();
+const runAll = (days: number): Promise<Map<string, Run>> => {
+  if (!pools.has(days)) pools.set(days, runShifts([days]).get(days)!);
+  return pools.get(days)!;
+};
 
 /**
  * A run counts only when its own TAP summary says it ran tests and failed none, and every pinned name reported its
@@ -176,14 +181,14 @@ function verdict(run: Run): string {
   return `fail (tests ${tests}, fail ${fails}${notOk ? `: ${notOk}` : ""}${unrun.length ? `; no ok for ${unrun.length} pinned` : ""})`;
 }
 
-test("W1-T14786 the fifteen clock drift suites pass under a seven day clock shift", { timeout: 300_000 }, async () => {
+test("W1-T14786 the fifteen clock drift suites pass under a seven day clock shift", async () => {
   const results = await runAll(7);
   assert.equal(results.size, FIFTEEN.length);
   const failing = [...results].map(([file, run]) => [file, verdict(run)]).filter(([, v]) => v !== "pass");
   assert.deepEqual(failing, [], "every suite passes 7 days from now");
 });
 
-test("W1-T14786 the clock sweep reports no new drift for the fifteen suites", { timeout: 300_000 }, async () => {
+test("W1-T14786 the clock sweep reports no new drift for the fifteen suites", async () => {
   const results = await runAll(SWEEP_SHIFT_DAYS);
   // Positive control: a child that never reported its own summary would read as "not failed" to the classifier.
   assert.deepEqual([...results].map(([file, run]) => [file, verdict(run)]).filter(([, v]) => v !== "pass"), [],
