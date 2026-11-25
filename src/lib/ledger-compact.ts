@@ -22,8 +22,6 @@ import { ledgerPathFor } from "./ledger-path.js";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 export const LEDGER_COMPACT_DEFAULT_OLDER_THAN_DAYS = 7;
-// PRIMARY CONTROL: bounds the exact-row Set and gzip inputs held by one operator invocation.
-export const LEDGER_COMPACT_MAX_SOURCES = 50;
 /**
  * PRIMARY CONTROL: bound one archive's decompressed rows to 64 MiB. In the 2026-09-23 synthetic million-row
  * measurement, ten-way partitioning put each archive near 87 MiB and held peak RSS to 205-231 MiB;
@@ -36,8 +34,8 @@ const GZIP_ISIZE_BYTES = 4;
 // Ten header bytes, at least two DEFLATE bytes, and eight trailer bytes.
 const GZIP_MIN_BYTES = 20;
 const LEDGER_COMPACT_VALUE_FLAGS = ["--older-than", "--older-than-hours", "--max-sources"];
-/** An archive this many times the typical rotation's size is a previous pass's output (one pass
- *  merges up to {@link LEDGER_COMPACT_MAX_SOURCES} rotations; rotations are cut at one size). */
+/** An archive this many times the typical rotation's size is a previous pass's output (one pass merges every
+ *  rotation the {@link LEDGER_COMPACT_MAX_ARCHIVE_BYTES} budget admits; rotations are cut at one size). */
 export const MERGED_ARCHIVE_SIZE_FACTOR = 4;
 const LEDGER_COMPACT_BOOL_FLAGS = ["--dry-run"];
 
@@ -154,10 +152,11 @@ const realFs: LedgerCompactFs = {
   copyFileSync: (from, to) => copyFileSync(from, to, constants.COPYFILE_EXCL),
 };
 
-/** Select parseable rotations strictly older than the requested age, preferring shared UTC days. The hard source
- * ceiling bounds `compactRotations`' exact-row Set even when an operator supplies a larger flag. */
+/** Select parseable rotations strictly older than the requested age, preferring shared UTC days. W1-T14729: the
+ * decompressed byte budget alone bounds `compactRotations`' exact-row Set; no source count does. `maxSources` is an
+ * optional operator override with no built-in maximum. */
 export function selectLedgerCompactionSources(
-  names: string[], stateDir: string, olderThanDays: number, maxSources: number, now: Date,
+  names: string[], stateDir: string, olderThanDays: number, maxSources: number | undefined, now: Date,
   sizeOf?: (path: string) => number,
   decompressedSizeOf?: (entry: LedgerCorpusEntry, maxArchiveBytes: number) => number,
   maxArchiveBytes = LEDGER_COMPACT_MAX_ARCHIVE_BYTES): LedgerCompactSelection {
@@ -182,7 +181,7 @@ export function selectLedgerCompactionSources(
       eligible.push(entry);
     }
   }
-  const cap = Math.min(maxSources, LEDGER_COMPACT_MAX_SOURCES);
+  const cap = maxSources ?? Number.POSITIVE_INFINITY;
   // W1-T4262: a previous pass's output is re-read whole by every pass that picks it, so ordinary
   // rotations go first; outputs merge with each other, two at a time, only once none are left.
   const merged = mergedArchives(ledgerRotationEntries(names, stateDir), sizeOf);
@@ -293,7 +292,7 @@ function mergedArchives(entries: LedgerCorpusEntry[], sizeOf: ((path: string) =>
 function reportFor(
   mode: "dry-run" | "apply",
   olderThanDays: number,
-  maxSources: number,
+  maxSources: number | undefined,
   eligibleCount: number,
   unparseableAgeCount: number,
   result: LedgerCompactionResult,
@@ -304,7 +303,7 @@ function reportFor(
   // The row counts come from exact compaction, never estimated bytes.
   // The archive name lets the operator verify the replacement before a real run.
   return JSON.stringify({
-    mode, olderThanDays, maxSources, eligibleCount, unparseableAgeCount,
+    mode, olderThanDays, maxSources: maxSources ?? null, eligibleCount, unparseableAgeCount,
     sourceCount: result.sourceCount,
     rowsWritten: result.rowsWritten, duplicatesCollapsed: result.duplicatesCollapsed, archiveName: result.archiveName,
     archiveNames: result.archiveNames,
@@ -471,12 +470,12 @@ export function ledgerCompactCommand(rest: string[], deps: LedgerCompactCommandD
         ? parseBoundedInteger(flagValue(rest, "--older-than"), 0, LEDGER_COMPACT_MAX_OLDER_THAN_DAYS)
         : LEDGER_COMPACT_DEFAULT_OLDER_THAN_DAYS;
   const maxSources = maxSourcesPresent
-    ? parseBoundedInteger(flagValue(rest, "--max-sources"), 1, LEDGER_COMPACT_MAX_SOURCES)
-    : LEDGER_COMPACT_MAX_SOURCES;
-  if (olderThanDays === undefined || maxSources === undefined) {
+    ? parseBoundedInteger(flagValue(rest, "--max-sources"), 1, Number.MAX_SAFE_INTEGER)
+    : undefined;
+  if (olderThanDays === undefined || (maxSourcesPresent && maxSources === undefined)) {
     log(
       `rmd ledger-compact: --older-than must be an integer from 0 to ${LEDGER_COMPACT_MAX_OLDER_THAN_DAYS} (or --older-than-hours, not both); ` +
-        `--max-sources must be an integer from 1 to ${LEDGER_COMPACT_MAX_SOURCES}`,
+        "--max-sources must be a positive integer",
     );
     return 2;
   }
@@ -532,7 +531,7 @@ export function takeCompactionRotationLock(
 interface CompactWindow {
   mode: "dry-run" | "apply";
   olderThanDays: number;
-  maxSources: number;
+  maxSources: number | undefined;
   maxArchiveBytes: number;
   stateDir: string;
   fs: LedgerCompactFs;

@@ -116,6 +116,9 @@ const TASK_FILES_WAITING_REL_PATH = "state/task-files-landing-waiting.json";
 const TASK_FILES_REFUSAL_MEMORY_REL_PATH = "state/task-files-landing-refused-blobs.json";
 /** W1-T13987: how many remembered blobs the memory keeps; the oldest goes first. */
 const TASK_FILES_REFUSAL_MEMORY_MAX = 2_048;
+/** W1-T14748: the plan destination's own gate; its failed job log names each file it refuses as "<path>: <finding>". */
+const DESTINATION_GATE_CHECK = "ops-gate";
+const DESTINATION_GATE_RULE = "destination-gate";
 const TASK_FILES_LANDING_BRANCH = "task-files-landing";
 const TASK_FILES_LANDING_PR_TITLE = "chore(plan): land pending edits of task files";
 const CI_LEARNING_SLUG_MAX = 72;
@@ -2616,6 +2619,8 @@ export interface LandTaskFilesOpts extends LandFeedbackAsyncOpts {
   reservationGitAsync?: GitExecAsync;
   /** W1-T13210: the clock a waiting row's pull-request age is read from; the system clock when absent. */
   clock?: Clock;
+  /** W1-T14748: tell the operator, once per pull request head, that the destination gate's findings cannot be read. */
+  escalateGateFindingsUnread?: (unread: { prUrl: string; headSha: string; reason: string; files: string[] }) => Promise<string | null>;
 }
 
 interface StagedTaskFileMeta {
@@ -2725,13 +2730,15 @@ interface OpenLandingPr {
   headRefOid?: string;
   mergeable?: string;
   createdAt?: string;
-  statusCheckRollup?: Array<{ name?: string; context?: string; status?: string; conclusion?: string; state?: string; startedAt?: string }>;
+  statusCheckRollup?: Array<{ name?: string; context?: string; status?: string; conclusion?: string; state?: string; startedAt?: string; detailsUrl?: string }>;
 }
 
 /** W1-T13210: what the lane reads of an open landing pull request. "unread" when the listing did not report its checks. */
 interface LandingPrChecks {
   checks: "conflicting" | "red" | "pending" | "green" | "none" | "unread";
   failing: string[];
+  /** W1-T14748: the job URL of each failing check that reports one. */
+  failingDetailsUrl?: Record<string, string>;
 }
 
 const sealListingArgs = (branch: string, repoArgs: string[]): string[] =>
@@ -2758,7 +2765,13 @@ function landingPrChecks(pr: OpenLandingPr): LandingPrChecks {
   const stateOf = (c: { status?: string; conclusion?: string; state?: string }): string => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
   const fail = new Set(["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"]);
   const failing = [...latest].filter(([, c]) => fail.has(stateOf(c))).map(([name]) => name).sort();
-  if (failing.length > 0) return { checks: "red", failing };
+  if (failing.length > 0) {
+    const failingDetailsUrl = Object.fromEntries(failing.flatMap((name) => {
+      const url = latest.get(name)?.detailsUrl;
+      return url === undefined ? [] : [[name, url]];
+    }));
+    return { checks: "red", failing, failingDetailsUrl };
+  }
   const ok = new Set(["SUCCESS", "SKIPPED", "NEUTRAL"]);
   return { checks: [...latest.values()].every((c) => ok.has(stateOf(c))) ? "green" : "pending", failing: [] };
 }
@@ -2797,6 +2810,8 @@ export interface RememberedRecordRefusal {
   /** The checks that refused these bytes, each a rule of the record's own. */
   rules: string[];
   failures: PlanPrPreflightResult["failures"];
+  /** W1-T14748: the refusal's text when no preflight finding carries it. */
+  reason?: string;
   first_refused_at: string;
 }
 
@@ -3120,8 +3135,8 @@ function* taskFilesLandingSteps(
       // W1-T13987: bytes whose own fault a preflight already refused are refused from memory, across a restart and a move of main.
       const remembered = rememberedRecordRefusal(stateRoot, relPath, blob);
       if (remembered !== undefined) {
-        yield* refuse(refusalText(remembered.failures), {
-          failures: remembered.failures, mainSha: yield* freshMain(), mainRed: false, rules: remembered.rules, remembered_at: remembered.first_refused_at,
+        yield* refuse(remembered.reason ?? refusalText(remembered.failures), {
+          ...(remembered.failures.length > 0 ? { failures: remembered.failures } : {}), mainSha: yield* freshMain(), mainRed: false, rules: remembered.rules, remembered_at: remembered.first_refused_at,
         });
         continue;
       }
@@ -3206,6 +3221,50 @@ function* taskFilesLandingSteps(
     /** W1-T13210: a wait while rebuilding is a wait behind its pull request; any other is the landing's own. */
     const hold = (reason?: string): TaskFilesLandingResult =>
       rebuilding ? waitBehind(rebuilding, rebuilding, reason === undefined ? {} : { reason }) : wait(reason);
+    type GateFindings = { runId: string; findings: Array<{ path: string; finding: string }> } | { unread: string };
+    /**
+     * W1-T14748: the destination gate's findings for `files`, read from its failed job's log, or why they cannot be
+     * read; undefined unless the landing targets the plan destination and the gate is among the failing checks.
+     */
+    const gateFindingsOf = function* (pr: LandingPrChecks, files: ReadonlyArray<{ relPath: string }>): Generator<LandingAsk, GateFindings | undefined, AskReply> {
+      if (pr.checks !== "red" || !pr.failing.includes(DESTINATION_GATE_CHECK) || repository === undefined || repository !== destinationKey) return undefined;
+      const job = /\/actions\/runs\/(\d+)\/job\/(\d+)/.exec(pr.failingDetailsUrl?.[DESTINATION_GATE_CHECK] ?? "");
+      if (job === null) return { unread: `the failing ${DESTINATION_GATE_CHECK} check names no job` };
+      const runId = job[1]!, jobId = job[2]!;
+      let text: string;
+      try {
+        text = yield* net.gh(["api", `repos/${repository}/actions/jobs/${jobId}/logs`]);
+      } catch (e) {
+        // Not rethrown: an unread log holds the landing and is named in its row and escalation.
+        return { unread: `the log of ${DESTINATION_GATE_CHECK} job ${jobId} (run ${runId}) cannot be read: ${String((e as Error)?.message ?? e)}` };
+      }
+      const findings: Array<{ path: string; finding: string }> = [];
+      for (const raw of text.split("\n")) {
+        const line = raw.replace(/\r$/, "").replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z /, "");
+        const file = files.find((f) => line.startsWith(`${f.relPath}: `));
+        if (file !== undefined) findings.push({ path: file.relPath, finding: line.slice(file.relPath.length + 2) });
+      }
+      return findings.length > 0 ? { runId, findings } : { unread: `the log of ${DESTINATION_GATE_CHECK} job ${jobId} (run ${runId}) names no staged file` };
+    };
+    /** W1-T14748: hold on an unread gate log, with one row and one escalation for each pull request head. */
+    const gateFindingsUnread = function* (pr: OpenLandingPr & { headRefOid: string }, reason: string, files: string[]): Generator<LandingAsk, TaskFilesLandingResult, AskReply> {
+      if (landingWaitChanged(stateRoot, `${kind.branch}#gate_findings_unread`, { pr_url: pr.url, head_sha: pr.headRefOid })) {
+        const port = opts.escalateGateFindingsUnread;
+        const escalation = port === undefined ? "no escalation port is bound" : (yield {
+          run: () => { throw new Error("the task-file landing escalates only under the async driver"); },
+          runAsync: async () => {
+            try {
+              return (await port({ prUrl: pr.url, headSha: pr.headRefOid, reason, files })) ?? "undelivered";
+            } catch (e) {
+              // Not rethrown: the row below names the failed escalation, and the hold stands either way.
+              return `failed: ${String((e as Error)?.message ?? e)}`;
+            }
+          },
+        }) as string;
+        opts.log?.("task_files_landing.gate_findings_unread", { branch: kind.branch, pr_url: pr.url, head_sha: pr.headRefOid, reason, files, escalation });
+      }
+      return hold(`the plan destination gate failed and no file is set aside, so nothing is pushed: ${reason}`);
+    };
     // ── the seal: an open pull request that is neither red nor conflicting, or a listing that cannot be read, means no push ──
     const sealed = function* (): Generator<LandingAsk, TaskFilesLandingResult | undefined, AskReply> {
       let open: OpenLandingPr[];
@@ -3290,6 +3349,22 @@ function* taskFilesLandingSteps(
       batch.push({ ...file, blob });
     }
     if (batch.length === 0) return yield* nothingToRebuild();
+    // W1-T14748: a red the destination gate names sets aside each file its findings name; an unread log holds.
+    const gate = rebuilding === undefined ? undefined : yield* gateFindingsOf(rebuilding, batch);
+    if (rebuilding !== undefined && gate !== undefined && "unread" in gate) return yield* gateFindingsUnread(rebuilding, gate.unread, batch.map((f) => f.relPath));
+    if (gate !== undefined && !("unread" in gate)) {
+      const named = batch.filter((f) => gate.findings.some((g) => g.path === f.relPath));
+      for (const file of named) {
+        const finding = gate.findings.filter((g) => g.path === file.relPath).map((g) => g.finding).join(" | ");
+        const reason = `the plan destination gate refused it: ${finding} (run ${gate.runId})`;
+        const first_refused_at = (opts.clock ?? systemClock).iso();
+        rememberRecordRefusal(stateRoot, { path: file.relPath, blob: file.blob, rules: [DESTINATION_GATE_RULE], failures: [], reason, first_refused_at });
+        opts.log?.("task_files_landing.refusal_remembered", { path: file.relPath, blob: file.blob, rule: DESTINATION_GATE_RULE, lane, run_id: gate.runId });
+        yield* setAside(file, { reason, rules: [DESTINATION_GATE_RULE] }, file.baseBlob);
+      }
+      batch.splice(0, batch.length, ...batch.filter((f) => !named.includes(f)));
+      if (batch.length === 0) return yield* nothingToRebuild();
+    }
 
     let landing = batch;
     let verdict = yield* verdictOf(landing);

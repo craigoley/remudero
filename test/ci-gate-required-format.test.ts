@@ -66,6 +66,7 @@ const PRE_REFORMAT_REQUIRED_FIXTURE = JSON.stringify([
   "coverage-session-blanking",
   "baseline-monotonic",
   "test-slow",
+  "flake-screen", // W1-T14633: the flake screen left ci-shard (1/8) for its own REQUIRED job
 ]);
 
 async function loadCiGate() {

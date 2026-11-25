@@ -1864,6 +1864,13 @@ export const CI_PARITY_TABLE: CiParityEntry[] = [
       "above runs the complete test/**/*.test.ts surface locally",
   },
   {
+    job: "flake-screen",
+    mirrored: false,
+    reason:
+      "W1-T14633 — GitHub-only: it reruns the test files a pull request adds for the predicted coverage makespan " +
+      "under load; the local suite already runs each added file once, and the screen's window is CI's own wait",
+  },
+  {
     job: "flake-retry-aggregate",
     mirrored: false,
     reason:

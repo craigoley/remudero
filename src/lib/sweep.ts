@@ -3652,6 +3652,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     ...(target.checkoutDir === repoDir ? {} : {
       reservationGitAsync: planRepairGitAsync(repoDir),
     }),
+    // W1-T14748: a landing held on an unread destination-gate log asks the operator once for that head.
+    escalateGateFindingsUnread: gateFindingsUnreadEscalation({ issues, ledgerPath, runId }),
     ...(deps.ghJsonImpl ? { gh: (args: string[]) => {
       const out = ghJsonForBuild(args);
       return typeof out === "string" ? out : JSON.stringify(out);
@@ -15021,6 +15023,13 @@ export function armedButStalled(prs: readonly OpenPrView[]): ArmedStalledPr[] {
 /** W1-T3277 — ordinary open PRs whose base has rotted far enough to deserve the same single
  *  update-branch press the armed/stalled rung already owns. The commit distance is injected data:
  *  `sweep.ts` stays pure and never performs a GitHub/git comparison itself. */
+/** W1-T14741 — the head's pending review is claimed by a run (its pending row or its status names one) not proven dead. */
+function reviewClaimLive(pr: OpenPrView): boolean {
+  return pr.reviewState === "pending" &&
+    (pr.reviewPendingOwnerRunId !== undefined || pr.reviewPendingStatusRunId !== undefined) &&
+    !pendingClaimOwnerProvenDead(pr);
+}
+
 export function openPrsBehindMain(
   prs: readonly OpenPrView[],
   behindMainByPr: ReadonlyMap<number, number>,
@@ -15038,6 +15047,9 @@ export function openPrsBehindMain(
     // A person's CHANGES_REQUESTED hold blocks the merge whatever the base: a refresh only re-runs CI and
     // the review it is waiting behind.
     if (changesRequestedHold(pr) !== undefined) continue;
+    // W1-T14741: a claimed review's verdict is bound to this head, and a refresh refuses its post (#20731, 2026-11-24:
+    // refreshed 9 min into a 31-min review). An unclaimed pending, or a claim whose owner is proven dead, holds nothing.
+    if (reviewClaimLive(pr)) continue;
     const behindBy = behindMainByPr.get(pr.prNumber);
     if (behindBy === undefined) continue;
     if (pr.mergeState === "dirty" || pr.mergeable === false) continue;
@@ -32343,6 +32355,30 @@ export function publishLightPassReviewDemand(
       deps.log?.("memory_budget.capacity_decision_failed", { scenario: decision.scenario, error: String((error as Error)?.message ?? error) });
     }
   }
+}
+
+/** W1-T14748: the operator escalation for a task-files landing held because the destination gate's findings cannot be read. */
+export function gateFindingsUnreadEscalation(
+  deps: Parameters<typeof tryEscalateAsync>[1],
+): NonNullable<LandTaskFilesOpts["escalateGateFindingsUnread"]> {
+  return ({ prUrl, headSha, reason, files }) => tryEscalateAsync({
+    class: "BLOCKED",
+    taskId: escalationTaskIdFor({ prNumber: Number(/\/pull\/(\d+)$/.exec(prUrl)?.[1] ?? 0) }),
+    runId: deps.runId,
+    headSha,
+    cause: "ci",
+    summary: `the task-files landing ${prUrl} holds: the plan destination gate failed and its findings cannot be read`,
+    detail:
+      `The landing pull request ${prUrl} is red at head ${headSha} on the plan destination's gate, ` +
+      `and the landing cannot tell which staged file the gate refused: ${reason}. ` +
+      `So it sets aside no file and pushes nothing. The staged files wait: ${files.join(", ")}.`,
+    options: [
+      { label: "read-the-gate-log", detail: "read the failed gate job's log on GitHub and remove or fix the file it names." },
+      { label: "grant-log-access", detail: "give the fleet's token read access to the destination repository's Actions job logs." },
+    ],
+    recommendation: "read-the-gate-log",
+    consequence: "the landing stays red at this head, and no staged edit lands until the head changes or a file is removed.",
+  }, deps);
 }
 
 /** W1-T7095 — the production escalation for a zero-worker capacity decision: the existing `tryEscalate` path, which

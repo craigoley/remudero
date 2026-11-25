@@ -4071,6 +4071,8 @@ export interface DaemonProcessEnd {
   heapLimitLine?: string;
   exitCode?: number;
   heapLimitBytes?: number;
+  /** W1-T14733: the stopDetail of the process's own daemon.summary, when it wrote one: what it stopped on. */
+  stopDetail?: string;
 }
 
 const finiteNumber = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
@@ -4155,6 +4157,7 @@ export function classifyEndedDaemonProcesses(
       ...(heapLine ? { heapLimitLine: heapLine } : {}),
       exitCode: finiteNumber(exit?.exit_code),
       heapLimitBytes: finiteNumber(policy?.heap_size_limit),
+      ...(typeof summary?.stopDetail === "string" ? { stopDetail: summary.stopDetail } : {}),
     });
   });
   return ended;
@@ -4180,6 +4183,8 @@ export interface DaemonLifetimeRecord {
   endedTs: string;
   lifetimeMs: number;
   clean: boolean;
+  /** W1-T14733: what an abnormal exit stopped on, when its summary said; null when it said nothing. */
+  stopDetail?: string | null;
 }
 
 /** Pure: the trailing run of abnormal exits, oldest first, each shorter than the learned median. A clean exit or a
@@ -4201,7 +4206,7 @@ export interface LearnedCrashLoopSummary {
   learned: LearnedCleanLifetime;
   runLength: number;
   abnormalExits: number;
-  incident: "none" | "opened" | "updated" | "cleared" | "open";
+  incident: "none" | "opened" | "updated" | "cleared" | "open" | "reescalated";
 }
 
 /** W1-T9754: the spawn helper's environment switch, now defined beside the boot routine it gates (W1-T13664). */
