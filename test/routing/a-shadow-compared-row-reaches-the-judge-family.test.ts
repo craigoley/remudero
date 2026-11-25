@@ -31,10 +31,11 @@ const OPTIONS = ["automate", "needs_operator", "backlog"];
 const mount: JudgeMount = { model: "haiku", effort: "low", maxTurns: 400, contextBudget: 60000,
   shadow: { provider: "decisions", deployment: LUNA.deployment, candidate: LUNA } };
 
-type Reply = { kind: "distribution"; top: string; cannotTell?: number } | { kind: "abstained" } | { kind: "rejected" } | { kind: "budget" };
+type Reply = { kind: "distribution"; top: string; cannotTell?: number } | { kind: "abstained" } | { kind: "rejected" } | { kind: "budget" } | { kind: "rate-limited" };
 
 /** One real decision-arm shadow call. Returns the decision.answered row the request wrote and the judge_shadow row. */
-async function decisionShadow(o: { hour: number; head: string; primary: string; reply: Reply; latency: number; cost: number }): Promise<Row[]> {
+async function decisionShadow(o: { hour: number; head: string; primary: string; reply: Reply; latency: number; cost: number;
+  threshold?: number; learnedLimitTokens?: number }): Promise<Row[]> {
   const rows: Row[] = [];
   const ts = `2026-10-06T${String(o.hour).padStart(2, "0")}:00:00.000Z`;
   const answer = (): DecisionAnsweredRow["answers"][number] =>
@@ -43,19 +44,27 @@ async function decisionShadow(o: { hour: number; head: string; primary: string; 
         : { name: "verify_human", outcome: "distribution", confidence: null, distribution: OPTIONS.map((option) =>
           ({ option, probability: option === (o.reply as { top: string }).top ? 0.8 : 0.1 })),
           ...((o.reply as { cannotTell?: number }).cannotTell === undefined ? {} : { cannotTell: (o.reply as { cannotTell: number }).cannotTell }) };
-  const call: ShadowJudgeCall<string> = { role: "verify-human", key: `shard-${o.head}`, mount, input: "judge this record",
+  const shadowMount: JudgeMount = o.threshold === undefined ? mount
+    : { ...mount, threshold: { model: LUNA.deployment, surface: "decisions", value: o.threshold } };
+  // A resolvable target, so the learned-limit check runs; the endpoint and key are placeholders and nothing is sent.
+  const config = { claudeBin: "/unused", root: "/unused",
+    workerProviders: { cashDeploymentEndpoints: { [LUNA.endpoint.source === "cash-default" ? "unused" : LUNA.endpoint.entry]:
+      { endpoint: "https://decisions.invalid", keyEnv: "RMD_TEST_DECISIONS_KEY" } } } } as unknown as Config;
+  const call: ShadowJudgeCall<string> = { role: "verify-human", key: `shard-${o.head}`, mount: shadowMount, input: "judge this record",
     primaryArgs: { cwd: REPO_ROOT, prompt: "judge this record", tools: [] } as unknown as SpawnWorkerArgs, primary: { costUsd: 0.0004 },
     primaryAnswer: o.primary, parse: (text) => text.trim(), agreementKey: (v) => v, head: { sha: o.head },
     spawn: async () => assert.fail("a decision arm spawns no worker"),
     log: (step, fields) => { rows.push({ ts, step, ...fields }); },
-    decisions: { config: () => ({ claudeBin: "/unused", root: "/unused" }) as Config, env: {}, learnedLimit: () => undefined,
+    decisions: { config: () => config, env: { RMD_TEST_DECISIONS_KEY: "placeholder" }, learnedLimit: () => o.learnedLimitTokens,
       ask: async (_config, request) => {
         const refused = o.reply.kind === "budget";
+        const limited = o.reply.kind === "rate-limited";
         const row: DecisionAnsweredRow = { role: request.role, input_digest: `in-${o.head}`, candidate: request.candidate.name,
           deployment: request.candidate.deployment, shape: request.candidate.shape, model_surface: "decisions",
-          outcome: refused ? "refused" : "answered", ...(refused ? { reason: "budget-refused", detail: "openweight daily allowance exhausted" } : {}),
-          served_model: refused ? null : LUNA.deployment, latency_ms: o.latency, reserved_usd: 0.001, settled_usd: refused ? 0 : o.cost, held_usd: 0,
-          usage: null, question_count: 1, answers: refused ? [] : [answer()] };
+          outcome: refused ? "refused" : limited ? "unavailable" : "answered",
+          ...(refused ? { reason: "budget-refused", detail: "openweight daily allowance exhausted" } : limited ? { reason: "http-error", status: 429 } : {}),
+          served_model: refused || limited ? null : LUNA.deployment, latency_ms: o.latency, reserved_usd: 0.001, settled_usd: refused || limited ? 0 : o.cost,
+          held_usd: 0, usage: null, question_count: 1, answers: refused || limited ? [] : [answer()] };
         // What the real askDecisionModel appends: the request's own decision.answered row, with its head.
         rows.push({ ts, step: "decision.answered", run_id: `decision-${o.head}`, ...row, head_sha: o.head });
         return row;
@@ -114,13 +123,25 @@ test("W1-T14853 criterion 2: a skipped decision-arm row is an abstained or a rej
   const abstained = await decisionShadow({ hour: 5, head: "e5e5e5e5", primary: "automate", reply: { kind: "abstained" }, latency: 200, cost: 0.0001 });
   const rejected = await decisionShadow({ hour: 6, head: "f6f6f6f6", primary: "automate", reply: { kind: "rejected" }, latency: 210, cost: 0.0001 });
   const refused = await decisionShadow({ hour: 7, head: "a7a7a7a7", primary: "automate", reply: { kind: "budget" }, latency: 6, cost: 0 });
-  assert.deepEqual([shadowRow(abstained).step, shadowRow(rejected).step, shadowRow(refused).step, shadowRow(refused).refusal],
-    ["judge_shadow.skipped", "judge_shadow.skipped", "judge_shadow.skipped", "budget"]);
+  const below = await decisionShadow({ hour: 8, head: "b8b8b8b8", primary: "automate", reply: { kind: "distribution", top: "automate" }, latency: 220, cost: 0.0001,
+    threshold: 0.95 });
+  const limited = await decisionShadow({ hour: 9, head: "c9c9c9c9", primary: "automate", reply: { kind: "rate-limited" }, latency: 90, cost: 0 });
+  const capacity = await decisionShadow({ hour: 10, head: "d0d0d0d0", primary: "automate", reply: { kind: "distribution", top: "automate" }, latency: 0, cost: 0,
+    learnedLimitTokens: 1 });
+  const skipped = [abstained, rejected, refused, below, limited, capacity].map(shadowRow);
+  assert.deepEqual(skipped.map((row) => [row.step, row.refusal ?? row.abstained ?? null]), [["judge_shadow.skipped", "cannot-tell"],
+    ["judge_shadow.skipped", null], ["judge_shadow.skipped", "budget"], ["judge_shadow.skipped", "below-threshold"], ["judge_shadow.skipped", null],
+    ["judge_shadow.skipped", "capacity"]], "positive control: the real writer skipped each request for its own reason");
+  assert.match(String(shadowRow(limited).reason), /429/);
+  assert.equal(capacity.some((row) => row.step === "decision.answered"), false, "a capacity refusal sends no request");
   assert.deepEqual(typedOf(shadowRow(abstained))[0]!.answer, { kind: "abstained", reason: "cannot-tell" });
+  assert.deepEqual(typedOf(shadowRow(below))[0]!.answer, { kind: "abstained", reason: "refusal" });
   assert.equal(typedOf(shadowRow(rejected))[0]!.answer.kind, "rejected");
-  assert.equal(judgeCalibrationRow(shadowRow(refused)), undefined, "a refusal made no answer");
-  const cell = cellOf([...abstained, ...rejected, ...refused], DECISION_CELL);
-  assert.deepEqual([cell.decisions, cell.answers, cell.abstained, cell.rejected, cell.refused], [2, 2, 1, 1, 1]);
+  assert.equal(typedOf(shadowRow(limited))[0]!.answer.kind, "rejected", "an unavailable model is a rejected answer");
+  assert.equal(judgeCalibrationRow(shadowRow(refused)), undefined, "a budget refusal made no answer");
+  assert.equal(judgeCalibrationRow(shadowRow(capacity)), undefined, "a capacity refusal made no answer");
+  const cell = cellOf([...abstained, ...rejected, ...refused, ...below, ...limited, ...capacity], DECISION_CELL);
+  assert.deepEqual([cell.decisions, cell.answers, cell.abstained, cell.rejected, cell.refused], [4, 4, 2, 2, 2]);
   assert.deepEqual(cell.agreement, { compared: 0, agreed: 0, rate: null }, "no answer is never a disagreement");
 });
 
