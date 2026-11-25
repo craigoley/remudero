@@ -5196,6 +5196,13 @@ export async function runDaemon(
   // no judge/proposal failure can change eligibility or hold a healthy sibling lane.
   const lifetimePressureTasks = new Map<string, Task>();
   const lifetimePressureObserved = new Set<string>();
+  /** W1-T14788: the tasks a decided restart left unjudged; its daemon.freshness_exit row names them. */
+  const lifetimePressureLeftToSuccessor = new Set<string>();
+  const leaveLifetimePressureToSuccessor = (): void => {
+    if (deps.onLifetimePressure === undefined) return;
+    for (const id of lifetimePressureTasks.keys()) lifetimePressureLeftToSuccessor.add(id);
+    lifetimePressureTasks.clear();
+  };
   const flushLifetimePressure = async (report: typeof emitLog = log): Promise<void> => {
     if (lifetimePressureTasks.size === 0 || deps.onLifetimePressure === undefined) return;
     const tasks = [...lifetimePressureTasks.values()];
@@ -6716,6 +6723,7 @@ export async function runDaemon(
       : `origin/main advanced ${freshness.oldSha.slice(0, 7)}..${freshness.newSha.slice(0, 7)} ` +
         `past this process's boot sha`;
     log("daemon.freshness_exit", { children_left_running: [...children.values()].map((child) => child.runId),
+      ...(lifetimePressureLeftToSuccessor.size === 0 ? {} : { lifetime_pressure_left_to_successor: [...lifetimePressureLeftToSuccessor] }),
       phases_ms: { ...freshnessPhases, ...(freshnessDecidedAtMs === undefined ? {} : {
         total: Math.max(0, daemonClock.now() - freshnessDecidedAtMs),
       }) },
@@ -10261,7 +10269,10 @@ export async function runDaemon(
     const reporting = createSettlementReporting();
     try {
     const settled = poolOutcome.settled;
-    await flushLifetimePressure(reporting.report);
+    // W1-T14788: after a decided restart the judging is the successor's. Its selection re-signals every task whose
+    // ledger-read predicate holds; awaited here it held a hand-over's promote marker 542 s (2026-11-25).
+    if (restartDecided) leaveLifetimePressureToSuccessor();
+    else await flushLifetimePressure(reporting.report);
     markSettle("lifetime_pressure");
     if (!childMode || !restartDecided) restartInterphaseReviewClock();
     if (admitted.length === 0 && newBuildHeld && poolOutcome.fault === undefined && phaseFaults.length === 0) {
