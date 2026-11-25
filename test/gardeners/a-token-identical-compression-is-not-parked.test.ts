@@ -44,13 +44,14 @@ test("W1-T13481 criterion 1: a deploy or CI comment-compression record with the 
 test("W1-T13481 criterion 2: a compression record that also declares another privileged path still escalates", async () => {
   const task = filed("deploy/recycle-container.sh");
   const tests = task.files!.slice(1);
+  const claims = task.acceptance ?? [];
   const extraClaim = { claim: "the deploy script restarts the container", proof: "grep: restart in deploy/recycle-container.sh" };
   const variants: [string, Task][] = [
     ["another deploy path", { ...task, files: [...task.files!, "deploy/host-update.sh"] }],
     ["a workflow path", { ...task, files: [...task.files!, ".github/workflows/release.yml"] }],
     ["a source path beside the subject", { ...task, files: [...task.files!, "src/lib/x.ts"] }],
-    ["a second acceptance claim", { ...task, acceptance: [...task.acceptance, extraClaim] }],
-    ["an edited claim", { ...task, acceptance: [{ ...task.acceptance[0]!, claim: `${task.acceptance[0]!.claim} Also restart.` }] }],
+    ["a second acceptance claim", { ...task, acceptance: [...claims, extraClaim] }],
+    ["an edited claim", { ...task, acceptance: [{ ...claims[0]!, claim: `${claims[0]!.claim} Also restart.` }, ...claims.slice(1)] }],
     ["an operator author", { ...task, author_class: "operator" }],
     ["an origin naming another subject", { ...task, origin: "comment-compression:deploy/host-update.sh" }],
     ["a privileged path without its subject", { ...task, files: ["deploy/host-update.sh", ...tests] }],
