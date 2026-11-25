@@ -24,15 +24,21 @@
  * A RECORD, NEVER A DECISION INPUT: no gate, route or gardener reads these cells.
  */
 import { DECISION_ANSWERED_STEP } from "./decision-model.js";
-import { JUDGE_SHADOW_REFUSED_STEP, JUDGE_SHADOW_ROW_STEPS, judgeCalibrationRow, judgeShadowRowIdentity } from "./judge-calibration.js";
-import { JUDGE_REPLAY_ANSWERED_STEP, JUDGE_REPLAY_FINISHED_STEP } from "./judge-replay-batch.js";
+import { isJudgeShadowArmRefusal, JUDGE_SHADOW_ARM_STEPS, JUDGE_SHADOW_REFUSED_STEP, JUDGE_SHADOW_ROW_STEPS, judgeCalibrationRow,
+  judgeShadowArmIdentity, judgeShadowRowIdentity } from "./judge-calibration.js";
+import { JUDGE_REPLAY_ANSWERED_STEP, JUDGE_REPLAY_DECISION_ROLE_PREFIX, JUDGE_REPLAY_FINISHED_STEP } from "./judge-replay-batch.js";
 import { scoreTypedAnswers, type TypedAnswerRow, type TypedAnswerScoreGroup } from "./typed-answer-scores.js";
 import { MODEL_SURFACES, type ModelSurface } from "./worker-provider.js";
 
 export const SHADOW_JUDGE_PAIRED_STEP = "shadow_judge.paired";
 /** The ledger steps only the judge family reads. */
 export const JUDGE_TRIAL_STEPS = [DECISION_ANSWERED_STEP, SHADOW_JUDGE_PAIRED_STEP, JUDGE_REPLAY_ANSWERED_STEP, JUDGE_REPLAY_FINISHED_STEP,
-  ...JUDGE_SHADOW_ROW_STEPS] as const;
+  ...JUDGE_SHADOW_ROW_STEPS, ...JUDGE_SHADOW_ARM_STEPS] as const;
+/** W1-T14853: a decision-model replay whose newest answer is older than this before the snapshot's asOf is stale. A
+ *  record only: nothing reads the flag to decide. */
+export const JUDGE_REPLAY_STALE_DAYS = 7;
+/** W1-T14853: part of every judge unit's digest, so a change to the cell's shape rebuilds the family once. */
+export const JUDGE_TRIAL_CELL_VERSION = "judge-trial-cell-v2" as const;
 /** A replay answer whose replay wrote no corpus digest (the batch lane, or a replay that has not finished). */
 export const JUDGE_CORPUS_DIGEST_UNRECORDED = "unrecorded";
 
@@ -52,7 +58,13 @@ export interface JudgeTrialProjection {
   answers: TypedAnswerRow[];
   /** W1-T13365: a refused shadow call. It has no answer; these fields name its cell and its private keys. */
   refused?: NonNullable<ReturnType<typeof judgeShadowRowIdentity>>;
+  /** W1-T14853: one decision-model request's key (role, head, latency and dollars), private. A decision-arm
+   *  judge_shadow row and the live decision.answered row of the same request share it, so the request counts once. */
+  request?: { key: string; side: "decision" | "shadow" };
 }
+
+const requestKey = (role: unknown, head: unknown, latency: unknown, dollars: unknown): string =>
+  JSON.stringify([role ?? null, head ?? null, latency ?? null, dollars ?? null]);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -76,15 +88,22 @@ export function projectJudgeTrialRow(row: Record<string, unknown>): JudgeTrialPr
   // A direct replay's own decision.answered row reads as no answer here: its answer is in its judge_replay.answered row.
   const typed = finished ? undefined : judgeCalibrationRow(row)?.typed_answers;
   const shadow = (JUDGE_SHADOW_ROW_STEPS as readonly unknown[]).includes(row.step);
-  const refused = row.step === JUDGE_SHADOW_REFUSED_STEP ? judgeShadowRowIdentity(row) : undefined;
+  const arm = (JUDGE_SHADOW_ARM_STEPS as readonly unknown[]).includes(row.step);
+  const refused = row.step === JUDGE_SHADOW_REFUSED_STEP ? judgeShadowRowIdentity(row)
+    : arm && isJudgeShadowArmRefusal(row) ? judgeShadowArmIdentity(row) : undefined;
+  const live = !replay && typeof row.role === "string" && !row.role.startsWith(JUDGE_REPLAY_DECISION_ROLE_PREFIX);
+  const request = arm && row.model_surface === "decisions" ? { key: requestKey(row.role, row.head_sha, row.latency_ms, row.shadow_cost_usd), side: "shadow" as const }
+    : row.step === DECISION_ANSWERED_STEP && live ? { key: requestKey(row.role, row.head_sha, row.latency_ms, row.settled_usd), side: "decision" as const }
+      : undefined;
   return {
     basis: replay ? "replay" : "live", finished, corpusDigest: replay ? text(row.corpus_digest) : null,
     latencyMs: finished ? null : amount(row.latency_ms),
     // A judge_shadow row names its dollars cost_usd. A refused call made no request, so it has none.
-    settledUsd: finished || refused ? null : amount(shadow ? row.cost_usd : row.settled_usd),
+    settledUsd: finished || refused ? null : amount(shadow ? row.cost_usd : arm ? row.shadow_cost_usd : row.settled_usd),
     decisionKey: text(row.decision_key),
     answers: Array.isArray(typed) ? typed.flatMap((answer) => { const read = readTypedAnswer(answer); return read ? [read] : []; }) : [],
     ...(refused ? { refused } : {}),
+    ...(request ? { request } : {}),
   };
 }
 
@@ -121,11 +140,15 @@ export interface JudgeTrialSourceRow {
 export function judgeTrialRows(source: string, rows: readonly JudgeTrialSourceRow[]): { rows: JudgeTrialRow[]; privateKeys: string[] } {
   const digestOfRun = new Map<string, string>();
   for (const row of rows) if (row.judge?.finished && row.runId !== null && row.judge.corpusDigest !== null) digestOfRun.set(row.runId, row.judge.corpusDigest);
+  // W1-T14853: a decision-arm shadow request also wrote its decision.answered row; its judge_shadow row is the one read.
+  const shadowRequests = new Set<string>();
+  for (const row of rows) if (row.judge?.request?.side === "shadow") shadowRequests.add(row.judge.request.key);
   const out: JudgeTrialRow[] = [];
   const privateKeys = new Set<string>();
   for (const row of rows) {
     const judge = row.judge;
     if (judge === undefined) continue;
+    if (judge.request?.side === "decision" && shadowRequests.has(judge.request.key)) continue;
     if (row.runId !== null) privateKeys.add(row.runId);
     if (judge.decisionKey !== null) privateKeys.add(judge.decisionKey);
     const corpusDigest = judge.basis === "live" ? null
@@ -177,6 +200,8 @@ export interface JudgeTrialCell extends ScoredFigures {
   refused: number;
   latencyMs: { observed: number; median: number | null; p90: number | null };
   settledUsd: { observed: number; median: number | null };
+  /** W1-T14853: the newest row time in the cell, or null when no row has one. */
+  newestAt: string | null;
   /** The same figures per question, because one cell can hold questions with different options. */
   questions: Array<ScoredFigures & { question: string | null }>;
 }
@@ -230,7 +255,41 @@ export function judgeTrialCells(rows: readonly JudgeTrialRow[], periodOf: (at: s
       ...figuresOf(pooled),
       latencyMs: { observed: latencies.length, median: medianOf(latencies), p90: p90Of(latencies) },
       settledUsd: { observed: dollars.length, median: medianOf(dollars) },
+      newestAt: all.reduce<string | null>((newest, member) => (member.ts !== null && (newest === null || member.ts > newest) ? member.ts : newest), null),
       questions: score(answers).groups.map((group) => ({ question: group.question, ...figuresOf(group) })),
     };
   });
+}
+
+/** W1-T14853: one decision-model candidate's newest replay for one role, or the candidate with none (role null). */
+export interface JudgeReplayAge {
+  model: string;
+  role: string | null;
+  newestReplayAt: string | null;
+  stale: boolean;
+}
+
+/**
+ * W1-T14853: for each decision-model candidate the judge family names (any cell on the decisions surface), the newest
+ * replay answer of each role its replay cells name, stale when it is more than {@link JUDGE_REPLAY_STALE_DAYS} before
+ * `asOf`. A candidate with no replay cell is one entry with role null, which is stale. A record, never a decision input.
+ */
+export function judgeReplayAges(cells: readonly JudgeTrialCell[], asOf: string): JudgeReplayAge[] {
+  const candidates = new Set<string>();
+  const newest = new Map<string, { model: string; role: string; at: string | null }>();
+  for (const cell of cells) {
+    if (cell.modelSurface !== "decisions") continue;
+    candidates.add(cell.model);
+    if (cell.basis !== "replay") continue;
+    const key = JSON.stringify([cell.model, cell.role]);
+    const before = newest.get(key);
+    const at = before?.at === undefined || before.at === null ? cell.newestAt
+      : cell.newestAt !== null && cell.newestAt > before.at ? cell.newestAt : before.at;
+    newest.set(key, { model: cell.model, role: cell.role, at });
+  }
+  const limit = Date.parse(asOf) - JUDGE_REPLAY_STALE_DAYS * 86_400_000;
+  const staleAt = (at: string | null): boolean => at === null || !Number.isFinite(Date.parse(at)) || Date.parse(at) < limit;
+  const ages: JudgeReplayAge[] = [...newest.values()].map(({ model, role, at }) => ({ model, role, newestReplayAt: at, stale: staleAt(at) }));
+  for (const model of candidates) if (!ages.some((age) => age.model === model)) ages.push({ model, role: null, newestReplayAt: null, stale: true });
+  return ages.sort((a, b) => a.model.localeCompare(b.model) || (a.role ?? "").localeCompare(b.role ?? ""));
 }

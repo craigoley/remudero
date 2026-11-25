@@ -20,8 +20,8 @@
 import { ciRemedyExecutionOf, ciRemedyExecutionReport, type CiRemedyExecution } from "./ci-remedy-execution.js";
 import { importedModuleOf, preventionRegistrationsOf, preventionAdoption, type ImportedModuleEvidence, type PreventionSourceRegistration } from "./prevention-source-evidence.js";
 import { servedTrialCohorts, trialRevisionPins, type TrialRevisionPins } from "./field-trials-cohorts.js";
-import { JUDGE_TRIAL_STEPS, judgeTrialCellKey, judgeTrialCells, judgeTrialRows, projectJudgeTrialRow, type JudgeTrialCell,
-  type JudgeTrialProjection, type JudgeTrialRow } from "./field-trials-judges.js";
+import { JUDGE_TRIAL_CELL_VERSION, JUDGE_TRIAL_STEPS, judgeReplayAges, judgeTrialCellKey, judgeTrialCells, judgeTrialRows, projectJudgeTrialRow,
+  type JudgeReplayAge, type JudgeTrialCell, type JudgeTrialProjection, type JudgeTrialRow } from "./field-trials-judges.js";
 import { buildControlledFieldTrialsRelease, deriveRegisteredEpoch, SITE_SECONDARY_COMMIT, type ControlledReleaseInput,
   type ControlledReleaseResult, type LedgerEpochFacts } from "./field-trials-controlled-release.js";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
@@ -501,7 +501,7 @@ function learningCells(units: LearningUnit[]) {
     humanEffort: { state: "unavailable" as const, reason: "no-independent-human-effort-estimate" } };
 }
 
-type JudgeUnit = Unit & { row: JudgeTrialRow };
+type JudgeUnit = Unit & { row: JudgeTrialRow; cellVersion: typeof JUDGE_TRIAL_CELL_VERSION };
 
 type GuardrailUnit = Unit & { modelId: string; category: PublicCategory; guardrailClass: PublicGuardrailClass; fired: boolean; row: string };
 
@@ -598,6 +598,8 @@ export interface FieldTrialsFlowSnapshot {
     /** W1-T12423: private judge figures per source|week|basis|role|model|model surface|corpus digest. Never released. */
     judges: Record<string, Partition<JudgeTrialCell>>;
   };
+  /** W1-T14853: each decision-model candidate's newest replay per role and whether it is stale. Private; a record only. */
+  judgeReplayAges: JudgeReplayAge[];
   rebuild: { rebuiltPartitions: string[]; reusedPartitions: number };
   /** Every private join key this snapshot saw, so a release can be refused if one leaks. */
   privateKeys: string[];
@@ -978,7 +980,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
     const judged = judgeTrialRows(source.label, judgeRows);
     for (const key of judged.privateKeys) privateKeys.add(key);
     for (const row of judgeRows) for (const key of [row.taskId, row.host, row.headSha]) if (key !== null) privateKeys.add(key);
-    for (const row of judged.rows) units.judges.push(withDigest({ key: judgeTrialCellKey(row, periodOf), row }));
+    for (const row of judged.rows) units.judges.push(withDigest({ key: judgeTrialCellKey(row, periodOf), row, cellVersion: JUDGE_TRIAL_CELL_VERSION }));
     // Only these three bounded schemas feed the private finding fold. Avoid a second copy
     // of the entire fleet ledger and an unbounded spread-argument list on large rotations.
     for (const row of ledgerRows) if (row.step === "review.posted" || row.step === "review.reviewer" || row.step === "review.finding")
@@ -1137,6 +1139,7 @@ export function buildFieldTrialsFlowSnapshot(input: FieldTrialsFlowInput): Field
     assignmentTelemetry: [...assignmentTelemetry.values()].sort((a, b) => a.source.localeCompare(b.source)
       || a.selectedModel.localeCompare(b.selectedModel)),
     provenance: { sources: provenance, githubPass: input.githubPass ?? null }, links, families,
+    judgeReplayAges: judgeReplayAges(Object.values(families.judges).map((partition) => partition.cells), input.asOf),
     rebuild: { rebuiltPartitions: rebuilt, reusedPartitions: reused.count }, privateKeys: [...privateKeys].sort() };
 }
 

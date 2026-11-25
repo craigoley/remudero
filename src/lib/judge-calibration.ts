@@ -28,6 +28,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { CANNOT_TELL_OPTION } from "./decision-model.js";
 import { JUDGE_REPLAY_DECISION_ROLE_PREFIX } from "./judge-replay-batch.js";
 import { JUDGE_SHADOW_COMPARED_KEY } from "./risk-judge.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
@@ -137,8 +138,13 @@ export const JUDGE_SHADOW_REFUSED_STEP = "judge_shadow.refused";
 /** W1-T13365: the rows runJudgeShadow (lib/risk-judge.ts) writes beside a ci-judge or fix-progress judgement. */
 export const JUDGE_SHADOW_ROW_STEPS = ["judge_shadow.paired", JUDGE_SHADOW_REFUSED_STEP, "judge_shadow.unavailable"] as const;
 const isJudgeShadowStep = (step: unknown): boolean => (JUDGE_SHADOW_ROW_STEPS as readonly unknown[]).includes(step);
+/** W1-T14853: the rows judge-shadow.ts writes for every other shadow arm, cash or decision model, and for a decision
+ *  model asked as a judge's primary that gave nothing (`served_as: "primary"`). */
+export const JUDGE_SHADOW_ARM_STEPS = ["judge_shadow.compared", "judge_shadow.skipped"] as const;
+const isJudgeShadowArmStep = (step: unknown): boolean => (JUDGE_SHADOW_ARM_STEPS as readonly unknown[]).includes(step);
 const isTypedAnswerStep = (step: unknown): boolean =>
-  step === "shadow_judge.paired" || step === "decision.answered" || step === "judge_replay.answered" || isJudgeShadowStep(step);
+  step === "shadow_judge.paired" || step === "decision.answered" || step === "judge_replay.answered" || isJudgeShadowStep(step) ||
+  isJudgeShadowArmStep(step);
 
 /** W1-T13365: who answered a judge_shadow row and about which input: the surface is the role, the cash deployment
  *  is the model and it answers with text. The head follows the `@` of the decision key (`PR<n>@<head>`). */
@@ -164,11 +170,70 @@ function judgeShadowTypedAnswer(line: Row): TypedAnswerRow | undefined {
   return { ...who, question: null, questionType: null, options: null, answer, incumbent: keyOf?.(line.primary_verdict) ?? null, outcome: null };
 }
 
+/** W1-T14853: who answered a judge_shadow.compared or .skipped row: its role, the shadow model (a decision candidate or a
+ *  cash deployment), the decisions surface when the row says so and text otherwise, and the head it judged. A row that
+ *  names no shadow model (a bake-off deployment that was not ready) has no answerer. */
+export function judgeShadowArmIdentity(line: Row): Pick<TypedAnswerRow, "role" | "model" | "source" | "modelSurface"> & { head: string | null; inputDigest: string | null } | undefined {
+  const role = str(line.role);
+  const model = str(line.shadow_model);
+  if (role === undefined || model === undefined) return undefined;
+  const decisions = line.model_surface === "decisions";
+  const key = str(line.decision_key);
+  const keyHead = key?.includes("@") ? key.slice(key.lastIndexOf("@") + 1) : undefined;
+  const head = str(line.head_sha) ?? keyHead;
+  return { role, model, source: decisions ? "decisions" : "generative", modelSurface: decisions ? "decisions" : "text",
+    head: head !== undefined && HEAD_SHA_RE.test(head) ? head : null,
+    inputDigest: key === undefined ? null : createHash("sha256").update(key).digest("hex").slice(0, 16) };
+}
+
+/** W1-T14853: a budget or capacity refusal made no request, so it is no answer. */
+export const isJudgeShadowArmRefusal = (line: Row): boolean =>
+  line.step === "judge_shadow.skipped" && (line.refusal === "budget" || line.refusal === "capacity");
+
+/** W1-T14853: a judge_shadow.compared or .skipped row as one answer beside the primary's. A decision model's
+ *  distribution is a distribution answer (its cannot-tell mass apart, as decision.answered reads it); a cash
+ *  shadow's answer is a single one; the primary's answer is the incumbent. A skipped row is an abstention when it
+ *  names one, a refusal is no answer, and anything else is a rejected answer. A compared row that only says whether
+ *  the reply parsed (`parses`) carries no option: one that did not parse is rejected, one that did is no answer. */
+function judgeShadowArmTypedAnswer(line: Row): TypedAnswerRow | undefined {
+  const who = judgeShadowArmIdentity(line);
+  if (who === undefined || isJudgeShadowArmRefusal(line)) return undefined;
+  const decisions = who.modelSurface === "decisions";
+  const base = { ...who, question: decisions ? who.role.replace(/-/g, "_") : null, questionType: null, options: null,
+    incumbent: str(line.primary_answer) ?? null, outcome: null };
+  if (line.step === "judge_shadow.skipped") {
+    const reason = str(line.reason) ?? "skipped";
+    const abstained = str(line.abstained) ?? (reason.startsWith("abstained") ? reason : undefined);
+    if (abstained !== undefined) return { ...base, answer: { kind: "abstained", reason: abstained === "cannot-tell" ? "cannot-tell" : "refusal" } };
+    return { ...base, answer: { kind: "rejected", reason } };
+  }
+  if (Array.isArray(line.distribution)) {
+    const entries = line.distribution.filter((entry): entry is Row => record(entry) !== undefined &&
+      typeof entry.option === "string" && typeof entry.probability === "number");
+    if (entries.length === 0) return { ...base, answer: { kind: "rejected", reason: "the shadow distribution is not readable" } };
+    const cannotTell = typeof line.cannot_tell === "number" ? line.cannot_tell : undefined;
+    const distribution = entries.map((entry) => ({ option: entry.option as string, probability: entry.probability as number }));
+    return { ...base, questionType: "choice", options: [...distribution.map((entry) => entry.option), ...(cannotTell === undefined ? [] : [CANNOT_TELL_OPTION])],
+      ...(cannotTell === undefined ? {} : { abstainOption: CANNOT_TELL_OPTION }),
+      answer: { kind: "distribution", distribution: cannotTell === undefined ? distribution
+        : [...distribution.map((entry) => ({ option: entry.option, probability: entry.probability * (1 - cannotTell) })),
+          { option: CANNOT_TELL_OPTION, probability: cannotTell }] } };
+  }
+  const option = str(line.shadow_answer);
+  if (option !== undefined) return { ...base, answer: { kind: "single", option } };
+  if (line.parses === false) return { ...base, answer: { kind: "rejected", reason: str(line.reason) ?? "the shadow reply did not parse" } };
+  return undefined;
+}
+
 /** A ledger row's typed answers, or the ones {@link judgeCalibrationRow} already read off it. */
 function typedAnswersOf(line: Row): TypedAnswerRow[] {
   if (Array.isArray(line.typed_answers)) return line.typed_answers as TypedAnswerRow[];
   if (isJudgeShadowStep(line.step)) {
     const answer = judgeShadowTypedAnswer(line);
+    return answer ? [answer] : [];
+  }
+  if (isJudgeShadowArmStep(line.step)) {
+    const answer = judgeShadowArmTypedAnswer(line);
     return answer ? [answer] : [];
   }
   // W1-T12421: a direct judge replay's decision request; its answer, with the case's outcome, is in its judge_replay.answered row.
