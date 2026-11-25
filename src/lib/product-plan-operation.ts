@@ -497,7 +497,8 @@ export async function verifyProductPlanCheckout(checkout: string, repository: Pl
 }
 
 /** What {@link refreshProductPlanCheckout} did. `left` names why the checkout was not moved; the verify after it decides the refusal. */
-export type ProductPlanCheckoutRefresh = { kind: "current" | "fast_forwarded"; reason?: never } | { kind: "left"; reason: string };
+export type ProductPlanCheckoutRefresh = { kind: "current" | "fast_forwarded"; reason?: never; unmovable?: never }
+  | { kind: "left"; reason: string; unmovable?: true };
 
 /**
  * W1-T14301 INVARIANT only-a-clean-behind-checkout-moves: serve moves a target checkout only by a fast-forward of a clean,
@@ -542,11 +543,12 @@ export async function refreshProductPlanCheckout(checkout: string, repository: P
         const held = readRunLock(path);
         return held.kind === "corrupt" || (held.kind === "live" && defaultIsPidAlive(held.info.pid));
       });
-      if (borrower) return left(`a live worker borrows it (${borrower.path})`);
+      if (borrower) return { kind: "left", reason: `a live worker borrows it (${borrower.path})`, unmovable: true };
       try { await git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "origin", `refs/heads/${branch}`], 120_000); }
       catch (error) {
         // A failed fetch moves nothing: the result carries git's message, and the verify after it refuses the stale tree.
-        return left(`could not fetch origin (${String((error as Error)?.message ?? error).slice(0, 512)})`);
+        // W1-T14724: serve mounts an instance daemon's repos read-only, so this is its steady state, not an accident.
+        return { kind: "left", reason: `could not fetch origin (${String((error as Error)?.message ?? error).slice(0, 512)})`, unmovable: true };
       }
       // Re-read under the lock: only the tree this call checked moves, and only forward onto the live head.
       if (await git(["rev-parse", "--verify", "HEAD^{commit}"]) !== before || await git(["status", "--porcelain", "--untracked-files=all"]))
@@ -560,6 +562,38 @@ export async function refreshProductPlanCheckout(checkout: string, repository: P
     return left(`it is unreadable (${String((error as Error)?.message ?? error).slice(0, 512)})`);
   }
 }
+/**
+ * W1-T14724 INVARIANT steer-never-waits-on-a-build: when a live build borrows the daemon's working checkout and it is
+ * behind, a product re-plan runs in a checkout core keeps for product plans only, at
+ * `<root>/product-plan-checkouts/<owner>/<name>`. No build worktree is ever registered on it, so a running build
+ * never makes a steer stale. On first use it is cloned from the origin the daemon's working checkout names (so
+ * a private repository keeps the same transport), into a temporary sibling that is renamed into place only once
+ * complete. An origin that cannot be read or cloned leaves no checkout, and the verify after it refuses as before.
+ * The refresh and verify that follow are {@link refreshProductPlanCheckout} and {@link verifyProductPlanCheckout},
+ * unchanged.
+ */
+export async function ensureProductPlanCheckout(root: string, working: string, repository: PlanRepository): Promise<string> {
+  const checkout = join(root, "product-plan-checkouts", repository.owner, repository.name);
+  if (existsSync(checkout)) return checkout;
+  let origin: string;
+  try { origin = (await hostWorktreeGitAsync(working, ["config", "--get", "remote.origin.url"], { timeout: 20_000, maxBuffer: 64 * 1024 })).trim(); }
+  catch { return checkout; /* no readable working checkout: nothing is cloned, and the verify refuses the missing tree */ }
+  const identity = parseOwnerRepoFromRemoteUrl(origin);
+  if (!identity || identity.owner.toLowerCase() !== repository.owner.toLowerCase() || identity.repo.toLowerCase() !== repository.name.toLowerCase())
+    return checkout;
+  await mkdir(dirname(checkout), { recursive: true });
+  const staging = `${checkout}.clone-${process.pid}-${randomUUID()}`;
+  try {
+    await promisify(execFile)("git", ["clone", "--quiet", "--no-tags", "--branch", repository.defaultBranch, "--", origin, staging],
+      { timeout: 600_000, maxBuffer: 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+    await rename(staging, checkout);
+  } catch {
+    // A failed or raced clone leaves no partial tree: the staging copy goes, and whatever holds the path now is verified.
+    await rm(staging, { recursive: true, force: true });
+  }
+  return checkout;
+}
+
 const runnerConfigRefusal = {
   absent: "runner_config_missing", invalid: "runner_config_invalid", unreadable: "target_unreadable",
 } as const satisfies Record<Exclude<TargetRunnerConfig["state"], "present">, ProductPlanOperationCode>;

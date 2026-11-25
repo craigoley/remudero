@@ -392,7 +392,7 @@ import { sameHost } from "./lib/host-identity.js";
 import { gitBlobSha, isDuplicateKeyError, repairDuplicateKeyShard } from "./lib/plan-shard-repair.js";
 import { gardenPrState, knowledgeGardenSpec, runGardenPass as runKnowledgeGardenPass, recordSkillUsage, skillUsagePath, type GardenWorkspace } from "./lib/knowledge-gardener.js";
 import { foldNarrativeStore, type NarrativeFoldKind } from "./lib/narrative-fold.js";
-import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenClosePr, gardenPassDue, gardenPendingSignal, isGardenLandWaiting, isPromiseLike, landedPrUrl, runStepsEager, runGardenAsync, type GardenAction, type GardenLandOpts, type GardenLandResult, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
+import { GardenMintBudget, GardenMintTimedOutError, GARDEN_FILING_RETRY_BASE_MS, gardenClosePr, gardenPassDue, gardenPendingSignal, isGardenLandRefused, isGardenLandWaiting, isPromiseLike, landedPrUrl, runStepsEager, runGardenAsync, type GardenAction, type GardenLandOpts, type GardenLandRefusal, type GardenLandResult, type GardenCheckout, type GardenCheckoutAsync, type GardenerDeps, type GardenSpec, type GardenTaskIdRelease, type PrState } from "./lib/gardener.js";
 import { boundedGardenPassSpawn, childGardenPassSpawn, flowGardenPass, issueRevalidationGardenPass, GARDEN_DUE_FAILED_STEP, gardenPacingDueAsync, lowYieldGardenPass, recordGardenPacing, GARDEN_HOURLY_FLAG, isRegisteredGardenName, REGISTERED_GARDEN_NAMES, selectorShadowGardenPass, selectorShadowMainFailures, type GardenPassSpawn, type RegisteredGardenName } from "./lib/garden-registry.js";
 import { flakeJudgeEvidencePort } from "./lib/flake-incident-gardener.js";
 import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.js";
@@ -858,6 +858,7 @@ import {
   stagedTaskFiles,
   stagedTaskFileOrigins,
   taskFileOrigin,
+  taskIdOfTaskFileText,
   taskFilesLandingBranchAsync,
   type LandTaskFilesOpts,
   type TaskFileInput,
@@ -24931,7 +24932,7 @@ async function retroCommand(
       commitCount: commitsAhead(worktreePath, "origin/main"),
       report: workerTranscript(worker),
       worktreePath,
-      declaredPaths: ["MASTER-PLAN.md"],
+      declaredPaths: ["MASTER-PLAN.md", "plan/proposals.d"],
       assignmentId: worker.selectionAssignmentId,
       log,
       say,
@@ -25322,16 +25323,18 @@ export const RETRO_ACCEPTANCE_BLOCK_GRAMMAR: readonly string[] = [
 export function retroPrompt(gatherReport: string, calTable: string, runId: string, shellLessFallback = false): string {
   const commitInstructions = shellLessFallback
     ? [
-        "- If your surface includes Bash, git add MASTER-PLAN.md && commit with a concise message;",
+        "- If your surface includes Bash, git add MASTER-PLAN.md (plus any plan/proposals.d/ record you",
+        "  wrote) && commit with a concise message;",
         "  if your surface is shell-less, do NOT run git commands: include one anchored",
         "  `COMMIT_MESSAGE: <type>(<scope>): <subject>` line in your REPORT and the harness commits,",
         "  regenerates its artifacts, pushes and opens the PR.",
       ]
-    : ["- git add MASTER-PLAN.md && commit with a concise message;"];
+    : ["- git add MASTER-PLAN.md (plus any plan/proposals.d/ record you wrote) && commit with a concise message;"];
   return [
     "You are the REMUDERO ARCHITECT running a RETRO (MASTER-PLAN §Self-improvement). You ride a HIGHER",
     "tier than implement workers. You are fed ONLY the deterministic GATHER below and the current",
-    "MASTER-PLAN.md in this working directory. Produce a PLAN-ONLY sync PR — edit ONLY MASTER-PLAN.md.",
+    "MASTER-PLAN.md in this working directory. Produce a PLAN-ONLY sync PR — edit ONLY MASTER-PLAN.md",
+    "and the proposal records under plan/proposals.d/.",
     "NEVER touch src/ or test/ (this is plan-only; a code change fails the retro).",
     "NEVER touch docs/ORIENTATION.md — it is HARNESS-OWNED: the harness deterministically regenerates",
     "it from this same gather right after you finish and commits it separately. Any edit you make to it",
@@ -25348,16 +25351,28 @@ export function retroPrompt(gatherReport: string, calTable: string, runId: strin
     "1. Append SHIPPED-log entries for what landed (from 'Merged since marker'), each with its PR link.",
     "2. Refresh the NET STATE section so it reflects reality (it currently predates WS-0).",
     "3. Add the observed CALIBRATION TABLE below (the numbers mounts.yaml/W1-T5 needs).",
-    "4. Mine FAILURES (blocked_* verdicts) into PROPOSED golden/new tasks — PROPOSALS ONLY, in a",
-    "   'Retro proposals' note. Do NOT edit plan/tasks.yaml.",
-    "   BEFORE MINTING ANY NEW PROPOSAL ID: grep this file's own '## Retro proposals' section for",
-    "   the highest existing P<N> header (the '- **[★ ]P<N>' bullets between that heading and the",
-    "   'Closed proposals' block) and take the NEXT UNUSED number — never reuse or guess one (the",
+    "4. Mine FAILURES (blocked_* verdicts) into proposal RECORDS — one file per proposal,",
+    "   plan/proposals.d/P<N>-<slug>.yaml (W1-T3102 ruling; DECISIONS.md 2026-09-22), each a YAML",
+    "   mapping with: id (P<N>), title, status (open|adopted|refuted|superseded), falsifier, and",
+    "   optionally rank and source. The falsifier must be EXECUTABLE, on ONE physical line, in the",
+    "   proof dialect: `unit test: <title substring>` or `grep: <pattern> in <path>` — prose is",
+    "   refused by `rmd lint-plan`. A record may be filed as a task: MASTER-PLAN rule 27 PERMITS",
+    "   automatic filing, so there is no 'proposals only' restriction on this lane. Do not hand-edit",
+    "   plan/tasks.yaml itself; file through the usual task-filing route.",
+    "   BEFORE MINTING ANY NEW PROPOSAL ID: take the NEXT UNUSED number across BOTH stores — the",
+    "   highest P<N> among the plan/proposals.d/ records AND the '- **[★ ]P<N>' bullets in this",
+    "   file's '## Retro proposals' section (between that heading and the 'Closed proposals' block,",
+    "   which has not migrated yet) — never reuse or guess one (the",
     "   #125/#118 P21 collision: two active proposals shared one id for ~2 hours because a synthesis",
     "   assigned an id without deriving next-unused). This is the SAME id-collision discipline",
     "   `rmd next-task-id` already applies to W1-T### task ids — proposal ids get no exception.",
     "   REPORT the mapping ('minted P<N+1>, highest prior was P<N>', or 'no new proposal minted",
     "   this cycle') in the PR body.",
+    "   ONE-TIME MIGRATION: if this file still has a '## Retro proposals' section AND plan/proposals.d/",
+    "   does not exist, migrate the LIVE '- **[★ ]P<N>' bullets (not the 'Closed proposals' block) into",
+    "   one record each — keeping each id, never renumbering — then reduce the MASTER-PLAN.md section",
+    "   to a short pointer at plan/proposals.d/. RE-DERIVE the bullet count yourself from the file in",
+    "   front of you (it was 21 at 855dcb0b6, not the 31 W1-T3102 measured); never copy a count.",
     "5. ★ COMPRESSION (REQUIRED — a retro that only ADDS is a failed retro): find what is STALE,",
     "   REDUNDANT, or SUPERSEDED and DELETE or fold it. The diff MUST be net-negative somewhere.",
     "",
@@ -28808,6 +28823,7 @@ async function repairRequestedShard(
     opts.log("plan.shard_repair_waiting", { ...at, blob, path: rel, kept: verdict.kept });
     return { wait: true };
   }
+  if (isGardenLandRefused(prUrl)) prUrl = prUrl.opened;
   if (prUrl === undefined) {
     opts.log("plan.shard_repair_not_landed", { ...at, blob, reason: "the plan-PR preflight refused the repair; plan_pr.preflight_refused names why" });
     return { retry: true, blob };
@@ -29096,20 +29112,43 @@ function* landSealedTaskFiles(opts: GardenCheckoutOpts, paths: readonly string[]
     }
   }
   const result = yield* step(() => land(inputs));
-  const carried = paths.every((p) => result.landed.includes(p));
-  const queued = paths.every((p) => result.landed.includes(p) || result.waiting.includes(p));
+  const refusals = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path));
+  // W1-T14657: the paths the landing did not refuse are the ones it was to carry: a landing of several lands them.
+  const refusedPaths = new Set(refusals.map((r) => r.path));
+  const owed = paths.filter((p) => !refusedPaths.has(p));
+  const carried = owed.every((p) => result.landed.includes(p));
+  const queued = owed.every((p) => result.landed.includes(p) || result.waiting.includes(p));
   // W1-T12222: a file that is in the queue keeps the ids of its land, so a partly refused land of new files waits.
   const partly = opts.taskFilesOnly === true && paths.some((p) => result.landed.includes(p) || result.waiting.includes(p));
-  const outcome = result.prUrl !== undefined && carried ? "opened" : queued || partly ? "waiting" : "not_landed";
-  const refused = [...result.refused, ...result.setAside].filter((r) => paths.includes(r.path)).map((r) => ({
+  const outcome = result.prUrl !== undefined && carried && owed.length > 0 ? "opened" : (queued && owed.length > 0) || partly ? "waiting" : "not_landed";
+  const refused = refusals.map((r) => ({
     path: r.path, reason: r.reason,
     ...(r.reserved_id === undefined ? {} : { reserved_id: r.reserved_id }),
     ...(r.id_release === undefined ? {} : { id_release: r.id_release }),
   }));
+  // W1-T14657: what the gardener is told: each refused path with the task ids its findings and its own record name.
+  const told: GardenLandRefusal[] = refusals.map((r) => {
+    const own = taskIdOfTaskFileText(inputs.find((i) => i.relPath === r.path)?.content ?? "");
+    const ids = [...new Set([...(own === undefined ? [] : [own]), ...(r.reserved_id === undefined ? [] : [r.reserved_id]), ...(r.failures ?? []).flatMap((f) => f.task_ids ?? [])])];
+    return { path: r.path, reason: r.reason, ...(ids.length > 0 ? { task_ids: ids } : {}) };
+  });
   opts.log(`${opts.name}.garden_sealed_landing`, { outcome, paths, pr_url: outcome === "opened" ? result.prUrl : null, ...(refused.length ? { refused } : {}), ...(result.error ? { error: result.error } : {}) });
-  if (outcome === "opened") return result.prUrl;
-  if (outcome === "waiting") return { waiting: { paths: paths.filter((p) => result.landed.includes(p) || result.waiting.includes(p)), stateRoot: opts.taskFilesLanding!.stateRoot, ...(opts.taskFilesOnly === true ? { filed: true as const } : {}) } };
-  return undefined;
+  if (outcome === "opened") return told.length > 0 ? { opened: result.prUrl!, refused: told } : result.prUrl;
+  if (outcome === "waiting") return { waiting: { paths: paths.filter((p) => result.landed.includes(p) || result.waiting.includes(p)), stateRoot: opts.taskFilesLanding!.stateRoot, ...(opts.taskFilesOnly === true ? { filed: true as const } : {}) }, ...(told.length > 0 ? { refused: told } : {}) };
+  return told.length > 0 ? { refused: told } : undefined;
+}
+
+/** W1-T14657: the paths of `paths` the tasks a preflight red names are filed in, with those ids: a refusal that names
+ *  no task of this landing attributes nothing, and the land stays unlanded as before. */
+function preflightRefusedPaths(root: string, paths: readonly string[], failures: PlanPrPreflightResult["failures"]): GardenLandRefusal[] {
+  const named = new Set(failures.flatMap((f) => f.task_ids ?? []));
+  const refused: GardenLandRefusal[] = [];
+  for (const path of paths) {
+    const own = existsSync(join(root, path)) ? taskIdOfTaskFileText(readFileSync(join(root, path), "utf8")) : undefined;
+    const id = own !== undefined && named.has(own) ? own : [...named].find((n) => basename(path).startsWith(`${n}-`));
+    if (id !== undefined) refused.push({ path, reason: `the plan-PR preflight refused ${id}`, task_ids: [id] });
+  }
+  return refused;
 }
 
 function* gardenLandSteps(
@@ -29191,7 +29230,11 @@ function* gardenCommitAndOpen(
   assertLiveWriteAllowed("gh-pr-create", `opening a ${opts.name} garden PR against ${to.owner}/${to.repo}`);
   // W1-T5348: a tree CI would refuse is never pushed — the lane's not-landed outcome instead of a red PR.
   const verdict = yield* step(() => io.preflight({ cwd: root, title: fitted.header, body: fullTitle + body }));
-  if (!planPrPreflightAllows(verdict, { lane: opts.name, branch, log: opts.log })) return undefined;
+  if (!planPrPreflightAllows(verdict, { lane: opts.name, branch, log: opts.log })) {
+    // W1-T14657: the refused task ids reach the gardener as the paths they are filed in.
+    const refused = preflightRefusedPaths(root, paths, verdict.failures);
+    return refused.length > 0 ? { refused } : undefined;
+  }
   yield* step(() => io.git("push", "-q", "origin", `HEAD:refs/heads/${branch}`));
   try {
     const create = { title: fitted.header, body: fullTitle + body, head: branch, base: "main" };
@@ -44702,7 +44745,7 @@ const COMMANDS: readonly CommandSpec[] = [
     name: "field-trials",
     syntax: "rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] [--consent <file>] [--case-files <file>] [--max-pages <n>] [--offline] [--revoke <release-id>] [--field-note <out> [--site-registry <file>]] [--json] [--refresh-step <name>=<exit-code|skipped>]... [--refresh-script-blob <sha1>] [--refresh-record-only]",
     summary: "Join the ledger union and GitHub history into observational field-trials aggregates.",
-    detail: "W1-T4574: one operator-invoked, resumable snapshot pass. For each source repository (default config.fleetRepos as core, site and console; only core's ledger is on this host unless --ledger names another) it reads the audited three-form ledger union and up to --max-pages GitHub pages of pull requests, main commits, deployments and per-PR reviews, commits and first-commit check runs; an interrupted sweep resumes from its stored page and only a completed sweep advances its watermark. PRs link to plan tasks by the trailer, branch and ledger credit paths separately; unmatched and ambiguous links are counted. It derives five observational families by source, week and task class: model adoption (requested, selected and served models apart; source merge, runtime boot and first exposure apart), the automation funnel with missing-join and human-touch counts per stage, PR repair and correctness signals with an unknown bucket, flow and recovery times with open work censored (Kaplan-Meier) and DORA commit-to-deploy lead time, and learning-loop yield. A merge is never a deployment and a green check is never correctness. The snapshot is private under --out-dir (default <root>/state/field-trials). With --consent it writes a dated, pseudonymised candidate release that withholds small cells and is refused if any private join key appears; --revoke withdraws one. W1-T10831: --field-note <out> reads the latest private snapshot without refreshing it and writes a candidate-unreviewed envelope for the site's model-field-note-v1 importer: rows per selected model and task class over whole UTC days from the end of the last exported window, under the site's own disclosure rule and row limit, from sources with a live --consent receipt that are active aggregate-public in the pinned site registry (--site-registry names a newer revision); it never stamps a review. A failed refresh keeps the last known good release. W1-T10830: --refresh-step carries routing-review, case-files and snapshot exit states; --refresh-script-blob identifies the running collector. Refresh metadata appends one field-trials.refresh outcome through recordFieldTrialsRefresh; --refresh-record-only records a failed snapshot without rebuilding it. Consecutive step failures raise deduplicated alerts and recovery resolves them. W1-T10832: after a good refresh pass with --consent and online, it exports the field-note candidate and runs the site's own --daily-stage importer in a fresh checkout of craigoley/remudero-site main; on staged, once a token scoped to the site proves the App installation holds Contents and Pull requests write (else site-grant-missing names the grant), it keeps ONE ready import PR open on branch field-trials/daily-field-note over REST (opened, or updated in place), on unchanged or refused it opens nothing, and every outcome is carried in the field-trials.refresh row. Core never stamps reviewedBy or reviewedAt and never arms, approves or merges, and the sweep holds every field-trials/ head for its owner: the owner's merge is the review. It gates no PR, changes no routing and spends nothing.",
+    detail: "W1-T4574: one operator-invoked, resumable snapshot pass. For each source repository (default config.fleetRepos as core, site and console; only core's ledger is on this host unless --ledger names another) it reads the audited three-form ledger union and GitHub pull requests, main commits, deployments and per-PR reviews, commits and first-commit check runs until the pass's work is done, waiting out the installation rate limit and checkpointing as it goes (W1-T14778; --max-pages is an optional operator override with no built-in maximum); an interrupted sweep resumes from its stored page and only a completed sweep advances its watermark. PRs link to plan tasks by the trailer, branch and ledger credit paths separately; unmatched and ambiguous links are counted. It derives five observational families by source, week and task class: model adoption (requested, selected and served models apart; source merge, runtime boot and first exposure apart), the automation funnel with missing-join and human-touch counts per stage, PR repair and correctness signals with an unknown bucket, flow and recovery times with open work censored (Kaplan-Meier) and DORA commit-to-deploy lead time, and learning-loop yield. A merge is never a deployment and a green check is never correctness. The snapshot is private under --out-dir (default <root>/state/field-trials). With --consent it writes a dated, pseudonymised candidate release that withholds small cells and is refused if any private join key appears; --revoke withdraws one. W1-T10831: --field-note <out> reads the latest private snapshot without refreshing it and writes a candidate-unreviewed envelope for the site's model-field-note-v1 importer: rows per selected model and task class over whole UTC days from the end of the last exported window, under the site's own disclosure rule and row limit, from sources with a live --consent receipt that are active aggregate-public in the pinned site registry (--site-registry names a newer revision); it never stamps a review. A failed refresh keeps the last known good release. W1-T10830: --refresh-step carries routing-review, case-files and snapshot exit states; --refresh-script-blob identifies the running collector. Refresh metadata appends one field-trials.refresh outcome through recordFieldTrialsRefresh; --refresh-record-only records a failed snapshot without rebuilding it. Consecutive step failures raise deduplicated alerts and recovery resolves them. W1-T10832: after a good refresh pass with --consent and online, it exports the field-note candidate and runs the site's own --daily-stage importer in a fresh checkout of craigoley/remudero-site main; on staged, once a token scoped to the site proves the App installation holds Contents and Pull requests write (else site-grant-missing names the grant), it keeps ONE ready import PR open on branch field-trials/daily-field-note over REST (opened, or updated in place), on unchanged or refused it opens nothing, and every outcome is carried in the field-trials.refresh row. Core never stamps reviewedBy or reviewedAt and never arms, approves or merges, and the sweep holds every field-trials/ head for its owner: the owner's merge is the review. It gates no PR, changes no routing and spends nothing.",
   },
   {
     name: "ci-failures",

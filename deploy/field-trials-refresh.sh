@@ -39,11 +39,8 @@ fi
 umask 077
 
 REGISTRY="${RMD_INSTANCE_REGISTRY:-/home/craigoleyagent/rmd-state2/daemon-install/.remudero/daemon-instances.yaml}"
-# Eight requests per repository cover recent lists, one historical page, a deployment status and
-# one three-read PR detail. The collector keeps the total bound and reports deferred evidence.
-MAX_PAGES="${RMD_FIELD_TRIALS_MAX_PAGES:-24}"
-case "$MAX_PAGES" in ''|*[!0-9]*) echo "field-trials-refresh: invalid page bound" >&2; exit 2;; esac
-if (( MAX_PAGES < 1 || MAX_PAGES > 24 )); then echo "field-trials-refresh: page bound must be 1..24" >&2; exit 2; fi
+# W1-T14778: no page bound. The snapshot pass reads until its work is done, paced by the installation's
+# rate limit, and checkpoints its GitHub store so a killed pass resumes where it stopped.
 test -r "$REGISTRY" || { echo "field-trials-refresh: instance registry unreadable" >&2; exit 2; }
 if [[ -n "${RMD_FIELD_TRIALS_CASE_FILES:-}" ]]; then
   test -r "$RMD_FIELD_TRIALS_CASE_FILES" || { echo "field-trials-refresh: case-file snapshot unreadable" >&2; exit 2; }
@@ -190,7 +187,7 @@ docker run --rm --network host --volumes-from remudero-daemon \
   -c 'umask 077; exec "$@"' field-trials-refresh /home/node/Remudero/daemon-install/bin/rmd field-trials \
   --source core=craigoley/remudero --source site=craigoley/remudero-site --source console=craigoley/remudero-console \
   --ledger core=/home/node/Remudero/state --ledger site=/field-trials/site --ledger console=/field-trials/console \
-  --out-dir /home/node/Remudero/state/field-trials --max-pages "$MAX_PAGES" \
+  --out-dir /home/node/Remudero/state/field-trials \
   ${CASE_ARG[@]+"${CASE_ARG[@]}"} ${CONSENT_ARG[@]+"${CONSENT_ARG[@]}"} "${REFRESH_ARG[@]}"
 }
 SNAPSHOT_EXIT=0

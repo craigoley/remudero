@@ -1370,7 +1370,9 @@ export function buildSweepLightHook(
     : { ...DEFAULT_SWEEP_POLICY, sweepWallClockBoundMs: io.sweepWallClockBoundMs };
   // W1-T12755: the last good open-PR list, kept for this hook's lifetime.
   const openPrList: ReturnType<typeof createLightPassOpenPrList<OpenPrView>> = createLightPassOpenPrList({ clock: io.clock ?? systemClock, log, runId,
-    deadlineMs: LIGHT_PASS_VIEWS_DEADLINE_MS, maxAgeMs: LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS });
+    deadlineMs: LIGHT_PASS_VIEWS_DEADLINE_MS, maxAgeMs: LIGHT_PASS_VIEWS_FALLBACK_MAX_AGE_MS,
+    // W1-T13237: a view whose rollup was unread (W1-T13195) never becomes part of the last-good list.
+    completeness: { key: (pr) => pr.prNumber, unread: (pr) => pr.rollupUnreadable === true } });
   return withMainHealthOnLightPass(async (scope?: LightPassScope) => {
     // W1-T4053: a freshness drain's pass. The fix rung reads closed and the requeue batch never forms,
     // so `post-review` is the only lane left.
