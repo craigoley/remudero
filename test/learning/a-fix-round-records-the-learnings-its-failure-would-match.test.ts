@@ -112,6 +112,7 @@ async function fixRung(opts: {
         waitForCiGreen: async () => ({ state: ci[waits++] ?? "green", sha: git("rev-parse", "HEAD") }),
         fetchCiFailures: async () => SECOND_RED,
         runReview: async () => ({ ...initialReview, state: "success", criteria: criteria.map((c) => ({ ...c, met: true })), headSha: git("rev-parse", "HEAD") }),
+        readHeadShaForProvenance: async () => git("rev-parse", "HEAD"),
         fetchPrBody: async () => "implemented", fetchPrDiffFiles: async () => task.files,
         issues: { create: () => "https://github.com/acme/remudero/issues/1", listOpen: () => [], comment: () => {} },
         log: (step, extra) => rows.push({ ...extra, step }), say: () => {}, account: (worker) => worker,

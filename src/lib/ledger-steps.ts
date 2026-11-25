@@ -804,6 +804,25 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["proofPhaseRecorder"],
     outcomes: ["converged", "not_converged"],
   },
+  {
+    step: "fix.learnings_shadow",
+    meaning:
+      "The learnings a fix round's failing checks and unmet review claims would match by symbol or error signature, " +
+      "written at the round's first prompt. Fields: `shadow_id`, `pr_number`, `attempt`, `round`, `arm` (offered or " +
+      "withheld, drawn per task), `matched` (each id with its match kinds; null with `selection_error` when the corpus " +
+      "could not be read), `dropped_ids`, `budget_chars` and `failing_checks`. Neither arm adds anything to the prompt.",
+    writer: ["runFixRung"],
+    outcomes: ["offered", "withheld"],
+  },
+  {
+    step: "fix.learnings_outcome",
+    meaning:
+      "What came of one fix.learnings_shadow round, joined by `shadow_id`: `conclusion` is CI's green or red on " +
+      "`pushed_head_sha`, or no_push when the round pushed nothing; a green row adds the task's `rounds_to_green`. " +
+      "A round whose CI the rung never saw conclude has no row.",
+    writer: ["runFixRung"],
+    outcomes: ["green", "red", "no_push"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never
