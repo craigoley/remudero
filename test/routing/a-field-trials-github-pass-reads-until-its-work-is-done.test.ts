@@ -90,15 +90,18 @@ test("W1-T14778: a rate limited field trials read waits and retries the same pag
 });
 
 test("W1-T14778: a pending head is read once per field trials pass", async () => {
-  const head = sha(99);
-  const open = pull(5, { state: "open", merged_at: null, closed_at: null, head: { ref: "run-T5-1", sha: head } });
-  const github = fake({ pulls: [open], checkRuns: { [head]: [{ id: 1, name: "ci-gate", status: "in_progress", conclusion: null,
-    head_sha: head, app: { slug: "github-actions" }, check_suite: { id: 2 } }] } });
+  // Twelve open PRs whose ci-gate never completes: one unbounded pass reads each head exactly once, then ends.
+  const heads = Array.from({ length: 12 }, (_, i) => sha(100 + i));
+  const pulls = heads.map((head, i) => pull(20 - i, { state: "open", merged_at: null, closed_at: null, head: { ref: `run-T${20 - i}-1`, sha: head } }));
+  const pending = (head: string) => [{ id: 1, name: "ci-gate", status: "in_progress", conclusion: null, head_sha: head,
+    app: { slug: "github-actions" }, check_suite: { id: 2 } }];
+  const github = fake({ pulls, checkRuns: Object.fromEntries(heads.map((head) => [head, pending(head)])) });
   const store: FieldTrialsGithubStore = { version: "field-trials-github-v1", repos: {} };
+  const reads = () => heads.map((head) => github.calls.filter((path) => path.includes(`/commits/${head}/check-runs`)).length);
   await ingestFieldTrialsGithub(github.fetch, ["o/r"], store, at(10));
-  assert.equal(github.calls.filter((path) => path.includes(`/commits/${head}/check-runs`)).length, 1);
+  assert.deepEqual(reads(), heads.map(() => 1), "every pending head once in one pass");
   await ingestFieldTrialsGithub(github.fetch, ["o/r"], store, at(11));
-  assert.equal(github.calls.filter((path) => path.includes(`/commits/${head}/check-runs`)).length, 2, "once more on the next pass, never a loop");
+  assert.deepEqual(reads(), heads.map(() => 2), "once more on the next pass, never a loop");
 });
 
 test("W1-T14778: the field trials refresh script passes no page bound", () => {
