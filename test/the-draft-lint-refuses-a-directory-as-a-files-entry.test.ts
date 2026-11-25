@@ -104,11 +104,28 @@ test("a draft that answers a human ask may not file another verify: human task",
     assert.deepEqual(lintDraftedFragment(human.replace("verify: human", "verify: auto"), asked, stamp, KNOWN,
       facts.moduleExists, facts.readGrepProofFile, isDirectory), [], "the same task at verify: auto is clean");
   }
-  assert.deepEqual(lint(human).filter((v) => v.check === "draft-human-ask-repeated"), [],
-    "a proposal that is not a human ask may still file verify: human work");
   const ask = { id: "verify-human:W1-T12032", summary: "W1-T12032 still needs you", evidenceAnchors: [] };
   const planText = inboxDraftExampleFragmentYaml().replace("NEW-1", "W1-T1");
-  assert.match(inboxDraftPrompt(ask, planText, "run-1"), /every task you file is\n`verify: auto`/);
-  assert.doesNotMatch(inboxDraftPrompt({ ...ask, id: PROPOSAL }, planText, "run-1"), /every task you file is/);
+  assert.match(inboxDraftPrompt(ask, planText, "run-1"), /every task you file is `verify: auto`/);
 });
 
+test("an approved follow-up or architect proposal files verify: auto unless it declares a workflow path", () => {
+  const human = fragment(["src/lib/plan.ts", "test/plan/example.test.ts"]).replace("verify: auto", "verify: human");
+  for (const proposal of ["followup:directory-draft", "architect:directory-draft", "proof-debt:W1-T12032:0"]) {
+    const stamp = `- ${proposal} (refuse directory drafts) — RATIFIED 2026-11-25 -> NEW-1.`;
+    const violation = lintDraftedFragment(human, proposal, stamp, KNOWN, facts.moduleExists, facts.readGrepProofFile, isDirectory)
+      .find((v) => v.check === "draft-human-ask-repeated");
+    assert.equal(violation?.severity, "block", proposal);
+    assert.ok(violation.message.includes(`approving ${proposal} already gives the human judgment`), violation.message);
+    assert.match(violation.message, /unless it declares a \.github\/workflows\/ path/);
+  }
+  assert.deepEqual(lint(human.replace("verify: human", "verify: auto")).filter((v) => v.check === "draft-human-ask-repeated"), [],
+    "the same task at verify: auto is clean");
+  const workflow = fragment([".github/workflows/ci.yml", "test/plan/example.test.ts"]).replace("verify: auto", "verify: human");
+  assert.deepEqual(lint(workflow).filter((v) => v.check === "draft-human-ask-repeated"), [],
+    "a task that declares a workflow path may stay verify: human");
+  const planText = inboxDraftExampleFragmentYaml().replace("NEW-1", "W1-T1");
+  const prompt = inboxDraftPrompt({ id: PROPOSAL, summary: "refuse directory drafts", evidenceAnchors: [] }, planText, "run-1");
+  assert.match(prompt, /every task you file is `verify: auto`/);
+  assert.match(prompt, /names a `\.github\/workflows\/` path/);
+});

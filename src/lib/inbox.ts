@@ -1874,8 +1874,10 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
       "First check whether releasing this shard as it stands satisfies the proposal and every reframe round.",
       `Whenever the reframe rounds do not ask for different work, print RELEASE: ${parked.id} instead of a FRAGMENT.`,
       "A RELEASE files no new task. Do not rewrite this shard as invented new tasks.", ""] : []),
-    ...(parkedProposalTaskId(proposal.id) ? ["Approving this ask IS the operator's human judgment, so every task you file is",
-      "`verify: auto` with proofs an agent can run. A `verify: human` task re-asks the question and never dispatches.", ""] : []),
+    "Approving this proposal IS the operator's human judgment, so every task you file is `verify: auto` with proofs an",
+    "agent can run. A `verify: human` task re-asks the question and never dispatches. The one exception is a task whose",
+    "`files:` names a `.github/workflows/` path, which the fleet cannot build.",
+    "",
     "=== GROUND ===",
     "Grep/Read MASTER-PLAN.md, LEARNINGS.md, and DECISIONS.md for what is already decided; an",
     "INDEX of the current plan/tasks.yaml is pasted below so you cite REAL existing task ids in",
@@ -2628,6 +2630,11 @@ export function queueDraftedBlockedTasks(fragmentYaml: string): string {
   return queued;
 }
 
+/** W1-T14659: a task that edits `.github/workflows/`, which the fleet App cannot push, so it needs an operator build. */
+function declaresWorkflowPath(task: { files?: readonly string[] }): boolean {
+  return (task.files ?? []).some((f) => f.trim().replace(/^\.\//, "").startsWith(".github/workflows/"));
+}
+
 /** Lint a drafted fragment exactly as `rmd approve` will: both pass {@link draftFilingLintOptions} (W1-T8714, W1-T9039), a
  *  new task's filing lint. A fragment that does not parse is one block violation, so it drives a redraft. */
 export function lintDraftedFragment(
@@ -2662,13 +2669,16 @@ export function lintDraftedFragment(
       if (directory(path)) violations.push({ check: "draft-directory-files", severity: "block",
         message: `${task.id} files entry ${JSON.stringify(path)} is a directory${directoryGuidance}` });
     }
-    // An approval of a verify-human, verify-human-automate or machine-judge ask IS the operator's judgment. A task it
-    // files as `verify: human` re-asks the same question, and drain's isDispatchEligible holds it as verify-not-auto
-    // until a second release, so the approved work never runs (W1-T13650, 2026-11-18).
-    if (task.verify === "human" && parkedProposalTaskId(proposalId) !== undefined) violations.push({
+    // An approval of ANY proposal IS the operator's judgment. A task it files as `verify: human` re-asks the same question,
+    // and drain's isDispatchEligible holds it as verify-not-auto until a second release, so the approved work never runs
+    // (W1-T13650, 2026-11-18; widened from the parked asks to every proposal by W1-T14659). A task that declares a workflow
+    // path is the exception: the fleet App cannot push it, so an operator builds it and `verify: human` is honest.
+    if (task.verify === "human" && !declaresWorkflowPath(task)) violations.push({
       check: "draft-human-ask-repeated", severity: "block",
       message: `${task.id} is verify: human, but approving ${proposalId} already gives the human judgment; file it verify: auto ` +
-        "with proofs an agent can run, or RELEASE the parked task when no new work is needed" });
+        (parkedProposalTaskId(proposalId) !== undefined
+          ? "with proofs an agent can run, or RELEASE the parked task when no new work is needed"
+          : "with proofs an agent can run, unless it declares a .github/workflows/ path in files:") });
     for (const criterion of task.acceptance ?? []) {
       const path = /^grep:\s*[\s\S]*\s+in\s+(\S+)\s*$/i.exec(criterion.proof.trim())?.[1];
       if (path && directory(path)) violations.push({ check: "draft-directory-grep", severity: "block",
