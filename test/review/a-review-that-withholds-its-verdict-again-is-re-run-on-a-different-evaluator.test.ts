@@ -69,10 +69,10 @@ function sweepDeps(rows: Row[]): SweepDeps & { escalated: Array<{ reason: string
   const escalated: Array<{ reason: string; question: ClarificationQuestion }> = [];
   const reviewed: ReviewDispatchPr[] = [];
   return { escalated, reviewed, ledgerPath, arm: () => {}, close: () => {}, dispatchFix: () => {},
-    escalate: (_p, reason, question) => { escalated.push({ reason, question }); },
-    postReview: (p) => { reviewed.push(p as ReviewDispatchPr); }, runId: "SWEEP-1", now: () => NOW } as never;
+    escalate: (_p: unknown, reason: string, question: ClarificationQuestion) => { escalated.push({ reason, question }); },
+    postReview: (p: unknown) => { reviewed.push(p as ReviewDispatchPr); }, runId: "SWEEP-1", now: () => NOW } as never;
 }
-const ledgerRows = (path: string): Row[] => readFileSync(path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Row);
+const rowsAt = (path: string): Row[] => readFileSync(path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Row);
 
 test("W1-T13945 criterion 1: two withheld attempts on codex re-admit with codex excluded and name both attempts", async () => {
   const rows = [...attempt(1), ...attempt(2, { onRow: true, eligible: ["claude", "codex"] })];
@@ -99,7 +99,7 @@ test("W1-T13945 criterion 1: two withheld attempts on codex re-admit with codex 
   await runSweep([viewFor()], d, DEFAULT_SWEEP_POLICY);
   assert.equal(d.reviewed.length, 1);
   assert.deepEqual(d.reviewed[0]!.excludeProviders, ["codex"]);
-  const disposed = ledgerRows(d.ledgerPath).findLast((r) => r.step === "sweep.disposed");
+  const disposed = rowsAt(d.ledgerPath).findLast((r) => r.step === "sweep.disposed");
   assert.equal(disposed?.disposition, "post-review");
   assert.match(String(disposed?.reason), /review-PR19673-1.*review-PR19673-2/);
 });
@@ -156,20 +156,20 @@ test("W1-T13945 criterion 3: every eligible evaluator withheld holds the input a
   assert.deepEqual(d.reviewed, [], "no review is admitted");
   assert.equal(d.escalated.length, 1);
   assert.match(d.escalated[0]!.reason, /review-PR19673-1/);
-  const holds = ledgerRows(d.ledgerPath).filter((r) => r.step === REVIEW_WITHHELD_EXHAUSTED_STEP);
+  const holds = rowsAt(d.ledgerPath).filter((r) => r.step === REVIEW_WITHHELD_EXHAUSTED_STEP);
   assert.equal(holds.length, 1);
   assert.deepEqual((holds[0]!.attempts as Row[]).map((a) => [a.run_id, a.provider, a.cause]),
     [["review-PR19673-1", "codex", "reviewer output incomplete"], ["review-PR19673-2", "codex", "reviewer output incomplete"]]);
 
   // A later pass at the same input neither re-admits nor escalates again.
-  const again = sweepDeps(ledgerRows(d.ledgerPath));
+  const again = sweepDeps(rowsAt(d.ledgerPath));
   await runSweep([viewFor()], again, DEFAULT_SWEEP_POLICY);
   assert.deepEqual(again.reviewed, []);
   assert.equal(again.escalated.length, 0);
-  assert.equal(ledgerRows(again.ledgerPath).filter((r) => r.step === REVIEW_WITHHELD_EXHAUSTED_STEP).length, 1);
+  assert.equal(rowsAt(again.ledgerPath).filter((r) => r.step === REVIEW_WITHHELD_EXHAUSTED_STEP).length, 1);
   // A new head starts the ladder again.
   const newHead = "e".repeat(40);
-  const fresh = sweepDeps(ledgerRows(d.ledgerPath));
+  const fresh = sweepDeps(rowsAt(d.ledgerPath));
   await runSweep([viewFor({ headSha: newHead })], fresh, DEFAULT_SWEEP_POLICY);
   assert.equal(fresh.reviewed.length, 1);
   assert.equal(fresh.reviewed[0]!.excludeProviders, undefined);
