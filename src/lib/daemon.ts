@@ -8000,7 +8000,8 @@ export async function runDaemon(
   // 2026-11-24: one iteration ran 65.6 minutes with no row naming the stage it awaited, and a restart marker sat unread.
   const cycleStages: Array<{ stage: string; ms: number }> = [];
   // W1-T14878: the settle stage's own parts, named on every cycle's row and not only on a decided restart's exit.
-  let cycleSettleParts: Record<string, number> | undefined;
+  // Its cursor outlives the iteration, so the time from the last part to the next tick's row is named too.
+  let cycleSettle: { parts: Record<string, number>; markMs: number } | undefined;
   let cycleStageName: string | undefined;
   let cycleStageAtMs = 0;
   let cycleStartedAtMs: number | undefined;
@@ -8032,10 +8033,13 @@ export async function runDaemon(
       cycleStage(undefined);
       const durations: Record<string, number> = {};
       for (const { stage, ms } of cycleStages) durations[`${stage}_ms`] = (durations[`${stage}_ms`] ?? 0) + ms;
+      if (cycleSettle && cycleStages.at(-1)?.stage === "settle") {
+        cycleSettle.parts.next_tick_head = (cycleSettle.parts.next_tick_head ?? 0) + Math.max(0, cycleStageAtMs - cycleSettle.markMs);
+      }
       log("daemon.cycle_phases", { ...durations, total_ms: Math.max(0, cycleStageAtMs - cycleStartedAtMs),
-        stages: cycleStages.map(({ stage }) => stage), ...(cycleSettleParts ? { settle_parts: { ...cycleSettleParts } } : {}) });
+        stages: cycleStages.map(({ stage }) => stage), ...(cycleSettle ? { settle_parts: { ...cycleSettle.parts } } : {}) });
       cycleStages.length = 0;
-      cycleSettleParts = undefined;
+      cycleSettle = undefined;
     }
     cycleStartedAtMs = daemonClock.now();
     cycleStage("tick_head");
@@ -10257,14 +10261,14 @@ export async function runDaemon(
     }, refillLane, lanes, admitAtStart, onStarted, poolControl);
     let poolOutcome: LanePoolOutcome<Task, RunResult>;
     // W1-T14684: from the pool's settle to a decided restart's exit, each step's time is named in the exit's phases_ms.
-    let settleMarkMs = daemonClock.now();
-    const settleParts: Record<string, number> = {};
-    cycleSettleParts = settleParts;
+    const settleCursor = { parts: {} as Record<string, number>, markMs: daemonClock.now() };
+    const settleParts = settleCursor.parts;
+    cycleSettle = settleCursor;
     const settleProcess: Record<string, number> = {};
     const markSettle = (part: string): void => {
       const atMs = daemonClock.now();
-      settleParts[part] = (settleParts[part] ?? 0) + Math.max(0, atMs - settleMarkMs);
-      settleMarkMs = atMs;
+      settleParts[part] = (settleParts[part] ?? 0) + Math.max(0, atMs - settleCursor.markMs);
+      settleCursor.markMs = atMs;
     };
     try {
       let phase = "dispatch.concurrent_set";
@@ -10288,7 +10292,7 @@ export async function runDaemon(
         // Even a phase-level logging failure cannot abandon promises the pool already owns.
         poolOutcome = await admittedWork;
         cycleStage("settle");
-        settleMarkMs = daemonClock.now();
+        settleCursor.markMs = daemonClock.now();
         // W1-T11129: the pool's last lane, and any a fault or detach retired, never reaches refillLane: close its interval.
         // Never throws: readLaneCpu reads an unreadable or throwing counter as unread, and the rest is pure.
         laneCpuTransition(() => { for (const task of admitted) laneCpuBuilds.delete(task.id); });
@@ -10320,10 +10324,13 @@ export async function runDaemon(
       // Persistent hold is an in-process, paced NEW-build deferral, never a failure/STOP.
       // A new tick owns a new clock. Retire this one before continuing, preserving
       // any event wake instead of leaving its runner live after the hold releases.
-      if (await stopInterphaseReviewClock()) continue;
+      const heldClockStopped = await stopInterphaseReviewClock();
+      markSettle("interphase_stop");
+      if (heldClockStopped) continue;
       ticks++;
       sampleIdleLane(0, true, dispatchSet.length);
       await sleepUntilSweepWake(pollIntervalMs);
+      markSettle("new_build_hold");
       continue;
     }
     // Lanes are back to empty here; whatever holds them empty from now on is named by the next tick's sample,
@@ -10497,10 +10504,10 @@ export async function runDaemon(
       const apiWindowDisposition = reasonAboutApiWindow(apiWindowHoldState, task.id, result.verdict, pollIntervalMs, maxApiWindowHoldMs);
       apiWindowHoldState = apiWindowDisposition.state;
       apiWindowHoldMs = apiWindowDisposition.holdMs;
-      const processStartedAtMs = settleMarkMs;
+      const processStartedAtMs = settleCursor.markMs;
       const outcome = await processDispatchResult(snapshot.plan, task, result, snapshot.isMerged, reporting.report);
       markSettle("process");
-      settleProcess[task.id] = (settleProcess[task.id] ?? 0) + Math.max(0, settleMarkMs - processStartedAtMs);
+      settleProcess[task.id] = (settleProcess[task.id] ?? 0) + Math.max(0, settleCursor.markMs - processStartedAtMs);
       batchChildren.get(task)?.acknowledge?.({ status: "fulfilled", value: result });
       if (outcome.kind === "genuine_blocker") {
         if (deps.isOpenPr === undefined || deps.isCreditIndeterminate === undefined) {
@@ -10556,8 +10563,11 @@ export async function runDaemon(
         reason: "consecutive blocked_transient refusals across different tasks — the API usage window looks closed; holding dispatch instead of re-discovering it per task",
         resumes_at: new Date(resumesAtMs).toISOString(),
       });
-      if (await stopInterphaseReviewClock()) continue;
+      const apiWindowClockStopped = await stopInterphaseReviewClock();
+      markSettle("interphase_stop");
+      if (apiWindowClockStopped) continue;
       await sleepUntilSweepWake(apiWindowHoldMs);
+      markSettle("api_window_hold");
     }
 
     if (spawnInfraSeenThisTick && toProcess.length === 0) {
@@ -10568,8 +10578,11 @@ export async function runDaemon(
       consecutiveSpawnInfraFailures++;
       const backoffMs = Math.min(pollIntervalMs * 2 ** (consecutiveSpawnInfraFailures - 1), maxSpawnInfraBackoffMs);
       log("daemon.spawn_infra_backoff", { tick: ticks, backoff_ms: backoffMs, consecutive: consecutiveSpawnInfraFailures });
-      if (await stopInterphaseReviewClock()) continue;
+      const spawnInfraClockStopped = await stopInterphaseReviewClock();
+      markSettle("interphase_stop");
+      if (spawnInfraClockStopped) continue;
       await sleepUntilSweepWake(backoffMs);
+      markSettle("spawn_infra_backoff");
     }
 
     if (dispatchTransportSeenThisTick && !spawnInfraSeenThisTick && toProcess.length === 0) {
@@ -10585,8 +10598,11 @@ export async function runDaemon(
         consecutive: consecutiveDispatchTransportFailures,
         reason: "transient gh transport refusal after worker dispatch — holding in process",
       });
-      if (await stopInterphaseReviewClock()) continue;
+      const transportClockStopped = await stopInterphaseReviewClock();
+      markSettle("interphase_stop");
+      if (transportClockStopped) continue;
       await sleepUntilSweepWake(backoffMs);
+      markSettle("dispatch_transport_backoff");
     }
 
     await stopInterphaseReviewClock();
