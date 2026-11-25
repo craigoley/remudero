@@ -347,6 +347,17 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
   const sourcesFile = readOnMtimeChange(readSources);
   const registryFile = readOnMtimeChange(readRegistry);
   const computed = new Map<string, InstanceSummary>();
+  /**
+   * W1-T14888: the instant the prepare cycle in progress began, and the last completed one's. A cycle refreshes each
+   * instance at most once, so it ends: before this an instance refreshed early in a stepped cycle fell due again 30 s
+   * later (its generation moves every tick) and was refreshed again before the last one was reached. MEASURED on the
+   * Azure host 2026-11-24 15Z to 11-25 23Z: under load the cycle outran that 30 s, prepare never returned ready, and
+   * the heavy lane spent 0.55 cores rebuilding an unread view, with 0 to 6 completed builds an hour.
+   */
+  let cycleFrom: number | undefined;
+  let preparedFrom: number | undefined;
+  const refreshedSince = (instanceId: string, from: number | undefined): boolean =>
+    from !== undefined && (computed.get(instanceId)?.atMs ?? Number.NEGATIVE_INFINITY) >= from;
   /** W1-T13457: the last committed body's summaries, read once from the first context that can read the store. */
   let carried: Map<string, RepoDashboardResult> | undefined;
   const carriedFrom = (committed: CommittedReader | undefined): Map<string, RepoDashboardResult> | undefined =>
@@ -430,9 +441,10 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       const at = published(instances);
       if (at?.sources === undefined) return true;
       const sourcesMtimeMs = statSync(at.path).mtimeMs;
+      const from = (cycleFrom ??= now);
       for (const { instanceId, options } of at.sources.instances) {
         const slot = instances.find((candidate) => candidate.state.instance === instanceId);
-        if (!due(instanceId, slot, sourcesMtimeMs, now)) continue;
+        if (refreshedSince(instanceId, from) || !due(instanceId, slot, sourcesMtimeMs, now)) continue;
         const planPath = options.planPath ?? join(options.root, "plan", "tasks.yaml");
         if (slot?.db !== undefined && slot.state.tickedAt !== undefined && !plans.fresh(planPath)) {
           if (!more()) return false;
@@ -445,6 +457,8 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
         if (!more()) return false;
         refresh(instanceId, slot, options, sourcesMtimeMs, now, ctx.committed);
       }
+      preparedFrom = from;
+      cycleFrom = undefined;
       return true;
     },
     /**
@@ -483,7 +497,7 @@ export function createRepositoriesReadModelView<S extends { instance: string; ti
       for (const { instanceId, options } of at.sources.instances) {
         const slot = instances.find((candidate) => candidate.state.instance === instanceId);
         if (slot) sources.push(ledgerSource(slot.state, now));
-        if (due(instanceId, slot, sourcesMtimeMs, now)) refresh(instanceId, slot, options, sourcesMtimeMs, now, committed);
+        if (!refreshedSince(instanceId, preparedFrom) && due(instanceId, slot, sourcesMtimeMs, now)) refresh(instanceId, slot, options, sourcesMtimeMs, now, committed);
         const current = computed.get(instanceId)!;
         if (current.summary) pair.at[instanceId] = Date.parse(current.summary.generated_at);
         pair.facts[instanceId] = current.shadow ?? {};
