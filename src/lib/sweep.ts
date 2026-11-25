@@ -6837,6 +6837,36 @@ export interface ReviewSetupRefusal {
   runningReviewerCodeSha: string | null;
 }
 
+/** W1-T13945 — one withheld review attempt (a `review.semantic_incomplete` row) at a head and review input. */
+export interface WithheldAttempt {
+  runId: string;
+  /** Undefined when neither the row nor the run's `review.reviewer` row names a provider. */
+  provider: WorkerProviderId | undefined;
+  routedModel: string | undefined;
+  cause: string;
+}
+
+/** W1-T13945 — the withheld attempts at one head and review input since its last terminal verdict, with the routing
+ *  facts the latest attempt recorded: `eligible` is its routing record's eligible providers (undefined: unknown), and
+ *  `exclusionUnhonoured` is true when its reviewer row says the exclusion found no eligible alternative. */
+export interface WithheldEvaluators {
+  attempts: WithheldAttempt[];
+  eligible: WorkerProviderId[] | undefined;
+  exclusionUnhonoured: boolean;
+}
+
+/** W1-T13945 — the rung a repeated withheld verdict at one input has reached. Rung 2 re-runs on another provider
+ *  (`excludeProviders`); rung 4 holds the input because no eligible evaluator is left to try. `reason` names each attempt. */
+export interface ReviewWithheldLadder {
+  rung: 2 | 4;
+  attempts: WithheldAttempt[];
+  excludeProviders: WorkerProviderId[];
+  reason: string;
+}
+
+/** W1-T13945 — the one hold row (and escalation) a rung-4 input takes, per PR, head and review input digest. */
+export const REVIEW_WITHHELD_EXHAUSTED_STEP = "review.withheld_exhausted";
+
 /** W1-T13193 — the one escalation a held review-setup refusal files, per PR, head and body digest. */
 export const REVIEW_SETUP_REFUSAL_ESCALATED_STEP = "sweep.review_setup_refused.escalated";
 
@@ -7274,6 +7304,21 @@ function reviewSetupRefusalHolds(pr: OpenPrView, policy: SweepPolicy, ageDays: n
       held.reviewerCodeSha !== held.runningReviewerCodeSha) return false;
   const self = DISPOSITION_RULES.findIndex((rule) => rule.when === reviewSetupRefusalHolds);
   return DISPOSITION_RULES.slice(self + 1).find((rule) => rule.when(pr, policy, ageDays, now, facts))?.disposition === "post-review";
+}
+
+/** W1-T13945 rung 4 — true when the next matching rule would admit a review for an input whose every eligible evaluator
+ *  has already withheld its verdict. The review is not admitted: the hold is escalated once (see
+ *  {@link REVIEW_WITHHELD_EXHAUSTED_STEP}) and holds until the head or the review input digest changes. */
+function reviewWithheldExhaustedHolds(pr: OpenPrView, policy: SweepPolicy, ageDays: number, now: number, facts?: DispositionFacts): boolean {
+  if (pr.reviewWithheld?.rung !== 4) return false;
+  const self = DISPOSITION_RULES.findIndex((rule) => rule.when === reviewWithheldExhaustedHolds);
+  return DISPOSITION_RULES.slice(self + 1).find((rule) => rule.when(pr, policy, ageDays, now, facts))?.disposition === "post-review";
+}
+
+/** W1-T13945 — true when this ledger already holds the rung-4 hold's one row for the PR's head and review input digest. */
+function reviewWithheldExhaustedRecorded(ledgerLines: ReadonlyArray<Record<string, unknown>>, pr: OpenPrView): boolean {
+  return ledgerLines.some((row) => row.step === REVIEW_WITHHELD_EXHAUSTED_STEP && row.pr_number === pr.prNumber &&
+    row.head_sha === pr.headSha && row.review_input_digest === pr.reviewInputDigest);
 }
 
 /** W1-T13193 — the cause a held review-setup refusal's parked_pr.remedy row names, `review-setup-refused:<reason>`. */
@@ -9242,6 +9287,8 @@ export interface OpenPrView {
   /** W1-T13193 — the review setup refusals at this exact input by the running reviewer code, set only when one
    *  reason reached {@link REVIEW_INPUT_ADMISSION_BACKSTOP}. Undefined: no hold, the review is admitted as before. */
   reviewSetupRefused?: ReviewSetupRefusal;
+  /** W1-T13945 — the withheld-verdict ladder at this exact input, set by the sweep only when two or more attempts withheld. */
+  reviewWithheld?: ReviewWithheldLadder;
   /** Most recent completed `review.posted` timestamp for the same exact input counted above.
    *  Refusals never move this clock, having judged no content. Undefined means no completed
    *  attempt is known, and {@link reviewInputBackoffElapsed} then fails toward escalation. */
@@ -14153,6 +14200,16 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
     },
   },
   {
+    // W1-T13945 — A REVIEW WHOSE EVERY ELIGIBLE EVALUATOR WITHHELD ITS VERDICT IS NOT RE-ADMITTED. Ordered beside the
+    // setup-refusal hold, before every post-review row: it holds the input, writes one hold row and escalates once.
+    // The bound is the eligible set the latest routing recorded, never an attempt count.
+    disposition: "blocked-ambiguous",
+    blocker: "other",
+    when: reviewWithheldExhaustedHolds,
+    reason: (pr) => `review withheld-verdict hold: ${pr.reviewWithheld?.reason ?? "every eligible evaluator withheld"} — ` +
+      "not re-admitted until the head or the review input changes",
+  },
+  {
     // W1-T5863 — A REVIEW DEMAND CANNOT RE-ADMIT THE SAME INPUT WITHOUT BOUND. The post-review rows
     // below demand a review while the task-keyed attempt count reads zero; their only brake is a
     // post REFUSAL. A completed post that count cannot see (a key or identity mismatch) never trips
@@ -14656,6 +14713,9 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           }
           if (pr.reviewPendingOwnerGone === "promise-harvest-incomplete") {
             return `checks green, its promise harvest did not complete — re-running the review lane on #${pr.prNumber}`;
+          }
+          if (pr.reviewWithheld?.rung === 2) {
+            return `checks green, remudero-review owner proven dead and ${pr.reviewWithheld.reason} — re-running the review lane on #${pr.prNumber}`;
           }
           return `checks green, remudero-review owner proven dead — re-running the review lane on #${pr.prNumber}`;
         }
@@ -18598,6 +18658,79 @@ export function reviewerUnavailableProvidersForReadmission(
   return [reviewer.provider];
 }
 
+function withheldAttemptText(attempt: WithheldAttempt, ordinal: number): string {
+  return `attempt ${ordinal} run ${attempt.runId} on ${attempt.provider ?? "an unnamed provider"}` +
+    `${attempt.routedModel ? `/${attempt.routedModel}` : ""} (${attempt.cause})`;
+}
+
+/** W1-T13945 — the withheld attempts at this PR, head and review input digest since the input's last terminal
+ *  (success or failure) `review.posted` row. A `review.pending_posted` row does not reset it: every withheld run
+ *  writes one first. The evaluator is read from the `review.semantic_incomplete` row, else from the same run's
+ *  `review.reviewer` row (rows written before the evaluator rode on the first). Start failures are W1-T13380's. */
+export function withheldEvaluatorsForInput(
+  pr: Pick<OpenPrView, "prUrl" | "headSha" | "reviewInputDigest">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): WithheldEvaluators {
+  let rows: Array<Record<string, unknown>> = [];
+  for (const row of lines) {
+    if (row.pr_url !== pr.prUrl || row.head_sha !== pr.headSha) continue;
+    if (row.step === "review.posted") {
+      const digestOk = pr.reviewInputDigest === undefined || row.review_input_digest === undefined ||
+        row.review_input_digest === pr.reviewInputDigest;
+      const verdict = row.decision_verdict as ReviewVerdict | undefined;
+      if (digestOk && (row.state === "success" || row.state === "failure") && verdict?.cannotEvaluate !== true) rows = [];
+    } else if (row.step === "review.semantic_incomplete" && row.reviewer_outcome !== REVIEWER_START_FAILED_OUTCOME &&
+        typeof row.run_id === "string" && (pr.reviewInputDigest === undefined || row.review_input_digest === pr.reviewInputDigest)) {
+      rows.push(row);
+    }
+  }
+  const reviewerRow = (runId: unknown): Record<string, unknown> | undefined =>
+    lines.findLast((row) => row.step === "review.reviewer" && row.run_id === runId);
+  const attempts: WithheldAttempt[] = rows.map((row) => {
+    const reviewer = isWorkerProviderId(row.provider) ? undefined : reviewerRow(row.run_id);
+    const provider = isWorkerProviderId(row.provider) ? row.provider
+      : isWorkerProviderId(reviewer?.provider) ? reviewer.provider : undefined;
+    const model = typeof row.routed_model === "string" ? row.routed_model
+      : typeof reviewer?.routed_model === "string" ? reviewer.routed_model : undefined;
+    return { runId: String(row.run_id), provider, routedModel: model, cause: String(row.reason ?? "withheld verdict") };
+  });
+  const latest = attempts.at(-1);
+  const latestReviewer = latest === undefined ? undefined : reviewerRow(latest.runId);
+  const considered = ((latestReviewer?.execution_evidence as { assignment?: { value?: { routing?: { decision?: { considered?: unknown } } } } } |
+    undefined)?.assignment?.value?.routing?.decision?.considered);
+  const eligible = Array.isArray(considered)
+    ? [...new Set(considered.filter((entry): entry is { provider: WorkerProviderId; eligible: true } =>
+        entry !== null && typeof entry === "object" && (entry as { eligible?: unknown }).eligible === true &&
+        isWorkerProviderId((entry as { provider?: unknown }).provider)).map((entry) => entry.provider))]
+    : [];
+  return { attempts, eligible: eligible.length > 0 ? eligible : undefined,
+    exclusionUnhonoured: latestReviewer?.exclusion_unhonoured !== undefined && latestReviewer.exclusion_unhonoured !== null };
+}
+
+/** W1-T13945 — where a repeated withheld verdict at this input stands. One attempt is rung 1 (undefined here: re-admitted
+ *  exactly as before). Two or more withheld attempts re-run on another provider (rung 2) until no eligible evaluator is
+ *  left: every provider the latest routing found eligible has withheld, or the latest attempt's exclusion found no
+ *  alternative (rung 4, a hold). An unknown eligible set never holds on its own. No fixed attempt count decides. */
+export function reviewWithheldLadder(
+  pr: Pick<OpenPrView, "prUrl" | "headSha" | "reviewInputDigest">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): ReviewWithheldLadder | undefined {
+  const withheld = withheldEvaluatorsForInput(pr, lines);
+  if (withheld.attempts.length < 2) return undefined;
+  const tried = [...new Set(withheld.attempts.map((attempt) => attempt.provider).filter((p): p is WorkerProviderId => p !== undefined))];
+  const exhausted = withheld.exclusionUnhonoured ||
+    (withheld.eligible !== undefined && withheld.eligible.every((provider) => tried.includes(provider)));
+  if (!exhausted && tried.length === 0) return undefined;
+  const named = withheld.attempts.map((attempt, i) => withheldAttemptText(attempt, i + 1)).join("; ");
+  return {
+    rung: exhausted ? 4 : 2, attempts: withheld.attempts, excludeProviders: tried,
+    reason: exhausted
+      ? `the review withheld its verdict ${withheld.attempts.length} times at head ${pr.headSha.slice(0, 7)} (${named}) and no eligible evaluator is left to try`
+      : `the review withheld its verdict ${withheld.attempts.length} times at head ${pr.headSha.slice(0, 7)} (${named}) — ` +
+        `re-running it on a different evaluator (excluding ${tried.join(", ")})`,
+  };
+}
+
 /** W1-T11132 criterion 2. True when the head's latest review is pending for NO cause but `inconclusive_load` proofs and
  *  this pass's own host load sample is strictly below the load the proof failed under (read from the recorded load,
  *  no fixed threshold). An unreadable sample or recording compares as "not lower": no retry on a guess. */
@@ -18714,7 +18847,7 @@ function promiseHarvestRetryView(
   // W1-T14035: a hold cause keeps its precedence over the producer's `owner-pid-dead`, as before; the producer's proof rides
   // along as a sweep-local flag that only the alongside-CI row and reviewDemandLooping read.
   const proven = producerProvedOwnerDead(pr) ? { reviewPendingOwnerPidProven: true as const } : {};
-  return incompletePromiseHarvestFromLedger(pr, lines)
+  const result: SweepPrView = incompletePromiseHarvestFromLedger(pr, lines)
     ? { ...pr, ...proven, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "promise-harvest-incomplete" }
     : inconclusiveLoadLowered(pr, lines, sample)
     ? { ...pr, ...proven, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "inconclusive-load" }
@@ -18724,6 +18857,9 @@ function promiseHarvestRetryView(
     ? { ...pr, ...proven, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "start-failed", reviewPendingOwnerGoneReason: started.standing }
     : pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerGone === undefined
       ? { ...pr, reviewPendingOwnerGone: "owner-pid-dead" } : pr;
+  // W1-T13945: a pending status with no live owner and a repeated withheld verdict at this input climbs the ladder.
+  const ladder = result.reviewState === "pending" ? reviewWithheldLadder(result, lines) : undefined;
+  return ladder === undefined ? result : { ...result, reviewWithheld: ladder };
 }
 
 function completedRefusalRetryView(pr: SweepPrView, prior: PriorActions): SweepPrView {
@@ -26214,6 +26350,10 @@ export async function runSweep(
     const setupRefusalHeld = pr.reviewSetupRefused !== undefined && derived.disposition === "blocked-ambiguous" &&
       derived.blocker === "other" &&
       selectDispositionRule(dispositionView, policy, actNowMs, dispositionFacts).rule?.when === reviewSetupRefusalHolds;
+    // W1-T13945: the withheld-verdict hold, named so the dedup and action arms escalate it once per head and input.
+    const withheldExhaustedHeld = pr.reviewWithheld?.rung === 4 && derived.disposition === "blocked-ambiguous" &&
+      derived.blocker === "other" &&
+      selectDispositionRule(dispositionView, policy, actNowMs, dispositionFacts).rule?.when === reviewWithheldExhaustedHolds;
     // W1-T9232: a build head cut before its own shard merged is refreshed from main and re-reviewed, never escalated
     // as "contradictory". A refresh that does not take, or a second miss after one, keeps the escalation, named.
     if (ownTaskRecordMissingRow(ledgerLines, pr) !== undefined) {
@@ -27451,6 +27591,13 @@ export async function runSweep(
           dedupStandDownReason = alreadyDone
             ? `${reason} — ${deps.parkedPr ? "the parked-pr remedy is already recorded" : "escalated once"} for this head and input ` +
               `(${pr.headSha.slice(0, 7)}); no review admitted and no needs-human issue is opened again` : undefined;
+        }
+        // W1-T13945: a held withheld-verdict input escalates once per head and review input digest.
+        if (withheldExhaustedHeld && disposition === "blocked-ambiguous" && standDownHold === undefined && !strikeLadderDue && !sloLadderDue) {
+          alreadyDone = reviewWithheldExhaustedRecorded(ledgerLines, pr);
+          dedupStandDownReason = alreadyDone
+            ? `${reason} — escalated once for this head and input (${pr.headSha.slice(0, 7)}); ` +
+              "no review admitted and no needs-human issue is opened again" : undefined;
         }
         // An unanswered escalation past its SLO reaches the ladder in the action arm; the dedup still forbids a second issue.
         if (alreadyDone && heldEscalationSlo !== undefined) {
@@ -29447,6 +29594,18 @@ export async function runSweep(
               }
               break;
             case "blocked-ambiguous":
+              if (withheldExhaustedHeld && standDownHold === undefined && !strikeLadderDue && !sloLadderDue) {
+                // W1-T13945: one hold row naming each attempt, then one escalation; the row keys the dedup above.
+                const ladder = pr.reviewWithheld!;
+                appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: REVIEW_WITHHELD_EXHAUSTED_STEP,
+                  pr_number: pr.prNumber, pr_url: pr.prUrl, head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest,
+                  attempts: ladder.attempts.map((attempt) => ({ run_id: attempt.runId, provider: attempt.provider ?? null,
+                    routed_model: attempt.routedModel ?? null, cause: attempt.cause })), reason: ladder.reason });
+                await deps.escalate(pr, reason, question ?? renderClarificationQuestion(pr, reason, pr.strikeHistory ?? []));
+                acted = false;
+                standDownReason = `${reason} — escalated once for this head and input; no review admitted`;
+                break;
+              }
               if (setupRefusalHeld && standDownHold === undefined && !strikeLadderDue && !sloLadderDue) {
                 // W1-T13193: acted stays false, so a later escalation at this head for another cause is not deduped by this one.
                 const held = pr.reviewSetupRefused!;
@@ -29889,8 +30048,10 @@ export async function runSweep(
       // W1-T2771: discovery is not execution and therefore owns no mutex. Carry the stable key into
       // the pool, where `claimReview` atomically claims it immediately before the attempt.
       const reviewKey = reviewOutcomeKeyForPr(pr);
-      const excludedProviders = reviewerUnavailableProvidersForReadmission(pr, ledgerLines);
-      const dispatchPr: ReviewDispatchPr = excludedProviders?.length ? { ...pr, excludeProviders: excludedProviders } : pr;
+      const withheldLadder = reviewWithheldLadder(pr, ledgerLines);
+      const excludedProviders = [...new Set([...(reviewerUnavailableProvidersForReadmission(pr, ledgerLines) ?? []),
+        ...(withheldLadder?.rung === 2 ? withheldLadder.excludeProviders : [])])];
+      const dispatchPr: ReviewDispatchPr = excludedProviders.length ? { ...pr, excludeProviders: excludedProviders } : pr;
       // W1-T9047: discriminate-only is then decided by main's reach.
       const requested = reviewDispatchModeFor(pr, disposition);
       const mode = await reviewModeWithReach(dispatchPr, requested);
