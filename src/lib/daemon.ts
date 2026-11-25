@@ -51,7 +51,7 @@ import {
 import type { RunResult } from "./run-result.js";
 import { assertCleanBoot, type BootAssertion } from "./env.js";
 import { classifyFailure } from "./classify.js";
-import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_RATE_CEILING_MS, DEPLOY_RESTART_SCORE_THRESHOLD, EXPEDITE_RELEASE, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, FRESHNESS_LIKELY_FRACTION, FRESHNESS_MAX_DRAIN_WAIT_MS, FRESHNESS_MIN_LIFETIME_MS, freshnessMinLifetimeForStall, INSTALL_INPUTS_RELEASE, LOOP_STALL_RELEASE, MIN_LIFETIME_HOLD, pendingExpedite, timeToLikelyFreshnessRestart, type DeployRestartPressureState, type DeployWorthChange } from "./deploy-judge.js";
+import { changesInstallInputs, coalesceFreshnessRestart, decideFreshnessRestart, DEPLOY_RESTART_RATE_CEILING_MS, deriveRestartBounds, DEPLOY_RESTART_SCORE_THRESHOLD, EXPEDITE_RELEASE, FRESHNESS_COALESCE_WINDOW_MS, FRESHNESS_DECISION_STEP, FRESHNESS_LIKELY_FRACTION, FRESHNESS_MAX_DRAIN_WAIT_MS, FRESHNESS_MIN_LIFETIME_MS, freshnessMinLifetimeForStall, INSTALL_INPUTS_RELEASE, LOOP_STALL_RELEASE, measuredRestarts, MIN_LIFETIME_HOLD, pendingExpedite, timeToLikelyFreshnessRestart, type DeployRestartPressureState, type DeployWorthChange, type RestartBounds } from "./deploy-judge.js";
 import { INITIAL_RETRY_STATE, reasonAboutBlock, type RetryState } from "./block-reason.js";
 import {
   nextRunnable,
@@ -4830,11 +4830,23 @@ export async function runDaemon(
   const freshnessThreshold = opts.freshnessScoreLimit === undefined ? DEPLOY_RESTART_SCORE_THRESHOLD
     : { value: opts.freshnessScoreLimit, reason: "plan/policy.yaml freshnessRestart.scoreLimit" };
   const freshnessStalenessHorizonMs = opts.freshnessStalenessHorizonMs ?? DEPLOY_RESTART_RATE_CEILING_MS;
-  const freshnessLoopOnlyHorizonMs = opts.freshnessLoopOnlyHorizonMs ?? freshnessStalenessHorizonMs;
   const freshnessQuietWindow = opts.freshnessQuietWindowMs === undefined ? FRESHNESS_COALESCE_WINDOW_MS
     : { value: opts.freshnessQuietWindowMs, reason: "plan/policy.yaml freshnessRestart.quietWindowMs" };
   const freshnessLikelyFraction = opts.freshnessLikelyFraction ?? FRESHNESS_LIKELY_FRACTION;
   const freshnessMaxDrainWaitMs = opts.freshnessMaxDrainWaitMs ?? FRESHNESS_MAX_DRAIN_WAIT_MS;
+  // W1-T14663: the hold, the score limit and the horizons above are the FALLBACK. Once enough of this daemon's own
+  // restart cycles are measured for the kind the next restart will be, `restartBounds` derives them from that cost.
+  const measuredCycleRows: Array<Record<string, unknown>> = [];
+  let boundsMemo: { rows: number; handsOff: boolean; bounds: RestartBounds } | undefined;
+  const restartBounds = (): RestartBounds => {
+    const handsOff = deps.handoff?.enabled() === true;
+    if (boundsMemo?.rows === measuredCycleRows.length && boundsMemo.handsOff === handsOff) return boundsMemo.bounds;
+    const bounds = deriveRestartBounds({ cycles: measuredRestarts(measuredCycleRows), handsOff, fallback: {
+      minLifetimeMs: freshnessMinLifetimeMs, threshold: freshnessThreshold, stalenessHorizonMs: freshnessStalenessHorizonMs,
+      ...(opts.freshnessLoopOnlyHorizonMs === undefined ? {} : { loopOnlyHorizonMs: opts.freshnessLoopOnlyHorizonMs }) } });
+    boundsMemo = { rows: measuredCycleRows.length, handsOff, bounds };
+    return bounds;
+  };
   const sweepBound: SweepBoundLearner = { fallbackMs: sweepWallClockBoundMs, settledMs: [] }; // W1-T9563, seeded at boot
   // One mutable ref for when a full pass last actually ran, shared by every call site below — see {@link
   // SweepRetrigger} for why a shared reference, not a fresh object per site, is load-bearing. It starts undefined so
@@ -4969,7 +4981,7 @@ export async function runDaemon(
     const lagMs = fields?.lag_ms;
     if (typeof lagMs !== "number" || !Number.isFinite(lagMs) || lagMs <= 0) return;
     const nowMs = idleLaneClock.now();
-    const oldestMs = nowMs - freshnessMinLifetimeMs;
+    const oldestMs = nowMs - Math.max(freshnessMinLifetimeMs, restartBounds().minLifetimeMs);
     discardStallsBefore(oldestMs);
     let endMs = recoveredAtMs !== undefined && Number.isFinite(recoveredAtMs) ? recoveredAtMs : nowMs;
     if (endMs <= oldestMs) return;
@@ -5259,12 +5271,17 @@ export async function runDaemon(
   const restartBoots = restartLedger.rows.filter(row => row.step === "daemon.boot" && typeof row.ts === "string")
     .map(row => Date.parse(String(row.ts))).filter(Number.isFinite).sort((a, b) => a - b);
   const restartStartedAtMs = restartBoots.at(-1) ?? clockFromDateFn(deps.now).now();
+  measuredCycleRows.push(...restartLedger.rows.filter(row => row.step === "daemon.restart_cycle"));
   const recordedRestartStarts = new Set(restartLedger.rows.filter(row => row.step === "daemon.restart_cycle")
     .map(row => Date.parse(String(row.started_at))));
   for (const started of restartBoots.slice(1, -1)) {
     if (recordedRestartStarts.has(started)) continue;
     const cycle = restartCycleRow(restartLedger.rows, started);
-    if (cycle) { log("daemon.restart_cycle", { ...cycle }); recordedRestartStarts.add(started); }
+    if (cycle) {
+      log("daemon.restart_cycle", { ...cycle });
+      measuredCycleRows.push({ step: "daemon.restart_cycle", ...cycle });
+      recordedRestartStarts.add(started);
+    }
   }
   let restartCyclePending = !recordedRestartStarts.has(restartStartedAtMs) &&
     restartCycleRow(restartLedger.rows, restartStartedAtMs) !== null;
@@ -5275,7 +5292,11 @@ export async function runDaemon(
       const ledger = restartCycleLedgerRows(lines);
       if (ledger.errors.length) log("daemon.restart_cycle_unreadable", { errors: ledger.errors });
       const cycle = restartCycleRow(ledger.rows, restartStartedAtMs);
-      if (cycle?.first_verdict_at) { log("daemon.restart_cycle", { ...cycle }); restartCyclePending = false; }
+      if (cycle?.first_verdict_at) {
+        log("daemon.restart_cycle", { ...cycle });
+        measuredCycleRows.push({ step: "daemon.restart_cycle", ...cycle });
+        restartCyclePending = false;
+      }
     } catch (error) {
       log("daemon.restart_cycle_unreadable", { error: String(error) });
     }
@@ -6062,10 +6083,10 @@ export async function runDaemon(
     if (outcome.arm === "dirty" && outcome.behind && outcome.newSha) {
       const nowMs = daemonClock.now();
       observeFreshnessAdvance(outcome.newSha, nowMs, undefined, outcome.changes);
-      const { decision, withheldEvidence } = scoreFreshness(outcome.changes, nowMs);
+      const { decision, withheldEvidence, bounds } = scoreFreshness(outcome.changes, nowMs);
       pressureEvidence = { behind: true, stale_since_ms: staleSinceMs, weight: decision.weight,
         age_pressure: decision.agePressure, pressure: decision.pressure, ...withheldEvidence };
-      if (decision.pressure >= freshnessThreshold.value && !dirtyBlockedShas.has(outcome.newSha)) {
+      if (decision.pressure >= bounds.threshold.value && !dirtyBlockedShas.has(outcome.newSha)) {
         dirtyBlockedShas.add(outcome.newSha);
         log("daemon.freshness_blocked_dirty", { old_sha: outcome.oldSha, new_sha: outcome.newSha,
           dirty_paths: outcome.dirty_paths, ...pressureEvidence });
@@ -6107,6 +6128,7 @@ export async function runDaemon(
   const scoreFreshness = (changes: readonly DeployWorthChange[] | undefined, nowMs: number,
     lanes: readonly (string | undefined)[] = [], stallShare = 0) => {
     const staleAtMs = staleSinceMs!;
+    const bounds = restartBounds();
     const reviews = inFlightReviewCount();
     const interruptible = restartInterruptibleDetachedActionCount();
     const handsOver = lanes.length > 0 && deps.handoff?.enabled() === true;
@@ -6147,14 +6169,14 @@ export async function runDaemon(
       if (changeClass !== "worker_only") classSinceMs[changeClass] = Math.min(classSinceMs[changeClass] ?? readAtMs, readAtMs);
     }
     const decision = decideFreshnessRestart({ changes, busy, staleSinceMs: staleAtMs, nowMs, state: freshnessPressure, withheldReviews,
-      threshold: freshnessThreshold, ageHorizonMs: freshnessStalenessHorizonMs, loopOnlyHorizonMs: freshnessLoopOnlyHorizonMs,
-      classSinceMs, stallShare });
+      threshold: bounds.threshold, ageHorizonMs: bounds.stalenessHorizonMs,
+      loopOnlyHorizonMs: bounds.loopOnlyHorizonMs ?? bounds.stalenessHorizonMs, classSinceMs, stallShare });
     freshnessPressure = decision.state;
-    return { decision, busy, busyReasons, background, withheldEvidence, adoptableLanes };
+    return { decision, busy, busyReasons, background, withheldEvidence, adoptableLanes, bounds };
   };
 
   const measureLoopStalls = (nowMs: number) => {
-    const startMs = Math.max(bootGateStartedAtMs, nowMs - freshnessMinLifetimeMs);
+    const startMs = Math.max(bootGateStartedAtMs, nowMs - restartBounds().minLifetimeMs);
     discardStallsBefore(startMs);
     const windowMs = Math.max(0, nowMs - startMs);
     const blockedMs = stallIntervals.reduce((total, interval) =>
@@ -6171,19 +6193,21 @@ export async function runDaemon(
     observeFreshnessAdvance(freshness.newSha, nowMs, freshness.staleSinceMs, freshness.changes);
     const staleAtMs = staleSinceMs!;
     const stall = measureLoopStalls(nowMs);
-    const { decision, busy, busyReasons, background, withheldEvidence, adoptableLanes } = scoreFreshness(freshness.changes, nowMs, lanes, stall.share);
+    const { decision, busy, busyReasons, background, withheldEvidence, adoptableLanes, bounds } = scoreFreshness(freshness.changes, nowMs, lanes, stall.share);
     freshnessOutlook = { weight: decision.weight, staleSinceMs: staleAtMs };
     const expedite = deps.taskExpedite ? pendingExpedite(freshness.changes, deps.taskExpedite) : undefined;
     const coalesced = coalesceFreshnessRestart({
       decision, newSha: freshness.newSha, lastAdvanceAtMs: lastAdvanceAtMs!,
       staleSinceMs: staleAtMs, nowMs, window: freshnessQuietWindow, installInputsChanged: changesInstallInputs(freshness.changes),
-      threshold: freshnessThreshold, ageHorizonMs: decision.horizonMs ?? freshnessStalenessHorizonMs,
-      lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: freshnessMinLifetimeMs, stallShare: stall.share,
+      threshold: bounds.threshold, ageHorizonMs: decision.horizonMs ?? bounds.stalenessHorizonMs,
+      lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: bounds.minLifetimeMs, stallShare: stall.share,
       ...(expedite ? { expedite } : {}),
     });
     const lifetimeEvidence = {
-      lifetime_ms: Math.max(0, nowMs - bootGateStartedAtMs), min_lifetime_ms: freshnessMinLifetimeMs,
-      effective_min_lifetime_ms: freshnessMinLifetimeForStall(freshnessMinLifetimeMs, stall.share),
+      lifetime_ms: Math.max(0, nowMs - bootGateStartedAtMs), min_lifetime_ms: bounds.minLifetimeMs,
+      effective_min_lifetime_ms: freshnessMinLifetimeForStall(bounds.minLifetimeMs, stall.share),
+      // W1-T14663: where the three bounds came from: the measured restarts, or the fallback and why.
+      restart_bounds: bounds.evidence,
       stall_ms: stall.blockedMs, stall_window_ms: stall.windowMs, stall_pressure: decision.stallPressure ?? 0,
       ...(coalesced.reason === MIN_LIFETIME_HOLD ? { held_by: MIN_LIFETIME_HOLD } : {}),
       // W1-T14360: the expedite fast path names the task and its declared reason on both rows.
@@ -6223,8 +6247,8 @@ export async function runDaemon(
       new_sha: freshness.newSha,
       ...withheldEvidence,
       ...lifetimeEvidence,
-      score_limit: freshnessThreshold.value,
-      staleness_horizon_ms: freshnessStalenessHorizonMs,
+      score_limit: bounds.threshold.value,
+      staleness_horizon_ms: bounds.stalenessHorizonMs,
       // W1-T12230: the commits of the advance in each class, and the horizon of the staleness part that decided.
       change_classes: decision.changeClasses,
       horizon_ms: decision.horizonMs,
@@ -6347,10 +6371,11 @@ export async function runDaemon(
   const restartLikely = (): { pressure: number; timeToRestartMs: number } | undefined => {
     if (freshnessOutlook === undefined) return undefined;
     const nowMs = daemonClock.now();
-    const outlook = timeToLikelyFreshnessRestart({ ...freshnessOutlook, nowMs, threshold: freshnessThreshold,
-      ageHorizonMs: freshnessStalenessHorizonMs, lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: freshnessMinLifetimeMs,
+    const bounds = restartBounds();
+    const outlook = timeToLikelyFreshnessRestart({ ...freshnessOutlook, nowMs, threshold: bounds.threshold,
+      ageHorizonMs: bounds.stalenessHorizonMs, lifetimeStartedAtMs: bootGateStartedAtMs, minLifetimeMs: bounds.minLifetimeMs,
       stallShare: measureLoopStalls(nowMs).share });
-    return outlook.pressure >= freshnessLikelyFraction * freshnessThreshold.value ? outlook : undefined;
+    return outlook.pressure >= freshnessLikelyFraction * bounds.threshold.value ? outlook : undefined;
   };
   let likelyLengths: { atMs: number; lengths: RestartWindow["lengths"] } | undefined;
   const likelyRestartAdmission: RestartAdmission = (kind, surface) => {
@@ -6368,7 +6393,7 @@ export async function runDaemon(
     if (surface === undefined) return false;
     log("daemon.admission_held", { surface, kind, reason: "restart likely", time_to_restart_ms: likely.timeToRestartMs,
       measured_length_ms: lengthMs, max_drain_wait_ms: freshnessMaxDrainWaitMs, pressure: likely.pressure,
-      likely_pressure: freshnessLikelyFraction * freshnessThreshold.value });
+      likely_pressure: freshnessLikelyFraction * restartBounds().threshold.value });
     return false;
   };
   const restartAdmission: RestartAdmission = (kind, surface, candidateMs) => {
