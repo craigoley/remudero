@@ -6,6 +6,7 @@ import {
   OPENWEIGHT_PRICES,
   OPENWEIGHT_RESPONSE_FORMATS,
   OPENWEIGHT_TEMPERATURE,
+  openWeightCandidatesForCapability,
   openWeightDeploymentReady,
   selectOpenWeightModel,
 } from "#src/lib/worker-provider.js";
@@ -58,6 +59,9 @@ test("W1-T4081: the retirement waits for seven days of service", () => {
   assert.equal(selectOpenWeightModel(ladder, "opus", "high").model, "gpt-6-luna", "the successor leads the frontier row");
   assert.equal(selectOpenWeightModel(ladder, "opus", "high", undefined, { cashSqueezed: true }).model, "gpt-6-luna");
   assert.equal(selectOpenWeightModel(ladder, "haiku", "low").model, "gpt-oss-120b", "cheap work stays cheap");
+  assert.deepEqual(openWeightCandidatesForCapability(undefined, "frontier", "high"), ["gpt-6-luna", "gpt-6.1-terra"],
+    "a checkout with no mounts table mirrors the retired frontier row");
+  assert.deepEqual(openWeightCandidatesForCapability(undefined, "economy", "low"), ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna"]);
   for (const [tier, efforts] of Object.entries(cashRows())) {
     for (const [effort, candidates] of Object.entries(efforts as Record<string, string[]>)) {
       const ready = candidates.filter((c) => openWeightDeploymentReady(c, NOW));
