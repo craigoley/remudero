@@ -3072,8 +3072,9 @@ jobs:
     # and coverage-shard restore it and never save (CodeQL cache poisoning: they run PR code and download
     # artifacts). This job runs only on a push to main, checks out nothing, downloads no artifact, and saves
     # a build of the sha256-verified GNU tarball. PR runs may restore a cache written on the default branch.
+    # No job-level if: (only the PR guard may sit there), so each step carries the push-to-main gate and the
+    # job is a no-op on a pull request.
     name: bash32-cache-seed
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
@@ -3081,12 +3082,13 @@ jobs:
     steps:
       - name: Restore the pinned bash 3.2 build (W1-T11263)
         id: bash32-cache
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bash32
           key: bash-3.2-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_SHA256 }}
       - name: Build the pinned bash 3.2 from GNU source on a cache miss (W1-T11263)
-        if: ${{ steps.bash32-cache.outputs.cache-hit != 'true' }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bash32-cache.outputs.cache-hit != 'true' }}
         run: |
           set -euo pipefail
           OUT="$RUNNER_TEMP/bash32"
@@ -3107,7 +3109,7 @@ jobs:
           fi
           echo "W1-T11263: built $OUT/bash (${VERSION}) for the cache."
       - name: Save the pinned bash 3.2 build (W1-T11263)
-        if: ${{ steps.bash32-cache.outputs.cache-hit != 'true' }}
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bash32-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bash32
