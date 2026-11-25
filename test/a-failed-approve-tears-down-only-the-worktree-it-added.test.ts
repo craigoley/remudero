@@ -133,6 +133,9 @@ function resumableApprove(kind: string, id: string) {
       "- id: W1-T4\n  title: \"a seed task\"\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  status: queued\n  attempts: 0\n",
     );
     writeFileSync(join(dir, "MASTER-PLAN.md"), "# MASTER PLAN\n\nfixture\n");
+    // The drafted `verify: auto` task declares this file (a dispatchable task with no `files:` is a declared-scope block).
+    mkdirSync(join(dir, "src", "lib"), { recursive: true });
+    writeFileSync(join(dir, "src", "lib", "plan.ts"), "");
   });
   const priorRunId = `APPROVE-${id}-1791000000000`;
   const branch = approveRunBranch(priorRunId);
@@ -151,7 +154,9 @@ function resumableApprove(kind: string, id: string) {
     JSON.stringify({
       [id]: {
         proposalId: id,
-        fragmentYaml: "- id: NEW-1\n  title: a quiet zebra crossing\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  design: |\n    NO-INVARIANTS: the fixture drafts a new crossing task only; no prior behavior changes.\n",
+        fragmentYaml: "- id: NEW-1\n  title: a quiet zebra crossing\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts a new crossing task only; no prior behavior changes.\n" +
+          // A new `verify: auto` implement task needs one criterion (shard-shape, promoted to block on a draft).
+          "  acceptance:\n    - claim: the crossing task is filed\n      proof: 'unit test: the crossing task is filed'\n",
         stampLine: `- ${id} (plan) — RATIFIED -> NEW-1.`,
         anchorFingerprint: "",
       },

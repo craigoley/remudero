@@ -31,9 +31,10 @@ const TITLES: Record<string, string> = {
   "P-OFF": "probe the broker socket", "P-OFF-A": "drain idle runners at night", "P-OFF-B": "report the slowest reviewer",
   "P-RESUME": "resume a stranded filing",
 };
-const DESIGN = '  design: "NO-INVARIANTS: a fixture task."\n';
+// A new `verify: auto` implement task needs one criterion (shard-shape, promoted to block on a draft).
+const DESIGN = '  design: "NO-INVARIANTS: a fixture task."\n  acceptance:\n    - claim: the approval files its task\n      proof: \'unit test: the approval files its task\'\n';
 const newDraft = (id: string) => draft(id,
-  `- id: NEW-1\n  title: ${TITLES[id]}\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/plan.ts]\n${DESIGN}`);
+  `- id: NEW-1\n  title: ${TITLES[id]}\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n  files: [src/lib/plan.ts]\n${DESIGN}`);
 
 interface World {
   root: string; publicOrigin: GitRepo; opsOrigin: GitRepo;
@@ -174,8 +175,10 @@ test("W1-T12214 criterion 2: with `task` on, rmd approve --batch files every tas
 });
 
 test("W1-T12214 criterion 3: an approval that changes a task file edits it in the repository that holds it", async (t) => {
+  // The edit re-files W1-T3 as `verify: auto` with a declared file: an approval's own judgment is the human one (W1-T14659).
   const changing = draft("P-EDIT", task("W1-T3", "fixture public task for the approval route",
-    `  origin: architect\n${DESIGN}  note: the operator approved this change\n`),
+    `  origin: architect\n  files: [src/lib/plan.ts]\n${DESIGN}  note: the operator approved this change\n`)
+    .replace("verify: human", "verify: auto"),
     "- P-EDIT (plan) — RATIFIED -> W1-T3.");
   const w = world(t, { kinds: ["task"], drafts: [changing] });
   await w.approve(["P-EDIT"]);

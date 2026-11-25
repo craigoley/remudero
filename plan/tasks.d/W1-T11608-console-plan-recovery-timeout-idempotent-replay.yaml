@@ -5,7 +5,7 @@
   type: implement
   verify: auto
   principles: {tdd: strict}
-  budget_usd: 60.00
+  budget_usd: 4.50
   rationale: "Reported in feedback fb-1794064519788-9bda6c against Console main 71cf77c141c7ee0584fd5e0704fe44184bf2231f.
     Resuming a saved plan command after a verified operator session shows 'This operation was aborted' and leaves
     Resume enabled, with the command still awaiting reconciliation. The browser request budget is 8000 ms

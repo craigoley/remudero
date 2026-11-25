@@ -1,0 +1,3 @@
+# Recursive searches from the repo root skip the task catalog (thousands of records).
+# Naming plan/tasks.d or a shard path explicitly still searches it.
+/plan/tasks.d/

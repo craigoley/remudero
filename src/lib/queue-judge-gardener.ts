@@ -728,10 +728,10 @@ export async function gitFilingDates(repoRoot: string): Promise<Map<string, numb
 
 const packLine = (p: EvidencePack): string => JSON.stringify({ id: p.id, title: p.title, priority: p.priority, pinned: p.pinned, facts: p.facts.map((f) => ({ ref: f.ref, text: f.text, source: f.source })) });
 
-/** The packs one prompt can hold: lowest priority number first, stopping at the first that would pass the bound. */
-function fitJudgePrompt(packs: readonly EvidencePack[], records: readonly ClassRecordReport[], bound: BoundReport, maxChars: number): { prompt: string; kept: EvidencePack[]; leftOut: EvidencePack[] } {
+/** The packs one prompt can hold: those left out last pass first, then lowest priority number, stopping at the first that would pass the bound. */
+function fitJudgePrompt(packs: readonly EvidencePack[], records: readonly ClassRecordReport[], bound: BoundReport, maxChars: number, carried: ReadonlySet<string> = new Set()): { prompt: string; kept: EvidencePack[]; leftOut: EvidencePack[] } {
   const rank = (p: EvidencePack): number => p.priority ?? Number.POSITIVE_INFINITY;
-  const byPriority = [...packs].sort((a, b) => rank(a) - rank(b));
+  const byPriority = [...packs].sort((a, b) => Number(carried.has(b.id)) - Number(carried.has(a.id)) || rank(a) - rank(b));
   let chars = judgePrompt([], records, bound).length, n = 0;
   for (; n < byPriority.length; n++) {
     const next = chars + 1 + packLine(byPriority[n]!).length;
@@ -866,7 +866,10 @@ export async function queueJudgeInventory(sources: QueueJudgeSources, deps: Pick
   if (packs.size === 0) return { ...emptyInventory("empty-queue", plan.open.length), scored, records };
 
   const promptBound = queueJudgePromptBound(sources.promptWindow());
-  const fit = fitJudgePrompt([...packs.values()], records, bound, promptBound.maxChars);
+  const lastLeftOut = sources.ledger([PACKS_LEFT_OUT_STEP]).filter((r) => r.step === PACKS_LEFT_OUT_STEP && Array.isArray(r.task_ids))
+    .reduce<Row | undefined>((a, r) => (a === undefined || String(r.ts) >= String(a.ts) ? r : a), undefined);
+  const carried = new Set<string>(((lastLeftOut?.task_ids as unknown[] | undefined) ?? []).filter((x): x is string => typeof x === "string"));
+  const fit = fitJudgePrompt([...packs.values()], records, bound, promptBound.maxChars, carried);
   deps.log(PROMPT_BOUND_STEP, { max_chars: promptBound.maxChars, window_tokens: promptBound.windowTokens, reply_reserve_tokens: OPENWEIGHT_MAX_COMPLETION_TOKENS,
     chars_per_token: QUEUE_JUDGE_CHARS_PER_TOKEN, source: promptBound.source, ...(promptBound.model ? { model: promptBound.model } : {}), ...(promptBound.reason ? { reason: promptBound.reason } : {}), prompt_chars: fit.prompt.length });
   if (fit.leftOut.length > 0) {
