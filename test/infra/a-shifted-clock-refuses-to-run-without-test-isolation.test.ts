@@ -35,8 +35,11 @@ test("W1-T14780: a shifted clock refuses to run without test isolation", () => {
 test("W1-T14780: a shifted clock still runs under test isolation", () => {
   const home = mkdtempSync(join(tmpdir(), "rmd-shift-isolated-"));
   try {
+    // The deny root alone decides: the same shifted command refuses without it and runs with it.
+    const { RMD_TEST_LIVE_DENY_ROOT: _deny, ...bare } = process.env;
+    assert.notEqual(shiftedChild({ ...bare, FK_SHIFT_DAYS: "7" }, home).run.status, 0, "without the deny root the preload refuses");
     const before = Date.now();
-    const { run } = shiftedChild({ ...process.env, FK_SHIFT_DAYS: "7", RMD_TEST_LIVE_DENY_ROOT: join(home, "deny") }, home);
+    const { run } = shiftedChild({ ...bare, FK_SHIFT_DAYS: "7", RMD_TEST_LIVE_DENY_ROOT: join(home, "deny") }, home);
     assert.equal(run.status, 0, run.stderr);
     const days = (Number(run.stdout) - before) / 86_400_000;
     assert.ok(Math.abs(days - 7) < 1, `Date.now() moved ${days} days, expected about 7`);
