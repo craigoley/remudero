@@ -135,7 +135,7 @@ function joinWorld(kind: string, opts: { ids: string[]; approver?: { pid?: numbe
           id,
           {
             proposalId: id,
-            fragmentYaml: `- id: NEW-1\n  title: ${id.toLowerCase()} lands its own shard\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts a new shard only; no prior behavior changes.\n`,
+            fragmentYaml: `- id: NEW-1\n  title: ${id.toLowerCase()} lands its own shard\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n  files: [src/lib/plan.ts]\n  design: |\n    NO-INVARIANTS: the fixture drafts a new shard only; no prior behavior changes.\n`,
             stampLine: `- ${id} (plan) — RATIFIED -> NEW-1.`,
             anchorFingerprint: "",
           },

@@ -38,22 +38,38 @@ function repeated(yaml: string, proposal: string) {
     .filter((v) => v.check === "draft-human-ask-repeated");
 }
 
-test("an approved follow-up or architect proposal files verify: auto unless it declares a workflow path", () => {
+const PROPOSALS = ["followup:no-second-ask", "architect:no-second-ask", "proof-debt:W1-T12032:0"];
+
+test("W1-T14659 criterion 1: an approved follow-up or architect proposal may not file a verify: human task", () => {
   const human = fragment(["src/lib/plan.ts", "test/plan/example.test.ts"]).replace("verify: auto", "verify: human");
   assert.ok(human.includes("verify: human"), human);
-  for (const proposal of ["followup:no-second-ask", "architect:no-second-ask", "proof-debt:W1-T12032:0"]) {
+  for (const proposal of PROPOSALS) {
     const [violation] = repeated(human, proposal);
     assert.equal(violation?.severity, "block", proposal);
     assert.ok(violation.message.includes(`approving ${proposal} already gives the human judgment`), violation.message);
     assert.match(violation.message, /unless it declares a \.github\/workflows\/ path/);
-    assert.deepEqual(repeated(human.replace("verify: human", "verify: auto"), proposal), [],
-      "the same task at verify: auto is clean");
   }
+});
+
+test("W1-T14659 criterion 2: a workflow-path task stays verify: human, and the drafter prompt names the exception", () => {
   const workflow = fragment([".github/workflows/ci.yml", "test/plan/example.test.ts"]).replace("verify: auto", "verify: human");
-  assert.deepEqual(repeated(workflow, "followup:no-second-ask"), [], "a task that declares a workflow path may stay verify: human");
+  assert.ok(workflow.includes("verify: human"), workflow);
+  for (const proposal of PROPOSALS) {
+    assert.deepEqual(repeated(workflow, proposal), [], "a task that declares a workflow path may stay verify: human");
+  }
   const planText = inboxDraftExampleFragmentYaml().replace("NEW-1", "W1-T1");
   const prompt = inboxDraftPrompt({ id: "followup:no-second-ask", summary: "no second human ask", evidenceAnchors: [] },
     planText, "run-1");
   assert.match(prompt, /every task you file is `verify: auto`/);
   assert.match(prompt, /names a `\.github\/workflows\/` path/);
+});
+
+test("W1-T14659 criterion 3: a-verify-auto-draft-is-unchanged — a verify: auto draft never draws the human-ask refusal", () => {
+  for (const proposal of [...PROPOSALS, "parked:W1-T1"]) {
+    for (const files of [["src/lib/plan.ts", "test/plan/example.test.ts"], [".github/workflows/ci.yml", "test/plan/example.test.ts"]]) {
+      const auto = fragment(files);
+      assert.ok(auto.includes("verify: auto"), auto);
+      assert.deepEqual(repeated(auto, proposal), [], `${proposal} ${files[0]}`);
+    }
+  }
 });

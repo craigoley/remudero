@@ -33,7 +33,7 @@ const TITLES: Record<string, string> = {
 };
 const DESIGN = '  design: "NO-INVARIANTS: a fixture task."\n';
 const newDraft = (id: string) => draft(id,
-  `- id: NEW-1\n  title: ${TITLES[id]}\n  repo: remudero\n  type: implement\n  verify: human\n  origin: architect\n  files: [src/lib/plan.ts]\n${DESIGN}`);
+  `- id: NEW-1\n  title: ${TITLES[id]}\n  repo: remudero\n  type: implement\n  verify: auto\n  origin: architect\n  files: [src/lib/plan.ts]\n${DESIGN}`);
 
 interface World {
   root: string; publicOrigin: GitRepo; opsOrigin: GitRepo;
