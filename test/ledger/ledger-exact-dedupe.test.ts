@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -72,4 +73,86 @@ test("exact index refuses invalid limits before allocating scratch", () => {
   for (const limits of [{ maxDiskBytes: 1 }, { cacheBytes: 0 }, { maxRowBytes: -1 }, { maxDiskBytes: NaN }]) {
     assert.throws(() => createLedgerExactDedupe(limits), /bound/);
   }
+});
+
+test("W1-T14473: an oversized row is skipped and reported, in one chunk or across chunks, and the next row still reads", async () => {
+  const big = "x".repeat(40);
+  const chunks = async function* (parts: string[]) { yield* parts; };
+  const seen: number[] = [];
+  const whole = await collect(ndjsonLines(chunks(["a\n", `${big}\n`, "b\n"]), 20, undefined, () => seen.push(1)));
+  assert.deepEqual(whole, ["a", "b"]);
+  const split = await collect(ndjsonLines(chunks(["a\nxxxxxxxxxxxxxxx", "xxxxxxxxxxxxxxx", "xxxx\nb\n", big]), 20, undefined, () => seen.push(2)));
+  assert.deepEqual(split, ["a", "b"], "the rest of a row past the bound is dropped up to its newline, and a final oversized tail too");
+  assert.deepEqual(seen, [1, 2, 2]);
+  await assert.rejects(collect(ndjsonLines(chunks(["a\n", `${big}\n`]), 20)), /ledger-row-byte-bound/,
+    "without a callback an oversized row still ends the read");
+});
+
+const OLD_DEFAULT_DISK_BYTES = 256 * 1024 * 1024;
+
+/** The real database, except its insert fails as SQLite does when the disk has no space (SQLITE_FULL). */
+function diskFullOnInsert(path: string): DatabaseSync {
+  const db = new DatabaseSync(path);
+  const prepare = db.prepare.bind(db);
+  db.prepare = ((sql: string) => sql.startsWith("INSERT")
+    ? { run: () => { throw Object.assign(new Error("database or disk is full"), { errcode: 13 }); } }
+    : prepare(sql)) as typeof db.prepare;
+  return db;
+}
+
+test("W1-T14801 criterion 1: with no maxDiskBytes the index grows past the old 256 MiB default and stays observed", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t14801-"));
+  const index = createLedgerExactDedupe({ scratchDir: dir });
+  try {
+    const pad = "z".repeat(1000);
+    let n = 0;
+    // UTF-16 keys of ~2 KB each: stop once the index itself is past the old default.
+    while (index.stats().allocatedBytes <= OLD_DEFAULT_DISK_BYTES) {
+      for (let batch = 0; batch < 10_000; batch++, n++) assert.equal(index.add(`${n}:${pad}`), true);
+    }
+    const stats = index.stats();
+    assert.ok(stats.allocatedBytes > OLD_DEFAULT_DISK_BYTES, `index reached ${stats.allocatedBytes} bytes`);
+    assert.equal(stats.rows, n);
+    assert.equal(stats.state, "observed");
+    assert.equal(stats.reason, null);
+    assert.equal(stats.maxDiskBytes, null);
+    assert.equal(index.add("0:" + pad), false, "exact identity still holds past the old bound");
+  } finally { index.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("W1-T14801 criterion 2: invariant:an-explicit-bound-still-binds", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t14801-"));
+  try {
+    for (const maxDiskBytes of [65536, 1024 * 1024]) {
+      const index = createLedgerExactDedupe({ scratchDir: dir, maxDiskBytes });
+      try {
+        assert.throws(() => { for (let n = 0; n < 1000; n++) index.add(`${n}${"x".repeat(2000)}`); }, /ledger-dedupe-disk-bound/,
+          `a ${maxDiskBytes}-byte bound is named as the bound`);
+        assert.equal(index.stats().state, "partial");
+        assert.equal(index.stats().reason, "ledger-dedupe-disk-bound");
+        assert.equal(index.stats().maxDiskBytes, maxDiskBytes);
+      } finally { index.close(); }
+    }
+    // The name never depends on the disk's free space: an SQLITE_FULL at the bound is the bound even when the disk
+    // has less room left than the bound itself.
+    const index = createLedgerExactDedupe({ scratchDir: dir, maxDiskBytes: 12288, openDatabase: diskFullOnInsert });
+    try { assert.throws(() => index.add("row"), /ledger-dedupe-disk-bound/); }
+    finally { index.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("W1-T14801 criterion 3: a disk-full write is named ledger-dedupe-disk-full", () => {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t14801-"));
+  const openDatabase = diskFullOnInsert;
+  // Unset, and a bound far above the index's size: neither failure is the caller's bound.
+  for (const maxDiskBytes of [undefined, Number.MAX_SAFE_INTEGER]) {
+    const index = createLedgerExactDedupe({ scratchDir: dir, maxDiskBytes, openDatabase });
+    try {
+      assert.throws(() => index.add("row"), /ledger-dedupe-disk-full/,
+        `a full disk is not the caller's bound (maxDiskBytes ${maxDiskBytes ?? "unset"})`);
+      assert.equal(index.stats().reason, "ledger-dedupe-disk-full");
+      assert.equal(index.stats().state, "partial");
+    } finally { index.close(); }
+  }
+  rmSync(dir, { recursive: true, force: true });
 });

@@ -19,8 +19,8 @@ import {
 } from "#src/lib/worker-provider.js";
 import { runOpenWeightWalkingLadder, type WorkerResult } from "#src/lib/worker.js";
 
-// W1-T4079 (operator ruling 2026-09-22): stay on gpt-5.6 until GPT-6 is priced and shaped,
-// then select it automatically. A measured 404 still drops the unavailable deployment briefly.
+// W1-T4079 (operator ruling 2026-09-22): select GPT-6 automatically once it is priced and shaped.
+// A measured 404 still drops the unavailable deployment briefly (W1-T4081: to the next candidate, as 5.6 is retired).
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const NOW = Date.parse("2026-09-23T01:00:00.000Z");
@@ -39,7 +39,7 @@ test("W1-T4079: an undeployed successor is skipped, not selected", () => {
     assert.equal(selectOpenWeightModel(ladder(), "opus", "high", undefined, { ready }).model, "gpt-6-luna", "control: ready, it leads");
     markOpenWeightDeploymentAbsent("gpt-6-luna", NOW);
     const picked = selectOpenWeightModel(ladder(), "opus", "high", undefined, { ready });
-    assert.equal(picked.model, "gpt-5.6-luna", "after a 404 the row resolves to the model behind it");
+    assert.equal(picked.model, "gpt-6.1-terra", "after a 404 the row resolves to the model behind it");
     assert.equal(openWeightDeploymentKnownAbsent("gpt-6-luna", NOW + OPENWEIGHT_ABSENT_TTL_MS + 1), false, "the absence is re-asked after its TTL");
   } finally {
     clearOpenWeightAbsence();
@@ -49,7 +49,7 @@ test("W1-T4079: an undeployed successor is skipped, not selected", () => {
 test("W1-T4079: the now-priced successor leads frontier and squeeze, while cheap work stays cheap", () => {
   clearOpenWeightAbsence();
   assert.equal(openWeightDeploymentReady("gpt-6-luna", NOW), true);
-  assert.equal(openWeightDeploymentReady("gpt-5.6-luna", NOW), true);
+  assert.equal(openWeightDeploymentReady("gpt-6.1-terra", NOW), true);
   const rows = ladder().cash!;
   assert.equal(rows.frontier.high[0], "gpt-6-luna");
   assert.equal(selectOpenWeightModel(ladder(), "opus", "high").model, "gpt-6-luna");
@@ -84,16 +84,16 @@ test("W1-T4079: an unknown probe keeps the previous reading", async () => {
           fetchImpl: async () => new Response(body, { status }),
         },
         config,
-        { model: "gpt-5.6-luna", effort: "low" },
+        { model: "gpt-6-luna", effort: "low" },
       );
     const notFound = await attempt(404, '{"error":{"code":"DeploymentNotFound"}}');
-    assert.equal(notFound.openWeightDeploymentAbsent, "gpt-5.6-luna", "a 404 is reported as an absent deployment");
+    assert.equal(notFound.openWeightDeploymentAbsent, "gpt-6-luna", "a 404 is reported as an absent deployment");
     const allowance = JSON.parse(readFileSync(join(root, "state", OPENWEIGHT_ALLOWANCE_FILENAME), "utf8")) as OpenWeightAllowanceState;
     assert.deepEqual(Object.values(allowance.reservations).map((r) => r.settledUsd), [0], "a 404 billed nothing, so it settles to zero");
 
     const timeout = await attempt(503, "unavailable");
     assert.equal(timeout.openWeightDeploymentAbsent, undefined, "any other failure is not evidence of absence");
-    assert.equal(openWeightDeploymentKnownAbsent("gpt-5.6-luna", NOW), false, "the adapter alone never marks; only the ladder does");
+    assert.equal(openWeightDeploymentKnownAbsent("gpt-6-luna", NOW), false, "the adapter alone never marks; only the ladder does");
   } finally {
     rmSync(root, { recursive: true, force: true });
     clearOpenWeightAbsence();
@@ -109,10 +109,10 @@ test("the walking ladder passes an absent rung and remembers it", async () => {
       return (selection.model === "gpt-6-luna"
         ? { isError: true, openWeightDeploymentAbsent: "gpt-6-luna" }
         : { isError: false }) as WorkerResult;
-    }, { model: "gpt-6-luna", effort: "high", capability: "frontier", alternatives: ["gpt-5.6-luna"] });
-    assert.deepEqual(tried, ["gpt-6-luna", "gpt-5.6-luna"]);
+    }, { model: "gpt-6-luna", effort: "high", capability: "frontier", alternatives: ["gpt-6.1-terra"] });
+    assert.deepEqual(tried, ["gpt-6-luna", "gpt-6.1-terra"]);
     assert.equal(result.isError, false);
-    assert.equal(result.routedModel, "gpt-5.6-luna");
+    assert.equal(result.routedModel, "gpt-6.1-terra");
     assert.equal(openWeightDeploymentKnownAbsent("gpt-6-luna"), true, "the next selection passes over it");
 
     const lastRung = await runOpenWeightWalkingLadder(async () => ({ isError: true, openWeightDeploymentAbsent: "only" }) as WorkerResult,

@@ -248,6 +248,19 @@ test("W1-T2213 ACCEPTANCE 2: all four denyRead entries (three re-anchored, one a
 // down, the exact defect this task exists to close. ──────────────────────────────
 
 const SANDBOX_SCHEMA_DECLARATION_MARKER = "declare const SandboxSettingsSchema:";
+
+// W1-T14821: the SDK names the schema behind its exported `SandboxSettings` type, and that name moves
+// (0.3.330 renamed SandboxSettingsSchema to PublishedSandboxSettingsSchema with the same members). The
+// marker is read from that type alias, so a rename alone is not drift; a missing alias is a parser fault.
+const SANDBOX_SETTINGS_ALIAS_RE = /export declare type SandboxSettings = z\.infer<ReturnType<typeof ([A-Za-z_$][\w$]*)>>;/;
+
+function sandboxSchemaDeclarationMarker(dts: string): string {
+  const m = SANDBOX_SETTINGS_ALIAS_RE.exec(dts);
+  if (!m) {
+    throw new Error("PARSER FAULT: no `export declare type SandboxSettings = z.infer<ReturnType<typeof ...>>` alias in sdk.d.ts.");
+  }
+  return `declare const ${m[1]}:`;
+}
 const SANDBOX_SCHEMA_ANCHOR_KEYS = ["enabled", "network", "filesystem"];
 
 /** Resolve the installed SDK's package directory without depending on `./package.json` being exported. */
@@ -353,7 +366,7 @@ test("W1-T2216: SANDBOX_KEYS matches SandboxSettingsSchema's live top-level memb
   const dts = readFileSync(sdkDtsPath, "utf8");
   const liveMembers = extractTopLevelZodObjectMembers(
     dts,
-    SANDBOX_SCHEMA_DECLARATION_MARKER,
+    sandboxSchemaDeclarationMarker(dts),
     SANDBOX_SCHEMA_ANCHOR_KEYS,
   );
   const version = readInstalledSdkVersion();
@@ -459,4 +472,31 @@ test("SDK 0.3.310: sandbox.allowNestedUserNamespaces true is refused by name, wh
     (e: unknown) => e instanceof WorkerSettingsError && /allowNestedUserNamespaces/.test((e as Error).message),
   );
   assert.doesNotThrow(() => validateWorkerSettings(withNested(false)));
+});
+
+test("W1-T14821 the schema marker follows the SandboxSettings alias to a renamed declaration", () => {
+  const renamed = [
+    "declare const PublishedSandboxSettingsSchema: () => z.ZodObject<{",
+    "    enabled: z.ZodOptional<z.ZodBoolean>;",
+    "    network: z.ZodOptional<z.ZodObject<{",
+    "        allowedDomains: z.ZodOptional<z.ZodArray<z.ZodString>>;",
+    "    }, z.core.$strip>>;",
+    "    filesystem: z.ZodOptional<z.ZodObject<{}, z.core.$strip>>;",
+    "}, z.core.$strip>;",
+    "export declare type SandboxSettings = z.infer<ReturnType<typeof PublishedSandboxSettingsSchema>>;",
+  ].join("\n");
+  assert.equal(sandboxSchemaDeclarationMarker(renamed), "declare const PublishedSandboxSettingsSchema:");
+  assert.deepEqual(
+    extractTopLevelZodObjectMembers(renamed, sandboxSchemaDeclarationMarker(renamed), SANDBOX_SCHEMA_ANCHOR_KEYS),
+    ["enabled", "network", "filesystem"],
+  );
+});
+
+test("W1-T14821 the schema marker still reads the original SandboxSettingsSchema name", () => {
+  const original = "export declare type SandboxSettings = z.infer<ReturnType<typeof SandboxSettingsSchema>>;";
+  assert.equal(sandboxSchemaDeclarationMarker(original), SANDBOX_SCHEMA_DECLARATION_MARKER);
+});
+
+test("W1-T14821 a sdk.d.ts with no SandboxSettings alias is a parser fault", () => {
+  assert.throws(() => sandboxSchemaDeclarationMarker("declare const SandboxSettingsSchema: () => z.ZodObject<{}>;"), /PARSER FAULT/);
 });

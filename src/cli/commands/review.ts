@@ -28,7 +28,7 @@ import { escalate, ghIssueGateway, ghIssueGatewayAsync, tryEscalate, tryEscalate
 import { combinedStatusRestArgs, compareRestArgs, mapRestPr, rollupForAsync, tryFetchReviewReuseFacts, type ReviewReuseFacts, type RestPullRow } from "../../lib/open-prs-rest.js";
 import { ghJsonAsync, ghLinesAsync, ghTextAsync } from "../../lib/github-transport.js";
 import { appendLedger, REVIEW_LANE_ABORTED_STEP } from "../../lib/ledger.js";
-import { requiredSemanticDecisionDigest } from "../../lib/required-semantic-review.js";
+import { NO_CRITERIA_FAIL_SUMMARY, NO_CRITERIA_REVIEWER_OUTCOME, requiredSemanticDecisionDigest } from "../../lib/required-semantic-review.js";
 import { deriveTaskClass } from "../../lib/task-class.js";
 import { withReceiptWork } from "../../lib/benchmark-run.js";
 import { classifyReviewOutcome, DOWNGRADE_UNCLASSIFIED, recordedReviewVerdictLines, reviewReplayLedgerFields, unclassifiedDowngrades, type ReviewReplayInput, type ReviewOutcomeDecision } from "../../lib/review-outcome-class.js";
@@ -1749,6 +1749,11 @@ export async function runReview(host: ReviewCommandHost, args: {
         const reviewerSpawnWorker: typeof spawnWorker = (spawnArgs) => reviewerSpawn(withReceiptWork(spawnArgs, reviewedWork));
         // W1-T4615: assigned before the provider call, so every later stream event names the routed model.
         let reviewerAssignment: WorkerSelectionAssignment | undefined;
+        // W1-T14037: the proofs the orchestrator recorded at this head; a reviewer command call that re-runs one is its own
+        // kind in worker.tool_lineage. Recorded only: nothing reads the kind to decide anything.
+        const recordedProofCommands = preparedDecision.proofExecutions()
+          .filter((execution) => execution.cwd === args.headCheckoutDir)
+          .map(({ command, args: argv, cwd }) => ({ command, args: [...argv], cwd }));
         try {
           let priorSignal: string | undefined;
           for (;;) {
@@ -1787,7 +1792,10 @@ export async function runReview(host: ReviewCommandHost, args: {
                 // a terminal verdict when this bound trips.
                 ...reviewerClockBound,
                 onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
-                streamObserver: args.workerTelemetry ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment)) : undefined,
+                streamObserver: args.workerTelemetry
+                  ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment))
+                  : undefined,
+                reviewer: { recordedProofCommands, cwd: snapshot.cwd },
                 promptTemplate,
                 prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
               }),
@@ -1831,6 +1839,8 @@ export async function runReview(host: ReviewCommandHost, args: {
           downgrades: semantic.filter((s) => s === false).length,
           // W1-T11428: criteria this reviewer could not inspect; W1-T11432 reads the provider beside it.
           unable: reviewerUnable.filter((u) => u !== undefined).length,
+          // W1-T14037: reviewer command calls by kind; `proof-rerun` re-ran a proof the orchestrator recorded at this head.
+          ...(reviewer.reviewerCommandKinds ? { command_kinds: reviewer.reviewerCommandKinds } : {}),
           ...(args.excludeProviders?.length ? { exclude_providers: [...args.excludeProviders] } : {}),
           ...(reviewerAssignment?.routing.exclusion_unhonoured
             ? { exclusion_unhonoured: reviewerAssignment.routing.exclusion_unhonoured } : {}),
@@ -1888,7 +1898,12 @@ export async function runReview(host: ReviewCommandHost, args: {
   // W1-T63/P10-a: LEGIBLE outcome of the reviewer spawn — a floor-only PASS
   // (never attempted, or attempted but walled/spawn-failed) is never
   // byte-identical in the ledger/console to a review the reviewer COMPLETED.
-  const outcome = reviewerOutcome({
+  // W1-T14826: under required semantic review, a code PR naming no criteria (and no verified mover removal) has nothing
+  // for a reviewer to judge; its own outcome lets the gate post the floor's FAIL once instead of withholding it on every
+  // run. A deterministic or advisory run keeps the bare `not_attempted` (W1-T14156 criterion 3).
+  const noCriteriaFinal = args.requireSemanticReview === true && criteria.length === 0 && !planOnlySkip && !attemptReviewer &&
+    args.moverRemoval?.verified !== true;
+  const outcome = noCriteriaFinal ? NO_CRITERIA_REVIEWER_OUTCOME : reviewerOutcome({
     attempted: attemptReviewer,
     subtype: reviewerSubtype,
     exit: reviewerExit,
@@ -2014,6 +2029,9 @@ export async function runReview(host: ReviewCommandHost, args: {
   let { verdict, suppressed } = applyVerdictStability(computed, headSha,
     prior?.reviewContractDigest === contractDigest ? prior : undefined);
   verdict = { ...verdict, reviewContractDigest: contractDigest };
+  if (outcome === NO_CRITERIA_REVIEWER_OUTCOME && verdict.state === "failure") {
+    verdict = { ...verdict, summary: NO_CRITERIA_FAIL_SUMMARY };
+  }
 
   // Ask again once per head and input when an unclassified downgrade survives stability and the floor did not fail.
   const downgradeUnclassified = suppressed || preliminaryProofs?.floorState === "failure" ? []

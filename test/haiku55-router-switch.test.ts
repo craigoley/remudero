@@ -18,7 +18,7 @@ test("Haiku 5.5 leads Claude economy with a same-capability legacy fallback and 
     "claude-haiku-4-5-20251001");
   assert.equal(openWeightDeploymentReady(MODEL), true);
   for (const effort of ["low", "medium", "high"]) {
-    assert.deepEqual(table.cash!.economy[effort], ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", "gpt-5.6-luna", MODEL]);
+    assert.deepEqual(table.cash!.economy[effort], ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna", MODEL]);
     assert.equal(selectOpenWeightModel(table, MODEL, effort, 100).model, "gpt-oss-120b");
     assert.equal(selectOpenWeightModel(table, MODEL, effort, 100, { only: [MODEL] }).model, MODEL);
     assert.equal(table.cash!.balanced[effort].includes(MODEL), false);

@@ -135,10 +135,12 @@ async function sixHourStream(changesFor: (sha: string) => { sha: string; files: 
   return { rows, restarts };
 }
 
-test("a 6-h stream with a weight-18 advance every 20 min restarts the daemon at most 4 times, each hold ledgered", async () => {
+// W1-T14751, OPERATOR RULING 2026-11-25 ("After each quiet burst of merges"): this stream's daemon is idle, so it no
+// longer sits out the 90-minute floor. It restarts once per advance, when that advance's quiet window has closed.
+test("a 6-h idle stream with a weight-18 advance every 20 min restarts once per advance, after its quiet window, each hold ledgered", async () => {
   const { rows, restarts } = await sixHourStream((sha) => [{ sha, files: ["src/lib/daemon.ts"] }]);
-  assert.ok(restarts.length >= 1, "the control: the stream does restart the daemon");
-  assert.ok(restarts.length <= 4, `restarts at minutes ${restarts.map((at) => (at - START) / MINUTE).join(", ")}`);
+  const minutes = restarts.map((at) => (at - START) / MINUTE);
+  assert.deepEqual(minutes, Array.from({ length: 17 }, (_, i) => 30 + 20 * i), `restarts at minutes ${minutes.join(", ")}`);
   const held = rows.filter((row) => row.step === "daemon.freshness_coalesced" && row.extra.held_by === "min_lifetime");
   const decisions = rows.filter((row) => row.step === "daemon.freshness_decision" && row.extra.held_by === "min_lifetime");
   assert.ok(held.length > 0 && decisions.length === held.length, "every min_lifetime hold is on both rows");
@@ -147,8 +149,13 @@ test("a 6-h stream with a weight-18 advance every 20 min restarts the daemon at 
     assert.equal(row.extra.reason, "min_lifetime");
     assert.ok(Number(row.extra.lifetime_ms) < 90 * MINUTE);
   }
-  const released = rows.filter((row) => row.step === "daemon.freshness_decision" && row.extra.action === "restart");
-  for (const row of released) assert.ok(Number(row.extra.lifetime_ms) >= 90 * MINUTE, `released at ${row.extra.lifetime_ms}`);
+  for (const row of held) assert.ok(row.atMs < Number(row.extra.window_ends_at_ms), "a hold is only ever inside its quiet window");
+  const released = rows.filter((row) => row.step === "daemon.freshness_coalesced" && row.extra.action === "restart");
+  assert.equal(released.length, restarts.length, "every restart is ledgered on the coalesce row");
+  for (const row of released) {
+    assert.equal(row.extra.reason, judge.IDLE_RELEASE);
+    assert.ok(row.atMs >= Number(row.extra.window_ends_at_ms), `released at ${row.atMs}, window ends ${row.extra.window_ends_at_ms}`);
+  }
 });
 
 test("an install-input advance restarts a young daemon on its first decision", async () => {

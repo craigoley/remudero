@@ -402,7 +402,9 @@ test("W1-T10953: a stale or partial adopted collector reports its actual source 
     assert.ok(empty.reasons.includes("ledger-positive-control-missing"));
     writeFileSync(join(f.sources[0]!.stateDir, "ledger.ndjson"), ndjson([assignment("1")]));
     const bounded = (await dailyRoutingReview({ ...f, asOf, retention: { maxRowBytes: 2 } })).snapshot;
-    assert.ok(bounded.sources[0].reasons.includes("ledger-row-byte-bound"));
+    // W1-T14473: an oversized row is counted and skipped, and still keeps the source partial with a named reason.
+    assert.ok(bounded.sources[0].reasons.includes("ledger-row-over-bound"));
+    assert.equal(bounded.sources[0].oversizedRows, 1);
     assert.equal(bounded.stages.collection.state, "partial");
     assert.equal(bounded.sources.length, 3, "a source failure preserves later independent reads");
     const unavailable = (await dailyRoutingReview({ ...f, asOf, retention: { scratchDir: join(f.dir, "absent") } })).snapshot;

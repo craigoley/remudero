@@ -78,9 +78,10 @@ const MACHINE: Record<string, string> = {
   "W1-T607": at("W1-T607", 3),
   "W1-T608": at("W1-T608", 2).replace("status: queued", "status: done"),
 };
-const EXPECTED_BATCH = ["W1-T602", "W1-T605", "W1-T607"];
+// W1-T14825: W1-T606, named only by W1-T605 in the same batch, now joins it instead of waiting a round as public_dependants.
+const EXPECTED_BATCH = ["W1-T602", "W1-T605", "W1-T606", "W1-T607"];
 const EXPECTED_REFUSED = [
-  { id: "W1-T603", reason: "not_open" }, { id: "W1-T604", reason: "reservation_absent" }, { id: "W1-T606", reason: "public_dependants" }, { id: "W1-T608", reason: "not_open" },
+  { id: "W1-T603", reason: "not_open" }, { id: "W1-T604", reason: "reservation_absent" }, { id: "W1-T608", reason: "not_open" },
 ];
 const HUMAN: Record<string, string> = { "W1-T601": human("W1-T601", 9), "W1-T609": human("W1-T609", 1, "blocked") };
 const prepare = (w: ReturnType<typeof moveWorld>) => { w.pub.origin.git("update-ref", "-d", "refs/rmd-id/W1-T604"); };

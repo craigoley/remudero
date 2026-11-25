@@ -2,11 +2,17 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
+import { landTaskFilesAsync, type LandTaskFilesOpts, type TaskFileInput } from "./feedback-landing.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
 import { bestNearDuplicate } from "./knowledge-dedup.js";
+import { readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "./ops-catalog-source.js";
 import { loadPlan, type RetirementReason, type Task } from "./plan.js";
+import { planDestinationRepository } from "./plan-destination.js";
+import { planPrPreflightAtCommitAsync, type PlanPrPreflightInput } from "./plan-pr-emitter.js";
+import { preflightOnUnmovedRecords } from "./plan-reconcile-batch.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { loadCreditStore } from "./status.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 /**
  * lib/plan-gardener.ts (W1-T4111) — the plan queue tends itself.
@@ -36,12 +42,46 @@ export interface PlanGardenAction extends GardenAction<PlanGardenClass> {
   landingCommit?: string;
 }
 
+/** W1-T14642: the ops catalog as one read left it, at one pinned commit. */
+export interface PlanOpsCatalog {
+  /** The ops main commit every record's bytes below were read at: the landing's unmoved-records guard is judged against it. */
+  pin: string;
+  tasks: Task[];
+  /** Task id → the record's path in the ops repository, for tasks that sit alone in their own shard. */
+  shards: Map<string, string>;
+  /** Record path → the bytes read at the pin, which an ops edit is made on. */
+  sources: Map<string, string>;
+}
+
+/** W1-T14642: what reading the ops catalog answered. `off`: none is configured, so the public plan is the whole
+ *  plan. `unavailable`: one is configured and could not be read now, so what it holds is unknown, never absent. */
+export type PlanOpsRead = { outcome: "off" } | { outcome: "unavailable"; reason: string } | ({ outcome: "ok" } & PlanOpsCatalog);
+
+/** W1-T14642: the plan gardener's two ops seams: the catalog read, and the ops plan landing an ops edit goes through. */
+export interface PlanGardenOps {
+  read: () => PlanOpsRead | Promise<PlanOpsRead>;
+  /** Starts a landing of edited records, read at `pin`, in the ops repository; the production landing is awaited by its owner. */
+  land: (inputs: readonly TaskFileInput[], pin: string) => void;
+  /** Every id `refs/rmd-id/` holds, so a reserved, unfiled id is not called unknown; undefined when it cannot be read. */
+  reservedIds?: () => Promise<ReadonlySet<string> | undefined>;
+}
+
 export interface PlanInventory {
-  /** Queued, unretired, uncredited tasks, in plan order. */
+  /** Queued, unretired, uncredited tasks, in plan order: the public catalog's, then the ops catalog's. */
   open: Task[];
   all: Task[];
   /** Task id → repo-relative shard path, for tasks that live in their own shard. */
   shards: Map<string, string>;
+  /** W1-T14642: the ops catalog, when one was read. Its tasks are in `open` and `all` too. */
+  ops?: PlanOpsCatalog;
+  /** W1-T14642: every id a catalog holds or `refs/rmd-id/` reserves; absent when a configured ops catalog was unreadable, so no id can be called unknown. */
+  known?: ReadonlySet<string>;
+}
+
+/** W1-T14642: the orphaned holds: blocked tasks, in either catalog, with no `retirement:` and no `needs_input:` question
+ *  to wait on. Nothing releases or retires them, so they are flagged on the scorecard and never edited. */
+export function orphanedHolds(inv: Pick<PlanInventory, "all">): string[] {
+  return inv.all.filter((t) => t.status === "blocked" && !t.retirement && t.needs_input === undefined).map((t) => t.id);
 }
 
 /** Title similarity at which two queued tasks are one task. Exact, because templated titles for
@@ -61,13 +101,26 @@ export function mainTrailerTaskIds(repoRoot: string): Set<string> {
   return new Set([...result.stdout.matchAll(/^Remudero-Task:[ \t]+([A-Za-z0-9][A-Za-z0-9-]*)[ \t]*$/gm)].map((m) => m[1]!));
 }
 
-export function planInventory(repoRoot: string, stateDir: string): PlanInventory {
+/** `reserved`: the ids `refs/rmd-id/` holds (a reserved id is not unknown), or `"unreadable"` when they cannot be read. */
+export function planInventory(repoRoot: string, stateDir: string, opsRead: PlanOpsRead = { outcome: "off" }, reserved: ReadonlySet<string> | "unreadable" = new Set()): PlanInventory {
   const layout = resolveRepoLayout(repoRoot);
   const plan = loadPlan(layout.planMonolith);
   const credited = loadCreditStore(join(stateDir, "merge-credit.json"));
   const inMain = mainTrailerTaskIds(repoRoot);
-  const open = plan.tasks.filter((t) => t.status === "queued" && !t.retirement && !credited[t.id] && !inMain.has(t.id));
-  return { open, all: plan.tasks, shards: planShards(repoRoot) };
+  const ops = opsRead.outcome === "ok" ? opsRead : undefined;
+  const all = [...plan.tasks, ...(ops?.tasks ?? [])];
+  const open = all.filter((t) => t.status === "queued" && !t.retirement && !credited[t.id] && !inMain.has(t.id));
+  return {
+    open, all, shards: planShards(repoRoot),
+    ...(ops ? { ops: { pin: ops.pin, tasks: ops.tasks, shards: ops.shards, sources: ops.sources } } : {}),
+    ...(opsRead.outcome === "unavailable" || reserved === "unreadable" ? {} : { known: new Set([...all.map((t) => t.id), ...reserved]) }),
+  };
+}
+
+/** The ids a shard text holds, when exactly one: the only shape a one-line edit can change without touching a neighbour. */
+export function soleTaskId(text: string): string | undefined {
+  const ids = [...text.matchAll(/^- id: (\S+)[ \t]*$/gm)].map((m) => m[1]!);
+  return ids.length === 1 ? ids[0] : undefined;
 }
 
 /** Task id → repo-relative path, for every shard that holds exactly one task — the only shape a
@@ -78,8 +131,8 @@ export function planShards(repoRoot: string): Map<string, string> {
   if (!existsSync(dir)) return shards;
   for (const ent of readdirSync(dir, { withFileTypes: true })) {
     if (!ent.isFile() || !ent.name.endsWith(".yaml")) continue;
-    const ids = [...readFileSync(join(dir, ent.name), "utf8").matchAll(/^- id: (\S+)[ \t]*$/gm)].map((m) => m[1]!);
-    if (ids.length === 1) shards.set(ids[0]!, relative(repoRoot, join(dir, ent.name)));
+    const id = soleTaskId(readFileSync(join(dir, ent.name), "utf8"));
+    if (id !== undefined) shards.set(id, relative(repoRoot, join(dir, ent.name)));
   }
   return shards;
 }
@@ -171,14 +224,21 @@ export function proofLandingCommit(repoRoot: string, filed: string, proofs: stri
 export function retirementCandidates(inv: PlanInventory, repoRoot: string): PlanGardenAction[] {
   const abandoned = new Set(inv.all.filter((t) => t.retirement && ABANDONED_RETIREMENTS.has(t.retirement)).map((t) => t.id));
   const out: PlanGardenAction[] = [];
+  const opsIds = new Set((inv.ops?.tasks ?? []).map((t) => t.id));
   for (const t of inv.open) {
     if (t.status !== "queued" || t.retirement) continue;
     const gone = t.depends_on.filter((d) => abandoned.has(d));
+    // W1-T14642: an id neither catalog holds names a task that was never filed or is gone; it can never be built.
+    const unknown = t.depends_on.filter((d) => inv.known !== undefined && !inv.known.has(d));
     // An abandoned subject may still need a research finding; dependency state alone cannot retire recon.
-    if (gone.length > 0 && t.type !== "recon") {
-      out.push({ class: "retire", target: t.id, retirement: "retired", reason: `It depends on ${gone.join(", ")}, which will never be built.` });
+    if (gone.length + unknown.length > 0 && t.type !== "recon") {
+      const why = [...(gone.length > 0 ? [`It depends on ${gone.join(", ")}, which will never be built.`] : []),
+        ...(unknown.length > 0 ? [`It depends on ${unknown.join(", ")}, which no catalog holds and no reservation covers.`] : [])];
+      out.push({ class: "retire", target: t.id, retirement: "retired", reason: why.join(" ") });
       continue;
     }
+    // The acceptance proofs below are read against the public checkout, never an ops record's.
+    if (opsIds.has(t.id)) continue;
     // A proof that greps the task's OWN shard holds from the moment it is filed, so it is no evidence the
     // work happened; only proofs about other files count, and there must be at least one.
     const own = inv.shards.get(t.id);
@@ -200,11 +260,12 @@ export function retirementCandidates(inv: PlanInventory, repoRoot: string): Plan
 
 export function planCandidates(inv: PlanInventory, repoRoot: string): PlanGardenAction[] {
   const inShard = (id: string) => inv.shards.has(id);
+  const inAnyShard = (id: string) => inShard(id) || (inv.ops?.shards.has(id) ?? false);
   const merges: PlanGardenAction[] = duplicateTasks(inv.open)
     .filter(([newer]) => inShard(newer.id))
     .map(([newer, older]) => ({ class: "merge", target: newer.id, into: older.id, retirement: "withdrawn", reason: "Its title and files repeat an older queued task." }));
   const merging = new Set(merges.map((m) => m.target));
-  return [...merges, ...retirementCandidates(inv, repoRoot).filter((a) => inShard(a.target) && !merging.has(a.target))];
+  return [...merges, ...retirementCandidates(inv, repoRoot).filter((a) => inAnyShard(a.target) && !merging.has(a.target))];
 }
 
 /** The comment an action leaves in the shard it changed. */
@@ -231,6 +292,15 @@ function withoutNeedsInput(text: string): string {
   return kept.join("\n");
 }
 
+/** The shard text with `a` applied, or undefined when it is no longer a queued, unretired record. A landed task was
+ *  BUILT: `done` alone. `retirement:` means it never will be, and is read only on a blocked task
+ *  (test/retirement-reaches-its-reader.test.ts); the marker keeps the reason. */
+export function planGardenEdit(text: string, a: PlanGardenAction): string | undefined {
+  if (/^ {2}retirement:/m.test(text) || !/^ {2}status: queued[ \t]*$/m.test(text)) return undefined;
+  const status = a.landingCommit ? "  status: done" : `  status: blocked\n  retirement: ${a.retirement}`;
+  return withoutNeedsInput(text.replace(/^ {2}status: queued[ \t]*$/m, `${status}\n  # ${planGardenMarker(a)}${a.landingCommit ? ` commit ${a.landingCommit}` : ""} — ${a.reason}`));
+}
+
 /** Reconcile each queued target in its own shard; record a completion's landing commit in its marker. */
 export function applyPlanActions(repoRoot: string, shards: Map<string, string>, actions: PlanGardenAction[]): string[] {
   const changed: string[] = [];
@@ -238,15 +308,36 @@ export function applyPlanActions(repoRoot: string, shards: Map<string, string>, 
     const rel = shards.get(a.target);
     if (!rel) continue;
     const path = join(repoRoot, rel);
-    const text = readFileSync(path, "utf8");
-    if (/^ {2}retirement:/m.test(text) || !/^ {2}status: queued[ \t]*$/m.test(text)) continue;
-    // A landed task was BUILT: `done` alone. `retirement:` means it never will be, and is read only on a
-    // blocked task (test/retirement-reaches-its-reader.test.ts); the marker below keeps the reason.
-    const status = a.landingCommit ? "  status: done" : `  status: blocked\n  retirement: ${a.retirement}`;
-    writeFileSync(path, withoutNeedsInput(text.replace(/^ {2}status: queued[ \t]*$/m, `${status}\n  # ${planGardenMarker(a)}${a.landingCommit ? ` commit ${a.landingCommit}` : ""} — ${a.reason}`)));
+    const edited = planGardenEdit(readFileSync(path, "utf8"), a);
+    if (edited === undefined) continue;
+    writeFileSync(path, edited);
     changed.push(rel);
   }
   return changed.sort();
+}
+
+/**
+ * W1-T14642: the ops landing's inputs for the ops-catalog `actions`: each record's pinned bytes with the action applied,
+ * and the criterion the landing PR states for it. A record that no longer reads as queued is left out. The landing
+ * itself is guarded twice: its preflight ({@link opsPlanLandingPreflight}) refuses a candidate when any commit since the
+ * pin touched a carried record, and the staged copy refuses a record whose blob on the ops main moved after staging.
+ */
+export function opsLandingInputs(ops: PlanOpsCatalog, actions: readonly PlanGardenAction[]): { inputs: TaskFileInput[]; landed: PlanGardenAction[] } {
+  const inputs: TaskFileInput[] = [];
+  const landed: PlanGardenAction[] = [];
+  for (const a of actions) {
+    const rel = ops.shards.get(a.target);
+    const source = rel === undefined ? undefined : ops.sources.get(rel);
+    const content = source === undefined ? undefined : planGardenEdit(source, a);
+    if (rel === undefined || content === undefined) continue;
+    inputs.push({
+      relPath: rel, content,
+      claim: `the gardener's ${a.class} of ${a.target} is marked in its record`,
+      proof: `grep: ${planGardenMarker(a)} in ${rel}`,
+    });
+    landed.push(a);
+  }
+  return { inputs, landed };
 }
 
 function prBody(actions: PlanGardenAction[], shards: Map<string, string>): string {
@@ -273,7 +364,14 @@ export function planCheapFingerprint(repoRoot: string, stateDir: string): string
 }
 
 /** The plan queue as a gardener spec. */
-export function planGardenSpec(deps: GardenerDeps): GardenSpec<PlanGardenClass, PlanInventory, PlanGardenAction, GardenCheckout> {
+export function planGardenSpec(deps: GardenerDeps, opsSeam?: PlanGardenOps): GardenSpec<PlanGardenClass, PlanInventory, PlanGardenAction, GardenCheckout> {
+  // The ops catalog the pass's own inventory read: an ops edit is made on those bytes, so apply reads them from here.
+  let readOps: PlanOpsCatalog | undefined;
+  const inventoryOf = (opsRead: PlanOpsRead, reserved?: ReadonlySet<string> | "unreadable"): PlanInventory => {
+    const inv = planInventory(deps.repoRoot, deps.stateDir, opsRead, reserved);
+    readOps = inv.ops;
+    return inv;
+  };
   return {
     name: "plan",
     classes: PLAN_GARDEN_CLASSES,
@@ -282,13 +380,29 @@ export function planGardenSpec(deps: GardenerDeps): GardenSpec<PlanGardenClass, 
       retire: "reconciling completed or abandoned work is a judgement call.",
     },
     cheapFingerprint: () => planCheapFingerprint(deps.repoRoot, deps.stateDir),
-    inventory: () => planInventory(deps.repoRoot, deps.stateDir),
+    // A sync caller cannot await the catalog read, so with an ops seam it sees the ops catalog as unreadable.
+    inventory: () => inventoryOf(opsSeam ? { outcome: "unavailable", reason: "sync-read" } : { outcome: "off" }),
+    ...(opsSeam ? { inventoryAsync: async () => {
+      const opsRead = await opsSeam.read();
+      return inventoryOf(opsRead, opsSeam.reservedIds ? (await opsSeam.reservedIds()) ?? "unreadable" : undefined);
+    } } : {}),
     fingerprint: (inv) => `${inv.all.length}:${inv.open.map((t) => t.id).join(",")}`,
     candidates: (inv) => planCandidates(inv, deps.repoRoot),
-    scorecard: (inv, plan) => ({ open: inv.open.length, tasks: inv.all.length, proposed: plan.actions.length }),
+    scorecard: (inv, plan) => {
+      const orphaned = orphanedHolds(inv);
+      return {
+        open: inv.open.length, tasks: inv.all.length, proposed: plan.actions.length, opsTasks: inv.ops?.tasks.length ?? null,
+        orphanedHolds: orphaned.length, orphanedHoldIds: orphaned.slice(0, 20),
+      };
+    },
     apply: (ws, plan) => {
       const shards = planShards(ws.root);
-      const paths = applyPlanActions(ws.root, shards, plan.actions);
+      const paths = applyPlanActions(ws.root, shards, plan.actions.filter((a) => shards.has(a.target)));
+      // An ops record is not in this checkout: it lands through the ops plan landing, beside the public PR.
+      if (opsSeam && readOps) {
+        const { inputs } = opsLandingInputs(readOps, plan.actions.filter((a) => !shards.has(a.target)));
+        if (inputs.length > 0) opsSeam.land(inputs, readOps.pin);
+      }
       if (paths.length === 0) return undefined;
       const landed = plan.actions.filter((a) => paths.includes(shards.get(a.target) ?? ""));
       return {
@@ -298,4 +412,131 @@ export function planGardenSpec(deps: GardenerDeps): GardenSpec<PlanGardenClass, 
       };
     },
   };
+}
+
+/**
+ * W1-T14642 — the plan gardener's production ops seams (the ops catalog read, the ops plan landing, the reservation read).
+ *
+ * READ: the ops task catalog at one pinned commit (ops-catalog-source.ts), each record's bytes read from the ops
+ * checkout at that pin. A catalog that cannot be read is `unavailable`, never an empty catalog: what it holds is
+ * unknown, so the gardener calls no dependency unknown while it is.
+ * LAND: an ops edit goes through the sealed task-files landing into the plan destination, never into the public tree,
+ * so one landing never mixes public and ops paths.
+ */
+/**
+ * The part of the ops status landing every ops plan landing shares (buildCatalogPlanReconcileInput in run-task.ts calls
+ * it too): the ops checkout must hold `pin`, the commit the catalog was read at. A checkout that lags the API-pinned main
+ * is fetched, without switching its branch, and is only used when the fetched main is that same commit; otherwise this
+ * throws `ops-status-source-moved`, and a git failure throws as it is.
+ */
+export async function assertOpsCheckoutAtPin(checkoutDir: string, pin: string): Promise<void> {
+  if ((await hostWorktreeGitAsync(checkoutDir, ["rev-parse", "HEAD"])).trim() === pin) return;
+  await hostWorktreeGitAsync(checkoutDir, ["fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"]);
+  if ((await hostWorktreeGitAsync(checkoutDir, ["rev-parse", "origin/main"])).trim() !== pin) throw new Error("ops-status-source-moved");
+}
+
+export interface OpsPlanLandingPreflightOptions {
+  /** The ops repository's checkout the landing builds its candidate in. */
+  checkoutDir: string;
+  pin: string;
+  /** The record paths the landing carries pin-derived bytes for; read when the preflight runs, so it may fill after this is built. */
+  carriedPaths: Iterable<string>;
+  /** The public code root the plan lint and the task-id check run from. */
+  codeRoot: string;
+  log?: (step: string, extra?: Record<string, unknown>) => void;
+  /** The plan PR preflight run after the unmoved-records guard; a test's stand-in. */
+  inner?: typeof planPrPreflightAtCommitAsync;
+}
+
+/**
+ * The plan PR preflight of an ops plan landing, shared by the ops status reconcile and the plan gardener: a candidate based
+ * on a newer ops main must never overwrite it with bytes read at the older pin (W1-T14574), so the plan preflight (plan-body
+ * proofs read against the candidate's plan folder) runs only when no commit since the pin touched a carried record.
+ */
+export function opsPlanLandingPreflight(o: OpsPlanLandingPreflightOptions): (sha: string, pr: Omit<PlanPrPreflightInput, "cwd">) => Promise<Awaited<ReturnType<typeof planPrPreflightAtCommitAsync>>> {
+  const inner = o.inner ?? planPrPreflightAtCommitAsync;
+  return preflightOnUnmovedRecords(
+    (args) => hostWorktreeGitAsync(o.checkoutDir, args), o.pin, o.carriedPaths,
+    (sha, pr: Omit<PlanPrPreflightInput, "cwd">) => inner(o.checkoutDir, sha, { ...pr, codeRoot: o.codeRoot, bodyProofRoot: "plan" }, { log: o.log }),
+  );
+}
+
+export interface ProductionPlanGardenOpsOptions {
+  repoRoot: string;
+  stateDir: string;
+  /** Daemon state root: the sealed landing's queue waits under it. */
+  stateRoot: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  api?: OpsCatalogApi;
+  /** The sealed landing, replaceable so a test lands nothing. */
+  landTaskFiles?: typeof landTaskFilesAsync;
+  /** The plan PR preflight the landing runs once its unmoved-records guard passes; the real one when absent. */
+  planPrPreflight?: typeof planPrPreflightAtCommitAsync;
+}
+
+export function productionPlanGardenOps(o: ProductionPlanGardenOpsOptions): PlanGardenOps & { settled: () => Promise<void> } {
+  const landings: Promise<void>[] = [];
+  // One `ls-remote` of the reservation namespace; a read that fails is unknown, never "no reservations".
+  const reservedIds = async (): Promise<ReadonlySet<string> | undefined> => {
+    try {
+      const out = await hostWorktreeGitAsync(o.repoRoot, ["ls-remote", "origin", "refs/rmd-id/*"]);
+      return new Set([...out.matchAll(/refs\/rmd-id\/([A-Za-z0-9][A-Za-z0-9-]*)[ \t]*$/gm)].map((m) => m[1]!));
+    } catch (error) {
+      o.log("plan.reservations_unreadable", { error: String((error as Error)?.message ?? error) });
+      return undefined;
+    }
+  };
+  const landTaskFiles = o.landTaskFiles ?? landTaskFilesAsync;
+  const read = async (): Promise<PlanOpsRead> => {
+    const destination = planDestinationRepository(o.stateDir);
+    if (destination.outcome === "off") return { outcome: "off" };
+    if (destination.outcome !== "named") return { outcome: "unavailable", reason: `plan-destination-${destination.outcome}` };
+    const snapshot = await readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, o.api);
+    if (snapshot.outcome !== "ok" || !snapshot.plan || !snapshot.binding) return { outcome: "unavailable", reason: `ops-${snapshot.outcome}` };
+    const publicPlan = loadPlan(resolveRepoLayout(o.repoRoot).planMonolith);
+    // One id held by both catalogs is ambiguous: neither copy can be edited by id.
+    if (snapshot.plan.tasks.some((t) => publicPlan.byId.has(t.id))) return { outcome: "unavailable", reason: "ops-duplicate_task_id" };
+    const pin = snapshot.binding.commit;
+    const shards = new Map<string, string>();
+    const sources = new Map<string, string>();
+    try {
+      // The records' bytes are read at the pin, so the checkout must hold it, exactly as the ops status reconcile requires.
+      await assertOpsCheckoutAtPin(destination.checkoutDir, pin);
+      for (const task of snapshot.plan.tasks) {
+        const source = task.sourcePath;
+        if (!source || !/^tasks\.d\/[^/]+\.ya?ml$/.test(source)) continue;
+        const path = `plan/${source}`;
+        if (!sources.has(path)) sources.set(path, await hostWorktreeGitAsync(destination.checkoutDir, ["show", `${pin}:${path}`]));
+        // Only a record that sits alone in its file can be edited without touching a neighbour.
+        if (soleTaskId(sources.get(path)!) === task.id) shards.set(task.id, path);
+      }
+    } catch (error) {
+      // A checkout that lags or lacks the pin leaves the ops catalog unknown, never failing the public pass.
+      o.log("plan.ops_checkout_unreadable", { error: String((error as Error)?.message ?? error) });
+      return { outcome: "unavailable", reason: "ops-checkout-unreadable" };
+    }
+    return { outcome: "ok", pin, tasks: snapshot.plan.tasks, shards, sources };
+  };
+  const land = (inputs: readonly TaskFileInput[], pin: string): void => {
+    const destination = planDestinationRepository(o.stateDir);
+    if (destination.outcome !== "named") {
+      o.log("plan.ops_landing_skipped", { reason: `plan-destination-${destination.outcome}`, records: inputs.length });
+      return;
+    }
+    const opts: LandTaskFilesOpts = {
+      stateRoot: o.stateRoot, targetRepository: { owner: destination.owner, repo: destination.repo }, log: o.log, lane: "plan",
+      // The ops status landing's preflight: refuse a candidate whose carried records moved since the pin.
+      planPrPreflight: opsPlanLandingPreflight({
+        checkoutDir: destination.checkoutDir, pin, carriedPaths: inputs.map((i) => i.relPath), codeRoot: o.repoRoot, log: o.log,
+        ...(o.planPrPreflight ? { inner: o.planPrPreflight } : {}),
+      }),
+    };
+    landings.push(landTaskFiles(destination.checkoutDir, [...inputs], opts).then((result) => {
+      o.log("plan.ops_landing", { records: inputs.length, pr_url: result.prUrl ?? null, landed: result.landed.length, waiting: result.waiting.length, refused: result.refused.length, ...(result.error ? { error: result.error } : {}) });
+    }, (error: unknown) => {
+      o.log("plan.ops_landing_failed", { records: inputs.length, error: String((error as Error)?.message ?? error) });
+    }));
+  };
+  // A landing's failure is logged where it happens, so waiting on the landings never throws.
+  return { read, land, reservedIds, settled: async () => void (await Promise.all(landings.splice(0))) };
 }
