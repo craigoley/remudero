@@ -9673,6 +9673,21 @@ export function cancelledCheckAlreadyRequeuedFromSurface(runAttempt: number | un
   return typeof runAttempt === "number" && runAttempt > 1;
 }
 
+/** W1-T13186 — the posted gates a cancelled producer explains that STILL read CANCELLED: the read's own
+ *  failure for the gate says CANCELLED, and the fresh rollup (when one was read) holds no newer failing
+ *  attempt of that name. A gate reading FAILURE is never named here, so its build-arm path is unchanged. */
+export function foldedCancelledGateNames(
+  cancelled: readonly CancelledRequiredCheck[],
+  failures: readonly CiFailure[],
+  rollup: RollupCheckEntry[] | undefined,
+): Set<string> {
+  const latest = dedupeRollupByLatestAttempt(rollup ?? []);
+  return new Set(cancelled.flatMap((c) => c.explainedFailures ?? []).filter((alias) =>
+    failures.some((f) => f.name === alias.name && f.conclusion === "CANCELLED") &&
+    latest.filter((l) => (l.name ?? l.context) === alias.name).every((l) =>
+      !l.checkRunId || l.checkRunId === alias.checkRunId || !REQUIRED_CHECK_FAIL.has(rollupState(l)))).map((alias) => alias.name));
+}
+
 /** W1-T1223 — which check has a LATEST (deduped) attempt that is CANCELLED. A genuinely FAILING
  *  check is never named: only the literal CANCELLED conclusion separates "nobody reached a verdict"
  *  from "a verdict came back bad". An unreadable `requiredContexts` names nothing. W1-T2283 dropped
@@ -26623,7 +26638,7 @@ export async function runSweep(
           if (!producer || (producer.conclusion ?? producer.state ?? "").toUpperCase() !== "CANCELLED" ||
               (producer.status ?? "").toUpperCase() !== "COMPLETED" || !check.explainedFailures.every(alias => {
                 const aliases = freshProducers.filter(latest => (latest.name ?? latest.context) === alias.name && latest.checkRunId === alias.checkRunId);
-                return aliases.length === 1 && rollupState(aliases[0]) === "FAILURE";
+                return aliases.length === 1 && ["FAILURE", "CANCELLED"].includes(rollupState(aliases[0]));
               })) {
             outcomes.push(`producer cancellation for "${check.name}" is no longer confirmed — awaiting fresh CI`);
             continue;
@@ -28924,8 +28939,12 @@ export async function runSweep(
                 // this pass is a cancellation, stand down rather than burning a strike on nothing.
                 // `acted` stays FALSE: claiming true would seed `prior.fixed`, dedupe the whole
                 // disposition away, and stop this logic observing the second cancellation.
+                // W1-T13186: a posted gate that reads CANCELLED and is folded into its producer is that
+                // producer's own cancellation, so it never earns a fix round beside the one re-queue.
+                const foldedGates = foldedCancelledGateNames(cancelledChecks, ciFailuresForFix, ciGateRollup);
                 const genuineFailures = ciFailuresForFix.filter((f) =>
-                  deterministicTimeouts.has(f.name) || !cancelledChecks.some((c) => c.name === f.name));
+                  deterministicTimeouts.has(f.name) ||
+                  !(cancelledChecks.some((c) => c.name === f.name) || foldedGates.has(f.name)));
                 if (genuineFailures.length === 0) {
                   acted = false;
                   const reason = `cancelled required check(s): ${outcomes.join("; ")}`;

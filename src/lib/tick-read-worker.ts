@@ -1712,7 +1712,10 @@ export function cancelledRequiredChecks(
   const names = new Set(cancelledRequiredCheckNames(rollup, requiredContexts));
   if (names.size === 0) return [];
   const deduped = dedupeRollupByLatestAttempt(rollup ?? []);
-  return deduped
+  // W1-T13186: a posted gate reading CANCELLED that is folded into its producer is that job's own alias,
+  // never a cancelled check of its own, so one physical job is one entry (and one retry).
+  const foldedAliases = new Set<string>();
+  const entries = deduped
     .filter((c) => names.has(c.name ?? c.context ?? "unknown"))
     .map((c) => {
       const check: CancelledRequiredCheck = { name: c.name ?? c.context ?? "unknown", jobId: checkJobId(c) };
@@ -1724,17 +1727,21 @@ export function cancelledRequiredChecks(
         if (!name || name === check.name || posted.headSha !== headSha || !id ||
             id[1] !== producer[1] || id[3] !== check.jobId || checkJobId(posted) !== check.jobId ||
             !Number.isSafeInteger(posted.checkRunId) || (posted.checkRunId ?? 0) <= 0 || !Number.isSafeInteger(Number(id[2])) ||
-            (posted.conclusion ?? posted.state ?? "").toUpperCase() !== "FAILURE" ||
+            !["FAILURE", "CANCELLED"].includes((posted.conclusion ?? posted.state ?? "").toUpperCase()) ||
             (posted.status ?? "").toUpperCase() !== "COMPLETED" ||
             posted.outputSummary !== `W1-T4399: reported by this job's ${name} step(s) (outcome(s): cancelled)`) return [];
-        return [{ name, attempt: Number(id[2]), checkRunId: posted.checkRunId! }];
+        return [{ name, attempt: Number(id[2]), checkRunId: posted.checkRunId!,
+          cancelled: (posted.conclusion ?? posted.state ?? "").toUpperCase() === "CANCELLED" }];
       });
       if (aliases.length > 0 && new Set(aliases.map(a => a.attempt)).size === 1) {
         check.explainedFailures = aliases.map(({ name, checkRunId }) => ({ name, checkRunId }));
         check.runAttempt = aliases[0].attempt;
+        for (const alias of aliases) if (alias.cancelled) foldedAliases.add(`${alias.name}#${alias.checkRunId}`);
       }
       return check;
     });
+  return entries.filter((check) => check.explainedFailures?.length ||
+    !deduped.some((c) => (c.name ?? c.context) === check.name && foldedAliases.has(`${check.name}#${c.checkRunId}`)));
 }
 
 /**

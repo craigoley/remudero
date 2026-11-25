@@ -175,3 +175,16 @@ test("posted cancellation evidence refuses wrong or missing heads, jobs, runs, a
   privateOutput[1].output = { summary: "PRIVATE_OTHER_CHECK_OUTPUT" };
   assert.equal(Object.hasOwn(read(privateOutput)[1], "outputSummary"), false, "unrelated check output is not retained in the cancellation read model");
 });
+
+test("W1-T13186: a posted gate reading cancelled folds into its producer with the same list", () => {
+  const checks = linkedChecks();
+  checks[1].conclusion = "cancelled";
+  const rollup = fetchOpenPrsWithPostedIds(OWNER, REPO, args => {
+    if (args[1].includes("/pulls?")) return [{ number: 13501, html_url: "https://github.com/owner/repo/pull/13501", head: { ref: "run-unfiled-1", sha: LINK_HEAD }, updated_at: "2026-10-22T02:36:53Z" }];
+    if (args[1].includes("/check-runs?")) return { check_runs: checks };
+    if (args[1].endsWith("/status")) return { statuses: [] };
+    throw Error("unexpected fixture route");
+  })[0].statusCheckRollup!;
+  assert.deepEqual(cancelledRequiredChecks(rollup, ["ci-gate"], LINK_HEAD),
+    [{ name: "light-gates", jobId: "119601912896", runAttempt: 1, explainedFailures: [{ name: "claims", checkRunId: 119606381286 }] }]);
+});

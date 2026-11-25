@@ -279,3 +279,24 @@ test("cancelled producer confirmation preserves an independent same-name gate in
     } finally { f.cleanup(); }
   }
 });
+
+test("W1-T13186: several posted gates reading CANCELLED spend only their one physical producer retry", async () => {
+  const f = fixture();
+  try {
+    const rollup = producerRollup();
+    rollup.push({ ...rollup[1], name: "another-gate", checkRunId: 119606381287,
+      outputSummary: "W1-T4399: reported by this job's another-gate step(s) (outcome(s): cancelled)" });
+    for (const row of rollup.slice(1)) row.conclusion = "CANCELLED";
+    const pr = producerView(rollup);
+    pr.ciFailures = pr.ciFailures!.map(failure => failure.name === PRODUCER || failure.name === "ci-gate" ? failure
+      : { ...failure, conclusion: "CANCELLED" });
+    pr.redRequiredChecks = [...pr.redRequiredChecks!, "another-gate"];
+    pr.ciFailures = [...pr.ciFailures!, { name: "another-gate", jobId: PRODUCER_JOB, conclusion: "CANCELLED", logTail: "The operation was canceled." }];
+    assert.equal(pr.cancelledRequiredChecks?.length, 1);
+    assert.equal(pr.cancelledRequiredChecks?.[0].explainedFailures?.length, 2);
+    const disposed = await f.pass(pr, { readCiGateRollup: () => rollup });
+    assert.deepEqual(f.requeued, [PRODUCER]);
+    assert.deepEqual(f.rounds, []);
+    assert.equal(disposed?.blocker, "awaiting-ci");
+  } finally { f.cleanup(); }
+});
