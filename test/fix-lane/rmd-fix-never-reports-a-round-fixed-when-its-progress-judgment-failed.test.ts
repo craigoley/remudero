@@ -19,7 +19,12 @@ import { originWithClone } from "#test/helpers/git-repo.js";
 
 const TASK = "W1-T12701";
 const PR = 18422;
-const STAMP = "2026-11-14T16:53:54.000Z";
+/** The PR's last activity, an hour before this run. The verb judges abandonment against its own clock, and a fixed
+ *  2026-11-14 stamp crossed the 14-day abandonment threshold as the wall clock moved (W1-T14786). */
+const ACTIVITY_MS = Date.now() - 3_600_000;
+const STAMP = new Date(ACTIVITY_MS).toISOString();
+/** The earlier round at this head, three hours before that activity. */
+const PRIOR_ROUND_MS = ACTIVITY_MS - 3 * 3_600_000;
 const PR_URL = `https://github.com/acme/fixrepo/pull/${PR}`;
 const WORKER = { sessionId: "T12701", costUsd: 0, text: "REPORT\nno change\n", blocks: [], stderr: "", subtype: "success",
   isError: false, apiError: false, verdict: "success", tokens: {}, compactionEvents: [], childEnvKeys: [] } as unknown as WorkerResult;
@@ -57,7 +62,7 @@ function world(t: TestContext, opts: { priorStrike: boolean }): World {
   clone.git("checkout", "--quiet", "main");
   const ledgerPath = join(root, "state", "ledger.ndjson");
   // One earlier round at this head, so the rung asks the progress judge before it spawns a worker.
-  writeFileSync(ledgerPath, opts.priorStrike ? JSON.stringify({ ts: "2026-11-14T13:53:43.000Z", run_id: "FIX-1794600000000",
+  writeFileSync(ledgerPath, opts.priorStrike ? JSON.stringify({ ts: new Date(PRIOR_ROUND_MS).toISOString(), run_id: `FIX-${PRIOR_ROUND_MS}`,
     task_id: TASK, step: "fix.dispatch", lane: "fix", strike: 1, pr_number: PR, head_sha: head, mode: "ci-log",
     round_id: "r1" }) + "\n" : "");
   const config = { root, claudeBin: "/bin/true",
@@ -130,7 +135,7 @@ async function runVerb(w: World, args: string[], route?: NonNullable<Parameters<
     [console.log, console.error] = [log, error];
   }
   const rows = readFileSync(w.ledgerPath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Row);
-  return { code, printed, rows: rows.filter((r) => String(r.run_id).startsWith("FIX-") && r.run_id !== "FIX-1794600000000") };
+  return { code, printed, rows: rows.filter((r) => String(r.run_id).startsWith("FIX-") && r.run_id !== `FIX-${PRIOR_ROUND_MS}`) };
 }
 
 test("W1-T12701 criterion 1: dispatchFix returns a no-round result for a handoff before any round, and spent after one", async (t) => {

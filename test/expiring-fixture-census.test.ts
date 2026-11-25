@@ -874,7 +874,9 @@ function shiftedRoot(files: Record<string, string>): string {
 }
 
 test("W1-T14578: one batched shifted run measures each file it reads", () => {
-  const crossing = Date.now() + DAY / 2;
+  // The crossing is read by shifted children, each moved from the host clock and never from this process's own
+  // (possibly shifted) one, so it is placed on the host clock (W1-T14786).
+  const crossing = Math.floor(performance.timeOrigin + performance.now()) + DAY / 2;
   const root = shiftedRoot({
     "test/green.test.ts": 'import { test } from "node:test";\ntest("one", () => {});\ntest("two", () => {});\n',
     "test/bomb.test.ts": `import { test } from "node:test";\nimport assert from "node:assert/strict";\ntest("fresh", () => {});\ntest("bomb", () => assert.ok(Date.now() < ${crossing}));\n`,

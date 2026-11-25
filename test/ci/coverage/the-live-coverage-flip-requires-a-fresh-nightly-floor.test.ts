@@ -27,6 +27,10 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const REPO = "craigoley/remudero";
 const NOW = new Date("2026-10-28T12:00:00Z");
+/** The selection steps run as child processes (`node scripts/coverage-floor.mjs`, the ci.yml step
+ *  bodies) whose clock the shift preload never moves (W1-T14786), so every time handed to them is
+ *  read from that same host clock, not from this process's `Date.now()`. */
+const hostClockMs = () => Math.floor(performance.timeOrigin + performance.now());
 const HEAD = "a".repeat(40);
 const LCOV = "TN:\nSF:src/a.ts\nDA:1,1\nLF:1\nLH:1\nend_of_record\nSF:src/b.ts\nDA:1,0\nLF:1\nLH:0\nend_of_record\n";
 const ALL_GREEN = Object.fromEntries(Array.from({ length: NIGHTLY_SHARD_COUNT }, (_, i) => [i + 1, 0]));
@@ -185,7 +189,7 @@ test("W1-T5892: empty shells and malformed coverage fields never authorize narro
 });
 
 test("W1-T5892: an old event cannot make a 49-hour-old floor fresh at execution", () => {
-  const execution = new Date();
+  const execution = new Date(hostClockMs());
   const measuredAt = new Date(execution.getTime() - 49 * 3_600_000);
   const cutoff = new Date(execution.getTime() - 48 * 3_600_000);
   const n = nightly({ measuredAt, row: { updatedAt: measuredAt.toISOString() } });
@@ -244,13 +248,13 @@ test("W1-T5892: a newer merge-group floor is preferred, and a refused newest fal
 
 test("W1-T5892: the CLI writes the decision for the shard and refuses an altered pin", () => {
   const pinDir = join(tmp("cli"), "coverage-floor-pin");
-  const { row, provenance } = nightly({ measuredAt: new Date(Date.now() - 3_600_000),
-    row: { updatedAt: new Date(Date.now() - 3_000_000).toISOString() } });
+  const { row, provenance } = nightly({ measuredAt: new Date(hostClockMs() - 3_600_000),
+    row: { updatedAt: new Date(hostClockMs() - 3_000_000).toISOString() } });
   const gh = ghShim(routes(pinDir, row, artifact(provenance)), { kind: "w1t5892-cli-gh" });
   const out = join(dirname(pinDir), "decision");
   const env = { ...process.env, PATH: `${gh.dir}:${process.env.PATH}`, GITHUB_REPOSITORY: REPO };
   const cli = (...args: string[]) => spawnSync(process.execPath, [join(REPO_ROOT, "scripts", "coverage-floor.mjs"), ...args], { encoding: "utf8", env });
-  const selected = cli("select", pinDir, "--as-of", new Date().toISOString(), "--decision-file", out);
+  const selected = cli("select", pinDir, "--as-of", new Date(hostClockMs()).toISOString(), "--decision-file", out);
   assert.equal(selected.status, 0, selected.stderr);
   assert.equal(readFileSync(out, "utf8"), "narrow\n");
   assert.match(selected.stdout, /coverage-floor: narrow — pinned coverage-nightly run 111/);
@@ -367,8 +371,8 @@ const live = { GITHUB_EVENT_NAME: "pull_request", RMD_AFFECTED_SUITE_LIVE: "1", 
 const output = (text: string, key: string) => text.split("\n").filter((line) => line.startsWith(`${key}=`)).at(-1)?.slice(key.length + 1) ?? "";
 
 /** Execute admission and final publication. Only GitHub transport is synthetic. */
-function admit(n = nightly({ measuredAt: new Date(Date.now() - 3_600_000),
-  row: { updatedAt: new Date(Date.now() - 3_000_000).toISOString() } }), files = artifact(n.provenance), published = "success", cwd = checkout()) {
+function admit(n = nightly({ measuredAt: new Date(hostClockMs() - 3_600_000),
+  row: { updatedAt: new Date(hostClockMs() - 3_000_000).toISOString() } }), files = artifact(n.provenance), published = "success", cwd = checkout()) {
   const selected = runStep(step(CI, "coverage-ledger", "Select one coverage floor").run!, live,
     routes(join(cwd, "coverage-floor-pin"), n.row, files), cwd);
   assert.equal(selected.status, 0, selected.out);
@@ -440,7 +444,7 @@ test("W1-T5892: one admission precedes all shards and every consumer uses its pu
 
 test("W1-T5892: refused admission and publication failure make every shard full with one named reason", () => {
   for (const a of [admit(nightly({ row: { conclusion: "failure" } })),
-    admit(nightly({ measuredAt: new Date(Date.now() - 49 * 3_600_000) })),
+    admit(nightly({ measuredAt: new Date(hostClockMs() - 49 * 3_600_000) })),
     admit(nightly(), artifact("not json")), admit(undefined, undefined, "failure")]) {
     assert.equal(a.env.FLOOR_DECISION, "full", a.selected.out);
     assert.ok(a.env.FLOOR_REASON);
@@ -472,7 +476,7 @@ test("W1-T5892: the final merge group is full when live selection is enabled and
     assert.equal(output(r.read("outputs.txt"), "class"), flag === "1" ? "SOURCE" : "NO_SRC");
   }
   const a = admit();
-  const elapsed = new Date(Date.now() + 25 * 3_600_000);
+  const elapsed = new Date(hostClockMs() + 25 * 3_600_000);
   assert.throws(() => verifyPin(join(a.selected.cwd, "coverage-floor-pin"), elapsed), /24h freshness bound/);
 });
 
@@ -562,9 +566,13 @@ test("W1-T5892: an unreadable or non-array run listing is refused by name, never
 
 test("W1-T5892: builtin consumers reject absent admission identities and missing shard receipts", () => {
   assert.throws(() => consumeFloor({ pinDir: tmp("bad"), runId: "bad" }), /no valid admission identity/);
-  const a = admit();
+  // agreeOnFloor verifies the pin against this process's clock, so the pin is selected in-process from a
+  // floor measured on that clock, not admitted by the child steps on the host clock (W1-T14786).
+  const fresh = nightly({ measuredAt: new Date(Date.now() - 3_600_000), row: { updatedAt: new Date(Date.now() - 3_000_000).toISOString() } });
+  const selected = select(fresh.row, artifact(fresh.provenance), CONSUMER, new Date());
+  assert.equal(selected.pin.decision, "narrow");
   const dir = tmp("agree");
-  writeFileSync(join(dir, "pin.json"), a.pin);
+  writeFileSync(join(dir, "pin.json"), readFileSync(join(selected.pinDir, "pin.json")));
   writeFileSync(join(dir, "lcov.info"), LCOV);
   assert.throws(() => agreeOnFloor({ shardsDir: tmp("empty"), outDir: dir }), /no shard narrowed/);
   const shards = tmp("shards");
@@ -628,6 +636,7 @@ test("W1-T5892: the CLI stamps provenance only for a trusted green run, and sele
     assert.throws(() => main(["nonsense"], env), /usage: coverage-floor\.mjs provenance\|select/);
 
     // select and consume shell the real `gh`, answered here by the shared shim on PATH.
+    // In-process from here on: `main` reads this process's clock, so the fixture does too (W1-T14786).
     const { row, provenance } = nightly({ measuredAt: new Date(Date.now() - 3_600_000),
       row: { updatedAt: new Date(Date.now() - 3_000_000).toISOString() } });
     const pinDir = join(dir, "coverage-floor-pin");

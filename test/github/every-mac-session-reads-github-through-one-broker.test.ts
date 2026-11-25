@@ -391,7 +391,9 @@ test("W1-T10279: classifying a read names its limiter and what it is about", () 
 test("W1-T10279: rmd gh prints what gh would, refuses writes, and needs a live broker to broker", { timeout: 60_000 }, async (t) => {
   const cache = tmp(t, "cli");
   const dir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!;
-  const clock = virtualClock();
+  // `status --since 1h` windows the broker's log by the process clock, so the broker logs on a virtual clock that
+  // starts at it: the default fixed start (2027-01-15) falls out of that hour once the wall clock passes it (W1-T14786).
+  const clock = virtualClock(Date.now());
   const exec: GhUpstreamExec = async (args) => (args[1] === "user" ? ok("octo\n") : { stdout: "out\n", stderr: "warn\n", exitCode: args.includes("8") ? 4 : 0 });
   const broker = new GhReadBroker(dir, exec, clockFromMillisFn(clock.now), clock.sleep, () => 1e12);
   const server = await serveGhReadBroker({ dir, broker });

@@ -174,8 +174,11 @@ test("W1-T10750: the gc prune window is derived from the fleet live state", asyn
   const inDatabase = (oid: string) => spawnSync("git", ["-C", store.dir, "cat-file", "-e", oid]).status === 0;
   const old = blob("older than every live consumer\n");
   const young = blob("newer than the oldest live consumer\n");
-  utimesSync(looseFile(old), new Date(t(1)), new Date(t(1)));
-  utimesSync(looseFile(young), new Date(t(20)), new Date(t(20)));
+  // git reads these mtimes itself, so they are set by a child too: an in-process utimes is moved by a shifted
+  // test clock and would no longer write the instant named here (W1-T14786).
+  const stampForGit = (path: string, ms: number) => execFileSync("touch", ["-d", new Date(ms).toISOString().replace(/\.\d+Z$/, "Z"), path]);
+  stampForGit(looseFile(old), t(1));
+  stampForGit(looseFile(young), t(20));
   const real = await maintenance.runMaintenanceGit(store.dir, maintenance.maintenanceArgs("gc", maintenance.pruneExpireFor(t(9))), 120000);
   assert.equal(real.ok, true, real.ok ? "" : real.error);
   assert.equal(inDatabase(old), false, "an object older than the oldest consumer is pruned");

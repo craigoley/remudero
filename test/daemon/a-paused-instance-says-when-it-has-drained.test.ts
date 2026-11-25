@@ -218,7 +218,10 @@ test("W1-T12939 criterion 2: a daemon with no garden and judge census never writ
 
 // ── criterion 3 ──────────────────────────────────────────────────────────────────────────────────
 
-const iso = (agoS: number) => new Date(Date.now() - agoS * 1000).toISOString().replace(/\.\d+Z$/, "Z");
+/** The beat is a shell child that reads `date`, a clock the shift preload never moves (W1-T14786), so
+ *  fixture rows are aged from that same host clock, not from this process's `Date.now()`. */
+const hostClockMs = () => Math.floor(performance.timeOrigin + performance.now());
+const iso = (agoS: number) => new Date(hostClockMs() - agoS * 1000).toISOString().replace(/\.\d+Z$/, "Z");
 const row = (agoS: number, step: string, rest: Record<string, unknown> = {}) => JSON.stringify({ ts: iso(agoS), step, ...rest });
 const drainVerdict = (ledger: string[] | undefined): string => {
   const b = runBeat(ledger ? { ledger } : {});

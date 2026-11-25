@@ -958,9 +958,12 @@ async function servedPlanProposal(t: TestContext, timing: PlanChildTiming): Prom
   const countFile = join(root, "child-count.txt");
   const releaseFile = join(root, "child-release");
   // The child waits for releaseFile, then writes its rows. It exits silently once teardown has removed the fixture
-  // root, and loudly (code 3) if it is never released.
+  // root, and loudly (code 3) if it is never released. It stamps its rows on this process's clock, as a real
+  // planner shares the gateway's wall clock: a child's clock does not follow a shifted test clock (W1-T14786).
+  const clockOffsetMs = Date.now() - Math.floor(performance.timeOrigin + performance.now());
   writeFileSync(join(tree, "bin", "rmd"), String.raw`#!/usr/bin/env node
 const fs = require("node:fs");
+const stamp = () => new Date(Date.now() + ${clockOffsetMs}).toISOString();
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(countFile)}, "invoked\n");
 fs.writeFileSync(${JSON.stringify(argsFile)}, args.join("\n") + "\n");
@@ -974,8 +977,8 @@ const poll = () => {
   }
   const mode = args[1].slice("--mode=".length), run_id = "PLAN-" + mode + "-fixture", task_id = "PLAN-" + mode;
   const rows = [
-    { ts: new Date().toISOString(), run_id, task_id, step: "plan.start", lane: "plan", actor_pid: process.pid, mode, brief: args[2] },
-    { ts: new Date().toISOString(), run_id, task_id, step: "pr.opened", lane: "plan", pr_url: "https://github.com/craigoley/wreckterra/pull/42" }
+    { ts: stamp(), run_id, task_id, step: "plan.start", lane: "plan", actor_pid: process.pid, mode, brief: args[2] },
+    { ts: stamp(), run_id, task_id, step: "pr.opened", lane: "plan", pr_url: "https://github.com/craigoley/wreckterra/pull/42" }
   ];
   fs.appendFileSync(${JSON.stringify(ledgerPath)}, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
 };

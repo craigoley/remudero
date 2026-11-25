@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -12,8 +12,13 @@ import { preserveRetireFixtureArgs } from "#test/helpers/preserve-retire-fixture
 
 const HELPER = join(REPO_ROOT, "deploy/mac/preserve-retire.py");
 const HOUR = 3600;
-// The helper's clock runs two days ahead, so every fixture file is idle unless a test dates it later.
-const NOW = Math.floor(Date.now() / 1000) + 48 * HOUR;
+// The helper's clock runs two days ahead, so every fixture file is idle unless a test dates it later. The helper
+// is a python child that reads real file times, so its clock and every date set here come from the host clock,
+// which the shift preload never moves (W1-T14786).
+const NOW = Math.floor((performance.timeOrigin + performance.now()) / 1000) + 48 * HOUR;
+/** Set a file's times as the helper will read them; an in-process utimes would be moved by a shifted test clock. */
+const dateForHelper = (path: string, epochS: number) =>
+  execFileSync("touch", ["-d", new Date(epochS * 1000).toISOString().replace(/\.\d+Z$/, "Z"), path]);
 const GIT_ENV = {
   ...process.env,
   GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
@@ -113,7 +118,7 @@ test("loose-folder housekeeping leaves seed stores, seed generations and keep-de
     writeFileSync(join(kept, ".rmd-janitor-keep"), "foundation inputs\n");
     writeFileSync(join(kept, "proj/run.json"), big);
     writeFileSync(join(kept, "old.json.gz"), "compressed earlier\n");
-    utimesSync(join(kept, "old.json.gz"), NOW - 20 * 24 * HOUR, NOW - 20 * 24 * HOUR);
+    dateForHelper(join(kept, "old.json.gz"), NOW - 20 * 24 * HOUR);
     symlinkSync(join(fx.root, "absent-marker-target"), join(recovery, "scratch-kept/.rmd-scratch-keep"));
     writeFileSync(join(recovery, "vendored/package.json"), "{}\n");
     writeFileSync(join(recovery, "vendored/coverage/.rmd-dependency-seed-root.json"), '{"version":1}');
@@ -272,7 +277,7 @@ test("a dry run never prunes worktree records, and an apply run still prunes an 
     git(repo, "worktree", "add", "--quiet", "-b", "gone", gone);
     rmSync(gone, { recursive: true, force: true }); // its folder is gone; only the stale record remains
     // The main checkout stays active, so its store survives and only prune can remove the stale record.
-    utimesSync(join(repo, "README"), NOW - HOUR, NOW - HOUR);
+    dateForHelper(join(repo, "README"), NOW - HOUR);
     const admin = join(repo, ".git/worktrees");
     const before = bytes(admin);
 
@@ -340,7 +345,7 @@ test("a declaration arriving after discovery holds an external worktree's siblin
     git(held, "worktree", "add", "--quiet", "-b", "held-sibling", sibling);
     git(held, "worktree", "add", "--quiet", "-b", "external", external);
     git(plain, "worktree", "add", "--quiet", "-b", "plain-sibling", positive);
-    for (const repo of [held, plain]) utimesSync(join(repo, "README"), NOW - HOUR, NOW - HOUR);
+    for (const repo of [held, plain]) dateForHelper(join(repo, "README"), NOW - HOUR);
     const before = bytes(join(held, ".git/worktrees"));
     const probe = `import importlib.util, os, sys
 spec = importlib.util.spec_from_file_location("pr", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
