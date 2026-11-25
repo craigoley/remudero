@@ -240,7 +240,8 @@ async function treeWith(root: string, treeish: string, path: string, blob: strin
  */
 export async function fastForwardTrackingMain(root: string, parent: string): Promise<"advanced" | "unchanged"> {
   const ref = "refs/remotes/origin/main";
-  const current = (await git(root, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).catch(() => "")).trim();
+  // for-each-ref answers an absent ref with no line and exit 0, so a failed read still throws and is never "absent".
+  const current = (await git(root, ["for-each-ref", "--format=%(objectname)", ref])).trim();
   if (current === parent) return "unchanged";
   if (current !== "" && !(await git(root, ["merge-base", "--is-ancestor", current, parent]).then(() => true, () => false))) return "unchanged";
   await git(root, ["update-ref", ref, parent, ...(current === "" ? [] : [current])]);
