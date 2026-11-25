@@ -392,3 +392,15 @@ export interface SweepWakeWireOptions {
  * without printing contents").
  */
 ```
+
+## W1-T14806: the owning daemon wakes
+
+`createGitHubEventWakeHandler` takes an optional `resolveMarkerPath(repository)`. serve.ts passes
+`githubWakeMarkerResolver`: core's repository resolves to `fleetControlRoot`, and each other live
+registry instance resolves to its mounted state root under the instance gateway's state base. The
+registry is read per delivery (`livenessInstances`), so an instance onboarded after serve booted is
+woken with no restart. Before this, every non-core payload answered `403 repository_mismatch`, and
+the product daemons kept only their 60 s poll. An unresolved repository now answers
+`202 unmanaged_repository`, because one organization hook also delivers repositories no daemon
+manages, and a non-2xx would fill GitHub's delivery log with failures. The CI-incident consumer
+(`onCheckRunCompleted`) stays core-only: it reads core's job logs.

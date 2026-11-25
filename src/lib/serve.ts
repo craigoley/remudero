@@ -321,6 +321,27 @@ export function resolveEscalationOptionAffordance(option: EscalationOption): Esc
 /** Default `rmd serve` port. */
 export const DEFAULT_SERVE_PORT = 4317;
 
+/**
+ * W1-T14806: the marker path of the daemon that owns a webhook's repository. Core resolves to its own
+ * `fleetControlRoot`; every other live registry instance resolves to its mounted state root, read from
+ * the registry on each call so an instance onboarded after boot is woken with no restart. An instance
+ * whose `state/` is not mounted here, a retired one, and an unknown repository all resolve to `undefined`.
+ */
+export function githubWakeMarkerResolver(
+  coreRepository: string,
+  coreRoot: string,
+  instances: InstanceGatewayOptions | undefined,
+  stateExists: (dir: string) => boolean = existsSync,
+): (repository: string) => string | undefined {
+  return (repository) => {
+    if (repository === coreRepository) return sweepWakeMarkerPath(coreRoot);
+    if (instances === undefined) return undefined;
+    const owner = livenessInstances(instances).find((instance) => instance.repo === repository);
+    if (owner === undefined || !stateExists(owner.stateDir)) return undefined;
+    return sweepWakeMarkerPath(dirname(owner.stateDir));
+  };
+}
+
 export interface ServeDeps {
   selectedRegistryObservation?: SelectedRegistryConsumerOptions;
   routeReadRollup?: RouteReadRollup;
@@ -3580,6 +3601,8 @@ function assembleServeRoutes(
       secret: deps.githubEventWake?.secret,
       repository: deps.githubEventWake?.repository ?? "",
       markerPath: sweepWakeMarkerPath(deps.fleetControlRoot),
+      // W1-T14806: every live registry instance's own daemon wakes for its repository, not only core.
+      resolveMarkerPath: githubWakeMarkerResolver(deps.githubEventWake?.repository ?? "", deps.fleetControlRoot, { registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances }),
       dedup: createPersistentDeliveryDedupStore(
         githubDeliveryDedupPath(deps.fleetControlRoot),
         deps.githubEventWake?.dedupCapacity ?? DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY,

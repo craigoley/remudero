@@ -508,6 +508,13 @@ export interface GithubEventWakeOptions {
   aggregateCheckNames?: readonly string[];
   /** Where {@link writeSweepWakeMarkerAtomic} persists the coalesced wake; see {@link sweepWakeMarkerPath}. */
   markerPath: string;
+  /**
+   * The marker path of the daemon that owns `repository` (`owner/name`), or `undefined` when no live daemon does.
+   * Called per delivery, so an instance onboarded after the route was built is resolved with no restart.
+   * When set it replaces the single `repository` + `markerPath` pair: an unresolved repository answers
+   * 202 `unmanaged_repository` and writes nothing. Absent, only `repository` is accepted, as before.
+   */
+  resolveMarkerPath?: (repository: string) => string | undefined;
   /** Bounded recent-delivery dedup — see {@link createDeliveryDedupStore}. */
   dedup: DeliveryDedupStore;
   maxBodyBytes?: number;
@@ -580,6 +587,8 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
   const notifyCheckRunCompleted = (event: string, action: string | undefined, body: unknown): void => {
     const callback = opts.onCheckRunCompleted;
     if (event !== "check_run" || action !== "completed" || !callback) return;
+    // The CI-incident consumer reads core's job logs only; another instance's check never reaches it.
+    if (extractRepositoryFullName(body) !== opts.repository) return;
     const info = extractCheckRunCompletedInfo(body);
     if (!info) return;
     // Serialized per head+check so a later pass can't overtake a failure's async log read; the ack never waits.
@@ -645,10 +654,28 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
       }
 
       const repository = extractRepositoryFullName(body);
-      if (repository !== opts.repository) {
-        log("github.wake.refused", { reason: "repository_mismatch", repository });
-        sendJson(res, 403, { error: "repository_mismatch" });
-        return;
+      let markerPath: string;
+      let owningRepository: string;
+      if (opts.resolveMarkerPath) {
+        const resolved = repository === undefined ? undefined : opts.resolveMarkerPath(repository);
+        if (resolved === undefined) {
+          // W1-T14806: an organization hook also delivers repositories no daemon manages; a 2xx keeps
+          // GitHub's delivery log clean, and nothing is written for them.
+          if (opts.counters) countWake(opts.counters, "ignored", firstHeader(req, "x-github-event"), extractAction(body));
+          else log("github.wake.ignored", { reason: "unmanaged_repository", repository });
+          sendJson(res, 202, { error: "unmanaged_repository" });
+          return;
+        }
+        markerPath = resolved;
+        owningRepository = repository as string;
+      } else {
+        if (repository !== opts.repository) {
+          log("github.wake.refused", { reason: "repository_mismatch", repository });
+          sendJson(res, 403, { error: "repository_mismatch" });
+          return;
+        }
+        markerPath = opts.markerPath;
+        owningRepository = opts.repository;
       }
 
       const event = firstHeader(req, "x-github-event");
@@ -686,11 +713,11 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
         deliveryId,
         event,
         action,
-        repository,
+        repository: owningRepository,
         receivedAtIso: now().toISOString(),
       };
-      const armed = readSweepWakeMarker(opts.markerPath) === undefined;
-      await writeMarker(opts.markerPath, record);
+      const armed = readSweepWakeMarker(markerPath) === undefined;
+      await writeMarker(markerPath, record);
       await opts.dedup.record(deliveryId);
       notifyCheckRunCompleted(event, action, body);
       if (opts.counters && !armed) {
