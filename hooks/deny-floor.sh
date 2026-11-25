@@ -66,77 +66,272 @@ deny() {
 # part of a longer word or a path. This is a TRIPWIRE, not a parser; an indirectly-named invocation
 # escapes it, and that limit is asserted in test/gh-read-cadence-floor.test.ts rather than papered over.
 #
-# W1-T14048 — THE NAME OF THE CLI IS NOT AN INVOCATION OF IT. REPRODUCED against a live read broker: a
-# `cat > notes.md <<EOF` whose body says `gh pr view 1`, a `git commit -m "$(cat <<'EOF' …` message that
-# names it, and a quoted message spanning lines were all ROUTED ("re-run as rmd gh"), because the old
-# test stripped quotes line by line with sed and knew nothing of heredoc bodies or comments.
-# `gh_code_text` is the one place that decides what is code: heredoc bodies and `#` comments are
-# dropped, single-quoted text is dropped, double-quoted text is dropped EXCEPT a `$(…)` or backtick
-# substitution inside it (that RUNS: W1-T1066's recorded poll, `until [ "$(gh run view …)" = completed ]`,
-# stays an invocation), and an UNQUOTED heredoc body keeps only its substitutions (the shell expands
-# those). Quotes are tracked across lines and through `"$(cat <<'EOF' … EOF)"`, so a `"` inside a
-# heredoc body cannot flip the state.
-gh_code_text() {  # stdin: shell text -> the text bash executes, quoted/heredoc/comment text removed
-  awk '
-    function top() { return sp > 0 ? st[sp] : "C" }
-    function push(k) { st[++sp] = k; pd[sp] = 0 }
-    BEGIN { sp = 0; nh = 0; hi = 0 }
+# W1-T14048 — THE NAME OF THE CLI IS NOT AN INVOCATION OF IT. MEASURED 2026-11-20 against a live read broker:
+# a cat heredoc writing markdown whose body says `gh api`, a `python3 -` heredoc whose comments say `gh child`, a
+# `git commit -q -F -` heredoc message, `echo the gh read floor` and a multi-line `git commit -m` were ROUTED, and
+# so was `R=…/bin/rmd; $R gh --class agent -- …`, the broker route itself: the old test stripped quotes per line.
+# `gh_exec_words` reads `hr_tokens 1` (rule 16's tokenizer, so no third one) and prints each simple command's
+# executable word, after the prefixes `hr_skip_prefix` skips for rule 16 as well, recursing as `hr_segment` does
+# into a `bash/sh/zsh/dash/ksh -c` string, a heredoc or `<<<` fed to a shell, `eval` and ssh's remote command.
+# Every argument word, quoted or not, and a heredoc body fed to anything else are data, but a `$(…)` or backtick
+# runs wherever it is not single-quoted: bare, in double quotes (W1-T1066's `until [ "$(gh run view …)" …`) and
+# in an unquoted-delimiter body. `invokes_gh` is true for an executable `gh` or `*/gh`, or `rmd`, `*/rmd` or a
+# `$VAR` followed by the word `gh` (rmd's gh verb runs the CLI, so rule 7 still refuses its poll). A `$VAR` that
+# IS gh (`g=gh; $g pr view 1`) still escapes, as asserted. FAIL CLOSED: when the tokenizer fails or ends inside
+# a quote, heredoc or substitution, base's whole-text match (`gh_whole_text_runs_gh`) decides.
+hr_tokens() {  # shell text -> per simple command: <`|` after a pipe, else `-`>\037<word>\037...; heredoc body = \036<body>
+  # $1 = 0 (the default: rule 16 and the argv readers). 1 (gh_exec_words): a `$(…)` or backtick in double quotes
+  # opens code as a bare one does, its words become their own simple commands while the word around it carries
+  # on, a body is \036Q<body> under a quoted delimiter and \036U<body> otherwise, and a text that ends inside a
+  # quote, heredoc or substitution prints a last line `!`. H: as 1, starting inside an unquoted heredoc body.
+  awk -v mode="${1:-0}" '
+    function endtok() { if (have) { seg = seg US tok; segn++ } tok = ""; have = 0 }
+    function flush(nsep) { endtok(); if (segn) out[++no] = sep seg; seg = ""; segn = 0; sep = nsep }
+    function emit(   k) { for (k = 1; k <= no; k++) print out[k]; no = 0 }
+    function attach(b) { if (segn || have) { seg = seg US HB b; segn++ } else if (no) out[no] = out[no] US HB b }
+    function enter(kind, from) {
+      nf++; fk[nf] = kind; fq[nf] = from; fd[nf] = 0
+      sseg[nf] = seg; ssegn[nf] = segn; ssep[nf] = sep; stok[nf] = tok
+      seg = ""; segn = 0; sep = "-"; tok = ""; have = 0; q = ""
+    }
+    function leave(   from) {
+      endtok(); if (segn) out[++no] = sep seg
+      from = fq[nf]; seg = sseg[nf]; segn = ssegn[nf]; sep = ssep[nf]; tok = stok[nf]; have = 1; nf--
+      if (from == 1) q = "\""; else if (from == 2) q = "H"; else q = ""
+    }
+    BEGIN { US = "\037"; HB = "\036"; NL = "\035"; q = ""; tok = ""; have = 0; seg = ""; segn = 0; sep = "-"; no = 0; nh = 0; hi = 0; body = ""
+            S = (mode != "0"); nf = 0; if (mode == "H") q = "H" }
     {
       L = $0
       if (hi) {
         line = L; if (htab[hi]) sub(/^\t+/, "", line)
-        if (line == hword[hi]) { if (++hi > nh) { hi = 0; nh = 0 }; next }
-        if (!hq[hi]) { r = L; while (match(r, /(\$\([^)]*\)|`[^`]*`)/) > 0) { print substr(r, RSTART, RLENGTH); r = substr(r, RSTART + RLENGTH) } }
+        if (line == hword[hi]) {
+          attach((S ? (hq[hi] ? "Q" : "U") : "") body); body = ""
+          if (++hi > nh) { hi = 0; nh = 0; if (q == "") emit() }
+        } else body = body (body == "" ? "" : NL) L
         next
       }
-      n = length(L); o = ""
+      r = L
+      if (S && q == "H") r = ""
+      while ((p = match(r, /<<-?[ \t]*[\047"\\]*[A-Za-z_][A-Za-z0-9_]*/)) > 0) {
+        if (p > 1 && substr(r, p - 1, 1) == "<") { r = substr(r, p + RLENGTH); continue }
+        w = substr(r, p, RLENGTH); t = (w ~ /^<<-/); qd = (w ~ /^<<-?[ \t]*[\047"\\]/); sub(/^<<-?[ \t]*[\047"\\]*/, "", w)
+        hword[++nh] = w; htab[nh] = t; hq[nh] = qd
+        r = substr(r, p + RLENGTH)
+      }
+      n = length(L); cont = 0
       for (i = 1; i <= n; i++) {
-        c = substr(L, i, 1); t = top()
-        if (t == "S") { if (c == "\047") sp--; continue }
-        if (t == "D") {
-          if (c == "\\") { i++; continue }
-          if (c == "\"") { sp--; continue }
-          if (c == "$" && substr(L, i + 1, 1) == "(") { push("P"); o = o "$("; i++; continue }
-          if (c == "`") { push("B"); o = o "`"; continue }
+        c = substr(L, i, 1)
+        if (q == "\047") { if (c == "\047") q = ""; else tok = tok c; continue }
+        if (q == "\"") {
+          if (c == "\\" && i < n && substr(L, i + 1, 1) ~ /[\\"$`]/) { tok = tok substr(L, i + 1, 1); i++; continue }
+          if (S && c == "$" && substr(L, i + 1, 1) == "(") { enter("P", 1); i++; continue }
+          if (S && c == "`") { enter("B", 1); continue }
+          if (c == "\"") q = ""; else tok = tok c
           continue
         }
-        if (c == "\\") { if (i < n) o = o substr(L, i + 1, 1); i++; continue }
-        if (c == "\047") { push("S"); continue }
-        if (c == "\"") { push("D"); continue }
-        if (c == "`") { if (t == "B") { sp--; o = o c } else { push("B"); o = o c }; continue }
-        if (c == "$" && substr(L, i + 1, 1) == "(") { push("P"); o = o "$("; i++; continue }
-        if (t == "P") {
-          if (c == "(") pd[sp]++
-          else if (c == ")") { if (pd[sp] == 0) { sp--; o = o ")"; continue } pd[sp]-- }
+        if (q == "H") {
+          if (c == "\\" && i < n && substr(L, i + 1, 1) ~ /[\\$`]/) { i++; continue }
+          if (c == "$" && substr(L, i + 1, 1) == "(") { enter("P", 2); i++; continue }
+          if (c == "`") enter("B", 2)
+          continue
         }
-        if (c == "#") { p = substr(L, i - 1, 1); if (i == 1 || p == " " || p == "\t" || p == ";" || p == "&" || p == "|" || p == "(") break }
-        if (c == "<" && substr(L, i, 2) == "<<") {
-          if (substr(L, i, 3) == "<<<") { o = o "<<<"; i += 2; continue }
-          rest = substr(L, i)
-          if (match(rest, /^<<-?[ \t]*[\047"\\]*[A-Za-z_][A-Za-z0-9_]*/) > 0) {
-            w = substr(rest, 1, RLENGTH); tb = (w ~ /^<<-/)
-            sub(/^<<-?[ \t]*/, "", w); quoted = (w ~ /^[\047"\\]/)
-            sub(/^[\047"\\]*/, "", w)
-            hword[++nh] = w; htab[nh] = tb; hq[nh] = quoted
-            i += RLENGTH - 1
-            nx = substr(L, i + 1, 1); if (nx == "\047" || nx == "\"") i++
-            o = o " "
-            continue
-          }
+        if (c == "\\") { if (i == n) { cont = 1; break } tok = tok substr(L, i + 1, 1); have = 1; i++; continue }
+        if (c == "\047" || c == "\"") { q = c; have = 1; continue }
+        if (c == " " || c == "\t") { endtok(); continue }
+        if (c == "#" && !have) break
+        if (substr(L, i, 3) == "<<<") { endtok(); tok = "<<<"; have = 1; endtok(); i += 2; continue }
+        if (substr(L, i, 2) == "<<") {
+          endtok(); tok = "<<"; have = 1; endtok()
+          j = i + 2; if (substr(L, j, 1) == "-") j++
+          while (substr(L, j, 1) ~ /[ \t]/) j++
+          while (j <= n && substr(L, j, 1) !~ /[ \t;&|()<>]/) j++
+          i = j - 1; continue
         }
-        o = o c
+        if (c == ">" && substr(L, i + 1, 1) == "&") { tok = tok ">&"; have = 1; i++; continue }
+        if (c == "&" && substr(L, i + 1, 1) == ">") { tok = tok "&>"; have = 1; i++; continue }
+        if (c == "$" && substr(L, i + 1, 1) == "(") { if (S) enter("P", 0); else flush("-"); i++; continue }
+        if (S && c == "`") { if (nf && fk[nf] == "B") leave(); else enter("B", 0); continue }
+        if (S && c == ")" && nf && fk[nf] == "P") { if (fd[nf] == 0) { leave(); continue } fd[nf]-- }
+        if (S && c == "(" && nf && fk[nf] == "P") fd[nf]++
+        if (c == "|") { if (substr(L, i + 1, 1) == "|") { flush("-"); i++ } else flush("|"); continue }
+        if (c == ";" || c == "&" || c == "(" || c == ")" || c == "`") { if (c == "&" && substr(L, i + 1, 1) == "&") i++; flush("-"); continue }
+        tok = tok c; have = 1
       }
-      print o
-      if (nh && !hi) hi = 1
-    }'
+      if (q != "") tok = tok NL
+      else if (cont) endtok()
+      else flush("-")
+      if (nh) hi = 1
+      else if (q == "" && !cont) emit()
+    }
+    END { flush("-"); emit(); if (S && (hi || nf || (q != "" && q != "H"))) print "!" }'
 }
-invokes_gh() {
-  printf '%s\n' "$1" | gh_code_text | grep -Eq '(^|[^A-Za-z0-9_/.-])gh[[:space:]]'
+hr_decode() { printf '%s' "${1//$'\035'/$'\n'}"; }
+hr_rest() {  # the words t[i..] of the caller's segment, space-joined (heredoc bodies left out)
+  local k="$i" s=""
+  while [ "$k" -lt "$n" ]; do
+    case "${t[$k]}" in $'\036'*) ;; *) s="$s ${t[$k]}" ;; esac
+    k=$((k + 1))
+  done
+  printf '%s' "${s# }"
 }
+hr_skipopts() {  # step the caller's i past the wrapper word at t[i] and its options; $1 = options taking a value
+  i=$((i + 1))
+  while [ "$i" -lt "$n" ]; do
+    case "${t[$i]}" in
+      --) i=$((i + 1)); break ;;
+      -*) case " $1 " in *" ${t[$i]} "*) i=$((i + 2)) ;; *) i=$((i + 1)) ;; esac ;;
+      *) break ;;
+    esac
+  done
+  return 0
+}
+hr_skip_prefix() {  # step the caller's i past t[i..]'s assignments, keywords and wrappers; stops AT an env word
+  while [ "$i" -lt "$n" ]; do
+    case "${t[$i]}" in
+      [A-Za-z_]*=*|do|then|else|elif|if|while|until|'!'|'{'|time|nohup|exec|command|builtin) i=$((i + 1)) ;;
+      sudo|*/sudo) hr_skipopts "-u -g -h -p -C -D -r -t -U -T" ;;
+      nice|*/nice) hr_skipopts "-n" ;;
+      timeout|*/timeout) hr_skipopts "-s -k --signal --kill-after"; i=$((i + 1)) ;;
+      xargs|*/xargs) hr_skipopts "-I -n -P -L -d -a -E -s --max-args --max-procs --max-lines --delimiter --arg-file" ;;
+      *) break ;;
+    esac
+  done
+  return 0
+}
+hr_ssh_skip() {  # step the caller's i past ssh's options and its destination, which it leaves in hr_ssh_dest
+  local w k c
+  hr_ssh_dest=""
+  while [ "$i" -lt "$n" ]; do
+    w="${t[$i]}"
+    i=$((i + 1))
+    case "$w" in
+      --) ;;
+      -?*)
+        k=1
+        while [ "$k" -lt "${#w}" ]; do
+          c="${w:$k:1}"
+          k=$((k + 1))
+          case "$c" in [BbcDEeFIiJLlmOoPpQRSWw]) if [ "$k" -ge "${#w}" ]; then i=$((i + 1)); fi; break ;; esac
+        done ;;
+      *) hr_ssh_dest="$w"; break ;;
+    esac
+  done
+  return 0
+}
+gh_exec_segment() {  # $1 = one `hr_tokens 1` line, $2 = depth; prints `<executable word>\037<next word>`
+  local -a t
+  local n i=1 w prog remote=""
+  t=()
+  IFS=$'\037' read -r -a t <<< "$1"
+  n=${#t[@]}
+  [ "$n" -gt 1 ] || return 0
+  while :; do
+    hr_skip_prefix
+    case "${t[$i]-}" in
+      env|*/env) hr_skipopts "-u --unset -C --chdir -P --path -a --argv0 -S --split-string" ;;
+      *) break ;;
+    esac
+  done
+  [ "$i" -lt "$n" ] || return 0
+  w="${t[$i]}"
+  printf '%s\037%s\n' "$w" "${t[$((i + 1))]-}"
+  prog="${w##*/}"
+  i=$((i + 1))
+  case "$prog" in
+    bash|sh|zsh|dash|ksh)
+      while [ "$i" -lt "$n" ]; do
+        w="${t[$i]}"
+        i=$((i + 1))
+        case "$w" in
+          $'\036'*) gh_exec_words "$(hr_decode "${w#??}")" $(( $2 + 1 )) 1 || return 1 ;;
+          '<<<') gh_exec_words "$(hr_decode "${t[$i]-}")" $(( $2 + 1 )) 1 || return 1; i=$((i + 1)) ;;
+          --*) ;;
+          -*c*) gh_exec_words "$(hr_decode "${t[$i]-}")" $(( $2 + 1 )) 1 || return 1; i=$((i + 1)) ;;
+        esac
+      done
+      return 0 ;;
+    eval) gh_exec_words "$(hr_decode "$(hr_rest)")" $(( $2 + 1 )) 1 || return 1; return 0 ;;
+    ssh)  # the remote command, and a heredoc or here-string a remote shell reads, are code
+      hr_ssh_skip
+      while [ "$i" -lt "$n" ]; do
+        w="${t[$i]}"
+        i=$((i + 1))
+        case "$w" in
+          $'\036'*) gh_exec_words "$(hr_decode "${w#??}")" $(( $2 + 1 )) 1 || return 1 ;;
+          '<<') ;;
+          '<<<') gh_exec_words "$(hr_decode "${t[$i]-}")" $(( $2 + 1 )) 1 || return 1; i=$((i + 1)) ;;
+          '<'|'>'|'>>'|[0-9]'>'|[0-9]'>>'|'&>') i=$((i + 1)) ;;
+          '<'*|'>'*|[0-9]'>'*|'&>'*) ;;
+          *) remote="$remote $w" ;;
+        esac
+      done
+      if [ -n "$remote" ]; then gh_exec_words "$(hr_decode "$remote")" $(( $2 + 1 )) 1 || return 1; fi
+      return 0 ;;
+  esac
+  while [ "$i" -lt "$n" ]; do  # a body fed to anything else is data; an unquoted-delimiter one still expands $(…)
+    case "${t[$i]}" in
+      $'\036'U*) gh_exec_words "$(hr_decode "${t[$i]#??}")" $(( $2 + 1 )) H || return 1 ;;
+    esac
+    i=$((i + 1))
+  done
+  return 0
+}
+gh_exec_words() {  # $1 = shell text, $2 = depth, $3 = hr_tokens mode (1 | H); false when it cannot be finished
+  local out line
+  [ "$2" -le 6 ] || return 1
+  out="$(printf '%s\n' "$1" | hr_tokens "$3")" || return 1
+  while IFS= read -r line; do
+    if [ "$line" = '!' ]; then return 1; fi
+    gh_exec_segment "$line" "$2" || return 1
+  done <<< "$out"
+  return 0
+}
+gh_whole_text_runs_gh() {  # $1 = shell text; base's whole-text verdict: a raw `$( gh`/backtick, then quotes stripped per line
+  if printf '%s\n' "$1" | grep -Eq '(\$\(|`)[[:space:]]*gh[[:space:]]'; then return 0; fi
+  printf '%s\n' "$1" | sed -e "s/'[^']*'//g" -e 's/"[^"]*"//g' | grep -Eq '(^|[^A-Za-z0-9_/.-])gh[[:space:]]'
+}
+invokes_gh() {  # $1 = shell text; true when it runs the GitHub CLI
+  local words w nx
+  case "$1" in *gh*) ;; *) return 1 ;; esac
+  if words="$(gh_exec_words "$1" 0 1)"; then :; else
+    if gh_whole_text_runs_gh "$1"; then return 0; fi
+    return 1
+  fi
+  while IFS=$'\037' read -r w nx; do
+    case "$w" in
+      gh|*/gh) return 0 ;;
+      rmd|*/rmd|'$'*) if [ "$nx" = gh ]; then return 0; fi ;;
+    esac
+  done <<< "$words"
+  return 1
+}
+# `R=<path>/bin/rmd; $R gh …` IS `rmd gh …` (W1-T14048): written so, rule 10's broker blanking and gh_norm read it
+# as the literal form. Only for a name whose last assignment in the text is `rmd` or a path ending `/rmd`.
+gh_rmd_var_text() {  # $1 = shell text -> the text with `$R gh`, `${R} gh` and `"$R" gh` written `rmd gh`
+  local text="$1" asg name val names=" " d='$' dq='"' pat
+  while IFS= read -r asg; do
+    asg="${asg#[!A-Za-z_]}"
+    name="${asg%%=*}"
+    val="${asg#*=}"
+    case "$val" in \"*\"|\'*\') val="${val:1:${#val}-2}" ;; esac
+    names="${names// $name / }"
+    case "$val" in rmd|*/rmd) names="$names$name " ;; esac
+  done < <(printf '%s\n' "$text" | grep -oE '(^|[^A-Za-z0-9_$])[A-Za-z_][A-Za-z0-9_]*=("[^"]*"|[^[:space:];&|]*)' || true)
+  for name in $names; do
+    for asg in "$d$name" "$d{$name}"; do
+      pat="$dq$asg$dq gh"; text="${text//$pat/rmd gh}"
+      pat="$asg gh"; text="${text//$pat/rmd gh}"
+    done
+  done
+  printf '%s' "$text"
+}
+gh_route_cmd="$cmd"
+case "$cmd" in *rmd*) gh_route_cmd="$(gh_rmd_var_text "$cmd")" || gh_route_cmd="$cmd" ;; esac
 
 # `rmd gh [--class c] [--client x] [--fresh] -- <args>` runs `gh <args>`, so rules 2, 4, 5 and 10 all judge this text.
 # Only rule 10 used to, and `rmd gh -- pr merge 1` passed rule 5 in a worker. rmd gh also refuses writes.
-gh_norm="$(printf '%s' "$cmd" | sed -E 's/(^|[^A-Za-z0-9_.-])((\.\/)?(bin\/)?rmd)[[:space:]]+gh(([[:space:]]+--class[[:space:]]+[a-z]+)|([[:space:]]+--client[[:space:]]+[a-z]+)|([[:space:]]+--fresh))*[[:space:]]+--[[:space:]]+/\1\2 gh /g')"
+gh_norm="$(printf '%s' "$gh_route_cmd" | sed -E 's/(^|[^A-Za-z0-9_.-])((\.\/)?(bin\/)?rmd)[[:space:]]+gh(([[:space:]]+--class[[:space:]]+[a-z]+)|([[:space:]]+--client[[:space:]]+[a-z]+)|([[:space:]]+--fresh))*[[:space:]]+--[[:space:]]+/\1\2 gh /g')"
 
 # 1) a push whose DESTINATION is a default branch (main/master), judged per command SEGMENT (W1-T4588)
 #    by its PARSED refspecs (W1-T5352), never by substrings. Two loose greps -- a force flag anywhere
@@ -811,67 +1006,8 @@ fi
 #    OPERATOR OVERRIDE, A CHOICE ON THE RECORD: RMD_HOUSE_RULE_OVERRIDE=<stash|no-verify|host>[,...] in the
 #    session's LAUNCH environment; agents never set it. Unlike RMD_GH_COOLDOWN_S it is NOT read from the
 #    command text, so an inline assignment is refused: the agent typing it is who must not hold it.
-#    FALSIFIER: test/the-house-rules-are-refused-at-the-floor.test.ts.
-hr_tokens() {  # shell text -> per simple command: <`|` after a pipe, else `-`>\037<word>\037...; heredoc body = \036<body>
-  awk '
-    function endtok() { if (have) { seg = seg US tok; segn++ } tok = ""; have = 0 }
-    function flush(nsep) { endtok(); if (segn) out[++no] = sep seg; seg = ""; segn = 0; sep = nsep }
-    function emit(   k) { for (k = 1; k <= no; k++) print out[k]; no = 0 }
-    function attach(b) { if (segn || have) { seg = seg US HB b; segn++ } else if (no) out[no] = out[no] US HB b }
-    BEGIN { US = "\037"; HB = "\036"; NL = "\035"; q = ""; tok = ""; have = 0; seg = ""; segn = 0; sep = "-"; no = 0; nh = 0; hi = 0; body = "" }
-    {
-      L = $0
-      if (hi) {
-        line = L; if (htab[hi]) sub(/^\t+/, "", line)
-        if (line == hword[hi]) {
-          attach(body); body = ""
-          if (++hi > nh) { hi = 0; nh = 0; if (q == "") emit() }
-        } else body = body (body == "" ? "" : NL) L
-        next
-      }
-      r = L
-      while ((p = match(r, /<<-?[ \t]*[\047"\\]*[A-Za-z_][A-Za-z0-9_]*/)) > 0) {
-        if (p > 1 && substr(r, p - 1, 1) == "<") { r = substr(r, p + RLENGTH); continue }
-        w = substr(r, p, RLENGTH); t = (w ~ /^<<-/); sub(/^<<-?[ \t]*[\047"\\]*/, "", w)
-        hword[++nh] = w; htab[nh] = t
-        r = substr(r, p + RLENGTH)
-      }
-      n = length(L); cont = 0
-      for (i = 1; i <= n; i++) {
-        c = substr(L, i, 1)
-        if (q == "\047") { if (c == "\047") q = ""; else tok = tok c; continue }
-        if (q == "\"") {
-          if (c == "\\" && i < n && substr(L, i + 1, 1) ~ /[\\"$`]/) { tok = tok substr(L, i + 1, 1); i++; continue }
-          if (c == "\"") q = ""; else tok = tok c
-          continue
-        }
-        if (c == "\\") { if (i == n) { cont = 1; break } tok = tok substr(L, i + 1, 1); have = 1; i++; continue }
-        if (c == "\047" || c == "\"") { q = c; have = 1; continue }
-        if (c == " " || c == "\t") { endtok(); continue }
-        if (c == "#" && !have) break
-        if (substr(L, i, 3) == "<<<") { endtok(); tok = "<<<"; have = 1; endtok(); i += 2; continue }
-        if (substr(L, i, 2) == "<<") {
-          endtok(); tok = "<<"; have = 1; endtok()
-          j = i + 2; if (substr(L, j, 1) == "-") j++
-          while (substr(L, j, 1) ~ /[ \t]/) j++
-          while (j <= n && substr(L, j, 1) !~ /[ \t;&|()<>]/) j++
-          i = j - 1; continue
-        }
-        if (c == ">" && substr(L, i + 1, 1) == "&") { tok = tok ">&"; have = 1; i++; continue }
-        if (c == "&" && substr(L, i + 1, 1) == ">") { tok = tok "&>"; have = 1; i++; continue }
-        if (c == "$" && substr(L, i + 1, 1) == "(") { flush("-"); i++; continue }
-        if (c == "|") { if (substr(L, i + 1, 1) == "|") { flush("-"); i++ } else flush("|"); continue }
-        if (c == ";" || c == "&" || c == "(" || c == ")" || c == "`") { if (c == "&" && substr(L, i + 1, 1) == "&") i++; flush("-"); continue }
-        tok = tok c; have = 1
-      }
-      if (q != "") tok = tok NL
-      else if (cont) endtok()
-      else flush("-")
-      if (nh) hi = 1
-      else if (q == "" && !cont) emit()
-    }
-    END { flush("-"); emit() }'
-}
+#    FALSIFIER: test/the-house-rules-are-refused-at-the-floor.test.ts. `hr_tokens`, `hr_decode`, `hr_rest`,
+#    `hr_skipopts`, `hr_skip_prefix` and `hr_ssh_skip` are defined above `invokes_gh`, which reads them (W1-T14048).
 HR_STASH="git stash (house rule: never stash: a stash lives outside every branch, is invisible to every other session sharing this clone, and is lost when its worktree is reaped). Commit by explicit path instead (git add <path> && git commit), or copy the file aside (cp <file> <scratch>/) to prove a falsifier, then copy it back. The read-only \`git stash list\` and \`git stash show\` still run."
 HR_NOVERIFY="git commit/push/merge with --no-verify, or \`git commit -n\` (house rule: never --no-verify: the hooks are this repo's gates). Fix what the hook reports, then commit or push again."
 HR_HOOKSPATH="a core.hooksPath override (house rule: never bypass the hooks: pointing core.hooksPath anywhere but \`hooks\` disarms pre-commit, commit-msg and pre-push). Fix what the hook reports; the only value this repo sets is \`git config core.hooksPath hooks\`."
@@ -934,26 +1070,6 @@ hr_host_tee() {
 hr_is_hookspath() {  # config keys are case-insensitive
   case "$1" in [cC][oO][rR][eE].[hH][oO][oO][kK][sS][pP][aA][tT][hH]) return 0 ;; esac
   return 1
-}
-hr_decode() { printf '%s' "${1//$'\035'/$'\n'}"; }
-hr_rest() {  # the words t[i..] of the caller's segment, space-joined (heredoc bodies left out)
-  local k="$i" s=""
-  while [ "$k" -lt "$n" ]; do
-    case "${t[$k]}" in $'\036'*) ;; *) s="$s ${t[$k]}" ;; esac
-    k=$((k + 1))
-  done
-  printf '%s' "${s# }"
-}
-hr_skipopts() {  # step the caller's i past the wrapper word at t[i] and its options; $1 = options taking a value
-  i=$((i + 1))
-  while [ "$i" -lt "$n" ]; do
-    case "${t[$i]}" in
-      --) i=$((i + 1)); break ;;
-      -*) case " $1 " in *" ${t[$i]} "*) i=$((i + 2)) ;; *) i=$((i + 1)) ;; esac ;;
-      *) break ;;
-    esac
-  done
-  return 0
 }
 hr_env_split_words() {  # split env -S text into literal argv words without interpreting shell separators or expansions
   local input="$1" len pos=0 ch next quote="" word="" have=0 out="" us=$'\037'
@@ -1194,23 +1310,10 @@ hr_git() {  # $1 = mode, $2 = depth; the caller's t[i..] are git's words after t
   return 0
 }
 hr_ssh() {  # $1 = depth, $2 = the previous segment; the caller's t[i..] are ssh's words
-  local w k c dest="" host remote="" j
+  local w dest="" host remote="" j
   local -a p
-  while [ "$i" -lt "$n" ]; do
-    w="${t[$i]}"
-    i=$((i + 1))
-    case "$w" in
-      --) ;;
-      -?*)
-        k=1
-        while [ "$k" -lt "${#w}" ]; do
-          c="${w:$k:1}"
-          k=$((k + 1))
-          case "$c" in [BbcDEeFIiJLlmOoPpQRSWw]) if [ "$k" -ge "${#w}" ]; then i=$((i + 1)); fi; break ;; esac
-        done ;;
-      *) dest="$w"; break ;;
-    esac
-  done
+  hr_ssh_skip
+  dest="$hr_ssh_dest"
   host="${dest#ssh://}"; host="${host##*@}"; host="${host%%:*}"
   [ "$host" = remudero ] || return 0
   while [ "$i" -lt "$n" ]; do
@@ -1290,17 +1393,8 @@ hr_segment() {  # $1 = one hr_tokens line, $2 = the previous line, $3 = local|ho
       GIT_CONFIG*=*[cC][oO][rR][eE].[hH][oO][oO][kK][sS][pP][aA][tT][hH]*) hr_refuse no-verify "$HR_HOOKSPATH" ;;
     esac
   done
-  while [ "$i" -lt "$n" ]; do
-    case "${t[$i]}" in
-      [A-Za-z_]*=*|do|then|else|elif|if|while|until|'!'|'{'|time|nohup|exec|command|builtin) i=$((i + 1)) ;;
-      sudo|*/sudo) hr_skipopts "-u -g -h -p -C -D -r -t -U -T" ;;
-      env|*/env) hr_env_check "$2" "$3" "$4"; return 0 ;;
-      nice|*/nice) hr_skipopts "-n" ;;
-      timeout|*/timeout) hr_skipopts "-s -k --signal --kill-after"; i=$((i + 1)) ;;
-      xargs|*/xargs) hr_skipopts "-I -n -P -L -d -a -E -s --max-args --max-procs --max-lines --delimiter --arg-file" ;;
-      *) break ;;
-    esac
-  done
+  hr_skip_prefix
+  case "${t[$i]-}" in env|*/env) hr_env_check "$2" "$3" "$4"; return 0 ;; esac
   [ "$i" -lt "$n" ] || return 0
   prog="${t[$i]##*/}"
   i=$((i + 1))
@@ -1668,7 +1762,7 @@ if [ -n "$cmd" ] && invokes_gh "$cmd"; then
 
   if [ "$gh_is_write" -eq 0 ] && [ "$gh_is_exempt" -eq 0 ] && [ "$gh_broker_live" -eq 1 ]; then
     # `rmd gh` is paced by the broker. A RAW `gh` left once it is blanked out is routed, never floored.
-    gh_raw="$(printf '%s' "$cmd" | sed -E 's/(^|[^A-Za-z0-9_.-])((\.\/)?(bin\/)?rmd)[[:space:]]+gh([[:space:]])/\1\2 rmd-gh\5/g')"
+    gh_raw="$(printf '%s' "$gh_route_cmd" | sed -E 's/(^|[^A-Za-z0-9_.-])((\.\/)?(bin\/)?rmd)[[:space:]]+gh([[:space:]])/\1\2 rmd-gh\5/g')"
     if invokes_gh "$gh_raw"; then
       gh_class=interactive
       gh_agent=""
