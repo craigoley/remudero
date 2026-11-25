@@ -1416,6 +1416,8 @@
     "worktree_retire.would_retire"
   ],
   "recordOnly": {
+    "worker.flight_signal.tripped": "W1-T4049: an observe-only mid-run trip of the repetition or error-loop predicate, once per run per predicate; nothing halts or decides on it until its trip precision is measured.",
+    "worker.flight_signal.error": "W1-T4049: a diagnostic that a live flight-signal predicate threw; the stream loop carries on, so nothing re-reads the row.",
     "review.withheld_exhausted": "W1-T13945: the hold record for an input whose every eligible evaluator withheld its verdict, naming each attempt for the operator; only its writer reads it, to escalate once per head and input.",
     "queue_judge.escalation_closed": "W1-T14651: an audit row for the operator that the judge closed one of its own floor escalations the corrected rule admits; the closed issue carries the state, so nothing re-reads the row.",
     "queue_judge.escalation_close_failed": "W1-T14651: a diagnostic for a failed close of a floor escalation; it records the error and the next pass retries the close, so nothing re-reads the row.",
