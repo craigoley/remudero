@@ -21,7 +21,7 @@ Object.assign(process.env, {
 });
 
 const { dispatchClaimRef, gitClaimRunnerAsync, gitDispatchClaimReserverAsync } = claimLib;
-type Sweep = (r: DispatchClaimReserverAsync, l: DispatchClaimListing, d: ClaimSilenceJudgeInputs & { skip?: ReadonlySet<string> }) => Promise<Array<{ taskId: string; verdict: string; dropped?: boolean; anchor?: string }>>;
+type Sweep = (r: DispatchClaimReserverAsync, l: DispatchClaimListing, d: ClaimSilenceJudgeInputs & { skip?: ReadonlySet<string> }) => Promise<Array<{ taskId: string; verdict: string; reason: string; dropped?: boolean; anchor?: string }>>;
 // Namespace read: this file loads on a base without the new export, so each test fails on its own assertion.
 const sweep: Sweep = (r, l, d) => (claimLib as unknown as { sweepSilentDispatchClaims: Sweep }).sweepSilentDispatchClaims(r, l, d);
 
@@ -98,10 +98,17 @@ test("W1-T14874 criterion 2: invariant:the-sweep-keeps-a-claim-it-cannot-judge",
   const judged = await sweep(w.reserver, await w.listing(), { ...base, mintedByThisInstance: a => a.host === "this-fleet", skip: new Set(["W1-T3"]) });
   assert.deepEqual(judged.map(j => [j.taskId, j.verdict]).sort(), [["W1-T1", "unrenewed"], ["W1-T2", "no-verdict"]]);
   assert.deepEqual([w.tip("W1-T1"), w.tip("W1-T2"), w.tip("W1-T3")], [recent, own, skipped], "THE CLAIM: every claim it cannot judge stays");
+  // An anchor that does not parse as a claim is never judged, however old its commit.
+  const garbled = await w.claim("W1-T4", nowMs - 6 * 24 * HOUR, "not-a-holder");
+  const unreadable = await sweep(w.reserver, { ok: true, claims: [{ taskId: "W1-T4", holder: garbled }] }, base);
+  assert.equal(unreadable[0]!.verdict, "no-verdict");
+  assert.match(unreadable[0]!.reason, /anchor is unreadable/);
+  assert.equal(w.tip("W1-T4"), garbled, "THE CLAIM: a claim with an unreadable anchor stays");
   // No measured window: nothing is judged at all, however old the claim.
   const none = await sweep(w.reserver, await w.listing(), deps(w.work, [], nowMs, logged));
+  assert.equal(none.length, 4);
   assert.ok(none.every(j => j.verdict === "no-verdict"));
-  assert.equal(w.tip("W1-T3"), skipped);
+  assert.deepEqual([w.tip("W1-T1"), w.tip("W1-T2"), w.tip("W1-T3"), w.tip("W1-T4")], [recent, own, skipped, garbled], "THE CLAIM: with no window every claim stays");
   // An unreadable run branch read is no verdict.
   const failing: ClaimSilenceJudgeInputs["run"] = async () => ({ status: 128, stdout: "", stderr: "fatal: unreachable" });
   const blind = await sweep(w.reserver, { ok: true, claims: [{ taskId: "W1-T3", holder: skipped }] }, { ...base, run: failing });
