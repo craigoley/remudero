@@ -99,7 +99,7 @@ import { loadPolicy, policyPath, type FreshnessRestartValues } from "../../lib/p
 import { refreshReviewPublisherToken as refreshInstallationToken } from "../../lib/review.js";
 import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
 import {
-  bootSweepDispatchClaimsAsync, dispatchClaimRef, realBootSweepHostProbe, releaseLandedDispatchClaims, listHeldDispatchClaims, claimMintedByRerun,
+  bootSweepDispatchClaimsAsync, dispatchClaimRef, realBootSweepHostProbe, releaseLandedDispatchClaims, listHeldDispatchClaims, claimMintedByRerun, sweepSilentDispatchClaims, gitClaimRunnerAsync,
   type BootSweepInputs, type DispatchClaimReserverAsync,
 } from "../../lib/dispatch-claim.js";
 import { type ProjectPlanPhases, loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, planCreditOverridePath, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
@@ -1358,6 +1358,8 @@ export async function daemonCommand(
     bootClaimReserver?: DispatchClaimReserverAsync;
     hostProbe?: BootSweepInputs["hostProbe"];
     tickClaimReserver?: DispatchClaimReserverAsync;
+    /** W1-T14874: the tick sweep's silence pass; production uses {@link sweepSilentDispatchClaims}. */
+    sweepSilentClaims?: typeof sweepSilentDispatchClaims;
     /** Opt-in NEW-build reservation reader; production uses the private-dir environment adapter. */
     checkHeavyNewBuild?: DispatchGovernorDeps["checkHeavyNewBuild"];
     /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
@@ -2778,10 +2780,11 @@ export async function daemonCommand(
         readLiveState: daemonLiveStateReader(target.owner, target.repo),
         isIndeterminate,
         releaseLandedClaims: (isMerged) => {
-          const reserver = deps.tickClaimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", target.repo));
+          const claimDir = join(config.root, "repos", target.repo);
+          const reserver = deps.tickClaimReserver ?? dispatchClaimReserverAsyncFor(claimDir);
           // W1-T13356: one listing feeds both this sweep and selection's claim-held deferral lift.
           const listing = listHeldDispatchClaims(reserver);
-          return Object.assign(releaseLandedDispatchClaims(reserver, {
+          const landed = releaseLandedDispatchClaims(reserver, {
             listing,
             isMerged,
             isIndeterminate,
@@ -2790,7 +2793,13 @@ export async function daemonCommand(
             reportedRerun: landedClaimRerunReported,
             localHost: hostname(),
             log,
-          }), { listing });
+          });
+          // W1-T14874: then every claim the landed sweep left is judged by the W1-T9432 silence judge, which no lane
+          // reaches for a task selection defers as claim-held; a claim silent for 2W is dropped, and nothing is minted.
+          return Object.assign(landed.then(async (released) => [...released, ...(await (deps.sweepSilentClaims ?? sweepSilentDispatchClaims)(reserver, await listing, {
+            run: gitClaimRunnerAsync(claimDir), stateDir: dirname(ledgerPath), log, localHost: hostname(),
+            skip: new Set(released.filter((r) => r.dropped).map((r) => r.taskId)),
+          }))]), { listing });
         },
         isIndependentFailureBlocked,
         independentBlockReleases: () => independentBlockReleasesFrom(lastProj), // W1-T8676: ledgered by the selection pass
