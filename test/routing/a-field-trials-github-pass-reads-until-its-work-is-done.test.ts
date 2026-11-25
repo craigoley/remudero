@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
 import {
   emptyRepoStore, ghApiFetch, GITHUB_PAGE_SIZE, ingestFieldTrialsGithub, pacedGhApiFetch, pullOf, rateLimitPacer,
   type FieldTrialsGithubStore, type GithubPage,
@@ -56,7 +57,7 @@ test("W1-T14778: a field trials github pass reads until its work is done", async
   assert.equal(repo.commits.state, "complete");
   assert.equal(repo.deployments.state, "complete");
   assert.equal(repo.detailsPending, 0);
-  assert.equal(repo.workAllocation.requests.details, 30 * 3, "exactly the 30 changed pulls were read in detail");
+  assert.equal(repo.workAllocation!.requests.details, 30 * 3, "exactly the 30 changed pulls were read in detail");
   assert.equal(repo.headGreensPending, 0);
   assert.equal(github.calls.filter((path) => path.includes("/check-runs?")).length, 12, "every head was read in this pass");
   assert.equal(pass.state, "complete");
@@ -117,15 +118,15 @@ test("W1-T14778: the rate limit pacer waits out the reserve and resumes", async 
     return "[]";
   };
   const sleep = async (ms: number) => { sleeps.push(ms); clock += ms; };
-  const fetch = pacedGhApiFetch(read, { now: () => clock, sleep });
+  const fetch = pacedGhApiFetch(read, { clock: clockFromMillisFn(() => clock), sleep });
   assert.deepEqual(await fetch("repos/o/r/pulls"), { ok: true, items: [] });
   assert.deepEqual(sleeps, [121_000], "under the 10% reserve, wait for the reset plus a second");
   assert.deepEqual(probes.map((args) => args[1]), ["rate_limit", "rate_limit", "repos/o/r/pulls"]);
   await fetch("repos/o/r/commits");
   assert.equal(probes.filter((args) => args[1] === "rate_limit").length, 2, "no second probe inside the same minute");
-  const unreadable = rateLimitPacer(async () => { throw new Error("offline"); }, { now: () => clock, sleep });
+  const unreadable = rateLimitPacer(async () => { throw new Error("offline"); }, { clock: clockFromMillisFn(() => clock), sleep });
   await unreadable();
-  const unparsed = rateLimitPacer(async () => "{}", { now: () => clock, sleep });
+  const unparsed = rateLimitPacer(async () => "{}", { clock: clockFromMillisFn(() => clock), sleep });
   await unparsed();
   assert.deepEqual(sleeps, [121_000], "an unreadable or unparsed probe never waits");
 });

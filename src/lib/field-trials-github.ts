@@ -14,7 +14,7 @@
  * derived trailer ids, revert target and a bot/human class survive. Nothing here decides whether a
  * change deployed or was correct; field-trials-flow.ts reads these facts and keeps those separate.
  */
-import { fixedClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, ghInteractiveRead } from "./github-transport.js";
 import { GITHUB_WRITE_RESERVE_FRACTION } from "./github-installation-budget.js";
 
@@ -105,9 +105,10 @@ export function ghApiFetch(read: (args: string[]) => Promise<string> = defaultGh
 /** W1-T14778: the production pacer. It reads `rate_limit` (which spends no quota) at most once a
  *  minute, and while the core bucket is at or under the daemon's write reserve it waits for the
  *  reset, so one long pass never spends the share the daemon and its writes rely on. */
-export function rateLimitPacer(read: (args: string[]) => Promise<string>, opts: { now?: () => number;
+export function rateLimitPacer(read: (args: string[]) => Promise<string>, opts: { clock?: Clock;
   sleep?: (ms: number) => Promise<void>; reserveFraction?: number } = {}): () => Promise<void> {
-  const now = opts.now ?? Date.now;
+  const clock = opts.clock ?? systemClock;
+  const now = () => clock.now();
   const sleep = opts.sleep ?? sleepFor;
   const reserveFraction = opts.reserveFraction ?? GITHUB_WRITE_RESERVE_FRACTION;
   let probedAt = Number.NEGATIVE_INFINITY;

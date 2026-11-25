@@ -33,7 +33,7 @@ import { buildModelFieldNoteCandidate, FIELD_NOTE_WINDOWS_VERSION, parseFieldNot
   type AdoptionSelectedCell, type FieldNoteWindow, type FieldNoteWindows } from "./field-trials-field-note.js";
 export type { AdoptionSelectedCell } from "./field-trials-field-note.js";
 import { joinVerifiedTaskOutcomes, type VerifiedAssignment } from "./benchmark-verified-outcome.js";
-import { fixedClock, systemClock } from "./clock.js";
+import { fixedClock, systemClock, type Clock } from "./clock.js";
 import { loadConfig } from "./config.js";
 import { ghInteractiveRead } from "./github-transport.js";
 import { syncFieldNoteSiteImport, type FieldNoteExport, type SiteImportOutcome, type SiteRelease } from "./field-trials-site-import.js";
@@ -1558,9 +1558,9 @@ export interface FieldTrialsCommandInput {
 
 /** W1-T14778: a long pass persists its GitHub store at most this often, so a killed pass resumes near where it stopped. */
 const GITHUB_CHECKPOINT_MS = 30_000;
-function checkpointEvery(intervalMs: number, write: () => void, now: () => number = () => systemClock.now()): () => void {
-  let last = now();
-  return () => { if (now() - last >= intervalMs) { last = now(); write(); } };
+function checkpointEvery(intervalMs: number, write: () => void, clock: Clock = systemClock): () => void {
+  let last = clock.now();
+  return () => { if (clock.now() - last >= intervalMs) { last = clock.now(); write(); } };
 }
 
 const USAGE = "usage: rmd field-trials [--source <label>=<owner/repo>]... [--ledger <label>=<state-dir>]... [--out-dir <dir>] "
