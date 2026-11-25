@@ -224,9 +224,8 @@ export interface OperatorHoldState {
 function heldOnOperatorInputBy(holds: OperatorHoldState | undefined): (task: Pick<DispatchValueTask, "id" | "needs_input" | "verify">) => boolean {
   let released: ReadonlySet<string> | undefined;
   return task => {
-    const answer = holds?.inputAnswer?.(task.id);
-    const answered = typeof answer === "string" && answer.trim() !== "";
-    if (task.needs_input !== undefined && answered === false) return true;
+    // The answer reader is consulted only for a record that asks a question, as plan.ts's needsInputRefusal does.
+    if (task.needs_input !== undefined && !holds?.inputAnswer?.(task.id)?.trim()) return true;
     if (task.verify !== "human") return false;
     released ??= holds?.releasedIds?.() ?? new Set<string>();
     return !released.has(task.id);
