@@ -8,7 +8,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import {
   LEDGER_COLD_STORE_DIRNAME,
   LEDGER_COLD_STORE_RETENTION_MS,
-  LEDGER_COMPACT_MAX_SOURCES,
+  LEDGER_COMPACT_MAX_ARCHIVE_BYTES,
   ledgerCompactCommand,
   selectLedgerCompactionSources,
   type LedgerCompactCommandDeps,
@@ -110,7 +110,7 @@ test("ledger-compact preserves the distinct row set while replacing duplicate so
   assert.deepEqual(JSON.parse(result.out[0]!), {
     mode: "apply",
     olderThanDays: 7,
-    maxSources: 50,
+    maxSources: null,
     eligibleCount: 3,
     unparseableAgeCount: 0,
     sourceCount: 3,
@@ -223,17 +223,32 @@ test("ledger-compact gives an all-torn corpus the same deterministic name in pre
   assert.deepEqual(corpusRows(applyMemory.files), new Set(["torn-row-without-a-timestamp"]));
 });
 
-test("ledger-compact caps one invocation at the 50 oldest eligible sources", () => {
-  const names = Array.from({ length: 52 }, (_, i) =>
-    compactedArchiveName(new Date(Date.UTC(2026, 0, 1) + i * 24 * 60 * 60 * 1_000).toISOString()));
+const dailyNames = (count: number) => Array.from({ length: count }, (_, i) =>
+  compactedArchiveName(new Date(Date.UTC(2026, 0, 1) + i * 60 * 60 * 1_000).toISOString()));
+
+test("W1-T14729 criterion 1: a compaction pass selects every rotation the byte budget admits", () => {
+  // 120 eligible rotations of 64 KiB each: 7.5 MiB in all, far inside the 64 MiB budget and past the old 50.
+  const names = dailyNames(120);
   names.push(compactedArchiveName("2026-09-09T00:00:00.000Z"));
-
-  const selected = selectLedgerCompactionSources(names, STATE_DIR, 7, 10_000, NOW);
-
-  assert.equal(selected.eligibleCount, 52);
-  assert.equal(selected.sources.length, LEDGER_COMPACT_MAX_SOURCES);
+  const selected = selectLedgerCompactionSources(names, STATE_DIR, 7, undefined, NOW, () => 65_536, () => 65_536);
+  assert.equal(selected.eligibleCount, 120);
+  assert.equal(selected.sources.length, 120, "invariant:the-byte-budget-alone-bounds-a-pass");
+  assert.equal(selected.sizeSkippedCount, 0);
   assert.equal(selected.sources[0]!.path, join(STATE_DIR, names[0]!));
-  assert.equal(selected.sources.at(-1)!.path, join(STATE_DIR, names[49]!));
+  assert.equal(selected.sources.at(-1)!.path, join(STATE_DIR, names[119]!));
+  // With no sizer the window holds every eligible rotation too.
+  assert.equal(selectLedgerCompactionSources(names, STATE_DIR, 7, undefined, NOW).sources.length, 120);
+  // An operator count still narrows a pass.
+  assert.equal(selectLedgerCompactionSources(names, STATE_DIR, 7, 3, NOW).sources.length, 3);
+});
+
+test("W1-T14729 criterion 2: a compaction pass still defers rotations past the byte budget", () => {
+  // 120 rotations of 1 MiB decompressed: the 64 MiB budget admits 64, and the other 56 are deferred and counted.
+  const names = dailyNames(120);
+  const selected = selectLedgerCompactionSources(names, STATE_DIR, 7, undefined, NOW, () => 65_536, () => 1024 * 1024);
+  assert.equal(LEDGER_COMPACT_MAX_ARCHIVE_BYTES, 64 * 1024 * 1024);
+  assert.equal(selected.sources.length, 64);
+  assert.equal(selected.sizeSkippedCount, 56);
 });
 
 test("ledger-compact names and skips a rotation whose age cannot be parsed", () => {
@@ -248,7 +263,7 @@ test("ledger-compact names and skips a rotation whose age cannot be parsed", () 
   assert.deepEqual(JSON.parse(result.out[0]!), {
     mode: "apply",
     olderThanDays: 7,
-    maxSources: 50,
+    maxSources: null,
     eligibleCount: 0,
     unparseableAgeCount: 1,
     sourceCount: 0,
@@ -269,7 +284,7 @@ test("ledger-compact never admits the live ledger into an operator compaction wi
     ["ledger.ndjson", rotation],
     STATE_DIR,
     7,
-    LEDGER_COMPACT_MAX_SOURCES,
+    undefined,
     NOW,
   );
 
@@ -329,14 +344,20 @@ test("ledger-compact still refuses a late output collision before any writes or 
   assert.deepEqual(memory.removals, []);
 });
 
-test("ledger-compact refuses an over-ceiling source flag before reading the state directory", () => {
+test("W1-T14729 criterion 3: ledger-compact accepts a max-sources override above fifty", () => {
   const memory = memoryFs({});
-
-  const result = command(["--max-sources", String(LEDGER_COMPACT_MAX_SOURCES + 1)], memory);
-
-  assert.equal(result.code, 2);
-  assert.equal(memory.reads, 0);
-  assert.match(result.errors.join("\n"), /--max-sources must be an integer from 1 to 50/);
+  const result = command(["--dry-run", "--max-sources", "51"], memory);
+  assert.equal(result.code, 0, result.errors.join("\n"));
+  assert.equal(JSON.parse(result.out[0]!).maxSources, 51);
+  assert.equal(command(["--dry-run", "--max-sources", String(Number.MAX_SAFE_INTEGER)], memoryFs({})).code, 0);
+  // A malformed count is still refused before any read.
+  for (const bad of ["0", "-1", "two"]) {
+    const refused = memoryFs({});
+    const out = command(["--max-sources", bad], refused);
+    assert.equal(out.code, 2);
+    assert.equal(refused.reads, 0);
+    assert.match(out.errors.join("\n"), /--max-sources must be a positive integer/);
+  }
 });
 
 test("ledger-compact refuses an unknown flag before reading the state directory", () => {

@@ -81,8 +81,9 @@ test("daemonCommand: the self-target daemon wires and runs the bounded ledger co
         rowsWritten: outcome.rowsWritten,
         duplicatesCollapsed: outcome.duplicatesCollapsed,
       },
-      { sourceCount: 50, rowsWritten: 1, duplicatesCollapsed: 49 },
-      "the real production hook invokes exactly one bounded 50-source pass",
+      // W1-T14729: the pass is bounded by its byte budget alone, so all 401 small archives merge at once.
+      { sourceCount: 401, rowsWritten: 1, duplicatesCollapsed: 400 },
+      "the real production hook invokes exactly one pass over every archive the byte budget admits",
     );
     assert.ok(outcome?.archiveName, "the outcome names the durable replacement archive");
     assert.ok(existsSync(join(stateDir, outcome!.archiveName)), "the replacement was atomically written in the configured state dir");
