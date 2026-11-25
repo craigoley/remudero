@@ -57,8 +57,15 @@ test("unit test: a matching, inconclusive, non-grep or credited proof leaves the
   assert.deepEqual(await gate("/w"), pass);
   assert.equal(runs, 1, "only the executable grep proof runs: not the suite proof, not the credited one");
 
-  for (const answer of [{ status: 4 }, { status: null, signal: "SIGTERM" as const }, { status: 1, error: "spawn failure" }, { status: 0 }]) {
-    const result = await withFiledProofCheck(async () => pass, [criterion("grep: x in src/a.ts")], answering(answer.status, answer as Partial<OpenPullRequestProofResult>))("/w");
+  const answers: OpenPullRequestProofResult[] = [
+    { status: 4 },
+    { status: null, signal: "SIGTERM" },
+    { status: 1, error: "spawn failure" },
+    { status: 0 },
+  ];
+  for (const answer of answers) {
+    const answered = async (): Promise<OpenPullRequestProofResult> => answer;
+    const result: PreopenGateResult = await withFiledProofCheck(async () => pass, [criterion("grep: x in src/a.ts")], answered)("/w");
     assert.deepEqual(result, pass, `${JSON.stringify(answer)} adds no step`);
   }
 });
