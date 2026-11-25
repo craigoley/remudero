@@ -16,8 +16,9 @@ const task: Task = {
   files: ["src/x.ts"],
   acceptance: [{ claim: "a claim", proof: "unit test: a claim" }],
 };
-/** Stands in for the built headline index. The real builder is driven through the real dispatch in
- *  test/recon-degrade.test.ts; importing src/run-task.ts here would raise the affected-suite reach ceiling. */
+/** Stands in for the built headline index. The dispatch's `spawn` (run-task-verb.ts) hands every spawn
+ *  to `withProviderRuleHeadlines` with the part it built; importing src/run-task.ts here would raise the
+ *  affected-suite reach ceiling, so this drives that same wrapper through the real router instead. */
 const HEADLINE_PART = "- CLAUDE.md's rule headlines (progressive disclosure) — headlines only\n    Always keep the fixture headline first.";
 const FULL = renderImplementPromptWithParts(task, "", "RUN", "", "", HEADLINE_PART).prompt;
 const WITHOUT = renderImplementPromptWithParts(task, "", "RUN").prompt;

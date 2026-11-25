@@ -253,32 +253,6 @@ test("BEHAVIORAL: a recon that errors once and succeeds on retry reaches impleme
   assert.doesNotMatch(String(implementSpawn.prompt), /RECON CONTEXT ABSENT/, "a successful retry never injects the absence note");
 });
 
-// ── W1-T13768: the REAL dispatch decides rule_headlines by the provider the router resolves ─
-
-test("W1-T13768: the real dispatch drops rule_headlines from a Codex-routed implement prompt and keeps Claude's bytes", async (t) => {
-  const spawnCalls: SpawnWorkerArgs[] = [];
-  const spawn: typeof spawnWorker = async (args) => {
-    spawnCalls.push(args);
-    if (spawnCalls.length === 1) {
-      return result({
-        sessionId: "s-recon",
-        text: "RECON REPORT\nOBSERVED: the repo has a README.md\nINFERRED: nothing\nCOULDN'T-VERIFY: nothing\n",
-      });
-    }
-    return result({ sessionId: "s-implement", text: "REPORT\nPR_URL: https://github.com/acme/remudero/pull/1\n" });
-  };
-
-  await runFixture(t, spawn, FIXTURE_PLAN, { "CLAUDE.md": "- **Always keep the fixture headline first.** A body.\n" }, true);
-
-  const [recon, implement] = spawnCalls;
-  assert.equal(recon!.promptFor, undefined, "a spawn that carries no headline part is not rerouted");
-  assert.match(implement!.prompt, /Always keep the fixture headline first/, "control: the built prompt carries the part");
-  const codex = implement!.promptFor!({ provider: "codex", harnessOwnsGit: true });
-  assert.doesNotMatch(codex, /fixture headline|CLAUDE\.md's rule headlines/);
-  assert.match(codex, /the repo has a README\.md/, "the rest of the prompt still reaches Codex");
-  assert.equal(implement!.promptFor!({ provider: "claude", harnessOwnsGit: false }), implement!.prompt);
-});
-
 // ── Behavioral: recon errors TWICE — degrades, implement still spawns with the absence note ─
 
 test("BEHAVIORAL: a recon that errors twice in a row DEGRADES (never aborts the run) — implement still spawns with an explicit absent-context note, and the degrade is ledgered naming the subtype", async (t) => {
