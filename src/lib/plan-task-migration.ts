@@ -7,7 +7,7 @@ import { defaultGitRunnerAsync, readBlobsAtRefAsync, type Plan, type Task } from
 import { createPlanRevisionStore } from "./plan-revision-store.js";
 import { dispatchOrder } from "./drain.js";
 import { taskIdFromRunBranch, creditsByAnchoredTrailer } from "./status.js";
-import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS, ghJsonAsync } from "./github-transport.js";
+import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, DEFAULT_GH_REFUSAL_BACKOFF_FLOOR_MS, ghJsonAsync, ghTextAsync } from "./github-transport.js";
 import { RmdError } from "./errors.js";
 
 type Json = Record<string, unknown>;
@@ -468,12 +468,54 @@ function searchedMerged(state: PreviewState, id: string, control: Json): boolean
   return [...state.trailer, ...state.branch].some(pr => credited(pr).includes(id));
 }
 
+/** W1-T14875: the record paths a closed copy pull request's failed ops-gate run named, or undefined when that is unread. */
+export type OpsGateNamedReader = (repository: string, pull: number) => Promise<ReadonlySet<string> | undefined>;
+
+/** One ops-gate finding line, `<path>: <message>`, after the job log's timestamp. */
+const GATE_FINDING = /^(?:\S+Z )?(plan\/tasks\.d\/[^\s:]+\.ya?ml): \S/;
+const stamp = (line: string) => line.replace(/^\S+Z /, "");
+/**
+ * PURE. The record paths an ops-gate job log names, or undefined unless the log reads whole: the gate step's output, every
+ * line before its `ops-gate: FAIL` verdict a record finding, and as many of them as its `findings: N` summary counts.
+ * A finding on anything but a record (a leak in another file) names no record, so it is undefined: every record stays refused.
+ */
+export function opsGateNamedPaths(log: string): ReadonlySet<string> | undefined {
+  const lines = log.split(/\r?\n/).map(stamp);
+  const run = lines.findIndex(line => line === "##[group]Run ruby scripts/ops-gate.rb");
+  const start = run < 0 ? -1 : lines.indexOf("##[endgroup]", run);
+  const fail = start < 0 ? -1 : lines.indexOf("ops-gate: FAIL", start);
+  if (fail < 0) return undefined;
+  const findings = lines.slice(start + 1, fail);
+  const counted = lines.slice(fail).map(line => /^findings: (\d+) /.exec(line)?.[1]).find(n => n !== undefined);
+  if (findings.length === 0 || findings.some(line => !GATE_FINDING.test(line)) || Number(counted) !== findings.length) return undefined;
+  return new Set(findings.map(line => GATE_FINDING.exec(line)![1]!));
+}
+
+/** The live reader: the pull request's head, its failed ops-gate check run, and that run's job log. */
+export const opsGateNamedRead: OpsGateNamedReader = async (repository, pull) => {
+  const head = object(object(await ghJsonAsync(["api", `repos/${repository}/pulls/${pull}`])).head).sha;
+  const runs = object(await ghJsonAsync(["api", `repos/${repository}/commits/${String(head)}/check-runs?check_name=ops-gate&per_page=100`])).check_runs;
+  const failed = Array.isArray(runs) ? runs.map(object).filter(r => r.conclusion === "failure") : [];
+  // No failed ops-gate run means the gate named nothing; the close was someone's own refusal of every record in it.
+  if (failed.length !== 1) return undefined;
+  return opsGateNamedPaths(await ghTextAsync(["api", `repos/${repository}/actions/jobs/${String(failed[0]!.id)}/logs`]));
+};
+
 /** W1-T13680: a closed, unmerged mover pull request whose ops copy added this same public blob: the move was refused.
- *  W1-T14345: one copy pull request may carry many tasks, so its receipt line, not its branch, names this one. */
-function moveRefused(state: PreviewState, id: string, blob: string): boolean {
+ *  W1-T14345: one copy pull request may carry many tasks, so its receipt line, not its branch, names this one.
+ *  W1-T14875 (operator ruling 2026-11-25 20:31Z): a closed batch refuses only the records its failed ops-gate run named.
+ *  When that run cannot be read, or there is none, every record in the batch stays refused, as before. */
+async function moveRefused(state: PreviewState, id: string, blob: string, named: OpsGateNamedReader, repository: string): Promise<boolean> {
   if (!state.refusedMoves) return unknown("incomplete_move_evidence");
-  return state.refusedMoves.some(pr => pr.state === "CLOSED" &&
-    String(pr.body).split(/\r?\n/).some(line => line.startsWith(`${MOVE_COPY_RECEIPT} ${id} `) && line.split(" ").includes(`blob=${blob}`)));
+  for (const pr of state.refusedMoves) {
+    if (pr.state !== "CLOSED") continue;
+    const receipt = String(pr.body).split(/\r?\n/).find(line => line.startsWith(`${MOVE_COPY_RECEIPT} ${id} `) && line.split(" ").includes(`blob=${blob}`));
+    if (receipt === undefined) continue;
+    const path = receipt.split(" ").find(field => field.startsWith("path="))?.slice(5);
+    const paths = await named(repository, Number(pr.number)).then(x => x, () => undefined);
+    if (paths === undefined || path === undefined || paths.has(path)) return true;
+  }
+  return false;
 }
 
 /**
@@ -508,7 +550,7 @@ export function publicReferences(tasks: ReadonlyArray<Task>): Set<string> {
  *  selected exactly as before. W1-T14714: no count ends the batch; {@link BatchFits} ends it where a pull request would
  *  pass GitHub's body limit. */
 export async function selectPlanTaskMigration(
-  o: Options, reader: MigrationGraphqlReader = graphqlRead, bounds: OpsCatalogBoundsIo = {}, fits?: BatchFits,
+  o: Options, reader: MigrationGraphqlReader = graphqlRead, bounds: OpsCatalogBoundsIo = {}, fits?: BatchFits, gateNamed: OpsGateNamedReader = opsGateNamedRead,
 ): Promise<MigrationSelection> {
   const publicRefs = await refs(o.publicRoot, o.publicRepo), opsRefs = await refs(o.opsRoot, o.opsRepo);
   const pub = await catalog(o.publicRoot, o.publicCommit), ops = await catalog(o.opsRoot, o.opsCommit, true);
@@ -595,7 +637,7 @@ export async function selectPlanTaskMigration(
       const checked = await readState(o, publicRefs, opsRefs, { id: member.id, control, reader });
       carrying.push(carriedOf(member, memberOriginal.path));
       stable(initial, checked, carrying); await judge(checked, carrying);
-      if (moveRefused(checked, member.id, memberOriginal.blob)) { groupRefused = "move_refused"; break; }
+      if (await moveRefused(checked, member.id, memberOriginal.blob, gateNamed, o.opsRepo)) { groupRefused = "move_refused"; break; }
       // A merged or done record moves as history: its merge credit is what it records, not a reason to stay.
       if (!isHistory(member) && searchedMerged(checked, member.id, control)) { groupRefused = "merged"; break; }
     }
