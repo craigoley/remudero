@@ -345,7 +345,9 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
     if (step !== undefined) planned = step;
     else {
       const selection = await selectPlanTaskMigration(o, reader, ports.bounds, batchFits(o, publicRefs, ports.bodyLimit));
-      if (selection.candidate === undefined) return report(completed.length > 0 ? "complete" : "none", { completed, refused: selection.refused.length });
+      if (selection.candidate === undefined) return report(completed.length > 0 ? "complete" : "none", { completed, refused: selection.refused.length,
+        // W1-T14870: every record selection refused and why, so a stand-down names what stays on core.
+        refusals: selection.refused });
       const members: Planned[] = [];
       for (const candidate of selection.batch) {
         const id = String(candidate.id), path = String(candidate.sourcePath), original = String(candidate.yaml);
