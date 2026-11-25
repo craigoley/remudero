@@ -108,7 +108,7 @@ function fixture(t: TestContext, privateEntry = true) {
               writeFileSync(join(args.cwd,TASK_PATH),[
                 "- id: "+id,"  title: an explicit public task","  repo: remudero","  origin: feedback#"+ID,
                 "  depends_on: []","  type: implement","  verify: auto","  status: queued","  attempts: 0",
-                "  files: [src/lib/triage.ts]","  acceptance:","    - claim: the task is present",
+                "  design: 'NO-INVARIANTS: a fixture filing with no prior behavior'","  files: [src/lib/triage.ts]","  acceptance:","    - claim: the task is present",
                 '      proof: "grep: triage in src/lib/triage.ts"',""].join("\n"));
               const branch=execFileSync("git",["branch","--show-current"],{cwd:args.cwd,encoding:"utf8"}).trim();
               writeFileSync(branchView,JSON.stringify({headRefName:branch}));

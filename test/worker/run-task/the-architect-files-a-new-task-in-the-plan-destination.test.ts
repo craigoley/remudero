@@ -107,7 +107,7 @@ function fixture(t: TestContext, kinds: string[] | undefined, privateFeedback = 
     const {root,REPO_ROOT,ID,NEW_TASK,PUBLIC_TASK,SOURCE,diffFile,observedPath,outcomePath,command,worker}=JSON.parse(process.env.ARCHITECT_CASE);
     const observed={};
     const task=(origin)=>["- id: W1-T5","  title: a new filing","  repo: remudero","  origin: "+origin,"  depends_on: []","  type: implement",
-      "  verify: auto","  status: queued","  attempts: 0","  files: [test/fixture.test.ts]","  acceptance:","    - claim: fixture",
+      "  verify: auto","  status: queued","  attempts: 0","  design: 'NO-INVARIANTS: a fixture filing with no prior behavior'","  files: [test/fixture.test.ts]","  acceptance:","    - claim: fixture",
       "      proof: 'unit test: fixture'",""].join("\n");
     const result=(text)=>({sessionId:"fixture",costUsd:0,text,blocks:[text],stderr:"",subtype:"success",isError:false,apiError:false,
       numTurns:1,model:"fixture",effort:"high",tokens:{input:0,output:0,cacheRead:0,cacheCreation:0},totalCostUsd:0,
