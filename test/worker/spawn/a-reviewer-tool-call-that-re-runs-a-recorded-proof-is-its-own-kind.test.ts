@@ -231,6 +231,10 @@ async function reviewOnce(keepReviewer: boolean): Promise<ReviewRun> {
     yield { type: "result", subtype: "success", is_error: false, result: "REVIEW_VERDICT 1: PASS", session_id: "s-14037",
       total_cost_usd: 0.01, num_turns: 4 };
   })()) as unknown as Parameters<typeof runReview>[1]["reviewerQueryFn"];
+  const shadowQueryFn = (() => (async function* () {
+    yield { type: "result", subtype: "success", is_error: false, result: "REVIEW_VERDICT 1: PASS", session_id: "s-14037-shadow",
+      total_cost_usd: 0, num_turns: 1 };
+  })()) as unknown as Parameters<typeof runReview>[1]["reviewerQueryFn"];
   const spawns: SpawnArgs[] = [];
   let prompt = "";
   let proofEvidence: unknown;
@@ -246,9 +250,13 @@ async function reviewOnce(keepReviewer: boolean): Promise<ReviewRun> {
         return stable;
       }) };
     }
+    const isShadowJudge = spawns.length > 0;
     spawns.push(args);
     const forwarded: SpawnArgs = { ...args, keychain: { platform: "linux", readCredentialFile: () => "{}" } };
     if (!keepReviewer) delete forwarded.reviewer;
+    // The review's shadow judge samples 1 in 20 by a hash that includes the head sha, so on some heads it spawns again
+    // with the same queryFn. Answer it apart, so `queried` counts only the reviewer's own query on every head.
+    if (isShadowJudge) forwarded.queryFn = shadowQueryFn;
     return spawnWorker(forwarded);
   };
   try {
