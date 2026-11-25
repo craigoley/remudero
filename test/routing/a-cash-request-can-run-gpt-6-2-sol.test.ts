@@ -81,8 +81,8 @@ test("W1-T13446 criterion 1: gpt-6.2-sol is a ready cash deployment, priced $2/$
 
 test("W1-T13446 criterion 2: every cash row offering gpt-6.1-sol lists gpt-6.2-sol directly ahead of it, and cashSonnetAlternatives offers terra, 6.2 sol, 6.1 sol, passing over absent or capacity-short members", (t) => {
   const withoutSol62 = (row: string[]) => row.filter((model) => model !== SOL62);
-  const originBalanced = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", TERRA, SOL];
-  const balanced = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", TERRA, SOL62, SOL];
+  const originBalanced = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", TERRA, SOL];
+  const balanced = ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", TERRA, SOL62, SOL];
   for (const effort of ["low", "medium", "high"]) {
     // mounts.yaml: every cash row offering 6.1 Sol has 6.2 Sol directly ahead, others in origin/main order.
     for (const tier of ["economy", "balanced", "frontier"] as const) {

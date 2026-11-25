@@ -1086,9 +1086,9 @@ export function balancedTrialControl(capabilities: CapabilityLadder | undefined,
 // measured 2026-09-15, a 259,181-token inbox_draft favours nano 2.83x while a 446-token escalation
 // judgement favours gpt-oss 2.40x, since nano spends ~5x the completion tokens on reasoning.
 const FALLBACK_OPENWEIGHT_MODELS: Record<CodexModelTier, string[]> = {
-  economy: ["gpt-oss-120b", "gpt-5-nano", "gpt-5.6-luna"],
-  balanced: ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", "gpt-6.2-sol", "gpt-6.1-sol"],
-  frontier: ["gpt-6-luna", "gpt-5.6-luna", "gpt-6.1-terra", "gpt-5.6-terra"],
+  economy: ["gpt-oss-120b", "gpt-5-nano", "gpt-6-luna"],
+  balanced: ["gpt-5-nano", "gpt-oss-120b", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.2-sol", "gpt-6.1-sol"],
+  frontier: ["gpt-6-luna", "gpt-6.1-terra"],
 };
 
 /** The provider-neutral Claude-model -> capability lookup is shared with Codex: both adapters
@@ -1142,8 +1142,6 @@ export const OPENWEIGHT_CONTEXT_WINDOWS: Readonly<Record<string, OpenWeightConte
   // So the window is recorded LOW on purpose: a request above it refuses pre-transport rather than
   // silently entering a tier whose price is unknown, which is the direction that keeps
   // `dailyCapUsd` honest. Raise it only when a long-context rate has been read AND priced.
-  "gpt-5.6-luna": { totalTokens: 128_000, readAt: "2026-09-16" },
-  "gpt-5.6-terra": { totalTokens: 128_000, readAt: "2026-09-16" },
   // Azure's 922K input limit is lower than the combined window; reserve 8K for output.
   "gpt-6-luna": { totalTokens: 922_000, readAt: "2026-09-24" },
   "gpt-6.1-sol": { totalTokens: 922_000, readAt: "2026-10-02" },
@@ -4473,15 +4471,7 @@ export const OPENWEIGHT_PRICES: Readonly<Record<string, OpenWeightPrice>> = {
   // $0.25/$2.00) and measurably more efficient -- on an identical trivial prompt Luna spent 0
   // reasoning tokens where mini spent 64 of 76 -- so mini had no lane left where it was the right
   // row. Keeping it trailing would have implied a fallback worth reaching; there is none.
-  //
-  // PUBLISHED SHORT-CONTEXT RATES, read 2026-09-16 from Microsoft's GPT-5.6 Foundry announcement.
-  // These are the SAME models the Codex subscription already routes (`gpt-5.6-luna`/`-terra` lead
-  // the codex economy and balanced rows), so a squeeze diverts a lane to identical intelligence on
-  // a different bill rather than to a cheaper substitute of unknown quality.
-  "gpt-5.6-luna": { inputUsdPerMillion: 0.2, outputUsdPerMillion: 1.2, unbilledAzureOpenAi429: true, readAt: "2026-09-16" },
-  // TERRA IS 10x LUNA ON BOTH AXES. It exists for the frontier band alone; nothing else may lead
-  // with it. Sol ($5.00/$30.00) is deliberately NOT here -- 2.5x terra for the same band.
-  "gpt-5.6-terra": { inputUsdPerMillion: 2.0, outputUsdPerMillion: 12.0, unbilledAzureOpenAi429: true, readAt: "2026-09-16" },
+  // gpt-5.6-luna and gpt-5.6-terra price rows were retired with the cash ladder's predecessors (W1-T4081).
   // Foundry Global Standard, 2026-09-24; requests above 272K input use long-context rates.
   "gpt-6-luna": {
     unbilledAzureOpenAi429: true,
@@ -4584,8 +4574,6 @@ export const FOUNDRY_CLAUDE_DAILY_CAP_USD = { normal: 5, squeezed: 10 } as const
  * Which structured-output modes each deployment can actually honour.
  *
  * MEASURED, NOT ASSUMED, with the adapter's own URL and api-version:
- *   gpt-5.6-luna   `response_format: {type:"json_object"}` -> HTTP 200, clean `{"ok":true}`
- *   gpt-5.6-terra  same, HTTP 200
  *   gpt-oss-120b   returns MALFORMED JSON under the same field (the measurement that put
  *                  "Do not add `response_format` here" on spawnOpenWeightWorker)
  *   gpt-5-nano     unmeasured, so it declares nothing and may not be asked
@@ -4599,8 +4587,6 @@ export const OPENWEIGHT_RESPONSE_FORMATS: Readonly<Record<string, readonly strin
   "DeepSeek-V4-Flash": ["json_object"],
   "DeepSeek-V4.1-Flash": ["json_object"],
   "gpt-6.1-sol": ["json_object"],
-  "gpt-5.6-luna": ["json_object"],
-  "gpt-5.6-terra": ["json_object"],
 };
 
 /** Exact deployment ids only. Azure DeepSeek thinking is off when effort is omitted;
@@ -4655,10 +4641,6 @@ export const OPENWEIGHT_TEMPERATURE: Readonly<Record<string, number | null>> = {
   // MEASURED 2026-09-16 with the adapter's own URL and api-version: `temperature: 0` returns
   // HTTP 400 ("does not support 0 with this model. Only the default (1) value is supported"),
   // byte-identical to nano's refusal. So the field is OMITTED, never sent as 0.
-  // Both refuse `temperature: 0` with HTTP 400 ("only the default (1) value is supported"),
-  // measured 2026-09-16 -- the same refusal nano gives, so the field is omitted rather than sent.
-  "gpt-5.6-luna": null,
-  "gpt-5.6-terra": null,
   "gpt-6-luna": null,
   "gpt-6.1-sol": null,
   "gpt-6.2-sol": null,
