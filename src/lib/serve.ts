@@ -3602,7 +3602,7 @@ function assembleServeRoutes(
       repository: deps.githubEventWake?.repository ?? "",
       markerPath: sweepWakeMarkerPath(deps.fleetControlRoot),
       // W1-T14806: every live registry instance's own daemon wakes for its repository, not only core.
-      resolveMarkerPath: githubWakeMarkerResolver(deps.githubEventWake?.repository ?? "", deps.fleetControlRoot, deps.instances),
+      resolveMarkerPath: githubWakeMarkerResolver(deps.githubEventWake?.repository ?? "", deps.fleetControlRoot, { registryPath: daemonInstanceRegistryPath(deps.questionsRoot), ...deps.instances }),
       dedup: createPersistentDeliveryDedupStore(
         githubDeliveryDedupPath(deps.fleetControlRoot),
         deps.githubEventWake?.dedupCapacity ?? DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY,

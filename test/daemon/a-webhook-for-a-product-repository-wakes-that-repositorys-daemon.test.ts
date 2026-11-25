@@ -1,13 +1,19 @@
 // W1-T14806: a verified GitHub webhook wakes the daemon that owns its repository, not only core.
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { daemonInstanceRegistryPath } from "#src/lib/deployer.js";
 import { createDeliveryDedupStore, createGitHubEventWakeHandler, sweepWakeMarkerPath } from "#src/lib/github-event-wake.js";
-import { githubWakeMarkerResolver } from "#src/lib/serve.js";
+import type { IssueCloser } from "#src/lib/panel-actions.js";
+import type { RatifyCliGateway } from "#src/lib/panel-graph.js";
+import type { Plan } from "#src/lib/plan.js";
+import { buildServeServer, githubWakeMarkerResolver, type ServeDeps } from "#src/lib/serve.js";
+import type { GitHub } from "#src/lib/status.js";
+import type { TraceGithub } from "#src/lib/trace.js";
 import { createService } from "#src/lib/service.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
@@ -115,6 +121,47 @@ test("W1-T14806: an instance onboarded after serve started is woken", async () =
       assert.deepEqual((await signedPost(url, "craigoley/oley-arcade", "d-after")).body, { accepted: true });
     });
     assert.equal(existsSync(sweepWakeMarkerPath(join(f.stateBase, "oley-arcade"))), true);
+  } finally {
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test("W1-T14806: the served route reads the registry at its default path, with no instances injected", async () => {
+  const f = fixture();
+  try {
+    const planPath = join(f.coreRoot, "plan-tasks.yaml");
+    writeFileSync(planPath, "[]\n");
+    const ledgerPath = join(f.coreRoot, "state", "ledger.ndjson");
+    const github: GitHub = { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
+    f.writeRegistry(["wreckterra"]);
+    // The registry sits where serve's own gateway reads it: daemonInstanceRegistryPath(questionsRoot).
+    const defaultRegistry = daemonInstanceRegistryPath(f.coreRoot);
+    mkdirSync(dirname(defaultRegistry), { recursive: true });
+    copyFileSync(f.registryPath, defaultRegistry);
+    const deps: ServeDeps = {
+      board: { plan: { tasks: [], byId: new Map() } as Plan, ledgerPath, github },
+      panelGraph: { root: f.coreRoot, planPath, ledgerPath, github: { prView: () => null } as TraceGithub, statusGithub: github, ratify: { approve: () => {}, reframe: () => {} } as RatifyCliGateway },
+      ledgerPath,
+      issues: { close: () => {} } as IssueCloser,
+      fleetControlRoot: f.coreRoot,
+      questionsRoot: f.coreRoot,
+      tokens: { read: "r", write: "w" },
+      pollMs: 50,
+      githubEventWake: { secret: SECRET, repository: CORE },
+      // Only the state base is pointed at the fixture; `registryPath` is left to its default, as in production.
+      instances: { stateBase: f.stateBase },
+    };
+    const server = buildServeServer(deps);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/hooks/github`;
+      const res = await signedPost(url, "craigoley/wreckterra", "d-served");
+      assert.deepEqual([res.status, res.body], [202, { accepted: true }]);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    assert.equal(existsSync(sweepWakeMarkerPath(join(f.stateBase, "wreckterra"))), true);
+    assert.equal(existsSync(sweepWakeMarkerPath(f.coreRoot)), false, "core's root must stay untouched");
   } finally {
     rmSync(f.base, { recursive: true, force: true });
   }
