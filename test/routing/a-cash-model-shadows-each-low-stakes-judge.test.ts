@@ -57,6 +57,13 @@ function table(rows: Record<string, unknown> = {}): Mounts {
   return validateMounts({ ...raw, ...rows });
 }
 
+/** W1-T14841: the repo's table with the risk judge's row naming no shadow, so its judgement takes the cash row's shadow
+ *  as it did before decision-1 became the row's shadow on 2026-11-25. */
+function cashShadowed(): Mounts {
+  const row = { model: "haiku", effort: "low", max_turns: 400, context_budget: 60000 };
+  return table({ risk_judge: row, feedback_summary: row });
+}
+
 /** A ledger that stamps each row, and can wait for the shadow rows a caller did not wait for. */
 function ledger(ts = ISO) {
   const rows: Array<Record<string, unknown>> = [];
@@ -104,7 +111,7 @@ function summarizer(mounts: Mounts, shadow: Spawn, book = ledger(), primary = SU
 }
 
 test("W1-T12187 criterion 1: after the risk judge answers, the same prompt goes to the first ready cash economy model and one row records the role, both models, both answers, agreement and each cost", async () => {
-  const mounts = loadMounts(mountsPath(REPO_ROOT));
+  const mounts = cashShadowed();
   const { judge, book, spawned } = riskJudge(mounts, async () => worker(HIGH, { costUsd: 0.0004, routedModel: "gpt-oss-120b" }));
   const verdict = await judge(INPUT);
   assert.equal(verdict.verdict, "low");
@@ -167,7 +174,7 @@ test("W1-T12187 criterion 2: the decision summary gets the same shadow call, and
 });
 
 test("W1-T12187 criterion 3: the caller holds the current model's answer before the shadow starts, and a shadow that fails, times out or gives no usable answer changes nothing and writes one row with the reason", async () => {
-  const mounts = loadMounts(mountsPath(REPO_ROOT));
+  const mounts = cashShadowed();
   const first = riskJudge(mounts, async () => worker(HIGH));
   const verdict = await first.judge(INPUT);
   assert.equal(first.spawned.length, 1, "no shadow request was made before the caller had its answer");
@@ -226,7 +233,7 @@ test("W1-T12187 criterion 3: the caller holds the current model's answer before 
 });
 
 test("W1-T12187 criterion 4: each shadow call reserves against the normal figure of the daily cash cap; when the cap refuses, no request is sent and one row says so", async (t) => {
-  const mounts = loadMounts(mountsPath(REPO_ROOT));
+  const mounts = cashShadowed();
   const root = ownedFixtureDir(t, "judge-shadow-cap").dir;
   // The normal figure has no room; the squeezed figure has plenty.
   const config = {
@@ -281,7 +288,7 @@ async function t11075Row(book: ReturnType<typeof ledger>, surface: "ci-judge" | 
 }
 
 test("W1-T12187 criterion 5: a summary gives, for each role, the paired calls, the share that agree, the share with no usable shadow answer and the median cost of each model, and covers the ci and fix-progress rows of W1-T11075", async (t) => {
-  const mounts = loadMounts(mountsPath(REPO_ROOT));
+  const mounts = cashShadowed();
   const book = ledger();
   // The risk judge: three agree, one disagrees, one fails, one is refused by the cap.
   const risk: Spawn[] = [
@@ -414,7 +421,10 @@ test("W1-T12187 criterion 7: with no row of its own each role resolves the same 
 
   // The rows this task adds to the repo's table change no model: each equals the cell.
   const repo = loadMounts(mountsPath(REPO_ROOT));
-  assert.deepEqual(repo.risk_judge, cell);
+  // W1-T14841: the risk judge's row also names decision-1 as its shadow; its model, effort and provider are the cell's.
+  const { shadow: riskShadow, ...repoRiskRow } = repo.risk_judge!;
+  assert.deepEqual(repoRiskRow, cell);
+  assert.equal(riskShadow?.provider, "decisions");
   assert.deepEqual(repo.feedback_summary, cell);
 
   // A row: its model, effort and provider.

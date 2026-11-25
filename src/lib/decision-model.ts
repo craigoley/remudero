@@ -24,6 +24,10 @@ export const DECISION_ANSWERED_STEP = "decision.answered";
 /** How far a distribution's sum may drift from 1 and still be accepted — floating-point slack only, never a licence
  *  for a model to under- or over-commit its probability mass. typed-judgment.ts re-exports it under the same name. */
 export const TYPED_JUDGMENT_SUM_TOLERANCE = 0.01;
+/** W1-T14841: the revision of this file's answer reader. Bump it whenever a reply is read differently: the bake-off
+ *  keys each model's judge replay on it, so the pool's figures are re-measured once under the new reader.
+ *  2 = W1-T14838 (a Microsoft choice counts cannot_tell in its one unit of mass). */
+export const DECISION_READER_REVISION = 2;
 /** The pseudo sender that writes {@link DECISION_ANSWERED_STEP} (src/lib/producer-identity.ts). */
 export const DECISION_SENDER = "DECISIONS";
 /** PRIMARY CONTROL: the OpenAI-shape limit, checked before any reservation; the Microsoft shape states none. */

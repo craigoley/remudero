@@ -1158,7 +1158,7 @@ import {
 import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
 import { learnedBakeoffLimit, renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
 import type { DeployedModel, DeploymentBakeoffCandidate, JudgeReplayOutcome } from "./lib/bakeoff-trigger.js";
-import { judgeShadowAutoRoles, judgeShadowReplayCorpus } from "./lib/judge-shadow.js";
+import { judgeReplayKey, judgeShadowAutoRoles, judgeShadowReplayCorpus } from "./lib/judge-shadow.js";
 import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
 import { runSweepBakeoff } from "./lib/sweep.js";
 import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError,
@@ -23229,6 +23229,9 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         // W1-T12422: the decision models join the deployed list; each new or changed model gets the direct judge replay.
         deployed: [...measurementBakeoffDeployments(bakeoffMounts), ...decisionBakeoffDeployments(bakeoffMounts)],
         judgeReplay: createJudgeShadowReplay(bakeoffConfig, repoRoot, bakeoffMounts),
+        // W1-T14841: a change to the auto roles or the decision reader, or figures older than the stale bound, replay once.
+        judgeReplayKey: judgeReplayKey(bakeoffMounts),
+        judgeReplayRoles: judgeShadowAutoRoles(bakeoffMounts),
         incumbent: { id: "incumbent", label: `incumbent ${baseMount.model} (${baseMount.effort})`,
           model: baseMount.model, billing: baseMount.provider === "cash" ? "cash" : "subscription",
           effort: baseMount.effort, tools: true },
