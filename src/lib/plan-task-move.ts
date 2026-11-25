@@ -31,7 +31,7 @@ import { parse as parseYaml, parseDocument } from "yaml";
 import { systemClock, type Clock } from "./clock.js";
 import { MOVED_FROM_VALUE, defaultGitRunnerAsync, withoutOneMovedFromLine } from "./plan.js";
 import {
-  MOVE_COPY_RECEIPT, PreviewUnknown, type BatchFits, catalog, liveHeadJudge, migrationOptions, publicReferences, readState, refs, selectPlanTaskMigration, unknown,
+  MOVE_COPY_RECEIPT, PreviewUnknown, type OpsGateNamedReader, type BatchFits, catalog, liveHeadJudge, migrationOptions, publicReferences, readState, refs, selectPlanTaskMigration, unknown,
   type CatalogOriginal, type MigrationGraphqlReader, type MigrationOptions, type PreviewState,
 } from "./plan-task-migration.js";
 import { planPrPreflightAllows, planPrPreflightAtCommitAsync, ratifyPrCreateRestArgs, type PlanPrPreflightResult } from "./plan-pr-emitter.js";
@@ -66,6 +66,8 @@ export interface MovePorts {
   bounds?: OpsCatalogBoundsIo;
   /** W1-T14714: the longest pull request body a batch may make; GitHub's own limit by default. */
   bodyLimit?: number;
+  /** W1-T14875: what a closed copy pull request's failed ops-gate run named; the live job-log read by default. */
+  opsGateNamed?: OpsGateNamedReader;
   print?: (line: string) => void;
 }
 
@@ -344,7 +346,7 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
         reservationUnchanged: event.reservation !== undefined && publicRefs.get(`refs/rmd-id/${event.id}`) === event.reservation }));
     if (step !== undefined) planned = step;
     else {
-      const selection = await selectPlanTaskMigration(o, reader, ports.bounds, batchFits(o, publicRefs, ports.bodyLimit));
+      const selection = await selectPlanTaskMigration(o, reader, ports.bounds, batchFits(o, publicRefs, ports.bodyLimit), ports.opsGateNamed);
       if (selection.candidate === undefined) return report(completed.length > 0 ? "complete" : "none", { completed, refused: selection.refused.length,
         // W1-T14870: every record selection refused and why, so a stand-down names what stays on core.
         refusals: selection.refused });
