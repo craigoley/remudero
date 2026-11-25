@@ -11,13 +11,13 @@ import { test } from "node:test";
 
 import type { GardenLandOpts, GardenerDeps } from "#src/lib/gardener.js";
 import { mergePlanBlobs } from "#src/lib/plan.js";
-import { productionPlanGardenOps } from "#src/lib/plan-gardener-ops.js";
 import {
-  blockedWithoutRetirement,
   opsLandingInputs,
+  orphanedHolds,
   planCandidates,
   planGardenSpec,
   planInventory,
+  productionPlanGardenOps,
   type PlanGardenOps,
   type PlanOpsRead,
 } from "#src/lib/plan-gardener.js";
@@ -25,9 +25,10 @@ import type { OpsCatalogApi } from "#src/lib/ops-catalog-source.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { GIT_REPO_FIXTURE_IDENTITY, gitRepo } from "#test/helpers/git-repo.js";
 
-const shardText = (id: string, o: { deps?: string[]; status?: string; retirement?: string; type?: string } = {}) => [
+const shardText = (id: string, o: { deps?: string[]; status?: string; retirement?: string; type?: string; needsInput?: true } = {}) => [
   `- id: ${id}`, `  title: "the task ${id}"`, "  repo: remudero", `  depends_on: [${(o.deps ?? []).join(", ")}]`, `  type: ${o.type ?? "implement"}`,
-  `  status: ${o.status ?? "queued"}`, ...(o.retirement ? [`  retirement: ${o.retirement}`] : []), "  files: [src/lib/x.ts]",
+  `  status: ${o.status ?? "queued"}`, ...(o.retirement ? [`  retirement: ${o.retirement}`] : []),
+  ...(o.needsInput ? ["  needs_input:", '    question: "which way?"', '    asked_at: "2026-11-24T00:00:00Z"'] : []), "  files: [src/lib/x.ts]",
   "  acceptance:", '    - claim: "c"', `      proof: 'grep: never-written-${id} in src/lib/x.ts'`, "",
 ].join("\n");
 
@@ -83,18 +84,45 @@ test("W1-T14642 criterion 2: a queued ops task whose dependency is retired is re
   assert.equal(ops.inputs[0]!.proof, "grep: plan gardener: retire OPS-T1 in plan/tasks.d/OPS-T1-x.yaml");
 });
 
-test("W1-T14642 criterion 3: a queued task that depends on an id neither catalog holds is retired", () => {
+test("W1-T14642 criterion 2: a queued task that depends on an id neither catalog holds is retired", () => {
   const root = publicWorld([["W1-T1", {}], ["W1-T2", { deps: ["W1-T1"] }]]);
   const opsRead = queuedOps(["OPS-T1", { deps: ["W1-T1"] }], ["OPS-T2", { deps: ["W1-T1", "GONE-T9"] }], ["OPS-T3", { deps: ["OPS-T1"] }]);
   const actions = planCandidates(planInventory(root, join(root, "state"), opsRead), root);
-  assert.deepEqual(actions.map((a) => [a.target, a.reason]), [["OPS-T2", "It depends on GONE-T9, which no catalog holds."]]);
+  assert.deepEqual(actions.map((a) => [a.target, a.reason]), [["OPS-T2", "It depends on GONE-T9, which no catalog holds and no reservation covers."]]);
   // With no ops catalog configured the public plan is the whole plan, so an id it lacks is unknown there too.
   const publicOnly = planInventory(root, join(root, "state"));
   assert.equal(publicOnly.known?.has("OPS-T1"), false);
   assert.equal(publicOnly.known?.has("W1-T1"), true);
 });
 
-test("W1-T14642 criterion 3: an unreadable ops catalog makes no id unknown, and a recon task is never retired for one", () => {
+test("W1-T14642 criterion 2: an id a reservation holds is not unknown, and an unreadable reservation read makes none unknown", () => {
+  const root = publicWorld([["W1-T1", {}]]);
+  const opsRead = queuedOps(["OPS-T1", { deps: ["W1-T9"] }]);
+  const stateDir = join(root, "state");
+  assert.deepEqual(planCandidates(planInventory(root, stateDir, opsRead, new Set(["W1-T9"])), root), [], "reserved, not yet filed");
+  assert.deepEqual(planCandidates(planInventory(root, stateDir, opsRead, new Set()), root).map((a) => a.target), ["OPS-T1"]);
+  assert.deepEqual(planCandidates(planInventory(root, stateDir, opsRead, "unreadable"), root), []);
+});
+
+test("W1-T14642 criterion 2: the production reservation read lists every refs/rmd-id ref of origin and is unknown when origin cannot be read", async () => {
+  const w = productionWorld({}, "acme/ops");
+  const origin = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1t14642-origin-`));
+  const run = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_AUTHOR_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email, GIT_COMMITTER_NAME: GIT_REPO_FIXTURE_IDENTITY.name, GIT_COMMITTER_EMAIL: GIT_REPO_FIXTURE_IDENTITY.email } }).trim();
+  run(origin, "init", "-q");
+  run(origin, "commit", "-q", "--allow-empty", "-m", "x");
+  const head = run(origin, "rev-parse", "HEAD");
+  for (const id of ["W1-T9", "W1-T9B"]) run(origin, "update-ref", `refs/rmd-id/${id}`, head);
+  run(w.repoRoot, "init", "-q");
+  run(w.repoRoot, "remote", "add", "origin", origin);
+  const rows: string[] = [];
+  const seam = productionPlanGardenOps({ repoRoot: w.repoRoot, stateDir: w.stateDir, stateRoot: w.root, log: (s) => void rows.push(s) });
+  assert.deepEqual([...(await seam.reservedIds!())!].sort(), ["W1-T9", "W1-T9B"]);
+  run(w.repoRoot, "remote", "set-url", "origin", join(origin, "nowhere"));
+  assert.equal(await seam.reservedIds!(), undefined);
+  assert.deepEqual(rows, ["plan.reservations_unreadable"]);
+});
+
+test("W1-T14642 criterion 4: an unreadable ops catalog gardens the public catalog as before: no id is unknown, no ops record is touched", () => {
   const root = publicWorld([["W1-T1", {}]]);
   const unavailable = planInventory(root, join(root, "state"), { outcome: "unavailable", reason: "ops-unreadable" });
   assert.equal(unavailable.known, undefined);
@@ -103,19 +131,19 @@ test("W1-T14642 criterion 3: an unreadable ops catalog makes no id unknown, and 
   assert.deepEqual(planCandidates(recon, root), []);
 });
 
-test("W1-T14642 criterion 4: a blocked record with no retirement is flagged on the scorecard and never edited", () => {
-  const root = publicWorld([["W1-T1", { status: "blocked" }], ["W1-T2", { status: "blocked", retirement: "closed" }]]);
-  const inv = planInventory(root, join(root, "state"), queuedOps(["OPS-T1", { status: "blocked" }], ["OPS-T2", { status: "blocked", retirement: "retired" }]));
-  assert.deepEqual(blockedWithoutRetirement(inv), ["W1-T1", "OPS-T1"]);
+test("W1-T14642 criterion 3: a blocked record with no retirement and no needs_input is an orphaned hold on the scorecard and never edited", () => {
+  const root = publicWorld([["W1-T1", { status: "blocked" }], ["W1-T2", { status: "blocked", retirement: "closed" }], ["W1-T3", { status: "blocked", needsInput: true }]]);
+  const inv = planInventory(root, join(root, "state"), queuedOps(["OPS-T1", { status: "blocked" }], ["OPS-T2", { status: "blocked", retirement: "retired" }], ["OPS-T3", { status: "blocked", needsInput: true }]));
+  assert.deepEqual(orphanedHolds(inv), ["W1-T1", "OPS-T1"], "a retirement or a pending question is a hold with a way out");
   assert.deepEqual(planCandidates(inv, root), []);
   const spec = planGardenSpec({ stateDir: join(root, "state"), repoRoot: root, openWorkspace: () => { throw new Error("no workspace"); }, log: () => {} } as unknown as GardenerDeps);
   const card = spec.scorecard(inv, { actions: [], acting: [] } as never);
-  assert.equal(card.blockedWithoutRetirement, 2);
-  assert.deepEqual(card.blockedWithoutRetirementIds, ["W1-T1", "OPS-T1"]);
-  assert.equal(card.opsTasks, 2);
+  assert.equal(card.orphanedHolds, 2);
+  assert.deepEqual(card.orphanedHoldIds, ["W1-T1", "OPS-T1"]);
+  assert.equal(card.opsTasks, 3);
 });
 
-test("W1-T14642 criterion 2: the spec reads the ops catalog off the loop and lands an ops retirement through its landing seam", async () => {
+test("W1-T14642 criterion 4: one landing never mixes catalogs: the public PR carries public paths and the ops landing ops paths", async () => {
   const root = publicWorld([["W1-T1", { status: "blocked", retirement: "retired" }], ["W1-T2", { deps: ["W1-T1"] }]]);
   const landed: Array<readonly { relPath: string; content: string }[]> = [];
   const seam: PlanGardenOps = { read: async () => queuedOps(["OPS-T1", { deps: ["W1-T1"] }]), land: (inputs) => void landed.push(inputs) };
@@ -204,7 +232,7 @@ test("W1-T14642 criterion 1: an ops catalog the api cannot serve is unavailable,
   assert.equal(read.outcome, "unavailable");
 });
 
-test("W1-T14642 criterion 2: the production ops landing goes to the plan destination's checkout and its outcome is logged", async () => {
+test("W1-T14642 criterion 1: the production ops landing goes to the plan destination's checkout and its outcome is logged", async () => {
   const w = productionWorld({}, "acme/ops");
   const rows: Array<[string, Record<string, unknown> | undefined]> = [];
   const calls: Array<{ root: string; paths: string[]; target: unknown; stateRoot: string }> = [];

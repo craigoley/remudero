@@ -2,12 +2,15 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
-import type { TaskFileInput } from "./feedback-landing.js";
+import { landTaskFilesAsync, type LandTaskFilesOpts, type TaskFileInput } from "./feedback-landing.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
 import { bestNearDuplicate } from "./knowledge-dedup.js";
+import { readOpsCatalogSnapshotAsync, type OpsCatalogApi } from "./ops-catalog-source.js";
 import { loadPlan, type RetirementReason, type Task } from "./plan.js";
+import { planDestinationRepository } from "./plan-destination.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { loadCreditStore } from "./status.js";
+import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 /**
  * lib/plan-gardener.ts (W1-T4111) — the plan queue tends itself.
@@ -55,6 +58,8 @@ export interface PlanGardenOps {
   read: () => PlanOpsRead | Promise<PlanOpsRead>;
   /** Starts a landing of edited records in the ops repository; the production landing is awaited by its owner. */
   land: (inputs: readonly TaskFileInput[]) => void;
+  /** Every id `refs/rmd-id/` holds, so a reserved, unfiled id is not called unknown; undefined when it cannot be read. */
+  reservedIds?: () => Promise<ReadonlySet<string> | undefined>;
 }
 
 export interface PlanInventory {
@@ -65,13 +70,14 @@ export interface PlanInventory {
   shards: Map<string, string>;
   /** W1-T14642: the ops catalog, when one was read. Its tasks are in `open` and `all` too. */
   ops?: PlanOpsCatalog;
-  /** W1-T14642: every id a catalog holds; absent when a configured ops catalog was unreadable, so no id can be called unknown. */
+  /** W1-T14642: every id a catalog holds or `refs/rmd-id/` reserves; absent when a configured ops catalog was unreadable, so no id can be called unknown. */
   known?: ReadonlySet<string>;
 }
 
-/** W1-T14642: the blocked tasks that carry no `retirement:`, in either catalog: flagged on the scorecard, never edited. */
-export function blockedWithoutRetirement(inv: Pick<PlanInventory, "all">): string[] {
-  return inv.all.filter((t) => t.status === "blocked" && !t.retirement).map((t) => t.id);
+/** W1-T14642: the orphaned holds: blocked tasks, in either catalog, with no `retirement:` and no `needs_input:` question
+ *  to wait on. Nothing releases or retires them, so they are flagged on the scorecard and never edited. */
+export function orphanedHolds(inv: Pick<PlanInventory, "all">): string[] {
+  return inv.all.filter((t) => t.status === "blocked" && !t.retirement && t.needs_input === undefined).map((t) => t.id);
 }
 
 /** Title similarity at which two queued tasks are one task. Exact, because templated titles for
@@ -91,7 +97,8 @@ export function mainTrailerTaskIds(repoRoot: string): Set<string> {
   return new Set([...result.stdout.matchAll(/^Remudero-Task:[ \t]+([A-Za-z0-9][A-Za-z0-9-]*)[ \t]*$/gm)].map((m) => m[1]!));
 }
 
-export function planInventory(repoRoot: string, stateDir: string, opsRead: PlanOpsRead = { outcome: "off" }): PlanInventory {
+/** `reserved`: the ids `refs/rmd-id/` holds (a reserved id is not unknown), or `"unreadable"` when they cannot be read. */
+export function planInventory(repoRoot: string, stateDir: string, opsRead: PlanOpsRead = { outcome: "off" }, reserved: ReadonlySet<string> | "unreadable" = new Set()): PlanInventory {
   const layout = resolveRepoLayout(repoRoot);
   const plan = loadPlan(layout.planMonolith);
   const credited = loadCreditStore(join(stateDir, "merge-credit.json"));
@@ -102,7 +109,7 @@ export function planInventory(repoRoot: string, stateDir: string, opsRead: PlanO
   return {
     open, all, shards: planShards(repoRoot),
     ...(ops ? { ops: { tasks: ops.tasks, shards: ops.shards, sources: ops.sources } } : {}),
-    ...(opsRead.outcome === "unavailable" ? {} : { known: new Set(all.map((t) => t.id)) }),
+    ...(opsRead.outcome === "unavailable" || reserved === "unreadable" ? {} : { known: new Set([...all.map((t) => t.id), ...reserved]) }),
   };
 }
 
@@ -222,7 +229,7 @@ export function retirementCandidates(inv: PlanInventory, repoRoot: string): Plan
     // An abandoned subject may still need a research finding; dependency state alone cannot retire recon.
     if (gone.length + unknown.length > 0 && t.type !== "recon") {
       const why = [...(gone.length > 0 ? [`It depends on ${gone.join(", ")}, which will never be built.`] : []),
-        ...(unknown.length > 0 ? [`It depends on ${unknown.join(", ")}, which no catalog holds.`] : [])];
+        ...(unknown.length > 0 ? [`It depends on ${unknown.join(", ")}, which no catalog holds and no reservation covers.`] : [])];
       out.push({ class: "retire", target: t.id, retirement: "retired", reason: why.join(" ") });
       continue;
     }
@@ -355,8 +362,8 @@ export function planCheapFingerprint(repoRoot: string, stateDir: string): string
 export function planGardenSpec(deps: GardenerDeps, opsSeam?: PlanGardenOps): GardenSpec<PlanGardenClass, PlanInventory, PlanGardenAction, GardenCheckout> {
   // The ops catalog the pass's own inventory read: an ops edit is made on those bytes, so apply reads them from here.
   let readOps: PlanOpsCatalog | undefined;
-  const inventoryOf = (opsRead: PlanOpsRead): PlanInventory => {
-    const inv = planInventory(deps.repoRoot, deps.stateDir, opsRead);
+  const inventoryOf = (opsRead: PlanOpsRead, reserved?: ReadonlySet<string> | "unreadable"): PlanInventory => {
+    const inv = planInventory(deps.repoRoot, deps.stateDir, opsRead, reserved);
     readOps = inv.ops;
     return inv;
   };
@@ -370,14 +377,17 @@ export function planGardenSpec(deps: GardenerDeps, opsSeam?: PlanGardenOps): Gar
     cheapFingerprint: () => planCheapFingerprint(deps.repoRoot, deps.stateDir),
     // A sync caller cannot await the catalog read, so with an ops seam it sees the ops catalog as unreadable.
     inventory: () => inventoryOf(opsSeam ? { outcome: "unavailable", reason: "sync-read" } : { outcome: "off" }),
-    ...(opsSeam ? { inventoryAsync: async () => inventoryOf(await opsSeam.read()) } : {}),
+    ...(opsSeam ? { inventoryAsync: async () => {
+      const opsRead = await opsSeam.read();
+      return inventoryOf(opsRead, opsSeam.reservedIds ? (await opsSeam.reservedIds()) ?? "unreadable" : undefined);
+    } } : {}),
     fingerprint: (inv) => `${inv.all.length}:${inv.open.map((t) => t.id).join(",")}`,
     candidates: (inv) => planCandidates(inv, deps.repoRoot),
     scorecard: (inv, plan) => {
-      const blocked = blockedWithoutRetirement(inv);
+      const orphaned = orphanedHolds(inv);
       return {
         open: inv.open.length, tasks: inv.all.length, proposed: plan.actions.length, opsTasks: inv.ops?.tasks.length ?? null,
-        blockedWithoutRetirement: blocked.length, blockedWithoutRetirementIds: blocked.slice(0, 20),
+        orphanedHolds: orphaned.length, orphanedHoldIds: orphaned.slice(0, 20),
       };
     },
     apply: (ws, plan) => {
@@ -397,4 +407,78 @@ export function planGardenSpec(deps: GardenerDeps, opsSeam?: PlanGardenOps): Gar
       };
     },
   };
+}
+
+/**
+ * W1-T14642 — the plan gardener's production ops seams (the ops catalog read, the ops plan landing, the reservation read).
+ *
+ * READ: the ops task catalog at one pinned commit (ops-catalog-source.ts), each record's bytes read from the ops
+ * checkout at that pin. A catalog that cannot be read is `unavailable`, never an empty catalog: what it holds is
+ * unknown, so the gardener calls no dependency unknown while it is.
+ * LAND: an ops edit goes through the sealed task-files landing into the plan destination, never into the public tree,
+ * so one landing never mixes public and ops paths.
+ */
+export interface ProductionPlanGardenOpsOptions {
+  repoRoot: string;
+  stateDir: string;
+  /** Daemon state root: the sealed landing's queue waits under it. */
+  stateRoot: string;
+  log: (step: string, extra?: Record<string, unknown>) => void;
+  api?: OpsCatalogApi;
+  /** The sealed landing, replaceable so a test lands nothing. */
+  landTaskFiles?: typeof landTaskFilesAsync;
+}
+
+export function productionPlanGardenOps(o: ProductionPlanGardenOpsOptions): PlanGardenOps & { settled: () => Promise<void> } {
+  const landings: Promise<void>[] = [];
+  // One `ls-remote` of the reservation namespace; a read that fails is unknown, never "no reservations".
+  const reservedIds = async (): Promise<ReadonlySet<string> | undefined> => {
+    try {
+      const out = await hostWorktreeGitAsync(o.repoRoot, ["ls-remote", "origin", "refs/rmd-id/*"]);
+      return new Set([...out.matchAll(/refs\/rmd-id\/([A-Za-z0-9][A-Za-z0-9-]*)[ \t]*$/gm)].map((m) => m[1]!));
+    } catch (error) {
+      o.log("plan.reservations_unreadable", { error: String((error as Error)?.message ?? error) });
+      return undefined;
+    }
+  };
+  const landTaskFiles = o.landTaskFiles ?? landTaskFilesAsync;
+  const read = async (): Promise<PlanOpsRead> => {
+    const destination = planDestinationRepository(o.stateDir);
+    if (destination.outcome === "off") return { outcome: "off" };
+    if (destination.outcome !== "named") return { outcome: "unavailable", reason: `plan-destination-${destination.outcome}` };
+    const snapshot = await readOpsCatalogSnapshotAsync({ repository: `${destination.owner}/${destination.repo}` }, o.api);
+    if (snapshot.outcome !== "ok" || !snapshot.plan || !snapshot.binding) return { outcome: "unavailable", reason: `ops-${snapshot.outcome}` };
+    const publicPlan = loadPlan(resolveRepoLayout(o.repoRoot).planMonolith);
+    // One id held by both catalogs is ambiguous: neither copy can be edited by id.
+    if (snapshot.plan.tasks.some((t) => publicPlan.byId.has(t.id))) return { outcome: "unavailable", reason: "ops-duplicate_task_id" };
+    const pin = snapshot.binding.commit;
+    const shards = new Map<string, string>();
+    const sources = new Map<string, string>();
+    for (const task of snapshot.plan.tasks) {
+      const source = task.sourcePath;
+      if (!source || !/^tasks\.d\/[^/]+\.ya?ml$/.test(source)) continue;
+      const path = `plan/${source}`;
+      if (!sources.has(path)) sources.set(path, await hostWorktreeGitAsync(destination.checkoutDir, ["show", `${pin}:${path}`]));
+      // Only a record that sits alone in its file can be edited without touching a neighbour.
+      if (soleTaskId(sources.get(path)!) === task.id) shards.set(task.id, path);
+    }
+    return { outcome: "ok", tasks: snapshot.plan.tasks, shards, sources };
+  };
+  const land = (inputs: readonly TaskFileInput[]): void => {
+    const destination = planDestinationRepository(o.stateDir);
+    if (destination.outcome !== "named") {
+      o.log("plan.ops_landing_skipped", { reason: `plan-destination-${destination.outcome}`, records: inputs.length });
+      return;
+    }
+    const opts: LandTaskFilesOpts = {
+      stateRoot: o.stateRoot, targetRepository: { owner: destination.owner, repo: destination.repo }, log: o.log, lane: "plan",
+    };
+    landings.push(landTaskFiles(destination.checkoutDir, [...inputs], opts).then((result) => {
+      o.log("plan.ops_landing", { records: inputs.length, pr_url: result.prUrl ?? null, landed: result.landed.length, waiting: result.waiting.length, refused: result.refused.length, ...(result.error ? { error: result.error } : {}) });
+    }, (error: unknown) => {
+      o.log("plan.ops_landing_failed", { records: inputs.length, error: String((error as Error)?.message ?? error) });
+    }));
+  };
+  // A landing's failure is logged where it happens, so waiting on the landings never throws.
+  return { read, land, reservedIds, settled: async () => void (await Promise.all(landings.splice(0))) };
 }

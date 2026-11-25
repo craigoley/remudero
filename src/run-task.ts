@@ -399,8 +399,7 @@ import type { SelectorShadowMainFailures } from "./lib/selector-shadow-gardener.
 import { issueRevalidationJudgeText, issueTaskId, loadIssueRevalidationPolicy, productionIssueRevalidationPorts, type IssueRevalidationPorts, type RevalidationVerdict } from "./lib/issue-revalidation-garden.js";
 import { reconcileManagedImprovementEffects } from "./lib/opportunity-outcomes.js";
 import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
-import { planGardenSpec } from "./lib/plan-gardener.js";
-import { productionPlanGardenOps } from "./lib/plan-gardener-ops.js";
+import { planGardenSpec, productionPlanGardenOps } from "./lib/plan-gardener.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { queueJudgeGardenSpec, queueJudgeRouteWindow, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
 import { redesignGardenSpec } from "./lib/redesign-gardener.js";
