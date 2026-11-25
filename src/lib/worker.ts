@@ -14,6 +14,9 @@ import { parseHarvestableFollowUps } from "./promised-follow-ups.js";
 import {
   createWorkerToolLineage, observeWorkerToolLineage, type ReviewerCommandKindCounts, type WorkerToolLineageOptions,
 } from "./worker-tool-lineage.js";
+import { errorSignatureLoopPredicate, hashToolCall, repeatedToolCallPredicate, type TurnSnapshot } from "./flight-signals.js";
+import { appendLedger, type LedgerLine } from "./ledger.js";
+import { LEDGER_FILENAME } from "./ledger-path.js";
 import { unavailableWorkerInitSummary, workerInitSummaryFromMessage, type WorkerInitSummary } from "./worker-init-summary.js";
 import { connect as connectTcp, createServer as createTcpServer, type Socket, type Server } from "node:net";
 import { Agent as HttpAgent, createServer as createHttpServer, request as httpRequest } from "node:http";
@@ -4186,6 +4189,12 @@ export interface WorkerStreamEvent {
   /** The spawn's cwd, stamped by run-task.ts's spawn observers: the root a tool signature's path is made relative to. */
   cwd?: string;
   toolOutcome?: "success" | "error";
+  /** W1-T4049: a bounded hash of a `tool_use` block's name + canonical input ({@link toolCallFingerprint}), so a mid-run
+   * repetition signal can tell five Reads of one file from five Reads of five files without the input itself. */
+  toolFingerprint?: string;
+  /** W1-T4049: on an ERROR tool_result only, a bounded hash of its normalised text ({@link errorTextFingerprint}). The error
+   * text itself never crosses the observer: a transcript is not telemetry. */
+  errorFingerprint?: string;
   workerRole?: "recon" | "implementer" | "reviewer" | "fixer" | "triage" | "retro";
   provider?: string;
   requestedModel?: string;
@@ -4265,6 +4274,164 @@ export class WorkerStateTracker {
     this.state = next;
     return next;
   }
+}
+
+// ── W1-T4049: flight signals on the live stream ─────────────────────────────────────────────
+// The two flight-signals predicates whose input the observer did not carry — repetition (name + input) and the error loop
+// (fingerprinted text) — evaluated AS TURNS ARRIVE over a bounded window, never at run end. Stall is deliberately not wired:
+// the quiet floor and W1-T2557's runaway bound already ledger it. A trip is ledgered and nothing else: no kill, no defer,
+// until a measured trip precision earns one (the order W1-T2557's runaway signal took).
+
+/** The ledger `step` a flight-signal trip rides: at most once per run per predicate, never a halt. */
+export const FLIGHT_SIGNAL_TRIPPED_LEDGER_STEP = "worker.flight_signal.tripped";
+/** The ledger `step` a predicate that THREW rides, so a broken evaluator is visible rather than silently blind. */
+export const FLIGHT_SIGNAL_ERROR_LEDGER_STEP = "worker.flight_signal.error";
+/** Fingerprints are 16 hex characters: bounded, stable, and carrying no byte of the payload they stand for. */
+const FLIGHT_FINGERPRINT_CHARS = 16;
+/** Turns the rolling window keeps per run; older turns fall out, so the hot path's cost is capped however long a run is. */
+export const FLIGHT_SIGNAL_WINDOW_TURNS = 24;
+/** Occurrences inside the window that trip either live predicate. Five, not the module's N>=3 default: re-running one
+ * test after an edit is a healthy repeat, and an unmeasured live alarm must not fire on it. PRIMARY CONTROL: this is
+ * the sole trip condition of the live predicates, not a backstop behind another limit (and it only ledgers, never halts). */
+export const LIVE_FLIGHT_SIGNAL_THRESHOLD = 5;
+/** Runs whose windows stay resident at once; the oldest is dropped first, so a long-lived process stays bounded. */
+const FLIGHT_SIGNAL_MAX_RUNS = 64;
+
+/** A bounded identity for one tool call — the same name + stable-stringified input {@link hashToolCall} keys on. */
+export function toolCallFingerprint(name: string, input: unknown): string {
+  return hashToolCall({ name, input }).slice(0, FLIGHT_FINGERPRINT_CHARS);
+}
+
+/** A bounded identity for one error tool_result, normalised as flight-signals' own reducer normalises error text: numbers
+ * collapsed, whitespace folded, the first 160 characters kept — then hashed, so the text itself is never carried. */
+export function errorTextFingerprint(content: unknown): string {
+  const raw = typeof content === "string" ? content : JSON.stringify(content) ?? "";
+  const normalised = raw.replace(/\d+/g, "#").replace(/\s+/g, " ").trim().slice(0, 160);
+  return createHash("sha256").update(normalised).digest("hex").slice(0, FLIGHT_FINGERPRINT_CHARS);
+}
+
+export type LiveFlightPredicate = "repeated_tool_call" | "error_signature_loop";
+
+/** One trip, as ledgered: the predicate, the turn it fired on, and the fingerprints that recurred — never a payload. */
+export interface FlightSignalTrip {
+  predicate: LiveFlightPredicate;
+  turn: number;
+  fingerprints: string[];
+  count: number;
+  threshold: number;
+  evidence: string;
+}
+
+/** FOLD fingerprinted stream events into a bounded rolling window of {@link TurnSnapshot}s and evaluate the two live
+ * predicates on every event that adds a fingerprint. PURE — no fs, no ledger, no clock — and each predicate reports at
+ * most ONCE for the window's lifetime. */
+export class FlightSignalWindow {
+  private readonly snapshots: TurnSnapshot[] = [];
+  private readonly reported = new Set<LiveFlightPredicate>();
+
+  constructor(
+    private readonly threshold: number = LIVE_FLIGHT_SIGNAL_THRESHOLD,
+    private readonly windowTurns: number = FLIGHT_SIGNAL_WINDOW_TURNS,
+  ) {}
+
+  /** Fold one event; returns the trips it newly caused (empty for every event carrying no fingerprint). */
+  observe(event: WorkerStreamEvent): FlightSignalTrip[] {
+    if (!event.toolFingerprint && !event.errorFingerprint) return [];
+    const snap = this.snapshotFor(event.turnsSoFar ?? 0);
+    const trips: FlightSignalTrip[] = [];
+    if (event.toolFingerprint) {
+      // The fingerprint stands in for the input: equal fingerprints hash equal inside the predicate, so its identity holds.
+      snap.toolCalls.push({ name: event.toolName ?? "unknown", input: event.toolFingerprint });
+      const fired = this.evaluate("repeated_tool_call", snap.turn);
+      if (fired) trips.push(fired);
+    }
+    if (event.errorFingerprint) {
+      snap.errorSignatures.push(event.errorFingerprint);
+      const fired = this.evaluate("error_signature_loop", snap.turn);
+      if (fired) trips.push(fired);
+    }
+    return trips;
+  }
+
+  private snapshotFor(turn: number): TurnSnapshot {
+    const last = this.snapshots[this.snapshots.length - 1];
+    if (last && last.turn === turn) return last;
+    const snap: TurnSnapshot = { turn, toolCalls: [], cumulativeDiffLines: 0, filesTouched: [], errorSignatures: [],
+      cumulativeCostUsd: 0, elapsedMs: 0 };
+    this.snapshots.push(snap);
+    if (this.snapshots.length > this.windowTurns) this.snapshots.shift();
+    return snap;
+  }
+
+  private evaluate(predicate: LiveFlightPredicate, turn: number): FlightSignalTrip | undefined {
+    if (this.reported.has(predicate)) return undefined;
+    const config = { burnRateBaselineUsdPerTurn: 0, repeatedToolCallThreshold: this.threshold, errorSignatureThreshold: this.threshold };
+    const verdict = predicate === "repeated_tool_call"
+      ? repeatedToolCallPredicate(this.snapshots, config)
+      : errorSignatureLoopPredicate(this.snapshots, config);
+    if (!verdict.tripped) return undefined;
+    this.reported.add(predicate);
+    const counts = new Map<string, number>();
+    for (const snap of this.snapshots) {
+      const keys = predicate === "repeated_tool_call" ? snap.toolCalls.map((call) => String(call.input)) : snap.errorSignatures;
+      for (const key of keys) counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const fingerprints = [...counts].filter(([, n]) => n >= this.threshold).map(([key]) => key).sort();
+    const count = Math.max(...counts.values());
+    return { predicate, turn, fingerprints, count, threshold: this.threshold, evidence: verdict.evidence };
+  }
+}
+
+const flightSignalWindows = new Map<string, FlightSignalWindow>();
+
+/** The ONE window a run keeps across every spawn it makes (recon, implement, a resume), so "once per run" holds. */
+function flightSignalWindowFor(key: string): FlightSignalWindow {
+  let window = flightSignalWindows.get(key);
+  if (!window) {
+    window = new FlightSignalWindow();
+    flightSignalWindows.set(key, window);
+    if (flightSignalWindows.size > FLIGHT_SIGNAL_MAX_RUNS) {
+      const oldest = flightSignalWindows.keys().next().value as string;
+      flightSignalWindows.delete(oldest);
+    }
+  }
+  return window;
+}
+
+/** Where a trip (or an evaluator failure) goes. The default appends to `<root>/state/ledger.ndjson`. */
+export type FlightSignalSink = (row: LedgerLine) => void;
+
+/** Wrap a stream observer so the run's flight-signal window sees every event FIRST, then the caller's observer. `undefined`
+ * without a run identity (`root` + `runId`) — nothing to attribute a trip to. Never throws and never halts: a trip or a
+ * predicate failure becomes one ledger row, and a sink failure is swallowed with its reason, because an observer that can
+ * kill the worker it watches is worse than the blindness it cures. */
+export function withFlightSignals(
+  observer: WorkerStreamObserver | undefined,
+  run: { root?: string; runId?: string; taskId?: string; sink?: FlightSignalSink },
+): WorkerStreamObserver | undefined {
+  if (!run.runId || (!run.root && !run.sink)) return observer;
+  const ids = { run_id: run.runId, task_id: run.taskId ?? "unattributed" };
+  const sink: FlightSignalSink = run.sink ?? ((row) => appendLedger(join(run.root!, "state", LEDGER_FILENAME), row));
+  const window = flightSignalWindowFor(`${run.root ?? ""}\0${run.runId}`);
+  const write = (row: { step: string } & Record<string, unknown>): void => {
+    try {
+      sink({ ...ids, ...row });
+    } catch (sinkError) {
+      // Swallowed with its reason: a ledger hiccup must not propagate into the stream loop every worker runs.
+      void sinkError;
+    }
+  };
+  return (event) => {
+    try {
+      for (const trip of window.observe(event)) {
+        write({ step: FLIGHT_SIGNAL_TRIPPED_LEDGER_STEP, predicate: trip.predicate, turn: trip.turn,
+          fingerprints: trip.fingerprints, count: trip.count, threshold: trip.threshold, evidence: trip.evidence });
+      }
+    } catch (error) {
+      write({ step: FLIGHT_SIGNAL_ERROR_LEDGER_STEP, error: error instanceof Error ? error.message : String(error) });
+    }
+    observer?.(event);
+  };
 }
 
 /** Evidence captured the MOMENT the clock-bound watchdog trips, BEFORE anything is released — the lock, the worktree, the
@@ -4450,6 +4617,8 @@ export async function collectWorkerResult(
     /** Invoked per message, classified by kind, with THIS call's own injected clock reading and never a second `Date.now()`.
      * Absent, the loop below behaves byte-identically: no new branch, no new SDK call, no second stream (W1-T942). */
     streamObserver?: WorkerStreamObserver;
+    /** W1-T4049: where a mid-run flight-signal trip is written. Omitted, a run with `root` + `runId` appends to its ledger. */
+    flightSignalSink?: FlightSignalSink;
     /** The injected clock `streamObserver` timestamps are read from. Omitted uses `Date.now`, so a test drives a synthetic
      * clock and the quiet-floor logic needs no real elapsed time. */
     now?: () => number;
@@ -4502,6 +4671,10 @@ export async function collectWorkerResult(
   const compactionEvents: CompactionEvent[] = [];
   const compactionFailures: CompactionFailure[] = [];
   const nowFn = opts.now ?? Date.now;
+  // W1-T4049: the run's flight-signal window sees each event before the caller's observer; without a run identity this
+  // is the caller's observer unchanged.
+  const streamObserver = withFlightSignals(opts.streamObserver, { root: opts.root, runId: opts.runId, taskId: opts.taskId,
+    sink: opts.flightSignalSink });
 
   try {
     for await (const raw of messages) {
@@ -4531,7 +4704,7 @@ export async function collectWorkerResult(
         // The SDK's two safeguard-refusal notices, read off the SAME raw message. Observational: no strike or retry reads it.
         safeguardRefusal = detectSafeguardRefusal(raw) ?? safeguardRefusal;
         // A heartbeat: no worker-authored text, but still proof of life for the quiet floor.
-        opts.streamObserver?.({ kind: "message", tsMs: nowFn(), turnsSoFar });
+        streamObserver?.({ kind: "message", tsMs: nowFn(), turnsSoFar });
       } else if (msg.type === "assistant") {
         // Anthropic-side api error mid-stream (server_error / <synthetic> model / isApiErrorMessage). A TRANSIENT — the
         // envelope may still report success.
@@ -4571,7 +4744,7 @@ export async function collectWorkerResult(
             if (blockType === "text") {
               const text = (block as { text: string }).text;
               blockOutput.push(text);
-              opts.streamObserver?.({ kind: "working", tsMs: nowFn(), text, turnsSoFar });
+              streamObserver?.({ kind: "working", tsMs: nowFn(), text, turnsSoFar });
               if (text.length > 0 && firstTextAtMs === undefined && !firstTextClockInvalid) {
                 const observedAtMs = systemClock.now();
                 if (!Number.isFinite(observedAtMs) || observedAtMs < startedAtMs) firstTextClockInvalid = true;
@@ -4580,13 +4753,14 @@ export async function collectWorkerResult(
               observedThisMessage = true;
             } else if (blockType === "tool_use") {
               const { name: toolName, id: toolUseId, input: toolInput } = block as { name?: string; id?: unknown; input?: unknown };
-              opts.streamObserver?.({
+              streamObserver?.({
                 kind: "tool-executing",
                 tsMs: nowFn(),
                 text: toolName ? `[tool_use: ${toolName}]` : "[tool_use]",
                 ...(toolName ? { toolName } : {}),
                 ...(typeof toolUseId === "string" ? { toolUseId } : {}),
                 ...(toolInput === undefined ? {} : { toolInput }),
+                toolFingerprint: toolCallFingerprint(toolName ?? "unknown", toolInput),
                 turnsSoFar,
               });
               observedThisMessage = true;
@@ -4595,22 +4769,22 @@ export async function collectWorkerResult(
         }
         // An assistant message with neither a text nor a tool_use block (e.g. thinking-only) is still a heartbeat — never
         // silently drop the quiet clock's reset.
-        if (!observedThisMessage) opts.streamObserver?.({ kind: "message", tsMs: nowFn(), turnsSoFar });
+        if (!observedThisMessage) streamObserver?.({ kind: "message", tsMs: nowFn(), turnsSoFar });
       } else if (msg.type === "user") {
         const content = (msg.message as { content?: unknown })?.content;
         const toolResult = Array.isArray(content)
           ? content.find((block) => block && (block as { type?: string }).type === "tool_result") as
-              | { is_error?: boolean; isError?: boolean; tool_use_id?: unknown }
+              | { is_error?: boolean; isError?: boolean; tool_use_id?: unknown; content?: unknown }
               | undefined
           : undefined;
-        opts.streamObserver?.({
+        const toolErrored = toolResult?.is_error === true || toolResult?.isError === true;
+        streamObserver?.({
           kind: "message",
           tsMs: nowFn(),
           turnsSoFar,
           ...(typeof toolResult?.tool_use_id === "string" ? { toolUseId: toolResult.tool_use_id } : {}),
-          ...(toolResult
-            ? { toolOutcome: toolResult.is_error === true || toolResult.isError === true ? "error" : "success" }
-            : {}),
+          ...(toolResult ? { toolOutcome: toolErrored ? "error" : "success" } : {}),
+          ...(toolErrored ? { errorFingerprint: errorTextFingerprint(toolResult?.content) } : {}),
         });
       } else if (msg.type === "result") {
         const r = raw as {
@@ -4635,7 +4809,7 @@ export async function collectWorkerResult(
         sawResult = true;
         // The terminal envelope is a heartbeat too, so a run going straight from spawn to a near-instant result still resets
         // the quiet clock rather than leaving it unset forever.
-        opts.streamObserver?.({ kind: "message", tsMs: nowFn(), turnsSoFar });
+        streamObserver?.({ kind: "message", tsMs: nowFn(), turnsSoFar });
         subtype = r.subtype;
         isError = r.is_error;
         textOutput.finish();
