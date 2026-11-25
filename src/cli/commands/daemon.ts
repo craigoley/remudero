@@ -1386,6 +1386,9 @@ export async function daemonCommand(
     applyMemoryPolicy?: typeof applyDaemonMemoryPolicy;
     /** W1-T11770: the GET-only api behind `--shadow-ops-catalog`. Production omits it and gets the source's default. */
     opsCatalogApi?: OpsCatalogApi;
+    /** W1-T14860: dispatch's filing reader. Production omits it and uses the process's one prefetch; a test injects a
+     *  recorder to see when the standby starts its read. */
+    filingPrefetch?: { refresh(planPath: string): Promise<unknown> };
   } = {},
   host: DaemonCommandHost,
   standby?: StandbyBoot,
@@ -2043,6 +2046,8 @@ export async function daemonCommand(
   const drainLockPath = join(config.root, "state", "drain.lock");
   let drainLock;
   let standbyPromotion: { prepareMs: number; waitMs: number; lockWaitMs: number; takeoverStartMs: number } | undefined;
+  const filingPrefetch = deps.filingPrefetch ?? dispatchFilingPrefetch;
+  let standbyFilingRead: Promise<unknown> | undefined;
   // W1-T14635: the rotations the boot's two union reads walk are read now, while the active daemon still works, and kept
   // for those reads; once promoted the boot reads only what the cache misses (the live file and any newer rotation).
   const rotationCache = standby?.ports ? createLedgerRotationCache() : undefined;
@@ -2058,6 +2063,10 @@ export async function daemonCommand(
     bootPhases.mark("standby_warm");
   }
   if (standby?.ports) {
+    // W1-T14860: the filing read is read-only, so the standby starts it now, while the active daemon still works, and the
+    // boot awaits that same read after the lock instead of starting one there. A plan the post-lock sync moves is seen
+    // one selection later, which the prefetched reader already allows (W1-T7744).
+    standbyFilingRead = filingPrefetch.refresh(target.planPath);
     // W1-T14544: ready, then wait for the hand-over; the lock is taken only once its live holder has let go.
     const promotion = await awaitPromotion(standby.ports, standby.startedAtMs);
     if ("criterion" in promotion) { await stopReadPlane(); return 1; }
@@ -2585,7 +2594,7 @@ export async function daemonCommand(
     try { await gardenerRuntime.flush(); } catch { log("garden.telemetry_failed", { reason: "runtime-inventory-write-failed" }); }
     // W1-T7744: the filing read is awaited here, before the loop, and behind each selection after — never on the loop.
     bootPhases.mark("loop_wiring");
-    await dispatchFilingPrefetch.refresh(target.planPath);
+    await (standbyFilingRead ?? filingPrefetch.refresh(target.planPath));
     bootPhases.mark("filing_prefetch");
     const opsClock = clockFromMillisFn(deps.now);
     const readOpsSelection = () => opsDispatchSelection(opsStateDir);
