@@ -550,6 +550,11 @@ async function readBlob(api: OpsCatalogApi, repo: string, blobSha: string, pass:
   return verified.text;
 }
 
+/** Resolves after the event loop's next check phase, so timers and I/O callbacks queued meanwhile run first. */
+function nextTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 /** The checks every kept blob passes, from GitHub or from a parent: git's blob SHA-1 and strict UTF-8. */
 function verifiedBlob(blobSha: string, bytes: Uint8Array): KeptBlob {
   if (createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex") !== blobSha) throw new Refusal("malformed");
@@ -615,7 +620,12 @@ async function readPass(
   const blobs: Array<{ label: string; text: string }> = [
     { label: "tasks.yaml", text: await readBlob(api, repo, monolith.sha, pass) },
   ];
-  for (const e of shardEntries) blobs.push({ label: `tasks.d/${e.path}`, text: await readBlob(api, repo, e.sha, pass) });
+  for (const e of shardEntries) {
+    // W1-T14876: a cached blob answers with no I/O wait, so without this a pass over thousands of blob files ran as one
+    // synchronous chain and held serve's event loop for 10 s and more (webhooks timed out). One turn per blob.
+    await nextTurn();
+    blobs.push({ label: `tasks.d/${e.path}`, text: await readBlob(api, repo, e.sha, pass) });
+  }
   return { monolith, shardDir, shardEntries, blobs };
 }
 
