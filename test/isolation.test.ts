@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CLAUDE_CODE_TOOL_WRAPPERS,
+  ISOLATION_PROBE_COMMAND_COUNT,
+  ISOLATION_PROBE_MAX_TURNS,
   IsolationError,
   assessIsolation,
   isolationProbePrompt,
@@ -347,4 +349,23 @@ test("probeIsolation: an UNPARSEABLE count (NaN, isError true) still REFUSES the
       return true;
     },
   );
+});
+
+// ── W1-T14884: the probe's turn budget fits the commands its own prompt asks for ──────────────
+
+const probeArgs = () => isolationProbeSpawnArgs({ cwd: "/tmp/probe", settingsFile: "/tmp/settings.json" });
+
+test("W1-T14884 the probe's turn budget fits every command in its own call plus the report", () => {
+  const numbered = isolationProbePrompt().split("\n").filter((line) => /^\d+\) /.test(line));
+  assert.equal(numbered.length, ISOLATION_PROBE_COMMAND_COUNT, "the command count matches the prompt");
+  assert.equal(probeArgs().maxTurns, ISOLATION_PROBE_MAX_TURNS);
+  assert.ok((probeArgs().maxTurns ?? 0) >= ISOLATION_PROBE_COMMAND_COUNT + 1, "one turn per command plus the report must fit");
+});
+
+test("W1-T14884 the probe asks for every command in one Bash call", () => {
+  assert.match(isolationProbePrompt(), /Run all 4 commands in ONE Bash call/);
+});
+
+test("W1-T14884 the probe stays read-only with Bash as its only tool", () => {
+  assert.deepEqual(probeArgs().tools, ["Bash"]);
 });

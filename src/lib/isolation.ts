@@ -249,6 +249,15 @@ export interface ProbeExecResult {
 /** Injectable probe runner (default spawns a real worker); tests provide a fake. */
 export type ProbeExecutor = () => Promise<ProbeExecResult>;
 
+/** W1-T14884: the number of read-only commands the probe prompt asks for. */
+export const ISOLATION_PROBE_COMMAND_COUNT = 4;
+
+/** W1-T14884: the probe's turn budget. Even a worker that runs every command in its own Bash call
+ *  and then reports fits, with one turn to spare. At a fixed 4 turns the probe hit "Reached maximum
+ *  number of turns (4)" on every spawn from 2026-11-25 20:05Z, and the isolation guard (fail-closed)
+ *  blocked every build. The guard's verdict logic and its read-only Bash-only tool set are unchanged. */
+export const ISOLATION_PROBE_MAX_TURNS = ISOLATION_PROBE_COMMAND_COUNT + 2;
+
 /** The probe worker prompt: report inherited alias/function counts, read-only.
  * The function count EXCLUDES Claude Code's own {@link CLAUDE_CODE_TOOL_WRAPPERS}
  * (find/grep/rg/pkill) — those are tool plumbing, not operator state (see file
@@ -260,6 +269,7 @@ export function isolationProbePrompt(): string {
     "You are an ISOLATION PREFLIGHT PROBE. READ-ONLY: use ONLY the Bash tool to run",
     "these commands, IN ORDER, and report the EXACT results. Do NOT create,",
     "modify, or delete any file — you have no write tool available for a reason.",
+    `Run all ${ISOLATION_PROBE_COMMAND_COUNT} commands in ONE Bash call, separated by \`; echo ---;\`, then report.`,
     "1) alias | wc -l        (count of shell aliases this worker inherited)",
     `2) declare -F | awk '$NF !~ /^(${wrappers})$/ {c++} END {print c+0}'`,
     `   (count of shell functions this worker inherited, EXCLUDING Claude Code's`,
@@ -343,7 +353,7 @@ export function isolationProbeSpawnArgs(opts: {
     // Structural read-only enforcement (belt-and-suspenders over the prompt):
     // the model has NO write tool at all, so it cannot use one even if asked.
     tools: ["Bash"],
-    maxTurns: 4, // two read-only commands + the report; bounded tight.
+    maxTurns: ISOLATION_PROBE_MAX_TURNS, // every command in its own call + the report + one spare.
     maxBudgetUsd: opts.budgetUsd,
     prompt: isolationProbePrompt(),
   };
