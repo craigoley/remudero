@@ -10,7 +10,8 @@ import {
 import type { Config } from "#src/lib/config.js";
 import { CLAUDE_BIN_ENV_OVERRIDE, collectWorkerResult, spawnWorker } from "#src/lib/worker.js";
 import {
-  classifyReviewerCommand, createWorkerToolLineage, type RecordedProofCommand, type WorkerToolReceipt,
+  classifyReviewerCommand, createWorkerToolLineage, REDIRECT_RE, REDIRECT_WITH_TARGET_RE, type RecordedProofCommand,
+  type WorkerToolReceipt,
 } from "#src/lib/worker-tool-lineage.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -56,6 +57,15 @@ test("W1-T14037 criterion 1: another node --test or vitest run is test-run, and 
   for (const command of reads) assert.equal(classifyReviewerCommand(command, RECORDED, REVIEWER_CWD), "read", JSON.stringify(command));
   assert.equal(classifyReviewerCommand("grep -arn -- 'W1-T14037 criterion 1' test/x.test.ts", [], REVIEWER_CWD), "read",
     "with no recorded proof nothing is a re-run");
+});
+
+test("W1-T14037: a bare redirection operator takes the next word as its target, and one that carries its target stands alone", () => {
+  for (const word of [">", ">>", "<", "2>", "&>"]) assert.equal(REDIRECT_RE.test(word), true, word);
+  for (const word of ["2>&1", ">/dev/null", "a>", "->", ""]) assert.equal(REDIRECT_RE.test(word), false, word);
+  for (const word of ["2>&1", ">/dev/null", "2>>err.log", "<input"]) assert.equal(REDIRECT_WITH_TARGET_RE.test(word), true, word);
+  for (const word of [">", "2>", "x>y", "--out=>"]) assert.equal(REDIRECT_WITH_TARGET_RE.test(word), false, word);
+  assert.equal(classifyReviewerCommand("grep -arn -- 'W1-T14037 criterion 1' test/x.test.ts 2> /dev/null", RECORDED, REVIEWER_CWD),
+    "proof-rerun", "a bare redirection drops its target word, so the argv is still the recorded proof");
 });
 
 type Lineage = ReturnType<typeof createWorkerToolLineage>;

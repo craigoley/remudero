@@ -85,8 +85,8 @@ function shellWords(text: string): ShellWord[] {
 
 const ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
 /** A bare redirection operator, whose target is the next word; and one that carries its own target (`2>&1`, `>/dev/null`). */
-const REDIRECT_RE = /^(\d*|&)(>>?|<)$/;
-const REDIRECT_WITH_TARGET_RE = /^(\d*|&)(>>?|<)\S+$/;
+export const REDIRECT_RE = /^(\d*|&)(>>?|<)$/;
+export const REDIRECT_WITH_TARGET_RE = /^(\d*|&)(>>?|<)\S+$/;
 const WRAPPERS = new Set(["env", "exec", "command", "time", "nice", "nohup"]);
 const SHELLS = new Set(["bash", "sh", "zsh", "dash"]);
 
