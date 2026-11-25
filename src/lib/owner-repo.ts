@@ -5,6 +5,7 @@
  * and its exports are pinned to the argv cluster, so a class a caller needs for `instanceof`, and a
  * root-parameterised reader a test can drive, cannot live there without every importer paying that.
  */
+import * as childProcess from "node:child_process";
 import { execFile, execFileSync } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
@@ -53,7 +54,7 @@ function gitFailureReason(e: unknown, root: string): string {
 export function resolveOwnerRepoAt(root: string): { owner: string; repo: string } {
   const key = originConfigKey(root);
   const memo = key === undefined ? undefined : originMemo.get(resolve(root));
-  if (memo !== undefined && memo.key === key) return { ...memo.ownerRepo };
+  if (memo !== undefined && memo.key === key && memo.reader === childProcess.execFileSync) return { ...memo.ownerRepo };
   let url: string;
   try {
     url = execFileSync("git", ["-C", root, "config", "--get", "remote.origin.url"], {
@@ -70,7 +71,7 @@ export function resolveOwnerRepoAt(root: string): { owner: string; repo: string 
 export async function resolveOwnerRepoAtAsync(root: string): Promise<{ owner: string; repo: string }> {
   const key = originConfigKey(root);
   const memo = key === undefined ? undefined : originMemo.get(resolve(root));
-  if (memo !== undefined && memo.key === key) return { ...memo.ownerRepo };
+  if (memo !== undefined && memo.key === key && memo.reader === childProcess.execFileSync) return { ...memo.ownerRepo };
   let url: string;
   try {
     url = (await execFileAsync("git", ["-C", root, "config", "--get", "remote.origin.url"], { encoding: "utf8" })).stdout.trim();
@@ -86,10 +87,12 @@ export async function resolveOwnerRepoAtAsync(root: string): Promise<{ owner: st
  * W1-T14753 — each checkout's owner/repo, kept while the config files git reads it from are unchanged. A daemon resolves
  * the same root many times a loop, and each `git config` spawn blocks it (9 s under host contention on 11-24).
  */
-const originMemo = new Map<string, { key: string; ownerRepo: { owner: string; repo: string } }>();
+// Each entry names the `execFileSync` the module exported when it was read (a reference, never a call): one swapped
+// in after the read (a test's mock, published by syncBuiltinESMExports) asks git again instead of reusing the value.
+const originMemo = new Map<string, { key: string; reader: unknown; ownerRepo: { owner: string; repo: string } }>();
 
 function remember(root: string, key: string | undefined, ownerRepo: { owner: string; repo: string }): { owner: string; repo: string } {
-  if (key !== undefined) originMemo.set(resolve(root), { key, ownerRepo: { ...ownerRepo } });
+  if (key !== undefined) originMemo.set(resolve(root), { key, reader: childProcess.execFileSync, ownerRepo: { ...ownerRepo } });
   return ownerRepo;
 }
 
