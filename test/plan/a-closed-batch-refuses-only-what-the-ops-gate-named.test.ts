@@ -54,14 +54,18 @@ test("W1-T14875 criterion 1: a closed batch refuses only the record its ops-gate
 });
 
 test("W1-T14875 criterion 2: invariant:an-unread-gate-keeps-the-whole-batch-refused", async t => {
-  for (const [why, opsGateNamed] of [
-    ["unread", (async () => undefined) as Named],
-    ["failed read", (async () => { throw new Error("HTTP 401"); }) as Named],
+  for (const [why, answer] of [
+    ["unread", async () => undefined],
+    ["failed read", async () => { throw new Error("HTTP 401"); }],
   ] as const) {
     const w = moveWorld(t, { "W1-T1": record("W1-T1"), "W1-T2": record("W1-T2"), "W1-T3": record("W1-T3") });
-    closedBatch(w, ["W1-T1", "W1-T2"]);
+    const batch = closedBatch(w, ["W1-T1", "W1-T2"]);
+    const asked: number[] = [];
+    const opsGateNamed: Named = async (_repository, pull) => { asked.push(pull); return answer(); };
     const run = await w.run(true, { opsGateNamed });
     assert.equal(run.out.step, "copy", `${why}: ${run.lines.join("\n")}`);
+    // The refusal is the reader's answer: the mover asked what the gate named and kept the batch because it could not tell.
+    assert.ok(asked.length > 0 && asked.every(n => n === batch.number), `${why}: the mover asked the gate reader about the closed batch`);
     assert.deepEqual(copied(w), [shard("W1-T3")], `THE CLAIM (${why}): every member of the batch stays refused`);
   }
 });
