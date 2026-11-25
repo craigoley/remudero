@@ -400,6 +400,7 @@ import { issueRevalidationJudgeText, issueTaskId, loadIssueRevalidationPolicy, p
 import { reconcileManagedImprovementEffects } from "./lib/opportunity-outcomes.js";
 import { classifyGardenerStep, productionGardenerOverseerPorts, runGardenerOverseer } from "./lib/gardener-overseer.js";
 import { planGardenSpec } from "./lib/plan-gardener.js";
+import { productionPlanGardenOps } from "./lib/plan-gardener-ops.js";
 import { backlogGardenSpec } from "./lib/backlog-gardener.js";
 import { queueJudgeGardenSpec, queueJudgeRouteWindow, type QueueJudgeSources } from "./lib/queue-judge-gardener.js";
 import { redesignGardenSpec } from "./lib/redesign-gardener.js";
@@ -29432,7 +29433,11 @@ export function buildRegisteredGarden(name: RegisteredGardenName, ctx: GardenBui
     case "plan": {
       const d = deps("plan");
       const repairs = { stateDir, repoDir: repoRoot, worktreesRoot: worktreesDir(config), owner, repo, log, taskFilesLanding: { stateRoot: config.root } };
-      return withShardRepairs(stateDir, () => runShardRepairPass(repairs), gardenPass(planGardenSpec(d), d), log);
+      // W1-T14642: the pass reads the ops catalog too, and an ops edit lands through the sealed landing into the plan destination.
+      const ops = productionPlanGardenOps({ repoRoot, stateDir, stateRoot: config.root, log });
+      const planPass = gardenPass(planGardenSpec(d, ops), d);
+      const planAndOps: RegisteredGardenPass = Object.assign(async () => { await planPass(); await ops.settled(); }, { due: planPass.due });
+      return withShardRepairs(stateDir, () => runShardRepairPass(repairs), planAndOps, log);
     }
     case "backlog": {
       // A filing streak escalates once (gardener.ts), so a refused change reaches a person rather than looping.

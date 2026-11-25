@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
+import type { TaskFileInput } from "./feedback-landing.js";
 import type { GardenAction, GardenCheckout, GardenerDeps, GardenSpec } from "./gardener.js";
 import { bestNearDuplicate } from "./knowledge-dedup.js";
 import { loadPlan, type RetirementReason, type Task } from "./plan.js";
@@ -36,12 +37,41 @@ export interface PlanGardenAction extends GardenAction<PlanGardenClass> {
   landingCommit?: string;
 }
 
+/** W1-T14642: the ops catalog as one read left it, at one pinned commit. */
+export interface PlanOpsCatalog {
+  tasks: Task[];
+  /** Task id → the record's path in the ops repository, for tasks that sit alone in their own shard. */
+  shards: Map<string, string>;
+  /** Record path → the bytes read at the pin, which an ops edit is made on. */
+  sources: Map<string, string>;
+}
+
+/** W1-T14642: what reading the ops catalog answered. `off`: none is configured, so the public plan is the whole
+ *  plan. `unavailable`: one is configured and could not be read now, so what it holds is unknown, never absent. */
+export type PlanOpsRead = { outcome: "off" } | { outcome: "unavailable"; reason: string } | ({ outcome: "ok" } & PlanOpsCatalog);
+
+/** W1-T14642: the plan gardener's two ops seams: the catalog read, and the ops plan landing an ops edit goes through. */
+export interface PlanGardenOps {
+  read: () => PlanOpsRead | Promise<PlanOpsRead>;
+  /** Starts a landing of edited records in the ops repository; the production landing is awaited by its owner. */
+  land: (inputs: readonly TaskFileInput[]) => void;
+}
+
 export interface PlanInventory {
-  /** Queued, unretired, uncredited tasks, in plan order. */
+  /** Queued, unretired, uncredited tasks, in plan order: the public catalog's, then the ops catalog's. */
   open: Task[];
   all: Task[];
   /** Task id → repo-relative shard path, for tasks that live in their own shard. */
   shards: Map<string, string>;
+  /** W1-T14642: the ops catalog, when one was read. Its tasks are in `open` and `all` too. */
+  ops?: PlanOpsCatalog;
+  /** W1-T14642: every id a catalog holds; absent when a configured ops catalog was unreadable, so no id can be called unknown. */
+  known?: ReadonlySet<string>;
+}
+
+/** W1-T14642: the blocked tasks that carry no `retirement:`, in either catalog: flagged on the scorecard, never edited. */
+export function blockedWithoutRetirement(inv: Pick<PlanInventory, "all">): string[] {
+  return inv.all.filter((t) => t.status === "blocked" && !t.retirement).map((t) => t.id);
 }
 
 /** Title similarity at which two queued tasks are one task. Exact, because templated titles for
@@ -61,13 +91,25 @@ export function mainTrailerTaskIds(repoRoot: string): Set<string> {
   return new Set([...result.stdout.matchAll(/^Remudero-Task:[ \t]+([A-Za-z0-9][A-Za-z0-9-]*)[ \t]*$/gm)].map((m) => m[1]!));
 }
 
-export function planInventory(repoRoot: string, stateDir: string): PlanInventory {
+export function planInventory(repoRoot: string, stateDir: string, opsRead: PlanOpsRead = { outcome: "off" }): PlanInventory {
   const layout = resolveRepoLayout(repoRoot);
   const plan = loadPlan(layout.planMonolith);
   const credited = loadCreditStore(join(stateDir, "merge-credit.json"));
   const inMain = mainTrailerTaskIds(repoRoot);
-  const open = plan.tasks.filter((t) => t.status === "queued" && !t.retirement && !credited[t.id] && !inMain.has(t.id));
-  return { open, all: plan.tasks, shards: planShards(repoRoot) };
+  const ops = opsRead.outcome === "ok" ? opsRead : undefined;
+  const all = [...plan.tasks, ...(ops?.tasks ?? [])];
+  const open = all.filter((t) => t.status === "queued" && !t.retirement && !credited[t.id] && !inMain.has(t.id));
+  return {
+    open, all, shards: planShards(repoRoot),
+    ...(ops ? { ops: { tasks: ops.tasks, shards: ops.shards, sources: ops.sources } } : {}),
+    ...(opsRead.outcome === "unavailable" ? {} : { known: new Set(all.map((t) => t.id)) }),
+  };
+}
+
+/** The ids a shard text holds, when exactly one: the only shape a one-line edit can change without touching a neighbour. */
+export function soleTaskId(text: string): string | undefined {
+  const ids = [...text.matchAll(/^- id: (\S+)[ \t]*$/gm)].map((m) => m[1]!);
+  return ids.length === 1 ? ids[0] : undefined;
 }
 
 /** Task id → repo-relative path, for every shard that holds exactly one task — the only shape a
@@ -78,8 +120,8 @@ export function planShards(repoRoot: string): Map<string, string> {
   if (!existsSync(dir)) return shards;
   for (const ent of readdirSync(dir, { withFileTypes: true })) {
     if (!ent.isFile() || !ent.name.endsWith(".yaml")) continue;
-    const ids = [...readFileSync(join(dir, ent.name), "utf8").matchAll(/^- id: (\S+)[ \t]*$/gm)].map((m) => m[1]!);
-    if (ids.length === 1) shards.set(ids[0]!, relative(repoRoot, join(dir, ent.name)));
+    const id = soleTaskId(readFileSync(join(dir, ent.name), "utf8"));
+    if (id !== undefined) shards.set(id, relative(repoRoot, join(dir, ent.name)));
   }
   return shards;
 }
@@ -171,14 +213,21 @@ export function proofLandingCommit(repoRoot: string, filed: string, proofs: stri
 export function retirementCandidates(inv: PlanInventory, repoRoot: string): PlanGardenAction[] {
   const abandoned = new Set(inv.all.filter((t) => t.retirement && ABANDONED_RETIREMENTS.has(t.retirement)).map((t) => t.id));
   const out: PlanGardenAction[] = [];
+  const opsIds = new Set((inv.ops?.tasks ?? []).map((t) => t.id));
   for (const t of inv.open) {
     if (t.status !== "queued" || t.retirement) continue;
     const gone = t.depends_on.filter((d) => abandoned.has(d));
+    // W1-T14642: an id neither catalog holds names a task that was never filed or is gone; it can never be built.
+    const unknown = t.depends_on.filter((d) => inv.known !== undefined && !inv.known.has(d));
     // An abandoned subject may still need a research finding; dependency state alone cannot retire recon.
-    if (gone.length > 0 && t.type !== "recon") {
-      out.push({ class: "retire", target: t.id, retirement: "retired", reason: `It depends on ${gone.join(", ")}, which will never be built.` });
+    if (gone.length + unknown.length > 0 && t.type !== "recon") {
+      const why = [...(gone.length > 0 ? [`It depends on ${gone.join(", ")}, which will never be built.`] : []),
+        ...(unknown.length > 0 ? [`It depends on ${unknown.join(", ")}, which no catalog holds.`] : [])];
+      out.push({ class: "retire", target: t.id, retirement: "retired", reason: why.join(" ") });
       continue;
     }
+    // The acceptance proofs below are read against the public checkout, never an ops record's.
+    if (opsIds.has(t.id)) continue;
     // A proof that greps the task's OWN shard holds from the moment it is filed, so it is no evidence the
     // work happened; only proofs about other files count, and there must be at least one.
     const own = inv.shards.get(t.id);
@@ -200,11 +249,12 @@ export function retirementCandidates(inv: PlanInventory, repoRoot: string): Plan
 
 export function planCandidates(inv: PlanInventory, repoRoot: string): PlanGardenAction[] {
   const inShard = (id: string) => inv.shards.has(id);
+  const inAnyShard = (id: string) => inShard(id) || (inv.ops?.shards.has(id) ?? false);
   const merges: PlanGardenAction[] = duplicateTasks(inv.open)
     .filter(([newer]) => inShard(newer.id))
     .map(([newer, older]) => ({ class: "merge", target: newer.id, into: older.id, retirement: "withdrawn", reason: "Its title and files repeat an older queued task." }));
   const merging = new Set(merges.map((m) => m.target));
-  return [...merges, ...retirementCandidates(inv, repoRoot).filter((a) => inShard(a.target) && !merging.has(a.target))];
+  return [...merges, ...retirementCandidates(inv, repoRoot).filter((a) => inAnyShard(a.target) && !merging.has(a.target))];
 }
 
 /** The comment an action leaves in the shard it changed. */
@@ -231,6 +281,15 @@ function withoutNeedsInput(text: string): string {
   return kept.join("\n");
 }
 
+/** The shard text with `a` applied, or undefined when it is no longer a queued, unretired record. A landed task was
+ *  BUILT: `done` alone. `retirement:` means it never will be, and is read only on a blocked task
+ *  (test/retirement-reaches-its-reader.test.ts); the marker keeps the reason. */
+export function planGardenEdit(text: string, a: PlanGardenAction): string | undefined {
+  if (/^ {2}retirement:/m.test(text) || !/^ {2}status: queued[ \t]*$/m.test(text)) return undefined;
+  const status = a.landingCommit ? "  status: done" : `  status: blocked\n  retirement: ${a.retirement}`;
+  return withoutNeedsInput(text.replace(/^ {2}status: queued[ \t]*$/m, `${status}\n  # ${planGardenMarker(a)}${a.landingCommit ? ` commit ${a.landingCommit}` : ""} — ${a.reason}`));
+}
+
 /** Reconcile each queued target in its own shard; record a completion's landing commit in its marker. */
 export function applyPlanActions(repoRoot: string, shards: Map<string, string>, actions: PlanGardenAction[]): string[] {
   const changed: string[] = [];
@@ -238,15 +297,35 @@ export function applyPlanActions(repoRoot: string, shards: Map<string, string>, 
     const rel = shards.get(a.target);
     if (!rel) continue;
     const path = join(repoRoot, rel);
-    const text = readFileSync(path, "utf8");
-    if (/^ {2}retirement:/m.test(text) || !/^ {2}status: queued[ \t]*$/m.test(text)) continue;
-    // A landed task was BUILT: `done` alone. `retirement:` means it never will be, and is read only on a
-    // blocked task (test/retirement-reaches-its-reader.test.ts); the marker below keeps the reason.
-    const status = a.landingCommit ? "  status: done" : `  status: blocked\n  retirement: ${a.retirement}`;
-    writeFileSync(path, withoutNeedsInput(text.replace(/^ {2}status: queued[ \t]*$/m, `${status}\n  # ${planGardenMarker(a)}${a.landingCommit ? ` commit ${a.landingCommit}` : ""} — ${a.reason}`)));
+    const edited = planGardenEdit(readFileSync(path, "utf8"), a);
+    if (edited === undefined) continue;
+    writeFileSync(path, edited);
     changed.push(rel);
   }
   return changed.sort();
+}
+
+/**
+ * W1-T14642: the ops landing's inputs for the ops-catalog `actions`: each record's pinned bytes with the action applied,
+ * and the criterion the landing PR states for it. A record that no longer reads as queued is left out. The landing
+ * itself refuses a record whose blob on the ops main differs from the one these bytes were read from.
+ */
+export function opsLandingInputs(ops: PlanOpsCatalog, actions: readonly PlanGardenAction[]): { inputs: TaskFileInput[]; landed: PlanGardenAction[] } {
+  const inputs: TaskFileInput[] = [];
+  const landed: PlanGardenAction[] = [];
+  for (const a of actions) {
+    const rel = ops.shards.get(a.target);
+    const source = rel === undefined ? undefined : ops.sources.get(rel);
+    const content = source === undefined ? undefined : planGardenEdit(source, a);
+    if (rel === undefined || content === undefined) continue;
+    inputs.push({
+      relPath: rel, content,
+      claim: `the gardener's ${a.class} of ${a.target} is marked in its record`,
+      proof: `grep: ${planGardenMarker(a)} in ${rel}`,
+    });
+    landed.push(a);
+  }
+  return { inputs, landed };
 }
 
 function prBody(actions: PlanGardenAction[], shards: Map<string, string>): string {
@@ -273,7 +352,14 @@ export function planCheapFingerprint(repoRoot: string, stateDir: string): string
 }
 
 /** The plan queue as a gardener spec. */
-export function planGardenSpec(deps: GardenerDeps): GardenSpec<PlanGardenClass, PlanInventory, PlanGardenAction, GardenCheckout> {
+export function planGardenSpec(deps: GardenerDeps, opsSeam?: PlanGardenOps): GardenSpec<PlanGardenClass, PlanInventory, PlanGardenAction, GardenCheckout> {
+  // The ops catalog the pass's own inventory read: an ops edit is made on those bytes, so apply reads them from here.
+  let readOps: PlanOpsCatalog | undefined;
+  const inventoryOf = (opsRead: PlanOpsRead): PlanInventory => {
+    const inv = planInventory(deps.repoRoot, deps.stateDir, opsRead);
+    readOps = inv.ops;
+    return inv;
+  };
   return {
     name: "plan",
     classes: PLAN_GARDEN_CLASSES,
@@ -282,13 +368,26 @@ export function planGardenSpec(deps: GardenerDeps): GardenSpec<PlanGardenClass, 
       retire: "reconciling completed or abandoned work is a judgement call.",
     },
     cheapFingerprint: () => planCheapFingerprint(deps.repoRoot, deps.stateDir),
-    inventory: () => planInventory(deps.repoRoot, deps.stateDir),
+    // A sync caller cannot await the catalog read, so with an ops seam it sees the ops catalog as unreadable.
+    inventory: () => inventoryOf(opsSeam ? { outcome: "unavailable", reason: "sync-read" } : { outcome: "off" }),
+    ...(opsSeam ? { inventoryAsync: async () => inventoryOf(await opsSeam.read()) } : {}),
     fingerprint: (inv) => `${inv.all.length}:${inv.open.map((t) => t.id).join(",")}`,
     candidates: (inv) => planCandidates(inv, deps.repoRoot),
-    scorecard: (inv, plan) => ({ open: inv.open.length, tasks: inv.all.length, proposed: plan.actions.length }),
+    scorecard: (inv, plan) => {
+      const blocked = blockedWithoutRetirement(inv);
+      return {
+        open: inv.open.length, tasks: inv.all.length, proposed: plan.actions.length, opsTasks: inv.ops?.tasks.length ?? null,
+        blockedWithoutRetirement: blocked.length, blockedWithoutRetirementIds: blocked.slice(0, 20),
+      };
+    },
     apply: (ws, plan) => {
       const shards = planShards(ws.root);
-      const paths = applyPlanActions(ws.root, shards, plan.actions);
+      const paths = applyPlanActions(ws.root, shards, plan.actions.filter((a) => shards.has(a.target)));
+      // An ops record is not in this checkout: it lands through the ops plan landing, beside the public PR.
+      if (opsSeam && readOps) {
+        const { inputs } = opsLandingInputs(readOps, plan.actions.filter((a) => !shards.has(a.target)));
+        if (inputs.length > 0) opsSeam.land(inputs);
+      }
       if (paths.length === 0) return undefined;
       const landed = plan.actions.filter((a) => paths.includes(shards.get(a.target) ?? ""));
       return {
