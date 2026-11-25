@@ -382,6 +382,8 @@ export interface FreshnessDecision {
   action: "restart" | "defer";
   reason: string;
   restartTrigger?: "change" | "idle" | "age" | "withheld_reviews" | "unreadable" | "stall";
+  /** W1-T14751: present on the decision for a daemon with nothing in flight, whatever its trigger. */
+  idle?: true;
   /** Change pressure: the summed freshness weight of every advance scored this lifetime. */
   weight: number;
   /** Staleness pressure: grows linearly from the first stale reading, reaching the threshold at the horizon. */
@@ -490,7 +492,7 @@ export function decideFreshnessRestart(input: {
     : pressure >= threshold.value && weight + agePressure < threshold.value ? "stall" : "age";
   if (!input.busy) {
     const stall = stallShare > 0 ? ` (stall pressure ${stallPressure})` : "";
-    return { action: "restart", restartTrigger, reason: `idle: nothing in flight, so the restart costs only a boot${stall}`, ...scores };
+    return { action: "restart", restartTrigger, idle: true, reason: `idle: nothing in flight, so the restart costs only a boot${stall}`, ...scores };
   }
   if (withheldPressure > 0) {
     return {
@@ -544,6 +546,13 @@ export const FRESHNESS_MIN_LIFETIME_MS = 90 * 60_000;
 /** The coalesce reason, and the ledger's `held_by`, for a restart held by {@link FRESHNESS_MIN_LIFETIME_MS}. */
 export const MIN_LIFETIME_HOLD = "min_lifetime";
 export const LOOP_STALL_RELEASE = "loop_stall";
+/**
+ * W1-T14751 — OPERATOR RULING 2026-11-25 11:56Z ("After each quiet burst of merges"): an idle daemon pays only a boot
+ * for a restart, so inside the minimum lifetime it restarts onto main once the quiet advance window has passed since
+ * the last advance. While a burst is still landing the floor holds it as before (min_lifetime). A busy daemon keeps
+ * the floor.
+ */
+export const IDLE_RELEASE = "idle_release";
 
 /**
  * W1-T14360 — the expedite fast path. 2026-11-22: #20230, a fix for a live cost leak, merged nine minutes into a
@@ -620,6 +629,10 @@ export function coalesceFreshnessRestart(input: {
     }
     if (lifetimeMs >= freshnessMinLifetimeForStall(minLifetimeMs, input.stallShare)) {
       return { action: "restart", reason: LOOP_STALL_RELEASE, heldMs, windowEndsAtMs };
+    }
+    // A weight-0 advance (tests only) changes no code this daemon runs, so it gives an idle daemon nothing to restart for.
+    if (decision.idle === true && decision.weight > 0 && input.nowMs >= windowEndsAtMs) {
+      return { action: "restart", reason: IDLE_RELEASE, heldMs, windowEndsAtMs };
     }
     return { action: "hold", reason: MIN_LIFETIME_HOLD, heldMs, windowEndsAtMs };
   }
