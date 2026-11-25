@@ -10,13 +10,16 @@ import { observeReviewFlow, REVIEW_FLOW_STEPS } from "../src/lib/review-flow-obs
 import { readCiLessonExposure } from "../src/lib/ci-lesson-recurrence.ts";
 import { goalObservationFromRow } from "../src/lib/goals.ts";
 import { fixedClock, systemClock } from "../src/lib/clock.ts";
-import { ledgerRotationEntries, openLedgerUnion } from "../src/lib/ledger-union.ts";
+import { fingerprintLedgerLine, ledgerRotationEntries, openLedgerUnion } from "../src/lib/ledger-union.ts";
+import { quarantinedLedgerFingerprints } from "../src/lib/field-trials-ledger-quarantine.ts";
 import { createLedgerExactDedupe, LedgerExactDedupeLimitError } from "../src/lib/ledger-exact-dedupe.ts";
 import { evaluateRoutingExperiment, ROUTING_EXPERIMENTS } from "../src/lib/routing-experiments.ts";
 import { attributeAttemptOutcome } from "../src/lib/attempt-outcome-attribution.ts";
 import { readRoutingQuarantineResolutions, resolveRoutingQuarantineRow } from "../src/lib/routing-quarantine-resolution.ts";
 
 const DAY = 86_400_000;
+/** Milliseconds since `start` on the monotonic clock. */
+const monotonicSince = (start) => () => performance.now() - start;
 const since = ROUTING_EXPERIMENTS.map((item) => item.startedOn).sort()[0];
 const collectorSha256 = createHash("sha256").update(readFileSync(fileURLToPath(import.meta.url))).digest("hex");
 function sourceRevisionAtRuntime() {
@@ -30,6 +33,38 @@ function corpusIdentity(stateDir) {
     .map(name => { const st = statSync(join(stateDir, name)); return [name, st.ino, st.size, st.mtimeMs, st.ctimeMs]; });
 }
 
+/** SHA-256 of a file's first `length` bytes, or null when fewer bytes are there. */
+function prefixDigest(path, length) {
+  const hash = createHash("sha256");
+  const buffer = Buffer.alloc(1024 * 1024);
+  const fd = openSync(path, constants.O_RDONLY);
+  try {
+    let read = 0;
+    while (read < length) {
+      const count = readSync(fd, buffer, 0, Math.min(buffer.length, length - read), read);
+      if (count === 0) return null;
+      hash.update(buffer.subarray(0, count));
+      read += count;
+    }
+  } finally { closeSync(fd); }
+  return hash.digest("hex");
+}
+
+/** W1-T14836: the daemon appends to the live ledger all the time, so a live file with the same inode whose earlier
+ *  bytes are unchanged is the corpus the audit read plus later rows. Rotations must match exactly. */
+function sameCorpus(before, after, liveBefore, stateDir) {
+  if (typeof before !== "string" || typeof after !== "string") return false;
+  const split = (identity) => {
+    const entries = JSON.parse(identity);
+    return { live: entries.find(([name]) => name === "ledger.ndjson"), rotations: JSON.stringify(entries.filter(([name]) => name !== "ledger.ndjson")) };
+  };
+  const was = split(before), now = split(after);
+  if (was.rotations !== now.rotations) return false;
+  if (!was.live || !now.live) return was.live === now.live;
+  if (was.live[1] !== now.live[1] || now.live[2] < was.live[2] || !liveBefore) return false;
+  return prefixDigest(join(stateDir, "ledger.ndjson"), liveBefore.size) === liveBefore.digest;
+}
+
 function reportReads(row, time, windowStart) {
   const step = String(row.step);
   return ["worker.assignment", "verdict.merged", "fix.dispatch"].includes(step)
@@ -39,7 +74,7 @@ function reportReads(row, time, windowStart) {
       || step.endsWith(".gardener_judged") || step.endsWith(".gardener_failed") || step.startsWith("goal."));
 }
 
-async function readSource(source, asOf, resolutions, openUnion, retention) {
+async function readSource(source, asOf, resolutions, openUnion, retention, elapsedMs, quarantine) {
   let names;
   try { names = readdirSync(source.stateDir); }
   catch { return { ...source, state: "unavailable", reasons: ["ledger-source-unreadable"], rowsRead: 0, rows: [] }; }
@@ -49,17 +84,27 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
   if (rotations.length + forms.live === 0)
     return { ...source, state: "unavailable", reasons: ["ledger-source-missing"], forms, rowsRead: 0, rows: [] };
   const rows = [];
-  let corpusBefore;
-  try { corpusBefore = JSON.stringify(corpusIdentity(source.stateDir)); }
+  let corpusBefore, liveBefore;
+  try {
+    corpusBefore = JSON.stringify(corpusIdentity(source.stateDir));
+    const live = JSON.parse(corpusBefore).find(([name]) => name === "ledger.ndjson");
+    liveBefore = live && { size: live[2], digest: prefixDigest(join(source.stateDir, "ledger.ndjson"), live[2]) };
+  }
   catch (error) { corpusBefore = { unreadable: String(error.message) }; }
   const resolvedRows = new WeakSet();
+  const quarantinedRows = new WeakSet();
+  let quarantinedCount = 0;
+  // W1-T14837: "now" moves with the scan. A row the daemon appended while a long scan ran is a later row, and only a
+  // stamp past the clock at the moment it is read, plus the 5-minute allowance, is future-dated.
+  const futureAfter = () => Date.parse(asOf) + 5 * 60_000 + elapsedMs();
   let routingResolvedFutureRows = 0;
   const findings = [];
   let findingsOmitted = 0;
   const finding = (value) => { if (findings.length < 200) findings.push(value); else findingsOmitted++; };
   const windowStart = Date.parse(asOf) - DAY;
   let retainedRowsOmitted = 0, retainedBytes = 0, byteBound = false, rowBound = false, dedupe = null;
-  const { maxRetainedBytes = 32 * 1024 * 1024, maxRetainedRows = 100_000, ...exactOptions } = retention;
+  // W1-T14836: no default retention bound; an explicit maxRetainedBytes or maxRetainedRows still binds.
+  const { maxRetainedBytes = Infinity, maxRetainedRows = Infinity, ...exactOptions } = retention;
   const exactDedupe = { ...exactOptions, createLedgerExactDedupe };
   const reportSeen = new Set();
   const reportSteps = new Set();
@@ -96,18 +141,21 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
             if (retainedBytes + bytes > maxRetainedBytes) byteBound = true;
           }
         }
+        // W1-T14837: a row named in the Field Trials quarantine (Craig's 2026-11-25 fingerprint ruling) is skipped.
+        if (quarantine.has(fingerprintLedgerLine(raw))) { quarantinedRows.add(row); return; }
         const resolution = resolveRoutingQuarantineRow(resolutions, source.label, row, raw, asOf);
         if (resolution) resolvedRows.add(row);
-        if (!Number.isFinite(timestamp) || timestamp > Date.parse(asOf) + 5 * 60_000) finding({
+        if (!Number.isFinite(timestamp) || timestamp > futureAfter()) finding({
           kind: Number.isFinite(timestamp) ? "future-timestamp" : "invalid-timestamp", rowHash: createHash("sha256").update(raw).digest("hex"),
           timestamp: typeof row.ts === "string" ? row.ts.slice(0, 80) : null, step: typeof row.step === "string" ? row.step.slice(0, 80) : null,
           ...(resolution ? { resolutionScope: resolution.scope, resolvedAt: resolution.resolvedAt } : {}),
         });
       },
     })) {
+      if (quarantinedRows.delete(row)) { quarantinedCount++; continue; }
       const time = Date.parse(row.ts);
       if (!Number.isFinite(time)) { invalidTimestampRows++; continue; }
-      if (time > Date.parse(asOf) + 5 * 60_000) { futureRows++; if (resolvedRows.has(row)) routingResolvedFutureRows++; continue; }
+      if (time > futureAfter()) { futureRows++; if (resolvedRows.has(row)) routingResolvedFutureRows++; continue; }
       // Normal writes arriving during the scan belong to the next snapshot, not a clock warning.
       if (time > Date.parse(asOf)) continue;
       rowsRead++;
@@ -146,7 +194,7 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
   let corpusAfter;
   try { corpusAfter = JSON.stringify(corpusIdentity(source.stateDir)); }
   catch (error) { corpusAfter = { unreadable: String(error.message) }; }
-  if (reportSeen.size || typeof corpusBefore !== "string" || typeof corpusAfter !== "string" || corpusBefore !== corpusAfter) reasons.push("ledger-source-changed-during-review");
+  if (reportSeen.size || !sameCorpus(corpusBefore, corpusAfter, liveBefore, source.stateDir)) reasons.push("ledger-source-changed-during-review");
   if (rowBound) reasons.push("ledger-retention-row-bound");
   if (byteBound) reasons.push("ledger-retention-byte-bound");
   if (unreadSources) reasons.push("ledger-source-unreadable");
@@ -163,9 +211,9 @@ async function readSource(source, asOf, resolutions, openUnion, retention) {
     complete: reasons.length === 0 };
   return { ...source, state: reasons.length ? "observed-partial" : "observed", reasons, forms,
     rowsRead, retainedRows: rows.length, retainedBytes: deliveredBytes, auditedRetainedBytes: retainedBytes,
-    retainedRowsMissing: reportSeen.size, maxRetainedBytes, dedupe: dedupe && { rows: dedupe.rows, state: dedupe.state, reason: dedupe.reason },
+    retainedRowsMissing: reportSeen.size, maxRetainedBytes: Number.isFinite(maxRetainedBytes) ? maxRetainedBytes : null, dedupe: dedupe && { rows: dedupe.rows, state: dedupe.state, reason: dedupe.reason },
     corpusControl: { formsExpected: forms, formsRead, index: dedupe },
-    completeness, dedupeRows, retainedRowsOmitted, malformedRows, oversizedRows, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
+    completeness, dedupeRows, retainedRowsOmitted, malformedRows, oversizedRows, quarantinedRows: quarantinedCount, unreadSources, futureRows, routingResolvedFutureRows, invalidTimestampRows, newestTs, findings, findingsOmitted, rows };
 }
 
 function privateWrite(path, value) {
@@ -174,7 +222,8 @@ function privateWrite(path, value) {
   renameSync(temp, path);
 }
 
-export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso(), quarantineResolutions, openUnion = openLedgerUnion, retention = {} }) {
+export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.iso(), quarantineResolutions, openUnion = openLedgerUnion, retention = {},
+  elapsedMs = monotonicSince(performance.now()), quarantinedFingerprints = quarantinedLedgerFingerprints() }) {
   for (const limit of [retention.maxRetainedBytes, retention.maxRetainedRows]) {
     if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) throw new TypeError("invalid ledger retention bound");
   }
@@ -209,7 +258,7 @@ export async function dailyRoutingReview({ sources, outDir, asOf = systemClock.i
   const results = [];
   const corpusControls = [];
   for (const source of sources) {
-    const { rows, corpusControl, ...quality } = await readSource(source, asOf, resolutions, openUnion, retention);
+    const { rows, corpusControl, ...quality } = await readSource(source, asOf, resolutions, openUnion, retention, elapsedMs, quarantinedFingerprints);
     corpusControls.push({ label: source.label, ...(corpusControl ?? { formsExpected: quality.forms ?? null,
       formsRead: { gzip: 0, plain: 0, live: 0 }, index: null }) });
     const trialReasons = quality.reasons.filter(reason => reason !== "ledger-source-future-dated"

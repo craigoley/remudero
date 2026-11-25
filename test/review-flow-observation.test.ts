@@ -62,5 +62,6 @@ test("review observation bounds detail without losing cohort counts and rejects 
   assert.equal(report.omittedCohorts, 5);
   assert.throws(() => observeReviewFlow([], "bad", start), /invalid bounded/);
   assert.throws(() => observeReviewFlow([], asOf, "2026-10-06T12:00:00Z"), /invalid bounded/);
-  assert.throws(() => observeReviewFlow(Array(100001).fill({}), asOf, start), /invalid bounded/);
+  // W1-T14836: no row bound; a large window is observed, not refused.
+  assert.equal(observeReviewFlow(Array(100001).fill({}), asOf, start).counts.delivered, 0);
 });

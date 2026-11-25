@@ -87,9 +87,12 @@ export function reviewTriageCandidates(root: string): DecisionCandidate[] {
 }
 
 /**
- * Ask the first available decision_models candidate the triage questions about this one pull
- * request. With no available candidate the first one is asked, so its row records why it was
- * unavailable. With no candidate at all nothing is sent and nothing is written.
+ * W1-T14851: ask EVERY available decision_models candidate the triage questions about this one pull
+ * request, one after another in decision_models order, so each model writes its own decision.answered
+ * row over the same input digest and the per-model scores compare like with like. One candidate's
+ * failure does not stop the next. The first available candidate's row is returned, as before.
+ * With no available candidate the first one is asked, so its row records why it was unavailable.
+ * With no candidate at all nothing is sent and nothing is written.
  */
 export async function triagePullRequest(config: Config, pr: ReviewTriagePullRequest,
   overrides: Partial<Pick<Parameters<typeof askDecisionModel>[1], "env" | "fetchImpl">>,
@@ -97,10 +100,16 @@ export async function triagePullRequest(config: Config, pr: ReviewTriagePullRequ
   candidates: readonly DecisionCandidate[],
 ): Promise<DecisionAnsweredRow | undefined> {
   const env = overrides.env ?? process.env;
-  const candidate = candidates.find((row) => resolveDecisionTarget(config, row, env).ok) ?? candidates[0];
-  if (candidate === undefined) return undefined;
-  return askDecisionModel(config, {
-    role: REVIEW_TRIAGE_ROLE, candidate, input: reviewTriageInput(pr), questions: REVIEW_TRIAGE_QUESTIONS, env,
-    ...(overrides.fetchImpl ? { fetchImpl: overrides.fetchImpl } : {}),
-  });
+  const available = candidates.filter((row) => resolveDecisionTarget(config, row, env).ok);
+  const asked = available.length > 0 ? available : candidates.slice(0, 1);
+  const input = reviewTriageInput(pr);
+  let first: DecisionAnsweredRow | undefined;
+  for (const candidate of asked) {
+    const row = await askDecisionModel(config, {
+      role: REVIEW_TRIAGE_ROLE, candidate, input, questions: REVIEW_TRIAGE_QUESTIONS, env,
+      ...(overrides.fetchImpl ? { fetchImpl: overrides.fetchImpl } : {}),
+    });
+    first ??= row;
+  }
+  return first;
 }

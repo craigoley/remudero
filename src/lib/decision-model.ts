@@ -54,7 +54,10 @@ export type DecisionAnswer =
   | { name: string; outcome: "distribution"; distribution: Array<{ option: DecisionOptionValue; probability: number }>;
     confidence: number | null; cannotTell?: number; score?: number }
   | { name: string; outcome: "abstained"; reason: "refusal" | "cannot-tell" }
-  | { name: string; outcome: "rejected"; reason: string };
+  | { name: string; outcome: "rejected"; reason: string;
+    /** W1-T14838: a Microsoft choice rejected for its sum keeps the reply's own choice and probabilities, so its
+     *  `decision.answered` row can be re-scored when the reader changes. */
+    wire?: { choice: unknown; probabilities: Record<string, unknown> } };
 
 /** The one `decision.answered` row a request writes, whatever happened to it. */
 export interface DecisionAnsweredRow {
@@ -228,6 +231,27 @@ function readOpenAiAnswer(question: DecisionQuestion, raw: unknown): DecisionAns
     (label) => labels.find((l) => l === label)), raw);
 }
 
+/** W1-T14838: decision-1 spreads ONE unit of mass over the declared options and cannot_tell together, so its declared
+ *  options sum to 1 minus cannot_tell (observed 2026-11-18: 0.9905 + 0.0076 + 0.0019 cannot_tell = 1.000). A reply whose
+ *  declared options alone sum to 1 is read as before, cannot_tell apart. One whose options and cannot_tell sum to 1 has
+ *  its declared options rescaled to sum to 1, `cannotTell` keeping the rest, so a scorer's joint mass (each option
+ *  p * (1 - cannotTell)) is the mass the model gave. One that leaves no declared mass is the abstention it means. A
+ *  reply that fits neither reading is rejected, keeping its own choice and probabilities as `wire`. */
+function microsoftChoice(question: DecisionQuestion, mass: Checked<Mass>, raw: Record<string, unknown>, cannotTell: number): DecisionAnswer {
+  if (!mass.ok) return finished(question, mass, raw, { cannotTell });
+  const declared = mass.value.reduce((sum, m) => sum + m.probability, 0);
+  if (summed([declared])) return finished(question, mass, raw, { cannotTell });
+  if (!summed([declared, cannotTell])) {
+    const probabilities = isRecord(raw.probabilities) ? { ...raw.probabilities } : {};
+    return { name: question.name, outcome: "rejected",
+      reason: `${question.name} summed to ${(declared + cannotTell).toFixed(3)} with ${CANNOT_TELL_OPTION}, not 1`,
+      wire: { choice: raw.choice, probabilities } };
+  }
+  if (declared <= TYPED_JUDGMENT_SUM_TOLERANCE) return { name: question.name, outcome: "abstained", reason: "cannot-tell" };
+  return finished(question, { ok: true, value: mass.value.map((m) => ({ option: m.option, probability: m.probability / declared })) },
+    raw, { cannotTell });
+}
+
 /** Criterion 3: answers come back keyed by name; a cannot-tell choice is an abstention. */
 function readMicrosoftAnswer(question: DecisionQuestion, raw: unknown): DecisionAnswer {
   if (!isRecord(raw)) return rejected(question.name, `the reply has no answer named ${question.name}`);
@@ -245,7 +269,7 @@ function readMicrosoftAnswer(question: DecisionQuestion, raw: unknown): Decision
     if (byWire(raw.choice) === undefined) return rejected(question.name, `${question.name} chose ${JSON.stringify(raw.choice)}, which was not declared`);
     const { [CANNOT_TELL_OPTION]: cannotTell, ...rest } = raw.probabilities;
     if (!probability(cannotTell)) return rejected(question.name, `${question.name} gave no mass to ${CANNOT_TELL_OPTION}`);
-    return finished(question, declaredMass(question.name, declared, Object.entries(rest), byWire), raw, { cannotTell });
+    return microsoftChoice(question, declaredMass(question.name, declared, Object.entries(rest), byWire), raw, cannotTell);
   }
   const labels = question.levels.map((l) => l.label);
   const legend = isRecord(raw.legend) ? raw.legend : {};

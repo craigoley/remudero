@@ -272,12 +272,15 @@ test("W1-T12416 criterion 4: an out-of-set or badly summed answer is rejected wi
   assert.equal(answer(badMicrosoft, "risk").outcome, "rejected");
   assert.equal(answer(badMicrosoft, "size").outcome, "rejected");
   assert.equal(answer(badMicrosoft, "docs_only").outcome, "distribution");
-  for (const [low, cannotTell, expectedSum] of [[0.6, 0.3, "0.700"], [0.88, 0.02, "0.980"]] as const) {
+  // W1-T14838: a reply whose declared options sum to 1 neither alone nor with cannot_tell is rejected.
+  for (const [low, cannotTell, expectedSum] of [[0.6, 0.1, "0.800"], [0.95, 0.05, "1.100"]] as const) {
     const row = await ask(microsoftCandidate, microsoftReply({ ...MICROSOFT_ANSWERS,
       risk: { type: "choice", choice: "string:low", confidence: 0.8,
         probabilities: { "string:low": low, "string:high": 0.1, [CANNOT_TELL_OPTION]: cannotTell } } }));
     assert.deepEqual(answer(row, "risk"), { name: "risk", outcome: "rejected",
-      reason: `risk summed to ${expectedSum}, not 1` }, "cannot-tell mass cannot complete the declared-option sum");
+      reason: `risk summed to ${expectedSum} with ${CANNOT_TELL_OPTION}, not 1`,
+      wire: { choice: "string:low", probabilities: { "string:low": low, "string:high": 0.1, [CANNOT_TELL_OPTION]: cannotTell } } },
+    "the declared options and cannot_tell must sum to 1");
     assert.equal(answer(row, "docs_only").outcome, "distribution");
     assert.equal(answer(row, "size").outcome, "distribution");
   }
@@ -288,6 +291,15 @@ test("W1-T12416 criterion 4: an out-of-set or badly summed answer is rejected wi
     assert.deepEqual(answer(row, "risk"), { name: "risk", outcome: "distribution", confidence: 0.8, cannotTell,
       distribution: [{ option: "low", probability: low }, { option: "high", probability: 0.1 }] },
     "declared-option mass inside tolerance is preserved without normalization");
+  }
+  for (const [low, cannotTell] of [[0.6, 0.3], [0.88, 0.02]] as const) {
+    const row = await ask(microsoftCandidate, microsoftReply({ ...MICROSOFT_ANSWERS,
+      risk: { type: "choice", choice: "string:low", confidence: 0.8,
+        probabilities: { "string:low": low, "string:high": 0.1, [CANNOT_TELL_OPTION]: cannotTell } } }));
+    const declared = low + 0.1;
+    assert.deepEqual(answer(row, "risk"), { name: "risk", outcome: "distribution", confidence: 0.8, cannotTell,
+      distribution: [{ option: "low", probability: low / declared }, { option: "high", probability: 0.1 / declared }] },
+    "declared options that sum to 1 with cannot_tell are rescaled to sum to 1, and cannot_tell keeps the rest");
   }
 });
 
