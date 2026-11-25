@@ -495,40 +495,44 @@ export function wakeTimingFields(timings: WakeTimings): WakeTimingFields {
   };
 }
 
-/** A gap between heartbeats longer than this is an event-loop stall. */
-export const ARRIVAL_STALL_MIN_MS = 100;
-/** A delivery whose handler starts this soon after a stall ends was queued behind it. */
-export const ARRIVAL_QUEUED_WINDOW_MS = 250;
 const ARRIVAL_BEAT_MS = 20;
 
-/** W1-T14808: each delivery's own wait before its handler ran, from heartbeat gaps (pure; times in ms). */
+/** W1-T14808: each delivery's own wait before its handler ran (pure; times in ms). `turn` records a completed
+ *  event-loop turn; `waitAt` is the time since the turn before the last one. */
 export interface ArrivalWaitTracker {
-  beat(nowMs: number): void;
+  turn(nowMs: number): void;
   waitAt(nowMs: number): number;
 }
 
-/** A handler that starts inside a stall no beat has closed yet waited since the last beat; one that starts within
- *  {@link ARRIVAL_QUEUED_WINDOW_MS} of a closed stall's end was queued behind all of it; any other waited 0. */
+/**
+ * A request read now arrived after some completed turn, but not always the last one: after a stall the loop can
+ * take one more turn to accept and read every connection that queued behind it (measured on loopback: some of a
+ * burst's sockets are accepted only after the first turn past the stall). So `waitAt` runs from the turn BEFORE the
+ * last one: on a healthy loop that is at most two {@link ARRIVAL_BEAT_MS} beats, stalls with no turn between them add
+ * up, and a delivery read in the turn right after a stall is charged that stall. One that arrives later than that is
+ * charged none of it. Nothing in the process can tell when a request's bytes reached the kernel, so a delivery
+ * arriving within that one recovery turn is charged the stall too.
+ */
 export function createArrivalWaitTracker(startMs: number): ArrivalWaitTracker {
-  let lastBeat = startMs;
-  let stall: { start: number; end: number } | undefined;
+  let previous = startMs;
+  let last = startMs;
   return {
-    beat(nowMs) {
-      if (nowMs - lastBeat > ARRIVAL_STALL_MIN_MS) stall = { start: lastBeat, end: nowMs };
-      lastBeat = nowMs;
+    turn(nowMs) {
+      previous = last;
+      last = nowMs;
     },
     waitAt(nowMs) {
-      if (nowMs - lastBeat > ARRIVAL_STALL_MIN_MS) return Math.round(nowMs - lastBeat);
-      if (stall && nowMs - stall.end <= ARRIVAL_QUEUED_WINDOW_MS) return Math.round(nowMs - stall.start);
-      return 0;
+      return Math.max(0, Math.round(nowMs - previous));
     },
   };
 }
 
-/** The production wait read: a tracker fed by an unref'd heartbeat that starts when the route is built. */
+/** The production wait read. Each unref'd beat queues an immediate, which runs in the check phase after the poll
+ *  that reads requests, so it marks a completed turn. Started when the route is built; the selfAuthenticated route's
+ *  handler runs synchronously in the request's own poll callback (service.ts), before that turn's mark. */
 export function startArrivalWaitMonitor(clock: () => number = () => performance.now()): () => number {
   const tracker = createArrivalWaitTracker(clock());
-  setInterval(() => tracker.beat(clock()), ARRIVAL_BEAT_MS).unref();
+  setInterval(() => setImmediate(() => tracker.turn(clock())), ARRIVAL_BEAT_MS).unref();
   return () => tracker.waitAt(clock());
 }
 

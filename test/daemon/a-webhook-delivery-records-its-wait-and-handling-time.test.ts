@@ -211,34 +211,41 @@ test("W1-T14808: a refused delivery is timed, and a slow one is logged with no t
   );
 });
 
-test("W1-T14808: each delivery's own wait is read from the heartbeat gap it was queued behind", () => {
+test("W1-T14808: each delivery's own wait runs from the turn before the last completed one", () => {
   const t = createArrivalWaitTracker(0);
-  for (let ms = 20; ms <= 200; ms += 20) t.beat(ms);
-  assert.equal(t.waitAt(205), 0, "a delivery on a healthy loop waited nothing");
-  assert.equal(t.waitAt(9_200), 9_000, "a handler starting inside a stall no beat has closed waited since the last beat");
-  t.beat(9_201);
+  for (let ms = 20; ms <= 200; ms += 20) t.turn(ms);
+  assert.equal(t.waitAt(205), 25, "a delivery on a healthy loop waited at most two beats");
   assert.deepEqual(
-    [9_202, 9_230, 9_290].map((ms) => t.waitAt(ms)),
-    [9_002, 9_030, 9_090],
-    "every delivery queued behind the stall gets all of it, not only the first",
+    [7_200, 7_204, 7_230].map((ms) => t.waitAt(ms)),
+    [7_020, 7_024, 7_050],
+    "every delivery read before the next turn waited through every stall since the last one",
   );
-  for (let ms = 9_221; ms <= 11_201; ms += 20) t.beat(ms);
-  assert.equal(t.waitAt(11_205), 0, "a delivery 2 s after an idle stall ended waited nothing");
+  t.turn(7_231);
+  assert.equal(t.waitAt(7_240), 7_040, "a delivery read in the turn right after the stall is charged it");
+  t.turn(7_251);
+  assert.equal(t.waitAt(7_260), 29, "a delivery read once the loop has turned twice since is charged none of it");
 });
 
-/** A separate process posts `ids` once the parent says it is about to stall, so they queue behind the stall. */
+/** A separate process posts `ids` once the parent says it is about to stall, so they queue behind the stall. Raw
+ *  sockets, one per delivery, write every request at once: fetch's pool can hold a request client-side until an
+ *  earlier one answers, and that wait is not serve's to measure. */
 const BURST_CLIENT = `
 const { createHmac } = require("node:crypto");
+const net = require("node:net");
 const [url, ...ids] = process.argv.slice(1);
-process.stdin.once("data", async () => {
-  await Promise.all(ids.map(async (id) => {
+const { hostname, port, pathname } = new URL(url);
+process.stdin.once("data", () => {
+  for (const id of ids) {
     const body = JSON.stringify({ action: "completed", repository: { full_name: ${JSON.stringify(REPOSITORY)} } });
     const sig = "sha256=" + createHmac("sha256", process.env.W1_T14808_SECRET).update(body, "utf8").digest("hex");
-    const res = await fetch(url, { method: "POST", body, headers: { "content-type": "application/json",
-      "x-github-delivery": id, "x-github-event": "check_run", "x-hub-signature-256": sig } });
-    await res.arrayBuffer();
-    process.stdout.write(id + ":" + res.status + "\\n");
-  }));
+    const head = ["POST " + pathname + " HTTP/1.1", "host: " + hostname, "content-type: application/json",
+      "content-length: " + Buffer.byteLength(body), "connection: close", "x-github-delivery: " + id,
+      "x-github-event: check_run", "x-hub-signature-256: " + sig].join("\\r\\n");
+    let reply = "";
+    const socket = net.connect(Number(port), hostname, () => socket.write(head + "\\r\\n\\r\\n" + body));
+    socket.on("data", (chunk) => void (reply += chunk));
+    socket.on("close", () => process.stdout.write(id + ":" + reply.split(" ")[1] + "\\n"));
+  }
 });
 process.stdout.write("ready\\n");
 `;
@@ -255,9 +262,8 @@ test("W1-T14808: a burst queued behind a real event-loop stall writes a slow row
     const done = new Promise<void>((resolve) => child.once("exit", () => resolve()));
     await new Promise<void>((resolve) => child.stdout!.once("data", () => resolve()));
     child.stdout!.on("data", (chunk: Buffer) => void (out += chunk.toString()));
+    // Stall at once, so the five requests the child writes now all queue behind the stall.
     child.stdin!.end("go\n");
-    // Give the child time to connect, then stall this process so its five requests queue behind the stall.
-    await new Promise((resolve) => setTimeout(resolve, 5));
     const until = Date.now() + 1_600;
     while (Date.now() < until) {
       // Block the event loop on purpose.
@@ -270,6 +276,36 @@ test("W1-T14808: a burst queued behind a real event-loop stall writes a slow row
   assert.deepEqual(slow.map((r) => r.delivery_id).sort(), ids, "every delivery queued behind the stall is slow, not only the first");
   for (const row of slow) assert.ok(Number(row.loop_lag_ms) >= 1_000, `${String(row.delivery_id)} waited ${String(row.loop_lag_ms)} ms`);
   assert.equal(timings.slow_count, 5);
+});
+
+test("W1-T14808: a delivery queued through two back-to-back stalls is charged both", async () => {
+  const timings = createWakeTimings();
+  const rows = await withRoute({ timings, slowMs: 1_000 }, async (_send, _rows, url) => {
+    const child = spawn(process.execPath, ["-e", BURST_CLIENT, url, "pair-1"], {
+      env: { ...process.env, W1_T14808_SECRET: SECRET },
+      stdio: ["pipe", "pipe", "inherit"],
+    });
+    const done = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    await new Promise<void>((resolve) => child.stdout!.once("data", () => resolve()));
+    // Two timers in one timers phase that each block for 700 ms, so neither stall alone passes the 1 s bound. The
+    // first tells the child to post, so the delivery arrives during the first stall and waits through both.
+    const block = () => {
+      const until = Date.now() + 700;
+      while (Date.now() < until) {
+        // Block the event loop on purpose.
+      }
+    };
+    setTimeout(() => {
+      child.stdin!.end("go\n");
+      block();
+    }, 5);
+    setTimeout(block, 5);
+    await done;
+  });
+  const slow = rows.filter((r) => r.step === "github.wake.slow");
+  assert.deepEqual(slow.map((r) => r.delivery_id), ["pair-1"]);
+  assert.ok(Number(slow[0]!.loop_lag_ms) >= 1_000, `waited ${String(slow[0]!.loop_lag_ms)} ms across both stalls`);
+  assert.equal(timings.slow_count, 1);
 });
 
 test("W1-T14808: a quick delivery long after a real stall ended is not slow", async () => {
@@ -290,14 +326,14 @@ test("W1-T14808: a quick delivery long after a real stall ended is not slow", as
 test("W1-T14808: the default monitor reads a real stall and resets after it", async () => {
   const read = startArrivalWaitMonitor();
   await new Promise((resolve) => setTimeout(resolve, 60));
-  assert.equal(read(), 0, "a healthy loop reads no wait");
+  assert.ok(read() < 100, "a healthy loop reads at most about one beat");
   const until = Date.now() + 400;
   while (Date.now() < until) {
     // Block the event loop on purpose.
   }
   assert.ok(read() >= 300, "a handler starting inside the stall reads it");
   await new Promise((resolve) => setTimeout(resolve, 600));
-  assert.equal(read(), 0, "long after the stall ended, a new delivery waited nothing");
+  assert.ok(read() < 100, "long after the stall ended, a new delivery waited about one beat");
 });
 
 test("W1-T14808: the default clock and sampler time a real delivery", async () => {

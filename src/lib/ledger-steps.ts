@@ -820,7 +820,7 @@ const SEED_ROWS: readonly SeedRow[] = [
     step: "github.wake.slow",
     meaning:
       "One webhook delivery took serve more than 5 s: its own wait before the handler ran (`loop_lag_ms`, the " +
-      "event-loop stall it was queued behind, from a 20 ms heartbeat) plus its handling until the handler settled and " +
+      "time since the event loop's turn before the last one, so every stall it queued behind counts) plus its handling until the handler settled and " +
       "the response closed (`handle_ms`). Fields: " +
       "`delivery_id`, `event`, `action`, `handle_ms` and `loop_lag_ms`. No payload and no secret. Nothing decides on it; " +
       "it is evidence for why GitHub timed a delivery out.",
