@@ -1,24 +1,26 @@
 /**
  * W1-T14853 — the field-trials judge family reads the judge_shadow.compared and judge_shadow.skipped rows of every
  * shadow arm, so a live shadow cell carries agreement with the judge it shadows, and each decision-model replay names
- * its age. The decision-arm rows here are written by the real shadowJudgeCall (lib/judge-shadow.ts); only the decision
- * request is a fake, which also writes the decision.answered row the real askDecisionModel writes. No paid call runs.
+ * its age. The shadow rows here are written by the real shadowJudgeCall (lib/judge-shadow.ts), save where a test names
+ * a hand-written one; the decision request is a fake, which also writes the decision.answered row the real
+ * askDecisionModel writes, and a cash shadow's spawn is a fake. No paid call runs.
  */
 import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { test } from "node:test";
 
+import { deriveAnalyticsSnapshot } from "#src/lib/analytics-route.js";
 import type { Config } from "#src/lib/config.js";
 import type { DecisionAnsweredRow } from "#src/lib/decision-model.js";
 import { buildModelFieldNoteCandidate, PINNED_SITE_CONSENT_REGISTRY } from "#src/lib/field-trials-field-note.js";
 import { buildFieldTrialsFlowSnapshot, buildFieldTrialsRelease, periodOf, projectFlowRow, readFieldTrialsLedger, type FieldTrialsConsent,
   type FieldTrialsFlowSnapshot, type FieldTrialsLedgerRead } from "#src/lib/field-trials-flow.js";
 import { JUDGE_REPLAY_STALE_DAYS, judgeReplayAges, judgeTrialCells, judgeTrialRows, type JudgeTrialCell } from "#src/lib/field-trials-judges.js";
-import { judgeCalibrationRow } from "#src/lib/judge-calibration.js";
+import { deriveJudgeCalibration, judgeCalibrationRow, type JudgeCalibration } from "#src/lib/judge-calibration.js";
 import { shadowJudgeCall, type ShadowJudgeCall } from "#src/lib/judge-shadow.js";
 import { loadMounts, mountsPath, type JudgeMount } from "#src/lib/mounts.js";
 import { scoreTypedAnswers, type TypedAnswerRow } from "#src/lib/typed-answer-scores.js";
-import type { SpawnWorkerArgs } from "#src/lib/worker.js";
+import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -31,17 +33,22 @@ const OPTIONS = ["automate", "needs_operator", "backlog"];
 const mount: JudgeMount = { model: "haiku", effort: "low", maxTurns: 400, contextBudget: 60000,
   shadow: { provider: "decisions", deployment: LUNA.deployment, candidate: LUNA } };
 
-type Reply = { kind: "distribution"; top: string } | { kind: "abstained" } | { kind: "rejected" } | { kind: "budget" };
+type Reply = { kind: "distribution"; top: string } | { kind: "masses"; masses: number[]; cannotTell: number } |
+  { kind: "abstained" } | { kind: "rejected" } | { kind: "budget" };
 
 /** One real decision-arm shadow call. Returns the decision.answered row the request wrote and the judge_shadow row. */
 async function decisionShadow(o: { hour: number; head: string; primary: string; reply: Reply; latency: number; cost: number }): Promise<Row[]> {
   const rows: Row[] = [];
   const ts = `2026-10-06T${String(o.hour).padStart(2, "0")}:00:00.000Z`;
-  const answer = (): DecisionAnsweredRow["answers"][number] =>
-    o.reply.kind === "abstained" ? { name: "verify_human", outcome: "abstained", reason: "cannot-tell" }
-      : o.reply.kind === "rejected" ? { name: "verify_human", outcome: "rejected", reason: "verify_human summed to 0.974, not 1" }
-        : { name: "verify_human", outcome: "distribution", confidence: null, distribution: OPTIONS.map((option) =>
-          ({ option, probability: option === (o.reply as { top: string }).top ? 0.8 : 0.1 })) };
+  const answer = (): DecisionAnsweredRow["answers"][number] => {
+    const reply = o.reply;
+    if (reply.kind === "abstained") return { name: "verify_human", outcome: "abstained", reason: "cannot-tell" };
+    if (reply.kind === "rejected") return { name: "verify_human", outcome: "rejected", reason: "verify_human summed to 0.974, not 1" };
+    return { name: "verify_human", outcome: "distribution", confidence: null,
+      ...(reply.kind === "masses" ? { cannotTell: reply.cannotTell } : {}),
+      distribution: OPTIONS.map((option, i) =>
+        ({ option, probability: reply.kind === "masses" ? reply.masses[i]! : option === (reply as { top: string }).top ? 0.8 : 0.1 })) };
+  };
   const call: ShadowJudgeCall<string> = { role: "verify-human", key: `shard-${o.head}`, mount, input: "judge this record",
     primaryArgs: { cwd: REPO_ROOT, prompt: "judge this record", tools: [] } as unknown as SpawnWorkerArgs, primary: { costUsd: 0.0004 },
     primaryAnswer: o.primary, parse: (text) => text.trim(), agreementKey: (v) => v, head: { sha: o.head },
@@ -67,6 +74,21 @@ async function decisionShadow(o: { hour: number; head: string; primary: string; 
 const cashCompared = (hour: number, key: string, primary: string, shadow: string): Row => ({ ts: `2026-10-06T${String(hour).padStart(2, "0")}:00:00.000Z`,
   step: "judge_shadow.compared", role: "refresh-value", decision_key: key, primary_model: "gpt-6-luna", primary_provider: null, primary_cost_usd: 0,
   shadow_effort: "default", shadow_model: "gpt-oss-120b", shadow_cost_usd: 0.0004, primary_answer: primary, shadow_answer: shadow, agreement: primary === shadow });
+
+/** One real cash-arm shadow call on a role the cash row shadows. With no `keyed`, the call has no agreement key, as the
+ *  decision summary's (lib/feedback.ts). The reply `no json` does not parse; the key of the answer `none` is empty. */
+async function cashShadow(o: { hour: number; key: string; reply: string; keyed?: { primary: string } }): Promise<Row[]> {
+  const rows: Row[] = [];
+  const ts = `2026-10-06T${String(o.hour).padStart(2, "0")}:00:00.000Z`;
+  await shadowJudgeCall<string>({ role: o.keyed ? "risk-judge" : "decision-summary", key: o.key,
+    mount: { model: "haiku", effort: "low", maxTurns: 400, contextBudget: 60000 },
+    primaryArgs: { cwd: REPO_ROOT, prompt: "judge this record", tools: [] } as unknown as SpawnWorkerArgs, primary: {},
+    primaryAnswer: o.keyed?.primary, parse: (text) => (text === "no json" ? undefined : text),
+    ...(o.keyed ? { agreementKey: (v: string) => (v === "none" ? "" : v) } : {}),
+    spawn: async () => ({ text: o.reply, costUsd: 0.0001, routedModel: "gpt-oss-120b" }) as unknown as WorkerResult,
+    log: (step, fields) => { rows.push({ ts, step, ...fields }); } });
+  return rows;
+}
 
 function projected(rows: Row[]): FieldTrialsLedgerRead {
   return { state: "observed", reason: null, forms: { gzip: 0, plain: 0, live: 1 }, malformedRows: 0, duplicateRows: 0, futureRows: 0,
@@ -99,6 +121,30 @@ test("W1-T14853 criterion 1: a judge_shadow.compared row is one typed answer of 
     ["gpt-oss-120b", "text", "generative", { kind: "single", option: "overlap" }, "overlap", "c3c3c3c3"]);
   const textCell = cellOf(cash, `core|${WEEK}|live|refresh-value|gpt-oss-120b|text|-`);
   assert.deepEqual([textCell.agreement, textCell.singles, textCell.settledUsd.median], [{ compared: 2, agreed: 1, rate: 0.5 }, 2, 0.0004]);
+
+  // A compared row that only says whether the reply parsed is still one answer: a success is never dropped.
+  const summaries: Row[] = [];
+  for (const [i, reply] of ["a summary", "another", "a third", "no json"].entries()) {
+    summaries.push(...await cashShadow({ hour: 5 + i, key: `summary-${i}`, reply }));
+  }
+  assert.deepEqual(summaries.map((row) => [row.step, row.parses]),
+    [true, true, true, false].map((parses) => ["judge_shadow.compared", parses]), "positive control: the writer's parses rows");
+  const [parsed] = typedOf(summaries[0]!);
+  assert.deepEqual([parsed!.answer, parsed!.incumbent], [{ kind: "single", option: "parsed" }, null]);
+  const summaryCell = cellOf(summaries, `core|${WEEK}|live|decision-summary|gpt-oss-120b|text|-`);
+  assert.deepEqual([summaryCell.decisions, summaryCell.answers, summaryCell.singles, summaryCell.rejected, summaryCell.rejectionRate,
+    summaryCell.settledUsd.observed, summaryCell.agreement], [4, 4, 3, 1, 0.25, 4, { compared: 0, agreed: 0, rate: null }]);
+
+  // A compared row that cannot be read whole is one rejected answer, never a dropped row or a partial distribution.
+  const written = shadowRow(agree);
+  const unreadable: Row[] = [
+    { ...written, distribution: [...written.distribution as unknown[], { option: "extra" }] },
+    { ...written, distribution: [] }, { ...written, distribution: "automate" }, { ...cash[0]!, shadow_answer: undefined },
+  ];
+  for (const row of unreadable) assert.deepEqual(typedOf(row).map((t) => t.answer.kind), ["rejected"]);
+  // A row with no shadow model is its shadow deployment's; with neither, it has no answerer.
+  assert.equal(typedOf({ ...written, shadow_model: null })[0]!.model, LUNA.deployment);
+  assert.equal(judgeCalibrationRow({ ...cash[0]!, shadow_model: null }), undefined);
 });
 
 test("W1-T14853 criterion 2: a skipped decision-arm row is an abstained or a rejected answer, and a budget refusal is no answer", async () => {

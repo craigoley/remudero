@@ -28,7 +28,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { systemClock, type Clock } from "./clock.js";
 import { writeAtomic } from "./fs-race-safe.js";
-import { CANNOT_TELL_OPTION } from "./decision-model.js";
 import { JUDGE_REPLAY_DECISION_ROLE_PREFIX } from "./judge-replay-batch.js";
 import { JUDGE_SHADOW_COMPARED_KEY } from "./risk-judge.js";
 import { appendPanelLedger, bearerTokenId, isRecord, jsonAction, sendJson } from "./panel-actions.js";
@@ -171,11 +170,11 @@ function judgeShadowTypedAnswer(line: Row): TypedAnswerRow | undefined {
 }
 
 /** W1-T14853: who answered a judge_shadow.compared or .skipped row: its role, the shadow model (a decision candidate or a
- *  cash deployment), the decisions surface when the row says so and text otherwise, and the head it judged. A row that
- *  names no shadow model (a bake-off deployment that was not ready) has no answerer. */
+ *  cash deployment), else the shadow deployment, the decisions surface when the row says so and text otherwise, and the
+ *  head it judged. A row that names neither model nor deployment has no answerer. */
 export function judgeShadowArmIdentity(line: Row): Pick<TypedAnswerRow, "role" | "model" | "source" | "modelSurface"> & { head: string | null; inputDigest: string | null } | undefined {
   const role = str(line.role);
-  const model = str(line.shadow_model);
+  const model = str(line.shadow_model) ?? str(line.shadow_deployment);
   if (role === undefined || model === undefined) return undefined;
   const decisions = line.model_surface === "decisions";
   const key = str(line.decision_key);
@@ -190,39 +189,37 @@ export function judgeShadowArmIdentity(line: Row): Pick<TypedAnswerRow, "role" |
 export const isJudgeShadowArmRefusal = (line: Row): boolean =>
   line.step === "judge_shadow.skipped" && (line.refusal === "budget" || line.refusal === "capacity");
 
-/** W1-T14853: a judge_shadow.compared or .skipped row as one answer beside the primary's. A decision model's
- *  distribution is a distribution answer (its cannot-tell mass apart, as decision.answered reads it); a cash
- *  shadow's answer is a single one; the primary's answer is the incumbent. A skipped row is an abstention when it
- *  names one, a refusal is no answer, and anything else is a rejected answer. A compared row that only says whether
- *  the reply parsed (`parses`) carries no option: one that did not parse is rejected, one that did is no answer. */
+/** W1-T14853: a judge_shadow.compared or .skipped row as one answer; a refusal is none. A skipped row is an abstention
+ *  when it names one, else rejected. Every compared row is an answer. One that only says whether the reply `parses` is
+ *  the single answer `parsed` with no incumbent, or rejected. Any other is compared as its writer compared it: over the
+ *  declared options only (`cannot_tell` mass is not among them), against `primary_answer`. A shape that cannot be read
+ *  whole is rejected. */
 function judgeShadowArmTypedAnswer(line: Row): TypedAnswerRow | undefined {
   const who = judgeShadowArmIdentity(line);
   if (who === undefined || isJudgeShadowArmRefusal(line)) return undefined;
   const decisions = who.modelSurface === "decisions";
   const base = { ...who, question: decisions ? who.role.replace(/-/g, "_") : null, questionType: null, options: null,
-    incumbent: str(line.primary_answer) ?? null, outcome: null };
+    incumbent: typeof line.primary_answer === "string" ? line.primary_answer : null, outcome: null };
+  const rejected = (reason: string): TypedAnswerRow => ({ ...base, answer: { kind: "rejected", reason } });
   if (line.step === "judge_shadow.skipped") {
     const reason = str(line.reason) ?? "skipped";
     const abstained = str(line.abstained) ?? (reason.startsWith("abstained") ? reason : undefined);
-    if (abstained !== undefined) return { ...base, answer: { kind: "abstained", reason: abstained === "cannot-tell" ? "cannot-tell" : "refusal" } };
-    return { ...base, answer: { kind: "rejected", reason } };
+    if (abstained === undefined) return rejected(reason);
+    return { ...base, answer: { kind: "abstained", reason: abstained === "cannot-tell" ? "cannot-tell" : "refusal" } };
   }
-  if (Array.isArray(line.distribution)) {
-    const entries = line.distribution.filter((entry): entry is Row => record(entry) !== undefined &&
-      typeof entry.option === "string" && typeof entry.probability === "number");
-    if (entries.length === 0) return { ...base, answer: { kind: "rejected", reason: "the shadow distribution is not readable" } };
-    const cannotTell = typeof line.cannot_tell === "number" ? line.cannot_tell : undefined;
-    const distribution = entries.map((entry) => ({ option: entry.option as string, probability: entry.probability as number }));
-    return { ...base, questionType: "choice", options: [...distribution.map((entry) => entry.option), ...(cannotTell === undefined ? [] : [CANNOT_TELL_OPTION])],
-      ...(cannotTell === undefined ? {} : { abstainOption: CANNOT_TELL_OPTION }),
-      answer: { kind: "distribution", distribution: cannotTell === undefined ? distribution
-        : [...distribution.map((entry) => ({ option: entry.option, probability: entry.probability * (1 - cannotTell) })),
-          { option: CANNOT_TELL_OPTION, probability: cannotTell }] } };
+  if (line.parses === true) return { ...base, incumbent: null, answer: { kind: "single", option: "parsed" } };
+  if (line.parses === false) return rejected(str(line.reason) ?? "the shadow reply did not parse");
+  if (line.distribution !== undefined) {
+    const entries: unknown[] = Array.isArray(line.distribution) ? line.distribution : [];
+    const distribution = entries.flatMap((entry) => {
+      const { option, probability } = record(entry) ?? {};
+      return typeof option === "string" && typeof probability === "number" ? [{ option, probability }] : [];
+    });
+    if (distribution.length === 0 || distribution.length !== entries.length) return rejected("the shadow distribution is not readable");
+    return { ...base, questionType: "choice", options: distribution.map((entry) => entry.option), answer: { kind: "distribution", distribution } };
   }
-  const option = str(line.shadow_answer);
-  if (option !== undefined) return { ...base, answer: { kind: "single", option } };
-  if (line.parses === false) return { ...base, answer: { kind: "rejected", reason: str(line.reason) ?? "the shadow reply did not parse" } };
-  return undefined;
+  if (typeof line.shadow_answer === "string") return { ...base, answer: { kind: "single", option: line.shadow_answer } };
+  return rejected("the compared row has no readable answer");
 }
 
 /** A ledger row's typed answers, or the ones {@link judgeCalibrationRow} already read off it. */
@@ -345,7 +342,9 @@ export function foldJudgeVerdictRow(fold: JudgeVerdictFold, row: Row): void {
     return;
   }
   if (isTypedAnswerStep(row.step)) {
-    fold.typedAnswers.push(...typedAnswersOf(row));
+    // W1-T14853: this body has no request join and reads a decision request's decision.answered row, so folding that
+    // request's judge_shadow row too would count it twice. The arm rows are the field-trials judge family's.
+    if (!isJudgeShadowArmStep(row.step)) fold.typedAnswers.push(...typedAnswersOf(row));
     return;
   }
   const raw = record(row.worker_assignment);
