@@ -483,9 +483,9 @@ export interface SharedHostMemory {
 
 let publishedSharedHostMemory: SharedHostMemory | null = null;
 
-/** BACKSTOP: a snapshot older than this is not read and each lane keeps its own reading, as before W1-T14903. The
- *  primary control is the lane-target reading itself, re-taken every dispatch poll interval; this only stops a daemon
- *  whose dispatch loop stopped from steering reviews with a stale figure. */
+/** BACKSTOP: a snapshot older than this is not read as it stands. The primary control is the lane-target reading
+ *  itself, re-taken every dispatch poll interval; a pass whose pin outlives this re-pins a fresh one (re-read through
+ *  the governor's reader when none is fresh), and only with no reading at all does each lane keep its own. */
 export const SHARED_HOST_MEMORY_STALE_MS = 10 * 60_000;
 
 /** W1-T14903 — publish one lane memory reading as the shared snapshot; an unread or host-unread reading clears it. */
@@ -506,7 +506,8 @@ export function publishSharedHostMemory(reading: LaneMemoryReading | { unread: s
   };
 }
 
-/** The reader the build lane's governor takes its readings through, once it has read; unset, nothing re-reads. */
+/** The reader the build lane's governor takes its readings through, installed when its ports are built (before any
+ *  read, so a PAUSE-booted daemon has it too); unset, nothing re-reads. */
 let sharedHostMemoryReader: (() => LaneMemoryReading) | undefined;
 
 /** W1-T14903 — the reader {@link refreshSharedHostMemory} re-reads through (the governor's own; tests pass a fake). */
@@ -533,40 +534,65 @@ export function refreshSharedHostMemory(nowMs: number, reader = sharedHostMemory
   return sharedHostMemory(nowMs);
 }
 
+type SharedRowLog = (step: string, extra?: Record<string, unknown>) => void;
+
 /**
  * W1-T14903 — ONE SNAPSHOT PER PASS. A sweep pass pins the shared snapshot once, when it starts, and every consumer in
  * that pass (the review width, re-review admission, the audit row) reads the pinned snapshot, never the live one the
- * dispatch loop may re-publish while the pass awaits a read. The pass writes at most one {@link HOST_MEMORY_SHARED_STEP}
- * row: consumers record into it and its owner flushes it once.
+ * dispatch loop may re-publish while the pass awaits a read. The pass writes one {@link HOST_MEMORY_SHARED_STEP} row per
+ * pinned snapshot: consumers record into it and its owner flushes it.
+ *
+ * A pin outlives its pass when a refill runs late (a lane freed minutes after the pass read): past the stale bound the
+ * pin no longer describes the host, so the pass RE-PINS from the current shared snapshot (re-read through the build
+ * lane's reader when that has expired too) and the late consumers form a new segment with its own row.
  */
 export interface SharedHostMemoryPass {
-  readonly snapshot: SharedHostMemory | undefined;
+  /** The pinned snapshot of the current segment; replaced only when it expires ({@link pinnedSharedHostMemory}). */
+  snapshot: SharedHostMemory | undefined;
+  /** When the current segment was pinned: with no snapshot, a re-read is attempted once this is past the bound. */
+  pinnedAtMs: number;
   width?: { ownMib: number | null; readMib: number | null; width: number; ownWidth: number; yieldedWidth: boolean };
   heldPrs: Set<number>;
+  /** The current segment's row has been written, unchanged since. */
   written: boolean;
+  /** The serialized row last written for the current segment. */
+  writtenRow?: string;
+  /** Rows of earlier, re-pinned segments not yet written. */
+  pendingRows: Record<string, unknown>[];
+  /** The reader this pass re-reads an expired snapshot through. */
+  reader?: () => LaneMemoryReading;
+  /** The owner's sink, once it flushed: a segment re-pinned after that writes its own row through it. */
+  log?: SharedRowLog;
+  /** The current segment was re-pinned after the owner flushed (a late refill): it is written on its own. */
+  late: boolean;
 }
 
 /** W1-T14903 — pin this pass's snapshot: the fresh shared one, re-read when expired. */
 export function openSharedHostMemoryPass(nowMs: number, reader = sharedHostMemoryReader): SharedHostMemoryPass {
-  return { snapshot: refreshSharedHostMemory(nowMs, reader), heldPrs: new Set(), written: false };
+  return {
+    snapshot: refreshSharedHostMemory(nowMs, reader), pinnedAtMs: nowMs, heldPrs: new Set(), written: false, pendingRows: [],
+    ...(reader === undefined ? {} : { reader }), late: false,
+  };
 }
 
-/** W1-T14903 — the pass's pinned snapshot at `nowMs`; past the stale bound (a long-lived refill) nothing is read. */
+/**
+ * W1-T14903 — the pass's pinned snapshot at `nowMs`. Within the stale bound it is the snapshot the pass started on.
+ * Past it (a refill freed late in the pass's chain) the pass re-pins: the current shared snapshot, re-read through the
+ * build lane's reader when that one has expired as well, so the late width and re-review yield read the same fresh
+ * reading the build lane does, never fall back to the review lane's own memory alone.
+ */
 export function pinnedSharedHostMemory(pass: SharedHostMemoryPass, nowMs: number): SharedHostMemory | undefined {
-  const snapshot = pass.snapshot;
-  if (snapshot === undefined || nowMs - snapshot.atMs > SHARED_HOST_MEMORY_STALE_MS) return undefined;
-  return snapshot;
+  const pinnedAt = pass.snapshot?.atMs ?? pass.pinnedAtMs;
+  if (nowMs - pinnedAt <= SHARED_HOST_MEMORY_STALE_MS) return pass.snapshot;
+  repinSharedHostMemoryPass(pass, nowMs);
+  return pass.snapshot;
 }
 
-/** W1-T14903 — write the pass's one row, once; a pass with no snapshot writes none. */
-export function flushSharedHostMemoryPass(
-  pass: SharedHostMemoryPass, log: ((step: string, extra?: Record<string, unknown>) => void) | undefined,
-): void {
-  if (pass.written || pass.snapshot === undefined || log === undefined) return;
-  pass.written = true;
+function sharedPassRow(pass: SharedHostMemoryPass): Record<string, unknown> | undefined {
+  if (pass.snapshot === undefined) return undefined;
   const width = pass.width;
   const held = [...pass.heldPrs].sort((a, b) => a - b);
-  log(HOST_MEMORY_SHARED_STEP, {
+  return {
     ...hostMemorySharedPayload(pass.snapshot, {
       ownMib: width?.ownMib ?? null, readMib: width?.readMib ?? null, width: width?.width ?? null,
       ...(width === undefined ? {} : { ownWidth: width.ownWidth }),
@@ -574,7 +600,54 @@ export function flushSharedHostMemoryPass(
       ...(held.length > 0 ? { withheld: held.length } : {}),
     }),
     ...(held.length > 0 ? { withheld_prs: held } : {}),
-  });
+  };
+}
+
+function repinSharedHostMemoryPass(pass: SharedHostMemoryPass, nowMs: number): void {
+  const row = sharedPassRow(pass);
+  // The expiring segment keeps its own row: unwritten, or a late segment that changed since its last write.
+  if (row !== undefined && (pass.writtenRow === undefined || (pass.late && JSON.stringify(row) !== pass.writtenRow))) {
+    pass.pendingRows.push(row);
+  }
+  pass.snapshot = refreshSharedHostMemory(nowMs, pass.reader ?? sharedHostMemoryReader);
+  pass.pinnedAtMs = nowMs;
+  delete pass.width;
+  pass.heldPrs.clear();
+  pass.written = false;
+  delete pass.writtenRow;
+  pass.late = pass.log !== undefined;
+  if (pass.log !== undefined) writePendingSharedRows(pass, pass.log);
+}
+
+function writePendingSharedRows(pass: SharedHostMemoryPass, log: SharedRowLog): void {
+  for (const row of pass.pendingRows.splice(0)) log(HOST_MEMORY_SHARED_STEP, row);
+}
+
+function writeCurrentSharedRow(pass: SharedHostMemoryPass, log: SharedRowLog): void {
+  const row = sharedPassRow(pass);
+  if (row === undefined) return;
+  const key = JSON.stringify(row);
+  if (pass.writtenRow === key) return;
+  pass.writtenRow = key;
+  pass.written = true;
+  log(HOST_MEMORY_SHARED_STEP, row);
+}
+
+/** W1-T14903 — the owner writes the pass's rows: each re-pinned segment's, then the current one's, once; a segment
+ *  with no snapshot writes none. After this, a segment re-pinned by a late refill writes through the same sink. */
+export function flushSharedHostMemoryPass(pass: SharedHostMemoryPass, log: SharedRowLog | undefined): void {
+  if (log === undefined) return;
+  pass.log ??= log;
+  writePendingSharedRows(pass, log);
+  if (!pass.written) writeCurrentSharedRow(pass, log);
+}
+
+/** W1-T14903 — a consumer that reads the pass after its owner flushed (a late refill's sweep) writes the segment it
+ *  re-pinned, as its own pass; the owner's segment is never re-written. Before the owner flushed: nothing. */
+export function flushLateSharedHostMemoryPass(pass: SharedHostMemoryPass): void {
+  if (pass.log === undefined) return;
+  writePendingSharedRows(pass, pass.log);
+  if (pass.late) writeCurrentSharedRow(pass, pass.log);
 }
 
 /** W1-T14903 — the shared snapshot unless it is older than the stale bound at `nowMs`. A snapshot taken after `nowMs`
@@ -703,16 +776,18 @@ export function publishedLaneCpuBound(): number | undefined {
   return publishedCpuLaneBound === null ? undefined : publishedCpuLaneBound;
 }
 
-/** The real ports over a daemon state directory (`<root>/state`, the ledger's directory). */
-export function defaultLaneGovernorPorts(stateDir: string): LaneGovernorPorts {
+/** The real ports over a daemon state directory (`<root>/state`, the ledger's directory). `memory` overrides the
+ *  reading's host ports (a test's fixture files); absent, the host itself is read. */
+export function defaultLaneGovernorPorts(stateDir: string, memory: Partial<ShadowMemoryPorts> = {}): LaneGovernorPorts {
   const root = dirname(stateDir);
+  const reread = (): LaneMemoryReading => readLaneMemory(root, memory);
+  // W1-T14903: installed when the ports are BUILT, not on the first read(): a daemon booted under PAUSE never takes a
+  // dispatch reading, yet its review passes must still re-read the shared snapshot and write their rows through it.
+  setSharedHostMemoryReader(reread);
   return {
     mode: () => loadLaneGovernorMode(),
     // W1-T14903: every reading is also the shared snapshot review capacity cuts its width from.
     read: () => {
-      const reread = (): LaneMemoryReading => readLaneMemory(root);
-      // The same reader re-takes an expired snapshot for a review pass while dispatch is paused.
-      setSharedHostMemoryReader(reread);
       const reading = reread();
       publishSharedHostMemory(reading, systemClock.now());
       return reading;

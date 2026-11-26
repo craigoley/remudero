@@ -5,17 +5,20 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
+import { fixedClock } from "#src/lib/clock.js";
+import { loadHostMemoryBudgetPolicy } from "#src/lib/host-memory-shadow.js";
 import {
-  HOST_MEMORY_SHARED_STEP, laneTarget, openSharedHostMemoryPass, publishSharedHostMemory, SHARED_HOST_MEMORY_STALE_MS,
-  setSharedHostMemoryReader, sharedBuildNeedMib, sharedHostMemory, sharedHostMemoryShort, type LaneMemoryReading,
+  defaultLaneGovernorPorts, HOST_MEMORY_SHARED_STEP, laneTarget, openSharedHostMemoryPass, publishSharedHostMemory, readLaneMemory,
+  SHARED_HOST_MEMORY_STALE_MS, setSharedHostMemoryReader, sharedBuildNeedMib, sharedHostMemory, sharedHostMemoryShort,
+  type LaneMemoryReading,
 } from "#src/lib/lane-governor.js";
 import {
   initialReviewCapacityState, readReviewHostObservation, reviewYieldsReReviews, selectAdaptiveReviewWidth, selectRuntimeReviewWidth,
   sharedMemoryAvailableMib, summarizeReviewSettlements, type ReviewCapacityObservation, type ReviewCapacityPolicy,
 } from "#src/lib/review-capacity.js";
 import {
-  DEFAULT_SWEEP_POLICY, RE_REVIEW_HELD_FOR_BUILD_REASON, reReviewsJudgedHead, reReviewYieldsForBuild, reviewOutcomeTaskIdFor, runSweep,
-  runSweepLightPass, selectReviewAdmissions, type OpenPrView, type SweepDeps,
+  DEFAULT_SWEEP_POLICY, drainInFlightReviews, RE_REVIEW_HELD_FOR_BUILD_REASON, reReviewsJudgedHead, reReviewYieldsForBuild,
+  reviewOutcomeTaskIdFor, runSweep, runSweepLightPass, selectReviewAdmissions, type OpenPrView, type SweepDeps,
 } from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-11-25T16:24:00Z");
@@ -394,8 +397,10 @@ test("W1-T14903 shared memory never raises a lane width — a kernel fall after 
     const pinned = openSharedHostMemoryPass(NOW);
     assert.equal(pinned.snapshot?.measuredMib, 30_000, "the pinned snapshot still carries the 30,000 MiB lane read");
     const pinnedRoot = tempRoot();
-    const refills = passes.map((offset) => width(pinnedRoot, NOW + offset, pinned));
+    const refills = [width(pinnedRoot, NOW, pinned)];
     assert.equal(pinned.width?.ownMib, kernelMib, "the pass's row names the current kernel reading as the lane's own");
+    // A refill past the pin's stale bound re-pins (here nothing fresh is left to pin); its width is still bounded.
+    refills.push(...passes.slice(1).map((offset) => width(pinnedRoot, NOW + offset, pinned)));
     passes.forEach((_, i) => {
       assert.ok(live[i]! <= main[i]!, `snapshot ${ageMs} ms old, pass ${i}: live width ${live[i]} <= origin/main ${main[i]}`);
       assert.ok(refills[i]! <= main[i]!, `snapshot ${ageMs} ms old, refill ${i}: pinned width ${refills[i]} <= origin/main ${main[i]}`);
@@ -518,4 +523,253 @@ test("W1-T14903 the full sweep's review lane holds a re-review back while memory
   const held = short.rows.find((row) => row.step === HOST_MEMORY_SHARED_STEP && row.yielded === "re-review");
   assert.ok(held, "the held re-review is recorded");
   assert.deepEqual(held.withheld_prs, [7]);
+});
+
+// ---- Light passes whose refills run on a clock the test advances, past the pin's stale bound ----
+
+const iso = (ms: number): string => new Date(ms).toISOString();
+const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+async function eventually(predicate: () => boolean, message: string): Promise<void> {
+  for (let i = 0; i < 300; i++) {
+    if (predicate()) return;
+    await settle();
+  }
+  assert.fail(message);
+}
+async function quiet(): Promise<void> {
+  for (let i = 0; i < 30; i++) await settle();
+}
+const REFILL_POLICY = { ...DEFAULT_SWEEP_POLICY, reviewLanes: 3, reviewLaneMin: 1, reviewLaneMax: 4 };
+/** Eleven minutes after the pass read: past {@link SHARED_HOST_MEMORY_STALE_MS}. */
+const LATE = NOW + SHARED_HOST_MEMORY_STALE_MS + 60_000;
+const OWN_MIB = 30_000;
+const ownHost = () => ({ memAvailableMib: OWN_MIB, cpuPsiSomeAvg10Pct: 0, cpuPsiFullAvg10Pct: 0, memoryPsiSomeAvg10Pct: 0 });
+
+/** A light pass whose reviews hold until released, whose width is the production runtime width over an own
+ *  MemAvailable of 30,000 MiB, and whose clock the test moves. Every width it cuts is recorded with the snapshot read. */
+function lightHarness(root: string, extra: Partial<SweepDeps> = {}) {
+  let clock = NOW;
+  const holds = new Map<number, { promise: Promise<void>; resolve: () => void }>();
+  const hold = (n: number) => {
+    let entry = holds.get(n);
+    if (entry === undefined) {
+      let resolve!: () => void;
+      const promise = new Promise<void>((r) => { resolve = r; });
+      entry = { promise, resolve };
+      holds.set(n, entry);
+    }
+    return entry;
+  };
+  const started: number[] = [];
+  const released = new Set<number>();
+  const rows: Record<string, unknown>[] = [];
+  const widths: Array<{ nowMs: number; width: number; snapshotAt: number | undefined; snapshotMib: number | undefined }> = [];
+  const log = (step: string, fields?: Record<string, unknown>): void => { rows.push({ step, ...fields }); };
+  const deps: SweepDeps = {
+    ledgerPath: "/unused/shared-memory-refill-ledger", runId: "shared-memory-refill", now: () => clock,
+    readLedger: () => [], appendLine: (_path, row) => { rows.push(row as Record<string, unknown>); }, log,
+    readActiveWorkerCount: () => 0,
+    dispatchFix: () => {}, arm: () => "armed", escalate: () => {}, close: () => {},
+    postReview: async (p) => {
+      started.push(p.prNumber);
+      await hold(p.prNumber).promise;
+    },
+    selectAdaptiveReviewWidth: ({ queueDepth, nowMs, ledgerLines, memoryPass }) => {
+      const width = selectRuntimeReviewWidth({
+        root, queueDepth, activeWorkers: 0, nowMs, ledgerLines, policy: POLICY, ...BOUNDS, log, cpuWeightShare: 1,
+        readHostObservation: ownHost, ...(memoryPass === undefined ? {} : { memoryPass }),
+      });
+      widths.push({ nowMs, width, snapshotAt: memoryPass?.snapshot?.atMs, snapshotMib: memoryPass?.snapshot?.availableMib });
+      return width;
+    },
+    ...extra,
+  };
+  return {
+    deps, started, released, rows, widths,
+    setClock: (ms: number) => { clock = ms; },
+    release: (n: number) => { released.add(n); hold(n).resolve(); },
+    sharedRows: () => rows.filter((row) => row.step === HOST_MEMORY_SHARED_STEP),
+    finish: async () => {
+      for (let n = 1; n <= 12; n++) hold(n).resolve();
+      await drainInFlightReviews({ boundMs: 1000 });
+      await quiet();
+    },
+  };
+}
+
+function lightPr(n: number, over: Partial<OpenPrView> = {}): OpenPrView {
+  return pr({ prNumber: n, prUrl: `https://github.com/o/r/pull/${n}`, headSha: `head${n}`, taskId: `W1-T${n}`, ...over });
+}
+
+test("W1-T14903 both lanes read one memory snapshot — a light-pass refill past the stale bound re-pins the fresh one", async () => {
+  // The reviewer's replay: own MemAvailable 30,000 MiB, the dispatch loop's projection -110 MiB. The pass cut width 2,
+  // then a lane freed 11 minutes later refilled at width 3 on its own reading while the build lane read -110 MiB.
+  const h = lightHarness(tempRoot());
+  publishSharedHostMemory(reading(-110), NOW);
+  try {
+    await runSweepLightPass([1, 2, 3, 4].map((n) => lightPr(n)), h.deps, REFILL_POLICY);
+    await eventually(() => h.started.length > 0, "the pass admitted no review");
+    const atStart = h.widths.filter((w) => w.nowMs === NOW);
+    assert.ok(atStart.length > 0);
+    for (const w of atStart) {
+      assert.equal(w.snapshotAt, NOW, "the pass pins the dispatch loop's reading");
+      assert.ok(w.width < BOUNDS.baseWidth, `the pass cuts width ${w.width} from the -110 MiB snapshot`);
+    }
+    // +1 minute, inside the bound: the freed lane's refill reads the pass's own pin.
+    h.setClock(NOW + 60_000);
+    h.release(h.started[0]!);
+    await eventually(() => h.widths.some((w) => w.nowMs === NOW + 60_000), "the +1 min refill cut no width");
+    await quiet();
+    for (const w of h.widths.filter((w) => w.nowMs === NOW + 60_000)) {
+      assert.equal(w.snapshotAt, NOW, "inside the bound the refill reads the pinned snapshot");
+      assert.ok(w.width < BOUNDS.baseWidth);
+    }
+    assert.deepEqual(h.sharedRows().map((row) => row.snapshot_at), [iso(NOW)], "inside the bound the pass keeps its one row");
+    // +11 minutes: the dispatch loop re-published -110 MiB; a lane frees past the pin's bound.
+    h.setClock(LATE);
+    publishSharedHostMemory(reading(-110), LATE);
+    const pending = h.started.find((n) => !h.released.has(n));
+    assert.ok(pending !== undefined, "a review is still running to free a lane late");
+    h.release(pending);
+    await eventually(() => h.widths.some((w) => w.nowMs === LATE), "the late refill cut no width");
+    const late = h.widths.filter((w) => w.nowMs === LATE);
+    for (const w of late) {
+      assert.equal(w.snapshotAt, LATE, "past the bound the refill re-pins the snapshot the build lane just read");
+      assert.equal(w.snapshotMib, -110);
+      assert.ok(w.width < BOUNDS.baseWidth, `the late refill's width ${w.width} is cut from -110 MiB, not its own 30,000`);
+    }
+    await eventually(() => h.sharedRows().some((row) => row.snapshot_at === iso(LATE)), "the late refill wrote no row");
+    const rows = h.sharedRows();
+    assert.equal(rows[0]?.snapshot_at, iso(NOW), "the pass's own row stays first, unchanged");
+    const lateRow = rows.find((row) => row.snapshot_at === iso(LATE))!;
+    assert.equal(lateRow.available_mib, -110, "the late refill's row names the fresh snapshot");
+    assert.equal(lateRow.review_read_mib, -110);
+    assert.equal(lateRow.review_own_mib, OWN_MIB);
+    assert.ok(h.widths.some((w) => w.nowMs === LATE && w.width === lateRow.review_width), "the row names a width the late refill cut");
+    assert.ok(Number(lateRow.review_width) < Number(lateRow.review_own_width), "and that width is the shared cut, below its own");
+  } finally {
+    await h.finish();
+  }
+  // The same late call with no shared snapshot is what the refill read before: its own 30,000 MiB, base width.
+  publishSharedHostMemory({ unread: "own reading only" }, NOW);
+  assert.equal(selectRuntimeReviewWidth({
+    root: tempRoot(), queueDepth: 3, activeWorkers: 0, nowMs: LATE, ledgerLines: [], policy: POLICY, ...BOUNDS, log: () => {},
+    cpuWeightShare: 1, readHostObservation: ownHost,
+  }), BOUNDS.baseWidth, "its own reading alone would have refilled at base width");
+});
+
+test("W1-T14903 a build outranks a re-review when memory is short — a refill past the stale bound still yields", async () => {
+  // The reviewer's replay: memory short, judged head #7 held by the pass; the first review settles 11 minutes later,
+  // the refill re-reads the open PRs and, its pin expired, admitted #7 though the dispatch loop republished -110 MiB.
+  const rejudge = lightPr(7, { reviewedHeadSha: "head7" });
+  const first = lightPr(8);
+  const lateRefill = async (
+    republished: number, settled: (h: ReturnType<typeof lightHarness>) => boolean,
+  ): Promise<{ started: number[]; rows: Record<string, unknown>[] }> => {
+    const h = lightHarness(tempRoot(), { readOpenPrsForRefill: async () => [rejudge] });
+    publishSharedHostMemory(reading(-110), NOW);
+    try {
+      await runSweepLightPass([rejudge, first], h.deps, REFILL_POLICY);
+      await eventually(() => h.started.includes(8), "the first review did not start");
+      await quiet();
+      assert.equal(h.started.includes(7), false, "short of memory the pass holds the re-review");
+      h.setClock(LATE);
+      publishSharedHostMemory(reading(republished), LATE);
+      h.release(8);
+      await eventually(() => h.widths.some((w) => w.nowMs === LATE), "the late refill cut no width");
+      await eventually(() => settled(h), `the late refill on ${republished} MiB did not settle`);
+      await quiet();
+      return { started: [...h.started], rows: h.sharedRows() };
+    } finally {
+      await h.finish();
+    }
+  };
+  const short = await lateRefill(-110, (h) => h.sharedRows().some((row) => row.snapshot_at === iso(LATE)));
+  assert.deepEqual(short.started, [8], "still short at +11 min: the refill leaves #7 for the build");
+  assert.equal(short.rows[0]?.snapshot_at, iso(NOW));
+  assert.deepEqual(short.rows[0]?.withheld_prs, [7], "the pass's row names the held re-review");
+  const lateRow = short.rows.find((row) => row.snapshot_at === iso(LATE));
+  assert.ok(lateRow, "the late refill writes its own row");
+  assert.equal(lateRow.yielded, "re-review");
+  assert.deepEqual(lateRow.withheld_prs, [7], "the late row names the re-review the refill held");
+  // Control: the same late refill on a roomy republished snapshot admits #7, so the hold above is the snapshot's.
+  const roomy = await lateRefill(30_000, (h) => h.started.includes(7));
+  assert.ok(roomy.started.includes(7), `with room at +11 min the refill admits the re-review (${roomy.started.join(", ")})`);
+  assert.equal(roomy.rows.find((row) => row.snapshot_at === iso(LATE))?.yielded === "re-review", false);
+});
+
+const MIB = 1024 * 1024;
+const PSI = "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
+/** The governor's host ports over fixture files: 4 GiB charged under an 8,379 MiB memory.high and ~976 MiB available
+ *  on the host, below the review lane's 1,536 MiB reserve. */
+function shortHostPorts() {
+  const files: Record<string, string> = {
+    "/sys/fs/cgroup/memory.current": String(4096 * MIB),
+    "/sys/fs/cgroup/memory.max": String(8379 * MIB),
+    "/sys/fs/cgroup/memory.high": String(8379 * MIB),
+    "/sys/fs/cgroup/memory.swap.current": "0",
+    "/sys/fs/cgroup/memory.stat": `anon ${3000 * MIB}\nfile ${1096 * MIB}\ninactive_file ${96 * MIB}\npswpin 0\n`,
+    "/sys/fs/cgroup/memory.events": "low 0\nhigh 7\nmax 0\noom 0\noom_kill 0\n",
+    "/sys/fs/cgroup/memory.pressure": PSI,
+    "/proc/pressure/memory": PSI,
+    "/proc/meminfo": "MemTotal: 16000000 kB\nMemAvailable: 1000000 kB\n",
+  };
+  return {
+    clock: fixedClock(NOW),
+    policy: () => loadHostMemoryBudgetPolicy(),
+    readLedger: () => undefined,
+    readTail: () => "",
+    readHostServe: undefined,
+    listStateDir: () => [],
+    daemonPid: () => undefined,
+    instance: () => "fixture",
+    estimate: () => 1400,
+    typical: () => 900,
+    readFile: (path: string): string => {
+      const text = files[path];
+      if (text === undefined) throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
+      return text;
+    },
+  };
+}
+
+test("W1-T14903 each pass writes host_memory.shared rows — a daemon booted under PAUSE writes them before any dispatch read", async () => {
+  // The reviewer's replay: an operator PAUSE held across a restart. The daemon builds its lane governor's ports at
+  // boot, but the paused loop never takes a dispatch reading, so the re-read hook installed on the first read() never
+  // was, and every pause pass wrote no row and cut width from its own memory.
+  const unbooted = lightHarness(tempRoot());
+  try {
+    await runSweepLightPass([lightPr(8)], unbooted.deps, REFILL_POLICY);
+    await eventually(() => unbooted.started.includes(8), "the unbooted pass admitted no review");
+  } finally {
+    await unbooted.finish();
+  }
+  assert.equal(unbooted.sharedRows().length, 0, "with no governor in the process nothing is read and no row is written");
+  assert.equal(unbooted.widths[0]?.snapshotAt, undefined);
+  assert.equal(unbooted.widths[0]?.width, BOUNDS.baseWidth, "with no snapshot the width is the lane's own");
+
+  const root = tempRoot();
+  const hostPorts = shortHostPorts();
+  const governor = defaultLaneGovernorPorts(join(root, "state"), hostPorts);
+  assert.equal(typeof governor.read, "function", "the ports are built; PAUSE means read() is never called");
+  const expected = readLaneMemory(root, hostPorts).hostBaseAvailableMib;
+  assert.ok(typeof expected === "number" && expected < POLICY.workerMemoryReserveMib, `the host fixture reads short (${expected})`);
+  const paused = lightHarness(tempRoot());
+  try {
+    await runSweepLightPass([lightPr(9)], paused.deps, REFILL_POLICY);
+    await eventually(() => paused.started.includes(9), "the paused pass admitted no review");
+  } finally {
+    await paused.finish();
+  }
+  const rows = paused.sharedRows();
+  assert.equal(rows.length, 1, "the paused pass re-read the snapshot through the governor's reader and wrote its row");
+  assert.equal(rows[0]?.snapshot_at, iso(NOW));
+  assert.equal(rows[0]?.available_mib, Math.round(expected));
+  assert.ok(paused.widths.length > 0);
+  for (const width of paused.widths) {
+    assert.equal(width.snapshotAt, NOW, "the paused pass's width read the re-read snapshot");
+    assert.ok(width.width < BOUNDS.baseWidth, `cut from the short snapshot, the width is ${width.width}`);
+  }
+  assert.ok(paused.widths.some((w) => w.width === rows[0]?.review_width), "the row names the width the pass cut");
+  assert.equal(rows[0]?.review_own_width, BOUNDS.baseWidth, "its own 30,000 MiB alone would hold base width");
 });

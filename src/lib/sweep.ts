@@ -282,7 +282,9 @@ import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, readDepReviewHo
 import { DEP_REVIEW_REFUSED_ASK_RETIRED_STEP, retireDepReviewRefusedAsk } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
 import { readReviewHostObservation, reviewYieldsReReviews, selectRuntimeReviewWidth } from "./review-capacity.js";
-import { flushSharedHostMemoryPass, openSharedHostMemoryPass, type SharedHostMemoryPass } from "./lane-governor.js";
+import {
+  flushLateSharedHostMemoryPass, flushSharedHostMemoryPass, openSharedHostMemoryPass, type SharedHostMemoryPass,
+} from "./lane-governor.js";
 import { yieldingFixClaim } from "./review-precedence.js";
 import {
   capacityDecisionText,
@@ -23888,7 +23890,8 @@ export async function runSweep(
 ): Promise<SweepSummary> {
   // W1-T14903: a pass pins ONE host memory snapshot as it starts. Its review width, re-review admission and audit row
   // all read it, never the live one the dispatch loop re-publishes while this pass awaits a read (readMainRepair).
-  // A pass nested in another (a light pass's per-PR sweep) reads the outer pass's, which the outer pass writes.
+  // A pass nested in another (a light pass's per-PR sweep) reads the outer pass's, which the outer pass writes; a
+  // late refill's sweep that re-pinned an expired snapshot after the outer pass wrote its row writes that segment's.
   // The caller's deps object is passed on as it is (a caller may change a seam on it while the pass runs).
   const outerPass = sweepDeps.sharedMemoryPass;
   const memoryPass = outerPass ?? openSharedHostMemoryPass(sweepDeps.now ? sweepDeps.now() : systemClock.now());
@@ -23896,6 +23899,7 @@ export async function runSweep(
     return await runSweepPinned(openPrs, sweepDeps, policy, memoryPass);
   } finally {
     if (outerPass === undefined) flushSharedHostMemoryPass(memoryPass, sweepDeps.log);
+    else flushLateSharedHostMemoryPass(outerPass);
   }
 }
 
@@ -31764,6 +31768,7 @@ export async function runSweepLightPass(
     return await runSweepLightPassPinned(openPrs, deps, policy, memoryPass);
   } finally {
     if (outerPass === undefined) flushSharedHostMemoryPass(memoryPass, deps.log);
+    else flushLateSharedHostMemoryPass(outerPass);
   }
 }
 
@@ -32309,18 +32314,26 @@ async function runSweepLightPassCore(
     }
     refillViewReadAtMs = deps.now ? deps.now() : systemClock.now();
     const freshViews = fresh.map(pr => completedRefusalRetryView(promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad), selectionPrior));
+    const refillCandidates = freshViews.filter((pr) => {
+      const key = lightPassHeadKey(pr);
+      if (refilledHeads.has(key) || lightPassReservedHeads.has(key)) return false;
+      const admittedHead = spawningHeads.get(pr.prNumber);
+      if (admittedHead === undefined) return true;
+      // Once the earlier head releases its slot, the normal selector can consider its green successor.
+      return admittedHead !== key && !lightPassReservedHeads.has(admittedHead) &&
+        pr.checksState === "green" && pr.reviewState === "none" && pr.reviewOrphanedByPush === true;
+    });
+    // W1-T14903: the pass's pinned snapshot, re-pinned once it expired (a late refill), decides the yield; the held
+    // re-reviews are recorded on that snapshot's row, exactly as the pass's own admission records them.
+    const refillYields = reviewYieldsReReviews(refillViewReadAtMs, policy.reviewCapacity.workerMemoryReserveMib, memoryPass);
+    if (refillYields) {
+      for (const pr of reviewAdmissionCandidates(refillCandidates, policy, refillViewReadAtMs, outcomes)) {
+        if (!reviewsInPlanLane(pr) && reReviewYieldsForBuild(pr, selectionLedgerLines)) memoryPass.heldPrs.add(pr.prNumber);
+      }
+    }
     refillTail.splice(0, refillTail.length, ...selectReviewAdmissions(
-      freshViews.filter((pr) => {
-        const key = lightPassHeadKey(pr);
-        if (refilledHeads.has(key) || lightPassReservedHeads.has(key)) return false;
-        const admittedHead = spawningHeads.get(pr.prNumber);
-        if (admittedHead === undefined) return true;
-        // Once the earlier head releases its slot, the normal selector can consider its green successor.
-        return admittedHead !== key && !lightPassReservedHeads.has(admittedHead) &&
-          pr.checksState === "green" && pr.reviewState === "none" && pr.reviewOrphanedByPush === true;
-      }),
-      policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson, queuedAt,
-      reviewYieldsReReviews(refillViewReadAtMs, policy.reviewCapacity.workerMemoryReserveMib, memoryPass), selectionLedgerLines,
+      refillCandidates, policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson, queuedAt,
+      refillYields, selectionLedgerLines,
     ).spawning);
   };
   let recycleRefillHeld = false;
@@ -32462,6 +32475,8 @@ async function runSweepLightPassCore(
       deps.log?.("sweep.review_refill.failed", { error: String((error as Error)?.message ?? error) });
     } finally {
       refillRunning = false;
+      // W1-T14903: a refill chain that ran past the pin's stale bound re-pinned; that late segment writes its own row.
+      flushLateSharedHostMemoryPass(memoryPass);
     }
   };
   // Let completed effects release their capacity before a caller starts the next pass.
