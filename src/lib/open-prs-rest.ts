@@ -464,7 +464,8 @@ export function createHeadReadGate(): HeadReadGate {
         try {
           value = onRateLimit ? read(args, onRateLimit) : read(args);
         } catch (error) {
-          return forget(error);
+          kept.delete(sha);
+          throw error;
         }
         return value instanceof Promise ? value.then(keep, forget) : keep(value);
       };
