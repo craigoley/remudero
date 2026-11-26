@@ -10870,6 +10870,10 @@ export function predecessorTranscriptPromptLines(paths: readonly string[]): stri
 export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<string, unknown>) => void,
   stackEvidence: BenchmarkStackEvidence = {}, initialWork: BenchmarkWorkInput = {}) {
   const assignments = new Set<string>();
+  let implementRun = false;
+  let workerAssigned = false;
+  let lastStage: string | undefined;
+  let lastStep = "run.start";
   let work = initialWork;
   return (step: string, extra: Record<string, unknown> = {}): void => {
     work = observeBenchmarkWork(work, step, extra);
@@ -10905,8 +10909,20 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
       // A metric write is never allowed to change a worker's actual result or retry path.
       try { write(step, fields); } catch { /* measured as absent on the next source audit */ }
     } else {
+      if (step === "verdict" && implementRun && !workerAssigned) {
+        fields.worker_assigned = false;
+        fields.last_stage = typeof extra.stage === "string" && extra.stage && extra.stage !== "run.error"
+          ? extra.stage : lastStage ?? lastStep;
+      }
       write(step, fields);
       if (durableAssignmentId) assignments.add(durableAssignmentId);
+      if (step === "worker.assignment") workerAssigned = true;
+      if (step === "run.start") implementRun = extra.type === "implement";
+      if (step !== "verdict" && implementRun && !workerAssigned) {
+        const stage = step === "run.phase" ? extra.waiting_on : extra.stage;
+        if (typeof stage === "string" && stage) lastStage = stage;
+        lastStep = step;
+      }
     }
   };
 }

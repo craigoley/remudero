@@ -35,6 +35,11 @@ export function infrastructureRefusal(line: Record<string, unknown>): string | u
   return undefined;
 }
 
+export function endedBeforeWorkerAssignment(line: Record<string, unknown>): boolean {
+  if (typeof line.worker_assigned === "boolean") return !line.worker_assigned;
+  return infrastructureRefusal(line) !== undefined;
+}
+
 export function lifetimeInfrastructureRefusal(line: Record<string, unknown>): string | undefined {
   return infrastructureRefusal(line) ??
     (typeof line.verdict === "string" && LIFETIME_ONLY_REFUSAL_VERDICTS.has(line.verdict) ? line.verdict : undefined);
