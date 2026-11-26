@@ -43,6 +43,7 @@ import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/moun
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
+import { REVIEW_HEARTBEAT_STEP, REVIEWER_CHECKOUT_VANISHED_REASON, reviewHeartbeat, watchReviewerCheckout } from "../../lib/review.js";
 import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, markUnbackedBodyGuards, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type CriterionVerdict, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure, type ReviewAdmission } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
@@ -1283,7 +1284,12 @@ export async function runReview(host: ReviewCommandHost, args: {
 }): Promise<ReviewRunResult> {
   const phases: Record<string, number> = { started: systemClock.now() };
   // W1-T11149: the phase reaches the CPU bound (setup, proofs) or the provider bound (judge, posting), in process or as a child.
-  const reportPhase = (phase: string): void => (args.onPhase ?? reportReviewPhase)(phase);
+  // W1-T14872: once this run holds the pending claim, every phase change (and streamed judge output, below) is a heartbeat.
+  let heartbeat: ((phase: string) => boolean) | undefined;
+  const reportPhase = (phase: string): void => {
+    heartbeat?.(phase);
+    (args.onPhase ?? reportReviewPhase)(phase);
+  };
   reportPhase("setup");
   const { attributeWorkerStreamEvent, ledgeredNonDispatchSpawn, lintPlanForReview, readHeadShaRest, reviewPostedDescription } = host;
   const { owner, repo, prUrl, task, report, log, say } = args;
@@ -1351,6 +1357,11 @@ export async function runReview(host: ReviewCommandHost, args: {
         return lifecycle;
       },
     });
+    if (pending.posted) {
+      heartbeat = reviewHeartbeat(({ step, ...fields }) => log(String(step ?? REVIEW_HEARTBEAT_STEP), fields),
+        () => systemClock.now(), { runId: args.runId, prUrl, headSha });
+      heartbeat("claimed");
+    }
     if (!pending.posted && pending.lifecycle !== undefined) {
       const reason = `pr_${pending.lifecycle}`;
       replayInput = { ...replayInput, publication_refusal: "pr-lifecycle-stood-down" };
@@ -1645,6 +1656,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   if (attemptReviewer) {
     // The proofs are done; the LLM judge waits on its provider, not this host's CPU (the binding judge after it reuses them).
     reportPhase("judge");
+    let checkoutVanished = false;
     try {
       const priorHeadFindings = priorHeadFindingsFromLedger(
         await priorHeadReviewRows(args.ledgerPath, priorReviewRows(), task.id, prUrl, { prCreatedAt, signal }),
@@ -1708,6 +1720,13 @@ export async function runReview(host: ReviewCommandHost, args: {
         let reviewerAssignment: WorkerSelectionAssignment | undefined;
         // W1-T14037: the proofs the orchestrator recorded at this head; a reviewer command call that re-runs one is its own
         // kind in worker.tool_lineage. Recorded only: nothing reads the kind to decide anything.
+        // W1-T14872: a reviewer whose checkout disappears is stopped at once and the run stands down, releasing its claim.
+        const checkoutAbort = new AbortController();
+        const stopCheckoutWatch = watchReviewerCheckout(snapshot.cwd, () => {
+          checkoutVanished = true;
+          checkoutAbort.abort(new Error(REVIEWER_CHECKOUT_VANISHED_REASON));
+        });
+        const reviewerSignal = signal ? AbortSignal.any([signal, checkoutAbort.signal]) : checkoutAbort.signal;
         const recordedProofCommands = preparedDecision.proofExecutions()
           .filter((execution) => execution.cwd === args.headCheckoutDir)
           .map(({ command, args: argv, cwd }) => ({ command, args: [...argv], cwd }));
@@ -1749,9 +1768,12 @@ export async function runReview(host: ReviewCommandHost, args: {
                 // a terminal verdict when this bound trips.
                 ...reviewerClockBound,
                 onSelectionAssignment: (assignment) => { reviewerAssignment = assignment; },
-                streamObserver: args.workerTelemetry
-                  ? (event) => args.workerTelemetry!.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment))
-                  : undefined,
+                signal: reviewerSignal,
+                // W1-T14872: streamed judge output is a heartbeat (at most once a minute per phase).
+                streamObserver: (event) => {
+                  heartbeat?.("judge");
+                  args.workerTelemetry?.observer(attributeWorkerStreamEvent({ ...event, workerRole: "reviewer", cwd: snapshot.cwd, provider: reviewerSpawnMount!.provider, requestedModel: reviewerSpawnMount!.model }, reviewerAssignment));
+                },
                 reviewer: { recordedProofCommands, cwd: snapshot.cwd },
                 promptTemplate,
                 prompt, // NEVER resumeSessionId, NEVER forkSession — fresh by construction.
@@ -1769,6 +1791,7 @@ export async function runReview(host: ReviewCommandHost, args: {
           }
         } finally {
           stopTelemetry?.();
+          stopCheckoutWatch();
         }
         const candidateSemantic = reviewerSemanticVerdicts(reviewer, criteria.length);
         semantic = candidateSemantic;
@@ -1841,6 +1864,19 @@ export async function runReview(host: ReviewCommandHost, args: {
         reapWorkerScratch(snapshot.cwd);
       });
     } catch (e) {
+      if (checkoutVanished) {
+        // W1-T14872: the checkout vanished under the judge. Stand down instead of posting a floor verdict judged without it:
+        // `review.stood_down` settles this run's claim, so the next sweep re-runs the head on a fresh checkout.
+        const reason = REVIEWER_CHECKOUT_VANISHED_REASON;
+        log("review.stood_down", { context: REVIEW_CONTEXT, state: "pending", head_sha: headSha, pr_url: prUrl, reason });
+        say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${reason}`);
+        reportPhase("posted");
+        return {
+          state: "pending", criteria: [], testTheater: false, summary: "review stood down: the reviewer checkout vanished",
+          floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
+          headSha, reviewerOutcome: "not_attempted_checkout_vanished", verdictWithheld: reason,
+        };
+      }
       // Advisory only — the deterministic floor still binds and posts below.
       reviewerSpawnFailed = true;
       if (e instanceof WorkerAbandonedError) {

@@ -264,6 +264,7 @@ import {
   resolvePlanCriteriaAtHeadAsync,
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
+  reviewClaimHeartbeat,
 } from "./review.js";
 import { withTempDir } from "./tmp.js";
 import { fetchPrDiff, prDiffSourceAsync } from "./pr-diff.js";
@@ -7674,7 +7675,8 @@ function deliveredFailureView(
   return {
     view: { ...pr, reviewState: "failure", unmetCriteria, reviewSummary: typeof summary === "string" && summary !== "" ? summary : undefined,
       reviewPendingSince: undefined, reviewPendingOwnerDead: undefined, reviewPendingOwnerGone: undefined, reviewPendingOwnerGoneReason: undefined,
-      reviewPendingOwnerPidProven: undefined, reviewPendingOwnerRunId: undefined, reviewPendingStatusRunId: undefined },
+      reviewPendingOwnerPidProven: undefined, reviewPendingOwnerRunId: undefined, reviewPendingStatusRunId: undefined,
+      reviewPendingHeartbeat: undefined },
     row,
   };
 }
@@ -9080,6 +9082,9 @@ export interface OpenPrView {
   reviewPendingOwnerGoneReason?: string;
   /** W1-T14035 — the `run_id` of the current head's `review.pending_posted` row the producer judged. Evidence only. */
   reviewPendingOwnerRunId?: string;
+  /** W1-T14872: the pending claim's reviewer heartbeat against the measured silence bound — `fresh` holds the claim past
+   *  the pending ceiling, `silent` releases it before. Absent (no heartbeat, or no measurable bound) keeps the ceiling. */
+  reviewPendingHeartbeat?: "fresh" | "silent";
   /** W1-T14035 — the run that published the live `remudero-review` status (tick-read-worker's reviewPendingStatusRunId);
    *  absent when unknown. Evidence only: the producer sets `reviewPendingOwnerDead` only when it equals the judged run. */
   reviewPendingStatusRunId?: string;
@@ -13574,6 +13579,9 @@ function reviewPendingAgeMinutes(pr: OpenPrView, now: number): number | undefine
  *  a second threshold that could drift. UNDATED READS STALE — the OPPOSITE direction from the
  *  re-push remedy's caution, because a redundant pending post is a no-op. */
 function reviewPendingIsStale(pr: OpenPrView, policy: SweepPolicy, now: number): boolean {
+  // W1-T14872 (invariant live-claim-waits): a measured heartbeat decides before the ceiling, in both directions.
+  if (pr.reviewPendingHeartbeat === "silent") return true;
+  if (pr.reviewPendingHeartbeat === "fresh") return false;
   const age = reviewPendingAgeMinutes(pr, now);
   return age === undefined || age >= policy.pendingCeilingMinutes;
 }
@@ -14726,6 +14734,11 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           return `checks green, remudero-review owner proven dead — re-running the review lane on #${pr.prNumber}`;
         }
         const age = reviewPendingAgeMinutes(pr, now);
+        if (pr.reviewPendingHeartbeat === "silent") {
+          return `checks green, remudero-review pending ${age !== undefined ? `${Math.floor(age)}m` : "for an undated interval"} ` +
+            `and its reviewer's heartbeat is silent past the measured bound — treating the claim as orphaned and re-running ` +
+            `the review lane on #${pr.prNumber}`;
+        }
         return (
           `checks green, remudero-review pending ${age !== undefined ? `${Math.floor(age)}m` : "for an undated interval"} ` +
           `(>= ${policy.pendingCeilingMinutes}m ceiling, or unreadable) — treating the stuck pending as ` +
@@ -18888,7 +18901,15 @@ function promiseHarvestRetryView(
       ? { ...pr, reviewPendingOwnerGone: "owner-pid-dead" } : pr;
   // W1-T13945: a pending status with no live owner and a repeated withheld verdict at this input climbs the ladder.
   const ladder = result.reviewState === "pending" ? reviewWithheldLadder(result, lines) : undefined;
-  return ladder === undefined ? result : { ...result, reviewWithheld: ladder };
+  const laddered = ladder === undefined ? result : { ...result, reviewWithheld: ladder };
+  return reviewHeartbeatView(laddered, lines, systemClock.now());
+}
+
+/** W1-T14872 — the pending claim's heartbeat read off the ledger already in hand: the claim's own run at this head. */
+export function reviewHeartbeatView<V extends OpenPrView>(view: V, lines: ReadonlyArray<Record<string, unknown>>, nowMs: number): V {
+  if (view.reviewState !== "pending") return view;
+  const beat = reviewClaimHeartbeat(lines, view.reviewPendingOwnerRunId, view.headSha, nowMs);
+  return beat === undefined ? view : { ...view, reviewPendingHeartbeat: beat.state };
 }
 
 function completedRefusalRetryView(pr: SweepPrView, prior: PriorActions): SweepPrView {
