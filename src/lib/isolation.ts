@@ -260,6 +260,8 @@ export function isolationProbePrompt(): string {
     "You are an ISOLATION PREFLIGHT PROBE. READ-ONLY: use ONLY the Bash tool to run",
     "these commands, IN ORDER, and report the EXACT results. Do NOT create,",
     "modify, or delete any file — you have no write tool available for a reason.",
+    // W1-T14912: one call keeps the probe inside its turn bound whichever way a model batches tool calls.
+    "Run all of these commands in ONE Bash tool call, separated by `; echo ---;`, then write the REPORT.",
     "1) alias | wc -l        (count of shell aliases this worker inherited)",
     `2) declare -F | awk '$NF !~ /^(${wrappers})$/ {c++} END {print c+0}'`,
     `   (count of shell functions this worker inherited, EXCLUDING Claude Code's`,
@@ -278,6 +280,11 @@ export function isolationProbePrompt(): string {
     "alias_names: <exact names from command 3, or - if command 3 printed nothing>",
     "function_names: <exact names from command 4, or - if command 4 printed nothing>",
   ].join("\n");
+}
+
+/** W1-T14912: the probe's turn bound, derived from the numbered commands its own prompt lists. */
+export function isolationProbeMaxTurns(): number {
+  return (isolationProbePrompt().match(/^\d+\) /gm) ?? []).length + 2;
 }
 
 /** Matches the probe's `aliases: N` / `functions: N` report lines, in order. */
@@ -343,7 +350,9 @@ export function isolationProbeSpawnArgs(opts: {
     // Structural read-only enforcement (belt-and-suspenders over the prompt):
     // the model has NO write tool at all, so it cannot use one even if asked.
     tools: ["Bash"],
-    maxTurns: 4, // two read-only commands + the report; bounded tight.
+    // W1-T14912: one tool turn per numbered command, one for the report and one of slack. The literal 4 it replaces
+    // ("two read-only commands + the report") outlived the prompt growing to four commands.
+    maxTurns: isolationProbeMaxTurns(),
     maxBudgetUsd: opts.budgetUsd,
     prompt: isolationProbePrompt(),
   };
