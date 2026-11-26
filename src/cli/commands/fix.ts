@@ -4802,7 +4802,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     const mergeMarker = merged !== undefined && !merged.started && !mergeUpToDateRed ? ":merge-refused" : "";
     const roundId = `${opts.runId}${mergeMarker}:${attempt + retriggers}:${systemClock.now()}`;
     const shadowRound: FixLearningsRound = { run_id: opts.runId, task_id: opts.taskId, pr_number: prNumber,
-      pr_url: opts.prUrl, round_id: roundId, attempt, round };
+      pr_url: opts.prUrl, round_id: roundId, attempt, round, head_sha: null };
     // W1-T14138: only the reds THIS round's prompt carries; `currentCiFailures` outlives a green CI.
     const recordFixLearningsShadow = () => deps.log("fix.learnings_shadow", fixLearningsShadowFields(shadowRound, {
       config: opts.config, repo: opts.reviewBase.repo, failures: priorCiFailures ?? [], review: evidence.review,

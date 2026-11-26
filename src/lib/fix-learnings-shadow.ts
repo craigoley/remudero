@@ -23,6 +23,9 @@ export interface FixLearningsRound {
   round_id: string;
   attempt: number;
   round: string;
+  /** Null, never absent: these rows measure a round and are not rung activity, but `codeScanningHeadSettled`
+   *  (sweep.ts) takes a `fix.*` row with an absent head as the rung's own. */
+  head_sha: null;
 }
 
 export function fixLearningsShadowFields(round: FixLearningsRound, input: {

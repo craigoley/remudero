@@ -10,6 +10,7 @@ import { summarizeFixLearningsShadow } from "#src/lib/fix-learnings-shadow.js";
 import { buildLearningsIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLayeredLearningsForTaskFiles, selectLearnings } from "#src/lib/learnings.js";
 import type { Mount } from "#src/lib/mounts.js";
 import { renderFixPrompt } from "#src/lib/prompt-render.js";
+import { CODE_SCANNING_FIX_DISPATCH_STEP, codeScanningHeadSettled } from "#src/lib/sweep.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
@@ -260,6 +261,25 @@ test("W1-T14138 criterion 4: a push that leaves the head unchanged is no push, e
   assert.equal(result.waits, 1);
   assert.equal(result.steps("fix.done")[0]?.ci_wait_holds_claim, true);
   assert.deepEqual(result.steps("fix.learnings_outcome").map(row => row.outcome), ["no_push"]);
+});
+
+test("W1-T14138 criterion 4: the measurement rows never change how a code-scanning round's end is read", async t => {
+  for (const [name, options, settled] of [
+    ["refused commit", { noPush: true }, false],
+    ["unchanged head", { unchangedHead: true }, false],
+    ["superseded worker", { spawnEnd: "superseded" }, true],
+  ] as const) {
+    const result = await runRound(t, options);
+    const head = result.rows.find(row => row.step.startsWith("fix.") && typeof row.head_sha === "string")?.head_sha;
+    assert.equal(typeof head, "string", name);
+    const intent = { step: CODE_SCANNING_FIX_DISPATCH_STEP, run_id: "shadow-fixture", task_id: TASK,
+      pr_number: 42, head_sha: head };
+    const read = (rows: Row[]) => codeScanningHeadSettled([intent, ...rows], 42, String(head));
+    const without = result.rows.filter(row => !row.step.startsWith("fix.learnings_"));
+    assert.ok(without.length < result.rows.length, name);
+    assert.equal(read(without), settled, name);
+    assert.equal(read(result.rows), settled, name);
+  }
 });
 
 test("a refused merge keeps its round-id marker on every row, and its prompt's evidence names no check", async t => {
