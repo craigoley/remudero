@@ -10,6 +10,7 @@
  * claim, open-PR and pushed-run-branch checks still run on every candidate, so a merge the snapshot missed
  * is still refused before a run starts.
  */
+import type { Clock } from "./clock.js";
 
 /** A GitHub wake the daemon observed: its event, its action and when serve received it. */
 export interface RefillWake {
@@ -80,8 +81,10 @@ type WakeMarkerLike = { deliveryId?: string; event: string; action?: string; rec
 export function createRefillReader<M>(options: {
   read: (plan: M) => Promise<(id: string) => boolean>;
   published: () => { atMs: number; merged: ReadonlySet<string> } | undefined;
-  now: () => number;
+  clock: Clock;
   log: (step: string, extra?: Record<string, unknown>) => void;
+  /** The decision the reader consults; the production refresher passes {@link decideRefillRead}. */
+  decide?: typeof decideRefillRead;
 }): {
   refill: (plan: M) => Promise<(id: string) => boolean>;
   observeRead: (settledAtMs: number) => void;
@@ -113,7 +116,7 @@ export function createRefillReader<M>(options: {
     refill: async (plan) => {
       const snapshot = options.published();
       const intervalMs = readIntervalMs();
-      const decided = decideRefillRead({ snapshotAtMs: snapshot?.atMs, nowMs: options.now(), wakesSince: wakes, readIntervalMs: intervalMs });
+      const decided = (options.decide ?? decideRefillRead)({ snapshotAtMs: snapshot?.atMs, nowMs: options.clock.now(), wakesSince: wakes, readIntervalMs: intervalMs });
       options.log("dispatch.refill_read", { decision: decided.decision, reason: decided.reason,
         snapshot_age_ms: decided.snapshotAgeMs ?? null, read_interval_ms: intervalMs ?? null });
       if (decided.decision === "reuse" && snapshot) {

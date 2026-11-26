@@ -132,7 +132,7 @@ import { asyncGit, testRunnerOnItsOwnCheckout } from "../../lib/self-sync.js";
 import { withLiveEditLadders } from "../../lib/live-edit-ladder.js";
 import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, clearKick, consumeDrainNow, consumeRestartInPlace, clearPrAction, consumeStop, isQuietHours, kickFilePath, pauseDetail, pendingKicks, pendingPrActions, stopDetail } from "../../lib/fleet-control.js";
 import { readSweepWakeMarker, sweepWakeMarkerPath, wireSweepWakeToDaemon } from "../../lib/github-event-wake.js";
-import { createRefillReader } from "../../lib/refill-snapshot-reuse.js";
+import { createRefillReader, decideRefillRead } from "../../lib/refill-snapshot-reuse.js";
 import { startInstallationTokenRefresh } from "../../lib/github-app.js";
 import { LEDGER_REQUEST_STEP, realScopedMint, startDaemonGitCredentialSocket, type ScopedTokenMint } from "../../lib/secret-boundary.js";
 import { automaticBranchReapStateFileName, orphanRunBranchEvidenceReader } from "../../lib/branch-reaper.js";
@@ -2707,8 +2707,9 @@ export async function daemonCommand(
     const refillReader = tickRefresher ? createRefillReader<Plan | undefined>({
       read: (plan) => tickRefresher(plan),
       published: () => { refillReader?.observeWake(readSweepWakeMarker(wakeMarkerPath)); return lastPublishedRead; },
-      now: () => tickReadClock.now(),
+      clock: tickReadClock,
       log,
+      decide: (input) => decideRefillRead(input),
     }) : undefined;
     const summary = await runDaemonFn(
       plan,

@@ -2,6 +2,7 @@
 // something merged or was pushed.
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { clockFromMillisFn } from "#src/lib/clock.js";
 import { createRefillReader, decideRefillRead, isMergeOrPushWake, medianReadIntervalMs } from "#src/lib/refill-snapshot-reuse.js";
 
 const AT = 1_000_000;
@@ -45,7 +46,7 @@ test("W1-T14893 the refill reader reuses the published merged set and reads afre
   const reader = createRefillReader<string>({
     read: async () => { reads++; reader.observeRead(nowMs); return (id) => id === "fresh"; },
     published: () => ({ atMs: AT, merged: new Set(["snap"]) }),
-    now: () => nowMs,
+    clock: clockFromMillisFn(() => nowMs),
     log: (step, extra) => rows.push({ step, extra }),
   });
   reader.observeRead(AT - 2 * INTERVAL);
@@ -72,7 +73,7 @@ test("W1-T14893 the refill reader reuses the published merged set and reads afre
 });
 
 test("W1-T14893 the refill reader keeps only its recent history", async () => {
-  const reader = createRefillReader<string>({ read: async () => () => false, published: () => undefined, now: () => AT, log: () => {} });
+  const reader = createRefillReader<string>({ read: async () => () => false, published: () => undefined, clock: clockFromMillisFn(() => AT), log: () => {} });
   for (let i = 0; i < 40; i++) reader.observeRead(i * 1_000);
   for (let i = 0; i < 40; i++) reader.observeWake({ deliveryId: `d${i}`, event: "check_run", receivedAtIso: new Date(AT).toISOString() });
   assert.equal(reader.readIntervalMs(), 1_000);
