@@ -89,18 +89,25 @@ function remember(key: string, pending: Promise<DaemonClosure>): void {
  *  - the named data edges (`namedDependencies`) of closure modules, except edges to the child entries the daemon
  *    spawns and to scripts/ it executes, whose code arrives at spawn;
  *  - {@link DAEMON_CLOSURE_ROOT_FILES}.
- * Memoized per (sha, entry); a failed read is never memoized, so the next tick retries it. Never throws: a read that
- * fails, or an entry the tree does not hold, is `unreadable`, which the caller treats as material.
+ * Memoized per (sha, entry, stopAt); a failed read is never memoized, so the next tick retries it. Never throws: a read
+ * that fails, or an entry the tree does not hold, is `unreadable`, which the caller treats as material.
+ *
+ * W1-T14987: `stopAt` names modules the walk never enters: one reached is neither added nor followed, so the result is
+ * what `entry` reaches WITHOUT passing through them (serve-own-code.ts reads serve's own code as the difference). Absent
+ * or empty, the read, its result and its memo key are exactly what they were before.
  */
-export async function daemonProcessClosure(gitText: ClosureGit, sha: string, entry: string | undefined): Promise<DaemonClosure> {
+export async function daemonProcessClosure(
+  gitText: ClosureGit, sha: string, entry: string | undefined, opts: { stopAt?: readonly string[] } = {},
+): Promise<DaemonClosure> {
   if (!entry) return { status: "unreadable", sha, entry, reason: "the process entry is not a path in this repository" };
-  const key = `${sha}\0${entry}`;
+  const stopAt = new Set(opts.stopAt ?? []);
+  const key = stopAt.size === 0 ? `${sha}\0${entry}` : `${sha}\0${entry}\0${[...stopAt].sort().join("\0")}`;
   const known = memo.get(key);
   if (known) {
     remember(key, known);
     return known;
   }
-  const pending = readClosure(gitText, sha, entry).catch((error: unknown): DaemonClosure => ({
+  const pending = readClosure(gitText, sha, entry, stopAt).catch((error: unknown): DaemonClosure => ({
     status: "unreadable", sha, entry, reason: (error instanceof Error ? error.message : String(error)).slice(0, 500),
   }));
   remember(key, pending);
@@ -109,7 +116,7 @@ export async function daemonProcessClosure(gitText: ClosureGit, sha: string, ent
   return closure;
 }
 
-async function readClosure(gitText: ClosureGit, sha: string, entry: string): Promise<DaemonClosure> {
+async function readClosure(gitText: ClosureGit, sha: string, entry: string, stopAt: ReadonlySet<string>): Promise<DaemonClosure> {
   const paths = (await gitText(["ls-tree", "-r", "--name-only", sha])).split("\n").filter(Boolean);
   const tracked = new Set(paths);
   if (!tracked.has(entry)) throw new Error(`the entry ${entry} is not tracked at ${sha}`);
@@ -145,7 +152,7 @@ async function readClosure(gitText: ClosureGit, sha: string, entry: string): Pro
       for (const file of slice.keys()) {
         const named = [...namedDependencies.get(file) ?? []].filter((dep) => !spawned.has(dep) && !dep.startsWith("scripts/"));
         for (const dep of [...directImports.get(file) ?? [], ...named]) {
-          if (!closure.has(dep)) {
+          if (!closure.has(dep) && !stopAt.has(dep)) {
             closure.add(dep);
             next.push(dep);
           }
