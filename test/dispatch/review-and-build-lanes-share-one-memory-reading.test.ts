@@ -14,8 +14,8 @@ import {
   sharedMemoryAvailableMib, summarizeReviewSettlements, type ReviewCapacityObservation, type ReviewCapacityPolicy,
 } from "#src/lib/review-capacity.js";
 import {
-  DEFAULT_SWEEP_POLICY, RE_REVIEW_HELD_FOR_BUILD_REASON, reReviewsJudgedHead, runSweep, runSweepLightPass, selectReviewAdmissions,
-  type OpenPrView, type SweepDeps,
+  DEFAULT_SWEEP_POLICY, RE_REVIEW_HELD_FOR_BUILD_REASON, reReviewsJudgedHead, reReviewYieldsForBuild, reviewOutcomeTaskIdFor, runSweep,
+  runSweepLightPass, selectReviewAdmissions, type OpenPrView, type SweepDeps,
 } from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-11-25T16:24:00Z");
@@ -64,17 +64,20 @@ function reading(hostBaseAvailableMib: number | null, extra: Partial<LaneMemoryR
 }
 
 /** One full sweep over `prs` whose review width is the production runtime width, cut for this pass. */
-async function fullSweep(prs: OpenPrView[], root: string, hooks: { readMainRepair?: () => Promise<undefined> } = {}): Promise<{
-  effects: string[]; rows: Record<string, unknown>[]; summary: Awaited<ReturnType<typeof runSweep>>;
+async function fullSweep(prs: OpenPrView[], root: string, hooks: {
+  readMainRepair?: () => Promise<undefined>; seed?: Record<string, unknown>[];
+} = {}): Promise<{
+  effects: string[]; modes: string[]; rows: Record<string, unknown>[]; summary: Awaited<ReturnType<typeof runSweep>>;
 }> {
   const effects: string[] = [];
-  const rows: Record<string, unknown>[] = [];
+  const modes: string[] = [];
+  const rows: Record<string, unknown>[] = [...(hooks.seed ?? [])];
   const log = (step: string, extra?: Record<string, unknown>): void => { rows.push({ step, ...extra }); };
   const deps: SweepDeps = {
     ledgerPath: "/unused/shared-memory-ledger", runId: "shared-memory", now: () => NOW, repairAdmissionSurface: "full",
     readLedger: () => rows, appendLine: (_path, row) => { rows.push(row); }, log,
     dispatchFix: () => {}, dispatchPlanOnlyRepair: () => true,
-    postReview: (p) => { effects.push(`review:${p.prNumber}`); },
+    postReview: (p, mode) => { effects.push(`review:${p.prNumber}`); modes.push(`${p.prNumber}:${mode?.kind ?? "none"}`); },
     arm: () => "armed", escalate: () => {}, close: () => {},
     selectAdaptiveReviewWidth: ({ queueDepth, nowMs, ledgerLines, memoryPass }) => selectRuntimeReviewWidth({
       root, queueDepth, activeWorkers: 0, nowMs, ledgerLines, policy: POLICY, ...BOUNDS, log, cpuWeightShare: 1,
@@ -84,7 +87,7 @@ async function fullSweep(prs: OpenPrView[], root: string, hooks: { readMainRepai
     ...(hooks.readMainRepair === undefined ? {} : { readMainRepair: hooks.readMainRepair }),
   };
   const summary = await runSweep(prs, deps);
-  return { effects, rows, summary };
+  return { effects, modes, rows, summary };
 }
 
 function pr(over: Partial<OpenPrView>): OpenPrView {
@@ -235,6 +238,42 @@ test("W1-T14903 a build outranks a re-review when memory is short — at the res
   assert.ok(laneTarget({ inFlight: 1, memory: boundary(843 + DEFAULT_SWEEP_POLICY.reviewCapacity.workerMemoryReserveMib), cpuCount: 8,
     maxLanes: 3 }).target > 1);
   assert.deepEqual(admitted(), [7, 8, 9], "room for the build and a review: the re-reviews start too");
+});
+
+test("W1-T14903 a build outranks a re-review when memory is short — a status restore runs no review and is never held", async () => {
+  // The reviewer's replay: a stale-claim takeover wrote pending over a delivered success on this exact head and input, so
+  // admission re-posts that verdict (W1-T11729) and runs no review. Held while short, the required status stayed pending.
+  const restorable = pr({
+    prNumber: 10, prUrl: "https://github.com/o/r/pull/10", headSha: "abab101", reviewedHeadSha: "abab101", reviewState: "pending",
+    reviewPendingOwnerDead: true, reviewPendingSince: "2026-11-25T15:00:00Z", reviewInputDigest: "digest-10",
+  });
+  const delivered = {
+    step: "review.posted", ts: "2026-11-25T14:00:00Z", task_id: reviewOutcomeTaskIdFor(restorable), pr_url: restorable.prUrl,
+    head_sha: restorable.headSha, review_input_digest: "digest-10", state: "success", decision_verdict: { state: "success" },
+  };
+  const rejudge = pr({ prNumber: 7, prUrl: "https://github.com/o/r/pull/7", headSha: "bbbb222", reviewedHeadSha: "bbbb222" });
+  const first = pr({ prNumber: 8, prUrl: "https://github.com/o/r/pull/8", headSha: "cccc333" });
+  assert.equal(reReviewsJudgedHead(restorable), true, "the restorable head is a judged head");
+  assert.equal(reReviewYieldsForBuild(restorable, [delivered]), false, "its delivered verdict is re-posted, so it never yields");
+  assert.equal(reReviewYieldsForBuild(restorable, []), true, "with no delivered verdict on the ledger it would run a review");
+  assert.equal(reReviewYieldsForBuild(rejudge, [delivered]), true, "another head's verdict exempts nothing");
+  assert.equal(reReviewYieldsForBuild(first, [delivered]), false, "a first review never yields");
+  // The light pass's selector: while short, the re-review waits and the restore is admitted beside the first review.
+  const lightShort = selectReviewAdmissions([restorable, rejudge, first], DEFAULT_SWEEP_POLICY, NOW, undefined, 4, 0, undefined,
+    undefined, true, [delivered]).spawning.map((p) => p.prNumber).sort((a, b) => a - b);
+  assert.deepEqual(lightShort, [8, 10], "short of memory, the restore is admitted and only the re-review waits");
+  // The full sweep: the restore is posted on the short snapshot exactly as on a roomy one, and is not held.
+  const restoredOn = async (snapshot: number): Promise<{ modes: string[]; held: unknown }> => {
+    publishSharedHostMemory(reading(snapshot), NOW);
+    const swept = await fullSweep([restorable, first], tempRoot(), { seed: [delivered] });
+    const shared = swept.rows.find((row) => row.step === HOST_MEMORY_SHARED_STEP);
+    return { modes: swept.modes.filter((mode) => mode.startsWith("10:")), held: shared?.withheld_prs };
+  };
+  const roomy = await restoredOn(30_000);
+  assert.equal(roomy.modes.length, 1, `with room the head's one admission posts (${roomy.modes.join(", ")})`);
+  const short = await restoredOn(-110);
+  assert.deepEqual(short.modes, roomy.modes, "short of memory the restore still posts");
+  assert.equal(short.held, undefined, "the pass withholds no restore");
 });
 
 test("W1-T14903 a build outranks a re-review when memory is short — every held re-review is disposed, never dropped", async () => {

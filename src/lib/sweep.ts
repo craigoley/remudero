@@ -30190,7 +30190,7 @@ async function runSweepPinned(
   // already-judged head waits, so the build lane is admitted before it; first reviews are never held here.
   const yieldReReviews = reviewYieldsReReviews(now, policy.reviewCapacity.workerMemoryReserveMib, memoryPass);
   const heldReReviews = new Set(yieldReReviews
-    ? orderedReviews.filter((job) => !reviewsInPlanLane(job.pr) && reReviewsJudgedHead(job.pr)) : []);
+    ? orderedReviews.filter((job) => !reviewsInPlanLane(job.pr) && reReviewYieldsForBuild(job.pr, ledgerLines)) : []);
   for (const job of heldReReviews) memoryPass.heldPrs.add(job.pr.prNumber);
   const codeLane: ReviewLane = {
     jobs: orderedReviews.filter((job) => !reviewsInPlanLane(job.pr) && !heldReReviews.has(job)), next: 0, cls: "review",
@@ -31923,14 +31923,14 @@ async function runSweepLightPassCore(
   const yieldReReviews = reviewYieldsReReviews(now, policy.reviewCapacity.workerMemoryReserveMib, memoryPass);
   if (yieldReReviews) {
     for (const pr of reviewAdmissionCandidates(unreserved, policy, now, outcomes)) {
-      if (!reviewsInPlanLane(pr) && reReviewsJudgedHead(pr)) memoryPass.heldPrs.add(pr.prNumber);
+      if (!reviewsInPlanLane(pr) && reReviewYieldsForBuild(pr, selectionLedgerLines)) memoryPass.heldPrs.add(pr.prNumber);
     }
   }
   const planBound = planLaneBoundForPass(deps, policy, selectReviewAdmissions(unreserved, policy, now, outcomes, 0, unreserved.length,
-    undefined, queuedAt, yieldReReviews).planFilings.length, "light");
+    undefined, queuedAt, yieldReReviews, selectionLedgerLines).planFilings.length, "light");
   const needsPerson = needsPersonPredicate(selectionLedgerLines);
   const selected = selectReviewAdmissions(unreserved, policy, now, outcomes, semanticBound, planBound.available, needsPerson,
-    queuedAt, yieldReReviews);
+    queuedAt, yieldReReviews, selectionLedgerLines);
   recordReviewOrderShadow(deps, selectionLedgerLines, reviewAdmissionCandidates(unreserved, policy, now, outcomes),
     selected.spawning, now, semanticBound);
   const latchHeld = new Set<number>();
@@ -31949,7 +31949,7 @@ async function runSweepLightPassCore(
   // admits the next of them at once (`refillFreedLanes` below) instead of idling until another pass.
   const refillTail = selectReviewAdmissions(
     openPrs.filter((pr) => !spawningHeads.has(pr.prNumber) && !lightPassReservedHeads.has(lightPassHeadKey(pr))),
-    policy, now, outcomes, openPrs.length, undefined, needsPerson, queuedAt, yieldReReviews,
+    policy, now, outcomes, openPrs.length, undefined, needsPerson, queuedAt, yieldReReviews, selectionLedgerLines,
   ).spawning;
   let refillArmed = false;
   // W1-T2584 parity: provider capacity is account-wide, so a pass whose review met the gh budget
@@ -32320,7 +32320,7 @@ async function runSweepLightPassCore(
           pr.checksState === "green" && pr.reviewState === "none" && pr.reviewOrphanedByPush === true;
       }),
       policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson, queuedAt,
-      reviewYieldsReReviews(refillViewReadAtMs, policy.reviewCapacity.workerMemoryReserveMib, memoryPass),
+      reviewYieldsReReviews(refillViewReadAtMs, policy.reviewCapacity.workerMemoryReserveMib, memoryPass), selectionLedgerLines,
     ).spawning);
   };
   let recycleRefillHeld = false;
@@ -32776,6 +32776,13 @@ export function reReviewsJudgedHead(pr: Pick<OpenPrView, "reviewedHeadSha" | "he
     pr.reviewState === "success" || pr.reviewState === "failure";
 }
 
+/** W1-T14903 — a judged head the memory yield holds: one whose admission runs a review. A W1-T11729 status restore
+ *  re-posts the delivered verdict of this exact head and input over a pending status and runs no review, so it spends no
+ *  memory and is never held — held, GitHub's required status would stay pending while memory is short. */
+export function reReviewYieldsForBuild(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): boolean {
+  return reReviewsJudgedHead(pr) && !("row" in restorableDeliveredVerdict(pr, lines, reviewOutcomeKeyForPr(pr)));
+}
+
 /** W1-T14903 — the stand-down a held re-review is disposed with (`sweep.disposed`), so the pass accounts for it. */
 export const RE_REVIEW_HELD_FOR_BUILD_REASON =
   "re-review held for a build: the pass's shared host-memory snapshot has no room for a build and this review — re-derived next pass";
@@ -32794,6 +32801,8 @@ export function selectReviewAdmissions(
   /** W1-T14903: true while the host memory snapshot has no room for one more build and a review; when absent, read
    *  from the live snapshot (a pass passes the answer from its pinned one). */
   yieldReReviews: boolean = reviewYieldsReReviews(now, policy.reviewCapacity.workerMemoryReserveMib),
+  /** W1-T14903: the ledger a W1-T11729 status restore is read from ({@link reReviewYieldsForBuild}); none: no restore. */
+  ledgerLines: ReadonlyArray<Record<string, unknown>> = [],
 ): { spawning: OpenPrView[]; planFilings: OpenPrView[] } {
   // W1-T2583: selection and execution must agree on outcome-keyed eligibility, so the caller folds
   // both sets once from the same reader `runSweep` uses and filters here before either lane ranks.
@@ -32804,7 +32813,7 @@ export function selectReviewAdmissions(
   const filings = eligible.filter(reviewsInPlanLane);
   // W1-T14903: when host memory is short, a re-review of a head that already has a verdict waits, so a build is
   // admitted before it; a first review of a head never waits on memory here.
-  const rest = eligible.filter((pr) => !reviewsInPlanLane(pr) && !(yieldReReviews && reReviewsJudgedHead(pr)));
+  const rest = eligible.filter((pr) => !reviewsInPlanLane(pr) && !(yieldReReviews && reReviewYieldsForBuild(pr, ledgerLines)));
 
   const oldestFirst = (a: OpenPrView, b: OpenPrView): number => {
     // W1-T11153: a PR that needs a person to merge is admitted only after every one that does not.
