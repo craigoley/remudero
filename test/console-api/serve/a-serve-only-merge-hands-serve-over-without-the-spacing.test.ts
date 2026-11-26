@@ -69,7 +69,11 @@ function fixture() {
 }
 
 /** A supervisor on the production spacing base, booted spaced; prepare hands out `shas` in turn. */
-function supervisorAt(extra: Partial<ServeSupervisorOptions>, coldSha: string, shas: string[]) {
+function supervisorAt(
+  extra: Partial<ServeSupervisorOptions>, coldSha: string, shas: string[], more: { standbyAsks?: Record<string, unknown>; shortAdmissions?: number } = {},
+) {
+  const { standbyAsks } = more;
+  let shortAdmissions = more.shortAdmissions ?? 0;
   const slots = new Map<string, PreparedSlot>();
   let forks = 0;
   /** The listeners of the generation last promoted: the one whose asks the supervisor acts on. */
@@ -88,7 +92,11 @@ function supervisorAt(extra: Partial<ServeSupervisorOptions>, coldSha: string, s
         }
         if (message.type === "rmd.drain") queueMicrotask(() => onExit.forEach((l) => l(0, null)));
       },
-      onMessage: (l) => void onMessage.push(l),
+      onMessage: (l) => {
+        onMessage.push(l);
+        // A standby that asks before it is promoted: the supervisor replays that ask once it is active.
+        if (standbyAsks !== undefined && forks > 1) queueMicrotask(() => l({ type: "rmd.handoff_request", ...standbyAsks }));
+      },
       onExit: (l) => void onExit.push(l),
       kill: () => onExit.forEach((l) => l(null, "SIGKILL")),
     };
@@ -110,7 +118,8 @@ function supervisorAt(extra: Partial<ServeSupervisorOptions>, coldSha: string, s
     clock: { now: () => state.now, iso: () => "" } as never,
     sleep: (ms) => new Promise<void>((resolve) => void waits.push({ ms, wake: () => ((state.now += ms), resolve()) })),
     freeMemory: () => undefined, rss: () => undefined, peakRss: () => 1_000,
-    hostPressure: async () => ({ atMs: state.now, memAvailableBytes: 2 ** 40, swapInPagesPerSec: 0, psiSomeAvg10: 0, psiFullAvg10: 0, unread: [] }),
+    // The first `shortAdmissions` host readings have no memory available: the admission is refused, then it fits.
+    hostPressure: async () => ({ atMs: state.now, memAvailableBytes: shortAdmissions-- > 0 ? 0 : 2 ** 40, swapInPagesPerSec: 0, psiSomeAvg10: 0, psiFullAvg10: 0, unread: [] }),
     upgradeThresholds: () => ({ hostReserveBytes: 0, swapInPagesPerSecMax: 256, psiSomeAvg10Max: 10, psiFullAvg10Max: 2, staleMs: 600_000 }),
     socketPathFor: (n) => `/sock/${n}`,
     spacingBaseMs: SERVE_HANDOFF_SPACING_BASE_MS,
@@ -250,6 +259,61 @@ test("W1-T14987: a daemon-touching merge landing after the ask does not ride the
     s.waits.find((w) => w.ms === s.spaced()[0]!.waitMs)!.wake();
     await settle();
     assert.equal(s.supervisor.activeSha(), f.daemonToo, "once the spacing has passed, the newer main hands off as before");
+  } finally {
+    f.repo.cleanup();
+  }
+});
+
+test("W1-T14987: a waived ask deferred once for memory hands over to its target on the retry, without the spacing", async () => {
+  const f = fixture();
+  try {
+    const s = supervisorAt({}, f.base, [f.serveOnly, f.serveOnly], { shortAdmissions: 1 });
+    await s.supervisor.start();
+    s.state.now += 20 * MIN;
+    await s.askFor(serveOnlyAdvanceIn(f.repo.dir), f.serveOnly);
+    assert.equal(s.supervisor.activeSha(), f.base);
+    assert.equal(s.rows("serve.handoff_deferred").filter((r) => r.reason === "memory").length, 1, "the first admission is short");
+    assert.equal(s.rows("serve.handoff_spacing_waived").length, 0, "no waiver is recorded for a handoff that did not proceed");
+    s.waits.find((w) => w.ms === 60_000)!.wake();
+    await settle();
+    assert.equal(s.supervisor.activeSha(), f.serveOnly, "the memory retry keeps the waived ask and hands over");
+    assert.equal(s.spaced().length, 0, "the retry is not held behind the spacing");
+    assert.equal(s.rows("serve.handoff_spacing_waived").length, 1, "one waived row, for the one real hand-over");
+    assert.equal(s.rows("serve.handoff_spacing_waived")[0]!.toSha, f.serveOnly);
+  } finally {
+    f.repo.cleanup();
+  }
+});
+
+test("W1-T14987: a memory retry after main moved to a daemon-touching sha still waits out the spacing", async () => {
+  const f = fixture();
+  try {
+    const s = supervisorAt({}, f.base, [f.serveOnly, f.daemonToo], { shortAdmissions: 1 });
+    await s.supervisor.start();
+    s.state.now += 20 * MIN;
+    await s.askFor(serveOnlyAdvanceIn(f.repo.dir), f.serveOnly);
+    s.waits.find((w) => w.ms === 60_000)!.wake();
+    await settle();
+    assert.equal(s.supervisor.activeSha(), f.base, "the newer main does not ride the held waiver");
+    assert.equal(s.rows("serve.handoff_spacing_waived").length, 0);
+    assert.equal(s.spaced().length, 1);
+    assert.equal(s.spaced()[0]!.waiver, `prepared ${f.daemonToo}, not the waived target ${f.serveOnly}`);
+  } finally {
+    f.repo.cleanup();
+  }
+});
+
+test("W1-T14987: a standby's early ask is replayed with its verdict once it is active", async () => {
+  const f = fixture();
+  try {
+    // The standby (serveOnly) asks before promotion; its replay is judged inside the window it just opened.
+    const s = supervisorAt({}, f.base, [f.serveOnly], { standbyAsks: { targetSha: f.ledgerToo, serveOnly: { status: "unreadable", reason: "standby read", fromSha: f.serveOnly } } });
+    await s.supervisor.start();
+    s.state.now += SERVE_HANDOFF_SPACING_BASE_MS;
+    await s.supervisor.requestHandoff();
+    await settle();
+    assert.equal(s.supervisor.activeSha(), f.serveOnly);
+    assert.equal(s.spaced().at(-1)!.waiver, "unreadable: standby read", "the replayed ask kept its verdict");
   } finally {
     f.repo.cleanup();
   }

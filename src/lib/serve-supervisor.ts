@@ -455,6 +455,8 @@ interface Generation {
   startedAt: number;
   /** It asked for a handoff before it was active; the ask is replayed once it is promoted. */
   asked: boolean;
+  /** W1-T14987: what that early ask said (target and verdict), so its replay keeps it. */
+  askedWith?: HandoffAsk;
   /** It dropped its caches for a handoff that has not yet replaced it. */
   shed?: boolean;
   /** W1-T8873: when it terminated its worker threads for a handoff that has not yet replaced it; absent once restored. */
@@ -866,6 +868,12 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
   let previous: PreparedSlot | undefined;
   let inFlight: Promise<void> | undefined;
   let askedAgain = false;
+  /**
+   * W1-T14987: the latest ask that said anything (target, verdict). A re-ask that carries nothing of its own (the memory
+   * retry, a spacing wake, an ask absorbed while one was in flight, an early ask's replay) runs with it, so a waiver is
+   * not lost on the way; the waiver re-checks it against the active sha and the prepared sha every time.
+   */
+  let heldAsk: HandoffAsk | undefined;
   let stopping = false;
   let deferrals = 0;
   let lastWorkerShedAt: number | undefined;
@@ -921,7 +929,10 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       if (message.type !== GENERATION_MESSAGES.handoffRequest) return;
       const ask: HandoffAsk = { ...(typeof message.targetSha === "string" ? { targetSha: message.targetSha } : {}), ...readServeOnlyVerdict(message.serveOnly) };
       if (generation === active) void supervisor.requestHandoff(Object.keys(ask).length > 0 ? ask : undefined);
-      else generation.asked = true;
+      else {
+        generation.asked = true;
+        if (Object.keys(ask).length > 0) generation.askedWith = ask;
+      }
     });
     proc.onExit((code, signal) => {
       if (generation === active && !stopping) void replaceCrashed(generation, code, signal);
@@ -1106,7 +1117,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
   const activate = (generation: Generation): void => {
     active = generation;
     startProbing();
-    if (generation.asked) void supervisor.requestHandoff();
+    if (generation.asked) void supervisor.requestHandoff(generation.askedWith);
   };
 
   /**
@@ -1434,7 +1445,6 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     if (waiver.waived) {
       // prepare checks out the newest main, which may hold merges that landed after the ask: those never ride the waiver.
       if (slot.sha !== waiver.toSha && awaitSpacing(from, ask, `prepared ${slot.sha}, not the waived target ${waiver.toSha}`)) return;
-      if (slot.sha === waiver.toSha) opts.log("serve.handoff_spacing_waived", waiver.row);
     }
     const prepMs = clock.now() - startedAt;
     if (slot.sha === from.slot.sha || failed.has(slot.sha)) {
@@ -1473,6 +1483,9 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     if (!admission.admit) return deferUpgrade(from, slot, { hold: admission.hold, detail: admission.detail, freeBytes: free });
     // needBytes here is the host's need (reserve + candidate); the candidate's own is candidateNeedBytes.
     const { needBytes: candidateNeedBytes, ...evidence } = need(from);
+    // W1-T14987: the waiver is recorded only once the handoff it waived actually proceeds; a memory deferral keeps the
+    // ask (heldAsk) and its retry judges it again.
+    if (waiver.waived && slot.sha === waiver.toSha) opts.log("serve.handoff_spacing_waived", waiver.row);
     opts.log("serve.handoff_admitted", { sha: slot.sha, availableBytes: admission.availableBytes, needBytes: admission.needBytes, peakBasis: admission.peakBasis, candidateNeedBytes, ...evidence, freeBytes: free, deferrals });
     deferrals = 0;
     const overlap = overlapWindow();
@@ -1493,6 +1506,8 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       largestOverlapGeneration = up.generation.id;
     }
     lastDoneAt = clock.now();
+    // The ask this handoff answered is spent; one that arrived meanwhile (a promoted standby's replay) is kept.
+    if (heldAsk === ask) heldAsk = undefined;
     pressure = { value: decayedPressure(pressure, lastDoneAt, spacingHalfLifeMs) + 1, at: lastDoneAt };
     opts.log("serve.handoff_done", {
       fromSha: from.slot.sha, toSha: slot.sha, deps: slot.deps, prepMs, readyMs: up.readyMs, drainMs, peakBytes: largestRss || undefined, pressure: Number(pressure.value.toFixed(3)),
@@ -1557,8 +1572,11 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       budget.start(() => [process.pid, ...(active?.process.pid === undefined ? [] : [active.process.pid])]);
       await reportAlone(up.generation, up.startedAt, up.readyMs);
     },
-    requestHandoff: (ask) => {
+    requestHandoff: (given) => {
       if (stopping) return Promise.resolve();
+      if (given !== undefined) heldAsk = given;
+      // Only a held verdict travels: a bare re-ask after a target-only ask stays bare, as before W1-T14987.
+      const ask = given ?? (heldAsk?.serveOnly === undefined ? undefined : heldAsk);
       if (inFlight) {
         askedAgain = true;
         return inFlight;

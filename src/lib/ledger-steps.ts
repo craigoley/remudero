@@ -835,8 +835,10 @@ const SEED_ROWS: readonly SeedRow[] = [
       "build to the ask's target holds a first-parent merge whose code paths all lie in serve's own code (the modules " +
       "src/run-task.ts reaches only through src/lib/serve.ts, serve-own-code.ts) and none in a module the daemon loads. " +
       "Fields: `fromSha`, `toSha`, `merge` (the oldest such merge), `paths` (that merge's changed paths) and `waitMs` " +
-      "(the spacing wait it skipped). It is written only once prepare lands on `toSha`: a newer main, which may hold " +
-      "merges that landed after the ask, is spaced instead, naming both shas in the `waiver` field. The handoff then runs prepare, memory admission and readiness as any other, and " +
+      "(the spacing wait it skipped). It is written once per real hand-over, when the waived handoff passes memory " +
+      "admission on `toSha`; a memory deferral writes none and its retry keeps the waived ask and judges it again. " +
+      "A prepare that lands on a newer main, which may hold merges that landed after the ask, is spaced instead, naming " +
+      "both shas in the `waiver` field. The waived handoff runs memory admission and readiness as any other and " +
       "counts toward the spacing of the next. An unreadable advance writes none and spaces the handoff, naming why in " +
       "the `waiver` field of its serve.handoff_deferred or serve.handoff_spacing_absorbed row.",
     writer: ["createServeSupervisor"],
