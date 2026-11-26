@@ -87,11 +87,17 @@ const defaultGhApiRead = async (args: string[]): Promise<string> => String(await
 const SERVER_ERROR_RETRY_FIRST_MS = 1_000;
 const SERVER_ERROR_RETRY_MAX_MS = 60_000;
 
+/** W1-T14944: gh's own response-status line (gh 2.89.0: `gh: <message> (HTTP <code>)`), for a 500, 502, 503 or 504. */
+const GH_SERVER_ERROR_LINE = /^gh: .*\(HTTP 50[0234]\)$/;
+
 /** W1-T14944: a read that failed with a transient GitHub server error (HTTP 500, 502, 503 or 504), as `gh` reports it
- *  on stderr. Only stderr is read: the error message also carries the command, whose endpoint is caller text. */
+ *  on stderr. Only stderr is read, because the error message also carries the command, whose endpoint is caller text.
+ *  Only gh's own status line counts, and only as stderr's LAST line: a URL parse error (`parse "<url>": invalid URL
+ *  escape ...`) echoes the endpoint, so `HTTP 502` anywhere else on stderr is caller text, never a response status. */
 export function isGhServerError(error: unknown): boolean {
   const e = error as { stderr?: string | Buffer } | null | undefined;
-  return /\bHTTP 50[0234]\b/.test(String(e?.stderr ?? ""));
+  const lines = String(e?.stderr ?? "").split(/\r?\n/).filter((line) => line.trim() !== "");
+  return GH_SERVER_ERROR_LINE.test(lines[lines.length - 1] ?? "");
 }
 
 export function ghApiFetch(read: (args: string[]) => Promise<string> = defaultGhApiRead, pacing: GhApiFetchPacing = {}): GithubPageFetch {

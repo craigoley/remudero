@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ghApiFetch } from "#src/lib/field-trials-github.js";
+import { ghApiFetch, isGhServerError } from "#src/lib/field-trials-github.js";
 
 const PAGE = JSON.stringify([{ number: 1 }]);
 
@@ -67,4 +67,29 @@ test("W1-T14944 criterion 2: a non-5xx read failure is not retried, even when th
   assert.deepEqual(result, { ok: false, reason: "github-read-failed" });
   assert.equal(calls, 1, "the 404 is read once");
   assert.deepEqual(sleeps, [], "and waits for nothing");
+});
+
+test("W1-T14944 criterion 2: a non-5xx read failure is not retried, when gh's URL parse error echoes HTTP 502", async () => {
+  // `rmd field-trials --source 'trial=o/HTTP 502%zz'`: gh 2.89.0 refuses the malformed URL and echoes it on stderr.
+  const sleeps: number[] = [];
+  let calls = 0;
+  const result = await ghApiFetch(async () => {
+    calls += 1;
+    if (calls > 3) return "[]"; // a retrying build stops here instead of looping forever
+    throw Object.assign(new Error("Command failed: gh api repos/o/HTTP 502%zz/pulls"),
+      { stderr: 'parse "https://api.github.com/repos/o/HTTP 502%zz/pulls": invalid URL escape "%zz"\n' });
+  }, { sleep: async (ms) => { sleeps.push(ms); } })("repos/o/HTTP 502%zz/pulls");
+  assert.deepEqual(result, { ok: false, reason: "github-read-failed" });
+  assert.equal(calls, 1, "the parse error is read once");
+  assert.deepEqual(sleeps, [], "and waits for nothing");
+});
+
+test("W1-T14944 criterion 2: a non-5xx read failure is not retried, unless gh's own last stderr line is the 5xx status", () => {
+  const stderr = (text: string) => ({ stderr: text });
+  assert.equal(isGhServerError(stderr("gh: Server Error (HTTP 502)\n")), true);
+  assert.equal(isGhServerError(stderr("{\"message\":\"x\"}\ngh: Bad Gateway (HTTP 502)\r\n")), true);
+  assert.equal(isGhServerError(stderr("gh: Not Found (HTTP 404)\n")), false);
+  assert.equal(isGhServerError(stderr("gh: Server Error (HTTP 502)\nparse \"x\": invalid URL escape \"%zz\"\n")), false);
+  assert.equal(isGhServerError(stderr('parse "https://api.github.com/repos/o/gh: x (HTTP 502)": invalid URL escape "%zz"\n')), false);
+  assert.equal(isGhServerError(new Error("gh: Server Error (HTTP 502)")), false, "the message alone is caller text");
 });
