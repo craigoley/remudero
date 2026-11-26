@@ -6,7 +6,8 @@ import { closeDaemonCleanup, createDaemonRetirement, inDaemonSpawnScope, retirin
 import { CI_JUDGE_HEADS_FILE, judgeCiEscalation, productionCiJudgePorts, withCiJudgeAfterSweep } from "#src/lib/ci-escalation-judge.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import { spawnRunChild } from "#src/lib/run-child.js";
@@ -16,6 +17,13 @@ import { createClaudeExecutableCache, runInWorkerSpawnScope, spawnWorker, worker
 import { spawnCodexWorker, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { installDetachedWorkHost, type DetachedWorkHost, type OpenPrView } from "#src/lib/sweep.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { readLedgerLines } from "#src/lib/status.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+// The shared run-task test helper, not a direct src/run-task.ts import (the affected-suite reach ratchet bounds direct importers).
+import { buildSweepEffects, runReview } from "#test/helpers/run-task-test.js";
 
 type Row = { step: string } & Record<string, unknown>;
 
@@ -404,4 +412,91 @@ test("W1-T14916 criterion 2: in-flight SRE lane page work still completes", asyn
   await exit;
   assert.equal(run.pageDone(), true, "the in-flight page settled");
   assert.ok(run.rows.some((row) => row.step === "daemon.exit_after_release"), "the page's settle is still timed");
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and a review admitted before the release neither falls back in-process nor claims the head", async (t: TestContext) => {
+  const root = ownedFixtureDir(t, "retired-review").dir;
+  const ledgerPath = join(root, "ledger.ndjson");
+  const RETIRED = "drain lock released; the successor owns this work";
+  // The reviewer's snapshot is materialized from this checkout, so the fixture PR's head is the checkout's own HEAD.
+  const head = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const pr = { prNumber: 7, prUrl: "https://github.com/acme/remudero/pull/7", headSha: head, isPlanFiling: false,
+    reviewState: "none", checksState: "green", unmetCriteria: [], priorStrikes: 0, lastActivityAt: "2026-11-26T20:00:00Z",
+    autoMergeArmed: false, body: "" } as unknown as OpenPrView;
+
+  // The sweep's post-review effect: the installed host withholds its child because the release lands in its wait.
+  const sweepRun = async (retireAt: "before" | "spawn" | "never") => {
+    const steps: string[] = [];
+    let inProcess = 0;
+    const scope: { retiredBy?: string } = retireAt === "before" ? { retiredBy: RETIRED } : {};
+    installDetachedWorkHost({ hosts: new Set(["review"]), mode: () => "on",
+      spawnReview: async () => { if (retireAt === "spawn") scope.retiredBy = RETIRED; return undefined; } } as unknown as DetachedWorkHost);
+    try {
+      const effects = buildSweepEffects({ owner: "acme", repo: "remudero", localRepoName: "not-remudero", config: { root } as never,
+        ledgerPath, runId: "retired-review", plan: { tasks: [], byId: new Map() } as never,
+        log: (step) => steps.push(step),
+        reviewRunner: async () => { inProcess++; return 0; } });
+      await runInWorkerSpawnScope(scope, () => withLiveWritesAllowed(() => effects.postReview!(pr)));
+    } finally {
+      installDetachedWorkHost(undefined);
+    }
+    return { steps: steps.filter((step) => step.startsWith("sweep.post_review")), inProcess };
+  };
+  assert.deepEqual(await sweepRun("before"), { steps: [], inProcess: 0 }, "a retired daemon writes no attempt and runs no review");
+  assert.deepEqual(await sweepRun("spawn"), { steps: ["sweep.post_review.attempt", "sweep.post_review.done"], inProcess: 0 },
+    "a child withheld by the release never becomes an in-process review");
+  assert.deepEqual(await sweepRun("never"), { steps: ["sweep.post_review.attempt", "sweep.post_review.done"], inProcess: 1 },
+    "control: a live daemon with no child runs the review in process");
+
+  // The review command itself: a retired scope stands down before its pending claim and records no withheld attempt.
+  const shim = ghShim([
+    { when: "/statuses?", stdout: "[[]]" },
+    { when: "pulls/", stdout: JSON.stringify({ number: 7, html_url: pr.prUrl, updated_at: "t", body: "", state: "open",
+      head: { ref: "run-W1-T90007-1", sha: pr.headSha } }) },
+    { when: "/status", stdout: JSON.stringify({ state: "pending", statuses: [] }) },
+  ], { kind: "t14916-review" });
+  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
+  const reviewLedger = join(root, "review-ledger.ndjson");
+  const priorPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${priorPath ?? ""}`;
+  try {
+    const result = await runInWorkerSpawnScope({ retiredBy: RETIRED }, () => withLiveWritesAllowed(() => runReview({
+      owner: "acme", repo: "remudero", prUrl: pr.prUrl, task: { id: "W1-T90007", acceptance: [{ claim: "c", proof: "grep: x y" }] },
+      report: "", settingsFile: join(root, "settings.json"), config: { claudeBin: "/bin/true", root } as never,
+      log: (step: string, extra: Record<string, unknown> = {}) => appendLedger(reviewLedger, { run_id: "R", task_id: "W1-T90007", step, ...extra }),
+      say: () => {}, account: (r: WorkerResult) => r, spawnReviewer: false, readReviewReuseFacts: () => undefined,
+      disarm: () => "not-armed" as const, arm: async () => "armed" as const, ledgerPath: reviewLedger, runId: "R",
+    } as never)));
+    assert.equal(result.reviewerOutcome, "not_attempted_retired");
+    const rows = readLedgerLines(reviewLedger);
+    assert.deepEqual(rows.map((row) => row.step), ["review.stood_down"]);
+    assert.match(String(rows[0]?.reason), /^retired: drain lock released/);
+    assert.equal(shim.calls().some((call) => call.includes("context=remudero-review")), false, "no pending claim is posted");
+
+    // Released after the claim, while the reviewer waits for admission: the withheld reviewer settles the claim and
+    // records no withheld attempt (review.semantic_incomplete), so the withheld-review ladder does not move.
+    const midLedger = join(root, "mid-ledger.ndjson");
+    const scope: { retiredBy?: string } = {};
+    const midRun = await runInWorkerSpawnScope(scope, () => withLiveWritesAllowed(() => runReview({
+      owner: "acme", repo: "remudero", prUrl: pr.prUrl,
+      task: { id: "W1-T90007", acceptance: [{ claim: "a claim", proof: "unit test: no-such-test-title-t14916" }] },
+      report: "nothing", settingsFile: join(root, "settings.json"), config: { claudeBin: "/bin/true", root } as never,
+      log: (step: string, extra: Record<string, unknown> = {}) => appendLedger(midLedger, { run_id: "MID", task_id: "W1-T90007", step, ...extra }),
+      say: () => {}, account: (r: WorkerResult) => r, spawnReviewer: true,
+      reviewerSpawnWorker: async () => {
+        scope.retiredBy = RETIRED;
+        return { notStarted: "admission-abandoned", subtype: "admission_abandoned", text: "", blocks: [] } as unknown as WorkerResult;
+      },
+      reviewerMount: { model: "sonnet", provider: "claude", effort: "medium", maxTurns: 10, contextBudget: 120000 },
+      disarm: () => {}, headCheckoutDir: REPO_ROOT, ledgerPath: midLedger, runId: "MID",
+    } as never)));
+    assert.equal(midRun.reviewerOutcome, "not_attempted_retired", JSON.stringify(readLedgerLines(midLedger).map((r) => [r.step, r.error ?? r.reason])));
+    const midSteps = readLedgerLines(midLedger).map((row) => String(row.step));
+    assert.equal(midSteps.includes("review.semantic_incomplete"), false, midSteps.join(", "));
+    assert.equal(midSteps.includes("review.posted"), false);
+    assert.equal(midSteps.at(-1), "review.stood_down");
+  } finally {
+    process.env.PATH = priorPath;
+  }
 });

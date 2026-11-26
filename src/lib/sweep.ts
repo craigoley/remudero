@@ -314,6 +314,7 @@ import {
   writeRunLock,
   runLockRecord,
   WorkerNotStartedError,
+  workerSpawnRetiredBy,
   type QuestionEntry,
   type SpawnWorkerArgs,
   type WorkerResult,
@@ -4012,6 +4013,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         if (value === "posted" && postedAtMs === undefined) postedAtMs = systemClock.now();
         onPhase?.(value);
       };
+      // W1-T14916: a retired daemon (drain lock released) starts no review here, in a child or in-process, and writes no
+      // attempt for one: the successor owns this head.
+      if (workerSpawnRetiredBy() !== undefined) return;
       await observePr(pr, "review");
       log("sweep.post_review.attempt", {
         pr_number: pr.prNumber,
@@ -4037,6 +4041,11 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             ...(hosted.acknowledge === undefined ? {} : { acknowledge: hosted.acknowledge }),
           }, log);
           log("sweep.post_review.child", { pr_number: pr.prNumber, head_sha: pr.headSha, review_key: reviewKey, child_run_id: hosted.runId });
+          return;
+        }
+        // A child withheld because the release landed during its admission wait never falls back to an in-process review.
+        if (workerSpawnRetiredBy() !== undefined) {
+          log("sweep.post_review.done", { pr_number: pr.prNumber, head_sha: pr.headSha, exit: "retired", review_mode: mode.kind });
           return;
         }
         // W1-T11729: a restore never falls back to a full review; without its runner it does nothing.

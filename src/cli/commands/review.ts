@@ -51,7 +51,7 @@ import { isDispatchedRunBranch } from "../../lib/sweep.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "../../lib/sweep.js";
 import { readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest } from "../../lib/sweep.js";
 import { REVIEW_RUN_SETTLED_STEPS, REVIEWER_START_FAILED_OUTCOME } from "../../lib/sweep.js";
-import { ghJson, renderWorkerSettings, cashDivertSpawnFields, spawnWorker, workerLedgerFields, workerTranscript, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment, WorkerAbandonedError, worktreeRemoveAsync } from "../../lib/worker.js";
+import { ghJson, renderWorkerSettings, cashDivertSpawnFields, spawnWorker, workerLedgerFields, workerTranscript, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, type SpawnWorkerArgs, type WorkerResult, type WorkerSelectionAssignment, WorkerAbandonedError, workerSpawnRetiredBy, WorkerSpawnRetiredError, worktreeRemoveAsync } from "../../lib/worker.js";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "../../lib/worktree-git.js";
 // @ts-expect-error a plain .mjs script with no declaration file, as src/lib/merged-ratchet-verdict.ts imports its siblings.
 import { PROOF_DISCRIMINATION_JOB, PROOF_DISCRIMINATION_WORKFLOW, RESULT_FORMAT, RESULT_MARKER, bodyDigest, discriminationProofs, proofDiscriminationDigests } from "../../../scripts/proof-discrimination-gate.mjs";
@@ -1292,6 +1292,21 @@ export async function runReview(host: ReviewCommandHost, args: {
   // never abort the review it exists to make visible — the terminal post below still runs and is
   // what actually gates the merge, exactly as it always has. A shadow review (W1-T10269) posts nothing.
   let prCreatedAt = args.prCreatedAt;
+  // W1-T14916: a review in a retired daemon's scope (its drain lock released) claims nothing and records no withheld
+  // attempt; the successor reviews this head. The stand-down settles any claim this run already posted.
+  const retiredStandDown = (retiredBy: string): ReviewRunResult => {
+    const reason = `retired: ${retiredBy}`;
+    log("review.stood_down", { context: REVIEW_CONTEXT, state: "pending", head_sha: headSha, pr_url: prUrl, reason });
+    say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — ${reason}`);
+    reportPhase("posted");
+    return {
+      state: "pending", criteria: [], testTheater: false, summary: "review stood down: this daemon retired",
+      floorDegraded: false, capped: false, keywordOnly: false, planOnly: false,
+      headSha, reviewerOutcome: "not_attempted_retired", verdictWithheld: reason,
+    };
+  };
+  const retiredBeforeClaim = workerSpawnRetiredBy();
+  if (retiredBeforeClaim !== undefined) return retiredStandDown(retiredBeforeClaim);
   if (!args.shadow) try {
     const pending = await postReviewPending({
       owner,
@@ -1728,6 +1743,8 @@ export async function runReview(host: ReviewCommandHost, args: {
         } finally {
           stopTelemetry?.();
         }
+        const retiredReviewer = reviewer.notStarted ? workerSpawnRetiredBy() : undefined;
+        if (retiredReviewer !== undefined) throw new WorkerSpawnRetiredError(retiredReviewer);
         const candidateSemantic = reviewerSemanticVerdicts(reviewer, criteria.length);
         semantic = candidateSemantic;
         reviewerFindingText = workerTranscript(reviewer);
@@ -1799,6 +1816,7 @@ export async function runReview(host: ReviewCommandHost, args: {
         reapWorkerScratch(snapshot.cwd);
       });
     } catch (e) {
+      if (e instanceof WorkerSpawnRetiredError) return retiredStandDown(e.reason);
       // Advisory only — the deterministic floor still binds and posts below.
       reviewerSpawnFailed = true;
       if (e instanceof WorkerAbandonedError) {
