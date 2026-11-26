@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
@@ -13,7 +14,9 @@ import { buildSweepEffects, runSweep, type BuildSweepEffectsDeps } from "#src/li
 import { gitRepo, originWithClone } from "#test/helpers/git-repo.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { buildFixturePlanPrBody } from "#test/helpers/plan-pr-body-fixture.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
+const THIS_FILE = fileURLToPath(import.meta.url);
 const ID = "W1-T900528", OPS = "fixture-private/ops", PUBLIC = "fixture/remudero";
 const SHARD = `plan/tasks.d/${ID}-fixture.yaml`;
 const NOW_MS = Date.parse("2026-11-23T12:00:00.000Z");
@@ -130,15 +133,32 @@ test("W1-T14528 criterion 1: an ops-only task reads its record at the ops main a
   assert.equal(f.pub.clone.git("status", "--porcelain"), "");
 });
 
+/** W1-T14969: run this file's five W1-T14528 tests in a child under a clock `days` ahead of the real one (0: the real
+ *  clock), with a private TMPDIR, and return its TAP. The child selects only them, so this test never runs itself. */
+function runW1T14528At(days: number): string {
+  const tmp = mkdtempSync(join(tmpdir(), "w1-t14969-"));
+  try {
+    const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: tmp, RMD_TEST_LIVE_DENY_ROOT: join(tmp, "live-deny"), FK_SHIFT_DAYS: String(days) };
+    delete env.NODE_TEST_CONTEXT;
+    const shift = days === 0 ? [] : ["--import", "./scripts/clock-shift.mjs"];
+    const result = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts",
+      ...shift, "--test-name-pattern", "^W1-T14528 criterion", THIS_FILE], { cwd: REPO_ROOT, env, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    return `${result.stdout ?? ""}${result.stderr ?? ""}`;
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 test("W1-T14969 criterion 1: the five W1-T14528 tests pass at any real date", async t => {
-  // The fixture stamps its refusal at NOW_MS; whatever the real clock reads, the sweep must still enumerate it, because
-  // the sweep's age window is read from the fixture's clock. Before W1-T14969 this went red once real time passed
-  // NOW_MS + REFUSAL_AMENDMENT_MAX_AGE_MS (2026-11-26T12:00Z), taking every W1-T14528 test with it.
-  const f = fixture(t, "ops");
-  await f.amendment();
-  const row = f.amendmentRows()[0];
-  assert.ok(row?.outcome === "drafted" || row?.outcome === "waiting",
-    `the sweep enumerated the NOW_MS refusal at real time ${new Date().toISOString()}: ${JSON.stringify(row)}`);
+  // The fixture stamps its refusal at NOW_MS; before W1-T14969 the sweep read the real clock, so all five went red once it
+  // passed NOW_MS + REFUSAL_AMENDMENT_MAX_AGE_MS (2026-11-26T12:00Z). Run them at the real clock and 7 and 400 days on.
+  for (const days of [0, 7, 400]) {
+    await t.test(`at the real clock plus ${days} days`, () => {
+      const tap = runW1T14528At(days);
+      assert.match(tap, /^# pass 5$/m, `all five W1-T14528 tests ran and passed at +${days} days:\n${tap.slice(-4000)}`);
+      assert.match(tap, /^# fail 0$/m, `no W1-T14528 test failed at +${days} days:\n${tap.slice(-4000)}`);
+    });
+  }
 });
 
 test("W1-T14528 criterion 2: a public task reads its record from the public working tree with no read at main", async t => {
