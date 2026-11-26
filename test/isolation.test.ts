@@ -81,6 +81,27 @@ test("isolationProbePrompt: EXCLUDES Claude Code's own find/grep/rg tool wrapper
   assert.deepEqual([...CLAUDE_CODE_TOOL_WRAPPERS], ["find", "grep", "rg", "pkill"]);
 });
 
+// ── W1-T14912: the turn bound follows the prompt's own command list ────────
+
+test("W1-T14912 criterion 1: maxTurns covers one tool turn per numbered command plus the report and one turn of slack", () => {
+  const commands = (isolationProbePrompt().match(/^\d+\) /gm) ?? []).length;
+  assert.ok(commands >= 4, `the prompt numbers its commands (found ${commands})`);
+  const args = isolationProbeSpawnArgs({ cwd: "/tmp/x", settingsFile: "/tmp/settings.json" });
+  assert.equal(args.maxTurns, commands + 2);
+});
+
+test("W1-T14912 criterion 2: the prompt asks for every numbered command in ONE Bash tool call before the report", () => {
+  assert.match(isolationProbePrompt(), /all of these commands in ONE Bash tool call/i);
+});
+
+test("W1-T14912 criterion 3: the probe stays Bash-only and its REPORT still parses to the same counts", () => {
+  const args = isolationProbeSpawnArgs({ cwd: "/tmp/x", settingsFile: "/tmp/settings.json" });
+  assert.deepEqual(args.tools, ["Bash"]);
+  assert.match(isolationProbePrompt(), /^REPORT$/m);
+  assert.deepEqual(parseIsolationReport("REPORT\naliases: 0\nfunctions: 3"), parseIsolationReport("text\nREPORT\naliases: 0\nfunctions: 3"));
+  assert.equal(parseIsolationReport("no report here"), null);
+});
+
 // ── probeIsolation: the fail-closed gate, via an injected executor ──────────
 
 const cleanExec = (): Promise<ProbeExecResult> =>
@@ -363,7 +384,7 @@ test("W1-T14884 the probe's turn budget fits every command in its own call plus 
 });
 
 test("W1-T14884 the probe asks for every command in one Bash call", () => {
-  assert.match(isolationProbePrompt(), /Run all 4 commands in ONE Bash call/);
+  assert.match(isolationProbePrompt(), /all of these commands in ONE Bash tool call/i);
 });
 
 test("W1-T14884 the probe stays read-only with Bash as its only tool", () => {

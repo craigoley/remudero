@@ -269,7 +269,8 @@ export function isolationProbePrompt(): string {
     "You are an ISOLATION PREFLIGHT PROBE. READ-ONLY: use ONLY the Bash tool to run",
     "these commands, IN ORDER, and report the EXACT results. Do NOT create,",
     "modify, or delete any file — you have no write tool available for a reason.",
-    `Run all ${ISOLATION_PROBE_COMMAND_COUNT} commands in ONE Bash call, separated by \`; echo ---;\`, then report.`,
+    // One call keeps the probe inside its turn bound whichever way a model batches tool calls.
+    "Run all of these commands in ONE Bash tool call, separated by `; echo ---;`, then write the REPORT.",
     "1) alias | wc -l        (count of shell aliases this worker inherited)",
     `2) declare -F | awk '$NF !~ /^(${wrappers})$/ {c++} END {print c+0}'`,
     `   (count of shell functions this worker inherited, EXCLUDING Claude Code's`,
@@ -353,7 +354,7 @@ export function isolationProbeSpawnArgs(opts: {
     // Structural read-only enforcement (belt-and-suspenders over the prompt):
     // the model has NO write tool at all, so it cannot use one even if asked.
     tools: ["Bash"],
-    maxTurns: ISOLATION_PROBE_MAX_TURNS, // every command in its own call + the report + one spare.
+    maxTurns: ISOLATION_PROBE_MAX_TURNS, // one turn per command, one for the report, plus one spare.
     maxBudgetUsd: opts.budgetUsd,
     prompt: isolationProbePrompt(),
   };
