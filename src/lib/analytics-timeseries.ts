@@ -1,4 +1,5 @@
 import { spendRoleOf, spendAmountUsd } from "./spend-rows.js";
+import { endedBeforeWorkerAssignment } from "./non-worker-verdict.js";
 
 export type TimeSeriesPoint = {
   t: string;
@@ -6,6 +7,8 @@ export type TimeSeriesPoint = {
   gap?: boolean;
   note?: string;
   unpricedRows?: number;
+  /** W1-T12154: on a `runs.completed` point, the runs that ended before a worker was assigned, counted apart. */
+  endedBeforeWorkerAssignment?: number;
 };
 
 export type LedgerTimeSeries = {
@@ -39,6 +42,7 @@ const utcDayFormatter = new Intl.DateTimeFormat("en-CA", {
 type HistoricalBucket = {
   observed: boolean;
   completedRuns: number;
+  endedBeforeWorkerAssignment: number;
   tokensTotal: number;
   cacheRead: number;
   inputTokens: number;
@@ -52,6 +56,7 @@ function emptyHistoricalBucket(): HistoricalBucket {
   return {
     observed: false,
     completedRuns: 0,
+    endedBeforeWorkerAssignment: 0,
     tokensTotal: 0,
     cacheRead: 0,
     inputTokens: 0,
@@ -143,7 +148,10 @@ function buildHistoricalSeries(state: Map<string, HistoricalBucket>, nowIso: str
   const pointFor = (day: string, id: (typeof HISTORICAL_SERIES)[number]["id"]): TimeSeriesPoint => {
     const bucket = state.get(day);
     if (bucket === undefined || bucket.observed !== true) return gapPoint(day, "missing");
-    if (id === "runs.completed") return observedPoint(day, bucket.completedRuns);
+    if (id === "runs.completed") {
+      const unassigned = bucket.endedBeforeWorkerAssignment;
+      return { ...observedPoint(day, bucket.completedRuns), ...(unassigned > 0 ? { endedBeforeWorkerAssignment: unassigned } : {}) };
+    }
     if (id === "tokens.total") return observedPoint(day, bucket.tokensTotal);
     if (id === "cost.modeled.usd") return { ...observedPoint(day, bucket.costUsd), unpricedRows: bucket.unpricedRows, ...(bucket.unpricedRows ? { note: "known spend plus unpriced receipts; total uncertain" } : {}) };
     if (id === "cache.reuse") {
@@ -170,6 +178,7 @@ function buildHistoricalSeries(state: Map<string, HistoricalBucket>, nowIso: str
 export function createHistoricalSeriesAccumulator(): HistoricalSeriesAccumulator {
   const state = new Map<string, HistoricalBucket>();
   const starts = new Map<string, number>();
+  const assignedRuns = new Set<string>();
   return {
     add(line) {
       const day = timestampDay(line.ts);
@@ -184,9 +193,13 @@ export function createHistoricalSeriesAccumulator(): HistoricalSeriesAccumulator
         const prior = starts.get(runId);
         if (prior === undefined || timestamp < prior) starts.set(runId, timestamp);
       }
+      if (step === "worker.assignment" && runId) assignedRuns.add(runId);
       if (step === "verdict" && runId && Number.isFinite(timestamp)) {
         const started = starts.get(runId);
-        if (started !== undefined) {
+        // W1-T12154: a run that ended before a worker was assigned is no completed run and has no duration.
+        if (started !== undefined && endedBeforeWorkerAssignment(line, assignedRuns.has(runId))) {
+          bucket.endedBeforeWorkerAssignment += 1;
+        } else if (started !== undefined) {
           bucket.completedRuns += 1;
           bucket.durationsMs.push(Math.max(0, timestamp - started));
         }
