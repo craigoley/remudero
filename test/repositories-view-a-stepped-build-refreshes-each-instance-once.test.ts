@@ -49,7 +49,7 @@ function fixture(): { stateDir: string; dbs: ReturnType<typeof openProjectorRead
     ];
     writeFileSync(join(ledgerDir, "ledger.ndjson"), rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
     return { instanceId: name, options: { root: dir, ledgerPath: join(ledgerDir, "ledger.ndjson"), planPath: join(dir, "plan", "tasks.yaml"), controlRoot: dir, incidentsDir: ledgerDir,
-      ...(name === "core" ? { repoRegistryPath: daemonInstanceRegistryPath(root), ownInstance: "core" } : { instanceRepository: repo }) } };
+      ...(name === "core" ? { repoRegistryPath: daemonInstanceRegistryPath(root), ownInstance: "core" } : { instanceRepository: { owner: "craigoley", repo: "remudero-console" } }) } };
   });
   createRepositoriesSourcePublisher({ stateDir, instances: () => sources })();
   switchViewsOn(stateDir, ["repositories"], "shadow");
