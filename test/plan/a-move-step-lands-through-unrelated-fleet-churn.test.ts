@@ -234,7 +234,6 @@ test("W1-T14447 criterion 4: invariant:a-changed-carried-task-never-moves — a 
   // again by the final re-read, so only the lookup's own comparison can see it.
   const owners: Array<[string, Json]> = [
     ["its record path", { head: "operator-fix-1", files: [shard("W1-T1")] }],
-    ["one of its files", { head: "operator-fix-2", files: ["src/lib/moved-task-code.ts"] }],
     ["its run branch", { head: "run-W1-T1-1795000000003", files: ["src/lib/other.ts"] }],
     ["its trailer", { head: "operator-fix-3", body: "fix: build it\n\nRemudero-Task: W1-T1", files: ["src/lib/other.ts"] }],
   ];
@@ -339,4 +338,38 @@ test("W1-T14993 criterion 3: an unreserved record is copied and removed with hel
   assert.deepEqual((done.out.completed as Array<Record<string, unknown>>).map(row => [row.id, row.reservation, row.reservationUnchanged]), [["W1-T1", null, true]],
     "THE CLAIM: the removal completes with its id still unreserved");
   assert.ok(w.holds("ops", "W1-T1") && !w.holds("public", "W1-T1"), "the record moved");
+});
+
+test("W1-T14982 criterion 1: an open pull request that only edits code a record's files lists does not own it, and the record moves", async t => {
+  // OBSERVED 2026-11-26: unrelated open pull requests on shared files (src/lib/review.ts) pinned 30 open core records.
+  const w = moveWorld(t, { "W1-T1": record("W1-T1", "  files:\n    - src/lib/moved-task-code.ts\n") });
+  w.openPull("public", { head: "operator-fix-2", body: "fix: something else", files: ["src/lib/moved-task-code.ts"] });
+  w.openPull("public", { head: "run-W1-T77-1795000000000", body: "Remudero-Task: W1-T77", files: ["src/lib/moved-task-code.ts", shard("W1-T77")] });
+  const result = await select(w, reader(w, 1, () => undefined));
+  assert.equal(result.reason, undefined, String(result.reason));
+  assert.equal(result.selection?.outcome, "candidate");
+  assert.deepEqual(batchIds(result.selection), ["W1-T1"], "THE CLAIM: a file overlap alone pins nothing");
+});
+
+test("W1-T14982 criterion 2: a record stays owned while a pull request names its task or edits its record", async t => {
+  const owners: Array<[string, { head: string; body?: string; files: string[] }]> = [
+    ["its record path", { head: "operator-fix-1", files: [shard("W1-T1")] }],
+    ["its run branch", { head: "run-W1-T1-1795000000003", files: ["src/lib/other.ts"] }],
+    ["its trailer", { head: "operator-fix-3", body: "fix: build it\n\nRemudero-Task: W1-T1", files: ["src/lib/other.ts"] }],
+  ];
+  for (const [rule, pr] of owners) {
+    const w = moveWorld(t, { "W1-T1": record("W1-T1", "  files:\n    - src/lib/moved-task-code.ts\n"), "W1-T2": record("W1-T2") });
+    w.openPull("public", pr);
+    const result = await select(w, reader(w, 1, () => undefined));
+    assert.equal(result.reason, undefined, `${rule}: ${String(result.reason)}`);
+    assert.deepEqual(batchIds(result.selection), ["W1-T2"], `THE CLAIM: a pull request owning W1-T1 by ${rule} keeps it on core`);
+  }
+  // A dispatch claim or a pushed run branch owns it with no pull request at all.
+  for (const ref of ["refs/rmd-dispatch/W1-T1", "refs/heads/run-W1-T1-1795000000004"]) {
+    const w = moveWorld(t, { "W1-T1": record("W1-T1", "  files:\n    - src/lib/moved-task-code.ts\n"), "W1-T2": record("W1-T2") });
+    w.pub.clone.git("push", "--quiet", "origin", `HEAD:${ref}`);
+    const result = await select(w, reader(w, 1, () => undefined));
+    assert.equal(result.reason, undefined, `${ref}: ${String(result.reason)}`);
+    assert.deepEqual(batchIds(result.selection), ["W1-T2"], `THE CLAIM: ${ref} keeps W1-T1 on core`);
+  }
 });
