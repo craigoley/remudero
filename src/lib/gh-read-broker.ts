@@ -539,6 +539,8 @@ interface QueuedJob {
   limiter: GhBrokerLimiter;
   listeners: Array<(p: GhBrokerProgress) => void>;
   lastReported?: string;
+  /** Set when the drainer starts the job: its upstream GET may already have left, so it can predate a later caller. */
+  started?: boolean;
   start(): Promise<void>;
 }
 
@@ -1174,7 +1176,10 @@ export class GhReadBroker {
       }
       return finish(this.render(cached, c.wantsInclude, "hit-fresh"), { key: key.slice(0, 12), request_key: key, gh_filtered_locally: false });
     }
-    const joined = this.inflight.get(key);
+    // W1-T14902: a FRESH read must observe GitHub as of its own arrival. A queued job's GET has not left yet, so it does;
+    // a started one's GET may have left before a trailer edit, so a fresh caller issues its own read instead of joining.
+    const inFlight = this.inflight.get(key);
+    const joined = inFlight !== undefined && !(request.fresh && inFlight.job.started) ? inFlight : undefined;
     if (joined) {
       // A higher class joining a queued read lifts it: the read is served at its most urgent caller's turn.
       if (GH_BROKER_CLASSES.indexOf(cls) < GH_BROKER_CLASSES.indexOf(joined.job.cls)) joined.job.cls = cls;
@@ -1192,6 +1197,7 @@ export class GhReadBroker {
       key, cls, caller: request.caller || "unknown", seq: (this.seq += 1), enqueuedMs: startedMs, limiter: c.limiter,
       listeners: onProgress ? [onProgress] : [],
       start: async () => {
+        job.started = true;
         const began = this.now();
         if (this.managedCredentials) {
           const latest = this.credential(request.args, request.repo);
@@ -1209,7 +1215,8 @@ export class GhReadBroker {
         resolveResult(result);
       },
     };
-    this.inflight.set(key, { job, promise, view });
+    const entry: InFlight = { job, promise, view };
+    this.inflight.set(key, entry);
     const queue = this.queues.get(paceKey) ?? [];
     this.queues.set(paceKey, queue);
     queue.push(job);
@@ -1219,7 +1226,8 @@ export class GhReadBroker {
       const result = await promise;
       return finish(result, { key: key.slice(0, 12), request_key: key, gh_filtered_locally: false, upstream_ms: upstreamMs, gap_ms: this.pacer(paceKey).gapMs });
     } finally {
-      this.inflight.delete(key);
+      // A fresh read that declined to join a started job took the slot; the older job must not clear it.
+      if (this.inflight.get(key) === entry) this.inflight.delete(key);
     }
   }
 

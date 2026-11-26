@@ -336,6 +336,7 @@ import {
   isPrMergedNow,
   armAutoMerge,
   armAutoMergeDetailed,
+  armAutoMergeDetailedAsync,
   attemptArm,
   armAutoMergeAtOpen,
   armAutoMergeAtOpenAsync,
@@ -5542,6 +5543,21 @@ export function withdrawArmIfVerdictRefuses(
  * unenforced: an omitted head still logs the row (never blocks an arm) — it simply stays
  * unjoinable, exactly as it does today.
  */
+/** W1-T14902 — {@link armAndLogOutcome} over the awaited detailed arm: the production default reads the task's hold
+ *  (realArmDepsAsync's reader) before arming, where the synchronous arm fails closed. Same row, same outcome. */
+export async function armAndLogOutcomeAsync(
+  prUrl: string,
+  taskId: string | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  arm: (prUrl: string, taskId: string | undefined) => Promise<ArmOutcome | ArmAttemptResult> =
+    (url, id) => armAutoMergeDetailedAsync(url, id, realArmDepsAsync()),
+  lane: ArmLane = "operator",
+  headSha?: string,
+): Promise<ArmOutcome> {
+  const attempt = await arm(prUrl, taskId);
+  return armAndLogOutcome(prUrl, taskId, log, () => attempt, lane, headSha);
+}
+
 export function armAndLogOutcome(
   prUrl: string,
   taskId: string | undefined,
@@ -12768,7 +12784,7 @@ export interface DepReviewDeps {
   prDiff?: (prUrl: string) => string;
   config?: Config;
   postStatus?: typeof postReviewStatusGuarded;
-  arm?: (prUrl: string, taskId: string | undefined) => ArmOutcome;
+  arm?: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult;
   /**
    * impl-FR — used by BOTH escalating call sites.
    *
@@ -13294,6 +13310,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       prUrl: view.url,
       reviewInputDigest: inputDigest,
       reviewEngineRevision: DEP_REVIEW_ENGINE_REVISION,
+      // W1-T14902: `taskId` is this lane's ledger key, never a task. The guarded poster reads the hold for the task the
+      // live PR names (one fresh read of `prUrl`), so a held task's trailer added to a Dependabot PR posts pending.
       fetchLifecycle: () => fetchPrLifecycle(view.url, deps.gh ?? ghJson, DEP_REVIEW_ENGINE_REVISION),
     });
     if (!posted.posted) {
@@ -13324,6 +13342,10 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     });
     // W1-T2258: `view.headRefOid` is the SAME head the `review.posted` line just above was keyed
     // to — already in hand, no extra read needed to close the join gap for this lane.
+    // W1-T14902: the production arm is the awaited detailed arm over realArmDepsAsync, whose task-hold gate reads the
+    // live body's task once more right before arming; its refusal and reason reach the row armAndLogOutcome writes.
+    const awaitedArm = deps.arm === undefined ? await armAutoMergeDetailedAsync(view.url, taskId, realArmDepsAsync()) : undefined;
+    if (awaitedArm !== undefined) deps = { ...deps, arm: () => awaitedArm };
     const armOutcome = armAndLogOutcome(view.url, taskId, log, deps.arm, "operator", view.headRefOid);
     // W1-T968: the PR — not merely this call — is what the console line answers about; a
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
@@ -25257,7 +25279,7 @@ async function retroCommand(
     } catch {
       /* best-effort — see the comment above */
     }
-    const armOutcome = armAndLogOutcome(prUrl, runId, log, undefined, undefined, armHeadSha);
+    const armOutcome = await armAndLogOutcomeAsync(prUrl, runId, log, undefined, undefined, armHeadSha);
     worktreeRemove(repoDir, worktreePath);
     // W1-T968: the PR — not merely this call — is what the console line answers about; a
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
@@ -37107,7 +37129,7 @@ async function triageCommandLocked(
       } catch {
         /* best-effort — see the comment above */
       }
-      const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
+      const armOutcome = await armAndLogOutcomeAsync(prUrl, taskId, log, undefined, undefined, armHeadSha);
       // W1-T968: the PR — not merely this call — is what the console line answers about; a
       // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
       const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
@@ -37828,7 +37850,7 @@ export async function planCommand(
       } catch {
         /* best-effort — see the comment above */
       }
-      const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
+      const armOutcome = await armAndLogOutcomeAsync(prUrl, taskId, log, undefined, undefined, armHeadSha);
       // W1-T968: the PR — not merely this call — is what the console line answers about; a
       // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
       const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
@@ -41060,7 +41082,7 @@ export async function approveCommand(
     } catch {
       /* best-effort — see the comment above */
     }
-    const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
+    const armOutcome = await armAndLogOutcomeAsync(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
     removeApproveWorktree();
     // W1-T968: the PR — not merely this call — is what the console line answers about; a
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
@@ -41455,7 +41477,7 @@ async function approveBatchCommand(
     } catch {
       /* best-effort — see the single-path comment above */
     }
-    const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
+    const armOutcome = await armAndLogOutcomeAsync(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
     removeApproveWorktree();
     // W1-T968: the PR — not merely this call — is what the console line answers about; a
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
