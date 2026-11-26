@@ -39,6 +39,8 @@ test("W1-T14976 criterion 1: an untyped verify-human or machine-judge ask retire
 });
 
 test("W1-T14976 criterion 2: invariant:own-release-only — an untyped ask stays open with no release, another task's release, a held task or a task the plan no longer holds", () => {
+  // Contrast: the same untyped ask with its own task released retires, so each case below is open only for its own reason.
+  assert.equal(classifyProposal(untyped("machine-judge"), undefined, context()).state, "retired", "own release retires");
   assert.notEqual(classifyProposal(untyped("machine-judge"), undefined, context("", new Set())).state, "retired", "no release");
   assert.notEqual(classifyProposal(untyped("machine-judge"), undefined, context("", new Set(["W1-T9940"]))).state, "retired", "another task's release");
   assert.notEqual(classifyProposal(untyped("machine-judge"), undefined, context("dispatch_hold: true")).state, "retired", "a held task");
@@ -52,4 +54,6 @@ test("W1-T14976 criterion 3: a typed ask whose stamp no longer matches stays ope
   assert.ok(typed.verificationAsk, "positive control: the ask is typed");
   const changed = { ...typed, summary: "A newly unanswered budget decision" };
   assert.equal(classifyProposal(changed, undefined, context()).state, "not_ready");
+  // Contrast: the untyped ask under the same release retires, so only the stale stamp keeps the typed ask open.
+  assert.equal(classifyProposal(untyped("machine-judge"), undefined, context()).state, "retired", "the untyped ask retires");
 });
