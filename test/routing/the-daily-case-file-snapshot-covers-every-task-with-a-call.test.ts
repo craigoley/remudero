@@ -56,7 +56,8 @@ test("W1-T14602 criterion 1: every called plan task is a candidate, with no coun
   const result = await built.build(async (plan) => plan.selected.map((id) => ({ taskId: id }) as unknown as TaskCaseFile));
   assert.equal(result.summary.candidates, 1001, "every called task in the plan is a candidate");
   assert.equal(result.summary.outsidePlan, 1);
-  assert.equal(result.files.length, 1000, "one case file for every task with a credited PR");
+  // W1-T14989: the one called task with no credited PR gets a case file too, so its build can read as ended.
+  assert.equal(result.files.length, 1001, "one case file for every called task, credited PR or not");
   assert.equal(result.summary.withoutPr, 1, "a called task with no credited PR is counted, not dropped silently");
   assert.ok(result.files.some((file) => file.taskId === taskId(89)), "a task last called 90 days ago is covered");
   // The case-file ledger read reaches back to the oldest selected call.
