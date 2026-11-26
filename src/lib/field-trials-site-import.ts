@@ -29,6 +29,7 @@ import { plannerPrWriteToken } from "./secret-boundary.js";
 import type { GhApiFetcher } from "./open-prs-rest.js";
 import { createPlanPrRest, probeExistingPlanPr } from "./plan-pr-emitter.js";
 import type { ModelFieldNoteBody } from "./field-trials-field-note.js";
+import { fixedClock } from "./clock.js";
 
 export const SITE_IMPORT_OWNER = "craigoley";
 export const SITE_IMPORT_REPO = "remudero-site";
@@ -258,7 +259,7 @@ export const FIELD_NOTE_STAGED_BY = "field-trials-collector";
  */
 export function collectorStagedNote<T extends { asOf: string }>(note: T, nowIso: string):
   T & { stagedBy: typeof FIELD_NOTE_STAGED_BY; stagedAt: string; publishedAt: string } {
-  const at = new Date(Date.parse(nowIso)).toISOString();
+  const at = fixedClock(Date.parse(nowIso)).iso();
   return { ...note, stagedBy: FIELD_NOTE_STAGED_BY, stagedAt: at, publishedAt: at };
 }
 
