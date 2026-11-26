@@ -57,8 +57,8 @@ test("W1-T13222 criterion 2: a reviewer worktree reaped while the snapshot walks
   }
 });
 
-test("W1-T13222 criterion 3: only status.json and engines/worktrees are excluded, and a prefix-sharing sibling is still copied", (t) => {
-  assert.deepEqual([...STATE_BACKUP_EXCLUDED_RELPATHS].sort(), ["engines/worktrees", "status.json"]);
+test("W1-T13222 criterion 3: only status.json, engines/worktrees and daemon-slots are excluded, and a prefix-sharing sibling is still copied", (t) => {
+  assert.deepEqual([...STATE_BACKUP_EXCLUDED_RELPATHS].sort(), ["daemon-slots", "engines/worktrees", "status.json"]);
   const live = fixture(t);
   const snapshot = snapshotState(live.state, live.backups);
   assert.ok(snapshot.entries.includes("engines/worktrees-notes.json"), "a sibling that only shares the prefix is copied");

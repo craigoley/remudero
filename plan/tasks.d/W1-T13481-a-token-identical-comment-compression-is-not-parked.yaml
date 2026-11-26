@@ -7,7 +7,7 @@
   risk: high # one concern across 2 files: the source change and its own new test
   band_meaning: blast-radius
   priority: 1.1
-  status: queued
+  status: merged
   attempts: 0
   files:
     - src/lib/machine-filing.ts

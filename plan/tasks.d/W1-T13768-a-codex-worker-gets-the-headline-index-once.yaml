@@ -15,7 +15,7 @@
     - src/lib/prompt-render.ts
     - test/worker/a-codex-worker-gets-the-headline-index-once.test.ts
     - "src/cli/commands/run-task-verb.ts"
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "A prompt routed to the Codex provider carries no rule_headlines part"
