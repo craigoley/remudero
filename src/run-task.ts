@@ -155,6 +155,7 @@ import { createIndexedLifetimeAccounting, tallyAuditedLifetimeDispatches, type L
 import { defaultCreditOverridePath, planCreditOverridePath, durableDependencyCredit, loadCreditOverrides, SERVE_KEEPS_CREDITS_IN_MEMORY,
   type CreditOverrideRow, type CreditReadState, type CreditStore, type ProjectPlanPhases } from "./lib/status.js";
 import type { DependencyMergeEvidence } from "./lib/plan.js";
+import { unassignedRunStage } from "./lib/non-worker-verdict.js";
 export { inboxGardenerRunTaskPorts } from "./lib/inbox-gardener-runtime.js";
 import {
   GitFetchError, PLAN_SYNC_GIT_TIMEOUT_MS, PlanSyncGitTimeoutError, createPlanRevisionStore,
@@ -10912,34 +10913,6 @@ export function benchmarkRunLedgerLogger(write: (step: string, fields: Record<st
       if (durableAssignmentId) assignments.add(durableAssignmentId);
     }
     reached.observe(step, extra);
-  };
-}
-
-/** W1-T12154: what an implement run's verdict says when the run wrote no `worker.assignment` row — that no worker
- *  was assigned, and the last stage the run reached: the verdict's own `stage` unless it is the generic `run.error`,
- *  else the last `run.phase` or row `stage` seen, else the last step written. An assigned or non-implement run gets
- *  no field. */
-function unassignedRunStage(): {
-  observe: (step: string, extra: Record<string, unknown>) => void;
-  verdictFields: (verdict: Record<string, unknown>) => Record<string, unknown>;
-} {
-  let implementRun = false;
-  let assigned = false;
-  let lastNamed: string | undefined;
-  let lastStep = "run.start";
-  const named = (value: unknown): string | undefined => typeof value === "string" && value.length > 0 ? value : undefined;
-  return {
-    observe(step, extra) {
-      if (step === "run.start") implementRun = extra.type === "implement";
-      if (step === "worker.assignment") assigned = true;
-      lastNamed = (step === "run.phase" ? named(extra.waiting_on) : named(extra.stage)) ?? lastNamed;
-      lastStep = step;
-    },
-    verdictFields(verdict) {
-      if (!implementRun || assigned) return {};
-      const own = named(verdict.stage);
-      return { worker_assigned: false, last_stage: (own !== "run.error" ? own : undefined) ?? lastNamed ?? lastStep };
-    },
   };
 }
 

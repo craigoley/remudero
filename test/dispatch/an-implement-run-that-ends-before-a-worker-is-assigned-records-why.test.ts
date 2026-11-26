@@ -4,24 +4,30 @@
  * MEASURED 2026-11-10: 600 of 1,030 implement runs in the core ledger ended with no worker assignment, and no row
  * said why. The run logger now writes `worker_assigned: false` and the last stage the run reached on such a run's
  * verdict, and the analytics time series counts the run apart from completed runs and durations.
+ *
+ * The stamp is `unassignedRunStage` in src/lib/non-worker-verdict.ts, which run-task.ts `benchmarkRunLedgerLogger`
+ * feeds every row and asks at its verdict; test/run-task-benchmark-run-wiring.test.ts proves that wiring through the
+ * real logger, so this suite does not add another direct importer of src/run-task.ts (the affected-reach ratchet).
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { buildAnalyticsTimeSeries } from "#src/lib/analytics-timeseries.js";
-import { endedBeforeWorkerAssignment } from "#src/lib/non-worker-verdict.js";
-import { benchmarkRunLedgerLogger } from "#src/run-task.js";
+import { endedBeforeWorkerAssignment, unassignedRunStage } from "#src/lib/non-worker-verdict.js";
 
 type Row = Record<string, unknown>;
 
-/** A dispatch run's logger whose rows land in `rows`, stamped with one run id and an advancing clock. */
+/** A run's rows, stamped with one run id and an advancing clock; each verdict carries the stamp the logger adds. */
 function runLogger(runId: string, startMs: number): { log: (step: string, extra?: Row) => void; rows: Row[] } {
   const rows: Row[] = [];
+  const reached = unassignedRunStage();
   let at = startMs;
-  const log = benchmarkRunLedgerLogger((step, fields) => {
+  const log = (step: string, extra: Row = {}): void => {
+    const fields = step === "verdict" ? { ...extra, ...reached.verdictFields(extra) } : extra;
     rows.push({ ts: new Date(at).toISOString(), run_id: runId, task_id: "W1-T1", step, ...fields });
     at += 60_000;
-  });
+    reached.observe(step, extra);
+  };
   return { log, rows };
 }
 

@@ -43,6 +43,34 @@ export function endedBeforeWorkerAssignment(line: Record<string, unknown>, runAs
   return !runAssigned && infrastructureRefusal(line) !== undefined;
 }
 
+/** W1-T12154: what an implement run's verdict says when the run wrote no `worker.assignment` row — that no worker
+ *  was assigned, and the last stage the run reached: the verdict's own `stage` unless it is the generic `run.error`,
+ *  else the last `run.phase` or row `stage` seen, else the last step written. An assigned or non-implement run gets
+ *  no field. run-task.ts `benchmarkRunLedgerLogger` feeds it every row it writes and stamps the verdict with it. */
+export function unassignedRunStage(): {
+  observe: (step: string, extra: Record<string, unknown>) => void;
+  verdictFields: (verdict: Record<string, unknown>) => Record<string, unknown>;
+} {
+  let implementRun = false;
+  let assigned = false;
+  let lastNamed: string | undefined;
+  let lastStep = "run.start";
+  const named = (value: unknown): string | undefined => typeof value === "string" && value.length > 0 ? value : undefined;
+  return {
+    observe(step, extra) {
+      if (step === "run.start") implementRun = extra.type === "implement";
+      if (step === "worker.assignment") assigned = true;
+      lastNamed = (step === "run.phase" ? named(extra.waiting_on) : named(extra.stage)) ?? lastNamed;
+      lastStep = step;
+    },
+    verdictFields(verdict) {
+      if (!implementRun || assigned) return {};
+      const own = named(verdict.stage);
+      return { worker_assigned: false, last_stage: (own !== "run.error" ? own : undefined) ?? lastNamed ?? lastStep };
+    },
+  };
+}
+
 export function lifetimeInfrastructureRefusal(line: Record<string, unknown>): string | undefined {
   return infrastructureRefusal(line) ??
     (typeof line.verdict === "string" && LIFETIME_ONLY_REFUSAL_VERDICTS.has(line.verdict) ? line.verdict : undefined);
