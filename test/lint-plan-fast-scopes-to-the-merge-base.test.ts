@@ -173,7 +173,8 @@ const SCOPE_CRITERIA: Array<[string, string]> = [["the thing is changed", `unit 
 
 interface ScopeFixture {
   design?: string;
-  acceptance?: Array<[string, string]>;
+  /** An optional third entry is the criterion's `kind` (W1-T14915: a guarded invariant stays quiet). */
+  acceptance?: Array<[string, string] | [string, string, string]>;
   /** Raw YAML lines for the bookkeeping fields, so a test edits exactly the bytes it names. */
   meta?: string[];
 }
@@ -187,7 +188,8 @@ function scopeRecord(id: string, f: ScopeFixture = {}): string {
     ...(f.meta ?? SCOPE_BASE_META),
     ...(f.design === undefined ? [] : [`  design: ${JSON.stringify(f.design)}`]),
     "  acceptance:",
-    ...(f.acceptance ?? SCOPE_CRITERIA).flatMap(([claim, proof]) => [`    - claim: ${JSON.stringify(claim)}`, `      proof: ${JSON.stringify(proof)}`]),
+    ...(f.acceptance ?? SCOPE_CRITERIA).flatMap(([claim, proof, kind]) => [`    - claim: ${JSON.stringify(claim)}`, `      proof: ${JSON.stringify(proof)}`,
+      ...(kind === undefined ? [] : [`      kind: ${kind}`])]),
     "",
   ].join("\n");
 }
@@ -274,7 +276,8 @@ test("W1-T12832 criterion 3: a task that declares is checked in full even on a m
       acceptance: [["invariant:keep-a — once", SCOPE_CRITERIA[0]![1]], ["invariant:keep-a — twice", `unit test: ${SCOPE_FIXTURE_TESTS[1]}`]],
     },
     "ZZ-Both": { design: "NO-INVARIANTS: nothing inherited\nINVARIANT keep-a: a stays", acceptance: [["invariant:keep-a — a stays", SCOPE_CRITERIA[0]![1]]] },
-    "ZZ-Good": { design: "INVARIANT keep-a: a stays", acceptance: [["invariant:keep-a — a stays", SCOPE_CRITERIA[0]![1]]] },
+    // W1-T14915: the well-formed control guards its invariant, so the unguarded-invariant warn names it nowhere.
+    "ZZ-Good": { design: "INVARIANT keep-a: a stays", acceptance: [SCOPE_CRITERIA[0]!, ["invariant:keep-a — a stays", `unit test: ${SCOPE_FIXTURE_TESTS[1]}`, "guard"]] },
   };
   const names = Object.keys(fixtures);
   const repo = scopePlanDiff(
