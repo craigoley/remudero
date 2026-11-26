@@ -218,13 +218,22 @@ test("W1-T12939 criterion 2: a daemon with no garden and judge census never writ
 
 // ── criterion 3 ──────────────────────────────────────────────────────────────────────────────────
 
-/** The beat is a shell child that reads `date`, a clock the shift preload never moves (W1-T14786), so
- *  fixture rows are aged from that same host clock, not from this process's `Date.now()`. */
-const hostClockMs = () => Math.floor(performance.timeOrigin + performance.now());
-const iso = (agoS: number) => new Date(hostClockMs() - agoS * 1000).toISOString().replace(/\.\d+Z$/, "Z");
+/** One clock for the fixture and the beat (W1-T14786): the rows are aged from this process's clock, which the shift
+ *  preload moves, and the beat's own `date -u` reads answer from the same clock through a stub, so a shifted run
+ *  shifts both sides together. Every other `date` call reaches the real one. */
+const clockMs = () => Date.now();
+const isoAt = (ms: number) => new Date(ms).toISOString().replace(/\.\d+Z$/, "Z");
+const iso = (agoS: number) => isoAt(clockMs() - agoS * 1000);
 const row = (agoS: number, step: string, rest: Record<string, unknown> = {}) => JSON.stringify({ ts: iso(agoS), step, ...rest });
+const dateStubAt = (ms: number) => `#!/bin/sh
+case "$*" in
+  '-u +%s') echo ${Math.floor(ms / 1000)} ;;
+  '-u +%Y-%m-%dT%H:%M:%SZ') echo ${isoAt(ms)} ;;
+  *) exec /bin/date "$@" ;;
+esac
+`;
 const drainVerdict = (ledger: string[] | undefined): string => {
-  const b = runBeat(ledger ? { ledger } : {});
+  const b = runBeat({ ...(ledger ? { ledger } : {}), dateStub: dateStubAt(clockMs()) });
   const line = b.published.split("\n").find((l) => l.startsWith("drain_verdict="));
   assert.ok(line, `the beat must publish drain_verdict: ${b.published}`);
   return line.slice("drain_verdict=".length);

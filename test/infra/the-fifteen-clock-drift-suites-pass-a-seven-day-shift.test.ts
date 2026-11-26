@@ -10,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -19,9 +19,11 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 type SweepRow = { suite: string };
 // `scripts/**` is outside tsconfig's `include`, so the sweep loads through a dynamic specifier, as
 // test/clock-sweep.test.ts loads it.
-const { classifySweep, SUITE_PRELOAD, suiteName, SWEEP_SHIFT_DAYS } = (await import(
+const { classifySweep, deriveCandidates, runnableCandidates, SUITE_PRELOAD, suiteName, SWEEP_SHIFT_DAYS } = (await import(
   pathToFileURL(join(REPO_ROOT, "scripts", "clock-sweep.mjs")).href)) as {
   classifySweep: (results: Map<string, { failed: boolean }>) => { newDrift: SweepRow[]; drifted: SweepRow[] };
+  deriveCandidates: () => string[];
+  runnableCandidates: (candidates: string[]) => string[];
   SUITE_PRELOAD: string;
   suiteName: (file: string) => string;
   SWEEP_SHIFT_DAYS: number;
@@ -139,34 +141,34 @@ function runShifted(suite: (typeof DRIFTING)[number], days: number): Promise<Run
 }
 
 /**
- * Every suite at the given shifts, one child at a time, resolving each shift's results as its last child finishes.
+ * Every suite at one shift through a pool, started on first use. Each suite's run is its own promise, so a test per
+ * suite waits only for that suite: one test awaiting all fifteen took ~155 s, past the proof runner's per-test
+ * timeout, while the pool still finishes all fifteen in one wall-clock pass.
  */
-function runShifts(shifts: readonly number[]): Map<number, Promise<Map<string, Run>>> {
-  const queue = shifts.flatMap((days) => DRIFTING.map((suite) => ({ suite, days })));
-  const results = new Map(shifts.map((days) => [days, new Map<string, Run>()]));
-  const settled = new Map(shifts.map((days) => {
-    let resolve!: (runs: Map<string, Run>) => void;
-    return [days, { promise: new Promise<Map<string, Run>>((r) => { resolve = r; }), resolve }];
+function runShift(days: number): Map<string, Promise<Run>> {
+  const settled = new Map(DRIFTING.map((suite) => {
+    let resolve!: (run: Run) => void;
+    return [suite.file, { promise: new Promise<Run>((r) => { resolve = r; }), resolve }] as const;
   }));
+  const queue = [...DRIFTING];
   // Half a child per core. Serially a proof took ~150 s against the reviewer's 180 s proof bound and failed on a hosted
   // runner (#20913); the children mostly wait, so a pool cuts that roughly in half. The flake screen runs twice
   // availableParallelism() copies of this file at once, and a core-sized pool there held 32 children and ~14.5 GB on
   // a 4-core, 15 GB box; half the cores keeps that load near one child per core per copy pair.
-  const workers = Array.from({ length: Math.max(1, Math.floor(availableParallelism() / 2)) }, async () => {
-    for (let job = queue.shift(); job !== undefined; job = queue.shift()) {
-      const runs = results.get(job.days)!;
-      runs.set(job.suite.file, await runShifted(job.suite, job.days));
-      if (runs.size === DRIFTING.length) settled.get(job.days)!.resolve(runs);
-    }
-  });
-  void Promise.all(workers);
-  return new Map([...settled].map(([days, { promise }]) => [days, promise]));
+  for (let w = 0; w < Math.max(1, Math.floor(availableParallelism() / 2)); w++) {
+    void (async () => {
+      for (let suite = queue.shift(); suite !== undefined; suite = queue.shift()) {
+        settled.get(suite.file)!.resolve(await runShifted(suite, days));
+      }
+    })();
+  }
+  return new Map([...settled].map(([file, { promise }]) => [file, promise]));
 }
-// Each shift runs only when a test asks for it, so a proof run that selects one test spawns one shift's children.
-const pools = new Map<number, Promise<Map<string, Run>>>();
-const runAll = (days: number): Promise<Map<string, Run>> => {
-  if (!pools.has(days)) pools.set(days, runShifts([days]).get(days)!);
-  return pools.get(days)!;
+// Each shift runs only when a test asks for it, so a proof run that selects one shift's tests spawns only its children.
+const pools = new Map<number, Map<string, Promise<Run>>>();
+const runOf = (days: number, file: string): Promise<Run> => {
+  if (!pools.has(days)) pools.set(days, runShift(days));
+  return pools.get(days)!.get(file)!;
 };
 
 /**
@@ -183,21 +185,41 @@ function verdict(run: Run): string {
   return `fail (tests ${tests}, fail ${fails}${notOk ? `: ${notOk}` : ""}${unrun.length ? `; no ok for ${unrun.length} pinned` : ""})`;
 }
 
-test("W1-T14786 the fifteen clock drift suites pass under a seven day clock shift", async () => {
-  const results = await runAll(7);
-  assert.equal(results.size, FIFTEEN.length);
-  const failing = [...results].map(([file, run]) => [file, verdict(run)]).filter(([, v]) => v !== "pass");
-  assert.deepEqual(failing, [], "every suite passes 7 days from now");
+const sweepId = (file: string) => suiteName(file.slice("test/".length));
+
+for (const suite of DRIFTING) {
+  test(`W1-T14786 the fifteen clock drift suites pass under a seven day clock shift: ${sweepId(suite.file)}`, async () => {
+    assert.equal(verdict(await runOf(7, suite.file)), "pass", `${suite.file} passes 7 days from now`);
+  });
+}
+
+// The report's input is the sweep's own discovery (deriveCandidates: an age surface and a date literal). A suite whose
+// fix removed its last date literal leaves that population, so the report never measures it again; it is named here,
+// and every other one of the fifteen must be a runnable candidate, so no pass below stands in for a suite the report
+// does not run.
+const DATE_LITERAL = /\d{4}-\d{2}-\d{2}/;
+const LEFT_THE_SWEEP = new Set(["sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views"]);
+const measured = () => new Set(runnableCandidates(deriveCandidates()));
+
+test("W1-T14786 the clock sweep reports no new drift for the fifteen suites: the sweep measures each one it can", () => {
+  const runnable = measured();
+  assert.deepEqual(FIFTEEN.map(sweepId).filter((suite) => !runnable.has(suite) && !LEFT_THE_SWEEP.has(suite)), [],
+    "every one of the fifteen is a runnable candidate of the sweep, or named as having left it");
+  for (const suite of LEFT_THE_SWEEP) {
+    assert.equal(runnable.has(suite), false, `${suite} is no longer a sweep candidate`);
+    assert.equal(DATE_LITERAL.test(readFileSync(join(REPO_ROOT, "test", `${suite}.test.ts`), "utf8")), false,
+      `${suite} left the sweep because it carries no date literal, the sweep's own rule`);
+  }
 });
 
-test("W1-T14786 the clock sweep reports no new drift for the fifteen suites", async () => {
-  const results = await runAll(SWEEP_SHIFT_DAYS);
-  // Positive control: a child that never reported its own summary would read as "not failed" to the classifier.
-  assert.deepEqual([...results].map(([file, run]) => [file, verdict(run)]).filter(([, v]) => v !== "pass"), [],
-    `every suite runs and passes at +${SWEEP_SHIFT_DAYS} days`);
-  const bySuite = new Map([...results].map(([file, run]) => [suiteName(file.slice("test/".length)), run]));
-  const sweep = classifySweep(bySuite);
-  assert.deepEqual(sweep.newDrift.map((row) => row.suite), [],
-    `the sweep's own classifier at +${SWEEP_SHIFT_DAYS} days names none of the fifteen as new drift`);
-  assert.deepEqual(sweep.drifted.map((row) => row.suite), []);
-});
+for (const suite of DRIFTING) {
+  test(`W1-T14786 the clock sweep reports no new drift for the fifteen suites: ${sweepId(suite.file)}`, async () => {
+    const run = await runOf(SWEEP_SHIFT_DAYS, suite.file);
+    // Positive control: a child that never reported its own summary would read as "not failed" to the classifier.
+    assert.equal(verdict(run), "pass", `${suite.file} runs and passes at +${SWEEP_SHIFT_DAYS} days`);
+    if (LEFT_THE_SWEEP.has(sweepId(suite.file))) return; // the report does not measure it; the test above says why
+    const sweep = classifySweep(new Map([[sweepId(suite.file), run]]));
+    assert.deepEqual(sweep.newDrift.map((row) => row.suite), [], `the sweep's own classifier names ${suite.file} as no new drift`);
+    assert.deepEqual(sweep.drifted.map((row) => row.suite), []);
+  });
+}
