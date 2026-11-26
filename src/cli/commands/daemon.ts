@@ -2114,6 +2114,8 @@ export async function daemonCommand(
   ];
   // W1-T14873: the SRE lane page reads the whole ledger union; the exit waits for it only after the lock is released.
   const afterRelease: Array<{ resource: string; settled: Promise<void> }> = [];
+  // W1-T14916: after the release, the in-flight page still finishes but no new sweep pass or worker starts.
+  const retirement = createDaemonRetirement(log);
   try {
   if (standbyPromotion) {
     // W1-T14544: the checkout sync a standby skipped runs now that it holds the lock; a refusal releases it.
@@ -2671,14 +2673,14 @@ export async function daemonCommand(
     const buildSweepHook: DaemonSweepHookBuilder = (...args) => {
       const sweep: (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> =
         (deps.buildSweepHook ?? daemonDefaultBuildSweepHook)(...args);
-      return withGoalRemeasurement(
+      return retirement.refuse("sweep", withGoalRemeasurement(
         withCiJudgeAfterSweep(withSweepTaskReaders(sweepTaskReaders, sweep), () => target.isSelf ? kickCiJudge?.() : undefined),
         () => remeasureSettledGoals({ repoRoot: target.isSelf ? effectiveRepoRoot : targetCheckoutRoot, stateDir: join(config.root, "state"),
           tasks: activePlanRef.current.tasks, settled: (id) => lastProj?.get(id)?.indeterminate ? undefined : lastProj?.get(id)?.merged,
-          log }), log);
+          log }), log));
     };
-    const buildSweepLightHook: DaemonSweepLightHookBuilder = (...args) =>
-      withSweepTaskReaders(sweepTaskReaders, (deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook)(...args));
+    const buildSweepLightHook: DaemonSweepLightHookBuilder = (...args) => retirement.refuse("sweep_light",
+      withSweepTaskReaders(sweepTaskReaders, (deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook)(...args)));
     if (standby?.ports && standbyPromotion) logPromoted(standby.ports, standbyPromotion);
     // W1-T14644: the latest refresh's projection phases, held until the selection timing row takes them.
     let pendingRefreshMergedPhases: ProjectPlanPhases | undefined;
@@ -3327,7 +3329,7 @@ export async function daemonCommand(
         // hooks above and gated the same way. The rung is DEFAULT OFF in policy data — this line
         // makes the switch REACHABLE, it does not turn anything on.
         checkAutoTriage: autoTriageHooks?.checkAutoTriage,
-        runAutoTriage: autoTriageHooks?.runAutoTriage,
+        runAutoTriage: autoTriageHooks ? retirement.refuse("auto_triage", autoTriageHooks.runAutoTriage) : undefined,
         // W1-T1040: THE GITHUB-SIDE POSTURE DRIFT CHECK — reads `security_and_analysis` +
         // `enforce_admins` at most once a day (github-posture.ts's own cadence gate), diffs
         // against the recorded state/github-posture.json baseline, and returns only what
@@ -3478,7 +3480,7 @@ export async function daemonCommand(
     // reason still resolves through `daemonExitCode` itself, unchanged.
     return daemonExitCodeForSummary(summary);
   } finally {
-    await closeDaemonCleanup(cleanup, log, clockFromMillisFn(deps.now), afterRelease);
+    await closeDaemonCleanup(cleanup, log, clockFromMillisFn(deps.now), afterRelease, retirement.retire);
   }
   } finally {
     archivedLifetime.history?.close?.();
@@ -3499,6 +3501,8 @@ export async function closeDaemonCleanup(
   clock: Pick<Clock, "now">,
   /** W1-T14873: work the exit still finishes, but only after the drain lock is released, so no successor waits on it. */
   afterRelease: Array<{ resource: string; settled: Promise<void> }> = [],
+  /** W1-T14916: called once every resource, the drain lock last, is released, before the after-release work settles. */
+  onReleased?: () => void,
 ): Promise<void> {
   const ordered = [...cleanup].reverse();
   const closesMs: Record<string, number> = {};
@@ -3528,6 +3532,7 @@ export async function closeDaemonCleanup(
     const key = `${resource}_ms`;
     closesMs[key] = (closesMs[key] ?? 0) + clock.now() - closeStartMs;
   }
+  onReleased?.();
   if (afterRelease.length === 0) return;
   const afterMs: Record<string, number> = {};
   const afterStartMs = clock.now();
@@ -3542,6 +3547,28 @@ export async function closeDaemonCleanup(
     // A timing row that cannot be written changes nothing: the lock is already released.
     console.error("daemon after-release reporting failed", { error: String(error) });
   }
+}
+
+/** W1-T14916: once a retiring daemon releases its drain lock, the successor owns the sweeps and their workers. */
+export interface DaemonRetirement {
+  /** Marks this process retired; called once the drain lock is released. */
+  retire: () => void;
+  retired: () => boolean;
+  /** Wraps a hook that starts a sweep pass or spawns a worker: once retired it starts nothing and says so. */
+  refuse: <A extends unknown[], R>(hook: string, start: (...args: A) => R) => (...args: A) => Promise<Awaited<R> | undefined>;
+}
+
+export function createDaemonRetirement(log: (step: string, extra?: Record<string, unknown>) => void): DaemonRetirement {
+  let retired = false;
+  return {
+    retire: () => { retired = true; },
+    retired: () => retired,
+    refuse: <A extends unknown[], R>(hook: string, start: (...args: A) => R) => async (...args: A): Promise<Awaited<R> | undefined> => {
+      if (!retired) return await start(...args);
+      log("daemon.retired_start_refused", { hook, reason: "drain lock released; the successor owns this work" });
+      return undefined;
+    },
+  };
 }
 
 /** The daemon sends the same atomic budget to its read worker in the existing worker input. */
