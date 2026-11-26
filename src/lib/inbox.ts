@@ -1613,8 +1613,9 @@ export function classifyProposal(
     // reframed still waits for its redraft, and the release draft's checks still apply.
     const parkedId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
     const reframed = (proposal.reframeHistory ?? []).some((round) => !round.retracted);
-    // A task already released to the fleet is never offered for release again.
-    if (parkedId && !reframed && isReleasableTask(ctx.plan.byId.get(parkedId)) && ctx.isReleasedHumanTask?.(parkedId) !== true &&
+    // A task already released to the fleet is never offered for release again. A caller that cannot say whether the
+    // task was released (no isReleasedHumanTask, as in `rmd inbox`) gets no draft-free release: unknown is not "no".
+    if (parkedId && !reframed && isReleasableTask(ctx.plan.byId.get(parkedId)) && ctx.isReleasedHumanTask?.(parkedId) === false &&
       proposal.evidenceAnchors.every((a) => ctx.grepAnchorTrue(a)) &&
       !(proposal.conflictsWith ?? []).some((id) => ctx.openProposalIds.has(id))) {
       return { proposalId: proposal.id, state: "ready", reasons, releaseTaskId: parkedId, proposal, ...referentUnverified };

@@ -23,7 +23,7 @@ function context(fields = "", verify = "human", status = "queued"): ReadinessCon
   attempts: 0
   ${fields}
 `, "parked-release-fixture");
-  return { plan, isMerged: () => false, grepAnchorTrue: () => true, openProposalIds: new Set(), isRatified: () => false };
+  return { plan, isMerged: () => false, grepAnchorTrue: () => true, openProposalIds: new Set(), isRatified: () => false, isReleasedHumanTask: () => false };
 }
 
 test("W1-T14977 criterion 1: a parked verify:human task's ask with no draft is ready to approve as its release", () => {
@@ -51,6 +51,7 @@ test("W1-T14977 criterion 2: invariant:release-only — no draft-free release fo
   notReleased(ask(undefined, { evidenceAnchors: [{ description: "x still names gone", pattern: "gone", path: "src/x.ts" }] }), { ...context(), grepAnchorTrue: () => false }, "drifted evidence");
   notReleased(ask(undefined, { conflictsWith: ["other:1"] }), { ...context(), openProposalIds: new Set(["other:1"]) }, "an open conflict");
   notReleased(ask(), { ...context(), isReleasedHumanTask: (id) => id === ID }, "a task already released to the fleet");
+  notReleased(ask(), { ...context(), isReleasedHumanTask: undefined }, "a caller that cannot say whether the task was released");
 });
 
 test("W1-T14977 criterion 3: an ask with a draft is still judged by that draft", () => {

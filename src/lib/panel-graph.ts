@@ -4410,7 +4410,8 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
   return {
     approve: validatedInboxAction(validateApproveProposal, async (input, actor, respond) => {
       if (improvementReviewRequired(input.proposalId, respond)) return;
-      const taskId = /^verify-human:([A-Za-z0-9-]+)$/.exec(input.proposalId)?.[1];
+      // W1-T14977: a machine-judge ask is approvable as its task's release too, so an archived release refuses both.
+      const taskId = /^(?:verify-human|machine-judge):([A-Za-z0-9-]+)$/.exec(input.proposalId)?.[1];
       const retained = taskId ? await readRetainedHumanReleases(deps) : undefined;
       const receipt = taskId ? retained?.receipts.get(taskId) : undefined;
       if (receipt) {

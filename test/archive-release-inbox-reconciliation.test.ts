@@ -173,3 +173,20 @@ test("W1-T4768: a live positive release remains proven when a retained archive i
       "the archived-only release remains unproven during the read fault");
   });
 });
+
+test("W1-T14977: an archived release also refuses a machine-judge ask's draft-free approval", async (t) => {
+  const world = fixture();
+  t.after(() => rmSync(world.root, { recursive: true, force: true }));
+  const ask = "machine-judge:W1-T217";
+  updateProposalRegistry(world.registryPath, (current) => [...current, { id: ask, summary: "Approve W1-T217's release", evidenceAnchors: [] }]);
+  await withServer(world.deps, async (base) => {
+    const approve = await fetch(`${base}/v1/inbox/approve`, {
+      method: "POST",
+      headers: { authorization: "Bearer write-token", "content-type": "application/json" },
+      body: JSON.stringify({ proposalId: ask }),
+    });
+    assert.equal(approve.status, 409, "W1-T217's only release row is archived, so its machine-judge ask is not released again");
+    assert.match(String(((await approve.json()) as { detail?: string }).detail), /already released; .*RELEASE-217/);
+    assert.deepEqual(world.approved, []);
+  });
+});
