@@ -305,8 +305,9 @@ fi
 # a different checked-out branch never answers for it; read as DATA: depcruise parses it, runs none of it) with the
 # GATE's own depcruise and config, and checks the ring count against that commit's cycle baseline with the gate's
 # scripts/cycle-ratchet.mjs. A new ring refuses with `cycle-ratchet:` lines, so the fix lane's next strike gets them.
-# "Adds an import" compares each changed file's import specifiers in full text, so one split over lines still counts,
-# against the remote's old tip for a branch update, or origin/main's merge base for a new branch.
+# "Adds an import" compares dependency-cruiser's parsed edges in the pushed tree with the comparison tree, so
+# comments and syntax layout cannot manufacture or hide an edge. On a branch update the comparison is the remote
+# tip; on a new branch it is origin/main's merge base. Only rings new relative to that comparison tree refuse.
 cycle_ratchet_skip() { echo "pre-push: cycle-ratchet — $1, skipped (a named skip, NOT a pass)" >&2; }
 if has cycle-ratchet.mjs && [ -x "$gate_root/node_modules/.bin/depcruise" ] && [ -f "$gate_root/.dependency-cruiser.cjs" ]; then
   cycle_base=""
@@ -315,49 +316,78 @@ if has cycle-ratchet.mjs && [ -x "$gate_root/node_modules/.bin/depcruise" ] && [
   else
     cycle_base="$(git merge-base origin/main "$head_sha" 2>/dev/null || true)"
   fi
-  cycle_added="$(git diff --no-renames --name-only --diff-filter=AM "$cycle_base" "$head_sha" -- src 2>/dev/null \
-    | node -e '
-      const { execFileSync } = require("node:child_process");
-      const [base, head] = process.argv.slice(1);
-      const re = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*["'"'"'`]([^"'"'"'`]+)["'"'"'`]/g;
-      const specs = (rev, path) => {
-        let text = "";
-        try { text = execFileSync("git", ["show", `${rev}:${path}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: Infinity }); } catch { return new Map(); }
-        const counts = new Map();
-        for (const m of text.matchAll(re)) counts.set(m[1], (counts.get(m[1]) ?? 0) + 1);
-        return counts;
-      };
-      const paths = require("node:fs").readFileSync(0, "utf8").split("\n").filter(Boolean);
-      for (const path of paths) {
-        const before = specs(base, path);
-        for (const [spec, n] of specs(head, path)) if (n > (before.get(spec) ?? 0)) { console.log(`${path}: ${spec}`); process.exit(0); }
-      }' "$cycle_base" "$head_sha" 2>/dev/null || echo "unreadable")"
   if [ -z "$cycle_base" ]; then
     cycle_ratchet_skip "no remote tip or merge base with origin/main"
-  elif [ -z "$cycle_added" ]; then
-    cycle_ratchet_skip "this diff adds no import under src/"
   elif ! cycle_tree="$(mktemp -d "${TMPDIR:-/tmp}/rmd-prepush-cycles-XXXXXX")"; then
     cycle_ratchet_skip "no temporary directory for the pushed tree"
   else
-    cycle_baseline="$cycle_tree/cycle-baseline.json"
-    git show "$head_sha:scripts/cycle-baseline.json" >"$cycle_baseline" 2>/dev/null \
-      || cp "$gate_root/scripts/cycle-baseline.json" "$cycle_baseline" 2>/dev/null || rm -f "$cycle_baseline"
-    if ! git archive "$head_sha" src | tar -x -C "$cycle_tree" 2>/dev/null; then
-      cycle_ratchet_skip "the pushed commit's src/ could not be extracted"
-    elif [ ! -f "$cycle_baseline" ]; then
-      cycle_ratchet_skip "no scripts/cycle-baseline.json"
+    cycle_base_tree="$cycle_tree/base"
+    cycle_head_tree="$cycle_tree/head"
+    mkdir -p "$cycle_base_tree" "$cycle_head_tree"
+    if ! git archive "$cycle_base" src 2>/dev/null | tar -x -C "$cycle_base_tree" 2>/dev/null \
+      || ! git archive "$head_sha" src 2>/dev/null | tar -x -C "$cycle_head_tree" 2>/dev/null; then
+      cycle_ratchet_skip "the comparison or pushed tree could not be extracted"
     else
       for cycle_cfg in package.json tsconfig.json; do
-        git show "$head_sha:$cycle_cfg" >"$cycle_tree/$cycle_cfg" 2>/dev/null || rm -f "$cycle_tree/$cycle_cfg"
+        git show "$cycle_base:$cycle_cfg" >"$cycle_base_tree/$cycle_cfg" 2>/dev/null || rm -f "$cycle_base_tree/$cycle_cfg"
+        git show "$head_sha:$cycle_cfg" >"$cycle_head_tree/$cycle_cfg" 2>/dev/null || rm -f "$cycle_head_tree/$cycle_cfg"
       done
-      ln -s "$gate_root/node_modules" "$cycle_tree/node_modules"
+      ln -s "$gate_root/node_modules" "$cycle_base_tree/node_modules"
+      ln -s "$gate_root/node_modules" "$cycle_head_tree/node_modules"
       # depcruise exits non-zero when it reports a violation, so its JSON is judged, never its exit code.
-      (cd "$cycle_tree" && "$gate_root/node_modules/.bin/depcruise" src --config "$gate_root/.dependency-cruiser.cjs" \
-        --output-type json >"$cycle_tree/cruise.json" 2>/dev/null) || true
-      if ! node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).summary.violations.length' "$cycle_tree/cruise.json" 2>/dev/null; then
-        cycle_ratchet_skip "the cruise produced no readable result"
-      elif ! node "$gate_root/scripts/cycle-ratchet.mjs" --json "$cycle_tree/cruise.json" --baseline "$cycle_baseline" >/dev/null; then
+      (cd "$cycle_base_tree" && "$gate_root/node_modules/.bin/depcruise" src --config "$gate_root/.dependency-cruiser.cjs" \
+        --output-type json >"$cycle_base_tree/cruise.json" 2>/dev/null) || true
+      (cd "$cycle_head_tree" && "$gate_root/node_modules/.bin/depcruise" src --config "$gate_root/.dependency-cruiser.cjs" \
+        --output-type json >"$cycle_head_tree/cruise.json" 2>/dev/null) || true
+      cycle_result="$(node -e '
+        const fs = require("node:fs");
+        const [basePath, headPath] = process.argv.slice(1);
+        let base, head;
+        try {
+          base = JSON.parse(fs.readFileSync(basePath, "utf8"));
+          head = JSON.parse(fs.readFileSync(headPath, "utf8"));
+        } catch { process.exit(2); }
+        const edges = (result) => {
+          const counts = new Map();
+          for (const mod of result.modules ?? []) for (const dep of mod.dependencies ?? []) {
+            const target = dep.resolved ?? dep.module;
+            if (!target) continue;
+            const key = `${mod.source} -> ${target}`;
+            counts.set(key, (counts.get(key) ?? 0) + 1);
+          }
+          return counts;
+        };
+        const beforeEdges = edges(base), afterEdges = edges(head);
+        let added = false;
+        for (const [edge, count] of afterEdges) if (count > (beforeEdges.get(edge) ?? 0)) added = true;
+        if (!added) { console.log("NO_ADDED_EDGE"); process.exit(0); }
+        const canonical = (modules) => {
+          const ring = modules.length > 1 && modules.at(-1) === modules[0] ? modules.slice(0, -1) : [...modules];
+          if (!ring.length) return "";
+          let at = 0;
+          for (let i = 1; i < ring.length; i++) if (ring[i] < ring[at]) at = i;
+          return [...ring.slice(at), ...ring.slice(0, at)].join(" -> ");
+        };
+        const cycles = (result) => new Set((result.summary?.violations ?? [])
+          .filter((v) => v.rule?.name === "no-circular")
+          .map((v) => canonical([v.from, ...(v.cycle ?? []).map((c) => typeof c === "string" ? c : c.name)])));
+        const beforeCycles = cycles(base), afterCycles = cycles(head);
+        for (const ring of [...afterCycles].filter((ring) => !beforeCycles.has(ring)).sort()) console.log(`NEW_RING ${ring}`);
+        if (![...afterCycles].some((ring) => !beforeCycles.has(ring))) console.log("NO_NEW_RING");
+      ' "$cycle_base_tree/cruise.json" "$cycle_head_tree/cruise.json" 2>/dev/null)"
+      cycle_status=$?
+      if [ "$cycle_status" -ne 0 ]; then
+        cycle_ratchet_skip "the comparison cruise produced no readable result"
+      elif [ "$cycle_result" = "NO_ADDED_EDGE" ]; then
+        cycle_ratchet_skip "this diff adds no parsed import edge under src/"
+      elif printf '%s\n' "$cycle_result" | grep -q '^NEW_RING '; then
         fail=1
+        echo "cycle-ratchet: BLOCKED -- new dependency cycle(s) detected" >&2
+        while IFS= read -r cycle_ring_line; do
+          case "$cycle_ring_line" in NEW_RING\ *) echo "cycle-ratchet: ${cycle_ring_line#NEW_RING }" >&2 ;; esac
+        done <<EOF_CYCLE_RESULT
+$cycle_result
+EOF_CYCLE_RESULT
       fi
     fi
     rm -rf "$cycle_tree"

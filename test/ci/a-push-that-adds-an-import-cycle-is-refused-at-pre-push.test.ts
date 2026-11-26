@@ -68,7 +68,7 @@ test("W1-T14945 criterion 1: a push whose diff closes an import ring is refused 
   try {
     commit(quiet, "src/lib/c.ts", "export const c = 3;\n");
     const { status, stderr } = push(quiet);
-    assert.match(stderr, /cycle-ratchet — this diff adds no import under src\/, skipped \(a named skip, NOT a pass\)/);
+    assert.match(stderr, /cycle-ratchet — this diff adds no parsed import edge under src\/, skipped \(a named skip, NOT a pass\)/);
     assert.equal(status, 0, stderr);
   } finally { quiet.cleanup(); }
 });
@@ -98,6 +98,16 @@ test("W1-T14945 criterion 1: a push whose diff closes an import ring is refused 
     const { status, stderr } = push(repo);
     assert.notEqual(status, 0, `a multiline import is still an added import:\n${stderr}`);
     assert.match(stderr, /src\/lib\/a\.ts -> src\/lib\/b\.ts/, stderr);
+  } finally { repo.cleanup(); }
+});
+
+test("W1-T14945 criterion 1: parsed imports with block comments still close and name an import ring", () => {
+  const repo = fixture();
+  try {
+    commit(repo, "src/lib/b.ts", `import { a } from /* valid trivia */ "${sibling("a")}";\nexport const b = 1;\nexport const viaA = () => a;\n`);
+    const { status, stderr } = push(repo);
+    assert.notEqual(status, 0, `a comment between from and the specifier cannot hide the import:\n${stderr}`);
+    assert.match(stderr, /^cycle-ratchet: src\/lib\/a\.ts -> src\/lib\/b\.ts$/m, stderr);
   } finally { repo.cleanup(); }
 });
 
@@ -151,7 +161,32 @@ test("W1-T14945 criterion 2: a cycle-free push passes the gate as before, and a 
     const tip = repo.git("rev-parse", "HEAD");
     commit(repo, "src/lib/c.ts", `${CLEAN_C}export const d = 4;\n`);
     const { status, stderr } = push(repo, "HEAD", tip);
-    assert.match(stderr, /cycle-ratchet — this diff adds no import under src\/, skipped/, `the update adds no import past the remote tip:\n${stderr}`);
+    assert.match(stderr, /cycle-ratchet — this diff adds no parsed import edge under src\/, skipped/, `the update adds no import past the remote tip:\n${stderr}`);
+    assert.equal(status, 0, stderr);
+  } finally { repo.cleanup(); }
+});
+
+test("W1-T14945 criterion 2: an acyclic edge on a branch update does not reject a ring already at its remote tip", () => {
+  const repo = fixture();
+  try {
+    commit(repo, "src/lib/b.ts", RING_B);
+    const remoteTip = repo.git("rev-parse", "HEAD");
+    commit(repo, "src/lib/c.ts", CLEAN_C);
+    const { status, stderr } = push(repo, "HEAD", remoteTip);
+    assert.doesNotMatch(stderr, /^cycle-ratchet: .+ -> .+$/m, stderr);
+    assert.equal(status, 0, `the ring predates this push and remains unchanged:\n${stderr}`);
+  } finally { repo.cleanup(); }
+});
+
+test("W1-T14945 criterion 2: an import quoted inside a comment is a named no-import skip even with a pre-existing ring", () => {
+  const repo = fixture();
+  try {
+    commit(repo, "src/lib/b.ts", RING_B);
+    const remoteTip = repo.git("rev-parse", "HEAD");
+    commit(repo, "src/lib/c.ts", `// import { a } from "${sibling("a")}";\nexport const c = 3;\n`);
+    const { status, stderr } = push(repo, "HEAD", remoteTip);
+    assert.match(stderr, /cycle-ratchet — this diff adds no parsed import edge under src\/, skipped \(a named skip, NOT a pass\)/, stderr);
+    assert.doesNotMatch(stderr, /^cycle-ratchet: .+ -> .+$/m, stderr);
     assert.equal(status, 0, stderr);
   } finally { repo.cleanup(); }
 });
