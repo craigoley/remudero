@@ -83,14 +83,31 @@ export interface GhApiFetchPacing {
 const defaultGhApiRead = async (args: string[]): Promise<string> => String(await ghInteractiveRead(args,
   { encoding: "utf8", maxBuffer: GH_MAX_BUFFER_BYTES }));
 
+/** W1-T14944: the first wait after a GitHub server error, doubled per retry up to {@link SERVER_ERROR_RETRY_MAX_MS}. */
+const SERVER_ERROR_RETRY_FIRST_MS = 1_000;
+const SERVER_ERROR_RETRY_MAX_MS = 60_000;
+
+/** W1-T14944: a read that failed with a transient GitHub server error (HTTP 500, 502, 503 or 504), as `gh` names it. */
+export function isGhServerError(error: unknown): boolean {
+  const e = error as { stderr?: string | Buffer; message?: string } | null | undefined;
+  return /\bHTTP 50[0234]\b/.test(`${e?.stderr ?? ""}\n${e?.message ?? ""}`);
+}
+
 export function ghApiFetch(read: (args: string[]) => Promise<string> = defaultGhApiRead, pacing: GhApiFetchPacing = {}): GithubPageFetch {
   const sleep = pacing.sleep ?? sleepFor;
   return async (path) => {
     let body: string;
+    let serverErrorWaitMs = SERVER_ERROR_RETRY_FIRST_MS;
     for (;;) {
       await pacing.beforeRead?.();
       try { body = await read(["api", path]); break; }
       catch (error) {
+        // W1-T14944: a 5xx is GitHub's own transient failure, so the same page is retried with backoff, no attempt cap.
+        if (classifyGhLimitFailure(error) === undefined && isGhServerError(error)) {
+          await sleep(serverErrorWaitMs);
+          serverErrorWaitMs = Math.min(serverErrorWaitMs * 2, SERVER_ERROR_RETRY_MAX_MS);
+          continue;
+        }
         if (classifyGhLimitFailure(error) === undefined) {
           const reason = "github-read-failed";
           return { ok: false, reason };

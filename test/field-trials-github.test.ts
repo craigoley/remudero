@@ -180,7 +180,7 @@ test("field trials github names unavailable detail, an exhausted budget and a re
 test("field trials github default seam shells gh api and turns a failed read into a reason", async () => {
   const shim = ghShim([
     { when: "repos/o/r/pulls", stdout: JSON.stringify([pr(1, 1)]) },
-    { when: "repos/o/r/commits", stderr: "HTTP 502", exit: 1 },
+    { when: "repos/o/r/commits", stderr: "HTTP 404: Not Found", exit: 1 },
   ]);
   const cache = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}field-trials-gh-cache-`));
   const saved = { PATH: process.env.PATH, RMD_GH_CACHE_HOME: process.env.RMD_GH_CACHE_HOME };
