@@ -84,12 +84,33 @@ test("W1-T14944 criterion 2: a non-5xx read failure is not retried, when gh's UR
   assert.deepEqual(sleeps, [], "and waits for nothing");
 });
 
-test("W1-T14944 criterion 2: a non-5xx read failure is not retried, unless gh's own last stderr line is the 5xx status", () => {
+test("W1-T14944 criterion 2: a non-5xx read failure is not retried, unless gh's own status line is the 5xx status", () => {
   const stderr = (text: string) => ({ stderr: text });
   assert.equal(isGhServerError(stderr("gh: Server Error (HTTP 502)\n")), true);
+  assert.equal(isGhServerError(stderr("gh: HTTP 503\n")), true, "gh 2.63.2's bare form for a non-JSON body");
   assert.equal(isGhServerError(stderr("{\"message\":\"x\"}\ngh: Bad Gateway (HTTP 502)\r\n")), true);
+  assert.equal(isGhServerError(stderr("gh: HTTP 502\nAuthorize in your web browser: https://x\n")), true, "a hint after the status");
   assert.equal(isGhServerError(stderr("gh: Not Found (HTTP 404)\n")), false);
-  assert.equal(isGhServerError(stderr("gh: Server Error (HTTP 502)\nparse \"x\": invalid URL escape \"%zz\"\n")), false);
+  assert.equal(isGhServerError(stderr("gh: HTTP 404\n")), false);
+  assert.equal(isGhServerError(stderr("gh: HTTP 5020\n")), false);
+  assert.equal(isGhServerError(stderr("gh: Not Found (HTTP 404)\ngh: HTTP 502\n")), false, "only gh's first status line counts");
   assert.equal(isGhServerError(stderr('parse "https://api.github.com/repos/o/gh: x (HTTP 502)": invalid URL escape "%zz"\n')), false);
   assert.equal(isGhServerError(new Error("gh: Server Error (HTTP 502)")), false, "the message alone is caller text");
+});
+
+test("W1-T14944 criterion 1: a page read that fails with HTTP 502 twice and then succeeds returns the page, in gh 2.63.2's bare form", async () => {
+  // deploy/Dockerfile pins gh 2.63.2, which prints `gh: HTTP 502` when GitHub's 502 body is not JSON.
+  for (const stderr of ["gh: HTTP 502\n", "gh: HTTP 500\n", "gh: HTTP 503\n", "gh: HTTP 504\n"]) {
+    const sleeps: number[] = [];
+    let calls = 0;
+    const page = await ghApiFetch(async () => {
+      calls += 1;
+      if (calls > 4) return "[]"; // a non-retrying build stops on its first throw; this guards a looping one
+      if (calls <= 2) throw Object.assign(new Error("Command failed: gh api repos/o/r/pulls"), { stderr });
+      return PAGE;
+    }, { sleep: async (ms) => { sleeps.push(ms); } })("repos/o/r/pulls");
+    assert.deepEqual(page, { ok: true, items: [{ number: 1 }] }, stderr);
+    assert.equal(calls, 3, `${stderr.trim()} is retried twice, then the page reads`);
+    assert.deepEqual(sleeps, [1_000, 2_000]);
+  }
 });
