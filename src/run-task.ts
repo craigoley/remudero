@@ -1851,7 +1851,7 @@ import {
   type FilingDiffFile,
   type PlanFilingDiffAtHead,
 } from "./lib/body-repair.js";
-import { fixRungInputFields, prBodyDigest } from "./lib/sweep.js";
+import { prBodyDigest } from "./lib/sweep.js";
 import { diagnoseBodyDefects, rewriteBodyProof } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
