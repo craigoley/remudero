@@ -7,9 +7,10 @@ import {
 
 test("the code time_to_merge stage recovers", async () => {
   const now = Date.parse("2026-11-24T20:02:00Z");
+  const taskId = "W1-T14710";
   const pr: OpenPrView = {
     prNumber: 20731, prUrl: "https://github.com/craigoley/remudero/pull/20731",
-    taskId: "W1-T14710", headSha: "77afb99a4", isPlanFiling: false,
+    taskId, headSha: "77afb99a4", isPlanFiling: false, autoMergeArmed: false,
     lastActivityAt: new Date(now - 9 * 60_000).toISOString(),
     reviewState: "pending", checksState: "green", mergeState: "clean",
     changedFiles: ["src/lib/daemon.ts"], unmetCriteria: [], priorStrikes: 0,
@@ -26,8 +27,8 @@ test("the code time_to_merge stage recovers", async () => {
     readBranchProtectionStrict: () => false,
     refreshCiRunForHead: () => {
       registerChildWork({
-        runId: reviewRunId, kind: "review", taskId: pr.taskId, prNumber: pr.prNumber,
-        headSha: pr.headSha, reviewKey: `${pr.taskId}@${pr.headSha}`,
+        runId: reviewRunId, kind: "review", taskId, prNumber: pr.prNumber,
+        headSha: pr.headSha, reviewKey: `${taskId}@${pr.headSha}`,
       });
       return false;
     },
