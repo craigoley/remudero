@@ -8108,6 +8108,8 @@ function processTableIsAbsent(stat: (path: string) => unknown): boolean {
     stat("/proc");
     return false;
   } catch (e) {
+    // Only ENOENT proves the host HAS no process table; any other stat failure (EACCES, EIO) leaves a table that may exist,
+    // so it reads "present" and the census's unknown keeps the tree — an unproven absence never authorizes a removal.
     return (e as NodeJS.ErrnoException).code === "ENOENT";
   }
 }
