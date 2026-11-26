@@ -11,7 +11,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -148,9 +148,11 @@ function runShifts(shifts: readonly number[]): Map<number, Promise<Map<string, R
     let resolve!: (runs: Map<string, Run>) => void;
     return [days, { promise: new Promise<Map<string, Run>>((r) => { resolve = r; }), resolve }];
   }));
-  // One child at a time: the flake screen already runs eight copies of this file at once, so a pool here multiplied
-  // into 32 shifted children on a 4-core runner and both tests timed out (#20913). Run alone, the cases take ~2 min.
-  const workers = Array.from({ length: 1 }, async () => {
+  // Half a child per core. Serially a proof took ~150 s against the reviewer's 180 s proof bound and failed on a hosted
+  // runner (#20913); the children mostly wait, so a pool cuts that roughly in half. The flake screen runs twice
+  // availableParallelism() copies of this file at once, and a core-sized pool there held 32 children and ~14.5 GB on
+  // a 4-core, 15 GB box; half the cores keeps that load near one child per core per copy pair.
+  const workers = Array.from({ length: Math.max(1, Math.floor(availableParallelism() / 2)) }, async () => {
     for (let job = queue.shift(); job !== undefined; job = queue.shift()) {
       const runs = results.get(job.days)!;
       runs.set(job.suite.file, await runShifted(job.suite, job.days));
