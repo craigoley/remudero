@@ -273,6 +273,7 @@ export async function planFieldTrialsCaseFiles(source: FieldTrialsCaseFileSource
   carry.listedPrs = listed.listedPrs;
   if (listed.listedThrough !== undefined) carry.listedThrough = listed.listedThrough;
   const creditedBy = new Map<string, number[]>();
+  const ambiguous = new Set<string>();
   const fromListing = new Set<string>();
   for (const [number, tasks] of Object.entries(listed.listedPrs)) {
     for (const task of tasks) creditedBy.set(task, [...(creditedBy.get(task) ?? []), Number(number)]);
@@ -285,7 +286,7 @@ export async function planFieldTrialsCaseFiles(source: FieldTrialsCaseFileSource
     // The listing index answers every unlinked task with no read of its own; a task it names no PR for has none
     // among the PRs listed so far, and a PR opened later is listed by the next build's pass.
     const credited = creditedBy.get(taskId) ?? [];
-    if (credited.length > 1) { counts.listingAmbiguous += 1; continue; }
+    if (credited.length > 1) { counts.listingAmbiguous += 1; ambiguous.add(taskId); continue; }
     if (credited.length === 1) { prNumbers.set(taskId, credited[0]!); fromListing.add(taskId); counts.linkedByListing += 1; }
   }
   // Only a ledger link is carried: a listing link is recomputed from the index each build, so a PR edited to drop
@@ -309,16 +310,22 @@ export async function planFieldTrialsCaseFiles(source: FieldTrialsCaseFileSource
       readFailures.push({ read: "view", target: String(number), error: errorText(error) });
     }
   }
-  const selected = candidates.filter((taskId) => prNumbers.has(taskId));
+  // W1-T14989: a called task the full listing credits no PR to gets a case file too, so a build that ended without one
+  // reads ended-without-PR instead of case-file-missing. A failed listing or an ambiguous credit is not an observed
+  // absence, so those tasks stay unselected.
+  const withoutPr = counts.listFailed ? [] : candidates.filter((taskId) => !prNumbers.has(taskId) && !ambiguous.has(taskId));
+  const unlinkedSelected = new Set(withoutPr);
+  const selected = candidates.filter((taskId) => prNumbers.has(taskId) || unlinkedSelected.has(taskId));
+  const chosen = new Set(selected);
   let oldestCallTs: string | null = null;
   for (const row of source.rows) {
-    if (row.step !== "worker.assignment" || !row.taskId || !row.ts || !prNumbers.has(row.taskId)) continue;
+    if (row.step !== "worker.assignment" || !row.taskId || !row.ts || !chosen.has(row.taskId)) continue;
     if (oldestCallTs === null || row.ts < oldestCallTs) oldestCallTs = row.ts;
   }
   // A failed listing leaves an unlinked task unknown, never counted as having no PR.
-  const unlinked = candidates.length - selected.length;
+  const unlinked = candidates.length - prNumbers.size;
   return { selected, prNumbers, prReads, oldestCallTs, carry, readFailures,
-    summary: { ...counts, selected: selected.length, withoutPr: counts.listFailed ? 0 : unlinked,
+    summary: { ...counts, selected: selected.length, selectedWithoutPr: withoutPr.length, withoutPr: counts.listFailed ? 0 : unlinked,
       unlinkedListingFailed: counts.listFailed ? unlinked : 0,
       ...(source.opsCatalog === undefined ? {} : { opsCatalog: source.opsCatalog }) } };
 }

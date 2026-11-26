@@ -38,7 +38,7 @@ import { classifyLogFetchFailure, logFetchRetryAtMs, readCheckRunOutputAsync } f
 import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
 import { loadPlan, DEFAULT_RISK, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
-import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
+import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, planFilingFromChangedFiles, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { type ProjectPlanPhases, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, planCreditOverridePath, type CommitTrailerIndexReader, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
 import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, dependabotCheckStates, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type EscalationConditionEvidence, escalationNamedChecks, MAX_ESCALATION_CLOSES_PER_CYCLE, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, REVIEW_INPUT_ADMISSION_BACKSTOP, type ReviewSetupRefusal, type BaseChangedFiles } from "./sweep.js";
 import { loadedReviewerCodeSha } from "./reviewer-health.js";
@@ -48,8 +48,8 @@ import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { repoRoot, resolveOwnerRepo } from "./repo-location.js";
 import { OwnerRepoUnresolvableError } from "./owner-repo.js";
-import { reviewTaskIdFromBody } from "./report-commands.js";
 import { isFleetAuthoredText } from "./escalation-answers.js";
+import { isPlanOnlyFilingPr, PR_PENDING_PLACEHOLDER, resolveReviewTaskId, usesUntaskedReviewMetadata } from "./untasked-review.js";
 
 /** REST rollups preserve check-run order: retain external_id and the exact head/constituent
  * outcome beside each row without changing the shared REST mapper's unrelated callers. */
@@ -1748,9 +1748,7 @@ export function cancelledRequiredChecks(
  * call sites) — a positive record from the ONE place that already verified the diff, not a
  * guess from this function.
  */
-export function isPlanOnlyFilingPr(ledger: Array<Record<string, unknown>>, prUrl: string): boolean {
-  return ledger.some((l) => l.step === "pr.opened" && l.pr_url === prUrl && l.plan_only === true);
-}
+export { isPlanOnlyFilingPr };
 
 export type PlanFilingClassificationSource = "emitter-ledger" | "github-files" | "unreadable" | "not-plan-only";
 
@@ -1774,9 +1772,8 @@ export function classifyPlanFiling(
 ): PlanFilingClassification {
   if (emitterLedger) return { isPlanFiling: true, source: "emitter-ledger" };
   if (!files || files.state === "unreadable") return { isPlanFiling: false, source: "unreadable" };
-  const isPlanOnly = files.paths.length > 0 && files.paths.every(isInPlanScope);
-  const touchesEnforcementData = enforcementDataInDiff([...files.paths]).length > 0;
-  return isPlanOnly && !touchesEnforcementData
+  // W1-T14902: the one rule, shared with the task-hold resolver so the hold and the board classify a PR alike.
+  return planFilingFromChangedFiles(files.paths)
     ? { isPlanFiling: true, source: "github-files" }
     : { isPlanFiling: false, source: "not-plan-only" };
 }
@@ -1795,31 +1792,9 @@ function introducedTaskIdsFromPlanPaths(paths: readonly string[]): string[] {
  * An exact trailer wins; a positively identified plan-only filing is intentionally
  * unattributed; otherwise the fleet's task-bearing run branch is the safe fallback.
  */
-export function resolveReviewTaskId(
-  body: string,
-  headRefName: string,
-  planOnlyFiling: boolean,
-): string | undefined {
-  const fromTrailer = reviewTaskIdFromBody(body);
-  if (fromTrailer) return fromTrailer;
-  if (planOnlyFiling) return undefined;
-  return taskIdFromRunBranch(headRefName);
-}
+export { resolveReviewTaskId };
 
-/** A hand PR pushed before it had a number carries the trailer `PR-pending`; it names no shard, so on its own
- *  `run-PR-pending-<epoch>` head it is reviewed like a trailerless PR instead of refusing setup every pass. */
-export const PR_PENDING_PLACEHOLDER = { taskId: "PR-pending", branch: /^run-PR-pending-\d+$/, rule: "W1-T11258" } as const;
-
-/** Generated lanes have correlation ids, not filed task records; keep their bounded semantic review.
- *  A synthetic `PR-<n>` id (a hand-fix PR's trailer) names no shard either: it gets the defaults a trailerless PR
- *  gets, on any branch, so the trailer can never cost a review (#13305: refused on every pass for 4.5 h). */
-export function usesUntaskedReviewMetadata(taskId: string | undefined, headRefName: string): boolean {
-  if (taskId === undefined || taskId === UNFILED_RUN_SENTINEL || /^PR-[1-9]\d*$/.test(taskId)) return true;
-  if (taskId === PR_PENDING_PLACEHOLDER.taskId) return PR_PENDING_PLACEHOLDER.branch.test(headRefName);
-  if (headRefName === `run-${taskId}` && /^RETRO-\d+$/.test(taskId)) return true;
-  return taskIdFromRunBranch(headRefName) === taskId &&
-    /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+|main-repair-(?:(?:ratchet|revert)-)?[0-9a-f]{12})$/.test(taskId);
-}
+export { PR_PENDING_PLACEHOLDER, usesUntaskedReviewMetadata };
 
 /**
  * Resolve a PR's task id (W1-T453): the `Remudero-Task:` trailer first, the `run-<taskId>-*` head ref only as
