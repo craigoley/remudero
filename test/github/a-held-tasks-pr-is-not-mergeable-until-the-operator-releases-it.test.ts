@@ -15,7 +15,7 @@ import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { postReviewStatusGuarded, taskHoldReading, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
-import { readTaskDispatchHold, type TaskDispatchHoldSources } from "#src/lib/task-dispatch-hold.js";
+import { readOpsCatalogHold, readTaskDispatchHold, type TaskDispatchHoldSources } from "#src/lib/task-dispatch-hold.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
@@ -176,6 +176,32 @@ test("W1-T14902: the one reader's defaults read this checkout's plan at origin/m
   assert.deepEqual(await readTaskDispatchHold("W1-T10732", { stateDir }), { outcome: "clear" });
   // Absent from main, the default lookup finds no plan destination under this state dir: no ops catalog, clear.
   assert.deepEqual(await readTaskDispatchHold("W1-T99999998", { stateDir }), { outcome: "clear" });
+});
+
+test("W1-T14902: the default ops read answers only from a fresh snapshot of the named destination", async (t) => {
+  type Read = NonNullable<Parameters<typeof readOpsCatalogHold>[2]>;
+  type Snapshot = Awaited<ReturnType<Read>>;
+  const named = tmp(t, "ops-destination");
+  writeFileSync(join(named, "plan-destination.json"), JSON.stringify({ repository: "acme/remudero-ops", kinds: ["task"] }));
+  const targets: string[] = [];
+  const snapshot = (answer: Partial<Snapshot>): Read => async (target) => {
+    targets.push(target.repository);
+    return { counts: {}, ...answer } as Snapshot;
+  };
+  const ops = { outcome: "ok", plan: { byId: new Map([[TASK, { dispatch_hold: true }]]) } } as unknown as Partial<Snapshot>;
+  assert.deepEqual(await readOpsCatalogHold(TASK, named, snapshot(ops)), { outcome: "found", task: { dispatch_hold: true } });
+  assert.deepEqual(await readOpsCatalogHold("W1-T99999998", named, snapshot(ops)), { outcome: "absent" });
+  assert.deepEqual(await readOpsCatalogHold(TASK, named, snapshot({ outcome: "stale" } as Partial<Snapshot>)),
+    { outcome: "unreadable", reason: "ops-stale" }, "a refused read is never the last good snapshot");
+  assert.deepEqual(targets, ["acme/remudero-ops", "acme/remudero-ops", "acme/remudero-ops"]);
+  const never: Read = async () => { throw new Error("no destination means no ops read"); };
+  assert.deepEqual(await readOpsCatalogHold(TASK, tmp(t, "ops-off"), never), { outcome: "absent" });
+  const broken = tmp(t, "ops-broken");
+  writeFileSync(join(broken, "plan-destination.json"), "{not json");
+  assert.deepEqual(await readOpsCatalogHold(TASK, broken, never), { outcome: "unreadable", reason: "destination-unreadable" });
+  // Through the one reader, a refused ops read holds.
+  assert.equal((await readTaskDispatchHold(TASK, { stateDir: named, readMainPlan: async () => ({ byId: new Map() }),
+    lookup: (id) => readOpsCatalogHold(id, named, snapshot({ outcome: "stale" } as Partial<Snapshot>)) })).outcome, "unread");
 });
 
 test("W1-T14902: every guarded post reads the hold itself when its caller supplied none", async (t) => {

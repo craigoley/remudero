@@ -19,7 +19,8 @@ import { homedir, hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { isTestRunner } from "./live-write-guard.js";
-import { readTaskDispatchHold } from "./task-dispatch-hold.js";
+import { readTaskDispatchHold, taskHoldRefusal, type TaskHoldReading } from "./task-dispatch-hold.js";
+export { taskHoldReading, taskHoldRefusal, type TaskHoldReading } from "./task-dispatch-hold.js";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic, type IsHolderStaleOpts } from "./fs-race-safe.js";
@@ -13582,29 +13583,11 @@ function recordedCappedOverride(opts: PostReviewStatusGuardedOpts): CappedOverri
 /** W1-T14241 (invariant capped-is-not-green): a capped code success no override certified posts pending — never
  *  success, and never failure (CAPPED IS NOT FAIL) — under the same CAPPED description, so nothing can merge or arm on
  *  it until proof executes or an operator records an override for this head. */
-/** W1-T14902: what the caller read of the named task's `dispatch_hold`. */
-export type TaskHoldReading =
-  | { outcome: "held"; taskId: string }
-  | { outcome: "clear" }
-  | { outcome: "unread"; taskId: string; reason: string };
-
 /** W1-T14902: the hold a success is judged against: the caller's reading, else the one reader's (W1-T5939's
  *  test-runner precedent keeps a suite of partial fakes off the live plan and ops catalog). */
 async function guardedTaskHold(opts: PostReviewStatusGuardedOpts): Promise<TaskHoldReading | undefined> {
   if (opts.taskHold !== undefined) return opts.taskHold;
   return isTestRunner() ? undefined : readTaskDispatchHold(opts.taskId, { stateDir: dirname(opts.ledgerPath) });
-}
-
-/** W1-T14902: the reading of a looked-up record. `undefined` (no record) is clear: a PR naming no task reviews as today. */
-export function taskHoldReading(taskId: string, task: { dispatch_hold?: boolean } | undefined): TaskHoldReading {
-  return task?.dispatch_hold === true ? { outcome: "held", taskId } : { outcome: "clear" };
-}
-
-/** W1-T14902: why a success may not post, or `undefined` when the reading is clear or the caller read none. */
-export function taskHoldRefusal(reading: TaskHoldReading | undefined): string | undefined {
-  if (reading === undefined || reading.outcome === "clear") return undefined;
-  return reading.outcome === "held" ? `held: ${reading.taskId} carries dispatch_hold`
-    : `held: ${reading.taskId}'s dispatch_hold is unreadable (${reading.reason})`;
 }
 
 async function publishTaskHold(opts: PostReviewStatusGuardedOpts, verdict: ReviewVerdict,
