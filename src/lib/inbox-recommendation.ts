@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { resolveOwnerRepoAtAsync } from "./owner-repo.js";
 
 import { systemClock, type Clock } from "./clock.js";
@@ -187,7 +187,8 @@ export type EvidenceKind = "pr" | "sha" | "task" | "path";
 export interface RecommendationEvidence {
   /** Every task record in the plan's shard directory on main, by task id: its path and blob. */
   shards(): Promise<Map<string, { path: string; blob: string }>>;
-  shardText(path: string): Promise<string | undefined>;
+  /** The task's record: the shard's text, or, when `path` is the plan monolith, only `taskId`'s own row. */
+  shardText(path: string, taskId?: string): Promise<string | undefined>;
   /** Commits on main that name the task, newest first, as "sha subject" lines. */
   taskHistory(taskId: string): Promise<string[]>;
   /** The kind an evidence entry resolves as on main, or undefined when it resolves as nothing. */
@@ -247,6 +248,7 @@ export function gitRecommendationEvidence(git: GitRunner, plan: { planDir: strin
       const at = evidenceAt(git, plan, commit);
       // Include monolith records with their actual immutable blob, so unchanged IDs cannot certify changed text.
       let pendingRecords: Promise<{ shards: Map<string, { path: string; blob: string }>; monolith: string[] }> | undefined;
+      const monolithRows = new Map<string, unknown>();
       const records = () => pendingRecords ??= (async () => {
         const shards = await at.shards();
         const listing = await git(["ls-tree", commit, "--", plan.planMonolith]);
@@ -261,6 +263,7 @@ export function gitRecommendationEvidence(git: GitRunner, plan: { planDir: strin
             const id: unknown = row && typeof row === "object" ? row.id : undefined;
             if (typeof id !== "string" || !/^[A-Z][A-Z0-9]*-T[A-Za-z0-9]+$/.test(id) || seen.has(id)) throw new Error("recommendation source monolith task identity is malformed");
             seen.add(id);
+            monolithRows.set(id, row);
             if (!shards.has(id)) { monolith.push(id); shards.set(id, { path: plan.planMonolith, blob: match[1]! }); }
           }
         }
@@ -269,7 +272,13 @@ export function gitRecommendationEvidence(git: GitRunner, plan: { planDir: strin
       return {
         ...at, repository: selected.repository, commit,
         shards: async () => new Map((await records()).shards),
-        shardText: async (path) => git(["show", commit + ":" + path]),
+        shardText: async (path, taskId) => {
+          if (path !== plan.planMonolith) return git(["show", commit + ":" + path]);
+          // W1-T10229: the whole monolith overflows the writer's prompt, so only the task's own record is sent.
+          await records();
+          const row = taskId === undefined ? undefined : monolithRows.get(taskId);
+          return row === undefined ? undefined : stringifyYaml([row]);
+        },
         qualification: async () => {
           const tasks: Record<string, string> = {};
           const { shards, monolith } = await records();
@@ -450,16 +459,27 @@ export function recommendationAnswerJson(text: string): unknown {
   return first;
 }
 
-/** The production writer: the summarize lane's mount, with this module's prompt. A spawn that never answered (an
- *  error envelope, a usage refusal, admission abandoned) throws, so the tick fails and the fingerprint is asked again
- *  later; only a model's real reply can be a refused answer. */
+/** W1-T10229: an ask for one item that ended in an error, not a reply. It parks that item; it is never a refusal. */
+export class UnansweredRecommendation {
+  constructor(readonly reason: string) {}
+}
+
+/** The production writer: the summarize lane's mount, with this module's prompt. An error result or a thrown spawn is
+ *  returned as {@link UnansweredRecommendation}. Admission abandoned is not about the item, so it throws and the tick
+ *  fails; only a model's real reply can be a refused answer. */
 export function realRecommendationWriter(opts: { mount: Mount; cwd: string; settingsFile: string; spawn?: typeof spawnWorker }): (input: SummarizeInput) => Promise<unknown> {
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("feedback-summary");
   return async ({ context: prompt }) => {
     const args = buildDecisionSummarySpawnArgs({ input: { context: "" }, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
-    const result = await spawn({ ...args, prompt });
-    if (result.isError === true || result.notStarted !== undefined) {
-      throw new Error(`the recommendation writer's spawn did not answer (${result.notStarted ?? result.subtype})`);
+    let result: Awaited<ReturnType<typeof spawn>>;
+    try {
+      result = await spawn({ ...args, prompt });
+    } catch (error) {
+      return new UnansweredRecommendation(`the recommendation writer's spawn threw: ${String((error as Error)?.message ?? error).slice(0, 300)}`);
+    }
+    if (result.notStarted !== undefined) throw new Error(`the recommendation writer's spawn did not answer (${result.notStarted})`);
+    if (result.isError === true) {
+      return new UnansweredRecommendation(`the recommendation writer's spawn did not answer (${result.subtype}): ${String(result.text ?? "").slice(0, 300)}`);
     }
     return recommendationAnswerJson(result.text);
   };
@@ -536,17 +556,46 @@ function importSeedOnce(deps: RecommendationBackfill, items: Map<string, Current
   return imported.length;
 }
 
+/** An item whose ask errored: not asked again at this fingerprint before `retryAt`. */
+export interface ParkedRecommendation {
+  fingerprint: string;
+  reason: string;
+  attempts: number;
+  retryAt: string;
+}
+
+const PARK_BASE_MS = 15 * 60_000;
+const PARK_MAX_MS = 24 * 60 * 60_000;
+
+function parkedPath(stateDir: string): string {
+  return `${stateDir}/inbox-recommendation-parked.json`;
+}
+
+/** Park the item, doubling the wait for each error at the same fingerprint, up to a day. */
+function parkItem(stateDir: string, item: CurrentItem, reason: string, clock: Clock): ParkedRecommendation {
+  const parked = readJsonObject<ParkedRecommendation>(parkedPath(stateDir));
+  const before = parked[item.proposal.id];
+  const attempts = (before?.fingerprint === item.fingerprint ? before.attempts : 0) + 1;
+  const wait = Math.min(PARK_BASE_MS * 2 ** (attempts - 1), PARK_MAX_MS);
+  const entry = { fingerprint: item.fingerprint, reason, attempts, retryAt: new Date(clock.now() + wait).toISOString() };
+  parked[item.proposal.id] = entry;
+  writeAtomic(parkedPath(stateDir), JSON.stringify(parked, null, 2) + "\n");
+  return entry;
+}
+
 export interface RecommendationTick {
   seeded: number;
   written: number;
   refused: number;
   dropped: number;
+  parked: Array<ParkedRecommendation & { id: string }>;
 }
 
 /** One tick: drop recommendations whose task record changed on main, import the seed once, then write at most `max`
- *  items with no current recommendation, oldest registry order first. */
+ *  items with no current recommendation: never-errored items in registry order, then parked items whose wait ended. */
 export async function backfillRecommendations(deps: RecommendationBackfill, max: number): Promise<RecommendationTick> {
-  const tick: RecommendationTick = { seeded: 0, written: 0, refused: 0, dropped: 0 };
+  const tick: RecommendationTick = { seeded: 0, written: 0, refused: 0, dropped: 0, parked: [] };
+  const clock = deps.clock ?? systemClock;
   const snapshot = readClassificationSnapshot(deps.stateDir);
   const lanes = deps.readLanes ? deps.readLanes() : snapshotLanes(snapshot);
   // One verified commit of the selected repository is read for the whole pass; a pass that cannot pin it stores nothing.
@@ -592,8 +641,12 @@ export async function backfillRecommendations(deps: RecommendationBackfill, max:
   const ask = deps.summarize;
   if (!ask) return tick;
   const refusals = readJsonObject<string>(refusalsPath(deps.stateDir));
+  const parked = readJsonObject<ParkedRecommendation>(parkedPath(deps.stateDir));
+  const parkOf = (item: CurrentItem) => (parked[item.proposal.id]?.fingerprint === item.fingerprint ? parked[item.proposal.id] : undefined);
   const pending = [...items.values()]
     .filter((item) => (store[item.proposal.id]?.sourceFingerprint !== item.fingerprint || (pinned && store[item.proposal.id]?.repository !== pinned.repository)) && refusals[item.proposal.id] !== item.fingerprint)
+    .filter((item) => !(Date.parse(parkOf(item)?.retryAt ?? "") > clock.now()))
+    .sort((a, b) => (parkOf(a)?.attempts ?? 0) - (parkOf(b)?.attempts ?? 0))
     .slice(0, max);
   const plainStore = readPlainStore(plainStorePath(deps.stateDir));
   for (const item of pending) {
@@ -601,16 +654,25 @@ export async function backfillRecommendations(deps: RecommendationBackfill, max:
     const plain = plainInboxMessage(item.proposal, plainStore);
     const ctx: RecommendationContext = {
       proposal: item.proposal, lane: item.lane, plain,
-      ...(item.shard ? { shardText: await sourceRead(() => evidence.shardText(item.shard!.path)) } : {}),
+      ...(item.shard ? { shardText: await sourceRead(() => evidence.shardText(item.shard!.path, taskId)) } : {}),
       history: taskId === undefined ? [] : await sourceRead(() => evidence.taskHistory(taskId)),
     };
     let problems: string[] = [];
     let accepted: Record<string, unknown> | undefined;
+    let unanswered: UnansweredRecommendation | undefined;
     for (let attempt = 0; attempt < 2 && accepted === undefined; attempt += 1) {
       const answer = await ask({ context: buildRecommendationPrompt(ctx, problems) });
+      if (answer instanceof UnansweredRecommendation) {
+        unanswered = answer;
+        break;
+      }
       const check = await checkRecommendation(answer, { id: item.proposal.id, lane: item.lane, ifNothingHappens: plain.ifNothingHappens }, evidence);
       if (check.ok) accepted = answer as Record<string, unknown>;
       else problems = check.problems;
+    }
+    if (unanswered) {
+      tick.parked.push({ id: item.proposal.id, ...parkItem(deps.stateDir, item, unanswered.reason, clock) });
+      continue;
     }
     const latest = readRecommendationStore(path);
     if (accepted === undefined) {
@@ -651,6 +713,7 @@ export function startRecommendationBackfill(
         if (t.written > 0) log("inbox.recommendation_written", { count: t.written });
         if (t.refused > 0) log("inbox.recommendation_refused", { count: t.refused });
         if (t.dropped > 0) log("inbox.recommendation_dropped", { count: t.dropped });
+        for (const p of t.parked) log("inbox.recommendation_failed", { error: p.reason, id: p.id, attempts: p.attempts, retryAt: p.retryAt });
       })
       .catch((e) => log("inbox.recommendation_failed", { error: String((e as Error)?.message ?? e) }))
       .finally(() => {
