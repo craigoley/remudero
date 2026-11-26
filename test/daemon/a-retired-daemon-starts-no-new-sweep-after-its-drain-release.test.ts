@@ -206,6 +206,38 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   admissionRace.settlePage();
   await admissionExit;
 
+  // Provider preparation can itself yield after admission (Codex verifies the Git worktree before
+  // creating its process). Retirement is therefore checked by the shared containment callback too.
+  const providerRace = retiringExit();
+  const providerWithheld: Array<Record<string, unknown>> = [];
+  const providerSteps: string[] = [];
+  let finishProviderPreparation: () => void = () => {};
+  const providerPreparation = new Promise<void>((resolve) => { finishProviderPreparation = resolve; });
+  const providerArgs = drafterStart(t, providerWithheld, providerSteps);
+  providerArgs.config = { ...providerArgs.config, workerProviders: { enabled: ["codex"] } } as NonNullable<SpawnWorkerArgs["config"]>;
+  const providerWorker = providerRace.retirement.inSpawnScope(() => spawnWorker({
+    ...providerArgs, mountProvider: "codex",
+    providerRouting: { writeStatus: () => {}, spawnCodex: async (codexArgs) => {
+      providerSteps.push("provider_preparation");
+      await providerPreparation;
+      codexArgs.containment?.spawn?.({ command: "codex", args: [], cwd: codexArgs.cwd, env: {} });
+      providerSteps.push("contained_spawn");
+      throw new Error("contained spawn unexpectedly returned");
+    } },
+  }));
+  await turns(8);
+  assert.deepEqual(providerSteps, ["memory_admission", "provider_preparation"], "provider work reaches asynchronous preparation");
+  const providerExit = providerRace.exit();
+  await turns(5);
+  finishProviderPreparation();
+  const providerResult = await providerWorker;
+  assert.equal(providerResult.notStarted, "admission-abandoned", "retired provider preparation settles as withheld");
+  assert.deepEqual(providerSteps, ["memory_admission", "provider_preparation"], "the final containment boundary refuses the child");
+  assert.equal(providerWithheld[0]?.hold,
+    "retired: drain lock released; the successor owns this work");
+  providerRace.settlePage();
+  await providerExit;
+
   // The retirement belongs to that daemon's scope: a start outside it (the next daemon in a pooled process, or a
   // direct spawn) still reaches memory admission.
   const outside: string[] = [];

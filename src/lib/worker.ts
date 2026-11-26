@@ -2409,6 +2409,15 @@ function reservationBoundContainment(
   };
 }
 
+/** Internal signal from the last synchronous provider boundary: retirement may happen while a provider
+ *  performs asynchronous preparation after spawnWorker's own launch check. */
+class RetiredWorkerLaunch extends Error {
+  constructor(readonly retiredBy: string) {
+    super(`worker launch refused after retirement: ${retiredBy}`);
+    this.name = "RetiredWorkerLaunch";
+  }
+}
+
 /** Claim one process-wide worker slot for the complete async operation and release it on every settlement, including an
  * AbortError/cancellation rejection. Exported so the finally contract is testable without a paid provider spawn. The claim
  * also opens a host memory ledger reservation, released only once its whole tree is verified gone (W1-T7093). */
@@ -2800,7 +2809,17 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     const current = workerSpawnRetiredBy();
     return current === undefined ? undefined : spawnWithheld(`retired: ${current}`);
   };
-  const boundContainment = memoryReservation ? reservationBoundContainment(args.containment, memoryReservation) : args.containment ?? {};
+  const reservedContainment = memoryReservation ? reservationBoundContainment(args.containment, memoryReservation) : args.containment ?? {};
+  // Providers can yield after the checks above (Codex verifies its worktree before spawning). Put the
+  // retirement read on the actual process boundary, which is shared by the real adapters.
+  const boundContainment: NonNullable<SpawnWorkerArgs["containment"]> = {
+    ...reservedContainment,
+    spawn: (options, onStderr, onSpawnError) => {
+      const retired = workerSpawnRetiredBy();
+      if (retired !== undefined) throw new RetiredWorkerLaunch(retired);
+      return (reservedContainment.spawn ?? spawnDetachedGroup)(options, onStderr, onSpawnError);
+    },
+  };
   try {
   // Validate-before-spawn guard, enforced at the spawn boundary rather than by caller convention. TRAP: `claude -p` SILENTLY
   // IGNORES an invalid settings file and drops containment, so it is validated against the pinned SandboxSettingsSchema
@@ -3267,9 +3286,15 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
         args.providerRouting?.spawnCodex ?? spawnCodexWorker;
       const execution = executionFor("codex");
-      const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
-        spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
-          containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
+      const runCodex: typeof spawnCodex = async (codexArgs, workerConfig, capacity) => {
+        try {
+          return await spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
+            containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
+        } catch (error) {
+          if (error instanceof RetiredWorkerLaunch) return spawnWithheld(`retired: ${error.retiredBy}`);
+          throw error;
+        }
+      };
       if (args.providerRouting?.spawnCodex === undefined) {
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
@@ -3364,9 +3389,15 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
       args.providerRouting?.spawnCodex ?? spawnCodexWorker;
     const execution = executionFor("codex");
-    const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
-      spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
-        containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
+    const runCodex: typeof spawnCodex = async (codexArgs, workerConfig, capacity) => {
+      try {
+        return await spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
+          containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
+      } catch (error) {
+        if (error instanceof RetiredWorkerLaunch) return spawnWithheld(`retired: ${error.retiredBy}`);
+        throw error;
+      }
+    };
     if (args.providerRouting?.spawnCodex === undefined) {
       assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -3563,9 +3594,15 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             promptBytes: Buffer.byteLength(executionPrompt, "utf8"), squeezed: args.cashSqueezed,
             atIso: fixedClock((args.providerRouting?.now ?? systemClock.now)()).iso() });
           if (fit && !fit.fits) throw new CashDraftSkippedError(fit);
-          const rung: WorkerResult = await runOpenWeight({ ...cashArgs, workerEnv, prompt: executionPrompt,
-            signal: cashController.signal, streamObserver: cashObserver,
-            resumeSessionId: undefined, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
+          let rung: WorkerResult;
+          try {
+            rung = await runOpenWeight({ ...cashArgs, workerEnv, prompt: executionPrompt,
+              signal: cashController.signal, streamObserver: cashObserver,
+              resumeSessionId: undefined, containment: boundContainment, workerHome, zdotdir: workerZdotdir(config) }, config, selection);
+          } catch (error) {
+            if (error instanceof RetiredWorkerLaunch) return spawnWithheld(`retired: ${error.retiredBy}`);
+            throw error;
+          }
           // W1-T13868: a rung the abort cut short still names the model its responses reported, on the error that replaces it.
           if (cashController.signal.aborted) {
             const reason: unknown = cashController.signal.reason;
@@ -4013,6 +4050,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         : undefined;
       return result;
     } catch (err) {
+      if (err instanceof RetiredWorkerLaunch) return spawnWithheld(`retired: ${err.retiredBy}`);
       queryFailure = err;
       if (measurement) abandonProviderWindowMeasurement(measurement);
       // Runs on EVERY thrown error but only REPLACES it when the watchdog tripped; any other transport failure passes through
