@@ -3,7 +3,7 @@
 // A standby daemon (`rmd daemon --standby`) runs only the read-only part of its boot, says it is ready, and waits
 // for the daemon that started it to hand over. INVARIANT single-writer: nothing here takes `state/drain.lock` from a
 // live holder. The pid lock is the fence on one host; `acquireDrainLock` already reclaims a lock whose holder is dead.
-import { mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { type Clock, systemClock } from "./clock.js";
 import { DrainLockError, type DrainLockHandle, type DrainLockInfo } from "./drain-lock.js";
@@ -36,6 +36,11 @@ export interface StandbyPorts {
   readonly promoteBoundMs: number;
   readonly lockWaitBoundMs: number;
   readonly pollMs: number;
+  /** W1-T15004: the command line this daemon started with; its `--repo` and slot tree name the promoted title. */
+  readonly argv: readonly string[];
+  readonly setTitle: (title: string) => void;
+  /** `/proc/self/status`, whose NSpid line holds this process's pid in each pid namespace, outermost first. */
+  readonly readStatus: () => string | undefined;
 }
 
 export interface StandbyOptions {
@@ -45,6 +50,9 @@ export interface StandbyOptions {
   readonly pollMs?: number;
   readonly clock?: Clock;
   readonly sleep?: (ms: number) => Promise<void>;
+  readonly argv?: readonly string[];
+  readonly setTitle?: (title: string) => void;
+  readonly readStatus?: () => string | undefined;
 }
 
 export function standbyPorts(base: Pick<StandbyPorts, "stateDir" | "runId" | "sha" | "pid" | "log">, opts: StandbyOptions = {}): StandbyPorts {
@@ -56,7 +64,32 @@ export function standbyPorts(base: Pick<StandbyPorts, "stateDir" | "runId" | "sh
     promoteBoundMs: opts.promoteBoundMs ?? STANDBY_PROMOTE_BOUND_MS,
     lockWaitBoundMs: opts.lockWaitBoundMs ?? STANDBY_LOCK_WAIT_BOUND_MS,
     pollMs: opts.pollMs ?? STANDBY_POLL_MS,
+    argv: opts.argv ?? process.argv,
+    setTitle: opts.setTitle ?? ((title) => { process.title = title; }),
+    readStatus: opts.readStatus ?? readProcSelfStatus,
   };
+}
+
+function readProcSelfStatus(): string | undefined {
+  try {
+    return readFileSync("/proc/self/status", "utf8");
+  } catch {
+    return undefined; // no procfs (macOS): the row's host_pid is then null, never a guess
+  }
+}
+
+/** W1-T15004: the title a promoted daemon shows in `ps`, since a promoted standby keeps its `--standby` argv. */
+export function promotedDaemonTitle(argv: readonly string[], runId: string): string {
+  const at = argv.indexOf("--repo");
+  const repo = at >= 0 ? argv[at + 1] : argv.find((arg) => arg.startsWith("--repo="))?.slice("--repo=".length);
+  const slot = argv.map((arg) => /\/daemon-slots\/([^/]+)\//.exec(arg)?.[1]).find((name) => name !== undefined);
+  return ["rmd daemon active", repo ?? "unknown-repo", runId, ...(slot ? [`slot-${slot}`] : [])].join(" ");
+}
+
+/** The pid in the outermost pid namespace this process's procfs shows (the host's when /proc is the host's), or null. */
+export function outermostPid(status: string | undefined): number | null {
+  const first = /^NSpid:\s+(\d+)/m.exec(status ?? "")?.[1];
+  return first === undefined ? null : Number(first);
 }
 
 export type StandbyAbort = { readonly criterion: "prepare_failed" | "ready_bound" | "promote_bound"; readonly detail?: string };
@@ -137,6 +170,11 @@ export function leaveExitCodeForEntrypoint(stateDir: string, pid: number, proc: 
 
 /** The promoted row: how long each part of the standby's life took, written before its loop starts. */
 export function logPromoted(ports: StandbyPorts, parts: { prepareMs: number; waitMs: number; lockWaitMs: number; takeoverStartMs: number }): void {
-  ports.log("daemon.standby_promoted", { sha: ports.sha ?? null, pid: ports.pid, prepare_ms: parts.prepareMs,
+  try {
+    ports.setTitle(promotedDaemonTitle(ports.argv, ports.runId));
+  } catch {
+    // A title the platform refuses changes nothing about the promotion; `ps` then shows the standby argv, as before.
+  }
+  ports.log("daemon.standby_promoted", { sha: ports.sha ?? null, pid: ports.pid, host_pid: outermostPid(ports.readStatus()), prepare_ms: parts.prepareMs,
     promote_wait_ms: parts.waitMs, lock_wait_ms: parts.lockWaitMs, takeover_ms: Math.max(0, ports.clock.now() - parts.takeoverStartMs) });
 }
