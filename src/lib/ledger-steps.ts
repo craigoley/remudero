@@ -537,6 +537,24 @@ const SEED_ROWS: readonly SeedRow[] = [
     outcomes: ["share", "reserve", "refused"],
   },
   {
+    step: "github.delivery",
+    meaning:
+      "One webhook delivery GitHub sent to serve, read from GitHub's own delivery log for the org hook (W1-T14881): " +
+      "hook_id, delivery_id, guid, event, action, repository_id, status_code (500 with duration_ms near 10000 is " +
+      "GitHub's own timeout), duration_ms, delivered_at and redelivery. No payload and no headers. Nothing decides on it; " +
+      "it is the record of how serve answered GitHub.",
+    writer: ["runGithubDeliveryLogPass"],
+    outcomes: ["one row per delivery, any status_code"],
+  },
+  {
+    step: "github.delivery.read_failed",
+    meaning:
+      "A pass over GitHub's webhook delivery log could not read a page: org, hook_id when one was being read, and " +
+      "status_class (auth, 4xx, 5xx or transport). The pass keeps every cursor, so the next one reads the same deliveries.",
+    writer: ["runGithubDeliveryLogPass"],
+    outcomes: ["auth", "4xx", "5xx", "transport"],
+  },
+  {
     step: "github.budget.configured",
     meaning:
       "At start, a process that reads with the GitHub App installation token set its share of the installation " +
