@@ -15,7 +15,7 @@
  * change deployed or was correct; field-trials-flow.ts reads these facts and keeps those separate.
  */
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, ghInteractiveRead } from "./github-transport.js";
+import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, ghInteractiveRead, splitGhHeaderBlock } from "./github-transport.js";
 import { GITHUB_WRITE_RESERVE_FRACTION } from "./github-installation-budget.js";
 import { ensureHeldTokenFresh } from "./github-app.js";
 
@@ -83,14 +83,43 @@ export interface GhApiFetchPacing {
 const defaultGhApiRead = async (args: string[]): Promise<string> => String(await ghInteractiveRead(args,
   { encoding: "utf8", maxBuffer: GH_MAX_BUFFER_BYTES }));
 
+/** W1-T14944: the first wait after a GitHub server error, doubled per retry up to {@link SERVER_ERROR_RETRY_MAX_MS}. */
+const SERVER_ERROR_RETRY_FIRST_MS = 1_000;
+const SERVER_ERROR_RETRY_MAX_MS = 60_000;
+
+/** W1-T14944: the HTTP status of a `gh api -i` read, from its STDOUT's first line (`HTTP/2.0 502 Bad Gateway`). gh 2.63.2
+ *  prints that line from the response's own proto and status (pkg/cmd/api/api.go, processResponse) before any header or
+ *  body, on a failed read as on a good one, so no response message or caller text can stand in for it. `undefined` when
+ *  there is no such line (a read that never got a response, or an injected fake). */
+export function ghIncludedStatus(stdout: unknown): number | undefined {
+  const m = /^HTTP\/[0-9.]+ ([0-9]{3})\b/.exec(String(stdout ?? ""));
+  return m ? Number(m[1]) : undefined;
+}
+
+/** W1-T14944: a read that failed with a transient GitHub server error, judged ONLY from the response's own HTTP status
+ *  (500, 502, 503 or 504) on the failed read's stdout; stderr's message text is never parsed for it. */
+export function isGhServerError(error: unknown): boolean {
+  const status = ghIncludedStatus((error as { stdout?: string | Buffer } | null | undefined)?.stdout);
+  return status === 500 || status === 502 || status === 503 || status === 504;
+}
+
 export function ghApiFetch(read: (args: string[]) => Promise<string> = defaultGhApiRead, pacing: GhApiFetchPacing = {}): GithubPageFetch {
   const sleep = pacing.sleep ?? sleepFor;
   return async (path) => {
     let body: string;
+    let serverErrorWaitMs = SERVER_ERROR_RETRY_FIRST_MS;
     for (;;) {
       await pacing.beforeRead?.();
-      try { body = await read(["api", path]); break; }
+      // `-i`: the response's own status line and headers lead stdout, so a failed read is classified by its status.
+      try { body = splitGhHeaderBlock(await read(["api", path, "-i"])).body; break; }
       catch (error) {
+        // W1-T14944: a 5xx is GitHub's own transient failure, so the same page is retried with backoff, no attempt cap.
+        // The status is read first: a gateway's 502 whose message text mentions a rate limit is still a 502.
+        if (isGhServerError(error)) {
+          await sleep(serverErrorWaitMs);
+          serverErrorWaitMs = Math.min(serverErrorWaitMs * 2, SERVER_ERROR_RETRY_MAX_MS);
+          continue;
+        }
         if (classifyGhLimitFailure(error) === undefined) {
           const reason = "github-read-failed";
           return { ok: false, reason };
