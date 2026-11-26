@@ -6,7 +6,7 @@ import { closeDaemonCleanup, createDaemonRetirement, inDaemonSpawnScope, retirin
 import { withCiJudgeAfterSweep } from "#src/lib/ci-escalation-judge.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import { spawnRunChild } from "#src/lib/run-child.js";
@@ -255,6 +255,13 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
       if (release !== "none") await assert.rejects(launch, WorkerSpawnRetiredError, `${model} ${release}: a release inside the adapter sends no request`);
       else assert.equal((await launch).isError, false, `${model}: control, with no release the request is sent`);
       assert.equal(sent, release === "none" ? 1 : 0, `${model} ${release}: requests sent`);
+      const allowance = join(root, "state", "openweight-allowance.json");
+      if (release === "gap") {
+        // The gap release lands after the first reservation: it settles as known-unbilled, never held against the cap.
+        const rows = Object.values((JSON.parse(readFileSync(allowance, "utf8")) as { reservations: Record<string, Record<string, unknown>> }).reservations);
+        assert.equal(rows.length, 1, `${model}: the one reserved attempt`);
+        assert.deepEqual(rows.map((row) => [row.accountingState, row.settledUsd, row.heldUsd]), [["known-unbilled", 0, 0]], `${model}: unsent reservation settles`);
+      }
       if (release === "none") assert.ok(readsAtSend > 1, `${model}: the control saw the clock reads before its request`);
     }
   }

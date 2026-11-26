@@ -6896,7 +6896,11 @@ export async function spawnFoundryClaudeWorker(
       messages.push({ role: "user", content: results });
     }
   } catch (error) {
-    if (error instanceof WorkerSpawnRetiredError) throw error;
+    if (error instanceof WorkerSpawnRetiredError) {
+      if (pending && !pending.receipt) settleOpenWeightBudget(config, { requestId: pending.requestId, identity: pending.identity,
+        actualUsd: 0, unbilled: true, atIso: pending.atIso, reason: error.message });
+      throw error;
+    }
     // An unknown transport outcome remains charged. Only a definite 404 is known to cost zero.
     if (pending) {
       const unbilled = error instanceof OpenWeightDeploymentNotFoundError;
@@ -7209,7 +7213,11 @@ export async function spawnOpenWeightWorker(
       }
     }
   } catch (error) {
-    if (error instanceof WorkerSpawnRetiredError) throw error;
+    if (error instanceof WorkerSpawnRetiredError) {
+      if (pendingReservation && !pendingReservation.receipt) settleOpenWeightBudget(config, { requestId: pendingReservation.requestId,
+        identity: pendingReservation.identity, actualUsd: 0, unbilled: true, atIso: pendingReservation.atIso, reason: error.message });
+      throw error;
+    }
     if (error instanceof CashCapacityShortfallFailure) recordCashCapacityShortfall(config, {
       reason: "capacity_shortfall", deployment: selection.model,
       estimatedTokens: error.estimatedTokens, limitTokens: error.limitTokens!,
