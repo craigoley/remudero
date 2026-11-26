@@ -350,7 +350,9 @@ export async function checkRecommendation(
   evidence: Pick<RecommendationEvidence, "resolve">,
 ): Promise<RecommendationCheck> {
   const problems: string[] = [];
-  const a = (answer && typeof answer === "object" ? answer : {}) as Record<string, unknown>;
+  // W1-T10229: name the real problem, so the repair attempt answers with the object instead of guessing at an action.
+  if (!answer || typeof answer !== "object") return { ok: false, problems: ["the answer was not one JSON object: reply with only the object"] };
+  const a = answer as Record<string, unknown>;
   if (!isOptionIntent(a.action)) {
     problems.push("action must be one of approve, decline, reframe, reply, keep");
     return { ok: false, problems };
@@ -409,20 +411,57 @@ export function buildRecommendationPrompt(ctx: RecommendationContext, retryProbl
   ].join("\n");
 }
 
-/** The production writer: the summarize lane's mount, with this module's prompt. Untested by unit, like every real spawn. */
+/** The end of the balanced `{…}` span opening at `start`, braces inside JSON strings not counted; -1 when unclosed. */
+function balancedEnd(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i += 1) {
+    const c = text[i];
+    if (inString) {
+      if (c === "\\") i += 1;
+      else if (c === '"') inString = false;
+    } else if (c === '"') inString = true;
+    else if (c === "{") depth += 1;
+    else if (c === "}" && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/** W1-T10229: the recommendation object in a writer reply, or `null` when it holds none. Each balanced `{…}` span is
+ *  tried in order, so a fenced answer followed by a note holding a brace is still read: the old greedy
+ *  /\{[\s\S]*\}/ ran to the note's last brace, failed to parse, and the valid answer was refused. The first object
+ *  with an `action` wins, else the first object. */
+export function recommendationAnswerJson(text: string): unknown {
+  let first: unknown = null;
+  for (let start = text.indexOf("{"); start !== -1; start = text.indexOf("{", start + 1)) {
+    const end = balancedEnd(text, start);
+    if (end === -1) continue;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
+    } catch {
+      // deliberate: prose in braces is not the answer; the next span is tried.
+      continue;
+    }
+    if (Object.hasOwn(parsed, "action")) return parsed;
+    first ??= parsed;
+    start = end;
+  }
+  return first;
+}
+
+/** The production writer: the summarize lane's mount, with this module's prompt. A spawn that never answered (an
+ *  error envelope, a usage refusal, admission abandoned) throws, so the tick fails and the fingerprint is asked again
+ *  later; only a model's real reply can be a refused answer. */
 export function realRecommendationWriter(opts: { mount: Mount; cwd: string; settingsFile: string; spawn?: typeof spawnWorker }): (input: SummarizeInput) => Promise<unknown> {
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("feedback-summary");
   return async ({ context: prompt }) => {
     const args = buildDecisionSummarySpawnArgs({ input: { context: "" }, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
     const result = await spawn({ ...args, prompt });
-    const match = /\{[\s\S]*\}/.exec(result.text);
-    if (!match) return null;
-    try {
-      return JSON.parse(match[0]);
-    } catch {
-      // deliberate: an unparseable answer is a refused answer; the checker names it.
-      return null;
+    if (result.isError === true || result.notStarted !== undefined) {
+      throw new Error(`the recommendation writer's spawn did not answer (${result.notStarted ?? result.subtype})`);
     }
+    return recommendationAnswerJson(result.text);
   };
 }
 
