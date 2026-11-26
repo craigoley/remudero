@@ -7,7 +7,7 @@
   band_meaning: span
   origin: "operator request 2026-10-24: fleet cockpit code health and daily progress; approved researched
     eight-slice delivery"
-  status: queued
+  status: merged
   attempts: 0
   id: W1-T10559
   title: Collect and serve durable timezone-aware Daily progress independently of page visits
