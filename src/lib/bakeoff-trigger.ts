@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { acquireDrainLock, DrainLockError } from "./drain-lock.js";
@@ -9,8 +9,8 @@ import { CASH_RESPONSES_DEPLOYMENTS } from "./cash-responses.js";
 import { invoiceLeadEligibility, readNewestInvoiceVerdictsAsync } from "./cash-invoice-reconcile.js";
 import { readLedgerUnionRecordsSync } from "./ledger-grep.js";
 import { isFoundryClaudeDeployment, OPENWEIGHT_REASONING_EFFORTS } from "./worker-provider.js";
-import { systemClock } from "./clock.js";
-import { judgeReplayPoolRefusal, recordJudgeReplayFigures, type JudgeReplayFigures } from "./judge-shadow.js";
+import { systemClock, type Clock } from "./clock.js";
+import { JUDGE_REPLAY_STALE_DAYS, judgeReplayPoolRefusal, readJudgeShadowPoolRecord, recordJudgeReplayFigures, type JudgeReplayFigures } from "./judge-shadow.js";
 import type { JudgeReplayFinishedRow } from "./judge-replay-batch.js";
 
 /** W1-T12422: a decision model is billed `decisions` and keyed `decisions:<candidate>`, apart from `cash:<deployment>`. */
@@ -65,6 +65,8 @@ interface TrialState {
   trialed: string[]; readinessDigests?: Record<string, string>; pending?: { id: string; models: string[]; proposal?: Proposal };
   /** W1-T12422: the models whose direct judge replay ran, and the readiness digest it ran at. */
   judgeTrialed?: string[]; judgeDigests?: Record<string, string>;
+  /** W1-T14841: when each model's judge replay was last started, so stale figures buy one replay per bound, not one per pass. */
+  judgeReplayedAt?: Record<string, string>;
 }
 
 export function readBakeoffTrialState(stateDir: string): TrialState {
@@ -81,6 +83,8 @@ export function readBakeoffTrialState(stateDir: string): TrialState {
     (state.judgeTrialed !== undefined && (!Array.isArray(state.judgeTrialed) || state.judgeTrialed.some((id) => typeof id !== "string"))) ||
     (state.judgeDigests !== undefined && (state.judgeDigests === null || typeof state.judgeDigests !== "object" || Array.isArray(state.judgeDigests) ||
       Object.values(state.judgeDigests).some((digest) => typeof digest !== "string"))) ||
+    (state.judgeReplayedAt !== undefined && (state.judgeReplayedAt === null || typeof state.judgeReplayedAt !== "object" ||
+      Array.isArray(state.judgeReplayedAt) || Object.values(state.judgeReplayedAt).some((at) => typeof at !== "string"))) ||
     (state.pending && (typeof state.pending.id !== "string" || !Array.isArray(state.pending.models) ||
       state.pending.models.some((id) => typeof id !== "string") ||
       (state.pending.proposal && (state.pending.proposal.id !== state.pending.id || typeof state.pending.proposal.summary !== "string"))))) {
@@ -96,6 +100,46 @@ export interface DeploymentBakeoffInput {
   replay?: (candidates: readonly DeploymentBakeoffCandidate[]) => Promise<BakeoffRow[]>;
   /** W1-T12422: the direct judge replay of one cash deployment or decision model, for each `shadow: auto` role. */
   judgeReplay?: (model: DeployedModel) => Promise<JudgeReplayOutcome[]>;
+  /** W1-T14841: what the judge replay is keyed on beside each model's readiness digest (judge-shadow.ts judgeReplayKey):
+   *  the `shadow: auto` roles and the decision reader revision. A change replays every judge-trialed model once. */
+  judgeReplayKey?: string;
+  /** W1-T14841: the `shadow: auto` roles. A trialed model whose pool figures for one are older than
+   *  JUDGE_REPLAY_STALE_DAYS is replayed once more. */
+  judgeReplayRoles?: readonly string[];
+  /** The clock, for a test; production reads the system clock. */
+  clock?: Pick<Clock, "now" | "iso">;
+}
+
+const DAY_MS = 86_400_000;
+
+/** W1-T14841: the model as the judge replay keys it: its readiness digest joined with the replay key. */
+function judgeKeyed(model: DeployedModel, replayKey: string | undefined): DeployedModel {
+  if (replayKey === undefined || model.readinessDigest === undefined) return model;
+  return { ...model, readinessDigest: createHash("sha256").update(`${model.readinessDigest}\u0000${replayKey}`).digest("hex") };
+}
+
+/** W1-T14841: a judge-trialed model is stale when its pool figures for an auto role are older than the bound and its
+ *  last replay started before the bound too. An unreadable pool record names no model stale. */
+function staleJudgeModels(models: readonly DeployedModel[], input: DeploymentBakeoffInput, state: TrialState, nowMs: number): DeployedModel[] {
+  const roles = input.judgeReplayRoles ?? [];
+  if (roles.length === 0) return [];
+  let record;
+  try { record = readJudgeShadowPoolRecord(input.stateDir); }
+  catch (error) {
+    process.stderr.write(`bake-off: the judge pool record is unreadable, so no model is replayed as stale: ${error instanceof Error ? error.message : String(error)}\n`);
+    return [];
+  }
+  const bound = nowMs - JUDGE_REPLAY_STALE_DAYS * DAY_MS;
+  return models.filter((model) => {
+    const id = key(model);
+    if (!(state.judgeTrialed ?? []).includes(id)) return false;
+    const started = state.judgeReplayedAt?.[id];
+    if (started !== undefined && Date.parse(started) > bound) return false;
+    return roles.some((role) => {
+      const figures = record.replays[role]?.[id];
+      return figures !== undefined && Date.parse(figures.finishedAt) <= bound;
+    });
+  });
 }
 
 /** W1-T12422: the replay figures one finished replay stores for the pool. */
@@ -171,8 +215,17 @@ export async function runDeploymentBakeoff(input: DeploymentBakeoffInput): Promi
     const models = input.replay ? findUntrialedModels(input.deployed.filter((model) => model.billing !== "decisions"), state.trialed, state.readinessDigests) : [];
     state.judgeTrialed ??= [];
     state.judgeDigests ??= {};
-    const judged = input.judgeReplay ? findUntrialedModels(input.deployed.filter((model) => model.billing !== "subscription" &&
-      !isFoundryClaudeDeployment(model.model)), state.judgeTrialed, state.judgeDigests) : [];
+    const judgeable = input.deployed.filter((model) => model.billing !== "subscription" && !isFoundryClaudeDeployment(model.model))
+      .map((model) => judgeKeyed(model, input.judgeReplayKey));
+    const clock = input.clock ?? systemClock;
+    const nowMs = clock.now();
+    const untrialed = input.judgeReplay ? findUntrialedModels(judgeable, state.judgeTrialed, state.judgeDigests) : [];
+    const judged = input.judgeReplay ? [...untrialed, ...staleJudgeModels(judgeable, input, state, nowMs)
+      .filter((model) => !untrialed.some((u) => key(u) === key(model)))] : [];
+    if (judged.length > 0) {
+      state.judgeReplayedAt ??= {};
+      for (const model of judged) state.judgeReplayedAt[key(model)] = clock.iso();
+    }
     save();
     if (models.length === 0 && judged.length === 0) return [];
     const ids = models.map(key);

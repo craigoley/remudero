@@ -1860,11 +1860,15 @@ export interface CodexCapacityDeps {
  */
 function resolveCapabilityLadder(config: Config, deps: CodexCapacityDeps): CapabilityLadder | undefined {
   if (deps.capabilities) return deps.capabilities;
+  const path = mountsPath(config.root);
   try {
-    return loadMounts(mountsPath(config.root)).capabilities;
+    return loadMounts(path).capabilities;
   } catch (error) {
     // Deliberate compatibility fallback: a missing/malformed optional table preserves the
     // pre-capability balanced routing path; callers already treat `undefined` as that state.
+    // W1-T14880: the fallback says why, so the path and error that forced it can be read from the log.
+    console.error(JSON.stringify({ event: "worker.provider.capability_table_unloadable", path,
+      reason: String((error as Error)?.message ?? error) }));
     return undefined;
   }
 }

@@ -2449,9 +2449,11 @@ export const STATE_BACKUP_LEDGER_RELPATH = LEDGER_FILENAME;
  * W1-T234: P37–P45 existed on only one disk. */
 export const STATE_BACKUP_PROPOSALS_REGISTER_RELPATH = "inbox-proposals.json";
 
-/** Only proven rederivable state/ paths are excluded: status.json (W1-T234 rationale), and engines/worktrees (W1-T13222):
- *  leased reviewer checkouts rebuilt from a revision, 1.3 GB on the host, one of which was reaped mid-walk on 2026-11-16. */
-export const STATE_BACKUP_EXCLUDED_RELPATHS: ReadonlySet<string> = new Set(["status.json", "engines/worktrees"]);
+/** Only proven rederivable state/ paths are excluded: status.json (W1-T234 rationale), engines/worktrees (W1-T13222):
+ *  leased reviewer checkouts rebuilt from a revision, 1.3 GB on the host, one of which was reaped mid-walk on 2026-11-16,
+ *  and daemon-slots (W1-T14890): the deploy slots' git checkouts and their reviewer trees, rebuilt from git at the next
+ *  handoff, 5.1 GB on the host on 2026-11-25, when a dangling node_modules/.bin link under it failed core's snapshot. */
+export const STATE_BACKUP_EXCLUDED_RELPATHS: ReadonlySet<string> = new Set(["status.json", "engines/worktrees", "daemon-slots"]);
 
 /** One completed snapshot. */
 export interface StateBackupSnapshot {

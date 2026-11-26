@@ -511,8 +511,9 @@ verify_human_judge:
 # primary judge spawns as before and the sweep acts only on its verdict. The `shadow` arm sends the
 # same prompt to one cash deployment and ledgers one judge_shadow row. To turn an arm off, remove the
 # `shadow:` mapping from its row (docs/operator-guide.md). Keep each row on ONE line.
-ci_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000, shadow: { deployment: DeepSeek-V4-Flash } }
-fix_progress_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000, shadow: { deployment: DeepSeek-V4-Flash } }
+# W1-T14841 (Craig, 2026-11-25): both draw from the `auto` pool; DeepSeek-V4-Flash answers while the role's pool is empty.
+ci_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000, shadow: auto, shadow_fallback: DeepSeek-V4-Flash }
+fix_progress_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000, shadow: auto, shadow_fallback: DeepSeek-V4-Flash }
 
 # The machine-filing judge (operator ruling 2026-09-29) releases machine-filed tasks with no person
 # asked, so it is the one judge where a miss dispatches work. MEASURED 2026-09-29 on five probe records,
@@ -531,9 +532,10 @@ machine_filing_judge:
 # clears the bar there, the config gardener proposes `provider: cash` on its row.
 # Keep each row on ONE line: the gardener replaces one line.
 # W1-T12417: a row may say `shadow: <name>`: a decision_models row asks the role's options as one
-# choice question, and any other name is a cash deployment. A row that names none, like these two,
+# choice question, and any other name is a cash deployment. A row that names none, like feedback_summary,
 # keeps the shadow above. A shadow never names a provider for the row itself.
-risk_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000 }
+# W1-T14841 (Craig, 2026-11-25): the risk judge's shadow is decision-1 (systemone-eastus2), in place of the cash row.
+risk_judge: { model: haiku, effort: low, max_turns: 400, context_budget: 60000, shadow: systemone-eastus2 }
 feedback_summary: { model: haiku, effort: low, max_turns: 400, context_budget: 60000 }
 
 # ── Decision models (W1-T12416, operator decision 2026-11-12) ──────────────────

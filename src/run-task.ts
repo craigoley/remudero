@@ -1158,7 +1158,7 @@ import {
 import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
 import { learnedBakeoffLimit, renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
 import type { DeployedModel, DeploymentBakeoffCandidate, JudgeReplayOutcome } from "./lib/bakeoff-trigger.js";
-import { judgeShadowAutoRoles, judgeShadowReplayCorpus } from "./lib/judge-shadow.js";
+import { judgeReplayKey, judgeShadowAutoRoles, judgeShadowReplayCorpus } from "./lib/judge-shadow.js";
 import { CASH_RESPONSES_DEPLOYMENTS } from "./lib/cash-responses.js";
 import { runSweepBakeoff } from "./lib/sweep.js";
 import { OPENWEIGHT_PRICES, OPENWEIGHT_CONTEXT_WINDOWS, OPENWEIGHT_TEMPERATURE, openWeightDeploymentReady, OpenWeightAllowanceExhaustedError,
@@ -1386,6 +1386,7 @@ import {
   readLiveRecyclePausePid,
   renderProgressWatchdogVerdict,
 } from "./lib/progress-watchdog.js";
+import { readProgressWatchdogDrainRows } from "./lib/progress-watchdog-drain-memo.js";
 import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-canary.js";
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
@@ -1569,7 +1570,7 @@ import { SEEDED_GOLDENS, replayGoldens, replayPassRate, recordReplayResults, typ
 import { classifyGrepZeroHit } from "./lib/grep-zero-cause.js";
 import { loadMounts, mountsPath, resolveMount, resolveMountForClass, type Mount, type Mounts } from "./lib/mounts.js";
 import { runFixSelfCheckWith, type FixSelfCheckRunArgs } from "./lib/fix-self-check.js";
-import { loadMountHeadroomCells, resolveMountExplorationDispatch as exploreMount } from "./lib/mount-exploration.js";
+import { loadMountHeadroomCells, MountSweepChildError, resolveMountExplorationDispatch as exploreMount } from "./lib/mount-exploration.js";
 import {
   RULING_JUDGED_STEP,
   judgeRulingRisk,
@@ -23230,6 +23231,9 @@ export function buildMeasurementCadenceDaemonHooks(deps: {
         // W1-T12422: the decision models join the deployed list; each new or changed model gets the direct judge replay.
         deployed: [...measurementBakeoffDeployments(bakeoffMounts), ...decisionBakeoffDeployments(bakeoffMounts)],
         judgeReplay: createJudgeShadowReplay(bakeoffConfig, repoRoot, bakeoffMounts),
+        // W1-T14841: a change to the auto roles or the decision reader, or figures older than the stale bound, replay once.
+        judgeReplayKey: judgeReplayKey(bakeoffMounts),
+        judgeReplayRoles: judgeShadowAutoRoles(bakeoffMounts),
         incumbent: { id: "incumbent", label: `incumbent ${baseMount.model} (${baseMount.effort})`,
           model: baseMount.model, billing: baseMount.provider === "cash" ? "cash" : "subscription",
           effort: baseMount.effort, tools: true },
@@ -34500,8 +34504,8 @@ export async function runMountRecommenderRung(
     }
     writeFeedbackDocketMarker(markerPath, { lastFireIso: now.toISOString() });
 
-    // W1-T13791's loader, not a plain import(): this rung runs in the bundled run child, which has no tsx loader, and
-    // the sweep imports src/*.ts that Node's strip-only mode refuses (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX).
+    // W1-T14922: the loader runs the sweep in a child process (its --json report), so the ledger scan never holds
+    // the daemon's event loop; a failed child throws a named MountSweepChildError, refused below.
     const sweep = deps.buildMountHeadroomSweep
       ? deps.buildMountHeadroomSweep(stateDir)
       : { cells: await loadMountHeadroomCells(root, stateDir) };
@@ -34549,7 +34553,10 @@ export async function runMountRecommenderRung(
     });
     return { filed, refused };
   } catch (e) {
-    log("mount_recommendation.error", { error: String((e as Error)?.message ?? e) });
+    log("mount_recommendation.error", {
+      error: String((e as Error)?.message ?? e),
+      ...(e instanceof MountSweepChildError ? { reason: e.reason } : {}),
+    });
     return { filed: 0, refused: 0 };
   }
 }
@@ -44140,9 +44147,8 @@ export function progressWatchdogCommand(
     ? captureDiagnosticsBundle(stateDir, nowMs, verdict, read.rows, { run })
     : undefined;
   if (rest.includes("--json")) {
-    const text = readLedgerUnionRecordsSync(stateDir, {
-      step: ["implement.done", "verdict", "run.freshness_handoff", "worker.recycle_yield"],
-    }).rows.map(row => JSON.stringify(row)).join("\n");
+    // W1-T14920: each rotation's drain rows are parsed once and remembered beside the ledger.
+    const text = readProgressWatchdogDrainRows(stateDir).map(row => JSON.stringify(row)).join("\n");
     const drainWait = deriveDrainWait(readImplementDurationsMs(text), readDrainWaitLanes(stateDir, text, () => nowMs));
     console.log(JSON.stringify({ stateDir, rowsRead: read.rows.length, ...verdict, bundle,
       drainWaitS: drainWait.waitS, drainWaitSource: drainWait.source }));

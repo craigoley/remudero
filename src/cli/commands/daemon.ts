@@ -99,7 +99,7 @@ import { loadPolicy, policyPath, type FreshnessRestartValues } from "../../lib/p
 import { refreshReviewPublisherToken as refreshInstallationToken } from "../../lib/review.js";
 import { feedbackStatusOnMain } from "../../lib/auto-triage.js";
 import {
-  bootSweepDispatchClaimsAsync, dispatchClaimRef, realBootSweepHostProbe, releaseLandedDispatchClaims, listHeldDispatchClaims, claimMintedByRerun,
+  bootSweepDispatchClaimsAsync, dispatchClaimRef, realBootSweepHostProbe, releaseLandedDispatchClaims, listHeldDispatchClaims, claimMintedByRerun, sweepSilentDispatchClaims, gitClaimRunnerAsync,
   type BootSweepInputs, type DispatchClaimReserverAsync,
 } from "../../lib/dispatch-claim.js";
 import { type ProjectPlanPhases, loadCreditStore, saveCreditStore, recordCredit, refusesAsPlanOnly, buildCommitTrailerIndex, planCreditOverridePath, projectPlan, independentBlockReleasesFrom, readLedgerLines, readLedgerSnapshot, buildLedgerIndex, createDispatchBreakerCache, evaluateDispatchBreakerCorroboratedDetailed, hasRepeatedTaskAttributableLifetimeDispatches, type LedgerLines, type LedgerSnapshot, type DispatchBreakerDetail, type GitHub, type PrRef, type StatusProjection, taskIdFromRunBranch } from "../../lib/status.js";
@@ -1287,6 +1287,12 @@ async function daemonStandbyCommand(rest: string[], deps: NonNullable<Parameters
   }
 }
 
+/** W1-T14635: the standby reads the rotations the boot's two union reads walk, while the active daemon still works. */
+function warmStandbyRotations(stateDir: string, cache: ReturnType<typeof createLedgerRotationCache>): void {
+  readRunChildModeUnion(stateDir, undefined, cache.hook([...RUN_CHILD_MODE_EVIDENCE_STEPS]));
+  readRestartHistoryLines(stateDir, undefined, cache.hook(RESTART_HISTORY_STEPS));
+}
+
 export async function daemonCommand(
   rest: string[],
   deps: {
@@ -1358,6 +1364,8 @@ export async function daemonCommand(
     bootClaimReserver?: DispatchClaimReserverAsync;
     hostProbe?: BootSweepInputs["hostProbe"];
     tickClaimReserver?: DispatchClaimReserverAsync;
+    /** W1-T14874: the tick sweep's silence pass; production uses {@link sweepSilentDispatchClaims}. */
+    sweepSilentClaims?: typeof sweepSilentDispatchClaims;
     /** Opt-in NEW-build reservation reader; production uses the private-dir environment adapter. */
     checkHeavyNewBuild?: DispatchGovernorDeps["checkHeavyNewBuild"];
     /** Injectable clock for the daily-cost consultation. Production keeps the real clock. */
@@ -1389,6 +1397,9 @@ export async function daemonCommand(
     /** W1-T14860: dispatch's filing reader. Production omits it and uses the process's one prefetch; a test injects a
      *  recorder to see when the standby starts its read. */
     filingPrefetch?: { refresh(planPath: string): Promise<unknown> };
+    /** W1-T14879: the standby's rotation warm read. Production omits it and reads the two unions; a test injects a
+     *  recorder to see that the filing read starts before it. */
+    standbyWarm?: (stateDir: string, cache: ReturnType<typeof createLedgerRotationCache>) => void;
   } = {},
   host: DaemonCommandHost,
   standby?: StandbyBoot,
@@ -2050,12 +2061,16 @@ export async function daemonCommand(
   let standbyFilingRead: Promise<unknown> | undefined;
   // W1-T14635: the rotations the boot's two union reads walk are read now, while the active daemon still works, and kept
   // for those reads; once promoted the boot reads only what the cache misses (the live file and any newer rotation).
+  // W1-T14860: the filing read is read-only, so the standby starts it while the active daemon still works, and the boot
+  // awaits that same read after the lock instead of starting one there. A plan the post-lock sync moves is seen one
+  // selection later, which the prefetched reader already allows (W1-T7744). W1-T14879: it starts before the rotation warm
+  // below, whose synchronous reads took 108 s on the 2026-11-25 21:12Z hand-over, so the git read runs beside them.
+  if (standby?.ports) standbyFilingRead = filingPrefetch.refresh(target.planPath);
   const rotationCache = standby?.ports ? createLedgerRotationCache() : undefined;
   if (rotationCache) {
     const stateDir = join(config.root, "state");
     try {
-      readRunChildModeUnion(stateDir, undefined, rotationCache.hook([...RUN_CHILD_MODE_EVIDENCE_STEPS]));
-      readRestartHistoryLines(stateDir, undefined, rotationCache.hook(RESTART_HISTORY_STEPS));
+      (deps.standbyWarm ?? warmStandbyRotations)(stateDir, rotationCache);
     } catch (warmError) {
       // A failed warm read decides nothing: the boot runs the same two reads and refuses or records there.
       void warmError;
@@ -2063,10 +2078,6 @@ export async function daemonCommand(
     bootPhases.mark("standby_warm");
   }
   if (standby?.ports) {
-    // W1-T14860: the filing read is read-only, so the standby starts it now, while the active daemon still works, and the
-    // boot awaits that same read after the lock instead of starting one there. A plan the post-lock sync moves is seen
-    // one selection later, which the prefetched reader already allows (W1-T7744).
-    standbyFilingRead = filingPrefetch.refresh(target.planPath);
     // W1-T14544: ready, then wait for the hand-over; the lock is taken only once its live holder has let go.
     const promotion = await awaitPromotion(standby.ports, standby.startedAtMs);
     if ("criterion" in promotion) { await stopReadPlane(); return 1; }
@@ -2101,6 +2112,8 @@ export async function daemonCommand(
     { resource: "stop_marker", close: () => { consumeStop(config.root); } },
     ...(readPlane ? [{ resource: "read_plane", close: stopReadPlane }] : []),
   ];
+  // W1-T14873: the SRE lane page reads the whole ledger union; the exit waits for it only after the lock is released.
+  const afterRelease: Array<{ resource: string; settled: Promise<void> }> = [];
   try {
   if (standbyPromotion) {
     // W1-T14544: the checkout sync a standby skipped runs now that it holds the lock; a refusal releases it.
@@ -2778,10 +2791,11 @@ export async function daemonCommand(
         readLiveState: daemonLiveStateReader(target.owner, target.repo),
         isIndeterminate,
         releaseLandedClaims: (isMerged) => {
-          const reserver = deps.tickClaimReserver ?? dispatchClaimReserverAsyncFor(join(config.root, "repos", target.repo));
+          const claimDir = join(config.root, "repos", target.repo);
+          const reserver = deps.tickClaimReserver ?? dispatchClaimReserverAsyncFor(claimDir);
           // W1-T13356: one listing feeds both this sweep and selection's claim-held deferral lift.
           const listing = listHeldDispatchClaims(reserver);
-          return Object.assign(releaseLandedDispatchClaims(reserver, {
+          const landed = releaseLandedDispatchClaims(reserver, {
             listing,
             isMerged,
             isIndeterminate,
@@ -2790,7 +2804,13 @@ export async function daemonCommand(
             reportedRerun: landedClaimRerunReported,
             localHost: hostname(),
             log,
-          }), { listing });
+          });
+          // W1-T14874: then every claim the landed sweep left is judged by the W1-T9432 silence judge, which no lane
+          // reaches for a task selection defers as claim-held; a claim silent for 2W is dropped, and nothing is minted.
+          return Object.assign(landed.then(async (released) => [...released, ...(await (deps.sweepSilentClaims ?? sweepSilentDispatchClaims)(reserver, await listing, {
+            run: gitClaimRunnerAsync(claimDir), stateDir: dirname(ledgerPath), log, localHost: hostname(),
+            skip: new Set(released.filter((r) => r.dropped).map((r) => r.taskId)),
+          }))]), { listing });
         },
         isIndependentFailureBlocked,
         independentBlockReleases: () => independentBlockReleasesFrom(lastProj), // W1-T8676: ledgered by the selection pass
@@ -3117,7 +3137,7 @@ export async function daemonCommand(
                 ...(await daemonSreLaneEnabled(config.root, repoRoot, log, {
                   escalate: (info) => escalateSreLaneUnresolved(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
                   clear: (info) => escalateSreLaneUnresolvedCleared(info, { owner: target.owner, repo: target.repo, ledgerPath, runId }),
-                }, (paged) => { cleanup.push({ resource: "sre_lane_page", close: () => paged }); }) ? [
+                }, (paged) => { afterRelease.push({ resource: "sre_lane_page", settled: paged }); }) ? [
                   startBoundedDaemonSreLane(
                     (mergedLastDay) => daemonSreLaneInput({
                       stateDir: join(config.root, "state"),
@@ -3458,7 +3478,7 @@ export async function daemonCommand(
     // reason still resolves through `daemonExitCode` itself, unchanged.
     return daemonExitCodeForSummary(summary);
   } finally {
-    await closeDaemonCleanup(cleanup, log, clockFromMillisFn(deps.now));
+    await closeDaemonCleanup(cleanup, log, clockFromMillisFn(deps.now), afterRelease);
   }
   } finally {
     archivedLifetime.history?.close?.();
@@ -3477,6 +3497,8 @@ export async function closeDaemonCleanup(
   cleanup: Array<{ resource: string; close: () => void | Promise<void> }>,
   log: (step: string, extra?: Record<string, unknown>) => void,
   clock: Pick<Clock, "now">,
+  /** W1-T14873: work the exit still finishes, but only after the drain lock is released, so no successor waits on it. */
+  afterRelease: Array<{ resource: string; settled: Promise<void> }> = [],
 ): Promise<void> {
   const ordered = [...cleanup].reverse();
   const closesMs: Record<string, number> = {};
@@ -3505,6 +3527,20 @@ export async function closeDaemonCleanup(
     }
     const key = `${resource}_ms`;
     closesMs[key] = (closesMs[key] ?? 0) + clock.now() - closeStartMs;
+  }
+  if (afterRelease.length === 0) return;
+  const afterMs: Record<string, number> = {};
+  const afterStartMs = clock.now();
+  for (const { resource, settled } of afterRelease) {
+    const settleStartMs = clock.now();
+    await settled.catch((error: unknown) => { console.error("daemon after-release work failed", { resource, error: String(error) }); });
+    afterMs[`${resource}_ms`] = clock.now() - settleStartMs;
+  }
+  try {
+    log("daemon.exit_after_release", { ...afterMs, total_ms: clock.now() - afterStartMs });
+  } catch (error) {
+    // A timing row that cannot be written changes nothing: the lock is already released.
+    console.error("daemon after-release reporting failed", { error: String(error) });
   }
 }
 

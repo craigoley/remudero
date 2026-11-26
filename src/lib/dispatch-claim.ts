@@ -1296,6 +1296,8 @@ export interface ClaimSilenceJudgeInputs {
   mintedByThisInstance?: (anchor: ClaimAnchorIdentity) => boolean;
   /** This instance's host, which a fleet lane's mint row names; absent ⇒ `os.hostname()`. */
   localHost?: string;
+  /** W1-T14874: the tick sweep drops a silent claim but never takes the task, so it retries no create. Absent ⇒ a lane. */
+  surface?: "tick-sweep";
 }
 
 export interface ClaimSilenceJudgement extends ClaimSilenceDecision {
@@ -1338,8 +1340,8 @@ export async function reclaimSilentDispatchClaim(
     return decision;
   }
   const dropped = await reserver.drop(taskId, { expect: judged! });
-  deps.log("dispatch.claim_reclaimed", { ...fields, dropped });
-  if (!dropped) return { ...decision, dropped };
+  deps.log("dispatch.claim_reclaimed", { ...fields, ...(deps.surface ? { surface: deps.surface } : {}), dropped });
+  if (!dropped || deps.surface === "tick-sweep") return { ...decision, dropped };
   deps.say?.(`RECLAIMED a silent claim — ${decision.reason}`);
   const fresh = await reserver.mintAnchor();
   const retried = await reserver.attempt(taskId, fresh);
@@ -1348,6 +1350,29 @@ export async function reclaimSilentDispatchClaim(
     ref: dispatchClaimRef(taskId), outcome: retried, ...decideDispatchClaim(retried, { taskId }),
   });
   return { ...decision, dropped, anchor: fresh };
+}
+
+/**
+ * W1-T14874: the tick sweep's silence pass. Selection defers a task whose claim another lane holds, so no lane ever meets
+ * a claim whose holder died on another host or in a recycled container, and {@link reclaimSilentDispatchClaim} never
+ * judges it. This judges every listed claim the landed sweep left with that same judge, over one ledger read, and drops
+ * a claim silent for 2W pinned to the sha it judged. It never mints: the task is dispatched by the next selection.
+ */
+export async function sweepSilentDispatchClaims(
+  reserver: DispatchClaimReserverAsync,
+  listing: DispatchClaimListing,
+  deps: ClaimSilenceJudgeInputs & { skip?: ReadonlySet<string> },
+): Promise<Array<ClaimSilenceJudgement & { taskId: string }>> {
+  if (!listing.ok) return [];
+  const read = deps.readRows ?? ((since: string) => readLedgerUnionRecords(deps.stateDir, { since, step: CLAIM_SILENCE_LEDGER_STEPS }));
+  let rows: Promise<Array<Record<string, unknown>>> | undefined;
+  const once = (since: string) => (rows ??= read(since));
+  const judged: Array<ClaimSilenceJudgement & { taskId: string }> = [];
+  for (const claim of listing.claims) {
+    if (deps.skip?.has(claim.taskId)) continue;
+    judged.push({ taskId: claim.taskId, ...(await reclaimSilentDispatchClaim(claim.taskId, reserver, { ...deps, readRows: once, surface: "tick-sweep" })) });
+  }
+  return judged;
 }
 
 /** A run's own claim, renewed on {@link DISPATCH_CLAIM_RENEW_INTERVAL_MS} until `stop()` hands back the sha to release. */

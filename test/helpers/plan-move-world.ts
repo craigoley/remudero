@@ -131,6 +131,8 @@ export function moveWorld(t: TestContext, publicRecords: Record<string, string>,
         preflight: async (repoDir, commit, pr) => { preflights.push({ repoDir, commit, title: pr.title }); return { ok: true, failures: [], unreadable: [] }; },
         clock: { now: () => ++clock, date: () => new Date(clock), iso: () => new Date(clock).toISOString() },
         print: line => { lines.push(line); },
+        // W1-T14875: no closed copy's ops-gate run is read unless a test says what it named.
+        opsGateNamed: async () => undefined,
         ...overrides,
       });
     } finally {
