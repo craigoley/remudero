@@ -61,11 +61,10 @@ function statusClassOfCode(status: number): DeliveryLogReadError["statusClass"] 
   return "5xx";
 }
 
-/** The production GET's seams: the env naming the App, the key reader, the clock and `fetch`. */
+/** The production GET's seams: the env naming the App, the key reader and `fetch`. */
 export interface AppLogApiOptions {
   env?: NodeJS.ProcessEnv;
   readKey?: (path: string) => string;
-  now?: () => number;
   fetchImpl?: typeof fetch;
 }
 
@@ -81,7 +80,7 @@ export function defaultDeliveryLogApi(opts: AppLogApiOptions = {}): DeliveryLogA
     if (!appId || !keyPath) throw new DeliveryLogReadError("auth");
     let jwt: string;
     try {
-      jwt = signAppJwt(appId, (opts.readKey ?? ((p: string) => fs.readFileSync(p, "utf8")))(keyPath), opts.now);
+      jwt = signAppJwt(appId, (opts.readKey ?? ((p: string) => fs.readFileSync(p, "utf8")))(keyPath));
     } catch {
       throw new DeliveryLogReadError("auth");
     }
