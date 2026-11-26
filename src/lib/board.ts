@@ -343,8 +343,14 @@ function derivePrQueue(
   // Each open head's newest `sweep.disposed` row, from ONE pass: a scan per open PR was P x L on core's fact store.
   const disposedAt = new Map<string, Record<string, unknown>>();
   const wanted = new Set([...unique.values()].flatMap((pr) => (pr.headRefOid ? [`${pr.number}\u0000${pr.headRefOid}`] : [])));
+  // W1-T15005: a fix round the sweep deferred for a review of the exact head, shown while that head's review is pending.
+  const waitingOn = new Map<string, string>();
   if (wanted.size > 0) {
     for (const line of lines) {
+      if (line.step === "sweep.fix_deferred_review_in_flight" && typeof line.pr_number === "number" &&
+          typeof line.head === "string" && typeof line.review_run === "string") {
+        waitingOn.set(`${line.pr_number}\u0000${line.head}`, line.review_run);
+      }
       if (line.step !== "sweep.disposed" || typeof line.pr_number !== "number" || typeof line.head_sha !== "string") continue;
       const id = `${line.pr_number}\u0000${line.head_sha}`;
       if (wanted.has(id)) disposedAt.set(id, line);
@@ -365,6 +371,7 @@ function derivePrQueue(
         : transition
           ? "reason not named"
           : "the sweep has not yet observed this current head";
+    const waiting = pr.headRefOid && reviewState === "pending" ? waitingOn.get(`${pr.number}\u0000${pr.headRefOid}`) : undefined;
     const held = fleetHeld || mergeHeld.some((hold) => hold.prNumber === pr.number);
     rows.push({
       prNumber: pr.number,
@@ -374,7 +381,7 @@ function derivePrQueue(
       ...(pr.headRefOid ? { headSha: pr.headRefOid } : {}),
       ...(taskId ? { taskId } : {}),
       disposition,
-      reason,
+      reason: waiting === undefined ? reason : `${reason}; fix waiting on review ${waiting}`,
       reviewState,
       queueClass: queueClass(disposition, reviewState, held),
       held,
