@@ -19274,7 +19274,7 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
   const reportWindowShort = () => {
     if (windowShort.length === 0) return;
     const names = windowShort.slice(0, 20).join(", ") + (windowShort.length > 20 ? ` (+${windowShort.length - 20} more)` : "");
-    console.error(`### rmd plan-reconcile: WINDOW-SHORT — ${windowShort.length} queued shard(s) are merged on origin/main but their merge subject and changed paths are outside the credit scan windows (subjects: last ${MERGE_SUBJECT_SCAN_LIMIT} commits, paths: last ${MERGED_PATHS_SCAN_LIMIT}) or carry no (#N), so they cannot be judged and were NOT flipped: ${names} — flip them by hand in a plan-only PR`);
+    console.error(`### rmd plan-reconcile: WINDOW-SHORT — ${windowShort.length} queued shard(s) are merged on origin/main but their merge commit carries no (#N) or its changed paths could not be read by sha, so they cannot be judged and were NOT flipped: ${names} — flip them by hand in a plan-only PR`);
     (deps.log ?? (() => {}))("plan.reconcile.window_short", { count: windowShort.length });
   };
   try {
@@ -45328,7 +45328,7 @@ import {
   escalateRunChildContract, type RunChildContractEscalation, type RunChildModeDecision, type RunChildModeEvidence,
 } from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
-import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, MERGE_SUBJECT_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildBehindMainByPrAsync, buildCreditCandidates, buildEscalationReconcileCandidates, buildEscalationReconcileCandidatesAsync, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger, usesUntaskedReviewMetadata } from "./lib/tick-read-worker.js";
+import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildBehindMainByPrAsync, buildCreditCandidates, buildEscalationReconcileCandidates, buildEscalationReconcileCandidatesAsync, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger, usesUntaskedReviewMetadata } from "./lib/tick-read-worker.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
@@ -46642,7 +46642,6 @@ export {
   MAX_RETAINED_REMEDY_LINES,
   MAX_RETAINED_VERDICT_LINES,
   MERGED_PATHS_SCAN_LIMIT,
-  MERGE_SUBJECT_SCAN_LIMIT,
   RETAINED_POOL_HEADER,
   RETAINED_REMEDY_HEADER,
   RETAINED_RULE_SUITES_HEADER,
