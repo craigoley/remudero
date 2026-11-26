@@ -696,7 +696,6 @@ export async function* openLedgerUnion(
       }
       const skip = opts.rotationStartOffset?.name === basename(entry.path) ? opts.rotationStartOffset.offset : 0;
       for await (const raw of ndjsonLines(skip > 0 ? skipBytes(input, skip) : input,
-        // W1-T14943: no default row bound under exact dedupe either; only an explicit maxRowBytes drops a row.
         opts.exactDedupe?.maxRowBytes ?? Infinity, exact?.rowLimitError,
         opts.onOversizedRow && (() => {
           rowOrdinal += 1;
