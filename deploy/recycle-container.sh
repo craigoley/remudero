@@ -2805,6 +2805,21 @@ holder_worktrees() {
 
 # Attribute only by cwd in a counted lock's worktree, never by the lock's pid: it may be the
 # daemon, whose other children (reviews included) still need to block independently.
+# W1-T14947: a review holds state/inflight/reviews/<id>.lock from its claim to its result, between and
+# after its reviewer worker attempts too. Print each such lock whose owner pid is alive in the container,
+# one path per line; a lock whose owner is gone prints nothing and so never blocks the drain.
+live_review_locks() {
+  local f pid
+  [ -d "${INFLIGHT_DIR}/reviews" ] || return 0
+  for f in "${INFLIGHT_DIR}/reviews"/*.lock; do
+    [ -e "${f}" ] || continue
+    pid="$(sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' "${f}" 2>/dev/null | head -n 1)"
+    [ -n "${pid}" ] || continue
+    docker exec "${CONTAINER_NAME}" kill -0 "${pid}" >/dev/null 2>&1 && printf '%s\n' "${f}"
+  done
+  return 0
+}
+
 worker_lane() {
   local cwd="$1" f tree
   [ -n "${cwd}" ] || return 0
@@ -3082,6 +3097,15 @@ while :; do
     n=$((n + 1))
     counted_locks="${counted_locks}${f}"$'\n'
   done
+  # W1-T14947: a live review is in flight like a lane, so the same bounded wait covers it.
+  review_locks="$(live_review_locks)"
+  while IFS= read -r f; do
+    [ -n "${f}" ] || continue
+    n=$((n + 1))
+    counted_locks="${counted_locks}${f}"$'\n'
+  done <<REVIEW_LOCKS
+${review_locks}
+REVIEW_LOCKS
 
   # Lane-less workers, split by age. `busy` blocks the recycle exactly like a lock does; `hung` does
   # not, because it never will.
@@ -3160,6 +3184,13 @@ WORKERS
         sed 's/^/    /' "${f}" 2>/dev/null >&2 || true
       done
     fi
+    while IFS= read -r f; do
+      [ -n "${f}" ] || continue
+      echo "  reviews/$(basename "${f}") (a live review, W1-T14947):" >&2
+      sed 's/^/    /' "${f}" 2>/dev/null >&2 || true
+    done <<REVIEW_LOCKS
+${review_locks}
+REVIEW_LOCKS
     if [ -n "${busy_worker_lines}" ]; then
       echo "  in-flight worker trees — busy, not hung (lane workers are included in their lock count):" >&2
       printf '%s' "${busy_worker_lines}" >&2

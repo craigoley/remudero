@@ -3707,16 +3707,27 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
 }
 
 /** W1-T5998 — hold `runId` in {@link liveWorkerRunIds} for as long as `spawn` runs its worker. */
+/** W1-T14947: the in-flight lock directory a review holds from its claim to its result, read by deploy/recycle-container.sh's
+ *  drain. Task dispatch and the orphan sweep read only the top-level `state/inflight/*.lock` files, so a review lock is never
+ *  a task run (invariant one-lock-per-review). */
+export const REVIEW_INFLIGHT_DIR = "reviews";
+
 export async function whileWorkerRunLive<T>(host: ReviewCommandHost, runId: string, spawn: () => Promise<T>, inflightDir?: string): Promise<T> {
   const { liveWorkerRunIds, reviewWorkerLockId } = host;
-  const held = inflightDir === undefined ? undefined : acquireInflightLock(join(inflightDir, "review-workers"),
+  // W1-T14947: the review lock spans the whole run — its pending post, every reviewer attempt and the posting after the
+  // last one exits — and is released in the finally below, so no exit path leaves it held.
+  const review = inflightDir === undefined ? undefined : acquireInflightLock(join(inflightDir, REVIEW_INFLIGHT_DIR),
     reviewWorkerLockId(runId), { run_id: runId, reclaim: false });
-  liveWorkerRunIds.add(runId);
+  let held: ReturnType<typeof acquireInflightLock> | undefined;
   try {
+    held = inflightDir === undefined ? undefined : acquireInflightLock(join(inflightDir, "review-workers"),
+      reviewWorkerLockId(runId), { run_id: runId, reclaim: false });
+    liveWorkerRunIds.add(runId);
     return await spawn();
   } finally {
     liveWorkerRunIds.delete(runId);
     held?.release();
+    review?.release();
   }
 }
 
