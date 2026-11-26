@@ -10,10 +10,10 @@
  */
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { systemClock, type Clock } from "./clock.js";
 import type { Config } from "./config.js";
 import { engineTreesRoot } from "./engine-paths.js";
-import { repoRoot } from "./repo-location.js";
 import { removeUnderReviewerLease } from "./reviewer-worktree-lease.js";
 import { DEFAULT_WORKTREE_REAP_GRACE_MS, worktreeRemoveAsync } from "./worker.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
@@ -47,7 +47,7 @@ export interface ReviewerTreeReapOptions {
   /** The registering repository's origin/main sha; `undefined` when it cannot be read. */
   readOriginMain?: (repoDir: string) => Promise<string | undefined>;
   removeWorktree?: (repoDir: string, worktreePath: string) => Promise<void>;
-  /** The code checkout whose reviews cut trees beside it; defaults to this process's checkout. */
+  /** The code checkout whose reviews cut trees beside it; defaults to this install's own root. */
   codeRoot?: string;
   clock?: Clock;
   graceMs?: number;
@@ -65,7 +65,7 @@ export function reapRetiredReviewerTreesAsync(config: Config, log: (step: string
 
 async function reapPass(config: Config, log: (step: string, extra?: Record<string, unknown>) => void,
   opts: ReviewerTreeReapOptions): Promise<ReviewerTreeReapSummary> {
-  const roots = [...new Set([resolve(reviewerTreeCutRoot(opts.codeRoot ?? repoRoot)),
+  const roots = [...new Set([resolve(reviewerTreeCutRoot(opts.codeRoot ?? installRootDir())),
     resolve(join(engineTreesRoot(join(config.root, "state")), "worktrees"))])];
   const listEntries = opts.listEntries ?? listRootEntries;
   const readOriginMain = opts.readOriginMain ?? defaultReadOriginMain;
@@ -114,6 +114,11 @@ async function reapPass(config: Config, log: (step: string, extra?: Record<strin
       }
     }
   }
+}
+
+/** This rmd install's own root, derived as src/lib/worker.ts and src/lib/policy.ts derive it from a src/lib module. */
+function installRootDir(): string {
+  return join(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
 }
 
 /** A missing root is an empty pass; any other unlistable root is returned as unreadable, never thrown into the tick. */
