@@ -17,7 +17,7 @@ import { linkWorktreeNodeModules } from "./worker.js";
 import { loadPlan, newTestPath, SELECTOR_SHADOW_MISS_TEST_PATH } from "./plan.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import {
-  machineShardDesign, machineShardHeaderLines, machineShardInvariantClaims, machineShardLandingGuard, machineShardLintRefusal,
+  machineShardCriterionLines, machineShardDesign, machineShardHeaderLines, machineShardInvariantClaims, machineShardLandingGuard, machineShardLintRefusal,
   type MachineShardInvariants,
 } from "./machine-filing.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
@@ -1480,11 +1480,13 @@ export { SELECTOR_SHADOW_MISS_TEST_PATH };
 function selectorKeepsItsSelections(proof: string): MachineShardInvariants {
   return { declared: [{ slug: "selector-keeps-its-selections",
     statement: "every suite the selector already selects for a changed path is still selected; the repair adds coverage and takes none away.",
-    claim: "a suite the selector selected for a changed path before the repair is still selected for that path after it", proof }] };
+    claim: "a suite the selector selected for a changed path before the repair is still selected for that path after it", proof,
+    // W1-T14924: a preservation invariant, so its acceptance entry renders `kind: guard`.
+    guard: true }] };
 }
 
 const invariantClaimLines = (invariants: MachineShardInvariants): string[] =>
-  machineShardInvariantClaims(invariants).flatMap((c) => [`    - claim: ${JSON.stringify(c.claim)}`, `      proof: ${JSON.stringify(c.proof)}`]);
+  machineShardInvariantClaims(invariants).flatMap(machineShardCriterionLines);
 
 /** A parked plan task names the missed suite and the first observed changed paths into it, without
  *  guessing imports. */

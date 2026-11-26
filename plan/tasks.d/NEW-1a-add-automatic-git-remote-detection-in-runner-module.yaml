@@ -13,7 +13,9 @@
   
     spans runner and sweep concerns
   priority: 1.5  # queue-judge-2026-10-27: Dependent NEW-1b is blocked, so delaying NEW-1a incurs high cost of delay.
-  status: queued
+  status: blocked
+  retirement: retired
+  # plan gardener: retire NEW-1a — It depends on W1-T60, W1-T77, which will never be built (W1-T9292 named this retire pass its owner). Retired 2026-11-26 by the operator session: its unminted id made every measurement cadence run fail in proof-debt minting since 03:56Z (mechanicalAskPurpose rejects it), so no plan status reconcile landed.
   # queue judge: priority=1.5 evidence=37e0e892c2c0d811
   attempts: 0
   files:
