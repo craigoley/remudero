@@ -23,7 +23,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { isMap, isScalar, isSeq, parseDocument } from "yaml";
+import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument } from "yaml";
 import { RmdError } from "./errors.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { resolveRepoLayout } from "./repo-layout.js";
@@ -291,6 +291,36 @@ export function proofAmendmentBranchName(taskId: string, prNumber: number): stri
   return `proof-amendment/${taskId}-${prNumber}`;
 }
 
+/** A `proof:` line whose value is a quoted YAML scalar: its prefix, the scalar as written, and its trailing space. */
+const QUOTED_PROOF_LINE = /^(\s*(?:-\s+)?proof\s*:\s*)("(?:[^"\\]|\\.)*"|'(?:[^']|'')*')(\s*)$/;
+
+/** W1-T14934 — the parsed value of a quoted `proof:` line, as the YAML reader that produced the proof reads it. */
+function quotedProofValue(line: string): { head: string; quote: string; tail: string; value: string } | undefined {
+  const m = QUOTED_PROOF_LINE.exec(line);
+  if (!m) return undefined;
+  try {
+    return { head: m[1]!, quote: m[2]![0]!, tail: m[3]!, value: String(parseYaml(m[2]!)) };
+  } catch {
+    return undefined;
+  }
+}
+
+/** W1-T14934 — does this shard line carry `proof`, a YAML-PARSED value? A quoted `proof:` line is compared by its
+ *  parsed scalar, since `\"` and `\\` are stored escaped; any other line is matched literally, as before. */
+export function shardProofLineCarries(line: string, proof: string): boolean {
+  const quoted = quotedProofValue(line);
+  return quoted !== undefined && quoted.value === proof ? true : line.includes(proof);
+}
+
+/** W1-T14934 — rewrite `oldProof` on this line as `newProof`, escaped for the line's quoting style when its value is a
+ *  quoted scalar equal to `oldProof`, so the shard re-parses to `newProof`; otherwise the literal replace, as before. */
+export function rewriteShardProofLine(line: string, oldProof: string, newProof: string): string {
+  const quoted = quotedProofValue(line);
+  if (quoted === undefined || quoted.value !== oldProof) return line.replace(oldProof, newProof);
+  const scalar = quoted.quote === "'" ? `'${newProof.replace(/'/g, "''")}'` : JSON.stringify(newProof);
+  return `${quoted.head}${scalar}${quoted.tail}`;
+}
+
 /** Replace ONE criterion's `proof:` scalar in raw shard text, touching nothing else — the same
  *  line-scoped discipline as `insertPlanRepairFlag` (sweep.ts), so `criterionFieldTampered`'s
  *  ADD/DEL-of-a-field-line count sees exactly one field change per entry and nothing beside it.
@@ -299,7 +329,7 @@ export function proofAmendmentBranchName(taskId: string, prNumber: number): stri
  *  line would misattribute the repair. */
 export function replaceProofScalar(shardText: string, claim: string, oldProof: string, newProof: string): string | undefined {
   const lines = shardText.split("\n");
-  const proofIdx = lines.findIndex((line) => /proof\s*:/.test(line) && line.includes(oldProof));
+  const proofIdx = lines.findIndex((line) => /proof\s*:/.test(line) && shardProofLineCarries(line, oldProof));
   if (proofIdx < 0) return undefined;
   let claimMatches = false;
   for (let i = proofIdx - 1; i >= 0; i--) {
@@ -309,7 +339,7 @@ export function replaceProofScalar(shardText: string, claim: string, oldProof: s
     }
   }
   if (!claimMatches) return undefined;
-  const replacedLine = lines[proofIdx].replace(oldProof, newProof);
+  const replacedLine = rewriteShardProofLine(lines[proofIdx], oldProof, newProof);
   if (replacedLine === lines[proofIdx]) return undefined;
   lines[proofIdx] = replacedLine;
   return lines.join("\n");

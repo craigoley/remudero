@@ -1,6 +1,7 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
 import { FIX_CLAIM_YIELDED_STEP } from "./adaptive-wip.js";
 import { registerProcessExitLatch } from "./process-exit-latches.js";
+import { shardProofLineCarries } from "./proof-amendment.js";
 import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
 import type { OpsCatalogShadowInput } from "./ops-catalog-source.js";
 import { clearanceBound, fixDispatchCauseProbe, fixDispatchRefusalClass } from "./stuck-state-gardener.js";
@@ -17327,7 +17328,7 @@ export function priorPlanRepairStrikesFromLedger(
  */
 export function insertPlanRepairFlag(shardText: string, proof: string, marker: string): string | undefined {
   const lines = shardText.split("\n");
-  const idx = lines.findIndex((line) => line.includes(proof));
+  const idx = lines.findIndex((line) => shardProofLineCarries(line, proof));
   if (idx < 0) return undefined;
   const indent = /^(\s*)/.exec(lines[idx])?.[1] ?? "";
   lines.splice(idx, 0, `${indent}# ${marker}`);
@@ -17342,7 +17343,7 @@ export function claimForProof(shardText: string, proof: string): string | undefi
   const lines = shardText.split("\n");
   const claims = new Set<string>();
   lines.forEach((line, at) => {
-    if (!SHARD_PROOF_LINE.test(line) || !line.includes(proof)) return;
+    if (!SHARD_PROOF_LINE.test(line) || !shardProofLineCarries(line, proof)) return;
     for (let back = at - 1; back >= 0; back--) {
       const found = SHARD_CLAIM_LINE.exec(lines[back]!);
       if (!found) continue;
