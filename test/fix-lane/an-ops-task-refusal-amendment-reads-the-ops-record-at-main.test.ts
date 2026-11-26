@@ -97,6 +97,7 @@ function fixture(t: TestContext, catalog: "public" | "ops", opsMainHolds: string
     await withLiveWritesAllowed(() => runSweep([], {
       arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {}, ledgerPath,
       runId: "fixture-sweep", draftRefusalAmendments: effects.draftRefusalAmendments, log: deps.log,
+      now: () => NOW_MS,
     }));
   };
   const ledger = () => readFileSync(ledgerPath, "utf8").trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
