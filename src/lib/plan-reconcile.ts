@@ -20,7 +20,7 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { parse as parseYaml, YAMLParseError } from "yaml";
+import { parseTasksFromYaml, PlanError } from "./plan.js";
 
 /** The one status this reconciler will ever write, and the one it will ever overwrite. `merged` and
  *  `done` are both legal in `TASK_STATUSES`, and `merged` is the word the projection and the ledger
@@ -34,7 +34,10 @@ export type ReconcileSkip =
   | "status-not-queued"
   | "retired"
   | "no-status-field"
-  | "credit-unreadable";
+  | "credit-unreadable"
+  /** W1-T11183: the shard file holds several records. Every edit here and at landing is keyed to one record per
+   *  file and reads the first status line, so no record of such a file is rewritten. */
+  | "shared-shard";
 
 export interface ReconcileOutcome {
   /** The rewritten shard text — present ONLY when a write is warranted. */
@@ -59,17 +62,6 @@ export interface ReconcileOutcome {
  * reading of an unanswerable question is to do nothing.
  */
 export function reconcileShardStatus(
-  text: string,
-  taskId: string,
-  isCreditedMerged: (taskId: string) => boolean | undefined,
-): ReconcileOutcome {
-  // W1-T11183: a shard holding several records is judged and edited on the named record alone.
-  const [start, end] = recordRange(text, taskId);
-  const out = reconcileRecordStatus(text.slice(start, end), taskId, isCreditedMerged);
-  return out.text === undefined ? out : { text: text.slice(0, start) + out.text + text.slice(end) };
-}
-
-function reconcileRecordStatus(
   text: string,
   taskId: string,
   isCreditedMerged: (taskId: string) => boolean | undefined,
@@ -119,17 +111,15 @@ export function reconcilePlan(
     retired: 0,
     "no-status-field": 0,
     "credit-unreadable": 0,
+    "shared-shard": 0,
   };
-  // W1-T11183: records that share one shard file share one text, so each write carries every earlier flip of that file
-  // and the last write to a path holds them all.
-  const current = new Map<string, string>();
   for (const shard of shards) {
-    const path = (shard as { readonly path?: string }).path;
-    const out = reconcileShardStatus((path === undefined ? undefined : current.get(path)) ?? shard.text, shard.taskId, isCreditedMerged);
-    if (out.text !== undefined) {
-      if (path !== undefined) current.set(path, out.text);
-      writes.push({ taskId: shard.taskId, text: out.text });
+    if (holdsSeveralRecords(shard.text)) {
+      skipped["shared-shard"] += 1;
+      continue;
     }
+    const out = reconcileShardStatus(shard.text, shard.taskId, isCreditedMerged);
+    if (out.text !== undefined) writes.push({ taskId: shard.taskId, text: out.text });
     else if (out.skipped) skipped[out.skipped] += 1;
   }
   return { summary: { rewritten: writes.map((w) => w.taskId), skipped }, writes };
@@ -147,7 +137,8 @@ export interface LostCreditProjection {
 export type RevertedRequeue = LostCreditProjection & { readonly taskId: string };
 
 /** Why {@link requeueRevertedShard} left a shard alone. */
-export type RequeueSkip = "retired" | "no-status-field" | "status-not-merged" | "no-lost-credit" | "still-merged" | "credit-unreadable";
+export type RequeueSkip =
+  "retired" | "no-status-field" | "status-not-merged" | "no-lost-credit" | "still-merged" | "credit-unreadable" | "shared-shard";
 
 /** The re-queued text, or the guard that declined. */
 export interface RequeueOutcome {
@@ -170,13 +161,9 @@ export function requeueShardStatusText(text: string): string | undefined {
  * that reads every task as uncredited changes nothing. {@link reconcileShardStatus} stays one-way.
  */
 export function requeueRevertedShard(text: string, taskId: string, projection: LostCreditProjection | undefined): RequeueOutcome {
-  // W1-T11183: as reconcileShardStatus, a shard holding several records is judged and edited on the named record alone.
-  const [start, end] = recordRange(text, taskId);
-  const out = requeueRevertedRecord(text.slice(start, end), projection);
-  return out.text === undefined ? out : { text: text.slice(0, start) + out.text + text.slice(end) };
-}
-
-function requeueRevertedRecord(text: string, projection: LostCreditProjection | undefined): RequeueOutcome {
+  void taskId; // the caller's key for the projection; the decision reads only the text and the projection
+  // W1-T11183: as reconcilePlan, a file holding several records is never rewritten.
+  if (holdsSeveralRecords(text)) return { skipped: "shared-shard" };
   if (/^  retirement:/m.test(text)) return { skipped: "retired" };
   const statusLine = text.match(/^  status: (\S+)[ \t]*$/m);
   if (!statusLine) return { skipped: "no-status-field" };
@@ -202,21 +189,9 @@ export function revertedRequeues(projections: Iterable<LostCreditProjection & { 
   return out;
 }
 
-/**
- * W1-T11183: the character range of `taskId`'s record in a shard's text. A shard holding one record is the whole text,
- * whatever `taskId` says (a caller may key it by path). A shard holding several records is the one top-level `- ` entry
- * whose own `id:` is `taskId`, or an empty range when none is, so no other record's status line is ever edited.
- */
-function recordRange(text: string, taskId: string): [number, number] {
-  const starts = [...text.matchAll(/^- /gm)].map((m) => m.index);
-  if (starts.length <= 1) return [0, text.length];
-  const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const names = new RegExp(`^(?:- |  )id: (["']?)${escaped}\\1[ \\t]*$`, "m");
-  for (const [i, start] of starts.entries()) {
-    const end = starts[i + 1] ?? text.length;
-    if (names.test(text.slice(start, end))) return [start, end];
-  }
-  return [0, 0];
+/** W1-T11183: whether a shard's text holds more than one top-level `- ` record. */
+function holdsSeveralRecords(text: string): boolean {
+  return (text.match(/^- /gm)?.length ?? 0) > 1;
 }
 
 /** One task record the reconciler reads: its id, its shard file and that file's whole text. */
@@ -228,28 +203,25 @@ export interface PlanShardRecord {
 
 /**
  * W1-T11183: every record of `plan/tasks.d`, as the plan loader reads it. The loader lists `.yaml` and `.yml` shards
- * and parses each as YAML, so the id comes from the parsed record: a record that opens with another key, or a shard
- * holding several records, is read here too. A shard that is not YAML is skipped, as the loader quarantines it, and
- * there is nothing safe to rewrite in it.
+ * and parses each with {@link parseTasksFromYaml}, so the id here comes from that parse: a record that opens with
+ * another key is read too, and each record of a file holding several. A file the loader quarantines (any
+ * {@link PlanError}, which covers every YAML failure, an unresolved alias included) is skipped, and there is nothing
+ * safe to rewrite in it. Any other error is not a judgement about the shard and is thrown.
  */
 export function readPlanShards(dir: string): PlanShardRecord[] {
   const out: PlanShardRecord[] = [];
   for (const name of readdirSync(dir).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml")).sort()) {
     const path = join(dir, name);
     const text = readFileSync(path, "utf8");
-    let entries: unknown;
+    let ids: string[];
     try {
-      entries = parseYaml(text, { logLevel: "error" });
+      // A duplicate id is the loader's quarantine to judge; the reader names each record it finds.
+      ids = parseTasksFromYaml(text, path, () => {}).map((task) => task.id);
     } catch (error) {
-      // Only a shard that is not YAML is skipped; any other failure is not a judgement about the shard.
-      if (!(error instanceof YAMLParseError)) throw error;
+      if (!(error instanceof PlanError)) throw error;
       continue;
     }
-    if (!Array.isArray(entries)) continue;
-    for (const entry of entries) {
-      const taskId = (entry as { id?: unknown } | null)?.id;
-      if (typeof taskId === "string" && taskId.length > 0) out.push({ taskId, path, text });
-    }
+    for (const taskId of ids) out.push({ taskId, path, text });
   }
   return out;
 }
