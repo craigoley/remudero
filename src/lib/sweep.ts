@@ -1,7 +1,6 @@
 import { hasNonBotAuthor, namePathLanding, type DependencyMainIdentity } from "./dependency-main-identity.js";
 import { FIX_CLAIM_YIELDED_STEP } from "./adaptive-wip.js";
 import { registerProcessExitLatch } from "./process-exit-latches.js";
-import { shardProofLineCarries } from "./proof-amendment.js";
 import { findTaskInCatalogs, type TaskLookupOptions, type TaskLookupResult } from "./task-lookup.js";
 import type { OpsCatalogShadowInput } from "./ops-catalog-source.js";
 import { clearanceBound, fixDispatchCauseProbe, fixDispatchRefusalClass } from "./stuck-state-gardener.js";
@@ -16723,6 +16722,29 @@ export interface FixDispatchEvidence {
 
 export type ConflictIntent = { prBody: string; mainByPath: readonly { path: string; log: string }[] };
 export type SweepConflictGarden = (stateDir: string, ports: ConflictGardenPorts<OpenPrView>) => Promise<void>;
+
+/** A `proof:` line whose value is a quoted YAML scalar: its prefix, the scalar as written, and its trailing space. */
+const QUOTED_PROOF_LINE = /^(\s*(?:-\s+)?proof\s*:\s*)("(?:[^"\\]|\\.)*"|'(?:[^']|'')*')(\s*)$/;
+
+/** W1-T14934 — the parsed value of a quoted `proof:` line, as the YAML reader that produced the proof reads it. Lives here,
+ *  not in proof-amendment.ts, which already imports this module (a reverse import would close a cycle). */
+export function quotedProofValue(line: string): { head: string; quote: string; tail: string; value: string } | undefined {
+  const m = QUOTED_PROOF_LINE.exec(line);
+  if (!m) return undefined;
+  try {
+    return { head: m[1]!, quote: m[2]![0]!, tail: m[3]!, value: String(parseYaml(m[2]!)) };
+  } catch {
+    // An invalid escape is not valid YAML, so the line has no parsed value; the caller then matches it literally.
+    return undefined;
+  }
+}
+
+/** W1-T14934 — does this shard line carry `proof`, a YAML-PARSED value? A quoted `proof:` line is compared by its
+ *  parsed scalar, since `\"` and `\\` are stored escaped; any other line is matched literally, as before. */
+export function shardProofLineCarries(line: string, proof: string): boolean {
+  const quoted = quotedProofValue(line);
+  return quoted !== undefined && quoted.value === proof ? true : line.includes(proof);
+}
 
 /** The only proof grades that establish the capped-green repair has a mechanical body remedy —
  *  every {@link CriterionVerdict.proof_exec} outcome EXCEPT the two that mean "this DID execute"

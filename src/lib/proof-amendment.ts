@@ -23,14 +23,14 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { isMap, isScalar, isSeq, parse as parseYaml, parseDocument } from "yaml";
+import { isMap, isScalar, isSeq, parseDocument } from "yaml";
 import { RmdError } from "./errors.js";
 import { execFileLoopBounded } from "./loop-bounded-child.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 import { execWhitelistedProof, INSTRUMENT_SURFACE, matchedLinesAreAllComments, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
-import type { ProofDiscriminationEvidence } from "./sweep.js";
+import { quotedProofValue, shardProofLineCarries, type ProofDiscriminationEvidence } from "./sweep.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
 import { loadPlanForLayout, parseTasksFromYaml, type MachineFilingAdmissionContext, type Task } from "./plan.js";
 import { machineFamily } from "./machine-filing-judge.js";
@@ -289,28 +289,6 @@ export function proofAmendmentIdempotencyKey(identity: ProofAmendmentIdentity): 
  *  rather than opening a second PR (mirrors `dispatchPlanOnlyRepair`'s `plan-repair/${taskId}`). */
 export function proofAmendmentBranchName(taskId: string, prNumber: number): string {
   return `proof-amendment/${taskId}-${prNumber}`;
-}
-
-/** A `proof:` line whose value is a quoted YAML scalar: its prefix, the scalar as written, and its trailing space. */
-const QUOTED_PROOF_LINE = /^(\s*(?:-\s+)?proof\s*:\s*)("(?:[^"\\]|\\.)*"|'(?:[^']|'')*')(\s*)$/;
-
-/** W1-T14934 — the parsed value of a quoted `proof:` line, as the YAML reader that produced the proof reads it. */
-function quotedProofValue(line: string): { head: string; quote: string; tail: string; value: string } | undefined {
-  const m = QUOTED_PROOF_LINE.exec(line);
-  if (!m) return undefined;
-  try {
-    return { head: m[1]!, quote: m[2]![0]!, tail: m[3]!, value: String(parseYaml(m[2]!)) };
-  } catch {
-    // An invalid escape is not valid YAML, so the line has no parsed value; the caller then matches it literally.
-    return undefined;
-  }
-}
-
-/** W1-T14934 — does this shard line carry `proof`, a YAML-PARSED value? A quoted `proof:` line is compared by its
- *  parsed scalar, since `\"` and `\\` are stored escaped; any other line is matched literally, as before. */
-export function shardProofLineCarries(line: string, proof: string): boolean {
-  const quoted = quotedProofValue(line);
-  return quoted !== undefined && quoted.value === proof ? true : line.includes(proof);
 }
 
 /** W1-T14934 — rewrite `oldProof` on this line as `newProof`, escaped for the line's quoting style when its value is a
