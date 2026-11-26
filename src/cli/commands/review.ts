@@ -3155,7 +3155,30 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     if (found.outcome === "unreadable" && found.reason === "ops-ref_moved") found = await lookUp();
     if (found.outcome === "unreadable") {
       log("review.catalog.unreadable", { reason: found.reason });
-      console.error("rmd review: task catalog unreadable; no body fallback or review effect");
+      // W1-T14902: this is a named task whose hold cannot be read. Publish a required pending status
+      // before returning, so an earlier success cannot continue to satisfy the merge gate.
+      if (!shadow) try {
+        const refusal = `${taskId}'s dispatch_hold is unreadable (${found.reason})`;
+        const description = `remudero-review: pending — held: ${refusal}`;
+        await postStatusDep({
+          owner,
+          repo,
+          sha: view.headRefOid,
+          taskId: reviewKey,
+          runId,
+          ledgerPath,
+          prUrl: view.url,
+          state: "pending",
+          evidence: "no_evidence",
+          description,
+          verdict: { state: "pending", criteria: [], testTheater: false, floorDegraded: false,
+            capped: false, keywordOnly: false, planOnly: false, summary: description },
+          fetchLifecycle: () => fetchPrLifecycleAsync(view.url),
+        });
+      } catch (error) {
+        log("review.pending_post.error", { error: String((error as Error)?.message ?? error) });
+      }
+      console.error(`rmd review: task catalog unreadable (${found.reason}); held pending, no body fallback or review effect`);
       exit.as("task-metadata-unavailable");
       return 2;
     }

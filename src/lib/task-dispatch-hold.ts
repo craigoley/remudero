@@ -132,23 +132,28 @@ function targetsRepo(taskRepo: string | undefined, subject: string): boolean {
   return taskRepo === undefined || taskRepo.trim() === "" || name(taskRepo) === name(subject);
 }
 
-// A planned id, legacy suffixes too (W1-T12e); a synthetic review key (`PR-<n>`, `dep-review-PR<n>`) is not one.
-const TASK_ID = /^[A-Z][A-Z0-9]*-T\d+[A-Za-z0-9]*$/;
+// Match plan.ts's task-id shape, including records whose prefix is not W1/CONSOLE (for example NEW-1a).
+// Synthetic correlation keys do not match this shape and remain taskless.
+const TASK_ID = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/;
+const SYNTHETIC_REVIEW_KEY = /^(?:PR-[1-9]\d*|dep-review-PR[1-9]\d*)$/;
 
 export async function readTaskDispatchHold(taskId: string | undefined, sources: TaskDispatchHoldSources): Promise<TaskHoldReading> {
   // A synthetic review key (`PR-<n>`, `dep-review-PR<n>`) or no trailer names no task: it reviews and arms as today.
   if (taskId === undefined || !TASK_ID.test(taskId)) return { outcome: "clear" };
+  const synthetic = SYNTHETIC_REVIEW_KEY.test(taskId);
   const plans = sources.readMainPlan !== undefined ? [sources.readMainPlan] : await mainPlanReaders(sources);
   for (const readPlan of plans) {
     let main: { byId: ReadonlyMap<string, { dispatch_hold?: boolean }> };
     try {
       main = await readPlan();
     } catch (error) {
+      if (synthetic) return { outcome: "clear" };
       return { outcome: "unread", taskId, reason: `the plan at origin/main is unreadable: ${String((error as Error)?.message ?? error)}` };
     }
     const inMain = main.byId.get(taskId);
     if (inMain !== undefined) return inMain.dispatch_hold === true ? { outcome: "held", taskId } : { outcome: "clear" };
   }
+  if (synthetic) return { outcome: "clear" };
   const lookup = sources.lookup ?? ((id: string) => readOpsCatalogHold(id, sources.stateDir));
   let found: TaskHoldLookup;
   try {

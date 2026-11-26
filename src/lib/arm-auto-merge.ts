@@ -1755,10 +1755,12 @@ function* attemptArmSteps(
     );
     return { outcome: "draft-refused" };
   }
-  const heldAtEntry = operatorHoldRefusal(prUrl, deps);
-  if (heldAtEntry) return heldAtEntry;
+  // W1-T14902: the named task's hold must be read and attributed before the standing operator hold can
+  // short-circuit this attempt. Otherwise an active merge hold masks an unread/dispatch-held task.
   const taskHeld = yield* taskHoldRefusalSteps(prUrl, deps);
   if (taskHeld) return taskHeld;
+  const heldAtEntry = operatorHoldRefusal(prUrl, deps);
+  if (heldAtEntry) return heldAtEntry;
   if (deps.stackPrerequisite) {
     let stack: StackPrerequisiteCheck;
     try {

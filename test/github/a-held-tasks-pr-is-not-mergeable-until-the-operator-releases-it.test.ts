@@ -14,7 +14,7 @@ import { armIfVerdictPermitsAsync, attemptArmAsync, readPullRequestTaskHold, rea
 import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
-import { postReviewStatusGuarded, taskHoldReading, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
+import { automergeHoldFromLedger, postReviewStatusGuarded, taskHoldReading, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
 import { planCheckoutRoot, readOpsCatalogHold, targetPlanRoot, readTaskDispatchHold, type TaskDispatchHoldSources } from "#src/lib/task-dispatch-hold.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { readLedgerLines } from "#src/lib/status.js";
@@ -55,7 +55,7 @@ async function guardedPost(t: TestContext, taskHold: TaskHoldReading | undefined
 }
 
 /** One review arm through the real attemptArm, every GitHub write recorded; `log` is the ledger the review writes. */
-async function reviewArm(taskHold: (prUrl: string) => Promise<TaskHoldReading>) {
+async function reviewArm(taskHold: (prUrl: string) => Promise<TaskHoldReading>, ledgerLines: () => Record<string, unknown>[] = () => []) {
   const writes: string[] = [];
   const rows: Array<{ step: string } & Record<string, unknown>> = [];
   const outcome = await armIfVerdictPermitsAsync(PASS, {
@@ -65,7 +65,7 @@ async function reviewArm(taskHold: (prUrl: string) => Promise<TaskHoldReading>) 
     ledgerLines: () => [],
     arm: (prUrl) => attemptArmAsync(prUrl, {
       headSha: async () => SHA,
-      ledgerLines: () => [],
+      ledgerLines,
       armAuto: async () => { writes.push("armAuto"); },
       mergeDirect: async () => { writes.push("mergeDirect"); },
       isMerged: async () => false,
@@ -98,6 +98,18 @@ test("W1-T14902 criterion 2: attemptArm refuses a held task's pull request: no a
   const named = rows.filter((row) => row.outcome === "hold-refused");
   assert.equal(named.length, 1, `one row records the refusal: ${JSON.stringify(rows)}`);
   assert.match(String(named[0]!.error), /W1-T14898 carries dispatch_hold/, "the row names the task and the hold");
+});
+
+test("W1-T14902: the task hold is read before an active operator merge hold short-circuits", async () => {
+  const asked: string[] = [];
+  const operatorHold = [{ ts: "2026-11-26T00:00:00.000Z", run_id: "OPERATOR-1", task_id: TASK,
+    step: "automerge.hold_engaged", by: "operator", reason: "manual review", authority: "interactive-cli", pr_number: 910 }];
+  const arm = await reviewArm(async (prUrl) => { asked.push(prUrl); return { outcome: "held", taskId: TASK }; },
+    () => operatorHold);
+  assert.deepEqual(asked, [PR_URL], "task hold lookup runs before operator hold refusal");
+  assert.equal(arm.outcome, "hold-refused");
+  assert.match(String(arm.rows.find((row) => row.outcome === "hold-refused")?.error), /W1-T14898 carries dispatch_hold/);
+  assert.deepEqual(arm.writes, []);
 });
 
 test("W1-T14902 criterion 3: invariant:an-unread-hold-holds", async (t) => {
@@ -149,6 +161,10 @@ test("W1-T14902: the one reader reads main, then a fresh ops record; every other
     "a real id neither catalog holds cannot be shown clear");
   assert.deepEqual(await read({ readMainPlan: main({ "W1-T12e": { dispatch_hold: true } }), lookup: never }, "W1-T12e"),
     { outcome: "held", taskId: "W1-T12e" }, "a legacy suffixed id is a task id, not a synthetic key");
+  assert.deepEqual(await read({ readMainPlan: main({ "NEW-1a": { dispatch_hold: true } }), lookup: never }, "NEW-1a"),
+    { outcome: "held", taskId: "NEW-1a" }, "a supported non-W1 plan id is still checked");
+  assert.deepEqual(await read({ readMainPlan: main({ "PR-910": { dispatch_hold: true } }), lookup: never }, "PR-910"),
+    { outcome: "held", taskId: "PR-910" }, "a real plan record takes precedence over a synthetic-looking key");
   // THE INVARIANT: a last-good snapshot may predate the hold, so it is unread; so is every failed read.
   assert.equal((await read({ readMainPlan: main({}), lookup: found({}, { lastGood: { refusal: "ops-stale", snapshotAgeMs: 1 } }) })).outcome, "unread");
   assert.equal((await read({ readMainPlan: main({}), lookup: ops({ outcome: "unreadable", reason: "ops-malformed" }) })).outcome, "unread");
