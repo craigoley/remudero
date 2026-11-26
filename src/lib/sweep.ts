@@ -30655,7 +30655,9 @@ export async function runSweep(
       };
       if (await valueGate.settle(requested, request.pr, "request", request.requestId)) target = requested;
     }
-    if (target) {
+    // The value check can yield long enough for another sweep to claim the selected head's review.
+    if (target && !(target.updateReason?.startsWith("distance") &&
+      inFlightReviewKeys.has(reviewOutcomeKeyForPr(viewOf(target))))) {
       // W1-T1212: a `StaleGatePr` (never `armedButStalled`'s own shape) carries the ONE extra
       // fact `deps.updatedForWorkflow`'s next read needs to remember this exact pair.
       const staleWorkflow = "staleWorkflow" in target ? (target as StaleGatePr).staleWorkflow : undefined;
