@@ -5,9 +5,9 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import * as cli from "#src/run-task.js";
+import { loadPlan } from "#src/lib/plan.js";
 import { buildBatchedGithub, buildCommitTrailerIndex } from "#src/lib/status.js";
-import { MERGED_PATHS_SCAN_LIMIT, creditCandidatesFromProjection, withCreditedMergePaths } from "#src/lib/tick-read-worker.js";
+import { MERGED_PATHS_SCAN_LIMIT, buildCreditCandidates, creditCandidatesFromProjection, creditIsReconcilable, withCreditedMergePaths } from "#src/lib/tick-read-worker.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 const TASK = "W1-T15100";
@@ -15,7 +15,8 @@ const url = (n: number) => `https://github.com/craigoley/remudero/pull/${n}`;
 const OLD_SHA = "a".repeat(40);
 const RECENT_SHA = "b".repeat(40);
 
-function realHistory(root: string): ReturnType<typeof cli.creditProjectionWithReadState> {
+/** The credited ids the real credit builder reports over a real history: the reconcile's own filter. */
+function realHistory(root: string): Set<string> {
   const commit = (message: string, build: boolean) =>
     `commit refs/heads/main\ncommitter ${GIT_REPO_FIXTURE_IDENTITY.name} <${GIT_REPO_FIXTURE_IDENTITY.email}> 1700000000 +0000\ndata ${Buffer.byteLength(message)}\n${message}\n${build ? "M 100644 inline src/example.ts\ndata 6\nbuild\n\n" : ""}\n`;
   // The build lands first, then more commits than the former 5000-commit subject window and the path window held.
@@ -31,8 +32,9 @@ function realHistory(root: string): ReturnType<typeof cli.creditProjectionWithRe
     }] : []),
     commitTrailerIndex: buildCommitTrailerIndex({ slug: "craigoley/remudero", cwd: root }),
   });
-  return cli.creditProjectionWithReadState({ root } as never, root,
-    (o, r, p, l, log, gateway) => cli.buildCreditCandidates(o, r, p, l, log, gateway, () => root), github);
+  const plan = loadPlan(join(root, "plan", "tasks.yaml"));
+  const candidates = buildCreditCandidates("craigoley", "remudero", plan, join(root, "state", "ledger.ndjson"), undefined, github, () => root);
+  return new Set(candidates.filter(creditIsReconcilable).map((c) => c.taskId));
 }
 
 test("W1-T15031 criterion 1: a credited merge older than the window is judged", () => {
@@ -55,7 +57,7 @@ test("W1-T15031 criterion 1: a credited merge older than the window is judged", 
   const subjects = new Map([[18550, "feat(x): old build (#18550)"], [21000, "feat(y): recent (#21000)"]]);
   const [old] = creditCandidatesFromProjection(projection.slice(0, 1) as never, subjects, new Map(), paths);
   assert.equal(old!.creditHasBuildDiff, true);
-  assert.equal(cli.creditIsReconcilable(old!), true);
+  assert.equal(creditIsReconcilable(old!), true);
   // Restore the window: without the by-sha read the same merge has no paths, and its diff reads unknown.
   const [windowed] = creditCandidatesFromProjection(projection.slice(0, 1) as never, new Map(), new Map(), windowPaths);
   assert.equal(windowed!.creditHasBuildDiff, undefined);
@@ -66,7 +68,7 @@ test("W1-T15031 criterion 1: a credited merge older than the window is judged", 
     mkdirSync(join(repo.dir, "plan"));
     writeFileSync(join(repo.dir, "plan", "tasks.yaml"),
       `- id: ${TASK}\n  title: t\n  repo: remudero\n  depends_on: []\n  type: implement\n  verify: auto\n  budget_usd: 1\n  status: queued\n  acceptance:\n    - claim: c\n      proof: "unit test: x"\n`);
-    assert.deepEqual(realHistory(repo.dir), { ids: new Set([TASK]) });
+    assert.deepEqual(realHistory(repo.dir), new Set([TASK]));
   } finally {
     repo.cleanup();
   }
