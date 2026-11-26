@@ -122,6 +122,8 @@
 #                               /mnt/rmd on a `/` pass. Reaped when idle and no lock holds it.
 #   RMD_CLEANUP_COVERAGE_LOCK_DIR  where `rmd-c-<hash>.lock` lives (default /tmp)
 #   RMD_CLEANUP_DOCKER          command for the running-container mount snapshot
+#   RMD_CLEANUP_LOG_ROTATE_PATHS / RMD_CLEANUP_LOG_MAX_MB / RMD_CLEANUP_LOG_KEEP  the janitor's own logs, each
+#                               rotated to a dated .gz sibling over LOG_MAX_MB (default 64), newest LOG_KEEP (4) kept (W1-T14401)
 #   RMD_CLEANUP_LOCK_FILE       shared whole-pass flock file (default: beside this script, which
 #                               both the root and the user cron run, so one path serves both)
 #   RMD_CLEANUP_FLOCK           flock command (tests may simulate an unavailable lock)
@@ -394,6 +396,46 @@ else
     *) log "REFUSE: cannot acquire janitor lock $LOCK_FILE"; exit 2 ;;
   esac
 fi
+
+# W1-T14401: the janitor's own logs are rotated under the pass lock, before this pass writes its first
+# decision. A log over LOG_MAX_MB is gzipped to a dated sibling, the sibling is verified, and only then is the
+# live log truncated in place (the cron's `>>` descriptor keeps appending to it). The newest LOG_KEEP siblings
+# are kept. A rotation that fails at any step leaves the live log as it was, so this pass's lines still reach it.
+# Only a log this pass's uid owns is rotated: the root tmp sweep shares the cron log and must not leave root-owned
+# siblings. A dry run rotates nothing.
+LOG_MAX_MB="${RMD_CLEANUP_LOG_MAX_MB:-64}"
+LOG_KEEP="${RMD_CLEANUP_LOG_KEEP:-4}"
+LOG_ROTATE_PATHS="${RMD_CLEANUP_LOG_ROTATE_PATHS-$SCRIPT_DIR/host-cleanup.log:$AUDIT_LOG:$DECISION_LOG}"
+case "$LOG_MAX_MB$LOG_KEEP" in
+  ""|*[!0-9]*) echo "rmd-host-cleanup: FATAL RMD_CLEANUP_LOG_MAX_MB and RMD_CLEANUP_LOG_KEEP must be non-negative integers" >&2; exit 2 ;;
+esac
+rotate_log() {
+  local f="$1" bytes owner stamp sib old n=0
+  [ -f "$f" ] && [ ! -L "$f" ] || return 0
+  bytes=$(stat -c %s -- "$f" 2>/dev/null) || return 0
+  [ "$bytes" -gt $(( 10#$LOG_MAX_MB * 1048576 )) ] || return 0
+  owner=$(stat -c %u -- "$f" 2>/dev/null) || return 0
+  if [ "$owner" != "$RUN_UID" ]; then printf '%s\n' "KEEP $f: log rotation skipped (owner uid $owner, pass uid $RUN_UID)"; return 0; fi
+  if [ "$DRY_RUN" = 1 ]; then printf '%s\n' "DRYRUN would: rotate $f ($bytes bytes)"; return 0; fi
+  stamp=$(date -u +%Y%m%dT%H%M%SZ)
+  sib="$f.$stamp.gz"
+  if gzip -c -- "$f" > "$sib.part" 2>/dev/null && gzip -t -- "$sib.part" 2>/dev/null && mv -f -- "$sib.part" "$sib"; then
+    : > "$f"
+    printf '%s\n' "ROTATE $f: $bytes bytes to $sib"
+  else
+    rm -f -- "$sib.part" 2>/dev/null
+    printf '%s\n' "WARN $f: log rotation failed; the live log is unchanged"
+    return 0
+  fi
+  for old in $(ls -1 -- "$f".*.gz 2>/dev/null | sort -r); do
+    n=$((n + 1))
+    [ "$n" -le "$(( 10#$LOG_KEEP ))" ] || rm -f -- "$old"
+  done
+}
+IFS=: read -r -a LOG_ROTATE_LIST <<< "$LOG_ROTATE_PATHS"
+for rotate_path in ${LOG_ROTATE_LIST[@]+"${LOG_ROTATE_LIST[@]}"}; do
+  [ -n "$rotate_path" ] && [ "$rotate_path" != /dev/null ] && rotate_log "$rotate_path"
+done
 
 # Every mutation goes through here, so DRY_RUN=1 has exactly one place to hold.
 act() {
