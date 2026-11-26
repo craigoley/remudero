@@ -290,6 +290,8 @@ test("W1-T12832 criterion 3: a task that declares is checked in full even on a m
   assert.match(got.text, /\[design-invariant-proof\] task ZZ-Dup: invariant slug "dup" is declared more than once in the design/);
   assert.match(got.text, /\[design-invariant-proof\] task ZZ-Twice: invariant "keep-a" is mapped by 2 acceptance claims; map it exactly once/);
   assert.match(got.text, /\[design-invariant-proof\] task ZZ-Both: design declares both INVARIANT lines and NO-INVARIANTS/);
+  // The changed-task CLI carries the invariant warning even when other invariant checks also report errors.
+  assert.match(got.text, /\[invariant-unguarded\] task ZZ-Orphan: acceptance claim 1 is an invariant with no kind/);
   // CONTROL: a well-formed declaration on the same metadata-only edit is in scope and passes.
   assert.match(got.text, /5 task\(s\) checked/, got.text);
   assert.ok(!got.out.some((l) => l.startsWith("✗ ZZ-Good:") || l.includes("task ZZ-Good:")), got.text);
