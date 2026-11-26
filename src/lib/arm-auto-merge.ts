@@ -1743,6 +1743,7 @@ function withTaskHoldAtWrite<D extends Pick<ArmDeps<true>, "armAuto" | "mergeDir
     try {
       reading = reader(prUrl);
     } catch (e) {
+      // A reader that throws has not read the hold: it reads unread, and an unread hold refuses the write.
       reading = unread(e);
     }
     return reading instanceof Promise ? reading.then(decide, (e: unknown) => decide(unread(e))) : decide(reading);

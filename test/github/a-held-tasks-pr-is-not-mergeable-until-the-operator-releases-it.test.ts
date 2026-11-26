@@ -930,7 +930,7 @@ test("W1-T14902: the hold lookup classifies a plan filing by the board's exact-h
   const sources = { stateDir: state, lookup: async () => ({ outcome: "absent" }) as never,
     readMainPlan: async () => ({ byId: new Map([[TASK, { dispatch_hold: true }]]) }) };
   /** The pull row (its head moving to `after` once the files are read) and the files GitHub lists for it. */
-  const github = (files: unknown, opts: { body?: string; after?: string } = {}) => {
+  const pullsApi = (files: unknown, opts: { body?: string; after?: string } = {}) => {
     const reads: string[] = [];
     let head = SHA;
     const read = async (path: string) => {
@@ -944,33 +944,33 @@ test("W1-T14902: the hold lookup classifies a plan filing by the board's exact-h
     };
     return { read, reads };
   };
-  const hold = async (gh: ReturnType<typeof github>) =>
+  const hold = async (gh: ReturnType<typeof pullsApi>) =>
     (await readPullRequestNamedTaskHold(PR_URL, sources, gh.read, boardPlanOnlyFiling(state, classifyPlanFiling, gh.read))).reading;
   const plan = [{ filename: "plan/tasks.d/W1-T1-a.yaml" }, { filename: "plan/tasks.d/W1-T2-b.yaml" }];
-  const filing = github(plan);
+  const filing = pullsApi(plan);
   assert.deepEqual(await hold(filing), { outcome: "clear" },
     "THE CLAIM: a trailerless filing whose live head is plan-only (github-files) names no task, with no emitter row");
   assert.deepEqual(filing.reads, ["repos/acme/remudero-ops/pulls/910", "repos/acme/remudero-ops/pulls/910/files?per_page=100",
     "repos/acme/remudero-ops/pulls/910"], "one pull row, the files, and the pull row again to bind them to the head");
-  assert.deepEqual(await hold(github(plan, { after: "f".repeat(40) })), { outcome: "held", taskId: TASK },
+  assert.deepEqual(await hold(pullsApi(plan, { after: "f".repeat(40) })), { outcome: "held", taskId: TASK },
     "files read while the head moved bind to no head: the run branch names the task, and its hold holds");
-  assert.deepEqual(await hold(github([...plan, { filename: "plan/policy.yaml" }])), { outcome: "held", taskId: TASK },
+  assert.deepEqual(await hold(pullsApi([...plan, { filename: "plan/policy.yaml" }])), { outcome: "held", taskId: TASK },
     "enforcement data is no filing (not-plan-only)");
-  assert.deepEqual(await hold(github([...plan, { filename: "src/lib/x.ts" }])), { outcome: "held", taskId: TASK }, "code is no filing");
-  assert.deepEqual(await hold(github(new Error("HTTP 502"))), { outcome: "held", taskId: TASK }, "an unread file list is no filing");
-  const trailered = github(plan, { body: `Remudero-Task: ${TASK}\n` });
+  assert.deepEqual(await hold(pullsApi([...plan, { filename: "src/lib/x.ts" }])), { outcome: "held", taskId: TASK }, "code is no filing");
+  assert.deepEqual(await hold(pullsApi(new Error("HTTP 502"))), { outcome: "held", taskId: TASK }, "an unread file list is no filing");
+  const trailered = pullsApi(plan, { body: `Remudero-Task: ${TASK}\n` });
   assert.deepEqual(await hold(trailered), { outcome: "held", taskId: TASK }, "a trailer wins over the filing rule");
   assert.deepEqual(trailered.reads, ["repos/acme/remudero-ops/pulls/910"], "and spends no files read: the classification decides nothing");
   // The board's kept observation at this exact head answers without a read; one at another head does not.
   mkdirSync(join(state, "cache"), { recursive: true });
   writeFileSync(join(state, "cache", "plan-filing-files.json"), JSON.stringify({ schema: 1, pulls: {
     "acme/remudero-ops#910": { head: SHA, files: plan.map((file) => file.filename) } } }));
-  const kept = github(new Error("the kept observation answers"));
+  const kept = pullsApi(new Error("the kept observation answers"));
   assert.deepEqual(await hold(kept), { outcome: "clear" }, "the board's exact-head observation classifies the filing");
   assert.deepEqual(kept.reads, ["repos/acme/remudero-ops/pulls/910"]);
   writeFileSync(join(state, "cache", "plan-filing-files.json"), JSON.stringify({ schema: 1, pulls: {
     "acme/remudero-ops#910": { head: "e".repeat(40), files: plan.map((file) => file.filename) } } }));
-  assert.deepEqual(await hold(github(new Error("HTTP 502"))), { outcome: "held", taskId: TASK }, "another head's observation is not this head's");
+  assert.deepEqual(await hold(pullsApi(new Error("HTTP 502"))), { outcome: "held", taskId: TASK }, "another head's observation is not this head's");
   // A pull row naming no head, and an unreadable re-read, bind to nothing either.
   const headless = async (path: string) => path.endsWith("/files?per_page=100") ? plan : { body: "x", head: { ref: branch } };
   assert.deepEqual((await readPullRequestNamedTaskHold(PR_URL, sources, headless, boardPlanOnlyFiling(state, classifyPlanFiling, headless))).reading,
