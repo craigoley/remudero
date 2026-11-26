@@ -1,7 +1,7 @@
 // W1-T14903 — review width and the build lanes cut from ONE host memory reading, so active reviews cannot silently
 // starve builds.
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -10,7 +10,7 @@ import {
   type LaneMemoryReading,
 } from "#src/lib/lane-governor.js";
 import {
-  reviewYieldsReReviews, selectAdaptiveReviewWidth, selectRuntimeReviewWidth, sharedMemoryAvailableMib,
+  readReviewHostObservation, reviewYieldsReReviews, selectAdaptiveReviewWidth, selectRuntimeReviewWidth, sharedMemoryAvailableMib,
   type ReviewCapacityObservation, type ReviewCapacityPolicy,
 } from "#src/lib/review-capacity.js";
 import { DEFAULT_SWEEP_POLICY, reReviewsJudgedHead, runSweep, selectReviewAdmissions, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
@@ -68,7 +68,17 @@ function pr(over: Partial<OpenPrView>): OpenPrView {
   };
 }
 
-afterEach(() => publishSharedHostMemory({ unread: "test reset" }, NOW));
+const tempRoots: string[] = [];
+function tempRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), "rmd-shared-width-"));
+  tempRoots.push(root);
+  return root;
+}
+
+afterEach(() => {
+  publishSharedHostMemory({ unread: "test reset" }, NOW);
+  for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 test("W1-T14903 both lanes read one memory snapshot", () => {
   const measured = reading(-110);
@@ -89,6 +99,13 @@ test("W1-T14903 both lanes read one memory snapshot", () => {
   publishSharedHostMemory(measured, NOW + 5_000);
   assert.equal(sharedHostMemory(NOW)?.availableMib, -110, "a snapshot re-read after a pass took its clock is still read");
   assert.equal(sharedMemoryAvailableMib(8_130, undefined), 8_130, "with no fresh snapshot each lane reads its own");
+  const paths: string[] = [];
+  const host = readReviewHostObservation((path) => {
+    paths.push(path);
+    return path.includes("pressure") ? "some avg10=0.00 avg60=0.00 avg300=0.00 total=0" : "MemAvailable: 999999 kB";
+  }, () => ({ load1: 1, cpuCount: 8 }), shared.availableMib);
+  assert.equal(host.memAvailableMib, -110);
+  assert.equal(paths.includes("/proc/meminfo"), false, "reviews do not take another kernel memory sample");
 });
 
 test("W1-T14903 a build outranks a re-review when memory is short", () => {
@@ -136,7 +153,7 @@ test("W1-T14903 shared memory never raises a lane width", () => {
     const run = (snapshot: boolean): number => {
       publishSharedHostMemory(snapshot ? reading(projected) : { unread: "own reading only" }, NOW);
       return selectRuntimeReviewWidth({
-        root: mkdtempSync(join(tmpdir(), "rmd-shared-width-")), queueDepth: 6, activeWorkers: 2, nowMs: NOW, ledgerLines: [],
+        root: tempRoot(), queueDepth: 6, activeWorkers: 2, nowMs: NOW, ledgerLines: [],
         policy: POLICY, ...BOUNDS, log: () => {},
       });
     };
@@ -150,8 +167,24 @@ test("W1-T14903 shared memory never raises a lane width", () => {
   }
 });
 
+test("W1-T14903 the width ceiling advances independently across shed and recovery passes", () => {
+  const root = tempRoot();
+  const run = (nowMs: number): number => selectRuntimeReviewWidth({
+    root, queueDepth: 6, activeWorkers: 2, nowMs, ledgerLines: [], policy: POLICY, ...BOUNDS, log: () => {},
+  });
+  publishSharedHostMemory(reading(-110), NOW);
+  const shed = run(NOW);
+  assert.ok(shed < reviewWidth(30_000).width, "the shared projection can shed the review lane");
+  publishSharedHostMemory(reading(30_000), NOW + 60_000);
+  const legacyCeiling = reviewWidth(30_000).width;
+  for (let pass = 1; pass <= 6; pass++) {
+    assert.ok(run(NOW + 60_000 + pass * 1_000) <= legacyCeiling,
+      "recovery follows an independently advanced legacy ceiling after the shared controller shed");
+  }
+});
+
 test("W1-T14903 the review width pass writes one host_memory.shared row per snapshot", () => {
-  const root = mkdtempSync(join(tmpdir(), "rmd-shared-memory-"));
+  const root = tempRoot();
   const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
   const pass = (nowMs: number): number => selectRuntimeReviewWidth({
     root, queueDepth: 4, activeWorkers: 0, nowMs, ledgerLines: [], policy: POLICY, ...BOUNDS,
@@ -161,7 +194,8 @@ test("W1-T14903 the review width pass writes one host_memory.shared row per snap
   for (let i = 0; i < 4; i++) pass(NOW + i * 1_000);
   const rows = logs.filter((row) => row.step === HOST_MEMORY_SHARED_STEP);
   const capacityRows = logs.filter((row) => row.step === "review.capacity");
-  assert.ok(rows.length >= 1 && rows.length >= capacityRows.length, "every recorded review pass records its shared reading");
+  assert.equal(rows.length, 4, "every pass records the shared reading, even when it is unchanged");
+  assert.ok(rows.length >= capacityRows.length, "every recorded review pass records its shared reading");
   assert.equal(rows[0]?.extra?.available_mib, -110);
   assert.equal(rows[0]?.extra?.review_read_mib, -110, "the review lane read the shared snapshot, not its own");
   assert.equal(rows[0]?.extra?.short, true);

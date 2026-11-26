@@ -733,6 +733,7 @@ function parsePsiFullAvg10(raw: string): number | undefined {
 export function readReviewHostObservation(
   read: (path: string, encoding: BufferEncoding) => string = readFileSync,
   hostLoad: () => { load1: number; cpuCount: number } = () => ({ load1: loadavg()[0]!, cpuCount: cpus().length }),
+  sharedMemAvailableMib?: number,
 ): Pick<
   ReviewCapacityObservation,
   "memAvailableMib" | "cpuPsiSomeAvg10Pct" | "cpuPsiFullAvg10Pct" | "memoryPsiSomeAvg10Pct" | "hostLoad1" | "hostCpuCount"
@@ -745,7 +746,9 @@ export function readReviewHostObservation(
       return undefined;
     }
   };
-  const mem = safeRead("/proc/meminfo");
+  // The build lane owns this pass's host-memory sample. Do not take a second kernel sample when
+  // it has published one; review telemetry still reads PSI and host load independently.
+  const mem = sharedMemAvailableMib === undefined ? safeRead("/proc/meminfo") : undefined;
   const cpuPressure = safeRead("/sys/fs/cgroup/cpu.pressure") ?? safeRead("/proc/pressure/cpu");
   const memoryPressure = safeRead("/sys/fs/cgroup/memory.pressure") ?? safeRead("/proc/pressure/memory");
   const { load1, cpuCount } = hostLoad();
@@ -753,7 +756,9 @@ export function readReviewHostObservation(
     // Attribution only: a non-finite or zero reading is dropped and the source reads `unknown`.
     ...(finite(load1) ? { hostLoad1: load1 } : {}),
     ...(finite(cpuCount) && cpuCount > 0 ? { hostCpuCount: cpuCount } : {}),
-    ...(mem ? { memAvailableMib: parseMemAvailableMib(mem) } : {}),
+    ...(sharedMemAvailableMib !== undefined
+      ? { memAvailableMib: sharedMemAvailableMib }
+      : mem ? { memAvailableMib: parseMemAvailableMib(mem) } : {}),
     ...(cpuPressure ? { cpuPsiSomeAvg10Pct: parsePsiSomeAvg10(cpuPressure) } : {}),
     ...(cpuPressure ? { cpuPsiFullAvg10Pct: parsePsiFullAvg10(cpuPressure) } : {}),
     ...(memoryPressure ? { memoryPsiSomeAvg10Pct: parsePsiSomeAvg10(memoryPressure) } : {}),
@@ -957,14 +962,13 @@ export function reviewYieldsReReviews(nowMs: number): boolean {
   return sharedHostMemoryShort(sharedHostMemory(nowMs));
 }
 
-/** The last {@link HOST_MEMORY_SHARED_STEP} row's content, so a pass whose share is unchanged and whose review.capacity
- *  row is not due writes nothing new. */
-let lastSharedRowKey: string | undefined;
-
 /** W1-T14903 — re-exported for review admission (sweep.ts), which records the re-reviews it held back. */
 export { HOST_MEMORY_SHARED_STEP, hostMemorySharedPayload, sharedHostMemory };
 
 const runtimeStates = new Map<string, ReviewCapacityState>();
+// Keep the legacy ceiling's hysteresis independent. A shared-memory shed must not make the
+// comparator inherit that shed and later recover above what the legacy controller would allow.
+const legacyCeilingStates = new Map<string, ReviewCapacityState>();
 
 export interface RuntimeReviewCapacityInput extends ReviewCapacityBounds {
   root: string;
@@ -990,14 +994,15 @@ export interface RuntimeReviewCapacityInput extends ReviewCapacityBounds {
 /** Production adapter. It reads only local host files and the age-bounded provider snapshot. */
 export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): number {
   const prior = runtimeStates.get(input.root) ?? initialReviewCapacityState(input.baseWidth);
+  const legacyPrior = legacyCeilingStates.get(input.root) ?? initialReviewCapacityState(input.baseWidth);
   const providerStatus = readProviderRoutingStatus(input.root, { now: () => input.nowMs });
   const settlements = summarizeReviewSettlements(input.ledgerLines, input.nowMs, input.policy.settlementWindowMs);
   // W1-T11129 — the share's producer is the host tuner's cpu-weights.json in this instance's state dir; unread or
   // stale, the observation carries no share and the CPU verdict holds rather than shedding on PSI alone.
   const weightShare = input.cpuWeightShare ?? readCpuWeightShare(join(input.root, "state"), input.nowMs);
-  // W1-T14903: one host memory reading for both lanes — the lower of this lane's own and the build lane's snapshot.
-  const host = readReviewHostObservation();
+  // W1-T14903: the build lane owns this pass's host memory reading; use it directly for the review decision.
   const shared = sharedHostMemory(input.nowMs);
+  const host = readReviewHostObservation(undefined, undefined, shared?.availableMib);
   const memAvailableMib = sharedMemoryAvailableMib(host.memAvailableMib, shared);
   const observation: ReviewCapacityObservation = {
     nowMs: input.nowMs,
@@ -1013,14 +1018,13 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
     provider: reviewProviderObservation(providerStatus, input.nowMs),
     settlements,
   };
-  // W1-T14903: the width is the lower of the width cut from this lane's own reading and the width cut from the shared
-  // one, both from the same prior state, so the shared reading can only lower it (INVARIANT width-never-grows): a lower
-  // reading can pick a different arm, which must never leave the width above the own reading's.
-  const own = selectAdaptiveReviewWidth(prior, input.policy, observation, input);
-  const sharedCut = memAvailableMib !== undefined && memAvailableMib !== host.memAvailableMib
-    ? selectAdaptiveReviewWidth(prior, input.policy, { ...observation, memAvailableMib }, input) : undefined;
-  const result = sharedCut !== undefined && sharedCut.decision.effectiveWidth < own.decision.effectiveWidth ? sharedCut : own;
+  // W1-T14903: compare the shared controller with an independently advanced legacy ceiling. The latter tracks the
+  // old controller's hysteresis across passes, so a shared shed cannot let a later recovery exceed that ceiling.
+  const own = selectAdaptiveReviewWidth(legacyPrior, input.policy, observation, input);
+  const sharedCut = selectAdaptiveReviewWidth(prior, input.policy, observation, input);
+  const result = sharedCut.decision.effectiveWidth < own.decision.effectiveWidth ? sharedCut : own;
   runtimeStates.set(input.root, result.state);
+  legacyCeilingStates.set(input.root, own.state);
   const phaseSplit = input.observeReviewPhases?.(observation.provider, result.decision.effectiveWidth);
   if (shared !== undefined) {
     const payload = hostMemorySharedPayload(shared, {
@@ -1030,9 +1034,9 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
       ownWidth: own.decision.effectiveWidth,
       yielded: result === sharedCut ? "review-width" : "none",
     });
-    const key = JSON.stringify(payload);
-    if (result.decision.shouldLog || key !== lastSharedRowKey) input.log(HOST_MEMORY_SHARED_STEP, payload);
-    lastSharedRowKey = key;
+    // This row is a pass boundary audit record, not telemetry-change logging: repeated passes
+    // over the same snapshot still need one row apiece.
+    input.log(HOST_MEMORY_SHARED_STEP, payload);
   }
   if (result.decision.shouldLog) {
     input.log("review.capacity", {
