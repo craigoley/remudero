@@ -363,6 +363,23 @@ export function reviewerSnapshotErrorRow(e: ReviewerSnapshotError): Record<strin
 }
 
 /**
+ * W1-T14938: the shadow judge's integrity check. runShadowJudge records any judge error only as
+ * shadow_judge.unavailable, so this logs the review.reviewer.<phase>_error row first and rethrows: the
+ * shadow result is still discarded, and the row still names the failed git read.
+ */
+export function assertShadowSnapshotIntegrity(
+  host: Pick<ReviewCommandHost, "GIT_UNTRACKED_FILES_ALL">, cwd: string, expectedHeadSha: string,
+  log: (step: string, fields: Record<string, unknown>) => void,
+): void {
+  try {
+    assertReviewerSnapshotIntegrity(host, cwd, expectedHeadSha);
+  } catch (e) {
+    if (e instanceof ReviewerSnapshotError) log(`review.reviewer.${e.phase}_error`, reviewerSnapshotErrorRow(e));
+    throw e;
+  }
+}
+
+/**
  * Materialize the semantic reviewer's repository locally from the exact checkout the
  * deterministic proof floor already owns. The clone has its own Git metadata and worktree, but
  * borrows immutable objects from the source for speed; no GitHub read and no source checkout
@@ -1807,7 +1824,7 @@ export async function runReview(host: ReviewCommandHost, args: {
               promptTemplate,
               prompt,
             }));
-            assertReviewerSnapshotIntegrity(host, snapshot.cwd, headSha);
+            assertShadowSnapshotIntegrity(host, snapshot.cwd, headSha, log);
             return {
               decision: reviewerSemanticVerdicts(shadow, criteria.length),
               servedModel: shadow.servedModel ?? shadow.routedModel ?? null,

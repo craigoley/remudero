@@ -11,9 +11,12 @@ import { join } from "node:path";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import {
   assertReviewerSnapshotIntegrity,
+  assertShadowSnapshotIntegrity,
   ReviewerSnapshotError,
   reviewerSnapshotErrorRow,
 } from "#src/cli/commands/review.js";
+import { runShadowJudge, shadowJudgeSampled } from "#src/lib/shadow-judge.js";
+import type { Mount } from "#src/lib/mounts.js";
 
 const HOST = { GIT_UNTRACKED_FILES_ALL: "--untracked-files=all" };
 
@@ -61,6 +64,39 @@ test("W1-T14938 criterion 1: an unreadable reviewer checkout row names the git c
     assert.equal(row.git_command, "rev-parse");
     assert.equal(row.checkout_exists, false);
   });
+});
+
+test("W1-T14938 criterion 1: an unreadable reviewer checkout row names the git command, its error and whether the path exists, through the shadow judge", async () => {
+  // runShadowJudge logs a judge error only as shadow_judge.unavailable; the shadow call site's integrity check
+  // must still write the review.reviewer.integrity_error row, and the shadow result is still discarded.
+  let n = 0;
+  while (!shadowJudgeSampled(`review:w1-t14938-${n}`)) n++;
+  const mount = (model: string): Mount => ({ model, effort: "high", maxTurns: 12, contextBudget: 1 });
+  const repo = gitRepo({ kind: "w1-t14938-shadow" });
+  try {
+    const head = repo.git("rev-parse", "HEAD");
+    writeFileSync(join(repo.dir, ".git", "index"), "corrupt index\n");
+    const rows: { step: string; fields: Record<string, unknown> }[] = [];
+    const log = (step: string, fields: Record<string, unknown>) => { rows.push({ step, fields }); };
+    await runShadowJudge({
+      surface: "review", key: `w1-t14938-${n}`, primaryMount: mount("primary"), primaryDecision: [],
+      mounts: [mount("primary"), mount("shadow")], log,
+      judge: async () => {
+        assertShadowSnapshotIntegrity(HOST, repo.dir, head, log);
+        return { decision: [] };
+      },
+    });
+    const integrity = rows.filter((row) => row.step === "review.reviewer.integrity_error");
+    assert.equal(integrity.length, 1, JSON.stringify(rows));
+    assert.equal(integrity[0]!.fields.reason, "unreadable");
+    assert.equal(integrity[0]!.fields.git_command, "status");
+    assert.match(String(integrity[0]!.fields.git_error), /index/i);
+    assert.equal(integrity[0]!.fields.checkout_exists, true);
+    assert.deepEqual(rows.map((row) => row.step), ["review.reviewer.integrity_error", "shadow_judge.unavailable"],
+      "the shadow result is discarded, never paired");
+  } finally {
+    repo.cleanup();
+  }
 });
 
 test("W1-T14938 criterion 2: an unreadable checkout is still refused as before", () => {
