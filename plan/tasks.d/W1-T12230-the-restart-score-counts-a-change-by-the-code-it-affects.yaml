@@ -30,7 +30,7 @@
     - src/lib/daemon-closure.ts
     - src/cli/commands/daemon.ts
     - test/daemon-external-wait-freshness.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "Each commit of an advance gets one class. `reviewer`: it changes a path that is material for a review. `loop`: it is not `reviewer` and it changes a file in the import closure of the daemon. `worker_only`: it changes `src/` or `scripts/` and neither of the two. A commit that cannot be classed is `loop`"
