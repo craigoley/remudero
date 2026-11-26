@@ -1,3 +1,5 @@
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { defaultGitRunnerAsync, loadPlanAtRefAsync } from "./plan.js";
 import { readOpsCatalogSnapshotAsync } from "./ops-catalog-source.js";
 import { planDestinationRepository } from "./plan-destination.js";
@@ -19,7 +21,7 @@ export type TaskHoldLookup =
   | { outcome: "unreadable"; reason: string };
 
 export interface TaskDispatchHoldSources {
-  /** The plan at origin/main. Default: `plan/tasks.yaml` at `origin/main` of the checkout holding the working directory. */
+  /** The plan at origin/main. Default: `plan/tasks.yaml` at `origin/main` of {@link planCheckoutRoot}. */
   readMainPlan?: () => Promise<{ byId: ReadonlyMap<string, { dispatch_hold?: boolean }> }>;
   /** The ops catalog lookup. Default: {@link readOpsCatalogHold} under `stateDir`. */
   lookup?: (taskId: string) => Promise<TaskHoldLookup>;
@@ -45,12 +47,26 @@ export function taskHoldRefusal(reading: TaskHoldReading | undefined): string | 
     : `held: ${reading.taskId}'s dispatch_hold is unreadable (${reading.reason})`;
 }
 
-/** The top of the checkout holding the working directory, as `repo-location.ts` resolves `repoRoot`, read lazily:
- *  importing that module would pay its argv-at-import cost (W1-T2531). A directory outside a checkout throws, and the
- *  caller reads that as an unreadable plan, which holds. */
-async function checkoutTopLevel(): Promise<string> {
-  // Through plan.ts's own git runner, the one the plan read uses: this module spawns no git of its own.
-  return (await defaultGitRunnerAsync(process.cwd())(["rev-parse", "--show-toplevel"])).trim();
+/** This module's own checkout: `src/lib/task-dispatch-hold.ts` → the root. `repo-location.ts`'s install fallback. */
+const INSTALL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+
+/**
+ * The checkout whose `origin/main` plan the hold is read from, resolved in `repo-location.ts`'s `repoRoot` order but
+ * lazily (importing that module pays its argv-at-import cost, W1-T2531): an explicit `--repo-root`, else the work tree
+ * holding `cwd`, else this install's own checkout. A daemon under launchd runs with cwd at `config.root`, which is not a
+ * work tree, and reads the install's plan exactly as its `repoRoot` does.
+ */
+export async function planCheckoutRoot(argv: readonly string[] = process.argv.slice(2), cwd: string = process.cwd(),
+  topLevel: (dir: string) => Promise<string> = (dir) => defaultGitRunnerAsync(dir)(["rev-parse", "--show-toplevel"]),
+  installRoot: string = INSTALL_ROOT): Promise<string> {
+  const flag = argv.indexOf("--repo-root");
+  if (flag >= 0 && argv[flag + 1] !== undefined) return resolve(argv[flag + 1]!);
+  try {
+    // Through plan.ts's own git runner, the one the plan read uses: this module spawns no git of its own.
+    return (await topLevel(cwd)).trim();
+  } catch {
+    return installRoot;
+  }
 }
 
 const TASK_ID = /^[A-Z][A-Z0-9]*-T\d+$/;
@@ -60,7 +76,7 @@ export async function readTaskDispatchHold(taskId: string | undefined, sources: 
   if (taskId === undefined || !TASK_ID.test(taskId)) return { outcome: "clear" };
   let main: { byId: ReadonlyMap<string, { dispatch_hold?: boolean }> };
   try {
-    main = await (sources.readMainPlan ?? (async () => loadPlanAtRefAsync(await checkoutTopLevel(), "plan/tasks.yaml", "origin/main")))();
+    main = await (sources.readMainPlan ?? (async () => loadPlanAtRefAsync(await planCheckoutRoot(), "plan/tasks.yaml", "origin/main")))();
   } catch (error) {
     return { outcome: "unread", taskId, reason: `the plan at origin/main is unreadable: ${String((error as Error)?.message ?? error)}` };
   }
