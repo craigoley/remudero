@@ -494,7 +494,7 @@ function parseGhJsonBody(args: string[], body: string): unknown {
 }
 
 /** An explicit revalidation request; omitted preserves normal broker caching. */
-export interface GhJsonReadOptions { fresh?: true; }
+export interface GhJsonReadOptions { fresh?: true; alone?: true; }
 
 export async function ghJsonAsync(
   args: string[],
@@ -530,7 +530,7 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
     await presentUnexpiredTokenAsync(args);
     try { return await run(); } catch (err) { noteInstallationRefusal(err); throw err; }
   }
-  const key = ghArgsAreCoalescibleRead(args) && readOpts.fresh !== true ? JSON.stringify(execArgs) : undefined;
+  const key = ghArgsAreCoalescibleRead(args) && readOpts.alone !== true ? `${readOpts.fresh === true ? "fresh:" : ""}${JSON.stringify(execArgs)}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
@@ -616,7 +616,7 @@ export async function ghTextAsync(
     await presentUnexpiredTokenAsync(args, env);
     try { return rememberHeaders(await read()); } catch (err) { noteInstallationRefusal(err); throw err; }
   }
-  const key = opts.signal === undefined && env === undefined && ghArgsAreCoalescibleRead(args) && opts.fresh !== true ? `text:${encoding}:${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
+  const key = opts.signal === undefined && env === undefined && ghArgsAreCoalescibleRead(args) ? `text:${encoding}:${opts.fresh === true ? "fresh:" : ""}${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {

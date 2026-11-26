@@ -228,8 +228,9 @@ export function pullRequestTaskSubjectOf(pull: unknown, planOnlyFiling = false):
 export type PullRowRead = (path: string) => Promise<unknown>;
 
 /** The act-time pull row: revalidated through the GitHub read broker (`fresh`), never a cached pre-edit body, and never
- *  joined to a GET already under way (gh-read-broker.ts), which may have left before an edit. */
-export const freshPullRowRead: PullRowRead = (path) => ghJsonAsync(["api", path], undefined, undefined, { fresh: true });
+ *  joined to a GET already under way (gh-read-broker.ts, or the transport's in-flight map: `alone`), which may have left
+ *  before an edit. */
+export const freshPullRowRead: PullRowRead = (path) => ghJsonAsync(["api", path], undefined, undefined, { fresh: true, alone: true });
 
 /** The live pull request a plan-only filing read is asked about: its repository, number and the head it was read at. */
 export interface PlanOnlyFilingSubject {
