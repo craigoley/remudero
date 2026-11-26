@@ -102,6 +102,7 @@ export type LintCheck =
   | "superseded-by"
   | "doctrine-citation-unresolved"
   | "design-invariant-proof"
+  | "invariant-unguarded"
   | "needs-input"
   | "production-caller";
 export type LintSeverity = "block" | "warn";
