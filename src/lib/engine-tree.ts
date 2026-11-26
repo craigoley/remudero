@@ -13,7 +13,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { buildIntoStore, materializeFromStore, type BuildIntoStoreOptions, type StoreBuildResult, type StoreLog, type StoreLookup } from "./child-entry-store.js";
 import { writeAtomic } from "./fs-race-safe.js";
 import { acquireInflightLock, InflightLockError, type InflightLockHandle } from "./inflight-lock.js";
-import { classifyRunDir, readSpec, realRunChildProbe, type RunChildProbe } from "./run-child-contract.js";
+import { classifyRunDir, readSpec, realRunChildProbe, type RunChildProbe, type RunDirKind } from "./run-child-contract.js";
 import { ENGINE_BUILD_PREFIX, ENGINE_SOURCE_HASH, engineTreesRoot } from "./engine-paths.js";
 import { linkWorktreeNodeModules, resolveNodeModulesSource, type NodeModulesLinkOutcome } from "./worker.js";
 import { hostWorktreeGitAsync } from "./worktree-git.js";
@@ -578,7 +578,15 @@ export interface PruneEngineOptions {
   worktreeRoots?: readonly string[];
 }
 
-/** Engine hashes and shas that a non-terminal run directory names, or a reason the answer cannot be known. */
+/** W1-T14889: the run directory kinds that keep their engine: one that may still execute, or one that cannot be read. */
+const RUN_KINDS_THAT_PIN: ReadonlySet<RunDirKind> = new Set(["live", "unreadable"]);
+
+/**
+ * Engine hashes and shas that a run directory still able to use its engine names, or a reason the answer cannot be
+ * known. W1-T14889: a terminal run, a dead one (its status names another container generation) and a lost one (its pid
+ * is gone or reused) cannot execute from an engine, so none of them pins it. A live run and an unreadable one still
+ * pin, and an unreadable run naming no engine still defers.
+ */
 function namedByLiveRuns(stateRoot: string, probe: RunChildProbe): { hashes: Set<string>; shas: Set<string> } | { undecidable: string } {
   const hashes = new Set<string>();
   const shas = new Set<string>();
@@ -601,7 +609,7 @@ function namedByLiveRuns(stateRoot: string, probe: RunChildProbe): { hashes: Set
     }
     if (contents.length === 0) continue;
     const classified = classifyRunDir(dir, probe);
-    if (classified.kind === "terminal") continue;
+    if (!RUN_KINDS_THAT_PIN.has(classified.kind)) continue;
     const spec = readSpec(dir);
     if (spec.ok) hashes.add(spec.value.engine.sourceHash);
     if (classified.status) shas.add(classified.status.engineSha);
@@ -611,7 +619,7 @@ function namedByLiveRuns(stateRoot: string, probe: RunChildProbe): { hashes: Set
 }
 
 /**
- * Remove each engine tree that no non-terminal run directory names and that is neither the newest published nor
+ * Remove each engine tree that no live or unreadable run directory names and that is neither the newest published nor
  * `keep`. Never by count or age. A run directory that is not terminal and names no engine makes the answer unknowable,
  * so nothing is removed that pass (`engine.prune_deferred`). Leftover `.build-` siblings and unrecorded engine
  * directories that no build in this process is making are cleared too. Returns the engine hashes removed.
