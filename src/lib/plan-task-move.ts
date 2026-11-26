@@ -231,6 +231,23 @@ async function treeWith(root: string, treeish: string, path: string, blob: strin
   return (await edit(treeish, path.split("/"))) ?? unknown("tree_shape");
 }
 
+/**
+ * W1-T14856: the preflight's id checks read the root's `refs/remotes/origin/main` as the base. The mover reads main's
+ * head as a SHA and fetches it without writing that ref, so on a shared checkout the ref can lag the commit this step is
+ * built on, and a record that main already holds then reads as one this step adds. Fast-forward the ref to the parent
+ * before the preflight, only when the ref is absent or an ancestor of it: a ref already at or past the parent, or on
+ * another line, is left as it is.
+ */
+export async function fastForwardTrackingMain(root: string, parent: string): Promise<"advanced" | "unchanged"> {
+  const ref = "refs/remotes/origin/main";
+  // for-each-ref answers an absent ref with no line and exit 0, so a failed read still throws and is never "absent".
+  const current = (await git(root, ["for-each-ref", "--format=%(objectname)", ref])).trim();
+  if (current === parent) return "unchanged";
+  if (current !== "" && !(await git(root, ["merge-base", "--is-ancestor", current, parent]).then(() => true, () => false))) return "unchanged";
+  await git(root, ["update-ref", ref, parent, ...(current === "" ? [] : [current])]);
+  return "advanced";
+}
+
 async function commitOn(root: string, parent: string, tree: string, message: string): Promise<string> {
   // A host with no git identity (a CI runner) still records the mover as the author; a configured identity wins.
   // `git config` exits 1 for an unset key; any unread identity falls back to the named mover identity below.
@@ -372,6 +389,7 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
       // A one-task step names its task, which the review requires of a single receipt; a batch's branch names its shape.
       const branch = `${MOVE_BRANCH_PREFIX}${batched ? "batch" : lead.id}-${clock.now()}`;
       const body = bodyOf(planned);
+      await fastForwardTrackingMain(root, parent);
       const verdict = await (ports.preflight ?? defaultPreflight)(root, commit, { title: planned.title, body, headRef: branch,
         ...(planned.repository === "ops" ? { codeRoot: o.publicRoot, bodyProofRoot: "plan" as const } : {}) });
       const allowed = planPrPreflightAllows(verdict, { lane: "move-task", branch });

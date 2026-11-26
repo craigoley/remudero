@@ -14,6 +14,7 @@
     - src/run-task.ts
     - src/lib/prompt-render.ts
     - test/worker/a-codex-worker-gets-the-headline-index-once.test.ts
+    - "src/cli/commands/run-task-verb.ts"
   status: queued
   attempts: 0
   acceptance:

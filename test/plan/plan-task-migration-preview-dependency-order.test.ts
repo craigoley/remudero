@@ -47,7 +47,9 @@ function fixture(t: TestContext, records: Record<string, string> = {"W1-T1.yaml"
 test("migration preview uses actual dispatch order and refuses remaining public dependants and merged records", t => {
   const f=fixture(t,{"W1-T1.yaml":record("W1-T1",9),"W1-T2.yaml":record("W1-T2",8),"W1-T3.yaml":record("W1-T3",7,["W1-T1"]),"W1-T4.yaml":record("W1-T4",6)});
   f.publicAnswer.merged.nodes.push({...f.closed,number:2,headRefName:"run-W1-T2-123",body:""}); f.publicAnswer.merged.totalCount++;
-  const r=f.run(); assert.equal(r.status,0); assert.equal(r.answer.outcome,"candidate"); assert.equal(r.answer.candidate.id,"W1-T3");
-  assert.ok(r.answer.refused.some((x:any)=>x.id==="W1-T1"&&x.reason==="public_dependants"));
+  // W1-T14825: W1-T1, named by W1-T3, now leads its group instead of being refused as public_dependants; W1-T3 follows it.
+  const r=f.run(); assert.equal(r.status,0); assert.equal(r.answer.outcome,"candidate"); assert.equal(r.answer.candidate.id,"W1-T1");
+  assert.deepEqual(r.answer.batch.map((m:any)=>m.id),["W1-T1","W1-T3","W1-T4"]);
+  assert.ok(!r.answer.refused.some((x:any)=>x.id==="W1-T1"));
   assert.ok(r.answer.refused.some((x:any)=>x.id==="W1-T2"&&x.reason==="merged"));
 });

@@ -1609,7 +1609,8 @@ export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOp
   return {
     shards: records.map(({ taskId, text }) => ({ taskId, text })),
     isCreditedMerged: (taskId) => credited.has(taskId),
-    threshold: deps.threshold ?? 10,
+    // W1-T14827: any drift lands; the landing bounds its own batch (plan-reconcile-batch.ts), so no count is waited for.
+    threshold: deps.threshold ?? 1,
     ...(requeue.length > 0 ? { requeue } : {}),
     land: (writes) => {
       const { landable, held } = planReconcileLintHold(deps.lint)(deps.checkoutRoot, records, writes);

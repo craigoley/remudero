@@ -1,11 +1,20 @@
 version: 2
 updates:
-  # remudero's package.json lives at the repo root.
+  # remudero's package.json lives at the repo root; the worker image has its own lockfile for the two
+  # baked CLI packages in /deploy. One npm lane covers both directories because a group in a lane with
+  # `directories` lands as ONE pull request across them (W1-T14823): the agent SDK and the image's Claude
+  # Code CLI must move together, or the-haiku55-image-pins-match-its-sdk fails on each half alone.
+  # The groups still keep the directories apart otherwise: every /deploy package is named by an image
+  # group below and excluded from the app group, so an app dependency update never silently changes the
+  # image.
   - package-ecosystem: npm
-    directory: /
+    directories:
+      - /
+      - /deploy
     schedule:
       interval: weekly
-    open-pull-requests-limit: 10
+    # The two lanes this replaced allowed 10 (/) and 5 (/deploy).
+    open-pull-requests-limit: 15
     # head-identity-gate admits a bump by its `chore(deps)` subject; pin it rather than let
     # Dependabot infer `build(deps)` from history.
     commit-message:
@@ -16,24 +25,26 @@ updates:
     # bumps are grouped so they don't flood one-PR-per-bump; MAJOR bumps
     # are excluded from AUTO-MERGE at the dep-review lane (W1-T54), never
     # via an `ignore:` block here.
+    # A dependency joins the FIRST group it matches, so the shared group comes first.
     groups:
-      npm-minor-and-patch:
+      agent-sdk-and-image-cli:
+        patterns:
+          - "@anthropic-ai/claude-agent-sdk"
+          - "@anthropic-ai/claude-code"
         update-types:
           - minor
           - patch
-
-  # The worker image has its own lockfile for the two baked CLI packages. Keeping this
-  # directory separate prevents an app dependency update from silently changing the image.
-  - package-ecosystem: npm
-    directory: /deploy
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: chore
-      include: scope
-    groups:
       image-cli-minor-and-patch:
+        patterns:
+          - "@anthropic-ai/claude-code"
+          - "@openai/codex"
+        update-types:
+          - minor
+          - patch
+      npm-minor-and-patch:
+        exclude-patterns:
+          - "@anthropic-ai/claude-code"
+          - "@openai/codex"
         update-types:
           - minor
           - patch
