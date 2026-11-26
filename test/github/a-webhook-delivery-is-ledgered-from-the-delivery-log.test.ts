@@ -200,3 +200,22 @@ test("W1-T14881: the started pass runs on its interval, never twice at once, and
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(started, after, "a stopped pass runs no more");
 });
+
+test("W1-T14923 criterion 1: a hooks body that is not an array writes one shape read_failed row, with GitHub's message", async (t) => {
+  const { stateDir, rows, log } = scene(t);
+  const api: DeliveryLogApi = async () => ({ body: { message: "Not Found", documentation_url: "https://docs.github.com/rest" } });
+  assert.deepEqual(await runGithubDeliveryLogPass({ org: ORG, stateDir, log, api }), { ledgered: 0, failed: true });
+  assert.deepEqual(rows, [{ step: GITHUB_DELIVERY_READ_FAILED_STEP, org: ORG, status_class: "shape", message: "Not Found" }]);
+});
+
+test("W1-T14923 criterion 2: a hook list with no serve hook writes one no_hook read_failed row, with hook_count", async (t) => {
+  const { stateDir, rows, log } = scene(t);
+  const calls: string[] = [];
+  const api: DeliveryLogApi = async (path) => {
+    calls.push(path);
+    return { body: [{ id: "999", config: { url: "https://elsewhere.example.test/hook" } }, { id: "998", config: {} }] };
+  };
+  assert.deepEqual(await runGithubDeliveryLogPass({ org: ORG, stateDir, log, api }), { ledgered: 0, failed: true });
+  assert.deepEqual(rows, [{ step: GITHUB_DELIVERY_READ_FAILED_STEP, org: ORG, status_class: "no_hook", hook_count: 2 }]);
+  assert.deepEqual(calls, [`orgs/${ORG}/hooks?per_page=100`], "no deliveries page is read for a hook that is not serve's");
+});
