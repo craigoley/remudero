@@ -112,7 +112,7 @@ import { readHeapAdmissionHoldMode } from "../../lib/daemon-heap-admission-hold.
 import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy } from "../../lib/daemon-memory-policy.js";
 import { workerThreads } from "../../lib/worker-heaps.js";
 import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
-import { resolveClaudeExecutable, claudeExecutableCache, taskInputAnswerWithLedger, retireWorkerSpawns } from "../../lib/worker.js";
+import { resolveClaudeExecutable, claudeExecutableCache, taskInputAnswerWithLedger, runInWorkerSpawnScope, type WorkerSpawnScope } from "../../lib/worker.js";
 import { defaultInstance, memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "../../lib/host-memory-ledger.js";
 import { type DispatchGovernorDeps } from "../../lib/dispatch-governor.js";
 import { focusGateFor } from "../../lib/focus-gardener.js";
@@ -2686,7 +2686,8 @@ export async function daemonCommand(
     if (standby?.ports && standbyPromotion) logPromoted(standby.ports, standbyPromotion);
     // W1-T14644: the latest refresh's projection phases, held until the selection timing row takes them.
     let pendingRefreshMergedPhases: ProjectPlanPhases | undefined;
-    const summary = await runDaemonFn(
+    // W1-T14916: every pass, timer and worker start runDaemon makes inherits the retirement's spawn scope.
+    const summary = await retirement.inSpawnScope(async () => runDaemonFn(
       plan,
       {
         // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
@@ -3468,7 +3469,7 @@ export async function daemonCommand(
         log,
       },
       opts,
-    );
+    ));
     writeSyncLine(1, "\n" + renderDaemonSummary(summary));
     // The pure stop-reason -> exit-code mapping lives in lib/daemon.ts
     // (`daemonExitCode`), unit-tested there with no process spawn (Rule 18):
@@ -3566,19 +3567,24 @@ export interface DaemonRetirement {
   lightPassScope: <S extends LightPassScope | undefined>(scope: S) => S;
   /** The worker admission hold: once retired, a STOP hold, so a pass still running admits no fix or review worker. */
   admissionHold: <H>(fallback: () => H | undefined) => H | FleetControlHold | undefined;
+  /** Run the daemon's work in this retirement's worker spawn scope: once retired, every spawnWorker call that work
+   *  makes returns not-started, from whichever sweep rung it comes (worker.ts). Nothing outside the scope is touched. */
+  inSpawnScope: <T>(run: () => T) => T;
 }
 
 const RETIRED_DETAIL = "drain lock released; the successor owns this work";
 
 export function createDaemonRetirement(log: (step: string, extra?: Record<string, unknown>) => void): DaemonRetirement {
   let retired = false;
+  const spawnScope: WorkerSpawnScope = {};
   const allows = (hook: string): boolean => {
     if (!retired) return true;
     log("daemon.retired_start_refused", { hook, reason: RETIRED_DETAIL });
     return false;
   };
   return {
-    retire: () => { retired = true; retireWorkerSpawns(RETIRED_DETAIL); },
+    retire: () => { retired = true; spawnScope.retiredBy ??= RETIRED_DETAIL; },
+    inSpawnScope: (run) => runInWorkerSpawnScope(spawnScope, run),
     retired: () => retired,
     allows,
     lightPassScope: <S extends LightPassScope | undefined>(scope: S): S => {

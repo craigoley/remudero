@@ -74,12 +74,13 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   const withheld: Array<Record<string, unknown>> = [];
   let drafted: Awaited<ReturnType<typeof spawnWorker>> | undefined;
   const admissionHold = () => late.retirement.admissionHold(() => resolveFleetControlHold({}));
-  const inFlightSweep = late.retirement.refuse("sweep", withCiJudgeAfterSweep(async () => {
+  // daemonCommand runs runDaemon, and so every pass, in the retirement's spawn scope.
+  const inFlightSweep = late.retirement.inSpawnScope(() => late.retirement.refuse("sweep", withCiJudgeAfterSweep(async () => {
     await sweepGate;
     if (admissionHold() === undefined) spawned.push("fix_worker");
     // The inbox draft rung calls spawnWorker with no admission hold of its own (cli/commands/sweep.ts).
     drafted = await spawnWorker(drafterStart(t, withheld, spawned));
-  }, retiringCiJudgeKick(late.retirement, () => { spawned.push("ci_judge_worker"); })))();
+  }, retiringCiJudgeKick(late.retirement, () => { spawned.push("ci_judge_worker"); })))());
   const latch: RestartAdmission = Object.assign(() => true, { heldBy: undefined });
   const scope = late.retirement.lightPassScope<LightPassScope>({ reviewOnly: true, admit: latch });
   assert.equal(scope.admit?.("review", "light"), true, "before the release the latched pass admits its review");
@@ -98,6 +99,16 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
     ["ci_judge_kick", "light_pass_admission"]);
   late.settlePage();
   await lateExit;
+
+  // The retirement belongs to that daemon's scope: a start outside it (the next daemon in a pooled process, or a
+  // direct spawn) still reaches memory admission.
+  const outside: string[] = [];
+  const outsideWithheld: Array<Record<string, unknown>> = [];
+  const elsewhere = await spawnWorker({ ...drafterStart(t, outsideWithheld, outside),
+    admitWorkerMemory: async () => { outside.push("memory_admission"); return { kind: "abandoned", reason: "admission-abandoned", waitedMs: 0, attempts: 1 }; } });
+  assert.deepEqual(outside, ["memory_admission"], "a spawn outside the retired scope is not withheld");
+  assert.deepEqual(outsideWithheld, []);
+  assert.equal(elsewhere.notStarted, "admission-abandoned");
 });
 
 test("W1-T14916 criterion 2: in-flight SRE lane page work still completes", async () => {

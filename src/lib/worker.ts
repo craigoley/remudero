@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
 import { answerHeld, answerRecords, newestLedgerTaskAnswer, newestTaskAnswer, publishAnswers, sharedAnswerEvidence, type Task, type TaskInputAnswer } from "./plan.js";
 import { citation } from "./provenance.js";
@@ -112,7 +113,6 @@ import {
   type ExperimentIntentionToTreat,
 } from "./routing-experiments.js";
 import { loadDefaultPolicy } from "./policy.js";
-import { registerProcessExitLatch } from "./process-exit-latches.js";
 import { assertLiveSpawnAllowed } from "./spawn-guard.js";
 import { validateWorkerSettings, validateWorkerSettingsFile } from "./settings.js";
 import { assertInstanceRegistryWorkerEnvironment, captureInstanceRegistryRuntimeFile, InstanceRegistryRuntimeError, runtimeInstanceRegistryPrivateFile } from "./instance-registry-selection.js";
@@ -2654,14 +2654,17 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
       ...(from === undefined ? {} : { from }), to } };
 }
 
-let workerSpawnRetirement: string | undefined;
+/** W1-T14916: a daemon's worker spawn scope. Its drain release sets `retiredBy`; from then on every spawnWorker call
+ *  made by work running in the scope returns not-started with a `worker.spawn_withheld` row naming the reason. */
+export interface WorkerSpawnScope { retiredBy?: string }
 
-/** W1-T14916: after its drain release a daemon process starts no worker; every later spawnWorker call returns
- *  not-started with a `worker.spawn_withheld` row naming the reason. Only the process exit clears it. */
-export function retireWorkerSpawns(reason: string): void {
-  workerSpawnRetirement ??= reason;
+const workerSpawnScope = new AsyncLocalStorage<WorkerSpawnScope>();
+
+/** Run `run` in `scope`. Every pass, timer and callback it starts inherits the scope, so a retirement reaches work
+ *  already running, and no caller outside it (a pooled test file's next daemon, or a direct spawn) inherits it. */
+export function runInWorkerSpawnScope<T>(scope: WorkerSpawnScope, run: () => T): T {
+  return workerSpawnScope.run(scope, run);
 }
-registerProcessExitLatch("worker-spawn-retirement", () => { workerSpawnRetirement = undefined; });
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // W1-T13868: a wrapper may replace this call's result with its own error; the call's table keeps the result's model.
@@ -2736,7 +2739,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
   const childReservationId = currentRunChildReservationId();
   const admissionStartedAtMs = systemClock.now();
-  const retiredBy = workerSpawnRetirement;
+  const retiredBy = workerSpawnScope.getStore()?.retiredBy;
   const admission = childReservationId || retiredBy ? undefined : await (args.admitWorkerMemory ?? awaitMemoryAdmission)({
     workerClass: workerClassOf(args),
     signal: args.signal,
