@@ -82,7 +82,3 @@
     read one byte before the tail to find a line boundary, so its byte bound moves from 14 to 15. Design step 3
     also names the open mode, because CodeQL alert 1351 (high) flagged the same read on #19776 without one.
     DEPENDS (2026-11-21, operator): W1-T14002 alone under-charges fix trees that run tsc, because its concurrent-rss samples are almost all trees without tsc; W1-T14153 (#20014) fixes the tsc accounting first.
-  needs_input:
-    question: "Pull request https://github.com/craigoley/remudero/pull/19776 (task W1-T13878) cannot merge without your input. What it needs: fix needs design at this exact head (round work-fix-dispatch-W1-T13878-1795182624098-45c2:1:1795183013572) — The canonical merge-base scope excludes two inherited test changes required by the estimate label and tail-boundary behavior. The CodeQL edit is saved, and required CI remains blocked on a separate scope amendment."
-    source_pr: https://github.com/craigoley/remudero/pull/19776
-    asked_at: 2026-11-20T14:24:48.860Z
