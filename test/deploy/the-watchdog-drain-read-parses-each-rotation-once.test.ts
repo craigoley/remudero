@@ -102,4 +102,21 @@ describe("test/deploy/the-watchdog-drain-read-parses-each-rotation-once.test.ts"
     assert.deepEqual(readProgressWatchdogDrainRows(dir, second.fs), expected);
     assert.deepEqual(second.reads, [OLD], "it is read whole again on the next read");
   });
+
+  test("W1-T14920 a replayed line survives the retirement of the rotation that first held it", (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t14920-retire-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const lines = (rows: Record<string, unknown>[]) => rows.map((row) => JSON.stringify(row)).join("\n") + "\n";
+    const a1 = { ts: "2026-01-01T01:00:00.000Z", step: "implement.done", run_id: "a1", worker_duration_ms: 60_000 };
+    const a2 = { ts: "2026-01-01T02:00:00.000Z", step: "verdict", run_id: "a2" };
+    const b1 = { ts: "2026-01-02T01:00:00.000Z", step: "verdict", run_id: "b1" };
+    writeFileSync(join(dir, OLD), gzipSync(lines([a1, a2])));
+    writeFileSync(join(dir, NEW), gzipSync(lines([a1, a2, b1]) + "{torn\n[1]\n")); // a compaction's replacement, published before its sources retire
+    writeFileSync(join(dir, "ledger.ndjson"), lines([{ ts: "2026-01-03T01:00:00.000Z", step: "daemon.pulse" }]));
+    assert.deepEqual(readProgressWatchdogDrainRows(dir), wholeRead(dir));
+    unlinkSync(join(dir, OLD));
+    const after = readProgressWatchdogDrainRows(dir);
+    assert.deepEqual(after, wholeRead(dir), "after the source retires, the remembered replacement still holds its rows");
+    assert.deepEqual(after.map((row) => row.run_id).sort(), ["a1", "a2", "b1"]);
+  });
 });

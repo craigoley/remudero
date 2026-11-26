@@ -24,7 +24,7 @@ import { writeAtomic } from "./fs-race-safe.js";
 export const PROGRESS_WATCHDOG_DRAIN_STEPS = Object.freeze(["implement.done", "verdict", "run.freshness_handoff", "worker.recycle_yield"]);
 /** The memo file, beside the ledger. Bump {@link DRAIN_MEMO_VERSION} when the steps or the row shape change. */
 export const DRAIN_MEMO_FILENAME = "progress-watchdog-drain-rotations.json";
-export const DRAIN_MEMO_VERSION = "w1-t14920.1";
+export const DRAIN_MEMO_VERSION = "w1-t14920.2";
 
 interface DrainMemoEntry { size: number; mtimeMs: number; torn: number; rows: Array<Record<string, unknown>> }
 interface DrainMemoFile { version: string; steps: string[]; entries: Record<string, DrainMemoEntry> }
@@ -37,6 +37,26 @@ function loadMemo(path: string, read: (path: string) => string): Record<string, 
   } catch {
     return {}; // missing, unreadable or foreign: every rotation is parsed, and the file is rewritten
   }
+}
+
+/** Every drain row of one rotation, read on its own: no line is skipped for having been seen in another file. */
+function rotationDrainRows(entry: LedgerCorpusEntry, fs: LedgerGrepFsDeps, steps: ReadonlySet<string>): { rows: Array<Record<string, unknown>>; torn: number; tornLines: string[] } {
+  const raw = fs.readFileSync(entry.path);
+  const text = (entry.form === "gzip" ? fs.gunzipSync(raw) : raw).toString("utf8");
+  const rows: Array<Record<string, unknown>> = [];
+  const tornLines: string[] = [];
+  for (const line of text.split("\n")) {
+    if (line.trim() === "") continue;
+    let row: unknown;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      tornLines.push(line); // deliberate: a torn line is counted, as the union counts it
+      continue;
+    }
+    if (row && typeof row === "object" && !Array.isArray(row) && steps.has(String((row as Record<string, unknown>).step))) rows.push(row as Record<string, unknown>);
+  }
+  return { rows, torn: tornLines.length, tornLines };
 }
 
 /** The drain rows of `stateDir`'s ledger union, every rotation answered from the memo when its size and mtime match.
@@ -64,10 +84,12 @@ export function readProgressWatchdogDrainRows(
       next[entry.path] = known;
       return { rows: known.rows, torn: known.torn, tornLines: [] };
     }
-    const read = parse();
-    next[entry.path] = { ...identity, torn: read.torn, rows: read.rows.filter((row) => steps.has(String(row.step))) };
+    // The union's own parse skips lines an earlier rotation already held, so a remembered entry built from it would
+    // lose those rows once compaction retires the earlier file. Each entry holds ALL of its rotation's drain rows.
+    const own = rotationDrainRows(entry, fs, steps);
+    next[entry.path] = { ...identity, torn: own.torn, rows: own.rows };
     changed = true;
-    return read;
+    return { rows: own.rows, torn: own.torn, tornLines: own.tornLines };
   };
   const rows = readLedgerUnionRecordsSync(stateDir, { step: [...PROGRESS_WATCHDOG_DRAIN_STEPS], rotationRecords }, fs).rows;
   if (changed || Object.keys(previous).some((path) => !(path in next))) {
