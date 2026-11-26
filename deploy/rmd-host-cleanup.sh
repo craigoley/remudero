@@ -218,6 +218,9 @@ DOCKER_CMD="${RMD_CLEANUP_DOCKER:-docker}"
 
 # ── 2026-10-23 phases. Host defaults apply only on the host layout: a fixture never inherits the disks.
 RETAIN_DAYS="${RMD_CLEANUP_RETAIN_DAYS:-7}"
+# W1-T14400: a linked hand worktree held for unsaved work (uncommitted changes, ignored data, unpublished commits)
+# is preserved, then retired, once it has been idle this many days.
+HELD_WORKTREE_DAYS="${RMD_CLEANUP_HELD_WORKTREE_DAYS:-$RETAIN_DAYS}"
 PRESERVE_ROOT="${RMD_CLEANUP_PRESERVE_ROOT:-$SCRATCH_DISK/host-cleanup-preserved}"
 MAX_UNTRACKED_MB="${RMD_CLEANUP_MAX_UNTRACKED_MB:-50}"
 DUMP_MIN_MB="${RMD_CLEANUP_DUMP_MIN_MB:-5}"
@@ -694,6 +697,47 @@ prune_held_worktree() {
     fi
   done
 }
+# W1-T14400: retire_held_worktree <linked worktree> <hold reason>. The Mac's preserve-retire on the Azure host: a
+# linked worktree idle HELD_WORKTREE_DAYS, closed and unmounted, gets its uncommitted patch, an unpublished-commit
+# bundle, its untracked files and a MANIFEST written to the preserve root (preserve_repo, the same format as the
+# preserve-then-retire pass), each read back, then leaves through git worktree remove. Its branch stays.
+# INVARIANT nothing-unsaved-is-removed: a failed save or read-back, a locked, open or recent worktree is kept.
+retire_held_worktree() {
+  local wt="$1" reason="$2" gitdir bytes copy
+  local IDLE_MINUTES=$(( HELD_WORKTREE_DAYS * 1440 ))
+  is_worktree_idle "$wt" || return 0
+  git_head_idle "$wt" || return 0
+  if is_open "$wt" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$wt"; then return 0; fi
+  gitdir="$(rgit "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
+  [ ! -f "$gitdir/locked" ] || return 0
+  if [ -L "$PRESERVE_ROOT" ]; then log "KEEP $wt: $reason; preserve root $PRESERVE_ROOT is a symbolic link"; return 0; fi
+  bytes="$(du_bytes "$wt")"
+  if [ "$DRY_RUN" = 1 ]; then
+    log "DRYRUN would: preserve then retire $wt ($reason; idle ${HELD_WORKTREE_DAYS} days; ${bytes:-unknown} bytes)"
+    tally "held-worktree ${wt%/*}" "$bytes"; return 0
+  fi
+  if ! mkdir -p -- "$PRESERVE_ROOT" 2>/dev/null || ! chmod 700 "$PRESERVE_ROOT" 2>/dev/null; then
+    log "KEEP $wt: $reason; cannot create $PRESERVE_ROOT"; return 0
+  fi
+  if ! preserve_root_has_room; then log "KEEP $wt: $reason; preserve root $PRESERVE_ROOT is past its watched mark"; return 0; fi
+  if ! preserve_repo "$wt" "$wt"; then log "KEEP $wt: $reason; save failed: $PRESERVE_REASON"; return 0; fi
+  copy="$PRESERVED_DIR"
+  if [ ! -s "$copy/MANIFEST.txt" ] || [ ! -s "$copy/refs.txt" ] ||
+     { [ -e "$copy/unpublished.bundle" ] && ! rgit "$wt" bundle verify "$copy/unpublished.bundle" >/dev/null 2>&1 </dev/null; } ||
+     { [ -e "$copy/uncommitted.patch" ] && ! rgit "$wt" apply --check --reverse --binary "$copy/uncommitted.patch" >/dev/null 2>&1; } ||
+     { [ -e "$copy/untracked.tar.gz" ] && ! tar -tzf "$copy/untracked.tar.gz" >/dev/null 2>&1; }; then
+    log "KEEP $wt: $reason; the saved copy did not read back (copy kept: $copy)"; return 0
+  fi
+  snapshot_open; snapshot_docker
+  if ! is_worktree_idle "$wt" || is_open "$wt" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$wt" || [ -f "$gitdir/locked" ] ||
+     [ "$(rgit "$wt" rev-parse --verify HEAD 2>/dev/null)" != "$PRESERVED_HEAD" ]; then
+    log "KEEP $wt: changed or active before retire (copy kept: $copy)"; return 0
+  fi
+  if ! audit_writable; then log "KEEP $wt: audit log unwritable ($AUDIT_LOG; copy kept: $copy)"; return 0; fi
+  log "REMOVE $wt: $reason; idle ${HELD_WORKTREE_DAYS} days, preserved then retired (${bytes:-unknown} bytes; copy: $copy)"
+  if rgit "$wt" worktree remove --force -- "$wt" 2>/dev/null; then tally "held-worktree ${wt%/*}" "$bytes"
+  else log "KEEP $wt: git worktree remove failed; no recursive filesystem fallback (copy kept: $copy)"; fi
+}
 sweep_worktree() {
   local wt="$1" gitdir idle_status kind head hosted unsaved orphaned=0 finished=0 seed_reason bytes
   if seed_reason=$(rmd_dependency_seed_risk "$wt"); then log "KEEP $wt: $seed_reason"; return; fi
@@ -733,18 +777,21 @@ sweep_worktree() {
   worktree_clean "$wt"; idle_status=$?
   case "$idle_status" in
     0) ;;
-    1) prune_held_worktree "$wt" "uncommitted changes"; return ;;
+    1) prune_held_worktree "$wt" "uncommitted changes"
+       [ "$kind" = "linked worktree" ] && retire_held_worktree "$wt" "uncommitted changes"; return ;;
     *) log "KEEP $wt: Git status failed (unknown)"; return ;;
   esac
   worktree_ignored_safe "$wt"; idle_status=$?
   case "$idle_status" in
     0) ;;
-    1) prune_held_worktree "$wt" "ignored data includes paths beyond node_modules/coverage"; return ;;
+    1) prune_held_worktree "$wt" "ignored data includes paths beyond node_modules/coverage"
+       [ "$kind" = "linked worktree" ] && retire_held_worktree "$wt" "ignored data includes paths beyond node_modules/coverage"; return ;;
     *) log "KEEP $wt: ignored-data scan failed (unknown)"; return ;;
   esac
   head="$(rgit "$wt" rev-parse HEAD 2>/dev/null)" || { log "KEEP $wt: HEAD is unreadable"; return; }
   if ! worktree_saved "$wt"; then
-    if [ "$kind" = "linked worktree" ]; then prune_held_worktree "$wt" "$RMD_PUB_REASON HEAD=$head"
+    if [ "$kind" = "linked worktree" ]; then
+      prune_held_worktree "$wt" "$RMD_PUB_REASON HEAD=$head"; retire_held_worktree "$wt" "$RMD_PUB_REASON HEAD=$head"
     else log "KEEP $wt: $RMD_PUB_REASON HEAD=$head"; fi
     return
   fi
