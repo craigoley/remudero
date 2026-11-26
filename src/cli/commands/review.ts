@@ -345,7 +345,8 @@ export async function withdrawArmIfVerdictRefusesAsync(
 ): Promise<{ withdrawn: boolean; outcome?: DisarmOutcome | void }> {
   // Only a capped verdict reads the ledger (its operator override), and that read is awaited.
   const rows = !verdict.capped ? [] : deps.ledgerLines?.() ??
-    await readLedgerUnionRecords(dirname(ctx.ledgerPath), { selectRotation: () => false });
+    await readLedgerUnionRecords(dirname(ctx.ledgerPath), { selectRotation: () => false,
+      step: ["automerge.capped_override_granted"], where: (row) => row.head_sha === ctx.headSha });
   const refusal = armWithdrawalReason(verdict, ctx, () => rows);
   if (refusal === undefined) return { withdrawn: false };
   const renewToken = deps.renewToken ?? (() => renewReviewPublisherToken({ force: true }));
