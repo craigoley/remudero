@@ -480,7 +480,8 @@ export function assertReviewerSnapshotIntegrity(host: Pick<ReviewCommandHost, "G
   }
   let status: string;
   try {
-    status = hostWorktreeGit(cwd, ["status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL]);
+    // W1-T14939: no output bound — Node's 1 MiB default turned a large dirty tree into ENOBUFS, read as "unreadable".
+    status = hostWorktreeGit(cwd, ["status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL], { maxBuffer: Infinity });
   } catch (e) {
     throw unreadable("status", e);
   }
