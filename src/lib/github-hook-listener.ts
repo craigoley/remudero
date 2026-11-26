@@ -17,7 +17,7 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
+import { SHARE_ENV, Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 import { systemClock } from "./clock.js";
 import {
   answerGithubDeliveryRequest,
@@ -174,9 +174,11 @@ export function startGithubHookListener(opts: StartGithubHookListenerOptions): G
     opts.log("github.wake.unavailable", { reason: "hook_port_invalid", value: port.invalid });
     return undefined;
   }
+  // SHARE_ENV: a long-lived thread reads the live supervisor env, not a spawn-time copy.
   const worker = new Worker(opts.workerUrl ?? new URL(import.meta.url), {
     name: threadName("hookListener"),
     workerData: { kind: KIND, port, host: opts.host, secretFile: resolveGithubWebhookSecretFilePath(undefined, env) },
+    env: SHARE_ENV,
   });
   const listeners: Array<(message: GithubHookListenerMessage) => void> = [];
   let resolveListening: (port: number | undefined) => void = () => {};
