@@ -365,6 +365,92 @@ export interface BodyProofReplacement { oldProof: string; newProof: string }
 /** One acceptance bullet as {@link parseAcceptanceBlock} (review.ts) reads it: `-`, `*`, `1.` or `1)`, then its text. */
 export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
 
+const ACCEPTANCE_HEADER_RE = /^\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?\b\s*\**\s*:?\s*\**\s*$/i;
+
+/** Locate lines the body parser can reach, rather than similarly shaped prose elsewhere in the body. */
+function acceptanceProofLines(lines: readonly string[]): Set<number> {
+  let inFence: string | undefined;
+  let inComment = false;
+  let header = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!.replace(/\r$/, "");
+    if (inFence !== undefined) {
+      const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+      if (close && close[1]![0] === inFence[0] && close[1]!.length >= inFence.length) inFence = undefined;
+      continue;
+    }
+    if (inComment) {
+      const close = line.indexOf("-->");
+      if (close < 0) continue;
+      inComment = false;
+      const tail = line.slice(close + 3);
+      if (!tail.trim()) continue;
+      if (/^ {0,3}(?:`{3,}|~{3,})/.test(tail)) {
+        const fence = /^ {0,3}(`{3,}|~{3,})/.exec(tail)?.[1];
+        if (fence) inFence = fence;
+        continue;
+      }
+      if (ACCEPTANCE_HEADER_RE.test(tail)) { header = index; break; }
+      continue;
+    }
+    const hidden = line.indexOf("<!--");
+    const visible = hidden < 0 ? line : line.slice(0, hidden);
+    if (/^ {0,3}(?:`{3,}|~{3,})/.test(visible)) {
+      const fence = /^ {0,3}(`{3,}|~{3,})/.exec(visible)?.[1];
+      if (fence) inFence = fence;
+      continue;
+    }
+    if (ACCEPTANCE_HEADER_RE.test(visible)) { header = index; break; }
+    if (hidden >= 0 && line.indexOf("-->", hidden + 4) < 0) inComment = true;
+  }
+  if (header < 0) return new Set();
+
+  const proofLines = new Set<number>();
+  let bullets = 0;
+  let lastHasProof = false;
+  let lastWasClaimLabel = false;
+  for (let index = header + 1; index < lines.length; index += 1) {
+    const line = lines[index]!.replace(/\r$/, "");
+    const bullet = ACCEPTANCE_BULLET_RE.exec(line);
+    if (bullet) {
+      bullets += 1;
+      const item = bullet[1]!.trim();
+      const separators: number[] = [];
+      for (let at = item.indexOf(" | "); at >= 0; at = item.indexOf(" | ", at + 1)) separators.push(at);
+      let separator = item.indexOf("|");
+      if (separator >= 0) {
+        const executable = (at: number, width: number): boolean => /^(?:grep:|unit test:)/i.test(item.slice(at + width).trim());
+        if (!executable(separator, 1)) {
+          const preferred = separators.findLast((at) => executable(at, 3));
+          if (preferred !== undefined) separator = preferred;
+          else if (separators.length) separator = separators[separators.length - 1]!;
+        }
+      }
+      lastHasProof = false;
+      lastWasClaimLabel = /^claim\s*:/i.test(separator < 0 ? item : item.slice(0, separator).trim());
+      if (separator >= 0) {
+        proofLines.add(index);
+        lastHasProof = true;
+      } else if (/^(?:grep:|unit test:)/i.test(item)) {
+        proofLines.add(index);
+        lastHasProof = true;
+      }
+      continue;
+    }
+    if (bullets > 0 && /^\s+\S/.test(line)) {
+      if (/^\s+proof\s*:/i.test(line) && (!lastHasProof || lastWasClaimLabel)) {
+        proofLines.add(index);
+        lastHasProof = true;
+        lastWasClaimLabel = false;
+      }
+      continue;
+    }
+    if (line.trim() === "" && bullets === 0) continue;
+    break;
+  }
+  return proofLines;
+}
+
 /** W1-T14913 — rewrite ONE body proof, found by the value parseAcceptanceBlock reads. On a `proof:` line whose whole
  *  value is double-quoted, that value is the quoted text with `\"` and `\\` unescaped (any other backslash stays), and
  *  the replacement is written back escaped, so it re-reads exactly; any other bullet or proof line is matched and
@@ -372,9 +458,9 @@ export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
 export function rewriteBodyProof(body: string, oldProof: string, newProof: string): string | undefined {
   const escaped = (text: string): string => `"${text.replace(/[\\"]/g, "\\$&")}"`;
   const lines = body.split("\n");
+  const proofLines = acceptanceProofLines(lines);
   const hits = lines.flatMap((line, index) => {
-    // W1-T14913: the parser's own bullet shapes (`-`, `*`, `1.`, `1)`) and its `proof:` continuation lines.
-    if (!ACCEPTANCE_BULLET_RE.test(line) && !/^\s*proof\s*:/i.test(line)) return [];
+    if (!proofLines.has(index)) return [];
     const quoted = line.match(/^(\s*proof\s*:\s*)"([\s\S]*)"(\s*)$/i);
     if (quoted) {
       if (quoted[2]!.replace(/\\(["\\])/g, "$1") === oldProof) return [{ index, line: `${quoted[1]}${escaped(newProof)}${quoted[3]}` }];

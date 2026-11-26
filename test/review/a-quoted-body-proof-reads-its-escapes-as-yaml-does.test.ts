@@ -125,3 +125,27 @@ test("numbered acceptance bullets are rewritten like the parser reads them", () 
     assert.equal(parseAcceptanceBlock(repaired!)[0]!.proof, newProof);
   }
 });
+
+test("a fenced proof example before Acceptance is not counted as an active proof", () => {
+  const oldProof = String.raw`grep: \"driftCeiling\": 11 in scripts/clock-sweep-baseline.json`;
+  const newProof = String.raw`grep: \"driftCeiling\": 12 in scripts/clock-sweep-baseline.json`;
+  const body = [
+    "```yaml",
+    `- claim: example only`,
+    `  proof: "${oldProof}"`,
+    "```",
+    "## Acceptance",
+    `- claim: active guard` ,
+    `  proof: "${oldProof}"`,
+    "  kind: guard",
+    "",
+    "## Validation",
+    `- claim: later prose | ${oldProof}`,
+  ].join("\n");
+  assert.equal(parseAcceptanceBlock(body)[0]!.proof, `grep: "driftCeiling": 11 in scripts/clock-sweep-baseline.json`);
+  const rewritten = rewriteBodyProof(body, parseAcceptanceBlock(body)[0]!.proof, `grep: "driftCeiling": 12 in scripts/clock-sweep-baseline.json`);
+  assert.notEqual(rewritten, undefined, "the fenced sample and later section do not create duplicate matches");
+  assert.equal(parseAcceptanceBlock(rewritten!)[0]!.proof, `grep: "driftCeiling": 12 in scripts/clock-sweep-baseline.json`);
+  assert.ok(rewritten!.includes(`  proof: "${newProof}"`), "the active proof line is escaped and rewritten");
+  assert.ok(rewritten!.includes(`  proof: "${oldProof}"`), "the fenced example remains untouched");
+});
