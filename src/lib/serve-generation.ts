@@ -11,7 +11,9 @@
 import { existsSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { BoardSnapshotSource } from "./board.js";
-import type { CheckRunCompletedInfo } from "./github-delivery-accept.js";
+import type { CheckRunCompletedInfo, GithubHookConfig } from "./github-delivery-accept.js";
+// W1-T14986: the hook config lives beside the fast path, so the baked listener imports nothing that reaches this module.
+export { isGithubHookConfig, type GithubHookConfig } from "./github-delivery-accept.js";
 import { systemClock, type Clock } from "./clock.js";
 import type { GitHub } from "./status.js";
 import type { Plan } from "./plan.js";
@@ -287,34 +289,6 @@ export async function listenReadiness(server: Server, socketPath: string, probes
   });
   server.setMaxListeners(server.getMaxListeners() + 1).once("close", () => privateServer.close());
   return privateServer;
-}
-
-/**
- * W1-T14986: what the hook listener (github-hook-listener.ts) needs to answer a webhook as serve's route does. The
- * listener is baked with the supervisor and cannot read plan/policy.yaml or the instance registry, so the active
- * generation resolves it and pushes it. The secret is never in it: the listener reads its own file.
- */
-export interface GithubHookConfig {
-  /** Core's own `owner/repo`: only its check runs reach the CI-incident consumer. */
-  repository: string;
-  /** Each managed repository's wake marker path, core's included (W1-T14806). */
-  markerPaths: Record<string, string>;
-  dedupPath: string;
-  dedupCapacity: number;
-  semanticCheckMode: "shadow" | "enforce";
-  aggregateCheckNames: string[];
-}
-
-/** A pushed config is used only when every field has its shape; anything else is ignored, and the last good one stays. */
-export function isGithubHookConfig(value: unknown): value is GithubHookConfig {
-  if (!value || typeof value !== "object") return false;
-  const c = value as Record<string, unknown>;
-  const paths = c.markerPaths;
-  return typeof c.repository === "string" && typeof c.dedupPath === "string"
-    && typeof c.dedupCapacity === "number" && Number.isSafeInteger(c.dedupCapacity) && c.dedupCapacity > 0
-    && (c.semanticCheckMode === "shadow" || c.semanticCheckMode === "enforce")
-    && Array.isArray(c.aggregateCheckNames) && c.aggregateCheckNames.every((name) => typeof name === "string")
-    && !!paths && typeof paths === "object" && !Array.isArray(paths) && Object.values(paths).every((path) => typeof path === "string");
 }
 
 /** W1-T14986: the supervisor relays a listener-accepted check run; it runs here, on the active generation, after the 202. */

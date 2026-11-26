@@ -21,9 +21,11 @@ import { Worker, isMainThread, parentPort, workerData } from "node:worker_thread
 import { systemClock } from "./clock.js";
 import {
   answerGithubDeliveryRequest,
+  isGithubHookConfig,
   type GithubDeliveryContext,
   type GithubDeliveryFollowUp,
   type GithubDeliveryMarker,
+  type GithubHookConfig,
 } from "./github-delivery-accept.js";
 import {
   countWake,
@@ -38,7 +40,6 @@ import {
   writeSweepWakeMarkerAtomicAsync,
   type DeliveryDedupStore,
 } from "./github-event-wake.js";
-import { isGithubHookConfig, type GithubHookConfig } from "./serve-generation.js";
 import { threadName } from "./thread-names.js";
 
 export const SERVE_HOOK_PORT_ENV = "RMD_SERVE_HOOK_PORT";

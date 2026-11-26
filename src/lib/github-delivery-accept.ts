@@ -23,6 +23,34 @@ export interface CheckRunCompletedInfo {
   conclusion: string;
 }
 
+/**
+ * W1-T14986: what the hook listener (github-hook-listener.ts) needs to answer a webhook as serve's route does. The
+ * listener is baked with the supervisor and cannot read plan/policy.yaml or the instance registry, so the active
+ * generation resolves it and pushes it. The secret is never in it: the listener reads its own file.
+ */
+export interface GithubHookConfig {
+  /** Core's own `owner/repo`: only its check runs reach the CI-incident consumer. */
+  repository: string;
+  /** Each managed repository's wake marker path, core's included (W1-T14806). */
+  markerPaths: Record<string, string>;
+  dedupPath: string;
+  dedupCapacity: number;
+  semanticCheckMode: "shadow" | "enforce";
+  aggregateCheckNames: string[];
+}
+
+/** A pushed config is used only when every field has its shape; anything else is ignored, and the last good one stays. */
+export function isGithubHookConfig(value: unknown): value is GithubHookConfig {
+  if (!value || typeof value !== "object") return false;
+  const c = value as Record<string, unknown>;
+  const paths = c.markerPaths;
+  return typeof c.repository === "string" && typeof c.dedupPath === "string"
+    && typeof c.dedupCapacity === "number" && Number.isSafeInteger(c.dedupCapacity) && c.dedupCapacity > 0
+    && (c.semanticCheckMode === "shadow" || c.semanticCheckMode === "enforce")
+    && Array.isArray(c.aggregateCheckNames) && c.aggregateCheckNames.every((name) => typeof name === "string")
+    && !!paths && typeof paths === "object" && !Array.isArray(paths) && Object.values(paths).every((path) => typeof path === "string");
+}
+
 /** The marker record an accepted delivery writes (github-event-wake.ts's SweepWakeMarker). */
 export interface GithubDeliveryMarker {
   deliveryId: string;
