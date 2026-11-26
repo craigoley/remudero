@@ -1391,9 +1391,12 @@ setTimeout(() => process.exit(2), 30000).unref();
   const token = `${payload}.${sign("RSA-SHA256", Buffer.from(payload), privateKey).toString("base64url")}`;
   const rows = () => existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean)
     .map(line => JSON.parse(line) as Record<string, unknown>) : [];
+  // The served children still running. A wait ends when its state is observed or no served child is left to reach
+  // it, never at a fixed deadline (W1-T14786): under the flake screen's load a healthy boot took past the 20 s this
+  // once allowed. The test's own timeout stays the backstop for a child that hangs.
+  const serving = new Set<ReturnType<typeof spawn>>();
   const wait = async (ready: () => boolean) => {
-    const deadline = Date.now() + 20_000;
-    while (!ready() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+    while (!ready() && serving.size > 0) await new Promise(resolve => setTimeout(resolve, 25));
     assert.ok(ready(), "owned served fixture reached the requested observable state");
   };
   async function boot() {
@@ -1421,7 +1424,8 @@ setTimeout(() => process.exit(2), 30000).unref();
       RMD_INSTANCE_REGISTRY: join(source, ".remudero", "daemon-instances.yaml"), RMD_SERVE_ROLE: "",
       GH_APP_ID: "", GH_APP_INSTALLATION_ID: "", GH_APP_PRIVATE_KEY_PATH: "",
       GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" }, stdio: ["ignore", "pipe", "pipe"] });
-    const exited = once(child, "exit");
+    serving.add(child);
+    const exited = once(child, "exit").finally(() => serving.delete(child));
     let output = "";
     child.stdout.on("data", data => { output += String(data); });
     child.stderr.on("data", data => { output += String(data); });
