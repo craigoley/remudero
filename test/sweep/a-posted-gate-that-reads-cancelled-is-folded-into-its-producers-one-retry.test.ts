@@ -4,7 +4,8 @@ import {
   CHECK_REQUEUE_STEP, runSweep, type CancelledRequiredCheck, type FixDispatchEvidence, type OpenPrView,
 } from "#src/lib/sweep.js";
 import { readLedgerLines } from "#src/lib/status.js";
-import { cancelledRequiredChecks, fetchCiFailures, type RollupCheck } from "#src/lib/tick-read-worker.js";
+import { rollupFromRest } from "#src/lib/open-prs-rest.js";
+import { attachPostedGateIds, cancelledRequiredChecks, fetchCiFailures, type RollupCheck } from "#src/lib/tick-read-worker.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 
 const HEAD = "6f9313fb89989914f77dcd770b0cc490bb12a0e2";
@@ -27,12 +28,29 @@ function producerRollup(conclusion: "FAILURE" | "CANCELLED", attempt: number, ga
   ];
 }
 
+/** The REST read of a cancelled producer and the gates it posted exactly as .github/workflows/ci.yml's reporter
+ *  posts each one (name, head_sha, run-scoped external_id, completed, conclusion, output and the job's details_url). */
+function reporterPosts(conclusion: "failure" | "cancelled", attempt: number, gates: string[]): RollupCheck[] {
+  const jobUrl = `${actionRoot}/runs/${RUN}/job/${JOB}`;
+  const startedAt = new Date(NOW - 60_000).toISOString();
+  const runs = [
+    { id: JOB, name: PRODUCER, head_sha: HEAD, status: "completed", conclusion: "cancelled", details_url: jobUrl, started_at: startedAt },
+    ...gates.map((gate, index) => ({
+      id: JOB + index + 1, name: gate, head_sha: HEAD, external_id: `run:${RUN}:${attempt}:job:${JOB}`, status: "completed",
+      conclusion, details_url: jobUrl, started_at: startedAt,
+      output: { title: gate, summary: `W1-T4399: reported by this job's ${gate} step(s) (outcome(s): cancelled)` },
+    })),
+  ];
+  return attachPostedGateIds(rollupFromRest(runs, []), { check_runs: runs }) as RollupCheck[];
+}
+
 function cancelled(rollup: RollupCheck[]) {
   return cancelledRequiredChecks(rollup, ["ci-gate"], HEAD);
 }
 
+/** `fresh: null` is the production reread's answer when the GitHub REST read fails. */
 async function sweep(t: TestContext, checks: RollupCheck[], isPlanFiling: boolean,
-  fresh = checks) {
+  fresh: RollupCheck[] | null = checks) {
   const rollup = [...checks, { name: "ci-gate", status: "COMPLETED", conclusion: "FAILURE" }];
   const ledger = writeLedger([], { scope: t });
   const retries: CancelledRequiredCheck[] = [];
@@ -55,7 +73,7 @@ async function sweep(t: TestContext, checks: RollupCheck[], isPlanFiling: boolea
     dispatchPlanGateRound: async () => { planRounds++; return { outcome: "pushed" }; },
     readPlanRepairFacts: () => ({ authorLogin: "remudero-fleet[bot]", title: "chore(plan): file task" }),
     repairPlanPr: async () => ({ outcome: "refused", reason: "not a mechanical plan failure" }),
-    readCiGateRollup: () => [...fresh, rollup.at(-1)!],
+    readCiGateRollup: () => fresh === null ? undefined : [...fresh, rollup.at(-1)!],
     requeueCheck: (_pr, check) => { retries.push(check); return true; },
     escalateCancelledCheck: (_pr, check, reason) => { escalations.push({ name: check.name, reason }); },
     ledgerPath: ledger.path, now: () => NOW, runId: "W1-T13186-test",
@@ -145,5 +163,49 @@ test("a newer posted gate cannot authorize the snapshot producer's retry", async
       conclusion: "FAILURE", outputSummary: undefined }]);
     assert.deepEqual(failed.retries, []);
     assert.equal(failed.fixes.length + failed.planRounds, 1);
+  }
+});
+
+// The production reread (`readCiGateRollup`) answers undefined when the GitHub REST read fails. The build arm of
+// #13538 never needed that read, so an unreadable reread must leave the FAILURE shape exactly as main has it.
+test("W1-T13186 criterion 2 escalates a spent producer on a build when the fresh rollup reread fails", async t => {
+  for (const conclusion of ["failure", "cancelled"] as const) {
+    const result = await sweep(t, reporterPosts(conclusion, 2, GATES), false, null);
+    assert.deepEqual(result.retries, [], conclusion);
+    assert.deepEqual(result.escalations.map(issue => issue.name), [PRODUCER], conclusion);
+    assert.match(result.escalations[0].reason, /already re-queued once on this head sha and cancelled again/);
+    assert.equal(result.fixes.length, conclusion === "failure" ? 1 : 0, conclusion);
+  }
+});
+
+test("W1-T13186 criterion 3 re-queues the build job once when the fresh rollup reread fails", async t => {
+  const legacy = await sweep(t, reporterPosts("failure", 1, GATES), false, null);
+  assert.deepEqual(legacy.retries.map(check => [check.name, check.jobId]), [[PRODUCER, String(JOB)]]);
+  assert.deepEqual(legacy.escalations, []);
+  assert.equal(legacy.fixes.length, 1, "the legacy FAILURE post keeps its ci-log round on a build, as on main");
+  assert.deepEqual(legacy.fixes[0]?.ciFailures?.map(failure => failure.name).filter(name => GATES.includes(name)).sort(), [...GATES].sort());
+
+  const posted = await sweep(t, reporterPosts("cancelled", 1, GATES), false, null);
+  assert.deepEqual(posted.retries.map(check => [check.name, check.jobId]), [[PRODUCER, String(JOB)]]);
+  assert.deepEqual(posted.escalations, []);
+  assert.deepEqual(posted.fixes, []);
+  assert.equal(posted.rows.filter(row => row.step === CHECK_REQUEUE_STEP).length, 1);
+  assert.equal(posted.disposed?.acted, false);
+});
+
+test("W1-T13186 criterion 4 reads the reporter's exact FAILURE post on a build the same whether or not the reread succeeds", async t => {
+  for (const attempt of [1, 2]) {
+    const rollup = reporterPosts("failure", attempt, GATES);
+    assert.deepEqual(cancelled(rollup), [{ name: PRODUCER, jobId: String(JOB), runAttempt: attempt,
+      explainedFailures: GATES.map((name, index) => ({ name, checkRunId: JOB + index + 1 })) }]);
+    const read = await sweep(t, rollup, false);
+    const unread = await sweep(t, rollup, false, null);
+    const outcome = (r: typeof read) => ({ retries: r.retries.map(check => check.name), escalations: r.escalations.map(issue => issue.name),
+      fixes: r.fixes.map(fix => fix?.ciFailures?.map(failure => failure.name).sort()) });
+    assert.deepEqual(outcome(unread), outcome(read), `attempt ${attempt}`);
+    assert.deepEqual(outcome(unread), attempt === 1
+      ? { retries: [PRODUCER], escalations: [], fixes: outcome(read).fixes }
+      : { retries: [], escalations: [PRODUCER], fixes: outcome(read).fixes });
+    assert.equal(unread.fixes.length, 1, `attempt ${attempt}`);
   }
 });

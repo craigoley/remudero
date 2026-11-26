@@ -28917,6 +28917,12 @@ export async function runSweep(
               if (cancelledChecks.length > 0) {
                 const outcomes: string[] = [];
                 const latest = dedupeRollupByLatestAttempt(ciGateRollup ?? []);
+                // W1-T13186: only a producer whose posted gates read CANCELLED takes the new path. The legacy
+                // FAILURE post keeps #13538's build behavior, which never needed the fresh reread; and an
+                // unreadable reread confirms nothing, so it leaves each job's retry or escalation to the snapshot.
+                // The shape is read from the snapshot, before the fresh rollup narrowed it.
+                const postsCancelled = new Set(cancelledChecks.filter(check => check.explainedFailures?.some(alias =>
+                  (pr.ciFailures ?? []).some(f => f.name === alias.name && f.conclusion === "CANCELLED" && f.jobId === check.jobId))));
                 // W1-T8040: cancelled checks whose own log proves a deterministic ceiling timeout; they stay
                 // genuine failures for the ci-log fix path instead of earning a requeue.
                 const deterministicTimeouts = new Set<string>();
@@ -28944,7 +28950,7 @@ export async function runSweep(
                     outcomes.push(`not re-queued "${check.name}" (deterministic-timeout: ${timeoutSignature})`);
                     continue;
                   }
-                  if (!confirmsPostedCancellation(check, latest)) {
+                  if (postsCancelled.has(check) && ciGateRollup?.length && !confirmsPostedCancellation(check, latest)) {
                     outcomes.push(`producer cancellation for "${check.name}" is no longer confirmed — awaiting fresh CI`);
                     continue;
                   }
@@ -28973,7 +28979,7 @@ export async function runSweep(
                 const aggregators = new Set([CI_GATE_CHECK_NAME]);
                 for (const check of cancelledChecks) {
                   const aliases = check.explainedFailures;
-                  if (aliases === undefined || aliases.length === 0 || deterministicTimeouts.has(check.name)) continue;
+                  if (aliases === undefined || !postsCancelled.has(check) || deterministicTimeouts.has(check.name)) continue;
                   const posts = ciFailuresForFix.filter(f => f.conclusion === "CANCELLED" && f.jobId === check.jobId &&
                     aliases.some(alias => alias.name === f.name && postedCancellationExplainsRed(alias, latest)));
                   if (posts.length === 0) continue;
@@ -28983,9 +28989,8 @@ export async function runSweep(
                 }
                 if (explained.size > 0) ciFailuresForFix = ciFailuresForFix.filter(f => !explained.has(f) && !aggregators.has(f.name));
                 const genuineFailures = ciFailuresForFix.filter(f => deterministicTimeouts.has(f.name) ||
-                  !cancelledChecks.some(c => c.name === f.name && producerCancellationExplainsRed(c, latest) &&
-                    (c.explainedFailures === undefined || c.explainedFailures.length === 0 ||
-                      f.conclusion === "CANCELLED" && f.jobId === c.jobId)));
+                  !cancelledChecks.some(c => c.name === f.name && (!postsCancelled.has(c) ||
+                    producerCancellationExplainsRed(c, latest) && f.conclusion === "CANCELLED" && f.jobId === c.jobId)));
                 if (genuineFailures.length === 0) {
                   acted = false;
                   const reason = `cancelled required check(s): ${outcomes.join("; ")}`;
