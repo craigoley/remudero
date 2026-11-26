@@ -50,11 +50,11 @@ describe("test/deploy/the-watchdog-drain-read-parses-each-rotation-once.test.ts"
   test("W1-T14920 an unchanged rotation is not read again", (t) => {
     const dir = fixture(t);
     const first = counting();
-    readProgressWatchdogDrainRows(dir, { fs: first.fs });
+    readProgressWatchdogDrainRows(dir, first.fs);
     assert.deepEqual(first.reads.sort(), [OLD, NEW]);
     assert.ok(existsSync(join(dir, DRAIN_MEMO_FILENAME)), "the first read remembers its rotations");
     const second = counting();
-    readProgressWatchdogDrainRows(dir, { fs: second.fs });
+    readProgressWatchdogDrainRows(dir, second.fs);
     assert.deepEqual(second.reads, [], "a second read with unchanged rotations reads no rotation file");
   });
 
@@ -74,7 +74,7 @@ describe("test/deploy/the-watchdog-drain-read-parses-each-rotation-once.test.ts"
     writeFileSync(join(dir, NEW), gzipSync([replayed, extra].map((row) => JSON.stringify(row)).join("\n") + "\n"));
     utimesSync(join(dir, NEW), new Date("2026-01-04T00:00:00Z"), new Date("2026-01-04T00:00:00Z"));
     const changed = counting();
-    const rows = readProgressWatchdogDrainRows(dir, { fs: changed.fs });
+    const rows = readProgressWatchdogDrainRows(dir, changed.fs);
     assert.deepEqual(changed.reads, [NEW], "only the changed rotation is parsed again");
     assert.deepEqual(rows, wholeRead(dir));
     assert.ok(rows.some((row) => row.run_id === "e"));

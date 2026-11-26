@@ -29,13 +29,6 @@ export const DRAIN_MEMO_VERSION = "w1-t14920.1";
 interface DrainMemoEntry { size: number; mtimeMs: number; torn: number; rows: Array<Record<string, unknown>> }
 interface DrainMemoFile { version: string; steps: string[]; entries: Record<string, DrainMemoEntry> }
 
-export interface DrainMemoDeps {
-  fs?: LedgerGrepFsDeps;
-  stat?: (path: string) => { size: number; mtimeMs: number };
-  readMemo?: (path: string) => string;
-  writeMemo?: (path: string, text: string) => void;
-}
-
 function loadMemo(path: string, read: (path: string) => string): Record<string, DrainMemoEntry> {
   try {
     const parsed = JSON.parse(read(path)) as Partial<DrainMemoFile>;
@@ -46,12 +39,15 @@ function loadMemo(path: string, read: (path: string) => string): Record<string, 
   }
 }
 
-/** The drain rows of `stateDir`'s ledger union, every rotation answered from the memo when its size and mtime match. */
-export function readProgressWatchdogDrainRows(stateDir: string, deps: DrainMemoDeps = {}): Array<Record<string, unknown>> {
-  const fs = deps.fs ?? realLedgerFs;
-  const stat = deps.stat ?? ((path: string) => statSync(path));
-  const memoPath = join(stateDir, DRAIN_MEMO_FILENAME);
-  const previous = loadMemo(memoPath, deps.readMemo ?? ((path) => readFileSync(path, "utf8")));
+/** The drain rows of `stateDir`'s ledger union, every rotation answered from the memo when its size and mtime match.
+ *  `fs` is the union's own seam (its `statSync` gives each rotation's identity); `memoPath` defaults beside the ledger. */
+export function readProgressWatchdogDrainRows(
+  stateDir: string,
+  fs: LedgerGrepFsDeps = realLedgerFs,
+  memoPath: string = join(stateDir, DRAIN_MEMO_FILENAME),
+): Array<Record<string, unknown>> {
+  const stat = fs.statSync ?? ((path: string) => statSync(path));
+  const previous = loadMemo(memoPath, (path) => readFileSync(path, "utf8"));
   const next: Record<string, DrainMemoEntry> = {};
   const steps = new Set<string>(PROGRESS_WATCHDOG_DRAIN_STEPS);
   let changed = false;
@@ -77,7 +73,7 @@ export function readProgressWatchdogDrainRows(stateDir: string, deps: DrainMemoD
   if (changed || Object.keys(previous).some((path) => !(path in next))) {
     const text = JSON.stringify({ version: DRAIN_MEMO_VERSION, steps: [...PROGRESS_WATCHDOG_DRAIN_STEPS], entries: next } satisfies DrainMemoFile);
     try {
-      (deps.writeMemo ?? ((path: string, body: string) => { writeAtomic(path, body); }))(memoPath, text);
+      writeAtomic(memoPath, text);
     } catch {
       // deliberate: an unwritable memo costs the next tick a full read, never this verdict
     }
