@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { tsImport } from "tsx/esm/api";
 import type { Config, WorkerProviderId } from "./config.js";
 import type { Mount, Mounts } from "./mounts.js";
 import type { MountHeadroomArm, MountHeadroomCell } from "./mount-recommender.js";
+import { systemClock, type Clock } from "./clock.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
+import { runRouted, type SpawnRequest, type SpawnResult } from "./spawn-helper.js";
 
 export interface MountExplorationPolicy {
   kind: "bounded-fraction";
@@ -296,16 +298,92 @@ export function configForMountExploration(config: Config, decision: MountExplora
 // and the mounts table become injectable, so the explore arm and the failure arm are each reachable
 // by passing a fake, while `runTask` keeps the real ones.
 
+/** A sweep child that did not hand back cells: `reason` names how, so the rung's refusal says why. */
+export class MountSweepChildError extends RmdError {
+  constructor(readonly reason: "sweep_child_spawn_failed" | "sweep_child_timed_out" | "sweep_child_exit" | "sweep_child_unparseable",
+    detail: string) {
+    super("child_process", GENERIC_EXIT_CODE, `${reason}: ${detail}`, { reason });
+    this.name = "MountSweepChildError";
+  }
+}
+
+/** Where the sweep child's measured durations live, beside the rung's cadence marker. */
+export function mountSweepTimingPath(stateDir: string): string {
+  return join(stateDir, "mount-headroom-sweep-timing.json");
+}
+
+function readSweepDurations(stateDir: string): number[] {
+  try {
+    const parsed = JSON.parse(readFileSync(mountSweepTimingPath(stateDir), "utf8")) as { durationsMs?: unknown };
+    return Array.isArray(parsed.durationsMs) ? parsed.durationsMs.filter((v): v is number => typeof v === "number" && v > 0) : [];
+  } catch {
+    return []; // Reason: no measurement yet (first sweep, or an unreadable file) reads as none; the default budget applies.
+  }
+}
+
+function recordSweepDuration(stateDir: string, ms: number): void {
+  try {
+    const durationsMs = [...readSweepDurations(stateDir), Math.round(ms)].slice(-7);
+    mkdirSync(stateDir, { recursive: true });
+    const path = mountSweepTimingPath(stateDir);
+    writeFileSync(`${path}.tmp`, `${JSON.stringify({ durationsMs })}\n`);
+    renameSync(`${path}.tmp`, path);
+  } catch {
+    // Reason: the timing record only sizes the next budget; failing to write it leaves the next sweep on the default.
+  }
+}
+
 /**
- * The observed per-cell arm population, read by the headroom sweep script. The script imports src/*.ts, and a
- * bundled run child has no tsx loader, so a plain import() fails in Node's strip-only mode; tsImport loads it.
+ * The sweep child's budget, read from the sweeps it measured: four times the slowest of the last seven, and never
+ * under five minutes. With nothing measured it is thirty minutes: tonight's in-process sweep held the loop 492 s,
+ * and a child reading the same corpus off the loop takes no longer.
  */
-export async function loadMountHeadroomCells(repoRoot: string, stateDir: string): Promise<MountHeadroomCell[]> {
-  const url = pathToFileURL(join(repoRoot, "scripts", "mount-headroom-sweep.mjs")).href;
-  const sweep = (await tsImport(url, import.meta.url)) as {
-    buildMountHeadroomSweep: (stateDir: string) => { cells: MountHeadroomCell[] };
-  };
-  return sweep.buildMountHeadroomSweep(stateDir).cells;
+export function mountSweepTimeoutMs(stateDir: string): number {
+  const measured = readSweepDurations(stateDir);
+  if (measured.length === 0) return 30 * 60_000;
+  return Math.max(4 * Math.max(...measured), 5 * 60_000);
+}
+
+/**
+ * W1-T14922: the observed per-cell arm population, read by the headroom sweep script in a CHILD process. Its
+ * `--json` mode prints the same report `buildMountHeadroomSweep` returns. Run in the daemon, that script reads and
+ * gunzips every rotated ledger synchronously, so an in-process import held the event loop for minutes (a 492 s
+ * stall on 2026-11-26); a child does the same read while the loop stays free. The child runs through the routed
+ * spawn with the tsx loader, because the script imports src/*.ts. A child that fails, overruns its measured
+ * budget or prints anything but the report throws a {@link MountSweepChildError} naming how.
+ */
+export async function loadMountHeadroomCells(
+  repoRoot: string,
+  stateDir: string,
+  opts: { run?: (request: SpawnRequest) => Promise<SpawnResult>; clock?: Clock } = {},
+): Promise<MountHeadroomCell[]> {
+  const run = opts.run ?? runRouted;
+  const clock = opts.clock ?? systemClock;
+  const began = clock.now();
+  const result = await run({
+    file: process.execPath,
+    args: ["--import", "tsx", join(repoRoot, "scripts", "mount-headroom-sweep.mjs"), "--state-dir", stateDir, "--json"],
+    cwd: repoRoot,
+    timeoutMs: mountSweepTimeoutMs(stateDir),
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  if (result.timedOut) throw new MountSweepChildError("sweep_child_timed_out", result.stderr.slice(-500));
+  if (result.exitCode === null && result.signal === null) {
+    throw new MountSweepChildError("sweep_child_spawn_failed", result.error ?? result.stderr.slice(-500));
+  }
+  if (result.exitCode !== 0) {
+    throw new MountSweepChildError("sweep_child_exit", `exit ${result.exitCode ?? result.signal}: ${result.stderr.slice(-500)}`);
+  }
+  let report: unknown;
+  try {
+    report = JSON.parse(result.stdout);
+  } catch (error) {
+    throw new MountSweepChildError("sweep_child_unparseable", String((error as Error).message ?? error));
+  }
+  const cells = (report as { cells?: unknown } | null)?.cells;
+  if (!Array.isArray(cells)) throw new MountSweepChildError("sweep_child_unparseable", "the report has no cells array");
+  recordSweepDuration(stateDir, clock.now() - began);
+  return cells as MountHeadroomCell[];
 }
 
 export interface MountExplorationWiringInput {

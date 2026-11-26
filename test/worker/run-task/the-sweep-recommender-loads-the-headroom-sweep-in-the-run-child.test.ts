@@ -34,12 +34,19 @@ test("W1-T14472 criterion 1: the bundled run child's mount recommender rung swee
   const { dir: instance } = ownedFixtureDir(t, "w14472-instance");
   writeLedger(sweepRows(), { dir: join(instance, "state") });
 
+  // The bundle's CLI entry runs on import and exits once it has printed usage. W1-T14922 reads the sweep in a child
+  // process, so the rung now outlives that exit: hold the entry's exit until the rung has answered.
   const code = `
+let answered;
+const done = new Promise((resolve) => { answered = resolve; });
+const exit = process.exit.bind(process);
+process.exit = (code) => { void done.then(() => exit(code)); };
 const m = await import(${JSON.stringify(pathToFileURL(join(out, "run-task.mjs")).href)});
 const rows = [];
 const result = await m.runMountRecommenderRung({ root: ${JSON.stringify(instance)} }, "SWEEP-W1-T14472",
   (step, fields) => rows.push({ step, ...fields }), { root: ${JSON.stringify(REPO_ROOT)}, env: {} });
-console.log(JSON.stringify({ result, rows }));`;
+console.log(JSON.stringify({ result, rows }));
+answered();`;
   const env: NodeJS.ProcessEnv = { ...process.env, RMD_SELF_SYNC_DONE: "1", NODE_V8_COVERAGE: "" };
   delete env.NODE_OPTIONS;
   // A plain node child: no tsx loader and no --import flags, as the run child runs.
