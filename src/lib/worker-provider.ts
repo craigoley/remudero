@@ -4897,6 +4897,8 @@ async function cashRequestJson<T>(input: {
   args: CashTransportOptions; deployment: string; source: string; endpoint: string; outputTokenCeiling?: number;
   body: string; headers: Record<string, string>; next: (checkActive: () => void) => T;
   canContinue: () => boolean; chargeFailure: (error: Error) => void;
+  /** W1-T14916: a worker's first request refuses here, after the last wait and before any reservation. */
+  refuseLaunch?: () => void;
   /** Usage belongs to this paid attempt even when fetch or body completion misses the deadline. */
   onEnvelope?: (envelope: unknown, attempt: T) => void;
   /** W1-T10856: sees every response's headers (success or failure) before its status is handled. */
@@ -4923,6 +4925,7 @@ async function cashRequestJson<T>(input: {
     for (;;) {
       checkActive();
       if (runtimeInstanceRegistryPrivateFile() !== undefined) await assertInstanceRegistryRuntimeCurrent();
+      if (current === undefined) input.refuseLaunch?.();
       const attempt = input.next(checkActive);
       current = attempt;
       dispatched = false;
@@ -6739,6 +6742,7 @@ export async function spawnFoundryClaudeWorker(
   const requestEfforts: CashRequestEffortCount[] = [];
   let pending: CashBudgetAttempt | undefined;
   const requestPrefix = `${args.runId ?? args.taskId ?? "foundry-claude"}-${startedAt}-${randomUUID()}`;
+  let launched = false;
   try {
     if (!isFoundryClaudeDeployment(selection.model) || (selection.model !== "claude-haiku-5-5" && args.cashSqueezed !== true)) {
       throw new Error(`cash ${label} requires an actual blocked-subscription squeeze`);
@@ -6775,7 +6779,7 @@ export async function spawnFoundryClaudeWorker(
         ...(maxTurns > 1 ? { cache_control: { type: "ephemeral" } } : {}),
       });
       const { envelope, attempt: { requestId, reservation } } = await cashRequestJson<CashBudgetAttempt>({
-        args, deployment: selection.model, source: `cash ${label}`, endpoint, body,
+        args, deployment: selection.model, source: `cash ${label}`, endpoint, body, refuseLaunch: launched ? undefined : () => { refuseRetiredLaunch(); launched = true; },
         headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
         onEnvelope: (envelope, attempt) => {
           // W1-T13868: a received envelope names its model even when the deadline then rejects the attempt.
@@ -6887,6 +6891,7 @@ export async function spawnFoundryClaudeWorker(
       messages.push({ role: "user", content: results });
     }
   } catch (error) {
+    if (error instanceof WorkerSpawnRetiredError) throw error;
     // An unknown transport outcome remains charged. Only a definite 404 is known to cost zero.
     if (pending) {
       const unbilled = error instanceof OpenWeightDeploymentNotFoundError;
@@ -6968,8 +6973,7 @@ export async function spawnOpenWeightWorker(
   // Identity for this run's reservations. The run id is not sufficient on its own: the tool loop
   // sends one paid request PER TURN, and each needs its own settleable row.
   const runRequestPrefix = `${args.runId ?? args.taskId ?? "openweight"}-${startedAt}-${randomUUID()}`;
-  // W1-T14916: after the last wait, outside the attempt's catch.
-  refuseRetiredLaunch();
+  let launched = false;
   try {
     // W1-T3880: verified FIRST, before `env`/the API key below are even read — a refused grant
     // must never reach the point where a real credential is used on its behalf. `capabilityGrant`
@@ -7036,7 +7040,7 @@ export async function spawnOpenWeightWorker(
       });
       const requestBodyBytes = Buffer.byteLength(body, "utf8");
       const { envelope, attempt: { requestId, reservation } } = await cashRequestJson<CashBudgetAttempt>({
-        args, deployment: selection.model, source: "openweight", endpoint, body,
+        args, deployment: selection.model, source: "openweight", endpoint, body, refuseLaunch: launched ? undefined : () => { refuseRetiredLaunch(); launched = true; },
         headers: { "content-type": "application/json", "api-key": key },
         onEnvelope: (envelope, attempt) => {
           // W1-T13868: a received envelope names its model even when the deadline then rejects the attempt.
@@ -7200,6 +7204,7 @@ export async function spawnOpenWeightWorker(
       }
     }
   } catch (error) {
+    if (error instanceof WorkerSpawnRetiredError) throw error;
     if (error instanceof CashCapacityShortfallFailure) recordCashCapacityShortfall(config, {
       reason: "capacity_shortfall", deployment: selection.model,
       estimatedTokens: error.estimatedTokens, limitTokens: error.limitTokens!,

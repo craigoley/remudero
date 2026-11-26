@@ -228,9 +228,28 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   await adapters.retirement.inSpawnScope(async () => {
     await assert.rejects(spawnCodexWorker(adapterArgs, adapterArgs.config!), WorkerSpawnRetiredError,
       "the real Codex adapter launches no process for a retired scope");
-    await assert.rejects(spawnOpenWeightWorker({ ...adapterArgs, prompt: "fix the finding" }, adapterArgs.config!,
-      { model: "gpt-6-luna", effort: "low" }), WorkerSpawnRetiredError, "the real open-weight adapter sends no request");
   });
+  // The cash adapters (open-weight and Foundry Claude) read it in the transport, after its last wait and before the
+  // first request reserves budget. Here the release lands inside the adapter, once the transport has started.
+  const cashEnv = { RMD_OPENWEIGHT_API_KEY: "test-only-key", RMD_FOUNDRY_CLAUDE_API_KEY: "test-only-key",
+    RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.test/anthropic" };
+  for (const model of ["gpt-6-luna", "claude-haiku-5-5"]) {
+    for (const release of [true, false]) {
+      const cash = retiringExit();
+      const root = ownedFixtureDir(t, "retired-cash").dir;
+      let sent = 0;
+      const launch = cash.retirement.inSpawnScope(() => spawnOpenWeightWorker({ cwd: root, workerHome: root, prompt: "classify",
+        env: cashEnv, clock: clockFromMillisFn(() => { if (release) cash.retirement.retire(); return Date.now(); }),
+        fetchImpl: async () => { sent++; return new Response(JSON.stringify(model.startsWith("claude-")
+          ? { id: "m-1", model, stop_reason: "end_turn", content: [{ type: "text", text: "done" }], usage: { input_tokens: 2, output_tokens: 1 } }
+          : { id: "c-1", model, choices: [{ message: { content: "done" }, finish_reason: "stop" }], usage: { prompt_tokens: 2, completion_tokens: 1 } }),
+        { status: 200 }); } },
+      { root, claudeBin: "/unused", dailyCapUsd: 25, workerProviders: { cashEndpoint: "https://openai.example.test/" } }, { model, effort: "low" }));
+      if (release) await assert.rejects(launch, WorkerSpawnRetiredError, `${model}: a release inside the adapter sends no request`);
+      else assert.equal((await launch).isError, false, `${model}: control, with no release the request is sent`);
+      assert.equal(sent, release ? 0 : 1, `${model}: requests sent`);
+    }
+  }
   // spawnWorker turns an adapter's refusal into the not-started result and its withheld row.
   const viaAdapter = retiringExit();
   const adapterRows: Array<Record<string, unknown>> = [];
