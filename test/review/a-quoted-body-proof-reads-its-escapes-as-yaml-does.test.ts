@@ -87,3 +87,15 @@ test("a hand-quoted body proof and a rendered wrapped grep are rewritten by the 
   assert.equal(parseAcceptanceBlock(repaired!)[0]!.proof, "grep: driftCeiling in scripts/clock-sweep-baseline.json");
   assert.equal(rewriteBodyProof(rendered, "grep: absent in f", "x"), undefined, "a proof the body does not carry is not guessed at");
 });
+
+test("numbered acceptance bullets are rewritten like the parser reads them", () => {
+  for (const marker of ["1.", "1)"]) {
+    const oldProof = String.raw`grep: "x" in f`;
+    const newProof = String.raw`grep: "y" in f`;
+    const body = `## Acceptance\n${marker} claim | ${oldProof}\n`;
+    assert.equal(parseAcceptanceBlock(body)[0]!.proof, oldProof);
+    const repaired = rewriteBodyProof(body, oldProof, newProof);
+    assert.notEqual(repaired, undefined, `${marker} bullet is found`);
+    assert.equal(parseAcceptanceBlock(repaired!)[0]!.proof, newProof);
+  }
+});

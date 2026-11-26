@@ -35,6 +35,7 @@
 
 import { isInPlanScope } from "./plan-scope.js";
 import { isTaskShardName } from "./task-shard-name.js";
+import { ACCEPTANCE_BULLET_RE } from "./review.js";
 
 /** The run-branch shape `projectPlan` attributes an open PR by (`status.ts`'s own regex). */
 export const RUN_BRANCH_RE = /^run-(.+)-\d+$/;
@@ -370,7 +371,7 @@ export function rewriteBodyProof(body: string, oldProof: string, newProof: strin
   const escaped = (text: string): string => `"${text.replace(/[\\"]/g, "\\$&")}"`;
   const lines = body.split("\n");
   const hits = lines.flatMap((line, index) => {
-    if (!/^\s*(?:[-*+]\s|proof\s*:)/i.test(line)) return [];
+    if (!(ACCEPTANCE_BULLET_RE.test(line) || /^\s*(?:[-*+]\s|proof\s*:)/i.test(line))) return [];
     const quoted = line.match(/^(\s*proof\s*:\s*)"([\s\S]*)"(\s*)$/i);
     if (quoted) {
       if (quoted[2]!.replace(/\\(["\\])/g, "$1") === oldProof) return [{ index, line: `${quoted[1]}${escaped(newProof)}${quoted[3]}` }];
