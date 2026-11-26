@@ -113,3 +113,15 @@ test("a body proof on every bullet shape the parser reads is rewritten, and the 
   assert.equal(rewriteBodyProof(`## Acceptance\n+ claim one | ${oldProof}\n`, oldProof, newProof), undefined,
     "a `+` line is no bullet the parser reads, so nothing there is rewritten");
 });
+
+test("numbered acceptance bullets are rewritten like the parser reads them", () => {
+  for (const marker of ["1.", "1)"]) {
+    const oldProof = String.raw`grep: "x" in f`;
+    const newProof = String.raw`grep: "y" in f`;
+    const body = `## Acceptance\n${marker} claim | ${oldProof}\n`;
+    assert.equal(parseAcceptanceBlock(body)[0]!.proof, oldProof);
+    const repaired = rewriteBodyProof(body, oldProof, newProof);
+    assert.notEqual(repaired, undefined, `${marker} bullet is found`);
+    assert.equal(parseAcceptanceBlock(repaired!)[0]!.proof, newProof);
+  }
+});
