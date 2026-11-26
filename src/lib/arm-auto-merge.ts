@@ -1711,7 +1711,7 @@ export async function readPullRequestTaskHold(
   readBody: PullRowRead = freshPullRowRead,
   sources: Omit<TaskDispatchHoldSources, "stateDir" | "headRefName" | "repository"> = {},
 ): Promise<TaskHoldReading> {
-  return readPullRequestNamedTaskHold(prUrl, { ...sources, stateDir: join(loadConfigImpl().root, "state") }, readBody);
+  return (await readPullRequestNamedTaskHold(prUrl, { ...sources, stateDir: join(loadConfigImpl().root, "state") }, readBody)).reading;
 }
 
 export function attemptArm(

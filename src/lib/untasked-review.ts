@@ -67,3 +67,25 @@ export function extractTaskTrailerId(body: string): string | undefined {
   const matches = [...(body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)];
   return matches.length ? matches[matches.length - 1][1] : undefined;
 }
+
+/** A positive record from the plan-only filing flows (`pr.opened` with `plan_only: true`). W1-T14902 moved it, with
+ *  {@link resolveReviewTaskId}, from tick-read-worker.ts (which re-exports both) so the one PR task resolver reuses them. */
+export function isPlanOnlyFilingPr(ledger: Array<Record<string, unknown>>, prUrl: string): boolean {
+  return ledger.some((l) => l.step === "pr.opened" && l.pr_url === prUrl && l.plan_only === true);
+}
+
+/**
+ * Resolve the task identity shared by the direct review path and the open-PR board path.
+ * An exact trailer wins; a positively identified plan-only filing is intentionally
+ * unattributed; otherwise the fleet's task-bearing run branch is the safe fallback.
+ */
+export function resolveReviewTaskId(
+  body: string,
+  headRefName: string,
+  planOnlyFiling: boolean,
+): string | undefined {
+  const fromTrailer = extractTaskTrailerId(body);
+  if (fromTrailer) return fromTrailer;
+  if (planOnlyFiling) return undefined;
+  return taskIdFromRunBranch(headRefName);
+}

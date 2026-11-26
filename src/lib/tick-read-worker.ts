@@ -48,9 +48,8 @@ import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { repoRoot, resolveOwnerRepo } from "./repo-location.js";
 import { OwnerRepoUnresolvableError } from "./owner-repo.js";
-import { reviewTaskIdFromBody } from "./report-commands.js";
 import { isFleetAuthoredText } from "./escalation-answers.js";
-import { PR_PENDING_PLACEHOLDER, usesUntaskedReviewMetadata } from "./untasked-review.js";
+import { isPlanOnlyFilingPr, PR_PENDING_PLACEHOLDER, resolveReviewTaskId, usesUntaskedReviewMetadata } from "./untasked-review.js";
 
 /** REST rollups preserve check-run order: retain external_id and the exact head/constituent
  * outcome beside each row without changing the shared REST mapper's unrelated callers. */
@@ -1749,9 +1748,7 @@ export function cancelledRequiredChecks(
  * call sites) — a positive record from the ONE place that already verified the diff, not a
  * guess from this function.
  */
-export function isPlanOnlyFilingPr(ledger: Array<Record<string, unknown>>, prUrl: string): boolean {
-  return ledger.some((l) => l.step === "pr.opened" && l.pr_url === prUrl && l.plan_only === true);
-}
+export { isPlanOnlyFilingPr };
 
 export type PlanFilingClassificationSource = "emitter-ledger" | "github-files" | "unreadable" | "not-plan-only";
 
@@ -1796,16 +1793,7 @@ function introducedTaskIdsFromPlanPaths(paths: readonly string[]): string[] {
  * An exact trailer wins; a positively identified plan-only filing is intentionally
  * unattributed; otherwise the fleet's task-bearing run branch is the safe fallback.
  */
-export function resolveReviewTaskId(
-  body: string,
-  headRefName: string,
-  planOnlyFiling: boolean,
-): string | undefined {
-  const fromTrailer = reviewTaskIdFromBody(body);
-  if (fromTrailer) return fromTrailer;
-  if (planOnlyFiling) return undefined;
-  return taskIdFromRunBranch(headRefName);
-}
+export { resolveReviewTaskId };
 
 export { PR_PENDING_PLACEHOLDER, usesUntaskedReviewMetadata };
 

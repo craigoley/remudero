@@ -70,7 +70,7 @@ import { flagValue } from "../../lib/cli-args.js";
 import { resolveReviewTarget, reviewTaskIdFromBody, reviewPrNumber, reviewViewArgs } from "../../lib/report-commands.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "../../lib/staged-install.js";
 import { UNTASKED_REVIEW_BUDGET_USD, isPlanOnlyFilingPr, resolveReviewTaskId, reviewStateFromRollup, reviewStatusHistoryFromRest, usesUntaskedReviewMetadata } from "../../lib/tick-read-worker.js";
-import { resolvePullRequestTaskSubject, type PullRequestTaskSubject } from "../../lib/task-dispatch-hold.js";
+import { freshPullRowRead, resolvePullRequestTaskSubject, type PullRequestTaskSubject } from "../../lib/task-dispatch-hold.js";
 
 export interface ReviewCommandHost {
   readonly GIT_UNTRACKED_FILES_ALL: string;
@@ -3044,10 +3044,11 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // Criteria: task trailer → tasks.yaml; else the PR body's Acceptance: block.
   let criteria: AcceptanceCriterion[] = [];
   let source = "NONE (fail closed — nothing to judge is never a pass)";
+  const reviewPlanOnlyFiling = planOnlyFiling ?? isPlanOnlyFilingPr(reviewLedger, view.url);
   const taskId = resolveReviewTaskId(
     body,
     view.headRefName,
-    planOnlyFiling ?? isPlanOnlyFilingPr(reviewLedger, view.url),
+    reviewPlanOnlyFiling,
   );
   const reviewKey = reviewLedgerKeyFor(taskId, view.number);
   // W1-T10269: a shadow review publishes nothing and its rows are renamed; every terminal row names the judging code's sha.
@@ -3207,7 +3208,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     // synthetic trailer on its own run branch names no task); the publisher re-checks the live PR through the resolver.
     if (shadow || !taskId || usesUntaskedReviewMetadata(taskId, view.headRefName)) return;
     await (deps.publishUnreadHold ?? (isTestRunner() ? async () => {} : publishUnreadTaskCatalogHold))({
-      post: catalogReviewPoster("ops", postReviewStatus), owner, repo, sha: view.headRefOid, taskId, reviewKey, source, reason,
+      post: catalogReviewPoster("ops", postReviewStatus), owner, repo, sha: view.headRefOid, taskId, reviewKey, source, reason, planOnlyFiling: reviewPlanOnlyFiling,
       ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest, fetchLifecycle: () => fetchPrLifecycleAsync(view.url), log });
   };
   // The public plan at origin/main could not be read for a task the head's plan lacks: neither its hold nor its catalog
@@ -3781,6 +3782,8 @@ export async function publishUnreadTaskCatalogHold(args: {
   ledgerPath: string; runId: string; prUrl: string; reviewInputDigest: string;
   fetchLifecycle: Parameters<typeof postReviewStatusGuarded>[0]["fetchLifecycle"];
   log: (step: string, extra?: Record<string, unknown>) => void;
+  /** Whether this review identified the PR as a plan-only filing (its run branch then names no task). */
+  planOnlyFiling?: boolean;
   /** The one PR task resolver. Default: {@link resolvePullRequestTaskSubject}, one fresh read of the live PR. */
   resolveSubject?: (prUrl: string) => Promise<PullRequestTaskSubject>;
 }): Promise<void> {
@@ -3788,13 +3791,18 @@ export async function publishUnreadTaskCatalogHold(args: {
   // lane's synthetic trailer on its own run branch) has no hold to be unread, so a success standing on it stays.
   // An unreadable PR is no exemption: the hold stays unread and pending is posted.
   let taskId = args.taskId;
+  let inputDigest = args.reviewInputDigest;
   try {
-    const subject = await (args.resolveSubject ?? resolvePullRequestTaskSubject)(args.prUrl);
+    const subject = await (args.resolveSubject ??
+      ((url: string) => resolvePullRequestTaskSubject(url, freshPullRowRead, () => args.planOnlyFiling === true)))(args.prUrl);
     if (subject.untasked) {
       args.log("review.dispatch_hold_untasked", { task_id: subject.taskId ?? null, head_ref: subject.headRefName });
       return;
     }
     taskId = subject.taskId ?? taskId;
+    // Round-8 C1: the pending write names the body the hold was read from, so the freshness rule judges it against the
+    // live PR rather than the body this review started from.
+    inputDigest = reviewInputDigest(args.sha, subject.snapshot.body, REVIEW_ENGINE_REVISION);
   } catch (e) {
     args.log("review.dispatch_hold_subject_unreadable", { error: String((e as Error)?.message ?? e) });
   }
@@ -3802,7 +3810,7 @@ export async function publishUnreadTaskCatalogHold(args: {
   try {
     await (args.publish ?? postUnreadTaskHoldGuarded)({ post: args.post, owner: args.owner, repo: args.repo, sha: args.sha,
       refusal, taskId: args.reviewKey, ledgerPath: args.ledgerPath, runId: args.runId, prUrl: args.prUrl,
-      reviewInputDigest: args.reviewInputDigest, reviewEngineRevision: REVIEW_ENGINE_REVISION, fetchLifecycle: args.fetchLifecycle });
+      reviewInputDigest: inputDigest, reviewEngineRevision: REVIEW_ENGINE_REVISION, fetchLifecycle: args.fetchLifecycle });
   } catch (e) {
     args.log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
   }

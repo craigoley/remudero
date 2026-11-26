@@ -14,7 +14,7 @@ import { armIfVerdictPermitsAsync, attemptArmAsync, readPullRequestTaskHold, rea
 import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
-import { postReviewStatusGuarded, postUnreadTaskHoldGuarded, taskHoldReading, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
+import { postReviewStatusGuarded, postUnreadTaskHoldGuarded, reviewInputDigest, taskHoldInputDigest, taskHoldReading, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
 import { planCheckoutRoot, pullRequestTaskSubjectOf, readOpsCatalogHold, readPullRequestNamedTaskHold, resolvePullRequestTaskSubject, targetPlanRoot, readTaskDispatchHold, type TaskDispatchHoldSources } from "#src/lib/task-dispatch-hold.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { readLedgerLines } from "#src/lib/status.js";
@@ -27,6 +27,7 @@ import { gitRepo } from "#test/helpers/git-repo.js";
 const SHA = "14902000c0de000000000000000000000000000ab";
 const PR_URL = "https://github.com/acme/remudero-ops/pull/910";
 const TASK = "W1-T14898";
+const LIVE_BODY = `Remudero-Task: ${TASK}\n`;
 const PASS: ReviewVerdict = { state: "success", criteria: [{ claim: "the change ships", proof: "grep: ships in src/x.ts",
   met: true, floorMet: true, reason: "proof executed and PASSED", proof_exec: "executed_pass" }] as ReviewVerdict["criteria"],
 testTheater: false, floorDegraded: false, capped: false, keywordOnly: false, planOnly: false, summary: "remudero-review: PASS" };
@@ -271,6 +272,27 @@ test("W1-T14902: every guarded post reads the hold itself when its caller suppli
   await post("W1-T10732");
   assert.deepEqual(posts, ["W1-T10732:pending", "W1-T10732:pending", "W1-T10732:success"]);
   assert.equal(shim.calls().filter((c) => c.includes("pulls/911")).length, 2, "positive control: each held post read the live PR");
+  // Round-9 C1: the caller's verdict started from a body whose trailer was since edited to a held task. The live PR's
+  // digest no longer matches the caller's, so a pending carrying the caller's digest would be refused and leave the
+  // success; the hold's write names the body it read, and lands.
+  delete process.env.NODE_TEST_CONTEXT;
+  names("W1-T8397");
+  const live = `Remudero-Task: W1-T8397\n`;
+  const edited = await postReviewStatusGuarded({
+    owner: "acme", repo: "remudero", sha: SHA, state: "success", verdict: PASS, description: PASS.summary,
+    taskId: "W1-T10732", evidence: "executed", ledgerPath, runId: "t14902-edited", prUrl,
+    reviewInputDigest: reviewInputDigest(SHA, "Remudero-Task: W1-T10732\n"),
+    fetchLifecycle: () => ({ merged: false, closed: false, reviewInputDigest: reviewInputDigest(SHA, live) }),
+    readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
+    fetchCurrentStatusEntry: () => undefined,
+    post: (status) => { posts.push(`edited:${status.state}`); },
+    semanticJudgement: { planOnly: false, reviewerOutcome: "success" },
+  });
+  process.env.NODE_TEST_CONTEXT = previous ?? "child-v8";
+  assert.equal(edited.taskHold, "held: W1-T8397 carries dispatch_hold");
+  assert.equal(posts.at(-1), "edited:pending", "THE CLAIM: the pending for the edited body is posted, not refused as stale");
+  assert.equal(taskHoldInputDigest({ sha: SHA, reviewInputDigest: "v2:caller" }, undefined), "v2:caller",
+    "a caller-supplied reading keeps the caller's digest");
 });
 
 test("W1-T14902: the production reader's defaults read the body through gh and the real catalog lookup", async (t) => {
@@ -471,11 +493,11 @@ test("W1-T14902: a review whose task catalog is unreadable replaces this head's 
   const args = {
     post: (status: { state: string; description?: string }) => { posts.push(status); },
     owner: "acme", repo: "remudero-ops", sha: SHA, taskId: TASK, reviewKey: TASK, reason: "ops-ref_moved", ledgerPath,
-    runId: "t14902-catalog", prUrl: PR_URL, reviewInputDigest: "v2:catalog", fetchLifecycle: () => ({ merged: false, closed: false }),
-    log: () => {}, resolveSubject: async () => ({ taskId: TASK, headRefName: `run-${TASK}-1`, untasked: false }),
+    runId: "t14902-catalog", prUrl: PR_URL, reviewInputDigest: reviewInputDigest(SHA, LIVE_BODY), fetchLifecycle: () => ({ merged: false, closed: false }),
+    log: () => {}, resolveSubject: async () => ({ taskId: TASK, headRefName: `run-${TASK}-1`, untasked: false, snapshot: { headSha: SHA, body: LIVE_BODY } }),
   };
   appendLedger(ledgerPath, { run_id: "earlier", task_id: TASK, step: "review.posted", state: "success", head_sha: SHA,
-    pr_url: PR_URL, review_input_digest: "v2:catalog", proof_exec: ["executed_pass"] });
+    pr_url: PR_URL, review_input_digest: reviewInputDigest(SHA, LIVE_BODY), proof_exec: ["executed_pass"] });
   await publishUnreadTaskCatalogHold(args as never);
   assert.deepEqual(posts.map((p) => p.state), ["pending"], "THE CLAIM: pending replaces the executed success on this head");
   assert.match(posts[0]!.description ?? "", /held: W1-T14898's dispatch_hold is unreadable \(task catalog ops-ref_moved\)/);
@@ -499,7 +521,7 @@ test("W1-T14902: a review whose task catalog is unreadable replaces this head's 
   const repairId = "main-repair-0123456789ab";
   const untaskedSteps: string[] = [];
   await publishUnreadTaskCatalogHold({ ...args, taskId: repairId, reviewKey: repairId, log: (step: string) => { untaskedSteps.push(step); },
-    resolveSubject: async () => ({ taskId: repairId, headRefName: `run-${repairId}-1795650818109`, untasked: true }) } as never);
+    resolveSubject: async () => ({ taskId: repairId, headRefName: `run-${repairId}-1795650818109`, untasked: true, snapshot: { headSha: SHA, body: "" } }) } as never);
   assert.equal(posts.length, 1, "THE CLAIM: an untasked PR's status is left as it stands");
   assert.deepEqual(untaskedSteps, ["review.dispatch_hold_untasked"]);
   // An unreadable live PR is no exemption: the hold stays unread, and pending is still published.
@@ -510,6 +532,14 @@ test("W1-T14902: a review whose task catalog is unreadable replaces this head's 
     resolveSubject: async () => { throw new Error("HTTP 502"); },
     publish: async (o: { refusal: string }) => { published.push(o.refusal); } } as never);
   assert.deepEqual(unreadableSteps, ["review.dispatch_hold_subject_unreadable"]);
+  // Round-9 C1: a trailer edited after this review read its body. The pending names the body the hold was read from,
+  // so the subject-freshness rule (which compares against the live PR) admits it instead of leaving the success.
+  const editedBody = "Remudero-Task: W1-T14898\n\nedited after the review started";
+  const digests: Array<string | undefined> = [];
+  await publishUnreadTaskCatalogHold({ ...args, ledgerPath: join(tmp(t, "catalog-edited"), "ledger.ndjson"),
+    resolveSubject: async () => ({ taskId: TASK, headRefName: "x", untasked: false, snapshot: { headSha: SHA, body: editedBody } }),
+    publish: async (o: { reviewInputDigest?: string }) => { digests.push(o.reviewInputDigest); } } as never);
+  assert.deepEqual(digests, [reviewInputDigest(SHA, editedBody)], "THE CLAIM: the write is bound to the body the hold read");
   assert.equal(published.length, 1, "an unreadable PR still publishes the unread hold");
   assert.match(published[0]!, /W1-T14898's dispatch_hold is unreadable/);
 });
@@ -555,12 +585,20 @@ test("W1-T14902: the one PR task resolver names the live PR's task: its trailer,
   const reads: string[] = [];
   const pull = (body: string | undefined, ref: string | undefined) => async (path: string) => { reads.push(path); return { body, head: { ref } }; };
   assert.deepEqual(await resolvePullRequestTaskSubject(PR_URL, pull(`Updates left-pad\n\nRemudero-Task: ${TASK}\n`, "dependabot/npm/x")),
-    { taskId: TASK, headRefName: "dependabot/npm/x", untasked: false }, "THE CLAIM: the trailer on the live body names the task");
+    { taskId: TASK, headRefName: "dependabot/npm/x", untasked: false, snapshot: { headSha: undefined, body: `Updates left-pad\n\nRemudero-Task: ${TASK}\n` } },
+    "THE CLAIM: the trailer on the live body names the task");
   assert.deepEqual(reads, ["repos/acme/remudero-ops/pulls/910"], "one read of the pull row the URL names");
   assert.equal((await resolvePullRequestTaskSubject(PR_URL, pull(`Remudero-Task: W1-T1\nRemudero-Task: ${TASK}\n`, "x"))).taskId, TASK,
     "the last trailer wins, as everywhere else");
   assert.deepEqual(await resolvePullRequestTaskSubject(PR_URL, pull("lost its trailer", `run-${TASK}-1795650818109`)),
-    { taskId: TASK, headRefName: `run-${TASK}-1795650818109`, untasked: false }, "a run branch names its task when the trailer is gone");
+    { taskId: TASK, headRefName: `run-${TASK}-1795650818109`, untasked: false, snapshot: { headSha: undefined, body: "lost its trailer" } },
+    "a run branch names its task when the trailer is gone");
+  // Round-9 C3: the review lane's own rule — a positively identified plan-only filing names no task, so a trailerless
+  // filing on a task-shaped run branch (W1-T4002's shape) keeps its success; an explicit trailer still wins.
+  const filing = pull("Files three tasks", `run-${TASK}-1795650818109`);
+  assert.equal((await resolvePullRequestTaskSubject(PR_URL, filing, () => true)).untasked, true, "THE CLAIM: a plan-only filing is untasked");
+  assert.equal((await resolvePullRequestTaskSubject(PR_URL, pull(`Remudero-Task: ${TASK}\n`, "x"), () => true)).taskId, TASK,
+    "an explicit trailer wins over the filing rule");
   assert.equal((await resolvePullRequestTaskSubject(PR_URL, pull("Updates left-pad", "dependabot/npm/x"))).untasked, true,
     "a PR naming no task reviews and arms as today");
   const repairId = "main-repair-0123456789ab";
@@ -568,7 +606,9 @@ test("W1-T14902: the one PR task resolver names the live PR's task: its trailer,
     "a generated lane's synthetic trailer on its own run branch names no task");
   assert.equal((await resolvePullRequestTaskSubject(PR_URL, pull(`Remudero-Task: ${repairId}\n`, "feature/x"))).untasked, false,
     "the same id on another branch is read as a task");
-  assert.deepEqual(pullRequestTaskSubjectOf(null), { taskId: undefined, headRefName: "", untasked: true });
+  assert.deepEqual(pullRequestTaskSubjectOf(null), { taskId: undefined, headRefName: "", untasked: true, snapshot: { headSha: undefined, body: "" } });
+  assert.deepEqual(pullRequestTaskSubjectOf({ body: "b", head: { ref: "r", sha: SHA } }).snapshot, { headSha: SHA, body: "b" },
+    "the subject carries the head and body it was read from");
   await assert.rejects(resolvePullRequestTaskSubject("not a pr url", pull("", "")), /no pull request/);
 });
 
@@ -578,13 +618,18 @@ test("W1-T14902: the hold lookup judges the task the live PR names NOW, never a 
   const read = async () => ({ body, head: { ref: "feature/x" } });
   const sources = { stateDir: "/nonexistent/state", lookup: async () => ({ outcome: "absent" }) as never,
     readMainPlan: async () => ({ byId: new Map([["W1-T10732", {}], [TASK, { dispatch_hold: true }]]) }) };
-  assert.deepEqual(await readPullRequestNamedTaskHold(PR_URL, sources, read), { outcome: "clear" });
+  assert.deepEqual((await readPullRequestNamedTaskHold(PR_URL, sources, read)).reading, { outcome: "clear" });
   body = `Remudero-Task: ${TASK}\n`;
-  assert.deepEqual(await readPullRequestNamedTaskHold(PR_URL, sources, read), { outcome: "held", taskId: TASK },
-    "THE CLAIM: the edited trailer's held task is the one judged");
+  const edited = await readPullRequestNamedTaskHold(PR_URL, sources, read);
+  assert.deepEqual(edited.reading, { outcome: "held", taskId: TASK }, "THE CLAIM: the edited trailer's held task is the one judged");
+  assert.equal(edited.snapshot?.body, body, "and the reading names the body it was judged on");
   const unreadable = await readPullRequestNamedTaskHold(PR_URL, sources, async () => { throw new Error("HTTP 502"); });
-  assert.equal(unreadable.outcome, "unread", "an unreadable pull row holds");
-  assert.equal((await readPullRequestNamedTaskHold(undefined, sources, read)).outcome, "unread", "a post naming no PR holds");
+  assert.equal(unreadable.reading.outcome, "unread", "an unreadable pull row holds");
+  assert.equal(unreadable.snapshot, undefined);
+  assert.equal((await readPullRequestNamedTaskHold(undefined, sources, read)).reading.outcome, "unread", "a post naming no PR holds");
+  // The default plan-only reader is the instance ledger's emitter record; an unreadable ledger records none.
+  const { ledgerPlanOnlyFiling } = await import("#src/lib/task-dispatch-hold.js");
+  assert.equal(ledgerPlanOnlyFiling("/nonexistent/state")(PR_URL), false);
 });
 
 test("W1-T14902: a daemon whose cwd is no work tree (launchd's config.root) still reads the plan, from its install", async (t) => {
@@ -636,8 +681,9 @@ test("W1-T14902: the review command's catalog-unreadable exit hands the unread h
 test("W1-T14902: dep-review's hold subject is the body trailer's task, never its own ledger key", () => {
   const head = "dependabot/npm_and_yarn/left-pad-1.3.1";
   assert.deepEqual(pullRequestTaskSubjectOf({ body: `Updates left-pad\n\nRemudero-Task: ${TASK}\n`, head: { ref: head } }),
-    { taskId: TASK, headRefName: head, untasked: false }, "THE CLAIM: the hold is read for the task the live body names");
-  assert.deepEqual(pullRequestTaskSubjectOf({ body: "Updates left-pad", head: { ref: head } }), { taskId: undefined, headRefName: head, untasked: true },
+    { taskId: TASK, headRefName: head, untasked: false, snapshot: { headSha: undefined, body: `Updates left-pad\n\nRemudero-Task: ${TASK}\n` } },
+    "THE CLAIM: the hold is read for the task the live body names");
+  assert.deepEqual(pullRequestTaskSubjectOf({ body: "Updates left-pad", head: { ref: head } }), { taskId: undefined, headRefName: head, untasked: true, snapshot: { headSha: undefined, body: "Updates left-pad" } },
     "a Dependabot PR naming no task reviews and arms as today");
 });
 
@@ -722,4 +768,37 @@ test("W1-T14902: a review whose public plan at origin/main is unreadable publish
   assert.ok(published.length >= 1, `THE CLAIM: the unread hold is published: ${JSON.stringify(published)}`);
   assert.equal(published[0]!.taskId, id);
   assert.equal(published[0]!.source, "public plan at origin/main");
+});
+
+test("W1-T14902: a fresh broker read never joins a GET already under way, which may predate a trailer edit", { timeout: 60_000 }, async (t) => {
+  // Round-9 C2: the arm's act-time read asks for freshness; joining an in-flight upstream GET that left before a
+  // maintainer's edit served the pre-edit body and the hold read clear.
+  const { GhReadBroker } = await import("#src/lib/gh-read-broker.js");
+  const { clockFromMillisFn } = await import("#src/lib/clock.js");
+  const dir = tmp(t, "broker-fresh");
+  let now = 1_800_000_000_000;
+  const calls: Array<{ resolve: (r: { stdout: string; stderr: string; exitCode: number }) => void }> = [];
+  const exec = (args: string[]) => args[1] === "user" ? Promise.resolve({ stdout: "octo\n", stderr: "", exitCode: 0 })
+    : new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => calls.push({ resolve }));
+  const broker = new GhReadBroker(join(dir, "broker"), exec as never, clockFromMillisFn(() => now),
+    async (ms: number) => { now += ms; await new Promise((resolve) => setImmediate(resolve)); }, () => 1e12);
+  const until = async (predicate: () => boolean, what: string) => {
+    const deadline = Date.now() + 30_000;
+    while (!predicate() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 2));
+    assert.ok(predicate(), `timed out waiting for ${what}`);
+  };
+  const row = (body: string) => ({ stdout: `HTTP/2.0 200 OK\r\nETag: "${body.length}"\r\n\r\n${JSON.stringify({ body })}`, stderr: "", exitCode: 0 });
+  const args = ["api", "repos/acme/remudero-ops/pulls/910"];
+  const stale = broker.read({ op: "read", args, class: "background", caller: "sweep" });
+  await until(() => calls.length === 1, "the sweep's GET to leave");
+  const joiner = broker.read({ op: "read", args, class: "background", caller: "board" });
+  // The maintainer edits the trailer now; the arm's fresh read arrives after the edit, with the old GET still out.
+  const fresh = broker.read({ op: "read", args, class: "agent", caller: "arm", fresh: true });
+  calls[0]!.resolve(row("Remudero-Task: W1-T10732"));
+  assert.equal(JSON.parse((await stale).stdout).body, "Remudero-Task: W1-T10732");
+  assert.equal((await joiner).outcome, "coalesced", "a read with no freshness asked still shares the GET in flight");
+  await until(() => calls.length === 2, "the fresh read's own GET");
+  calls[1]!.resolve(row(`Remudero-Task: ${TASK}`));
+  assert.equal(JSON.parse((await fresh).stdout).body, `Remudero-Task: ${TASK}`, "THE CLAIM: the fresh read sees the edit");
+  assert.equal(calls.length, 2);
 });

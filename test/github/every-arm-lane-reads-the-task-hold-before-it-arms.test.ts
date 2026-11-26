@@ -165,9 +165,15 @@ test("census: every task-hold lookup goes through the one PR task resolver, fed 
     assert.match(hold, new RegExp(`function ${fn}\\([^)]*read: PullRowRead = freshPullRowRead`), `${fn} defaults to the fresh read`);
   }
   assert.match(source(ARM_MODULE), /readBody: PullRowRead = freshPullRowRead/, "the arm's reader defaults to the fresh read");
+  // Round 9 (C3): the subject is the review lane's OWN task-id rule, reused rather than restated.
+  assert.match(hold, /const taskId = resolveReviewTaskId\(body, headRefName, planOnlyFiling\);/);
+  assert.equal(callsOf("resolveReviewTaskId").filter((call) => call.file === HOLD_MODULE).length, 1);
+  // Round 9 (C2): a fresh broker read never joins an upstream GET that already left.
+  assert.match(source("src/lib/gh-read-broker.ts"), /!\(request\.fresh && inFlight\.job\.started\)/,
+    "the broker declines to join a started job for a fresh caller");
   // The unread-hold publisher classifies the live PR through the same resolver.
   const unread = callsOf("resolvePullRequestTaskSubject").map((call) => `${call.file}:${call.fn}`).sort();
   assert.ok(unread.includes(`${HOLD_MODULE}:readPullRequestNamedTaskHold`));
-  assert.match(source("src/cli/commands/review.ts"), /args\.resolveSubject \?\? resolvePullRequestTaskSubject\)\(args\.prUrl\)/,
+  assert.match(source("src/cli/commands/review.ts"), /args\.resolveSubject \?\?\s*\(\(url: string\) => resolvePullRequestTaskSubject\(url, freshPullRowRead, \(\) => args\.planOnlyFiling === true\)\)\)\(args\.prUrl\)/,
     "the unread-hold publisher resolves the live PR's task before it posts");
 });

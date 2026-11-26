@@ -19,7 +19,7 @@ import { homedir, hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { isTestRunner } from "./live-write-guard.js";
-import { readPullRequestNamedTaskHold, taskHoldRefusal, type TaskHoldReading } from "./task-dispatch-hold.js";
+import { readPullRequestNamedTaskHold, taskHoldRefusal, type PullRequestSnapshot, type PullRequestTaskHold, type TaskHoldReading } from "./task-dispatch-hold.js";
 export { publicTaskHoldDescription, taskHoldReading, taskHoldRefusal, type TaskHoldReading } from "./task-dispatch-hold.js";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -13507,8 +13507,9 @@ export async function postReviewStatusGuarded(
       if (cappedHold !== undefined) return await publishCappedHold(opts, effectiveVerdict, cappedHold);
       // W1-T14902 (invariant an-unread-hold-holds): a task that awaits the operator is never posted success, and a hold
       // the caller could not read holds too. A required pending status blocks GitHub auto-merge and wakes no fix lane.
-      const taskHold = effectiveVerdict.state === "success" ? taskHoldRefusal(await guardedTaskHold(opts)) : undefined;
-      if (taskHold !== undefined) return await publishTaskHold(opts, effectiveVerdict, taskHold);
+      const hold = effectiveVerdict.state === "success" ? await guardedTaskHold(opts) : undefined;
+      const taskHold = taskHoldRefusal(hold?.reading);
+      if (taskHold !== undefined) return await publishTaskHold(opts, effectiveVerdict, taskHold, hold?.snapshot);
     }
     const result = await publishReviewStatusLocked(opts);
     return !historyApplied ? result : { ...result, ...(effectiveVerdict ? { effectiveVerdict } : {}),
@@ -13583,22 +13584,35 @@ function recordedCappedOverride(opts: PostReviewStatusGuardedOpts): CappedOverri
 /** W1-T14902: the hold a success is judged against: the caller's reading, else the one PR task resolver's — the task
  *  the live PR names, read fresh inside the lock, so a trailer edited after the caller fetched its body (a fix round's
  *  pre-edit task) is the one judged (W1-T5939's test-runner precedent keeps partial fakes off the live plan and catalog). */
-async function guardedTaskHold(opts: PostReviewStatusGuardedOpts): Promise<TaskHoldReading | undefined> {
-  if (opts.taskHold !== undefined) return opts.taskHold;
+async function guardedTaskHold(opts: PostReviewStatusGuardedOpts): Promise<PullRequestTaskHold | undefined> {
+  if (opts.taskHold !== undefined) return { reading: opts.taskHold };
   if (isTestRunner()) return undefined;
   return readPullRequestNamedTaskHold(opts.prUrl, { stateDir: dirname(opts.ledgerPath) });
 }
 
+/** W1-T14902 (round-8 C1): the input digest a hold's pending write carries — that of the head and body the hold was
+ *  judged on, so the subject-freshness rule judges the write against the PR the hold read, not the body the caller's
+ *  verdict started from (a trailer edited since then would otherwise refuse the pending and leave the success). */
+export function taskHoldInputDigest(opts: Pick<PostReviewStatusGuardedOpts, "sha" | "reviewInputDigest" | "reviewEngineRevision">,
+  snapshot: PullRequestSnapshot | undefined): string | undefined {
+  // This head, not the snapshot's: if the PR moved on, the live digest differs and the write is refused, as it must be
+  // for a superseded head (whose status no merge reads); the head the hold read gets its own review and hold.
+  return snapshot === undefined ? opts.reviewInputDigest
+    : reviewInputDigest(opts.sha, snapshot.body, opts.reviewEngineRevision ?? REVIEW_ENGINE_REVISION);
+}
+
 async function publishTaskHold(opts: PostReviewStatusGuardedOpts, verdict: ReviewVerdict,
-  refusal: string): Promise<PostReviewStatusGuardedResult> {
+  refusal: string, snapshot?: PullRequestSnapshot): Promise<PostReviewStatusGuardedResult> {
   const description = `remudero-review: pending — ${refusal}; it merges after the operator releases the hold`
     .slice(0, STATUS_DESC_MAX);
   const held: ReviewVerdict = { ...verdict, state: "pending", summary: description };
+  const inputDigest = taskHoldInputDigest(opts, snapshot);
   appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: opts.taskId, step: "review.dispatch_hold_held",
-    head_sha: opts.sha, attempted_state: "success", reason: refusal, outcome: "pending" });
+    head_sha: opts.sha, attempted_state: "success", reason: refusal, outcome: "pending",
+    ...(inputDigest !== undefined ? { review_input_digest: inputDigest } : {}) });
   // No decision digest: a hold is not a terminal decision, so the pass cannot replay over it once posted.
   const result = await publishReviewStatusLocked({ ...opts, state: "pending", verdict: held, description,
-    reviewDecisionDigest: undefined });
+    reviewDecisionDigest: undefined, reviewInputDigest: inputDigest });
   return { ...result, effectiveState: "pending", effectiveVerdict: held, taskHold: refusal, reason: result.reason ?? refusal };
 }
 
