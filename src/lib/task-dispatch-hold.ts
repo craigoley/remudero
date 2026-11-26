@@ -64,7 +64,10 @@ export async function planCheckoutRoot(argv: readonly string[] = process.argv.sl
   try {
     // Through plan.ts's own git runner, the one the plan read uses: this module spawns no git of its own.
     return (await topLevel(cwd)).trim();
-  } catch {
+  } catch (error) {
+    // Not a work tree (`git rev-parse` exits 128): the install's checkout, as repoRoot falls back. Any other failure
+    // reaches the plan read at that root, which answers unread if it cannot read.
+    void error;
     return installRoot;
   }
 }

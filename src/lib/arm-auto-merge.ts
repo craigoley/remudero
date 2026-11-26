@@ -1725,10 +1725,13 @@ export function readPullRequestTaskHoldSync(
   } catch (error) {
     return { outcome: "unread", taskId: "the named task", reason: `the hold reader exited: ${String((error as Error)?.message ?? error).split("\n")[0]}` };
   }
+  let reading: TaskHoldReading | undefined;
   try {
-    const reading = JSON.parse(out) as TaskHoldReading;
-    if (reading?.outcome === "held" || reading?.outcome === "clear" || reading?.outcome === "unread") return reading;
-  } catch { /* the reading below */ }
+    reading = JSON.parse(out) as TaskHoldReading;
+  } catch (error) {
+    return { outcome: "unread", taskId: "the named task", reason: `the hold reader answered no JSON (${(error as Error).name})` };
+  }
+  if (reading?.outcome === "held" || reading?.outcome === "clear" || reading?.outcome === "unread") return reading;
   return { outcome: "unread", taskId: "the named task", reason: "the hold reader answered no reading" };
 }
 
