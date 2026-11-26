@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parse } from "yaml";
 import { ciFrictionShardYaml } from "#src/lib/ci-friction-gardener.js";
+import { selectorShadowMissTask, selectorShadowStructuralTask } from "#src/lib/selector-shadow-gardener.js";
 import { machineShardInvariantClaims, renderMachineShard, type MachineShardInvariant, type MachineShardSpec } from "#src/lib/machine-filing.js";
 
 const SPEC: MachineShardSpec = {
@@ -34,6 +35,13 @@ test("W1-T14924 criterion 1: a drafted machine shard with a preservation invaria
     "W1-T999924", [price]);
   const invariant = rows(drafted).find((r) => r.claim.startsWith("invariant:"));
   assert.equal(invariant?.kind, "guard", drafted);
+  // Both selector-shadow drafts declare the selector-keeps-its-selections preservation invariant; each entry is marked.
+  const miss = { runId: 1, headSha: "a".repeat(40), selection: "narrow" as const, file: "test/foo.test.ts" };
+  for (const shard of [selectorShadowMissTask(miss, "W1-T999925", ["src/lib/foo.ts"]),
+    selectorShadowStructuralTask("test/foo.test.ts", "W1-T999926", ["src/lib/foo.ts -> test/foo.test.ts"], "W1-T999925")]) {
+    const kept = rows(shard).find((r) => r.claim.startsWith("invariant:selector-keeps-its-selections"));
+    assert.equal(kept?.kind, "guard", shard);
+  }
 });
 
 test("W1-T14924 criterion 2: a drafted shard's other criteria render as today", () => {
