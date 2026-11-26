@@ -921,3 +921,72 @@ test("W1-T14902: a held plan-lint retry whose ledger archive is unreadable still
   const retries = readLedgerLines(ledgerPath).filter((row) => row.step === "review.plan_lint_retry");
   assert.deepEqual(retries.map((row) => [row.outcome, row.attempt_id, row.merge_base_sha]), [["held", "review-PR910-attempt", undefined]]);
 });
+
+test("W1-T14902: the hold lookup classifies a plan filing by the board's exact-head classification, not emitter rows alone", async (t) => {
+  const { boardPlanOnlyFiling } = await import("#src/lib/task-dispatch-hold.js");
+  const { classifyPlanFiling } = await import("#src/lib/review.js");
+  const state = tmp(t, "board-filing");
+  const branch = `run-${TASK}-1795650818109`;
+  const sources = { stateDir: state, lookup: async () => ({ outcome: "absent" }) as never,
+    readMainPlan: async () => ({ byId: new Map([[TASK, { dispatch_hold: true }]]) }) };
+  /** The pull row (its head moving to `after` once the files are read) and the files GitHub lists for it. */
+  const github = (files: unknown, opts: { body?: string; after?: string } = {}) => {
+    const reads: string[] = [];
+    let head = SHA;
+    const read = async (path: string) => {
+      reads.push(path);
+      if (path.endsWith("/files?per_page=100")) {
+        if (files instanceof Error) throw files;
+        if (opts.after !== undefined) head = opts.after;
+        return files;
+      }
+      return { body: opts.body ?? "Files three tasks", head: { ref: branch, sha: head } };
+    };
+    return { read, reads };
+  };
+  const hold = async (gh: ReturnType<typeof github>) =>
+    (await readPullRequestNamedTaskHold(PR_URL, sources, gh.read, boardPlanOnlyFiling(state, classifyPlanFiling, gh.read))).reading;
+  const plan = [{ filename: "plan/tasks.d/W1-T1-a.yaml" }, { filename: "plan/tasks.d/W1-T2-b.yaml" }];
+  const filing = github(plan);
+  assert.deepEqual(await hold(filing), { outcome: "clear" },
+    "THE CLAIM: a trailerless filing whose live head is plan-only (github-files) names no task, with no emitter row");
+  assert.deepEqual(filing.reads, ["repos/acme/remudero-ops/pulls/910", "repos/acme/remudero-ops/pulls/910/files?per_page=100",
+    "repos/acme/remudero-ops/pulls/910"], "one pull row, the files, and the pull row again to bind them to the head");
+  assert.deepEqual(await hold(github(plan, { after: "f".repeat(40) })), { outcome: "held", taskId: TASK },
+    "files read while the head moved bind to no head: the run branch names the task, and its hold holds");
+  assert.deepEqual(await hold(github([...plan, { filename: "plan/policy.yaml" }])), { outcome: "held", taskId: TASK },
+    "enforcement data is no filing (not-plan-only)");
+  assert.deepEqual(await hold(github([...plan, { filename: "src/lib/x.ts" }])), { outcome: "held", taskId: TASK }, "code is no filing");
+  assert.deepEqual(await hold(github(new Error("HTTP 502"))), { outcome: "held", taskId: TASK }, "an unread file list is no filing");
+  const trailered = github(plan, { body: `Remudero-Task: ${TASK}\n` });
+  assert.deepEqual(await hold(trailered), { outcome: "held", taskId: TASK }, "a trailer wins over the filing rule");
+  assert.deepEqual(trailered.reads, ["repos/acme/remudero-ops/pulls/910"], "and spends no files read: the classification decides nothing");
+  // The board's kept observation at this exact head answers without a read; one at another head does not.
+  mkdirSync(join(state, "cache"), { recursive: true });
+  writeFileSync(join(state, "cache", "plan-filing-files.json"), JSON.stringify({ schema: 1, pulls: {
+    "acme/remudero-ops#910": { head: SHA, files: plan.map((file) => file.filename) } } }));
+  const kept = github(new Error("the kept observation answers"));
+  assert.deepEqual(await hold(kept), { outcome: "clear" }, "the board's exact-head observation classifies the filing");
+  assert.deepEqual(kept.reads, ["repos/acme/remudero-ops/pulls/910"]);
+  writeFileSync(join(state, "cache", "plan-filing-files.json"), JSON.stringify({ schema: 1, pulls: {
+    "acme/remudero-ops#910": { head: "e".repeat(40), files: plan.map((file) => file.filename) } } }));
+  assert.deepEqual(await hold(github(new Error("HTTP 502"))), { outcome: "held", taskId: TASK }, "another head's observation is not this head's");
+  // A pull row naming no head, and an unreadable re-read, bind to nothing either.
+  const headless = async (path: string) => path.endsWith("/files?per_page=100") ? plan : { body: "x", head: { ref: branch } };
+  assert.deepEqual((await readPullRequestNamedTaskHold(PR_URL, sources, headless, boardPlanOnlyFiling(state, classifyPlanFiling, headless))).reading,
+    { outcome: "held", taskId: TASK });
+  let rows = 0;
+  const flaky = async (path: string) => {
+    if (path.endsWith("/files?per_page=100")) return plan;
+    if (++rows > 1) throw new Error("HTTP 502");
+    return { body: "x", head: { ref: branch, sha: "d".repeat(40) } };
+  };
+  assert.deepEqual((await readPullRequestNamedTaskHold(PR_URL, sources, flaky, boardPlanOnlyFiling(state, classifyPlanFiling, flaky))).reading,
+    { outcome: "held", taskId: TASK }, "an unreadable re-read binds the files to no head");
+  // The emitter's record grants the filing without a files read; no PR or no head reads no files either.
+  const unread = async (): Promise<never> => { throw new Error("no read expected"); };
+  appendLedger(join(state, "ledger.ndjson"), { run_id: "PLAN-1", task_id: "PLAN-1", step: "pr.opened", pr_url: PR_URL, plan_only: true });
+  assert.equal(await boardPlanOnlyFiling(state, classifyPlanFiling, unread)(PR_URL, SHA), true, "the emitter's record is a filing");
+  assert.equal(await boardPlanOnlyFiling(state, classifyPlanFiling, unread)(`${PR_URL}1`, undefined), false, "no head, no filing");
+  assert.equal(await boardPlanOnlyFiling(state, classifyPlanFiling, unread)("not a pr url", SHA), false, "no pull request, no filing");
+});

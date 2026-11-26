@@ -55,7 +55,8 @@ import {
   type PlanMergeSafetyReadings,
 } from "./plan-pr-merge-safety.js";
 import { readLedgerLines } from "./status.js";
-import { freshPullRowRead, readPullRequestNamedTaskHold, type PullRowRead, type TaskDispatchHoldSources } from "./task-dispatch-hold.js";
+import { classifyPlanFiling } from "./review.js";
+import { boardPlanOnlyFiling, freshPullRowRead, readPullRequestNamedTaskHold, type PullRowRead, type TaskDispatchHoldSources } from "./task-dispatch-hold.js";
 import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetUpdateRefusal, ratchetVerdictHolds, mainChangedPathsSteps, readMergedRatchetInputsSteps, type MergedRatchetInputs, type MergedRatchetJudgement, type RatchetUpdateWithheldEvidence } from "./merged-ratchet-verdict.js";
 import { judgeMergedRatchetsInWorker } from "./merged-ratchet-worker.js";
 import {
@@ -1758,7 +1759,10 @@ export async function readPullRequestTaskHold(
   readBody: PullRowRead = freshPullRowRead,
   sources: Omit<TaskDispatchHoldSources, "stateDir" | "headRefName" | "repository"> = {},
 ): Promise<TaskHoldReading> {
-  return (await readPullRequestNamedTaskHold(prUrl, { ...sources, stateDir: join(loadConfigImpl().root, "state") }, readBody)).reading;
+  const stateDir = join(loadConfigImpl().root, "state");
+  // W1-T14902 (round-10 C3): the board's exact-head plan-filing classification decides a filing, not emitter rows alone.
+  return (await readPullRequestNamedTaskHold(prUrl, { ...sources, stateDir }, readBody,
+    boardPlanOnlyFiling(stateDir, classifyPlanFiling, readBody))).reading;
 }
 
 export function attemptArm(

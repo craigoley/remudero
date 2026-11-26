@@ -160,8 +160,8 @@ test("census: every task-hold lookup goes through the one PR task resolver, fed 
   assert.deepEqual(lookups, ["src/lib/arm-auto-merge.ts:readPullRequestTaskHold", "src/lib/review.ts:guardedTaskHold"],
     "the arm and the review publisher (and the fix lane, which posts through it) are its only callers");
   const review = source(REVIEW_MODULE);
-  assert.match(review, /readPullRequestNamedTaskHold\(opts\.prUrl, \{ stateDir: dirname\(opts\.ledgerPath\) \}\)/,
-    "the publisher names the PR, never a task id: the resolver reads which task it names");
+  assert.match(review, /readPullRequestNamedTaskHold\(opts\.prUrl, \{ stateDir \}, freshPullRowRead, boardPlanOnlyFiling\(stateDir, classifyPlanFiling\)\)/,
+    "the publisher names the PR, never a task id: the resolver reads which task it names, by the board's classification");
   const hold = source(HOLD_MODULE);
   assert.match(hold, /freshPullRowRead: PullRowRead = \(path\) => ghJsonAsync\(\["api", path\], undefined, undefined, \{ fresh: true \}\)/,
     "the act-time read revalidates through the broker");
@@ -178,8 +178,22 @@ test("census: every task-hold lookup goes through the one PR task resolver, fed 
   // The unread-hold publisher classifies the live PR through the same resolver.
   const unread = callsOf("resolvePullRequestTaskSubject").map((call) => `${call.file}:${call.fn}`).sort();
   assert.ok(unread.includes(`${HOLD_MODULE}:readPullRequestNamedTaskHold`));
-  assert.match(source("src/cli/commands/review.ts"), /args\.resolveSubject \?\?\s*\(\(url: string\) => resolvePullRequestTaskSubject\(url, freshPullRowRead, \(\) => args\.planOnlyFiling === true\)\)\)\(args\.prUrl\)/,
+  const cli = source("src/cli/commands/review.ts");
+  assert.match(cli, /args\.resolveSubject \?\?\s*\(\(url: string\) => resolvePullRequestTaskSubject\(url, freshPullRowRead,\s*planOnlyFilingOrBoard\(args\.planOnlyFiling, dirname\(args\.ledgerPath\)\)\)\)\)\(args\.prUrl\)/,
     "the unread-hold publisher resolves the live PR's task before it posts");
+  // Round 10 (C3): every hold lookup classifies a plan filing as the open-PR board does — its ONE classifyPlanFiling,
+  // over the live head's material paths — never emitter rows alone.
+  assert.match(cli, /const board = boardPlanOnlyFiling\(stateDir, classifyPlanFiling\);\s*return \(prUrl, headSha\) => identified === true \|\| board\(prUrl, headSha\);/);
+  assert.match(source(ARM_MODULE), /readPullRequestNamedTaskHold\(prUrl, \{ \.\.\.sources, stateDir \}, readBody,\s*boardPlanOnlyFiling\(stateDir, classifyPlanFiling, readBody\)\)/,
+    "the arm's lookup classifies by the board's classification");
+  const board = source("src/lib/tick-read-worker.ts");
+  assert.match(board, /export \{ classifyPlanFiling, type PlanFilingClassification, type PlanFilingClassificationSource \};/);
+  assert.doesNotMatch(board, /function classifyPlanFiling\(/, "the board classifies with the one definition, not a copy");
+  assert.equal([...review.matchAll(/function classifyPlanFiling\(/g)].length, 1, "positive control: the one definition is in review.ts");
+  assert.match(board, /classifyPlanFiling\(emitterPlanFilings\.get\(pr\.number\) === true, planFilingFiles\.get\(pr\.number\)\)/,
+    "positive control: the board itself classifies through it");
+  assert.match(hold, /\(await runReadStepsAsync\(hydratePlanFilingFilesSteps\(target\.owner, target\.repo,\s*\[\{ number: target\.number, headRefOid: headSha, nominated: true \}\]/,
+    "the hold reads the live head's files through the board's own exact-head hydration and cache");
 });
 
 test("census: every arm and merge write re-reads the task hold with nothing awaited between that read and the write", () => {

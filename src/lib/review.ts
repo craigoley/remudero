@@ -19,7 +19,7 @@ import { homedir, hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { isTestRunner } from "./live-write-guard.js";
-import { readPullRequestNamedTaskHold, taskHoldRefusal, type PullRequestSnapshot, type PullRequestTaskHold, type TaskHoldReading } from "./task-dispatch-hold.js";
+import { boardPlanOnlyFiling, freshPullRowRead, readPullRequestNamedTaskHold, taskHoldRefusal, type PullRequestSnapshot, type PullRequestTaskHold, type TaskHoldReading } from "./task-dispatch-hold.js";
 export { publicTaskHoldDescription, taskHoldReading, taskHoldRefusal, type TaskHoldReading } from "./task-dispatch-hold.js";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -27,7 +27,7 @@ import { isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic, type Is
 import { observeProofFileInside, type ProofFileObservation } from "./proof-file-read.js";
 import { appendLedger } from "./ledger.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import { combinedStatusRestArgs, prStateFromRest, singlePrRestArgs, type GhApiFetcher, type RestPullRow } from "./open-prs-rest.js";
+import { combinedStatusRestArgs, prStateFromRest, singlePrRestArgs, type GhApiFetcher, type PlanFilingFileObservation, type RestPullRow } from "./open-prs-rest.js";
 // W1-T2895: review.ts imports "src/lib/plan-scope" through the leaf module below.
 import { isInPlanScope } from "./plan-scope.js";
 import { defaultGitRunnerAsync, loadPlanAtRef, MOVED_FROM_VALUE, withoutOneMovedFromLine, loadPlanAtRefAsync, readBlobsAtRef, readBlobsAtRefAsync, visibleCriteria, type AcceptanceCriterion, type GitBlobRunner, type KeepsUnseenDependency, type Task, type TaskRisk } from "./plan.js";
@@ -10964,6 +10964,27 @@ export function enforcementDataInDiff(diffFiles: string[]): string[] {
   return diffFiles.filter((f) => Object.hasOwn(ENFORCEMENT_DATA, f));
 }
 
+export type PlanFilingClassificationSource = "emitter-ledger" | "github-files" | "unreadable" | "not-plan-only";
+
+export interface PlanFilingClassification {
+  isPlanFiling: boolean;
+  source: PlanFilingClassificationSource;
+}
+
+/** Titles and branch names may nominate a read, but only the emitter record or material paths grant it. */
+export function classifyPlanFiling(
+  emitterLedger: boolean,
+  files: PlanFilingFileObservation | undefined,
+): PlanFilingClassification {
+  if (emitterLedger) return { isPlanFiling: true, source: "emitter-ledger" };
+  if (!files || files.state === "unreadable") return { isPlanFiling: false, source: "unreadable" };
+  const isPlanOnly = files.paths.length > 0 && files.paths.every(isInPlanScope);
+  const touchesEnforcementData = enforcementDataInDiff([...files.paths]).length > 0;
+  return isPlanOnly && !touchesEnforcementData
+    ? { isPlanFiling: true, source: "github-files" }
+    : { isPlanFiling: false, source: "not-plan-only" };
+}
+
 const USER_VISIBLE_SURFACE_RE = new RegExp(
   [
     "^bin/", // the CLI entry point
@@ -13587,7 +13608,9 @@ function recordedCappedOverride(opts: PostReviewStatusGuardedOpts): CappedOverri
 async function guardedTaskHold(opts: PostReviewStatusGuardedOpts): Promise<PullRequestTaskHold | undefined> {
   if (opts.taskHold !== undefined) return { reading: opts.taskHold };
   if (isTestRunner()) return undefined;
-  return readPullRequestNamedTaskHold(opts.prUrl, { stateDir: dirname(opts.ledgerPath) });
+  // W1-T14902 (round-10 C3): the board's exact-head plan-filing classification decides a filing, not emitter rows alone.
+  const stateDir = dirname(opts.ledgerPath);
+  return readPullRequestNamedTaskHold(opts.prUrl, { stateDir }, freshPullRowRead, boardPlanOnlyFiling(stateDir, classifyPlanFiling));
 }
 
 /** W1-T14902 (round-8 C1): the input digest a hold's pending write carries — that of the head and body the hold was

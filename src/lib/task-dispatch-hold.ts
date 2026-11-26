@@ -7,6 +7,7 @@ import { planDestinationRepository } from "./plan-destination.js";
 import { ghJsonAsync } from "./github-transport.js";
 import { isPlanOnlyFilingPr, resolveReviewTaskId, usesUntaskedReviewMetadata } from "./untasked-review.js";
 import { readLedgerUnionRecords } from "./ledger-union.js";
+import { hydratePlanFilingFilesSteps, loadPlanFilingFileCache, type GhApiFetcher, type GhReadSteps, type PlanFilingFileObservation } from "./open-prs-rest.js";
 
 /**
  * W1-T14902: the one reader of a named task's `dispatch_hold`, for the review's guarded poster and the merge path alike.
@@ -230,8 +231,58 @@ export type PullRowRead = (path: string) => Promise<unknown>;
  *  joined to a GET already under way (gh-read-broker.ts), which may have left before an edit. */
 export const freshPullRowRead: PullRowRead = (path) => ghJsonAsync(["api", path], undefined, undefined, { fresh: true });
 
-/** Whether the emitter ledger records `prUrl` as a plan-only filing ({@link isPlanOnlyFilingPr}). */
-export type PlanOnlyFilingRead = (prUrl: string) => boolean | Promise<boolean>;
+/** Whether `prUrl` is a plan-only filing at the live head `headSha` (absent when the pull row named none). */
+export type PlanOnlyFilingRead = (prUrl: string, headSha?: string) => boolean | Promise<boolean>;
+
+/** The board's plan-filing classification (review.ts `classifyPlanFiling`), injected: this leaf cannot import review. */
+export type PlanFilingClassifier = (emitterLedger: boolean, files: PlanFilingFileObservation | undefined) => { isPlanFiling: boolean };
+
+/** W1-T14902 (round-10 C3): the board's exact-head plan-filing classification, the one the open-PR board grants a
+ *  filing by — the emitter's `pr.opened{plan_only}` record, OR (`github-files`) the live head's own changed paths, all in
+ *  plan scope and none enforcement data. The paths come from the board's kept file cache keyed by that exact head, else
+ *  one fresh read of the PR's files bound to the head: the pull row is re-read after it, and a head that moved reads
+ *  as no filing. Every unread or unbound answer is no filing, so the run branch names the task and its hold is read —
+ *  never an exemption. */
+/** The board's read steps, awaited (git-push.ts's `runStepsAsync`, restated: review reaches this leaf, so importing it
+ *  would close a cycle). */
+async function runReadStepsAsync<R>(steps: GhReadSteps<R>): Promise<R> {
+  let next = steps.next();
+  while (!next.done) {
+    let value: unknown;
+    try {
+      value = await next.value();
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(value);
+  }
+  return next.value;
+}
+
+export function boardPlanOnlyFiling(stateDir: string, classify: PlanFilingClassifier,
+  read: PullRowRead = freshPullRowRead): PlanOnlyFilingRead {
+  const emitter = ledgerPlanOnlyFiling(stateDir);
+  return async (prUrl, headSha) => {
+    const emitterLedger = await emitter(prUrl);
+    const target = pullRequestOfUrl(prUrl);
+    if (emitterLedger || headSha === undefined || target === undefined) return classify(emitterLedger, undefined).isPlanFiling;
+    const fetchFiles: GhApiFetcher = (args) => read(args[1]!);
+    const files = (await runReadStepsAsync(hydratePlanFilingFilesSteps(target.owner, target.repo,
+      [{ number: target.number, headRefOid: headSha, nominated: true }], fetchFiles, loadPlanFilingFileCache(stateDir),
+      { missCap: 1 }))).get(target.number);
+    if (files?.state === "complete" && files.cache === "miss") {
+      let liveHead: unknown;
+      try {
+        liveHead = ((await read(`repos/${target.owner}/${target.repo}/pulls/${target.number}`)) as { head?: { sha?: unknown } } | null)?.head?.sha;
+      } catch (error) {
+        liveHead = `unreadable: ${String((error as Error)?.message ?? error)}`;
+      }
+      if (liveHead !== headSha) return classify(false, { state: "unreadable", reason: "fetch-failed" }).isPlanFiling;
+    }
+    return classify(false, files).isPlanFiling;
+  };
+}
 
 /** The instance ledger's answer, as `rmd review` reads it (the live file, awaited: the daemon loop reaches this); an
  *  unreadable ledger records no filing. */
@@ -259,7 +310,12 @@ export async function resolvePullRequestTaskSubject(prUrl: string | undefined, r
   planOnlyFiling: PlanOnlyFilingRead = () => false): Promise<PullRequestTaskSubject> {
   const target = pullRequestOfUrl(prUrl);
   if (target === undefined) throw new Error(`no pull request in ${JSON.stringify(prUrl)}`);
-  return pullRequestTaskSubjectOf(await read(`repos/${target.owner}/${target.repo}/pulls/${target.number}`), await planOnlyFiling(prUrl!));
+  const pull = await read(`repos/${target.owner}/${target.repo}/pulls/${target.number}`);
+  const named = pullRequestTaskSubjectOf(pull, false);
+  // The classification is read only where it decides the task (no trailer, a task-bearing run branch): a trailer wins
+  // over it, and an untasked head is untasked either way, so neither spends a files read.
+  if (pullRequestTaskSubjectOf(pull, true).taskId === named.taskId) return named;
+  return pullRequestTaskSubjectOf(pull, await planOnlyFiling(prUrl!, named.snapshot.headSha));
 }
 
 /** A hold reading and the PR snapshot it was judged on (absent when the PR could not be read). */

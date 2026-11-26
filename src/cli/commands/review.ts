@@ -8,7 +8,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
-import { MOVER_BRANCH_PREFIX, movedFromCommit, parseMoverReceipts, verifyMoverRemoval, type MoverOpsRead, verifyMoverRemovalPublic, type MoverRemovalVerdict, parseReviewerHistoryEvidence, parseWhitelistedProof, reviewRowNamesPr, resolveProofTestPath, resolveNameFilteredCandidatesAsync, publicTaskHoldDescription, taskHoldRefusal, type TaskHoldReading } from "../../lib/review.js";
+import { MOVER_BRANCH_PREFIX, movedFromCommit, parseMoverReceipts, verifyMoverRemoval, type MoverOpsRead, verifyMoverRemovalPublic, type MoverRemovalVerdict, parseReviewerHistoryEvidence, parseWhitelistedProof, reviewRowNamesPr, resolveProofTestPath, resolveNameFilteredCandidatesAsync, publicTaskHoldDescription, taskHoldRefusal, classifyPlanFiling, type TaskHoldReading } from "../../lib/review.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -70,7 +70,7 @@ import { flagValue } from "../../lib/cli-args.js";
 import { resolveReviewTarget, reviewTaskIdFromBody, reviewPrNumber, reviewViewArgs } from "../../lib/report-commands.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "../../lib/staged-install.js";
 import { UNTASKED_REVIEW_BUDGET_USD, isPlanOnlyFilingPr, resolveReviewTaskId, reviewStateFromRollup, reviewStatusHistoryFromRest, usesUntaskedReviewMetadata } from "../../lib/tick-read-worker.js";
-import { freshPullRowRead, resolvePullRequestTaskSubject, type PullRequestTaskSubject } from "../../lib/task-dispatch-hold.js";
+import { boardPlanOnlyFiling, freshPullRowRead, resolvePullRequestTaskSubject, type PlanOnlyFilingRead, type PullRequestTaskSubject } from "../../lib/task-dispatch-hold.js";
 
 export interface ReviewCommandHost {
   readonly GIT_UNTRACKED_FILES_ALL: string;
@@ -3773,6 +3773,12 @@ export function planOnlyPhaseFields(marks: Record<string, number>, armedAt: numb
  * earlier pass included) with pending naming the unread hold, through the pending-only {@link postUnreadTaskHoldGuarded},
  * which ledgers what the post actually did. A throw is ledgered too, never thrown out of the review's exit.
  */
+/** W1-T14902 (round-10 C3): this review's own plan-only identification, else the board's exact-head classification. */
+function planOnlyFilingOrBoard(identified: boolean | undefined, stateDir: string): PlanOnlyFilingRead {
+  const board = boardPlanOnlyFiling(stateDir, classifyPlanFiling);
+  return (prUrl, headSha) => identified === true || board(prUrl, headSha);
+}
+
 export async function publishUnreadTaskCatalogHold(args: {
   publish?: typeof postUnreadTaskHoldGuarded;
   post: Parameters<typeof postReviewStatusGuarded>[0]["post"];
@@ -3794,7 +3800,8 @@ export async function publishUnreadTaskCatalogHold(args: {
   let inputDigest = args.reviewInputDigest;
   try {
     const subject = await (args.resolveSubject ??
-      ((url: string) => resolvePullRequestTaskSubject(url, freshPullRowRead, () => args.planOnlyFiling === true)))(args.prUrl);
+      ((url: string) => resolvePullRequestTaskSubject(url, freshPullRowRead,
+        planOnlyFilingOrBoard(args.planOnlyFiling, dirname(args.ledgerPath)))))(args.prUrl);
     if (subject.untasked) {
       args.log("review.dispatch_hold_untasked", { task_id: subject.taskId ?? null, head_ref: subject.headRefName });
       return;
