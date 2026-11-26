@@ -5,11 +5,13 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { join } from "node:path";
 
-import { fixture, run } from "#test/helpers/host-cleanup-fixture.js";
+import { SCRIPT, fixture, run } from "#test/helpers/host-cleanup-fixture.js";
 
 const MB = 1048576;
 
@@ -69,4 +71,43 @@ test("W1-T14401 criterion 2: a failed rotation still lets the run write its line
   assert.equal(readdirSync(logs).filter(n => n.endsWith(".gz") || n.endsWith(".part")).length, 0, "no partial sibling is left");
   assert.match(r.stdout, /^rmd-host-cleanup: /m, "the pass still ran and wrote its own lines");
   assert.ok(existsSync(log));
+});
+
+test("W1-T14401 criterion 2: a pass that waited for the lock keeps its own WAIT line in the live log after rotating", async () => {
+  const fx = fixture();
+  const logs = join(fx.root, "logs");
+  mkdirSync(logs, { recursive: true });
+  const log = join(logs, "host-cleanup.log");
+  const old = "KEEP /old: an earlier pass\n".repeat(Math.ceil((2 * MB) / 27));
+  writeFileSync(log, old);
+  // The 6-hourly cron line appends the pass's stdout and stderr to the log (`>> host-cleanup.log 2>&1`), and
+  // the hourly tmp sweep holds the lock, so this pass logs "WAIT pass" before it rotates.
+  const ready = join(fx.root, "held");
+  const holder = spawn(fx.flock, [fx.env.RMD_CLEANUP_LOCK_FILE, "bash", "-c", `echo held > '${ready}'; sleep 2`], { stdio: "ignore", detached: true });
+  const exited = once(holder, "close");
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(ready) || readFileSync(ready, "utf8") !== "held\n") {
+    if (Date.now() > deadline) throw new Error("the lock holder never took the lock");
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  const fd = openSync(log, "a");
+  let r;
+  try {
+    r = spawnSync("bash", [SCRIPT], {
+      stdio: ["ignore", fd, fd],
+      env: { ...process.env, ...fx.env, RMD_CLEANUP_LOG_ROTATE_PATHS: log, RMD_CLEANUP_LOG_MAX_MB: "1" },
+    });
+  } finally {
+    closeSync(fd);
+    await exited;
+  }
+  const live = readFileSync(log, "utf8");
+  assert.equal(r.status, 0, live.slice(-4000));
+  const siblings = readdirSync(logs).filter(n => /^host-cleanup\.log\.\d{8}T\d{6}Z\.gz$/.test(n));
+  assert.equal(siblings.length, 1, `the log was rotated: ${readdirSync(logs).join(", ")}`);
+  assert.equal(gunzipSync(readFileSync(join(logs, siblings[0]!))).toString(), old, "the sibling holds exactly the log as it was before this pass");
+  assert.match(live, /^WAIT pass: another janitor pass holds the lock; waiting up to 1800 s$/m, "this pass's WAIT line stays in the live log");
+  assert.ok(live.indexOf("WAIT pass") < live.indexOf("ROTATE "), "the WAIT line was written before the rotation");
+  assert.doesNotMatch(live, /KEEP \/old: an earlier pass/, "the earlier passes' lines moved to the sibling");
+  assert.match(live, /^rmd-host-cleanup: decision-report /m, "the rest of the pass reached the live log");
 });
