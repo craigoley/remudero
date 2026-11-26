@@ -34,7 +34,7 @@ test("W1-T14944 criterion 1: a page read that fails with HTTP 502 twice and then
     const waits: number[] = [];
     const result = await ghApiFetch(async () => {
       n += 1;
-      if (n <= 8) throw new Error(`gh: Server Error (HTTP ${status})`);
+      if (n <= 8) throw Object.assign(new Error("Command failed: gh api repos/o/r/commits"), { stderr: `gh: Server Error (HTTP ${status})\n` });
       return PAGE;
     }, { sleep: async (ms) => { waits.push(ms); } })("repos/o/r/commits");
     assert.equal(result.ok, true, `HTTP ${status} is retried until the page reads`);
@@ -52,4 +52,19 @@ test("W1-T14944 criterion 2: a non-5xx read failure is not retried", async () =>
     assert.equal(calls, 1, `${message} is read once`);
     assert.deepEqual(sleeps, [], `${message} waits for nothing`);
   }
+});
+
+test("W1-T14944 criterion 2: a non-5xx read failure is not retried, even when the endpoint text names HTTP 502", async () => {
+  // `rmd field-trials --source trial=o/HTTP 502` puts that text in the command, which the error message repeats.
+  const sleeps: number[] = [];
+  let calls = 0;
+  const result = await ghApiFetch(async () => {
+    calls += 1;
+    if (calls > 3) return "[]"; // a retrying build stops here instead of looping forever
+    throw Object.assign(new Error("Command failed: gh api repos/o/HTTP 502/pulls\ngh: Not Found (HTTP 404)"),
+      { stderr: "gh: Not Found (HTTP 404)\n" });
+  }, { sleep: async (ms) => { sleeps.push(ms); } })("repos/o/HTTP 502/pulls");
+  assert.deepEqual(result, { ok: false, reason: "github-read-failed" });
+  assert.equal(calls, 1, "the 404 is read once");
+  assert.deepEqual(sleeps, [], "and waits for nothing");
 });
