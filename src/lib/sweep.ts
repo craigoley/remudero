@@ -146,7 +146,7 @@ import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflight
 import { sameHost } from "./host-identity.js";
 import { reclaimStaleLock, realWriteAtomicIo, writeAtomic } from "./fs-race-safe.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
-import { appendLedger, isRealStrike, type LedgerLine } from "./ledger.js";
+import { appendLedger, isRealStrike, type LedgerLine, REVIEW_LANE_ABORTED_STEP } from "./ledger.js";
 import { LEDGER_SECURITY_PRODUCER_LOCK_SUFFIX } from "./ledger-path.js";
 import { appendOperatorNote, loadOperatorNoteRows, loadOperatorNotesForTask, operatorNoteStore, type OperatorNoteEntry } from "./operator-notes.js";
 import {
@@ -4988,9 +4988,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // W1-T15005: a fix round pushed mid-review supersedes that review ("review input changed after this verdict
         // started"), so the round waits while a live review owns this exact head; a verdict or a proven-dead owner ends it.
         // Read off the loop; a ledger not yet written holds no review in flight, so the round dispatches as before.
-        const reviewLines = pr.reviewState === "pending" ? parseLedger(await fs.promises.readFile(ledgerPath, "utf8")
-          .catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; })) : [];
-        const reviewRun = reviewInFlightOnHead(pr, reviewLines);
+        const reviewRun = await reviewInFlightAtDispatch(pr, ledgerPath);
         if (reviewRun !== undefined) {
           log("sweep.fix_deferred_review_in_flight", { pr_number: pr.prNumber, head: pr.headSha, review_run: reviewRun });
           return false;
@@ -7453,24 +7451,46 @@ export const REVIEW_RUN_SETTLED_STEPS: ReadonlySet<string> = new Set(["review.po
   "review.skipped_closed_lifecycle"]);
 
 /** W1-T15005: the run whose review of `pr`'s current head is in flight, or undefined. A run is in flight from its
- *  review.pending_posted claim on this head until it writes a row that settles it ({@link REVIEW_RUN_SETTLED_STEPS}); a
- *  takeover ends the run it took over, and the run the view proves dead (reviewPendingOwnerDead) holds nothing. */
+ *  review.pending_posted claim on this head until it writes a row that settles it ({@link REVIEW_RUN_SETTLED_STEPS}) or
+ *  ends it without a verdict (review.lane_aborted); a takeover ends the run it took over; the sweep's in-process reclaim
+ *  of this head (aborted or released unsettled) ends every claim before it; and the run the view proves dead
+ *  (reviewPendingOwnerDead) holds nothing. Each end is a row, never an age. */
 export function reviewInFlightOnHead(
-  pr: Pick<OpenPrView, "headSha" | "prUrl" | "taskId" | "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerRunId">,
+  pr: Pick<OpenPrView, "prNumber" | "headSha" | "prUrl" | "taskId" | "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerRunId">,
   lines: ReadonlyArray<Record<string, unknown>>,
 ): string | undefined {
   if (pr.reviewState !== "pending") return undefined;
   const live = new Set<string>();
   for (const line of lines) {
-    if (line.head_sha !== pr.headSha || !reviewRowNamesPr(line, pr.taskId, pr.prUrl) || typeof line.run_id !== "string") continue;
+    if (line.head_sha !== pr.headSha) continue;
+    // The reclaim row is the sweep's own, under the sweep's run id, so it names the PR by number.
+    if (line.step === REVIEW_IN_PROCESS_RECLAIMED_STEP) {
+      if (line.pr_number === pr.prNumber) live.clear();
+      continue;
+    }
+    if (!reviewRowNamesPr(line, pr.taskId, pr.prUrl) || typeof line.run_id !== "string") continue;
     if (line.step === "review.pending_posted") {
       if (typeof line.took_over_run_id === "string") live.delete(line.took_over_run_id);
       live.delete(line.run_id);
       live.add(line.run_id);
-    } else if (typeof line.step === "string" && REVIEW_RUN_SETTLED_STEPS.has(line.step)) live.delete(line.run_id);
+    } else if (typeof line.step === "string" && (REVIEW_RUN_SETTLED_STEPS.has(line.step) || line.step === REVIEW_LANE_ABORTED_STEP)) {
+      live.delete(line.run_id);
+    }
   }
   if (pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerRunId !== undefined) live.delete(pr.reviewPendingOwnerRunId);
   return [...live].at(-1);
+}
+
+/** W1-T15005: {@link reviewInFlightOnHead} over the live ledger, read off the loop. A ledger not yet written holds no
+ *  review in flight; any other read failure propagates. The fix dispatch and the owned-conflict round share this read. */
+export async function reviewInFlightAtDispatch(
+  pr: Parameters<typeof reviewInFlightOnHead>[0],
+  ledgerPath: string,
+): Promise<string | undefined> {
+  if (pr.reviewState !== "pending") return undefined;
+  const text = await fs.promises.readFile(ledgerPath, "utf8")
+    .catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; });
+  return reviewInFlightOnHead(pr, parseLedger(text));
 }
 
 /** W1-T14035/W1-T14177 — the death proof is a snapshot, proven about the run the view's ledger named for the live status the
@@ -29540,7 +29560,10 @@ export async function runSweep(
               }
               // W1-T11170: an owned head's worker round is recorded before it starts, and comments after it lands.
               const ownedDispatch = (onPhase?: DetachedFixPhaseObserver, control?: DetachedFixControl) => async () => {
-                if (!ownedRound) return deps.dispatchFix(pr, conflictedEvidence, onPhase, control);
+                // W1-T15005: a round the dispatch defers for a review in flight never ran, so it records no worker round.
+                if (!ownedRound || await reviewInFlightAtDispatch(pr, deps.ledgerPath) !== undefined) {
+                  return deps.dispatchFix(pr, conflictedEvidence, onPhase, control);
+                }
                 appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: escalationTaskIdFor(pr), step: OWNED_CONFLICT_ROUND_STEP,
                   pr_number: pr.prNumber, head_sha: pr.headSha, main_sha: mainTipSha ?? null, round: "worker",
                   head_kind: ownedRound.kind, push: conflictedEvidence.ownedConflictHead!.push,

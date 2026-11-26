@@ -5,7 +5,7 @@
  * PR's current head, and dispatches as before once that review settles or its owner is proven dead.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -13,6 +13,7 @@ import { test, type TestContext } from "node:test";
 import * as sweep from "#src/lib/sweep.js";
 import type { FixDispatchEvidence, OpenPrView, RollupCheckEntry } from "#src/lib/sweep.js";
 import type { Config } from "#src/lib/config.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const HEAD = "a".repeat(40);
@@ -119,7 +120,7 @@ test("W1-T15005 criterion 3: a PR with no review in flight dispatches as today",
     assert.equal(deferrals(d.rows).length, 0, `THE CLAIM: ${why} defers nothing`);
     assert.equal(d.seen.claimKeys, 1, `${why}: the round takes its branch claim exactly as today`);
   }
-  assert.equal(sweep.reviewInFlightOnHead({ headSha: HEAD, prUrl: PR_URL, taskId: TASK, reviewState: "success" }, [claim("r")]), undefined,
+  assert.equal(sweep.reviewInFlightOnHead({ prNumber: 15005, headSha: HEAD, prUrl: PR_URL, taskId: TASK, reviewState: "success" }, [claim("r")]), undefined,
     "a non-pending head never waits, whatever the ledger holds");
 });
 
@@ -128,4 +129,72 @@ test("a live ledger not yet written holds no review in flight, so the fix round 
   await d.dispatch();
   assert.equal(deferrals(d.rows).length, 0, "nothing defers");
   assert.equal(d.seen.claimKeys, 1, "the round takes its branch claim as today");
+});
+
+test("W1-T15005 criterion 3: a review that ended with no verdict holds nothing, so a red head's fix round dispatches", async (t) => {
+  const reclaimed = (outcome: string): Row => ({ step: sweep.REVIEW_IN_PROCESS_RECLAIMED_STEP, run_id: "SWEEP-PASS", task_id: TASK,
+    pr_number: 15005, head_sha: HEAD, outcome, ts: "2026-11-26T16:40:00.000Z" });
+  const ended: Array<[string, Row[]]> = [
+    // The review lane aborted it: review.lane_aborted is its last row, and the daemon that ran it is still alive.
+    ["a lane-aborted review", [claim("review-PR15005-1"), settled("review-PR15005-1", "review.lane_aborted")]],
+    // The sweep reclaimed the stuck in-process review under its own run id: aborted, then released unsettled.
+    ["an aborted in-process review", [claim("review-PR15005-1"), reclaimed("aborted")]],
+    ["a review released unsettled", [claim("review-PR15005-1"), reclaimed("aborted"), reclaimed("released-unsettled")]],
+  ];
+  for (const [why, ledger] of ended) {
+    // Every pass reads the same rows: a review that ended without a verdict never comes back to life.
+    for (let pass = 0; pass < 3; pass++) {
+      const d = dispatcher(t, ledger);
+      await d.dispatch();
+      assert.equal(deferrals(d.rows).length, 0, `THE CLAIM: ${why} defers nothing (pass ${pass + 1})`);
+      assert.equal(d.seen.claimKeys, 1, `${why}: the red head's round takes its branch claim as today`);
+    }
+  }
+  // Positive controls: a reclaim of another PR or head ends nothing, and a claim posted after the reclaim is in flight.
+  for (const [why, ledger] of [
+    ["a reclaim of another PR", [claim("review-PR15005-1"), { ...reclaimed("aborted"), pr_number: 1 }]],
+    ["a reclaim of another head", [claim("review-PR15005-1"), { ...reclaimed("aborted"), head_sha: OTHER }]],
+    ["a new claim after the reclaim", [claim("review-PR15005-1"), reclaimed("released-unsettled"), claim("review-PR15005-2")]],
+  ] as Array<[string, Row[]]>) {
+    const d = dispatcher(t, ledger);
+    await d.dispatch();
+    assert.equal(deferrals(d.rows).length, 1, `${why} still waits`);
+  }
+});
+
+test("W1-T15005 criterion 1: an owned conflicted head whose round waits on a review records no worker round", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t15005-owned-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ledgerPath = join(root, "ledger.ndjson");
+  const branch = "review-replay-garden-1795700000000";
+  const prUrl = "https://github.com/example/fixture/pull/15006";
+  const pending = { step: "review.pending_posted", run_id: "review-PR15006-1", pr_url: prUrl, head_sha: HEAD };
+  const pass = async (onDisk: Row[]) => {
+    writeFileSync(ledgerPath, onDisk.map((row) => `${JSON.stringify(row)}\n`).join(""));
+    const ledger: Record<string, unknown>[] = [];
+    let dispatched = 0;
+    const deps = {
+      ledgerPath, runId: "owned-conflict-t15005", readLedger: () => ledger, appendLine: (_p: string, row: Record<string, unknown>) => { ledger.push(row); },
+      arm: () => assert.fail("a dirty PR cannot arm"), close: () => assert.fail("a dirty PR is not closed"), escalate: () => {},
+      readMainTip: () => "b".repeat(40), dispatchFix: () => { dispatched++; return false; },
+      claimFixAdmission: () => ({ admitted: true }), readActiveWorkerCount: () => 0,
+      readFixPressure: () => ({ availableMib: 8192, floorMib: 1024 }),
+      readPlanRepairFacts: () => ({ authorLogin: "remudero-fleet[bot]", headRepoFork: false }),
+      regenerateConflict: async () => ({ outcome: "fell-through", paths: [], reason: "no deterministic tier in this fixture" }),
+      postConflictComment: () => {},
+    } as unknown as sweep.SweepDeps;
+    const pr = { prNumber: 15006, prUrl, headRefName: branch, headSha: HEAD, mergeState: "dirty", mergeableState: "dirty",
+      checksState: "none", reviewState: "pending", unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false,
+      lastActivityAt: new Date().toISOString(), createdAt: new Date().toISOString(),
+      mergeConflict: { files: [{ path: "test/fixtures/review-replay/sample.ndjson", oursDeleted: 1, theirsDeleted: 1 }], oursLog: "h", theirsLog: "m" },
+    } as unknown as OpenPrView;
+    await withLiveWritesAllowed(async () => { await sweep.runSweep([pr], deps); await sweep.drainDetachedSweepActions(); });
+    return { dispatched, rounds: ledger.filter((row) => row.step === sweep.OWNED_CONFLICT_ROUND_STEP && row.round === "worker") };
+  };
+  const waiting = await pass([pending]);
+  assert.equal(waiting.dispatched, 1, "the dispatch still decides, and defers");
+  assert.deepEqual(waiting.rounds, [], "THE CLAIM: a round the review holds back records no worker round");
+  // Positive control: once that review posts, the round is recorded before it runs, as today.
+  const free = await pass([pending, { ...pending, step: "review.posted", state: "failure" }]);
+  assert.equal(free.rounds.length, 1, "the worker round is recorded when no review is in flight");
 });
