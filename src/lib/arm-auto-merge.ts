@@ -55,6 +55,7 @@ import {
   type PlanMergeSafetyReadings,
 } from "./plan-pr-merge-safety.js";
 import { readLedgerLines } from "./status.js";
+import { boardPlanOnlyFiling, freshPullRowRead, readPullRequestNamedTaskHold, type PlanOnlyFilingRead, type PullRowRead, type TaskDispatchHoldSources } from "./task-dispatch-hold.js";
 import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetUpdateRefusal, ratchetVerdictHolds, mainChangedPathsSteps, readMergedRatchetInputsSteps, type MergedRatchetInputs, type MergedRatchetJudgement, type RatchetUpdateWithheldEvidence } from "./merged-ratchet-verdict.js";
 import { judgeMergedRatchetsInWorker } from "./merged-ratchet-worker.js";
 import {
@@ -88,6 +89,9 @@ import {
 } from "./live-write-guard.js";
 import {
   automergeHoldFromLedger,
+  planFilingFromChangedFiles,
+  taskHoldRefusal,
+  type TaskHoldReading,
   cappedOverrideFromLedger,
   decideAutoMergeArm,
   decideArmFromLedgerVerdict,
@@ -638,6 +642,9 @@ export interface ArmDeps<A extends boolean = false> {
   enqueue?: (prUrl: string) => MaybeAsync<void, A>;
   /** W1-T4581 — explicit stack parents must all be merged before either arm or direct-merge path. */
   stackPrerequisite?: (prUrl: string) => MaybeAsync<StackPrerequisiteCheck, A>;
+  /** W1-T14902 — OPTIONAL. The `dispatch_hold` of the task the PR's `Remudero-Task:` trailer names, read at the plan's
+   *  main. `held`, `unread` or a throw refuses every arm and direct merge; absent keeps every path as before. */
+  taskHold?: (prUrl: string) => MaybeAsync<TaskHoldReading, A>;
   /** OPTIONAL. Rewrites each closing keyword in the PR's body that names another OPEN pull request,
    *  before any arm, enqueue or merge: GitHub closes that PR when this one merges (core #10856,
    *  closed by console #2035's merge on 2026-10-11). See lib/closing-reference-guard.ts. */
@@ -731,9 +738,18 @@ export function realArmDeps(
       assertLiveWriteAllowed("gh-pr-merge", `rewriting a closing keyword in the body of ${prUrl} before merging it`);
       return runGh(args, { encoding: "utf8", stdio: "pipe" });
     }, recordClosingReferenceToLedger(loadConfigImpl))),
+    // W1-T14902 (invariant an-unread-hold-holds): the synchronous arm cannot read the plan or the ops catalog without a
+    // synchronous spawn (W1-T13204), so it FAILS CLOSED: every production sync arm reads the hold as unread and refuses.
+    // Production lanes arm through realArmDepsAsync, whose reader replaces this one. Under the test runner a suite
+    // spreading these deps with fakes keeps today's arm (W1-T5939's precedent); its own suite proves this reader.
+    ...(isTestRunner() ? {} : { taskHold: SYNC_ARM_TASK_HOLD }),
     say: (msg) => console.log(msg),
   };
 }
+
+/** W1-T14902: the synchronous arm's reading — unread, so attemptArm refuses and its row names why. */
+export const SYNC_ARM_TASK_HOLD = (): TaskHoldReading => ({ outcome: "unread", taskId: "the named task",
+  reason: "the synchronous arm has no task-hold reader; this lane must arm through the awaited arm" });
 
 /**
  * W1-T5284 — {@link realArmDeps} for the daemon: the same deps, with the at-open arm's `gh pr merge`
@@ -741,7 +757,7 @@ export function realArmDeps(
  * core daemon's profile: `ghExec` 10.4 s and {@link baseBranchRequiresMergeQueue} 3.5 s on the loop.
  */
 export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig, qualification?: SelectedModeQualification): ArmDeps<true> {
-  const { sleepSync: _sleepSync, ...shared } = realArmDeps(loadConfigImpl, qualification);
+  const { sleepSync: _sleepSync, taskHold: _syncTaskHold, ...shared } = realArmDeps(loadConfigImpl, qualification);
   return {
     ...shared,
     contributorAdmission: (prUrl, head) => runStepsAsync(armAdmissionSteps(prUrl, head, loadConfigImpl, readAdmissionRestAsync)),
@@ -758,6 +774,9 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig,
     },
     readPlanTouch: (prUrl, headSha) => runStepsAsync(cachedPlanTouchSteps(prUrl, headSha, ghJsonAsync)),
     stackPrerequisite: (prUrl) => runStepsAsync(stackPrerequisiteSteps(prUrl, ghJsonAsync)),
+    // W1-T14902: as the sweep's Actions status reader (W1-T5939), the live read is left out under the test runner, where
+    // a suite spreading these deps with some fakes would otherwise read a real PR body; its own suite injects it.
+    ...(isTestRunner() ? {} : { taskHold: (prUrl: string) => readPullRequestTaskHold(prUrl, loadConfigImpl) }),
     closingReferences: (prUrl) => runStepsAsync(closingReferenceGuardSteps(prUrl, ghJsonAsync, async (args) => {
       assertLiveWriteAllowed("gh-pr-merge", `rewriting a closing keyword in the body of ${prUrl} before merging it`);
       return ghTextAsync(args);
@@ -1661,10 +1680,60 @@ function operatorHoldRefusal(
   return { outcome: "hold-refused" };
 }
 
+/** W1-T14902 (invariant an-unread-hold-holds): a PR whose named task awaits the operator is neither armed nor merged,
+ *  and one whose hold could not be read is refused too. The ledgered `error` names the task and the hold. */
+function* taskHoldRefusalSteps(
+  prUrl: string,
+  deps: Pick<ArmDeps<true>, "say"> & Partial<Pick<ArmDeps<true>, "taskHold">>,
+): Steps<ArmAttemptResult | undefined> {
+  if (!deps.taskHold) {
+    // Fail closed: a production arm with no reader wired never skips the check (a fixture's partial fakes do).
+    if (!isRealArmDepsObject(deps) || isTestRunner()) return undefined;
+    deps = { ...deps, taskHold: SYNC_ARM_TASK_HOLD };
+  }
+  let reading: TaskHoldReading;
+  try {
+    reading = yield* step(() => deps.taskHold!(prUrl));
+  } catch (e) {
+    reading = { outcome: "unread", taskId: "the named task", reason: String((e as Error)?.message ?? e) };
+  }
+  const refusal = taskHoldRefusal(reading);
+  if (refusal === undefined) return undefined;
+  deps.say(`automerge.task_hold_refused (W1-T14902): ${refusal} — no arm and no direct merge until the operator ` +
+    `releases it: ${prUrl}`);
+  return { outcome: "hold-refused", error: refusal };
+}
+
+/** W1-T14902 (round 10, C2): the holds read AGAIN at each write, after every step that awaited since the entry read
+ *  (the stack and closing-reference reads, the ratchet judge, a direct merge's preflight): the task's own first, from a
+ *  fresh read of the live PR, so a trailer edited during those waits to name a held task is the one judged, then the
+ *  operator's, as before. */
+function* holdsBeforeWriteSteps(
+  prUrl: string,
+  deps: Pick<ArmDeps<true>, "say"> & Partial<Pick<ArmDeps<true>, "ledgerLines" | "taskHold">>,
+): Steps<ArmAttemptResult | undefined> {
+  return (yield* taskHoldRefusalSteps(prUrl, deps)) ?? operatorHoldRefusal(prUrl, deps);
+}
+
+/** W1-T14902: the production reading — the task the live PR names, from one broker-revalidated read at act time (a
+ *  cached pre-edit body would miss a trailer just edited to a held task), through the one PR task resolver. */
+export async function readPullRequestTaskHold(
+  prUrl: string,
+  loadConfigImpl: typeof loadConfig = loadConfig,
+  readBody: PullRowRead = freshPullRowRead,
+  sources: Omit<TaskDispatchHoldSources, "stateDir" | "headRefName" | "repository"> = {},
+  planOnlyFiling?: PlanOnlyFilingRead,
+): Promise<TaskHoldReading> {
+  const stateDir = join(loadConfigImpl().root, "state");
+  // A trailerless run-branch PR is classified as the board classifies it (W1-T14902 round 10, C3).
+  return (await readPullRequestNamedTaskHold(prUrl, { ...sources, stateDir }, readBody,
+    planOnlyFiling ?? boardPlanOnlyFiling(stateDir, planFilingFromChangedFiles))).reading;
+}
+
 export function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps<false>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">>,
+    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance" | "taskHold">>,
   priorHeadSha?: string,
   // W1-T3551: read off `OpenPrView.isDraft` (POSITIVE match only — `undefined`/`false` both fall
   // through unchanged). This is the ONE shared call site {@link armAutoMergeDetailed} (ledger-gated
@@ -1681,7 +1750,7 @@ export function attemptArm(
 export function attemptArmAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance" | "taskHold">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Promise<ArmAttemptResult> {
@@ -1691,7 +1760,7 @@ export function attemptArmAsync(
 function* attemptArmSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "checksGreenReviewed" | "readChecksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "checksGreenReviewed" | "readChecksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance" | "taskHold">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Steps<ArmAttemptResult> {
@@ -1710,6 +1779,9 @@ function* attemptArmSteps(
     );
     return { outcome: "draft-refused" };
   }
+  // W1-T14902: the task's own hold first, so its refusal row names dispatch_hold even under a standing operator hold.
+  const taskHeld = yield* taskHoldRefusalSteps(prUrl, deps);
+  if (taskHeld) return taskHeld;
   const heldAtEntry = operatorHoldRefusal(prUrl, deps);
   if (heldAtEntry) return heldAtEntry;
   if (deps.stackPrerequisite) {
@@ -1770,7 +1842,7 @@ function* attemptArmSteps(
   if ("hold" in judged) return judged.hold;
   try {
     yield* step(() => deps.contributorAdmission?.(prUrl, priorHeadSha));
-    const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
+    const heldBeforeWrite = yield* holdsBeforeWriteSteps(prUrl, deps);
     if (heldBeforeWrite) return heldBeforeWrite;
     yield* step(() => deps.armAuto(prUrl));
     return { outcome: "armed", ...(judged.judge ? { ratchetJudge: judged.judge } : {}) };
@@ -1802,7 +1874,7 @@ function* attemptArmSteps(
       if (!preflight.proceed) return preflight.result;
       try {
         yield* step(() => deps.contributorAdmission?.(prUrl, priorHeadSha));
-        const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
+        const heldBeforeWrite = yield* holdsBeforeWriteSteps(prUrl, deps);
         if (heldBeforeWrite) return heldBeforeWrite;
         yield* step(() => deps.mergeDirect(prUrl));
         deps.say(`automerge.rate_limited_rest_merge (W1-T1255; arm refused on quota, PR already green): ${prUrl}`);
@@ -1838,7 +1910,7 @@ function* attemptArmSteps(
               if (!retryPreflight.proceed) return retryPreflight.result;
               try {
                 yield* step(() => deps.contributorAdmission?.(prUrl, priorHeadSha));
-                const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
+                const heldBeforeWrite = yield* holdsBeforeWriteSteps(prUrl, deps);
                 if (heldBeforeWrite) return heldBeforeWrite;
                 yield* step(() => deps.mergeDirect(prUrl));
                 deps.say(
@@ -2038,12 +2110,13 @@ export function mergeDirectRefusalIsCheckExpected(stderrText: string): boolean {
 /** The REST merge once {@link directMergePreflight} has let it through. */
 function* mergeDirectAfterPreflightSteps(
   prUrl: string,
-  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say" | "contributorAdmission"> & DirectMergePreflightDeps,
+  deps: Pick<ArmDeps<true>, "mergeDirect" | "isMerged" | "say" | "contributorAdmission"> & DirectMergePreflightDeps &
+    Partial<Pick<ArmDeps<true>, "taskHold">>,
   evidence: DirectMergePreflightEvidence | undefined,
 ): Steps<ArmAttemptResult> {
   try {
     yield* step(() => deps.contributorAdmission?.(prUrl));
-    const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
+    const heldBeforeWrite = yield* holdsBeforeWriteSteps(prUrl, deps);
     if (heldBeforeWrite) return heldBeforeWrite;
     yield* step(() => deps.mergeDirect(prUrl));
     deps.say(`automerge.clean_status_direct_merge (already green — merged now): ${prUrl}`);
@@ -2080,7 +2153,7 @@ function* mergeDirectAfterPreflightSteps(
           finalEvidence = retryPreflight.evidence;
           try {
             yield* step(() => deps.contributorAdmission?.(prUrl, evidence?.priorHeadSha));
-            const heldBeforeRetry = operatorHoldRefusal(prUrl, deps);
+            const heldBeforeRetry = yield* holdsBeforeWriteSteps(prUrl, deps);
             if (heldBeforeRetry) return heldBeforeRetry;
             yield* step(() => deps.mergeDirect(prUrl));
             deps.say(`automerge.clean_status_direct_merge (W1-T11259; merged on retry ${read}): ${prUrl}`);
@@ -2322,11 +2395,11 @@ function* attemptPlanPrMergeSteps(
  */
 function* attemptQueueArmSteps(
   prUrl: string,
-  deps: Pick<ArmDeps<true>, "armAuto" | "isMerged" | "say"> & Partial<Pick<ArmDeps<true>, "enqueue" | "contributorAdmission" | "ledgerLines">>,
+  deps: Pick<ArmDeps<true>, "armAuto" | "isMerged" | "say"> & Partial<Pick<ArmDeps<true>, "enqueue" | "contributorAdmission" | "ledgerLines" | "taskHold">>,
 ): Steps<ArmAttemptResult> {
   try {
     yield* step(() => deps.contributorAdmission?.(prUrl));
-    const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
+    const heldBeforeWrite = yield* holdsBeforeWriteSteps(prUrl, deps);
     if (heldBeforeWrite) return heldBeforeWrite;
     yield* step(() => deps.armAuto(prUrl));
     deps.say(`automerge.queued (W1-T4405): auto-merge armed on a merge-queue branch — the queue merges it: ${prUrl}`);
@@ -2342,7 +2415,7 @@ function* attemptQueueArmSteps(
     if (armFailureAction(msg) === "direct-merge" && enqueue) {
       try {
         yield* step(() => deps.contributorAdmission?.(prUrl));
-        const heldBeforeWrite = operatorHoldRefusal(prUrl, deps);
+        const heldBeforeWrite = yield* holdsBeforeWriteSteps(prUrl, deps);
         if (heldBeforeWrite) return heldBeforeWrite;
         yield* step(() => enqueue(prUrl));
         deps.say(`automerge.enqueued (W1-T4405): already green — added to the merge queue, never merged around it: ${prUrl}`);
@@ -2370,7 +2443,7 @@ function* attemptQueueArmSteps(
 export function armAutoMergeAtOpen(
   prUrl: string,
   deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "sleepSync" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">>) = realArmDeps(),
+    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "sleepSync" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance" | "taskHold">>) = realArmDeps(),
   irreversible = false,
   // W1-T3551: threaded straight through to {@link attemptArm}'s shared gate — see that function's
   // own doc. Defaults false, so every existing call site (which predates this parameter and never
@@ -2378,7 +2451,7 @@ export function armAutoMergeAtOpen(
   isDraft = false,
 ): ArmOutcome {
   requireExplicitArmSeam("armAutoMergeAtOpen", !isRealArmDepsObject(deps));
-  return runStepsSync(armAtOpenSteps(prUrl, deps, irreversible, isDraft));
+  return runStepsSync(armAtOpenSteps(prUrl, deps, irreversible, isDraft)).outcome;
 }
 
 /** W1-T5284 — {@link armAutoMergeAtOpen} for runTaskBody, which runs on the daemon loop: the same
@@ -2386,29 +2459,34 @@ export function armAutoMergeAtOpen(
 export async function armAutoMergeAtOpenAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">> = realArmDepsAsync(),
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance" | "taskHold">> = realArmDepsAsync(),
   irreversible = false,
   isDraft = false,
+  // W1-T14902: handed the whole attempt, so the run's `automerge.armed` row can name a refusal's reason (a task's
+  // `dispatch_hold`) instead of the bare outcome.
+  onAttempt?: (attempt: ArmAttemptResult) => void,
 ): Promise<ArmOutcome> {
   requireExplicitArmSeam("armAutoMergeAtOpenAsync", !isRealArmDepsObject(deps));
-  return runStepsAsync(armAtOpenSteps(prUrl, deps, irreversible, isDraft));
+  const attempt = await runStepsAsync(armAtOpenSteps(prUrl, deps, irreversible, isDraft));
+  onAttempt?.(attempt);
+  return attempt.outcome;
 }
 
 function* armAtOpenSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance" | "taskHold">>,
   irreversible: boolean,
   isDraft: boolean,
-): Steps<ArmOutcome> {
+): Steps<ArmAttemptResult> {
   if (irreversible) {
     deps.say(
       `automerge.irreversible_refused (W1-T919/W1-T947): diff classified irreversible — refusing to ` +
         `arm at open; an operator must review and merge this manually: ${prUrl}`,
     );
-    return "irreversible-refused";
+    return { outcome: "irreversible-refused" };
   }
-  return (yield* attemptArmSteps(prUrl, deps, undefined, isDraft)).outcome;
+  return yield* attemptArmSteps(prUrl, deps, undefined, isDraft);
 }
 
 /**
