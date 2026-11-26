@@ -6,8 +6,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, copyFileSync, mkdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -37,31 +37,28 @@ function fixture(): GitRepo {
 
 /** Push `rev` (HEAD by default) as a branch; `oldSha` is the remote's tip, all zeros for a new branch. */
 function push(repo: GitRepo, rev = "HEAD", oldSha = "0".repeat(40)): { status: number; stderr: string } {
-  const head = repo.git("rev-parse", rev);
-  const res = spawnSync("sh", [join(repo.dir, "hooks", "pre-push")], {
-    cwd: repo.dir,
-    encoding: "utf8",
-    input: `refs/heads/run-W1-T14945-1 ${head} refs/heads/run-W1-T14945-1 ${oldSha}\n`,
-    env: { PATH: process.env.PATH ?? "", HOME: repo.dir, RMD_PREPUSH_GATES: "1" },
-  });
-  assert.equal(res.error, undefined, `the hook launched: ${String(res.error)}`);
-  return { status: res.status ?? -1, stderr: res.stderr ?? "" };
+  return pushMany(repo, [{ rev, oldSha, remoteRef: "refs/heads/run-W1-T14945-1" }]);
 }
 
-function pushMany(repo: GitRepo, updates: Array<{ rev: string; oldSha?: string }>): { status: number; stderr: string } {
-  const input = updates.map(({ rev, oldSha = "0".repeat(40) }) =>
-    `refs/heads/${rev} ${repo.git("rev-parse", rev)} refs/heads/${rev} ${oldSha}`).join("\n") + "\n";
-  const res = spawnSync("sh", [join(repo.dir, "hooks", "pre-push")], {
+function pushMany(
+  repo: GitRepo,
+  updates: Array<{ rev: string; oldSha?: string; remoteRef?: string }>,
+  gate = repo,
+): { status: number; stderr: string } {
+  const input = updates.map(({ rev, oldSha = "0".repeat(40), remoteRef = `refs/heads/${rev}` }) =>
+    `${remoteRef} ${repo.git("rev-parse", rev)} ${remoteRef} ${oldSha}\n`).join("");
+  const res = spawnSync("sh", [join(gate.dir, "hooks", "pre-push")], {
     cwd: repo.dir,
     encoding: "utf8",
     input,
-    env: { PATH: process.env.PATH ?? "", HOME: repo.dir, RMD_PREPUSH_GATES: "1" },
+    env: { PATH: process.env.PATH ?? "", HOME: repo.dir, TMPDIR: repo.dir, RMD_PREPUSH_GATES: "1" },
   });
   assert.equal(res.error, undefined, `the hook launched: ${String(res.error)}`);
   return { status: res.status ?? -1, stderr: res.stderr ?? "" };
 }
 
 function commit(repo: GitRepo, path: string, text: string): void {
+  mkdirSync(dirname(join(repo.dir, path)), { recursive: true });
   writeFileSync(join(repo.dir, path), text);
   repo.git("add", "-A");
   repo.git("commit", "-q", "-m", `edit ${path}`);
@@ -76,7 +73,7 @@ test("W1-T14945 criterion 1: a push whose diff closes an import ring is refused 
     assert.match(stderr, /^cycle-ratchet: BLOCKED/m, "the refusal is a cycle-ratchet line, so the fix lane's strike names it");
     assert.match(stderr, /src\/lib\/a\.ts -> src\/lib\/b\.ts/, "the ring is named");
   } finally { repo.cleanup(); }
-  // A push adding no import is a named skip, never cruised.
+  // A push adding no import reports the named skip.
   const quiet = fixture();
   try {
     commit(quiet, "src/lib/c.ts", "export const c = 3;\n");
@@ -84,6 +81,38 @@ test("W1-T14945 criterion 1: a push whose diff closes an import ring is refused 
     assert.match(stderr, /cycle-ratchet — this diff adds no parsed import edge under src\/, skipped \(a named skip, NOT a pass\)/);
     assert.equal(status, 0, stderr);
   } finally { quiet.cleanup(); }
+});
+
+const WORKSPACE_CLIENT = "packages/client/src/client.ts";
+const WORKSPACE_RETURN = `import { c } from "../../../src/lib/c.js";\nexport const client = () => c;\n`;
+
+test("W1-T14945 criterion 1: a push whose diff closes an import ring is refused at pre-push naming the ring across workspace boundaries", () => {
+  const gate = fixture();
+  try {
+    for (const specifier of ["../../packages/client/src/client.js", "@fixture/client/client"]) {
+      const repo = fixture();
+      try {
+        commit(repo, "package.json", JSON.stringify({ workspaces: ["packages/*"] }));
+        commit(repo, "packages/client/package.json", JSON.stringify({
+          name: "@fixture/client", exports: { "./client": "./src/client.ts" },
+        }));
+        commit(repo, WORKSPACE_CLIENT, WORKSPACE_RETURN);
+        commit(repo, ".dependency-cruiser.cjs", 'throw new Error("worktree config");\n');
+        const remoteTip = repo.git("rev-parse", "HEAD");
+        commit(repo, "src/lib/c.ts", `import { client } from "${specifier}";\nexport const c = () => client;\n`);
+        writeFileSync(join(repo.dir, WORKSPACE_CLIENT), "export const client = 1;\n");
+        unlinkSync(join(repo.dir, "node_modules"));
+        const worktreeCruiser = join(repo.dir, "node_modules/.bin/depcruise");
+        mkdirSync(dirname(worktreeCruiser), { recursive: true });
+        writeFileSync(worktreeCruiser, "#!/bin/sh\nexit 2\n");
+        chmodSync(worktreeCruiser, 0o755);
+
+        const { status, stderr } = pushMany(repo, [{ rev: "HEAD", oldSha: remoteTip }], gate);
+        assert.equal(status, 1, `${specifier} closes a ring in the pushed commits:\n${stderr}`);
+        assert.match(stderr, /^cycle-ratchet: packages\/client\/src\/client\.ts -> src\/lib\/c\.ts$/m, stderr);
+      } finally { repo.cleanup(); }
+    }
+  } finally { gate.cleanup(); }
 });
 
 test("W1-T14945 criterion 1: every branch ref in a multi-ref push is checked", () => {
@@ -109,12 +138,64 @@ test("W1-T14945 criterion 2: a cycle-free push passes the gate as before", () =>
     commit(repo, "src/lib/c.ts", `import { b } from "${sibling("b")}";\nexport const c = () => b;\n`);
     const withImport = push(repo);
     assert.doesNotMatch(withImport.stderr, /cycle-ratchet: BLOCKED/, withImport.stderr);
+    assert.doesNotMatch(withImport.stderr, /cycle-ratchet — .*skipped/, withImport.stderr);
     assert.equal(withImport.status, 0, `a cycle-free import passes:\n${withImport.stderr}`);
     commit(repo, "src/lib/c.ts", `import { b } from "${sibling("b")}";\nexport const c = () => b + 1;\n`);
     repo.git("update-ref", "refs/remotes/origin/main", "HEAD~1");
     const noImport = push(repo);
     assert.doesNotMatch(noImport.stderr, /cycle-ratchet: BLOCKED/, noImport.stderr);
+    assert.match(noImport.stderr, /cycle-ratchet — this diff adds no parsed import edge under src\/, skipped/);
     assert.equal(noImport.status, 0, `a push adding no import passes:\n${noImport.stderr}`);
+  } finally { repo.cleanup(); }
+});
+
+test("W1-T14945 criterion 2: a cycle-free push passes the gate as before for non-branch refs from a checkout with a ring", () => {
+  const repo = fixture();
+  try {
+    const published = repo.git("rev-parse", "HEAD");
+    repo.git("tag", "-a", "release", "-m", "release", published);
+    commit(repo, "src/lib/b.ts", RING_B);
+    const nonBranches = [
+      { rev: "refs/tags/release", remoteRef: "refs/tags/release" },
+      { rev: published, remoteRef: "refs/notes/release" },
+    ];
+    const onlyNonBranches = pushMany(repo, nonBranches);
+    assert.equal(onlyNonBranches.status, 0, onlyNonBranches.stderr);
+    assert.match(onlyNonBranches.stderr, /cycle-ratchet — no branch updates, skipped \(a named skip, NOT a pass\)/);
+
+    const mixed = pushMany(repo, [...nonBranches, { rev: "HEAD", remoteRef: "refs/heads/ring" }]);
+    assert.equal(mixed.status, 1, mixed.stderr);
+    assert.match(mixed.stderr, /^cycle-ratchet: src\/lib\/a\.ts -> src\/lib\/b\.ts$/m, mixed.stderr);
+
+    const manual = pushMany(repo, []);
+    assert.equal(manual.status, 1, manual.stderr);
+    assert.match(manual.stderr, /^cycle-ratchet: src\/lib\/a\.ts -> src\/lib\/b\.ts$/m, manual.stderr);
+  } finally { repo.cleanup(); }
+});
+
+test("W1-T14945 criterion 2: a cycle-free push passes the gate as before when existing imports resolve differently", () => {
+  const repo = fixture();
+  try {
+    commit(repo, "package.json", JSON.stringify({ imports: { "#client": "./src/lib/b.ts" } }));
+    commit(repo, WORKSPACE_CLIENT, WORKSPACE_RETURN);
+    const beforeImporter = repo.git("rev-parse", "HEAD");
+    commit(repo, "src/lib/c.ts", 'import { client } from "#client";\nexport const c = () => client;\n');
+    const remoteTip = repo.git("rev-parse", "HEAD");
+    commit(repo, "package.json", JSON.stringify({ imports: { "#client": `./${WORKSPACE_CLIENT}` } }));
+    commit(repo, WORKSPACE_CLIENT, `${WORKSPACE_RETURN}export const metadata = 1;\n`);
+
+    const retargeted = push(repo, "HEAD", remoteTip);
+    assert.equal(retargeted.status, 0, retargeted.stderr);
+    assert.match(retargeted.stderr, /cycle-ratchet — this diff adds no parsed import edge under src\/, skipped/);
+
+    const withNewRingImport = push(repo, "HEAD", beforeImporter);
+    assert.equal(withNewRingImport.status, 1, withNewRingImport.stderr);
+    assert.match(withNewRingImport.stderr, /^cycle-ratchet: packages\/client\/src\/client\.ts -> src\/lib\/c\.ts$/m);
+
+    commit(repo, "src/lib/e.ts", `import { a } from "${sibling("a")}";\nexport const e = () => a();\n`);
+    const withUnrelatedImport = push(repo, "HEAD", remoteTip);
+    assert.equal(withUnrelatedImport.status, 0, withUnrelatedImport.stderr);
+    assert.doesNotMatch(withUnrelatedImport.stderr, /cycle-ratchet — .*skipped/, withUnrelatedImport.stderr);
   } finally { repo.cleanup(); }
 });
 
