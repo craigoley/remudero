@@ -10,8 +10,9 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { join } from "node:path";
 import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import { spawnRunChild } from "#src/lib/run-child.js";
+import { captureInboxDraftSnapshot, commitInboxDraftOutcomes, draftsDueOnDaemon, runDraftRung, type DraftLaneIdentity, type Proposal } from "#src/lib/inbox.js";
 import { resolveFleetControlHold, type LightPassScope, type RestartAdmission } from "#src/lib/daemon.js";
-import { createClaudeExecutableCache, spawnWorker, workerSpawnRetiredBy, WorkerSpawnRetiredError, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import { createClaudeExecutableCache, runInWorkerSpawnScope, spawnWorker, workerSpawnRetiredBy, WorkerSpawnRetiredError, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
 import { spawnCodexWorker, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -319,6 +320,41 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
     await inDaemonSpawnScope(async () => { createDaemonRetirement(() => {}).retire(); });
     assert.equal(outer(), "drain lock released; the successor owns this work");
   });
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, and a withheld draft stays due", async (t) => {
+  // An inbox draft rung already running at the release reaches the real spawnWorker, which returns not-started. The
+  // proposal must stay due for the successor: no attempt key is written for work that never ran.
+  const lane: DraftLaneIdentity = { leadDeployment: "gpt-oss-120b", effort: "high", escalationDeployment: "sonnet", escalationEffort: "medium" };
+  const proposal: Proposal = { id: "P-14916", summary: "a withheld draft stays due",
+    evidenceAnchors: [{ pattern: "draft input", path: "README.md", description: "fixture anchor" }] };
+  const scope = { repository: "o/r" };
+  const ranWithoutDraft = { sessionId: "fixture", costUsd: 0, numTurns: 1, text: "no fragment", blocks: [], stderr: "",
+    subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], provider: "cash", model: "gpt-oss-120b",
+    servedModel: "gpt-oss-120b", effort: "high", tokens: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0 }, modelUsage: {},
+    compactionEvents: [], qualitySuspect: false } as WorkerResult;
+  for (const retired of [true, false]) {
+    const stateDir = ownedFixtureDir(t, "retired-draft-state").dir;
+    writeFileSync(join(stateDir, "inbox-proposals.json"), JSON.stringify({ proposals: [proposal] }));
+    const withheld: Array<Record<string, unknown>> = [];
+    const starts: string[] = [];
+    const rows: Array<Record<string, unknown>> = [];
+    const run = () => runDraftRung([proposal], "- id: W1-T1\n", { causalScope: scope, log: (step, extra) => rows.push({ step, ...extra }),
+      spawn: async () => retired ? spawnWorker(drafterStart(t, withheld, starts)) : ranWithoutDraft }, "retired-draft");
+    const outcomes = retired ? await runInWorkerSpawnScope({ retiredBy: "drain lock released; the successor owns this work" }, run) : await run();
+    commitInboxDraftOutcomes({ stateDir, scope, snapshots: [captureInboxDraftSnapshot(proposal, scope)], outcomes, lane, log: () => {} });
+    const attempts = existsSync(join(stateDir, "inbox-draft-attempts.json"))
+      ? JSON.parse(readFileSync(join(stateDir, "inbox-draft-attempts.json"), "utf8")) as Record<string, string> : {};
+    const due = draftsDueOnDaemon([proposal], {}, attempts, 3, undefined, lane).map((p) => p.id);
+    if (retired) {
+      assert.deepEqual(starts, [], "the retired scope starts no draft worker");
+      assert.equal(withheld.length, 1);
+      assert.deepEqual(due, ["P-14916"], "the withheld draft keys no attempt, so it stays due");
+    } else {
+      // Control: a draft that ran and wrote no fragment keys its attempt, so the proposal is no longer due.
+      assert.deepEqual(due, [], "a draft that really ran keys its attempt");
+    }
+  }
 });
 
 test("W1-T14916 criterion 2: in-flight SRE lane page work still completes", async () => {

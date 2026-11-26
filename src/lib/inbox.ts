@@ -2865,6 +2865,9 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           parsed = null;
           break;
         }
+        // W1-T14916: a withheld start (a retired daemon, an abandoned admission) never ran, so it keys no attempt.
+        if (worker.notStarted) return { proposalId: proposal.id, ok: false, error: `draft worker not started: ${worker.notStarted}`,
+          refused: { matched: `worker.not_started:${worker.notStarted}` } };
         if (retry && worker.provider === "cash") {
           attempt = cashAttempt;
           dirty = cashDirty;
