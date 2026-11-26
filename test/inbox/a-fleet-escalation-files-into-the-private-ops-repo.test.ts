@@ -16,7 +16,6 @@ import {
 } from "#src/lib/escalate.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { buildEscalationCloser } from "#src/run-task.js";
 
 const CODE = { owner: "craigoley", repo: "remudero" };
 const OPS = "craigoley/remudero-ops";
@@ -149,8 +148,8 @@ test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery close
   assert.equal(again, first, "the second escalation names the one open issue");
   assert.equal(gh.issues.length, 1);
   assert.equal(rows().filter((row) => row.step === "escalation.deduped").length, 1);
-  // Recovery's closer, over the same route, closes that issue on the ops repository.
-  buildEscalationCloser(CODE.owner, CODE.repo, issues)(first, "recovered: the review ran");
+  // Recovery closes through the gateway's own close (run-task's buildEscalationCloser delegates to it), on the ops repository.
+  issues.closeWithComment!(first, "recovered: the review ran");
   assert.deepEqual(gh.issues.map((issue) => [issue.repo, issue.state]), [[OPS, "closed"]]);
   const reopened = withLiveWritesAllowed(() => escalate(escalation(), { issues, ledgerPath: path, runId: "RUN-3" }));
   assert.notEqual(reopened, first, "a closed issue does not silence a recurrence");
