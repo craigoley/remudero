@@ -87,11 +87,12 @@ const defaultGhApiRead = async (args: string[]): Promise<string> => String(await
 const SERVER_ERROR_RETRY_FIRST_MS = 1_000;
 const SERVER_ERROR_RETRY_MAX_MS = 60_000;
 
-/** W1-T14944: a read that failed with a transient GitHub server error (HTTP 500, 502, 503 or 504), as `gh` reports it
- *  on stderr. Only stderr is read: the error message also carries the command, whose endpoint is caller text. */
+/** W1-T14944: a read that failed with a transient GitHub server response (HTTP 500, 502, 503 or 504),
+ *  as `gh` reports it on stderr. Match the server-error diagnostic, not an HTTP-like substring in
+ *  malformed endpoint text echoed by `gh`. */
 export function isGhServerError(error: unknown): boolean {
   const e = error as { stderr?: string | Buffer } | null | undefined;
-  return /\bHTTP 50[0234]\b/.test(String(e?.stderr ?? ""));
+  return /gh: Server Error \(HTTP 50[0234]\)/.test(String(e?.stderr ?? ""));
 }
 
 export function ghApiFetch(read: (args: string[]) => Promise<string> = defaultGhApiRead, pacing: GhApiFetchPacing = {}): GithubPageFetch {

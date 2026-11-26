@@ -68,3 +68,16 @@ test("W1-T14944 criterion 2: a non-5xx read failure is not retried, even when th
   assert.equal(calls, 1, "the 404 is read once");
   assert.deepEqual(sleeps, [], "and waits for nothing");
 });
+
+test("W1-T14944 criterion 2: an HTTP-like status in a malformed endpoint diagnostic is not retried", async () => {
+  const sleeps: number[] = [];
+  let calls = 0;
+  const result = await ghApiFetch(async () => {
+    calls += 1;
+    throw Object.assign(new Error("Command failed: gh api repos/o/HTTP 502%zz/pulls\ngh: parse error near HTTP 502%zz"),
+      { stderr: "gh: parse error near HTTP 502%zz\n" });
+  }, { sleep: async (ms) => { sleeps.push(ms); } })("repos/o/HTTP 502%zz/pulls");
+  assert.deepEqual(result, { ok: false, reason: "github-read-failed" });
+  assert.equal(calls, 1, "the malformed URL is read once");
+  assert.deepEqual(sleeps, [], "a parse error waits for nothing");
+});
