@@ -2693,11 +2693,32 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
   // sweep's own resolved head so round 1 is pinned too, then re-pinned by every gate read. It is
   // never independently resolved here — a second read is a second chance to skew.
   let currentPinnedSha: string | undefined = opts.ciEvidenceDisagreement?.sha;
-  // W1-T14871: the rollup state and red checks this rung's most recent read saw. A round whose rollup is still pending
-  // has not settled, so an empty miner read says nothing yet; the rung waits for CI before it may stand down on it.
-  // The red checks are the dispatching sweep's own reading, the same reader the sweep's hold compares against.
-  let currentChecksState: string | undefined = opts.ciEvidenceDisagreement?.rollup.checks_state;
-  const dispatchedRedChecks: readonly string[] | undefined = opts.ciEvidenceDisagreement?.rollup.red_checks;
+  // W1-T14871: this rung's newest reading of its head's checks. The dispatch's is the sweep's own; a gate wait makes
+  // its red names stale and leaves the gate's state, in the sweep's words (a stalled "timeout" is still pending).
+  let checksRead: { state?: string; redChecks?: readonly string[]; waited: boolean } = { waited: false,
+    state: opts.ciEvidenceDisagreement?.rollup.checks_state, redChecks: opts.ciEvidenceDisagreement?.rollup.red_checks };
+  const noteCiWait = (ci: CiGateOutcome | "green" | "red" | "timeout"): void => {
+    const state = host.ciGateState(ci);
+    checksRead = { state: state === "timeout" ? "pending" : state, waited: true };
+  };
+  /** W1-T14871: what an empty-evidence stand-down records, read by the sweep's own two readers so its hold compares
+   *  like with like. An unreadable rollup records no red names rather than stale ones. */
+  const readStandDownChecks = async (headSha: string): Promise<{ checksState?: string; redChecks?: readonly string[] }> => {
+    const known = { checksState: checksRead.state, redChecks: checksRead.redChecks };
+    if (!deps.readCiRollup || (!checksRead.waited && checksRead.redChecks !== undefined)) return known;
+    try {
+      const rollup = await deps.readCiRollup(opts.prUrl);
+      const { owner, repo } = opts.reviewBase;
+      const required = opts.requiredContexts ?? ghRequiredStatusCheckContexts(owner, repo);
+      const source = resolveCiGateRequiredSource({ owner, repo },
+        { self: resolveOwnerRepo(), selfRoot: repoRoot, configRoot: opts.config.root });
+      return { checksState: checksStateFromRollup(rollup, required),
+        redChecks: redQualityGateNames(rollup, readCiGateRequiredNames(source, deps.log)) };
+    } catch (error) {
+      deps.log("fix.stand_down_checks_unread", { head_sha: headSha, reason: String(error) });
+      return known;
+    }
+  };
   let currentPrHeadSha = currentPinnedSha ?? review.headSha;
   // W1-T2551: bounds the generator-fix short-circuit (site `rung.generator_fix`, below) to a
   // SMALL number of attempts per invocation — every attempt already re-verifies the regenerated
@@ -3639,7 +3660,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // down, exactly as those sites do.
     if (noReviewYet && currentCiFailures !== undefined) currentCiFailures = dropDerivativeAggregateCiFailure(currentCiFailures);
     if (currentMergeConflict === undefined && noReviewYet && currentCiFailures !== undefined && currentCiFailures.length === 0 &&
-        currentChecksState === "pending") {
+        !checksRead.waited && checksRead.state === "pending") {
       // W1-T14871: the rollup this round read is still pending, so the shard that will name the failure may not have
       // finished. Wait for CI to settle, as a pending round already does, then re-read the evidence on the settled head.
       deps.say(`fix rung: CI is still pending with no enumerable failure yet; waiting for it to settle before strike ${strikes + 1}`);
@@ -3647,7 +3668,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       const handoff = ciHandoff(settled);
       if (handoff) return handoff;
       currentPinnedSha = ciGateSha(settled) ?? currentPinnedSha;
-      currentChecksState = typeof settled === "string" ? settled : settled.state;
+      noteCiWait(settled);
       if (deps.fetchCiFailures) {
         try {
           currentCiFailures = await deps.fetchCiFailures(opts.prUrl, ciGateSha(settled));
@@ -3684,8 +3705,9 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       });
       // W1-T14871: the row names the rollup state and red checks it stood down on, so the sweep's hold is released
       // once either changes (sweep.ts, fixRungInputsUnchanged).
+      const read = await readStandDownChecks(pinnedSha ?? review.headSha);
       deps.log("fix.stood_down", { site: "rung.empty_ci_failures", strike: strikes + 1, reason,
-        ...fixRungInputFields({ checksState: currentChecksState }), ...fixRungRedCheckFields(dispatchedRedChecks) });
+        ...fixRungInputFields({ checksState: read.checksState }), ...fixRungRedCheckFields(read.redChecks) });
       deps.say(`fix rung: standing down before strike ${strikes + 1} — ${reason}`);
       return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
     }
@@ -3765,6 +3787,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           const gated = await deps.waitForCiGreen(opts.prUrl, deps.log);
           const handoff = ciHandoff(gated);
           if (handoff) return handoff;
+          noteCiWait(gated);
           currentPinnedSha = ciGateSha(gated) ?? currentPinnedSha;
           currentPrHeadSha = ciGateSha(gated) ?? generatorResult.commitSha;
           if (deps.fetchCiFailures) {
@@ -5921,6 +5944,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     if (handoff) return finish(handoff);
     const claimLostAfterCi = branchClaimLost();
     if (claimLostAfterCi) return finish(claimLostAfterCi);
+    noteCiWait(ci); // W1-T14871: every later round of this rung reads the head this wait judged
     if (handed) {
       deps.log("fix.live_round_resumed", { round_id: roundId, strike: strikes, head_sha: handed.headSha, failure: resumed?.failure ?? "check",
         ...(resumed === undefined ? { handed_failure: handed.failure, precedence: "ci_red" } : {}) });
@@ -5950,7 +5974,6 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     currentPinnedSha = ciGateSha(ci) ?? currentPinnedSha;
     currentPrHeadSha = ciGateSha(ci) ?? landing.remoteHead ?? expectedHeadShaForPush ?? currentPrHeadSha;
     partialFixCi = host.ciGateState(ci) === "timeout";
-    currentChecksState = host.ciGateState(ci); // W1-T14871: the strike's own wait settled CI
     if (host.ciGateState(ci) !== "green") {
       deps.log("fix.ci_not_green", { strike: strikes, ci: host.ciGateState(ci), sha: ciGateSha(ci) });
       // W1-T138 (the #303/#305/#292/#315 fix): no review ran for THIS push
