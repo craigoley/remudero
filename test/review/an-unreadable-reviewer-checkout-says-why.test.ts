@@ -6,10 +6,9 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { gitRepo } from "#test/helpers/git-repo.js";
 import {
   assertReviewerSnapshotIntegrity,
   ReviewerSnapshotError,
@@ -18,24 +17,13 @@ import {
 
 const HOST = { GIT_UNTRACKED_FILES_ALL: "--untracked-files=all" };
 
-function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
-}
-
-/** A one-commit checkout with its own identity (CI has none). */
+/** A one-commit checkout with the fixture's own git identity (CI has none). */
 function withCheckout(fn: (dir: string, head: string) => void): void {
-  const root = mkdtempSync(join(tmpdir(), "rmd-w1-t14938-"));
-  const dir = join(root, "checkout");
+  const repo = gitRepo({ kind: "w1-t14938" });
   try {
-    execFileSync("git", ["init", "-q", dir]);
-    git(dir, "config", "user.name", "RMD Test");
-    git(dir, "config", "user.email", "rmd-test@example.invalid");
-    writeFileSync(join(dir, "a.txt"), "a\n");
-    git(dir, "add", "a.txt");
-    git(dir, "commit", "-q", "-m", "fixture");
-    fn(dir, git(dir, "rev-parse", "HEAD"));
+    fn(repo.dir, repo.git("rev-parse", "HEAD"));
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    repo.cleanup();
   }
 }
 
