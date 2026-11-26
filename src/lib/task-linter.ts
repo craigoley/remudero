@@ -13,6 +13,7 @@ import {
   grepProofCanOnlyCertifyComments,
   isDialectPrefixed,
   parseWhitelistedProof,
+  registeredSuiteTarget,
   wrappedGrepPattern,
   type NameFilterResolution,
   type WhitelistedProof,
@@ -3972,9 +3973,10 @@ export function invariantSlugViolations(task: Task, opts: LintOpts = {}): LintVi
 function unguardedInvariantViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   if (opts.requireDesignInvariantDeclaration !== true) return [];
   const out: LintViolation[] = [];
-  // The task's resolved repository, as proofDialectViolations reads it, so a satellite's own suite path (a Console
-  // `tests/unit/*.test.tsx` proof) classifies as the test proof the target-aware review executor runs.
-  const target = opts.taskRepoOwner === undefined ? undefined : { owner: opts.taskRepoOwner, repo: task.repo };
+  // The task's own registered repository, resolved from the suite registry and never from the checkout's origin, so a
+  // satellite's suite path (a Console `tests/unit/*.test.tsx` proof) classifies as the test proof the target-aware
+  // review executor runs in any clone. Only this warn reads it: every other check sees the options it saw before.
+  const target = registeredSuiteTarget(task.repo);
   (task.acceptance ?? []).forEach((criterion, index) => {
     if (!INVARIANT_CLAIM_RE.test(criterion.claim)) return;
     if (criterion.satisfied_by || (criterion as { kind?: unknown }).kind !== undefined) return;

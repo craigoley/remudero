@@ -1249,6 +1249,13 @@ const SUITE_REGISTRY: ReadonlyArray<SuiteRegistryTarget & { roots: readonly Suit
   { owner: "craigoley", repo: "wreckterra", roots: WRECKTERRA_SUITE_ROOTS },
 ];
 
+/** W1-T14915 — the registered target carrying this repository name, read from the registry itself and never from a
+ *  checkout's origin; `undefined` when no entry, or more than one, carries the name. */
+export function registeredSuiteTarget(repo: string): SuiteRegistryTarget | undefined {
+  const hits = SUITE_REGISTRY.filter((e) => e.repo === repo);
+  return hits.length === 1 ? { owner: hits[0]!.owner, repo: hits[0]!.repo } : undefined;
+}
+
 const TEST_PATH_EXACT_RE = /^(?:test|apps\/dashboard\/src)\/[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
 
 /** A body SHAPED like a test-file path, whatever its root — used only to tell "undeclared root"

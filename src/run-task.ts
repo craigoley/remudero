@@ -19913,15 +19913,7 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
   const codeRootSelected = codeRootArg ?? planDestinationWorkingCheckout(checkoutRoot, destinationStateDir)?.publicCheckout;
   const codeRoot = codeRootSelected !== undefined ? resolve(codeRootSelected) : checkoutRoot;
   let localRepoName: string | undefined;
-  // W1-T14915: the owner from the same origin read, so each task's proofs classify against its own repository. Only a
-  // checkout whose own origin the suite registry knows lends it: a fork or a fixture origin keeps the default target,
-  // which every core proof parses against today, instead of refusing them all as an unregistered repository.
-  let localRepoOwner: string | undefined;
-  try {
-    const origin = resolveOwnerRepoAt(codeRoot);
-    localRepoName = origin.repo;
-    if (parseWhitelistedProof("unit test: registry probe", origin) !== null) localRepoOwner = origin.owner;
-  } catch { /* no origin identity: preserve existing lint behavior */ }
+  try { localRepoName = resolveOwnerRepoAt(codeRoot).repo; } catch { /* no origin identity: preserve existing lint behavior */ }
   const planPathArg = flagValue(rest, "--plan");
   const planPath = planPathArg !== undefined ? resolve(planPathArg) : join(checkoutRoot, "plan", "tasks.yaml");
   // W1-T120: an explicit --plan OUTSIDE the root is refused here BY NAME, before --base/git-show
@@ -20358,7 +20350,6 @@ export async function lintPlanCommand(rest: string[], deps: LintPlanStatusDeps =
     // is pure — so the predicate is supplied here, the one place holding a real checkout to ask.
     opts.moduleExists = (rel: string) => existsSync(join(codeRoot, rel));
     opts.localRepoName = localRepoName;
-    if (localRepoOwner !== undefined) opts.taskRepoOwner = localRepoOwner;
     opts.knownRepos = knownRepos;
     // W1-T9292: an unminted id BLOCKS only on a task this diff adds; one already on the base, every one in a whole-plan
     // pass, and every one when the base plan does not load (`newTaskIds` undefined) only WARNS.
