@@ -2933,6 +2933,12 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       await commentLandedRound(remoteHead);
       return { landed: true, remoteHead };
     }
+    // A successful push receipt names the commit this round actually sent. A later writer can
+    // advance the branch before this verification read; that does not turn our earlier push into
+    // a no-push round. Keep CI attribution pinned to the receipt's SHA.
+    if (receipt?.fixRoundPushedHead !== undefined && receipt.fixRoundPushedHead === headSha) {
+      return { landed: true, remoteHead: receipt.fixRoundPushedHead };
+    }
     if (unreadable !== undefined) return { landed: false, outcome: "remote_unreadable", reason: unreadable };
     return { landed: false, outcome: "not_on_remote", ...seen,
       reason: `refs/heads/${opts.branch} holds ${remoteHead ?? "<absent>"}, not the round's commit ${headSha ?? "<unread>"}` };
@@ -4899,7 +4905,10 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       // adopted evidence head can continue this loop with different checks; those checks belong to a new row.
       if (learningsRound === undefined || learningsRound.pushed !== undefined) {
         learningsRound = recordFixLearningsShadow({ taskId: opts.taskId, runId: opts.runId, prNumber, attempt, round,
-          repoDir: opts.worktreePath, config: opts.config, evidence, knownCiFailures: currentCiFailures, priorRows: roundLedger });
+          repoDir: opts.worktreePath, config: opts.config, evidence,
+          // Once a review has run, a retained CI failure belongs to an earlier head. A review-only
+          // round measures its current review evidence and must not relabel that old check as red.
+          knownCiFailures: noReviewYet ? currentCiFailures : undefined, priorRows: roundLedger });
         deps.log("fix.learnings_shadow", learningsRound.row);
       }
       learningsRound.roundId = roundId;

@@ -60,6 +60,8 @@ async function fixRung(opts: {
   ci?: Array<"green" | "red">;
   landed?: boolean;
   noCommit?: boolean;
+  advanceAfterPush?: boolean;
+  reviewOnly?: boolean;
 }): Promise<Run> {
   const taskId = opts.taskId ?? OFFERED_TASK;
   const ci = opts.ci ?? ["green"];
@@ -83,7 +85,7 @@ async function fixRung(opts: {
     let waits = 0;
     await runFixRung({
       task, taskId, runId, prUrl: "https://github.com/acme/remudero/pull/7", branch: `run-${runId}`,
-      worktreePath: repo, initialSessionId: "", initialReview, ciFailures: FIRST_RED,
+      worktreePath: repo, initialSessionId: "", initialReview, ciFailures: opts.reviewOnly ? undefined : FIRST_RED,
       mount, settingsFile: join(root, "settings.json"), config: { root } as Config, budgetUsd: 1, strikeCap: ci.length,
       reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: repo, reviewerMount: mount },
       deps: {
@@ -103,8 +105,13 @@ async function fixRung(opts: {
             modelUsage: {}, compactionEvents: [], qualitySuspect: false,
           } satisfies WorkerResult;
         },
-        push: () => { const head = git("rev-parse", "HEAD"); pushed.push(head); if (opts.landed !== false) publishedHead = head; },
-        ...((opts.landed === false || opts.noCommit) ? { readRemoteBranchHead: async () => opts.landed === false ? base : publishedHead } : {}),
+        push: () => {
+          const head = git("rev-parse", "HEAD"); pushed.push(head);
+          if (opts.landed !== false) publishedHead = opts.advanceAfterPush ? "descendant-head" : head;
+          return opts.landed === false ? undefined : { fixRoundPushedHead: head };
+        },
+        ...((opts.landed === false || opts.noCommit || opts.advanceAfterPush)
+          ? { readRemoteBranchHead: async () => opts.landed === false ? base : publishedHead } : {}),
         waitForCiGreen: async () => ({ state: ci[waits++] ?? "green", sha: git("rev-parse", "HEAD") }),
         fetchCiFailures: async () => SECOND_RED,
         runReview: async () => ({ ...initialReview, state: "success", criteria: criteria.map((c) => ({ ...c, met: true })), headSha: git("rev-parse", "HEAD") }),
@@ -167,6 +174,30 @@ test("W1-T14138 criterion 3: the fix prompt is byte-identical in both arms wheth
   }
 });
 
+test("W1-T14138 criterion 3: both arms match the origin/main prompt baseline", async () => {
+  // Captured from origin/main with the same fixture inputs; normalize only the renderer's random
+  // envelope boundary, git commit ids, and fixture root before comparing bytes.
+  const stable = (prompt: string): string => prompt.replace(/boundary="[^"]*"/g, 'boundary="B"')
+    .replace(/\b[0-9a-f]{40}\b/g, "SHA").replace(new RegExp(`${RMD_TMP_PREFIX}fix-learnings-[A-Za-z0-9]+`, "g"), "ROOT");
+  const originMainPromptSha256: Record<string, string> = {
+    [OFFERED_TASK]: "e911e923cf464303d1b921824501456e70dac66d8def9405c36aea4da7480f1e",
+    [WITHHELD_TASK]: "84e58dd2b082dcdcfda8aff51a1885c0189e4d94941964463c810428fe6d6ece",
+  };
+  const { createHash } = await import("node:crypto");
+  for (const taskId of [OFFERED_TASK, WITHHELD_TASK]) {
+    const run = await fixRung({ taskId, corpus: CORPUS });
+    assert.equal(createHash("sha256").update(stable(run.prompts[0]!)).digest("hex"), originMainPromptSha256[taskId],
+      `${taskId} prompt must remain byte-identical to origin/main`);
+  }
+});
+
+test("review-only rounds do not reuse CI checks from an earlier head", async () => {
+  const run = await fixRung({ corpus: CORPUS, reviewOnly: true });
+  const shadow = of(run, "fix.learnings_shadow")[0]!;
+  assert.deepEqual(shadow.failing_checks, []);
+  assert.deepEqual(matchedIds(shadow), []);
+});
+
 test("W1-T14138 criterion 4: the outcome row records CI on the pushed head, red then green with rounds to green", async () => {
   const run = await fixRung({ corpus: CORPUS, ci: ["red", "green"] });
   const shadows = of(run, "fix.learnings_shadow");
@@ -200,6 +231,17 @@ test("W1-T14138 criterion 4: a successful no-op push does not claim the already-
   assert.equal(done.fix_learnings_no_push, true);
   assert.equal(outcome.conclusion, "no_push");
   assert.equal(outcome.rounds_to_green, undefined);
+});
+
+test("W1-T14138 criterion 4: a later descendant push does not erase this round's pushed head", async () => {
+  const run = await fixRung({ corpus: CORPUS, advanceAfterPush: true });
+  const done = of(run, "fix.done")[0]!;
+  const outcome = of(run, "fix.learnings_outcome")[0]!;
+  assert.equal(done.push_outcome, "landed");
+  assert.equal(done.pushed_head_sha, run.pushed[0]);
+  assert.equal(done.fix_learnings_no_push, undefined);
+  assert.equal(outcome.conclusion, "green");
+  assert.equal(outcome.pushed_head_sha, run.pushed[0]);
 });
 
 test("known CI failures remain selectable when prompt evidence is conflict-only", () => {
