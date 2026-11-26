@@ -227,6 +227,7 @@ import {
   type GithubEventWakeSemanticMode,
   type WakeCounters,
 } from "./github-event-wake.js";
+import { startGithubDeliveryLogPass } from "./github-delivery-log.js";
 import { createGithubKeepWarm } from "./github-refresh-pacer.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY, policyPath } from "./policy.js";
 import { loadConfig, type WorkerProviderId } from "./config.js";
@@ -3939,6 +3940,11 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
     clock: systemClock,
     write: (window) => deps.log?.("github.wake.summary", { ...wakeSummaryRow(wakeCounters, window) }),
   });
+  // W1-T14881: GitHub's own log of each webhook delivery serve answered, when serve takes webhooks at all.
+  const deliveryLogOrg = deps.githubEventWake?.secret ? deps.githubEventWake.repository.split("/")[0] : undefined;
+  const stopDeliveryLog = deliveryLogOrg
+    ? startGithubDeliveryLogPass({ org: deliveryLogOrg, stateDir: join(deps.fleetControlRoot, "state"), log: (step, fields) => deps.log?.(step, fields) })
+    : () => {};
   // W1-T9370: each worker module's first start (bundle or .ts source) is ledgered as worker.entry_resolved.
   setWorkerEntryLog(deps.log);
   // W1-T10290: the plumbing carries the children's node flags to the read-model worker thread in its data; serve's own
@@ -3971,6 +3977,7 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
       analyticsCache.stop();
       liveAnalyticsCache.stop();
       stopWakeSummary();
+      stopDeliveryLog();
       stopRouteReads();
       stopDemand();
       prewarm.stop();
@@ -4097,6 +4104,7 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
   server.on("close", prewarm.stop);
   if (keepWarm) server.once("listening", keepWarm.start);
   server.on("close", stopWakeSummary);
+  server.on("close", stopDeliveryLog);
   // The demand window starts last, so a test seam that keeps one `every` tick drives serve.demand.
   server.once("listening", () => { stopRouteReads = routeReads.start(); const stops = [readDeadline.start(), demand.start()]; stopDemand = () => { for (const stop of stops) stop(); }; });
   server.on("close", () => { stopRouteReads(); stopDemand(); });
