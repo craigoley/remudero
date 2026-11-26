@@ -6,15 +6,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import {
-  HOST_MEMORY_SHARED_STEP, laneTarget, publishSharedHostMemory, SHARED_HOST_MEMORY_STALE_MS, setSharedHostMemoryReader, sharedBuildNeedMib,
-  sharedHostMemory, sharedHostMemoryShort, type LaneMemoryReading,
+  HOST_MEMORY_SHARED_STEP, laneTarget, openSharedHostMemoryPass, publishSharedHostMemory, SHARED_HOST_MEMORY_STALE_MS,
+  setSharedHostMemoryReader, sharedBuildNeedMib, sharedHostMemory, sharedHostMemoryShort, type LaneMemoryReading,
 } from "#src/lib/lane-governor.js";
 import {
   initialReviewCapacityState, readReviewHostObservation, reviewYieldsReReviews, selectAdaptiveReviewWidth, selectRuntimeReviewWidth,
   sharedMemoryAvailableMib, summarizeReviewSettlements, type ReviewCapacityObservation, type ReviewCapacityPolicy,
 } from "#src/lib/review-capacity.js";
 import {
-  DEFAULT_SWEEP_POLICY, reReviewsJudgedHead, runSweep, runSweepLightPass, selectReviewAdmissions, type OpenPrView, type SweepDeps,
+  DEFAULT_SWEEP_POLICY, RE_REVIEW_HELD_FOR_BUILD_REASON, reReviewsJudgedHead, runSweep, runSweepLightPass, selectReviewAdmissions,
+  type OpenPrView, type SweepDeps,
 } from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-11-25T16:24:00Z");
@@ -64,7 +65,7 @@ function reading(hostBaseAvailableMib: number | null, extra: Partial<LaneMemoryR
 
 /** One full sweep over `prs` whose review width is the production runtime width, cut for this pass. */
 async function fullSweep(prs: OpenPrView[], root: string, hooks: { readMainRepair?: () => Promise<undefined> } = {}): Promise<{
-  effects: string[]; rows: Record<string, unknown>[];
+  effects: string[]; rows: Record<string, unknown>[]; summary: Awaited<ReturnType<typeof runSweep>>;
 }> {
   const effects: string[] = [];
   const rows: Record<string, unknown>[] = [];
@@ -82,8 +83,8 @@ async function fullSweep(prs: OpenPrView[], root: string, hooks: { readMainRepai
     }),
     ...(hooks.readMainRepair === undefined ? {} : { readMainRepair: hooks.readMainRepair }),
   };
-  await runSweep(prs, deps);
-  return { effects, rows };
+  const summary = await runSweep(prs, deps);
+  return { effects, rows, summary };
 }
 
 function pr(over: Partial<OpenPrView>): OpenPrView {
@@ -104,8 +105,8 @@ function tempRoot(): string {
 // The reviewer's replay of 2026-11-25 16:24Z: kernel MemAvailable 8,130 MiB, cgroup memory PSI 8%, calm CPU, and
 // review settlements whose recent latency is 6x the baseline. Fed through the width's host-reading seam.
 const REPLAY_POLICY = { ...POLICY, settlementWindowMs: 3_600_000 } as ReviewCapacityPolicy;
-const replayHost = (measured: number | undefined) => ({
-  memAvailableMib: measured ?? 8_130, cpuPsiSomeAvg10Pct: 0.03, cpuPsiFullAvg10Pct: 0, memoryPsiSomeAvg10Pct: 8,
+const replayHost = () => ({
+  memAvailableMib: 8_130, cpuPsiSomeAvg10Pct: 0.03, cpuPsiFullAvg10Pct: 0, memoryPsiSomeAvg10Pct: 8,
   hostLoad1: 1, hostCpuCount: 8,
 });
 function sixfoldLatencyLines(): Record<string, unknown>[] {
@@ -155,7 +156,7 @@ test("W1-T14903 both lanes read one memory snapshot", () => {
     return path.includes("pressure") ? "some avg10=0.00 avg60=0.00 avg300=0.00 total=0" : "MemAvailable: 999999 kB";
   }, () => ({ load1: 1, cpuCount: 8 }), shared.availableMib);
   assert.equal(host.memAvailableMib, -110);
-  assert.equal(paths.includes("/proc/meminfo"), false, "reviews do not take another kernel memory sample");
+  assert.equal(paths.includes("/proc/meminfo"), false, "a supplied snapshot reading replaces the kernel memory sample");
 });
 
 test("W1-T14903 both lanes read one memory snapshot — a dispatch re-read while the sweep awaits main changes no cut", async () => {
@@ -236,6 +237,37 @@ test("W1-T14903 a build outranks a re-review when memory is short — at the res
   assert.deepEqual(admitted(), [7, 8, 9], "room for the build and a review: the re-reviews start too");
 });
 
+test("W1-T14903 a build outranks a re-review when memory is short — every held re-review is disposed, never dropped", async () => {
+  // The reviewer's replay: a full sweep on a short snapshot held #7 out of the code lane, and the unstarted-tail loop
+  // never finalized it — no sweep.disposed row, a hole in summary.actions, and actions.find threw a TypeError.
+  const rejudges = [
+    pr({ prNumber: 7, prUrl: "https://github.com/o/r/pull/7", headSha: "bbbb222", reviewedHeadSha: "bbbb222" }),
+    pr({ prNumber: 9, prUrl: "https://github.com/o/r/pull/9", headSha: "ffff666", reviewedHeadSha: "ffff666" }),
+  ];
+  const first = pr({ prNumber: 8, prUrl: "https://github.com/o/r/pull/8", headSha: "cccc333" });
+  for (const [snapshot, started] of [[-110, ["review:8"]], [30_000, ["review:7", "review:8", "review:9"]]] as const) {
+    publishSharedHostMemory(reading(snapshot), NOW);
+    const swept = await fullSweep([...rejudges, first], tempRoot());
+    assert.deepEqual(swept.effects.sort(), [...started], `snapshot ${snapshot}: the reviews it admits`);
+    const actions = Array.from(swept.summary.actions);
+    assert.equal(actions.length, 3, `snapshot ${snapshot}: one action per PR`);
+    assert.ok(actions.every((action) => action !== undefined), `snapshot ${snapshot}: summary.actions has no hole`);
+    for (const held of rejudges) {
+      const action = swept.summary.actions.find((entry) => entry.prNumber === held.prNumber);
+      assert.ok(action, `snapshot ${snapshot}: #${held.prNumber} is accounted for in the pass summary`);
+      const disposed = swept.rows.filter((row) => row.step === "sweep.disposed" && row.pr_number === held.prNumber);
+      assert.ok(disposed.length >= 1, `snapshot ${snapshot}: #${held.prNumber} writes a sweep.disposed row`);
+      const heldRows = disposed.filter((row) => row.stand_down_reason === RE_REVIEW_HELD_FOR_BUILD_REASON);
+      assert.equal(heldRows.length, snapshot < 0 ? 1 : 0, `snapshot ${snapshot}: #${held.prNumber} names the build hold only when held`);
+      if (snapshot < 0) {
+        assert.equal(action.acted, false, "a held re-review is not acted on this pass");
+        assert.equal(heldRows[0]?.acted, false);
+        assert.equal(heldRows[0]?.disposition, "post-review");
+      }
+    }
+  }
+});
+
 test("W1-T14903 shared memory never raises a lane width", () => {
   const ownReadings = [-4_000, 0, 900, 1_535, 1_536, 4_000, 8_130, 26_000];
   const snapshots = [-4_558, -110, 1_200, 1_908, 6_812, 30_000];
@@ -275,7 +307,7 @@ test("W1-T14903 shared memory never raises a lane width — the reviewer's repla
   assert.equal(settlements.recentLatencyMs! / settlements.baselineLatencyMs!, 6, "the replay's 6x latency ratio");
   // origin/main's width for these readings: its own MemAvailable, so the proportional latency cut, not the reserve cut.
   const main = selectAdaptiveReviewWidth(initialReviewCapacityState(BOUNDS.baseWidth), REPLAY_POLICY, {
-    nowMs: NOW, queueDepth: 6, activeWorkers: 2, ...replayHost(undefined), cpuWeightShare: 1, settlements,
+    nowMs: NOW, queueDepth: 6, activeWorkers: 2, ...replayHost(), cpuWeightShare: 1, settlements,
     provider: { fresh: false, readable: false, refused: false },
   } as unknown as ReviewCapacityObservation, BOUNDS).decision;
   assert.equal(main.reason, "review-latency-expanded");
@@ -290,6 +322,46 @@ test("W1-T14903 shared memory never raises a lane width — the reviewer's repla
   assert.equal(run(undefined), main.effectiveWidth, "with no snapshot the runtime width is origin/main's");
   assert.ok(run(reading(-110, { hostMeasuredAvailableMib: 8_130 })) <= main.effectiveWidth,
     "a -110 MiB projection's one-lane reserve cut never lifts the width above origin/main's latency cut");
+});
+
+test("W1-T14903 shared memory never raises a lane width — a kernel fall after the snapshot's read bounds the width", () => {
+  // The reviewer's replay: the build lane read 30,000 MiB, then the kernel fell to 500 MiB while the snapshot was still
+  // fresh (30 s to 599 s old). origin/main reads the current kernel each pass; the width must never exceed its width.
+  const kernelMib = 500;
+  let kernelReads = 0;
+  const kernel = () => {
+    kernelReads += 1;
+    return { memAvailableMib: kernelMib, cpuPsiSomeAvg10Pct: 0, cpuPsiFullAvg10Pct: 0, memoryPsiSomeAvg10Pct: 0 };
+  };
+  const passes = [0, 1_000, 2_000];
+  const width = (root: string, nowMs: number, memoryPass?: ReturnType<typeof openSharedHostMemoryPass>): number =>
+    selectRuntimeReviewWidth({
+      root, queueDepth: 6, activeWorkers: 2, nowMs, ledgerLines: [], policy: POLICY, ...BOUNDS, cpuWeightShare: 1,
+      readHostObservation: kernel, log: () => {}, ...(memoryPass === undefined ? {} : { memoryPass }),
+    });
+  publishSharedHostMemory({ unread: "origin/main reads its own" }, NOW);
+  const mainRoot = tempRoot();
+  const main = passes.map((offset) => width(mainRoot, NOW + offset));
+  assert.ok(main[0]! < BOUNDS.baseWidth, "origin/main cuts the width on the current 500 MiB reading");
+  for (const ageMs of [30_000, 599_000]) {
+    const lane = reading(30_000, { hostMeasuredAvailableMib: 30_000 });
+    // A direct caller reading the live snapshot, then one pinned pass whose refills reuse it.
+    publishSharedHostMemory(lane, NOW - ageMs);
+    const liveRoot = tempRoot();
+    const before = kernelReads;
+    const live = passes.map((offset) => width(liveRoot, NOW + offset));
+    assert.equal(kernelReads - before, passes.length, `snapshot ${ageMs} ms old: every pass takes a current kernel reading`);
+    publishSharedHostMemory(lane, NOW - ageMs);
+    const pinned = openSharedHostMemoryPass(NOW);
+    assert.equal(pinned.snapshot?.measuredMib, 30_000, "the pinned snapshot still carries the 30,000 MiB lane read");
+    const pinnedRoot = tempRoot();
+    const refills = passes.map((offset) => width(pinnedRoot, NOW + offset, pinned));
+    assert.equal(pinned.width?.ownMib, kernelMib, "the pass's row names the current kernel reading as the lane's own");
+    passes.forEach((_, i) => {
+      assert.ok(live[i]! <= main[i]!, `snapshot ${ageMs} ms old, pass ${i}: live width ${live[i]} <= origin/main ${main[i]}`);
+      assert.ok(refills[i]! <= main[i]!, `snapshot ${ageMs} ms old, refill ${i}: pinned width ${refills[i]} <= origin/main ${main[i]}`);
+    });
+  }
 });
 
 test("W1-T14903 the width ceiling advances independently across shed and recovery passes", () => {

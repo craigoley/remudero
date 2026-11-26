@@ -30522,6 +30522,11 @@ async function runSweepPinned(
       "overtaken by a repair queued before it — this review keeps its place in the queue, re-derived next pass",
       undefined, undefined, undefined);
   }
+  // W1-T14903: a held re-review is never pulled, so it is disposed here like the unstarted tail, or the pass leaves a hole.
+  for (const job of heldReReviews) {
+    await finalizeDisposition(job.index, job.pr, "post-review", job.reason, job.question, false, false, undefined,
+      RE_REVIEW_HELD_FOR_BUILD_REASON, undefined, undefined, undefined);
+  }
   for (const [lane, job] of [codeLane, planLane].flatMap((lane) => lane.jobs.slice(lane.next).map((job) => [lane, job] as const))) {
     await finalizeDisposition(
       job.index,
@@ -32770,6 +32775,10 @@ export function reReviewsJudgedHead(pr: Pick<OpenPrView, "reviewedHeadSha" | "he
   return (pr.reviewedHeadSha !== undefined && pr.reviewedHeadSha === pr.headSha) ||
     pr.reviewState === "success" || pr.reviewState === "failure";
 }
+
+/** W1-T14903 — the stand-down a held re-review is disposed with (`sweep.disposed`), so the pass accounts for it. */
+export const RE_REVIEW_HELD_FOR_BUILD_REASON =
+  "re-review held for a build: the pass's shared host-memory snapshot has no room for a build and this review — re-derived next pass";
 
 /** W1-T2439 — TWO LANES, keyed before the outcome exists: code PRs at the review width, plan-lane PRs at
  *  {@link derivePlanLaneBound}'s width (W1-T11148). FAIL-OPEN: an unresolved classification is SPAWNING. */

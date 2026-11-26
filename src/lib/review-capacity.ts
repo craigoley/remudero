@@ -746,8 +746,8 @@ export function readReviewHostObservation(
       return undefined;
     }
   };
-  // The build lane owns this pass's host-memory sample. Do not take a second kernel sample when
-  // it has published one; review telemetry still reads PSI and host load independently.
+  // A caller-supplied MemAvailable replaces the kernel read; PSI and host load are still read.
+  // The runtime width passes none: its legacy ceiling needs the CURRENT kernel reading (W1-T14903).
   const mem = sharedMemAvailableMib === undefined ? safeRead("/proc/meminfo") : undefined;
   const cpuPressure = safeRead("/sys/fs/cgroup/cpu.pressure") ?? safeRead("/proc/pressure/cpu");
   const memoryPressure = safeRead("/sys/fs/cgroup/memory.pressure") ?? safeRead("/proc/pressure/memory");
@@ -995,9 +995,9 @@ export interface RuntimeReviewCapacityInput extends ReviewCapacityBounds {
   /** W1-T14903 — the sweep pass this width is cut for: its pinned snapshot is read, and the shared row is recorded into
    *  the pass, which writes it once. Absent (a direct caller): the live snapshot is read and the row written here. */
   memoryPass?: SharedHostMemoryPass;
-  /** W1-T14903 — the host readings, given the kernel MemAvailable the shared snapshot already sampled (undefined: none).
-   *  Absent: {@link readReviewHostObservation} reads the host files. */
-  readHostObservation?: (sharedMeasuredMib: number | undefined) => ReturnType<typeof readReviewHostObservation>;
+  /** W1-T14903 — the lane's CURRENT host readings, its own MemAvailable included: the legacy ceiling's input, read
+   *  every call. Absent: {@link readReviewHostObservation} reads the host files, /proc/meminfo included. */
+  readHostObservation?: () => ReturnType<typeof readReviewHostObservation>;
 }
 
 /** Production adapter. It reads only local host files and the age-bounded provider snapshot. */
@@ -1009,12 +1009,11 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
   // W1-T11129 — the share's producer is the host tuner's cpu-weights.json in this instance's state dir; unread or
   // stale, the observation carries no share and the CPU verdict holds rather than shedding on PSI alone.
   const weightShare = input.cpuWeightShare ?? readCpuWeightShare(join(input.root, "state"), input.nowMs);
-  // W1-T14903: ONE snapshot per pass — the pass's pinned one, else the live one. Its kernel MemAvailable (same sample)
-  // is the review lane's own reading, exactly what origin/main reads, so no second kernel sample is taken; without one
-  // the lane reads /proc/meminfo itself, as before.
+  // W1-T14903: ONE snapshot per pass (pinned, else live) is the shared reading. The lane's OWN reading is a current
+  // /proc/meminfo read (origin/main's input), never the snapshot's cached measuredMib, which can be minutes old: the
+  // legacy ceiling fed it read room the kernel no longer had. The fresh read only lowers widths (width-never-grows).
   const shared = input.memoryPass === undefined ? sharedHostMemory(input.nowMs) : pinnedSharedHostMemory(input.memoryPass, input.nowMs);
-  const host = (input.readHostObservation ?? ((measured) => readReviewHostObservation(undefined, undefined, measured)))(
-    shared?.measuredMib);
+  const host = (input.readHostObservation ?? (() => readReviewHostObservation()))();
   const memAvailableMib = sharedMemoryAvailableMib(host.memAvailableMib, shared);
   const observation: ReviewCapacityObservation = {
     nowMs: input.nowMs,

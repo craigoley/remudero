@@ -476,8 +476,8 @@ export interface SharedHostMemory {
   perLaneMib: number;
   /** The tail the host base already reserves, MiB; a new build's tail competes with it (see {@link laneTarget}). */
   hostTailMib: number;
-  /** The kernel MemAvailable the projection was cut from, in the same sample, MiB. Review capacity reads it as its
-   *  own (origin/main's) reading, so it takes no second kernel sample. Absent: unread, and review reads its own. */
+  /** The kernel MemAvailable the projection was cut from, in the same sample, MiB; recorded on the row only. Review
+   *  capacity's legacy ceiling reads a CURRENT kernel sample instead: this one can be minutes old. Absent: unread. */
   measuredMib?: number;
 }
 
