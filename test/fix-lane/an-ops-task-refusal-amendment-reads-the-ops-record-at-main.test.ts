@@ -130,6 +130,17 @@ test("W1-T14528 criterion 1: an ops-only task reads its record at the ops main a
   assert.equal(f.pub.clone.git("status", "--porcelain"), "");
 });
 
+test("W1-T14969 criterion 1: the five W1-T14528 tests pass at any real date", async t => {
+  // The fixture stamps its refusal at NOW_MS; whatever the real clock reads, the sweep must still enumerate it, because
+  // the sweep's age window is read from the fixture's clock. Before W1-T14969 this went red once real time passed
+  // NOW_MS + REFUSAL_AMENDMENT_MAX_AGE_MS (2026-11-26T12:00Z), taking every W1-T14528 test with it.
+  const f = fixture(t, "ops");
+  await f.amendment();
+  const row = f.amendmentRows()[0];
+  assert.ok(row?.outcome === "drafted" || row?.outcome === "waiting",
+    `the sweep enumerated the NOW_MS refusal at real time ${new Date().toISOString()}: ${JSON.stringify(row)}`);
+});
+
 test("W1-T14528 criterion 2: a public task reads its record from the public working tree with no read at main", async t => {
   const f = fixture(t, "public");
   await f.amendment();
