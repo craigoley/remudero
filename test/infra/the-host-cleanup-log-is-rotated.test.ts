@@ -5,7 +5,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { join } from "node:path";
 
@@ -53,21 +53,20 @@ test("W1-T14401 criterion 1: a log under its bound, a dry run, and a log another
 
 test("W1-T14401 criterion 2: a failed rotation still lets the run write its lines to the live log", () => {
   const fx = fixture();
-  const logs = join(fx.root, "ro");
+  const logs = join(fx.root, "logs");
   mkdirSync(logs, { recursive: true });
   const log = join(logs, "host-cleanup.log");
   const body = Buffer.alloc(2 * MB, 120);
   writeFileSync(log, body);
-  chmodSync(logs, 0o555); // the sibling cannot be written, so the rotation fails before it truncates
-  try {
-    const r = run(fx, { RMD_CLEANUP_LOG_ROTATE_PATHS: log, RMD_CLEANUP_LOG_MAX_MB: "1" });
-    assert.equal(r.status, 0, r.stderr + r.stdout);
-    assert.match(r.stdout, /WARN .*host-cleanup\.log: log rotation failed; the live log is unchanged/);
-    assert.equal(statSync(log).size, body.length, "the live log keeps every byte");
-    assert.equal(readdirSync(logs).filter(n => n.endsWith(".gz") || n.endsWith(".part")).length, 0, "no partial sibling is left");
-    assert.match(r.stdout, /^rmd-host-cleanup: /m, "the pass still ran and wrote its own lines");
-  } finally {
-    chmodSync(logs, 0o755);
-  }
+  // A gzip that fails for every uid: the rotation must stop before it truncates the live log.
+  const bin = join(fx.root, "failing-gzip");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "gzip"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+  const r = run(fx, { RMD_CLEANUP_LOG_ROTATE_PATHS: log, RMD_CLEANUP_LOG_MAX_MB: "1", PATH: `${bin}:${process.env.PATH ?? ""}` });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /WARN .*host-cleanup\.log: log rotation failed; the live log is unchanged/);
+  assert.equal(statSync(log).size, body.length, "the live log keeps every byte");
+  assert.equal(readdirSync(logs).filter(n => n.endsWith(".gz") || n.endsWith(".part")).length, 0, "no partial sibling is left");
+  assert.match(r.stdout, /^rmd-host-cleanup: /m, "the pass still ran and wrote its own lines");
   assert.ok(existsSync(log));
 });
