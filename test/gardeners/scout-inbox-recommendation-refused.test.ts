@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   backfillRecommendations,
+  buildRecommendationPrompt,
+  checkRecommendation,
   readRecommendationStore,
   realRecommendationWriter,
   recommendationStorePath,
@@ -87,6 +89,50 @@ test("W1-T10229: inbox.recommendation_refused no longer recurs", async (t) => {
   assert.equal(prompts.length, 3);
   assert.match(prompts[2]!, /Your last answer was refused for: the answer was not one JSON object/);
   assert.equal(readRecommendationStore(recommendationStorePath(stateDir))[proposal.id]?.why, "Its re-filed proof passed on main.");
+
+  // A keep decision from a writer that obeys its prompt, scripted the same on both attempts: the prompt asks for
+  // the text the checker requires, so the first answer is written and no row says refused.
+  const kept = { ...changed, summary: `${changed.summary} It stays parked.` };
+  const asked: string[] = [];
+  assert.deepEqual(await pumpOnce(stateDir, kept, obedientWriter("keep", asked)), ["inbox.recommendation_written"]);
+  assert.equal(asked.length, 1, "no repair attempt");
+  const stored = readRecommendationStore(recommendationStorePath(stateDir))[proposal.id];
+  assert.deepEqual([stored?.action, stored?.text], ["keep", "The exact keep input."]);
+});
+
+/** The production writer over a model that obeys its prompt: it answers `action`, with "text" only when the prompt
+ *  says that action posts text. */
+function obedientWriter(action: string, prompts: string[]) {
+  return realRecommendationWriter({
+    mount: { model: "haiku", effort: "low", maxTurns: 400 } as never, cwd: "/nonexistent", settingsFile: "settings.json",
+    spawn: (async (args: { prompt: string }) => {
+      prompts.push(args.prompt);
+      const posts = new RegExp(`\\b${action} posts (?:a reason|feedback|a question)\\b`).test(args.prompt);
+      const answer = {
+        action, ...(posts ? { text: `The exact ${action} input.` } : {}),
+        why: "Its proof passed on main.", evidence: ["W1-T5418"], obsolete: false,
+      };
+      return { subtype: "success", isError: false, text: JSON.stringify(answer) };
+    }) as never,
+  });
+}
+
+test("W1-T10229: every action the prompt offers, answered as the prompt says, passes the checker in every lane", async () => {
+  const resolves: Pick<RecommendationEvidence, "resolve"> = { resolve: async () => "pr" };
+  const seen = new Set<string>();
+  for (const id of ["machine-judge:W1-T5418", "ruling:p0", "unowned"]) {
+    for (const lane of ["ready", "drafting", "notReady", "declined"] as const) {
+      const prompt = buildRecommendationPrompt({ proposal: { id, summary: "A parked decision." }, lane, history: [] });
+      const offered = /"action" is one of: ([a-z, ]+)\./.exec(prompt)![1]!.split(", ");
+      for (const action of offered) {
+        const answer = await obedientWriter(action, [])({ context: prompt });
+        assert.deepEqual(await checkRecommendation(answer, { id, lane, ifNothingHappens: "It stays parked." }, resolves),
+          { ok: true, problems: [] }, `${action} on ${id} in ${lane}`);
+        seen.add(action);
+      }
+    }
+  }
+  assert.deepEqual([...seen].sort(), ["approve", "decline", "keep", "reframe", "reply"]);
 });
 
 test("W1-T10229: the writer reads the answer object out of prose, fences and stray braces", async () => {

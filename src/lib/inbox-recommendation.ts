@@ -407,15 +407,25 @@ export interface RecommendationContext {
   history: string[];
 }
 
+const INPUT_NOUN: Readonly<Record<NonNullable<PlainOptionAction["input"]>, string>> = {
+  reason: "a reason", feedback: "feedback", text: "a question",
+};
+
 export function buildRecommendationPrompt(ctx: RecommendationContext, retryProblems: string[] = []): string {
   const routable = (["approve", "decline", "reframe", "reply"] as const).filter((a) => optionAction(a, ctx.lane, ctx.proposal.id) !== undefined);
+  const offered = [...routable, "keep" as const];
+  // W1-T10229: read from the route the checker reads, so every action it requires text for is asked for text.
+  const posts = offered.flatMap((a) => {
+    const input = optionAction(a, ctx.lane, ctx.proposal.id)?.input;
+    return input === undefined ? [] : [`${a} posts ${INPUT_NOUN[input]}`];
+  });
   return [
     "You recommend ONE decision on an inbox item for the operator of an autonomous software fleet.",
     "Respond with ONLY a JSON object, no prose and no markdown fence, shaped EXACTLY:",
     '{"action": string, "text": string (when the action posts text), "why": string (one plain sentence),',
     ' "evidence": [string, ...], "obsolete": boolean, "group": string (optional)}',
-    `"action" is one of: ${[...routable, "keep"].join(", ")}. keep leaves the item as it is and posts nothing.`,
-    'decline posts a reason, reframe posts feedback, reply posts a question: put that exact text in "text".',
+    `"action" is one of: ${offered.join(", ")}. keep leaves the item as it is and records why.`,
+    `${posts.join(", ")}: put that exact text in "text".`,
     'Every "evidence" entry is a merged PR number ("#11199"), a commit sha on main, a task id ("W1-T8918"), or a file path ("src/lib/inbox.ts:1655").',
     '"obsolete" is true only when a merged PR or a commit on main already resolves the item; then cite it in "evidence".',
     'Give "group" when this item shares one root cause with other items, naming that cause in a few words.',
