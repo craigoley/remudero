@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { stringify } from "yaml";
 import type { CiGateOutcome } from "#src/cli/commands/run-task-verb.js";
+import { fixRoundReaderFor } from "#src/lib/adaptive-wip.js";
 import type { Config } from "#src/lib/config.js";
 import { summarizeFixLearningsShadow } from "#src/lib/fix-learnings-shadow.js";
 import { buildLearningsIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLayeredLearningsForTaskFiles, selectLearnings } from "#src/lib/learnings.js";
@@ -41,6 +42,13 @@ async function runRound(t: TestContext, options: {
   noPush?: boolean;
   priorRows?: Row[];
   reviewEvidence?: boolean;
+  /** One verdict per review the rung asks for; each runs a further round while it fails. */
+  laterReviews?: ("failure" | "success")[];
+  spawnEnd?: "superseded" | "abandoned" | "throws";
+  workerHoldsGit?: boolean;
+  mergeRefused?: boolean;
+  /** The round's push leaves the branch at the head it started from, with its claim kept for the CI wait. */
+  unchangedHead?: boolean;
 } = {}) {
   const taskId = options.taskId ?? TASK;
   const runId = options.runId ?? "shadow-fixture";
@@ -78,23 +86,43 @@ async function runRound(t: TestContext, options: {
   };
   let pushes = 0;
   let waits = 0;
-  await withGhShim([{ when: "", stdout: "{}" }], () => runFixRung({
+  const landedHead = options.unchangedHead ? head : PUSHED_HEAD;
+  const reviews = [...(options.laterReviews ?? [])];
+  const rounds = Math.max(1, reviews.length);
+  const stillUnmet = { claim: "claimSymbol is missing", proof: "unit test: fixture", met: false,
+    reason: "the symbol is absent", proof_exec: "executed_fail" as const };
+  const run = () => withGhShim([{ when: "", stdout: "{}" }], () => runFixRung({
     taskId, runId, task: { id: taskId, title: TITLE, files: [PATH] },
     prUrl: PR_URL, branch: `run-${taskId}-1`, worktreePath: source.dir,
     initialSessionId: "fixture", mount: MOUNT, settingsFile: join(source.dir, "settings.json"),
-    config: { root: source.dir, workerProviders: { harnessCommitsFix: true } } as Config,
-    budgetUsd: 10, strikeCap: 1, initialReview: review, ciFailures: [failure],
+    config: { root: source.dir, workerProviders: { harnessCommitsFix: !options.workerHoldsGit } } as Config,
+    budgetUsd: 10, strikeCap: rounds, initialReview: review, ciFailures: [failure],
     reviewBase: { owner: "acme", repo: "fixture", headCheckoutDir: source.dir, reviewerMount: MOUNT },
+    escalationJudge: async () => ({ decision: "deliver", reason: "fixture" }),
+    ...(options.mergeRefused ? { mergeConflict: { files: [{ path: PATH, oursDeleted: 0, theirsDeleted: 0 }],
+      oursLog: "ours", theirsLog: "theirs" } } : {}),
     deps: {
-      spawn: async ({ prompt }) => { prompts.push(prompt); return WORKER; },
+      spawn: async ({ prompt }) => {
+        prompts.push(prompt);
+        if (options.spawnEnd === "throws") throw new Error("fixture worker died");
+        return options.spawnEnd ? new Promise<WorkerResult>(() => {}) : WORKER;
+      },
+      ...(options.spawnEnd === "abandoned" ? { spawnWallClockBoundMs: 20, reclaimWorker: () => {} } : {}),
+      ...(options.spawnEnd === "superseded" ? { watchSuperseded: async () => ({ kind: "superseded" as const,
+        condition: "head-moved" as const, oldHead: head, newHead: FOREIGN_HEAD }) } : {}),
+      ...(options.mergeRefused
+        ? { startShellLessMergeConflictMerge: () => ({ started: false, reason: "fixture merge refusal" }) } : {}),
+      ...(options.unchangedHead ? { branchClaim: { id: () => "claim", release: () => {}, reacquire: () => undefined,
+        last: () => { throw new Error("not read"); }, keepForWait: () => ({}) } } : {}),
       push: () => { pushes++; },
-      readRemoteBranchHead: async () => PUSHED_HEAD,
+      readRemoteBranchHead: async () => landedHead,
       waitForCiGreen: async () => {
         waits++;
-        assert.equal(rows.findLast(row => row.step === "fix.done")?.pushed_head_sha, PUSHED_HEAD);
+        assert.equal(rows.findLast(row => row.step === "fix.done")?.pushed_head_sha, landedHead);
         return options.ci ?? { state: "green", sha: PUSHED_HEAD };
       },
-      runReview: async () => ({ ...review, state: "success" }),
+      runReview: async () => reviews.shift() === "failure"
+        ? { ...review, criteria: [stillUnmet] } : { ...review, state: "success" },
       fetchPrBody: async () => "REPORT",
       fetchPrDiffFiles: async () => [PATH],
       fetchCiFailures: async () => [],
@@ -105,11 +133,13 @@ async function runRound(t: TestContext, options: {
       worktreeHasUncommittedChanges: () => true,
       harnessCommitForShellLessWorker: input => harnessCommitForShellLessWorker(input, {
         commit: () => options.noPush ? { committed: false, reason: "fixture refused commit", undeclared: [] }
-          : { committed: true, sha: PUSHED_HEAD, undeclared: [] }, ahead: () => 1,
+          : { committed: true, sha: landedHead, undeclared: [] }, ahead: () => 1,
       }),
     },
   }));
-  assert.equal(prompts.length, 1);
+  if (options.spawnEnd === "throws") await assert.rejects(run, /fixture worker died/);
+  else await run();
+  if (!options.spawnEnd && !options.mergeRefused) assert.equal(prompts.length, rounds);
   return { rows, project, prompt: prompts[0]!, pushes, waits, steps: (step: string) => rows.filter(row => row.step === step) };
 }
 
@@ -195,6 +225,54 @@ test("W1-T14138 criterion 4: records CI green or red on the round's pushed head,
     assert.equal(outcome.round_id, result.steps("fix.done").at(-1)?.round_id);
     assert.equal(outcome.rounds_to_green, expected === "green" ? 2 : undefined);
   }
+});
+
+test("W1-T14138 criterion 1: a review round after a green CI records none of the earlier round's reds", async t => {
+  const result = await runRound(t, { ci: "green", laterReviews: ["failure", "success"] });
+  const [first, second, ...rest] = result.steps("fix.learnings_shadow");
+  assert.equal(rest.length, 0);
+  assert.deepEqual(first?.failing_checks, [CHECK.name]);
+  assert.equal(result.steps("fix.dispatch")[1]?.mode, "reviewer-unmet");
+  assert.deepEqual(second?.failing_checks, []);
+  assert.deepEqual(second?.matches, [{ id: "review-claim", kinds: ["symbol"] }]);
+});
+
+test("W1-T14138 criterion 4: a round whose worker is superseded, abandoned or dies pushed nothing", async t => {
+  for (const spawnEnd of ["superseded", "abandoned", "throws"] as const) {
+    const result = await runRound(t, { spawnEnd });
+    assert.equal(result.pushes, 0, spawnEnd);
+    const outcomes = result.steps("fix.learnings_outcome");
+    assert.deepEqual(outcomes.map(row => row.outcome), ["no_push"], spawnEnd);
+    assert.equal(outcomes[0]?.round_id, result.steps("fix.learnings_shadow")[0]?.round_id, spawnEnd);
+  }
+});
+
+test("a worker that holds its own git and may still be running leaves the round unresolved", async t => {
+  for (const spawnEnd of ["superseded", "abandoned", "throws"] as const) {
+    const result = await runRound(t, { spawnEnd, workerHoldsGit: true });
+    assert.equal(result.steps("fix.learnings_shadow").length, 1, spawnEnd);
+    assert.equal(result.steps("fix.learnings_outcome").length, 0, spawnEnd);
+  }
+});
+
+test("W1-T14138 criterion 4: a push that leaves the head unchanged is no push, even with the claim kept", async t => {
+  const result = await runRound(t, { unchangedHead: true });
+  assert.equal(result.waits, 1);
+  assert.equal(result.steps("fix.done")[0]?.ci_wait_holds_claim, true);
+  assert.deepEqual(result.steps("fix.learnings_outcome").map(row => row.outcome), ["no_push"]);
+});
+
+test("a refused merge keeps its round-id marker on every row, and its prompt's evidence names no check", async t => {
+  const result = await runRound(t, { mergeRefused: true });
+  const roundId = String(result.steps("fix.dispatch")[0]?.round_id);
+  assert.match(roundId, /^shadow-fixture:merge-refused:1:\d+$/);
+  for (const step of ["fix.done", "fix.learnings_shadow", "fix.learnings_outcome"]) {
+    assert.deepEqual(result.steps(step).map(row => row.round_id), [roundId], step);
+  }
+  assert.deepEqual(result.steps("fix.learnings_shadow")[0]?.failing_checks, []);
+  assert.deepEqual(result.steps("fix.learnings_shadow")[0]?.matches, []);
+  const read = fixRoundReaderFor(result.rows.map(row => ({ ...row, ts: new Date(1_000).toISOString() })));
+  assert.deepEqual(read(0)?.refusedCauses, { merge_refused: 1 });
 });
 
 test("the summary keeps unreadable corpora and unresolved CI out of the rate denominators", async t => {

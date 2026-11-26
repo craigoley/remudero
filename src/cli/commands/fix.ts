@@ -4668,17 +4668,6 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // An empty filed scope can still admit a new test or a registered regenerable artifact.
     // Let the worker try; the harness commit stages only those admitted paths and reports
     // unrelated edits as undeclared. A proof-repair round can also end in a PROOF_AMENDMENT.
-    const roundId = `${opts.runId}:${attempt + retriggers}:${systemClock.now()}`;
-    const shadowRound: FixLearningsRound = { run_id: opts.runId, task_id: opts.taskId, pr_number: prNumber,
-      pr_url: opts.prUrl, round_id: roundId, attempt, round };
-    const recordFixLearningsShadow = () => deps.log("fix.learnings_shadow", fixLearningsShadowFields(shadowRound, {
-      config: opts.config, repo: opts.reviewBase.repo, failures: currentCiFailures ?? [], review: evidence.review,
-    }));
-    const recordFixLearningsOutcome = (outcome: "green" | "red" | "no_push", pushedHeadSha?: string) =>
-      deps.log("fix.learnings_outcome", { ...shadowRound, outcome, pushed_head_sha: pushedHeadSha,
-        ...(outcome === "green" ? { rounds_to_green: fixLearningsRoundsToGreen(
-          [...(repairHistory?.ok ? repairHistory.rows : []), ...roundLedger, ...roundRows], opts.taskId) } : {}) });
-    recordFixLearningsShadow();
     // At the first prompt assembly, as the implement lane does — emitted even at zero selection.
     if (!fixSkillSelectionLogged) deps.log("skills.selection", fixSkillSelection.observation);
     fixSkillSelectionLogged = true;
@@ -4805,14 +4794,32 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
 
     // W1-T4458 (i): the harness starts the merge a shell-less round cannot run, so the worker only
     // resolves the conflict markers it leaves.
-    if (fixHarnessOwnsGit && currentMergeConflict !== undefined) {
-      const merged = (deps.startShellLessMergeConflictMerge ?? host.startShellLessMergeConflictMerge)(opts.worktreePath);
+    const merged = fixHarnessOwnsGit && currentMergeConflict !== undefined
+      ? (deps.startShellLessMergeConflictMerge ?? host.startShellLessMergeConflictMerge)(opts.worktreePath) : undefined;
+    // #10787: main is already in the branch and a red is known — route to it: no strike, no refused round.
+    const mergeUpToDateRed = merged?.reason === host.MERGE_UP_TO_DATE_REASON && noReviewYet && (currentCiFailures?.length ?? 0) > 0;
+    // W1-T13990: a round whose merge did not start is told apart by its id (adaptive-wip.ts reads the marker).
+    const mergeMarker = merged !== undefined && !merged.started && !mergeUpToDateRed ? ":merge-refused" : "";
+    const roundId = `${opts.runId}${mergeMarker}:${attempt + retriggers}:${systemClock.now()}`;
+    const shadowRound: FixLearningsRound = { run_id: opts.runId, task_id: opts.taskId, pr_number: prNumber,
+      pr_url: opts.prUrl, round_id: roundId, attempt, round };
+    // W1-T14138: only the reds THIS round's prompt carries; `currentCiFailures` outlives a green CI.
+    const recordFixLearningsShadow = () => deps.log("fix.learnings_shadow", fixLearningsShadowFields(shadowRound, {
+      config: opts.config, repo: opts.reviewBase.repo, failures: priorCiFailures ?? [], review: evidence.review,
+    }));
+    const recordFixLearningsOutcome = (outcome: "green" | "red" | "no_push", pushedHeadSha?: string) =>
+      deps.log("fix.learnings_outcome", { ...shadowRound, outcome, pushed_head_sha: pushedHeadSha,
+        ...(outcome === "green" ? { rounds_to_green: fixLearningsRoundsToGreen(
+          [...(repairHistory?.ok ? repairHistory.rows : []), ...roundLedger, ...roundRows], opts.taskId) } : {}) });
+    // A worker that may still be running can publish only when it holds its own git; that outcome stays unresolved.
+    const recordUnpublishedLiveRound = (): void => { if (fixHarnessOwnsGit) recordFixLearningsOutcome("no_push"); };
+    recordFixLearningsShadow();
+    if (merged !== undefined) {
       deps.log(merged.started ? "fix.merge_started" : "fix.merge_start_failed", {
         strike: attempt,
         ...(merged.reason ? { reason: merged.reason } : {}),
       });
-      // #10787: main is already in the branch and a red is known — route to it: no strike, no refused round.
-      if (merged.reason === host.MERGE_UP_TO_DATE_REASON && noReviewYet && (currentCiFailures?.length ?? 0) > 0) {
+      if (mergeUpToDateRed) {
         recordFixLearningsOutcome("no_push");
         leaveMergeMode("rung.merge_up_to_date", priorHeadSha);
         continue;
@@ -4923,6 +4930,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         const s = spawnOutcome.superseded;
         const reason = `fix superseded (${s.condition}): ${s.oldHead.slice(0, 12)} -> ${s.newHead.slice(0, 12)}`;
         deps.say(`fix rung: STOPPED strike ${attempt}/${opts.strikeCap} — ${reason}: ${opts.prUrl}`);
+        recordUnpublishedLiveRound();
         return finish({ outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, superseded: s });
       }
       if (spawnOutcome.kind === "yielded") {
@@ -4933,7 +4941,9 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           strike: attempt, round, subtype: "round_yielded", trigger: y.trigger, recovery_ref: y.recoveryRef ?? null,
           index_recovery_ref: y.indexRecoveryRef ?? null,
           cost_usd: y.costUsd, elapsed_ms: spawnOutcome.elapsedMs });
-        recordFixLearningsOutcome("no_push");
+        // `keepError` also names a worker that did not stop.
+        if (y.keepError) recordUnpublishedLiveRound();
+        else recordFixLearningsOutcome("no_push");
         deps.branchClaim?.release();
         const kept = [y.recoveryRef && `work kept at ${y.recoveryRef}`, y.indexRecoveryRef && `staged work kept at ${y.indexRecoveryRef}`]
           .filter(Boolean).join(", ");
@@ -4951,6 +4961,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         // Mirrors the spawn-infra-blocked path immediately below: no subprocess demonstrably
         // ran to completion, so this round is never committed as a strike (W1-T127's own
         // "a strike is only spent once a worker demonstrably ran" invariant).
+        recordUnpublishedLiveRound();
         return finish({ outcome: "spawn_abandoned", review, strikes, retriggers, reason: "spawn wall-clock bound exceeded", spawnAbandonedElapsedMs: spawnOutcome.elapsedMs });
       }
       spawnElapsedMs = spawnOutcome.elapsedMs;
@@ -4970,7 +4981,10 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         ...(fixResult.servedModel == null ? { served_model_reason: fixResult.servedModelReason ??
           "the provider reported no served model for this call" } : {}) };
     } catch (e) {
-      if (!isSpawnInfraBlockedError(e)) throw e;
+      if (!isSpawnInfraBlockedError(e)) {
+        recordUnpublishedLiveRound();
+        throw e;
+      }
       recordFixLearningsOutcome("no_push");
       // No subprocess ever launched, nothing was billed: an INFRA-tagged $0 line, NEVER a
       // `fix.dispatch` line (the only step `priorStrikesFor` counts), so forensics can separate "the
@@ -5396,6 +5410,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         keptForWait = { headSha: pushedHeadSha, claimRunId };
         logFixDoneRow(pushedHeadSha, undefined, landing,
           { ...kept, ci_wait_holds_claim: true, round_started_at_ms: fixRoundStartedAtMs });
+        if (pushedHeadSha === priorHeadSha) recordFixLearningsOutcome("no_push");
       } else logFixDone(pushedHeadSha, undefined, landing);
       if (!landing.landed) deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha, reason: "push-not-landed", push_outcome: landing.outcome });
     };
