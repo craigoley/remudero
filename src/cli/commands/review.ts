@@ -374,7 +374,11 @@ export function assertShadowSnapshotIntegrity(
   try {
     assertReviewerSnapshotIntegrity(host, cwd, expectedHeadSha);
   } catch (e) {
-    if (e instanceof ReviewerSnapshotError) log(`review.reviewer.${e.phase}_error`, reviewerSnapshotErrorRow(e));
+    // The row is diagnostic: a failed append (a full disk) must never replace the checkout refusal, so the original
+    // ReviewerSnapshotError is always the one rethrown.
+    if (e instanceof ReviewerSnapshotError) {
+      try { log(`review.reviewer.${e.phase}_error`, reviewerSnapshotErrorRow(e)); } catch { /* the refusal below still stands */ }
+    }
     throw e;
   }
 }

@@ -125,3 +125,36 @@ test("W1-T14938 criterion 2: an unreadable checkout is still refused as before",
     assert.doesNotThrow(() => assertReviewerSnapshotIntegrity(HOST, dir, head), "an exact, clean checkout still passes");
   });
 });
+
+test("W1-T14938 criterion 2: an unreadable checkout is still refused as before, when the diagnostic row cannot be written", async () => {
+  // A full disk makes the ledger append throw: the checkout refusal, never the disk error, is what the shadow judge sees.
+  let n = 0;
+  while (!shadowJudgeSampled(`review:w1-t14938-enospc-${n}`)) n++;
+  const mount = (model: string): Mount => ({ model, effort: "high", maxTurns: 12, contextBudget: 1 });
+  const repo = gitRepo({ kind: "w1-t14938-enospc" });
+  try {
+    const head = repo.git("rev-parse", "HEAD");
+    writeFileSync(join(repo.dir, ".git", "index"), "corrupt index\n");
+    const rows: { step: string; fields: Record<string, unknown> }[] = [];
+    const log = (step: string, fields: Record<string, unknown>) => {
+      if (step.startsWith("review.reviewer.")) throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+      rows.push({ step, fields });
+    };
+    assert.throws(() => assertShadowSnapshotIntegrity(HOST, repo.dir, head, log),
+      (e: unknown) => e instanceof ReviewerSnapshotError && e.reason === "unreadable", "the original refusal is rethrown");
+    await runShadowJudge({
+      surface: "review", key: `w1-t14938-enospc-${n}`, primaryMount: mount("primary"), primaryDecision: [],
+      mounts: [mount("primary"), mount("shadow")], log,
+      judge: async () => {
+        assertShadowSnapshotIntegrity(HOST, repo.dir, head, log);
+        return { decision: [] };
+      },
+    });
+    assert.deepEqual(rows.map((row) => row.step), ["shadow_judge.unavailable"], "the shadow result is still discarded");
+    const recorded = JSON.stringify(rows[0]!.fields);
+    assert.match(recorded, /semantic reviewer checkout integrity is unreadable/, recorded);
+    assert.doesNotMatch(recorded, /ENOSPC/, recorded);
+  } finally {
+    repo.cleanup();
+  }
+});
