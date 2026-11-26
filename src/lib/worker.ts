@@ -112,6 +112,7 @@ import {
   type ExperimentIntentionToTreat,
 } from "./routing-experiments.js";
 import { loadDefaultPolicy } from "./policy.js";
+import { registerProcessExitLatch } from "./process-exit-latches.js";
 import { assertLiveSpawnAllowed } from "./spawn-guard.js";
 import { validateWorkerSettings, validateWorkerSettingsFile } from "./settings.js";
 import { assertInstanceRegistryWorkerEnvironment, captureInstanceRegistryRuntimeFile, InstanceRegistryRuntimeError, runtimeInstanceRegistryPrivateFile } from "./instance-registry-selection.js";
@@ -2653,6 +2654,15 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
       ...(from === undefined ? {} : { from }), to } };
 }
 
+let workerSpawnRetirement: string | undefined;
+
+/** W1-T14916: after its drain release a daemon process starts no worker; every later spawnWorker call returns
+ *  not-started with a `worker.spawn_withheld` row naming the reason. Only the process exit clears it. */
+export function retireWorkerSpawns(reason: string): void {
+  workerSpawnRetirement ??= reason;
+}
+registerProcessExitLatch("worker-spawn-retirement", () => { workerSpawnRetirement = undefined; });
+
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // W1-T13868: a wrapper may replace this call's result with its own error; the call's table keeps the result's model.
   forgetReturnedServedModel();
@@ -2726,7 +2736,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
   const childReservationId = currentRunChildReservationId();
   const admissionStartedAtMs = systemClock.now();
-  const admission = childReservationId ? undefined : await (args.admitWorkerMemory ?? awaitMemoryAdmission)({
+  const retiredBy = workerSpawnRetirement;
+  const admission = childReservationId || retiredBy ? undefined : await (args.admitWorkerMemory ?? awaitMemoryAdmission)({
     workerClass: workerClassOf(args),
     signal: args.signal,
     sinceMs: args.memoryAdmissionSinceMs,
@@ -2746,23 +2757,27 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       modelUsage: {}, compactionEvents: [], qualitySuspect: false };
   };
   if (admission?.kind === "abandoned" || args.signal?.aborted) return admissionAbandoned();
+  const spawnWithheld = (hold: string): WorkerResult => {
+    const abandoned = admissionAbandoned();
+    const row = { step: "worker.spawn_withheld", ...(args.taskId ? { task_id: args.taskId } : {}),
+      ...(args.runId ? { run_id: args.runId } : {}), hold };
+    try {
+      if (args.logWorkerSpawnWithheld) args.logWorkerSpawnWithheld(row);
+      else process.stderr.write(`${JSON.stringify(row)}\n`);
+    } catch (error) {
+      try { process.stderr.write(`${JSON.stringify(row)}\n`); } catch { /* diagnostics cannot reopen a refused start */ }
+    }
+    return abandoned;
+  };
+  // W1-T14916: once a daemon releases its drain lock, the successor owns new work. A pass already running in the
+  // retired process reaches this boundary from many rungs (fix, review, triage, inbox drafts), so it is refused here.
+  if (retiredBy) return spawnWithheld(`retired: ${retiredBy}`);
   // W1-T11336, W1-T12497: the sweep's admission may precede a fleet PAUSE by tens of minutes. Every fix start,
   // in process or in a run child, re-reads the hold here; reviews and other classes retain their existing path.
   if (workerClassOf(args) === "fix") {
     const root = (args.config ?? loadConfig()).root;
     const hold = (args.readWorkerAdmissionHold ?? workerAdmissionHold)(root);
-    if (hold) {
-      const abandoned = admissionAbandoned();
-      const row = { step: "worker.spawn_withheld", ...(args.taskId ? { task_id: args.taskId } : {}),
-        ...(args.runId ? { run_id: args.runId } : {}), hold: `fleet ${hold.control} hold: ${hold.detail}` };
-      try {
-        if (args.logWorkerSpawnWithheld) args.logWorkerSpawnWithheld(row);
-        else process.stderr.write(`${JSON.stringify(row)}\n`);
-      } catch (error) {
-        try { process.stderr.write(`${JSON.stringify(row)}\n`); } catch { /* diagnostics cannot reopen a refused start */ }
-      }
-      return abandoned;
-    }
+    if (hold) return spawnWithheld(`fleet ${hold.control} hold: ${hold.detail}`);
   }
   const releaseWorkerOccupancy = claimWorkerOccupancy();
   const memoryReservation = childReservationId ? undefined :

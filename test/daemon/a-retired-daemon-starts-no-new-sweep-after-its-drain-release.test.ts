@@ -1,10 +1,14 @@
 // W1-T14916: since W1-T14873 a retiring daemon releases its drain lock before its SRE lane page settles. On 2026-11-26
 // the retired process then ran 14 sweep passes and started 18 workers over 34 minutes, beside its successor.
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { closeDaemonCleanup, createDaemonRetirement, retiringCiJudgeKick } from "#src/cli/commands/daemon.js";
 import { withCiJudgeAfterSweep } from "#src/lib/ci-escalation-judge.js";
+import { join } from "node:path";
 import { resolveFleetControlHold, type LightPassScope, type RestartAdmission } from "#src/lib/daemon.js";
+import { spawnWorker, type SpawnWorkerArgs } from "#src/lib/worker.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 type Row = { step: string } & Record<string, unknown>;
 
@@ -29,9 +33,20 @@ function retiringExit() {
     pageDone: () => pageDone, lockReleased: () => lockReleased };
 }
 
+/** A drafter start as the inbox draft rung makes it, with a provider seam that counts real starts. */
+function drafterStart(t: TestContext, withheld: Array<Record<string, unknown>>, starts: string[]): SpawnWorkerArgs {
+  const root = ownedFixtureDir(t, "retired-spawn").dir;
+  return { cwd: root, permissionMode: "bypassPermissions", settingsFile: join(REPO_ROOT, "settings/worker.json"),
+    config: { root, claudeBin: "/unused", dailyCapUsd: 25 }, model: "haiku", effort: "low", tools: ["Read"],
+    workerClass: "review", prompt: "draft a proposal", taskId: "FB-DRAFT",
+    admitWorkerMemory: async () => { starts.push("memory_admission"); return { kind: "admitted", tier: "fits", waitedMs: 0, attempts: 1 }; },
+    logWorkerSpawnWithheld: (row) => withheld.push(row),
+    providerRouting: { writeStatus: () => {}, spawnCodex: async () => { starts.push("drafter_worker"); throw new Error("started"); } } };
+}
+
 const turns = async (n: number) => { for (let i = 0; i < n; i++) await new Promise((resolve) => setImmediate(resolve)); };
 
-test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker", async () => {
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker", async (t) => {
   const run = retiringExit();
   assert.deepEqual(await run.sweep(), { swept: true }, "before the release a sweep pass runs as before");
   await run.sweepLight();
@@ -56,10 +71,14 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   const spawned: string[] = [];
   let finishSweep: () => void = () => {};
   const sweepGate = new Promise<void>((resolve) => { finishSweep = resolve; });
+  const withheld: Array<Record<string, unknown>> = [];
+  let drafted: Awaited<ReturnType<typeof spawnWorker>> | undefined;
   const admissionHold = () => late.retirement.admissionHold(() => resolveFleetControlHold({}));
   const inFlightSweep = late.retirement.refuse("sweep", withCiJudgeAfterSweep(async () => {
     await sweepGate;
     if (admissionHold() === undefined) spawned.push("fix_worker");
+    // The inbox draft rung calls spawnWorker with no admission hold of its own (cli/commands/sweep.ts).
+    drafted = await spawnWorker(drafterStart(t, withheld, spawned));
   }, retiringCiJudgeKick(late.retirement, () => { spawned.push("ci_judge_worker"); })))();
   const latch: RestartAdmission = Object.assign(() => true, { heldBy: undefined });
   const scope = late.retirement.lightPassScope<LightPassScope>({ reviewOnly: true, admit: latch });
@@ -68,7 +87,10 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   await turns(5);
   finishSweep();
   await inFlightSweep;
-  assert.deepEqual(spawned, [], "a sweep that settles after the release spawns no fix worker and no CI judge worker");
+  assert.deepEqual(spawned, [], "a sweep that settles after the release spawns no fix, CI judge or drafter worker");
+  assert.equal(drafted?.notStarted, "admission-abandoned", "the drafter start returns not-started");
+  assert.deepEqual(withheld, [{ step: "worker.spawn_withheld", task_id: "FB-DRAFT",
+    hold: "retired: drain lock released; the successor owns this work" }], "the spawn path ledgers why it withheld the start");
   assert.deepEqual(admissionHold(), { control: "STOP", detail: "retired: drain lock released; the successor owns this work" });
   assert.equal(scope.admit?.("review", "light"), false, "a light pass still running admits no new review worker");
   assert.equal(scope.admit?.heldBy, "retired: drain lock released; the successor owns this work", "its stand-down names why");

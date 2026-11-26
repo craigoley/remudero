@@ -112,7 +112,7 @@ import { readHeapAdmissionHoldMode } from "../../lib/daemon-heap-admission-hold.
 import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy } from "../../lib/daemon-memory-policy.js";
 import { workerThreads } from "../../lib/worker-heaps.js";
 import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
-import { resolveClaudeExecutable, claudeExecutableCache, taskInputAnswerWithLedger } from "../../lib/worker.js";
+import { resolveClaudeExecutable, claudeExecutableCache, taskInputAnswerWithLedger, retireWorkerSpawns } from "../../lib/worker.js";
 import { defaultInstance, memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "../../lib/host-memory-ledger.js";
 import { type DispatchGovernorDeps } from "../../lib/dispatch-governor.js";
 import { focusGateFor } from "../../lib/focus-gardener.js";
@@ -3578,7 +3578,7 @@ export function createDaemonRetirement(log: (step: string, extra?: Record<string
     return false;
   };
   return {
-    retire: () => { retired = true; },
+    retire: () => { retired = true; retireWorkerSpawns(RETIRED_DETAIL); },
     retired: () => retired,
     allows,
     lightPassScope: <S extends LightPassScope | undefined>(scope: S): S => {
