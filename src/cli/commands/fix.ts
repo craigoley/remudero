@@ -53,7 +53,7 @@ import { fixArmEvidence, fixRoutingWeights, readFixRoutingRows, type FixLearnedA
 import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, SKILL_WITHHOLDING_SHARE, skillWithheldUnderRetirement, stagedSkillRetirements } from "../../lib/skill-workshop.js";
 import { SKILL_ARM_EPOCH, TASK_ARM_UNIT, taskArmWithheld } from "../../lib/task-arm.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../../lib/learnings.js";
-import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockRegion, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
+import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockRegion, extractTaskTrailerId, parseAcceptanceBlock, bodyProofSetDivergence, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
 import { ghRequiredStatusCheckContexts, readLedgerLines, taskIdFromRunBranch } from "../../lib/status.js";
@@ -4350,8 +4350,9 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
               return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
             }
           }
-          const existingProofs = new Set(parseAcceptanceBlock(body).map((criterion) => criterion.proof.trim()));
-          if (!criteria.every((criterion) => existingProofs.has(criterion.proof.trim()))) {
+          // W1-T14913: the author gate's comparison, so a legacy-rendered quoted proof counts as present.
+          const missingProofs = new Set(bodyProofSetDivergence(parseAcceptanceBlock(body), criteria.map((criterion) => criterion.proof)).onlyInRecord);
+          if (missingProofs.size > 0) {
             if (deps.fetchPrDiffFiles) {
               try {
                 const recognition = recognizeChangesetClaims(body, await deps.fetchPrDiffFiles(opts.prUrl));
@@ -4380,7 +4381,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
             deps.log("fix.body_coverage_repaired", {
               head_sha: review.headSha,
               criteria_count: criteria.length,
-              missing_proofs: criteria.filter((criterion) => !existingProofs.has(criterion.proof.trim())).length,
+              missing_proofs: criteria.filter((criterion) => missingProofs.has(criterion.proof.trim())).length,
             });
             const fresh = await deps.runReview({
               ...opts.reviewBase,
