@@ -62,6 +62,7 @@ import {
 } from "./task-id-reservation.js";
 // @ts-expect-error The shared plain .mjs helper ships under src/ so source-only runtimes can load it.
 import { adjudicateReservationChain, parseReservationHolderLine, parseReservationHolderFields } from "./reservation-chain.mjs";
+import { ACCEPTANCE_BULLET_RE, type ProofSpan, type ReadCriterion } from "./body-repair.js";
 
 /** JUDGE (MASTER-PLAN §12 rules 4/3B; W1-T1C): after green CI, a fresh read-only REVIEW session
  * judges each stated proof and posts `remudero-review`. {@link judgeReview} is pure (unit-fixture falsifier);
@@ -9122,10 +9123,50 @@ export function parseReviewerVerdictClauses(text: string, count: number): (strin
 
 // ── Acceptance criteria from a PR body (manual plan/doc PRs) ───────────────
 
-/** Strip a single layer of matching `"..."` or `'...'` quotes, if present. */
+/** Strip a single layer of matching `"..."` or `'...'` quotes, if present. Inside double quotes, `\"` and `\\` unescape
+ *  as a YAML double-quoted scalar's do (W1-T14913), so a body proof carries the same text as its plan record. */
 function stripQuotes(s: string): string {
   const m = s.match(/^(["'])([\s\S]*)\1$/);
-  return m ? m[2] : s;
+  if (!m) return s;
+  return m[1] === '"' ? m[2].replace(/\\(["\\])/g, "$1") : m[2];
+}
+
+/** W1-T14913: a double-quoted body proof whose escapes the parser unescaped, mapped to the text between its quotes as
+ *  written. Before W1-T14913 the renderer wrote a quoted proof's backslashes unescaped (a claim holding `|` quoted both
+ *  sides), so a stored legacy body's `\\` meant two backslashes; {@link bodyProofsAgainstRecord} reads that raw text
+ *  only when the whole body's as-written proof set is its record's. */
+const quotedProofAsWritten = new WeakMap<AcceptanceCriterion, string>();
+
+/** W1-T14913: every body criterion's proof as compared with its record's, index-aligned, under ONE reading for the whole
+ *  body. A legacy body (rendered before W1-T14913, backslashes unescaped inside quotes) is read as written when its
+ *  as-written proof set IS the record's; every other body is read as YAML decodes it. Never row by row: mixing the two
+ *  readings would accept a body that neither complete reading matches (#20963's fourteenth review). */
+export function bodyProofsAgainstRecord(criteria: readonly AcceptanceCriterion[], recordProofs: ReadonlySet<string>): string[] {
+  const asWritten = criteria.map((c) => quotedProofAsWritten.get(c)?.trim() ?? c.proof.trim());
+  const written = new Set(asWritten.filter((p) => p.length > 0));
+  const sameSet = written.size === recordProofs.size && [...written].every((p) => recordProofs.has(p));
+  return sameSet ? asWritten : criteria.map((c) => c.proof.trim());
+}
+
+/** W1-T14913: the proofs only a body's block names and the proofs only its record names, each body proof read by
+ *  {@link bodyProofsAgainstRecord}. THE one body-versus-record proof-set comparison: the author gate's trailer/body
+ *  divergence, run-task's acceptance normalizer and the fix rung's body-coverage check all call it, so a legacy body
+ *  the gate passes is never one a normalizer rewrites. */
+export function bodyProofSetDivergence(bodyCriteria: readonly AcceptanceCriterion[], recordProofs: readonly string[]):
+  { onlyInBody: string[]; onlyInRecord: string[] } {
+  const record = recordProofs.map((p) => p.trim()).filter((p) => p.length > 0);
+  const recordSet = new Set(record);
+  const body = bodyProofsAgainstRecord(bodyCriteria, recordSet).filter((p) => p.length > 0);
+  const bodySet = new Set(body);
+  return { onlyInBody: [...new Set(body.filter((p) => !recordSet.has(p)))], onlyInRecord: [...new Set(record.filter((p) => !bodySet.has(p)))] };
+}
+
+/** The proof a `proof:` value reads as, remembering its as-written text when unescaping changed it. */
+function readQuotedProof(criterion: AcceptanceCriterion, value: string): string {
+  const proof = stripQuotes(value);
+  const raw = value.match(/^"([\s\S]*)"$/)?.[1];
+  if (raw !== undefined && raw !== proof) quotedProofAsWritten.set(criterion, raw);
+  return proof;
 }
 
 /** The Acceptance HEADER line. Extracted as a shared constant so {@link parseAcceptanceBlock} and {@link
@@ -9136,7 +9177,8 @@ export const ACCEPTANCE_HEADER_RE = /^\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?
 
 /** A criterion BULLET. Shared with {@link acceptanceBlockDiagnostics} for the same reason as {@link
  *  ACCEPTANCE_HEADER_RE}. Exported for the same reason {@link ACCEPTANCE_HEADER_RE} is (W1-T2762). */
-export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
+// W1-T14913: lives in body-repair.ts (a leaf review.ts may import) so the body-proof rewriter reads the same bullets.
+export { ACCEPTANCE_BULLET_RE };
 
 /** A CommonMark fence opener — three or more backticks (whose info string holds no backtick) or tildes. Exported so a
  *  fixture can drive both of its arms by name (the negative-reachability ratchet). */
@@ -9277,16 +9319,54 @@ function acceptanceSeparator(item: string): { index: number; width: number } | n
  * house format, #277/#280). Parsing stops at the first line, after the bullets begin, that is neither a new bullet nor
  * a recognised continuation. FAILS CLOSED: `[]` when there is no block, and empty criteria never pass. */
 export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
+  return readAcceptanceBlock(body).criteria;
+}
+
+/** W1-T14913: where the parser read each criterion's proof value, index-aligned with {@link parseAcceptanceBlock}'s
+ *  criteria (`undefined` for a criterion with no proof): its line (split on `\n`), the column range of the value as written
+ *  (quotes included when `quoted`) and the proof read there. A line outside the Acceptance block, a fenced example
+ *  included, is never one, and a claim repeating the proof text lies outside the range. */
+export function acceptanceProofSpans(body: string): (ProofSpan | undefined)[] {
+  return acceptanceCriteriaRead(body).map((criterion) => criterion.span);
+}
+
+/** W1-T14913: every Acceptance criterion's claim and proof as parseAcceptanceBlock reads them, with the span its proof was
+ *  read from. body-repair's rewrites take this, so a rewrite that changes any claim, or any proof but its target, refuses. */
+export function acceptanceCriteriaRead(body: string): ReadCriterion[] {
+  const { criteria, proofSpans } = readAcceptanceBlock(body);
+  return criteria.map((criterion, index) => {
+    const span = proofSpans[index];
+    const proof = criterion.proof ?? "";
+    return { claim: criterion.claim ?? "", proof, span: span === undefined ? undefined : { ...span, proof } };
+  });
+}
+
+type WrittenProofSpan = Omit<ProofSpan, "proof">;
+
+/** The column range of `value` inside `line`, starting the search at `from`; `undefined` when it is not there. */
+function spanOf(line: string, value: string, from: number, at: number, quoted = false): WrittenProofSpan | undefined {
+  const start = line.indexOf(value, from);
+  return start < 0 || value === "" ? undefined : { line: at, start, end: start + value.length, quoted };
+}
+
+function readAcceptanceBlock(body: string): { criteria: AcceptanceCriterion[]; proofSpans: (WrittenProofSpan | undefined)[] } {
   const lines = (body ?? "").split("\n");
   const criteria: AcceptanceCriterion[] = [];
+  const proofSpans: (WrittenProofSpan | undefined)[] = [];
+  /** A `proof:` continuation's value as written, quotes included, so a rewrite replaces exactly that range. */
+  const continuationSpan = (line: string, at: number): WrittenProofSpan | undefined => {
+    const m = line.match(/^(\s*proof\s*:\s*)(.*?)\s*$/i);
+    return m ? spanOf(line, m[2]!, m[1]!.length, at, /^(["'])[\s\S]*\1$/.test(m[2]!)) : undefined;
+  };
   /** Index-aligned with `criteria`: for a `claim:`-labelled bullet nonetheless split at a separator, the claim text as
    *  written BEFORE that split. An indented `proof:` continuation below such a bullet proves the split was a false
    *  positive — the proof lives on that line, so the pipe belonged to the claim — and restores this. */
   const unsplitLabelledClaims: (string | undefined)[] = [];
   // Header: "Acceptance:", "**Acceptance:**", "## Acceptance", "Acceptance criteria:" — never one inside a fence.
   const headerLine = acceptanceHeaderLine(lines);
-  if (headerLine < 0) return criteria;
-  for (const raw of lines.slice(headerLine + 1)) {
+  if (headerLine < 0) return { criteria, proofSpans };
+  for (const [offset, raw] of lines.slice(headerLine + 1).entries()) {
+    const at = headerLine + 1 + offset;
     const line = raw.replace(/\r$/, "");
     const bullet = line.match(ACCEPTANCE_BULLET_RE);
     if (bullet) {
@@ -9302,6 +9382,9 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
       else if (!sep) proof = bareDialectProof(claim);
       if (!claim) continue;
       criteria.push({ claim, proof });
+      // The proof's own range: after the separator for a split bullet (never the claim before it), else inside the item.
+      const itemStart = line.lastIndexOf(bullet[1]);
+      proofSpans[criteria.length - 1] = proof ? spanOf(line, proof, itemStart + (sep ? sep.index + sep.width : 0), at) : undefined;
       const whole = claimLabel && proof ? item.match(/^claim\s*:\s*(.*)$/i) : null;
       unsplitLabelledClaims[criteria.length - 1] = whole ? stripQuotes(whole[1].trim()) : undefined;
       continue;
@@ -9312,7 +9395,8 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
       const proofLabel = line.trim().match(/^proof\s*:\s*(.*)$/i);
       const last = criteria[criteria.length - 1];
       if (proofLabel && !last.proof) {
-        last.proof = stripQuotes(proofLabel[1].trim());
+        last.proof = readQuotedProof(last, proofLabel[1].trim());
+        proofSpans[criteria.length - 1] = continuationSpan(line, at);
         continue;
       }
       // The bullet above was a `claim:` label carrying a separator of its own and THIS line is the proof, so that
@@ -9321,7 +9405,8 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
       const unsplit = proofLabel ? unsplitLabelledClaims[criteria.length - 1] : undefined;
       if (proofLabel && unsplit !== undefined) {
         last.claim = unsplit;
-        last.proof = stripQuotes(proofLabel[1].trim());
+        last.proof = readQuotedProof(last, proofLabel[1].trim());
+        proofSpans[criteria.length - 1] = continuationSpan(line, at);
         unsplitLabelledClaims[criteria.length - 1] = undefined;
         continue;
       }
@@ -9337,7 +9422,7 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
     if (line.trim() === "" && criteria.length === 0) continue;
     break;
   }
-  return criteria;
+  return { criteria, proofSpans };
 }
 
 /** W1-T14627: the refusal a body guard earns when no task record declares it. */
@@ -9351,8 +9436,10 @@ export const BODY_GUARD_UNBACKED = "body-guard-unbacked";
  */
 export function markUnbackedBodyGuards<T extends AcceptanceCriterion>(criteria: readonly T[], bodyCriteria: readonly AcceptanceCriterion[],
   fromBody: boolean): { criteria: T[]; unbacked: string[] } {
-  const bodyGuardList = bodyCriteria.filter((c) => (c as { kind?: unknown }).kind === "guard");
-  const bodyGuards = new Set(bodyGuardList.map((c) => c.proof.trim()));
+  const recordProofs = new Set(criteria.map((c) => c.proof.trim()));
+  const read = bodyProofsAgainstRecord(bodyCriteria, recordProofs);
+  const bodyGuardList = bodyCriteria.flatMap((c, i) => (c as { kind?: unknown }).kind === "guard" ? [{ guard: c, proof: read[i]! }] : []);
+  const bodyGuards = new Set(bodyGuardList.map(({ proof }) => proof));
   // A body guard is backed only by a record criterion that is itself `kind: guard` with the same trimmed proof.
   const backedProofs = new Set(fromBody ? [] : criteria
     .filter((c) => (c as { kind?: unknown }).kind === "guard").map((c) => c.proof.trim()));
@@ -9366,8 +9453,7 @@ export function markUnbackedBodyGuards<T extends AcceptanceCriterion>(criteria: 
   // A body guard whose proof matches NO record criterion has no row to mark: add one the review must refuse, naming
   // the proof, so editing a proof and marking it guard cannot slip past both halves.
   const present = new Set(criteria.map((c) => c.proof.trim()));
-  for (const guard of bodyGuardList) {
-    const proof = guard.proof.trim();
+  for (const { guard, proof } of bodyGuardList) {
     if (present.has(proof) || backedProofs.has(proof)) continue;
     present.add(proof);
     unbacked.push(proof);
