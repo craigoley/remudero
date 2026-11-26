@@ -362,37 +362,40 @@ export function renderBodyDefects(defects: readonly BodyDefect[]): string {
 /** W1-T10339 — one validated proof replacement for a PR whose BODY is its Acceptance (it carries no task trailer). */
 export interface BodyProofReplacement { oldProof: string; newProof: string }
 
+/** W1-T14913 — rewrite ONE body proof, found by the value parseAcceptanceBlock reads. On a `proof:` line whose whole
+ *  value is double-quoted, that value is the quoted text with `\"` and `\\` unescaped (any other backslash stays), and
+ *  the replacement is written back escaped, so it re-reads exactly; any other bullet or proof line is matched and
+ *  written literally, as before. `undefined` unless exactly one line carries `oldProof`. */
+export function rewriteBodyProof(body: string, oldProof: string, newProof: string): string | undefined {
+  const escaped = (text: string): string => `"${text.replace(/[\\"]/g, "\\$&")}"`;
+  const lines = body.split("\n");
+  const hits = lines.flatMap((line, index) => {
+    if (!/^\s*(?:[-*+]\s|proof\s*:)/i.test(line)) return [];
+    const quoted = line.match(/^(\s*proof\s*:\s*)"([\s\S]*)"(\s*)$/i);
+    if (quoted) {
+      if (quoted[2]!.replace(/\\(["\\])/g, "$1") === oldProof) return [{ index, line: `${quoted[1]}${escaped(newProof)}${quoted[3]}` }];
+      return [];
+    }
+    return line.includes(oldProof) ? [{ index, line: line.replace(oldProof, () => newProof) }] : [];
+  });
+  if (hits.length !== 1) return undefined;
+  lines[hits[0]!.index] = hits[0]!.line;
+  return lines.join("\n");
+}
+
 /**
  * W1-T10339 — REPLACE THE PROOF TEXT OF THE ACCEPTANCE BULLETS A VALIDATED REPAIR NAMES, AND NOTHING ELSE. Each old proof must
  * sit on exactly ONE bullet or `proof:` continuation line of the body; a body that no longer carries it, or carries it on more
  * than one line, is not guessed at (`undefined`). A claim is never read or written here — {@link refusesToAuthorAClaim}'s line.
  */
 export function replaceBodyProofs(body: string, replacements: readonly BodyProofReplacement[]): string | undefined {
-  const lines = body.split("\n");
-  // W1-T14913: parseAcceptanceBlock unescapes `\"` and `\\` inside double quotes (any other backslash stays), so a
-  // double-quoted span is compared by its parsed value and rewritten escaped; text outside quotes is matched literally.
-  const escaped = (text: string): string => `"${text.replace(/[\\"]/g, "\\$&")}"`;
-  const parsedSpan = (inner: string): string => inner.replace(/\\(["\\])/g, "$1");
-  const replaceIn = (line: string, oldProof: string, newProof: string): string | undefined => {
-    let found = false;
-    const out = line.replace(/"((?:[^"\\]|\\.)*)"/g, (span, inner: string) => {
-      if (found || parsedSpan(inner) !== oldProof) return span;
-      found = true;
-      return escaped(newProof);
-    });
-    if (found) return out;
-    return line.includes(oldProof) ? line.replace(oldProof, () => newProof) : undefined;
-  };
+  let repaired = body;
   for (const { oldProof, newProof } of replacements) {
-    const hits = lines.flatMap((line, index) => {
-      if (!/^\s*(?:[-*+]\s|proof\s*:)/i.test(line)) return [];
-      const replaced = replaceIn(line, oldProof, newProof);
-      return replaced === undefined ? [] : [{ index, replaced }];
-    });
-    if (hits.length !== 1) return undefined;
-    lines[hits[0]!.index] = hits[0]!.replaced;
+    const next = rewriteBodyProof(repaired, oldProof, newProof);
+    if (next === undefined) return undefined;
+    repaired = next;
   }
-  return lines.join("\n");
+  return repaired;
 }
 
 /** One path a pull request's diff changes, as {@link planFilingAcceptanceCure} reads it. */

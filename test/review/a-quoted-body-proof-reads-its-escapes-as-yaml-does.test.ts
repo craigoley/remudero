@@ -4,6 +4,7 @@ import { parse } from "yaml";
 import { replaceBodyProofs } from "#src/lib/body-repair.js";
 import { renderAcceptanceBlock } from "#src/lib/plan-pr-emitter.js";
 import { parseAcceptanceBlock } from "#src/lib/review.js";
+import { wrappedGrepBodyRepair } from "#src/run-task.js";
 
 // W1-T14913: a body proof in YAML double quotes must read as the record's YAML scalar does, or a body `kind: guard`
 // finds no record row and is refused (core #20913).
@@ -65,4 +66,21 @@ test("a non-canonical quoted body proof is found by its parsed value and rewritt
   const newLone = String.raw`grep: a\\b in f`;
   const rewritten = replaceBodyProofs(lone, [{ oldProof: oldLone, newProof: newLone }]);
   assert.equal(parseAcceptanceBlock(rewritten!)[0]!.proof, newLone, "a newProof holding \\\\ re-reads exactly");
+});
+
+// The third review of #20963: a double-quoted proof line holding UNESCAPED inner quotes (a hand edit) is read by its
+// whole quoted value, and a wrapped grep in a rendered pipe-form block is found although its quotes are escaped.
+test("a hand-quoted body proof and a rendered wrapped grep are rewritten by the value they parse to", () => {
+  const hand = "## Acceptance\n- claim: the ceiling stays\n" + String.raw`  proof: "grep: "x" in f"` + "\n";
+  const oldHand = parseAcceptanceBlock(hand)[0]!.proof;
+  assert.equal(oldHand, `grep: "x" in f`);
+  const newHand = String.raw`grep: a\\b in f`;
+  const fixed = replaceBodyProofs(hand, [{ oldProof: oldHand, newProof: newHand }]);
+  assert.notEqual(fixed, undefined, "the hand-quoted line is found");
+  assert.equal(parseAcceptanceBlock(fixed!)[0]!.proof, newHand, "and the replacement re-reads exactly");
+
+  const rendered = renderAcceptanceBlock([{ claim: "a | b", proof: `grep: "driftCeiling" in scripts/clock-sweep-baseline.json` }]);
+  const repair = wrappedGrepBodyRepair(rendered);
+  assert.notEqual(repair, undefined, "the wrapped grep is found in the rendered block");
+  assert.equal(parseAcceptanceBlock(repair!.repairedBody)[0]!.proof, "grep: driftCeiling in scripts/clock-sweep-baseline.json");
 });
