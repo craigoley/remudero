@@ -329,11 +329,14 @@ const INERT_CENSUS: Record<string, { importers: string[]; symbol: string; caller
 
 test("W1-T14987: every daemon-inert path of serve's own code is pinned by its census", () => {
   assert.deepEqual(SERVE_OWN_CODE_DAEMON_INERT_PATHS.map((row) => row.path).sort(), Object.keys(INERT_CENSUS).sort());
-  const tracked = execFileSync("git", ["-C", REPO_ROOT, "ls-files", "--", "src", "scripts", "bin"], { encoding: "utf8" }).split("\n").filter(Boolean);
   for (const row of SERVE_OWN_CODE_DAEMON_INERT_PATHS) {
     const census = INERT_CENSUS[row.path]!;
     assert.match(row.reader, new RegExp(census.symbol), `${row.path} names its reader`);
     const stem = row.path.split("/").pop()!.replace(/\.ts$/, "");
+    // A caller sweep, not a population walk: every importer names the stem, so `git grep -l` over
+    // tracked src/scripts/bin is the complete candidate set the specifier test below narrows.
+    const tracked = execFileSync("git", ["-C", REPO_ROOT, "grep", "-l", "-F", "-e", stem, "--", "src", "scripts", "bin"], { encoding: "utf8" }).split("\n").filter(Boolean);
+    assert.ok(tracked.includes(census.importers[0]!), `positive control: the sweep for ${stem} sees ${census.importers[0]}`);
     const specifier = new RegExp(`(?:from|import)\\s*\\(?\\s*["'][^"']*/${stem}(?:\\.js|\\.ts)?["']`);
     const importers = tracked.filter((file) => file !== row.path && /\.(?:ts|mts|mjs|js)$/.test(file) && specifier.test(readFileSync(join(REPO_ROOT, file), "utf8")));
     assert.deepEqual(importers, census.importers, `the modules importing ${row.path}`);
