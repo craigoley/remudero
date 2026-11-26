@@ -1,4 +1,5 @@
-import { dirname, resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultGitRunnerAsync, loadPlanAtRefAsync } from "./plan.js";
 import { readOpsCatalogSnapshotAsync } from "./ops-catalog-source.js";
@@ -6,8 +7,9 @@ import { planDestinationRepository } from "./plan-destination.js";
 
 /**
  * W1-T14902: the one reader of a named task's `dispatch_hold`, for the review's guarded poster and the merge path alike.
- * It reads the plan of this checkout at origin/main first, then the ops catalog, never the pull request's head: a hold
- * added on main is seen, and a head cannot release its own hold.
+ * It reads the plan of the pull request's own repository at origin/main first (its managed checkout, or this one when the
+ * daemon drains itself), then the ops catalog, never the pull request's head: a hold added on main is seen, and a head
+ * cannot release its own hold. A real task id that neither catalog holds is `unread`: its hold cannot be shown clear.
  *
  * INVARIANT an-unread-hold-holds: a plan that cannot be read, a refused ops read, and an ops answer served from the last
  * good snapshot (it may predate the hold) all answer `unread`, which holds. Only a record read fresh says `clear`.
@@ -25,8 +27,10 @@ export interface TaskDispatchHoldSources {
   readMainPlan?: () => Promise<{ byId: ReadonlyMap<string, { dispatch_hold?: boolean }> }>;
   /** The ops catalog lookup. Default: {@link readOpsCatalogHold} under `stateDir`. */
   lookup?: (taskId: string) => Promise<TaskHoldLookup>;
-  /** The instance state dir naming the ops catalog (its plan destination). */
+  /** The instance state dir naming the ops catalog (its plan destination), the daemon's target and its `repos/`. */
   stateDir: string;
+  /** The pull request's repository, whose plan holds its task. Omitted: the daemon's target, else this checkout. */
+  repository?: { owner: string; repo: string };
 }
 
 /** W1-T14902: what the caller read of the named task's `dispatch_hold`. */
@@ -72,14 +76,47 @@ export async function planCheckoutRoot(argv: readonly string[] = process.argv.sl
   }
 }
 
-const TASK_ID = /^[A-Z][A-Z0-9]*-T\d+$/;
+/**
+ * The checkout holding `repository`'s plan, as `daemon.ts` picks a daemon's checkout: the target record's own checkout
+ * when the pull request is the daemon's target (`<state>/daemon-target.json`, written at boot), else that repository's
+ * managed checkout `<config.root>/repos/<repo>` when it exists, else {@link planCheckoutRoot} (an operator's CLI, or a
+ * daemon draining itself with no record). Read here, not through `repo-location.ts` (its argv-at-import cost, W1-T2531).
+ */
+export async function targetPlanRoot(stateDir: string, repository: { owner: string; repo: string } | undefined,
+  selfRoot: () => Promise<string> = () => planCheckoutRoot()): Promise<string> {
+  if (repository === undefined) return selfRoot();
+  const record = daemonTarget(stateDir);
+  const same = (owner: string, repo: string) => owner.toLowerCase() === repository.owner.toLowerCase() &&
+    repo.toLowerCase() === repository.repo.toLowerCase();
+  if (record !== undefined && same(record.owner, record.repo)) return record.checkoutRoot;
+  const managed = join(dirname(stateDir), "repos", repository.repo);
+  return existsSync(join(managed, ".git")) ? managed : selfRoot();
+}
+
+function daemonTarget(stateDir: string): { owner: string; repo: string; checkoutRoot: string } | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(join(stateDir, "daemon-target.json"), "utf8"));
+  } catch (error) {
+    // No record (a CLI, or a host before W1-T10925) or an unreadable one: the managed checkout or this one answers,
+    // and a plan that cannot be read there still answers unread.
+    void error;
+    return undefined;
+  }
+  const r = parsed as { owner?: unknown; repo?: unknown; checkoutRoot?: unknown } | null;
+  return typeof r?.owner === "string" && typeof r.repo === "string" && typeof r.checkoutRoot === "string"
+    ? { owner: r.owner, repo: r.repo, checkoutRoot: r.checkoutRoot } : undefined;
+}
+
+// A planned id, legacy suffixes too (W1-T12e); a synthetic review key (`PR-<n>`, `dep-review-PR<n>`) is not one.
+const TASK_ID = /^[A-Z][A-Z0-9]*-T\d+[A-Za-z0-9]*$/;
 
 export async function readTaskDispatchHold(taskId: string | undefined, sources: TaskDispatchHoldSources): Promise<TaskHoldReading> {
   // A synthetic review key (`PR-<n>`, `dep-review-PR<n>`) or no trailer names no task: it reviews and arms as today.
   if (taskId === undefined || !TASK_ID.test(taskId)) return { outcome: "clear" };
   let main: { byId: ReadonlyMap<string, { dispatch_hold?: boolean }> };
   try {
-    main = await (sources.readMainPlan ?? (async () => loadPlanAtRefAsync(await planCheckoutRoot(), "plan/tasks.yaml", "origin/main")))();
+    main = await (sources.readMainPlan ?? (async () => loadPlanAtRefAsync(await targetPlanRoot(sources.stateDir, sources.repository), "plan/tasks.yaml", "origin/main")))();
   } catch (error) {
     return { outcome: "unread", taskId, reason: `the plan at origin/main is unreadable: ${String((error as Error)?.message ?? error)}` };
   }
@@ -93,7 +130,7 @@ export async function readTaskDispatchHold(taskId: string | undefined, sources: 
     return { outcome: "unread", taskId, reason: `the ops catalog lookup threw: ${String((error as Error)?.message ?? error)}` };
   }
   if (found.outcome === "unreadable") return { outcome: "unread", taskId, reason: found.reason };
-  if (found.outcome === "absent") return { outcome: "clear" };
+  if (found.outcome === "absent") return { outcome: "unread", taskId, reason: "neither the plan at origin/main nor the ops catalog holds it" };
   if (found.lastGood !== undefined) return { outcome: "unread", taskId, reason: `served from the last good ops snapshot (${found.lastGood.refusal})` };
   return found.task.dispatch_hold === true ? { outcome: "held", taskId } : { outcome: "clear" };
 }

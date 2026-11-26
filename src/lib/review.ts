@@ -13587,7 +13587,8 @@ function recordedCappedOverride(opts: PostReviewStatusGuardedOpts): CappedOverri
  *  test-runner precedent keeps a suite of partial fakes off the live plan and ops catalog). */
 async function guardedTaskHold(opts: PostReviewStatusGuardedOpts): Promise<TaskHoldReading | undefined> {
   if (opts.taskHold !== undefined) return opts.taskHold;
-  return isTestRunner() ? undefined : readTaskDispatchHold(opts.taskId, { stateDir: dirname(opts.ledgerPath) });
+  return isTestRunner() ? undefined : readTaskDispatchHold(opts.taskId,
+    { stateDir: dirname(opts.ledgerPath), repository: { owner: opts.owner, repo: opts.repo } });
 }
 
 async function publishTaskHold(opts: PostReviewStatusGuardedOpts, verdict: ReviewVerdict,

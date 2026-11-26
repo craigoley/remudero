@@ -5,9 +5,9 @@
  * and the merge path refuses the PR, until the hold is released. A hold that cannot be read holds too.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { runReview, type ReviewCommandHost } from "#src/cli/commands/review.js";
 import { armIfVerdictPermitsAsync, attemptArmAsync, readPullRequestTaskHold, realArmDepsAsync } from "#src/lib/arm-auto-merge.js";
@@ -15,7 +15,7 @@ import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { postReviewStatusGuarded, taskHoldReading, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
-import { planCheckoutRoot, readOpsCatalogHold, readTaskDispatchHold, type TaskDispatchHoldSources } from "#src/lib/task-dispatch-hold.js";
+import { planCheckoutRoot, readOpsCatalogHold, targetPlanRoot, readTaskDispatchHold, type TaskDispatchHoldSources } from "#src/lib/task-dispatch-hold.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -144,7 +144,11 @@ test("W1-T14902: the one reader reads main, then a fresh ops record; every other
     ops({ outcome: "found", catalog: "ops", task: { id: TASK, ...task }, ...extra });
   assert.deepEqual(await read({ readMainPlan: main({}), lookup: found({ dispatch_hold: true }) }), { outcome: "held", taskId: TASK });
   assert.deepEqual(await read({ readMainPlan: main({}), lookup: found({}) }), { outcome: "clear" });
-  assert.deepEqual(await read({ readMainPlan: main({}), lookup: ops({ outcome: "absent" }) }), { outcome: "clear" });
+  assert.deepEqual(await read({ readMainPlan: main({}), lookup: ops({ outcome: "absent" }) }),
+    { outcome: "unread", taskId: TASK, reason: "neither the plan at origin/main nor the ops catalog holds it" },
+    "a real id neither catalog holds cannot be shown clear");
+  assert.deepEqual(await read({ readMainPlan: main({ "W1-T12e": { dispatch_hold: true } }), lookup: never }, "W1-T12e"),
+    { outcome: "held", taskId: "W1-T12e" }, "a legacy suffixed id is a task id, not a synthetic key");
   // THE INVARIANT: a last-good snapshot may predate the hold, so it is unread; so is every failed read.
   assert.equal((await read({ readMainPlan: main({}), lookup: found({}, { lastGood: { refusal: "ops-stale", snapshotAgeMs: 1 } }) })).outcome, "unread");
   assert.equal((await read({ readMainPlan: main({}), lookup: ops({ outcome: "unreadable", reason: "ops-malformed" }) })).outcome, "unread");
@@ -176,7 +180,7 @@ test("W1-T14902: the one reader's defaults read this checkout's plan at origin/m
   assert.deepEqual(await readTaskDispatchHold("W1-T8397", { stateDir }), { outcome: "held", taskId: "W1-T8397" });
   assert.deepEqual(await readTaskDispatchHold("W1-T10732", { stateDir }), { outcome: "clear" });
   // Absent from main, the default lookup finds no plan destination under this state dir: no ops catalog, clear.
-  assert.deepEqual(await readTaskDispatchHold("W1-T99999998", { stateDir }), { outcome: "clear" });
+  assert.equal((await readTaskDispatchHold("W1-T99999998", { stateDir })).outcome, "unread");
 });
 
 test("W1-T14902: the default ops read answers only from a fresh snapshot of the named destination", async (t) => {
@@ -222,9 +226,16 @@ test("W1-T14902: every guarded post reads the hold itself when its caller suppli
   delete process.env.NODE_TEST_CONTEXT;
   const held = await post("W1-T8397");
   assert.equal(held.taskHold, "held: W1-T8397 carries dispatch_hold", "THE WIRING: a caller that passes no reading is still held");
+  // THE TARGET WIRING: the post's own owner/repo picks the plan. A daemon whose target acme/remudero has no readable
+  // checkout holds even a task this checkout's plan reads clear, so the reading came from the PR's repository.
+  writeFileSync(join(dirname(ledgerPath), "daemon-target.json"),
+    JSON.stringify({ owner: "acme", repo: "remudero", isSelf: false, checkoutRoot: join(dirname(ledgerPath), "no-checkout") }));
+  const target = await post("W1-T10732");
+  assert.match(target.taskHold ?? "", /^held: W1-T10732's dispatch_hold is unreadable/);
+  rmSync(join(dirname(ledgerPath), "daemon-target.json"));
   process.env.NODE_TEST_CONTEXT = previous ?? "child-v8";
   await post("W1-T10732");
-  assert.deepEqual(posts, ["W1-T8397:pending", "W1-T10732:success"]);
+  assert.deepEqual(posts, ["W1-T8397:pending", "W1-T10732:pending", "W1-T10732:success"]);
 });
 
 test("W1-T14902: the production reader's defaults read the body through gh and the real catalog lookup", async (t) => {
@@ -241,9 +252,16 @@ test("W1-T14902: the production reader's defaults read the body through gh and t
     rmSync(shim.dir, { recursive: true, force: true });
   });
   Object.assign(process.env, { PATH: `${shim.dir}:${previous.get("PATH")}`, HOME: root, RMD_GH_CACHE_HOME: root, RMD_SELF_SYNC_DONE: "1" });
-  // No plan destination is configured under this state dir, so the real lookup answers absent: clear, as today.
+  // THE TARGET WIRING on the merge path: the PR's acme/remudero-ops plan is read from its managed checkout, so a broken
+  // one holds even W1-T10732, which this checkout's plan reads clear.
+  mkdirSync(join(root, "repos", "remudero-ops", ".git"), { recursive: true });
+  const viaTarget = await readPullRequestTaskHold(PR_URL, (() => ({ root })) as unknown as Parameters<typeof readPullRequestTaskHold>[1],
+    async () => ({ body: "Remudero-Task: W1-T10732\n" }));
+  assert.equal(viaTarget.outcome, "unread");
+  rmSync(join(root, "repos"), { recursive: true, force: true });
+  // No plan destination and no acme/remudero-ops checkout: no catalog holds the named task, so it reads unread.
   const reading = await readPullRequestTaskHold(PR_URL, (() => ({ root })) as unknown as Parameters<typeof readPullRequestTaskHold>[1]);
-  assert.deepEqual(reading, { outcome: "clear" });
+  assert.deepEqual(reading, { outcome: "unread", taskId: TASK, reason: "neither the plan at origin/main nor the ops catalog holds it" });
   assert.equal(shim.calls().filter((c) => c.includes("pulls/910")).length, 1, "positive control: the body was read through gh");
 });
 
@@ -350,6 +368,28 @@ test("W1-T14902: the daemon's arm deps carry the live hold reader, left out only
   assert.equal(realArmDepsAsync().taskHold, undefined, "under the test runner a suite with partial fakes reads no real PR body");
   delete process.env.NODE_TEST_CONTEXT;
   assert.equal(typeof realArmDepsAsync().taskHold, "function", "THE WIRING: a live daemon reads the hold before every arm");
+});
+
+test("W1-T14902: a target repository's task is read from that repository's own plan, not the core checkout's", async (t) => {
+  const root = tmp(t, "target-root");
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir);
+  const self = async () => "/the/self/checkout";
+  // Not the daemon's target and no managed checkout: this checkout answers, as an operator's CLI does.
+  assert.equal(await targetPlanRoot(stateDir, { owner: "acme", repo: "wreck" }, self), "/the/self/checkout");
+  assert.equal(await targetPlanRoot(stateDir, undefined, self), "/the/self/checkout");
+  // A managed checkout <config.root>/repos/<repo> answers for its repository.
+  mkdirSync(join(root, "repos"));
+  symlinkSync(REPO_ROOT, join(root, "repos", "wreck"));
+  assert.equal(await targetPlanRoot(stateDir, { owner: "acme", repo: "wreck" }, self), join(root, "repos", "wreck"));
+  // The daemon's own target record wins, whatever its checkout is called (a self target is not under repos/).
+  writeFileSync(join(stateDir, "daemon-target.json"), JSON.stringify({ owner: "Acme", repo: "Core", isSelf: true, checkoutRoot: REPO_ROOT }));
+  assert.equal(await targetPlanRoot(stateDir, { owner: "acme", repo: "core" }, self), REPO_ROOT);
+  writeFileSync(join(stateDir, "daemon-target.json"), "{not json");
+  assert.equal(await targetPlanRoot(stateDir, { owner: "acme", repo: "core" }, self), "/the/self/checkout");
+  // End to end through the guarded poster's own source: a held record in the target's plan holds its PR.
+  assert.deepEqual(await readTaskDispatchHold("W1-T8397", { stateDir, repository: { owner: "acme", repo: "wreck" } }),
+    { outcome: "held", taskId: "W1-T8397" });
 });
 
 test("W1-T14902: a daemon whose cwd is no work tree (launchd's config.root) still reads the plan, from its install", async (t) => {

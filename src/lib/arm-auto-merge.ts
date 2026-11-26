@@ -1702,7 +1702,8 @@ export async function readPullRequestTaskHold(
   if (!target) return { outcome: "unread", taskId: "the named task", reason: `no pull request in ${prUrl}` };
   const pull = await readBody(`repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`) as { body?: unknown };
   const taskId = extractTaskTrailerId(typeof pull?.body === "string" ? pull.body : "");
-  return readTaskDispatchHold(taskId, { ...sources, stateDir: join(loadConfigImpl().root, "state") });
+  return readTaskDispatchHold(taskId, { repository: { owner: target.owner, repo: target.repo }, ...sources,
+    stateDir: join(loadConfigImpl().root, "state") });
 }
 
 export function attemptArm(
