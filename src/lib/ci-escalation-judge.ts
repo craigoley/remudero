@@ -281,10 +281,9 @@ export async function judgeCiEscalation(ports: CiJudgePorts): Promise<CiJudgePas
       });
     } catch (error) {
       if (error instanceof CiJudgeNotStartedError) {
-        // Nothing ran, so the head stays due for the next pass (the successor's, after a retirement).
+        // Nothing ran (spawnWorker logged its worker.spawn_withheld row), so the head stays due for the next pass.
         if (previous === undefined) delete heads[String(pr.number)];
         else heads[String(pr.number)] = previous;
-        ports.log("ci_judge.withheld", { pr: pr.number, head_sha: pr.headSha, reason: error.notStarted });
         continue;
       }
       failed.push(pr.number);

@@ -375,7 +375,7 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
     const heads = JSON.parse(readFileSync(join(stateDir, CI_JUDGE_HEADS_FILE), "utf8")) as Record<string, string>;
     if (retired) {
       assert.deepEqual(heads, {}, "the withheld judgment records no head, so the head stays due");
-      assert.deepEqual(rows.map((row) => row.step), ["ci_judge.withheld"]);
+      assert.deepEqual(rows.map((row) => row.step), [], "no failure row: nothing ran");
       assert.deepEqual([result.judged, result.failed, posts], [[], [], 0]);
     } else {
       // Control: a judgment that ran records its head and posts.
