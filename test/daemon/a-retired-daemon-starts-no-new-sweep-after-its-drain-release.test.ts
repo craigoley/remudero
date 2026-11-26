@@ -2,7 +2,9 @@
 // the retired process then ran 14 sweep passes and started 18 workers over 34 minutes, beside its successor.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { closeDaemonCleanup, createDaemonRetirement } from "#src/cli/commands/daemon.js";
+import { closeDaemonCleanup, createDaemonRetirement, retiringCiJudgeKick } from "#src/cli/commands/daemon.js";
+import { withCiJudgeAfterSweep } from "#src/lib/ci-escalation-judge.js";
+import { resolveFleetControlHold, type LightPassScope, type RestartAdmission } from "#src/lib/daemon.js";
 
 type Row = { step: string } & Record<string, unknown>;
 
@@ -48,6 +50,32 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
     ["sweep", "sweep_light", "auto_triage"], "each refusal is ledgered with the hook it refused");
   run.settlePage();
   await exit;
+
+  // A full sweep and a latched light pass that were already running when the lock was released.
+  const late = retiringExit();
+  const spawned: string[] = [];
+  let finishSweep: () => void = () => {};
+  const sweepGate = new Promise<void>((resolve) => { finishSweep = resolve; });
+  const admissionHold = () => late.retirement.admissionHold(() => resolveFleetControlHold({}));
+  const inFlightSweep = late.retirement.refuse("sweep", withCiJudgeAfterSweep(async () => {
+    await sweepGate;
+    if (admissionHold() === undefined) spawned.push("fix_worker");
+  }, retiringCiJudgeKick(late.retirement, () => { spawned.push("ci_judge_worker"); })))();
+  const latch: RestartAdmission = Object.assign(() => true, { heldBy: undefined });
+  const scope = late.retirement.lightPassScope<LightPassScope>({ reviewOnly: true, admit: latch });
+  assert.equal(scope.admit?.("review", "light"), true, "before the release the latched pass admits its review");
+  const lateExit = late.exit();
+  await turns(5);
+  finishSweep();
+  await inFlightSweep;
+  assert.deepEqual(spawned, [], "a sweep that settles after the release spawns no fix worker and no CI judge worker");
+  assert.deepEqual(admissionHold(), { control: "STOP", detail: "retired: drain lock released; the successor owns this work" });
+  assert.equal(scope.admit?.("review", "light"), false, "a light pass still running admits no new review worker");
+  assert.equal(scope.admit?.heldBy, "retired: drain lock released; the successor owns this work", "its stand-down names why");
+  assert.deepEqual(late.rows.filter((row) => row.step === "daemon.retired_start_refused").map((row) => row.hook),
+    ["ci_judge_kick", "light_pass_admission"]);
+  late.settlePage();
+  await lateExit;
 });
 
 test("W1-T14916 criterion 2: in-flight SRE lane page work still completes", async () => {

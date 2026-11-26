@@ -44,7 +44,7 @@ import {
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "../../lib/provider-routing-status.js";
 import { readFileIfExists } from "../../lib/fs-race-safe.js";
 import { mergedInLastDayAsync } from "../../lib/fleet-lane.js";
-import { startDaemonSreLane, type LightPassScope, type ReviewAdmissionGate, type SweepCycleOutcome } from "../../lib/daemon.js";
+import { startDaemonSreLane, type LightPassScope, type RestartAdmission, type ReviewAdmissionGate, type SweepCycleOutcome } from "../../lib/daemon.js";
 import { REGISTERED_GARDEN_NAMES, createGardenFlightRegistry, gardenAndJudgeUnits, startGardenOffLoop, type GardenPassSpawn, type RegisteredGardenName } from "../../lib/garden-registry.js";
 import { gardenSchedule } from "../../lib/garden-registry.js";
 import { createGardenerRuntimeWriter } from "../../lib/gardener-runtime.js";
@@ -60,7 +60,7 @@ import { loadTargetPlanForReload, loadTargetPlanOrEmptyWhenAbsent, plannedSequen
 import { fileTargetJobStore, nativeTargetAdmission, readTargetExecution, type ProductBuildInstances } from "../../lib/product-build.js";
 import { loadManagedRepos } from "../../lib/managed-repos.js";
 import type { RunResult } from "../../lib/run-result.js";
-import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, readRestartHistoryLines, RESTART_HISTORY_STEPS, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type DaemonFreshness, type OpsTaskDispatchRead, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe, type PauseInFlightUnit } from "../../lib/daemon.js";
+import { runBoundedTargetJob, type BoundedTargetJobPorts, type BoundedTargetJobOutcome, daemonBoot, daemonExitCodeForSummary, resolveFleetControlHold, runDaemon, type FleetControlHold, readRestartHistoryLines, RESTART_HISTORY_STEPS, type BootPhases, type CrashLoopVerdict, type DaemonDeps, type DaemonFreshness, type OpsTaskDispatchRead, type DaemonKick, type DaemonOpts, type DaemonSummary, priorUnrecognisedResetStrings, daemonPushTokenSource, receivePackCredentialProbe, type PauseInFlightUnit } from "../../lib/daemon.js";
 import { sweepStrandedReviewWorktreesAsync } from "../../lib/review-worktree-reclaim.js";
 import { reapRetiredReviewerTreesAsync } from "../../lib/reviewer-tree-reaper.js";
 import { sweepReclaimableArtifacts } from "../../lib/disk-artifact-reclaim.js";
@@ -2674,13 +2674,15 @@ export async function daemonCommand(
       const sweep: (continueReviewAdmissions?: ReviewAdmissionGate) => Promise<SweepCycleOutcome | void> =
         (deps.buildSweepHook ?? daemonDefaultBuildSweepHook)(...args);
       return retirement.refuse("sweep", withGoalRemeasurement(
-        withCiJudgeAfterSweep(withSweepTaskReaders(sweepTaskReaders, sweep), () => target.isSelf ? kickCiJudge?.() : undefined),
+        withCiJudgeAfterSweep(withSweepTaskReaders(sweepTaskReaders, sweep), retiringCiJudgeKick(retirement, () => target.isSelf ? kickCiJudge?.() : undefined)),
         () => remeasureSettledGoals({ repoRoot: target.isSelf ? effectiveRepoRoot : targetCheckoutRoot, stateDir: join(config.root, "state"),
           tasks: activePlanRef.current.tasks, settled: (id) => lastProj?.get(id)?.indeterminate ? undefined : lastProj?.get(id)?.merged,
           log }), log));
     };
-    const buildSweepLightHook: DaemonSweepLightHookBuilder = (...args) => retirement.refuse("sweep_light",
-      withSweepTaskReaders(sweepTaskReaders, (deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook)(...args)));
+    const buildSweepLightHook: DaemonSweepLightHookBuilder = (...args) => {
+      const light = withSweepTaskReaders(sweepTaskReaders, (deps.buildSweepLightHook ?? daemonDefaultBuildSweepLightHook)(...args));
+      return retirement.refuse("sweep_light", (scope?: LightPassScope) => light(retirement.lightPassScope(scope)));
+    };
     if (standby?.ports && standbyPromotion) logPromoted(standby.ports, standbyPromotion);
     // W1-T14644: the latest refresh's projection phases, held until the selection timing row takes them.
     let pendingRefreshMergedPhases: ProjectPlanPhases | undefined;
@@ -3010,7 +3012,7 @@ export async function daemonCommand(
         // (`refs/rmd-pause/hold`) only when the local file is silent — see checkSharedPause's
         // own doc for why UNREACHABLE reads as held, never as clear.
         checkPause,
-        workerAdmissionHold: () => resolveFleetControlHold({ checkStop, checkPause }),
+        workerAdmissionHold: () => retirement.admissionHold(() => resolveFleetControlHold({ checkStop, checkPause })),
         heapAdmissionHoldMode: heapHoldMode.mode,
         ...(heapHoldMode.error ? { heapAdmissionHoldModeError: heapHoldMode.error } : {}),
         // CODE FRESHNESS — THE PRODUCER W1-T126 NEVER GOT. The consumer has read
@@ -3556,19 +3558,49 @@ export interface DaemonRetirement {
   retired: () => boolean;
   /** Wraps a hook that starts a sweep pass or spawns a worker: once retired it starts nothing and says so. */
   refuse: <A extends unknown[], R>(hook: string, start: (...args: A) => R) => (...args: A) => Promise<Awaited<R> | undefined>;
+  /** True while the process may start `hook`; once retired it ledgers the refusal and returns false. A pass already
+   *  running when the lock is released reads this at each start it would make, so it finishes without new workers. */
+  allows: (hook: string) => boolean;
+  /** A latched light pass asks `admit` before each review or fix it starts; once retired that answer is no. A pass
+   *  with no latch has no `admit` to ask, and gets none here, because an `admit` also keeps closed refills closed. */
+  lightPassScope: <S extends LightPassScope | undefined>(scope: S) => S;
+  /** The worker admission hold: once retired, a STOP hold, so a pass still running admits no fix or review worker. */
+  admissionHold: <H>(fallback: () => H | undefined) => H | FleetControlHold | undefined;
 }
+
+const RETIRED_DETAIL = "drain lock released; the successor owns this work";
 
 export function createDaemonRetirement(log: (step: string, extra?: Record<string, unknown>) => void): DaemonRetirement {
   let retired = false;
+  const allows = (hook: string): boolean => {
+    if (!retired) return true;
+    log("daemon.retired_start_refused", { hook, reason: RETIRED_DETAIL });
+    return false;
+  };
   return {
     retire: () => { retired = true; },
     retired: () => retired,
+    allows,
+    lightPassScope: <S extends LightPassScope | undefined>(scope: S): S => {
+      const admit = scope?.admit;
+      if (!scope || !admit) return scope;
+      const retiring = (...args: Parameters<RestartAdmission>): boolean => allows("light_pass_admission") && admit(...args);
+      Object.defineProperty(retiring, "heldBy", { get: () => (retired ? `retired: ${RETIRED_DETAIL}` : admit.heldBy) });
+      if (admit.recycleWait) Object.defineProperty(retiring, "recycleWait", { value: true });
+      return { ...scope, admit: retiring as RestartAdmission };
+    },
+    admissionHold: (fallback) => (retired ? { control: "STOP", detail: `retired: ${RETIRED_DETAIL}` } : fallback()),
     refuse: <A extends unknown[], R>(hook: string, start: (...args: A) => R) => async (...args: A): Promise<Awaited<R> | undefined> => {
-      if (!retired) return await start(...args);
-      log("daemon.retired_start_refused", { hook, reason: "drain lock released; the successor owns this work" });
-      return undefined;
+      if (!allows(hook)) return undefined;
+      return await start(...args);
     },
   };
+}
+
+/** W1-T14916: the kick a sweep makes as it settles. A pass running at the release settles after it, so the kick asks
+ *  the mark itself: a retired daemon spawns no CI judge worker. */
+export function retiringCiJudgeKick(retirement: Pick<DaemonRetirement, "allows">, kick: () => unknown): () => unknown {
+  return () => (retirement.allows("ci_judge_kick") ? kick() : undefined);
 }
 
 /** The daemon sends the same atomic budget to its read worker in the existing worker input. */
