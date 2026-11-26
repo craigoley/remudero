@@ -832,7 +832,7 @@ const SEED_ROWS: readonly SeedRow[] = [
       "`attempt`, `round`, `arm` (offered or " +
       "withheld, drawn per task), `matched` (each id with its match kinds; null with `selection_error` when the corpus " +
       "could not be read), `dropped_ids`, `budget_chars` and `failing_checks`. Neither arm adds anything to the prompt.",
-    writer: ["runFixRung"],
+    writer: ["runFixRung", "planFixRoundLedger"],
     outcomes: ["offered", "withheld"],
   },
   {
@@ -840,8 +840,8 @@ const SEED_ROWS: readonly SeedRow[] = [
     meaning:
       "What came of one fix.learnings_shadow round, joined by `shadow_id`: `conclusion` is CI's green or red on " +
       "`pushed_head_sha`, or no_push when the round pushed nothing; a green row adds the task's `rounds_to_green`. " +
-      "A round whose CI the rung never saw conclude has no row.",
-    writer: ["runFixRung"],
+      "A pushed round has no outcome until CI on its head is observed.",
+    writer: ["runFixRung", "planFixRoundLedger", "runSweep"],
     outcomes: ["green", "red", "no_push"],
   },
 ];

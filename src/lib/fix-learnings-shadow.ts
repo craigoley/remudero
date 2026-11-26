@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { globalArtifactPath, userOverallLearningsHome, type Config } from "./config.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS, learningMatchKinds, loadLayeredLearningsForTaskFiles, projectLearningsHome, selectLearnings,
   type LearningMatchKind } from "./learnings.js";
-import type { FixEvidence } from "./prompt-render.js";
 import { taskArmWithheld } from "./task-arm.js";
 
 /**
@@ -27,14 +26,26 @@ export type FixLearningsConclusion = "green" | "red" | "no_push";
 /** One round's open measurement, keyed to its dispatch and completion rows. */
 export interface FixLearningsRound {
   /** The `fix.learnings_shadow` row's fields. */
-  readonly row: { shadow_id: string; task_id: string; round_id: string; arm: FixLearningsArm } & Record<string, unknown>;
+  readonly row: FixLearningsShadowRow;
   /** The ledger as the round's first prompt read it: the earlier rounds `rounds_to_green` counts. */
   readonly priorRows: ReadonlyArray<Record<string, unknown>>;
   /** Set when the round pushed; `head` is absent when the push landed on a head nobody could name. */
   pushed?: { head?: string };
 }
 
-function selectionText(evidence: FixEvidence): string[] {
+type FixLearningsShadowRow = { shadow_id: string; run_id: string; task_id: string; round_id: string; arm: FixLearningsArm } &
+  Record<string, unknown>;
+type FixLearningsOutcomeFields = { run_id: string; task_id: string } & Record<string, unknown>;
+
+interface FixLearningsEvidence {
+  ciFailures?: readonly { name: string; title?: string; logTail: string }[];
+  review?: {
+    unmetCriteria: readonly { claim: string }[];
+    findings?: readonly { mechanism: string; remedy?: string | null }[];
+  };
+}
+
+function selectionText(evidence: FixLearningsEvidence): string[] {
   return [
     ...(evidence.ciFailures ?? []).flatMap((f) => [f.name, f.title ?? "", f.logTail.slice(-FIX_LEARNINGS_LOG_TAIL_CHARS)]),
     ...(evidence.review?.unmetCriteria ?? []).map((criterion) => criterion.claim),
@@ -53,9 +64,9 @@ export function recordFixLearningsShadow(input: {
   roundId: string;
   repoDir: string;
   config: Config;
-  evidence: FixEvidence;
+  evidence: FixLearningsEvidence;
   /** Checks already known to the dispatch, including when merge-conflict prompt evidence omits CI. */
-  knownCiFailures?: FixEvidence["ciFailures"];
+  knownCiFailures?: FixLearningsEvidence["ciFailures"];
   priorRows: ReadonlyArray<Record<string, unknown>>;
 }): FixLearningsRound {
   const { taskId, evidence } = input;
@@ -126,7 +137,7 @@ export function fixLearningsOutcomeRow(
   round: FixLearningsRound,
   conclusion: FixLearningsConclusion,
   rungRows: ReadonlyArray<Record<string, unknown>>,
-): Record<string, unknown> {
+): FixLearningsOutcomeFields {
   const { shadow_id, run_id, task_id, pr_number, attempt, arm, round_id } = round.row;
   const row = { shadow_id, run_id, task_id, pr_number, attempt, arm, round_id, conclusion,
     pushed_head_sha: round.pushed?.head };
@@ -137,6 +148,41 @@ export function fixLearningsOutcomeRow(
     .filter((r) => !noOps.has(r.round_id) && (r.step === "fix.dispatch" || (r.step === "fix.done" && pushedHeadForShadow(r) !== undefined)))
     .map((r) => r.round_id)]);
   return { ...row, rounds_to_green: rounds.size };
+}
+
+function isShadowRow(row: Record<string, unknown>): row is FixLearningsShadowRow {
+  return row.step === "fix.learnings_shadow" && typeof row.shadow_id === "string" &&
+    typeof row.run_id === "string" && typeof row.task_id === "string" &&
+    typeof row.round_id === "string" && (row.arm === "offered" || row.arm === "withheld");
+}
+
+/** Close pushed rounds that ended without a CI wait using the next exact-head sweep observation. */
+export function fixLearningsOutcomesFromSnapshot(
+  prs: readonly { prNumber: number; headSha: string; checksState: string }[],
+  rows: ReadonlyArray<Record<string, unknown>>,
+): FixLearningsOutcomeFields[] {
+  const terminal = new Map(prs.filter((pr) => pr.checksState === "green" || pr.checksState === "red").map((pr) => [pr.prNumber, pr]));
+  if (terminal.size === 0) return [];
+  const settled = new Set(rows.filter((row) => row.step === "fix.learnings_outcome").map((row) => row.shadow_id));
+  const roundKey = (row: Record<string, unknown>) => JSON.stringify([row.task_id, row.pr_number, row.round_id]);
+  const shadows = new Map<string, FixLearningsShadowRow>();
+  const outcomes: FixLearningsOutcomeFields[] = [];
+  for (const [index, row] of rows.entries()) {
+    if (isShadowRow(row) && !settled.has(row.shadow_id)) shadows.set(roundKey(row), row);
+    if (row.step !== "fix.done" || typeof row.pr_number !== "number" ||
+        (row.mode !== "plan-gate" && row.mode !== "plan-conflict" && row.fix_learnings_pushed_head_sha === undefined)) continue;
+    const ci = terminal.get(row.pr_number);
+    if (ci === undefined || ci.headSha !== pushedHeadForShadow(row)) continue;
+    const shadow = shadows.get(roundKey(row));
+    if (shadow === undefined || settled.has(shadow.shadow_id)) continue;
+    const round: FixLearningsRound = { row: shadow, priorRows: [] };
+    fixLearningsDoneConclusion(round, row);
+    const conclusion = fixLearningsCiConclusion(round, ci.checksState, ci.headSha);
+    if (conclusion === undefined) continue;
+    outcomes.push(fixLearningsOutcomeRow(round, conclusion, conclusion === "green" ? rows.slice(0, index + 1) : []));
+    settled.add(shadow.shadow_id);
+  }
+  return outcomes;
 }
 
 export interface FixLearningsArmSummary {

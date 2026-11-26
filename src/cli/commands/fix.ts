@@ -2883,7 +2883,9 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     } catch (e) {
       if (!(e instanceof host.FixRoundPushError)) throw e;
       const text = (e.refusal?.text ?? e.detail).slice(0, 2000);
-      roundPushFailure = { landed: false, outcome: e.refusal ? "refused" : "failed", cause: e.pushCause, reason: text.slice(0, 500) };
+      const receiptHead = "confirmedPushedHeadSha" in e && typeof e.confirmedPushedHeadSha === "string" ? e.confirmedPushedHeadSha : undefined;
+      roundPushFailure = { landed: false, outcome: e.refusal ? "refused" : "failed", cause: e.pushCause,
+        reason: text.slice(0, 500), receiptHead };
       if (e.refusal) {
         deps.log("fix.push_refused", { site, strike: strikes, censuses: e.refusal.censuses, refusal: text, head_sha: headSha, pr_head_sha: review.headSha });
         deps.say(`fix rung: strike ${strikes}/${opts.strikeCap} push REFUSED by the pre-push census (${e.refusal.censuses.join(", ")}) — the next strike gets the refusal`);

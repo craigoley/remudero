@@ -15,13 +15,16 @@ import {
   type FixLearningsRound,
 } from "#src/lib/fix-learnings-shadow.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "#src/lib/learnings.js";
+import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import type { CriterionVerdict } from "#src/lib/review.js";
-import type { CiFailure, LiveRoundHandoff } from "#src/lib/sweep.js";
+import { buildSweepEffects, DEFAULT_SWEEP_POLICY, runSweep, type CiFailure, type LiveRoundHandoff, type OpenPrView } from "#src/lib/sweep.js";
 import { taskArmWithheld } from "#src/lib/task-arm.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
-import { MERGE_UP_TO_DATE_REASON, runFixRung } from "#test/helpers/run-task-test.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+import { MERGE_UP_TO_DATE_REASON, pushFixRound, pushFixRoundPrechecked, runFixRung, runPlanScopedFixRound } from "#test/helpers/run-task-test.js";
 
 // W1-T14138: each fix round records which learnings its failing checks would match, in a task-keyed arm, and
 // injects nothing. These tests drive the real fix rung over a real git worktree holding a learnings corpus.
@@ -64,6 +67,7 @@ async function fixRung(opts: {
   landed?: boolean;
   noCommit?: boolean;
   remoteAfterPush?: "advanced" | "missing" | "unreadable";
+  leasedRefDeleted?: "before-push" | "after-push";
   mergeStart?: "fetch-fails" | "refused" | "up-to-date";
   reviewOnly?: boolean;
 }): Promise<Run> {
@@ -71,6 +75,7 @@ async function fixRung(opts: {
   const ci = opts.ci ?? ["green"];
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}fix-learnings-`));
   const fixture = gitRepo({ kind: "fix-learnings" });
+  const origin = opts.leasedRefDeleted && gitRepo({ bare: true, kind: "fix-learnings-origin" });
   const { dir: repo, git } = fixture;
   try {
     mkdirSync(join(repo, "learnings"), { recursive: true });
@@ -78,6 +83,12 @@ async function fixRung(opts: {
     const base = git("rev-parse", "HEAD");
     const task = { id: taskId, title: "wire the producer", files: ["src/changed.ts"], acceptance: criteria };
     const runId = `${taskId}-1791151948510`;
+    const branch = `run-${runId}`;
+    const ref = `refs/heads/${branch}`;
+    if (origin) {
+      fixture.addRemote("origin", origin.dir);
+      git("push", "-q", "origin", `${base}:${ref}`);
+    }
     const initialReview = {
       state: "failure" as const, criteria, testTheater: false, summary: "one visible gap",
       floorDegraded: false, capped: false, keywordOnly: false, planOnly: false, headSha: base, reviewerOutcome: "success",
@@ -96,7 +107,7 @@ async function fixRung(opts: {
     };
     await runFixRung({
       ...ciPorts,
-      task, taskId, runId, prUrl: "https://github.com/acme/remudero/pull/7", branch: `run-${runId}`,
+      task, taskId, runId, prUrl: "https://github.com/acme/remudero/pull/7", branch,
       worktreePath: repo, initialSessionId: "", initialReview, ciFailures: opts.reviewOnly ? undefined : FIRST_RED,
       mount, settingsFile: join(root, "settings.json"),
       config: { root, ...(opts.mergeStart ? { workerProviders: { harnessCommitsFix: true } } : {}) } as Config,
@@ -123,8 +134,21 @@ async function fixRung(opts: {
             modelUsage: {}, compactionEvents: [], qualitySuspect: false,
           } satisfies WorkerResult;
         },
-        push: () => {
+        push: (_wt, _branch, expected) => {
           const head = git("rev-parse", "HEAD"); pushed.push(head);
+          if (origin) {
+            const log = (step: string, extra?: Record<string, unknown>) => rows.push({ ...extra, step });
+            return withLiveWritesAllowed(() => pushFixRoundPrechecked(log, repo, branch, expected, {
+              repo: "fixture", conflictMarkers: () => [],
+            }, (wt, refBranch, sha, prior) => pushFixRound(wt, refBranch, sha, prior, {
+              exec: (_file, args) => {
+                if (opts.leasedRefDeleted === "before-push") origin.git("update-ref", "-d", ref);
+                git(...args.slice(2));
+                assert.equal(origin.git("rev-parse", ref), head, "the server accepted the exact commit");
+                origin.git("update-ref", "-d", ref, head);
+              },
+            }), base));
+          }
           if (opts.landed !== false) publishedHead = opts.remoteAfterPush === "advanced" ? "descendant-head" : head;
           return opts.landed === false ? undefined : { fixRoundPushedHead: head };
         },
@@ -154,6 +178,7 @@ async function fixRung(opts: {
     });
     return { prompts, rows, pushed, waits, reviews };
   } finally {
+    if (origin) origin.cleanup();
     fixture.cleanup();
     rmSync(root, { recursive: true, force: true });
   }
@@ -218,6 +243,91 @@ test("an up-to-date merge retries the same strike with a single shadow row for t
   assert.equal(shadows[0]!.round_id, of(run, "fix.dispatch")[0]!.round_id);
   assert.equal(shadows[0]!.attempt, 1);
   assert.equal(run.prompts.length, 1);
+});
+
+test("W1-T14138 criterion 1: a fleet plan repair records hosted CI matches at dispatch", async (t) => {
+  const head = "a".repeat(40);
+  const next = "b".repeat(40);
+  const path = "plan/tasks.d/W1-T5543-fixture.yaml";
+  const body = `## Acceptance\n- the shard is filed | grep: id: W1-T5543 in ${path}`;
+  const ciFailures = [{ ...FIRST_RED[0]!, name: "lint-plan" }];
+  const rows: Row[] = [];
+  for (const arm of ["offered", "withheld"] as const) {
+    const root = ownedFixtureDir(t, `plan-shadow-${arm}`).dir;
+    const prNumber = Array.from({ length: 64 }, (_, i) => i + 9000)
+      .find((n) => withheld(`PR-${n}`) === (arm === "withheld"))!;
+    const pr: OpenPrView = {
+      prNumber, prUrl: `https://github.com/acme/remudero/pull/${prNumber}`, headSha: head,
+      headRefName: "ci-friction-garden-1791084979333", checksState: "red", reviewState: "pending",
+      isPlanFiling: true, unmetCriteria: [], priorStrikes: 0, lastActivityAt: new Date().toISOString(), autoMergeArmed: false,
+    };
+    mkdirSync(join(root, "learnings"));
+    writeFileSync(join(root, "learnings", "ci.yaml"), CORPUS.replace("unit-shadow-check", "lint-plan"));
+    const ledgerPath = join(root, "ledger.ndjson");
+    const log = (step: string, extra?: Record<string, unknown>) => { rows.push({ ...extra, step }); };
+    const edits = arm === "offered";
+    let committed = false;
+    const effects = buildSweepEffects({
+      owner: "acme", repo: "remudero", repoRoot: REPO_ROOT, config: { root } as Config, ledgerPath,
+      runId: `plan-shadow-${arm}`, log, plan: { tasks: [] } as never, policy: DEFAULT_SWEEP_POLICY,
+      dispatchFixPreflightStandDownImpl: async () => undefined,
+      ghJsonImpl: () => ({ head: { ref: pr.headRefName, sha: head }, user: { login: "remudero-fleet[bot]" }, title: "chore(plan): fixture", body }),
+      fetchPrDiffFilesImpl: async () => [path],
+      fixBranchClaimKeyImpl: () => `plan-shadow-${prNumber}`,
+      materializePlanRoundWorktreeImpl: () => ({ worktreePath: root }),
+      worktreeRemoveImpl: () => {},
+      restRollupForImpl: async () => [],
+      fetchCiFailuresImpl: () => ciFailures,
+      planPrPreflightImpl: async (_dir, sha) => ({
+        ok: sha === next || !edits, failures: sha === head && edits ? [{ check: "lint-plan", firstLine: "plan red" }] : [], unreadable: [],
+      }),
+      spawnImpl: async (args) => {
+        assert.equal(rows.at(-2)?.step, "fix.learnings_shadow");
+        assert.match(args.prompt, /ERR_SHADOW_BOOM/);
+        assert.doesNotMatch(args.prompt, /FACT-OF-/);
+        return { text: edits ? "COMMIT_MESSAGE: fix(plan): repair the plan" : "PR_TITLE: chore(plan): correct metadata",
+          blocks: [], subtype: "success" } as never;
+      },
+      runPlanScopedFixRoundImpl: (input) => runPlanScopedFixRound({
+        ...input, deps: { ...input.deps, execProof: () => ({ hits: 1 }), runGit: (args: string[]) => {
+          if (args[0] === "rev-parse") return committed ? next : head;
+          if (args[0] === "ls-tree") return path;
+          if (args[0] === "status") return edits ? ` M ${path}\0` : "";
+          if (args[0] === "commit") committed = true;
+          return "";
+        } },
+      }),
+      planRepairGitImpl: (_file, args) => args.includes("rev-parse") ? next : "",
+    });
+    const result = await withLiveWritesAllowed(() => effects.dispatchPlanGateRound!(pr));
+    assert.equal(result.outcome, edits ? "pushed" : "metadata-repaired", result.reason);
+    const shadow = rows.findLast((row) => row.step === "fix.learnings_shadow")!;
+    const dispatch = rows.findLast((row) => row.step === "fix.dispatch")!;
+    assert.equal(shadow.round_id, dispatch.round_id);
+    assert.equal(shadow.task_id, `PR-${prNumber}`);
+    assert.equal(shadow.arm, arm);
+    assert.deepEqual(shadow.failing_checks, ["lint-plan"]);
+    assert.deepEqual(matchedKinds(shadow), FIRST_MATCHES);
+    assert.equal(rows.filter((row) => row.step === "fix.learnings_shadow" && row.pr_number === prNumber).length, 1);
+
+    const sweep = (headSha: string, checksState: OpenPrView["checksState"]) =>
+      runSweep([{ ...pr, headSha, checksState }], {
+        runId: "next-sweep", ledgerPath, readLedger: () => rows,
+        appendLine: (_path, row) => { rows.push(row); },
+        arm() {}, close() {}, postReview: async () => {}, dispatchFix: async () => {}, escalate() {},
+      }, DEFAULT_SWEEP_POLICY);
+    const outcomes = () => rows.filter((row) => row.step === "fix.learnings_outcome" && row.shadow_id === shadow.shadow_id);
+    if (edits) {
+      await sweep(next, "pending");
+      await sweep(head, "green");
+      assert.deepEqual(outcomes(), []);
+      await sweep(next, "green");
+      await sweep(next, "green");
+      assert.deepEqual(outcomes().map((row) => [row.conclusion, row.pushed_head_sha, row.rounds_to_green]), [["green", next, 1]]);
+    } else {
+      assert.deepEqual(outcomes().map((row) => [row.conclusion, row.pushed_head_sha]), [["no_push", undefined]]);
+    }
+  }
 });
 
 test("W1-T14138 criterion 3: the fix prompt is byte-identical in both arms whether or not learnings match", async () => {
@@ -324,14 +434,34 @@ test("W1-T14138 criterion 4: terminal CI on the pushed head takes precedence ove
   assert.equal(of(foreign, "fix.learnings_outcome").length, 0);
 });
 
-test("known CI failures remain selectable when prompt evidence is conflict-only", () => {
+test("W1-T14138 criterion 4: a leased push survives ref deletion in shadow attribution only after acceptance", async () => {
+  for (const leasedRefDeleted of ["after-push", "before-push"] as const) {
+    const run = await fixRung({ corpus: CORPUS, leasedRefDeleted });
+    const [done] = of(run, "fix.done");
+    assert.equal(done?.push_outcome, "failed");
+    assert.equal(done?.pushed_head_sha, undefined);
+    assert.equal(of(run, "fix.round_reapply_refused").length, 1);
+    assert.equal(run.prompts.length, 1);
+    assert.equal(run.waits, 0);
+    assert.equal(run.reviews, 0);
+    if (leasedRefDeleted === "after-push") {
+      assert.equal(done?.fix_learnings_pushed_head_sha, run.pushed[0]);
+      assert.deepEqual(of(run, "fix.learnings_outcome"), []);
+    } else {
+      assert.equal(done?.fix_learnings_pushed_head_sha, undefined);
+      assert.deepEqual(of(run, "fix.learnings_outcome").map((row) => row.conclusion), ["no_push"]);
+    }
+  }
+});
+
+test("known CI failures remain selectable without CI evidence from the prompt", () => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}fix-learnings-known-ci-`));
   try {
     mkdirSync(join(root, "learnings"));
     writeFileSync(join(root, "learnings", "ci.yaml"), CORPUS);
     const round = recordFixLearningsShadow({ taskId: OFFERED_TASK, runId: "known-ci", prNumber: 7, attempt: 1,
       round: "resume", roundId: "known-ci:1", repoDir: root, config: { root } as Config,
-      evidence: { mergeConflict: { files: [], oursLog: "", theirsLog: "" } }, knownCiFailures: FIRST_RED, priorRows: [] });
+      evidence: {}, knownCiFailures: FIRST_RED, priorRows: [] });
     assert.deepEqual(round.row.failing_checks, ["unit-shadow-check"]);
     assert.deepEqual(matchedIds(round.row), ["by-check-name", "by-log-error", "by-title-symbol"]);
   } finally {
@@ -364,8 +494,8 @@ test("selection reads unmet claims, findings and only the newest part of a log t
       evidence: {
         ciFailures: [{ name: "c", logTail: `OLD-LOG-SIG${"x".repeat(FIX_LEARNINGS_LOG_TAIL_CHARS)}` }],
         review: {
-          unmetCriteria: [{ ...criteria[0]!, claim: "CLAIM-SIG" }], summary: "",
-          findings: [{ criterionIndex: 1, path: "a.ts", line: 1, mechanism: "MECHANISM-SIG", remedy: "REMEDY-SIG" }],
+          unmetCriteria: [{ claim: "CLAIM-SIG" }],
+          findings: [{ mechanism: "MECHANISM-SIG", remedy: "REMEDY-SIG" }],
         },
       },
     });
@@ -376,7 +506,7 @@ test("selection reads unmet claims, findings and only the newest part of a log t
 });
 
 const openRound = (roundId = "r1", priorRows: Array<Record<string, unknown>> = []): FixLearningsRound =>
-  ({ row: { shadow_id: "s", task_id: "W1-T1", round_id: roundId, arm: "offered" }, priorRows });
+  ({ row: { shadow_id: "s", run_id: "r", task_id: "W1-T1", round_id: roundId, arm: "offered" }, priorRows });
 
 test("only a push on a known head waits for CI, and only a conclusion on that head is recorded", () => {
   const unnamed = openRound();
