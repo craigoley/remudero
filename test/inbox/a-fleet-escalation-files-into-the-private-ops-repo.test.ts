@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
-  escalate, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, issueGatewayRepository, issueGatewayUnfiled,
+  ESCALATION_REPOSITORY_ENV, escalate, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, issueGatewayRepository, issueGatewayUnfiled,
   NEEDS_HUMAN_LABEL, tryEscalate, type Escalation, type EscalationDestinationRead,
 } from "#src/lib/escalate.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
@@ -76,6 +76,17 @@ function ledger(t: TestContext) {
   return { path, rows: () => readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>) };
 }
 
+/** The host's route with {@link ESCALATION_REPOSITORY_ENV} set to `value`, restored after. */
+function withEnv<T>(value: string, read: () => T): T {
+  const before = process.env[ESCALATION_REPOSITORY_ENV];
+  process.env[ESCALATION_REPOSITORY_ENV] = value;
+  try {
+    return read();
+  } finally {
+    if (before === undefined) delete process.env[ESCALATION_REPOSITORY_ENV]; else process.env[ESCALATION_REPOSITORY_ENV] = before;
+  }
+}
+
 /** The host's own route, read from a fixture home's instance config and its plan-destination file. */
 function withHostHome<T>(t: TestContext, destination: Record<string, unknown> | undefined, read: () => T): T {
   const home = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14998-home-`));
@@ -85,12 +96,14 @@ function withHostHome<T>(t: TestContext, destination: Record<string, unknown> | 
   mkdirSync(join(root, "state"), { recursive: true });
   writeFileSync(join(home, ".config", "remudero", "config.json"), JSON.stringify({ root }));
   if (destination) writeFileSync(join(root, "state", "plan-destination.json"), JSON.stringify(destination));
-  const before = process.env.HOME;
+  const before = process.env.HOME, explicit = process.env[ESCALATION_REPOSITORY_ENV];
   process.env.HOME = home;
+  delete process.env[ESCALATION_REPOSITORY_ENV];
   try {
     return read();
   } finally {
     if (before === undefined) delete process.env.HOME; else process.env.HOME = before;
+    if (explicit !== undefined) process.env[ESCALATION_REPOSITORY_ENV] = explicit;
   }
 }
 
@@ -111,6 +124,8 @@ test("W1-T14998 criterion 1: a fleet escalation opens its issue in the private o
   const hostRoute = withHostHome(t, { repository: OPS, kinds: ["decision", "feedback", "task"] },
     () => issueGatewayRepository(ghIssueGateway(CODE.owner, CODE.repo)));
   assert.equal(hostRoute, OPS, "the host's plan destination names the escalation repository");
+  // An operator's explicit escalation repository is read ahead of the plan destination.
+  assert.equal(withEnv(OPS, () => issueGatewayRepository(ghIssueGateway(CODE.owner, CODE.repo))), OPS);
   // A caller's own fake transport, with no route, keeps the repository it names.
   assert.equal(issueGatewayRepository(ghIssueGateway(CODE.owner, CODE.repo, { exec: gh.exec })), `${CODE.owner}/${CODE.repo}`);
 });
@@ -137,6 +152,9 @@ test("W1-T14998 criterion 2: with no private repository an escalation opens no p
     "no-private-escalation-repository");
   assert.match(withHostHome(t, { repository: "not a repository", kinds: [] },
     () => issueGatewayUnfiled(ghIssueGateway(CODE.owner, CODE.repo))) ?? "", /^private-escalation-repository-unreadable: /);
+  // A set escalation repository that is not <owner>/<name> files nowhere, never on public core.
+  assert.equal(withEnv("../remudero", () => issueGatewayUnfiled(ghIssueGateway(CODE.owner, CODE.repo))),
+    "RMD_ESCALATION_REPOSITORY is not <owner>/<name>");
 });
 
 test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery closes it", (t) => {

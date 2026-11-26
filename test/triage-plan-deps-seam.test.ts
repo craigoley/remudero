@@ -14,6 +14,8 @@ import { stringify } from "yaml";
 import { appendThreadMessage, appendThreadReplyOnce, deriveThreadId, readThread } from "#src/lib/inbox-thread.js";
 import { escalationReplySubmissionKey } from "#src/lib/escalation-correspondence.js";
 import { feedbackEntryRepoPath, type FeedbackEntry } from "#src/lib/feedback.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for craigoley/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "craigoley/remudero";
 
 // ── WHAT THIS FILE PROVES ────────────────────────────────────────────────────────────
 // `triageCommand` and `planCommand` took no deps parameter, so no offline test could get
@@ -340,7 +342,7 @@ test("the real intake publication writes an agent response on its original escal
   `;
   const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", code], { cwd: REPO_ROOT, encoding: "utf8", timeout: 45_000,
     env: { PATH: `${shim.dir}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: home, TMPDIR: root, GH_TOKEN: "offline-fixture-only", NODE_TEST_CONTEXT: "fixture", RMD_GH_CACHE_HOME: join(root, "gh-cache"), RMD_GH_SHARED_READ_GAP_MS: "0",
-      GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", ...(process.env.NODE_V8_COVERAGE ? { NODE_V8_COVERAGE: process.env.NODE_V8_COVERAGE } : {}) } });
+      GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", RMD_ESCALATION_REPOSITORY: "craigoley/remudero", ...(process.env.NODE_V8_COVERAGE ? { NODE_V8_COVERAGE: process.env.NODE_V8_COVERAGE } : {}) } });
   const result = readThread(entry.thread_id!, { threadStorePath }); assert.equal(result.status, "ok"); assert.ok(result.status === "ok");
   const response = result.messages.find(message => message.extra?.intake?.feedbackId === feedbackId);
   assert.ok(response, `${output}\nFixture GH calls:\n${shim.calls().join("\n").slice(-12000)}`); assert.equal(response.threadId, entry.thread_id); assert.equal(response.extra?.question, true);

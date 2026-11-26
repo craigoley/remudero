@@ -15,6 +15,8 @@ import { repoRoot } from "../src/lib/repo-location.js";
 import { liveEditLadderWiring, liveEditsCommand } from "../src/run-task.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for example/fleet.
+process.env.RMD_ESCALATION_REPOSITORY ??= "example/fleet";
 
 test("rmd live-edits refuses a missing or unknown tree, and prints one JSON verdict for a real one", async (t) => {
   const errors = t.mock.method(console, "error", () => {});

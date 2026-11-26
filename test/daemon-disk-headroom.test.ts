@@ -31,6 +31,8 @@ import { readLedgerLines } from "../src/lib/status.js";
 import type { IssueGateway } from "../src/lib/escalate.js";
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { ghShim } from "./helpers/gh-shim.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for o/r.
+process.env.RMD_ESCALATION_REPOSITORY ??= "o/r";
 
 // A single dispatchable task — enough to keep `runOne` in flight so the dispatch-phase
 // `startInFlightTicker` (the row this whole task rides on) actually starts ticking.

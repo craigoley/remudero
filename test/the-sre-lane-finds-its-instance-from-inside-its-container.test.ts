@@ -10,6 +10,8 @@ import { fileURLToPath } from "node:url";
 import { REGISTERED_GARDEN_NAMES } from "../src/lib/garden-registry.js";
 import { resolveSreLaneInstance, sreLaneStartRow } from "../src/lib/sre-lane.js";
 import * as runTask from "../src/run-task.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for craigoley/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "craigoley/remudero";
 
 /**
  * W1-T9500 — the SRE lane names its own registry instance from INSIDE its container. W1-T8232

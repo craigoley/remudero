@@ -32,6 +32,8 @@ import { escalate, renderIssueBody, type IssueGateway } from "../src/lib/escalat
 import { withLiveWritesAllowed } from "../src/lib/live-write-guard.js";
 import { workerTranscript, type WorkerResult } from "../src/lib/worker.js";
 import { consoleCorrectionSubmissionKey, type ConsoleCorrection, type CorrectionEvidence, type CorrectionSymptom } from "#src/lib/console-feedback.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for craigoley/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "craigoley/remudero";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");

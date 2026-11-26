@@ -18,6 +18,8 @@ import type { Plan } from "#src/lib/plan.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { finishJudgedRun } from "#test/helpers/judged-pool-run.js";
 import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for o/r.
+process.env.RMD_ESCALATION_REPOSITORY ??= "o/r";
 
 async function withoutSyncSpawn<T>(run: () => T | Promise<T>): Promise<T> {
   let ticks = 0;

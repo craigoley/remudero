@@ -21,6 +21,8 @@ import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { withGhShim, type GhShim } from "#test/helpers/gh-shim.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for fixture/repo.
+process.env.RMD_ESCALATION_REPOSITORY ??= "fixture/repo";
 
 const ISSUE_URL = "https://github.com/fixture/repo/issues/77";
 /** What the real reader rethrows when an issue body cannot be read (W1-T11405 names the stage and the kind). */

@@ -2378,8 +2378,18 @@ export function ghIssueGatewayAsync(
  */
 export type EscalationDestinationRead = () => { outcome: "named"; repository: string } | { outcome: "unfiled"; reason: string };
 
-/** The host's own route: the plan destination its instance config names, read on each gateway construction. */
+/** W1-T14998 — an operator's explicit escalation repository, `<owner>/<name>`, ahead of the plan destination. */
+export const ESCALATION_REPOSITORY_ENV = "RMD_ESCALATION_REPOSITORY";
+
+/** The host's own route, read on each gateway construction: {@link ESCALATION_REPOSITORY_ENV} when set, else the plan
+ *  destination its instance config names. A set value that is not `<owner>/<name>` files nowhere, never a fallback. */
 export const hostEscalationDestination: EscalationDestinationRead = () => {
+  const explicit = process.env[ESCALATION_REPOSITORY_ENV];
+  if (explicit !== undefined && explicit !== "") {
+    return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(explicit) && !/(^|\/)\.+(\/|$)/.test(explicit)
+      ? { outcome: "named", repository: explicit }
+      : { outcome: "unfiled", reason: `${ESCALATION_REPOSITORY_ENV} is not <owner>/<name>` };
+  }
   const named = planDestinationRepository(instanceStateDir());
   if (named.outcome === "named") return { outcome: "named", repository: `${named.owner}/${named.repo}` };
   return { outcome: "unfiled", reason: named.outcome === "off" ? "no-private-escalation-repository" : `private-escalation-repository-unreadable: ${named.reason}` };

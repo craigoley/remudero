@@ -38,6 +38,8 @@ import {
 import type { SummarizeDeps } from "../src/lib/feedback.js";
 import { validateMounts, type Mount, type Mounts } from "../src/lib/mounts.js";
 import type { spawnWorker, WorkerResult } from "../src/lib/worker.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for craigoley/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "craigoley/remudero";
 
 function ledgerPath(): string {
   return join(mkdtempSync(join(tmpdir(), "rmd-escalate-")), "ledger.ndjson");

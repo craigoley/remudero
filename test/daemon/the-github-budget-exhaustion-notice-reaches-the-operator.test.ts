@@ -21,6 +21,8 @@ import { readLedgerLines } from "#src/lib/status.js";
 import { systemClock } from "#src/lib/clock.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { ghShim, type GhShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for o/r.
+process.env.RMD_ESCALATION_REPOSITORY ??= "o/r";
 
 const RESETS_AT = "2026-11-18T02:00:00.000Z";
 const CORE = { bucket: "core" as const, remaining: 0, resetsAt: RESETS_AT };

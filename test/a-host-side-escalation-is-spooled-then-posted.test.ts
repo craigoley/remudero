@@ -36,6 +36,8 @@ import { escalationSpoolDrainWiring, liveEditsCommand } from "../src/run-task.js
 import { runBeat } from "./helpers/fleet-heartbeat-harness.js";
 import { ghShim } from "./helpers/gh-shim.js";
 import { gitRepo } from "./helpers/git-repo.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for o/r.
+process.env.RMD_ESCALATION_REPOSITORY ??= "o/r";
 
 const T0 = Date.parse("2026-10-11T00:17:00Z");
 const HOUR = 3_600_000;

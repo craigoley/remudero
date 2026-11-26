@@ -25,6 +25,8 @@ import { daemonCommand, ledgerPathFor } from "../src/run-task.js";
 import { DEFAULT_CRASHLOOP_WINDOW } from "../src/lib/daemon.js";
 import type { DaemonSummary } from "../src/lib/daemon.js";
 import { ghShim, type GhShim } from "./helpers/gh-shim.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for craigoley/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "craigoley/remudero";
 
 function fixtureHome(): { home: string; root: string; planPath: string } {
   const home = mkdtempSync(join(tmpdir(), "rmd-daemon-crashloop-wiring-"));

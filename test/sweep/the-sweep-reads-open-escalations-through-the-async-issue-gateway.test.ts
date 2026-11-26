@@ -8,6 +8,8 @@ import { ghIssueGateway, NEEDS_HUMAN_LABEL, type OpenIssue } from "#src/lib/esca
 import { buildSweepEffects, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { ghShim, type GhShimRoute } from "#test/helpers/gh-shim.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for craigoley/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "craigoley/remudero";
 
 const OWNER = "craigoley";
 const REPO = "remudero";

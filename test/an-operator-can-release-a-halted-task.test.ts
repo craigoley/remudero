@@ -14,6 +14,8 @@ import {
 import { COMMANDS, main } from "../src/run-task.js";
 import { ghShim, type GhShimRoute } from "./helpers/gh-shim.js";
 import { writeLedger } from "./helpers/ledger-fixture.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for craigoley/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "craigoley/remudero";
 
 // ── W1-T4691: A HALTED TASK CAN NEVER BE RELEASED — the dispatch circuit breaker's trip
 // deliberately survives a rotation and a daemon restart (W1-T2425's own invariant), and the ONLY

@@ -10,6 +10,8 @@ import { appendLedger } from "#src/lib/ledger.js";
 import type { Plan, Task } from "#src/lib/plan.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for fixture/loop.
+process.env.RMD_ESCALATION_REPOSITORY ??= "fixture/loop";
 
 function cache() {
   const root = mkdtempSync(join(tmpdir(), "rmd-loop-gh-"));

@@ -25,6 +25,8 @@ import type { Config } from "#src/lib/config.js";
 import { gitRepo, type GitRepo } from "#test/helpers/git-repo.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for acme/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "acme/remudero";
 
 const REPO_URL = "https://github.com/acme/remudero/pull";
 /** A fixture module's import line, spelled so this file's own text carries no relative specifier. */
