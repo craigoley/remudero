@@ -9612,6 +9612,8 @@ export interface PlanCriteriaAtHeadResult {
   taskDeclaredFiles?: string[];
   /** Routing/spend metadata from the same task record at the same head as {@link criteria}. */
   taskRisk?: TaskRisk;
+  /** W1-T14902: the same record's `dispatch_hold`, so a held task's pull request is never posted success. */
+  taskDispatchHold?: boolean;
   taskBudgetUsd?: number;
   taskNarrative?: ReviewTaskNarrativeInput;
   source?: string;
@@ -9706,6 +9708,7 @@ function planCriteriaAtHeadResult(
     taskId,
     taskDeclaredFiles: t?.files,
     taskRisk: t?.risk,
+    ...(t?.dispatch_hold === true ? { taskDispatchHold: true } : {}),
     taskBudgetUsd: t?.budget_usd,
     ...(t && (t.design !== undefined || t.amendment !== undefined || t.narrativeUnavailable) ? {
       taskNarrative: {
@@ -13256,6 +13259,9 @@ export interface PostReviewStatusGuardedOpts {
   /** The PR the lock/ledger key off — every real caller already keys its `review.posted` ledger lines by this same id
    * (the task id, or the `dep-review-PR<n>`/`PR-<n>` synthetic ids `run-task.ts` falls back to). */
   taskId: string;
+  /** W1-T14902: the named task's `dispatch_hold` as the caller read it at the plan's main. `held` or `unread` turns a
+   *  success into pending; absent (no task named, or a caller that reads none) posts as before. */
+  taskHold?: TaskHoldReading;
   evidence: ReviewEvidenceStrength;
   ledgerPath: string;
   runId: string;
@@ -13333,6 +13339,8 @@ export interface PostReviewStatusGuardedResult {
   semanticHold?: string;
   /** W1-T14241: present when a capped code success was held as pending because no override certified it. */
   cappedHold?: string;
+  /** W1-T14902: set when a success was held as pending because the named task carries (or may carry) dispatch_hold. */
+  taskHold?: string;
   /** Present only when `posted` is false — either {@link decideReviewStatusPost} refused the write (see
    * `review.post_refused`), or the post itself failed after retries or as a permanent error (`review.post_failed`). */
   reason?: string;
@@ -13500,6 +13508,10 @@ export async function postReviewStatusGuarded(
       const cappedHold = effectiveVerdict.state === "success"
         ? cappedCertificationRefusal(effectiveVerdict, recordedCappedOverride(opts)) : undefined;
       if (cappedHold !== undefined) return await publishCappedHold(opts, effectiveVerdict, cappedHold);
+      // W1-T14902 (invariant an-unread-hold-holds): a task that awaits the operator is never posted success, and a hold
+      // the caller could not read holds too. A required pending status blocks GitHub auto-merge and wakes no fix lane.
+      const taskHold = effectiveVerdict.state === "success" ? taskHoldRefusal(opts.taskHold) : undefined;
+      if (taskHold !== undefined) return await publishTaskHold(opts, effectiveVerdict, taskHold);
     }
     const result = await publishReviewStatusLocked(opts);
     return !historyApplied ? result : { ...result, ...(effectiveVerdict ? { effectiveVerdict } : {}),
@@ -13571,6 +13583,37 @@ function recordedCappedOverride(opts: PostReviewStatusGuardedOpts): CappedOverri
 /** W1-T14241 (invariant capped-is-not-green): a capped code success no override certified posts pending — never
  *  success, and never failure (CAPPED IS NOT FAIL) — under the same CAPPED description, so nothing can merge or arm on
  *  it until proof executes or an operator records an override for this head. */
+/** W1-T14902: what the caller read of the named task's `dispatch_hold`. */
+export type TaskHoldReading =
+  | { outcome: "held"; taskId: string }
+  | { outcome: "clear" }
+  | { outcome: "unread"; taskId: string; reason: string };
+
+/** W1-T14902: the reading of a looked-up record. `undefined` (no record) is clear: a PR naming no task reviews as today. */
+export function taskHoldReading(taskId: string, task: { dispatch_hold?: boolean } | undefined): TaskHoldReading {
+  return task?.dispatch_hold === true ? { outcome: "held", taskId } : { outcome: "clear" };
+}
+
+/** W1-T14902: why a success may not post, or `undefined` when the reading is clear or the caller read none. */
+export function taskHoldRefusal(reading: TaskHoldReading | undefined): string | undefined {
+  if (reading === undefined || reading.outcome === "clear") return undefined;
+  return reading.outcome === "held" ? `held: ${reading.taskId} carries dispatch_hold`
+    : `held: ${reading.taskId}'s dispatch_hold is unreadable (${reading.reason})`;
+}
+
+async function publishTaskHold(opts: PostReviewStatusGuardedOpts, verdict: ReviewVerdict,
+  refusal: string): Promise<PostReviewStatusGuardedResult> {
+  const description = `remudero-review: pending — ${refusal}; it merges after the operator releases the hold`
+    .slice(0, STATUS_DESC_MAX);
+  const held: ReviewVerdict = { ...verdict, state: "pending", summary: description };
+  appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: opts.taskId, step: "review.dispatch_hold_held",
+    head_sha: opts.sha, attempted_state: "success", reason: refusal, outcome: "pending" });
+  // No decision digest: a hold is not a terminal decision, so the pass cannot replay over it once posted.
+  const result = await publishReviewStatusLocked({ ...opts, state: "pending", verdict: held, description,
+    reviewDecisionDigest: undefined });
+  return { ...result, effectiveState: "pending", effectiveVerdict: held, taskHold: refusal, reason: result.reason ?? refusal };
+}
+
 async function publishCappedHold(opts: PostReviewStatusGuardedOpts, verdict: ReviewVerdict,
   refusal: string): Promise<PostReviewStatusGuardedResult> {
   const description = (opts.description ?? verdict.summary).slice(0, STATUS_DESC_MAX);

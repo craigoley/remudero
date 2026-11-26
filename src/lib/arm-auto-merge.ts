@@ -55,6 +55,7 @@ import {
   type PlanMergeSafetyReadings,
 } from "./plan-pr-merge-safety.js";
 import { readLedgerLines } from "./status.js";
+import { findTaskInCatalogs } from "./task-lookup.js";
 import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetUpdateRefusal, ratchetVerdictHolds, mainChangedPathsSteps, readMergedRatchetInputsSteps, type MergedRatchetInputs, type MergedRatchetJudgement, type RatchetUpdateWithheldEvidence } from "./merged-ratchet-verdict.js";
 import { judgeMergedRatchetsInWorker } from "./merged-ratchet-worker.js";
 import {
@@ -88,6 +89,10 @@ import {
 } from "./live-write-guard.js";
 import {
   automergeHoldFromLedger,
+  extractTaskTrailerId,
+  taskHoldReading,
+  taskHoldRefusal,
+  type TaskHoldReading,
   cappedOverrideFromLedger,
   decideAutoMergeArm,
   decideArmFromLedgerVerdict,
@@ -638,6 +643,9 @@ export interface ArmDeps<A extends boolean = false> {
   enqueue?: (prUrl: string) => MaybeAsync<void, A>;
   /** W1-T4581 — explicit stack parents must all be merged before either arm or direct-merge path. */
   stackPrerequisite?: (prUrl: string) => MaybeAsync<StackPrerequisiteCheck, A>;
+  /** W1-T14902 — OPTIONAL. The `dispatch_hold` of the task the PR's `Remudero-Task:` trailer names, read at the plan's
+   *  main. `held`, `unread` or a throw refuses every arm and direct merge; absent keeps every path as before. */
+  taskHold?: (prUrl: string) => MaybeAsync<TaskHoldReading, A>;
   /** OPTIONAL. Rewrites each closing keyword in the PR's body that names another OPEN pull request,
    *  before any arm, enqueue or merge: GitHub closes that PR when this one merges (core #10856,
    *  closed by console #2035's merge on 2026-10-11). See lib/closing-reference-guard.ts. */
@@ -758,6 +766,7 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig,
     },
     readPlanTouch: (prUrl, headSha) => runStepsAsync(cachedPlanTouchSteps(prUrl, headSha, ghJsonAsync)),
     stackPrerequisite: (prUrl) => runStepsAsync(stackPrerequisiteSteps(prUrl, ghJsonAsync)),
+    taskHold: (prUrl) => readPullRequestTaskHold(prUrl, loadConfigImpl),
     closingReferences: (prUrl) => runStepsAsync(closingReferenceGuardSteps(prUrl, ghJsonAsync, async (args) => {
       assertLiveWriteAllowed("gh-pr-merge", `rewriting a closing keyword in the body of ${prUrl} before merging it`);
       return ghTextAsync(args);
@@ -1661,10 +1670,49 @@ function operatorHoldRefusal(
   return { outcome: "hold-refused" };
 }
 
+/** W1-T14902 (invariant an-unread-hold-holds): a PR whose named task awaits the operator is neither armed nor merged,
+ *  and one whose hold could not be read is refused too. The ledgered `error` names the task and the hold. */
+function* taskHoldRefusalSteps(
+  prUrl: string,
+  deps: Pick<ArmDeps<true>, "say"> & Partial<Pick<ArmDeps<true>, "taskHold">>,
+): Steps<ArmAttemptResult | undefined> {
+  if (!deps.taskHold) return undefined;
+  let reading: TaskHoldReading;
+  try {
+    reading = yield* step(() => deps.taskHold!(prUrl));
+  } catch (e) {
+    reading = { outcome: "unread", taskId: "the named task", reason: String((e as Error)?.message ?? e) };
+  }
+  const refusal = taskHoldRefusal(reading);
+  if (refusal === undefined) return undefined;
+  deps.say(`automerge.task_hold_refused (W1-T14902): ${refusal} — no arm and no direct merge until the operator ` +
+    `releases it: ${prUrl}`);
+  return { outcome: "hold-refused", error: refusal };
+}
+
+/** W1-T14902: the production reading — the PR body's trailer, then that task in the ops catalog. */
+export async function readPullRequestTaskHold(
+  prUrl: string,
+  loadConfigImpl: typeof loadConfig = loadConfig,
+  readBody: (path: string) => Promise<unknown> = (path) => ghJsonAsync(["api", path]),
+  lookup: typeof findTaskInCatalogs = findTaskInCatalogs,
+): Promise<TaskHoldReading> {
+  const target = mergeTargetFromPrUrl(prUrl);
+  if (!target) return { outcome: "unread", taskId: "the named task", reason: `no pull request in ${prUrl}` };
+  const pull = await readBody(`repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`) as { body?: unknown };
+  const taskId = extractTaskTrailerId(typeof pull?.body === "string" ? pull.body : "");
+  if (taskId === undefined) return { outcome: "clear" };
+  // The ops catalog only, as `rmd review` reads a task the public plan lacks: core files no new task record
+  // (catalog.newTasks closed), and a held public task's review already posts pending at its plan's main.
+  const found = await lookup(taskId, { byId: new Map(), stateDir: join(loadConfigImpl().root, "state") });
+  if (found.outcome === "unreadable") return { outcome: "unread", taskId, reason: found.reason };
+  return taskHoldReading(taskId, found.task);
+}
+
 export function attemptArm(
   prUrl: string,
   deps: Pick<ArmDeps<false>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">>,
+    Partial<Pick<ArmDeps<false>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance" | "taskHold">>,
   priorHeadSha?: string,
   // W1-T3551: read off `OpenPrView.isDraft` (POSITIVE match only — `undefined`/`false` both fall
   // through unchanged). This is the ONE shared call site {@link armAutoMergeDetailed} (ledger-gated
@@ -1681,7 +1729,7 @@ export function attemptArm(
 export function attemptArmAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance" | "taskHold">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Promise<ArmAttemptResult> {
@@ -1691,7 +1739,7 @@ export function attemptArmAsync(
 function* attemptArmSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "checksGreenReviewed" | "readChecksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "checksGreenReviewed" | "readChecksGreenReviewed" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance" | "taskHold">>,
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Steps<ArmAttemptResult> {
@@ -1712,6 +1760,8 @@ function* attemptArmSteps(
   }
   const heldAtEntry = operatorHoldRefusal(prUrl, deps);
   if (heldAtEntry) return heldAtEntry;
+  const taskHeld = yield* taskHoldRefusalSteps(prUrl, deps);
+  if (taskHeld) return taskHeld;
   if (deps.stackPrerequisite) {
     let stack: StackPrerequisiteCheck;
     try {
@@ -2370,7 +2420,7 @@ function* attemptQueueArmSteps(
 export function armAutoMergeAtOpen(
   prUrl: string,
   deps: (Pick<ArmDeps, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "sleepSync" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">>) = realArmDeps(),
+    Partial<Pick<ArmDeps, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "sleepSync" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance" | "taskHold">>) = realArmDeps(),
   irreversible = false,
   // W1-T3551: threaded straight through to {@link attemptArm}'s shared gate — see that function's
   // own doc. Defaults false, so every existing call site (which predates this parameter and never
@@ -2386,7 +2436,7 @@ export function armAutoMergeAtOpen(
 export async function armAutoMergeAtOpenAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">> = realArmDepsAsync(),
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance" | "taskHold">> = realArmDepsAsync(),
   irreversible = false,
   isDraft = false,
 ): Promise<ArmOutcome> {
@@ -2397,7 +2447,7 @@ export async function armAutoMergeAtOpenAsync(
 function* armAtOpenSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "isMerged" | "say"> &
-    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance">>,
+    Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance" | "taskHold">>,
   irreversible: boolean,
   isDraft: boolean,
 ): Steps<ArmOutcome> {
