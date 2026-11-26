@@ -1359,7 +1359,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     });
     if (pending.posted) {
       heartbeat = reviewHeartbeat(({ step, ...fields }) => log(String(step ?? REVIEW_HEARTBEAT_STEP), fields),
-        () => systemClock.now(), { runId: args.runId, prUrl, headSha });
+        () => systemClock.now(), { runId: args.runId, headSha });
       heartbeat("claimed");
     }
     if (!pending.posted && pending.lifecycle !== undefined) {

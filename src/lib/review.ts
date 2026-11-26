@@ -14164,7 +14164,8 @@ export const REVIEW_HEARTBEAT_MIN_GAP_SAMPLE = 20;
  *  `nowMs` is the clock port's reading. */
 export function reviewHeartbeat(
   write: (row: Record<string, unknown>) => void, nowMs: () => number,
-  identity: { runId: string; prUrl: string; headSha: string },
+  // The row names its run and head only: a pr_url would make it a priced step the config garden must read.
+  identity: { runId: string; headSha: string },
 ): (phase: string) => boolean {
   let lastPhase: string | undefined;
   let lastAt = Number.NEGATIVE_INFINITY;
@@ -14173,7 +14174,7 @@ export function reviewHeartbeat(
     if (phase === lastPhase && at - lastAt < REVIEW_HEARTBEAT_MIN_INTERVAL_MS) return false;
     lastPhase = phase;
     lastAt = at;
-    write({ step: REVIEW_HEARTBEAT_STEP, run_id: identity.runId, pr_url: identity.prUrl, head_sha: identity.headSha, phase });
+    write({ step: REVIEW_HEARTBEAT_STEP, run_id: identity.runId, head_sha: identity.headSha, phase });
     return true;
   };
 }

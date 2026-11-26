@@ -127,7 +127,7 @@ test("W1-T14872 a vanished reviewer checkout writes a terminal row", async () =>
 test("W1-T14872 the heartbeat writes on each phase change and at most once a minute per phase", () => {
   const rows: Record<string, unknown>[] = [];
   let now = NOW;
-  const beatOnce = reviewHeartbeat((row) => rows.push(row), () => now, { runId: "r", prUrl: PR_URL, headSha: HEAD });
+  const beatOnce = reviewHeartbeat((row) => rows.push(row), () => now, { runId: "r", headSha: HEAD });
   assert.equal(beatOnce("claimed"), true);
   assert.equal(beatOnce("judge"), true, "a phase change always writes");
   now += 30_000;

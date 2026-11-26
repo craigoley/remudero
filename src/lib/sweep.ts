@@ -7361,7 +7361,12 @@ function reviewDemandLooping(pr: OpenPrView, policy: SweepPolicy, _ageDays: numb
  *  {@link OpenPrView} and never set by a producer: {@link promiseHarvestRetryView} sets it when a hold cause replaced the
  *  producer's `owner-pid-dead`, so the alongside-CI row still sees the producer's proof of death. The green-check rows
  *  never read it. */
-type SweepPrView = OpenPrView & { reviewPendingOwnerPidProven?: true; reviewWithheld?: ReviewWithheldLadder };
+type SweepPrView = OpenPrView & PendingHeartbeatFact & { reviewPendingOwnerPidProven?: true; reviewWithheld?: ReviewWithheldLadder };
+
+/** W1-T14872 — sweep-local like `reviewPendingOwnerPidProven`, never set by a producer: {@link reviewHeartbeatView} reads the
+ *  pending claim's reviewer heartbeat off the ledger against the measured silence bound. `fresh` holds the claim past the
+ *  pending ceiling, `silent` releases it before; absent (no heartbeat, or no measurable bound) keeps the ceiling. */
+export interface PendingHeartbeatFact { reviewPendingHeartbeat?: "fresh" | "silent" }
 
 /** W1-T13945 — the withheld-verdict ladder the sweep derived for this view. Sweep-local like `reviewPendingOwnerPidProven`:
  *  it is derived from the ledger inside the sweep, never assigned by an `OpenPrView` producer, so it is not an `OpenPrView`
@@ -7675,8 +7680,7 @@ function deliveredFailureView(
   return {
     view: { ...pr, reviewState: "failure", unmetCriteria, reviewSummary: typeof summary === "string" && summary !== "" ? summary : undefined,
       reviewPendingSince: undefined, reviewPendingOwnerDead: undefined, reviewPendingOwnerGone: undefined, reviewPendingOwnerGoneReason: undefined,
-      reviewPendingOwnerPidProven: undefined, reviewPendingOwnerRunId: undefined, reviewPendingStatusRunId: undefined,
-      reviewPendingHeartbeat: undefined },
+      reviewPendingOwnerPidProven: undefined, reviewPendingOwnerRunId: undefined, reviewPendingStatusRunId: undefined },
     row,
   };
 }
@@ -9082,9 +9086,6 @@ export interface OpenPrView {
   reviewPendingOwnerGoneReason?: string;
   /** W1-T14035 — the `run_id` of the current head's `review.pending_posted` row the producer judged. Evidence only. */
   reviewPendingOwnerRunId?: string;
-  /** W1-T14872: the pending claim's reviewer heartbeat against the measured silence bound — `fresh` holds the claim past
-   *  the pending ceiling, `silent` releases it before. Absent (no heartbeat, or no measurable bound) keeps the ceiling. */
-  reviewPendingHeartbeat?: "fresh" | "silent";
   /** W1-T14035 — the run that published the live `remudero-review` status (tick-read-worker's reviewPendingStatusRunId);
    *  absent when unknown. Evidence only: the producer sets `reviewPendingOwnerDead` only when it equals the judged run. */
   reviewPendingStatusRunId?: string;
@@ -13578,7 +13579,7 @@ function reviewPendingAgeMinutes(pr: OpenPrView, now: number): number | undefine
  *  offer this head to the post-review lane again? Reuses `policy.pendingCeilingMinutes` rather than
  *  a second threshold that could drift. UNDATED READS STALE — the OPPOSITE direction from the
  *  re-push remedy's caution, because a redundant pending post is a no-op. */
-function reviewPendingIsStale(pr: OpenPrView, policy: SweepPolicy, now: number): boolean {
+function reviewPendingIsStale(pr: OpenPrView & PendingHeartbeatFact, policy: SweepPolicy, now: number): boolean {
   // W1-T14872 (invariant live-claim-waits): a measured heartbeat decides before the ceiling, in both directions.
   if (pr.reviewPendingHeartbeat === "silent") return true;
   if (pr.reviewPendingHeartbeat === "fresh") return false;
@@ -14734,7 +14735,7 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           return `checks green, remudero-review owner proven dead — re-running the review lane on #${pr.prNumber}`;
         }
         const age = reviewPendingAgeMinutes(pr, now);
-        if (pr.reviewPendingHeartbeat === "silent") {
+        if ((pr as OpenPrView & PendingHeartbeatFact).reviewPendingHeartbeat === "silent") {
           return `checks green, remudero-review pending ${age !== undefined ? `${Math.floor(age)}m` : "for an undated interval"} ` +
             `and its reviewer's heartbeat is silent past the measured bound — treating the claim as orphaned and re-running ` +
             `the review lane on #${pr.prNumber}`;
@@ -18906,7 +18907,9 @@ function promiseHarvestRetryView(
 }
 
 /** W1-T14872 — the pending claim's heartbeat read off the ledger already in hand: the claim's own run at this head. */
-export function reviewHeartbeatView<V extends OpenPrView>(view: V, lines: ReadonlyArray<Record<string, unknown>>, nowMs: number): V {
+export function reviewHeartbeatView<V extends OpenPrView>(
+  view: V, lines: ReadonlyArray<Record<string, unknown>>, nowMs: number,
+): V & PendingHeartbeatFact {
   if (view.reviewState !== "pending") return view;
   const beat = reviewClaimHeartbeat(lines, view.reviewPendingOwnerRunId, view.headSha, nowMs);
   return beat === undefined ? view : { ...view, reviewPendingHeartbeat: beat.state };
