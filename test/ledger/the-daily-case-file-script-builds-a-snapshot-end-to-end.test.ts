@@ -24,6 +24,7 @@ test("W1-T14602: the daily case-file script writes a snapshot and its carry for 
       worker_assignment: { id: "a1", selected: { provider: "claude", model: "claude-opus-5-5" } } },
     { ts: at(20), task_id: task, run_id: runId, step: "pr.opened", pr_url: "https://github.com/craigoley/remudero/pull/41001" },
     // W1-T14728: called tasks with no ledger PR row are looked up in one PR listing; neither is credited there.
+    // W1-T14989: a listing that read and credits neither is an observed absence, so each still gets a case file.
     { ts: at(10), task_id: "W1-T20002", run_id: "W1-T20002-1795000000001", step: "worker.assignment",
       worker_assignment: { id: "a2", selected: { provider: "claude", model: "claude-opus-5-5" } } },
     { ts: at(9), task_id: "W1-T20003", run_id: "W1-T20003-1795000000002", step: "worker.assignment",
@@ -49,13 +50,14 @@ test("W1-T14602: the daily case-file script writes a snapshot and its carry for 
   const summary = JSON.parse(stdout.trim().split("\n").at(-1)!);
   assert.equal(summary.event, "field_trials.case_files");
   assert.equal(summary.candidates, 3);
-  assert.equal(summary.selected, 1);
+  assert.equal(summary.selected, 3);
   assert.equal(summary.withoutPr, 2);
+  assert.equal(summary.selectedWithoutPr, 2);
   assert.deepEqual(summary.readFailures, []);
   assert.equal(shim.calls().filter((call) => call.includes("--search")).length, 0, "no per-task search");
   assert.equal(shim.calls().filter((call) => call.includes("pulls?state=all")).length, 1, "one listing page answers both");
   const files = JSON.parse(readFileSync(out, "utf8"));
-  assert.deepEqual(files.map((file: { taskId: string }) => file.taskId), [task]);
+  assert.deepEqual(files.map((file: { taskId: string }) => file.taskId).sort(), [task, "W1-T20002", "W1-T20003"]);
   const carry = JSON.parse(readFileSync(join(ledger.dir, "field-trials", "case-files-carry.json"), "utf8"));
   assert.equal(carry.links[task], 41001);
   assert.equal(carry.finishedPrs["41001"].raw.state, "MERGED");
