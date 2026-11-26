@@ -24,14 +24,12 @@ export type FixLearningsArm = "offered" | "withheld";
 /** What CI concluded on the head a round pushed, or that it pushed nothing. */
 export type FixLearningsConclusion = "green" | "red" | "no_push";
 
-/** One round's open measurement: from its first prompt assembly until its outcome is written. */
+/** One round's open measurement, keyed to its dispatch and completion rows. */
 export interface FixLearningsRound {
   /** The `fix.learnings_shadow` row's fields. */
-  readonly row: { shadow_id: string; task_id: string; arm: FixLearningsArm } & Record<string, unknown>;
+  readonly row: { shadow_id: string; task_id: string; round_id: string; arm: FixLearningsArm } & Record<string, unknown>;
   /** The ledger as the round's first prompt read it: the earlier rounds `rounds_to_green` counts. */
   readonly priorRows: ReadonlyArray<Record<string, unknown>>;
-  /** The round's id, known once its `fix.done` row is seen. */
-  roundId?: string;
   /** Set when the round pushed; `head` is absent when the push landed on a head nobody could name. */
   pushed?: { head?: string };
 }
@@ -52,6 +50,7 @@ export function recordFixLearningsShadow(input: {
   prNumber: number | undefined;
   attempt: number;
   round: "resume" | "fresh";
+  roundId: string;
   repoDir: string;
   config: Config;
   evidence: FixEvidence;
@@ -89,6 +88,7 @@ export function recordFixLearningsShadow(input: {
       pr_number: input.prNumber,
       attempt: input.attempt,
       round: input.round,
+      round_id: input.roundId,
       arm: withheld ? "withheld" : "offered",
       ...selection,
       budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
@@ -97,13 +97,16 @@ export function recordFixLearningsShadow(input: {
   };
 }
 
-/** Read one `fix.done` row into the open round: a push is remembered for CI to judge; no push concludes now.
- *  A row with no `round_id`, or a second row for a round that pushed, concludes nothing. */
+function pushedHeadForShadow(done: Record<string, unknown>): string | undefined {
+  const head = done.fix_learnings_pushed_head_sha ?? done.pushed_head_sha;
+  return typeof head === "string" ? head : undefined;
+}
+
+/** Read the matching `fix.done` row. A push is remembered for CI to judge; no push concludes now. */
 export function fixLearningsDoneConclusion(round: FixLearningsRound, done: Record<string, unknown>): "no_push" | undefined {
-  if (round.pushed !== undefined || typeof done.round_id !== "string") return undefined;
-  round.roundId = done.round_id;
+  if (round.pushed !== undefined || done.round_id !== round.row.round_id) return undefined;
   if (done.fix_learnings_no_push === true) return "no_push";
-  const head = typeof done.pushed_head_sha === "string" ? done.pushed_head_sha : undefined;
+  const head = pushedHeadForShadow(done);
   if (head === undefined && done.push_outcome !== "landed" && done.push_outcome !== "unverified" &&
     done.push_outcome !== "remote_unreadable") return "no_push";
   round.pushed = { head };
@@ -113,25 +116,26 @@ export function fixLearningsDoneConclusion(round: FixLearningsRound, done: Recor
 /** CI's conclusion for the open round, only when it is green or red on the head that round pushed. */
 export function fixLearningsCiConclusion(round: FixLearningsRound, state: string, sha: string | undefined): "green" | "red" | undefined {
   const head = round.pushed?.head;
-  if (head === undefined || (sha !== undefined && sha !== head)) return undefined;
+  if (head === undefined || sha !== head) return undefined;
   return state === "green" || state === "red" ? state : undefined;
 }
 
 /** The `fix.learnings_outcome` row. On green, `rounds_to_green` counts this task's rounds that dispatched a
- *  worker (`fix.dispatch`) or pushed (`fix.done`) in `priorRows` and this rung's `rungRows`, this one included. */
+ *  worker round (`fix.dispatch`) or pushed (`fix.done`), excluding unchanged-head push attempts. */
 export function fixLearningsOutcomeRow(
   round: FixLearningsRound,
   conclusion: FixLearningsConclusion,
   rungRows: ReadonlyArray<Record<string, unknown>>,
 ): Record<string, unknown> {
-  const { shadow_id, run_id, task_id, pr_number, attempt, arm } = round.row;
-  const row = { shadow_id, run_id, task_id, pr_number, attempt, arm, round_id: round.roundId, conclusion,
+  const { shadow_id, run_id, task_id, pr_number, attempt, arm, round_id } = round.row;
+  const row = { shadow_id, run_id, task_id, pr_number, attempt, arm, round_id, conclusion,
     pushed_head_sha: round.pushed?.head };
   if (conclusion !== "green") return row;
-  const rounds = new Set([round.roundId, ...[...round.priorRows, ...rungRows]
-    .filter((r) => r.task_id === task_id &&
-      (r.step === "fix.dispatch" || (r.step === "fix.done" && typeof r.pushed_head_sha === "string")))
-    .map((r) => r.round_id)].filter((id) => typeof id === "string"));
+  const taskRows = [...round.priorRows, ...rungRows].filter((r) => r.task_id === task_id && typeof r.round_id === "string");
+  const noOps = new Set(taskRows.filter((r) => r.step === "fix.done" && r.fix_learnings_no_push === true).map((r) => r.round_id));
+  const rounds = new Set([round_id, ...taskRows
+    .filter((r) => !noOps.has(r.round_id) && (r.step === "fix.dispatch" || (r.step === "fix.done" && pushedHeadForShadow(r) !== undefined)))
+    .map((r) => r.round_id)]);
   return { ...row, rounds_to_green: rounds.size };
 }
 

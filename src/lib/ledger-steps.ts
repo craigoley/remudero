@@ -828,7 +828,8 @@ const SEED_ROWS: readonly SeedRow[] = [
     step: "fix.learnings_shadow",
     meaning:
       "The learnings a fix round's failing checks and unmet review claims would match by symbol or error signature, " +
-      "written at the round's first prompt. Fields: `shadow_id`, `pr_number`, `attempt`, `round`, `arm` (offered or " +
+      "written for a worker dispatch or a counted merge-start refusal. Fields: `shadow_id`, `round_id`, `pr_number`, " +
+      "`attempt`, `round`, `arm` (offered or " +
       "withheld, drawn per task), `matched` (each id with its match kinds; null with `selection_error` when the corpus " +
       "could not be read), `dropped_ids`, `budget_chars` and `failing_checks`. Neither arm adds anything to the prompt.",
     writer: ["runFixRung"],

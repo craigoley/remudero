@@ -16,12 +16,12 @@ import {
 } from "#src/lib/fix-learnings-shadow.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "#src/lib/learnings.js";
 import type { CriterionVerdict } from "#src/lib/review.js";
-import type { CiFailure } from "#src/lib/sweep.js";
+import type { CiFailure, LiveRoundHandoff } from "#src/lib/sweep.js";
 import { taskArmWithheld } from "#src/lib/task-arm.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
-import { runFixRung } from "#test/helpers/run-task-test.js";
+import { MERGE_UP_TO_DATE_REASON, runFixRung } from "#test/helpers/run-task-test.js";
 
 // W1-T14138: each fix round records which learnings its failing checks would match, in a task-keyed arm, and
 // injects nothing. These tests drive the real fix rung over a real git worktree holding a learnings corpus.
@@ -44,6 +44,7 @@ const CORPUS = [
 
 const FIRST_RED: CiFailure[] = [{ name: "unit-shadow-check", title: "wireProducer failed", logTail: "ERR_SHADOW_BOOM" }];
 const SECOND_RED: CiFailure[] = [{ name: "lint-shadow-check", logTail: "a different failure" }];
+const FIRST_MATCHES = { "by-check-name": ["error"], "by-log-error": ["error"], "by-title-symbol": ["symbol"] };
 
 const criteria: CriterionVerdict[] = [
   { claim: "wire producer", proof: "unit test: wires it", met: false, reason: "consumer disconnected", proof_exec: "executed_fail" },
@@ -51,16 +52,19 @@ const criteria: CriterionVerdict[] = [
 const mount = { model: "sonnet", effort: "medium", maxTurns: 10, contextBudget: 120000 };
 
 type Row = Record<string, unknown> & { step: string };
-interface Run { prompts: string[]; rows: Row[]; pushed: string[] }
+interface Run { prompts: string[]; rows: Row[]; pushed: string[]; waits: number; reviews: number }
 
 /** Drive the fix rung from a red CI dispatch; `ci[i]` is what CI concludes on the head round i+1 pushes. */
 async function fixRung(opts: {
   taskId?: string;
   corpus?: string;
-  ci?: Array<"green" | "red">;
+  ci?: Array<"green" | "red" | "timeout">;
+  ciOnOtherHead?: boolean;
+  checkHandoff?: "pushed-head" | "other-head";
   landed?: boolean;
   noCommit?: boolean;
-  advanceAfterPush?: boolean;
+  remoteAfterPush?: "advanced" | "missing" | "unreadable";
+  mergeStart?: "fetch-fails" | "refused" | "up-to-date";
   reviewOnly?: boolean;
 }): Promise<Run> {
   const taskId = opts.taskId ?? OFFERED_TASK;
@@ -83,10 +87,24 @@ async function fixRung(opts: {
     const pushed: string[] = [];
     let publishedHead = base;
     let waits = 0;
+    let reviews = 0;
+    const ciPorts = {
+      requiredContexts: [...FIRST_RED, ...SECOND_RED].map((failure) => failure.name),
+      liveRoundHandoff: (): LiveRoundHandoff | undefined => waits === 1 && opts.checkHandoff
+        ? { failure: "check", headSha: opts.checkHandoff === "pushed-head" ? pushed[0]! : base, ciFailures: SECOND_RED }
+        : undefined,
+    };
     await runFixRung({
+      ...ciPorts,
       task, taskId, runId, prUrl: "https://github.com/acme/remudero/pull/7", branch: `run-${runId}`,
       worktreePath: repo, initialSessionId: "", initialReview, ciFailures: opts.reviewOnly ? undefined : FIRST_RED,
-      mount, settingsFile: join(root, "settings.json"), config: { root } as Config, budgetUsd: 1, strikeCap: ci.length,
+      mount, settingsFile: join(root, "settings.json"),
+      config: { root, ...(opts.mergeStart ? { workerProviders: { harnessCommitsFix: true } } : {}) } as Config,
+      budgetUsd: 1, strikeCap: ci.length,
+      escalationJudge: async () => ({ decision: "deliver", reason: "fixture" }),
+      ...(opts.mergeStart ? { mergeConflict: {
+        files: [{ path: "src/changed.ts", oursDeleted: 1, theirsDeleted: 0 }], oursLog: "ours", theirsLog: "theirs",
+      } } : {}),
       reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: repo, reviewerMount: mount },
       deps: {
         approvedSkillsDir: join(root, "skills"),
@@ -107,21 +125,34 @@ async function fixRung(opts: {
         },
         push: () => {
           const head = git("rev-parse", "HEAD"); pushed.push(head);
-          if (opts.landed !== false) publishedHead = opts.advanceAfterPush ? "descendant-head" : head;
+          if (opts.landed !== false) publishedHead = opts.remoteAfterPush === "advanced" ? "descendant-head" : head;
           return opts.landed === false ? undefined : { fixRoundPushedHead: head };
         },
-        ...((opts.landed === false || opts.noCommit || opts.advanceAfterPush)
-          ? { readRemoteBranchHead: async () => opts.landed === false ? base : publishedHead } : {}),
-        waitForCiGreen: async () => ({ state: ci[waits++] ?? "green", sha: git("rev-parse", "HEAD") }),
+        readRemoteBranchHead: async () => {
+          if (pushed.length > 0 && opts.remoteAfterPush === "unreadable") throw new Error("origin unavailable after push");
+          return pushed.length > 0 && opts.remoteAfterPush === "missing" ? undefined : publishedHead;
+        },
+        ...(opts.mergeStart === "up-to-date" || opts.mergeStart === "refused" ? {
+          startShellLessMergeConflictMerge: () => opts.mergeStart === "up-to-date"
+            ? { started: false, reason: MERGE_UP_TO_DATE_REASON } : { started: false },
+        } : {}),
+        waitForCiGreen: async () => ({ state: ci[waits++] ?? "green", sha: opts.ciOnOtherHead ? base : publishedHead }),
+        readCiRollup: async () => (pushed.length === 0 ? FIRST_RED : SECOND_RED).map(({ name }) =>
+          ({ name, status: "COMPLETED", conclusion: "FAILURE" })),
         fetchCiFailures: async () => SECOND_RED,
-        runReview: async () => ({ ...initialReview, state: "success", criteria: criteria.map((c) => ({ ...c, met: true })), headSha: git("rev-parse", "HEAD") }),
+        runReview: async () => {
+          reviews++;
+          return opts.remoteAfterPush
+            ? { ...initialReview, criteria: criteria.map((c) => ({ ...c, claim: "a new unmet claim" })), headSha: publishedHead }
+            : { ...initialReview, state: "success", criteria: criteria.map((c) => ({ ...c, met: true })), headSha: publishedHead };
+        },
         readHeadShaForProvenance: () => git("rev-parse", "HEAD"),
         fetchPrBody: async () => "implemented", fetchPrDiffFiles: async () => task.files,
         issues: { create: () => "https://github.com/acme/remudero/issues/1", listOpen: () => [], comment: () => {} },
         log: (step, extra) => rows.push({ ...extra, step }), say: () => {}, account: (worker) => worker,
       },
     });
-    return { prompts, rows, pushed };
+    return { prompts, rows, pushed, waits, reviews };
   } finally {
     fixture.cleanup();
     rmSync(root, { recursive: true, force: true });
@@ -129,7 +160,8 @@ async function fixRung(opts: {
 }
 
 const of = (run: Run, step: string): Row[] => run.rows.filter((row) => row.step === step);
-const matchedIds = (row: Row): string[] => (row.matched as Array<{ id: string }>).map((m) => m.id).sort();
+const matchedIds = (row: Record<string, unknown>): string[] => (row.matched as Array<{ id: string }>).map((m) => m.id).sort();
+const matchedKinds = (row: Row) => Object.fromEntries((row.matched as Array<{ id: string; kinds: string[] }>).map((m) => [m.id, m.kinds]));
 
 test("W1-T14138 criterion 1: a fix round writes one shadow row naming the matches, their kinds and the task's arm", async () => {
   for (const [taskId, arm] of [[OFFERED_TASK, "offered"], [WITHHELD_TASK, "withheld"]] as const) {
@@ -138,10 +170,7 @@ test("W1-T14138 criterion 1: a fix round writes one shadow row naming the matche
     assert.equal(shadows.length, 1, "one row for the one round");
     const row = shadows[0]!;
     assert.equal(row.arm, arm);
-    assert.deepEqual(
-      Object.fromEntries((row.matched as Array<{ id: string; kinds: string[] }>).map((m) => [m.id, m.kinds])),
-      { "by-check-name": ["error"], "by-log-error": ["error"], "by-title-symbol": ["symbol"] },
-    );
+    assert.deepEqual(matchedKinds(row), FIRST_MATCHES);
     assert.deepEqual(row.failing_checks, ["unit-shadow-check"]);
     assert.equal(row.task_id, taskId);
     assert.equal(row.run_id, `${taskId}-1791151948510`);
@@ -158,6 +187,37 @@ test("W1-T14138 criterion 2: a learning that would match only by file path is no
   const row = of(run, "fix.learnings_shadow")[0]!;
   assert.deepEqual(matchedIds(row), ["by-check-name", "by-log-error", "by-title-symbol"]);
   assert.deepEqual(row.dropped_ids, [], "the path-only entry is not a dropped candidate either");
+});
+
+test("W1-T14138 criterion 1: counted merge-start refusals record the known CI matches under the refused round ID", async () => {
+  for (const [mergeStart, taskId, arm] of [
+    ["fetch-fails", OFFERED_TASK, "offered"], ["refused", WITHHELD_TASK, "withheld"],
+  ] as const) {
+    const run = await fixRung({ corpus: CORPUS, mergeStart, taskId });
+    const [dispatch] = of(run, "fix.dispatch");
+    assert.equal(dispatch?.mode, "merge-conflict");
+    assert.equal(run.prompts.length, 0);
+    const shadows = of(run, "fix.learnings_shadow");
+    assert.equal(shadows.length, 1);
+    const [shadow] = shadows;
+    assert.equal(shadow!.round_id, dispatch!.round_id);
+    assert.equal(shadow!.arm, arm);
+    assert.deepEqual(shadow!.failing_checks, ["unit-shadow-check"]);
+    assert.deepEqual(matchedKinds(shadow!), FIRST_MATCHES);
+    assert.deepEqual(of(run, "fix.learnings_outcome").map((row) => [row.round_id, row.shadow_id, row.conclusion]),
+      [[dispatch!.round_id, shadow!.shadow_id, "no_push"]]);
+  }
+});
+
+test("an up-to-date merge retries the same strike with a single shadow row for the CI worker", async () => {
+  const run = await fixRung({ corpus: CORPUS, mergeStart: "up-to-date" });
+  assert.deepEqual(of(run, "fix.dispatch").map((row) => row.mode), ["ci-log"]);
+  assert.equal(of(run, "fix.commit_refused").length, 0);
+  const shadows = of(run, "fix.learnings_shadow");
+  assert.equal(shadows.length, 1);
+  assert.equal(shadows[0]!.round_id, of(run, "fix.dispatch")[0]!.round_id);
+  assert.equal(shadows[0]!.attempt, 1);
+  assert.equal(run.prompts.length, 1);
 });
 
 test("W1-T14138 criterion 3: the fix prompt is byte-identical in both arms whether or not learnings match", async () => {
@@ -202,7 +262,7 @@ test("W1-T14138 criterion 4: the outcome row records CI on the pushed head, red 
   const run = await fixRung({ corpus: CORPUS, ci: ["red", "green"] });
   const shadows = of(run, "fix.learnings_shadow");
   const outcomes = of(run, "fix.learnings_outcome");
-  assert.deepEqual(shadows.map((row) => row.attempt), [1, 2]);
+  assert.deepEqual(shadows.map((row) => row.attempt), [1, 2], JSON.stringify(run.rows.slice(-8)));
   assert.deepEqual(outcomes.map((row) => row.conclusion), ["red", "green"]);
   assert.deepEqual(outcomes.map((row) => row.shadow_id), shadows.map((row) => row.shadow_id));
   assert.deepEqual(outcomes.map((row) => row.pushed_head_sha), run.pushed);
@@ -233,15 +293,35 @@ test("W1-T14138 criterion 4: a successful no-op push does not claim the already-
   assert.equal(outcome.rounds_to_green, undefined);
 });
 
-test("W1-T14138 criterion 4: a later descendant push does not erase this round's pushed head", async () => {
-  const run = await fixRung({ corpus: CORPUS, advanceAfterPush: true });
-  const done = of(run, "fix.done")[0]!;
-  const outcome = of(run, "fix.learnings_outcome")[0]!;
-  assert.equal(done.push_outcome, "landed");
-  assert.equal(done.pushed_head_sha, run.pushed[0]);
-  assert.equal(done.fix_learnings_no_push, undefined);
-  assert.equal(outcome.conclusion, "green");
-  assert.equal(outcome.pushed_head_sha, run.pushed[0]);
+test("W1-T14138 criterion 3: a push receipt cannot extend the prompt sequence after failed remote verification", async () => {
+  for (const taskId of [OFFERED_TASK, WITHHELD_TASK]) {
+    for (const remoteAfterPush of ["unreadable", "advanced", "missing"] as const) {
+      const run = await fixRung({ corpus: CORPUS, taskId, remoteAfterPush, ci: ["green", "green"] });
+      assert.equal(run.prompts.length, 1, remoteAfterPush);
+      assert.equal(run.waits, 0, remoteAfterPush);
+      assert.equal(run.reviews, 0, remoteAfterPush);
+      const done = of(run, "fix.done")[0]!;
+      assert.equal(done.push_outcome, remoteAfterPush === "unreadable" ? "remote_unreadable" : "not_on_remote");
+      assert.equal(done.pushed_head_sha, undefined);
+      assert.equal(done.fix_learnings_pushed_head_sha, run.pushed[0]);
+      assert.equal(of(run, "fix.learnings_outcome").length, 0, "the receipt has no observed CI conclusion");
+    }
+  }
+});
+
+test("W1-T14138 criterion 4: terminal CI on the pushed head takes precedence over a check handoff for measurement", async () => {
+  const terminal = await fixRung({ corpus: CORPUS, ci: ["green", "green"], checkHandoff: "pushed-head" });
+  const [outcome] = of(terminal, "fix.learnings_outcome");
+  assert.equal(outcome?.conclusion, "green");
+  assert.equal(outcome?.pushed_head_sha, terminal.pushed[0]);
+  assert.equal(outcome?.rounds_to_green, 1);
+  assert.equal(of(terminal, "fix.live_round_resumed")[0]?.failure, "check");
+  assert.equal(of(terminal, "fix.ci_not_green")[0]?.ci, "red", "routing still follows the handoff");
+
+  const timedOut = await fixRung({ corpus: CORPUS, ci: ["timeout"], checkHandoff: "pushed-head" });
+  assert.deepEqual(of(timedOut, "fix.learnings_outcome").map((row) => row.conclusion), ["red"]);
+  const foreign = await fixRung({ corpus: CORPUS, ciOnOtherHead: true, checkHandoff: "other-head" });
+  assert.equal(of(foreign, "fix.learnings_outcome").length, 0);
 });
 
 test("known CI failures remain selectable when prompt evidence is conflict-only", () => {
@@ -250,7 +330,7 @@ test("known CI failures remain selectable when prompt evidence is conflict-only"
     mkdirSync(join(root, "learnings"));
     writeFileSync(join(root, "learnings", "ci.yaml"), CORPUS);
     const round = recordFixLearningsShadow({ taskId: OFFERED_TASK, runId: "known-ci", prNumber: 7, attempt: 1,
-      round: "resume", repoDir: root, config: { root } as Config,
+      round: "resume", roundId: "known-ci:1", repoDir: root, config: { root } as Config,
       evidence: { mergeConflict: { files: [], oursLog: "", theirsLog: "" } }, knownCiFailures: FIRST_RED, priorRows: [] });
     assert.deepEqual(round.row.failing_checks, ["unit-shadow-check"]);
     assert.deepEqual(matchedIds(round.row), ["by-check-name", "by-log-error", "by-title-symbol"]);
@@ -279,7 +359,7 @@ test("selection reads unmet claims, findings and only the newest part of a log t
       lesson("by-old-log", "  error_signatures: [OLD-LOG-SIG]\n"),
     ].join("\n"));
     const round = recordFixLearningsShadow({
-      taskId: OFFERED_TASK, runId: "r", prNumber: undefined, attempt: 1, round: "resume", repoDir: root, config: { root } as Config,
+      taskId: OFFERED_TASK, runId: "r", prNumber: undefined, attempt: 1, round: "resume", roundId: "r1", repoDir: root, config: { root } as Config,
       priorRows: [],
       evidence: {
         ciFailures: [{ name: "c", logTail: `OLD-LOG-SIG${"x".repeat(FIX_LEARNINGS_LOG_TAIL_CHARS)}` }],
@@ -289,14 +369,14 @@ test("selection reads unmet claims, findings and only the newest part of a log t
         },
       },
     });
-    assert.deepEqual(matchedIds({ ...round.row, step: "fix.learnings_shadow" }), ["by-claim", "by-mechanism", "by-remedy"]);
+    assert.deepEqual(matchedIds(round.row), ["by-claim", "by-mechanism", "by-remedy"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-const openRound = (priorRows: Array<Record<string, unknown>> = []): FixLearningsRound =>
-  ({ row: { shadow_id: "s", task_id: "W1-T1", arm: "offered" }, priorRows });
+const openRound = (roundId = "r1", priorRows: Array<Record<string, unknown>> = []): FixLearningsRound =>
+  ({ row: { shadow_id: "s", task_id: "W1-T1", round_id: roundId, arm: "offered" }, priorRows });
 
 test("only a push on a known head waits for CI, and only a conclusion on that head is recorded", () => {
   const unnamed = openRound();
@@ -305,7 +385,7 @@ test("only a push on a known head waits for CI, and only a conclusion on that he
   assert.deepEqual(unnamed.pushed, { head: undefined });
   assert.equal(fixLearningsCiConclusion(unnamed, "green", undefined), undefined);
 
-  const unreadableRemote = openRound();
+  const unreadableRemote = openRound("r-remote-unreadable");
   assert.equal(fixLearningsDoneConclusion(unreadableRemote, {
     round_id: "r-remote-unreadable", push_outcome: "remote_unreadable",
   }), undefined, "a successful push with an unreadable remote is not a no-push outcome");
@@ -315,13 +395,16 @@ test("only a push on a known head waits for CI, and only a conclusion on that he
 
   const round = openRound();
   assert.equal(fixLearningsCiConclusion(round, "green", undefined), undefined, "nothing pushed yet");
+  assert.equal(fixLearningsDoneConclusion(round, { round_id: "other-round", pushed_head_sha: "other-head" }), undefined);
+  assert.equal(round.pushed, undefined, "another round cannot claim this measurement");
   assert.equal(fixLearningsDoneConclusion(round, { round_id: "r1", pushed_head_sha: "abc" }), undefined);
   assert.equal(fixLearningsDoneConclusion(round, { round_id: "r1" }), undefined, "a later row cannot undo the push");
   assert.equal(fixLearningsCiConclusion(round, "timeout", "abc"), undefined);
   assert.equal(fixLearningsCiConclusion(round, "freshness_handoff", "abc"), undefined);
   assert.equal(fixLearningsCiConclusion(round, "green", "def"), undefined);
   assert.equal(fixLearningsCiConclusion(round, "red", "abc"), "red");
-  assert.equal(fixLearningsCiConclusion(round, "green", undefined), "green");
+  assert.equal(fixLearningsCiConclusion(round, "green", "abc"), "green");
+  assert.equal(fixLearningsCiConclusion(round, "green", undefined), undefined, "CI must identify the head it judged");
 });
 
 test("rounds to green joins this task's dispatched and pushed rounds from earlier runs and this one", () => {
@@ -330,12 +413,15 @@ test("rounds to green joins this task's dispatched and pushed rounds from earlie
     { step: "fix.done", task_id: "W1-T1", round_id: "r1", pushed_head_sha: "a" },
     { step: "fix.done", task_id: "W1-T1", round_id: "r2", pushed_head_sha: "b" },
     { step: "fix.done", task_id: "W1-T1", round_id: "r3" },
+    { step: "fix.done", task_id: "W1-T1", round_id: "unverified-after-receipt", fix_learnings_pushed_head_sha: "c" },
+    { step: "fix.dispatch", task_id: "W1-T1", round_id: "no-op" },
+    { step: "fix.done", task_id: "W1-T1", round_id: "no-op", pushed_head_sha: "c", fix_learnings_no_push: true },
     { step: "fix.dispatch", task_id: "W1-T2", round_id: "other" },
     { step: "fix.dispatch", task_id: "W1-T1" },
   ];
-  const round = { ...openRound(earlier), roundId: "r4" };
+  const round = openRound("r4", earlier);
   const thisRung = [{ step: "fix.dispatch", task_id: "W1-T1", round_id: "r4" }];
-  assert.equal(fixLearningsOutcomeRow(round, "green", thisRung).rounds_to_green, 3);
+  assert.equal(fixLearningsOutcomeRow(round, "green", thisRung).rounds_to_green, 4);
   assert.equal(fixLearningsOutcomeRow(round, "red", thisRung).rounds_to_green, undefined);
 });
 

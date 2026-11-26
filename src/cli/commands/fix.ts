@@ -401,7 +401,8 @@ const isFixRoundPushReceipt = (value: unknown): value is FixRoundPushReceipt =>
   typeof value === "object" && value !== null && "fixRoundPushedHead" in value;
 
 export type FixRoundLanding = { landed: true; remoteHead?: string } // W1-T9618: did the round's commit reach the remote branch?
-  | { landed: false; outcome: "failed" | "refused" | "not_on_remote" | "remote_unreadable"; cause?: string; reason: string; remoteHead?: string };
+  | { landed: false; outcome: "failed" | "refused" | "not_on_remote" | "remote_unreadable"; cause?: string; reason: string;
+      remoteHead?: string; receiptHead?: string };
 
 /** W1-T4207: at most this many undeclared paths ride a `fix.commit_refused` row; the rest are counted. */
 const COMMIT_REFUSED_PATH_CAP = 20;
@@ -1824,6 +1825,7 @@ function fixRoundLandingFields(landing: FixRoundLanding | undefined, workerSubty
   if (landing.landed) return landing.remoteHead === undefined ? { push_outcome: "unverified" } : { push_outcome: "landed", remote_head_sha: landing.remoteHead };
   return { subtype: "push_failed", worker_subtype: workerSubtype, fix_outcome: "NOT_LANDED", worker_fix_outcome: workerFixOutcome,
     push_outcome: landing.outcome, ...(landing.cause === undefined ? {} : { push_failure_cause: landing.cause }),
+    ...(landing.receiptHead === undefined ? {} : { fix_learnings_pushed_head_sha: landing.receiptHead }),
     push_failure_reason: landing.reason.slice(0, 500), ...(landing.remoteHead === undefined ? {} : { remote_head_sha: landing.remoteHead }) };
 }
 
@@ -2933,14 +2935,10 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       await commentLandedRound(remoteHead);
       return { landed: true, remoteHead };
     }
-    // A successful push receipt names the commit this round actually sent. A later writer can
-    // advance the branch before this verification read; that does not turn our earlier push into
-    // a no-push round. Keep CI attribution pinned to the receipt's SHA.
-    if (receipt?.fixRoundPushedHead !== undefined && receipt.fixRoundPushedHead === headSha) {
-      return { landed: true, remoteHead: receipt.fixRoundPushedHead };
-    }
-    if (unreadable !== undefined) return { landed: false, outcome: "remote_unreadable", reason: unreadable };
-    return { landed: false, outcome: "not_on_remote", ...seen,
+    // The receipt identifies a push for shadow attribution even if the remote read ends the rung.
+    const receiptHead = receipt?.fixRoundPushedHead;
+    if (unreadable !== undefined) return { landed: false, outcome: "remote_unreadable", reason: unreadable, receiptHead };
+    return { landed: false, outcome: "not_on_remote", ...seen, receiptHead,
       reason: `refs/heads/${opts.branch} holds ${remoteHead ?? "<absent>"}, not the round's commit ${headSha ?? "<unread>"}` };
   };
 
@@ -4805,6 +4803,13 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       } } : {}),
     };
 
+    const openLearningsRound = (roundId: string): void => {
+      learningsRound = recordFixLearningsShadow({ taskId: opts.taskId, runId: opts.runId, prNumber, attempt, round, roundId,
+        repoDir: opts.worktreePath, config: opts.config, evidence,
+        knownCiFailures: noReviewYet ? currentCiFailures : undefined, priorRows: roundLedger });
+      deps.log("fix.learnings_shadow", learningsRound.row);
+    };
+
     // W1-T4458 (i): the harness starts the merge a shell-less round cannot run, so the worker only
     // resolves the conflict markers it leaves.
     if (fixHarnessOwnsGit && currentMergeConflict !== undefined) {
@@ -4822,6 +4827,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         const refusal = merged.reason ?? "the merge of current main did not start (no reason reported)";
         consecutiveMergeRefusalReasons.push(refusal);
         const refusedRoundId = `${opts.runId}:merge-refused:${attempt}:${systemClock.now()}`;
+        openLearningsRound(refusedRoundId);
         strikes = attempt;
         deps.log("fix.dispatch", {
           round_id: refusedRoundId,
@@ -4901,17 +4907,8 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // on failure, folded into `fix.dispatch` so a completed spawn's duration is measurable at all.
     let spawnElapsedMs: number | undefined;
     try {
-      // W1-T14138: open the measurement only once every pre-spawn guard has passed. A merge refresh or
-      // adopted evidence head can continue this loop with different checks; those checks belong to a new row.
-      if (learningsRound === undefined || learningsRound.pushed !== undefined) {
-        learningsRound = recordFixLearningsShadow({ taskId: opts.taskId, runId: opts.runId, prNumber, attempt, round,
-          repoDir: opts.worktreePath, config: opts.config, evidence,
-          // Once a review has run, a retained CI failure belongs to an earlier head. A review-only
-          // round measures its current review evidence and must not relabel that old check as red.
-          knownCiFailures: noReviewYet ? currentCiFailures : undefined, priorRows: roundLedger });
-        deps.log("fix.learnings_shadow", learningsRound.row);
-      }
-      learningsRound.roundId = roundId;
+      // A merge refresh or adopted evidence head can retry before any round starts.
+      openLearningsRound(roundId);
       // W1-T1044: bounds this ONE spawn by wall-clock time (spawnFixWorkerBounded's doc: why).
       const spawnOutcome = await host.withPredecessorTranscriptCopies(fixArgs, {
         root: opts.config.root, taskId: opts.taskId, excludeRunId: opts.runId,
@@ -5932,7 +5929,11 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // hand-off (a failing review on the same head) arrived during that same poll; a hand-off ends only a wait not yet red.
     const resumed = host.ciGateState(waited) === "red" ? undefined : handed;
     const ci = resumed?.failure === "check" ? { state: "red" as const, sha: resumed.headSha } : waited;
-    if (learningsRound) settleLearningsRound(fixLearningsCiConclusion(learningsRound, host.ciGateState(ci), ciGateSha(ci)));
+    if (learningsRound) {
+      const observed = fixLearningsCiConclusion(learningsRound, host.ciGateState(waited), ciGateSha(waited));
+      settleLearningsRound(observed ?? (handed?.failure === "check"
+        ? fixLearningsCiConclusion(learningsRound, "red", handed.headSha) : undefined));
+    }
     const handoff = ciHandoff(ci);
     if (handoff) return finish(handoff);
     const claimLostAfterCi = branchClaimLost();
