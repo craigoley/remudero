@@ -20,11 +20,18 @@ const PR_URL = `https://github.com/acme/remudero/pull/${PR_NUMBER}`;
 const BRANCH = "ci-friction-garden-1795712311884";
 const task = { id: "W1-T15006", title: "plan round reads its last refusal", files: [], status: "queued" };
 
-async function lastRefusalSeen(rows: Record<string, unknown>[]): Promise<string | undefined> {
+async function lastRefusalSeen(rows: Record<string, unknown>[] | "missing" | "directory"): Promise<string | undefined> {
+  const { seen } = await planRound(rows);
+  assert.ok(seen, "the plan-scoped round ran");
+  return seen.lastRefusal;
+}
+
+async function planRound(rows: Record<string, unknown>[] | "missing" | "directory") {
   const root = mkdtempSync(join(tmpdir(), "rmd-t15006-sweep-"));
   mkdirSync(join(root, "state", "inflight"), { recursive: true });
   const ledgerPath = join(root, "state", "ledger.ndjson");
-  writeFileSync(ledgerPath, rows.map((row) => `${JSON.stringify(row)}\n`).join(""));
+  if (rows === "directory") mkdirSync(ledgerPath);
+  else if (rows !== "missing") writeFileSync(ledgerPath, rows.map((row) => `${JSON.stringify(row)}\n`).join(""));
   let seen: { lastRefusal?: string } | undefined;
   const deps: BuildSweepEffectsDeps = {
     owner: "acme", repo: "remudero", config: { root, claudeBin: "/bin/true" } as Config,
@@ -48,9 +55,8 @@ async function lastRefusalSeen(rows: Record<string, unknown>[]): Promise<string 
   const pr = { prNumber: PR_NUMBER, prUrl: PR_URL, taskId: task.id, headSha: HEAD, headRefName: BRANCH,
     unmetCriteria: [] } as unknown as OpenPrView;
   try {
-    await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(pr));
-    assert.ok(seen, "the plan-scoped round ran");
-    return seen.lastRefusal;
+    const result = await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(pr));
+    return { result, seen };
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -66,4 +72,14 @@ test("W1-T15006 criterion 1: a prior plan-round refusal reaches lastRefusal", as
     refused("a refusal on an older head", { head_sha: OTHER }),
   ]), "the newest refusal on this head");
   assert.equal(await lastRefusalSeen([refused("an older head only", { head_sha: OTHER })]), undefined);
+});
+
+test("a ledger not yet written hands the round no last refusal, and an unreadable one refuses the round", async () => {
+  const missing = await planRound("missing");
+  assert.ok(missing.seen, "the round runs with no ledger yet");
+  assert.equal(missing.seen.lastRefusal, undefined);
+  const unreadable = await planRound("directory");
+  assert.equal(unreadable.seen, undefined, "the round does not run blind on an unreadable ledger");
+  assert.equal(unreadable.result.outcome, "refused");
+  assert.match(String((unreadable.result as { reason?: string }).reason), /EISDIR/);
 });

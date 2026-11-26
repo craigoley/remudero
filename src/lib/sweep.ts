@@ -4833,8 +4833,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return await runPlanScopedFixRound({ pr: { ...pr, headRefName: live.head.ref, ciFailures }, task, worktreePath,
           title: live.title, body: live.body, runId, admission: config.contributorAdmission,
           conflict: pr.mergeState === "dirty",
-          lastRefusal: readLedgerLines(ledgerPath).findLast( // ledger-read-intent: live
-            (l) => l.step === "sweep.plan_round.refused" &&
+          lastRefusal: parseLedger(await fs.promises.readFile(ledgerPath, "utf8").catch((error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return "";
+            throw error;
+          })).findLast((l) => l.step === "sweep.plan_round.refused" &&
             l.pr_number === pr.prNumber && l.head_sha === pr.headSha)?.reason,
           deps: roundEffects,
         });
