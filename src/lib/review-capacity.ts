@@ -957,8 +957,12 @@ export function reviewYieldsReReviews(nowMs: number): boolean {
   return sharedHostMemoryShort(sharedHostMemory(nowMs));
 }
 
-/** The snapshot whose {@link HOST_MEMORY_SHARED_STEP} row was written, so each snapshot writes one row. */
-let sharedRowWrittenForAtMs: number | undefined;
+/** The last {@link HOST_MEMORY_SHARED_STEP} row's content, so a pass whose share is unchanged and whose review.capacity
+ *  row is not due writes nothing new. */
+let lastSharedRowKey: string | undefined;
+
+/** W1-T14903 — re-exported for review admission (sweep.ts), which records the re-reviews it held back. */
+export { HOST_MEMORY_SHARED_STEP, hostMemorySharedPayload, sharedHostMemory };
 
 const runtimeStates = new Map<string, ReviewCapacityState>();
 
@@ -1001,7 +1005,6 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
     activeWorkers: input.activeWorkers,
     ...(finite(input.providerPhaseWorkers) ? { providerPhaseWorkers: input.providerPhaseWorkers } : {}),
     ...host,
-    ...(memAvailableMib !== undefined ? { memAvailableMib } : {}),
     ...(weightShare !== undefined ? { cpuWeightShare: weightShare } : {}),
     ...((input.laneCpuBound ?? publishedLaneCpuBound()) !== undefined ? { laneCpuBound: input.laneCpuBound ?? publishedLaneCpuBound() } : {}),
     // W1-T11150 — the review lane's own CPU share: reviews attempted and still inside their CPU phase.
@@ -1010,17 +1013,26 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
     provider: reviewProviderObservation(providerStatus, input.nowMs),
     settlements,
   };
-  const result = selectAdaptiveReviewWidth(prior, input.policy, observation, input);
+  // W1-T14903: the width is the lower of the width cut from this lane's own reading and the width cut from the shared
+  // one, both from the same prior state, so the shared reading can only lower it (INVARIANT width-never-grows): a lower
+  // reading can pick a different arm, which must never leave the width above the own reading's.
+  const own = selectAdaptiveReviewWidth(prior, input.policy, observation, input);
+  const sharedCut = memAvailableMib !== undefined && memAvailableMib !== host.memAvailableMib
+    ? selectAdaptiveReviewWidth(prior, input.policy, { ...observation, memAvailableMib }, input) : undefined;
+  const result = sharedCut !== undefined && sharedCut.decision.effectiveWidth < own.decision.effectiveWidth ? sharedCut : own;
   runtimeStates.set(input.root, result.state);
   const phaseSplit = input.observeReviewPhases?.(observation.provider, result.decision.effectiveWidth);
-  if (shared !== undefined && sharedRowWrittenForAtMs !== shared.atMs) {
-    sharedRowWrittenForAtMs = shared.atMs;
-    input.log(HOST_MEMORY_SHARED_STEP, hostMemorySharedPayload(shared, {
+  if (shared !== undefined) {
+    const payload = hostMemorySharedPayload(shared, {
       ownMib: host.memAvailableMib ?? null,
       readMib: memAvailableMib ?? null,
       width: result.decision.effectiveWidth,
-      yieldsReReviews: sharedHostMemoryShort(shared),
-    }));
+      ownWidth: own.decision.effectiveWidth,
+      yielded: result === sharedCut ? "review-width" : "none",
+    });
+    const key = JSON.stringify(payload);
+    if (result.decision.shouldLog || key !== lastSharedRowKey) input.log(HOST_MEMORY_SHARED_STEP, payload);
+    lastSharedRowKey = key;
   }
   if (result.decision.shouldLog) {
     input.log("review.capacity", {

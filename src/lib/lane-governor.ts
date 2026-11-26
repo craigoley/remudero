@@ -469,6 +469,10 @@ export interface SharedHostMemory {
   hostReserveMib: number;
   /** One more build at its learned typical peak, MiB. */
   perLaneTypicalMib: number;
+  /** One more build at its learned tail (p90) peak, MiB. */
+  perLaneMib: number;
+  /** The tail the host base already reserves, MiB; a new build's tail competes with it (see {@link laneTarget}). */
+  hostTailMib: number;
 }
 
 let publishedSharedHostMemory: SharedHostMemory | null = null;
@@ -488,37 +492,49 @@ export function publishSharedHostMemory(reading: LaneMemoryReading | { unread: s
     atMs,
     availableMib: reading.hostBaseAvailableMib,
     hostReserveMib: reading.hostReserveMib,
-    perLaneTypicalMib: Math.max(1, reading.perLaneTypicalMib ?? reading.perLaneMib),
+    perLaneTypicalMib: Math.max(1, Math.min(reading.perLaneMib, reading.perLaneTypicalMib ?? reading.perLaneMib)),
+    perLaneMib: Math.max(1, reading.perLaneMib),
+    hostTailMib: Math.max(0, reading.hostTailMib ?? 0),
   };
 }
 
-/** W1-T14903 — the shared snapshot when it is fresh at `nowMs`, otherwise undefined. */
+/** W1-T14903 — the shared snapshot unless it is older than the stale bound at `nowMs`. A snapshot taken after `nowMs`
+ *  (the dispatch loop re-read it after a pass captured its clock) is the newest reading there is, so it is read. */
 export function sharedHostMemory(nowMs: number): SharedHostMemory | undefined {
   const snapshot = publishedSharedHostMemory;
-  if (snapshot === null || nowMs - snapshot.atMs > SHARED_HOST_MEMORY_STALE_MS || nowMs < snapshot.atMs) return undefined;
+  if (snapshot === null || nowMs - snapshot.atMs > SHARED_HOST_MEMORY_STALE_MS) return undefined;
   return snapshot;
 }
 
-/** W1-T14903 — short: the snapshot has no room for one more build at its typical peak above the host reserve. */
+/** W1-T14903 — the room one more build needs on the host arm, by {@link laneTarget}'s own rule: its typical peak plus
+ *  the part of its tail the host base has not already reserved. */
+export function sharedBuildNeedMib(snapshot: SharedHostMemory): number {
+  return snapshot.perLaneTypicalMib + Math.max(0, snapshot.perLaneMib - snapshot.perLaneTypicalMib - snapshot.hostTailMib);
+}
+
+/** W1-T14903 — short: the build lane's host arm would admit no new build on this snapshot (laneTarget's `fit` rule). */
 export function sharedHostMemoryShort(snapshot: SharedHostMemory | undefined): boolean {
   if (snapshot === undefined) return false;
-  return snapshot.availableMib - snapshot.hostReserveMib < snapshot.perLaneTypicalMib;
+  return snapshot.availableMib - snapshot.hostReserveMib < sharedBuildNeedMib(snapshot);
 }
 
 /** W1-T14903 — the {@link HOST_MEMORY_SHARED_STEP} row: the snapshot, each lane's share and which lane yielded. */
 export function hostMemorySharedPayload(snapshot: SharedHostMemory, review: {
-  ownMib: number | null; readMib: number | null; width: number; yieldsReReviews: boolean;
+  ownMib: number | null; readMib: number | null; width: number; ownWidth?: number; yielded: "review-width" | "re-review" | "none";
+  withheld?: number;
 }): Record<string, unknown> {
   return {
     snapshot_at: fixedClock(snapshot.atMs).iso(),
     available_mib: Math.round(snapshot.availableMib),
     host_reserve_mib: Math.round(snapshot.hostReserveMib),
-    build_share_mib: Math.round(snapshot.perLaneTypicalMib),
+    build_need_mib: Math.round(sharedBuildNeedMib(snapshot)),
     review_own_mib: review.ownMib === null ? null : Math.round(review.ownMib),
     review_read_mib: review.readMib === null ? null : Math.round(review.readMib),
     review_width: review.width,
+    ...(review.ownWidth === undefined ? {} : { review_own_width: review.ownWidth }),
     short: sharedHostMemoryShort(snapshot),
-    yielded: review.yieldsReReviews ? "re-review" : "none",
+    yielded: review.yielded,
+    ...(review.withheld === undefined ? {} : { withheld_re_reviews: review.withheld }),
   };
 }
 

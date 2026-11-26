@@ -6,14 +6,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import {
-  HOST_MEMORY_SHARED_STEP, laneTarget, publishSharedHostMemory, SHARED_HOST_MEMORY_STALE_MS, sharedHostMemory, sharedHostMemoryShort,
+  HOST_MEMORY_SHARED_STEP, laneTarget, publishSharedHostMemory, SHARED_HOST_MEMORY_STALE_MS, sharedBuildNeedMib, sharedHostMemory, sharedHostMemoryShort,
   type LaneMemoryReading,
 } from "#src/lib/lane-governor.js";
 import {
   reviewYieldsReReviews, selectAdaptiveReviewWidth, selectRuntimeReviewWidth, sharedMemoryAvailableMib,
   type ReviewCapacityObservation, type ReviewCapacityPolicy,
 } from "#src/lib/review-capacity.js";
-import { DEFAULT_SWEEP_POLICY, reReviewsJudgedHead, selectReviewAdmissions, type OpenPrView } from "#test/helpers/sweep-test.js";
+import { DEFAULT_SWEEP_POLICY, reReviewsJudgedHead, runSweep, selectReviewAdmissions, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-11-25T16:24:00Z");
 
@@ -86,6 +86,8 @@ test("W1-T14903 both lanes read one memory snapshot", () => {
   assert.equal(cut.reason, "memory-reserve", "on the shared snapshot the review lane sees what the build lane sees");
   assert.ok(cut.width < reviewWidth(8_130).width);
   assert.equal(sharedHostMemory(NOW + SHARED_HOST_MEMORY_STALE_MS + 1), undefined, "a stale snapshot is not read");
+  publishSharedHostMemory(measured, NOW + 5_000);
+  assert.equal(sharedHostMemory(NOW)?.availableMib, -110, "a snapshot re-read after a pass took its clock is still read");
   assert.equal(sharedMemoryAvailableMib(8_130, undefined), 8_130, "with no fresh snapshot each lane reads its own");
 });
 
@@ -98,13 +100,20 @@ test("W1-T14903 a build outranks a re-review when memory is short", () => {
   assert.deepEqual(roomy.spawning.map((p) => p.prNumber).sort(), [7, 8], "with room both reviews start");
   const short = selectReviewAdmissions([rejudge, first], DEFAULT_SWEEP_POLICY, NOW, undefined, 4, 0, undefined, undefined, true);
   assert.deepEqual(short.spawning.map((p) => p.prNumber), [8], "short of memory, the re-review waits and the first review starts");
-  // The production default reads the shared snapshot: short when no build fits above the reserve.
-  publishSharedHostMemory(reading(2_048 + 842), NOW);
-  assert.equal(sharedHostMemoryShort(sharedHostMemory(NOW)), true);
+  // The production default reads the shared snapshot: short exactly when the build lane's host arm admits no build.
+  publishSharedHostMemory(reading(0), NOW);
+  const need = sharedBuildNeedMib(sharedHostMemory(NOW)!);
+  for (const room of [need - 1, need]) {
+    const snapshotReading = reading(2_048 + room);
+    publishSharedHostMemory(snapshotReading, NOW);
+    const admitsBuild = laneTarget({ inFlight: 1, memory: snapshotReading, cpuCount: 8, maxLanes: 3 }).target > 1;
+    assert.equal(sharedHostMemoryShort(sharedHostMemory(NOW)), !admitsBuild, `short matches the build lane's own rule at room ${room}`);
+  }
+  publishSharedHostMemory(reading(2_048 + need - 1), NOW);
   assert.equal(reviewYieldsReReviews(NOW), true);
   assert.deepEqual(selectReviewAdmissions([rejudge, first], DEFAULT_SWEEP_POLICY, NOW, undefined, 4, 0).spawning.map((p) => p.prNumber), [8]);
-  publishSharedHostMemory(reading(2_048 + 843), NOW);
-  assert.equal(reviewYieldsReReviews(NOW), false, "room for one build at its typical peak: nothing yields");
+  publishSharedHostMemory(reading(2_048 + need), NOW);
+  assert.equal(reviewYieldsReReviews(NOW), false, "room for one more build: nothing yields");
   assert.deepEqual(selectReviewAdmissions([rejudge, first], DEFAULT_SWEEP_POLICY, NOW, undefined, 4, 0).spawning.map((p) => p.prNumber).sort(), [7, 8]);
 });
 
@@ -123,6 +132,16 @@ test("W1-T14903 shared memory never raises a lane width", () => {
         "publishing the snapshot changes no build target");
     }
   }
+  for (const projected of snapshots) {
+    const run = (snapshot: boolean): number => {
+      publishSharedHostMemory(snapshot ? reading(projected) : { unread: "own reading only" }, NOW);
+      return selectRuntimeReviewWidth({
+        root: mkdtempSync(join(tmpdir(), "rmd-shared-width-")), queueDepth: 6, activeWorkers: 2, nowMs: NOW, ledgerLines: [],
+        policy: POLICY, ...BOUNDS, log: () => {},
+      });
+    };
+    assert.ok(run(true) <= run(false), `the production width never rises on the shared snapshot ${projected}`);
+  }
   const prs = [pr({ prNumber: 1, reviewedHeadSha: "aaaa111" }), pr({ prNumber: 2, prUrl: "https://github.com/o/r/pull/2", headSha: "dddd444" })];
   for (const width of [0, 1, 2, 4]) {
     const yielded = selectReviewAdmissions(prs, DEFAULT_SWEEP_POLICY, NOW, undefined, width, 0, undefined, undefined, true).spawning;
@@ -139,17 +158,43 @@ test("W1-T14903 the review width pass writes one host_memory.shared row per snap
     log: (step, extra) => logs.push({ step, extra }),
   });
   publishSharedHostMemory(reading(-110), NOW);
-  pass(NOW);
-  pass(NOW + 1_000);
+  for (let i = 0; i < 4; i++) pass(NOW + i * 1_000);
   const rows = logs.filter((row) => row.step === HOST_MEMORY_SHARED_STEP);
-  assert.equal(rows.length, 1, "one row for one snapshot, however many width passes read it");
+  const capacityRows = logs.filter((row) => row.step === "review.capacity");
+  assert.ok(rows.length >= 1 && rows.length >= capacityRows.length, "every recorded review pass records its shared reading");
   assert.equal(rows[0]?.extra?.available_mib, -110);
   assert.equal(rows[0]?.extra?.review_read_mib, -110, "the review lane read the shared snapshot, not its own");
   assert.equal(rows[0]?.extra?.short, true);
-  assert.equal(rows[0]?.extra?.yielded, "re-review");
+  assert.ok(Number(rows[0]?.extra?.review_width) <= Number(rows[0]?.extra?.review_own_width));
   publishSharedHostMemory(reading(30_000), NOW + 60_000);
   pass(NOW + 60_000);
   const next = logs.filter((row) => row.step === HOST_MEMORY_SHARED_STEP);
-  assert.equal(next.length, 2, "a new snapshot writes its own row");
-  assert.equal(next[1]?.extra?.yielded, "none");
+  assert.equal(next.length, rows.length + 1, "a changed share writes its own row");
+  assert.equal(next.at(-1)?.extra?.short, false);
+});
+
+test("W1-T14903 the full sweep's review lane holds a re-review back while memory is short", async () => {
+  const rejudge = pr({ prNumber: 7, prUrl: "https://github.com/o/r/pull/7", headSha: "bbbb222", reviewedHeadSha: "bbbb222" });
+  const first = pr({ prNumber: 8, prUrl: "https://github.com/o/r/pull/8", headSha: "cccc333" });
+  const sweep = async (): Promise<{ effects: string[]; rows: Record<string, unknown>[] }> => {
+    const effects: string[] = [];
+    const rows: Record<string, unknown>[] = [];
+    const deps: SweepDeps = {
+      ledgerPath: "/unused/shared-memory-ledger", runId: "shared-memory", now: () => NOW,
+      readLedger: () => rows, appendLine: (_path, row) => { rows.push(row); }, log: (step, extra) => { rows.push({ step, ...extra }); },
+      dispatchFix: () => {}, dispatchPlanOnlyRepair: () => true,
+      postReview: (p) => { effects.push(`review:${p.prNumber}`); },
+      arm: () => "armed", escalate: () => {}, close: () => {},
+    };
+    await runSweep([rejudge, first], deps);
+    return { effects, rows };
+  };
+  publishSharedHostMemory(reading(30_000), NOW);
+  assert.deepEqual((await sweep()).effects.sort(), ["review:7", "review:8"], "with room both reviews run");
+  publishSharedHostMemory(reading(-110), NOW);
+  const short = await sweep();
+  assert.deepEqual(short.effects, ["review:8"], "short of memory, the full sweep holds the re-review back");
+  const held = short.rows.find((row) => row.step === HOST_MEMORY_SHARED_STEP && row.yielded === "re-review");
+  assert.ok(held, "the held re-review is recorded");
+  assert.deepEqual(held.withheld_prs, [7]);
 });

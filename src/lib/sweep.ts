@@ -281,7 +281,10 @@ import type {
 import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, readDepReviewHoldState, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { DEP_REVIEW_REFUSED_ASK_RETIRED_STEP, retireDepReviewRefusedAsk } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
-import { readReviewHostObservation, reviewYieldsReReviews, selectRuntimeReviewWidth } from "./review-capacity.js";
+import {
+  HOST_MEMORY_SHARED_STEP, hostMemorySharedPayload, readReviewHostObservation, reviewYieldsReReviews, selectRuntimeReviewWidth,
+  sharedHostMemory,
+} from "./review-capacity.js";
 import { yieldingFixClaim } from "./review-precedence.js";
 import {
   capacityDecisionText,
@@ -30133,11 +30136,27 @@ export async function runSweep(
   const orderedReviews = orderPendingReviewsNeedsPersonLast(pendingReviews.filter((job) => !overtakenReviews.has(job.pr.prNumber)), fullNeedsPerson,
     fullQueuedAt);
   type ReviewLane = { jobs: typeof orderedReviews; next: number; stop?: string; cls: ReviewLaneClass };
-  const codeLane: ReviewLane = { jobs: orderedReviews.filter((job) => !reviewsInPlanLane(job.pr)), next: 0, cls: "review" };
+  // W1-T14903: while the shared host memory snapshot has no room for a build, a re-review of an already-judged head
+  // waits, so the build lane is admitted before it; first reviews are never held here.
+  const yieldReReviews = reviewYieldsReReviews(now);
+  const heldReReviews = new Set(yieldReReviews
+    ? orderedReviews.filter((job) => !reviewsInPlanLane(job.pr) && reReviewsJudgedHead(job.pr)) : []);
+  const codeLane: ReviewLane = {
+    jobs: orderedReviews.filter((job) => !reviewsInPlanLane(job.pr) && !heldReReviews.has(job)), next: 0, cls: "review",
+  };
   const planLane: ReviewLane = { jobs: orderedReviews.filter((job) => reviewsInPlanLane(job.pr)), next: 0, cls: "plan-review" };
   fullReviews.planned = Math.max(0, fullReviews.planned - overtakenReviews.size);
   const reviewLanes = Math.max(0, (fullReviewLanes ?? effectiveReviewWidth(deps, policy, codeLane.jobs.length, now, ledgerLines)) -
     overtakenReviews.size);
+  const heldSnapshot = heldReReviews.size > 0 ? sharedHostMemory(now) : undefined;
+  if (heldSnapshot !== undefined) {
+    (deps.log ?? (() => {}))(HOST_MEMORY_SHARED_STEP, {
+      ...hostMemorySharedPayload(heldSnapshot, {
+        ownMib: null, readMib: null, width: reviewLanes, yielded: "re-review", withheld: heldReReviews.size,
+      }),
+      withheld_prs: [...heldReReviews].map((job) => job.pr.prNumber),
+    });
+  }
   const postReview = deps.postReview;
   const walkEndedEarly = walkEndedAt !== undefined;
   let admissionStopReason: string | undefined = walkEndedEarly ? "restart decided — re-derived after the restart" : undefined;
