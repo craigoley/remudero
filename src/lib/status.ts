@@ -333,6 +333,8 @@ export interface GitHub {
   findMergedByHeadBranch?(taskId: string): PrRef[] | null;
   /** W1-T257: one merged list, matched client-side on STRUCTURED head refs, never body index; null=failure. */
   listMergedHeadBranches?(): PrRef[] | null;
+  /** Prose index for the exact batch returned by listMergedHeadBranches. */
+  mergedProseIndex?(rows: readonly PrRef[]): Map<string, UncreditedBuildWarning[]> | undefined;
   /** W1-T3763: snapshot lookup, exact body trailer then commit fallback; null=unreadable, absent=per-task.
    *  Never re-enter the board index: expiry mid-projectPlan restarts its 15-second cache read. */
   mergedTrailerLookup?(): ((taskId: string) => PrRef | null) | null;
@@ -427,7 +429,9 @@ export interface DeriveDeps {
   previousProjection?: (taskId: string) => StatusProjection | undefined;
   /** Opt-in projectPlan reuse only with proven unchanged inputs; undefined=derive. Wrong reuse stales
    *  the board. 2026-09-15: 1,792 tasks cost 1.44s/3s poll; 1 changed in 3s, 2 in 60s, 17 in 20m. */
-  reuseProjection?: (task: Task) => StatusProjection | undefined;
+  reuseProjection?: (task: Task, inputs: DeriveDeps) => StatusProjection | undefined;
+  /** Close the read scope opened by reuseProjection after a fresh task projection. */
+  afterProjectTask?: (task: Task, projection: StatusProjection) => void;
   /** W1-T257: rung (c2) lookup in projectPlan's shared batch; []=confirmed miss, null=batch failure,
    *  retry per-task then defer on failure (W1-T119). Trap: five 07-23 GraphQL exhaustions. */
   mergedHeadBranches?: (taskId: string) => PrRef[] | null;
@@ -4114,6 +4118,16 @@ export type CommitTrailerIndexReader = (() => Map<string, PrRef[]> | null) & {
   reverts?: () => ReadonlyMap<number, RevertedMerge> | null;
 };
 
+interface CommitHistoryIndexes {
+  trailers: Map<string, PrRef[]>;
+  reverts: ReadonlyMap<number, RevertedMerge>;
+}
+
+type CommitHistoryExec = (args: string[]) => string;
+type CommitHistoryMemo = Map<string, { sha: string; indexes: CommitHistoryIndexes }>;
+const commitHistoryMemo: CommitHistoryMemo = new Map();
+const injectedCommitHistoryMemos = new WeakMap<CommitHistoryExec, CommitHistoryMemo>();
+
 /** W1-T2387: union machine-written commit trailers after hand-written body trailers miss; add credit only,
  *  never compare surfaces or fetch again. Failed read returns null, never [].
  *  W1-T2447: admin-only `squash_merge_commit_message` must remain `COMMIT_MESSAGES` for trailers to survive.
@@ -4124,10 +4138,15 @@ export function buildCommitTrailerIndex(opts: {
   slug: string;
   ref?: string;
   cwd?: string;
-  exec?: (args: string[]) => string;
+  exec?: CommitHistoryExec;
 }): CommitTrailerIndexReader {
   const slug = opts.slug;
   const ref = opts.ref ?? "origin/main";
+  let memo = commitHistoryMemo;
+  if (opts.exec) {
+    memo = injectedCommitHistoryMemos.get(opts.exec) ?? new Map();
+    injectedCommitHistoryMemos.set(opts.exec, memo);
+  }
   const exec =
     opts.exec ??
     ((args: string[]) =>
@@ -4140,7 +4159,7 @@ export function buildCommitTrailerIndex(opts: {
         // repository. The first probe against the live corpus returned exactly that.
         maxBuffer: COMMIT_TRAILER_LOG_MAX_BYTES,
       }));
-  const read = () => {
+  const read = (requireSha: boolean): CommitHistoryIndexes | null => {
     // THE CHECKOUT MUST BE THIS GATEWAY'S OWN REPO, AND THIS IS A DEFECT THIS TASK SHIPPED ONCE AND CAUGHT. A
     // gateway is constructed for an explicit owner and repo, but `git log` reads whatever checkout the PROCESS
     // sits in, and the first draft consulted it unconditionally, so a fixture asking about one repo was
@@ -4148,69 +4167,74 @@ export function buildCommitTrailerIndex(opts: {
     let originUrl: string;
     try {
       originUrl = exec(["config", "--get", "remote.origin.url"]).trim();
-    } catch {
+    } catch (error) {
       // No `origin` remote, so this checkout cannot be SHOWN to be this gateway's repo — the foreign-checkout
       // case above, a genuine ABSENCE. An empty map, never `null`, which is reserved for a failed read.
-      return new Map();
+      void error;
+      return { trailers: new Map(), reverts: new Map() };
     }
-    if (originRepoSlug(originUrl) !== slug.toLowerCase()) return new Map();
+    if (originRepoSlug(originUrl) !== slug.toLowerCase()) return { trailers: new Map(), reverts: new Map() };
+    let sha: string | undefined;
+    let share = false;
+    try {
+      const commit = `${ref}^{commit}`;
+      if (opts.exec) {
+        sha = exec(["rev-parse", "--verify", commit]).trim();
+        share = true;
+      } else {
+        const [shallow, tip] = exec(["rev-parse", "--is-shallow-repository", "--verify", commit]).trim().split("\n");
+        sha = tip;
+        // Deepening a shallow checkout can expose more history at the same tip.
+        share = shallow === "false" && tip !== undefined;
+      }
+    } catch (error) {
+      // Trailer readers with no pinned commit can still try the original ref. Revert readers require a pin.
+      void error;
+      if (requireSha && sha === undefined) return null;
+    }
+    const key = JSON.stringify([opts.cwd ?? process.cwd(), slug, ref]);
+    const cached = share ? memo.get(key) : undefined;
+    if (cached && cached.sha === sha) return cached.indexes;
     let raw: string;
     try {
-      raw = exec(["log", ref, "--format=%H%x00%s%x00%b%x1e"]);
-    } catch {
+      raw = exec(["log", sha ?? ref, "--format=%H%x00%s%x00%b%x1e"]);
+    } catch (error) {
       // The local commit surface could not be READ (no such ref, a shallow clone, a git that would not run).
       // `null` is this file's "unreadable", kept distinct from the empty map above (W1-T119).
+      void error;
       return null;
     }
-    const out = new Map<string, PrRef[]>();
-    for (const record of raw.split("\x1e")) {
-      const trimmed = record.replace(/^\n+/, "");
-      if (!trimmed.trim()) continue;
-      const [, subject, body] = trimmed.split("\x00");
-      if (subject === undefined) continue;
-      const token = (body ?? "").match(TRAILER_RE)?.[1];
-      // THE GRAMMAR CHECK IS LOAD-BEARING, not defensive tidiness: without it every run-id trailer becomes an
-      // indexed "task".
-      if (!token || !TASK_ID_TRAILER_RE.test(token)) continue;
-      const number = prNumberFromSquashSubject(subject);
-      if (number === undefined) continue;
-      const list = out.get(token) ?? [];
-      list.push({ number, url: `https://github.com/${slug}/pull/${number}`, state: "merged" });
-      out.set(token, list);
-    }
-    return out;
-  };
-  let revertMemo: { sha: string; map: ReadonlyMap<number, RevertedMerge> } | undefined;
-  const reverts = (): ReadonlyMap<number, RevertedMerge> | null => {
-    let originUrl: string;
-    try {
-      originUrl = exec(["config", "--get", "remote.origin.url"]).trim();
-    } catch {
-      return new Map(); // no origin: not shown to be this repo, so no revert is known (W1-T14302)
-    }
-    if (originRepoSlug(originUrl) !== slug.toLowerCase()) return new Map();
-    let sha: string;
-    let raw: string;
-    try {
-      sha = exec(["rev-parse", "--verify", `${ref}^{commit}`]).trim();
-      if (revertMemo?.sha === sha) return revertMemo.map;
-      raw = exec(["log", sha, "--format=%H%x00%s%x00%b%x1e"]);
-    } catch {
-      return null; // unreadable history: no revert takes credit back (W1-T14302)
-    }
+    const trailers = new Map<string, PrRef[]>();
     const records: MainHistoryRecord[] = [];
     for (const record of raw.split("\x1e")) {
       const trimmed = record.replace(/^\n+/, "");
       if (!trimmed.trim()) continue;
       const [commit, subject, body] = trimmed.split("\x00");
-      if (!commit || subject === undefined) continue;
+      if (subject === undefined) continue;
       const token = (body ?? "").match(TRAILER_RE)?.[1];
-      records.push({ sha: commit, subject, body: body ?? "", ...(token && TASK_ID_TRAILER_RE.test(token) ? { taskId: token } : {}) });
+      const taskId = token && TASK_ID_TRAILER_RE.test(token) ? token : undefined;
+      if (commit) records.push({ sha: commit, subject, body: body ?? "", ...(taskId ? { taskId } : {}) });
+      // THE GRAMMAR CHECK IS LOAD-BEARING, not defensive tidiness: without it every run-id trailer becomes an
+      // indexed "task".
+      if (!taskId) continue;
+      const number = prNumberFromSquashSubject(subject);
+      if (number === undefined) continue;
+      const list = trailers.get(taskId) ?? [];
+      list.push({ number, url: `https://github.com/${slug}/pull/${number}`, state: "merged" });
+      trailers.set(taskId, list);
     }
-    revertMemo = { sha, map: revertedMergesFromLog(records) };
-    return revertMemo.map;
+    const indexes = { trailers, reverts: revertedMergesFromLog(records) };
+    if (share) {
+      memo.delete(key);
+      memo.set(key, { sha: sha!, indexes });
+      if (memo.size > 16) memo.delete(memo.keys().next().value!);
+    }
+    return indexes;
   };
-  return Object.assign(read, { reverts });
+  return Object.assign(() => {
+    const trailers = read(false)?.trailers;
+    return trailers ? new Map([...trailers].map(([id, refs]) => [id, refs.map((pr) => ({ ...pr }))])) : null;
+  }, { reverts: () => read(true)?.reverts ?? null });
 }
 
 /** W1-T13662: {@link projectPlan} over a plan of the one named task, with the same deps; an id not in the plan
@@ -4325,7 +4349,9 @@ export function projectPlan(
     // W1-T2392: the SAME rows, walked once more in memory for the prose index — no second fetch, and skipped
     // entirely when the batched read failed.
     // Only the uncredited-build warning reads the index, so a pass that skips the warning skips the walk too.
-    const prose = allMerged !== null && !effectiveDeps.skipUncreditedBuildWarning ? indexProseNamedTaskIds(allMerged) : undefined;
+    const prose = allMerged !== null && !effectiveDeps.skipUncreditedBuildWarning
+      ? effectiveDeps.github.mergedProseIndex?.(allMerged) ?? indexProseNamedTaskIds(allMerged)
+      : undefined;
     // W1-T3763: capture the exact trailer lookup from this projection's SAME merged snapshot. A failed merged
     // read must stay a failure for every task, never fall back into N direct probes that can restart the board
     // walk. A gateway without this optional batched surface keeps its existing direct lookup.
@@ -4379,7 +4405,7 @@ export function projectPlan(
   for (const task of plan.tasks) {
     // {@link DeriveDeps.reuseProjection} — absent by default, so this is a no-op for every
     // caller that does not opt in.
-    const reused = effectiveDeps.reuseProjection?.(task);
+    const reused = effectiveDeps.reuseProjection?.(task, effectiveDeps);
     if (reused !== undefined) {
       byId.set(task.id, reused);
       if (phaseNow) (reused.merged ? creditedMergedPhase : openPhase).records++;
@@ -4393,6 +4419,7 @@ export function projectPlan(
       const sib = openSiblingBuild(task.id, task.files, openForSiblings, effectiveDeps.github.changedFiles?.bind(effectiveDeps.github));
       if (sib) p.openSiblingBuild = sib;
     }
+    effectiveDeps.afterProjectTask?.(task, p);
     byId.set(task.id, p);
     if (phaseNow) {
       const phase = p.merged ? creditedMergedPhase : openPhase;
@@ -5558,6 +5585,8 @@ export function buildBatchedGithub(
     ...(p.headRefOid ? { headRefOid: p.headRefOid } : {}),
     body: p.body,
   });
+  const mergedBatches = new WeakMap<readonly PrRef[], Index>();
+  const proseByIndex = new WeakMap<Index, Map<string, UncreditedBuildWarning[]>>();
   // W1-T2387 — the COMMIT surface, memoized and lazy; mirrors {@link ghGateway}'s own fallback exactly, same
   // doc and same precedence. Built at most ONCE per gateway and only after a task has missed on the body index,
   // so a board whose PRs all carry the body trailer never shells out. Deliberately NOT TTL'd.
@@ -5869,7 +5898,17 @@ export function buildBatchedGithub(
     listMergedHeadBranches() {
       // W1-T257: every merged PR with its head ref, from the ONE fetch; projectPlan groups client-side.
       const idx = index();
-      return unreadable() ? null : idx.mergedNewestFirst.map(asRef);
+      if (unreadable()) return null;
+      const rows = idx.mergedNewestFirst.map(asRef);
+      mergedBatches.set(rows, idx);
+      return rows;
+    },
+    mergedProseIndex(rows) {
+      const idx = mergedBatches.get(rows);
+      if (idx === undefined) return undefined;
+      let prose = proseByIndex.get(idx);
+      if (prose === undefined) proseByIndex.set(idx, (prose = indexProseNamedTaskIds(rows)));
+      return prose;
     },
     mergedTrailerLookup,
     listOpenHeadBranches() {

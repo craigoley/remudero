@@ -11,7 +11,8 @@ import { daemonBoot } from "#src/lib/daemon.js";
 import { pruneEngineTrees } from "#src/lib/engine-tree.js";
 import type { LearnedReservation, TreePeakSampler } from "#src/lib/host-memory-learning.js";
 import * as runChild from "#src/lib/run-child.js";
-import { classifyRunDir, parseStatus, readSpec, readStatus, realRunChildProbe, RUN_CHILD_SCHEMA, runDir, writeSpec, writeStatus } from "#src/lib/run-child-contract.js";
+import { childIdentity, classifyRunDir, parseStatus, readSpec, readStatus, realRunChildProbe, RUN_CHILD_SCHEMA, runDir, writeSpec, writeStatus,
+  type RunChildIdentity } from "#src/lib/run-child-contract.js";
 import { daemonCommand } from "#src/run-task.js";
 
 const HASH = "a".repeat(64);
@@ -164,8 +165,8 @@ test("W1-T9910: an in-flight directory and a child-written status are left alone
     const spec = readSpec(dir);
     assert.ok(spec.ok);
     assert.equal(existsSync(spec.value.planSnapshotPath), true);
-    writeStatus(dir, { schema: RUN_CHILD_SCHEMA, runId: id,
-      identity: { pid: child.pid, startTicks: "proc:1", containerGeneration: { containerId: "fixture", initStart: "proc:1" } },
+    // W1-T14889: a status from another container generation no longer pins, so the child names a live identity here.
+    writeStatus(dir, { schema: RUN_CHILD_SCHEMA, runId: id, identity: liveIdentity(),
       state: "running", engineSha: SHA, entryKind: "tsx", phase: "child-owned", heartbeatAt: 1 });
     const before = readFileSync(join(dir, "status.json"), "utf8");
     child.emit("exit", 1, null);
@@ -297,4 +298,70 @@ test("W1-T9910: an unreadable run directory census is reported instead of settle
     assert.equal(f.rows.at(-1)?.unread, 1);
     assert.match(String(f.rows.at(-1)?.error), /ENOTDIR/);
   } finally { f.cleanup(); }
+});
+
+/** W1-T14889: this process's identity in this container generation, so a status naming it classifies live. */
+function liveIdentity(): RunChildIdentity {
+  const identity = childIdentity(process.pid);
+  assert.ok(identity, "this process's start time is readable");
+  return identity;
+}
+
+/** A spec-only run directory for the fixture engine, then its child-written status with `identity`. */
+function runWithStatus(f: ReturnType<typeof fixture>, id: string, identity: RunChildIdentity): string {
+  const dir = f.specOnly(id);
+  writeStatus(dir, { schema: RUN_CHILD_SCHEMA, runId: id, identity, state: "running", engineSha: SHA, entryKind: "tsx",
+    phase: "child-owned", heartbeatAt: 1 });
+  return dir;
+}
+
+test("W1-T14889 a dead-generation run no longer pins its engine", async () => {
+  const f = fixture();
+  try {
+    const live = liveIdentity();
+    const dir = runWithStatus(f, "run-from-an-earlier-container",
+      { ...live, containerGeneration: { containerId: "an-earlier-container", initStart: "proc:1" } });
+    assert.equal(classifyRunDir(dir).kind, "dead", "the status names another container generation");
+    f.newerResources();
+    await f.prune();
+    assert.equal(existsSync(f.engine), false, "a run from a dead container generation does not keep its engine");
+  } finally { f.cleanup(); }
+});
+
+test("W1-T14889 a live run keeps its engine", async () => {
+  const f = fixture();
+  try {
+    const dir = runWithStatus(f, "run-live", liveIdentity());
+    assert.equal(classifyRunDir(dir).kind, "live");
+    f.newerResources();
+    await f.prune();
+    assert.equal(existsSync(f.engine), true, "invariant: a live child keeps the engine it executes from");
+    // The contrast: the same run, once its status names a dead container generation, no longer keeps the engine.
+    writeStatus(dir, { schema: RUN_CHILD_SCHEMA, runId: "run-live", state: "running", engineSha: SHA, entryKind: "tsx",
+      phase: "child-owned", heartbeatAt: 1, identity: { ...liveIdentity(), containerGeneration: { containerId: "gone", initStart: "proc:1" } } });
+    await f.prune();
+    assert.equal(existsSync(f.engine), false, "only liveness keeps it: the dead generation's run lets it go");
+  } finally { f.cleanup(); }
+});
+
+test("W1-T14889 a lost run frees its engine and an unreadable run defers", async () => {
+  const f = fixture();
+  try {
+    const live = liveIdentity();
+    const lost = runWithStatus(f, "run-lost", { ...live, startTicks: `${live.startTicks}-reused` });
+    assert.equal(classifyRunDir(lost).kind, "lost", "the recorded pid now names another process");
+    f.newerResources();
+    await f.prune();
+    assert.equal(existsSync(f.engine), false, "a lost run does not keep its engine");
+  } finally { f.cleanup(); }
+  const g = fixture();
+  try {
+    const unreadable = runDir(g.state, "run-unreadable");
+    mkdirSync(unreadable, { recursive: true });
+    writeFileSync(join(unreadable, "status.json"), "{not a status");
+    assert.equal(classifyRunDir(unreadable).kind, "unreadable");
+    g.newerResources();
+    await g.prune();
+    assert.equal(existsSync(g.engine), true, "a run that names no engine and cannot be read defers the whole pass");
+  } finally { g.cleanup(); }
 });
