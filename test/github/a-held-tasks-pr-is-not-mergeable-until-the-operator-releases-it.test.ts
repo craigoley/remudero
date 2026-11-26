@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { publishUnreadTaskCatalogHold, runReview, type ReviewCommandHost } from "#src/cli/commands/review.js";
+import { publishUnreadTaskCatalogHold, reviewCommand, runReview, type ReviewCommandHost } from "#src/cli/commands/review.js";
 import { armIfVerdictPermitsAsync, attemptArmAsync, readPullRequestTaskHold, realArmDepsAsync } from "#src/lib/arm-auto-merge.js";
 import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
@@ -475,4 +475,37 @@ test("W1-T14902: a daemon whose cwd is no work tree (launchd's config.root) stil
   // The reproduction: from a non-git cwd a clear public task read unread, and every named task was held.
   assert.deepEqual(await readTaskDispatchHold("W1-T10732", { stateDir: outside }), { outcome: "clear" });
   assert.deepEqual(await readTaskDispatchHold("W1-T8397", { stateDir: outside }), { outcome: "held", taskId: "W1-T8397" });
+});
+
+test("W1-T14902: the review command's catalog-unreadable exit hands the unread hold to its publisher seam", async (t) => {
+  // The wiring half of round-5 F3: the real command reaches publishUnreadTaskCatalogHold at this exit. Under the test
+  // runner its default posts nothing (no real `gh`), so the seam is injected here to observe the call.
+  const root = tmp(t, "catalog-unreadable-command");
+  mkdirSync(join(root, "state"));
+  writeFileSync(join(root, "state", "plan-destination.json"), JSON.stringify({ repository: "fixture-private/ops", kinds: [] }));
+  const head = (await import("node:child_process")).execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+  const id = "W1-T900000";
+  const published: Array<{ taskId: string; reason: string; sha: string }> = [];
+  const host = {
+    GIT_UNTRACKED_FILES_ALL: "--untracked-files=all", JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
+    acceptedReviewAttemptId: () => undefined, reviewWorktreeAsync: { fetch: () => {} },
+    materializeReviewWorktree: () => { throw Error("forbidden real materialization"); },
+    realDeps: () => { throw Error("forbidden default worker graph"); },
+    reviewPostedDescription: () => "fixture", liveWorkerRunIds: new Set<string>(), reviewWorkerLockId: (x: string) => `fixture-${x}`,
+  } as unknown as ReviewCommandHost;
+  const code = await reviewCommand(host, "42", [], {
+    loadConfig: () => ({ root }) as never,
+    resolveOwnerRepo: () => ({ owner: "fixture", repo: "remudero" }),
+    fetchView: () => ({ body: `Remudero-Task: ${id}\n\n## Acceptance\n- fallback | grep: wrong in src/wrong.ts`, html_url: "https://github.com/fixture/remudero/pull/42",
+      number: 42, head: { ref: `run-${id}-1`, sha: head }, updated_at: new Date().toISOString() }),
+    fetchHead: () => {}, taskLookup: { api: async () => { throw Error("PRIVATE_API_RESPONSE"); } },
+    runReview: (async () => { throw Error("forbidden review"); }) as never,
+    postReviewPending: async () => { throw Error("forbidden pending claim"); },
+    publishUnreadHold: async (args) => { published.push({ taskId: args.taskId, reason: args.reason, sha: args.sha }); },
+  });
+  assert.equal(code, 2);
+  assert.equal(published.length, 1, "THE CLAIM: the unreadable exit publishes the unread hold");
+  assert.equal(published[0]!.taskId, id);
+  assert.equal(published[0]!.sha, head);
+  assert.match(published[0]!.reason, /^ops-/);
 });
