@@ -550,9 +550,11 @@ const SEED_ROWS: readonly SeedRow[] = [
     step: "github.delivery.read_failed",
     meaning:
       "A pass over GitHub's webhook delivery log could not read a page: org, hook_id when one was being read, and " +
-      "status_class (auth, 4xx, 5xx or transport). The pass keeps every cursor, so the next one reads the same deliveries.",
+      "status_class (auth, 4xx, 5xx or transport). shape: a 2xx hook list that is not an array, with GitHub's message " +
+      "when it sent one. no_hook: the org lists hook_count hooks and none points at serve's webhook route. The pass " +
+      "keeps every cursor, so the next one reads the same deliveries.",
     writer: ["runGithubDeliveryLogPass"],
-    outcomes: ["auth", "4xx", "5xx", "transport"],
+    outcomes: ["auth", "4xx", "5xx", "transport", "shape", "no_hook"],
   },
   {
     step: "github.budget.configured",

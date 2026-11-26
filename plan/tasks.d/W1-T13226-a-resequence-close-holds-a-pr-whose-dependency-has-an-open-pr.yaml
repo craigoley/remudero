@@ -17,7 +17,7 @@
   files:
     - src/lib/sweep.ts
     - test/sweep/a-resequence-close-holds-a-pr-whose-dependency-has-an-open-pr.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "An implementation PR whose only unmet dependency is the task of another open, non-plan-filing PR is left open with planResequenceHeld naming that PR, and is not closed"
