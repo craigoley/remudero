@@ -1,14 +1,16 @@
 /**
- * W1-T14915 — an `invariant:<slug>` claim with no `kind` and no `satisfied_by` gets one warn at filing:
- * such a proof usually passes at the merge base and proof-discrimination refuses it at review.
+ * W1-T14915 — an `invariant:<slug>` claim proved by a unit test, with no `kind` and no `satisfied_by`, gets one warn
+ * at filing: such a proof usually passes at the merge base and proof-discrimination refuses it at review.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { lintTask, unguardedInvariantViolations, type LintOpts } from "#src/lib/task-linter.js";
+import { lintTask, type LintOpts, type LintViolation } from "#src/lib/task-linter.js";
 import type { AcceptanceCriterion, Task } from "#src/lib/plan.js";
 
 const ON: LintOpts = { requireDesignInvariantDeclaration: true };
+/** The rule's warns, read through lintTask as every caller reads them; the rule itself is private to the linter. */
+const warns = (t: Task, opts: LintOpts): LintViolation[] => lintTask(t, opts).violations.filter((v) => v.check === "invariant-unguarded");
 const INVARIANT = "invariant:keep-buckets — legacy buckets keep their counts";
 
 function task(invariant: Partial<AcceptanceCriterion> & { kind?: string }): Task {
@@ -23,8 +25,8 @@ function task(invariant: Partial<AcceptanceCriterion> & { kind?: string }): Task
   } as Task;
 }
 
-test("W1-T14915 criterion 1: an invariant claim with no kind gets the warn", () => {
-  const got = unguardedInvariantViolations(task({}), ON);
+test("W1-T14915 criterion 1: an invariant claim with a unit-test proof and no kind gets the warn", () => {
+  const got = warns(task({}), ON);
   assert.equal(got.length, 1);
   assert.equal(got[0]!.check, "invariant-unguarded");
   assert.equal(got[0]!.severity, "warn");
@@ -34,30 +36,23 @@ test("W1-T14915 criterion 1: an invariant claim with no kind gets the warn", () 
   assert.equal(lintTask(task({}), ON).violations.filter((v) => v.check === "invariant-unguarded").length, 1, "lintTask carries it");
 });
 
-test("W1-T14915 criterion 1: wrapped test proofs and satellite suite paths get the warn", () => {
+test("W1-T14915 criterion 1: an invariant claim with a code-span-wrapped unit-test proof gets the warn too", () => {
   // A plan record can wrap the proof in backticks; the YAML loader keeps them and the review executor strips them.
   for (const proof of ["`unit test: legacy buckets keep their counts`", "``unit test: legacy buckets keep their counts``"]) {
-    const got = unguardedInvariantViolations(task({ proof }), ON);
+    const got = warns(task({ proof }), ON);
     assert.equal(got.length, 1, proof);
     assert.match(got[0]!.message, /claim 2/);
   }
-  assert.equal(unguardedInvariantViolations(task({ proof: "`grep: keep-buckets in src/a.ts`" }), ON).length, 1,
-    "the invariant warning does not depend on proof dialect");
-  // The changed-task CLI does not have a target owner for every satellite repo. The invariant rule still warns
-  // on its test path without relying on target-aware proof resolution.
-  const satellite = { ...task({ proof: "unit test: tests/unit/product-stage-timeout-replay.test.tsx" }), repo: "remudero-console" } as Task;
-  const satelliteWarnings = unguardedInvariantViolations(satellite, ON);
-  assert.equal(satelliteWarnings.length, 1);
-  assert.match(satelliteWarnings[0]!.message, /`kind: guard`/);
-  assert.equal(lintTask(satellite, ON).violations.filter((v) => v.check === "invariant-unguarded").length, 1,
-    "lintTask carries the warning when target-owner context is absent");
+  assert.deepEqual(warns(task({ proof: "`grep: keep-buckets in src/a.ts`" }), ON), [],
+    "a wrapped grep proof is not a test proof");
 });
 
 test("W1-T14915 criterion 2: a guarded invariant gets no warn and existing checks are unchanged", () => {
   const guarded = task({ kind: "guard" });
   const credited = task({ satisfied_by: "#123" });
-  for (const t of [guarded, credited]) assert.deepEqual(unguardedInvariantViolations(t, ON), []);
-  assert.deepEqual(unguardedInvariantViolations(task({}), {}), [], "silent outside the changed-task pass");
+  const grepProved = task({ proof: "grep: keep-buckets in src/a.ts" });
+  for (const t of [guarded, credited, grepProved]) assert.deepEqual(warns(t, ON), []);
+  assert.deepEqual(warns(task({}), {}), [], "silent outside the changed-task pass");
   const others = (t: Task) => lintTask(t, ON).violations.filter((v) => v.check !== "invariant-unguarded");
   assert.deepEqual(others(task({})), others(guarded), "every other check reads the same with or without the guard");
   assert.equal(lintTask(guarded, ON).violations.some((v) => v.check === "invariant-unguarded"), false);
@@ -68,13 +63,13 @@ test("W1-T14915 criterion 1: an invariant claim with a unit-test proof and no ki
   const consoleTask = (proof: string): Task => ({ ...task({ proof }), repo: "remudero-console" }) as Task;
   const onConsole: LintOpts = { ...ON, taskRepoOwner: "craigoley" };
   for (const proof of ["unit test: tests/unit/product-stage-timeout-replay.test.tsx", "`unit test: tests/unit/product-stage-timeout-replay.test.tsx`"]) {
-    const got = unguardedInvariantViolations(consoleTask(proof), onConsole);
+    const got = warns(consoleTask(proof), onConsole);
     assert.equal(got.length, 1, proof);
     assert.match(got[0]!.message, /claim 2/);
     assert.equal(lintTask(consoleTask(proof), onConsole).violations.filter((v) => v.check === "invariant-unguarded").length, 1,
       `lintTask carries it: ${proof}`);
   }
-  assert.deepEqual(unguardedInvariantViolations({ ...consoleTask("unit test: tests/unit/product-stage-timeout-replay.test.tsx"),
+  assert.deepEqual(warns({ ...consoleTask("unit test: tests/unit/product-stage-timeout-replay.test.tsx"),
     acceptance: [{ claim: INVARIANT, proof: "unit test: tests/unit/product-stage-timeout-replay.test.tsx", kind: "guard" } as AcceptanceCriterion] } as Task,
   onConsole), [], "a guarded satellite invariant stays quiet");
 });

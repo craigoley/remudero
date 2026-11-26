@@ -177,13 +177,15 @@ interface ScopeFixture {
   acceptance?: Array<[string, string] | [string, string, string]>;
   /** Raw YAML lines for the bookkeeping fields, so a test edits exactly the bytes it names. */
   meta?: string[];
+  /** The task's `repo:`; core (`remudero`) unless a test files a satellite task. */
+  repo?: string;
 }
 
 const SCOPE_BASE_META = ["  verify: human", "  status: queued", "  attempts: 0", "  depends_on: []"];
 
 function scopeRecord(id: string, f: ScopeFixture = {}): string {
   return [
-    `- id: ${id}`, `  title: "invariant scope fixture ${id}"`, "  repo: remudero", "  type: implement", "  risk: high",
+    `- id: ${id}`, `  title: "invariant scope fixture ${id}"`, `  repo: ${f.repo ?? "remudero"}`, "  type: implement", "  risk: high",
     '  origin: "W1-T12832 test fixture"',
     ...(f.meta ?? SCOPE_BASE_META),
     ...(f.design === undefined ? [] : [`  design: ${JSON.stringify(f.design)}`]),
@@ -291,9 +293,64 @@ test("W1-T12832 criterion 3: a task that declares is checked in full even on a m
   assert.match(got.text, /\[design-invariant-proof\] task ZZ-Twice: invariant "keep-a" is mapped by 2 acceptance claims; map it exactly once/);
   assert.match(got.text, /\[design-invariant-proof\] task ZZ-Both: design declares both INVARIANT lines and NO-INVARIANTS/);
   // The changed-task CLI carries the invariant warning even when other invariant checks also report errors.
-  assert.match(got.text, /\[invariant-unguarded\] task ZZ-Orphan: acceptance claim 1 is an invariant with no kind/);
+  assert.match(got.text, /\[invariant-unguarded\] task ZZ-Orphan: acceptance claim 1 is an invariant proved by a unit test with no kind/);
   // CONTROL: a well-formed declaration on the same metadata-only edit is in scope and passes.
   assert.match(got.text, /5 task\(s\) checked/, got.text);
   assert.ok(!got.out.some((l) => l.startsWith("✗ ZZ-Good:") || l.includes("task ZZ-Good:")), got.text);
   for (const id of names) assert.equal(declaresDesignInvariant({ design: fixtures[id]!.design }), true, id);
+});
+
+// ── W1-T14915: lint-plan reads each task's proofs with its own repository's owner ─────────────────────────────────────
+// lintPlanCommand resolved only the origin's repo name, so a satellite task's own suite path (a Console
+// `tests/unit/*.test.tsx` proof) parsed against core's layout: the design-invariant check refused it as having no
+// executable proof dialect, though the target-aware review executor runs it as a vitest file.
+const GUARD_DESIGN = "INVARIANT keep-a: a stays";
+/** The base needs one record to load; it is unchanged, so only the added record is in scope. */
+const GUARD_DEP = scopeRecord("ZZ-Dep");
+const CONSOLE_PROOF = "unit test: tests/unit/x.test.tsx";
+const unguarded = (id: string, proof: string, repo?: string): string =>
+  scopeRecord(id, { design: GUARD_DESIGN, acceptance: [["invariant:keep-a — a stays", proof]], ...(repo === undefined ? {} : { repo }) });
+const unguardedWarned = (text: string, id: string): boolean =>
+  text.includes(`[invariant-unguarded] task ${id}: acceptance claim 1 is an invariant proved by a unit test with no kind`);
+const noDialect = (text: string, id: string): boolean =>
+  text.includes(`[design-invariant-proof] task ${id}: acceptance claim invariant:keep-a needs an executable proof dialect`);
+const withOrigin = (repo: GitRepo): GitRepo => {
+  repo.git("remote", "add", "origin", "https://github.com/craigoley/remudero.git");
+  return repo;
+};
+const consoleTask = (id: string, kind?: string): string => kind === undefined ? unguarded(id, CONSOLE_PROOF, "remudero-console")
+  : scopeRecord(id, { design: GUARD_DESIGN, repo: "remudero-console", acceptance: [["invariant:keep-a — a stays", CONSOLE_PROOF, kind]] });
+
+test("W1-T14915 criterion 1: an invariant claim with a unit-test proof and no kind gets the warn, in lint-plan for a satellite task read with its own repository's owner", async () => {
+  const got = await lintWork(withOrigin(scopePlanDiff([GUARD_DEP], [GUARD_DEP, consoleTask("ZZ-Console")])));
+  // CONTROL: the record is in the changed-task scope, so what follows is a verdict on it.
+  assert.match(got.text, /1 task\(s\) checked/, got.text);
+  assert.ok(unguardedWarned(got.text, "ZZ-Console"), got.text);
+  assert.ok(!noDialect(got.text, "ZZ-Console"), `a Console suite path is an executable proof for a Console task:\n${got.text}`);
+});
+
+test("W1-T14915 criterion 2: a guarded invariant gets no warn and existing checks are unchanged, for a core task in lint-plan and for an origin-less checkout", async () => {
+  const core = [GUARD_DEP, unguarded("ZZ-Core", "unit test: test/w1-t12832-fixture.test.ts")];
+  // The run's own temp path and the timing fields of its JSON event lines differ between two runs; nothing else may.
+  const strip = (text: string, dir: string) => text.split(dir).join("<repo>").replace(/"ms":[0-9]+/g, '"ms":0');
+  const originRepo = withOrigin(scopePlanDiff([GUARD_DEP], core));
+  const bareRepo = scopePlanDiff([GUARD_DEP], core);
+  const withOwner = await lintWork(originRepo);
+  const without = await lintWork(bareRepo);
+  assert.ok(unguardedWarned(withOwner.text, "ZZ-Core"), withOwner.text);
+  assert.equal(strip(withOwner.text, originRepo.dir), strip(without.text, bareRepo.dir), "a core task lints the same with and without the owner");
+  assert.equal(withOwner.code, without.code);
+  // With no origin there is no owner, so a satellite proof parses against the default target and is refused, as before.
+  const satellite = await lintWork(scopePlanDiff([GUARD_DEP], [GUARD_DEP, consoleTask("ZZ-Console")]));
+  assert.match(satellite.text, /1 task\(s\) checked/, satellite.text);
+  assert.ok(noDialect(satellite.text, "ZZ-Console"), satellite.text);
+  // An origin the suite registry does not know (a fork) lends no owner either, so its core proofs parse as before.
+  const forkCore = scopePlanDiff([GUARD_DEP], core);
+  forkCore.git("remote", "add", "origin", "https://github.com/someone-else/remudero.git");
+  assert.equal(strip((await lintWork(forkCore)).text, forkCore.dir), strip(without.text, bareRepo.dir), "a fork's core task lints as before");
+  // A guarded satellite invariant stays quiet with the owner read.
+  const guarded = await lintWork(withOrigin(scopePlanDiff([GUARD_DEP], [GUARD_DEP, consoleTask("ZZ-Guarded", "guard")])));
+  assert.match(guarded.text, /1 task\(s\) checked/, guarded.text);
+  assert.ok(!guarded.text.includes("invariant-unguarded"), guarded.text);
+  assert.ok(!noDialect(guarded.text, "ZZ-Guarded"), guarded.text);
 });

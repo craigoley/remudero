@@ -3969,16 +3969,21 @@ export function invariantSlugViolations(task: Task, opts: LintOpts = {}): LintVi
  *  proof-discrimination refuses it unless the criterion declares `kind: guard` or carries `satisfied_by`. Three filed
  *  tasks needed a guard amendment after filing (W1-T14876, W1-T14877, W1-T14913). WARN only: an invariant can be new
  *  behaviour that does fail at base. Runs on the changed-task pass, as {@link invariantSlugViolations} does. */
-export function unguardedInvariantViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+function unguardedInvariantViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   if (opts.requireDesignInvariantDeclaration !== true) return [];
   const out: LintViolation[] = [];
+  // The task's resolved repository, as proofDialectViolations reads it, so a satellite's own suite path (a Console
+  // `tests/unit/*.test.tsx` proof) classifies as the test proof the target-aware review executor runs.
+  const target = opts.taskRepoOwner === undefined ? undefined : { owner: opts.taskRepoOwner, repo: task.repo };
   (task.acceptance ?? []).forEach((criterion, index) => {
     if (!INVARIANT_CLAIM_RE.test(criterion.claim)) return;
     if (criterion.satisfied_by || (criterion as { kind?: unknown }).kind !== undefined) return;
+    // Read as the review executor reads it, so a code-span-wrapped `unit test:` proof is a test proof too.
+    if (parseWhitelistedProof(criterion.proof ?? "", target)?.kind !== "test") return;
     out.push({
       check: "invariant-unguarded",
       severity: "warn",
-      message: `task ${task.id}: acceptance claim ${index + 1} is an invariant with no kind and no ` +
+      message: `task ${task.id}: acceptance claim ${index + 1} is an invariant proved by a unit test with no kind and no ` +
         "satisfied_by; this invariant probably passes at the merge base by design; declare `kind: guard` or prove it " +
         "with a grep on text the build adds",
     });
