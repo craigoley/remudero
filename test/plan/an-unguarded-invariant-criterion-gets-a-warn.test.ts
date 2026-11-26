@@ -45,6 +45,17 @@ test("W1-T14915 criterion 1: an invariant claim with a code-span-wrapped unit-te
     "a wrapped grep proof is not a test proof");
 });
 
+test("W1-T14915 criterion 1: unit-test proofs use the task repository's registered suite", () => {
+  const consoleTask = {
+    ...task({ proof: "unit test: tests/unit/product-stage-timeout-replay.test.tsx" }),
+    repo: "remudero-console",
+  };
+  const got = unguardedInvariantViolations(consoleTask, { ...ON, taskRepoOwner: "craigoley" });
+  assert.equal(got.length, 1);
+  assert.equal(got[0]!.severity, "warn");
+  assert.match(got[0]!.message, /`kind: guard`/);
+});
+
 test("W1-T14915 criterion 2: a guarded invariant gets no warn and existing checks are unchanged", () => {
   const guarded = task({ kind: "guard" });
   const credited = task({ satisfied_by: "#123" });

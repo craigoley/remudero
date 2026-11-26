@@ -3976,7 +3976,8 @@ export function unguardedInvariantViolations(task: Task, opts: LintOpts = {}): L
     if (!INVARIANT_CLAIM_RE.test(criterion.claim)) return;
     if (criterion.satisfied_by || (criterion as { kind?: unknown }).kind !== undefined) return;
     // Read as the review executor reads it, so a code-span-wrapped `unit test:` proof is a test proof too.
-    if (parseWhitelistedProof(criterion.proof ?? "")?.kind !== "test") return;
+    const target = opts.taskRepoOwner === undefined ? undefined : { owner: opts.taskRepoOwner, repo: task.repo };
+    if (parseWhitelistedProof(criterion.proof ?? "", target)?.kind !== "test") return;
     out.push({
       check: "invariant-unguarded",
       severity: "warn",
