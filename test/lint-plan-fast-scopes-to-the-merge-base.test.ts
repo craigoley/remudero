@@ -173,21 +173,25 @@ const SCOPE_CRITERIA: Array<[string, string]> = [["the thing is changed", `unit 
 
 interface ScopeFixture {
   design?: string;
-  acceptance?: Array<[string, string]>;
+  /** An optional third entry is the criterion's `kind` (W1-T14915: a guarded invariant stays quiet). */
+  acceptance?: Array<[string, string] | [string, string, string]>;
   /** Raw YAML lines for the bookkeeping fields, so a test edits exactly the bytes it names. */
   meta?: string[];
+  /** The task's `repo:`; core (`remudero`) unless a test files a satellite task. */
+  repo?: string;
 }
 
 const SCOPE_BASE_META = ["  verify: human", "  status: queued", "  attempts: 0", "  depends_on: []"];
 
 function scopeRecord(id: string, f: ScopeFixture = {}): string {
   return [
-    `- id: ${id}`, `  title: "invariant scope fixture ${id}"`, "  repo: remudero", "  type: implement", "  risk: high",
+    `- id: ${id}`, `  title: "invariant scope fixture ${id}"`, `  repo: ${f.repo ?? "remudero"}`, "  type: implement", "  risk: high",
     '  origin: "W1-T12832 test fixture"',
     ...(f.meta ?? SCOPE_BASE_META),
     ...(f.design === undefined ? [] : [`  design: ${JSON.stringify(f.design)}`]),
     "  acceptance:",
-    ...(f.acceptance ?? SCOPE_CRITERIA).flatMap(([claim, proof]) => [`    - claim: ${JSON.stringify(claim)}`, `      proof: ${JSON.stringify(proof)}`]),
+    ...(f.acceptance ?? SCOPE_CRITERIA).flatMap(([claim, proof, kind]) => [`    - claim: ${JSON.stringify(claim)}`, `      proof: ${JSON.stringify(proof)}`,
+      ...(kind === undefined ? [] : [`      kind: ${kind}`])]),
     "",
   ].join("\n");
 }
@@ -274,7 +278,8 @@ test("W1-T12832 criterion 3: a task that declares is checked in full even on a m
       acceptance: [["invariant:keep-a — once", SCOPE_CRITERIA[0]![1]], ["invariant:keep-a — twice", `unit test: ${SCOPE_FIXTURE_TESTS[1]}`]],
     },
     "ZZ-Both": { design: "NO-INVARIANTS: nothing inherited\nINVARIANT keep-a: a stays", acceptance: [["invariant:keep-a — a stays", SCOPE_CRITERIA[0]![1]]] },
-    "ZZ-Good": { design: "INVARIANT keep-a: a stays", acceptance: [["invariant:keep-a — a stays", SCOPE_CRITERIA[0]![1]]] },
+    // W1-T14915: the well-formed control guards its invariant, so the unguarded-invariant warn names it nowhere.
+    "ZZ-Good": { design: "INVARIANT keep-a: a stays", acceptance: [SCOPE_CRITERIA[0]!, ["invariant:keep-a — a stays", `unit test: ${SCOPE_FIXTURE_TESTS[1]}`, "guard"]] },
   };
   const names = Object.keys(fixtures);
   const repo = scopePlanDiff(
@@ -287,8 +292,69 @@ test("W1-T12832 criterion 3: a task that declares is checked in full even on a m
   assert.match(got.text, /\[design-invariant-proof\] task ZZ-Dup: invariant slug "dup" is declared more than once in the design/);
   assert.match(got.text, /\[design-invariant-proof\] task ZZ-Twice: invariant "keep-a" is mapped by 2 acceptance claims; map it exactly once/);
   assert.match(got.text, /\[design-invariant-proof\] task ZZ-Both: design declares both INVARIANT lines and NO-INVARIANTS/);
+  // The changed-task CLI carries the invariant warning even when other invariant checks also report errors.
+  assert.match(got.text, /\[invariant-unguarded\] task ZZ-Orphan: acceptance claim 1 is an invariant proved by a unit test with no kind/);
   // CONTROL: a well-formed declaration on the same metadata-only edit is in scope and passes.
   assert.match(got.text, /5 task\(s\) checked/, got.text);
   assert.ok(!got.out.some((l) => l.startsWith("✗ ZZ-Good:") || l.includes("task ZZ-Good:")), got.text);
   for (const id of names) assert.equal(declaresDesignInvariant({ design: fixtures[id]!.design }), true, id);
+});
+
+// ── W1-T14915: the unguarded-invariant warn reads each task's own registered repository ───────────────────────────
+// The warn resolves a task's target from the suite registry by its `repo:`, never from the checkout's origin, so a
+// Console task's own suite path (`tests/unit/*.test.tsx`) is a unit-test proof in any clone. Every other check sees
+// exactly the options it sees on main, so their output is the same with and without an origin.
+const GUARD_DESIGN = "INVARIANT keep-a: a stays";
+/** The base needs one record to load; it is unchanged, so only the added record is in scope. */
+const GUARD_DEP = scopeRecord("ZZ-Dep");
+const CONSOLE_PROOF = "unit test: tests/unit/product-stage-timeout-replay.test.tsx";
+const unguarded = (id: string, proof: string, repo?: string): string =>
+  scopeRecord(id, { design: GUARD_DESIGN, acceptance: [["invariant:keep-a — a stays", proof]], ...(repo === undefined ? {} : { repo }) });
+const unguardedWarned = (text: string, id: string): boolean =>
+  text.includes(`[invariant-unguarded] task ${id}: acceptance claim 1 is an invariant proved by a unit test with no kind`);
+const withOrigin = (repo: GitRepo): GitRepo => {
+  repo.git("remote", "add", "origin", "https://github.com/craigoley/remudero.git");
+  return repo;
+};
+const consoleTask = (id: string, kind?: string): string => kind === undefined ? unguarded(id, CONSOLE_PROOF, "remudero-console")
+  : scopeRecord(id, { design: GUARD_DESIGN, repo: "remudero-console", acceptance: [["invariant:keep-a — a stays", CONSOLE_PROOF, kind]] });
+// The run's own temp path and the timing fields of its JSON event lines differ between two runs; nothing else may.
+const strip = (text: string, dir: string) => text.split(dir).join("<repo>").replace(/"ms":[0-9]+/g, '"ms":0');
+
+test("W1-T14915 criterion 1: an invariant claim with a unit-test proof and no kind gets the warn, in lint-plan for a satellite task in a local clone and under the core origin", async () => {
+  const clone = scopePlanDiff([GUARD_DEP], [GUARD_DEP, consoleTask("ZZ-Console")]);
+  const local = await lintWork(clone);
+  // CONTROL: the record is in the changed-task scope, so what follows is a verdict on it.
+  assert.match(local.text, /1 task\(s\) checked/, local.text);
+  assert.ok(unguardedWarned(local.text, "ZZ-Console"), `a clone with no origin still reads the task's own repository:\n${local.text}`);
+  const origin = withOrigin(scopePlanDiff([GUARD_DEP], [GUARD_DEP, consoleTask("ZZ-Console")]));
+  const canonical = await lintWork(origin);
+  assert.ok(unguardedWarned(canonical.text, "ZZ-Console"), canonical.text);
+  assert.equal(strip(canonical.text, origin.dir), strip(local.text, clone.dir), "the checkout's origin changes nothing");
+});
+
+test("W1-T14915 criterion 2: a guarded invariant gets no warn and existing checks are unchanged, for a Console guard under the core origin and a core task", async () => {
+  // A plan author's guarded Console invariant on the canonical core origin: no warn, and the checks that predate the
+  // warn report exactly what they report in a clone with no origin, the options main gives them.
+  const guardedOrigin = withOrigin(scopePlanDiff([GUARD_DEP], [GUARD_DEP, consoleTask("ZZ-Guarded", "guard")]));
+  const guardedClone = scopePlanDiff([GUARD_DEP], [GUARD_DEP, consoleTask("ZZ-Guarded", "guard")]);
+  const guarded = await lintWork(guardedOrigin);
+  const guardedLocal = await lintWork(guardedClone);
+  assert.match(guarded.text, /1 task\(s\) checked/, guarded.text);
+  assert.ok(!guarded.text.includes("invariant-unguarded"), guarded.text);
+  assert.equal(strip(guarded.text, guardedOrigin.dir), strip(guardedLocal.text, guardedClone.dir), "the origin lends no check an owner");
+  assert.equal(guarded.code, guardedLocal.code);
+  // The blocks main gives this record stay: the guarded Console proof still reads against main's default target.
+  assert.match(guarded.text, /\[design-invariant-proof\] task ZZ-Guarded: acceptance claim invariant:keep-a needs an executable proof dialect/, guarded.text);
+  assert.match(guarded.text, /\[proof-dialect\] criterion 1 \("invariant:keep-a — a stays"\) proof "unit test: tests\/unit\/product-stage-timeout-replay\.test\.tsx" cannot execute/, guarded.text);
+  // A core task lints the same with and without an origin, and with a fork's.
+  const core = [GUARD_DEP, unguarded("ZZ-Core", "unit test: test/w1-t12832-fixture.test.ts")];
+  const originRepo = withOrigin(scopePlanDiff([GUARD_DEP], core));
+  const bareRepo = scopePlanDiff([GUARD_DEP], core);
+  const forkRepo = scopePlanDiff([GUARD_DEP], core);
+  forkRepo.git("remote", "add", "origin", "https://github.com/someone-else/remudero.git");
+  const [withOwner, without, fork] = [await lintWork(originRepo), await lintWork(bareRepo), await lintWork(forkRepo)];
+  assert.ok(unguardedWarned(without.text, "ZZ-Core"), without.text);
+  assert.equal(strip(withOwner.text, originRepo.dir), strip(without.text, bareRepo.dir), "a core task lints the same with and without an origin");
+  assert.equal(strip(fork.text, forkRepo.dir), strip(without.text, bareRepo.dir), "a fork's core task lints as before");
 });
