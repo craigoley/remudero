@@ -1047,6 +1047,19 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     }
     engineSha = pinned.sha;
     const shareDivisor = await runChildInstallationShareDivisor();
+    // Pinning writes the prepared spec and can wait on the engine lock. Retirement may happen
+    // during that wait, after the admission check above. The detached child cannot inherit this
+    // process's spawn scope, so make the final decision immediately before child setup/spawn.
+    const retiredAtLaunch = workerSpawnRetiredBy();
+    if (retiredAtLaunch !== undefined) {
+      inFlightRunDirs.delete(dir);
+      rmSync(dir, { recursive: true, force: true });
+      reservation.releaseOccupancy();
+      reservation = undefined;
+      log(RUN_CHILD_SPAWN_WITHHELD_STEP, { task_id: input.taskId, run_id: runId,
+        hold: `retired: ${retiredAtLaunch}` });
+      return { started: false, abandoned: true, reason: "admission-abandoned", runId, waitedMs: 0 };
+    }
     stderrFd = openSync(join(dir, RUN_CHILD_STDERR_FILE), "a");
     // The daemon's growth percent rides the child's command line: NODE_OPTIONS refuses it (daemon-memory-policy.ts).
     spawnedAt = clock();

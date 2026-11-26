@@ -2780,7 +2780,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   };
   // W1-T14916: once a daemon releases its drain lock, the successor owns new work. A pass already running in the
   // retired process reaches this boundary from many rungs (fix, review, triage, inbox drafts), so it is refused here.
-  if (retiredBy) return spawnWithheld(`retired: ${retiredBy}`);
+  const retiredAtAdmission = workerSpawnRetiredBy();
+  if (retiredAtAdmission) return spawnWithheld(`retired: ${retiredAtAdmission}`);
   // W1-T11336, W1-T12497: the sweep's admission may precede a fleet PAUSE by tens of minutes. Every fix start,
   // in process or in a run child, re-reads the hold here; reviews and other classes retain their existing path.
   if (workerClassOf(args) === "fix") {
@@ -2792,6 +2793,13 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   const memoryReservation = childReservationId ? undefined :
     (admission && "reservation" in admission ? admission.reservation : undefined) ??
       openOccupancyReservation({ workerClass: workerClassOf(args), root: args.config?.root });
+  // Provider routing can await capacity, health, and usage reads after admission. Re-read the
+  // AsyncLocalStorage mark at each actual launch boundary; the value captured before admission
+  // is stale if drain release happened during any of those waits.
+  const refuseRetiredLaunch = (): WorkerResult | undefined => {
+    const current = workerSpawnRetiredBy();
+    return current === undefined ? undefined : spawnWithheld(`retired: ${current}`);
+  };
   const boundContainment = memoryReservation ? reservationBoundContainment(args.containment, memoryReservation) : args.containment ?? {};
   try {
   // Validate-before-spawn guard, enforced at the spawn boundary rather than by caller convention. TRAP: `claude -p` SILENTLY
@@ -3292,6 +3300,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         // process boundary while the worker's SHELL still read the operator's exported value from `$HOME/.bashrc`.
         materializeWorkerHome({ workerHome, realHome });
         measurement = await beginSelectedCapacityMeasurement(args, config, selection, capabilities);
+        const retirementRefusal = refuseRetiredLaunch();
+        if (retirementRefusal) return retirementRefusal;
         const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config, selection.capacity);
         result.promptChars = execution.prompt.length;
         result.continuation = execution.receipt;
@@ -3376,6 +3386,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     });
     try {
       materializeWorkerHome({ workerHome, realHome });
+      const retirementRefusal = refuseRetiredLaunch();
+      if (retirementRefusal) return retirementRefusal;
       const result = await runCodex({ ...args, workerHome, zdotdir: workerZdotdir(config) }, config);
       result.promptChars = execution.prompt.length;
       result.continuation = execution.receipt;
@@ -3545,6 +3557,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
             },
           });
           cashController.signal.throwIfAborted();
+          const retirementRefusal = refuseRetiredLaunch();
+          if (retirementRefusal) return retirementRefusal;
           const fit = args.draftRouting?.cashFit?.({ deployment: selection.model, promptChars: executionPrompt.length,
             promptBytes: Buffer.byteLength(executionPrompt, "utf8"), squeezed: args.cashSqueezed,
             atIso: fixedClock((args.providerRouting?.now ?? systemClock.now)()).iso() });
@@ -3924,6 +3938,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         model: sdkRequestedModel(options),
         effort: sdkRequestedEffort(options),
       };
+      const retirementRefusal = refuseRetiredLaunch();
+      if (retirementRefusal) return retirementRefusal;
       const liveQuery = runQuery({ prompt: execution.prompt, options });
       unregisterRunningWorker = args.taskId ? registerRunningWorker(args.taskId, liveQuery) : undefined;
       const result = await withWorkerGroupTeardown(
