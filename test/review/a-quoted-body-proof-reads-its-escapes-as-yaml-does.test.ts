@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { parse } from "yaml";
 import { ACCEPTANCE_BULLET_RE, replaceBodyProofs, rewriteBodyProof, rewriteCriterionProofs } from "#src/lib/body-repair.js";
 import { renderAcceptanceBlock } from "#src/lib/plan-pr-emitter.js";
-import { acceptanceCriteriaRead, acceptanceProofSpans, markUnbackedBodyGuards, parseAcceptanceBlock } from "#src/lib/review.js";
+import { acceptanceCriteriaRead, acceptanceProofSpans, bodyProofSetDivergence, markUnbackedBodyGuards, parseAcceptanceBlock } from "#src/lib/review.js";
 import type { AcceptanceCriterion } from "#src/lib/plan.js";
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
@@ -320,4 +320,28 @@ test("a quoted body proof reads its escapes as yaml does, and a legacy body of t
   const dropped = `## Acceptance\n- claim: "two | backslashes"\n  proof: "${two}"\n${trailer}`;
   assert.equal(authorGate.trailerBodyProofDivergenceRefusal({ body: dropped, taskAcceptanceForId: () => declared })?.defect,
     "trailer-body-proof-divergence");
+});
+
+// The thirteenth review of #20963: run-task's acceptance normalizer compared the unescaped proofs itself, so a legacy body
+// the author gate passed read as divergent there and was rewritten from the record, losing a claim edited on GitHub and
+// its kind: guard line. Every body-versus-record proof-set comparison now calls bodyProofSetDivergence.
+test("a quoted body proof reads its escapes as yaml does, and the run-task normalizer's comparison matches a legacy body as the author gate does", () => {
+  const two = String.raw`grep: a\\b in f`, one = String.raw`grep: a\b in f`;
+  const legacy = `## Acceptance\n- claim: "edited on GitHub | two"\n  proof: "${two}"\n  kind: guard\n- claim: "one | backslash"\n  proof: "${one}"\n\nRemudero-Task: W1-T999913\n`;
+  const record = [two, one];
+  const read = parseAcceptanceBlock(legacy);
+  assert.deepEqual(read.map((c) => c.proof), [one, one], "CONTROL: per row both unescape to one backslash");
+  const collapsed = new Set(read.map((c) => c.proof.trim()));
+  assert.equal(record.every((p) => collapsed.has(p)), false, "CONTROL: the unescaped set alone loses a declared proof");
+  assert.deepEqual(bodyProofSetDivergence(read, record), { onlyInBody: [], onlyInRecord: [] }, "the shared comparison finds no divergence");
+  assert.equal(authorGate.trailerBodyProofDivergenceRefusal({ body: legacy, taskAcceptanceForId: () => record.map((proof) => ({ claim: "c", proof })) }),
+    undefined, "the author gate agrees");
+  // A body that really diverges still does, on both sides of the comparison.
+  const dropped = `## Acceptance\n- claim: "two | backslashes"\n  proof: "${two}"\n`;
+  // Its one row unescapes to a record proof, so it reads so, and the proof it no longer carries is the other one.
+  assert.deepEqual(bodyProofSetDivergence(parseAcceptanceBlock(dropped), record), { onlyInBody: [], onlyInRecord: [two] });
+  const added = `## Acceptance\n- claim: "x | y"\n  proof: "grep: other in f"\n- claim: "two | backslashes"\n  proof: "${two}"\n- claim: "one | backslash"\n  proof: "${one}"\n`;
+  // A row written `a\\b` is a legacy two-backslash proof or a current one-backslash one; once the sets differ that is not
+  // decidable per row, so only the divergence itself is pinned: the extra proof is named.
+  assert.deepEqual(bodyProofSetDivergence(parseAcceptanceBlock(added), record).onlyInBody, ["grep: other in f"]);
 });

@@ -1778,6 +1778,7 @@ import {
   type AcceptanceAuthorTimeResult,
   parseAcceptanceBlock,
   acceptanceCriteriaRead,
+  bodyProofSetDivergence,
   parseReviewerVerdictClauses,
   parseReviewerVerdicts,
   postReviewCommentGuarded,
@@ -6274,10 +6275,8 @@ export function rewriteAcceptanceBlockFromPlan(
   // contract trailerBodyProofDivergenceRefusal itself keeps.
   if (bodyCriteria.length === 0) return { kind: "no-block" };
   const planProofs = new Set(planCriteria.map((c) => (c.proof ?? "").trim()).filter((p) => p.length > 0));
-  const bodyProofs = bodyCriteria.map((c) => (c.proof ?? "").trim()).filter((p) => p.length > 0);
-  const bodyProofSet = new Set(bodyProofs);
-  const removedProofs = [...new Set(bodyProofs.filter((p) => !planProofs.has(p)))];
-  const onlyInPlan = [...planProofs].filter((p) => !bodyProofSet.has(p));
+  // W1-T14913: the author gate's own comparison, so a legacy-rendered quoted proof the gate passes is never rewritten here.
+  const { onlyInBody: removedProofs, onlyInRecord: onlyInPlan } = bodyProofSetDivergence(bodyCriteria, [...planProofs]);
   // Identical proof sets (order and claim wording both ignored) — nothing to rewrite.
   if (removedProofs.length === 0 && onlyInPlan.length === 0) return { kind: "healthy" };
 

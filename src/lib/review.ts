@@ -9115,6 +9115,19 @@ export function bodyProofsAgainstRecord(criteria: readonly AcceptanceCriterion[]
   return sameSet ? asWritten : criteria.map((c) => bodyProofAgainstRecord(c, recordProofs));
 }
 
+/** W1-T14913: the proofs only a body's block names and the proofs only its record names, each body proof read by
+ *  {@link bodyProofsAgainstRecord}. THE one body-versus-record proof-set comparison: the author gate's trailer/body
+ *  divergence, run-task's acceptance normalizer and the fix rung's body-coverage check all call it, so a legacy body
+ *  the gate passes is never one a normalizer rewrites. */
+export function bodyProofSetDivergence(bodyCriteria: readonly AcceptanceCriterion[], recordProofs: readonly string[]):
+  { onlyInBody: string[]; onlyInRecord: string[] } {
+  const record = recordProofs.map((p) => p.trim()).filter((p) => p.length > 0);
+  const recordSet = new Set(record);
+  const body = bodyProofsAgainstRecord(bodyCriteria, recordSet).filter((p) => p.length > 0);
+  const bodySet = new Set(body);
+  return { onlyInBody: [...new Set(body.filter((p) => !recordSet.has(p)))], onlyInRecord: [...new Set(record.filter((p) => !bodySet.has(p)))] };
+}
+
 /** The proof a `proof:` value reads as, remembering its as-written text when unescaping changed it. */
 function readQuotedProof(criterion: AcceptanceCriterion, value: string): string {
   const proof = stripQuotes(value);
