@@ -12658,6 +12658,14 @@ export interface PostReviewStatusRetryOpts {
   /** Injectable `gh` invocation — the "gh gateway" a unit test simulates without shelling out. Defaults to the
    *  awaited {@link execGhStatusPostAsync} POST below (W1-T9549). */
   exec?: (args: string[], env: NodeJS.ProcessEnv) => void | Promise<void>;
+  /** W1-T15038: re-mint the ambient installation token after a 401; resolves whether a fresh token was minted.
+   *  Default: {@link refreshReviewPublisherToken} when no reviewer-token override is set and GH_APP_ID is set. */
+  reauth?: () => Promise<boolean>;
+}
+
+/** W1-T15038: a refusal that says the token is no longer accepted. */
+export function isExpiredCredentialRefusal(text: string): boolean {
+  return /Bad credentials|HTTP 401/.test(text);
 }
 
 /** W1-T9549 — the status POST {@link postReviewStatus} and the repair lease make by default, AWAITED over
@@ -12715,12 +12723,23 @@ export async function postReviewStatus(
   const backoffMs = retryOpts.backoffMs ?? ((failedAttempt) => POST_REVIEW_STATUS_BASE_DELAY_MS * 2 ** (failedAttempt - 1));
   const sleep = retryOpts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const exec = retryOpts.exec ?? execGhStatusPostAsync;
+  const reauth = retryOpts.reauth ?? (reviewerToken || !process.env.GH_APP_ID
+    ? undefined : async () => (await refreshReviewPublisherToken()).ok);
+  let reauthed = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       await exec(args, env);
       return;
     } catch (e) {
+      // W1-T15038: an expired token is re-minted once and the post retried; a 401 after that is thrown as before.
+      if (!reauthed && reauth && isExpiredCredentialRefusal(ghErrorText(e))) {
+        reauthed = true;
+        if (await reauth()) {
+          attempt -= 1;
+          continue;
+        }
+      }
       const transient = classifyFailure({ text: ghErrorText(e) }) === "transient";
       if (!transient || attempt >= maxAttempts) throw e; // permanent, or transient-but-exhausted: surface once
       await sleep(backoffMs(attempt));
