@@ -10,7 +10,7 @@ import {
   reviewYieldsReReviews, selectAdaptiveReviewWidth, sharedMemoryAvailableMib,
   type ReviewCapacityObservation, type ReviewCapacityPolicy,
 } from "#src/lib/review-capacity.js";
-import { DEFAULT_SWEEP_POLICY, reReviewsJudgedHead, selectReviewAdmissions, type OpenPrView } from "../helpers/sweep-test.js";
+import { DEFAULT_SWEEP_POLICY, reReviewsJudgedHead, selectReviewAdmissions, type OpenPrView } from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-11-25T16:24:00Z");
 
