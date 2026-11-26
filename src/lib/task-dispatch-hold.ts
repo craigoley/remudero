@@ -1,7 +1,8 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { loadPlanAtRefAsync } from "./plan.js";
 import { readOpsCatalogSnapshotAsync } from "./ops-catalog-source.js";
 import { planDestinationRepository } from "./plan-destination.js";
-import { repoRoot } from "./repo-location.js";
 
 /**
  * W1-T14902: the one reader of a named task's `dispatch_hold`, for the review's guarded poster and the merge path alike.
@@ -20,7 +21,7 @@ export type TaskHoldLookup =
   | { outcome: "unreadable"; reason: string };
 
 export interface TaskDispatchHoldSources {
-  /** The plan at origin/main. Default: this checkout's `plan/tasks.yaml` at `origin/main`. */
+  /** The plan at origin/main. Default: `plan/tasks.yaml` at `origin/main` of the checkout holding the working directory. */
   readMainPlan?: () => Promise<{ byId: ReadonlyMap<string, { dispatch_hold?: boolean }> }>;
   /** The ops catalog lookup. Default: {@link readOpsCatalogHold} under `stateDir`. */
   lookup?: (taskId: string) => Promise<TaskHoldLookup>;
@@ -46,6 +47,14 @@ export function taskHoldRefusal(reading: TaskHoldReading | undefined): string | 
     : `held: ${reading.taskId}'s dispatch_hold is unreadable (${reading.reason})`;
 }
 
+/** The top of the checkout holding the working directory, as `repo-location.ts` resolves `repoRoot`, read lazily:
+ *  importing that module would pay its argv-at-import cost (W1-T2531). A directory outside a checkout throws, and the
+ *  caller reads that as an unreadable plan, which holds. */
+async function checkoutTopLevel(): Promise<string> {
+  const { stdout } = await promisify(execFile)("git", ["-C", process.cwd(), "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+  return stdout.trim();
+}
+
 const TASK_ID = /^[A-Z][A-Z0-9]*-T\d+$/;
 
 export async function readTaskDispatchHold(taskId: string | undefined, sources: TaskDispatchHoldSources): Promise<TaskHoldReading> {
@@ -53,7 +62,7 @@ export async function readTaskDispatchHold(taskId: string | undefined, sources: 
   if (taskId === undefined || !TASK_ID.test(taskId)) return { outcome: "clear" };
   let main: { byId: ReadonlyMap<string, { dispatch_hold?: boolean }> };
   try {
-    main = await (sources.readMainPlan ?? (() => loadPlanAtRefAsync(repoRoot, "plan/tasks.yaml", "origin/main")))();
+    main = await (sources.readMainPlan ?? (async () => loadPlanAtRefAsync(await checkoutTopLevel(), "plan/tasks.yaml", "origin/main")))();
   } catch (error) {
     return { outcome: "unread", taskId, reason: `the plan at origin/main is unreadable: ${String((error as Error)?.message ?? error)}` };
   }
