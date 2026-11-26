@@ -28,12 +28,16 @@ import {
   type BoardRow,
   isBlockedRow,
   isRunningRow,
+  projectionAgesWithTheClock,
   type BoardSnapshot,
   type PrQueueRow,
   type RecentActivityCache,
   type RecentActivityEntry,
 } from "./board.js";
-import { boardSweepRepeat, createBoardProjection, rowsNamingTasksBefore, type BoardProjection, type BoardProjectionOptions, type Row } from "./board-projection.js";
+import {
+  boardSweepRepeat, createBoardProjection, githubDigest, githubViewOf, recordingGithub, rowsNamingTasksBefore,
+  type BoardProjection, type BoardProjectionOptions, type GithubReadLog, type Row,
+} from "./board-projection.js";
 import { boardOpenSnapshotPath, boardSnapshotPath, createBoardSnapshotReader, OPEN_SNAPSHOT_RESAVE_MS, readOpenBoardSnapshot, type SharedBoardSnapshotRows } from "./board-snapshot-cache.js";
 import { changedFilesCachePath, createChangedFilesCache } from "./changed-files-cache.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
@@ -84,13 +88,13 @@ import {
 } from "./now-decisions.js";
 import type { BoardIssueRest, BoardPrRest } from "./open-prs-rest.js";
 import { projectReconciledFeedback } from "./panel-graph.js";
-import { answerRecords, publishAnswers, sharedAnswerEvidence, sharedAnswersPath, unmetDependencies, type AnswerRecord, type Plan, type AcceptanceCriterion, type SharedAnswerEvidence } from "./plan.js";
+import { answerRecords, publishAnswers, sharedAnswerEvidence, sharedAnswersPath, unmetDependencies, type AnswerRecord, type Plan, type AcceptanceCriterion, type SharedAnswerEvidence, type Task } from "./plan.js";
 import { loadPolicy, policyPath, type PolicyValues } from "./policy.js";
 import { ratificationsPath, type Ratifications } from "./ratification.js";
 import { parse as parseYaml } from "yaml";
 import type { ReadModelDb, ReadModelLease } from "./read-model-db.js";
 import { resolveRepoLayout } from "./repo-layout.js";
-import { buildBatchedGithub, buildLedgerIndex, ledgerGenerationOf, readLedgerLines, resolveEscalation, type BatchedPr, type BoardDeps, type GitHub, type LedgerIndex } from "./status.js";
+import { buildBatchedGithub, buildLedgerIndex, ledgerGenerationOf, projectPlan, readLedgerLines, resolveEscalation, type BatchedPr, type BoardDeps, type GitHub, type LedgerIndex, type StatusProjection } from "./status.js";
 import { loadTargetPlanQuarantiningDuplicates } from "./drain.js";
 import { deriveOperatorItems } from "./status-board.js";
 import { deriveDayCostUsd, windowCostRows } from "./sweep.js";
@@ -610,22 +614,23 @@ function closedHalfOf(rows: SharedBoardSnapshotRows): ClosedHalf {
 
 /**
  * A gateway over the legacy gateway's persisted snapshot (ruling Q3): open PRs, closed PRs and issues, no GitHub read.
- * `generation` is the files' identities; atomic re-saves may share an mtime but replace the inode.
- * `content` moves only when what they hold does.
+ * `generation` tracks file identities and the local main tip. `projectionKey` tracks their inputs to derivation.
  * The closed/issues file is parsed once per change and shared ({@link createBoardSnapshotReader}), and so is the
  * gateway while `content` holds: the open half's 60 s re-save rebuilt both on every build (E33).
  */
 export function snapshotGithub(
   root: string, owner: string, repo: string, clock: Clock = systemClock,
   opts: { refuseIncomplete?: boolean; read?: (root: string, owner: string, repo: string) => SharedBoardSnapshotRows } = {},
-): { github: GitHub; generation: string; content?: string; source: Omit<ViewSource, "name">; unavailable?: string } {
+): { github: GitHub; generation: string; content?: string; projectionKey?: string; source: Omit<ViewSource, "name">; unavailable?: string } {
   const half = closedHalfOf((opts.read ?? sharedBoardSnapshots)(root, owner, repo));
   const open = readOpenBoardSnapshot(root, owner, repo);
   const openRows = open.ok ? open.snapshot.rows.map(asBatched) : [];
   // An incomplete snapshot read as complete would say no PR ever merged; refused, the gateway reads failed instead.
   const unavailable = !opts.refuseIncomplete ? undefined : !open.ok ? open.reason : half.present ? undefined : "the board snapshot holds no closed pull requests";
   const content = createHash("sha1").update(`${JSON.stringify(openRows)}\n${half.digest}`).digest("hex").slice(0, 16);
-  const key = `${root}\n${owner}/${repo}\n${content}\n${snapshotFileIdentity(changedFilesCachePath(root, owner, repo))}\n${unavailable ?? ""}`;
+  const checkout = process.cwd();
+  const main = originMainOf(checkout);
+  const key = `${root}\n${owner}/${repo}\n${content}\n${snapshotFileIdentity(changedFilesCachePath(root, owner, repo))}\n${unavailable ?? ""}\n${checkout}\n${main ?? ""}`;
   if (half.gateway?.key !== key) {
     const openNumbers = new Set(openRows.map((r) => r.number));
     const all = [...openRows, ...half.closed.filter((r) => !openNumbers.has(r.number))];
@@ -644,7 +649,7 @@ export function snapshotGithub(
     half.gateway = { key, github };
   }
   const source = unavailable !== undefined ? { asOf: null, state: "unavailable" as const, reason: unavailable } : snapshotSource(open.ok ? open.snapshot.savedAt : null, open.ok ? undefined : open.reason, clock.now());
-  return { github: half.gateway.github, generation: snapshotGeneration(root, owner, repo), content, source, ...(unavailable !== undefined ? { unavailable } : {}) };
+  return { github: half.gateway.github, generation: snapshotFileGeneration(root, owner, repo, main), content, projectionKey: key, source, ...(unavailable !== undefined ? { unavailable } : {}) };
 }
 
 /** A plan file's identity: its own mtime and its `tasks.d`'s. */
@@ -669,8 +674,12 @@ function snapshotFileIdentity(path: string): string {
   }
 }
 
+function snapshotFileGeneration(root: string, owner: string, repo: string, main: string | undefined): string {
+  return [boardSnapshotPath(root, owner, repo), boardOpenSnapshotPath(root, owner, repo), changedFilesCachePath(root, owner, repo)].map(snapshotFileIdentity).concat(main ?? "-").join(":");
+}
+
 export function snapshotGeneration(root: string, owner: string, repo: string): string {
-  return [boardSnapshotPath(root, owner, repo), boardOpenSnapshotPath(root, owner, repo), changedFilesCachePath(root, owner, repo)].map(snapshotFileIdentity).join(":");
+  return snapshotFileGeneration(root, owner, repo, originMainOf(process.cwd()));
 }
 
 export interface NowViewOptions {
@@ -745,6 +754,19 @@ function refShaFromFiles(commonDir: string, ref: string): string | undefined {
   return packed?.split("\n").find((line) => line.endsWith(` ${ref}`) && isFullSha(line.slice(0, line.indexOf(" "))))?.split(" ")[0];
 }
 
+function gitRefDirs(dir: string): { gitDir: string; commonDir: string } {
+  const dotGit = join(dir, ".git");
+  const pointer = readRefFile(dotGit);
+  const gitDir = pointer?.startsWith("gitdir:") ? resolvePath(dir, pointer.slice("gitdir:".length).trim()) : dotGit;
+  const common = readRefFile(join(gitDir, "commondir"));
+  const commonDir = common === undefined ? gitDir : resolvePath(gitDir, common.trim());
+  return { gitDir, commonDir };
+}
+
+function originMainOf(dir: string): string | undefined {
+  return refShaFromFiles(gitRefDirs(dir).commonDir, "refs/remotes/origin/main");
+}
+
 /**
  * What `git -C <dir> rev-parse <base> origin/main` prints, read from the ref files with no spawn — `.git` (a
  * directory, or a linked worktree's `gitdir:` file), its `commondir`, the loose ref, then `packed-refs`; the
@@ -752,11 +774,7 @@ function refShaFromFiles(commonDir: string, ref: string): string | undefined {
  * plan) or `HEAD` (direct, or one symbolic hop to a branch). Undefined for any other shape — the caller spawns.
  */
 export function planHeadsFromRefFiles(dir: string, base: string): string | undefined {
-  const dotGit = join(dir, ".git");
-  const pointer = readRefFile(dotGit);
-  const gitDir = pointer?.startsWith("gitdir:") ? resolvePath(dir, pointer.slice("gitdir:".length).trim()) : dotGit;
-  const common = readRefFile(join(gitDir, "commondir"));
-  const commonDir = common === undefined ? gitDir : resolvePath(gitDir, common.trim());
+  const { gitDir, commonDir } = gitRefDirs(dir);
   let left: string | undefined;
   if (isFullSha(base)) left = base;
   else if (base === "HEAD") {
@@ -847,9 +865,148 @@ export function nowPlanPath(instance: NowInstance): string | undefined {
   return name ? resolveRepoLayout(join(dirname(instance.ledgerDir), "repos", name)).planMonolith : undefined;
 }
 
+type OpsLedgerRead =
+  | { kind: "byTask" | "byStep"; id: string }
+  | { kind: "byTaskSteps"; id: string; steps: readonly string[] }
+  | { kind: "latestTsMs" | "planOnlyFilingPrUrls" | "planOnlyReviewedHeads" };
+type LedgerReads = Map<string, { read: OpsLedgerRead; digest: string }>;
+interface OpsProjectionInput {
+  stamp: string;
+  ledger: LedgerReads;
+  github: GithubReadLog;
+}
+
+interface HeldOpsProjection {
+  stamp: string;
+  ledger: LedgerReads;
+  githubKeys: readonly string[];
+  githubKey: string;
+  gateway: GitHub;
+  githubDigest: string;
+  projection: StatusProjection;
+}
+
+function opsLedgerDigest(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value, (_key, entry: unknown) =>
+    entry instanceof Map || entry instanceof Set ? [...entry] : entry) ?? "undefined").digest("hex");
+}
+
+function readOpsLedger(index: LedgerIndex, read: OpsLedgerRead): unknown {
+  switch (read.kind) {
+    case "byTask":
+    case "byStep":
+      return index[read.kind].get(read.id);
+    case "byTaskSteps":
+      return index.byTaskSteps?.get(read.id, read.steps);
+    default:
+      return index[read.kind];
+  }
+}
+
+function digestOpsRead(index: LedgerIndex, read: OpsLedgerRead, value: unknown): string {
+  if (read.kind === "byTaskSteps" && index.appendSequenceOf && Array.isArray(value)) {
+    return opsLedgerDigest(value.map((row) => [index.appendSequenceOf!(row), row]));
+  }
+  return opsLedgerDigest(value);
+}
+
+/** Holds only the last snapshot's private projections. Ledger reads use the board's bound fact index. */
+function createOpsProjectionMemo() {
+  let held = new Map<string, HeldOpsProjection>();
+  let lastNow = Number.NEGATIVE_INFINITY;
+  return (deps: BoardDeps, catalog: BoardCatalogContext, githubKey: string, gateway: GitHub) => {
+    const plan = catalog.plan ?? deps.plan;
+    const index = deps.ledgerIndex;
+    if (index === undefined || catalog.opsIds.size === 0) {
+      held.clear();
+      return projectPlan(plan, deps);
+    }
+    const now = (deps.now ?? Date.now)();
+    const next = new Map<string, HeldOpsProjection>();
+    const digests = new Map<string, string>();
+    let recording: OpsProjectionInput | undefined;
+    let view: ReturnType<typeof githubViewOf> | undefined;
+    const githubView = () => (view ??= githubViewOf(deps.github, githubKey));
+    const observe = <T>(read: OpsLedgerRead, value: T): T => {
+      if (!recording) return value;
+      const key = JSON.stringify(read);
+      if (!recording.ledger.has(key)) {
+        const digest = digests.get(key) ?? digestOpsRead(index, read, value);
+        digests.set(key, digest);
+        recording.ledger.set(key, { read, digest });
+      }
+      return value;
+    };
+    const ledgerIndex: LedgerIndex = {
+      rows: index.rows,
+      byTask: { get: (id) => observe({ kind: "byTask", id }, index.byTask.get(id)) },
+      byStep: { get: (id) => observe({ kind: "byStep", id }, index.byStep.get(id)) },
+      ...(index.byTaskSteps ? { byTaskSteps: { get: (id, steps) =>
+        observe({ kind: "byTaskSteps", id, steps }, index.byTaskSteps!.get(id, steps)) } } : {}),
+      appendSequenceOf: index.appendSequenceOf,
+      get latestTsMs() { return observe({ kind: "latestTsMs" }, index.latestTsMs); },
+      get planOnlyFilingPrUrls() { return observe({ kind: "planOnlyFilingPrUrls" }, index.planOnlyFilingPrUrls); },
+      get planOnlyReviewedHeads() { return observe({ kind: "planOnlyReviewedHeads" }, index.planOnlyReviewedHeads); },
+    };
+    // A restoration can depend on another shard which names the reverted task in plan_refs.
+    const restorers = new Map<string, Task[]>();
+    for (const task of plan.tasks) {
+      for (const id of task.plan_refs ?? []) {
+        const tasks = restorers.get(id) ?? [];
+        tasks.push(task);
+        restorers.set(id, tasks);
+      }
+    }
+    const projections = projectPlan(plan, {
+      ...deps,
+      github: recordingGithub(deps.github, () => recording?.github),
+      ledgerIndex,
+      afterProjectTask: (task, projection) => {
+        const inputs = recording;
+        recording = undefined;
+        deps.afterProjectTask?.(task, projection);
+        // Live runs, blocked latches and refusal amendments can change without a ledger append.
+        if (!inputs || projectionAgesWithTheClock(projection) || projection.indeterminate ||
+            projection.independentFailureBlocked || projection.categorizedRefusalRejoin) return;
+        const digest = githubDigest(githubView(), task.id, task, projection, inputs.github.answers);
+        next.set(task.id, { stamp: inputs.stamp, ledger: inputs.ledger, githubKeys: inputs.github.keys,
+          githubKey, gateway, githubDigest: digest, projection });
+      },
+      reuseProjection: (task, inputs) => {
+        if (!catalog.opsIds.has(task.id)) return deps.reuseProjection?.(task, inputs);
+        const { sourcePath: _label, ...content } = task;
+        const stamp = opsLedgerDigest([content, restorers.get(task.id), inputs.readCreditStore?.()[task.id],
+          inputs.proseNamedTaskIds?.get(task.id),
+          inputs.creditOverrideRows?.().filter((row) => row.task === task.id)]);
+        const previous = held.get(task.id);
+        if (now >= lastNow && previous?.stamp === stamp && [...previous.ledger].every(([key, { read, digest }]) => {
+          const current = digests.get(key) ?? digestOpsRead(index, read, readOpsLedger(index, read));
+          digests.set(key, current);
+          return current === digest;
+        })) {
+          const sameGateway = previous.githubKey === githubKey && previous.gateway === gateway;
+          const digest = sameGateway ? previous.githubDigest : githubDigest(
+            githubView(), task.id, task, previous.projection, previous.githubKeys.map((key) => githubView().answer(key)),
+          );
+          if (digest === previous.githubDigest) {
+            next.set(task.id, sameGateway ? previous : { ...previous, githubKey, gateway });
+            return previous.projection;
+          }
+        }
+        recording = { stamp, ledger: new Map(), github: { keys: [], answers: [] } };
+        return undefined;
+      },
+    });
+    held = next;
+    lastNow = now;
+    return projections;
+  };
+}
+
 interface Held {
   db: ReadModelDb;
   board: BoardProjection;
+  opsMemo: ReturnType<typeof createOpsProjectionMemo>;
   recent: RecentActivityCache;
   /** The build whose board stage is ingesting: the recent feed classifies each row with its plan and gateway. */
   feed?: BoardDeps;
@@ -1366,7 +1523,7 @@ export function createNowView(opts: NowViewOptions): {
             if (g?.feed) feedRecentActivity(g.feed, g.recent, fresh);
           },
         });
-        h = { db: b.db, board, recent: createRecentActivityCache(), generation: -1, planKey: b.keys.plan, githubKey: b.keys.github, gateway: b.gateway!, at: b.now, healthAt: Number.NEGATIVE_INFINITY, decisionsKey: b.keys.decisions };
+        h = { db: b.db, board, opsMemo: createOpsProjectionMemo(), recent: createRecentActivityCache(), generation: -1, planKey: b.keys.plan, githubKey: b.keys.github, gateway: b.gateway!, at: b.now, healthAt: Number.NEGATIVE_INFINITY, decisionsKey: b.keys.decisions };
         held.set(name, h);
       }
       Object.assign(h, { githubKey: b.keys.github, gateway: b.gateway, feed: depsOf(instance, b) });
@@ -1382,11 +1539,14 @@ export function createNowView(opts: NowViewOptions): {
       b.index = h.board.index(b.rows);
     }],
     ["snapshot", (instance, b) => {
-      const projections = b.h!.board.projections();
+      const h = b.h!;
+      const projections = h.board.projections();
+      const { github, projectionKey } = b.gateway!;
       // Persisted projections remain public-only. Private rows are derived solely for this
       // whitelisted body, from its captured observation rather than a later asynchronous reply.
       b.snapshot = computeBoardSnapshot({ ...depsOf(instance, b), ledgerIndex: b.index! },
-        { catalog: b.catalog ?? null, reuseProjection: (task) => projections.get(task.id), lap: decisionsLap(instance.name, "snapshot") });
+        { catalog: b.catalog ?? null, reuseProjection: (task) => projections.get(task.id), lap: decisionsLap(instance.name, "snapshot"),
+          ...(projectionKey !== undefined ? { projectCatalog: (deps, catalog) => h.opsMemo(deps, catalog, projectionKey, github) } : {}) });
       // The fact store keeps only the steps a reader decides on; a task's newest row of any step is legacy's sort time.
       const activity = readTaskActivity(b.db);
       for (const t of b.snapshot.tasks) {

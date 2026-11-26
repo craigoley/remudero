@@ -26,7 +26,7 @@
     - src/lib/prompt-render.ts
     - src/lib/sweep.ts
     - test/gardeners/a-conflict-gardener-resolves-what-the-sweep-left-conflicted.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: Each conflict-gardener pass lists every open PR that GitHub reads dirty or whose newest sweep.merge_probe row at its exact head and main tip reads conflict, keeps those whose conflict has outlived the fleet's own p90 conflict-episode duration over the trailing ledger window with no sweep act at that head since, and ranks them by blocked PR-hours; a PR holding a live fix claim, an in-flight sweep action or an operator merge hold is skipped and named, and every pass writes one conflict_garden.report row

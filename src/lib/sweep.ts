@@ -16723,6 +16723,29 @@ export interface FixDispatchEvidence {
 export type ConflictIntent = { prBody: string; mainByPath: readonly { path: string; log: string }[] };
 export type SweepConflictGarden = (stateDir: string, ports: ConflictGardenPorts<OpenPrView>) => Promise<void>;
 
+/** A `proof:` line whose value is a quoted YAML scalar: its prefix, the scalar as written, and its trailing space. */
+const QUOTED_PROOF_LINE = /^(\s*(?:-\s+)?proof\s*:\s*)("(?:[^"\\]|\\.)*"|'(?:[^']|'')*')(\s*)$/;
+
+/** W1-T14934 — the parsed value of a quoted `proof:` line, as the YAML reader that produced the proof reads it. Lives here,
+ *  not in proof-amendment.ts, which already imports this module (a reverse import would close a cycle). */
+export function quotedProofValue(line: string): { head: string; quote: string; tail: string; value: string } | undefined {
+  const m = QUOTED_PROOF_LINE.exec(line);
+  if (!m) return undefined;
+  try {
+    return { head: m[1]!, quote: m[2]![0]!, tail: m[3]!, value: String(parseYaml(m[2]!)) };
+  } catch {
+    // An invalid escape is not valid YAML, so the line has no parsed value; the caller then matches it literally.
+    return undefined;
+  }
+}
+
+/** W1-T14934 — does this shard line carry `proof`, a YAML-PARSED value? A quoted `proof:` line is compared by its
+ *  parsed scalar, since `\"` and `\\` are stored escaped; any other line is matched literally, as before. */
+export function shardProofLineCarries(line: string, proof: string): boolean {
+  const quoted = quotedProofValue(line);
+  return quoted !== undefined && quoted.value === proof ? true : line.includes(proof);
+}
+
 /** The only proof grades that establish the capped-green repair has a mechanical body remedy —
  *  every {@link CriterionVerdict.proof_exec} outcome EXCEPT the two that mean "this DID execute"
  *  (`executed_pass`/`executed_fail`) and `stale_self_path` (a PROVEN-bad proof, `met: false`,
@@ -17327,7 +17350,7 @@ export function priorPlanRepairStrikesFromLedger(
  */
 export function insertPlanRepairFlag(shardText: string, proof: string, marker: string): string | undefined {
   const lines = shardText.split("\n");
-  const idx = lines.findIndex((line) => line.includes(proof));
+  const idx = lines.findIndex((line) => shardProofLineCarries(line, proof));
   if (idx < 0) return undefined;
   const indent = /^(\s*)/.exec(lines[idx])?.[1] ?? "";
   lines.splice(idx, 0, `${indent}# ${marker}`);
@@ -17342,7 +17365,7 @@ export function claimForProof(shardText: string, proof: string): string | undefi
   const lines = shardText.split("\n");
   const claims = new Set<string>();
   lines.forEach((line, at) => {
-    if (!SHARD_PROOF_LINE.test(line) || !line.includes(proof)) return;
+    if (!SHARD_PROOF_LINE.test(line) || !shardProofLineCarries(line, proof)) return;
     for (let back = at - 1; back >= 0; back--) {
       const found = SHARD_CLAIM_LINE.exec(lines[back]!);
       if (!found) continue;
@@ -30632,7 +30655,9 @@ export async function runSweep(
       };
       if (await valueGate.settle(requested, request.pr, "request", request.requestId)) target = requested;
     }
-    if (target) {
+    // The value check can yield long enough for another sweep to claim the selected head's review.
+    if (target && !(target.updateReason?.startsWith("distance") &&
+      inFlightReviewKeys.has(reviewOutcomeKeyForPr(viewOf(target))))) {
       // W1-T1212: a `StaleGatePr` (never `armedButStalled`'s own shape) carries the ONE extra
       // fact `deps.updatedForWorkflow`'s next read needs to remember this exact pair.
       const staleWorkflow = "staleWorkflow" in target ? (target as StaleGatePr).staleWorkflow : undefined;
