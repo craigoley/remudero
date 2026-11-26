@@ -118,6 +118,25 @@ test("W1-T15026 a terminal tree no process works in is still reaped", () => {
   }
 });
 
+test("W1-T15026 a terminal tree no process works in is still reaped when it vanishes mid-pass", () => {
+  const t = tree("hd-hand-review-20961");
+  const asked: string[] = [];
+  try {
+    const s = reap(t.root, 2 * HOUR, (dir) => { asked.push(dir); return { state: "clear", scanned: 1 }; }, {
+      // A concurrent removal wins after the pass has seen the directory and before the census gate.
+      newestActivity: () => {
+        rmSync(t.entry, { recursive: true, force: true });
+        return { mtimeMs: 0, complete: true };
+      },
+    });
+    assert.deepEqual(s.reaped, ["hd-hand-review-20961"], "a tree proven gone is recorded as it was before the gate");
+    assert.deepEqual(s.keptReasons, []);
+    assert.deepEqual(asked, [], "a tree that no longer exists is never censused");
+  } finally {
+    t.cleanup();
+  }
+});
+
 test("W1-T15026 a tree a later keep rule already holds keeps its own reason and costs no census", () => {
   const t = tree("hd-hand-review-21031");
   const asked: string[] = [];
@@ -215,18 +234,20 @@ test("W1-T15026 an undecidable census keeps the tree as cwd-unknown when /proc c
 });
 
 test("W1-T15026 an undecidable census keeps the tree as cwd-unknown when its canonical path cannot be resolved", () => {
-  const t = tree("hd-hand-review-21035");
-  const asked: string[] = [];
-  try {
-    const s = reap(t.root, 2 * HOUR, (dir) => { asked.push(dir); return { state: "clear", scanned: 1 }; }, {
-      realpath: () => {
-        throw Object.assign(new Error("EIO: injected realpath"), { code: "EIO" });
-      },
-    });
-    assert.deepEqual(s.keptReasons, [{ name: "hd-hand-review-21035", reason: "cwd-unknown" }]);
-    assert.deepEqual(asked, [], "a path with no canonical spelling is never censused");
-    assert.equal(existsSync(t.entry), true);
-  } finally {
-    t.cleanup();
+  for (const code of ["EIO", "EACCES", "ELOOP", "ENOTDIR"]) {
+    const t = tree("hd-hand-review-21035");
+    const asked: string[] = [];
+    try {
+      const s = reap(t.root, 2 * HOUR, (dir) => { asked.push(dir); return { state: "clear", scanned: 1 }; }, {
+        realpath: () => {
+          throw Object.assign(new Error(`${code}: injected realpath`), { code });
+        },
+      });
+      assert.deepEqual(s.keptReasons, [{ name: "hd-hand-review-21035", reason: "cwd-unknown" }], code);
+      assert.deepEqual(asked, [], `${code}: a path with no canonical spelling is never censused`);
+      assert.equal(existsSync(t.entry), true, code);
+    } finally {
+      t.cleanup();
+    }
   }
 });

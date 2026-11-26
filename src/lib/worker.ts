@@ -8068,13 +8068,14 @@ type WorktreeRegistrationLookup =
 function canonicalIdentity(
   path: string,
   realpath: (p: string) => string = realpathSync,
-): { kind: "resolved"; identity: string } | { kind: "unresolvable" } {
+): { kind: "resolved"; identity: string } | { kind: "unresolvable"; gone: boolean } {
   try {
     return { kind: "resolved", identity: realpath(path) };
-  } catch {
+  } catch (e) {
     // The distinction is CARRIED, not erased: "could not resolve" is a different answer from "does
     // not match", and folding them into one bare `undefined` is how a live lane gets destroyed.
-    return { kind: "unresolvable" };
+    // `gone` (ENOENT) says the path does not exist; every other failure leaves that open.
+    return { kind: "unresolvable", gone: (e as NodeJS.ErrnoException)?.code === "ENOENT" };
   }
 }
 
@@ -8364,18 +8365,20 @@ function* worktreeReapPass(
       // works in it (an operator review writes nothing inside its tree), so the census is asked only here, for the few
       // trees about to be removed. Occupied keeps; an undecidable census keeps. A host with no process table at all has
       // nothing to ask, so its removal runs as it did before this gate. `/proc` cwd links are canonical, so the census
-      // is asked about the canonical path: a symlinked spelling would match no cwd and read clear.
+      // is asked about the canonical path: a symlinked spelling would match no cwd and read clear. A tree already gone
+      // (a concurrent removal won) has nothing left to protect, so it proceeds as before, uncensused.
       const canonical = canonicalIdentity(entryPath, opts.realpath ?? realpathSync);
-      if (canonical.kind === "unresolvable") {
+      if (canonical.kind === "resolved") {
+        const census = cwdCensus(canonical.identity);
+        // `proc_unavailable` also covers a failed open or a broken enumeration of a table that exists.
+        const noProcessTable = census.state === "unknown" && census.reason === "proc_unavailable"
+          && processTableIsAbsent(opts.statProcessTable ?? statSync);
+        if (census.state !== "clear" && !noProcessTable) {
+          keep(name, census.state === "occupied" ? "live-cwd" : "cwd-unknown");
+          continue;
+        }
+      } else if (!canonical.gone) {
         keep(name, "cwd-unknown");
-        continue;
-      }
-      const census = cwdCensus(canonical.identity);
-      // `proc_unavailable` also covers a failed open or a broken enumeration of a table that exists.
-      const noProcessTable = census.state === "unknown" && census.reason === "proc_unavailable"
-        && processTableIsAbsent(opts.statProcessTable ?? statSync);
-      if (census.state !== "clear" && !noProcessTable) {
-        keep(name, census.state === "occupied" ? "live-cwd" : "cwd-unknown");
         continue;
       }
       if (!dryRun) {
