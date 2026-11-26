@@ -1,9 +1,19 @@
 // W1-T14893: a lane refill reuses the tick read published moments ago unless a GitHub wake since says
 // something merged or was pushed.
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { clockFromMillisFn } from "#src/lib/clock.js";
-import { createRefillReader, decideRefillRead, isMergeOrPushWake, medianReadIntervalMs } from "#src/lib/refill-snapshot-reuse.js";
+import {
+  createDeliveryDedupStore, createGitHubEventWakeHandler, isPullRequestClosedWake, lastClosedWakePath, readSweepWakeMarker, sweepWakeMarkerPath,
+} from "#src/lib/github-event-wake.js";
+import { createRefillReader, decideRefillRead, isMergeWake, medianReadIntervalMs } from "#src/lib/refill-snapshot-reuse.js";
+import { createService } from "#src/lib/service.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const AT = 1_000_000;
 const INTERVAL = 60_000;
@@ -15,12 +25,51 @@ test("W1-T14893 a fresh snapshot with no merge or push wake since is reused", ()
   assert.deepEqual(decided, { decision: "reuse", reason: "fresh", snapshotAgeMs: 10_000 });
 });
 
-test("W1-T14893 a merge or push wake after the snapshot forces a fresh read", () => {
-  for (const wake of [{ event: "pull_request", action: "closed", atMs: AT + 2_000 }, { event: "push", atMs: AT }]) {
-    const decided = decideRefillRead({ snapshotAtMs: AT, nowMs: AT + 10_000, wakesSince: [wake], readIntervalMs: INTERVAL });
-    assert.deepEqual(decided, { decision: "read", reason: "merge-or-push-wake", snapshotAgeMs: 10_000 }, wake.event);
+test("W1-T14893 a pull request closed wake after the snapshot forces a fresh read even when a later delivery overwrites the wake marker", async (t) => {
+  // Serve coalesces every delivery over one wake marker, so a check_run after a merge hides it there.
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14893-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const secret = "w1-t14893-secret";
+  const markerPath = sweepWakeMarkerPath(root);
+  const route = createGitHubEventWakeHandler({ secret, repository: "o/r", markerPath, dedup: createDeliveryDedupStore(10) });
+  const server = createService({ tokens: { read: "read", write: "write" }, routes: [route] });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  const post = async (deliveryId: string, event: string, payload: Record<string, unknown>) => {
+    const body = JSON.stringify({ repository: { full_name: "o/r" }, ...payload });
+    const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}${route.path}`, { method: "POST", body,
+      headers: { "content-type": "application/json", "x-github-delivery": deliveryId, "x-github-event": event,
+        "x-hub-signature-256": `sha256=${createHmac("sha256", secret).update(body, "utf8").digest("hex")}` } });
+    assert.equal(response.status, 202, `${event} is accepted`);
+  };
+  await post("d-merge", "pull_request", { action: "closed", pull_request: { number: 1, merged: true } });
+  await post("d-check", "check_run", { action: "completed", check_run: { name: "ci-gate", conclusion: "failure" } });
+  assert.equal(readSweepWakeMarker(markerPath)?.event, "check_run", "the later delivery overwrote the coalesced marker");
+  assert.equal(readSweepWakeMarker(lastClosedWakePath(markerPath))?.deliveryId, "d-merge", "the closed wake is kept apart");
+
+  // The daemon's refill reader reads both, as src/cli/commands/daemon.ts does, from a snapshot taken before the merge.
+  let reads = 0;
+  const snapshotAtMs = Date.parse(readSweepWakeMarker(lastClosedWakePath(markerPath))!.receivedAtIso) - 1;
+  const reader = createRefillReader<string>({
+    read: async () => { reads++; return () => true; },
+    published: () => {
+      reader.observeWake(readSweepWakeMarker(markerPath));
+      reader.observeWake(readSweepWakeMarker(lastClosedWakePath(markerPath)));
+      return { atMs: snapshotAtMs, merged: new Set<string>() };
+    },
+    clock: clockFromMillisFn(() => snapshotAtMs + 1_000), log: () => {},
+  });
+  reader.observeRead(snapshotAtMs - INTERVAL);
+  reader.observeRead(snapshotAtMs);
+  assert.equal((await reader.refill("plan"))("W1-T1"), true);
+  assert.equal(reads, 1, "THE CLAIM: the merge forces a fresh read though the marker now names a check_run");
+
+  for (const wake of [{ event: "pull_request", action: "closed", atMs: AT + 2_000 }, { event: "pull_request", action: "closed", atMs: AT }]) {
+    assert.deepEqual(decideRefillRead({ snapshotAtMs: AT, nowMs: AT + 10_000, wakesSince: [wake], readIntervalMs: INTERVAL }),
+      { decision: "read", reason: "merge-wake", snapshotAgeMs: 10_000 });
   }
-  assert.equal(isMergeOrPushWake({ event: "pull_request", action: "opened" }), false, "an opened pull request merges nothing");
+  assert.equal(isMergeWake({ event: "pull_request", action: "opened" }), false, "an opened pull request merges nothing");
+  assert.equal(isPullRequestClosedWake({ event: "check_run", action: "completed" }), false);
 });
 
 test("W1-T14893 a snapshot older than the read interval forces a fresh read", () => {
@@ -68,7 +117,7 @@ test("W1-T14893 the refill reader reuses the published merged set and reads afre
   const fresh = await reader.refill("plan");
   assert.equal(fresh("fresh"), true);
   assert.equal(reads, 1, "a merge wake after the snapshot reads afresh");
-  assert.equal(rows.at(-1)?.extra?.reason, "merge-or-push-wake");
+  assert.equal(rows.at(-1)?.extra?.reason, "merge-wake");
   assert.equal(reader.readIntervalMs(), INTERVAL, "the refill's own read does not change the tick's interval");
 });
 

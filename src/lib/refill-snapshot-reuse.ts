@@ -3,8 +3,8 @@
  *
  * Each lane refill used to await a full tick read before choosing work, while the tick loop had published
  * one moments earlier. A refill now reuses that published snapshot when it is younger than the measured
- * median interval between the tick's own reads and no GitHub wake since says a pull request closed or a
- * branch was pushed. Any other case reads afresh, exactly as before.
+ * median interval between the tick's own reads and no GitHub wake since says a pull request closed. Serve keeps
+ * the newest such wake apart from the coalesced wake marker, so a later delivery cannot hide it. Any other case reads afresh, exactly as before.
  *
  * INVARIANT unchanged-guards: reuse only chooses which merged set the refill selects against. The dispatch
  * claim, open-PR and pushed-run-branch checks still run on every candidate, so a merge the snapshot missed
@@ -20,7 +20,7 @@ export interface RefillWake {
   atMs: number;
 }
 
-export type RefillReadReason = "fresh" | "no-snapshot" | "no-interval" | "stale" | "merge-or-push-wake";
+export type RefillReadReason = "fresh" | "no-snapshot" | "no-interval" | "stale" | "merge-wake";
 
 export interface RefillReadDecision {
   decision: "reuse" | "read";
@@ -28,14 +28,17 @@ export interface RefillReadDecision {
   snapshotAgeMs?: number;
 }
 
-/** A wake that can change what is merged or pushed: a push, or a pull request that closed. */
-export function isMergeOrPushWake(wake: Pick<RefillWake, "event" | "action">): boolean {
-  return wake.event === "push" || (wake.event === "pull_request" && wake.action === "closed");
+/**
+ * A wake that can change what is merged: a pull request that closed. A push to a run branch needs no wake here:
+ * the pushed-run-branch check refuses that candidate before a run starts.
+ */
+export function isMergeWake(wake: Pick<RefillWake, "event" | "action">): boolean {
+  return wake.event === "pull_request" && wake.action === "closed";
 }
 
 /**
  * "reuse" when the published snapshot is younger than the measured median tick read interval and no
- * merge or push wake arrived after it; "read" otherwise. A missing snapshot or interval always reads.
+ * merge wake arrived after it; "read" otherwise. A missing snapshot or interval always reads.
  */
 export function decideRefillRead(input: {
   snapshotAtMs: number | undefined;
@@ -47,8 +50,8 @@ export function decideRefillRead(input: {
   if (snapshotAtMs === undefined) return { decision: "read", reason: "no-snapshot" };
   const snapshotAgeMs = Math.max(0, nowMs - snapshotAtMs);
   if (readIntervalMs === undefined || !(readIntervalMs > 0)) return { decision: "read", reason: "no-interval", snapshotAgeMs };
-  if (wakesSince.some((wake) => wake.atMs >= snapshotAtMs && isMergeOrPushWake(wake))) {
-    return { decision: "read", reason: "merge-or-push-wake", snapshotAgeMs };
+  if (wakesSince.some((wake) => wake.atMs >= snapshotAtMs && isMergeWake(wake))) {
+    return { decision: "read", reason: "merge-wake", snapshotAgeMs };
   }
   if (snapshotAgeMs >= readIntervalMs) return { decision: "read", reason: "stale", snapshotAgeMs };
   return { decision: "reuse", reason: "fresh", snapshotAgeMs };

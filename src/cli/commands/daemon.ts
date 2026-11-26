@@ -131,7 +131,7 @@ import { createSlotPreparer } from "../../lib/serve-slots.js";
 import { asyncGit, testRunnerOnItsOwnCheckout } from "../../lib/self-sync.js";
 import { withLiveEditLadders } from "../../lib/live-edit-ladder.js";
 import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, clearKick, consumeDrainNow, consumeRestartInPlace, clearPrAction, consumeStop, isQuietHours, kickFilePath, pauseDetail, pendingKicks, pendingPrActions, stopDetail } from "../../lib/fleet-control.js";
-import { readSweepWakeMarker, sweepWakeMarkerPath, wireSweepWakeToDaemon } from "../../lib/github-event-wake.js";
+import { lastClosedWakePath, readSweepWakeMarker, sweepWakeMarkerPath, wireSweepWakeToDaemon } from "../../lib/github-event-wake.js";
 import { createRefillReader, decideRefillRead } from "../../lib/refill-snapshot-reuse.js";
 import { startInstallationTokenRefresh } from "../../lib/github-app.js";
 import { LEDGER_REQUEST_STEP, realScopedMint, startDaemonGitCredentialSocket, type ScopedTokenMint } from "../../lib/secret-boundary.js";
@@ -2706,7 +2706,12 @@ export async function daemonCommand(
     }) : undefined;
     const refillReader = tickRefresher ? createRefillReader<Plan | undefined>({
       read: (plan) => tickRefresher(plan),
-      published: () => { refillReader?.observeWake(readSweepWakeMarker(wakeMarkerPath)); return lastPublishedRead; },
+      published: () => {
+        // W1-T14893: the coalesced marker and the newest pull_request closed wake, which no later delivery overwrites.
+        refillReader?.observeWake(readSweepWakeMarker(wakeMarkerPath));
+        refillReader?.observeWake(readSweepWakeMarker(lastClosedWakePath(wakeMarkerPath)));
+        return lastPublishedRead;
+      },
       clock: tickReadClock,
       log,
       decide: (input) => decideRefillRead(input),
