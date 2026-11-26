@@ -2945,6 +2945,10 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // returns the `gh --json` shape and passes through untouched. Both arms yield the SAME five
   // fields, so nothing downstream of `body` can tell which transport served it.
   const args = reviewViewArgs(owner, repo, prArg);
+  // W1-T15037: the own-start reading comes before the first gh read, whose read-cadence lock can wait for many
+  // minutes; main moving during that wait is the same case as the W1-T9727 admission wait, not stale code.
+  const ownStartReading = deps.reviewStartFreshness ??
+    (deps.judgeAtOwnStart === true ? await ownStartFreshness(reviewerCodeFreshnessDep) : undefined);
   const raw = await (deps.fetchView ?? ghJsonAsync)(args);
   exit.step = "setup";
   // The sweep's open-PR snapshot can age while earlier reviews run. The numeric arm already
@@ -3348,8 +3352,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // transient lifecycle-read failure) degrades the SAME way `runReview`'s own call site does —
   // best-effort legibility, never a reason this command fails to review the PR at all.
   // W1-T9727: a fresh-tree child reads at its own start, before a memory-admission wait lets main move past it.
-  const startFreshness = deps.reviewStartFreshness ??
-    (deps.judgeAtOwnStart === true ? await ownStartFreshness(reviewerCodeFreshnessDep) : undefined);
+  const startFreshness = ownStartReading;
   // The start reading could not prove freshness: say so, then fall back to the JIT read.
   if (startFreshness?.status === "unreadable") {
     log("review.reviewer_freshness_unreadable_at_start", {
