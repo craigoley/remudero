@@ -362,6 +362,9 @@ export function renderBodyDefects(defects: readonly BodyDefect[]): string {
 /** W1-T10339 — one validated proof replacement for a PR whose BODY is its Acceptance (it carries no task trailer). */
 export interface BodyProofReplacement { oldProof: string; newProof: string }
 
+/** One acceptance bullet as {@link parseAcceptanceBlock} (review.ts) reads it: `-`, `*`, `1.` or `1)`, then its text. */
+export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
+
 /** W1-T14913 — rewrite ONE body proof, found by the value parseAcceptanceBlock reads. On a `proof:` line whose whole
  *  value is double-quoted, that value is the quoted text with `\"` and `\\` unescaped (any other backslash stays), and
  *  the replacement is written back escaped, so it re-reads exactly; any other bullet or proof line is matched and
@@ -370,7 +373,8 @@ export function rewriteBodyProof(body: string, oldProof: string, newProof: strin
   const escaped = (text: string): string => `"${text.replace(/[\\"]/g, "\\$&")}"`;
   const lines = body.split("\n");
   const hits = lines.flatMap((line, index) => {
-    if (!/^\s*(?:[-*+]\s|proof\s*:)/i.test(line)) return [];
+    // W1-T14913: the parser's own bullet shapes (`-`, `*`, `1.`, `1)`) and its `proof:` continuation lines.
+    if (!ACCEPTANCE_BULLET_RE.test(line) && !/^\s*proof\s*:/i.test(line)) return [];
     const quoted = line.match(/^(\s*proof\s*:\s*)"([\s\S]*)"(\s*)$/i);
     if (quoted) {
       if (quoted[2]!.replace(/\\(["\\])/g, "$1") === oldProof) return [{ index, line: `${quoted[1]}${escaped(newProof)}${quoted[3]}` }];

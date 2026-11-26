@@ -62,6 +62,7 @@ import {
 } from "./task-id-reservation.js";
 // @ts-expect-error The shared plain .mjs helper ships under src/ so source-only runtimes can load it.
 import { adjudicateReservationChain, parseReservationHolderLine, parseReservationHolderFields } from "./reservation-chain.mjs";
+import { ACCEPTANCE_BULLET_RE } from "./body-repair.js";
 
 /** JUDGE (MASTER-PLAN §12 rules 4/3B; W1-T1C): after green CI, a fresh read-only REVIEW session
  * judges each stated proof and posts `remudero-review`. {@link judgeReview} is pure (unit-fixture falsifier);
@@ -9095,7 +9096,8 @@ export const ACCEPTANCE_HEADER_RE = /^\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?
 
 /** A criterion BULLET. Shared with {@link acceptanceBlockDiagnostics} for the same reason as {@link
  *  ACCEPTANCE_HEADER_RE}. Exported for the same reason {@link ACCEPTANCE_HEADER_RE} is (W1-T2762). */
-export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
+// W1-T14913: lives in body-repair.ts (a leaf review.ts may import) so the body-proof rewriter reads the same bullets.
+export { ACCEPTANCE_BULLET_RE };
 
 /** A CommonMark fence opener — three or more backticks (whose info string holds no backtick) or tildes. Exported so a
  *  fixture can drive both of its arms by name (the negative-reachability ratchet). */

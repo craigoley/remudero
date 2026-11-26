@@ -87,3 +87,27 @@ test("a hand-quoted body proof and a rendered wrapped grep are rewritten by the 
   assert.equal(parseAcceptanceBlock(repaired!)[0]!.proof, "grep: driftCeiling in scripts/clock-sweep-baseline.json");
   assert.equal(rewriteBodyProof(rendered, "grep: absent in f", "x"), undefined, "a proof the body does not carry is not guessed at");
 });
+
+test("a body proof on every bullet shape the parser reads is rewritten, and the parser reads the replacement", () => {
+  const oldProof = 'grep: "x" in f';
+  const newProof = "grep: y in g";
+  // Every shape ACCEPTANCE_BULLET_RE admits (`-`, `*`, `1.`, `1)`), single-line and as a `- claim:` with a `proof:` line.
+  const bodies = [
+    `## Acceptance\n- claim one | ${oldProof}\n`,
+    `## Acceptance\n* claim one | ${oldProof}\n`,
+    `## Acceptance\n1. claim one | ${oldProof}\n`,
+    `## Acceptance\n1) claim one | ${oldProof}\n`,
+    `## Acceptance\n12. claim one | ${oldProof}\n`,
+    `## Acceptance\n  - claim one | ${oldProof}\n`,
+    `## Acceptance\n1. claim: claim one\n   proof: ${oldProof}\n`,
+    `## Acceptance\n2) claim: "claim one"\n   proof: "grep: \\"x\\" in f"\n`,
+  ];
+  for (const body of bodies) {
+    assert.equal(parseAcceptanceBlock(body)[0]?.proof, oldProof, `the parser reads the old proof from ${JSON.stringify(body)}`);
+    const rewritten = rewriteBodyProof(body, oldProof, newProof);
+    assert.ok(rewritten !== undefined, `rewritten: ${JSON.stringify(body)}`);
+    assert.equal(parseAcceptanceBlock(rewritten)[0]?.proof, newProof, `re-read: ${JSON.stringify(rewritten)}`);
+  }
+  assert.equal(rewriteBodyProof(`## Acceptance\n+ claim one | ${oldProof}\n`, oldProof, newProof), undefined,
+    "a `+` line is no bullet the parser reads, so nothing there is rewritten");
+});
