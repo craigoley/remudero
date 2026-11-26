@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import type { Config } from "#src/lib/config.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { mergePlanBlobs } from "#src/lib/plan.js";
 import { draftRefusalAmendment, extractRefusal, readTaskShard, REFUSAL_AMENDMENT_STEP } from "#src/lib/refusal-amendment.js";
 import { buildSweepEffects, runSweep, type BuildSweepEffectsDeps } from "#src/lib/sweep.js";
@@ -136,10 +137,12 @@ test("W1-T14528 criterion 1: an ops-only task reads its record at the ops main a
 /** W1-T14969: run this file's five W1-T14528 tests in a child under a clock `days` ahead of the real one (0: the real
  *  clock), with a private TMPDIR, and return its TAP. The child selects only them, so this test never runs itself. */
 function runW1T14528At(days: number): string {
-  const tmp = mkdtempSync(join(tmpdir(), "w1-t14969-"));
+  const tmp = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14969-`));
   try {
     const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: tmp, RMD_TEST_LIVE_DENY_ROOT: join(tmp, "live-deny"), FK_SHIFT_DAYS: String(days) };
     delete env.NODE_TEST_CONTEXT;
+    // A nested runner must not inherit a coverage session; only an assignment blanks it (W1-T2292).
+    env.NODE_V8_COVERAGE = undefined;
     const shift = days === 0 ? [] : ["--import", "./scripts/clock-shift.mjs"];
     const result = spawnSync(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts",
       ...shift, "--test-name-pattern", "^W1-T14528 criterion", THIS_FILE], { cwd: REPO_ROOT, env, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
