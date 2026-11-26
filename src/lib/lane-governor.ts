@@ -526,7 +526,8 @@ export function refreshSharedHostMemory(nowMs: number, reader = sharedHostMemory
   let reading: LaneMemoryReading | { unread: string };
   try { reading = reader(); }
   catch (error) {
-    reading = { unread: error instanceof Error ? error.message : String(error) };
+    const reason = error instanceof Error ? error.message : String(error);
+    reading = { unread: reason };
   }
   publishSharedHostMemory(reading, nowMs);
   return sharedHostMemory(nowMs);
