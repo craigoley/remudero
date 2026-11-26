@@ -13,6 +13,7 @@ import type { Mount } from "./mounts.js";
 import { checkOperatorMessage } from "./operator-message.js";
 import { spawnWorker } from "./worker.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
 /**
  * lib/inbox-recommendation.ts (W1-T8950) — each operator inbox item carries the decision the fleet recommends.
@@ -468,9 +469,9 @@ export function recommendationAnswerJson(text: string): unknown {
 }
 
 /** W1-T10229: a writer spawn that gave no model answer. `unattempted` when it never ran (admission abandoned). */
-export class RecommendationSpawnError extends Error {
+export class RecommendationSpawnError extends RmdError {
   constructor(readonly unattempted: boolean, detail: string) {
-    super(`the recommendation writer's spawn did not answer (${detail})`);
+    super("child_process", GENERIC_EXIT_CODE, `the recommendation writer's spawn did not answer (${detail})`, { unattempted });
     this.name = "RecommendationSpawnError";
   }
 }
