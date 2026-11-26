@@ -31,7 +31,7 @@ function dispatcher(t: TestContext, ledger: Row[] | "unreadable", view: Partial<
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const dir of ["state/inflight", "repos/fixture", "tmp"]) mkdirSync(join(root, dir), { recursive: true });
   const ledgerPath = join(root, "state/ledger.ndjson");
-  // An unreadable live ledger is one not yet written: the read fails with ENOENT.
+  // A live ledger not yet written: the read fails with ENOENT.
   if (ledger !== "unreadable") appendFileSync(ledgerPath, ledger.map((row) => `${JSON.stringify(row)}\n`).join(""));
   const rows: Row[] = [];
   const seen = { claimKeys: 0, dispatched: 0 };
@@ -123,7 +123,7 @@ test("W1-T15005 criterion 3: a PR with no review in flight dispatches as today",
     "a non-pending head never waits, whatever the ledger holds");
 });
 
-test("an unreadable live ledger reads as no review in flight, so the fix round dispatches as before", async (t) => {
+test("a live ledger not yet written holds no review in flight, so the fix round dispatches as before", async (t) => {
   const d = dispatcher(t, "unreadable");
   await d.dispatch();
   assert.equal(deferrals(d.rows).length, 0, "nothing defers");

@@ -4976,8 +4976,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         }
         // W1-T15005: a fix round pushed mid-review supersedes that review ("review input changed after this verdict
         // started"), so the round waits while a live review owns this exact head; a verdict or a proven-dead owner ends it.
-        // Read off the loop; an unreadable live ledger reads as no review in flight, so the round dispatches as before.
-        const reviewLines = pr.reviewState === "pending" ? parseLedger(await fs.promises.readFile(ledgerPath, "utf8").catch(() => "")) : [];
+        // Read off the loop; a ledger not yet written holds no review in flight, so the round dispatches as before.
+        const reviewLines = pr.reviewState === "pending" ? parseLedger(await fs.promises.readFile(ledgerPath, "utf8")
+          .catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; })) : [];
         const reviewRun = reviewInFlightOnHead(pr, reviewLines);
         if (reviewRun !== undefined) {
           log("sweep.fix_deferred_review_in_flight", { pr_number: pr.prNumber, head: pr.headSha, review_run: reviewRun });
