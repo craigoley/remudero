@@ -34,6 +34,17 @@ test("W1-T14915 criterion 1: an invariant claim with a unit-test proof and no ki
   assert.equal(lintTask(task({}), ON).violations.filter((v) => v.check === "invariant-unguarded").length, 1, "lintTask carries it");
 });
 
+test("W1-T14915 criterion 1: an invariant claim with a code-span-wrapped unit-test proof gets the warn too", () => {
+  // A plan record can wrap the proof in backticks; the YAML loader keeps them and the review executor strips them.
+  for (const proof of ["`unit test: legacy buckets keep their counts`", "``unit test: legacy buckets keep their counts``"]) {
+    const got = unguardedInvariantViolations(task({ proof }), ON);
+    assert.equal(got.length, 1, proof);
+    assert.match(got[0]!.message, /claim 2/);
+  }
+  assert.deepEqual(unguardedInvariantViolations(task({ proof: "`grep: keep-buckets in src/a.ts`" }), ON), [],
+    "a wrapped grep proof is not a test proof");
+});
+
 test("W1-T14915 criterion 2: a guarded invariant gets no warn and existing checks are unchanged", () => {
   const guarded = task({ kind: "guard" });
   const credited = task({ satisfied_by: "#123" });

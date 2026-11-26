@@ -3975,7 +3975,8 @@ export function unguardedInvariantViolations(task: Task, opts: LintOpts = {}): L
   (task.acceptance ?? []).forEach((criterion, index) => {
     if (!INVARIANT_CLAIM_RE.test(criterion.claim)) return;
     if (criterion.satisfied_by || (criterion as { kind?: unknown }).kind !== undefined) return;
-    if (!/^unit test\s*:/i.test((criterion.proof ?? "").trim())) return;
+    // Read as the review executor reads it, so a code-span-wrapped `unit test:` proof is a test proof too.
+    if (parseWhitelistedProof(criterion.proof ?? "")?.kind !== "test") return;
     out.push({
       check: "invariant-unguarded",
       severity: "warn",
