@@ -1779,6 +1779,8 @@ import {
   extractTaskTrailerId,
   type AcceptanceAuthorTimeResult,
   parseAcceptanceBlock,
+  acceptanceCriteriaRead,
+  bodyProofSetDivergence,
   parseReviewerVerdictClauses,
   parseReviewerVerdicts,
   postReviewCommentGuarded,
@@ -1853,8 +1855,8 @@ import {
   type FilingDiffFile,
   type PlanFilingDiffAtHead,
 } from "./lib/body-repair.js";
-import { fixRungInputFields, prBodyDigest } from "./lib/sweep.js";
-import { diagnoseBodyDefects } from "./lib/body-repair.js";
+import { prBodyDigest } from "./lib/sweep.js";
+import { diagnoseBodyDefects, rewriteCriterionProofs } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
 import { type BaseProofGrader, diffAnchor, mainRepairAcceptanceFor, withoutStaleRepairProofs } from "./lib/main-repair-acceptance.js";
@@ -6275,10 +6277,8 @@ export function rewriteAcceptanceBlockFromPlan(
   // contract trailerBodyProofDivergenceRefusal itself keeps.
   if (bodyCriteria.length === 0) return { kind: "no-block" };
   const planProofs = new Set(planCriteria.map((c) => (c.proof ?? "").trim()).filter((p) => p.length > 0));
-  const bodyProofs = bodyCriteria.map((c) => (c.proof ?? "").trim()).filter((p) => p.length > 0);
-  const bodyProofSet = new Set(bodyProofs);
-  const removedProofs = [...new Set(bodyProofs.filter((p) => !planProofs.has(p)))];
-  const onlyInPlan = [...planProofs].filter((p) => !bodyProofSet.has(p));
+  // W1-T14913: the author gate's own comparison, so a legacy-rendered quoted proof the gate passes is never rewritten here.
+  const { onlyInBody: removedProofs, onlyInRecord: onlyInPlan } = bodyProofSetDivergence(bodyCriteria, [...planProofs]);
   // Identical proof sets (order and claim wording both ignored) — nothing to rewrite.
   if (removedProofs.length === 0 && onlyInPlan.length === 0) return { kind: "healthy" };
 
@@ -6323,16 +6323,16 @@ export function trailerBodyDivergenceRepair(
 /**
  * W1-T5544 — THE DETERMINISTIC CURE FOR `acceptance-author-gate: REFUSED (proof-shape)` WHEN EVERY DEFECT IS A WRAPPED
  * GREP PATTERN: each `grep: "x" in f` / `` grep: `x` in f `` becomes `wrappedGrepPattern(...).bare`. EXACT, never a
- * heuristic: each proof text must occur in the body exactly once, and after the rewrite the block must parse to the same
- * number of criteria, none still wrapped, every one executable — anything else (an unparseable proof, a missing
- * target) returns `undefined` because the cause was not ONLY wrapping.
+ * heuristic: each proof is rewritten on the line the parser read its criterion from (W1-T14913), and after the rewrite
+ * the block must parse to the same number of criteria, none still wrapped, every one executable — anything else (an
+ * unparseable proof, a missing target) returns `undefined` because the cause was not ONLY wrapping.
  */
 export function wrappedGrepBodyRepair(body: string): AcceptanceGateBodyRepair | undefined {
   const criteria = parseAcceptanceBlock(body);
   if (criteria.length === 0) return undefined;
   let repaired = body;
   let unwrapped = 0;
-  for (const criterion of criteria) {
+  for (const [index, criterion] of criteria.entries()) {
     const proof = criterion.proof ?? "";
     const wrapped = wrappedGrepPattern(proof);
     if (wrapped === undefined) continue;
@@ -6340,9 +6340,12 @@ export function wrappedGrepBodyRepair(body: string): AcceptanceGateBodyRepair | 
       /^(\s*grep:\s*)(.+?)(\s+in\s+\S+\s*)$/,
       (_all, head: string, _pattern: string, tail: string) => `${head}${wrapped.bare}${tail}`,
     );
-    const at = repaired.indexOf(proof);
-    if (bareProof === proof || at === -1 || repaired.indexOf(proof, at + 1) !== -1) return undefined;
-    repaired = repaired.slice(0, at) + bareProof + repaired.slice(at + proof.length);
+    // W1-T14913: found by its parsed value in the span the parser read THIS criterion from, so a quoted proof line is
+    // found too, and two criteria sharing one wrapped grep are each unwrapped in turn.
+    const next = bareProof === proof ? undefined
+      : rewriteCriterionProofs(repaired, [{ index, oldProof: proof, newProof: bareProof }], acceptanceCriteriaRead);
+    if (next === undefined) return undefined;
+    repaired = next;
     unwrapped += 1;
   }
   if (unwrapped === 0) return undefined;
@@ -6525,7 +6528,10 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
     for (const defect of defects) {
       if (defect.kind !== "wrapped-proof" || !defect.repair || !defect.criterion) continue;
       const proof = parseAcceptanceBlock(repairedBody)[defect.criterion - 1]?.proof;
-      if (proof) repairedBody = repairedBody.replace(proof, defect.repair);
+      // W1-T14913: the diagnosed criterion's own parser-reported proof span, never a text match, so a proof two criteria share
+      // is repaired on each.
+      if (proof) repairedBody = rewriteCriterionProofs(repairedBody, [{ index: defect.criterion - 1, oldProof: proof,
+        newProof: defect.repair }], acceptanceCriteriaRead) ?? repairedBody;
     }
     if (repairedBody !== metadata.body) {
       const candidate = { ...metadata, body: repairedBody };
@@ -9442,8 +9448,8 @@ export async function dispatchBodyProofRepair(
     });
     if (!validation.ok) return refuse(validation.refusal.reason, validation.refusal.detail);
     const body = await params.fetchPrBody(params.prUrl);
-    const repairedBody = replaceBodyProofs(body, validation.validated.map((e) => ({ oldProof: e.oldProof, newProof: e.newProof })));
-    if (repairedBody === undefined) return refuse("body-drifted", "the live body no longer carries each old proof on exactly one bullet");
+    const repairedBody = replaceBodyProofs(body, validation.validated.map((e) => ({ oldProof: e.oldProof, newProof: e.newProof })), acceptanceCriteriaRead);
+    if (repairedBody === undefined) return refuse("body-drifted", "the live body no longer carries each old proof on exactly one bullet, or rewriting it would change a claim or another proof");
     const unsafe = diagnoseUnrunnableProofs(parseAcceptanceBlock(repairedBody), { execProof: params.execProof });
     if (unsafe.length > 0) return refuse("proof-unsafe-to-push", renderBodyDefects(unsafe));
     await params.updatePrBody(params.prUrl, repairedBody);
