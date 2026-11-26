@@ -59,7 +59,7 @@ test("a machine-judge ask stays open without a release receipt for its own prese
 });
 
 test("a release does not retire a generic machine ID or a mismatched producer family", () => {
-  assert.equal(classifyProposal(ask(), undefined, context()).state, "not_ready");
+  assert.equal(classifyProposal(ask(), undefined, context()).state, "retired", "W1-T14976: an untyped ask is answered by its own task's release");
   const wrongFamily = stampVerificationAsk(ask(), ID);
   assert.equal(classifyProposal(wrongFamily, undefined, context()).state, "not_ready");
 });

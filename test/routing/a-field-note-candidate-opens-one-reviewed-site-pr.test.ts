@@ -12,7 +12,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand, readFieldTrialsLedger } from "#src/lib/field-trials-flow.js";
 import { appWriteProof, SITE_IMPORT_BRANCH, SITE_IMPORT_GRANT, syncFieldNoteSiteImport, type FieldNoteExport, type SiteWriteProof }
   from "#src/lib/field-trials-site-import.js";
@@ -34,6 +35,8 @@ const DAY = (day: number, hour = 0) => new Date(Date.UTC(2026, 8, day, hour)).to
 const BLOB = "b".repeat(40);
 const EXPORT_KEYS = ["schema", "releaseId", "status", "publicationScope", "evidence", "windowStart",
   "windowEnd", "asOf", "sourceDigest", "sourceRepos", "consentRegistryRevision", "rows"].sort();
+/** W1-T14984: the site's collector-staged key set (remudero-site lib/model-field-note.ts collectorStagedKeys). */
+const SITE_COLLECTOR_STAGED_KEYS = [...EXPORT_KEYS, "publishedAt", "stagedBy", "stagedAt"].sort();
 type SiteImportOptions = NonNullable<Parameters<typeof syncFieldNoteSiteImport>[1]>;
 type Mode = "staged" | "unchanged" | "refused" | "no-daily-stage" | "absent" | "outside-data" | "garbled" | "usage"
   | "staged-nothing" | "dir-script" | "git-hook" | "git-config-refused";
@@ -57,8 +60,21 @@ const [flag, candidatePath, summaryPath] = process.argv.slice(2);
 if (flag !== "--daily-stage") process.exit(2);
 const note = JSON.parse(readFileSync(candidatePath, "utf8"));
 appendFileSync(${JSON.stringify(seen)}, JSON.stringify(note) + "\\n");
-const staged = { ...note, stagedBy: "site-stage-mode", stagedAt: note.asOf, publishedAt: note.asOf };
 const mode = ${JSON.stringify(mode)};
+// W1-T14984: the site's own admission (remudero-site lib/model-field-note.ts parseModelFieldNote, collector arm): its
+// exact key set, the collector's stamp and the date order. The real site stamps nothing; a note failing this is refused.
+const KEYS = ${JSON.stringify(SITE_COLLECTOR_STAGED_KEYS)};
+const iso = (value) => typeof value === "string" && /^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\.\\d{3}Z$/.test(value)
+  && new Date(value).toISOString() === value;
+const dates = [note.windowStart, note.windowEnd, note.asOf, note.stagedAt, note.publishedAt];
+const admitted = Object.keys(note).length === KEYS.length && KEYS.every((key) => Object.hasOwn(note, key))
+  && note.stagedBy === "field-trials-collector" && dates.every(iso) && dates[0] < dates[1] && dates[1] <= dates[2]
+  && dates[2] <= dates[3] && dates[3] <= dates[4] && Date.parse(dates[4]) <= Date.now();
+if (!admitted && !["garbled", "usage"].includes(mode)) {
+  console.log(JSON.stringify({ outcome: "refused", reason: "model field note refused: invalid schema, rights, coverage or disclosure cell" }));
+  process.exit(1);
+}
+const staged = note;
 if (mode === "garbled") { console.log("not json"); process.exit(0); }
 if (mode === "usage") { console.error("usage: --daily-stage"); process.exit(2); }
 if (mode === "staged-nothing") { console.log(JSON.stringify({ outcome: "staged", releaseId: note.releaseId })); process.exit(0); }
@@ -296,6 +312,45 @@ test("W1-T10832: a field-note candidate keeps exactly one site import PR open", 
   }
 });
 
+test("W1-T14984 criterion 1: a staged field note carries the collector's stamps the site requires", async (t) => {
+  const root = tempRoot("collector-stamps");
+  try {
+    const site = stageFixture(t, root, "staged");
+    const github = siteRest();
+    const pass = await dailyPass(root, DAY(4, 7), [1, 2, 3], { fetch: github.fetch, siteUrl: site.url });
+    assert.equal(pass.row.state, "staged", `the site's stage mode admits the stamped note: ${JSON.stringify(pass.row)}`);
+    const [siteInput] = seenCandidates(site.seen);
+    assert.deepEqual(Object.keys(siteInput!).sort(), SITE_COLLECTOR_STAGED_KEYS, "exactly the site's collector-staged keys");
+    assert.equal(siteInput!.stagedBy, "field-trials-collector");
+    const order = [siteInput!.asOf, siteInput!.stagedAt, siteInput!.publishedAt] as string[];
+    assert.ok(order[0]! <= order[1]! && order[1]! <= order[2]! && Date.parse(order[2]!) <= Date.now(),
+      `asOf <= stagedAt <= publishedAt <= now: ${order.join(" ")}`);
+    // The fake is the site's gate, not a stamp of its own: the exporter's bare note, as core sent it before, is refused.
+    const bare = Object.fromEntries(Object.entries(siteInput!).filter(([key]) => !["stagedBy", "stagedAt", "publishedAt"].includes(key)));
+    mkdirSync(join(root, "bare"), { recursive: true });
+    const bareSite = stageFixture(t, join(root, "bare"), "staged");
+    const bareRoot = join(root, "bare-pass");
+    mkdirSync(bareRoot, { recursive: true });
+    const refusedBare = await syncFieldNoteSiteImport({ workRoot: bareRoot, nowIso: DAY(4, 7),
+      exportCandidate: () => ({ state: "candidate", note: bare as unknown as ModelFieldNoteBody }) },
+      { siteUrl: bareSite.url, fetch: siteRest().fetch, writeProof: granted });
+    assert.equal(refusedBare.state, "staged", "core stamps even a note handed to it bare");
+    for (const drop of ["stagedBy", "stagedAt", "publishedAt"]) {
+      const unstamped = Object.fromEntries(Object.entries(siteInput!).filter(([key]) => key !== drop));
+      mkdirSync(join(root, `drop-${drop}`), { recursive: true });
+      const dropped = stageFixture(t, join(root, `drop-${drop}`), "staged");
+      const candidate = join(root, `drop-${drop}.json`);
+      writeFileSync(candidate, JSON.stringify(unstamped));
+      const run = spawnSync(process.execPath, [join(fileURLToPath(dropped.url), "scripts", "import-model-field-note.mjs"), "--daily-stage", candidate,
+        join(root, `drop-${drop}.md`)], { cwd: fileURLToPath(dropped.url), encoding: "utf8" });
+      assert.equal(run.status, 1, `the site fake refuses a note missing ${drop}`);
+      assert.match(run.stdout, /invalid schema, rights, coverage or disclosure cell/);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("W1-T10832: core stamps no review fields and nothing merges the site PR", async (t) => {
   const root = tempRoot("no-stamp");
   try {
@@ -304,8 +359,9 @@ test("W1-T10832: core stamps no review fields and nothing merges the site PR", a
     const pass = await dailyPass(root, DAY(4, 7), [1, 2, 3], { fetch: github.fetch, siteUrl: site.url });
     assert.equal(pass.row.state, "staged", JSON.stringify(pass.row));
     const [siteInput] = seenCandidates(site.seen);
-    assert.deepEqual(Object.keys(siteInput!).sort(), EXPORT_KEYS, "core passes the exporter's unstamped note to the site");
-    for (const field of ["reviewedBy", "reviewedAt", "publishedAt", "stagedBy", "stagedAt"]) {
+    // W1-T14984: core adds only the collector stamps the site's stage mode requires; never a review field.
+    assert.deepEqual(Object.keys(siteInput!).sort(), SITE_COLLECTOR_STAGED_KEYS, "core passes the exporter's note with the collector stamps");
+    for (const field of ["reviewedBy", "reviewedAt"]) {
       assert.equal(Object.hasOwn(siteInput!, field), false, `core never writes ${field} into the importer input`);
     }
     const candidate = JSON.parse(readFileSync(join(pass.outDir, "field-note-candidate-latest.json"), "utf8"));
@@ -317,8 +373,8 @@ test("W1-T10832: core stamps no review fields and nothing merges the site PR", a
     const pushed = github.state.trees[0]!.tree.find((entry) => entry.path === "data/model-field-note.json")!;
     const staged = JSON.parse(pushed.content);
     assert.equal(pushed.content, readFileSync(site.stagedNote, "utf8"), "core sends exactly the site's staged note");
-    assert.equal(staged.publishedAt, DAY(4, 7), "the site stage mode owns the publication stamp");
-    assert.equal(staged.stagedBy, "site-stage-mode");
+    assert.equal(staged.publishedAt, DAY(4, 7), "the collector stamps the publication at the pass's time");
+    assert.equal(staged.stagedBy, "field-trials-collector");
     assert.equal(staged.stagedAt, DAY(4, 7));
     assert.equal(Object.hasOwn(staged, "reviewedBy"), false);
     assert.equal(Object.hasOwn(staged, "reviewedAt"), false);

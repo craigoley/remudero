@@ -90,14 +90,14 @@ test("W1-T4738: a release receipt retires only its exact verify-human ask withou
   const classified = classifyAllProposalsMemo(world.deps);
   assert.equal(classified.classifications.find((row) => row.proposalId === HUMAN)?.state, "retired");
   assert.equal(classified.classifications.find((row) => row.proposalId === OTHER)?.state, "ready", "W1-T14977: an unreleased parked ask is ready to approve as its release");
-  assert.equal(classified.classifications.find((row) => row.proposalId === GENERIC)?.state, "not_ready", "an ID without producer purpose cannot borrow the exact release");
+  assert.equal(classified.classifications.find((row) => row.proposalId === GENERIC)?.state, "retired", "W1-T14976: an untyped ask is answered by its own task's release");
   assert.equal(classified.classifications.find((row) => row.proposalId === HELD)?.state, "not_ready");
   assert.ok(classified.proposals.some((row) => row.id === HUMAN), "history stays in the registry");
   const visible = await threads(world.deps);
   assert.ok(!visible.some((row) => row.proposalId === HUMAN));
   assert.ok(visible.some((row) => row.proposalId === OTHER));
   assert.ok(visible.some((row) => row.proposalId === RULING));
-  assert.ok(visible.some((row) => row.proposalId === GENERIC));
+  assert.ok(!visible.some((row) => row.proposalId === GENERIC), "W1-T14976");
   assert.ok(visible.some((row) => row.proposalId === HELD));
 });
 

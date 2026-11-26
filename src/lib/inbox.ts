@@ -1475,8 +1475,13 @@ export function classifyProposal(
   const releasedTaskId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
   const verifiedFamily = proposal.verificationAsk?.producer === "verify-human-judge-v1" ? `verify-human:${releasedTaskId}`
     : proposal.verificationAsk?.producer === "machine-filing-judge-v1" ? `machine-judge:${releasedTaskId}` : undefined;
-  if (!held && releasedTaskId && proposal.verificationAsk?.taskId === releasedTaskId &&
-    proposal.verificationAsk.proposalDigest === inboxMechanicalProposalDigest(proposal) && proposal.id === verifiedFamily && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
+  const typedRelease = releasedTaskId !== undefined && proposal.verificationAsk !== undefined && proposal.verificationAsk.taskId === releasedTaskId &&
+    proposal.verificationAsk.proposalDigest === inboxMechanicalProposalDigest(proposal) && proposal.id === verifiedFamily;
+  // W1-T14976 (operator ruling 2026-11-26 15:10Z): an UNTYPED ask, filed before stampVerificationAsk shipped
+  // (#12507, 2026-10-17), asked for this same release, so the task's verified release receipt answers it too.
+  // A typed ask whose stamp no longer matches stays open, and a held task's receipt answers nothing.
+  const untypedRelease = proposal.verificationAsk === undefined && !proposal.automaticRetirement;
+  if (!held && releasedTaskId && (typedRelease || untypedRelease) && ctx.plan.byId.has(releasedTaskId) && ctx.isReleasedHumanTask?.(releasedTaskId) === true) {
     return {
       proposalId: proposal.id,
       state: "retired",
@@ -1489,7 +1494,8 @@ export function classifyProposal(
     ctx.depsUnobservable?.(currentTaskReferent.id) === undefined && ctx.isMerged(currentTaskReferent)))
     return { proposalId: proposal.id, state: "not_ready", reasons: [{ predicate: "lint_clean", detail: "needs-triage: terminal task facts require an exact reversible ask receipt" }], needsTriageReason: "A task's terminal state alone does not answer an unqualified operator ask; source revalidation is required" };
   // Typed mechanical asks retire through the reversible journal. Untyped human asks never gain
-  // terminal authority from their ID, changed verification mode, or a related task's merge.
+  // terminal authority from their ID, changed verification mode, or a related task's merge; the
+  // only exception is their own task's verified release receipt above (W1-T14976).
   const automaticTerminal = !held && !proposal.automaticRetirement && !taskIdForProtection;
   // W1-T2451: RESOLVED is a terminal override — such a proposal has no live referent to be ABOUT. UNREADABLE never
   // short-circuits: it only sets a flag, so a failed read never blocks a READY.
