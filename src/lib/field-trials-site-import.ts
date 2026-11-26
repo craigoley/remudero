@@ -29,6 +29,7 @@ import { plannerPrWriteToken } from "./secret-boundary.js";
 import type { GhApiFetcher } from "./open-prs-rest.js";
 import { createPlanPrRest, probeExistingPlanPr } from "./plan-pr-emitter.js";
 import type { ModelFieldNoteBody } from "./field-trials-field-note.js";
+import { fixedClock } from "./clock.js";
 
 export const SITE_IMPORT_OWNER = "craigoley";
 export const SITE_IMPORT_REPO = "remudero-site";
@@ -180,6 +181,22 @@ async function publish(fetch: GhApiFetcher, siteDir: string, workDir: string,
   return { state: "staged", releaseId, pr: "opened", prUrl: created.prUrl, prNumber: created.prNumber, files };
 }
 
+/** W1-T14984: who staged a field note, as the site's stage mode requires it (remudero-site lib/model-field-note.ts). */
+export const FIELD_NOTE_STAGED_BY = "field-trials-collector";
+
+/**
+ * W1-T14984: the exporter's note with the collector stamps the site's `--daily-stage` parser demands. The site accepts
+ * only its exact collector-staged key set (`stagedBy: "field-trials-collector"`, `stagedAt`, `publishedAt`, ordered
+ * asOf <= stagedAt <= publishedAt <= now) and stamps nothing itself, so a bare note was refused on every pass
+ * ("invalid schema, rights, coverage or disclosure cell"). Both stamps are this pass's own time; no review field is
+ * ever written, because the owner's merge of the site PR is the review.
+ */
+export function collectorStagedNote<T extends { asOf: string }>(note: T, nowIso: string):
+  T & { stagedBy: typeof FIELD_NOTE_STAGED_BY; stagedAt: string; publishedAt: string } {
+  const at = fixedClock(Date.parse(nowIso)).iso();
+  return { ...note, stagedBy: FIELD_NOTE_STAGED_BY, stagedAt: at, publishedAt: at };
+}
+
 /**
  * One pass of the daily site import: fresh site main, the exporter after its released windows, the site's
  * own stage mode, and — only on `staged` — one open import PR. Every outcome is a value, never a throw.
@@ -217,7 +234,7 @@ export async function syncFieldNoteSiteImport(input: SiteImportInput,
     if (!script.includes("--daily-stage")) return { state: "site-stage-mode-unavailable", releaseId };
     // The site stage mode owns every publication and review stamp.
     const candidatePath = join(workDir, "candidate.json"), summaryPath = join(workDir, "summary.md");
-    writeFileSync(candidatePath, JSON.stringify(exported.note), { mode: 0o600 });
+    writeFileSync(candidatePath, JSON.stringify(collectorStagedNote(exported.note, input.nowIso)), { mode: 0o600 });
     const stage = spawn(process.execPath, ["--experimental-strip-types", SITE_STAGE_SCRIPT, "--daily-stage", candidatePath, summaryPath], { cwd: siteDir });
     const line = stage.stdout.trim().split("\n").at(-1) ?? "";
     let reported: { outcome?: string; reason?: string } = {};

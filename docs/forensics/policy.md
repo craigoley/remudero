@@ -233,6 +233,12 @@ fs.watch"): a redelivery/replay burst is refused as a duplicate only while its d
 is still in this window, so the bound is a real, reviewed tuning knob, not a source
 literal. OPTIONAL, absent-means-default like {@link PolicyValues.sweepWallClockBoundMs}.
 
+W1-T14810: `githubEventWake.artifactRecheckMs` is the fold-debt and mutation-verdict artifact
+listings' freshness floor. A sweep lists those artifacts when a verified
+`workflow_run:completed` delivery for the repository arrived since its last listing, and
+otherwise only once that listing is older than this row (default 900000). A delivery always
+lists; the floor only recovers a missed one, so it is never a cap.
+
 ## PolicyValues.armCalibrationBands
 
 ### Base lines 272-284

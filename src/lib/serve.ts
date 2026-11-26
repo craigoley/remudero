@@ -3941,9 +3941,9 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
     write: (window) => deps.log?.("github.wake.summary", { ...wakeSummaryRow(wakeCounters, window) }),
   });
   // W1-T14881: GitHub's own log of each webhook delivery serve answered, when serve takes webhooks at all.
-  const deliveryLogOrg = deps.githubEventWake?.secret ? deps.githubEventWake.repository.split("/")[0] : undefined;
-  const stopDeliveryLog = deliveryLogOrg
-    ? startGithubDeliveryLogPass({ org: deliveryLogOrg, stateDir: join(deps.fleetControlRoot, "state"), log: (step, fields) => deps.log?.(step, fields) })
+  // W1-T14967: the log is the App's own webhook's, read with an App JWT.
+  const stopDeliveryLog = deps.githubEventWake?.secret
+    ? startGithubDeliveryLogPass({ stateDir: join(deps.fleetControlRoot, "state"), log: (step, fields) => deps.log?.(step, fields) })
     : () => {};
   // W1-T9370: each worker module's first start (bundle or .ts source) is ledgered as worker.entry_resolved.
   setWorkerEntryLog(deps.log);
