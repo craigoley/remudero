@@ -350,7 +350,7 @@ interface PlanLintRetryIdentity {
 function appendPlanLintRetryRow(
   ledgerPath: string,
   id: PlanLintRetryIdentity,
-  outcome: "admitted" | "refused" | "incomplete" | "published" | "post_failed",
+  outcome: "admitted" | "refused" | "incomplete" | "published" | "post_failed" | "held",
   reason?: string,
 ): void {
   appendLedger(ledgerPath, {
@@ -13601,6 +13601,22 @@ export function taskHoldInputDigest(opts: Pick<PostReviewStatusGuardedOpts, "sha
     : reviewInputDigest(opts.sha, snapshot.body, opts.reviewEngineRevision ?? REVIEW_ENGINE_REVISION);
 }
 
+/** W1-T14902 (round-10 C1): a held task's plan-lint retry settles its attempt `held`, carrying the admitted identity. */
+async function settlePlanLintRetryHeld(opts: PostReviewStatusGuardedOpts, retry: PlanLintRetryPublicationRequest,
+  refusal: string): Promise<void> {
+  const identity: PlanLintRetryIdentity = { runId: opts.runId, taskId: opts.taskId, attemptId: retry.attemptId,
+    prUrl: opts.prUrl, headSha: opts.sha, digest: opts.reviewDecisionDigest };
+  try {
+    const admitted = (await readPlanLintRetryRows(opts.ledgerPath)).findLast((row) => row.outcome === "admitted" &&
+      row.attempt_id === retry.attemptId && row.pr_url === opts.prUrl && row.head_sha === opts.sha);
+    identity.mergeBaseSha = admitted?.merge_base_sha;
+    identity.priorRunId = admitted?.prior_run_id;
+  } catch {
+    // The settled row still names the attempt, head and digest; only the admitted base and prior run go unrecorded.
+  }
+  appendPlanLintRetryRow(opts.ledgerPath, identity, "held", refusal);
+}
+
 async function publishTaskHold(opts: PostReviewStatusGuardedOpts, verdict: ReviewVerdict,
   refusal: string, snapshot?: PullRequestSnapshot): Promise<PostReviewStatusGuardedResult> {
   const description = `remudero-review: pending — ${refusal}; it merges after the operator releases the hold`
@@ -13610,9 +13626,14 @@ async function publishTaskHold(opts: PostReviewStatusGuardedOpts, verdict: Revie
   appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: opts.taskId, step: "review.dispatch_hold_held",
     head_sha: opts.sha, attempted_state: "success", reason: refusal, outcome: "pending",
     ...(inputDigest !== undefined ? { review_input_digest: inputDigest } : {}) });
-  // No decision digest: a hold is not a terminal decision, so the pass cannot replay over it once posted.
-  const result = await publishReviewStatusLocked({ ...opts, state: "pending", verdict: held, description,
+  // No decision digest: a hold is not a terminal decision, so the pass cannot replay over it once posted. A plan-lint
+  // retry is not forwarded (round-10 C1): its gate admits only the terminal it re-judges, so it would refuse the
+  // pending and leave the hold unposted. The hold posts through the ordinary guarded pending path, and the attempt
+  // settles `held`, distinct from a `published` terminal.
+  const { planLintRetry, ...unretried } = opts;
+  const result = await publishReviewStatusLocked({ ...unretried, state: "pending", verdict: held, description,
     reviewDecisionDigest: undefined, reviewInputDigest: inputDigest });
+  if (planLintRetry !== undefined) await settlePlanLintRetryHeld(opts, planLintRetry, refusal);
   return { ...result, effectiveState: "pending", effectiveVerdict: held, taskHold: refusal, reason: result.reason ?? refusal };
 }
 

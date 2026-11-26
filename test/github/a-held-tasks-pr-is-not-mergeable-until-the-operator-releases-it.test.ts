@@ -866,3 +866,58 @@ test("W1-T14902: the synchronous arm's write fence reads its reader synchronousl
   assert.match(sync.error ?? "", /dispatch_hold is unreadable \(read failed\)/);
   assert.equal(writes.length, 0);
 });
+
+test("W1-T14902: a held task's plan-lint retry posts the hold as pending, and its attempt settles held, never published", async (t) => {
+  const ledgerPath = join(tmp(t, "lint-retry"), "ledger.ndjson");
+  const admitted = { run_id: "t14902-retry", task_id: TASK, step: "review.plan_lint_retry", attempt_id: "review-PR910-attempt",
+    pr_url: PR_URL, head_sha: SHA, merge_base_sha: "b".repeat(40), review_decision_digest: "v1:decision", prior_run_id: "t14902-seed",
+    outcome: "admitted" };
+  writeFileSync(ledgerPath, `${JSON.stringify(admitted)}\n`);
+  const posts: Array<{ state: string; description?: string }> = [];
+  const result = await postReviewStatusGuarded({
+    owner: "acme", repo: "remudero-ops", sha: SHA, state: "success", verdict: PASS, description: PASS.summary,
+    taskId: TASK, evidence: "executed", ledgerPath, runId: "t14902-retry", prUrl: PR_URL, reviewInputDigest: "v2:t14902",
+    reviewDecisionDigest: "v1:decision", reopenedDegradedTerminal: true,
+    planLintRetry: { attemptId: "review-PR910-attempt", outcome: { ran: true, label: "fixture", checked: 1, violations: [] },
+      observe: () => { throw new Error("a held retry observes nothing: it publishes no terminal"); } },
+    fetchLifecycle: () => ({ merged: false, closed: false }),
+    readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
+    fetchCurrentStatusEntry: () => undefined,
+    post: (status) => { posts.push({ state: status.state, description: status.description }); },
+    semanticJudgement: { planOnly: true, reviewerOutcome: "success" },
+    taskHold: taskHoldReading(TASK, { dispatch_hold: true }),
+  });
+  assert.deepEqual(posts.map((p) => p.state), ["pending"], "THE CLAIM: the retry's hold is posted pending through the guarded path");
+  assert.match(posts[0]!.description ?? "", /held: W1-T14898 carries dispatch_hold/);
+  assert.equal(result.posted, true);
+  assert.equal(result.taskHold, "held: W1-T14898 carries dispatch_hold");
+  const retries = readLedgerLines(ledgerPath).filter((row) => row.step === "review.plan_lint_retry");
+  assert.deepEqual(retries.map((row) => row.outcome), ["admitted", "held"], "the attempt settles held: distinct from a published terminal");
+  assert.equal(retries[1]!.attempt_id, "review-PR910-attempt");
+  assert.equal(retries[1]!.merge_base_sha, "b".repeat(40), "the held row carries the admitted identity");
+  assert.match(String(retries[1]!.reason), /dispatch_hold/);
+  const posted = readLedgerLines(ledgerPath).filter((row) => row.step === "review.posted");
+  assert.ok(posted.every((row) => row.review_decision_digest === undefined), "no decision digest: the hold is no terminal to replay");
+});
+
+test("W1-T14902: a held plan-lint retry whose ledger archive is unreadable still settles held, naming the attempt", async (t) => {
+  const dir = tmp(t, "lint-retry-unread");
+  const ledgerPath = join(dir, "ledger.ndjson");
+  writeFileSync(join(dir, "ledger.2026-11-01.ndjson.gz"), "not gzip");
+  const result = await postReviewStatusGuarded({
+    owner: "acme", repo: "remudero-ops", sha: SHA, state: "success", verdict: PASS, description: PASS.summary,
+    taskId: TASK, evidence: "executed", ledgerPath, runId: "t14902-retry", prUrl: PR_URL, reviewInputDigest: "v2:t14902",
+    reviewDecisionDigest: "v1:decision", reopenedDegradedTerminal: true,
+    planLintRetry: { attemptId: "review-PR910-attempt", outcome: { ran: true, label: "fixture", checked: 1, violations: [] },
+      observe: () => { throw new Error("unreached"); } },
+    fetchLifecycle: () => ({ merged: false, closed: false }),
+    readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
+    fetchCurrentStatusEntry: () => undefined,
+    post: () => {},
+    semanticJudgement: { planOnly: true, reviewerOutcome: "success" },
+    taskHold: taskHoldReading(TASK, { dispatch_hold: true }),
+  });
+  assert.equal(result.taskHold, "held: W1-T14898 carries dispatch_hold");
+  const retries = readLedgerLines(ledgerPath).filter((row) => row.step === "review.plan_lint_retry");
+  assert.deepEqual(retries.map((row) => [row.outcome, row.attempt_id, row.merge_base_sha]), [["held", "review-PR910-attempt", undefined]]);
+});
