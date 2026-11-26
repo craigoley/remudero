@@ -59,6 +59,7 @@ async function fixRung(opts: {
   corpus?: string;
   ci?: Array<"green" | "red">;
   landed?: boolean;
+  noCommit?: boolean;
 }): Promise<Run> {
   const taskId = opts.taskId ?? OFFERED_TASK;
   const ci = opts.ci ?? ["green"];
@@ -78,6 +79,7 @@ async function fixRung(opts: {
     const prompts: string[] = [];
     const rows: Row[] = [];
     const pushed: string[] = [];
+    let publishedHead = base;
     let waits = 0;
     await runFixRung({
       task, taskId, runId, prUrl: "https://github.com/acme/remudero/pull/7", branch: `run-${runId}`,
@@ -89,9 +91,11 @@ async function fixRung(opts: {
         ledgerLines: () => rows.map((row) => ({ ...row, task_id: taskId })), ledgerPath: join(root, "ledger.ndjson"),
         spawn: async (args) => {
           prompts.push(args.prompt);
-          writeFileSync(join(repo, `round-${prompts.length}.txt`), "fixed\n");
-          git("add", `round-${prompts.length}.txt`);
-          git("commit", "-q", "-m", `fix: round ${prompts.length}`);
+          if (!opts.noCommit) {
+            writeFileSync(join(repo, `round-${prompts.length}.txt`), "fixed\n");
+            git("add", `round-${prompts.length}.txt`);
+            git("commit", "-q", "-m", `fix: round ${prompts.length}`);
+          }
           return {
             sessionId: "fix", costUsd: 0, numTurns: 1, text: "fixed", blocks: [], stderr: "",
             subtype: "success", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
@@ -99,8 +103,8 @@ async function fixRung(opts: {
             modelUsage: {}, compactionEvents: [], qualitySuspect: false,
           } satisfies WorkerResult;
         },
-        push: () => { pushed.push(git("rev-parse", "HEAD")); },
-        ...(opts.landed === false ? { readRemoteBranchHead: async () => base } : {}),
+        push: () => { const head = git("rev-parse", "HEAD"); pushed.push(head); if (opts.landed !== false) publishedHead = head; },
+        ...((opts.landed === false || opts.noCommit) ? { readRemoteBranchHead: async () => opts.landed === false ? base : publishedHead } : {}),
         waitForCiGreen: async () => ({ state: ci[waits++] ?? "green", sha: git("rev-parse", "HEAD") }),
         fetchCiFailures: async () => SECOND_RED,
         runReview: async () => ({ ...initialReview, state: "success", criteria: criteria.map((c) => ({ ...c, met: true })), headSha: git("rev-parse", "HEAD") }),
@@ -186,6 +190,31 @@ test("W1-T14138 criterion 4: a round whose push did not land records that it pus
   assert.equal(outcomes[0]!.conclusion, "no_push");
   assert.equal(outcomes[0]!.pushed_head_sha, undefined);
   assert.equal(outcomes[0]!.shadow_id, of(run, "fix.learnings_shadow")[0]!.shadow_id);
+});
+
+test("W1-T14138 criterion 4: a successful no-op push does not claim the already-published head", async () => {
+  const run = await fixRung({ corpus: CORPUS, noCommit: true });
+  const done = of(run, "fix.done")[0]!;
+  const outcome = of(run, "fix.learnings_outcome")[0]!;
+  assert.equal(done.pushed_head_sha, run.pushed[0]);
+  assert.equal(done.fix_learnings_no_push, true);
+  assert.equal(outcome.conclusion, "no_push");
+  assert.equal(outcome.rounds_to_green, undefined);
+});
+
+test("known CI failures remain selectable when prompt evidence is conflict-only", () => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}fix-learnings-known-ci-`));
+  try {
+    mkdirSync(join(root, "learnings"));
+    writeFileSync(join(root, "learnings", "ci.yaml"), CORPUS);
+    const round = recordFixLearningsShadow({ taskId: OFFERED_TASK, runId: "known-ci", prNumber: 7, attempt: 1,
+      round: "resume", repoDir: root, config: { root } as Config,
+      evidence: { mergeConflict: { files: [], oursLog: "", theirsLog: "" } }, knownCiFailures: FIRST_RED, priorRows: [] });
+    assert.deepEqual(round.row.failing_checks, ["unit-shadow-check"]);
+    assert.deepEqual(matchedIds(round.row), ["by-check-name", "by-log-error", "by-title-symbol"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("an unreadable corpus is recorded as a selection error, never as an empty match, and the round still runs", async () => {

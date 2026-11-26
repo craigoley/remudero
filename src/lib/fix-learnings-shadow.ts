@@ -55,13 +55,17 @@ export function recordFixLearningsShadow(input: {
   repoDir: string;
   config: Config;
   evidence: FixEvidence;
+  /** Checks already known to the dispatch, including when merge-conflict prompt evidence omits CI. */
+  knownCiFailures?: FixEvidence["ciFailures"];
   priorRows: ReadonlyArray<Record<string, unknown>>;
 }): FixLearningsRound {
   const { taskId, evidence } = input;
+  const ciFailures = input.knownCiFailures ?? evidence.ciFailures ?? [];
+  const selectionEvidence = { ...evidence, ciFailures };
   const withheld = taskArmWithheld({ taskId, unit: "fix-learnings", share: FIX_LEARNINGS_SHARE, epoch: FIX_LEARNINGS_EPOCH });
   let selection: Record<string, unknown>;
   try {
-    const context = { text: selectionText(evidence) };
+    const context = { text: selectionText(selectionEvidence) };
     const { entries } = loadLayeredLearningsForTaskFiles({
       projectDir: projectLearningsHome(input.repoDir),
       userOverallDir: userOverallLearningsHome(input.config),
@@ -88,7 +92,7 @@ export function recordFixLearningsShadow(input: {
       arm: withheld ? "withheld" : "offered",
       ...selection,
       budget_chars: DEFAULT_KNOWLEDGE_BUDGET_CHARS,
-      failing_checks: [...new Set((evidence.ciFailures ?? []).map((f) => f.name))],
+      failing_checks: [...new Set(ciFailures.map((f) => f.name))],
     },
   };
 }
@@ -98,6 +102,7 @@ export function recordFixLearningsShadow(input: {
 export function fixLearningsDoneConclusion(round: FixLearningsRound, done: Record<string, unknown>): "no_push" | undefined {
   if (round.pushed !== undefined || typeof done.round_id !== "string") return undefined;
   round.roundId = done.round_id;
+  if (done.fix_learnings_no_push === true) return "no_push";
   const head = typeof done.pushed_head_sha === "string" ? done.pushed_head_sha : undefined;
   if (head === undefined && done.push_outcome !== "landed" && done.push_outcome !== "unverified" &&
     done.push_outcome !== "remote_unreadable") return "no_push";

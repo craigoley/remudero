@@ -4899,7 +4899,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       // adopted evidence head can continue this loop with different checks; those checks belong to a new row.
       if (learningsRound === undefined || learningsRound.pushed !== undefined) {
         learningsRound = recordFixLearningsShadow({ taskId: opts.taskId, runId: opts.runId, prNumber, attempt, round,
-          repoDir: opts.worktreePath, config: opts.config, evidence, priorRows: roundLedger });
+          repoDir: opts.worktreePath, config: opts.config, evidence, knownCiFailures: currentCiFailures, priorRows: roundLedger });
         deps.log("fix.learnings_shadow", learningsRound.row);
       }
       learningsRound.roundId = roundId;
@@ -5346,6 +5346,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     };
     let workerProofResults: FixProgressWorkerProofResult[] = [];
     let selfCheckCostUsd = 0;
+    let fixLearningsNoPush = false;
     const logFixDoneRow = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding, waitFields?: Record<string, unknown>) => deps.log("fix.done", {
       ...fixReceipt.ledgerFields(fixResult), // W1-T4613: FIRST, so every field this row already carried keeps its value
       round_id: roundId,
@@ -5355,6 +5356,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       ...fixClaimFields,
       head_sha: priorHeadSha,
       pushed_head_sha: pushedHeadSha,
+      ...(fixLearningsNoPush ? { fix_learnings_no_push: true } : {}),
       ...(workerProofResults.length > 0 ? { worker_proof_results: workerProofResults } : {}),
       strike: attempt,
       round,
@@ -5862,6 +5864,19 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         headSha: expectedHeadShaForPush, criteria: unmet }, opts.workerProofIo);
     }
     let landing: FixRoundLanding = { landed: false, outcome: "failed", reason: "the push did not return" };
+    if (expectedHeadShaForPush !== undefined) {
+      try {
+        // Use a fresh remote read when the caller has one; otherwise `priorHeadSha` is this
+        // round's pinned published tip, captured before the worker ran.
+        const publishedBeforePush = deps.readRemoteBranchHead
+          ? await deps.readRemoteBranchHead(opts.worktreePath, opts.branch)
+          : priorHeadSha;
+        fixLearningsNoPush = publishedBeforePush === expectedHeadShaForPush;
+      } catch (error) {
+        deps.log("fix.learnings_push_head_read_error", { round_id: roundId,
+          reason: String((error as Error)?.message ?? error).slice(0, 500) });
+      }
+    }
     try {
       const priorHeadSha = opts.guardRoundHead && fixHarnessOwnsGit && ownedSessionPushGuard === undefined ? roundPushBaseSha : undefined;
       roundPush = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, expectedHeadShaForPush, priorHeadSha, ownedSessionPushGuard), expectedHeadShaForPush, "rung.strike");
