@@ -4,7 +4,11 @@ import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { closeDaemonCleanup, createDaemonRetirement, retiringCiJudgeKick } from "#src/cli/commands/daemon.js";
 import { withCiJudgeAfterSweep } from "#src/lib/ci-escalation-judge.js";
+import { EventEmitter } from "node:events";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
+import { spawnRunChild } from "#src/lib/run-child.js";
 import { resolveFleetControlHold, type LightPassScope, type RestartAdmission } from "#src/lib/daemon.js";
 import { spawnWorker, type SpawnWorkerArgs } from "#src/lib/worker.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -42,6 +46,33 @@ function drafterStart(t: TestContext, withheld: Array<Record<string, unknown>>, 
     admitWorkerMemory: async () => { starts.push("memory_admission"); return { kind: "admitted", tier: "fits", waitedMs: 0, attempts: 1 }; },
     logWorkerSpawnWithheld: (row) => withheld.push(row),
     providerRouting: { writeStatus: () => {}, spawnCodex: async () => { starts.push("drafter_worker"); throw new Error("started"); } } };
+}
+
+/** A detached run child whose memory reservation is held open until `admit()`, as sweep.ts launches reviews and fixes. */
+function runChildStart(t: TestContext) {
+  const root = ownedFixtureDir(t, "retired-run-child").dir;
+  const state = join(root, "state");
+  const sha = "b".repeat(40);
+  const hash = "a".repeat(64);
+  mkdirSync(join(state, "engines", hash), { recursive: true });
+  writeFileSync(join(state, "engines", hash, "engine.json"), JSON.stringify({ sha, sourceHash: hash, builtAt: Date.now() }));
+  const rows: Row[] = [];
+  const spawned: string[] = [];
+  const released: string[] = [];
+  let admit: () => void = () => {};
+  const reserved = new Promise<void>((resolve) => { admit = resolve; });
+  const handle = { id: "reservation-1", workerClass: "review", estimateMib: 1, estimateSource: "default", bindRoot: () => {},
+    releaseOccupancy: () => { released.push("reservation-1"); } } as unknown as LearnedReservation;
+  const launch = () => spawnRunChild({
+    taskId: "T-1", stateRoot: state, repoDir: root, root,
+    options: { skipGitSync: false, handOffAtPrOpen: true, pairedTrialHost: "daemon" as const },
+    plan: async () => ({ plan: { tasks: [{ id: "T-1", title: "t", repo: "remudero", depends_on: [], type: "implement",
+      verify: "auto", status: "queued" }] } }) as never,
+    log: (step: string, extra?: Record<string, unknown>) => { rows.push({ step, ...extra }); },
+  }, { mainSha: async () => sha, engine: { isCurrent: () => true }, watch: false, pollMs: 60_000,
+    reserve: async () => { await reserved; return handle; }, workerAdmissionHold: () => undefined,
+    spawn: () => { spawned.push("run_child"); return Object.assign(new EventEmitter(), { pid: 424_242, unref() {} }) as never; } });
+  return { rows, spawned, released, admit: () => admit(), launch };
 }
 
 const turns = async (n: number) => { for (let i = 0; i < n; i++) await new Promise((resolve) => setImmediate(resolve)); };
@@ -99,6 +130,24 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
     ["ci_judge_kick", "light_pass_admission"]);
   late.settlePage();
   await lateExit;
+
+  // A review admitted before the release launches a detached run child, and its memory wait outlasts the release.
+  const child = runChildStart(t);
+  const waiting = retiringExit();
+  const launched = waiting.retirement.inSpawnScope(() => child.launch());
+  await turns(5);
+  const waitingExit = waiting.exit();
+  await turns(5);
+  child.admit();
+  const outcome = await launched;
+  assert.equal(outcome.started, false, "a run child whose wait ends after the release does not start");
+  assert.equal("abandoned" in outcome && outcome.abandoned, true, "the caller treats it as not started, never in process");
+  assert.deepEqual(child.spawned, [], "no child process is spawned");
+  assert.deepEqual(child.released, ["reservation-1"], "the admitted reservation is released");
+  assert.equal(child.rows.find((row) => row.step === "run_child.spawn_withheld")?.hold,
+    "retired: drain lock released; the successor owns this work", "the launch gate ledgers why it withheld the child");
+  waiting.settlePage();
+  await waitingExit;
 
   // The retirement belongs to that daemon's scope: a start outside it (the next daemon in a pooled process, or a
   // direct spawn) still reaches memory admission.

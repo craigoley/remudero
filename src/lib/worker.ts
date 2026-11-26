@@ -2666,6 +2666,12 @@ export function runInWorkerSpawnScope<T>(scope: WorkerSpawnScope, run: () => T):
   return workerSpawnScope.run(scope, run);
 }
 
+/** Why the caller's daemon spawn scope is retired, or undefined while it may start work. A run child is a new process
+ *  that inherits no scope, so spawnRunChild reads this at its own launch gate (run-child.ts). */
+export function workerSpawnRetiredBy(): string | undefined {
+  return workerSpawnScope.getStore()?.retiredBy;
+}
+
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // W1-T13868: a wrapper may replace this call's result with its own error; the call's table keeps the result's model.
   forgetReturnedServedModel();
@@ -2739,7 +2745,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // start would not fit. It never throws, and an error admits the start (host-memory-admission.ts).
   const childReservationId = currentRunChildReservationId();
   const admissionStartedAtMs = systemClock.now();
-  const retiredBy = workerSpawnScope.getStore()?.retiredBy;
+  const retiredBy = workerSpawnRetiredBy();
   const admission = childReservationId || retiredBy ? undefined : await (args.admitWorkerMemory ?? awaitMemoryAdmission)({
     workerClass: workerClassOf(args),
     signal: args.signal,

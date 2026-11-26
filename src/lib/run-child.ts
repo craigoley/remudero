@@ -48,6 +48,7 @@ import { killProcessGroup } from "./worker-containment.js";
 import { execFileRouted } from "./spawn-helper.js";
 import { keptOpsCatalogBlobsForChild } from "./ops-catalog-source.js";
 import type { ReviewerCodeFreshness } from "./self-sync.js";
+import { workerSpawnRetiredBy } from "./worker.js";
 
 export const RUN_CHILD_SHADOW_STEP = "run_child.shadow";
 export const RUN_CHILD_SHADOW_SKIPPED_STEP = "run_child.shadow_skipped";
@@ -1000,7 +1001,10 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     reservation = waited.held;
     // W1-T10001: the wait can outlast a PAUSE that began meanwhile; no child starts past it. It takes the abandoned path:
     // no claim, no run directory, no run.start, no strike, and never in-process under the hold.
-    const hold = (ports.workerAdmissionHold ?? (() => {
+    // W1-T14916: the same holds for a release of the caller's drain lock: a retired daemon starts no child, which would
+    // inherit no spawn scope of its own.
+    const retiredBy = workerSpawnRetiredBy();
+    const hold = retiredBy !== undefined ? { control: "retired" as const, detail: retiredBy } : (ports.workerAdmissionHold ?? (() => {
       const stop = stopDetail(input.root);
       if (stop !== undefined) return { control: "STOP" as const, detail: stop };
       const pause = pauseDetail(input.root);
@@ -1009,7 +1013,8 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     if (hold) {
       reservation.releaseOccupancy();
       reservation = undefined;
-      log(RUN_CHILD_SPAWN_WITHHELD_STEP, { task_id: input.taskId, run_id: runId, hold: `fleet ${hold.control} hold: ${hold.detail}` });
+      log(RUN_CHILD_SPAWN_WITHHELD_STEP, { task_id: input.taskId, run_id: runId,
+        hold: hold.control === "retired" ? `retired: ${hold.detail}` : `fleet ${hold.control} hold: ${hold.detail}` });
       return { started: false, abandoned: true, reason: "admission-abandoned", runId, waitedMs: 0 };
     }
     // A held reservation spends any carried wait; a state root that refuses the removal fails the spawn like writeSpec would.
