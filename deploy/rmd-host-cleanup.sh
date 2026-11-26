@@ -218,6 +218,9 @@ DOCKER_CMD="${RMD_CLEANUP_DOCKER:-docker}"
 
 # ── 2026-10-23 phases. Host defaults apply only on the host layout: a fixture never inherits the disks.
 RETAIN_DAYS="${RMD_CLEANUP_RETAIN_DAYS:-7}"
+# W1-T14971: a scratch hold that protects history (a bare repository, a clone borrowing missing objects, a folder
+# holding a dependency seed store) expires once the folder is idle this many days; it is then preserved, then retired.
+HOLD_EXPIRE_DAYS="${RMD_CLEANUP_HOLD_EXPIRE_DAYS:-$RETAIN_DAYS}"
 PRESERVE_ROOT="${RMD_CLEANUP_PRESERVE_ROOT:-$SCRATCH_DISK/host-cleanup-preserved}"
 MAX_UNTRACKED_MB="${RMD_CLEANUP_MAX_UNTRACKED_MB:-50}"
 DUMP_MIN_MB="${RMD_CLEANUP_DUMP_MIN_MB:-5}"
@@ -1207,6 +1210,89 @@ lender_check() {
   done <<< "$ALTERNATES"
   [ -z "$borrowers" ] || { SCRATCH_REASON="lends objects to $borrowers"; return 1; }
 }
+# W1-T14971: retire_held_scratch_unit <unit> <bare|broken|seed> <hold reason>. The caller has already proved the
+# unit idle for the scratch window, closed and unmounted. A unit idle past HOLD_EXPIRE_DAYS is copied to the preserve
+# root (each bare repository as a verified bundle, the rest as a listed tarball, with a MANIFEST), then removed.
+# A unit owned in whole or part by another user is reported with its size and never removed.
+HELD_LINKS_TAKEN=0
+retire_held_scratch_unit() {
+  local p="$1" kind="$2" why="$3" uid bytes found name final work rel bare listed walked unit_is_bare=0
+  local -a excludes=() bares=()
+  bytes="$(du_bytes "$p")"
+  uid="$(owner_uid "$p")"
+  if [ "$uid" != "$RUN_UID" ]; then log "KEEP $p: $why; foreign owner (uid ${uid:-unknown}, ${bytes:-unknown} bytes)"; return; fi
+  if ! scan_find "$p" ! -user "$RUN_UID" -print -quit; then log "KEEP $p: $why; ownership scan failed (unknown)"; return; fi
+  found="$(printf '%s\n' "$SCAN_OUT" | head -n 1)"
+  if [ -n "$found" ]; then log "KEEP $p: $why; foreign owner (holds $found, ${bytes:-unknown} bytes)"; return; fi
+  local IDLE_MINUTES=$(( HOLD_EXPIRE_DAYS * 1440 ))
+  is_idle "$p"; case "$?" in
+    0) ;;
+    1) log "KEEP $p: $why (written within $HOLD_EXPIRE_DAYS days)"; return ;;
+    *) log "KEEP $p: $why; activity probe failed (unknown)"; return ;;
+  esac
+  if [ "$kind" = seed ]; then
+    [ "$HELD_LINKS_TAKEN" = 1 ] || { snapshot_links; HELD_LINKS_TAKEN=1; }
+    if ! link_lender_check "$p"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
+  fi
+  if [ -L "$PRESERVE_ROOT" ]; then log "KEEP $p: $why; preserve root $PRESERVE_ROOT is a symbolic link"; return; fi
+  name="${p#/}"; name="${name//\//__}@$PRESERVE_STAMP"; final="$PRESERVE_ROOT/$name.held"
+  if [ "$DRY_RUN" = 1 ]; then
+    log "DRYRUN would: preserve then retire $p ($why; ${bytes:-unknown} bytes) to $final"
+    tally "hold-expired ${p%/*}" "$bytes"; return
+  fi
+  if ! mkdir -p -- "$PRESERVE_ROOT" 2>/dev/null || ! chmod 700 "$PRESERVE_ROOT" 2>/dev/null; then log "KEEP $p: $why; cannot create $PRESERVE_ROOT"; return; fi
+  if ! preserve_root_has_room; then log "KEEP $p: $why; preserve root $PRESERVE_ROOT is past its watched mark"; return; fi
+  if [ -e "$final" ] || [ -L "$final" ]; then log "KEEP $p: $why; preserve copy $final already exists"; return; fi
+  work="$PRESERVE_ROOT/.incoming-$name.held"
+  mkdir -m 700 -- "$work" 2>/dev/null || { log "KEEP $p: $why; cannot create $work"; return; }
+  if [ "$kind" = bare ]; then
+    while IFS= read -r bare; do
+      [ -n "$bare" ] && bares+=("${bare%/HEAD}")
+    done < <(find "$p" \( -name .git -o -name node_modules \) -prune -o -type f -name HEAD -print 2>/dev/null)
+    for bare in ${bares[@]+"${bares[@]}"}; do
+      [ -d "$bare/objects" ] && [ -d "$bare/refs" ] || continue
+      rel="${bare#"$p"}"; rel="${rel#/}"
+      if [ -z "$rel" ]; then unit_is_bare=1; else excludes+=("--exclude=${p##*/}/$rel"); fi
+      if [ -n "$(git --git-dir="$bare" for-each-ref --count=1 2>/dev/null)" ]; then
+        if ! git --git-dir="$bare" bundle create "$work/${rel//\//__}${rel:+.}all.bundle" --all >/dev/null 2>&1 </dev/null ||
+           ! git --git-dir="$bare" bundle verify "$work/${rel//\//__}${rel:+.}all.bundle" >/dev/null 2>&1 </dev/null; then
+          rm -rf -- "$work"; log "KEEP $p: $why; bundle of $bare did not verify"; return
+        fi
+      fi
+      printf 'bare repository: %s\n' "$bare" >> "$work/MANIFEST.txt"
+    done
+  fi
+  # A unit that is itself a bare repository is whole in its bundle; anything else is tarred too.
+  if [ "$unit_is_bare" = 1 ]; then :
+  elif ! ( cd -- "${p%/*}" && tar -czf "$work/unit.tar.gz" ${excludes[@]+"${excludes[@]}"} -- "${p##*/}" ) </dev/null >/dev/null 2>&1; then
+    rm -rf -- "$work"; log "KEEP $p: $why; tarball failed"; return
+  fi
+  if [ "$unit_is_bare" = 1 ]; then :
+  elif ! listed="$(tar -tzf "$work/unit.tar.gz" 2>/dev/null | wc -l | tr -d ' ')"; then
+    rm -rf -- "$work"; log "KEEP $p: $why; tarball unreadable"; return
+  elif [ "${#excludes[@]}" = 0 ]; then
+    walked="$(find "$p" 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "$listed" != "$walked" ]; then rm -rf -- "$work"; log "KEEP $p: $why; tarball lists $listed entries, the folder holds $walked"; return; fi
+  elif [ "${listed:-0}" -lt 1 ]; then rm -rf -- "$work"; log "KEEP $p: $why; tarball unreadable"; return
+  fi
+  {
+    printf 'Preserved by the Azure host janitor (deploy/rmd-host-cleanup.sh, W1-T14971 hold expiry).\n'
+    printf 'path:   %s\nkind:   %s\nhold:   %s\nbytes:  %s\npreserved_at: %s\n' "$p" "$kind" "$why" "${bytes:-unknown}" "$PRESERVE_STAMP"
+    printf 'expires: %s days after preservation (operator ruling 2026-10-23)\n\nRestore:\n' "$RETAIN_DAYS"
+    [ "$unit_is_bare" = 1 ] || printf '  tar -xzf %s/unit.tar.gz -C %s\n' "$final" "${p%/*}"
+    printf '  git clone --bare <bundle> <dir>   # for each *.bundle listed above\n'
+  } >> "$work/MANIFEST.txt" || { rm -rf -- "$work"; log "KEEP $p: $why; manifest write failed"; return; }
+  mv -- "$work" "$final" || { rm -rf -- "$work"; log "KEEP $p: $why; preserve move failed"; return; }
+  log "PRESERVE $p: copied to $final"
+  snapshot_open; snapshot_docker
+  local IDLE_MINUTES=$(( HOLD_EXPIRE_DAYS * 1440 ))
+  if ! is_idle "$p" || is_open "$p" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$p"; then
+    log "KEEP $p: changed or active before retire (copy kept: $final)"; return
+  fi
+  if ! audit_writable; then log "KEEP $p: audit log unwritable ($AUDIT_LOG; copy kept: $final)"; return; fi
+  log "REMOVE $p: $why expired after $HOLD_EXPIRE_DAYS idle days; preserved then retired (${bytes:-unknown} bytes; copy: $final)"
+  act rm -rf -- "$p" && tally "hold-expired ${p%/*}" "$bytes"
+}
 sweep_scratch_unit() {
   local p="$1" status entries entry repo head bundles bytes seed_reason gitdir hosted wt_root
   local IDLE_MINUTES="$SCRATCH_IDLE_MINUTES" SCRATCH_REASON=""
@@ -1225,21 +1311,26 @@ sweep_scratch_unit() {
     1) log "KEEP $p: written within ${IDLE_MINUTES} min"; return ;;
     *) log "KEEP $p: activity probe failed (unknown)"; return ;;
   esac
-  if seed_reason=$(rmd_dependency_seed_risk "$p"); then log "KEEP $p: $seed_reason"; return; fi
+  seed_reason=""; seed_reason=$(rmd_dependency_seed_risk "$p") || seed_reason=""
+  case "$seed_reason" in ""|contains*) ;; *) log "KEEP $p: $seed_reason"; return ;; esac
   if is_open "$p"; then log "KEEP $p: held open by a process"; return; fi
   if [ "$DOCKER_OK" != 1 ]; then log "KEEP $p: docker probe failed (unknown)"; return; fi
   if is_docker_mount "$p"; then log "KEEP $p: $DOCKER_PATH_REASON"; return; fi
+  if [ -n "$seed_reason" ]; then retire_held_scratch_unit "$p" seed "$seed_reason"; return; fi
   if [ -d "$p" ]; then
     bare_repository_scan "$p"; status=$?
     case "$status" in
-      1) log "KEEP $p: bare repository; Git history retained"; return ;;
+      1) retire_held_scratch_unit "$p" bare "bare repository; Git history retained"; return ;;
       2) log "KEEP $p: repository scan failed (unknown)"; return ;;
     esac
   fi
   if ! entries="$(find "$p" -name node_modules -prune -o -name .git -prune -print 2>/dev/null)"; then
     log "KEEP $p: repository scan failed (unknown)"; return
   fi
-  if ! lender_check "$p"; then keep_scratch_for_repo "$p" "$SCRATCH_REASON" "$entries"; return; fi
+  if ! lender_check "$p"; then
+    case "$SCRATCH_REASON" in "borrows from missing "*) retire_held_scratch_unit "$p" broken "$SCRATCH_REASON"; return ;; esac
+    keep_scratch_for_repo "$p" "$SCRATCH_REASON" "$entries"; return
+  fi
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     case "$entry" in */.git) repo="${entry%/.git}" ;; *) log "KEEP $p: unreadable repository path"; return ;; esac
