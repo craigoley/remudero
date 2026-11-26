@@ -12,6 +12,7 @@
  * that is always `success`: it informs the selection and never gates a merge. Off switch:
  * `state/CI_JUDGE_OFF`.
  */
+import { RmdError } from "./errors.js";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -235,6 +236,14 @@ function writeHeads(stateDir: string, heads: Record<string, string>): void {
   renameSync(`${path}.tmp`, path);
 }
 
+/** W1-T14916: the judge worker was withheld (a retired daemon, an abandoned admission), so no judgment happened. */
+export class CiJudgeNotStartedError extends RmdError {
+  constructor(readonly notStarted: string) {
+    super("child_process", 1, `ci judge worker not started: ${notStarted}`, { notStarted });
+    this.name = "CiJudgeNotStartedError";
+  }
+}
+
 /** ONE DAEMON PASS: every open PR whose head changed since its last judgment is judged once, and a
  *  parsed verdict is posted as the `remudero/ci-judge` status. A malformed reply posts nothing, and
  *  CI reads an absent status as the floor alone. */
@@ -252,6 +261,7 @@ export async function judgeCiEscalation(ports: CiJudgePorts): Promise<CiJudgePas
   const failed: number[] = [];
   for (const pr of due) {
     // Recorded before the call: a head that fails is not re-spent on every sweep.
+    const previous = heads[String(pr.number)];
     heads[String(pr.number)] = pr.headSha;
     try {
       const changed = await ports.changedFiles(pr);
@@ -270,6 +280,13 @@ export async function judgeCiEscalation(ports: CiJudgePorts): Promise<CiJudgePas
         added: widened.added, rejected: parsed.rejected, escalate_full: parsed.output.escalateFull, reason: parsed.output.reason,
       });
     } catch (error) {
+      if (error instanceof CiJudgeNotStartedError) {
+        // Nothing ran, so the head stays due for the next pass (the successor's, after a retirement).
+        if (previous === undefined) delete heads[String(pr.number)];
+        else heads[String(pr.number)] = previous;
+        ports.log("ci_judge.withheld", { pr: pr.number, head_sha: pr.headSha, reason: error.notStarted });
+        continue;
+      }
       failed.push(pr.number);
       ports.log("ci_judge.failed", { pr: pr.number, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
     }
@@ -382,6 +399,7 @@ export function productionCiJudgePorts(opts: {
         ...(mount.provider === undefined ? {} : { mountProvider: mount.provider }),
       };
       const result = await spawn(args);
+      if (result.notStarted) throw new CiJudgeNotStartedError(result.notStarted);
       opts.log("ci_judge.spend", { cost_usd: result.costUsd, num_turns: result.numTurns, model: mount.model, effort: mount.effort,
         provider: mount.provider ?? null });
       if (mount.shadow !== undefined) {

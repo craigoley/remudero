@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { closeDaemonCleanup, createDaemonRetirement, inDaemonSpawnScope, retiringCiJudgeKick } from "#src/cli/commands/daemon.js";
-import { withCiJudgeAfterSweep } from "#src/lib/ci-escalation-judge.js";
+import { CI_JUDGE_HEADS_FILE, judgeCiEscalation, productionCiJudgePorts, withCiJudgeAfterSweep } from "#src/lib/ci-escalation-judge.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -353,6 +353,34 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
     } else {
       // Control: a draft that ran and wrote no fragment keys its attempt, so the proposal is no longer due.
       assert.deepEqual(due, [], "a draft that really ran keys its attempt");
+    }
+  }
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, and a withheld CI judgment stays due", async (t) => {
+  // A judge kick started just before the release reaches the real spawnWorker in the retired scope, which returns
+  // not-started. The head must stay due for the successor, which shares the state dir.
+  for (const retired of [true, false]) {
+    const stateDir = ownedFixtureDir(t, "retired-ci-judge").dir;
+    const rows: Row[] = [];
+    let posts = 0;
+    const production = productionCiJudgePorts({ owner: "fixture", repo: "fixture", repoRoot: REPO_ROOT, stateDir, log: () => {},
+      spawn: async (args) => retired ? spawnWorker(args) : { ...(await runInWorkerSpawnScope({ retiredBy: "control" }, () => spawnWorker(args))),
+        notStarted: undefined, text: JSON.stringify({ add: [], escalateFull: false, reason: "floor is sufficient" }) } });
+    const pass = () => judgeCiEscalation({ stateDir, openPrs: async () => [{ number: 7, headSha: "head-7" }],
+      changedFiles: async () => ["src/example.ts"], diff: async () => "diff", floor: () => ({ suites: [], fullRun: false }),
+      suiteIds: () => [], judge: production.judge, post: async () => { posts++; },
+      log: (step, extra = {}) => { rows.push({ step, ...extra }); } });
+    const result = retired ? await runInWorkerSpawnScope({ retiredBy: "drain lock released; the successor owns this work" }, pass) : await pass();
+    const heads = JSON.parse(readFileSync(join(stateDir, CI_JUDGE_HEADS_FILE), "utf8")) as Record<string, string>;
+    if (retired) {
+      assert.deepEqual(heads, {}, "the withheld judgment records no head, so the head stays due");
+      assert.deepEqual(rows.map((row) => row.step), ["ci_judge.withheld"]);
+      assert.deepEqual([result.judged, result.failed, posts], [[], [], 0]);
+    } else {
+      // Control: a judgment that ran records its head and posts.
+      assert.deepEqual(heads, { 7: "head-7" });
+      assert.deepEqual([result.judged, posts], [[7], 1]);
     }
   }
 });
