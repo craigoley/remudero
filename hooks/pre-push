@@ -324,22 +324,24 @@ EOF_CYCLE_UPDATES
   while IFS=' ' read -r cycle_head_sha cycle_old_sha; do
   [ -n "$cycle_head_sha" ] || continue
   cycle_base=""
-  cycle_old_unavailable=""
   if [ -n "$cycle_old_sha" ] && [ "$cycle_old_sha" != "$zero_sha" ]; then
-    # A branch update compares against the tip the remote advertised, never a merge base: an old tip this clone has not
-    # fetched is a named skip, because a creation-style base could count a ring already on the remote as new.
-    if git cat-file -e "${cycle_old_sha}^{commit}" 2>/dev/null; then cycle_base="$cycle_old_sha"; else cycle_old_unavailable=1; fi
-  else
-    # A new branch compares against its merge base with the DESTINATION remote's default branch (the hook's $1), so a
-    # clone whose remote is not named origin is checked too; a push to a bare URL keeps origin/main.
+    # A branch update compares against the tip the remote advertised. One this clone lacks (a stale clone's force push)
+    # is fetched by its id first, writing no ref and no FETCH_HEAD; never skipped, so a stale push cannot bypass the scan.
+    if ! git cat-file -e "${cycle_old_sha}^{commit}" 2>/dev/null; then
+      git fetch -q --no-tags --no-write-fetch-head "$cycle_remote" "$cycle_old_sha" </dev/null >/dev/null 2>&1 || true
+    fi
+    if git cat-file -e "${cycle_old_sha}^{commit}" 2>/dev/null; then cycle_base="$cycle_old_sha"; fi
+  fi
+  if [ -z "$cycle_base" ]; then
+    # A new branch, or an old tip the remote would not serve, compares against its merge base with the DESTINATION
+    # remote's default branch (the hook's $1), so a clone whose remote is not named origin is checked too; a push to a
+    # bare URL keeps origin/main.
     for cycle_main in "refs/remotes/$cycle_remote/HEAD" "refs/remotes/$cycle_remote/main" "refs/remotes/origin/main"; do
       cycle_base="$(git merge-base "$cycle_main" "$cycle_head_sha" 2>/dev/null || true)"
       [ -n "$cycle_base" ] && break
     done
   fi
-  if [ -n "$cycle_old_unavailable" ]; then
-    cycle_ratchet_skip "the remote's old tip $cycle_old_sha is unavailable in this clone"
-  elif [ -z "$cycle_base" ]; then
+  if [ -z "$cycle_base" ]; then
     cycle_ratchet_skip "no remote tip or merge base with $cycle_remote's default branch"
   elif git --no-replace-objects diff --quiet --no-ext-diff "$cycle_base" "$cycle_head_sha" --; then
     cycle_ratchet_skip "this diff adds no parsed import edge under src/"
@@ -502,13 +504,38 @@ EOF_CYCLE_UPDATES
         if (!addedImport) { console.log("NO_ADDED_EDGE"); process.exit(0); }
 
         const beforeCycles = new Set(distinctCycles(base));
+        // A ring moved without Git pairing its paths (a low-similarity move reads as delete + add) keeps the parsed imports
+        // of every module in it. Each base ring is also known by the multiset of its modules import lists, counted, so a
+        // moved ring matches the one it was, and a ring whose module gained an import, or a second copy, matches none.
+        const afterModules = new Map(head.modules.map(({ source, dependencies }) => [source, dependencies ?? []]));
+        const ringPrint = (ring, modules) => JSON.stringify(ring.split(" -> ")
+          .map((source) => JSON.stringify((modules.get(source) ?? []).map(parsedKey).sort())).sort());
+        const beforePrints = new Map();
+        for (const ring of beforeCycles) {
+          const print = ringPrint(ring, beforeModules);
+          beforePrints.set(print, (beforePrints.get(print) ?? 0) + 1);
+        }
         const newCycles = new Set();
+        const headRings = new Map();
         for (const { rule, from, cycle = [] } of head.summary.violations) {
           if (rule?.name !== CYCLE_RULE_NAME) continue;
           const nodes = [from, ...cycle.map((step) => typeof step === "string" ? step : step.name)];
+          const ring = canonicalRing(nodes);
+          if (headRings.has(ring)) continue;
           const usesAddedEdge = nodes.some((source, i) => addedEdges.has(edgeKey(source, nodes[(i + 1) % nodes.length])));
-          if (usesAddedEdge && !beforeCycles.has(canonicalRing(nodes.map(priorPath)))) newCycles.add(canonicalRing(nodes));
+          headRings.set(ring, usesAddedEdge && !beforeCycles.has(canonicalRing(nodes.map(priorPath))));
         }
+        const sorted = [...headRings].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+        const take = (ring) => {
+          const print = ringPrint(ring, afterModules);
+          const left = beforePrints.get(print) ?? 0;
+          if (left > 0) beforePrints.set(print, left - 1);
+          return left > 0;
+        };
+        // A ring already known by its paths, or using no added edge, claims its base ring first, so a copy Git pairs
+        // with the original cannot leave the original free for the moved ring to claim too.
+        for (const [ring, candidate] of sorted) if (!candidate) take(ring);
+        for (const [ring, candidate] of sorted) if (candidate && !take(ring)) newCycles.add(ring); // else: the same ring, moved
         for (const ring of [...newCycles].sort()) console.log(`NEW_RING ${ring}`);
       ' "$cycle_base" "$cycle_head_sha" "$cycle_base_tree" "$cycle_head_tree" "$gate_root" 2>/dev/null)"
       cycle_status=$?

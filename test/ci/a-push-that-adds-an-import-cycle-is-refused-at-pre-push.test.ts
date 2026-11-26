@@ -385,17 +385,91 @@ test("W1-T14945 criterion 1: a push whose diff closes an import ring is refused 
   } finally { repo.cleanup(); }
 });
 
+/** A bare remote whose branch tip is `build`'s commit, then forgotten by `repo`: a stale clone's view of a remote. */
+function remoteTipNotInClone(repo: GitRepo, build: () => void): string {
+  const remote = join(repo.dir, "..", `${repo.dir.split("/").at(-1)}-remote.git`);
+  repo.git("clone", "-q", "--bare", repo.dir, remote);
+  repo.git("remote", "add", "origin", remote);
+  const base = repo.git("rev-parse", "HEAD");
+  build();
+  const tip = repo.git("rev-parse", "HEAD");
+  repo.git("push", "-q", "--no-verify", "origin", "HEAD:refs/heads/run-W1-T14945-1");
+  repo.git("reset", "-q", "--hard", base);
+  repo.git("update-ref", "-d", "refs/remotes/origin/run-W1-T14945-1");
+  repo.git("reflog", "expire", "--expire=now", "--all");
+  repo.git("gc", "-q", "--prune=now");
+  assert.notEqual(spawnSync("git", ["cat-file", "-e", `${tip}^{commit}`], { cwd: repo.dir }).status, 0, "CONTROL: the clone lacks the tip");
+  return tip;
+}
+
+// The thirteenth review of #20986 (C1): a stale clone's force push advertises an old tip the clone never fetched. It is
+// fetched by its id and compared against, never skipped, so the ring the push adds is named.
+test("W1-T14945 criterion 1: a push whose diff closes an import ring is refused at pre-push naming the ring, from a stale clone whose remote tip it never fetched", () => {
+  const repo = fixture();
+  try {
+    const tip = remoteTipNotInClone(repo, () => commit(repo, "src/lib/c.ts", CLEAN_C));
+    commit(repo, "src/lib/b.ts", RING_B);
+    const { status, stderr } = pushMany(repo, [{ rev: "HEAD", oldSha: tip, remoteRef: "refs/heads/run-W1-T14945-1" }], repo, ["origin", "remote"]);
+    assert.notEqual(status, 0, `the stale push's ring is refused:\n${stderr}`);
+    assert.match(stderr, /src\/lib\/a\.ts -> src\/lib\/b\.ts/, stderr);
+    assert.equal(spawnSync("git", ["cat-file", "-e", `${tip}^{commit}`], { cwd: repo.dir }).status, 0, "the hook fetched the advertised tip");
+  } finally { repo.cleanup(); }
+  // An old tip the remote will not serve falls back to the merge base with main, never to a skip.
+  const lost = fixture();
+  try {
+    commit(lost, "src/lib/b.ts", RING_B);
+    const { status, stderr } = push(lost, "HEAD", "1234567890abcdef1234567890abcdef12345678");
+    assert.notEqual(status, 0, `an unservable old tip still scans:\n${stderr}`);
+    assert.match(stderr, /src\/lib\/a\.ts -> src\/lib\/b\.ts/, stderr);
+  } finally { lost.cleanup(); }
+});
+
 // The twelfth review of #20986 (F2): an advertised old tip missing from this clone read as a branch creation, so the merge
-// base with main counted a ring already on the remote as this push's. It is a named skip, as the gate was before.
+// base with main counted a ring already on the remote as this push's. The tip is fetched and compared against.
 test("W1-T14945 criterion 2: a cycle-free push passes the gate as before, when the remote's old tip is not in this clone", () => {
   const repo = fixture();
   try {
-    commit(repo, "src/lib/b.ts", RING_B); // the ring the remote's branch already carries
+    const tip = remoteTipNotInClone(repo, () => commit(repo, "src/lib/b.ts", RING_B)); // the ring the remote already carries
+    commit(repo, "src/lib/b.ts", RING_B);
     commit(repo, "src/lib/c.ts", CLEAN_C);
-    const unfetched = "1234567890abcdef1234567890abcdef12345678";
-    const { status, stderr } = push(repo, "HEAD", unfetched);
-    assert.match(stderr, new RegExp(`cycle-ratchet — the remote's old tip ${unfetched} is unavailable in this clone, skipped`), stderr);
+    const { status, stderr } = pushMany(repo, [{ rev: "HEAD", oldSha: tip, remoteRef: "refs/heads/run-W1-T14945-1" }], repo, ["origin", "remote"]);
+    assert.doesNotMatch(stderr, /cycle-ratchet — .*skipped/, `the update is scanned against the fetched tip, not skipped:\n${stderr}`);
     assert.doesNotMatch(stderr, /cycle-ratchet: BLOCKED/, stderr);
     assert.equal(status, 0, stderr);
+  } finally { repo.cleanup(); }
+});
+
+// The thirteenth review of #20986 (C2): a published ring moved with only comments added reads to Git as deletes and adds
+// when its similarity is low, so no path pairs. Its modules keep their parsed imports, so it is the same ring.
+test("W1-T14945 criterion 2: a cycle-free push passes the gate as before, when a published ring moves without Git pairing its paths", () => {
+  const repo = fixture();
+  try {
+    commit(repo, "src/lib/b.ts", RING_B);
+    repo.git("update-ref", "refs/remotes/origin/main", "HEAD"); // the ring is published
+    const padding = Array.from({ length: 60 }, (_, i) => `// moved note ${i}: this module now lives beside its ring partner.`).join("\n");
+    const a = `import { b } from "${sibling("b")}";\nexport const a = () => b;\n`;
+    for (const [name, text] of [["a", a], ["b", RING_B]] as const) {
+      unlinkSync(join(repo.dir, "src", "lib", `${name}.ts`));
+      mkdirSync(join(repo.dir, "src", "moved"), { recursive: true });
+      writeFileSync(join(repo.dir, "src", "moved", `${name}.ts`), `${padding}\n${text}`);
+    }
+    repo.git("add", "-A");
+    repo.git("commit", "-q", "-m", "move the ring");
+    assert.doesNotMatch(repo.git("diff", "--name-status", "--find-renames", "HEAD~1", "HEAD"), /^R/m, "CONTROL: Git pairs no path");
+    const { status, stderr } = push(repo);
+    assert.doesNotMatch(stderr, /cycle-ratchet: BLOCKED/, stderr);
+    assert.equal(status, 0, stderr);
+    // A second copy of the ring is a new ring, even with identical imports.
+    for (const name of ["a", "b"]) {
+      mkdirSync(join(repo.dir, "src", "copy"), { recursive: true });
+      writeFileSync(join(repo.dir, "src", "copy", `${name}.ts`), name === "a" ? a : RING_B);
+    }
+    repo.git("add", "-A");
+    repo.git("commit", "-q", "-m", "copy the ring");
+    const copied = push(repo);
+    assert.notEqual(copied.status, 0, copied.stderr);
+    // Against the published base the push holds two rings where one was; Git pairs the copy with the original, so the
+    // one named new is whichever is left unpaired.
+    assert.match(copied.stderr, /^cycle-ratchet: src\/(copy|moved)\/a\.ts -> src\/\1\/b\.ts$/m, copied.stderr);
   } finally { repo.cleanup(); }
 });
