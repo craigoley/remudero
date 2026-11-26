@@ -13606,6 +13606,12 @@ export function taskHoldReadOf(opts: Pick<PostReviewStatusGuardedOpts, "taskId" 
     headRefName: subject !== undefined ? subject.headRefName : () => pullRequestHeadRef(opts.prUrl, readPullRow) } };
 }
 
+/** W1-T14902: the hold subject of a lane whose ledger key is not a task (dep-review's `dep-review-PR<n>`): the task the
+ *  live body's trailer names, and the PR's head branch. */
+export function taskHoldSubjectFromPr(pr: { body?: string | null; headRefName?: string }): { taskId: string | undefined; headRefName: string } {
+  return { taskId: extractTaskTrailerId(pr.body ?? ""), headRefName: pr.headRefName ?? "" };
+}
+
 /** W1-T14902: the live head branch of the PR a post names, read only for an id of a generated lane's shape. */
 export async function pullRequestHeadRef(prUrl: string | undefined, read: (args: string[]) => Promise<unknown>): Promise<string | undefined> {
   const target = prLifecycleUrlTarget(prUrl ?? "");

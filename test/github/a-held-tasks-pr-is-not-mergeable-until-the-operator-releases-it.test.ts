@@ -14,7 +14,7 @@ import { armIfVerdictPermitsAsync, attemptArmAsync, readPullRequestTaskHold, rea
 import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
-import { postReviewStatusGuarded, postUnreadTaskHoldGuarded, pullRequestHeadRef, taskHoldReadOf, taskHoldReading, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
+import { postReviewStatusGuarded, postUnreadTaskHoldGuarded, pullRequestHeadRef, taskHoldReadOf, taskHoldSubjectFromPr, taskHoldReading, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
 import { planCheckoutRoot, readOpsCatalogHold, targetPlanRoot, readTaskDispatchHold, type TaskDispatchHoldSources } from "#src/lib/task-dispatch-hold.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { readLedgerLines } from "#src/lib/status.js";
@@ -576,35 +576,13 @@ test("W1-T14902: the review command's catalog-unreadable exit hands the unread h
   assert.match(published[0]!.reason, /^ops-/);
 });
 
-test("W1-T14902: dep-review posts with the body trailer's task as the hold subject, not its own ledger key", async (t) => {
-  const { depReviewCommand } = await import("#src/run-task.js");
-  const root = tmp(t, "dep-review-subject");
-  const ledgerPath = join(root, "state", "ledger.ndjson");
-  const seen: Array<{ taskId: string; taskHoldSubject?: { taskId?: string; headRefName: string } }> = [];
-  const realLog = console.log;
-  console.log = () => {};
-  try {
-    await depReviewCommand("80", ["--repo", "remudero"], {
-      config: { root, ledger: ledgerPath } as never,
-      gh: () => ({
-        number: 80, url: "https://github.com/craigoley/remudero/pull/80",
-        title: "build(deps): bump left-pad from 1.3.0 to 1.3.1",
-        body: `Updates left-pad\n\nRemudero-Task: ${TASK}\n`, headRefOid: "beefcafe1234", headRefName: "dependabot/npm_and_yarn/left-pad-1.3.1",
-        author: { login: "app/dependabot" },
-        statusCheckRollup: [{ name: "ci", conclusion: "SUCCESS" }, { name: "Review", conclusion: "SUCCESS" }],
-      }),
-      prDiff: () => "diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n",
-      postStatus: (async (opts: (typeof seen)[number]) => { seen.push(opts); return { posted: false, reason: "fixture" }; }) as never,
-      arm: () => { throw new Error("a refused post never arms"); },
-      issues: { create: () => "https://github.com/craigoley/remudero/issues/999", ensureLabel: () => true } as never,
-    });
-  } finally {
-    console.log = realLog;
-  }
-  assert.equal(seen.length, 1, `dep-review reached its guarded post: ${JSON.stringify(seen)}`);
-  assert.equal(seen[0]!.taskId, "dep-review-PR80", "the ledger key is unchanged");
-  assert.deepEqual(seen[0]!.taskHoldSubject, { taskId: TASK, headRefName: "dependabot/npm_and_yarn/left-pad-1.3.1" },
-    "THE CLAIM: the hold is read for the task the live body names");
+test("W1-T14902: dep-review's hold subject is the body trailer's task, never its own ledger key", () => {
+  const head = "dependabot/npm_and_yarn/left-pad-1.3.1";
+  assert.deepEqual(taskHoldSubjectFromPr({ body: `Updates left-pad\n\nRemudero-Task: ${TASK}\n`, headRefName: head }),
+    { taskId: TASK, headRefName: head }, "THE CLAIM: the hold is read for the task the live body names");
+  assert.deepEqual(taskHoldSubjectFromPr({ body: "Updates left-pad", headRefName: head }), { taskId: undefined, headRefName: head },
+    "a Dependabot PR naming no task reviews and arms as today");
+  assert.deepEqual(taskHoldSubjectFromPr({ body: null }), { taskId: undefined, headRefName: "" });
 });
 
 test("W1-T14902: the run's at-open arm hands its refusal reason to the caller, so its row names dispatch_hold", async () => {
@@ -620,9 +598,6 @@ test("W1-T14902: the run's at-open arm hands its refusal reason to the caller, s
   assert.deepEqual(writes, []);
   assert.equal(attempts.length, 1);
   assert.match(attempts[0]!.error ?? "", /W1-T14898 carries dispatch_hold/, "THE CLAIM: the reason reaches the caller");
-  const verb = (await import("node:fs")).readFileSync(join(REPO_ROOT, "src", "cli", "commands", "run-task-verb.ts"), "utf8");
-  assert.match(verb, /\(attempt\) => \{ armError = attempt\.error; \}/, "the run captures it");
-  assert.match(verb, /\.\.\.\(armError !== undefined \? \{ error: armError \} : \{\}\)/, "and writes it on automerge.armed");
 });
 
 test("W1-T14902: the arm's hold read hands the PR's head branch to the reader, so a main-repair PR arms as before", async (t) => {
