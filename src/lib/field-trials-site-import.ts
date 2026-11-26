@@ -98,14 +98,14 @@ export function consentAtFromReceipts(receipts: readonly string[], nowIso: strin
   for (const receipt of receipts) {
     const day = /^owner-(\d{4}-\d{2}-\d{2})-/.exec(receipt)?.[1];
     const end = day === undefined ? Number.NaN : Date.parse(`${day}T23:59:59.999Z`);
-    if (day === undefined || !Number.isFinite(end) || new Date(end).toISOString().slice(0, 10) !== day) {
+    if (day === undefined || !Number.isFinite(end) || fixedClock(end).iso().slice(0, 10) !== day) {
       return { reason: `consent-receipt-has-no-date: ${receipt}` };
     }
     dates.add(day);
   }
   if (dates.size !== 1) return { reason: `consent-receipts-disagree: ${[...dates].sort().join(", ")}` };
   const end = Date.parse(`${[...dates][0]}T23:59:59.999Z`);
-  return { at: new Date(Math.min(end, Date.parse(nowIso))).toISOString() };
+  return { at: fixedClock(Math.min(end, Date.parse(nowIso))).iso() };
 }
 
 /** Run the site's own derivation in the site checkout, so core and site can never disagree on the figures. */
