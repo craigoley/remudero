@@ -267,6 +267,7 @@ import {
 } from "./review.js";
 import { withTempDir } from "./tmp.js";
 import { fetchPrDiff, prDiffSourceAsync } from "./pr-diff.js";
+import { ORPHANED_REVIEW_OWNER_SILENCE_MS, reviewOwnerOrphaned, type ReviewOwnerOrphanedOpts } from "./review.js";
 import type {
   ArmDecision,
   AutomergeHold,
@@ -9104,7 +9105,8 @@ export interface OpenPrView {
    *  dead, which keep {@link reviewPendingIsStale}'s timeout behaviour. Only the real gateway sets
    *  this, from the durable pending ledger row. */
   reviewPendingOwnerDead?: boolean;
-  reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete" | "inconclusive-load" | "start-failed";
+  reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete" | "inconclusive-load" | "start-failed" |
+    "owner-orphaned";
   reviewPendingOwnerGoneReason?: string;
   /** W1-T14035 — the `run_id` of the current head's `review.pending_posted` row the producer judged. Evidence only. */
   reviewPendingOwnerRunId?: string;
@@ -14747,6 +14749,10 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           if (pr.reviewPendingOwnerGone === "promise-harvest-incomplete") {
             return `checks green, its promise harvest did not complete — re-running the review lane on #${pr.prNumber}`;
           }
+          if (pr.reviewPendingOwnerGone === "owner-orphaned") {
+            return `checks green, the pending review's run ${pr.reviewPendingOwnerGoneReason ?? "(unnamed)"} has no live process and ` +
+              `no ledger row for ${ORPHANED_REVIEW_OWNER_SILENCE_MS / 60_000}m — re-running the review lane on #${pr.prNumber}`;
+          }
           const withheldLadder = withheldLadderOf(pr);
           if (withheldLadder?.rung === 2) {
             return `checks green, remudero-review owner proven dead and ${withheldLadder.reason} —re-running the review lane on #${pr.prNumber}`;
@@ -18896,8 +18902,22 @@ function reviewStartFailures(pr: SweepPrView, lines: ReadonlyArray<Record<string
   return { ...(standing !== undefined && ownerFailed ? { standing } : {}), ...(held === undefined ? {} : { held }) };
 }
 
+/** W1-T15030 — a pending status whose named run is orphaned ({@link reviewOwnerOrphaned}: no live process and no ledger
+ *  row for 30 minutes) owns nothing, so the sweep re-admits the PR at that head. The run is the live status's own writer
+ *  where the view names it, else the judged claim's run. */
+export function orphanedOwnerRetryView<T extends Pick<SweepPrView, "reviewState" | "headSha" | "reviewPendingOwnerDead" |
+  "reviewPendingOwnerGone" | "reviewPendingOwnerGoneReason" | "reviewPendingStatusRunId" | "reviewPendingOwnerRunId">>(
+  pr: T, lines: ReadonlyArray<Record<string, unknown>>, opts: ReviewOwnerOrphanedOpts = {},
+): T {
+  if (pr.reviewState !== "pending" || pr.reviewPendingOwnerDead === true) return pr;
+  const run = pr.reviewPendingStatusRunId ?? pr.reviewPendingOwnerRunId;
+  if (run === undefined || !reviewOwnerOrphaned(run, pr.headSha, lines, opts)) return pr;
+  return { ...pr, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "owner-orphaned", reviewPendingOwnerGoneReason: run };
+}
+
 function promiseHarvestRetryView(
   view: SweepPrView, lines: ReadonlyArray<Record<string, unknown>>, sample: () => HostLoadSample = sampleHostLoad,
+  now: number = systemClock.now(),
 ): SweepPrView {
   // W1-T13380: the sweep runs each review in process, so this process's code sha is the next review's (as W1-T13193's producer).
   const started = reviewStartFailures(view, lines, runningReviewerCodeSha());
@@ -18916,7 +18936,7 @@ function promiseHarvestRetryView(
       (pr.reviewPendingStatusRunId === undefined || pr.reviewPendingStatusRunId === pr.reviewPendingOwnerRunId)
     ? { ...pr, ...proven, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "start-failed", reviewPendingOwnerGoneReason: started.standing }
     : pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerGone === undefined
-      ? { ...pr, reviewPendingOwnerGone: "owner-pid-dead" } : pr;
+      ? { ...pr, reviewPendingOwnerGone: "owner-pid-dead" } : orphanedOwnerRetryView(pr, lines, { now });
   // W1-T13945: a pending status with no live owner and a repeated withheld verdict at this input climbs the ladder.
   const ladder = result.reviewState === "pending" ? reviewWithheldLadder(result, lines) : undefined;
   return ladder === undefined ? result : { ...result, reviewWithheld: ladder };
@@ -24089,7 +24109,7 @@ export async function runSweep(
   const progressWitness = (pr: OpenPrView): FixProgressWitness => ({ reviewInputDigest: pr.reviewInputDigest,
     contractRevision: pr.taskId === undefined || pr.taskId === "unfiled" || pr.taskId === `PR-${pr.prNumber}`
       ? null : readWitnessContractRevision(pr.taskId) });
-  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines, deps.sampleLoad));
+  openPrs = openPrs.map(pr => promiseHarvestRetryView(pr, ledgerLines, deps.sampleLoad, now));
   // W1-T9970: the running reviewer image, read at most once per pass and only when a blocked-fixable PR asks.
   let runningImage: { sha: string | undefined } | undefined;
   // W1-T9124: a body-only edit leaves the head-keyed status on the old verdict; queue one re-review of the new input.
@@ -26379,7 +26399,7 @@ export async function runSweep(
       ledgerLines, reviewOutcomeKeyForPr(pr));
     if (settledView !== undefined) pr = settledView.view;
     const hostGapRefusal = prior.reviewHostGapRefusals.get(reviewOutcomeKeyForPr(pr));
-    const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines, deps.sampleLoad);
+    const dispositionView = promiseHarvestRetryView(completedRefusalRetryView(pr, prior), ledgerLines, deps.sampleLoad, now);
     pr = { ...pr, reviewPendingOwnerGone: dispositionView.reviewPendingOwnerGone,
       reviewPendingOwnerGoneReason: dispositionView.reviewPendingOwnerGoneReason };
     // W1-T5813: the SAME delivered set the post-review claim dedups on, so the two cannot disagree.

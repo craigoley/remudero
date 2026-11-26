@@ -2415,7 +2415,17 @@ function* armAtOpenSteps(
  * W1-T125: best-effort withdrawal of an early {@link armAutoMergeAtOpen} — `gh pr merge
  * --disable-auto`.
  */
-export type DisarmOutcome = "disarmed" | "not-armed" | "lost-race" | "failed";
+export type DisarmOutcome = "disarmed" | "not-armed" | "lost-race" | "failed" | "token_unrenewable";
+
+/** W1-T15030: a `gh` failure GitHub answered with HTTP 401 — the token it presented was refused. */
+export function ghUnauthorizedText(text: string): boolean {
+  return /\bHTTP 401\b|Bad credentials/i.test(text);
+}
+
+/** W1-T15030: renews the token a disarm presents. Only the awaited disarm can wait for it. */
+export interface DisarmRenewal {
+  renewToken?: () => unknown | Promise<unknown>;
+}
 
 /**
  * W1-T1056 — PURE classifier for a failed `gh pr merge --disable-auto` (exported for test).
@@ -2451,24 +2461,36 @@ export function disarmAutoMerge(
 export async function disarmAutoMergeAsync(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "disableAuto" | "say"> & Partial<Pick<ArmDeps<true>, "isMerged">> = realArmDepsAsync(),
+  renewal: DisarmRenewal = {},
 ): Promise<DisarmOutcome> {
   requireExplicitArmSeam("disarmAutoMergeAsync", !isRealArmDepsObject(deps));
-  return runStepsAsync(disarmSteps(prUrl, deps));
+  return runStepsAsync(disarmSteps(prUrl, deps, renewal));
 }
 
 function* disarmSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "disableAuto" | "say"> & Partial<Pick<ArmDeps<true>, "isMerged">>,
+  renewal: DisarmRenewal = {},
 ): Steps<DisarmOutcome> {
-  try {
-    yield* step(() => deps.disableAuto(prUrl));
-    deps.say(`automerge.disarmed (W1-T125): early arm withdrawn — ${prUrl}`);
-    return "disarmed";
-  } catch (e) {
-    // recorded via deps.say below and classified into the return shape, not swallowed silently.
-    const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
-    deps.say(`automerge.disarm_failed (W1-T125): ${msg} — ${prUrl}`);
-    return classifyDisarmFailure(msg, yield* step(() => deps.isMerged?.(prUrl)));
+  let renewed = false;
+  for (;;) {
+    try {
+      yield* step(() => deps.disableAuto(prUrl));
+      deps.say(`automerge.disarmed (W1-T125): early arm withdrawn — ${prUrl}`);
+      return "disarmed";
+    } catch (e) {
+      // recorded via deps.say below and classified into the return shape, not swallowed silently.
+      const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
+      deps.say(`automerge.disarm_failed (W1-T125): ${msg} — ${prUrl}`);
+      // W1-T15030: a refused token is renewed once and the disarm retried once; a second 401 names the token.
+      if (renewal.renewToken !== undefined && ghUnauthorizedText(msg)) {
+        if (renewed) return "token_unrenewable";
+        renewed = true;
+        yield* step(() => renewal.renewToken!());
+        continue;
+      }
+      return classifyDisarmFailure(msg, yield* step(() => deps.isMerged?.(prUrl)));
+    }
   }
 }
 

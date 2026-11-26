@@ -14,7 +14,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isWorkerProviderId, loadConfig, type Config, type WorkerProviderId } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
-import { disarmOutcomeWithdrawn, disarmAutoMerge, armIfVerdictPermitsAsync, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
+import { disarmOutcomeWithdrawn, disarmAutoMerge, disarmAutoMergeAsync, realArmDepsAsync, armIfVerdictPermitsAsync, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
 import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/composition-root.js";
 import { writeReviewEvidenceRecord } from "../../lib/review-evidence-record.js";
 import { SPECIALIST_TOOLS } from "../../lib/specialist-panel.js";
@@ -43,6 +43,7 @@ import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/moun
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
+import { holdReviewRunLive, renewReviewPublisherToken, reviewClaimTakenOverBy, type ReviewTokenRenewal } from "../../lib/review.js";
 import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, markUnbackedBodyGuards, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type CriterionVerdict, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure, type ReviewAdmission } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
@@ -194,7 +195,7 @@ export const REVIEW_EXIT_CAUSES = [
   ...REVIEW_EXIT_STEPS.map((step) => `threw-in-${step}` as const),
 ] as const;
 export type ReviewExitCause = (typeof REVIEW_EXIT_CAUSES)[number];
-type ReviewExit = { step: (typeof REVIEW_EXIT_STEPS)[number]; as: (cause: ReviewExitCause) => void };
+type ReviewExit = { step: (typeof REVIEW_EXIT_STEPS)[number]; as: (cause: ReviewExitCause) => void; release?: () => void };
 
 function writeReviewExitCause(rest: string[], cause: ReviewExitCause, error?: unknown): void {
   const path = flagValue(rest, REVIEW_EXIT_CAUSE_FLAG);
@@ -214,6 +215,8 @@ async function reportingReviewExit(rest: string[], run: (exit: ReviewExit) => Pr
   } catch (error) {
     writeReviewExitCause(rest, `threw-in-${exit.step}`, error);
     throw error;
+  } finally {
+    exit.release?.();
   }
 }
 
@@ -298,28 +301,66 @@ export function withdrawArmIfVerdictRefuses(
   },
   deps: { disarm?: (prUrl: string) => DisarmOutcome | void; ledgerLines?: () => Array<Record<string, unknown>> } = {},
 ): boolean {
+  const refusal = armWithdrawalReason(verdict, ctx, deps.ledgerLines);
+  if (refusal === undefined) return false;
+  const outcome = (deps.disarm ?? disarmAutoMerge)(ctx.prUrl);
+  logArmWithdrawal(ctx, refusal, outcome);
+  return true;
+}
+
+type ArmWithdrawalCtx = Parameters<typeof withdrawArmIfVerdictRefuses>[1];
+
+/** Why the verdict refuses an arm, so one taken at open is withdrawn; undefined when it permits one. */
+function armWithdrawalReason(verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">, ctx: ArmWithdrawalCtx,
+  ledgerLines?: () => Array<Record<string, unknown>>): string | undefined {
   const override = verdict.capped
-    ? cappedOverrideFromLedger(
-        (deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)))(),
-        ctx.taskId,
-        ctx.headSha,
-        ctx.prUrl,
-      )
+    ? cappedOverrideFromLedger((ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)))(), ctx.taskId, ctx.headSha, ctx.prUrl)
     : undefined;
   const decision = decideAutoMergeArm(verdict, false, override);
-  if (decision.arm) return false;
-  // W1-T1056: the row follows the OUTCOME, never the attempt. This is the load-bearing site —
-  // it runs BECAUSE the PR was armed at open and the verdict now refuses, so there is genuinely
-  // an arm to withdraw, and this row is the one an incident reader consults when asking "did the
-  // arm fire, and why did a refused PR merge anyway?". A failed withdrawal recorded as
-  // `automerge.disarmed` leaves the arm standing on GitHub and the ledger asserting it is gone.
-  const outcome = (deps.disarm ?? disarmAutoMerge)(ctx.prUrl);
+  return decision.arm ? undefined : decision.reason;
+}
+
+/** W1-T1056: the row follows the OUTCOME, never the attempt. This is the load-bearing site —
+ *  it runs BECAUSE the PR was armed at open and the verdict now refuses, so there is genuinely
+ *  an arm to withdraw, and this row is the one an incident reader consults when asking "did the
+ *  arm fire, and why did a refused PR merge anyway?". A failed withdrawal recorded as
+ *  `automerge.disarmed` leaves the arm standing on GitHub and the ledger asserting it is gone. */
+function logArmWithdrawal(ctx: ArmWithdrawalCtx, refusal: string, outcome: DisarmOutcome | void): void {
   ctx.log(disarmOutcomeWithdrawn(outcome) ? "automerge.disarmed" : "automerge.disarm_skipped", {
-    reason: `verdict refuses auto-merge: ${decision.reason}`,
+    reason: `verdict refuses auto-merge: ${refusal}`,
     outcome,
     head_sha: ctx.headSha,
   });
-  return true;
+}
+
+/** W1-T15030 — {@link withdrawArmIfVerdictRefuses} with the disarm awaited, so a disarm GitHub refuses with HTTP 401
+ *  renews the token once and retries once. The same decision and the same rows; `token_unrenewable` is returned for the
+ *  caller to stop on. */
+export async function withdrawArmIfVerdictRefusesAsync(
+  verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
+  ctx: Parameters<typeof withdrawArmIfVerdictRefuses>[1],
+  deps: {
+    disarm?: (prUrl: string) => DisarmOutcome | void | Promise<DisarmOutcome | void>;
+    ledgerLines?: () => Array<Record<string, unknown>>;
+    renewToken?: () => Promise<unknown>;
+  } = {},
+): Promise<{ withdrawn: boolean; outcome?: DisarmOutcome | void }> {
+  const refusal = armWithdrawalReason(verdict, ctx, deps.ledgerLines);
+  if (refusal === undefined) return { withdrawn: false };
+  const renewToken = deps.renewToken ?? (() => renewReviewPublisherToken({ force: true }));
+  const outcome = await (deps.disarm ?? ((prUrl: string) => disarmAutoMergeAsync(prUrl, realArmDepsAsync(), { renewToken })))(ctx.prUrl);
+  logArmWithdrawal(ctx, refusal, outcome);
+  return { withdrawn: true, outcome };
+}
+
+/** W1-T15030: the claim this run holds at `headSha` was taken over by another run, read from the ledger. */
+export function reviewClaimLost(ledgerPath: string, runId: string, headSha: string, prUrl: string): string | undefined {
+  try {
+    return reviewClaimTakenOverBy(readLedgerLines(ledgerPath), runId, headSha, prUrl);
+  } catch {
+    // An unreadable ledger proves no takeover; the guarded post's own lock and lifecycle reads still decide.
+    return undefined;
+  }
 }
 
 /**
@@ -736,12 +777,20 @@ function disputeGuardedHistoryReader(read: ReviewStatusHistoryReader, verdict: R
 /** W1-T14179: a disputed PASS posts pending naming both runs, withdraws any arm and raises one escalation. */
 async function holdDisputedPass(dispute: ReviewPassDispute, verdict: ReviewVerdict, ctx: {
   owner: string; repo: string; prUrl: string; headSha: string; taskId: string; runId: string; ledgerPath: string;
-  catalog?: "public" | "ops"; log: (step: string, extra?: Record<string, unknown>) => void; disarm?: (prUrl: string) => DisarmOutcome | void;
+  catalog?: "public" | "ops"; log: (step: string, extra?: Record<string, unknown>) => void;
+  disarm?: (prUrl: string) => DisarmOutcome | void | Promise<DisarmOutcome | void>; renewToken?: () => Promise<unknown>;
   publish: (held: ReviewVerdict, description: string) => Promise<{ posted: boolean }>;
 }): Promise<ReviewVerdict & { verdictWithheld: string }> {
   const held: ReviewVerdict = { ...verdict, state: "pending", summary: dispute.description };
-  withdrawArmIfVerdictRefuses(held, { prUrl: ctx.prUrl, taskId: ctx.taskId, headSha: ctx.headSha, ledgerPath: ctx.ledgerPath, log: ctx.log },
-    { disarm: ctx.disarm });
+  // W1-T15030: a run that lost its claim disarms nothing, posts nothing and opens no escalation.
+  const taker = reviewClaimLost(ctx.ledgerPath, ctx.runId, ctx.headSha, ctx.prUrl);
+  if (taker !== undefined) {
+    ctx.log("review.post_refused", { pr_url: ctx.prUrl, head_sha: ctx.headSha, attempted_state: "success", outcome: "disputed_pass_held",
+      reason: "claim_lost", taken_over_by_run_id: taker });
+    return { ...held, verdictWithheld: "claim_lost" };
+  }
+  await withdrawArmIfVerdictRefusesAsync(held, { prUrl: ctx.prUrl, taskId: ctx.taskId, headSha: ctx.headSha, ledgerPath: ctx.ledgerPath,
+    log: ctx.log }, { disarm: ctx.disarm, ...(ctx.renewToken ? { renewToken: ctx.renewToken } : {}) });
   const published = await ctx.publish(held, dispute.description);
   const ops = ctx.catalog === "ops";
   const issueUrl = await tryEscalateAsync({
@@ -1225,6 +1274,9 @@ export async function runReview(host: ReviewCommandHost, args: {
    * ISSUED rather than mocking `gh`.
    */
   disarm?: (prUrl: string) => DisarmOutcome | void;
+  /** W1-T15030: renews this run's GitHub token before it publishes, and after a 401. Default
+   *  {@link renewReviewPublisherToken}. */
+  renewToken?: (opts?: { force?: boolean }) => Promise<ReviewTokenRenewal>;
   /** Head ref of the PR under review — used ONLY to exclude `dependabot/` heads from the
    *  post-verdict arm, which the dep-review lane owns. Absent ⇒ not a dependabot PR. */
   headRefName?: string;
@@ -2052,11 +2104,35 @@ export async function runReview(host: ReviewCommandHost, args: {
   // rule — two copies of exactly this rule are how the sweep and the run flow diverged.
   // `disarmAutoMerge` never throws and is a no-op-ish on an unarmed PR, so this needs no
   // extra API call to learn whether the PR was armed.
-  withdrawArmIfVerdictRefuses(
+  // W1-T15030: before the first disarm or post, renew a token the reviewer outlived, and stop if another run took this
+  // run's claim over: a run that lost its claim posts nothing, disarms nothing and opens no escalation.
+  const renewToken = args.renewToken ?? ((o?: { force?: boolean }) => renewReviewPublisherToken(o));
+  await renewToken();
+  const withdrawDeps = { disarm: args.disarm, renewToken: () => renewToken({ force: true }) };
+  const claimLost = (): ReviewRunResult | undefined => {
+    const taker = reviewClaimLost(args.ledgerPath, args.runId, headSha, prUrl);
+    if (taker === undefined) return undefined;
+    log("review.post_refused", { pr_url: prUrl, head_sha: headSha, attempted_state: verdict.state, reason: "claim_lost",
+      taken_over_by_run_id: taker });
+    reportPhase("posted");
+    say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — claim_lost: run ${taker} took this review over`);
+    return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: "claim_lost", reviewDecisionDigest: decisionDigest,
+      decisionDisposition, evaluatorProvenance };
+  };
+  const lostAtPost = claimLost();
+  if (lostAtPost !== undefined) return lostAtPost;
+  const disarmedAtPost = await withdrawArmIfVerdictRefusesAsync(
     verdict,
     { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log },
-    { disarm: args.disarm },
+    withdrawDeps,
   );
+  if (disarmedAtPost.outcome === "token_unrenewable") {
+    log("review.post_refused", { pr_url: prUrl, head_sha: headSha, attempted_state: verdict.state, reason: "token_unrenewable" });
+    reportPhase("posted");
+    say(`remudero-review: verdict WITHHELD for ${headSha.slice(0, 7)} — token_unrenewable: the disarm was refused twice`);
+    return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: "token_unrenewable", reviewDecisionDigest: decisionDigest,
+      decisionDisposition, evaluatorProvenance };
+  }
 
   // W1-T228: the ONLY call path that posts `remudero-review` from here on —
   // acquires the per-task serialization lock, re-reads the ledger + live PR
@@ -2131,6 +2207,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     reviewEngineRevision: REVIEW_ENGINE_REVISION,
     evaluatorProvenance,
     reviewerCodeFreshness,
+    renewToken: () => renewToken({ force: true }),
     finishedReview: { admission: args.admission ?? "direct", reviewerMs: phases.postStart - phases.started },
     fetchLifecycle: () => fetchPrLifecycleAsync(prUrl),
     readRequiredContexts: readRequiredStatusCheckContextsAsync,
@@ -2145,8 +2222,10 @@ export async function runReview(host: ReviewCommandHost, args: {
   decisionDigest = posted.effectiveReviewDecisionDigest ?? decisionDigest;
   if (posted.effectiveVerdict) verdict = { ...verdict, ...posted.effectiveVerdict, state: posted.effectiveState ?? posted.effectiveVerdict.state };
   if (dispute !== undefined && posted.effectiveState === "pending") {
+    const lostAtHold = claimLost();
+    if (lostAtHold !== undefined) return lostAtHold;
     const held = await holdDisputedPass(dispute, verdict, { owner, repo, prUrl, headSha, taskId: task.id, runId: args.runId,
-      ledgerPath: args.ledgerPath, catalog: task.catalog, log, disarm: args.disarm,
+      ledgerPath: args.ledgerPath, catalog: task.catalog, log, disarm: args.disarm, renewToken: withdrawDeps.renewToken,
       publish: (pending, pendingDescription) => postReviewStatusGuarded({ post: catalogReviewPoster(task.catalog, poster.post),
         owner, repo, sha: headSha, state: "pending", verdict: pending, description: pendingDescription, taskId: task.id,
         evidence: reviewEvidenceStrength(pending.criteria), ledgerPath: args.ledgerPath, runId: args.runId, prUrl,
@@ -2157,14 +2236,14 @@ export async function runReview(host: ReviewCommandHost, args: {
   }
   if (posted.semanticHold !== undefined) {
     // W1-T14235: the pass was held (pending, or a standing failure left standing), so an arm taken at open is withdrawn.
-    withdrawArmIfVerdictRefuses(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
+    await withdrawArmIfVerdictRefusesAsync(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, withdrawDeps);
     say(`remudero-review: PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${posted.reason ?? posted.semanticHold}`);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.reason ?? posted.semanticHold,
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
   if (posted.cappedHold !== undefined) {
     // W1-T14241 (invariant capped-is-not-green): the capped pass was held as pending, so an arm taken at open is withdrawn.
-    withdrawArmIfVerdictRefuses(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
+    await withdrawArmIfVerdictRefusesAsync(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, withdrawDeps);
     say(`remudero-review: CAPPED PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${posted.cappedHold}`);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.cappedHold,
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
@@ -2189,8 +2268,8 @@ export async function runReview(host: ReviewCommandHost, args: {
     );
   }
 
-  if (publishingState === "success" && verdict.state === "failure") withdrawArmIfVerdictRefuses(verdict,
-    { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
+  if (publishingState === "success" && verdict.state === "failure") await withdrawArmIfVerdictRefusesAsync(verdict,
+    { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, withdrawDeps);
   if (posted.conflict) {
     decisionDisposition = "conflict";
     verdict = {
@@ -2198,10 +2277,10 @@ export async function runReview(host: ReviewCommandHost, args: {
       state: "failure",
       summary: `review verdict conflict for decision ${decisionDigest.slice(0, 11)} — operator adjudication required`,
     };
-    withdrawArmIfVerdictRefuses(
+    await withdrawArmIfVerdictRefusesAsync(
       verdict,
       { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log },
-      { disarm: args.disarm },
+      withdrawDeps,
     );
     if (!posted.posted) {
       replayInput = { ...replayInput, publication_refusal: "conflict-hold-publication-failed" };
@@ -2976,6 +3055,9 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   let body = view.body ?? "";
   const reportBody = body;
   const runId = `review-PR${view.number}-${Date.now()}`;
+  // W1-T15030: while this command runs, its run is live in this process, so its claim is never read as orphaned.
+  exit.release?.();
+  exit.release = holdReviewRunLive(runId);
   const reviewAttemptId = acceptedReviewAttemptId(deps.reviewAttemptId, view.number);
   const shadow = rest.includes(REVIEWER_SHADOW_FLAG);
   const startPhasesStep = reviewerShadowStep("review.start_phases", shadow);
