@@ -13,12 +13,13 @@
  * Verified against GitHub REST API 2022-11-28: `GET /app/hook/deliveries` takes a JWT (`Authorization: Bearer`), lists
  * deliveries newest first, `per_page` up to 100, with the next page named by a `cursor` in the `Link` header. A
  * delivery's `duration` is in seconds and its `id` is an integer too large for a double, so ids are read from the
- * response text and compared as BigInt.
+ * response text and compared as BigInt. `GET /app/hook/config` (same version, same JWT) names the webhook's url; it answers
+ * 404 while the App has no active webhook (observed 2026-11-26 before the webhook was saved Active).
  */
 import fs from "node:fs";
 import { join } from "node:path";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
-import { writeAtomic } from "./fs-race-safe.js";
+import { realWriteAtomicIo, writeAtomic, type WriteAtomicIo } from "./fs-race-safe.js";
 import { GH_APP_ID_ENV, GH_APP_PRIVATE_KEY_PATH_ENV, signAppJwt } from "./github-app.js";
 
 export const GITHUB_DELIVERY_STEP = "github.delivery";
@@ -27,6 +28,9 @@ export const GITHUB_DELIVERY_LOG_INTERVAL_MS = 5 * 60_000;
 /** The hook a row names: the App's own webhook, which has no numeric id of its own in this log. */
 export const APP_HOOK_ID = "app";
 const APP_HOOK_DELIVERIES_PATH = "app/hook/deliveries?per_page=100";
+const APP_HOOK_CONFIG_PATH = "app/hook/config";
+/** The route GitHub's webhook posts to; a webhook whose url ends with it is serve's. */
+const WEBHOOK_ROUTE_SUFFIX = "/v1/hooks/github";
 const GITHUB_API_ROOT = "https://api.github.com/";
 const APP_LOG_TIMEOUT_MS = 30_000;
 
@@ -34,9 +38,9 @@ const APP_LOG_TIMEOUT_MS = 30_000;
 export interface DeliveryLogPage { body: unknown; next?: string }
 export type DeliveryLogApi = (path: string) => Promise<DeliveryLogPage>;
 
-/** A GET that failed, with the class of its HTTP status. */
+/** A GET that failed, with the class of its HTTP status and the status itself when GitHub answered. */
 export class DeliveryLogReadError extends RmdError {
-  constructor(readonly statusClass: "auth" | "4xx" | "5xx" | "transport") {
+  constructor(readonly statusClass: "auth" | "4xx" | "5xx" | "transport", readonly status?: number) {
     super("github", GENERIC_EXIT_CODE, `github delivery log read failed (${statusClass})`, { status_class: statusClass });
   }
 }
@@ -98,7 +102,7 @@ export function defaultDeliveryLogApi(opts: AppLogApiOptions = {}): DeliveryLogA
     } catch {
       throw new DeliveryLogReadError("transport");
     }
-    if (!res.ok) throw new DeliveryLogReadError(statusClassOfCode(res.status));
+    if (!res.ok) throw new DeliveryLogReadError(statusClassOfCode(res.status), res.status);
     return { body: parseKeepingIds(await res.text()), next: nextPagePath(res.headers.get("link")) };
   };
 }
@@ -108,6 +112,8 @@ export interface DeliveryLogPassOptions {
   stateDir: string;
   log: (step: string, fields: Record<string, unknown>) => void;
   api?: DeliveryLogApi;
+  /** The cursor file's writes; the default the real filesystem. */
+  cursorIo?: WriteAtomicIo;
 }
 
 const record = (value: unknown): Record<string, unknown> =>
@@ -128,9 +134,23 @@ function readCursors(path: string): Record<string, string> {
   }
 }
 
-function writeCursors(path: string, cursors: Record<string, string>): void {
+function writeCursors(path: string, cursors: Record<string, string>, io: WriteAtomicIo): void {
   fs.mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
-  writeAtomic(path, `${JSON.stringify(cursors)}\n`, { mode: 0o600 });
+  writeAtomic(path, `${JSON.stringify(cursors)}\n`, { io, mode: 0o600 });
+}
+
+/**
+ * Whether the App has a webhook pointing at serve's route. A 404 is the App with no active webhook; any other refusal
+ * is the read's own failure and propagates with its class.
+ */
+async function appHookPointsAtServe(api: DeliveryLogApi): Promise<boolean> {
+  try {
+    const url = record((await api(APP_HOOK_CONFIG_PATH)).body).url;
+    return typeof url === "string" && url.endsWith(WEBHOOK_ROUTE_SUFFIX);
+  } catch (error) {
+    if (error instanceof DeliveryLogReadError && error.status === 404) return false;
+    throw error;
+  }
 }
 
 /** The row a delivery is ledgered as: its identity, status and timing. Never its payload or headers. */
@@ -152,9 +172,14 @@ function deliveryRow(hookId: string, delivery: Record<string, unknown>): Record<
 
 /**
  * One pass: every App-hook delivery newer than the cursor, oldest first. A first pass starts at the newest page: GitHub
- * keeps days of deliveries, and the measure starts when serve does. The cursor moves only after its rows are written; a
- * failed GET writes one read_failed row and leaves the cursor. A page that is not an array writes one read_failed row
- * too (W1-T14923): a pass never ends unsaid.
+ * keeps days of deliveries, and the measure starts when serve does. A failed GET writes one read_failed row and leaves
+ * the cursor. A page that is not an array writes one read_failed row too (W1-T14923): a pass never ends unsaid. An App
+ * whose webhook is missing or points elsewhere writes one no_hook row, the class main wrote for an org with no hook.
+ *
+ * The cursor is saved BEFORE its rows are appended, so a cursor that cannot be saved (a refused rename) appends nothing
+ * and writes one `cursor` read_failed row: the next pass reads the same deliveries and ledgers each one once. Saving
+ * after appending would replay every row of that pass on the next one. What remains is a process killed between the
+ * save and the synchronous append loop, which would skip that pass's rows; no await separates the two.
  */
 export async function runGithubDeliveryLogPass(deps: DeliveryLogPassOptions): Promise<{ ledgered: number; failed: boolean }> {
   const api = deps.api ?? defaultDeliveryLogApi();
@@ -162,6 +187,10 @@ export async function runGithubDeliveryLogPass(deps: DeliveryLogPassOptions): Pr
   const cursors = readCursors(path);
   const hookId = APP_HOOK_ID;
   try {
+    if (!(await appHookPointsAtServe(api))) {
+      deps.log(GITHUB_DELIVERY_READ_FAILED_STEP, { hook_id: hookId, status_class: "no_hook" });
+      return { ledgered: 0, failed: true };
+    }
     const cursor = cursors[hookId] === undefined ? undefined : BigInt(cursors[hookId]!);
     const fresh: Array<Record<string, unknown>> = [];
     let page: string | undefined = APP_HOOK_DELIVERIES_PATH;
@@ -181,9 +210,16 @@ export async function runGithubDeliveryLogPass(deps: DeliveryLogPassOptions): Pr
     }
     if (fresh.length === 0) return { ledgered: 0, failed: false };
     fresh.sort((a, b) => (BigInt(a.id as string) < BigInt(b.id as string) ? -1 : 1));
+    try {
+      writeCursors(path, { ...cursors, [hookId]: String(fresh.at(-1)!.id) }, deps.cursorIo ?? realWriteAtomicIo);
+    } catch (error) {
+      // Not a read failure: the deliveries were read, but a cursor that cannot be saved must not be passed, or the next
+      // pass ledgers them again. The errno names why the state dir refused.
+      const code = (error as NodeJS.ErrnoException | undefined)?.code;
+      deps.log(GITHUB_DELIVERY_READ_FAILED_STEP, { hook_id: hookId, status_class: "cursor", ...(typeof code === "string" ? { code } : {}) });
+      return { ledgered: 0, failed: true };
+    }
     for (const delivery of fresh) deps.log(GITHUB_DELIVERY_STEP, deliveryRow(hookId, delivery));
-    cursors[hookId] = String(fresh.at(-1)!.id);
-    writeCursors(path, cursors);
     return { ledgered: fresh.length, failed: false };
   } catch (error) {
     const statusClass = error instanceof DeliveryLogReadError ? error.statusClass : "transport";
