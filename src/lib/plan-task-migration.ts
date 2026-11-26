@@ -559,6 +559,27 @@ export function moveReservation(id: string, publicRefs: ReadonlyMap<string, stri
   return publicRefs.get(`refs/rmd-id/${id}`) ?? (base.ids.has(id) ? heldAtBase(base.commit) : undefined);
 }
 
+/** W1-T14993: the roots and skipped folders scripts/task-id-existence-check.mjs scans for cited ids. */
+const CITATION_ROOTS = ["src", "deploy", "plan"];
+const CITATION_SKIPPED = new Set(["node_modules", "dist", "build", ".git", "coverage"]);
+/** W1-T14993: the public files at `commit` that would still cite `id` once the paths in `leaving` are removed, as
+ *  task-id-existence reads them (a whole-word id under its roots; its baseline exempts an id). A record held only at the
+ *  base resolves through its own shard, so its removal is refused by that gate whenever this is non-empty. */
+export async function unresolvedCitations(root: string, commit: string, id: string, leaving: ReadonlySet<string>): Promise<string[]> {
+  const git = defaultGitRunnerAsync(root);
+  const grep = ["grep", "-I", "-l", "-w", "-F", "-e", id, commit, "--", ...CITATION_ROOTS];
+  const found = await exitOf(git, ["grep", "-q", ...grep.slice(1)]);
+  if (found === 1) return [];
+  if (found !== 0) return unknown("citation_unreadable");
+  const cited = (await git(grep)).split("\n").filter(Boolean).map(line => line.slice(commit.length + 1))
+    .filter(path => !leaving.has(path) && !path.split("/").some(part => CITATION_SKIPPED.has(part)));
+  if (cited.length === 0) return [];
+  const baseline = "scripts/task-id-existence-baseline.json";
+  if (await exitOf(git, ["cat-file", "-e", `${commit}:${baseline}`]) !== 0) return cited;
+  const rows = JSON.parse(await git(["show", `${commit}:${baseline}`])) as Array<{ id?: unknown }>;
+  return rows.some(row => row.id === id) ? [] : cited;
+}
+
 /** The selection the preview verb prints (W1-T13680 exports it for `rmd move-task`): pinned catalogs, ownership, the
  *  merge-credit search and a stable re-read. It throws {@link PreviewUnknown} on any unread or changed evidence.
  *  W1-T14345: it fills a batch of open tasks, oldest filing first, that the ops catalog has room for; a batch of one is
@@ -645,6 +666,15 @@ export async function selectPlanTaskMigration(
     if (!control) return unknown("merge_credit_control_unreadable");
     // W1-T14825: an unnamed record is a group of one, selected exactly as before.
     const group = publicPrerequisites.has(task.id) ? groupOf(task)! : [task];
+    // W1-T14993: a member with no reservation ref resolves only through its own shard, so it moves only when its removal
+    // (with the batch's) leaves no public citation of its id for task-id-existence to refuse.
+    const leaving = new Set([...batch.map(m => String(m.sourcePath)), ...group.map(m => pub.originals.get(m.id)!.path)]);
+    let cited = false;
+    for (const member of group) {
+      if (publicRefs.has(`refs/rmd-id/${member.id}`)) continue;
+      if ((await unresolvedCitations(o.publicRoot, o.publicCommit, member.id, leaving)).length > 0) { cited = true; break; }
+    }
+    if (cited) { refused.push({ id: task.id, reason: group.length > 1 ? "group_citation_unresolved" : "citation_unresolved" }); continue; }
     let groupRefused: string | undefined;
     const carrying = [...carried];
     for (const member of group) {

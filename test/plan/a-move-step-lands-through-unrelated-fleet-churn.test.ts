@@ -9,12 +9,14 @@
  * carries may refuse it, and every such change still does.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { moveReservation, PreviewUnknown, selectPlanTaskMigration, type MigrationGraphqlReader, type MigrationSelection } from "#src/lib/plan-task-migration.js";
 import { MOVE_RESERVATION_TRAILER } from "#src/lib/plan-task-move.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { moveWorld, OPS, PUBLIC, record, shard, type MoveWorld, type Side } from "#test/helpers/plan-move-world.js";
 
 type Json = Record<string, unknown>;
@@ -299,6 +301,17 @@ test("W1-T14447 criterion 4: invariant:a-changed-carried-task-never-moves — a 
 
 /** W1-T14993: drop an id's refs/rmd-id ref, as the ids filed before reservations (W1-T4190..W1-T4216) never had one. */
 const unreserve = (w: MoveWorld, id: string) => w.pub.origin.git("update-ref", "-d", `refs/rmd-id/${id}`);
+/** W1-T14993: the real scripts/task-id-existence-check.mjs, no stub, over the public tree at `commit` less `removed`. */
+function taskIdExistence(w: MoveWorld, commit: string, removed: string[] = []): { status: number | null; out: string } {
+  const dir = join(w.root, `gate-${commit.slice(0, 12)}-${removed.length}`);
+  w.pub.clone.git("fetch", "--quiet", "origin");
+  w.pub.clone.git("worktree", "add", "--quiet", "--detach", dir, commit);
+  for (const rel of removed) rmSync(join(dir, rel));
+  const baseline = join(w.root, "empty-task-id-baseline.json");
+  writeFileSync(baseline, "[]\n");
+  const run = spawnSync(process.execPath, [join(REPO_ROOT, "scripts", "task-id-existence-check.mjs"), "--cwd", dir, "--baseline", baseline], { encoding: "utf8" });
+  return { status: run.status, out: `${run.stdout}${run.stderr}` };
+}
 
 test("W1-T14993 criterion 1: a record with no refs/rmd-id ref that the public plan holds at the base is selected", async t => {
   // OBSERVED 2026-11-26: the 14:04:32Z stand_down refused W1-T4210 and W1-T4215 as reservation_absent.
@@ -338,6 +351,28 @@ test("W1-T14993 criterion 3: an unreserved record is copied and removed with hel
   assert.deepEqual((done.out.completed as Array<Record<string, unknown>>).map(row => [row.id, row.reservation, row.reservationUnchanged]), [["W1-T1", null, true]],
     "THE CLAIM: the removal completes with its id still unreserved");
   assert.ok(w.holds("ops", "W1-T1") && !w.holds("public", "W1-T1"), "the record moved");
+  const gate = taskIdExistence(w, w.main("public"));
+  assert.equal(gate.status, 0, `THE CLAIM: the real task-id-existence check passes the public tree after the removal: ${gate.out}`);
+});
+
+test("W1-T14993 criterion 3: an unreserved record a public file still cites stays, since the real task-id-existence check refuses its removal", async t => {
+  // OBSERVED 2026-11-26 (review of 42d744ff3): W1-T4210 and W1-T4215 were selected, but public records cite them, so the
+  // real gate refused each REMOVE and converge planned it again on every pass.
+  const w = moveWorld(t, { "W1-T1": record("W1-T1"), "W1-T3": record("W1-T3") });
+  unreserve(w, "W1-T1");
+  unreserve(w, "W1-T3");
+  w.commitTo("public", { "src/cites-w1-t1.ts": "// Follows W1-T1.\nexport {};\n" }, "chore: cite W1-T1");
+  const result = await select(w, reader(w, 1, () => undefined));
+  assert.equal(result.reason, undefined, String(result.reason));
+  assert.deepEqual(result.selection?.refused.filter(r => r.id === "W1-T1"), [{ id: "W1-T1", reason: "citation_unresolved" }],
+    "THE CLAIM: the cited unreserved record is left in place");
+  assert.deepEqual(batchIds(result.selection), ["W1-T3"], "positive control: an unreserved record nothing else cites still moves");
+  const commit = w.main("public");
+  const kept = taskIdExistence(w, commit);
+  assert.equal(kept.status, 0, `positive control: the real check passes while the record stays: ${kept.out}`);
+  const removed = taskIdExistence(w, commit, [shard("W1-T1")]);
+  assert.equal(removed.status, 1, removed.out);
+  assert.match(removed.out, /^ {2}W1-T1$/m, "the real check names W1-T1 unresolved once its shard is gone");
 });
 
 test("W1-T14982 criterion 1: an open pull request that only edits code a record's files lists does not own it, and the record moves", async t => {
