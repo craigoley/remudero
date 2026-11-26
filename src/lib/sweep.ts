@@ -146,7 +146,7 @@ import { acquireInflightLock, InflightLockError, inflightLockPath, parseInflight
 import { sameHost } from "./host-identity.js";
 import { reclaimStaleLock, realWriteAtomicIo, writeAtomic } from "./fs-race-safe.js";
 import { DEFAULT_POLL_INTERVAL_MS } from "./poll-interval.js";
-import { appendLedger, isRealStrike, type LedgerLine } from "./ledger.js";
+import { appendLedger, isRealStrike, REVIEW_LANE_ABORTED_STEP, type LedgerLine } from "./ledger.js";
 import { LEDGER_SECURITY_PRODUCER_LOCK_SUFFIX } from "./ledger-path.js";
 import { appendOperatorNote, loadOperatorNoteRows, loadOperatorNotesForTask, operatorNoteStore, type OperatorNoteEntry } from "./operator-notes.js";
 import {
@@ -4975,7 +4975,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           }
         }
         // W1-T15005: a fix round pushed mid-review supersedes that review ("review input changed after this verdict
-        // started"), so the round waits while a live review owns this exact head; a verdict or a proven-dead owner ends it.
+        // started"), so the round waits while a live review owns this exact head ({@link reviewInFlightOnHead}).
         // Read off the loop; a ledger not yet written holds no review in flight, so the round dispatches as before.
         const reviewLines = pr.reviewState === "pending" ? parseLedger(await fs.promises.readFile(ledgerPath, "utf8")
           .catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; })) : [];
@@ -7421,25 +7421,46 @@ function alongsideCiReviewDue(pr: OpenPrView, policy: SweepPolicy, now: number):
 export const REVIEW_RUN_SETTLED_STEPS: ReadonlySet<string> = new Set(["review.posted", "review.stood_down", "review.post_refused", "review.replay_input",
   "review.skipped_closed_lifecycle"]);
 
+/** W1-T15005: the rows by which a run ends its review of a head: every settled step, and the ends that deliver no
+ *  verdict while the owner process lives on (a lane abort, a held pass, a publication that threw). */
+const REVIEW_RUN_ENDED_STEPS: ReadonlySet<string> = new Set([...REVIEW_RUN_SETTLED_STEPS, REVIEW_LANE_ABORTED_STEP,
+  "review.semantic_pass_refused", "review.capped_pass_held", "review.post_failed"]);
+
+/** W1-T15005: the sweep's row that a review attempt it admitted threw, so the run it started may have written no end. */
+const REVIEW_ATTEMPT_THREW_STEP = "sweep.review_attempt_threw";
+
 /** W1-T15005: the run whose review of `pr`'s current head is in flight, or undefined. A run is in flight from its
- *  review.pending_posted claim on this head until it writes a row that settles it ({@link REVIEW_RUN_SETTLED_STEPS}); a
- *  takeover ends the run it took over, and the run the view proves dead (reviewPendingOwnerDead) holds nothing. */
+ *  review.pending_posted claim on this head until one of these ends it: its own end row ({@link REVIEW_RUN_ENDED_STEPS});
+ *  a takeover; the view's dead-owner proof; or, for a claim of the sweep's own process, the sweep's row that the attempt
+ *  which posted it threw, or that it aborted the process's review of this head past the ceiling. */
 export function reviewInFlightOnHead(
   pr: Pick<OpenPrView, "headSha" | "prUrl" | "taskId" | "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerRunId">,
   lines: ReadonlyArray<Record<string, unknown>>,
 ): string | undefined {
   if (pr.reviewState !== "pending") return undefined;
-  const live = new Set<string>();
+  const live = new Map<string, unknown>(); // run id -> the claim's owner pid
+  const heldAtAdmission = new Map<unknown, ReadonlySet<string>>(); // review attempt id -> claims older than the attempt
+  const endProcessClaims = (pid: unknown, older?: ReadonlySet<string>): void => {
+    if (typeof pid !== "number") return;
+    for (const [run, owner] of live) if (owner === pid && older?.has(run) !== true) live.delete(run);
+  };
   for (const line of lines) {
-    if (line.head_sha !== pr.headSha || !reviewRowNamesPr(line, pr.taskId, pr.prUrl) || typeof line.run_id !== "string") continue;
-    if (line.step === "review.pending_posted") {
+    if (line.head_sha !== pr.headSha) continue;
+    if (line.step === "sweep.review_admitted") heldAtAdmission.set(line.review_attempt_id, new Set(live.keys()));
+    else if (line.step === REVIEW_ATTEMPT_THREW_STEP) {
+      const older = heldAtAdmission.get(line.review_attempt_id);
+      if (older !== undefined) endProcessClaims(line.owner_pid, older);
+    } else if (line.step === REVIEW_IN_PROCESS_RECLAIMED_STEP) endProcessClaims(line.owner_pid);
+    else if (typeof line.run_id !== "string") continue;
+    else if (line.step === "review.pending_posted") {
+      if (!reviewRowNamesPr(line, pr.taskId, pr.prUrl)) continue;
       if (typeof line.took_over_run_id === "string") live.delete(line.took_over_run_id);
       live.delete(line.run_id);
-      live.add(line.run_id);
-    } else if (typeof line.step === "string" && REVIEW_RUN_SETTLED_STEPS.has(line.step)) live.delete(line.run_id);
+      live.set(line.run_id, line.owner_pid);
+    } else if (typeof line.step === "string" && REVIEW_RUN_ENDED_STEPS.has(line.step)) live.delete(line.run_id);
   }
   if (pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerRunId !== undefined) live.delete(pr.reviewPendingOwnerRunId);
-  return [...live].at(-1);
+  return [...live.keys()].at(-1);
 }
 
 /** W1-T14035/W1-T14177 — the death proof is a snapshot, proven about the run the view's ledger named for the live status the
@@ -30354,6 +30375,9 @@ export async function runSweep(
           }
           } catch (e) {
             acted = false;
+            // W1-T15005: this attempt is over, whatever claim it posted, so a fix round stops waiting. No dedup key.
+            appendLine(deps.ledgerPath, { run_id: deps.runId, task_id: job.pr.taskId ?? "SWEEP", step: REVIEW_ATTEMPT_THREW_STEP,
+              pr_number: job.pr.prNumber, head_sha: job.pr.headSha, review_attempt_id: reviewAttemptId, owner_pid: process.pid });
             // W1-T529 — THE ONE THROW THAT MUST NOT LEAVE A DEDUP KEY. Design (v), the
             // `review.post_refused` arm below, is right about every ORDINARY throw and exactly wrong
             // about this one: a floor stand-down says nothing about this PR, because the guarded
@@ -31395,7 +31419,7 @@ async function reclaimStuckInProcessReviews(openPrs: OpenPrView[], deps: SweepDe
   const record = (pr: OpenPrView, fields: Record<string, unknown>): void => {
     if (!deps.dryRun) (deps.appendLine ?? appendLedger)(deps.ledgerPath, { run_id: deps.runId, task_id: pr.taskId ?? "SWEEP",
       step: REVIEW_IN_PROCESS_RECLAIMED_STEP, pr_number: pr.prNumber, head_sha: pr.headSha,
-      ceiling_minutes: policy.pendingCeilingMinutes, ...fields });
+      owner_pid: process.pid, ceiling_minutes: policy.pendingCeilingMinutes, ...fields });
   };
   const freeHead = (key: string): void => {
     reclaimedInProcessReviews.delete(key);

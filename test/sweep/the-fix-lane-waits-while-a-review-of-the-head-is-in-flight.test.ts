@@ -13,7 +13,9 @@ import { test, type TestContext } from "node:test";
 import * as sweep from "#src/lib/sweep.js";
 import type { FixDispatchEvidence, OpenPrView, RollupCheckEntry } from "#src/lib/sweep.js";
 import type { Config } from "#src/lib/config.js";
+import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { runSweep } from "#test/helpers/sweep-test.js";
 
 const HEAD = "a".repeat(40);
 const OTHER = "c".repeat(40);
@@ -70,6 +72,11 @@ const claim = (run: string, head = HEAD, extra: Record<string, unknown> = {}): R
 const settled = (run: string, step = "review.posted"): Row =>
   ({ step, run_id: run, pr_url: PR_URL, task_id: TASK, head_sha: HEAD, state: "failure", ts: "2026-11-26T16:30:00.000Z" });
 const deferrals = (rows: Row[]) => rows.filter((row) => row.step === "sweep.fix_deferred_review_in_flight");
+const sweepRow = (step: string, extra: Record<string, unknown>): Row => ({ step, run_id: "SWEEP-1", task_id: TASK, head_sha: HEAD, ...extra });
+const admitted = (attempt: string): Row => sweepRow("sweep.review_admitted", { pr_url: PR_URL, review_attempt_id: attempt });
+const threw = (attempt: string, pid: number): Row =>
+  sweepRow("sweep.review_attempt_threw", { review_attempt_id: attempt, owner_pid: pid });
+const reclaimed = (pid?: number): Row => sweepRow(sweep.REVIEW_IN_PROCESS_RECLAIMED_STEP, { owner_pid: pid });
 
 test("W1-T15005 criterion 1: a fix round waits while a review of the current head is in flight", async (t) => {
   const d = dispatcher(t, [claim("review-PR15005-1")]);
@@ -112,6 +119,14 @@ test("W1-T15005 criterion 3: a PR with no review in flight dispatches as today",
     ["a review of another PR", [{ ...claim("review-PR15005-1"), pr_url: "https://github.com/o/fixture/pull/1" }], {}],
     ["a red verdict on the head", [claim("review-PR15005-1"), settled("review-PR15005-1")], { reviewState: "failure" }],
     ["a pending hold the run already posted", [claim("review-PR15005-1"), { ...settled("review-PR15005-1"), state: "pending" }], {}],
+    // A review that ended with no verdict, its owner process still alive, is not in flight either.
+    ["an aborted review lane", [claim("review-PR15005-1"), settled("review-PR15005-1", "review.lane_aborted")], {}],
+    ["a held capped pass, keyed by task alone", [claim("review-PR15005-1"),
+      { step: "review.capped_pass_held", run_id: "review-PR15005-1", task_id: TASK, head_sha: HEAD }], {}],
+    ["a held uncertified pass", [claim("review-PR15005-1"), settled("review-PR15005-1", "review.semantic_pass_refused")], {}],
+    ["a publication that threw", [claim("review-PR15005-1"), settled("review-PR15005-1", "review.post_failed")], {}],
+    ["a sweep attempt that threw", [admitted("a1"), claim("review-PR15005-1", HEAD, { owner_pid: 4242 }), threw("a1", 4242)], {}],
+    ["a review aborted past the ceiling that never settled", [claim("review-PR15005-1", HEAD, { owner_pid: 4242 }), reclaimed(4242)], {}],
   ];
   for (const [why, ledger, view] of cases) {
     const d = dispatcher(t, ledger, view);
@@ -121,6 +136,46 @@ test("W1-T15005 criterion 3: a PR with no review in flight dispatches as today",
   }
   assert.equal(sweep.reviewInFlightOnHead({ headSha: HEAD, prUrl: PR_URL, taskId: TASK, reviewState: "success" }, [claim("r")]), undefined,
     "a non-pending head never waits, whatever the ledger holds");
+});
+
+test("W1-T15005: an end that is not the live claim's own leaves the fix round waiting", async (t) => {
+  const own = claim("review-PR15005-1", HEAD, { owner_pid: 4242 });
+  const cases: Array<[string, Row[]]> = [
+    ["another run's lane abort", [own, settled("review-PR15005-0", "review.lane_aborted")]],
+    ["a thrown attempt admitted after the claim", [own, admitted("a2"), threw("a2", 4242)]],
+    ["a thrown attempt of another process, the claim a review child's", [admitted("a1"), own, threw("a1", 1)]],
+    ["a thrown attempt with no admission on the ledger", [own, threw("a9", 4242)]],
+    ["another process's ceiling abort", [own, reclaimed(1)]],
+    ["a ceiling abort naming no process", [claim("review-PR15005-1"), reclaimed()]],
+    ["a claim posted after the ceiling abort", [reclaimed(4242), own]],
+  ];
+  for (const [why, ledger] of cases) {
+    const d = dispatcher(t, ledger);
+    await d.dispatch();
+    assert.deepEqual(deferrals(d.rows).map((row) => row.review_run), ["review-PR15005-1"], `${why} ends nothing`);
+  }
+});
+
+test("W1-T15005: a sweep review that throws after its claim leaves no review in flight", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t15005-threw-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const ledgerPath = join(root, "ledger.ndjson");
+  const view: OpenPrView = { prNumber: 15006, prUrl: PR_URL, taskId: TASK, reviewState: "none", checksState: "green",
+    unmetCriteria: [], priorStrikes: 0, lastActivityAt: "2026-11-26T15:00:00Z", headSha: HEAD, autoMergeArmed: false };
+  const pending = { ...view, reviewState: "pending" as const };
+  let during: string | undefined;
+  await runSweep([view], {
+    ledgerPath, runId: "SWEEP-T15005", now: () => Date.parse("2026-11-26T16:00:00Z"),
+    arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {},
+    postReview: () => {
+      appendFileSync(ledgerPath, `${JSON.stringify(claim("review-PR15006-1", HEAD, { owner_pid: process.pid }))}\n`);
+      during = sweep.reviewInFlightOnHead(pending, readLedgerLines(ledgerPath));
+      throw new Error("reviewer threw");
+    },
+  }, sweep.DEFAULT_SWEEP_POLICY);
+  assert.equal(during, "review-PR15006-1", "positive control: the claim is in flight while the attempt runs");
+  assert.equal(sweep.reviewInFlightOnHead(pending, readLedgerLines(ledgerPath)), undefined,
+    "THE CLAIM: the thrown attempt ends it, though this process lives on");
 });
 
 test("a live ledger not yet written holds no review in flight, so the fix round dispatches as before", async (t) => {

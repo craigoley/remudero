@@ -351,6 +351,10 @@ function derivePrQueue(
           typeof line.head === "string" && typeof line.review_run === "string") {
         waitingOn.set(`${line.pr_number}\u0000${line.head}`, line.review_run);
       }
+      // A thrown review attempt ends the wait shown; a later deferral row shows it again.
+      if (line.step === "sweep.review_attempt_threw" && typeof line.pr_number === "number") {
+        waitingOn.delete(`${line.pr_number}\u0000${String(line.head_sha)}`);
+      }
       if (line.step !== "sweep.disposed" || typeof line.pr_number !== "number" || typeof line.head_sha !== "string") continue;
       const id = `${line.pr_number}\u0000${line.head_sha}`;
       if (wanted.has(id)) disposedAt.set(id, line);

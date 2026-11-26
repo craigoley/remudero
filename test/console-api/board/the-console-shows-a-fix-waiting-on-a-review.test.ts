@@ -29,4 +29,8 @@ test("W1-T15005: the Console PR queue names the review a deferred fix round wait
   assert.equal(snapshot([disposed, deferred()]).reason, "CI red; fix waiting on review review-PR15005-1", "THE CLAIM: the wait is shown");
   assert.equal(snapshot([disposed, deferred("b".repeat(40))]).reason, "CI red", "a deferral at another head says nothing about this one");
   assert.equal(snapshot([disposed, deferred()], "failure").reason, "CI red", "the wait ends once the head's review has a verdict");
+  const threw = { step: "sweep.review_attempt_threw", pr_number: 15005, head_sha: HEAD, ts: "2026-11-26T16:02:00.000Z" };
+  assert.equal(snapshot([disposed, deferred(), threw]).reason, "CI red", "a thrown review attempt ends the wait shown");
+  assert.equal(snapshot([disposed, threw, deferred()]).reason, "CI red; fix waiting on review review-PR15005-1",
+    "a deferral after the throw is shown");
 });
