@@ -301,7 +301,7 @@ export function withdrawArmIfVerdictRefuses(
   },
   deps: { disarm?: (prUrl: string) => DisarmOutcome | void; ledgerLines?: () => Array<Record<string, unknown>> } = {},
 ): boolean {
-  const refusal = armWithdrawalReason(verdict, ctx, deps.ledgerLines);
+  const refusal = armWithdrawalReason(verdict, ctx, deps.ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)));
   if (refusal === undefined) return false;
   const outcome = (deps.disarm ?? disarmAutoMerge)(ctx.prUrl);
   logArmWithdrawal(ctx, refusal, outcome);
@@ -312,9 +312,9 @@ type ArmWithdrawalCtx = Parameters<typeof withdrawArmIfVerdictRefuses>[1];
 
 /** Why the verdict refuses an arm, so one taken at open is withdrawn; undefined when it permits one. */
 function armWithdrawalReason(verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">, ctx: ArmWithdrawalCtx,
-  ledgerLines?: () => Array<Record<string, unknown>>): string | undefined {
+  ledgerLines: () => ReadonlyArray<Record<string, unknown>>): string | undefined {
   const override = verdict.capped
-    ? cappedOverrideFromLedger((ledgerLines ?? (() => readLedgerLines(ctx.ledgerPath)))(), ctx.taskId, ctx.headSha, ctx.prUrl)
+    ? cappedOverrideFromLedger([...ledgerLines()], ctx.taskId, ctx.headSha, ctx.prUrl)
     : undefined;
   const decision = decideAutoMergeArm(verdict, false, override);
   return decision.arm ? undefined : decision.reason;
@@ -345,7 +345,10 @@ export async function withdrawArmIfVerdictRefusesAsync(
     renewToken?: () => Promise<unknown>;
   } = {},
 ): Promise<{ withdrawn: boolean; outcome?: DisarmOutcome | void }> {
-  const refusal = armWithdrawalReason(verdict, ctx, deps.ledgerLines);
+  // Only a capped verdict reads the ledger (its operator override), and that read is awaited.
+  const rows = !verdict.capped ? [] : deps.ledgerLines?.() ??
+    await readLedgerUnionRecords(dirname(ctx.ledgerPath), { selectRotation: () => false });
+  const refusal = armWithdrawalReason(verdict, ctx, () => rows);
   if (refusal === undefined) return { withdrawn: false };
   const renewToken = deps.renewToken ?? (() => renewReviewPublisherToken({ force: true }));
   const outcome = await (deps.disarm ?? ((prUrl: string) => disarmAutoMergeAsync(prUrl, realArmDepsAsync(), { renewToken })))(ctx.prUrl);
@@ -354,9 +357,11 @@ export async function withdrawArmIfVerdictRefusesAsync(
 }
 
 /** W1-T15030: the claim this run holds at `headSha` was taken over by another run, read from the ledger. */
-export function reviewClaimLost(ledgerPath: string, runId: string, headSha: string, prUrl: string): string | undefined {
+export async function reviewClaimLost(ledgerPath: string, runId: string, headSha: string, prUrl: string): Promise<string | undefined> {
   try {
-    return reviewClaimTakenOverBy(readLedgerLines(ledgerPath), runId, headSha, prUrl);
+    const claims = await readLedgerUnionRecords(dirname(ledgerPath), { selectRotation: () => false, step: ["review.pending_posted"],
+      where: (row) => row.head_sha === headSha });
+    return reviewClaimTakenOverBy(claims, runId, headSha, prUrl);
   } catch {
     // An unreadable ledger proves no takeover; the guarded post's own lock and lifecycle reads still decide.
     return undefined;
@@ -783,7 +788,7 @@ async function holdDisputedPass(dispute: ReviewPassDispute, verdict: ReviewVerdi
 }): Promise<ReviewVerdict & { verdictWithheld: string }> {
   const held: ReviewVerdict = { ...verdict, state: "pending", summary: dispute.description };
   // W1-T15030: a run that lost its claim disarms nothing, posts nothing and opens no escalation.
-  const taker = reviewClaimLost(ctx.ledgerPath, ctx.runId, ctx.headSha, ctx.prUrl);
+  const taker = await reviewClaimLost(ctx.ledgerPath, ctx.runId, ctx.headSha, ctx.prUrl);
   if (taker !== undefined) {
     ctx.log("review.post_refused", { pr_url: ctx.prUrl, head_sha: ctx.headSha, attempted_state: "success", outcome: "disputed_pass_held",
       reason: "claim_lost", taken_over_by_run_id: taker });
@@ -2109,8 +2114,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   const renewToken = args.renewToken ?? ((o?: { force?: boolean }) => renewReviewPublisherToken(o));
   await renewToken();
   const withdrawDeps = { disarm: args.disarm, renewToken: () => renewToken({ force: true }) };
-  const claimLost = (): ReviewRunResult | undefined => {
-    const taker = reviewClaimLost(args.ledgerPath, args.runId, headSha, prUrl);
+  const claimLost = async (): Promise<ReviewRunResult | undefined> => {
+    const taker = await reviewClaimLost(args.ledgerPath, args.runId, headSha, prUrl);
     if (taker === undefined) return undefined;
     log("review.post_refused", { pr_url: prUrl, head_sha: headSha, attempted_state: verdict.state, reason: "claim_lost",
       taken_over_by_run_id: taker });
@@ -2119,7 +2124,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: "claim_lost", reviewDecisionDigest: decisionDigest,
       decisionDisposition, evaluatorProvenance };
   };
-  const lostAtPost = claimLost();
+  const lostAtPost = await claimLost();
   if (lostAtPost !== undefined) return lostAtPost;
   const disarmedAtPost = await withdrawArmIfVerdictRefusesAsync(
     verdict,
@@ -2222,7 +2227,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   decisionDigest = posted.effectiveReviewDecisionDigest ?? decisionDigest;
   if (posted.effectiveVerdict) verdict = { ...verdict, ...posted.effectiveVerdict, state: posted.effectiveState ?? posted.effectiveVerdict.state };
   if (dispute !== undefined && posted.effectiveState === "pending") {
-    const lostAtHold = claimLost();
+    const lostAtHold = await claimLost();
     if (lostAtHold !== undefined) return lostAtHold;
     const held = await holdDisputedPass(dispute, verdict, { owner, repo, prUrl, headSha, taskId: task.id, runId: args.runId,
       ledgerPath: args.ledgerPath, catalog: task.catalog, log, disarm: args.disarm, renewToken: withdrawDeps.renewToken,
