@@ -4218,9 +4218,9 @@ export function workerSpawnRetiredBy(): string | undefined {
   return workerSpawnScope.getStore()?.retiredBy;
 }
 
-export class WorkerSpawnRetiredError extends Error {
+export class WorkerSpawnRetiredError extends RmdError {
   constructor(readonly reason: string) {
-    super(`worker launch withheld: retired: ${reason}`);
+    super("child_process", 1, `worker launch withheld: retired: ${reason}`, { reason });
     this.name = "WorkerSpawnRetiredError";
   }
 }
