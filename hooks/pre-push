@@ -298,6 +298,271 @@ else
 fi
 # W1-T3388 — END head-identity admission
 
+# W1-T14945 — BEGIN import-cycle admission
+# OBSERVED 2026-11-26: a fix-lane round on core #20963 made src/lib/body-repair.ts import ./review.js, closing an
+# import ring that depcruise's no-circular rule refuses. Cruise from src/ in each committed snapshot, including
+# workspace dependencies that the scanner can follow. The gate supplies the scanner, config and external packages.
+# Compare the parsed imports first, then check whether any added import supplies a new edge of a reported ring.
+# Check each pushed branch against its remote tip or, on creation, its merge base with the destination remote's default branch.
+cycle_ratchet_skip() { echo "pre-push: cycle-ratchet — $1, skipped (a named skip, NOT a pass)" >&2; }
+cycle_remote="${1:-origin}" # the hook's first argument: the destination remote's name (or its URL)
+if has cycle-ratchet.mjs && [ -x "$gate_root/node_modules/.bin/depcruise" ] && [ -f "$gate_root/.dependency-cruiser.cjs" ]; then
+  cycle_updates=""
+  while read -r cycle_local_ref cycle_local_sha cycle_remote_ref cycle_remote_sha; do
+    [ -n "$cycle_local_sha" ] || continue
+    [ "$cycle_local_sha" = "$zero_sha" ] && continue
+    case "$cycle_remote_ref" in refs/heads/*) cycle_updates="${cycle_updates}${cycle_local_sha} ${cycle_remote_sha}
+" ;; esac
+  done <<EOF_CYCLE_UPDATES
+$push_lines
+EOF_CYCLE_UPDATES
+  if [ -z "$push_lines" ]; then
+    cycle_updates="HEAD"
+  elif [ -z "$cycle_updates" ]; then
+    cycle_ratchet_skip "no branch updates"
+  fi
+  while IFS=' ' read -r cycle_head_sha cycle_old_sha; do
+  [ -n "$cycle_head_sha" ] || continue
+  cycle_base=""
+  if [ -n "$cycle_old_sha" ] && [ "$cycle_old_sha" != "$zero_sha" ]; then
+    # A branch update compares against the tip the remote advertised. One this clone lacks (a stale clone's force push)
+    # is fetched by its id first, writing no ref and no FETCH_HEAD; never skipped, so a stale push cannot bypass the scan.
+    if ! git cat-file -e "${cycle_old_sha}^{commit}" 2>/dev/null; then
+      git fetch -q --no-tags --no-write-fetch-head "$cycle_remote" "$cycle_old_sha" </dev/null >/dev/null 2>&1 || true
+    fi
+    if git cat-file -e "${cycle_old_sha}^{commit}" 2>/dev/null; then cycle_base="$cycle_old_sha"; fi
+  fi
+  if [ -z "$cycle_base" ]; then
+    # A new branch, or an old tip the remote would not serve, compares against its merge base with the DESTINATION
+    # remote's default branch (the hook's $1), so a clone whose remote is not named origin is checked too; a push to a
+    # bare URL keeps origin/main.
+    for cycle_main in "refs/remotes/$cycle_remote/HEAD" "refs/remotes/$cycle_remote/main" "refs/remotes/origin/main"; do
+      cycle_base="$(git merge-base "$cycle_main" "$cycle_head_sha" 2>/dev/null || true)"
+      [ -n "$cycle_base" ] && break
+    done
+  fi
+  if [ -z "$cycle_base" ]; then
+    cycle_ratchet_skip "no remote tip or merge base with $cycle_remote's default branch"
+  elif git --no-replace-objects diff --quiet --no-ext-diff "$cycle_base" "$cycle_head_sha" --; then
+    cycle_ratchet_skip "this diff adds no parsed import edge under src/"
+  elif ! cycle_tree="$(mktemp -d "${TMPDIR:-/tmp}/rmd-prepush-cycles-XXXXXX")"; then
+    cycle_ratchet_skip "no temporary directory for the pushed tree"
+  else
+    cycle_base_tree="$cycle_tree/base"
+    cycle_head_tree="$cycle_tree/head"
+    if ! mkdir -p "$cycle_base_tree" "$cycle_head_tree"; then
+      cycle_ratchet_skip "no temporary directory for the comparison or pushed tree"
+    else
+      cycle_result="$(node --input-type=module -e '
+        import * as fs from "node:fs";
+        import { execFileSync, spawnSync } from "node:child_process";
+        import { dirname, join, resolve, sep } from "node:path";
+        import { pathToFileURL } from "node:url";
+
+        const [baseRevision, headRevision, basePath, headPath, gatePath] = process.argv.slice(1);
+        const [baseTree, headTree, gate] = [basePath, headPath, gatePath].map((path) => fs.realpathSync(path));
+        const { canonicalRing, distinctCycles, CYCLE_RULE_NAME } = await import(
+          pathToFileURL(join(gate, "scripts/cycle-ratchet.mjs"))
+        );
+        const installed = fs.realpathSync(join(gate, "node_modules"));
+        const inside = (dir, path) => path.startsWith(dir + sep);
+        const readJson = (path) => JSON.parse(fs.readFileSync(path, "utf8"));
+        const git = (args, options) => execFileSync("git", ["--no-replace-objects", ...args], {
+          maxBuffer: 64 * 1024 * 1024, ...options,
+        });
+
+        function writeBlobs(tree, entries, bytes) {
+          const output = git(["cat-file", "--batch=%(objectsize)"], {
+            input: entries.map(({ oid }) => oid + "\n").join(""),
+            maxBuffer: bytes + 1024,
+          });
+          let offset = 0;
+          for (const { mode, file, size } of entries) {
+            const end = output.indexOf(10, offset);
+            if (end < offset || output.toString("ascii", offset, end) !== String(size) || output[end + size + 1] !== 10) {
+              throw new Error("Incomplete Git blob batch");
+            }
+            const blob = output.subarray(end + 1, end + size + 1);
+            offset = end + size + 2;
+            const target = resolve(tree, file);
+            if (!inside(tree, target)) throw new Error("Git path leaves the commit snapshot");
+            fs.mkdirSync(dirname(target), { recursive: true });
+            if (mode === "120000") {
+              const link = blob.toString();
+              if (inside(tree, resolve(dirname(target), link))) fs.symlinkSync(link, target);
+            } else {
+              fs.writeFileSync(target, blob);
+            }
+          }
+        }
+
+        function snapshot(revision, tree) {
+          // Read raw blobs in bounded batches. Release attributes and checkout filters can alter the files.
+          const entries = git(["ls-tree", "-rlz", revision], { encoding: "utf8" }).split("\0").filter(Boolean);
+          let batch = [];
+          let bytes = 0;
+          for (const entry of entries) {
+            const tab = entry.indexOf("\t");
+            const [mode, type, oid, length] = entry.slice(0, tab).trim().split(/\s+/);
+            if (type !== "blob") continue;
+            const size = Number(length);
+            const recordBytes = size + length.length + 2;
+            if (batch.length && bytes + recordBytes > 16 * 1024 * 1024) {
+              writeBlobs(tree, batch, bytes);
+              batch = [];
+              bytes = 0;
+            }
+            batch.push({ mode, oid, file: entry.slice(tab + 1), size });
+            bytes += recordBytes;
+          }
+          if (batch.length) writeBlobs(tree, batch, bytes);
+        }
+
+        const changes = git(["diff", "--name-status", "-z", "--find-renames", "--no-ext-diff", "--no-textconv",
+          baseRevision, headRevision, "--"], { encoding: "utf8" }).split("\0");
+        const priorPaths = new Map();
+        for (let i = 0; i < changes.length - 1;) {
+          const status = changes[i++];
+          const path = changes[i++];
+          if (status.startsWith("R")) priorPaths.set(changes[i++], path);
+        }
+        const priorPath = (path) => priorPaths.get(path) ?? path;
+        snapshot(baseRevision, baseTree);
+        snapshot(headRevision, headTree);
+
+        function linkPackages(tree) {
+          const modules = join(tree, "node_modules");
+          fs.mkdirSync(modules);
+          const manifest = join(tree, "package.json");
+          const workspaces = fs.lstatSync(manifest, { throwIfNoEntry: false })?.isFile() ? readJson(manifest).workspaces : [];
+          // Resolve workspace package exports through the snapshot, including packages added by this push.
+          for (const workspace of Array.isArray(workspaces) ? workspaces : []) {
+            if (typeof workspace !== "string" || !/^(?:[\w.-]+\/)*[\w.-]+(?:\/\*)?$/.test(workspace) ||
+              workspace.split("/").some((part) => part === "." || part === "..")) continue;
+            for (const relative of fs.globSync(`${workspace}/package.json`, { cwd: tree })) {
+              const file = fs.realpathSync(join(tree, relative));
+              if (!inside(tree, file)) continue;
+              const { name } = readJson(file);
+              if (typeof name !== "string" || !/^(?:@[\w-][\w.-]*\/)?[\w-][\w.-]*$/.test(name)) continue;
+              const link = join(modules, name);
+              fs.mkdirSync(dirname(link), { recursive: true });
+              if (!fs.existsSync(link)) fs.symlinkSync(dirname(file), link);
+            }
+          }
+          // Exclude installed workspace symlinks, which would point back into the gate checkout.
+          const linkInstalled = (from, to) => {
+            fs.mkdirSync(to, { recursive: true });
+            for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+              const source = join(from, entry.name);
+              const target = join(to, entry.name);
+              if (entry.isDirectory() && entry.name.startsWith("@")) linkInstalled(source, target);
+              else if (!entry.name.startsWith(".") && !fs.existsSync(target) && (!entry.isSymbolicLink() ||
+                (fs.existsSync(source) && inside(installed, fs.realpathSync(source))))) fs.symlinkSync(source, target);
+            }
+          };
+          linkInstalled(installed, modules);
+        }
+
+        function cruise(tree, roots) {
+          const inputs = roots.filter((root) => fs.existsSync(join(tree, root)));
+          if (!inputs.length) return { modules: [], summary: { violations: [] } };
+          linkPackages(tree);
+          const result = spawnSync(join(gate, "node_modules/.bin/depcruise"), [
+            "--config", join(gate, ".dependency-cruiser.cjs"), "--output-type", "json", "--", ...inputs,
+          ], { cwd: tree, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+          // A rule violation can exit nonzero with a complete report.
+          const graph = JSON.parse(result.stdout);
+          if (!Array.isArray(graph.modules) || !Array.isArray(graph.summary?.violations)) {
+            throw new Error("Incomplete dependency-cruiser report");
+          }
+          return graph;
+        }
+
+        const head = cruise(headTree, ["src"]);
+        // A resolution change can make an existing file reachable for the first time. Compare its old imports too.
+        const extraBaseRoots = head.modules.filter(({ dependencies }) => dependencies?.length)
+          .map(({ source }) => priorPath(source))
+          .filter((source) => !source.startsWith("src/") && inside(baseTree, resolve(baseTree, source)));
+        const base = cruise(baseTree, ["src", ...extraBaseRoots]);
+        const beforeModules = new Map(base.modules.map(({ source, dependencies }) => [source, dependencies ?? []]));
+        const parsedKey = (dep) => JSON.stringify([dep.module, dep.moduleSystem, dep.dependencyTypes?.includes("type-only")]);
+        const edgeKey = (source, target) => JSON.stringify([source, target]);
+        const addedEdges = new Set();
+        let addedImport = false;
+        for (const { source, dependencies = [] } of head.modules) {
+          const before = beforeModules.get(priorPath(source)) ?? [];
+          const beforeImports = new Set(before.map(parsedKey));
+          const beforeTargets = new Set(before.filter((dep) => !dep.couldNotResolve).map((dep) => dep.resolved));
+          for (const dep of dependencies) {
+            if (beforeImports.has(parsedKey(dep))) continue;
+            addedImport = true;
+            if (!dep.couldNotResolve && !beforeTargets.has(priorPath(dep.resolved))) {
+              addedEdges.add(edgeKey(source, dep.resolved));
+            }
+          }
+        }
+        if (!addedImport) { console.log("NO_ADDED_EDGE"); process.exit(0); }
+
+        const beforeCycles = new Set(distinctCycles(base));
+        // A ring moved without Git pairing its paths (a low-similarity move reads as delete + add) keeps the parsed imports
+        // of every module in it. Each base ring is also known by the multiset of its modules import lists, counted, so a
+        // moved ring matches the one it was, and a ring whose module gained an import, or a second copy, matches none.
+        const afterModules = new Map(head.modules.map(({ source, dependencies }) => [source, dependencies ?? []]));
+        const ringPrint = (ring, modules) => JSON.stringify(ring.split(" -> ")
+          .map((source) => JSON.stringify((modules.get(source) ?? []).map(parsedKey).sort())).sort());
+        const beforePrints = new Map();
+        for (const ring of beforeCycles) {
+          const print = ringPrint(ring, beforeModules);
+          beforePrints.set(print, (beforePrints.get(print) ?? 0) + 1);
+        }
+        const newCycles = new Set();
+        const headRings = new Map();
+        for (const { rule, from, cycle = [] } of head.summary.violations) {
+          if (rule?.name !== CYCLE_RULE_NAME) continue;
+          const nodes = [from, ...cycle.map((step) => typeof step === "string" ? step : step.name)];
+          const ring = canonicalRing(nodes);
+          if (headRings.has(ring)) continue;
+          const usesAddedEdge = nodes.some((source, i) => addedEdges.has(edgeKey(source, nodes[(i + 1) % nodes.length])));
+          headRings.set(ring, usesAddedEdge && !beforeCycles.has(canonicalRing(nodes.map(priorPath))));
+        }
+        const sorted = [...headRings].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+        const take = (ring) => {
+          const print = ringPrint(ring, afterModules);
+          const left = beforePrints.get(print) ?? 0;
+          if (left > 0) beforePrints.set(print, left - 1);
+          return left > 0;
+        };
+        // A ring already known by its paths, or using no added edge, claims its base ring first, so a copy Git pairs
+        // with the original cannot leave the original free for the moved ring to claim too.
+        for (const [ring, candidate] of sorted) if (!candidate) take(ring);
+        for (const [ring, candidate] of sorted) if (candidate && !take(ring)) newCycles.add(ring); // else: the same ring, moved
+        for (const ring of [...newCycles].sort()) console.log(`NEW_RING ${ring}`);
+      ' "$cycle_base" "$cycle_head_sha" "$cycle_base_tree" "$cycle_head_tree" "$gate_root" 2>/dev/null)"
+      cycle_status=$?
+      if [ "$cycle_status" -ne 0 ]; then
+        cycle_ratchet_skip "the committed trees or comparison cruise produced no readable result"
+      elif [ "$cycle_result" = "NO_ADDED_EDGE" ]; then
+        cycle_ratchet_skip "this diff adds no parsed import edge under src/"
+      elif printf '%s\n' "$cycle_result" | grep -q '^NEW_RING '; then
+        fail=1
+        echo "cycle-ratchet: BLOCKED -- new dependency cycle(s) detected" >&2
+        while IFS= read -r cycle_ring_line; do
+          case "$cycle_ring_line" in NEW_RING\ *) echo "cycle-ratchet: ${cycle_ring_line#NEW_RING }" >&2 ;; esac
+        done <<EOF_CYCLE_RESULT
+$cycle_result
+EOF_CYCLE_RESULT
+      fi
+    fi
+    rm -rf "$cycle_tree"
+  fi
+  done <<EOF_CYCLE_RUNS
+$cycle_updates
+EOF_CYCLE_RUNS
+else
+  cycle_ratchet_skip "no gate depcruise, config or scripts/cycle-ratchet.mjs"
+fi
+# W1-T14945 — END import-cycle admission
+
 # W1-T4214 — BEGIN head-identity TRANSITION (BLOCKING, and only this narrow case)
 # The advisory above prints and the push goes on, and nobody reads it: a push that took #6562's head
 # from admitted to refused was the incident, and the only repair left was a new pull request. What is
