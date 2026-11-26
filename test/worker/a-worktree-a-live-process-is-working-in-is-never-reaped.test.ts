@@ -7,12 +7,13 @@
  * below the tree; the census is injected here so the cases are the same on any host.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { ProcessCwdCensus } from "#src/lib/process-cwd-census.js";
-import { reapStaleWorktrees } from "#src/lib/worker.js";
+import { readBoundedProcessCwdCensus, type ProcessCwdCensus } from "#src/lib/process-cwd-census.js";
+import { reapStaleWorktrees, type WorktreeReapOpts } from "#src/lib/worker.js";
 
 const NOW = 1_800_000_000_000;
 const HOUR = 3_600_000;
@@ -27,7 +28,7 @@ function tree(name: string) {
 }
 
 /** Reap `root` with every older gate reading terminal: no live pid, no live branch, activity `ageMs` old. */
-function reap(root: string, ageMs: number, census: (dir: string) => ProcessCwdCensus) {
+function reap(root: string, ageMs: number, census?: (dir: string) => ProcessCwdCensus, extra: WorktreeReapOpts = {}) {
   return reapStaleWorktrees(root, {
     isPidAlive: () => false,
     pidNamespace: () => "pid:[4026531836]",
@@ -35,7 +36,25 @@ function reap(root: string, ageMs: number, census: (dir: string) => ProcessCwdCe
     newestActivity: () => ({ mtimeMs: NOW - ageMs, complete: true }),
     branchIsLiveUpstream: () => false,
     cwdCensus: census,
+    ...extra,
   });
+}
+
+/** A `statProcessTable` that fails with `code`; ENOENT is the one answer that proves a host has no `/proc`. */
+function statFails(code: string) {
+  return () => {
+    throw Object.assign(new Error(`${code}: injected stat of /proc`), { code });
+  };
+}
+
+/** A supplied process table: each call yields pid 4242 once, then ends, or throws `then` mid-enumeration. */
+function onePid(then?: Error) {
+  let reads = 0;
+  return () => {
+    if (reads++ === 0) return "4242";
+    if (then) throw then;
+    return null;
+  };
 }
 
 test("W1-T15026 a tree a live process works in is kept as live-cwd", () => {
@@ -47,6 +66,33 @@ test("W1-T15026 a tree a live process works in is kept as live-cwd", () => {
     assert.equal(existsSync(t.entry), true, "the tree is still on disk");
   } finally {
     t.cleanup();
+  }
+});
+
+test("W1-T15026 a tree a live process works in is kept as live-cwd through a symlinked path", () => {
+  const name = "op-hand-review-1795712378";
+  for (const linked of ["root", "tree"] as const) {
+    const t = tree(name);
+    const links = realpathSync(mkdtempSync(join(tmpdir(), "rmd-live-cwd-link-")));
+    try {
+      let root = links;
+      if (linked === "root") {
+        root = join(links, "worktrees");
+        symlinkSync(t.root, root);
+      } else {
+        symlinkSync(t.entry, join(links, name));
+      }
+      // The real census compares paths; the process's cwd is spelled canonically, as a `/proc` cwd link is.
+      const s = reap(root, 2 * HOUR, (dir) =>
+        readBoundedProcessCwdCensus(dir, { readNextPid: onePid(), readCwd: () => join(t.entry, "src"), clock: { now: () => 0 } }));
+      assert.deepEqual(s.reaped, [], `symlinked ${linked}: an occupied tree is never reaped`);
+      assert.deepEqual(s.keptReasons, [{ name, reason: "live-cwd" }], linked);
+      assert.equal(existsSync(join(root, name)), true, linked);
+      assert.equal(existsSync(t.entry), true, linked);
+    } finally {
+      rmSync(links, { recursive: true, force: true });
+      t.cleanup();
+    }
   }
 });
 
@@ -99,9 +145,88 @@ test("W1-T15026 an undecidable census keeps the tree as cwd-unknown", () => {
   }
   const bare = tree("hd-hand-review-21030");
   try {
-    const s = reap(bare.root, 2 * HOUR, () => ({ state: "unknown", scanned: 0, reason: "proc_unavailable" }));
+    const s = reap(bare.root, 2 * HOUR, () => ({ state: "unknown", scanned: 0, reason: "proc_unavailable" }),
+      { statProcessTable: statFails("ENOENT") });
     assert.deepEqual(s.reaped, ["hd-hand-review-21030"], "a host with no process table at all reaps as it did before the gate");
   } finally {
     bare.cleanup();
+  }
+});
+
+test("W1-T15026 an undecidable census keeps the tree as cwd-unknown when /proc is not proven absent", () => {
+  const unproven: Array<[string, WorktreeReapOpts["statProcessTable"]]> = [
+    ["/proc stats", () => ({})],
+    ["EACCES", statFails("EACCES")],
+    ["EIO", statFails("EIO")],
+  ];
+  for (const [label, statProcessTable] of unproven) {
+    const t = tree("hd-hand-review-21032");
+    try {
+      const s = reap(t.root, 2 * HOUR, () => ({ state: "unknown", scanned: 0, reason: "proc_unavailable" }),
+        { statProcessTable });
+      assert.deepEqual(s.reaped, [], label);
+      assert.deepEqual(s.keptReasons, [{ name: "hd-hand-review-21032", reason: "cwd-unknown" }], label);
+      assert.equal(existsSync(t.entry), true, label);
+    } finally {
+      t.cleanup();
+    }
+  }
+});
+
+test("W1-T15026 an undecidable census keeps the tree as cwd-unknown when the /proc enumeration breaks", () => {
+  const t = tree("hd-hand-review-21033");
+  const seen: ProcessCwdCensus[] = [];
+  try {
+    const broken = Object.assign(new Error("EIO: injected readdir of /proc"), { code: "EIO" });
+    const s = reap(t.root, 2 * HOUR, (dir) => {
+      const census = readBoundedProcessCwdCensus(dir, { readNextPid: onePid(broken), readCwd: () => "/", clock: { now: () => 0 } });
+      seen.push(census);
+      return census;
+    }, { statProcessTable: () => ({}) });
+    assert.deepEqual(seen, [{ state: "unknown", scanned: 1, reason: "proc_unavailable" }]);
+    assert.deepEqual(s.keptReasons, [{ name: "hd-hand-review-21033", reason: "cwd-unknown" }]);
+    assert.equal(existsSync(t.entry), true);
+  } finally {
+    t.cleanup();
+  }
+});
+
+test("W1-T15026 an undecidable census keeps the tree as cwd-unknown when /proc cannot be opened", (ctx) => {
+  const t = tree("hd-hand-review-21034");
+  const real = fs.opendirSync;
+  let refused = 0;
+  const patch = ctx.mock.method(fs, "opendirSync", (...args: Parameters<typeof fs.opendirSync>) => {
+    if (args[0] !== "/proc") return real(...args);
+    refused += 1;
+    throw Object.assign(new Error("EMFILE: injected open of /proc"), { code: "EMFILE" });
+  });
+  syncBuiltinESMExports();
+  try {
+    // The default census runs. `/proc` stats as present, whatever host this is.
+    const s = reap(t.root, 2 * HOUR, undefined, { statProcessTable: () => ({}) });
+    assert.equal(refused, 1, "the default census met the refused open");
+    assert.deepEqual(s.keptReasons, [{ name: "hd-hand-review-21034", reason: "cwd-unknown" }]);
+    assert.equal(existsSync(t.entry), true);
+  } finally {
+    patch.mock.restore();
+    syncBuiltinESMExports();
+    t.cleanup();
+  }
+});
+
+test("W1-T15026 an undecidable census keeps the tree as cwd-unknown when its canonical path cannot be resolved", () => {
+  const t = tree("hd-hand-review-21035");
+  const asked: string[] = [];
+  try {
+    const s = reap(t.root, 2 * HOUR, (dir) => { asked.push(dir); return { state: "clear", scanned: 1 }; }, {
+      realpath: () => {
+        throw Object.assign(new Error("EIO: injected realpath"), { code: "EIO" });
+      },
+    });
+    assert.deepEqual(s.keptReasons, [{ name: "hd-hand-review-21035", reason: "cwd-unknown" }]);
+    assert.deepEqual(asked, [], "a path with no canonical spelling is never censused");
+    assert.equal(existsSync(t.entry), true);
+  } finally {
+    t.cleanup();
   }
 });

@@ -7990,15 +7990,17 @@ export interface WorktreeReapOpts {
   /** Whether `branch` (in `repoDir`) is still live upstream — true means KEEP, fail closed. Defaults to {@link
    * defaultBranchIsLiveUpstream} (an `origin` ls-remote). */
   branchIsLiveUpstream?: (branch: string, repoDir: string) => boolean;
-  /** W1-T2950: canonical-path resolver for the registration identity compare. Injectable so a test can drive the
-   *  UNDECIDABLE arm — the one where the comparison cannot be made — without an unreadable real filesystem. Defaults to
-   *  `realpathSync`. */
+  /** W1-T2950: canonical-path resolver for the registration identity compare and the cwd census (W1-T15026). Injectable
+   *  so a test can drive the UNDECIDABLE arm — the one where the comparison cannot be made — without an unreadable real
+   *  filesystem. Defaults to `realpathSync`. */
   realpath?: (p: string) => string;
   /** The tree-activity probe the age gate measures against. Injectable so a test asserts the boundary without a deep fixture
    * per case. Defaults to {@link newestActivityMs}, the REAL bounded walk, which the fixture-free tests drive (W1-T378). */
   newestActivity?: (dir: string) => { mtimeMs: number; complete: boolean };
   /** W1-T15026: who works at or below a tree about to be removed; defaults to the bounded `/proc` cwd census. */
   cwdCensus?: (dir: string) => ProcessCwdCensus;
+  /** W1-T15026: asks whether `/proc` exists after a `proc_unavailable` census; defaults to `statSync`. */
+  statProcessTable?: (path: string) => unknown;
   /** SURVEY ONLY when true: an entry that would be reaped is still recorded in `reaped` and `reapedLocks`, so a caller can
    * ledger exactly what it would reclaim, but nothing is removed from disk. Mirrors {@link reapStaleClones}'s own `dryRun`.
    * Default false, unchanged for every existing caller (W1-T406). */
@@ -8096,6 +8098,17 @@ function resolveWorktreeRegistration(
     if (registered.identity === candidate.identity) return { kind: "registered", repoDir, branch: entry.branch };
   }
   return { kind: "unregistered" };
+}
+
+/** W1-T15026: true only when this host is PROVEN to have no process table, i.e. `/proc` does not exist. A `/proc` that
+ *  stats, or whose stat fails any other way, leaves a failed census undecided. */
+function processTableIsAbsent(stat: (path: string) => unknown): boolean {
+  try {
+    stat("/proc");
+    return false;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ENOENT";
+  }
 }
 
 /** HOW an aged, terminal reap candidate must be REMOVED — never WHETHER, which the gates above decide. `git-remove` deletes
@@ -8350,9 +8363,17 @@ function* worktreeReapPass(
       // W1-T15026: the last gate before removal. A tree can look terminal by every signal above while a live process still
       // works in it (an operator review writes nothing inside its tree), so the census is asked only here, for the few
       // trees about to be removed. Occupied keeps; an undecidable census keeps. A host with no process table at all has
-      // nothing to ask, so its removal runs as it did before this gate.
-      const census = cwdCensus(entryPath);
-      const noProcessTable = census.state === "unknown" && census.reason === "proc_unavailable";
+      // nothing to ask, so its removal runs as it did before this gate. `/proc` cwd links are canonical, so the census
+      // is asked about the canonical path: a symlinked spelling would match no cwd and read clear.
+      const canonical = canonicalIdentity(entryPath, opts.realpath ?? realpathSync);
+      if (canonical.kind === "unresolvable") {
+        keep(name, "cwd-unknown");
+        continue;
+      }
+      const census = cwdCensus(canonical.identity);
+      // `proc_unavailable` also covers a failed open or a broken enumeration of a table that exists.
+      const noProcessTable = census.state === "unknown" && census.reason === "proc_unavailable"
+        && processTableIsAbsent(opts.statProcessTable ?? statSync);
       if (census.state !== "clear" && !noProcessTable) {
         keep(name, census.state === "occupied" ? "live-cwd" : "cwd-unknown");
         continue;
