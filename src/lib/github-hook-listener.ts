@@ -177,6 +177,7 @@ export function startGithubHookListener(opts: StartGithubHookListenerOptions): G
   // SHARE_ENV: a long-lived thread reads the live supervisor env, not a spawn-time copy.
   const worker = new Worker(opts.workerUrl ?? new URL(import.meta.url), {
     name: threadName("hookListener"),
+    execArgv: ["--import", "tsx"],
     workerData: { kind: KIND, port, host: opts.host, secretFile: resolveGithubWebhookSecretFilePath(undefined, env) },
     env: SHARE_ENV,
   });
