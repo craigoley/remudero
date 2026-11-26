@@ -11,8 +11,8 @@
     From the 2026-10-13 proposal on verify-human-automate:W1-T5760, ratified via rmd approve:
   
     spans runner and sweep concerns
-  priority: 4
-  status: queued
+  status: blocked
+  retirement: retired  # closed unbuilt 2026-11-26: unminted placeholder id (W1-T9292 class); its dependencies W1-T60 and W1-T77 are retired per W1-T9292
   # backlog gardener: band=4 evidence=bbda018dc72f52c1
   attempts: 0
   files:

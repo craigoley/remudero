@@ -12,8 +12,8 @@
     From the 2026-10-13 proposal on verify-human-automate:W1-T5760, ratified via rmd approve:
   
     spans runner and sweep concerns
-  priority: 1.5  # queue-judge-2026-10-27: Dependent NEW-1b is blocked, so delaying NEW-1a incurs high cost of delay.
-  status: queued
+  status: blocked
+  retirement: retired  # closed unbuilt 2026-11-26: unminted placeholder id (W1-T9292 class); its dependencies W1-T60 and W1-T77 are retired per W1-T9292
   # queue judge: priority=1.5 evidence=37e0e892c2c0d811
   attempts: 0
   files:
