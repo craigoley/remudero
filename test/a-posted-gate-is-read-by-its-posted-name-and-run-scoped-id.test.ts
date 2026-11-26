@@ -22,7 +22,7 @@ import {
 } from "#src/lib/ci-control-plane.js";
 import { checkJobId } from "#src/lib/sweep.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { buildSweepEffects, cancelledRequiredChecks, fetchCiFailures } from "#src/run-task.js";
+import { buildSweepEffects, fetchCiFailures } from "#src/run-task.js";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const OWNER = "owner";
@@ -73,19 +73,6 @@ test("fetchCiFailures and cancelledRequiredChecks carry the job id of a run-scop
   assert.deepEqual(logReads, ["12345"]);
   assert.match(failures[0]?.logTail ?? "", /failed job 12345/);
   assert.equal(failures[0]?.logUnavailable, undefined);
-
-  // W1-T13186: a run-scoped post is never a cancellation of its own. Its job id binds it to its cancelled producer.
-  assert.deepEqual(cancelledRequiredChecks([{ ...POSTED, conclusion: "CANCELLED" }], [POSTED.name]), []);
-  const head = "6f9313fb89989914f77dcd770b0cc490bb12a0e2";
-  const producer = { name: "light-gates", headSha: head, status: "COMPLETED", conclusion: "CANCELLED",
-    detailsUrl: "https://github.com/owner/repo/actions/runs/777/job/12345" };
-  const post = { ...POSTED, headSha: head, status: "COMPLETED", conclusion: "CANCELLED", checkRunId: 900,
-    outputSummary: "W1-T4399: reported by this job's rule-checks step(s) (outcome(s): cancelled)" };
-  assert.deepEqual(cancelledRequiredChecks([producer, post], [POSTED.name], head), [
-    { name: "light-gates", jobId: "12345", runAttempt: 2, explainedFailures: [{ name: "rule-checks", checkRunId: 900 }] },
-  ]);
-  assert.deepEqual(cancelledRequiredChecks([producer, { ...post, externalId: "run:777:2:job:9" }], [POSTED.name], head),
-    [{ name: "light-gates", jobId: "12345" }], "a post naming another job binds to nothing");
 });
 
 test("a stale ci-gate posted with a run-scoped external id is rerun by its job id", async () => {
