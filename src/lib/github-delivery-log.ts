@@ -127,7 +127,8 @@ function deliveryRow(hookId: string, delivery: Record<string, unknown>): Record<
 /**
  * One pass: every hook pointing at serve's route, every delivery newer than its cursor, oldest first. A first pass for
  * a hook starts at its newest page: GitHub keeps days of deliveries, and the measure starts when serve does. The
- * cursor moves only after its rows are written; a failed GET writes one read_failed row and leaves every cursor.
+ * cursor moves only after its rows are written; a failed GET writes one read_failed row and leaves every cursor. A hook
+ * list that is not an array, or that names no serve hook, writes one read_failed row too: a pass never ends unsaid.
  */
 export async function runGithubDeliveryLogPass(deps: DeliveryLogPassOptions): Promise<{ ledgered: number; failed: boolean }> {
   const api = deps.api ?? defaultDeliveryLogApi();
@@ -137,9 +138,20 @@ export async function runGithubDeliveryLogPass(deps: DeliveryLogPassOptions): Pr
   let hookId: string | undefined;
   try {
     const hooks = (await api(`orgs/${deps.org}/hooks?per_page=100`)).body;
-    const ours = (Array.isArray(hooks) ? hooks : []).map(record)
+    if (!Array.isArray(hooks)) {
+      // A 2xx whose body is not the hook list: GitHub's own `message`, when it sent one, names why.
+      const message = record(hooks).message;
+      deps.log(GITHUB_DELIVERY_READ_FAILED_STEP, { org: deps.org, status_class: "shape", ...(typeof message === "string" ? { message } : {}) });
+      return { ledgered, failed: true };
+    }
+    const ours = hooks.map(record)
       .filter((hook) => typeof record(hook.config).url === "string" && (record(hook.config).url as string).endsWith(WEBHOOK_ROUTE_SUFFIX))
       .map((hook) => String(hook.id));
+    if (ours.length === 0) {
+      // The org lists no hook pointing at serve, so there is no delivery log to read: say so, with what it did list.
+      deps.log(GITHUB_DELIVERY_READ_FAILED_STEP, { org: deps.org, status_class: "no_hook", hook_count: hooks.length });
+      return { ledgered, failed: true };
+    }
     for (hookId of ours) {
       const cursor = cursors[hookId] === undefined ? undefined : BigInt(cursors[hookId]!);
       const fresh: Array<Record<string, unknown>> = [];
