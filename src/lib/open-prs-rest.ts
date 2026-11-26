@@ -6,7 +6,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { writeAtomic } from "./fs-race-safe.js";
 import { contributionOriginFromRest, type ContributionOrigin, type RestContributionOrigin } from "./contributor-admission.js";
@@ -348,6 +348,169 @@ export async function rollupForAsync(
     ? await fetch(runsForHeadRestArgs(owner, repo, sha)) as { workflow_runs?: RestWorkflowRunIdentity[] }
     : undefined;
   return rollupFromRest(checks, combined?.statuses ?? [], listing === undefined ? undefined : listing?.workflow_runs ?? []);
+}
+
+// ── W1-T14809: AN UNCHANGED HEAD IS NOT RE-READ ─────────────────────────────────────────────
+
+/** One verified delivery that named a head sha (`state/github-changed-heads.ndjson`, github-event-wake.ts). */
+export interface ChangedHeadEntry {
+  sha: string;
+  event: string;
+  received_at: string;
+}
+
+/** What one sweep's head reads cost: REST reads made, and reads answered from the kept rollup. */
+export interface HeadReadCounts {
+  head_reads_made: number;
+  head_reads_skipped: number;
+  /** Why this sweep's skips were off, when they were: a failed ls-remote, or no recent delivery. */
+  head_reads_unguarded?: string;
+}
+
+/** A head's own rollup reads: check-runs, combined status and the runs-for-head listing. */
+const HEAD_READ_PATH = /^repos\/[^/]+\/[^/]+\/(?:commits\/([0-9a-f]{40})\/(?:check-runs\?per_page=100|status)|actions\/runs\?head_sha=([0-9a-f]{40})&per_page=100)$/;
+
+function headReadSha(args: string[]): string | undefined {
+  if (args.length !== 2 || args[0] !== "api") return undefined;
+  const match = HEAD_READ_PATH.exec(args[1]);
+  return match ? (match[1] ?? match[2]) : undefined;
+}
+
+/**
+ * INVARIANT unchanged-head-is-not-re-read: a head's rollup reads are answered from the kept rollup
+ * unless (a) none is kept for that sha, (b) a verified delivery named the sha since it was kept, or
+ * (c) the kept read is `recheckMs` old. Skips are off for a sweep whose `heads` (one `git ls-remote`)
+ * are unknown, and while no delivery arrived within `recheckMs`: a repository whose webhook is not
+ * delivering keeps today's reads. Why: docs/forensics/github-event-wake.md#headreadgate.
+ */
+export interface HeadReadGate {
+  /** Starts one sweep; `heads` undefined (a failed ls-remote) reads every head over REST. */
+  beginSweep(input: {
+    heads: ReadonlySet<string> | undefined;
+    unguardedReason?: string;
+    changed: readonly ChangedHeadEntry[];
+    nowMs: number;
+    recheckMs: number;
+  }): void;
+  /** The kept answer for a head read this sweep skips, or `undefined` when it must read. */
+  answer(args: string[]): { value: unknown } | undefined;
+  /** `read` with every head read gated and every other read passed through. */
+  wrap(read: GhApiFetcher): GhApiFetcher;
+  /** This sweep's counts so far. */
+  counts(): HeadReadCounts;
+}
+
+export function createHeadReadGate(): HeadReadGate {
+  type Kept = { readAtMs: number; answers: Map<string, unknown> };
+  const kept = new Map<string, Kept>();
+  let decided = new Map<string, "skip" | "read">();
+  let heads: ReadonlySet<string> | undefined;
+  let nowMs = 0;
+  let recheckMs = 0;
+  let lastDeliveryMs: number | undefined;
+  let unguarded: string | undefined = "no sweep begun";
+  let counts: HeadReadCounts = { head_reads_made: 0, head_reads_skipped: 0 };
+  const decide = (sha: string): "skip" | "read" => {
+    const known = decided.get(sha);
+    if (known) return known;
+    const entry = kept.get(sha);
+    const skip = unguarded === undefined && heads?.has(sha) === true && entry !== undefined && nowMs - entry.readAtMs < recheckMs;
+    if (!skip) kept.set(sha, { readAtMs: nowMs, answers: new Map() });
+    decided.set(sha, skip ? "skip" : "read");
+    return skip ? "skip" : "read";
+  };
+  const answer = (args: string[]): { value: unknown } | undefined => {
+    const sha = headReadSha(args);
+    if (sha === undefined || decide(sha) !== "skip") return undefined;
+    const answers = kept.get(sha)!.answers;
+    if (!answers.has(args[1])) return undefined;
+    counts.head_reads_skipped++;
+    return { value: answers.get(args[1]) };
+  };
+  return {
+    beginSweep(input) {
+      ({ heads, nowMs, recheckMs } = input);
+      decided = new Map();
+      for (const delivery of input.changed) {
+        kept.delete(delivery.sha);
+        const at = Date.parse(delivery.received_at);
+        if (Number.isFinite(at)) lastDeliveryMs = Math.max(lastDeliveryMs ?? at, at);
+      }
+      for (const [sha, entry] of kept) if ((heads && !heads.has(sha)) || nowMs - entry.readAtMs >= recheckMs) kept.delete(sha);
+      unguarded = input.unguardedReason ?? (heads === undefined ? "head shas unknown" : undefined);
+      if (unguarded === undefined && (lastDeliveryMs === undefined || nowMs - lastDeliveryMs >= recheckMs)) {
+        unguarded = "no webhook delivery within the recheck interval";
+      }
+      counts = { head_reads_made: 0, head_reads_skipped: 0, ...(unguarded === undefined ? {} : { head_reads_unguarded: unguarded }) };
+    },
+    answer,
+    wrap(read) {
+      return (args, onRateLimit) => {
+        const sha = headReadSha(args);
+        if (sha === undefined) return onRateLimit ? read(args, onRateLimit) : read(args);
+        const hit = answer(args);
+        if (hit) return hit.value;
+        counts.head_reads_made++;
+        const keep = (value: unknown) => {
+          kept.get(sha)?.answers.set(args[1], value);
+          return value;
+        };
+        const forget = (error: unknown): never => {
+          // A failed read keeps nothing for its head, so the next sweep reads the head again.
+          kept.delete(sha);
+          throw error;
+        };
+        let value: unknown;
+        try {
+          value = onRateLimit ? read(args, onRateLimit) : read(args);
+        } catch (error) {
+          return forget(error);
+        }
+        return value instanceof Promise ? value.then(keep, forget) : keep(value);
+      };
+    },
+    counts: () => ({ ...counts }),
+  };
+}
+
+/** `state/github-head-reads.json`: the head-read counts since `sweep.summary` last took them. */
+export function headReadCountsPath(stateDir: string): string {
+  return join(stateDir, "github-head-reads.json");
+}
+
+function readHeadReadCounts(path: string): HeadReadCounts | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<HeadReadCounts>;
+    if (typeof parsed.head_reads_made !== "number" || typeof parsed.head_reads_skipped !== "number") return undefined;
+    return parsed as HeadReadCounts;
+  } catch {
+    // Absent and unreadable are one answer: no counts kept since the last take.
+    return undefined;
+  }
+}
+
+/** Adds one sweep's counts to the kept total. Observe-only: a failed write loses only these counts. */
+export function recordHeadReadCounts(stateDir: string, add: HeadReadCounts): void {
+  const prior = readHeadReadCounts(headReadCountsPath(stateDir));
+  const next: HeadReadCounts = {
+    head_reads_made: (prior?.head_reads_made ?? 0) + add.head_reads_made,
+    head_reads_skipped: (prior?.head_reads_skipped ?? 0) + add.head_reads_skipped,
+    ...(add.head_reads_unguarded !== undefined ? { head_reads_unguarded: add.head_reads_unguarded } : {}),
+  };
+  try {
+    writeAtomic(headReadCountsPath(stateDir), JSON.stringify(next));
+  } catch (error) {
+    // Observe-only: the reads these count already happened, so nothing is retried and the sweep goes on.
+    console.error(`github.head_reads: counts not kept (${String((error as Error)?.message ?? error)})`);
+  }
+}
+
+/** Takes (reads, then removes) the kept counts for `sweep.summary`; `undefined` when none were kept. */
+export function takeHeadReadCounts(stateDir: string): HeadReadCounts | undefined {
+  const path = headReadCountsPath(stateDir);
+  const counts = readHeadReadCounts(path);
+  if (counts !== undefined) rmSync(path, { force: true });
+  return counts;
 }
 
 /** Enumerate open PRs over REST. List failures throw: an outage must never look like an empty queue.

@@ -661,6 +661,7 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // constant bounded this persistent set, so its capacity is intentionally net-new policy data.
     "githubEventWake.dedupCapacity",
     "githubEventWake.checkSettleMs",
+    "githubEventWake.headRecheckMs",
     "githubEventWake.semanticCheckMode",
     "githubEventWake.aggregateCheckNames",
     // R-3: the keychain provisioning lock's wait deadline joins them too. NET-NEW because the wait

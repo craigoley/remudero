@@ -13,19 +13,23 @@
  * Why: docs/forensics/github-event-wake.md#module-header (W1-T2568). */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   watch as fsWatch,
 } from "node:fs";
+import { appendFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, dirname, join } from "node:path";
 import type { Clock } from "./clock.js";
 import { writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
+import type { ChangedHeadEntry } from "./open-prs-rest.js";
 import { RawBodyTooLargeError, readBoundedRawBody, type Route } from "./service.js";
 
 // ── (i) THE ALLOWLIST — never subscribe to or accept `*` ────────────────────────────────────
@@ -492,6 +496,102 @@ export function startWakeSummaryFlush(opts: {
   };
 }
 
+// ── (iv-b) THE CHANGED-HEADS JOURNAL (W1-T14809) — which head shas a delivery named ─────────
+
+const CHANGED_HEADS_FILE = "github-changed-heads.ndjson";
+const ACKNOWLEDGED_HEADS_FILE = "github-changed-heads.acked.ndjson";
+const HEAD_SHA_PATTERN = /^[0-9a-f]{40}$/;
+
+/** `state/github-changed-heads.ndjson`: one `{sha, event, received_at}` line per accepted delivery naming a head. */
+export function githubChangedHeadsPath(root: string): string {
+  return join(root, "state", CHANGED_HEADS_FILE);
+}
+
+/** `state/github-changed-heads.acked.ndjson`: the entries an accepted sweep's acknowledge claimed, for its read plane. */
+export function githubAcknowledgedHeadsPath(root: string): string {
+  return join(root, "state", ACKNOWLEDGED_HEADS_FILE);
+}
+
+/** The head sha a `check_run`, `status` or `pull_request` delivery names; `undefined` for any other event. */
+export function changedHeadShaOf(event: string, body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const record = body as Record<string, unknown>;
+  let sha: unknown;
+  if (event === "check_run") sha = (record.check_run as Record<string, unknown> | undefined)?.head_sha;
+  else if (event === "status") sha = record.sha;
+  else if (event === "pull_request") sha = ((record.pull_request as Record<string, unknown> | undefined)?.head as Record<string, unknown> | undefined)?.sha;
+  return typeof sha === "string" && HEAD_SHA_PATTERN.test(sha) ? sha : undefined;
+}
+
+/** One O_APPEND write of one line, so concurrent deliveries never interleave inside an entry. A failed
+ *  append costs only the skip: the gate re-reads the head at `githubEventWake.headRecheckMs`. */
+async function appendChangedHead(stateDir: string, event: string, body: unknown, receivedAt: Date): Promise<void> {
+  const sha = changedHeadShaOf(event, body);
+  if (sha === undefined) return;
+  const entry: ChangedHeadEntry = { sha, event, received_at: receivedAt.toISOString() };
+  try {
+    await appendFile(join(stateDir, CHANGED_HEADS_FILE), `${JSON.stringify(entry)}\n`);
+  } catch (error) {
+    // CLAIM: collapses "journaled" and "lost" into "no delivery named this head" (stderr only, no ledger step). Safe because
+    // the delivery is still accepted and its marker written, and headRecheckMs re-reads every head within one interval.
+    console.error(`github.wake: changed head not journaled (${String((error as Error)?.message ?? error)})`);
+  }
+}
+
+function claimFile(path: string): string | undefined {
+  const claimed = `${path}.consume-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  try {
+    renameSync(path, claimed);
+    return claimed;
+  } catch {
+    // Nothing to claim: absent, or a racing consumer won the rename. Both mean "no entries".
+    return undefined;
+  }
+}
+
+/** Moves the live journal into the acknowledged file, claim-by-rename, so an entry appended during the
+ *  move stays in the live journal for the next acknowledge. A held daemon never acknowledges, so never loses one. */
+export function acknowledgeChangedHeads(root: string): void {
+  const claimed = claimFile(githubChangedHeadsPath(root));
+  if (claimed === undefined) return;
+  try {
+    appendFileSync(githubAcknowledgedHeadsPath(root), readFileSync(claimed));
+    unlinkSync(claimed);
+  } catch (error) {
+    // CLAIM: collapses "acknowledged" and "stranded" into "no delivery named these heads" (stderr only, no ledger step). Safe
+    // because the claimed file stays beside the journal, and headRecheckMs re-reads every head it named within one interval.
+    console.error(`github.wake: changed heads not acknowledged (${String((error as Error)?.message ?? error)})`);
+  }
+}
+
+/** The read plane's take of the acknowledged entries, claim-by-rename; malformed lines are dropped. */
+export function takeAcknowledgedChangedHeads(root: string): ChangedHeadEntry[] {
+  const claimed = claimFile(githubAcknowledgedHeadsPath(root));
+  if (claimed === undefined) return [];
+  const entries: ChangedHeadEntry[] = [];
+  try {
+    for (const line of readFileSync(claimed, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line) as Partial<ChangedHeadEntry>;
+        if (typeof parsed.sha === "string" && typeof parsed.event === "string" && typeof parsed.received_at === "string") {
+          entries.push({ sha: parsed.sha, event: parsed.event, received_at: parsed.received_at });
+        }
+      } catch {
+        // A torn or corrupt line names no head; the recheck interval covers whatever it held.
+        continue;
+      }
+    }
+  } catch (error) {
+    // CLAIM: collapses "taken" and "unreadable" into "no heads named" (stderr only, no ledger step). Safe because an unreadable
+    // claim names no head the read plane can trust, and headRecheckMs re-reads every head within one interval.
+    console.error(`github.wake: acknowledged heads unreadable (${String((error as Error)?.message ?? error)})`);
+  } finally {
+    rmSync(claimed, { force: true, recursive: true });
+  }
+  return entries;
+}
+
 // ── (v) THE ROUTE — the self-authenticated POST /v1/hooks/github ───────────────────────────
 
 /** Bytes, bounded BEFORE buffering, never after. 1 MiB is far above any real delivery — a
@@ -703,6 +803,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
       const classification = classifyGithubEventWake(event, action, body, aggregateCheckNames);
       recordClassification(classification, body);
       if (semanticCheckMode === "enforce" && !classification.actionable) {
+        await appendChangedHead(dirname(markerPath), event, body, now());
         await opts.dedup.record(deliveryId);
         notifyCheckRunCompleted(event, action, body);
         sendJson(res, 202, { accepted: false, reason: "successful_leaf" });
@@ -718,6 +819,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
       };
       const armed = readSweepWakeMarker(markerPath) === undefined;
       await writeMarker(markerPath, record);
+      await appendChangedHead(dirname(markerPath), event, body, now());
       await opts.dedup.record(deliveryId);
       notifyCheckRunCompleted(event, action, body);
       if (opts.counters && !armed) {
@@ -970,6 +1072,8 @@ export function wireSweepWakeToDaemon(
       // An accepted sweep owns the same reconciliation, so retire and report the collapsed burst.
       finishCheckBurst(false);
       consumeSweepWakeMarker(path);
+      // W1-T14809: the same accepted pass claims the changed heads its read plane will consult.
+      acknowledgeChangedHeads(root);
       const stillPending = readSweepWakeMarker(path);
       observedDeliveryId = stillPending?.deliveryId;
       if (stillPending) scheduleRecord(stillPending);

@@ -404,3 +404,43 @@ the product daemons kept only their 60 s poll. An unresolved repository now answ
 `202 unmanaged_repository`, because one organization hook also delivers repositories no daemon
 manages, and a non-2xx would fill GitHub's delivery log with failures. The CI-incident consumer
 (`onCheckRunCompleted`) stays core-only: it reads core's job logs.
+
+## HeadReadGate
+
+W1-T14809. OBSERVED 2026-11-25 (host ledger, `daemon.quota` over 24 h): about 70,200 stamped GitHub
+reads across six daemons on one installation bucket, with every daemon re-reading each open PR
+head's check-runs, combined status and runs-for-head each 60 s, and 79% of conditional reads
+answered 304. Those reads run in the read plane: `createTickReadProducer` -> `fetchTickOpenPrs` ->
+`fetchOpenPrsRestSteps` -> `rollupSteps`, plus W1-T12530's `rollupPrefetchRead`, which starts every
+head's check-runs and status reads as soon as the list arrives.
+
+INVARIANT unchanged-head-is-not-re-read. `open-prs-rest.ts`'s `createHeadReadGate` keeps each
+head's rollup answers in the producer, across ticks. A head read is answered from them unless
+(a) none is kept for that sha (a moved head has a new sha, so a new key), (b) a verified delivery
+named the sha since they were kept, or (c) they are `githubEventWake.headRecheckMs` old (default
+600000). The interval is a freshness floor, never a cap: it never stops a read that (a) or (b)
+asks for. A skipped prefetch starts no read and waits on no pacer.
+
+The journal. An accepted `check_run`, `status` or `pull_request` delivery (and a successful leaf
+under `enforce`, which writes no marker but changed its head's rollup) appends one
+`{sha, event, received_at}` line, one O_APPEND write, to `state/github-changed-heads.ndjson` beside
+the owning instance's marker (W1-T14806's resolver picks it). `wireSweepWakeToDaemon`'s
+`acknowledge`, the same call that consumes `SWEEP_WAKE_REQUESTED` after STOP/PAUSE and the sweep
+gate accept a pass, claims the journal by rename and appends it to
+`state/github-changed-heads.acked.ndjson`. A held daemon never acknowledges, so it never loses an
+entry. The read plane takes the acknowledged file the same way (`takeAcknowledgedChangedHeads`):
+it may be a worker thread, so the hand-off is a file, never memory.
+
+The head set. ONE `git ls-remote origin 'refs/heads/*' 'refs/pull/*/head'` per tick
+(`lsRemoteHeadShas`, git upload-pack, never the REST quota). A head is skipped only when its sha is
+in that set. A failed ls-remote turns every skip off for that tick, so every head is read over REST,
+and its reason is recorded.
+
+Two cases turn skips off, and each costs only reads. A repository whose webhook delivered nothing
+within the interval keeps today's reads, because without deliveries a kept answer would go stale
+for up to the full interval. A failed journal append or acknowledge is printed to stderr, and the
+interval re-reads the head.
+
+The counts. Each tick adds `head_reads_made`, `head_reads_skipped` and, when skips were off,
+`head_reads_unguarded` (the reason) to `state/github-head-reads.json`. `sweep.summary` takes them,
+so the existing per-sweep row carries them and no new ledger step is written.
