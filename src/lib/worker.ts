@@ -250,6 +250,7 @@ import { cashDeploymentEndpoint } from "./config-schema.js";
 import { FIX_ROUTING_LEARNER, fixRoutingDecisionFields, mountedFixArms, type FixLearnedArms, type FixRoutingWeights } from "./fix-routing-learner.js";
 import { writeProviderRoutingStatus, type ProviderRoutingWriteInput } from "./provider-routing-status.js";
 import { FIX_WORKER_TOOLS } from "./fix-fence.js";
+import { readBoundedProcessCwdCensus, type ProcessCwdCensus } from "./process-cwd-census.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import {
   GITDIR_RECORD_PREFIX,
@@ -7899,7 +7900,11 @@ export type WorktreeKeepReason =
   | "registration-undecidable"
   | "unpushed-commit"
   | "inflight-lock"
-  | "work-undecidable";
+  | "work-undecidable"
+  /** W1-T15026: a live process works at or below the tree (an operator `rmd review` run from a hand tree holds no lock). */
+  | "live-cwd"
+  /** W1-T15026: the bounded working-directory census could not decide, so absence is not proven. */
+  | "cwd-unknown";
 
 /** The newest mtime anywhere under `dir`, and whether the walk could be trusted. TRAP: a DIRECTORY's mtime advances only when
  * an entry is added to or removed from THAT directory, never when a nested file is modified, so age-gating on the root's own
@@ -7992,6 +7997,8 @@ export interface WorktreeReapOpts {
   /** The tree-activity probe the age gate measures against. Injectable so a test asserts the boundary without a deep fixture
    * per case. Defaults to {@link newestActivityMs}, the REAL bounded walk, which the fixture-free tests drive (W1-T378). */
   newestActivity?: (dir: string) => { mtimeMs: number; complete: boolean };
+  /** W1-T15026: who works at or below a tree about to be removed; defaults to the bounded `/proc` cwd census. */
+  cwdCensus?: (dir: string) => ProcessCwdCensus;
   /** SURVEY ONLY when true: an entry that would be reaped is still recorded in `reaped` and `reapedLocks`, so a caller can
    * ledger exactly what it would reclaim, but nothing is removed from disk. Mirrors {@link reapStaleClones}'s own `dryRun`.
    * Default false, unchanged for every existing caller (W1-T406). */
@@ -8220,6 +8227,7 @@ function* worktreeReapPass(
   const now = opts.now ?? (() => Date.now());
   const branchIsLiveUpstream = opts.branchIsLiveUpstream ?? defaultBranchIsLiveUpstream;
   const newestActivity = opts.newestActivity ?? ((d: string) => newestActivityMs(d));
+  const cwdCensus = opts.cwdCensus ?? ((d: string) => readBoundedProcessCwdCensus(d));
   const dryRun = opts.dryRun ?? false;
   const reaped: string[] = [];
   const reapedLocks: string[] = [];
@@ -8312,6 +8320,16 @@ function* worktreeReapPass(
     // reap a tree whose run is alive (W1-T381).
     if (!lockNamesDeadPid && now() - activity.mtimeMs < maxAgeMs) {
       keep(name, lockIsForeign ? "foreign-holder" : "recent-activity");
+      continue;
+    }
+    // W1-T15026: the last gate before removal. A tree can look terminal by every signal above while a live process still
+    // works in it (an operator review writes nothing inside its tree), so the census is asked only here, for the few
+    // trees about to be removed. Occupied keeps; an undecidable census keeps. A host with no process table at all has
+    // nothing to ask, so its removal runs as it did before this gate.
+    const census = cwdCensus(entryPath);
+    const noProcessTable = census.state === "unknown" && census.reason === "proc_unavailable";
+    if (census.state !== "clear" && !noProcessTable) {
+      keep(name, census.state === "occupied" ? "live-cwd" : "cwd-unknown");
       continue;
     }
     // HOW to remove it, decided BEFORE anything is destroyed: a linked worktree must die through its parent, or its record is
