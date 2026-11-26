@@ -629,7 +629,16 @@ test("W1-T14902: the hold lookup judges the task the live PR names NOW, never a 
   assert.equal((await readPullRequestNamedTaskHold(undefined, sources, read)).reading.outcome, "unread", "a post naming no PR holds");
   // The default plan-only reader is the instance ledger's emitter record; an unreadable ledger records none.
   const { ledgerPlanOnlyFiling } = await import("#src/lib/task-dispatch-hold.js");
-  assert.equal(ledgerPlanOnlyFiling("/nonexistent/state")(PR_URL), false);
+  assert.equal(await ledgerPlanOnlyFiling("/nonexistent/state")(PR_URL), false);
+  const state = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}plan-only-ledger-`));
+  try {
+    appendLedger(join(state, "ledger.ndjson"), { run_id: "PLAN-1", task_id: "PLAN-1", step: "pr.opened", pr_url: PR_URL, plan_only: true });
+    appendLedger(join(state, "ledger.ndjson"), { run_id: "W1-T1-1", task_id: "W1-T1", step: "pr.opened", pr_url: `${PR_URL}1`, plan_only: false });
+    assert.equal(await ledgerPlanOnlyFiling(state)(PR_URL), true, "THE CLAIM: the emitter's plan-only record is read");
+    assert.equal(await ledgerPlanOnlyFiling(state)(`${PR_URL}1`), false);
+  } finally {
+    rmSync(state, { recursive: true, force: true });
+  }
 });
 
 test("W1-T14902: a daemon whose cwd is no work tree (launchd's config.root) still reads the plan, from its install", async (t) => {

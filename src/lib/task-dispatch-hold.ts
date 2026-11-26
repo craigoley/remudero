@@ -6,7 +6,7 @@ import { readOpsCatalogSnapshotAsync } from "./ops-catalog-source.js";
 import { planDestinationRepository } from "./plan-destination.js";
 import { ghJsonAsync } from "./github-transport.js";
 import { isPlanOnlyFilingPr, resolveReviewTaskId, usesUntaskedReviewMetadata } from "./untasked-review.js";
-import { readLedgerUnionRecordsSync } from "./ledger-union.js";
+import { readLedgerUnionRecords } from "./ledger-union.js";
 
 /**
  * W1-T14902: the one reader of a named task's `dispatch_hold`, for the review's guarded poster and the merge path alike.
@@ -231,13 +231,15 @@ export type PullRowRead = (path: string) => Promise<unknown>;
 export const freshPullRowRead: PullRowRead = (path) => ghJsonAsync(["api", path], undefined, undefined, { fresh: true });
 
 /** Whether the emitter ledger records `prUrl` as a plan-only filing ({@link isPlanOnlyFilingPr}). */
-export type PlanOnlyFilingRead = (prUrl: string) => boolean;
+export type PlanOnlyFilingRead = (prUrl: string) => boolean | Promise<boolean>;
 
-/** The instance ledger's answer, as `rmd review` reads it (the live file); an unreadable ledger records no filing. */
+/** The instance ledger's answer, as `rmd review` reads it (the live file, awaited: the daemon loop reaches this); an
+ *  unreadable ledger records no filing. */
 export function ledgerPlanOnlyFiling(stateDir: string): PlanOnlyFilingRead {
-  return (prUrl) => {
+  return async (prUrl) => {
     try {
-      return isPlanOnlyFilingPr(readLedgerUnionRecordsSync(stateDir, { maxRotations: 0, dedupe: false }).rows, prUrl);
+      return isPlanOnlyFilingPr(await readLedgerUnionRecords(stateDir, { step: "pr.opened", selectRotation: () => false,
+        where: (row) => row.pr_url === prUrl }), prUrl);
     } catch (error) {
       // No record means the run branch names the task, which is then read (and holds when unread): never an exemption.
       void error;
@@ -257,7 +259,7 @@ export async function resolvePullRequestTaskSubject(prUrl: string | undefined, r
   planOnlyFiling: PlanOnlyFilingRead = () => false): Promise<PullRequestTaskSubject> {
   const target = pullRequestOfUrl(prUrl);
   if (target === undefined) throw new Error(`no pull request in ${JSON.stringify(prUrl)}`);
-  return pullRequestTaskSubjectOf(await read(`repos/${target.owner}/${target.repo}/pulls/${target.number}`), planOnlyFiling(prUrl!));
+  return pullRequestTaskSubjectOf(await read(`repos/${target.owner}/${target.repo}/pulls/${target.number}`), await planOnlyFiling(prUrl!));
 }
 
 /** A hold reading and the PR snapshot it was judged on (absent when the PR could not be read). */
