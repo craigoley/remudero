@@ -1755,10 +1755,11 @@ function* attemptArmSteps(
     );
     return { outcome: "draft-refused" };
   }
-  const heldAtEntry = operatorHoldRefusal(prUrl, deps);
-  if (heldAtEntry) return heldAtEntry;
+  // W1-T14902: the task's own hold first, so its refusal row names dispatch_hold even under a standing operator hold.
   const taskHeld = yield* taskHoldRefusalSteps(prUrl, deps);
   if (taskHeld) return taskHeld;
+  const heldAtEntry = operatorHoldRefusal(prUrl, deps);
+  if (heldAtEntry) return heldAtEntry;
   if (deps.stackPrerequisite) {
     let stack: StackPrerequisiteCheck;
     try {

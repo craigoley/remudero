@@ -132,12 +132,13 @@ function targetsRepo(taskRepo: string | undefined, subject: string): boolean {
   return taskRepo === undefined || taskRepo.trim() === "" || name(taskRepo) === name(subject);
 }
 
-// A planned id, legacy suffixes too (W1-T12e); a synthetic review key (`PR-<n>`, `dep-review-PR<n>`) is not one.
-const TASK_ID = /^[A-Z][A-Z0-9]*-T\d+[A-Za-z0-9]*$/;
+// The keys a review stamps when the PR names no task (reviewLedgerKeyFor's `PR-<n>`, dep-review's `dep-review-PR<n>`,
+// and the unfiled sentinel). Every other trailer is a task id, whatever its shape (`W1-T12e`, `NEW-1a`): its hold is read.
+const SYNTHETIC_REVIEW_KEY = /^(?:PR-\d+|dep-review-PR\d+|unfiled)$/;
 
 export async function readTaskDispatchHold(taskId: string | undefined, sources: TaskDispatchHoldSources): Promise<TaskHoldReading> {
-  // A synthetic review key (`PR-<n>`, `dep-review-PR<n>`) or no trailer names no task: it reviews and arms as today.
-  if (taskId === undefined || !TASK_ID.test(taskId)) return { outcome: "clear" };
+  // A synthetic review key or no trailer names no task: it reviews and arms as today.
+  if (taskId === undefined || taskId.trim() === "" || SYNTHETIC_REVIEW_KEY.test(taskId)) return { outcome: "clear" };
   const plans = sources.readMainPlan !== undefined ? [sources.readMainPlan] : await mainPlanReaders(sources);
   for (const readPlan of plans) {
     let main: { byId: ReadonlyMap<string, { dispatch_hold?: boolean }> };

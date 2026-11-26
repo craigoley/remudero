@@ -8,7 +8,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
-import { MOVER_BRANCH_PREFIX, movedFromCommit, parseMoverReceipts, verifyMoverRemoval, type MoverOpsRead, verifyMoverRemovalPublic, type MoverRemovalVerdict, parseReviewerHistoryEvidence, parseWhitelistedProof, reviewRowNamesPr, resolveProofTestPath, resolveNameFilteredCandidatesAsync, type TaskHoldReading } from "../../lib/review.js";
+import { MOVER_BRANCH_PREFIX, movedFromCommit, parseMoverReceipts, verifyMoverRemoval, type MoverOpsRead, verifyMoverRemovalPublic, type MoverRemovalVerdict, parseReviewerHistoryEvidence, parseWhitelistedProof, reviewRowNamesPr, resolveProofTestPath, resolveNameFilteredCandidatesAsync, taskHoldRefusal, type TaskHoldReading } from "../../lib/review.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -3155,6 +3155,10 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     if (found.outcome === "unreadable" && found.reason === "ops-ref_moved") found = await lookUp();
     if (found.outcome === "unreadable") {
       log("review.catalog.unreadable", { reason: found.reason });
+      // W1-T14902 (invariant an-unread-hold-holds): a success already on this head must not stand. A shadow posts nothing.
+      if (!shadow) await publishUnreadTaskCatalogHold({ postStatus: postStatusDep, post: postReviewStatus, owner, repo,
+        sha: view.headRefOid, taskId, reviewKey, reason: found.reason, ledgerPath, runId, prUrl: view.url,
+        reviewInputDigest: inputDigest, fetchLifecycle: () => fetchPrLifecycleAsync(view.url), log });
       console.error("rmd review: task catalog unreadable; no body fallback or review effect");
       exit.as("task-metadata-unavailable");
       return 2;
@@ -3697,4 +3701,29 @@ export function planOnlyPhaseFields(marks: Record<string, number>, armedAt: numb
     judge_ms: span("lint", "judge"), post_ms: span("postStart", "post"),
     arm_ms: Math.max(0, armedAt - (marks.armStart ?? armedAt)), total_ms: Math.max(0, armedAt - (marks.started ?? armedAt)),
   };
+}
+
+/**
+ * W1-T14902 (invariant an-unread-hold-holds): the review could not read the named task's catalog, so the task's
+ * `dispatch_hold` is unread. Before the review exits, it replaces whatever status this head carries (a success from an
+ * earlier pass included) with pending naming the unread hold, so nothing merges or arms on it. A failed post is ledgered.
+ */
+export async function publishUnreadTaskCatalogHold(args: {
+  postStatus: (opts: Parameters<typeof postReviewStatusGuarded>[0]) => Promise<unknown>;
+  post: Parameters<typeof postReviewStatusGuarded>[0]["post"];
+  owner: string; repo: string; sha: string; taskId: string; reviewKey: string; reason: string;
+  ledgerPath: string; runId: string; prUrl: string; reviewInputDigest: string;
+  fetchLifecycle: Parameters<typeof postReviewStatusGuarded>[0]["fetchLifecycle"];
+  log: (step: string, extra?: Record<string, unknown>) => void;
+}): Promise<void> {
+  const refusal = taskHoldRefusal({ outcome: "unread", taskId: args.taskId, reason: `task catalog ${args.reason}` })!;
+  try {
+    await args.postStatus({ post: args.post, owner: args.owner, repo: args.repo, sha: args.sha, state: "pending",
+      description: `remudero-review: pending — ${refusal}`,
+      taskId: args.reviewKey, evidence: "no_evidence", ledgerPath: args.ledgerPath, runId: args.runId, prUrl: args.prUrl,
+      reviewInputDigest: args.reviewInputDigest, reviewEngineRevision: REVIEW_ENGINE_REVISION, fetchLifecycle: args.fetchLifecycle });
+    args.log("review.dispatch_hold_held", { reason: refusal, head_sha: args.sha, outcome: "pending" });
+  } catch (e) {
+    args.log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
+  }
 }

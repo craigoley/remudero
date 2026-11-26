@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { runReview, type ReviewCommandHost } from "#src/cli/commands/review.js";
+import { publishUnreadTaskCatalogHold, runReview, type ReviewCommandHost } from "#src/cli/commands/review.js";
 import { armIfVerdictPermitsAsync, attemptArmAsync, readPullRequestTaskHold, realArmDepsAsync } from "#src/lib/arm-auto-merge.js";
 import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
@@ -55,7 +55,7 @@ async function guardedPost(t: TestContext, taskHold: TaskHoldReading | undefined
 }
 
 /** One review arm through the real attemptArm, every GitHub write recorded; `log` is the ledger the review writes. */
-async function reviewArm(taskHold: (prUrl: string) => Promise<TaskHoldReading>) {
+async function reviewArm(taskHold: (prUrl: string) => Promise<TaskHoldReading>, armLedger: Array<Record<string, unknown>> = []) {
   const writes: string[] = [];
   const rows: Array<{ step: string } & Record<string, unknown>> = [];
   const outcome = await armIfVerdictPermitsAsync(PASS, {
@@ -65,7 +65,7 @@ async function reviewArm(taskHold: (prUrl: string) => Promise<TaskHoldReading>) 
     ledgerLines: () => [],
     arm: (prUrl) => attemptArmAsync(prUrl, {
       headSha: async () => SHA,
-      ledgerLines: () => [],
+      ledgerLines: () => armLedger as never,
       armAuto: async () => { writes.push("armAuto"); },
       mergeDirect: async () => { writes.push("mergeDirect"); },
       isMerged: async () => false,
@@ -98,6 +98,16 @@ test("W1-T14902 criterion 2: attemptArm refuses a held task's pull request: no a
   const named = rows.filter((row) => row.outcome === "hold-refused");
   assert.equal(named.length, 1, `one row records the refusal: ${JSON.stringify(rows)}`);
   assert.match(String(named[0]!.error), /W1-T14898 carries dispatch_hold/, "the row names the task and the hold");
+  // Under a standing operator merge hold too, the refusal row names the task's dispatch_hold (round-5 finding F2).
+  const operatorHold = { step: "automerge.hold_engaged", pr_number: 910, by: "operator", reason: "reviewing", authority: "interactive-cli" };
+  const both = await reviewArm(async () => ({ outcome: "held", taskId: TASK }), [operatorHold]);
+  assert.equal(both.outcome, "hold-refused");
+  assert.deepEqual(both.writes, []);
+  assert.match(String(both.rows.find((row) => row.outcome === "hold-refused")?.error), /W1-T14898 carries dispatch_hold/);
+  // Positive control: the operator hold alone still refuses, under its own reason.
+  const operatorOnly = await reviewArm(async () => ({ outcome: "clear" }), [operatorHold]);
+  assert.equal(operatorOnly.outcome, "hold-refused");
+  assert.doesNotMatch(String(operatorOnly.rows.find((row) => row.outcome === "hold-refused")?.error), /dispatch_hold/);
 });
 
 test("W1-T14902 criterion 3: invariant:an-unread-hold-holds", async (t) => {
@@ -156,6 +166,12 @@ test("W1-T14902: the one reader reads main, then a fresh ops record; every other
   assert.equal((await read({ readMainPlan: async () => { throw new Error("bad object origin/main"); }, lookup: never })).outcome, "unread");
   // A synthetic review key or no trailer names no task.
   assert.deepEqual(await read({ readMainPlan: never, lookup: never }, "PR-910"), { outcome: "clear" });
+  assert.deepEqual(await read({ readMainPlan: never, lookup: never }, "dep-review-PR910"), { outcome: "clear" });
+  assert.deepEqual(await read({ readMainPlan: never, lookup: never }, "unfiled"), { outcome: "clear" });
+  // Any other trailer is a task id whatever its shape (round-5 finding F1: a `NEW-1a` record's hold was skipped).
+  assert.deepEqual(await read({ readMainPlan: main({ "NEW-1a": { dispatch_hold: true } }), lookup: never }, "NEW-1a"),
+    { outcome: "held", taskId: "NEW-1a" });
+  assert.equal((await read({ readMainPlan: async () => { throw new Error("no plan"); }, lookup: never }, "NEW-1a")).outcome, "unread");
   assert.deepEqual(await readTaskDispatchHold(undefined, { stateDir: "/nonexistent/state", readMainPlan: never, lookup: never }), { outcome: "clear" });
 });
 
@@ -424,6 +440,28 @@ test("W1-T14902: a satellite target's plan is read as its review reads it, and a
   ops.git("commit", "-qam", "broken own record");
   ops.git("update-ref", "refs/remotes/origin/main", "HEAD");
   assert.equal((await read("W1-T900302")).outcome, "unread");
+});
+
+test("W1-T14902: a review whose task catalog is unreadable replaces this head's status with pending naming the unread hold", async (t) => {
+  // Round-5 finding F3: the refusal exit (`task catalog unreadable`) left an earlier success standing on the head.
+  const ledgerPath = join(tmp(t, "catalog-refused"), "ledger.ndjson");
+  const posts: Array<{ state: string; description?: string }> = [];
+  const rows: Array<{ step: string } & Record<string, unknown>> = [];
+  const args = {
+    post: (status: { state: string; description?: string }) => { posts.push(status); },
+    owner: "acme", repo: "remudero-ops", sha: SHA, taskId: TASK, reviewKey: TASK, reason: "ops-ref_moved", ledgerPath,
+    runId: "t14902-catalog", prUrl: PR_URL, reviewInputDigest: "v2:catalog", fetchLifecycle: () => ({ merged: false, closed: false }),
+    log: (step: string, extra: Record<string, unknown> = {}) => { rows.push({ step, ...extra }); },
+  };
+  await publishUnreadTaskCatalogHold({ ...args, postStatus: postReviewStatusGuarded } as never);
+  assert.deepEqual(posts.map((p) => p.state), ["pending"], "THE CLAIM: pending replaces the head's status");
+  assert.match(posts[0]!.description ?? "", /held: W1-T14898's dispatch_hold is unreadable \(task catalog ops-ref_moved\)/);
+  assert.equal(rows.filter((row) => row.step === "review.dispatch_hold_held").length, 1);
+  // A post that fails is ledgered, never thrown out of the review's exit.
+  const failing: typeof rows = [];
+  await publishUnreadTaskCatalogHold({ ...args, log: (step: string, extra: Record<string, unknown> = {}) => { failing.push({ step, ...extra }); },
+    postStatus: async () => { throw new Error("HTTP 502"); } } as never);
+  assert.deepEqual(failing.map((row) => row.step), ["review.pending_post.error"]);
 });
 
 test("W1-T14902: a daemon whose cwd is no work tree (launchd's config.root) still reads the plan, from its install", async (t) => {
