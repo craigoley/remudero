@@ -8,7 +8,10 @@
 import { readFileSync } from "node:fs";
 import { cpus, loadavg } from "node:os";
 import { join } from "node:path";
-import { cpuWeightShare, publishedLaneCpuBound, readCpuWeightShare } from "./lane-governor.js";
+import {
+  cpuWeightShare, HOST_MEMORY_SHARED_STEP, hostMemorySharedPayload, publishedLaneCpuBound, readCpuWeightShare, sharedHostMemory,
+  sharedHostMemoryShort, type SharedHostMemory,
+} from "./lane-governor.js";
 import {
   creditsLaneRoom,
   PROVIDER_ROUTING_READING_MAX_AGE_MS,
@@ -936,6 +939,27 @@ export function summarizeReviewSettlements(
   };
 }
 
+/**
+ * W1-T14903 — the memory the review width reads: the lower of its own MemAvailable and the shared snapshot's projected
+ * availability (lane-governor.ts {@link SharedHostMemory}), so reviews never spend memory the build lane already counted
+ * for in-flight workers. Lower only: a reading can never rise above its own (INVARIANT width-never-grows), and with no
+ * fresh snapshot the review lane reads exactly what it read before.
+ */
+export function sharedMemoryAvailableMib(ownMib: number | undefined, shared: SharedHostMemory | undefined): number | undefined {
+  if (shared === undefined || !Number.isFinite(shared.availableMib)) return ownMib;
+  if (ownMib === undefined || !Number.isFinite(ownMib)) return ownMib;
+  return Math.min(ownMib, shared.availableMib);
+}
+
+/** W1-T14903 — whether review admission yields re-reviews of already-judged heads to builds now: the shared snapshot is
+ *  fresh and has no room for one more build at its typical peak. No fresh snapshot: nothing yields. */
+export function reviewYieldsReReviews(nowMs: number): boolean {
+  return sharedHostMemoryShort(sharedHostMemory(nowMs));
+}
+
+/** The snapshot whose {@link HOST_MEMORY_SHARED_STEP} row was written, so each snapshot writes one row. */
+let sharedRowWrittenForAtMs: number | undefined;
+
 const runtimeStates = new Map<string, ReviewCapacityState>();
 
 export interface RuntimeReviewCapacityInput extends ReviewCapacityBounds {
@@ -967,12 +991,17 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
   // W1-T11129 — the share's producer is the host tuner's cpu-weights.json in this instance's state dir; unread or
   // stale, the observation carries no share and the CPU verdict holds rather than shedding on PSI alone.
   const weightShare = input.cpuWeightShare ?? readCpuWeightShare(join(input.root, "state"), input.nowMs);
+  // W1-T14903: one host memory reading for both lanes — the lower of this lane's own and the build lane's snapshot.
+  const host = readReviewHostObservation();
+  const shared = sharedHostMemory(input.nowMs);
+  const memAvailableMib = sharedMemoryAvailableMib(host.memAvailableMib, shared);
   const observation: ReviewCapacityObservation = {
     nowMs: input.nowMs,
     queueDepth: input.queueDepth,
     activeWorkers: input.activeWorkers,
     ...(finite(input.providerPhaseWorkers) ? { providerPhaseWorkers: input.providerPhaseWorkers } : {}),
-    ...readReviewHostObservation(),
+    ...host,
+    ...(memAvailableMib !== undefined ? { memAvailableMib } : {}),
     ...(weightShare !== undefined ? { cpuWeightShare: weightShare } : {}),
     ...((input.laneCpuBound ?? publishedLaneCpuBound()) !== undefined ? { laneCpuBound: input.laneCpuBound ?? publishedLaneCpuBound() } : {}),
     // W1-T11150 — the review lane's own CPU share: reviews attempted and still inside their CPU phase.
@@ -984,6 +1013,15 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
   const result = selectAdaptiveReviewWidth(prior, input.policy, observation, input);
   runtimeStates.set(input.root, result.state);
   const phaseSplit = input.observeReviewPhases?.(observation.provider, result.decision.effectiveWidth);
+  if (shared !== undefined && sharedRowWrittenForAtMs !== shared.atMs) {
+    sharedRowWrittenForAtMs = shared.atMs;
+    input.log(HOST_MEMORY_SHARED_STEP, hostMemorySharedPayload(shared, {
+      ownMib: host.memAvailableMib ?? null,
+      readMib: memAvailableMib ?? null,
+      width: result.decision.effectiveWidth,
+      yieldsReReviews: sharedHostMemoryShort(shared),
+    }));
+  }
   if (result.decision.shouldLog) {
     input.log("review.capacity", {
       reason: result.decision.reason,

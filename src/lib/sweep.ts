@@ -281,7 +281,7 @@ import type {
 import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, readDepReviewHoldState, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { DEP_REVIEW_REFUSED_ASK_RETIRED_STEP, retireDepReviewRefusedAsk } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
-import { readReviewHostObservation, selectRuntimeReviewWidth } from "./review-capacity.js";
+import { readReviewHostObservation, reviewYieldsReReviews, selectRuntimeReviewWidth } from "./review-capacity.js";
 import { yieldingFixClaim } from "./review-precedence.js";
 import {
   capacityDecisionText,
@@ -32672,6 +32672,11 @@ export function resetPlanLaneHeadDiffs(): void {
   planOnlyHeadDiffs.clear();
 }
 
+/** W1-T14903 — a review of a head that already carries a recorded review verdict (a re-review, not a first judgment). */
+export function reReviewsJudgedHead(pr: Pick<OpenPrView, "reviewedHeadSha" | "headSha">): boolean {
+  return pr.reviewedHeadSha !== undefined && pr.reviewedHeadSha === pr.headSha;
+}
+
 /** W1-T2439 — TWO LANES, keyed before the outcome exists: code PRs at the review width, plan-lane PRs at
  *  {@link derivePlanLaneBound}'s width (W1-T11148). FAIL-OPEN: an unresolved classification is SPAWNING. */
 export function selectReviewAdmissions(
@@ -32683,6 +32688,8 @@ export function selectReviewAdmissions(
   planLaneWidth: number = derivePlanLaneBound(undefined, policy, 0).available,
   needsPerson?: (pr: OpenPrView) => boolean,
   queuedAt?: ReviewQueuedAt,
+  /** W1-T14903: true while the shared host memory snapshot has no room for one more build; read from it when absent. */
+  yieldReReviews: boolean = reviewYieldsReReviews(now),
 ): { spawning: OpenPrView[]; planFilings: OpenPrView[] } {
   // W1-T2583: selection and execution must agree on outcome-keyed eligibility, so the caller folds
   // both sets once from the same reader `runSweep` uses and filters here before either lane ranks.
@@ -32691,7 +32698,9 @@ export function selectReviewAdmissions(
     isReviewLaneDisposition(deriveDisposition(pr, policy, now).disposition) &&
     !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now));
   const filings = eligible.filter(reviewsInPlanLane);
-  const rest = eligible.filter((pr) => !reviewsInPlanLane(pr));
+  // W1-T14903: when host memory is short, a re-review of a head that already has a verdict waits, so a build is
+  // admitted before it; a first review of a head never waits on memory here.
+  const rest = eligible.filter((pr) => !reviewsInPlanLane(pr) && !(yieldReReviews && reReviewsJudgedHead(pr)));
 
   const oldestFirst = (a: OpenPrView, b: OpenPrView): number => {
     // W1-T11153: a PR that needs a person to merge is admitted only after every one that does not.

@@ -19,6 +19,7 @@
 import { readFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname, join } from "node:path";
+import { fixedClock, systemClock } from "./clock.js";
 
 import {
   defaultShadowMemoryPorts,
@@ -449,6 +450,78 @@ export function publishedLaneCpuPerLane(laneClass: string): number | undefined {
   return publishedPerLaneCpus[laneClass];
 }
 
+/** W1-T14903 — the audit row each shared host memory snapshot writes once, from the review width pass that reads it:
+ *  the snapshot, each lane's share and which lane yielded. Record-only (scripts/write-only-ledger-step-baseline.json). */
+export const HOST_MEMORY_SHARED_STEP = "host_memory.shared";
+
+/**
+ * W1-T14903 — THE ONE HOST MEMORY SNAPSHOT BOTH LANES CUT FROM. The build lane's reading ({@link readLaneMemory}) is
+ * MemAvailable projected after every in-flight worker's remaining claim, reviews and builds alike; the review width
+ * read raw MemAvailable, so a full review lane could hold builds down while the review lane still saw room. Each
+ * lane-target reading publishes its
+ * snapshot here; review capacity takes the lower of it and its own reading, so neither lane spends memory the other
+ * already counted, and neither width can rise (INVARIANT width-never-grows).
+ */
+export interface SharedHostMemory {
+  atMs: number;
+  /** Projected MemAvailable after every in-flight claim, MiB (the lane governor's host base). */
+  availableMib: number;
+  hostReserveMib: number;
+  /** One more build at its learned typical peak, MiB. */
+  perLaneTypicalMib: number;
+}
+
+let publishedSharedHostMemory: SharedHostMemory | null = null;
+
+/** BACKSTOP: a snapshot older than this is not read and each lane keeps its own reading, as before W1-T14903. The
+ *  primary control is the lane-target reading itself, re-taken every dispatch poll interval; this only stops a daemon
+ *  whose dispatch loop stopped from steering reviews with a stale figure. */
+export const SHARED_HOST_MEMORY_STALE_MS = 10 * 60_000;
+
+/** W1-T14903 — publish one lane memory reading as the shared snapshot; an unread or host-unread reading clears it. */
+export function publishSharedHostMemory(reading: LaneMemoryReading | { unread: string }, atMs: number): void {
+  if ("unread" in reading || reading.hostBaseAvailableMib === null || !Number.isFinite(reading.hostBaseAvailableMib)) {
+    publishedSharedHostMemory = null;
+    return;
+  }
+  publishedSharedHostMemory = {
+    atMs,
+    availableMib: reading.hostBaseAvailableMib,
+    hostReserveMib: reading.hostReserveMib,
+    perLaneTypicalMib: Math.max(1, reading.perLaneTypicalMib ?? reading.perLaneMib),
+  };
+}
+
+/** W1-T14903 — the shared snapshot when it is fresh at `nowMs`, otherwise undefined. */
+export function sharedHostMemory(nowMs: number): SharedHostMemory | undefined {
+  const snapshot = publishedSharedHostMemory;
+  if (snapshot === null || nowMs - snapshot.atMs > SHARED_HOST_MEMORY_STALE_MS || nowMs < snapshot.atMs) return undefined;
+  return snapshot;
+}
+
+/** W1-T14903 — short: the snapshot has no room for one more build at its typical peak above the host reserve. */
+export function sharedHostMemoryShort(snapshot: SharedHostMemory | undefined): boolean {
+  if (snapshot === undefined) return false;
+  return snapshot.availableMib - snapshot.hostReserveMib < snapshot.perLaneTypicalMib;
+}
+
+/** W1-T14903 — the {@link HOST_MEMORY_SHARED_STEP} row: the snapshot, each lane's share and which lane yielded. */
+export function hostMemorySharedPayload(snapshot: SharedHostMemory, review: {
+  ownMib: number | null; readMib: number | null; width: number; yieldsReReviews: boolean;
+}): Record<string, unknown> {
+  return {
+    snapshot_at: fixedClock(snapshot.atMs).iso(),
+    available_mib: Math.round(snapshot.availableMib),
+    host_reserve_mib: Math.round(snapshot.hostReserveMib),
+    build_share_mib: Math.round(snapshot.perLaneTypicalMib),
+    review_own_mib: review.ownMib === null ? null : Math.round(review.ownMib),
+    review_read_mib: review.readMib === null ? null : Math.round(review.readMib),
+    review_width: review.width,
+    short: sharedHostMemoryShort(snapshot),
+    yielded: review.yieldsReReviews ? "re-review" : "none",
+  };
+}
+
 /** W1-T11129 — the daemon publishes the learned CPU lane bound each reading; review capacity reads it as its hold. */
 export function publishLaneCpuBound(bound: number | null): void {
   publishedCpuLaneBound = bound !== null && Number.isFinite(bound) ? bound : null;
@@ -525,7 +598,14 @@ export function publishedLaneCpuBound(): number | undefined {
 export function defaultLaneGovernorPorts(stateDir: string): LaneGovernorPorts {
   const root = dirname(stateDir);
   return {
-    mode: () => loadLaneGovernorMode(), read: () => readLaneMemory(root), cpuCount: () => availableParallelism(),
+    mode: () => loadLaneGovernorMode(),
+    // W1-T14903: every reading is also the shared snapshot review capacity cuts its width from.
+    read: () => {
+      const reading = readLaneMemory(root);
+      publishSharedHostMemory(reading, systemClock.now());
+      return reading;
+    },
+    cpuCount: () => availableParallelism(),
     cpuUsageUsec: () => readCgroupCpuUsageUsec(),
   };
 }
