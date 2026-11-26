@@ -6338,9 +6338,10 @@ export function wrappedGrepBodyRepair(body: string): AcceptanceGateBodyRepair | 
       /^(\s*grep:\s*)(.+?)(\s+in\s+\S+\s*)$/,
       (_all, head: string, _pattern: string, tail: string) => `${head}${wrapped.bare}${tail}`,
     );
-    const at = repaired.indexOf(proof);
-    if (bareProof === proof || at === -1 || repaired.indexOf(proof, at + 1) !== -1) return undefined;
-    repaired = repaired.slice(0, at) + bareProof + repaired.slice(at + proof.length);
+    if (bareProof === proof) return undefined;
+    const replaced = replaceBodyProofs(repaired, [{ oldProof: proof, newProof: bareProof }]);
+    if (replaced === undefined) return undefined;
+    repaired = replaced;
     unwrapped += 1;
   }
   if (unwrapped === 0) return undefined;
@@ -6523,7 +6524,9 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
     for (const defect of defects) {
       if (defect.kind !== "wrapped-proof" || !defect.repair || !defect.criterion) continue;
       const proof = parseAcceptanceBlock(repairedBody)[defect.criterion - 1]?.proof;
-      if (proof) repairedBody = repairedBody.replace(proof, defect.repair);
+      if (proof) {
+        repairedBody = replaceBodyProofs(repairedBody, [{ oldProof: proof, newProof: defect.repair }]) ?? repairedBody;
+      }
     }
     if (repairedBody !== metadata.body) {
       const candidate = { ...metadata, body: repairedBody };

@@ -66,3 +66,15 @@ test("a non-canonical quoted body proof is found by its parsed value and rewritt
   const rewritten = replaceBodyProofs(lone, [{ oldProof: oldLone, newProof: newLone }]);
   assert.equal(parseAcceptanceBlock(rewritten!)[0]!.proof, newLone, "a newProof holding \\\\ re-reads exactly");
 });
+
+test("a quoted scalar with inner quotes and escapes is matched whole and re-escaped", () => {
+  const body = String.raw`## Acceptance` + "\n- claim: plain\n" +
+    String.raw`  proof: "grep: "x" a\\.b in f"` + "\n";
+  const oldProof = parseAcceptanceBlock(body)[0]!.proof;
+  assert.equal(oldProof, String.raw`grep: "x" a\.b in f`);
+  const newProof = String.raw`grep: a\\b in f`;
+  const repaired = replaceBodyProofs(body, [{ oldProof, newProof }]);
+  assert.notEqual(repaired, undefined);
+  assert.equal(parseAcceptanceBlock(repaired!)[0]!.proof, newProof);
+});
+

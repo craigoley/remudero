@@ -374,6 +374,29 @@ export function replaceBodyProofs(body: string, replacements: readonly BodyProof
   const escaped = (text: string): string => `"${text.replace(/[\\"]/g, "\\$&")}"`;
   const parsedSpan = (inner: string): string => inner.replace(/\\(["\\])/g, "$1");
   const replaceIn = (line: string, oldProof: string, newProof: string): string | undefined => {
+    // Treat a proof label's complete value as one YAML scalar. Matching quoted fragments fails when the
+    // scalar itself contains an unescaped quote (which parseAcceptanceBlock still reads as one outer value).
+    const proofValue = line.match(/^(\s*proof\s*:\s*)(.*?)(\s*)$/i);
+    const bulletValue = !proofValue && /^\s*[-*+]\s/.test(line)
+      ? (() => {
+          const match = line.match(/^(\s*[-*+]\s.*?\s\|\s+)("[\s\S]*"\s*)$/);
+          return match ? { prefix: match[1]!, value: match[2]! } : undefined;
+        })()
+      : undefined;
+    const whole = proofValue
+      ? { prefix: proofValue[1]!, value: proofValue[2]!, suffix: proofValue[3]! }
+      : bulletValue ? { prefix: bulletValue.prefix, value: bulletValue.value.trimEnd(), suffix: bulletValue.value.slice(bulletValue.value.trimEnd().length) }
+      : undefined;
+    if (whole) {
+      const value = whole.value.trim();
+      const isDoubleQuoted = value.startsWith('"') && value.endsWith('"');
+      const parsed = isDoubleQuoted ? parsedSpan(value.slice(1, -1)) : value;
+      if (isDoubleQuoted && parsed === oldProof) {
+        const leading = whole.value.match(/^\s*/)?.[0] ?? "";
+        const trailing = whole.value.match(/\s*$/)?.[0] ?? "";
+        return `${whole.prefix}${leading}${escaped(newProof)}${trailing}${whole.suffix}`;
+      }
+    }
     let found = false;
     const out = line.replace(/"((?:[^"\\]|\\.)*)"/g, (span, inner: string) => {
       if (found || parsedSpan(inner) !== oldProof) return span;

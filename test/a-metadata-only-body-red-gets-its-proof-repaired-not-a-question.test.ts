@@ -176,6 +176,17 @@ test("W1-T5544: a diverged or wrapped body is cured deterministically", async ()
     assert.equal(repaired?.repairedBody, wrapped("grep: export function cure in src/run-task.ts"));
     assert.equal(wrappedGrepPattern("grep: export function cure in src/run-task.ts"), undefined);
   }
+  const escapedQuotedBody = String.raw`Acceptance:
+- claim: "a | b"
+  proof: "grep: \"export function cure\" in src/run-task.ts"
+`;
+  const escapedQuotedRepair = wrappedGrepBodyRepair(escapedQuotedBody);
+  assert.notEqual(escapedQuotedRepair, undefined, "the escaped quoted scalar is recognized as a wrapped proof");
+  assert.equal(
+    parseAcceptanceBlock(escapedQuotedRepair!.repairedBody)[0]!.proof,
+    "grep: export function cure in src/run-task.ts",
+    "a rendered escaped quote scalar is rewritten through the complete proof value",
+  );
   assert.equal(wrappedGrepBodyRepair(wrapped("grep: export function cure in src/run-task.ts")), undefined, "an unwrapped body has nothing to cure");
   assert.equal(wrappedGrepBodyRepair(wrapped("just run the suite and see")), undefined, "an unparseable proof is not a wrapping defect");
   assert.equal(
