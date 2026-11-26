@@ -22,8 +22,9 @@ type EvidenceRow = { fingerprint: string; bytes: number; row: Record<string, unk
 /** W1-T4636: the row projection a source was scanned under. A live source scanned before
  * `implement.done` was retained lacks those rows, so it is rescanned whole, never appended to.
  * W1-T14571: a source scanned before a call row kept `provider` and `notional_cost_usd` read every Codex call as free,
- * so any source under an older projection, archive or live, is rescanned whole on the next pass. */
-const SOURCE_PROJECTION = "codex-notional-v1" as const;
+ * so any source under an older projection, archive or live, is rescanned whole on the next pass.
+ * W1-T14988: a source scanned before an assignment kept its `lane` read every call as a build call, so it is too. */
+const SOURCE_PROJECTION = "build-lane-v1" as const;
 type SourceRecord = {
   name: string;
   form: Form;
@@ -75,7 +76,14 @@ export interface CohortVerifiedOutcome {
   censored: number;
   unavailable: number;
   reasons: Record<string, number>;
+  /** W1-T14988: this cohort's attempted calls from a lane that builds nothing (a judge, a draft, a review), by lane.
+   * They have no build to complete, so the join counts none of them; present only when there is one. */
+  nonBuildCalls?: Record<string, number>;
 }
+
+/** W1-T14988: the lane whose calls build a task. A call row with no lane predates lane stamping and stays a build call
+ * (none was observed on the host ledger, 286 files, 2026-11-26). */
+const BUILD_LANE = "run-task";
 
 const NO_VERIFICATION_JOIN = "unavailable-no-github-verification-join" as const;
 
@@ -504,6 +512,7 @@ function projectRow(row: Record<string, unknown>): Record<string, unknown> {
     const stack = object(receipt?.stack);
     return {
       ts: row.ts, host: row.host, task_id: row.task_id, run_id: row.run_id, step: row.step,
+      ...(typeof row.lane === "string" ? { lane: row.lane } : {}),
       worker_assignment: { id: assignment?.id, requested: { model: requested?.model },
         selected: { provider: selected?.provider, model: selected?.model } },
       benchmark_run: { work: { taskClass: work?.taskClass, ...(work?.shape !== undefined ? { shape: projectTaskShape(work.shape) } : {}) },
@@ -808,7 +817,8 @@ function eligibleAssignmentIds(index: ReturnType<typeof indexEvidence>,
   return eligible;
 }
 
-type CohortAssignment = VerifiedAssignment & { cohortKey: string; exposure: Omit<ModelExposure, "verified" | "cost"> };
+type CohortAssignment = VerifiedAssignment & { cohortKey: string; lane: string | null;
+  exposure: Omit<ModelExposure, "verified" | "cost"> };
 
 function cohortAssignments(sources: SourceRecord[], faults: SourceFault[]): CohortAssignment[] {
   const index = indexEvidence(sources);
@@ -825,6 +835,7 @@ function cohortAssignments(sources: SourceRecord[], faults: SourceFault[]): Coho
     const servedModel = typeof sameRunCall?.served_model === "string" && sameRunCall.served_model ? sameRunCall.served_model : null;
     const requested = object(object(row.worker_assignment)?.requested)?.model;
     assignments.push({ assignmentId: id, cohortKey: JSON.stringify(dimensions),
+      lane: typeof row.lane === "string" && row.lane ? row.lane : null,
       taskId: typeof row.task_id === "string" ? row.task_id : null,
       runId: typeof row.run_id === "string" ? row.run_id : null,
       assignedAt: typeof row.ts === "string" ? row.ts : null,
@@ -919,8 +930,9 @@ function selfForecastCalibration(sources: SourceRecord[], assignments: CohortAss
     coverage: { paired: pairs.length, forecasts, outcomes, unpaired }, score };
 }
 
-/** W1-T13867: give every cohort row its calls' verified outcomes, joined one assignment at a time against its task's
- * case files at `cutoff`. Without case files every row names the join's unavailable reason, never a guessed outcome. */
+/** W1-T13867: give every cohort row its BUILD calls' verified outcomes (W1-T14988), joined one assignment at a time
+ * against its task's case files at `cutoff`; every other call is counted by lane in `nonBuildCalls`. Without case files
+ * every row names the join's unavailable reason, never a guessed outcome. */
 function withCohortOutcomes(cohorts: readonly Omit<BenchmarkCohort, "verifiedOutcome">[], assignments: CohortAssignment[],
   caseFiles: readonly TaskCaseFile[] | undefined, cutoff: string): BenchmarkCohort[] {
   if (!caseFiles) return cohorts.map((cohort) => ({ ...cohort, verifiedOutcome: NO_VERIFICATION_JOIN }));
@@ -932,6 +944,12 @@ function withCohortOutcomes(cohorts: readonly Omit<BenchmarkCohort, "verifiedOut
     const tally = tallies.get(assignment.cohortKey)
       ?? { assignments: 0, completed: 0, endedWithoutCompletion: 0, censored: 0, unavailable: 0, reasons: {} };
     tallies.set(assignment.cohortKey, tally);
+    // W1-T14988: a judge, draft or review call has no build to complete; it is counted by lane, never joined.
+    if (assignment.lane !== null && assignment.lane !== BUILD_LANE) {
+      const calls = tally.nonBuildCalls ??= {};
+      calls[assignment.lane] = (calls[assignment.lane] ?? 0) + 1;
+      continue;
+    }
     const { coverage } = joinVerifiedTaskOutcomes([assignment], byTask.get(assignment.taskId) ?? [], cutoff);
     tally.assignments += coverage.assignments;
     tally.completed += coverage.completed;

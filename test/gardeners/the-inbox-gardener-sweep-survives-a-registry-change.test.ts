@@ -6,14 +6,15 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { runInboxGardener, INBOX_GARDENER_LIMITS, type InboxGardenerCandidate, type InboxGardenerPack, type InboxGardenerPorts } from "#src/lib/inbox-gardener.js";
+import { runInboxGardener, type InboxGardenerCandidate, type InboxGardenerPack, type InboxGardenerPorts } from "#src/lib/inbox-gardener.js";
 import { readInboxGardenerStore, type InboxGardenerScope } from "#src/lib/inbox-retirement.js";
 import type { Clock } from "#src/lib/clock.js";
 
 const NOW = Date.parse("2026-11-18T12:00:00.000Z");
 const SCOPE: InboxGardenerScope = { repository: "craigoley/remudero", instance: "core", root: "/r" };
 const clock: Clock = { now: () => NOW, date: () => new Date(NOW), iso: () => new Date(NOW).toISOString() } as Clock;
-const PER_PASS = INBOX_GARDENER_LIMITS.candidates;
+// W1-T14978: a pass has no default count bound, so this file splits its sweep with an explicit per-pass count.
+const PER_PASS = 8;
 
 const id = (n: number) => `adoption:sweep-${String(n).padStart(3, "0")}`;
 const candidate = (proposalId: string, summary = "unowned ask"): InboxGardenerCandidate =>
@@ -28,7 +29,7 @@ function gardener(t: TestContext) {
   const pass = (candidates: InboxGardenerCandidate[]) => {
     const ports: InboxGardenerPorts = { capture: async () => pack(candidates), proof: async () => assert.fail("no candidate here needs a proof"),
       mirror: async () => assert.fail("shadow mode mirrors nothing") };
-    return runInboxGardener({ stateDir: dir, scope: SCOPE, ports, mode: "shadow", clock });
+    return runInboxGardener({ stateDir: dir, scope: SCOPE, ports, mode: "shadow", clock, limits: { candidates: PER_PASS } });
   };
   const store = () => { const read = readInboxGardenerStore(dir, SCOPE); assert.equal(read.state, "observed"); return read.state === "observed" ? read.store : assert.fail(); };
   return { pass, store };

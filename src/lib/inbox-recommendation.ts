@@ -13,6 +13,7 @@ import type { Mount } from "./mounts.js";
 import { checkOperatorMessage } from "./operator-message.js";
 import { spawnWorker } from "./worker.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 
 /**
  * lib/inbox-recommendation.ts (W1-T8950) — each operator inbox item carries the decision the fleet recommends.
@@ -69,6 +70,23 @@ export function recommendationStorePath(stateDir: string): string {
 function refusalsPath(stateDir: string): string {
   return `${stateDir}/inbox-recommendation-refusals.json`;
 }
+
+/** W1-T10229: writer spawns that failed, by proposal id: the fingerprint, its strikes and when it may be asked again. */
+function failuresPath(stateDir: string): string {
+  return `${stateDir}/inbox-recommendation-failures.json`;
+}
+
+interface RecommendationFailureRecord {
+  fingerprint: string;
+  strikes: number;
+  /** Epoch ms before which the fingerprint is not asked again. */
+  retryAtMs: number;
+}
+
+/** The first failed spawn defers its fingerprint this long; each further strike doubles it. */
+const FAILURE_BACKOFF_MS = 5 * 60_000;
+/** A fingerprint whose spawn failed this many times is parked until it changes. */
+const FAILURE_PARK_STRIKES = 3;
 
 function seedMarkerPath(stateDir: string): string {
   return `${stateDir}/inbox-recommendation-seeds.json`;
@@ -350,7 +368,9 @@ export async function checkRecommendation(
   evidence: Pick<RecommendationEvidence, "resolve">,
 ): Promise<RecommendationCheck> {
   const problems: string[] = [];
-  const a = (answer && typeof answer === "object" ? answer : {}) as Record<string, unknown>;
+  // W1-T10229: name the real problem, so the repair attempt answers with the object instead of guessing at an action.
+  if (!answer || typeof answer !== "object") return { ok: false, problems: ["the answer was not one JSON object: reply with only the object"] };
+  const a = answer as Record<string, unknown>;
   if (!isOptionIntent(a.action)) {
     problems.push("action must be one of approve, decline, reframe, reply, keep");
     return { ok: false, problems };
@@ -387,15 +407,25 @@ export interface RecommendationContext {
   history: string[];
 }
 
+const INPUT_NOUN: Readonly<Record<NonNullable<PlainOptionAction["input"]>, string>> = {
+  reason: "a reason", feedback: "feedback", text: "a question",
+};
+
 export function buildRecommendationPrompt(ctx: RecommendationContext, retryProblems: string[] = []): string {
   const routable = (["approve", "decline", "reframe", "reply"] as const).filter((a) => optionAction(a, ctx.lane, ctx.proposal.id) !== undefined);
+  const offered = [...routable, "keep" as const];
+  // W1-T10229: read from the route the checker reads, so every action it requires text for is asked for text.
+  const posts = offered.flatMap((a) => {
+    const input = optionAction(a, ctx.lane, ctx.proposal.id)?.input;
+    return input === undefined ? [] : [`${a} posts ${INPUT_NOUN[input]}`];
+  });
   return [
     "You recommend ONE decision on an inbox item for the operator of an autonomous software fleet.",
     "Respond with ONLY a JSON object, no prose and no markdown fence, shaped EXACTLY:",
     '{"action": string, "text": string (when the action posts text), "why": string (one plain sentence),',
     ' "evidence": [string, ...], "obsolete": boolean, "group": string (optional)}',
-    `"action" is one of: ${[...routable, "keep"].join(", ")}. keep leaves the item as it is and posts nothing.`,
-    'decline posts a reason, reframe posts feedback, reply posts a question: put that exact text in "text".',
+    `"action" is one of: ${offered.join(", ")}. keep leaves the item as it is and records why.`,
+    `${posts.join(", ")}: put that exact text in "text".`,
     'Every "evidence" entry is a merged PR number ("#11199"), a commit sha on main, a task id ("W1-T8918"), or a file path ("src/lib/inbox.ts:1655").',
     '"obsolete" is true only when a merged PR or a commit on main already resolves the item; then cite it in "evidence".',
     'Give "group" when this item shares one root cause with other items, naming that cause in a few words.',
@@ -409,20 +439,66 @@ export function buildRecommendationPrompt(ctx: RecommendationContext, retryProbl
   ].join("\n");
 }
 
-/** The production writer: the summarize lane's mount, with this module's prompt. Untested by unit, like every real spawn. */
+/** The end of the balanced `{…}` span opening at `start`, braces inside JSON strings not counted; -1 when unclosed. */
+function balancedEnd(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i += 1) {
+    const c = text[i];
+    if (inString) {
+      if (c === "\\") i += 1;
+      else if (c === '"') inString = false;
+    } else if (c === '"') inString = true;
+    else if (c === "{") depth += 1;
+    else if (c === "}" && --depth === 0) return i;
+  }
+  return -1;
+}
+
+/** W1-T10229: the recommendation object in a writer reply, or `null` when it holds none. Each balanced `{…}` span is
+ *  tried in order, so a fenced answer followed by a note holding a brace is still read: the old greedy
+ *  /\{[\s\S]*\}/ ran to the note's last brace, failed to parse, and the valid answer was refused. The first object
+ *  with an `action` wins, else the first object. */
+export function recommendationAnswerJson(text: string): unknown {
+  let first: unknown = null;
+  for (let start = text.indexOf("{"); start !== -1; start = text.indexOf("{", start + 1)) {
+    const end = balancedEnd(text, start);
+    if (end === -1) continue;
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
+    } catch {
+      // deliberate: prose in braces is not the answer; the next span is tried.
+      continue;
+    }
+    if (Object.hasOwn(parsed, "action")) return parsed;
+    first ??= parsed;
+    start = end;
+  }
+  return first;
+}
+
+/** W1-T10229: a writer spawn that gave no model answer. `unattempted` when it never ran (admission abandoned). */
+export class RecommendationSpawnError extends RmdError {
+  constructor(readonly unattempted: boolean, detail: string) {
+    super("child_process", GENERIC_EXIT_CODE, `the recommendation writer's spawn did not answer (${detail})`, { unattempted });
+    this.name = "RecommendationSpawnError";
+  }
+}
+
+/** The production writer: the summarize lane's mount, with this module's prompt. A spawn that never answered (an
+ *  error envelope, a usage refusal, admission abandoned) throws {@link RecommendationSpawnError}, which the backfill
+ *  defers rather than refuses; only a model's real reply can be a refused answer. */
 export function realRecommendationWriter(opts: { mount: Mount; cwd: string; settingsFile: string; spawn?: typeof spawnWorker }): (input: SummarizeInput) => Promise<unknown> {
   const spawn = opts.spawn ?? benchmarkNonDispatchSpawn("feedback-summary");
   return async ({ context: prompt }) => {
     const args = buildDecisionSummarySpawnArgs({ input: { context: "" }, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
     const result = await spawn({ ...args, prompt });
-    const match = /\{[\s\S]*\}/.exec(result.text);
-    if (!match) return null;
-    try {
-      return JSON.parse(match[0]);
-    } catch {
-      // deliberate: an unparseable answer is a refused answer; the checker names it.
-      return null;
+    if (result.isError === true || result.notStarted !== undefined) {
+      throw new RecommendationSpawnError(result.notStarted !== undefined,
+        result.notStarted ?? `${result.subtype}: ${result.text.trim().slice(0, 200)}`);
     }
+    return recommendationAnswerJson(result.text);
   };
 }
 
@@ -502,12 +578,45 @@ export interface RecommendationTick {
   written: number;
   refused: number;
   dropped: number;
+  /** W1-T10229: items whose writer threw; each is deferred, and the tick went on to the next item. */
+  failed: number;
+  failures: RecommendationFailure[];
+}
+
+export interface RecommendationFailure {
+  proposalId: string;
+  error: string;
+  /** Failed spawns of this fingerprint so far; a spawn that never started adds none. */
+  strikes: number;
+  /** True once the strikes park the fingerprint until it changes. */
+  parked: boolean;
+  unattempted: boolean;
+}
+
+/** Record a failed ask: defer its fingerprint by a doubling backoff, park it at the strike limit. */
+function recordFailure(deps: RecommendationBackfill, item: CurrentItem, error: unknown, now: number): RecommendationFailure {
+  const failures = readJsonObject<RecommendationFailureRecord>(failuresPath(deps.stateDir));
+  const prior = failures[item.proposal.id];
+  const unattempted = error instanceof RecommendationSpawnError && error.unattempted;
+  const strikes = (prior?.fingerprint === item.fingerprint ? prior.strikes : 0) + (unattempted ? 0 : 1);
+  const delay = FAILURE_BACKOFF_MS * 2 ** Math.max(0, strikes - 1);
+  failures[item.proposal.id] = { fingerprint: item.fingerprint, strikes, retryAtMs: now + delay };
+  writeAtomic(failuresPath(deps.stateDir), JSON.stringify(failures, null, 2) + "\n");
+  return { proposalId: item.proposal.id, error: String((error as Error)?.message ?? error), strikes, parked: strikes >= FAILURE_PARK_STRIKES, unattempted };
+}
+
+/** Forget an item's failed spawns once it is answered (written or refused). */
+function clearFailure(deps: RecommendationBackfill, id: string): void {
+  const failures = readJsonObject<RecommendationFailureRecord>(failuresPath(deps.stateDir));
+  if (failures[id] === undefined) return;
+  delete failures[id];
+  writeAtomic(failuresPath(deps.stateDir), JSON.stringify(failures, null, 2) + "\n");
 }
 
 /** One tick: drop recommendations whose task record changed on main, import the seed once, then write at most `max`
  *  items with no current recommendation, oldest registry order first. */
 export async function backfillRecommendations(deps: RecommendationBackfill, max: number): Promise<RecommendationTick> {
-  const tick: RecommendationTick = { seeded: 0, written: 0, refused: 0, dropped: 0 };
+  const tick: RecommendationTick = { seeded: 0, written: 0, refused: 0, dropped: 0, failed: 0, failures: [] };
   const snapshot = readClassificationSnapshot(deps.stateDir);
   const lanes = deps.readLanes ? deps.readLanes() : snapshotLanes(snapshot);
   // One verified commit of the selected repository is read for the whole pass; a pass that cannot pin it stores nothing.
@@ -553,11 +662,20 @@ export async function backfillRecommendations(deps: RecommendationBackfill, max:
   const ask = deps.summarize;
   if (!ask) return tick;
   const refusals = readJsonObject<string>(refusalsPath(deps.stateDir));
+  const failures = readJsonObject<RecommendationFailureRecord>(failuresPath(deps.stateDir));
+  const now = (deps.clock ?? systemClock).now();
+  // A failed fingerprint waits out its backoff, or stays parked, until its fingerprint changes.
+  const deferred = (item: CurrentItem): boolean => {
+    const f = failures[item.proposal.id];
+    return f?.fingerprint === item.fingerprint && (f.strikes >= FAILURE_PARK_STRIKES || f.retryAtMs > now);
+  };
   const pending = [...items.values()]
-    .filter((item) => (store[item.proposal.id]?.sourceFingerprint !== item.fingerprint || (pinned && store[item.proposal.id]?.repository !== pinned.repository)) && refusals[item.proposal.id] !== item.fingerprint)
-    .slice(0, max);
+    .filter((item) => (store[item.proposal.id]?.sourceFingerprint !== item.fingerprint || (pinned && store[item.proposal.id]?.repository !== pinned.repository)) && refusals[item.proposal.id] !== item.fingerprint && !deferred(item));
   const plainStore = readPlainStore(plainStorePath(deps.stateDir));
+  let answered = 0;
   for (const item of pending) {
+    // A failed ask does not spend the tick's `max`: the next item is asked in the same tick (W1-T10229).
+    if (answered >= max) break;
     const taskId = recommendationTaskId(item.proposal.id);
     const plain = plainInboxMessage(item.proposal, plainStore);
     const ctx: RecommendationContext = {
@@ -567,12 +685,25 @@ export async function backfillRecommendations(deps: RecommendationBackfill, max:
     };
     let problems: string[] = [];
     let accepted: Record<string, unknown> | undefined;
+    let failed = false;
     for (let attempt = 0; attempt < 2 && accepted === undefined; attempt += 1) {
-      const answer = await ask({ context: buildRecommendationPrompt(ctx, problems) });
+      let answer: unknown;
+      try {
+        answer = await ask({ context: buildRecommendationPrompt(ctx, problems) });
+      } catch (error) {
+        // A writer that gave no answer is deferred, never refused, and never holds the queue.
+        tick.failures.push(recordFailure(deps, item, error, now));
+        tick.failed += 1;
+        failed = true;
+        break;
+      }
       const check = await checkRecommendation(answer, { id: item.proposal.id, lane: item.lane, ifNothingHappens: plain.ifNothingHappens }, evidence);
       if (check.ok) accepted = answer as Record<string, unknown>;
       else problems = check.problems;
     }
+    if (failed) continue;
+    answered += 1;
+    clearFailure(deps, item.proposal.id);
     const latest = readRecommendationStore(path);
     if (accepted === undefined) {
       const fresh = readJsonObject<string>(refusalsPath(deps.stateDir));
@@ -612,6 +743,9 @@ export function startRecommendationBackfill(
         if (t.written > 0) log("inbox.recommendation_written", { count: t.written });
         if (t.refused > 0) log("inbox.recommendation_refused", { count: t.refused });
         if (t.dropped > 0) log("inbox.recommendation_dropped", { count: t.dropped });
+        for (const f of t.failures) {
+          log("inbox.recommendation_failed", { proposal_id: f.proposalId, error: f.error, strikes: f.strikes, parked: f.parked, unattempted: f.unattempted });
+        }
       })
       .catch((e) => log("inbox.recommendation_failed", { error: String((e as Error)?.message ?? e) }))
       .finally(() => {
