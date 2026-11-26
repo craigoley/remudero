@@ -9,8 +9,8 @@ import { readFileSync } from "node:fs";
 import { cpus, loadavg } from "node:os";
 import { join } from "node:path";
 import {
-  cpuWeightShare, HOST_MEMORY_SHARED_STEP, hostMemorySharedPayload, publishedLaneCpuBound, readCpuWeightShare, sharedHostMemory,
-  sharedHostMemoryShort, type SharedHostMemory,
+  cpuWeightShare, HOST_MEMORY_SHARED_STEP, hostMemorySharedPayload, pinnedSharedHostMemory, publishedLaneCpuBound, readCpuWeightShare,
+  reReviewYieldsToBuild, sharedHostMemory, type SharedHostMemory, type SharedHostMemoryPass,
 } from "./lane-governor.js";
 import {
   creditsLaneRoom,
@@ -952,14 +952,17 @@ export function summarizeReviewSettlements(
  */
 export function sharedMemoryAvailableMib(ownMib: number | undefined, shared: SharedHostMemory | undefined): number | undefined {
   if (shared === undefined || !Number.isFinite(shared.availableMib)) return ownMib;
-  if (ownMib === undefined || !Number.isFinite(ownMib)) return ownMib;
+  // Its own reading unread, the snapshot is the only reading there is; the width it cuts is still bounded by the legacy
+  // ceiling, which reads the unread own reading exactly as origin/main does.
+  if (ownMib === undefined || !Number.isFinite(ownMib)) return shared.availableMib;
   return Math.min(ownMib, shared.availableMib);
 }
 
-/** W1-T14903 — whether review admission yields re-reviews of already-judged heads to builds now: the shared snapshot is
- *  fresh and has no room for one more build at its typical peak. No fresh snapshot: nothing yields. */
-export function reviewYieldsReReviews(nowMs: number): boolean {
-  return sharedHostMemoryShort(sharedHostMemory(nowMs));
+/** W1-T14903 — whether review admission yields re-reviews of already-judged heads to builds: the snapshot (a pass's
+ *  pinned one, else the live one at `nowMs`) has no room for one more build AND a review at `reviewNeedMib`
+ *  ({@link reReviewYieldsToBuild}). No fresh snapshot: nothing yields. */
+export function reviewYieldsReReviews(nowMs: number, reviewNeedMib = 0, pass?: SharedHostMemoryPass): boolean {
+  return reReviewYieldsToBuild(pass === undefined ? sharedHostMemory(nowMs) : pinnedSharedHostMemory(pass, nowMs), reviewNeedMib);
 }
 
 /** W1-T14903 — re-exported for review admission (sweep.ts), which records the re-reviews it held back. */
@@ -989,6 +992,12 @@ export interface RuntimeReviewCapacityInput extends ReviewCapacityBounds {
   observeReviewPhases?: (provider: ReviewProviderCapacityObservation, width: number) => {
     cpuPhaseInFlight: number; judgePhaseInFlight: number; providerBound: number;
   };
+  /** W1-T14903 — the sweep pass this width is cut for: its pinned snapshot is read, and the shared row is recorded into
+   *  the pass, which writes it once. Absent (a direct caller): the live snapshot is read and the row written here. */
+  memoryPass?: SharedHostMemoryPass;
+  /** W1-T14903 — the host readings, given the kernel MemAvailable the shared snapshot already sampled (undefined: none).
+   *  Absent: {@link readReviewHostObservation} reads the host files. */
+  readHostObservation?: (sharedMeasuredMib: number | undefined) => ReturnType<typeof readReviewHostObservation>;
 }
 
 /** Production adapter. It reads only local host files and the age-bounded provider snapshot. */
@@ -1000,9 +1009,12 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
   // W1-T11129 — the share's producer is the host tuner's cpu-weights.json in this instance's state dir; unread or
   // stale, the observation carries no share and the CPU verdict holds rather than shedding on PSI alone.
   const weightShare = input.cpuWeightShare ?? readCpuWeightShare(join(input.root, "state"), input.nowMs);
-  // W1-T14903: the build lane owns this pass's host memory reading; use it directly for the review decision.
-  const shared = sharedHostMemory(input.nowMs);
-  const host = readReviewHostObservation(undefined, undefined, shared?.availableMib);
+  // W1-T14903: ONE snapshot per pass — the pass's pinned one, else the live one. Its kernel MemAvailable (same sample)
+  // is the review lane's own reading, exactly what origin/main reads, so no second kernel sample is taken; without one
+  // the lane reads /proc/meminfo itself, as before.
+  const shared = input.memoryPass === undefined ? sharedHostMemory(input.nowMs) : pinnedSharedHostMemory(input.memoryPass, input.nowMs);
+  const host = (input.readHostObservation ?? ((measured) => readReviewHostObservation(undefined, undefined, measured)))(
+    shared?.measuredMib);
   const memAvailableMib = sharedMemoryAvailableMib(host.memAvailableMib, shared);
   const observation: ReviewCapacityObservation = {
     nowMs: input.nowMs,
@@ -1019,14 +1031,25 @@ export function selectRuntimeReviewWidth(input: RuntimeReviewCapacityInput): num
     settlements,
   };
   // W1-T14903: compare the shared controller with an independently advanced legacy ceiling. The latter tracks the
-  // old controller's hysteresis across passes, so a shared shed cannot let a later recovery exceed that ceiling.
+  // old controller's hysteresis across passes, so a shared shed cannot let a later recovery exceed that ceiling. The
+  // ceiling reads the lane's OWN MemAvailable (origin/main's input): fed the projection, its one-lane reserve cut fired
+  // before, and so masked, the proportional latency cut origin/main makes. Only the shared controller reads the snapshot.
   const own = selectAdaptiveReviewWidth(legacyPrior, input.policy, observation, input);
-  const sharedCut = selectAdaptiveReviewWidth(prior, input.policy, observation, input);
+  const sharedObservation: ReviewCapacityObservation = {
+    ...observation, ...(memAvailableMib === undefined ? {} : { memAvailableMib }),
+  };
+  const sharedCut = selectAdaptiveReviewWidth(prior, input.policy, sharedObservation, input);
   const result = sharedCut.decision.effectiveWidth < own.decision.effectiveWidth ? sharedCut : own;
   runtimeStates.set(input.root, result.state);
   legacyCeilingStates.set(input.root, own.state);
   const phaseSplit = input.observeReviewPhases?.(observation.provider, result.decision.effectiveWidth);
-  if (shared !== undefined) {
+  if (shared !== undefined && input.memoryPass !== undefined) {
+    const yieldedWidth = result === sharedCut && sharedCut.decision.effectiveWidth < own.decision.effectiveWidth;
+    input.memoryPass.width = {
+      ownMib: host.memAvailableMib ?? null, readMib: memAvailableMib ?? null, width: result.decision.effectiveWidth,
+      ownWidth: own.decision.effectiveWidth, yieldedWidth: yieldedWidth || input.memoryPass.width?.yieldedWidth === true,
+    };
+  } else if (shared !== undefined) {
     const payload = hostMemorySharedPayload(shared, {
       ownMib: host.memAvailableMib ?? null,
       readMib: memAvailableMib ?? null,

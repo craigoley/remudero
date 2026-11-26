@@ -6,14 +6,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import {
-  HOST_MEMORY_SHARED_STEP, laneTarget, publishSharedHostMemory, SHARED_HOST_MEMORY_STALE_MS, sharedBuildNeedMib, sharedHostMemory, sharedHostMemoryShort,
-  type LaneMemoryReading,
+  HOST_MEMORY_SHARED_STEP, laneTarget, publishSharedHostMemory, SHARED_HOST_MEMORY_STALE_MS, setSharedHostMemoryReader, sharedBuildNeedMib,
+  sharedHostMemory, sharedHostMemoryShort, type LaneMemoryReading,
 } from "#src/lib/lane-governor.js";
 import {
-  readReviewHostObservation, reviewYieldsReReviews, selectAdaptiveReviewWidth, selectRuntimeReviewWidth, sharedMemoryAvailableMib,
-  type ReviewCapacityObservation, type ReviewCapacityPolicy,
+  initialReviewCapacityState, readReviewHostObservation, reviewYieldsReReviews, selectAdaptiveReviewWidth, selectRuntimeReviewWidth,
+  sharedMemoryAvailableMib, summarizeReviewSettlements, type ReviewCapacityObservation, type ReviewCapacityPolicy,
 } from "#src/lib/review-capacity.js";
-import { DEFAULT_SWEEP_POLICY, reReviewsJudgedHead, runSweep, selectReviewAdmissions, type OpenPrView, type SweepDeps } from "#test/helpers/sweep-test.js";
+import {
+  DEFAULT_SWEEP_POLICY, reReviewsJudgedHead, runSweep, runSweepLightPass, selectReviewAdmissions, type OpenPrView, type SweepDeps,
+} from "#test/helpers/sweep-test.js";
 
 const NOW = Date.parse("2026-11-25T16:24:00Z");
 
@@ -53,11 +55,35 @@ function reviewWidth(memAvailableMib: number | undefined): { width: number; reas
   return { width: result.decision.effectiveWidth, reason: result.decision.reason };
 }
 
-function reading(hostBaseAvailableMib: number | null): LaneMemoryReading {
+function reading(hostBaseAvailableMib: number | null, extra: Partial<LaneMemoryReading> = {}): LaneMemoryReading {
   return {
     containerBaseMib: null, containerOnsetMib: null, containerArmCounts: false, containerBasis: "test",
-    hostBaseAvailableMib, hostReserveMib: 2048, perLaneMib: 2313, perLaneTypicalMib: 843, containerPressed: false,
+    hostBaseAvailableMib, hostReserveMib: 2048, perLaneMib: 2313, perLaneTypicalMib: 843, containerPressed: false, ...extra,
   };
+}
+
+/** One full sweep over `prs` whose review width is the production runtime width, cut for this pass. */
+async function fullSweep(prs: OpenPrView[], root: string, hooks: { readMainRepair?: () => Promise<undefined> } = {}): Promise<{
+  effects: string[]; rows: Record<string, unknown>[];
+}> {
+  const effects: string[] = [];
+  const rows: Record<string, unknown>[] = [];
+  const log = (step: string, extra?: Record<string, unknown>): void => { rows.push({ step, ...extra }); };
+  const deps: SweepDeps = {
+    ledgerPath: "/unused/shared-memory-ledger", runId: "shared-memory", now: () => NOW, repairAdmissionSurface: "full",
+    readLedger: () => rows, appendLine: (_path, row) => { rows.push(row); }, log,
+    dispatchFix: () => {}, dispatchPlanOnlyRepair: () => true,
+    postReview: (p) => { effects.push(`review:${p.prNumber}`); },
+    arm: () => "armed", escalate: () => {}, close: () => {},
+    selectAdaptiveReviewWidth: ({ queueDepth, nowMs, ledgerLines, memoryPass }) => selectRuntimeReviewWidth({
+      root, queueDepth, activeWorkers: 0, nowMs, ledgerLines, policy: POLICY, ...BOUNDS, log, cpuWeightShare: 1,
+      readHostObservation: () => ({ memAvailableMib: 30_000, cpuPsiSomeAvg10Pct: 0, cpuPsiFullAvg10Pct: 0, memoryPsiSomeAvg10Pct: 0 }),
+      ...(memoryPass === undefined ? {} : { memoryPass }),
+    }),
+    ...(hooks.readMainRepair === undefined ? {} : { readMainRepair: hooks.readMainRepair }),
+  };
+  await runSweep(prs, deps);
+  return { effects, rows };
 }
 
 function pr(over: Partial<OpenPrView>): OpenPrView {
@@ -75,7 +101,31 @@ function tempRoot(): string {
   return root;
 }
 
+// The reviewer's replay of 2026-11-25 16:24Z: kernel MemAvailable 8,130 MiB, cgroup memory PSI 8%, calm CPU, and
+// review settlements whose recent latency is 6x the baseline. Fed through the width's host-reading seam.
+const REPLAY_POLICY = { ...POLICY, settlementWindowMs: 3_600_000 } as ReviewCapacityPolicy;
+const replayHost = (measured: number | undefined) => ({
+  memAvailableMib: measured ?? 8_130, cpuPsiSomeAvg10Pct: 0.03, cpuPsiFullAvg10Pct: 0, memoryPsiSomeAvg10Pct: 8,
+  hostLoad1: 1, hostCpuCount: 8,
+});
+function sixfoldLatencyLines(): Record<string, unknown>[] {
+  const iso = (ms: number): string => new Date(ms).toISOString();
+  const lines: Record<string, unknown>[] = [];
+  for (let i = 0; i < 4; i++) {
+    const start = NOW - 4 * 3_600_000 + i * 20 * 60_000; // baseline: 10 minute reviews, before the settlement window
+    lines.push({ step: "sweep.post_review.attempt", ts: iso(start), pr_number: 100 + i, head_sha: `base${i}` });
+    lines.push({ step: "sweep.post_review.done", ts: iso(start + 10 * 60_000), pr_number: 100 + i, head_sha: `base${i}` });
+  }
+  for (let i = 0; i < 4; i++) {
+    const start = NOW - 70 * 60_000 + i * 60_000; // recent: 60 minute reviews settling inside the window
+    lines.push({ step: "sweep.post_review.attempt", ts: iso(start), pr_number: 200 + i, head_sha: `recent${i}` });
+    lines.push({ step: "sweep.post_review.done", ts: iso(start + 60 * 60_000), pr_number: 200 + i, head_sha: `recent${i}` });
+  }
+  return lines;
+}
+
 afterEach(() => {
+  setSharedHostMemoryReader(undefined);
   publishSharedHostMemory({ unread: "test reset" }, NOW);
   for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -108,6 +158,25 @@ test("W1-T14903 both lanes read one memory snapshot", () => {
   assert.equal(paths.includes("/proc/meminfo"), false, "reviews do not take another kernel memory sample");
 });
 
+test("W1-T14903 both lanes read one memory snapshot — a dispatch re-read while the sweep awaits main changes no cut", async () => {
+  // The reviewer's replay: the pass cuts review width from 30,000 MiB, then the dispatch loop re-publishes -110 MiB
+  // while the full sweep awaits readMainRepair. Every consumer in that pass must read the snapshot the pass started on.
+  const rejudge = pr({ prNumber: 7, prUrl: "https://github.com/o/r/pull/7", headSha: "bbbb222", reviewedHeadSha: "bbbb222" });
+  const first = pr({ prNumber: 8, prUrl: "https://github.com/o/r/pull/8", headSha: "cccc333" });
+  publishSharedHostMemory(reading(30_000), NOW);
+  const swept = await fullSweep([rejudge, first], tempRoot(), {
+    readMainRepair: async () => { publishSharedHostMemory(reading(-110), NOW); return undefined; },
+  });
+  assert.equal(sharedHostMemory(NOW)?.availableMib, -110, "the dispatch loop did re-publish mid-pass");
+  assert.deepEqual(swept.effects.sort(), ["review:7", "review:8"],
+    "admission reads the 30,000 MiB snapshot the width was cut from, so the re-review is not held on -110 MiB");
+  const shared = swept.rows.filter((row) => row.step === HOST_MEMORY_SHARED_STEP);
+  assert.equal(shared.length, 1, "one pass, one snapshot, one row");
+  assert.equal(shared[0]?.available_mib, 30_000, "the row names the snapshot every consumer in the pass read");
+  assert.equal(shared[0]?.review_read_mib, 30_000);
+  assert.equal(shared[0]?.yielded, "none");
+});
+
 test("W1-T14903 a build outranks a re-review when memory is short", () => {
   const rejudge = pr({ prNumber: 7, prUrl: "https://github.com/o/r/pull/7", headSha: "bbbb222", reviewedHeadSha: "bbbb222" });
   const first = pr({ prNumber: 8, prUrl: "https://github.com/o/r/pull/8", headSha: "cccc333" });
@@ -131,7 +200,40 @@ test("W1-T14903 a build outranks a re-review when memory is short", () => {
   assert.deepEqual(selectReviewAdmissions([rejudge, first], DEFAULT_SWEEP_POLICY, NOW, undefined, 4, 0).spawning.map((p) => p.prNumber), [8]);
   publishSharedHostMemory(reading(2_048 + need), NOW);
   assert.equal(reviewYieldsReReviews(NOW), false, "room for one more build: nothing yields");
-  assert.deepEqual(selectReviewAdmissions([rejudge, first], DEFAULT_SWEEP_POLICY, NOW, undefined, 4, 0).spawning.map((p) => p.prNumber).sort(), [7, 8]);
+  // W1-T14903 review 2026-11-26: at exactly one build's room the re-review used to start beside the build, unordered,
+  // and could take the room first. It now yields until the room holds the build AND its own reserve.
+  const reviewReserve = DEFAULT_SWEEP_POLICY.reviewCapacity.workerMemoryReserveMib;
+  assert.ok(reviewReserve > 0);
+  publishSharedHostMemory(reading(2_048 + need + reviewReserve), NOW);
+  assert.deepEqual(selectReviewAdmissions([rejudge, first], DEFAULT_SWEEP_POLICY, NOW, undefined, 4, 0).spawning.map((p) => p.prNumber).sort(), [7, 8],
+    "room for a build and the re-review: nothing yields");
+});
+
+test("W1-T14903 a build outranks a re-review when memory is short — at the reserve boundary the build goes first", () => {
+  // The reviewer's inputs: an 843 MiB build need (typical 843, tail already reserved) at 842 and 843 MiB above reserve.
+  const boundary = (room: number): LaneMemoryReading => reading(2_048 + room, { hostTailMib: 1_470 });
+  publishSharedHostMemory(boundary(0), NOW);
+  assert.equal(sharedBuildNeedMib(sharedHostMemory(NOW)!), 843);
+  const rejudge = pr({ prNumber: 7, prUrl: "https://github.com/o/r/pull/7", headSha: "bbbb222", reviewedHeadSha: "bbbb222" });
+  // A GitHub exact-head SUCCESS with no local review.posted row: W1-T2860 re-runs the reviewer on a judged head.
+  const statusOnly = pr({
+    prNumber: 9, prUrl: "https://github.com/o/r/pull/9", headSha: "eeee555", reviewState: "success", reviewInputDigest: "digest-9",
+    priorReviewAttemptsForInput: 0,
+  });
+  const first = pr({ prNumber: 8, prUrl: "https://github.com/o/r/pull/8", headSha: "cccc333" });
+  assert.equal(reReviewsJudgedHead(statusOnly), true, "a head GitHub already judged is a re-review");
+  const admitted = (): number[] =>
+    selectReviewAdmissions([rejudge, statusOnly, first], DEFAULT_SWEEP_POLICY, NOW, undefined, 4, 0).spawning.map((p) => p.prNumber).sort();
+  for (const room of [842, 843]) {
+    publishSharedHostMemory(boundary(room), NOW);
+    const build = laneTarget({ inFlight: 1, memory: boundary(room), cpuCount: 8, maxLanes: 3 });
+    assert.equal(build.target > 1, room >= 843, `the build lane admits a build at ${room} MiB only once it fits`);
+    assert.deepEqual(admitted(), [8], `at ${room} MiB both re-reviews wait, so the build takes the room first`);
+  }
+  publishSharedHostMemory(boundary(843 + DEFAULT_SWEEP_POLICY.reviewCapacity.workerMemoryReserveMib), NOW);
+  assert.ok(laneTarget({ inFlight: 1, memory: boundary(843 + DEFAULT_SWEEP_POLICY.reviewCapacity.workerMemoryReserveMib), cpuCount: 8,
+    maxLanes: 3 }).target > 1);
+  assert.deepEqual(admitted(), [7, 8, 9], "room for the build and a review: the re-reviews start too");
 });
 
 test("W1-T14903 shared memory never raises a lane width", () => {
@@ -165,6 +267,29 @@ test("W1-T14903 shared memory never raises a lane width", () => {
     const open = selectReviewAdmissions(prs, DEFAULT_SWEEP_POLICY, NOW, undefined, width, 0, undefined, undefined, false).spawning;
     assert.ok(yielded.length <= open.length, "yielding never admits more reviews");
   }
+});
+
+test("W1-T14903 shared memory never raises a lane width — the reviewer's replay keeps origin/main's latency cut", () => {
+  const ledgerLines = sixfoldLatencyLines();
+  const settlements = summarizeReviewSettlements(ledgerLines, NOW, REPLAY_POLICY.settlementWindowMs);
+  assert.equal(settlements.recentLatencyMs! / settlements.baselineLatencyMs!, 6, "the replay's 6x latency ratio");
+  // origin/main's width for these readings: its own MemAvailable, so the proportional latency cut, not the reserve cut.
+  const main = selectAdaptiveReviewWidth(initialReviewCapacityState(BOUNDS.baseWidth), REPLAY_POLICY, {
+    nowMs: NOW, queueDepth: 6, activeWorkers: 2, ...replayHost(undefined), cpuWeightShare: 1, settlements,
+    provider: { fresh: false, readable: false, refused: false },
+  } as unknown as ReviewCapacityObservation, BOUNDS).decision;
+  assert.equal(main.reason, "review-latency-expanded");
+  assert.equal(main.effectiveWidth, 1);
+  const run = (snapshot: LaneMemoryReading | undefined): number => {
+    publishSharedHostMemory(snapshot ?? { unread: "origin/main reads its own" }, NOW);
+    return selectRuntimeReviewWidth({
+      root: tempRoot(), queueDepth: 6, activeWorkers: 2, nowMs: NOW, ledgerLines, policy: REPLAY_POLICY, ...BOUNDS,
+      cpuWeightShare: 1, readHostObservation: replayHost, log: () => {},
+    });
+  };
+  assert.equal(run(undefined), main.effectiveWidth, "with no snapshot the runtime width is origin/main's");
+  assert.ok(run(reading(-110, { hostMeasuredAvailableMib: 8_130 })) <= main.effectiveWidth,
+    "a -110 MiB projection's one-lane reserve cut never lifts the width above origin/main's latency cut");
 });
 
 test("W1-T14903 the width ceiling advances independently across shed and recovery passes", () => {
@@ -205,6 +330,57 @@ test("W1-T14903 the review width pass writes one host_memory.shared row per snap
   const next = logs.filter((row) => row.step === HOST_MEMORY_SHARED_STEP);
   assert.equal(next.length, rows.length + 1, "a changed share writes its own row");
   assert.equal(next.at(-1)?.extra?.short, false);
+});
+
+test("W1-T14903 each pass writes one host_memory.shared row, and a paused pass re-reads an expired snapshot", async () => {
+  // The reviewer's inputs: a full sweep holding a same-head re-review wrote one row from the width pass and a second
+  // from re-review admission, for one snapshot.
+  const rejudge = pr({ prNumber: 7, prUrl: "https://github.com/o/r/pull/7", headSha: "bbbb222", reviewedHeadSha: "bbbb222" });
+  const first = pr({ prNumber: 8, prUrl: "https://github.com/o/r/pull/8", headSha: "cccc333" });
+  publishSharedHostMemory(reading(-110), NOW);
+  const short = await fullSweep([rejudge, first], tempRoot());
+  assert.deepEqual(short.effects, ["review:8"]);
+  const rows = short.rows.filter((row) => row.step === HOST_MEMORY_SHARED_STEP);
+  assert.equal(rows.length, 1, "one snapshot in one pass writes one row");
+  assert.equal(rows[0]?.yielded, "re-review");
+  assert.deepEqual(rows[0]?.withheld_prs, [7]);
+  assert.equal(typeof rows[0]?.review_width, "number", "the one row carries the review width's share too");
+  // Paused: nothing dispatches, so nothing re-publishes and the snapshot expires. The pass re-reads it through the
+  // build lane's own reader rather than writing no row and reading its own memory.
+  publishSharedHostMemory(reading(-110), NOW - SHARED_HOST_MEMORY_STALE_MS - 1);
+  assert.equal(sharedHostMemory(NOW), undefined, "the snapshot has expired");
+  let reads = 0;
+  setSharedHostMemoryReader(() => { reads += 1; return reading(-110); });
+  const paused = await fullSweep([rejudge, first], tempRoot());
+  assert.equal(reads, 1, "the expired snapshot is re-read once for the pass");
+  const pausedRows = paused.rows.filter((row) => row.step === HOST_MEMORY_SHARED_STEP);
+  assert.equal(pausedRows.length, 1);
+  assert.equal(pausedRows[0]?.snapshot_at, new Date(NOW).toISOString(), "the row names the re-read snapshot");
+  assert.deepEqual(paused.effects, ["review:8"], "the re-read snapshot still holds the re-review back");
+  setSharedHostMemoryReader(() => { throw new Error("meminfo unreadable"); });
+  publishSharedHostMemory(reading(-110), NOW - SHARED_HOST_MEMORY_STALE_MS - 1);
+  const unread = await fullSweep([rejudge, first], tempRoot());
+  assert.equal(unread.rows.filter((row) => row.step === HOST_MEMORY_SHARED_STEP).length, 0, "an unreadable re-read pins nothing");
+  assert.deepEqual(unread.effects.sort(), ["review:7", "review:8"]);
+});
+
+test("W1-T14903 a light pass and its per-PR sweeps read one pinned snapshot and write one row", async () => {
+  const rejudge = pr({ prNumber: 7, prUrl: "https://github.com/o/r/pull/7", headSha: "bbbb222", reviewedHeadSha: "bbbb222" });
+  const first = pr({ prNumber: 8, prUrl: "https://github.com/o/r/pull/8", headSha: "cccc333" });
+  const effects: string[] = [];
+  const rows: Record<string, unknown>[] = [];
+  publishSharedHostMemory(reading(-110), NOW);
+  await runSweepLightPass([rejudge, first], {
+    ledgerPath: "/unused/shared-memory-light-ledger", runId: "shared-memory-light", now: () => NOW,
+    readLedger: () => rows, appendLine: (_path, row) => { rows.push(row); }, log: (step, extra) => { rows.push({ step, ...extra }); },
+    dispatchFix: () => {}, postReview: (p) => { effects.push(`review:${p.prNumber}`); },
+    arm: () => "armed", escalate: () => {}, close: () => {},
+  });
+  assert.deepEqual(effects, ["review:8"], "short of memory, the light pass holds the re-review back");
+  const shared = rows.filter((row) => row.step === HOST_MEMORY_SHARED_STEP);
+  assert.equal(shared.length, 1, "the light pass and every per-PR sweep it fans out to write one row");
+  assert.equal(shared[0]?.yielded, "re-review");
+  assert.deepEqual(shared[0]?.withheld_prs, [7]);
 });
 
 test("W1-T14903 the full sweep's review lane holds a re-review back while memory is short", async () => {

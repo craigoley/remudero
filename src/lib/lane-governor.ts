@@ -46,6 +46,8 @@ export interface LaneMemoryReading {
   containerBasis: string;
   /** Projected MemAvailable after every in-flight claim and margin, before a new lane. Null when unread. */
   hostBaseAvailableMib: number | null;
+  /** W1-T14903 — the kernel MemAvailable that projection was cut from, in the same sample. Absent or null: unread. */
+  hostMeasuredAvailableMib?: number | null;
   hostReserveMib: number;
   /** One more run tree at the learned class tail (p90 peak) of the next build. */
   perLaneMib: number;
@@ -394,6 +396,7 @@ export function readLaneMemory(root: string, overrides: Partial<ShadowMemoryPort
     containerArmCounts: containerArmCounts(inputs.containerLift),
     containerBasis: numbers.containerBasis,
     hostBaseAvailableMib: numbers.projectedAvailableMib,
+    hostMeasuredAvailableMib: numbers.memAvailableMib,
     hostReserveMib: numbers.hostReserveMib,
     perLaneMib,
     ...(perLaneTypicalMib !== undefined ? { perLaneTypicalMib } : {}),
@@ -473,6 +476,9 @@ export interface SharedHostMemory {
   perLaneMib: number;
   /** The tail the host base already reserves, MiB; a new build's tail competes with it (see {@link laneTarget}). */
   hostTailMib: number;
+  /** The kernel MemAvailable the projection was cut from, in the same sample, MiB. Review capacity reads it as its
+   *  own (origin/main's) reading, so it takes no second kernel sample. Absent: unread, and review reads its own. */
+  measuredMib?: number;
 }
 
 let publishedSharedHostMemory: SharedHostMemory | null = null;
@@ -495,7 +501,79 @@ export function publishSharedHostMemory(reading: LaneMemoryReading | { unread: s
     perLaneTypicalMib: Math.max(1, Math.min(reading.perLaneMib, reading.perLaneTypicalMib ?? reading.perLaneMib)),
     perLaneMib: Math.max(1, reading.perLaneMib),
     hostTailMib: Math.max(0, reading.hostTailMib ?? 0),
+    ...(typeof reading.hostMeasuredAvailableMib === "number" && Number.isFinite(reading.hostMeasuredAvailableMib)
+      ? { measuredMib: reading.hostMeasuredAvailableMib } : {}),
   };
+}
+
+/** The reader the build lane's governor takes its readings through, once it has read; unset, nothing re-reads. */
+let sharedHostMemoryReader: (() => LaneMemoryReading) | undefined;
+
+/** W1-T14903 — the reader {@link refreshSharedHostMemory} re-reads through (the governor's own; tests pass a fake). */
+export function setSharedHostMemoryReader(reader: (() => LaneMemoryReading) | undefined): void {
+  sharedHostMemoryReader = reader;
+}
+
+/**
+ * W1-T14903 — the fresh shared snapshot, re-read through the build lane's own reader when it has expired. The daemon's
+ * dispatch loop publishes a snapshot each poll; while it is paused nothing does, so a review pass that found the
+ * snapshot expired would otherwise fall back to its own reading and write no row. With no reader (no governor in this
+ * process) nothing is re-read.
+ */
+export function refreshSharedHostMemory(nowMs: number, reader = sharedHostMemoryReader): SharedHostMemory | undefined {
+  const fresh = sharedHostMemory(nowMs);
+  if (fresh !== undefined || reader === undefined) return fresh;
+  let reading: LaneMemoryReading | { unread: string };
+  try { reading = reader(); }
+  catch (error) {
+    reading = { unread: error instanceof Error ? error.message : String(error) };
+  }
+  publishSharedHostMemory(reading, nowMs);
+  return sharedHostMemory(nowMs);
+}
+
+/**
+ * W1-T14903 — ONE SNAPSHOT PER PASS. A sweep pass pins the shared snapshot once, when it starts, and every consumer in
+ * that pass (the review width, re-review admission, the audit row) reads the pinned snapshot, never the live one the
+ * dispatch loop may re-publish while the pass awaits a read. The pass writes at most one {@link HOST_MEMORY_SHARED_STEP}
+ * row: consumers record into it and its owner flushes it once.
+ */
+export interface SharedHostMemoryPass {
+  readonly snapshot: SharedHostMemory | undefined;
+  width?: { ownMib: number | null; readMib: number | null; width: number; ownWidth: number; yieldedWidth: boolean };
+  heldPrs: Set<number>;
+  written: boolean;
+}
+
+/** W1-T14903 — pin this pass's snapshot: the fresh shared one, re-read when expired. */
+export function openSharedHostMemoryPass(nowMs: number, reader = sharedHostMemoryReader): SharedHostMemoryPass {
+  return { snapshot: refreshSharedHostMemory(nowMs, reader), heldPrs: new Set(), written: false };
+}
+
+/** W1-T14903 — the pass's pinned snapshot at `nowMs`; past the stale bound (a long-lived refill) nothing is read. */
+export function pinnedSharedHostMemory(pass: SharedHostMemoryPass, nowMs: number): SharedHostMemory | undefined {
+  const snapshot = pass.snapshot;
+  if (snapshot === undefined || nowMs - snapshot.atMs > SHARED_HOST_MEMORY_STALE_MS) return undefined;
+  return snapshot;
+}
+
+/** W1-T14903 — write the pass's one row, once; a pass with no snapshot writes none. */
+export function flushSharedHostMemoryPass(
+  pass: SharedHostMemoryPass, log: ((step: string, extra?: Record<string, unknown>) => void) | undefined,
+): void {
+  if (pass.written || pass.snapshot === undefined || log === undefined) return;
+  pass.written = true;
+  const width = pass.width;
+  const held = [...pass.heldPrs].sort((a, b) => a - b);
+  log(HOST_MEMORY_SHARED_STEP, {
+    ...hostMemorySharedPayload(pass.snapshot, {
+      ownMib: width?.ownMib ?? null, readMib: width?.readMib ?? null, width: width?.width ?? null,
+      ...(width === undefined ? {} : { ownWidth: width.ownWidth }),
+      yielded: held.length > 0 ? "re-review" : width?.yieldedWidth === true ? "review-width" : "none",
+      ...(held.length > 0 ? { withheld: held.length } : {}),
+    }),
+    ...(held.length > 0 ? { withheld_prs: held } : {}),
+  });
 }
 
 /** W1-T14903 — the shared snapshot unless it is older than the stale bound at `nowMs`. A snapshot taken after `nowMs`
@@ -518,14 +596,28 @@ export function sharedHostMemoryShort(snapshot: SharedHostMemory | undefined): b
   return snapshot.availableMib - snapshot.hostReserveMib < sharedBuildNeedMib(snapshot);
 }
 
+/**
+ * W1-T14903 — a re-review of an already-judged head yields to a build unless the snapshot holds room for BOTH: one
+ * more build by the build lane's own rule and the review's own memory reserve. Below the build's need nothing starts
+ * and the re-review waits, so freed memory reaches the build first; between the two, the build fits and the re-review
+ * still waits, so the build is admitted before it. No snapshot: nothing yields.
+ */
+export function reReviewYieldsToBuild(snapshot: SharedHostMemory | undefined, reviewNeedMib: number): boolean {
+  if (snapshot === undefined) return false;
+  const need = sharedBuildNeedMib(snapshot) + (Number.isFinite(reviewNeedMib) ? Math.max(0, reviewNeedMib) : 0);
+  return snapshot.availableMib - snapshot.hostReserveMib < need;
+}
+
 /** W1-T14903 — the {@link HOST_MEMORY_SHARED_STEP} row: the snapshot, each lane's share and which lane yielded. */
 export function hostMemorySharedPayload(snapshot: SharedHostMemory, review: {
-  ownMib: number | null; readMib: number | null; width: number; ownWidth?: number; yielded: "review-width" | "re-review" | "none";
+  ownMib: number | null; readMib: number | null; width: number | null; ownWidth?: number;
+  yielded: "review-width" | "re-review" | "none";
   withheld?: number;
 }): Record<string, unknown> {
   return {
     snapshot_at: fixedClock(snapshot.atMs).iso(),
     available_mib: Math.round(snapshot.availableMib),
+    ...(snapshot.measuredMib === undefined ? {} : { measured_mib: Math.round(snapshot.measuredMib) }),
     host_reserve_mib: Math.round(snapshot.hostReserveMib),
     build_need_mib: Math.round(sharedBuildNeedMib(snapshot)),
     review_own_mib: review.ownMib === null ? null : Math.round(review.ownMib),
@@ -617,7 +709,10 @@ export function defaultLaneGovernorPorts(stateDir: string): LaneGovernorPorts {
     mode: () => loadLaneGovernorMode(),
     // W1-T14903: every reading is also the shared snapshot review capacity cuts its width from.
     read: () => {
-      const reading = readLaneMemory(root);
+      const reread = (): LaneMemoryReading => readLaneMemory(root);
+      // The same reader re-takes an expired snapshot for a review pass while dispatch is paused.
+      setSharedHostMemoryReader(reread);
+      const reading = reread();
       publishSharedHostMemory(reading, systemClock.now());
       return reading;
     },
