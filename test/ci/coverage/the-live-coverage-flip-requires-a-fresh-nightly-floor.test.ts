@@ -14,6 +14,7 @@ import { spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { after, test } from "node:test";
 import { parse as parseYaml } from "yaml";
 
@@ -27,10 +28,19 @@ import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const REPO = "craigoley/remudero";
 const NOW = new Date("2026-10-28T12:00:00Z");
-/** The selection steps run as child processes (`node scripts/coverage-floor.mjs`, the ci.yml step
- *  bodies) whose clock the shift preload never moves (W1-T14786), so every time handed to them is
- *  read from that same host clock, not from this process's `Date.now()`. */
-const hostClockMs = () => Math.floor(performance.timeOrigin + performance.now());
+/** W1-T14786: one clock for the fixture and every child. Fixture times come from this process's clock, and each child
+ *  (`node scripts/coverage-floor.mjs`, the ci.yml step bodies, the gh shim) is started with the same shift preload this
+ *  process runs under, so under a clock shift the fixture and the code it feeds read the same shifted "now". */
+const fixtureClockMs = () => Date.now();
+const SHIFT_PRELOAD = pathToFileURL(join(REPO_ROOT, "scripts", "clock-shift.mjs")).href;
+/** The env a child needs to read this process's clock: the shift and its preload, or nothing when no shift is set. */
+const childClockEnv = (): Record<string, string> => process.env.FK_SHIFT_DAYS === undefined ? {} : {
+  FK_SHIFT_DAYS: process.env.FK_SHIFT_DAYS,
+  // The preload refuses to shift a process that lacks the test isolation this one runs under; a step body's env is built
+  // from scratch, so the isolation travels with the shift.
+  ...(process.env.RMD_TEST_LIVE_DENY_ROOT === undefined ? {} : { RMD_TEST_LIVE_DENY_ROOT: process.env.RMD_TEST_LIVE_DENY_ROOT }),
+  NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import ${SHIFT_PRELOAD}`.trim(),
+};
 const HEAD = "a".repeat(40);
 const LCOV = "TN:\nSF:src/a.ts\nDA:1,1\nLF:1\nLH:1\nend_of_record\nSF:src/b.ts\nDA:1,0\nLF:1\nLH:0\nend_of_record\n";
 const ALL_GREEN = Object.fromEntries(Array.from({ length: NIGHTLY_SHARD_COUNT }, (_, i) => [i + 1, 0]));
@@ -83,7 +93,7 @@ function select(row: Record<string, unknown>, files: Record<string, string | Uin
   const pinDir = join(tmp("pin"), "coverage-floor-pin");
   const gh = ghShim(routes(pinDir, row, files), { kind: "w1t5892-gh" });
   const run = (cmd: string, args: readonly string[], opts: SpawnSyncOptions) =>
-    spawnSync(cmd, args, { ...opts, env: { ...process.env, PATH: `${gh.dir}:${process.env.PATH}` } });
+    spawnSync(cmd, args, { ...opts, env: { ...process.env, PATH: `${gh.dir}:${process.env.PATH}`, ...childClockEnv() } });
   const pin = selectFloor({ pinDir, consumer, now, run: run as typeof spawnSync, log: () => {} });
   return { pin, pinDir, calls: gh.calls() };
 }
@@ -189,7 +199,7 @@ test("W1-T5892: empty shells and malformed coverage fields never authorize narro
 });
 
 test("W1-T5892: an old event cannot make a 49-hour-old floor fresh at execution", () => {
-  const execution = new Date(hostClockMs());
+  const execution = new Date(fixtureClockMs());
   const measuredAt = new Date(execution.getTime() - 49 * 3_600_000);
   const cutoff = new Date(execution.getTime() - 48 * 3_600_000);
   const n = nightly({ measuredAt, row: { updatedAt: measuredAt.toISOString() } });
@@ -198,7 +208,7 @@ test("W1-T5892: an old event cannot make a 49-hour-old floor fresh at execution"
   const decision = join(dirname(pinDir), "decision");
   const result = spawnSync(process.execPath, [join(REPO_ROOT, "scripts/coverage-floor.mjs"), "select", pinDir,
     "--as-of", cutoff.toISOString(), "--decision-file", decision], {
-    encoding: "utf8", env: { ...process.env, PATH: `${shim.dir}:${process.env.PATH}`, GITHUB_REPOSITORY: REPO },
+    encoding: "utf8", env: { ...process.env, PATH: `${shim.dir}:${process.env.PATH}`, GITHUB_REPOSITORY: REPO, ...childClockEnv() },
   });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(readFileSync(decision, "utf8"), "full\n");
@@ -229,7 +239,7 @@ test("W1-T5892: a newer merge-group floor is preferred, and a refused newest fal
       GITHUB_REF: "refs/heads/gh-readonly-queue/main/pr-1-x", GITHUB_SHA: "c".repeat(40) } });
   const mergedDir = join(pinDir, ".candidates", "coverage-merged-222");
   const run = (shim: ReturnType<typeof ghShim>) => (cmd: string, args: readonly string[], opts: SpawnSyncOptions) =>
-    spawnSync(cmd, args, { ...opts, env: { ...process.env, PATH: `${shim.dir}:${process.env.PATH}` } });
+    spawnSync(cmd, args, { ...opts, env: { ...process.env, PATH: `${shim.dir}:${process.env.PATH}`, ...childClockEnv() } });
   const mergedRoute = (provenance: unknown): GhShimRoute => ({ when: "run download 222", writes: [
     { path: join(mergedDir, "lcov.info"), content: LCOV }, { path: join(mergedDir, "provenance.json"), content: JSON.stringify(provenance) }] });
   const base = routes(pinDir, n.row, artifact(n.provenance));
@@ -248,13 +258,13 @@ test("W1-T5892: a newer merge-group floor is preferred, and a refused newest fal
 
 test("W1-T5892: the CLI writes the decision for the shard and refuses an altered pin", () => {
   const pinDir = join(tmp("cli"), "coverage-floor-pin");
-  const { row, provenance } = nightly({ measuredAt: new Date(hostClockMs() - 3_600_000),
-    row: { updatedAt: new Date(hostClockMs() - 3_000_000).toISOString() } });
+  const { row, provenance } = nightly({ measuredAt: new Date(fixtureClockMs() - 3_600_000),
+    row: { updatedAt: new Date(fixtureClockMs() - 3_000_000).toISOString() } });
   const gh = ghShim(routes(pinDir, row, artifact(provenance)), { kind: "w1t5892-cli-gh" });
   const out = join(dirname(pinDir), "decision");
-  const env = { ...process.env, PATH: `${gh.dir}:${process.env.PATH}`, GITHUB_REPOSITORY: REPO };
+  const env = { ...process.env, PATH: `${gh.dir}:${process.env.PATH}`, GITHUB_REPOSITORY: REPO, ...childClockEnv() };
   const cli = (...args: string[]) => spawnSync(process.execPath, [join(REPO_ROOT, "scripts", "coverage-floor.mjs"), ...args], { encoding: "utf8", env });
-  const selected = cli("select", pinDir, "--as-of", new Date(hostClockMs()).toISOString(), "--decision-file", out);
+  const selected = cli("select", pinDir, "--as-of", new Date(fixtureClockMs()).toISOString(), "--decision-file", out);
   assert.equal(selected.status, 0, selected.stderr);
   assert.equal(readFileSync(out, "utf8"), "narrow\n");
   assert.match(selected.stdout, /coverage-floor: narrow — pinned coverage-nightly run 111/);
@@ -282,7 +292,7 @@ test("W1-T5892: a producer records its own run, runtime, policy and shard exits"
     writeFileSync(join(dir, "coverage-shards", `coverage-shard-${n}`, "test-exit"), n === 5 ? "1\n" : "0\n");
   }
   const env = { ...process.env, GITHUB_REPOSITORY: REPO, GITHUB_RUN_ID: "333", GITHUB_RUN_ATTEMPT: "2", GITHUB_EVENT_NAME: "schedule",
-    GITHUB_REF: "refs/heads/main", GITHUB_SHA: HEAD };
+    GITHUB_REF: "refs/heads/main", GITHUB_SHA: HEAD, ...childClockEnv() };
   const r = spawnSync(process.execPath, [join(REPO_ROOT, "scripts", "coverage-floor.mjs"), "provenance", "--producer", "coverage-nightly",
     "--lcov", join(dir, "lcov.info"), "--shards-dir", join(dir, "coverage-shards"), "--out", join(dir, "provenance.json")], { encoding: "utf8", env });
   assert.equal(r.status, 0, r.stderr);
@@ -349,7 +359,7 @@ esac
   const r = spawnSync("bash", ["--noprofile", "--norc", "-e", join(cwd, "run.sh")], {
     cwd, encoding: "utf8",
     env: { PATH: `${bin}:${gh.dir}:${process.env.PATH}`, HOME: process.env.HOME ?? cwd, GITHUB_STEP_SUMMARY: join(cwd, "summary.md"),
-      GITHUB_OUTPUT: join(cwd, "outputs.txt"), RUNNER_TEMP: cwd, CALL_LOG: join(cwd, "calls.log"), GITHUB_REPOSITORY: REPO, ...env },
+      GITHUB_OUTPUT: join(cwd, "outputs.txt"), RUNNER_TEMP: cwd, CALL_LOG: join(cwd, "calls.log"), GITHUB_REPOSITORY: REPO, ...childClockEnv(), ...env },
   });
   const read = (f: string) => (existsSync(join(cwd, f)) ? readFileSync(join(cwd, f), "utf8") : "");
   return { status: r.status, out: r.stdout + r.stderr, calls: read("calls.log") + gh.calls().map((c) => `gh ${c}\n`).join(""), read, cwd };
@@ -371,8 +381,8 @@ const live = { GITHUB_EVENT_NAME: "pull_request", RMD_AFFECTED_SUITE_LIVE: "1", 
 const output = (text: string, key: string) => text.split("\n").filter((line) => line.startsWith(`${key}=`)).at(-1)?.slice(key.length + 1) ?? "";
 
 /** Execute admission and final publication. Only GitHub transport is synthetic. */
-function admit(n = nightly({ measuredAt: new Date(hostClockMs() - 3_600_000),
-  row: { updatedAt: new Date(hostClockMs() - 3_000_000).toISOString() } }), files = artifact(n.provenance), published = "success", cwd = checkout()) {
+function admit(n = nightly({ measuredAt: new Date(fixtureClockMs() - 3_600_000),
+  row: { updatedAt: new Date(fixtureClockMs() - 3_000_000).toISOString() } }), files = artifact(n.provenance), published = "success", cwd = checkout()) {
   const selected = runStep(step(CI, "coverage-ledger", "Select one coverage floor").run!, live,
     routes(join(cwd, "coverage-floor-pin"), n.row, files), cwd);
   assert.equal(selected.status, 0, selected.out);
@@ -444,7 +454,7 @@ test("W1-T5892: one admission precedes all shards and every consumer uses its pu
 
 test("W1-T5892: refused admission and publication failure make every shard full with one named reason", () => {
   for (const a of [admit(nightly({ row: { conclusion: "failure" } })),
-    admit(nightly({ measuredAt: new Date(hostClockMs() - 49 * 3_600_000) })),
+    admit(nightly({ measuredAt: new Date(fixtureClockMs() - 49 * 3_600_000) })),
     admit(nightly(), artifact("not json")), admit(undefined, undefined, "failure")]) {
     assert.equal(a.env.FLOOR_DECISION, "full", a.selected.out);
     assert.ok(a.env.FLOOR_REASON);
@@ -476,7 +486,7 @@ test("W1-T5892: the final merge group is full when live selection is enabled and
     assert.equal(output(r.read("outputs.txt"), "class"), flag === "1" ? "SOURCE" : "NO_SRC");
   }
   const a = admit();
-  const elapsed = new Date(hostClockMs() + 25 * 3_600_000);
+  const elapsed = new Date(fixtureClockMs() + 25 * 3_600_000);
   assert.throws(() => verifyPin(join(a.selected.cwd, "coverage-floor-pin"), elapsed), /24h freshness bound/);
 });
 
@@ -680,4 +690,12 @@ test("W1-T5892: the CLI stamps provenance only for a trusted green run, and sele
   } finally {
     console.log = log;
   }
+});
+
+test("W1-T14786: a child started with the fixture's clock env reads the fixture's clock", () => {
+  // Positive control for every child above: under a shift the child's Date is this process's, not the host's.
+  const r = spawnSync(process.execPath, ["-e", "process.stdout.write(String(Date.now()))"],
+    { encoding: "utf8", env: { PATH: process.env.PATH ?? "", ...childClockEnv() } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(Math.abs(Number(r.stdout) - fixtureClockMs()) < 60_000, `child ${r.stdout} vs fixture ${fixtureClockMs()}`);
 });
