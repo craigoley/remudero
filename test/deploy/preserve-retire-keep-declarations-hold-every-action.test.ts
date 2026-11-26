@@ -9,13 +9,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { preserveRetireFixtureArgs } from "#test/helpers/preserve-retire-fixture.js";
+import { systemClock } from "#src/lib/clock.js";
 
 const HELPER = join(REPO_ROOT, "deploy/mac/preserve-retire.py");
 const HOUR = 3600;
-// The helper's clock runs two days ahead, so every fixture file is idle unless a test dates it later. The helper
-// is a python child that reads real file times, so its clock and every date set here come from the host clock,
-// which the shift preload never moves (W1-T14786).
-const NOW = Math.floor((performance.timeOrigin + performance.now()) / 1000) + 48 * HOUR;
+// The helper's clock runs two days ahead, so every fixture file is idle unless a test dates it later. Pass the
+// injected wall clock through --now and derive every filesystem timestamp from it, including under clock shifts.
+const NOW = Math.floor(systemClock.now() / 1000) + 48 * HOUR;
 /** Set a file's times as the helper will read them; an in-process utimes would be moved by a shifted test clock. */
 const dateForHelper = (path: string, epochS: number) =>
   execFileSync("touch", ["-d", new Date(epochS * 1000).toISOString().replace(/\.\d+Z$/, "Z"), path]);
