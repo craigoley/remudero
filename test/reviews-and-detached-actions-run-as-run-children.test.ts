@@ -1144,7 +1144,7 @@ async function proveFreshFixAdmissionAcrossRestart(identity: FixIdentityRead = "
         readMode: () => "on", readLedger: () => ledger, spawn, log: f.log });
       installDetachedWorkHost(host);
       const launchedReview = await host.spawnReview({ pr: { prNumber: 7, headSha: review.headSha! }, reviewKey: "restart-review", reviewAttemptId: undefined });
-      assert.ok(launchedReview, JSON.stringify(f.rows.filter(row => row.step === "run_child.fallback")));
+      assert.ok(launchedReview && !("abandoned" in launchedReview), JSON.stringify(f.rows.filter(row => row.step === "run_child.fallback")));
       void adoptChildWork({ ...launchedReview, taskId: FIX_TASK, work: review }, f.log);
       await runSweep([fixPr({ prUrl: "https://github.com/foreign-owner/remudero/pull/9379" })], {
         arm: () => {}, close: () => {}, escalate: () => {}, log: f.log, runId: "restart-producer", now: clock.now,

@@ -48,7 +48,7 @@ import { killProcessGroup } from "./worker-containment.js";
 import { execFileRouted } from "./spawn-helper.js";
 import { keptOpsCatalogBlobsForChild } from "./ops-catalog-source.js";
 import type { ReviewerCodeFreshness } from "./self-sync.js";
-import { workerSpawnRetiredBy } from "./worker.js";
+import { workerSpawnRetiredBy, WorkerSpawnRetiredError } from "./worker.js";
 
 export const RUN_CHILD_SHADOW_STEP = "run_child.shadow";
 export const RUN_CHILD_SHADOW_SKIPPED_STEP = "run_child.shadow_skipped";
@@ -1450,7 +1450,7 @@ export interface DetachedWorkChildHost {
     pr: { prNumber: number; headSha: string; taskId?: string; isPlanFiling?: boolean; excludeProviders?: readonly WorkerProviderId[] };
     reviewKey: string;
     reviewAttemptId: string | undefined;
-  }) => Promise<{ runId: string; settled: Promise<unknown>; readPhase?: () => string | undefined; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | undefined>;
+  }) => Promise<{ runId: string; settled: Promise<unknown>; readPhase?: () => string | undefined; acknowledge?: (outcome: PromiseSettledResult<never>) => void } | RunChildAbandoned | undefined>;
   /** Starts a fix child, refuses abandoned admission, or returns `undefined` when it stays in process. */
   spawnFix: (input: {
     pr: { prNumber: number; headSha: string; taskId?: string };
@@ -1529,7 +1529,11 @@ export async function decideReviewPath<T>(
   fromFreshTree: (stale: StaleReviewerCode) => Promise<T>,
 ): Promise<T> {
   const freshness = await readFreshness();
-  return freshness.status === "stale" ? fromFreshTree(freshness) : inProcess(freshness);
+  if (freshness.status === "stale") return fromFreshTree(freshness);
+  // W1-T14916: the read can outlast the drain lock release, and an in-process review past it would claim the head.
+  const retiredBy = workerSpawnRetiredBy();
+  if (retiredBy !== undefined) throw new WorkerSpawnRetiredError(retiredBy);
+  return inProcess(freshness);
 }
 
 const STALE_AT_OWN_START = "reviewer-stale-at-start";
@@ -1896,7 +1900,7 @@ export interface DetachedWorkHostInput {
  * The production host the sweep's review path asks (src/lib/sweep.ts `installDetachedWorkHost`), and the drain reads through
  * `detachedWorkPlacement`. Under `shadow` it starts one probe at a time that round-trips the contract and records its cost, and the
  * review stays in process. Under `on` it starts the review as a run child on its own reservation, only where the inventory and the
- * measured drain cost say so; a child that cannot start is `undefined`, and the review runs in process as before.
+ * measured drain cost say so; a child that cannot start is `undefined` (the review runs in process); an abandoned one is returned.
  */
 export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWorkChildHost {
   const intent = copySelectedRegistryIntent(input.selectedRegistryIntent);
@@ -1946,7 +1950,7 @@ export function createDetachedWorkHost(input: DetachedWorkHostInput): DetachedWo
         taskId: pr.taskId ?? `PR-${pr.prNumber}`, lane: "review", stateRoot: input.stateRoot, repoDir: input.repoDir, root: input.root,
         plan: async () => ({ plan: { tasks: [] } }), options: options(), log, work,
       });
-      if (!launch.started) return undefined;
+      if (!launch.started) return launch.abandoned ? launch : undefined;
       return { runId: launch.runId, settled: launch.settled, acknowledge: launch.acknowledge,
         readPhase: () => readOwnedChildPhase(launch.dir, launch.runId) };
     },

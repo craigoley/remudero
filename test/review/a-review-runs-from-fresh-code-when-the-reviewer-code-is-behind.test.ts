@@ -22,6 +22,7 @@ import { runDetachedReview, type FreshTreeReview } from "#src/lib/run-child.js";
 import type { ReviewerCodeFreshness } from "#src/lib/self-sync.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { makeTempDir } from "#src/lib/tmp.js";
+import { runInWorkerSpawnScope, WorkerSpawnRetiredError, type WorkerSpawnScope } from "#src/lib/worker.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import {
   buildFreshTreeReviewRunner, buildRequiredFixReviewRunner, buildReviewerCodeFreshnessGate, reviewCommand, spawnRmdReviewForFreshTree,
@@ -81,6 +82,25 @@ test("W1-T12227 criterion 1: a required fix review on a stale reading runs from 
   assert.equal(result.headSha, HEAD);
   assert.match(String(result.verdictWithheld), /ran from a fresh tree/, "the rung stands down; the fresh tree posts the verdict");
   assert.deepEqual(gate.staleThisPass(), { oldSha: OLD, newSha: MAIN }, "the pass still counts the stale reading");
+});
+
+test("W1-T14916: a drain lock release during the freshness read starts no in-process review, from the gate or a fix rung", async () => {
+  for (const reading of [FRESH, { status: "unreadable", reason: "fetch failed" } as ReviewerCodeFreshness]) {
+    const scope: WorkerSpawnScope = {};
+    const read = () => { scope.retiredBy = "released"; return reading; };
+    let reviewed = 0;
+    const gate = buildReviewerCodeFreshnessGate(read, () => {}, async () => { reviewed++; return 0; });
+    await assert.rejects(runInWorkerSpawnScope(scope, () => gate.call("7", [], {})), WorkerSpawnRetiredError);
+    const review = buildRequiredFixReviewRunner(async () => { reviewed++; return {} as never; }, read, { gate, readHead: () => HEAD });
+    const result = await runInWorkerSpawnScope(scope, () => review(FIX_ARGS));
+    assert.equal(result.verdictWithheld, "retired: released; no reviewer started", "the rung stands down");
+    assert.equal(result.reviewerOutcome, "admission_abandoned");
+    assert.equal(result.headSha, HEAD);
+    assert.equal(reviewed, 0);
+  }
+  const { gate } = gateWith([FRESH]);
+  const failing = buildRequiredFixReviewRunner(async () => { throw new Error("review broke"); }, () => FRESH, { gate, readHead: () => HEAD });
+  await assert.rejects(failing(FIX_ARGS), /review broke/, "any other failure still reaches the rung");
 });
 
 test("W1-T12227 criterion 2: the run child's detached review on a stale reading runs from the fresh tree, not in the child", async () => {

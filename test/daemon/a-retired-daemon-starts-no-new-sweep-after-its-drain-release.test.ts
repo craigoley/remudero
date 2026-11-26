@@ -9,10 +9,12 @@ import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
-import { spawnRunChild } from "#src/lib/run-child.js";
+import { createDetachedWorkHost, spawnRunChild, type RunChildLaunch } from "#src/lib/run-child.js";
 import { captureInboxDraftSnapshot, commitInboxDraftOutcomes, draftsDueOnDaemon, runDraftRung, type DraftLaneIdentity, type Proposal } from "#src/lib/inbox.js";
 import { resolveFleetControlHold, type LightPassScope, type RestartAdmission } from "#src/lib/daemon.js";
-import { createClaudeExecutableCache, runInWorkerSpawnScope, spawnWorker, workerSpawnRetiredBy, WorkerSpawnRetiredError, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import type { Config } from "#src/lib/config.js";
+import { buildSweepEffects, installDetachedWorkHost, reviewWithheldLadder, runSweep, withheldEvaluatorsForInput, type OpenPrView } from "#src/lib/sweep.js";
+import { createClaudeExecutableCache, runInWorkerSpawnScope, spawnWorker, workerSpawnRetiredBy, WorkerNotStartedError, WorkerSpawnRetiredError, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
 import { spawnCodexWorker, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -383,6 +385,101 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
       assert.deepEqual([result.judged, posts], [[7], 1]);
     }
   }
+});
+
+/** The production postReview effect, with the in-process review runner replaced by a counting gate. */
+function reviewEffects(t: TestContext) {
+  const root = ownedFixtureDir(t, "retired-review").dir;
+  mkdirSync(join(root, "state"), { recursive: true });
+  const rows: Row[] = [];
+  const reviewed: unknown[] = [];
+  const gate: { refuses?: string } = {};
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const effects = buildSweepEffects({ owner: "acme", repo: "fixture", config: { root, claudeBin: "/unused" } as Config,
+    ledgerPath, runId: "SWEEP-RETIRED", plan: { tasks: [], byId: new Map() },
+    log: (step, extra) => { rows.push({ step, ...extra }); },
+    // The in-process review; `refuses` is its own freshness read seeing the release (decideReviewPath).
+    reviewRunner: async (prNumber) => {
+      if (gate.refuses !== undefined) throw new WorkerSpawnRetiredError(gate.refuses);
+      reviewed.push(prNumber);
+      return 0;
+    } });
+  const pr: OpenPrView = { prNumber: 14916, prUrl: "https://github.com/acme/fixture/pull/14916", headSha: "a".repeat(40),
+    headRefName: "run-W1-T14916-1", taskId: "W1-T14916", reviewState: "none", checksState: "green", unmetCriteria: [], priorStrikes: 0,
+    autoMergeArmed: false, lastActivityAt: new Date().toISOString(), reviewInputDigest: "v1:input" };
+  return { root, rows, reviewed, gate, pr, ledgerPath, effects };
+}
+
+/** A detached work host whose review launch answers `launch`, after `during` runs (the wait a release can land in). */
+function reviewHost(root: string, launch: RunChildLaunch, during: () => void, asked: unknown[]) {
+  return createDetachedWorkHost({ stateRoot: join(root, "state"), repoDir: root, root, repo: "fixture", log: () => {},
+    readMode: () => "on", readLedger: () => [{ step: "daemon.freshness_drain.completed", duration_ms: 9_000, in_flight_reviews: 1,
+      waited_on: [{ what: "review", kind: "review", settled_after_ms: 4_000 }] }],
+    spawn: async (input) => { asked.push(input); during(); return launch; } });
+}
+
+const ABANDONED: RunChildLaunch = { started: false, abandoned: true, reason: "admission-abandoned", runId: "work-review-withheld", waitedMs: 0 };
+const UNSTARTED: RunChildLaunch = { started: false, reason: "no engine tree has been built yet" };
+const RELEASED = "drain lock released; the successor owns this work";
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, and runs no withheld review in process", async (t) => {
+  const withheldChild = "admission-abandoned (run child work-review-withheld)";
+  const cases = [
+    { name: "released before the review", release: "before", launch: ABANDONED, hold: `retired: ${RELEASED}`, asked: 0 },
+    { name: "released while the child waits for admission", release: "launch", launch: ABANDONED, hold: withheldChild, asked: 1 },
+    { name: "a fleet hold abandons the child", release: "never", launch: ABANDONED, hold: withheldChild, asked: 1 },
+    { name: "released while a child fails to start", release: "launch", launch: UNSTARTED, hold: `retired: ${RELEASED}`, asked: 1 },
+    { name: "released during the in-process freshness read", release: "gate", launch: UNSTARTED, hold: `retired: ${RELEASED}`, asked: 1 },
+    { name: "control: no release, a child that cannot start", release: "never", launch: UNSTARTED, hold: undefined, asked: 1 },
+  ];
+  try {
+    for (const c of cases) {
+      const run = reviewEffects(t);
+      const retirement = createDaemonRetirement(() => {});
+      const asked: unknown[] = [];
+      if (c.release === "before") retirement.retire();
+      if (c.release === "gate") run.gate.refuses = RELEASED;
+      installDetachedWorkHost(reviewHost(run.root, c.launch, () => { if (c.release === "launch") retirement.retire(); }, asked));
+      const review = retirement.inSpawnScope(async () => run.effects.postReview!(run.pr, { kind: "full-review" }, "review-PR14916-attempt"));
+      const steps = () => run.rows.map((row) => row.step).filter((step) => step.startsWith("sweep.post_review."));
+      if (c.hold === undefined) {
+        await review;
+        assert.equal(run.reviewed.length, 1, `${c.name}: the review runs in process`);
+        assert.deepEqual(steps(), ["sweep.post_review.attempt", "sweep.post_review.done"], c.name);
+      } else {
+        await assert.rejects(review, (error: unknown) => error instanceof WorkerNotStartedError &&
+          error.message === `review start withheld: ${c.hold}; re-derived next pass`, c.name);
+        assert.deepEqual(run.reviewed, [], `${c.name}: no in-process review`);
+        assert.deepEqual(steps(), c.release === "before" ? ["sweep.post_review.stood_down"]
+          : ["sweep.post_review.attempt", "sweep.post_review.stood_down"], `${c.name}: neither done nor failed`);
+      }
+      assert.equal(asked.length, c.asked, `${c.name}: child launches asked`);
+    }
+  } finally { installDetachedWorkHost(undefined); }
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, and a withheld review keys no outcome", async (t) => {
+  const run = reviewEffects(t);
+  const { ledgerPath } = run;
+  const retirement = createDaemonRetirement(() => {});
+  retirement.retire();
+  await retirement.inSpawnScope(() => runSweep([run.pr], { arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {},
+    postReview: run.effects.postReview, runId: "SWEEP-RETIRED", ledgerPath, log: () => {} }));
+  const ledger = readFileSync(ledgerPath, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Row);
+  assert.deepEqual(ledger.filter((row) => row.step === "review.post_refused" || row.step === "sweep.action_failed"), [],
+    "no failure or refusal row keys the input, so the successor reviews it");
+  const disposed = ledger.find((row) => row.step === "sweep.disposed");
+  assert.equal(disposed?.acted, false);
+  assert.equal(disposed?.stand_down_reason, `review start withheld: retired: ${RELEASED}; re-derived next pass`);
+  assert.deepEqual(run.reviewed, []);
+
+  // A release that lands after a review's claim leaves a withheld row for a reviewer that never started: no attempt.
+  const withheld = (runId: string, outcome: string) => ({ run_id: runId, step: "review.semantic_incomplete", pr_url: run.pr.prUrl,
+    head_sha: run.pr.headSha, review_input_digest: run.pr.reviewInputDigest, provider: "codex", reason: "incomplete", reviewer_outcome: outcome });
+  const rows = [withheld("review-1", "error_max_turns"), withheld("review-2", "admission_abandoned")];
+  assert.deepEqual(withheldEvaluatorsForInput(run.pr, rows).attempts.map((attempt) => attempt.runId), ["review-1"]);
+  assert.equal(reviewWithheldLadder(run.pr, rows), undefined, "one real attempt does not climb to another evaluator");
+  assert.equal(reviewWithheldLadder(run.pr, [rows[0]!, withheld("review-3", "error_max_turns")])?.rung, 2, "control: two real attempts do");
 });
 
 test("W1-T14916 criterion 2: in-flight SRE lane page work still completes", async () => {

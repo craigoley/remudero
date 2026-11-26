@@ -314,6 +314,8 @@ import {
   writeRunLock,
   runLockRecord,
   WorkerNotStartedError,
+  WorkerSpawnRetiredError,
+  workerSpawnRetiredBy,
   type QuestionEntry,
   type SpawnWorkerArgs,
   type WorkerResult,
@@ -4012,6 +4014,18 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         if (value === "posted" && postedAtMs === undefined) postedAtMs = systemClock.now();
         onPhase?.(value);
       };
+      // W1-T14916: a withheld start throws a stand-down, never a failed review: no claim, reviewer or outcome row.
+      const withheldStart = (hold: string): WorkerNotStartedError => {
+        log("sweep.post_review.stood_down", { pr_number: pr.prNumber, head_sha: pr.headSha, hold });
+        const withheld = new WorkerNotStartedError("admission-abandoned");
+        withheld.message = `review start withheld: ${hold}; re-derived next pass`;
+        return withheld;
+      };
+      const refuseRetiredReview = (): void => {
+        const retiredBy = workerSpawnRetiredBy();
+        if (retiredBy !== undefined) throw withheldStart(`retired: ${retiredBy}`);
+      };
+      refuseRetiredReview();
       await observePr(pr, "review");
       log("sweep.post_review.attempt", {
         pr_number: pr.prNumber,
@@ -4029,6 +4043,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         const reviewKey = reviewOutcomeKeyForPr(pr);
         const hosted = mode.kind === "full-review"
           ? await installedWorkHost?.spawnReview({ pr, reviewKey, reviewAttemptId }) : undefined;
+        // W1-T10000/W1-T14916: an abandoned launch (a fleet hold, a retired daemon) never runs in process.
+        if (hosted !== undefined && "abandoned" in hosted) throw withheldStart(`${hosted.reason} (run child ${hosted.runId})`);
         if (hosted !== undefined) {
           void adoptChildWork({
             runId: hosted.runId, taskId: pr.taskId ?? `PR-${pr.prNumber}`,
@@ -4044,6 +4060,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           log("sweep.post_review.restore_unwired", { pr_number: pr.prNumber, head_sha: pr.headSha });
           return;
         }
+        refuseRetiredReview(); // W1-T14916: the admission and host waits above can outlast the drain lock release.
         const exit = await reviewPhaseObserver.run(phase, async () =>
           mode.kind === "full-review" || !deps.reviewReuseRunner
             ? await reviewRunner(pr.prNumber, pr.isPlanFiling, reviewAttemptId, phase, pr.excludeProviders)
@@ -4056,6 +4073,8 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
           review_mode: mode.kind,
         });
       } catch (e) {
+        if (e instanceof WorkerNotStartedError) throw e;
+        if (e instanceof WorkerSpawnRetiredError) throw withheldStart(`retired: ${e.reason}`);
         log("sweep.post_review.failed", {
           ...(postedAtMs === undefined ? {} : { post_to_settle_ms: Math.max(0, systemClock.now() - postedAtMs) }),
           pr_number: pr.prNumber,
@@ -18674,7 +18693,8 @@ function withheldAttemptText(attempt: WithheldAttempt, ordinal: number): string 
 /** W1-T13945 — the withheld attempts at this PR, head and review input digest since the input's last terminal
  *  (success or failure) `review.posted` row. A `review.pending_posted` row does not reset it: every withheld run
  *  writes one first. The evaluator is read from the `review.semantic_incomplete` row, else from the same run's
- *  `review.reviewer` row (rows written before the evaluator rode on the first). Start failures are W1-T13380's. */
+ *  `review.reviewer` row (rows written before the evaluator rode on the first). Start failures are W1-T13380's, and a
+ *  reviewer that never started (W1-T14916) is no attempt. */
 export function withheldEvaluatorsForInput(
   pr: Pick<OpenPrView, "prUrl" | "headSha" | "reviewInputDigest">,
   lines: ReadonlyArray<Record<string, unknown>>,
@@ -18688,7 +18708,7 @@ export function withheldEvaluatorsForInput(
       const verdict = row.decision_verdict as ReviewVerdict | undefined;
       if (digestOk && (row.state === "success" || row.state === "failure") && verdict?.cannotEvaluate !== true) rows = [];
     } else if (row.step === "review.semantic_incomplete" && row.reviewer_outcome !== REVIEWER_START_FAILED_OUTCOME &&
-        typeof row.run_id === "string" && (pr.reviewInputDigest === undefined || row.review_input_digest === pr.reviewInputDigest)) {
+        row.reviewer_outcome !== REVIEWER_NOT_STARTED_OUTCOME && typeof row.run_id === "string" &&(pr.reviewInputDigest === undefined || row.review_input_digest === pr.reviewInputDigest)) {
       rows.push(row);
     }
   }
@@ -18765,6 +18785,9 @@ export function inconclusiveLoadLowered(
 
 /** W1-T13380: the reviewer outcome a review run records when its reviewer could not start (a spawn error). */
 export const REVIEWER_START_FAILED_OUTCOME = "spawn_error";
+
+/** W1-T14916: the outcome of a run whose reviewer start was withheld (the worker's `admission_abandoned` subtype). */
+const REVIEWER_NOT_STARTED_OUTCOME = "admission_abandoned";
 
 /** W1-T13380: the HEAD sha of a checkout, read from its git files (no spawn), as reviewer-health's checkoutHeadSha reads it. */
 function checkoutHeadOf(root: string): string {
@@ -21939,12 +21962,12 @@ export type FixChildLaunch = ReviewChildLaunch | { abandoned: true; reason: "adm
 export interface DetachedWorkHost {
   hosts: ReadonlySet<string>;
   mode: () => "off" | "shadow" | "on";
-  /** Starts one review as a child, or `undefined` when it stays in process (the mode, the placement, no engine, no admission). */
+  /** Starts a review child, refuses abandoned admission, or returns `undefined` to stay in process (mode, placement, no engine). */
   spawnReview: (input: {
     pr: { prNumber: number; headSha: string; taskId?: string; isPlanFiling?: boolean; excludeProviders?: readonly WorkerProviderId[] };
     reviewKey: string;
     reviewAttemptId: string | undefined;
-  }) => Promise<ReviewChildLaunch | undefined>;
+  }) => Promise<FixChildLaunch | undefined>;
   /** Starts a fix child, refuses abandoned admission, or returns `undefined` to stay in process. Absent: stay in process. */
   spawnFix?: (input: {
     pr: { prNumber: number; headSha: string; taskId?: string };
@@ -30314,7 +30337,9 @@ export async function runSweep(
             // unchanged input. THE REPEAT IS STILL BOUNDED, just not by a key: the pacer CONSUMES
             // its trip on the call it refuses.
             const floorStandDown = budgetFloorStandDown(e, jobDisposition);
-            if (floorStandDown !== undefined) {
+            if (e instanceof WorkerNotStartedError) {
+              standDownReason = e.message; // W1-T14916: nothing ran, so no failure or refusal row keys this input.
+            } else if (floorStandDown !== undefined) {
               standDownReason = floorStandDown;
               // W1-T2584: capacity is provider/account-wide, not a verdict about this PR. Once
               // one worker observes the floor, no worker may pull a later head from this same

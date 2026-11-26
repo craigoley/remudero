@@ -2790,6 +2790,9 @@ export function buildRequiredFixReviewRunner(
   readFreshness: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>,
   stale: { gate: Pick<ReviewerCodeStartGate<ReviewCommandDeps>, "fromFreshTree">; readHead: (prUrl: string) => string },
 ): typeof runReview {
+  const withheld = (headSha: string, reviewerOutcome: string, reason: string): Awaited<ReturnType<typeof next>> => ({
+    state: "pending", criteria: [], testTheater: false, summary: reason, floorDegraded: false, capped: false,
+    keywordOnly: false, planOnly: false, headSha, reviewerOutcome, verdictWithheld: reason });
   return (args) => decideReviewPath(() => ownStartFreshness(readFreshness),
     (start) => next({ ...args, requireSemanticReview: true, admission: "required-fix",
       reviewerCodeFreshness: reviewerFreshnessForPublication(start, readFreshness) }),
@@ -2800,8 +2803,11 @@ export function buildRequiredFixReviewRunner(
       const behind = `reviewer code ${reading.codeSha.slice(0, 12)} is behind origin/main ${reading.originMainSha.slice(0, 12)}`;
       const reason = code === undefined ? `${behind}; no fresh tree could run, so no reviewer started`
         : `${behind}; the review ran from a fresh tree and exited ${code}`;
-      return { state: "pending", criteria: [], testTheater: false, summary: reason, floorDegraded: false, capped: false,
-        keywordOnly: false, planOnly: false, headSha, reviewerOutcome: "not_attempted_stale_reviewer_code", verdictWithheld: reason };
+      return withheld(headSha, "not_attempted_stale_reviewer_code", reason);
+    }).catch((error: unknown) => {
+      // W1-T14916: a retired daemon starts no required review; the rung stands down on the withheld result.
+      if (!(error instanceof WorkerSpawnRetiredError)) throw error;
+      return withheld(stale.readHead(args.prUrl), "admission_abandoned", `retired: ${error.reason}; no reviewer started`);
     });
 }
 
