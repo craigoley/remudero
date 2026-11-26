@@ -616,7 +616,7 @@ export async function ghTextAsync(
     await presentUnexpiredTokenAsync(args, env);
     try { return rememberHeaders(await read()); } catch (err) { noteInstallationRefusal(err); throw err; }
   }
-  const key = opts.signal === undefined && env === undefined && ghArgsAreCoalescibleRead(args) ? `text:${encoding}:${opts.fresh === true ? "fresh:" : ""}${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
+  const key = opts.signal === undefined && env === undefined && ghArgsAreCoalescibleRead(args) && opts.fresh !== true ? `text:${encoding}:${JSON.stringify(args)}:${maxBuffer}:${timeout}` : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
