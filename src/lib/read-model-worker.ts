@@ -1096,6 +1096,8 @@ export interface ReadModelTicker {
   peer(entry: ReadModelBodyEntry): void;
   /** W1-T15008: the heavy lane restarted; republish this unit's last bodies as warming until its first fresh body. */
   warming(view: string, instance?: string): void;
+  /** W1-T15008: the heavy lane dropped this key, so its peer copy here is forgotten and never republished. */
+  peerDrop(view: string, key: string): void;
 }
 
 /** One view, or one instance's share of a per-instance view: the unit the pass budgets, times and paces. */
@@ -2372,6 +2374,10 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       lastEtag.set(`${entry.view}\u0000${entry.key}`, entry.etag);
       latest.set(`${entry.view}\u0000${entry.key}`, entry);
     },
+    peerDrop(view: string, key: string): void {
+      lastEtag.delete(`${view}\u0000${key}`);
+      latest.delete(`${view}\u0000${key}`);
+    },
     homeLeaseIdentity,
     publishDailyProgress(publication, expectedLeaseIdentity): void {
       const home = slots[0];
@@ -2447,6 +2453,8 @@ export type ReadModelViewsInput =
   | { type: "peer"; entry: ReadModelBodyEntry }
   /** W1-T15008: to the fast lane, as the idle heavy lane restarts: mark this unit's last bodies warming. */
   | { type: "warming"; view: string; instance?: string }
+  /** W1-T15008: to the fast lane, as the heavy lane drops a key: forget its peer copy. */
+  | { type: "peer_drop"; view: string; key: string }
   | { type: "stop" };
 
 /**
@@ -2493,6 +2501,7 @@ export function runReadModelViewWorker(
     else if (msg.type === "lane") ticker.lane(msg);
     else if (msg.type === "peer") ticker.peer(msg.entry);
     else if (msg.type === "warming") ticker.warming(msg.view, msg.instance);
+    else if (msg.type === "peer_drop") ticker.peerDrop(msg.view, msg.key);
     else ticker.accept(msg.built);
   };
   port.on("message", handle);
@@ -2656,6 +2665,8 @@ export function threadViews(opts: {
         return other(lane).worker?.postMessage({ ...msg, type: "lane" } satisfies ReadModelViewsInput);
       }
       if (msg.type === "body" && lane === heavy) fast.worker?.postMessage({ type: "peer", entry: msg.entry } satisfies ReadModelViewsInput);
+      // A key the heavy lane dropped leaves the fast lane's peer copies too, so a later warming never posts it again.
+      if (msg.type === "drop" && lane === heavy) fast.worker?.postMessage({ type: "peer_drop", view: msg.view, key: msg.key } satisfies ReadModelViewsInput);
       if (lane.wokeAt !== undefined && lane.worker === spawned && (msg.type === "body" || (msg.type === "view_unit" && msg.phase === "end"))) {
         opts.log("read_model.view_lane_restarted", { lane: lane.name, firstPaintMs: clock.now() - lane.wokeAt, units: heavyUnits.size });
         lane.wokeAt = undefined;

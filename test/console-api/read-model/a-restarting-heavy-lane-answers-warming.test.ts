@@ -157,3 +157,42 @@ test("W1-T15008 criterion 3: invariant:own-source-otherwise", (t) => {
   fast.ticker.warming("slow");
   assert.ok(warmingSource(fast.bodies("slow").at(-1)), "a later restart marks the fresh body again");
 });
+
+test("W1-T15008: a key the heavy lane dropped is never republished as warming", async (t) => {
+  // Review finding at 9439e5699: heavy drops reached only main, so a warming pass posted an evicted key again.
+  const { fast } = lanes(t);
+  const before = fast.bodies("slow").length;
+  fast.ticker.peerDrop("slow", "");
+  fast.ticker.warming("slow");
+  assert.equal(fast.bodies("slow").length, before, "the dropped key's last body is not posted again");
+
+  const dir = readModelFixtureDir(t, "warming-drops").dir;
+  const lanePath = join(dir, "lane.mjs");
+  writeFileSync(lanePath, `import { parentPort, workerData } from "node:worker_threads";
+const lane = workerData.lane;
+const alive = setInterval(() => {}, 1000);
+parentPort.on("message", (msg) => {
+  if (msg.type === "stop") { clearInterval(alive); return parentPort.close(); }
+  if (msg.type === "lane" && lane === "heavy" && msg.heavy) parentPort.postMessage({ type: "drop", view: msg.view, key: "gone" });
+  if (msg.type === "peer_drop") parentPort.postMessage({ type: "log", step: "fixture.peer_drop", extra: { lane, view: msg.view, key: msg.key } });
+  if (msg.type === "want" && msg.view === "move" && lane === "fast") parentPort.postMessage({ type: "view_lane", view: "now", heavy: true, dueAt: 0, costMs: 2000 });
+});
+`);
+  const relayed: ReadModelWorkerMessage[] = [];
+  const book = trackWorkerThreads();
+  const views = threadViews({
+    data: { stateDir: dir, instances: [], tickMs: 50, holder: "warming-drops" }, workerUrl: pathToFileURL(lanePath), clock: handClock(T0).clock,
+    every: () => () => undefined, log: () => undefined, relay: (msg) => void relayed.push(msg),
+  });
+  onReadModelClose(t, async () => {
+    views.close();
+    await Promise.all(book.live().map(({ thread }) => (thread as Worker).terminate()));
+    book.stop();
+  });
+  views.want("move", "");
+  const forwarded = () => relayed.flatMap((msg) => (msg.type === "log" && msg.step === "fixture.peer_drop" ? [msg.extra] : []));
+  const deadline = Date.now() + 10_000;
+  while (forwarded().length === 0 && Date.now() < deadline) await sleep(5);
+  assert.deepEqual(forwarded(), [{ lane: "fast", view: "now", key: "gone" }], "the heavy lane's drop reaches the fast lane");
+  assert.ok(relayed.some((msg) => msg.type === "drop" && msg.view === "now" && msg.key === "gone"), "and still reaches serve");
+});
