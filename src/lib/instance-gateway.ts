@@ -26,7 +26,7 @@ import { dirname, join } from "node:path";
 import { coldAnalyticsSnapshot, createAnalyticsSnapshotCache, type AnalyticsSnapshot, type AnalyticsSnapshotCache } from "./analytics-route.js";
 import { buildRecentRoute, buildStatusRoute, STALE_SOURCE_HEADER, type BoardDeps } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
-import { escalate, ghIssueGateway, type IssueGateway } from "./escalate.js";
+import { escalate, ghIssueGateway, issueUrlRepository, type IssueGateway } from "./escalate.js";
 import { evaluateFleetLiveness, livenessEscalation, readLivenessRows, type InstanceLiveness, type LivenessInstance, type ReadLastRows } from "./fleet-liveness.js";
 import { ghExec } from "./github-transport.js";
 import { appendLedger } from "./ledger.js";
@@ -480,7 +480,7 @@ function operatorIssues(repo: string, gh: (args: string[]) => string, log: Insta
       const out = gh(args);
       if (args[0] !== "issue" || args[1] !== "create") return out;
       try {
-        gh(["issue", "edit", out.trim(), "--repo", repo, "--add-assignee", owner]);
+        gh(["issue", "edit", out.trim(), "--repo", issueUrlRepository(out) ?? repo, "--add-assignee", owner]);
       } catch (error) {
         log?.("fleet.liveness_assign_failed", { repo, issue_url: out.trim(), reason: String((error as Error).message ?? error) });
       }

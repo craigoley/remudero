@@ -125,7 +125,7 @@ test("W1-T11458 criterion 2: async escalation promotes a real sync gateway to it
       assert.ok(during.has(event.id), `loop timer must run during each real default child: ${event.args.join(" ")}`);
     }
     const injected: string[][] = [];
-    const custom = ghIssueGateway("custom", "route", { exec: (args) => {
+    const custom = ghIssueGateway("custom", "route", { destination: () => ({ outcome: "named", repository: "custom/route" }), exec: (args) => {
       injected.push(args);
       return args[0] === "api" ? "[]" : args[0] === "issue" ? "https://github.com/custom/route/issues/8" : "";
     } });

@@ -18,6 +18,8 @@ import { createEscalationTriageHistoryReader, ESCALATION_REJUDGED_STEP } from "#
 import { buildEscalationTriageRuntime, sweepEscalationTriage } from "#src/run-task.js";
 import type { Config } from "#src/lib/config.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for o/r.
+process.env.RMD_ESCALATION_REPOSITORY ??= "o/r";
 
 const DAY = 86_400_000;
 const daysAgo = (days: number): string => new Date(Date.now() - days * DAY).toISOString();

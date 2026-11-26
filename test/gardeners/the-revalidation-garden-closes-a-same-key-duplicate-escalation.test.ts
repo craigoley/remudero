@@ -9,6 +9,8 @@ import {
   type RevalidationComment,
   type RevalidationIssue,
 } from "#src/lib/issue-revalidation-garden.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for craigoley/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "craigoley/remudero";
 
 const NOW = Date.parse("2026-11-17T12:00:00Z");
 const FOOTER = "_Opened automatically by Remudero (MASTER-PLAN §4 escalation taxonomy). Closing this issue does_";

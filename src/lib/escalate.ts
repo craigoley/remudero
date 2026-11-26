@@ -2340,7 +2340,7 @@ export function ghIssueGateway(
   repo: string,
   opts: { exec?: (args: string[]) => string; destination?: EscalationDestinationRead } = {},
 ): IssueGateway {
-  const route = escalationIssueRoute(owner, repo, opts);
+  const route = escalationIssueRoute(opts);
   if (route.outcome === "unfiled") return unfiledIssueGateway(route.reason, "sync") as IssueGateway;
   const run =
     opts.exec ??
@@ -2358,7 +2358,7 @@ export function ghIssueGatewayAsync(
   repo: string,
   opts: { exec?: (args: string[]) => Promise<string>; destination?: EscalationDestinationRead } = {},
 ): AsyncIssueGateway {
-  const route = escalationIssueRoute(owner, repo, opts);
+  const route = escalationIssueRoute(opts);
   if (route.outcome === "unfiled") return unfiledIssueGateway(route.reason);
   const gateway = issueGatewaySteps(route.repository, opts.exec ?? ((args: string[]) => ghTextAsync(args)), runStepsAsync);
   gatewayRepository.set(gateway, route.repository);
@@ -2373,8 +2373,8 @@ export function ghIssueGatewayAsync(
  *
  * `named` files in that repository; `unfiled` opens no issue at all — no file (`off`) or a file that cannot be read,
  * which is never read as permission to fall back to the public repository. The code repository is `owner/repo`, which
- * the route no longer files in. A gateway built over an injected `exec` with no `destination` keeps `owner/repo`:
- * that is a caller's own fake transport, not the fleet's.
+ * the route no longer files in. An injected `exec` changes the transport, never the route; a test that files in its
+ * own fixture repository names it with `destination` or {@link ESCALATION_REPOSITORY_ENV}.
  */
 export type EscalationDestinationRead = () => { outcome: "named"; repository: string } | { outcome: "unfiled"; reason: string };
 
@@ -2395,12 +2395,27 @@ export const hostEscalationDestination: EscalationDestinationRead = () => {
   return { outcome: "unfiled", reason: named.outcome === "off" ? "no-private-escalation-repository" : `private-escalation-repository-unreadable: ${named.reason}` };
 };
 
-function escalationIssueRoute(owner: string, repo: string, opts: { exec?: unknown; destination?: EscalationDestinationRead }):
-  ReturnType<EscalationDestinationRead> {
-  if (opts.destination === undefined && opts.exec !== undefined) return { outcome: "named", repository: `${owner}/${repo}` };
+function escalationIssueRoute(opts: { destination?: EscalationDestinationRead }): ReturnType<EscalationDestinationRead> {
+  // An injected exec is never a route: production producers inject one too (sreOperatorEscalation, the instance
+  // liveness gateway, `rmd host-alert`, escalation triage), so only an explicit destination names another repository.
   return (opts.destination ?? hostEscalationDestination)();
 }
 
+
+/** W1-T14998 — the repository the host's escalation issues live in, for readers of them (owner replies): the host
+ *  route's repository, or with none named the code repository, whose issues are legacy and only read, never filed. */
+export function escalationIssueRepository(owner: string, repo: string,
+  destination: EscalationDestinationRead = hostEscalationDestination): [string, string] {
+  const route = destination();
+  if (route.outcome !== "named") return [owner, repo];
+  const [routeOwner, routeRepo] = route.repository.split("/") as [string, string];
+  return [routeOwner, routeRepo];
+}
+
+/** W1-T14998 — the `<owner>/<name>` an issue URL names, or undefined when it is not a GitHub issue URL. */
+export function issueUrlRepository(url: string): string | undefined {
+  return /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/issues\/\d+\/?$/.exec(url.trim())?.[1];
+}
 
 /** W1-T14998 — the repository a gateway files in, or undefined for a fake gateway or one that files nowhere. */
 export function issueGatewayRepository(gateway: object): string | undefined {
@@ -2445,7 +2460,7 @@ export function ghIssueGatewayGraphql(
   codeRepo: string,
   opts: { exec?: (args: string[]) => Promise<string>; destination?: EscalationDestinationRead } = {},
 ): AsyncIssueGateway {
-  const route = escalationIssueRoute(codeOwner, codeRepo, opts);
+  const route = escalationIssueRoute(opts);
   if (route.outcome === "unfiled") return unfiledIssueGateway(route.reason);
   const repoArg = route.repository;
   const [owner, repo] = repoArg.split("/") as [string, string];

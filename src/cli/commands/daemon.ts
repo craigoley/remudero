@@ -73,7 +73,7 @@ import { DEPENDABOT_REPAIR_SNAPSHOT_MAX_AGE_MS } from "../../lib/dep-review.js";
 import { withEscalationSpoolDrain } from "../../lib/host-escalation-spool.js";
 import { instanceMode, readInstanceRegistryText } from "../../lib/instance-mode.js";
 import { instanceRegistryRuntimePresent, ledgerSelectedRegistryReadTimeouts, selectedInstanceRegistryEnvPath, withInstanceRegistryRuntime } from "../../lib/instance-registry-selection.js";
-import { escalate, escalateWithJudge, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
+import { escalate, escalateWithJudge, escalationIssueRepository, realEscalationJudge, ghIssueGateway, ghIssueGatewayAsync, type Escalation, type EscalationJudgeVerdict } from "../../lib/escalate.js";
 import { boardPrsRestArgs, createGhCallPacer, prStateFromRest, singlePrRestArgs } from "../../lib/open-prs-rest.js";
 import { buildMainHealthRung } from "../../lib/main-health-rung.js";
 import { ghEscalationAnswerGateway } from "../../lib/escalation-answers.js";
@@ -3266,7 +3266,8 @@ export async function daemonCommand(
           targetCheckoutRoot,
           () => activePlanRef.current,
           // W1-T4471: the one real wiring of the owner-reply reader.
-          ghEscalationAnswerGateway(target.owner, target.repo, undefined, config.operatorGithubLogins,
+          // W1-T14998: replies are read where escalations are filed; with none named, the code repository's legacy issues.
+          ghEscalationAnswerGateway(...escalationIssueRepository(target.owner, target.repo), undefined, config.operatorGithubLogins,
             config.contributorAdmission === undefined ? undefined : { settings: config.contributorAdmission }),
           gitCredentialSocket?.socketPath,
           keepLastServe(onePassPerGeneration(() => tickReadGeneration, readTick,

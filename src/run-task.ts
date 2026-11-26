@@ -746,7 +746,7 @@ import {
   type AsyncIssueGateway,
   type IssueGateway,
   type OpenIssue,
-  type PresenceMode, prReferentFromIssueText, loadEscalationLinkSecret,} from "./lib/escalate.js";
+  type PresenceMode, prReferentFromIssueText, loadEscalationLinkSecret, issueUrlRepository,} from "./lib/escalate.js";
 import {
   boardPrsRestArgs,
   checkRunsRestArgs,
@@ -33964,7 +33964,8 @@ export async function sweepEscalationTriage(
     // Async transport: this sweep runs on the daemon loop, so the relabel must not block the event loop.
     const relabel = io.relabel ?? (async (url: string, label: string): Promise<void> => {
       assertLiveWriteAllowed("gh-transport", "routing an escalation after triage");
-      await ghTextAsync(["issue", "edit", url, "--repo", `${owner}/${repo}`, "--add-label", label,
+      // W1-T14998: the issue lives where it was filed (the escalation repository), named by its own URL.
+      await ghTextAsync(["issue", "edit", url, "--repo", issueUrlRepository(url) ?? `${owner}/${repo}`, "--add-label", label,
         "--remove-label", label === "needs-human" ? "fleet-notice" : "needs-human"], {}, io.execAsync);
     });
     const candidates: StaleEscalationRejudgeCandidate[] = [];

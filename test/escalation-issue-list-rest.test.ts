@@ -10,6 +10,8 @@ import {
 } from "../src/lib/escalate.js";
 import { buildBatchedGithub } from "../src/lib/status.js";
 import { ghUpdateBranchArgv } from "../src/run-task.js";
+// W1-T14998: an escalation files in the host's escalation repository; this suite's gh fixture answers for craigoley/remudero.
+process.env.RMD_ESCALATION_REPOSITORY ??= "craigoley/remudero";
 
 /**
  * The escalation-lifecycle issue reads (the batched board gateway's `fetchAllIssues` and

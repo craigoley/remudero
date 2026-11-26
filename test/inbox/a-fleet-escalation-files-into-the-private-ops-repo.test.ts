@@ -11,10 +11,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
-  ESCALATION_REPOSITORY_ENV, escalate, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, issueGatewayRepository, issueGatewayUnfiled,
-  NEEDS_HUMAN_LABEL, tryEscalate, type Escalation, type EscalationDestinationRead,
+  ESCALATION_REPOSITORY_ENV, escalate, escalationIssueRepository, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, issueGatewayRepository, issueGatewayUnfiled,
+  issueUrlRepository, NEEDS_HUMAN_LABEL, tryEscalate, type Escalation, type EscalationDestinationRead,
 } from "#src/lib/escalate.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { sreOperatorEscalation } from "#src/lib/sre-runbooks.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const CODE = { owner: "craigoley", repo: "remudero" };
@@ -126,8 +127,23 @@ test("W1-T14998 criterion 1: a fleet escalation opens its issue in the private o
   assert.equal(hostRoute, OPS, "the host's plan destination names the escalation repository");
   // An operator's explicit escalation repository is read ahead of the plan destination.
   assert.equal(withEnv(OPS, () => issueGatewayRepository(ghIssueGateway(CODE.owner, CODE.repo))), OPS);
-  // A caller's own fake transport, with no route, keeps the repository it names.
-  assert.equal(issueGatewayRepository(ghIssueGateway(CODE.owner, CODE.repo, { exec: gh.exec })), `${CODE.owner}/${CODE.repo}`);
+  // An injected transport is never a route: production producers inject one (the SRE lane, liveness, `rmd host-alert`).
+  assert.equal(withHostHome(t, { repository: OPS, kinds: ["decision"] },
+    () => issueGatewayRepository(ghIssueGateway(CODE.owner, CODE.repo, { exec: gh.exec }))), OPS);
+  assert.equal(withEnv(OPS, () => issueGatewayRepository(ghIssueGatewayAsync(CODE.owner, CODE.repo, { exec: async () => "" }))), OPS);
+  // The SRE lane's own producer, over its real exec-injecting gateway, files in ops and assigns there.
+  const sre = fakeGh();
+  const sreUrl = withEnv(OPS, () => withLiveWritesAllowed(() => sreOperatorEscalation({ ...CODE, ledgerPath: path, log: () => {},
+    gh: (args) => (args[0] === "issue" && args[1] === "edit" ? (sre.calls.push(args), "") : sre.exec(args)) })(escalation({ taskId: "W1-T14999" }))));
+  assert.match(sreUrl ?? "", /^https:\/\/github\.com\/craigoley\/remudero-ops\/issues\/1$/);
+  assert.deepEqual(sre.issues.map((issue) => issue.repo), [OPS]);
+  const assign = sre.calls.find((args) => args[0] === "issue" && args[1] === "edit");
+  assert.equal(assign?.[assign.indexOf("--repo") + 1], OPS, "the assignee edit names the issue's own repository");
+  // Readers of escalation issues (owner replies, relabels) read where they were filed.
+  assert.deepEqual(escalationIssueRepository(CODE.owner, CODE.repo, toOps), ["craigoley", "remudero-ops"]);
+  assert.deepEqual(escalationIssueRepository(CODE.owner, CODE.repo, nowhere), [CODE.owner, CODE.repo]);
+  assert.equal(issueUrlRepository("https://github.com/craigoley/remudero-ops/issues/12"), OPS);
+  assert.equal(issueUrlRepository("https://github.com/craigoley/remudero/pull/12"), undefined);
 });
 
 test("W1-T14998 criterion 2: with no private repository an escalation opens no public issue", async (t) => {
@@ -152,6 +168,12 @@ test("W1-T14998 criterion 2: with no private repository an escalation opens no p
     "no-private-escalation-repository");
   assert.match(withHostHome(t, { repository: "not a repository", kinds: [] },
     () => issueGatewayUnfiled(ghIssueGateway(CODE.owner, CODE.repo))) ?? "", /^private-escalation-repository-unreadable: /);
+  // An exec-injecting producer with no valid route opens nothing either, and records why.
+  const sre = fakeGh();
+  assert.equal(withEnv("../remudero", () => sreOperatorEscalation({ ...CODE, ledgerPath: path, log: () => {}, gh: sre.exec })(
+    escalation({ taskId: "W1-T14999" }))), null);
+  assert.deepEqual(sre.calls, [], "the SRE lane runs no gh call");
+  assert.equal(rows().filter((row) => row.step === "escalation.not_filed" && row.task_id === "W1-T14999").length, 1);
   // A set escalation repository that is not <owner>/<name> files nowhere, never on public core.
   assert.equal(withEnv("../remudero", () => issueGatewayUnfiled(ghIssueGateway(CODE.owner, CODE.repo))),
     "RMD_ESCALATION_REPOSITORY is not <owner>/<name>");
