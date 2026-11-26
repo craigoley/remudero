@@ -19,7 +19,7 @@
     - test/plan-blob-batch-sizes-its-buffer-from-the-catalog.test.ts
     - test/next-task-id-reserve.test.ts
     - test/plan/every-ref-read-asks-git-for-blob-ids.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: invariant:bound-from-listing — readBlobsAtRef and readBlobsAtRefAsync list blob ids with `ls-tree -l` and pass the `cat-file --batch` call a maxBuffer equal to the sum, over the requested paths, of each listed blob's size plus its header and trailing newline bytes (oid length + ' blob ' + the size's digits + 2); when any requested path is not listed as a blob (it is asked as `<ref>:<path>`), the batch passes no bound and the runner keeps its present bound; a real git repository whose shards total more than 64 MiB loads through loadPlanAtRef and loadPlanAtRefAsync with the default runners

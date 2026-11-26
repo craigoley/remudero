@@ -19,7 +19,7 @@
     - src/lib/status-board.ts
     - src/lib/ledger-steps.ts
     - test/paid-spend-per-merged-pr-is-recorded-daily.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: invariant:spend-counted-once — For one finished UTC day, paidSpendPerMergedDay sums every produced paid row (isProducedSpendRow with billing_mode api or provider cash) and every worker.attempt api row whose selection_assignment_id has no produced paid row, and divides by that day's pr.terminal merged rows
