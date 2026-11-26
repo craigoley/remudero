@@ -298,6 +298,41 @@ else
 fi
 # W1-T3388 — END head-identity admission
 
+# W1-T14945 — BEGIN import-cycle admission
+# OBSERVED 2026-11-26: a fix-lane round on core #20963 made src/lib/body-repair.ts import ./review.js, closing an
+# import ring that depcruise's no-circular rule refuses, and this hook let it through to CI. When the pushed diff adds
+# an import under src/, the hook cruises the tree (read as DATA: depcruise parses it, runs none of it) with the
+# GATE's own depcruise and config, and checks the ring count against the tree's cycle baseline with the gate's
+# scripts/cycle-ratchet.mjs. A new ring refuses with `cycle-ratchet:` lines, so the fix lane's next strike gets them.
+cycle_ratchet_skip() { echo "pre-push: cycle-ratchet — $1, skipped (a named skip, NOT a pass)" >&2; }
+if has cycle-ratchet.mjs && [ -x "$gate_root/node_modules/.bin/depcruise" ] && [ -f "$gate_root/.dependency-cruiser.cjs" ]; then
+  cycle_base="$(git merge-base origin/main "$head_sha" 2>/dev/null || true)"
+  cycle_import_re='^[+]([^+].*)?(from[[:space:]]*["'"'"']|import[[:space:]]*[(]?["'"'"']|require[[:space:]]*[(])'
+  cycle_baseline="$tree_root/scripts/cycle-baseline.json"
+  [ -f "$cycle_baseline" ] || cycle_baseline="$gate_root/scripts/cycle-baseline.json"
+  if [ -z "$cycle_base" ]; then
+    cycle_ratchet_skip "no merge base with origin/main"
+  elif ! git diff --unified=0 "$cycle_base" "$head_sha" -- src 2>/dev/null | grep -Eq "$cycle_import_re"; then
+    cycle_ratchet_skip "this diff adds no import under src/"
+  elif [ ! -f "$cycle_baseline" ]; then
+    cycle_ratchet_skip "no scripts/cycle-baseline.json"
+  else
+    cycle_json="$(mktemp "${TMPDIR:-/tmp}/rmd-prepush-cycles-XXXXXX")"
+    # depcruise exits non-zero when it reports a violation, so its JSON is judged, never its exit code.
+    "$gate_root/node_modules/.bin/depcruise" src --config "$gate_root/.dependency-cruiser.cjs" --output-type json \
+      >"$cycle_json" 2>/dev/null || true
+    if ! node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).summary.violations.length' "$cycle_json" 2>/dev/null; then
+      cycle_ratchet_skip "the cruise produced no readable result"
+    elif ! node "$gate_root/scripts/cycle-ratchet.mjs" --json "$cycle_json" --baseline "$cycle_baseline" >/dev/null; then
+      fail=1
+    fi
+    rm -f "$cycle_json"
+  fi
+else
+  cycle_ratchet_skip "no gate depcruise, config or scripts/cycle-ratchet.mjs"
+fi
+# W1-T14945 — END import-cycle admission
+
 # W1-T4214 — BEGIN head-identity TRANSITION (BLOCKING, and only this narrow case)
 # The advisory above prints and the push goes on, and nobody reads it: a push that took #6562's head
 # from admitted to refused was the incident, and the only repair left was a new pull request. What is
