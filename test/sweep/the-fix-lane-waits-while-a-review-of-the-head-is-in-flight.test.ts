@@ -26,12 +26,13 @@ const EVIDENCE: FixDispatchEvidence = { unmetCriteria: [], ciFailures: [{ name: 
 type Row = { step: string } & Record<string, unknown>;
 
 /** The sweep's real fix dispatch over a ledger holding `ledger`, with every effect past the deferral point faked. */
-function dispatcher(t: TestContext, ledger: Row[], view: Partial<OpenPrView> = {}) {
+function dispatcher(t: TestContext, ledger: Row[] | "unreadable", view: Partial<OpenPrView> = {}) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t15005-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const dir of ["state/inflight", "repos/fixture", "tmp"]) mkdirSync(join(root, dir), { recursive: true });
   const ledgerPath = join(root, "state/ledger.ndjson");
-  appendFileSync(ledgerPath, ledger.map((row) => `${JSON.stringify(row)}\n`).join(""));
+  // An unreadable live ledger is one not yet written: the read fails with ENOENT.
+  if (ledger !== "unreadable") appendFileSync(ledgerPath, ledger.map((row) => `${JSON.stringify(row)}\n`).join(""));
   const rows: Row[] = [];
   const seen = { claimKeys: 0, dispatched: 0 };
   const task = { id: TASK, title: "repair", files: [], acceptance: [], verify: "auto", status: "queued", risk: "low" };
@@ -120,4 +121,11 @@ test("W1-T15005 criterion 3: a PR with no review in flight dispatches as today",
   }
   assert.equal(sweep.reviewInFlightOnHead({ headSha: HEAD, prUrl: PR_URL, taskId: TASK, reviewState: "success" }, [claim("r")]), undefined,
     "a non-pending head never waits, whatever the ledger holds");
+});
+
+test("an unreadable live ledger reads as no review in flight, so the fix round dispatches as before", async (t) => {
+  const d = dispatcher(t, "unreadable");
+  await d.dispatch();
+  assert.equal(deferrals(d.rows).length, 0, "nothing defers");
+  assert.equal(d.seen.claimKeys, 1, "the round takes its branch claim as today");
 });
