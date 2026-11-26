@@ -680,9 +680,28 @@ export interface AutoTriagePolicy {
   maxPerDay: number;
 }
 
+/** W1-T14905: a triage end that left unchanged feedback untriaged. On feedback with no content commit since, it is a
+ *  failed fire, as `auto_triage.run_failed` is, so the entry backs off instead of re-firing at the floor interval. */
+export const AUTO_TRIAGE_REFUSED_END_STEPS = ["triage.relint_refused", "triage.error"] as const;
+/** W1-T14905: one row per run of three consecutive refused ends that share a check, naming that check. */
+export const AUTO_TRIAGE_REFUSAL_REPEATED_STEP = "auto_triage.refusal_repeated";
+/** W1-T14905: PRIMARY CONTROL — how many consecutive refused ends with one check make a repeat worth one ledger row
+ *  (the record's "three consecutive fires"). It only names the check; the backoff, not this count, slows the fires. */
+export const AUTO_TRIAGE_REFUSAL_REPEAT_COUNT = 3;
+
 export const AUTO_TRIAGE_FAILURE_STEPS = [
-  "auto_triage.run_failed", "pr.opened", "triage.grill_opened", "triage.relint_refused", "verdict",
+  "auto_triage.run_failed", "pr.opened", "triage.grill_opened", ...AUTO_TRIAGE_REFUSED_END_STEPS, "verdict",
+  AUTO_TRIAGE_REFUSAL_REPEATED_STEP,
 ] as const;
+
+const REFUSED_END_STEPS: ReadonlySet<string> = new Set(AUTO_TRIAGE_REFUSED_END_STEPS);
+
+/** The check a refused end names: the relint's sorted check list, or a triage error's text before its first colon. */
+function refusedEndCheck(row: Record<string, unknown>): string {
+  if (Array.isArray(row.checks) && row.checks.length > 0) return [...row.checks].map(String).sort().join(",");
+  const error = typeof row.error === "string" ? row.error : "";
+  return `${String(row.step)}:${(error.split(":")[0] ?? "").trim()}`;
+}
 
 /** Consecutive failed fires since a triage end or the entry's last content commit. */
 export function failedFireBackoff(
@@ -695,10 +714,12 @@ export function failedFireBackoff(
   for (const row of rows) {
     const ts = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
     if (!Number.isFinite(ts)) continue;
-    if (row.step === "auto_triage.run_failed" && row.feedback === feedbackId) {
+    if ((row.step === "auto_triage.run_failed" && row.feedback === feedbackId) ||
+      (row.task_id === `TRIAGE-${feedbackId}` && REFUSED_END_STEPS.has(String(row.step)))) {
+      // W1-T14905: a refused end on unchanged feedback is a failed fire; one before the last content commit is not.
       if (!Number.isFinite(changedMs) || ts >= changedMs) failures.push(ts);
     } else if (row.task_id === `TRIAGE-${feedbackId}` &&
-      (row.step === "pr.opened" || row.step === "triage.grill_opened" || row.step === "triage.relint_refused" || row.step === "verdict")) {
+      (row.step === "pr.opened" || row.step === "triage.grill_opened" || row.step === "verdict")) {
       lastEnd = Math.max(lastEnd, ts);
     }
   }
@@ -707,6 +728,32 @@ export function failedFireBackoff(
   const newest = consecutive.reduce((latest, ts) => Math.max(latest, ts));
   const retryAtMs = newest + minIntervalMinutes * 60_000 * 2 ** consecutive.length;
   return { failures: consecutive.length, backedOff: now.getTime() < retryAtMs, retryAtMs };
+}
+
+/**
+ * W1-T14905: the check shared by the newest {@link AUTO_TRIAGE_REFUSAL_REPEAT_COUNT} consecutive refused ends on
+ * unchanged feedback, when no {@link AUTO_TRIAGE_REFUSAL_REPEATED_STEP} row has named that run yet; else undefined.
+ * The caller writes the row, so the operator or a plan fix can address the check the drafts keep failing.
+ */
+export function repeatedTriageRefusal(
+  rows: readonly Record<string, unknown>[], feedbackId: string, contentChangedAt?: string,
+): { check: string; since: string } | undefined {
+  const changedMs = Date.parse(contentChangedAt ?? "");
+  const run: Array<{ ts: number; iso: string; check: string }> = [];
+  let notedMs = Number.NEGATIVE_INFINITY;
+  for (const row of rows) {
+    const ts = typeof row.ts === "string" ? Date.parse(row.ts) : Number.NaN;
+    if (!Number.isFinite(ts) || (Number.isFinite(changedMs) && ts < changedMs)) continue;
+    // The daemon writes the repeated row as a producer row, keyed by `feedback`; the triage ends are keyed by task id.
+    if (row.step === AUTO_TRIAGE_REFUSAL_REPEATED_STEP && row.feedback === feedbackId) notedMs = Math.max(notedMs, ts);
+    if (row.task_id !== `TRIAGE-${feedbackId}`) continue;
+    if (REFUSED_END_STEPS.has(String(row.step))) run.push({ ts, iso: String(row.ts), check: refusedEndCheck(row) });
+    else if (row.step === "pr.opened" || row.step === "triage.grill_opened" || row.step === "verdict") run.length = 0;
+  }
+  run.sort((a, b) => a.ts - b.ts);
+  const tail = run.slice(-AUTO_TRIAGE_REFUSAL_REPEAT_COUNT);
+  if (tail.length < AUTO_TRIAGE_REFUSAL_REPEAT_COUNT || tail.some((end) => end.check !== tail[0]!.check)) return undefined;
+  return tail[0]!.ts > notedMs ? { check: tail[0]!.check, since: tail[0]!.iso } : undefined;
 }
 
 /** Unreadable main history retains the failure history; security refusals still propagate. */

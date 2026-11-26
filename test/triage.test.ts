@@ -1604,3 +1604,39 @@ test("W1-T4203: a refused triage commit is not re-triaged", async () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("W1-T14905 the auto-triage pass backs off a repeatedly refused entry and names its check once", async () => {
+  const { autoTriageCheck } = await import("../src/run-task.js");
+  const { loadPolicy, policyPath } = await import("../src/lib/policy.js");
+  const { triageCandidateReaders, AUTO_TRIAGE_REFUSAL_REPEATED_STEP } = await import("../src/lib/auto-triage.js");
+  const { ledgerPathFor } = await import("../src/lib/ledger-path.js");
+  const readers = await triageCandidateReaders(REPO_ROOT);
+  const candidates = readers.newFeedbackIdsOldestFirst(REPO_ROOT);
+  assert.ok(candidates.length >= 1, "origin/main holds at least one status: new entry to exercise");
+  const [head] = candidates;
+  const shipped = loadPolicy(policyPath(REPO_ROOT));
+  const policy = { ...shipped, values: { ...shipped.values, autoTriage: { enabled: true, minIntervalMinutes: 30, maxPerDay: 50 } } };
+  const root = mkdtempSync(join(tmpdir(), "rmd-triage-repeat-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  try {
+    const config = { root, claudeBin: "/bin/true" } as unknown as import("../src/lib/config.js").Config;
+    const claimReserver = { mintAnchor: () => "a", attempt: () => "created", claimedIds: () => new Map() } as never;
+    const now = new Date();
+    const ago = (minutes: number) => new Date(now.getTime() - minutes * 60_000).toISOString();
+    const refusals = [120, 80, 40].map((m) => ({ step: "triage.relint_refused", task_id: `TRIAGE-${head}`, ts: ago(m),
+      stop: "exhausted", checks: ["design-invariant-proof"] }));
+    const args = { config, policy, now, deferralPending: true, dispatchCount: 1, laneBudget: 1, claimReserver,
+      readFeedbackChangedAt: async () => undefined };
+    const first = await autoTriageCheck({ ...args, readRefusalRows: () => refusals });
+    assert.ok(!first.fire || first.feedbackId !== head, "the refused entry is passed over while it backs off");
+    const written = () => readFileSync(ledgerPathFor(config), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((row) => row.step === AUTO_TRIAGE_REFUSAL_REPEATED_STEP);
+    assert.equal(written().length, 1, "one refusal_repeated row is written");
+    assert.equal(written()[0]!.check, "design-invariant-proof");
+    assert.equal(written()[0]!.feedback, head);
+    await autoTriageCheck({ ...args, readRefusalRows: () => [...refusals, ...written()] });
+    assert.equal(written().length, 1, "a later pass that reads the row does not write it again");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

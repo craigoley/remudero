@@ -1913,7 +1913,7 @@ import {
   reviewProviderProvenanceLedgerFields,
   type HeadReflogEntry,
 } from "./lib/review-provider-provenance.js";
-import { decideAutoTriage, failedFireBackoff, feedbackChangedAtOnMain, AUTO_TRIAGE_FAILURE_STEPS, triageCandidateReaders, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
+import { decideAutoTriage, failedFireBackoff, feedbackChangedAtOnMain, AUTO_TRIAGE_FAILURE_STEPS, AUTO_TRIAGE_REFUSAL_REPEATED_STEP, repeatedTriageRefusal, triageCandidateReaders, readAutoTriageMarker, recordAutoTriageFire, autoTriageMarkerPath, triageLockPath, claimTriageWithLogging, releaseTriageClaimWithLogging, gitTriageClaimReserver, gitTriageClaimReserverAsync, sweepTriageClaims, type AutoTriageDecision, type AutoTriageInputs, type TriageClaimReserver, type TriageClaimReserverAsync, type TriageClaimResult } from "./lib/auto-triage.js";
 import { decideDispatchClaim, releaseDispatchClaim, releaseDispatchClaimAsync, gitDispatchClaimReserver, gitDispatchClaimReserverAsync, gitClaimRunnerAsync, dispatchClaimRef, claimDropRefusal, pidIsPresent, readNamespaceBootMs, reclaimSilentDispatchClaim, holdDispatchClaim, renewDispatchClaim, DISPATCH_CLAIM_RENEW_INTERVAL_MS, type DispatchClaimRenewal, type DispatchClaimReserver, type DispatchClaimReserverAsync } from "./lib/dispatch-claim.js";
 import {
   checkGithubPosture,
@@ -21921,7 +21921,8 @@ function readRetroTriggerLedger(config: Config): string {
 export const RETRO_TRIGGER_RUN_SLICE: EscalationTriageSlice = { holder: "run-task.retro-trigger-runs", steps: RETRO_TRIGGER_RUN_STEPS, version: "1" };
 export const AUTO_TRIAGE_REFUSAL_SLICE: EscalationTriageSlice = {
   holder: "run-task.auto-triage-refusals",
-  steps: [TRIAGE_COMMIT_REFUSED_STEP, TRIAGE_REFUSAL_CLEARED_STEP, ...AUTO_TRIAGE_FAILURE_STEPS], version: "2",
+  // W1-T14905: version 3 adds the triage.error ends and the refusal_repeated rows to the slice.
+  steps: [TRIAGE_COMMIT_REFUSED_STEP, TRIAGE_REFUSAL_CLEARED_STEP, ...AUTO_TRIAGE_FAILURE_STEPS], version: "3",
 };
 
 let retroTriggerRunReader: EscalationTriageHistoryReader | undefined;
@@ -22537,6 +22538,10 @@ export async function autoTriageCheck(
     const changedAt = await (opts.readFeedbackChangedAt ?? ((c) => feedbackChangedAtOnMain(feedbackRoot, c)))(id);
     const backoff = failedFireBackoff(rows, id, inputs.policy.minIntervalMinutes, now, changedAt);
     if (backoff.backedOff) backedOffCandidates!.set(id, backoff.retryAtMs!);
+    // W1-T14905: one row names a check that refused the same unchanged entry three fires running.
+    const repeated = repeatedTriageRefusal(rows, id, changedAt);
+    if (repeated !== undefined) appendProducerLedger(ledgerPathFor(config), "daemon", { run_id: "AUTO-TRIAGE",
+      step: AUTO_TRIAGE_REFUSAL_REPEATED_STEP, feedback: id, check: repeated.check, since: repeated.since });
   }
   const sweep = await triageClaimSweepForPass(config, now, candidates, opts);
   const ordered = await prioritizeDepReviewRepairs(candidates, join(config.root, "state"), opts.repairSnapshot?.(), now.getTime(),

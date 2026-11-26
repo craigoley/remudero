@@ -47,7 +47,8 @@ test("W1-T9853: each repeat failure doubles the pass-over", () => {
 });
 
 test("W1-T9853: a triage end resets the backoff", () => {
-  for (const step of ["pr.opened", "triage.grill_opened", "triage.relint_refused", "verdict"]) {
+  // W1-T14905: a relint refusal is a failed fire on unchanged feedback, not a triage end.
+  for (const step of ["pr.opened", "triage.grill_opened", "verdict"]) {
     const rows = [failure(0), end(step, 1)];
     assert.equal(triage.failedFireBackoff(rows, "fb-old", 60, at(2)).failures, 0, step);
     rows.push(failure(3));
