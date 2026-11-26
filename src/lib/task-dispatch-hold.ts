@@ -1,6 +1,4 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { loadPlanAtRefAsync } from "./plan.js";
+import { defaultGitRunnerAsync, loadPlanAtRefAsync } from "./plan.js";
 import { readOpsCatalogSnapshotAsync } from "./ops-catalog-source.js";
 import { planDestinationRepository } from "./plan-destination.js";
 
@@ -51,8 +49,8 @@ export function taskHoldRefusal(reading: TaskHoldReading | undefined): string | 
  *  importing that module would pay its argv-at-import cost (W1-T2531). A directory outside a checkout throws, and the
  *  caller reads that as an unreadable plan, which holds. */
 async function checkoutTopLevel(): Promise<string> {
-  const { stdout } = await promisify(execFile)("git", ["-C", process.cwd(), "rev-parse", "--show-toplevel"], { encoding: "utf8" });
-  return stdout.trim();
+  // Through plan.ts's own git runner, the one the plan read uses: this module spawns no git of its own.
+  return (await defaultGitRunnerAsync(process.cwd())(["rev-parse", "--show-toplevel"])).trim();
 }
 
 const TASK_ID = /^[A-Z][A-Z0-9]*-T\d+$/;
