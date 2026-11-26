@@ -4974,6 +4974,14 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
             return { roundNotRun: true, reason: held.reason };
           }
         }
+        // W1-T15005: a fix round pushed mid-review supersedes that review ("review input changed after this verdict
+        // started"), so the round waits while a live review owns this exact head; a verdict or a proven-dead owner ends it.
+        const reviewLines = pr.reviewState === "pending" ? readLedgerLines(ledgerPath) : []; // ledger-read-intent: live
+        const reviewRun = reviewInFlightOnHead(pr, reviewLines);
+        if (reviewRun !== undefined) {
+          log("sweep.fix_deferred_review_in_flight", { pr_number: pr.prNumber, head: pr.headSha, review_run: reviewRun });
+          return false;
+        }
         const realBranch = headRef.headRefName;
         const changedPaths = (headRef.files ?? []).map((f) => f.path);
         // impl-FY: a PR with no plan task is STILL repairable — see fixRungTaskFor. The rung used to
@@ -7410,6 +7418,27 @@ function alongsideCiReviewDue(pr: OpenPrView, policy: SweepPolicy, now: number):
 /** W1-T14177: the rows by which a review run settles a head: after one, that run holds no claim on it. */
 export const REVIEW_RUN_SETTLED_STEPS: ReadonlySet<string> = new Set(["review.posted", "review.stood_down", "review.post_refused", "review.replay_input",
   "review.skipped_closed_lifecycle"]);
+
+/** W1-T15005: the run whose review of `pr`'s current head is in flight, or undefined. A run is in flight from its
+ *  review.pending_posted claim on this head until it writes a row that settles it ({@link REVIEW_RUN_SETTLED_STEPS}); a
+ *  takeover ends the run it took over, and the run the view proves dead (reviewPendingOwnerDead) holds nothing. */
+export function reviewInFlightOnHead(
+  pr: Pick<OpenPrView, "headSha" | "prUrl" | "taskId" | "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerRunId">,
+  lines: ReadonlyArray<Record<string, unknown>>,
+): string | undefined {
+  if (pr.reviewState !== "pending") return undefined;
+  const live = new Set<string>();
+  for (const line of lines) {
+    if (line.head_sha !== pr.headSha || !reviewRowNamesPr(line, pr.taskId, pr.prUrl) || typeof line.run_id !== "string") continue;
+    if (line.step === "review.pending_posted") {
+      if (typeof line.took_over_run_id === "string") live.delete(line.took_over_run_id);
+      live.delete(line.run_id);
+      live.add(line.run_id);
+    } else if (typeof line.step === "string" && REVIEW_RUN_SETTLED_STEPS.has(line.step)) live.delete(line.run_id);
+  }
+  if (pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerRunId !== undefined) live.delete(pr.reviewPendingOwnerRunId);
+  return [...live].at(-1);
+}
 
 /** W1-T14035/W1-T14177 — the death proof is a snapshot, proven about the run the view's ledger named for the live status the
  *  view's rollup held (INVARIANT one-live-review-owner). THREAT MODEL at the moment the sweep admits a re-run on it:
