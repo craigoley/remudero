@@ -71,7 +71,3 @@
   falsifier: |
     Count worker.attempt api rows that share a selection_assignment_id with a produced row: criterion 1's total
     rises above the fixture's known bill and the test fails.
-  needs_input:
-    question: "Pull request https://github.com/craigoley/remudero/pull/19769 (task W1-T13862) cannot merge without your input. What it needs: fix needs design at this exact head (round work-fix-dispatch-W1-T13862-1795138668286-da03:1:1795139056722) — The fixture correction must land separately before this branch can satisfy both the merge-base scope gate and the coverage check."
-    source_pr: https://github.com/craigoley/remudero/pull/19769
-    asked_at: 2026-11-20T01:56:43.917Z

@@ -99,7 +99,3 @@
     At origin/main criterion 1 fails: a fixture over 64 MiB refuses with "stdout maxBuffer length exceeded".
     Drop the header bytes from the bound: criterion 2's exact-size fixture refuses. Make the third
     runner argument required: criterion 3's two-argument fake fails to typecheck or read.
-  needs_input:
-    question: "Pull request https://github.com/craigoley/remudero/pull/19697 (task W1-T13824) cannot merge without your input. What it needs: fix needs design at this exact head (round work-fix-dispatch-W1-T13824-1795143069296-1fd8:1:1795143350099) — Hosted CI requires a merged scope amendment. The fix harness routes test-only NEEDS_SCOPE reports to commit, which would republish the refused path."
-    source_pr: https://github.com/craigoley/remudero/pull/19697
-    asked_at: 2026-11-20T03:04:45.410Z
