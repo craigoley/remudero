@@ -10,9 +10,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -150,7 +151,46 @@ function withoutTestContext(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  * One suite's drifting tests as the sweep's `runSuite` runs the suite: TAP, the test preload, the shift preload and a
  * private TMPDIR, plus one exact `--test-name-pattern` per pinned test.
  */
+/**
+ * One HOST-WIDE pool of shifted children, shared by every copy of this file running at once. The flake screen runs
+ * 2 × availableParallelism() copies, and each copy's own pool of four held 32 children on a 4-core, 15 GB runner: the
+ * runner was shut down mid-screen twice (#20913 at 4369178, exit 143). A slot is a file created exclusively under the
+ * shared tmpdir(), naming its holder's pid; a slot whose holder is dead is reclaimed. One copy alone never waits.
+ */
+const HOST_SLOT_DIR = join(tmpdir(), "rmd-w1-t14786-host-slots");
+const HOST_SLOTS = 2 * availableParallelism();
+function holderAlive(path: string): boolean {
+  try {
+    process.kill(Number(readFileSync(path, "utf8")), 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+async function withHostSlot<T>(run: () => Promise<T>): Promise<T> {
+  mkdirSync(HOST_SLOT_DIR, { recursive: true });
+  for (;;) {
+    for (let i = 0; i < HOST_SLOTS; i++) {
+      const path = join(HOST_SLOT_DIR, `slot-${i}`);
+      try {
+        writeFileSync(path, String(process.pid), { flag: "wx" });
+      } catch {
+        if (!holderAlive(path)) rmSync(path, { force: true });
+        continue;
+      }
+      try {
+        return await run();
+      } finally {
+        try { unlinkSync(path); } catch { /* already reclaimed */ }
+      }
+    }
+    await sleep(250);
+  }
+}
 function runShifted(suite: (typeof DRIFTING)[number], days: number, whole: boolean): Promise<Run> {
+  return withHostSlot(() => runShiftedNow(suite, days, whole));
+}
+function runShiftedNow(suite: (typeof DRIFTING)[number], days: number, whole: boolean): Promise<Run> {
   const isolatedTmp = mkdtempSync(join(tmpdir(), "rmd-w1-t14786-"));
   // A whole-suite run, as the sweep's report runs it, pins no name: every test in the file must pass.
   const names = whole ? [] : pinned(suite);
