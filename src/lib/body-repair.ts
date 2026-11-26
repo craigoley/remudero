@@ -369,12 +369,19 @@ export interface BodyProofReplacement { oldProof: string; newProof: string }
  */
 export function replaceBodyProofs(body: string, replacements: readonly BodyProofReplacement[]): string | undefined {
   const lines = body.split("\n");
+  // W1-T14913: parseAcceptanceBlock unescapes `\"` and `\\` inside double quotes, so a proof written there is matched
+  // and rewritten in its escaped, quoted form; anywhere else it is read literally, as before.
+  const quoted = (text: string): string => `"${text.replace(/[\\"]/g, "\\$&")}"`;
   for (const { oldProof, newProof } of replacements) {
-    const hits = lines.flatMap((line, index) =>
-      /^\s*(?:[-*+]\s|proof\s*:)/i.test(line) && line.includes(oldProof) ? [index] : []);
+    const forms = [{ from: quoted(oldProof), to: quoted(newProof) }, { from: oldProof, to: newProof }];
+    const hits = lines.flatMap((line, index) => {
+      if (!/^\s*(?:[-*+]\s|proof\s*:)/i.test(line)) return [];
+      const form = forms.find(({ from }) => line.includes(from));
+      return form ? [{ index, form }] : [];
+    });
     if (hits.length !== 1) return undefined;
-    const at = hits[0]!;
-    lines[at] = lines[at]!.replace(oldProof, () => newProof);
+    const { index, form } = hits[0]!;
+    lines[index] = lines[index]!.replace(form.from, () => form.to);
   }
   return lines.join("\n");
 }
