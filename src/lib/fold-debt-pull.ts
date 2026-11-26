@@ -25,6 +25,40 @@ export const FOLD_DEBT_PULL_MAX_READS = 5;
 
 const ENTRY_FILE = /^(fold-debt-[A-Za-z0-9-]+-\d+)\.yaml$/;
 
+// ── W1-T14810: an artifact listing follows a completed workflow run ─────────────────────────────
+//
+// INVARIANT artifacts-follow-runs: a sweep lists fold-debt or mutation-verdict artifacts only when a
+// verified workflow_run.completed delivery arrived since that kind's last listing, or the last
+// listing is older than `recheckMs` (policy githubEventWake.artifactRecheckMs). The floor recovers a
+// missed delivery and is never a cap: a delivery always lists. A failed listing still throws.
+
+export type ArtifactListingKind = "fold_debt" | "mutation_verdict";
+
+/** When each kind was last listed, in epoch ms; the caller owns it so it outlives one poll's effects. */
+export type ArtifactListingState = Map<ArtifactListingKind, number>;
+
+/** Whether `kind` is listed now, stamping the listing's start when it is: a run that completes while
+ *  the listing is in flight is newer than the stamp, so the next sweep lists again. A due listing
+ *  returns its rollback, which restores the previous stamp so a FAILED listing is retried next sweep;
+ *  `undefined` means not due. */
+export function artifactListingDue(state: ArtifactListingState, kind: ArtifactListingKind, at: {
+  nowMs: number;
+  /** When the last workflow_run.completed delivery was received, or `undefined` when none is recorded. */
+  runCompletedAtMs: number | undefined;
+  recheckMs: number;
+}): (() => void) | undefined {
+  const last = state.get(kind);
+  const due = last === undefined
+    || (at.runCompletedAtMs !== undefined && at.runCompletedAtMs > last)
+    || at.nowMs - last >= at.recheckMs;
+  if (!due) return undefined;
+  state.set(kind, at.nowMs);
+  return () => {
+    if (last === undefined) state.delete(kind);
+    else state.set(kind, last);
+  };
+}
+
 export function foldDebtArtifactsRestArgs(owner: string, repo: string, name: string): string[] {
   return ["api", `repos/${owner}/${repo}/actions/artifacts?name=${name}&per_page=30`];
 }

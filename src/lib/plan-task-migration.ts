@@ -336,9 +336,14 @@ function credited(pr: Json): string[] {
   return [...new Set([...(branch ? [branch] : []), ...Array.from(pr.body.matchAll(/^Remudero-Task: (W[0-9]+-T[0-9]+)\r?$/gm), m => m[1]!)])]
     .filter(id => branch === id || creditsByAnchoredTrailer("MERGED", pr.headRefName as string, pr.body as string, id));
 }
-export function taskOwned(id: string, files: readonly string[], remote: Map<string, string>, open: Json[]): boolean {
+/** Whether `id` is owned: a dispatch claim or run branch names it, or an open pull request names it by its run branch or
+ *  `Remudero-Task:` trailer, or edits one of `paths` (the record's own shard). An open pull request that only edits the
+ *  code a record's `files:` lists does not own it (operator ruling 2026-11-26, decision card
+ *  cmsg_01KfHU5QoLahDBtwgXxjyKDYNxapcGM6jACdh7UcsY2Z61): credit follows the trailer or run branch, and hot files always
+ *  carry some open pull request, so that overlap pinned records on core for good. */
+export function taskOwned(id: string, paths: readonly string[], remote: Map<string, string>, open: Json[]): boolean {
   if (remote.has(`refs/rmd-dispatch/${id}`) || [...remote.keys()].some(ref => ref.startsWith("refs/heads/") && taskIdFromRunBranch(ref.slice(11)) === id)) return true;
-  return open.some(pr => taskIdFromRunBranch(String(pr.headRefName)) === id || String(pr.body).split(/\r?\n/).includes(`Remudero-Task: ${id}`) || page(pr.files).nodes.some(file => files.includes(String(file.path))));
+  return open.some(pr => taskIdFromRunBranch(String(pr.headRefName)) === id || String(pr.body).split(/\r?\n/).includes(`Remudero-Task: ${id}`) || page(pr.files).nodes.some(file => paths.includes(String(file.path))));
 }
 
 export interface PreviewState {
@@ -391,12 +396,13 @@ export async function readState(o: Options, primaryRefs: Map<string, string>, pr
     ...(movers ? { publicMoves: moverRows(data.publicMoves, repositoryId, o.publicRepo, ["OPEN"]), opsMoves: moverRows(data.opsMoves, opsId, o.opsRepo, ["OPEN"]) } : {}) };
 }
 /** W1-T14447: a task a move step carries: its id, its record path (the same path on both sides), and every path
- *  taskOwned reads as its own (its files: and its record path). */
+ *  taskOwned reads as its own: its record path alone (the operator's 2026-11-26 ruling: a pull request that only
+ *  edits a record's `files:` does not own it; one naming its task or editing its record does). */
 export interface CarriedTask { id: string; path: string; files: readonly string[] }
 const NO_REFS: Map<string, string> = new Map();
 /**
  * W1-T14447: the re-read refuses ownership_changed only for a change that touches a carried task: another repository,
- * an open pull request owning a carried task by taskOwned's rules (its files and record path, its run branch, its
+ * an open pull request owning a carried task by taskOwned's rules (its record path, its run branch, its
  * trailer), or a merged pull request crediting one. Every open and merged pull request of `after` is judged, not only
  * the new or changed ones: the selection already refused any task owned in `before.open` or credited in
  * `before.recent`, so a hit here is a change, and judging the whole read cannot miss one. A merged pull request that
@@ -569,7 +575,7 @@ export async function selectPlanTaskMigration(
   const batch: Json[] = [];
   // W1-T14447: what each re-read protects: every member selected so far, and the candidate under lookup.
   const carried: CarriedTask[] = [];
-  const carriedOf = (task: Task, path: string): CarriedTask => ({ id: task.id, path, files: [...(task.files ?? []), path] });
+  const carriedOf = (task: Task, path: string): CarriedTask => ({ id: task.id, path, files: [path] });
   let lookups = 0;
   // W1-T14825: a record public records still name moves WITH them. Its group is the record plus every public record
   // that names it through depends_on or superseded_by, transitively; a retired, merged or done namer moves as history.
@@ -583,7 +589,7 @@ export async function selectPlanTaskMigration(
     const orig = pub.originals.get(t.id)!;
     if (!isHistory(t) && knownMerged.has(t.id)) return "merged";
     if (t.repo !== o.publicRepo.split("/")[1]) return "target_not_bound";
-    if (taskOwned(t.id, [...(t.files ?? []), orig.path], publicRefs, initial.open)) return "owned";
+    if (taskOwned(t.id, [orig.path], publicRefs, initial.open)) return "owned";
     if (!orig.single || !orig.shard) return "not_single_shard";
     if (alreadyMoved(orig)) return "already_moved";
     // W1-T14858: the ops gate judges a record as moved history by its status alone, so a retired record whose status is
@@ -612,7 +618,7 @@ export async function selectPlanTaskMigration(
   for (const task of ordered) {
     if (inBatch.has(task.id)) continue;
     const original = pub.originals.get(task.id)!;
-    const reason = knownMerged.has(task.id) ? "merged" : task.repo !== o.publicRepo.split("/")[1] ? "target_not_bound" : taskOwned(task.id, [...(task.files ?? []), original.path], publicRefs, initial.open) ? "owned" :
+    const reason = knownMerged.has(task.id) ? "merged" : task.repo !== o.publicRepo.split("/")[1] ? "target_not_bound" : taskOwned(task.id, [original.path], publicRefs, initial.open) ? "owned" :
       publicPrerequisites.has(task.id) && groupOf(task) === undefined ? "public_dependants" : !original.single || !original.shard ? "not_single_shard" : alreadyMoved(original) ? "already_moved" : undefined;
     if (reason) { refused.push({ id: task.id, reason }); continue; }
     if (task.retirement !== undefined) {
@@ -668,7 +674,7 @@ export async function selectPlanTaskMigration(
     if (member && control) {
       if (!historyIds.has(String(member.id)) && searchedMerged(last, String(member.id), control)) return unknown("candidate_credit_changed");
       const task = pub.plan.byId.get(String(member.id))!;
-      if (taskOwned(task.id, [...(task.files ?? []), String(member.sourcePath)], finalPublic, last.open)) return unknown("ownership_changed");
+      if (taskOwned(task.id, [String(member.sourcePath)], finalPublic, last.open)) return unknown("ownership_changed");
     }
   }
   const candidate = batch[0];

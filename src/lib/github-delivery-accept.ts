@@ -74,6 +74,8 @@ export interface GithubDeliveryChecks {
   checkRunCompleted(body: unknown): CheckRunCompletedInfo | undefined;
   /** True when a readable marker is already at `path`. */
   markerPending(path: string): boolean;
+  /** W1-T14810: records a `workflow_run:completed` delivery beside the instance's marker, before the marker. */
+  writeWorkflowRunCompleted(markerPath: string, record: { deliveryId: string; repository: string; receivedAtIso: string }): Promise<void>;
 }
 
 export type GithubDeliveryCount = "accepted_coalesced" | "ignored" | "duplicate";
@@ -199,6 +201,10 @@ export async function acceptGithubDelivery(rawBody: string, headers: IncomingHtt
 
   const record: GithubDeliveryMarker = { deliveryId, event, action, repository: owningRepository, receivedAtIso: deps.clock.iso() };
   const armed = !checks.markerPending(markerPath);
+  if (event === "workflow_run" && action === "completed") {
+    // W1-T14810: written before the marker, so the sweep the marker wakes already sees the run.
+    await checks.writeWorkflowRunCompleted(markerPath, { deliveryId, repository: owningRepository, receivedAtIso: record.receivedAtIso });
+  }
   await deps.writeMarker(markerPath, record);
   await deps.dedup.record(deliveryId);
   if (deps.count && !armed) {
