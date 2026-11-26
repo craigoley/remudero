@@ -301,6 +301,7 @@ function quotedProofValue(line: string): { head: string; quote: string; tail: st
   try {
     return { head: m[1]!, quote: m[2]![0]!, tail: m[3]!, value: String(parseYaml(m[2]!)) };
   } catch {
+    // An invalid escape is not valid YAML, so the line has no parsed value; the caller then matches it literally.
     return undefined;
   }
 }
