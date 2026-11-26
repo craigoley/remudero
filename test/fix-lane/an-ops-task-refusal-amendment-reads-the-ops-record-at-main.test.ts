@@ -97,6 +97,9 @@ function fixture(t: TestContext, catalog: "public" | "ops", opsMainHolds: string
     await withLiveWritesAllowed(() => runSweep([], {
       arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {}, ledgerPath,
       runId: "fixture-sweep", draftRefusalAmendments: effects.draftRefusalAmendments, log: deps.log,
+      // W1-T14969: the sweep reads its age window from the fixture's clock, the one its verdict rows are stamped by, so
+      // the pass enumerates the refusal at any real date instead of only within REFUSAL_AMENDMENT_MAX_AGE_MS of NOW_MS.
+      now: () => NOW_MS,
     }));
   };
   const ledger = () => readFileSync(ledgerPath, "utf8").trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
