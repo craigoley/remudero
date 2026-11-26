@@ -232,8 +232,15 @@ case "$*" in
   *) exec /bin/date "$@" ;;
 esac
 `;
+// The beat's temp-leftover walk reads $TMPDIR and the host's /tmp unless the fixture points both at an empty
+// directory; on a busy review host that walk cost each beat about 14 to 25 s (W1-T14786).
+const QUIET_TMP = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14786-quiet-`));
 const drainVerdict = (ledger: string[] | undefined): string => {
-  const b = runBeat({ ...(ledger ? { ledger } : {}), dateStub: dateStubAt(clockMs()) });
+  const b = runBeat({
+    ...(ledger ? { ledger } : {}),
+    dateStub: dateStubAt(clockMs()),
+    env: { TMPDIR: QUIET_TMP, RMD_HEARTBEAT_SYSTEM_TMP: QUIET_TMP },
+  });
   const line = b.published.split("\n").find((l) => l.startsWith("drain_verdict="));
   assert.ok(line, `the beat must publish drain_verdict: ${b.published}`);
   return line.slice("drain_verdict=".length);

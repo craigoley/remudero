@@ -106,10 +106,9 @@ const DRIFTING: readonly { file: string; tests: readonly string[]; bash4?: reado
 ];
 /**
  * Each suite's whole-file wall time at the sweep's shift, two at a time (seconds, measured 2026-11-26 in a 4-core cloud
- * container). Only an order is read from them. The proof runner gives each test 120 s and a test waits from the end of
- * the one before it, but the two slowest suites take about that alone: run from a shared queue, the second-slowest
- * started behind the quick ones and its test waited 122 s. So the long suites get a lane of their own, started with the
- * pool, and their tests come last, after the quick lane's runs have covered their time.
+ * container; the paused-instance suite re-measured once its beats stopped walking the host's /tmp, 137 s to 13 s). Only
+ * an order is read from them: the pool starts the slowest first, and the tests await the quickest first. The proof
+ * runner gives each test 120 s from the end of the one before it, so a test never waits behind a slower suite's start.
  */
 const WHOLE_SECONDS: Readonly<Record<string, number>> = {
   "test/daemon/repository-maintenance-escalation-heals-itself.test.ts": 3,
@@ -117,6 +116,7 @@ const WHOLE_SECONDS: Readonly<Record<string, number>> = {
   "test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts": 7,
   "test/daemon/a-worktree-janitor-reports-what-it-would-retire.test.ts": 10,
   "test/sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views.test.ts": 12,
+  "test/daemon/a-paused-instance-says-when-it-has-drained.test.ts": 13,
   "test/github/every-mac-session-reads-github-through-one-broker.test.ts": 13,
   "test/fix-lane/rmd-fix-never-reports-a-round-fixed-when-its-progress-judgment-failed.test.ts": 13,
   "test/sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store.test.ts": 15,
@@ -126,17 +126,11 @@ const WHOLE_SECONDS: Readonly<Record<string, number>> = {
   "test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts": 49,
   "test/sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views.test.ts": 51,
   "test/dispatch/product-plan-operation.test.ts": 112,
-  "test/daemon/a-paused-instance-says-when-it-has-drained.test.ts": 137,
 };
 type Suite = (typeof DRIFTING)[number];
-/** A suite is long when its whole run alone is over half the proof runner's 120 s per-test timeout. */
-const LONG_SECONDS = 60;
 const byTime = (a: Suite, b: Suite) => WHOLE_SECONDS[a.file]! - WHOLE_SECONDS[b.file]!;
-/** The long lane runs slowest first: the pinned run's slowest test (the paused instance, ~100 s) is that suite too. */
-const WHOLE_LONG = DRIFTING.filter((suite) => WHOLE_SECONDS[suite.file]! > LONG_SECONDS).sort((a, b) => byTime(b, a));
-const WHOLE_QUICK = DRIFTING.filter((suite) => WHOLE_SECONDS[suite.file]! <= LONG_SECONDS).sort(byTime);
-/** The whole-suite tests: quick suites quickest first, then the long lane in its run order. */
-const WHOLE_TEST_ORDER = [...WHOLE_QUICK, ...WHOLE_LONG];
+/** The whole-suite tests, quickest suite first: each one's run has usually finished by the time its test starts. */
+const WHOLE_TEST_ORDER = [...DRIFTING].sort(byTime);
 const FIFTEEN = DRIFTING.map((suite) => suite.file);
 assert.deepEqual(Object.keys(WHOLE_SECONDS).sort(), [...FIFTEEN].sort(), "every suite has a measured whole-file time");
 assert.equal(new Set(FIFTEEN).size, 15, "fifteen distinct suites");
@@ -185,7 +179,9 @@ function runShift(days: number, whole: boolean): Map<string, Promise<Run>> {
     let resolve!: (run: Run) => void;
     return [suite.file, { promise: new Promise<Run>((r) => { resolve = r; }), resolve }] as const;
   }));
-  const queue = whole ? [...WHOLE_QUICK] : DRIFTING.filter((suite) => !WHOLE_LONG.includes(suite));
+  // Slowest first over one shared pool (longest-processing-time): the wall time is then about the slowest suite alone
+  // (~112 s) rather than the quick suites' sum split across two workers (~161 s at 4 cores, W1-T14786 at 2a5f).
+  const queue = [...DRIFTING].sort((a, b) => byTime(b, a));
   // Half a child per core. Serially a proof took ~150 s against the reviewer's 180 s proof bound and failed on a hosted
   // runner (#20913); the children mostly wait, so a pool cuts that roughly in half. The flake screen runs twice
   // availableParallelism() copies of this file at once, and a core-sized pool there held 32 children and ~14.5 GB on
@@ -195,11 +191,10 @@ function runShift(days: number, whole: boolean): Map<string, Promise<Run>> {
       settled.get(suite.file)!.resolve(await runShifted(suite, days, whole));
     }
   };
-  // Each long suite drains a lane of its own beside the pool, so none starts behind the quick ones or behind each other:
-  // one shared long lane ran 112 s + 137 s = 249 s back to back, past the reviewer's whole-proof 180 s bound (#20913's
-  // review at e7aa53b, exec_error). Two quick workers at least: on one, the quick suites alone summed ~255 s.
-  for (const long of WHOLE_LONG) void drain([long]);
-  for (let w = 0; w < Math.max(2, Math.floor(availableParallelism() / 2) - 1); w++) void drain(queue);
+  // Four workers at least, as many children as the earlier two long lanes plus two quick workers held, so the flake
+  // screen's load is unchanged: one shared long lane ran 112 s + 137 s back to back, past the reviewer's whole-proof
+  // 180 s bound (#20913's review at e7aa53b, exec_error).
+  for (let w = 0; w < Math.max(2, Math.floor(availableParallelism() / 2) - 1) + 2; w++) void drain(queue);
   return new Map([...settled].map(([file, { promise }]) => [file, promise]));
 }
 // Each shift runs only when a test asks for it, so a proof run that selects one shift's tests spawns only its children.
