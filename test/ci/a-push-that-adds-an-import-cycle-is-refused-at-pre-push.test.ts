@@ -44,10 +44,12 @@ function pushMany(
   repo: GitRepo,
   updates: Array<{ rev: string; oldSha?: string; remoteRef?: string }>,
   gate = repo,
+  remote: readonly string[] = [],
 ): { status: number; stderr: string } {
   const input = updates.map(({ rev, oldSha = "0".repeat(40), remoteRef = `refs/heads/${rev}` }) =>
     `${remoteRef} ${repo.git("rev-parse", rev)} ${remoteRef} ${oldSha}\n`).join("");
-  const res = spawnSync("sh", [join(gate.dir, "hooks", "pre-push")], {
+  // `remote` is the hook's own argv as Git passes it: the destination remote's name, then its URL.
+  const res = spawnSync("sh", [join(gate.dir, "hooks", "pre-push"), ...remote], {
     cwd: repo.dir,
     encoding: "utf8",
     input,
@@ -363,6 +365,37 @@ test("W1-T14945 criterion 2: an import quoted inside a comment is a named no-imp
     const { status, stderr } = push(repo, "HEAD", remoteTip);
     assert.match(stderr, /cycle-ratchet — this diff adds no parsed import edge under src\/, skipped \(a named skip, NOT a pass\)/, stderr);
     assert.doesNotMatch(stderr, /^cycle-ratchet: .+ -> .+$/m, stderr);
+    assert.equal(status, 0, stderr);
+  } finally { repo.cleanup(); }
+});
+
+// The twelfth review of #20986 (F1): a new branch was compared only with origin/main, so in a clone whose remote is named
+// upstream the merge base was missing and a committed ring was skipped before depcruise ran.
+test("W1-T14945 criterion 1: a push whose diff closes an import ring is refused at pre-push naming the ring, for a new branch on a remote not named origin", () => {
+  const repo = fixture();
+  try {
+    repo.git("update-ref", "refs/remotes/upstream/main", "refs/remotes/origin/main");
+    repo.git("update-ref", "-d", "refs/remotes/origin/main");
+    commit(repo, "src/lib/b.ts", RING_B);
+    const { status, stderr } = pushMany(repo, [{ rev: "HEAD", remoteRef: "refs/heads/run-W1-T14945-1" }], repo,
+      ["upstream", "https://github.com/craigoley/remudero.git"]);
+    assert.notEqual(status, 0, `the new branch's ring is refused against upstream's default branch:\n${stderr}`);
+    assert.match(stderr, /^cycle-ratchet: BLOCKED/m, stderr);
+    assert.match(stderr, /src\/lib\/a\.ts -> src\/lib\/b\.ts/, stderr);
+  } finally { repo.cleanup(); }
+});
+
+// The twelfth review of #20986 (F2): an advertised old tip missing from this clone read as a branch creation, so the merge
+// base with main counted a ring already on the remote as this push's. It is a named skip, as the gate was before.
+test("W1-T14945 criterion 2: a cycle-free push passes the gate as before, when the remote's old tip is not in this clone", () => {
+  const repo = fixture();
+  try {
+    commit(repo, "src/lib/b.ts", RING_B); // the ring the remote's branch already carries
+    commit(repo, "src/lib/c.ts", CLEAN_C);
+    const unfetched = "1234567890abcdef1234567890abcdef12345678";
+    const { status, stderr } = push(repo, "HEAD", unfetched);
+    assert.match(stderr, new RegExp(`cycle-ratchet — the remote's old tip ${unfetched} is unavailable in this clone, skipped`), stderr);
+    assert.doesNotMatch(stderr, /cycle-ratchet: BLOCKED/, stderr);
     assert.equal(status, 0, stderr);
   } finally { repo.cleanup(); }
 });

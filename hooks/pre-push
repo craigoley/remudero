@@ -303,8 +303,9 @@ fi
 # import ring that depcruise's no-circular rule refuses. Cruise from src/ in each committed snapshot, including
 # workspace dependencies that the scanner can follow. The gate supplies the scanner, config and external packages.
 # Compare the parsed imports first, then check whether any added import supplies a new edge of a reported ring.
-# Check each pushed branch against its remote tip or, on creation, its merge base with origin/main.
+# Check each pushed branch against its remote tip or, on creation, its merge base with the destination remote's default branch.
 cycle_ratchet_skip() { echo "pre-push: cycle-ratchet — $1, skipped (a named skip, NOT a pass)" >&2; }
+cycle_remote="${1:-origin}" # the hook's first argument: the destination remote's name (or its URL)
 if has cycle-ratchet.mjs && [ -x "$gate_root/node_modules/.bin/depcruise" ] && [ -f "$gate_root/.dependency-cruiser.cjs" ]; then
   cycle_updates=""
   while read -r cycle_local_ref cycle_local_sha cycle_remote_ref cycle_remote_sha; do
@@ -323,13 +324,23 @@ EOF_CYCLE_UPDATES
   while IFS=' ' read -r cycle_head_sha cycle_old_sha; do
   [ -n "$cycle_head_sha" ] || continue
   cycle_base=""
-  if [ -n "$cycle_old_sha" ] && [ "$cycle_old_sha" != "$zero_sha" ] && git cat-file -e "${cycle_old_sha}^{commit}" 2>/dev/null; then
-    cycle_base="$cycle_old_sha"
+  cycle_old_unavailable=""
+  if [ -n "$cycle_old_sha" ] && [ "$cycle_old_sha" != "$zero_sha" ]; then
+    # A branch update compares against the tip the remote advertised, never a merge base: an old tip this clone has not
+    # fetched is a named skip, because a creation-style base could count a ring already on the remote as new.
+    if git cat-file -e "${cycle_old_sha}^{commit}" 2>/dev/null; then cycle_base="$cycle_old_sha"; else cycle_old_unavailable=1; fi
   else
-    cycle_base="$(git merge-base origin/main "$cycle_head_sha" 2>/dev/null || true)"
+    # A new branch compares against its merge base with the DESTINATION remote's default branch (the hook's $1), so a
+    # clone whose remote is not named origin is checked too; a push to a bare URL keeps origin/main.
+    for cycle_main in "refs/remotes/$cycle_remote/HEAD" "refs/remotes/$cycle_remote/main" "refs/remotes/origin/main"; do
+      cycle_base="$(git merge-base "$cycle_main" "$cycle_head_sha" 2>/dev/null || true)"
+      [ -n "$cycle_base" ] && break
+    done
   fi
-  if [ -z "$cycle_base" ]; then
-    cycle_ratchet_skip "no remote tip or merge base with origin/main"
+  if [ -n "$cycle_old_unavailable" ]; then
+    cycle_ratchet_skip "the remote's old tip $cycle_old_sha is unavailable in this clone"
+  elif [ -z "$cycle_base" ]; then
+    cycle_ratchet_skip "no remote tip or merge base with $cycle_remote's default branch"
   elif git --no-replace-objects diff --quiet --no-ext-diff "$cycle_base" "$cycle_head_sha" --; then
     cycle_ratchet_skip "this diff adds no parsed import edge under src/"
   elif ! cycle_tree="$(mktemp -d "${TMPDIR:-/tmp}/rmd-prepush-cycles-XXXXXX")"; then
