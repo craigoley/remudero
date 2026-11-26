@@ -32,7 +32,7 @@ import { systemClock, type Clock } from "./clock.js";
 import { MOVED_FROM_VALUE, defaultGitRunnerAsync, withoutOneMovedFromLine } from "./plan.js";
 import {
   MOVE_COPY_RECEIPT, PreviewUnknown, type OpsGateNamedReader, type BatchFits, catalog, liveHeadJudge, migrationOptions, publicReferences, readState, refs, selectPlanTaskMigration, unknown,
-  type CatalogOriginal, type MigrationGraphqlReader, type MigrationOptions, type PreviewState,
+  heldAtBase, moveReservation, type CatalogOriginal, type MigrationGraphqlReader, type MigrationOptions, type PreviewState,
 } from "./plan-task-migration.js";
 import { planPrPreflightAllows, planPrPreflightAtCommitAsync, ratifyPrCreateRestArgs, type PlanPrPreflightResult } from "./plan-pr-emitter.js";
 import { ghJsonAsync } from "./github-transport.js";
@@ -118,7 +118,7 @@ export function batchFits(o: ReceiptOptions, publicRefs: ReadonlyMap<string, str
   return batch => (["copy", "remove"] as const).every(step => {
     const receipt = step === "copy" ? copyReceipt : removeReceipt;
     const members = batch.map((m): Planned => ({ step, id: m.id, repository: step === "copy" ? "ops" : "public", path: m.path, title: "", evidence: {},
-      message: `\n\n${receipt(o, m.id, m.path, m.blob, publicRefs.get(`refs/rmd-id/${m.id}`) ?? "0".repeat(40))}` }));
+      message: `\n\n${receipt(o, m.id, m.path, m.blob, publicRefs.get(`refs/rmd-id/${m.id}`) ?? heldAtBase(o.publicCommit))}` }));
     return bodyOf(stepOf(members)).length <= limit;
   });
 }
@@ -188,7 +188,7 @@ async function moverHistory(root: string, commit: string): Promise<Map<string, M
   for (const entry of out.split("\x1e")) {
     const [sha, body] = entry.trim().split("\x1f");
     if (!sha || body === undefined) continue;
-    const reservations = new Map([...body.matchAll(/^Remudero-Move-Reservation: (\S+) ([0-9a-f]{40})$/gm)].map(m => [m[1]!, m[2]!]));
+    const reservations = new Map([...body.matchAll(/^Remudero-Move-Reservation: (\S+) ([0-9a-f]{40}|held-at=remudero@[0-9a-f]{40})$/gm)].map(m => [m[1]!, m[2]!]));
     for (const m of body.matchAll(/^Remudero-Moved-To: \S+@[0-9a-f]{40} (\S+) path=(\S+) blob=([0-9a-f]{40})$/gm)) {
       if (!latest.has(m[1]!)) latest.set(m[1]!, { kind: "removed", id: m[1]!, commit: sha, path: m[2]!, blob: m[3]!, reservation: reservations.get(m[1]!) });
     }
@@ -271,7 +271,8 @@ function plannedConverge(o: MigrationOptions, state: PreviewState, publicRefs: M
       title: `chore(plan): roll back the move of ${id} into the ops catalog`,
       message: `chore(plan): roll back the move of ${id} into the ops catalog\n\nThe public copy is ${owner}, so it stays and this ops copy is removed.\n\n${MOVE_ROLLBACK_TRAILER} ${id} path=${opsCopy.path} reason=${owner}\n` };
   }
-  const reservation = publicRefs.get(`refs/rmd-id/${id}`);
+  // W1-T14993: the public plan holds the record at this base (pub is its copy there), as ops-gate check_reserved accepts.
+  const reservation = moveReservation(id, publicRefs, { commit: o.publicCommit, ids: new Set([id]) });
   if (reservation === undefined) return { held: "reservation_absent" };
   return { step: "remove", id, repository: "public", path: pub.path, blob: bound.blob, evidence: { ...evidence, reservation },
     title: `chore(plan): move ${id} to the ops catalog`,
@@ -343,7 +344,9 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
     // COMPLETE evidence: every removal only ops now holds, with its reservation ref unchanged since the removal.
     const completed = [...history.values()].filter(event => event.kind === "removed" && !pub.plan.byId.has(event.id) && ops.plan.byId.get(event.id)?.moved_from !== undefined)
       .map(event => ({ id: event.id, removalCommit: event.commit, reservation: publicRefs.get(`refs/rmd-id/${event.id}`) ?? null,
-        reservationUnchanged: event.reservation !== undefined && publicRefs.get(`refs/rmd-id/${event.id}`) === event.reservation }));
+        // W1-T14993: a removal held at its base stays unchanged while the id stays unreserved.
+        reservationUnchanged: event.reservation !== undefined && (publicRefs.get(`refs/rmd-id/${event.id}`) ??
+          (event.reservation.startsWith("held-at=") ? event.reservation : undefined)) === event.reservation }));
     if (step !== undefined) planned = step;
     else {
       const selection = await selectPlanTaskMigration(o, reader, ports.bounds, batchFits(o, publicRefs, ports.bodyLimit), ports.opsGateNamed);
@@ -354,7 +357,7 @@ export async function movePlanTask(args: readonly string[], ports: MovePorts): P
       for (const candidate of selection.batch) {
         const id = String(candidate.id), path = String(candidate.sourcePath), original = String(candidate.yaml);
         if (await readBytes(o.opsRoot, `${o.opsCommit}:${path}`) !== undefined) return unknown("ops_path_taken");
-        const reservation = publicRefs.get(`refs/rmd-id/${id}`) ?? unknown("reservation_absent");
+        const reservation = moveReservation(id, publicRefs, { commit: o.publicCommit, ids: pub.plan.byId }) ?? unknown("reservation_absent");
         const text = withMovedFromLine(original, id, o.publicCommit);
         members.push({ step: "copy", id, repository: "ops", path, text, blob: String(candidate.sourceBlob),
           evidence: { sourceCommit: o.publicCommit, sourceBlob: candidate.sourceBlob, reservation },

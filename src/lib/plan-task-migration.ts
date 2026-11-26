@@ -544,6 +544,15 @@ export function publicReferences(tasks: ReadonlyArray<Task>): Set<string> {
   return new Set(tasks.flatMap(task => [...task.depends_on, ...(task.superseded_by === undefined ? [] : [task.superseded_by])]));
 }
 
+/** W1-T14993: the reservation evidence a moving record whose id has no refs/rmd-id ref carries in its receipts. */
+export const heldAtBase = (publicCommit: string) => `held-at=remudero@${publicCommit}`;
+/** W1-T14993 (operator ruling 2026-11-26T15:10:25Z, "match the ops gate's rule"): what proves a moving record's id. Its
+ *  refs/rmd-id ref when one exists; otherwise, as ops-gate check_reserved exempts a verified move, the public plan holding
+ *  the id at the move's base proves it (ids before W1-T4217 predate reservations). Undefined when neither does. */
+export function moveReservation(id: string, publicRefs: ReadonlyMap<string, string>, base: { commit: string; ids: { has(id: string): boolean } }): string | undefined {
+  return publicRefs.get(`refs/rmd-id/${id}`) ?? (base.ids.has(id) ? heldAtBase(base.commit) : undefined);
+}
+
 /** The selection the preview verb prints (W1-T13680 exports it for `rmd move-task`): pinned catalogs, ownership, the
  *  merge-credit search and a stable re-read. It throws {@link PreviewUnknown} on any unread or changed evidence.
  *  W1-T14345: it fills a batch of open tasks, oldest filing first, that the ops catalog has room for; a batch of one is
@@ -562,6 +571,7 @@ export async function selectPlanTaskMigration(
   const control = [...initial.recent].reverse().find(pr => taskIdFromRunBranch(String(pr.headRefName)) !== undefined);
   const refused: Array<{ id: string; reason: string }> = [];
   const publicPrerequisites = publicReferences(pub.plan.tasks);
+  const atBase = { commit: o.publicCommit, ids: pub.plan.byId };
   // Oldest filing first; records filed in one commit keep the reverse dispatch order the preview always read.
   const ranks = await filingRanks(o.publicRoot, o.publicCommit, [...new Set([...pub.originals.values()].filter(x => x.shard).map(x => dirname(x.path)))]);
   const rank = (task: Task) => ranks.get(pub.originals.get(task.id)!.path) ?? Number.MAX_SAFE_INTEGER;
@@ -589,7 +599,7 @@ export async function selectPlanTaskMigration(
     // W1-T14858: the ops gate judges a record as moved history by its status alone, so a retired record whose status is
     // still open-shaped (blocked, queued) is moved live work there and must pass the shape rules.
     if (!OPS_GATE_HISTORY_STATUSES.has(t.status) && opsGateShapeRefused(orig)) return "ops_gate_shape";
-    if (!publicRefs.has(`refs/rmd-id/${t.id}`)) return "reservation_absent";
+    if (moveReservation(t.id, publicRefs, atBase) === undefined) return "reservation_absent";
     return undefined;
   };
   /** The record's group, or undefined when any member cannot move or would leave a superseded_by unresolved in ops. */
@@ -624,7 +634,7 @@ export async function selectPlanTaskMigration(
     // exclude the mover's moved_from line, so a release survives the move. W1-T14424: an open record
     // the ops gate's moved-live rules refuse would fail the whole batch's copy, so it is left out before any lookup.
     const unmovable = !OPEN_STATUSES.has(task.status) ? "not_open" : opsGateShapeRefused(original) ? "ops_gate_shape" :
-      !publicRefs.has(`refs/rmd-id/${task.id}`) ? "reservation_absent" : undefined;
+      moveReservation(task.id, publicRefs, atBase) === undefined ? "reservation_absent" : undefined;
     if (unmovable) { refused.push({ id: task.id, reason: unmovable }); continue; }
     if (!control) return unknown("merge_credit_control_unreadable");
     // W1-T14825: an unnamed record is a group of one, selected exactly as before.
