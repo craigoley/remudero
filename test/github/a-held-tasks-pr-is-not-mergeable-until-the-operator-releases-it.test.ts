@@ -145,7 +145,7 @@ test("W1-T14902: the one reader reads main, then a fresh ops record; every other
   assert.deepEqual(await read({ readMainPlan: main({}), lookup: found({ dispatch_hold: true }) }), { outcome: "held", taskId: TASK });
   assert.deepEqual(await read({ readMainPlan: main({}), lookup: found({}) }), { outcome: "clear" });
   assert.deepEqual(await read({ readMainPlan: main({}), lookup: ops({ outcome: "absent" }) }),
-    { outcome: "unread", taskId: TASK, reason: "neither the plan at origin/main nor the ops catalog holds it" },
+    { outcome: "unread", taskId: TASK, reason: "no plan at origin/main and no ops catalog holds it" },
     "a real id neither catalog holds cannot be shown clear");
   assert.deepEqual(await read({ readMainPlan: main({ "W1-T12e": { dispatch_hold: true } }), lookup: never }, "W1-T12e"),
     { outcome: "held", taskId: "W1-T12e" }, "a legacy suffixed id is a task id, not a synthetic key");
@@ -261,7 +261,7 @@ test("W1-T14902: the production reader's defaults read the body through gh and t
   rmSync(join(root, "repos"), { recursive: true, force: true });
   // No plan destination and no acme/remudero-ops checkout: no catalog holds the named task, so it reads unread.
   const reading = await readPullRequestTaskHold(PR_URL, (() => ({ root })) as unknown as Parameters<typeof readPullRequestTaskHold>[1]);
-  assert.deepEqual(reading, { outcome: "unread", taskId: TASK, reason: "neither the plan at origin/main nor the ops catalog holds it" });
+  assert.deepEqual(reading, { outcome: "unread", taskId: TASK, reason: "no plan at origin/main and no ops catalog holds it" });
   assert.equal(shim.calls().filter((c) => c.includes("pulls/910")).length, 1, "positive control: the body was read through gh");
 });
 
@@ -390,6 +390,40 @@ test("W1-T14902: a target repository's task is read from that repository's own p
   // End to end through the guarded poster's own source: a held record in the target's plan holds its PR.
   assert.deepEqual(await readTaskDispatchHold("W1-T8397", { stateDir, repository: { owner: "acme", repo: "wreck" } }),
     { outcome: "held", taskId: "W1-T8397" });
+});
+
+test("W1-T14902: a satellite target's plan is read as its review reads it, and a core record falls back to core", async (t) => {
+  // The live remudero-ops shape: a core record (repo: remudero) depending on a public id the ops plan never holds, beside
+  // the ops daemon's own tasks. A strict parse throws on the first, and every ops task read unread (round-4 finding).
+  const record = (id: string, repo: string, dependsOn: string[], hold?: boolean) =>
+    `- id: ${id}\n  title: Fixture ${id}\n  repo: ${repo}\n  depends_on: [${dependsOn.join(", ")}]\n  type: implement\n` +
+    `  verify: auto\n  risk: low\n  budget_usd: 5\n  status: queued\n  files: [fixture.ts]\n${hold === undefined ? "" : `  dispatch_hold: ${hold}\n`}` +
+    `  acceptance:\n    - claim: ${id} holds\n      proof: "grep: ${id} in fixture.ts"\n`;
+  const root = tmp(t, "satellite");
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir);
+  const ops = gitRepo({ scope: t, kind: "t14902-ops" });
+  mkdirSync(join(ops.dir, "plan", "tasks.d"), { recursive: true });
+  writeFileSync(join(ops.dir, "plan", "tasks.yaml"), "[]\n");
+  writeFileSync(join(ops.dir, "plan", "tasks.d", "core.yaml"), record("W1-T900301", "remudero", ["W1-T900300"]));
+  writeFileSync(join(ops.dir, "plan", "tasks.d", "ops.yaml"),
+    record("W1-T900302", "remudero-ops", []) + record("W1-T900303", "remudero-ops", [], true));
+  ops.git("add", "plan");
+  ops.git("commit", "-qm", "plan");
+  ops.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  writeFileSync(join(stateDir, "daemon-target.json"),
+    JSON.stringify({ owner: "acme", repo: "remudero-ops", isSelf: false, checkoutRoot: ops.dir }));
+  const read = (id: string, repo = "remudero-ops") => readTaskDispatchHold(id, { stateDir, repository: { owner: "acme", repo } });
+  assert.deepEqual(await read("W1-T900302"), { outcome: "clear" }, "an ops task with no hold reviews and arms as today");
+  assert.deepEqual(await read("W1-T900303"), { outcome: "held", taskId: "W1-T900303" });
+  // A record the PR's own plan does not hold, but this checkout's plan does, is read from it (W1-T8397 is held on main).
+  assert.deepEqual(await read("W1-T8397"), { outcome: "held", taskId: "W1-T8397" });
+  assert.deepEqual(await read("W1-T10732"), { outcome: "clear" });
+  // The target's own task with an unresolved dependency stays strict: that plan cannot be read, and the hold holds.
+  writeFileSync(join(ops.dir, "plan", "tasks.d", "ops.yaml"), record("W1-T900302", "remudero-ops", ["W1-T900300"]));
+  ops.git("commit", "-qam", "broken own record");
+  ops.git("update-ref", "refs/remotes/origin/main", "HEAD");
+  assert.equal((await read("W1-T900302")).outcome, "unread");
 });
 
 test("W1-T14902: a daemon whose cwd is no work tree (launchd's config.root) still reads the plan, from its install", async (t) => {

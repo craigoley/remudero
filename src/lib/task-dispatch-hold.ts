@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defaultGitRunnerAsync, loadPlanAtRefAsync } from "./plan.js";
+import { defaultGitRunnerAsync, loadPlanAtRefAsync, type KeepsUnseenDependency } from "./plan.js";
 import { readOpsCatalogSnapshotAsync } from "./ops-catalog-source.js";
 import { planDestinationRepository } from "./plan-destination.js";
 
@@ -108,20 +108,47 @@ function daemonTarget(stateDir: string): { owner: string; repo: string; checkout
     ? { owner: r.owner, repo: r.repo, checkoutRoot: r.checkoutRoot } : undefined;
 }
 
+/**
+ * The plans at origin/main a named task is looked up in, in order: the pull request's own repository's, then this
+ * checkout's when that is another one (a core record naming `repo: remudero-console` is filed in core, not in the
+ * console's plan). A foreign target's plan is read as its review reads it (W1-T13794): a satellite catalog such as
+ * remudero-ops holds other repositories' tasks whose dependencies it cannot hold, so those stay unseen instead of
+ * failing the whole parse; its own repository's tasks stay strict.
+ */
+async function mainPlanReaders(sources: TaskDispatchHoldSources): Promise<Array<() => Promise<{ byId: ReadonlyMap<string, { dispatch_hold?: boolean }> }>>> {
+  const self = await planCheckoutRoot();
+  const target = await targetPlanRoot(sources.stateDir, sources.repository, async () => self);
+  const read = (root: string, keeps?: KeepsUnseenDependency) => () =>
+    loadPlanAtRefAsync(root, "plan/tasks.yaml", "origin/main", defaultGitRunnerAsync(root), keeps);
+  if (target === self || sources.repository === undefined) return [read(self)];
+  const subject = `${sources.repository.owner}/${sources.repository.repo}`;
+  return [read(target, (task: { repo: string }) => !targetsRepo(task.repo, subject)), read(self)];
+}
+
+/** `drain.ts` taskTargetsRepo's rule, restated: importing drain.ts from here closes a cycle back through review.ts.
+ *  The repository's last path segment, case-folded; a task naming no repository belongs to every target. */
+function targetsRepo(taskRepo: string | undefined, subject: string): boolean {
+  const name = (value: string) => { const trimmed = value.trim().replace(/\/+$/, ""); return trimmed.slice(trimmed.lastIndexOf("/") + 1).toLowerCase(); };
+  return taskRepo === undefined || taskRepo.trim() === "" || name(taskRepo) === name(subject);
+}
+
 // A planned id, legacy suffixes too (W1-T12e); a synthetic review key (`PR-<n>`, `dep-review-PR<n>`) is not one.
 const TASK_ID = /^[A-Z][A-Z0-9]*-T\d+[A-Za-z0-9]*$/;
 
 export async function readTaskDispatchHold(taskId: string | undefined, sources: TaskDispatchHoldSources): Promise<TaskHoldReading> {
   // A synthetic review key (`PR-<n>`, `dep-review-PR<n>`) or no trailer names no task: it reviews and arms as today.
   if (taskId === undefined || !TASK_ID.test(taskId)) return { outcome: "clear" };
-  let main: { byId: ReadonlyMap<string, { dispatch_hold?: boolean }> };
-  try {
-    main = await (sources.readMainPlan ?? (async () => loadPlanAtRefAsync(await targetPlanRoot(sources.stateDir, sources.repository), "plan/tasks.yaml", "origin/main")))();
-  } catch (error) {
-    return { outcome: "unread", taskId, reason: `the plan at origin/main is unreadable: ${String((error as Error)?.message ?? error)}` };
+  const plans = sources.readMainPlan !== undefined ? [sources.readMainPlan] : await mainPlanReaders(sources);
+  for (const readPlan of plans) {
+    let main: { byId: ReadonlyMap<string, { dispatch_hold?: boolean }> };
+    try {
+      main = await readPlan();
+    } catch (error) {
+      return { outcome: "unread", taskId, reason: `the plan at origin/main is unreadable: ${String((error as Error)?.message ?? error)}` };
+    }
+    const inMain = main.byId.get(taskId);
+    if (inMain !== undefined) return inMain.dispatch_hold === true ? { outcome: "held", taskId } : { outcome: "clear" };
   }
-  const inMain = main.byId.get(taskId);
-  if (inMain !== undefined) return inMain.dispatch_hold === true ? { outcome: "held", taskId } : { outcome: "clear" };
   const lookup = sources.lookup ?? ((id: string) => readOpsCatalogHold(id, sources.stateDir));
   let found: TaskHoldLookup;
   try {
@@ -130,7 +157,7 @@ export async function readTaskDispatchHold(taskId: string | undefined, sources: 
     return { outcome: "unread", taskId, reason: `the ops catalog lookup threw: ${String((error as Error)?.message ?? error)}` };
   }
   if (found.outcome === "unreadable") return { outcome: "unread", taskId, reason: found.reason };
-  if (found.outcome === "absent") return { outcome: "unread", taskId, reason: "neither the plan at origin/main nor the ops catalog holds it" };
+  if (found.outcome === "absent") return { outcome: "unread", taskId, reason: "no plan at origin/main and no ops catalog holds it" };
   if (found.lastGood !== undefined) return { outcome: "unread", taskId, reason: `served from the last good ops snapshot (${found.lastGood.refusal})` };
   return found.task.dispatch_hold === true ? { outcome: "held", taskId } : { outcome: "clear" };
 }
