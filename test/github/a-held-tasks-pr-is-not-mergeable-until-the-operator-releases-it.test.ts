@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { catalogReviewPoster, publishUnreadTaskCatalogHold, reviewCommand, runReview, type ReviewCommandHost } from "#src/cli/commands/review.js";
-import { armIfVerdictPermitsAsync, attemptArmAsync, readPullRequestTaskHold, realArmDepsAsync } from "#src/lib/arm-auto-merge.js";
+import { armIfVerdictPermitsAsync, attemptArm, attemptArmAsync, readPullRequestTaskHold, realArmDepsAsync } from "#src/lib/arm-auto-merge.js";
 import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
@@ -94,7 +94,7 @@ test("W1-T14902 criterion 2: attemptArm refuses a held task's pull request: no a
   const asked: string[] = [];
   const { outcome, writes, rows } = await reviewArm(async (prUrl) => { asked.push(prUrl); return { outcome: "held", taskId: TASK }; });
   assert.equal(outcome, "hold-refused", "THE CLAIM: the arm is refused");
-  assert.deepEqual(writes, [], "no arm and no direct merge reached GitHub");
+  assert.equal(writes.length, 0, "no arm and no direct merge reached GitHub");
   assert.deepEqual(asked, [PR_URL], "positive control: the hold reader was asked about this PR");
   const named = rows.filter((row) => row.outcome === "hold-refused");
   assert.equal(named.length, 1, `one row records the refusal: ${JSON.stringify(rows)}`);
@@ -706,7 +706,7 @@ test("W1-T14902: the run's at-open arm hands its refusal reason to the caller, s
     taskHold: async () => ({ outcome: "held", taskId: TASK }),
   }, false, false, (attempt) => { attempts.push(attempt); });
   assert.equal(outcome, "hold-refused");
-  assert.deepEqual(writes, []);
+  assert.equal(writes.length, 0);
   assert.equal(attempts.length, 1);
   assert.match(attempts[0]!.error ?? "", /W1-T14898 carries dispatch_hold/, "THE CLAIM: the reason reaches the caller");
 });
@@ -810,4 +810,59 @@ test("W1-T14902: a fresh broker read never joins a GET already under way, which 
   calls[1]!.resolve(row(`Remudero-Task: ${TASK}`));
   assert.equal(JSON.parse((await fresh).stdout).body, `Remudero-Task: ${TASK}`, "THE CLAIM: the fresh read sees the edit");
   assert.equal(calls.length, 2);
+});
+
+test("W1-T14902: a trailer edited to a held task while the arm awaits its checks is refused at the write", async () => {
+  // Round-10 C2: the hold was read only on entry; the closing-reference check awaited, the live trailer was edited to
+  // a held task, and the arm reached armAuto. The write fence re-reads the hold immediately before every write.
+  const readings: string[] = [];
+  let edited = false;
+  const taskHold = async () => { readings.push(edited ? "held" : "clear");
+    return edited ? { outcome: "held" as const, taskId: "W1-T8397" } : { outcome: "clear" as const }; };
+  const writes: string[] = [];
+  const says: string[] = [];
+  const noWrites = () => writes.length;
+  const base = {
+    headSha: async () => SHA, ledgerLines: () => [], isMerged: async () => false, say: (m: string) => { says.push(m); },
+    closingReferences: async () => { edited = true; return { state: "clean" as const, defused: [] }; },
+    taskHold,
+  };
+  const armed = await attemptArmAsync(PR_URL, { ...base, armAuto: async () => { writes.push("armAuto"); },
+    mergeDirect: async () => { writes.push("mergeDirect"); } } as never);
+  assert.equal(noWrites(), 0, "THE CLAIM: no arm and no direct merge reached GitHub");
+  assert.equal(armed.outcome, "hold-refused");
+  assert.match(armed.error ?? "", /W1-T8397 carries dispatch_hold/, "the row names the task and the hold");
+  assert.deepEqual(readings, ["clear", "held"], "read at entry, and again at the write");
+  assert.ok(says.some((m) => /at the write/.test(m)));
+  // The direct-merge fallback is fenced the same way (GitHub refuses auto-merge on a clean PR).
+  edited = false;
+  readings.length = 0;
+  const direct = await attemptArmAsync(PR_URL, { ...base,
+    armAuto: async () => { throw Object.assign(new Error("x"), { stderr: "Pull request is in clean status" }); },
+    mergeDirect: async () => { writes.push("mergeDirect"); } } as never);
+  assert.equal(writes.length, 0);
+  assert.equal(direct.outcome, "hold-refused");
+  // An unreadable hold at the write holds too, and a clear one writes as today.
+  const unread = await attemptArmAsync(PR_URL, { ...base, closingReferences: undefined,
+    taskHold: (() => { let n = 0; return async () => { if (n++ === 0) return { outcome: "clear" as const }; throw new Error("HTTP 502"); }; })(),
+    armAuto: async () => { writes.push("armAuto"); }, mergeDirect: async () => { writes.push("mergeDirect"); } } as never);
+  assert.equal(unread.outcome, "hold-refused");
+  assert.equal(writes.length, 0);
+  const clear = await attemptArmAsync(PR_URL, { ...base, closingReferences: undefined, taskHold: async () => ({ outcome: "clear" as const }),
+    armAuto: async () => { writes.push("armAuto"); }, mergeDirect: async () => { writes.push("mergeDirect"); } } as never);
+  assert.equal(clear.outcome, "armed");
+  assert.deepEqual(writes, ["armAuto"]);
+});
+
+test("W1-T14902: the synchronous arm's write fence reads its reader synchronously, and a throwing reader holds", () => {
+  const writes: string[] = [];
+  let n = 0;
+  const sync = attemptArm(PR_URL, {
+    headSha: () => SHA, ledgerLines: () => [], isMerged: () => false, say: () => {},
+    taskHold: () => { if (n++ === 0) return { outcome: "clear" as const }; throw new Error("read failed"); },
+    armAuto: () => { writes.push("armAuto"); }, mergeDirect: () => { writes.push("mergeDirect"); },
+  } as never);
+  assert.equal(sync.outcome, "hold-refused");
+  assert.match(sync.error ?? "", /dispatch_hold is unreadable \(read failed\)/);
+  assert.equal(writes.length, 0);
 });

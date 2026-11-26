@@ -1685,14 +1685,11 @@ function* taskHoldRefusalSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "say"> & Partial<Pick<ArmDeps<true>, "taskHold">>,
 ): Steps<ArmAttemptResult | undefined> {
-  if (!deps.taskHold) {
-    // Fail closed: a production arm with no reader wired never skips the check (a fixture's partial fakes do).
-    if (!isRealArmDepsObject(deps) || isTestRunner()) return undefined;
-    deps = { ...deps, taskHold: SYNC_ARM_TASK_HOLD };
-  }
+  const reader = taskHoldReaderOf(deps);
+  if (reader === undefined) return undefined;
   let reading: TaskHoldReading;
   try {
-    reading = yield* step(() => deps.taskHold!(prUrl));
+    reading = yield* step(() => reader(prUrl));
   } catch (e) {
     reading = { outcome: "unread", taskId: "the named task", reason: String((e as Error)?.message ?? e) };
   }
@@ -1701,6 +1698,56 @@ function* taskHoldRefusalSteps(
   deps.say(`automerge.task_hold_refused (W1-T14902): ${refusal} — no arm and no direct merge until the operator ` +
     `releases it: ${prUrl}`);
   return { outcome: "hold-refused", error: refusal };
+}
+
+/** W1-T14902: the hold reader an arm uses — its own, else (fail closed) {@link SYNC_ARM_TASK_HOLD} for a production
+ *  deps object with none wired; a fixture's partial fakes with no reader skip the check. */
+function taskHoldReaderOf(deps: Partial<Pick<ArmDeps<true>, "taskHold">>): ArmDeps<true>["taskHold"] | undefined {
+  if (deps.taskHold) return deps.taskHold;
+  return !isRealArmDepsObject(deps) || isTestRunner() ? undefined : SYNC_ARM_TASK_HOLD;
+}
+
+/** W1-T14902 (round-10 C2): a write the task's hold refused at its boundary. It is an operator-hold write refusal, so
+ *  every write site's existing catch returns `hold-refused`; {@link holdRefusedAtWrite} carries the reason to the row. */
+class TaskHoldWriteRefused extends OperatorMergeHoldWriteRefused {
+  constructor(readonly refusal: string) {
+    super(`${refusal} — write withheld`);
+  }
+}
+
+/** The outcome of a write an operator hold or the task's hold refused at its boundary. */
+function holdRefusedAtWrite(e: OperatorMergeHoldWriteRefused): ArmAttemptResult {
+  return e instanceof TaskHoldWriteRefused ? { outcome: "hold-refused", error: e.refusal } : { outcome: "hold-refused" };
+}
+
+/** W1-T14902 (round-10 C2): THE write fence. Every arm write (`armAuto`, `mergeDirect`, `enqueue`) re-reads the task the
+ *  live PR names immediately before it is issued — nothing runs between that read and the write — so a trailer edited
+ *  to a held task while the arm awaited its other checks (closing references, the ratchet judge, the preflight) is
+ *  refused at the write, not armed. */
+function withTaskHoldAtWrite<D extends Pick<ArmDeps<true>, "armAuto" | "mergeDirect" | "say"> &
+  Partial<Pick<ArmDeps<true>, "enqueue" | "taskHold">>>(deps: D): D {
+  const reader = taskHoldReaderOf(deps);
+  if (reader === undefined) return deps;
+  const fence = <W extends (prUrl: string, ...rest: never[]) => unknown>(write: W): W => ((prUrl: string, ...rest: never[]) => {
+    const decide = (reading: TaskHoldReading) => {
+      const refusal = taskHoldRefusal(reading);
+      if (refusal === undefined) return write(prUrl, ...rest);
+      deps.say(`automerge.task_hold_refused (W1-T14902, at the write): ${refusal} — no arm and no direct merge until ` +
+        `the operator releases it: ${prUrl}`);
+      throw new TaskHoldWriteRefused(refusal);
+    };
+    const unread = (e: unknown): TaskHoldReading =>
+      ({ outcome: "unread", taskId: "the named task", reason: String((e as Error)?.message ?? e) });
+    let reading: TaskHoldReading | Promise<TaskHoldReading>;
+    try {
+      reading = reader(prUrl);
+    } catch (e) {
+      reading = unread(e);
+    }
+    return reading instanceof Promise ? reading.then(decide, (e: unknown) => decide(unread(e))) : decide(reading);
+  }) as W;
+  return { ...deps, armAuto: fence(deps.armAuto), mergeDirect: fence(deps.mergeDirect),
+    ...(deps.enqueue ? { enqueue: fence(deps.enqueue) } : {}) };
 }
 
 /** W1-T14902: the production reading — the task the live PR names, from one broker-revalidated read at act time (a
@@ -1748,7 +1795,7 @@ function* attemptArmSteps(
   priorHeadSha?: string,
   isDraft?: boolean,
 ): Steps<ArmAttemptResult> {
-  deps = withSubmittedMark(deps);
+  deps = withTaskHoldAtWrite(withSubmittedMark(deps));
   // SHADOW (W1-T13698): checked before everything, the draft read included — every arm and direct-merge write below
   // sits behind this, so a ratchet-judge decision, a quota fallback or a clean-status merge never reaches a write.
   const shadowRefused = yield* shadowInstanceRefusalSteps(prUrl, deps);
@@ -1831,7 +1878,7 @@ function* attemptArmSteps(
     yield* step(() => deps.armAuto(prUrl));
     return { outcome: "armed", ...(judged.judge ? { ratchetJudge: judged.judge } : {}) };
   } catch (e) {
-    if (e instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
+    if (e instanceof OperatorMergeHoldWriteRefused) return holdRefusedAtWrite(e);
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
     // GitHub REFUSES to enable auto-merge on an ALREADY-mergeable PR ("Pull request is in clean
     // status"): every SWEEP-armed PR can land in exactly that state, so the fallback below
@@ -1864,7 +1911,7 @@ function* attemptArmSteps(
         deps.say(`automerge.rate_limited_rest_merge (W1-T1255; arm refused on quota, PR already green): ${prUrl}`);
         return { outcome: "direct-merged", error: msg, rateLimit: quota, directMergePreflight: preflight.evidence };
       } catch (e3) {
-        if (e3 instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
+        if (e3 instanceof OperatorMergeHoldWriteRefused) return holdRefusedAtWrite(e3);
         let msg3 = String((e3 as { stderr?: unknown })?.stderr ?? (e3 as Error)?.message ?? e3);
         if (yield* step(() => deps.isMerged?.(prUrl))) {
           deps.say(`automerge.rate_limited_rest_merge (merge landed; a post-merge step failed: ${msg3}): ${prUrl}`);
@@ -1907,7 +1954,7 @@ function* attemptArmSteps(
                   directMergePreflight: retryPreflight.evidence,
                 };
               } catch (e4) {
-                if (e4 instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
+                if (e4 instanceof OperatorMergeHoldWriteRefused) return holdRefusedAtWrite(e4);
                 msg3 = String((e4 as { stderr?: unknown })?.stderr ?? (e4 as Error)?.message ?? e4);
                 if (yield* step(() => deps.isMerged?.(prUrl))) {
                   deps.say(
@@ -2105,7 +2152,7 @@ function* mergeDirectAfterPreflightSteps(
     deps.say(`automerge.clean_status_direct_merge (already green — merged now): ${prUrl}`);
     return { outcome: "direct-merged", directMergePreflight: evidence };
   } catch (e2) {
-    if (e2 instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
+    if (e2 instanceof OperatorMergeHoldWriteRefused) return holdRefusedAtWrite(e2);
     let msg2 = String((e2 as { stderr?: unknown })?.stderr ?? (e2 as Error)?.message ?? e2);
     // W1-T1050: a merge that landed must never be reported as a failed one.
     if (yield* step(() => deps.isMerged?.(prUrl))) {
@@ -2142,7 +2189,7 @@ function* mergeDirectAfterPreflightSteps(
             deps.say(`automerge.clean_status_direct_merge (W1-T11259; merged on retry ${read}): ${prUrl}`);
             return { outcome: "direct-merged", directMergePreflight: finalEvidence };
           } catch (e4) {
-            if (e4 instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
+            if (e4 instanceof OperatorMergeHoldWriteRefused) return holdRefusedAtWrite(e4);
             msg2 = String((e4 as { stderr?: unknown })?.stderr ?? (e4 as Error)?.message ?? e4);
             if (yield* step(() => deps.isMerged?.(prUrl))) {
               deps.say(`automerge.clean_status_direct_merge (merge landed; a post-merge step failed: ${msg2}): ${prUrl}`);
@@ -2388,7 +2435,7 @@ function* attemptQueueArmSteps(
     deps.say(`automerge.queued (W1-T4405): auto-merge armed on a merge-queue branch — the queue merges it: ${prUrl}`);
     return { outcome: "armed" };
   } catch (e) {
-    if (e instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
+    if (e instanceof OperatorMergeHoldWriteRefused) return holdRefusedAtWrite(e);
     const msg = String((e as { stderr?: unknown })?.stderr ?? (e as Error)?.message ?? e);
     if (armFailureIsAlreadyQueued(msg)) {
       deps.say(`automerge.queued (W1-T4405): already in the merge queue — armed, not stuck: ${prUrl}`);
@@ -2404,7 +2451,7 @@ function* attemptQueueArmSteps(
         deps.say(`automerge.enqueued (W1-T4405): already green — added to the merge queue, never merged around it: ${prUrl}`);
         return { outcome: "armed" };
       } catch (e2) {
-        if (e2 instanceof OperatorMergeHoldWriteRefused) return { outcome: "hold-refused" };
+        if (e2 instanceof OperatorMergeHoldWriteRefused) return holdRefusedAtWrite(e2);
         const msg2 = String((e2 as { stderr?: unknown })?.stderr ?? (e2 as Error)?.message ?? e2);
         if (armFailureIsAlreadyQueued(msg2) || (yield* step(() => deps.isMerged?.(prUrl)))) {
           deps.say(`automerge.enqueued (W1-T4405): the queue already holds or merged it: ${prUrl}`);

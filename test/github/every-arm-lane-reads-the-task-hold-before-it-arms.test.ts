@@ -29,7 +29,9 @@ test("census: every arm effector in the arm module is reached only through attem
   const effectorHolders = new Set([...text.matchAll(/deps\.(?:armAuto|mergeDirect|enqueue)\b/g)]
     .map((match) => enclosing(spans, match.index!)).filter((name): name is string => name !== undefined));
   assert.ok(effectorHolders.has("attemptArmSteps"), "positive control: the census sees the arm's own effector call");
-  // Walk callers upward. A holder that only WRAPS deps (withSubmittedMark) runs no effector of its own.
+  // Walk callers upward. A holder that only WRAPS deps runs no effector of its own: withSubmittedMark, and the
+  // W1-T14902 write fence withTaskHoldAtWrite (its own census below pins that it re-reads the hold at each write).
+  const WRAPPERS = ["withSubmittedMark", "withTaskHoldAtWrite"];
   const callers = (name: string) => new Set([...text.matchAll(new RegExp(`\\b${name}\\(`, "g"))]
     .map((match) => enclosing(spans, match.index!)).filter((caller): caller is string => caller !== undefined && caller !== name));
   const roots = new Set<string>();
@@ -37,22 +39,24 @@ test("census: every arm effector in the arm module is reached only through attem
   const walk = (name: string): void => {
     if (seen.has(name)) return;
     seen.add(name);
-    if (name === "attemptArmSteps" || name === "withSubmittedMark") { roots.add(name); return; }
+    if (name === "attemptArmSteps" || WRAPPERS.includes(name)) { roots.add(name); return; }
     const up = callers(name);
     assert.ok(up.size > 0, `${name} runs an arm effector but no function in the module calls it`);
     for (const caller of up) walk(caller);
   };
   for (const holder of effectorHolders) walk(holder);
-  assert.deepEqual([...roots].sort(), ["attemptArmSteps", "withSubmittedMark"].filter((root) => roots.has(root)).sort());
-  assert.ok(!roots.has("withSubmittedMark") || callers("withSubmittedMark").size === 1 && callers("withSubmittedMark").has("attemptArmSteps"),
-    "the submitted-mark wrapper is applied only inside attemptArmSteps");
+  assert.deepEqual([...roots].sort(), ["attemptArmSteps", ...WRAPPERS].filter((root) => roots.has(root)).sort());
+  for (const wrapper of WRAPPERS) {
+    assert.ok(!roots.has(wrapper) || callers(wrapper).size === 1 && callers(wrapper).has("attemptArmSteps"),
+      `the ${wrapper} wrapper is applied only inside attemptArmSteps`);
+  }
   // Inside attemptArmSteps, the task hold is read before any effector or effector-bearing step.
   const arm = spans.find((span) => span.name === "attemptArmSteps")!;
   const body = text.slice(arm.start, arm.end);
   const hold = body.indexOf("taskHoldRefusalSteps(");
   assert.ok(hold > 0, "attemptArmSteps reads the task hold");
-  // withSubmittedMark only wraps `deps.mergeDirect` (it calls nothing), so it may run before the hold.
-  for (const effect of [...effectorHolders].filter((name) => name !== "attemptArmSteps" && name !== "withSubmittedMark")
+  // The wrappers only wrap the effectors (they call none at wrap time), so they may run before the hold.
+  for (const effect of [...effectorHolders].filter((name) => name !== "attemptArmSteps" && !WRAPPERS.includes(name))
     .map((name) => `${name}(`).concat("deps.armAuto(", "deps.mergeDirect(")) {
     const at = body.indexOf(effect);
     assert.ok(at < 0 || at > hold, `${effect} sits before the task hold in attemptArmSteps`);
@@ -176,4 +180,31 @@ test("census: every task-hold lookup goes through the one PR task resolver, fed 
   assert.ok(unread.includes(`${HOLD_MODULE}:readPullRequestNamedTaskHold`));
   assert.match(source("src/cli/commands/review.ts"), /args\.resolveSubject \?\?\s*\(\(url: string\) => resolvePullRequestTaskSubject\(url, freshPullRowRead, \(\) => args\.planOnlyFiling === true\)\)\)\(args\.prUrl\)/,
     "the unread-hold publisher resolves the live PR's task before it posts");
+});
+
+test("census: every arm and merge write re-reads the task hold with nothing awaited between that read and the write", () => {
+  const text = source(ARM_MODULE);
+  const spans = functionSpans(text);
+  const span = (name: string) => {
+    const found = spans.find((candidate) => candidate.name === name);
+    assert.ok(found, `positive control: the census finds ${name}`);
+    return text.slice(found.start, found.end);
+  };
+  // Every write the arm makes is fenced, and the fence is the outermost wrapper attemptArmSteps applies first.
+  const arm = span("attemptArmSteps");
+  assert.match(arm, /^[^]*?\{\s*deps = withTaskHoldAtWrite\(withSubmittedMark\(deps\)\);/, "attemptArmSteps fences its deps first");
+  const fence = span("withTaskHoldAtWrite");
+  assert.match(fence, /armAuto: fence\(deps\.armAuto\), mergeDirect: fence\(deps\.mergeDirect\)/, "arm and direct merge are fenced");
+  assert.match(fence, /enqueue: fence\(deps\.enqueue\)/, "the merge-queue enqueue is fenced");
+  // Between the re-read and the write: no await, no yield, and no other call that could suspend.
+  const read = fence.indexOf("reading = reader(prUrl);");
+  const write = fence.indexOf("return write(prUrl, ...rest);");
+  assert.ok(read > 0 && write > 0, "positive control: the fence reads the hold and calls the write");
+  assert.doesNotMatch(fence, /\bawait\b|\byield\b/, "the fence awaits and yields nothing: the write follows its read in the same turn");
+  assert.match(fence, /reading instanceof Promise \? reading\.then\(decide, \(e: unknown\) => decide\(unread\(e\)\)\) : decide\(reading\)/,
+    "the write runs in the read's own continuation, and a failed read holds");
+  // Every write site's refusal carries the reason the fence named to the ledgered row.
+  const catches = [...text.matchAll(/if \((e\d*) instanceof OperatorMergeHoldWriteRefused\) return ([^;]+);/g)];
+  assert.ok(catches.length >= 7, `positive control: the census sees every write site's catch (saw ${catches.length})`);
+  for (const [, name, ret] of catches) assert.equal(ret, `holdRefusedAtWrite(${name})`, `a write-site catch drops the fence's reason: ${ret}`);
 });
