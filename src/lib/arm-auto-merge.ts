@@ -669,8 +669,6 @@ export function realArmDeps(
       (path) => readAdmissionRest(path, runGh))),
     shadowInstance: (prUrl) => runningInstanceIsShadow(prUrl, loadConfigImpl),
     [REAL_ARM_DEPS_MARKER]: true,
-    // W1-T14902: the sync lanes read the hold too (W1-T5939's test-runner precedent keeps partial fakes off it).
-    ...(isTestRunner() ? {} : { taskHold: (prUrl: string) => readPullRequestTaskHoldSync(prUrl) }),
     headSha: (prUrl) => readHeadShaRest(prUrl),
     ledgerLines: () => {
       try {
@@ -1705,34 +1703,6 @@ export async function readPullRequestTaskHold(
   const pull = await readBody(`repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`) as { body?: unknown };
   const taskId = extractTaskTrailerId(typeof pull?.body === "string" ? pull.body : "");
   return readTaskDispatchHold(taskId, { ...sources, stateDir: join(loadConfigImpl().root, "state") });
-}
-
-/**
- * W1-T14902: {@link readPullRequestTaskHold} for the synchronous arm lanes (`realArmDeps`: retro, triage, plan, approve,
- * dep-review). The one reader is async (its ops read is), so this runs that same reader in a child of this process's own
- * node and waits for its answer: one reader, one set of rules. A child that fails, or answers with no reading, is
- * `unread`, which refuses.
- */
-export function readPullRequestTaskHoldSync(
-  prUrl: string,
-  run: (file: string, args: string[]) => string = (file, args) => execFileSync(file, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
-): TaskHoldReading {
-  const script = "const [url, pr] = process.argv.slice(-2); const m = await import(url); " +
-    "process.stdout.write(JSON.stringify(await m.readPullRequestTaskHold(pr)));";
-  let out: string;
-  try {
-    out = run(process.execPath, [...process.execArgv, "--input-type=module", "-e", script, import.meta.url, prUrl]);
-  } catch (error) {
-    return { outcome: "unread", taskId: "the named task", reason: `the hold reader exited: ${String((error as Error)?.message ?? error).split("\n")[0]}` };
-  }
-  let reading: TaskHoldReading | undefined;
-  try {
-    reading = JSON.parse(out) as TaskHoldReading;
-  } catch (error) {
-    return { outcome: "unread", taskId: "the named task", reason: `the hold reader answered no JSON (${(error as Error).name})` };
-  }
-  if (reading?.outcome === "held" || reading?.outcome === "clear" || reading?.outcome === "unread") return reading;
-  return { outcome: "unread", taskId: "the named task", reason: "the hold reader answered no reading" };
 }
 
 export function attemptArm(

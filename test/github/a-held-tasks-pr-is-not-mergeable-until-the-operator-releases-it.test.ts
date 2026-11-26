@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { runReview, type ReviewCommandHost } from "#src/cli/commands/review.js";
-import { armIfVerdictPermitsAsync, attemptArmAsync, readPullRequestTaskHold, readPullRequestTaskHoldSync, realArmDeps, realArmDepsAsync } from "#src/lib/arm-auto-merge.js";
+import { armIfVerdictPermitsAsync, attemptArmAsync, readPullRequestTaskHold, realArmDepsAsync } from "#src/lib/arm-auto-merge.js";
 import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
@@ -350,10 +350,6 @@ test("W1-T14902: the daemon's arm deps carry the live hold reader, left out only
   assert.equal(realArmDepsAsync().taskHold, undefined, "under the test runner a suite with partial fakes reads no real PR body");
   delete process.env.NODE_TEST_CONTEXT;
   assert.equal(typeof realArmDepsAsync().taskHold, "function", "THE WIRING: a live daemon reads the hold before every arm");
-  process.env.NODE_TEST_CONTEXT = previous ?? "child-v8";
-  assert.equal(realArmDeps().taskHold, undefined);
-  delete process.env.NODE_TEST_CONTEXT;
-  assert.equal(typeof realArmDeps().taskHold, "function", "THE WIRING: the synchronous arm lanes read the hold too");
 });
 
 test("W1-T14902: a daemon whose cwd is no work tree (launchd's config.root) still reads the plan, from its install", async (t) => {
@@ -367,18 +363,4 @@ test("W1-T14902: a daemon whose cwd is no work tree (launchd's config.root) stil
   // The reproduction: from a non-git cwd a clear public task read unread, and every named task was held.
   assert.deepEqual(await readTaskDispatchHold("W1-T10732", { stateDir: outside }), { outcome: "clear" });
   assert.deepEqual(await readTaskDispatchHold("W1-T8397", { stateDir: outside }), { outcome: "held", taskId: "W1-T8397" });
-});
-
-test("W1-T14902: the synchronous lanes' reader runs the one async reader in a child and refuses on any failure", () => {
-  // The real child: this process's own node runs readPullRequestTaskHold and hands its reading back.
-  const real = readPullRequestTaskHoldSync("not a pull request url");
-  assert.deepEqual(real, { outcome: "unread", taskId: "the named task", reason: "no pull request in not a pull request url" });
-  const calls: string[][] = [];
-  assert.deepEqual(readPullRequestTaskHoldSync(PR_URL, (file, args) => { calls.push([file, ...args]); return JSON.stringify({ outcome: "held", taskId: TASK }); }),
-    { outcome: "held", taskId: TASK });
-  assert.equal(calls[0]![0], process.execPath);
-  assert.equal(calls[0]!.at(-1), PR_URL);
-  assert.equal(readPullRequestTaskHoldSync(PR_URL, () => { throw new Error("spawn node ENOENT\nmore"); }).outcome, "unread");
-  assert.equal(readPullRequestTaskHoldSync(PR_URL, () => "not json").outcome, "unread");
-  assert.equal(readPullRequestTaskHoldSync(PR_URL, () => JSON.stringify({ outcome: "maybe" })).outcome, "unread");
 });
