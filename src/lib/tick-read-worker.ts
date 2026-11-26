@@ -28,7 +28,7 @@ import { createChangedFilesCache } from "./changed-files-cache.js";
 import { readFileIfExists } from "./fs-race-safe.js";
 import { escalationTaskId, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, type AsyncIssueGateway, type IssueGateway, type OpenIssue, prReferentFromIssueText, escalationHeadSha } from "./escalate.js";
 import { checkRunsRestArgs, createGhCallPacer, fetchOpenPrsRest, fetchOpenPrsRestSteps, type OpenPrRest, hydrateMergeConflictEvidenceSteps, hydratePlanFilingFilesSteps, hydrateSupersessionVerdictsSteps, hydrateWorkflowRunsSteps, hydrateMergeStateObservationsSteps, hydrateScannerBlockerObservationsSteps, hydrateCodeqlHeadAlertsSteps, codeqlCheckFailed, securityMergePolicyRefusal, isHumanHoldCandidate, isScannerBlockerCandidate, isReviewQueueHoldCandidate, classifyChangesRequested, pullReviewsRestArgs, paceGhEntryAsync, hydrateReviewReuseFactsSteps, type GhApiFetcher, type GhCallPacer, createPlanFilingFileCache, loadPlanFilingFileCache, PLAN_FILING_FILE_MISS_CAP, type PlanFilingFileCache, type PlanFilingFileObservation, combinedStatusRestArgs, openPrsRestArgs, MERGE_STATE_HYDRATION_CAP, SCANNER_BLOCKER_HYDRATION_CAP, REVIEW_QUEUE_HOLD_READ_CAP, CODEQL_HEAD_ALERT_HYDRATION_CAP, WORKFLOW_RUN_HYDRATION_CAP, type MergeStateObservation, createHeadReadGate, recordHeadReadCounts, type HeadReadGate } from "./open-prs-rest.js";
-import { takeAcknowledgedChangedHeads } from "./github-event-wake.js";
+import { takeChangedHeadsForRead } from "./github-event-wake.js";
 import { DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS, loadDefaultPolicy, type Policy } from "./policy.js";
 import { createHash } from "node:crypto";
 import { codeqlAlertsReadDue } from "./pr-blocker.js";
@@ -3103,7 +3103,7 @@ export function headRecheckMsFromPolicy(load: () => Pick<Policy, "values"> = loa
 /** Starts one sweep's head-read gate: the acknowledged changed heads, then ONE ls-remote. A failed ls-remote
  *  reads every head over REST this sweep, and its reason rides the counts onto `sweep.summary`. */
 export async function beginHeadReadSweep(gate: HeadReadGate, root: string, checkoutRoot: string, io: HeadReadSweepIo = {}): Promise<void> {
-  const changed = takeAcknowledgedChangedHeads(root);
+  const changed = takeChangedHeadsForRead(root);
   let heads: ReadonlySet<string> | undefined;
   let unguardedReason: string | undefined;
   try {

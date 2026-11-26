@@ -592,9 +592,24 @@ export function acknowledgeChangedHeads(root: string): void {
   }
 }
 
-/** The read plane's take of the acknowledged entries, claim-by-rename; malformed lines are dropped. */
+/** A take of the acknowledged entries only, claim-by-rename; malformed lines are dropped. */
 export function takeAcknowledgedChangedHeads(root: string): ChangedHeadEntry[] {
-  const claimed = claimFile(githubAcknowledgedHeadsPath(root));
+  return takeClaimedEntries(githubAcknowledgedHeadsPath(root));
+}
+
+/**
+ * The read plane's take, before it reads: the acknowledged entries AND the live journal, each claim-by-rename.
+ * The daemon produces the tick read an accepted sweep consumes BEFORE `runGatedSweep` acknowledges (daemon.ts), so
+ * a take of the acknowledged file alone would serve a delivery-woken sweep the rollup kept before that delivery.
+ * An entry is consumed only by the read that drops its head's kept rollup and re-reads it, so a held daemon's
+ * entry is never lost: that read already reflects it, and every later read is newer.
+ */
+export function takeChangedHeadsForRead(root: string): ChangedHeadEntry[] {
+  return [...takeClaimedEntries(githubAcknowledgedHeadsPath(root)), ...takeClaimedEntries(githubChangedHeadsPath(root))];
+}
+
+function takeClaimedEntries(path: string): ChangedHeadEntry[] {
+  const claimed = claimFile(path);
   if (claimed === undefined) return [];
   const entries: ChangedHeadEntry[] = [];
   try {

@@ -427,20 +427,25 @@ under `enforce`, which writes no marker but changed its head's rollup) appends o
 the owning instance's marker (W1-T14806's resolver picks it). `wireSweepWakeToDaemon`'s
 `acknowledge`, the same call that consumes `SWEEP_WAKE_REQUESTED` after STOP/PAUSE and the sweep
 gate accept a pass, claims the journal by rename and appends it to
-`state/github-changed-heads.acked.ndjson`. A held daemon never acknowledges, so it never loses an
-entry. The read plane takes the acknowledged file the same way (`takeAcknowledgedChangedHeads`):
-it may be a worker thread, so the hand-off is a file, never memory.
+`state/github-changed-heads.acked.ndjson`. The read plane takes BOTH files the same way, before it
+reads (`takeChangedHeadsForRead`): the daemon produces the tick read an accepted sweep consumes
+before `runGatedSweep` acknowledges, so taking the acknowledged file alone served the
+delivery-woken sweep the rollup kept before that delivery, and the head was re-read only a cycle
+later (fleet review of #21033). An entry is consumed only by the read that drops its head's kept
+rollup and re-reads it, so a held daemon never loses one: that read already reflects it. The read
+plane may be a worker thread, so the hand-off is a file, never memory.
 
 The head set. ONE `git ls-remote origin 'refs/heads/*' 'refs/pull/*/head'` per tick
 (`lsRemoteHeadShas`, git upload-pack, never the REST quota). A head is skipped only when its sha is
 in that set. A failed ls-remote turns every skip off for that tick, so every head is read over REST,
 and its reason is recorded.
 
-Two cases turn skips off, and each costs only reads. A repository whose webhook delivered nothing
-within the interval keeps today's reads, because without deliveries a kept answer would go stale
-for up to the full interval. A failed journal append or acknowledge is printed to stderr, and the
-interval re-reads the head.
+Only an unknown head set turns skips off. A repository whose webhook is silent keeps its skips:
+the floor (c) re-reads every head within one interval, so a missed delivery is corrected in
+`headRecheckMs`. A failed journal append, acknowledge or take is printed to stderr, and the same
+floor re-reads the head.
 
 The counts. Each tick adds `head_reads_made`, `head_reads_skipped` and, when skips were off,
-`head_reads_unguarded` (the reason) to `state/github-head-reads.json`. `sweep.summary` takes them,
+`head_reads_unguarded` (the reason, kept until taken even when a later tick is guarded) to
+`state/github-head-reads.json`. `sweep.summary` takes them,
 so the existing per-sweep row carries them and no new ledger step is written.

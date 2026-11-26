@@ -380,8 +380,8 @@ function headReadSha(args: string[]): string | undefined {
  * INVARIANT unchanged-head-is-not-re-read: a head's rollup reads are answered from the kept rollup
  * unless (a) none is kept for that sha, (b) a verified delivery named the sha since it was kept, or
  * (c) the kept read is `recheckMs` old. Skips are off for a sweep whose `heads` (one `git ls-remote`)
- * are unknown, and while no delivery arrived within `recheckMs`: a repository whose webhook is not
- * delivering keeps today's reads. Why: docs/forensics/github-event-wake.md#headreadgate.
+ * are unknown. A repository whose webhook is silent needs no other guard: (c) re-reads every head
+ * within one interval, so a missed delivery is corrected in `recheckMs`. Why: docs/forensics/github-event-wake.md#headreadgate.
  */
 export interface HeadReadGate {
   /** Starts one sweep; `heads` undefined (a failed ls-remote) reads every head over REST. */
@@ -407,7 +407,6 @@ export function createHeadReadGate(): HeadReadGate {
   let heads: ReadonlySet<string> | undefined;
   let nowMs = 0;
   let recheckMs = 0;
-  let lastDeliveryMs: number | undefined;
   let unguarded: string | undefined = "no sweep begun";
   let counts: HeadReadCounts = { head_reads_made: 0, head_reads_skipped: 0 };
   const decide = (sha: string): "skip" | "read" => {
@@ -431,16 +430,9 @@ export function createHeadReadGate(): HeadReadGate {
     beginSweep(input) {
       ({ heads, nowMs, recheckMs } = input);
       decided = new Map();
-      for (const delivery of input.changed) {
-        kept.delete(delivery.sha);
-        const at = Date.parse(delivery.received_at);
-        if (Number.isFinite(at)) lastDeliveryMs = Math.max(lastDeliveryMs ?? at, at);
-      }
+      for (const delivery of input.changed) kept.delete(delivery.sha);
       for (const [sha, entry] of kept) if ((heads && !heads.has(sha)) || nowMs - entry.readAtMs >= recheckMs) kept.delete(sha);
       unguarded = input.unguardedReason ?? (heads === undefined ? "head shas unknown" : undefined);
-      if (unguarded === undefined && (lastDeliveryMs === undefined || nowMs - lastDeliveryMs >= recheckMs)) {
-        unguarded = "no webhook delivery within the recheck interval";
-      }
       counts = { head_reads_made: 0, head_reads_skipped: 0, ...(unguarded === undefined ? {} : { head_reads_unguarded: unguarded }) };
     },
     answer,
@@ -496,7 +488,9 @@ export function recordHeadReadCounts(stateDir: string, add: HeadReadCounts): voi
   const next: HeadReadCounts = {
     head_reads_made: (prior?.head_reads_made ?? 0) + add.head_reads_made,
     head_reads_skipped: (prior?.head_reads_skipped ?? 0) + add.head_reads_skipped,
-    ...(add.head_reads_unguarded !== undefined ? { head_reads_unguarded: add.head_reads_unguarded } : {}),
+    // The newest reason, else the one already kept: a later guarded tick never erases an ls-remote failure before it is reported.
+    ...((add.head_reads_unguarded ?? prior?.head_reads_unguarded) !== undefined
+      ? { head_reads_unguarded: add.head_reads_unguarded ?? prior?.head_reads_unguarded } : {}),
   };
   try {
     writeAtomic(headReadCountsPath(stateDir), JSON.stringify(next));

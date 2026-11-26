@@ -174,6 +174,11 @@ test("W1-T14809: a sweep skips check reads for a head no webhook named", async (
     assert.equal(takeHeadReadCounts(f.stateDir), undefined, "nothing kept, nothing reported");
     writeFileSync(headReadCountsPath(f.stateDir), "{}");
     assert.equal(takeHeadReadCounts(f.stateDir), undefined, "a file without counts reports none");
+    // An ls-remote failure's reason survives a later guarded tick until sweep.summary takes it.
+    recordHeadReadCounts(f.stateDir, { head_reads_made: 20, head_reads_skipped: 0, head_reads_unguarded: "ls-remote failed: offline" });
+    recordHeadReadCounts(f.stateDir, second.counts);
+    assert.deepEqual(takeHeadReadCounts(f.stateDir),
+      { head_reads_made: 20, head_reads_skipped: 20, head_reads_unguarded: "ls-remote failed: offline" });
     writeFileSync(join(f.root, "blocker"), "a file, not a directory");
     recordHeadReadCounts(join(f.root, "blocker", "state"), first.counts);
     assert.equal(readFileSync(join(f.root, "blocker"), "utf8"), "a file, not a directory", "an unwritable state dir loses only these counts");
@@ -198,21 +203,24 @@ test("W1-T14809: a webhook naming a head re-reads its checks", async () => {
     assert.deepEqual(readFileSync(githubChangedHeadsPath(f.root), "utf8").trim().split("\n").map((line) => JSON.parse(line).sha), [sha(3)],
       "the accepted delivery journaled the head it named");
 
-    // A held daemon never acknowledges: its sweep does not see the entry, and the entry is not lost.
-    const held = await sweep(gate, f.root, gh, T0 + MINUTE);
-    assert.deepEqual(held.headReads, [], "an unacknowledged entry changes nothing yet");
-    assert.ok(existsSync(githubChangedHeadsPath(f.root)), "the held daemon's journal keeps the entry");
-
-    acceptPass(f.root);
-    assert.equal(existsSync(githubChangedHeadsPath(f.root)), false, "the acknowledge truncated the live journal");
-    assert.equal(existsSync(sweepWakeMarkerPath(f.root)), false, "under the same acknowledge that consumed the marker");
-    const named = await sweep(gate, f.root, gh, T0 + 2 * MINUTE);
+    // Production order (daemon.ts): the tick read the woken sweep consumes runs BEFORE runGatedSweep acknowledges.
+    // That very read re-reads the named head, so the woken sweep sees FAILURE, not the rollup kept before it.
+    assert.ok(existsSync(sweepWakeMarkerPath(f.root)), "the delivery armed the wake");
+    const named = await sweep(gate, f.root, gh, T0 + MINUTE);
     assert.deepEqual(named.headReads.sort(), [
       `repos/o/r/commits/${sha(3)}/check-runs?per_page=100`, `repos/o/r/commits/${sha(3)}/status`,
-    ], "only the named head is re-read");
+    ], "the next tick read re-reads the named head, and only it");
     assert.deepEqual(named.counts, { head_reads_made: 2, head_reads_skipped: 18 });
     const pr3 = named.prs.find((pr) => pr.number === 3);
-    assert.equal(pr3?.statusCheckRollup?.find((entry) => entry.name === "ci-gate")?.conclusion, "FAILURE", "the re-read carries the new verdict");
+    assert.equal(pr3?.statusCheckRollup?.find((entry) => entry.name === "ci-gate")?.conclusion, "FAILURE", "the woken sweep's read carries the new verdict");
+    assert.equal(existsSync(githubChangedHeadsPath(f.root)), false, "the read consumed the entry it acted on");
+
+    // The gated sweep's acknowledge then consumes the marker; the entry was not lost, and is not read twice.
+    acceptPass(f.root);
+    assert.equal(existsSync(sweepWakeMarkerPath(f.root)), false, "the acknowledge consumed the marker");
+    const after = await sweep(gate, f.root, gh, T0 + 2 * MINUTE);
+    assert.deepEqual(after.headReads, [], "the head read since its delivery stays kept");
+    assert.equal(after.prs.find((pr) => pr.number === 3)?.statusCheckRollup?.find((entry) => entry.name === "ci-gate")?.conclusion, "FAILURE");
 
     // A pull_request synchronize names its new head too; another repository's delivery names nothing here.
     const sync = { action: "synchronize", pull_request: { number: 4, head: { sha: sha(4) } } };
@@ -290,12 +298,12 @@ test("W1-T14809: a failed ls-remote reads every head over REST", async () => {
     assert.equal(headRecheckMsFromPolicy(), DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS);
     assert.equal(headRecheckMsFromPolicy(() => { throw new Error("unreadable policy"); }), DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS);
 
-    // A webhook that has delivered nothing within the interval never turns skips on.
+    // A quiet repository keeps its skips: no delivery for an interval re-reads nothing the floor has not aged out.
     const quiet = createHeadReadGate();
     await sweep(quiet, f.root, gh, T0 + 20 * MINUTE);
-    const unproven = await sweep(quiet, f.root, gh, T0 + 21 * MINUTE);
-    assert.equal(unproven.headReads.length, 20, "no delivery proves the webhook live: today's reads");
-    assert.equal(unproven.counts.head_reads_unguarded, "no webhook delivery within the recheck interval");
+    const silent = await sweep(quiet, f.root, gh, T0 + 21 * MINUTE);
+    assert.deepEqual(silent.headReads, [], "a kept read younger than headRecheckMs is not re-read, delivery or none");
+    assert.deepEqual(silent.counts, { head_reads_made: 0, head_reads_skipped: 20 });
   } finally {
     f.cleanup();
   }
