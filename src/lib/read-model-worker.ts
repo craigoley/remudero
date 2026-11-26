@@ -219,7 +219,14 @@ export function readModelUnreadWindowMs(costMs: number): number {
  * the ETag from before the stop gets the body, not a 304.
  */
 export const READ_MODEL_IDLE_SOURCE_PREFIX = "read-model:idle:";
-const carriesIdleSource = (body: ViewBody | undefined): boolean => body?.sources.some((source) => source.name.startsWith(READ_MODEL_IDLE_SOURCE_PREFIX)) === true;
+/**
+ * W1-T15008: the source a heavy-lane unit's last body carries while the lane restarts after it idled (W1-T11937),
+ * until the lane's first fresh body replaces it. Its phase is `warming`, which the Console shows as "warming up".
+ */
+export const READ_MODEL_WARMING_SOURCE_PREFIX = "read-model:warming:";
+const republishedSource = (source: ViewSource): boolean =>
+  source.name.startsWith(READ_MODEL_IDLE_SOURCE_PREFIX) || source.name.startsWith(READ_MODEL_WARMING_SOURCE_PREFIX);
+const carriesIdleSource = (body: ViewBody | undefined): boolean => body?.sources.some(republishedSource) === true;
 /**
  * BACKSTOP (W1-T11933): an {@link ReadModelView.idleFloor} unit unread for {@link READ_MODEL_READ_HOT_MS}
  * waits at least this long between builds; a read restores cost / share cadence on the next tick.
@@ -1087,6 +1094,8 @@ export interface ReadModelTicker {
   read(path: string, subscribed?: boolean): void;
   lane(move: ReadModelLaneMove): void;
   peer(entry: ReadModelBodyEntry): void;
+  /** W1-T15008: the heavy lane restarted; republish this unit's last bodies as warming until its first fresh body. */
+  warming(view: string, instance?: string): void;
 }
 
 /** One view, or one instance's share of a per-instance view: the unit the pass budgets, times and paces. */
@@ -1846,6 +1855,23 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
     }
   }
 
+  /** W1-T15008: each body a restarting heavy-lane unit last published is posted again, stale, saying the lane is warming. */
+  function markWarming(unit: ViewUnit): void {
+    const view = unit.view.name, instance = unit.slot?.instance.name, at = clock.iso();
+    for (const entry of [...latest.values()]) {
+      if (entry.view !== view || !demandKeyBelongsTo(unit, entry.key)) continue;
+      if (entry.body.sources.some((source) => source.name.startsWith(READ_MODEL_WARMING_SOURCE_PREFIX))) continue;
+      const warming: ViewSource = {
+        name: `${READ_MODEL_WARMING_SOURCE_PREFIX}${view}${instance === undefined ? "" : `@${instance}`}`, kind: "read-model",
+        ...(instance === undefined ? {} : { instance }), asOf: entry.body.generatedAt, state: "stale", phase: "warming",
+        reason: `rebuilding: this view's lane idled while nobody read it and restarted at ${at}; showing its last answer, from ${entry.body.generatedAt}`,
+      };
+      const sources = [...entry.body.sources.filter((source) => !republishedSource(source)), warming];
+      // Posted, never persisted, as markIdle's: the heavy lane's first fresh body replaces it.
+      publishEntry({ ...entry, etag: `${entry.etag.replace(/"$/, "")}.warming"`, body: { ...entry.body, stale: true, asOf: oldestAsOf(sources), sources } }, true);
+    }
+  }
+
   /** W1-T12270: a stopped unit is due at once, and its next build measures again rather than reusing inputs. */
   function resume(unit: ViewUnit, at: number): void {
     unit.stopped = undefined;
@@ -2338,6 +2364,10 @@ export function createReadModelTicker(opts: ReadModelTickerOptions): ReadModelTi
       }
       reportHeld(true);
     },
+    warming(view: string, instance?: string): void {
+      // Only a unit this lane handed to the heavy lane: a unit it builds itself is not restarting.
+      for (const unit of units) if (unit.heavy === true && unit.view.name === view && unit.slot?.instance.name === instance) markWarming(unit);
+    },
     peer(entry: ReadModelBodyEntry): void {
       lastEtag.set(`${entry.view}\u0000${entry.key}`, entry.etag);
       latest.set(`${entry.view}\u0000${entry.key}`, entry);
@@ -2415,6 +2445,8 @@ export type ReadModelViewsInput =
   | { type: "read"; path: string; subscribed?: true }
   | ({ type: "lane" } & ReadModelLaneMove)
   | { type: "peer"; entry: ReadModelBodyEntry }
+  /** W1-T15008: to the fast lane, as the idle heavy lane restarts: mark this unit's last bodies warming. */
+  | { type: "warming"; view: string; instance?: string }
   | { type: "stop" };
 
 /**
@@ -2460,6 +2492,7 @@ export function runReadModelViewWorker(
     else if (msg.type === "snapshot") ticker.acceptSnapshot(msg.snapshot);
     else if (msg.type === "lane") ticker.lane(msg);
     else if (msg.type === "peer") ticker.peer(msg.entry);
+    else if (msg.type === "warming") ticker.warming(msg.view, msg.instance);
     else ticker.accept(msg.built);
   };
   port.on("message", handle);
@@ -2685,10 +2718,12 @@ export function threadViews(opts: {
     }
     heavy.idle = false;
     heavy.wokeAt = lastReadAt;
-    // Its units are handed straight back, due now, so the fast lane keeps its own pace.
+    // Its units are handed straight back, due now, so the fast lane keeps its own pace. The fast lane, which holds a
+    // copy of each unit's last body, republishes it as warming until the restarted lane's first paint (W1-T15008).
     for (const id of heavyUnits) {
       const [view, instance] = JSON.parse(id) as [string, string | null];
       heavy.worker?.postMessage({ type: "lane", view, ...(instance === null ? {} : { instance }), heavy: true, dueAt: 0 } satisfies ReadModelViewsInput);
+      fast.worker?.postMessage({ type: "warming", view, ...(instance === null ? {} : { instance }) } satisfies ReadModelViewsInput);
     }
     return { woke: "restarted" };
   };
