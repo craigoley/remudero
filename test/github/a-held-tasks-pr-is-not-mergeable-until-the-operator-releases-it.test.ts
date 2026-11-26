@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { runReview, type ReviewCommandHost } from "#src/cli/commands/review.js";
-import { armIfVerdictPermitsAsync, attemptArmAsync, readPullRequestTaskHold } from "#src/lib/arm-auto-merge.js";
+import { armIfVerdictPermitsAsync, attemptArmAsync, readPullRequestTaskHold, realArmDepsAsync } from "#src/lib/arm-auto-merge.js";
 import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
@@ -267,4 +267,12 @@ test("W1-T14902: the review command holds a held task's pass as pending, arms no
   const clear = await heldRunReview(t, { outcome: "clear" });
   assert.ok(clear.statusPosts.some((call) => call.includes("state=success")), `a clear task's pass posts: ${clear.statusPosts.join(" | ")}`);
   assert.ok(clear.effects.includes("arm"), "a clear task's pass arms");
+});
+
+test("W1-T14902: the daemon's arm deps carry the live hold reader, left out only under the test runner", (t) => {
+  const previous = process.env.NODE_TEST_CONTEXT;
+  t.after(() => { if (previous === undefined) delete process.env.NODE_TEST_CONTEXT; else process.env.NODE_TEST_CONTEXT = previous; });
+  assert.equal(realArmDepsAsync().taskHold, undefined, "under the test runner a suite with partial fakes reads no real PR body");
+  delete process.env.NODE_TEST_CONTEXT;
+  assert.equal(typeof realArmDepsAsync().taskHold, "function", "THE WIRING: a live daemon reads the hold before every arm");
 });

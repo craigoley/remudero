@@ -766,7 +766,9 @@ export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig,
     },
     readPlanTouch: (prUrl, headSha) => runStepsAsync(cachedPlanTouchSteps(prUrl, headSha, ghJsonAsync)),
     stackPrerequisite: (prUrl) => runStepsAsync(stackPrerequisiteSteps(prUrl, ghJsonAsync)),
-    taskHold: (prUrl) => readPullRequestTaskHold(prUrl, loadConfigImpl),
+    // W1-T14902: as the sweep's Actions status reader (W1-T5939), the live read is left out under the test runner, where
+    // a suite spreading these deps with some fakes would otherwise read a real PR body; its own suite injects it.
+    ...(isTestRunner() ? {} : { taskHold: (prUrl: string) => readPullRequestTaskHold(prUrl, loadConfigImpl) }),
     closingReferences: (prUrl) => runStepsAsync(closingReferenceGuardSteps(prUrl, ghJsonAsync, async (args) => {
       assertLiveWriteAllowed("gh-pr-merge", `rewriting a closing keyword in the body of ${prUrl} before merging it`);
       return ghTextAsync(args);
