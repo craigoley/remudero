@@ -2487,7 +2487,9 @@ export async function daemonCommand(
   }
   bootPhases.mark("boot_sweeps");
 
-  const runDaemonFn = deps.runDaemon ?? runDaemon;
+  const runDaemonUnscoped = deps.runDaemon ?? runDaemon;
+  // W1-T14916: every pass, timer and worker start runDaemon makes inherits the retirement's spawn scope.
+  const runDaemonFn: typeof runDaemonUnscoped = (...args) => retirement.inSpawnScope(() => runDaemonUnscoped(...args));
   const runTaskFn = deps.runTask ?? runTask;
   // W1-T160: the retro cadence hooks (self-target only) — see buildRetroDaemonHooks.
   const retroHooks = target.isSelf ? buildRetroDaemonHooks() : undefined;
@@ -2686,8 +2688,7 @@ export async function daemonCommand(
     if (standby?.ports && standbyPromotion) logPromoted(standby.ports, standbyPromotion);
     // W1-T14644: the latest refresh's projection phases, held until the selection timing row takes them.
     let pendingRefreshMergedPhases: ProjectPlanPhases | undefined;
-    // W1-T14916: every pass, timer and worker start runDaemon makes inherits the retirement's spawn scope.
-    const summary = await retirement.inSpawnScope(async () => runDaemonFn(
+    const summary = await runDaemonFn(
       plan,
       {
         // W1-T988: the target this daemon already resolved and already ledgers as `daemon.target`'s
@@ -3469,7 +3470,7 @@ export async function daemonCommand(
         log,
       },
       opts,
-    ));
+    );
     writeSyncLine(1, "\n" + renderDaemonSummary(summary));
     // The pure stop-reason -> exit-code mapping lives in lib/daemon.ts
     // (`daemonExitCode`), unit-tested there with no process spawn (Rule 18):
