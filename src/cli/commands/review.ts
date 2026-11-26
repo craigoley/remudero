@@ -3365,369 +3365,372 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     return 2;
   }
   const publicationFreshness = reviewerFreshnessForPublication(startFreshness, reviewerCodeFreshnessDep);
-  let claimHeld: string | undefined;
-  let claimPosted = false;
-  if (!shadow) try {
-    const claimLedger = await readLedgerUnionRecords(dirname(ledgerPath), {
-      selectRotation: () => false,
-      step: ["review.pending_posted", ...REVIEW_RUN_SETTLED_STEPS],
-      where: (row) => row.head_sha === view.headRefOid && reviewRowNamesPr(row, reviewKey, view.url),
-      onUnreadLive: () => { claimHeld = "the action-time review ledger could not be read"; },
-    });
-    const hasClaim = claimLedger.some(row => row.step === "review.pending_posted");
-    const checkedStatus = hasClaim ? await readBoundPendingClaimStatus(owner, repo, view.headRefOid,
-      deps.fetchPendingStatus ?? ((args) => ghJsonAsync(args, undefined, undefined, { fresh: true }))) : undefined;
-    claimHeld ??= checkedStatus?.reason;
-    const claim = claimHeld !== undefined ? undefined : await postReviewPendingDep({
-      owner,
-      repo,
-      sha: view.headRefOid,
-      taskId: reviewKey,
-      runId,
-      ledgerPath,
-      prUrl: view.url,
-      reviewInputDigest: inputDigest,
-      reviewEngineRevision: REVIEW_ENGINE_REVISION,
-      fetchLifecycle: () => fetchPrLifecycleAsync(view.url),
-      fetchStatus: checkedStatus === undefined ? undefined : () => checkedStatus.combined,
-    });
-    claimPosted = claim?.posted === true;
-    if (claim !== undefined) claimHeld = pendingClaimHeldByAnotherRun(claim, runId, claimLedger, view.headRefOid);
-  } catch (e) {
-    log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
-  }
-  // W1-T14177: a claim refusal is returned, never discarded — another run's live claim holds this head.
-  if (claimHeld !== undefined) {
-    log("review.stood_down", { pr_url: view.url, head_sha: view.headRefOid, review_input_digest: inputDigest, reason: claimHeld });
-    console.log(`rmd review: PR #${view.number} not reviewed — ${claimHeld}`);
-    exit.as("review-claim-held");
-    return 2;
-  }
-
-  // W1-T9232: the pending status just posted STANDS — no verdict is judged on a plan that lacks the task's own record.
-  // The sweep reads this row, refreshes the branch from main and re-reviews the new head.
-  if (ownTaskRecordMissing) {
-    const withheldInput = { ...replaySetupInput, publication_refusal: OWN_TASK_RECORD_MISSING_CAUSE };
-    recordSetupReplay(withheldInput, classifyReviewOutcome(withheldInput));
-    log("review.reviewer.skipped", {
-      reason: OWN_TASK_RECORD_MISSING_CAUSE, pr_number: view.number, pr_url: view.url, head_sha: view.headRefOid,
-      derived_repair: "refresh the branch from main", missing: ["risk", "budget_usd", "criteria"],
-    });
-    console.log(
-      `rmd review PR #${view.number}: ${taskId} has no record at head ${view.headRefOid.slice(0, 7)} but origin/main has it ` +
-        `(${OWN_TASK_RECORD_MISSING_CAUSE}) — pending; refresh the branch from main, then re-review`,
-    );
-    exit.as("own-task-record-missing");
-    return 2;
-  }
-
-  // W1-T185 (Gap 2): materialize a throwaway worktree at the PR head so
-  // whitelisted proofs actually EXECUTE on this manual path, matching what
-  // the automated fix rung observes for the same PR/proofs (acceptance
-  // criterion 4). On ANY failure this leaves worktreePath undefined and the
-  // review falls back to keyword-only — EXPLICITLY marked (criterion 5),
-  // never silently, and (W1-T233) the console line below now NAMES why,
-  // instead of a bare "unavailable" with the real reason thrown away.
-  exit.step = "materialize";
-  const materializeStartedMs = systemClock.now();
-  const materialized = await materialize(config, subjectRepoDir, view.number, view.headRefOid);
-  if (materialized.worktreePath === undefined) {
-    console.log(
-      `(worktree materialization failed [${materialized.failure.errorClass}]: ` +
-        `${materialized.failure.message} — this verdict will post keyword-only)`,
-    );
-  }
-  const worktreePath = materialized.worktreePath;
-
-  // impl-GE / R-11: the merge-base side this PR's proofs are re-run against, so a proof that ALREADY
-  // matched/passed before the work existed is marked `executed_stale` instead of counting as
-  // evidence. Built from the materialised head worktree (the merge-base is resolved there);
-  // `baseCheckoutDir` is a real detached worktree when `baseIsCheckout` is true, else the blob-only
-  // fallback (or undefined when the PR has no dialect proof / no resolvable base — the check then
-  // stays inert, exactly as it was for its first 1,180 verdicts). W1-T460's `baseUnreadablePaths`
-  // rides along: a per-proof fact the dir alone cannot carry.
-  const baseProof = worktreePath ? await buildBaseProof(criteria, worktreePath) : undefined;
-  const materializeMs = systemClock.now() - materializeStartedMs;
-
-  // W1-T185 (Gap 2, criterion 6): withMaterializedWorktree guarantees teardown
-  // on EVERY exit path, including a throw from runReview itself — never just
-  // the success path, which would reproduce the W1-T175 leak class. (R-11) The
-  // base worktree is torn down by the SAME helper, as the outer scope, so the
-  // head goes first and the base follows on every exit path too; a grep tree is
-  // deleted there the same way, and a blob-only fallback dir is not a worktree and
-  // is left to the boot sweep (src/lib/tmp.ts) exactly as before.
-  // W1-T185 (Gap 1, criterion 2), raised by W1-T229: the operator override —
-  // a LEDGERED, attributable decision to arm a capped verdict anyway.
-  // Granted here (the manual escape hatch, an operator-run command) rather
-  // than inferred: an override is a decision someone made, and it must name
-  // who. No `principles`/tdd-tier check gates this note since W1-T229 — a
-  // CAPPED verdict refuses to arm regardless of tdd tier. W1-T14241: recorded
-  // BEFORE the review runs, because a capped code pass now posts pending until
-  // an override for its head is in the ledger — the run's own guarded post
-  // reads this row and publishes success.
-  const overrideBy = flagValue(rest, "--override-capped-by");
-  const overrideReason = flagValue(rest, "--override-capped-reason");
-  if (overrideBy && overrideReason && !shadow) {
-    if (!taskId) {
-      console.error(
-        "--override-capped-by/--override-capped-reason need a resolvable task (a Remudero-Task: trailer) " +
-          "— not recorded.",
-      );
-    } else {
-      // W1-T219: BIND the grant to the head it is reviewed against —
-      // cappedOverrideFromLedger refuses to honour it against any other head.
-      log("automerge.capped_override_granted", {
-        by: overrideBy,
-        reason: overrideReason,
-        pr_url: view.url,
-        head_sha: view.headRefOid,
+  // W1-T14947: one lock under state/inflight/reviews from before the pending post until after the terminal row — the
+  // claim, materialization, base proof, the review and any replayed or restored post — released on every exit path, so
+  // a container recycle's drain waits for an in-flight review. A shadow review posts nothing and takes none.
+  const reviewLock = shadow ? undefined : acquireInflightLock(join(config.root, "state", "inflight", REVIEW_INFLIGHT_DIR),
+    host.reviewWorkerLockId(runId), { run_id: runId, reclaim: false });
+  try {
+    let claimHeld: string | undefined;
+    let claimPosted = false;
+    if (!shadow) try {
+      const claimLedger = await readLedgerUnionRecords(dirname(ledgerPath), {
+        selectRotation: () => false,
+        step: ["review.pending_posted", ...REVIEW_RUN_SETTLED_STEPS],
+        where: (row) => row.head_sha === view.headRefOid && reviewRowNamesPr(row, reviewKey, view.url),
+        onUnreadLive: () => { claimHeld = "the action-time review ledger could not be read"; },
       });
-      console.log(
-        `CAPPED override recorded — by ${overrideBy}: ${overrideReason} (task ${taskId}, head ${view.headRefOid.slice(0, 7)})`,
-      );
-    }
-  }
-  exit.step = "review";
-  let verdict = await withMaterialized(
-    baseProof?.baseIsCheckout || baseProof?.baseIsGrepTree ? baseProof.baseCheckoutDir : undefined,
-    subjectRepoDir,
-    () =>
-      withMaterialized(worktreePath, subjectRepoDir, () => whileWorkerRunLive(host, runId, () =>
-        runReviewDep({
-          onPhase: deps.onPhase,
-          ...(deps.planLintRetryHead === undefined ? {} : { planLintRetryHead: deps.planLintRetryHead }),
-          reviewReplaySetupInput: replaySetupInput,
-          owner,
-          repo,
-          prUrl: view.url,
-          // impl-BG: excludes dependabot heads from the post-verdict arm (the dep-review lane owns those).
-          headRefName: view.headRefName,
-          ...(keepsUnseenDependency ? { reservationHomeDir: repoRoot } : {}),
-          task: {
-            id: reviewKey,
-            catalog: taskCatalog,
-            acceptance: criteria,
-            files: taskDeclaredFiles,
-            risk: taskRisk,
-            budget_usd: taskBudgetUsd,
-            ...taskNarrative,
-          },
-          report: reportBody, // the PR body is the manual author's REPORT (proofs are pasted here)
-          settingsFile,
-          config,
-          budgetUsd: spawnReviewer ? taskBudgetUsd : undefined,
-          log,
-          say: (m) => console.log(m),
-          account: (r) => r,
-          spawnReviewer,
-          requireSemanticReview: executionMode === "semantic",
-          reviewerMount,
-          excludeProviders,
-          // W1-T185 (Gap 2): the materialized worktree above when available — the
-          // SAME `headCheckoutDir` wiring the autonomous path uses, so whitelisted
-          // proofs execute here too. `undefined` (materialization unavailable)
-          // makes `judgeReview` mark the verdict `keywordOnly`+`capped`, exactly
-          // the documented fallback (criterion 5) — never silent.
-          headCheckoutDir: worktreePath,
-          reviewerCodeFreshness: publicationFreshness,
-          admission: deps.reviewStartFreshness !== undefined ? "start-gate" : deps.judgeAtOwnStart === true ? "fresh-tree-child" : "operator",
-          prCreatedAt: view.createdAt,
-          readReviewStatusHistory: deps.readReviewStatusHistory,
-          // The three base facts, threaded by NAME so a reader (and test/preexisting-proof-hits-wiring)
-          // can see each one reach the evidence: the dir, the per-proof unreadable set (W1-T460), and
-          // whether the dir is a checkout a `unit test:` proof may honestly be re-run in (R-11).
-          baseCheckoutDir: baseProof?.baseCheckoutDir,
-          baseUnreadablePaths: baseProof?.baseUnreadablePaths,
-          baseIsCheckout: baseProof?.baseIsCheckout,
-          addedTestFiles: baseProof?.addedTestFiles,
-          // W1-T233: the named reason materialization failed (absent ⇒ it was
-          // never attempted at all) — carried onto the posted CAPPED description
-          // and the review.posted ledger line's degraded_reason fields.
-          materializationFailure: materialized.failure,
-          materializeMs,
-          ledgerPath,
-          runId,
-          openTaskIds,
-          ...(moverRemoval === undefined ? {} : { moverRemoval }),
-          ...(shadow ? { shadow: true } : {}),
-          ...(calibrationCase ? { calibrationCase: true } : {}),
-        }), join(config.root, "state", "inflight")),
-      ),
-    baseProof?.baseIsGrepTree ? (_repo, tree) => rmSync(tree, { recursive: true, force: true }) : undefined,
-  );
-  // W1-T10269: a shadow review ends at its verdict: no restore, no status, no comment, no arm.
-  exit.step = "publish";
-  if (shadow && verdict.verdictWithheld) exit.as("shadow-verdict-withheld");
-  if (shadow) return verdict.verdictWithheld ? 2 : 0;
-  // W1-T13380: a reviewer that never started leaves no review running, so this run replaces its own claim with the truth.
-  if (claimPosted && startFailure !== undefined) {
-    try {
-      await postStatusDep({ post: catalogReviewPoster(taskCatalog, postReviewStatus), owner, repo, sha: view.headRefOid,
-        state: "pending", description: `pending (owned by run ${runId}) — no review running: the reviewer failed to start ` +
-          `(${startFailure}); retry due`, taskId: reviewKey, evidence: "no_evidence", ledgerPath, runId, prUrl: view.url,
-        reviewInputDigest: inputDigest, reviewEngineRevision: REVIEW_ENGINE_REVISION, fetchLifecycle: () => fetchPrLifecycleAsync(view.url) });
+      const hasClaim = claimLedger.some(row => row.step === "review.pending_posted");
+      const checkedStatus = hasClaim ? await readBoundPendingClaimStatus(owner, repo, view.headRefOid,
+        deps.fetchPendingStatus ?? ((args) => ghJsonAsync(args, undefined, undefined, { fresh: true }))) : undefined;
+      claimHeld ??= checkedStatus?.reason;
+      const claim = claimHeld !== undefined ? undefined : await postReviewPendingDep({
+        owner,
+        repo,
+        sha: view.headRefOid,
+        taskId: reviewKey,
+        runId,
+        ledgerPath,
+        prUrl: view.url,
+        reviewInputDigest: inputDigest,
+        reviewEngineRevision: REVIEW_ENGINE_REVISION,
+        fetchLifecycle: () => fetchPrLifecycleAsync(view.url),
+        fetchStatus: checkedStatus === undefined ? undefined : () => checkedStatus.combined,
+      });
+      claimPosted = claim?.posted === true;
+      if (claim !== undefined) claimHeld = pendingClaimHeldByAnotherRun(claim, runId, claimLedger, view.headRefOid);
     } catch (e) {
       log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
     }
-  }
-
-  // A final review decision is immutable, but GitHub's commit status is last-write-wins. A stale
-  // daemon may have posted pending after that decision; replay must check the live context and
-  // restore the already-judged terminal status instead of reporting a success that GitHub cannot see.
-  let replayStatusAction: "restored" | "confirmed" | undefined;
-  if (verdict.decisionDisposition === "replayed" && verdict.reviewDecisionDigest) {
-    if (verdict.verdictWithheld) exit.as("replayed-verdict-withheld");
-    if (verdict.verdictWithheld) return 2;
-    const restorePoster = failureRecordingPoster();
-    const restoringState = verdict.state;
-    const restoringFreshness = await publicationFreshness();
-    let replayDispute: ReviewPassDispute | undefined;
-    const restored = await postStatusDep({
-      post: catalogReviewPoster(taskCatalog, restorePoster.post, restoringFreshness.status === "fresh" ? restoringFreshness.codeSha : undefined),
-      owner, repo, sha: view.headRefOid, state: verdict.state, verdict,
-      readReviewStatusHistory: disputeGuardedHistoryReader(deps.readReviewStatusHistory ?? readSharedReviewStatusHistory, verdict,
-        { runId, inputDigest, codeSha: restoringFreshness.status === "fresh" ? restoringFreshness.codeSha : undefined },
-        { planOnly: verdict.planOnly, reviewerOutcome: verdict.reviewerOutcome }, (found) => { replayDispute = found; }),
-      description: reviewPostedDescription(verdict),
-      taskId: reviewKey, evidence: reviewEvidenceStrength(verdict.criteria),
-      ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest,
-      reviewDecisionDigest: verdict.reviewDecisionDigest,
-      reviewEngineRevision: REVIEW_ENGINE_REVISION,
-      reviewerCodeFreshness: restoringFreshness,
-      fetchLifecycle: () => fetchPrLifecycle(view.url),
-      fetchCurrentStatus: () => reviewStatusEntryFromCombined(fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)))?.state,
-      fetchCurrentStatusEntry: () => readReviewStatusEntry(owner, repo, view.headRefOid, deps.fetchView),
-      fetchPublisher: deps.fetchView,
-      readRequiredContexts: readRequiredStatusCheckContextsAsync,
-      cannotEvaluateEscalation: (e, issues) => tryEscalate(taskCatalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
-      // W1-T14235: a replayed decision re-publishes a code pass only when its recorded judgement was semantic.
-      semanticJudgement: { planOnly: verdict.planOnly, reviewerOutcome: verdict.reviewerOutcome },
-    });
-    verdict.reviewDecisionDigest = restored.effectiveReviewDecisionDigest ?? verdict.reviewDecisionDigest;
-    if (restored.effectiveVerdict) verdict = { ...verdict, ...restored.effectiveVerdict, state: restored.effectiveState ?? restored.effectiveVerdict.state };
-    if (restoringState === "success" && verdict.state === "failure") withdrawArmIfVerdictRefuses(verdict,
-      { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
-    if (replayDispute !== undefined && restored.effectiveState === "pending") {
-      verdict = { ...verdict, ...await holdDisputedPass(replayDispute, verdict, { owner, repo, prUrl: view.url, headSha: view.headRefOid,
-        taskId: reviewKey, runId, ledgerPath, catalog: taskCatalog, log, disarm: deps.disarm,
-        publish: (pending, pendingDescription) => postStatusDep({ post: catalogReviewPoster(taskCatalog, restorePoster.post), owner, repo,
-          sha: view.headRefOid, state: "pending", verdict: pending, description: pendingDescription, taskId: reviewKey,
-          evidence: reviewEvidenceStrength(pending.criteria), ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest,
-          reviewEngineRevision: REVIEW_ENGINE_REVISION, reviewerCodeFreshness: restoringFreshness,
-          fetchLifecycle: () => fetchPrLifecycle(view.url), readRequiredContexts: readRequiredStatusCheckContextsAsync }) }) };
-    } else if (restored.semanticHold !== undefined) {
-      if (verdict.state === "pending") withdrawArmIfVerdictRefuses(verdict,
-        { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
-      verdict.verdictWithheld = restored.reason ?? restored.semanticHold;
-    } else if (restored.cappedHold !== undefined) {
-      // W1-T14241: a replayed capped code pass no override certified is restored as pending, never as success.
-      withdrawArmIfVerdictRefuses(verdict,
-        { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
-      verdict.verdictWithheld = restored.cappedHold;
-    } else if (restored.posted) {
-      replayStatusAction = "restored";
-      const { unmetClaims, reasons } = reviewUnmetFields(verdict);
-      const reviewPostedRow = {
-        context: REVIEW_CONTEXT, state: verdict.state, head_sha: view.headRefOid, pr_url: view.url,
-        review_input_digest: inputDigest, review_engine_revision: REVIEW_ENGINE_REVISION,
-        review_decision_digest: verdict.reviewDecisionDigest, decision_verdict: verdict,
-        evaluator_provenance: verdict.evaluatorProvenance,
-        ...(restoringFreshness.status === "fresh" ? { reviewer_code_sha: restoringFreshness.codeSha } : {}),
-        reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
-        unmet_criteria: unmetClaims, reasons, ...reviewLedgerLegibilityFields(verdict),
-        status_recovered: true,
-        status_publisher: restored.publisherEvidence,
-      };
-      log("review.posted", reviewPostedRow);
-      if (restorePoster.published()) {
-        await writeReviewEvidenceRecord(reviewPostedRow, taskCatalog).catch(error => {
-          log("review.evidence_write_failed", { pr_number: view.number, head_sha: view.headRefOid, reason: String(error) });
-        });
-      }
-    } else if (restored.replayed) {
-      replayStatusAction = "confirmed";
-      // W1-T5726: nothing posted, but this input WAS judged; no row leaves the attempt count 0 and the sweep re-reviews (#9138).
-      log("review.posted", {
-        context: REVIEW_CONTEXT, state: verdict.state, head_sha: view.headRefOid, pr_url: view.url,
-        review_input_digest: inputDigest, review_engine_revision: REVIEW_ENGINE_REVISION,
-        review_decision_digest: verdict.reviewDecisionDigest, decision_verdict: verdict,
-        evaluator_provenance: verdict.evaluatorProvenance,
-        reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
-        status_confirmed: true,
-        status_publisher: restored.publisherEvidence,
-      });
-    } else {
-      verdict.verdictWithheld = restored.reason ?? "could not restore the live remudero-review status";
+    // W1-T14177: a claim refusal is returned, never discarded — another run's live claim holds this head.
+    if (claimHeld !== undefined) {
+      log("review.stood_down", { pr_url: view.url, head_sha: view.headRefOid, review_input_digest: inputDigest, reason: claimHeld });
+      console.log(`rmd review: PR #${view.number} not reviewed — ${claimHeld}`);
+      exit.as("review-claim-held");
+      return 2;
     }
-    // W1-T11151: a restored, confirmed or refused replay is terminal; only a restore whose publication threw holds its slot.
-    if (!restorePoster.failed()) (deps.onPhase ?? reportReviewPhase)("posted");
-  }
 
-  console.log(
-    `\nremudero-review=${verdict.state} ${verdict.verdictWithheld ? "WITHHELD" : replayStatusAction ?? "posted"} to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
-      (verdict.verdictWithheld ? ` — ${verdict.verdictWithheld}` : "") +
-      (reviewVerdictAnnotation(verdict) ? ` — ${reviewVerdictAnnotation(verdict)}` : "") +
-      // W1-T1085: the same three-way fact the status itself renders — a plan-only PR is not a
-      // degraded one, and saying "not certified" here contradicts the status posted seconds ago.
-      (cappedWordingApplies(verdict) ? " — CAPPED: not certified (0 proofs executed)" : ""),
-  );
-  // W1-T14241: a capped code pass held as pending is withheld, yet the override that releases it is still followable.
-  const cappedHoldWithheld = verdict.verdictWithheld?.startsWith(UNCERTIFIED_PASS_HELD) === true;
-  if (cappedHoldWithheld && !(overrideBy && overrideReason) && cappedWordingApplies(verdict)) {
-    console.log(cappedOverrideHint(view.number));
-  }
-  if (verdict.verdictWithheld) exit.as("verdict-not-posted");
-  if (verdict.verdictWithheld) return 2;
+    // W1-T9232: the pending status just posted STANDS — no verdict is judged on a plan that lacks the task's own record.
+    // The sweep reads this row, refreshes the branch from main and re-reviews the new head.
+    if (ownTaskRecordMissing) {
+      const withheldInput = { ...replaySetupInput, publication_refusal: OWN_TASK_RECORD_MISSING_CAUSE };
+      recordSetupReplay(withheldInput, classifyReviewOutcome(withheldInput));
+      log("review.reviewer.skipped", {
+        reason: OWN_TASK_RECORD_MISSING_CAUSE, pr_number: view.number, pr_url: view.url, head_sha: view.headRefOid,
+        derived_repair: "refresh the branch from main", missing: ["risk", "budget_usd", "criteria"],
+      });
+      console.log(
+        `rmd review PR #${view.number}: ${taskId} has no record at head ${view.headRefOid.slice(0, 7)} but origin/main has it ` +
+          `(${OWN_TASK_RECORD_MISSING_CAUSE}) — pending; refresh the branch from main, then re-review`,
+      );
+      exit.as("own-task-record-missing");
+      return 2;
+    }
 
-  if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(host, source, subjectRepoDir)) {
-    console.log(
-      "NOTE: the criteria came from a plan tree older than origin/main; merge origin/main into the branch " +
-        "before treating this unmet verdict as a diff defect",
+    // W1-T185 (Gap 2): materialize a throwaway worktree at the PR head so
+    // whitelisted proofs actually EXECUTE on this manual path, matching what
+    // the automated fix rung observes for the same PR/proofs (acceptance
+    // criterion 4). On ANY failure this leaves worktreePath undefined and the
+    // review falls back to keyword-only — EXPLICITLY marked (criterion 5),
+    // never silently, and (W1-T233) the console line below now NAMES why,
+    // instead of a bare "unavailable" with the real reason thrown away.
+    exit.step = "materialize";
+    const materializeStartedMs = systemClock.now();
+    const materialized = await materialize(config, subjectRepoDir, view.number, view.headRefOid);
+    if (materialized.worktreePath === undefined) {
+      console.log(
+        `(worktree materialization failed [${materialized.failure.errorClass}]: ` +
+          `${materialized.failure.message} — this verdict will post keyword-only)`,
+      );
+    }
+    const worktreePath = materialized.worktreePath;
+
+    // impl-GE / R-11: the merge-base side this PR's proofs are re-run against, so a proof that ALREADY
+    // matched/passed before the work existed is marked `executed_stale` instead of counting as
+    // evidence. Built from the materialised head worktree (the merge-base is resolved there);
+    // `baseCheckoutDir` is a real detached worktree when `baseIsCheckout` is true, else the blob-only
+    // fallback (or undefined when the PR has no dialect proof / no resolvable base — the check then
+    // stays inert, exactly as it was for its first 1,180 verdicts). W1-T460's `baseUnreadablePaths`
+    // rides along: a per-proof fact the dir alone cannot carry.
+    const baseProof = worktreePath ? await buildBaseProof(criteria, worktreePath) : undefined;
+    const materializeMs = systemClock.now() - materializeStartedMs;
+
+    // W1-T185 (Gap 2, criterion 6): withMaterializedWorktree guarantees teardown
+    // on EVERY exit path, including a throw from runReview itself — never just
+    // the success path, which would reproduce the W1-T175 leak class. (R-11) The
+    // base worktree is torn down by the SAME helper, as the outer scope, so the
+    // head goes first and the base follows on every exit path too; a grep tree is
+    // deleted there the same way, and a blob-only fallback dir is not a worktree and
+    // is left to the boot sweep (src/lib/tmp.ts) exactly as before.
+    // W1-T185 (Gap 1, criterion 2), raised by W1-T229: the operator override —
+    // a LEDGERED, attributable decision to arm a capped verdict anyway.
+    // Granted here (the manual escape hatch, an operator-run command) rather
+    // than inferred: an override is a decision someone made, and it must name
+    // who. No `principles`/tdd-tier check gates this note since W1-T229 — a
+    // CAPPED verdict refuses to arm regardless of tdd tier. W1-T14241: recorded
+    // BEFORE the review runs, because a capped code pass now posts pending until
+    // an override for its head is in the ledger — the run's own guarded post
+    // reads this row and publishes success.
+    const overrideBy = flagValue(rest, "--override-capped-by");
+    const overrideReason = flagValue(rest, "--override-capped-reason");
+    if (overrideBy && overrideReason && !shadow) {
+      if (!taskId) {
+        console.error(
+          "--override-capped-by/--override-capped-reason need a resolvable task (a Remudero-Task: trailer) " +
+            "— not recorded.",
+        );
+      } else {
+        // W1-T219: BIND the grant to the head it is reviewed against —
+        // cappedOverrideFromLedger refuses to honour it against any other head.
+        log("automerge.capped_override_granted", {
+          by: overrideBy,
+          reason: overrideReason,
+          pr_url: view.url,
+          head_sha: view.headRefOid,
+        });
+        console.log(
+          `CAPPED override recorded — by ${overrideBy}: ${overrideReason} (task ${taskId}, head ${view.headRefOid.slice(0, 7)})`,
+        );
+      }
+    }
+    exit.step = "review";
+    let verdict = await withMaterialized(
+      baseProof?.baseIsCheckout || baseProof?.baseIsGrepTree ? baseProof.baseCheckoutDir : undefined,
+      subjectRepoDir,
+      () =>
+        withMaterialized(worktreePath, subjectRepoDir, () => whileWorkerRunLive(host, runId, () =>
+          runReviewDep({
+            onPhase: deps.onPhase,
+            ...(deps.planLintRetryHead === undefined ? {} : { planLintRetryHead: deps.planLintRetryHead }),
+            reviewReplaySetupInput: replaySetupInput,
+            owner,
+            repo,
+            prUrl: view.url,
+            // impl-BG: excludes dependabot heads from the post-verdict arm (the dep-review lane owns those).
+            headRefName: view.headRefName,
+            ...(keepsUnseenDependency ? { reservationHomeDir: repoRoot } : {}),
+            task: {
+              id: reviewKey,
+              catalog: taskCatalog,
+              acceptance: criteria,
+              files: taskDeclaredFiles,
+              risk: taskRisk,
+              budget_usd: taskBudgetUsd,
+              ...taskNarrative,
+            },
+            report: reportBody, // the PR body is the manual author's REPORT (proofs are pasted here)
+            settingsFile,
+            config,
+            budgetUsd: spawnReviewer ? taskBudgetUsd : undefined,
+            log,
+            say: (m) => console.log(m),
+            account: (r) => r,
+            spawnReviewer,
+            requireSemanticReview: executionMode === "semantic",
+            reviewerMount,
+            excludeProviders,
+            // W1-T185 (Gap 2): the materialized worktree above when available — the
+            // SAME `headCheckoutDir` wiring the autonomous path uses, so whitelisted
+            // proofs execute here too. `undefined` (materialization unavailable)
+            // makes `judgeReview` mark the verdict `keywordOnly`+`capped`, exactly
+            // the documented fallback (criterion 5) — never silent.
+            headCheckoutDir: worktreePath,
+            reviewerCodeFreshness: publicationFreshness,
+            admission: deps.reviewStartFreshness !== undefined ? "start-gate" : deps.judgeAtOwnStart === true ? "fresh-tree-child" : "operator",
+            prCreatedAt: view.createdAt,
+            readReviewStatusHistory: deps.readReviewStatusHistory,
+            // The three base facts, threaded by NAME so a reader (and test/preexisting-proof-hits-wiring)
+            // can see each one reach the evidence: the dir, the per-proof unreadable set (W1-T460), and
+            // whether the dir is a checkout a `unit test:` proof may honestly be re-run in (R-11).
+            baseCheckoutDir: baseProof?.baseCheckoutDir,
+            baseUnreadablePaths: baseProof?.baseUnreadablePaths,
+            baseIsCheckout: baseProof?.baseIsCheckout,
+            addedTestFiles: baseProof?.addedTestFiles,
+            // W1-T233: the named reason materialization failed (absent ⇒ it was
+            // never attempted at all) — carried onto the posted CAPPED description
+            // and the review.posted ledger line's degraded_reason fields.
+            materializationFailure: materialized.failure,
+            materializeMs,
+            ledgerPath,
+            runId,
+            openTaskIds,
+            ...(moverRemoval === undefined ? {} : { moverRemoval }),
+            ...(shadow ? { shadow: true } : {}),
+            ...(calibrationCase ? { calibrationCase: true } : {}),
+          }), join(config.root, "state", "inflight")),
+        ),
+      baseProof?.baseIsGrepTree ? (_repo, tree) => rmSync(tree, { recursive: true, force: true }) : undefined,
     );
-  }
+    // W1-T10269: a shadow review ends at its verdict: no restore, no status, no comment, no arm.
+    exit.step = "publish";
+    if (shadow && verdict.verdictWithheld) exit.as("shadow-verdict-withheld");
+    if (shadow) return verdict.verdictWithheld ? 2 : 0;
+    // W1-T13380: a reviewer that never started leaves no review running, so this run replaces its own claim with the truth.
+    if (claimPosted && startFailure !== undefined) {
+      try {
+        await postStatusDep({ post: catalogReviewPoster(taskCatalog, postReviewStatus), owner, repo, sha: view.headRefOid,
+          state: "pending", description: `pending (owned by run ${runId}) — no review running: the reviewer failed to start ` +
+            `(${startFailure}); retry due`, taskId: reviewKey, evidence: "no_evidence", ledgerPath, runId, prUrl: view.url,
+          reviewInputDigest: inputDigest, reviewEngineRevision: REVIEW_ENGINE_REVISION, fetchLifecycle: () => fetchPrLifecycleAsync(view.url) });
+      } catch (e) {
+        log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
+      }
+    }
 
-  // W1-T185 (Gap 1, criterion 2), raised by W1-T229: the operator override —
-  // a LEDGERED, attributable decision to arm a capped verdict anyway.
-  // Granted here (the manual escape hatch, an operator-run command) rather
-  // than inferred: an override is a decision someone made, and it must name
-  // who. No `principles`/tdd-tier check gates this note since W1-T229 — a
-  // CAPPED verdict refuses to arm regardless of tdd tier.
-  // W1-T14241: the grant itself is recorded BEFORE the review runs (the `--override-capped-by` block above), so the run's
-  // own guarded post reads it and releases the capped pass to success. Only the hint remains here.
-  if (!(overrideBy && overrideReason) && cappedWordingApplies(verdict) && !cappedHoldWithheld) {
-    // W1-T1085: a SEPARATE call site from the capped annotation above, with the same defect —
-    // gated on `capped` alone. For a plan-only verdict both halves are false: it arms, and the
-    // override is structurally unreachable, so the hint is advice that cannot be followed. The
-    // status this run posts already states the truth, so nothing replaces it here.
-    console.log(cappedOverrideHint(view.number));
-  }
+    // A final review decision is immutable, but GitHub's commit status is last-write-wins. A stale
+    // daemon may have posted pending after that decision; replay must check the live context and
+    // restore the already-judged terminal status instead of reporting a success that GitHub cannot see.
+    let replayStatusAction: "restored" | "confirmed" | undefined;
+    if (verdict.decisionDisposition === "replayed" && verdict.reviewDecisionDigest) {
+      if (verdict.verdictWithheld) exit.as("replayed-verdict-withheld");
+      if (verdict.verdictWithheld) return 2;
+      const restorePoster = failureRecordingPoster();
+      const restoringState = verdict.state;
+      const restoringFreshness = await publicationFreshness();
+      let replayDispute: ReviewPassDispute | undefined;
+      const restored = await postStatusDep({
+        post: catalogReviewPoster(taskCatalog, restorePoster.post, restoringFreshness.status === "fresh" ? restoringFreshness.codeSha : undefined),
+        owner, repo, sha: view.headRefOid, state: verdict.state, verdict,
+        readReviewStatusHistory: disputeGuardedHistoryReader(deps.readReviewStatusHistory ?? readSharedReviewStatusHistory, verdict,
+          { runId, inputDigest, codeSha: restoringFreshness.status === "fresh" ? restoringFreshness.codeSha : undefined },
+          { planOnly: verdict.planOnly, reviewerOutcome: verdict.reviewerOutcome }, (found) => { replayDispute = found; }),
+        description: reviewPostedDescription(verdict),
+        taskId: reviewKey, evidence: reviewEvidenceStrength(verdict.criteria),
+        ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest,
+        reviewDecisionDigest: verdict.reviewDecisionDigest,
+        reviewEngineRevision: REVIEW_ENGINE_REVISION,
+        reviewerCodeFreshness: restoringFreshness,
+        fetchLifecycle: () => fetchPrLifecycle(view.url),
+        fetchCurrentStatus: () => reviewStatusEntryFromCombined(fetchView(combinedStatusRestArgs(owner, repo, view.headRefOid)))?.state,
+        fetchCurrentStatusEntry: () => readReviewStatusEntry(owner, repo, view.headRefOid, deps.fetchView),
+        fetchPublisher: deps.fetchView,
+        readRequiredContexts: readRequiredStatusCheckContextsAsync,
+        cannotEvaluateEscalation: (e, issues) => tryEscalate(taskCatalog === "ops" ? { ...e, detail: "Review cannot evaluate this head; detailed evidence is retained on the host." } : e, { issues: issues ?? ghIssueGateway(owner, repo), ledgerPath, runId }),
+        // W1-T14235: a replayed decision re-publishes a code pass only when its recorded judgement was semantic.
+        semanticJudgement: { planOnly: verdict.planOnly, reviewerOutcome: verdict.reviewerOutcome },
+      });
+      verdict.reviewDecisionDigest = restored.effectiveReviewDecisionDigest ?? verdict.reviewDecisionDigest;
+      if (restored.effectiveVerdict) verdict = { ...verdict, ...restored.effectiveVerdict, state: restored.effectiveState ?? restored.effectiveVerdict.state };
+      if (restoringState === "success" && verdict.state === "failure") withdrawArmIfVerdictRefuses(verdict,
+        { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
+      if (replayDispute !== undefined && restored.effectiveState === "pending") {
+        verdict = { ...verdict, ...await holdDisputedPass(replayDispute, verdict, { owner, repo, prUrl: view.url, headSha: view.headRefOid,
+          taskId: reviewKey, runId, ledgerPath, catalog: taskCatalog, log, disarm: deps.disarm,
+          publish: (pending, pendingDescription) => postStatusDep({ post: catalogReviewPoster(taskCatalog, restorePoster.post), owner, repo,
+            sha: view.headRefOid, state: "pending", verdict: pending, description: pendingDescription, taskId: reviewKey,
+            evidence: reviewEvidenceStrength(pending.criteria), ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest,
+            reviewEngineRevision: REVIEW_ENGINE_REVISION, reviewerCodeFreshness: restoringFreshness,
+            fetchLifecycle: () => fetchPrLifecycle(view.url), readRequiredContexts: readRequiredStatusCheckContextsAsync }) }) };
+      } else if (restored.semanticHold !== undefined) {
+        if (verdict.state === "pending") withdrawArmIfVerdictRefuses(verdict,
+          { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
+        verdict.verdictWithheld = restored.reason ?? restored.semanticHold;
+      } else if (restored.cappedHold !== undefined) {
+        // W1-T14241: a replayed capped code pass no override certified is restored as pending, never as success.
+        withdrawArmIfVerdictRefuses(verdict,
+          { prUrl: view.url, taskId: reviewKey, headSha: view.headRefOid, ledgerPath, log }, { disarm: deps.disarm });
+        verdict.verdictWithheld = restored.cappedHold;
+      } else if (restored.posted) {
+        replayStatusAction = "restored";
+        const { unmetClaims, reasons } = reviewUnmetFields(verdict);
+        const reviewPostedRow = {
+          context: REVIEW_CONTEXT, state: verdict.state, head_sha: view.headRefOid, pr_url: view.url,
+          review_input_digest: inputDigest, review_engine_revision: REVIEW_ENGINE_REVISION,
+          review_decision_digest: verdict.reviewDecisionDigest, decision_verdict: verdict,
+          evaluator_provenance: verdict.evaluatorProvenance,
+          ...(restoringFreshness.status === "fresh" ? { reviewer_code_sha: restoringFreshness.codeSha } : {}),
+          reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
+          unmet_criteria: unmetClaims, reasons, ...reviewLedgerLegibilityFields(verdict),
+          status_recovered: true,
+          status_publisher: restored.publisherEvidence,
+        };
+        log("review.posted", reviewPostedRow);
+        if (restorePoster.published()) {
+          await writeReviewEvidenceRecord(reviewPostedRow, taskCatalog).catch(error => {
+            log("review.evidence_write_failed", { pr_number: view.number, head_sha: view.headRefOid, reason: String(error) });
+          });
+        }
+      } else if (restored.replayed) {
+        replayStatusAction = "confirmed";
+        // W1-T5726: nothing posted, but this input WAS judged; no row leaves the attempt count 0 and the sweep re-reviews (#9138).
+        log("review.posted", {
+          context: REVIEW_CONTEXT, state: verdict.state, head_sha: view.headRefOid, pr_url: view.url,
+          review_input_digest: inputDigest, review_engine_revision: REVIEW_ENGINE_REVISION,
+          review_decision_digest: verdict.reviewDecisionDigest, decision_verdict: verdict,
+          evaluator_provenance: verdict.evaluatorProvenance,
+          reviewer_outcome: verdict.reviewerOutcome, proof_exec: verdict.criteria.map((criterion) => criterion.proof_exec),
+          status_confirmed: true,
+          status_publisher: restored.publisherEvidence,
+        });
+      } else {
+        verdict.verdictWithheld = restored.reason ?? "could not restore the live remudero-review status";
+      }
+      // W1-T11151: a restored, confirmed or refused replay is terminal; only a restore whose publication threw holds its slot.
+      if (!restorePoster.failed()) (deps.onPhase ?? reportReviewPhase)("posted");
+    }
 
-  if (verdict.state !== "success") exit.as(REVIEW_EXIT_CAUSES.find((cause) => cause === `verdict-${verdict.state}`) ?? "verdict-not-success");
-  return verdict.state === "success" ? 0 : 1;
+    console.log(
+      `\nremudero-review=${verdict.state} ${verdict.verdictWithheld ? "WITHHELD" : replayStatusAction ?? "posted"} to ${view.url} (head ${verdict.headSha.slice(0, 7)})` +
+        (verdict.verdictWithheld ? ` — ${verdict.verdictWithheld}` : "") +
+        (reviewVerdictAnnotation(verdict) ? ` — ${reviewVerdictAnnotation(verdict)}` : "") +
+        // W1-T1085: the same three-way fact the status itself renders — a plan-only PR is not a
+        // degraded one, and saying "not certified" here contradicts the status posted seconds ago.
+        (cappedWordingApplies(verdict) ? " — CAPPED: not certified (0 proofs executed)" : ""),
+    );
+    // W1-T14241: a capped code pass held as pending is withheld, yet the override that releases it is still followable.
+    const cappedHoldWithheld = verdict.verdictWithheld?.startsWith(UNCERTIFIED_PASS_HELD) === true;
+    if (cappedHoldWithheld && !(overrideBy && overrideReason) && cappedWordingApplies(verdict)) {
+      console.log(cappedOverrideHint(view.number));
+    }
+    if (verdict.verdictWithheld) exit.as("verdict-not-posted");
+    if (verdict.verdictWithheld) return 2;
+
+    if (verdict.criteria.some((criterion) => !criterion.met) && planTreeIsBehindMain(host, source, subjectRepoDir)) {
+      console.log(
+        "NOTE: the criteria came from a plan tree older than origin/main; merge origin/main into the branch " +
+          "before treating this unmet verdict as a diff defect",
+      );
+    }
+
+    // W1-T185 (Gap 1, criterion 2), raised by W1-T229: the operator override —
+    // a LEDGERED, attributable decision to arm a capped verdict anyway.
+    // Granted here (the manual escape hatch, an operator-run command) rather
+    // than inferred: an override is a decision someone made, and it must name
+    // who. No `principles`/tdd-tier check gates this note since W1-T229 — a
+    // CAPPED verdict refuses to arm regardless of tdd tier.
+    // W1-T14241: the grant itself is recorded BEFORE the review runs (the `--override-capped-by` block above), so the run's
+    // own guarded post reads it and releases the capped pass to success. Only the hint remains here.
+    if (!(overrideBy && overrideReason) && cappedWordingApplies(verdict) && !cappedHoldWithheld) {
+      // W1-T1085: a SEPARATE call site from the capped annotation above, with the same defect —
+      // gated on `capped` alone. For a plan-only verdict both halves are false: it arms, and the
+      // override is structurally unreachable, so the hint is advice that cannot be followed. The
+      // status this run posts already states the truth, so nothing replaces it here.
+      console.log(cappedOverrideHint(view.number));
+    }
+
+    if (verdict.state !== "success") exit.as(REVIEW_EXIT_CAUSES.find((cause) => cause === `verdict-${verdict.state}`) ?? "verdict-not-success");
+    return verdict.state === "success" ? 0 : 1;
+  } finally {
+    reviewLock?.release();
+  }
 }
 
-/** W1-T5998 — hold `runId` in {@link liveWorkerRunIds} for as long as `spawn` runs its worker. */
 /** W1-T14947: the in-flight lock directory a review holds from its claim to its result, read by deploy/recycle-container.sh's
  *  drain. Task dispatch and the orphan sweep read only the top-level `state/inflight/*.lock` files, so a review lock is never
  *  a task run (invariant one-lock-per-review). */
 export const REVIEW_INFLIGHT_DIR = "reviews";
 
+/** W1-T5998 — hold `runId` in {@link liveWorkerRunIds} for as long as `spawn` runs its worker. */
 export async function whileWorkerRunLive<T>(host: ReviewCommandHost, runId: string, spawn: () => Promise<T>, inflightDir?: string): Promise<T> {
   const { liveWorkerRunIds, reviewWorkerLockId } = host;
-  // W1-T14947: the review lock spans the whole run — its pending post, every reviewer attempt and the posting after the
-  // last one exits — and is released in the finally below, so no exit path leaves it held.
-  const review = inflightDir === undefined ? undefined : acquireInflightLock(join(inflightDir, REVIEW_INFLIGHT_DIR),
+  const held = inflightDir === undefined ? undefined : acquireInflightLock(join(inflightDir, "review-workers"),
     reviewWorkerLockId(runId), { run_id: runId, reclaim: false });
-  let held: ReturnType<typeof acquireInflightLock> | undefined;
+  liveWorkerRunIds.add(runId);
   try {
-    held = inflightDir === undefined ? undefined : acquireInflightLock(join(inflightDir, "review-workers"),
-      reviewWorkerLockId(runId), { run_id: runId, reclaim: false });
-    liveWorkerRunIds.add(runId);
     return await spawn();
   } finally {
     liveWorkerRunIds.delete(runId);
     held?.release();
-    review?.release();
   }
 }
 

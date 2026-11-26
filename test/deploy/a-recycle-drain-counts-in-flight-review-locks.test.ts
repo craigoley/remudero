@@ -1,5 +1,6 @@
 // W1-T14947 — deploy/recycle-container.sh's drain counts a review lock under state/inflight/reviews whose owner is alive in
-// the container, and ignores one whose owner is gone. Drives the real script with a fake `docker` on PATH.
+// the target container, and ignores one whose owner is gone or that another container wrote. Drives the real script with a
+// fake `docker` on PATH.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -42,6 +43,7 @@ case "$1" in
     name="\${!#}"
     case "$*" in
       *Config.Env*) echo GH_TOKEN=fixture-token ;;
+      *Config.Hostname*) echo "$FAKE_HOSTNAME" ;;
       *Mounts*) printf '%s\\t/home/node/Remudero\\ttrue\\n%s\\t/home/node/.claude\\ttrue\\n' "$RMD_STATE_DIR" "$RMD_CLAUDE_DIR" ;;
       *Config.Image*) echo fixture/remudero:old ;;
       *'{{.Id}}'*) cat "$S/containers/$name/id" 2>/dev/null || exit 1 ;;
@@ -60,8 +62,9 @@ esac
 exit 0
 `;
 
-/** Runs one recycle whose state holds a review lock owned by pid 4242; returns its exit code and output. */
-async function recycleWithReviewLock(t: TestContext, alivePids: string): Promise<{ code: number | null; out: string }> {
+/** Runs one recycle whose state holds a review lock owned by pid 4242 on `lockHost`; the target container's hostname is
+ *  `core-host`. Returns its exit code and output. */
+async function recycleWithReviewLock(t: TestContext, alivePids: string, lockHost = "core-host"): Promise<{ code: number | null; out: string }> {
   const owned = ownedFixtureDir(t, "recycle-review-lock");
   const root = owned.dir;
   const store = join(root, "store");
@@ -75,10 +78,10 @@ async function recycleWithReviewLock(t: TestContext, alivePids: string): Promise
   writeFileSync(join(store, "containers/core-daemon/image"), "sha256:old\n");
   writeFileSync(join(store, "containers/core-daemon/id"), "old-core-daemon\n");
   writeFileSync(join(root, "core/state/inflight/reviews/review-run-a.lock"),
-    JSON.stringify({ pid: 4242, run_id: "run-a", host: "fixture-host", startedAt: new Date().toISOString() }));
+    JSON.stringify({ pid: 4242, run_id: "run-a", host: lockHost, startedAt: new Date().toISOString() }));
   const env: NodeJS.ProcessEnv = {
     ...process.env, HOME: join(root, "home"), PATH: `${join(root, "bin")}:${process.env.PATH}`,
-    FAKE_STORE: store, FAKE_ALIVE_PIDS: alivePids, RMD_CLAUDE_DIR: join(root, "claude"),
+    FAKE_STORE: store, FAKE_ALIVE_PIDS: alivePids, FAKE_HOSTNAME: "core-host", RMD_CLAUDE_DIR: join(root, "claude"),
     RMD_CODEX_DIR: join(root, "absent-codex"), RMD_CONTAINER_CONFIG_DIR: join(root, "absent-config"),
     RMD_RECYCLE_FIRST_BOOT: "1", RMD_RECYCLE_POLL_S: "1", RMD_RECYCLE_DOCKERENV_PATH: join(root, "no-marker"),
     RMD_OPENWEIGHT_API_KEY_PATH: join(root, "key"), TMPDIR: join(root, "tmp"),
@@ -106,8 +109,15 @@ describe("test/deploy/a-recycle-drain-counts-in-flight-review-locks.test.ts", { 
     assert.equal(live.code, 1, `the bounded wait refuses rather than kill the live review:\n${live.out}`);
     assert.match(live.out, /reviews\/review-run-a\.lock \(a live review, W1-T14947\)/);
     assert.doesNotMatch(live.out, /no in-flight workers — safe to proceed/);
+    const blockers = JSON.parse(/recycle-blockers-json: (\[.*\])/.exec(live.out)?.[1] ?? "[]") as Array<Record<string, unknown>>;
+    assert.deepEqual(blockers.filter((b) => b.kind === "lock").map((b) => [b.task_id, b.run_id]), [["reviews/review-run-a", "run-a"]],
+      "the refusal names the review lock as a blocker the supervisor can watch settle");
 
     const gone = await recycleWithReviewLock(t, "");
     assert.match(gone.out, /no in-flight workers — safe to proceed/, `a lock whose owner is gone does not block:\n${gone.out}`);
+
+    const replaced = await recycleWithReviewLock(t, "4242", "replaced-container-host");
+    assert.match(replaced.out, /no in-flight workers — safe to proceed/,
+      `a lock another container wrote does not block, even when its pid number is alive here:\n${replaced.out}`);
   });
 });
