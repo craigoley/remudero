@@ -4678,13 +4678,6 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // At the first prompt assembly, as the implement lane does — emitted even at zero selection.
     if (!fixSkillSelectionLogged) deps.log("skills.selection", fixSkillSelection.observation);
     fixSkillSelectionLogged = true;
-    // W1-T14138: one shadow row per round, at its first prompt assembly; neither arm adds anything to the prompt below.
-    // A round that pushed and whose CI was never observed is left without an outcome row.
-    if (learningsRound === undefined || learningsRound.pushed !== undefined) {
-      learningsRound = recordFixLearningsShadow({ taskId: opts.taskId, runId: opts.runId, prNumber, attempt, round,
-        repoDir: opts.worktreePath, config: opts.config, evidence, priorRows: roundLedger });
-      deps.log("fix.learnings_shadow", learningsRound.row);
-    }
     const prompt = [
       renderFixPrompt({
         harnessCommits: fixHarnessOwnsGit,
@@ -4902,6 +4895,14 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // on failure, folded into `fix.dispatch` so a completed spawn's duration is measurable at all.
     let spawnElapsedMs: number | undefined;
     try {
+      // W1-T14138: open the measurement only once every pre-spawn guard has passed. A merge refresh or
+      // adopted evidence head can continue this loop with different checks; those checks belong to a new row.
+      if (learningsRound === undefined || learningsRound.pushed !== undefined) {
+        learningsRound = recordFixLearningsShadow({ taskId: opts.taskId, runId: opts.runId, prNumber, attempt, round,
+          repoDir: opts.worktreePath, config: opts.config, evidence, priorRows: roundLedger });
+        deps.log("fix.learnings_shadow", learningsRound.row);
+      }
+      learningsRound.roundId = roundId;
       // W1-T1044: bounds this ONE spawn by wall-clock time (spawnFixWorkerBounded's doc: why).
       const spawnOutcome = await host.withPredecessorTranscriptCopies(fixArgs, {
         root: opts.config.root, taskId: opts.taskId, excludeRunId: opts.runId,
@@ -4922,6 +4923,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       }
       if (recheck && spawnOutcome.kind !== "spawned") await recheck.refresh(roundId);
       if (spawnOutcome.kind === "superseded") {
+        settleLearningsRound("no_push");
         const s = spawnOutcome.superseded;
         const reason = `fix superseded (${s.condition}): ${s.oldHead.slice(0, 12)} -> ${s.newHead.slice(0, 12)}`;
         deps.say(`fix rung: STOPPED strike ${attempt}/${opts.strikeCap} — ${reason}: ${opts.prUrl}`);
@@ -4945,6 +4947,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           ...(y.keepError ? { retainWorktree: reason } : {}) });
       }
       if (spawnOutcome.kind === "abandoned") {
+        settleLearningsRound("no_push");
         deps.say(
           `fix rung: ABANDONED strike ${attempt}/${opts.strikeCap} — worker spawn exceeded its ` +
             `${spawnOutcome.elapsedMs}ms wall-clock bound (W1-T1044): ${opts.prUrl}`,
@@ -4971,6 +4974,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           "the provider reported no served model for this call" } : {}) };
     } catch (e) {
       if (!isSpawnInfraBlockedError(e)) throw e;
+      settleLearningsRound("no_push");
       // No subprocess ever launched, nothing was billed: an INFRA-tagged $0 line, NEVER a
       // `fix.dispatch` line (the only step `priorStrikesFor` counts), so forensics can separate "the
       // task was expensive" from "the host was broken" (W1-T127 iii). The refusal propagates

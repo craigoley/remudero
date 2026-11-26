@@ -99,7 +99,8 @@ export function fixLearningsDoneConclusion(round: FixLearningsRound, done: Recor
   if (round.pushed !== undefined || typeof done.round_id !== "string") return undefined;
   round.roundId = done.round_id;
   const head = typeof done.pushed_head_sha === "string" ? done.pushed_head_sha : undefined;
-  if (head === undefined && done.push_outcome !== "landed" && done.push_outcome !== "unverified") return "no_push";
+  if (head === undefined && done.push_outcome !== "landed" && done.push_outcome !== "unverified" &&
+    done.push_outcome !== "remote_unreadable") return "no_push";
   round.pushed = { head };
   return undefined;
 }

@@ -234,6 +234,14 @@ test("only a push on a known head waits for CI, and only a conclusion on that he
   assert.deepEqual(unnamed.pushed, { head: undefined });
   assert.equal(fixLearningsCiConclusion(unnamed, "green", undefined), undefined);
 
+  const unreadableRemote = openRound();
+  assert.equal(fixLearningsDoneConclusion(unreadableRemote, {
+    round_id: "r-remote-unreadable", push_outcome: "remote_unreadable",
+  }), undefined, "a successful push with an unreadable remote is not a no-push outcome");
+  assert.deepEqual(unreadableRemote.pushed, { head: undefined });
+  assert.equal(fixLearningsCiConclusion(unreadableRemote, "green", undefined), undefined,
+    "without a verifiable pushed head its CI result remains unobserved");
+
   const round = openRound();
   assert.equal(fixLearningsCiConclusion(round, "green", undefined), undefined, "nothing pushed yet");
   assert.equal(fixLearningsDoneConclusion(round, { round_id: "r1", pushed_head_sha: "abc" }), undefined);
