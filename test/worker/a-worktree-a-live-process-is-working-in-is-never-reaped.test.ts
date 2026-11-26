@@ -72,6 +72,19 @@ test("W1-T15026 a terminal tree no process works in is still reaped", () => {
   }
 });
 
+test("W1-T15026 a tree a later keep rule already holds keeps its own reason and costs no census", () => {
+  const t = tree("hd-hand-review-21031");
+  const asked: string[] = [];
+  try {
+    writeFileSync(join(t.entry, ".git"), "not a gitdir pointer\n");
+    const s = reap(t.root, 2 * HOUR, (dir) => { asked.push(dir); return { state: "occupied", scanned: 1, pid: 7 }; });
+    assert.deepEqual(s.keptReasons, [{ name: "hd-hand-review-21031", reason: "git-unreadable" }]);
+    assert.deepEqual(asked, [], "the census is asked only for a tree nothing else keeps");
+  } finally {
+    t.cleanup();
+  }
+});
+
 test("W1-T15026 an undecidable census keeps the tree as cwd-unknown", () => {
   for (const reason of ["cwd_unreadable", "entry_bound", "wall_bound"] as const) {
     const t = tree("hd-hand-review-21029");

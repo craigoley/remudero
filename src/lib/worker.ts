@@ -8322,16 +8322,6 @@ function* worktreeReapPass(
       keep(name, lockIsForeign ? "foreign-holder" : "recent-activity");
       continue;
     }
-    // W1-T15026: the last gate before removal. A tree can look terminal by every signal above while a live process still
-    // works in it (an operator review writes nothing inside its tree), so the census is asked only here, for the few
-    // trees about to be removed. Occupied keeps; an undecidable census keeps. A host with no process table at all has
-    // nothing to ask, so its removal runs as it did before this gate.
-    const census = cwdCensus(entryPath);
-    const noProcessTable = census.state === "unknown" && census.reason === "proc_unavailable";
-    if (census.state !== "clear" && !noProcessTable) {
-      keep(name, census.state === "occupied" ? "live-cwd" : "cwd-unknown");
-      continue;
-    }
     // HOW to remove it, decided BEFORE anything is destroyed: a linked worktree must die through its parent, or its record is
     // stranded `prunable`. `registration` is the live-branch gate's own lookup.
     const removalPlan = planWorktreeRemoval(entryPath, registration);
@@ -8356,6 +8346,16 @@ function* worktreeReapPass(
           }
           initializing = true;
         }
+      }
+      // W1-T15026: the last gate before removal. A tree can look terminal by every signal above while a live process still
+      // works in it (an operator review writes nothing inside its tree), so the census is asked only here, for the few
+      // trees about to be removed. Occupied keeps; an undecidable census keeps. A host with no process table at all has
+      // nothing to ask, so its removal runs as it did before this gate.
+      const census = cwdCensus(entryPath);
+      const noProcessTable = census.state === "unknown" && census.reason === "proc_unavailable";
+      if (census.state !== "clear" && !noProcessTable) {
+        keep(name, census.state === "occupied" ? "live-cwd" : "cwd-unknown");
+        continue;
       }
       if (!dryRun) {
         executeWorktreeRemoval(entryPath, removalPlan, initializing);
