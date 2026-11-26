@@ -5,6 +5,7 @@
  * and the merge path refuses the PR, until the hold is released. A hold that cannot be read holds too.
  */
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -14,10 +15,10 @@ import { armIfVerdictPermitsAsync, attemptArmAsync, readPullRequestTaskHold, rea
 import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
-import { postReviewStatusGuarded, postUnreadTaskHoldGuarded, reviewInputDigest, taskHoldInputDigest, taskHoldReading, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
-import { planCheckoutRoot, pullRequestTaskSubjectOf, readOpsCatalogHold, readPullRequestNamedTaskHold, resolvePullRequestTaskSubject, targetPlanRoot, readTaskDispatchHold, type TaskDispatchHoldSources } from "#src/lib/task-dispatch-hold.js";
+import { claimReviewDecision, planFilingFromChangedFiles, postReviewStatusGuarded, postUnreadTaskHoldGuarded, refreshReviewPublisherToken, reviewInputDigest, taskHoldInputDigest, taskHoldReading, type PlanLintOutcome, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
+import { boardPlanOnlyFiling, planCheckoutRoot, pullRequestTaskSubjectOf, readOpsCatalogHold, readPullRequestNamedTaskHold, resolvePullRequestTaskSubject, targetPlanRoot, readTaskDispatchHold, type TaskDispatchHoldSources } from "#src/lib/task-dispatch-hold.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
-import { readLedgerLines } from "#src/lib/status.js";
+import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { spawnWorker } from "#src/lib/worker.js";
@@ -139,6 +140,171 @@ test("W1-T14902 criterion 3: invariant:an-unread-hold-holds", async (t) => {
   const clear = await reviewArm(async () => ({ outcome: "clear" }));
   assert.equal(clear.outcome, "armed", "a clear task arms as before");
   assert.deepEqual(clear.writes, ["armAuto"]);
+});
+
+/** One process-wide credential: the App exchange is faked, and the publisher proof it leaves is the real one. */
+async function usablePublisher(t: TestContext): Promise<void> {
+  const saved = { ...process.env };
+  t.after(() => { process.env = saved; });
+  delete process.env.REMUDERO_REVIEWER_TOKEN;
+  delete process.env.REMUDERO_REVIEWER_LOGIN;
+  Object.assign(process.env, { GH_APP_ID: "42", GH_APP_INSTALLATION_ID: "7", GH_APP_PRIVATE_KEY_PATH: "/fixture/key" });
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const refreshed = await refreshReviewPublisherToken({
+    readKey: () => privateKey.export({ type: "pkcs8", format: "pem" }) as string,
+    fetchImpl: (async () => new Response(JSON.stringify({
+      token: "fixture-native-token", expires_at: new Date(Date.now() + 600_000).toISOString(),
+    }))) as typeof fetch,
+  });
+  assert.equal(refreshed.ok, true, "fixture assumption: the native exchange succeeded");
+}
+
+test("W1-T14902 criterion 1: a held task's clean `rmd review --plan-lint-retry` posts pending naming the hold over the lint failure", async (t) => {
+  // Round 10 (C1): the retry's success was handed to the hold's pending write without its decision digest, and the retry
+  // gate then found no admission for it and refused: nothing was posted, so the lint failure stood on the head.
+  await usablePublisher(t);
+  const head = gitRepo({ scope: t, kind: "t14902-retry" });
+  const sha = head.git("rev-parse", "HEAD");
+  const ledgerPath = join(tmp(t, "retry"), "ledger.ndjson");
+  const digest = "sha256:t14902-retry-decision";
+  const reason = "lint-plan exited 1 with no summary";
+  const criteria = [{ claim: "the filing names its repo", proof: "grep: remudero in plan/tasks.yaml", met: true, floorMet: true,
+    reason: "proof executed and PASSED", proof_exec: "executed_pass" }] as ReviewVerdict["criteria"];
+  const lintFailure = { state: "failure", criteria, testTheater: false, floorDegraded: false, capped: false, keywordOnly: false,
+    planOnly: true, planLint: { ran: false, reason }, mergeBaseSha: sha,
+    summary: `remudero-review: FAIL — plan-only PASS withheld, lint-plan could not run: ${reason}` } as ReviewVerdict;
+  appendLedger(ledgerPath, { run_id: "first-review", task_id: TASK, step: "review.posted", pr_url: PR_URL, head_sha: sha,
+    review_decision_digest: digest, state: "failure", decision_verdict: lintFailure, reviewer_outcome: "reviewer_completed",
+    merge_base_sha: sha });
+  const binding = { contexts: ["remudero-review"], checks: [{ context: "remudero-review", app_id: 42 }] };
+  const readers = { owner: "acme", repo: "remudero-ops", readRequiredContexts: readRequiredStatusCheckContextsAsync,
+    fetchPublisher: (args: string[]) => {
+      if (args[1]?.endsWith("required_status_checks")) return binding;
+      throw new Error(`unexpected read ${args.join(" ")}`);
+    } };
+  const observe = async () => ({ headSha: sha, mergeBaseSha: sha, baseRef: "main",
+    checks: { headSha: sha, fresh: true, complete: true, passing: true } });
+  const claim = (attemptId: string) => claimReviewDecision({ ledgerPath, taskId: TASK, prUrl: PR_URL, digest, headCheckoutDir: head.dir,
+    planLintRetry: { ...readers, attemptId, runId: `retry-${attemptId}`, headSha: sha, mergeBaseSha: sha, observe } });
+  const posts: Array<{ state: string; description?: string }> = [];
+  const cleanLint: PlanLintOutcome = { ran: true, label: "fixture", checked: 1, violations: [] };
+  const retried = (attemptId: string, taskHold: TaskHoldReading) => postReviewStatusGuarded({ ...readers, sha, state: "success",
+    verdict: { ...PASS, planOnly: true, criteria }, description: PASS.summary, taskId: TASK, evidence: "executed", ledgerPath,
+    runId: `retry-${attemptId}`, prUrl: PR_URL, reviewDecisionDigest: digest, reopenedDegradedTerminal: true,
+    fetchLifecycle: () => ({ merged: false, closed: false, baseRef: "main" }),
+    readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
+    post: (status) => { posts.push({ state: status.state, description: status.description }); },
+    planLintRetry: { attemptId, outcome: cleanLint, observe }, taskHold });
+  const retryRows = () => readLedgerLines(ledgerPath).filter((row) => row.step === "review.plan_lint_retry");
+
+  const first = await claim("attempt-1");
+  assert.equal(first.kind, "owned", `fixture assumption: the retry is admitted: ${JSON.stringify(retryRows().at(-1))}`);
+  const held = await retried("attempt-1", taskHoldReading(TASK, { dispatch_hold: true })).finally(() => first.kind === "owned" && first.release());
+  assert.deepEqual(posts.map((p) => p.state), ["pending"], `THE CLAIM: the retry posts pending, never success: ${JSON.stringify(held)}`);
+  assert.match(posts[0]!.description ?? "", /held: W1-T14898 carries dispatch_hold/, "the pending names the task and the hold");
+  assert.equal(held.posted, true);
+  assert.equal(held.taskHold, "held: W1-T14898 carries dispatch_hold");
+  assert.deepEqual(retryRows().map((row) => row.outcome), ["admitted", "held"], "the attempt settles as held, through its own gate");
+  // Releasing the hold and re-running the retry is the path to merge: the held attempt spent no retry.
+  const second = await claim("attempt-2");
+  assert.equal(second.kind, "owned", `after the release a new retry is admitted: ${JSON.stringify(retryRows().at(-1))}`);
+  const released = await retried("attempt-2", taskHoldReading(TASK, {})).finally(() => second.kind === "owned" && second.release());
+  assert.equal(released.posted, true, released.reason);
+  assert.deepEqual(posts.map((p) => p.state), ["pending", "success"], "the released task's clean retry publishes its success");
+  assert.equal(retryRows().at(-1)!.outcome, "published");
+});
+
+test("W1-T14902 criterion 2: a trailer edited to name a held task while the arm awaits its closing-reference check is refused at the write", async (t) => {
+  // Round 10 (C2): the hold was read once, before the closing-reference read; a maintainer's edit during that wait armed.
+  const root = tmp(t, "arm-edit");
+  const config = (() => ({ root })) as unknown as Parameters<typeof readPullRequestTaskHold>[1];
+  const plan = { readMainPlan: async () => ({ byId: new Map([["W1-T10732", {}], ["W1-T8397", { dispatch_hold: true }]]) }) };
+  let body = "Remudero-Task: W1-T10732\n";
+  const reads: string[] = [];
+  const writes: string[] = [];
+  const arm = (closing: () => Promise<{ state: "clean"; defused: [] }>) => attemptArmAsync(PR_URL, {
+    headSha: async () => SHA,
+    ledgerLines: () => [],
+    armAuto: async () => { writes.push("armAuto"); },
+    mergeDirect: async () => { writes.push("mergeDirect"); },
+    isMerged: async () => false,
+    closingReferences: closing,
+    taskHold: (prUrl) => readPullRequestTaskHold(prUrl, config, async () => { reads.push(body); return { body, head: { ref: "feature/x", sha: SHA } }; }, plan),
+    say: () => {},
+  }, SHA);
+  const edited = await arm(async () => { body = "Remudero-Task: W1-T8397\n"; return { state: "clean", defused: [] }; });
+  assert.equal(edited.outcome, "hold-refused", `THE CLAIM: the edited trailer's held task refuses the arm: ${JSON.stringify(edited)}`);
+  assert.match(edited.error ?? "", /W1-T8397 carries dispatch_hold/, "the refusal names the task and the hold");
+  assert.deepEqual(writes, [], "no arm and no direct merge reached GitHub");
+  assert.deepEqual(reads, ["Remudero-Task: W1-T10732\n", "Remudero-Task: W1-T8397\n"], "the hold was read again, fresh, at the write");
+  // Positive control: an unedited PR naming a clear task arms as before.
+  body = "Remudero-Task: W1-T10732\n";
+  const clear = await arm(async () => ({ state: "clean", defused: [] }));
+  assert.equal(clear.outcome, "armed");
+  assert.deepEqual(writes, ["armAuto"]);
+});
+
+test("W1-T14902 criterion 3: a trailerless plan filing on an unrelated held task's run branch stays untasked, classified by its GitHub files", async (t) => {
+  // Round 10 (C3): the board classifies GitHub's changed files (`github-files`) and leaves the filing untasked; the hold
+  // read only the local emitter ledger, so it fell back to the run branch's held task and turned the filing's pass pending.
+  const previous = process.env.NODE_TEST_CONTEXT;
+  t.after(() => { if (previous === undefined) delete process.env.NODE_TEST_CONTEXT; else process.env.NODE_TEST_CONTEXT = previous; });
+  const root = tmp(t, "filing");
+  const ledgerPath = join(root, "ledger.ndjson");
+  const pullFile = join(root, "pull.json");
+  const filesFile = join(root, "files.json");
+  // W1-T8397 carries dispatch_hold: true at this checkout's main; its run branch carries an unrelated filing.
+  writeFileSync(pullFile, JSON.stringify({ number: 912, body: "Files a task.", head: { ref: "run-W1-T8397-1795650818109", sha: SHA } }));
+  const files = (...paths: string[]) => writeFileSync(filesFile, JSON.stringify(paths.map((filename) => ({ filename }))));
+  const shim = ghShim([
+    { when: "api repos/acme/remudero/pulls/912/files", stdoutFile: filesFile },
+    { when: "api repos/acme/remudero/pulls/912", stdoutFile: pullFile },
+    { when: "", exit: 97, stderr: "unexpected GitHub call" },
+  ]);
+  const env = new Map(["PATH", "HOME", "RMD_GH_CACHE_HOME", "RMD_SELF_SYNC_DONE"].map((k) => [k, process.env[k]]));
+  t.after(() => {
+    for (const [k, v] of env) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    rmSync(shim.dir, { recursive: true, force: true });
+  });
+  Object.assign(process.env, { PATH: `${shim.dir}:${env.get("PATH")}`, HOME: root, RMD_GH_CACHE_HOME: root, RMD_SELF_SYNC_DONE: "1" });
+  const prUrl = "https://github.com/acme/remudero/pull/912";
+  const config = (() => ({ root })) as unknown as Parameters<typeof readPullRequestTaskHold>[1];
+  const posts: string[] = [];
+  const review = async (label: string) => {
+    delete process.env.NODE_TEST_CONTEXT;
+    try {
+      return await postReviewStatusGuarded({
+        owner: "acme", repo: "remudero", sha: SHA, state: "success", verdict: PASS, description: PASS.summary,
+        taskId: "PR-912", evidence: "executed", ledgerPath, runId: `t14902-${label}`, prUrl, reviewInputDigest: `v2:${label}`,
+        fetchLifecycle: () => ({ merged: false, closed: false }),
+        readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
+        fetchCurrentStatusEntry: () => undefined,
+        post: (status) => { posts.push(`${label}:${status.state}`); },
+        semanticJudgement: { planOnly: false, reviewerOutcome: "success" },
+      });
+    } finally {
+      process.env.NODE_TEST_CONTEXT = previous ?? "child-v8";
+    }
+  };
+  files("plan/tasks.d/W1-T99999990-a-filing.yaml");
+  const filing = await review("filing");
+  assert.equal(filing.taskHold, undefined, `THE CLAIM: the filing is untasked, as the board leaves it: ${JSON.stringify(filing)}`);
+  assert.deepEqual(await readPullRequestTaskHold(prUrl, config), { outcome: "clear" }, "and the arm's reader agrees");
+  // Positive controls: what the board would not call a filing keeps the run branch's task, and its hold holds.
+  files("plan/tasks.d/W1-T99999990-a-filing.yaml", "src/lib/x.ts");
+  assert.equal((await review("source")).taskHold, "held: W1-T8397 carries dispatch_hold", "a source change is the branch's task");
+  files("plan/claims.yaml");
+  assert.equal((await review("enforcement")).taskHold, "held: W1-T8397 carries dispatch_hold", "enforcement data is no filing");
+  assert.deepEqual(await readPullRequestTaskHold(prUrl, config), { outcome: "held", taskId: "W1-T8397" });
+  assert.deepEqual(posts, ["filing:success", "source:pending", "enforcement:pending"]);
+  assert.ok(shim.calls().filter((c) => c.includes("pulls/912/files")).length >= 4, "positive control: the files were read through gh");
+  assert.equal(planFilingFromChangedFiles([]), false, "an empty file list is no filing");
+  // The emitter ledger's own `pr.opened{plan_only}` record answers first, whatever the files; a torn row beside it records
+  // nothing and does not hide it.
+  mkdirSync(join(root, "state"));
+  writeFileSync(join(root, "state", "ledger.ndjson"), `{"step":"pr.opened","pr_url":"${prUrl}",\n` +
+    `${JSON.stringify({ step: "pr.opened", pr_url: prUrl, plan_only: true })}\n`);
+  assert.deepEqual(await readPullRequestTaskHold(prUrl, config), { outcome: "clear" }, "an emitted filing is untasked");
 });
 
 test("W1-T14902: the one reader reads main, then a fresh ops record; every other answer is unread", async () => {
@@ -618,18 +784,22 @@ test("W1-T14902: the hold lookup judges the task the live PR names NOW, never a 
   const read = async () => ({ body, head: { ref: "feature/x" } });
   const sources = { stateDir: "/nonexistent/state", lookup: async () => ({ outcome: "absent" }) as never,
     readMainPlan: async () => ({ byId: new Map([["W1-T10732", {}], [TASK, { dispatch_hold: true }]]) }) };
-  assert.deepEqual((await readPullRequestNamedTaskHold(PR_URL, sources, read)).reading, { outcome: "clear" });
+  const noFiling = () => false;
+  assert.deepEqual((await readPullRequestNamedTaskHold(PR_URL, sources, read, noFiling)).reading, { outcome: "clear" });
   body = `Remudero-Task: ${TASK}\n`;
-  const edited = await readPullRequestNamedTaskHold(PR_URL, sources, read);
+  const edited = await readPullRequestNamedTaskHold(PR_URL, sources, read, noFiling);
   assert.deepEqual(edited.reading, { outcome: "held", taskId: TASK }, "THE CLAIM: the edited trailer's held task is the one judged");
   assert.equal(edited.snapshot?.body, body, "and the reading names the body it was judged on");
-  const unreadable = await readPullRequestNamedTaskHold(PR_URL, sources, async () => { throw new Error("HTTP 502"); });
+  const unreadable = await readPullRequestNamedTaskHold(PR_URL, sources, async () => { throw new Error("HTTP 502"); }, noFiling);
   assert.equal(unreadable.reading.outcome, "unread", "an unreadable pull row holds");
   assert.equal(unreadable.snapshot, undefined);
-  assert.equal((await readPullRequestNamedTaskHold(undefined, sources, read)).reading.outcome, "unread", "a post naming no PR holds");
-  // The default plan-only reader is the instance ledger's emitter record; an unreadable ledger records none.
-  const { ledgerPlanOnlyFiling } = await import("#src/lib/task-dispatch-hold.js");
-  assert.equal(ledgerPlanOnlyFiling("/nonexistent/state")(PR_URL), false);
+  assert.equal((await readPullRequestNamedTaskHold(undefined, sources, read, noFiling)).reading.outcome, "unread", "a post naming no PR holds");
+  // The board's plan-only reader: an unreadable ledger records no filing, and an unreadable file list classifies none,
+  // whatever the files rule would say, so the run branch names the task and the hold is read.
+  const unreadFiles = boardPlanOnlyFiling("/nonexistent/state", () => true, async () => { throw new Error("HTTP 502"); });
+  assert.equal(await unreadFiles(PR_URL, { owner: "acme", repo: "remudero-ops", number: 910, headSha: SHA }), false);
+  assert.equal(await boardPlanOnlyFiling("/nonexistent/state", () => true)(PR_URL, { owner: "acme", repo: "remudero-ops", number: 910, headSha: undefined }), false,
+    "a pull row with no head reads no file list");
 });
 
 test("W1-T14902: a daemon whose cwd is no work tree (launchd's config.root) still reads the plan, from its install", async (t) => {

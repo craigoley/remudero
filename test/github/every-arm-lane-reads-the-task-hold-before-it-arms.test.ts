@@ -156,8 +156,11 @@ test("census: every task-hold lookup goes through the one PR task resolver, fed 
   assert.deepEqual(lookups, ["src/lib/arm-auto-merge.ts:readPullRequestTaskHold", "src/lib/review.ts:guardedTaskHold"],
     "the arm and the review publisher (and the fix lane, which posts through it) are its only callers");
   const review = source(REVIEW_MODULE);
-  assert.match(review, /readPullRequestNamedTaskHold\(opts\.prUrl, \{ stateDir: dirname\(opts\.ledgerPath\) \}\)/,
-    "the publisher names the PR, never a task id: the resolver reads which task it names");
+  assert.match(review, /readPullRequestNamedTaskHold\(opts\.prUrl, \{ stateDir: dirname\(opts\.ledgerPath\) \}, freshPullRowRead,\s*boardPlanOnlyFiling\(dirname\(opts\.ledgerPath\), planFilingFromChangedFiles\)\)/,
+    "the publisher names the PR, never a task id: the resolver reads which task it names, classified as the board does");
+  // Round 10 (C3): the arm's reader classifies a trailerless run-branch PR by the same board rule.
+  assert.match(source(ARM_MODULE), /planOnlyFiling \?\? boardPlanOnlyFiling\(stateDir, planFilingFromChangedFiles\)/,
+    "the arm's hold reader classifies plan filings as the board does");
   const hold = source(HOLD_MODULE);
   assert.match(hold, /freshPullRowRead: PullRowRead = \(path\) => ghJsonAsync\(\["api", path\], undefined, undefined, \{ fresh: true \}\)/,
     "the act-time read revalidates through the broker");

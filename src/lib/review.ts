@@ -19,7 +19,7 @@ import { homedir, hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { isTestRunner } from "./live-write-guard.js";
-import { readPullRequestNamedTaskHold, taskHoldRefusal, type PullRequestSnapshot, type PullRequestTaskHold, type TaskHoldReading } from "./task-dispatch-hold.js";
+import { boardPlanOnlyFiling, freshPullRowRead, readPullRequestNamedTaskHold, taskHoldRefusal, type PullRequestSnapshot, type PullRequestTaskHold, type TaskHoldReading } from "./task-dispatch-hold.js";
 export { publicTaskHoldDescription, taskHoldReading, taskHoldRefusal, type TaskHoldReading } from "./task-dispatch-hold.js";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -350,7 +350,7 @@ interface PlanLintRetryIdentity {
 function appendPlanLintRetryRow(
   ledgerPath: string,
   id: PlanLintRetryIdentity,
-  outcome: "admitted" | "refused" | "incomplete" | "published" | "post_failed",
+  outcome: "admitted" | "refused" | "incomplete" | "published" | "held" | "post_failed",
   reason?: string,
 ): void {
   appendLedger(ledgerPath, {
@@ -431,9 +431,14 @@ async function planLintRetryRefusal(
     if (checkoutHead !== retry.headSha) return `the checkout is at ${checkoutHead}, not the requested head`;
     const publisherRefusal = await planLintRetryPublisherRefusal(retry, observed.baseRef);
     if (publisherRefusal !== undefined) return publisherRefusal;
-    const consumed = (await readPlanLintRetryRows(opts.ledgerPath)).some((row) => row.outcome === "admitted" &&
-      row.pr_url === opts.prUrl && row.head_sha === retry.headSha && row.merge_base_sha === retry.mergeBaseSha &&
-      row.review_decision_digest === opts.digest);
+    const rows = await readPlanLintRetryRows(opts.ledgerPath);
+    const spends = (row: Record<string, unknown>) => row.pr_url === opts.prUrl && row.head_sha === retry.headSha &&
+      row.review_decision_digest === opts.digest;
+    // W1-T14902: an attempt a task hold held published no verdict, so it spent nothing: once the operator releases the
+    // hold, a new attempt may still publish the success its lint earns.
+    const held = new Set(rows.filter((row) => row.outcome === "held" && spends(row)).map((row) => row.attempt_id));
+    const consumed = rows.some((row) => row.outcome === "admitted" && spends(row) && row.merge_base_sha === retry.mergeBaseSha &&
+      !held.has(row.attempt_id));
     return consumed ? "this PR, head, base and digest already spent their retry" : undefined;
   } catch (error) {
     return `a retry read failed: ${String(error)}`;
@@ -10964,6 +10969,13 @@ export function enforcementDataInDiff(diffFiles: string[]): string[] {
   return diffFiles.filter((f) => Object.hasOwn(ENFORCEMENT_DATA, f));
 }
 
+/** The board's `github-files` rule for a pull request's changed files (tick-read-worker classifyPlanFiling): some
+ *  changed path, every one in plan scope, and none of them enforcement data. W1-T14902's hold resolver classifies a
+ *  trailerless run-branch PR by this same rule, so the hold and the board agree on which PRs name no task. */
+export function planFilingFromChangedFiles(paths: readonly string[]): boolean {
+  return paths.length > 0 && paths.every(isInPlanScope) && enforcementDataInDiff([...paths]).length === 0;
+}
+
 const USER_VISIBLE_SURFACE_RE = new RegExp(
   [
     "^bin/", // the CLI entry point
@@ -13408,6 +13420,12 @@ interface PlanLintRetryPublicationRequest {
   observe: PlanLintRetryObserver;
 }
 
+/** W1-T14902 (round 10, C1): a clean lint retry whose success a task hold turned to pending. Its pending write carries no
+ *  decision digest (a hold is no terminal decision), so the retry gate is handed the digest it was admitted under. */
+interface HeldLintRetry {
+  decisionDigest: string;
+}
+
 /** Only a clean lint may publish success, so a retry cannot launder a violation. */
 async function decidePlanLintRetryPublication(
   opts: PostReviewStatusGuardedOpts,
@@ -13415,16 +13433,18 @@ async function decidePlanLintRetryPublication(
   priorDecision: ReviewDecisionTerminal | undefined,
   prior: PostedReviewStatusRecord | undefined,
   lifecycle: PrLifecycleState,
+  heldRetry?: HeldLintRetry,
 ): Promise<{ identity: PlanLintRetryIdentity; refusal?: { outcome: "refused" | "incomplete"; reason: string } }> {
+  const digest = heldRetry?.decisionDigest ?? opts.reviewDecisionDigest;
   const identity: PlanLintRetryIdentity = {
     runId: opts.runId, taskId: opts.taskId, attemptId: retry.attemptId, prUrl: opts.prUrl,
-    headSha: opts.sha, digest: opts.reviewDecisionDigest,
+    headSha: opts.sha, digest,
   };
   const refuse = (reason: string, outcome: "refused" | "incomplete" = "refused") => ({ identity, refusal: { outcome, reason } });
   try {
     const rows = await readPlanLintRetryRows(opts.ledgerPath);
     const admitted = rows.findLastIndex((row) => row.outcome === "admitted" && row.attempt_id === retry.attemptId &&
-      row.pr_url === opts.prUrl && row.head_sha === opts.sha && row.review_decision_digest === opts.reviewDecisionDigest);
+      row.pr_url === opts.prUrl && row.head_sha === opts.sha && row.review_decision_digest === digest);
     if (admitted < 0) return refuse("no admitted lint retry exists for this attempt, head and digest");
     identity.mergeBaseSha = rows[admitted]!.merge_base_sha;
     identity.priorRunId = rows[admitted]!.prior_run_id;
@@ -13432,7 +13452,9 @@ async function decidePlanLintRetryPublication(
     if (!priorDecision || !isPlanLintRetryEligible(priorDecision)) return refuse("the terminal is no longer a lint-plan failure with no summary");
     if (retry.outcome?.ran !== true) return refuse(`the retried lint-plan did not finish: ${retry.outcome?.reason ?? "no lint was run"}`, "incomplete");
     const expected = retry.outcome.violations.length === 0 ? "success" : "failure";
-    if (opts.state !== expected) return refuse(`a retried lint-plan with ${retry.outcome.violations.length} violation(s) cannot publish ${opts.state}`);
+    // W1-T14902: a task hold publishes pending in place of the success a clean retried lint earned.
+    const earned = heldRetry !== undefined && opts.state === "pending" ? "success" : opts.state;
+    if (earned !== expected) return refuse(`a retried lint-plan with ${retry.outcome.violations.length} violation(s) cannot publish ${opts.state}`);
     const guarded = decideReviewStatusPost({ headSha: opts.sha, state: opts.state, evidence: opts.evidence,
       ...(opts.reviewInputDigest !== undefined ? { reviewInputDigest: opts.reviewInputDigest } : {}) }, prior, lifecycle);
     if (!guarded.post) return refuse(guarded.reason);
@@ -13587,7 +13609,8 @@ function recordedCappedOverride(opts: PostReviewStatusGuardedOpts): CappedOverri
 async function guardedTaskHold(opts: PostReviewStatusGuardedOpts): Promise<PullRequestTaskHold | undefined> {
   if (opts.taskHold !== undefined) return { reading: opts.taskHold };
   if (isTestRunner()) return undefined;
-  return readPullRequestNamedTaskHold(opts.prUrl, { stateDir: dirname(opts.ledgerPath) });
+  return readPullRequestNamedTaskHold(opts.prUrl, { stateDir: dirname(opts.ledgerPath) }, freshPullRowRead,
+    boardPlanOnlyFiling(dirname(opts.ledgerPath), planFilingFromChangedFiles));
 }
 
 /** W1-T14902 (round-8 C1): the input digest a hold's pending write carries — that of the head and body the hold was
@@ -13610,9 +13633,12 @@ async function publishTaskHold(opts: PostReviewStatusGuardedOpts, verdict: Revie
   appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: opts.taskId, step: "review.dispatch_hold_held",
     head_sha: opts.sha, attempted_state: "success", reason: refusal, outcome: "pending",
     ...(inputDigest !== undefined ? { review_input_digest: inputDigest } : {}) });
-  // No decision digest: a hold is not a terminal decision, so the pass cannot replay over it once posted.
+  // No decision digest: a hold is not a terminal decision, so the pass cannot replay over it once posted. A held lint
+  // retry still settles through its own gate, under the digest it was admitted for (round 10, C1).
+  const heldRetry = opts.planLintRetry !== undefined && opts.reviewDecisionDigest !== undefined
+    ? { decisionDigest: opts.reviewDecisionDigest } : undefined;
   const result = await publishReviewStatusLocked({ ...opts, state: "pending", verdict: held, description,
-    reviewDecisionDigest: undefined, reviewInputDigest: inputDigest });
+    reviewDecisionDigest: undefined, reviewInputDigest: inputDigest }, heldRetry);
   return { ...result, effectiveState: "pending", effectiveVerdict: held, taskHold: refusal, reason: result.reason ?? refusal };
 }
 
@@ -13659,7 +13685,7 @@ async function publishCappedHold(opts: PostReviewStatusGuardedOpts, verdict: Rev
   return { ...result, effectiveState: "pending", effectiveVerdict: held, cappedHold: refusal, reason: result.reason ?? refusal };
 }
 
-async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Promise<PostReviewStatusGuardedResult> {
+async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts, heldRetry?: HeldLintRetry): Promise<PostReviewStatusGuardedResult> {
   const post = opts.post ?? postReviewStatus;
   const freshnessRefusal = reviewerCodePublicationRefusal(opts.state, opts.reviewerCodeFreshness);
   if (freshnessRefusal !== undefined) {
@@ -13729,7 +13755,9 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
     };
     let planLintRetryIdentity: PlanLintRetryIdentity | undefined;
     if (opts.planLintRetry !== undefined) {
-      const { identity, refusal } = await decidePlanLintRetryPublication(opts, opts.planLintRetry, priorDecision, prior, lifecycle);
+      const retryDecision = heldRetry === undefined ? priorDecision
+        : opts.prUrl !== undefined ? lastReviewDecisionTerminal(lines, opts.taskId, opts.prUrl, heldRetry.decisionDigest) : undefined;
+      const { identity, refusal } = await decidePlanLintRetryPublication(opts, opts.planLintRetry, retryDecision, prior, lifecycle, heldRetry);
       if (refusal !== undefined) {
         appendPlanLintRetryRow(opts.ledgerPath, identity, refusal.outcome, refusal.reason);
         return withholdReplay(refusal.reason);
@@ -13862,7 +13890,7 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
         reason: `posting remudero-review failed and was not applied (see the review.post_failed ledger line): ${message}`,
       };
     }
-    if (planLintRetryIdentity !== undefined) appendPlanLintRetryRow(opts.ledgerPath, planLintRetryIdentity, "published");
+    if (planLintRetryIdentity !== undefined) appendPlanLintRetryRow(opts.ledgerPath, planLintRetryIdentity, heldRetry !== undefined ? "held" : "published");
     if (opts.state === "pending" && opts.description?.startsWith("remudero-review: cannot-evaluate") &&
         !/^remudero-review: cannot-evaluate — promise harvest (?:unavailable:|corpus is unreadable)/.test(opts.description) && opts.prUrl &&
         !lines.some((line) => line.step === "review.cannot_evaluate_escalated" && line.task_id === opts.taskId && line.head_sha === opts.sha)) {

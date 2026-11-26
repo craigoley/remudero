@@ -38,7 +38,7 @@ import { classifyLogFetchFailure, logFetchRetryAtMs, readCheckRunOutputAsync } f
 import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
 import { loadPlan, DEFAULT_RISK, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
-import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
+import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, planFilingFromChangedFiles, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { type ProjectPlanPhases, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, planCreditOverridePath, type CommitTrailerIndexReader, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
 import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, dependabotCheckStates, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type EscalationConditionEvidence, escalationNamedChecks, MAX_ESCALATION_CLOSES_PER_CYCLE, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, REVIEW_INPUT_ADMISSION_BACKSTOP, type ReviewSetupRefusal, type BaseChangedFiles } from "./sweep.js";
 import { loadedReviewerCodeSha } from "./reviewer-health.js";
@@ -1772,9 +1772,8 @@ export function classifyPlanFiling(
 ): PlanFilingClassification {
   if (emitterLedger) return { isPlanFiling: true, source: "emitter-ledger" };
   if (!files || files.state === "unreadable") return { isPlanFiling: false, source: "unreadable" };
-  const isPlanOnly = files.paths.length > 0 && files.paths.every(isInPlanScope);
-  const touchesEnforcementData = enforcementDataInDiff([...files.paths]).length > 0;
-  return isPlanOnly && !touchesEnforcementData
+  // W1-T14902: the one rule, shared with the task-hold resolver so the hold and the board classify a PR alike.
+  return planFilingFromChangedFiles(files.paths)
     ? { isPlanFiling: true, source: "github-files" }
     : { isPlanFiling: false, source: "not-plan-only" };
 }
