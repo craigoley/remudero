@@ -2,10 +2,9 @@
  * W1-T14786: on core PR #20802 (2026-11-25) the clock sweep listed 15 suites that passed today and failed in the
  * future. Each now takes its "now" from the clock the code under test reads: this process's clock for in-process
  * code, the host clock for a child whose clock the shift preload never moves, or the same shift for a child that
- * models the same host. This suite runs each of the 15 as its own child, exactly as the sweep's runner does, at
- * the 7-day shift that first named them and at the sweep's own shift, so none of them can drift back unseen. Each
- * child runs only that suite's drifting tests: whole-suite reruns took ~335 s per shift and overran CI's
- * flake-screen, which reruns an added suite several times at once.
+ * models the same host. This suite runs each of the 15 as its own child at the 7-day shift that first named them.
+ * At the sweep's own shift it runs each complete suite, matching the report's whole-file inputs so failures outside
+ * the pinned names cannot disappear from the drift report.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -122,12 +121,13 @@ function withoutTestContext(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  * One suite's drifting tests as the sweep's `runSuite` runs the suite: TAP, the test preload, the shift preload and a
  * private TMPDIR, plus one exact `--test-name-pattern` per pinned test.
  */
-function runShifted(suite: (typeof DRIFTING)[number], days: number): Promise<Run> {
+function runShifted(suite: (typeof DRIFTING)[number], days: number, wholeFile = false): Promise<Run> {
   const isolatedTmp = mkdtempSync(join(tmpdir(), "rmd-w1-t14786-"));
-  const names = pinned(suite);
+  const names = wholeFile ? [] : pinned(suite);
+  const selection = wholeFile ? [] : names.map((name) => `--test-name-pattern=${exactName(name)}`);
   return new Promise((resolve) => {
     execFile(process.execPath,
-      ["--test", "--test-reporter=tap", ...names.map((name) => `--test-name-pattern=${exactName(name)}`),
+      ["--test", "--test-reporter=tap", ...selection,
         "--import", "tsx", "--import", join(REPO_ROOT, SUITE_PRELOAD),
         "--import", join(REPO_ROOT, "scripts", "clock-shift.mjs"), suite.file],
       { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
@@ -145,7 +145,7 @@ function runShifted(suite: (typeof DRIFTING)[number], days: number): Promise<Run
  * suite waits only for that suite: one test awaiting all fifteen took ~155 s, past the proof runner's per-test
  * timeout, while the pool still finishes all fifteen in one wall-clock pass.
  */
-function runShift(days: number): Map<string, Promise<Run>> {
+function runShift(days: number, wholeFile = false): Map<string, Promise<Run>> {
   const settled = new Map(DRIFTING.map((suite) => {
     let resolve!: (run: Run) => void;
     return [suite.file, { promise: new Promise<Run>((r) => { resolve = r; }), resolve }] as const;
@@ -158,17 +158,18 @@ function runShift(days: number): Map<string, Promise<Run>> {
   for (let w = 0; w < Math.max(1, Math.floor(availableParallelism() / 2)); w++) {
     void (async () => {
       for (let suite = queue.shift(); suite !== undefined; suite = queue.shift()) {
-        settled.get(suite.file)!.resolve(await runShifted(suite, days));
+        settled.get(suite.file)!.resolve(await runShifted(suite, days, wholeFile));
       }
     })();
   }
   return new Map([...settled].map(([file, { promise }]) => [file, promise]));
 }
-// Each shift runs only when a test asks for it, so a proof run that selects one shift's tests spawns only its children.
-const pools = new Map<number, Map<string, Promise<Run>>>();
-const runOf = (days: number, file: string): Promise<Run> => {
-  if (!pools.has(days)) pools.set(days, runShift(days));
-  return pools.get(days)!.get(file)!;
+// Each pool starts only when a proof test asks for it.
+const pools = new Map<string, Map<string, Promise<Run>>>();
+const runOf = (days: number, file: string, wholeFile = false): Promise<Run> => {
+  const key = `${days}:${wholeFile ? "whole" : "pinned"}`;
+  if (!pools.has(key)) pools.set(key, runShift(days, wholeFile));
+  return pools.get(key)!.get(file)!;
 };
 
 /**
@@ -180,7 +181,7 @@ function verdict(run: Run): string {
   const fails = Number(/^# fail (\d+)$/m.exec(run.output)?.[1] ?? -1);
   const passed = new Set(run.output.split("\n").map((line) => /^\s*ok \d+ - (.*)$/.exec(line)?.[1]).filter((name) => name !== undefined));
   const unrun = run.names.filter((name) => !passed.has(name));
-  if (!run.failed && tests >= run.names.length && fails === 0 && unrun.length === 0) return "pass";
+  if (!run.failed && tests > 0 && tests >= run.names.length && fails === 0 && unrun.length === 0) return "pass";
   const notOk = run.output.split("\n").filter((line) => /^\s*not ok /.test(line)).slice(0, 3).join(" | ");
   return `fail (tests ${tests}, fail ${fails}${notOk ? `: ${notOk}` : ""}${unrun.length ? `; no ok for ${unrun.length} pinned` : ""})`;
 }
@@ -214,8 +215,8 @@ test("W1-T14786 the clock sweep reports no new drift for the fifteen suites: the
 
 for (const suite of DRIFTING) {
   test(`W1-T14786 the clock sweep reports no new drift for the fifteen suites: ${sweepId(suite.file)}`, async () => {
-    const run = await runOf(SWEEP_SHIFT_DAYS, suite.file);
-    // Positive control: a child that never reported its own summary would read as "not failed" to the classifier.
+    const run = await runOf(SWEEP_SHIFT_DAYS, suite.file, true);
+    // Positive control: the actual whole-file input must report tests and zero failures.
     assert.equal(verdict(run), "pass", `${suite.file} runs and passes at +${SWEEP_SHIFT_DAYS} days`);
     if (LEFT_THE_SWEEP.has(sweepId(suite.file))) return; // the report does not measure it; the test above says why
     const sweep = classifySweep(new Map([[sweepId(suite.file), run]]));
