@@ -85,5 +85,5 @@ test("W1-T14571 criterion 3: a source scanned before the change is rescanned and
   assert.ok(rescanned.scannedSources >= 1, "the archive under the old projection is scanned again");
   assert.equal(group(rescanned.snapshot, "gpt-6-sol").subscriptionNotionalUsd, 1.5);
   const stored = JSON.parse(readFileSync(checkpointFile, "utf8"));
-  assert.deepEqual([...new Set(stored.sources.map((source: { projection?: string }) => source.projection))], ["codex-notional-v1"]);
+  assert.deepEqual([...new Set(stored.sources.map((source: { projection?: string }) => source.projection))], ["build-lane-v1"]);
 });
