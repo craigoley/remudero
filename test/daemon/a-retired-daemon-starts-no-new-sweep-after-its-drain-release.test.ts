@@ -456,7 +456,9 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
       head: { ref: "run-W1-T90007-1", sha: pr.headSha } }) },
     { when: "/status", stdout: JSON.stringify({ state: "pending", statuses: [] }) },
   ], { kind: "t14916-review" });
-  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
+  // On a CPU-starved runner a shim call can still be appending to its logs when the review returns (flake-screen saw
+  // ENOTEMPTY here); retrying the removal outlasts that late write.
+  t.after(() => rmSync(shim.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
   const reviewLedger = join(root, "review-ledger.ndjson");
   const priorPath = process.env.PATH;
   process.env.PATH = `${shim.dir}:${priorPath ?? ""}`;
