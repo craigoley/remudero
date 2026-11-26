@@ -1386,6 +1386,7 @@ import {
   readLiveRecyclePausePid,
   renderProgressWatchdogVerdict,
 } from "./lib/progress-watchdog.js";
+import { readProgressWatchdogDrainRows } from "./lib/progress-watchdog-drain-memo.js";
 import { impossibleCanaryCommand, runImpossibleCanary } from "./lib/impossible-canary.js";
 import { buildFieldTrialsFlowSnapshot, fieldTrialsCommand } from "./lib/field-trials-flow.js";
 import { cashTrialPolicy, cashTrialSpawnFields, decideCashTrial } from "./lib/cash-trial.js";
@@ -44143,9 +44144,8 @@ export function progressWatchdogCommand(
     ? captureDiagnosticsBundle(stateDir, nowMs, verdict, read.rows, { run })
     : undefined;
   if (rest.includes("--json")) {
-    const text = readLedgerUnionRecordsSync(stateDir, {
-      step: ["implement.done", "verdict", "run.freshness_handoff", "worker.recycle_yield"],
-    }).rows.map(row => JSON.stringify(row)).join("\n");
+    // W1-T14920: each rotation's drain rows are parsed once and remembered beside the ledger.
+    const text = readProgressWatchdogDrainRows(stateDir).map(row => JSON.stringify(row)).join("\n");
     const drainWait = deriveDrainWait(readImplementDurationsMs(text), readDrainWaitLanes(stateDir, text, () => nowMs));
     console.log(JSON.stringify({ stateDir, rowsRead: read.rows.length, ...verdict, bundle,
       drainWaitS: drainWait.waitS, drainWaitSource: drainWait.source }));
