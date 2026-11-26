@@ -39,7 +39,6 @@ export function infrastructureRefusal(line: Record<string, unknown>): string | u
  *  a run's verdict; a row written before that falls back to {@link infrastructureRefusal}, unless the reader saw the
  *  run's own `worker.assignment` row (`runAssigned`). */
 export function endedBeforeWorkerAssignment(line: Record<string, unknown>, runAssigned = false): boolean {
-  if (line.step !== undefined && line.step !== "verdict") return false;
   if (typeof line.worker_assigned === "boolean") return !line.worker_assigned;
   return !runAssigned && infrastructureRefusal(line) !== undefined;
 }
