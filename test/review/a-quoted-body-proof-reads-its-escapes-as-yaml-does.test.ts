@@ -48,3 +48,21 @@ test("an unquoted body proof is still replaced literally", () => {
   assert.equal(parseAcceptanceBlock(repaired!)[0]!.proof, 'grep: c\\"d in f');
   assert.equal(replaceBodyProofs(body, [{ oldProof: "grep: absent in f", newProof: "x" }]), undefined);
 });
+
+// The second review of #20963: a quoted line not written in canonical escapes (a lone `\.` beside `\"`) was not found,
+// and a replacement into a non-canonical quoted line was written unescaped.
+test("a non-canonical quoted body proof is found by its parsed value and rewritten escaped", () => {
+  const mixed = String.raw`## Acceptance` + "\n- claim: the ceiling stays\n" + String.raw`  proof: "grep: \"driftCeiling\": 1\.5 in f"` + "\n";
+  const oldMixed = parseAcceptanceBlock(mixed)[0]!.proof;
+  assert.equal(oldMixed, String.raw`grep: "driftCeiling": 1\.5 in f`);
+  const newMixed = String.raw`grep: "driftCeiling": 2\.5 in f`;
+  const fixed = replaceBodyProofs(mixed, [{ oldProof: oldMixed, newProof: newMixed }]);
+  assert.notEqual(fixed, undefined, "the mixed-escape line is found");
+  assert.equal(parseAcceptanceBlock(fixed!)[0]!.proof, newMixed);
+
+  const lone = "## Acceptance\n- claim: the dot is literal\n" + String.raw`  proof: "grep: a\.b in f"` + "\n";
+  const oldLone = parseAcceptanceBlock(lone)[0]!.proof;
+  const newLone = String.raw`grep: a\\b in f`;
+  const rewritten = replaceBodyProofs(lone, [{ oldProof: oldLone, newProof: newLone }]);
+  assert.equal(parseAcceptanceBlock(rewritten!)[0]!.proof, newLone, "a newProof holding \\\\ re-reads exactly");
+});

@@ -369,19 +369,28 @@ export interface BodyProofReplacement { oldProof: string; newProof: string }
  */
 export function replaceBodyProofs(body: string, replacements: readonly BodyProofReplacement[]): string | undefined {
   const lines = body.split("\n");
-  // W1-T14913: parseAcceptanceBlock unescapes `\"` and `\\` inside double quotes, so a proof written there is matched
-  // and rewritten in its escaped, quoted form; anywhere else it is read literally, as before.
-  const quoted = (text: string): string => `"${text.replace(/[\\"]/g, "\\$&")}"`;
+  // W1-T14913: parseAcceptanceBlock unescapes `\"` and `\\` inside double quotes (any other backslash stays), so a
+  // double-quoted span is compared by its parsed value and rewritten escaped; text outside quotes is matched literally.
+  const escaped = (text: string): string => `"${text.replace(/[\\"]/g, "\\$&")}"`;
+  const parsedSpan = (inner: string): string => inner.replace(/\\(["\\])/g, "$1");
+  const replaceIn = (line: string, oldProof: string, newProof: string): string | undefined => {
+    let found = false;
+    const out = line.replace(/"((?:[^"\\]|\\.)*)"/g, (span, inner: string) => {
+      if (found || parsedSpan(inner) !== oldProof) return span;
+      found = true;
+      return escaped(newProof);
+    });
+    if (found) return out;
+    return line.includes(oldProof) ? line.replace(oldProof, () => newProof) : undefined;
+  };
   for (const { oldProof, newProof } of replacements) {
-    const forms = [{ from: quoted(oldProof), to: quoted(newProof) }, { from: oldProof, to: newProof }];
     const hits = lines.flatMap((line, index) => {
       if (!/^\s*(?:[-*+]\s|proof\s*:)/i.test(line)) return [];
-      const form = forms.find(({ from }) => line.includes(from));
-      return form ? [{ index, form }] : [];
+      const replaced = replaceIn(line, oldProof, newProof);
+      return replaced === undefined ? [] : [{ index, replaced }];
     });
     if (hits.length !== 1) return undefined;
-    const { index, form } = hits[0]!;
-    lines[index] = lines[index]!.replace(form.from, () => form.to);
+    lines[hits[0]!.index] = hits[0]!.replaced;
   }
   return lines.join("\n");
 }
