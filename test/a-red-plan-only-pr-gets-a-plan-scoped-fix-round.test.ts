@@ -10,6 +10,7 @@ import { buildSweepEffects, DEFAULT_SWEEP_POLICY, drainDetachedSweepActions, fix
 import type { PlanPrPreflightResult } from "#src/lib/plan-pr-emitter.js";
 import { acceptanceAuthorTimeCheck } from "#src/lib/review.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
+import { WorkerNotStartedError } from "#src/lib/worker.js";
 import { gitRepo, GIT_REPO_FIXTURE_IDENTITY } from "#test/helpers/git-repo.js";
 
 const HEAD = "a".repeat(40);
@@ -479,4 +480,70 @@ test("a filed plan repair's real commit retains its task identity", async () => 
     assert.match(repo.git("show", "-s", "--format=%B", "HEAD"), /^Remudero-Task: W1-T9772$/m);
     assert.deepEqual(repo.git("diff", "--name-only", sha, "HEAD").split("\n"), [PATH]);
   } finally { repo.cleanup(); }
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and a withheld plan round spends no strike and no refusal", async () => {
+  // The sweep's plan-round port turns a not-started worker into WorkerNotStartedError, never an empty transcript.
+  const root = mkdtempSync(join(tmpdir(), "rmd-plan-not-started-"));
+  try {
+    let thrown: unknown;
+    const deps: Parameters<typeof buildSweepEffects>[0] = {
+      owner: "acme", repo: "remudero", config: { root } as Config, repoRoot: process.cwd(),
+      ledgerPath: join(root, "ledger.ndjson"), runId: "plan-round-test", log() {},
+      plan: { tasks: [] } as never, policy: DEFAULT_SWEEP_POLICY,
+      dispatchFixPreflightStandDownImpl: async () => undefined,
+      ghJsonImpl: () => ({ head: { ref: pr.headRefName, sha: HEAD }, user: { login: "remudero-fleet[bot]" }, title: "t", body: BODY }),
+      fetchPrDiffFilesImpl: async () => [PATH], fixBranchClaimKeyImpl: () => "plan-not-started-fixture",
+      materializePlanRoundWorktreeImpl: () => ({ worktreePath: join(root, "tree") }),
+      planRepairGitImpl: () => HEAD, restRollupForImpl: async () => [], fetchCiFailuresImpl: () => pr.ciFailures,
+      spawnImpl: async () => ({ notStarted: "admission-abandoned", subtype: "admission_abandoned", text: "", blocks: [] }) as never,
+      runPlanScopedFixRoundImpl: async (input: Parameters<typeof runner.runPlanScopedFixRound>[0]) => {
+        try { await input.deps.spawn("plan fixture"); } catch (error) { thrown = error; }
+        return { outcome: "refused", reason: "fixture" };
+      },
+      worktreeRemoveImpl: () => {},
+    };
+    await withLiveWritesAllowed(() => buildSweepEffects(deps).dispatchPlanGateRound!(pr));
+    assert.ok(thrown instanceof WorkerNotStartedError, String(thrown));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // Both round variants answer not-started, with a fix.done the strike tally reads as no worker run.
+  const fix = roundFixture();
+  fix.input.deps.spawn = async () => { throw new WorkerNotStartedError("admission-abandoned"); };
+  const conflict = roundFixture();
+  Object.assign(conflict.input, { conflict: true });
+  conflict.input.deps.runGit = (args: string[]) => args[0] === "rev-parse" ? HEAD : args[0] === "diff" ? `${PATH}\0` : "";
+  conflict.input.deps.spawn = fix.input.deps.spawn;
+  for (const round of [fix, conflict]) {
+    const result = await runner.runPlanScopedFixRound(round.input);
+    assert.equal(result.outcome, "not-started", result.reason);
+    const rows: Array<Record<string, unknown>> = round.logs.map(({ step, extra }) => ({ step, ...extra }));
+    assert.deepEqual(rows.map((row) => String(row.step)).filter((step) => step.startsWith("fix.") || step.startsWith("sweep.plan_round")),
+      ["fix.dispatch", "fix.done"]);
+    assert.equal(rows.at(-1)?.subtype, "admission_abandoned");
+    const tally = fixRoundTally(rows, "PR-9000", HEAD, "executed");
+    assert.deepEqual([tally.strikes, tally.refusals], [0, []]);
+    assert.deepEqual(round.pushed, []);
+  }
+
+  // The sweep writes no refusal row for it, so two withheld rounds never exhaust the plan round.
+  const ledger: Record<string, unknown>[] = [];
+  let rounds = 0;
+  const sweepDeps = {
+    runId: "plan-round-test", ledgerPath: "/dev/null/ledger", readLedger: () => ledger,
+    appendLine: (_: string, line: Record<string, unknown>) => ledger.push(line),
+    arm() {}, close() {}, postReview: async () => {},
+    dispatchFix() { assert.fail("never dispatch code"); }, escalate() { assert.fail("a withheld round never escalates"); },
+    readPlanRepairFacts: () => ({ authorLogin: "remudero-fleet[bot]" }),
+    repairPlanPr() { assert.fail("no mechanical cure"); },
+    dispatchPlanGateRound: async () => { rounds++; return { outcome: "not-started", reason: "worker not started: admission-abandoned" }; },
+  } as unknown as SweepDeps;
+  const peer = { ...pr, prNumber: 9001, checksState: "green", reviewState: "success", isPlanFiling: false, ciFailures: undefined } as OpenPrView;
+  for (let pass = 0; pass < 3; pass++) await runSweep([pr, peer], sweepDeps, DEFAULT_SWEEP_POLICY);
+  assert.equal(rounds, 3, "each pass re-derives the round");
+  assert.equal(ledger.filter((l) => l.step === "sweep.plan_round.refused" || l.step === "sweep.plan_round.pushed").length, 0);
+  assert.notEqual(ledger.findLast((l) => l.step === "sweep.disposed" && l.pr_number === pr.prNumber)?.disposition, "blocked-ambiguous");
 });

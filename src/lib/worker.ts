@@ -5826,6 +5826,15 @@ type WorktreeNodeModulesOutcome = NodeModulesLinkOutcome | { outcome: "refused";
 /** Thrown by `worktreeAdd`, only when its caller opts in, instead of linking a SAME-package tree whose install inputs differ
  * from the worktree's (W1-T4193). `reasonClass` is the `blocked_toolchain` tag daemon.ts's `isSpawnInfraBlocked` defers
  * WITHOUT a strike: every daemon installs its install root before a freshness restart, so the mismatch clears. */
+/** W1-T14916: a consumer whose port returns only a transcript throws this on a `notStarted` result, so its caller can
+ *  record a round no worker ran instead of judging an empty transcript as the worker's answer. */
+export class WorkerNotStartedError extends RmdError {
+  constructor(readonly notStarted: NonNullable<WorkerResult["notStarted"]>) {
+    super("child_process", 1, `worker not started: ${notStarted}`, { notStarted });
+    this.name = "WorkerNotStartedError";
+  }
+}
+
 /** A subscription-only (frontier) model was pinned or forced onto cash; it waits for a subscription instead. */
 export class SubscriptionOnlyRefusedError extends RmdError {
   readonly reasonClass = "blocked_toolchain" as const;

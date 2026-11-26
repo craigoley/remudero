@@ -3058,7 +3058,7 @@ import { dropDerivativeAggregateCiFailure } from "./lib/derivative-ci-failure.js
 import { applyCorrection } from "./lib/correct.js";
 import { projectHeldTaskQuestionGates, renderHeldTaskQuestions } from "./lib/human-gate.js";
 import { DEFAULT_PRUNE_GRACE_MS, appendQuestion, ghJson, ghRateLimitRefusalUnknown, type GhRateLimitRefusal, parseDecisionRequest, parseFollowups, parseLearningsUsed, parseSkillsUsed, parseQuestion, parseReconReport, parseReport, pruneStaleRuns, reapStaleWorktrees, removeWorktreeBase, removeRunLock, renderWorkerSettings, resolveGenericRouteToolBound, harnessOwnsGitFor, IMPLEMENT_CASH_TOOLS, IMPLEMENT_CLAUDE_TOOLS, WORKER_RULE_TOOL_NAME, implementToolBound, resolveDispatchLaneToolBound, cashDivertSpawnFields, cashFallbackRefusal, runAdhocLaneReapRung, runWorktreeReapRung, spawnWorker, readClaudeProviderCapacity, activeWorkerCount, cacheTokenLedgerFields, capStderrExcerpt, REPORT_EXCERPT_CAP, STDERR_EXCERPT_CAP, noPrReportExcerpt, foreignTreeStandDownReason, listRegisteredWorktrees, readRunLock, runLockPath, runLockRecord, workerLedgerFields, workerTranscript, withAssignmentTrailer, resolveCommitAssignment, uniqueRunBranch, excludeNodeModulesFromGit, linkWorktreeNodeModules, resolveNodeModulesSource, worktreeAdd, worktreeAddAsync, worktreeLockIsPidAlive, worktreeRemove, worktreeRemoveAsync, worktreeRemoveIfPresent, worktreeRemoveIfPresentAsync, worktreesDir, writeRunLock, WorktreeBaseStaleError, WorktreeNodeModulesRefusedError, detectWorktreeBaseUncheckableStreak, WORKTREE_BASE_UNCHECKABLE_STREAK_BOUND, type RunLockInfo, type SpawnWorkerArgs, buildInboxDraftWorkerArgs, type ForeignTreeStandDown, type RegisteredWorktree, type WorkerResult, type WorktreeReapSummary, openUsageProbeSession, type UsageProbeQueryFn, WorkerStateTracker, DEFAULT_WORKER_QUIET_FLOOR_MS, type WorkerState, type WorkerStreamObserver, type WorkerStreamEvent, type WorkerSelectionAssignment, WorkerAbandonedError, SubscriptionOnlyRefusedError, deliverOperatorAnswerToRunningWorker, sharesHarnessCheckout, unwireCredentialHelperSocket, wireCredentialHelperSocket, workerContinuation, workerExecutionForProvider, taskInputAnswerWithLedger } from "./lib/worker.js";
-import { healedReviewerTreeTools, workerHeadroomTiming, workerSpawnRetiredBy, WorkerSpawnRetiredError } from "./lib/worker.js";
+import { healedReviewerTreeTools, workerHeadroomTiming, workerSpawnRetiredBy, WorkerNotStartedError, WorkerSpawnRetiredError } from "./lib/worker.js";
 import {
   QuietRoundEndedError, createQuietBoundHistory, guardSpawnWithQuietWatchdog, productionQuietWorkerJudge, quietHistoryOptions,
   runQuietWorkerWatchdog, type QuietBoundHistory, type QuietWorkerJudge,
@@ -6402,7 +6402,15 @@ function gitStatusResult(git: (args: string[]) => string, args: string[]): { sta
  * re-applies the branch's change only where it still applies to the merged task and edits ONLY the conflicted plan
  * paths. The pushed merge commit must preflight clean, so a head that fails `planPrPreflight` is never pushed.
  */
-async function runPlanScopedConflictRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
+/** W1-T14916: a plan round whose worker never started is no refusal; its `fix.done` matches the fix rung's, spending no
+ *  strike, so a retired daemon's withheld round cannot count toward the refused-twice exhaustion. */
+function planRoundNotStarted(error: WorkerNotStartedError, round: Record<string, unknown> | undefined,
+  log: (step: string, fields: Record<string, unknown>) => void): { outcome: "not-started"; reason: string } {
+  if (round) log("fix.done", { ...round, subtype: "admission_abandoned", worker_exit: "not_spawned", cost_usd: 0, num_turns: 0 });
+  return { outcome: "not-started", reason: error.message };
+}
+
+async function runPlanScopedConflictRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired" | "not-started"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
   const { pr, deps, worktreePath } = input;
   const git = deps.runGit ?? ((args: string[]) => hostWorktreeGit(worktreePath, args));
   const preflight = (tree: string, sha: string, meta: { title: string; body: string }) => deps.preflight
@@ -6477,6 +6485,7 @@ async function runPlanScopedConflictRound(input: PlanScopedFixRoundInput): Promi
     if (roundId) deps.log("fix.done", { ...roundFields(), subtype: "success", pushed_head_sha: sha });
     return { outcome: "pushed", headSha: sha, preflight: verdict };
   } catch (error) {
+    if (error instanceof WorkerNotStartedError) return planRoundNotStarted(error, roundId ? roundFields() : undefined, deps.log);
     const reason = String((error as Error)?.message ?? error);
     deps.log("sweep.plan_round.error", { pr_number: pr.prNumber, head_sha: pr.headSha, reason });
     return refuse(reason);
@@ -6489,7 +6498,7 @@ function fixRoundCommitMessage(report: string, subject: string): string {
   return [subject, ...trailers].join("\n\n");
 }
 
-export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
+export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Promise<{ outcome: "pushed" | "refused" | "metadata-repaired" | "not-started"; headSha?: string; reason?: string; preflight?: PlanPrPreflightResult }> {
   if (input.conflict === true) return runPlanScopedConflictRound(input);
   const { pr, deps, worktreePath } = input;
   const git = deps.runGit ?? ((args: string[]) => hostWorktreeGit(worktreePath, args));
@@ -6588,6 +6597,7 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
     deps.log("fix.done", { ...roundFields(), subtype: "success", pushed_head_sha: sha });
     return { outcome: "pushed", headSha: sha, preflight: verdict };
   } catch (error) {
+    if (error instanceof WorkerNotStartedError) return planRoundNotStarted(error, roundId ? roundFields() : undefined, deps.log);
     const reason = String((error as Error)?.message ?? error);
     deps.log("sweep.plan_round.error", { pr_number: pr.prNumber, head_sha: pr.headSha, reason });
     return refuse(reason);

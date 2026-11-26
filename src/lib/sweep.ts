@@ -313,6 +313,7 @@ import {
   worktreesDir,
   writeRunLock,
   runLockRecord,
+  WorkerNotStartedError,
   type QuestionEntry,
   type SpawnWorkerArgs,
   type WorkerResult,
@@ -4811,6 +4812,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
               tools: ["Read", "Write", "Edit", "Grep", "Glob"], cashTools: ["Read", "Write", "Edit", "Grep", "Glob", "RunCheck"],
               runId, taskId: task.id,
             });
+            if (result.notStarted) throw new WorkerNotStartedError(result.notStarted);
             log("sweep.plan_round.worker", { pr_number: pr.prNumber, head_sha: pr.headSha, cost_usd: result.costUsd,
               num_turns: result.numTurns, subtype: result.subtype });
             return workerTranscript(result);
@@ -18165,7 +18167,7 @@ export interface SweepDeps {
    *  (closed, the judge's pending state cleared), never sent to a plan-scoped round machine-author-verify must refuse. */
   withdrawStaleJudgePr?: (pr: OpenPrView) => Promise<{ withdrawn: boolean; reason?: string }>;
   dispatchPlanGateRound?: (pr: OpenPrView) => Promise<{
-    outcome: "pushed" | "refused" | "metadata-repaired";
+    outcome: "pushed" | "refused" | "metadata-repaired" | "not-started";
     headSha?: string;
     reason?: string;
     preflight?: PlanPrPreflightResult;
@@ -26921,6 +26923,11 @@ export async function runSweep(
                 result = await deps.dispatchPlanGateRound!(pr);
               } catch (error) {
                 result = { outcome: "refused", reason: String((error as Error)?.message ?? error) };
+              }
+              // W1-T14916: no worker ran, so the round is no refusal and no push; the next pass re-derives it.
+              if (result.outcome === "not-started") {
+                repair.reason = `plan-scoped round not started: ${result.reason ?? "worker not started"}`;
+                return;
               }
               appendLine(deps.ledgerPath, { ...row, step: result.outcome === "refused" ? "sweep.plan_round.refused" : "sweep.plan_round.pushed", ...result });
               repair.reason = `plan-scoped round ${result.outcome}${result.reason ? `: ${result.reason}` : ""}`;
