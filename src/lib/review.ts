@@ -9079,10 +9079,12 @@ export function parseReviewerVerdictClauses(text: string, count: number): (strin
 
 // ── Acceptance criteria from a PR body (manual plan/doc PRs) ───────────────
 
-/** Strip a single layer of matching `"..."` or `'...'` quotes, if present. */
+/** Strip a single layer of matching `"..."` or `'...'` quotes, if present. Inside double quotes, `\"` and `\\` unescape
+ *  as a YAML double-quoted scalar's do (W1-T14913), so a body proof carries the same text as its plan record. */
 function stripQuotes(s: string): string {
   const m = s.match(/^(["'])([\s\S]*)\1$/);
-  return m ? m[2] : s;
+  if (!m) return s;
+  return m[1] === '"' ? m[2].replace(/\\(["\\])/g, "$1") : m[2];
 }
 
 /** The Acceptance HEADER line. Extracted as a shared constant so {@link parseAcceptanceBlock} and {@link
