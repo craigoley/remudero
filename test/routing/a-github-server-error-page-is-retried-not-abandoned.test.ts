@@ -147,3 +147,25 @@ test("W1-T14944 criterion 1: a page read that fails with HTTP 502 twice and then
     assert.deepEqual(sleeps, [1_000, 2_000]);
   }
 });
+
+test("W1-T14944 criterion 1: a page read that fails with HTTP 502 twice and then succeeds returns the page, when the gateway's message names a rate limit", async () => {
+  // The ninth review of #20985: an API gateway's 502 carried a JSON message saying "rate limit" and `Retry-After: 90`;
+  // the text classifier ran first and waited 90 s twice. The response's own status now decides first.
+  const limited502 = (): Error => Object.assign(new Error("Command failed: gh api repos/o/r/pulls -i\ngh: API rate limit exceeded (HTTP 502)"), {
+    status: 1,
+    stdout: `HTTP/2.0 502 Bad Gateway\r\nRetry-After: 90\r\nContent-Type: application/json\r\n\r\n{"message":"API rate limit exceeded"}`,
+    stderr: "gh: API rate limit exceeded (HTTP 502)\nRetry-After: 90\n",
+  });
+  assert.equal(isGhServerError(limited502()), true, "CONTROL: the fixture is a 502 by its status line");
+  const sleeps: number[] = [];
+  let calls = 0;
+  const page = await ghApiFetch(async () => {
+    calls += 1;
+    if (calls > 4) return "[]";
+    if (calls <= 2) throw limited502();
+    return included("200 OK", PAGE);
+  }, { sleep: async (ms) => { sleeps.push(ms); } })("repos/o/r/pulls");
+  assert.deepEqual(page, { ok: true, items: [{ number: 1 }] });
+  assert.equal(calls, 3);
+  assert.deepEqual(sleeps, [1_000, 2_000], "the server-error backoff, not the rate limit's Retry-After");
+});

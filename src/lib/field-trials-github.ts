@@ -114,7 +114,8 @@ export function ghApiFetch(read: (args: string[]) => Promise<string> = defaultGh
       try { body = splitGhHeaderBlock(await read(["api", path, "-i"])).body; break; }
       catch (error) {
         // W1-T14944: a 5xx is GitHub's own transient failure, so the same page is retried with backoff, no attempt cap.
-        if (classifyGhLimitFailure(error) === undefined && isGhServerError(error)) {
+        // The status is read first: a gateway's 502 whose message text mentions a rate limit is still a 502.
+        if (isGhServerError(error)) {
           await sleep(serverErrorWaitMs);
           serverErrorWaitMs = Math.min(serverErrorWaitMs * 2, SERVER_ERROR_RETRY_MAX_MS);
           continue;
