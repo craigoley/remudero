@@ -1777,8 +1777,7 @@ import {
   extractTaskTrailerId,
   type AcceptanceAuthorTimeResult,
   parseAcceptanceBlock,
-  acceptanceProofLineAt,
-  acceptanceProofLines,
+  acceptanceProofSpans,
   parseReviewerVerdictClauses,
   parseReviewerVerdicts,
   postReviewCommentGuarded,
@@ -6340,10 +6339,10 @@ export function wrappedGrepBodyRepair(body: string): AcceptanceGateBodyRepair | 
       /^(\s*grep:\s*)(.+?)(\s+in\s+\S+\s*)$/,
       (_all, head: string, _pattern: string, tail: string) => `${head}${wrapped.bare}${tail}`,
     );
-    // W1-T14913: found by its parsed value on the line the parser read THIS criterion from, so a quoted proof line is
+    // W1-T14913: found by its parsed value in the span the parser read THIS criterion from, so a quoted proof line is
     // found too, and two criteria sharing one wrapped grep are each unwrapped in turn.
     const next = bareProof === proof ? undefined
-      : rewriteCriterionProofs(repaired, [{ index, oldProof: proof, newProof: bareProof }], acceptanceProofLineAt);
+      : rewriteCriterionProofs(repaired, [{ index, oldProof: proof, newProof: bareProof }], acceptanceProofSpans);
     if (next === undefined) return undefined;
     repaired = next;
     unwrapped += 1;
@@ -6528,10 +6527,10 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
     for (const defect of defects) {
       if (defect.kind !== "wrapped-proof" || !defect.repair || !defect.criterion) continue;
       const proof = parseAcceptanceBlock(repairedBody)[defect.criterion - 1]?.proof;
-      // W1-T14913: the diagnosed criterion's own parser-reported line, never a text match, so a proof two criteria share
+      // W1-T14913: the diagnosed criterion's own parser-reported proof span, never a text match, so a proof two criteria share
       // is repaired on each.
       if (proof) repairedBody = rewriteCriterionProofs(repairedBody, [{ index: defect.criterion - 1, oldProof: proof,
-        newProof: defect.repair }], acceptanceProofLineAt) ?? repairedBody;
+        newProof: defect.repair }], acceptanceProofSpans) ?? repairedBody;
     }
     if (repairedBody !== metadata.body) {
       const candidate = { ...metadata, body: repairedBody };
@@ -9448,7 +9447,7 @@ export async function dispatchBodyProofRepair(
     });
     if (!validation.ok) return refuse(validation.refusal.reason, validation.refusal.detail);
     const body = await params.fetchPrBody(params.prUrl);
-    const repairedBody = replaceBodyProofs(body, validation.validated.map((e) => ({ oldProof: e.oldProof, newProof: e.newProof })), acceptanceProofLines);
+    const repairedBody = replaceBodyProofs(body, validation.validated.map((e) => ({ oldProof: e.oldProof, newProof: e.newProof })), acceptanceProofSpans);
     if (repairedBody === undefined) return refuse("body-drifted", "the live body no longer carries each old proof on exactly one bullet");
     const unsafe = diagnoseUnrunnableProofs(parseAcceptanceBlock(repairedBody), { execProof: params.execProof });
     if (unsafe.length > 0) return refuse("proof-unsafe-to-push", renderBodyDefects(unsafe));

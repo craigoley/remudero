@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parse } from "yaml";
-import { ACCEPTANCE_BULLET_RE, replaceBodyProofs, rewriteBodyProof, rewriteBodyProofLine, rewriteCriterionProofs } from "#src/lib/body-repair.js";
+import { ACCEPTANCE_BULLET_RE, replaceBodyProofs, rewriteBodyProof, rewriteCriterionProofs } from "#src/lib/body-repair.js";
 import { renderAcceptanceBlock } from "#src/lib/plan-pr-emitter.js";
-import { acceptanceProofLineAt, acceptanceProofLines, parseAcceptanceBlock } from "#src/lib/review.js";
+import { acceptanceProofSpans, parseAcceptanceBlock } from "#src/lib/review.js";
 
 // W1-T14913: a body proof in YAML double quotes must read as the record's YAML scalar does, or a body `kind: guard`
 // finds no record row and is refused (core #20913).
@@ -135,15 +135,15 @@ test("a quoted body proof reads its escapes as yaml does, and a fenced example a
   const body = `${example}\n## Acceptance\n- claim: the ceiling stays\n${proofLine}\n`;
   const oldProof = parseAcceptanceBlock(body)[0]!.proof;
   assert.equal(oldProof, String.raw`grep: "driftCeiling": 1 in f`);
-  assert.deepEqual(acceptanceProofLines(body), [body.split("\n").indexOf(proofLine, example.split("\n").length)]);
+  assert.deepEqual(acceptanceProofSpans(body).map((span) => span?.line), [body.split("\n").indexOf(proofLine, example.split("\n").length)]);
   const newProof = String.raw`grep: "driftCeiling": 2 in f`;
-  for (const fixed of [rewriteBodyProof(body, oldProof, newProof, acceptanceProofLines),
-    replaceBodyProofs(body, [{ oldProof, newProof }], acceptanceProofLines)]) {
+  for (const fixed of [rewriteBodyProof(body, oldProof, newProof, acceptanceProofSpans),
+    replaceBodyProofs(body, [{ oldProof, newProof }], acceptanceProofSpans)]) {
     assert.notEqual(fixed, undefined, "the active proof is found once");
     assert.ok(fixed!.startsWith(example), "the fenced example is left exactly as written");
     assert.deepEqual(parseAcceptanceBlock(fixed!).map((c) => c.proof), [newProof]);
   }
-  assert.equal(acceptanceProofLines("no header\n- a | grep: x in f\n").length, 0, "no Acceptance header, no proof line");
+  assert.equal(acceptanceProofSpans("no header\n- a | grep: x in f\n").length, 0, "no Acceptance header, no proof line");
 });
 
 // The seventh review of #20963: a human edit gave two criteria the same wrapped grep. Matched by text, each rewrite saw two
@@ -156,23 +156,54 @@ test("a quoted body proof reads its escapes as yaml does, and two criteria shari
   for (const body of [rendered, hand]) {
     const criteria = parseAcceptanceBlock(body);
     assert.deepEqual(criteria.map((c) => c.proof), [wrapped, wrapped], `both criteria read the wrapped grep: ${body}`);
-    assert.equal(rewriteBodyProof(body, wrapped, bare, acceptanceProofLines), undefined, "a text match sees two lines and refuses");
+    assert.equal(rewriteBodyProof(body, wrapped, bare, acceptanceProofSpans), undefined, "a text match sees two lines and refuses");
     // One edit per call, as the plan round and wrappedGrepBodyRepair each send it, then both in one call.
     let repaired = body;
     for (const index of criteria.keys()) {
-      const next = rewriteCriterionProofs(repaired, [{ index, oldProof: criteria[index]!.proof, newProof: bare }], acceptanceProofLineAt);
+      const next = rewriteCriterionProofs(repaired, [{ index, oldProof: criteria[index]!.proof, newProof: bare }], acceptanceProofSpans);
       assert.notEqual(next, undefined, `criterion ${index + 1} is rewritten on its own line`);
       repaired = next!;
     }
     assert.deepEqual(parseAcceptanceBlock(repaired).map((c) => c.proof), [bare, bare], repaired);
-    const both = rewriteCriterionProofs(body, criteria.map((c, index) => ({ index, oldProof: c.proof, newProof: bare })), acceptanceProofLineAt);
+    const both = rewriteCriterionProofs(body, criteria.map((c, index) => ({ index, oldProof: c.proof, newProof: bare })), acceptanceProofSpans);
     assert.deepEqual(parseAcceptanceBlock(both!).map((c) => c.proof), [bare, bare], String(both));
   }
   const one = renderAcceptanceBlock([{ claim: "only", proof: wrapped }]);
-  assert.equal(acceptanceProofLineAt(one, 1), undefined, "a criterion the body does not hold has no line");
-  assert.equal(rewriteBodyProofLine(one, undefined, wrapped, bare), undefined, "no line is never guessed at");
-  assert.equal(rewriteCriterionProofs(one, [{ index: 1, oldProof: wrapped, newProof: bare }], acceptanceProofLineAt), undefined,
+  assert.equal(acceptanceProofSpans(one)[1], undefined, "a criterion the body does not hold has no span");
+  assert.equal(rewriteCriterionProofs(one, [{ index: 1, oldProof: wrapped, newProof: bare }], acceptanceProofSpans), undefined,
     "an edit for a criterion the body does not hold refuses the whole rewrite");
-  assert.equal(rewriteBodyProofLine(one, acceptanceProofLineAt(one, 0), "grep: absent in f", bare), undefined,
-    "a line that does not carry the old proof is left alone");
+  assert.equal(rewriteCriterionProofs(one, [{ index: 0, oldProof: "grep: absent in f", newProof: bare }], acceptanceProofSpans),
+    undefined, "a criterion that does not read the old proof is left alone");
+});
+
+// The eighth review of #20963: a human-edited numbered bullet repeated the old grep in its claim and its proof, and the
+// line rewrite replaced the claim's copy. A rewrite given the parser's spans edits only the proof value it read.
+test("a quoted body proof reads its escapes as yaml does, and a claim repeating the proof is never rewritten", () => {
+  const old = "grep: driftCeiling in f";
+  const fresh = "grep: driftCeiling\\b in f";
+  const bodies = [
+    `## Acceptance\n1. the claim names ${old} | ${old}\n`,
+    `## Acceptance\n1) the claim names ${old} — ${old}\n`,
+    `## Acceptance\n1. claim: the claim names ${old}\n   proof: ${old}\n`,
+    `## Acceptance\n- claim: "the claim names ${old}"\n  proof: "${old}"\n`,
+    `## Acceptance\n- claim: the claim names ${old}\n  proof: '${old}'\n`,
+  ];
+  let checked = 0;
+  for (const body of bodies) {
+    const [criterion] = parseAcceptanceBlock(body);
+    if (criterion?.proof !== old) continue; // a separator this parser does not split is not this test's shape
+    checked += 1;
+    const claim = criterion.claim;
+    assert.ok(claim.includes(old), `the claim repeats the proof: ${body}`);
+    for (const fixed of [rewriteBodyProof(body, old, fresh, acceptanceProofSpans), replaceBodyProofs(body, [{ oldProof: old, newProof: fresh }], acceptanceProofSpans),
+      rewriteCriterionProofs(body, [{ index: 0, oldProof: old, newProof: fresh }], acceptanceProofSpans)]) {
+      assert.notEqual(fixed, undefined, body);
+      const [after] = parseAcceptanceBlock(fixed!);
+      assert.equal(after!.proof, fresh, `the proof is rewritten: ${fixed}`);
+      assert.equal(after!.claim, claim, `the claim is left exactly as written: ${fixed}`);
+    }
+  }
+  assert.ok(checked >= 4, `the numbered, labelled and quoted shapes all ran (${checked})`);
+  const [span] = acceptanceProofSpans(bodies[0]!);
+  assert.equal(bodies[0]!.split("\n")[span!.line]!.slice(span!.start, span!.end), old, "the span is the proof value as written");
 });

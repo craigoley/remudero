@@ -62,7 +62,7 @@ import {
 } from "./task-id-reservation.js";
 // @ts-expect-error The shared plain .mjs helper ships under src/ so source-only runtimes can load it.
 import { adjudicateReservationChain, parseReservationHolderLine, parseReservationHolderFields } from "./reservation-chain.mjs";
-import { ACCEPTANCE_BULLET_RE } from "./body-repair.js";
+import { ACCEPTANCE_BULLET_RE, type ProofSpan } from "./body-repair.js";
 
 /** JUDGE (MASTER-PLAN §12 rules 4/3B; W1-T1C): after green CI, a fresh read-only REVIEW session
  * judges each stated proof and posts `remudero-review`. {@link judgeReview} is pure (unit-fixture falsifier);
@@ -9241,29 +9241,42 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
   return readAcceptanceBlock(body).criteria;
 }
 
-/** W1-T14913: the body line indices (split on `\n`) the parser read each criterion's proof from, in criterion order;
- *  a criterion with no proof has none. A line outside the Acceptance block, a fenced example included, is never one. */
-export function acceptanceProofLines(body: string): number[] {
-  return readAcceptanceBlock(body).proofLines.filter((index): index is number => index !== undefined);
+/** W1-T14913: where the parser read each criterion's proof value, index-aligned with {@link parseAcceptanceBlock}'s
+ *  criteria (`undefined` for a criterion with no proof): its line (split on `\n`), the column range of the value as written
+ *  (quotes included when `quoted`) and the proof read there. A line outside the Acceptance block, a fenced example
+ *  included, is never one, and a claim repeating the proof text lies outside the range. */
+export function acceptanceProofSpans(body: string): (ProofSpan | undefined)[] {
+  const { criteria, proofSpans } = readAcceptanceBlock(body);
+  return criteria.map((criterion, index) => {
+    const span = proofSpans[index];
+    return span === undefined ? undefined : { ...span, proof: criterion.proof ?? "" };
+  });
 }
 
-/** W1-T14913: the body line index the parser read criterion `index`'s (0-based) proof from, or `undefined` when that
- *  criterion has no proof. Indexed by criterion, so two criteria carrying the same proof text each name their own line. */
-export function acceptanceProofLineAt(body: string, index: number): number | undefined {
-  return readAcceptanceBlock(body).proofLines[index];
+type WrittenProofSpan = Omit<ProofSpan, "proof">;
+
+/** The column range of `value` inside `line`, starting the search at `from`; `undefined` when it is not there. */
+function spanOf(line: string, value: string, from: number, at: number, quoted = false): WrittenProofSpan | undefined {
+  const start = line.indexOf(value, from);
+  return start < 0 || value === "" ? undefined : { line: at, start, end: start + value.length, quoted };
 }
 
-function readAcceptanceBlock(body: string): { criteria: AcceptanceCriterion[]; proofLines: (number | undefined)[] } {
+function readAcceptanceBlock(body: string): { criteria: AcceptanceCriterion[]; proofSpans: (WrittenProofSpan | undefined)[] } {
   const lines = (body ?? "").split("\n");
   const criteria: AcceptanceCriterion[] = [];
-  const proofLines: (number | undefined)[] = [];
+  const proofSpans: (WrittenProofSpan | undefined)[] = [];
+  /** A `proof:` continuation's value as written, quotes included, so a rewrite replaces exactly that range. */
+  const continuationSpan = (line: string, at: number): WrittenProofSpan | undefined => {
+    const m = line.match(/^(\s*proof\s*:\s*)(.*?)\s*$/i);
+    return m ? spanOf(line, m[2]!, m[1]!.length, at, /^(["'])[\s\S]*\1$/.test(m[2]!)) : undefined;
+  };
   /** Index-aligned with `criteria`: for a `claim:`-labelled bullet nonetheless split at a separator, the claim text as
    *  written BEFORE that split. An indented `proof:` continuation below such a bullet proves the split was a false
    *  positive — the proof lives on that line, so the pipe belonged to the claim — and restores this. */
   const unsplitLabelledClaims: (string | undefined)[] = [];
   // Header: "Acceptance:", "**Acceptance:**", "## Acceptance", "Acceptance criteria:" — never one inside a fence.
   const headerLine = acceptanceHeaderLine(lines);
-  if (headerLine < 0) return { criteria, proofLines };
+  if (headerLine < 0) return { criteria, proofSpans };
   for (const [offset, raw] of lines.slice(headerLine + 1).entries()) {
     const at = headerLine + 1 + offset;
     const line = raw.replace(/\r$/, "");
@@ -9281,7 +9294,9 @@ function readAcceptanceBlock(body: string): { criteria: AcceptanceCriterion[]; p
       else if (!sep) proof = bareDialectProof(claim);
       if (!claim) continue;
       criteria.push({ claim, proof });
-      proofLines[criteria.length - 1] = proof ? at : undefined;
+      // The proof's own range: after the separator for a split bullet (never the claim before it), else inside the item.
+      const itemStart = line.lastIndexOf(bullet[1]);
+      proofSpans[criteria.length - 1] = proof ? spanOf(line, proof, itemStart + (sep ? sep.index + sep.width : 0), at) : undefined;
       const whole = claimLabel && proof ? item.match(/^claim\s*:\s*(.*)$/i) : null;
       unsplitLabelledClaims[criteria.length - 1] = whole ? stripQuotes(whole[1].trim()) : undefined;
       continue;
@@ -9293,7 +9308,7 @@ function readAcceptanceBlock(body: string): { criteria: AcceptanceCriterion[]; p
       const last = criteria[criteria.length - 1];
       if (proofLabel && !last.proof) {
         last.proof = stripQuotes(proofLabel[1].trim());
-        proofLines[criteria.length - 1] = at;
+        proofSpans[criteria.length - 1] = continuationSpan(line, at);
         continue;
       }
       // The bullet above was a `claim:` label carrying a separator of its own and THIS line is the proof, so that
@@ -9303,7 +9318,7 @@ function readAcceptanceBlock(body: string): { criteria: AcceptanceCriterion[]; p
       if (proofLabel && unsplit !== undefined) {
         last.claim = unsplit;
         last.proof = stripQuotes(proofLabel[1].trim());
-        proofLines[criteria.length - 1] = at;
+        proofSpans[criteria.length - 1] = continuationSpan(line, at);
         unsplitLabelledClaims[criteria.length - 1] = undefined;
         continue;
       }
@@ -9319,7 +9334,7 @@ function readAcceptanceBlock(body: string): { criteria: AcceptanceCriterion[]; p
     if (line.trim() === "" && criteria.length === 0) continue;
     break;
   }
-  return { criteria, proofLines };
+  return { criteria, proofSpans };
 }
 
 /** W1-T14627: the refusal a body guard earns when no task record declares it. */
