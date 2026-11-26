@@ -300,33 +300,67 @@ fi
 
 # W1-T14945 — BEGIN import-cycle admission
 # OBSERVED 2026-11-26: a fix-lane round on core #20963 made src/lib/body-repair.ts import ./review.js, closing an
-# import ring that depcruise's no-circular rule refuses, and this hook let it through to CI. When the pushed diff adds
-# an import under src/, the hook cruises the tree (read as DATA: depcruise parses it, runs none of it) with the
-# GATE's own depcruise and config, and checks the ring count against the tree's cycle baseline with the gate's
+# import ring that depcruise's no-circular rule refuses, and this hook let it through to CI. When the pushed commit adds
+# an import under src/, the hook cruises THE PUSHED COMMIT'S src/ (extracted with git archive, so a dirty working tree or
+# a different checked-out branch never answers for it; read as DATA: depcruise parses it, runs none of it) with the
+# GATE's own depcruise and config, and checks the ring count against that commit's cycle baseline with the gate's
 # scripts/cycle-ratchet.mjs. A new ring refuses with `cycle-ratchet:` lines, so the fix lane's next strike gets them.
+# "Adds an import" compares each changed file's import specifiers in full text, so one split over lines still counts,
+# against the remote's old tip for a branch update, or origin/main's merge base for a new branch.
 cycle_ratchet_skip() { echo "pre-push: cycle-ratchet — $1, skipped (a named skip, NOT a pass)" >&2; }
 if has cycle-ratchet.mjs && [ -x "$gate_root/node_modules/.bin/depcruise" ] && [ -f "$gate_root/.dependency-cruiser.cjs" ]; then
-  cycle_base="$(git merge-base origin/main "$head_sha" 2>/dev/null || true)"
-  cycle_import_re='^[+]([^+].*)?(from[[:space:]]*["'"'"']|import[[:space:]]*[(]?["'"'"']|require[[:space:]]*[(])'
-  cycle_baseline="$tree_root/scripts/cycle-baseline.json"
-  [ -f "$cycle_baseline" ] || cycle_baseline="$gate_root/scripts/cycle-baseline.json"
-  if [ -z "$cycle_base" ]; then
-    cycle_ratchet_skip "no merge base with origin/main"
-  elif ! git diff --unified=0 "$cycle_base" "$head_sha" -- src 2>/dev/null | grep -Eq "$cycle_import_re"; then
-    cycle_ratchet_skip "this diff adds no import under src/"
-  elif [ ! -f "$cycle_baseline" ]; then
-    cycle_ratchet_skip "no scripts/cycle-baseline.json"
+  cycle_base=""
+  if [ -n "${head_old_sha:-}" ] && [ "$head_old_sha" != "$zero_sha" ] && git cat-file -e "${head_old_sha}^{commit}" 2>/dev/null; then
+    cycle_base="$head_old_sha"
   else
-    cycle_json="$(mktemp "${TMPDIR:-/tmp}/rmd-prepush-cycles-XXXXXX")"
-    # depcruise exits non-zero when it reports a violation, so its JSON is judged, never its exit code.
-    "$gate_root/node_modules/.bin/depcruise" src --config "$gate_root/.dependency-cruiser.cjs" --output-type json \
-      >"$cycle_json" 2>/dev/null || true
-    if ! node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).summary.violations.length' "$cycle_json" 2>/dev/null; then
-      cycle_ratchet_skip "the cruise produced no readable result"
-    elif ! node "$gate_root/scripts/cycle-ratchet.mjs" --json "$cycle_json" --baseline "$cycle_baseline" >/dev/null; then
-      fail=1
+    cycle_base="$(git merge-base origin/main "$head_sha" 2>/dev/null || true)"
+  fi
+  cycle_added="$(git diff --no-renames --name-only --diff-filter=AM "$cycle_base" "$head_sha" -- src 2>/dev/null \
+    | node -e '
+      const { execFileSync } = require("node:child_process");
+      const [base, head] = process.argv.slice(1);
+      const re = /(?:\bfrom|\bimport|\brequire)\s*\(?\s*["'"'"'`]([^"'"'"'`]+)["'"'"'`]/g;
+      const specs = (rev, path) => {
+        let text = "";
+        try { text = execFileSync("git", ["show", `${rev}:${path}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: Infinity }); } catch { return new Map(); }
+        const counts = new Map();
+        for (const m of text.matchAll(re)) counts.set(m[1], (counts.get(m[1]) ?? 0) + 1);
+        return counts;
+      };
+      const paths = require("node:fs").readFileSync(0, "utf8").split("\n").filter(Boolean);
+      for (const path of paths) {
+        const before = specs(base, path);
+        for (const [spec, n] of specs(head, path)) if (n > (before.get(spec) ?? 0)) { console.log(`${path}: ${spec}`); process.exit(0); }
+      }' "$cycle_base" "$head_sha" 2>/dev/null || echo "unreadable")"
+  if [ -z "$cycle_base" ]; then
+    cycle_ratchet_skip "no remote tip or merge base with origin/main"
+  elif [ -z "$cycle_added" ]; then
+    cycle_ratchet_skip "this diff adds no import under src/"
+  elif ! cycle_tree="$(mktemp -d "${TMPDIR:-/tmp}/rmd-prepush-cycles-XXXXXX")"; then
+    cycle_ratchet_skip "no temporary directory for the pushed tree"
+  else
+    cycle_baseline="$cycle_tree/cycle-baseline.json"
+    git show "$head_sha:scripts/cycle-baseline.json" >"$cycle_baseline" 2>/dev/null \
+      || cp "$gate_root/scripts/cycle-baseline.json" "$cycle_baseline" 2>/dev/null || rm -f "$cycle_baseline"
+    if ! git archive "$head_sha" src | tar -x -C "$cycle_tree" 2>/dev/null; then
+      cycle_ratchet_skip "the pushed commit's src/ could not be extracted"
+    elif [ ! -f "$cycle_baseline" ]; then
+      cycle_ratchet_skip "no scripts/cycle-baseline.json"
+    else
+      for cycle_cfg in package.json tsconfig.json; do
+        git show "$head_sha:$cycle_cfg" >"$cycle_tree/$cycle_cfg" 2>/dev/null || rm -f "$cycle_tree/$cycle_cfg"
+      done
+      ln -s "$gate_root/node_modules" "$cycle_tree/node_modules"
+      # depcruise exits non-zero when it reports a violation, so its JSON is judged, never its exit code.
+      (cd "$cycle_tree" && "$gate_root/node_modules/.bin/depcruise" src --config "$gate_root/.dependency-cruiser.cjs" \
+        --output-type json >"$cycle_tree/cruise.json" 2>/dev/null) || true
+      if ! node -e 'JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).summary.violations.length' "$cycle_tree/cruise.json" 2>/dev/null; then
+        cycle_ratchet_skip "the cruise produced no readable result"
+      elif ! node "$gate_root/scripts/cycle-ratchet.mjs" --json "$cycle_tree/cruise.json" --baseline "$cycle_baseline" >/dev/null; then
+        fail=1
+      fi
     fi
-    rm -f "$cycle_json"
+    rm -rf "$cycle_tree"
   fi
 else
   cycle_ratchet_skip "no gate depcruise, config or scripts/cycle-ratchet.mjs"

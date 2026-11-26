@@ -35,12 +35,13 @@ function fixture(): GitRepo {
   return repo;
 }
 
-function push(repo: GitRepo): { status: number; stderr: string } {
-  const head = repo.git("rev-parse", "HEAD");
+/** Push `rev` (HEAD by default) as a branch; `oldSha` is the remote's tip, all zeros for a new branch. */
+function push(repo: GitRepo, rev = "HEAD", oldSha = "0".repeat(40)): { status: number; stderr: string } {
+  const head = repo.git("rev-parse", rev);
   const res = spawnSync("sh", [join(repo.dir, "hooks", "pre-push")], {
     cwd: repo.dir,
     encoding: "utf8",
-    input: `refs/heads/run-W1-T14945-1 ${head} refs/heads/run-W1-T14945-1 ${"0".repeat(40)}\n`,
+    input: `refs/heads/run-W1-T14945-1 ${head} refs/heads/run-W1-T14945-1 ${oldSha}\n`,
     env: { PATH: process.env.PATH ?? "", HOME: repo.dir, RMD_PREPUSH_GATES: "1" },
   });
   assert.equal(res.error, undefined, `the hook launched: ${String(res.error)}`);
@@ -84,5 +85,73 @@ test("W1-T14945 criterion 2: a cycle-free push passes the gate as before", () =>
     const noImport = push(repo);
     assert.doesNotMatch(noImport.stderr, /cycle-ratchet: BLOCKED/, noImport.stderr);
     assert.equal(noImport.status, 0, `a push adding no import passes:\n${noImport.stderr}`);
+  } finally { repo.cleanup(); }
+});
+
+const RING_B = `import { a } from "${sibling("a")}";\nexport const b = 1;\nexport const viaA = () => a;\n`;
+const CLEAN_C = `import { b } from "${sibling("b")}";\nexport const c = () => b;\n`;
+
+test("W1-T14945 criterion 1: a push whose diff closes an import ring is refused at pre-push naming the ring, when the import spans lines", () => {
+  const repo = fixture();
+  try {
+    commit(repo, "src/lib/b.ts", `import {\n  a,\n} from\n  "${sibling("a")}";\nexport const b = 1;\nexport const viaA = () => a;\n`);
+    const { status, stderr } = push(repo);
+    assert.notEqual(status, 0, `a multiline import is still an added import:\n${stderr}`);
+    assert.match(stderr, /src\/lib\/a\.ts -> src\/lib\/b\.ts/, stderr);
+  } finally { repo.cleanup(); }
+});
+
+test("W1-T14945 criterion 1: a push whose diff closes an import ring is refused at pre-push naming the ring, for the pushed commit and never the checkout", () => {
+  // The pushed branch holds the ring while a clean commit is checked out: the pushed commit answers.
+  const other = fixture();
+  try {
+    const main = other.git("rev-parse", "--abbrev-ref", "HEAD");
+    other.git("checkout", "-q", "-b", "ring");
+    commit(other, "src/lib/b.ts", RING_B);
+    other.git("checkout", "-q", main);
+    const { status, stderr } = push(other, "ring");
+    assert.notEqual(status, 0, `the pushed branch's ring is refused from a clean checkout:\n${stderr}`);
+    assert.match(stderr, /src\/lib\/a\.ts -> src\/lib\/b\.ts/, stderr);
+  } finally { other.cleanup(); }
+  // The working tree is dirty with a ring the pushed commit does not hold: the push passes.
+  const dirty = fixture();
+  try {
+    commit(dirty, "src/lib/c.ts", CLEAN_C);
+    writeFileSync(join(dirty.dir, "src", "lib", "b.ts"), RING_B);
+    const { status, stderr } = push(dirty);
+    assert.doesNotMatch(stderr, /cycle-ratchet: BLOCKED/, `an uncommitted ring never answers for the pushed commit:\n${stderr}`);
+    assert.equal(status, 0, stderr);
+  } finally { dirty.cleanup(); }
+  // The pushed commit holds the ring while the working tree is dirty without it: the push is refused.
+  const hidden = fixture();
+  try {
+    commit(hidden, "src/lib/b.ts", RING_B);
+    writeFileSync(join(hidden.dir, "src", "lib", "b.ts"), "export const b = 1;\n");
+    const { status, stderr } = push(hidden);
+    assert.notEqual(status, 0, `a dirty tree never hides the pushed commit's ring:\n${stderr}`);
+  } finally { hidden.cleanup(); }
+});
+
+test("W1-T14945 criterion 1: a push whose diff closes an import ring is refused at pre-push naming the ring, against the remote's old tip on a branch update", () => {
+  const repo = fixture();
+  try {
+    commit(repo, "src/lib/c.ts", CLEAN_C);
+    const tip = repo.git("rev-parse", "HEAD");
+    commit(repo, "src/lib/b.ts", RING_B);
+    const { status, stderr } = push(repo, "HEAD", tip);
+    assert.notEqual(status, 0, `an update that adds the ring is refused:\n${stderr}`);
+    assert.match(stderr, /src\/lib\/a\.ts -> src\/lib\/b\.ts/, stderr);
+  } finally { repo.cleanup(); }
+});
+
+test("W1-T14945 criterion 2: a cycle-free push passes the gate as before, and a branch update reads only its own commits", () => {
+  const repo = fixture();
+  try {
+    commit(repo, "src/lib/c.ts", CLEAN_C);
+    const tip = repo.git("rev-parse", "HEAD");
+    commit(repo, "src/lib/c.ts", `${CLEAN_C}export const d = 4;\n`);
+    const { status, stderr } = push(repo, "HEAD", tip);
+    assert.match(stderr, /cycle-ratchet — this diff adds no import under src\/, skipped/, `the update adds no import past the remote tip:\n${stderr}`);
+    assert.equal(status, 0, stderr);
   } finally { repo.cleanup(); }
 });
