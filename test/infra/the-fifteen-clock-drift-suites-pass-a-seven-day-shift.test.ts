@@ -195,9 +195,11 @@ function runShift(days: number, whole: boolean): Map<string, Promise<Run>> {
       settled.get(suite.file)!.resolve(await runShifted(suite, days, whole));
     }
   };
-  // The long suites drain their own lane beside the pool, so none starts behind the quick ones.
-  void drain([...WHOLE_LONG]);
-  for (let w = 0; w < Math.max(1, Math.floor(availableParallelism() / 2) - 1); w++) void drain(queue);
+  // Each long suite drains a lane of its own beside the pool, so none starts behind the quick ones or behind each other:
+  // one shared long lane ran 112 s + 137 s = 249 s back to back, past the reviewer's whole-proof 180 s bound (#20913's
+  // review at e7aa53b, exec_error). Two quick workers at least: on one, the quick suites alone summed ~255 s.
+  for (const long of WHOLE_LONG) void drain([long]);
+  for (let w = 0; w < Math.max(2, Math.floor(availableParallelism() / 2) - 1); w++) void drain(queue);
   return new Map([...settled].map(([file, { promise }]) => [file, promise]));
 }
 // Each shift runs only when a test asks for it, so a proof run that selects one shift's tests spawns only its children.
