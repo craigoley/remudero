@@ -1473,7 +1473,9 @@ setTimeout(() => process.exit(2), 30000).unref();
     boot, send, prepare, rows, wait, generation, tree: join(root, "worktrees", `approve-${sourceHead.slice(0, 12)}`) };
 }
 
-test("served product planning receives the owned gateway from production assembly", { timeout: 60_000 }, async t => {
+// The served-planning tests carry no fixed per-test timeout (W1-T14786): under the flake screen's load a healthy boot ran
+// past the 60 s this one allowed. The runner's own --test-timeout, and the served fixture's child-exit wait, bound them.
+test("served product planning receives the owned gateway from production assembly", async t => {
   const f = await ownedServedPlan(t), app = await f.boot();
   const proposal = await f.prepare(app.base);
   const pending = await f.send(app.base, proposal);
@@ -1540,7 +1542,7 @@ test("served product planning refuses when no owned runner is available", async 
   assert.equal(readFileSync(join(root, "state/ledger.ndjson"), "utf8"), "");
 });
 
-test("served product planning retains fresh source refusal evidence", { timeout: 120_000 }, async t => {
+test("served product planning retains fresh source refusal evidence", async t => {
   await t.test("unavailable", async t => {
     const f = await ownedServedPlan(t), app = await f.boot();
     const command = await f.prepare(app.base);
@@ -1561,7 +1563,7 @@ test("served product planning retains fresh source refusal evidence", { timeout:
   });
 });
 
-test("a registered branch tree at the old sha-keyed path neither blocks served planning nor is touched", { timeout: 90_000 }, async t => {
+test("a registered branch tree at the old sha-keyed path neither blocks served planning nor is touched", async t => {
   // 2026-11-18: a tree another clone left at `approve-<sha12>` blocked every Approve at that sha. Each attempt now
   // cuts its own tree, so a contaminated tree at the old path is never run in, re-added over or removed.
   const f = await ownedServedPlan(t), app = await f.boot();
@@ -1579,7 +1581,7 @@ test("a registered branch tree at the old sha-keyed path neither blocks served p
   assert.equal(f.generation.git("-C", f.tree, "rev-parse", "--abbrev-ref", "HEAD"), "contaminated-owned-tree");
 });
 
-test("served product planning retains owned fresh-source child evidence on recovery", { timeout: 90_000 }, async t => {
+test("served product planning retains owned fresh-source child evidence on recovery", async t => {
   const f = await ownedServedPlan(t), app = await f.boot();
   const command = await f.prepare(app.base);
   const first = await f.send(app.base, command);
