@@ -22,6 +22,7 @@ import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "#src/lib/
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { spawnWorker } from "#src/lib/worker.js";
+import { ghJsonAsync } from "#src/lib/github-transport.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 
@@ -242,6 +243,56 @@ test("W1-T14902 criterion 2: a trailer edited to name a held task while the arm 
   const clear = await arm(async () => ({ state: "clean", defused: [] }));
   assert.equal(clear.outcome, "armed");
   assert.deepEqual(writes, ["armAuto"]);
+});
+
+test("W1-T14902 criterion 2: the arm's write-time hold read never joins a pre-edit fresh GET still in flight in the transport", { timeout: 60_000 }, async (t) => {
+  // Round 11: a sweep's fresh GET of the PR (sweep.ts readCiGateRollup) left before a trailer edit; the transport joined
+  // the arm's write-time read to it, ahead of the broker, and the pre-edit body read clear. Real reader, stub gh.
+  const root = tmp(t, "arm-transport-join");
+  const config = (() => ({ root })) as unknown as Parameters<typeof readPullRequestTaskHold>[1];
+  const plan = { readMainPlan: async () => ({ byId: new Map([["W1-T10732", {}], ["W1-T8397", { dispatch_hold: true }]]) }) };
+  const row = (task: string) => JSON.stringify({ number: 910, body: `Remudero-Task: ${task}\n`, head: { ref: "feature/x", sha: SHA } });
+  // The live PR row is the env the stub gh was spawned with: each GET answers GitHub as of the moment it left.
+  const shim = ghShim([
+    { when: "api repos/acme/remudero-ops/pulls/910", delaySeconds: 1, stdoutEnv: "T14902_LIVE_PULL_ROW" },
+    { when: "", exit: 97, stderr: "unexpected GitHub call" },
+  ]);
+  const previous = new Map(["PATH", "HOME", "RMD_GH_CACHE_HOME", "RMD_SELF_SYNC_DONE", "T14902_LIVE_PULL_ROW"].map((k) => [k, process.env[k]]));
+  t.after(() => {
+    for (const [k, v] of previous) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    rmSync(shim.dir, { recursive: true, force: true });
+  });
+  Object.assign(process.env, { PATH: `${shim.dir}:${previous.get("PATH")}`, HOME: root, RMD_GH_CACHE_HOME: root, RMD_SELF_SYNC_DONE: "1",
+    T14902_LIVE_PULL_ROW: row("W1-T10732") });
+  const started = () => shim.events().filter((e) => e.phase === "start" && e.args.includes("repos/acme/remudero-ops/pulls/910")).length;
+  const writes: string[] = [];
+  let sweepRead: Promise<unknown> | undefined;
+  const arm = (closing: () => Promise<{ state: "clean"; defused: [] }>) => attemptArmAsync(PR_URL, {
+    headSha: async () => SHA,
+    ledgerLines: () => [],
+    armAuto: async () => { writes.push("armAuto"); },
+    mergeDirect: async () => { writes.push("mergeDirect"); },
+    isMerged: async () => false,
+    closingReferences: closing,
+    taskHold: (prUrl) => readPullRequestTaskHold(prUrl, config, undefined, plan),
+    say: () => {},
+  }, SHA);
+  const edited = await arm(async () => {
+    // The sweep's fresh GET leaves with the pre-edit body; the maintainer edits the trailer while it is still out.
+    const before = started();
+    sweepRead = ghJsonAsync(["api", "repos/acme/remudero-ops/pulls/910"], undefined, undefined, { fresh: true });
+    const deadline = Date.now() + 30_000;
+    while (started() === before && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(started(), before + 1, "the sweep's GET is in flight before the edit");
+    process.env.T14902_LIVE_PULL_ROW = row("W1-T8397");
+    return { state: "clean", defused: [] };
+  });
+  assert.equal(edited.outcome, "hold-refused", `THE CLAIM: the edit made while an older GET was out refuses the arm: ${JSON.stringify(edited)}`);
+  assert.match(edited.error ?? "", /W1-T8397 carries dispatch_hold/, "the refusal names the edited task and its hold");
+  assert.deepEqual(writes, [], "no arm and no direct merge reached GitHub");
+  assert.match(String((await sweepRead as { body?: unknown }).body), /W1-T10732/, "positive control: the sweep's own GET did predate the edit");
+  assert.equal(started(), 3, "the arm read the PR at its start, the sweep once, and the arm again on its own GET at the write");
+  assert.equal(shim.calls().filter((c) => !c.includes("pulls/910")).length, 0, `no other GitHub call: ${shim.calls().join(" | ")}`);
 });
 
 test("W1-T14902 criterion 3: a trailerless plan filing on an unrelated held task's run branch stays untasked, classified by its GitHub files", async (t) => {

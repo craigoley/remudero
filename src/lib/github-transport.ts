@@ -530,7 +530,7 @@ async function ghStdoutAsync(args: string[], execArgs: string[], execAsync: type
     await presentUnexpiredTokenAsync(args);
     try { return await run(); } catch (err) { noteInstallationRefusal(err); throw err; }
   }
-  const key = ghArgsAreCoalescibleRead(args) ? `${readOpts.fresh === true ? "fresh:" : ""}${JSON.stringify(execArgs)}` : undefined;
+  const key = ghArgsAreCoalescibleRead(args) && readOpts.fresh !== true ? JSON.stringify(execArgs) : undefined;
   const existing = key === undefined ? undefined : asyncReadInFlight.get(key) as Promise<string> | undefined;
   if (existing) return existing;
   const request = (async (): Promise<string> => {
