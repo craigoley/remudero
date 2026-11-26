@@ -9247,6 +9247,12 @@ export function acceptanceProofLines(body: string): number[] {
   return readAcceptanceBlock(body).proofLines.filter((index): index is number => index !== undefined);
 }
 
+/** W1-T14913: the body line index the parser read criterion `index`'s (0-based) proof from, or `undefined` when that
+ *  criterion has no proof. Indexed by criterion, so two criteria carrying the same proof text each name their own line. */
+export function acceptanceProofLineAt(body: string, index: number): number | undefined {
+  return readAcceptanceBlock(body).proofLines[index];
+}
+
 function readAcceptanceBlock(body: string): { criteria: AcceptanceCriterion[]; proofLines: (number | undefined)[] } {
   const lines = (body ?? "").split("\n");
   const criteria: AcceptanceCriterion[] = [];

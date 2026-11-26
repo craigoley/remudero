@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parse } from "yaml";
-import { ACCEPTANCE_BULLET_RE, replaceBodyProofs, rewriteBodyProof } from "#src/lib/body-repair.js";
+import { ACCEPTANCE_BULLET_RE, replaceBodyProofs, rewriteBodyProof, rewriteBodyProofLine, rewriteCriterionProofs } from "#src/lib/body-repair.js";
 import { renderAcceptanceBlock } from "#src/lib/plan-pr-emitter.js";
-import { acceptanceProofLines, parseAcceptanceBlock } from "#src/lib/review.js";
+import { acceptanceProofLineAt, acceptanceProofLines, parseAcceptanceBlock } from "#src/lib/review.js";
 
 // W1-T14913: a body proof in YAML double quotes must read as the record's YAML scalar does, or a body `kind: guard`
 // finds no record row and is refused (core #20913).
@@ -144,4 +144,35 @@ test("a quoted body proof reads its escapes as yaml does, and a fenced example a
     assert.deepEqual(parseAcceptanceBlock(fixed!).map((c) => c.proof), [newProof]);
   }
   assert.equal(acceptanceProofLines("no header\n- a | grep: x in f\n").length, 0, "no Acceptance header, no proof line");
+});
+
+// The seventh review of #20963: a human edit gave two criteria the same wrapped grep. Matched by text, each rewrite saw two
+// hits and left both wrapped. The plan round and wrappedGrepBodyRepair now rewrite the diagnosed criterion's own line.
+test("a quoted body proof reads its escapes as yaml does, and two criteria sharing one wrapped grep are each rewritten on their own line", () => {
+  const wrapped = `grep: "driftCeiling" in scripts/clock-sweep-baseline.json`;
+  const bare = "grep: driftCeiling in scripts/clock-sweep-baseline.json";
+  const rendered = renderAcceptanceBlock([{ claim: "first | one", proof: wrapped }, { claim: "second | two", proof: wrapped }]);
+  const hand = `## Acceptance\n- claim: first\n  proof: ${wrapped}\n- claim: second\n  proof: "${wrapped.replace(/"/g, '\\"')}"\n`;
+  for (const body of [rendered, hand]) {
+    const criteria = parseAcceptanceBlock(body);
+    assert.deepEqual(criteria.map((c) => c.proof), [wrapped, wrapped], `both criteria read the wrapped grep: ${body}`);
+    assert.equal(rewriteBodyProof(body, wrapped, bare, acceptanceProofLines), undefined, "a text match sees two lines and refuses");
+    // One edit per call, as the plan round and wrappedGrepBodyRepair each send it, then both in one call.
+    let repaired = body;
+    for (const index of criteria.keys()) {
+      const next = rewriteCriterionProofs(repaired, [{ index, oldProof: criteria[index]!.proof, newProof: bare }], acceptanceProofLineAt);
+      assert.notEqual(next, undefined, `criterion ${index + 1} is rewritten on its own line`);
+      repaired = next!;
+    }
+    assert.deepEqual(parseAcceptanceBlock(repaired).map((c) => c.proof), [bare, bare], repaired);
+    const both = rewriteCriterionProofs(body, criteria.map((c, index) => ({ index, oldProof: c.proof, newProof: bare })), acceptanceProofLineAt);
+    assert.deepEqual(parseAcceptanceBlock(both!).map((c) => c.proof), [bare, bare], String(both));
+  }
+  const one = renderAcceptanceBlock([{ claim: "only", proof: wrapped }]);
+  assert.equal(acceptanceProofLineAt(one, 1), undefined, "a criterion the body does not hold has no line");
+  assert.equal(rewriteBodyProofLine(one, undefined, wrapped, bare), undefined, "no line is never guessed at");
+  assert.equal(rewriteCriterionProofs(one, [{ index: 1, oldProof: wrapped, newProof: bare }], acceptanceProofLineAt), undefined,
+    "an edit for a criterion the body does not hold refuses the whole rewrite");
+  assert.equal(rewriteBodyProofLine(one, acceptanceProofLineAt(one, 0), "grep: absent in f", bare), undefined,
+    "a line that does not carry the old proof is left alone");
 });

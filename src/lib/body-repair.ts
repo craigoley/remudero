@@ -381,21 +381,61 @@ const bulletOrProofLines: ProofLines = (body) => body.split("\n").flatMap((line,
  *  exactly one such line carries `oldProof`. */
 export function rewriteBodyProof(body: string, oldProof: string, newProof: string,
   proofLines: ProofLines = bulletOrProofLines): string | undefined {
-  const escaped = (text: string): string => `"${text.replace(/[\\"]/g, "\\$&")}"`;
   const lines = body.split("\n");
   const hits = [...new Set(proofLines(body))].flatMap((index) => {
-    const line = lines[index];
-    if (line === undefined) return [];
-    const quoted = line.match(/^(\s*proof\s*:\s*)"([\s\S]*)"(\s*)$/i);
-    if (quoted) {
-      if (quoted[2]!.replace(/\\(["\\])/g, "$1") === oldProof) return [{ index, line: `${quoted[1]}${escaped(newProof)}${quoted[3]}` }];
-      return [];
-    }
-    return line.includes(oldProof) ? [{ index, line: line.replace(oldProof, () => newProof) }] : [];
+    const line = lines[index] === undefined ? undefined : rewriteProofLine(lines[index]!, oldProof, newProof);
+    return line === undefined ? [] : [{ index, line }];
   });
   if (hits.length !== 1) return undefined;
   lines[hits[0]!.index] = hits[0]!.line;
   return lines.join("\n");
+}
+
+/**
+ * W1-T14913: rewrite the proof on ONE body line the caller already knows is its criterion's — the parser-reported line for
+ * a diagnosed criterion index — so two criteria sharing one proof text are each rewritten in turn, where a text match
+ * would see two hits and refuse. `undefined` when there is no such line or it does not carry `oldProof`.
+ */
+export function rewriteBodyProofLine(body: string, lineIndex: number | undefined, oldProof: string,
+  newProof: string): string | undefined {
+  if (lineIndex === undefined) return undefined;
+  const lines = body.split("\n");
+  const line = lines[lineIndex] === undefined ? undefined : rewriteProofLine(lines[lineIndex]!, oldProof, newProof);
+  if (line === undefined) return undefined;
+  lines[lineIndex] = line;
+  return lines.join("\n");
+}
+
+/** W1-T14913: the parser's proof line for criterion `index` (0-based), injected because this module cannot import review.ts. */
+export type ProofLineAt = (body: string, index: number) => number | undefined;
+
+/** One criterion's proof rewrite, addressed by its 0-based index in the parsed Acceptance block. */
+export interface CriterionProofEdit { index: number; oldProof: string; newProof: string }
+
+/**
+ * W1-T14913: apply each edit on the line the parser read ITS criterion's proof from, in order. Two criteria carrying the same
+ * proof text are each rewritten, where a text match would see two lines and refuse. `undefined` when any edit's line is
+ * missing or no longer carries its old proof, so a drifted body is never guessed at.
+ */
+export function rewriteCriterionProofs(body: string, edits: readonly CriterionProofEdit[], proofLineAt: ProofLineAt): string | undefined {
+  let repaired = body;
+  for (const { index, oldProof, newProof } of edits) {
+    const next = rewriteBodyProofLine(repaired, proofLineAt(repaired, index), oldProof, newProof);
+    if (next === undefined) return undefined;
+    repaired = next;
+  }
+  return repaired;
+}
+
+/** One line's rewrite: a double-quoted `proof:` line matched by its parsed value and rewritten escaped, else a literal
+ *  substring replace; `undefined` when the line does not carry `oldProof`. */
+function rewriteProofLine(line: string, oldProof: string, newProof: string): string | undefined {
+  const escaped = (text: string): string => `"${text.replace(/[\\"]/g, "\\$&")}"`;
+  const quoted = line.match(/^(\s*proof\s*:\s*)"([\s\S]*)"(\s*)$/i);
+  if (quoted) {
+    return quoted[2]!.replace(/\\(["\\])/g, "$1") === oldProof ? `${quoted[1]}${escaped(newProof)}${quoted[3]}` : undefined;
+  }
+  return line.includes(oldProof) ? line.replace(oldProof, () => newProof) : undefined;
 }
 
 /**

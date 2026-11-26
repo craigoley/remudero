@@ -1777,6 +1777,7 @@ import {
   extractTaskTrailerId,
   type AcceptanceAuthorTimeResult,
   parseAcceptanceBlock,
+  acceptanceProofLineAt,
   acceptanceProofLines,
   parseReviewerVerdictClauses,
   parseReviewerVerdicts,
@@ -1853,7 +1854,7 @@ import {
   type PlanFilingDiffAtHead,
 } from "./lib/body-repair.js";
 import { prBodyDigest } from "./lib/sweep.js";
-import { diagnoseBodyDefects, rewriteBodyProof } from "./lib/body-repair.js";
+import { diagnoseBodyDefects, rewriteCriterionProofs } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
 import { type BaseProofGrader, diffAnchor, mainRepairAcceptanceFor, withoutStaleRepairProofs } from "./lib/main-repair-acceptance.js";
@@ -6322,16 +6323,16 @@ export function trailerBodyDivergenceRepair(
 /**
  * W1-T5544 — THE DETERMINISTIC CURE FOR `acceptance-author-gate: REFUSED (proof-shape)` WHEN EVERY DEFECT IS A WRAPPED
  * GREP PATTERN: each `grep: "x" in f` / `` grep: `x` in f `` becomes `wrappedGrepPattern(...).bare`. EXACT, never a
- * heuristic: each proof text must occur in the body exactly once, and after the rewrite the block must parse to the same
- * number of criteria, none still wrapped, every one executable — anything else (an unparseable proof, a missing
- * target) returns `undefined` because the cause was not ONLY wrapping.
+ * heuristic: each proof is rewritten on the line the parser read its criterion from (W1-T14913), and after the rewrite
+ * the block must parse to the same number of criteria, none still wrapped, every one executable — anything else (an
+ * unparseable proof, a missing target) returns `undefined` because the cause was not ONLY wrapping.
  */
 export function wrappedGrepBodyRepair(body: string): AcceptanceGateBodyRepair | undefined {
   const criteria = parseAcceptanceBlock(body);
   if (criteria.length === 0) return undefined;
   let repaired = body;
   let unwrapped = 0;
-  for (const criterion of criteria) {
+  for (const [index, criterion] of criteria.entries()) {
     const proof = criterion.proof ?? "";
     const wrapped = wrappedGrepPattern(proof);
     if (wrapped === undefined) continue;
@@ -6339,8 +6340,10 @@ export function wrappedGrepBodyRepair(body: string): AcceptanceGateBodyRepair | 
       /^(\s*grep:\s*)(.+?)(\s+in\s+\S+\s*)$/,
       (_all, head: string, _pattern: string, tail: string) => `${head}${wrapped.bare}${tail}`,
     );
-    // W1-T14913: found by its parsed value, so a quoted proof line (escaped by renderAcceptanceBlock) is found too.
-    const next = bareProof === proof ? undefined : rewriteBodyProof(repaired, proof, bareProof, acceptanceProofLines);
+    // W1-T14913: found by its parsed value on the line the parser read THIS criterion from, so a quoted proof line is
+    // found too, and two criteria sharing one wrapped grep are each unwrapped in turn.
+    const next = bareProof === proof ? undefined
+      : rewriteCriterionProofs(repaired, [{ index, oldProof: proof, newProof: bareProof }], acceptanceProofLineAt);
     if (next === undefined) return undefined;
     repaired = next;
     unwrapped += 1;
@@ -6525,7 +6528,10 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
     for (const defect of defects) {
       if (defect.kind !== "wrapped-proof" || !defect.repair || !defect.criterion) continue;
       const proof = parseAcceptanceBlock(repairedBody)[defect.criterion - 1]?.proof;
-      if (proof) repairedBody = rewriteBodyProof(repairedBody, proof, defect.repair, acceptanceProofLines) ?? repairedBody;
+      // W1-T14913: the diagnosed criterion's own parser-reported line, never a text match, so a proof two criteria share
+      // is repaired on each.
+      if (proof) repairedBody = rewriteCriterionProofs(repairedBody, [{ index: defect.criterion - 1, oldProof: proof,
+        newProof: defect.repair }], acceptanceProofLineAt) ?? repairedBody;
     }
     if (repairedBody !== metadata.body) {
       const candidate = { ...metadata, body: repairedBody };
