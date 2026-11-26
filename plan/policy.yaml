@@ -1716,6 +1716,17 @@ githubEventWake:
     origin: "net-new"
     min: 60000
     max: 3600000
+  # W1-T14810 — the fold-debt and mutation-verdict artifact lists run when a workflow_run.completed
+  # delivery arrived since the last listing (an artifact only appears when a run completes), and
+  # otherwise once the last listing is older than this. A freshness floor for a missed delivery,
+  # never a cap: a delivery always lists. 900000 (15 min) replaces a listing on every sweep, the
+  # ~8.5k GitHub reads a day the 2026-11-25 daemon.quota rows named. min=60000 keeps the floor
+  # from tuning back into per-sweep polling; max=3600000 bounds a missed delivery's delay to an hour.
+  artifactRecheckMs:
+    value: 900000
+    origin: "net-new"
+    min: 60000
+    max: 3600000
   # W1-T3089 — semantic check-run filtering ships observational first. In shadow mode every
   # signed, allowlisted delivery keeps the current marker/wake behavior while the route emits
   # bounded class counts on ordinary accepted rows. A later plan-only policy change may set this

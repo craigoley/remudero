@@ -240,6 +240,12 @@ this old; a dropped delivery is therefore corrected within one interval. It is a
 a moved sha or a delivery naming the head re-reads at once. OPTIONAL, absent-means-default
 (`DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS`).
 
+W1-T14810: `githubEventWake.artifactRecheckMs` is the fold-debt and mutation-verdict artifact
+listings' freshness floor. A sweep lists those artifacts when a verified
+`workflow_run:completed` delivery for the repository arrived since its last listing, and
+otherwise only once that listing is older than this row (default 900000). A delivery always
+lists; the floor only recovers a missed one, so it is never a cap.
+
 ## PolicyValues.armCalibrationBands
 
 ### Base lines 272-284

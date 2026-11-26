@@ -662,6 +662,8 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     "githubEventWake.dedupCapacity",
     "githubEventWake.checkSettleMs",
     "githubEventWake.headRecheckMs",
+    // W1-T14810: the artifact listings were made every sweep; no earlier interval bounded them.
+    "githubEventWake.artifactRecheckMs",
     "githubEventWake.semanticCheckMode",
     "githubEventWake.aggregateCheckNames",
     // R-3: the keychain provisioning lock's wait deadline joins them too. NET-NEW because the wait
