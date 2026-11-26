@@ -4,6 +4,7 @@ import { parse as parseYaml } from "yaml";
 import { resolveOwnerRepoAtAsync } from "./owner-repo.js";
 
 import { systemClock, type Clock } from "./clock.js";
+import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { buildDecisionSummarySpawnArgs, isOptionIntent, type OptionIntent, type SummarizeInput } from "./feedback.js";
 import { readClassificationSnapshot } from "./fleet-lane.js";
 import { readFileIfExists, writeAtomic } from "./fs-race-safe.js";
@@ -468,9 +469,9 @@ export function recommendationAnswerJson(text: string): unknown {
 }
 
 /** W1-T10229: a writer spawn that gave no model answer. `unattempted` when it never ran (admission abandoned). */
-export class RecommendationSpawnError extends Error {
+export class RecommendationSpawnError extends RmdError {
   constructor(readonly unattempted: boolean, detail: string) {
-    super(`the recommendation writer's spawn did not answer (${detail})`);
+    super("child_process", GENERIC_EXIT_CODE, `the recommendation writer's spawn did not answer (${detail})`);
     this.name = "RecommendationSpawnError";
   }
 }
