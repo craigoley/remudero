@@ -30,7 +30,7 @@ import { resolveRepoLayout } from "./repo-layout.js";
 import { RMD_TMP_PREFIX } from "./tmp.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 import { execWhitelistedProof, INSTRUMENT_SURFACE, matchedLinesAreAllComments, parseWhitelistedProof, type WhitelistedProof } from "./review.js";
-import type { ProofDiscriminationEvidence } from "./sweep.js";
+import { quotedProofValue, shardProofLineCarries, type ProofDiscriminationEvidence } from "./sweep.js";
 import { renderAcceptanceBlock } from "./plan-pr-emitter.js";
 import { loadPlanForLayout, parseTasksFromYaml, type MachineFilingAdmissionContext, type Task } from "./plan.js";
 import { machineFamily } from "./machine-filing-judge.js";
@@ -291,6 +291,15 @@ export function proofAmendmentBranchName(taskId: string, prNumber: number): stri
   return `proof-amendment/${taskId}-${prNumber}`;
 }
 
+/** W1-T14934 — rewrite `oldProof` on this line as `newProof`, escaped for the line's quoting style when its value is a
+ *  quoted scalar equal to `oldProof`, so the shard re-parses to `newProof`; otherwise the literal replace, as before. */
+export function rewriteShardProofLine(line: string, oldProof: string, newProof: string): string {
+  const quoted = quotedProofValue(line);
+  if (quoted === undefined || quoted.value !== oldProof) return line.replace(oldProof, newProof);
+  const scalar = quoted.quote === "'" ? `'${newProof.replace(/'/g, "''")}'` : JSON.stringify(newProof);
+  return `${quoted.head}${scalar}${quoted.tail}`;
+}
+
 /** Replace ONE criterion's `proof:` scalar in raw shard text, touching nothing else — the same
  *  line-scoped discipline as `insertPlanRepairFlag` (sweep.ts), so `criterionFieldTampered`'s
  *  ADD/DEL-of-a-field-line count sees exactly one field change per entry and nothing beside it.
@@ -299,7 +308,7 @@ export function proofAmendmentBranchName(taskId: string, prNumber: number): stri
  *  line would misattribute the repair. */
 export function replaceProofScalar(shardText: string, claim: string, oldProof: string, newProof: string): string | undefined {
   const lines = shardText.split("\n");
-  const proofIdx = lines.findIndex((line) => /proof\s*:/.test(line) && line.includes(oldProof));
+  const proofIdx = lines.findIndex((line) => /proof\s*:/.test(line) && shardProofLineCarries(line, oldProof));
   if (proofIdx < 0) return undefined;
   let claimMatches = false;
   for (let i = proofIdx - 1; i >= 0; i--) {
@@ -309,7 +318,7 @@ export function replaceProofScalar(shardText: string, claim: string, oldProof: s
     }
   }
   if (!claimMatches) return undefined;
-  const replacedLine = lines[proofIdx].replace(oldProof, newProof);
+  const replacedLine = rewriteShardProofLine(lines[proofIdx], oldProof, newProof);
   if (replacedLine === lines[proofIdx]) return undefined;
   lines[proofIdx] = replacedLine;
   return lines.join("\n");

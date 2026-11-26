@@ -9,6 +9,7 @@ export interface LedgerExactDedupeOptions {
   /** W1-T14801: no default. Unset, the index grows with the corpus; set, it binds (`ledger-dedupe-disk-bound`). */
   maxDiskBytes?: number;
   cacheBytes?: number;
+  /** W1-T14943: no default. Unset, a row of any size is indexed; set, a larger row binds (`ledger-row-byte-bound`). */
   maxRowBytes?: number;
   /** Test seam: opens the index database. */
   openDatabase?: (path: string) => DatabaseSync;
@@ -23,9 +24,9 @@ export class LedgerExactDedupeLimitError extends RmdError {
 }
 
 export function createLedgerExactDedupe(options: LedgerExactDedupeOptions = {}) {
-  const { maxDiskBytes, cacheBytes = 2 * 1024 * 1024, maxRowBytes = 1024 * 1024,
+  const { maxDiskBytes, cacheBytes = 2 * 1024 * 1024, maxRowBytes,
     openDatabase = (path: string) => new DatabaseSync(path) } = options;
-  for (const [name, value, minimum] of [["disk", maxDiskBytes ?? 12288, 12288], ["cache", cacheBytes, 1024], ["row", maxRowBytes, 1]] as const) {
+  for (const [name, value, minimum] of [["disk", maxDiskBytes ?? 12288, 12288], ["cache", cacheBytes, 1024], ["row", maxRowBytes ?? 1, 1]] as const) {
     if (!Number.isSafeInteger(value) || value < minimum) throw new TypeError(`invalid ledger ${name} byte bound`);
   }
   let dir: string | undefined;
@@ -47,7 +48,7 @@ export function createLedgerExactDedupe(options: LedgerExactDedupeOptions = {}) 
       rowLimitError: () => new LedgerExactDedupeLimitError("ledger-row-byte-bound"),
       add(raw: string): boolean {
         if (failure) throw failure;
-        if (raw.length * 2 > maxRowBytes) throw new LedgerExactDedupeLimitError("ledger-row-byte-bound");
+        if (maxRowBytes !== undefined && raw.length * 2 > maxRowBytes) throw new LedgerExactDedupeLimitError("ledger-row-byte-bound");
         // A failed write can roll the file back, so the bound is judged from the page count before the write.
         const pagesBefore = maxPages === undefined ? 0 : (pageCount.get() as { page_count: number }).page_count;
         try {
@@ -67,7 +68,7 @@ export function createLedgerExactDedupe(options: LedgerExactDedupeOptions = {}) 
       stats() {
         const pages = pageCount.get() as { page_count: number };
         return { rows, diskBytes: statSync(join(dir!, "seen.sqlite")).size, allocatedBytes: pages.page_count * 4096,
-          maxDiskBytes: maxDiskBytes ?? null, cacheTargetBytes: Math.floor(cacheBytes / 1024) * 1024, maxRowBytes,
+          maxDiskBytes: maxDiskBytes ?? null, cacheTargetBytes: Math.floor(cacheBytes / 1024) * 1024, maxRowBytes: maxRowBytes ?? null,
           state: failure ? "partial" : "observed", reason: failure?.reason ?? null };
       },
       close() {
