@@ -790,7 +790,6 @@ function admitInstallationReadSync(args: readonly string[]): void {
   }
 }
 
-/** W1-T14892: a 304 costs GitHub no budget, so the read it claimed is taken back and the read gap falls. */
 function refundInstallationRead(args: readonly string[]): void {
   if (installationCoreRead(args)) githubInstallationBudget().refundRead?.();
 }
