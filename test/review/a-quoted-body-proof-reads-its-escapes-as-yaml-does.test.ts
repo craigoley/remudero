@@ -1,10 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parse } from "yaml";
-import { replaceBodyProofs } from "#src/lib/body-repair.js";
+import { replaceBodyProofs, rewriteBodyProof } from "#src/lib/body-repair.js";
 import { renderAcceptanceBlock } from "#src/lib/plan-pr-emitter.js";
 import { parseAcceptanceBlock } from "#src/lib/review.js";
-import { wrappedGrepBodyRepair } from "#src/run-task.js";
 
 // W1-T14913: a body proof in YAML double quotes must read as the record's YAML scalar does, or a body `kind: guard`
 // finds no record row and is refused (core #20913).
@@ -79,8 +78,12 @@ test("a hand-quoted body proof and a rendered wrapped grep are rewritten by the 
   assert.notEqual(fixed, undefined, "the hand-quoted line is found");
   assert.equal(parseAcceptanceBlock(fixed!)[0]!.proof, newHand, "and the replacement re-reads exactly");
 
-  const rendered = renderAcceptanceBlock([{ claim: "a | b", proof: `grep: "driftCeiling" in scripts/clock-sweep-baseline.json` }]);
-  const repair = wrappedGrepBodyRepair(rendered);
-  assert.notEqual(repair, undefined, "the wrapped grep is found in the rendered block");
-  assert.equal(parseAcceptanceBlock(repair!.repairedBody)[0]!.proof, "grep: driftCeiling in scripts/clock-sweep-baseline.json");
+  // wrappedGrepBodyRepair and the plan round rewrite through rewriteBodyProof: a wrapped grep in a rendered pipe-form
+  // block is written with escaped quotes, and is still found by the proof it parses to.
+  const wrapped = `grep: "driftCeiling" in scripts/clock-sweep-baseline.json`;
+  const rendered = renderAcceptanceBlock([{ claim: "a | b", proof: wrapped }]);
+  const repaired = rewriteBodyProof(rendered, parseAcceptanceBlock(rendered)[0]!.proof, "grep: driftCeiling in scripts/clock-sweep-baseline.json");
+  assert.notEqual(repaired, undefined, "the wrapped grep is found in the rendered block");
+  assert.equal(parseAcceptanceBlock(repaired!)[0]!.proof, "grep: driftCeiling in scripts/clock-sweep-baseline.json");
+  assert.equal(rewriteBodyProof(rendered, "grep: absent in f", "x"), undefined, "a proof the body does not carry is not guessed at");
 });
