@@ -15,6 +15,7 @@ import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { postReviewStatusGuarded, taskHoldReading, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
+import { readTaskDispatchHold, type TaskDispatchHoldSources } from "#src/lib/task-dispatch-hold.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { WorkerResult } from "#src/lib/worker.js";
@@ -128,28 +129,75 @@ test("W1-T14902 criterion 3: invariant:an-unread-hold-holds", async (t) => {
   assert.deepEqual(clear.writes, ["armAuto"]);
 });
 
-test("W1-T14902: the production reader follows the PR body's trailer to the task's catalog record", async (t) => {
+test("W1-T14902: the one reader reads main, then a fresh ops record; every other answer is unread", async () => {
+  const main = (byId: Record<string, { dispatch_hold?: boolean }>) => async () => ({ byId: new Map(Object.entries(byId)) });
+  const never = async (): Promise<never> => { throw new Error("the ops catalog is not consulted for a task main holds"); };
+  const ops = (answer: unknown) => async () => answer as Awaited<ReturnType<NonNullable<TaskDispatchHoldSources["lookup"]>>>;
+  const read = (sources: Omit<TaskDispatchHoldSources, "stateDir">, id: string | undefined = TASK) =>
+    readTaskDispatchHold(id, { stateDir: "/nonexistent/state", ...sources });
+  // A public task held on main is held (the merge path read no public plan before), and main answers before ops.
+  assert.deepEqual(await read({ readMainPlan: main({ [TASK]: { dispatch_hold: true } }), lookup: never }), { outcome: "held", taskId: TASK });
+  assert.deepEqual(await read({ readMainPlan: main({ [TASK]: {} }), lookup: never }), { outcome: "clear" });
+  // Absent from main: the ops catalog's fresh record decides.
+  const found = (task: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+    ops({ outcome: "found", catalog: "ops", task: { id: TASK, ...task }, ...extra });
+  assert.deepEqual(await read({ readMainPlan: main({}), lookup: found({ dispatch_hold: true }) }), { outcome: "held", taskId: TASK });
+  assert.deepEqual(await read({ readMainPlan: main({}), lookup: found({}) }), { outcome: "clear" });
+  assert.deepEqual(await read({ readMainPlan: main({}), lookup: ops({ outcome: "absent" }) }), { outcome: "clear" });
+  // THE INVARIANT: a last-good snapshot may predate the hold, so it is unread; so is every failed read.
+  assert.equal((await read({ readMainPlan: main({}), lookup: found({}, { lastGood: { refusal: "ops-stale", snapshotAgeMs: 1 } }) })).outcome, "unread");
+  assert.equal((await read({ readMainPlan: main({}), lookup: ops({ outcome: "unreadable", reason: "ops-malformed" }) })).outcome, "unread");
+  assert.equal((await read({ readMainPlan: main({}), lookup: async () => { throw new Error("HTTP 502"); } })).outcome, "unread");
+  assert.equal((await read({ readMainPlan: async () => { throw new Error("bad object origin/main"); }, lookup: never })).outcome, "unread");
+  // A synthetic review key or no trailer names no task.
+  assert.deepEqual(await read({ readMainPlan: never, lookup: never }, "PR-910"), { outcome: "clear" });
+  assert.deepEqual(await readTaskDispatchHold(undefined, { stateDir: "/nonexistent/state", readMainPlan: never, lookup: never }), { outcome: "clear" });
+});
+
+test("W1-T14902: the merge path's reader follows the PR body's trailer into the one reader", async (t) => {
   const root = tmp(t, "reader");
-  const config = (() => ({ root }) as unknown as Config) as unknown as Parameters<typeof readPullRequestTaskHold>[1];
+  const config = (() => ({ root })) as unknown as Parameters<typeof readPullRequestTaskHold>[1];
   const bodyOf = (body: string | undefined) => async (path: string) => {
     assert.equal(path, "repos/acme/remudero-ops/pulls/910");
     return body === undefined ? {} : { body };
   };
-  const found = (dispatch_hold?: boolean) => async (taskId: string, sources: { stateDir?: string }) => {
-    assert.equal(taskId, TASK);
-    assert.equal(sources.stateDir, join(root, "state"));
-    return { outcome: "found" as const, catalog: "ops" as const,
-      task: { id: taskId, ...(dispatch_hold === undefined ? {} : { dispatch_hold }) } as never };
-  };
-  const trailer = `Task: ${TASK}\n\nRemudero-Task: ${TASK}\n`;
-  assert.deepEqual(await readPullRequestTaskHold(PR_URL, config, bodyOf(trailer), found(true)), { outcome: "held", taskId: TASK });
-  assert.deepEqual(await readPullRequestTaskHold(PR_URL, config, bodyOf(trailer), found()), { outcome: "clear" });
-  assert.deepEqual(await readPullRequestTaskHold(PR_URL, config, bodyOf(trailer),
-    async () => ({ outcome: "unreadable" as const, reason: "ops-malformed" })), { outcome: "unread", taskId: TASK, reason: "ops-malformed" });
-  assert.deepEqual(await readPullRequestTaskHold(PR_URL, config, bodyOf("no trailer"), found(true)), { outcome: "clear" },
+  const held = { readMainPlan: async () => ({ byId: new Map([[TASK, { dispatch_hold: true }]]) }) };
+  assert.deepEqual(await readPullRequestTaskHold(PR_URL, config, bodyOf(`Remudero-Task: ${TASK}\n`), held), { outcome: "held", taskId: TASK });
+  assert.deepEqual(await readPullRequestTaskHold(PR_URL, config, bodyOf("no trailer"), held), { outcome: "clear" },
     "a PR naming no task reviews as today");
-  assert.deepEqual(await readPullRequestTaskHold(PR_URL, config, bodyOf(undefined), found(true)), { outcome: "clear" });
+  assert.deepEqual(await readPullRequestTaskHold(PR_URL, config, bodyOf(undefined), held), { outcome: "clear" });
   assert.equal((await readPullRequestTaskHold("not a pull request url", config)).outcome, "unread");
+});
+
+test("W1-T14902: the one reader's defaults read this checkout's plan at origin/main, never a PR head", async (t) => {
+  // W1-T8397 is a public record carrying dispatch_hold: true on main; W1-T10732 carries dispatch_hold: false.
+  const stateDir = tmp(t, "default-state");
+  assert.deepEqual(await readTaskDispatchHold("W1-T8397", { stateDir }), { outcome: "held", taskId: "W1-T8397" });
+  assert.deepEqual(await readTaskDispatchHold("W1-T10732", { stateDir }), { outcome: "clear" });
+  // Absent from main, the default lookup finds no plan destination under this state dir: no ops catalog, clear.
+  assert.deepEqual(await readTaskDispatchHold("W1-T99999998", { stateDir }), { outcome: "clear" });
+});
+
+test("W1-T14902: every guarded post reads the hold itself when its caller supplied none", async (t) => {
+  const previous = process.env.NODE_TEST_CONTEXT;
+  t.after(() => { if (previous === undefined) delete process.env.NODE_TEST_CONTEXT; else process.env.NODE_TEST_CONTEXT = previous; });
+  const ledgerPath = join(tmp(t, "guarded-default"), "ledger.ndjson");
+  const posts: string[] = [];
+  const post = (taskId: string) => postReviewStatusGuarded({
+    owner: "acme", repo: "remudero", sha: SHA, state: "success", verdict: PASS, description: PASS.summary,
+    taskId, evidence: "executed", ledgerPath, runId: "t14902-default", prUrl: PR_URL, reviewInputDigest: `v2:${taskId}`,
+    fetchLifecycle: () => ({ merged: false, closed: false }),
+    readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
+    fetchCurrentStatusEntry: () => undefined,
+    post: (status) => { posts.push(`${taskId}:${status.state}`); },
+    semanticJudgement: { planOnly: false, reviewerOutcome: "success" },
+  });
+  delete process.env.NODE_TEST_CONTEXT;
+  const held = await post("W1-T8397");
+  assert.equal(held.taskHold, "held: W1-T8397 carries dispatch_hold", "THE WIRING: a caller that passes no reading is still held");
+  process.env.NODE_TEST_CONTEXT = previous ?? "child-v8";
+  await post("W1-T10732");
+  assert.deepEqual(posts, ["W1-T8397:pending", "W1-T10732:success"]);
 });
 
 test("W1-T14902: the production reader's defaults read the body through gh and the real catalog lookup", async (t) => {

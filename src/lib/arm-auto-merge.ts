@@ -55,7 +55,7 @@ import {
   type PlanMergeSafetyReadings,
 } from "./plan-pr-merge-safety.js";
 import { readLedgerLines } from "./status.js";
-import { findTaskInCatalogs } from "./task-lookup.js";
+import { readTaskDispatchHold, type TaskDispatchHoldSources } from "./task-dispatch-hold.js";
 import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetUpdateRefusal, ratchetVerdictHolds, mainChangedPathsSteps, readMergedRatchetInputsSteps, type MergedRatchetInputs, type MergedRatchetJudgement, type RatchetUpdateWithheldEvidence } from "./merged-ratchet-verdict.js";
 import { judgeMergedRatchetsInWorker } from "./merged-ratchet-worker.js";
 import {
@@ -90,7 +90,6 @@ import {
 import {
   automergeHoldFromLedger,
   extractTaskTrailerId,
-  taskHoldReading,
   taskHoldRefusal,
   type TaskHoldReading,
   cappedOverrideFromLedger,
@@ -1692,23 +1691,18 @@ function* taskHoldRefusalSteps(
   return { outcome: "hold-refused", error: refusal };
 }
 
-/** W1-T14902: the production reading — the PR body's trailer, then that task in the ops catalog. */
+/** W1-T14902: the production reading — the PR body's trailer, then that task through the one hold reader. */
 export async function readPullRequestTaskHold(
   prUrl: string,
   loadConfigImpl: typeof loadConfig = loadConfig,
   readBody: (path: string) => Promise<unknown> = (path) => ghJsonAsync(["api", path]),
-  lookup: typeof findTaskInCatalogs = findTaskInCatalogs,
+  sources: Omit<TaskDispatchHoldSources, "stateDir"> = {},
 ): Promise<TaskHoldReading> {
   const target = mergeTargetFromPrUrl(prUrl);
   if (!target) return { outcome: "unread", taskId: "the named task", reason: `no pull request in ${prUrl}` };
   const pull = await readBody(`repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`) as { body?: unknown };
   const taskId = extractTaskTrailerId(typeof pull?.body === "string" ? pull.body : "");
-  if (taskId === undefined) return { outcome: "clear" };
-  // The ops catalog only, as `rmd review` reads a task the public plan lacks: core files no new task record
-  // (catalog.newTasks closed), and a held public task's review already posts pending at its plan's main.
-  const found = await lookup(taskId, { byId: new Map(), stateDir: join(loadConfigImpl().root, "state") });
-  if (found.outcome === "unreadable") return { outcome: "unread", taskId, reason: found.reason };
-  return taskHoldReading(taskId, found.task);
+  return readTaskDispatchHold(taskId, { ...sources, stateDir: join(loadConfigImpl().root, "state") });
 }
 
 export function attemptArm(

@@ -8,7 +8,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
-import { MOVER_BRANCH_PREFIX, movedFromCommit, parseMoverReceipts, verifyMoverRemoval, type MoverOpsRead, verifyMoverRemovalPublic, type MoverRemovalVerdict, parseReviewerHistoryEvidence, parseWhitelistedProof, reviewRowNamesPr, resolveProofTestPath, resolveNameFilteredCandidatesAsync, taskHoldReading, type TaskHoldReading } from "../../lib/review.js";
+import { MOVER_BRANCH_PREFIX, movedFromCommit, parseMoverReceipts, verifyMoverRemoval, type MoverOpsRead, verifyMoverRemovalPublic, type MoverRemovalVerdict, parseReviewerHistoryEvidence, parseWhitelistedProof, reviewRowNamesPr, resolveProofTestPath, resolveNameFilteredCandidatesAsync, type TaskHoldReading } from "../../lib/review.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -1077,7 +1077,7 @@ export async function runReview(host: ReviewCommandHost, args: {
   /** `files` (W1-T322): the task's declared scope — see {@link "../../lib/review.js".ReviewEvidence.taskDeclaredFiles}'s
    *  doc. Every real caller already passes the full plan `Task`, so this widens for free. */
   task: { catalog?: "public" | "ops"; id: string; title?: string; acceptance?: AcceptanceCriterion[]; files?: string[]; risk?: TaskRisk; budget_usd?: number; sourcePath?: string } & ReviewTaskNarrativeInput;
-  /** W1-T14902: the named task's `dispatch_hold` as read for this review; held or unread posts pending, never success. */
+  /** W1-T14902 test seam: the named task's `dispatch_hold` reading. Omitted, the guarded poster reads it at main. */
   taskHold?: TaskHoldReading;
   /** W1-T3704 (completed here) — injectable producer for the review-reuse pair recorded on this verdict's
    *  `review.posted` line (`own_diff_digest`/`merge_base_sha`). Production omits it and gets one
@@ -3108,8 +3108,6 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   let resolverDivergence: PlanCriteriaAtHeadDivergence | undefined;
   let ownTaskRecordMissing = false, headTaskResolved = false;
   let publicTaskAbsent = false;
-  // W1-T14902: true when any read of the named task's record (its head, main, or the ops catalog) carries dispatch_hold.
-  let taskDispatchHold = false;
   // W1-T2846: a fleet PR can lose its trailer while retaining the task-bearing run branch.
   // Give the existing exact-trailer criteria resolver only the recovered identity it needs;
   // `reportBody` still carries the real PR body unchanged to the fallback and reviewer below.
@@ -3133,7 +3131,6 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     taskBudgetUsd = resolved.taskBudgetUsd;
     taskNarrative = resolved.taskNarrative ?? {};
     resolverDivergence = resolved.divergence;
-    if (resolved.taskDispatchHold === true) taskDispatchHold = true;
     headTaskResolved = resolved.divergence === undefined && resolved.criteria.length > 0;
     // W1-T9232: a head cut before its own shard merged is pending a refresh from main, not a plan fault. Only a task
     // origin/main HAS qualifies; one absent from both, or a TRIAGE-/main-repair/unfiled identity, keeps today's path.
@@ -3147,7 +3144,6 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
         keepsUnseenDependency)
         .then(recordMainSuccess, recordMainFailure);
       ownTaskRecordMissing = headLacksOwnTaskRecord(resolved, atMain);
-      if (atMain.taskDispatchHold === true) taskDispatchHold = true;
       publicTaskAbsent = atMain.divergence === undefined && atMain.criteria.length === 0 &&
         atMain.taskDeclaredFiles === undefined && atMain.taskRisk === undefined && atMain.taskBudgetUsd === undefined;
     }
@@ -3171,7 +3167,6 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
         exit.as("task-metadata-unavailable");
         return 2;
       }
-      if (found.task.dispatch_hold === true) taskDispatchHold = true;
       criteria = contract.criteria;
       taskDeclaredFiles = contract.taskDeclaredFiles;
       taskRisk = contract.taskRisk;
@@ -3476,8 +3471,6 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
           // impl-BG: excludes dependabot heads from the post-verdict arm (the dep-review lane owns those).
           headRefName: view.headRefName,
           ...(keepsUnseenDependency ? { reservationHomeDir: repoRoot } : {}),
-          ...(taskId && taskId !== UNFILED_RUN_SENTINEL
-            ? { taskHold: taskHoldReading(taskId, { dispatch_hold: taskDispatchHold }) } : {}),
           task: {
             id: reviewKey,
             catalog: taskCatalog,

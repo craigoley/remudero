@@ -18,6 +18,8 @@ import { closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync, m
 import { homedir, hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
+import { isTestRunner } from "./live-write-guard.js";
+import { readTaskDispatchHold } from "./task-dispatch-hold.js";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic, type IsHolderStaleOpts } from "./fs-race-safe.js";
@@ -9612,8 +9614,6 @@ export interface PlanCriteriaAtHeadResult {
   taskDeclaredFiles?: string[];
   /** Routing/spend metadata from the same task record at the same head as {@link criteria}. */
   taskRisk?: TaskRisk;
-  /** W1-T14902: the same record's `dispatch_hold`, so a held task's pull request is never posted success. */
-  taskDispatchHold?: boolean;
   taskBudgetUsd?: number;
   taskNarrative?: ReviewTaskNarrativeInput;
   source?: string;
@@ -9708,7 +9708,6 @@ function planCriteriaAtHeadResult(
     taskId,
     taskDeclaredFiles: t?.files,
     taskRisk: t?.risk,
-    ...(t?.dispatch_hold === true ? { taskDispatchHold: true } : {}),
     taskBudgetUsd: t?.budget_usd,
     ...(t && (t.design !== undefined || t.amendment !== undefined || t.narrativeUnavailable) ? {
       taskNarrative: {
@@ -13259,8 +13258,8 @@ export interface PostReviewStatusGuardedOpts {
   /** The PR the lock/ledger key off — every real caller already keys its `review.posted` ledger lines by this same id
    * (the task id, or the `dep-review-PR<n>`/`PR-<n>` synthetic ids `run-task.ts` falls back to). */
   taskId: string;
-  /** W1-T14902: the named task's `dispatch_hold` as the caller read it at the plan's main. `held` or `unread` turns a
-   *  success into pending; absent (no task named, or a caller that reads none) posts as before. */
+  /** W1-T14902: the named task's `dispatch_hold`, read at the plan's main. `held` or `unread` turns a success into
+   *  pending. Omitted, {@link readTaskDispatchHold} reads it for every caller, left out only under the test runner. */
   taskHold?: TaskHoldReading;
   evidence: ReviewEvidenceStrength;
   ledgerPath: string;
@@ -13510,7 +13509,7 @@ export async function postReviewStatusGuarded(
       if (cappedHold !== undefined) return await publishCappedHold(opts, effectiveVerdict, cappedHold);
       // W1-T14902 (invariant an-unread-hold-holds): a task that awaits the operator is never posted success, and a hold
       // the caller could not read holds too. A required pending status blocks GitHub auto-merge and wakes no fix lane.
-      const taskHold = effectiveVerdict.state === "success" ? taskHoldRefusal(opts.taskHold) : undefined;
+      const taskHold = effectiveVerdict.state === "success" ? taskHoldRefusal(await guardedTaskHold(opts)) : undefined;
       if (taskHold !== undefined) return await publishTaskHold(opts, effectiveVerdict, taskHold);
     }
     const result = await publishReviewStatusLocked(opts);
@@ -13588,6 +13587,13 @@ export type TaskHoldReading =
   | { outcome: "held"; taskId: string }
   | { outcome: "clear" }
   | { outcome: "unread"; taskId: string; reason: string };
+
+/** W1-T14902: the hold a success is judged against: the caller's reading, else the one reader's (W1-T5939's
+ *  test-runner precedent keeps a suite of partial fakes off the live plan and ops catalog). */
+async function guardedTaskHold(opts: PostReviewStatusGuardedOpts): Promise<TaskHoldReading | undefined> {
+  if (opts.taskHold !== undefined) return opts.taskHold;
+  return isTestRunner() ? undefined : readTaskDispatchHold(opts.taskId, { stateDir: dirname(opts.ledgerPath) });
+}
 
 /** W1-T14902: the reading of a looked-up record. `undefined` (no record) is clear: a PR naming no task reviews as today. */
 export function taskHoldReading(taskId: string, task: { dispatch_hold?: boolean } | undefined): TaskHoldReading {
