@@ -83,4 +83,23 @@ describe("test/deploy/the-watchdog-drain-read-parses-each-rotation-once.test.ts"
     const memo = JSON.parse(readFileSync(join(dir, DRAIN_MEMO_FILENAME), "utf8")) as { entries: Record<string, unknown> };
     assert.deepEqual(Object.keys(memo.entries).map((path) => path.split("/").pop()), [NEW], "a removed rotation's entry is dropped");
   });
+
+  test("W1-T14920 an unstattable rotation is read whole and not remembered", (t) => {
+    const dir = fixture(t);
+    const expected = wholeRead(dir);
+    const blind = (): { fs: LedgerGrepFsDeps; reads: string[] } => {
+      const inner = counting();
+      return { reads: inner.reads, fs: { ...inner.fs, statSync: (path) => {
+        if (path.endsWith(OLD)) throw Object.assign(new Error("stat refused"), { code: "EACCES" });
+        return realLedgerFs.statSync(path);
+      } } };
+    };
+    const first = blind();
+    assert.deepEqual(readProgressWatchdogDrainRows(dir, first.fs), expected, "an unstattable rotation still yields its rows");
+    const memo = JSON.parse(readFileSync(join(dir, DRAIN_MEMO_FILENAME), "utf8")) as { entries: Record<string, unknown> };
+    assert.deepEqual(Object.keys(memo.entries).map((path) => path.split("/").pop()), [NEW], "the unstattable rotation is not remembered");
+    const second = blind();
+    assert.deepEqual(readProgressWatchdogDrainRows(dir, second.fs), expected);
+    assert.deepEqual(second.reads, [OLD], "it is read whole again on the next read");
+  });
 });
