@@ -36,7 +36,7 @@ const prRaw = (number: number) => ({ number, url: `https://github.com/craigoley/
   statusCheckRollup: [] });
 
 /** The ledger the case files read: a linked build that opened a PR and an unlinked build that failed without one. */
-function ledgerRows(withUnlinked: boolean): Record<string, unknown>[] {
+function buildCallRows(withUnlinked: boolean): Record<string, unknown>[] {
   const build = (taskId: string, i: number) => [
     { ts: `2026-11-20T0${i}:00:00.000Z`, step: "run.start", task_id: taskId, run_id: `${taskId}-1795000000000` },
     { ts: `2026-11-20T0${i}:00:01.000Z`, step: "worker.assignment", lane: "run-task", task_id: taskId, run_id: `${taskId}-1795000000000`,
@@ -54,7 +54,7 @@ function ledgerRows(withUnlinked: boolean): Record<string, unknown>[] {
 
 /** The nightly script's build (scripts/private-field-trials-case-files.mjs) over fakes: one caseFileCommand batch. */
 async function nightly(t: TestContext, opts: { withUnlinked: boolean; listing?: ListPrsPage }) {
-  const ledger = writeLedger(ledgerRows(opts.withUnlinked), { scope: t });
+  const ledger = writeLedger(buildCallRows(opts.withUnlinked), { scope: t });
   const ids = opts.withUnlinked ? [LINKED, UNLINKED] : [LINKED];
   const rows = [
     ...ids.map((id) => flow({ step: "worker.assignment", taskId: id, runId: `${id}-1795000000000`, ts: "2026-11-20T00:00:00.000Z" })),
