@@ -47,6 +47,8 @@ export interface GithubHttpReadResponse {
   /** Lower-case names, as fetch gives them. */
   headers: Array<[string, string]>;
   body: string;
+  /** W1-T14892: true when GitHub answered 304 and this is the stored answer, so the read cost no budget. */
+  notModified?: true;
 }
 
 /**
@@ -132,6 +134,7 @@ function revalidated(entry: StoredRead, notModified: Array<[string, string]>): G
   return {
     ...entry.response,
     headers: [...entry.response.headers.filter(([name]) => !isRate(name)), ...notModified.filter(([name]) => isRate(name))],
+    notModified: true,
   };
 }
 

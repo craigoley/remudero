@@ -575,9 +575,16 @@ function ghHttpReadFor(args: readonly string[], timeoutMs?: number): { paged: bo
   // W1-T12892: each page after the first claims its own read; every page records its own reading.
   if (read.paginate) {
     return { paged: true, send: () => githubHttpPagedRead(read, token, { ...opts, beforePage: () => admitInstallationReadAsync(args),
-      afterPage: (page) => githubInstallationBudget().record(parseGhRateLimitHeaders(ghIncludeHeaderBlock(page))) }) };
+      afterPage: (page) => {
+        githubInstallationBudget().record(parseGhRateLimitHeaders(ghIncludeHeaderBlock(page)));
+        if (page.notModified) refundInstallationRead(args);
+      } }) };
   }
-  return { paged: false, send: async () => ghStdoutOfHttpRead(read, await githubHttpRead(read, token, opts)) };
+  return { paged: false, send: async () => {
+    const response = await githubHttpRead(read, token, opts);
+    if (response.notModified) refundInstallationRead(args);
+    return ghStdoutOfHttpRead(read, response);
+  } };
 }
 
 /** Bounded, paced async `gh` transport for endpoints whose response is plain text (for example
@@ -781,6 +788,10 @@ function admitInstallationReadSync(args: readonly string[]): void {
     budget.noteThrottle(admitted.reason);
     throw new GhPaceFloorStandDownError(admitted.reading);
   }
+}
+
+function refundInstallationRead(args: readonly string[]): void {
+  if (installationCoreRead(args)) githubInstallationBudget().refundRead?.();
 }
 
 const standDownFor = (reading: GhBudgetReading): never => { throw new GhPaceFloorStandDownError(reading); };
