@@ -19202,19 +19202,6 @@ export function readInlinePlanRecords(planPath: string): Array<{ taskId: string;
   return out;
 }
 
-/** Read `plan/tasks.d/*.yaml` as `{ taskId, path, text }`, skipping anything without an `- id:`. */
-function readPlanShards(dir: string): Array<{ taskId: string; path: string; text: string }> {
-  const out: Array<{ taskId: string; path: string; text: string }> = [];
-  for (const name of readdirSync(dir)) {
-    if (!name.endsWith(".yaml")) continue;
-    const path = join(dir, name);
-    const text = readFileSync(path, "utf8");
-    const id = text.match(/^- id: (\S+)/m)?.[1];
-    if (id) out.push({ taskId: id, path, text });
-  }
-  return out;
-}
-
 export function windowShortShards(
   shards: ReadonlyArray<{ taskId: string; text: string }>,
   credited: ReadonlySet<string>,
@@ -45303,7 +45290,7 @@ function commandSyntax(name: string): string {
 // (test/run-task.test.ts, test/install-symlink-refusal.test.ts, plus this file's own
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
-import { reconcilePlan, reconcileShardStatus, revertedRequeues, type RevertedRequeue, type ReconcileSummary } from "./lib/plan-reconcile.js";
+import { readPlanShards, reconcilePlan, reconcileShardStatus, revertedRequeues, type RevertedRequeue, type ReconcileSummary } from "./lib/plan-reconcile.js";
 import { PLAN_RECONCILE_LANDING_BODY_BUDGET, PLAN_RECONCILE_LANDING_RECORD_LIMIT, takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
