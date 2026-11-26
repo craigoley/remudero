@@ -1311,7 +1311,8 @@ export interface SpawnWorkerArgs {
       // The Codex spawn REQUIRES the redirected per-spawn worker home, threaded explicitly rather than inferred from
       // `process.env.HOME` or `args.env` ordering, so a test double is held to the contract the real `spawnCodexWorker` is
       // (W1-T2800).
-      args: SpawnWorkerArgs & { workerHome: string; zdotdir?: string; fixtureSpawn?: boolean },
+      args: SpawnWorkerArgs & { workerHome: string; zdotdir?: string; fixtureSpawn?: boolean;
+        retiredByBeforeSpawn?: () => string | undefined },
       config: Config,
       selection?: Pick<ProviderCapacity, "model" | "effort">,
     ) => Promise<WorkerResult>;
@@ -3273,9 +3274,16 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
         args.providerRouting?.spawnCodex ?? spawnCodexWorker;
       const execution = executionFor("codex");
-      const runCodex: typeof spawnCodex = async (codexArgs, workerConfig, capacity) => retiredAtLaunch() ??
-        spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
-          containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
+      const runCodex: typeof spawnCodex = async (codexArgs, workerConfig, capacity) => {
+        const refused = retiredAtLaunch();
+        if (refused) return refused;
+        const result = await spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
+          containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined,
+          retiredByBeforeSpawn: workerSpawnRetiredBy }, workerConfig, capacity);
+        return result.notStarted === "admission-abandoned"
+          ? spawnWithheld(`retired: ${workerSpawnRetiredBy() ?? "drain lock released; the successor owns this work"}`)
+          : result;
+      };
       if (args.providerRouting?.spawnCodex === undefined) {
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
@@ -3368,9 +3376,16 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
       args.providerRouting?.spawnCodex ?? spawnCodexWorker;
     const execution = executionFor("codex");
-    const runCodex: typeof spawnCodex = async (codexArgs, workerConfig, capacity) => retiredAtLaunch() ??
-      spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
-        containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
+    const runCodex: typeof spawnCodex = async (codexArgs, workerConfig, capacity) => {
+      const refused = retiredAtLaunch();
+      if (refused) return refused;
+      const result = await spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
+        containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined,
+        retiredByBeforeSpawn: workerSpawnRetiredBy }, workerConfig, capacity);
+      return result.notStarted === "admission-abandoned"
+        ? spawnWithheld(`retired: ${workerSpawnRetiredBy() ?? "drain lock released; the successor owns this work"}`)
+        : result;
+    };
     if (args.providerRouting?.spawnCodex === undefined) {
       assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
     }

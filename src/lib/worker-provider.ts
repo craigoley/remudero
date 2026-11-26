@@ -134,6 +134,8 @@ interface CodexSpawnArgs {
   /** W1-T9245 — the caller's cancel, as `SpawnWorkerArgs.signal` is for Claude: aborting it (or passing it aborted) tears the
    * process group down through `teardownOnce`, so an `end_round` abort stops the worker instead of letting it run on. */
   signal?: AbortSignal;
+  /** W1-T14916: final admission check after async provider preparation and immediately before process creation. */
+  retiredByBeforeSpawn?: () => string | undefined;
 }
 
 /** W1-T6027: how a worker's process ended. `exit` carries a code (0 included) and `signal` the signal's name, each as the
@@ -241,6 +243,8 @@ export function buildWorkerCapabilityContract(provider: string, facts: {
 
 interface CodexWorkerResult {
   provider: "codex";
+  /** The daemon retired during adapter preparation, so no Codex process was started. */
+  notStarted?: "admission-abandoned";
   capabilityContract?: WorkerCapabilityContract;
   /** W1-T14037: see `WorkerResult.reviewerCommandKinds`; absent unless the spawn carried `reviewer`. */
   reviewerCommandKinds?: ReviewerCommandKindCounts;
@@ -4232,12 +4236,25 @@ export async function spawnCodexWorker(
     const nativeCacheRoot = process.platform !== "win32" && !codexReadOnly(args) && args.sandboxIntent !== "disposable-review" &&
       await verifiedGitWorktree(args.cwd)
       ? prepareWorkerNativeCache() : undefined;
-    const spawn = (route: CodexSpawnSelection | undefined, profile?: PrivateRegistryCodexProfile) =>
-      spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, route, profile, nativeCacheRoot);
+    const spawn = (route: CodexSpawnSelection | undefined, profile?: PrivateRegistryCodexProfile) => {
+      // `verifiedGitWorktree` above is asynchronous. Retirement can happen while it is running, so the
+      // worker.ts check before entering this adapter is not the process boundary. Re-read at the last
+      // point before the adapter can create the Codex process.
+      if (args.retiredByBeforeSpawn?.() !== undefined) return Promise.resolve(withheldCodexResult());
+      return spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, route, profile, nativeCacheRoot);
+    };
     if (selected === undefined) return spawnCodexBalancedSelection(args, config, selection, route => spawn(route));
     return withPrivateRegistryCodexProfile(args, config, selected, profile =>
       spawnCodexBalancedSelection(args, config, selection, route => spawn(route, profile)), nativeCacheRoot);
   });
+}
+
+function withheldCodexResult(): CodexWorkerResult {
+  return { provider: "codex", notStarted: "admission-abandoned", sessionId: "", costUsd: 0, numTurns: 0,
+    text: "", blocks: [], stderr: "", subtype: "admission_abandoned", isError: false, exit: { kind: "unobserved" },
+    apiError: false, permissionDenials: [], childEnvKeys: [], model: "", effort: "", tokens: { input: 0, output: 0,
+      cacheRead: 0, cacheCreation: 0 }, tokenUsageState: "unavailable", modelUsage: {}, compactionEvents: [],
+    compactionFailures: [], compactionConfigured: false, qualitySuspect: false, workerDurationMs: 0 };
 }
 
 async function spawnCodexBalancedSelection(args: CodexSpawnArgs, config: Config, selection: CodexSpawnSelection | undefined,

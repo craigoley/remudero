@@ -12,6 +12,7 @@ import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import { spawnRunChild } from "#src/lib/run-child.js";
 import { resolveFleetControlHold, type LightPassScope, type RestartAdmission } from "#src/lib/daemon.js";
 import { createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import { spawnCodexWorker } from "#src/lib/worker-provider.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -234,6 +235,30 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   assert.deepEqual(outside, ["memory_admission"], "a spawn outside the retired scope is not withheld");
   assert.deepEqual(outsideWithheld, []);
   assert.equal(elsewhere.notStarted, "admission-abandoned");
+});
+
+test("W1-T14916 criterion 1: the real Codex adapter rechecks retirement after its worktree probe", async (t) => {
+  const root = ownedFixtureDir(t, "retired-codex-adapter").dir;
+  const started: string[] = [];
+  let retired = false;
+  const result = await spawnCodexWorker({
+    cwd: root,
+    workerHome: join(root, "worker-home"),
+    settingsFile: join(REPO_ROOT, "settings/worker.json"),
+    prompt: "must not reach a process",
+    retiredByBeforeSpawn: () => {
+      // This callback is evaluated by the production adapter after its awaited Git worktree check.
+      retired = true;
+      return "drain lock released; the successor owns this work";
+    },
+    containment: { spawn: () => {
+      started.push("codex_process");
+      throw new Error("retired Codex adapter started a process");
+    } },
+  }, { root, claudeBin: "/unused", dailyCapUsd: 25 });
+  assert.equal(retired, true, "the async adapter preparation reached the final retirement check");
+  assert.equal(result.notStarted, "admission-abandoned", "the adapter reports a refused start to spawnWorker");
+  assert.deepEqual(started, [], "the real adapter never invokes its process launcher after retirement");
 });
 
 test("W1-T14916 criterion 2: in-flight SRE lane page work still completes", async () => {
