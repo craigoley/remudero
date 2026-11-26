@@ -53,6 +53,7 @@ import { fixArmEvidence, fixRoutingWeights, readFixRoutingRows, type FixLearnedA
 import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, SKILL_WITHHOLDING_SHARE, skillWithheldUnderRetirement, stagedSkillRetirements } from "../../lib/skill-workshop.js";
 import { SKILL_ARM_EPOCH, TASK_ARM_UNIT, taskArmWithheld } from "../../lib/task-arm.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../../lib/learnings.js";
+import { fixLearningsRoundsToGreen, fixLearningsShadowFields, type FixLearningsRound } from "../../lib/fix-learnings-shadow.js";
 import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockRegion, extractTaskTrailerId, parseAcceptanceBlock, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
@@ -4667,6 +4668,17 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // An empty filed scope can still admit a new test or a registered regenerable artifact.
     // Let the worker try; the harness commit stages only those admitted paths and reports
     // unrelated edits as undeclared. A proof-repair round can also end in a PROOF_AMENDMENT.
+    const roundId = `${opts.runId}:${attempt + retriggers}:${systemClock.now()}`;
+    const shadowRound: FixLearningsRound = { run_id: opts.runId, task_id: opts.taskId, pr_number: prNumber,
+      pr_url: opts.prUrl, round_id: roundId, attempt, round };
+    const recordFixLearningsShadow = () => deps.log("fix.learnings_shadow", fixLearningsShadowFields(shadowRound, {
+      config: opts.config, repo: opts.reviewBase.repo, failures: currentCiFailures ?? [], review: evidence.review,
+    }));
+    const recordFixLearningsOutcome = (outcome: "green" | "red" | "no_push", pushedHeadSha?: string) =>
+      deps.log("fix.learnings_outcome", { ...shadowRound, outcome, pushed_head_sha: pushedHeadSha,
+        ...(outcome === "green" ? { rounds_to_green: fixLearningsRoundsToGreen(
+          [...(repairHistory?.ok ? repairHistory.rows : []), ...roundLedger, ...roundRows], opts.taskId) } : {}) });
+    recordFixLearningsShadow();
     // At the first prompt assembly, as the implement lane does — emitted even at zero selection.
     if (!fixSkillSelectionLogged) deps.log("skills.selection", fixSkillSelection.observation);
     fixSkillSelectionLogged = true;
@@ -4801,24 +4813,25 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       });
       // #10787: main is already in the branch and a red is known — route to it: no strike, no refused round.
       if (merged.reason === host.MERGE_UP_TO_DATE_REASON && noReviewYet && (currentCiFailures?.length ?? 0) > 0) {
+        recordFixLearningsOutcome("no_push");
         leaveMergeMode("rung.merge_up_to_date", priorHeadSha);
         continue;
       }
       if (!merged.started) {
         const refusal = merged.reason ?? "the merge of current main did not start (no reason reported)";
         consecutiveMergeRefusalReasons.push(refusal);
-        const refusedRoundId = `${opts.runId}:merge-refused:${attempt}:${systemClock.now()}`;
         strikes = attempt;
         deps.log("fix.dispatch", {
-          round_id: refusedRoundId,
+          round_id: roundId,
           strike: attempt, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: fixMode,
           verdict_regime: verdictRegime, head_sha: priorHeadSha, reason: refusal,
           conflicted_files: conflictedFilePaths(currentMergeConflict), ...conflictBaseField(),
         });
-        deps.log("fix.commit_refused", { round_id: refusedRoundId, head_sha: priorHeadSha,
+        deps.log("fix.commit_refused", { round_id: roundId, head_sha: priorHeadSha,
           strike: attempt, mode: fixMode, merge_start_failed: true, reason: refusal });
-        deps.log("fix.done", { round_id: refusedRoundId, head_sha: priorHeadSha,
+        deps.log("fix.done", { round_id: roundId, head_sha: priorHeadSha,
           strike: attempt, mode: fixMode, subtype: "commit_refused" });
+        recordFixLearningsOutcome("no_push");
         deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} FAILED, no worker spent — the merge of current main did not start: ${merged.reason}`);
         continue;
       }
@@ -4858,6 +4871,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         reason: "remote branch head read failed; no published advance was established" }); }
       // A retained unpublished commit is still this round's existing recovery input, not proof the PR moved.
       if (publishedHead !== undefined && publishedHead !== priorHeadSha) {
+        recordFixLearningsOutcome("no_push");
         const adopted = !evidenceHeadAdopted && priorCiFailures !== undefined && publishedHead === roundBase.baseSha
           ? await adoptableEvidenceHead(opts.prUrl, publishedHead,
             () => (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch),
@@ -4879,7 +4893,6 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       }
     }
     const fixRoundStartedAtMs = systemClock.now();
-    const roundId = `${opts.runId}:${attempt + retriggers}:${fixRoundStartedAtMs}`;
     const fixReceipt = host.fixWorkerReceipt(deps.spawn, deps.log, host.fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
       { prUrl: opts.prUrl, roundId }, { root: opts.config.root }, remedyExecution);
     let fixResult: WorkerResult;
@@ -4920,6 +4933,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           strike: attempt, round, subtype: "round_yielded", trigger: y.trigger, recovery_ref: y.recoveryRef ?? null,
           index_recovery_ref: y.indexRecoveryRef ?? null,
           cost_usd: y.costUsd, elapsed_ms: spawnOutcome.elapsedMs });
+        recordFixLearningsOutcome("no_push");
         deps.branchClaim?.release();
         const kept = [y.recoveryRef && `work kept at ${y.recoveryRef}`, y.indexRecoveryRef && `staged work kept at ${y.indexRecoveryRef}`]
           .filter(Boolean).join(", ");
@@ -4947,6 +4961,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
           strike: attempt, round, subtype: "admission_abandoned", worker_exit: "not_spawned",
           admission_since_ms: fixResult.admissionSinceMs, cost_usd: 0, num_turns: 0 });
+        recordFixLearningsOutcome("no_push");
         deps.branchClaim?.release();
         return finish({ outcome: "stood_down", review, strikes, retriggers, reason: "admission-abandoned",
           standDownReason: "fix admission abandoned before a worker started" });
@@ -4956,6 +4971,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           "the provider reported no served model for this call" } : {}) };
     } catch (e) {
       if (!isSpawnInfraBlockedError(e)) throw e;
+      recordFixLearningsOutcome("no_push");
       // No subprocess ever launched, nothing was billed: an INFRA-tagged $0 line, NEVER a
       // `fix.dispatch` line (the only step `priorStrikesFor` counts), so forensics can separate "the
       // task was expensive" from "the host was broken" (W1-T127 iii). The refusal propagates
@@ -4996,6 +5012,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         num_turns: fixResult.numTurns,
         elapsed_ms: spawnElapsedMs,
       });
+      recordFixLearningsOutcome("no_push");
       deps.branchClaim?.release();
       deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} worker TERMINATED BY SIGNAL (${fixResult.subtype}) — ` +
         `not a commit refusal, no strike spent: ${opts.prUrl}`);
@@ -5200,6 +5217,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     if (filingRefusal) {
       deps.log("fix.commit_refused", { round_id: roundId, head_sha: priorHeadSha, reason: filingRefusal });
       deps.log("fix.done", { round_id: roundId, head_sha: priorHeadSha, subtype: "commit_refused" });
+      recordFixLearningsOutcome("no_push");
       deps.branchClaim?.release();
       return finish({ outcome: "stood_down", review, strikes, retriggers, reason: filingRefusal, standDownReason: filingRefusal });
     }
@@ -5362,6 +5380,10 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // W1-T5955: the round ends here, so its branch claim does too; the CI wait holds none.
     const logFixDone = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding): void => {
       logFixDoneRow(pushedHeadSha, subtype, landing);
+      if (pushedHeadSha === priorHeadSha || (pushedHeadSha === undefined &&
+          (landing === undefined || (!landing.landed && (landing.outcome === "refused" || landing.outcome === "not_on_remote"))))) {
+        recordFixLearningsOutcome("no_push");
+      }
       releaseRoundClaim();
     };
     const logPushedRoundDone = (landing: FixRoundLanding, waitsNext: boolean): void => { // W1-T9618: only a landed round is FIXED; one that did not land spends no strike
@@ -5889,6 +5911,12 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // hand-off (a failing review on the same head) arrived during that same poll; a hand-off ends only a wait not yet red.
     const resumed = host.ciGateState(waited) === "red" ? undefined : handed;
     const ci = resumed?.failure === "check" ? { state: "red" as const, sha: resumed.headSha } : waited;
+    const pushedHeadSha = landing.remoteHead ?? expectedHeadShaForPush;
+    const shadowCi = host.ciGateState(ci);
+    if (pushedHeadSha !== undefined && pushedHeadSha !== priorHeadSha && ciGateSha(ci) === pushedHeadSha &&
+        (shadowCi === "green" || shadowCi === "red")) {
+      recordFixLearningsOutcome(shadowCi, pushedHeadSha);
+    }
     const handoff = ciHandoff(ci);
     if (handoff) return finish(handoff);
     const claimLostAfterCi = branchClaimLost();
