@@ -330,31 +330,92 @@ EOF_CYCLE_UPDATES
   fi
   if [ -z "$cycle_base" ]; then
     cycle_ratchet_skip "no remote tip or merge base with origin/main"
-  elif git diff --quiet "$cycle_base" "$cycle_head_sha" --; then
+  elif git --no-replace-objects diff --quiet --no-ext-diff "$cycle_base" "$cycle_head_sha" --; then
     cycle_ratchet_skip "this diff adds no parsed import edge under src/"
   elif ! cycle_tree="$(mktemp -d "${TMPDIR:-/tmp}/rmd-prepush-cycles-XXXXXX")"; then
     cycle_ratchet_skip "no temporary directory for the pushed tree"
   else
     cycle_base_tree="$cycle_tree/base"
     cycle_head_tree="$cycle_tree/head"
-    mkdir -p "$cycle_base_tree" "$cycle_head_tree"
-    if ! git archive "$cycle_base" 2>/dev/null | tar -x -C "$cycle_base_tree" 2>/dev/null \
-      || ! git archive "$cycle_head_sha" 2>/dev/null | tar -x -C "$cycle_head_tree" 2>/dev/null; then
-      cycle_ratchet_skip "the comparison or pushed tree could not be extracted"
+    if ! mkdir -p "$cycle_base_tree" "$cycle_head_tree"; then
+      cycle_ratchet_skip "no temporary directory for the comparison or pushed tree"
     else
       cycle_result="$(node --input-type=module -e '
         import * as fs from "node:fs";
-        import { spawnSync } from "node:child_process";
+        import { execFileSync, spawnSync } from "node:child_process";
         import { dirname, join, resolve, sep } from "node:path";
         import { pathToFileURL } from "node:url";
 
-        const [baseTree, headTree, gate] = process.argv.slice(1).map((path) => fs.realpathSync(path));
+        const [baseRevision, headRevision, basePath, headPath, gatePath] = process.argv.slice(1);
+        const [baseTree, headTree, gate] = [basePath, headPath, gatePath].map((path) => fs.realpathSync(path));
         const { canonicalRing, distinctCycles, CYCLE_RULE_NAME } = await import(
           pathToFileURL(join(gate, "scripts/cycle-ratchet.mjs"))
         );
         const installed = fs.realpathSync(join(gate, "node_modules"));
         const inside = (dir, path) => path.startsWith(dir + sep);
         const readJson = (path) => JSON.parse(fs.readFileSync(path, "utf8"));
+        const git = (args, options) => execFileSync("git", ["--no-replace-objects", ...args], {
+          maxBuffer: 64 * 1024 * 1024, ...options,
+        });
+
+        function writeBlobs(tree, entries, bytes) {
+          const output = git(["cat-file", "--batch=%(objectsize)"], {
+            input: entries.map(({ oid }) => oid + "\n").join(""),
+            maxBuffer: bytes + 1024,
+          });
+          let offset = 0;
+          for (const { mode, file, size } of entries) {
+            const end = output.indexOf(10, offset);
+            if (end < offset || output.toString("ascii", offset, end) !== String(size) || output[end + size + 1] !== 10) {
+              throw new Error("Incomplete Git blob batch");
+            }
+            const blob = output.subarray(end + 1, end + size + 1);
+            offset = end + size + 2;
+            const target = resolve(tree, file);
+            if (!inside(tree, target)) throw new Error("Git path leaves the commit snapshot");
+            fs.mkdirSync(dirname(target), { recursive: true });
+            if (mode === "120000") {
+              const link = blob.toString();
+              if (inside(tree, resolve(dirname(target), link))) fs.symlinkSync(link, target);
+            } else {
+              fs.writeFileSync(target, blob);
+            }
+          }
+        }
+
+        function snapshot(revision, tree) {
+          // Read raw blobs in bounded batches. Release attributes and checkout filters can alter the files.
+          const entries = git(["ls-tree", "-rlz", revision], { encoding: "utf8" }).split("\0").filter(Boolean);
+          let batch = [];
+          let bytes = 0;
+          for (const entry of entries) {
+            const tab = entry.indexOf("\t");
+            const [mode, type, oid, length] = entry.slice(0, tab).trim().split(/\s+/);
+            if (type !== "blob") continue;
+            const size = Number(length);
+            const recordBytes = size + length.length + 2;
+            if (batch.length && bytes + recordBytes > 16 * 1024 * 1024) {
+              writeBlobs(tree, batch, bytes);
+              batch = [];
+              bytes = 0;
+            }
+            batch.push({ mode, oid, file: entry.slice(tab + 1), size });
+            bytes += recordBytes;
+          }
+          if (batch.length) writeBlobs(tree, batch, bytes);
+        }
+
+        const changes = git(["diff", "--name-status", "-z", "--find-renames", "--no-ext-diff", "--no-textconv",
+          baseRevision, headRevision, "--"], { encoding: "utf8" }).split("\0");
+        const priorPaths = new Map();
+        for (let i = 0; i < changes.length - 1;) {
+          const status = changes[i++];
+          const path = changes[i++];
+          if (status.startsWith("R")) priorPaths.set(changes[i++], path);
+        }
+        const priorPath = (path) => priorPaths.get(path) ?? path;
+        snapshot(baseRevision, baseTree);
+        snapshot(headRevision, headTree);
 
         function linkPackages(tree) {
           const modules = join(tree, "node_modules");
@@ -406,8 +467,9 @@ EOF_CYCLE_UPDATES
 
         const head = cruise(headTree, ["src"]);
         // A resolution change can make an existing file reachable for the first time. Compare its old imports too.
-        const extraBaseRoots = head.modules.filter(({ source, dependencies }) => dependencies?.length &&
-          !source.startsWith("src/") && inside(baseTree, resolve(baseTree, source))).map(({ source }) => source);
+        const extraBaseRoots = head.modules.filter(({ dependencies }) => dependencies?.length)
+          .map(({ source }) => priorPath(source))
+          .filter((source) => !source.startsWith("src/") && inside(baseTree, resolve(baseTree, source)));
         const base = cruise(baseTree, ["src", ...extraBaseRoots]);
         const beforeModules = new Map(base.modules.map(({ source, dependencies }) => [source, dependencies ?? []]));
         const parsedKey = (dep) => JSON.stringify([dep.module, dep.moduleSystem, dep.dependencyTypes?.includes("type-only")]);
@@ -415,13 +477,15 @@ EOF_CYCLE_UPDATES
         const addedEdges = new Set();
         let addedImport = false;
         for (const { source, dependencies = [] } of head.modules) {
-          const before = beforeModules.get(source) ?? [];
+          const before = beforeModules.get(priorPath(source)) ?? [];
           const beforeImports = new Set(before.map(parsedKey));
           const beforeTargets = new Set(before.filter((dep) => !dep.couldNotResolve).map((dep) => dep.resolved));
           for (const dep of dependencies) {
             if (beforeImports.has(parsedKey(dep))) continue;
             addedImport = true;
-            if (!beforeTargets.has(dep.resolved)) addedEdges.add(edgeKey(source, dep.resolved));
+            if (!dep.couldNotResolve && !beforeTargets.has(priorPath(dep.resolved))) {
+              addedEdges.add(edgeKey(source, dep.resolved));
+            }
           }
         }
         if (!addedImport) { console.log("NO_ADDED_EDGE"); process.exit(0); }
@@ -431,15 +495,14 @@ EOF_CYCLE_UPDATES
         for (const { rule, from, cycle = [] } of head.summary.violations) {
           if (rule?.name !== CYCLE_RULE_NAME) continue;
           const nodes = [from, ...cycle.map((step) => typeof step === "string" ? step : step.name)];
-          const ring = canonicalRing(nodes);
           const usesAddedEdge = nodes.some((source, i) => addedEdges.has(edgeKey(source, nodes[(i + 1) % nodes.length])));
-          if (usesAddedEdge && !beforeCycles.has(ring)) newCycles.add(ring);
+          if (usesAddedEdge && !beforeCycles.has(canonicalRing(nodes.map(priorPath)))) newCycles.add(canonicalRing(nodes));
         }
         for (const ring of [...newCycles].sort()) console.log(`NEW_RING ${ring}`);
-      ' "$cycle_base_tree" "$cycle_head_tree" "$gate_root" 2>/dev/null)"
+      ' "$cycle_base" "$cycle_head_sha" "$cycle_base_tree" "$cycle_head_tree" "$gate_root" 2>/dev/null)"
       cycle_status=$?
       if [ "$cycle_status" -ne 0 ]; then
-        cycle_ratchet_skip "the comparison cruise produced no readable result"
+        cycle_ratchet_skip "the committed trees or comparison cruise produced no readable result"
       elif [ "$cycle_result" = "NO_ADDED_EDGE" ]; then
         cycle_ratchet_skip "this diff adds no parsed import edge under src/"
       elif printf '%s\n' "$cycle_result" | grep -q '^NEW_RING '; then

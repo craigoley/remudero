@@ -84,7 +84,8 @@ test("W1-T14945 criterion 1: a push whose diff closes an import ring is refused 
 });
 
 const WORKSPACE_CLIENT = "packages/client/src/client.ts";
-const WORKSPACE_RETURN = `import { c } from "../../../src/lib/c.js";\nexport const client = () => c;\n`;
+const WORKSPACE_RETURN_PATH = "../../../src/lib/c.js";
+const WORKSPACE_RETURN = `import { c } from "${WORKSPACE_RETURN_PATH}";\nexport const client = () => c;\n`;
 
 test("W1-T14945 criterion 1: a push whose diff closes an import ring is refused at pre-push naming the ring across workspace boundaries", () => {
   const gate = fixture();
@@ -132,6 +133,23 @@ test("W1-T14945 criterion 1: every branch ref in a multi-ref push is checked", (
   } finally { repo.cleanup(); }
 });
 
+test("W1-T14945 criterion 1: a push whose diff closes an import ring is refused at pre-push naming the ring despite release archive attributes", () => {
+  const repo = fixture();
+  try {
+    const trackedName = "$Format:%s$";
+    commit(repo, ".gitattributes", "src/lib/a.ts export-ignore\nsrc/lib/b.ts export-subst\n");
+    commit(repo, `src/lib/${trackedName}.ts`,
+      `import { a } from "${sibling("a")}";\nexport const viaA = () => a();\n`);
+    const remoteTip = repo.git("rev-parse", "HEAD");
+    commit(repo, "src/lib/b.ts",
+      `import { viaA } from "${sibling(trackedName)}";\nexport const b = () => viaA();\n`);
+
+    const { status, stderr } = push(repo, "HEAD", remoteTip);
+    assert.equal(status, 1, stderr);
+    assert.match(stderr, /^cycle-ratchet: src\/lib\/\$Format:%s\$\.ts -> src\/lib\/a\.ts -> src\/lib\/b\.ts$/m, stderr);
+  } finally { repo.cleanup(); }
+});
+
 test("W1-T14945 criterion 2: a cycle-free push passes the gate as before", () => {
   const repo = fixture();
   try {
@@ -146,6 +164,37 @@ test("W1-T14945 criterion 2: a cycle-free push passes the gate as before", () =>
     assert.doesNotMatch(noImport.stderr, /cycle-ratchet: BLOCKED/, noImport.stderr);
     assert.match(noImport.stderr, /cycle-ratchet — this diff adds no parsed import edge under src\/, skipped/);
     assert.equal(noImport.status, 0, `a push adding no import passes:\n${noImport.stderr}`);
+  } finally { repo.cleanup(); }
+});
+
+test("W1-T14945 criterion 2: a cycle-free push passes the gate as before when modules in a published ring move", () => {
+  const repo = fixture();
+  try {
+    const existing = `import { b } from "${sibling("b")}";\nexport const a = () => b;\n` +
+      "export const description = 'This module and its existing imports move together with their sibling modules.';\n";
+    commit(repo, "src/lib/a.ts", existing);
+    commit(repo, "src/lib/b.ts", RING_B);
+    const remoteTip = repo.git("rev-parse", "HEAD");
+    repo.git("mv", "src/lib", "src/relocated modules");
+    repo.git("commit", "-qm", "move the directory without changing its files");
+
+    const moved = push(repo, "HEAD", remoteTip);
+    assert.equal(moved.status, 0, moved.stderr);
+    assert.match(moved.stderr, /cycle-ratchet — this diff adds no parsed import edge under src\/, skipped/);
+
+    commit(repo, "src/relocated modules/c.ts", CLEAN_C);
+    const withAcyclicImport = push(repo, "HEAD", remoteTip);
+    assert.equal(withAcyclicImport.status, 0, withAcyclicImport.stderr);
+    assert.doesNotMatch(withAcyclicImport.stderr, /cycle-ratchet — .*skipped/);
+
+    const movedA = "src/relocated modules/a.ts";
+    commit(repo, movedA, `import { c } from "${sibling("c")}";\n${existing}export const viaC = () => c;\n`);
+    assert.match(repo.git("diff", "--name-status", "-M", remoteTip, "HEAD"),
+      /^R\d+\tsrc\/lib\/a\.ts\tsrc\/relocated modules\/a\.ts$/m);
+    const withClosingImport = push(repo, "HEAD", remoteTip);
+    assert.equal(withClosingImport.status, 1, withClosingImport.stderr);
+    assert.match(withClosingImport.stderr,
+      /^cycle-ratchet: src\/relocated modules\/a\.ts -> src\/relocated modules\/c\.ts -> src\/relocated modules\/b\.ts$/m);
   } finally { repo.cleanup(); }
 });
 
