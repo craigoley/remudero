@@ -74,14 +74,15 @@ const outcomeOf = (cohort: BenchmarkCohort) => {
   assert.notEqual(typeof cohort.verifiedOutcome, "string", "the case files were joined");
   return cohort.verifiedOutcome as CohortVerifiedOutcome;
 };
-const sum = (cohorts: readonly BenchmarkCohort[]) => cohorts.map(outcomeOf).reduce((total, o) => ({
+interface Tally { assignments: number; completed: number; endedWithoutCompletion: number; censored: number;
+  unavailable: number; reasons: Record<string, number>; nonBuildCalls: Record<string, number> }
+const sum = (cohorts: readonly BenchmarkCohort[]): Tally => cohorts.map(outcomeOf).reduce<Tally>((total, o) => ({
   assignments: total.assignments + o.assignments, completed: total.completed + o.completed,
   endedWithoutCompletion: total.endedWithoutCompletion + o.endedWithoutCompletion, censored: total.censored + o.censored,
   unavailable: total.unavailable + o.unavailable,
-  reasons: Object.entries(o.reasons).reduce((r, [k, n]) => ({ ...r, [k]: (r[k] ?? 0) + n }), total.reasons),
-  nonBuildCalls: Object.entries(o.nonBuildCalls ?? {}).reduce((r, [k, n]) => ({ ...r, [k]: (r[k] ?? 0) + n }), total.nonBuildCalls),
-}), { assignments: 0, completed: 0, endedWithoutCompletion: 0, censored: 0, unavailable: 0,
-  reasons: {} as Record<string, number>, nonBuildCalls: {} as Record<string, number> });
+  reasons: Object.entries(o.reasons).reduce<Record<string, number>>((r, [k, n]) => ({ ...r, [k]: (r[k] ?? 0) + n }), total.reasons),
+  nonBuildCalls: Object.entries(o.nonBuildCalls ?? {}).reduce<Record<string, number>>((r, [k, n]) => ({ ...r, [k]: (r[k] ?? 0) + n }), total.nonBuildCalls),
+}), { assignments: 0, completed: 0, endedWithoutCompletion: 0, censored: 0, unavailable: 0, reasons: {}, nonBuildCalls: {} });
 
 test("W1-T14988 criterion 1: a judge, draft or review call is not counted as a build outcome", async (t) => {
   const { result, stateDir } = await pass(t, true);
