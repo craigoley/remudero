@@ -3942,9 +3942,12 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
   });
   // W1-T14881: GitHub's own log of each webhook delivery serve answered, when serve takes webhooks at all.
   // W1-T14967: the log is the App's own webhook's, read with an App JWT.
-  const stopDeliveryLog = deps.githubEventWake?.secret
-    ? startGithubDeliveryLogPass({ stateDir: join(deps.fleetControlRoot, "state"), log: (step, fields) => deps.log?.(step, fields) })
-    : () => {};
+  // W1-T14979: the pass POSTs redeliveries, so only one process runs it: a supervised generation starts it on
+  // 'listening' (its promotion), as startLedgerWriters does, never while it is an unpromoted handoff standby.
+  let stopDeliveryLog: () => void = () => {};
+  const startDeliveryLog = (): void => {
+    stopDeliveryLog = startGithubDeliveryLogPass({ stateDir: join(deps.fleetControlRoot, "state"), log: (step, fields) => deps.log?.(step, fields) });
+  };
   // W1-T9370: each worker module's first start (bundle or .ts source) is ledgered as worker.entry_resolved.
   setWorkerEntryLog(deps.log);
   // W1-T10290: the plumbing carries the children's node flags to the read-model worker thread in its data; serve's own
@@ -4104,7 +4107,7 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
   server.on("close", prewarm.stop);
   if (keepWarm) server.once("listening", keepWarm.start);
   server.on("close", stopWakeSummary);
-  server.on("close", stopDeliveryLog);
+  server.on("close", () => stopDeliveryLog());
   // The demand window starts last, so a test seam that keeps one `every` tick drives serve.demand.
   server.once("listening", () => { stopRouteReads = routeReads.start(); const stops = [readDeadline.start(), demand.start()]; stopDemand = () => { for (const stop of stops) stop(); }; });
   server.on("close", () => { stopRouteReads(); stopDemand(); });
@@ -4163,6 +4166,10 @@ function wireServeServer(deps: ServeDeps, releaseRotationRole: () => void): Serv
   let stopLedgerWriters: (() => void) | undefined;
   if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", () => { stopLedgerWriters = startLedgerWriters(); });
   else stopLedgerWriters = startLedgerWriters();
+  if (deps.githubEventWake?.secret) {
+    if (deps.generation) server.setMaxListeners(server.getMaxListeners() + 1).once("listening", startDeliveryLog);
+    else startDeliveryLog();
+  }
   server.once("close", () => {
     try {
       stopLedgerWriters?.();

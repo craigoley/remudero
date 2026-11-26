@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type IncomingHttpHeaders } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -10,6 +11,7 @@ import { promisify } from "node:util";
 import {
   DEFAULT_GH_CALL_TIMEOUT_MS,
   DEFAULT_GH_SYNC_KILL_SIGNAL,
+  configureGithubInstallationBudget,
   ghExecFile,
   ghJson,
   ghJsonAsync,
@@ -18,6 +20,9 @@ import {
   parseGhRateLimitHeaders,
   withGhKillEscalation,
 } from "#src/lib/github-transport.js";
+import { systemClock } from "#src/lib/clock.js";
+import { configureGithubHttpRead, githubHttpRead, parseGhApiRead, resetGithubHttpReadStore } from "#src/lib/github-http-read.js";
+import { createInstallationBudget, createInstallationBudgetState, type InstallationBudget } from "#src/lib/github-installation-budget.js";
 import { classifyGhFailure, type GitHub } from "#src/lib/status.js";
 import { ghPostureGateway } from "#src/lib/github-posture.js";
 import { ghIssueListGateway } from "#src/lib/issues-intake.js";
@@ -633,4 +638,92 @@ test("the spike reaches both GitHub CLI calls through ghExec", () => {
   assert.match(out, /PROBE FALLBACK/, "the fake exercises the second, contained worker call");
   assert.match(out, /SPIKE_TEST_GH_EXEC:pr create --repo craigoley\/remudero-sandbox --base main --head spike-hello-\d+ --fill/);
   assert.match(out, /### SPIKE COMPLETE all steps executed/);
+});
+
+// ── W1-T14892: a 304 answer costs no installation budget ─────────────────────────────────────────
+// W1-T12839's in-process read already sends a stored ETag as If-None-Match and serves the stored
+// answer on a 304. GitHub does not count that 304, so the read the transport claimed is taken back.
+
+const T14892_TOKEN = "w1-t14892-fixture-token";
+const T14892_ENV = ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST"] as const;
+
+/** A local stand-in for api.github.com that answers 304 to its own ETag; every request is kept. */
+async function t14892Server(t: import("node:test").TestContext): Promise<{ requests: IncomingHttpHeaders[] }> {
+  const saved = Object.fromEntries(T14892_ENV.map((key) => [key, process.env[key]]));
+  process.env.GH_TOKEN = T14892_TOKEN;
+  delete process.env.GITHUB_TOKEN;
+  delete process.env.GH_HOST;
+  resetGithubHttpReadStore();
+  const requests: IncomingHttpHeaders[] = [];
+  const rate = { "x-ratelimit-limit": "15000", "x-ratelimit-remaining": "9000", "x-ratelimit-reset": "1800000000", "x-ratelimit-resource": "core" };
+  const server = createServer((req, res) => {
+    requests.push(req.headers);
+    const etag = `"pulls#1"`;
+    if (req.headers["if-none-match"] === etag) { res.writeHead(304, { etag, ...rate }); res.end(); return; }
+    res.writeHead(200, { "content-type": "application/json; charset=utf-8", etag, ...rate });
+    res.end(JSON.stringify([{ number: 7 }]));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  configureGithubHttpRead({ origin: `http://127.0.0.1:${(server.address() as { port: number }).port}` });
+  t.after(async () => {
+    configureGithubHttpRead(undefined);
+    configureGithubInstallationBudget(undefined);
+    resetGithubHttpReadStore();
+    for (const key of T14892_ENV) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  return { requests };
+}
+
+test("W1-T14892 a 304 answer is marked not modified and returns the stored body", async (t) => {
+  const { requests } = await t14892Server(t);
+  const read = parseGhApiRead(["api", "repos/o/r/pulls", "-i"])!;
+  const first = await githubHttpRead(read, T14892_TOKEN, { identity: "w1-t14892" });
+  assert.equal(first.status, 200);
+  assert.equal(first.notModified, undefined, "a 200 is a new answer");
+  const second = await githubHttpRead(read, T14892_TOKEN, { identity: "w1-t14892" });
+  assert.equal(requests[1]?.["if-none-match"], `"pulls#1"`, "the repeat sends the stored ETag");
+  assert.equal(second.notModified, true, "THE CLAIM: the 304 says it is the stored answer");
+  assert.equal(second.body, first.body, "and returns the stored body");
+});
+
+test("W1-T14892 a 304 answer is not charged to the installation budget", async (t) => {
+  const { requests } = await t14892Server(t);
+  const real = createInstallationBudget({ consumers: 9, clock: systemClock });
+  let claims = 0;
+  let refunds = 0;
+  const spy: InstallationBudget = Object.assign(Object.create(real) as InstallationBudget, {
+    claimRead: () => { claims += 1; return real.claimRead(); },
+    refundRead: () => { refunds += 1; real.refundRead?.(); },
+  });
+  configureGithubInstallationBudget(spy);
+  const first = await ghJsonAsync(["api", "repos/o/r/pulls"]);
+  const second = await ghJsonAsync(["api", "repos/o/r/pulls"]);
+  assert.equal(requests.length, 2, "both reads reached the server");
+  assert.deepEqual(second, first, "the 304 serves the stored body");
+  assert.equal(claims, 2, "each read claims its slot before it is sent");
+  assert.equal(refunds, 1, "THE CLAIM: the 304's claimed read is taken back");
+
+  // A refunded read frees its share: two consumers' worth of reads, then one more after a refund.
+  for (const sharedState of [undefined, createInstallationBudgetState()]) {
+    const budget = createInstallationBudget({ consumers: 50, clock: systemClock, ...(sharedState === undefined ? {} : { sharedState }) });
+    budget.refundRead?.();
+    budget.record({ remaining: 200, limit: 1000, reset: Math.floor(systemClock.now() / 1000) + 3_600, resource: "core" });
+    assert.equal(budget.claimRead().ok, true);
+    assert.equal(budget.claimRead().ok, true);
+    assert.equal(budget.claimRead().ok, false, "the share of 2 reads is spent");
+    budget.refundRead?.();
+    assert.equal(budget.claimRead().ok, true, "a refunded read can be claimed again");
+  }
+});
+
+test("W1-T14892 a write or GraphQL call never carries a validator", () => {
+  for (const write of [["api", "-X", "POST", "repos/o/r/issues"], ["api", "--method", "PATCH", "repos/o/r/pulls/1"],
+    ["api", "repos/o/r/issues", "-f", "title=x"], ["api", "graphql", "-f", "query={viewer{login}}"]]) {
+    assert.equal(parseGhApiRead(write), undefined, `${write.join(" ")} never reaches the conditional client`);
+  }
 });

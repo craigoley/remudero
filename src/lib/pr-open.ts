@@ -17,6 +17,7 @@ import { taskIdFromRunBranch } from "./status.js";
 import {
   acceptanceAuthorTimeCheck,
   acceptanceBlockDiagnostics,
+  bodyProofsAgainstRecord,
   extractTaskTrailerId,
   parseAcceptanceBlock,
   parseWhitelistedProof,
@@ -483,15 +484,17 @@ export async function proposeStaleProofReplacement(
 }
 
 function sameCriteria(
-  actual: readonly { claim: string; proof: string }[],
+  actual: readonly AcceptanceCriterion[],
   expected: readonly { claim: string; proof: string }[],
 ): boolean {
+  // W1-T14913: each body proof reads as the author gate reads it, so a legacy-rendered quoted proof matches its record.
+  const proofs = bodyProofsAgainstRecord(actual, new Set(expected.map((criterion) => criterion.proof.trim())));
   return (
     actual.length === expected.length &&
     actual.every(
       (criterion, index) =>
         criterion.claim.trim() === expected[index].claim.trim() &&
-        criterion.proof.trim() === expected[index].proof.trim(),
+        proofs[index] === expected[index].proof.trim(),
     )
   );
 }

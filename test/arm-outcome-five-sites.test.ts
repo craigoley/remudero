@@ -237,7 +237,7 @@ test("SITE retro reads the arm outcome and passes runId, never the literal RETRO
 
   assert.match(
     w,
-    /armAndLogOutcome\(prUrl, runId, log, undefined, undefined, armHeadSha\)/,
+    /await armAndLogOutcomeAsync\(prUrl, runId, log, undefined, undefined, armHeadSha\)/,
     "the id passed is runId — the one the trailer and the verdict agree on",
   );
   // W1-T2258: this lane holds no headSha variable of its own — a best-effort live REST read
@@ -250,7 +250,7 @@ test("SITE retro reads the arm outcome and passes runId, never the literal RETRO
 test("SITE triage reads the arm outcome rather than discarding it", () => {
   const w = laneWindow("`triage PR gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? \"success\" : \"failure\"}): ${prUrl}`", 24);
 
-  assert.match(w, /armAndLogOutcome\(prUrl, taskId, log, undefined, undefined, armHeadSha\)/);
+  assert.match(w, /await armAndLogOutcomeAsync\(prUrl, taskId, log, undefined, undefined, armHeadSha\)/);
   assert.match(w, /armHeadSha = readHeadShaRest\(prUrl\)/, "W1-T2258: the head sha is recovered, not guessed");
   assert.doesNotMatch(w, /log\("automerge\.armed"/, "the unconditional ledger line is gone from this lane");
 });
@@ -258,7 +258,7 @@ test("SITE triage reads the arm outcome rather than discarding it", () => {
 test("SITE plan reads the arm outcome rather than discarding it", () => {
   const w = laneWindow("`plan PR gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? \"success\" : \"failure\"}): ${prUrl}`", 24);
 
-  assert.match(w, /armAndLogOutcome\(prUrl, taskId, log, undefined, undefined, armHeadSha\)/);
+  assert.match(w, /await armAndLogOutcomeAsync\(prUrl, taskId, log, undefined, undefined, armHeadSha\)/);
   assert.match(w, /armHeadSha = readHeadShaRest\(prUrl\)/, "W1-T2258: the head sha is recovered, not guessed");
   assert.doesNotMatch(w, /log\("automerge\.armed"/, "the unconditional ledger line is gone from this lane");
 });
@@ -266,7 +266,7 @@ test("SITE plan reads the arm outcome rather than discarding it", () => {
 test("SITE approve reads the arm outcome rather than discarding it", () => {
   const w = laneWindow("`rmd approve: ${proposalId} gated — ${armReportPhrase(armOutcome, priorArm)} (review ${reviewCode === 0 ? \"success\" : \"failure\"}): ${result.prUrl}`", 28);
 
-  assert.match(w, /armAndLogOutcome\(result\.prUrl, `PR-\$\{prNum\}`, log, undefined, undefined, armHeadSha\)/);
+  assert.match(w, /await armAndLogOutcomeAsync\(result\.prUrl, `PR-\$\{prNum\}`, log, undefined, undefined, armHeadSha\)/);
   assert.match(w, /armHeadSha = readHeadShaRest\(result\.prUrl\)/, "W1-T2258: the head sha is recovered, not guessed");
   assert.doesNotMatch(w, /log\("automerge\.armed"/, "the unconditional ledger line is gone from this lane");
 });
