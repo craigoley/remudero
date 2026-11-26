@@ -60,6 +60,7 @@
     (vi) COMMENT LOAD. src/run-task.ts is at its comment-load ceiling (scripts/comment-load-baseline.json row `src/run-task.ts`). The edit ADDS NO NET COMMENT LINES: any comment it adds is paid for by deleting or tightening one of the touched function's own, and a new function carries no doc block beyond the one line `creditProjectionWithReadState`'s neighbours already use.
     (vii) NOT IN SCOPE, NAMED. The board-truncation arm and the page bound (rationale (4)); the W1-T5035 monolith report (its sibling edit sits in the same function: expect a mechanical merge, this task's block sits after the summary print and before the return, and theirs after the shard fold);
     the no-ledger early return in `creditProjectionWithReadState` (an empty projection by design); raising either git window.
+    NO-INVARIANTS: report-only verb output; W1-T15031 removes both git windows and carries the real-seam claim this record dropped (an old merge is now judged and flipped).
   acceptance:
     - claim: "a dry run over a queued shard whose merge is merged-with-no-evidence prints WINDOW-SHORT naming it and the count on stderr and exits 2, and the stdout summary is unchanged"
       proof: 'grep: test("W1-T5100: a queued shard merged outside both scan windows prints WINDOW-SHORT and exits 2" in test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts'
@@ -73,8 +74,6 @@
       proof: 'grep: test("W1-T5100: an UNKNOWN read keeps its own line and exit code and names the window-short shards too" in test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts'
     - claim: "the projection omits windowShort when no candidate is short, and an injected credit set keeps its old contract"
       proof: 'grep: test("W1-T5100: the projection omits windowShort when no candidate is short and an injected set is unchanged" in test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts'
-    - claim: "the real credit builder over a real git history longer than the subject window reports the task window-short (the real default seam, no fake builder)"
-      proof: 'grep: test("W1-T5100: the real credit builder over a real git history longer than the subject window reports the task window-short" in test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts'
     - claim: "the same history with the merge inside the window is judged and flipped, the positive control for the real seam"
       proof: 'grep: test("W1-T5100: the same history inside the window is judged and flipped, the positive control for the real seam" in test/plan-reconcile-names-the-shards-its-scan-window-cannot-judge.test.ts'
     - claim: "the pure helper that names the shards has a production call site in the verb"
