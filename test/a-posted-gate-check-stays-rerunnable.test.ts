@@ -106,11 +106,11 @@ test("W1-T4438: a re-drive of a failed posted gate reruns its job", async () => 
 
 
 const LINK_HEAD = "6f9313fb89989914f77dcd770b0cc490bb12a0e2";
-function linkedChecks() {
+function linkedChecks(conclusion = "failure") {
   return [
     { id: 119601912896, name: "light-gates", status: "completed", conclusion: "cancelled", head_sha: LINK_HEAD,
       details_url: "https://github.com/owner/repo/actions/runs/39710957377/job/119601912896", started_at: "2026-10-22T02:21:49Z" },
-    { id: 119606381286, name: "claims", status: "completed", conclusion: "failure", head_sha: LINK_HEAD,
+    { id: 119606381286, name: "claims", status: "completed", conclusion, head_sha: LINK_HEAD,
       details_url: "https://github.com/owner/repo/runs/119606381286", external_id: "run:39710957377:1:job:119601912896",
       started_at: "2026-10-22T02:36:53Z", output: { summary: "W1-T4399: reported by this job's claims step(s) (outcome(s): cancelled)" } },
     { id: 119601900001, name: "claims", status: "completed", conclusion: "skipped", head_sha: LINK_HEAD,
@@ -135,6 +135,19 @@ test("the default REST transport binds cancelled posted claims to exactly one ph
     assert.equal(shim.calls().length, 3, "the default really shells out for pulls/check-runs/status");
     assert.ok(shim.calls().some(call => call.includes(`/commits/${LINK_HEAD}/check-runs?`)));
   } finally { process.env.PATH = originalPath; }
+});
+
+test("a posted CANCELLED claim from REST is retry evidence for its producer and still holds merge", () => {
+  const checks = fetchOpenPrsWithPostedIds(OWNER, REPO, args => {
+    if (args[1].includes("/pulls?")) return [{ number: 13501, html_url: "https://github.com/owner/repo/pull/13501", head: { ref: "run-unfiled-1", sha: LINK_HEAD } }];
+    if (args[1].includes("/check-runs?")) return { check_runs: linkedChecks("cancelled") };
+    if (args[1].endsWith("/status")) return { statuses: [] };
+    throw Error("unexpected fixture route");
+  })[0].statusCheckRollup;
+  assert.deepEqual(cancelledRequiredChecks(checks, ["ci-gate"], LINK_HEAD), [
+    { name: "light-gates", jobId: "119601912896", runAttempt: 1, explainedFailures: [{ name: "claims", checkRunId: 119606381286 }] },
+  ]);
+  assert.equal(checks?.find(c => c.checkRunId === 119606381286)?.conclusion, "CANCELLED");
 });
 
 test("posted cancellation evidence refuses wrong or missing heads, jobs, runs, attempts and constituent outcomes", () => {

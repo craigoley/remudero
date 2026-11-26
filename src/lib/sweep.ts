@@ -9652,7 +9652,7 @@ export function checksPendingSinceFromRollup(
  *  verdict rather than a bad one, so the job can be re-queued instead of a worker dispatched. */
 export interface CancelledRequiredCheck {
   name: string;
-  /** Failed posted gates whose exact head/run/attempt/job and own cancelled outcome bind to this producer. */
+  /** Red posted gates whose exact head/run/attempt/job and own cancelled outcome bind to this producer. */
   explainedFailures?: readonly { name: string; checkRunId: number }[];
   /** GitHub Actions job id, parsed by the real gateway from the rollup's URL or external id — the
    *  re-queue target is the JOB (design iv), never the workflow run. `undefined` when none could
@@ -9692,6 +9692,34 @@ export function cancelledRequiredCheckNames(
 
 const qualityGate = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): RollupCheckEntry[] => dedupeRollupByLatestAttempt((rollup ?? []).filter((c) => c.name !== REVIEW_CONTEXT && c.context !== REVIEW_CONTEXT && ([...(requiredCheckNames ?? [])].includes(c.name ?? "") || [...(requiredCheckNames ?? [])].includes(c.context ?? ""))));
 const rollupState = (c: RollupCheckEntry) => (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase();
+
+type PostedCancellation = NonNullable<CancelledRequiredCheck["explainedFailures"]>[number];
+
+function confirmsPostedCancellation(check: CancelledRequiredCheck, latest: readonly RollupCheckEntry[]): boolean {
+  const aliases = check.explainedFailures;
+  if (aliases === undefined || aliases.length === 0) return true;
+  const producers = latest.filter(c => (c.name ?? c.context) === check.name && checkJobId(c) === check.jobId);
+  const producer = producers.length === 1 ? producers[0] : undefined;
+  return producer !== undefined && (producer.conclusion ?? producer.state ?? "").toUpperCase() === "CANCELLED" &&
+    (producer.status ?? "").toUpperCase() === "COMPLETED" && aliases.every(alias => {
+      const matches = latest.filter(c => (c.name ?? c.context) === alias.name && c.checkRunId === alias.checkRunId);
+      if (matches.length !== 1) return false;
+      const state = rollupState(matches[0]);
+      return state === "FAILURE" || state === "CANCELLED";
+    });
+}
+
+function postedCancellationExplainsRed(alias: PostedCancellation, latest: readonly RollupCheckEntry[]): boolean {
+  return !latest.some(c => (c.name ?? c.context) === alias.name && c.checkRunId &&
+    c.checkRunId !== alias.checkRunId && REQUIRED_CHECK_FAIL.has(rollupState(c)));
+}
+
+function producerCancellationExplainsRed(check: CancelledRequiredCheck, latest: readonly RollupCheckEntry[]): boolean {
+  const aliases = check.explainedFailures;
+  return aliases === undefined || aliases.length === 0 || !latest.some(c =>
+    (c.name ?? c.context) === check.name && REQUIRED_CHECK_FAIL.has(rollupState(c)) && rollupState(c) !== "CANCELLED");
+}
+
 export const redQualityGateNames = (rollup: RollupCheckEntry[] | undefined, requiredCheckNames: Iterable<string> | undefined): string[] => {
   const required = [...(requiredCheckNames ?? [])];
   const red = qualityGate(rollup, required).filter((c) => REQUIRED_CHECK_FAIL.has(rollupState(c))).map((c) => c.name ?? c.context ?? "unknown");
@@ -26617,10 +26645,7 @@ export async function runSweep(
       const cancelled = pr.cancelledRequiredChecks!.filter(c => fresh.has(c.name));
       const freshProducers = dedupeRollupByLatestAttempt(rollup ?? []);
       const explained = new Set(pr.cancelledRequiredChecks!.flatMap(c => c.explainedFailures ?? [])
-        .filter(alias => {
-          const matches = freshProducers.filter(c => (c.name ?? c.context) === alias.name);
-          return matches.every(latest => !latest.checkRunId || latest.checkRunId === alias.checkRunId || !REQUIRED_CHECK_FAIL.has(rollupState(latest)));
-        }).map(alias => alias.name));
+        .filter(alias => postedCancellationExplainsRed(alias, freshProducers)).map(alias => alias.name));
       const deterministicTimeouts = new Set<string>();
       const outcomes: string[] = [];
       let escalated = false;
@@ -26640,17 +26665,9 @@ export async function runSweep(
           continue;
         }
         if (deferred !== undefined) continue;
-        if (check.explainedFailures?.length) {
-          const producers = freshProducers.filter(latest => (latest.name ?? latest.context) === check.name && checkJobId(latest) === check.jobId);
-          const producer = producers.length === 1 ? producers[0] : undefined;
-          if (!producer || (producer.conclusion ?? producer.state ?? "").toUpperCase() !== "CANCELLED" ||
-              (producer.status ?? "").toUpperCase() !== "COMPLETED" || !check.explainedFailures.every(alias => {
-                const aliases = freshProducers.filter(latest => (latest.name ?? latest.context) === alias.name && latest.checkRunId === alias.checkRunId);
-                return aliases.length === 1 && rollupState(aliases[0]) === "FAILURE";
-              })) {
-            outcomes.push(`producer cancellation for "${check.name}" is no longer confirmed — awaiting fresh CI`);
-            continue;
-          }
+        if (!confirmsPostedCancellation(check, freshProducers)) {
+          outcomes.push(`producer cancellation for "${check.name}" is no longer confirmed — awaiting fresh CI`);
+          continue;
         }
         if (decision.requeue) {
           const result = await requeueCheckJob(deps, pr, check, checkDeferrals.get(key), rollup);
@@ -26671,10 +26688,8 @@ export async function runSweep(
       }
       // Only ci and ci-gate downstream of this cancelled shard are explained by cancellation.
       const genuine = [...fresh].filter(name => deterministicTimeouts.has(name) ||
-        (!explained.has(name) && !cancelled.some(c => c.name === name &&
-          !(c.explainedFailures?.length && dedupeRollupByLatestAttempt(rollup ?? []).some(latest =>
-            (latest.name ?? latest.context) === name && REQUIRED_CHECK_FAIL.has(rollupState(latest)) &&
-            rollupState(latest) !== "CANCELLED"))) && name !== "ci-gate" &&
+        (!explained.has(name) && !cancelled.some(c => c.name === name && producerCancellationExplainsRed(c, freshProducers)) &&
+          name !== "ci-gate" &&
           !(name === "ci" && pr.cancelledRequiredChecks!.some(c => /^ci-shard \(\d+\/\d+\)$/.test(c.name)))));
       if (genuine.length === 0) {
         infrastructureBlockerByPr.set(pr.prNumber, escalated ? "escalated" : "awaiting-ci");
@@ -28901,6 +28916,7 @@ export async function runSweep(
               // cancellations never spends a strike on nothing.
               if (cancelledChecks.length > 0) {
                 const outcomes: string[] = [];
+                const latest = dedupeRollupByLatestAttempt(ciGateRollup ?? []);
                 // W1-T8040: cancelled checks whose own log proves a deterministic ceiling timeout; they stay
                 // genuine failures for the ci-log fix path instead of earning a requeue.
                 const deterministicTimeouts = new Set<string>();
@@ -28928,6 +28944,10 @@ export async function runSweep(
                     outcomes.push(`not re-queued "${check.name}" (deterministic-timeout: ${timeoutSignature})`);
                     continue;
                   }
+                  if (!confirmsPostedCancellation(check, latest)) {
+                    outcomes.push(`producer cancellation for "${check.name}" is no longer confirmed — awaiting fresh CI`);
+                    continue;
+                  }
                   if (decision.requeue) {
                     // LEDGERED BEFORE THE CALL (inside `requeueCheckJob`). Not dry-run-guarded:
                     // reaching this line already proves `acted` was true, which `dryRun` forces false.
@@ -28947,8 +28967,25 @@ export async function runSweep(
                 // this pass is a cancellation, stand down rather than burning a strike on nothing.
                 // `acted` stays FALSE: claiming true would seed `prior.fixed`, dedupe the whole
                 // disposition away, and stop this logic observing the second cancellation.
-                const genuineFailures = ciFailuresForFix.filter((f) =>
-                  deterministicTimeouts.has(f.name) || !cancelledChecks.some((c) => c.name === f.name));
+                // The legacy FAILURE post remains ci-log evidence on builds. A verified CANCELLED
+                // post follows its producer, including when a matrix aggregator also reports red.
+                const explained = new Set<CiFailure>();
+                const aggregators = new Set([CI_GATE_CHECK_NAME]);
+                for (const check of cancelledChecks) {
+                  const aliases = check.explainedFailures;
+                  if (aliases === undefined || aliases.length === 0 || deterministicTimeouts.has(check.name)) continue;
+                  const posts = ciFailuresForFix.filter(f => f.conclusion === "CANCELLED" && f.jobId === check.jobId &&
+                    aliases.some(alias => alias.name === f.name && postedCancellationExplainsRed(alias, latest)));
+                  if (posts.length === 0) continue;
+                  for (const post of posts) explained.add(post);
+                  const matrix = CI_MATRIX_AGGREGATORS.find(({ constituent }) => constituent.test(check.name));
+                  if (matrix) aggregators.add(matrix.aggregator);
+                }
+                if (explained.size > 0) ciFailuresForFix = ciFailuresForFix.filter(f => !explained.has(f) && !aggregators.has(f.name));
+                const genuineFailures = ciFailuresForFix.filter(f => deterministicTimeouts.has(f.name) ||
+                  !cancelledChecks.some(c => c.name === f.name && producerCancellationExplainsRed(c, latest) &&
+                    (c.explainedFailures === undefined || c.explainedFailures.length === 0 ||
+                      f.conclusion === "CANCELLED" && f.jobId === c.jobId)));
                 if (genuineFailures.length === 0) {
                   acted = false;
                   const reason = `cancelled required check(s): ${outcomes.join("; ")}`;
