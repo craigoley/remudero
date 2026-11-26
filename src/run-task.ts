@@ -19301,6 +19301,7 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
     mode: write ? "write" : "dry-run",
     rewritten: summary.rewritten.length,
     skipped: summary.skipped,
+    ...(summary.sharedShards?.length ? { shared_shards: summary.sharedShards } : {}),
     ...(inline && "queued" in inline ? { inline_queued: inline.queued, inline_creditable: inline.creditable.length } : {}),
   });
   console.log(renderPlanReconcile(summary, write, inline));
@@ -19570,6 +19571,8 @@ export function renderPlanReconcile(summary: ReconcileSummary, write: boolean, i
     `### rmd plan-reconcile${write ? " --write" : " (dry run — nothing written)"}\n` +
     `${summary.rewritten.length} shard(s) ${write ? "reconciled" : "would be reconciled"} to status: merged` +
     (skipped ? `\nskipped: ${skipped}` : "") +
+    // W1-T11183: a file holding several records is read but never rewritten; name its records so none is unaccounted.
+    (summary.sharedShards?.length ? `\nleft as they are (their file holds several records): ${summary.sharedShards.join(" ")}` : "") +
     (summary.rewritten.length > 0 && !write ? reviewHint : "") +
     (inline && "unreadable" in inline ? `\nplan/tasks.yaml: unreadable (${inline.unreadable}), its queued records were not counted` : "") +
     (inline && "queued" in inline && inline.queued > 0

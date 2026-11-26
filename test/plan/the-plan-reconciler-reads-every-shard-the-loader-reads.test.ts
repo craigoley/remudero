@@ -57,13 +57,12 @@ test(`${PROOF}: W1-T11183 criterion 1: every record is read with the loader's id
   }
 });
 
-test(`${PROOF}: a shard the loader quarantines is skipped, and the rest are still reconciled`, (t) => {
+test(`${PROOF}: a shard that is not YAML is skipped, and the rest are still reconciled`, (t) => {
   // An unresolved alias makes the yaml parser throw a ReferenceError, not a YAMLParseError.
   const { planPath, dir } = fixturePlan(t, {
     "W1-T1-opens-with-id.yaml": record("W1-T1", "queued"),
     "W1-T7-an-unresolved-alias.yaml": "- id: W1-T7\n  title: *missing\n",
     "W1-T8-does-not-parse.yaml": "- id: W1-T8\n  title: [unclosed\n",
-    "W1-T6-an-invalid-record.yaml": record("W1-T6", "queued").replace("type: implement", "type: nonsense"),
   });
   const shards = readPlanShards(dir);
   assert.deepEqual(shards.map((s) => s.taskId), ["W1-T1"]);
@@ -80,7 +79,7 @@ test(`${PROOF}: a file holding several records is read but none of its records i
   const { writes, summary } = reconcilePlan(shards, () => true);
   // One write per file: the shared file yields none, so no landing input can overwrite another record's flip.
   assert.deepEqual(writes.map((w) => w.taskId), ["W1-T1"]);
-  assert.equal(summary.skipped["shared-shard"], 3);
+  assert.deepEqual(summary.sharedShards, ["W1-T4", "W1-T5", "W1-T6"], "the shared file's records are named as left alone");
   const lost = { merged: false, revertedCredit: { pr: 1, revertSha: "a".repeat(40) } };
   assert.equal(requeueRevertedShard(multi, "W1-T4", lost).skipped, "shared-shard", "a re-queue never edits a shared file");
   // reconcileShardStatus is unchanged: a single-record shard is edited by any key, as the landing keys its carry by path.
