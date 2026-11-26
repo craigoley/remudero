@@ -234,20 +234,28 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   const cashEnv = { RMD_OPENWEIGHT_API_KEY: "test-only-key", RMD_FOUNDRY_CLAUDE_API_KEY: "test-only-key",
     RMD_FOUNDRY_CLAUDE_ENDPOINT: "https://foundry.example.test/anthropic" };
   for (const model of ["gpt-6-luna", "claude-haiku-5-5"]) {
-    for (const release of [true, false]) {
+    // The control run counts the clock reads up to the request; the last is the dispatch callback's own deadline check,
+    // queued a microtask after the transport's first refusal check. "gap" lands the release on exactly that read.
+    let readsAtSend = 0;
+    for (const release of ["none", "first", "gap"] as const) {
       const cash = retiringExit();
       const root = ownedFixtureDir(t, "retired-cash").dir;
-      let sent = 0;
+      let sent = 0, reads = 0;
       const launch = cash.retirement.inSpawnScope(() => spawnOpenWeightWorker({ cwd: root, workerHome: root, prompt: "classify",
-        env: cashEnv, clock: clockFromMillisFn(() => { if (release) cash.retirement.retire(); return Date.now(); }),
-        fetchImpl: async () => { sent++; return new Response(JSON.stringify(model.startsWith("claude-")
+        env: cashEnv, clock: clockFromMillisFn(() => {
+          reads++;
+          if (release === "first" || (release === "gap" && reads === readsAtSend)) cash.retirement.retire();
+          return Date.now();
+        }),
+        fetchImpl: async () => { if (sent++ === 0 && release === "none") readsAtSend = reads; return new Response(JSON.stringify(model.startsWith("claude-")
           ? { id: "m-1", model, stop_reason: "end_turn", content: [{ type: "text", text: "done" }], usage: { input_tokens: 2, output_tokens: 1 } }
           : { id: "c-1", model, choices: [{ message: { content: "done" }, finish_reason: "stop" }], usage: { prompt_tokens: 2, completion_tokens: 1 } }),
         { status: 200 }); } },
       { root, claudeBin: "/unused", dailyCapUsd: 25, workerProviders: { cashEndpoint: "https://openai.example.test/" } }, { model, effort: "low" }));
-      if (release) await assert.rejects(launch, WorkerSpawnRetiredError, `${model}: a release inside the adapter sends no request`);
+      if (release !== "none") await assert.rejects(launch, WorkerSpawnRetiredError, `${model} ${release}: a release inside the adapter sends no request`);
       else assert.equal((await launch).isError, false, `${model}: control, with no release the request is sent`);
-      assert.equal(sent, release ? 0 : 1, `${model}: requests sent`);
+      assert.equal(sent, release === "none" ? 1 : 0, `${model} ${release}: requests sent`);
+      if (release === "none") assert.ok(readsAtSend > 1, `${model}: the control saw the clock reads before its request`);
     }
   }
   // spawnWorker turns an adapter's refusal into the not-started result and its withheld row.
@@ -291,6 +299,13 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   assert.equal(await seenByCallback, "drain lock released; the successor owns this work",
     "work a callback wired before the loop schedules sees the retired scope, so it starts no worker");
   assert.equal(await outside, undefined, "the caller of the daemon run is outside its scope");
+  // The mark lands in the same synchronous step as the drain lock release: work queued at the release sees it.
+  const rows: Row[] = [];
+  const marked = createDaemonRetirement((step, extra = {}) => { rows.push({ step, ...extra }); });
+  let seenAtRelease: boolean | undefined;
+  await closeDaemonCleanup([{ resource: "drain_lock", close: () => { queueMicrotask(() => { seenAtRelease = marked.allows("sweep"); }); } }],
+    () => {}, { now: () => 0 }, [], marked.retire);
+  assert.equal(seenAtRelease, false, "a microtask queued by the release already sees the retirement");
   // A daemon run nested in a scope already open (the standby and registry re-entries) keeps that one scope.
   await inDaemonSpawnScope(async () => {
     const outer = workerSpawnRetiredBy;

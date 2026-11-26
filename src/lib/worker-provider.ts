@@ -4928,7 +4928,8 @@ async function cashRequestJson<T>(input: {
     for (;;) {
       checkActive();
       if (runtimeInstanceRegistryPrivateFile() !== undefined) await assertInstanceRegistryRuntimeCurrent();
-      if (current === undefined) input.refuseLaunch?.();
+      const refuseLaunch = current === undefined ? input.refuseLaunch : undefined;
+      refuseLaunch?.();
       const attempt = input.next(checkActive);
       current = attempt;
       dispatched = false;
@@ -4936,6 +4937,7 @@ async function cashRequestJson<T>(input: {
       try {
         const response = await cashAbortable(controller.signal, () => {
           checkActive();
+          refuseLaunch?.(); // the release can land in the microtask gap; `unsent` settles the reservation
           dispatched = true;
           return (args.fetchImpl ?? fetch)(input.endpoint, {
             method: "POST", headers: input.headers, body: input.body, signal: controller.signal,

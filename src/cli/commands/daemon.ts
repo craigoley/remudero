@@ -3512,6 +3512,7 @@ export async function closeDaemonCleanup(
   const ordered = [...cleanup].reverse();
   const closesMs: Record<string, number> = {};
   const startMs = clock.now();
+  let releasedInStep = false;
   for (const [index, { resource, close }] of ordered.entries()) {
     if (index === ordered.length - 1) {
       try {
@@ -3522,7 +3523,10 @@ export async function closeDaemonCleanup(
     }
     const closeStartMs = clock.now();
     try {
-      await close();
+      const closing = close();
+      // A synchronous last release (the drain lock) marks retirement in the same step: no microtask sits between them.
+      if (index === ordered.length - 1 && !(closing instanceof Promise)) { releasedInStep = true; onReleased?.(); }
+      await closing;
     } catch (error) {
       try {
         log("daemon.cleanup_failed", { resource, error: String(error) });
@@ -3537,7 +3541,7 @@ export async function closeDaemonCleanup(
     const key = `${resource}_ms`;
     closesMs[key] = (closesMs[key] ?? 0) + clock.now() - closeStartMs;
   }
-  onReleased?.();
+  if (!releasedInStep) onReleased?.();
   if (afterRelease.length === 0) return;
   const afterMs: Record<string, number> = {};
   const afterStartMs = clock.now();
