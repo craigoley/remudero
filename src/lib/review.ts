@@ -62,7 +62,7 @@ import {
 } from "./task-id-reservation.js";
 // @ts-expect-error The shared plain .mjs helper ships under src/ so source-only runtimes can load it.
 import { adjudicateReservationChain, parseReservationHolderLine, parseReservationHolderFields } from "./reservation-chain.mjs";
-import { ACCEPTANCE_BULLET_RE, type ProofSpan } from "./body-repair.js";
+import { ACCEPTANCE_BULLET_RE, type ProofSpan, type ReadCriterion } from "./body-repair.js";
 
 /** JUDGE (MASTER-PLAN §12 rules 4/3B; W1-T1C): after green CI, a fresh read-only REVIEW session
  * judges each stated proof and posts `remudero-review`. {@link judgeReview} is pure (unit-fixture falsifier);
@@ -9246,10 +9246,17 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
  *  (quotes included when `quoted`) and the proof read there. A line outside the Acceptance block, a fenced example
  *  included, is never one, and a claim repeating the proof text lies outside the range. */
 export function acceptanceProofSpans(body: string): (ProofSpan | undefined)[] {
+  return acceptanceCriteriaRead(body).map((criterion) => criterion.span);
+}
+
+/** W1-T14913: every Acceptance criterion's claim and proof as parseAcceptanceBlock reads them, with the span its proof was
+ *  read from. body-repair's rewrites take this, so a rewrite that changes any claim, or any proof but its target, refuses. */
+export function acceptanceCriteriaRead(body: string): ReadCriterion[] {
   const { criteria, proofSpans } = readAcceptanceBlock(body);
   return criteria.map((criterion, index) => {
     const span = proofSpans[index];
-    return span === undefined ? undefined : { ...span, proof: criterion.proof ?? "" };
+    const proof = criterion.proof ?? "";
+    return { claim: criterion.claim ?? "", proof, span: span === undefined ? undefined : { ...span, proof } };
   });
 }
 

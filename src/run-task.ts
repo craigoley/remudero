@@ -1777,7 +1777,7 @@ import {
   extractTaskTrailerId,
   type AcceptanceAuthorTimeResult,
   parseAcceptanceBlock,
-  acceptanceProofSpans,
+  acceptanceCriteriaRead,
   parseReviewerVerdictClauses,
   parseReviewerVerdicts,
   postReviewCommentGuarded,
@@ -6342,7 +6342,7 @@ export function wrappedGrepBodyRepair(body: string): AcceptanceGateBodyRepair | 
     // W1-T14913: found by its parsed value in the span the parser read THIS criterion from, so a quoted proof line is
     // found too, and two criteria sharing one wrapped grep are each unwrapped in turn.
     const next = bareProof === proof ? undefined
-      : rewriteCriterionProofs(repaired, [{ index, oldProof: proof, newProof: bareProof }], acceptanceProofSpans);
+      : rewriteCriterionProofs(repaired, [{ index, oldProof: proof, newProof: bareProof }], acceptanceCriteriaRead);
     if (next === undefined) return undefined;
     repaired = next;
     unwrapped += 1;
@@ -6530,7 +6530,7 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
       // W1-T14913: the diagnosed criterion's own parser-reported proof span, never a text match, so a proof two criteria share
       // is repaired on each.
       if (proof) repairedBody = rewriteCriterionProofs(repairedBody, [{ index: defect.criterion - 1, oldProof: proof,
-        newProof: defect.repair }], acceptanceProofSpans) ?? repairedBody;
+        newProof: defect.repair }], acceptanceCriteriaRead) ?? repairedBody;
     }
     if (repairedBody !== metadata.body) {
       const candidate = { ...metadata, body: repairedBody };
@@ -9447,8 +9447,8 @@ export async function dispatchBodyProofRepair(
     });
     if (!validation.ok) return refuse(validation.refusal.reason, validation.refusal.detail);
     const body = await params.fetchPrBody(params.prUrl);
-    const repairedBody = replaceBodyProofs(body, validation.validated.map((e) => ({ oldProof: e.oldProof, newProof: e.newProof })), acceptanceProofSpans);
-    if (repairedBody === undefined) return refuse("body-drifted", "the live body no longer carries each old proof on exactly one bullet");
+    const repairedBody = replaceBodyProofs(body, validation.validated.map((e) => ({ oldProof: e.oldProof, newProof: e.newProof })), acceptanceCriteriaRead);
+    if (repairedBody === undefined) return refuse("body-drifted", "the live body no longer carries each old proof on exactly one bullet, or rewriting it would change a claim or another proof");
     const unsafe = diagnoseUnrunnableProofs(parseAcceptanceBlock(repairedBody), { execProof: params.execProof });
     if (unsafe.length > 0) return refuse("proof-unsafe-to-push", renderBodyDefects(unsafe));
     await params.updatePrBody(params.prUrl, repairedBody);

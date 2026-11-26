@@ -376,31 +376,43 @@ const bulletOrProofLines: ProofLines = (body) => body.split("\n").flatMap((line,
  *  (the quotes included when `quoted`) — and the proof it read there. Nothing outside the range is the proof. */
 export interface ProofSpan { line: number; start: number; end: number; quoted: boolean; proof: string }
 
-/** W1-T14913: review.ts's `acceptanceProofSpans`, index-aligned with parseAcceptanceBlock's criteria (`undefined` for a
- *  criterion with no proof). INJECTED: review.ts imports this module, so importing the parser here would close a ring. */
-export type ProofSpans = (body: string) => readonly (ProofSpan | undefined)[];
+/** W1-T14913: one criterion as the parser reads it — its claim, its proof, and the span its proof was read from
+ *  (`undefined` for a criterion with no proof value on a line of its own). */
+export interface ReadCriterion { claim: string; proof: string; span: ProofSpan | undefined }
+
+/** W1-T14913: review.ts's `acceptanceCriteriaRead`, index-aligned with parseAcceptanceBlock's criteria. INJECTED:
+ *  review.ts imports this module, so importing the parser here would close a ring. */
+export type ProofSpans = (body: string) => readonly ReadCriterion[];
 
 const quotedValue = (text: string): string => `"${text.replace(/[\\"]/g, "\\$&")}"`;
 
+/** W1-T14913: does `after` read exactly as `before`, except criterion `index`'s proof, which now reads `newProof`? Every
+ *  claim, and every other criterion's proof, must re-read unchanged: a bare bullet whose text is both its claim and its
+ *  proof, or any other span the parser shares between them, fails here instead of saving an altered claim. */
+function onlyTheProofChanged(before: readonly ReadCriterion[], after: readonly ReadCriterion[], index: number, newProof: string): boolean {
+  return before.length === after.length && before.every((was, i) =>
+    after[i]!.claim === was.claim && after[i]!.proof === (i === index ? newProof : was.proof));
+}
+
 /** Replace criterion `index`'s proof value inside its span only, quoted and escaped when the value was written quoted;
- *  `undefined` unless the body then re-reads `newProof` for that criterion. */
+ *  `undefined` unless the body then re-reads with only that proof changed (see {@link onlyTheProofChanged}). */
 function rewriteSpan(body: string, index: number, span: ProofSpan, newProof: string, spans: ProofSpans): string | undefined {
   const lines = body.split("\n");
   const line = lines[span.line];
   if (line === undefined) return undefined;
   lines[span.line] = `${line.slice(0, span.start)}${span.quoted ? quotedValue(newProof) : newProof}${line.slice(span.end)}`;
   const repaired = lines.join("\n");
-  return spans(repaired)[index]?.proof === newProof ? repaired : undefined;
+  return onlyTheProofChanged(spans(body), spans(repaired), index, newProof) ? repaired : undefined;
 }
 
 /** W1-T14913 — rewrite ONE body proof, found by the value parseAcceptanceBlock reads. Given review.ts's
- *  `acceptanceProofSpans`, only the value inside the span the parser read it from is replaced, so a claim repeating the
+ *  `acceptanceCriteriaRead`, only the value inside the span the parser read it from is replaced, so a claim repeating the
  *  proof, a fenced example and prose outside the Acceptance block are never touched; `undefined` unless exactly one
  *  criterion reads `oldProof`. With no parser at hand, any bullet or `proof:` line is matched as before: a double-quoted
  *  `proof:` value by its unescaped text, any other line literally; `undefined` unless exactly one line carries it. */
 export function rewriteBodyProof(body: string, oldProof: string, newProof: string, spans?: ProofSpans): string | undefined {
   if (spans) {
-    const hits = spans(body).flatMap((span, index) => span?.proof === oldProof ? [{ span, index }] : []);
+    const hits = spans(body).flatMap(({ span }, index) => span?.proof === oldProof ? [{ span, index }] : []);
     return hits.length === 1 ? rewriteSpan(body, hits[0]!.index, hits[0]!.span, newProof, spans) : undefined;
   }
   const lines = body.split("\n");
@@ -424,7 +436,7 @@ export interface CriterionProofEdit { index: number; oldProof: string; newProof:
 export function rewriteCriterionProofs(body: string, edits: readonly CriterionProofEdit[], spans: ProofSpans): string | undefined {
   let repaired = body;
   for (const { index, oldProof, newProof } of edits) {
-    const span = spans(repaired)[index];
+    const span = spans(repaired)[index]?.span;
     const next = span?.proof === oldProof ? rewriteSpan(repaired, index, span, newProof, spans) : undefined;
     if (next === undefined) return undefined;
     repaired = next;
