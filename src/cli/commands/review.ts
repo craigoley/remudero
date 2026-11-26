@@ -346,9 +346,41 @@ export class ReviewerSnapshotError extends Error {
     readonly phase: ReviewerSnapshotPhase,
     readonly reason: "source-unavailable" | "head-mismatch" | "clone-failed" | "unreadable" | "dirty",
     message: string,
+    /** W1-T14938: why an integrity read failed — the git subcommand, its error and whether the checkout path exists. */
+    readonly unreadable?: { gitCommand: string; gitError: string; checkoutExists: boolean },
   ) {
     super(message);
     this.name = "ReviewerSnapshotError";
+  }
+}
+
+/** W1-T14938: the `review.reviewer.<phase>_error` row's fields, naming the failed git read when there was one. */
+export function reviewerSnapshotErrorRow(e: ReviewerSnapshotError): Record<string, unknown> {
+  return {
+    reason: e.reason,
+    error: e.message,
+    ...(e.unreadable ? { git_command: e.unreadable.gitCommand, git_error: e.unreadable.gitError, checkout_exists: e.unreadable.checkoutExists } : {}),
+  };
+}
+
+/**
+ * W1-T14938: the shadow judge's integrity check. runShadowJudge records any judge error only as
+ * shadow_judge.unavailable, so this logs the review.reviewer.<phase>_error row first and rethrows: the
+ * shadow result is still discarded, and the row still names the failed git read.
+ */
+export function assertShadowSnapshotIntegrity(
+  host: Pick<ReviewCommandHost, "GIT_UNTRACKED_FILES_ALL">, cwd: string, expectedHeadSha: string,
+  log: (step: string, fields: Record<string, unknown>) => void,
+): void {
+  try {
+    assertReviewerSnapshotIntegrity(host, cwd, expectedHeadSha);
+  } catch (e) {
+    // The row is diagnostic: a failed append (a full disk) must never replace the checkout refusal, so the original
+    // ReviewerSnapshotError is always the one rethrown.
+    if (e instanceof ReviewerSnapshotError) {
+      try { log(`review.reviewer.${e.phase}_error`, reviewerSnapshotErrorRow(e)); } catch { /* the refusal below still stands */ }
+    }
+    throw e;
   }
 }
 
@@ -440,14 +472,23 @@ export function materializeReviewerSnapshot(
 /** A semantic result is usable only while the disposable checkout remains exact and clean. */
 export function assertReviewerSnapshotIntegrity(host: Pick<ReviewCommandHost, "GIT_UNTRACKED_FILES_ALL">, cwd: string, expectedHeadSha: string): void {
   const { GIT_UNTRACKED_FILES_ALL } = host;
+  // W1-T14938: each read runs alone, so a refusal names the subcommand that failed, its error and whether the path exists.
+  const unreadable = (gitCommand: string, e: unknown) => new ReviewerSnapshotError(
+    "integrity", "unreadable", "semantic reviewer checkout integrity is unreadable",
+    { gitCommand, gitError: String((e as Error)?.message ?? e), checkoutExists: existsSync(cwd) },
+  );
   let actualHead: string;
-  let status: string;
   try {
     actualHead = hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim();
+  } catch (e) {
+    throw unreadable("rev-parse", e);
+  }
+  let status: string;
+  try {
     // W1-T14939: no output bound — Node's 1 MiB default turned a large dirty tree into ENOBUFS, read as "unreadable".
     status = hostWorktreeGit(cwd, ["status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL], { maxBuffer: Infinity });
-  } catch {
-    throw new ReviewerSnapshotError("integrity", "unreadable", "semantic reviewer checkout integrity is unreadable");
+  } catch (e) {
+    throw unreadable("status", e);
   }
   if (actualHead !== expectedHeadSha) {
     throw new ReviewerSnapshotError("integrity", "head-mismatch", "semantic reviewer changed the checkout HEAD");
@@ -1791,7 +1832,7 @@ export async function runReview(host: ReviewCommandHost, args: {
               promptTemplate,
               prompt,
             }));
-            assertReviewerSnapshotIntegrity(host, snapshot.cwd, headSha);
+            assertShadowSnapshotIntegrity(host, snapshot.cwd, headSha, log);
             return {
               decision: reviewerSemanticVerdicts(shadow, criteria.length),
               servedModel: shadow.servedModel ?? shadow.routedModel ?? null,
@@ -1809,7 +1850,7 @@ export async function runReview(host: ReviewCommandHost, args: {
         log("review.reviewer.abandoned", reviewerAbandonmentLedgerFields(e));
       }
       if (e instanceof ReviewerSnapshotError) {
-        log(`review.reviewer.${e.phase}_error`, { reason: e.reason, error: e.message });
+        log(`review.reviewer.${e.phase}_error`, reviewerSnapshotErrorRow(e));
       }
       log("review.reviewer.error", { error: String((e as Error)?.message ?? e) });
     }
