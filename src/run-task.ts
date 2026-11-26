@@ -12762,7 +12762,7 @@ export interface DepReviewDeps {
   prDiff?: (prUrl: string) => string;
   config?: Config;
   postStatus?: typeof postReviewStatusGuarded;
-  arm?: (prUrl: string, taskId: string | undefined) => ArmOutcome;
+  arm?: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult;
   /**
    * impl-FR — used by BOTH escalating call sites.
    *
@@ -13324,7 +13324,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     // W1-T14902: the production arm is the awaited detailed arm over realArmDepsAsync, whose task-hold gate reads the
     // live body's task once more right before arming; its refusal and reason reach the row armAndLogOutcome writes.
     const awaitedArm = deps.arm === undefined ? await armAutoMergeDetailedAsync(view.url, taskId, realArmDepsAsync()) : undefined;
-    const armOutcome = armAndLogOutcome(view.url, taskId, log, deps.arm ?? (() => awaitedArm!), "operator", view.headRefOid);
+    if (awaitedArm !== undefined) deps = { ...deps, arm: () => awaitedArm };
+    const armOutcome = armAndLogOutcome(view.url, taskId, log, deps.arm, "operator", view.headRefOid);
     // W1-T968: the PR — not merely this call — is what the console line answers about; a
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
     const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), view.url, view.headRefOid);
