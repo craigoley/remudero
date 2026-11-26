@@ -86,10 +86,13 @@ export function promotedDaemonTitle(argv: readonly string[], runId: string): str
   return ["rmd daemon active", repo ?? "unknown-repo", runId, ...(slot ? [`slot-${slot}`] : [])].join(" ");
 }
 
-/** The pid in the outermost pid namespace this process's procfs shows (the host's when /proc is the host's), or null. */
+/**
+ * The pid in an outer pid namespace, read from the NSpid line (outermost first), or null when none is visible. A
+ * container with its own /proc lists only its own namespace, so one value is the namespace pid again, never the host's.
+ */
 export function outermostPid(status: string | undefined): number | null {
-  const first = /^NSpid:\s+(\d+)/m.exec(status ?? "")?.[1];
-  return first === undefined ? null : Number(first);
+  const pids = /^NSpid:[ \t]+([\d \t]+)$/m.exec(status ?? "")?.[1]?.trim().split(/[ \t]+/) ?? [];
+  return pids.length > 1 ? Number(pids[0]) : null;
 }
 
 export type StandbyAbort = { readonly criterion: "prepare_failed" | "ready_bound" | "promote_bound"; readonly detail?: string };

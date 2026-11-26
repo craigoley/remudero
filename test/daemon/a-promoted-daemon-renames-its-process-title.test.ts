@@ -4,6 +4,7 @@
  * promotion the title now names the active role, and daemon.standby_promoted carries the outermost pid beside its own.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { logPromoted, outermostPid, promotedDaemonTitle, standbyPorts, type StandbyOptions } from "#src/lib/daemon-standby.js";
 
@@ -30,7 +31,7 @@ test("W1-T15004 criterion 1: promotion renames the process title and records bot
   assert.equal(promotedDaemonTitle(["node", "run-task.mjs", "daemon", "--repo=wreckterra"], "DAEMON-2"),
     "rmd daemon active wreckterra DAEMON-2", "no slot tree, no slot suffix");
   assert.equal(outermostPid(undefined), null, "no procfs is null, never a guess");
-  assert.equal(outermostPid("NSpid:\t41\n"), 41, "one namespace: the outermost pid is the pid");
+  assert.equal(outermostPid("NSpid:\t41\n"), null, "one namespace shows no outer pid: null, not the namespace pid again");
 
   // The real defaults: process.title really changes, and /proc/self/status is really read on Linux.
   const saved = process.title;
@@ -38,7 +39,11 @@ test("W1-T15004 criterion 1: promotion renames the process title and records bot
     const real = promote({ argv: ARGV });
     assert.equal(process.title.startsWith("rmd daemon active remudero"), true, process.title);
     const hostPid = real[0]?.extra?.host_pid;
-    assert.equal(process.platform === "linux" ? typeof hostPid === "number" : hostPid === null, true, String(hostPid));
+    const ownLevels = /^NSpid:[ \t]+([\d \t]+)$/m.exec((process.platform === "linux" ? readFileSync("/proc/self/status", "utf8") : ""))?.[1]
+      ?.trim().split(/[ \t]+/).length ?? 1;
+    // Never the namespace pid relabelled: null when this procfs shows one level, an outer pid when it shows more.
+    assert.equal(hostPid, ownLevels > 1 ? hostPid : null, String(hostPid));
+    assert.notEqual(hostPid, process.pid, "host_pid never repeats the namespace pid");
   } finally {
     process.title = saved;
   }
