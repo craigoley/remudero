@@ -8094,7 +8094,7 @@ export interface RenewReviewTokenOpts {
   /** Renew even when the token has time left: GitHub refused it (HTTP 401). */
   force?: boolean;
   env?: NodeJS.ProcessEnv;
-  now?: () => number;
+  clock?: Clock;
   /** The refresh loop's renewal, when one is armed in this process. Default {@link ensureHeldTokenFresh}. */
   ensureHeld?: typeof ensureHeldTokenFresh;
   /** This process's own mint. Default {@link refreshReviewPublisherToken}. */
@@ -8107,7 +8107,7 @@ export interface RenewReviewTokenOpts {
  *  daemons arm a refresh loop. The renewed token is written to `GH_TOKEN`, which the status post and disarm present. */
 export async function renewReviewPublisherToken(opts: RenewReviewTokenOpts = {}): Promise<ReviewTokenRenewal> {
   const env = opts.env ?? process.env;
-  const now = (opts.now ?? (() => systemClock.now()))();
+  const now = (opts.clock ?? systemClock).now();
   const armed = await (opts.ensureHeld ?? ensureHeldTokenFresh)(opts.force === true ? Number.MAX_SAFE_INTEGER : HELD_TOKEN_READ_MARGIN_MS);
   if (armed !== "not_armed") return armed === "token_expired" ? "token_unrenewable" : armed;
   const held = nativeReviewPublisher;

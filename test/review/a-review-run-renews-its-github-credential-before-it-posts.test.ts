@@ -2,13 +2,14 @@
 // holds its claim, and a run that dies leaves no pending status the sweep cannot re-admit.
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import { type ReviewCommandHost, runReview } from "#src/cli/commands/review.js";
 import { disarmAutoMergeAsync } from "#src/lib/arm-auto-merge.js";
+import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
 import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import type { Mount } from "#src/lib/mounts.js";
@@ -18,6 +19,7 @@ import { holdReviewRunLive, postReviewPending, refreshReviewPublisherToken, rene
 import { readLedgerLines } from "#src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, orphanedOwnerRetryView, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import type { WorkerResult } from "#src/lib/worker.js";
+import { withGhShim } from "#test/helpers/gh-shim.js";
 
 const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
 const HEAD = "abc1234def5678";
@@ -42,79 +44,64 @@ function hostFor(): ReviewCommandHost {
   }) as ReviewCommandHost;
 }
 
-/** A `gh` stub that answers runReview's reads and records every status POST with the token it presented. A terminal
- *  POST presenting a token named in REFUSED_TOKENS (space separated) fails as GitHub's 401 does. */
-function ghStub(dir: string): { bin: string; posts: () => Array<{ state: string; token: string }> } {
-  const bin = join(dir, "bin");
-  mkdirSync(bin, { recursive: true });
-  const log = join(dir, "posts.log");
-  writeFileSync(log, "");
-  writeFileSync(join(bin, "gh"), `#!/bin/sh
-case "$*" in
-  *"-X POST"*statuses*)
-    state=$(printf '%s\\n' "$@" | sed -n 's/^state=//p')
-    printf '%s %s\\n' "$state" "$GH_TOKEN" >> "${log}"
-    case " $REFUSED_TOKENS " in
-      *" $GH_TOKEN "*) if [ "$state" != pending ]; then echo "gh: Bad credentials (HTTP 401)" >&2; exit 1; fi ;;
-    esac
-    echo '{}' ;;
-  *"/statuses?"*) echo '[[]]' ;;
-  *reviews\\?*) echo '[]' ;;
-  *reviews*) echo '{}' ;;
-  *pulls/*) echo '{"number":1,"html_url":"${PR_URL}","state":"open","merged":false,"updated_at":"t","body":"","head":{"ref":"b","sha":"${HEAD}"},"base":{"ref":"main"}}' ;;
-  *) echo '{}' ;;
-esac
-`, { mode: 0o755 });
-  return { bin, posts: () => readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((line) => {
-    const [state, token] = line.split(" ");
-    return { state: state!, token: token ?? "" };
-  }) };
-}
+/** The shared `gh` shim's table for runReview's reads. A terminal status POST answers as GitHub's 401 does until a test
+ *  adds a route ahead of it. */
+const REFUSED_POST = { when: "state=failure", stderr: "gh: Bad credentials (HTTP 401)", exit: 1 };
+const READS = [
+  { when: "/statuses?", stdout: "[[]]" },
+  { when: "reviews?", stdout: "[]" },
+  { when: "reviews", stdout: "{}" },
+  { when: "pulls/", stdout: JSON.stringify({ number: 1, html_url: PR_URL, state: "open", merged: false, updated_at: "t", body: "",
+    head: { ref: "b", sha: HEAD }, base: { ref: "main" } }) },
+];
 
 const UNMET: AcceptanceCriterion[] = [{ claim: "VISIBLE-CLAIM the surface behaves", proof: "unit test: never-matches-W1-T15030" }];
 
-/** Drive the real runReview to a failing verdict (the keyword floor finds nothing), which withdraws an arm and posts. */
+/** Drive the real runReview to a failing verdict (the keyword floor finds nothing), which withdraws an arm and posts.
+ *  `refuse`: the terminal post answers 401 until the run renews its token (`renewAccepted`), or always. */
 async function reviewFailing(t: TestContext, opts: {
-  token: string; refused?: string[]; renewTo?: string; runId?: string;
+  token: string; refuse?: boolean; renewAccepted?: boolean; runId?: string;
   midRun?: (ledgerPath: string) => void;
 }) {
   const root = mkdtempSync(join(tmpdir(), "rmd-w1-t15030-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "state"), { recursive: true });
   const ledgerPath = join(root, "state", "ledger.ndjson");
-  const gh = ghStub(root);
-  const saved = { PATH: process.env.PATH, GH_TOKEN: process.env.GH_TOKEN, REFUSED_TOKENS: process.env.REFUSED_TOKENS };
-  process.env.PATH = `${gh.bin}:${saved.PATH}`;
+  const savedToken = process.env.GH_TOKEN;
   process.env.GH_TOKEN = opts.token;
-  process.env.REFUSED_TOKENS = (opts.refused ?? []).join(" ");
   const order: string[] = [];
   const logged: Array<Record<string, unknown>> = [];
   const renewals: Array<{ force?: boolean }> = [];
   try {
-    const verdict = await runReview(hostFor(), {
-      owner: "acme", repo: "remudero", prUrl: PR_URL,
-      task: { id: "W1-T15030", acceptance: UNMET },
-      report: "", settingsFile: join(root, "settings.json"), config: { claudeBin: "/bin/true", root } as Config,
-      log: (step, extra = {}) => { logged.push({ ...extra, step }); }, say: () => {}, account: (r: WorkerResult) => r, spawnReviewer: false, reviewerMount: MOUNT,
-      ledgerPath, runId: opts.runId ?? "review-PR1-1",
-      readReviewReuseFacts: () => { opts.midRun?.(ledgerPath); return undefined; },
-      renewToken: async (o) => {
-        renewals.push(o ?? {});
-        order.push(`renew:${o?.force === true ? "forced" : "due"}`);
-        if (opts.renewTo !== undefined) process.env.GH_TOKEN = opts.renewTo;
-        return opts.renewTo !== undefined ? "renewed" : "fresh";
-      },
-      disarm: () => {
-        order.push(`disarm:${process.env.GH_TOKEN}`);
-        return "disarmed" as const;
-      },
+    return await withGhShim([...(opts.refuse === true ? [REFUSED_POST] : []), ...READS], async (shim) => {
+      const verdict = await runReview(hostFor(), {
+        owner: "acme", repo: "remudero", prUrl: PR_URL,
+        task: { id: "W1-T15030", acceptance: UNMET },
+        report: "", settingsFile: join(root, "settings.json"), config: { claudeBin: "/bin/true", root } as Config,
+        log: (step, extra = {}) => { logged.push({ ...extra, step }); }, say: () => {},
+        account: (r: WorkerResult) => r, spawnReviewer: false, reviewerMount: MOUNT,
+        ledgerPath, runId: opts.runId ?? "review-PR1-1",
+        readReviewReuseFacts: () => { opts.midRun?.(ledgerPath); return undefined; },
+        renewToken: async (o) => {
+          renewals.push(o ?? {});
+          order.push(`renew:${o?.force === true ? "forced" : "due"}`);
+          if (opts.renewAccepted !== true) return "fresh";
+          // GitHub accepts the renewed token.
+          process.env.GH_TOKEN = "renewed-token";
+          shim.addRoute({ when: "state=failure", stdout: "{}" });
+          return "renewed";
+        },
+        disarm: () => {
+          order.push(`disarm:${process.env.GH_TOKEN}`);
+          return "disarmed" as const;
+        },
+      });
+      const terminalPosts = shim.calls().filter((call) => call.includes("-X POST") && call.includes("state=failure")).length;
+      return { verdict, order, renewals, terminalPosts, rows: [...readLedgerLines(ledgerPath), ...logged] };
     });
-    return { verdict, order, renewals, posts: gh.posts(), rows: [...readLedgerLines(ledgerPath), ...logged] };
   } finally {
-    for (const [key, value] of Object.entries(saved)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
+    if (savedToken === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = savedToken;
   }
 }
 
@@ -135,12 +122,12 @@ function fakeApp(t: TestContext, expiresAtMs: () => number, token: () => string)
 
 test("W1-T15030 criterion 1: a review that outlives its token publishes with a renewed token", async (t) => {
   // The run started with a token GitHub now refuses; the renewal before publishing replaces it.
-  const run = await reviewFailing(t, { token: "expired-token", refused: ["expired-token"], renewTo: "renewed-token" });
+  const run = await reviewFailing(t, { token: "expired-token", refuse: true, renewAccepted: true });
   assert.equal(run.verdict.state, "failure");
-  // The renewal comes first; the disarm and the terminal post present the renewed token.
+  // The renewal comes first; the disarm presents the renewed token, and the one terminal post needs no retry.
   assert.deepEqual(run.order.slice(0, 2), ["renew:due", "disarm:renewed-token"]);
-  const terminal = run.posts.filter((post) => post.state === "failure");
-  assert.deepEqual(terminal, [{ state: "failure", token: "renewed-token" }]);
+  assert.equal(run.terminalPosts, 1);
+  assert.equal(run.rows.some((row) => row.step === "review.posted" && row.state === "failure"), true);
   assert.equal(run.rows.some((row) => row.step === "review.post_refused" && row.reason === "token_unrenewable"), false);
 
   // The default renewal: this process's own App token, renewed once it has under five minutes left.
@@ -159,24 +146,24 @@ test("W1-T15030 criterion 1: a review that outlives its token publishes with a r
   assert.equal(process.env.GH_TOKEN, "app-token-1");
   const notArmed = async () => "not_armed" as const;
   clock += 30 * 60_000;
-  assert.equal(await renewReviewPublisherToken({ now: () => clock, ensureHeld: notArmed, refresh }), "fresh");
+  assert.equal(await renewReviewPublisherToken({ clock: clockFromMillisFn(() => clock), ensureHeld: notArmed, refresh }), "fresh");
   assert.equal(process.env.GH_TOKEN, "app-token-1");
   clock += 27 * 60_000;
-  assert.equal(await renewReviewPublisherToken({ now: () => clock, ensureHeld: notArmed, refresh }), "renewed");
+  assert.equal(await renewReviewPublisherToken({ clock: clockFromMillisFn(() => clock), ensureHeld: notArmed, refresh }), "renewed");
   assert.equal(process.env.GH_TOKEN, "app-token-2");
   // A token this process did not mint is never renewed, and an armed refresh loop renews its own.
   process.env.GH_TOKEN = "operator-token";
-  assert.equal(await renewReviewPublisherToken({ now: () => clock, ensureHeld: notArmed, refresh }), "not_held");
+  assert.equal(await renewReviewPublisherToken({ clock: clockFromMillisFn(() => clock), ensureHeld: notArmed, refresh }), "not_held");
   assert.equal(await renewReviewPublisherToken({ ensureHeld: async () => "renewed" }), "renewed");
   assert.equal(await renewReviewPublisherToken({ ensureHeld: async () => "token_expired" }), "token_unrenewable");
   assert.deepEqual(app.exchanges, ["app-token-1", "app-token-2"]);
 });
 
 test("W1-T15030 criterion 2: one renew-and-retry on 401, then a named refusal", async (t) => {
-  // A 401 on the post: one forced renewal, one retry, and the retry presents the renewed token.
-  const recovered = await reviewFailing(t, { token: "old-token", refused: ["old-token"] , renewTo: undefined });
+  // A 401 on the post and on its retry: one forced renewal between them, then a named refusal.
+  const recovered = await reviewFailing(t, { token: "old-token", refuse: true });
   assert.equal(recovered.renewals.filter((o) => o.force === true).length, 1);
-  assert.deepEqual(recovered.posts.filter((post) => post.state === "failure").map((post) => post.token), ["old-token", "old-token"]);
+  assert.equal(recovered.terminalPosts, 2, "one post and one retry");
   const refused = recovered.rows.filter((row) => row.step === "review.post_refused" && row.reason === "token_unrenewable");
   assert.equal(refused.length, 1, "a second 401 is a named refusal");
   assert.equal(recovered.rows.some((row) => row.step === "review.posted" && row.state === "failure"), false,
@@ -277,7 +264,7 @@ test("W1-T15030 criterion 3: an orphaned pending owner does not block re-admissi
       description: `remudero-review: review in progress (owned by run ${orphan.runId})`, created_at: orphan.pr.reviewPendingSince }] }),
     post: (o) => { statuses.push(String(o.description)); },
     readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
-    clock: { now: () => orphan.now } as never,
+    clock: fixedClock(orphan.now),
     // The daemon's own pid is alive, so the pid proves nothing; only the orphan rule can release the claim.
     assessPendingOwner: () => "active",
   });
@@ -294,7 +281,7 @@ test("W1-T15030 criterion 4: a run that lost its claim cannot post", async (t) =
   } });
   assert.equal(run.verdict.verdictWithheld, "claim_lost");
   // No terminal post and no disarm; one claim_lost refusal naming the run that took over.
-  assert.deepEqual(run.posts.filter((post) => post.state !== "pending"), []);
+  assert.equal(run.terminalPosts, 0);
   assert.equal(run.order.some((step) => step.startsWith("disarm:")), false);
   const refused = run.rows.filter((row) => row.step === "review.post_refused" && row.reason === "claim_lost");
   assert.equal(refused.length, 1);

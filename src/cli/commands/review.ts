@@ -14,7 +14,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isWorkerProviderId, loadConfig, type Config, type WorkerProviderId } from "../../lib/config.js";
 import { ledgerPathFor } from "../../lib/ledger-path.js";
-import { disarmOutcomeWithdrawn, disarmAutoMerge, disarmAutoMergeAsync, realArmDepsAsync, armIfVerdictPermitsAsync, type ArmOutcome, type DisarmOutcome } from "../../lib/arm-auto-merge.js";
+import { disarmOutcomeWithdrawn, disarmAutoMerge, disarmAutoMergeAsync, realArmDepsAsync, armIfVerdictPermitsAsync, type ArmOutcome, type DisarmOutcome, type DisarmRenewal } from "../../lib/arm-auto-merge.js";
 import { type ComposedRealGraph, type ReviewWorktreeDeps } from "../../lib/composition-root.js";
 import { writeReviewEvidenceRecord } from "../../lib/review-evidence-record.js";
 import { SPECIALIST_TOOLS } from "../../lib/specialist-panel.js";
@@ -339,11 +339,7 @@ function logArmWithdrawal(ctx: ArmWithdrawalCtx, refusal: string, outcome: Disar
 export async function withdrawArmIfVerdictRefusesAsync(
   verdict: Pick<ReviewVerdict, "state" | "capped" | "planOnly">,
   ctx: Parameters<typeof withdrawArmIfVerdictRefuses>[1],
-  deps: {
-    disarm?: (prUrl: string) => DisarmOutcome | void | Promise<DisarmOutcome | void>;
-    ledgerLines?: () => Array<Record<string, unknown>>;
-    renewToken?: () => Promise<unknown>;
-  } = {},
+  deps: Parameters<typeof withdrawArmIfVerdictRefuses>[2] & DisarmRenewal = {},
 ): Promise<{ withdrawn: boolean; outcome?: DisarmOutcome | void }> {
   // Only a capped verdict reads the ledger (its operator override), and that read is awaited.
   const rows = !verdict.capped ? [] : deps.ledgerLines?.() ??
@@ -783,7 +779,7 @@ function disputeGuardedHistoryReader(read: ReviewStatusHistoryReader, verdict: R
 async function holdDisputedPass(dispute: ReviewPassDispute, verdict: ReviewVerdict, ctx: {
   owner: string; repo: string; prUrl: string; headSha: string; taskId: string; runId: string; ledgerPath: string;
   catalog?: "public" | "ops"; log: (step: string, extra?: Record<string, unknown>) => void;
-  disarm?: (prUrl: string) => DisarmOutcome | void | Promise<DisarmOutcome | void>; renewToken?: () => Promise<unknown>;
+  disarm?: (prUrl: string) => DisarmOutcome | void; renewToken?: () => Promise<unknown>;
   publish: (held: ReviewVerdict, description: string) => Promise<{ posted: boolean }>;
 }): Promise<ReviewVerdict & { verdictWithheld: string }> {
   const held: ReviewVerdict = { ...verdict, state: "pending", summary: dispute.description };
