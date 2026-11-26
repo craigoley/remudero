@@ -336,6 +336,7 @@ import {
   isPrMergedNow,
   armAutoMerge,
   armAutoMergeDetailed,
+  armAutoMergeDetailedAsync,
   attemptArm,
   armAutoMergeAtOpen,
   armAutoMergeAtOpenAsync,
@@ -13288,6 +13289,9 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       reviewInputDigest: inputDigest,
       reviewEngineRevision: DEP_REVIEW_ENGINE_REVISION,
       fetchLifecycle: () => fetchPrLifecycle(view.url, deps.gh ?? ghJson, DEP_REVIEW_ENGINE_REVISION),
+      // W1-T14902: `taskId` is this lane's ledger key, never a task. The hold is read for the task the live body names,
+      // so a held task's trailer added to a Dependabot PR posts pending, not this lane's success.
+      taskHoldSubject: { taskId: extractTaskTrailerId(view.body ?? ""), headRefName: view.headRefName ?? "" },
     });
     if (!posted.posted) {
       console.log(`no remudero-review posted (refused: ${posted.reason}): ${view.url}`);
@@ -13317,7 +13321,10 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     });
     // W1-T2258: `view.headRefOid` is the SAME head the `review.posted` line just above was keyed
     // to — already in hand, no extra read needed to close the join gap for this lane.
-    const armOutcome = armAndLogOutcome(view.url, taskId, log, deps.arm, "operator", view.headRefOid);
+    // W1-T14902: the production arm is the awaited detailed arm over realArmDepsAsync, whose task-hold gate reads the
+    // live body's task once more right before arming; its refusal and reason reach the row armAndLogOutcome writes.
+    const awaitedArm = deps.arm === undefined ? await armAutoMergeDetailedAsync(view.url, taskId, realArmDepsAsync()) : undefined;
+    const armOutcome = armAndLogOutcome(view.url, taskId, log, deps.arm ?? (() => awaitedArm!), "operator", view.headRefOid);
     // W1-T968: the PR — not merely this call — is what the console line answers about; a
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
     const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), view.url, view.headRefOid);

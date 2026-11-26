@@ -44,7 +44,7 @@ import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
 import { isTestRunner } from "../../lib/live-write-guard.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, markUnbackedBodyGuards, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type CriterionVerdict, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure, type ReviewAdmission } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, markUnbackedBodyGuards, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, postUnreadTaskHoldGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type CriterionVerdict, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure, type ReviewAdmission } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -3161,7 +3161,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     if (found.outcome === "unreadable") {
       log("review.catalog.unreadable", { reason: found.reason });
       // W1-T14902 (invariant an-unread-hold-holds): a success already on this head must not stand. A shadow posts nothing.
-      if (!shadow) await (deps.publishUnreadHold ?? (isTestRunner() ? async () => {} : publishUnreadTaskCatalogHold))({ postStatus: postStatusDep, post: postReviewStatus, owner, repo,
+      if (!shadow) await (deps.publishUnreadHold ?? (isTestRunner() ? async () => {} : publishUnreadTaskCatalogHold))({ post: postReviewStatus, owner, repo,
         sha: view.headRefOid, taskId, reviewKey, reason: found.reason, ledgerPath, runId, prUrl: view.url,
         reviewInputDigest: inputDigest, fetchLifecycle: () => fetchPrLifecycleAsync(view.url), log });
       console.error("rmd review: task catalog unreadable; no body fallback or review effect");
@@ -3711,10 +3711,11 @@ export function planOnlyPhaseFields(marks: Record<string, number>, armedAt: numb
 /**
  * W1-T14902 (invariant an-unread-hold-holds): the review could not read the named task's catalog, so the task's
  * `dispatch_hold` is unread. Before the review exits, it replaces whatever status this head carries (a success from an
- * earlier pass included) with pending naming the unread hold, so nothing merges or arms on it. A failed post is ledgered.
+ * earlier pass included) with pending naming the unread hold, through the pending-only {@link postUnreadTaskHoldGuarded},
+ * which ledgers what the post actually did. A throw is ledgered too, never thrown out of the review's exit.
  */
 export async function publishUnreadTaskCatalogHold(args: {
-  postStatus: (opts: Parameters<typeof postReviewStatusGuarded>[0]) => Promise<unknown>;
+  publish?: typeof postUnreadTaskHoldGuarded;
   post: Parameters<typeof postReviewStatusGuarded>[0]["post"];
   owner: string; repo: string; sha: string; taskId: string; reviewKey: string; reason: string;
   ledgerPath: string; runId: string; prUrl: string; reviewInputDigest: string;
@@ -3723,11 +3724,9 @@ export async function publishUnreadTaskCatalogHold(args: {
 }): Promise<void> {
   const refusal = taskHoldRefusal({ outcome: "unread", taskId: args.taskId, reason: `task catalog ${args.reason}` })!;
   try {
-    await args.postStatus({ post: args.post, owner: args.owner, repo: args.repo, sha: args.sha, state: "pending",
-      description: `remudero-review: pending — ${refusal}`,
-      taskId: args.reviewKey, evidence: "no_evidence", ledgerPath: args.ledgerPath, runId: args.runId, prUrl: args.prUrl,
+    await (args.publish ?? postUnreadTaskHoldGuarded)({ post: args.post, owner: args.owner, repo: args.repo, sha: args.sha,
+      refusal, taskId: args.reviewKey, ledgerPath: args.ledgerPath, runId: args.runId, prUrl: args.prUrl,
       reviewInputDigest: args.reviewInputDigest, reviewEngineRevision: REVIEW_ENGINE_REVISION, fetchLifecycle: args.fetchLifecycle });
-    args.log("review.dispatch_hold_held", { reason: refusal, head_sha: args.sha, outcome: "pending" });
   } catch (e) {
     args.log("review.pending_post.error", { error: String((e as Error)?.message ?? e) });
   }

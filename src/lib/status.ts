@@ -51,6 +51,7 @@ import { startWorker } from "./child-entry-argv.js";
 import { hostWorktreeGit } from "./worktree-git.js";
 import { resolveRepoLayout } from "./repo-layout.js";
 import { prNumberFromSquashSubject, revertRestored, revertedMergesFromLog, type MainHistoryRecord, type RevertedMerge } from "./reverted-merges.js";
+import { taskIdFromRunBranch } from "./untasked-review.js";
 
 /** Host-private inputs for one status pass. Only the finite outcome is enumerable. */
 export interface CatalogStatusContext {
@@ -2098,44 +2099,7 @@ function latestActualPrUrl(
   return url;
 }
 
-/** Extract the task id a fleet-dispatched run branch claims, or `undefined`. The ONE named extractor for a
- *  shape tested three other ways: {@link ownsBranch} VERIFIES a known id and cannot discover one, and
- *  run-task.ts's predicate is a boolean shape test with no capture group (W1-T453). */
-export function taskIdFromRunBranch(head: string | undefined): string | undefined {
-  const m = /^run-(.+)-\d+$/.exec(head ?? "");
-  if (!m) return undefined;
-  // W1-T3042 — THE CAPTURE MUST LOOK LIKE A TASK ID, or this invents one.
-  //
-  // `(.+)` is greedy and the shape has no second anchor, so any extra hyphenated segment before the
-  // epoch is swallowed whole: `run-W1-T3030-build-<epochMs>` yielded `W1-T3030-build`. That is
-  // not a failure to credit — it is a CREDIT FOR A TASK THAT DOES NOT EXIST, which is worse,
-  // because a phantom id enters the merged set while the real task stays uncredited and eligible
-  // for re-dispatch.
-  //
-  // MEASURED 2026-09-07 over 255 merged pull requests: 100 run-shaped heads, 92 extracting a valid
-  // id and 8 a phantom — five from a `-file-`/`-build-` pairing used that day. Returning `undefined`
-  // costs those five nothing: they never credited a real task, so no credit is lost, and a caller
-  // can now SAY the branch names no task instead of acting on an id nobody minted. (The other three
-  // of the 8, TRIAGE feedback branches, were never phantom in the first place — see `namesATask`.)
-  return namesATask(m[1]) ? m[1] : undefined;
-}
-
-/** Reject a stapled-on suffix, not unfamiliar id formats. Hyphen-free ids are accepted.
- *  Canonical-only validation rejected fixture ids `A`/`D` and broke four suites, including the
- *  pushed-branch in-flight guard; hyphen-free-or-canonical also broke auto-triage's guard.
- *  Strip a trailing word: `W1-T3030-build` leaves a whole id and is rejected;
- *  `TRIAGE-fb-1785792135748-755f93` leaves a non-id and is accepted. */
-function namesATask(capture: string): boolean {
-  // Letter-suffix ids such as `W1-T12a` also remain valid; do not replace suffix detection with a whitelist.
-  const suffixed = /^(.+)-[A-Za-z][A-Za-z0-9]*$/.exec(capture);
-  if (suffixed && TASK_ID_SHAPE.test(suffixed[1])) return false;
-  return true;
-}
-
-/** The canonical minted shape — `W<n>-T<n>` with an optional split-out letter (`W1-T12a`,
- *  `W1-T1C`). Used ONLY to recognise an id that has had a suffix appended, never as a whitelist:
- *  1457 of 1457 plan ids match it, and ids that do NOT (TRIAGE runs) are still real. */
-const TASK_ID_SHAPE = /^[A-Za-z]+\d*-T\d+[A-Za-z]*$/;
+export { taskIdFromRunBranch };
 
 /**
  * Extract the task id a SLUG branch declares in its own name — the shape {@link taskIdFromRunBranch} cannot

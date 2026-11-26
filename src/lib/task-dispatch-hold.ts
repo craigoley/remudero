@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { defaultGitRunnerAsync, loadPlanAtRefAsync, type KeepsUnseenDependency } from "./plan.js";
 import { readOpsCatalogSnapshotAsync } from "./ops-catalog-source.js";
 import { planDestinationRepository } from "./plan-destination.js";
+import { usesUntaskedReviewMetadata } from "./untasked-review.js";
 
 /**
  * W1-T14902: the one reader of a named task's `dispatch_hold`, for the review's guarded poster and the merge path alike.
@@ -31,6 +32,11 @@ export interface TaskDispatchHoldSources {
   stateDir: string;
   /** The pull request's repository, whose plan holds its task. Omitted: the daemon's target, else this checkout. */
   repository?: { owner: string; repo: string };
+  /** The pull request's head branch, which {@link usesUntaskedReviewMetadata} needs to tell a generated lane's
+   *  correlation id (`main-repair-<sha>` on its own run branch) from a filed task. A function is called only for an id
+   *  of a generated lane's shape; a throw reads unread. Omitted: only a branch-free untasked id (`PR-<n>`, `unfiled`,
+   *  none) reads clear, and any other id is read as a task. */
+  headRefName?: string | (() => Promise<string | undefined>);
 }
 
 /** W1-T14902: what the caller read of the named task's `dispatch_hold`. */
@@ -132,13 +138,21 @@ function targetsRepo(taskRepo: string | undefined, subject: string): boolean {
   return taskRepo === undefined || taskRepo.trim() === "" || name(taskRepo) === name(subject);
 }
 
-// The keys a review stamps when the PR names no task (reviewLedgerKeyFor's `PR-<n>`, dep-review's `dep-review-PR<n>`,
-// and the unfiled sentinel). Every other trailer is a task id, whatever its shape (`W1-T12e`, `NEW-1a`): its hold is read.
-const SYNTHETIC_REVIEW_KEY = /^(?:PR-\d+|dep-review-PR\d+|unfiled)$/;
-
 export async function readTaskDispatchHold(taskId: string | undefined, sources: TaskDispatchHoldSources): Promise<TaskHoldReading> {
-  // A synthetic review key or no trailer names no task: it reviews and arms as today.
-  if (taskId === undefined || taskId.trim() === "" || SYNTHETIC_REVIEW_KEY.test(taskId)) return { outcome: "clear" };
+  // The review lane's own untasked classification: no trailer, `PR-<n>`, the unfiled sentinel, or a generated lane's
+  // correlation id on its own run branch names no filed task, so it reviews and arms as today. Every other id is a
+  // task, whatever its shape (`W1-T12e`, `NEW-1a`), and a lane's private key (`dep-review-PR<n>`) is not exempt: a
+  // caller passes the task the PR body names, so a key handed in by mistake reads unread and holds.
+  if (taskId === undefined || taskId.trim() === "" || usesUntaskedReviewMetadata(taskId, "")) return { outcome: "clear" };
+  if (usesUntaskedReviewMetadata(taskId, `run-${taskId}-0`) && sources.headRefName !== undefined) {
+    let head: string | undefined;
+    try {
+      head = typeof sources.headRefName === "string" ? sources.headRefName : await sources.headRefName();
+    } catch (error) {
+      return { outcome: "unread", taskId, reason: `the pull request's head branch is unreadable: ${String((error as Error)?.message ?? error)}` };
+    }
+    if (head !== undefined && usesUntaskedReviewMetadata(taskId, head)) return { outcome: "clear" };
+  }
   const plans = sources.readMainPlan !== undefined ? [sources.readMainPlan] : await mainPlanReaders(sources);
   for (const readPlan of plans) {
     let main: { byId: ReadonlyMap<string, { dispatch_hold?: boolean }> };

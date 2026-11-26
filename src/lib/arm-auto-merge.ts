@@ -1700,10 +1700,11 @@ export async function readPullRequestTaskHold(
 ): Promise<TaskHoldReading> {
   const target = mergeTargetFromPrUrl(prUrl);
   if (!target) return { outcome: "unread", taskId: "the named task", reason: `no pull request in ${prUrl}` };
-  const pull = await readBody(`repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`) as { body?: unknown };
+  const pull = await readBody(`repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`) as { body?: unknown; head?: { ref?: unknown } };
   const taskId = extractTaskTrailerId(typeof pull?.body === "string" ? pull.body : "");
-  return readTaskDispatchHold(taskId, { repository: { owner: target.owner, repo: target.repo }, ...sources,
-    stateDir: join(loadConfigImpl().root, "state") });
+  const headRefName = typeof pull?.head?.ref === "string" ? pull.head.ref : undefined;
+  return readTaskDispatchHold(taskId, { repository: { owner: target.owner, repo: target.repo },
+    ...(headRefName === undefined ? {} : { headRefName }), ...sources, stateDir: join(loadConfigImpl().root, "state") });
 }
 
 export function attemptArm(
@@ -2426,7 +2427,7 @@ export function armAutoMergeAtOpen(
   isDraft = false,
 ): ArmOutcome {
   requireExplicitArmSeam("armAutoMergeAtOpen", !isRealArmDepsObject(deps));
-  return runStepsSync(armAtOpenSteps(prUrl, deps, irreversible, isDraft));
+  return runStepsSync(armAtOpenSteps(prUrl, deps, irreversible, isDraft)).outcome;
 }
 
 /** W1-T5284 — {@link armAutoMergeAtOpen} for runTaskBody, which runs on the daemon loop: the same
@@ -2437,9 +2438,14 @@ export async function armAutoMergeAtOpenAsync(
     Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance" | "taskHold">> = realArmDepsAsync(),
   irreversible = false,
   isDraft = false,
+  // W1-T14902: handed the whole attempt, so the run's `automerge.armed` row can name a refusal's reason (a task's
+  // `dispatch_hold`) instead of the bare outcome.
+  onAttempt?: (attempt: ArmAttemptResult) => void,
 ): Promise<ArmOutcome> {
   requireExplicitArmSeam("armAutoMergeAtOpenAsync", !isRealArmDepsObject(deps));
-  return runStepsAsync(armAtOpenSteps(prUrl, deps, irreversible, isDraft));
+  const attempt = await runStepsAsync(armAtOpenSteps(prUrl, deps, irreversible, isDraft));
+  onAttempt?.(attempt);
+  return attempt.outcome;
 }
 
 function* armAtOpenSteps(
@@ -2448,15 +2454,15 @@ function* armAtOpenSteps(
     Partial<Pick<ArmDeps<true>, "headSha" | "ledgerLines" | "readMergeFacts" | "updateBranch" | "readPlanTouch" | "readPlanMergeSafety" | "readOwnFiles" | "readMergedRatchets" | "armStanding" | "sleep" | "sleepSync" | "mergeQueue" | "enqueue" | "stackPrerequisite" | "closingReferences" | "contributorAdmission" | "shadowInstance" | "taskHold">>,
   irreversible: boolean,
   isDraft: boolean,
-): Steps<ArmOutcome> {
+): Steps<ArmAttemptResult> {
   if (irreversible) {
     deps.say(
       `automerge.irreversible_refused (W1-T919/W1-T947): diff classified irreversible — refusing to ` +
         `arm at open; an operator must review and merge this manually: ${prUrl}`,
     );
-    return "irreversible-refused";
+    return { outcome: "irreversible-refused" };
   }
-  return (yield* attemptArmSteps(prUrl, deps, undefined, isDraft)).outcome;
+  return yield* attemptArmSteps(prUrl, deps, undefined, isDraft);
 }
 
 /**

@@ -19,7 +19,7 @@ import { homedir, hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { isTestRunner } from "./live-write-guard.js";
-import { readTaskDispatchHold, taskHoldRefusal, type TaskHoldReading } from "./task-dispatch-hold.js";
+import { readTaskDispatchHold, taskHoldRefusal, type TaskDispatchHoldSources, type TaskHoldReading } from "./task-dispatch-hold.js";
 export { taskHoldReading, taskHoldRefusal, type TaskHoldReading } from "./task-dispatch-hold.js";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -65,6 +65,7 @@ import {
 } from "./task-id-reservation.js";
 // @ts-expect-error The shared plain .mjs helper ships under src/ so source-only runtimes can load it.
 import { adjudicateReservationChain, parseReservationHolderLine, parseReservationHolderFields } from "./reservation-chain.mjs";
+import { UNFILED_RUN_SENTINEL } from "./untasked-review.js";
 
 /** JUDGE (MASTER-PLAN §12 rules 4/3B; W1-T1C): after green CI, a fresh read-only REVIEW session
  * judges each stated proof and posts `remudero-review`. {@link judgeReview} is pure (unit-fixture falsifier);
@@ -7165,9 +7166,7 @@ export interface VerdictStabilityResult {
   suppressed: boolean;
 }
 
-/** W1-T5839 — what `taskIdFromRunBranch` recovers from every `run-unfiled-<epochMs>` head: a branch-shape SENTINEL that
- *  every ad-hoc PR shares, never a task (W1-T3535), so it owns neither supersession nor a review verdict. */
-export const UNFILED_RUN_SENTINEL = "unfiled";
+export { UNFILED_RUN_SENTINEL };
 
 /** W1-T5839 — THE KEY A PR's REVIEW ROWS ARE WRITTEN UNDER: the resolved task id, else `PR-<n>` — and the sentinel is
  *  "else" too. `resolveReviewTaskId` answers `unfiled` or `undefined` for ONE run-unfiled PR depending on that pass's
@@ -13262,6 +13261,9 @@ export interface PostReviewStatusGuardedOpts {
   /** W1-T14902: the named task's `dispatch_hold`, read at the plan's main. `held` or `unread` turns a success into
    *  pending. Omitted, {@link readTaskDispatchHold} reads it for every caller, left out only under the test runner. */
   taskHold?: TaskHoldReading;
+  /** W1-T14902: the task the live PR names and its head branch, for the hold read. A lane whose ledger key is not the
+   *  task (dep-review's `dep-review-PR<n>`) passes the body's trailer here. Omitted: {@link taskId} with no branch. */
+  taskHoldSubject?: { taskId: string | undefined; headRefName: string };
   evidence: ReviewEvidenceStrength;
   ledgerPath: string;
   runId: string;
@@ -13587,8 +13589,29 @@ function recordedCappedOverride(opts: PostReviewStatusGuardedOpts): CappedOverri
  *  test-runner precedent keeps a suite of partial fakes off the live plan and ops catalog). */
 async function guardedTaskHold(opts: PostReviewStatusGuardedOpts): Promise<TaskHoldReading | undefined> {
   if (opts.taskHold !== undefined) return opts.taskHold;
-  return isTestRunner() ? undefined : readTaskDispatchHold(opts.taskId,
-    { stateDir: dirname(opts.ledgerPath), repository: { owner: opts.owner, repo: opts.repo } });
+  if (isTestRunner()) return undefined;
+  const { taskId, sources } = taskHoldReadOf(opts);
+  return readTaskDispatchHold(taskId, sources);
+}
+
+/** W1-T14902: what {@link guardedTaskHold} hands the one hold reader — the live PR's task and head branch when the
+ *  caller names them, else the ledger key. */
+export function taskHoldReadOf(opts: Pick<PostReviewStatusGuardedOpts, "taskId" | "taskHoldSubject" | "ledgerPath" | "owner" | "repo" | "prUrl">,
+  readPullRow: (args: string[]) => Promise<unknown> = ghJsonAsync): {
+  taskId: string | undefined; sources: TaskDispatchHoldSources;
+} {
+  const subject = opts.taskHoldSubject;
+  return { taskId: subject === undefined ? opts.taskId : subject.taskId, sources: { stateDir: dirname(opts.ledgerPath),
+    repository: { owner: opts.owner, repo: opts.repo },
+    headRefName: subject !== undefined ? subject.headRefName : () => pullRequestHeadRef(opts.prUrl, readPullRow) } };
+}
+
+/** W1-T14902: the live head branch of the PR a post names, read only for an id of a generated lane's shape. */
+export async function pullRequestHeadRef(prUrl: string | undefined, read: (args: string[]) => Promise<unknown>): Promise<string | undefined> {
+  const target = prLifecycleUrlTarget(prUrl ?? "");
+  if (target === undefined) throw new Error(`no pull request in ${JSON.stringify(prUrl)}`);
+  const ref = (await read(singlePrRestArgs(target.owner, target.repo, target.number)) as { head?: { ref?: unknown } })?.head?.ref;
+  return typeof ref === "string" ? ref : undefined;
 }
 
 async function publishTaskHold(opts: PostReviewStatusGuardedOpts, verdict: ReviewVerdict,
@@ -13602,6 +13625,37 @@ async function publishTaskHold(opts: PostReviewStatusGuardedOpts, verdict: Revie
   const result = await publishReviewStatusLocked({ ...opts, state: "pending", verdict: held, description,
     reviewDecisionDigest: undefined });
   return { ...result, effectiveState: "pending", effectiveVerdict: held, taskHold: refusal, reason: result.reason ?? refusal };
+}
+
+/** W1-T14902 (invariant an-unread-hold-holds): the review could not read the named task's catalog, so its hold is
+ *  unread and whatever stands on this head (an earlier success included) must yield to pending. This path can post
+ *  ONLY pending, whatever the caller hands it, and it does not bypass {@link decideReviewStatusPost}: it runs inside the
+ *  same review-status lock and {@link publishReviewStatusLocked}, so the lifecycle, input-digest and reviewer-freshness
+ *  checks all apply. A hold is not a new verdict — it holds the one already posted here — so it carries that posted
+ *  verdict's evidence class, as {@link publishTaskHold} carries the held success's. The ledger row records what the
+ *  post actually did. */
+export async function postUnreadTaskHoldGuarded(
+  opts: Omit<PostReviewStatusGuardedOpts, "state" | "evidence" | "verdict" | "reviewDecisionDigest"> & { refusal: string },
+): Promise<PostReviewStatusGuardedResult> {
+  const { refusal, ...rest } = opts;
+  const lockPath = join(dirname(rest.ledgerPath), "review-status-locks", `${rest.taskId}.lock`);
+  const handle = await acquireReviewStatusLock(lockPath, rest.lockOpts);
+  try {
+    const lines = readLiveLedgerRecords(rest.ledgerPath);
+    const prior = rest.prUrl !== undefined && rest.reviewInputDigest !== undefined
+      ? lastPostedReviewStatusForInput(lines, rest.taskId, rest.prUrl, rest.sha, rest.reviewInputDigest)
+      : lastPostedReviewStatusFromLedger(lines, rest.taskId);
+    const evidence: ReviewEvidenceStrength = prior?.headSha === rest.sha && prior.evidence === "executed" ? "executed" : "no_evidence";
+    const description = `remudero-review: pending — ${refusal}`.slice(0, STATUS_DESC_MAX);
+    const result = await publishReviewStatusLocked({ ...rest, state: "pending", evidence, description,
+      reviewDecisionDigest: undefined, verdict: undefined });
+    appendLedger(rest.ledgerPath, { run_id: rest.runId, task_id: rest.taskId, step: "review.dispatch_hold_held",
+      head_sha: rest.sha, reason: refusal, evidence, outcome: result.posted ? "pending" : "refused",
+      ...(result.posted ? {} : { post_reason: result.reason ?? null }) });
+    return { ...result, effectiveState: result.posted ? "pending" : result.effectiveState, taskHold: refusal };
+  } finally {
+    handle.release();
+  }
 }
 
 async function publishCappedHold(opts: PostReviewStatusGuardedOpts, verdict: ReviewVerdict,

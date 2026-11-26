@@ -50,6 +50,7 @@ import { repoRoot, resolveOwnerRepo } from "./repo-location.js";
 import { OwnerRepoUnresolvableError } from "./owner-repo.js";
 import { reviewTaskIdFromBody } from "./report-commands.js";
 import { isFleetAuthoredText } from "./escalation-answers.js";
+import { PR_PENDING_PLACEHOLDER, usesUntaskedReviewMetadata } from "./untasked-review.js";
 
 /** REST rollups preserve check-run order: retain external_id and the exact head/constituent
  * outcome beside each row without changing the shared REST mapper's unrelated callers. */
@@ -1806,20 +1807,7 @@ export function resolveReviewTaskId(
   return taskIdFromRunBranch(headRefName);
 }
 
-/** A hand PR pushed before it had a number carries the trailer `PR-pending`; it names no shard, so on its own
- *  `run-PR-pending-<epoch>` head it is reviewed like a trailerless PR instead of refusing setup every pass. */
-export const PR_PENDING_PLACEHOLDER = { taskId: "PR-pending", branch: /^run-PR-pending-\d+$/, rule: "W1-T11258" } as const;
-
-/** Generated lanes have correlation ids, not filed task records; keep their bounded semantic review.
- *  A synthetic `PR-<n>` id (a hand-fix PR's trailer) names no shard either: it gets the defaults a trailerless PR
- *  gets, on any branch, so the trailer can never cost a review (#13305: refused on every pass for 4.5 h). */
-export function usesUntaskedReviewMetadata(taskId: string | undefined, headRefName: string): boolean {
-  if (taskId === undefined || taskId === UNFILED_RUN_SENTINEL || /^PR-[1-9]\d*$/.test(taskId)) return true;
-  if (taskId === PR_PENDING_PLACEHOLDER.taskId) return PR_PENDING_PLACEHOLDER.branch.test(headRefName);
-  if (headRefName === `run-${taskId}` && /^RETRO-\d+$/.test(taskId)) return true;
-  return taskIdFromRunBranch(headRefName) === taskId &&
-    /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+|main-repair-(?:(?:ratchet|revert)-)?[0-9a-f]{12})$/.test(taskId);
-}
+export { PR_PENDING_PLACEHOLDER, usesUntaskedReviewMetadata };
 
 /**
  * Resolve a PR's task id (W1-T453): the `Remudero-Task:` trailer first, the `run-<taskId>-*` head ref only as

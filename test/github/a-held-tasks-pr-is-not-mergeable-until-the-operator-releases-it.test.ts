@@ -14,7 +14,7 @@ import { armIfVerdictPermitsAsync, attemptArmAsync, readPullRequestTaskHold, rea
 import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
-import { postReviewStatusGuarded, taskHoldReading, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
+import { postReviewStatusGuarded, postUnreadTaskHoldGuarded, pullRequestHeadRef, taskHoldReadOf, taskHoldReading, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
 import { planCheckoutRoot, readOpsCatalogHold, targetPlanRoot, readTaskDispatchHold, type TaskDispatchHoldSources } from "#src/lib/task-dispatch-hold.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { readLedgerLines } from "#src/lib/status.js";
@@ -166,8 +166,9 @@ test("W1-T14902: the one reader reads main, then a fresh ops record; every other
   assert.equal((await read({ readMainPlan: async () => { throw new Error("bad object origin/main"); }, lookup: never })).outcome, "unread");
   // A synthetic review key or no trailer names no task.
   assert.deepEqual(await read({ readMainPlan: never, lookup: never }, "PR-910"), { outcome: "clear" });
-  assert.deepEqual(await read({ readMainPlan: never, lookup: never }, "dep-review-PR910"), { outcome: "clear" });
   assert.deepEqual(await read({ readMainPlan: never, lookup: never }, "unfiled"), { outcome: "clear" });
+  // Round-6 C1: a lane's private key is no exemption — a caller hands in the body's task, so a key passed by mistake holds.
+  assert.equal((await read({ readMainPlan: main({}), lookup: ops({ outcome: "absent" }) }, "dep-review-PR910")).outcome, "unread");
   // Any other trailer is a task id whatever its shape (round-5 finding F1: a `NEW-1a` record's hold was skipped).
   assert.deepEqual(await read({ readMainPlan: main({ "NEW-1a": { dispatch_hold: true } }), lookup: never }, "NEW-1a"),
     { outcome: "held", taskId: "NEW-1a" });
@@ -443,25 +444,90 @@ test("W1-T14902: a satellite target's plan is read as its review reads it, and a
 });
 
 test("W1-T14902: a review whose task catalog is unreadable replaces this head's status with pending naming the unread hold", async (t) => {
-  // Round-5 finding F3: the refusal exit (`task catalog unreadable`) left an earlier success standing on the head.
-  const ledgerPath = join(tmp(t, "catalog-refused"), "ledger.ndjson");
+  // Round-5 F3 and round-6 C3: the refusal exit (`task catalog unreadable`) left an earlier executed success standing,
+  // and a no-evidence pending is refused over it by the unchanged precedence guard. The hold carries the held
+  // verdict's evidence class, so the guard permits it, and the row records what the post did.
+  const dir = tmp(t, "catalog-refused");
+  const ledgerPath = join(dir, "ledger.ndjson");
   const posts: Array<{ state: string; description?: string }> = [];
-  const rows: Array<{ step: string } & Record<string, unknown>> = [];
   const args = {
     post: (status: { state: string; description?: string }) => { posts.push(status); },
     owner: "acme", repo: "remudero-ops", sha: SHA, taskId: TASK, reviewKey: TASK, reason: "ops-ref_moved", ledgerPath,
     runId: "t14902-catalog", prUrl: PR_URL, reviewInputDigest: "v2:catalog", fetchLifecycle: () => ({ merged: false, closed: false }),
-    log: (step: string, extra: Record<string, unknown> = {}) => { rows.push({ step, ...extra }); },
+    log: () => {},
   };
-  await publishUnreadTaskCatalogHold({ ...args, postStatus: postReviewStatusGuarded } as never);
-  assert.deepEqual(posts.map((p) => p.state), ["pending"], "THE CLAIM: pending replaces the head's status");
+  appendLedger(ledgerPath, { run_id: "earlier", task_id: TASK, step: "review.posted", state: "success", head_sha: SHA,
+    pr_url: PR_URL, review_input_digest: "v2:catalog", proof_exec: ["executed_pass"] });
+  await publishUnreadTaskCatalogHold(args as never);
+  assert.deepEqual(posts.map((p) => p.state), ["pending"], "THE CLAIM: pending replaces the executed success on this head");
   assert.match(posts[0]!.description ?? "", /held: W1-T14898's dispatch_hold is unreadable \(task catalog ops-ref_moved\)/);
-  assert.equal(rows.filter((row) => row.step === "review.dispatch_hold_held").length, 1);
-  // A post that fails is ledgered, never thrown out of the review's exit.
-  const failing: typeof rows = [];
-  await publishUnreadTaskCatalogHold({ ...args, log: (step: string, extra: Record<string, unknown> = {}) => { failing.push({ step, ...extra }); },
-    postStatus: async () => { throw new Error("HTTP 502"); } } as never);
-  assert.deepEqual(failing.map((row) => row.step), ["review.pending_post.error"]);
+  const held = readLedgerLines(ledgerPath).filter((row) => row.step === "review.dispatch_hold_held");
+  assert.deepEqual(held.map((row) => [row.outcome, row.evidence]), [["pending", "executed"]]);
+  // The lifecycle check still applies, and a refused post is ledgered as refused, never as pending.
+  const merged = join(tmp(t, "catalog-refused-merged"), "ledger.ndjson");
+  await publishUnreadTaskCatalogHold({ ...args, ledgerPath: merged, fetchLifecycle: () => ({ merged: true, closed: false }) } as never);
+  assert.equal(posts.length, 1, "a merged PR gets no post");
+  const refusedRows = readLedgerLines(merged).filter((row) => row.step === "review.dispatch_hold_held");
+  assert.equal(refusedRows.length, 1);
+  assert.equal(refusedRows[0]!.outcome, "refused");
+  assert.match(String(refusedRows[0]!.post_reason), /already merged/);
+  // A publisher that throws is ledgered, never thrown out of the review's exit.
+  const failing: string[] = [];
+  await publishUnreadTaskCatalogHold({ ...args, log: (step: string) => { failing.push(step); },
+    publish: async () => { throw new Error("HTTP 502"); } } as never);
+  assert.deepEqual(failing, ["review.pending_post.error"]);
+});
+
+test("W1-T14902: the unread-hold publisher posts only pending, whatever state or verdict a caller smuggles in", async (t) => {
+  for (const smuggled of ["success", "failure"] as const) {
+    const ledgerPath = join(tmp(t, `pending-only-${smuggled}`), "ledger.ndjson");
+    const posts: string[] = [];
+    const result = await postUnreadTaskHoldGuarded({
+      post: (status: { state: string }) => { posts.push(status.state); }, owner: "acme", repo: "remudero-ops", sha: SHA,
+      taskId: TASK, refusal: "held: unread", ledgerPath, runId: `pending-only-${smuggled}`, prUrl: PR_URL,
+      reviewInputDigest: "v2:pending-only", fetchLifecycle: () => ({ merged: false, closed: false }),
+      state: smuggled, evidence: "executed", verdict: { state: smuggled }, reviewDecisionDigest: "d",
+    } as never);
+    assert.deepEqual(posts, ["pending"], `a smuggled ${smuggled} still posts pending`);
+    assert.equal(result.effectiveState, "pending");
+    const rows = readLedgerLines(ledgerPath);
+    assert.ok(rows.every((row) => row.state === undefined || row.state === "pending"), "no row records a terminal state");
+    assert.equal(rows.find((row) => row.step === "review.dispatch_hold_held")?.evidence, "no_evidence", "no prior: no evidence");
+  }
+});
+
+test("W1-T14902: a generated lane's correlation id on its own run branch names no task, by the review lane's classification", async () => {
+  const never = async (): Promise<never> => { throw new Error("no catalog is read for an untasked review"); };
+  const id = "main-repair-0123456789ab";
+  const read = (headRefName: TaskDispatchHoldSources["headRefName"]) =>
+    readTaskDispatchHold(id, { stateDir: "/nonexistent/state", readMainPlan: never, lookup: never, headRefName });
+  assert.deepEqual(await read(`run-${id}-1795650818109`), { outcome: "clear" }, "THE CLAIM: a main-repair PR reviews as before");
+  assert.deepEqual(await read(async () => `run-${id}-1795650818109`), { outcome: "clear" }, "a lazily read head classifies the same");
+  assert.equal((await read(async () => { throw new Error("HTTP 502"); })).outcome, "unread", "an unreadable head holds");
+  // The same id on another branch is not the lane's own: it is read as a task, and nothing holds it.
+  const elsewhere = await readTaskDispatchHold(id, { stateDir: "/nonexistent/state", headRefName: "feature/x",
+    readMainPlan: async () => ({ byId: new Map() }), lookup: async () => ({ outcome: "absent" }) as never });
+  assert.equal(elsewhere.outcome, "unread");
+  // A filed task's id never asks for the head at all.
+  let asked = 0;
+  await readTaskDispatchHold(TASK, { stateDir: "/nonexistent/state", headRefName: async () => { asked++; return "x"; },
+    readMainPlan: async () => ({ byId: new Map([[TASK, {}]]) }), lookup: never });
+  assert.equal(asked, 0);
+});
+
+test("W1-T14902: the guarded poster reads the hold for the live PR's task, not a lane's ledger key", async () => {
+  const base = { taskId: "dep-review-PR910", ledgerPath: "/state/ledger.ndjson", owner: "acme", repo: "remudero", prUrl: PR_URL };
+  const subject = taskHoldReadOf({ ...base, taskHoldSubject: { taskId: TASK, headRefName: "dependabot/npm/x" } });
+  assert.equal(subject.taskId, TASK, "THE CLAIM: dep-review's hold is the body trailer's task");
+  assert.equal(subject.sources.headRefName, "dependabot/npm/x");
+  assert.equal(subject.sources.stateDir, "/state");
+  const reads: string[][] = [];
+  const keyed = taskHoldReadOf({ ...base, taskId: TASK }, async (args) => { reads.push(args); return { head: { ref: "run-x-1" } }; });
+  assert.equal(keyed.taskId, TASK);
+  assert.equal(typeof keyed.sources.headRefName, "function");
+  assert.equal(await (keyed.sources.headRefName as () => Promise<string | undefined>)(), "run-x-1");
+  assert.match(reads[0]!.join(" "), /repos\/acme\/remudero-ops\/pulls\/910/);
+  await assert.rejects(pullRequestHeadRef("not a pr url", async () => ({})), /no pull request/);
 });
 
 test("W1-T14902: a daemon whose cwd is no work tree (launchd's config.root) still reads the plan, from its install", async (t) => {
@@ -508,4 +574,65 @@ test("W1-T14902: the review command's catalog-unreadable exit hands the unread h
   assert.equal(published[0]!.taskId, id);
   assert.equal(published[0]!.sha, head);
   assert.match(published[0]!.reason, /^ops-/);
+});
+
+test("W1-T14902: dep-review posts with the body trailer's task as the hold subject, not its own ledger key", async (t) => {
+  const { depReviewCommand } = await import("#src/run-task.js");
+  const root = tmp(t, "dep-review-subject");
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const seen: Array<{ taskId: string; taskHoldSubject?: { taskId?: string; headRefName: string } }> = [];
+  const realLog = console.log;
+  console.log = () => {};
+  try {
+    await depReviewCommand("80", ["--repo", "remudero"], {
+      config: { root, ledger: ledgerPath } as never,
+      gh: () => ({
+        number: 80, url: "https://github.com/craigoley/remudero/pull/80",
+        title: "build(deps): bump left-pad from 1.3.0 to 1.3.1",
+        body: `Updates left-pad\n\nRemudero-Task: ${TASK}\n`, headRefOid: "beefcafe1234", headRefName: "dependabot/npm_and_yarn/left-pad-1.3.1",
+        author: { login: "app/dependabot" },
+        statusCheckRollup: [{ name: "ci", conclusion: "SUCCESS" }, { name: "Review", conclusion: "SUCCESS" }],
+      }),
+      prDiff: () => "diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n",
+      postStatus: (async (opts: (typeof seen)[number]) => { seen.push(opts); return { posted: false, reason: "fixture" }; }) as never,
+      arm: () => { throw new Error("a refused post never arms"); },
+      issues: { create: () => "https://github.com/craigoley/remudero/issues/999", ensureLabel: () => true } as never,
+    });
+  } finally {
+    console.log = realLog;
+  }
+  assert.equal(seen.length, 1, `dep-review reached its guarded post: ${JSON.stringify(seen)}`);
+  assert.equal(seen[0]!.taskId, "dep-review-PR80", "the ledger key is unchanged");
+  assert.deepEqual(seen[0]!.taskHoldSubject, { taskId: TASK, headRefName: "dependabot/npm_and_yarn/left-pad-1.3.1" },
+    "THE CLAIM: the hold is read for the task the live body names");
+});
+
+test("W1-T14902: the run's at-open arm hands its refusal reason to the caller, so its row names dispatch_hold", async () => {
+  const { armAutoMergeAtOpenAsync } = await import("#src/lib/arm-auto-merge.js");
+  const attempts: Array<{ outcome: string; error?: string }> = [];
+  const writes: string[] = [];
+  const outcome = await armAutoMergeAtOpenAsync(PR_URL, {
+    headSha: async () => SHA, ledgerLines: () => [], isMerged: async () => false, say: () => {},
+    armAuto: async () => { writes.push("armAuto"); }, mergeDirect: async () => { writes.push("mergeDirect"); },
+    taskHold: async () => ({ outcome: "held", taskId: TASK }),
+  }, false, false, (attempt) => { attempts.push(attempt); });
+  assert.equal(outcome, "hold-refused");
+  assert.deepEqual(writes, []);
+  assert.equal(attempts.length, 1);
+  assert.match(attempts[0]!.error ?? "", /W1-T14898 carries dispatch_hold/, "THE CLAIM: the reason reaches the caller");
+  const verb = (await import("node:fs")).readFileSync(join(REPO_ROOT, "src", "cli", "commands", "run-task-verb.ts"), "utf8");
+  assert.match(verb, /\(attempt\) => \{ armError = attempt\.error; \}/, "the run captures it");
+  assert.match(verb, /\.\.\.\(armError !== undefined \? \{ error: armError \} : \{\}\)/, "and writes it on automerge.armed");
+});
+
+test("W1-T14902: the arm's hold read hands the PR's head branch to the reader, so a main-repair PR arms as before", async (t) => {
+  const root = tmp(t, "arm-head-ref");
+  const config = (() => ({ root })) as unknown as Parameters<typeof readPullRequestTaskHold>[1];
+  const id = "main-repair-0123456789ab";
+  const never = async (): Promise<never> => { throw new Error("no catalog is read for an untasked review"); };
+  const pull = (ref: string) => async () => ({ body: `Remudero-Task: ${id}\n`, head: { ref } });
+  assert.deepEqual(await readPullRequestTaskHold(PR_URL, config, pull(`run-${id}-1795650818109`), { readMainPlan: never, lookup: never }),
+    { outcome: "clear" }, "THE CLAIM: the lane's own branch classifies it untasked");
+  assert.equal((await readPullRequestTaskHold(PR_URL, config, pull("feature/x"),
+    { readMainPlan: async () => ({ byId: new Map() }), lookup: async () => ({ outcome: "absent" }) as never })).outcome, "unread");
 });
