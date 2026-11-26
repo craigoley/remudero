@@ -1,13 +1,16 @@
 // W1-T14903 — review width and the build lanes cut from ONE host memory reading, so active reviews cannot silently
 // starve builds.
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import {
-  laneTarget, publishSharedHostMemory, SHARED_HOST_MEMORY_STALE_MS, sharedHostMemory, sharedHostMemoryShort,
+  HOST_MEMORY_SHARED_STEP, laneTarget, publishSharedHostMemory, SHARED_HOST_MEMORY_STALE_MS, sharedHostMemory, sharedHostMemoryShort,
   type LaneMemoryReading,
 } from "#src/lib/lane-governor.js";
 import {
-  reviewYieldsReReviews, selectAdaptiveReviewWidth, sharedMemoryAvailableMib,
+  reviewYieldsReReviews, selectAdaptiveReviewWidth, selectRuntimeReviewWidth, sharedMemoryAvailableMib,
   type ReviewCapacityObservation, type ReviewCapacityPolicy,
 } from "#src/lib/review-capacity.js";
 import { DEFAULT_SWEEP_POLICY, reReviewsJudgedHead, selectReviewAdmissions, type OpenPrView } from "#test/helpers/sweep-test.js";
@@ -126,4 +129,27 @@ test("W1-T14903 shared memory never raises a lane width", () => {
     const open = selectReviewAdmissions(prs, DEFAULT_SWEEP_POLICY, NOW, undefined, width, 0, undefined, undefined, false).spawning;
     assert.ok(yielded.length <= open.length, "yielding never admits more reviews");
   }
+});
+
+test("W1-T14903 the review width pass writes one host_memory.shared row per snapshot", () => {
+  const root = mkdtempSync(join(tmpdir(), "rmd-shared-memory-"));
+  const logs: Array<{ step: string; extra?: Record<string, unknown> }> = [];
+  const pass = (nowMs: number): number => selectRuntimeReviewWidth({
+    root, queueDepth: 4, activeWorkers: 0, nowMs, ledgerLines: [], policy: POLICY, ...BOUNDS,
+    log: (step, extra) => logs.push({ step, extra }),
+  });
+  publishSharedHostMemory(reading(-110), NOW);
+  pass(NOW);
+  pass(NOW + 1_000);
+  const rows = logs.filter((row) => row.step === HOST_MEMORY_SHARED_STEP);
+  assert.equal(rows.length, 1, "one row for one snapshot, however many width passes read it");
+  assert.equal(rows[0]?.extra?.available_mib, -110);
+  assert.equal(rows[0]?.extra?.review_read_mib, -110, "the review lane read the shared snapshot, not its own");
+  assert.equal(rows[0]?.extra?.short, true);
+  assert.equal(rows[0]?.extra?.yielded, "re-review");
+  publishSharedHostMemory(reading(30_000), NOW + 60_000);
+  pass(NOW + 60_000);
+  const next = logs.filter((row) => row.step === HOST_MEMORY_SHARED_STEP);
+  assert.equal(next.length, 2, "a new snapshot writes its own row");
+  assert.equal(next[1]?.extra?.yielded, "none");
 });
