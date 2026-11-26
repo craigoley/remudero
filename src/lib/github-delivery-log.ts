@@ -268,10 +268,27 @@ async function redeliverFailed(deps: DeliveryLogPassOptions, api: DeliveryLogApi
   for (const delivery of fresh) absorb(memory, GITHUB_DELIVERY_STEP, deliveryRow(APP_HOOK_ID, delivery));
   const answered = memory.newestAnswered;
   if (answered === undefined) return true;
-  const owed = [...memory.failed]
+  const owedNow = (): Array<[string, string | undefined]> => [...memory.failed]
     .filter(([deliveryId, guid]) => BigInt(deliveryId) < answered && !(guid !== undefined && memory.redeliveredGuids.has(guid)))
     .sort(([a], [b]) => (BigInt(a) < BigInt(b) ? -1 : 1));
-  for (const [deliveryId, guid] of owed) {
+  if (owedNow().length === 0) return true;
+  // Another serve process (a handoff's other generation) may have redelivered one of these since this memory loaded:
+  // its github.delivery.redelivered row, re-read here before any POST, stops this one.
+  const reread = await readLedgerUnionRawLinesAsync(deps.stateDir, {
+    step: [GITHUB_DELIVERY_REDELIVERED_STEP],
+    rotationWindowMs: REDELIVERY_WINDOW_MS,
+    minRotations: 1,
+    refuseIncomplete: true,
+  });
+  if (!reread.ok) {
+    deps.log(GITHUB_DELIVERY_READ_FAILED_STEP, { hook_id: APP_HOOK_ID, status_class: "ledger", unread: reread.unread.length });
+    return false;
+  }
+  for (const line of reread.rawLines) {
+    const row = record(JSON.parse(line));
+    absorb(memory, row.step, row);
+  }
+  for (const [deliveryId, guid] of owedNow()) {
     const row = { hook_id: APP_HOOK_ID, delivery_id: deliveryId, guid };
     deps.log(GITHUB_DELIVERY_REDELIVERED_STEP, row);
     absorb(memory, GITHUB_DELIVERY_REDELIVERED_STEP, row);

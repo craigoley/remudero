@@ -16,6 +16,7 @@ import {
   createRedeliveryMemory,
   defaultDeliveryLogApi,
   DeliveryLogReadError,
+  GITHUB_DELIVERY_LOG_INTERVAL_MS,
   GITHUB_DELIVERY_READ_FAILED_STEP,
   GITHUB_DELIVERY_REDELIVERED_STEP,
   GITHUB_DELIVERY_STEP,
@@ -23,6 +24,7 @@ import {
   startGithubDeliveryLogPass,
   type DeliveryLogApi,
 } from "#src/lib/github-delivery-log.js";
+import { buildReadyServeServer, buildServeServer, CONSOLE_SHA_UNKNOWN, type ServeDeps } from "#src/lib/serve.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const SERVE_HOOK_CONFIG = { content_type: "json", insecure_ssl: "0", url: "https://console.example.test/v1/hooks/github" };
@@ -234,4 +236,89 @@ test("W1-T14979: the started pass serve runs redelivers, and its passes share on
     stop();
   }
   assert.deepEqual(up.posts, [id(1)], "redelivered by the first pass, and by no later one");
+});
+
+test("W1-T14979 criterion 2: a redelivery another serve process made since this memory loaded is never repeated", async (t) => {
+  const { stateDir, rows, log } = scene(t);
+  const up = appLog(rows);
+  up.add({ n: 1, status: 500, duration: 10 });
+  const active = createRedeliveryMemory();
+  await runGithubDeliveryLogPass({ stateDir, log, api: up.api, redelivery: active });
+  assert.equal(active.loaded, true);
+  assert.deepEqual(up.posts, [], "no newer 2xx yet: nothing is owed");
+  up.add({ n: 2 });
+  // A handoff's other generation, with its own memory, redelivers 1 first.
+  await runGithubDeliveryLogPass({ stateDir, log, api: up.api, redelivery: createRedeliveryMemory() });
+  assert.deepEqual(up.posts, [id(1)]);
+  up.add({ n: 3 });
+  await runGithubDeliveryLogPass({ stateDir, log, api: up.api, redelivery: active });
+  assert.deepEqual(up.posts, [id(1)], "the active memory re-reads the redelivered rows before its POST");
+  assert.equal(redeliveredRows(rows).length, 1);
+});
+
+test("W1-T14979: a re-read before the POST that cannot read the ledger whole redelivers nothing", async (t) => {
+  const { stateDir, rows, log, ledger } = scene(t);
+  const up = appLog(rows);
+  up.add({ n: 1, status: 500, duration: 10 });
+  const memory = createRedeliveryMemory();
+  await runGithubDeliveryLogPass({ stateDir, log, api: up.api, redelivery: memory });
+  up.add({ n: 2 });
+  fs.writeFileSync(join(stateDir, "ledger.1.ndjson.gz"), "not gzip");
+  rows.length = 0;
+  assert.deepEqual(await runGithubDeliveryLogPass({ stateDir, log, api: up.api, redelivery: memory }), { ledgered: 1, failed: true });
+  assert.deepEqual(up.posts, []);
+  assert.deepEqual(rows.filter((r) => r.step === GITHUB_DELIVERY_READ_FAILED_STEP).map((r) => r.status_class), ["ledger"]);
+  void ledger;
+});
+
+/** Counts the timers serve starts at the delivery-log pass's own interval, for one build. */
+async function deliveryLogTimers(t: TestContext, wake: boolean, generation: boolean) {
+  const root = fs.mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14979-serve-`));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(join(root, "state"));
+  const ledgerPath = join(root, "state", "ledger.ndjson"), planPath = join(root, "plan.yaml");
+  fs.writeFileSync(ledgerPath, ""); fs.writeFileSync(planPath, "[]\n");
+  const github = { prByRef: () => null, findMergedByTrailer: () => null, headRefName: () => undefined, prBody: () => undefined };
+  const deps = {
+    ledgerPath, fleetControlRoot: root, questionsRoot: root,
+    board: { plan: { tasks: [], byId: new Map() }, ledgerPath, github },
+    panelGraph: { root, planPath, ledgerPath, github: { prView: () => null }, statusGithub: github, ratify: { approve() {}, reframe() {} } },
+    issues: { close() {} }, tokens: { read: "r", write: "w" },
+    consoleSha: generation ? CONSOLE_SHA_UNKNOWN : "aaaaaaaa", resolveCurrentSha: () => "aaaaaaaa",
+    gatewayCheckout: async () => ({ state: "clean" }) as never,
+    githubAppRefresh: { start: () => ({ armed: false, stop() {} }) as never },
+    assistantRepository: "craigoley/remudero",
+    demand: { every: () => () => undefined },
+    hostServeEvidence: { root },
+    incidentInvariants: { readLedger: () => [], setInterval: (() => ({ unref() {} })) as never, clearInterval: () => undefined },
+    ...(wake ? { githubEventWake: { secret: "s", repository: "craigoley/remudero" } } : {}),
+    ...(generation ? { generation: { requestHandoff() {} } } : {}),
+  } as ServeDeps;
+  const real = globalThis.setInterval;
+  let started = 0;
+  globalThis.setInterval = ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+    if (ms === GITHUB_DELIVERY_LOG_INTERVAL_MS) started++;
+    return real(fn, ms, ...rest);
+  }) as typeof setInterval;
+  try {
+    const server = generation ? await buildReadyServeServer(deps) : buildServeServer(deps);
+    const atBuild = started;
+    server.emit("listening");
+    const atListening = started;
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    return { atBuild, atListening };
+  } finally {
+    globalThis.setInterval = real;
+  }
+}
+
+test("W1-T14979 criterion 2: a supervised generation starts the redelivering pass only once it is promoted", async (t) => {
+  const standby = await deliveryLogTimers(t, true, true);
+  const standbyBaseline = await deliveryLogTimers(t, false, true);
+  assert.equal(standby.atBuild - standbyBaseline.atBuild, 0, "an unpromoted standby runs no delivery-log pass");
+  assert.equal(standby.atListening - standbyBaseline.atListening, 1, "its promotion ('listening') starts exactly one");
+  const plain = await deliveryLogTimers(t, true, false);
+  const plainBaseline = await deliveryLogTimers(t, false, false);
+  assert.equal(plain.atBuild - plainBaseline.atBuild, 1, "an unsupervised serve starts its pass at assembly, as before");
 });
