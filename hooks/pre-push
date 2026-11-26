@@ -301,20 +301,36 @@ fi
 # W1-T14945 — BEGIN import-cycle admission
 # OBSERVED 2026-11-26: a fix-lane round on core #20963 made src/lib/body-repair.ts import ./review.js, closing an
 # import ring that depcruise's no-circular rule refuses, and this hook let it through to CI. When the pushed commit adds
-# an import under src/, the hook cruises THE PUSHED COMMIT'S src/ (extracted with git archive, so a dirty working tree or
-# a different checked-out branch never answers for it; read as DATA: depcruise parses it, runs none of it) with the
-# GATE's own depcruise and config, and checks the ring count against that commit's cycle baseline with the gate's
-# scripts/cycle-ratchet.mjs. A new ring refuses with `cycle-ratchet:` lines, so the fix lane's next strike gets them.
+# an import under src/, the hook cruises both comparison and pushed src/ trees (extracted with git archive, so a
+# dirty working tree or a different checked-out branch never answers for it; depcruise parses the source and runs
+# none of it) with the GATE's own binary and config. A newly reported ring containing an added edge refuses with
+# `cycle-ratchet:` lines, so the fix lane's next strike gets them.
 # "Adds an import" compares dependency-cruiser's parsed edges in the pushed tree with the comparison tree, so
 # comments and syntax layout cannot manufacture or hide an edge. On a branch update the comparison is the remote
-# tip; on a new branch it is origin/main's merge base. Only rings new relative to that comparison tree refuse.
+# tip; on a new branch it is origin/main's merge base. Every pushed branch ref is checked. Only a newly reported
+# ring containing an added edge refuses, so an unrelated import cannot make an existing cycle look new.
 cycle_ratchet_skip() { echo "pre-push: cycle-ratchet — $1, skipped (a named skip, NOT a pass)" >&2; }
 if has cycle-ratchet.mjs && [ -x "$gate_root/node_modules/.bin/depcruise" ] && [ -f "$gate_root/.dependency-cruiser.cjs" ]; then
+  cycle_updates=""
+  while read -r cycle_local_ref cycle_local_sha cycle_remote_ref cycle_remote_sha; do
+    [ -n "$cycle_local_sha" ] || continue
+    [ "$cycle_local_sha" = "$zero_sha" ] && continue
+    case "$cycle_remote_ref" in refs/heads/*) cycle_updates="${cycle_updates}${cycle_local_sha} ${cycle_remote_sha}
+" ;; esac
+  done <<EOF_CYCLE_UPDATES
+$push_lines
+EOF_CYCLE_UPDATES
+  if [ -z "$cycle_updates" ]; then
+    cycle_updates="${head_sha} ${head_old_sha:-}
+"
+  fi
+  while IFS=' ' read -r cycle_head_sha cycle_old_sha; do
+  [ -n "$cycle_head_sha" ] || continue
   cycle_base=""
-  if [ -n "${head_old_sha:-}" ] && [ "$head_old_sha" != "$zero_sha" ] && git cat-file -e "${head_old_sha}^{commit}" 2>/dev/null; then
-    cycle_base="$head_old_sha"
+  if [ -n "$cycle_old_sha" ] && [ "$cycle_old_sha" != "$zero_sha" ] && git cat-file -e "${cycle_old_sha}^{commit}" 2>/dev/null; then
+    cycle_base="$cycle_old_sha"
   else
-    cycle_base="$(git merge-base origin/main "$head_sha" 2>/dev/null || true)"
+    cycle_base="$(git merge-base origin/main "$cycle_head_sha" 2>/dev/null || true)"
   fi
   if [ -z "$cycle_base" ]; then
     cycle_ratchet_skip "no remote tip or merge base with origin/main"
@@ -325,12 +341,12 @@ if has cycle-ratchet.mjs && [ -x "$gate_root/node_modules/.bin/depcruise" ] && [
     cycle_head_tree="$cycle_tree/head"
     mkdir -p "$cycle_base_tree" "$cycle_head_tree"
     if ! git archive "$cycle_base" src 2>/dev/null | tar -x -C "$cycle_base_tree" 2>/dev/null \
-      || ! git archive "$head_sha" src 2>/dev/null | tar -x -C "$cycle_head_tree" 2>/dev/null; then
+      || ! git archive "$cycle_head_sha" src 2>/dev/null | tar -x -C "$cycle_head_tree" 2>/dev/null; then
       cycle_ratchet_skip "the comparison or pushed tree could not be extracted"
     else
       for cycle_cfg in package.json tsconfig.json; do
         git show "$cycle_base:$cycle_cfg" >"$cycle_base_tree/$cycle_cfg" 2>/dev/null || rm -f "$cycle_base_tree/$cycle_cfg"
-        git show "$head_sha:$cycle_cfg" >"$cycle_head_tree/$cycle_cfg" 2>/dev/null || rm -f "$cycle_head_tree/$cycle_cfg"
+        git show "$cycle_head_sha:$cycle_cfg" >"$cycle_head_tree/$cycle_cfg" 2>/dev/null || rm -f "$cycle_head_tree/$cycle_cfg"
       done
       ln -s "$gate_root/node_modules" "$cycle_base_tree/node_modules"
       ln -s "$gate_root/node_modules" "$cycle_head_tree/node_modules"
@@ -358,8 +374,9 @@ if has cycle-ratchet.mjs && [ -x "$gate_root/node_modules/.bin/depcruise" ] && [
           return counts;
         };
         const beforeEdges = edges(base), afterEdges = edges(head);
-        let added = false;
-        for (const [edge, count] of afterEdges) if (count > (beforeEdges.get(edge) ?? 0)) added = true;
+        const addedEdges = new Set();
+        for (const [edge, count] of afterEdges) if (count > (beforeEdges.get(edge) ?? 0)) addedEdges.add(edge);
+        const added = addedEdges.size > 0;
         if (!added) { console.log("NO_ADDED_EDGE"); process.exit(0); }
         const canonical = (modules) => {
           const ring = modules.length > 1 && modules.at(-1) === modules[0] ? modules.slice(0, -1) : [...modules];
@@ -368,12 +385,18 @@ if has cycle-ratchet.mjs && [ -x "$gate_root/node_modules/.bin/depcruise" ] && [
           for (let i = 1; i < ring.length; i++) if (ring[i] < ring[at]) at = i;
           return [...ring.slice(at), ...ring.slice(0, at)].join(" -> ");
         };
-        const cycles = (result) => new Set((result.summary?.violations ?? [])
+        const cycleRings = (result) => (result.summary?.violations ?? [])
           .filter((v) => v.rule?.name === "no-circular")
-          .map((v) => canonical([v.from, ...(v.cycle ?? []).map((c) => typeof c === "string" ? c : c.name)])));
-        const beforeCycles = cycles(base), afterCycles = cycles(head);
-        for (const ring of [...afterCycles].filter((ring) => !beforeCycles.has(ring)).sort()) console.log(`NEW_RING ${ring}`);
-        if (![...afterCycles].some((ring) => !beforeCycles.has(ring))) console.log("NO_NEW_RING");
+          .map((v) => {
+            const ring = canonical([v.from, ...(v.cycle ?? []).map((c) => typeof c === "string" ? c : c.name)]);
+            const nodes = ring.split(" -> ");
+            const usesAddedEdge = nodes.some((source, i) => addedEdges.has(`${source} -> ${nodes[(i + 1) % nodes.length]}`));
+            return { ring, usesAddedEdge };
+          });
+        const beforeCycles = new Set(cycleRings(base).map((cycle) => cycle.ring));
+        const newCycles = cycleRings(head).filter((cycle) => !beforeCycles.has(cycle.ring) && cycle.usesAddedEdge);
+        for (const { ring } of newCycles.sort((a, b) => a.ring.localeCompare(b.ring))) console.log(`NEW_RING ${ring}`);
+        if (newCycles.length === 0) console.log("NO_NEW_RING");
       ' "$cycle_base_tree/cruise.json" "$cycle_head_tree/cruise.json" 2>/dev/null)"
       cycle_status=$?
       if [ "$cycle_status" -ne 0 ]; then
@@ -392,6 +415,9 @@ EOF_CYCLE_RESULT
     fi
     rm -rf "$cycle_tree"
   fi
+  done <<EOF_CYCLE_RUNS
+$cycle_updates
+EOF_CYCLE_RUNS
 else
   cycle_ratchet_skip "no gate depcruise, config or scripts/cycle-ratchet.mjs"
 fi

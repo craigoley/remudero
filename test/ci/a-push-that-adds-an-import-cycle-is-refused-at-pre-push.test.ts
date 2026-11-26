@@ -48,6 +48,19 @@ function push(repo: GitRepo, rev = "HEAD", oldSha = "0".repeat(40)): { status: n
   return { status: res.status ?? -1, stderr: res.stderr ?? "" };
 }
 
+function pushMany(repo: GitRepo, updates: Array<{ rev: string; oldSha?: string }>): { status: number; stderr: string } {
+  const input = updates.map(({ rev, oldSha = "0".repeat(40) }) =>
+    `refs/heads/${rev} ${repo.git("rev-parse", rev)} refs/heads/${rev} ${oldSha}`).join("\n") + "\n";
+  const res = spawnSync("sh", [join(repo.dir, "hooks", "pre-push")], {
+    cwd: repo.dir,
+    encoding: "utf8",
+    input,
+    env: { PATH: process.env.PATH ?? "", HOME: repo.dir, RMD_PREPUSH_GATES: "1" },
+  });
+  assert.equal(res.error, undefined, `the hook launched: ${String(res.error)}`);
+  return { status: res.status ?? -1, stderr: res.stderr ?? "" };
+}
+
 function commit(repo: GitRepo, path: string, text: string): void {
   writeFileSync(join(repo.dir, path), text);
   repo.git("add", "-A");
@@ -71,6 +84,23 @@ test("W1-T14945 criterion 1: a push whose diff closes an import ring is refused 
     assert.match(stderr, /cycle-ratchet — this diff adds no parsed import edge under src\/, skipped \(a named skip, NOT a pass\)/);
     assert.equal(status, 0, stderr);
   } finally { quiet.cleanup(); }
+});
+
+test("W1-T14945 criterion 1: every branch ref in a multi-ref push is checked", () => {
+  const repo = fixture();
+  try {
+    const main = repo.git("rev-parse", "--abbrev-ref", "HEAD");
+    repo.git("checkout", "-q", "-b", "clean-ref");
+    commit(repo, "src/lib/c.ts", "export const c = 3;\n");
+    const clean = repo.git("rev-parse", "HEAD");
+    repo.git("checkout", "-q", main);
+    repo.git("checkout", "-q", "-b", "ring-ref");
+    commit(repo, "src/lib/b.ts", RING_B);
+    const result = pushMany(repo, [{ rev: "clean-ref" }, { rev: "ring-ref" }]);
+    assert.notEqual(result.status, 0, `the later ring-closing ref is refused:\n${result.stderr}`);
+    assert.match(result.stderr, /^cycle-ratchet: src\/lib\/a\.ts -> src\/lib\/b\.ts$/m, result.stderr);
+    assert.equal(repo.git("rev-parse", "clean-ref"), clean);
+  } finally { repo.cleanup(); }
 });
 
 test("W1-T14945 criterion 2: a cycle-free push passes the gate as before", () => {
@@ -175,6 +205,22 @@ test("W1-T14945 criterion 2: an acyclic edge on a branch update does not reject 
     const { status, stderr } = push(repo, "HEAD", remoteTip);
     assert.doesNotMatch(stderr, /^cycle-ratchet: .+ -> .+$/m, stderr);
     assert.equal(status, 0, `the ring predates this push and remains unchanged:\n${stderr}`);
+  } finally { repo.cleanup(); }
+});
+
+test("W1-T14945 criterion 2: an added edge outside an existing ring does not make that ring new", () => {
+  const repo = fixture();
+  try {
+    commit(repo, "src/lib/a.ts", `import { c } from "${sibling("c")}";\nimport { b } from "${sibling("b")}";\nexport const a = () => c + b;\n`);
+    commit(repo, "src/lib/b.ts", `import { a } from "${sibling("a")}";\nexport const b = () => a();\n`);
+    commit(repo, "src/lib/c.ts", `import { b } from "${sibling("b")}";\nexport const c = () => b();\n`);
+    const remoteTip = repo.git("rev-parse", "HEAD");
+    // Remove the extra a -> b edge while retaining a -> c -> b -> a, and add an unrelated e -> a edge.
+    commit(repo, "src/lib/a.ts", `import { c } from "${sibling("c")}";\nexport const a = () => c;\n`);
+    commit(repo, "src/lib/e.ts", `import { a } from "${sibling("a")}";\nexport const e = () => a();\n`);
+    const { status, stderr } = push(repo, "HEAD", remoteTip);
+    assert.doesNotMatch(stderr, /^cycle-ratchet: .+ -> .+$/m, stderr);
+    assert.equal(status, 0, `an unrelated acyclic edge does not reclassify an existing ring:\n${stderr}`);
   } finally { repo.cleanup(); }
 });
 
