@@ -11,7 +11,8 @@ import { join } from "node:path";
 import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import { spawnRunChild } from "#src/lib/run-child.js";
 import { resolveFleetControlHold, type LightPassScope, type RestartAdmission } from "#src/lib/daemon.js";
-import { createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import { createClaudeExecutableCache, spawnWorker, WorkerSpawnRetiredError, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import { spawnCodexWorker, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -219,6 +220,24 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   assert.deepEqual(queried, [], "no SDK query after a release during the Claude launch preparation");
   assert.equal(claudeOutcome.notStarted, "admission-abandoned");
   assert.deepEqual(claudeRows.map((row) => row.hold), ["retired: drain lock released; the successor owns this work"]);
+  // The real adapters read it after their own last waits (the Codex worktree probe, the open-weight registry
+  // invocation), before any trial receipt, cash reservation or process.
+  const adapters = retiringExit();
+  adapters.retirement.retire();
+  const adapterArgs = { ...codexFixStart(t, [], [], () => {}, () => {}), workerHome: ownedFixtureDir(t, "retired-home").dir };
+  await adapters.retirement.inSpawnScope(async () => {
+    await assert.rejects(spawnCodexWorker(adapterArgs, adapterArgs.config!), WorkerSpawnRetiredError,
+      "the real Codex adapter launches no process for a retired scope");
+    await assert.rejects(spawnOpenWeightWorker({ ...adapterArgs, prompt: "fix the finding" }, adapterArgs.config!,
+      { model: "gpt-6-luna", effort: "low" }), WorkerSpawnRetiredError, "the real open-weight adapter sends no request");
+  });
+  // spawnWorker turns an adapter's refusal into the not-started result and its withheld row.
+  const viaAdapter = retiringExit();
+  const adapterRows: Array<Record<string, unknown>> = [];
+  const refused = await viaAdapter.retirement.inSpawnScope(() => spawnWorker({ ...codexFixStart(t, adapterRows, [], () => {}, () => {}),
+    providerRouting: { writeStatus: () => {}, spawnCodex: async () => { throw new WorkerSpawnRetiredError("adapter saw the release"); } } }));
+  assert.equal(refused.notStarted, "admission-abandoned");
+  assert.deepEqual(adapterRows.map((row) => row.hold), ["retired: adapter saw the release"]);
   // Control: with no release the same start reaches its provider, so the refusals above are the mark's doing.
   const control = retiringExit();
   const controlStarts: string[] = [];

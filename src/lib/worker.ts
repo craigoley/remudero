@@ -1,4 +1,3 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { withWorkspaceCleanup } from "./workspace-cleanup-contract.js";
 import { answerHeld, answerRecords, newestLedgerTaskAnswer, newestTaskAnswer, publishAnswers, sharedAnswerEvidence, type Task, type TaskInputAnswer } from "./plan.js";
 import { citation } from "./provenance.js";
@@ -2654,23 +2653,13 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
       ...(from === undefined ? {} : { from }), to } };
 }
 
-/** W1-T14916: a daemon's worker spawn scope. Its drain release sets `retiredBy`; from then on every spawnWorker call
- *  made by work running in the scope returns not-started with a `worker.spawn_withheld` row naming the reason. */
-export interface WorkerSpawnScope { retiredBy?: string }
-
-const workerSpawnScope = new AsyncLocalStorage<WorkerSpawnScope>();
-
-/** Run `run` in `scope`. Every pass, timer and callback it starts inherits the scope, so a retirement reaches work
- *  already running, and no caller outside it (a pooled test file's next daemon, or a direct spawn) inherits it. */
-export function runInWorkerSpawnScope<T>(scope: WorkerSpawnScope, run: () => T): T {
-  return workerSpawnScope.run(scope, run);
-}
-
-/** Why the caller's daemon spawn scope is retired, or undefined while it may start work. A run child is a new process
- *  that inherits no scope, so spawnRunChild reads this at its own launch gate (run-child.ts). */
-export function workerSpawnRetiredBy(): string | undefined {
-  return workerSpawnScope.getStore()?.retiredBy;
-}
+// W1-T14916: a daemon's worker spawn scope. runInWorkerSpawnScope runs the daemon's work in it, so every pass, timer and
+// callback inherits it and no caller outside it does. Its drain release sets `retiredBy`; from then on spawnWorker,
+// spawnRunChild and each provider adapter (after its last wait: the Codex worktree probe and registry recheck, the
+// open-weight registry invocation) refuse to launch. An adapter refuses with WorkerSpawnRetiredError, which spawnWorker
+// turns into a not-started result and a `worker.spawn_withheld` row. The scope lives beside the adapters (worker-provider.ts).
+export { runInWorkerSpawnScope, workerSpawnRetiredBy, WorkerSpawnRetiredError, type WorkerSpawnScope } from "./worker-provider.js";
+import { workerSpawnRetiredBy, WorkerSpawnRetiredError } from "./worker-provider.js";
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
   // W1-T13868: a wrapper may replace this call's result with its own error; the call's table keeps the result's model.
@@ -2794,6 +2783,15 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     if (reason === undefined) return undefined;
     logSpawnWithheld(`retired: ${reason}`);
     return notStartedResult();
+  };
+  // An adapter's own launch reads the mark after its last wait (worker-provider.ts) and refuses with a typed error.
+  const retiredInAdapter = async (launch: () => Promise<WorkerResult>): Promise<WorkerResult> => {
+    try { return await launch(); }
+    catch (error) {
+      if (!(error instanceof WorkerSpawnRetiredError)) throw error;
+      logSpawnWithheld(`retired: ${error.reason}`);
+      return notStartedResult();
+    }
   };
   // W1-T11336, W1-T12497: the sweep's admission may precede a fleet PAUSE by tens of minutes. Every fix start,
   // in process or in a run child, re-reads the hold here; reviews and other classes retain their existing path.
@@ -3273,9 +3271,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
         args.providerRouting?.spawnCodex ?? spawnCodexWorker;
       const execution = executionFor("codex");
-      const runCodex: typeof spawnCodex = async (codexArgs, workerConfig, capacity) => retiredAtLaunch() ??
+      const runCodex: typeof spawnCodex = async (codexArgs, workerConfig, capacity) => retiredAtLaunch() ?? retiredInAdapter(() =>
         spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
-          containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
+          containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity));
       if (args.providerRouting?.spawnCodex === undefined) {
         assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
       }
@@ -3368,9 +3366,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
       args.providerRouting?.spawnCodex ?? spawnCodexWorker;
     const execution = executionFor("codex");
-    const runCodex: typeof spawnCodex = async (codexArgs, workerConfig, capacity) => retiredAtLaunch() ??
+    const runCodex: typeof spawnCodex = async (codexArgs, workerConfig, capacity) => retiredAtLaunch() ?? retiredInAdapter(() =>
       spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
-        containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
+        containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity));
     if (args.providerRouting?.spawnCodex === undefined) {
       assertLiveSpawnAllowed(`spawnCodexWorker for task ${args.taskId ?? "<no taskId>"}`);
     }
@@ -3418,7 +3416,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     }
     const openWeightAdapter = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
     const runOpenWeight: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnOpenWeight"]> =
-      async (openWeightArgs, workerConfig, selection) => retiredAtLaunch() ?? openWeightAdapter(openWeightArgs, workerConfig, selection);
+      async (openWeightArgs, workerConfig, selection) => retiredAtLaunch()
+        ?? retiredInAdapter(() => openWeightAdapter(openWeightArgs, workerConfig, selection));
     const execution = executionFor("cash");
     const executionPrompt = execution.prompt;
     // env means child extras here, but a complete daemon override in the adapter. Keep custody distinct.

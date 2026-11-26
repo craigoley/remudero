@@ -4205,6 +4205,31 @@ async function withPrivateRegistryCodexProfile<T>(
 
 type CodexSpawnSelection = Pick<ProviderCapacity, "model" | "effort" | "modelDecision">;
 
+/** W1-T14916: a daemon's worker spawn scope (documented in worker.ts). */
+export interface WorkerSpawnScope { retiredBy?: string }
+
+const workerSpawnScope = new AsyncLocalStorage<WorkerSpawnScope>();
+
+export function runInWorkerSpawnScope<T>(scope: WorkerSpawnScope, run: () => T): T {
+  return workerSpawnScope.run(scope, run);
+}
+
+export function workerSpawnRetiredBy(): string | undefined {
+  return workerSpawnScope.getStore()?.retiredBy;
+}
+
+export class WorkerSpawnRetiredError extends Error {
+  constructor(readonly reason: string) {
+    super(`worker launch withheld: retired: ${reason}`);
+    this.name = "WorkerSpawnRetiredError";
+  }
+}
+
+function refuseRetiredLaunch(): void {
+  const reason = workerSpawnRetiredBy();
+  if (reason !== undefined) throw new WorkerSpawnRetiredError(reason);
+}
+
 export async function spawnCodexWorker(
   args: CodexSpawnArgs,
   config: Config,
@@ -4232,11 +4257,15 @@ export async function spawnCodexWorker(
     const nativeCacheRoot = process.platform !== "win32" && !codexReadOnly(args) && args.sandboxIntent !== "disposable-review" &&
       await verifiedGitWorktree(args.cwd)
       ? prepareWorkerNativeCache() : undefined;
+    // W1-T14916: after the last wait, before the trial receipt.
+    refuseRetiredLaunch();
     const spawn = (route: CodexSpawnSelection | undefined, profile?: PrivateRegistryCodexProfile) =>
       spawnCodexWorkerInPrivateTemp(args, config, privateTmpDir, route, profile, nativeCacheRoot);
     if (selected === undefined) return spawnCodexBalancedSelection(args, config, selection, route => spawn(route));
-    return withPrivateRegistryCodexProfile(args, config, selected, profile =>
-      spawnCodexBalancedSelection(args, config, selection, route => spawn(route, profile)), nativeCacheRoot);
+    return withPrivateRegistryCodexProfile(args, config, selected, profile => {
+      refuseRetiredLaunch();
+      return spawnCodexBalancedSelection(args, config, selection, route => spawn(route, profile));
+    }, nativeCacheRoot);
   });
 }
 
@@ -6939,6 +6968,8 @@ export async function spawnOpenWeightWorker(
   // Identity for this run's reservations. The run id is not sufficient on its own: the tool loop
   // sends one paid request PER TURN, and each needs its own settleable row.
   const runRequestPrefix = `${args.runId ?? args.taskId ?? "openweight"}-${startedAt}-${randomUUID()}`;
+  // W1-T14916: after the last wait, outside the attempt's catch.
+  refuseRetiredLaunch();
   try {
     // W1-T3880: verified FIRST, before `env`/the API key below are even read — a refused grant
     // must never reach the point where a real credential is used on its behalf. `capabilityGrant`
