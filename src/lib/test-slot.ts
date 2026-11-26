@@ -299,7 +299,8 @@ function holdProofCpuLease(ports: ProofCpuAdmissionPorts): ProofCpuAdmission {
   const path = join(dir, `${ports.pid ?? process.pid}-${randomUUID()}.json`);
   try {
     mkdirSync(dir, { recursive: true });
-    writeFileSync(path, JSON.stringify({ pid: ports.pid ?? process.pid, pidNs: ports.pidNs ?? readPidNamespace(), host: hostname() }));
+    writeFileSync(path, JSON.stringify({ pid: ports.pid ?? process.pid, pidNs: ports.pidNs ?? readPidNamespace(), host: hostname() }),
+      { flag: "wx", mode: 0o600 });
   } catch {
     // A lease that cannot be written leaves this child uncounted by others; the child itself still runs, as before.
     return { release() {} };
