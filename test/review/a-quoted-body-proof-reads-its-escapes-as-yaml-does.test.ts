@@ -302,3 +302,22 @@ test("a quoted body proof reads its escapes as yaml does, and a code-spanned sta
   assert.equal(fixed, `## Acceptance\n- claim: ${spanned}\n  proof: ${bare}\n`);
   assert.deepEqual(parseAcceptanceBlock(fixed!).map((c) => [c.claim, c.proof]), [[spanned, bare]]);
 });
+
+// The twelfth review of #20963: a record with two grep proofs differing only by one versus two backslashes, published by
+// the legacy renderer. Per row both unescape to one backslash and the set lost a declared proof; the body's as-written
+// set equals the record's, so it is read as written first.
+test("a quoted body proof reads its escapes as yaml does, and a legacy body of two proofs differing only by escaping still matches its record", () => {
+  const two = String.raw`grep: a\\b in f`, one = String.raw`grep: a\b in f`;
+  const trailer = "\n\nRemudero-Task: W1-T999913\n";
+  const legacy = `## Acceptance\n- claim: "two | backslashes"\n  proof: "${two}"\n  kind: guard\n- claim: "one | backslash"\n  proof: "${one}"\n${trailer}`;
+  const declared = [{ claim: "two | backslashes", proof: two, kind: "guard" }, { claim: "one | backslash", proof: one }];
+  assert.deepEqual(parseAcceptanceBlock(legacy).map((c) => c.proof), [one, one], "CONTROL: per row both unescape to one backslash");
+  assert.equal(authorGate.trailerBodyProofDivergenceRefusal({ body: legacy, taskAcceptanceForId: () => declared }), undefined,
+    "the body main matched still matches");
+  const record = declared as unknown as AcceptanceCriterion[];
+  assert.deepEqual(markUnbackedBodyGuards(record, parseAcceptanceBlock(legacy), false).unbacked, [], "its guard stays backed");
+  // Nothing new is accepted: a body that drops the one-backslash row is still a divergence.
+  const dropped = `## Acceptance\n- claim: "two | backslashes"\n  proof: "${two}"\n${trailer}`;
+  assert.equal(authorGate.trailerBodyProofDivergenceRefusal({ body: dropped, taskAcceptanceForId: () => declared })?.defect,
+    "trailer-body-proof-divergence");
+});

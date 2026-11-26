@@ -9104,6 +9104,17 @@ export function bodyProofAgainstRecord(criterion: AcceptanceCriterion, recordPro
   return raw !== undefined && !recordProofs.has(proof) && recordProofs.has(raw) ? raw : proof;
 }
 
+/** W1-T14913: every body criterion's proof as compared with its record's, index-aligned. A legacy body whose as-written
+ *  proof set IS the record's reads wholly as written first: per row, two record proofs differing only by one versus two
+ *  backslashes both unescape to one and the set would lose a declared proof. Otherwise each row reads as
+ *  {@link bodyProofAgainstRecord} decides. */
+export function bodyProofsAgainstRecord(criteria: readonly AcceptanceCriterion[], recordProofs: ReadonlySet<string>): string[] {
+  const asWritten = criteria.map((c) => quotedProofAsWritten.get(c)?.trim() ?? c.proof.trim());
+  const written = new Set(asWritten.filter((p) => p.length > 0));
+  const sameSet = written.size === recordProofs.size && [...written].every((p) => recordProofs.has(p));
+  return sameSet ? asWritten : criteria.map((c) => bodyProofAgainstRecord(c, recordProofs));
+}
+
 /** The proof a `proof:` value reads as, remembering its as-written text when unescaping changed it. */
 function readQuotedProof(criterion: AcceptanceCriterion, value: string): string {
   const proof = stripQuotes(value);
@@ -9380,9 +9391,9 @@ export const BODY_GUARD_UNBACKED = "body-guard-unbacked";
 export function markUnbackedBodyGuards<T extends AcceptanceCriterion>(criteria: readonly T[], bodyCriteria: readonly AcceptanceCriterion[],
   fromBody: boolean): { criteria: T[]; unbacked: string[] } {
   const recordProofs = new Set(criteria.map((c) => c.proof.trim()));
-  const bodyProof = (c: AcceptanceCriterion): string => bodyProofAgainstRecord(c, recordProofs);
-  const bodyGuardList = bodyCriteria.filter((c) => (c as { kind?: unknown }).kind === "guard");
-  const bodyGuards = new Set(bodyGuardList.map(bodyProof));
+  const read = bodyProofsAgainstRecord(bodyCriteria, recordProofs);
+  const bodyGuardList = bodyCriteria.flatMap((c, i) => (c as { kind?: unknown }).kind === "guard" ? [{ guard: c, proof: read[i]! }] : []);
+  const bodyGuards = new Set(bodyGuardList.map(({ proof }) => proof));
   // A body guard is backed only by a record criterion that is itself `kind: guard` with the same trimmed proof.
   const backedProofs = new Set(fromBody ? [] : criteria
     .filter((c) => (c as { kind?: unknown }).kind === "guard").map((c) => c.proof.trim()));
@@ -9396,8 +9407,7 @@ export function markUnbackedBodyGuards<T extends AcceptanceCriterion>(criteria: 
   // A body guard whose proof matches NO record criterion has no row to mark: add one the review must refuse, naming
   // the proof, so editing a proof and marking it guard cannot slip past both halves.
   const present = new Set(criteria.map((c) => c.proof.trim()));
-  for (const guard of bodyGuardList) {
-    const proof = bodyProof(guard);
+  for (const { guard, proof } of bodyGuardList) {
     if (present.has(proof) || backedProofs.has(proof)) continue;
     present.add(proof);
     unbacked.push(proof);
