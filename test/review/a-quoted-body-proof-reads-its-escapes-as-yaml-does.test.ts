@@ -345,3 +345,26 @@ test("a quoted body proof reads its escapes as yaml does, and the run-task norma
   // decidable per row, so only the divergence itself is pinned: the extra proof is named.
   assert.deepEqual(bodyProofSetDivergence(parseAcceptanceBlock(added), record).onlyInBody, ["grep: other in f"]);
 });
+
+// The fourteenth review of #20963: reading each row by whichever form matched let a body edited on GitHub pass when
+// neither complete reading matched its record. One row written with four backslashes decodes to the record's two; the
+// other, written with two, matches the record only as written. The as-written set and the decoded set both differ from
+// the record, so the body diverges, everywhere the comparison is made.
+test("a quoted body proof reads its escapes as yaml does, and a body matching its record only by mixing readings row by row is refused", () => {
+  const x2 = String.raw`grep: x\\y in f`, p2 = String.raw`grep: p\\q in f`;
+  const x4 = String.raw`grep: x\\\\y in f`, p1 = String.raw`grep: p\q in f`;
+  const record = [x2, p2];
+  const mixed = `## Acceptance\n- claim: "x | y"\n  proof: "${x4}"\n  kind: guard\n- claim: "p | q"\n  proof: "${p2}"\n\nRemudero-Task: W1-T999913\n`;
+  const read = parseAcceptanceBlock(mixed);
+  assert.deepEqual(read.map((c) => c.proof), [x2, p1], "CONTROL: decoded, only the first row is a record proof");
+  const divergence = bodyProofSetDivergence(read, record);
+  assert.ok(divergence.onlyInBody.length > 0 && divergence.onlyInRecord.length > 0, JSON.stringify(divergence));
+  assert.equal(authorGate.trailerBodyProofDivergenceRefusal({ body: mixed, taskAcceptanceForId: () => record.map((proof) => ({ claim: "c", proof })) })?.defect,
+    "trailer-body-proof-divergence", "the author gate refuses it");
+  const guarded = record.map((proof, i) => ({ claim: "c", proof, ...(i === 0 ? { kind: "guard" } : {}) })) as unknown as AcceptanceCriterion[];
+  assert.equal(markUnbackedBodyGuards(guarded, parseAcceptanceBlock(mixed), false).unbacked.length, 0,
+    "CONTROL: its guard row decodes to the record's guard proof, so it stays backed under the decoded reading");
+  // A wholly legacy body still reads as written: both rows written as the legacy renderer wrote them.
+  const legacy = `## Acceptance\n- claim: "x | y"\n  proof: "${x2}"\n- claim: "p | q"\n  proof: "${p2}"\n`;
+  assert.deepEqual(bodyProofSetDivergence(parseAcceptanceBlock(legacy), record), { onlyInBody: [], onlyInRecord: [] });
+});

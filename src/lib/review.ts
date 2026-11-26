@@ -9090,29 +9090,19 @@ function stripQuotes(s: string): string {
 
 /** W1-T14913: a double-quoted body proof whose escapes the parser unescaped, mapped to the text between its quotes as
  *  written. Before W1-T14913 the renderer wrote a quoted proof's backslashes unescaped (a claim holding `|` quoted both
- *  sides), so a stored legacy body's `\\` meant two backslashes; {@link markUnbackedBodyGuards} reads that raw text
- *  only when the unescaped proof matches no record criterion and the raw one does. */
+ *  sides), so a stored legacy body's `\\` meant two backslashes; {@link bodyProofsAgainstRecord} reads that raw text
+ *  only when the whole body's as-written proof set is its record's. */
 const quotedProofAsWritten = new WeakMap<AcceptanceCriterion, string>();
 
-/** W1-T14913: a body criterion's trimmed proof as compared with its record's proofs. A legacy-rendered quoted proof (see
- *  {@link quotedProofAsWritten}) reads as written only when its unescaped text is no record proof and its as-written
- *  text is one: exactly the body main compared as written, and nothing more. Shared by review's guard backing and the
- *  author-time trailer/body proof comparison, so the two can never disagree about one body. */
-export function bodyProofAgainstRecord(criterion: AcceptanceCriterion, recordProofs: ReadonlySet<string>): string {
-  const proof = criterion.proof.trim();
-  const raw = quotedProofAsWritten.get(criterion)?.trim();
-  return raw !== undefined && !recordProofs.has(proof) && recordProofs.has(raw) ? raw : proof;
-}
-
-/** W1-T14913: every body criterion's proof as compared with its record's, index-aligned. A legacy body whose as-written
- *  proof set IS the record's reads wholly as written first: per row, two record proofs differing only by one versus two
- *  backslashes both unescape to one and the set would lose a declared proof. Otherwise each row reads as
- *  {@link bodyProofAgainstRecord} decides. */
+/** W1-T14913: every body criterion's proof as compared with its record's, index-aligned, under ONE reading for the whole
+ *  body. A legacy body (rendered before W1-T14913, backslashes unescaped inside quotes) is read as written when its
+ *  as-written proof set IS the record's; every other body is read as YAML decodes it. Never row by row: mixing the two
+ *  readings would accept a body that neither complete reading matches (#20963's fourteenth review). */
 export function bodyProofsAgainstRecord(criteria: readonly AcceptanceCriterion[], recordProofs: ReadonlySet<string>): string[] {
   const asWritten = criteria.map((c) => quotedProofAsWritten.get(c)?.trim() ?? c.proof.trim());
   const written = new Set(asWritten.filter((p) => p.length > 0));
   const sameSet = written.size === recordProofs.size && [...written].every((p) => recordProofs.has(p));
-  return sameSet ? asWritten : criteria.map((c) => bodyProofAgainstRecord(c, recordProofs));
+  return sameSet ? asWritten : criteria.map((c) => c.proof.trim());
 }
 
 /** W1-T14913: the proofs only a body's block names and the proofs only its record names, each body proof read by
