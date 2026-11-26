@@ -4214,6 +4214,9 @@ export function runInWorkerSpawnScope<T>(scope: WorkerSpawnScope, run: () => T):
   return workerSpawnScope.run(scope, run);
 }
 
+export function currentWorkerSpawnScope(): WorkerSpawnScope | undefined {
+  return workerSpawnScope.getStore();
+}
 export function workerSpawnRetiredBy(): string | undefined {
   return workerSpawnScope.getStore()?.retiredBy;
 }

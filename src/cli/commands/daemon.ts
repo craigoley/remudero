@@ -112,7 +112,7 @@ import { readHeapAdmissionHoldMode } from "../../lib/daemon-heap-admission-hold.
 import { applyDaemonMemoryPolicy, createDaemonMemoryGovernor, createDaemonSlackReclaimer, installDaemonSlackReclaimer, readDaemonMemoryPolicy } from "../../lib/daemon-memory-policy.js";
 import { workerThreads } from "../../lib/worker-heaps.js";
 import { readCiGateRequiredChecks } from "../../lib/ci-gate-required.js";
-import { resolveClaudeExecutable, claudeExecutableCache, taskInputAnswerWithLedger, runInWorkerSpawnScope, type WorkerSpawnScope } from "../../lib/worker.js";
+import { resolveClaudeExecutable, claudeExecutableCache, taskInputAnswerWithLedger, currentWorkerSpawnScope, runInWorkerSpawnScope, type WorkerSpawnScope } from "../../lib/worker.js";
 import { defaultInstance, memoryStoreReadFailure, readMemoryLedger, sweepMemoryReservations } from "../../lib/host-memory-ledger.js";
 import { type DispatchGovernorDeps } from "../../lib/dispatch-governor.js";
 import { focusGateFor } from "../../lib/focus-gardener.js";
@@ -1405,6 +1405,7 @@ export async function daemonCommand(
   standby?: StandbyBoot,
 ): Promise<number> {
   if (standby === undefined && rest.includes("--standby")) return daemonStandbyCommand(rest, deps, host);
+  if (currentWorkerSpawnScope() === undefined) return inDaemonSpawnScope(() => daemonCommand(rest, deps, host, standby));
   if (selectedInstanceRegistryEnvPath() !== undefined && !instanceRegistryRuntimePresent()) {
     return withInstanceRegistryRuntime(() => daemonCommand(rest, deps, host, standby));
   }
@@ -3575,9 +3576,15 @@ export interface DaemonRetirement {
 
 const RETIRED_DETAIL = "drain lock released; the successor owns this work";
 
+/** W1-T14916: a daemon run enters one spawn scope for its whole body, so every callback it wires before or around the
+ *  loop (the GitHub wake, timers) inherits it, and its retirement (which adopts the scope) reaches all of them. */
+export function inDaemonSpawnScope<T>(run: () => T): T {
+  return currentWorkerSpawnScope() === undefined ? runInWorkerSpawnScope({}, run) : run();
+}
+
 export function createDaemonRetirement(log: (step: string, extra?: Record<string, unknown>) => void): DaemonRetirement {
   let retired = false;
-  const spawnScope: WorkerSpawnScope = {};
+  const spawnScope: WorkerSpawnScope = currentWorkerSpawnScope() ?? {};
   const allows = (hook: string): boolean => {
     if (!retired) return true;
     log("daemon.retired_start_refused", { hook, reason: RETIRED_DETAIL });

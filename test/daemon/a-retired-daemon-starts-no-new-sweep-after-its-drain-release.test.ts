@@ -2,7 +2,7 @@
 // the retired process then ran 14 sweep passes and started 18 workers over 34 minutes, beside its successor.
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { closeDaemonCleanup, createDaemonRetirement, retiringCiJudgeKick } from "#src/cli/commands/daemon.js";
+import { closeDaemonCleanup, createDaemonRetirement, inDaemonSpawnScope, retiringCiJudgeKick } from "#src/cli/commands/daemon.js";
 import { withCiJudgeAfterSweep } from "#src/lib/ci-escalation-judge.js";
 import { clockFromMillisFn } from "#src/lib/clock.js";
 import { EventEmitter } from "node:events";
@@ -11,7 +11,7 @@ import { join } from "node:path";
 import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import { spawnRunChild } from "#src/lib/run-child.js";
 import { resolveFleetControlHold, type LightPassScope, type RestartAdmission } from "#src/lib/daemon.js";
-import { createClaudeExecutableCache, spawnWorker, WorkerSpawnRetiredError, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
+import { createClaudeExecutableCache, spawnWorker, workerSpawnRetiredBy, WorkerSpawnRetiredError, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
 import { spawnCodexWorker, spawnOpenWeightWorker } from "#src/lib/worker-provider.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -272,6 +272,31 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   assert.deepEqual(outside, ["memory_admission"], "a spawn outside the retired scope is not withheld");
   assert.deepEqual(outsideWithheld, []);
   assert.equal(elsewhere.notStarted, "admission-abandoned");
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, in the whole run", async () => {
+  // daemonCommand runs its whole body in inDaemonSpawnScope. The GitHub wake is wired before the retirement and the
+  // loop exist; the main-health repair it schedules runs later and must see the release.
+  let afterRelease: () => void = () => {};
+  const released = new Promise<void>((resolve) => { afterRelease = resolve; });
+  let seenByCallback: Promise<string | undefined> | undefined;
+  await inDaemonSpawnScope(async () => {
+    seenByCallback = released.then(() => workerSpawnRetiredBy());
+    const run = retiringExit();
+    run.settlePage();
+    await run.exit();
+  });
+  const outside = released.then(() => workerSpawnRetiredBy());
+  afterRelease();
+  assert.equal(await seenByCallback, "drain lock released; the successor owns this work",
+    "work a callback wired before the loop schedules sees the retired scope, so it starts no worker");
+  assert.equal(await outside, undefined, "the caller of the daemon run is outside its scope");
+  // A daemon run nested in a scope already open (the standby and registry re-entries) keeps that one scope.
+  await inDaemonSpawnScope(async () => {
+    const outer = workerSpawnRetiredBy;
+    await inDaemonSpawnScope(async () => { createDaemonRetirement(() => {}).retire(); });
+    assert.equal(outer(), "drain lock released; the successor owns this work");
+  });
 });
 
 test("W1-T14916 criterion 2: in-flight SRE lane page work still completes", async () => {

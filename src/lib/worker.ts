@@ -2658,7 +2658,7 @@ export function workerExecutionForProvider(args: Pick<SpawnWorkerArgs,
 // spawnRunChild and each provider adapter (after its last wait: the Codex worktree probe and registry recheck, the
 // open-weight registry invocation) refuse to launch. An adapter refuses with WorkerSpawnRetiredError, which spawnWorker
 // turns into a not-started result and a `worker.spawn_withheld` row. The scope lives beside the adapters (worker-provider.ts).
-export { runInWorkerSpawnScope, workerSpawnRetiredBy, WorkerSpawnRetiredError, type WorkerSpawnScope } from "./worker-provider.js";
+export { currentWorkerSpawnScope, runInWorkerSpawnScope, workerSpawnRetiredBy, WorkerSpawnRetiredError, type WorkerSpawnScope } from "./worker-provider.js";
 import { workerSpawnRetiredBy, WorkerSpawnRetiredError } from "./worker-provider.js";
 
 export async function spawnWorker(args: SpawnWorkerArgs): Promise<WorkerResult> {
