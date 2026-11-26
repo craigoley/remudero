@@ -138,7 +138,7 @@ import { automaticBranchReapStateFileName, orphanRunBranchEvidenceReader } from 
 import { repoRoot, resolveOwnerRepo, writeDaemonTargetRecord } from "../../lib/repo-location.js";
 import { resolveRepoLayout } from "../../lib/repo-layout.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
-import { createOpsCatalogShadowSource, servedAsLastGood, type OpsCatalogApi, type OpsCatalogShadowInput } from "../../lib/ops-catalog-source.js";
+import { createOpsCatalogShadowSource, defaultOpsCatalogApi, servedAsLastGood, type OpsCatalogApi, type OpsCatalogShadowInput } from "../../lib/ops-catalog-source.js";
 import { liveInflightRuns, readCheckoutDepth } from "../../lib/report-commands.js";
 import { adoptRunChildren, createAdmittedPlanSlot, runChildAdoptableAt, runChildModeIsOn, startRunChildProbe, tapPlanSnapshot, type AdoptedRunChild } from "../../lib/run-child.js";
 import { loadObservedOverlapMode, loadRunChildMode, type RunChildMode } from "../../lib/policy.js";
@@ -2718,6 +2718,8 @@ export async function daemonCommand(
           daemonPlanCopies.observe(fresh);
         },
         readOpsTaskDispatch,
+        // W1-T14865: the ops catalog's open pull requests are watched for a required check left red on an unchanged head.
+        opsPullRequestWatch: { repository: () => opsSourceRepository, api: deps.opsCatalogApi ?? defaultOpsCatalogApi(), escalate: raiseDuplicate },
         // W1-T13681: the move janitor reads move_public_tasks on every tick; absent or false, it does nothing.
         planTaskMover: createPlanTaskMover(planTaskMovePorts({
           publicRoot: targetCheckoutRoot, publicRepository: `${target.owner}/${target.repo}`,
