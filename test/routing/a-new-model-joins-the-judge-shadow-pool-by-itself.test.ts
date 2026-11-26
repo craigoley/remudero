@@ -64,7 +64,9 @@ function call(role: ShadowJudgeCall<string>["role"], mount: JudgeMount, pool: Ju
 const autoMount: JudgeMount = { model: "haiku", effort: "low", maxTurns: 400, contextBudget: 60000, shadow: { provider: "auto", deployment: "auto" } };
 
 test("W1-T12422 criterion 1: `shadow: auto` pools every decision model and every ready cash deployment, not Foundry Claude, that has a replay for the role", async (t) => {
-  const table = validateMounts({ ...(parseYaml(TABLE) as Record<string, unknown>), ci_judge: { ...ROW, shadow: "auto" }, judge_shadows: { "head-rehome": "auto" } });
+  // W1-T14841: the repo's fix-progress row is auto too; this table keeps it without a shadow to name its own roles.
+  const table = validateMounts({ ...(parseYaml(TABLE) as Record<string, unknown>), ci_judge: { ...ROW, shadow: "auto" }, fix_progress_judge: ROW,
+    judge_shadows: { "head-rehome": "auto" } });
   assert.deepEqual(table.ci_judge!.shadow, { provider: "auto", deployment: "auto" });
   assert.deepEqual(judgeShadowAutoRoles(table).sort(), ["ci-judge", "head-rehome", "verify-human"]);
   assert.ok(judgeShadowAutoRoles(MOUNTS).length > 0, "the repo's table sets `shadow: auto` on the fixed-option rows");
@@ -203,9 +205,11 @@ test("W1-T12422 criterion 5: the cadence replays each new or changed model once 
     (async (_config: Config, request: { model: string; corpus: string; lane?: string }) => { sent.push(request); return { ...finished(), corpus: request.corpus }; }) as never)!;
   const outcomes = await replay(decision);
   assert.deepEqual(sent.map((s) => [s.model, s.corpus, s.lane]), [["decisions-eastus", "risk-judge-dispositions", "direct"], ["decisions-eastus", "all", "direct"]]);
-  assert.deepEqual(outcomes.map((o) => o.roles), [["risk-judge"], ["verify-human", "refresh-value", "quiet-worker-watchdog", "head-rehome", "typed-judgment"]]);
+  assert.deepEqual(outcomes.map((o) => o.roles), [["risk-judge"],
+    ["ci-judge", "fix-progress", "verify-human", "refresh-value", "quiet-worker-watchdog", "head-rehome", "typed-judgment"]]);
   assert.equal(createJudgeShadowReplay({ claudeBin: "/unused", root: dir } as Config, REPO_ROOT,
-    validateMounts({ ...(parseYaml(TABLE) as Record<string, unknown>), verify_human_judge: undefined, judge_shadows: undefined })), undefined, "no auto role, no replay");
+    validateMounts({ ...(parseYaml(TABLE) as Record<string, unknown>), verify_human_judge: undefined, judge_shadows: undefined,
+      ci_judge: ROW, fix_progress_judge: ROW })), undefined, "no auto role, no replay");
 });
 
 test("W1-T12422 criterion 6: with today's price rows and both decision models, an auto role's pool holds them and the four open-weight deployments once their replays pass", (t) => {

@@ -320,6 +320,11 @@ interface CatalogPoolEntry {
   reply?: BoardCatalogReply;
   /** W1-T13330: the last whole read for this selection, kept while one ref GET says its branch still names the commit. */
   kept?: { selection: string; repository: string; branch: string; commit: string; plan: Plan };
+  /** W1-T14877: the running read's liveness; the entry's one api refuses every GET while it is false. */
+  active?: () => boolean;
+  /** W1-T14877: one api for the entry's life. The source keeps verified blobs per api, so a new api per read missed
+   *  them all and re-read and re-hashed every blob file on serve's main thread after each branch move. */
+  api?: OpsCatalogApi;
 }
 // Serve's two independent producers share one parent-owned read. No private Plan enters a public
 // worker body or generic log message; this channel is intercepted before either relay.
@@ -354,7 +359,9 @@ export function createBoardCatalogParentBridge(roots: readonly string[], post: (
       const destination = planDestinationRepository(root);
       if (destination.outcome !== "named") payload = { observedAt: clock.iso(), reason: "destination-unreadable" };
       else {
-        const api: OpsCatalogApi = (path) => active() ? parentCatalogApi(path) : Promise.reject(new Error("catalog consumer changed"));
+        entry.active = active;
+        const api: OpsCatalogApi = entry.api ??= (path) =>
+          entry.active?.() ? parentCatalogApi(path) : Promise.reject(new Error("catalog consumer changed"));
         const repository = `${destination.owner}/${destination.repo}`;
         const kept = entry.kept?.repository === repository ? entry.kept : undefined;
         // W1-T13330: while the branch still names the kept commit, one ref GET revalidates the kept catalog instead of

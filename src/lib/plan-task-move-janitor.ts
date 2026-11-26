@@ -33,6 +33,28 @@ import { gitReservationRunnerAsync } from "./task-id-reservation.js";
 export const PLAN_TASK_MOVE_ACTION = "plan-task-move";
 export const PLAN_MOVE_STAND_DOWN = "plan.move.stand_down";
 export const PLAN_MOVE_JANITOR_STEP = "plan.move.janitor_step";
+
+/**
+ * W1-T14870: refusals that only record where a record already is (landed, retired, moved, closed, or bound to another
+ * repository) are counted by reason in the stand-down row, never listed. On the real plan they are about 5,300 of
+ * 5,400 refusals, and listing each made one row about 225 KB, enough for rotation's byte shed to evict other steps'
+ * rows. Every other refusal is listed by id with its reason, so a record that could move and does not is named. The
+ * mover's own none answer still lists every refusal.
+ */
+export const COUNTED_ONLY_REFUSALS: ReadonlySet<string> = new Set(["merged", "retired", "already_moved", "not_open", "target_not_bound"]);
+
+/** The stand-down row's refusal fields: the listed refusals and every refusal's count by reason, in reason order. */
+export function standDownRefusals(refusals: unknown): Json {
+  if (!Array.isArray(refusals)) return {};
+  const counts = new Map<string, number>();
+  const listed: Json[] = [];
+  for (const refusal of refusals) {
+    const reason = refusal !== null && typeof refusal === "object" && typeof (refusal as Json).reason === "string" ? String((refusal as Json).reason) : "unknown";
+    counts.set(reason, (counts.get(reason) ?? 0) + 1);
+    if (!COUNTED_ONLY_REFUSALS.has(reason)) listed.push(refusal as Json);
+  }
+  return { refusals: listed, refused_by_reason: Object.fromEntries([...counts].sort(([a], [b]) => a.localeCompare(b))) };
+}
 /** BACKSTOP: a mover child that never answers is killed, so the in-flight guard frees; the next step converges. */
 export const PLAN_TASK_MOVE_CHILD_TIMEOUT_MS = 30 * 60_000;
 
@@ -138,15 +160,15 @@ async function lastStepState(ports: PlanTaskMovePorts, pin: MovePin, last: { sid
 /** One tick. It never throws: any failure is a stand-down, and the next tick reads everything again. */
 export async function runPlanTaskMoveTick(inputs: PlanTaskMoveTickInputs, mover: PlanTaskMover): Promise<PlanTaskMoveTickOutcome> {
   const { ports, memory } = mover;
-  const standDown = (reason: string, detail?: string): PlanTaskMoveTickOutcome => {
-    const signature = JSON.stringify([reason, detail ?? null]);
+  const standDown = (reason: string, detail?: string, extra: Record<string, unknown> = {}): PlanTaskMoveTickOutcome => {
+    const signature = JSON.stringify([reason, detail ?? null, extra]);
     if (memory.standDown === signature) memory.standDownTicks = (memory.standDownTicks ?? 0) + 1;
     else {
       // W1-T14448: the row names how long the reason it replaces held; after a reset (off, a step) none is held.
       const previous = memory.standDown === undefined ? {} : { previous_ticks: memory.standDownTicks ?? 0 };
       memory.standDown = signature;
       memory.standDownTicks = 1;
-      try { inputs.log(PLAN_MOVE_STAND_DOWN, { reason, ...(detail === undefined ? {} : { detail }), ...previous }); }
+      try { inputs.log(PLAN_MOVE_STAND_DOWN, { reason, ...(detail === undefined ? {} : { detail }), ...extra, ...previous }); }
       catch (error) { void error; /* A row that cannot be written never takes a step. */ }
     }
     return { outcome: "stand_down", reason, ...(detail === undefined ? {} : { detail }) };
@@ -182,7 +204,8 @@ export async function runPlanTaskMoveTick(inputs: PlanTaskMoveTickInputs, mover:
     const step = text(dry.out.step) ?? "unknown";
     if (step === "wait") return standDown("mover_pull_request_open");
     if (step === "held") return standDown("move_held", text(dry.out.reason));
-    if (step === "none" || step === "complete") return standDown("nothing_to_move");
+    // W1-T14870: the row names each record selection refused and why; a change in that list writes a new row.
+    if (step === "none" || step === "complete") return standDown("nothing_to_move", undefined, standDownRefusals(dry.out.refusals));
     if (step !== "copy" && !CONVERGING.has(step)) return standDown("preview_unknown", text(dry.out.reason));
     if (step === "copy") {
       if (inputs.opsDispatchHold !== undefined) return standDown("ops_dispatch_held", inputs.opsDispatchHold);
