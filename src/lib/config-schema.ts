@@ -599,6 +599,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_WORKER_EGRESS", "Selects the worker egress mode when the spawn arguments do not specify one.", ["src/lib/worker.ts"]),
   envEntry("RMD_WORKER_HOME_DIR", "Maps one config root to the directory holding its worker homes as <root>:<dir>; set by deploy/scratch-mounts.sh.", ["src/lib/config.ts"]),
   envEntry("RMD_BIN_DIR", "Overrides the installed host command directory checked by rmd doctor.", ["src/lib/report-commands.ts"]),
+  envEntry("RMD_ESCALATION_REPOSITORY", "Names the <owner>/<name> repository a fleet escalation files its issue in, read ahead of the host's plan destination; a value not of that form files nowhere.", ["src/lib/escalate.ts"]),
   envEntry("RMD_FLEET_INSTALL_DIR", "Overrides the fleet install checkout used to check and restore host cron scripts in rmd doctor.", ["src/lib/report-commands.ts"]),
   envEntry("RMD_CLEANUP_PATH", "Overrides the installed six-hour cleanup script path checked by rmd doctor.", ["src/lib/report-commands.ts"]),
   envEntry("RMD_TMP_SWEEP_PATH", "Overrides the installed temporary sweep script path checked by rmd doctor.", ["src/lib/report-commands.ts"]),
