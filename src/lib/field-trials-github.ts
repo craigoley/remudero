@@ -15,7 +15,7 @@
  * change deployed or was correct; field-trials-flow.ts reads these facts and keeps those separate.
  */
 import { fixedClock, systemClock, type Clock } from "./clock.js";
-import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, ghInteractiveRead } from "./github-transport.js";
+import { classifyGhLimitFailure, defaultGhRetryAfterSeconds, ghInteractiveRead, splitGhHeaderBlock } from "./github-transport.js";
 import { GITHUB_WRITE_RESERVE_FRACTION } from "./github-installation-budget.js";
 import { ensureHeldTokenFresh } from "./github-app.js";
 
@@ -87,20 +87,20 @@ const defaultGhApiRead = async (args: string[]): Promise<string> => String(await
 const SERVER_ERROR_RETRY_FIRST_MS = 1_000;
 const SERVER_ERROR_RETRY_MAX_MS = 60_000;
 
-/** W1-T14944: gh's own response-status line, for a 500, 502, 503 or 504. gh 2.63.2 (the version deploy/Dockerfile pins)
- *  prints it in pkg/cmd/api/api.go as `gh: <message> (HTTP <code>)` for a JSON error body (:640) and as a bare
- *  `gh: HTTP <code>` for any other body (:509). */
-const GH_SERVER_ERROR_LINE = /^gh: (?:HTTP 50[0234]|.* \(HTTP 50[0234]\))$/;
+/** W1-T14944: the HTTP status of a `gh api -i` read, from its STDOUT's first line (`HTTP/2.0 502 Bad Gateway`). gh 2.63.2
+ *  prints that line from the response's own proto and status (pkg/cmd/api/api.go, processResponse) before any header or
+ *  body, on a failed read as on a good one, so no response message or caller text can stand in for it. `undefined` when
+ *  there is no such line (a read that never got a response, or an injected fake). */
+export function ghIncludedStatus(stdout: unknown): number | undefined {
+  const m = /^HTTP\/[0-9.]+ ([0-9]{3})\b/.exec(String(stdout ?? ""));
+  return m ? Number(m[1]) : undefined;
+}
 
-/** W1-T14944: a read that failed with a transient GitHub server error (HTTP 500, 502, 503 or 504), as `gh` reports it
- *  on stderr. Only stderr is read, because the error message also carries the command, whose endpoint is caller text.
- *  Only gh's own status line counts: the FIRST stderr line gh prefixes `gh: ` (it prints the status first, then any
- *  scope or SSO hint). A URL parse error (`parse "<url>": invalid URL escape ...`) echoes the endpoint without that
- *  prefix, so `HTTP 502` there is caller text, never a response status. */
+/** W1-T14944: a read that failed with a transient GitHub server error, judged ONLY from the response's own HTTP status
+ *  (500, 502, 503 or 504) on the failed read's stdout; stderr's message text is never parsed for it. */
 export function isGhServerError(error: unknown): boolean {
-  const e = error as { stderr?: string | Buffer } | null | undefined;
-  const status = String(e?.stderr ?? "").split(/\r?\n/).find((line) => line.startsWith("gh: "));
-  return status !== undefined && GH_SERVER_ERROR_LINE.test(status.trimEnd());
+  const status = ghIncludedStatus((error as { stdout?: string | Buffer } | null | undefined)?.stdout);
+  return status === 500 || status === 502 || status === 503 || status === 504;
 }
 
 export function ghApiFetch(read: (args: string[]) => Promise<string> = defaultGhApiRead, pacing: GhApiFetchPacing = {}): GithubPageFetch {
@@ -110,7 +110,8 @@ export function ghApiFetch(read: (args: string[]) => Promise<string> = defaultGh
     let serverErrorWaitMs = SERVER_ERROR_RETRY_FIRST_MS;
     for (;;) {
       await pacing.beforeRead?.();
-      try { body = await read(["api", path]); break; }
+      // `-i`: the response's own status line and headers lead stdout, so a failed read is classified by its status.
+      try { body = splitGhHeaderBlock(await read(["api", path, "-i"])).body; break; }
       catch (error) {
         // W1-T14944: a 5xx is GitHub's own transient failure, so the same page is retried with backoff, no attempt cap.
         if (classifyGhLimitFailure(error) === undefined && isGhServerError(error)) {

@@ -191,7 +191,7 @@ test("field trials github default seam shells gh api and turns a failed read int
     const ok = await fetch("repos/o/r/pulls?page=1");
     assert.equal(ok.ok && (ok.items[0] as { number: number }).number, 1);
     assert.deepEqual(await fetch("repos/o/r/commits?page=1"), { ok: false, reason: "github-read-failed" });
-    assert.deepEqual(shim.calls(), ["api repos/o/r/pulls?page=1", "api repos/o/r/commits?page=1"]);
+    assert.deepEqual(shim.calls(), ["api repos/o/r/pulls?page=1 -i", "api repos/o/r/commits?page=1 -i"]);
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
@@ -202,7 +202,7 @@ test("field trials github default seam shells gh api and turns a failed read int
   const refused = ghApiFetch(async () => { throw new Error("read floor refused"); });
   assert.deepEqual(await refused("repos/o/r/pulls"), { ok: false, reason: "github-read-failed" }, "a refused read is a reason, not a crash");
   const injected = ghApiFetch(async (args) => JSON.stringify([{ args }]));
-  assert.deepEqual(await injected("repos/o/r/pulls"), { ok: true, items: [{ args: ["api", "repos/o/r/pulls"] }] });
+  assert.deepEqual(await injected("repos/o/r/pulls"), { ok: true, items: [{ args: ["api", "repos/o/r/pulls", "-i"] }] });
 });
 
 
