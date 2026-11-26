@@ -644,6 +644,7 @@ import { readRestartHistoryLines, type RetroCheckCompanions, type RetroReadProje
 export { readRestartHistoryLines } from "./lib/daemon.js";
 import { holdReviewWorktree, releaseReviewWorktree } from "./lib/review-worktree-reclaim.js";
 import { ReviewerWorktreeLeasedError, withReviewerWorktreeLease } from "./lib/reviewer-worktree-lease.js";
+import { reviewerTreeCutRoot } from "./lib/reviewer-tree-reaper.js";
 import { REVIEWER_INCIDENT_FLAG, REVIEWER_SHADOW_FLAG, REVIEWER_SHADOW_VERDICT_STEP, buildHealedReviewerTree, claimHealedDeathEscalation, evaluateReviewerHealth, gitIn, healedChildDiedBeforeJudging, healedChildLedgerMark, healedChildStartedJudging, noteHealedTreeOutcome, readReviewerHealthRows, reviewerHealedChildDiedEscalation, reviewerHealedTreeUnavailableFields, reviewerHealthRowFields, reviewerHealthStatePath, reviewerShadowStep, type ReviewerIncident } from "./lib/reviewer-health.js";
 import {
   REVIEW_CALIBRATION_CASE_STEP, REVIEW_CALIBRATION_RESULT_STEP, calibrationPorts, scoreReviewersAgainstKnownAnswers, type ReviewerCalibrationPorts,
@@ -46481,7 +46482,7 @@ export async function runDetachedWork(work: DetachedWorkSpec, ctx: { runId: stri
  *  verdict; a stale one runs the review from a fresh tree at origin/main, or runs no reviewer. */
 export function gatedDetachedReviewCommand(root: string, log: (step: string, extra?: Record<string, unknown>) => void): DetachedReviewCommand {
   const seams: FreshTreeReviewSeams = {
-    git: reviewerGit(root), addWorktree: realDeps().reviewWorktree.addWorktree, worktreeRoot: join(root, "..", "worktrees"), spawnReview: spawnRmdReviewForFreshTree,
+    git: reviewerGit(root), addWorktree: realDeps().reviewWorktree.addWorktree, worktreeRoot: reviewerTreeCutRoot(root), spawnReview: spawnRmdReviewForFreshTree,
     storeFill: { log },
   };
   const gate = buildReviewerCodeFreshnessGate(() => checkReviewerCodeFreshnessAsync(root, process.env), log, reviewCommand,
