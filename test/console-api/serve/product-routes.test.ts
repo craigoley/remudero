@@ -234,12 +234,14 @@ writeFileSync(process.argv[3], JSON.stringify({ summary: 'A source-backed skirmi
       const queryFn = ((params: { options: { env: Record<string, string>; spawnClaudeCodeProcess?: (opts: unknown) => unknown } }) => {
         queries++;
         // Exercise spawnWorker's real contained child hook; only the SDK stream is a fixture.
-        params.options.spawnClaudeCodeProcess?.({ command: process.execPath,
+        const child = params.options.spawnClaudeCodeProcess?.({ command: process.execPath,
           args: [worker, JSON.stringify({ prompt: args.prompt, tools: args.tools }), output],
-          env: params.options.env, signal: new AbortController().signal });
+          env: params.options.env, signal: new AbortController().signal }) as
+          { exitCode: number | null; once(event: "exit", listener: () => void): unknown } | undefined;
         return (async function* () {
-          const deadline = Date.now() + 5_000;
-          while (!existsSync(output) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+          // Wait for the child itself, never a fixed deadline (W1-T14786): under host load, as when the clock sweep runs
+          // every suite at once, a node child took longer than the 5 s this once allowed, and the test failed healthy.
+          if (child && child.exitCode === null && !existsSync(output)) await new Promise<void>((resolve) => child.once("exit", resolve));
           assert.ok(existsSync(output), "the contained worker child produced its fixture output");
           yield { type: "result", subtype: "success", is_error: false, result: readFileSync(output, "utf8"),
             session_id: "research-process-fixture", total_cost_usd: 0.02, num_turns: 1 };

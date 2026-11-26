@@ -2,9 +2,10 @@
  * W1-T14786: on core PR #20802 (2026-11-25) the clock sweep listed 15 suites that passed today and failed in the
  * future. Each now takes its "now" from the clock the code under test reads: this process's clock for in-process
  * code, the host clock for a child whose clock the shift preload never moves, or the same shift for a child that
- * models the same host. This suite runs each of the 15 as its own child at the 7-day shift that first named them.
- * At the sweep's own shift it runs each complete suite, matching the report's whole-file inputs so failures outside
- * the pinned names cannot disappear from the drift report.
+ * models the same host. This suite runs each of the 15 as its own child, exactly as the sweep's runner does, at
+ * the 7-day shift that first named them and at the sweep's own shift, so none of them can drift back unseen. At the
+ * 7-day shift each child runs only that suite's drifting tests, by exact name. At the sweep's shift each child runs
+ * the whole suite, as the sweep's report does, so a pinned pass cannot hide another test in the file that drifts.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -103,7 +104,41 @@ const DRIFTING: readonly { file: string; tests: readonly string[]; bash4?: reado
     "a dry run never prunes worktree records, and an apply run still prunes an unmarked store's stale record",
   ] },
 ];
+/**
+ * Each suite's whole-file wall time at the sweep's shift, two at a time (seconds, measured 2026-11-26 in a 4-core cloud
+ * container). Only an order is read from them. The proof runner gives each test 120 s and a test waits from the end of
+ * the one before it, but the two slowest suites take about that alone: run from a shared queue, the second-slowest
+ * started behind the quick ones and its test waited 122 s. So the long suites get a lane of their own, started with the
+ * pool, and their tests come last, after the quick lane's runs have covered their time.
+ */
+const WHOLE_SECONDS: Readonly<Record<string, number>> = {
+  "test/daemon/repository-maintenance-escalation-heals-itself.test.ts": 3,
+  "test/deploy/preserve-retire-keep-declarations-hold-every-action.test.ts": 4,
+  "test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts": 7,
+  "test/daemon/a-worktree-janitor-reports-what-it-would-retire.test.ts": 10,
+  "test/sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views.test.ts": 12,
+  "test/github/every-mac-session-reads-github-through-one-broker.test.ts": 13,
+  "test/fix-lane/rmd-fix-never-reports-a-round-fixed-when-its-progress-judgment-failed.test.ts": 13,
+  "test/sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store.test.ts": 15,
+  "test/expiring-fixture-census.test.ts": 15,
+  "test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts": 21,
+  "test/console-api/serve/product-routes.test.ts": 42,
+  "test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts": 49,
+  "test/sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views.test.ts": 51,
+  "test/dispatch/product-plan-operation.test.ts": 112,
+  "test/daemon/a-paused-instance-says-when-it-has-drained.test.ts": 137,
+};
+type Suite = (typeof DRIFTING)[number];
+/** A suite is long when its whole run alone is over half the proof runner's 120 s per-test timeout. */
+const LONG_SECONDS = 60;
+const byTime = (a: Suite, b: Suite) => WHOLE_SECONDS[a.file]! - WHOLE_SECONDS[b.file]!;
+/** The long lane runs slowest first: the pinned run's slowest test (the paused instance, ~100 s) is that suite too. */
+const WHOLE_LONG = DRIFTING.filter((suite) => WHOLE_SECONDS[suite.file]! > LONG_SECONDS).sort((a, b) => byTime(b, a));
+const WHOLE_QUICK = DRIFTING.filter((suite) => WHOLE_SECONDS[suite.file]! <= LONG_SECONDS).sort(byTime);
+/** The whole-suite tests: quick suites quickest first, then the long lane in its run order. */
+const WHOLE_TEST_ORDER = [...WHOLE_QUICK, ...WHOLE_LONG];
 const FIFTEEN = DRIFTING.map((suite) => suite.file);
+assert.deepEqual(Object.keys(WHOLE_SECONDS).sort(), [...FIFTEEN].sort(), "every suite has a measured whole-file time");
 assert.equal(new Set(FIFTEEN).size, 15, "fifteen distinct suites");
 const BASH_HAS_MAPFILE = spawnSync("bash", ["-c", "type mapfile"], { stdio: "ignore" }).status === 0;
 /** The names this host can run: the bash-4 tests only where `bash` has `mapfile`. */
@@ -121,13 +156,13 @@ function withoutTestContext(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  * One suite's drifting tests as the sweep's `runSuite` runs the suite: TAP, the test preload, the shift preload and a
  * private TMPDIR, plus one exact `--test-name-pattern` per pinned test.
  */
-function runShifted(suite: (typeof DRIFTING)[number], days: number, wholeFile = false): Promise<Run> {
+function runShifted(suite: (typeof DRIFTING)[number], days: number, whole: boolean): Promise<Run> {
   const isolatedTmp = mkdtempSync(join(tmpdir(), "rmd-w1-t14786-"));
-  const names = wholeFile ? [] : pinned(suite);
-  const selection = wholeFile ? [] : names.map((name) => `--test-name-pattern=${exactName(name)}`);
+  // A whole-suite run, as the sweep's report runs it, pins no name: every test in the file must pass.
+  const names = whole ? [] : pinned(suite);
   return new Promise((resolve) => {
     execFile(process.execPath,
-      ["--test", "--test-reporter=tap", ...selection,
+      ["--test", "--test-reporter=tap", ...names.map((name) => `--test-name-pattern=${exactName(name)}`),
         "--import", "tsx", "--import", join(REPO_ROOT, SUITE_PRELOAD),
         "--import", join(REPO_ROOT, "scripts", "clock-shift.mjs"), suite.file],
       { cwd: REPO_ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
@@ -145,30 +180,32 @@ function runShifted(suite: (typeof DRIFTING)[number], days: number, wholeFile = 
  * suite waits only for that suite: one test awaiting all fifteen took ~155 s, past the proof runner's per-test
  * timeout, while the pool still finishes all fifteen in one wall-clock pass.
  */
-function runShift(days: number, wholeFile = false): Map<string, Promise<Run>> {
+function runShift(days: number, whole: boolean): Map<string, Promise<Run>> {
   const settled = new Map(DRIFTING.map((suite) => {
     let resolve!: (run: Run) => void;
     return [suite.file, { promise: new Promise<Run>((r) => { resolve = r; }), resolve }] as const;
   }));
-  const queue = [...DRIFTING];
+  const queue = whole ? [...WHOLE_QUICK] : DRIFTING.filter((suite) => !WHOLE_LONG.includes(suite));
   // Half a child per core. Serially a proof took ~150 s against the reviewer's 180 s proof bound and failed on a hosted
   // runner (#20913); the children mostly wait, so a pool cuts that roughly in half. The flake screen runs twice
   // availableParallelism() copies of this file at once, and a core-sized pool there held 32 children and ~14.5 GB on
   // a 4-core, 15 GB box; half the cores keeps that load near one child per core per copy pair.
-  for (let w = 0; w < Math.max(1, Math.floor(availableParallelism() / 2)); w++) {
-    void (async () => {
-      for (let suite = queue.shift(); suite !== undefined; suite = queue.shift()) {
-        settled.get(suite.file)!.resolve(await runShifted(suite, days, wholeFile));
-      }
-    })();
-  }
+  const drain = async (lane: Suite[]) => {
+    for (let suite = lane.shift(); suite !== undefined; suite = lane.shift()) {
+      settled.get(suite.file)!.resolve(await runShifted(suite, days, whole));
+    }
+  };
+  // The long suites drain their own lane beside the pool, so none starts behind the quick ones.
+  void drain([...WHOLE_LONG]);
+  for (let w = 0; w < Math.max(1, Math.floor(availableParallelism() / 2) - 1); w++) void drain(queue);
   return new Map([...settled].map(([file, { promise }]) => [file, promise]));
 }
-// Each pool starts only when a proof test asks for it.
+// Each shift runs only when a test asks for it, so a proof run that selects one shift's tests spawns only its children.
+// `whole` runs every test in each suite, as the sweep's report does; otherwise only the pinned drifting tests run.
 const pools = new Map<string, Map<string, Promise<Run>>>();
-const runOf = (days: number, file: string, wholeFile = false): Promise<Run> => {
-  const key = `${days}:${wholeFile ? "whole" : "pinned"}`;
-  if (!pools.has(key)) pools.set(key, runShift(days, wholeFile));
+const runOf = (days: number, file: string, whole = false): Promise<Run> => {
+  const key = `${days}:${whole ? "whole" : "pinned"}`;
+  if (!pools.has(key)) pools.set(key, runShift(days, whole));
   return pools.get(key)!.get(file)!;
 };
 
@@ -181,7 +218,7 @@ function verdict(run: Run): string {
   const fails = Number(/^# fail (\d+)$/m.exec(run.output)?.[1] ?? -1);
   const passed = new Set(run.output.split("\n").map((line) => /^\s*ok \d+ - (.*)$/.exec(line)?.[1]).filter((name) => name !== undefined));
   const unrun = run.names.filter((name) => !passed.has(name));
-  if (!run.failed && tests > 0 && tests >= run.names.length && fails === 0 && unrun.length === 0) return "pass";
+  if (!run.failed && tests >= Math.max(1, run.names.length) && fails === 0 && unrun.length === 0) return "pass";
   const notOk = run.output.split("\n").filter((line) => /^\s*not ok /.test(line)).slice(0, 3).join(" | ");
   return `fail (tests ${tests}, fail ${fails}${notOk ? `: ${notOk}` : ""}${unrun.length ? `; no ok for ${unrun.length} pinned` : ""})`;
 }
@@ -213,11 +250,12 @@ test("W1-T14786 the clock sweep reports no new drift for the fifteen suites: the
   }
 });
 
-for (const suite of DRIFTING) {
+for (const suite of WHOLE_TEST_ORDER) {
   test(`W1-T14786 the clock sweep reports no new drift for the fifteen suites: ${sweepId(suite.file)}`, async () => {
+    // The whole suite, as the sweep's report runs it: a pinned run could pass while another test in the file drifts.
     const run = await runOf(SWEEP_SHIFT_DAYS, suite.file, true);
-    // Positive control: the actual whole-file input must report tests and zero failures.
-    assert.equal(verdict(run), "pass", `${suite.file} runs and passes at +${SWEEP_SHIFT_DAYS} days`);
+    // Positive control: a child that never reported its own summary would read as "not failed" to the classifier.
+    assert.equal(verdict(run), "pass", `${suite.file} runs in full and passes at +${SWEEP_SHIFT_DAYS} days`);
     if (LEFT_THE_SWEEP.has(sweepId(suite.file))) return; // the report does not measure it; the test above says why
     const sweep = classifySweep(new Map([[sweepId(suite.file), run]]));
     assert.deepEqual(sweep.newDrift.map((row) => row.suite), [], `the sweep's own classifier names ${suite.file} as no new drift`);
