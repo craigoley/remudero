@@ -18,7 +18,8 @@ import {
 import { assertLiveWriteAllowed } from "./live-write-guard.js";
 // W1-T5283/W1-T5284: shared steps run synchronously for CLI callers, asynchronously on the daemon.
 import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
-import { validateDecisionSummary, type DecisionSummary, type SummarizeDeps } from "./feedback.js";
+import { instanceStateDir, validateDecisionSummary, type DecisionSummary, type SummarizeDeps } from "./feedback.js";
+import { planDestinationRepository } from "./plan-destination.js";
 import type { Mount, Mounts } from "./mounts.js";
 import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { benchmarkNonDispatchSpawn, withReceiptIdentity } from "./benchmark-run.js";
@@ -2006,6 +2007,9 @@ export function escalate(e: Escalation, deps: EscalateDeps): string {
 }
 
 const asyncIssueTwins = new WeakMap<IssueGateway, AsyncIssueGateway>();
+/** W1-T14998: the repository each real gateway files in, and the reason a gateway files nowhere. */
+const gatewayRepository = new WeakMap<object, string>();
+const unfiledGateways = new WeakMap<object, string>();
 
 function driveSynchronousEscalation<T>(drive: () => T): T {
   // Latched producers and SRE feedback can consume an incident after this call. Preserve
@@ -2195,6 +2199,13 @@ function* escalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>, al
   validateEscalationOptionKinds(e);
   const resolved = withExplicitConsequence(refuseUnlessResolvable(e));
   recordThreadMessage(resolved, deps);
+  // W1-T14998: with no private escalation repository the escalation is a ledger row only, never a public issue.
+  const unfiled = issueGatewayUnfiled(deps.issues);
+  if (unfiled !== undefined) {
+    appendLedger(deps.ledgerPath, { run_id: deps.runId, task_id: resolved.taskId, step: "escalation.not_filed",
+      class: resolved.class, summary: resolved.summary, reason: unfiled });
+    return "";
+  }
   if (!allowAsyncJudge) return yield* raiseEscalation(resolved, deps, allowAsyncJudge);
   return yield* escalateOncePerKey(resolved, deps, () => raiseEscalation(resolved, deps, allowAsyncJudge));
 }
@@ -2327,13 +2338,16 @@ export async function triageExistingEscalation(
 export function ghIssueGateway(
   owner: string,
   repo: string,
-  opts: { exec?: (args: string[]) => string } = {},
+  opts: { exec?: (args: string[]) => string; destination?: EscalationDestinationRead } = {},
 ): IssueGateway {
+  const route = escalationIssueRoute(owner, repo, opts);
+  if (route.outcome === "unfiled") return unfiledIssueGateway(route.reason, "sync") as IssueGateway;
   const run =
     opts.exec ??
     ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
-  const gateway = issueGatewaySteps(`${owner}/${repo}`, run, runStepsSync) as IssueGateway;
-  if (opts.exec === undefined) asyncIssueTwins.set(gateway, ghIssueGatewayAsync(owner, repo));
+  const gateway = issueGatewaySteps(route.repository, run, runStepsSync) as IssueGateway;
+  gatewayRepository.set(gateway, route.repository);
+  if (opts.exec === undefined) asyncIssueTwins.set(gateway, ghIssueGatewayAsync(owner, repo, { destination: () => route }));
   return gateway;
 }
 
@@ -2342,9 +2356,66 @@ export function ghIssueGateway(
 export function ghIssueGatewayAsync(
   owner: string,
   repo: string,
-  opts: { exec?: (args: string[]) => Promise<string> } = {},
+  opts: { exec?: (args: string[]) => Promise<string>; destination?: EscalationDestinationRead } = {},
 ): AsyncIssueGateway {
-  return issueGatewaySteps(`${owner}/${repo}`, opts.exec ?? ((args: string[]) => ghTextAsync(args)), runStepsAsync);
+  const route = escalationIssueRoute(owner, repo, opts);
+  if (route.outcome === "unfiled") return unfiledIssueGateway(route.reason);
+  const gateway = issueGatewaySteps(route.repository, opts.exec ?? ((args: string[]) => ghTextAsync(args)), runStepsAsync);
+  gatewayRepository.set(gateway, route.repository);
+  return gateway;
+}
+
+/**
+ * W1-T14998 — WHERE A FLEET ESCALATION ISSUE IS FILED. Never the public code repository: the host's private plan
+ * destination (`<state>/plan-destination.json`, the ops repository on the fleet host), so task ids, PR links and host
+ * detail stay out of public issues. OBSERVED 2026-11-26: [MANUAL], MAIN-HEALTH and READ-MODEL issues were opened on
+ * public core (#21036, #21001, #21006, ...). The issue body still names the code repository's PR by its URL.
+ *
+ * `named` files in that repository; `unfiled` opens no issue at all — no file (`off`) or a file that cannot be read,
+ * which is never read as permission to fall back to the public repository. The code repository is `owner/repo`, which
+ * the route no longer files in. A gateway built over an injected `exec` with no `destination` keeps `owner/repo`:
+ * that is a caller's own fake transport, not the fleet's.
+ */
+export type EscalationDestinationRead = () => { outcome: "named"; repository: string } | { outcome: "unfiled"; reason: string };
+
+/** The host's own route: the plan destination its instance config names, read on each gateway construction. */
+export const hostEscalationDestination: EscalationDestinationRead = () => {
+  const named = planDestinationRepository(instanceStateDir());
+  if (named.outcome === "named") return { outcome: "named", repository: `${named.owner}/${named.repo}` };
+  return { outcome: "unfiled", reason: named.outcome === "off" ? "no-private-escalation-repository" : `private-escalation-repository-unreadable: ${named.reason}` };
+};
+
+function escalationIssueRoute(owner: string, repo: string, opts: { exec?: unknown; destination?: EscalationDestinationRead }):
+  ReturnType<EscalationDestinationRead> {
+  if (opts.destination === undefined && opts.exec !== undefined) return { outcome: "named", repository: `${owner}/${repo}` };
+  return (opts.destination ?? hostEscalationDestination)();
+}
+
+
+/** W1-T14998 — the repository a gateway files in, or undefined for a fake gateway or one that files nowhere. */
+export function issueGatewayRepository(gateway: object): string | undefined {
+  return gatewayRepository.get(gateway);
+}
+
+/** W1-T14998 — why a gateway files nowhere, or undefined when it files somewhere. */
+export function issueGatewayUnfiled(gateway: object): string | undefined {
+  return unfiledGateways.get(gateway);
+}
+
+/** A gateway that opens nothing: no open issue to dedupe against or retire, and every write refused with its reason. */
+function unfiledIssueGateway(reason: string, form: "sync" | "async" = "async"): AsyncIssueGateway {
+  const error = () => new Error(`no escalation issue is filed: ${reason}`);
+  const gateway: AsyncIssueGateway = form === "sync" ? {
+    create: () => { throw error(); }, closeWithComment: () => { throw error(); }, comment: () => { throw error(); },
+    editBody: () => { throw error(); }, editComment: () => { throw error(); },
+    listOpen: () => [], listCommentsSince: () => [], ensureLabel: () => false,
+  } : {
+    create: () => Promise.reject(error()), closeWithComment: () => Promise.reject(error()), comment: () => Promise.reject(error()),
+    editBody: () => Promise.reject(error()), editComment: () => Promise.reject(error()),
+    listOpen: () => Promise.resolve([]), listCommentsSince: () => Promise.resolve([]), ensureLabel: () => Promise.resolve(false),
+  };
+  unfiledGateways.set(gateway, reason);
+  return gateway;
 }
 
 const OPEN_ISSUES_BY_LABEL_QUERY =
@@ -2360,11 +2431,14 @@ const CREATE_ISSUE_MUTATION =
  *  {@link parseLabelledIssuesRest} returns; `create` reads the repository id and every label id in one
  *  query, then calls the createIssue mutation. There is no `ensureLabel`: a label with no id fails the create. */
 export function ghIssueGatewayGraphql(
-  owner: string,
-  repo: string,
-  opts: { exec?: (args: string[]) => Promise<string> } = {},
+  codeOwner: string,
+  codeRepo: string,
+  opts: { exec?: (args: string[]) => Promise<string>; destination?: EscalationDestinationRead } = {},
 ): AsyncIssueGateway {
-  const repoArg = `${owner}/${repo}`;
+  const route = escalationIssueRoute(codeOwner, codeRepo, opts);
+  if (route.outcome === "unfiled") return unfiledIssueGateway(route.reason);
+  const repoArg = route.repository;
+  const [owner, repo] = repoArg.split("/") as [string, string];
   const run = opts.exec ?? ((args: string[]) => ghTextAsync(args));
   const graphql = async (query: string, vars: Record<string, string>): Promise<Record<string, unknown>> => {
     const args = ["api", "graphql", "-f", `query=${query}`];
@@ -2375,7 +2449,7 @@ export function ghIssueGatewayGraphql(
     }
     return answer.data;
   };
-  return {
+  const gateway: AsyncIssueGateway = {
     async listOpen(label) {
       const issues: LabelledIssue[] = [];
       let cursor: string | undefined;
@@ -2416,6 +2490,8 @@ export function ghIssueGatewayGraphql(
       return url;
     },
   };
+  gatewayRepository.set(gateway, repoArg);
+  return gateway;
 }
 
 function issueGatewaySteps(
