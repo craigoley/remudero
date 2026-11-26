@@ -38,7 +38,7 @@ import { quarantinedLedgerFingerprints } from "./field-trials-ledger-quarantine.
 import { loadConfig } from "./config.js";
 import { ghInteractiveRead } from "./github-transport.js";
 import { startInstallationTokenRefresh } from "./github-app.js";
-import { syncFieldNoteSiteImport, type FieldNoteExport, type SiteImportOutcome, type SiteRelease } from "./field-trials-site-import.js";
+import { coreVerifiedOutcomeReceipts, syncFieldNoteSiteImport, type FieldNoteExport, type SiteImportOutcome, type SiteRelease } from "./field-trials-site-import.js";
 import { BENCHMARK_PAID_PILOT_VERSION, loadPaidPilotProtocol } from "./benchmark-paid-pilot.js";
 import { parseRefreshSteps, recordFieldTrialsRefresh, refreshSection, type FieldTrialsRefresh, type RefreshStep } from "./field-trials-refresh.js";
 import type { IssueGateway } from "./escalate.js";
@@ -1646,9 +1646,8 @@ async function siteImportPass(args: { outDir: string; nowIso: string; consent: F
     : typeof args.consent === "string" ? { state: "withheld", reason: args.consent }
     : args.offline ? { state: "withheld", reason: "offline-pass" }
     : await syncFieldNoteSiteImport({ workRoot: join(args.outDir, "site-import"), nowIso: args.nowIso,
-      // W1-T14985: the core ledger's cohort index and every live receipt, for the site's verified-outcome derivation.
-      verifiedOutcome: { cohortIndexPath: args.cohortIndexPath,
-        receipts: args.consent.repos.filter((repo) => repo.revoked !== true).map((repo) => repo.receipt) },
+      // W1-T14985: the core ledger's cohort index, authorised only by core's own live aggregate receipt.
+      verifiedOutcome: { cohortIndexPath: args.cohortIndexPath, receipts: coreVerifiedOutcomeReceipts(args.consent.repos) },
       exportCandidate: (released): FieldNoteExport => {
         const result = exportFieldNoteCandidate({ outDir: args.outDir, out: join(args.outDir, "field-note-candidate-latest.json"),
           nowIso: args.nowIso, consent: args.consent, registryPath: undefined, released });

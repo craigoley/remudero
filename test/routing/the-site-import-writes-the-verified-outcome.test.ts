@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 import {
-  consentAtFromReceipts, SITE_IMPORT_BRANCH, SITE_VERIFIED_OUTCOME_FILE, SITE_VERIFIED_OUTCOME_SCRIPT, syncFieldNoteSiteImport,
+  consentAtFromReceipts, coreVerifiedOutcomeReceipts, SITE_IMPORT_BRANCH, SITE_VERIFIED_OUTCOME_FILE, SITE_VERIFIED_OUTCOME_SCRIPT, syncFieldNoteSiteImport,
 } from "#src/lib/field-trials-site-import.js";
 import type { ModelFieldNoteBody } from "#src/lib/field-trials-field-note.js";
 import type { GhApiFetcher } from "#src/lib/open-prs-rest.js";
@@ -111,7 +111,7 @@ function siteRest() {
 
 const NOTE = { releaseId: "fn-2026-11-25-2026-11-26-abc", asOf: "2026-11-26T12:00:00.000Z" } as unknown as ModelFieldNoteBody;
 
-async function importPass(t: TestContext, index: unknown, mode: "staged" | "unchanged" = "staged") {
+async function importPass(t: TestContext, index: unknown, mode: "staged" | "unchanged" = "staged", receipts: readonly string[] = RECEIPTS) {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14985-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const site = siteFixture(t, mode);
@@ -119,7 +119,7 @@ async function importPass(t: TestContext, index: unknown, mode: "staged" | "unch
   writeFileSync(cohortIndexPath, JSON.stringify(index));
   const rest = siteRest();
   const outcome = await syncFieldNoteSiteImport({ workRoot: join(root, "work"), nowIso: NOW,
-    exportCandidate: () => ({ state: "candidate", note: NOTE }), verifiedOutcome: { cohortIndexPath, receipts: RECEIPTS } },
+    exportCandidate: () => ({ state: "candidate", note: NOTE }), verifiedOutcome: { cohortIndexPath, receipts } },
   { siteUrl: site.url, fetch: rest.fetch, writeProof: async () => ({ ok: true }) });
   const pushed = new Map((rest.state.trees.at(-1)?.tree ?? []).map((entry) => [entry.path, entry.content]));
   return { outcome, pushed, rest, site, cohortIndexPath, root };
@@ -151,10 +151,28 @@ test("W1-T14985 criterion 1: the consent instant comes from the receipts, never 
   assert.deepEqual(consentAtFromReceipts(RECEIPTS, NOW), { at: CONSENT_AT });
   assert.deepEqual(consentAtFromReceipts(["owner-2026-11-26-craig-oley"], NOW), { at: NOW }, "a receipt from today is clamped to now");
   assert.deepEqual(consentAtFromReceipts([], NOW), { reason: "no-consent-receipt" });
+  assert.deepEqual(consentAtFromReceipts(["owner-2026-11-27-craig-oley"], NOW),
+    { reason: "consent-receipt-after-pass: owner-2026-11-27-craig-oley" }, "a receipt dated after the pass is never clamped back");
   assert.deepEqual(consentAtFromReceipts(["owner-2026-10-27-a", "owner-2026-10-28-b"], NOW),
     { reason: "consent-receipts-disagree: 2026-10-27, 2026-10-28" });
   assert.deepEqual(consentAtFromReceipts(["owner-craig-oley"], NOW), { reason: "consent-receipt-has-no-date: owner-craig-oley" });
   assert.deepEqual(consentAtFromReceipts(["owner-2026-02-30-x"], NOW), { reason: "consent-receipt-has-no-date: owner-2026-02-30-x" });
+});
+
+test("W1-T14985 criterion 1: only core's own live aggregate grant authorises publishing core's cohort index", async (t) => {
+  const consoleGrant = { repo: "craigoley/remudero-console", rights: "aggregate-opt-in", receipt: "owner-2026-10-27-console" };
+  const core = { repo: "craigoley/remudero", rights: "aggregate-opt-in", receipt: "owner-2026-10-27-core" };
+  assert.deepEqual(coreVerifiedOutcomeReceipts([consoleGrant, core]), ["owner-2026-10-27-core"], "another repository's receipt never counts");
+  assert.deepEqual(coreVerifiedOutcomeReceipts([consoleGrant]), [], "core absent");
+  assert.deepEqual(coreVerifiedOutcomeReceipts([consoleGrant, { ...core, revoked: true }]), [], "core revoked");
+  assert.deepEqual(coreVerifiedOutcomeReceipts([consoleGrant, { ...core, rights: "private" }]), [], "core private");
+  // With no core grant the pass writes no verified outcome, names why, and the field note still ships.
+  const { outcome, pushed, rest } = await importPass(t, JOINED_INDEX, "staged", coreVerifiedOutcomeReceipts([consoleGrant]));
+  assert.equal(outcome.state, "staged", JSON.stringify(outcome));
+  assert.equal(pushed.has(SITE_VERIFIED_OUTCOME_FILE), false, "core's data never reaches the site PR");
+  assert.deepEqual("verifiedOutcome" in outcome ? outcome.verifiedOutcome : undefined,
+    { state: "not-written", reason: "no-core-aggregate-consent" });
+  assert.match(rest.state.prs[0]!.body, /Verified outcome: not written \(no-core-aggregate-consent\)/);
 });
 
 test("W1-T14985 criterion 2: a cohort index with no verified outcome writes no file and says why", async (t) => {

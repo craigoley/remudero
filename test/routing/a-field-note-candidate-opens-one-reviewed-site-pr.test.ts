@@ -173,7 +173,7 @@ async function dailyPass(root: string, nowIso: string, days: number[], siteImpor
   mkdirSync(outDir, { recursive: true });
   const consent = join(root, "consent.json");
   writeFileSync(consent, JSON.stringify({ version: "field-trials-consent-v1",
-    repos: [{ repo: "craigoley/remudero", rights: "aggregate-opt-in", receipt: "owner-2026-10-27-test" }] }));
+    repos: [{ repo: "craigoley/remudero", rights: "aggregate-opt-in", receipt: "owner-2026-08-27-test" }] }));
   const lines: string[] = [];
   const code = await fieldTrialsCommand(["--source", "core=craigoley/remudero", "--ledger", `core=${stateDir}`, "--out-dir", outDir,
     "--consent", consent, "--refresh-step", "routing-review=0", "--refresh-step", "case-files=0", "--refresh-script-blob", BLOB],

@@ -79,8 +79,21 @@ export const SITE_VERIFIED_OUTCOME_FILE = "data/model-verified-outcome.json";
 export interface SiteVerifiedOutcomeSource {
   /** state/benchmark-cohort-index.json. */
   cohortIndexPath: string;
-  /** Every consented repository's receipt in state/field-trials/field-trials-consent-v1.json. */
+  /** Core's live aggregate receipt in state/field-trials/field-trials-consent-v1.json ({@link coreVerifiedOutcomeReceipts}). */
   receipts: readonly string[];
+}
+
+/** The repository whose ledger the cohort index is built from: only its grant can authorise the verified outcome. */
+export const VERIFIED_OUTCOME_SOURCE_REPO = "craigoley/remudero";
+
+/**
+ * W1-T14985: the receipt that authorises publishing core's cohort index — core's own live aggregate grant, never another
+ * repository's. A revoked, private or absent core grant gives no receipt, so the derivation writes nothing.
+ */
+export function coreVerifiedOutcomeReceipts(repos: readonly { repo: string; rights: string; receipt: string; revoked?: boolean }[]):
+  string[] {
+  return repos.filter((entry) => entry.repo.toLowerCase() === VERIFIED_OUTCOME_SOURCE_REPO && entry.revoked !== true
+    && entry.rights === "aggregate-opt-in").map((entry) => entry.receipt);
 }
 
 /** Whether this pass wrote the verified outcome, or the reason it wrote none. */
@@ -101,6 +114,8 @@ export function consentAtFromReceipts(receipts: readonly string[], nowIso: strin
     if (day === undefined || !Number.isFinite(end) || fixedClock(end).iso().slice(0, 10) !== day) {
       return { reason: `consent-receipt-has-no-date: ${receipt}` };
     }
+    // The site refuses a consent instant after its own clock, and a clamp to now would date the consent before the receipt does.
+    if (day > nowIso.slice(0, 10)) return { reason: `consent-receipt-after-pass: ${receipt}` };
     dates.add(day);
   }
   if (dates.size !== 1) return { reason: `consent-receipts-disagree: ${[...dates].sort().join(", ")}` };
@@ -111,6 +126,7 @@ export function consentAtFromReceipts(receipts: readonly string[], nowIso: strin
 /** Run the site's own derivation in the site checkout, so core and site can never disagree on the figures. */
 function deriveVerifiedOutcome(spawn: NonNullable<PreflightFastDeps["spawn"]>, siteDir: string,
   source: SiteVerifiedOutcomeSource, nowIso: string): VerifiedOutcomeWrite {
+  if (source.receipts.length === 0) return { state: "not-written", reason: "no-core-aggregate-consent" };
   const consent = consentAtFromReceipts(source.receipts, nowIso);
   if ("reason" in consent) return { state: "not-written", reason: consent.reason };
   try { readFileSync(join(siteDir, SITE_VERIFIED_OUTCOME_SCRIPT), "utf8"); }
