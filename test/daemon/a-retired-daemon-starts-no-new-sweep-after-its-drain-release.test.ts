@@ -4,13 +4,14 @@ import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { closeDaemonCleanup, createDaemonRetirement, retiringCiJudgeKick } from "#src/cli/commands/daemon.js";
 import { withCiJudgeAfterSweep } from "#src/lib/ci-escalation-judge.js";
+import { clockFromMillisFn } from "#src/lib/clock.js";
 import { EventEmitter } from "node:events";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LearnedReservation } from "#src/lib/host-memory-learning.js";
 import { spawnRunChild } from "#src/lib/run-child.js";
 import { resolveFleetControlHold, type LightPassScope, type RestartAdmission } from "#src/lib/daemon.js";
-import { spawnWorker, type SpawnWorkerArgs } from "#src/lib/worker.js";
+import { createClaudeExecutableCache, spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "#src/lib/worker.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
@@ -49,7 +50,7 @@ function drafterStart(t: TestContext, withheld: Array<Record<string, unknown>>, 
 }
 
 /** A detached run child whose memory reservation is held open until `admit()`, as sweep.ts launches reviews and fixes. */
-function runChildStart(t: TestContext) {
+function runChildStart(t: TestContext, duringPin: () => void = () => {}) {
   const root = ownedFixtureDir(t, "retired-run-child").dir;
   const state = join(root, "state");
   const sha = "b".repeat(40);
@@ -71,8 +72,34 @@ function runChildStart(t: TestContext) {
     log: (step: string, extra?: Record<string, unknown>) => { rows.push({ step, ...extra }); },
   }, { mainSha: async () => sha, engine: { isCurrent: () => true }, watch: false, pollMs: 60_000,
     reserve: async () => { await reserved; return handle; }, workerAdmissionHold: () => undefined,
+    enginePin: { clock: clockFromMillisFn(() => { duringPin(); return Date.now(); }) },
     spawn: () => { spawned.push("run_child"); return Object.assign(new EventEmitter(), { pid: 424_242, unref() {} }) as never; } });
-  return { rows, spawned, released, admit: () => admit(), launch };
+  const runDirs = (): string[] => existsSync(join(state, "runs")) ? readdirSync(join(state, "runs")) : [];
+  return { rows, spawned, released, admit: () => admit(), launch, runDirs };
+}
+
+/** An in-process Codex fix start; `duringPreparation` runs after memory admission, before the provider launch. */
+function codexFixStart(t: TestContext, withheld: Array<Record<string, unknown>>, starts: string[],
+  duringAdmission: () => void, duringPreparation: () => void): SpawnWorkerArgs {
+  const root = ownedFixtureDir(t, "retired-codex").dir;
+  const result: WorkerResult = { provider: "codex", sessionId: "fixture-session", text: "done", blocks: [], stderr: "",
+    isError: false, apiError: false, subtype: "success", costUsd: 0, numTurns: 1, permissionDenials: [], childEnvKeys: [],
+    model: "fixture", effort: "low", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+    modelUsage: {}, compactionEvents: [], qualitySuspect: false };
+  return { cwd: root, permissionMode: "bypassPermissions", settingsFile: join(REPO_ROOT, "settings/worker.json"),
+    config: { root, claudeBin: "/unused", dailyCapUsd: 25, workerProviders: { enabled: ["claude", "codex", "cash"],
+      cashFallbackWhenBlocked: true, cashEndpoint: "https://foundry.example.test/" } },
+    model: "haiku", effort: "low", tools: ["Read", "Write", "Edit"], workerClass: "fix", memoryShadow: {},
+    mountProvider: "codex", prompt: "fix the finding", taskId: "W1-T14916", runId: "W1-T14916-fixture",
+    admitWorkerMemory: async () => { duringAdmission(); return { kind: "admitted", tier: "fits", waitedMs: 0, attempts: 1 }; },
+    readWorkerAdmissionHold: () => { duringPreparation(); return undefined; },
+    logWorkerSpawnWithheld: (row) => withheld.push(row),
+    providerRouting: { writeStatus: () => {}, spawnCodex: async () => { starts.push("codex_worker"); return result; } },
+    claudeExecutable: { cache: createClaudeExecutableCache(), deps: { env: { RMD_CLAUDE_BIN: "/fixture/claude" }, home: root,
+      exists: () => true, which: () => "/fixture/claude", canExecute: () => true, locations: [] } },
+    keychain: { platform: "linux", readCredentialFile: () => JSON.stringify({
+      claudeAiOauth: { accessToken: "fixture-only", expiresAt: Date.now() + 3_600_000 } }) },
+  };
 }
 
 const turns = async (n: number) => { for (let i = 0; i < n; i++) await new Promise((resolve) => setImmediate(resolve)); };
@@ -148,6 +175,55 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
     "retired: drain lock released; the successor owns this work", "the launch gate ledgers why it withheld the child");
   waiting.settlePage();
   await waitingExit;
+
+  // The release can also land while the child waits for its engine pin, after that gate: the spawn reads the mark again.
+  const pinning = retiringExit();
+  const pinned = runChildStart(t, () => pinning.retirement.retire());
+  pinned.admit();
+  const pinOutcome = await pinning.retirement.inSpawnScope(() => pinned.launch());
+  assert.equal(pinOutcome.started, false, "a release during the engine pin starts no child");
+  assert.deepEqual(pinned.spawned, []);
+  assert.deepEqual(pinned.released, ["reservation-1"]);
+  assert.deepEqual(pinned.runDirs(), [], "the prepared run directory is removed");
+  assert.equal(pinned.rows.find((row) => row.step === "run_child.spawn_withheld")?.hold,
+    "retired: drain lock released; the successor owns this work");
+
+  // In process, the release can land during memory admission or during provider preparation; each is read again.
+  for (const when of ["admission", "preparation"] as const) {
+    const run = retiringExit();
+    const starts: string[] = [];
+    const rows: Array<Record<string, unknown>> = [];
+    const retire = () => run.retirement.retire();
+    let prepared = 0;
+    const outcome = await run.retirement.inSpawnScope(() => spawnWorker(codexFixStart(t, rows, starts,
+      when === "admission" ? retire : () => {}, () => { prepared++; if (when === "preparation") retire(); })));
+    assert.equal(prepared, when === "admission" ? 0 : 1, `a release during ${when} is refused before the next step`);
+    assert.equal(outcome.notStarted, "admission-abandoned", `a release during ${when} starts no worker`);
+    assert.deepEqual(starts, [], `no provider launch after a release during ${when}`);
+    assert.deepEqual(rows.map((row) => row.hold), ["retired: drain lock released; the successor owns this work"]);
+  }
+  // A Claude start reads it once more just before its SDK query, after the egress broker and policy waits.
+  const claude = retiringExit();
+  const queried: string[] = [];
+  const claudeRows: Array<Record<string, unknown>> = [];
+  const { mountProvider: _codexMount, providerRouting: _codexRouting, ...claudeBase } =
+    codexFixStart(t, claudeRows, queried, () => {}, () => {});
+  const claudeOutcome = await claude.retirement.inSpawnScope(() => spawnWorker({ ...claudeBase,
+    config: { root: claudeBase.config!.root, claudeBin: "/unused", dailyCapUsd: 25 },
+    queryFn: (() => { queried.push("claude_query"); throw new Error("started"); }) as never,
+    // The broker start is the last wait before the query; the release lands inside it.
+    egress: { mode: "observe", checkVersion: () => "fixture", startProxy: async () => {
+      claude.retirement.retire();
+      return { httpProxyPort: 1, socksProxyPort: 2, close: async () => {} } as never;
+    } } }));
+  assert.deepEqual(queried, [], "no SDK query after a release during the Claude launch preparation");
+  assert.equal(claudeOutcome.notStarted, "admission-abandoned");
+  assert.deepEqual(claudeRows.map((row) => row.hold), ["retired: drain lock released; the successor owns this work"]);
+  // Control: with no release the same start reaches its provider, so the refusals above are the mark's doing.
+  const control = retiringExit();
+  const controlStarts: string[] = [];
+  await control.retirement.inSpawnScope(() => spawnWorker(codexFixStart(t, [], controlStarts, () => {}, () => {})));
+  assert.deepEqual(controlStarts, ["codex_worker"]);
 
   // The retirement belongs to that daemon's scope: a start outside it (the next daemon in a pooled process, or a
   // direct spawn) still reaches memory admission.

@@ -2755,19 +2755,19 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     ...(args.taskId ? { taskId: args.taskId } : {}),
   }, args.memoryShadow);
   args.onMemoryAdmissionEnd?.();
-  const admissionAbandoned = (): WorkerResult => {
-    if (admission && "reservation" in admission) admission.reservation?.releaseOccupancy();
-    if (admission?.kind === "admitted") admission.endAged?.();
-    return { notStarted: "admission-abandoned", subtype: "admission_abandoned",
+  const notStartedResult = (): WorkerResult => ({ notStarted: "admission-abandoned", subtype: "admission_abandoned",
       admissionSinceMs: Math.min(admissionStartedAtMs, args.memoryAdmissionSinceMs ?? admissionStartedAtMs),
       sessionId: "", costUsd: 0, numTurns: 0,
       text: "", blocks: [], stderr: "", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [],
       model: args.model ?? "", effort: args.effort ?? "", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
-      modelUsage: {}, compactionEvents: [], qualitySuspect: false };
+      modelUsage: {}, compactionEvents: [], qualitySuspect: false });
+  const admissionAbandoned = (): WorkerResult => {
+    if (admission && "reservation" in admission) admission.reservation?.releaseOccupancy();
+    if (admission?.kind === "admitted") admission.endAged?.();
+    return notStartedResult();
   };
   if (admission?.kind === "abandoned" || args.signal?.aborted) return admissionAbandoned();
-  const spawnWithheld = (hold: string): WorkerResult => {
-    const abandoned = admissionAbandoned();
+  const logSpawnWithheld = (hold: string): void => {
     const row = { step: "worker.spawn_withheld", ...(args.taskId ? { task_id: args.taskId } : {}),
       ...(args.runId ? { run_id: args.runId } : {}), hold };
     try {
@@ -2776,11 +2776,25 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     } catch (error) {
       try { process.stderr.write(`${JSON.stringify(row)}\n`); } catch { /* diagnostics cannot reopen a refused start */ }
     }
+  };
+  const spawnWithheld = (hold: string): WorkerResult => {
+    const abandoned = admissionAbandoned();
+    logSpawnWithheld(hold);
     return abandoned;
   };
   // W1-T14916: once a daemon releases its drain lock, the successor owns new work. A pass already running in the
-  // retired process reaches this boundary from many rungs (fix, review, triage, inbox drafts), so it is refused here.
-  if (retiredBy) return spawnWithheld(`retired: ${retiredBy}`);
+  // retired process reaches this boundary from many rungs (fix, review, triage, inbox drafts), so it is refused here,
+  // read again now because memory admission can outlast the release.
+  const retiredAfterAdmission = retiredBy ?? workerSpawnRetiredBy();
+  if (retiredAfterAdmission) return spawnWithheld(`retired: ${retiredAfterAdmission}`);
+  // Provider preparation awaits too, so each provider launch reads the mark once more. The outer finally releases the
+  // occupancy and reservation there, so this path only ledgers and returns not-started.
+  const retiredAtLaunch = (): WorkerResult | undefined => {
+    const reason = workerSpawnRetiredBy();
+    if (reason === undefined) return undefined;
+    logSpawnWithheld(`retired: ${reason}`);
+    return notStartedResult();
+  };
   // W1-T11336, W1-T12497: the sweep's admission may precede a fleet PAUSE by tens of minutes. Every fix start,
   // in process or in a run child, re-reads the hold here; reviews and other classes retain their existing path.
   if (workerClassOf(args) === "fix") {
@@ -3259,7 +3273,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
       const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
         args.providerRouting?.spawnCodex ?? spawnCodexWorker;
       const execution = executionFor("codex");
-      const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
+      const runCodex: typeof spawnCodex = async (codexArgs, workerConfig, capacity) => retiredAtLaunch() ??
         spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
           containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
       if (args.providerRouting?.spawnCodex === undefined) {
@@ -3354,7 +3368,7 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
     const spawnCodex: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnCodex"]> =
       args.providerRouting?.spawnCodex ?? spawnCodexWorker;
     const execution = executionFor("codex");
-    const runCodex: typeof spawnCodex = (codexArgs, workerConfig, capacity) =>
+    const runCodex: typeof spawnCodex = async (codexArgs, workerConfig, capacity) => retiredAtLaunch() ??
       spawnCodex({ ...codexArgs, prompt: execution.prompt, resumeSessionId: execution.resumeSessionId,
         containment: boundContainment, fixtureSpawn: args.containment?.spawn !== undefined }, workerConfig, capacity);
     if (args.providerRouting?.spawnCodex === undefined) {
@@ -3402,7 +3416,9 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         if (!(error instanceof ProviderCapacityBlockedError)) throw error;
       }
     }
-    const runOpenWeight = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
+    const openWeightAdapter = args.providerRouting?.spawnOpenWeight ?? spawnOpenWeightWorker;
+    const runOpenWeight: NonNullable<NonNullable<SpawnWorkerArgs["providerRouting"]>["spawnOpenWeight"]> =
+      async (openWeightArgs, workerConfig, selection) => retiredAtLaunch() ?? openWeightAdapter(openWeightArgs, workerConfig, selection);
     const execution = executionFor("cash");
     const executionPrompt = execution.prompt;
     // env means child extras here, but a complete daemon override in the adapter. Keep custody distinct.
@@ -3920,6 +3936,8 @@ async function spawnWorkerImpl(args: SpawnWorkerArgs): Promise<WorkerResult> {
         privatePolicyArtifact = createPrivateRegistryWorkerPolicy(options.settings, privateRegistry!, workerHome, scope);
         options.settings = privatePolicyArtifact.path;
       }
+      const retiredAtQuery = retiredAtLaunch();
+      if (retiredAtQuery) return retiredAtQuery;
       const sdkRequest: SdkRequestEvidence = {
         model: sdkRequestedModel(options),
         effort: sdkRequestedEffort(options),

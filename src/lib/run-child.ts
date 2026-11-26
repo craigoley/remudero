@@ -1047,6 +1047,17 @@ export async function spawnRunChild(input: SpawnRunChildInput, ports: SpawnRunCh
     }
     engineSha = pinned.sha;
     const shareDivisor = await runChildInstallationShareDivisor();
+    // W1-T14916: the pin and share waits can outlast the caller's drain release too, so the mark is read again at the
+    // spawn itself. The abandoned path removes the prepared run directory (its spec and stderr name a run that never ran).
+    const retiredAtSpawn = workerSpawnRetiredBy();
+    if (retiredAtSpawn !== undefined) {
+      inFlightRunDirs.delete(dir);
+      rmSync(dir, { recursive: true, force: true });
+      reservation.releaseOccupancy();
+      reservation = undefined;
+      log(RUN_CHILD_SPAWN_WITHHELD_STEP, { task_id: input.taskId, run_id: runId, hold: `retired: ${retiredAtSpawn}` });
+      return { started: false, abandoned: true, reason: "admission-abandoned", runId, waitedMs: 0 };
+    }
     stderrFd = openSync(join(dir, RUN_CHILD_STDERR_FILE), "a");
     // The daemon's growth percent rides the child's command line: NODE_OPTIONS refuses it (daemon-memory-policy.ts).
     spawnedAt = clock();
