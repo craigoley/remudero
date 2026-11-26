@@ -4813,18 +4813,17 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           [...(repairHistory?.ok ? repairHistory.rows : []), ...roundLedger, ...roundRows], opts.taskId) } : {}) });
     // A worker that may still be running can publish only when it holds its own git; that outcome stays unresolved.
     const recordUnpublishedLiveRound = (): void => { if (fixHarnessOwnsGit) recordFixLearningsOutcome("no_push"); };
-    recordFixLearningsShadow();
     if (merged !== undefined) {
       deps.log(merged.started ? "fix.merge_started" : "fix.merge_start_failed", {
         strike: attempt,
         ...(merged.reason ? { reason: merged.reason } : {}),
       });
       if (mergeUpToDateRed) {
-        recordFixLearningsOutcome("no_push");
         leaveMergeMode("rung.merge_up_to_date", priorHeadSha);
         continue;
       }
       if (!merged.started) {
+        recordFixLearningsShadow(); // a counted round: it spends a strike below
         const refusal = merged.reason ?? "the merge of current main did not start (no reason reported)";
         consecutiveMergeRefusalReasons.push(refusal);
         strikes = attempt;
@@ -4871,14 +4870,13 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // The unpublished local merge is the commit base; the push still leases the PR's original tip.
     const roundPushBaseSha = scopeMergeStartSha ?? roundBase.baseSha;
     if (roundBase.advanced) deps.log("fix.round_head_advanced", { head_sha: priorHeadSha, round_base_sha: roundBase.baseSha, reason: roundBase.reason });
+    let publishedHead: string | undefined;
     if (roundBase.advanced && scopeMergeStartSha === undefined) {
-      let publishedHead: string | undefined;
       try { publishedHead = await (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch); }
       catch { deps.log("fix.evidence_head_unread", { head_sha: priorHeadSha, worktree_head_sha: roundBase.baseSha,
         reason: "remote branch head read failed; no published advance was established" }); }
       // A retained unpublished commit is still this round's existing recovery input, not proof the PR moved.
       if (publishedHead !== undefined && publishedHead !== priorHeadSha) {
-        recordFixLearningsOutcome("no_push");
         const adopted = !evidenceHeadAdopted && priorCiFailures !== undefined && publishedHead === roundBase.baseSha
           ? await adoptableEvidenceHead(opts.prUrl, publishedHead,
             () => (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch),
@@ -4899,6 +4897,10 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
       }
     }
+    const roundStartHeadSha = roundBase.advanced && publishedHead === priorHeadSha ? priorHeadSha // proven unpublished
+      : scopeMergeStartSha ?? roundBase.baseSha; // W1-T14138: may already be on the PR, so re-pushing it is no push
+    const pushedByThisRound = (sha: string | undefined): boolean => sha !== undefined && sha !== roundStartHeadSha;
+    recordFixLearningsShadow(); // W1-T14138: only now is this iteration a worker round (no adopt, supersede or up-to-date)
     const fixRoundStartedAtMs = systemClock.now();
     const fixReceipt = host.fixWorkerReceipt(deps.spawn, deps.log, host.fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
       { prUrl: opts.prUrl, roundId }, { root: opts.config.root }, remedyExecution);
@@ -5394,7 +5396,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // W1-T5955: the round ends here, so its branch claim does too; the CI wait holds none.
     const logFixDone = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding): void => {
       logFixDoneRow(pushedHeadSha, subtype, landing);
-      if (pushedHeadSha === priorHeadSha || (pushedHeadSha === undefined &&
+      if (pushedHeadSha === roundStartHeadSha || (pushedHeadSha === undefined &&
           (landing === undefined || (!landing.landed && (landing.outcome === "refused" || landing.outcome === "not_on_remote"))))) {
         recordFixLearningsOutcome("no_push");
       }
@@ -5410,7 +5412,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         keptForWait = { headSha: pushedHeadSha, claimRunId };
         logFixDoneRow(pushedHeadSha, undefined, landing,
           { ...kept, ci_wait_holds_claim: true, round_started_at_ms: fixRoundStartedAtMs });
-        if (pushedHeadSha === priorHeadSha) recordFixLearningsOutcome("no_push");
+        if (!pushedByThisRound(pushedHeadSha)) recordFixLearningsOutcome("no_push");
       } else logFixDone(pushedHeadSha, undefined, landing);
       if (!landing.landed) deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha, reason: "push-not-landed", push_outcome: landing.outcome });
     };
@@ -5928,7 +5930,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     const ci = resumed?.failure === "check" ? { state: "red" as const, sha: resumed.headSha } : waited;
     const pushedHeadSha = landing.remoteHead ?? expectedHeadShaForPush;
     const shadowCi = host.ciGateState(ci);
-    if (pushedHeadSha !== undefined && pushedHeadSha !== priorHeadSha && ciGateSha(ci) === pushedHeadSha &&
+    if (pushedByThisRound(pushedHeadSha) && ciGateSha(ci) === pushedHeadSha &&
         (shadowCi === "green" || shadowCi === "red")) {
       recordFixLearningsOutcome(shadowCi, pushedHeadSha);
     }

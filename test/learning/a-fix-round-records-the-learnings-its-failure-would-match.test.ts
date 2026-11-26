@@ -14,7 +14,7 @@ import { CODE_SCANNING_FIX_DISPATCH_STEP, codeScanningHeadSettled } from "#src/l
 import type { WorkerResult } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
-import { harnessCommitForShellLessWorker, runFixRung } from "#test/helpers/run-task-test.js";
+import { harnessCommitForShellLessWorker, MERGE_UP_TO_DATE_REASON, runFixRung } from "#test/helpers/run-task-test.js";
 
 const TASK = "W1-T14138";
 const OTHER_TASK = "W1-T5";
@@ -39,7 +39,8 @@ async function runRound(t: TestContext, options: {
   taskId?: string;
   runId?: string;
   corpus?: "invalid" | "path-only";
-  ci?: CiGateOutcome | "green";
+  /** A function receives the head the worktree started the rung at. */
+  ci?: CiGateOutcome | "green" | ((startHead: string) => CiGateOutcome);
   noPush?: boolean;
   priorRows?: Row[];
   reviewEvidence?: boolean;
@@ -48,13 +49,24 @@ async function runRound(t: TestContext, options: {
   spawnEnd?: "superseded" | "abandoned" | "throws";
   workerHoldsGit?: boolean;
   mergeRefused?: boolean;
-  /** The round's push leaves the branch at the head it started from, with its claim kept for the CI wait. */
+  /** The round's push leaves the branch at the head it started from. */
   unchangedHead?: boolean;
+  /** The round keeps its branch claim for the CI wait; defaults to `unchangedHead`. */
+  claimKept?: boolean;
+  /** The review names the worktree head's parent, as after a red CI on a pushed round. The remote branch then
+   *  reads as that worktree head (adopted), a foreign head (superseded), the review head (unpublished), or
+   *  throws once (unread). */
+  staleReview?: "adopted" | "superseded" | "unpublished" | "unread";
+  /** The merge-conflict round's merge finds main already in the branch. */
+  mergeUpToDate?: boolean;
 } = {}) {
   const taskId = options.taskId ?? TASK;
   const runId = options.runId ?? "shadow-fixture";
   const source = gitRepo({ kind: "fix-learnings", scope: t });
   const head = source.git("rev-parse", "HEAD");
+  if (options.staleReview) source.git("commit", "--quiet", "--allow-empty", "-m", "an earlier round's push");
+  const startHead = source.git("rev-parse", "HEAD");
+  let remoteUnread = options.staleReview === "unread";
   const project = join(source.dir, "repos", "fixture", "learnings");
   mkdirSync(project, { recursive: true });
   const entries = [
@@ -87,7 +99,14 @@ async function runRound(t: TestContext, options: {
   };
   let pushes = 0;
   let waits = 0;
-  const landedHead = options.unchangedHead ? head : PUSHED_HEAD;
+  const landedHead = options.unchangedHead ? startHead : PUSHED_HEAD;
+  const claimKept = options.claimKept ?? options.unchangedHead;
+  const remoteHead = async () => {
+    if (pushes > 0 || !options.staleReview) return landedHead;
+    if (remoteUnread) { remoteUnread = false; throw new Error("fixture ls-remote failed"); }
+    return options.staleReview === "superseded" ? FOREIGN_HEAD : options.staleReview === "unpublished" ? head : startHead;
+  };
+  const conflict = options.mergeRefused || options.mergeUpToDate;
   const reviews = [...(options.laterReviews ?? [])];
   const rounds = Math.max(1, reviews.length);
   const stillUnmet = { claim: "claimSymbol is missing", proof: "unit test: fixture", met: false,
@@ -100,8 +119,9 @@ async function runRound(t: TestContext, options: {
     budgetUsd: 10, strikeCap: rounds, initialReview: review, ciFailures: [failure],
     reviewBase: { owner: "acme", repo: "fixture", headCheckoutDir: source.dir, reviewerMount: MOUNT },
     escalationJudge: async () => ({ decision: "deliver", reason: "fixture" }),
-    ...(options.mergeRefused ? { mergeConflict: { files: [{ path: PATH, oursDeleted: 0, theirsDeleted: 0 }],
+    ...(conflict ? { mergeConflict: { files: [{ path: PATH, oursDeleted: 0, theirsDeleted: 0 }],
       oursLog: "ours", theirsLog: "theirs" } } : {}),
+    ...(options.staleReview ? { requiredContexts: [CHECK.name] } : {}),
     deps: {
       spawn: async ({ prompt }) => {
         prompts.push(prompt);
@@ -111,22 +131,25 @@ async function runRound(t: TestContext, options: {
       ...(options.spawnEnd === "abandoned" ? { spawnWallClockBoundMs: 20, reclaimWorker: () => {} } : {}),
       ...(options.spawnEnd === "superseded" ? { watchSuperseded: async () => ({ kind: "superseded" as const,
         condition: "head-moved" as const, oldHead: head, newHead: FOREIGN_HEAD }) } : {}),
-      ...(options.mergeRefused
-        ? { startShellLessMergeConflictMerge: () => ({ started: false, reason: "fixture merge refusal" }) } : {}),
-      ...(options.unchangedHead ? { branchClaim: { id: () => "claim", release: () => {}, reacquire: () => undefined,
+      ...(conflict ? { startShellLessMergeConflictMerge: () => ({ started: false,
+        reason: options.mergeUpToDate ? MERGE_UP_TO_DATE_REASON : "fixture merge refusal" }) } : {}),
+      ...(options.staleReview === "adopted" ? {
+        readCiRollup: async () => [{ name: CHECK.name, status: "COMPLETED", conclusion: "FAILURE" }],
+      } : {}),
+      ...(claimKept ? { branchClaim: { id: () => "claim", release: () => {}, reacquire: () => undefined,
         last: () => { throw new Error("not read"); }, keepForWait: () => ({}) } } : {}),
       push: () => { pushes++; },
-      readRemoteBranchHead: async () => landedHead,
+      readRemoteBranchHead: remoteHead,
       waitForCiGreen: async () => {
         waits++;
         assert.equal(rows.findLast(row => row.step === "fix.done")?.pushed_head_sha, landedHead);
-        return options.ci ?? { state: "green", sha: PUSHED_HEAD };
+        return typeof options.ci === "function" ? options.ci(startHead) : options.ci ?? { state: "green", sha: PUSHED_HEAD };
       },
       runReview: async () => reviews.shift() === "failure"
         ? { ...review, criteria: [stillUnmet] } : { ...review, state: "success" },
       fetchPrBody: async () => "REPORT",
       fetchPrDiffFiles: async () => [PATH],
-      fetchCiFailures: async () => [],
+      fetchCiFailures: async () => options.staleReview === "adopted" && pushes === 0 ? [CHECK] : [],
       issues: { create: () => "https://github.com/acme/fixture/issues/1", listOpen: () => [], comment: () => {} },
       ledgerPath: join(source.dir, "ledger.ndjson"), ledgerLines: () => rows,
       log: (step, extra) => { rows.push({ task_id: taskId, run_id: runId, pr_number: 42, step, ...extra }); },
@@ -140,8 +163,10 @@ async function runRound(t: TestContext, options: {
   }));
   if (options.spawnEnd === "throws") await assert.rejects(run, /fixture worker died/);
   else await run();
-  if (!options.spawnEnd && !options.mergeRefused) assert.equal(prompts.length, rounds);
-  return { rows, project, prompt: prompts[0]!, pushes, waits, steps: (step: string) => rows.filter(row => row.step === step) };
+  if (!options.spawnEnd && !options.mergeRefused) {
+    assert.equal(prompts.length, options.staleReview === "superseded" ? 0 : rounds);
+  }
+  return { rows, project, prompt: prompts[0]!, pushes, waits, startHead, steps: (step: string) => rows.filter(row => row.step === step) };
 }
 
 test("W1-T14138 criterion 1: records check and log matches once with a task-keyed arm", async t => {
@@ -236,6 +261,47 @@ test("W1-T14138 criterion 1: a review round after a green CI records none of the
   assert.equal(result.steps("fix.dispatch")[1]?.mode, "reviewer-unmet");
   assert.deepEqual(second?.failing_checks, []);
   assert.deepEqual(second?.matches, [{ id: "review-claim", kinds: ["symbol"] }]);
+});
+
+test("W1-T14138 criterion 1: an iteration that starts no worker writes no shadow row, so one attempt is one round", async t => {
+  // Each early exit before the worker: an adopted published head, an up-to-date merge, a superseded head.
+  for (const [name, options, exit] of [
+    ["adopted head", { staleReview: "adopted" }, "fix.evidence_head_adopted"],
+    ["up-to-date merge", { mergeUpToDate: true }, "fix.merge_mode_cleared"],
+  ] as const) {
+    const result = await runRound(t, options);
+    assert.equal(result.steps(exit).length, 1, name);
+    const dispatched = result.steps("fix.dispatch").map(row => row.round_id);
+    assert.equal(dispatched.length, 1, name);
+    assert.deepEqual(result.steps("fix.learnings_shadow").map(row => row.round_id), dispatched, name);
+    assert.deepEqual(result.steps("fix.learnings_shadow").map(row => row.attempt), [1], name);
+    assert.deepEqual(result.steps("fix.learnings_outcome").map(row => [row.round_id, row.outcome]),
+      [[dispatched[0], "green"]], name);
+    const summary = summarizeFixLearningsShadow(result.rows);
+    assert.equal(summary.offered.rounds + summary.withheld.rounds, 1, name);
+  }
+  const superseded = await runRound(t, { staleReview: "superseded" });
+  assert.equal(superseded.steps("fix.evidence_head_superseded").length, 1);
+  assert.equal(superseded.steps("fix.learnings_shadow").length, 0);
+  assert.equal(superseded.steps("fix.learnings_outcome").length, 0);
+});
+
+test("W1-T14138 criterion 4: re-pushing the head the round started from is no push, not an earlier round's CI", async t => {
+  // The review still names the head before an earlier round's push; the round changes nothing and CI is red on it.
+  for (const claimKept of [false, true]) {
+    const result = await runRound(t, { staleReview: "unread", unchangedHead: true, claimKept,
+      ci: startHead => ({ state: "red", sha: startHead }) });
+    assert.equal(result.steps("fix.evidence_head_unread").length, 1);
+    assert.equal(result.steps("fix.done")[0]?.pushed_head_sha, result.startHead);
+    const outcomes = result.steps("fix.learnings_outcome");
+    assert.deepEqual(outcomes.map(row => [row.outcome, row.pushed_head_sha]), [["no_push", undefined]], String(claimKept));
+    assert.equal(outcomes[0]?.round_id, result.steps("fix.learnings_shadow")[0]?.round_id);
+  }
+  // A local advance the remote read proves unpublished is still this round's own push.
+  const unpublished = await runRound(t, { staleReview: "unpublished", unchangedHead: true,
+    ci: startHead => ({ state: "red", sha: startHead }) });
+  assert.deepEqual(unpublished.steps("fix.learnings_outcome").map(row => [row.outcome, row.pushed_head_sha]),
+    [["red", unpublished.startHead]]);
 });
 
 test("W1-T14138 criterion 4: a round whose worker is superseded, abandoned or dies pushed nothing", async t => {
