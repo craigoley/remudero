@@ -55,3 +55,19 @@ test("W1-T14915 criterion 2: a guarded invariant gets no warn and existing check
   assert.deepEqual(others(task({})), others(guarded), "every other check reads the same with or without the guard");
   assert.equal(lintTask(guarded, ON).violations.some((v) => v.check === "invariant-unguarded"), false);
 });
+
+test("W1-T14915 criterion 1: an invariant claim with a unit-test proof and no kind gets the warn, on a satellite's own suite path", () => {
+  // A Console record proves an invariant with its Vitest suite path; the target-aware review executor runs it as a test.
+  const consoleTask = (proof: string): Task => ({ ...task({ proof }), repo: "remudero-console" }) as Task;
+  const onConsole: LintOpts = { ...ON, taskRepoOwner: "craigoley" };
+  for (const proof of ["unit test: tests/unit/product-stage-timeout-replay.test.tsx", "`unit test: tests/unit/product-stage-timeout-replay.test.tsx`"]) {
+    const got = unguardedInvariantViolations(consoleTask(proof), onConsole);
+    assert.equal(got.length, 1, proof);
+    assert.match(got[0]!.message, /claim 2/);
+    assert.equal(lintTask(consoleTask(proof), onConsole).violations.filter((v) => v.check === "invariant-unguarded").length, 1,
+      `lintTask carries it: ${proof}`);
+  }
+  assert.deepEqual(unguardedInvariantViolations({ ...consoleTask("unit test: tests/unit/product-stage-timeout-replay.test.tsx"),
+    acceptance: [{ claim: INVARIANT, proof: "unit test: tests/unit/product-stage-timeout-replay.test.tsx", kind: "guard" } as AcceptanceCriterion] } as Task,
+  onConsole), [], "a guarded satellite invariant stays quiet");
+});

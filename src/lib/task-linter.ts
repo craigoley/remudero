@@ -3972,11 +3972,14 @@ export function invariantSlugViolations(task: Task, opts: LintOpts = {}): LintVi
 export function unguardedInvariantViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
   if (opts.requireDesignInvariantDeclaration !== true) return [];
   const out: LintViolation[] = [];
+  // The task's resolved repository, as proofDialectViolations reads it, so a satellite's own suite path (a Console
+  // `tests/unit/*.test.tsx` proof) classifies as the test proof the target-aware review executor runs.
+  const target = opts.taskRepoOwner === undefined ? undefined : { owner: opts.taskRepoOwner, repo: task.repo };
   (task.acceptance ?? []).forEach((criterion, index) => {
     if (!INVARIANT_CLAIM_RE.test(criterion.claim)) return;
     if (criterion.satisfied_by || (criterion as { kind?: unknown }).kind !== undefined) return;
     // Read as the review executor reads it, so a code-span-wrapped `unit test:` proof is a test proof too.
-    if (parseWhitelistedProof(criterion.proof ?? "")?.kind !== "test") return;
+    if (parseWhitelistedProof(criterion.proof ?? "", target)?.kind !== "test") return;
     out.push({
       check: "invariant-unguarded",
       severity: "warn",
