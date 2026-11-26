@@ -5,11 +5,11 @@
  * and the merge path refuses the PR, until the hold is released. A hold that cannot be read holds too.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { publishUnreadTaskCatalogHold, reviewCommand, runReview, type ReviewCommandHost } from "#src/cli/commands/review.js";
+import { catalogReviewPoster, publishUnreadTaskCatalogHold, reviewCommand, runReview, type ReviewCommandHost } from "#src/cli/commands/review.js";
 import { armIfVerdictPermitsAsync, attemptArmAsync, readPullRequestTaskHold, realArmDepsAsync } from "#src/lib/arm-auto-merge.js";
 import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
@@ -610,4 +610,60 @@ test("W1-T14902: the arm's hold read hands the PR's head branch to the reader, s
     { outcome: "clear" }, "THE CLAIM: the lane's own branch classifies it untasked");
   assert.equal((await readPullRequestTaskHold(PR_URL, config, pull("feature/x"),
     { readMainPlan: async () => ({ byId: new Map() }), lookup: async () => ({ outcome: "absent" }) as never })).outcome, "unread");
+});
+
+test("W1-T14902: an ops task's status projection keeps a public-safe description naming the hold", async () => {
+  const posted: string[] = [];
+  const project = catalogReviewPoster("ops", (async (options: { description?: string }) => { posted.push(options.description ?? ""); }) as never);
+  const send = (state: string, description: string) => project({ owner: "acme", repo: "remudero", sha: SHA, state, description } as never);
+  await send("pending", "remudero-review: pending — held: W1-T14898 carries dispatch_hold; it merges after the operator releases the hold");
+  await send("pending", "remudero-review: pending — held: W1-T14898's dispatch_hold is unreadable (task catalog ops-private-reason)");
+  await send("pending", "remudero-review: pending — reviewing");
+  await send("success", "remudero-review: PASS — 3 criteria");
+  assert.match(posted[0]!, /held: the named task carries dispatch_hold/, "THE CLAIM: a held ops task's PR says why it waits");
+  assert.match(posted[1]!, /held: the named task's dispatch_hold is unreadable/);
+  assert.doesNotMatch(posted.slice(0, 2).join("\n"), /W1-T14898|ops-private-reason/, "and names neither the private task nor its read failure");
+  assert.match(posted[2]!, /detailed evidence retained on host/, "any other ops status keeps the private projection");
+  assert.match(posted[3]!, /^remudero-review: success — detailed evidence retained on host/);
+});
+
+test("W1-T14902: a review whose public plan at origin/main is unreadable publishes the unread hold before anything else", async (t) => {
+  const root = tmp(t, "main-unreadable");
+  mkdirSync(join(root, "state"));
+  const { execFileSync } = await import("node:child_process");
+  // The managed checkout is a real directory (the subject check refuses a symlink) with no refs/remotes/origin/main.
+  const dir = join(root, "repos", "subject");
+  mkdirSync(join(root, "repos"));
+  renameSync(gitRepo({ seedCommit: false, kind: "main-unreadable-subject" }).dir, dir);
+  mkdirSync(join(dir, "plan"));
+  const git = (...argv: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+    "-c", "commit.gpgsign=false", ...argv], { encoding: "utf8" });
+  writeFileSync(join(dir, "plan", "tasks.yaml"), "[]\n");
+  git("add", "plan");
+  git("commit", "-qm", "plan");
+  git("remote", "add", "origin", "https://github.com/fixture/subject.git");
+  const head = git("rev-parse", "HEAD").trim();
+  const id = "W1-T900000";
+  const published: Array<{ taskId: string; source?: string; reason: string }> = [];
+  const host = {
+    GIT_UNTRACKED_FILES_ALL: "--untracked-files=all", JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
+    acceptedReviewAttemptId: () => undefined, reviewWorktreeAsync: { fetch: () => {} },
+    reviewSubjectGit: (dir: string, argv: string[]) => execFileSync("git", ["-C", dir, ...argv], { encoding: "utf8" }),
+    materializeReviewWorktree: () => { throw Error("forbidden real materialization"); },
+    realDeps: () => { throw Error("forbidden default worker graph"); },
+    reviewPostedDescription: () => "fixture", liveWorkerRunIds: new Set<string>(), reviewWorkerLockId: (x: string) => `fixture-${x}`,
+  } as unknown as ReviewCommandHost;
+  await reviewCommand(host, "42", ["--repo", "fixture/subject"], {
+    loadConfig: () => ({ root }) as never,
+    resolveOwnerRepo: () => ({ owner: "fixture", repo: "remudero" }),
+    fetchView: () => ({ body: `Remudero-Task: ${id}\n\n## Acceptance\n- fallback | grep: wrong in src/wrong.ts`, html_url: "https://github.com/fixture/subject/pull/42",
+      number: 42, head: { ref: `run-${id}-1`, sha: head }, updated_at: new Date().toISOString() }),
+    fetchHead: () => {}, taskLookup: { api: async () => { throw Error("PRIVATE_API_RESPONSE"); } },
+    runReview: (async () => { throw Error("forbidden review"); }) as never,
+    postReviewPending: async () => { throw Error("forbidden pending claim"); },
+    publishUnreadHold: async (args) => { published.push({ taskId: args.taskId, source: args.source, reason: args.reason }); },
+  }).catch(() => 2);
+  assert.ok(published.length >= 1, `THE CLAIM: the unread hold is published: ${JSON.stringify(published)}`);
+  assert.equal(published[0]!.taskId, id);
+  assert.equal(published[0]!.source, "public plan at origin/main");
 });

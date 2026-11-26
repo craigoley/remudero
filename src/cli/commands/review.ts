@@ -8,7 +8,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { checksStateFromRollup, currentReviewSignal, reportReviewPhase, withheldReviewRefusalRow, readHostedFixProofResults, type HostedFixProofReader } from "../../lib/sweep.js";
-import { MOVER_BRANCH_PREFIX, movedFromCommit, parseMoverReceipts, verifyMoverRemoval, type MoverOpsRead, verifyMoverRemovalPublic, type MoverRemovalVerdict, parseReviewerHistoryEvidence, parseWhitelistedProof, reviewRowNamesPr, resolveProofTestPath, resolveNameFilteredCandidatesAsync, taskHoldRefusal, type TaskHoldReading } from "../../lib/review.js";
+import { MOVER_BRANCH_PREFIX, movedFromCommit, parseMoverReceipts, verifyMoverRemoval, type MoverOpsRead, verifyMoverRemovalPublic, type MoverRemovalVerdict, parseReviewerHistoryEvidence, parseWhitelistedProof, reviewRowNamesPr, resolveProofTestPath, resolveNameFilteredCandidatesAsync, publicTaskHoldDescription, taskHoldRefusal, type TaskHoldReading } from "../../lib/review.js";
 import { extractReviewFindings, recordReviewFindings, type FindingCapture } from "../../lib/review-findings.js";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
@@ -977,7 +977,9 @@ async function compareProofReuse(read: ProofDiscriminationRecordRead, input: Pro
 // one does; it carries no code provenance, as no pending post does.
 export function catalogReviewPoster(catalog: "public" | "ops" | undefined, post: typeof postReviewStatus, codeSha?: string): typeof postReviewStatus {
   return catalog !== "ops" ? post : async options => {
-    const description = `remudero-review: ${options.state} — detailed evidence retained on host`;
+    // W1-T14902: a task hold keeps a public-safe description naming the hold, so an ops task's PR says why it waits.
+    const held = options.state === "pending" ? publicTaskHoldDescription(options.description) : undefined;
+    const description = held ?? `remudero-review: ${options.state} — detailed evidence retained on host`;
     const owner = options.state === "pending" ? reviewStatusOwnerRun(options.description) : undefined;
     await post({ ...options, description: owner !== undefined ? reviewPendingDescriptionWithOwner(description, owner)
       : codeSha ? reviewDescriptionWithCodeProvenance(description, codeSha) : description });
@@ -3152,6 +3154,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     // Swallowed on purpose — see above. The materializer's own fetch names a real outage.
   }
   let resolverDivergence: PlanCriteriaAtHeadDivergence | undefined;
+  let mainPlanDivergence: PlanCriteriaAtHeadDivergence | undefined;
   let ownTaskRecordMissing = false, headTaskResolved = false;
   let publicTaskAbsent = false;
   // W1-T2846: a fleet PR can lose its trailer while retaining the task-bearing run branch.
@@ -3190,10 +3193,23 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
         keepsUnseenDependency)
         .then(recordMainSuccess, recordMainFailure);
       ownTaskRecordMissing = headLacksOwnTaskRecord(resolved, atMain);
+      mainPlanDivergence = atMain.divergence;
       publicTaskAbsent = atMain.divergence === undefined && atMain.criteria.length === 0 &&
         atMain.taskDeclaredFiles === undefined && atMain.taskRisk === undefined && atMain.taskBudgetUsd === undefined;
     }
   }
+  // W1-T14902 (invariant an-unread-hold-holds): THE ONE unread-hold exit. Every path that leaves this review without a
+  // verdict for a named task whose record could not be read replaces a success already on this head with pending
+  // naming the unread hold, projected as an ops task's status is. A shadow posts nothing.
+  const publishUnreadHoldFor = async (source: string, reason: string): Promise<void> => {
+    if (shadow || !taskId || taskId === UNFILED_RUN_SENTINEL) return;
+    await (deps.publishUnreadHold ?? (isTestRunner() ? async () => {} : publishUnreadTaskCatalogHold))({
+      post: catalogReviewPoster("ops", postReviewStatus), owner, repo, sha: view.headRefOid, taskId, reviewKey, source, reason,
+      ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest, fetchLifecycle: () => fetchPrLifecycleAsync(view.url), log });
+  };
+  // The public plan at origin/main could not be read for a task the head's plan lacks: neither its hold nor its catalog
+  // is known, so the hold is unread before anything else runs.
+  if (mainPlanDivergence !== undefined) await publishUnreadHoldFor("public plan at origin/main", mainPlanDivergence.reason);
   if (taskId && publicTaskAbsent) {
     const lookUp = () => findTaskInCatalogs(taskId, { ...deps.taskLookup, stateDir: join(config.root, "state"), byId: new Map() });
     let found = await lookUp();
@@ -3201,10 +3217,7 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     if (found.outcome === "unreadable" && found.reason === "ops-ref_moved") found = await lookUp();
     if (found.outcome === "unreadable") {
       log("review.catalog.unreadable", { reason: found.reason });
-      // W1-T14902 (invariant an-unread-hold-holds): a success already on this head must not stand. A shadow posts nothing.
-      if (!shadow) await (deps.publishUnreadHold ?? (isTestRunner() ? async () => {} : publishUnreadTaskCatalogHold))({ post: postReviewStatus, owner, repo,
-        sha: view.headRefOid, taskId, reviewKey, reason: found.reason, ledgerPath, runId, prUrl: view.url,
-        reviewInputDigest: inputDigest, fetchLifecycle: () => fetchPrLifecycleAsync(view.url), log });
+      await publishUnreadHoldFor("task catalog", found.reason);
       console.error("rmd review: task catalog unreadable; no body fallback or review effect");
       exit.as("task-metadata-unavailable");
       return 2;
@@ -3304,7 +3317,8 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
       if (setupDecision.class === "refused") {
         recordSetupReplay(replaySetupInput, setupDecision);
         log("review.semantic_setup_refused", { reason: "head-task-metadata-unavailable", head_sha: view.headRefOid, pr_url: view.url });
-        console.error("rmd review: semantic review unavailable (head task metadata); no pending status, verdict or merge effect");
+        await publishUnreadHoldFor("task record at the PR head", `missing ${missing.join(", ")}`);
+        console.error("rmd review: semantic review unavailable (head task metadata); no verdict or merge effect");
         exit.as("task-metadata-unavailable");
         return 2;
       }
@@ -3759,11 +3773,13 @@ export async function publishUnreadTaskCatalogHold(args: {
   publish?: typeof postUnreadTaskHoldGuarded;
   post: Parameters<typeof postReviewStatusGuarded>[0]["post"];
   owner: string; repo: string; sha: string; taskId: string; reviewKey: string; reason: string;
+  /** What could not be read. Default: the task catalog. */
+  source?: string;
   ledgerPath: string; runId: string; prUrl: string; reviewInputDigest: string;
   fetchLifecycle: Parameters<typeof postReviewStatusGuarded>[0]["fetchLifecycle"];
   log: (step: string, extra?: Record<string, unknown>) => void;
 }): Promise<void> {
-  const refusal = taskHoldRefusal({ outcome: "unread", taskId: args.taskId, reason: `task catalog ${args.reason}` })!;
+  const refusal = taskHoldRefusal({ outcome: "unread", taskId: args.taskId, reason: `${args.source ?? "task catalog"} ${args.reason}` })!;
   try {
     await (args.publish ?? postUnreadTaskHoldGuarded)({ post: args.post, owner: args.owner, repo: args.repo, sha: args.sha,
       refusal, taskId: args.reviewKey, ledgerPath: args.ledgerPath, runId: args.runId, prUrl: args.prUrl,

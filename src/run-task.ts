@@ -5541,6 +5541,21 @@ export function withdrawArmIfVerdictRefuses(
  * unenforced: an omitted head still logs the row (never blocks an arm) — it simply stays
  * unjoinable, exactly as it does today.
  */
+/** W1-T14902 — {@link armAndLogOutcome} over the awaited detailed arm: the production default reads the task's hold
+ *  (realArmDepsAsync's reader) before arming, where the synchronous arm fails closed. Same row, same outcome. */
+export async function armAndLogOutcomeAsync(
+  prUrl: string,
+  taskId: string | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  arm: (prUrl: string, taskId: string | undefined) => Promise<ArmOutcome | ArmAttemptResult> =
+    (url, id) => armAutoMergeDetailedAsync(url, id, realArmDepsAsync()),
+  lane: ArmLane = "operator",
+  headSha?: string,
+): Promise<ArmOutcome> {
+  const attempt = await arm(prUrl, taskId);
+  return armAndLogOutcome(prUrl, taskId, log, () => attempt, lane, headSha);
+}
+
 export function armAndLogOutcome(
   prUrl: string,
   taskId: string | undefined,
@@ -25259,7 +25274,7 @@ async function retroCommand(
     } catch {
       /* best-effort — see the comment above */
     }
-    const armOutcome = armAndLogOutcome(prUrl, runId, log, undefined, undefined, armHeadSha);
+    const armOutcome = await armAndLogOutcomeAsync(prUrl, runId, log, undefined, undefined, armHeadSha);
     worktreeRemove(repoDir, worktreePath);
     // W1-T968: the PR — not merely this call — is what the console line answers about; a
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
@@ -37109,7 +37124,7 @@ async function triageCommandLocked(
       } catch {
         /* best-effort — see the comment above */
       }
-      const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
+      const armOutcome = await armAndLogOutcomeAsync(prUrl, taskId, log, undefined, undefined, armHeadSha);
       // W1-T968: the PR — not merely this call — is what the console line answers about; a
       // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
       const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
@@ -37830,7 +37845,7 @@ export async function planCommand(
       } catch {
         /* best-effort — see the comment above */
       }
-      const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
+      const armOutcome = await armAndLogOutcomeAsync(prUrl, taskId, log, undefined, undefined, armHeadSha);
       // W1-T968: the PR — not merely this call — is what the console line answers about; a
       // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
       const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
@@ -41062,7 +41077,7 @@ export async function approveCommand(
     } catch {
       /* best-effort — see the comment above */
     }
-    const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
+    const armOutcome = await armAndLogOutcomeAsync(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
     removeApproveWorktree();
     // W1-T968: the PR — not merely this call — is what the console line answers about; a
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
@@ -41457,7 +41472,7 @@ async function approveBatchCommand(
     } catch {
       /* best-effort — see the single-path comment above */
     }
-    const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
+    const armOutcome = await armAndLogOutcomeAsync(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
     removeApproveWorktree();
     // W1-T968: the PR — not merely this call — is what the console line answers about; a
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.

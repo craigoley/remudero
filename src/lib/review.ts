@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { isTestRunner } from "./live-write-guard.js";
 import { readTaskDispatchHold, taskHoldRefusal, type TaskDispatchHoldSources, type TaskHoldReading } from "./task-dispatch-hold.js";
-export { taskHoldReading, taskHoldRefusal, type TaskHoldReading } from "./task-dispatch-hold.js";
+export { publicTaskHoldDescription, taskHoldReading, taskHoldRefusal, type TaskHoldReading } from "./task-dispatch-hold.js";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic, type IsHolderStaleOpts } from "./fs-race-safe.js";

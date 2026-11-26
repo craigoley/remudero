@@ -57,6 +57,19 @@ export function taskHoldRefusal(reading: TaskHoldReading | undefined): string | 
     : `held: ${reading.taskId}'s dispatch_hold is unreadable (${reading.reason})`;
 }
 
+/** W1-T14902: the public-safe form of a hold a pending description names, for a status projection that withholds a
+ *  private task's detail (the ops catalog's): it names the hold, never the reason a read failed. */
+export function publicTaskHoldDescription(description: string | undefined): string | undefined {
+  if (description === undefined) return undefined;
+  if (/\bheld: \S+ carries dispatch_hold\b/.test(description)) {
+    return "remudero-review: pending — held: the named task carries dispatch_hold; it merges after the operator releases the hold";
+  }
+  if (/\bheld: \S+'s dispatch_hold is unreadable\b/.test(description)) {
+    return "remudero-review: pending — held: the named task's dispatch_hold is unreadable, so nothing merges until it reads";
+  }
+  return undefined;
+}
+
 /** This module's own checkout: `src/lib/task-dispatch-hold.ts` → the root. `repo-location.ts`'s install fallback. */
 const INSTALL_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 

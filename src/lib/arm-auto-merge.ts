@@ -738,9 +738,18 @@ export function realArmDeps(
       assertLiveWriteAllowed("gh-pr-merge", `rewriting a closing keyword in the body of ${prUrl} before merging it`);
       return runGh(args, { encoding: "utf8", stdio: "pipe" });
     }, recordClosingReferenceToLedger(loadConfigImpl))),
+    // W1-T14902 (invariant an-unread-hold-holds): the synchronous arm cannot read the plan or the ops catalog without a
+    // synchronous spawn (W1-T13204), so it FAILS CLOSED: every production sync arm reads the hold as unread and refuses.
+    // Production lanes arm through realArmDepsAsync, whose reader replaces this one. Under the test runner a suite
+    // spreading these deps with fakes keeps today's arm (W1-T5939's precedent); its own suite proves this reader.
+    ...(isTestRunner() ? {} : { taskHold: SYNC_ARM_TASK_HOLD }),
     say: (msg) => console.log(msg),
   };
 }
+
+/** W1-T14902: the synchronous arm's reading — unread, so attemptArm refuses and its row names why. */
+export const SYNC_ARM_TASK_HOLD = (): TaskHoldReading => ({ outcome: "unread", taskId: "the named task",
+  reason: "the synchronous arm has no task-hold reader; this lane must arm through the awaited arm" });
 
 /**
  * W1-T5284 — {@link realArmDeps} for the daemon: the same deps, with the at-open arm's `gh pr merge`
@@ -748,7 +757,7 @@ export function realArmDeps(
  * core daemon's profile: `ghExec` 10.4 s and {@link baseBranchRequiresMergeQueue} 3.5 s on the loop.
  */
 export function realArmDepsAsync(loadConfigImpl: typeof loadConfig = loadConfig, qualification?: SelectedModeQualification): ArmDeps<true> {
-  const { sleepSync: _sleepSync, ...shared } = realArmDeps(loadConfigImpl, qualification);
+  const { sleepSync: _sleepSync, taskHold: _syncTaskHold, ...shared } = realArmDeps(loadConfigImpl, qualification);
   return {
     ...shared,
     contributorAdmission: (prUrl, head) => runStepsAsync(armAdmissionSteps(prUrl, head, loadConfigImpl, readAdmissionRestAsync)),
@@ -1677,7 +1686,11 @@ function* taskHoldRefusalSteps(
   prUrl: string,
   deps: Pick<ArmDeps<true>, "say"> & Partial<Pick<ArmDeps<true>, "taskHold">>,
 ): Steps<ArmAttemptResult | undefined> {
-  if (!deps.taskHold) return undefined;
+  if (!deps.taskHold) {
+    // Fail closed: a production arm with no reader wired never skips the check (a fixture's partial fakes do).
+    if (!isRealArmDepsObject(deps) || isTestRunner()) return undefined;
+    deps = { ...deps, taskHold: SYNC_ARM_TASK_HOLD };
+  }
   let reading: TaskHoldReading;
   try {
     reading = yield* step(() => deps.taskHold!(prUrl));
