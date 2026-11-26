@@ -78,9 +78,11 @@ test("W1-T4768: archived positive release retires exact ask", async (t) => {
   const world = fixture();
   t.after(() => rmSync(world.root, { recursive: true, force: true }));
   await withServer(world.deps, async (base) => {
-    const inbox = await get(base, "/v1/inbox") as { notReady: Array<{ proposalId: string }> };
-    assert.ok(!inbox.notReady.some((item) => item.proposalId === RELEASED));
-    assert.ok(inbox.notReady.some((item) => item.proposalId === UNRELEASED));
+    const inbox = await get(base, "/v1/inbox") as { ready: Array<{ proposalId: string }>; notReady: Array<{ proposalId: string }> };
+    // W1-T14977: an unreleased parked ask is ready to approve as its release, so it may be listed in ready.
+    const listed = (id: string) => [...inbox.ready, ...inbox.notReady].some((item) => item.proposalId === id);
+    assert.ok(!listed(RELEASED));
+    assert.ok(listed(UNRELEASED));
     const threads = await get(base, "/v1/inbox/threads") as { threads: Array<{ proposalId: string }> };
     assert.ok(!threads.threads.some((item) => item.proposalId === RELEASED));
     assert.ok(threads.threads.some((item) => item.proposalId === UNRELEASED));
@@ -122,9 +124,11 @@ test("W1-T4768: archive gap preserves unproven ask", async (t) => {
   const world = fixture(true);
   t.after(() => rmSync(world.root, { recursive: true, force: true }));
   await withServer(world.deps, async (base) => {
-    const inbox = await get(base, "/v1/inbox") as { notReady: Array<{ proposalId: string }> };
-    assert.ok(inbox.notReady.some((item) => item.proposalId === RELEASED));
-    assert.ok(inbox.notReady.some((item) => item.proposalId === UNRELEASED));
+    const inbox = await get(base, "/v1/inbox") as { ready: Array<{ proposalId: string }>; notReady: Array<{ proposalId: string }> };
+    // W1-T14977: an unreleased parked ask is ready to approve as its release, so it may be listed in ready.
+    const listed = (id: string) => [...inbox.ready, ...inbox.notReady].some((item) => item.proposalId === id);
+    assert.ok(listed(RELEASED));
+    assert.ok(listed(UNRELEASED));
     const census = await get(base, "/v1/inbox/attention-census") as {
       sources: { archiveLedger: string }; items: Array<{ proposalId: string; attention: string }>;
     };

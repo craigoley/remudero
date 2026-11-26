@@ -1610,10 +1610,11 @@ export function classifyProposal(
     // W1-T14977 (operator ruling 2026-11-26 15:10Z): a parked verify:human task's own ask needs no Architect draft.
     // The only draft it can take is `RELEASE: <task>`, which `rmd approve <task>` does directly, so waiting on a
     // draft that failed once and is never retried left these asks with no way to approve. An ask the operator
-    // reframed still waits for its redraft, and the release checks below still apply.
+    // reframed still waits for its redraft, and the release draft's checks still apply.
     const parkedId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
     const reframed = (proposal.reframeHistory ?? []).some((round) => !round.retracted);
-    if (parkedId && !reframed && isReleasableTask(ctx.plan.byId.get(parkedId)) &&
+    // A task already released to the fleet is never offered for release again.
+    if (parkedId && !reframed && isReleasableTask(ctx.plan.byId.get(parkedId)) && ctx.isReleasedHumanTask?.(parkedId) !== true &&
       proposal.evidenceAnchors.every((a) => ctx.grepAnchorTrue(a)) &&
       !(proposal.conflictsWith ?? []).some((id) => ctx.openProposalIds.has(id))) {
       return { proposalId: proposal.id, state: "ready", reasons, releaseTaskId: parkedId, proposal, ...referentUnverified };

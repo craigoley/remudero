@@ -89,7 +89,7 @@ test("W1-T4738: a release receipt retires only its exact verify-human ask withou
   release(world.ledgerPath, "W1-T1218");
   const classified = classifyAllProposalsMemo(world.deps);
   assert.equal(classified.classifications.find((row) => row.proposalId === HUMAN)?.state, "retired");
-  assert.equal(classified.classifications.find((row) => row.proposalId === OTHER)?.state, "not_ready");
+  assert.equal(classified.classifications.find((row) => row.proposalId === OTHER)?.state, "ready", "W1-T14977: an unreleased parked ask is ready to approve as its release");
   assert.equal(classified.classifications.find((row) => row.proposalId === GENERIC)?.state, "not_ready", "an ID without producer purpose cannot borrow the exact release");
   assert.equal(classified.classifications.find((row) => row.proposalId === HELD)?.state, "not_ready");
   assert.ok(classified.proposals.some((row) => row.id === HUMAN), "history stays in the registry");
@@ -104,12 +104,12 @@ test("W1-T4738: a release receipt retires only its exact verify-human ask withou
 test("W1-T4738: release receipt invalidates the inbox memo", () => {
   const world = fixture();
   const before = classifyAllProposalsMemo(world.deps);
-  assert.equal(before.classifications.find((row) => row.proposalId === HUMAN)?.state, "not_ready");
+  assert.equal(before.classifications.find((row) => row.proposalId === HUMAN)?.state, "ready", "W1-T14977: an unreleased parked ask is ready to approve as its release");
   release(world.ledgerPath, TASK);
   const after = classifyAllProposalsMemo(world.deps);
   assert.notStrictEqual(after, before);
   assert.equal(after.classifications.find((row) => row.proposalId === HUMAN)?.state, "retired");
-  assert.equal(after.classifications.find((row) => row.proposalId === OTHER)?.state, "not_ready");
+  assert.equal(after.classifications.find((row) => row.proposalId === OTHER)?.state, "ready", "W1-T14977: an unreleased parked ask is ready to approve as its release");
 });
 
 test("a machine release cannot retire an explicitly held security ask", async () => {
@@ -130,13 +130,13 @@ test("W1-T4884: verify-auto alone preserves an unanswered human ask without eras
   const classified = classifyAllProposalsMemo(world.deps);
   const stale = classified.classifications.find((row) => row.proposalId === HUMAN);
   assert.equal(stale?.state, "not_ready");
-  assert.equal(classified.classifications.find((row) => row.proposalId === OTHER)?.state, "not_ready");
+  assert.equal(classified.classifications.find((row) => row.proposalId === OTHER)?.state, "ready", "W1-T14977: an unreleased parked ask is ready to approve as its release");
   assert.ok(classified.proposals.some((row) => row.id === HUMAN), "the unanswered ask stays in the registry");
   const visible = await threads(world.deps);
   assert.ok(visible.some((row) => row.proposalId === HUMAN && row.attention === "decision"));
   assert.ok(visible.some((row) => row.proposalId === OTHER));
   writeFileSync(world.planPath, readFileSync(world.planPath, "utf8").replace("verify: auto", "verify: human"));
-  assert.equal(classifyAllProposalsMemo(world.deps).classifications.find((row) => row.proposalId === HUMAN)?.state, "not_ready");
+  assert.equal(classifyAllProposalsMemo(world.deps).classifications.find((row) => row.proposalId === HUMAN)?.state, "ready", "W1-T14977: an unreleased parked ask is ready to approve as its release");
   assert.ok((await threads(world.deps)).some((row) => row.proposalId === HUMAN), "verification-mode edits never answer the ask");
 });
 

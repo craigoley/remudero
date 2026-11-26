@@ -34,24 +34,29 @@ test("W1-T14977 criterion 1: a parked verify:human task's ask with no draft is r
   }
 });
 
-test("W1-T14977 criterion 2: invariant:release-only — no draft-free release for a held, unparked or missing task, another ask kind, a reframed ask, drifted evidence or an open conflict", () => {
+test("W1-T14977 criterion 2: invariant:release-only — no draft-free release for a held, unparked, missing or already-released task, another ask kind, a reframed ask, drifted evidence or an open conflict", () => {
   const notReleased = (proposal: Proposal, ctx: ReadinessContext, why: string) => {
     const result = classifyProposal(proposal, undefined, ctx);
     assert.notEqual(result.state, "ready", why);
     assert.equal(result.releaseTaskId, undefined, why);
   };
+  // Contrast: the same ask in the same context is ready, so each case below is refused only for its own reason.
+  assert.equal(classifyProposal(ask(), undefined, context()).state, "ready", "the plain parked ask is ready");
   notReleased(ask(), context("dispatch_hold: true"), "a held task");
   notReleased(ask(), context("", "auto"), "a task that no longer needs a person");
   notReleased(ask(), context("", "human", "blocked"), "a task that is not queued");
   notReleased(ask(`verify-human:W1-T9951`), context(), "a task the plan does not hold");
   notReleased(ask(`verify-human-automate:${ID}`), context(), "an automate ask is not a release ask");
   notReleased(ask(undefined, { reframeHistory: [{ feedback: "Split this first" }] }), context(), "a reframed ask waits for its redraft");
-  notReleased(ask(undefined, { evidenceAnchors: [{ pattern: "gone", path: "src/x.ts" }] }), { ...context(), grepAnchorTrue: () => false }, "drifted evidence");
+  notReleased(ask(undefined, { evidenceAnchors: [{ description: "x still names gone", pattern: "gone", path: "src/x.ts" }] }), { ...context(), grepAnchorTrue: () => false }, "drifted evidence");
   notReleased(ask(undefined, { conflictsWith: ["other:1"] }), { ...context(), openProposalIds: new Set(["other:1"]) }, "an open conflict");
+  notReleased(ask(), { ...context(), isReleasedHumanTask: (id) => id === ID }, "a task already released to the fleet");
 });
 
 test("W1-T14977 criterion 3: an ask with a draft is still judged by that draft", () => {
   const result = classifyProposal(ask(), { releaseTaskId: "W1-T9999", fragmentYaml: "", stampLine: "", anchorFingerprint: "" } as never, context());
   assert.equal(result.state, "not_ready");
   assert.match(result.reasons.map((r) => r.detail).join("\n"), /RELEASE must name this proposal's parked task/);
+  // Contrast: the same ask with no draft is ready, so only the draft keeps it not ready.
+  assert.equal(classifyProposal(ask(), undefined, context()).releaseTaskId, ID, "without a draft the ask is its release");
 });
