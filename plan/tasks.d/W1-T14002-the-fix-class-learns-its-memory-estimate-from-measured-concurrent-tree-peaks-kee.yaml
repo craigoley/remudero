@@ -21,7 +21,7 @@
     - test/memory/the-fix-class-learns-from-concurrent-peaks.test.ts
     - test/fix-lane/a-fix-child-refused-for-memory-is-retried-when-memory-frees.test.ts
     - test/the-config-gardener-reads-only-the-ledger-steps-it-prices.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: When the store holds concurrent-rss fix samples, the fix class estimate and typical are learned from their measured concurrent peaks, not from legacy-hwm lifetime sums
