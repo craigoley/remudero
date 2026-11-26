@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { parse } from "yaml";
 import { ACCEPTANCE_BULLET_RE, replaceBodyProofs, rewriteBodyProof, rewriteCriterionProofs } from "#src/lib/body-repair.js";
 import { renderAcceptanceBlock } from "#src/lib/plan-pr-emitter.js";
-import { acceptanceCriteriaRead, acceptanceProofSpans, parseAcceptanceBlock } from "#src/lib/review.js";
+import { acceptanceCriteriaRead, acceptanceProofSpans, markUnbackedBodyGuards, parseAcceptanceBlock } from "#src/lib/review.js";
+import type { AcceptanceCriterion } from "#src/lib/plan.js";
 
 // W1-T14913: a body proof in YAML double quotes must read as the record's YAML scalar does, or a body `kind: guard`
 // finds no record row and is refused (core #20913).
@@ -210,18 +211,55 @@ test("a quoted body proof reads its escapes as yaml does, and a claim repeating 
 
 // The ninth review of #20963: a taskless PR's author wrote a bare numbered bullet, `1. unit test: <title>`, whose one text is
 // both its claim and its proof. Rewriting the proof's span rewrote the claim too, and the live writer saved it. Every
-// rewrite now re-reads the body and refuses unless only its target proof changed.
-test("a quoted body proof reads its escapes as yaml does, and a rewrite that would change a claim refuses", () => {
+// rewrite now re-reads the body and keeps it only when every claim and every other proof is unchanged; a bare bullet is
+// expanded into a `claim:` bullet holding its text byte for byte and a `proof:` line (the tenth review).
+test("a quoted body proof reads its escapes as yaml does, and a bare bullet's proof rewrite keeps its claim byte for byte", () => {
   const title = "unit test: a bare bullet's claim is its proof";
   const body = `## Acceptance\n1. ${title}\n- claim: second\n  proof: grep: x in f\n`;
   const read = acceptanceCriteriaRead(body);
   assert.deepEqual(read.map((c) => [c.claim, c.proof]), [[title, title], ["second", "grep: x in f"]], "the bare bullet reads as both");
   assert.notEqual(read[0]!.span, undefined, "CONTROL: the bare bullet's proof has a span, so the rewrite reaches the re-read");
   const newProof = "unit test: a renamed title";
-  assert.equal(rewriteBodyProof(body, title, newProof, acceptanceCriteriaRead), undefined, "the claim would change");
-  assert.equal(replaceBodyProofs(body, [{ oldProof: title, newProof }], acceptanceCriteriaRead), undefined);
-  assert.equal(rewriteCriterionProofs(body, [{ index: 0, oldProof: title, newProof }], acceptanceCriteriaRead), undefined);
-  // The labelled criterion beside it still rewrites, with its claim and the bare bullet unchanged.
+  for (const fixed of [rewriteBodyProof(body, title, newProof, acceptanceCriteriaRead),
+    replaceBodyProofs(body, [{ oldProof: title, newProof }], acceptanceCriteriaRead),
+    rewriteCriterionProofs(body, [{ index: 0, oldProof: title, newProof }], acceptanceCriteriaRead)]) {
+    assert.notEqual(fixed, undefined);
+    assert.deepEqual(acceptanceCriteriaRead(fixed!).map((c) => [c.claim, c.proof]), [[title, newProof], ["second", "grep: x in f"]],
+      `the claim is kept byte for byte:\n${fixed}`);
+    assert.ok(fixed!.includes(`1. claim: ${title}\n  proof: ${newProof}\n`), fixed);
+  }
+  // The labelled criterion beside it still rewrites in place, with its claim and the bare bullet unchanged.
   const fixed = rewriteCriterionProofs(body, [{ index: 1, oldProof: "grep: x in f", newProof: "grep: y in f" }], acceptanceCriteriaRead);
   assert.deepEqual(acceptanceCriteriaRead(fixed!).map((c) => [c.claim, c.proof]), [[title, title], ["second", "grep: y in f"]]);
+});
+
+// The tenth review of #20963: a standalone wrapped grep bullet on a GitHub filing PR (`- grep: "x" in f`) shares one span
+// between claim and proof, so the in-place unwrap failed the re-read and the plan round left it wrapped.
+test("a quoted body proof reads its escapes as yaml does, and a standalone wrapped grep bullet is unwrapped with its claim kept", () => {
+  const wrapped = `grep: "driftCeiling" in scripts/clock-sweep-baseline.json`;
+  const bare = "grep: driftCeiling in scripts/clock-sweep-baseline.json";
+  const body = `## Acceptance\n- ${wrapped}\n`;
+  assert.deepEqual(parseAcceptanceBlock(body).map((c) => [c.claim, c.proof]), [[wrapped, wrapped]]);
+  const fixed = rewriteCriterionProofs(body, [{ index: 0, oldProof: wrapped, newProof: bare }], acceptanceCriteriaRead);
+  assert.equal(fixed, `## Acceptance\n- claim: ${wrapped}\n  proof: ${bare}\n`);
+  assert.deepEqual(parseAcceptanceBlock(fixed!).map((c) => [c.claim, c.proof]), [[wrapped, bare]]);
+});
+
+// The tenth review of #20963 (F2): before this change the renderer wrote a quoted proof's backslashes as they were, so a
+// stored body rendered for a claim holding `|` says `"grep: a\\b in f"` and means two backslashes. Read at head, the
+// unescape collapses them to one and the body's `kind: guard` no longer matches its record. It reads as written only
+// when that, and not the unescaped text, is a record criterion's proof.
+test("a quoted body proof reads its escapes as yaml does, and a legacy-rendered body's guard stays backed by its record", () => {
+  const recordProof = String.raw`grep: a\\b in f`;
+  const legacy = `## Acceptance\n- claim: "the split | holds"\n  proof: "${recordProof}"\n  kind: guard\n`;
+  const body = parseAcceptanceBlock(legacy);
+  assert.equal(body[0]!.proof, String.raw`grep: a\b in f`, "CONTROL: head's parser unescapes the legacy body");
+  const record = [{ claim: "the split | holds", proof: recordProof, kind: "guard" }] as unknown as unknown as AcceptanceCriterion[];
+  assert.deepEqual(markUnbackedBodyGuards(record, body, false).unbacked, [], "the legacy guard is backed by its record");
+  // The fallback is narrow: when the unescaped text is the record's proof, it is read, and a raw match alone backs nothing.
+  const escapedRecord = [{ claim: "x", proof: String.raw`grep: a\b in f`, kind: "guard" }] as unknown as unknown as AcceptanceCriterion[];
+  assert.deepEqual(markUnbackedBodyGuards(escapedRecord, parseAcceptanceBlock(legacy), false).unbacked, []);
+  const unguardedRecord = [{ claim: "the split | holds", proof: recordProof }] as unknown as unknown as AcceptanceCriterion[];
+  assert.deepEqual(markUnbackedBodyGuards(unguardedRecord, parseAcceptanceBlock(legacy), false).unbacked, [recordProof],
+    "a legacy body guard over a record criterion that is not a guard is still refused");
 });

@@ -395,14 +395,30 @@ function onlyTheProofChanged(before: readonly ReadCriterion[], after: readonly R
 }
 
 /** Replace criterion `index`'s proof value inside its span only, quoted and escaped when the value was written quoted;
- *  `undefined` unless the body then re-reads with only that proof changed (see {@link onlyTheProofChanged}). */
+ *  `undefined` unless the body then re-reads with only that proof changed (see {@link onlyTheProofChanged}). A bare
+ *  bullet whose one text is both its claim and its proof (`- grep: "x" in f`) cannot change one without the other, so it
+ *  is expanded into a `claim:` bullet carrying that text byte for byte and a `proof:` line carrying the new proof. */
 function rewriteSpan(body: string, index: number, span: ProofSpan, newProof: string, spans: ProofSpans): string | undefined {
   const lines = body.split("\n");
   const line = lines[span.line];
   if (line === undefined) return undefined;
-  lines[span.line] = `${line.slice(0, span.start)}${span.quoted ? quotedValue(newProof) : newProof}${line.slice(span.end)}`;
-  const repaired = lines.join("\n");
-  return onlyTheProofChanged(spans(body), spans(repaired), index, newProof) ? repaired : undefined;
+  const before = spans(body);
+  const keeps = (candidate: string[]): string | undefined => {
+    const repaired = candidate.join("\n");
+    return onlyTheProofChanged(before, spans(repaired), index, newProof) ? repaired : undefined;
+  };
+  const inPlace = keeps([...lines.slice(0, span.line),
+    `${line.slice(0, span.start)}${span.quoted ? quotedValue(newProof) : newProof}${line.slice(span.end)}`, ...lines.slice(span.line + 1)]);
+  if (inPlace !== undefined) return inPlace;
+  const read = before[index];
+  const bullet = line.match(/^(\s*)([-*]|\d+[.)])\s+/);
+  if (!bullet || read === undefined || read.claim !== read.proof) return undefined;
+  for (const proofText of [newProof, quotedValue(newProof)]) {
+    const expanded = keeps([...lines.slice(0, span.line), `${bullet[1]}${bullet[2]} claim: ${read.claim}`,
+      `${bullet[1]}  proof: ${proofText}`, ...lines.slice(span.line + 1)]);
+    if (expanded !== undefined) return expanded;
+  }
+  return undefined;
 }
 
 /** W1-T14913 — rewrite ONE body proof, found by the value parseAcceptanceBlock reads. Given review.ts's

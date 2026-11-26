@@ -9088,6 +9088,20 @@ function stripQuotes(s: string): string {
   return m[1] === '"' ? m[2].replace(/\\(["\\])/g, "$1") : m[2];
 }
 
+/** W1-T14913: a double-quoted body proof whose escapes the parser unescaped, mapped to the text between its quotes as
+ *  written. Before W1-T14913 the renderer wrote a quoted proof's backslashes unescaped (a claim holding `|` quoted both
+ *  sides), so a stored legacy body's `\\` meant two backslashes; {@link markUnbackedBodyGuards} reads that raw text
+ *  only when the unescaped proof matches no record criterion and the raw one does. */
+const quotedProofAsWritten = new WeakMap<AcceptanceCriterion, string>();
+
+/** The proof a `proof:` value reads as, remembering its as-written text when unescaping changed it. */
+function readQuotedProof(criterion: AcceptanceCriterion, value: string): string {
+  const proof = stripQuotes(value);
+  const raw = value.match(/^"([\s\S]*)"$/)?.[1];
+  if (raw !== undefined && raw !== proof) quotedProofAsWritten.set(criterion, raw);
+  return proof;
+}
+
 /** The Acceptance HEADER line. Extracted as a shared constant so {@link parseAcceptanceBlock} and {@link
  *  acceptanceBlockDiagnostics} can never disagree about where a block begins. Exported (W1-T2762) so
  *  scripts/generate-proof-dialect.mjs can render it and test/proof-dialect-doc.test.ts can hold prose
@@ -9314,7 +9328,7 @@ function readAcceptanceBlock(body: string): { criteria: AcceptanceCriterion[]; p
       const proofLabel = line.trim().match(/^proof\s*:\s*(.*)$/i);
       const last = criteria[criteria.length - 1];
       if (proofLabel && !last.proof) {
-        last.proof = stripQuotes(proofLabel[1].trim());
+        last.proof = readQuotedProof(last, proofLabel[1].trim());
         proofSpans[criteria.length - 1] = continuationSpan(line, at);
         continue;
       }
@@ -9324,7 +9338,7 @@ function readAcceptanceBlock(body: string): { criteria: AcceptanceCriterion[]; p
       const unsplit = proofLabel ? unsplitLabelledClaims[criteria.length - 1] : undefined;
       if (proofLabel && unsplit !== undefined) {
         last.claim = unsplit;
-        last.proof = stripQuotes(proofLabel[1].trim());
+        last.proof = readQuotedProof(last, proofLabel[1].trim());
         proofSpans[criteria.length - 1] = continuationSpan(line, at);
         unsplitLabelledClaims[criteria.length - 1] = undefined;
         continue;
@@ -9355,8 +9369,16 @@ export const BODY_GUARD_UNBACKED = "body-guard-unbacked";
  */
 export function markUnbackedBodyGuards<T extends AcceptanceCriterion>(criteria: readonly T[], bodyCriteria: readonly AcceptanceCriterion[],
   fromBody: boolean): { criteria: T[]; unbacked: string[] } {
+  const recordProofs = new Set(criteria.map((c) => c.proof.trim()));
+  // A legacy-rendered body proof (see quotedProofAsWritten) reads as written only when that, and not the unescaped
+  // text, is a record criterion's proof.
+  const bodyProof = (c: AcceptanceCriterion): string => {
+    const proof = c.proof.trim();
+    const raw = quotedProofAsWritten.get(c)?.trim();
+    return raw !== undefined && !recordProofs.has(proof) && recordProofs.has(raw) ? raw : proof;
+  };
   const bodyGuardList = bodyCriteria.filter((c) => (c as { kind?: unknown }).kind === "guard");
-  const bodyGuards = new Set(bodyGuardList.map((c) => c.proof.trim()));
+  const bodyGuards = new Set(bodyGuardList.map(bodyProof));
   // A body guard is backed only by a record criterion that is itself `kind: guard` with the same trimmed proof.
   const backedProofs = new Set(fromBody ? [] : criteria
     .filter((c) => (c as { kind?: unknown }).kind === "guard").map((c) => c.proof.trim()));
@@ -9371,7 +9393,7 @@ export function markUnbackedBodyGuards<T extends AcceptanceCriterion>(criteria: 
   // the proof, so editing a proof and marking it guard cannot slip past both halves.
   const present = new Set(criteria.map((c) => c.proof.trim()));
   for (const guard of bodyGuardList) {
-    const proof = guard.proof.trim();
+    const proof = bodyProof(guard);
     if (present.has(proof) || backedProofs.has(proof)) continue;
     present.add(proof);
     unbacked.push(proof);
