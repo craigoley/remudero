@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parse } from "yaml";
-import { replaceBodyProofs, rewriteBodyProof } from "#src/lib/body-repair.js";
+import { ACCEPTANCE_BULLET_RE, replaceBodyProofs, rewriteBodyProof } from "#src/lib/body-repair.js";
 import { renderAcceptanceBlock } from "#src/lib/plan-pr-emitter.js";
 import { parseAcceptanceBlock } from "#src/lib/review.js";
 
@@ -108,6 +108,8 @@ test("a body proof on every bullet shape the parser reads is rewritten, and the 
     assert.ok(rewritten !== undefined, `rewritten: ${JSON.stringify(body)}`);
     assert.equal(parseAcceptanceBlock(rewritten)[0]?.proof, newProof, `re-read: ${JSON.stringify(rewritten)}`);
   }
+  for (const line of ["- a", "* a", "1. a", "1) a", "12. a", "  - a"]) assert.equal(ACCEPTANCE_BULLET_RE.test(line), true, line);
+  for (const line of ["+ a", "-a", "1.a", "a. b", "proof: a", "- "]) assert.equal(ACCEPTANCE_BULLET_RE.test(line), false, line);
   assert.equal(rewriteBodyProof(`## Acceptance\n+ claim one | ${oldProof}\n`, oldProof, newProof), undefined,
     "a `+` line is no bullet the parser reads, so nothing there is rewritten");
 });
