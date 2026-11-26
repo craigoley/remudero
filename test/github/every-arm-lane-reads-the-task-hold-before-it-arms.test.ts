@@ -162,8 +162,8 @@ test("census: every task-hold lookup goes through the one PR task resolver, fed 
   assert.match(source(ARM_MODULE), /planOnlyFiling \?\? boardPlanOnlyFiling\(stateDir, planFilingFromChangedFiles\)/,
     "the arm's hold reader classifies plan filings as the board does");
   const hold = source(HOLD_MODULE);
-  assert.match(hold, /freshPullRowRead: PullRowRead = \(path\) => ghJsonAsync\(\["api", path\], undefined, undefined, \{ fresh: true \}\)/,
-    "the act-time read revalidates through the broker");
+  assert.match(hold, /freshPullRowRead: PullRowRead = \(path\) => ghJsonAsync\(\["api", path\], undefined, undefined, \{ fresh: true, alone: true \}\)/,
+    "the act-time read revalidates through the broker and never joins a GET already under way (round 11)");
   for (const fn of ["resolvePullRequestTaskSubject", "readPullRequestNamedTaskHold"]) {
     assert.match(hold, new RegExp(`function ${fn}\\([^)]*read: PullRowRead = freshPullRowRead`), `${fn} defaults to the fresh read`);
   }
