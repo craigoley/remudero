@@ -340,15 +340,26 @@ function reviewerSemanticVerdicts(
 
 type ReviewerSnapshotPhase = "materialization" | "integrity";
 
-class ReviewerSnapshotError extends Error {
+export class ReviewerSnapshotError extends Error {
   constructor(
     readonly phase: ReviewerSnapshotPhase,
     readonly reason: "source-unavailable" | "head-mismatch" | "clone-failed" | "unreadable" | "dirty",
     message: string,
+    /** W1-T14938: why an integrity read failed — the git subcommand, its error and whether the checkout path exists. */
+    readonly unreadable?: { gitCommand: string; gitError: string; checkoutExists: boolean },
   ) {
     super(message);
     this.name = "ReviewerSnapshotError";
   }
+}
+
+/** W1-T14938: the `review.reviewer.<phase>_error` row's fields, naming the failed git read when there was one. */
+export function reviewerSnapshotErrorRow(e: ReviewerSnapshotError): Record<string, unknown> {
+  return {
+    reason: e.reason,
+    error: e.message,
+    ...(e.unreadable ? { git_command: e.unreadable.gitCommand, git_error: e.unreadable.gitError, checkout_exists: e.unreadable.checkoutExists } : {}),
+  };
 }
 
 /**
@@ -437,15 +448,24 @@ export function materializeReviewerSnapshot(
 }
 
 /** A semantic result is usable only while the disposable checkout remains exact and clean. */
-function assertReviewerSnapshotIntegrity(host: ReviewCommandHost, cwd: string, expectedHeadSha: string): void {
+export function assertReviewerSnapshotIntegrity(host: Pick<ReviewCommandHost, "GIT_UNTRACKED_FILES_ALL">, cwd: string, expectedHeadSha: string): void {
   const { GIT_UNTRACKED_FILES_ALL } = host;
+  // W1-T14938: each read runs alone, so a refusal names the subcommand that failed, its error and whether the path exists.
+  const unreadable = (gitCommand: string, e: unknown) => new ReviewerSnapshotError(
+    "integrity", "unreadable", "semantic reviewer checkout integrity is unreadable",
+    { gitCommand, gitError: String((e as Error)?.message ?? e), checkoutExists: existsSync(cwd) },
+  );
   let actualHead: string;
-  let status: string;
   try {
     actualHead = hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim();
+  } catch (e) {
+    throw unreadable("rev-parse", e);
+  }
+  let status: string;
+  try {
     status = hostWorktreeGit(cwd, ["status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL]);
-  } catch {
-    throw new ReviewerSnapshotError("integrity", "unreadable", "semantic reviewer checkout integrity is unreadable");
+  } catch (e) {
+    throw unreadable("status", e);
   }
   if (actualHead !== expectedHeadSha) {
     throw new ReviewerSnapshotError("integrity", "head-mismatch", "semantic reviewer changed the checkout HEAD");
@@ -1805,7 +1825,7 @@ export async function runReview(host: ReviewCommandHost, args: {
         log("review.reviewer.abandoned", reviewerAbandonmentLedgerFields(e));
       }
       if (e instanceof ReviewerSnapshotError) {
-        log(`review.reviewer.${e.phase}_error`, { reason: e.reason, error: e.message });
+        log(`review.reviewer.${e.phase}_error`, reviewerSnapshotErrorRow(e));
       }
       log("review.reviewer.error", { error: String((e as Error)?.message ?? e) });
     }
