@@ -340,7 +340,7 @@ function reviewerSemanticVerdicts(
 
 type ReviewerSnapshotPhase = "materialization" | "integrity";
 
-class ReviewerSnapshotError extends Error {
+export class ReviewerSnapshotError extends Error {
   constructor(
     readonly phase: ReviewerSnapshotPhase,
     readonly reason: "source-unavailable" | "head-mismatch" | "clone-failed" | "unreadable" | "dirty",
@@ -437,13 +437,14 @@ export function materializeReviewerSnapshot(
 }
 
 /** A semantic result is usable only while the disposable checkout remains exact and clean. */
-function assertReviewerSnapshotIntegrity(host: ReviewCommandHost, cwd: string, expectedHeadSha: string): void {
+export function assertReviewerSnapshotIntegrity(host: Pick<ReviewCommandHost, "GIT_UNTRACKED_FILES_ALL">, cwd: string, expectedHeadSha: string): void {
   const { GIT_UNTRACKED_FILES_ALL } = host;
   let actualHead: string;
   let status: string;
   try {
     actualHead = hostWorktreeGit(cwd, ["rev-parse", "HEAD"]).trim();
-    status = hostWorktreeGit(cwd, ["status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL]);
+    // W1-T14939: no output bound — Node's 1 MiB default turned a large dirty tree into ENOBUFS, read as "unreadable".
+    status = hostWorktreeGit(cwd, ["status", "--porcelain=v1", GIT_UNTRACKED_FILES_ALL], { maxBuffer: Infinity });
   } catch {
     throw new ReviewerSnapshotError("integrity", "unreadable", "semantic reviewer checkout integrity is unreadable");
   }
