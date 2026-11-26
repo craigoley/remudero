@@ -365,16 +365,27 @@ export interface BodyProofReplacement { oldProof: string; newProof: string }
 /** One acceptance bullet as {@link parseAcceptanceBlock} (review.ts) reads it: `-`, `*`, `1.` or `1)`, then its text. */
 export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
 
-/** W1-T14913 — rewrite ONE body proof, found by the value parseAcceptanceBlock reads. On a `proof:` line whose whole
- *  value is double-quoted, that value is the quoted text with `\"` and `\\` unescaped (any other backslash stays), and
- *  the replacement is written back escaped, so it re-reads exactly; any other bullet or proof line is matched and
- *  written literally, as before. `undefined` unless exactly one line carries `oldProof`. */
-export function rewriteBodyProof(body: string, oldProof: string, newProof: string): string | undefined {
+/** The body lines that may carry a proof: review.ts's `acceptanceProofLines`, the lines parseAcceptanceBlock reads each
+ *  proof from. INJECTED: review.ts imports this module, so importing the parser here would close a ring. */
+export type ProofLines = (body: string) => readonly number[];
+
+/** Every bullet or `proof:` line, the shape a caller with no parser at hand matches (the W1-T10339 behaviour). */
+const bulletOrProofLines: ProofLines = (body) => body.split("\n").flatMap((line, index) =>
+  ACCEPTANCE_BULLET_RE.test(line) || /^\s*proof\s*:/i.test(line) ? [index] : []);
+
+/** W1-T14913 — rewrite ONE body proof, found by the value parseAcceptanceBlock reads, on a line `proofLines` names: given
+ *  review.ts's `acceptanceProofLines`, only the lines the parser read proofs from, so a fenced example or prose outside
+ *  the Acceptance block is never matched or rewritten. On a `proof:` line whose whole value is double-quoted, that value
+ *  is the quoted text with `\"` and `\\` unescaped (any other backslash stays), and the replacement is written back
+ *  escaped, so it re-reads exactly; any other proof line is matched and written literally, as before. `undefined` unless
+ *  exactly one such line carries `oldProof`. */
+export function rewriteBodyProof(body: string, oldProof: string, newProof: string,
+  proofLines: ProofLines = bulletOrProofLines): string | undefined {
   const escaped = (text: string): string => `"${text.replace(/[\\"]/g, "\\$&")}"`;
   const lines = body.split("\n");
-  const hits = lines.flatMap((line, index) => {
-    // W1-T14913: the parser's own bullet shapes (`-`, `*`, `1.`, `1)`) and its `proof:` continuation lines.
-    if (!ACCEPTANCE_BULLET_RE.test(line) && !/^\s*proof\s*:/i.test(line)) return [];
+  const hits = [...new Set(proofLines(body))].flatMap((index) => {
+    const line = lines[index];
+    if (line === undefined) return [];
     const quoted = line.match(/^(\s*proof\s*:\s*)"([\s\S]*)"(\s*)$/i);
     if (quoted) {
       if (quoted[2]!.replace(/\\(["\\])/g, "$1") === oldProof) return [{ index, line: `${quoted[1]}${escaped(newProof)}${quoted[3]}` }];
@@ -392,10 +403,11 @@ export function rewriteBodyProof(body: string, oldProof: string, newProof: strin
  * sit on exactly ONE bullet or `proof:` continuation line of the body; a body that no longer carries it, or carries it on more
  * than one line, is not guessed at (`undefined`). A claim is never read or written here — {@link refusesToAuthorAClaim}'s line.
  */
-export function replaceBodyProofs(body: string, replacements: readonly BodyProofReplacement[]): string | undefined {
+export function replaceBodyProofs(body: string, replacements: readonly BodyProofReplacement[],
+  proofLines: ProofLines = bulletOrProofLines): string | undefined {
   let repaired = body;
   for (const { oldProof, newProof } of replacements) {
-    const next = rewriteBodyProof(repaired, oldProof, newProof);
+    const next = rewriteBodyProof(repaired, oldProof, newProof, proofLines);
     if (next === undefined) return undefined;
     repaired = next;
   }

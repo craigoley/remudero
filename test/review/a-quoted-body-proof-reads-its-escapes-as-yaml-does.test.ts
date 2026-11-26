@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { parse } from "yaml";
 import { ACCEPTANCE_BULLET_RE, replaceBodyProofs, rewriteBodyProof } from "#src/lib/body-repair.js";
 import { renderAcceptanceBlock } from "#src/lib/plan-pr-emitter.js";
-import { parseAcceptanceBlock } from "#src/lib/review.js";
+import { acceptanceProofLines, parseAcceptanceBlock } from "#src/lib/review.js";
 
 // W1-T14913: a body proof in YAML double quotes must read as the record's YAML scalar does, or a body `kind: guard`
 // finds no record row and is refused (core #20913).
@@ -124,4 +124,24 @@ test("numbered acceptance bullets are rewritten like the parser reads them", () 
     assert.notEqual(repaired, undefined, `${marker} bullet is found`);
     assert.equal(parseAcceptanceBlock(repaired!)[0]!.proof, newProof);
   }
+});
+
+// The sixth review of #20963: a human-edited body showed the same grep in a fenced YAML example above its only Acceptance
+// proof, and the rewrite counted the example as a second proof and refused. A rewrite given the parser's own proof lines
+// touches only the lines parseAcceptanceBlock reads; the example stays byte for byte.
+test("a quoted body proof reads its escapes as yaml does, and a fenced example above the header is never rewritten", () => {
+  const proofLine = String.raw`  proof: "grep: \"driftCeiling\": 1 in f"`;
+  const example = ["Example record:", "", "```yaml", "- claim: the ceiling stays", proofLine, "```", ""].join("\n");
+  const body = `${example}\n## Acceptance\n- claim: the ceiling stays\n${proofLine}\n`;
+  const oldProof = parseAcceptanceBlock(body)[0]!.proof;
+  assert.equal(oldProof, String.raw`grep: "driftCeiling": 1 in f`);
+  assert.deepEqual(acceptanceProofLines(body), [body.split("\n").indexOf(proofLine, example.split("\n").length)]);
+  const newProof = String.raw`grep: "driftCeiling": 2 in f`;
+  for (const fixed of [rewriteBodyProof(body, oldProof, newProof, acceptanceProofLines),
+    replaceBodyProofs(body, [{ oldProof, newProof }], acceptanceProofLines)]) {
+    assert.notEqual(fixed, undefined, "the active proof is found once");
+    assert.ok(fixed!.startsWith(example), "the fenced example is left exactly as written");
+    assert.deepEqual(parseAcceptanceBlock(fixed!).map((c) => c.proof), [newProof]);
+  }
+  assert.equal(acceptanceProofLines("no header\n- a | grep: x in f\n").length, 0, "no Acceptance header, no proof line");
 });

@@ -9238,16 +9238,28 @@ function acceptanceSeparator(item: string): { index: number; width: number } | n
  * house format, #277/#280). Parsing stops at the first line, after the bullets begin, that is neither a new bullet nor
  * a recognised continuation. FAILS CLOSED: `[]` when there is no block, and empty criteria never pass. */
 export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
+  return readAcceptanceBlock(body).criteria;
+}
+
+/** W1-T14913: the body line indices (split on `\n`) the parser read each criterion's proof from, in criterion order;
+ *  a criterion with no proof has none. A line outside the Acceptance block, a fenced example included, is never one. */
+export function acceptanceProofLines(body: string): number[] {
+  return readAcceptanceBlock(body).proofLines.filter((index): index is number => index !== undefined);
+}
+
+function readAcceptanceBlock(body: string): { criteria: AcceptanceCriterion[]; proofLines: (number | undefined)[] } {
   const lines = (body ?? "").split("\n");
   const criteria: AcceptanceCriterion[] = [];
+  const proofLines: (number | undefined)[] = [];
   /** Index-aligned with `criteria`: for a `claim:`-labelled bullet nonetheless split at a separator, the claim text as
    *  written BEFORE that split. An indented `proof:` continuation below such a bullet proves the split was a false
    *  positive — the proof lives on that line, so the pipe belonged to the claim — and restores this. */
   const unsplitLabelledClaims: (string | undefined)[] = [];
   // Header: "Acceptance:", "**Acceptance:**", "## Acceptance", "Acceptance criteria:" — never one inside a fence.
   const headerLine = acceptanceHeaderLine(lines);
-  if (headerLine < 0) return criteria;
-  for (const raw of lines.slice(headerLine + 1)) {
+  if (headerLine < 0) return { criteria, proofLines };
+  for (const [offset, raw] of lines.slice(headerLine + 1).entries()) {
+    const at = headerLine + 1 + offset;
     const line = raw.replace(/\r$/, "");
     const bullet = line.match(ACCEPTANCE_BULLET_RE);
     if (bullet) {
@@ -9263,6 +9275,7 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
       else if (!sep) proof = bareDialectProof(claim);
       if (!claim) continue;
       criteria.push({ claim, proof });
+      proofLines[criteria.length - 1] = proof ? at : undefined;
       const whole = claimLabel && proof ? item.match(/^claim\s*:\s*(.*)$/i) : null;
       unsplitLabelledClaims[criteria.length - 1] = whole ? stripQuotes(whole[1].trim()) : undefined;
       continue;
@@ -9274,6 +9287,7 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
       const last = criteria[criteria.length - 1];
       if (proofLabel && !last.proof) {
         last.proof = stripQuotes(proofLabel[1].trim());
+        proofLines[criteria.length - 1] = at;
         continue;
       }
       // The bullet above was a `claim:` label carrying a separator of its own and THIS line is the proof, so that
@@ -9283,6 +9297,7 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
       if (proofLabel && unsplit !== undefined) {
         last.claim = unsplit;
         last.proof = stripQuotes(proofLabel[1].trim());
+        proofLines[criteria.length - 1] = at;
         unsplitLabelledClaims[criteria.length - 1] = undefined;
         continue;
       }
@@ -9298,7 +9313,7 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
     if (line.trim() === "" && criteria.length === 0) continue;
     break;
   }
-  return criteria;
+  return { criteria, proofLines };
 }
 
 /** W1-T14627: the refusal a body guard earns when no task record declares it. */
