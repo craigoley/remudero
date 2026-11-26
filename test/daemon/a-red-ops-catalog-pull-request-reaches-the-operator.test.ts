@@ -122,6 +122,9 @@ test("W1-T14865: the daemon tick reads at most once per interval and never while
     { clock: { now: () => now }, ledgerLines: () => [], log: (step) => rows.push(step), run: async () => { throw new Error("boom"); } });
   await thrown();
   assert.deepEqual(rows, [OPS_PR_WATCH_UNREADABLE_STEP], "a thrown read writes one unreadable row");
+  const lostRow = opsPullRequestWatchTick({ repository: () => REPO, api: api("x") },
+    { clock: { now: () => now }, ledgerLines: () => [], log: () => { throw new Error("ledger full"); }, run: async () => { throw new Error("boom"); } });
+  await lostRow(); // a log that throws while recording a failed read never escapes the tick
   assert.equal(opsPullRequestWatchTick(undefined, { clock: { now: () => now }, ledgerLines: () => [], log: () => {}, run: async () => ({ escalated: [] }) })(), undefined);
   assert.equal(opsPullRequestWatchTick({ repository: () => undefined, api: api("x") },
     { clock: { now: () => now }, ledgerLines: () => [], log: () => {}, run: async () => ({ escalated: [] }) })(), undefined, "no repository yet, no read");
