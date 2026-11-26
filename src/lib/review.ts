@@ -19,7 +19,7 @@ import { homedir, hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
 import { isTestRunner } from "./live-write-guard.js";
-import { readTaskDispatchHold, taskHoldRefusal, type TaskDispatchHoldSources, type TaskHoldReading } from "./task-dispatch-hold.js";
+import { readPullRequestNamedTaskHold, taskHoldRefusal, type TaskHoldReading } from "./task-dispatch-hold.js";
 export { publicTaskHoldDescription, taskHoldReading, taskHoldRefusal, type TaskHoldReading } from "./task-dispatch-hold.js";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
@@ -65,7 +65,7 @@ import {
 } from "./task-id-reservation.js";
 // @ts-expect-error The shared plain .mjs helper ships under src/ so source-only runtimes can load it.
 import { adjudicateReservationChain, parseReservationHolderLine, parseReservationHolderFields } from "./reservation-chain.mjs";
-import { UNFILED_RUN_SENTINEL } from "./untasked-review.js";
+import { extractTaskTrailerId, UNFILED_RUN_SENTINEL } from "./untasked-review.js";
 
 /** JUDGE (MASTER-PLAN §12 rules 4/3B; W1-T1C): after green CI, a fresh read-only REVIEW session
  * judges each stated proof and posts `remudero-review`. {@link judgeReview} is pure (unit-fixture falsifier);
@@ -9388,10 +9388,7 @@ export function acceptanceBlockDiagnostics(body: string): AcceptanceBlockDiagnos
  *  construction, appending its stamp at the END of the body. Before this, two callers here each ran their own
  *  anchored-but-first-wins match, disagreeing with run-task.ts's last-wins `reviewTaskIdFromBody` on any body carrying
  *  two anchored trailers. review.ts is the leaf and run-task.ts imports FROM it, so this lives here. */
-export function extractTaskTrailerId(body: string): string | undefined {
-  const matches = [...(body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)];
-  return matches.length ? matches[matches.length - 1][1] : undefined;
-}
+export { extractTaskTrailerId } from "./untasked-review.js";
 
 /** The four defects {@link acceptanceAuthorTimeCheck} names — design item (iii), W1-T952: "the diagnostic must say
  *  WHICH of the four it is", never a generic refusal. */
@@ -13259,11 +13256,9 @@ export interface PostReviewStatusGuardedOpts {
    * (the task id, or the `dep-review-PR<n>`/`PR-<n>` synthetic ids `run-task.ts` falls back to). */
   taskId: string;
   /** W1-T14902: the named task's `dispatch_hold`, read at the plan's main. `held` or `unread` turns a success into
-   *  pending. Omitted, {@link readTaskDispatchHold} reads it for every caller, left out only under the test runner. */
+   *  pending. Omitted, {@link readPullRequestNamedTaskHold} reads it for every caller from a fresh read of the live PR
+   *  (never this ledger key, never a body the caller fetched earlier), left out only under the test runner. */
   taskHold?: TaskHoldReading;
-  /** W1-T14902: the task the live PR names and its head branch, for the hold read. A lane whose ledger key is not the
-   *  task (dep-review's `dep-review-PR<n>`) passes the body's trailer here. Omitted: {@link taskId} with no branch. */
-  taskHoldSubject?: { taskId: string | undefined; headRefName: string };
   evidence: ReviewEvidenceStrength;
   ledgerPath: string;
   runId: string;
@@ -13585,39 +13580,13 @@ function recordedCappedOverride(opts: PostReviewStatusGuardedOpts): CappedOverri
 /** W1-T14241 (invariant capped-is-not-green): a capped code success no override certified posts pending — never
  *  success, and never failure (CAPPED IS NOT FAIL) — under the same CAPPED description, so nothing can merge or arm on
  *  it until proof executes or an operator records an override for this head. */
-/** W1-T14902: the hold a success is judged against: the caller's reading, else the one reader's (W1-T5939's
- *  test-runner precedent keeps a suite of partial fakes off the live plan and ops catalog). */
+/** W1-T14902: the hold a success is judged against: the caller's reading, else the one PR task resolver's — the task
+ *  the live PR names, read fresh inside the lock, so a trailer edited after the caller fetched its body (a fix round's
+ *  pre-edit task) is the one judged (W1-T5939's test-runner precedent keeps partial fakes off the live plan and catalog). */
 async function guardedTaskHold(opts: PostReviewStatusGuardedOpts): Promise<TaskHoldReading | undefined> {
   if (opts.taskHold !== undefined) return opts.taskHold;
   if (isTestRunner()) return undefined;
-  const { taskId, sources } = taskHoldReadOf(opts);
-  return readTaskDispatchHold(taskId, sources);
-}
-
-/** W1-T14902: what {@link guardedTaskHold} hands the one hold reader — the live PR's task and head branch when the
- *  caller names them, else the ledger key. */
-export function taskHoldReadOf(opts: Pick<PostReviewStatusGuardedOpts, "taskId" | "taskHoldSubject" | "ledgerPath" | "owner" | "repo" | "prUrl">,
-  readPullRow: (args: string[]) => Promise<unknown> = ghJsonAsync): {
-  taskId: string | undefined; sources: TaskDispatchHoldSources;
-} {
-  const subject = opts.taskHoldSubject;
-  return { taskId: subject === undefined ? opts.taskId : subject.taskId, sources: { stateDir: dirname(opts.ledgerPath),
-    repository: { owner: opts.owner, repo: opts.repo },
-    headRefName: subject !== undefined ? subject.headRefName : () => pullRequestHeadRef(opts.prUrl, readPullRow) } };
-}
-
-/** W1-T14902: the hold subject of a lane whose ledger key is not a task (dep-review's `dep-review-PR<n>`): the task the
- *  live body's trailer names, and the PR's head branch. */
-export function taskHoldSubjectFromPr(pr: { body?: string | null; headRefName?: string }): { taskId: string | undefined; headRefName: string } {
-  return { taskId: extractTaskTrailerId(pr.body ?? ""), headRefName: pr.headRefName ?? "" };
-}
-
-/** W1-T14902: the live head branch of the PR a post names, read only for an id of a generated lane's shape. */
-export async function pullRequestHeadRef(prUrl: string | undefined, read: (args: string[]) => Promise<unknown>): Promise<string | undefined> {
-  const target = prLifecycleUrlTarget(prUrl ?? "");
-  if (target === undefined) throw new Error(`no pull request in ${JSON.stringify(prUrl)}`);
-  const ref = (await read(singlePrRestArgs(target.owner, target.repo, target.number)) as { head?: { ref?: unknown } })?.head?.ref;
-  return typeof ref === "string" ? ref : undefined;
+  return readPullRequestNamedTaskHold(opts.prUrl, { stateDir: dirname(opts.ledgerPath) });
 }
 
 async function publishTaskHold(opts: PostReviewStatusGuardedOpts, verdict: ReviewVerdict,

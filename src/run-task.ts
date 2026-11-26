@@ -1784,7 +1784,6 @@ import {
   postReviewCommentGuarded,
   postReviewPending,
   postReviewStatusGuarded,
-  taskHoldSubjectFromPr,
   readReviewStatusEntry,
   reviewStatusEntryFromCombined,
   refreshReviewPublisherToken as refreshInstallationToken,
@@ -13304,10 +13303,9 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       prUrl: view.url,
       reviewInputDigest: inputDigest,
       reviewEngineRevision: DEP_REVIEW_ENGINE_REVISION,
+      // W1-T14902: `taskId` is this lane's ledger key, never a task. The guarded poster reads the hold for the task the
+      // live PR names (one fresh read of `prUrl`), so a held task's trailer added to a Dependabot PR posts pending.
       fetchLifecycle: () => fetchPrLifecycle(view.url, deps.gh ?? ghJson, DEP_REVIEW_ENGINE_REVISION),
-      // W1-T14902: `taskId` is this lane's ledger key, never a task. The hold is read for the task the live body names,
-      // so a held task's trailer added to a Dependabot PR posts pending, not this lane's success.
-      taskHoldSubject: taskHoldSubjectFromPr(view),
     });
     if (!posted.posted) {
       console.log(`no remudero-review posted (refused: ${posted.reason}): ${view.url}`);

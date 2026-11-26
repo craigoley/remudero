@@ -58,3 +58,12 @@ export function usesUntaskedReviewMetadata(taskId: string | undefined, headRefNa
   return taskIdFromRunBranch(headRefName) === taskId &&
     /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+|main-repair-(?:(?:ratchet|revert)-)?[0-9a-f]{12})$/.test(taskId);
 }
+
+/** THE SINGLE ANSWER to "which id does this body name" — anchored, LAST-WINS (W1-T2624). Last-wins is W1-T70's
+ *  ratified reading of the worker prompt's own contract, and what `ensureTaskTrailer` (run-task.ts) produces by
+ *  construction, appending its stamp at the END of the body. W1-T14902 moved it to this leaf so the one PR task
+ *  resolver (task-dispatch-hold.ts) reads it without an import cycle; review.ts re-exports it. */
+export function extractTaskTrailerId(body: string): string | undefined {
+  const matches = [...(body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)];
+  return matches.length ? matches[matches.length - 1][1] : undefined;
+}

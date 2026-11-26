@@ -135,3 +135,39 @@ test("the synchronous real arm fails closed: its reader reads unread, and a real
     if (context !== undefined) process.env.NODE_TEST_CONTEXT = context;
   }
 });
+
+test("census: every task-hold lookup goes through the one PR task resolver, fed by a fresh read of the live PR", () => {
+  // Round 8 (C1, C2): a lane that hands the hold reader an id of its own, or a body read earlier or from a cache, judges
+  // a task the PR may no longer name. The one hold reader is reached only through readPullRequestNamedTaskHold.
+  const files = trackedSourceFiles();
+  const HOLD_MODULE = "src/lib/task-dispatch-hold.ts";
+  const callsOf = (name: string) => files.flatMap((file) => {
+    const text = source(file);
+    const spans = functionSpans(text);
+    return [...text.matchAll(new RegExp(`\\b${name}\\(`, "g"))]
+      .map((match) => ({ file, fn: enclosing(spans, match.index!), at: match.index!, text }))
+      .filter((call) => call.fn !== name);
+  });
+  const readerCalls = callsOf("readTaskDispatchHold");
+  assert.ok(readerCalls.length >= 1, "positive control: the census sees the hold reader's callers");
+  assert.deepEqual(readerCalls.map((call) => `${call.file}:${call.fn}`), [`${HOLD_MODULE}:readPullRequestNamedTaskHold`],
+    "THE CLAIM: only the resolver-fed lookup calls the hold reader");
+  const lookups = callsOf("readPullRequestNamedTaskHold").map((call) => `${call.file}:${call.fn}`).sort();
+  assert.deepEqual(lookups, ["src/lib/arm-auto-merge.ts:readPullRequestTaskHold", "src/lib/review.ts:guardedTaskHold"],
+    "the arm and the review publisher (and the fix lane, which posts through it) are its only callers");
+  const review = source(REVIEW_MODULE);
+  assert.match(review, /readPullRequestNamedTaskHold\(opts\.prUrl, \{ stateDir: dirname\(opts\.ledgerPath\) \}\)/,
+    "the publisher names the PR, never a task id: the resolver reads which task it names");
+  const hold = source(HOLD_MODULE);
+  assert.match(hold, /freshPullRowRead: PullRowRead = \(path\) => ghJsonAsync\(\["api", path\], undefined, undefined, \{ fresh: true \}\)/,
+    "the act-time read revalidates through the broker");
+  for (const fn of ["resolvePullRequestTaskSubject", "readPullRequestNamedTaskHold"]) {
+    assert.match(hold, new RegExp(`function ${fn}\\([^)]*read: PullRowRead = freshPullRowRead`), `${fn} defaults to the fresh read`);
+  }
+  assert.match(source(ARM_MODULE), /readBody: PullRowRead = freshPullRowRead/, "the arm's reader defaults to the fresh read");
+  // The unread-hold publisher classifies the live PR through the same resolver.
+  const unread = callsOf("resolvePullRequestTaskSubject").map((call) => `${call.file}:${call.fn}`).sort();
+  assert.ok(unread.includes(`${HOLD_MODULE}:readPullRequestNamedTaskHold`));
+  assert.match(source("src/cli/commands/review.ts"), /args\.resolveSubject \?\? resolvePullRequestTaskSubject\)\(args\.prUrl\)/,
+    "the unread-hold publisher resolves the live PR's task before it posts");
+});

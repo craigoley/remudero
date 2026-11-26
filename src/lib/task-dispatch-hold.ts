@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import { defaultGitRunnerAsync, loadPlanAtRefAsync, type KeepsUnseenDependency } from "./plan.js";
 import { readOpsCatalogSnapshotAsync } from "./ops-catalog-source.js";
 import { planDestinationRepository } from "./plan-destination.js";
-import { usesUntaskedReviewMetadata } from "./untasked-review.js";
+import { ghJsonAsync } from "./github-transport.js";
+import { extractTaskTrailerId, taskIdFromRunBranch, usesUntaskedReviewMetadata } from "./untasked-review.js";
 
 /**
  * W1-T14902: the one reader of a named task's `dispatch_hold`, for the review's guarded poster and the merge path alike.
@@ -188,6 +189,60 @@ export async function readTaskDispatchHold(taskId: string | undefined, sources: 
   if (found.outcome === "absent") return { outcome: "unread", taskId, reason: "no plan at origin/main and no ops catalog holds it" };
   if (found.lastGood !== undefined) return { outcome: "unread", taskId, reason: `served from the last good ops snapshot (${found.lastGood.refusal})` };
   return found.task.dispatch_hold === true ? { outcome: "held", taskId } : { outcome: "clear" };
+}
+
+/** W1-T14902: THE answer to "which task does this pull request name" — the trailer on the live body (last wins), else
+ *  the task its `run-<id>-<epoch>` head names, with the review lane's untasked classification applied to that id and
+ *  that head. Every hold lookup (the review publisher, the fix lane through it, the arm) goes through
+ *  {@link readPullRequestNamedTaskHold}, which builds this from one fresh read; nothing hands a hold an id of its own. */
+export interface PullRequestTaskSubject {
+  readonly taskId: string | undefined;
+  readonly headRefName: string;
+  /** The PR names no filed task (no id, `PR-<n>`, `unfiled`, or a generated lane's id on its own run branch). */
+  readonly untasked: boolean;
+}
+
+/** {@link PullRequestTaskSubject} of a pull row already in hand — `{ body, head: { ref } }`, REST's shape. */
+export function pullRequestTaskSubjectOf(pull: unknown): PullRequestTaskSubject {
+  const row = pull as { body?: unknown; head?: { ref?: unknown } } | null | undefined;
+  const headRefName = typeof row?.head?.ref === "string" ? row.head.ref : "";
+  const taskId = extractTaskTrailerId(typeof row?.body === "string" ? row.body : "") ?? taskIdFromRunBranch(headRefName);
+  return { taskId, headRefName, untasked: taskId === undefined || taskId.trim() === "" || usesUntaskedReviewMetadata(taskId, headRefName) };
+}
+
+/** Reads one pull row by its REST path. */
+export type PullRowRead = (path: string) => Promise<unknown>;
+
+/** The act-time pull row: revalidated through the GitHub read broker (`fresh`), never a cached pre-edit body. */
+export const freshPullRowRead: PullRowRead = (path) => ghJsonAsync(["api", path], undefined, undefined, { fresh: true });
+
+/** The pull request `prUrl` names, or `undefined`. */
+export function pullRequestOfUrl(prUrl: string | undefined): { owner: string; repo: string; number: number } | undefined {
+  const m = /^https:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/([1-9]\d*)(?:[/?#]|$)/.exec(prUrl ?? "");
+  return m ? { owner: m[1]!, repo: m[2]!, number: Number(m[3]) } : undefined;
+}
+
+/** W1-T14902: {@link PullRequestTaskSubject} from ONE fresh read of the live pull row. Throws when it cannot be read. */
+export async function resolvePullRequestTaskSubject(prUrl: string | undefined, read: PullRowRead = freshPullRowRead): Promise<PullRequestTaskSubject> {
+  const target = pullRequestOfUrl(prUrl);
+  if (target === undefined) throw new Error(`no pull request in ${JSON.stringify(prUrl)}`);
+  return pullRequestTaskSubjectOf(await read(`repos/${target.owner}/${target.repo}/pulls/${target.number}`));
+}
+
+/** W1-T14902: THE hold lookup for a pull request: the task the live PR names, read fresh at act time, through the one
+ *  hold reader. An unreadable pull row reads unread (an unread hold holds); an untasked PR reads clear. */
+export async function readPullRequestNamedTaskHold(prUrl: string | undefined, sources: Omit<TaskDispatchHoldSources, "headRefName" | "repository">,
+  read: PullRowRead = freshPullRowRead): Promise<TaskHoldReading> {
+  let subject: PullRequestTaskSubject;
+  try {
+    subject = await resolvePullRequestTaskSubject(prUrl, read);
+  } catch (error) {
+    return { outcome: "unread", taskId: "the named task", reason: `the pull request is unreadable: ${String((error as Error)?.message ?? error)}` };
+  }
+  if (subject.untasked) return { outcome: "clear" };
+  const target = pullRequestOfUrl(prUrl)!;
+  return readTaskDispatchHold(subject.taskId, { ...sources, repository: { owner: target.owner, repo: target.repo },
+    headRefName: subject.headRefName });
 }
 
 /** The ops catalog's fresh answer for `taskId`: no destination is absent (no ops catalog to hold it), and a refused

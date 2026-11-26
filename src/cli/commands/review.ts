@@ -70,6 +70,7 @@ import { flagValue } from "../../lib/cli-args.js";
 import { resolveReviewTarget, reviewTaskIdFromBody, reviewPrNumber, reviewViewArgs } from "../../lib/report-commands.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "../../lib/staged-install.js";
 import { UNTASKED_REVIEW_BUDGET_USD, isPlanOnlyFilingPr, resolveReviewTaskId, reviewStateFromRollup, reviewStatusHistoryFromRest, usesUntaskedReviewMetadata } from "../../lib/tick-read-worker.js";
+import { resolvePullRequestTaskSubject, type PullRequestTaskSubject } from "../../lib/task-dispatch-hold.js";
 
 export interface ReviewCommandHost {
   readonly GIT_UNTRACKED_FILES_ALL: string;
@@ -3202,7 +3203,9 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   // verdict for a named task whose record could not be read replaces a success already on this head with pending
   // naming the unread hold, projected as an ops task's status is. A shadow posts nothing.
   const publishUnreadHoldFor = async (source: string, reason: string): Promise<void> => {
-    if (shadow || !taskId || taskId === UNFILED_RUN_SENTINEL) return;
+    // The review lane's own untasked classification of this id on this head (a main-repair or other generated lane's
+    // synthetic trailer on its own run branch names no task); the publisher re-checks the live PR through the resolver.
+    if (shadow || !taskId || usesUntaskedReviewMetadata(taskId, view.headRefName)) return;
     await (deps.publishUnreadHold ?? (isTestRunner() ? async () => {} : publishUnreadTaskCatalogHold))({
       post: catalogReviewPoster("ops", postReviewStatus), owner, repo, sha: view.headRefOid, taskId, reviewKey, source, reason,
       ledgerPath, runId, prUrl: view.url, reviewInputDigest: inputDigest, fetchLifecycle: () => fetchPrLifecycleAsync(view.url), log });
@@ -3778,8 +3781,24 @@ export async function publishUnreadTaskCatalogHold(args: {
   ledgerPath: string; runId: string; prUrl: string; reviewInputDigest: string;
   fetchLifecycle: Parameters<typeof postReviewStatusGuarded>[0]["fetchLifecycle"];
   log: (step: string, extra?: Record<string, unknown>) => void;
+  /** The one PR task resolver. Default: {@link resolvePullRequestTaskSubject}, one fresh read of the live PR. */
+  resolveSubject?: (prUrl: string) => Promise<PullRequestTaskSubject>;
 }): Promise<void> {
-  const refusal = taskHoldRefusal({ outcome: "unread", taskId: args.taskId, reason: `${args.source ?? "task catalog"} ${args.reason}` })!;
+  // W1-T14902: the hold belongs to the task the LIVE PR names, classified on its live head. An untasked PR (a generated
+  // lane's synthetic trailer on its own run branch) has no hold to be unread, so a success standing on it stays.
+  // An unreadable PR is no exemption: the hold stays unread and pending is posted.
+  let taskId = args.taskId;
+  try {
+    const subject = await (args.resolveSubject ?? resolvePullRequestTaskSubject)(args.prUrl);
+    if (subject.untasked) {
+      args.log("review.dispatch_hold_untasked", { task_id: subject.taskId ?? null, head_ref: subject.headRefName });
+      return;
+    }
+    taskId = subject.taskId ?? taskId;
+  } catch (e) {
+    args.log("review.dispatch_hold_subject_unreadable", { error: String((e as Error)?.message ?? e) });
+  }
+  const refusal = taskHoldRefusal({ outcome: "unread", taskId, reason: `${args.source ?? "task catalog"} ${args.reason}` })!;
   try {
     await (args.publish ?? postUnreadTaskHoldGuarded)({ post: args.post, owner: args.owner, repo: args.repo, sha: args.sha,
       refusal, taskId: args.reviewKey, ledgerPath: args.ledgerPath, runId: args.runId, prUrl: args.prUrl,

@@ -55,7 +55,7 @@ import {
   type PlanMergeSafetyReadings,
 } from "./plan-pr-merge-safety.js";
 import { readLedgerLines } from "./status.js";
-import { readTaskDispatchHold, type TaskDispatchHoldSources } from "./task-dispatch-hold.js";
+import { freshPullRowRead, readPullRequestNamedTaskHold, type PullRowRead, type TaskDispatchHoldSources } from "./task-dispatch-hold.js";
 import { describeRatchetRows, judgeMergedRatchets, ratchetJudgeLedgerFields, ratchetUpdateRefusal, ratchetVerdictHolds, mainChangedPathsSteps, readMergedRatchetInputsSteps, type MergedRatchetInputs, type MergedRatchetJudgement, type RatchetUpdateWithheldEvidence } from "./merged-ratchet-verdict.js";
 import { judgeMergedRatchetsInWorker } from "./merged-ratchet-worker.js";
 import {
@@ -89,7 +89,6 @@ import {
 } from "./live-write-guard.js";
 import {
   automergeHoldFromLedger,
-  extractTaskTrailerId,
   taskHoldRefusal,
   type TaskHoldReading,
   cappedOverrideFromLedger,
@@ -1704,20 +1703,15 @@ function* taskHoldRefusalSteps(
   return { outcome: "hold-refused", error: refusal };
 }
 
-/** W1-T14902: the production reading — the PR body's trailer, then that task through the one hold reader. */
+/** W1-T14902: the production reading — the task the live PR names, from one broker-revalidated read at act time (a
+ *  cached pre-edit body would miss a trailer just edited to a held task), through the one PR task resolver. */
 export async function readPullRequestTaskHold(
   prUrl: string,
   loadConfigImpl: typeof loadConfig = loadConfig,
-  readBody: (path: string) => Promise<unknown> = (path) => ghJsonAsync(["api", path]),
-  sources: Omit<TaskDispatchHoldSources, "stateDir"> = {},
+  readBody: PullRowRead = freshPullRowRead,
+  sources: Omit<TaskDispatchHoldSources, "stateDir" | "headRefName" | "repository"> = {},
 ): Promise<TaskHoldReading> {
-  const target = mergeTargetFromPrUrl(prUrl);
-  if (!target) return { outcome: "unread", taskId: "the named task", reason: `no pull request in ${prUrl}` };
-  const pull = await readBody(`repos/${target.owner}/${target.repo}/pulls/${target.prNumber}`) as { body?: unknown; head?: { ref?: unknown } };
-  const taskId = extractTaskTrailerId(typeof pull?.body === "string" ? pull.body : "");
-  const headRefName = typeof pull?.head?.ref === "string" ? pull.head.ref : undefined;
-  return readTaskDispatchHold(taskId, { repository: { owner: target.owner, repo: target.repo },
-    ...(headRefName === undefined ? {} : { headRefName }), ...sources, stateDir: join(loadConfigImpl().root, "state") });
+  return readPullRequestNamedTaskHold(prUrl, { ...sources, stateDir: join(loadConfigImpl().root, "state") }, readBody);
 }
 
 export function attemptArm(

@@ -14,8 +14,8 @@ import { armIfVerdictPermitsAsync, attemptArmAsync, readPullRequestTaskHold, rea
 import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
-import { postReviewStatusGuarded, postUnreadTaskHoldGuarded, pullRequestHeadRef, taskHoldReadOf, taskHoldSubjectFromPr, taskHoldReading, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
-import { planCheckoutRoot, readOpsCatalogHold, targetPlanRoot, readTaskDispatchHold, type TaskDispatchHoldSources } from "#src/lib/task-dispatch-hold.js";
+import { postReviewStatusGuarded, postUnreadTaskHoldGuarded, taskHoldReading, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
+import { planCheckoutRoot, pullRequestTaskSubjectOf, readOpsCatalogHold, readPullRequestNamedTaskHold, resolvePullRequestTaskSubject, targetPlanRoot, readTaskDispatchHold, type TaskDispatchHoldSources } from "#src/lib/task-dispatch-hold.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -230,29 +230,47 @@ test("W1-T14902: every guarded post reads the hold itself when its caller suppli
   const previous = process.env.NODE_TEST_CONTEXT;
   t.after(() => { if (previous === undefined) delete process.env.NODE_TEST_CONTEXT; else process.env.NODE_TEST_CONTEXT = previous; });
   const ledgerPath = join(tmp(t, "guarded-default"), "ledger.ndjson");
+  // The post reads the task the live PR names through gh (one fresh read of the pull row), never its ledger key.
+  const pullFile = join(dirname(ledgerPath), "pull.json");
+  const names = (taskId: string) => writeFileSync(pullFile, JSON.stringify({ number: 911, body: `Remudero-Task: ${taskId}\n`, head: { ref: "feature/x" } }));
+  const shim = ghShim([
+    { when: "api repos/acme/remudero/pulls/911", stdoutFile: pullFile },
+    { when: "", exit: 97, stderr: "unexpected GitHub call" },
+  ]);
+  const env = new Map(["PATH", "HOME", "RMD_GH_CACHE_HOME", "RMD_SELF_SYNC_DONE"].map((k) => [k, process.env[k]]));
+  t.after(() => {
+    for (const [k, v] of env) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    rmSync(shim.dir, { recursive: true, force: true });
+  });
+  Object.assign(process.env, { PATH: `${shim.dir}:${env.get("PATH")}`, HOME: dirname(ledgerPath), RMD_GH_CACHE_HOME: dirname(ledgerPath), RMD_SELF_SYNC_DONE: "1" });
+  const prUrl = "https://github.com/acme/remudero/pull/911";
   const posts: string[] = [];
-  const post = (taskId: string) => postReviewStatusGuarded({
+  const post = (key: string) => postReviewStatusGuarded({
     owner: "acme", repo: "remudero", sha: SHA, state: "success", verdict: PASS, description: PASS.summary,
-    taskId, evidence: "executed", ledgerPath, runId: "t14902-default", prUrl: PR_URL, reviewInputDigest: `v2:${taskId}`,
+    taskId: key, evidence: "executed", ledgerPath, runId: "t14902-default", prUrl, reviewInputDigest: `v2:${key}`,
     fetchLifecycle: () => ({ merged: false, closed: false }),
     readReviewStatusHistory: async () => ({ kind: "readable", failures: [] }),
     fetchCurrentStatusEntry: () => undefined,
-    post: (status) => { posts.push(`${taskId}:${status.state}`); },
+    post: (status) => { posts.push(`${key}:${status.state}`); },
     semanticJudgement: { planOnly: false, reviewerOutcome: "success" },
   });
   delete process.env.NODE_TEST_CONTEXT;
-  const held = await post("W1-T8397");
+  names("W1-T8397");
+  // The caller's key is a task this plan reads clear: the hold is the live PR's, not the key's (round-8 C1).
+  const held = await post("W1-T10732");
   assert.equal(held.taskHold, "held: W1-T8397 carries dispatch_hold", "THE WIRING: a caller that passes no reading is still held");
-  // THE TARGET WIRING: the post's own owner/repo picks the plan. A daemon whose target acme/remudero has no readable
+  // THE TARGET WIRING: the PR's own repository picks the plan. A daemon whose target acme/remudero has no readable
   // checkout holds even a task this checkout's plan reads clear, so the reading came from the PR's repository.
   writeFileSync(join(dirname(ledgerPath), "daemon-target.json"),
     JSON.stringify({ owner: "acme", repo: "remudero", isSelf: false, checkoutRoot: join(dirname(ledgerPath), "no-checkout") }));
+  names("W1-T10732");
   const target = await post("W1-T10732");
   assert.match(target.taskHold ?? "", /^held: W1-T10732's dispatch_hold is unreadable/);
   rmSync(join(dirname(ledgerPath), "daemon-target.json"));
   process.env.NODE_TEST_CONTEXT = previous ?? "child-v8";
   await post("W1-T10732");
-  assert.deepEqual(posts, ["W1-T8397:pending", "W1-T10732:pending", "W1-T10732:success"]);
+  assert.deepEqual(posts, ["W1-T10732:pending", "W1-T10732:pending", "W1-T10732:success"]);
+  assert.equal(shim.calls().filter((c) => c.includes("pulls/911")).length, 2, "positive control: each held post read the live PR");
 });
 
 test("W1-T14902: the production reader's defaults read the body through gh and the real catalog lookup", async (t) => {
@@ -454,7 +472,7 @@ test("W1-T14902: a review whose task catalog is unreadable replaces this head's 
     post: (status: { state: string; description?: string }) => { posts.push(status); },
     owner: "acme", repo: "remudero-ops", sha: SHA, taskId: TASK, reviewKey: TASK, reason: "ops-ref_moved", ledgerPath,
     runId: "t14902-catalog", prUrl: PR_URL, reviewInputDigest: "v2:catalog", fetchLifecycle: () => ({ merged: false, closed: false }),
-    log: () => {},
+    log: () => {}, resolveSubject: async () => ({ taskId: TASK, headRefName: `run-${TASK}-1`, untasked: false }),
   };
   appendLedger(ledgerPath, { run_id: "earlier", task_id: TASK, step: "review.posted", state: "success", head_sha: SHA,
     pr_url: PR_URL, review_input_digest: "v2:catalog", proof_exec: ["executed_pass"] });
@@ -476,6 +494,24 @@ test("W1-T14902: a review whose task catalog is unreadable replaces this head's 
   await publishUnreadTaskCatalogHold({ ...args, log: (step: string) => { failing.push(step); },
     publish: async () => { throw new Error("HTTP 502"); } } as never);
   assert.deepEqual(failing, ["review.pending_post.error"]);
+  // Round-8 C3: the live PR is classified through the one resolver. A generated lane's synthetic trailer on its own
+  // run branch (main-repair) names no task, so the success standing on it stays.
+  const repairId = "main-repair-0123456789ab";
+  const untaskedSteps: string[] = [];
+  await publishUnreadTaskCatalogHold({ ...args, taskId: repairId, reviewKey: repairId, log: (step: string) => { untaskedSteps.push(step); },
+    resolveSubject: async () => ({ taskId: repairId, headRefName: `run-${repairId}-1795650818109`, untasked: true }) } as never);
+  assert.equal(posts.length, 1, "THE CLAIM: an untasked PR's status is left as it stands");
+  assert.deepEqual(untaskedSteps, ["review.dispatch_hold_untasked"]);
+  // An unreadable live PR is no exemption: the hold stays unread, and pending is still published.
+  const unreadable = join(tmp(t, "catalog-subject-unreadable"), "ledger.ndjson");
+  const unreadableSteps: string[] = [];
+  const published: string[] = [];
+  await publishUnreadTaskCatalogHold({ ...args, ledgerPath: unreadable, log: (step: string) => { unreadableSteps.push(step); },
+    resolveSubject: async () => { throw new Error("HTTP 502"); },
+    publish: async (o: { refusal: string }) => { published.push(o.refusal); } } as never);
+  assert.deepEqual(unreadableSteps, ["review.dispatch_hold_subject_unreadable"]);
+  assert.equal(published.length, 1, "an unreadable PR still publishes the unread hold");
+  assert.match(published[0]!, /W1-T14898's dispatch_hold is unreadable/);
 });
 
 test("W1-T14902: the unread-hold publisher posts only pending, whatever state or verdict a caller smuggles in", async (t) => {
@@ -515,19 +551,40 @@ test("W1-T14902: a generated lane's correlation id on its own run branch names n
   assert.equal(asked, 0);
 });
 
-test("W1-T14902: the guarded poster reads the hold for the live PR's task, not a lane's ledger key", async () => {
-  const base = { taskId: "dep-review-PR910", ledgerPath: "/state/ledger.ndjson", owner: "acme", repo: "remudero", prUrl: PR_URL };
-  const subject = taskHoldReadOf({ ...base, taskHoldSubject: { taskId: TASK, headRefName: "dependabot/npm/x" } });
-  assert.equal(subject.taskId, TASK, "THE CLAIM: dep-review's hold is the body trailer's task");
-  assert.equal(subject.sources.headRefName, "dependabot/npm/x");
-  assert.equal(subject.sources.stateDir, "/state");
-  const reads: string[][] = [];
-  const keyed = taskHoldReadOf({ ...base, taskId: TASK }, async (args) => { reads.push(args); return { head: { ref: "run-x-1" } }; });
-  assert.equal(keyed.taskId, TASK);
-  assert.equal(typeof keyed.sources.headRefName, "function");
-  assert.equal(await (keyed.sources.headRefName as () => Promise<string | undefined>)(), "run-x-1");
-  assert.match(reads[0]!.join(" "), /repos\/acme\/remudero-ops\/pulls\/910/);
-  await assert.rejects(pullRequestHeadRef("not a pr url", async () => ({})), /no pull request/);
+test("W1-T14902: the one PR task resolver names the live PR's task: its trailer, else its run branch, classified on its head", async () => {
+  const reads: string[] = [];
+  const pull = (body: string | undefined, ref: string | undefined) => async (path: string) => { reads.push(path); return { body, head: { ref } }; };
+  assert.deepEqual(await resolvePullRequestTaskSubject(PR_URL, pull(`Updates left-pad\n\nRemudero-Task: ${TASK}\n`, "dependabot/npm/x")),
+    { taskId: TASK, headRefName: "dependabot/npm/x", untasked: false }, "THE CLAIM: the trailer on the live body names the task");
+  assert.deepEqual(reads, ["repos/acme/remudero-ops/pulls/910"], "one read of the pull row the URL names");
+  assert.equal((await resolvePullRequestTaskSubject(PR_URL, pull(`Remudero-Task: W1-T1\nRemudero-Task: ${TASK}\n`, "x"))).taskId, TASK,
+    "the last trailer wins, as everywhere else");
+  assert.deepEqual(await resolvePullRequestTaskSubject(PR_URL, pull("lost its trailer", `run-${TASK}-1795650818109`)),
+    { taskId: TASK, headRefName: `run-${TASK}-1795650818109`, untasked: false }, "a run branch names its task when the trailer is gone");
+  assert.equal((await resolvePullRequestTaskSubject(PR_URL, pull("Updates left-pad", "dependabot/npm/x"))).untasked, true,
+    "a PR naming no task reviews and arms as today");
+  const repairId = "main-repair-0123456789ab";
+  assert.equal((await resolvePullRequestTaskSubject(PR_URL, pull(`Remudero-Task: ${repairId}\n`, `run-${repairId}-1795650818109`))).untasked, true,
+    "a generated lane's synthetic trailer on its own run branch names no task");
+  assert.equal((await resolvePullRequestTaskSubject(PR_URL, pull(`Remudero-Task: ${repairId}\n`, "feature/x"))).untasked, false,
+    "the same id on another branch is read as a task");
+  assert.deepEqual(pullRequestTaskSubjectOf(null), { taskId: undefined, headRefName: "", untasked: true });
+  await assert.rejects(resolvePullRequestTaskSubject("not a pr url", pull("", "")), /no pull request/);
+});
+
+test("W1-T14902: the hold lookup judges the task the live PR names NOW, never a body or task a caller fetched earlier", async () => {
+  // Round-8 C1 and C2: a trailer edited to a held task after a fix round (or a broker cache) read the old body.
+  let body = "Remudero-Task: W1-T10732\n";
+  const read = async () => ({ body, head: { ref: "feature/x" } });
+  const sources = { stateDir: "/nonexistent/state", lookup: async () => ({ outcome: "absent" }) as never,
+    readMainPlan: async () => ({ byId: new Map([["W1-T10732", {}], [TASK, { dispatch_hold: true }]]) }) };
+  assert.deepEqual(await readPullRequestNamedTaskHold(PR_URL, sources, read), { outcome: "clear" });
+  body = `Remudero-Task: ${TASK}\n`;
+  assert.deepEqual(await readPullRequestNamedTaskHold(PR_URL, sources, read), { outcome: "held", taskId: TASK },
+    "THE CLAIM: the edited trailer's held task is the one judged");
+  const unreadable = await readPullRequestNamedTaskHold(PR_URL, sources, async () => { throw new Error("HTTP 502"); });
+  assert.equal(unreadable.outcome, "unread", "an unreadable pull row holds");
+  assert.equal((await readPullRequestNamedTaskHold(undefined, sources, read)).outcome, "unread", "a post naming no PR holds");
 });
 
 test("W1-T14902: a daemon whose cwd is no work tree (launchd's config.root) still reads the plan, from its install", async (t) => {
@@ -578,11 +635,10 @@ test("W1-T14902: the review command's catalog-unreadable exit hands the unread h
 
 test("W1-T14902: dep-review's hold subject is the body trailer's task, never its own ledger key", () => {
   const head = "dependabot/npm_and_yarn/left-pad-1.3.1";
-  assert.deepEqual(taskHoldSubjectFromPr({ body: `Updates left-pad\n\nRemudero-Task: ${TASK}\n`, headRefName: head }),
-    { taskId: TASK, headRefName: head }, "THE CLAIM: the hold is read for the task the live body names");
-  assert.deepEqual(taskHoldSubjectFromPr({ body: "Updates left-pad", headRefName: head }), { taskId: undefined, headRefName: head },
+  assert.deepEqual(pullRequestTaskSubjectOf({ body: `Updates left-pad\n\nRemudero-Task: ${TASK}\n`, head: { ref: head } }),
+    { taskId: TASK, headRefName: head, untasked: false }, "THE CLAIM: the hold is read for the task the live body names");
+  assert.deepEqual(pullRequestTaskSubjectOf({ body: "Updates left-pad", head: { ref: head } }), { taskId: undefined, headRefName: head, untasked: true },
     "a Dependabot PR naming no task reviews and arms as today");
-  assert.deepEqual(taskHoldSubjectFromPr({ body: null }), { taskId: undefined, headRefName: "" });
 });
 
 test("W1-T14902: the run's at-open arm hands its refusal reason to the caller, so its row names dispatch_hold", async () => {
