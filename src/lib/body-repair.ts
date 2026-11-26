@@ -397,7 +397,8 @@ function onlyTheProofChanged(before: readonly ReadCriterion[], after: readonly R
 /** Replace criterion `index`'s proof value inside its span only, quoted and escaped when the value was written quoted;
  *  `undefined` unless the body then re-reads with only that proof changed (see {@link onlyTheProofChanged}). A bare
  *  bullet whose one text is both its claim and its proof (`- grep: "x" in f`) cannot change one without the other, so it
- *  is expanded into a `claim:` bullet carrying that text byte for byte and a `proof:` line carrying the new proof. */
+ *  is expanded into a `claim:` bullet carrying that text byte for byte and a `proof:` line carrying the new proof; so is a
+ *  bare bullet whose claim is its proof wrapped in a code span. */
 function rewriteSpan(body: string, index: number, span: ProofSpan, newProof: string, spans: ProofSpans): string | undefined {
   const lines = body.split("\n");
   const line = lines[span.line];
@@ -412,7 +413,9 @@ function rewriteSpan(body: string, index: number, span: ProofSpan, newProof: str
   if (inPlace !== undefined) return inPlace;
   const read = before[index];
   const bullet = line.match(/^(\s*)([-*]|\d+[.)])\s+/);
-  if (!bullet || read === undefined || read.claim !== read.proof) return undefined;
+  // A bare bullet: its whole text is the claim (a code-span-wrapped one too, `- \`grep: "x" in f\``), so the claim is
+  // kept byte for byte on its own `claim:` line and only the proof moves to a `proof:` line.
+  if (!bullet || read === undefined || line.slice(bullet[0].length).trimEnd() !== read.claim) return undefined;
   for (const proofText of [newProof, quotedValue(newProof)]) {
     const expanded = keeps([...lines.slice(0, span.line), `${bullet[1]}${bullet[2]} claim: ${read.claim}`,
       `${bullet[1]}  proof: ${proofText}`, ...lines.slice(span.line + 1)]);

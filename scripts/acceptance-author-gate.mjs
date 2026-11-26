@@ -53,6 +53,7 @@ import {
   explainUnitTestProofRefusal,
   filingSelfCreditCheck,
   parseAcceptanceBlock,
+  bodyProofAgainstRecord,
   parseWhitelistedProof,
   resolvePlanCriteriaAtHead,
   resolveTestPath,
@@ -524,8 +525,9 @@ export function trailerBodyProofDivergenceRefusal({ body, taskAcceptanceForId })
   if (bodyCriteria.length === 0) return undefined; // trailer-only shape — unaffected, task acceptance criterion 2
 
   const taskProofs = declared.map((c) => (c.proof ?? "").trim()).filter((p) => p.length > 0);
-  const bodyProofs = bodyCriteria.map((c) => (c.proof ?? "").trim()).filter((p) => p.length > 0);
   const taskSet = new Set(taskProofs);
+  // W1-T14913: a legacy-rendered quoted proof compares as written exactly where review reads it so (one shared helper).
+  const bodyProofs = bodyCriteria.map((c) => bodyProofAgainstRecord(c, taskSet)).filter((p) => p.length > 0);
   const bodySet = new Set(bodyProofs);
   const onlyInBody = [...new Set(bodyProofs.filter((p) => !taskSet.has(p)))];
   const onlyInTask = [...new Set(taskProofs.filter((p) => !bodySet.has(p)))];

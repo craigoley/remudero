@@ -9094,6 +9094,16 @@ function stripQuotes(s: string): string {
  *  only when the unescaped proof matches no record criterion and the raw one does. */
 const quotedProofAsWritten = new WeakMap<AcceptanceCriterion, string>();
 
+/** W1-T14913: a body criterion's trimmed proof as compared with its record's proofs. A legacy-rendered quoted proof (see
+ *  {@link quotedProofAsWritten}) reads as written only when its unescaped text is no record proof and its as-written
+ *  text is one: exactly the body main compared as written, and nothing more. Shared by review's guard backing and the
+ *  author-time trailer/body proof comparison, so the two can never disagree about one body. */
+export function bodyProofAgainstRecord(criterion: AcceptanceCriterion, recordProofs: ReadonlySet<string>): string {
+  const proof = criterion.proof.trim();
+  const raw = quotedProofAsWritten.get(criterion)?.trim();
+  return raw !== undefined && !recordProofs.has(proof) && recordProofs.has(raw) ? raw : proof;
+}
+
 /** The proof a `proof:` value reads as, remembering its as-written text when unescaping changed it. */
 function readQuotedProof(criterion: AcceptanceCriterion, value: string): string {
   const proof = stripQuotes(value);
@@ -9370,13 +9380,7 @@ export const BODY_GUARD_UNBACKED = "body-guard-unbacked";
 export function markUnbackedBodyGuards<T extends AcceptanceCriterion>(criteria: readonly T[], bodyCriteria: readonly AcceptanceCriterion[],
   fromBody: boolean): { criteria: T[]; unbacked: string[] } {
   const recordProofs = new Set(criteria.map((c) => c.proof.trim()));
-  // A legacy-rendered body proof (see quotedProofAsWritten) reads as written only when that, and not the unescaped
-  // text, is a record criterion's proof.
-  const bodyProof = (c: AcceptanceCriterion): string => {
-    const proof = c.proof.trim();
-    const raw = quotedProofAsWritten.get(c)?.trim();
-    return raw !== undefined && !recordProofs.has(proof) && recordProofs.has(raw) ? raw : proof;
-  };
+  const bodyProof = (c: AcceptanceCriterion): string => bodyProofAgainstRecord(c, recordProofs);
   const bodyGuardList = bodyCriteria.filter((c) => (c as { kind?: unknown }).kind === "guard");
   const bodyGuards = new Set(bodyGuardList.map(bodyProof));
   // A body guard is backed only by a record criterion that is itself `kind: guard` with the same trimmed proof.

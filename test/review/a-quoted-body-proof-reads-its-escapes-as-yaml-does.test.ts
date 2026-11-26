@@ -5,6 +5,14 @@ import { ACCEPTANCE_BULLET_RE, replaceBodyProofs, rewriteBodyProof, rewriteCrite
 import { renderAcceptanceBlock } from "#src/lib/plan-pr-emitter.js";
 import { acceptanceCriteriaRead, acceptanceProofSpans, markUnbackedBodyGuards, parseAcceptanceBlock } from "#src/lib/review.js";
 import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import { pathToFileURL } from "node:url";
+import { join } from "node:path";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
+
+const authorGate = (await import(pathToFileURL(join(REPO_ROOT, "scripts", "acceptance-author-gate.mjs")).href)) as {
+  trailerBodyProofDivergenceRefusal: (input: { body: string;
+    taskAcceptanceForId?: (taskId: string) => readonly { claim: string; proof: string }[] | undefined }) => { defect?: string } | undefined;
+};
 
 // W1-T14913: a body proof in YAML double quotes must read as the record's YAML scalar does, or a body `kind: guard`
 // finds no record row and is refused (core #20913).
@@ -262,4 +270,35 @@ test("a quoted body proof reads its escapes as yaml does, and a legacy-rendered 
   const unguardedRecord = [{ claim: "the split | holds", proof: recordProof }] as unknown as unknown as AcceptanceCriterion[];
   assert.deepEqual(markUnbackedBodyGuards(unguardedRecord, parseAcceptanceBlock(legacy), false).unbacked, [recordProof],
     "a legacy body guard over a record criterion that is not a guard is still refused");
+});
+
+// The eleventh review of #20963 (F1): the author-time trailer/body comparison read the legacy body unescaped too, so a
+// body and record main matched were refused as divergent. It shares review's helper, so it accepts exactly that body.
+test("a quoted body proof reads its escapes as yaml does, and the author gate matches a legacy-rendered body as main does", () => {
+  const recordProof = String.raw`grep: a\\b in f`;
+  const trailer = "\n\nRemudero-Task: W1-T999913\n";
+  const legacy = `## Acceptance\n- claim: "the split | holds"\n  proof: "${recordProof}"\n${trailer}`;
+  const refusal = (body: string, proof: string) =>
+    authorGate.trailerBodyProofDivergenceRefusal({ body, taskAcceptanceForId: () => [{ claim: "the split | holds", proof }] });
+  assert.equal(refusal(legacy, recordProof), undefined, "the legacy body matches its record as written, as on main");
+  // A current body, escaped as YAML escapes it, matches its record by the unescaped text.
+  const current = `## Acceptance\n- claim: "the split | holds"\n  proof: "grep: a\\\\\\\\b in f"\n${trailer}`;
+  assert.equal(parseAcceptanceBlock(current)[0]!.proof, recordProof, "CONTROL: the current body reads as the record by YAML");
+  assert.equal(refusal(current, recordProof), undefined, "a current body matches by its YAML reading");
+  // Nothing new is accepted: a body whose proof matches the record neither unescaped nor as written still refuses.
+  assert.equal(refusal(legacy, String.raw`grep: a\\c in f`)?.defect, "trailer-body-proof-divergence");
+  assert.equal(refusal(`## Acceptance\n- claim: x\n  proof: "grep: q in f"\n${trailer}`, recordProof)?.defect, "trailer-body-proof-divergence");
+});
+
+// The eleventh review of #20963 (F2): a standalone grep bullet wrapped in a code span reads its claim with the backticks
+// and its proof without, so the claim-equals-proof test refused to expand it and the wrapped grep stayed.
+test("a quoted body proof reads its escapes as yaml does, and a code-spanned standalone grep bullet is unwrapped with its claim kept", () => {
+  const spanned = "`grep: \"driftCeiling\" in scripts/clock-sweep-baseline.json`";
+  const wrapped = `grep: "driftCeiling" in scripts/clock-sweep-baseline.json`;
+  const bare = "grep: driftCeiling in scripts/clock-sweep-baseline.json";
+  const body = `## Acceptance\n- ${spanned}\n`;
+  assert.deepEqual(parseAcceptanceBlock(body).map((c) => [c.claim, c.proof]), [[spanned, wrapped]], "CONTROL: the parser's reading");
+  const fixed = rewriteCriterionProofs(body, [{ index: 0, oldProof: wrapped, newProof: bare }], acceptanceCriteriaRead);
+  assert.equal(fixed, `## Acceptance\n- claim: ${spanned}\n  proof: ${bare}\n`);
+  assert.deepEqual(parseAcceptanceBlock(fixed!).map((c) => [c.claim, c.proof]), [[spanned, bare]]);
 });
