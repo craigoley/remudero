@@ -7,6 +7,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -16,7 +17,10 @@ import type { Config } from "#src/lib/config.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { claimReviewDecision, planFilingFromChangedFiles, postReviewStatusGuarded, postUnreadTaskHoldGuarded, refreshReviewPublisherToken, reviewInputDigest, taskHoldInputDigest, taskHoldReading, type PlanLintOutcome, type TaskHoldReading, type ReviewVerdict } from "#src/lib/review.js";
-import { boardPlanOnlyFiling, planCheckoutRoot, pullRequestTaskSubjectOf, readOpsCatalogHold, readPullRequestNamedTaskHold, resolvePullRequestTaskSubject, targetPlanRoot, readTaskDispatchHold, type TaskDispatchHoldSources } from "#src/lib/task-dispatch-hold.js";
+import { boardPlanOnlyFiling, freshPullRowRead, planCheckoutRoot, pullRequestTaskSubjectOf, readOpsCatalogHold, readPullRequestNamedTaskHold, resolvePullRequestTaskSubject, targetPlanRoot, readTaskDispatchHold, type TaskDispatchHoldSources } from "#src/lib/task-dispatch-hold.js";
+import { ghBrokerDir } from "#src/lib/gh-read-broker-client.js";
+import { ghJsonAsync, ghTextAsync } from "#src/lib/github-transport.js";
+import { prFilesRestArgs } from "#src/lib/open-prs-rest.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "#src/lib/status.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
@@ -938,6 +942,99 @@ test("W1-T14902: a review whose public plan at origin/main is unreadable publish
   assert.ok(published.length >= 1, `THE CLAIM: the unread hold is published: ${JSON.stringify(published)}`);
   assert.equal(published[0]!.taskId, id);
   assert.equal(published[0]!.source, "public plan at origin/main");
+});
+
+test("W1-T14902 criterion 2: the arm's hold reads never join a GET this process already has out, which may predate an edit", { timeout: 60_000 }, async (t) => {
+  // The transport shared an in-flight read between equal argv, fresh ones too, so the arm's write-time read joined an
+  // earlier GET inside this process (ahead of the broker's own rule) and armed a PR whose trailer now named a held task.
+  const root = mkdtempSync("/tmp/rmd-t14902-"); // a Unix socket path must stay short
+  const cache = join(root, "cache");
+  const dir = ghBrokerDir({ RMD_GH_CACHE_HOME: cache })!;
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "heartbeat"), "60\n");
+  const row = ["api", "repos/acme/remudero-ops/pulls/910"];
+  const files = prFilesRestArgs("acme", "remudero-ops", 910);
+  let edited = false;
+  const withheld: Array<() => void> = [];
+  const release = () => { for (const reply of withheld.splice(0)) reply(); };
+  const clients = new Set<Socket>();
+  // The broker's stand-in: a GET that arrived before the edit is held back; a later one answers the edited PR at once.
+  const server = createServer((conn) => {
+    clients.add(conn);
+    conn.on("close", () => clients.delete(conn));
+    let text = "";
+    conn.on("data", (bytes) => {
+      text += bytes.toString();
+      if (!text.includes("\n")) return;
+      const { args } = JSON.parse(text.slice(0, text.indexOf("\n"))) as { args: string[] };
+      const after = edited;
+      const json = args[1]!.includes("/pulls/911") ? "<html>PRIVATE_BODY</html>" : JSON.stringify(args[1]!.includes("/files")
+        ? [{ filename: "plan/tasks.d/W1-T99999990-a-filing.yaml" }, ...(after ? [{ filename: "src/lib/x.ts" }] : [])]
+        : { body: `Remudero-Task: ${after ? "W1-T8397" : "W1-T10732"}\n`, head: { ref: "feature/x", sha: SHA } });
+      const stdout = args.includes("-i") ? `HTTP/2.0 200 OK\r\n\r\n${json}` : json;
+      const reply = () => { conn.end(`${JSON.stringify({ type: "result", stdout, stderr: "", exitCode: 0, outcome: "upstream-200" })}\n`); };
+      if (after) reply(); else withheld.push(reply);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(join(dir, "broker.sock"), resolve));
+  const shim = ghShim([{ when: "", exit: 97, stderr: "FALSIFIER: direct gh ran" }]);
+  const env = new Map(["PATH", "RMD_GH_CACHE_HOME"].map((k) => [k, process.env[k]]));
+  Object.assign(process.env, { PATH: `${shim.dir}:${env.get("PATH")}`, RMD_GH_CACHE_HOME: cache });
+  let backstop: ReturnType<typeof setTimeout> | undefined;
+  t.after(async () => {
+    if (backstop) clearTimeout(backstop);
+    release(); // a failed assertion still answers the earlier reads, so none is left to reject unheard
+    await Promise.allSettled(earlier);
+    for (const conn of clients) conn.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    for (const [k, v] of env) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    rmSync(shim.dir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  });
+  // Every form of an earlier fresh read of the same two paths, JSON and text, still out when the PR is edited.
+  const earlier = [row, files].flatMap((args) => [
+    ghJsonAsync(args, undefined, undefined, { fresh: true }).then((value) => JSON.stringify(value)),
+    ghTextAsync([...args, "-i"], { fresh: true }),
+  ]);
+  const deadline = Date.now() + 30_000;
+  while (withheld.length < earlier.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 2));
+  assert.equal(withheld.length, earlier.length, "positive control: the earlier reads are in flight");
+  edited = true;
+  // INFRASTRUCTURE BACKSTOP: a read that joins an earlier one is answered with the pre-edit PR instead of hanging.
+  backstop = setTimeout(release, 5_000);
+  const config = (() => ({ root })) as unknown as Parameters<typeof readPullRequestTaskHold>[1];
+  const plan = { readMainPlan: async () => ({ byId: new Map([["W1-T10732", {}], ["W1-T8397", { dispatch_hold: true }]]) }) };
+  // One read each, both made while every earlier read is still out: the arm's own hold reader, and the files read that
+  // decides whether a trailerless PR is a plan filing (a pre-push list would call a source change a filing).
+  const [reading, filing] = await Promise.all([
+    readPullRequestTaskHold(PR_URL, config, undefined, plan),
+    boardPlanOnlyFiling(join(root, "state"), planFilingFromChangedFiles)(PR_URL,
+      { owner: "acme", repo: "remudero-ops", number: 910, headSha: SHA }),
+  ]);
+  assert.deepEqual(reading, { outcome: "held", taskId: "W1-T8397" }, "THE CLAIM: the hold read sees the edited trailer");
+  assert.equal(filing, false, "THE CLAIM: the files read sees the pushed source file");
+  const writes: string[] = [];
+  const outcome = await attemptArmAsync(PR_URL, {
+    headSha: async () => SHA,
+    ledgerLines: () => [],
+    armAuto: async () => { writes.push("armAuto"); },
+    mergeDirect: async () => { writes.push("mergeDirect"); },
+    isMerged: async () => false,
+    taskHold: (prUrl) => readPullRequestTaskHold(prUrl, config, undefined, plan),
+    say: () => {},
+  }, SHA);
+  assert.equal(outcome.outcome, "hold-refused", `THE CLAIM: the arm is refused: ${JSON.stringify(outcome)}`);
+  assert.match(outcome.error ?? "", /W1-T8397 carries dispatch_hold/);
+  assert.deepEqual(writes, [], "no arm and no direct merge reached GitHub");
+  // An unreadable row throws the transport's redacted error: a hold's reason is published, the response is not.
+  await assert.rejects(freshPullRowRead("repos/acme/remudero-ops/pulls/911"), (error: Error) => {
+    assert.equal(error.message, "gh api response body was unreadable");
+    return true;
+  });
+  release();
+  const stale = await Promise.all(earlier);
+  assert.match(stale[0]!, /W1-T10732/, "positive control: the earlier read answered the pre-edit body");
+  assert.equal(shim.calls().length, 0, "every read went through the broker");
 });
 
 test("W1-T14902: a fresh broker read never joins a GET already under way, which may predate a trailer edit", { timeout: 60_000 }, async (t) => {

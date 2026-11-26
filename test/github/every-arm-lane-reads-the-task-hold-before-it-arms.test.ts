@@ -162,8 +162,12 @@ test("census: every task-hold lookup goes through the one PR task resolver, fed 
   assert.match(source(ARM_MODULE), /planOnlyFiling \?\? boardPlanOnlyFiling\(stateDir, planFilingFromChangedFiles\)/,
     "the arm's hold reader classifies plan filings as the board does");
   const hold = source(HOLD_MODULE);
-  assert.match(hold, /freshPullRowRead: PullRowRead = \(path\) => ghJsonAsync\(\["api", path\], undefined, undefined, \{ fresh: true \}\)/,
-    "the act-time read revalidates through the broker");
+  assert.match(hold, /ghTextAsync\(\[\.\.\.args, "-i"\], \{ fresh: true, env: process\.env \}\)/,
+    "the act-time read revalidates through the broker and, naming its own env, shares no read already in flight");
+  assert.match(hold, /freshPullRowRead: PullRowRead = \(path\) => unsharedFreshGhJson\(\["api", path\]\)/, "the pull row");
+  assert.match(hold, /freshPullFilesFetch: GhApiFetcher = \(args\) => unsharedFreshGhJson\(args\)/, "the changed files");
+  // Both hold reads go through that one reader: no coalescing JSON transport is named in the module at all.
+  assert.doesNotMatch(hold, /\bghJsonAsync\b/);
   for (const fn of ["resolvePullRequestTaskSubject", "readPullRequestNamedTaskHold"]) {
     assert.match(hold, new RegExp(`function ${fn}\\([^)]*read: PullRowRead = freshPullRowRead`), `${fn} defaults to the fresh read`);
   }

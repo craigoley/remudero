@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { defaultGitRunnerAsync, loadPlanAtRefAsync, type KeepsUnseenDependency } from "./plan.js";
 import { readOpsCatalogSnapshotAsync } from "./ops-catalog-source.js";
 import { planDestinationRepository } from "./plan-destination.js";
-import { ghJsonAsync } from "./github-transport.js";
+import { ghTextAsync, GhJsonUnreadableResponseError, splitGhHeaderBlock } from "./github-transport.js";
 import { extractTaskTrailerId, isPlanOnlyFilingPr, resolveReviewTaskId, usesUntaskedReviewMetadata } from "./untasked-review.js";
 import { readLedgerUnionRawLinesAsync } from "./ledger-union.js";
 import { createPlanFilingFileCache, hydratePlanFilingFilesSteps, type GhApiFetcher, type GhReadSteps } from "./open-prs-rest.js";
@@ -227,9 +227,24 @@ export function pullRequestTaskSubjectOf(pull: unknown, planOnlyFiling = false):
 /** Reads one pull row by its REST path. */
 export type PullRowRead = (path: string) => Promise<unknown>;
 
-/** The act-time pull row: revalidated through the GitHub read broker (`fresh`), never a cached pre-edit body, and never
- *  joined to a GET already under way (gh-read-broker.ts), which may have left before an edit. */
-export const freshPullRowRead: PullRowRead = (path) => ghJsonAsync(["api", path], undefined, undefined, { fresh: true });
+/**
+ * One act-time GitHub GET that is this caller's own: revalidated through the read broker (`fresh`), and never joined to a
+ * GET already out, which may have left before a trailer edit or a push. This process's transport shares an in-flight read
+ * between equal argv, fresh ones too, except for a `ghTextAsync` call naming its own `env` (W1-T9549); the broker starts
+ * its own upstream GET for a fresh caller (gh-read-broker.ts). With no broker this runs `gh`, not the in-process client.
+ */
+async function unsharedFreshGhJson(args: string[]): Promise<unknown> {
+  const out = await ghTextAsync([...args, "-i"], { fresh: true, env: process.env });
+  try {
+    return JSON.parse(splitGhHeaderBlock(out).body);
+  } catch (cause) {
+    // The transport's own redacted error: a parse message quotes the response, and a hold's reason is published.
+    throw new GhJsonUnreadableResponseError("api", cause);
+  }
+}
+
+/** The act-time pull row ({@link unsharedFreshGhJson}): never a cached or in-flight pre-edit body. */
+export const freshPullRowRead: PullRowRead = (path) => unsharedFreshGhJson(["api", path]);
 
 /** The live pull request a plan-only filing read is asked about: its repository, number and the head it was read at. */
 export interface PlanOnlyFilingSubject {
@@ -248,8 +263,8 @@ export type PlanOnlyFilingRead = (prUrl: string, subject: PlanOnlyFilingSubject)
  *  module. */
 export type PlanFilingFilesRule = (paths: readonly string[]) => boolean;
 
-/** GitHub's changed files of one pull request, revalidated through the read broker like the act-time pull row. */
-export const freshPullFilesFetch: GhApiFetcher = (args) => ghJsonAsync(args, undefined, undefined, { fresh: true });
+/** GitHub's changed files of one pull request, read like the act-time pull row: never a pre-push list. */
+export const freshPullFilesFetch: GhApiFetcher = (args) => unsharedFreshGhJson(args);
 
 /**
  * W1-T14902 (round 10, C3): the board's own classification (tick-read-worker classifyPlanFiling, and `rmd fix`'s
