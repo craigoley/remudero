@@ -2010,7 +2010,7 @@ const asyncIssueTwins = new WeakMap<IssueGateway, AsyncIssueGateway>();
 /** W1-T14998: the repository each real gateway files in, and the reason a gateway files nowhere. */
 const gatewayRepository = new WeakMap<object, string>();
 const unfiledGateways = new WeakMap<object, string>();
-const visibilityGates = new WeakMap<object, () => Steps<string | undefined>>();
+const visibilityGates = new WeakMap<object, () => Steps<"private" | "public" | { unreadable: string }>>();
 
 function driveSynchronousEscalation<T>(drive: () => T): T {
   // Latched producers and SRE feedback can consume an incident after this call. Preserve
@@ -2511,7 +2511,7 @@ export function withCodeRepositoryField(body: string, codeRepository: string): s
 /** W1-T14998 — a gateway filing in `route` for `codeRepository`. When those differ, the route is a pool other code
  *  repositories file in too: each issue this gateway creates (or rewrites) records its code repository, and its open
  *  listing — which dedup, the main-health rung and the reconcilers close from — holds only that repository's issues. */
-function scopedToCodeRepository(gateway: AsyncIssueGateway, route: string, codeRepository: string): AsyncIssueGateway {
+export function scopedToCodeRepository(gateway: AsyncIssueGateway, route: string, codeRepository: string): AsyncIssueGateway {
   if (route.toLowerCase() === codeRepository.toLowerCase()) return gateway;
   const own = (open: OpenIssue[]) => open.filter((issue) => issueIsCodeRepositorys(issue, codeRepository));
   const { create, listOpen, editBody } = gateway;
@@ -2571,24 +2571,29 @@ function restVisibility(codeRepository: string, run: (args: string[]) => string 
  *  unreadable (read again next use) files nowhere. */
 function unroutedGateway(real: AsyncIssueGateway, codeRepository: string, read: () => Steps<boolean>,
   drive: (steps: Steps<unknown>) => unknown): AsyncIssueGateway {
-  const gate = function* (): Steps<string | undefined> {
+  const gate = function* (): Steps<"private" | "public" | { unreadable: string }> {
     const key = codeRepository.toLowerCase();
     let isPrivate = codeRepositoryPrivate.get(key);
     if (isPrivate === undefined) {
       try {
         isPrivate = yield* read();
       } catch (error) {
-        return `${NO_ESCALATION_ROUTE}; code-repository-visibility-unreadable: ${error instanceof Error ? error.message : String(error)}`;
+        return { unreadable: `${NO_ESCALATION_ROUTE}; code-repository-visibility-unreadable: ${error instanceof Error ? error.message : String(error)}` };
       }
       codeRepositoryPrivate.set(key, isPrivate);
     }
-    return isPrivate ? undefined : NO_ESCALATION_ROUTE;
+    return isPrivate ? "private" : "public";
   };
   const nowhere: Record<string, (why: string) => unknown> = { listOpen: () => [], listCommentsSince: () => [], ensureLabel: () => false };
   const refuse = (why: string): never => { throw new Error(`no escalation issue is filed: ${why}`); };
   const gateway = Object.fromEntries(Object.entries(real).map(([name, method]) => [name, (...args: unknown[]) => drive((function* () {
-    const why = yield* gate();
-    return why === undefined ? yield* step(() => (method as (...a: unknown[]) => unknown)(...args)) : (nowhere[name] ?? refuse)(why);
+    const visibility = yield* gate();
+    if (visibility === "private") return yield* step(() => (method as (...a: unknown[]) => unknown)(...args));
+    if (typeof visibility === "object") {
+      if (name === "listOpen") throw new Error(`cannot read open issues: ${visibility.unreadable}`);
+      return (nowhere[name] ?? refuse)(visibility.unreadable);
+    }
+    return (nowhere[name] ?? refuse)(NO_ESCALATION_ROUTE);
   })())])) as AsyncIssueGateway;
   visibilityGates.set(gateway, gate);
   return gateway;
@@ -2596,7 +2601,10 @@ function unroutedGateway(real: AsyncIssueGateway, codeRepository: string, read: 
 
 function* unroutedGatewayUnfiled(gateway: object): Steps<string | undefined> {
   const gate = visibilityGates.get(gateway);
-  return gate === undefined ? undefined : yield* gate();
+  if (gate === undefined) return undefined;
+  const visibility = yield* gate();
+  return visibility === "private" ? undefined
+    : typeof visibility === "object" ? visibility.unreadable : NO_ESCALATION_ROUTE;
 }
 
 const OPEN_ISSUES_BY_LABEL_QUERY =

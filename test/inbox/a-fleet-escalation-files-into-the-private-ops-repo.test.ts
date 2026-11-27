@@ -194,9 +194,12 @@ test("W1-T14998 criterion 2: with no private repository an escalation opens no p
   // A repository whose visibility cannot be read fails closed, and is read again on the next escalation.
   const dark = fakeGh({ "craigoley/unreadable": null });
   const darkIssues = ghIssueGateway("craigoley", "unreadable", { exec: dark.exec, destination: nowhere });
+  assert.throws(() => darkIssues.listOpen?.(NEEDS_HUMAN_LABEL), /code-repository-visibility-unreadable/,
+    "an unreadable visibility result cannot masquerade as a confirmed empty open-issue list");
   assert.equal(escalate(escalation({ taskId: "W1-T14997" }), { issues: darkIssues, ledgerPath: path, runId: "RUN-1" }), "");
   assert.equal(escalate(escalation({ taskId: "W1-T14997" }), { issues: darkIssues, ledgerPath: path, runId: "RUN-2" }), "");
-  assert.deepEqual(dark.calls.map((args) => isVisibilityRead(args)), [true, true], "two visibility reads, no issue command");
+  assert.deepEqual(dark.calls.map((args) => isVisibilityRead(args)), [true, true, true],
+    "the explicit read and each failed escalation retry visibility, with no issue command");
   assert.match(String(rows().find((row) => row.task_id === "W1-T14997")?.reason),
     /^no-private-escalation-repository; code-repository-visibility-unreadable: repos\/craigoley\/unreadable answered no private field$/);
   assert.match(withHostHome(t, { repository: "not a repository", kinds: [] },
@@ -553,4 +556,59 @@ test("W1-T14998 criterion 6: an owner reply on this repository's own issue lands
   const ownRead = await own.read();
   assert.deepEqual(ownRead.stored, [["W1-T15503", "issue#6:comment:600"], ["W1-T15504", "issue#7:comment:700"]]);
   assert.deepEqual([own.reacted, ownRead.ignored], [[600, 700], []]);
+});
+
+test("W1-T14998: routed answers include legacy code-repository issues and scope refusal alarms to their owner", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14998-routed-answer-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const reads: string[] = [];
+  const writes: string[][] = [];
+  const legacyUrl = `https://github.com/${CORE_REPO}/issues/41`;
+  const gateway = withEnv(OPS, () => ghEscalationAnswerGateway("craigoley", "remudero-ops", async (args) => {
+    const path = args[1]!;
+    reads.push(path);
+    if (path.startsWith(`repos/${OPS}/issues?`)) return "[]";
+    if (path.startsWith(`repos/${CORE_REPO}/issues?`)) return JSON.stringify([
+      { number: 41, html_url: legacyUrl, state: "open", title: "[MANUAL] W1-T15541", body: answerable("W1-T15541") },
+    ]);
+    if (path === `repos/${CORE_REPO}/issues/41/comments?per_page=100`) return JSON.stringify([
+      { id: 4101, body: "re-review", author_association: "OWNER", user: { login: "craigoley", type: "User" }, updated_at: "2026-11-27T08:00:00Z" },
+    ]);
+    if (path.endsWith("/reactions?per_page=100") || path.includes("/issues/comments?")) return "[]";
+    if (path === `repos/${OPS}/issues/41/comments?per_page=100`) throw new Error("issue number alone chose the wrong repository");
+    if (path === `repos/${OPS}/issues`) return "";
+    throw new Error(`unexpected routed answer read ${path}`);
+  }, undefined, undefined, CORE_REPO, [CORE_REPO]));
+  gateway.reactPlusOne = (id) => { writes.push(["comment-reaction", String(id)]); };
+  gateway.reactPlusOneOnIssue = (number) => { writes.push(["issue-reaction", String(number)]); };
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const result = await readEscalationAnswers(root, "RUN-ROUTED-ANSWER", gateway, {
+    ledgerPath,
+  });
+  const questions = readFileSync(join(root, "plan", "questions.ndjson"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(result.accepted, 1, "the code repository's legacy owner reply is still landed");
+  assert.deepEqual(questions.map((row: { task: string; origin: string }) => [row.task, row.origin]),
+    [["W1-T15541", "issue#41:comment:4101"]]);
+  assert.ok(reads.includes(`repos/${CORE_REPO}/issues/41/comments?per_page=100`), "comments are read from the issue URL's repository");
+  assert.ok(reads.includes(`repos/${OPS}/issues/comments?sort=updated&direction=desc&per_page=1`), "the routed repository keeps its own comment cursor read");
+  assert.ok(reads.includes(`repos/${CORE_REPO}/issues/comments?sort=updated&direction=desc&per_page=1`), "the legacy repository keeps its own comment cursor read");
+  assert.ok(reads.includes(`repos/${CORE_REPO}/issues/41/reactions?per_page=100`), "issue reactions are read from the issue URL's repository");
+  assert.deepEqual(writes, [["comment-reaction", "4101"]], "the acknowledgement is sent through the same repository-specific reader");
+
+  const poolResponse = JSON.stringify([
+    { number: 1, html_url: `https://github.com/${OPS}/issues/1`, state: "open", title: "core alarm", body: `**Code-Repository:** ${CORE_REPO}\n` },
+    { number: 2, html_url: `https://github.com/${OPS}/issues/2`, state: "open", title: "site alarm", body: "**Code-Repository:** craigoley/site\n" },
+  ]);
+  const scoped = withEnv(OPS, () => ghEscalationAnswerGateway("craigoley", "remudero-ops", async (args) => {
+    if (args[1]?.startsWith(`repos/${OPS}/issues?`)) return poolResponse;
+    if (args[0] === "issue" && args[1] === "create") { writes.push(args); return `https://github.com/${OPS}/issues/3\n`; }
+    throw new Error(`unexpected alarm call ${args.join(" ")}`);
+  }, undefined, undefined, CORE_REPO));
+  assert.deepEqual((await scoped.refusalIssues!.listOpen?.("needs-human"))?.map(issue => issue.number), [1],
+    "the refusal alarm dedup listing filters the shared ops pool to this code repository");
+  await withLiveWritesAllowed(async () => scoped.refusalIssues!.create("core refusal", "alarm detail", ["needs-human"]));
+  const create = writes.find(args => args[0] === "issue" && args[1] === "create")!;
+  assert.ok(create.includes(OPS), "refusal alarms remain in the configured escalation repository");
+  assert.ok(create.some(value => value.includes(`**Code-Repository:** ${CORE_REPO}`)),
+    "the shared-pool issue records its code repository for scoped dedup and recovery");
 });
