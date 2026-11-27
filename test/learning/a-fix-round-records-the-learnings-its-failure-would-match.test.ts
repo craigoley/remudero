@@ -10,11 +10,12 @@ import { summarizeFixLearningsShadow } from "#src/lib/fix-learnings-shadow.js";
 import { buildLearningsIndex, DEFAULT_KNOWLEDGE_BUDGET_CHARS, loadLayeredLearningsForTaskFiles, selectLearnings } from "#src/lib/learnings.js";
 import type { Mount } from "#src/lib/mounts.js";
 import { renderFixPrompt } from "#src/lib/prompt-render.js";
+import { runFixRung as runFixRungModule } from "#src/cli/commands/fix.js";
 import { CODE_SCANNING_FIX_DISPATCH_STEP, codeScanningHeadSettled } from "#src/lib/sweep.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
-import { harnessCommitForShellLessWorker, MERGE_UP_TO_DATE_REASON, runFixRung } from "#test/helpers/run-task-test.js";
+import { fixCommandHost, harnessCommitForShellLessWorker, MERGE_UP_TO_DATE_REASON, runFixRung } from "#test/helpers/run-task-test.js";
 
 const TASK = "W1-T14138";
 const OTHER_TASK = "W1-T5";
@@ -50,6 +51,7 @@ async function runRound(t: TestContext, options: {
   spawnEnd?: "superseded" | "abandoned" | "throws";
   workerHoldsGit?: boolean;
   workerPushesBeforeHandoff?: boolean;
+  workerPushesThen?: "plan_filing_refusal" | "recycle_yield";
   /** The worker leaves HEAD naming a branch with no commit, then hands off. */
   workerLosesHead?: boolean;
   mergeRefused?: boolean;
@@ -70,7 +72,8 @@ async function runRound(t: TestContext, options: {
   const head = source.git("rev-parse", "HEAD");
   if (options.staleReview) source.git("commit", "--quiet", "--allow-empty", "-m", "an earlier round's push");
   const startHead = source.git("rev-parse", "HEAD");
-  const workerOrigin = options.workerPushesBeforeHandoff ? gitRepo({ bare: true, scope: t, kind: "fix-learnings-worker-origin" }) : undefined;
+  const workerOrigin = options.workerPushesBeforeHandoff || options.workerPushesThen
+    ? gitRepo({ bare: true, scope: t, kind: "fix-learnings-worker-origin" }) : undefined;
   if (workerOrigin) {
     source.addRemote("origin", workerOrigin.dir);
     source.git("push", "--quiet", "origin", `${startHead}:refs/heads/run-${taskId}-1`);
@@ -111,6 +114,7 @@ async function runRound(t: TestContext, options: {
   const landedHead = options.unchangedHead ? startHead : PUSHED_HEAD;
   const claimKept = options.claimKept ?? options.unchangedHead;
   const remoteHead = async () => {
+    if (options.workerPushesThen) return workerOrigin!.git("rev-parse", `refs/heads/run-${taskId}-1`);
     if (pushes > 0 || !options.staleReview) return landedHead;
     if (remoteUnread) { remoteUnread = false; throw new Error("fixture ls-remote failed"); }
     return options.staleReview === "superseded" ? FOREIGN_HEAD : options.staleReview === "unpublished" ? head : startHead;
@@ -120,8 +124,9 @@ async function runRound(t: TestContext, options: {
   const rounds = Math.max(1, reviews.length);
   const stillUnmet = { claim: "claimSymbol is missing", proof: "unit test: fixture", met: false,
     reason: "the symbol is absent", proof_exec: "executed_fail" as const };
-  const run = () => withGhShim([{ when: "", stdout: "{}" }], () => runFixRung({
-    taskId, runId, task: { id: taskId, title: TITLE, files: [PATH] },
+  const rungOptions = {
+    taskId, runId, task: { id: taskId, title: TITLE,
+      files: options.workerPushesThen === "plan_filing_refusal" ? ["plan/tasks.d/new.yaml"] : [PATH] },
     prUrl: PR_URL, branch: `run-${taskId}-1`, worktreePath: source.dir,
     initialSessionId: "fixture", mount: MOUNT, settingsFile: join(source.dir, "settings.json"),
     config: { root: source.dir, workerProviders: { harnessCommitsFix: !options.workerHoldsGit } } as Config,
@@ -135,7 +140,7 @@ async function runRound(t: TestContext, options: {
       spawn: async ({ prompt }) => {
         prompts.push(prompt);
         if (options.spawnEnd === "throws") throw new Error("fixture worker died");
-        if (options.workerPushesBeforeHandoff) {
+        if (options.workerPushesBeforeHandoff || options.workerPushesThen) {
           source.git("commit", "--quiet", "--allow-empty", "-m", "worker pushed before handoff");
           source.git("push", "--quiet", "origin", `HEAD:refs/heads/run-${taskId}-1`);
           return NEEDS_DESIGN_WORKER;
@@ -157,16 +162,26 @@ async function runRound(t: TestContext, options: {
       ...(claimKept ? { branchClaim: { id: () => "claim", release: () => {}, reacquire: () => undefined,
         last: () => { throw new Error("not read"); }, keepForWait: () => ({}) } } : {}),
       push: () => { pushes++; },
-      readRemoteBranchHead: remoteHead,
+      readRemoteBranchHead: options.workerPushesThen
+        ? async () => workerOrigin!.git("rev-parse", `refs/heads/run-${taskId}-1`) : remoteHead,
       waitForCiGreen: async () => {
         waits++;
-        assert.equal(rows.findLast(row => row.step === "fix.done")?.pushed_head_sha, landedHead);
-        return typeof options.ci === "function" ? options.ci(startHead) : options.ci ?? { state: "green", sha: PUSHED_HEAD };
+        if (!options.workerPushesThen) assert.equal(rows.findLast(row => row.step === "fix.done")?.pushed_head_sha, landedHead);
+        const sha = options.workerPushesThen ? workerOrigin!.git("rev-parse", `refs/heads/run-${taskId}-1`) : landedHead!;
+        return typeof options.ci === "function" ? options.ci(startHead) : options.ci ?? { state: "green", sha };
       },
       runReview: async () => reviews.shift() === "failure"
         ? { ...review, criteria: [stillUnmet] } : { ...review, state: "success" },
       fetchPrBody: async () => "REPORT",
-      fetchPrDiffFiles: async () => [PATH],
+      fetchPrDiffFiles: async () => options.workerPushesThen === "plan_filing_refusal" ? ["plan/tasks.d/new.yaml"] : [PATH],
+      ...(options.workerPushesThen === "plan_filing_refusal" ? { scopeAmendmentGit: async (_cwd: string, args: string[]) => {
+        if (args[0] === "ls-tree") return "";
+        if (args[0] === "show" && args[1]?.startsWith(`${head}:`)) {
+          return `- id: ${taskId}\n  files: [plan/tasks.d/new.yaml]\n  acceptance: []\n`;
+        }
+        if (args[0] === "show") return "[]\n";
+        return "";
+      } } : {}),
       fetchCiFailures: async () => options.staleReview === "adopted" && pushes === 0 ? [CHECK] : [],
       issues: { create: () => "https://github.com/acme/fixture/issues/1", listOpen: () => [], comment: () => {} },
       ledgerPath: join(source.dir, "ledger.ndjson"), ledgerLines: () => rows,
@@ -178,10 +193,21 @@ async function runRound(t: TestContext, options: {
           : { committed: true, sha: landedHead, undeclared: [] }, ahead: () => 1,
       }),
     },
-  }));
+  };
+  const recycleYieldHost = options.workerPushesThen === "recycle_yield" ? {
+    ...fixCommandHost(),
+    spawnFixWorkerBounded: async (deps: Parameters<ReturnType<typeof fixCommandHost>["spawnFixWorkerBounded"]>[0], args: Parameters<ReturnType<typeof fixCommandHost>["spawnFixWorkerBounded"]>[1]) => {
+      const result = await deps.spawn(args);
+      return { kind: "yielded" as const, elapsedMs: 1,
+        yielded: { trigger: "recycle" as const, detail: "fixture recycle", paths: [], costUsd: result.costUsd ?? 0 } };
+    },
+  } : undefined;
+  const run = () => withGhShim([{ when: "", stdout: "{}" }], () => recycleYieldHost
+    ? runFixRungModule(rungOptions, recycleYieldHost)
+    : runFixRung(rungOptions));
   if (options.spawnEnd === "throws") await assert.rejects(run, /fixture worker died/);
   else await run();
-  if (!options.spawnEnd && !options.mergeRefused) {
+  if (!options.spawnEnd && !options.mergeRefused && !options.workerPushesThen) {
     assert.equal(prompts.length, options.staleReview === "superseded" ? 0 : rounds);
   }
   return { rows, project, prompt: prompts[0]!, pushes, waits, startHead,
@@ -340,6 +366,18 @@ test("W1-T14138 criterion 4: a worker-owned push before NEEDS_DESIGN stays unres
   assert.equal(result.steps("fix.done")[0]?.pushed_head_sha, undefined);
   assert.notEqual(result.workerRemoteHead, result.startHead);
   assert.equal(result.steps("fix.learnings_outcome").length, 0);
+});
+
+test("W1-T14138 criterion 4: early plan-filing refusal and recycle yield attribute a worker push to its remote head", async t => {
+  for (const exit of ["plan_filing_refusal", "recycle_yield"] as const) {
+    const result = await runRound(t, { workerHoldsGit: true, workerPushesThen: exit });
+    const remoteHead = result.workerRemoteHead;
+    assert.ok(remoteHead && remoteHead !== result.startHead, exit);
+    const outcomes = result.steps("fix.learnings_outcome");
+    assert.equal(outcomes.length, 1, exit);
+    assert.deepEqual([outcomes[0]?.outcome, outcomes[0]?.pushed_head_sha], ["green", remoteHead], exit);
+    assert.equal(result.waits, 1, exit);
+  }
 });
 
 test("W1-T14138 criterion 4: a worker-owned head that cannot be read leaves the round unresolved", async t => {

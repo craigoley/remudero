@@ -4863,6 +4863,27 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       deps.log("fix.learnings_outcome", { ...shadowRound, outcome, pushed_head_sha: pushedHeadSha,
         ...(outcome === "green" ? { rounds_to_green: fixLearningsRoundsToGreen(
           [...(repairHistory?.ok ? repairHistory.rows : []), ...roundLedger, ...roundRows], opts.taskId) } : {}) });
+    // These two exits happen before the ordinary landing/CI path. Consult the remote directly:
+    // the fix lane's git ownership says who may publish, not whether this worker already did.
+    const recordEarlyFixLearningsOutcome = async (): Promise<void> => {
+      const readRemote = deps.readRemoteBranchHead ?? lsRemoteBranchHead;
+      let remoteHead: string | undefined;
+      try { remoteHead = await readRemote(opts.worktreePath, opts.branch); }
+      catch { return; } // an unreadable remote cannot establish either a push or no push
+      if (remoteHead === undefined || remoteHead === roundStartHeadSha) {
+        recordFixLearningsOutcome("no_push");
+        return;
+      }
+      try {
+        const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
+        const state = host.ciGateState(ci);
+        if ((state === "green" || state === "red") && ciGateSha(ci) === remoteHead) {
+          recordFixLearningsOutcome(state, remoteHead);
+        }
+      } catch {
+        // Keep the round unresolved when the CI read fails; a moved remote is not itself a verdict.
+      }
+    };
     // A worker that may still be running can publish only when it holds its own git; that outcome stays unresolved.
     const recordUnpublishedLiveRound = (): void => { if (fixHarnessOwnsGit) recordFixLearningsOutcome("no_push"); };
     if (merged !== undefined) {
@@ -4997,7 +5018,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           cost_usd: y.costUsd, elapsed_ms: spawnOutcome.elapsedMs });
         // `keepError` also names a worker that did not stop.
         if (y.keepError) recordUnpublishedLiveRound();
-        else recordFixLearningsOutcome("no_push");
+        else await recordEarlyFixLearningsOutcome();
         deps.branchClaim?.release();
         const kept = [y.recoveryRef && `work kept at ${y.recoveryRef}`, y.indexRecoveryRef && `staged work kept at ${y.indexRecoveryRef}`]
           .filter(Boolean).join(", ");
@@ -5285,7 +5306,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     if (filingRefusal) {
       deps.log("fix.commit_refused", { round_id: roundId, head_sha: priorHeadSha, reason: filingRefusal });
       deps.log("fix.done", { round_id: roundId, head_sha: priorHeadSha, subtype: "commit_refused" });
-      recordFixLearningsOutcome("no_push");
+      await recordEarlyFixLearningsOutcome();
       deps.branchClaim?.release();
       return finish({ outcome: "stood_down", review, strikes, retriggers, reason: filingRefusal, standDownReason: filingRefusal });
     }
