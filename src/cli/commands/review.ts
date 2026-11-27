@@ -38,6 +38,7 @@ import { observeAdmissionDisposition } from "../../lib/action-executor.js";
 import { listedLedgerFiles, readLedgerUnionRawLinesAsync, readLedgerUnionRecords } from "../../lib/ledger-union.js";
 import { defaultGitRunnerAsync, visibleCriteria, type AcceptanceCriterion, DEFAULT_RISK, type TaskRisk } from "../../lib/plan.js";
 import { planDestinationRepository } from "../../lib/plan-destination.js";
+import { landReviewFindingsAsync, type LandFeedbackResult } from "../../lib/feedback-landing.js";
 import { defaultOpsCatalogApi, type OpsCatalogApi } from "../../lib/ops-catalog-source.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/mounts.js";
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
@@ -1035,6 +1036,37 @@ export function opsReviewRecord(input: { taskId: string; prUrl: string; headSha:
   };
 }
 
+/** W1-T15077: the private page of a failed or capped ops-task review: each criterion's reason, and each finding's
+ *  file:line, mechanism, remedy and status. It lands only in the plan destination, never on the public PR. */
+export function opsReviewFindingsMarkdown(record: OpsReviewRecord): string {
+  const one = (text: string | null): string => (text ?? "none").replace(/\s+/g, " ").trim();
+  return [`# Review of ${record.pr_url} at ${record.head_sha}`, "", `Task: ${record.task_id}. State: ${record.state}.`, "",
+    "## Criteria", ...record.criteria.map(c => `- ${c.index}. ${c.met ? "PASS" : "FAIL"} (${c.proof_exec}): ${one(c.claim)}\n` +
+      `  reason: ${one(c.reason)}`), "", "## Findings",
+    ...(record.findings.length === 0 ? ["- none"] : record.findings.map(f => `- ${f.anchor.path}:${f.anchor.line} ` +
+      `(criterion ${f.criterion_index}, ${f.severity} ${f.category}, ${f.anchor.status})\n` +
+      `  mechanism: ${one(f.mechanism)}\n  remedy: ${one(f.remedy)}`)),
+    ...(record.reasons.length === 0 ? [] : ["", "## Reasons", ...record.reasons.map(r => `- ${one(r)}`)]), ""].join("\n");
+}
+
+/** W1-T15077: a failed or capped ops-task verdict lands its findings in remudero-ops. A refused landing changes no
+ *  status: its cause is ledgered as review.record_write_failed beside the host record, and nothing else. */
+export async function publishOpsReviewFindings(stateDir: string, record: OpsReviewRecord,
+  target: { prNumber: number | undefined; capped: boolean }, log: (step: string, extra?: Record<string, unknown>) => void,
+  land: typeof landReviewFindingsAsync = landReviewFindingsAsync, say?: (line: string) => void): Promise<"landed" | "refused" | "not_failed"> {
+  if (record.state !== "failure" && !target.capped) return "not_failed";
+  const refuse = (reason: string): "refused" => {
+    log("review.record_write_failed", { pr_number: target.prNumber ?? null, head_sha: record.head_sha, destination: "plan_destination", reason });
+    return "refused";
+  };
+  if (target.prNumber === undefined) return refuse("the review names no pull request number");
+  const landed = await land(stateDir, { prNumber: target.prNumber, headSha: record.head_sha,
+    content: opsReviewFindingsMarkdown(record) }).catch((error: unknown): LandFeedbackResult => ({ landed: false, files: [], error: String(error) }));
+  if (!landed.landed) return refuse(landed.error ?? "the findings landing produced no pull request");
+  say?.(`remudero-review: findings for ${record.head_sha.slice(0, 7)} landed privately${landed.prUrl ? ` (${landed.prUrl})` : ""}`);
+  return "landed";
+}
+
 const SAFE_SEGMENT = /^(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}$/;
 
 /** W1-T14581: where a head's record lives under the state dir — one file per repo, PR and head; `undefined` when a
@@ -1240,6 +1272,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   reservationHomeDir?: string;
   /** Injectable arm (impl-BG), awaited (W1-T9549). Default: the awaited {@link armAutoMergeDetailedAsync}. */
   arm?: (prUrl: string, taskId: string) => ArmOutcome | Promise<ArmOutcome>;
+  /** W1-T15077: lands a failed ops-task review's findings privately. Default {@link landReviewFindingsAsync}. */
+  landReviewFindings?: typeof landReviewFindingsAsync;
   /** W1-T13698: the repository's instance mode. Absent ⇒ read from the instance registry (unknown ⇒ live). */
   repoMode?: "shadow" | "live";
   /**
@@ -2264,10 +2298,10 @@ export async function runReview(host: ReviewCommandHost, args: {
   // The gate TEACHES: the FULL list of unmet criteria goes to the ledger (and the
   // PR comment below) — the status description names only the first (length-capped).
   // W1-T14581: an ops task's reasons and findings stay on the host, in one record per head its row links.
-  const opsRecord = task.catalog !== "ops" ? undefined
-    : writeOpsReviewRecord(dirname(args.ledgerPath), { owner, repo, prNumber: reviewPrNumber(prUrl), headSha },
-      opsReviewRecord({ taskId: task.id, prUrl, headSha, state: verdict.state, decisionDigest, criteria: verdict.criteria,
-        reasons, findings: findingCapture.findings }));
+  const opsRecordBody = task.catalog !== "ops" ? undefined : opsReviewRecord({ taskId: task.id, prUrl, headSha,
+    state: verdict.state, decisionDigest, criteria: verdict.criteria, reasons, findings: findingCapture.findings });
+  const opsRecord = opsRecordBody === undefined ? undefined
+    : writeOpsReviewRecord(dirname(args.ledgerPath), { owner, repo, prNumber: reviewPrNumber(prUrl), headSha }, opsRecordBody);
   if (opsRecord !== undefined && "error" in opsRecord) log("review.record_write_failed", { pr_number: reviewPrNumber(prUrl), head_sha: headSha, reason: opsRecord.error });
   const reviewPostedRow = {
     context: REVIEW_CONTEXT,
@@ -2399,6 +2433,10 @@ export async function runReview(host: ReviewCommandHost, args: {
     readChecksGreenReviewed: (_url: string, head: string) => readChecksGreenReviewedAtHead(owner, repo, head) };
   // W1-T9549: AWAITED. The daemon runs this review (`trackInFlightReview`), so the arm's gh and git leave its loop free.
   await armIfVerdictPermitsAsync(verdict, armCtx, { arm: args.arm });
+  if (opsRecordBody !== undefined) {
+    await publishOpsReviewFindings(dirname(args.ledgerPath), opsRecordBody, { prNumber: reviewPrNumber(prUrl), capped: verdict.capped === true },
+      log, args.landReviewFindings, say);
+  }
   // Record after both authoritative posting and auto-merge eligibility. The recorder
   // swallows telemetry write failures; replay returns above before reaching this call.
   if (planOnlySkip) log("review.plan_only_phases", { head_sha: headSha, ...planOnlyPhaseFields(phases, systemClock.now(), args.materializeMs) });
