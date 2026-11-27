@@ -159,6 +159,7 @@ import {
   type InboxClassification,
   type PredicateFailure,
   type Proposal,
+  releasedHumanTaskIds,
 } from "./inbox.js";
 import { skillEvalInboxStatus } from "./skill-eval-gate.js";
 
@@ -2325,16 +2326,6 @@ function projectionDigest(projection: Map<string, StatusProjection>, boardRefere
   return JSON.stringify([parts, [...boardReferents.states].sort(([a], [b]) => a.localeCompare(b))]);
 }
 
-/** Exact task-scoped release receipts, not a verdict inferred from proposal prose. */
-function releasedHumanTaskIds(lines: LedgerLines): Set<string> {
-  const out = new Set<string>();
-  for (const row of lines) {
-    if (row.step === "ratify.approved" && row.released === "verify-human" && typeof row.task_id === "string" && row.task_id) {
-      out.add(row.task_id);
-    }
-  }
-  return out;
-}
 
 /** Every release is already a `ratify.approved` row, so this existing digest also invalidates
  * the inbox memo when one lands; no second scan or release-specific fingerprint is needed. */
@@ -4410,7 +4401,8 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
   return {
     approve: validatedInboxAction(validateApproveProposal, async (input, actor, respond) => {
       if (improvementReviewRequired(input.proposalId, respond)) return;
-      const taskId = /^verify-human:([A-Za-z0-9-]+)$/.exec(input.proposalId)?.[1];
+      // W1-T14977: a machine-judge ask is approvable as its task's release too, so an archived release refuses both.
+      const taskId = /^(?:verify-human|machine-judge):([A-Za-z0-9-]+)$/.exec(input.proposalId)?.[1];
       const retained = taskId ? await readRetainedHumanReleases(deps) : undefined;
       const receipt = taskId ? retained?.receipts.get(taskId) : undefined;
       if (receipt) {
