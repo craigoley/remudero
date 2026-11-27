@@ -49,6 +49,7 @@ function heldHandTree(fx: Fixture, name: string) {
 test("W1-T14400 criterion 1: an idle hand worktree with uncommitted and unpushed work is saved and then removed, and git worktree add plus the patch restores it", () => {
   const fx = fixture();
   const { main, wt, branch, root } = heldHandTree(fx, "wt-T9001");
+  writeFileSync(join(main, ".git", "info", "exclude"), "/node_modules/\n", { flag: "a" });
   age(wt, 10 * DAY_HOURS);
 
   const r = run(fx, handOnly(root));
@@ -73,8 +74,8 @@ test("W1-T14400 criterion 1: an idle hand worktree with uncommitted and unpushed
   for (const path of ["test/ci/coverage/new-test.ts", "src/dist/new-source.ts"]) {
     assert.equal(readFileSync(join(extracted, path), "utf8"), "export {};\n", `${path} survives the skipped-name class`);
   }
-  assert.equal(existsSync(join(extracted, "node_modules", "generated.js")), false, "root node_modules stays excluded");
-  assert.equal(existsSync(join(extracted, "coverage", "report.json")), false, "root coverage stays excluded");
+  assert.equal(readFileSync(join(extracted, "coverage", "report.json"), "utf8"), "generated report\n", "unignored root coverage is preserved");
+  assert.equal(existsSync(join(extracted, "node_modules", "generated.js")), false, "Git-ignored root node_modules stays excluded");
 });
 
 test("W1-T14400 criterion 2: invariant:nothing-unsaved-is-removed — a failed save, a held worktree or a recent one is kept", () => {

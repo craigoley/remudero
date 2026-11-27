@@ -812,21 +812,22 @@ sweep_worktree() {
   worktree_clean "$wt"; idle_status=$?
   case "$idle_status" in
     0) ;;
-    1) prune_held_worktree "$wt" "uncommitted changes"
-       [ "$kind" = "linked worktree" ] && retire_held_worktree "$wt" "uncommitted changes"; return ;;
+    1) [ "$kind" = "linked worktree" ] && retire_held_worktree "$wt" "uncommitted changes"
+       [ -d "$wt" ] && prune_held_worktree "$wt" "uncommitted changes"; return ;;
     *) log "KEEP $wt: Git status failed (unknown)"; return ;;
   esac
   worktree_ignored_safe "$wt"; idle_status=$?
   case "$idle_status" in
     0) ;;
-    1) prune_held_worktree "$wt" "ignored data includes paths beyond node_modules/coverage"
-       [ "$kind" = "linked worktree" ] && retire_held_worktree "$wt" "ignored data includes paths beyond node_modules/coverage"; return ;;
+    1) [ "$kind" = "linked worktree" ] && retire_held_worktree "$wt" "ignored data includes paths beyond node_modules/coverage"
+       [ -d "$wt" ] && prune_held_worktree "$wt" "ignored data includes paths beyond node_modules/coverage"; return ;;
     *) log "KEEP $wt: ignored-data scan failed (unknown)"; return ;;
   esac
   head="$(rgit "$wt" rev-parse HEAD 2>/dev/null)" || { log "KEEP $wt: HEAD is unreadable"; return; }
   if ! worktree_saved "$wt"; then
     if [ "$kind" = "linked worktree" ]; then
-      prune_held_worktree "$wt" "$RMD_PUB_REASON HEAD=$head"; retire_held_worktree "$wt" "$RMD_PUB_REASON HEAD=$head"
+      retire_held_worktree "$wt" "$RMD_PUB_REASON HEAD=$head"
+      [ -d "$wt" ] && prune_held_worktree "$wt" "$RMD_PUB_REASON HEAD=$head"
     else log "KEEP $wt: $RMD_PUB_REASON HEAD=$head"; fi
     return
   fi
@@ -1579,7 +1580,7 @@ preserve_exclusions() {
   return 0
 }
 preserve_write() {
-  local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count objects r name url path remotes_text=""
+  local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count objects r name url path cache_root tracked remotes_text=""
   local -a revs=() tar_excludes=()
   branch="$(rgit "$repo" symbolic-ref -q --short HEAD 2>/dev/null)" || branch="(detached)"
   while IFS= read -r name; do
@@ -1607,7 +1608,17 @@ preserve_write() {
     tar_excludes=(--exclude=.git)
     : > "$work/.untracked-to-archive" || { PRESERVE_REASON="untracked-listing-failed"; return 1; }
     while IFS= read -r -d '' path; do
-      case "$path" in node_modules|node_modules/*|coverage|coverage/*) continue ;; esac
+      case "$path" in
+        node_modules|node_modules/*|coverage|coverage/*)
+          cache_root="${path%%/*}"
+          # A cache-shaped name is not proof that the payload is disposable. Omit it only
+          # when Git explicitly ignores the root and has no tracked entries below it.
+          if rgit "$repo" check-ignore -q -- "$cache_root" 2>/dev/null &&
+             tracked="$(rgit "$repo" ls-files -- "$cache_root" 2>/dev/null)" && [ -z "$tracked" ]; then
+            continue
+          fi
+          ;;
+      esac
       printf '%s\0' "$path" >> "$work/.untracked-to-archive" || { PRESERVE_REASON="untracked-listing-failed"; return 1; }
     done < "$work/.untracked"
     if [ -s "$work/.untracked-to-archive" ] &&
