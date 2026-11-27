@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { armCliTokenRenewal } from "#src/lib/cli-token-renewal.js";
+import { startInstallationTokenRefresh } from "#src/lib/github-app.js";
 import { postReviewStatus } from "#src/lib/review.js";
 
 const APP_ENV = { GH_APP_ID: "1", GH_APP_INSTALLATION_ID: "2", GH_APP_PRIVATE_KEY_PATH: "/nonexistent/key.pem" };
@@ -58,4 +59,16 @@ test("W1-T15038 criterion 3 the renewal never holds a short verb open", async ()
     refresh: async () => { mints += 1; return { ok: false, reason: "not configured" } as never; } });
   assert.equal(result, "minted-once", "with no GH_APP_* names the one-shot mint runs as before");
   assert.equal(mints, 1);
+
+  // A normal short verb such as `review` does arm the production loop. Observe its real timer
+  // handle so this proof fails if the loop stops unref'ing the renewal timer.
+  const reviewEnv: NodeJS.ProcessEnv = { ...APP_ENV };
+  let timerUnrefs = 0;
+  const resultForReview = await armCliTokenRenewal({ cmd: "review", env: reviewEnv, log: () => {},
+    refresh: okRefresh(reviewEnv),
+    start: (opts) => startInstallationTokenRefresh({ ...opts,
+      setTimer: () => ({ unref: () => { timerUnrefs += 1; } }) }) });
+  assert.equal(resultForReview, "armed", "a short CLI verb uses the production renewal loop");
+  assert.equal(reviewEnv.GH_TOKEN, "fresh", "the first mint completes before the short verb runs");
+  assert.equal(timerUnrefs, 1, "the production renewal timer cannot keep a short verb open");
 });
