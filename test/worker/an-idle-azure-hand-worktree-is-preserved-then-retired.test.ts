@@ -6,7 +6,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { age, fixture, git, repos, run, type Fixture } from "#test/helpers/host-cleanup-fixture.js";
@@ -34,6 +35,10 @@ function heldHandTree(fx: Fixture, name: string) {
   git(wt, "commit", "--quiet", "-m", "unpublished commit");
   writeFileSync(join(wt, "README"), "edited, not committed\n");
   writeFileSync(join(wt, "notes.md"), "untracked notes\n");
+  mkdirSync(join(wt, "test", "ci", "coverage"), { recursive: true });
+  writeFileSync(join(wt, "test", "ci", "coverage", "new-test.ts"), "export {};\n");
+  mkdirSync(join(wt, "src", "dist"), { recursive: true });
+  writeFileSync(join(wt, "src", "dist", "new-source.ts"), "export {};\n");
   return { main, wt, branch, root: join(wt, "..") };
 }
 
@@ -58,6 +63,12 @@ test("W1-T14400 criterion 1: an idle hand worktree with uncommitted and unpushed
   assert.equal(readFileSync(join(restore, "feature.txt"), "utf8"), "unpublished work\n", "the commit is on the kept branch");
   git(restore, "apply", "--binary", join(copy, "uncommitted.patch"));
   assert.equal(readFileSync(join(restore, "README"), "utf8"), "edited, not committed\n", "the patch restores the edit");
+  const extracted = join(fx.root, "untracked-restore");
+  mkdirSync(extracted);
+  execFileSync("tar", ["-xzf", join(copy, "untracked.tar.gz"), "-C", extracted]);
+  for (const path of ["test/ci/coverage/new-test.ts", "src/dist/new-source.ts"]) {
+    assert.equal(readFileSync(join(extracted, path), "utf8"), "export {};\n", `${path} survives the skipped-name class`);
+  }
 });
 
 test("W1-T14400 criterion 2: invariant:nothing-unsaved-is-removed — a failed save, a held worktree or a recent one is kept", () => {
@@ -85,4 +96,47 @@ test("W1-T14400 criterion 2: invariant:nothing-unsaved-is-removed — a failed s
   }
   assert.match(r.stdout, new RegExp(`KEEP ${unsavable}: uncommitted changes; cannot create`));
   assert.match(r.stdout, new RegExp(`KEEP ${locked}: Git worktree is locked`));
+});
+
+test("W1-T14400 criterion 2: preserve-retire keeps nested repositories, bundles and implicit agent worktrees", () => {
+  const fx = fixture();
+  const { main, addWorktree } = repos(fx);
+  const handRoot = join(fx.root, "hand-roots");
+  mkdirSync(handRoot);
+  const addHand = (name: string, branch: string) => {
+    const wt = join(handRoot, name);
+    git(main, "worktree", "add", "--quiet", "-b", branch, wt, "main");
+    writeFileSync(join(wt, "README"), `${name} dirty\n`);
+    age(wt, 10 * DAY_HOURS);
+    return wt;
+  };
+  const nested = addHand("nested", "hand/nested");
+  const nestedRepo = join(nested, "vendor", "clone");
+  mkdirSync(join(nested, "vendor"), { recursive: true });
+  git(fx.root, "clone", "--quiet", join(fx.root, "origin.git"), nestedRepo);
+  age(nested, 10 * DAY_HOURS);
+  const bare = addHand("bare", "hand/bare");
+  const bareRepo = join(bare, "vendor", "bare.git");
+  git(fx.root, "init", "--quiet", "--bare", bareRepo);
+  age(bare, 10 * DAY_HOURS);
+  const cachedBundle = addHand("bundle", "hand/bundle");
+  mkdirSync(join(cachedBundle, "node_modules"), { recursive: true });
+  writeFileSync(join(cachedBundle, "node_modules", "only-copy.bundle"), "bundle data\n");
+  age(cachedBundle, 10 * DAY_HOURS);
+
+  const agent = addWorktree("implicit-agent", "agent/implicit-agent");
+  writeFileSync(join(agent, "README"), "agent dirty\n");
+  age(agent, 10 * DAY_HOURS);
+
+  const r = run(fx, handOnly(handRoot));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  for (const kept of [nested, bare, cachedBundle, agent]) {
+    assert.equal(existsSync(kept), true, `${kept} remains:
+${r.stdout}`);
+    assert.doesNotMatch(r.stdout, new RegExp(`REMOVE ${kept}[: ]`));
+  }
+  assert.match(r.stdout, new RegExp(`KEEP ${nested}: .*nested repository or bundle found`));
+  assert.match(r.stdout, new RegExp(`KEEP ${bare}: .*nested repository or bundle found`));
+  assert.match(r.stdout, new RegExp(`KEEP ${cachedBundle}: .*nested repository or bundle found`));
+  assert.match(r.stdout, new RegExp(`KEEP ${agent}: .*outside configured hand worktree roots`));
 });

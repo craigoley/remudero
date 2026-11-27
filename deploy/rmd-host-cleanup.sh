@@ -632,6 +632,38 @@ worktree_ignored_safe() {
 worktree_saved() {
   rmd_workspace_published "$1" head "${2:-0}"
 }
+# Retirement is reserved for immediate children of configured hand roots. The separate
+# ~/.claude/worktrees scan is cleanup-only and must never opt an agent worktree into preservation.
+configured_hand_worktree() {
+  local wt="$1" root rest
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    root="${root%/}"
+    case "$wt" in
+      "$root"/*)
+        rest="${wt#"$root"/}"
+        case "$rest" in */*) continue ;; esac
+        [ -n "$rest" ] && return 0
+        ;;
+    esac
+  done < <(printf '%s\n' "$WORKTREE_ROOTS" | tr ':' '\n')
+  return 1
+}
+# The preserve format intentionally omits only root build caches. Never retire a worktree when a
+# nested repository or bundle is present: the tarball excludes Git metadata and cache pruning can
+# otherwise remove the only copy of repository history or a bundle.
+retirement_payload_safe() {
+  local wt="$1" found dir dirs
+  if ! found="$(find "$wt" -mindepth 2 \( -name .git -o -type f -name '*.bundle' \) -print -quit 2>/dev/null)"; then
+    return 1
+  fi
+  [ -z "$found" ] || return 1
+  if ! dirs="$(find "$wt" -mindepth 2 -type d -print 2>/dev/null)"; then return 1; fi
+  while IFS= read -r dir; do
+    if [ -f "$dir/HEAD" ] && [ -d "$dir/objects" ] && [ -d "$dir/refs" ]; then return 1; fi
+  done <<< "$dirs"
+  return 0
+}
 # Every ref of a clone outside refs/remotes, as "<object> <refname>" lines (heads, tags, stash, ...).
 local_refs() {
   local out
@@ -705,6 +737,8 @@ prune_held_worktree() {
 retire_held_worktree() {
   local wt="$1" reason="$2" gitdir bytes copy
   local IDLE_MINUTES=$(( HELD_WORKTREE_DAYS * 1440 ))
+  if ! configured_hand_worktree "$wt"; then log "KEEP $wt: $reason; outside configured hand worktree roots"; return 0; fi
+  if ! retirement_payload_safe "$wt"; then log "KEEP $wt: $reason; nested repository or bundle found, or payload scan failed"; return 0; fi
   is_worktree_idle "$wt" || return 0
   git_head_idle "$wt" || return 0
   if is_open "$wt" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$wt"; then return 0; fi
@@ -1486,7 +1520,6 @@ archive_transcript() {
 # ── preserve-then-retire (operator 2026-10-23): the Mac preserve-retire.py design on this janitor's
 # own guards; holds, copy format and restore steps are in deploy/mac/JANITOR.md.
 PRESERVE_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-PRESERVE_SKIP_DIRS="node_modules coverage dist .turbo .next"
 PRESERVE_RETIRED=0; PRESERVE_HELD=0
 owner_uid() { stat -c %u -- "$1" 2>/dev/null || stat -f %u -- "$1" 2>/dev/null; }
 url_without_credentials() { printf '%s\n' "$1" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@#\1#'; }
@@ -1545,7 +1578,7 @@ preserve_exclusions() {
   return 0
 }
 preserve_write() {
-  local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count objects r name url remotes_text="" skip
+  local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count objects r name url remotes_text=""
   local -a revs=() tar_excludes=()
   branch="$(rgit "$repo" symbolic-ref -q --short HEAD 2>/dev/null)" || branch="(detached)"
   while IFS= read -r name; do
@@ -1568,11 +1601,9 @@ preserve_write() {
   fi
   rgit "$repo" diff --binary HEAD > "$work/uncommitted.patch" 2>/dev/null || { PRESERVE_REASON="diff-failed"; return 1; }
   [ -s "$work/uncommitted.patch" ] || rm -f -- "$work/uncommitted.patch"
-  for skip in $PRESERVE_SKIP_DIRS; do tar_excludes+=("-x" "$skip"); done
   rgit "$repo" ls-files -z --others "${tar_excludes[@]}" > "$work/.untracked" 2>/dev/null || { PRESERVE_REASON="untracked-listing-failed"; return 1; }
   if [ -s "$work/.untracked" ]; then
     tar_excludes=(--exclude=.git)
-    for skip in $PRESERVE_SKIP_DIRS; do tar_excludes+=("--exclude=$skip"); done
     if ! ( cd -- "$repo" && tar -czf "$work/untracked.tar.gz" "${tar_excludes[@]}" --null -T "$work/.untracked" ) </dev/null >/dev/null 2>&1 ||
        ! tar -tzf "$work/untracked.tar.gz" </dev/null >/dev/null 2>&1; then
       PRESERVE_REASON="untracked-tarball-failed"; return 1
