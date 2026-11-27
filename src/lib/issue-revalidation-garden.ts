@@ -31,7 +31,7 @@ import { loadConfig, type Config, type WorkerProviderId } from "./config.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { fixedClock, systemClock, type Clock } from "./clock.js";
 import {
-  escalationBodyInLegacyOrder, escalationHeadSha, ghIssueGatewayAsync, prReferentFromIssueText, splitConcatenatedJsonPages,
+  escalationBodyInLegacyOrder, escalationHeadSha, escalationIssueRepository, ghIssueGatewayAsync, prReferentFromIssueText, splitConcatenatedJsonPages,
   type AsyncIssueGateway,
 } from "./escalate.js";
 import { feedbackCaptured, stageFeedbackCapture } from "./feedback.js";
@@ -1278,6 +1278,8 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
     return read.rows;
   });
   const repoArg = `${opts.owner}/${opts.repo}`;
+  // W1-T14998: escalation issues are listed and read where they are filed; pull requests stay on the code repository.
+  const [issueOwner, issueRepo] = escalationIssueRepository(opts.owner, opts.repo);
   const sinceIso = () => fixedClock(clock.now() - ISSUE_REVALIDATION_LEDGER_WINDOW_MS).iso();
   let ownRows: Array<Record<string, unknown>> | undefined;
   const rows = () => (ownRows ??= readLedgerRows([ISSUE_REVALIDATION_VERDICT_STEP, "read_model.consistency"], sinceIso()));
@@ -1291,13 +1293,13 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
     clock,
     log: opts.log,
     listOpenIssues: async () => {
-      listed = parseOpenIssuesRest(await readText(openIssuesRestArgs(opts.owner, opts.repo)));
+      listed = parseOpenIssuesRest(await readText(openIssuesRestArgs(issueOwner, issueRepo)));
       stepRows = undefined;
       commits = undefined;
       shardList = undefined;
       return listed;
     },
-    listComments: async (n) => parseIssueCommentsRest(await readText(["api", `repos/${repoArg}/issues/${n}/comments?per_page=100`, "--paginate"])),
+    listComments: async (n) => parseIssueCommentsRest(await readText(["api", `repos/${issueOwner}/${issueRepo}/issues/${n}/comments?per_page=100`, "--paginate"])),
     answeredOrigins: () => readAnsweredCommentOrigins(opts.repoRoot),
     pullState: async (n) => pullStateFromRest(await readText(["api", `repos/${repoArg}/pulls/${n}`, "--jq", "{state: .state, merged_at: .merged_at, closed_at: .closed_at}"])),
     // One tree listing per pass, however many BLOCKED issues ask for a shard.
@@ -1322,7 +1324,7 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
       }
     },
     readModelVerdict: (taskId) => readModelVerdictFromRows(taskId, rows()),
-    priorVerdicts: () => priorVerdictsFromRows(rows().filter((r) => verdictRowNamesRepository(r, repoArg, opts.managedTarget === true))),
+    priorVerdicts: () => priorVerdictsFromRows(rows().filter((r) => verdictRowNamesRepository(r, `${issueOwner}/${issueRepo}`, opts.managedTarget === true))),
     evidence: (issue) => {
       const facts: string[] = [];
       for (const name of evidenceNames(issue)) {

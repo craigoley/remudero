@@ -16,6 +16,8 @@ import {
 } from "#src/lib/escalate.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { sreOperatorEscalation } from "#src/lib/sre-runbooks.js";
+import { productionIssueRevalidationPorts } from "#src/lib/issue-revalidation-garden.js";
+import { attachEscalationConditions } from "#src/lib/tick-read-worker.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const CODE = { owner: "craigoley", repo: "remudero" };
@@ -194,4 +196,29 @@ test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery close
   const reopened = withLiveWritesAllowed(() => escalate(escalation(), { issues, ledgerPath: path, runId: "RUN-3" }));
   assert.notEqual(reopened, first, "a closed issue does not silence a recurrence");
   assert.deepEqual(gh.issues.map((issue) => issue.repo), [OPS, OPS]);
+});
+
+test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery closes it, reading its thread and listing where filed", async () => {
+  // A condition-cleared close first asks whether a person replied: on the issue's own (ops) thread, never core's #7.
+  const reads: string[] = [];
+  const read = async (args: string[]): Promise<unknown> => { reads.push(args[1]!); return []; };
+  const [candidate] = await attachEscalationConditions(CODE.owner, CODE.repo, [{
+    issueUrl: `https://github.com/${OPS}/issues/7`, issueNumber: 7, title: "t",
+    condition: { prNumber: 20986, escalatedHead: "old", checks: ["ci-gate"] },
+  } as unknown as Parameters<typeof attachEscalationConditions>[2][number]], [{
+    number: 20986, url: PR_URL, headRefOid: "new",
+    statusCheckRollup: [{ name: "ci-gate", conclusion: "SUCCESS", status: "COMPLETED", headSha: "new" }],
+  } as unknown as Parameters<typeof attachEscalationConditions>[3] extends readonly (infer R)[] | undefined ? R : never], read);
+  assert.deepEqual(reads, [`repos/${OPS}/issues/7/comments?per_page=100`]);
+  assert.equal(candidate?.condition?.personReplied, false);
+  // The revalidation garden lists and reads escalation issues in ops, and reads pull requests on the code repository.
+  const garden: string[] = [];
+  const ports = withEnv(OPS, () => productionIssueRevalidationPorts({ ...CODE, stateDir: tmpdir(), repoRoot: tmpdir(), log: () => {},
+    referentVerdicts: async () => new Map(), hasReferent: () => false, judgeText: async () => "",
+    readText: async (args: string[]) => { garden.push(args[1]!); return args[1]!.includes("/pulls/") ? "{}" : "[]"; } } as never));
+  await ports.listOpenIssues();
+  await ports.listComments(7);
+  await ports.pullState?.(20986).catch(() => undefined);
+  assert.deepEqual(garden.map((path) => path.split("?")[0]),
+    [`repos/${OPS}/issues`, `repos/${OPS}/issues/7/comments`, `repos/${CODE.owner}/${CODE.repo}/pulls/20986`]);
 });

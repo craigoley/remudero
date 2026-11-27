@@ -21,6 +21,7 @@ import { readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome
 import { findTaskInCatalogs } from "./task-lookup.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
+import { escalationIssueRepository } from "./escalate.js";
 import { isHolderStale } from "./fs-race-safe.js";
 import { isTestRunner } from "./live-write-guard.js";
 import { boardRefreshRollup, instanceBoardSnapshotCache, type BoardSnapshotCache } from "./board-snapshot-cache.js";
@@ -5001,7 +5002,8 @@ function runPrewarmChannelsSync(req: PrewarmWorkerRequest): PrewarmWorkerRespons
   if (req.fetchIssues) {
     const { fetchJson, bytes } = makeFetchJson();
     response.issues = prewarmRunChannel(
-      () => fetchLabelledIssuesRest(req.owner, req.repo, NEEDS_HUMAN_LABEL, fetchJson, req.knownIssues),
+      // W1-T14998: needs-human issues are read where they are filed.
+      () => fetchLabelledIssuesRest(...escalationIssueRepository(req.owner, req.repo), NEEDS_HUMAN_LABEL, fetchJson, req.knownIssues),
       bytes,
     );
   }
@@ -5301,7 +5303,7 @@ export function buildBatchedGithub(
         return JSON.parse(raw);
       };
       seedFromInstance();
-      const fetched = fetchLabelledIssuesRest(owner, repo, NEEDS_HUMAN_LABEL, fetchJson, knownIssues);
+      const fetched = fetchLabelledIssuesRest(...escalationIssueRepository(owner, repo), NEEDS_HUMAN_LABEL, fetchJson, knownIssues);
       // Reassigned only on a SUCCESSFUL return, exactly like `knownBoardPrs` — a throw skips this line, so a
       // transient failure leaves the previous complete snapshot intact and the NEXT call is still a cheap delta.
       knownIssues = new Map(fetched.rows.map((r) => [r.number, r]));
