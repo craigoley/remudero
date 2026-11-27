@@ -41,8 +41,8 @@ function hookView(prNumber: number, headSha: string, ready = false): OpenPrView 
 
 function pullRow(prNumber: number, headSha: string, repo: string): Record<string, unknown> {
   return { number: prNumber, html_url: `https://github.com/o/${repo}/pull/${prNumber}`, state: "open", draft: false,
-    title: `feat: ${prNumber}`, body: `Remudero-Task: W1-T${prNumber}`, updated_at: "2026-11-14T00:00:00Z",
-    created_at: "2026-11-14T00:00:00Z", head: { ref: `run-W1-T${prNumber}-1`, sha: headSha } };
+    title: `feat: ${prNumber}`, body: `Remudero-Task: W1-T${prNumber}`, updated_at: new Date().toISOString(),
+    created_at: new Date().toISOString(), head: { ref: `run-W1-T${prNumber}-1`, sha: headSha } };
 }
 
 function hookFixture(ownPr: OpenPrView) {

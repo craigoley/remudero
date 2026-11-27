@@ -1598,6 +1598,8 @@ export interface DaemonDeps {
   /** Fresh merged predicate each call (re-derived from GitHub between iterations). */
   refreshMerged: (plan?: Plan) => MergedSet;
   refreshMergedAsync?: (plan?: Plan) => Promise<MergedSet>;
+  /** W1-T14893: the lane refill's merged-set read, which may reuse the tick read published moments ago; absent, the refill reads through `refreshMergedAsync`. */
+  refreshMergedForRefill?: (plan?: Plan) => Promise<MergedSet>;
   /** W1-T14644: where the last refreshMerged read's projection spent its time, handed over once; undefined when it measured nothing. */
   takeRefreshMergedPhases?: () => ProjectPlanPhases | undefined;
   readLoopTelemetry?: (() => { loop_delay_max_ms: number; loop_delay_p99_ms: number; sync_spawn_ms: number;
@@ -10004,8 +10006,9 @@ export async function runDaemon(
             // object that supplies no async port keeps the synchronous read, and its refill stays synchronous.
             // W1-T14644: drop phases an earlier read left, so the row names only this probe's own.
             deps.takeRefreshMergedPhases?.();
-            if (deps.refreshMergedAsync) {
-              return timing.probe("refreshMerged", () => deps.refreshMergedAsync!(refillPlan)).then(
+            const refillRead = deps.refreshMergedAsync ? (deps.refreshMergedForRefill ?? deps.refreshMergedAsync) : undefined;
+            if (refillRead) {
+              return timing.probe("refreshMerged", () => refillRead(refillPlan)).then(
                 (isMerged) => {
                   timing.noteRefreshMergedPhases(deps.takeRefreshMergedPhases?.());
                   if (deps.readLiveState) return decideLive(refillPlan, isMerged);

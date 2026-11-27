@@ -19,7 +19,9 @@ function fixture() {
     if (reason !== undefined) writeFileSync(join(admin, "locked"), reason);
     return { name, path, admin };
   };
-  const reap = (dryRun = false) => reapStaleWorktrees(worktrees, { maxAgeMs: 0, dryRun });
+  // W1-T15026: nobody works in these trees, said here rather than read off the host's `/proc`.
+  const cwdCensus = () => ({ state: "clear", scanned: 0 }) as const;
+  const reap = (dryRun = false) => reapStaleWorktrees(worktrees, { maxAgeMs: 0, dryRun, cwdCensus });
   return { root, repo, git, add, reap };
 }
 
