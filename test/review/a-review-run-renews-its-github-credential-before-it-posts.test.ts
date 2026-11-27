@@ -22,7 +22,8 @@ import { holdReviewRunLive, postReviewPending, postReviewStatusGuarded, postUnre
 import { tryEscalateAsync } from "#src/lib/escalate.js";
 import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
 import { readLedgerLines } from "#src/lib/status.js";
-import { DEFAULT_SWEEP_POLICY, orphanedOwnerRetryView, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
+import { DEFAULT_SWEEP_POLICY, orphanedOwnerRetryView, pendingProofRetryCause, reviewerUnavailableProvidersForReadmission, runSweep,
+  type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
 import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
@@ -366,6 +367,26 @@ test("W1-T15030 criterion 3: a taker that dies after a takeover is re-admitted o
   // The production view builder shares the classification: a claim_lost row is no durable input refusal.
   assert.equal(await producerRefusesAfter(t, "claim_lost"), false);
   assert.equal(await producerRefusesAfter(t, "a durable refusal"), true, "control: the producer reads the row");
+});
+
+test("W1-T15030 criterion 4: claim_lost does not supersede the pending verdict it refused to publish", async (t) => {
+  const orphan = orphanFixture(t, 35);
+  const pr = { ...orphan.pr, reviewState: "pending" as const };
+  const verdictRow = { run_id: orphan.runId, task_id: pr.taskId, step: "review.posted", pr_url: pr.prUrl, head_sha: pr.headSha,
+    review_input_digest: pr.reviewInputDigest, state: "pending", ts: pr.reviewPendingSince,
+    decision_verdict: { state: "pending", criteria: [{ proof_exec: "sandbox_start_failed" }], testTheater: false, criteriaTampered: false,
+      cannotEvaluate: false } };
+  const rows = [verdictRow, { run_id: "review-loser", task_id: pr.taskId, step: "review.post_refused", pr_url: pr.prUrl,
+    head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, reason: "claim_lost", taken_over_by_run_id: "review-taker" }];
+
+  assert.equal(pendingProofRetryCause(pr, rows, () => ({})), "sandbox-start-failed",
+    "THE CLAIM: a loser's refusal cannot hide the pending verdict that the sweep must retry");
+
+  const unavailableVerdict = { ...verdictRow, decision_verdict: { ...verdictRow.decision_verdict, cannotEvaluate: true,
+    criteria: [{ proof_exec: "cannot_evaluate", reviewerUnavailable: "provider unavailable" }] } };
+  const providerRows = [unavailableVerdict, { run_id: orphan.runId, step: "review.reviewer", provider: "codex", unable: 1 }, rows[1]!];
+  assert.deepEqual(reviewerUnavailableProvidersForReadmission(pr, providerRows), ["codex"],
+    "the same claim-loss signal cannot erase reviewer-unavailable retry context");
 });
 
 test("W1-T15030 criterion 4: a run that lost its claim cannot post", async (t) => {

@@ -18738,11 +18738,17 @@ function reviewOutcomeKeyForPr(pr: OpenPrView): string {
   return reviewOutcomeKey(taskId, pr.prUrl, pr.headSha, pr.reviewInputDigest);
 }
 
+/** A claim-lost refusal says nothing about the review outcome: another run owns the claim and this run published no
+ *  verdict. Keep it out of readers that select the latest outcome for a pending review. */
+function isReviewOutcomeLedgerRow(row: Record<string, unknown>): boolean {
+  return row.step === "review.posted" || row.step === "review.pending_posted" ||
+    (row.step === "review.post_refused" && row.reason !== "claim_lost");
+}
+
 function incompletePromiseHarvestFromLedger(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): boolean {
   if (pr.reviewState !== "pending") return false;
   const row = lines.findLast(row => row.task_id === reviewOutcomeTaskIdFor(pr) && row.pr_url === pr.prUrl &&
-    row.head_sha === pr.headSha &&
-    (row.step === "review.posted" || row.step === "review.pending_posted" || row.step === "review.post_refused"));
+    row.head_sha === pr.headSha && isReviewOutcomeLedgerRow(row));
   if (row?.step !== "review.posted" || row.state !== "pending") return false;
   if (row.review_input_digest !== undefined && pr.reviewInputDigest !== undefined && row.review_input_digest !== pr.reviewInputDigest) return false;
   if (pr.reviewPendingSince && typeof row.ts === "string" && Date.parse(pr.reviewPendingSince) > Date.parse(row.ts)) return false;
@@ -18762,7 +18768,7 @@ export function reviewerUnavailableProvidersForReadmission(
   if (pr.reviewState !== "pending") return undefined;
   const taskId = reviewOutcomeTaskIdFor(pr);
   const pending = lines.findLast((row) => row.task_id === taskId && row.pr_url === pr.prUrl && row.head_sha === pr.headSha &&
-    (row.step === "review.posted" || row.step === "review.pending_posted" || row.step === "review.post_refused"));
+    isReviewOutcomeLedgerRow(row));
   if (pending?.step !== "review.posted" || pending.state !== "pending") return undefined;
   if (pending.review_input_digest !== undefined && pr.reviewInputDigest !== undefined &&
       pending.review_input_digest !== pr.reviewInputDigest) return undefined;
@@ -18874,7 +18880,7 @@ function inconclusiveLoadLoweredRow(
   if (pr.reviewState !== "pending") return false;
   const taskId = reviewOutcomeTaskIdFor(pr);
   const rows = lines.filter(row => row.task_id === taskId && row.pr_url === pr.prUrl && row.head_sha === pr.headSha &&
-    (row.step === "review.posted" || row.step === "review.pending_posted" || row.step === "review.post_refused"));
+    isReviewOutcomeLedgerRow(row));
   const row = rows.at(-1);
   if (row?.step !== "review.posted" || row.state !== "pending") return false;
   if (row.review_input_digest !== undefined && pr.reviewInputDigest !== undefined && row.review_input_digest !== pr.reviewInputDigest) return false;
