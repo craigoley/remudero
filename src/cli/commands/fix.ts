@@ -53,6 +53,7 @@ import { fixArmEvidence, fixRoutingWeights, readFixRoutingRows, type FixLearnedA
 import { loadInjectableSkills, observeSkillSelection, renderSkillsPart, SKILL_FIX_TASK_TYPE, SKILL_WITHHOLDING_SHARE, skillWithheldUnderRetirement, stagedSkillRetirements } from "../../lib/skill-workshop.js";
 import { SKILL_ARM_EPOCH, TASK_ARM_UNIT, taskArmWithheld } from "../../lib/task-arm.js";
 import { DEFAULT_KNOWLEDGE_BUDGET_CHARS } from "../../lib/learnings.js";
+import { fixLearningsRoundsToGreen, fixLearningsShadowFields, type FixLearningsRound } from "../../lib/fix-learnings-shadow.js";
 import { recognizeChangesetClaims, acceptanceAuthorTimeCheck, acceptanceBlockRegion, extractTaskTrailerId, parseAcceptanceBlock, bodyProofSetDivergence, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, reviewInputDigest, reviewLedgerReasons, resolvePlanCriteriaAtHeadAsync, type CriterionVerdict } from "../../lib/review.js";
 import { repairedProofsAreSafeToPush, diagnoseUnrunnableProofs, renderBodyDefects } from "../../lib/body-repair.js";
 import { recordHeadProviderAfterPush } from "../../lib/review-provider-provenance.js";
@@ -2938,6 +2939,18 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     const failure = roundPushFailure;
     const receipt = roundPushReceipt;
     roundPushFailure = roundPushReceipt = undefined;
+    if (failure?.outcome === "failed" && failure.remoteHead === undefined) {
+      // W1-T14138: a rejected push says nothing about the remote on its own. Read the branch once so the round's
+      // outcome can be attributed: a readable head that is not the round's commit is no push; an unreadable one stays
+      // unresolved. The landing itself stays "failed".
+      const head = await Promise.resolve().then(() => (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch))
+        .then((read) => read, (error: unknown) => {
+          deps.log("fix.evidence_head_unread", { head_sha: committed,
+            reason: `failed push remote head could not be read: ${String((error as Error)?.message ?? error).slice(0, 300)}` });
+          return undefined;
+        });
+      return head === undefined ? failure : { ...failure, remoteHead: head };
+    }
     if (failure) return failure;
     const readRemoteBranchHead = deps.readRemoteBranchHead ?? (receipt ? lsRemoteBranchHead : undefined);
     if (!readRemoteBranchHead) return { landed: true }; // a push double that names no head never reached a remote to read
@@ -4845,32 +4858,68 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
 
     // W1-T4458 (i): the harness starts the merge a shell-less round cannot run, so the worker only
     // resolves the conflict markers it leaves.
-    if (fixHarnessOwnsGit && currentMergeConflict !== undefined) {
-      const merged = (deps.startShellLessMergeConflictMerge ?? host.startShellLessMergeConflictMerge)(opts.worktreePath);
+    const merged = fixHarnessOwnsGit && currentMergeConflict !== undefined
+      ? (deps.startShellLessMergeConflictMerge ?? host.startShellLessMergeConflictMerge)(opts.worktreePath) : undefined;
+    // #10787: main is already in the branch and a red is known — route to it: no strike, no refused round.
+    const mergeUpToDateRed = merged?.reason === host.MERGE_UP_TO_DATE_REASON && noReviewYet && (currentCiFailures?.length ?? 0) > 0;
+    // W1-T13990: a round whose merge did not start is told apart by its id (adaptive-wip.ts reads the marker).
+    const mergeMarker = merged !== undefined && !merged.started && !mergeUpToDateRed ? ":merge-refused" : "";
+    const roundId = `${opts.runId}${mergeMarker}:${attempt + retriggers}:${systemClock.now()}`;
+    const shadowRound: FixLearningsRound = { run_id: opts.runId, task_id: opts.taskId, pr_number: prNumber,
+      pr_url: opts.prUrl, round_id: roundId, attempt, round, head_sha: null };
+    // W1-T14138: only the reds THIS round's prompt carries; `currentCiFailures` outlives a green CI.
+    const recordFixLearningsShadow = () => deps.log("fix.learnings_shadow", fixLearningsShadowFields(shadowRound, {
+      config: opts.config, repo: opts.reviewBase.repo, failures: priorCiFailures ?? [], review: evidence.review,
+    }));
+    const recordFixLearningsOutcome = (outcome: "green" | "red" | "no_push", pushedHeadSha?: string) =>
+      deps.log("fix.learnings_outcome", { ...shadowRound, outcome, pushed_head_sha: pushedHeadSha,
+        ...(outcome === "green" ? { rounds_to_green: fixLearningsRoundsToGreen(
+          [...(repairHistory?.ok ? repairHistory.rows : []), ...roundLedger, ...roundRows], opts.taskId) } : {}) });
+    // The plan-filing refusal and the recycle yield end the round before the harness push and its CI wait.
+    // A shell-less worker cannot publish, so its round pushed nothing. A worker that holds git may have run
+    // `git push`: it pushed nothing only when the remote still names the round's start. A moved remote stays
+    // unresolved, as on every exit that waits for no CI. The measurement never adds a CI wait to an exit.
+    const recordEarlyFixLearningsOutcome = async (): Promise<void> => {
+      if (fixHarnessOwnsGit) {
+        recordFixLearningsOutcome("no_push");
+        return;
+      }
+      let remoteHead: string | undefined;
+      try { remoteHead = await (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch); }
+      catch (error) {
+        deps.log("fix.evidence_head_unread", { round_id: roundId, head_sha: priorHeadSha,
+          reason: `early round outcome remote head could not be read: ${String((error as Error)?.message ?? error)}` });
+        return;
+      }
+      if (remoteHead === undefined || remoteHead === roundStartHeadSha) recordFixLearningsOutcome("no_push");
+    };
+    // A worker that may still be running can publish only when it holds its own git; that outcome stays unresolved.
+    const recordUnpublishedLiveRound = (): void => { if (fixHarnessOwnsGit) recordFixLearningsOutcome("no_push"); };
+    if (merged !== undefined) {
       deps.log(merged.started ? "fix.merge_started" : "fix.merge_start_failed", {
         strike: attempt,
         ...(merged.reason ? { reason: merged.reason } : {}),
       });
-      // #10787: main is already in the branch and a red is known — route to it: no strike, no refused round.
-      if (merged.reason === host.MERGE_UP_TO_DATE_REASON && noReviewYet && (currentCiFailures?.length ?? 0) > 0) {
+      if (mergeUpToDateRed) {
         leaveMergeMode("rung.merge_up_to_date", priorHeadSha);
         continue;
       }
       if (!merged.started) {
+        recordFixLearningsShadow(); // a counted round: it spends a strike below
         const refusal = merged.reason ?? "the merge of current main did not start (no reason reported)";
         consecutiveMergeRefusalReasons.push(refusal);
-        const refusedRoundId = `${opts.runId}:merge-refused:${attempt}:${systemClock.now()}`;
         strikes = attempt;
         deps.log("fix.dispatch", {
-          round_id: refusedRoundId,
+          round_id: roundId,
           strike: attempt, strike_cap: opts.strikeCap, unmet_count: unmet.length, round, mode: fixMode,
           verdict_regime: verdictRegime, head_sha: priorHeadSha, reason: refusal,
           conflicted_files: conflictedFilePaths(currentMergeConflict), ...conflictBaseField(),
         });
-        deps.log("fix.commit_refused", { round_id: refusedRoundId, head_sha: priorHeadSha,
+        deps.log("fix.commit_refused", { round_id: roundId, head_sha: priorHeadSha,
           strike: attempt, mode: fixMode, merge_start_failed: true, reason: refusal });
-        deps.log("fix.done", { round_id: refusedRoundId, head_sha: priorHeadSha,
+        deps.log("fix.done", { round_id: roundId, head_sha: priorHeadSha,
           strike: attempt, mode: fixMode, subtype: "commit_refused" });
+        recordFixLearningsOutcome("no_push");
         deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} FAILED, no worker spent — the merge of current main did not start: ${merged.reason}`);
         continue;
       }
@@ -4903,8 +4952,8 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // The unpublished local merge is the commit base; the push still leases the PR's original tip.
     const roundPushBaseSha = scopeMergeStartSha ?? roundBase.baseSha;
     if (roundBase.advanced) deps.log("fix.round_head_advanced", { head_sha: priorHeadSha, round_base_sha: roundBase.baseSha, reason: roundBase.reason });
+    let publishedHead: string | undefined;
     if (roundBase.advanced && scopeMergeStartSha === undefined) {
-      let publishedHead: string | undefined;
       try { publishedHead = await (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch); }
       catch { deps.log("fix.evidence_head_unread", { head_sha: priorHeadSha, worktree_head_sha: roundBase.baseSha,
         reason: "remote branch head read failed; no published advance was established" }); }
@@ -4930,8 +4979,11 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         return { outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason };
       }
     }
+    const roundStartHeadSha = roundBase.advanced && publishedHead === priorHeadSha ? priorHeadSha // proven unpublished
+      : scopeMergeStartSha ?? roundBase.baseSha; // W1-T14138: may already be on the PR, so re-pushing it is no push
+    const pushedByThisRound = (sha: string | undefined): boolean => sha !== undefined && sha !== roundStartHeadSha;
+    recordFixLearningsShadow(); // W1-T14138: only now is this iteration a worker round (no adopt, supersede or up-to-date)
     const fixRoundStartedAtMs = systemClock.now();
-    const roundId = `${opts.runId}:${attempt + retriggers}:${fixRoundStartedAtMs}`;
     const fixReceipt = host.fixWorkerReceipt(deps.spawn, deps.log, host.fixWorkerRunId(opts.runId, `fix${attempt}`, fixRoundStartedAtMs), fixLaneBenchmarkWork(opts.task, deps.ledgerPath),
       { prUrl: opts.prUrl, roundId }, { root: opts.config.root }, remedyExecution);
     let fixResult: WorkerResult;
@@ -4962,6 +5014,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         const s = spawnOutcome.superseded;
         const reason = `fix superseded (${s.condition}): ${s.oldHead.slice(0, 12)} -> ${s.newHead.slice(0, 12)}`;
         deps.say(`fix rung: STOPPED strike ${attempt}/${opts.strikeCap} — ${reason}: ${opts.prUrl}`);
+        recordUnpublishedLiveRound();
         return finish({ outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason, superseded: s });
       }
       if (spawnOutcome.kind === "yielded") {
@@ -4972,6 +5025,9 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           strike: attempt, round, subtype: "round_yielded", trigger: y.trigger, recovery_ref: y.recoveryRef ?? null,
           index_recovery_ref: y.indexRecoveryRef ?? null,
           cost_usd: y.costUsd, elapsed_ms: spawnOutcome.elapsedMs });
+        // `keepError` also names a worker that did not stop.
+        if (y.keepError) recordUnpublishedLiveRound();
+        else await recordEarlyFixLearningsOutcome();
         deps.branchClaim?.release();
         const kept = [y.recoveryRef && `work kept at ${y.recoveryRef}`, y.indexRecoveryRef && `staged work kept at ${y.indexRecoveryRef}`]
           .filter(Boolean).join(", ");
@@ -4989,6 +5045,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         // Mirrors the spawn-infra-blocked path immediately below: no subprocess demonstrably
         // ran to completion, so this round is never committed as a strike (W1-T127's own
         // "a strike is only spent once a worker demonstrably ran" invariant).
+        recordUnpublishedLiveRound();
         return finish({ outcome: "spawn_abandoned", review, strikes, retriggers, reason: "spawn wall-clock bound exceeded", spawnAbandonedElapsedMs: spawnOutcome.elapsedMs });
       }
       spawnElapsedMs = spawnOutcome.elapsedMs;
@@ -4999,6 +5056,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           ...(deps.branchClaim ? { branch_claim_run_id: deps.branchClaim.id() } : {}),
           strike: attempt, round, subtype: "admission_abandoned", worker_exit: "not_spawned",
           admission_since_ms: fixResult.admissionSinceMs, cost_usd: 0, num_turns: 0 });
+        recordFixLearningsOutcome("no_push");
         deps.branchClaim?.release();
         return finish({ outcome: "stood_down", review, strikes, retriggers, reason: "admission-abandoned",
           standDownReason: "fix admission abandoned before a worker started" });
@@ -5007,7 +5065,11 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         ...(fixResult.servedModel == null ? { served_model_reason: fixResult.servedModelReason ??
           "the provider reported no served model for this call" } : {}) };
     } catch (e) {
-      if (!isSpawnInfraBlockedError(e)) throw e;
+      if (!isSpawnInfraBlockedError(e)) {
+        recordUnpublishedLiveRound();
+        throw e;
+      }
+      recordFixLearningsOutcome("no_push");
       // No subprocess ever launched, nothing was billed: an INFRA-tagged $0 line, NEVER a
       // `fix.dispatch` line (the only step `priorStrikesFor` counts), so forensics can separate "the
       // task was expensive" from "the host was broken" (W1-T127 iii). The refusal propagates
@@ -5048,6 +5110,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         num_turns: fixResult.numTurns,
         elapsed_ms: spawnElapsedMs,
       });
+      recordFixLearningsOutcome("no_push");
       deps.branchClaim?.release();
       deps.say(`fix rung: strike ${attempt}/${opts.strikeCap} worker TERMINATED BY SIGNAL (${fixResult.subtype}) — ` +
         `not a commit refusal, no strike spent: ${opts.prUrl}`);
@@ -5252,6 +5315,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     if (filingRefusal) {
       deps.log("fix.commit_refused", { round_id: roundId, head_sha: priorHeadSha, reason: filingRefusal });
       deps.log("fix.done", { round_id: roundId, head_sha: priorHeadSha, subtype: "commit_refused" });
+      await recordEarlyFixLearningsOutcome();
       deps.branchClaim?.release();
       return finish({ outcome: "stood_down", review, strikes, retriggers, reason: filingRefusal, standDownReason: filingRefusal });
     }
@@ -5414,6 +5478,31 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // W1-T5955: the round ends here, so its branch claim does too; the CI wait holds none.
     const logFixDone = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding): void => {
       logFixDoneRow(pushedHeadSha, subtype, landing);
+      if (pushedHeadSha === undefined && landing !== undefined && !landing.landed && landing.outcome === "failed") {
+        // W1-T14138: a failed push is no push only when the remote was read after it and does not hold the round's
+        // commit; with no readable remote the round stays unresolved.
+        if (landing.remoteHead !== undefined && landing.remoteHead !== expectedHeadShaForPush) recordFixLearningsOutcome("no_push");
+        releaseRoundClaim();
+        return;
+      }
+      if (pushedHeadSha === roundStartHeadSha || (pushedHeadSha === undefined &&
+          (landing === undefined || (!landing.landed && (landing.outcome === "refused" || landing.outcome === "not_on_remote"))))) {
+        // W1-T14138: when the worker owns git, a missing harness landing is not evidence
+        // that it pushed nothing. NEEDS_DESIGN / NEEDS_SCOPE / FLAKE can end this path after
+        // the worker has committed and pushed itself. Only classify no_push when the head read
+        // after the worker returned is still the round's starting head; a moved or unreadable
+        // head remains unresolved until CI can be attributed to the produced commit.
+        if (!fixHarnessOwnsGit && expectedHeadShaForPush !== roundStartHeadSha) {
+          if (expectedHeadShaForPush === undefined) {
+            deps.log("fix.evidence_head_unread", { round_id: roundId, head_sha: priorHeadSha,
+              worktree_head_sha: roundStartHeadSha,
+              reason: "worker-owned worktree HEAD was unreadable, so the round's outcome is not attributed" });
+          }
+          releaseRoundClaim();
+          return;
+        }
+        recordFixLearningsOutcome("no_push");
+      }
       releaseRoundClaim();
     };
     const logPushedRoundDone = (landing: FixRoundLanding, waitsNext: boolean): void => { // W1-T9618: only a landed round is FIXED; one that did not land spends no strike
@@ -5426,6 +5515,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         keptForWait = { headSha: pushedHeadSha, claimRunId };
         logFixDoneRow(pushedHeadSha, undefined, landing,
           { ...kept, ci_wait_holds_claim: true, round_started_at_ms: fixRoundStartedAtMs });
+        if (!pushedByThisRound(pushedHeadSha)) recordFixLearningsOutcome("no_push");
       } else logFixDone(pushedHeadSha, undefined, landing);
       if (!landing.landed) deps.log("fix.strike_refunded", { strike: attempt, head_sha: priorHeadSha, reason: "push-not-landed", push_outcome: landing.outcome });
     };
@@ -5941,6 +6031,12 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // hand-off (a failing review on the same head) arrived during that same poll; a hand-off ends only a wait not yet red.
     const resumed = host.ciGateState(waited) === "red" ? undefined : handed;
     const ci = resumed?.failure === "check" ? { state: "red" as const, sha: resumed.headSha } : waited;
+    const pushedHeadSha = landing.remoteHead ?? expectedHeadShaForPush;
+    const shadowCi = host.ciGateState(ci);
+    if (pushedByThisRound(pushedHeadSha) && ciGateSha(ci) === pushedHeadSha &&
+        (shadowCi === "green" || shadowCi === "red")) {
+      recordFixLearningsOutcome(shadowCi, pushedHeadSha);
+    }
     const handoff = ciHandoff(ci);
     if (handoff) return finish(handoff);
     const claimLostAfterCi = branchClaimLost();
