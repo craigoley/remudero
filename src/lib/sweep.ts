@@ -21752,7 +21752,7 @@ export function restartInterruptibleDetachedActionCount(): number {
 
 /** Reviews in flight in this process. A freshness exit used to wait only for detached actions, so a
  *  review started by a light pass the exit never awaits was killed mid-judgement (PR 6993, 2026-09-24). */
-interface ReviewRegistration { taskId?: string; prNumber?: number; admittedAtMs: number; kind?: string; laneId?: string }
+interface ReviewRegistration { taskId?: string; prNumber?: number; headSha?: string; admittedAtMs: number; kind?: string; laneId?: string }
 const inFlightReviewRuns = new Map<Promise<void>, ReviewRegistration>();
 let reviewLaneSeq = 0;
 
@@ -21847,9 +21847,22 @@ export function inFlightReviewCount(): number {
 /** W1-T15116: this process's admitted full reviews still running, from every pass and surface (a light pass's
  *  per-PR runSweep included), each of which the memory.high admission charges until it settles. */
 export function inFlightFullReviewCount(): number {
-  let n = 0;
-  for (const review of inFlightReviewRuns.values()) if (review.kind === "full-review") n++;
-  return n;
+  // A child-hosted full review is adopted into childWork and then postReview returns, settling its
+  // in-process wrapper while the child continues to consume memory. Count it until child settlement.
+  // During the brief handoff both registries can contain the same review, so deduplicate by PR/head.
+  const running = new Set<string>();
+  let anonymous = 0;
+  const add = (prNumber: number | undefined, headSha: string | undefined): void => {
+    if (prNumber === undefined || headSha === undefined) anonymous++;
+    else running.add(`${prNumber}@${headSha}`);
+  };
+  for (const review of inFlightReviewRuns.values()) {
+    if (review.kind === "full-review") add(review.prNumber, review.headSha);
+  }
+  for (const work of childWork.values()) {
+    if (work.kind === "review") add(work.prNumber, work.headSha);
+  }
+  return running.size + anonymous;
 }
 
 /** W1-T11340: abort this process's in-process review of `prNumber` once it has run `ceilingMs` or longer, returning its
@@ -30601,7 +30614,7 @@ async function runSweepPinned(
   // W1-T11340: the review runs inside this lane's view of its PR, so its archive scans stay within the PR's lifetime.
   const startReview = (job: (typeof orderedReviews)[number], onPhase?: (phase: string) => void): Promise<void> => trackInFlightReview(
     () => reviewLanePr.run({ prUrl: job.pr.prUrl, createdAt: job.pr.createdAt }, () => runReview(job, onPhase)), {
-    taskId: job.pr.taskId, prNumber: job.pr.prNumber, kind: job.mode.kind, admittedAtMs: deps.now?.() ?? systemClock.now(),
+    taskId: job.pr.taskId, prNumber: job.pr.prNumber, headSha: job.pr.headSha, kind: job.mode.kind, admittedAtMs: deps.now?.() ?? systemClock.now(),
   });
   const lightAdmitted = deps.repairAdmissionSurface === "light"; // its light pass already bounded and reserved each plan review
   const planBound = planLane.jobs.length === 0 || lightAdmitted ? undefined

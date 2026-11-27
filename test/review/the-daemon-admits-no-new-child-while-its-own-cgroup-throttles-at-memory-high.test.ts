@@ -17,7 +17,7 @@ import { afterEach, test } from "node:test";
 
 import { readLedgerLines } from "#src/lib/status.js";
 import { readDaemonCgroupMemory, reviewMemoryHighVerdict, type DaemonCgroupMemoryReading } from "#src/lib/review-capacity.js";
-import { inFlightFullReviewCount, productionReviewMemoryHighReaders, type ReviewMemoryHighReaders } from "#src/lib/sweep.js";
+import { inFlightFullReviewCount, productionReviewMemoryHighReaders, registerChildWork, settleChildWork, type ReviewMemoryHighReaders } from "#src/lib/sweep.js";
 import {
   DEFAULT_SWEEP_POLICY,
   runSweep,
@@ -111,6 +111,7 @@ const four = (base = 20970): OpenPrView[] => [eligiblePr(base, 40), eligiblePr(b
 /** Releases every review a harness still holds when a test ends, pass or fail, so no review leaks into the next test. */
 const live: Harness[] = [];
 afterEach(async () => {
+  settleChildWork("t15116-child-review");
   live.splice(0).forEach((h) => h.releaseAll());
   await settle();
 });
@@ -150,6 +151,24 @@ test("W1-T15116 criterion 1: one pass cannot admit reviews past the cgroup's mem
   next.releaseAll();
   await nextPass;
   await settle();
+});
+
+test("W1-T15116: child-hosted reviews stay charged after postReview returns", async () => {
+  // A hosted child outlives the parent's postReview promise. Its learned peak remains charged until the child settles.
+  // The child has posted, so it has freed the ordinary review lane; its memory still contributes to the cgroup.
+  registerChildWork({ runId: "t15116-child-review", kind: "review", taskId: "W1-T15116", prNumber: 20969,
+    headSha: "child-head", readPhase: () => "review:posted" });
+  assert.equal(inFlightFullReviewCount(), 1);
+  const h = harness(() => bounded(11_100, 14_000));
+  const pass = runSweep(four(), h.deps, width(4));
+  await settle();
+  assert.deepEqual(h.started, [], "the posted child frees its lane but its 1,500 MiB charge holds this candidate");
+  assert.equal(inFlightFullReviewCount(), 1);
+  assert.match(standDown(h.deps, 20970) ?? "", /1 admitted review\(s\) still running charged 1500 MiB/);
+  settleChildWork("t15116-child-review");
+  await pass;
+  await settle();
+  assert.equal(inFlightFullReviewCount(), 0);
 });
 
 test("W1-T15116 criterion 2: a pass with headroom admits every candidate", async () => {
