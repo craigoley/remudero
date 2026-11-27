@@ -49,7 +49,7 @@ test("W1-T13202 criterion 1: a registry the size of production on 2026-11-16 is 
   assert.equal(pack.coverage.registry, "observed");
   const result = await runInboxGardener({ stateDir: f.state, scope: f.scope, ports: { ...f.ports(), judge: async () => assert.fail("no judge"), mirror: async () => assert.fail("shadow has no live effects") }, mode: "shadow" });
   assert.notEqual(result.state, "failed");
-  assert.equal("evaluated" in result && result.evaluated, 8, "the pass judged a bounded slice");
+  assert.equal("evaluated" in result && result.evaluated, 2343, "W1-T14978: the pass sweeps every proposal");
 });
 
 test("W1-T13202 criterion 2: a source past three quarters of its bound warns once per UTC day and the pass still runs", async t => {

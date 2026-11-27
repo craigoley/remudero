@@ -73,9 +73,11 @@ export function renderAcceptanceBlock(criteria: AcceptanceCriterion[]): string {
   }
   const lines = ["Acceptance:"];
   for (const { claim, proof } of criteria) {
-    // Both sides quoted so `stripQuotes` returns exactly what was passed in.
+    // Both sides quoted and escaped as YAML double quotes, so `stripQuotes` returns exactly what was passed in
+    // (it unescapes `\"` and `\\`, W1-T14913).
     if (claim.includes("|") || proof.includes("|")) {
-      lines.push(`- claim: "${claim}"`, `  proof: "${proof}"`);
+      const quoted = (text: string) => `"${text.replace(/[\\"]/g, "\\$&")}"`;
+      lines.push(`- claim: ${quoted(claim)}`, `  proof: ${quoted(proof)}`);
       continue;
     }
     lines.push(`- ${claim} | ${proof}`);

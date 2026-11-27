@@ -38,7 +38,7 @@ import { classifyLogFetchFailure, logFetchRetryAtMs, readCheckRunOutputAsync } f
 import { createSizedMemo } from "./ledger-union.js";
 import { type BoardItem } from "./board-review.js";
 import { loadPlan, DEFAULT_RISK, readBlobsAtRefAsync, type QuarantinedTask, type MergedResolver, type Plan, type Task } from "./plan.js";
-import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, enforcementDataInDiff, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
+import { cappedOverrideFromLedger, postedArmFactsFromLedger, lastPendingReviewStatusFromLedger, assessPendingReviewOwner, priorReviewVerdictFromLedger, reviewLedgerKeyFor, reviewRowNamesPr, UNFILED_RUN_SENTINEL, planFilingFromChangedFiles, bodyReviewContractDigest, reviewContractDigest, reviewTaskNarrative, reviewInputDigest, isCriterionRefusal, type PendingReviewOwnerAssessment, type PendingReviewStatusRecord, type CriterionVerdict, type CriterionRefusal } from "./review.js";
 import { type ProjectPlanPhases, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, buildCommitTrailerIndex, planCreditOverridePath, type CommitTrailerIndexReader, deriveStatus, isGhRateLimitError, projectPlan, readLedgerLines, type DeriveDeps, type GitHub, isBookkeepingOnlyChangeset, type PrRef, type StatusProjection, taskIdFromRunBranch, creditsByAnchoredTrailer, readMergeCreditedTaskIds, readRequiredStatusCheckContextsAsync, isPlanTextDeliverable, type RequiredContextsRead } from "./status.js";
 import { RUNNER_TIMEOUT_LINE, actionableGateFailuresFromReasons, cancelledRequiredCheckNames, withoutDownstreamGateFailure, earlyRedEvidenceRollup, checksStateFromRollup, checksPendingSinceFromRollup, dedupeRollupByLatestAttempt, fixLedgerRowsForHead, fixRoundTally, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, operatorVerdictEvidence, REQUIRED_CHECK_FAIL, closedPrFacts, type ClosedPrFact, redQualityGateNames, pendingQualityGateNames, dependabotCheckStates, usableInstrumentEntanglementPaths, type ActionableGateFailure, type CancelledRequiredCheck, type CiFailure, type CiLogUnavailableCause, MAX_CI_LOG_FAILURE_DETAIL, type CiTailSource, type CiAnnotationFallback, type CreditCandidate, type EscalationReconcileCandidate, type EscalationConditionEvidence, escalationNamedChecks, MAX_ESCALATION_CLOSES_PER_CYCLE, type InstrumentEntanglementPaths, type OpenPrView, type StrikeAttempt, DEFAULT_FIX_CLASSES, checkJobId, corroboratedIneligibility, creditSubjectIsImplementation, isPostReviewDiffCeilingRefusal, isRetryableReviewThrow, codeScanningHeadSettled, reviewInputLoopFacts, REVIEW_INPUT_ADMISSION_BACKSTOP, type ReviewSetupRefusal, type BaseChangedFiles } from "./sweep.js";
 import { loadedReviewerCodeSha } from "./reviewer-health.js";
@@ -48,8 +48,8 @@ import { runStepsAsync, runStepsSync, step, type Steps } from "./git-push.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { repoRoot, resolveOwnerRepo } from "./repo-location.js";
 import { OwnerRepoUnresolvableError } from "./owner-repo.js";
-import { reviewTaskIdFromBody } from "./report-commands.js";
 import { isFleetAuthoredText } from "./escalation-answers.js";
+import { isPlanOnlyFilingPr, PR_PENDING_PLACEHOLDER, resolveReviewTaskId, usesUntaskedReviewMetadata } from "./untasked-review.js";
 
 /** REST rollups preserve check-run order: retain external_id and the exact head/constituent
  * outcome beside each row without changing the shared REST mapper's unrelated callers. */
@@ -472,7 +472,7 @@ export function buildStaleGateWorkflowsByPr(
   owner: string,
   repo: string,
   openPrs: readonly OpenPrView[],
-): Map<number, string[]> {
+): Map<number, readonly string[]> {
   const out = new Map<number, string[]>();
   for (const pr of openPrs) {
     if (pr.checksState !== "red") continue;
@@ -1748,9 +1748,7 @@ export function cancelledRequiredChecks(
  * call sites) — a positive record from the ONE place that already verified the diff, not a
  * guess from this function.
  */
-export function isPlanOnlyFilingPr(ledger: Array<Record<string, unknown>>, prUrl: string): boolean {
-  return ledger.some((l) => l.step === "pr.opened" && l.pr_url === prUrl && l.plan_only === true);
-}
+export { isPlanOnlyFilingPr };
 
 export type PlanFilingClassificationSource = "emitter-ledger" | "github-files" | "unreadable" | "not-plan-only";
 
@@ -1774,9 +1772,8 @@ export function classifyPlanFiling(
 ): PlanFilingClassification {
   if (emitterLedger) return { isPlanFiling: true, source: "emitter-ledger" };
   if (!files || files.state === "unreadable") return { isPlanFiling: false, source: "unreadable" };
-  const isPlanOnly = files.paths.length > 0 && files.paths.every(isInPlanScope);
-  const touchesEnforcementData = enforcementDataInDiff([...files.paths]).length > 0;
-  return isPlanOnly && !touchesEnforcementData
+  // W1-T14902: the one rule, shared with the task-hold resolver so the hold and the board classify a PR alike.
+  return planFilingFromChangedFiles(files.paths)
     ? { isPlanFiling: true, source: "github-files" }
     : { isPlanFiling: false, source: "not-plan-only" };
 }
@@ -1795,31 +1792,9 @@ function introducedTaskIdsFromPlanPaths(paths: readonly string[]): string[] {
  * An exact trailer wins; a positively identified plan-only filing is intentionally
  * unattributed; otherwise the fleet's task-bearing run branch is the safe fallback.
  */
-export function resolveReviewTaskId(
-  body: string,
-  headRefName: string,
-  planOnlyFiling: boolean,
-): string | undefined {
-  const fromTrailer = reviewTaskIdFromBody(body);
-  if (fromTrailer) return fromTrailer;
-  if (planOnlyFiling) return undefined;
-  return taskIdFromRunBranch(headRefName);
-}
+export { resolveReviewTaskId };
 
-/** A hand PR pushed before it had a number carries the trailer `PR-pending`; it names no shard, so on its own
- *  `run-PR-pending-<epoch>` head it is reviewed like a trailerless PR instead of refusing setup every pass. */
-export const PR_PENDING_PLACEHOLDER = { taskId: "PR-pending", branch: /^run-PR-pending-\d+$/, rule: "W1-T11258" } as const;
-
-/** Generated lanes have correlation ids, not filed task records; keep their bounded semantic review.
- *  A synthetic `PR-<n>` id (a hand-fix PR's trailer) names no shard either: it gets the defaults a trailerless PR
- *  gets, on any branch, so the trailer can never cost a review (#13305: refused on every pass for 4.5 h). */
-export function usesUntaskedReviewMetadata(taskId: string | undefined, headRefName: string): boolean {
-  if (taskId === undefined || taskId === UNFILED_RUN_SENTINEL || /^PR-[1-9]\d*$/.test(taskId)) return true;
-  if (taskId === PR_PENDING_PLACEHOLDER.taskId) return PR_PENDING_PLACEHOLDER.branch.test(headRefName);
-  if (headRefName === `run-${taskId}` && /^RETRO-\d+$/.test(taskId)) return true;
-  return taskIdFromRunBranch(headRefName) === taskId &&
-    /^(?:RETRO(?:-.+)?|TRIAGE-.+|PLAN-.+|APPROVE-.+|main-repair-(?:(?:ratchet|revert)-)?[0-9a-f]{12})$/.test(taskId);
-}
+export { PR_PENDING_PLACEHOLDER, usesUntaskedReviewMetadata };
 
 /**
  * Resolve a PR's task id (W1-T453): the `Remudero-Task:` trailer first, the `run-<taskId>-*` head ref only as
@@ -3106,7 +3081,11 @@ export function buildOpenPrViewsAsync(
  */
 type MergeLogReadOptions = {
   ref?: string;
-  cache?: { mergedPathsByPr?: Map<number, string[]>; mergeSubjects?: Map<number, string> };
+  cache?: { mergedPathsByPr?: Map<number, string[]>; mergeSubjects?: Map<number, string>; mergeShas?: Map<number, string> };
+  /** W1-T15031: read exactly these merge commits by sha instead of the recent window; the cache is bypassed. */
+  shas?: readonly string[];
+  /** W1-T15031: receives each PR's merge commit sha, read in the same subject pass. */
+  shaByPr?: Map<number, string>;
 };
 
 /**
@@ -3120,12 +3099,16 @@ type MergeLogReadOptions = {
 export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PATHS_SCAN_LIMIT, opts: MergeLogReadOptions = {}): Map<number, string[]> {
   const byPr = new Map<number, string[]>();
   if (root === undefined) return byPr;
-  if (opts.cache?.mergedPathsByPr) return opts.cache.mergedPathsByPr;
+  const bySha = opts.shas !== undefined;
+  if (bySha && opts.shas!.length === 0) return byPr;
+  if (!bySha && opts.cache?.mergedPathsByPr) return opts.cache.mergedPathsByPr;
   try {
+    // W1-T15031: by sha, `--no-walk --stdin` reads exactly the named merge commits, however old.
     const out = execFileSync(
       "git",
-      ["log", opts.ref ?? "origin/main", "--first-parent", "--name-only", "--format=%x00%s", "-n", String(limit)],
-      { cwd: root, encoding: "utf8", maxBuffer: 1 << 26 },
+      bySha ? ["log", "--no-walk=unsorted", "--stdin", "--first-parent", "--name-only", "--format=%x00%s"]
+        : ["log", opts.ref ?? "origin/main", "--first-parent", "--name-only", "--format=%x00%s", "-n", String(limit)],
+      { cwd: root, encoding: "utf8", maxBuffer: 1 << 26, ...(bySha ? { input: opts.shas!.join("\n") + "\n" } : {}) },
     );
     let current: number | undefined;
     for (const raw of out.split("\n")) {
@@ -3142,7 +3125,7 @@ export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PAT
       // twice means a re-merge, whose newest paths are the ones credit was derived from.
       if (files && files.length < MERGED_PATHS_PER_PR_CAP) files.push(path);
     }
-    if (opts.cache) {
+    if (opts.cache && !bySha) {
       opts.cache.mergedPathsByPr = byPr;
       if (mergeLogEvidenceByRoot.get(root) === opts.cache) mergeLogEvidenceByRoot.set(root, mergeLogEvidenceByRoot.get(root)!);
     }
@@ -3162,19 +3145,32 @@ export function readMergedPathsByPr(root: string | undefined, limit = MERGED_PAT
 function readMergeSubjectsByPr(root: string | undefined, opts: MergeLogReadOptions = {}): Map<number, string> {
   const byPr = new Map<number, string>();
   if (root === undefined) return byPr;
-  if (opts.cache?.mergeSubjects) return opts.cache.mergeSubjects;
+  if (opts.cache?.mergeSubjects) {
+    for (const [pr, sha] of opts.cache.mergeShas ?? []) opts.shaByPr?.set(pr, sha);
+    return opts.cache.mergeSubjects;
+  }
+  const shas = new Map<number, string>();
   try {
-    const out = execFileSync("git", ["log", opts.ref ?? "origin/main", "--format=%s", "-n", String(MERGE_SUBJECT_SCAN_LIMIT)], {
+    // W1-T15031: the whole history, not a recent window: a subject line is cheap (MEASURED 0.4 s, 1.9 MB over
+    // 15223 commits at b23b26575), and each PR's sha lets its changed paths be read by sha.
+    const out = execFileSync("git", ["log", opts.ref ?? "origin/main", "--format=%H%x00%s"], {
       cwd: root,
       encoding: "utf8",
-      maxBuffer: 1 << 24,
+      maxBuffer: 1 << 26,
     });
-    for (const line of out.split("\n")) {
+    for (const record of out.split("\n")) {
+      const [sha, line] = record.split("\u0000");
+      if (sha === undefined || line === undefined) continue;
       const m = line.match(/\(#(\d+)\)\s*$/);
-      if (m && !byPr.has(Number(m[1]))) byPr.set(Number(m[1]), line);
+      if (m && !byPr.has(Number(m[1]))) {
+        byPr.set(Number(m[1]), line);
+        shas.set(Number(m[1]), sha);
+      }
     }
+    for (const [pr, sha] of shas) opts.shaByPr?.set(pr, sha);
     if (opts.cache) {
       opts.cache.mergeSubjects = byPr;
+      opts.cache.mergeShas = shas;
       if (mergeLogEvidenceByRoot.get(root) === opts.cache) mergeLogEvidenceByRoot.set(root, mergeLogEvidenceByRoot.get(root)!);
     }
   } catch {
@@ -3191,9 +3187,6 @@ export const MERGED_PATHS_SCAN_LIMIT = 4000;
  *  1,000-file merge does not need 1,000 strings held to decide it. */
 const MERGED_PATHS_PER_PR_CAP = 200;
 
-/** How far back {@link readMergeSubjectsByPr} scans. A BACKSTOP on cost, not a correctness bound:
- *  a credit older than this window reads UNKNOWN and therefore declines, which is the safe side. */
-export const MERGE_SUBJECT_SCAN_LIMIT = 5000;
 
 export const mergeLogEvidenceByRoot = createSizedMemo<string, NonNullable<MergeLogReadOptions["cache"]> & { sha: string }>();
 
@@ -3387,9 +3380,12 @@ export function buildCreditCandidates(
   // W1-T3063 — ONE local `git log` for the whole pass, never one per candidate and never a GitHub
   // call: W1-T2794 promised this rung adds no new read, and that promise is kept. A squash merge
   // puts `(#N)` in the subject, which is what maps a credit back to what earned it.
-  const mergeSubjects = readMergeSubjectsByPr(evidenceRoot, mergeLog);
+  const shaByPr = new Map<number, string>();
+  const mergeSubjects = readMergeSubjectsByPr(evidenceRoot, { ...mergeLog, shaByPr });
   const projection = projectPlan(plan, deps);
   observeProjection?.(projection);
+  // W1-T15031: a credited merge older than the recent path window is read by its own sha, so no window decides it.
+  const mergedPaths = withCreditedMergePaths(evidenceRoot, projection.values(), deps.mergedPathsByPr ?? new Map(), shaByPr);
   // W1-T4078 — `buildBatchedGithub` already has each merged PR body in the same cache that fed
   // the projection. Read those bodies by PR number so the measured prerequisite-only split can
   // be refused without adding a GitHub request or weakening ordinary commit-trailer credit.
@@ -3410,7 +3406,28 @@ export function buildCreditCandidates(
     }
     return mergedByTask.get(taskId) ?? [];
   };
-  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies, deps.mergedPathsByPr, mergedCreditsFor, plan.byId);
+  return creditCandidatesFromProjection(projection.values(), mergeSubjects, mergeBodies, mergedPaths, mergedCreditsFor, plan.byId);
+}
+
+/** W1-T15031: the recent-window paths plus, read by sha, the paths of every credited merge the window missed. */
+export function withCreditedMergePaths(
+  root: string | undefined,
+  projections: Iterable<Pick<StatusProjection, "merged" | "prNumber">>,
+  windowPaths: ReadonlyMap<number, readonly string[]>,
+  shaByPr: ReadonlyMap<number, string>,
+  readBySha: (root: string | undefined, shas: readonly string[]) => ReadonlyMap<number, readonly string[]> =
+    (r, shas) => readMergedPathsByPr(r, MERGED_PATHS_SCAN_LIMIT, { shas }),
+): Map<number, readonly string[]> {
+  const shas = new Set<string>();
+  for (const p of projections) {
+    if (!p.merged || p.prNumber === undefined || windowPaths.has(p.prNumber)) continue;
+    const sha = shaByPr.get(p.prNumber);
+    if (sha !== undefined) shas.add(sha);
+  }
+  const out = new Map<number, readonly string[]>(windowPaths);
+  if (shas.size === 0) return out;
+  for (const [pr, paths] of readBySha(root, [...shas])) if (!out.has(pr)) out.set(pr, paths);
+  return out;
 }
 
 /**

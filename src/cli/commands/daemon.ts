@@ -132,7 +132,8 @@ import { createSlotPreparer } from "../../lib/serve-slots.js";
 import { asyncGit, testRunnerOnItsOwnCheckout } from "../../lib/self-sync.js";
 import { withLiveEditLadders } from "../../lib/live-edit-ladder.js";
 import { checkSharedPause, disposeSharedPauseRefresh, prepareSharedPause, clearKick, consumeDrainNow, consumeRestartInPlace, clearPrAction, consumeStop, isQuietHours, kickFilePath, pauseDetail, pendingKicks, pendingPrActions, stopDetail } from "../../lib/fleet-control.js";
-import { wireSweepWakeToDaemon } from "../../lib/github-event-wake.js";
+import { lastClosedWakePath, readSweepWakeMarker, sweepWakeMarkerPath, wireSweepWakeToDaemon } from "../../lib/github-event-wake.js";
+import { createRefillReader, decideRefillRead } from "../../lib/refill-snapshot-reuse.js";
 import { startInstallationTokenRefresh } from "../../lib/github-app.js";
 import { LEDGER_REQUEST_STEP, realScopedMint, startDaemonGitCredentialSocket, type ScopedTokenMint } from "../../lib/secret-boundary.js";
 import { automaticBranchReapStateFileName, orphanRunBranchEvidenceReader } from "../../lib/branch-reaper.js";
@@ -2683,6 +2684,39 @@ export async function daemonCommand(
     if (standby?.ports && standbyPromotion) logPromoted(standby.ports, standbyPromotion);
     // W1-T14644: the latest refresh's projection phases, held until the selection timing row takes them.
     let pendingRefreshMergedPhases: ProjectPlanPhases | undefined;
+    // W1-T14893: the last published tick read, which `invalidate` does not clear, and the refill reader that may reuse it.
+    let lastPublishedRead: { atMs: number; merged: ReadonlySet<string> } | undefined;
+    const wakeMarkerPath = sweepWakeMarkerPath(config.root);
+    const tickRefresher = firstTickRead ? buildDaemonReadRefresher({
+      read: firstTickRead, plan: () => activePlanRef.current, previous: () => lastProj,
+      observePhases: (phases: ProjectPlanPhases) => { pendingRefreshMergedPhases = phases; },
+      invalidate: () => { tickReadGeneration = undefined; tickReadStartedAtMs = tickReadClock.now(); },
+      publish: (snapshot: ReadGeneration<TickReadFacts>) => {
+        tickReadGeneration = snapshot;
+        lastRepairSnapshotGeneration = snapshot;
+        lastProj = new Map(snapshot.facts.projection);
+        boardOpenPrCount.reset();
+        // The same open rows the synchronous `refreshMerged` keeps: production ticks take this path.
+        lastOpenRows = snapshot.facts.openBranches;
+        boardOpenPrCount.observe(snapshot.facts.openBranches);
+        lastPublishedRead = { atMs: snapshot.publishedAtMs,
+          merged: new Set(snapshot.facts.projection.filter(([, projection]) => projection.merged).map(([id]) => id)) };
+        refillReader?.observeRead(snapshot.settledAtMs ?? tickReadClock.now());
+      },
+      ledgerPath, statusPath, log,
+    }) : undefined;
+    const refillReader = tickRefresher ? createRefillReader<Plan | undefined>({
+      read: (plan) => tickRefresher(plan),
+      published: () => {
+        // W1-T14893: the coalesced marker and the newest pull_request closed wake, which no later delivery overwrites.
+        refillReader?.observeWake(readSweepWakeMarker(wakeMarkerPath));
+        refillReader?.observeWake(readSweepWakeMarker(lastClosedWakePath(wakeMarkerPath)));
+        return lastPublishedRead;
+      },
+      clock: tickReadClock,
+      log,
+      decide: (input) => decideRefillRead(input),
+    }) : undefined;
     const summary = await runDaemonFn(
       plan,
       {
@@ -2692,21 +2726,9 @@ export async function daemonCommand(
         claimSweepSettled,
         bootPhases,
         refreshMerged,
-        refreshMergedAsync: firstTickRead ? buildDaemonReadRefresher({
-          read: firstTickRead, plan: () => activePlanRef.current, previous: () => lastProj,
-          observePhases: (phases: ProjectPlanPhases) => { pendingRefreshMergedPhases = phases; },
-          invalidate: () => { tickReadGeneration = undefined; tickReadStartedAtMs = tickReadClock.now(); },
-          publish: (snapshot: ReadGeneration<TickReadFacts>) => {
-            tickReadGeneration = snapshot;
-            lastRepairSnapshotGeneration = snapshot;
-            lastProj = new Map(snapshot.facts.projection);
-            boardOpenPrCount.reset();
-            // The same open rows the synchronous `refreshMerged` keeps: production ticks take this path.
-            lastOpenRows = snapshot.facts.openBranches;
-            boardOpenPrCount.observe(snapshot.facts.openBranches);
-          },
-          ledgerPath, statusPath, log,
-        }) : undefined,
+        refreshMergedAsync: tickRefresher,
+        // W1-T14893: the refill reuses the published tick read unless it is stale or a merge or push wake came since.
+        refreshMergedForRefill: refillReader ? (plan) => refillReader.refill(plan) : undefined,
         takeRefreshMergedPhases: () => { const taken = pendingRefreshMergedPhases; pendingRefreshMergedPhases = undefined; return taken; },
         readLoopTelemetry: loopTelemetry.sample,
         readMemoryTelemetry: daemonMemoryTelemetryReader(daemonLoadedCodeSha, { generation: runId, footprint: daemonFootprint }),
@@ -3236,7 +3258,11 @@ export async function daemonCommand(
         // interruptible clock with a heartbeat ticker could consume a wake without reconciling.
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         sleepUntilSweepWake: githubEventWake.sleep,
-        acknowledgeSweepWake: githubEventWake.acknowledge,
+        acknowledgeSweepWake: () => {
+          // W1-T14893: the refill reader sees each wake the full sweep consumes.
+          refillReader?.observeWake(readSweepWakeMarker(wakeMarkerPath));
+          githubEventWake.acknowledge();
+        },
         // The real wall clock backing the TIME-AWARE headroom ceiling (see
         // lib/daemon.ts's HeadroomPolicy) — resolves each window's own
         // hours-to-reset. Explicit here (though `runDaemon` defaults the same
