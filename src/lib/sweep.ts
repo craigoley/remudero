@@ -7565,29 +7565,31 @@ export async function reviewInFlightAtDispatch(
   pr: Parameters<typeof reviewInFlightOnHead>[0],
   ledgerPath: string,
 ): Promise<string | undefined> {
-  if (pr.reviewState !== "pending") return undefined;
   const text = await fs.promises.readFile(ledgerPath, "utf8")
     .catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; });
-  return reviewInFlightOnHead(pr, parseLedger(text));
+  // This is an action-time read for the exact head being dispatched. The view may predate a
+  // review claim (or may have adopted a moved head while carrying `reviewState: "none"`), so
+  // the snapshot's state cannot veto a fresh, live claim in the ledger.
+  return reviewInFlightOnHead({ ...pr, reviewState: "pending" }, parseLedger(text));
 }
 
 /** W1-T15005: a {@link reviewInFlightAtDispatch} answer for one head. `reviewRun` absent: no review of `headSha` was in flight. */
-export interface ReviewInFlightDecision { headSha: string; reviewRun?: string }
+export interface ReviewInFlightDecision { headSha: string; reviewRun?: string; checked?: true }
 
-/** W1-T15005: `evidence` carrying the review-in-flight decision for `pr`'s head, made once. A decision already carried for
- *  this head is kept and nothing is read; one for another head (a moved head the dispatch adopted) is made again here.
- *  The liveness half reads THIS process's review mutex (another process's claim is judged by its owner pid instead), so
- *  the sweep that holds the mutex decides before a fix child is started: {@link detachFixDispatch} decides before
- *  {@link hostFixDispatch} spawns, and the child reuses the decision. */
+/** W1-T15005: `evidence` carrying the review-in-flight decision for `pr`'s head. Its prior answer is only a snapshot:
+ *  a review may have claimed this head since it was made, or the dispatch may have adopted a moved head whose view still
+ *  says `none`. Re-read the exact head's claim from the live ledger at the spending point. The liveness half reads THIS
+ *  process's review mutex (another process's claim is judged by its owner pid instead), so the sweep decides before a fix
+ *  child is started: {@link detachFixDispatch} decides before {@link hostFixDispatch} spawns. */
 export async function decideReviewInFlight(
   pr: Parameters<typeof reviewInFlightOnHead>[0],
   evidence: FixDispatchEvidence,
   ledgerPath: string,
 ): Promise<FixDispatchEvidence & { reviewInFlight: ReviewInFlightDecision }> {
   const carried = evidence.reviewInFlight;
-  if (carried?.headSha === pr.headSha) return { ...evidence, reviewInFlight: carried };
+  if (carried?.headSha === pr.headSha && carried.checked === true) return { ...evidence, reviewInFlight: carried };
   const reviewRun = await reviewInFlightAtDispatch(pr, ledgerPath);
-  return { ...evidence, reviewInFlight: { headSha: pr.headSha, ...(reviewRun === undefined ? {} : { reviewRun }) } };
+  return { ...evidence, reviewInFlight: { headSha: pr.headSha, checked: true, ...(reviewRun === undefined ? {} : { reviewRun }) } };
 }
 
 /** W1-T15005: the deferral row a fix round writes when a review of its head is in flight. One shape for every site. */

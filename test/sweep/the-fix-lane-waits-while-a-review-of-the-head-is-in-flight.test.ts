@@ -363,7 +363,7 @@ test("W1-T15005 criterion 1: a round the sweep starts as a run child waits in th
   const free = dispatcher(t, [claim("review-PR15005-1")], {}, false);
   const freed = await hostedPass(t, free, undefined);
   assert.equal(freed.envelopes.length, 1, "positive control: the round is started as a run child");
-  assert.deepEqual(freed.envelopes[0]!.evidence.reviewInFlight, { headSha: HEAD }, "the child carries the sweep's decision");
+  assert.deepEqual(freed.envelopes[0]!.evidence.reviewInFlight, { headSha: HEAD, checked: true }, "the child carries the sweep's action-time decision");
   assert.equal(free.seen.claimKeys, 1, "the child takes its branch claim");
   assert.equal(deferrals([...freed.sweepRows, ...free.rows]).length, 0);
 });
@@ -438,18 +438,35 @@ test("W1-T15005: a claim another process owns is live only on an active owner as
   assert.equal(sweep.reviewInFlightOnHead(view, [foreign, settled("review-PR15005-2")], () => false, () => true), undefined);
 });
 
-test("W1-T15005 finding 2: a carried decision for the head is used as made, and one for another head is made again", async (t) => {
+test("W1-T15005 finding 2: dispatch rechecks a fresh claim after a moved-head snapshot", async (t) => {
   const d = dispatcher(t, [claim("review-PR15005-1")], {}, false);
   const pr = d.pr;
-  // A carried "in flight" is honoured without a liveness read: the process that made it held the mutex.
-  const held = await sweep.decideReviewInFlight(pr, { ...EVIDENCE, reviewInFlight: { headSha: HEAD, reviewRun: "review-PR15005-1" } }, d.ledgerPath);
+  const release = liveReview(pr);
+  t.after(release);
+  // A carried positive result is checked against current claim and liveness evidence at dispatch.
+  const held = await sweep.decideReviewInFlight(pr, { ...EVIDENCE, reviewInFlight: { headSha: HEAD } }, d.ledgerPath);
   assert.equal(held.reviewInFlight.reviewRun, "review-PR15005-1");
   const deferred = await d.effects.dispatchFix!(pr, held);
   assert.equal(deferred, false, "the dispatch defers on the carried decision");
   assert.equal(deferrals(d.rows).length, 1);
-  // A decision for another head (a moved head) is made again, here: no review is live, so it reads none.
-  const moved = await sweep.decideReviewInFlight(pr, { ...EVIDENCE, reviewInFlight: { headSha: OTHER, reviewRun: "review-PR15005-1" } }, d.ledgerPath);
-  assert.deepEqual(moved.reviewInFlight, { headSha: HEAD });
+
+  // adoptMovedFixHead copies the old snapshot's `reviewState: none`. A claim posted on the
+  // adopted head after that snapshot must still stop the fix round.
+  const movedFixture = dispatcher(t, [claim("review-PR15005-moved", OTHER)], { reviewState: "none" }, false);
+  const adopted = await sweep.adoptMovedFixHead(movedFixture.pr, { headRefOid: OTHER }, EVIDENCE, {
+    readPr: async () => ({ state: "open", head: { sha: OTHER }, mergeable_state: "clean" }),
+    readRollup: async () => RED,
+    readRequiredContexts: () => ["ci"],
+    readFailures: () => EVIDENCE.ciFailures!,
+  });
+  assert.ok("adopted" in adopted);
+  assert.equal(adopted.adopted.reviewState, "none", "the adopted view retains its older review snapshot");
+  const releaseMoved = liveReview(adopted.adopted, OTHER);
+  t.after(releaseMoved);
+  const fresh = await sweep.decideReviewInFlight(adopted.adopted,
+    { ...EVIDENCE, reviewInFlight: { headSha: OTHER } }, movedFixture.ledgerPath);
+  assert.equal(fresh.reviewInFlight.reviewRun, "review-PR15005-moved",
+    "THE CLAIM: a new live claim on the dispatched head replaces the stale no-review snapshot");
 });
 
 test("W1-T15005 criterion 1: an owned conflicted head whose round waits on a review records no worker round", async (t) => {
