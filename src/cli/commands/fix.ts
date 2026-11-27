@@ -4863,40 +4863,23 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       deps.log("fix.learnings_outcome", { ...shadowRound, outcome, pushed_head_sha: pushedHeadSha,
         ...(outcome === "green" ? { rounds_to_green: fixLearningsRoundsToGreen(
           [...(repairHistory?.ok ? repairHistory.rows : []), ...roundLedger, ...roundRows], opts.taskId) } : {}) });
-    // These two exits happen before the ordinary landing/CI path. Consult the remote directly:
-    // the fix lane's git ownership says who may publish, not whether this worker already did.
+    // The plan-filing refusal and the recycle yield end the round before the harness push and its CI wait.
+    // A shell-less worker cannot publish, so its round pushed nothing. A worker that holds git may have run
+    // `git push`: it pushed nothing only when the remote still names the round's start. A moved remote stays
+    // unresolved, as on every exit that waits for no CI. The measurement never adds a CI wait to an exit.
     const recordEarlyFixLearningsOutcome = async (): Promise<void> => {
-      const readRemote = deps.readRemoteBranchHead ?? lsRemoteBranchHead;
-      let remoteHead: string | undefined;
-      try { remoteHead = await readRemote(opts.worktreePath, opts.branch); }
-      catch (error) {
-        deps.log("fix.evidence_head_unread", { round_id: roundId, head_sha: priorHeadSha,
-          reason: `early round outcome remote head could not be read: ${String((error as Error)?.message ?? error)}` });
-        if (fixHarnessOwnsGit) recordFixLearningsOutcome("no_push");
-        return; // an unreadable remote cannot establish a worker-owned push
-      }
-      if (remoteHead === undefined || remoteHead === roundStartHeadSha) {
-        recordFixLearningsOutcome("no_push");
-        return;
-      }
-      // A moved branch is attributable to this round only when the worker held git. With
-      // harness-owned git, an external branch update can race either early exit; the harness
-      // has not reached its normal push path, so that head is not this round's push.
       if (fixHarnessOwnsGit) {
         recordFixLearningsOutcome("no_push");
         return;
       }
-      try {
-        const ci = await deps.waitForCiGreen(opts.prUrl, deps.log);
-        const state = host.ciGateState(ci);
-        if ((state === "green" || state === "red") && ciGateSha(ci) === remoteHead) {
-          recordFixLearningsOutcome(state, remoteHead);
-        }
-      } catch (error) {
-        deps.log("fix.ci_failures_fetch_error", { round_id: roundId, head_sha: remoteHead,
-          site: "early_round_outcome", error: String((error as Error)?.message ?? error) });
-        // Keep the round unresolved when the CI read fails; a moved remote is not itself a verdict.
+      let remoteHead: string | undefined;
+      try { remoteHead = await (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch); }
+      catch (error) {
+        deps.log("fix.evidence_head_unread", { round_id: roundId, head_sha: priorHeadSha,
+          reason: `early round outcome remote head could not be read: ${String((error as Error)?.message ?? error)}` });
+        return;
       }
+      if (remoteHead === undefined || remoteHead === roundStartHeadSha) recordFixLearningsOutcome("no_push");
     };
     // A worker that may still be running can publish only when it holds its own git; that outcome stays unresolved.
     const recordUnpublishedLiveRound = (): void => { if (fixHarnessOwnsGit) recordFixLearningsOutcome("no_push"); };
