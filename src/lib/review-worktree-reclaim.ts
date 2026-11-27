@@ -23,12 +23,19 @@
 import { execFileSync } from "node:child_process";
 import { hostWorktreeGit, hostWorktreeGitAsync } from "./worktree-git.js";
 import { runStepsSync, runStepsAsync, step, type Steps } from "./git-push.js";
-import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
-import { lstat, readdir, rm } from "node:fs/promises";
+import { chmodSync, existsSync, lstatSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { chmod, lstat, readdir, rm } from "node:fs/promises";
+import { hostname } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { systemClock, type Clock } from "./clock.js";
 import type { Config } from "./config.js";
-import { DEFAULT_WORKTREE_REAP_GRACE_MS, reviewWorktreeHoldState, worktreesDir, worktreeRemove, worktreeRemoveAsync } from "./worker.js";
+import { DEFAULT_WORKTREE_REAP_GRACE_MS, readRunLock, removeRunLock, reviewWorktreeHoldState, worktreesDir, worktreeRemove,
+  worktreeRemoveAsync } from "./worker.js";
+import { defaultIsPidAlive } from "./drain-lock.js";
+import { reviewerTreeCutRoot } from "./reviewer-tree-reaper.js";
+import { removeUnderReviewerLease } from "./reviewer-worktree-lease.js";
+import { readPidNamespace } from "./test-slot.js";
 export { holdReviewWorktree, releaseReviewWorktree, reviewWorktreeIsHeld } from "./worker.js";
 
 /** Exactly what `materializeReviewWorktree` mints (src/run-task.ts): `review-PR<n>-<epochMs>`.
@@ -37,9 +44,11 @@ export { holdReviewWorktree, releaseReviewWorktree, reviewWorktreeIsHeld } from 
  *  worktree is a read-only checkout that nothing legitimately touches after creation. */
 const REVIEW_WORKTREE_NAME = /^review-PR(\d+)-(\d+)$/;
 
-/** W1-T14928: the other trees the daemon cuts under its worktrees root: a run's `<run-id>-source` view
- *  (src/run-task.ts) and reviewer-health's `healed-*` trees. Only an unregistered one is ever reclaimed. */
-const DAEMON_RUN_TREE_NAME = /^(?:run-[A-Za-z0-9._-]+-source|healed-[0-9A-Za-z]+)$/;
+/** W1-T14928: a run's `<run-id>-source` view (src/run-task.ts), cut under `worktreesDir(config)`. */
+const RUN_SOURCE_TREE_NAME = /^run-[A-Za-z0-9._-]+-source$/;
+/** W1-T14928: reviewer-health's healed tree, as prepareFreshOriginMainTree and perAttemptTreePath name it:
+ *  `healed-<x>-<sha12>`, or `healed-<x>-<sha12>-<pid>-<8hex>`, cut in the reviewer tree cut root. */
+const HEALED_TREE_NAME = /^healed-[0-9A-Za-z]{1,12}-[0-9a-f]{12}(?:-\d+-[0-9a-f]{8})?$/;
 
 /** Reused rather than a second policy constant: the same "a linked worktree might still be doing
  *  something" grace window {@link DEFAULT_WORKTREE_REAP_GRACE_MS} already protects the general
@@ -68,7 +77,11 @@ export type ReviewWorktreeSweepReason =
   /** Shared ownership was unreadable; a missing owner has not been established. */
   | "review-ownership-unknown"
   /** W1-T14928: its admin directory is gone, but the clone still lists it. */
-  | "registered";
+  | "registered"
+  /** W1-T14928: its sibling `<tree>.lock` names a live holder. */
+  | "lock-held"
+  /** W1-T14928: its sibling lock is corrupt, or names a pid this process cannot probe. */
+  | "lock-unknown";
 
 export interface ReviewWorktreeSweepOutcome {
   name: string;
@@ -105,8 +118,10 @@ export interface ReviewWorktreeSweepOptions {
   isLive?: (worktreePath: string) => boolean;
   /** W1-T14928: the clone's registered worktree paths. `undefined` = unreadable. */
   listRegisteredWorktrees?: (repoDir: string) => string[] | undefined;
-  /** W1-T14928: removes an unregistered tree, which `git worktree remove` cannot. */
-  removeUnregisteredTree?: (path: string) => void;
+  /** W1-T14928: removes an unregistered tree, which `git worktree remove` cannot. "leased" = a reviewer holds it. */
+  removeUnregisteredTree?: (path: string) => void | "leased";
+  /** W1-T14928: other directories healed trees are cut in. Defaults to the reviewer tree cut root. */
+  healedTreeRoots?: string[];
   /** W1-T14928: the bytes a tree holds, for the ledger row. */
   measureTreeBytes?: (path: string) => number;
 }
@@ -132,7 +147,7 @@ export type ReviewWorktreeSweepAsyncOptions = Omit<ReviewWorktreeSweepOptions, A
   readRemoteHeadSha?: (repoDir: string, prNumber: number) => string | undefined | Promise<string | undefined>;
   removeWorktree?: (repoDir: string, worktreePath: string) => void | Promise<void>;
   listRegisteredWorktrees?: (repoDir: string) => string[] | undefined | Promise<string[] | undefined>;
-  removeUnregisteredTree?: (path: string) => void | Promise<void>;
+  removeUnregisteredTree?: (path: string) => void | "leased" | Promise<void | "leased">;
   measureTreeBytes?: (path: string) => number | Promise<number>;
 };
 type ReviewSweepGitPorts = Required<Pick<ReviewWorktreeSweepAsyncOptions, AsyncPorted>>;
@@ -141,7 +156,7 @@ export function sweepStrandedReviewWorktrees(config: Config, log: (step: string,
   opts: ReviewWorktreeSweepOptions = {}): ReviewWorktreeSweepSummary {
   return runStepsSync(strandedReviewWorktreeSteps(config, log, opts,
     { readHeadSha: defaultReadHeadSha, readRemoteHeadSha: defaultReadRemoteHeadSha, removeWorktree: worktreeRemove,
-      listRegisteredWorktrees: defaultListRegisteredWorktrees, removeUnregisteredTree: (p) => rmSync(p, { recursive: true, force: true }),
+      listRegisteredWorktrees: defaultListRegisteredWorktrees, removeUnregisteredTree: removeWritableTree,
       measureTreeBytes: treeBytes }, false));
 }
 
@@ -149,7 +164,7 @@ export function sweepStrandedReviewWorktreesAsync(config: Config, log: (step: st
   opts: ReviewWorktreeSweepAsyncOptions = {}): Promise<ReviewWorktreeSweepSummary> {
   return runStepsAsync(strandedReviewWorktreeSteps(config, log, opts,
     { readHeadSha: defaultReadHeadShaAsync, readRemoteHeadSha: defaultReadRemoteHeadShaAsync, removeWorktree: worktreeRemoveAsync,
-      listRegisteredWorktrees: defaultListRegisteredWorktrees, removeUnregisteredTree: (p) => rm(p, { recursive: true, force: true }),
+      listRegisteredWorktrees: defaultListRegisteredWorktrees, removeUnregisteredTree: removeWritableTreeAsync,
       measureTreeBytes: treeBytesAsync }, true));
 }
 
@@ -198,23 +213,40 @@ function* strandedReviewWorktreeSteps(config: Config, log: (step: string, extra?
     if (!existsSync(join(pointer.repoDir, ".git"))) return { kind: "kept", reason: "git-unreadable" };
     const newest = newestMtimeMs(path);
     if (newest === undefined || clock.now() - newest < graceMs) return { kind: "kept", reason: "too-young" };
-    const owner = holdState(path);
-    if (owner !== "unheld") return { kind: "kept", reason: owner === "held" ? "live-review" : "review-ownership-unknown" };
+    const held = holderReason(path);
+    if (held !== undefined) return { kind: "kept", reason: held };
     const registered = yield* step(() => listRegistered(pointer.repoDir));
     if (registered === undefined) return { kind: "kept", reason: "git-unreadable" };
     if (registered.some((p) => resolve(p) === resolve(path))) return { kind: "kept", reason: "registered" };
     return { kind: "eligible" };
   }
+  // A review hold, then the sibling run lock or reviewer lease: live or unprobeable keeps the tree.
+  function holderReason(path: string): ReviewWorktreeSweepReason | undefined {
+    const owner = holdState(path);
+    if (owner !== "unheld") return owner === "held" ? "live-review" : "review-ownership-unknown";
+    const lock = siblingLockState(path);
+    return lock === "free" ? undefined : lock === "held" ? "lock-held" : "lock-unknown";
+  }
   function* reclaimUnregistered(name: string, path: string): Steps<void> {
-    if (recheckOwnership && holdState(path) !== "unheld") { keep(name, path, "live-review"); return; }
     try {
       const bytes = yield* step(() => measureBytes(path));
-      yield* step(() => removeTree(path));
+      const held = holderReason(path); // rechecked immediately before the removal
+      if (held !== undefined) { keep(name, path, held); return; }
+      if ((yield* step(() => removeTree(path))) === "leased") { keep(name, path, "lock-held"); return; }
+      removeRunLock(path);
       reclaimed.push(name);
       log("review_worktree.sweep.reclaimed", { name, path, bytes, kind: "unregistered" });
     } catch (e) {
       keep(name, path, "removal-failed", { error: String((e as Error)?.message ?? e) });
     }
+  }
+
+  function* considerRunTree(dir: string, name: string): Steps<void> {
+    const path = join(dir, name);
+    if (!isDirectory(path)) return;
+    const verdict = yield* unregisteredTreeVerdict(path);
+    if (verdict.kind === "kept") keep(name, path, verdict.reason);
+    else if (verdict.kind === "eligible") yield* reclaimUnregistered(name, path);
   }
 
   let names: string[];
@@ -228,12 +260,7 @@ function* strandedReviewWorktreeSteps(config: Config, log: (step: string, extra?
     const m = REVIEW_WORKTREE_NAME.exec(name);
     if (!m) {
       // W1-T14928: a run tree is considered only once git no longer resolves it; any other name never is.
-      if (!DAEMON_RUN_TREE_NAME.test(name) || !isDirectory(join(root, name))) continue;
-      const path = join(root, name);
-      const verdict = yield* unregisteredTreeVerdict(path);
-      if (verdict.kind === "resolvable") continue;
-      if (verdict.kind === "kept") { keep(name, path, verdict.reason); continue; }
-      yield* reclaimUnregistered(name, path);
+      if (RUN_SOURCE_TREE_NAME.test(name) || HEALED_TREE_NAME.test(name)) yield* considerRunTree(root, name);
       continue;
     }
     const prNumber = Number(m[1]);
@@ -288,6 +315,18 @@ function* strandedReviewWorktreeSteps(config: Config, log: (step: string, extra?
     } catch (e) {
       keep(name, path, "removal-failed", { error: String((e as Error)?.message ?? e) });
     }
+  }
+
+  const cutRoots = opts.healedTreeRoots ?? [reviewerTreeCutRoot(installRootDir())];
+  for (const dir of new Set(cutRoots.map((r) => resolve(r)))) {
+    if (dir === resolve(root)) continue;
+    let entries: string[];
+    try { entries = listEntries(dir); }
+    catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error(`review-worktree-reclaim: could not list ${dir} (${String((e as Error)?.message ?? e)})`);
+      continue;
+    }
+    for (const name of entries) if (HEALED_TREE_NAME.test(name)) yield* considerRunTree(dir, name);
   }
 
   return { reclaimed, kept };
@@ -431,4 +470,50 @@ async function treeBytesAsync(path: string): Promise<number> {
   let total = 0;
   for (const entry of await readdir(path)) total += await treeBytesAsync(join(path, entry));
   return total;
+}
+
+/** This rmd install's own root, derived as src/lib/reviewer-tree-reaper.ts derives it. */
+function installRootDir(): string {
+  return join(fileURLToPath(new URL(".", import.meta.url)), "..", "..");
+}
+
+/** W1-T14928: a tree's sibling `<tree>.lock` (a run lock or a reviewer lease). A dead pid frees it only when it was
+ *  written in this process's pid namespace, or on this host when it names none; otherwise it cannot be probed. */
+function siblingLockState(path: string): "free" | "held" | "unknown" {
+  const lock = readRunLock(path);
+  if (lock.kind === "absent") return "free";
+  if (lock.kind === "corrupt") return "unknown";
+  if (defaultIsPidAlive(lock.info.pid)) return "held";
+  const own = readPidNamespace();
+  const host = (lock.info as { host?: unknown }).host;
+  const sameNamespace = lock.info.pidNs !== undefined ? own !== undefined && lock.info.pidNs === own : host === hostname();
+  return sameNamespace ? "free" : "unknown";
+}
+
+/** Restore owner write and search on every directory under `path`, never following a symlink, so a read-only
+ *  tree (a run's `-source` view) can be removed. */
+function makeOwnerWritable(path: string): void {
+  const st = lstatSync(path);
+  if (!st.isDirectory()) return;
+  chmodSync(path, (st.mode & 0o7777) | 0o700);
+  for (const entry of readdirSync(path)) makeOwnerWritable(join(path, entry));
+}
+
+async function makeOwnerWritableAsync(path: string): Promise<void> {
+  const st = await lstat(path);
+  if (!st.isDirectory()) return;
+  await chmod(path, (st.mode & 0o7777) | 0o700);
+  for (const entry of await readdir(path)) await makeOwnerWritableAsync(join(path, entry));
+}
+
+function removeWritableTree(path: string): void {
+  makeOwnerWritable(path);
+  rmSync(path, { recursive: true, force: true });
+}
+
+/** A healed tree is removed only while this process holds its reviewer lease. */
+async function removeWritableTreeAsync(path: string): Promise<void | "leased"> {
+  const remove = async (): Promise<void> => { await makeOwnerWritableAsync(path); await rm(path, { recursive: true, force: true }); };
+  if (!HEALED_TREE_NAME.test(path.split(sep).pop() ?? "")) return remove();
+  return (await removeUnderReviewerLease(path, remove)) === "leased" ? "leased" : undefined;
 }
