@@ -13682,9 +13682,8 @@ async function claimLostRefusal(opts: PostReviewStatusGuardedOpts): Promise<Post
 export async function postReviewStatusGuarded(
   opts: PostReviewStatusGuardedOpts,
 ): Promise<PostReviewStatusGuardedResult> {
-  if (reviewerCodePublicationRefusal(opts.state, opts.reviewerCodeFreshness) !== undefined) {
-    return (await claimLostRefusal(opts)) ?? publishReviewStatusLocked(opts);
-  }
+  // W1-T15030: even the freshness refusal's early return first refuses a run that lost its claim.
+  if (reviewerCodePublicationRefusal(opts.state, opts.reviewerCodeFreshness) !== undefined) return (await claimLostRefusal(opts)) ?? publishReviewStatusLocked(opts);
   const lockPath = join(dirname(opts.ledgerPath), "review-status-locks", `${opts.taskId}.lock`);
   const handle = await acquireReviewStatusLock(lockPath, opts.lockOpts);
   try {
