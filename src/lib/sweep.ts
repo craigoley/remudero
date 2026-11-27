@@ -7450,9 +7450,15 @@ function alongsideCiReviewDue(pr: OpenPrView, policy: SweepPolicy, now: number):
 export const REVIEW_RUN_SETTLED_STEPS: ReadonlySet<string> = new Set(["review.posted", "review.stood_down", "review.post_refused", "review.replay_input",
   "review.skipped_closed_lifecycle"]);
 
+/** W1-T15005: the rows a review run writes when it ends a pass by publishing a HOLD (capped, semantic-refused or
+ *  dispatch-held pending) instead of a verdict. The run has finished, so it holds no fix round, though its status stays
+ *  pending. Each is written by src/lib/review.ts under the run's own run_id and task_id. */
+export const REVIEW_HELD_PASS_STEPS: ReadonlySet<string> = new Set(["review.capped_pass_held", "review.semantic_pass_refused",
+  "review.dispatch_hold_held"]);
+
 /** W1-T15005: the run whose review of `pr`'s current head is in flight, or undefined. A run is in flight from its
  *  review.pending_posted claim on this head until it writes a row that settles it ({@link REVIEW_RUN_SETTLED_STEPS}) or
- *  ends it without a verdict (review.lane_aborted); a takeover ends the run it took over; the sweep's in-process reclaim
+ *  ends it without a verdict (review.lane_aborted, or a held pass: {@link REVIEW_HELD_PASS_STEPS}); a takeover ends the run it took over; the sweep's in-process reclaim
  *  of this head (aborted or released unsettled) ends every claim before it; and the run the view proves dead
  *  (reviewPendingOwnerDead) holds nothing. Each end is a row, never an age. */
 export function reviewInFlightOnHead(
@@ -7473,7 +7479,8 @@ export function reviewInFlightOnHead(
       if (typeof line.took_over_run_id === "string") live.delete(line.took_over_run_id);
       live.delete(line.run_id);
       live.add(line.run_id);
-    } else if (typeof line.step === "string" && (REVIEW_RUN_SETTLED_STEPS.has(line.step) || line.step === REVIEW_LANE_ABORTED_STEP)) {
+    } else if (typeof line.step === "string" && (REVIEW_RUN_SETTLED_STEPS.has(line.step) || line.step === REVIEW_LANE_ABORTED_STEP ||
+      REVIEW_HELD_PASS_STEPS.has(line.step))) {
       live.delete(line.run_id);
     }
   }

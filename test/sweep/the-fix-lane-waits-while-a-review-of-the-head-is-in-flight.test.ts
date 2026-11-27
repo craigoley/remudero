@@ -162,6 +162,39 @@ test("W1-T15005 criterion 3: a review that ended with no verdict holds nothing, 
   }
 });
 
+test("W1-T15005 criterion 3: a review that ended its pass on a held pending status holds nothing on later passes", async (t) => {
+  // OBSERVED 2026-11-26 (review of 83132de7b): a real capped runReview writes review.pending_posted, then
+  // review.capped_pass_held, and returns; no settled row follows, and its daemon stays alive. Each row below carries the
+  // fields its producer in src/lib/review.ts writes (publishCappedHold, publishSemanticHold, publishTaskHold).
+  const held: Array<[string, Row]> = [
+    ["a capped pass held", { step: "review.capped_pass_held", run_id: "review-PR15005-1", task_id: TASK, head_sha: HEAD,
+      attempted_state: "success", reason: "capped", outcome: "pending", ts: "2026-11-26T16:30:00.000Z" }],
+    ["a semantic pass refused", { step: "review.semantic_pass_refused", run_id: "review-PR15005-1", task_id: TASK, head_sha: HEAD,
+      pr_url: PR_URL, attempted_state: "success", reason: "no semantic judgement", reviewer_outcome: null, ts: "2026-11-26T16:30:00.000Z" }],
+    ["a dispatch hold held", { step: "review.dispatch_hold_held", run_id: "review-PR15005-1", task_id: TASK, head_sha: HEAD,
+      attempted_state: "success", reason: "dispatch_hold", outcome: "pending", ts: "2026-11-26T16:30:00.000Z" }],
+  ];
+  for (const [why, row] of held) {
+    for (let pass = 0; pass < 3; pass++) {
+      const d = dispatcher(t, [claim("review-PR15005-1"), row]);
+      await d.dispatch();
+      assert.equal(deferrals(d.rows).length, 0, `THE CLAIM: ${why} defers nothing (pass ${pass + 1})`);
+      assert.equal(d.seen.claimKeys, 1, `${why}: the red head's round takes its branch claim as today`);
+    }
+    // Positive controls: a hold by another run, or on another head, ends nothing; a new claim after the hold is in flight.
+    for (const [control, ledger] of [
+      ["a hold by another run", [claim("review-PR15005-1"), { ...row, run_id: "review-PR15005-0" }]],
+      ["a hold on another head", [claim("review-PR15005-1"), { ...row, head_sha: OTHER }]],
+      ["a new claim after the hold", [claim("review-PR15005-1"), row, claim("review-PR15005-2")]],
+    ] as Array<[string, Row[]]>) {
+      const d = dispatcher(t, ledger);
+      await d.dispatch();
+      assert.equal(deferrals(d.rows).length, 1, `${why}: ${control} still waits`);
+    }
+  }
+  assert.deepEqual([...sweep.REVIEW_HELD_PASS_STEPS].sort(), [...held.map(([, row]) => row.step)].sort(), "each held step is exercised above");
+});
+
 test("W1-T15005 criterion 1: an owned conflicted head whose round waits on a review records no worker round", async (t) => {
   const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}t15005-owned-`));
   t.after(() => rmSync(root, { recursive: true, force: true }));
