@@ -161,12 +161,12 @@ const PRODUCER = "light-gates";
 const PRODUCER_JOB = "119601912896";
 const PRODUCER_RUN = "39710957377";
 const PRODUCER_HEAD = "6f9313fb89989914f77dcd770b0cc490bb12a0e2";
-function producerRollup(): RollupCheck[] {
+function producerRollup(conclusion = "FAILURE"): RollupCheck[] {
   return [
     { name: PRODUCER, headSha: PRODUCER_HEAD, status: "COMPLETED", conclusion: "CANCELLED",
       detailsUrl: `https://github.com/craigoley/remudero/actions/runs/${PRODUCER_RUN}/job/${PRODUCER_JOB}`,
       startedAt: new Date(NOW - 900000).toISOString() },
-    { name: "claims", checkRunId: 119606381286, headSha: PRODUCER_HEAD, status: "COMPLETED", conclusion: "FAILURE",
+    { name: "claims", checkRunId: 119606381286, headSha: PRODUCER_HEAD, status: "COMPLETED", conclusion,
       externalId: `run:${PRODUCER_RUN}:1:job:${PRODUCER_JOB}`,
       outputSummary: "W1-T4399: reported by this job's claims step(s) (outcome(s): cancelled)",
       startedAt: new Date(NOW - 1000).toISOString() },
@@ -176,7 +176,7 @@ function producerView(rollup = producerRollup()) {
   return view({ headSha: PRODUCER_HEAD, redRequiredChecks: [PRODUCER, "claims", "ci-gate"],
     cancelledRequiredChecks: cancelledRequiredChecks(rollup, ["ci-gate"], PRODUCER_HEAD),
     ciFailures: [{ name: PRODUCER, jobId: PRODUCER_JOB, conclusion: "CANCELLED", logTail: "The job has exceeded the maximum execution time of15m0s" },
-      { name: "claims", jobId: PRODUCER_JOB, conclusion: "FAILURE", logTail: "claims-check: OK -- all18 claim(s) hold.\nThe operation was canceled." },
+      { name: "claims", jobId: PRODUCER_JOB, conclusion: rollup[1].conclusion, logTail: "claims-check: OK -- all18 claim(s) hold.\nThe operation was canceled." },
       { name: "ci-gate", conclusion: "FAILURE", logTail: "required checks failed" }] });
 }
 
@@ -278,4 +278,21 @@ test("cancelled producer confirmation preserves an independent same-name gate in
       assert.equal(f.armed.includes(pr.prNumber), false, "an unresolved producer cannot arm");
     } finally { f.cleanup(); }
   }
+});
+
+test("several posted gates reading CANCELLED share their producer's one plan retry", async () => {
+  const f = fixture();
+  try {
+    const rollup = producerRollup("CANCELLED");
+    rollup.push({ ...rollup[1], name: "another-gate", checkRunId: 119606381287,
+      outputSummary: "W1-T4399: reported by this job's another-gate step(s) (outcome(s): cancelled)" });
+    const pr = producerView(rollup);
+    pr.ciFailures!.push({ name: "another-gate", jobId: PRODUCER_JOB, conclusion: "CANCELLED", logTail: "The operation was canceled." });
+    assert.equal(pr.cancelledRequiredChecks?.length, 1);
+    assert.equal(pr.cancelledRequiredChecks?.[0].explainedFailures?.length, 2);
+    const disposed = await f.pass(pr, { readCiGateRollup: () => rollup });
+    assert.deepEqual(f.requeued, [PRODUCER]);
+    assert.deepEqual(f.rounds, []);
+    assert.equal(disposed?.blocker, "awaiting-ci");
+  } finally { f.cleanup(); }
 });
