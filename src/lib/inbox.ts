@@ -46,6 +46,7 @@ import { openWeightCandidatesForCapability, openWeightCapabilityForRequestedMode
   OpenWeightRequestTooLargeError, OPENWEIGHT_MAX_COMPLETION_TOKENS, type CashDraftFit, type CashDraftFitInput } from "./worker-provider.js";
 import { mechanicalAskPurpose, inboxMechanicalTaskDigest, inboxMechanicalProposalDigest, isMechanicalProducerObject, isVerificationProducerObject, type MechanicalAskPurpose, type InboxRetirementView } from "./inbox-retirement.js";
 import { inboxDismissalReceipt } from "./inbox-dismissal-audit.js";
+import { dependsOnShortlist, pathsInText, type DependsOnCandidateRow } from "./depends-on-candidates.js";
 
 /**
  * Ratification core (MASTER-PLAN P25(i), W1-T110; docs/forensics/inbox.md): only READY surfaces
@@ -1771,18 +1772,24 @@ export function planProjectionForDependsOn(planText: string, keepIds: ReadonlySe
   return dependsOnIndexFromRows(projectPlanRows(planText), keepIds).text;
 }
 
-/** One projected task row; `landed` is plan.ts's reading of its status. */
+/** One projected task row; `landed` is plan.ts's reading of its status, `candidate` what the shortlist scores. */
 interface ProjectedPlanRow {
   id: string;
   landed: boolean;
   text: string;
+  candidate: DependsOnCandidateRow;
 }
 
-/** The depends_on index a draft prompt carries; `omitsLanded` says whether any landed row was left out. */
+/** The depends_on index a draft prompt carries; `omitsLanded` says whether any landed row was left out, and
+ *  `shortlist` whether open rows were left out too (config `inboxDraftIndex: "topk"`). */
 export interface PlanDependsOnIndex {
   text: string;
   omitsLanded: boolean;
+  shortlist?: true;
 }
+
+/** config.json `inboxDraftIndex`: "full" lists every open task (the default); "topk" lists the shortlist. */
+export type InboxDraftIndexMode = "full" | "topk";
 
 /** plan.ts's own landed reading (its MERGED_STATUSES behind `unmetDependencies`' default resolver), so this file
  *  keeps no second list: a status is landed exactly when a dependency on a task holding only it is satisfied. */
@@ -1797,16 +1804,47 @@ function dependsOnIndexFromRows(rows: readonly ProjectedPlanRow[], keepIds: Read
   return { text: kept.map((row) => row.text).join("\n"), omitsLanded: kept.length < rows.length };
 }
 
+/** The proposal's own text: its id, summary and live reframe rounds, which {@link proposalNamedTaskIds} and the shortlist read. */
+function proposalText(proposal: Proposal): string {
+  return [proposal.id, proposal.summary, ...(proposal.reframeHistory ?? []).filter((round) => !round.retracted).map((round) => round.feedback)].join("\n");
+}
+
 /** Every whole id-shaped token in the proposal's own text (its id, summary and live reframe rounds): a landed task
  *  it names keeps its index row. Whole tokens, so `W1-T5` never matches inside `W1-T55`. A split, not a matching
  *  regex: a backtracking id pattern is quadratic on a long dashless summary and spun a 300K-char proposal. */
 function proposalNamedTaskIds(proposal: Proposal): Set<string> {
-  const text = [proposal.id, proposal.summary, ...(proposal.reframeHistory ?? []).filter((round) => !round.retracted).map((round) => round.feedback)].join("\n");
+  const text = proposalText(proposal);
   return new Set(text.split(/[^A-Za-z0-9-]+/).map((token) => token.replace(/^-+|-+$/g, "")));
 }
 
 function dependsOnIndexFor(proposal: Proposal, rows: readonly ProjectedPlanRow[]): PlanDependsOnIndex {
   return dependsOnIndexFromRows(rows, proposalNamedTaskIds(proposal));
+}
+
+/** The "topk" index: the open rows {@link dependsOnShortlist} keeps for this proposal, plus every row it names (a
+ *  named landed row too, as the full index keeps it). Rows keep the full index's text and plan order. */
+function dependsOnShortlistIndexFor(proposal: Proposal, rows: readonly ProjectedPlanRow[], k?: number): PlanDependsOnIndex {
+  const named = proposalNamedTaskIds(proposal);
+  const text = proposalText(proposal);
+  const paths = pathsInText(text);
+  const open = rows.filter((row) => !row.landed || named.has(row.id));
+  const kept = new Set(dependsOnShortlist(open.map((row) => row.candidate),
+    { text, files: paths, planRefs: [...named, ...paths], namedIds: new Set(open.filter((row) => named.has(row.id)).map((row) => row.id)) }, k));
+  const shortlisted = open.filter((row) => kept.has(row.id));
+  return { text: shortlisted.map((row) => row.text).join("\n"), omitsLanded: open.length < rows.length, shortlist: true };
+}
+
+/** The index a draft prompt carries under `mode`; "full" (and an absent mode) is {@link dependsOnIndexFor} unchanged. */
+export function draftPlanIndex(proposal: Proposal, currentPlanText: string, mode: InboxDraftIndexMode = "full", k?: number): PlanDependsOnIndex {
+  return draftPlanIndexFromRows(proposal, projectPlanRows(currentPlanText), mode, k);
+}
+
+function draftPlanIndexFromRows(proposal: Proposal, rows: readonly ProjectedPlanRow[], mode: InboxDraftIndexMode | undefined, k?: number): PlanDependsOnIndex {
+  return mode === "topk" ? dependsOnShortlistIndexFor(proposal, rows, k) : dependsOnIndexFor(proposal, rows);
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 function projectPlanRows(planText: string): ProjectedPlanRow[] {
@@ -1829,7 +1867,9 @@ function projectPlanRows(planText: string): ProjectedPlanRow[] {
       if (value === undefined || value === null || value === "") continue;
       lines.push(`  ${field}: ${Array.isArray(value) ? value.join(", ") : String(value)}`);
     }
-    rows.push({ id, landed: statusHasLanded(record["status"]), text: lines.join("\n") });
+    rows.push({ id, landed: statusHasLanded(record["status"]), text: lines.join("\n"), candidate: { id,
+      title: typeof record["title"] === "string" ? record["title"] : "", body: typeof record["rationale"] === "string" ? record["rationale"] : undefined,
+      files: stringList(record["files"]), planRefs: stringList(record["plan_refs"]) } });
   }
   if (rows.length === 0) throw new PlanProjectionError("the plan projected to zero tasks");
   return rows;
@@ -1926,6 +1966,7 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
       "a dependency on a merged or done task is already satisfied, so leave it out of depends_on."] : []),
     "",
     "=== plan/tasks.yaml INDEX (id, title, status, type, depends_on — for depends_on grounding) ===",
+    ...(planIndex.shortlist ? ["This is a shortlist; Grep plan/tasks.yaml for any other dependency."] : []),
     planIndex.text,
     "",
     "=== TASK IDS — PLACEHOLDERS ONLY, never a real W1-Tnnn id (feedback#fb-1784766965325-c7b673) ===",
@@ -2277,6 +2318,8 @@ export interface DraftRungDeps {
   lane?: DraftLaneIdentity;
   cashFit?: (input: CashDraftFitInput) => CashDraftFit;
   cashResumes?: DraftCashResumes;
+  /** config.json `inboxDraftIndex`; absent is "full", the index every open task appears in. */
+  indexMode?: InboxDraftIndexMode;
   log: (step: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -2834,7 +2877,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
     try {
       // The plan is parsed once per rung; each proposal keeps the landed tasks its own text names.
       planRows ??= projectPlanRows(currentPlanText);
-      const planIndex = dependsOnIndexFor(proposal, planRows);
+      const planIndex = draftPlanIndexFromRows(proposal, planRows, deps.indexMode);
       const planIndexChars = planIndex.text.length;
       const initialPrompt = inboxDraftPrompt(proposal, currentPlanText, runId, planIndex);
       const generation = snapshot?.generation;
@@ -2935,6 +2978,7 @@ export async function runDraftRung(toDraft: Proposal[], currentPlanText: string,
           subtype: worker.subtype,
           prompt_chars: worker.promptChars ?? prompt.length,
           plan_index_chars: planIndexChars,
+          ...(planIndex.shortlist ? { plan_index_mode: "topk" } : {}),
           num_turns: worker.numTurns,
           ...workerLedgerFields(worker),
         });

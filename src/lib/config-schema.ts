@@ -62,6 +62,8 @@ export interface Config {
   contributorAdmission?: import("./contributor-admission.js").AdmissionSettings;
   selectedRegistryMode?: SelectedModeSettings;
   inboxGardenerMode?: "off" | "shadow" | "act";
+  /** The inbox draft's depends_on index: "full" lists every open task (default), "topk" a per-proposal shortlist. */
+  inboxDraftIndex?: "full" | "topk";
   claudeBin: string;
   root: string;
   diskArtifactScanRoots?: string[];
@@ -360,6 +362,7 @@ const workerProvidersShape: ValueSchema = {
 };
 
 export const CONFIG_SCHEMA: readonly ConfigFieldSchema[] = [
+  configField("inboxDraftIndex", '"full" | "topk"', true, "full", "config.json", "The inbox draft prompt's depends_on index: full lists every open task, as before; topk lists the open tasks the proposal names plus the 80 that score highest against it (src/lib/depends-on-candidates.ts), and tells the worker to Grep plan/tasks.yaml for any other.", { kind: "enum", values: ["full", "topk"] }),
   configField("inboxGardenerMode", '"off" | "shadow" | "act"', true, undefined, "config.json", "Durable host setting for the bounded Inbox gardener (W1-T13258): shadow revalidates only, act retires source-proven asks reversibly; a valid RMD_INBOX_GARDENER_MODE wins. Activation still needs operator authority (W1-T9284).", { kind: "enum", values: ["off", "shadow", "act"] }),
   configField("selectedRegistryMode", "SelectedModeSettings", true, undefined, "config.json", "Opt-in SHADOW mode evidence only; never selected authority or publication permission.", {
     kind: "object", fields: [
