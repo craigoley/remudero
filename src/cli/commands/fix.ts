@@ -5854,12 +5854,15 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     if (expectedHeadShaForPush !== undefined && expectationBase !== undefined && expectedHeadShaForPush !== expectationBase) {
       let unasked: Array<{ path: string; changed: string[] }>;
       try {
-        const git = (args: string[]) => hostWorktreeGit(opts.worktreePath, args);
-        const paths = git(["diff", "--name-only", "-z", "--diff-filter=M", expectationBase, expectedHeadShaForPush, "--", "test/"])
+        const git = (args: string[]) => hostWorktreeGitAsync(opts.worktreePath, args);
+        const head = expectedHeadShaForPush;
+        const paths = (await git(["diff", "--name-only", "-z", "--diff-filter=M", expectationBase, head, "--", "test/"]))
           .split("\0").filter((path) => /\.test\.[cm]?[jt]s$/.test(path));
-        unasked = unaskedExpectationRewrites(rewrittenTestExpectations(paths.map((path) => ({ path,
-          base: git(["show", `${expectationBase}:${path}`]), head: git(["show", `${expectedHeadShaForPush}:${path}`]) }))),
-        JSON.stringify(evidence));
+        const changes = [];
+        for (const path of paths) {
+          changes.push({ path, base: await git(["show", `${expectationBase}:${path}`]), head: await git(["show", `${head}:${path}`]) });
+        }
+        unasked = unaskedExpectationRewrites(rewrittenTestExpectations(changes), JSON.stringify(evidence));
       } catch (error) {
         // The base is this worktree's own HEAD at round start, so an unreadable diff means git cannot read
         // the round's head here, and the push below sends that same head. Say so rather than pass silently.
