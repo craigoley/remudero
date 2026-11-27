@@ -180,7 +180,7 @@ test("field trials github names unavailable detail, an exhausted budget and a re
 test("field trials github default seam shells gh api and turns a failed read into a reason", async () => {
   const shim = ghShim([
     { when: "repos/o/r/pulls", stdout: JSON.stringify([pr(1, 1)]) },
-    { when: "repos/o/r/commits", stderr: "HTTP 502", exit: 1 },
+    { when: "repos/o/r/commits", stderr: "HTTP 404: Not Found", exit: 1 },
   ]);
   const cache = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}field-trials-gh-cache-`));
   const saved = { PATH: process.env.PATH, RMD_GH_CACHE_HOME: process.env.RMD_GH_CACHE_HOME };
@@ -191,7 +191,7 @@ test("field trials github default seam shells gh api and turns a failed read int
     const ok = await fetch("repos/o/r/pulls?page=1");
     assert.equal(ok.ok && (ok.items[0] as { number: number }).number, 1);
     assert.deepEqual(await fetch("repos/o/r/commits?page=1"), { ok: false, reason: "github-read-failed" });
-    assert.deepEqual(shim.calls(), ["api repos/o/r/pulls?page=1", "api repos/o/r/commits?page=1"]);
+    assert.deepEqual(shim.calls(), ["api repos/o/r/pulls?page=1 -i", "api repos/o/r/commits?page=1 -i"]);
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
@@ -202,7 +202,7 @@ test("field trials github default seam shells gh api and turns a failed read int
   const refused = ghApiFetch(async () => { throw new Error("read floor refused"); });
   assert.deepEqual(await refused("repos/o/r/pulls"), { ok: false, reason: "github-read-failed" }, "a refused read is a reason, not a crash");
   const injected = ghApiFetch(async (args) => JSON.stringify([{ args }]));
-  assert.deepEqual(await injected("repos/o/r/pulls"), { ok: true, items: [{ args: ["api", "repos/o/r/pulls"] }] });
+  assert.deepEqual(await injected("repos/o/r/pulls"), { ok: true, items: [{ args: ["api", "repos/o/r/pulls", "-i"] }] });
 });
 
 

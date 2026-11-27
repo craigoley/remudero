@@ -43,9 +43,9 @@ test("W1-T10038 criterion 1: the gardener admits a representative registry witho
   assert.equal(mechanicalAskPurpose(pack.candidates.find(c => c.proposal.id === ID)!.proposal)?.producer, "proof-queue-audit-v1");
   assert.equal(pack.candidates.filter(c => mechanicalAskPurpose(c.proposal)).length, 1, "byte admission grants no legacy purpose");
   const result = await runInboxGardener({ stateDir: f.state, scope: f.scope, ports: { ...ports, judge: async () => assert.fail("no judge for protected human asks or proven control"), mirror: async () => assert.fail("shadow has no live effects") }, mode: "shadow" });
-  assert.equal(result.state, "pending");
+  assert.equal(result.state, "complete", "W1-T14978: one pass sweeps every proposal");
   assert.equal("retired" in result && result.retired, 0);
-  assert.equal("evaluated" in result && result.evaluated, 8, "candidate limit remains bounded");
+  assert.equal("evaluated" in result && result.evaluated, 1400);
   const store = readInboxGardenerStore(f.state, f.scope); assert.equal(store.state, "observed");
   if (store.state !== "observed") return;
   assert.equal(store.store.entries[ID]?.decision, "retire_proven_shadow");

@@ -97,6 +97,9 @@ function fixture(t: TestContext, catalog: "public" | "ops", opsMainHolds: string
     await withLiveWritesAllowed(() => runSweep([], {
       arm: () => {}, close: () => {}, dispatchFix: () => {}, escalate: () => {}, ledgerPath,
       runId: "fixture-sweep", draftRefusalAmendments: effects.draftRefusalAmendments, log: deps.log,
+      // W1-T14969: the sweep reads its age window from the fixture's clock, the one its verdict rows are stamped by, so
+      // the pass enumerates the refusal at any real date instead of only within REFUSAL_AMENDMENT_MAX_AGE_MS of NOW_MS.
+      now: () => NOW_MS,
     }));
   };
   const ledger = () => readFileSync(ledgerPath, "utf8").trim().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
@@ -125,6 +128,42 @@ test("W1-T14528 criterion 1: an ops-only task reads its record at the ops main a
   assert.ok(f.readsAtMain(f.opsDir).length >= 3);
   assert.ok(f.creates().every(args => args.some(arg => arg.includes(OPS))));
   assert.equal(f.pub.clone.git("status", "--porcelain"), "");
+});
+
+/** W1-T14969: run this file's five W1-T14528 tests in a child under a clock `days` ahead of the real one (0: the real
+ *  clock), with a private TMPDIR, and return its TAP. The child selects only them, so this test never runs itself. */
+const DAY_MS = 86_400_000;
+
+test("W1-T14969 criterion 1: the five W1-T14528 tests pass at any real date", async t => {
+  // The fixture stamps its refusal at NOW_MS; before W1-T14969 the sweep read the real clock, so all five went red once it
+  // passed NOW_MS + REFUSAL_AMENDMENT_MAX_AGE_MS (2026-11-26T12:00Z). Each pass shifts the real clock (Date only, in this
+  // process) and runs the five tests' scenarios: no nested runner, so the proof runs wherever the suite does.
+  for (const days of [0, 7, 400]) {
+    await t.test(`at the real clock plus ${days} days`, async st => {
+      st.mock.timers.enable({ apis: ["Date"], now: Date.now() + days * DAY_MS });
+      for (const catalog of ["ops", "public"] as const) {
+        const f = fixture(st, catalog);
+        await f.amendment();
+        const row = f.amendmentRows()[0];
+        assert.ok(row?.outcome === "drafted" || row?.outcome === "waiting", `${catalog} at +${days} days: ${JSON.stringify(row)}`);
+      }
+      for (const failure of ["fetch", "show"] as const) {
+        const f = fixture(st, "ops");
+        const url = f.ops.clone.git("remote", "get-url", "origin");
+        if (failure === "fetch") f.ops.clone.git("remote", "set-url", "origin", join(f.root, "missing-origin"));
+        else f.options.failShow = true;
+        await f.amendment();
+        assert.equal(f.rows.find(r => r.step === "sweep.refusal_amendment.error")?.outcome, "lookup_unreadable", `${failure} at +${days} days`);
+        f.ops.clone.git("remote", "set-url", "origin", url);
+        f.options.failShow = false;
+        await f.amendment();
+        assert.ok(["drafted", "waiting"].includes(String(f.amendmentRows()[0]?.outcome)), `${failure} recovers at +${days} days`);
+      }
+      const absent = fixture(st, "ops", "W1-T900529");
+      await absent.amendment();
+      assert.equal(absent.amendmentRows()[0]?.outcome, "no_shard", `absent at +${days} days`);
+    });
+  }
 });
 
 test("W1-T14528 criterion 2: a public task reads its record from the public working tree with no read at main", async t => {

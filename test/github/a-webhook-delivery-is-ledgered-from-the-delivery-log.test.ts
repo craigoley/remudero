@@ -1,14 +1,18 @@
 /**
  * W1-T14881: serve's main thread cannot time a webhook request it was too blocked to see arrive (W1-T14808), but GitHub
  * keeps a log of every delivery it sent with its status code and duration. A pass reads that log and writes one
- * github.delivery row per delivery, resuming from a cursor in the state dir.
+ * github.delivery row per delivery, resuming from a cursor in the state dir. W1-T14967: the log is the App's own
+ * webhook's, read with an App JWT, because a user-created org hook is invisible to the App's installation token.
  */
 import assert from "node:assert/strict";
+import { generateKeyPairSync, verify } from "node:crypto";
 import fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
+  APP_HOOK_ID,
+  defaultDeliveryLogApi,
   DeliveryLogReadError,
   GITHUB_DELIVERY_READ_FAILED_STEP,
   GITHUB_DELIVERY_STEP,
@@ -18,17 +22,18 @@ import {
   startGithubDeliveryLogPass,
   type DeliveryLogApi,
 } from "#src/lib/github-delivery-log.js";
+import { realWriteAtomicIo } from "#src/lib/fs-race-safe.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { ghShim } from "#test/helpers/gh-shim.js";
 
-const ORG = "fixture-org";
-const HOOK = "716757843";
+/** GET /app/hook/config for an App whose webhook points at serve's route. */
+const SERVE_HOOK_CONFIG = { content_type: "json", insecure_ssl: "0", url: "https://console.example.test/v1/hooks/github" };
+
 /** Ids past Number.MAX_SAFE_INTEGER, as GitHub's are: a double would round neighbours to one value. */
 const id = (n: number): string => (3856109046673203200n + BigInt(n)).toString();
 
 interface Row { step: string; [field: string]: unknown }
 
-/** A fake delivery-log api: the org's hooks and one hook's deliveries, served newest first `perPage` at a time. */
+/** A fake App-hook log: deliveries served newest first `perPage` at a time, the way GET /app/hook/deliveries pages. */
 function deliveryLog(perPage = 2) {
   const deliveries: Array<Record<string, unknown>> = [];
   const calls: string[] = [];
@@ -43,19 +48,14 @@ function deliveryLog(perPage = 2) {
   };
   const api: DeliveryLogApi = async (path) => {
     calls.push(path);
+    if (path === "app/hook/config") return { body: SERVE_HOOK_CONFIG };
     if (refuse !== undefined && path.includes(refuse)) throw new DeliveryLogReadError("5xx");
-    if (path === `orgs/${ORG}/hooks?per_page=100`) {
-      return { body: [
-        { id: HOOK, config: { url: "https://console.example.test/v1/hooks/github" } },
-        { id: "999", config: { url: "https://elsewhere.example.test/hook" } },
-      ] };
-    }
-    const match = /^orgs\/fixture-org\/hooks\/(\d+)\/deliveries\?per_page=100(?:&cursor=(\d+))?$/.exec(path);
-    assert.ok(match && match[1] === HOOK, `only serve's hook is paged (${path})`);
+    const match = /^app\/hook\/deliveries\?per_page=100(?:&cursor=(\d+))?$/.exec(path);
+    assert.ok(match, `only the App's own hook log is paged (${path})`);
     const newestFirst = [...deliveries].reverse();
-    const start = match[2] === undefined ? 0 : Number(match[2]);
+    const start = match[1] === undefined ? 0 : Number(match[1]);
     const page = newestFirst.slice(start, start + perPage);
-    const next = start + perPage < newestFirst.length ? `orgs/${ORG}/hooks/${HOOK}/deliveries?per_page=100&cursor=${start + perPage}` : undefined;
+    const next = start + perPage < newestFirst.length ? `app/hook/deliveries?per_page=100&cursor=${start + perPage}` : undefined;
     return { body: page, ...(next ? { next } : {}) };
   };
   return { api, add, calls, refuseOn: (part: string | undefined) => void (refuse = part) };
@@ -71,19 +71,19 @@ function scene(t: TestContext) {
 
 const deliveryIds = (rows: Row[]): string[] => rows.filter((r) => r.step === GITHUB_DELIVERY_STEP).map((r) => String(r.delivery_id));
 
-test("W1-T14881 criterion 1: a pass ledgers one github.delivery row per new delivery, with status_code and duration_ms and no payload field", async (t) => {
+test("W1-T14967 criterion 1: a pass ledgers one github.delivery row per new App-hook delivery with status_code and duration_ms and no payload", async (t) => {
   const { stateDir, rows, log } = scene(t);
   const up = deliveryLog();
   up.add(1);
   up.add(2, 500, 10.002);
   up.add(3);
-  const result = await runGithubDeliveryLogPass({ org: ORG, stateDir, log, api: up.api });
+  const result = await runGithubDeliveryLogPass({ stateDir, log, api: up.api });
   assert.deepEqual(result, { ledgered: 2, failed: false }, "a first pass reads the newest page only");
   assert.deepEqual(deliveryIds(rows), [id(2), id(3)], "oldest first, each delivery once, exact ids");
   const timedOut = rows.find((r) => r.delivery_id === id(2))!;
   assert.equal(timedOut.status_code, 500);
   assert.equal(timedOut.duration_ms, 10_002);
-  assert.equal(timedOut.hook_id, HOOK);
+  assert.equal(timedOut.hook_id, APP_HOOK_ID);
   assert.equal(timedOut.event, "check_run");
   assert.equal(timedOut.repository_id, 1300328309);
   for (const row of rows) {
@@ -91,29 +91,47 @@ test("W1-T14881 criterion 1: a pass ledgers one github.delivery row per new deli
     assert.equal("payload" in row, false, "no payload field");
     assert.doesNotMatch(JSON.stringify(row), /secret-looking|private/, "nothing from the payload or headers");
   }
+  assert.deepEqual(up.calls, ["app/hook/config", "app/hook/deliveries?per_page=100"], "the App's own hook, never an org hook list");
+});
 
+test("W1-T14881 criterion 1: a pass ledgers one github.delivery row per new delivery, with status_code and duration_ms and no payload field", async (t) => {
+  const { stateDir, rows, log } = scene(t);
+  const up = deliveryLog();
+  up.add(1);
+  up.add(2);
+  await runGithubDeliveryLogPass({ stateDir, log, api: up.api });
+  up.add(3, 500, 10);
   up.add(4);
   up.add(5);
-  up.add(6);
   rows.length = 0;
-  assert.deepEqual(await runGithubDeliveryLogPass({ org: ORG, stateDir, log, api: up.api }), { ledgered: 3, failed: false });
-  assert.deepEqual(deliveryIds(rows), [id(4), id(5), id(6)], "a later pass pages back to its cursor and stops there");
+  assert.deepEqual(await runGithubDeliveryLogPass({ stateDir, log, api: up.api }), { ledgered: 3, failed: false });
+  assert.deepEqual(deliveryIds(rows), [id(3), id(4), id(5)], "a later pass pages back to its cursor and stops there");
+  assert.deepEqual(rows.map((r) => r.status_code), [500, 202, 202]);
+  assert.equal(rows[0]!.duration_ms, 10_000);
 });
 
 test("W1-T14881 criterion 2: a second pass after a restart ledgers no delivery twice and skips none (invariant:cursor-resumes)", async (t) => {
   const { stateDir, rows, log } = scene(t);
   const up = deliveryLog(3);
   for (let n = 1; n <= 3; n++) up.add(n);
-  await runGithubDeliveryLogPass({ org: ORG, stateDir, log, api: up.api });
-  for (let n = 4; n <= 10; n++) up.add(n);
+  await runGithubDeliveryLogPass({ stateDir, log, api: up.api });
   // A restart: a new pass with nothing in memory, the cursor only on disk.
   const restarted = deliveryLog(3);
   for (let n = 1; n <= 10; n++) restarted.add(n);
-  await runGithubDeliveryLogPass({ org: ORG, stateDir, log, api: restarted.api });
+  await runGithubDeliveryLogPass({ stateDir, log, api: restarted.api });
   assert.deepEqual(deliveryIds(rows), Array.from({ length: 10 }, (_, i) => id(i + 1)), "every delivery once, in order");
   rows.length = 0;
-  await runGithubDeliveryLogPass({ org: ORG, stateDir, log, api: restarted.api });
+  await runGithubDeliveryLogPass({ stateDir, log, api: restarted.api });
   assert.deepEqual(deliveryIds(rows), [], "a pass with nothing new ledgers nothing");
+  // A cursor the state dir refuses to save (a rename refused with EACCES), then a restart.
+  for (let n = 11; n <= 12; n++) restarted.add(n);
+  const refusing = { ...realWriteAtomicIo, renameSync: () => { throw Object.assign(new Error("EACCES: permission denied, rename"), { code: "EACCES" }); } };
+  assert.deepEqual(await runGithubDeliveryLogPass({ stateDir, log, api: restarted.api, cursorIo: refusing }), { ledgered: 0, failed: true });
+  assert.deepEqual(rows, [{ step: GITHUB_DELIVERY_READ_FAILED_STEP, hook_id: APP_HOOK_ID, status_class: "cursor", code: "EACCES" }],
+    "a cursor that cannot be saved ledgers no delivery");
+  rows.length = 0;
+  await runGithubDeliveryLogPass({ stateDir, log, api: restarted.api });
+  assert.deepEqual(deliveryIds(rows), [id(11), id(12)], "the next pass ledgers each of them once");
 });
 
 test("W1-T14881 criterion 3: a refused deliveries GET writes one read_failed row and keeps the cursor", async (t) => {
@@ -121,19 +139,48 @@ test("W1-T14881 criterion 3: a refused deliveries GET writes one read_failed row
   const up = deliveryLog(2);
   up.add(1);
   up.add(2);
-  await runGithubDeliveryLogPass({ org: ORG, stateDir, log, api: up.api });
+  await runGithubDeliveryLogPass({ stateDir, log, api: up.api });
   up.add(3);
   up.add(4);
   up.add(5);
   up.refuseOn("cursor=2");
   rows.length = 0;
-  assert.deepEqual(await runGithubDeliveryLogPass({ org: ORG, stateDir, log, api: up.api }), { ledgered: 0, failed: true });
-  assert.deepEqual(rows, [{ step: GITHUB_DELIVERY_READ_FAILED_STEP, org: ORG, hook_id: HOOK, status_class: "5xx" }],
+  assert.deepEqual(await runGithubDeliveryLogPass({ stateDir, log, api: up.api }), { ledgered: 0, failed: true });
+  assert.deepEqual(rows, [{ step: GITHUB_DELIVERY_READ_FAILED_STEP, hook_id: APP_HOOK_ID, status_class: "5xx" }],
     "one read_failed row and no delivery row from a half-read walk");
   up.refuseOn(undefined);
   rows.length = 0;
-  await runGithubDeliveryLogPass({ org: ORG, stateDir, log, api: up.api });
+  await runGithubDeliveryLogPass({ stateDir, log, api: up.api });
   assert.deepEqual(deliveryIds(rows), [id(3), id(4), id(5)], "the next pass reads from the kept cursor");
+});
+
+test("W1-T14923 criterion 1: a hooks body that is not an array writes one shape read_failed row, with GitHub's message", async (t) => {
+  const { stateDir, rows, log } = scene(t);
+  const api: DeliveryLogApi = async (path) => path === "app/hook/config" ? { body: SERVE_HOOK_CONFIG }
+    : { body: { message: "Not Found", documentation_url: "https://docs.github.com/rest" } };
+  assert.deepEqual(await runGithubDeliveryLogPass({ stateDir, log, api }), { ledgered: 0, failed: true });
+  assert.deepEqual(rows, [{ step: GITHUB_DELIVERY_READ_FAILED_STEP, hook_id: APP_HOOK_ID, status_class: "shape", message: "Not Found" }]);
+});
+
+test("W1-T14967 criterion 4: an App whose webhook is missing or points elsewhere writes one no_hook read_failed row", async (t) => {
+  const { stateDir, rows, log } = scene(t);
+  const reads: string[] = [];
+  const answering = (config: () => unknown): DeliveryLogApi => async (path) => {
+    reads.push(path);
+    if (path === "app/hook/config") return { body: config() };
+    return { body: [] };
+  };
+  const noHook = { step: GITHUB_DELIVERY_READ_FAILED_STEP, hook_id: APP_HOOK_ID, status_class: "no_hook" };
+  const missing = answering(() => { throw new DeliveryLogReadError("4xx", 404); });
+  assert.deepEqual(await runGithubDeliveryLogPass({ stateDir, log, api: missing }), { ledgered: 0, failed: true });
+  const elsewhere = answering(() => ({ ...SERVE_HOOK_CONFIG, url: "https://elsewhere.example.test/hook" }));
+  assert.deepEqual(await runGithubDeliveryLogPass({ stateDir, log, api: elsewhere }), { ledgered: 0, failed: true });
+  assert.deepEqual(rows, [noHook, noHook]);
+  assert.deepEqual(reads, ["app/hook/config", "app/hook/config"], "no deliveries are paged for a hook that is not serve's");
+  rows.length = 0;
+  const refused = answering(() => { throw new DeliveryLogReadError("auth", 401); });
+  await runGithubDeliveryLogPass({ stateDir, log, api: refused });
+  assert.deepEqual(rows, [{ step: GITHUB_DELIVERY_READ_FAILED_STEP, hook_id: APP_HOOK_ID, status_class: "auth" }], "a refused config read keeps its own class");
 });
 
 test("W1-T14881: a delivery id keeps its digits and the next page comes from the Link header", () => {
@@ -141,50 +188,108 @@ test("W1-T14881: a delivery id keeps its digits and the next page comes from the
   assert.equal(parsed[0]!.id, id(1));
   assert.equal(parsed[0]!.repository_id, 1300328309);
   assert.notEqual(String(Number(id(1))), id(1), "positive control: a double would have rounded the id");
-  const headers = 'HTTP/2.0 200 OK\nLink: <https://api.github.com/orgs/x/hooks/1/deliveries?per_page=100&cursor=v1_77>; rel="next"\n';
-  assert.equal(nextPagePath(headers), "orgs/x/hooks/1/deliveries?per_page=100&cursor=v1_77");
-  assert.equal(nextPagePath("HTTP/2.0 200 OK\n"), undefined);
+  const link = '<https://api.github.com/app/hook/deliveries?per_page=100&cursor=v1_77>; rel="next"';
+  assert.equal(nextPagePath(link), "app/hook/deliveries?per_page=100&cursor=v1_77");
+  assert.equal(nextPagePath(null), undefined);
 });
 
-test("W1-T14881: the default api reads through a real gh child, keeps exact ids and classes a refusal", async (t) => {
+/** A real RSA key pair and an App env naming it; the key file lives in the scene's own temp dir. */
+function appKey(t: TestContext, stateDir: string) {
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const keyPath = join(stateDir, "app.pem");
+  fs.writeFileSync(keyPath, privateKey.export({ type: "pkcs8", format: "pem" }));
+  const env = { GH_APP_ID: "4648213", GH_APP_PRIVATE_KEY_PATH: keyPath, GH_TOKEN: "ghs_installation-token-must-not-appear" };
+  void t;
+  return { publicKey, env };
+}
+
+test("W1-T14967 criterion 2: the App-log GET carries a Bearer JWT, never an installation token", async (t) => {
   const { stateDir, rows, log } = scene(t);
-  const hooks = JSON.stringify([{ id: Number(HOOK), config: { url: "https://console.example.test/v1/hooks/github" } }]);
-  const page = `[{"id":${id(7)},"guid":"g7","status_code":500,"duration":10.0,"event":"status","repository_id":1}]`;
-  const shim = ghShim([
-    { when: `api -i orgs/${ORG}/hooks/${HOOK}/deliveries`, stdout: `HTTP/2.0 200 OK\nX-Ratelimit-Remaining: 4999\n\n${page}` },
-    { when: `api -i orgs/${ORG}/hooks?per_page=100`, stdout: `HTTP/2.0 200 OK\n\n${hooks}` },
-    { when: "api -i orgs/refused-org/hooks", stderr: "gh: Resource not accessible by integration (HTTP 403)", exit: 1 },
-    { when: "api -i orgs/broken-org/hooks", stderr: "gh: Server Error (HTTP 502)", exit: 1 },
-    { when: "api -i orgs/missing-org/hooks", stderr: "gh: Not Found (HTTP 404)", exit: 1 },
-    { when: "api -i orgs/offline-org/hooks", stderr: "error connecting to api.github.com", exit: 1 },
+  const { publicKey, env } = appKey(t, stateDir);
+  const seen: Array<{ url: string; authorization: string }> = [];
+  const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+    seen.push({ url: String(url), authorization: new Headers(init?.headers).get("authorization") ?? "" });
+    if (String(url).endsWith("/app/hook/config")) return new Response(JSON.stringify(SERVE_HOOK_CONFIG), { status: 200 });
+    const first = !String(url).includes("cursor=");
+    const page = first ? `[{"id":${id(2)},"guid":"g2","status_code":202,"duration":0.2,"event":"status"}]`
+      : `[{"id":${id(1)},"guid":"g1","status_code":500,"duration":10,"event":"status"}]`;
+    return new Response(page, { status: 200, headers: first ? { link: '<https://api.github.com/app/hook/deliveries?per_page=100&cursor=v1_9>; rel="next"' } : {} });
+  }) as typeof fetch;
+  const api = defaultDeliveryLogApi({ env, fetchImpl });
+  // A first pass reads one page; seed a cursor so the walk follows the Link header to a second page.
+  fs.mkdirSync(join(stateDir, "cache", "github-delivery-log"), { recursive: true });
+  fs.writeFileSync(join(stateDir, "cache", "github-delivery-log", `${APP_HOOK_ID}.json`), JSON.stringify({ [APP_HOOK_ID]: id(0) }));
+  assert.deepEqual(await runGithubDeliveryLogPass({ stateDir, log, api }), { ledgered: 2, failed: false });
+  assert.deepEqual(deliveryIds(rows), [id(1), id(2)]);
+  assert.deepEqual(seen.map((s) => s.url), [
+    "https://api.github.com/app/hook/config",
+    "https://api.github.com/app/hook/deliveries?per_page=100",
+    "https://api.github.com/app/hook/deliveries?per_page=100&cursor=v1_9",
   ]);
-  const savedPath = process.env.PATH;
-  process.env.PATH = `${shim.dir}:${savedPath ?? ""}`;
-  t.after(() => { process.env.PATH = savedPath; fs.rmSync(shim.dir, { recursive: true, force: true }); });
-  assert.deepEqual(await runGithubDeliveryLogPass({ org: ORG, stateDir, log }), { ledgered: 1, failed: false });
-  assert.deepEqual(deliveryIds(rows), [id(7)]);
-  assert.equal(rows[0]!.duration_ms, 10_000);
-  rows.length = 0;
-  for (const org of ["refused-org", "broken-org", "missing-org", "offline-org"]) {
-    await runGithubDeliveryLogPass({ org, stateDir, log });
+  for (const { authorization } of seen) {
+    assert.match(authorization, /^Bearer [\w-]+\.[\w-]+\.[\w-]+$/, "a Bearer JWT");
+    assert.doesNotMatch(authorization, /ghs_|^token /i, "never the installation token");
+    const [header, payload, signature] = authorization.slice("Bearer ".length).split(".");
+    assert.ok(verify("RSA-SHA256", Buffer.from(`${header}.${payload}`), publicKey, Buffer.from(signature!, "base64url")), "signed by the App key");
+    assert.equal(JSON.parse(Buffer.from(payload!, "base64url").toString()).iss, "4648213");
   }
-  assert.deepEqual(rows.map((r) => r.status_class), ["auth", "5xx", "4xx", "transport"]);
+});
+
+test("W1-T14967: the App-log GET classes each refusal and reads an unconfigured App as auth", async (t) => {
+  const { stateDir } = scene(t);
+  const { env } = appKey(t, stateDir);
+  const answering = (status: number) => (async () => new Response("{}", { status })) as unknown as typeof fetch;
+  const classOf = async (api: ReturnType<typeof defaultDeliveryLogApi>): Promise<string> => {
+    try { await api("app/hook/deliveries?per_page=100"); return "resolved"; } catch (error) { return (error as DeliveryLogReadError).statusClass; }
+  };
+  assert.equal(await classOf(defaultDeliveryLogApi({ env, fetchImpl: answering(401) })), "auth");
+  assert.equal(await classOf(defaultDeliveryLogApi({ env, fetchImpl: answering(404) })), "4xx");
+  const notFound = await defaultDeliveryLogApi({ env, fetchImpl: answering(404) })("app/hook/config").catch((error: unknown) => error);
+  assert.equal((notFound as DeliveryLogReadError).status, 404, "GitHub's status rides with its class");
+  assert.equal(await classOf(defaultDeliveryLogApi({ env, fetchImpl: answering(502) })), "5xx");
+  assert.equal(await classOf(defaultDeliveryLogApi({ env, fetchImpl: (async () => { throw new TypeError("fetch failed"); }) as typeof fetch })), "transport");
+  assert.equal(await classOf(defaultDeliveryLogApi({ env: {}, fetchImpl: answering(200) })), "auth", "no App configured");
+  assert.equal(await classOf(defaultDeliveryLogApi({ env: { ...env, GH_APP_PRIVATE_KEY_PATH: join(stateDir, "missing.pem") }, fetchImpl: answering(200) })), "auth", "an unreadable key");
+});
+
+test("W1-T14967: the default App-log GET reaches GitHub's api root through the real fetch seam", async (t) => {
+  const { stateDir } = scene(t);
+  const { env } = appKey(t, stateDir);
+  const savedFetch = globalThis.fetch;
+  const urls: string[] = [];
+  globalThis.fetch = (async (url: string | URL) => {
+    urls.push(String(url));
+    return new Response(String(url).endsWith("/app/hook/config") ? JSON.stringify(SERVE_HOOK_CONFIG) : "[]", { status: 200 });
+  }) as typeof fetch;
+  t.after(() => { globalThis.fetch = savedFetch; });
+  const savedEnv = { id: process.env.GH_APP_ID, key: process.env.GH_APP_PRIVATE_KEY_PATH };
+  process.env.GH_APP_ID = env.GH_APP_ID;
+  process.env.GH_APP_PRIVATE_KEY_PATH = env.GH_APP_PRIVATE_KEY_PATH;
+  t.after(() => {
+    if (savedEnv.id === undefined) delete process.env.GH_APP_ID; else process.env.GH_APP_ID = savedEnv.id;
+    if (savedEnv.key === undefined) delete process.env.GH_APP_PRIVATE_KEY_PATH; else process.env.GH_APP_PRIVATE_KEY_PATH = savedEnv.key;
+  });
+  const { rows, log } = scene(t);
+  assert.deepEqual(await runGithubDeliveryLogPass({ stateDir, log }), { ledgered: 0, failed: false });
+  assert.deepEqual(urls, ["https://api.github.com/app/hook/config", "https://api.github.com/app/hook/deliveries?per_page=100"]);
+  assert.deepEqual(rows, []);
 });
 
 test("W1-T14881: the started pass runs on its interval, never twice at once, and stops", async (t) => {
   const { stateDir, rows, log } = scene(t);
   fs.mkdirSync(join(stateDir, "cache", "github-delivery-log"), { recursive: true });
-  fs.writeFileSync(join(stateDir, "cache", "github-delivery-log", `${ORG}.json`), "not json");
+  fs.writeFileSync(join(stateDir, "cache", "github-delivery-log", `${APP_HOOK_ID}.json`), "not json");
   const up = deliveryLog();
   up.add(1);
   let release: () => void = () => {};
   const held = new Promise<void>((resolve) => { release = resolve; });
   let started = 0;
   const api: DeliveryLogApi = async (path) => {
-    if (path.endsWith("hooks?per_page=100")) { started++; await held; }
+    started++;
+    if (started === 1) await held;
     return up.api(path);
   };
-  const stop = startGithubDeliveryLogPass({ org: ORG, stateDir, log, api, intervalMs: 10 });
+  const stop = startGithubDeliveryLogPass({ stateDir, log, api, intervalMs: 10 });
   try {
     await new Promise((resolve) => setTimeout(resolve, 80));
     assert.equal(started, 1, "a pass still running holds back the next one");

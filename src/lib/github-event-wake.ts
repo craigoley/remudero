@@ -43,7 +43,7 @@ const ALLOWLISTED_PULL_REQUEST_ACTIONS: ReadonlySet<string> = new Set([
 
 /** INVARIANT: true only for an `event`+`action` the sweep can act on. `check_run` counts only its
  *  terminal `completed` state; `status` has no `action` field, so presence is the whole signal;
- *  `pull_request_review` counts `submitted`, `edited`, `dismissed`.
+ *  `pull_request_review` counts `submitted`, `edited`, `dismissed`; `workflow_run` counts `completed`.
  *  Why: docs/forensics/github-event-wake.md#isallowlistedgithubevent (design ii). */
 export function isAllowlistedGithubEvent(event: string, action: string | undefined): boolean {
   switch (event) {
@@ -55,6 +55,9 @@ export function isAllowlistedGithubEvent(event: string, action: string | undefin
       return true;
     case "pull_request_review":
       return action === "submitted" || action === "edited" || action === "dismissed";
+    case "workflow_run":
+      // W1-T14810: a completed run is when an Actions artifact can appear; requested/in_progress add none.
+      return action === "completed";
     default:
       return false;
   }
@@ -338,6 +341,17 @@ export function sweepWakeMarkerPath(root: string): string {
   return join(root, "state", "SWEEP_WAKE_REQUESTED");
 }
 
+/** W1-T14893: `SWEEP_WAKE_LAST_CLOSED`, beside the wake marker, holds the newest accepted pull_request closed
+ *  delivery. Later deliveries coalesce over the wake marker but never overwrite this record. */
+export function lastClosedWakePath(markerPath: string): string {
+  return join(dirname(markerPath), "SWEEP_WAKE_LAST_CLOSED");
+}
+
+/** W1-T14893: a delivery that can change what is merged: a pull request that closed. */
+export function isPullRequestClosedWake(record: Pick<SweepWakeMarker, "event" | "action">): boolean {
+  return record.event === "pull_request" && record.action === "closed";
+}
+
 /** INVARIANT: writes `record` atomically — a same-directory temp file, then `renameSync` over the
  *  real path — so a reader never observes a torn write, and a delivery coalesces rather than queuing.
  *  Why: docs/forensics/github-event-wake.md#writesweepwakemarkeratomic (design iv). */
@@ -348,6 +362,31 @@ export function writeSweepWakeMarkerAtomic(path: string, record: SweepWakeMarker
 
 export async function writeSweepWakeMarkerAtomicAsync(path: string, record: SweepWakeMarker): Promise<void> {
   await writeAtomicAsync(path, JSON.stringify(record));
+}
+
+/** W1-T14810: the last verified `workflow_run:completed` delivery for one instance. The wake marker
+ *  coalesces with later deliveries and is consumed before the sweep it wakes, so the sweep's artifact
+ *  listing gate reads this separate record instead (until W1-T14809's changed-heads journal lands). */
+export interface WorkflowRunCompletedRecord {
+  deliveryId: string;
+  repository: string;
+  receivedAtIso: string;
+}
+
+/** `state/WORKFLOW_RUN_COMPLETED` under `root`, beside {@link sweepWakeMarkerPath}. */
+export function workflowRunCompletedPath(root: string): string {
+  return join(root, "state", "WORKFLOW_RUN_COMPLETED");
+}
+
+/** `undefined` when absent or unreadable: the listing gate then waits on its freshness floor. */
+export function readWorkflowRunCompleted(path: string): WorkflowRunCompletedRecord | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<WorkflowRunCompletedRecord>;
+    return typeof parsed?.receivedAtIso === "string" && typeof parsed.deliveryId === "string" ? (parsed as WorkflowRunCompletedRecord) : undefined;
+  } catch {
+    // Absent, mid-write and corrupt read as "no delivery recorded"; the recheck floor still lists.
+    return undefined;
+  }
 }
 
 /**
@@ -717,7 +756,13 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
         receivedAtIso: now().toISOString(),
       };
       const armed = readSweepWakeMarker(markerPath) === undefined;
+      if (event === "workflow_run" && action === "completed") {
+        // W1-T14810: written before the marker, so the sweep the marker wakes already sees the run.
+        await writeAtomicAsync(join(dirname(markerPath), basename(workflowRunCompletedPath(""))),
+          JSON.stringify({ deliveryId, repository: owningRepository, receivedAtIso: record.receivedAtIso } satisfies WorkflowRunCompletedRecord));
+      }
       await writeMarker(markerPath, record);
+      if (isPullRequestClosedWake(record)) await writeMarker(lastClosedWakePath(markerPath), record);
       await opts.dedup.record(deliveryId);
       notifyCheckRunCompleted(event, action, body);
       if (opts.counters && !armed) {

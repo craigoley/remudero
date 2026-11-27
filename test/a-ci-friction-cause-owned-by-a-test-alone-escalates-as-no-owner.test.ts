@@ -51,5 +51,6 @@ test("W1-T9503: a source-owned cause still drafts a record lint-plan admits", t 
   assert.deepEqual(ciFrictionRecordVerdict(contents, relPath), { ok: true, reason: "" });
   // The test alone, linted under the origin label as before, is the record the gardener refused (#11716).
   const alone = ciFrictionShardYaml({ price: PRICE, rung: 1, owner: { files: [TEST], why: ["x"] }, rounds: [] }, "W1-T999999", [PRICE]);
+  // W1-T14924: the drafted preservation invariant carries `kind: guard`, so W1-T14915's warn no longer joins the refusal.
   assert.deepEqual(ciFrictionRecordVerdict(alone, "ci-friction:W1-T999999"), { ok: false, reason: "block:sizing" });
 });

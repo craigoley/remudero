@@ -4,7 +4,7 @@ raw: >-
   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
   `escalation-summary`, field `servedModel`.
 
-  Coverage: 874/980 joined worker calls (89.2%) in the trailing 7-day window;
+  Coverage: 799/891 joined worker calls (89.7%) in the trailing 7-day window;
   below the field's 90.0% floor — a chronic gap no baseline excuses.
 
   First seen: 2026-11-11T18:06:47.334Z.
@@ -25,7 +25,7 @@ submission_key: null
 thread_id: null
 evidence_coverage_revision:
   version: 1
-  mainSha: bbfaa33819f2bee80097d0e7178ed1f1c6043eba
+  mainSha: 7ff2bc94213d91a2236b366b900c87a89da13bfd
   expectedRecord: >
     id: evidence-coverage-escalation-summary-served-model
 
@@ -35,8 +35,8 @@ evidence_coverage_revision:
       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
       `escalation-summary`, field `servedModel`.
 
-      Coverage: 914/1054 joined worker calls (86.7%) in the trailing 7-day window;
-      trailing baseline 99.1% — below it by more than 10.0%.
+      Coverage: 814/908 joined worker calls (89.6%) in the trailing 7-day window;
+      below the field's 90.0% floor — a chronic gap no baseline excuses.
 
       First seen: 2026-11-11T18:06:47.334Z.
 
@@ -65,7 +65,7 @@ evidence_coverage_revision:
 
     evidence_coverage_revision:
       version: 1
-      mainSha: 6ac1583d17a3ec3c13a35d719160b62d595768b9
+      mainSha: 1af66a91b9221d685f2e3061cbe91e18576e31f1
       expectedRecord: >
         id: evidence-coverage-escalation-summary-served-model
 
@@ -75,8 +75,8 @@ evidence_coverage_revision:
           Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
           `escalation-summary`, field `servedModel`.
 
-          Coverage: 1035/1177 joined worker calls (87.9%) in the trailing 7-day window;
-          trailing baseline 99.1% — below it by more than 10.0%.
+          Coverage: 874/980 joined worker calls (89.2%) in the trailing 7-day window;
+          below the field's 90.0% floor — a chronic gap no baseline excuses.
 
           First seen: 2026-11-11T18:06:47.334Z.
 
@@ -105,7 +105,7 @@ evidence_coverage_revision:
 
         evidence_coverage_revision:
           version: 1
-          mainSha: b82cd411946585c6a11d8ff1c34e73796848f433
+          mainSha: bbfaa33819f2bee80097d0e7178ed1f1c6043eba
           expectedRecord: >
             id: evidence-coverage-escalation-summary-served-model
 
@@ -115,7 +115,7 @@ evidence_coverage_revision:
               Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
               `escalation-summary`, field `servedModel`.
 
-              Coverage: 1128/1275 joined worker calls (88.5%) in the trailing 7-day window;
+              Coverage: 914/1054 joined worker calls (86.7%) in the trailing 7-day window;
               trailing baseline 99.1% — below it by more than 10.0%.
 
               First seen: 2026-11-11T18:06:47.334Z.
@@ -145,7 +145,7 @@ evidence_coverage_revision:
 
             evidence_coverage_revision:
               version: 1
-              mainSha: c7f43c157ff3804771de5f9960584ab8ecb7c837
+              mainSha: 6ac1583d17a3ec3c13a35d719160b62d595768b9
               expectedRecord: >
                 id: evidence-coverage-escalation-summary-served-model
 
@@ -155,7 +155,7 @@ evidence_coverage_revision:
                   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                   `escalation-summary`, field `servedModel`.
 
-                  Coverage: 1088/1250 joined worker calls (87.0%) in the trailing 7-day window;
+                  Coverage: 1035/1177 joined worker calls (87.9%) in the trailing 7-day window;
                   trailing baseline 99.1% — below it by more than 10.0%.
 
                   First seen: 2026-11-11T18:06:47.334Z.
@@ -185,7 +185,7 @@ evidence_coverage_revision:
 
                 evidence_coverage_revision:
                   version: 1
-                  mainSha: 6886c58df8ad4484c0a4dd1b0e61acd16dd1fc7d
+                  mainSha: b82cd411946585c6a11d8ff1c34e73796848f433
                   expectedRecord: >
                     id: evidence-coverage-escalation-summary-served-model
 
@@ -195,7 +195,7 @@ evidence_coverage_revision:
                       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                       `escalation-summary`, field `servedModel`.
 
-                      Coverage: 968/1209 joined worker calls (80.1%) in the trailing 7-day window;
+                      Coverage: 1128/1275 joined worker calls (88.5%) in the trailing 7-day window;
                       trailing baseline 99.1% — below it by more than 10.0%.
 
                       First seen: 2026-11-11T18:06:47.334Z.
@@ -225,7 +225,7 @@ evidence_coverage_revision:
 
                     evidence_coverage_revision:
                       version: 1
-                      mainSha: ba5bd4f639a1011d035063b42f6a0d390ceaa016
+                      mainSha: c7f43c157ff3804771de5f9960584ab8ecb7c837
                       expectedRecord: >
                         id: evidence-coverage-escalation-summary-served-model
 
@@ -235,7 +235,7 @@ evidence_coverage_revision:
                           Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                           `escalation-summary`, field `servedModel`.
 
-                          Coverage: 839/1081 joined worker calls (77.6%) in the trailing 7-day window;
+                          Coverage: 1088/1250 joined worker calls (87.0%) in the trailing 7-day window;
                           trailing baseline 99.1% — below it by more than 10.0%.
 
                           First seen: 2026-11-11T18:06:47.334Z.
@@ -265,7 +265,7 @@ evidence_coverage_revision:
 
                         evidence_coverage_revision:
                           version: 1
-                          mainSha: 59923bb4f7037bdf74cbf8a746f9a4f12b1d3876
+                          mainSha: 6886c58df8ad4484c0a4dd1b0e61acd16dd1fc7d
                           expectedRecord: >
                             id: evidence-coverage-escalation-summary-served-model
 
@@ -275,7 +275,7 @@ evidence_coverage_revision:
                               Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                               `escalation-summary`, field `servedModel`.
 
-                              Coverage: 721/958 joined worker calls (75.3%) in the trailing 7-day window;
+                              Coverage: 968/1209 joined worker calls (80.1%) in the trailing 7-day window;
                               trailing baseline 99.1% — below it by more than 10.0%.
 
                               First seen: 2026-11-11T18:06:47.334Z.
@@ -305,7 +305,7 @@ evidence_coverage_revision:
 
                             evidence_coverage_revision:
                               version: 1
-                              mainSha: c1030e0d477b97322558d4d4d484d03b299d7e93
+                              mainSha: ba5bd4f639a1011d035063b42f6a0d390ceaa016
                               expectedRecord: >
                                 id: evidence-coverage-escalation-summary-served-model
 
@@ -315,7 +315,7 @@ evidence_coverage_revision:
                                   Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                   `escalation-summary`, field `servedModel`.
 
-                                  Coverage: 636/873 joined worker calls (72.9%) in the trailing 7-day window;
+                                  Coverage: 839/1081 joined worker calls (77.6%) in the trailing 7-day window;
                                   trailing baseline 99.1% — below it by more than 10.0%.
 
                                   First seen: 2026-11-11T18:06:47.334Z.
@@ -345,7 +345,7 @@ evidence_coverage_revision:
 
                                 evidence_coverage_revision:
                                   version: 1
-                                  mainSha: 8840b91c2ebf90cdd6f479611070bfebf1c541a5
+                                  mainSha: 59923bb4f7037bdf74cbf8a746f9a4f12b1d3876
                                   expectedRecord: >
                                     id: evidence-coverage-escalation-summary-served-model
 
@@ -355,7 +355,7 @@ evidence_coverage_revision:
                                       Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                       `escalation-summary`, field `servedModel`.
 
-                                      Coverage: 650/808 joined worker calls (80.4%) in the trailing 7-day window;
+                                      Coverage: 721/958 joined worker calls (75.3%) in the trailing 7-day window;
                                       trailing baseline 99.1% — below it by more than 10.0%.
 
                                       First seen: 2026-11-11T18:06:47.334Z.
@@ -385,7 +385,7 @@ evidence_coverage_revision:
 
                                     evidence_coverage_revision:
                                       version: 1
-                                      mainSha: 64e89ff8e75f3b974ccaf7806dd58d2bfdfe5158
+                                      mainSha: c1030e0d477b97322558d4d4d484d03b299d7e93
                                       expectedRecord: >
                                         id: evidence-coverage-escalation-summary-served-model
 
@@ -395,7 +395,7 @@ evidence_coverage_revision:
                                           Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
                                           `escalation-summary`, field `servedModel`.
 
-                                          Coverage: 646/790 joined worker calls (81.8%) in the trailing 7-day window;
+                                          Coverage: 636/873 joined worker calls (72.9%) in the trailing 7-day window;
                                           trailing baseline 99.1% — below it by more than 10.0%.
 
                                           First seen: 2026-11-11T18:06:47.334Z.
@@ -422,172 +422,288 @@ evidence_coverage_revision:
                                         submission_key: null
 
                                         thread_id: null
+
+                                        evidence_coverage_revision:
+                                          version: 1
+                                          mainSha: 8840b91c2ebf90cdd6f479611070bfebf1c541a5
+                                          expectedRecord: >
+                                            id: evidence-coverage-escalation-summary-served-model
+
+                                            ts: 2026-11-13T22:57:42.074Z
+
+                                            raw: >-
+                                              Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+                                              `escalation-summary`, field `servedModel`.
+
+                                              Coverage: 650/808 joined worker calls (80.4%) in the trailing 7-day window;
+                                              trailing baseline 99.1% — below it by more than 10.0%.
+
+                                              First seen: 2026-11-11T18:06:47.334Z.
+
+
+                                              This follow-up never gates a PR or blocks work. Restore the field at the
+                                              lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+                                              reads), or record why this lane legitimately lacks it. The evidence-coverage
+                                              gardener updates this entry in place while the gap persists.
+                                            attachments: []
+
+                                            origin: cli
+
+                                            status: new
+
+                                            reply_to: null
+
+                                            proposal_pr: null
+
+                                            summary: null
+
+                                            expansion: null
+
+                                            submission_key: null
+
+                                            thread_id: null
+
+                                            evidence_coverage_revision:
+                                              version: 1
+                                              mainSha: 64e89ff8e75f3b974ccaf7806dd58d2bfdfe5158
+                                              expectedRecord: >
+                                                id: evidence-coverage-escalation-summary-served-model
+
+                                                ts: 2026-11-13T22:57:42.074Z
+
+                                                raw: >-
+                                                  Evidence coverage gap (evidence-coverage-v1, over benchmark-quality-v1): lane
+                                                  `escalation-summary`, field `servedModel`.
+
+                                                  Coverage: 646/790 joined worker calls (81.8%) in the trailing 7-day window;
+                                                  trailing baseline 99.1% — below it by more than 10.0%.
+
+                                                  First seen: 2026-11-11T18:06:47.334Z.
+
+
+                                                  This follow-up never gates a PR or blocks work. Restore the field at the
+                                                  lane's ledger write site (src/lib/benchmark-evidence.ts names what each field
+                                                  reads), or record why this lane legitimately lacks it. The evidence-coverage
+                                                  gardener updates this entry in place while the gap persists.
+                                                attachments: []
+
+                                                origin: cli
+
+                                                status: new
+
+                                                reply_to: null
+
+                                                proposal_pr: null
+
+                                                summary: null
+
+                                                expansion: null
+
+                                                submission_key: null
+
+                                                thread_id: null
+                                              expectedPlan:
+                                                plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+                                                plan/tasks.d: 5a24cf9db945ffa98083612b8448505fe74259c0
+                                              measurement:
+                                                lane: escalation-summary
+                                                field: servedModel
+                                                observed: 650
+                                                denominator: 808
+                                                floor: 0.9
+                                                baseline: 0.9909584086799277
+                                                at: 2026-11-14T10:59:21.278Z
+                                                since: 2026-11-07T10:59:21.278Z
+                                                line: "Coverage: 650/808 joined worker calls (80.4%) in the trailing 7-day
+                                                  window; trailing baseline 99.1% — below it by more than 10.0%."
+                                              closure:
+                                                eligible: false
+                                                reason: record is open
+                                          expectedPlan:
+                                            plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
+                                            plan/tasks.d: 4eb612098e36942ad303105c0a12f2bc73ede9fc
+                                          measurement:
+                                            lane: escalation-summary
+                                            field: servedModel
+                                            observed: 636
+                                            denominator: 873
+                                            floor: 0.9
+                                            baseline: 0.9909584086799277
+                                            at: 2026-11-14T23:52:58.348Z
+                                            since: 2026-11-07T23:52:58.348Z
+                                            line: "Coverage: 636/873 joined worker calls (72.9%) in the trailing 7-day
+                                              window; trailing baseline 99.1% — below it by more than 10.0%."
+                                          closure:
+                                            eligible: false
+                                            reason: record is open
                                       expectedPlan:
                                         plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                        plan/tasks.d: 5a24cf9db945ffa98083612b8448505fe74259c0
+                                        plan/tasks.d: be3bf22a44aa36f148f91137d2ed351acfb2bb75
                                       measurement:
                                         lane: escalation-summary
                                         field: servedModel
-                                        observed: 650
-                                        denominator: 808
+                                        observed: 721
+                                        denominator: 958
                                         floor: 0.9
                                         baseline: 0.9909584086799277
-                                        at: 2026-11-14T10:59:21.278Z
-                                        since: 2026-11-07T10:59:21.278Z
-                                        line: "Coverage: 650/808 joined worker calls (80.4%) in the trailing 7-day
+                                        at: 2026-11-15T12:22:06.571Z
+                                        since: 2026-11-08T12:22:06.571Z
+                                        line: "Coverage: 721/958 joined worker calls (75.3%) in the trailing 7-day
                                           window; trailing baseline 99.1% — below it by more than 10.0%."
                                       closure:
                                         eligible: false
                                         reason: record is open
                                   expectedPlan:
                                     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                    plan/tasks.d: 4eb612098e36942ad303105c0a12f2bc73ede9fc
+                                    plan/tasks.d: 70ee01fb4624b7bef5094232f01c86ffee8824df
                                   measurement:
                                     lane: escalation-summary
                                     field: servedModel
-                                    observed: 636
-                                    denominator: 873
+                                    observed: 839
+                                    denominator: 1081
                                     floor: 0.9
                                     baseline: 0.9909584086799277
-                                    at: 2026-11-14T23:52:58.348Z
-                                    since: 2026-11-07T23:52:58.348Z
-                                    line: "Coverage: 636/873 joined worker calls (72.9%) in the trailing 7-day
+                                    at: 2026-11-16T12:27:43.330Z
+                                    since: 2026-11-09T12:27:43.330Z
+                                    line: "Coverage: 839/1081 joined worker calls (77.6%) in the trailing 7-day
                                       window; trailing baseline 99.1% — below it by more than 10.0%."
                                   closure:
                                     eligible: false
                                     reason: record is open
                               expectedPlan:
                                 plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                                plan/tasks.d: be3bf22a44aa36f148f91137d2ed351acfb2bb75
+                                plan/tasks.d: b3e0437299ae72b33d5843c52ac676c32cee24c2
                               measurement:
                                 lane: escalation-summary
                                 field: servedModel
-                                observed: 721
-                                denominator: 958
+                                observed: 968
+                                denominator: 1209
                                 floor: 0.9
                                 baseline: 0.9909584086799277
-                                at: 2026-11-15T12:22:06.571Z
-                                since: 2026-11-08T12:22:06.571Z
-                                line: "Coverage: 721/958 joined worker calls (75.3%) in the trailing 7-day
+                                at: 2026-11-17T09:35:10.871Z
+                                since: 2026-11-10T09:35:10.871Z
+                                line: "Coverage: 968/1209 joined worker calls (80.1%) in the trailing 7-day
                                   window; trailing baseline 99.1% — below it by more than 10.0%."
                               closure:
                                 eligible: false
                                 reason: record is open
                           expectedPlan:
                             plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                            plan/tasks.d: 70ee01fb4624b7bef5094232f01c86ffee8824df
+                            plan/tasks.d: 86b4199647db308bf5057ddc507686f979344b7e
                           measurement:
                             lane: escalation-summary
                             field: servedModel
-                            observed: 839
-                            denominator: 1081
+                            observed: 1088
+                            denominator: 1250
                             floor: 0.9
                             baseline: 0.9909584086799277
-                            at: 2026-11-16T12:27:43.330Z
-                            since: 2026-11-09T12:27:43.330Z
-                            line: "Coverage: 839/1081 joined worker calls (77.6%) in the trailing 7-day
+                            at: 2026-11-20T04:28:27.876Z
+                            since: 2026-11-13T04:28:27.876Z
+                            line: "Coverage: 1088/1250 joined worker calls (87.0%) in the trailing 7-day
                               window; trailing baseline 99.1% — below it by more than 10.0%."
                           closure:
                             eligible: false
                             reason: record is open
                       expectedPlan:
                         plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                        plan/tasks.d: b3e0437299ae72b33d5843c52ac676c32cee24c2
+                        plan/tasks.d: 3d4ebb2ea3e096baf3d44dbd4fe0b714895ca105
                       measurement:
                         lane: escalation-summary
                         field: servedModel
-                        observed: 968
-                        denominator: 1209
+                        observed: 1128
+                        denominator: 1275
                         floor: 0.9
                         baseline: 0.9909584086799277
-                        at: 2026-11-17T09:35:10.871Z
-                        since: 2026-11-10T09:35:10.871Z
-                        line: "Coverage: 968/1209 joined worker calls (80.1%) in the trailing 7-day
+                        at: 2026-11-21T08:48:11.171Z
+                        since: 2026-11-14T08:48:11.171Z
+                        line: "Coverage: 1128/1275 joined worker calls (88.5%) in the trailing 7-day
                           window; trailing baseline 99.1% — below it by more than 10.0%."
                       closure:
                         eligible: false
                         reason: record is open
                   expectedPlan:
                     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                    plan/tasks.d: 86b4199647db308bf5057ddc507686f979344b7e
+                    plan/tasks.d: f674dac17e7f102872ecbd0c1b1ed513e3fa721b
                   measurement:
                     lane: escalation-summary
                     field: servedModel
-                    observed: 1088
-                    denominator: 1250
+                    observed: 1035
+                    denominator: 1177
                     floor: 0.9
                     baseline: 0.9909584086799277
-                    at: 2026-11-20T04:28:27.876Z
-                    since: 2026-11-13T04:28:27.876Z
-                    line: "Coverage: 1088/1250 joined worker calls (87.0%) in the trailing 7-day
+                    at: 2026-11-22T19:29:10.142Z
+                    since: 2026-11-15T19:29:10.142Z
+                    line: "Coverage: 1035/1177 joined worker calls (87.9%) in the trailing 7-day
                       window; trailing baseline 99.1% — below it by more than 10.0%."
                   closure:
                     eligible: false
                     reason: record is open
               expectedPlan:
                 plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-                plan/tasks.d: 3d4ebb2ea3e096baf3d44dbd4fe0b714895ca105
+                plan/tasks.d: 0cbfce743242697b15eed6887025a2c6ff82c297
               measurement:
                 lane: escalation-summary
                 field: servedModel
-                observed: 1128
-                denominator: 1275
+                observed: 914
+                denominator: 1054
                 floor: 0.9
                 baseline: 0.9909584086799277
-                at: 2026-11-21T08:48:11.171Z
-                since: 2026-11-14T08:48:11.171Z
-                line: "Coverage: 1128/1275 joined worker calls (88.5%) in the trailing 7-day
+                at: 2026-11-24T21:53:07.150Z
+                since: 2026-11-17T21:53:07.150Z
+                line: "Coverage: 914/1054 joined worker calls (86.7%) in the trailing 7-day
                   window; trailing baseline 99.1% — below it by more than 10.0%."
               closure:
                 eligible: false
                 reason: record is open
           expectedPlan:
             plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-            plan/tasks.d: f674dac17e7f102872ecbd0c1b1ed513e3fa721b
+            plan/tasks.d: 9eed10e7e3123114ef897dec9acd5cea99ed9b34
           measurement:
             lane: escalation-summary
             field: servedModel
-            observed: 1035
-            denominator: 1177
+            observed: 874
+            denominator: 980
             floor: 0.9
             baseline: 0.9909584086799277
-            at: 2026-11-22T19:29:10.142Z
-            since: 2026-11-15T19:29:10.142Z
-            line: "Coverage: 1035/1177 joined worker calls (87.9%) in the trailing 7-day
-              window; trailing baseline 99.1% — below it by more than 10.0%."
+            at: 2026-11-25T19:43:22.109Z
+            since: 2026-11-18T19:43:22.109Z
+            line: "Coverage: 874/980 joined worker calls (89.2%) in the trailing 7-day
+              window; below the field's 90.0% floor — a chronic gap no baseline
+              excuses."
           closure:
             eligible: false
             reason: record is open
       expectedPlan:
         plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-        plan/tasks.d: 0cbfce743242697b15eed6887025a2c6ff82c297
+        plan/tasks.d: 858f5ad6a343c228d126e7488483c71fb801bbee
       measurement:
         lane: escalation-summary
         field: servedModel
-        observed: 914
-        denominator: 1054
+        observed: 814
+        denominator: 908
         floor: 0.9
         baseline: 0.9909584086799277
-        at: 2026-11-24T21:53:07.150Z
-        since: 2026-11-17T21:53:07.150Z
-        line: "Coverage: 914/1054 joined worker calls (86.7%) in the trailing 7-day
-          window; trailing baseline 99.1% — below it by more than 10.0%."
+        at: 2026-11-26T11:10:46.166Z
+        since: 2026-11-19T11:10:46.166Z
+        line: "Coverage: 814/908 joined worker calls (89.6%) in the trailing 7-day
+          window; below the field's 90.0% floor — a chronic gap no baseline
+          excuses."
       closure:
         eligible: false
         reason: record is open
   expectedPlan:
     plan/tasks.yaml: 4f7b11c7c694a482e077db0e692abc5874cf6611
-    plan/tasks.d: 9eed10e7e3123114ef897dec9acd5cea99ed9b34
+    plan/tasks.d: 7be80212659d7ee0b4c4c85f206be5f43985224d
   measurement:
     lane: escalation-summary
     field: servedModel
-    observed: 874
-    denominator: 980
+    observed: 799
+    denominator: 891
     floor: 0.9
     baseline: 0.9909584086799277
-    at: 2026-11-25T19:43:22.109Z
-    since: 2026-11-18T19:43:22.109Z
-    line: "Coverage: 874/980 joined worker calls (89.2%) in the trailing 7-day
+    at: 2026-11-27T03:49:35.795Z
+    since: 2026-11-20T03:49:35.795Z
+    line: "Coverage: 799/891 joined worker calls (89.7%) in the trailing 7-day
       window; below the field's 90.0% floor — a chronic gap no baseline
       excuses."
   closure:

@@ -362,21 +362,131 @@ export function renderBodyDefects(defects: readonly BodyDefect[]): string {
 /** W1-T10339 — one validated proof replacement for a PR whose BODY is its Acceptance (it carries no task trailer). */
 export interface BodyProofReplacement { oldProof: string; newProof: string }
 
+/** One acceptance bullet as {@link parseAcceptanceBlock} (review.ts) reads it: `-`, `*`, `1.` or `1)`, then its text. */
+export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
+
+/** The body lines that may carry a proof, for a caller with no parser at hand (the W1-T10339 behaviour). */
+type ProofLines = (body: string) => readonly number[];
+
+/** Every bullet or `proof:` line, the shape a caller with no parser at hand matches (the W1-T10339 behaviour). */
+const bulletOrProofLines: ProofLines = (body) => body.split("\n").flatMap((line, index) =>
+  ACCEPTANCE_BULLET_RE.test(line) || /^\s*proof\s*:/i.test(line) ? [index] : []);
+
+/** W1-T14913: where the parser read one criterion's proof VALUE — its line, and the column range of the value as written
+ *  (the quotes included when `quoted`) — and the proof it read there. Nothing outside the range is the proof. */
+export interface ProofSpan { line: number; start: number; end: number; quoted: boolean; proof: string }
+
+/** W1-T14913: one criterion as the parser reads it — its claim, its proof, and the span its proof was read from
+ *  (`undefined` for a criterion with no proof value on a line of its own). */
+export interface ReadCriterion { claim: string; proof: string; span: ProofSpan | undefined }
+
+/** W1-T14913: review.ts's `acceptanceCriteriaRead`, index-aligned with parseAcceptanceBlock's criteria. INJECTED:
+ *  review.ts imports this module, so importing the parser here would close a ring. */
+export type ProofSpans = (body: string) => readonly ReadCriterion[];
+
+const quotedValue = (text: string): string => `"${text.replace(/[\\"]/g, "\\$&")}"`;
+
+/** W1-T14913: does `after` read exactly as `before`, except criterion `index`'s proof, which now reads `newProof`? Every
+ *  claim, and every other criterion's proof, must re-read unchanged: a bare bullet whose text is both its claim and its
+ *  proof, or any other span the parser shares between them, fails here instead of saving an altered claim. */
+function onlyTheProofChanged(before: readonly ReadCriterion[], after: readonly ReadCriterion[], index: number, newProof: string): boolean {
+  return before.length === after.length && before.every((was, i) =>
+    after[i]!.claim === was.claim && after[i]!.proof === (i === index ? newProof : was.proof));
+}
+
+/** Replace criterion `index`'s proof value inside its span only, quoted and escaped when the value was written quoted;
+ *  `undefined` unless the body then re-reads with only that proof changed (see {@link onlyTheProofChanged}). A bare
+ *  bullet whose one text is both its claim and its proof (`- grep: "x" in f`) cannot change one without the other, so it
+ *  is expanded into a `claim:` bullet carrying that text byte for byte and a `proof:` line carrying the new proof; so is a
+ *  bare bullet whose claim is its proof wrapped in a code span. */
+function rewriteSpan(body: string, index: number, span: ProofSpan, newProof: string, spans: ProofSpans): string | undefined {
+  const lines = body.split("\n");
+  const line = lines[span.line];
+  if (line === undefined) return undefined;
+  const before = spans(body);
+  const keeps = (candidate: string[]): string | undefined => {
+    const repaired = candidate.join("\n");
+    return onlyTheProofChanged(before, spans(repaired), index, newProof) ? repaired : undefined;
+  };
+  const inPlace = keeps([...lines.slice(0, span.line),
+    `${line.slice(0, span.start)}${span.quoted ? quotedValue(newProof) : newProof}${line.slice(span.end)}`, ...lines.slice(span.line + 1)]);
+  if (inPlace !== undefined) return inPlace;
+  const read = before[index];
+  const bullet = line.match(/^(\s*)([-*]|\d+[.)])\s+/);
+  // A bare bullet: its whole text is the claim (a code-span-wrapped one too, `- \`grep: "x" in f\``), so the claim is
+  // kept byte for byte on its own `claim:` line and only the proof moves to a `proof:` line.
+  if (!bullet || read === undefined || line.slice(bullet[0].length).trimEnd() !== read.claim) return undefined;
+  for (const proofText of [newProof, quotedValue(newProof)]) {
+    const expanded = keeps([...lines.slice(0, span.line), `${bullet[1]}${bullet[2]} claim: ${read.claim}`,
+      `${bullet[1]}  proof: ${proofText}`, ...lines.slice(span.line + 1)]);
+    if (expanded !== undefined) return expanded;
+  }
+  return undefined;
+}
+
+/** W1-T14913 — rewrite ONE body proof, found by the value parseAcceptanceBlock reads. Given review.ts's
+ *  `acceptanceCriteriaRead`, only the value inside the span the parser read it from is replaced, so a claim repeating the
+ *  proof, a fenced example and prose outside the Acceptance block are never touched; `undefined` unless exactly one
+ *  criterion reads `oldProof`. With no parser at hand, any bullet or `proof:` line is matched as before: a double-quoted
+ *  `proof:` value by its unescaped text, any other line literally; `undefined` unless exactly one line carries it. */
+export function rewriteBodyProof(body: string, oldProof: string, newProof: string, spans?: ProofSpans): string | undefined {
+  if (spans) {
+    const hits = spans(body).flatMap(({ span }, index) => span?.proof === oldProof ? [{ span, index }] : []);
+    return hits.length === 1 ? rewriteSpan(body, hits[0]!.index, hits[0]!.span, newProof, spans) : undefined;
+  }
+  const lines = body.split("\n");
+  const hits = [...new Set(bulletOrProofLines(body))].flatMap((index) => {
+    const line = lines[index] === undefined ? undefined : rewriteProofLine(lines[index]!, oldProof, newProof);
+    return line === undefined ? [] : [{ index, line }];
+  });
+  if (hits.length !== 1) return undefined;
+  lines[hits[0]!.index] = hits[0]!.line;
+  return lines.join("\n");
+}
+
+/** One criterion's proof rewrite, addressed by its 0-based index in the parsed Acceptance block. */
+export interface CriterionProofEdit { index: number; oldProof: string; newProof: string }
+
+/**
+ * W1-T14913: apply each edit inside the span the parser read ITS criterion's proof from, in order. Two criteria carrying the
+ * same proof text are each rewritten, where a text match would see two and refuse. `undefined` when any edit's criterion
+ * has no span or no longer reads its old proof, so a drifted body is never guessed at.
+ */
+export function rewriteCriterionProofs(body: string, edits: readonly CriterionProofEdit[], spans: ProofSpans): string | undefined {
+  let repaired = body;
+  for (const { index, oldProof, newProof } of edits) {
+    const span = spans(repaired)[index]?.span;
+    const next = span?.proof === oldProof ? rewriteSpan(repaired, index, span, newProof, spans) : undefined;
+    if (next === undefined) return undefined;
+    repaired = next;
+  }
+  return repaired;
+}
+
+/** One line's rewrite with no parser at hand: a double-quoted `proof:` line matched by its unescaped value and rewritten
+ *  escaped, else a literal substring replace; `undefined` when the line does not carry `oldProof`. */
+function rewriteProofLine(line: string, oldProof: string, newProof: string): string | undefined {
+  const quoted = line.match(/^(\s*proof\s*:\s*)"([\s\S]*)"(\s*)$/i);
+  if (quoted) {
+    return quoted[2]!.replace(/\\(["\\])/g, "$1") === oldProof ? `${quoted[1]}${quotedValue(newProof)}${quoted[3]}` : undefined;
+  }
+  return line.includes(oldProof) ? line.replace(oldProof, () => newProof) : undefined;
+}
+
 /**
  * W1-T10339 — REPLACE THE PROOF TEXT OF THE ACCEPTANCE BULLETS A VALIDATED REPAIR NAMES, AND NOTHING ELSE. Each old proof must
- * sit on exactly ONE bullet or `proof:` continuation line of the body; a body that no longer carries it, or carries it on more
- * than one line, is not guessed at (`undefined`). A claim is never read or written here — {@link refusesToAuthorAClaim}'s line.
+ * be read by exactly ONE criterion (given the parser's spans; else sit on one bullet or `proof:` line), and only that
+ * proof's value is rewritten; a body that no longer carries it, or carries it more than once, is not guessed at (`undefined`). A claim is never read or written here — {@link refusesToAuthorAClaim}'s line.
  */
-export function replaceBodyProofs(body: string, replacements: readonly BodyProofReplacement[]): string | undefined {
-  const lines = body.split("\n");
+export function replaceBodyProofs(body: string, replacements: readonly BodyProofReplacement[],
+  spans?: ProofSpans): string | undefined {
+  let repaired = body;
   for (const { oldProof, newProof } of replacements) {
-    const hits = lines.flatMap((line, index) =>
-      /^\s*(?:[-*+]\s|proof\s*:)/i.test(line) && line.includes(oldProof) ? [index] : []);
-    if (hits.length !== 1) return undefined;
-    const at = hits[0]!;
-    lines[at] = lines[at]!.replace(oldProof, () => newProof);
+    const next = rewriteBodyProof(repaired, oldProof, newProof, spans);
+    if (next === undefined) return undefined;
+    repaired = next;
   }
-  return lines.join("\n");
+  return repaired;
 }
 
 /** One path a pull request's diff changes, as {@link planFilingAcceptanceCure} reads it. */

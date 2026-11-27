@@ -13,6 +13,7 @@ import {
   grepProofCanOnlyCertifyComments,
   isDialectPrefixed,
   parseWhitelistedProof,
+  registeredSuiteTarget,
   wrappedGrepPattern,
   type NameFilterResolution,
   type WhitelistedProof,
@@ -102,6 +103,7 @@ export type LintCheck =
   | "superseded-by"
   | "doctrine-citation-unresolved"
   | "design-invariant-proof"
+  | "invariant-unguarded"
   | "needs-input"
   | "production-caller";
 export type LintSeverity = "block" | "warn";
@@ -3964,6 +3966,33 @@ export function invariantSlugViolations(task: Task, opts: LintOpts = {}): LintVi
   return out;
 }
 
+/** W1-T14915 — an `invariant:<slug>` claim proved by a unit test usually passes at the merge base by design, so
+ *  proof-discrimination refuses it unless the criterion declares `kind: guard` or carries `satisfied_by`. Three filed
+ *  tasks needed a guard amendment after filing (W1-T14876, W1-T14877, W1-T14913). WARN only: an invariant can be new
+ *  behaviour that does fail at base. Runs on the changed-task pass, as {@link invariantSlugViolations} does. */
+function unguardedInvariantViolations(task: Task, opts: LintOpts = {}): LintViolation[] {
+  if (opts.requireDesignInvariantDeclaration !== true) return [];
+  const out: LintViolation[] = [];
+  // The task's own registered repository, resolved from the suite registry and never from the checkout's origin, so a
+  // satellite's suite path (a Console `tests/unit/*.test.tsx` proof) classifies as the test proof the target-aware
+  // review executor runs in any clone. Only this warn reads it: every other check sees the options it saw before.
+  const target = registeredSuiteTarget(task.repo);
+  (task.acceptance ?? []).forEach((criterion, index) => {
+    if (!INVARIANT_CLAIM_RE.test(criterion.claim)) return;
+    if (criterion.satisfied_by || (criterion as { kind?: unknown }).kind !== undefined) return;
+    // Read as the review executor reads it, so a code-span-wrapped `unit test:` proof is a test proof too.
+    if (parseWhitelistedProof(criterion.proof ?? "", target)?.kind !== "test") return;
+    out.push({
+      check: "invariant-unguarded",
+      severity: "warn",
+      message: `task ${task.id}: acceptance claim ${index + 1} is an invariant proved by a unit test with no kind and no ` +
+        "satisfied_by; this invariant probably passes at the merge base by design; declare `kind: guard` or prove it " +
+        "with a grep on text the build adds",
+    });
+  });
+  return out;
+}
+
 /** W1-T12832 — does the design carry a declaration {@link invariantSlugViolations} reads, in either form? */
 export function declaresDesignInvariant(task: Pick<Task, "design">): boolean {
   const design = task.design ?? "";
@@ -4012,6 +4041,7 @@ export function lintTask(task: Task, opts: LintOpts = {}): LintResult {
   violations.push(...blockedDispositionViolations(task, opts));
   violations.push(...needsInputViolations(task));
   violations.push(...invariantSlugViolations(task, opts));
+  violations.push(...unguardedInvariantViolations(task, opts));
   violations.push(...blockedRecordUnruledViolations(task));
   violations.push(...callSiteViolations(task, opts));
   violations.push(...monolithFilingViolations(task, opts));
