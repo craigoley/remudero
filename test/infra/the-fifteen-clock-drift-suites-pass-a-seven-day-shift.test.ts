@@ -374,3 +374,54 @@ for (const suite of WHOLE_TEST_ORDER) {
     assert.deepEqual(sweep.drifted.map((row) => row.suite), []);
   });
 }
+
+/**
+ * The whole-suite tests in four groups, one proof each (W1-T14786 amended 2026-11-27, Craig: "Group into ~4 proofs").
+ * Sixteen per-suite proofs, each run at the PR head and again at the merge base, took proof-discrimination past its
+ * 10-minute job limit; one proof for all fifteen took the reviewer past its 180 s per-proof bound. Each group shares
+ * the same pool as the per-suite tests above, so its wall time is about its slowest suite (measured sums in
+ * WHOLE_SECONDS: 112, 114, 106 and 48 s, run four at a time). Every suite of the fifteen is in exactly one group.
+ */
+const WHOLE_GROUPS: ReadonlyArray<{ title: string; suites: readonly string[] }> = [
+  { title: "W1-T14786 the whole-suite clock sweep group 1 of 4 shows no new drift", suites: [
+    "test/dispatch/product-plan-operation.test.ts",
+  ] },
+  { title: "W1-T14786 the whole-suite clock sweep group 2 of 4 shows no new drift", suites: [
+    "test/sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views.test.ts",
+    "test/inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing.test.ts",
+    "test/ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor.test.ts",
+    "test/deploy/preserve-retire-keep-declarations-hold-every-action.test.ts",
+    "test/daemon/repository-maintenance-escalation-heals-itself.test.ts",
+  ] },
+  { title: "W1-T14786 the whole-suite clock sweep group 3 of 4 shows no new drift", suites: [
+    "test/console-api/serve/product-routes.test.ts",
+    "test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts",
+    "test/expiring-fixture-census.test.ts",
+    "test/sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store.test.ts",
+    "test/fix-lane/rmd-fix-never-reports-a-round-fixed-when-its-progress-judgment-failed.test.ts",
+  ] },
+  { title: "W1-T14786 the whole-suite clock sweep group 4 of 4 shows no new drift", suites: [
+    "test/github/every-mac-session-reads-github-through-one-broker.test.ts",
+    "test/daemon/a-paused-instance-says-when-it-has-drained.test.ts",
+    "test/sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views.test.ts",
+    "test/daemon/a-worktree-janitor-reports-what-it-would-retire.test.ts",
+  ] },
+];
+assert.deepEqual(WHOLE_GROUPS.flatMap((group) => group.suites).sort(), [...FIFTEEN].sort(),
+  "every one of the fifteen suites is in exactly one whole-suite group");
+
+for (const group of WHOLE_GROUPS) {
+  test(group.title, async () => {
+    const suites = group.suites.map((file) => DRIFTING.find((suite) => suite.file === file)!);
+    // Ask for every suite of the group at once, so the pool runs them side by side.
+    const runs = await Promise.all(suites.map((suite) => runOf(SWEEP_SHIFT_DAYS, suite, true)));
+    suites.forEach((suite, i) => {
+      const run = runs[i]!;
+      assert.equal(verdict(run), "pass", `${suite.file} runs in full and passes at +${SWEEP_SHIFT_DAYS} days`);
+      if (LEFT_THE_SWEEP.has(sweepId(suite.file))) return;
+      const sweep = classifySweep(new Map([[sweepId(suite.file), run]]));
+      assert.deepEqual(sweep.newDrift.map((row) => row.suite), [], `the sweep's own classifier names ${suite.file} as no new drift`);
+      assert.deepEqual(sweep.drifted.map((row) => row.suite), [], `${suite.file} has no drift at all`);
+    });
+  });
+}
