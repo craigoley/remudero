@@ -1710,6 +1710,14 @@ export const PRECHECK_PATH_TRIGGERED_SUITES = [
       "test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts",
     ].includes(p)) && readHead?.("test/rules/a-stalled-shard-checkout-times-out-and-retries.test.ts") != null,
     remedy: "keep each shard lane's first checkout bounded at 3 minutes with continue-on-error, followed by one retry checkout" },
+  // W1-T15177: the proof-discrimination concurrency suite reads that one workflow, so an edit to it asks the suite
+  // before the push. A fixture tree that never had the suite starts no child.
+  { testFile: "test/rules/a-newer-proof-discrimination-run-cancels-the-older-one.test.ts", gitFree: true,
+    trigger: ({ changed, readHead }) => changed.some((p) => [
+      ".github/workflows/proof-discrimination-gate.yml", "scripts/census-precheck.mjs",
+      "test/rules/a-newer-proof-discrimination-run-cancels-the-older-one.test.ts",
+    ].includes(p)) && readHead?.("test/rules/a-newer-proof-discrimination-run-cancels-the-older-one.test.ts") != null,
+    remedy: "keep proof-discrimination-gate.yml's per-PR concurrency group with cancel-in-progress and its four pull_request trigger types" },
   { testFile: "test/rules/the-root-scratch-ignore-stays-root-only.test.ts",
     trigger: ({ changed }) => changed.some((p) => [".gitignore", "scripts/census-precheck.mjs",
       "test/rules/the-root-scratch-ignore-stays-root-only.test.ts"].includes(p)),
