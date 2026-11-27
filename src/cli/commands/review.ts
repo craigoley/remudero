@@ -1287,6 +1287,8 @@ export async function runReview(host: ReviewCommandHost, args: {
   reviewerCodeFreshness?: () => ReviewerCodeFreshness | Promise<ReviewerCodeFreshness>;
   /** W1-T12227: the path that admitted this review, named on `review.refused_after_finished_review`. */
   admission?: ReviewAdmission;
+  /** W1-T14872 test seam: how often the reviewer checkout is polled while the judge runs. Default once a minute. */
+  reviewerCheckoutPollMs?: number;
 }): Promise<ReviewRunResult> {
   const phases: Record<string, number> = { started: systemClock.now() };
   // W1-T11149: the phase reaches the CPU bound (setup, proofs) or the provider bound (judge, posting), in process or as a child.
@@ -1363,7 +1365,8 @@ export async function runReview(host: ReviewCommandHost, args: {
         return lifecycle;
       },
     });
-    if (pending.posted) {
+    // W1-T14872: this run owns the claim when it posted it, or when its own reviewCommand already did (a same-run no-op).
+    if (pending.posted || pending.heldByRun === args.runId) {
       // Each beat is one review.heartbeat ledger row naming this run, its head and the phase.
       heartbeat = reviewHeartbeat(({ step: _step, ...fields }) => log("review.heartbeat", fields),
         () => systemClock.now(), { runId: args.runId, headSha });
@@ -1732,7 +1735,7 @@ export async function runReview(host: ReviewCommandHost, args: {
         const stopCheckoutWatch = watchReviewerCheckout(snapshot.cwd, () => {
           checkoutVanished = true;
           checkoutAbort.abort(new Error(REVIEWER_CHECKOUT_VANISHED_REASON));
-        });
+        }, args.reviewerCheckoutPollMs);
         const reviewerSignal = signal ? AbortSignal.any([signal, checkoutAbort.signal]) : checkoutAbort.signal;
         const recordedProofCommands = preparedDecision.proofExecutions()
           .filter((execution) => execution.cwd === args.headCheckoutDir)

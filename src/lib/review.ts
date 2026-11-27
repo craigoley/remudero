@@ -14371,7 +14371,7 @@ export function reviewHeartbeat(
 
 /** W1-T14872: one pass over a ledger read: each run's newest heartbeat per head, and the measured silence bound. Cached per
  *  array, so a sweep that asks for every open PR's claim scans its ledger once. */
-interface ReviewHeartbeatIndex { newest: Map<string, number>; boundMs: number | undefined }
+interface ReviewHeartbeatIndex { newest: Map<string, number>; settled: Set<string>; boundMs: number | undefined }
 const heartbeatIndexes = new WeakMap<ReadonlyArray<Record<string, unknown>>, ReviewHeartbeatIndex>();
 
 function reviewHeartbeatIndex(lines: ReadonlyArray<Record<string, unknown>>): ReviewHeartbeatIndex {
@@ -14403,7 +14403,7 @@ function reviewHeartbeatIndex(lines: ReadonlyArray<Record<string, unknown>>): Re
     const p99 = gaps[Math.min(gaps.length - 1, Math.ceil(gaps.length * 0.99) - 1)]!;
     boundMs = Math.max(REVIEW_HEARTBEAT_SILENCE_FLOOR_MS, p99 * 2);
   }
-  const index = { newest, boundMs };
+  const index = { newest, settled, boundMs };
   heartbeatIndexes.set(lines, index);
   return index;
 }
@@ -14423,7 +14423,10 @@ export function reviewClaimHeartbeat(
 ): { state: "fresh" | "silent"; silentMs: number; boundMs: number } | undefined {
   if (!runId) return undefined;
   const index = reviewHeartbeatIndex(lines);
-  const newest = index.newest.get(`${runId}|${headSha}`);
+  const key = `${runId}|${headSha}`;
+  // A run that already settled its claim at this head holds nothing, so its silence orphans nothing.
+  if (index.settled.has(key)) return undefined;
+  const newest = index.newest.get(key);
   if (newest === undefined || index.boundMs === undefined) return undefined;
   const silentMs = nowMs - newest;
   return { state: silentMs >= index.boundMs ? "silent" : "fresh", silentMs, boundMs: index.boundMs };
@@ -14486,6 +14489,9 @@ export interface PostReviewPendingResult {
   reason?: string;
   lifecycle?: "merged" | "closed";
   outbox?: "posted" | "held";
+  /** W1-T14872: the run whose live claim made this post a no-op. Equal to the caller's own run when it already holds the
+   *  claim (reviewCommand claims before runReview does), so that run still owns the claim and beats its heartbeat. */
+  heldByRun?: string;
 }
 
 /** Single pending-post entry point (design (a)/(d)): `runReview`, `reviewCommand` and transitively sweep
@@ -14585,6 +14591,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
         reason:
           `remudero-review is already pending for ${opts.sha.slice(0, 7)} (owned by run ${priorPending.runId}) ` +
           "— no-op (W1-T913 idempotent-per-input)",
+        heldByRun: priorPending.runId,
       };
     }
     // RECLAIM, DO NOT DELETE (design (b)): the stale claim is evidence a run died mid-review, so
@@ -14625,6 +14632,7 @@ export async function postReviewPending(opts: PostReviewPendingOpts): Promise<Po
           return {
             posted: false,
             reason: `remudero-review is already pending (owned by run ${foreignRun}) — host-independent claim; no-op`,
+            heldByRun: foreignRun,
           };
         }
         takenOverFrom = { headSha: opts.sha, runId: foreignRun, postedAt: status.created_at! };
