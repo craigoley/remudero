@@ -25,6 +25,7 @@ import { readLedgerLines } from "#src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, orphanedOwnerRetryView, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
+import { ownedFixtureDir } from "#test/helpers/owned-fixture-dir.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 const MOUNT: Mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
@@ -589,11 +590,6 @@ test("W1-T15030 criterion 3: a review run called the way runTask calls it stays 
  *  these helpers. */
 type Drive = (refusals: number) => Promise<{ landed: boolean; renewals: number; unrenewable: number }>;
 
-function censusLedger(t: TestContext, name: string): string {
-  const dir = mkdtempSync(join(tmpdir(), `rmd-w1-t15030-census-${name}-`));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return join(dir, "ledger.ndjson");
-}
 const refusing = (refusals: number, onLand: () => void) => {
   let calls = 0;
   return () => { if (++calls <= refusals) UNAUTHORIZED(); onLand(); };
@@ -603,7 +599,7 @@ const unrenewableRows = (ledgerPath: string) =>
 
 const statusSite = (t: TestContext, name: string, publish: (o: { ledgerPath: string; post: () => void;
   renewToken: () => Promise<"renewed"> }) => Promise<unknown>): Drive => async (refusals) => {
-  const ledgerPath = censusLedger(t, `${name}-${refusals}`);
+  const ledgerPath = join(ownedFixtureDir(t, `w1-t15030-census-${name}-${refusals}`).dir, "ledger.ndjson");
   let landed = false;
   let renewals = 0;
   await publish({ ledgerPath, post: refusing(refusals, () => { landed = true; }), renewToken: async () => { renewals++; return "renewed"; } });
@@ -657,7 +653,7 @@ test("W1-T15030 criterion 2: census — every status post, disarm and escalation
         unrenewable: rows.filter((row) => row.step === "review.post_refused" && row.reason === "token_unrenewable").length };
     },
     "renewingIssueGateway escalation post": async (refusals) => {
-      const ledgerPath = censusLedger(t, `escalation-${refusals}`);
+      const ledgerPath = join(ownedFixtureDir(t, `w1-t15030-census-escalation-${refusals}`).dir, "ledger.ndjson");
       const rows: Array<Record<string, unknown>> = [];
       let renewals = 0;
       let filed = false;
@@ -703,7 +699,7 @@ test("W1-T15030 criterion 2: a pending post refused twice is re-reviewed on the 
   // input digest; tick-read-worker's reviewPostRefusedFor read it as durable, and 24h later the PR was a blocked-ambiguous
   // escalation with 0 reviews. The fix is the one shared classifier, isRetryableReviewThrow.
   const pass = async (durable: boolean) => {
-    const ledgerPath = censusLedger(t, durable ? "e2e-durable" : "e2e");
+    const ledgerPath = join(ownedFixtureDir(t, `w1-t15030-census-${durable ? "e2e-durable" : "e2e"}`).dir, "ledger.ndjson");
     const sha = "e".repeat(40);
     const body = "Remudero-Task: W1-T15030";
     const prUrl = "https://github.com/o/r/pull/15032";
