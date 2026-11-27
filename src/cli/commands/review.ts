@@ -2145,6 +2145,23 @@ export async function runReview(host: ReviewCommandHost, args: {
   const historyEvidence = reviewerFindingText === undefined ? undefined : parseReviewerHistoryEvidence(reviewerFindingText, criteria.length);
   const presentedFailureIds = initialStatusHistory.kind === "readable" ? initialStatusHistory.failures.map(finding => finding.id) : [];
   let dispute: ReviewPassDispute | undefined;
+  // W1-T15077: the private findings page of an ops task's failed or capped verdict, landed at most once per run. EVERY
+  // return below that follows a status this run PUBLISHED calls it: the disputed-pass hold (holdDisputedPass), the
+  // semantic hold (posted.semanticHold), the task hold (posted.taskHold), the capped hold (posted.cappedHold), any
+  // other pending outcome, and the posted terminal verdict (after armIfVerdictPermitsAsync). The returns that publish
+  // no status for this head land nothing, as the next review of the head decides: the shadow
+  // (REVIEWER_SHADOW_VERDICT_STEP), a semantic replay (withholdSemanticVerdict), a withheld task id
+  // (taskIdOwnershipWithheld), a missing input digest, an aborted lane (laneAbortedResult), a refused post (!posted.posted)
+  // and a conflict hold that failed to post. publishOpsReviewFindings itself lands only a failed or capped verdict.
+  let findingsLanded = false;
+  const landFindings = async (capped: boolean): Promise<void> => {
+    if (task.catalog !== "ops" || findingsLanded) return;
+    findingsLanded = true;
+    const record = opsReviewRecord({ taskId: task.id, prUrl, headSha, state: verdict.state, decisionDigest, criteria: verdict.criteria,
+      reasons: reviewUnmetFields(verdict).reasons, findings: findingCapture.findings });
+    await publishOpsReviewFindings(dirname(args.ledgerPath), record, { prNumber: reviewPrNumber(prUrl), capped: capped || verdict.capped === true },
+      log, args.landReviewFindings, say);
+  };
   const posted = await postReviewStatusGuarded({
     post: catalogReviewPoster(task.catalog, poster.post, reviewerCodeFreshness?.status === "fresh" ? reviewerCodeFreshness.codeSha : undefined),
     outboxBeforePost: true,
@@ -2194,12 +2211,14 @@ export async function runReview(host: ReviewCommandHost, args: {
         reviewInputDigest: inputDigest, reviewEngineRevision: REVIEW_ENGINE_REVISION, reviewerCodeFreshness,
         fetchLifecycle: () => fetchPrLifecycleAsync(prUrl), readRequiredContexts: readRequiredStatusCheckContextsAsync }) });
     say(`remudero-review: PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${held.verdictWithheld}`);
+    await landFindings(false);
     return { ...held, headSha, reviewerOutcome: outcome, reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
   if (posted.semanticHold !== undefined) {
     // W1-T14235: the pass was held (pending, or a standing failure left standing), so an arm taken at open is withdrawn.
     withdrawArmIfVerdictRefuses(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
     say(`remudero-review: PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${posted.reason ?? posted.semanticHold}`);
+    await landFindings(false);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.reason ?? posted.semanticHold,
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
@@ -2207,6 +2226,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     // W1-T14902: the pass was held as pending until the operator releases the task's hold, so an arm taken at open is withdrawn.
     withdrawArmIfVerdictRefuses(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
     say(`remudero-review: PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${posted.taskHold}`);
+    await landFindings(false);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.taskHold,
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
@@ -2214,10 +2234,12 @@ export async function runReview(host: ReviewCommandHost, args: {
     // W1-T14241 (invariant capped-is-not-green): the capped pass was held as pending, so an arm taken at open is withdrawn.
     withdrawArmIfVerdictRefuses(verdict, { prUrl, taskId: task.id, headSha, ledgerPath: args.ledgerPath, log }, { disarm: args.disarm });
     say(`remudero-review: CAPPED PASS NOT PUBLISHED for ${headSha.slice(0, 7)} — ${posted.cappedHold}`);
+    await landFindings(true);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.cappedHold,
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
   if (posted.effectiveState === "pending") {
+    await landFindings(false);
     return { ...verdict, headSha, reviewerOutcome: outcome, verdictWithheld: posted.reason,
       reviewDecisionDigest: decisionDigest, decisionDisposition, evaluatorProvenance };
   }
@@ -2433,10 +2455,7 @@ export async function runReview(host: ReviewCommandHost, args: {
     readChecksGreenReviewed: (_url: string, head: string) => readChecksGreenReviewedAtHead(owner, repo, head) };
   // W1-T9549: AWAITED. The daemon runs this review (`trackInFlightReview`), so the arm's gh and git leave its loop free.
   await armIfVerdictPermitsAsync(verdict, armCtx, { arm: args.arm });
-  if (opsRecordBody !== undefined) {
-    await publishOpsReviewFindings(dirname(args.ledgerPath), opsRecordBody, { prNumber: reviewPrNumber(prUrl), capped: verdict.capped === true },
-      log, args.landReviewFindings, say);
-  }
+  await landFindings(false);
   // Record after both authoritative posting and auto-merge eligibility. The recorder
   // swallows telemetry write failures; replay returns above before reaching this call.
   if (planOnlySkip) log("review.plan_only_phases", { head_sha: headSha, ...planOnlyPhaseFields(phases, systemClock.now(), args.materializeMs) });

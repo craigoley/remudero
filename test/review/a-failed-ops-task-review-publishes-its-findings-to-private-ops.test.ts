@@ -6,17 +6,21 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import {
-  catalogReviewPoster, opsReviewCommentBody, opsReviewFindingsMarkdown, publishOpsReviewFindings, type OpsReviewRecord,
+  catalogReviewPoster, runReview, type ReviewCommandHost, opsReviewCommentBody, opsReviewFindingsMarkdown, publishOpsReviewFindings, type OpsReviewRecord,
 } from "#src/cli/commands/review.js";
 import { isLandingRef, landingIdentity, landReviewFindingsAsync, reviewFindingsRelPath } from "#src/lib/feedback-landing.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { planDestinationPath } from "#src/lib/plan-destination.js";
 import { makeTempDir } from "#src/lib/tmp.js";
-import { originWithClone } from "#test/helpers/git-repo.js";
+import type { Config } from "#src/lib/config.js";
+import { appendLedger } from "#src/lib/ledger.js";
+import { spawnWorker, type WorkerResult } from "#src/lib/worker.js";
+import { ghShim } from "#test/helpers/gh-shim.js";
+import { gitRepo, originWithClone } from "#test/helpers/git-repo.js";
 
 const OPS = { owner: "fixture", repo: "remudero-ops" };
 const HEAD = "ab".repeat(20);
@@ -129,4 +133,108 @@ test("W1-T15077 criterion 2: the public status and comment carry no claim or fin
   for (const text of [REASON, MECHANISM, REMEDY, "8118"]) {
     assert.ok(!posted[0]!.description!.includes(text) && !comment.includes(text), `THE CLAIM: no public text carries ${text}`);
   }
+});
+
+// ── the real runReview, end to end ──────────────────────────────────────────────────────────────────────────────────
+
+const RUN_REPORT = "REPORT\n- widget frobnicate implemented and verified.";
+/** The review command's host, with every dependency these fixtures never reach refusing loudly. */
+let reviewedHead = HEAD;
+function unexpected(): never { throw new Error("unexpected review fixture dependency"); }
+const host: ReviewCommandHost = {
+  GIT_UNTRACKED_FILES_ALL: "--untracked-files=all",
+  JUDGE_AT_OWN_START_FLAG: "--judge-at-own-start",
+  acceptedReviewAttemptId: (value) => typeof value === "string" ? value : undefined,
+  attributeWorkerStreamEvent: (event) => event,
+  ledgeredNonDispatchSpawn: (_lane, raw) => raw ?? spawnWorker,
+  lintPlanForReview: unexpected,
+  liveWorkerRunIds: new Set<string>(),
+  materializeReviewWorktree: unexpected,
+  readHeadShaRest: () => reviewedHead,
+  readMainPlanTreeSha: unexpected,
+  realDeps: () => ({ reviewWorktree: { fetch: () => {} } }) as unknown as ReturnType<ReviewCommandHost["realDeps"]>,
+  reviewPostedDescription: (verdict) => verdict.summary,
+  reviewWorkerLockId: (runId) => runId,
+  reviewerClockBoundMs: () => 60_000,
+  reviewSubjectGit: unexpected,
+};
+
+type RunCase = { catalog: "ops" | "public"; reviewer: "PASS" | "FAIL"; proof: string };
+/** The real runReview of one code PR, its state dir naming the private repository, every GitHub read shimmed. */
+async function runOpsReview(t: TestContext, c: RunCase) {
+  const f = instance(t);
+  writeFileSync(planDestinationPath(f.stateDir), JSON.stringify({ repository: `${OPS.owner}/${OPS.repo}`, kinds: ["decision"] }));
+  const root = dirname(f.stateDir);
+  const head = gitRepo({ scope: t, kind: "t15077-head" });
+  writeFileSync(join(head.dir, "x.ts"), "export const x = 1;\n");
+  head.git("add", "x.ts");
+  head.git("commit", "-qm", "x");
+  const headSha = head.git("rev-parse", "HEAD");
+  reviewedHead = headSha;
+  t.after(() => { reviewedHead = HEAD; });
+  const prUrl = `https://github.com/acme/remudero/pull/${PR}`;
+  const ledgerPath = join(f.stateDir, "ledger.ndjson");
+  writeFileSync(join(root, "settings.json"), "{}");
+  const pull = { number: PR, html_url: prUrl, updated_at: "t", body: RUN_REPORT, state: "open", merged: false, head: { ref: "run-t15077", sha: headSha } };
+  const shim = ghShim([
+    { when: "/statuses?", stdout: "[[]]" }, { when: "/reviews?", stdout: "[]" }, { when: "/commits/", stdout: '{"statuses":[]}' },
+    { when: "/pulls/", stdout: JSON.stringify(pull) }, { when: "pr view", stdout: '{"state":"OPEN"}' },
+    { when: "pr diff", stdout: "diff --git a/x.ts b/x.ts\n+++ b/x.ts\n@@\n+export const x = 1;\n" }, { when: "api ", stdout: "{}" },
+  ], { kind: "t15077-run" });
+  t.after(() => rmSync(shim.dir, { recursive: true, force: true }));
+  const oldPath = process.env.PATH;
+  process.env.PATH = `${shim.dir}:${oldPath}`;
+  const gh = fakeGh();
+  const lines: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  try {
+    const verdict = await withLiveWritesAllowed(() => runReview(host, {
+      owner: "acme", repo: "remudero", prUrl,
+      task: { id: "W1-T15077X", ...(c.catalog === "ops" ? { catalog: "ops" as const } : {}), acceptance: [{ claim: "the change ships", proof: c.proof }] },
+      report: RUN_REPORT, settingsFile: join(root, "settings.json"), config: { claudeBin: "/bin/true", root } as Config,
+      log: (step: string, extra: Record<string, unknown> = {}) => {
+        lines.push({ step, extra });
+        appendLedger(ledgerPath, { run_id: "t15077-run", task_id: "W1-T15077X", step, ...extra });
+      },
+      say: () => {}, account: (r: WorkerResult) => r,
+      reviewerMount: { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 },
+      reviewerSpawnWorker: async () => ({ sessionId: "t15077-reviewer", text: `REVIEW_VERDICT 1: ${c.reviewer}${c.reviewer === "FAIL" ? ` — ${REASON}` : ""}`,
+        blocks: [], stderr: "", exit: { kind: "exit", code: 0 }, costUsd: 0, numTurns: 1, permissionDenials: [], childEnvKeys: [],
+        model: "sonnet", effort: "medium", provider: "claude", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
+        modelUsage: {}, compactionEvents: [], qualitySuspect: false, subtype: "success", isError: false, apiError: false }) as WorkerResult,
+      headCheckoutDir: head.dir, ledgerPath, runId: "t15077-run",
+      arm: () => "armed" as const, disarm: () => "not-armed" as const,
+      landReviewFindings: (dir, input) => landReviewFindingsAsync(dir, input, { gh: gh.gh, ghAsync: gh.ghAsync }),
+    }));
+    const branch = landingIdentity({ family: "review-findings", targetRepository: OPS, sourceRepository: OPS }).branch;
+    const page = branches(f.opsOrigin).includes(branch) ? git(f.opsOrigin, "show", `${branch}:${reviewFindingsRelPath(PR, headSha)}`) : undefined;
+    const statusPosts = shim.calls().filter((call) => call.includes("context=remudero-review"));
+    return { verdict, page, lines, statusPosts, publicBranches: branches(f.publicOrigin) };
+  } finally {
+    process.env.PATH = oldPath;
+  }
+}
+
+test("W1-T15077 criterion 1: the real runReview of an ops task lands the findings of a failed verdict and of a capped hold", async (t) => {
+  const failed = await runOpsReview(t, { catalog: "ops", reviewer: "FAIL", proof: "grep: export const y in x.ts" });
+  assert.equal(failed.verdict.state, "failure", "fixture assumption: the review fails");
+  assert.ok(failed.page?.includes("FAIL"), `THE CLAIM: the failed verdict's page lands in the private repository: ${failed.page}`);
+  // A prose proof never executes, so the code review is CAPPED and held pending (publishCappedHold): runReview
+  // returns on posted.cappedHold, before the posted terminal path.
+  const capped = await runOpsReview(t, { catalog: "ops", reviewer: "PASS", proof: "widget frobnicate implemented" });
+  assert.equal(capped.verdict.capped, true, "fixture assumption: the review is capped");
+  assert.equal(capped.verdict.state, "pending", "fixture assumption: the capped pass is held pending");
+  assert.ok(capped.page?.includes("State: pending"), `THE CLAIM: the capped hold's page lands in the private repository: ${capped.page}`);
+  for (const run of [failed, capped]) {
+    assert.deepEqual(run.publicBranches, ["main"], "nothing reaches the public repository");
+    assert.ok(!run.lines.some((l) => l.step === "review.record_write_failed"), JSON.stringify(run.lines.filter((l) => l.step === "review.record_write_failed")));
+  }
+});
+
+test("W1-T15077 criterion 1: a passing ops verdict and a failed public-catalog verdict land no findings", async (t) => {
+  const passed = await runOpsReview(t, { catalog: "ops", reviewer: "PASS", proof: "grep: export const x in x.ts" });
+  assert.equal(passed.verdict.state, "success", "fixture assumption: the review passes");
+  assert.equal(passed.page, undefined, "a passing verdict writes nothing");
+  const publicFailed = await runOpsReview(t, { catalog: "public", reviewer: "FAIL", proof: "grep: export const y in x.ts" });
+  assert.equal(publicFailed.verdict.state, "failure", "fixture assumption: the public review fails");
+  assert.equal(publicFailed.page, undefined, "a public-catalog task writes nothing");
 });
