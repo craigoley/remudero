@@ -25,10 +25,10 @@
  * and tsc discards any cached entry whose hash, options or version differ. Extra argv is passed through to tsc.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
-import { systemClock } from "./clock.js";
+import { systemClock, type Clock } from "./clock.js";
 import { acquireInflightLock, InflightLockError, type InflightLockHandle, type InflightLockInfo } from "./inflight-lock.js";
 import { appendProducerLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
@@ -52,6 +52,8 @@ import {
   typecheckEnv,
   typecheckPeakBytes,
   worktreeBuildInfoPath,
+  WORKTREE_LOCK_BEAT_MS,
+  WORKTREE_LOCK_MISSED_BEATS,
   type SeedOutcome,
   type TypecheckObservation,
   type TypecheckPeakRow,
@@ -65,7 +67,7 @@ export const WORKTREE_BUILDINFO_NAME = ".rmd-typecheck.tsbuildinfo";
 
 /** Runs tsc with stdio inherited in `env`; returns its exit status (null when it was killed or never started). */
 export type TypecheckRunSpawn = (
-  file: string, args: readonly string[], cwd: string, env: NodeJS.ProcessEnv,
+  file: string, args: readonly string[], cwd: string, env: NodeJS.ProcessEnv, heartbeat?: string,
 ) => { status: number | null; error?: Error; observation?: TypecheckObservation };
 
 export interface TypecheckRunOptions {
@@ -89,6 +91,9 @@ export interface WorktreeLockOptions {
   bootId?: () => string | undefined;
   /** The /proc readers {@link probeRecordedPidNamespace} uses to judge a holder in another pid namespace. */
   namespaceProbe?: ReservedTreeProbeHost;
+  /** The clock a waiter ages the holder's last beat by, and the lock file's mtime reader (W1-T15169 heartbeat). */
+  clock?: Clock;
+  mtimeOf?: (path: string) => number | undefined;
 }
 
 /** How often a check waiting on its worktree's lock looks again. */
@@ -101,25 +106,56 @@ function sleepSync(ms: number): void {
 const recorded = (value: unknown): string | undefined => typeof value === "string" && value !== "" ? value : undefined;
 
 /**
- * Is the lock's holder gone? In this pid namespace (or off Linux, with no namespace on record) its pid and start time
- * answer, as for every lock here. In ANOTHER one its pid names nothing here: OBSERVED 2026-11-27, each Codex sandbox
- * command runs in its own pid namespace, so a pid probe would read the first check as dead and take its lock over. Then
- * the holder is live unless its namespace is proven gone: an earlier kernel boot ended every process it held, and
- * otherwise W1-T12504's namespace probe (reuse or complete absence of the namespace) must say ended.
+ * Is the lock's holder gone? A holder refreshes the lock's mtime every {@link WORKTREE_LOCK_BEAT_MS} (its tsc observer,
+ * and runTypecheck itself while it waits for admission), so one silent past {@link WORKTREE_LOCK_MISSED_BEATS} beats is
+ * gone in ANY pid namespace: a SIGKILLed sandbox stops beating and is taken over within seconds. Two proofs end it
+ * sooner. In this pid namespace (or off Linux, with no namespace on record) a dead or reused pid. In ANOTHER one its pid
+ * names nothing here (OBSERVED 2026-11-27: each Codex sandbox command runs in its own pid namespace, so a pid probe read
+ * the first check as dead), so only an earlier kernel boot, or W1-T12504's namespace probe saying ended, ends it early.
  */
-function worktreeHolderStale(held: InflightLockInfo, byPid: () => boolean, opts: WorktreeLockOptions): boolean {
+function worktreeHolderStale(held: InflightLockInfo, byPid: () => boolean, lockPath: string, opts: WorktreeLockOptions): boolean {
   const fields = held as InflightLockInfo & Record<string, unknown>;
   const pidNs = recorded(fields.pidNs);
   const mine = (opts.pidNamespace ?? readPidNamespace)();
-  if (pidNs === undefined || mine === undefined || pidNs === mine) return byPid();
-  const bootId = recorded(fields.bootId);
-  const myBoot = (opts.bootId ?? readBootId)();
-  if (bootId !== undefined && myBoot !== undefined && bootId !== myBoot) return true;
-  const evidence = probeRecordedPidNamespace({
-    pid: held.pid, host: held.host, startedAt: held.startedAt, heartbeatAt: held.startedAt, label: NPM_TYPECHECK_SLOT_LABEL,
-    pidNs, bootId, processStart: recorded(fields.processStart),
-  }, { bootId: myBoot, ...opts.namespaceProbe });
-  return evidence.state === "ended";
+  if (pidNs === undefined || mine === undefined || pidNs === mine) {
+    if (byPid()) return true;
+  } else {
+    const bootId = recorded(fields.bootId);
+    const myBoot = (opts.bootId ?? readBootId)();
+    if (bootId !== undefined && myBoot !== undefined && bootId !== myBoot) return true;
+    const evidence = probeRecordedPidNamespace({
+      pid: held.pid, host: held.host, startedAt: held.startedAt, heartbeatAt: held.startedAt, label: NPM_TYPECHECK_SLOT_LABEL,
+      pidNs, bootId, processStart: recorded(fields.processStart),
+    }, { bootId: myBoot, ...opts.namespaceProbe });
+    if (evidence.state === "ended") return true;
+  }
+  const beatAt = (opts.mtimeOf ?? lockMtime)(lockPath);
+  // A lock gone since it was read has no beat to age: the acquire loop retries the create on whatever is there now.
+  return beatAt !== undefined && (opts.clock ?? systemClock).now() - beatAt > WORKTREE_LOCK_BEAT_MS * WORKTREE_LOCK_MISSED_BEATS;
+}
+
+const lockMtime = (path: string): number | undefined => statSync(path, { throwIfNoEntry: false })?.mtimeMs;
+
+/** Refresh the lock's mtime: the beat a waiter in any pid namespace ages. */
+function beatLock(path: string, clock: Clock): void {
+  const now = clock.date();
+  try {
+    utimesSync(path, now, now);
+  } catch (error) {
+    // Released or taken over already: there is no lock of ours left to keep alive. The holder still runs to its end.
+    process.stderr.write(JSON.stringify({ step: "typecheck.worktree_beat_failed", path, error: String(error) }) + "\n");
+  }
+}
+
+/** A sleep that beats the lock at least once per {@link WORKTREE_LOCK_BEAT_MS}, for a holder waiting on admission. */
+function beatingSleep(beat: () => void, sleep: (ms: number) => void): (ms: number) => void {
+  return (ms) => {
+    for (let left = ms; ; left -= WORKTREE_LOCK_BEAT_MS) {
+      beat();
+      sleep(Math.min(left, WORKTREE_LOCK_BEAT_MS));
+      if (left <= WORKTREE_LOCK_BEAT_MS) return;
+    }
+  };
 }
 
 /**
@@ -127,7 +163,8 @@ function worktreeHolderStale(held: InflightLockInfo, byPid: () => boolean, opts:
  * holder is reclaimed by {@link acquireInflightLock}. A wait ends in one typecheck.waited_for_worktree line.
  */
 function holdWorktreeTypecheck(buildInfo: string, opts: WorktreeLockOptions = {}, log: (line: string) => void): InflightLockHandle {
-  const started = systemClock.now();
+  const clock = opts.clock ?? systemClock;
+  const started = clock.now();
   // Recorded so a check in another pid namespace can judge this one without probing a pid it cannot see.
   const identity = { pidNs: (opts.pidNamespace ?? readPidNamespace)(), bootId: (opts.bootId ?? readBootId)(),
     processStart: testSlotProcessFacts(process.pid)?.start };
@@ -136,9 +173,12 @@ function holdWorktreeTypecheck(buildInfo: string, opts: WorktreeLockOptions = {}
     try {
       const handle = acquireInflightLock(dirname(buildInfo), basename(buildInfo), {
         run_id: NPM_TYPECHECK_SLOT_LABEL, isPidAlive: opts.isPidAlive, getProcessStartTime: opts.getProcessStartTime,
-        extra: identity, isStale: (held, byPid) => worktreeHolderStale(held, byPid, opts),
+        extra: identity, isStale: (held, byPid) => worktreeHolderStale(held, byPid, `${buildInfo}.lock`, opts),
       });
-      if (holder !== undefined) log(JSON.stringify({ step: "typecheck.waited_for_worktree", holderPid: holder.pid, waitedMs: systemClock.now() - started }));
+      if (holder !== undefined) {
+        log(JSON.stringify({ step: "typecheck.waited_for_worktree", holderPid: holder.pid, waitedMs: clock.now() - started,
+          beatMs: WORKTREE_LOCK_BEAT_MS, missedBeats: WORKTREE_LOCK_MISSED_BEATS }));
+      }
       return handle;
     } catch (error) {
       if (!(error instanceof InflightLockError)) throw error;
@@ -148,8 +188,8 @@ function holdWorktreeTypecheck(buildInfo: string, opts: WorktreeLockOptions = {}
   }
 }
 
-const inheritSpawn: TypecheckRunSpawn = (file, args, cwd, env) => {
-  const command = measuredTypecheckInvocation(file, args, { cwd, env, encoding: "utf8" }, true);
+const inheritSpawn: TypecheckRunSpawn = (file, args, cwd, env, heartbeat) => {
+  const command = measuredTypecheckInvocation(file, args, { cwd, env, encoding: "utf8" }, true, heartbeat);
   return measuredTypecheckResult(spawnSync(command.file, command.args, command.options));
 };
 
@@ -239,7 +279,8 @@ export function runTypecheck(root: string, extraArgs: readonly string[] = [], op
   // W1-T15169: taken before seeding, the warm/cold read and the admission, so a second check reads the first's buildinfo.
   const worktree = site.buildInfo === undefined ? undefined : holdWorktreeTypecheck(site.buildInfo, opts.worktreeLock, log);
   try {
-    return runHeldTypecheck(root, prepareAtSite(root, site), extraArgs, opts, log);
+    const held = worktree === undefined ? undefined : { path: worktree.path, beat: () => beatLock(worktree.path, opts.worktreeLock?.clock ?? systemClock) };
+    return runHeldTypecheck(root, prepareAtSite(root, site), extraArgs, opts, log, held);
   } finally {
     worktree?.release();
   }
@@ -247,28 +288,33 @@ export function runTypecheck(root: string, extraArgs: readonly string[] = [], op
 
 function runHeldTypecheck(
   root: string, prepared: PreparedTypecheck, extraArgs: readonly string[], opts: TypecheckRunOptions, log: (line: string) => void,
+  held: { path: string; beat: () => void } | undefined,
 ): number {
   const cold = !hasUsableTypecheckBuildInfo(prepared.buildInfo, installedTypescriptVersion(root));
   const peak = typecheckAdmissionPeak(root, !cold);
+  held?.beat();
+  // W1-T15169: a holder waiting for its admission keeps beating, so no waiter reads it as gone.
+  const testSlot = held === undefined ? opts.testSlot : { ...opts.testSlot, sleep: beatingSleep(held.beat, opts.testSlot?.sleep ?? sleepSync) };
   let slot: TestSlotLease | undefined;
   try {
     // W1-T14145: a cold check takes a slot; a warm one waits on memory headroom alone, never on a slot count.
     slot = opts.acquireSlot ? opts.acquireSlot(NPM_TYPECHECK_SLOT_LABEL)
-      : cold ? acquireTestSlot(NPM_TYPECHECK_SLOT_LABEL, { memoryBytes: peak, ...opts.testSlot })
-      : staticLease(admitStaticWork(NPM_TYPECHECK_SLOT_LABEL, { memoryBytes: peak, ...opts.testSlot }));
+      : cold ? acquireTestSlot(NPM_TYPECHECK_SLOT_LABEL, { memoryBytes: peak, ...testSlot })
+      : staticLease(admitStaticWork(NPM_TYPECHECK_SLOT_LABEL, { memoryBytes: peak, ...testSlot }));
     if (!testSlotExecutionAllowed(slot)) {
       log(JSON.stringify({ step: "typecheck.not_run", note: slot.note }));
       return 75;
     }
     log(JSON.stringify({ step: cold ? "typecheck.cold" : "typecheck.warm", where: prepared.where, seed: prepared.seed, slot: slot.outcome, note: slot.note }));
     // Read after any wait for a slot: a tight container runs tsc with fewer checkers, same diagnostics.
-    const headroom = (opts.testSlot?.memoryHeadroom ?? readMemoryHeadroom)();
+    const headroom = (testSlot?.memoryHeadroom ?? readMemoryHeadroom)();
     const tight = lowMemoryTypecheckArgs(headroom, peak);
     if (tight.length > 0) log(JSON.stringify({ step: "typecheck.low_memory", headroomMiB: Math.round(headroom! / 1024 ** 2), args: tight }));
     let res: ReturnType<TypecheckRunSpawn> | undefined;
+    held?.beat();
     try {
       res = (opts.spawn ?? inheritSpawn)(
-        join(root, "node_modules", ".bin", "tsc"), [...prepared.args, ...tight, ...extraArgs], root, typecheckEnv(process.env),
+        join(root, "node_modules", ".bin", "tsc"), [...prepared.args, ...tight, ...extraArgs], root, typecheckEnv(process.env), held?.path,
       );
     } finally {
       recordTypecheckPeak(typecheckPeakWriter(root), "npm", !cold, res?.observation, "", slot.waitedMs);

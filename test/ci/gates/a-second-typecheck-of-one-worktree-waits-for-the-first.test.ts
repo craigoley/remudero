@@ -4,16 +4,18 @@
 // admission is injected and every tree is a fixture; the two-process cases run runTypecheck in real child processes.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { test, type TestContext } from "node:test";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
-import { INITIAL_PID_NAMESPACE, type ReservedTreeProbeHost, type TestSlotLease } from "#src/lib/test-slot.js";
+import { admitStaticWork, INITIAL_PID_NAMESPACE, type ReservedTreeProbeHost, type TestSlotLease } from "#src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
-import { installedTypescriptVersion, TYPECHECK_BUILDINFO_NAME } from "#src/lib/typecheck-buildinfo.js";
+import {
+  installedTypescriptVersion, measuredTypecheckArgs, TYPECHECK_BUILDINFO_NAME, WORKTREE_LOCK_BEAT_MS, WORKTREE_LOCK_MISSED_BEATS,
+} from "#src/lib/typecheck-buildinfo.js";
 import { runTypecheck, type TypecheckRunOptions } from "#src/lib/typecheck-run.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -215,13 +217,106 @@ test("W1-T15169 criterion 2: a holder in another pid namespace is waited on unle
 test("W1-T15169 criterion 2: a check records its pid namespace, boot id and kernel start in the lock it holds", (t) => {
   const root = tree(t, "identity", true);
   let record: Record<string, unknown> | undefined;
+  let heartbeat: string | undefined;
   assert.equal(runTypecheck(root, [], { ...admitted, log: () => {},
     worktreeLock: { pidNamespace: () => "pid:[4026532009]", bootId: () => "boot-z" },
-    spawn: () => { record = JSON.parse(readFileSync(`${buildInfoOf(root)}.lock`, "utf8")) as Record<string, unknown>; return { status: 0 }; } }), 0);
+    spawn: (_file, _args, _cwd, _env, beat) => {
+      heartbeat = beat;
+      record = JSON.parse(readFileSync(`${buildInfoOf(root)}.lock`, "utf8")) as Record<string, unknown>;
+      return { status: 0 };
+    } }), 0);
+  assert.equal(heartbeat, `${buildInfoOf(root)}.lock`, "tsc's observer is handed the lock to beat");
   assert.equal(record?.pid, process.pid);
   assert.equal(record?.pidNs, "pid:[4026532009]");
   assert.equal(record?.bootId, "boot-z");
   assert.match(String(record?.processStart), /^(proc|ps):/);
+});
+
+const WINDOW_MS = WORKTREE_LOCK_BEAT_MS * WORKTREE_LOCK_MISSED_BEATS;
+
+test("W1-T15169 criterion 2: a holder in another pid namespace that keeps beating is waited on past the miss window", (t) => {
+  const root = tree(t, "beating", true);
+  const sandbox = fakeProc("pid:[4026532002]", "pid:[4026532001]", 400);
+  const held = acquireInflightLock(join(root, ".git"), TYPECHECK_BUILDINFO_NAME, { run_id: "fixture",
+    info: { pid: spawnSync(process.execPath, ["-e", ""]).pid! }, extra: { pidNs: "pid:[4026532001]", bootId: "boot-a", processStart: "proc:500" } });
+  let now = 1_000_000;
+  let lastBeat = now;
+  let sleeps = 0;
+  const polls = 2 * WORKTREE_LOCK_MISSED_BEATS + 1;
+  let spawnedAfter: number | undefined;
+  const code = runTypecheck(root, [], { ...admitted, log: () => {}, spawn: () => { spawnedAfter = sleeps; return { status: 0 }; },
+    worktreeLock: { pidNamespace: () => "pid:[4026532002]", bootId: () => "boot-a", namespaceProbe: sandbox,
+      clock: { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() }, mtimeOf: () => lastBeat,
+      // Each poll a beat's worth of time passes and the holder beats once.
+      sleep: () => { sleeps++; now += WORKTREE_LOCK_BEAT_MS; lastBeat = now; if (sleeps === polls) held.release(); } } });
+  assert.equal(code, 0);
+  assert.ok(polls * WORKTREE_LOCK_BEAT_MS > WINDOW_MS, "the wait outlasted the miss window");
+  assert.equal(spawnedAfter, polls, "tsc started only once the beating holder let go");
+});
+
+test("W1-T15169 criterion 2: a holder whose beats stopped is taken over once the miss window passes, in any pid namespace", (t) => {
+  const holders = [
+    { why: "a sibling sandbox, SIGKILLed", pid: spawnSync(process.execPath, ["-e", ""]).pid!,
+      extra: { pidNs: "pid:[4026532001]", bootId: "boot-a", processStart: "proc:500" } as Record<string, string> },
+    { why: "a live pid in this namespace that stopped beating", pid: process.pid, extra: {} as Record<string, string> },
+  ];
+  for (const holder of holders) {
+    const root = tree(t, "silent", true);
+    acquireInflightLock(join(root, ".git"), TYPECHECK_BUILDINFO_NAME, { run_id: "fixture", info: { pid: holder.pid }, extra: holder.extra });
+    let now = 1_000_000;
+    const lastBeat = now;
+    let sleeps = 0;
+    const lines: string[] = [];
+    const code = runTypecheck(root, [], { ...admitted, log: (line) => lines.push(line), spawn: () => ({ status: 0 }),
+      worktreeLock: { pidNamespace: () => "pid:[4026532002]", bootId: () => "boot-a", namespaceProbe: fakeProc("pid:[4026532002]", "pid:[4026532001]", 400),
+        clock: { now: () => now, date: () => new Date(now), iso: () => new Date(now).toISOString() }, mtimeOf: () => lastBeat,
+        isPidAlive: (pid) => pid === process.pid,
+        sleep: () => { if (++sleeps > 1_000) throw new Error(`${holder.why}: waited forever on a silent holder`); now += WORKTREE_LOCK_BEAT_MS; } } });
+    assert.equal(code, 0, holder.why);
+    assert.equal(sleeps, WORKTREE_LOCK_MISSED_BEATS + 1, `${holder.why}: taken over on the first poll past the window`);
+    const row = steps(lines).find((r) => r.step === "typecheck.waited_for_worktree");
+    assert.deepEqual([row?.holderPid, row?.beatMs, row?.missedBeats], [holder.pid, WORKTREE_LOCK_BEAT_MS, WORKTREE_LOCK_MISSED_BEATS], holder.why);
+  }
+});
+
+test("W1-T15169 criterion 2: tsc's observer beats the lock it is handed, and only that one", (t) => {
+  const dir = eventsDir(t);
+  const lock = join(dir, "worktree.lock");
+  const other = join(dir, "other.lock");
+  for (const path of [lock, other]) { writeFileSync(path, "{}"); utimesSync(path, 1_000, 1_000); }
+  const run = (heartbeat?: string) => spawnSync(process.execPath,
+    measuredTypecheckArgs("capture", process.execPath, ["-e", "setTimeout(() => {}, 50)"], heartbeat),
+    { encoding: "utf8", stdio: ["pipe", "pipe", "pipe", "pipe"], timeout: 60_000 });
+  assert.equal(run().status, 0);
+  assert.equal(statSync(lock).mtimeMs, 1_000_000, "no lock named, none beaten");
+  const result = run(lock);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(statSync(lock).mtimeMs > 1_000_000, "the observer beat the lock while its child ran");
+  assert.equal(statSync(other).mtimeMs, 1_000_000);
+});
+
+test("W1-T15169 criterion 2: a holder waiting for its memory admission keeps beating its lock", (t) => {
+  const root = tree(t, "admission", true);
+  const slots = join(root, "slots");
+  mkdirSync(slots);
+  const lockPath = `${buildInfoOf(root)}.lock`;
+  // A live peer's recorded peak is what a short headroom must hold beside, so the check waits until it reads roomy.
+  const peer = admitStaticWork("peer", { dir: slots, memoryBytes: 1024 ** 3, memoryHeadroom: () => 64 * 1024 ** 3, log: () => {} });
+  t.after(() => peer.release());
+  for (const lost of [false, true]) {
+    let calls = 0;
+    let beatenBetween: boolean | undefined;
+    const code = runTypecheck(root, [], { log: () => {}, spawn: () => ({ status: 0 }),
+      testSlot: { dir: slots, memoryHeadroom: () => calls >= 2 ? 64 * 1024 ** 3 : 0, pollMs: 1, waitBoundMs: 60_000, log: () => {},
+        sleep: () => {
+          calls++;
+          if (calls === 1) { if (lost) unlinkSync(lockPath); else utimesSync(lockPath, 1_000, 1_000); }
+          if (calls === 2 && !lost) beatenBetween = statSync(lockPath).mtimeMs > 1_000_000;
+        } } });
+    assert.equal(code, 0, `lost=${lost}`);
+    assert.ok(calls >= 2, `lost=${lost}: the admission waited (${calls} polls)`);
+    if (!lost) assert.equal(beatenBetween, true, "the admission wait beat the lock between polls");
+  }
 });
 
 test("W1-T15169 criterion 3: runTypecheck on two different worktrees runs both at once", async (t) => {
