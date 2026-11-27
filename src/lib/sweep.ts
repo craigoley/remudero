@@ -5014,7 +5014,7 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         // started"), so the round waits while a live review owns this exact head; a verdict or a proven-dead owner ends it.
         // Read off the loop; a ledger not yet written holds no review in flight, so the round dispatches as before.
         // A decision the sweep carried for this head is used as made; otherwise (a caller that made none, or a moved head) it is made here.
-        evidence = await decideReviewInFlight(pr, evidence, ledgerPath);
+        evidence = decideReviewInFlight(pr, evidence, ledgerPath);
         const reviewRun = evidence.reviewInFlight?.reviewRun;
         if (reviewRun !== undefined) {
           log(FIX_DEFERRED_REVIEW_IN_FLIGHT_STEP, { pr_number: pr.prNumber, head: pr.headSha, review_run: reviewRun });
@@ -7579,12 +7579,17 @@ export function reviewInFlightOnHead(
 
 /** W1-T15005: {@link reviewInFlightOnHead} over the live ledger, read off the loop. A ledger not yet written holds no
  *  review in flight; any other read failure propagates. The fix dispatch and the owned-conflict round share this read. */
-export async function reviewInFlightAtDispatch(
+export function reviewInFlightAtDispatch(
   pr: Parameters<typeof reviewInFlightOnHead>[0],
   ledgerPath: string,
-): Promise<string | undefined> {
-  const text = await fs.promises.readFile(ledgerPath, "utf8")
-    .catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; });
+): string | undefined {
+  let text: string;
+  try {
+    text = readFileSync(ledgerPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") text = "";
+    else throw error;
+  }
   // This is an action-time read for the exact head being dispatched. The view may predate a
   // review claim (or may have adopted a moved head while carrying `reviewState: "none"`), so
   // the snapshot's state cannot veto a fresh, live claim in the ledger.
@@ -7599,14 +7604,14 @@ export interface ReviewInFlightDecision { headSha: string; reviewRun?: string; c
  *  says `none`. Re-read the exact head's claim from the live ledger at the spending point. The liveness half reads THIS
  *  process's review mutex (another process's claim is judged by its owner pid instead), so the sweep decides before a fix
  *  child is started: {@link detachFixDispatch} decides before {@link hostFixDispatch} spawns. */
-export async function decideReviewInFlight(
+export function decideReviewInFlight(
   pr: Parameters<typeof reviewInFlightOnHead>[0],
   evidence: FixDispatchEvidence,
   ledgerPath: string,
-): Promise<FixDispatchEvidence & { reviewInFlight: ReviewInFlightDecision }> {
+): FixDispatchEvidence & { reviewInFlight: ReviewInFlightDecision } {
   const carried = evidence.reviewInFlight;
   if (carried?.headSha === pr.headSha && carried.checked === true) return { ...evidence, reviewInFlight: carried };
-  const reviewRun = await reviewInFlightAtDispatch(pr, ledgerPath);
+  const reviewRun = reviewInFlightAtDispatch(pr, ledgerPath);
   return { ...evidence, reviewInFlight: { headSha: pr.headSha, checked: true, ...(reviewRun === undefined ? {} : { reviewRun }) } };
 }
 
@@ -25992,7 +25997,7 @@ async function runSweepPinned(
     // W1-T15005: decide here, in the sweep that holds the review mutex, before a fix child is started: a child's own mutex
     // is empty, so it could never see the review. The decision rides on, to the child's envelope or the in-process work.
     if (evidence !== undefined) {
-      evidence = await decideReviewInFlight(pr, evidence, deps.ledgerPath);
+      evidence = decideReviewInFlight(pr, evidence, deps.ledgerPath);
       const reviewRun = evidence.reviewInFlight?.reviewRun;
       if (reviewRun !== undefined) {
         log(FIX_DEFERRED_REVIEW_IN_FLIGHT_STEP, { pr_number: pr.prNumber, head: pr.headSha, review_run: reviewRun });
@@ -29815,7 +29820,7 @@ async function runSweepPinned(
               const ownedDispatch = (onPhase?: DetachedFixPhaseObserver, control?: DetachedFixControl, carried?: FixDispatchEvidence) => async () => {
                 // W1-T15005: a round the dispatch defers for a review in flight never ran, so it records no worker round. The
                 // decision is made once (or carried from detachFixDispatch) and the dispatch below uses that same decision.
-                const decided = await decideReviewInFlight(pr, carried ?? conflictedEvidence, deps.ledgerPath);
+                const decided = decideReviewInFlight(pr, carried ?? conflictedEvidence, deps.ledgerPath);
                 if (!ownedRound || decided.reviewInFlight.reviewRun !== undefined) {
                   return deps.dispatchFix(pr, decided, onPhase, control);
                 }
