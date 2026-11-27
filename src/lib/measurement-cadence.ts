@@ -27,6 +27,7 @@ import {
 import { mineAutonomyLedgerLines, parseTrailerMerges, zeroTouchMergeRate } from "./autonomy.js";
 import { LEDGER_FILENAME } from "./ledger-path.js";
 import { appendLedger } from "./ledger.js";
+import { WorkerNotStartedError } from "./worker.js";
 import { finishedUtcDays, isSpendPerMergedInput, paidSpendPerMergedDay, SPEND_PER_MERGED_DAILY_STEP } from "./spend-per-merged.js";
 import { resolveLedgerUnion, type LedgerUnionOptions, type LedgerUnionResult } from "./ledger-grep.js";
 import {
@@ -1840,7 +1841,15 @@ export async function verifyHumanCadence(opts: VerifyHumanCadenceOpts): Promise<
   }
 
   for (const { shard, reason } of due) {
-    const verdict = await judgeVerifyHumanShard(shard, { judge: opts.judge });
+    let verdict: VerifyHumanVerdict;
+    try {
+      verdict = await judgeVerifyHumanShard(shard, { judge: opts.judge });
+    } catch (error) {
+      // W1-T14916: no verdict row and no proposal for a judge that never started, so the shard
+      // stays due for the successor daemon's cadence.
+      if (error instanceof WorkerNotStartedError) break;
+      throw error;
+    }
     const ageBandKey = reason === "age_band" ? verifyHumanAgeBandKey(shard) : undefined;
     opts.appendRow({
       ...verifyHumanVerdictRow(shard, verdict, opts.runId),

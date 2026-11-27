@@ -35510,6 +35510,11 @@ export function trackRepairLadder<A extends SpawnWorkerArgs, R>(
       }
       throw error;
     }
+    // W1-T14916: a spawn a retired daemon withheld proves nothing about provider capacity, so it
+    // neither clears the stall nor reports a recovery.
+    if (typeof result === "object" && result !== null && (result as { notStarted?: unknown }).notStarted !== undefined) {
+      return result;
+    }
     try {
       const cleared = clearRepairLadderStall(root);
       if (cleared !== undefined) {

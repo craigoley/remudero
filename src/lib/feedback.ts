@@ -26,7 +26,7 @@ import {
 import type { JudgeMount, Mount, Mounts } from "./mounts.js";
 import { shadowJudgeCall } from "./judge-shadow.js";
 import { providerLessRiskJudgeMount, resolveRiskJudgeMount } from "./risk-judge.js";
-import { spawnWorker, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
+import { spawnWorker, WorkerNotStartedError, type SpawnWorkerArgs, type WorkerResult } from "./worker.js";
 import { benchmarkNonDispatchSpawn } from "./benchmark-run.js";
 import type { ConsoleCorrection } from "./console-feedback.js";
 
@@ -320,6 +320,8 @@ export function realDecisionSummarizer(opts: {
   return async (input: SummarizeInput) => {
     const args = buildDecisionSummarySpawnArgs({ input, mount: opts.mount, cwd: opts.cwd, settingsFile: opts.settingsFile });
     const result: WorkerResult = await spawn(args);
+    // W1-T14916: a writer that never started wrote nothing; its callers keep the item unwritten, not templated.
+    if (result.notStarted) throw new WorkerNotStartedError(result.notStarted);
     const summary = decisionSummaryJson(result.text);
     if (opts.shadowLog !== undefined) {
       // Not awaited: the summary returned below is the primary's. The row records cost and parse, never agreement.

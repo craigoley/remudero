@@ -4165,6 +4165,13 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         }, (args) => host.spawnFixWorkerBounded({ ...deps, spawn: prerequisiteReceipt.spawn }, args, {
           runId: opts.runId, taskId: opts.taskId,
         }), deps.log);
+        // W1-T14916: a prerequisite worker that never started opened no PR and was refused nothing: no escalation,
+        // no exhausted rung and no "completed-no-pr" outcome, so a later round dispatches it again.
+        if (spawnOutcome.kind === "spawned" && spawnOutcome.result.notStarted !== undefined) {
+          deps.branchClaim?.release();
+          return finish({ outcome: "stood_down", review, strikes, retriggers, reason: "admission-abandoned",
+            standDownReason: "prerequisite admission abandoned before a worker started" });
+        }
         const prerequisiteWorker = spawnOutcome.kind === "spawned" ? deps.account(spawnOutcome.result) : undefined;
         if (prerequisiteWorker) host.archiveWorkerTranscript({
           root: opts.config.root, taskId: opts.taskId, runId: prerequisiteWorkerId,

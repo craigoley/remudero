@@ -22,8 +22,23 @@ import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
+import { answerThread, realThreadDecider, type InboxThreadItem } from "#src/lib/inbox-responder.js";
+import { appendThreadMessage, inboxThreadId, inboxThreadIdentity, readAllThreads } from "#src/lib/inbox-thread.js";
+import { runAlertLane, type AlertLaneAlert, type AlertPolicy } from "#src/lib/alert-lane.js";
+import { trackRepairLadder } from "#src/lib/sweep.js";
+import { claudeCapacityFromUsage, ProviderCapacityBlockedError, readRepairLadderState } from "#src/lib/worker-provider.js";
+import { judgeVerifyHumanShard, realVerifyHumanJudge, type ShardUnderJudgement } from "#src/lib/verify-human-judge.js";
+import { verifyHumanCadence } from "#src/lib/measurement-cadence.js";
+import { loadMounts, mountsPath } from "#src/lib/mounts.js";
+import { realDecisionSummarizer } from "#src/lib/feedback.js";
+import { writePlainMessage } from "#src/lib/inbox-plain.js";
+import { runInboxGardener, type InboxGardenerCandidate, type InboxGardenerPack, type InboxGardenerPorts } from "#src/lib/inbox-gardener.js";
+import { inboxGardenerRunTaskPorts } from "#src/lib/inbox-gardener-runtime.js";
+import { proofDebtPopulationPermit, readInboxGardenerStore, stampMechanicalAsk, type InboxGardenerScope } from "#src/lib/inbox-retirement.js";
+import { fixedClock } from "#src/lib/clock.js";
+
 // The shared run-task test helper, not a direct src/run-task.ts import (the affected-suite reach ratchet bounds direct importers).
-import { buildSweepEffects, dispatchMainRepairFixRun, mainRepairLaneFor, runReview, type AlertFixDispatchDeps } from "#test/helpers/run-task-test.js";
+import { buildSweepEffects, dispatchAlertFixRun, dispatchMainRepairFixRun, mainRepairLaneFor, runFixRung, runReview, type AlertFixDispatchDeps } from "#test/helpers/run-task-test.js";
 
 type Row = { step: string } & Record<string, unknown>;
 
@@ -541,4 +556,185 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   assert.equal(settled, "pending", "a retired daemon reports nothing for a fix it never ran");
   await assert.rejects(runInWorkerSpawnScope({}, async () => lane.openFixPr!(request)), WorkerNotStartedError,
     "control: a live daemon's not-started fix reaches the rung");
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and an operator reply its reader never read stays pending", async (t: TestContext) => {
+  const root = ownedFixtureDir(t, "retired-inbox-reply").dir;
+  const threadStorePath = join(root, "threads.ndjson");
+  const ledgerPath = join(root, "ledger.ndjson");
+  const item: InboxThreadItem = { proposalId: "ruling:t14916", state: "ready", summary: "Explain the proposal",
+    plain: { headline: "A proposed improvement", whatHappened: "The evidence changed.", whatWeNeed: "Review the evidence.",
+      ifNothingHappens: "Nothing is changed.", options: [], source: "template" } };
+  appendThreadMessage(inboxThreadIdentity(item.proposalId), "reply", "What happens next?", { threadStorePath });
+  const messages = () => {
+    const read = readAllThreads({ threadStorePath });
+    return read.status === "ok" ? read.threads.get(inboxThreadId(item.proposalId))?.length ?? 0 : -1;
+  };
+  const before = messages();
+  // The real spawnWorker, refused by the retired scope before any provider starts.
+  const withheld: Array<Record<string, unknown>> = [];
+  const starts: string[] = [];
+  const base = drafterStart(t, withheld, starts);
+  const decide = realThreadDecider({ mount: { model: "haiku", effort: "low", maxTurns: 2, contextBudget: 1000 } as never,
+    cwd: root, settingsFile: base.settingsFile, spawn: (args) => spawnWorker({ ...args, config: base.config,
+      admitWorkerMemory: base.admitWorkerMemory, logWorkerSpawnWithheld: base.logWorkerSpawnWithheld, providerRouting: base.providerRouting }) });
+  const deps = { threadStorePath, ledgerPath, readItems: () => [item], decide, reframe: () => {} };
+  await assert.rejects(runInWorkerSpawnScope({ retiredBy: "drain lock released; the successor owns this work" },
+    () => answerThread(inboxThreadId(item.proposalId), deps)), WorkerNotStartedError);
+  assert.equal(starts.includes("drafter_worker"), false, "no reader started");
+  assert.equal(withheld.length, 1, "the refusal is ledgered once");
+  assert.equal(messages(), before, "no fallback answer is written to the thread");
+  const rows = existsSync(ledgerPath) ? readLedgerLines(ledgerPath).map((row) => String(row.step)) : [];
+  assert.equal(rows.includes("inbox.thread_answered"), false, rows.join(", "));
+  // Control: the successor's reader answers the same reply, so it was left pending rather than consumed.
+  const answered = await answerThread(inboxThreadId(item.proposalId), { ...deps,
+    decide: async () => ({ action: "question", reply: "Which part should I explain?" }) });
+  assert.equal(answered, "question");
+  assert.equal(messages(), before + 1);
+});
+
+/** The WorkerResult spawnWorker returns when a retired scope withholds the start. */
+function notStartedResult(): WorkerResult {
+  return { notStarted: "admission-abandoned", subtype: "admission_abandoned", sessionId: "", costUsd: 0, numTurns: 0, text: "",
+    blocks: [], stderr: "", isError: false, apiError: false, permissionDenials: [], childEnvKeys: [], model: "sonnet",
+    effort: "medium", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {}, compactionEvents: [],
+    qualitySuspect: false } as unknown as WorkerResult;
+}
+
+const isNotStarted = (error: unknown) => error instanceof WorkerNotStartedError && error.notStarted === "admission-abandoned";
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and an alert fix it withheld stays undispatched", async (t: TestContext) => {
+  const root = ownedFixtureDir(t, "retired-alert-fix").dir;
+  const ledgerPath = join(root, "ledger.ndjson");
+  const alert: AlertLaneAlert = { source: "code-scanning", id: "10", severity: "medium", state: "open", createdAt: "2026-11-26T00:00:00Z",
+    summary: "unused variable", url: "https://github.com/acme/remudero/security/code-scanning/10", path: "src/lib/plain.ts" };
+  const policy: AlertPolicy = { actSeverities: ["medium", "low"], criticalPaths: { review: [], gate: [], containment: [], ledger: [], status: [] } };
+  const deps: AlertFixDispatchDeps = {
+    worktreeAdd: () => {}, worktreeRemove: () => {}, renderWorkerSettings: () => join(root, "settings.json"),
+    loadMounts: () => ({}) as never, resolveMount: () => ({ model: "sonnet", provider: "claude", effort: "medium", maxTurns: 10 }) as never,
+    spawn: async () => notStartedResult(),
+    ensureTaskTrailer: () => { throw new Error("no PR exists to trail"); }, checkAcceptance: () => ({ ok: true }) as never,
+  };
+  // The dispatcher: a fix that never started is not a fix run that failed.
+  await assert.rejects(dispatchAlertFixRun("acme", "fixture-repo", { root } as never, alert, ledgerPath, "R", deps), isNotStarted);
+  const steps = () => readLedgerLines(ledgerPath).map((row) => String(row.step));
+  assert.equal(steps().includes("alert-fix.error"), false, steps().join(", "));
+  // The lane writes no dispatched row, so the successor's lane still dispatches the alert.
+  const withheld = await runAlertLane([alert], policy, { ledgerPath, runId: "R", escalate: () => "unused",
+    dispatch: async () => { throw new WorkerNotStartedError("admission-abandoned"); } });
+  assert.equal(withheld.dispatched.length, 0);
+  assert.equal(steps().includes("alert-lane.dispatched"), false, steps().join(", "));
+  const successor = await runAlertLane([alert], policy, { ledgerPath, runId: "R2", escalate: () => "unused", dispatch: async () => {} });
+  assert.equal(successor.dispatched.length, 1, "control: the successor dispatches the same alert");
+  await assert.rejects(runAlertLane([alert], policy, { ledgerPath: join(root, "other.ndjson"), runId: "R3", escalate: () => "unused",
+    dispatch: async () => { throw new Error("worktree vanished"); } }), /worktree vanished/, "control: another failure still propagates");
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and a fix spawn it withheld does not clear a stalled repair ladder", async (t: TestContext) => {
+  const root = ownedFixtureDir(t, "retired-repair-ladder").dir;
+  mkdirSync(join(root, "state"), { recursive: true });
+  const config = { claudeBin: "/bin/true", root, workerProviders: { enabled: ["claude", "codex"] } } as never;
+  const rows: Row[] = [];
+  const log = (step: string, extra: Record<string, unknown> = {}) => { rows.push({ step, ...extra }); };
+  let next: () => Promise<WorkerResult> = async () => { throw new ProviderCapacityBlockedError([claudeCapacityFromUsage(undefined)]); };
+  const spawn = trackRepairLadder(async () => next(), { config, log });
+  const args = { cwd: root, permissionMode: "bypassPermissions", prompt: "fix", settingsFile: "/unused", config } as never;
+  await assert.rejects(spawn(args));
+  assert.equal(readRepairLadderState(root).state, "stalled");
+  next = async () => notStartedResult();
+  assert.equal((await spawn(args)).notStarted, "admission-abandoned");
+  assert.equal(readRepairLadderState(root).state, "stalled", "a withheld spawn says nothing about provider capacity");
+  assert.equal(rows.some((row) => row.step === "repair_ladder.recovered"), false);
+  next = async () => ({ ...notStartedResult(), notStarted: undefined, subtype: "success" }) as WorkerResult;
+  await spawn(args);
+  assert.equal(readRepairLadderState(root).state, "running", "control: a worker that ran clears the stall");
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and a verify-human shard it never judged stays due", async () => {
+  const shard: ShardUnderJudgement = { id: "W1-T9001", title: "choose the policy", rationale: "An operator preference.",
+    acceptance: ["the operator records it"], ageDays: 6, depsAllMerged: false, citedInSrc: false };
+  const judge = realVerifyHumanJudge({ mounts: loadMounts(mountsPath(REPO_ROOT)), cwd: REPO_ROOT, settingsFile: "/unused",
+    spawn: async () => notStartedResult() });
+  await assert.rejects(judge(shard), isNotStarted);
+  await assert.rejects(judgeVerifyHumanShard(shard, { judge }), isNotStarted);
+  const control = await judgeVerifyHumanShard(shard, { judge: async () => { throw new Error("judge down"); } });
+  assert.equal(control.judgeFailed, true, "control: any other failure still fails open");
+  const rows: Array<Record<string, unknown>> = [];
+  const staged: unknown[] = [];
+  const result = await verifyHumanCadence({ shards: [shard], priorVerdicts: new Map(), judge, runId: "R",
+    stageProposal: (proposal) => staged.push(proposal), appendRow: (row) => rows.push(row) });
+  assert.deepEqual([rows.length, staged.length, result.judged], [0, 0, 0], "no verdict row and no Inbox ask");
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and an Inbox message whose writer never started stays unwritten", async () => {
+  const summarize = realDecisionSummarizer({ mount: { model: "haiku", effort: "medium", maxTurns: 20, contextBudget: 60000 },
+    cwd: "/unused", settingsFile: "/unused", spawn: async () => notStartedResult() });
+  await assert.rejects(summarize({ context: "raw" }), isNotStarted);
+  const proposal = { id: "ruling:t14916", summary: "Explain the proposal" };
+  await assert.rejects(writePlainMessage(proposal, { summarize }), isNotStarted, "no template is stored in its place");
+  const control = await writePlainMessage(proposal, { summarize: async () => { throw new Error("writer down"); } });
+  assert.equal(control.source, "template", "control: a writer that failed still falls back to the template");
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and an Inbox ask its gardener never judged is judged again", async (t: TestContext) => {
+  const root = ownedFixtureDir(t, "retired-gardener").dir;
+  const runtime = await inboxGardenerRunTaskPorts({ config: { root }, repoRoot: REPO_ROOT, owner: "acme", repo: "remudero",
+    codeSha: "a".repeat(40), log: () => {} }, { spawn: async () => notStartedResult(),
+    mount: () => ({ model: "haiku", effort: "low", maxTurns: 1, contextBudget: 1 }) });
+  const now = Date.parse("2026-11-26T12:00:00.000Z"), clock = fixedClock(now);
+  const scope: InboxGardenerScope = { repository: "acme/remudero", instance: "core", root };
+  const task = { id: "W1-T9001", title: "A mechanical ask", repo: "remudero", verify: "auto", depends_on: [] };
+  const proposal = stampMechanicalAsk({ id: "proof-debt:W1-T9001", summary: "repair a proof",
+    evidenceAnchors: [{ description: "unresolved criterion 1", path: "plan/tasks.yaml", pattern: "grep: missing in src/missing.ts" }] },
+  task.id, proofDebtPopulationPermit([task]));
+  const candidates = [{ proposal, operatorIntent: "", unansweredReply: false, resolvedByOperator: false, task }] as unknown as InboxGardenerCandidate[];
+  await assert.rejects(runtime.ports.judge!("prompt", candidates[0]!), isNotStarted);
+  const pack: InboxGardenerPack = { scope, snapshotKey: "b".repeat(64), generatedAt: new Date(now - 60_000).toISOString(),
+    checkedAt: new Date(now).toISOString(), codeSha: "a".repeat(40), candidates, ledgerEventIds: new Set(),
+    coverage: { plan: "observed", registry: "observed", github: "observed", ledger: "observed", threads: "observed" } };
+  const stateDir = join(root, "state");
+  mkdirSync(stateDir, { recursive: true });
+  const ports = (judge: InboxGardenerPorts["judge"]): InboxGardenerPorts => ({ capture: async () => pack,
+    proof: async () => undefined as never, mirror: async () => assert.fail("nothing to mirror"), judge });
+  const entry = () => { const read = readInboxGardenerStore(stateDir, scope);
+    return read.state === "observed" ? read.store.entries["proof-debt:W1-T9001"] : assert.fail("store observed"); };
+  const withheld = await runInboxGardener({ stateDir, scope, mode: "shadow", clock, ports: ports(runtime.ports.judge) });
+  assert.equal(withheld.state, "pending", JSON.stringify(withheld));
+  assert.equal(entry(), undefined, "no failed judgment is stored for a judge that never started");
+  const successor = await runInboxGardener({ stateDir, scope, mode: "shadow", clock,
+    ports: ports(async () => ({ decision: "needs_triage", reason: "an operator should look" })) });
+  assert.equal(successor.state, "complete", JSON.stringify(successor));
+  assert.equal(entry()?.judge, "complete", "control: the successor judges the same ask");
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and a prerequisite fix it withheld is neither escalated nor exhausted", async (t: TestContext) => {
+  const root = ownedFixtureDir(t, "retired-prerequisite").dir;
+  const mount = { model: "sonnet", effort: "medium", maxTurns: 400, contextBudget: 120000 };
+  const issues: string[] = [];
+  const rows: Row[] = [];
+  const review = { state: "failure", criteria: [], testTheater: false, summary: "entangled", floorDegraded: false, capped: false,
+    keywordOnly: false, planOnly: false, instrumentEntangled: true, headSha: "deadbeef", reviewerOutcome: "success",
+    instrumentEntanglementPaths: { instrumentPaths: ["scripts/coverage-ratchet.mjs"], srcPaths: ["src/run-task.ts"] } };
+  const outcome = await runFixRung({ taskId: "W1-T14916FIX", runId: "W1-T14916FIX-1", prUrl: "https://github.com/acme/remudero/pull/4242",
+    task: { id: "W1-T14916FIX", title: "An entangled PR" }, branch: "run-W1-T14916FIX-1", worktreePath: join(root, "wt"),
+    initialSessionId: "session-0", mount, settingsFile: join(root, "settings.json"), config: {}, budgetUsd: 10, strikeCap: 3,
+    reviewBase: { owner: "acme", repo: "remudero", headCheckoutDir: join(root, "wt"), reviewerMount: mount }, initialReview: review,
+    deps: { spawn: async () => notStartedResult(), waitForCiGreen: async () => assert.fail("no PR to wait on"),
+      runReview: async () => assert.fail("no re-review"), push: () => {}, ledgerPath: join(root, "ledger.ndjson"),
+      issues: { create: (title: string) => { issues.push(title); return "https://github.com/acme/remudero/issues/1"; } },
+      log: (step: string, extra: Record<string, unknown> = {}) => { rows.push({ step, ...extra }); }, say: () => {},
+      account: (result: WorkerResult) => result, ledgerLines: () => [],
+      readLiveHead: () => ({ ok: true as const, headSha: "deadbeef" }), fetchPrBody: async () => "" },
+  } as never);
+  assert.equal(outcome.outcome, "stood_down", JSON.stringify(outcome));
+  assert.equal(outcome.strikes, 0);
+  assert.deepEqual(issues, [], "no needs-human issue");
+  assert.equal(rows.some((row) => row.step === "fix.exhausted"), false, rows.map((row) => row.step).join(", "));
 });

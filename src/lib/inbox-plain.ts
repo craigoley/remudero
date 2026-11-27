@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import type { OptionIntent, SummarizeDeps } from "./feedback.js";
 import { validateDecisionSummary } from "./feedback.js";
 import { writeAtomic } from "./fs-race-safe.js";
+import { WorkerNotStartedError } from "./worker.js";
 import { inboxKind, inboxOwner } from "./inbox-owner.js";
 import { inboxThreadId } from "./inbox-thread.js";
 import { checkOperatorMessage } from "./operator-message.js";
@@ -405,6 +406,8 @@ async function askWriter(
   try {
     out = await deps.summarize({ context: writerContext(proposal, retryProblems) });
   } catch (e) {
+    // W1-T14916: a writer that never started is no failed writer: the item stays unwritten for the next tick.
+    if (e instanceof WorkerNotStartedError) throw e;
     return { message: null, problems: [`writer failed: ${String((e as Error)?.message ?? e)}`] };
   }
   const card = validateDecisionSummary(out);

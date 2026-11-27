@@ -24949,6 +24949,15 @@ async function retroCommand(
       config,
       prompt,
     });
+    // W1-T14916: a retro whose worker never started has synthesized nothing. Stand down before the
+    // harness regenerates its own artifacts, which would otherwise publish an orientation-only PR
+    // and advance the marker past runs no Architect read.
+    if (worker.notStarted) {
+      log("retro.no_op", { reason: "admission abandoned before a worker started", subtype: worker.subtype });
+      say(`retro no-op — worker not started (${worker.notStarted}); nothing to PR`);
+      worktreeRemove(repoDir, worktreePath);
+      return 1;
+    }
     // W1-T3746: the cash worker cannot commit MASTER-PLAN.md. Run the shared bridge before the
     // harness regenerates its derived artifacts, so the existing no-op guard and publication path
     // observe the worker's substantive edit. A shell-capable retro has a non-zero commit count
@@ -39389,7 +39398,14 @@ export async function routeVerifyHumanBacklog(
     }
   }
   for (const shard of toJudge) {
-    const verdict = await judgeVerifyHumanShard(shard, { judge: deps.judge });
+    let verdict: VerifyHumanVerdict;
+    try {
+      verdict = await judgeVerifyHumanShard(shard, { judge: deps.judge });
+    } catch (error) {
+      // W1-T14916: a judge that never started writes no verdict row, so the shard stays due.
+      if (error instanceof WorkerNotStartedError) break;
+      throw error;
+    }
     // UNCONDITIONAL, and BEFORE either arm: a crash between the verdict and its effect leaves
     // the verdict readable rather than leaving a silent gap.
     deps.appendRow(verifyHumanVerdictRow(shard, verdict, deps.runId) as LedgerLine);
@@ -42091,6 +42107,8 @@ export async function dispatchAlertFixRun(
       subtype: worker.subtype,
       ...workerLedgerFields(worker),
     });
+    // W1-T14916: a fix that never started is not a dispatched alert: the lane writes no alert-lane.dispatched row.
+    if (worker.notStarted) throw new WorkerNotStartedError(worker.notStarted);
 
     const workerReport = parseReport(workerTranscript(worker));
     const owned = (workerReport?.prUrl ?? "") === "" && repairHarnessOwnsGit({ provider: worker.provider, tools: toolBound, harnessCommit: workerHarnessCommit(worker) });
@@ -42111,6 +42129,7 @@ export async function dispatchAlertFixRun(
       log("alert-fix.no_pr", { subtype: worker.subtype });
     }
   } catch (e) {
+    if (e instanceof WorkerNotStartedError) throw e;
     log("alert-fix.error", { error: String((e as Error)?.message ?? e) });
   } finally {
     rmSync(bodyFile, { force: true });
