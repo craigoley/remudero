@@ -314,10 +314,10 @@ test("W1-T15005 criterion 3: an untasked PR's held pass, written under PR-<n> wi
 /** One real sweep pass over `d`'s PR with the run-child host on, as `sweep.runChild.mode: auto` resolves it in production.
  *  The host's fix child runs the real {@link sweep.runFixDispatchChild} on the envelope the sweep built, in a process of its
  *  own: before it starts, the review that is live in the sweep's process is not live in the child's (`settle`). */
-async function hostedPass(t: TestContext, d: ReturnType<typeof dispatcher>, settle: (() => void) | undefined) {
+async function hostedPass(t: TestContext, d: ReturnType<typeof dispatcher>, settle: (() => void) | undefined, host = true) {
   const sweepRows: Row[] = [];
   const envelopes: FixDispatchEnvelope[] = [];
-  sweep.installDetachedWorkHost({
+  if (host) sweep.installDetachedWorkHost({
     hosts: new Set(["review", "fix-dispatch"]), mode: () => "on", spawnReview: async () => undefined,
     spawnFix: async (input) => {
       envelopes.push(input.envelope);
@@ -378,6 +378,21 @@ async function otherProcessOwner(t: TestContext) {
   t.after(kill);
   return { owner, kill };
 }
+
+test("W1-T15005 criterion 2: a round the sweep runs in its own process waits on another process's review, then dispatches", async (t) => {
+  // No run-child host: the detached round runs in the sweep's process on the decision the sweep made before starting it.
+  const { owner, kill } = await otherProcessOwner(t);
+  const operatorClaim = [claim("review-PR15005-op", HEAD, owner)];
+  const waiting = dispatcher(t, operatorClaim, {}, false);
+  const held = await hostedPass(t, waiting, undefined, false);
+  assert.deepEqual(deferrals(held.sweepRows).map((row) => row.review_run), ["review-PR15005-op"], "the sweep defers the round");
+  assert.equal(waiting.seen.claimKeys, 0);
+  await kill();
+  const free = dispatcher(t, operatorClaim, {}, false);
+  const freed = await hostedPass(t, free, undefined, false);
+  assert.equal(deferrals([...freed.sweepRows, ...free.rows]).length, 0, "THE CLAIM: a dead owner ends the wait");
+  assert.equal(free.seen.claimKeys, 1, "the in-process round takes its branch claim as today");
+});
 
 test("W1-T15005: a claim another process owns is live only on an active owner assessment", () => {
   // The owner rule takes only an "active" assessment; another host or an incomplete identity proves nothing.
