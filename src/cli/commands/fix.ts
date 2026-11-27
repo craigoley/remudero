@@ -5862,7 +5862,9 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           base: git(["show", `${expectationBase}:${path}`]), head: git(["show", `${expectedHeadShaForPush}:${path}`]) }))),
         JSON.stringify(evidence));
       } catch (error) {
-        unasked = [{ path: "(diff unreadable)", changed: [String(error)] }];
+        // The reason rides into the fix.commit_refused row below as its changed_assertions.
+        const unreadable = String(error);
+        unasked = [{ path: "(diff unreadable)", changed: [unreadable] }];
       }
       if (unasked.length > 0) {
         const reason = "the round changed a test expectation the answered finding does not name";
