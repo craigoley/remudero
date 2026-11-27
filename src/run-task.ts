@@ -1074,6 +1074,7 @@ import {
   approvePrTitle,
   approveProposal,
   classifyProposal,
+  releasedHumanTaskPredicate,
   SKILL_DRAFT_ID_PREFIX,
   draftsDueOnDaemon,
   indexInboxDraftReceipts,
@@ -38838,6 +38839,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
       openProposalIds,
       isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
       isDeclined: declinedWithReceipts(ledgerLinesForRatify, join(config.root, "state")),
+      isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLinesForRatify),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
@@ -38918,6 +38920,7 @@ function loadProposalForRatify(
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
     isDeclined: declinedWithReceipts(ledgerLines, join(inboxRoot, "state")),
+    isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLines),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -38960,6 +38963,7 @@ function loadProposalsForRatify(
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
     isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
+    isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLines),
   };
 
   const found: { id: string; proposal: Proposal; classification: InboxClassification }[] = [];
