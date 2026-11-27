@@ -74,8 +74,15 @@ test("fetchCiFailures and cancelledRequiredChecks carry the job id of a run-scop
   assert.match(failures[0]?.logTail ?? "", /failed job 12345/);
   assert.equal(failures[0]?.logUnavailable, undefined);
 
-  const cancelled = cancelledRequiredChecks([{ ...POSTED, conclusion: "CANCELLED" }], [POSTED.name]);
-  assert.deepEqual(cancelled, [{ name: POSTED.name, jobId: "12345" }]);
+  const headSha = "a".repeat(40);
+  const producer = { name: "light-gates", headSha, status: "COMPLETED", conclusion: "CANCELLED",
+    detailsUrl: "https://github.com/owner/repo/actions/runs/777/job/12345" };
+  const post = { ...POSTED, headSha, status: "COMPLETED", conclusion: "CANCELLED", checkRunId: 900,
+    outputSummary: "W1-T4399: reported by this job's rule-checks step(s) (outcome(s): cancelled)" };
+  assert.deepEqual(cancelledRequiredChecks([post], [POSTED.name], headSha), []);
+  assert.deepEqual(cancelledRequiredChecks([producer, post], [POSTED.name], headSha), [
+    { name: producer.name, jobId: "12345", runAttempt: 2, explainedFailures: [{ name: POSTED.name, checkRunId: 900 }] },
+  ]);
 });
 
 test("a stale ci-gate posted with a run-scoped external id is rerun by its job id", async () => {
