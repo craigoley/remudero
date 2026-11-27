@@ -11,7 +11,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { test, type TestContext } from "node:test";
 import { acquireInflightLock } from "#src/lib/inflight-lock.js";
-import type { TestSlotLease } from "#src/lib/test-slot.js";
+import { INITIAL_PID_NAMESPACE, type ReservedTreeProbeHost, type TestSlotLease } from "#src/lib/test-slot.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { installedTypescriptVersion, TYPECHECK_BUILDINFO_NAME } from "#src/lib/typecheck-buildinfo.js";
 import { runTypecheck, type TypecheckRunOptions } from "#src/lib/typecheck-run.js";
@@ -168,6 +168,60 @@ test("W1-T15169 criterion 2: a live holder is waited on, so the take-over is the
   assert.equal(code, 0);
   assert.equal(sleeps, 2, "it polled the live holder until it let go");
   assert.equal(spawnedWhileHeld, false);
+});
+
+/** A /proc as seen from `self` (a reader in namespace `selfNs`) where the recorded namespace's init is pid 77, or absent. */
+function fakeProc(selfNs: string, heldNs: string, initStart: number | undefined): ReservedTreeProbeHost {
+  const stat = (pid: string, start: number) => `${pid} (node) S ${["1", ...Array(17).fill("0"), String(start), "0"].join(" ")}`;
+  const files: Record<string, string> = {
+    "/proc/self/ns/pid": selfNs, "/proc/self/status": "NSpid:\t1234\n", "/proc/1/ns/pid": selfNs,
+    "/proc/1/status": "NSpid:\t1\n", "/proc/1/stat": stat("1", 1),
+    ...(initStart === undefined ? {} : { "/proc/77/ns/pid": heldNs, "/proc/77/status": "NSpid:\t77\t1\n", "/proc/77/stat": stat("77", initStart) }),
+  };
+  return {
+    platform: "linux", bootId: "boot-a", list: () => initStart === undefined ? ["1"] : ["1", "77"],
+    read: (path) => { const body = files[path]; if (body === undefined) throw Object.assign(new Error(`ENOENT ${path}`), { code: "ENOENT" }); return body; },
+  };
+}
+
+test("W1-T15169 criterion 2: a holder in another pid namespace is waited on unless that namespace is proven gone, never pid-probed", (t) => {
+  const HELD_NS = "pid:[4026532001]";
+  const SANDBOX_NS = "pid:[4026532002]";
+  // The holder's pid reads dead from here, as a sibling sandbox's pid does: only the namespace judgment may decide.
+  const deadPid = spawnSync(process.execPath, ["-e", ""]).pid!;
+  const cases = [
+    { why: "a sibling sandbox (the 2026-11-27 shape): its namespace is invisible from here", self: SANDBOX_NS, initStart: 400 as number | undefined, boot: "boot-a", waits: true },
+    { why: "seen from the initial namespace, its init is older than the holder: live", self: INITIAL_PID_NAMESPACE, initStart: 400, boot: "boot-a", waits: true },
+    { why: "seen from the initial namespace, no process is left in it: gone", self: INITIAL_PID_NAMESPACE, initStart: undefined, boot: "boot-a", waits: false },
+    { why: "its namespace id was reused by a newer init: gone", self: INITIAL_PID_NAMESPACE, initStart: 900, boot: "boot-a", waits: false },
+    { why: "it was recorded under an earlier kernel boot: gone", self: SANDBOX_NS, initStart: 400, boot: "boot-old", waits: false },
+  ];
+  for (const c of cases) {
+    const root = tree(t, "ns", true);
+    const held = acquireInflightLock(join(root, ".git"), TYPECHECK_BUILDINFO_NAME, { run_id: "fixture", info: { pid: deadPid },
+      extra: { pidNs: HELD_NS, bootId: c.boot, processStart: "proc:500" } });
+    let sleeps = 0;
+    let spawnedWhileHeld: boolean | undefined;
+    const code = runTypecheck(root, [], { ...admitted, log: () => {},
+      worktreeLock: { pidNamespace: () => c.self, bootId: () => "boot-a", namespaceProbe: fakeProc(c.self, HELD_NS, c.initStart),
+        sleep: () => { sleeps++; held.release(); } },
+      spawn: () => { spawnedWhileHeld = sleeps === 0; return { status: 0 }; } });
+    assert.equal(code, 0, c.why);
+    assert.equal(sleeps, c.waits ? 1 : 0, `${c.why}: ${c.waits ? "taken over" : "waited on"}`);
+    assert.equal(spawnedWhileHeld, !c.waits, c.why);
+  }
+});
+
+test("W1-T15169 criterion 2: a check records its pid namespace, boot id and kernel start in the lock it holds", (t) => {
+  const root = tree(t, "identity", true);
+  let record: Record<string, unknown> | undefined;
+  assert.equal(runTypecheck(root, [], { ...admitted, log: () => {},
+    worktreeLock: { pidNamespace: () => "pid:[4026532009]", bootId: () => "boot-z" },
+    spawn: () => { record = JSON.parse(readFileSync(`${buildInfoOf(root)}.lock`, "utf8")) as Record<string, unknown>; return { status: 0 }; } }), 0);
+  assert.equal(record?.pid, process.pid);
+  assert.equal(record?.pidNs, "pid:[4026532009]");
+  assert.equal(record?.bootId, "boot-z");
+  assert.match(String(record?.processStart), /^(proc|ps):/);
 });
 
 test("W1-T15169 criterion 3: runTypecheck on two different worktrees runs both at once", async (t) => {

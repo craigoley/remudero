@@ -34,7 +34,8 @@ import { appendProducerLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { discoverLiveLedgerRoot } from "./live-write-guard.js";
 import {
-  acquireTestSlot, admitStaticWork, readMemoryHeadroom, testSlotExecutionAllowed, type StaticAdmission, type TestSlotLease, type TestSlotOptions,
+  acquireTestSlot, admitStaticWork, probeRecordedPidNamespace, readBootId, readMemoryHeadroom, readPidNamespace, testSlotExecutionAllowed,
+  testSlotProcessFacts, type ReservedTreeProbeHost, type StaticAdmission, type TestSlotLease, type TestSlotOptions,
 } from "./test-slot.js";
 import {
   canonicalBuildInfo,
@@ -83,6 +84,11 @@ export interface WorktreeLockOptions {
   sleep?: (ms: number) => void;
   isPidAlive?: (pid: number) => boolean;
   getProcessStartTime?: (pid: number) => number | null;
+  /** This process's pid namespace and kernel boot id; default `/proc/self/ns/pid` and the boot id, undefined off Linux. */
+  pidNamespace?: () => string | undefined;
+  bootId?: () => string | undefined;
+  /** The /proc readers {@link probeRecordedPidNamespace} uses to judge a holder in another pid namespace. */
+  namespaceProbe?: ReservedTreeProbeHost;
 }
 
 /** How often a check waiting on its worktree's lock looks again. */
@@ -92,17 +98,45 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+const recorded = (value: unknown): string | undefined => typeof value === "string" && value !== "" ? value : undefined;
+
+/**
+ * Is the lock's holder gone? In this pid namespace (or off Linux, with no namespace on record) its pid and start time
+ * answer, as for every lock here. In ANOTHER one its pid names nothing here: OBSERVED 2026-11-27, each Codex sandbox
+ * command runs in its own pid namespace, so a pid probe would read the first check as dead and take its lock over. Then
+ * the holder is live unless its namespace is proven gone: an earlier kernel boot ended every process it held, and
+ * otherwise W1-T12504's namespace probe (reuse or complete absence of the namespace) must say ended.
+ */
+function worktreeHolderStale(held: InflightLockInfo, byPid: () => boolean, opts: WorktreeLockOptions): boolean {
+  const fields = held as InflightLockInfo & Record<string, unknown>;
+  const pidNs = recorded(fields.pidNs);
+  const mine = (opts.pidNamespace ?? readPidNamespace)();
+  if (pidNs === undefined || mine === undefined || pidNs === mine) return byPid();
+  const bootId = recorded(fields.bootId);
+  const myBoot = (opts.bootId ?? readBootId)();
+  if (bootId !== undefined && myBoot !== undefined && bootId !== myBoot) return true;
+  const evidence = probeRecordedPidNamespace({
+    pid: held.pid, host: held.host, startedAt: held.startedAt, heartbeatAt: held.startedAt, label: NPM_TYPECHECK_SLOT_LABEL,
+    pidNs, bootId, processStart: recorded(fields.processStart),
+  }, { bootId: myBoot, ...opts.namespaceProbe });
+  return evidence.state === "ended";
+}
+
 /**
  * Hold the lock beside `buildInfo` (`<buildInfo>.lock`), waiting while a live check of the same tree holds it. A stale
  * holder is reclaimed by {@link acquireInflightLock}. A wait ends in one typecheck.waited_for_worktree line.
  */
 function holdWorktreeTypecheck(buildInfo: string, opts: WorktreeLockOptions = {}, log: (line: string) => void): InflightLockHandle {
   const started = systemClock.now();
+  // Recorded so a check in another pid namespace can judge this one without probing a pid it cannot see.
+  const identity = { pidNs: (opts.pidNamespace ?? readPidNamespace)(), bootId: (opts.bootId ?? readBootId)(),
+    processStart: testSlotProcessFacts(process.pid)?.start };
   let holder: InflightLockInfo | undefined;
   for (;;) {
     try {
       const handle = acquireInflightLock(dirname(buildInfo), basename(buildInfo), {
         run_id: NPM_TYPECHECK_SLOT_LABEL, isPidAlive: opts.isPidAlive, getProcessStartTime: opts.getProcessStartTime,
+        extra: identity, isStale: (held, byPid) => worktreeHolderStale(held, byPid, opts),
       });
       if (holder !== undefined) log(JSON.stringify({ step: "typecheck.waited_for_worktree", holderPid: holder.pid, waitedMs: systemClock.now() - started }));
       return handle;
