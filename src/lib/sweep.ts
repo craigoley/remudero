@@ -4841,7 +4841,10 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
         return await runPlanScopedFixRound({ pr: { ...pr, headRefName: live.head.ref, ciFailures }, task, worktreePath,
           title: live.title, body: live.body, runId, admission: config.contributorAdmission,
           conflict: pr.mergeState === "dirty",
-          lastRefusal: parseLedger(ledgerPath).findLast((l) => l.step === "sweep.plan_round.refused" &&
+          lastRefusal: parseLedger(await fs.promises.readFile(ledgerPath, "utf8").catch((error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return "";
+            throw error;
+          })).findLast((l) => l.step === "sweep.plan_round.refused" &&
             l.pr_number === pr.prNumber && l.head_sha === pr.headSha)?.reason,
           deps: roundEffects,
         });
@@ -20467,7 +20470,11 @@ function readFixRungEnd(lines: Array<Record<string, unknown>>, taskId: string | 
 
 /** W1-T10339 — WHAT A STAND-DOWN READ. Each `fix.stood_down` and `fix.needs_design` row names the head, the task-contract
  *  revision and (for a PR with no task trailer, whose BODY is the authoritative Acceptance) the body digest it worked on. */
-export interface FixRungInputs { headSha: string; contractRevision?: string; bodySha256?: string }
+export interface FixRungInputs {
+  headSha: string; contractRevision?: string; bodySha256?: string;
+  /** W1-T14871: the rollup state and red checks an empty-CI-evidence stand-down read; a hold releases once either moves. */
+  checksState?: string; redChecks?: readonly string[];
+}
 
 /** The non-conflict rung defers a dirty PR to the existing conflict repair route. */
 export const CONFLICT_REPAIR_HANDOFF_REASON = "merge state is dirty (mergeable === false or mergeable_state === \"dirty\") — a conflicted PR registers no new check runs, so a strike buys no information; standing down for the sweep's own conflicted disposition rather than retrying blindly";
@@ -20483,7 +20490,13 @@ export function fixRungInputFields(inputs: Partial<FixRungInputs>): Record<strin
     ...(inputs.headSha === undefined ? {} : { read_head_sha: inputs.headSha }),
     ...(inputs.contractRevision === undefined ? {} : { read_contract_revision: inputs.contractRevision }),
     ...(inputs.bodySha256 === undefined ? {} : { read_body_sha256: inputs.bodySha256 }),
+    ...(inputs.checksState === undefined ? {} : { read_checks_state: inputs.checksState }),
   };
+}
+
+/** W1-T14871: the red checks a stand-down read, as the sorted list its row records. */
+export function fixRungRedCheckFields(redChecks: readonly string[] | undefined): { read_red_checks?: string[] } {
+  return redChecks === undefined ? {} : { read_red_checks: [...new Set(redChecks)].sort() };
 }
 
 /** W1-T10339 — have the inputs a recorded row read moved? A row written before these fields existed has not recorded
@@ -20496,8 +20509,17 @@ export function fixRungInputsUnchanged(row: Record<string, unknown>, current: Fi
         row.reason.includes(", cause) is ALREADY OPEN and ")) return false;
   if (typeof row.read_contract_revision === "string" && current.contractRevision !== undefined &&
       row.read_contract_revision !== current.contractRevision) return false;
-  return !(typeof row.read_body_sha256 === "string" && current.bodySha256 !== undefined &&
-    row.read_body_sha256 !== current.bodySha256);
+  if (typeof row.read_body_sha256 === "string" && current.bodySha256 !== undefined &&
+    row.read_body_sha256 !== current.bodySha256) return false;
+  // W1-T14871: a stand-down taken while CI was still pending is released once it settles, and one that recorded its
+  // red checks is released when the red checks differ. A row without these fields keeps today's hold.
+  if (row.read_checks_state === "pending" && current.checksState !== undefined && current.checksState !== "pending") return false;
+  if (Array.isArray(row.read_red_checks) && current.redChecks !== undefined) {
+    const recorded = [...new Set(row.read_red_checks.map(String))].sort();
+    const now = [...new Set(current.redChecks)].sort();
+    if (recorded.length !== now.length || recorded.some((name, i) => name !== now[i])) return false;
+  }
+  return true;
 }
 
 /** W1-T10653 — WHEN DID THIS HEAD'S RUNG FIRST STAND DOWN ON AN ALREADY-OPEN ESCALATION, and has nothing dispatched since?
@@ -27233,7 +27255,7 @@ export async function runSweep(
       }
       catch (error) { readable = false; deps.log?.("sweep.stand_down_hold.unreadable", { pr_number: pr.prNumber, head_sha: pr.headSha, reason: String(error) }); }
       const held = readable ? fixSeedRead(ledgerLines, pr, deps.runId,
-        { headSha: pr.headSha, contractRevision, bodySha256: standDownBodySha }) : undefined;
+        { headSha: pr.headSha, contractRevision, bodySha256: standDownBodySha, checksState: pr.checksState, redChecks: pr.redRequiredChecks ?? [] }) : undefined;
       const conflictHold = held?.hold?.site === "rung.strike" && held.hold.reason === CONFLICT_REPAIR_HANDOFF_REASON;
       const conflictHandoff = disposition === "conflicted" && hasCapturedMergeConflictEvidence(pr.mergeConflict) && conflictHold;
       const heldUnderMain = conflictHold && held?.hold?.at !== undefined ? ledgerLines.find(row => row.step === "sweep.disposed" &&

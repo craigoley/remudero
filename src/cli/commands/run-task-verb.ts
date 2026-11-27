@@ -8713,13 +8713,15 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     }
     const shadowArmDecision = resolveShadowInstanceArmPermission(shadowInstance);
     const wipeTestArmDecision = resolveWipeTestArmPermission(!!opts.noMerge);
+    // W1-T14902: the attempt's refusal reason (a task's dispatch_hold) rides onto the row below.
+    let armError: string | undefined;
     const armOutcome = await observeSelectedRegistry(selectedRegistryObserverInContext(), "run-task-resume", { repository: `${owner}/${task.repo}` },
       () => observeSelectedMode<ArmOutcome | "no-merge-boundary-refused" | "shadow-instance-refused">(
       selectedModeQualification, "run-arm", async () => !shadowArmDecision.armed
       ? "shadow-instance-refused"
       : wipeTestArmDecision.armed
         ? await armAutoMergeAtOpenAsync(prUrl,
-          realArmDepsAsync(() => config, selectedModeQualification), irreversible)
+          realArmDepsAsync(() => config, selectedModeQualification), irreversible, false, (attempt) => { armError = attempt.error; })
         : "no-merge-boundary-refused", prUrl));
     // W1-T2258: `review.headSha` — the SAME head captured in `riskJudgeInput` above — is already
     // in scope here and simply was not put on the row; this is the SINGLE LARGEST dropped
@@ -8727,6 +8729,7 @@ export async function runTaskBody(ctx: RunTaskContext, host: RunTaskCommandHost)
     log("automerge.armed", {
       at: "verdict",
       outcome: armOutcome,
+      ...(armError !== undefined ? { error: armError } : {}),
       irreversible,
       head_sha: review.headSha,
       ...(wipeTestArmDecision.reason ? { reason: wipeTestArmDecision.reason } : {}),

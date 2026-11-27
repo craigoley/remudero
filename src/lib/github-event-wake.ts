@@ -341,6 +341,17 @@ export function sweepWakeMarkerPath(root: string): string {
   return join(root, "state", "SWEEP_WAKE_REQUESTED");
 }
 
+/** W1-T14893: `SWEEP_WAKE_LAST_CLOSED`, beside the wake marker, holds the newest accepted pull_request closed
+ *  delivery. Later deliveries coalesce over the wake marker but never overwrite this record. */
+export function lastClosedWakePath(markerPath: string): string {
+  return join(dirname(markerPath), "SWEEP_WAKE_LAST_CLOSED");
+}
+
+/** W1-T14893: a delivery that can change what is merged: a pull request that closed. */
+export function isPullRequestClosedWake(record: Pick<SweepWakeMarker, "event" | "action">): boolean {
+  return record.event === "pull_request" && record.action === "closed";
+}
+
 /** INVARIANT: writes `record` atomically — a same-directory temp file, then `renameSync` over the
  *  real path — so a reader never observes a torn write, and a delivery coalesces rather than queuing.
  *  Why: docs/forensics/github-event-wake.md#writesweepwakemarkeratomic (design iv). */
@@ -751,6 +762,7 @@ export function createGitHubEventWakeHandler(opts: GithubEventWakeOptions): Rout
           JSON.stringify({ deliveryId, repository: owningRepository, receivedAtIso: record.receivedAtIso } satisfies WorkflowRunCompletedRecord));
       }
       await writeMarker(markerPath, record);
+      if (isPullRequestClosedWake(record)) await writeMarker(lastClosedWakePath(markerPath), record);
       await opts.dedup.record(deliveryId);
       notifyCheckRunCompleted(event, action, body);
       if (opts.counters && !armed) {

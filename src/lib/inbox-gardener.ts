@@ -19,12 +19,17 @@ import { inboxSemanticDigest, inboxProposalRevision, mechanicalAskPurpose, retir
   writeInboxGardenerStore, withInboxGardenerLock, readInboxGardenerFile, type InboxGardenerScope, type InboxGardenerStore, type InboxLifecycleEvent,
   inboxOperatorIntent, inboxMechanicalTaskDigest, inboxGardenerSource, inboxGardenerTaskFact, inboxGardenerMode, type InboxGardenerMode, sameInboxGardenerScope, type InboxGardenerTaskFact, type InboxTerminalProof, type RetirementProposal } from "./inbox-retirement.js";
 
-/** PRIMARY CONTROL: each pass admits bounded candidate, proof, judge and transition work. */
+/** PRIMARY CONTROL: each pass bounds only its ledger catch-up time and read chunk size.
+ *  W1-T14978: a pass has no per-pass count bound. On 2026-11-26 the host's passes evaluated 8 of about 2,400 proposals,
+ *  retired 0 and judged 0 (complete=false), so a full sweep took weeks. Each candidate's digest still decides whether it is
+ *  re-judged, and `stopped` still cancels a pass at the next candidate. A test may pass `limits` to split a sweep. */
 /** W1-T13348: ledgerCatchUpMs replaced a 25 ms tick budget. The projector gunzips a whole archive per tick and checks its
  *  deadline only after a commit, so 25 ms advanced ONE 64 KiB chunk a pass, and the host's 240 archives (~10 GB) could never
  *  be read. The pass runs in its own spawned process, and a caught-up store returns as soon as the live tail is read.
  *  W1-T13477: 20 s read 5-18 of 232 host archives a pass at one pass per ~3 h; 300 s covers the corpus in 1-3 passes. */
-export const INBOX_GARDENER_LIMITS = { candidates: 8, proofReads: 4, judges: 1, retirements: 1, ledgerCatchUpMs: 300_000, ledgerChunkBytes: 64 * 1024 } as const;
+export const INBOX_GARDENER_LIMITS = { ledgerCatchUpMs: 300_000, ledgerChunkBytes: 64 * 1024 } as const;
+/** The per-pass counts a caller may pass to split a sweep. None is set by default. */
+export type InboxGardenerPassLimits = Partial<Record<"candidates" | "proofReads" | "judges" | "retirements", number>>;
 export { inboxGardenerMode } from "./inbox-retirement.js";
 export interface InboxGardenerCandidate {
   proposal: RetirementProposal;
@@ -77,12 +82,12 @@ export function inboxGardenerGaps(p: InboxGardenerPack, scope: InboxGardenerScop
 const qualified = (p: InboxGardenerPack, scope: InboxGardenerScope, now: number) => inboxGardenerGaps(p, scope, now).length === 0;
 
 export async function runInboxGardener(options: { stateDir: string; scope: InboxGardenerScope; ports: InboxGardenerPorts;
-  mode?: InboxGardenerMode; clock?: Clock; stopped?: () => boolean; limits?: Partial<Record<keyof typeof INBOX_GARDENER_LIMITS, number>> }) {
+  mode?: InboxGardenerMode; clock?: Clock; stopped?: () => boolean; limits?: InboxGardenerPassLimits }) {
   const mode = options.mode ?? inboxGardenerMode(), clock = options.clock ?? systemClock;
   if (mode === "off") return { state: "disabled", complete: false, evaluated: 0, retired: 0, judged: 0 };
   if (options.stopped?.()) return { state: "cancelled", complete: false, evaluated: 0, retired: 0, judged: 0 };
-  const limits = { ...INBOX_GARDENER_LIMITS, ...options.limits };
-  for (const [key, value] of Object.entries(limits)) if (!Number.isSafeInteger(value) || value < 1 || value > INBOX_GARDENER_LIMITS[key as keyof typeof limits]) throw new Error("invalid Inbox gardener bound");
+  for (const value of Object.values(options.limits ?? {})) if (value !== undefined && (!Number.isSafeInteger(value) || value < 1)) throw new Error("invalid Inbox gardener bound");
+  const limits = { candidates: Infinity, proofReads: Infinity, judges: Infinity, retirements: Infinity, ...options.limits };
   return withInboxGardenerLock(options.stateDir, async () => {
     const read = readInboxGardenerStore(options.stateDir, options.scope);
     if (read.state === "unavailable") return { state: "source_unavailable", complete: false, reason: read.reason };

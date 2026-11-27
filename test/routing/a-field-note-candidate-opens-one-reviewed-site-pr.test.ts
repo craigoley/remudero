@@ -173,7 +173,7 @@ async function dailyPass(root: string, nowIso: string, days: number[], siteImpor
   mkdirSync(outDir, { recursive: true });
   const consent = join(root, "consent.json");
   writeFileSync(consent, JSON.stringify({ version: "field-trials-consent-v1",
-    repos: [{ repo: "craigoley/remudero", rights: "aggregate-opt-in", receipt: "owner-2026-10-27-test" }] }));
+    repos: [{ repo: "craigoley/remudero", rights: "aggregate-opt-in", receipt: "owner-2026-08-27-test" }] }));
   const lines: string[] = [];
   const code = await fieldTrialsCommand(["--source", "core=craigoley/remudero", "--ledger", `core=${stateDir}`, "--out-dir", outDir,
     "--consent", consent, "--refresh-step", "routing-review=0", "--refresh-step", "case-files=0", "--refresh-script-blob", BLOB],
@@ -265,7 +265,9 @@ test("W1-T10832: a field-note candidate keeps exactly one site import PR open", 
     assert.equal(first.refreshRows, 1, "the pass still records its refresh row");
     assert.deepEqual(first.refreshRow.siteImport, {
       state: "staged", releaseId: first.row.releaseId, pr: "opened", prUrl: first.row.prUrl,
-      prNumber: first.row.prNumber, files: first.row.files }, "the refresh row records the opened PR");
+      prNumber: first.row.prNumber, files: first.row.files,
+      // W1-T14985: this fixture site has no verified-outcome script, and the row says so.
+      verifiedOutcome: { state: "not-written", reason: "site-derive-script-unreadable: ENOENT" } }, "the refresh row records the opened PR");
     assert.equal(github.state.prs.length, 1);
     const [pr] = github.state.prs;
     assert.deepEqual([pr!.head, pr!.base, pr!.draft, pr!.open], [SITE_IMPORT_BRANCH, "main", false, true], "one READY PR from the import branch");
@@ -484,7 +486,8 @@ test("W1-T10832: a refused or unchanged stage opens no PR", async (t) => {
     const unchangedSite = stageFixture(t, root, "unchanged");
     const unchanged = await dailyPass(root, DAY(5, 7), [1, 2, 3, 4], { fetch: github.fetch, siteUrl: unchangedSite.url });
     assert.equal(unchanged.row.state, "unchanged", JSON.stringify(unchanged.row));
-    assert.deepEqual(unchanged.refreshRow.siteImport, { state: "unchanged", releaseId: unchanged.row.releaseId },
+    assert.deepEqual(unchanged.refreshRow.siteImport, { state: "unchanged", releaseId: unchanged.row.releaseId,
+      verifiedOutcome: { state: "not-written", reason: "site-derive-script-unreadable: ENOENT" } },
       "the field-trials.refresh row records unchanged without a PR");
     assert.deepEqual(github.calls, [], "unchanged is never treated as staged: no branch, no PR");
   } finally {

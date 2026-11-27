@@ -2288,7 +2288,7 @@ test("W1-T229 acceptance criterion 2: the plan-only-PR-emitting flows (retro/tri
   // between them contains no arm-decision gate of its own. A future change that puts
   // `decideAutoMergeArm`/`resolveAutoMergeArm` into that wrapper — the exact regression the
   // original count existed to catch, and one the count would have MISSED — trips this.
-  const laneArmSites = (runTaskSrc.match(/\barmAndLogOutcome\(/g) ?? []).length;
+  const laneArmSites = (runTaskSrc.match(/\barmAndLogOutcome(?:Async)?\(/g) ?? []).length;
   assert.ok(
     laneArmSites >= 6,
     "expected the plan-only-PR-emitting lanes (retro/triage/plan/approve/dep-review) to arm via armAndLogOutcome, plus its definition",

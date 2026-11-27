@@ -1691,11 +1691,13 @@ export function ciFrictionShardYaml(draft: CiFrictionDraft, taskId: string, pric
       statement: "a finding a healthy census run reports is still refused by the existing predicate; only the diagnosed runner failure is prevented.",
       claim: "a branch finding from a healthy census run is still refused publication by the existing predicate",
       proof: `unit test: ${taskId}: a healthy census finding is still refused publication`,
+      guard: true, // W1-T14924: the existing predicate's refusal holds today
     } : {
       slug: "unhealed-failures-still-get-a-fix-round",
       statement: "a failure the remedy neither prevents nor heals still dispatches its fix round as before; the remedy never hides a red by skipping the round.",
       claim: "a red round the remedy does not prevent or heal still dispatches its fix round",
       proof: `unit test: ${taskId}: a failure the remedy does not heal still gets its fix round`,
+      guard: true, // W1-T14924: an unhealed failure dispatches its fix round today
     }] },
     note: `Filed by the ci-friction gardener (W1-T4435) at rung ${rung}. MACHINE-AUTHORED — the machine-filing judge releases it or escalates it to a person. After its build merges, the gardener measures ${key}'s share of all fix rounds in equal windows before and after; a share that does not fall reopens the cause at rung ${rung + 1}.` +
       (census ? " The regression must execute the diagnosed failure through the real owner path and retain a control that a healthy branch finding is still refused; class-wide cost observations and after-window measurement remain unchanged."

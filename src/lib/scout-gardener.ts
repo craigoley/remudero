@@ -12,7 +12,7 @@ import { readMainHistory } from "./hot-file-gardener.js";
 import { ghTextAsync } from "./github-transport.js";
 import { readLedgerUnionRecordsSync } from "./ledger-union.js";
 import {
-  machineShardDesign, machineShardFilingRefusal, machineShardInvariantClaims, machineShardLandingGuard,
+  machineShardCriterionLines, machineShardDesign, machineShardFilingRefusal, machineShardInvariantClaims, machineShardLandingGuard,
   machineShardLintRefusal, renderMachineShard, withoutRulingBlock, type MachineShardInvariant, type MachineShardPaths,
 } from "./machine-filing.js";
 import { INVARIANT_DECL_RE, NO_INVARIANTS_RE } from "./task-linter.js";
@@ -201,6 +201,7 @@ const symptomInvariant = (step: string, taskId: string, testPath: string): Machi
   statement: `${step} is still written to the ledger whenever its failure really occurs; the fix ends the cause, not the record of it.`,
   claim: `${step} is still written to the ledger when its failure occurs`,
   proof: `grep: test("${taskId}: the symptom is still recorded when its failure occurs" in ${testPath}`,
+  guard: true, // W1-T14924: preserves the ledger row the step writes today
 });
 
 /** The queued, unretired, never-attempted machine draft whose one declared file is its own scout test. */
@@ -266,7 +267,7 @@ function scoutDraftRewrite(original: string, draft: DraftSpec, paths: MachineSha
     ...(declared ? [] : machineShardInvariantClaims(invariants)),
   ];
   if (draft.investigation || !declared) {
-    lines = setField(lines, "acceptance", ["  acceptance:", ...acceptance.flatMap((c) => [`    - claim: ${q(c.claim)}`, `      proof: ${q(c.proof)}`])]);
+    lines = setField(lines, "acceptance", ["  acceptance:", ...acceptance.flatMap(machineShardCriterionLines)]);
   }
   const found = draft.files.slice(0, -1);
   const prose = (only.rationale ?? "").split("\n").filter((l, i, all) => l !== "" || i < all.length - 1);
