@@ -233,6 +233,13 @@ fs.watch"): a redelivery/replay burst is refused as a duplicate only while its d
 is still in this window, so the bound is a real, reviewed tuning knob, not a source
 literal. OPTIONAL, absent-means-default like {@link PolicyValues.sweepWallClockBoundMs}.
 
+W1-T14809: `githubEventWake.headRecheckMs` (default 600000) is the freshness floor of the read
+plane's kept head rollups (`open-prs-rest.ts`'s `createHeadReadGate`). A PR head whose sha did not
+move and that no verified delivery named since its kept read is answered from that read until it is
+this old; a dropped delivery is therefore corrected within one interval. It is a floor, never a cap:
+a moved sha or a delivery naming the head re-reads at once. OPTIONAL, absent-means-default
+(`DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS`).
+
 W1-T14810: `githubEventWake.artifactRecheckMs` is the fold-debt and mutation-verdict artifact
 listings' freshness floor. A sweep lists those artifacts when a verified
 `workflow_run:completed` delivery for the repository arrived since its last listing, and

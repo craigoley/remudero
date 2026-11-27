@@ -125,6 +125,110 @@ export function reconcilePlan(
   return { summary: { rewritten: writes.map((w) => w.taskId), skipped, ...(sharedShards.length > 0 ? { sharedShards } : {}) }, writes };
 }
 
+/** W1-T15048: a record's span in a file holding several: from its `- ` line to the next one, with the record's id. */
+function recordSpans(text: string): Array<{ start: number; end: number; id: string | undefined }> {
+  const starts = [...text.matchAll(/^- /gm)].map((m) => m.index!);
+  return starts.map((start, i) => {
+    const end = starts[i + 1] ?? text.length;
+    const id = text.slice(start, end).match(/^(?:- | {2})id:[ \t]*["']?([^"'\s#]+)["']?[ \t]*(?:#.*)?$/m)?.[1];
+    return { start, end, id };
+  });
+}
+
+/**
+ * W1-T15048: {@link reconcileShardStatus} for one record of a file that may hold several. A single-record file is
+ * edited exactly as before. In a shared file only the span of the record whose id is `taskId` is read and edited, by
+ * the same one-way rule, and every other byte of the file stays the same. A shared file with no span for the id
+ * leaves the text as it is ("no-status-field"), so an edit can never land on another record.
+ */
+export function reconcileRecordStatus(
+  text: string,
+  taskId: string,
+  isCreditedMerged: (taskId: string) => boolean | undefined,
+): ReconcileOutcome {
+  if (!holdsSeveralRecords(text)) return reconcileShardStatus(text, taskId, isCreditedMerged);
+  const spans = recordSpans(text).filter((span) => span.id === taskId);
+  if (spans.length !== 1) return { skipped: "no-status-field" };
+  const { start, end } = spans[0];
+  // The span opens `- `; read it as a lone record's body so a record that opens with `status:` is read like the rest.
+  const body = `  ${text.slice(start + 2, end)}`;
+  const out = reconcileShardStatus(body, taskId, isCreditedMerged);
+  if (out.text === undefined) return out;
+  // Keep the edit a pure status flip. Besides preserving the status-only lint carve, this makes the
+  // same record eligible for reconciliation exactly once: on the next pass it reads `merged`.
+  return { text: text.slice(0, start) + "- " + out.text.slice(2) + text.slice(end) };
+}
+
+/** W1-T15048: every record of one file flipped onto that file's text, in record order. Undefined when none flips. */
+export function composeRecordStatuses(
+  text: string,
+  taskIds: readonly string[],
+  isCreditedMerged: (taskId: string) => boolean | undefined,
+): { readonly text: string; readonly flipped: readonly string[] } | undefined {
+  let composed = text;
+  const flipped: string[] = [];
+  for (const taskId of taskIds) {
+    const out = reconcileRecordStatus(composed, taskId, isCreditedMerged);
+    if (out.text === undefined) continue;
+    composed = out.text;
+    flipped.push(taskId);
+  }
+  return flipped.length > 0 ? { text: composed, flipped } : undefined;
+}
+
+/** One composed write: the file's replacement text, keyed by its first flipped record, naming every record it flips. */
+export interface ComposedReconcileWrite {
+  readonly taskId: string;
+  readonly taskIds: readonly string[];
+  readonly text: string;
+}
+
+/**
+ * W1-T15048: {@link reconcilePlan} with each file's records composed into ONE write. A shard that carries its `path`
+ * is grouped with every other record of that file, and all their flips are applied to the one text, so no flip of a
+ * shared file overwrites another. A shard without a path is its own file, and a shared text without one is still left
+ * as it is (`sharedShards`), since its records cannot be grouped.
+ */
+export function reconcilePlanByFile(
+  shards: ReadonlyArray<{ readonly taskId: string; readonly text: string; readonly path?: string }>,
+  isCreditedMerged: (taskId: string) => boolean | undefined,
+): { readonly summary: ReconcileSummary; readonly writes: ReadonlyArray<ComposedReconcileWrite> } {
+  const skipped: Record<ReconcileSkip, number> = {
+    "not-credited-merged": 0,
+    "status-not-queued": 0,
+    retired: 0,
+    "no-status-field": 0,
+    "credit-unreadable": 0,
+  };
+  const files = new Map<string, Array<{ readonly taskId: string; readonly text: string }>>();
+  const sharedShards: string[] = [];
+  for (const shard of shards) {
+    if (shard.path === undefined && holdsSeveralRecords(shard.text)) {
+      sharedShards.push(shard.taskId);
+      continue;
+    }
+    const key = shard.path === undefined ? `\0${shard.taskId}` : `\u0001${shard.path}`;
+    files.set(key, [...(files.get(key) ?? []), shard]);
+  }
+  const writes: ComposedReconcileWrite[] = [];
+  for (const records of files.values()) {
+    let text = records[0].text;
+    const flipped: string[] = [];
+    for (const record of records) {
+      const out = reconcileRecordStatus(text, record.taskId, isCreditedMerged);
+      if (out.text !== undefined) {
+        text = out.text;
+        flipped.push(record.taskId);
+      } else if (out.skipped) skipped[out.skipped] += 1;
+    }
+    if (flipped.length > 0) writes.push({ taskId: flipped[0], taskIds: flipped, text });
+  }
+  return {
+    summary: { rewritten: writes.flatMap((w) => w.taskIds), skipped, ...(sharedShards.length > 0 ? { sharedShards } : {}) },
+    writes,
+  };
+}
+
 /** W1-T14302: the projection facts a re-queue reads. A structural shape, so this module stays pure. */
 export interface LostCreditProjection {
   readonly merged: boolean;

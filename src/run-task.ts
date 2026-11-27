@@ -876,7 +876,7 @@ import {
 // renderTraceChain/traceForward/traceReverse: only traceCommand read them, and it moved to
 // src/lib/report-commands.ts (W1-T2888); ghTraceGateway has a second caller here and stays.
 import { ghTraceGateway } from "./lib/trace.js";
-import { checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
+import { CONVENTIONAL_LIMITS, checkCommitMessage, defaultPreflightSpawn, fitConventionalTitle, runPreflight, shapeCommitMessage, wrapBodyLines, type PreflightDeps, type PreflightSpawn } from "./lib/commit-message.js";
 import { planFilingFixRoundRefusal, readPlanFilingFixRoundInput } from "./lib/plan-filing-fix-guard.js";
 import { resolveProjectPreflight, runProjectPreflight } from "./lib/ci-project-preflight.js";
 import { observeSynchronousPreflightPhase, reportPreflightPhase } from "./lib/preflight-phase-progress.js";
@@ -1074,6 +1074,7 @@ import {
   approvePrTitle,
   approveProposal,
   classifyProposal,
+  releasedHumanTaskPredicate,
   SKILL_DRAFT_ID_PREFIX,
   draftsDueOnDaemon,
   indexInboxDraftReceipts,
@@ -1927,7 +1928,7 @@ import {
 } from "./lib/github-posture.js";
 import { validateWorkerSettingsFile } from "./lib/settings.js";
 import { readCatalogStatusContext, type CatalogStatusContext, buildBatchedGithub, defaultCreditStorePath, loadCreditStore, saveCreditStore, buildCommitTrailerIndex, COMMIT_TRAILER_LOG_MAX_BYTES, classifyGhFailure, createDispatchBreakerCache, deriveStatus, dispatchesWithoutNewOwnedPr, evaluateDispatchBreakerCorroboratedDetailed, type LedgerSnapshot, type LedgerIndex, readLedgerSnapshot, type DispatchBreakerDetail, ghGateway, ghRequiredStatusCheckContexts, isGhRateLimitError, effectiveLifetimeDispatches, hasRepeatedTaskAttributableLifetimeDispatches, streakRefusal, taskAttributableLifetimeDispatches, type LifetimeDispatchTally, projectPlan, projectTask, readLedgerLines, type DeriveDeps, type GitHub, type GhFailureReason, preferImplementingPr, type PrRef, type BatchedPr, type OpenSiblingBuild, type StatusProjection, planBranchReap, type BranchFacts, type BranchReapPlan, BRANCH_REAP_REASON_LABEL, readLedgerUnionBounded, taskIdFromRunBranch, taskIdFromSlugBranch, readMergeCreditedTaskIds, readMergeCreditedTaskIdsAsync, isMergeCreditLine, readRequiredStatusCheckContexts, readRequiredStatusCheckContextsAsync, persistVerifiedCredit, type ThrownRunVerdictStage, type RefusedRunVerdictStage } from "./lib/status.js";
-import { readyDraftPullRequest, readTaskContractAtHeadViaGit, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
+import { readyDraftPullRequest, readTaskContractAtHeadViaGit, withCodeqlAlertEvidence, CODE_SCANNING_FALSE_POSITIVE_STEP, DEFAULT_SWEEP_POLICY, decideRedBaseRefresh, isCiHarnessPath, prAddedLinesFromPullFiles, failingSourceFilesFromCiFailures, failingTestFilesFromCiFailures, projectMergedTaskCandidates, actionableGateFailuresFromReasons, armOutcomeArmed, dispatchFixSpent, checkCostGovernor, checkMemoryGovernor, installedSlackReclaim, reclaimBeforeHold, type SlackReclaim, checkQueueGovernor, productionFixPressure, deriveQueueGovernorTrailingFlow, isFleetOwnedRunBranch, splitOpenPrOwnership, checksStateFromRollup, checksPendingSinceFromRollup, CI_GATE_CHECK_NAME, supersededRedsNowPassing, dedupeRollupByLatestAttempt, deriveDayCostUsd, deriveDayUnpricedRows, deriveDisposition, diffCoverageReport, fixCeilingInForce, fixDispatchBudget, fixRoundTally, buildFixProgressInput, flakeClaimsForHead, isBlockedCi, listRetirableEscalationIssues, listRetirableEscalationIssuesAsync, createEscalationTriageHistoryReader, ESCALATION_TRIAGE_EVIDENCE_SLICE, indexEscalationTriageHistory, type EscalationTriageHistoryReader, type EscalationTriageSlice, logCostGovernorDeferral, logMemoryObservation, logQueueGovernorDeferral, renderClarificationQuestion, renderSweepSummary, type SweepSummary, REQUIRED_CHECK_FAIL, REQUIRED_CHECK_OK, runCreditBackfill, closedPrFromRef, closedPrLookup, runPrTerminalReconcile, type PrTerminalReconcileSummary, runEscalationReconcile, runStaleEscalationRejudge, buildStaleEscalationRejudgePrompt, type StaleEscalationRejudgeCandidate, runPostFixReverification, runSweep, runSweepLightPass, runLightPassReadyRefresh, runLightPassRefreshAdmission, lightPassHeadContractRefresh, runArmedRatchetRejudge, withFullSweepRepairAdmission, redQualityGateNames, stillRedRequiredNames, terminalStateReason, toQuestionEntry, usableInstrumentEntanglementPaths, type ActionableGateFailure, type ArmedStalledPr, type CiFailure, type ClarificationQuestion, type CostGovernorResult, type EscalationReconcileSummary, type FixClass, type FixDispatchEvidence, type FixOwnerResidue, type FixDispatchSnapshot, type FixSuperseded, type LiveStateResult, type MemoryGovernorResult, type MergeConflictEvidence, type OpenPrView, type PlanScopedFixRoundInput, type ReviewDispatchMode, type ReviewReuseInputs, type RollupCheckEntry, type PostFixReverificationSummary, type ProofDiscriminationEvidence, type QueueGovernorResult, type RedBaseRefreshFacts, type PostReviewStallVerdict, type RepairFilingCapture, type Disposition, type SweepDeps, type SweepPolicy, type UpdateBranchOutcome, type UncreditableHeadReason, ABSENT_REPUSH_CAP, DEFAULT_FIX_CLASSES, buildSweepEffects as buildSweepEffectsFromLib, checkJobId, RATIFIED_BASELINE_RATCHET_REPAIRS, currentPlanIneligibilityReason, defaultSweepGhRun, dispatchFixCatchOutcome, discriminateReviewReuse, discriminateReviewReuseAsync, escalationTaskIdFor, fixDispatchErrorClass, fixDispatchSignalDeath, fixHeadAcceptable, fixRungTaskFor, foreignHeadIsStuck, isDispatchedRunBranch, detectPostReviewStall, isCappedReviewOrphanEscalation, proofDiscriminationEvidenceFromCriteria, type ArmAttemptOutcome, type ArmOutcomeName, type BuildSweepEffectsDeps, type MetadataRepairResult, sweepArmTaskId, uncreditableHeadReason, planOnlyRunBranchReceipts, REGENERABLE_ARTIFACT_GENERATORS, ADDITIVE_REGISTRATION_SURFACES, isAdditiveRegistrationChange, type RegistrationChange, repairLadderCommand, trackRepairLadder, riskJudgeHandedOffHead, handedOffHeadJudgmentPool, type HandedOffHeadJudgmentPool, awaitHandedOffHeadJudgments, riskJudgeCodeScanning, hasCapturedMergeConflictEvidence, clearedConflictEscalationCause, type FixRoundBranchClaim, inFlightReviewCount } from "./lib/sweep.js";
 import { sampleDaemonMemory, workerHeapReadings } from "./lib/daemon-memory-telemetry.js";
 import { fixRoundsInFlight, reviewOnlyStandDownReason } from "./lib/sweep.js";
 import { createFullPreludeTimer, isReviewLaneDisposition, readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest,
@@ -26557,8 +26558,8 @@ export function createOpenPrCountObservation(): {
     readOwnership: (projectionCount) => {
       if (!observed) return { owned: projectionCount(), foreign: 0 };
       if (openPrs === undefined) throw new Error("open PR board count is unreadable");
-      const ownedPrNumbers = openPrs.filter((pr) => isFleetOwnedRunBranch(pr.headRefName)).map((pr) => pr.number);
-      return { owned: ownedPrNumbers.length, foreign: openPrs.length - ownedPrNumbers.length, ownedPrNumbers };
+      // W1-T15170: the head AND the batch's author decide, so an operator hand build on a run-<task> head is foreign.
+      return splitOpenPrOwnership(openPrs);
     },
   };
 }
@@ -33309,6 +33310,15 @@ export const WORKER_CHANGED_NOTHING_REASON = "the worker changed nothing";
 /** W1-T4450: how much of a report a missing-line refusal carries into the ledger. */
 export const REFUSED_REPORT_TAIL_CHARS = 800;
 
+/** W1-T15109: `message` with every body line over commitlint's body-max-line-length wrapped at spaces
+ *  (lib/commit-message.ts `wrapBodyLines`). The subject and every line that already fits stay byte-for-byte;
+ *  nothing is truncated. A 244-character harness-derived reason once refused every later preflight push. */
+function wrapLongBodyLines(message: string): string {
+  const [subject, ...body] = message.split("\n");
+  return [subject, ...body.flatMap((line) =>
+    line.length > CONVENTIONAL_LIMITS.bodyMaxLineLength ? wrapBodyLines(line) : [line])].join("\n");
+}
+
 export function harnessCommitForShellLessWorker(
   input: Parameters<RunTaskCommandHost["harnessCommitForShellLessWorker"]>[0],
   deps: Parameters<RunTaskCommandHost["harnessCommitForShellLessWorker"]>[1] = {},
@@ -33331,8 +33341,8 @@ export function harnessCommitForShellLessWorker(
     return input.commitCount;
   }
   const message = withAssignmentTrailer(
-    fixRoundCommitMessage(input.report,
-      asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`),
+    fixRoundCommitMessage(input.report, wrapLongBodyLines(
+      asked ?? `${input.derivedCommit!.subject}\n\nHarness-derived subject: ${input.derivedCommit!.reason}`)),
     input.assignmentId,
   );
   const subjectSource = asked === undefined ? "harness-derived" : input.subjectSource ?? "worker-authored";
@@ -38884,6 +38894,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
       openProposalIds,
       isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
       isDeclined: declinedWithReceipts(ledgerLinesForRatify, join(config.root, "state")),
+      isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLinesForRatify),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
@@ -38964,6 +38975,7 @@ function loadProposalForRatify(
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
     isDeclined: declinedWithReceipts(ledgerLines, join(inboxRoot, "state")),
+    isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLines),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -39006,6 +39018,7 @@ function loadProposalsForRatify(
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
     isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
+    isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLines),
   };
 
   const found: { id: string; proposal: Proposal; classification: InboxClassification }[] = [];

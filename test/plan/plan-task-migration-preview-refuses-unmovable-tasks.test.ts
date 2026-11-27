@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { previewPlanTaskMigration, selectPlanTaskMigration } from "#src/lib/plan-task-migration.js";
+import { moveReservation, previewPlanTaskMigration, selectPlanTaskMigration } from "#src/lib/plan-task-migration.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
 import { OPS, PUBLIC, moveWorld, record, shard } from "#test/helpers/plan-move-world.js";
 
@@ -42,20 +42,24 @@ test("W1-T13680 criterion 6: the preview refuses not_queued, verify_human, reser
     assert.equal(refused.get("W1-T11"), undefined);
     // W1-T14425 replaces the W1-T13680 contract that refused verify_human: an open verify:human record is admitted, since a release survives the move (W1-T14408).
     assert.equal(refused.get("W1-T12"), undefined);
-    assert.equal(refused.get("W1-T13"), "reservation_absent");
+    // W1-T14993 (operator ruling 2026-11-26T15:10:25Z): the public plan holds W1-T13 at the base, which proves its id as
+    // ops-gate check_reserved accepts, so it is selected. reservation_absent still refuses an id nothing proves: the
+    // selection's own check answers undefined for an unreserved id absent from the base.
+    assert.equal(refused.get("W1-T13"), undefined);
+    assert.equal(moveReservation("W1-T13", new Map(), { commit: o.publicCommit, ids: new Set() }), undefined);
     assert.equal(refused.get("W1-T14"), "move_refused");
     assert.equal(selection.outcome, "candidate");
     assert.equal(selection.permission, "not_granted");
     // W1-T14345: the selection is a batch of every eligible task; filed in one commit, they keep reverse dispatch order.
     assert.equal(selection.candidate?.id, "W1-T11");
-    assert.deepEqual(selection.batch.map(member => member.id), ["W1-T11", "W1-T12", "W1-T15"]);
-    assert.equal(selection.batch[2]?.yaml, RECORDS["W1-T15"]);
-    assert.equal(selection.batch[2]?.originalBytesBase64, Buffer.from(RECORDS["W1-T15"]).toString("base64"));
+    assert.deepEqual(selection.batch.map(member => member.id), ["W1-T11", "W1-T12", "W1-T13", "W1-T15"]);
+    assert.equal(selection.batch[3]?.yaml, RECORDS["W1-T15"]);
+    assert.equal(selection.batch[3]?.originalBytesBase64, Buffer.from(RECORDS["W1-T15"]).toString("base64"));
 
     // Positive control for move_refused: a refused copy of a DIFFERENT blob does not refuse today's record.
     refusal.body = refusal.body.replace(blob, "f".repeat(40));
     const changed = await selectPlanTaskMigration(o, async query => w.answer(query), {}, undefined, UNREAD_GATE);
-    assert.deepEqual(changed.batch.map(member => member.id), ["W1-T11", "W1-T12", "W1-T14", "W1-T15"]);
+    assert.deepEqual(changed.batch.map(member => member.id), ["W1-T11", "W1-T12", "W1-T13", "W1-T14", "W1-T15"]);
 
     // The real verb, reading GitHub through its own default reader (a gh shim answering the same model).
     refusal.body = refusal.body.replace("f".repeat(40), blob);
@@ -76,7 +80,7 @@ test("W1-T13680 criterion 6: the preview refuses not_queued, verify_human, reser
     assert.equal(printed.permission, "not_granted");
     assert.equal(printed.candidate.id, "W1-T11");
     assert.deepEqual(printed.refused.filter((r: { id: string }) => ["W1-T11", "W1-T12", "W1-T13", "W1-T14"].includes(r.id)).map((r: { reason: string }) => r.reason),
-      ["reservation_absent", "move_refused"]);
+      ["move_refused"]);
     // W1-T14875: the verb also asks what the closed copy's ops-gate run named; the shim refuses that read, so it stays refused.
     const gateRead = `api repos/${OPS}/pulls/${refusal.number}`;
     assert.ok(shim.calls().filter(call => call.startsWith("api graphql ")).length >= 2 && shim.calls().every(call => call.startsWith("api graphql ") || call === gateRead), "positive control: the verb read GitHub through the shim");

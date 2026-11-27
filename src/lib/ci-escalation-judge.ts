@@ -11,8 +11,16 @@
  * and the diff only as quoted data. Its verdict reaches CI as a commit status (`remudero/ci-judge`)
  * that is always `success`: it informs the selection and never gates a merge. Off switch:
  * `state/CI_JUDGE_OFF`.
+ *
+ * Two passes spend no model call. A floor that is already a full run can only union to a full run,
+ * so the judge is not asked and the union's own status is posted (`ci_judge.skipped`). A new head
+ * whose diff has the same `git patch-id --verbatim` as the PR's last judged diff, with the same floor,
+ * gets that diff's posted verdict again (`ci_judge.reused`): a rebase or a merge of main that leaves
+ * the PR's own diff alone needs no new verdict. `state/CI_JUDGE_REUSE_OFF` turns the reuse off;
+ * `state/CI_JUDGE_OFF` still wins over both.
  */
 import { RmdError } from "./errors.js";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -28,10 +36,14 @@ import { hostWorktreeGitAsync } from "./worktree-git.js";
 
 /** The off switch: while `state/CI_JUDGE_OFF` exists the daemon judges nothing and posts nothing. */
 export const CI_JUDGE_OFF_FILE = "CI_JUDGE_OFF";
+/** The reuse rollback: while `state/CI_JUDGE_REUSE_OFF` exists every changed head is judged afresh. */
+export const CI_JUDGE_REUSE_OFF_FILE = "CI_JUDGE_REUSE_OFF";
 /** The commit-status context CI reads the judge's additions from. */
 export const CI_JUDGE_CONTEXT = "remudero/ci-judge";
 /** Which head of which PR was already judged, so one head costs one model call. */
 export const CI_JUDGE_HEADS_FILE = "ci-judge-heads.json";
+/** The last posted verdict of each PR, keyed by the patch id of the diff it judged and the floor beside it. */
+export const CI_JUDGE_VERDICTS_FILE = "ci-judge-verdicts.json";
 /** PRIMARY CONTROL: a pass judges at most this many changed heads; the rest wait for the next sweep. */
 export const CI_JUDGE_MAX_PRS_PER_PASS = 3;
 /** BACKSTOP: the diff is cut here before it reaches the prompt; the cut is marked, never silent. */
@@ -132,6 +144,19 @@ export function ciJudgeStatusDescription(output: Pick<CiJudgeOutput, "add" | "es
   return STATUS_PREFIX + JSON.stringify({ add: [], escalateFull: true });
 }
 
+/** The status a full floor posts without asking the judge: the union of a full floor with any verdict
+ *  is a full run, so this is that union's own description, derived through the same two functions. */
+export function ciJudgeFullFloorStatus(floor: CiJudgeFloor): string {
+  const union = unionJudgeWithFloor(floor, { kind: "parsed", output: { add: [], escalateFull: true, reason: "floor already full" }, rejected: [] });
+  return ciJudgeStatusDescription({ add: union.added, escalateFull: union.fullRun });
+}
+
+/** A floor's identity: a prior verdict is reused only beside the floor it was judged against. */
+export function ciJudgeFloorKey(floor: CiJudgeFloor): string {
+  const canonical = JSON.stringify({ fullRun: floor.fullRun, suites: [...new Set(floor.suites)].sort() });
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
 /** A posted status read back on the CI side; anything not this module's own shape is malformed. */
 export function readCiJudgeStatus(description: string | undefined, knownSuites: Iterable<string>): CiJudgeParse {
   if (description === undefined || !description.startsWith(STATUS_PREFIX)) return { kind: "malformed", reason: "no ci-judge status" };
@@ -204,6 +229,8 @@ export interface CiJudgePorts {
   floor: (changed: readonly string[]) => CiJudgeFloor | Promise<CiJudgeFloor>;
   /** One model call: the prompt in, the raw reply out. `pr` names the judgement, so a shadow row joins it. */
   judge: (prompt: string, pr?: CiJudgePr) => Promise<string>;
+  /** The diff's `git patch-id`, or undefined when it cannot be computed; absent, every head is judged. */
+  patchId?: (pr: CiJudgePr, diff: string) => Promise<string | undefined>;
   post: (pr: CiJudgePr, description: string) => Promise<void>;
   log: (step: string, extra?: Record<string, unknown>) => void;
   maxPerPass?: number;
@@ -230,9 +257,9 @@ function readHeads(stateDir: string, log: CiJudgePorts["log"]): Record<string, s
   return {};
 }
 
-function writeHeads(stateDir: string, heads: Record<string, string>): void {
-  const path = join(stateDir, CI_JUDGE_HEADS_FILE);
-  writeFileSync(`${path}.tmp`, JSON.stringify(heads) + "\n");
+function writeState(stateDir: string, file: string, value: unknown): void {
+  const path = join(stateDir, file);
+  writeFileSync(`${path}.tmp`, JSON.stringify(value) + "\n");
   renameSync(`${path}.tmp`, path);
 }
 
@@ -244,9 +271,49 @@ export class CiJudgeNotStartedError extends RmdError {
   }
 }
 
+/** One PR's last posted verdict: the patch id of the diff judged, the floor's key and the posted status. */
+interface CiJudgeVerdict {
+  patchId: string;
+  floorKey: string;
+  description: string;
+}
+
+function isVerdict(value: unknown): value is CiJudgeVerdict {
+  if (value === null || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.patchId === "string" && typeof record.floorKey === "string" && typeof record.description === "string";
+}
+
+function readVerdicts(stateDir: string, log: CiJudgePorts["log"]): Record<string, CiJudgeVerdict> {
+  const path = join(stateDir, CI_JUDGE_VERDICTS_FILE);
+  if (!existsSync(path)) return {};
+  try {
+    const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, CiJudgeVerdict] => isVerdict(entry[1])));
+    }
+    log("ci_judge.verdicts_unreadable", { reason: "the verdicts file is not an object; no verdict is reused this pass" });
+  } catch (error) {
+    log("ci_judge.verdicts_unreadable", { reason: "the verdicts file does not parse; no verdict is reused this pass", error: (error as Error).message });
+  }
+  return {};
+}
+
+/** The patch id, or why there is none: a missing port, a throw or an empty answer all key by head sha. */
+async function readPatchId(ports: CiJudgePorts, pr: CiJudgePr, diff: string): Promise<{ id?: string; error?: string }> {
+  if (ports.patchId === undefined) return {};
+  try {
+    const id = await ports.patchId(pr, diff);
+    return id === undefined || id === "" ? {} : { id };
+  } catch (error) {
+    return { error: String((error as Error)?.message ?? error) };
+  }
+}
+
 /** ONE DAEMON PASS: every open PR whose head changed since its last judgment is judged once, and a
  *  parsed verdict is posted as the `remudero/ci-judge` status. A malformed reply posts nothing, and
- *  CI reads an absent status as the floor alone. */
+ *  CI reads an absent status as the floor alone. A full floor posts {@link ciJudgeFullFloorStatus}
+ *  without a model call; a diff whose patch id and floor match the PR's last posted verdict reposts it. */
 export async function judgeCiEscalation(ports: CiJudgePorts): Promise<CiJudgePassResult> {
   if (existsSync(join(ports.stateDir, CI_JUDGE_OFF_FILE))) {
     ports.log("ci_judge.off", { reason: `state/${CI_JUDGE_OFF_FILE} is present` });
@@ -254,30 +321,52 @@ export async function judgeCiEscalation(ports: CiJudgePorts): Promise<CiJudgePas
   }
   const prs = await ports.openPrs();
   const heads = readHeads(ports.stateDir, ports.log);
+  const reuseOff = existsSync(join(ports.stateDir, CI_JUDGE_REUSE_OFF_FILE));
+  const verdicts = reuseOff ? undefined : readVerdicts(ports.stateDir, ports.log);
   const open = new Set(prs.map((pr) => String(pr.number)));
   for (const key of Object.keys(heads)) if (!open.has(key)) delete heads[key];
+  for (const key of Object.keys(verdicts ?? {})) if (!open.has(key)) delete verdicts![key];
   const due = prs.filter((pr) => heads[String(pr.number)] !== pr.headSha).slice(0, ports.maxPerPass ?? CI_JUDGE_MAX_PRS_PER_PASS);
   const judged: number[] = [];
   const failed: number[] = [];
   for (const pr of due) {
     // Recorded before the call: a head that fails is not re-spent on every sweep.
-    const previous = heads[String(pr.number)];
-    heads[String(pr.number)] = pr.headSha;
+    const key = String(pr.number);
+    const previous = heads[key];
+    heads[key] = pr.headSha;
     try {
       const changed = await ports.changedFiles(pr);
       const floor = await ports.floor(changed);
-      const prompt = buildCiJudgePrompt({ pr: pr.number, headSha: pr.headSha, changed, floor, diff: await ports.diff(pr) });
+      if (floor.fullRun) {
+        // A full floor unions to a full run whatever the judge answers: no model call can change it.
+        await ports.post(pr, ciJudgeFullFloorStatus(floor));
+        ports.log("ci_judge.skipped", { pr: pr.number, head_sha: pr.headSha, reason: "floor already full" });
+        continue;
+      }
+      const diff = await ports.diff(pr);
+      const patch = verdicts === undefined ? {} : await readPatchId(ports, pr, diff);
+      const floorKey = ciJudgeFloorKey(floor);
+      const prior = verdicts?.[key];
+      if (patch.id !== undefined && prior !== undefined && prior.patchId === patch.id && prior.floorKey === floorKey) {
+        await ports.post(pr, prior.description);
+        ports.log("ci_judge.reused", { pr: pr.number, head_sha: pr.headSha, patch_id: patch.id });
+        continue;
+      }
+      const prompt = buildCiJudgePrompt({ pr: pr.number, headSha: pr.headSha, changed, floor, diff });
       const parsed = parseCiJudgeOutput(await ports.judge(prompt, pr), await ports.suiteIds());
       if (parsed.kind === "malformed") {
         ports.log("ci_judge.malformed", { pr: pr.number, head_sha: pr.headSha, reason: parsed.reason });
         continue;
       }
       const widened = unionJudgeWithFloor(floor, parsed);
-      await ports.post(pr, ciJudgeStatusDescription(parsed.output));
+      const description = ciJudgeStatusDescription(parsed.output);
+      await ports.post(pr, description);
+      if (verdicts !== undefined && patch.id !== undefined) verdicts[key] = { patchId: patch.id, floorKey, description };
       judged.push(pr.number);
       ports.log("ci_judge.judged", {
         pr: pr.number, head_sha: pr.headSha, floor_size: floor.suites.length, floor_full: floor.fullRun,
         added: widened.added, rejected: parsed.rejected, escalate_full: parsed.output.escalateFull, reason: parsed.output.reason,
+        patch_id: patch.id ?? null, ...(patch.error === undefined ? {} : { patch_id_error: patch.error }),
       });
     } catch (error) {
       if (error instanceof CiJudgeNotStartedError) {
@@ -290,7 +379,8 @@ export async function judgeCiEscalation(ports: CiJudgePorts): Promise<CiJudgePas
       ports.log("ci_judge.failed", { pr: pr.number, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) });
     }
   }
-  writeHeads(ports.stateDir, heads);
+  writeState(ports.stateDir, CI_JUDGE_HEADS_FILE, heads);
+  if (verdicts !== undefined) writeState(ports.stateDir, CI_JUDGE_VERDICTS_FILE, verdicts);
   return { off: false, judged, failed };
 }
 
@@ -385,6 +475,14 @@ export function productionCiJudgePorts(opts: {
       return local ? output.split("\0").filter(Boolean) : output.split("\n").map((line) => line.trim()).filter(Boolean);
     },
     diff: async (pr) => (await readDiff(pr, false)).output,
+    // `--verbatim` (it implies `--stable`) ignores hunk line numbers, which a merge of main shifts, but
+    // not whitespace, so a whitespace-only change to the diff is judged again.
+    patchId: async (_pr, diff) => {
+      if (diff.trim() === "") return undefined;
+      const output = (await hostWorktreeGitAsync(opts.repoRoot, ["patch-id", "--verbatim"], { input: diff, maxBuffer: 1 << 20 })).trim();
+      const match = /^([0-9a-f]{40}|[0-9a-f]{64}) [0-9a-f]+$/.exec(output);
+      return match?.[1];
+    },
     suiteIds,
     floor: opts.floor ?? ((changed) => affectedSelectionOrFullAsync(changed, () => readAffectedSuitesInputAsync(opts.repoRoot, changed))),
     judge: async (prompt, pr) => {

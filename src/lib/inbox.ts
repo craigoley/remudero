@@ -966,6 +966,24 @@ function fragmentVerdict(memo: FragmentMemo | undefined, plan: Plan, fragmentYam
 
 /** The ledger's answer to "has this proposal already been ratified?". Re-derived on every read rather than trusted
  *  from a stored flag, so a drifted entry heals with no migration (W1-T190). */
+/** Exact task-scoped release receipts (`ratify.approved` rows with `released: "verify-human"`), not a verdict
+ * inferred from proposal prose. W1-T14977: every classifyProposal caller reads releases from this one rule. */
+export function releasedHumanTaskIds(lines: readonly { step?: unknown; released?: unknown; task_id?: unknown }[]): Set<string> {
+  const out = new Set<string>();
+  for (const row of lines) {
+    if (row.step === "ratify.approved" && row.released === "verify-human" && typeof row.task_id === "string" && row.task_id) out.add(row.task_id);
+  }
+  return out;
+}
+
+/** W1-T14977: the {@link ReadinessContext.isReleasedHumanTask} a CLI caller (`rmd inbox`, `rmd approve`, `rmd status`)
+ * builds from the ledger it already read. A release moves a task into the fleet only if the plan allows dispatch, so a
+ * held task's old release row does not hide its human ask. Without it the draft-free release would refuse every ask. */
+export function releasedHumanTaskPredicate(plan: Plan, lines: readonly { step?: unknown; released?: unknown; task_id?: unknown }[]): (taskId: string) => boolean {
+  const released = releasedHumanTaskIds(lines);
+  return (taskId) => plan.byId.get(taskId)?.dispatch_hold !== true && released.has(taskId);
+}
+
 export function isRatifiedInLedger(ledgerLines: { step?: unknown; task_id?: unknown }[], proposalId: string): boolean {
   return ledgerLines.some((l) => l.step === "ratify.approved" && l.task_id === proposalId);
 }
@@ -1613,6 +1631,20 @@ export function classifyProposal(
   const reasons: PredicateFailure[] = [];
 
   if (!draft) {
+    // W1-T14977 (operator ruling 2026-11-26 15:10Z): a parked verify:human task's own ask needs no Architect draft.
+    // The only draft it can take is `RELEASE: <task>`, which `rmd approve <task>` does directly, so waiting on a
+    // draft that failed once and is never retried left these asks with no way to approve. An ask the operator
+    // reframed still waits for its redraft, and the release draft's checks still apply.
+    const parkedId = /^(?:verify-human|machine-judge):([A-Za-z0-9][A-Za-z0-9-]*)$/.exec(proposal.id)?.[1];
+    const reframed = (proposal.reframeHistory ?? []).some((round) => !round.retracted);
+    // A task already released to the fleet is never offered for release again. A caller that cannot say whether the
+    // task was released (no isReleasedHumanTask) gets no draft-free release: unknown is not "no". Every caller in
+    // this repo supplies one; the terminal verbs build it with releasedHumanTaskPredicate.
+    if (parkedId && !reframed && isReleasableTask(ctx.plan.byId.get(parkedId)) && ctx.isReleasedHumanTask?.(parkedId) === false &&
+      proposal.evidenceAnchors.every((a) => ctx.grepAnchorTrue(a)) &&
+      !(proposal.conflictsWith ?? []).some((id) => ctx.openProposalIds.has(id))) {
+      return { proposalId: proposal.id, state: "ready", reasons, releaseTaskId: parkedId, proposal, ...referentUnverified };
+    }
     reasons.push({ predicate: "drafted", detail: "not-drafted: no drafted candidate available yet" });
     return { proposalId: proposal.id, state: "not_ready", reasons, ...referentUnverified };
   }
