@@ -1436,6 +1436,7 @@
     "coverage_nightly.impact_map": "Observability for W1-T14530: one row per impact-map refresh; the map file and its run record carry the state lint-plan reads, and no decision reads the row.",
     "dispatch.ops_catalog_hold_cleared": "W1-T14532: a diagnostic naming the ops dispatch hold a cycle cleared; nothing reads it, and it changes no dispatch or move decision.",
     "dispatch.ops_selection_changed": "An audit row for the operator (W1-T13462): it names the previous and the new ops dispatch selection when the flag changes between cycles, never the repository; nothing decides on it.",
+    "dispatch.refill_read": "Observability for W1-T14893: whether each lane refill reused the published tick read or read afresh, and why; no decision reads it.",
     "dispatch.selection_timing": "Observability for W1-T13286: per-probe selection timing that an operator reads to pick the next speed fix; no decision reads it (invariant measuring-changes-no-decision).",
     "github_app.token_refresh_late": "W1-T14537: a diagnostic that a scheduled App token refresh ran after the token it replaced had expired, with how late; it changes no refresh or credential decision.",
     "object_reaper.gc_log_cleared": "An operator-facing record that the reaper removed a stale gc.log after a clean full pass, with its age and first line; the following repository_maintenance.complete row carries the gc.log verdict every reader uses, so nothing re-reads it.",
@@ -1470,6 +1471,7 @@
     "plan.ops_landing_failed": "W1-T14642: a diagnostic for a failed ops landing with its error; the next pass retries the landing, so nothing re-reads the row.",
     "github.delivery": "W1-T14881: GitHub's own record of each webhook delivery's status and duration; it is the evidence for webhook timeouts, and only its own pass reads it back (W1-T14979, to redeliver failed ones).",
     "github.delivery.read_failed": "W1-T14881: a diagnostic that a delivery-log pass could not read a page; the next pass rereads from the same cursor, so nothing re-reads the row.",
-    "github.delivery.redelivered": "W1-T14979: the record that a failed delivery was redelivered once; only its own pass reads it back, to never redeliver twice."
+    "github.delivery.redelivered": "W1-T14979: the record that a failed delivery was redelivered once; only its own pass reads it back, to never redeliver twice.",
+    "host_memory.shared": "W1-T14903: an audit row of the one host memory snapshot both lanes cut from; the widths act on the snapshot itself, and nothing decides on the row."
   }
 }
