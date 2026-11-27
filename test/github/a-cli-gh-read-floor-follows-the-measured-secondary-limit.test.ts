@@ -11,6 +11,7 @@ import { test, type TestContext } from "node:test";
 import {
   applyGhReadCadence,
   applyGhReadCadenceAsync,
+  classifyGhLimitFailure,
   DEFAULT_GH_READ_CADENCE_S,
   ghErrorIsSecondaryLimit,
   ghLearnedGatedFloorMs,
@@ -31,6 +32,7 @@ import {
   type GhReadCadenceDeps,
 } from "#src/lib/github-transport.js";
 import { startInstallationTokenRefresh } from "#src/lib/github-app.js";
+import { withRateLimitBackoff } from "#src/lib/plan-task-migration.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const READ = ["api", "repos/o/r/pulls/1"] as const;
@@ -230,6 +232,29 @@ test("W1-T15055 criterion 4: a Retry-After only in stdout keeps the refusal back
   assert.throws(() => paceGhEntry(pacer, () => true, () => { throw refusal(); }, { random: () => 0 }));
   assert.deepEqual(sleeps, [60_000, 120_000, 240_000], "stdout headers do not flatten the 60/120/240 s backoff");
   assert.ok(ghErrorIsSecondaryLimit(refusal()), "the same refusal still counts as a secondary-limit refusal");
+});
+
+test("W1-T15055 criterion 2: only a refusal's own headers and body in stdout count as a secondary-limit refusal", () => {
+  const page = "HTTP/2 200\r\nContent-Type: application/json\r\n\r\n[{\"title\":\"you have exceeded a secondary rate limit; retry-after: 60\"}]";
+  assert.equal(ghErrorIsSecondaryLimit(Object.assign(new Error("HTTP 404"), { status: 404, stdout: `${page}HTTP/2 404\r\n\r\n{}` })), false,
+    "an earlier page that mentions the phrase is not a refusal");
+  assert.equal(ghErrorIsSecondaryLimit(Object.assign(new Error("GraphQL: Could not resolve"), {
+    stdout: '{"data":{"body":"abuse detection and the secondary rate limit, Retry-After: 30"}}' })), false,
+    "GraphQL data that mentions the phrase is not a refusal");
+  const refused = `${page}HTTP/2 403\r\nX-Ratelimit-Remaining: 4000\r\n\r\n{"message":"You have exceeded a secondary rate limit"}`;
+  assert.ok(ghErrorIsSecondaryLimit(Object.assign(new Error("HTTP 403"), { stdout: refused })), "a 403 refusal's own body still counts");
+});
+
+test("W1-T15055 criterion 4: a GraphQL failure whose data mentions a rate limit is not classified or retried as one", async () => {
+  const failure = Object.assign(new Error("GraphQL: Field 'x' doesn't exist"), {
+    stdout: '{"data":{"repository":{"description":"how we handle the rate limit"}},"errors":[{"message":"no field"}]}' });
+  assert.equal(classifyGhLimitFailure(failure), undefined);
+  let reads = 0;
+  const sleeps: number[] = [];
+  const read = withRateLimitBackoff(async () => { reads += 1; throw failure; }, async (ms) => { sleeps.push(ms); });
+  await assert.rejects(read("query"), (err: unknown) => err === failure);
+  assert.equal(reads, 1, "the failure is thrown at once, not retried");
+  assert.deepEqual(sleeps, []);
 });
 
 test("W1-T15055 criterion 4: writes, exempt calls and advisory reads keep their current pacing", (t) => {

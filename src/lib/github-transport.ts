@@ -1195,9 +1195,19 @@ export function recordGhSecondaryLimitRefusal(env: NodeJS.ProcessEnv = process.e
 export function ghErrorIsSecondaryLimit(err: unknown): boolean {
   const e = err as { status?: number; stdout?: string | Buffer; stderr?: string | Buffer; message?: string } | null | undefined;
   if (e === null || e === undefined) return false;
-  if (/secondary rate|abuse detection/i.test(`${e.stdout ?? ""}\n${e.stderr ?? ""}\n${e.message ?? ""}`)) return true;
-  const shaped = e.status === 403 || e.status === 429 || ghErrorTextLooksRateLimited(err);
-  return shaped && retryAfterSecondsIn(`${e.stdout ?? ""}\n${e.stderr ?? ""}\n${e.message ?? ""}`) !== undefined;
+  const text = `${e.stderr ?? ""}\n${e.message ?? ""}`;
+  const refusal = ghStdoutRefusal(e.stdout);
+  if (/secondary rate|abuse detection/i.test(`${text}\n${refusal?.body ?? ""}`)) return true;
+  const shaped = e.status === 403 || e.status === 429 || refusal !== undefined || ghErrorTextLooksRateLimited(err);
+  return shaped && retryAfterSecondsIn(`${refusal?.headers ?? ""}\n${text}`) !== undefined;
+}
+
+function ghStdoutRefusal(stdout: string | Buffer | undefined): { headers: string; body: string } | undefined {
+  const out = String(stdout ?? "");
+  const blocks = [...out.matchAll(/(HTTP\/[0-9.]+ ([0-9]{3})[^\r\n]*\r?\n(?:[A-Za-z0-9-]+:[^\r\n]*\r?\n)*)/g)];
+  const last = blocks.at(-1);
+  if (last === undefined || (last[2] !== "403" && last[2] !== "429")) return undefined;
+  return { headers: last[1]!, body: out.slice(last.index! + last[0].length) };
 }
 
 /** The `search` limiter — a separate bucket with its own, far lower ceiling. */
@@ -1216,9 +1226,9 @@ export interface GhSecondaryLimitRefusal {
 }
 
 function ghErrorTextLooksRateLimited(err: unknown): boolean {
-  const e = err as { status?: number; stdout?: string | Buffer; stderr?: string | Buffer; message?: string } | null | undefined;
+  const e = err as { status?: number; stderr?: string | Buffer; message?: string } | null | undefined;
   if (e === null || e === undefined) return false;
-  const text = `${e.stdout ?? ""}\n${e.stderr ?? ""}\n${e.message ?? ""}`;
+  const text = `${e.stderr ?? ""}\n${e.message ?? ""}`;
   if (/rate limit|too many requests|secondary rate|abuse detection/i.test(text)) return true;
   // A bare 403/429 with no body still reads as pacing; a 404 or 422 never does.
   return e.status === 429;
