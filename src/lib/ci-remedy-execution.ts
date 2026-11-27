@@ -168,6 +168,9 @@ export function ciRemedyExecutionReport(rows: readonly ExecutionRow[], asOf: str
 export const BASE_INHERITED_MARKER = "[inherited from the base -- NOT this diff]";
 /** One census crossing line, as that script prints it: `  - <file>:<line>  ... goes red <day> (...)`. */
 const CROSSING_LINE = /^\s*- \S+:\d+\s.*\sgoes red\s/;
+const CENSUS_BLOCKED = /^\s*expiring-fixture-census: BLOCKED\b/;
+const CENSUS_ERROR_ANNOTATION = /^\s*(?:##\[error\]|::error title=expiring-fixture-census::)expiring-fixture-census: BLOCKED\b/;
+const POPULATION_DROP = /^\s*expiring-fixture-census: BLOCKED\s+--\s+\d+ file\(s\) dropped below the recorded fixture population:/;
 /** A failure the log names that is not a census crossing: a failed test, a type error, an explicit error annotation. */
 const OTHER_RED = /^\s*not ok \d|^\s*✖ |\berror TS\d+|##\[error\](?!Process completed with exit code)/;
 
@@ -177,9 +180,16 @@ export function baseInheritedRedSteps(failures: ReadonlyArray<{ name: string; lo
   const steps = [...new Set(failures.map((failure) => failure.name))];
   const inherited = failures.length > 0 && failures.every((failure) => {
     const lines = failure.logTail.split("\n");
-    return lines.some((line) => line.includes(BASE_INHERITED_MARKER))
-      && lines.filter((line) => CROSSING_LINE.test(line)).every((line) => line.includes(BASE_INHERITED_MARKER))
-      && !lines.some((line) => OTHER_RED.test(line));
+    const crossings = lines.filter((line) => CROSSING_LINE.test(line));
+    const blocked = lines.filter((line) => /\bBLOCKED\b/.test(line));
+    return lines.some((line) => CENSUS_BLOCKED.test(line) || CENSUS_ERROR_ANNOTATION.test(line))
+      && crossings.length > 0
+      && crossings.every((line) => line.includes(BASE_INHERITED_MARKER))
+      // A population drop is a separate census failure even when another report section is inherited.
+      && !lines.some((line) => POPULATION_DROP.test(line))
+      // Only this census report's own blocked headline/annotation is attributable to the inherited crossings.
+      && blocked.every((line) => CENSUS_BLOCKED.test(line) || CENSUS_ERROR_ANNOTATION.test(line))
+      && !lines.some((line) => OTHER_RED.test(line) && !CENSUS_ERROR_ANNOTATION.test(line));
   });
   return { inherited, steps };
 }
@@ -218,8 +228,20 @@ export function rewrittenTestExpectations(changes: ReadonlyArray<{ path: string;
   });
 }
 
+/** The expectation guard sees only evidence this round was dispatched to answer; met criteria are deliberately absent. */
+export function answeredExpectationFindingText(evidence: {
+  unmetCriteria: readonly unknown[];
+  verifiedFindings: readonly unknown[];
+  failingChecks: readonly unknown[];
+  metCriteria?: readonly unknown[];
+}): string {
+  return JSON.stringify({ unmetCriteria: evidence.unmetCriteria, verifiedFindings: evidence.verifiedFindings,
+    failingChecks: evidence.failingChecks });
+}
+
 /** W1-T15064: a rewritten expectation stands only in a test the answered finding names, by path or file name. */
-export function unaskedExpectationRewrites(rewrites: ReadonlyArray<{ path: string; changed: string[] }>, findingText: string):
+export function unaskedExpectationRewrites(rewrites: ReadonlyArray<{ path: string; changed: string[]; aliases?: string[] }>, findingText: string):
   Array<{ path: string; changed: string[] }> {
-  return rewrites.filter(({ path }) => !findingText.includes(path) && !findingText.includes(path.split("/").pop()!));
+  return rewrites.filter(({ path, aliases = [] }) => [path, ...aliases]
+    .every((candidate) => !findingText.includes(candidate) && !findingText.includes(candidate.split("/").pop()!)));
 }

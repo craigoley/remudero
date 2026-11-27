@@ -4,9 +4,10 @@
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 
-import { BASE_INHERITED_MARKER, baseInheritedRedSteps, rewrittenTestExpectations, unaskedExpectationRewrites } from "#src/lib/ci-remedy-execution.js";
+import { answeredExpectationFindingText, BASE_INHERITED_MARKER, baseInheritedRedSteps, rewrittenTestExpectations, unaskedExpectationRewrites } from "#src/lib/ci-remedy-execution.js";
 import type { Config } from "#src/lib/config.js";
 import type { ReviewVerdict } from "#src/lib/review.js";
 import type { WorkerResult } from "#src/lib/worker.js";
@@ -21,6 +22,10 @@ const GUARDED = "export const released = (r?: (id: string) => boolean) => r?.(\"
 const LOOSENED = "export const released = (r?: (id: string) => boolean) => r?.(\"x\") !== true;\n";
 const EXPECT = "import assert from \"node:assert/strict\";\nassert.equal(released(undefined), false);\n";
 const REWRITTEN = "import assert from \"node:assert/strict\";\nassert.equal(released(undefined), true);\n";
+// Load the real executable module at runtime because scripts/** intentionally has no declaration output.
+const censusScript = await import(pathToFileURL(join(REPO_ROOT, "scripts/expiring-fixture-census.mjs")).href) as {
+  emitCiReport: (tool: string, report: string, options: { blocked: boolean; env: Record<string, string>; log: (line: string) => void }) => boolean;
+};
 
 /** The census log of core #21035's comment-load-ratchet step: every crossing is marked inherited. */
 const inheritedLog = [
@@ -93,7 +98,7 @@ test("W1-T15064 criterion 1: an all-inherited red step dispatches no source edit
   assert.equal(result.pushes, 0);
   assert.equal(result.outcome.outcome, "stood_down");
   assert.equal(result.repo.git("rev-parse", "HEAD"), result.before);
-  const why = result.rows.find((row) => row.step === "fix.stood_down" && row.reason === "base_inherited");
+  const why = result.rows.find((row) => row.step === "fix.round_skipped" && row.reason === "base_inherited");
   assert.deepEqual(why?.steps, ["comment-load-ratchet"], "the stand-down records why, naming the step");
   // The marker is the one the census really prints.
   assert.equal(readFileSync(join(REPO_ROOT, "scripts/expiring-fixture-census.mjs"), "utf8").includes(BASE_INHERITED_MARKER), true);
@@ -101,6 +106,16 @@ test("W1-T15064 criterion 1: an all-inherited red step dispatches no source edit
   const planted = inheritedLog.replace(`(1.4d)  ${BASE_INHERITED_MARKER}`, "(1.4d)");
   assert.equal(baseInheritedRedSteps([{ name: "comment-load-ratchet", logTail: planted }]).inherited, false);
   assert.equal(baseInheritedRedSteps([{ name: "comment-load-ratchet", logTail: `${inheritedLog}\nnot ok 3 - inbox` }]).inherited, false);
+  const populationDrop = `expiring-fixture-census: BLOCKED -- 1 file(s) dropped below the recorded fixture population:\n  - test/old.test.ts: measured 0 stamp(s), recorded 1 (1 missing)\n${inheritedLog}`;
+  assert.equal(baseInheritedRedSteps([{ name: "expiring-fixture-census", logTail: populationDrop }]).inherited, false,
+    "a separate population-drop failure cannot be hidden by inherited crossing lines");
+  assert.equal(baseInheritedRedSteps([{ name: "expiring-fixture-census", logTail: `${inheritedLog}\nother-gate: BLOCKED` }]).inherited, false,
+    "an unrelated blocked section is not attributed to inherited crossings");
+  const emitted: string[] = [];
+  censusScript.emitCiReport("expiring-fixture-census", inheritedLog,
+    { blocked: true, env: { RMD_CI_REPORT: "1" }, log: (line) => emitted.push(line) });
+  assert.equal(baseInheritedRedSteps([{ name: "expiring-fixture-census", logTail: `${inheritedLog}\n${emitted.join("\n")}` }]).inherited, true,
+    "the CI error annotation emitted by emitCiReport belongs to its census report");
   assert.equal(baseInheritedRedSteps([{ name: "comment-load-ratchet", logTail: inheritedLog },
     { name: "unit", logTail: "✖ inbox released asks" }]).inherited, false);
   assert.equal(baseInheritedRedSteps([]).inherited, false);
@@ -136,4 +151,11 @@ test("W1-T15064 criterion 2: a changed test expectation is refused unless its fi
   assert.deepEqual(multi, [{ path: TEST, changed: ["assert.deepEqual(rows, [1, 2])"] }]);
   assert.deepEqual(unaskedExpectationRewrites(multi, "fails in inbox.test.ts"), []);
   assert.deepEqual(unaskedExpectationRewrites(multi, "fails in src/inbox.ts"), multi);
+  assert.deepEqual(unaskedExpectationRewrites([{ ...multi[0]!, aliases: ["test/renamed.test.ts"] }], "finding names test/renamed.test.ts"), [],
+    "a verified rename is attributed by either test path");
+  const answeredOnly = answeredExpectationFindingText({ unmetCriteria: [{ claim: "guard behavior" }], verifiedFindings: [],
+    failingChecks: [{ name: "unit", logTail: "fails in src/inbox.ts" }], metCriteria: [{ claim: `already passes ${TEST}` }] });
+  assert.equal(answeredOnly.includes(TEST), false, "a met criterion cannot authorize rewriting its named test");
+  assert.deepEqual(unaskedExpectationRewrites(multi, answeredOnly), multi,
+    "only the criterion and failures this round answers can name an expectation rewrite");
 });

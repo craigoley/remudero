@@ -45,7 +45,7 @@ import { observeFeedbackInputs, type AdmissionObserver } from "../../lib/contrib
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
 import { observeAdmissionDisposition } from "../../lib/action-executor.js";
 import { fixLaneBenchmarkWork } from "../../lib/benchmark-run.js";
-import { baseInheritedRedSteps, captureCiRemedyComponent, recordCiRemedyExecution, rewrittenTestExpectations, unaskedExpectationRewrites,
+import { answeredExpectationFindingText, baseInheritedRedSteps, captureCiRemedyComponent, recordCiRemedyExecution, rewrittenTestExpectations, unaskedExpectationRewrites,
   upsertCiRemedyRoundComment, type CiRemedyExecution } from "../../lib/ci-remedy-execution.js";
 import { loadPlan, visibleCriteria, type AcceptanceCriterion, type Plan } from "../../lib/plan.js";
 import { loadMounts, mountsPath, type Mount } from "../../lib/mounts.js";
@@ -4640,7 +4640,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       ? baseInheritedRedSteps(currentCiFailures ?? []) : undefined;
     if (inheritedRed?.inherited) {
       const reason = "base_inherited";
-      deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason, steps: inheritedRed.steps });
+      deps.log("fix.round_skipped", { site: "rung.strike", strike: strikes + 1, reason, steps: inheritedRed.steps });
       deps.say(`fix rung: every red step (${inheritedRed.steps.join(", ")}) is inherited from the base — no source edit dispatched`);
       return finish({ outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason });
     }
@@ -5645,6 +5645,52 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       const paths = [...new Set(fixAction.paths)].sort();
       let landing: FixRoundLanding | undefined;
       let heldPaths: string[] = [];
+      const expectationFindingText = answeredExpectationFindingText({
+        unmetCriteria: unmet,
+        verifiedFindings: evidence.review?.findings ?? [],
+        failingChecks: evidence.ciFailures ?? [],
+      });
+      const refuseUnaskedExpectations = async (head: string, base = roundStartSha ?? priorHeadSha): Promise<boolean> => {
+        if (base === undefined || head === base) return false;
+        try {
+          const git = (args: string[]) => hostWorktreeGitAsync(opts.worktreePath, args);
+          // A conflict-resolution merge's second parent is the tree main supplied. Comparing against
+          // round start would blame main's own test changes on the fix round.
+          const parents = (await git(["rev-list", "--parents", "-n", "1", head])).trim().split(/\s+/).slice(1);
+          const comparisonBase = parents.length > 1 && parents[0] === base ? parents[1]! : base;
+          const fields = (await git(["diff", "--name-status", "-z", "--find-renames=1%", comparisonBase, head, "--", "test/"]))
+            .split("\0").filter(Boolean);
+          const changes: Array<{ path: string; base: string; head: string; aliases?: string[] }> = [];
+          for (let i = 0; i < fields.length;) {
+            const status = fields[i++]!;
+            if (status.startsWith("R") || status.startsWith("C")) {
+              const oldPath = fields[i++]!, newPath = fields[i++]!;
+              if (!/\.test\.[cm]?[jt]s$/.test(oldPath) && !/\.test\.[cm]?[jt]s$/.test(newPath)) continue;
+              changes.push({ path: oldPath, aliases: [newPath], base: await git(["show", `${comparisonBase}:${oldPath}`]),
+                head: await git(["show", `${head}:${newPath}`]) });
+              continue;
+            }
+            const path = fields[i++]!;
+            if (!/\.test\.[cm]?[jt]s$/.test(path)) continue;
+            if (status === "D") changes.push({ path, base: await git(["show", `${comparisonBase}:${path}`]), head: "" });
+            else if (status !== "A") changes.push({ path, base: await git(["show", `${comparisonBase}:${path}`]),
+              head: await git(["show", `${head}:${path}`]) });
+          }
+          const unasked = unaskedExpectationRewrites(rewrittenTestExpectations(changes), expectationFindingText);
+          if (unasked.length === 0) return false;
+          const reason = "the round changed a test expectation the answered finding does not name";
+          deps.log("fix.commit_refused", { round_id: roundId, strike: attempt, round, head_sha: priorHeadSha, reason,
+            tests: unasked.map((rewrite) => rewrite.path), changed_assertions: unasked.flatMap((rewrite) => rewrite.changed) });
+          deps.say(`fix rung: refused — ${reason}: ${unasked.map((rewrite) => rewrite.path).join(", ")}`);
+          return true;
+        } catch (error) {
+          const unreadable = String(error);
+          deps.log("fix.test_expectation_read_error", { round_id: roundId, strike: attempt, round, head_sha: head,
+            base_sha: base, reason: "expectation_diff_unreadable_round_continues", error: unreadable });
+          deps.say(`fix rung: the test-expectation diff ${base}..${head} is unreadable; round continues: ${unreadable}`);
+          return false;
+        }
+      };
       const pushScopeRepair = async (): Promise<string | undefined> => {
         if (roundStartSha === undefined || currentMergeConflict !== undefined || harnessCommitRefused || !fixLeftEdits()) return undefined;
         const base = roundStartSha;
@@ -5658,6 +5704,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           partialHead = repair?.head;
           if (partialHead === undefined) return undefined;
           expectedHeadShaForPush = partialHead;
+          if (await refuseUnaskedExpectations(partialHead, base)) return undefined;
           const lease = opts.guardRoundHead && ownedSessionPushGuard === undefined ? roundPushBaseSha : undefined;
           const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, partialHead, lease, ownedSessionPushGuard),
             partialHead, "rung.strike");
@@ -5849,39 +5896,52 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       });
     }
 
-    // W1-T15064: a round never rewrites an existing test's expectation unless the finding it answers names that test.
+    let roundPush: FixRungOutcome | "refused" | undefined;
+    await selfCheckBeforePush();
+    // Check the final head after self-check commits and immediately before any push.
     const expectationBase = roundStartSha ?? priorHeadSha;
     if (expectedHeadShaForPush !== undefined && expectationBase !== undefined && expectedHeadShaForPush !== expectationBase) {
-      let unasked: Array<{ path: string; changed: string[] }>;
       try {
         const git = (args: string[]) => hostWorktreeGitAsync(opts.worktreePath, args);
         const head = expectedHeadShaForPush;
-        const paths = (await git(["diff", "--name-only", "-z", "--diff-filter=M", expectationBase, head, "--", "test/"]))
-          .split("\0").filter((path) => /\.test\.[cm]?[jt]s$/.test(path));
-        const changes = [];
-        for (const path of paths) {
-          changes.push({ path, base: await git(["show", `${expectationBase}:${path}`]), head: await git(["show", `${head}:${path}`]) });
+        const parents = (await git(["rev-list", "--parents", "-n", "1", head])).trim().split(/\s+/).slice(1);
+        const comparisonBase = parents.length > 1 && parents[0] === expectationBase ? parents[1]! : expectationBase;
+        const fields = (await git(["diff", "--name-status", "-z", "--find-renames=1%", comparisonBase, head, "--", "test/"]))
+          .split("\0").filter(Boolean);
+        const changes: Array<{ path: string; base: string; head: string; aliases?: string[] }> = [];
+        for (let i = 0; i < fields.length;) {
+          const status = fields[i++]!;
+          if (status.startsWith("R") || status.startsWith("C")) {
+            const oldPath = fields[i++]!, newPath = fields[i++]!;
+            if (!/\.test\.[cm]?[jt]s$/.test(oldPath) && !/\.test\.[cm]?[jt]s$/.test(newPath)) continue;
+            changes.push({ path: oldPath, aliases: [newPath], base: await git(["show", `${comparisonBase}:${oldPath}`]),
+              head: await git(["show", `${head}:${newPath}`]) });
+            continue;
+          }
+          const path = fields[i++]!;
+          if (!/\.test\.[cm]?[jt]s$/.test(path)) continue;
+          if (status === "D") changes.push({ path, base: await git(["show", `${comparisonBase}:${path}`]), head: "" });
+          else if (status !== "A") changes.push({ path, base: await git(["show", `${comparisonBase}:${path}`]),
+            head: await git(["show", `${head}:${path}`]) });
         }
-        unasked = unaskedExpectationRewrites(rewrittenTestExpectations(changes), JSON.stringify(evidence));
+        const findingText = answeredExpectationFindingText({ unmetCriteria: unmet,
+          verifiedFindings: evidence.review?.findings ?? [], failingChecks: evidence.ciFailures ?? [] });
+        const unasked = unaskedExpectationRewrites(rewrittenTestExpectations(changes), findingText);
+        if (unasked.length > 0) {
+          const reason = "the round changed a test expectation the answered finding does not name";
+          deps.log("fix.commit_refused", { round_id: roundId, strike: attempt, round, head_sha: priorHeadSha, reason,
+            tests: unasked.map((rewrite) => rewrite.path), changed_assertions: unasked.flatMap((rewrite) => rewrite.changed) });
+          deps.say(`fix rung: refused — ${reason}: ${unasked.map((rewrite) => rewrite.path).join(", ")}`);
+          logFixDone();
+          return finish({ outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason });
+        }
       } catch (error) {
-        // The base is this worktree's own HEAD at round start, so an unreadable diff means git cannot read
-        // the round's head here, and the push below sends that same head. Say so rather than pass silently.
         const unreadable = String(error);
-        deps.say(`fix rung: the test-expectation diff ${expectationBase}..${expectedHeadShaForPush} is unreadable: ${unreadable}`);
-        unasked = [];
-      }
-      if (unasked.length > 0) {
-        const reason = "the round changed a test expectation the answered finding does not name";
-        deps.log("fix.commit_refused", { round_id: roundId, strike: attempt, round, head_sha: priorHeadSha, reason,
-          tests: unasked.map((rewrite) => rewrite.path), changed_assertions: unasked.flatMap((rewrite) => rewrite.changed) });
-        deps.say(`fix rung: refused — ${reason}: ${unasked.map((rewrite) => rewrite.path).join(", ")}`);
-        logFixDone();
-        return finish({ outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason });
+        deps.log("fix.test_expectation_read_error", { round_id: roundId, strike: attempt, round, head_sha: expectedHeadShaForPush,
+          base_sha: expectationBase, reason: "expectation_diff_unreadable_round_continues", error: unreadable });
+        deps.say(`fix rung: the test-expectation diff ${expectationBase}..${expectedHeadShaForPush} is unreadable; round continues: ${unreadable}`);
       }
     }
-
-    let roundPush: FixRungOutcome | "refused" | undefined;
-    await selfCheckBeforePush();
     if (expectedHeadShaForPush && fixOutcome?.kind === "FIXED") {
       workerProofResults = await runWorkerAcceptanceProofs({ worktreePath: opts.worktreePath,
         headSha: expectedHeadShaForPush, criteria: unmet }, opts.workerProofIo);
