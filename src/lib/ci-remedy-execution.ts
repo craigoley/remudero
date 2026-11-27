@@ -186,10 +186,16 @@ const decodeAnnotation = (text: string) => text.replace(/%0D/g, "\r").replace(/%
 function reportLines(logTail: string): { lines: string[]; annotationHeads: string[]; failedExitSteps: string[] } {
   const lines: string[] = [], annotationHeads: string[] = [], failedExitSteps: string[] = [];
   let currentStep = "";
+  let currentScript: string[] = [];
+  let inRunGroup = false;
   for (const raw of logTail.split(/\r?\n/)) {
     const line = raw.replace(LOG_PREFIX, "");
     const run = /^##\[group\]Run\s+(.+)$/.exec(line);
-    if (run) currentStep = run[1]!;
+    if (run) { currentStep = run[1]!; currentScript = [run[1]!]; inRunGroup = true; }
+    else if (line === "##[endgroup]") {
+      currentStep = currentScript.join("\n");
+      inRunGroup = false;
+    } else if (inRunGroup) currentScript.push(line);
     const annotation = ERROR_ANNOTATION.exec(line);
     if (!annotation) { lines.push(line); continue; }
     const decoded = decodeAnnotation(annotation[1]!).split(/\r?\n/);
@@ -218,7 +224,7 @@ function censusReportIsInherited(logTail: string): boolean {
     // command is the census itself; an unknown or differently named step can hide an unmarked red in the same job.
     && failedExitAnnotations.length <= 1
     && (failedExitAnnotations.length === 0 || (failedExitSteps.length === 1
-      && /expiring-fixture-census/.test(failedExitSteps[0]!)))
+      && /(?:^|[\s/])node\s+scripts\/expiring-fixture-census\.mjs(?:\s|$)/m.test(failedExitSteps[0]!)))
     && annotationHeads.every((head) => INHERITABLE_HEADLINE.test(head) || /^Process completed with exit code \d+\.?$/.test(head));
 }
 
@@ -341,15 +347,21 @@ function loopBindingSources(tokens: readonly SourceToken[]): Map<string, Set<str
     let declaration = open + 1;
     if (!["const", "let", "var"].includes(tokens[declaration]?.text ?? "")) continue;
     declaration++;
-    if (tokens[declaration]?.text !== "{") continue;
-    const patternEnd = closing(tokens, declaration);
+    const pattern = tokens[declaration]!.text;
+    if (!OPENERS.has(pattern) && !isName(tokens[declaration])) continue;
+    const patternEnd = OPENERS.has(pattern) ? closing(tokens, declaration) : declaration;
     let of = patternEnd + 1;
     if (tokens[of]?.text !== "of" || !isName(tokens[of + 1])) continue;
     const iterable = tokens[of + 1]!.text;
-    for (let at = declaration + 1; at < patternEnd; at++) {
-      if (!isName(tokens[at]) || tokens[at - 1]?.text === ":") continue;
-      const local = tokens[at + 1]?.text === ":" ? tokens[at + 2]?.text : tokens[at]!.text;
-      if (!isName(tokens[tokens[at + 1]?.text === ":" ? at + 2 : at])) continue;
+    const bindings = pattern === "{" || pattern === "["
+      ? tokens.slice(declaration + 1, patternEnd).flatMap((token, offset, body) => {
+        const at = declaration + 1 + offset;
+        if (!isName(token) || body[offset - 1]?.text === ":") return [];
+        const localAt = tokens[at + 1]?.text === ":" ? at + 2 : at;
+        return isName(tokens[localAt]) ? [tokens[localAt]!.text] : [];
+      }) : [];
+    const names = pattern === "{" || pattern === "[" ? bindings : [tokens[declaration]!.text];
+    for (const local of names) {
       const bound = sources.get(local!) ?? new Set<string>();
       bound.add(iterable);
       sources.set(local!, bound);

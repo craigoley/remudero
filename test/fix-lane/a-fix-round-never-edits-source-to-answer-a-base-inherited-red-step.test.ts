@@ -59,7 +59,11 @@ function censusLog(reported: ReturnType<typeof crossing>[], drops: Record<string
 
 /** The census step's job log as GitHub serves it: a step group, the report on stdout, the runner's multi-line
  *  rendering of the `::error` annotation, the exit line, every line stamped with its time. */
-const jobLog = (report: string) => stamped(["##[group]Run node scripts/expiring-fixture-census.mjs", "##[endgroup]", report,
+const jobLog = (report: string) => stamped(["##[group]Run set -o pipefail", "  set -o pipefail",
+  '  mkdir -p "$RUNNER_TEMP/gate-reports"',
+  '  if [ "${GITHUB_EVENT_NAME}" = "merge_group" ]; then git update-ref refs/remotes/origin/main "$GATE_BASE"; fi',
+  "  node scripts/expiring-fixture-census.mjs 2>&1 | tee \"$RUNNER_TEMP/gate-reports/expiring-fixture-census.log\"",
+  "##[endgroup]", report,
   `##[error]${report}`, "##[error]Process completed with exit code 1."].join("\n"));
 const crossingLines = (log: string) => log.split("\n").filter((line) => / goes red /.test(line)).length;
 
@@ -237,6 +241,16 @@ test("W1-T15064 criterion 2: a changed test expectation is refused unless its fi
   const casesHead = casesBase.replace("expected: false", "expected: true");
   assert.deepEqual(rewrittenTestExpectations([{ path: "test/console-review-three-state.test.ts", base: casesBase, head: casesHead }]), [
     { path: "test/console-review-three-state.test.ts", changed: ["strictEqual(f(), expected) (reads changed cases)"] },
+  ]);
+  const tupleBase = `import assert from "node:assert/strict";\nconst cases = [["origin", "portal"]];\nfor (const [origin, want] of cases) assert.deepEqual(resolve(origin), want);\n`;
+  assert.deepEqual(rewrittenTestExpectations([{ path: "test/resolve-owner-repo-names-its-failure.test.ts", base: tupleBase,
+    head: tupleBase.replace("portal", "other") }]), [
+    { path: "test/resolve-owner-repo-names-its-failure.test.ts", changed: ["assert.deepEqual(resolve(origin), want) (reads changed cases)"] },
+  ]);
+  const objectVariableBase = `import { strictEqual } from "node:assert/strict";\nconst cases = [{ expected: false }];\nfor (const c of cases) strictEqual(f(), c.expected);\n`;
+  assert.deepEqual(rewrittenTestExpectations([{ path: "test/containment.test.ts", base: objectVariableBase,
+    head: objectVariableBase.replace("expected: false", "expected: true") }]), [
+    { path: "test/containment.test.ts", changed: ["strictEqual(f(), c.expected) (reads changed cases)"] },
   ]);
   // A finding for a longer, similarly named file does not name this test.
   assert.deepEqual(unaskedExpectationRewrites(multi, "test/fix-rung-inbox.test.ts"), multi);
