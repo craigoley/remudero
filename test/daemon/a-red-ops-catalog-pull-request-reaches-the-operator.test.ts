@@ -14,7 +14,8 @@ import { test } from "node:test";
 import { OPS_PR_RED_STALLED_STEP, OPS_PR_WATCH_UNREADABLE_STEP, firstErrorLine, readOpsPrJobLog, watchOpsPullRequests } from "#src/lib/ops-pr-watch.js";
 import type { Escalation } from "#src/lib/escalate.js";
 import { appendLedger, rotateLedger } from "#src/lib/ledger.js";
-import { readLedgerUnionRawLinesSync } from "#src/lib/ledger-union.js";
+import { readLedgerUnionRawLinesAsync, readLedgerUnionRawLinesSync } from "#src/lib/ledger-union.js";
+import { prReferentFromIssueText } from "#src/lib/escalate.js";
 
 const REPO = "acme/remudero-ops";
 const NOW = Date.parse("2026-11-25T18:20:00Z");
@@ -46,6 +47,9 @@ test("W1-T14865 criterion 1: a required check that failed over an hour ago on an
   const { rows, escalations } = await watch("2026-11-24T22:16:41Z");
   assert.equal(escalations.length, 1, "one operator escalation");
   assert.match(escalations[0]!.summary, /#748: required check ops-gate/);
+  assert.match(escalations[0]!.detail, /ops catalog pull request 748 in acme\/remudero-ops/i);
+  assert.equal(prReferentFromIssueText(escalations[0]!.detail), undefined,
+    "the ops catalog pull request must not be treated as the product repository's PR 748");
   assert.equal(escalations[0]!.headSha, HEAD);
   const red = rows.filter((r) => r.step === OPS_PR_RED_STALLED_STEP);
   assert.equal(red.length, 1);
@@ -75,6 +79,19 @@ test("W1-T14865 criterion 1: the production job-log adapter preserves the plain-
   assert.equal(firstErrorLine(body), "raw log text");
 });
 
+test("W1-T14865 criterion 1: production plain-text logs supply the first error in a real watch escalation", async () => {
+  const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
+  const escalations: Escalation[] = [];
+  const result = await watchOpsPullRequests({ repository: REPO, api: api("2026-11-24T22:16:41Z"),
+    readJobLog: (path) => readOpsPrJobLog(path, async () => ({ stdout: "2026-11-24T22:16:40.0Z ##[error]from production transport\n", stderr: "" })),
+    nowMs: NOW, ledgerLines: [], log: (step, extra) => rows.push({ step, extra }),
+    escalate: (value) => { escalations.push(value); return "https://example.test/ops-alert"; } });
+  assert.equal(result.escalated.length, 1);
+  assert.match(escalations[0]!.detail, /First error line: from production transport/);
+  assert.equal(rows.find((row) => row.step === OPS_PR_RED_STALLED_STEP)?.extra.first_error_line,
+    "from production transport");
+});
+
 test("W1-T14865 criterion 1: an escalation without a durable URL does not consume the head", async () => {
   const rows: Array<{ step: string; extra: Record<string, unknown> }> = [];
   const result = await watchOpsPullRequests({ repository: REPO, api: api("2026-11-24T22:16:41Z"),
@@ -98,7 +115,7 @@ test("W1-T14865 criterion 2: once-per-head memory survives a real ledger rotatio
   const dir = mkdtempSync(join(tmpdir(), "ops-pr-watch-rotation-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const ledger = join(dir, "ledger.ndjson");
-  appendLedger(ledger, { step: OPS_PR_RED_STALLED_STEP, pr_number: 748, head_sha: HEAD, ts: "2026-11-24T23:30:00Z" },
+  appendLedger(ledger, { step: OPS_PR_RED_STALLED_STEP, run_id: "test-run", task_id: "OPS-PR-748", pr_number: 748, head_sha: HEAD, ts: "2026-11-24T23:30:00Z" },
     { actor: () => "operator" });
   const rotation = rotateLedger(ledger, { ceilingBytes: 1, smoothingWindowMs: 0 });
   assert.equal(rotation.rotated, true, "the fixture must exercise archive rotation");
@@ -110,12 +127,20 @@ test("W1-T14865 criterion 2: once-per-head memory survives a real ledger rotatio
   assert.equal(second.rows.filter((row) => row.step === OPS_PR_RED_STALLED_STEP).length, 0);
   const { opsPullRequestWatchTick } = await import("#src/lib/ops-pr-watch.js");
   let tickResult: Awaited<ReturnType<typeof watchOpsPullRequests>> | undefined;
+  let archiveReadFinished = false;
   const tick = opsPullRequestWatchTick({ repository: () => REPO, api: api("2026-11-24T22:16:41Z"),
-    ledgerLines: () => union.rawLines, escalate: () => "https://example.test/should-not-be-created" },
+    ledgerLines: async () => {
+      const read = await readLedgerUnionRawLinesAsync(dir, { keep: (line) => line.includes(OPS_PR_RED_STALLED_STEP), refuseIncomplete: true });
+      archiveReadFinished = true;
+      assert.equal(read.ok, true);
+      return read.rawLines;
+    }, escalate: () => "https://example.test/should-not-be-created" },
   { clock: { now: () => NOW }, ledgerLines: () => [], log: () => {}, run: async (input) => (tickResult = await watchOpsPullRequests(input)) });
   const started = tick();
   assert.ok(started);
+  assert.equal(archiveReadFinished, false, "archive traversal starts detached from the daemon tick");
   await started;
+  assert.equal(archiveReadFinished, true);
   assert.equal(tickResult?.escalated.length, 0, "the daemon tick reads durable per-head memory before watching");
 });
 
@@ -174,11 +199,12 @@ test("W1-T14865: the daemon tick reads at most once per interval and never while
   const first = tick();
   assert.ok(first, "the first tick starts a read");
   assert.equal(tick(), undefined, "a read in flight is not started again");
+  await new Promise<void>((resolve) => setImmediate(resolve));
   release(); await first;
   now += OPS_PR_WATCH_EVERY_MS - 1;
   assert.equal(tick(), undefined, "within the interval nothing starts");
   now += 1;
-  const second = tick(); assert.ok(second); release(); await second;
+  const second = tick(); assert.ok(second); await new Promise<void>((resolve) => setImmediate(resolve)); release(); await second;
   assert.equal(runs, 2);
   const thrown = opsPullRequestWatchTick({ repository: () => REPO, api: api("x") },
     { clock: { now: () => now }, ledgerLines: () => [], log: (step) => rows.push(step), run: async () => { throw new Error("boom"); } });

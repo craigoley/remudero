@@ -85,7 +85,7 @@ import { appendLedger, markDaemonProcessActor } from "../../lib/ledger.js";
 import { clockFromMillisFn, fixedClock, systemClock, type Clock } from "../../lib/clock.js";
 import { getHeapStatistics } from "node:v8";
 import { sweepInflightLocksWithReceipts } from "../../lib/benchmark-run.js";
-import { ledgerMemoHolders, readLedgerUnionRawLinesSync, readLedgerUnionRecordsSync } from "../../lib/ledger-union.js";
+import { ledgerMemoHolders, readLedgerUnionRawLinesAsync, readLedgerUnionRawLinesSync, readLedgerUnionRecordsSync } from "../../lib/ledger-union.js";
 import { childMeasurementCadenceSpawn, measurementCadenceChildRunner } from "../../lib/measurement-cadence.js";
 import { loadPlan, type Plan } from "../../lib/plan.js";
 import { createPlanTaskMover, opsCatalogOutcomeReader, planTaskMovePorts, type PlanTaskMoveFlag, type PlanTaskMoveSwitch } from "../../lib/plan-task-move-janitor.js";
@@ -2726,8 +2726,8 @@ export async function daemonCommand(
           readJobLog: readOpsPrJobLog,
           // Read this decision's rows from the live ledger and rotations. If an archive cannot
           // be read, refuse the watch pass instead of forgetting a prior escalation.
-          ledgerLines: () => {
-            const read = readLedgerUnionRawLinesSync(dirname(ledgerPathFor(config)), {
+          ledgerLines: async () => {
+            const read = await readLedgerUnionRawLinesAsync(dirname(ledgerPathFor(config)), {
               keep: isOpsPullRequestWatchRow, refuseIncomplete: true,
             });
             if (!read.ok) throw new Error(`ops pull request ledger history unreadable: ${read.unread.join(", ") || "incomplete"}`);

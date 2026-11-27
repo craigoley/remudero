@@ -36,7 +36,7 @@ export interface OpsPrWatchInput {
   /** The ledger's raw lines; a pull request already escalated at its head is not escalated again. */
   ledgerLines: readonly string[];
   log: (step: string, extra: Record<string, unknown>) => void;
-  /** Writes the operator inbox escalation and returns its url; absent, the ledger row is still written. */
+  /** Writes the operator inbox escalation and returns its url; a missing URL leaves the head eligible for retry. */
   escalate?: (escalation: Escalation) => unknown;
 }
 
@@ -101,7 +101,7 @@ function escalationFor(pull: RedStalledPull, repository: string): Escalation {
     taskId: `OPS-PR-${pull.prNumber}`,
     summary: `${repository} #${pull.prNumber}: required check ${pull.check} has been red since ${pull.failedAt}`,
     detail: [
-      `The ops catalog pull request ${pull.prUrl} has its required check \`${pull.check}\` red at head ${pull.headSha.slice(0, 9)},`,
+      `Ops catalog pull request ${pull.prNumber} in ${repository} has its required check \`${pull.check}\` red at head ${pull.headSha.slice(0, 9)},`,
       `concluded ${pull.failedAt}, with no push since. Ops pull requests have no fix lane, so nothing will repair it.`,
       ``,
       `First error line: ${pull.firstErrorLine ?? "(the job log was not readable)"}`,
@@ -183,8 +183,8 @@ export interface OpsPullRequestWatch {
   api: OpsCatalogApi;
   /** Plain-text transport for workflow job logs. */
   readJobLog?: (path: string) => Promise<string>;
-  /** Optional durable ledger-union reader, used to preserve once-per-head memory over rotation. */
-  ledgerLines?: () => readonly string[];
+  /** Async durable ledger-union reader, used off-loop to preserve once-per-head memory over rotation. */
+  ledgerLines?: () => readonly string[] | Promise<readonly string[]>;
   escalate?: (escalation: Escalation) => unknown;
 }
 
@@ -196,7 +196,7 @@ export interface OpsPullRequestWatch {
 export function opsPullRequestWatchTick(
   watch: OpsPullRequestWatch | undefined,
   ports: {
-    clock: Pick<Clock, "now">; ledgerLines: () => readonly string[]; log: (step: string, extra: Record<string, unknown>) => void;
+    clock: Pick<Clock, "now">; ledgerLines: () => readonly string[] | Promise<readonly string[]>; log: (step: string, extra: Record<string, unknown>) => void;
     /** The read itself: {@link watchOpsPullRequests}, passed in so the daemon's tick names what it runs. */
     run: (input: OpsPrWatchInput) => Promise<OpsPrWatchResult>;
   },
@@ -211,19 +211,13 @@ export function opsPullRequestWatchTick(
     if (repository === undefined) return undefined;
     lastAtMs = nowMs;
     inFlight = true;
-    let input: OpsPrWatchInput;
-    try {
-      input = { repository, api: watch.api, nowMs, ledgerLines: watch.ledgerLines?.() ?? ports.ledgerLines(), log: ports.log,
+    return Promise.resolve().then(async () => {
+      const ledgerLines = await (watch.ledgerLines?.() ?? ports.ledgerLines());
+      const input: OpsPrWatchInput = { repository, api: watch.api, nowMs, ledgerLines, log: ports.log,
         ...(watch.readJobLog ? { readJobLog: watch.readJobLog } : {}),
         ...(watch.escalate ? { escalate: watch.escalate } : {}) };
-    } catch (error) {
-      inFlight = false;
-      try { ports.log(OPS_PR_WATCH_UNREADABLE_STEP, { repository, reason: String((error as Error)?.message ?? error).slice(0, 300) }); }
-      catch (logError) { void logError; /* the watch is advisory; a lost row never stops the daemon */ }
-      return Promise.resolve();
-    }
-    return ports.run(input)
-      .then(() => undefined, (error: unknown) => {
+      await ports.run(input);
+    }).then(() => undefined, (error: unknown) => {
         try { ports.log(OPS_PR_WATCH_UNREADABLE_STEP, { repository, reason: String((error as Error)?.message ?? error).slice(0, 300) }); }
         catch (logError) { void logError; /* the watch is advisory; a lost row never stops the daemon */ }
       })
