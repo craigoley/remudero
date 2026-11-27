@@ -2453,8 +2453,10 @@ export async function runReview(host: ReviewCommandHost, args: {
     replayInput = { ...replayInput, publication_refusal: "terminal-publication-refused" };
     recordReplay(classifyReviewOutcome(replayInput));
     // W1-T15077: terminal status failures are outboxed for retry. Publish this head's private
-    // evidence now as well, so a later drain that posts the status cannot leave it behind.
-    if (task.catalog === "ops" && posted.reason?.startsWith("posting remudero-review failed and was not applied")) {
+    // evidence now as well, so a later drain that posts the status cannot leave it behind. W1-T15030: a post GitHub
+    // refused twice (token_unrenewable) leaves the same outbox entry, so it lands the evidence too.
+    if (task.catalog === "ops" && (posted.reason?.startsWith("posting remudero-review failed and was not applied") === true ||
+        posted.reason?.startsWith("token_unrenewable:") === true)) {
       await landFindings(verdict.capped === true);
     }
     // REFUSED, NOT SWALLOWED: postReviewStatusGuarded already ledgered
@@ -2759,6 +2761,23 @@ export function refreshReviewSubjectInstall(
   } finally {
     lock.release();
   }
+}
+
+/** W1-T15030: {@link refreshReviewSubjectInstall} whose escalation is ASYNC and awaited before this returns. staged-install
+ *  marks a lockfile hash escalated once, so an issue a quick review exit cut short would never be filed again.
+ *  `install` receives the recording escalation, as the default staged install does. */
+export async function refreshReviewSubjectInstallAsync(
+  repoDir: string,
+  lockPath: string,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  escalate: (failure: StagedInstallFailure) => Promise<unknown>,
+  install?: (repoDir: string, escalate: (failure: StagedInstallFailure) => void) => void,
+): Promise<void> {
+  const escalations: Promise<unknown>[] = [];
+  const recordEscalation = (failure: StagedInstallFailure): void => { escalations.push(escalate(failure)); };
+  refreshReviewSubjectInstall(repoDir, lockPath, log, recordEscalation,
+    install === undefined ? undefined : (dir) => install(dir, recordEscalation));
+  await Promise.all(escalations);
 }
 
 /** Result of {@link materializeReviewWorktree}: either a usable path, or a
@@ -3336,11 +3355,12 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
   const subjectRepoDir = subjectCheckout.repoDir;
   // W1-T4933: a satellite's managed checkout is the reviewer's install source too; only a validated one (never the test fallback).
   if (subjectCheckout.explicitTarget && subjectRepoDir !== repoRoot && (reviewSubject.ok || deps.refreshSubjectInstall !== undefined)) {
-    refreshReviewSubjectInstall(
+    // W1-T15030: the async escalation is awaited, so a quick review exit cannot end the process before the issue exists.
+    await refreshReviewSubjectInstallAsync(
       subjectRepoDir,
       join(config.root, "state", `managed-checkout-${repo}.lock`),
       log,
-      (failure) => void tryEscalateAsync(managedCheckoutInstallEscalation(failure, reviewKey, runId),
+      (failure) => tryEscalateAsync(managedCheckoutInstallEscalation(failure, reviewKey, runId),
         { issues: renewingIssueGateway(ghIssueGatewayAsync(owner, repo), { log }), ledgerPath, runId }),
       deps.refreshSubjectInstall,
     );

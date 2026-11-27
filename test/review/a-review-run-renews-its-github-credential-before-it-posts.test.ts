@@ -7,8 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
-import { failureRecordingPoster, renewingIssueGateway, reviewCommand, type ReviewCommandDeps, type ReviewCommandHost, runReview,
-  withdrawAfterPublication, withdrawArmIfVerdictRefusesAsync } from "#src/cli/commands/review.js";
+import { failureRecordingPoster, refreshReviewSubjectInstallAsync, renewingIssueGateway, reviewCommand, type ReviewCommandDeps,
+  type ReviewCommandHost, runReview, withdrawAfterPublication, withdrawArmIfVerdictRefusesAsync } from "#src/cli/commands/review.js";
 import { disarmAutoMergeAsync } from "#src/lib/arm-auto-merge.js";
 import { clockFromMillisFn, fixedClock } from "#src/lib/clock.js";
 import type { Config } from "#src/lib/config.js";
@@ -16,6 +16,7 @@ import { startInstallationTokenRefresh } from "#src/lib/github-app.js";
 import { appendLedger } from "#src/lib/ledger.js";
 import type { Mount } from "#src/lib/mounts.js";
 import type { AcceptanceCriterion } from "#src/lib/plan.js";
+import type { StagedInstallFailure } from "#src/lib/staged-install.js";
 import { holdReviewRunLive, postReviewPending, postReviewStatusGuarded, postUnreadTaskHoldGuarded, refreshReviewPublisherToken,
   renewReviewPublisherToken, reviewDecisionDigest, reviewInputDigest, reviewOwnerOrphaned } from "#src/lib/review.js";
 import { tryEscalateAsync } from "#src/lib/escalate.js";
@@ -78,6 +79,8 @@ const UNMET: AcceptanceCriterion[] = [{ claim: "VISIBLE-CLAIM the surface behave
  *  `refuse`: the terminal post answers 401 until the run renews its token (`renewAccepted`), or always. */
 async function reviewFailing(t: TestContext, opts: {
   token: string; refuse?: boolean; renewAccepted?: boolean; runId?: string;
+  /** An ops-catalog task, whose failed verdict lands its private findings through the recorded seam. */
+  catalog?: "ops";
   midRun?: (ledgerPath: string) => void;
   /** Runs while the run awaits its reviewer-code freshness read, after its first claim check. */
   duringFreshness?: (ledgerPath: string) => void;
@@ -91,11 +94,16 @@ async function reviewFailing(t: TestContext, opts: {
   const order: string[] = [];
   const logged: Array<Record<string, unknown>> = [];
   const renewals: Array<{ force?: boolean }> = [];
+  const landings: Array<{ headSha: string; content: string }> = [];
   try {
     return await withGhShim([...(opts.refuse === true ? [REFUSED_POST] : []), ...READS], async (shim) => {
       const verdict = await runReview(hostFor(), {
         owner: "acme", repo: "remudero", prUrl: PR_URL,
-        task: { id: "W1-T15030", acceptance: UNMET },
+        task: { id: "W1-T15030", acceptance: UNMET, ...(opts.catalog === undefined ? {} : { catalog: opts.catalog }) },
+        landReviewFindings: async (_stateDir, input) => {
+          landings.push({ headSha: input.headSha, content: input.content });
+          return { landed: true, files: [`reviews/pr-${input.prNumber}.md`] };
+        },
         report: "", settingsFile: join(root, "settings.json"), config: { claudeBin: "/bin/true", root } as Config,
         log: (step, extra = {}) => { logged.push({ ...extra, step }); }, say: () => {},
         account: (r: WorkerResult) => r, spawnReviewer: false, reviewerMount: MOUNT,
@@ -121,7 +129,7 @@ async function reviewFailing(t: TestContext, opts: {
         },
       });
       const terminalPosts = shim.calls().filter((call) => call.includes("-X POST") && call.includes("state=failure")).length;
-      return { verdict, order, renewals, terminalPosts, rows: [...readLedgerLines(ledgerPath), ...logged] };
+      return { verdict, order, renewals, terminalPosts, landings, rows: [...readLedgerLines(ledgerPath), ...logged] };
     });
   } finally {
     if (savedToken === undefined) delete process.env.GH_TOKEN;
@@ -213,6 +221,40 @@ test("W1-T15030 criterion 2: one renew-and-retry on 401, then a named refusal", 
   const other = { disableAuto: async () => { throw new Error("can't disable auto-merge"); }, say: () => {}, isMerged: () => false };
   assert.equal(await disarmAutoMergeAsync(PR_URL, other, renewal), "not-armed");
   assert.equal(renewed, 2);
+});
+
+test("W1-T15030 criterion 2: an ops task's terminal post refused twice still lands its private findings", async (t) => {
+  // W1-T15077 lands an outboxed terminal status's private findings at once; a token_unrenewable refusal leaves the same
+  // outbox entry for a later drain, so it must land them too (review of #21071, 2026-11-27).
+  const refused = await reviewFailing(t, { token: "old-token", refuse: true, catalog: "ops" });
+  assert.equal(refused.verdict.state, "failure", "fixture assumption: the review fails");
+  assert.ok(refused.rows.some((row) => row.step === "review.post_refused" && row.reason === "token_unrenewable"),
+    "fixture assumption: the terminal post was refused twice");
+  assert.equal(refused.landings.length, 1, "THE CLAIM: the refused terminal post still lands this head's private findings");
+  assert.equal(refused.landings[0]?.headSha, HEAD);
+  assert.ok(refused.landings[0]?.content.includes("State: failure"), refused.landings[0]?.content);
+  // Control: the same ops review whose renewed token is accepted lands its findings once, as before.
+  const recovered = await reviewFailing(t, { token: "old-token", refuse: true, renewAccepted: true, catalog: "ops" });
+  assert.equal(recovered.landings.length, 1, "a posted failed verdict lands once");
+});
+
+test("W1-T15030 criterion 2: a managed-checkout install escalation is awaited before the review goes on", async (t) => {
+  // The escalation renews its token on 401, so it is async; staged-install marks the lockfile escalated once, so an
+  // issue a quick review exit cut short is never filed again (review of #21071, 2026-11-27).
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t15030-install-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const repoDir = join(dir, "repos", "console");
+  mkdirSync(join(repoDir, "node_modules"), { recursive: true });
+  const failure: StagedInstallFailure = { repoDir, hash: "a".repeat(64), error: "npm ci exited 1: ETIMEDOUT" };
+  const filed: string[] = [];
+  await refreshReviewSubjectInstallAsync(repoDir, join(dir, "managed-checkout-console.lock"), () => {},
+    (f) => new Promise<void>((resolve) => { setTimeout(() => { filed.push(f.hash); resolve(); }, 25); }),
+    (_dir, escalate) => escalate(failure));
+  assert.deepEqual(filed, [failure.hash], "THE CLAIM: the issue is filed before the install refresh returns");
+  // No failure, no escalation.
+  await refreshReviewSubjectInstallAsync(repoDir, join(dir, "managed-checkout-console.lock"), () => {},
+    () => assert.fail("nothing failed"), () => {});
+  assert.deepEqual(filed, [failure.hash]);
 });
 
 /** A sweep fixture over one green PR whose pending status names `runId`, claimed `ageMin` minutes ago. `takeover`: that
