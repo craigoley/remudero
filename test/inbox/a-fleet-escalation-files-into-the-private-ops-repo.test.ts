@@ -20,6 +20,7 @@ import { productionIssueRevalidationPorts } from "#src/lib/issue-revalidation-ga
 import { attachEscalationConditions } from "#src/lib/tick-read-worker.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { hostAlertIssueGateway } from "#src/lib/launcher-host-alerts.js";
+import { instanceEscalationIssueRepositories } from "#src/lib/instance-gateway.js";
 import { createEscalationConversationReader } from "#src/lib/escalation-conversation.js";
 import { buildEscalationIndexSnapshot } from "#src/lib/escalation-conversation-index.js";
 import { escalationReplySubmissionKey, recordEscalationIntakeOutcome } from "#src/lib/escalation-correspondence.js";
@@ -246,6 +247,12 @@ test("W1-T14998 criterion 1: a fleet escalation opens its issue in the private o
   const code = `${CODE.owner}/${CODE.repo}`, repositories = escalationIssueRepositories(CODE.owner, CODE.repo, toOps);
   assert.deepEqual(repositories, [OPS, code]);
   assert.deepEqual(escalationIssueRepositories(CODE.owner, CODE.repo, nowhere), [code]);
+  // A managed instance's Console readers take the route its own state directory (the ledger's) names.
+  assert.deepEqual(withHostHome(t, undefined, () => instanceEscalationIssueRepositories(join(stateDir, "ledger.ndjson"), code)), [OPS, code]);
+  const bare = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14998-bare-`));
+  t.after(() => rmSync(bare, { recursive: true, force: true }));
+  assert.deepEqual(withHostHome(t, undefined, () => instanceEscalationIssueRepositories(join(bare, "ledger.ndjson"), code)), [code],
+    "control: an instance whose state names no destination reads only its code repository");
   const opsIssue = `https://github.com/${OPS}/issues/5`;
   const read: string[] = [];
   const readIssue = async (url: string) => { read.push(url); throw new Error("offline"); };

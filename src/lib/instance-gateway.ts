@@ -26,7 +26,7 @@ import { dirname, join } from "node:path";
 import { coldAnalyticsSnapshot, createAnalyticsSnapshotCache, type AnalyticsSnapshot, type AnalyticsSnapshotCache } from "./analytics-route.js";
 import { buildRecentRoute, buildStatusRoute, STALE_SOURCE_HEADER, type BoardDeps } from "./board.js";
 import { systemClock, type Clock } from "./clock.js";
-import { escalate, ghIssueGateway, issueUrlRepository, type IssueGateway } from "./escalate.js";
+import { escalate, escalationDestinationAt, escalationIssueRepositories, ghIssueGateway, issueUrlRepository, type IssueGateway } from "./escalate.js";
 import { evaluateFleetLiveness, livenessEscalation, readLivenessRows, type InstanceLiveness, type LivenessInstance, type ReadLastRows } from "./fleet-liveness.js";
 import { ghExec } from "./github-transport.js";
 import { appendLedger } from "./ledger.js";
@@ -268,14 +268,23 @@ function instanceEscalationConversationRoutes(
   root: InstanceStateRoot, repository: string, panel: { root: string; ledgerPath: string; issues: IssueCloser },
 ): Route[] {
   const threadStorePath = inboxThreadStorePath(root.root);
-  const readEscalationConversation = createEscalationConversationReader({ repository, threadStorePath, ledgerPath: root.ledgerPath });
-  const readIndex = createEscalationConversationIndexReader({ repository, threadStorePath,
+  // W1-T14998: this instance's escalations are filed where its own state directory routes them, beside its legacy ones.
+  const issueRepositories = instanceEscalationIssueRepositories(root.ledgerPath, repository);
+  const readEscalationConversation = createEscalationConversationReader({ repository, issueRepositories, threadStorePath, ledgerPath: root.ledgerPath });
+  const readIndex = createEscalationConversationIndexReader({ repository, issueRepositories, threadStorePath,
     readBoard: () => ({ state: "unavailable", reason: "no cached board snapshot for this instance" }) });
   return [
     buildEscalationConversationRoute(readEscalationConversation),
     buildEscalationConversationIndexRoute(readIndex),
-    buildEscalationReplyRoute({ ...panel, threadStorePath, readEscalationConversation }),
+    buildEscalationReplyRoute({ ...panel, threadStorePath, readEscalationConversation, escalationFeedbackRepository: repository }),
   ];
+}
+
+/** W1-T14998 — the repositories an instance's escalation issues live in: where its state directory (the ledger's) routes
+ *  them, then its own code repository's legacy ones. */
+export function instanceEscalationIssueRepositories(ledgerPath: string, repository: string): string[] {
+  const [owner, repo] = repository.split("/") as [string, string];
+  return escalationIssueRepositories(owner, repo, escalationDestinationAt(dirname(ledgerPath)));
 }
 
 /** Core's routes under its prefix, its conversation routes replaced by the identity-checked contract over the SAME handlers. */
