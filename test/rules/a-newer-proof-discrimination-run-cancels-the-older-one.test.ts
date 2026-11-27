@@ -1,3 +1,4 @@
+// @census-reads: .github/workflows/proof-discrimination-gate.yml test/helpers/repo-root.ts test/rules/a-newer-proof-discrimination-run-cancels-the-older-one.test.ts — the one workflow, the root helper, itself.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFile } from "node:fs/promises";
