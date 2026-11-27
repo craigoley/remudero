@@ -45,7 +45,7 @@ import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
 import { runShadowJudge, SHADOW_JUDGE_MAX_BUDGET_USD } from "../../lib/shadow-judge.js";
 import type { ReviewTriagePullRequest } from "../../lib/review-triage.js";
 import { isTestRunner } from "../../lib/live-write-guard.js";
-import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, markUnbackedBodyGuards, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, postUnreadTaskHoldGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type CriterionVerdict, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure, type ReviewAdmission } from "../../lib/review.js";
+import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyVerdictStability, applyReviewStatusHistoryGuard, readReviewStatusHistory, type ReviewStatusHistoryReader, buildReviewPrompt, reviewScopeContext, reviewPlacementAdmitted, cappedAnnotation, cappedOverrideFromLedger, UNCERTIFIED_PASS_HELD, cappedWordingApplies, decideAutoMergeArm, fetchPrLifecycle, fetchPrLifecycleAsync, floorDegradedAnnotation, judgeRubric, rubricAdvisorySection, scopeAdvisorySection, inverseScopeAdvisorySection, unwiredExportAdvisorySection, keywordOnlyAnnotation, markUnbackedBodyGuards, parseAcceptanceBlock, parseReviewerUnable, parseReviewerVerdictClauses, parseReviewerVerdicts, postReviewCommentGuarded, postReviewPending, postReviewStatus, postReviewStatusGuarded, postUnreadTaskHoldGuarded, reviewDescriptionWithCodeProvenance, reviewCodeShaFromDescription, semanticJudgementRefusal, reviewPendingDescriptionWithOwner, reviewStatusOwnerRun, reviewFollowUps, followUpFindingsSection, readReviewStatusEntry, reviewStatusEntryFromCombined, priorReviewVerdictFromLedger, priorHeadFindingsFromLedger, priorHeadReviewRows, reviewLedgerKeyFor, UNFILED_RUN_SENTINEL, planOnlyDiff, reviewerOutcome, reviewerRerunDecision, reviewerVerdictContract, reviewEvidenceStrength, claimReviewDecision, preparePromisedReviewDecision, reviewTaskIdEvidenceAsync, satelliteReservationRead, reviewContractDigest, reviewTaskNarrative, type ReviewTaskNarrativeInput, reviewInputDigest, reviewLedgerLegibilityFields, reviewLedgerReasons, unmetReviewCriteria, proofConcludedNothing, resolvePlanCriteriaAtHeadAsync, type PlanCriteriaAtHeadDivergence, type CriterionVerdict, type ReviewVerdict, type PlanLintOutcome, type ReviewEvaluatorProvenance, type ReviewStatusHistory, type PriorReproducedReviewFailure, type ReviewAdmission } from "../../lib/review.js";
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
@@ -996,7 +996,7 @@ export function opsReviewCommentBody(state: string, acceptance: readonly Accepta
   const marks = visibleCriteria([...acceptance]).map(criterion => {
     const index = acceptance.indexOf(criterion);
     const judged = criteria[index]?.claim === criterion.claim ? criteria[index] : criteria.find(c => c.claim === criterion.claim);
-    const mark = judged === undefined || !judged.met && judged.proof_exec === "inconclusive_load" ? "UNDETERMINED"
+    const mark = judged === undefined || !judged.met && proofConcludedNothing(judged.proof_exec) ? "UNDETERMINED"
       : judged.met ? "PASS" : "FAIL";
     return `- ${mark}: ${criterion.claim}`;
   });
@@ -1015,7 +1015,9 @@ export interface OpsReviewRecord {
   state: string;
   review_decision_digest: string;
   criteria: Array<{ index: number; claim: string; met: boolean; proof_exec: string; proof: string; reason: string;
-    proof_failure_output?: string }>;
+    proof_failure_output?: string;
+    /** W1-T15100: a failed sandbox start check's stderr, exit code or signal, and each bind source's state. */
+    sandbox_start_failure?: { stderr: string; exit_code: number | null; signal: string | null; bind_sources: Array<{ path: string; existed: boolean }> } }>;
   reasons: string[];
   findings: Array<{ criterion_index: number; category: string; severity: string; mechanism: string; remedy: string | null;
     anchor: FindingCapture["findings"][number]["anchor"] }>;
@@ -1028,7 +1030,10 @@ export function opsReviewRecord(input: { taskId: string; prUrl: string; headSha:
     review_decision_digest: input.decisionDigest,
     criteria: input.criteria.flatMap((c, i) => c.holdout ? [] : [{ index: i + 1, claim: c.claim, met: c.met,
       proof_exec: c.proof_exec, proof: c.proof, reason: c.reason,
-      ...(c.proofFailureOutput !== undefined ? { proof_failure_output: c.proofFailureOutput } : {}) }]),
+      ...(c.proofFailureOutput !== undefined ? { proof_failure_output: c.proofFailureOutput } : {}),
+      ...(c.sandboxStartFailure !== undefined ? { sandbox_start_failure: { stderr: c.sandboxStartFailure.stderr,
+        exit_code: c.sandboxStartFailure.exitCode ?? null, signal: c.sandboxStartFailure.signal ?? null,
+        bind_sources: c.sandboxStartFailure.bindSources.map((b) => ({ path: b.path, existed: b.existed })) } } : {}) }]),
     reasons: [...input.reasons],
     findings: input.findings.filter(f => input.criteria[f.criterion - 1]?.holdout !== true).map(f => ({
       criterion_index: f.criterion, category: f.category, severity: f.severity, mechanism: f.mechanism, remedy: f.remedy,
