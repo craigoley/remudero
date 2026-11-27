@@ -172,9 +172,11 @@ test("W1-T15064 criterion 1: an all-inherited red step dispatches no source edit
   // and the annotation message alone, which is what a log read that falls back to annotations carries.
   const rendered = stamped(inheritedLog.replace(/^::error title=expiring-fixture-census::/m, "##[error]"));
   const reportOnly = inheritedLog.split("\n::error")[0]!;
-  for (const logTail of [stamped(inheritedLog), rendered, reportOnly, `${rendered}\n##[error]Process completed with exit code 1.`]) {
-    assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail }]).inherited, true, logTail.slice(0, 200));
+  for (const [shape, logTail] of [["stamped", stamped(inheritedLog)], ["rendered", rendered], ["report-only", reportOnly]] as const) {
+    assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail }]).inherited, true, `${shape}: ${logTail.slice(0, 200)}`);
   }
+  assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: `${rendered}\n##[error]Process completed with exit code 1.` }]).inherited, false,
+    "a generic failed exit without the job step heading is ambiguous");
   // Any doubt dispatches as before: a crossing the diff planted, a population drop the base is not charged with,
   // another failure in the log, another error annotation, or no failure at all.
   const planted = censusLog([crossing("test/a.test.ts", 0.4, true), crossing("test/b.test.ts", 0.6, false)]);
@@ -190,6 +192,11 @@ test("W1-T15064 criterion 1: an all-inherited red step dispatches no source edit
   assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: dropOnly.log }]).inherited, false);
   assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: `${inheritedLog}\nnot ok 3 - inbox` }]).inherited, false);
   assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: `${rendered}\n##[error]tsc: 2 errors` }]).inherited, false);
+  assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: `${rendered}\n##[error]Process completed with exit code 1.\n##[error]Process completed with exit code 1.` }]).inherited, false,
+    "a second failed-step exit in the same job means the census is not the only red step");
+  const otherStepFailed = `${rendered}\n##[group]Run npm run lint-plan\n##[endgroup]\n##[error]Process completed with exit code 1.`;
+  assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: otherStepFailed }]).inherited, false,
+    "a generic failure attributed to another named job step cannot be explained by the inherited census");
   assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: inheritedLog },
     { name: "unit", logTail: "✖ inbox released asks" }]).inherited, false);
   assert.equal(baseInheritedRedSteps([]).inherited, false);
@@ -225,6 +232,14 @@ test("W1-T15064 criterion 2: a changed test expectation is refused unless its fi
   assert.deepEqual(multi, [{ path: TEST, changed: ["assert.deepEqual(rows, [1, 2])"] }]);
   assert.deepEqual(unaskedExpectationRewrites(multi, "fails in inbox.test.ts"), []);
   assert.deepEqual(unaskedExpectationRewrites(multi, "fails in src/inbox.ts"), multi);
+  // Named assert imports count as assertion heads, and a destructured loop value inherits changes to its source table.
+  const casesBase = `import { strictEqual } from "node:assert/strict";\nconst cases = [{ expected: false }];\nfor (const { expected } of cases) strictEqual(f(), expected);\n`;
+  const casesHead = casesBase.replace("expected: false", "expected: true");
+  assert.deepEqual(rewrittenTestExpectations([{ path: "test/console-review-three-state.test.ts", base: casesBase, head: casesHead }]), [
+    { path: "test/console-review-three-state.test.ts", changed: ["strictEqual(f(), expected) (reads changed cases)"] },
+  ]);
+  // A finding for a longer, similarly named file does not name this test.
+  assert.deepEqual(unaskedExpectationRewrites(multi, "test/fix-rung-inbox.test.ts"), multi);
 });
 
 const REFUSAL = "the round changed a test expectation the answered finding does not name";

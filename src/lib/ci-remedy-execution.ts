@@ -183,24 +183,29 @@ const ERROR_ANNOTATION = /^(?:##\[error\]|::error(?: [^:]*)?::)(.*)$/;
 const decodeAnnotation = (text: string) => text.replace(/%0D/g, "\r").replace(/%0A/g, "\n").replace(/%25/g, "%");
 
 /** A failing check's log as report lines; each error annotation is decoded, and its first line is kept apart. */
-function reportLines(logTail: string): { lines: string[]; annotationHeads: string[] } {
-  const lines: string[] = [], annotationHeads: string[] = [];
+function reportLines(logTail: string): { lines: string[]; annotationHeads: string[]; failedExitSteps: string[] } {
+  const lines: string[] = [], annotationHeads: string[] = [], failedExitSteps: string[] = [];
+  let currentStep = "";
   for (const raw of logTail.split(/\r?\n/)) {
     const line = raw.replace(LOG_PREFIX, "");
+    const run = /^##\[group\]Run\s+(.+)$/.exec(line);
+    if (run) currentStep = run[1]!;
     const annotation = ERROR_ANNOTATION.exec(line);
     if (!annotation) { lines.push(line); continue; }
     const decoded = decodeAnnotation(annotation[1]!).split(/\r?\n/);
     annotationHeads.push(decoded[0]!);
+    if (/^Process completed with exit code \d+\.?$/.test(decoded[0]!)) failedExitSteps.push(currentStep);
     lines.push(...decoded);
   }
-  return { lines, annotationHeads };
+  return { lines, annotationHeads, failedExitSteps };
 }
 
 /** True when one failing check's log is the census's crossing report and the base owns every line of it. */
 function censusReportIsInherited(logTail: string): boolean {
-  const { lines, annotationHeads } = reportLines(logTail);
+  const { lines, annotationHeads, failedExitSteps } = reportLines(logTail);
   const headlines = lines.filter((line) => CENSUS_HEADLINE.test(line));
   const crossings = lines.filter((line) => CROSSING_LINE.test(line));
+  const failedExitAnnotations = annotationHeads.filter((head) => /^Process completed with exit code \d+\.?$/.test(head));
   // The headline states how many crossings the report lists. A log that holds fewer distinct crossing lines was cut
   // (the CI log region keeps only a few lines before each error), so what it lost is unknown, and unknown is not
   // inherited.
@@ -209,6 +214,11 @@ function censusReportIsInherited(logTail: string): boolean {
     && counts.size === 1 && new Set(crossings.map((line) => line.trim())).size === [...counts][0]
     && crossings.length > 0 && crossings.every((line) => line.includes(BASE_INHERITED_MARKER))
     && !lines.some((line) => POPULATION_DROP_LINE.test(line) || OTHER_RED.test(line))
+    // A job log can include several failed steps. A generic exit annotation counts only when its preceding Actions
+    // command is the census itself; an unknown or differently named step can hide an unmarked red in the same job.
+    && failedExitAnnotations.length <= 1
+    && (failedExitAnnotations.length === 0 || (failedExitSteps.length === 1
+      && /expiring-fixture-census/.test(failedExitSteps[0]!)))
     && annotationHeads.every((head) => INHERITABLE_HEADLINE.test(head) || /^Process completed with exit code \d+\.?$/.test(head));
 }
 
@@ -295,18 +305,77 @@ const sliceOf = (text: string, tokens: readonly SourceToken[], from: number, to:
 
 /** Each assertion in the file: `assert(...)`, `assert.x(...)` or `expect(...)` with its chained matchers, whole,
  *  whitespace collapsed, with the names its arguments read. */
+const ASSERTION_IMPORTS = new Set(["ok", "equal", "strictEqual", "deepEqual", "deepStrictEqual", "notEqual", "notStrictEqual",
+  "throws", "doesNotThrow", "match", "doesNotMatch", "fail", "ifError", "rejects", "doesNotReject"]);
+
+/** Local names imported as individual assertion functions from Node's assert modules, including aliases. */
+function namedAssertionImports(tokens: readonly SourceToken[]): Set<string> {
+  const names = new Set<string>();
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i]!.text !== "import") continue;
+    let from = i + 1;
+    while (from < tokens.length && tokens[from]!.text !== "from" && tokens[from]!.text !== ";") from++;
+    if (tokens[from]?.text !== "from" || !/^['\"](?:node:)?assert(?:\/strict)?['\"]$/.test(tokens[from + 1]?.text ?? "")) continue;
+    const open = tokens.findIndex((token, at) => at > i && at < from && token.text === "{");
+    if (open < 0) continue;
+    const close = closing(tokens, open);
+    for (let at = open + 1; at < close; at++) {
+      if (!ASSERTION_IMPORTS.has(tokens[at]!.text)) continue;
+      const local = tokens[at + 1]?.text === "as" ? tokens[at + 2]?.text : tokens[at]!.text;
+      if (isName(tokens[at]) && isName(tokens[tokens[at + 1]?.text === "as" ? at + 2 : at])) names.add(local!);
+    }
+    i = from;
+  }
+  return names;
+}
+
+/** Names bound by `for (const { expected } of cases)` inherit changes to the source table. */
+function loopBindingSources(tokens: readonly SourceToken[]): Map<string, Set<string>> {
+  const sources = new Map<string, Set<string>>();
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i]!.text !== "for") continue;
+    let open = i + 1;
+    if (tokens[open]?.text === "await") open++;
+    if (tokens[open]?.text !== "(") continue;
+    const closeParen = closing(tokens, open);
+    let declaration = open + 1;
+    if (!["const", "let", "var"].includes(tokens[declaration]?.text ?? "")) continue;
+    declaration++;
+    if (tokens[declaration]?.text !== "{") continue;
+    const patternEnd = closing(tokens, declaration);
+    let of = patternEnd + 1;
+    if (tokens[of]?.text !== "of" || !isName(tokens[of + 1])) continue;
+    const iterable = tokens[of + 1]!.text;
+    for (let at = declaration + 1; at < patternEnd; at++) {
+      if (!isName(tokens[at]) || tokens[at - 1]?.text === ":") continue;
+      const local = tokens[at + 1]?.text === ":" ? tokens[at + 2]?.text : tokens[at]!.text;
+      if (!isName(tokens[tokens[at + 1]?.text === ":" ? at + 2 : at])) continue;
+      const bound = sources.get(local!) ?? new Set<string>();
+      bound.add(iterable);
+      sources.set(local!, bound);
+    }
+    i = closeParen;
+  }
+  return sources;
+}
+
 function assertionsOf(text: string, tokens = sourceTokens(text)): Array<{ call: string; reads: Set<string> }> {
   const found: Array<{ call: string; reads: Set<string> }> = [];
+  const heads = new Set(["assert", "expect", ...namedAssertionImports(tokens)]);
+  const loopSources = loopBindingSources(tokens);
   for (let i = 0; i < tokens.length; i++) {
     const head = tokens[i]!;
-    if (!isName(head) || (head.text !== "assert" && head.text !== "expect") || tokens[i - 1]?.text === ".") continue;
+    if (!isName(head) || !heads.has(head.text) || tokens[i - 1]?.text === ".") continue;
     let at = i + 1;
     while (tokens[at]?.text === "." && isName(tokens[at + 1])) at += 2;
     if (tokens[at]?.text !== "(") continue;
     let end = closing(tokens, at);
     while (tokens[end + 1]?.text === "." && isName(tokens[end + 2]) && tokens[end + 3]?.text === "(") end = closing(tokens, end + 3);
     const reads = new Set<string>();
-    for (let k = at + 1; k < end; k++) if (isName(tokens[k]) && tokens[k - 1]?.text !== ".") reads.add(tokens[k]!.text);
+    for (let k = at + 1; k < end; k++) if (isName(tokens[k]) && tokens[k - 1]?.text !== ".") {
+      reads.add(tokens[k]!.text);
+      for (const source of loopSources.get(tokens[k]!.text) ?? []) reads.add(source);
+    }
     found.push({ call: sliceOf(text, tokens, i, end), reads });
     i = end;
   }
@@ -443,5 +512,10 @@ export async function readExpectationRewrites(git: (args: string[]) => Promise<s
 /** W1-T15064: a rewritten expectation stands only in a test the answered finding names, by path or file name. */
 export function unaskedExpectationRewrites(rewrites: ReadonlyArray<{ path: string; changed: string[] }>, findingText: string):
   Array<{ path: string; changed: string[] }> {
-  return rewrites.filter(({ path }) => !findingText.includes(path) && !findingText.includes(path.split("/").pop()!));
+  const containsPathToken = (text: string, candidate: string) => {
+    const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(?<![A-Za-z0-9_.-])${escaped}(?![A-Za-z0-9_.-])`).test(text);
+  };
+  return rewrites.filter(({ path }) => !containsPathToken(findingText, path)
+    && !containsPathToken(findingText, path.split("/").pop()!));
 }
