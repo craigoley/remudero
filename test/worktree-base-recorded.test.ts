@@ -23,9 +23,6 @@ import {
   worktreeRemove,
   writeRunLock,
 } from "#src/lib/worker.js";
-import { emptyHostProcessTable } from "#test/helpers/empty-process-table.js";
-
-emptyHostProcessTable(); // W1-T15026: the reapers here decide removals on an owned process table, not the host's
 
 // W1-T405 acceptance (4): the base commit is recorded when the worktree is created, so a
 // later refusal can be attributed without re-deriving it. `worktreeAdd` never asserted or

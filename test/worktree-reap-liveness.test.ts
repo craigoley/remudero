@@ -60,8 +60,6 @@ import { DEFAULT_LIVENESS_BOUND_MS } from "#src/lib/status.js";
 import type { Config } from "#src/lib/config.js";
 
 const MIN = 60_000;
-/** W1-T15026: nobody works in the fixture tree, said by the case rather than read off the host's `/proc`. */
-const cwdCensus = () => ({ state: "clear", scanned: 0 }) as const;
 const ago = (mins: number) => new Date(Date.now() - mins * MIN);
 // `newestActivityMs`/`reapStaleWorktrees` age-gate on REAL FILESYSTEM MTIMES, which
 // `scripts/clock-shift.mjs` could not shift before W1-T6035 (it moved only this process's `Date`),
@@ -158,7 +156,7 @@ test("REGRESSION LOCK: genuine debris â€” nothing recent anywhere in the tree â€
     for (const p of [deep, join(f.entry, "src", "lib"), join(f.entry, "src"), f.entry]) utimesSync(p, past, past);
     writeRunLock(f.entry, { pid: 999_999, run_id: "W1-T156", startedAt: "2026-07-20T19:17:23.863Z" });
 
-    const s = reapStaleWorktrees(f.root, { isPidAlive: () => false, branchIsLiveUpstream: () => false, cwdCensus });
+    const s = reapStaleWorktrees(f.root, { isPidAlive: () => false, branchIsLiveUpstream: () => false });
 
     assert.deepEqual(s.reaped, [f.entryName], "aged debris is still reclaimed");
     assert.deepEqual(s.kept, [], "and nothing was spuriously kept");
@@ -201,7 +199,7 @@ test("W1-T381 BITES: a lock naming a DEAD pid is not rescued by fresh nested act
     assert.equal(existsSync(runLockPath(f.entry)), true, "the lock exists before the pass");
 
     const s = reapStaleWorktrees(f.root, {
-      isPidAlive: () => false, pidNamespace: () => "pid:[4026531836]", branchIsLiveUpstream: () => false, cwdCensus,
+      isPidAlive: () => false, pidNamespace: () => "pid:[4026531836]", branchIsLiveUpstream: () => false,
     });
 
     assert.deepEqual(s.reaped, [f.entryName], "the dead pid's own lock outranks the fresh nested write");
@@ -498,7 +496,7 @@ test("keptReasons always pairs 1:1 with kept, across a mixed pass", () => {
     const live = mk("run-C-3", 120);
     writeRunLock(live, { pid: process.pid, run_id: "C", startedAt: "2026-07-20T00:00:00Z" }); // kept: live pid
 
-    const s = reapStaleWorktrees(root, { branchIsLiveUpstream: () => false, cwdCensus });
+    const s = reapStaleWorktrees(root, { branchIsLiveUpstream: () => false });
 
     assert.deepEqual(s.reaped, ["run-B-2"]);
     assert.deepEqual(s.kept.sort(), ["run-A-1", "run-C-3"]);

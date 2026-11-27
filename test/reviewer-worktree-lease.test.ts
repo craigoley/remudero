@@ -10,9 +10,6 @@ import { reviewAdvanceIsMaterial } from "#src/lib/self-sync.js";
 import { reapStaleWorktrees } from "#src/lib/worker.js";
 import { buildFreshTreeReviewRunner } from "#src/run-task.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
-import { emptyHostProcessTable } from "#test/helpers/empty-process-table.js";
-
-emptyHostProcessTable(); // W1-T15026: the reapers here decide removals on an owned process table, not the host's
 
 // check-proof transplants the test into main. An absent new production module is an explicit
 // failing feature assertion; a real import/toolchain error on a present module still propagates.

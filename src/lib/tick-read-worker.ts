@@ -1700,6 +1700,7 @@ function* ciFailuresSteps(
  * cancelledRequiredCheckNames, agreeing with fetchCiFailures/checksStateFromRollup.
  * Resolve jobId from URL or externalId (posted URLs may become /runs/<check-run-id>);
  * unresolved means a named requeueCheck no-op, never a guessed target.
+ * Run-scoped posts can supply an attempt only as aliases of a verified producer job.
  * W1-T2283 (#2794/#2841): requiredContexts must be readable but must not narrow cancellations.
  * ci-gate reports FAILURE when a non-required sibling such as coverage-ratchet is CANCELLED;
  * filtering by required context first would hide that cancellation.
@@ -1713,7 +1714,9 @@ export function cancelledRequiredChecks(
   if (names.size === 0) return [];
   const deduped = dedupeRollupByLatestAttempt(rollup ?? []);
   return deduped
-    .filter((c) => names.has(c.name ?? c.context ?? "unknown"))
+    .filter(c => names.has(c.name ?? c.context ?? "unknown") &&
+      (c.state ?? c.conclusion ?? c.status ?? "").toUpperCase() === "CANCELLED" &&
+      !(c.externalId ?? "").startsWith("run:") && c.outputSummary === undefined)
     .map((c) => {
       const check: CancelledRequiredCheck = { name: c.name ?? c.context ?? "unknown", jobId: checkJobId(c) };
       const producer = c.detailsUrl?.match(/\/actions\/runs\/([1-9]\d*)\/job\/([1-9]\d*)(?:[/?#]|$)/);
@@ -1721,10 +1724,11 @@ export function cancelledRequiredChecks(
       const aliases = deduped.flatMap(posted => {
         const id = posted.externalId?.match(/^run:([1-9]\d*):([1-9]\d*):job:([1-9]\d*)$/);
         const name = posted.name ?? posted.context;
+        const conclusion = (posted.conclusion ?? posted.state ?? "").toUpperCase();
         if (!name || name === check.name || posted.headSha !== headSha || !id ||
             id[1] !== producer[1] || id[3] !== check.jobId || checkJobId(posted) !== check.jobId ||
             !Number.isSafeInteger(posted.checkRunId) || (posted.checkRunId ?? 0) <= 0 || !Number.isSafeInteger(Number(id[2])) ||
-            (posted.conclusion ?? posted.state ?? "").toUpperCase() !== "FAILURE" ||
+            (conclusion !== "FAILURE" && conclusion !== "CANCELLED") ||
             (posted.status ?? "").toUpperCase() !== "COMPLETED" ||
             posted.outputSummary !== `W1-T4399: reported by this job's ${name} step(s) (outcome(s): cancelled)`) return [];
         return [{ name, attempt: Number(id[2]), checkRunId: posted.checkRunId! }];
