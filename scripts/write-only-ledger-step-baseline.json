@@ -1468,7 +1468,8 @@
     "plan.ops_landing": "W1-T14642: an audit row for the operator naming the ops landing PR and how many records landed, waited or were refused; the PR carries the state, so nothing re-reads the row.",
     "plan.ops_landing_skipped": "W1-T14642: an audit row naming why an ops landing was not attempted (no named plan destination); nothing decides on it.",
     "plan.ops_landing_failed": "W1-T14642: a diagnostic for a failed ops landing with its error; the next pass retries the landing, so nothing re-reads the row.",
-    "github.delivery": "W1-T14881: GitHub's own record of each webhook delivery's status and duration; it is the evidence for webhook timeouts, so nothing decides on it yet.",
-    "github.delivery.read_failed": "W1-T14881: a diagnostic that a delivery-log pass could not read a page; the next pass rereads from the same cursor, so nothing re-reads the row."
+    "github.delivery": "W1-T14881: GitHub's own record of each webhook delivery's status and duration; it is the evidence for webhook timeouts, and only its own pass reads it back (W1-T14979, to redeliver failed ones).",
+    "github.delivery.read_failed": "W1-T14881: a diagnostic that a delivery-log pass could not read a page; the next pass rereads from the same cursor, so nothing re-reads the row.",
+    "github.delivery.redelivered": "W1-T14979: the record that a failed delivery was redelivered once; only its own pass reads it back, to never redeliver twice."
   }
 }

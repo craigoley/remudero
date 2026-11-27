@@ -542,8 +542,8 @@ const SEED_ROWS: readonly SeedRow[] = [
       "One webhook delivery GitHub sent to serve, read from GitHub's own delivery log for the App's webhook (W1-T14881, " +
       "W1-T14967; hook_id \"app\"): " +
       "hook_id, delivery_id, guid, event, action, repository_id, status_code (500 with duration_ms near 10000 is " +
-      "GitHub's own timeout), duration_ms, delivered_at and redelivery. No payload and no headers. Nothing decides on it; " +
-      "it is the record of how serve answered GitHub.",
+      "GitHub's own timeout), duration_ms, delivered_at and redelivery. No payload and no headers. It is the record of " +
+      "how serve answered GitHub; W1-T14979: its own pass reads the failed rows back to redeliver each one once.",
     writer: ["runGithubDeliveryLogPass"],
     outcomes: ["one row per delivery, any status_code"],
   },
@@ -554,9 +554,22 @@ const SEED_ROWS: readonly SeedRow[] = [
       "status_class (auth, 4xx, 5xx or transport). shape: a 2xx deliveries page that is not an array, with GitHub's " +
       "message when it sent one. no_hook: the App has no active webhook, or its url does not point at serve's webhook " +
       "route. cursor: the deliveries were read but the cursor could not be saved (code names the errno), so none was " +
-      "ledgered. The pass keeps the cursor, so the next one reads the same deliveries.",
+      "ledgered. The pass keeps the cursor, so the next one reads the same deliveries. W1-T14979: ledger: the ledger " +
+      "could not be read whole (unread counts the files), so no delivery was redelivered. A refused redelivery POST " +
+      "writes its own class with delivery_id and status, and ends that pass's redeliveries.",
     writer: ["runGithubDeliveryLogPass"],
-    outcomes: ["auth", "4xx", "5xx", "transport", "shape", "no_hook", "cursor"],
+    outcomes: ["auth", "4xx", "5xx", "transport", "shape", "no_hook", "cursor", "ledger"],
+  },
+  {
+    step: "github.delivery.redelivered",
+    meaning:
+      "W1-T14979: serve asked GitHub to redeliver one App-webhook delivery it had failed (a timeout or a 5xx), once a " +
+      "newer delivery answered 2xx: hook_id \"app\", delivery_id and guid. Written BEFORE the POST " +
+      "/app/hook/deliveries/{id}/attempts, so it is the record that the delivery is never redelivered again, across " +
+      "passes and restarts (invariant:redelivered-at-most-once); a refused POST adds a read_failed row with its delivery_id. " +
+      "The attempt appears later as a github.delivery row with redelivery true and the same guid.",
+    writer: ["runGithubDeliveryLogPass"],
+    outcomes: ["one row per delivery redelivered"],
   },
   {
     step: "github.budget.configured",
@@ -825,6 +838,24 @@ const SEED_ROWS: readonly SeedRow[] = [
       "whole time. Nothing decides on it.",
     writer: ["proofPhaseRecorder"],
     outcomes: ["converged", "not_converged"],
+  },
+  {
+    // W1-T14987: a serve handoff the spacing would have held ran at once, because a merge changed only serve's own code.
+    step: "serve.handoff_spacing_waived",
+    meaning:
+      "The serve supervisor handed serve over inside its handoff spacing window, because the active generation's verdict " +
+      "on its ask (`serveOnly`, classified in the generation, never in the baked supervisor) says the advance from the active " +
+      "build to the ask's target holds a first-parent merge whose code paths all lie in serve's own code (the modules " +
+      "src/run-task.ts reaches only through src/lib/serve.ts, serve-own-code.ts) and none in a module the daemon loads. " +
+      "Fields: `fromSha`, `toSha`, `merge` (the oldest such merge), `paths` (that merge's changed paths) and `waitMs` " +
+      "(the spacing wait it skipped). It is written once per real hand-over, when the waived handoff passes memory " +
+      "admission on `toSha`; a memory deferral writes none and its retry keeps the waived ask and judges it again. " +
+      "A prepare that lands on a newer main, which may hold merges that landed after the ask, is spaced instead, naming " +
+      "both shas in the `waiver` field. The waived handoff runs memory admission and readiness as any other and " +
+      "counts toward the spacing of the next. An unreadable advance writes none and spaces the handoff, naming why in " +
+      "the `waiver` field of its serve.handoff_deferred or serve.handoff_spacing_absorbed row.",
+    writer: ["createServeSupervisor"],
+    outcomes: ["waived"],
   },
 ];
 
