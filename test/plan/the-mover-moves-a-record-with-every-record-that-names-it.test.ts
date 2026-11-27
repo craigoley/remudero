@@ -57,7 +57,7 @@ test("W1-T14825 criterion 3: invariant:a-group-with-an-unmovable-member-stays-wh
   const w = moveWorld(t, {
     "W1-T1": record("W1-T1"), "W1-T2": record("W1-T2", "  depends_on: [W1-T1]\n"), "W1-T3": record("W1-T3", "  depends_on: [W1-T2]\n"), "W1-T4": record("W1-T4"),
   });
-  w.pub.origin.git("update-ref", "-d", "refs/rmd-id/W1-T2");
+  w.pub.origin.git("update-ref", "refs/rmd-dispatch/W1-T2", w.main("public")); // W1-T14993: an unreserved id now moves; a dispatch claim keeps W1-T2 on core
   const copy = await w.run();
   assert.equal(copy.out.step, "copy", copy.lines.join("\n"));
   assert.equal(changeOf(w), added("W1-T3", "W1-T4"), "THE CLAIM: only records no unmovable record names are copied");

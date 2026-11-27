@@ -265,6 +265,7 @@ import {
   resolvePlanCriteriaAtHeadAsync,
   UNFILED_RUN_SENTINEL,
   unknownReservationReads,
+  proofConcludedNothing,
 } from "./review.js";
 import { withTempDir } from "./tmp.js";
 import { fetchPrDiff, prDiffSourceAsync } from "./pr-diff.js";
@@ -379,6 +380,7 @@ import {
   prFilesRestArgs,
   rollupFromRest,
   rollupForAsync,
+  takeHeadReadCounts,
   needsWorkflowIdentity,
   singlePrRestArgs,
   runsForHeadRestArgs,
@@ -1001,6 +1003,22 @@ export function isFleetOwnedRunBranch(head: string | undefined): boolean {
   const owner = taskIdFromRunBranch(head);
   if (owner === undefined) return false;
   return isSyntheticOrchestratorLaneId(owner) || TASK_ID_TRAILER_RE.test(owner);
+}
+
+/** W1-T15170: an operator hand build of a filed task uses the same run-<task>-<ms> head the fleet does, so the head
+ * alone cannot tell them apart. An open PR is fleet-owned only when its head is and its author is the fleet App.
+ * An author the batch did not carry (absent, empty, not a string) counts owned, as an unresolvable head does. */
+export function isFleetOwnedOpenPr(pr: { headRefName?: string; authorLogin?: unknown }): boolean {
+  if (!isFleetOwnedRunBranch(pr.headRefName)) return false;
+  const author = pr.authorLogin;
+  return typeof author !== "string" || author.trim() === "" || isFleetAppAuthor(author);
+}
+
+/** W1-T15170: the queue governor's and the W1-T172 lane budget's owned/foreign split of one open-board batch. */
+export function splitOpenPrOwnership(openPrs: ReadonlyArray<{ number: number; headRefName?: string; authorLogin?: unknown }>):
+  { owned: number; foreign: number; ownedPrNumbers: number[] } {
+  const ownedPrNumbers = openPrs.filter(isFleetOwnedOpenPr).map((pr) => pr.number);
+  return { owned: ownedPrNumbers.length, foreign: openPrs.length - ownedPrNumbers.length, ownedPrNumbers };
 }
 
 /** Fix ownership: plan tasks require their own creditable run branch (`status.ts:ownsBranch`).
@@ -7671,6 +7689,7 @@ export function deadOwnerProofStillLive(pr: OpenPrView, reread: OpenPrView | und
 function alongsideCiHoldNote(pr: Pick<OpenPrView, "reviewPendingOwnerGone" | "reviewPendingOwnerGoneReason">): string | undefined {
   return pr.reviewPendingOwnerGone === "promise-harvest-incomplete" ? "its promise harvest did not complete"
     : pr.reviewPendingOwnerGone === "inconclusive-load" ? "its proof was inconclusive under host load"
+    : pr.reviewPendingOwnerGone === "sandbox-start-failed" ? "its proof sandbox failed its start check"
     : pr.reviewPendingOwnerGoneReason;
 }
 
@@ -9261,7 +9280,7 @@ export interface OpenPrView {
    *  dead, which keep {@link reviewPendingIsStale}'s timeout behaviour. Only the real gateway sets
    *  this, from the durable pending ledger row. */
   reviewPendingOwnerDead?: boolean;
-  reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete" | "inconclusive-load" | "start-failed";
+  reviewPendingOwnerGone?: "owner-pid-dead" | "refused-after-pending" | "promise-harvest-incomplete" | "inconclusive-load" | "sandbox-start-failed" | "start-failed";
   reviewPendingOwnerGoneReason?: string;
   /** W1-T14035 — the `run_id` of the current head's `review.pending_posted` row the producer judged. Evidence only. */
   reviewPendingOwnerRunId?: string;
@@ -14934,6 +14953,9 @@ export const DISPOSITION_RULES: readonly DispositionRule[] = [
           if (pr.reviewPendingOwnerGone === "inconclusive-load") {
             return `checks green, its proof was inconclusive under host load and the host is quieter now — re-running the review lane on #${pr.prNumber}`;
           }
+          if (pr.reviewPendingOwnerGone === "sandbox-start-failed") {
+            return `checks green, its proof sandbox failed its start check so the proof never ran — re-running the review lane on #${pr.prNumber}`;
+          }
           if (pr.reviewPendingOwnerGone === "promise-harvest-incomplete") {
             return `checks green, its promise harvest did not complete — re-running the review lane on #${pr.prNumber}`;
           }
@@ -18995,6 +19017,22 @@ export function reviewWithheldLadder(
 export function inconclusiveLoadLowered(
   pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>, sample: () => HostLoadSample,
 ): boolean {
+  return pendingProofRetryCause(pr, lines, sample) !== undefined;
+}
+
+/** W1-T15100 — why {@link inconclusiveLoadLowered} re-reviews: `inconclusive-load` when any held proof concluded nothing
+ *  under load (and the load is now lower), `sandbox-start-failed` when every held proof's sandbox failed its start
+ *  check, which learned nothing about load. `undefined` when it does not re-review. */
+export function pendingProofRetryCause(
+  pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>, sample: () => HostLoadSample,
+): "inconclusive-load" | "sandbox-start-failed" | undefined {
+  const lowered = inconclusiveLoadLoweredRow(pr, lines, sample);
+  return lowered === false ? undefined : lowered;
+}
+
+function inconclusiveLoadLoweredRow(
+  pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>, sample: () => HostLoadSample,
+): false | "inconclusive-load" | "sandbox-start-failed" {
   if (pr.reviewState !== "pending") return false;
   const taskId = reviewOutcomeTaskIdFor(pr);
   const rows = lines.filter(row => row.task_id === taskId && row.pr_url === pr.prUrl && row.head_sha === pr.headSha &&
@@ -19005,12 +19043,16 @@ export function inconclusiveLoadLowered(
   if (pr.reviewPendingSince && typeof row.ts === "string" && Date.parse(pr.reviewPendingSince) > Date.parse(row.ts)) return false;
   const verdict = row.decision_verdict as ReviewVerdict | undefined;
   const inconclusive = verdict?.criteria?.filter(criterion => criterion.proof_exec === "inconclusive_load") ?? [];
-  if (inconclusive.length === 0 || verdict?.cannotEvaluate === true || verdict?.promisedFollowUpObservation?.state === "unknown") return false;
-  if (verdict?.criteria.some(c => !c.met && c.proof_exec !== "inconclusive_load") || verdict?.testTheater || verdict?.criteriaTampered) return false;
+  // W1-T15100: a proof whose sandbox never started learned nothing about load, so it is re-reviewed on the next pass.
+  const startFailed = verdict?.criteria?.filter(criterion => criterion.proof_exec === "sandbox_start_failed") ?? [];
+  if (inconclusive.length + startFailed.length === 0 || verdict?.cannotEvaluate === true ||
+    verdict?.promisedFollowUpObservation?.state === "unknown") return false;
+  if (verdict?.criteria.some(c => !c.met && !proofConcludedNothing(c.proof_exec)) || verdict?.testTheater || verdict?.criteriaTampered) return false;
+  if (inconclusive.length === 0) return "sandbox-start-failed";
   const recorded = inconclusive.map(criterion => recordedLoad1(criterion.load)).filter((n): n is number => n !== undefined);
   if (recorded.length !== inconclusive.length) return false;
   const now = sample().load1;
-  return now !== undefined && now < Math.min(...recorded);
+  return now !== undefined && now < Math.min(...recorded) ? "inconclusive-load" : false;
 }
 
 /** W1-T13380: the reviewer outcome a review run records when its reviewer could not start (a spawn error). */
@@ -19105,10 +19147,11 @@ function promiseHarvestRetryView(
   // W1-T14035: a hold cause keeps its precedence over the producer's `owner-pid-dead`, as before; the producer's proof rides
   // along as a sweep-local flag that only the alongside-CI row and reviewDemandLooping read.
   const proven = producerProvedOwnerDead(pr) ? { reviewPendingOwnerPidProven: true as const } : {};
+  const retryCause = incompletePromiseHarvestFromLedger(pr, lines) ? undefined : pendingProofRetryCause(pr, lines, sample);
   const result: SweepPrView = incompletePromiseHarvestFromLedger(pr, lines)
     ? { ...pr, ...proven, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "promise-harvest-incomplete" }
-    : inconclusiveLoadLowered(pr, lines, sample)
-    ? { ...pr, ...proven, reviewPendingOwnerDead: true, reviewPendingOwnerGone: "inconclusive-load" }
+    : retryCause !== undefined
+    ? { ...pr, ...proven, reviewPendingOwnerDead: true, reviewPendingOwnerGone: retryCause }
     : pr.reviewState === "pending" && started.standing !== undefined &&
       (pr.reviewPendingOwnerGone === undefined || pr.reviewPendingOwnerGone === "owner-pid-dead") &&
       (pr.reviewPendingStatusRunId === undefined || pr.reviewPendingStatusRunId === pr.reviewPendingOwnerRunId)
@@ -30577,7 +30620,8 @@ async function runSweepPinned(
       host_gap_rereview: hostGapSkips !== undefined,
       ...(hostGapSkips === undefined ? {} : { skips: [...hostGapSkips] }),
       ...(incompletePromiseHarvestFromLedger(job.pr, ledgerLines) ? { prior_cause: "promise-harvest-incomplete" } : {}),
-      ...(job.pr.reviewPendingOwnerGone === "inconclusive-load" ? { prior_cause: "inconclusive-load" } : {}),
+      ...(job.pr.reviewPendingOwnerGone === "inconclusive-load" || job.pr.reviewPendingOwnerGone === "sandbox-start-failed"
+        ? { prior_cause: job.pr.reviewPendingOwnerGone } : {}),
       surface: deps.repairAdmissionSurface ?? "full",
       observation_version: 1,
     });
@@ -30834,6 +30878,8 @@ async function runSweepPinned(
     actions_taken: actionsTaken,
     actions_failed: actionsFailed,
     ...openEscalationHistoryHeldFields(deps.ledgerPath),
+    // W1-T14809: the read plane's head reads made and skipped since the previous summary.
+    ...takeHeadReadCounts(dirname(deps.ledgerPath)),
     // W1-T11171: only a gated (light) pass has conflict shares to report.
     ...(deps.actionable !== undefined ? { light_conflict_acted: lightConflictActed, light_conflict_deferred: lightConflictDeferred } : {}),
   });
