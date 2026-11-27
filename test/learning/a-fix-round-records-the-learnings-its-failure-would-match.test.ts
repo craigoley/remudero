@@ -127,7 +127,7 @@ async function runRound(t: TestContext, options: {
   const rounds = Math.max(1, reviews.length);
   const stillUnmet = { claim: "claimSymbol is missing", proof: "unit test: fixture", met: false,
     reason: "the symbol is absent", proof_exec: "executed_fail" as const };
-  const rungOptions = {
+  const rungOptions: Parameters<typeof runFixRungModule>[0] = {
     taskId, runId, task: { id: taskId, title: TITLE,
       files: options.workerPushesThen === "plan_filing_refusal" ? ["plan/tasks.d/new.yaml"] : [PATH] },
     prUrl: PR_URL, branch: `run-${taskId}-1`, worktreePath: source.dir,
@@ -180,7 +180,7 @@ async function runRound(t: TestContext, options: {
         ? { ...review, criteria: [stillUnmet] } : { ...review, state: "success" },
       fetchPrBody: async () => "REPORT",
       fetchPrDiffFiles: async () => options.workerPushesThen === "plan_filing_refusal" ? ["plan/tasks.d/new.yaml"] : [PATH],
-      ...(options.workerPushesThen === "plan_filing_refusal" ? { scopeAmendmentGit: async (_cwd: string, args: string[]) => {
+      ...(options.workerPushesThen === "plan_filing_refusal" ? { scopeAmendmentGit: async (_cwd: string, args: readonly string[]) => {
         if (args[0] === "ls-tree") return "";
         if (args[0] === "show" && args[1]?.startsWith(`${head}:`)) {
           return `- id: ${taskId}\n  files: [plan/tasks.d/new.yaml]\n  acceptance: []\n`;
