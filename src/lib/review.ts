@@ -5127,6 +5127,8 @@ export function judgeCriterion(
               `sandbox_start_failed, not an unmet criterion — the next pass re-runs it`;
           } else if (e instanceof ProofSandboxUnavailableError) {
             proofSkip = "runner-absent";
+            // W1-T15100: a `grep:` proof's failed start check keeps its evidence too, whatever proof_exec it gets.
+            startFailure = e.startFailure;
             if (whitelisted.kind === "test") {
               inconclusiveUnderLoad(`could not start its sandbox (${e.sandboxReason})`);
             } else {
@@ -5249,7 +5251,7 @@ export function judgeCriterion(
   return {
     ...base, met, reason, proof_exec: proofExec, proof_skip: proofSkip, ...(loadError ? { loadError } : {}),
     ...(proofLoad !== undefined ? { load: proofLoad } : {}),
-    ...(proofExec === "sandbox_start_failed" && startFailure !== undefined ? { sandboxStartFailure: startFailure } : {}),
+    ...(startFailure !== undefined ? { sandboxStartFailure: startFailure } : {}),
     ...(clauseChars !== undefined ? { clauseChars } : {}),
     ...(downgradeClass !== undefined ? { downgrade_class: downgradeClass } : {}),
     ...(followUp !== undefined ? { followUp } : {}),
@@ -6886,8 +6888,10 @@ export function judgeReview(
         ? `remudero-review: cannot-evaluate — ${visibleCriteria(verdicts).find(v => v.loadError)?.loadError ?? "proof test files could not load"}`
         : reviewerUnavailable !== undefined
         ? `remudero-review: cannot-evaluate — reviewer unable: ${reviewerUnavailable}`
-        : inconclusiveLoad && !cannotEvaluate
+        : inconclusiveLoad && !cannotEvaluate && verdicts.some((v) => v.proof_exec === "inconclusive_load")
         ? "remudero-review: inconclusive-load — a proof concluded nothing under host load; re-reviewed when load falls"
+        : inconclusiveLoad && !cannotEvaluate
+        ? "remudero-review: sandbox-start-failed — a proof's sandbox failed its start check; re-run on the next pass"
         : `remudero-review: promise-harvest-incomplete — ${promiseObservation?.state === "unknown" ? promiseObservation.reason : "harvest unfinished"}`).slice(0, 140)
       : state === "success"
       ? planOnly

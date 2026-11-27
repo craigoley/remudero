@@ -1014,7 +1014,9 @@ export interface OpsReviewRecord {
   state: string;
   review_decision_digest: string;
   criteria: Array<{ index: number; claim: string; met: boolean; proof_exec: string; proof: string; reason: string;
-    proof_failure_output?: string }>;
+    proof_failure_output?: string;
+    /** W1-T15100: a failed sandbox start check's stderr, exit code or signal, and each bind source's state. */
+    sandbox_start_failure?: { stderr: string; exit_code: number | null; signal: string | null; bind_sources: Array<{ path: string; existed: boolean }> } }>;
   reasons: string[];
   findings: Array<{ criterion_index: number; category: string; severity: string; mechanism: string; remedy: string | null;
     anchor: FindingCapture["findings"][number]["anchor"] }>;
@@ -1027,7 +1029,10 @@ export function opsReviewRecord(input: { taskId: string; prUrl: string; headSha:
     review_decision_digest: input.decisionDigest,
     criteria: input.criteria.flatMap((c, i) => c.holdout ? [] : [{ index: i + 1, claim: c.claim, met: c.met,
       proof_exec: c.proof_exec, proof: c.proof, reason: c.reason,
-      ...(c.proofFailureOutput !== undefined ? { proof_failure_output: c.proofFailureOutput } : {}) }]),
+      ...(c.proofFailureOutput !== undefined ? { proof_failure_output: c.proofFailureOutput } : {}),
+      ...(c.sandboxStartFailure !== undefined ? { sandbox_start_failure: { stderr: c.sandboxStartFailure.stderr,
+        exit_code: c.sandboxStartFailure.exitCode ?? null, signal: c.sandboxStartFailure.signal ?? null,
+        bind_sources: c.sandboxStartFailure.bindSources.map((b) => ({ path: b.path, existed: b.existed })) } } : {}) }]),
     reasons: [...input.reasons],
     findings: input.findings.filter(f => input.criteria[f.criterion - 1]?.holdout !== true).map(f => ({
       criterion_index: f.criterion, category: f.category, severity: f.severity, mechanism: f.mechanism, remedy: f.remedy,

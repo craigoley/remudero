@@ -9,8 +9,8 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { execWhitelistedProof, execWhitelistedProofAsync, judgeReview, judgeReviewAsync, parseWhitelistedProof,
   proofConcludedNothing, proofExecutionOutcome, ProofSandboxUnavailableError, sandboxStartFailure, sandboxStartFailureOf,
   setProofSandboxForTests, unmetReviewCriteria, type ReviewEvidence, type SandboxStartFailure } from "#src/lib/review.js";
-import { opsReviewCommentBody } from "#src/cli/commands/review.js";
-import { inconclusiveLoadLowered, type OpenPrView } from "#src/lib/sweep.js";
+import { opsReviewCommentBody, opsReviewRecord } from "#src/cli/commands/review.js";
+import { inconclusiveLoadLowered, pendingProofRetryCause, type OpenPrView } from "#src/lib/sweep.js";
 
 // W1-T15100. OBSERVED 2026-11-27: about 13% of review.proof_execution rows in 24 h (292 of about 2,227) ended "error" in
 // under 100 ms, their sandbox start check failing with only "Command failed: bwrap --die-with-parent ..." kept, and the
@@ -73,6 +73,15 @@ test("W1-T15100 criterion 1: a failed start check records bwrap's stderr, exit c
   const killed = judgeReview(criteria, evidence({ execProof: () => { throw new ProofSandboxUnavailableError("x", signalled); } }));
   assert.match(killed.criteria[0]!.reason, /signal SIGKILL; bwrap stderr: \(empty\); missing bind sources: none/);
   assert.deepEqual(JSON.parse(JSON.stringify(criterion)).sandboxStartFailure, failure, "the review record serialises it");
+  // The host's per-head review record keeps it, field by field.
+  const record = opsReviewRecord({ taskId: "W1-T1", prUrl: "https://github.com/o/r/pull/1", headSha: "a".repeat(40), state: "pending",
+    decisionDigest: "d", criteria: [criterion!], reasons: [], findings: [] });
+  assert.deepEqual(record.criteria[0]!.sandbox_start_failure, { stderr: failure.stderr, exit_code: 1, signal: null, bind_sources: failure.bindSources });
+  // A `grep:` proof keeps its keyword floor, and its failed start check's evidence too.
+  const grepCriteria = [{ claim: "the behaviour holds", proof: "grep: behaviour in src/x.ts" }];
+  const [grep] = judgeReview(grepCriteria, evidence({ execProof: () => { throw startFailed(); } })).criteria;
+  assert.equal(grep!.proof_exec, "not_executable");
+  assert.deepEqual(grep!.sandboxStartFailure, failure);
 });
 
 test("W1-T15100 criterion 2: a failed start check is sandbox_start_failed and re-runs on the next pass", async () => {
@@ -94,6 +103,9 @@ test("W1-T15100 criterion 2: a failed start check is sandbox_start_failed and re
   assert.equal(proofConcludedNothing("sandbox_start_failed"), true);
   assert.equal(proofConcludedNothing("executed_fail"), false);
   assert.match(opsReviewCommentBody("pending", criteria, stuck.criteria), /UNDETERMINED: the behaviour holds/);
+  // Its pending summary names the start check, never host load.
+  assert.match(stuck.summary, /^remudero-review: sandbox-start-failed — /);
+  assert.doesNotMatch(stuck.summary, /load/);
   // The next sweep pass re-reviews it at ANY load: a start failure says nothing about load.
   const URL = "https://github.com/acme/remudero/pull/1", HEAD = "a".repeat(40);
   const pr: OpenPrView = { prNumber: 1, prUrl: URL, taskId: "W1-T1", headSha: HEAD, checksState: "green", reviewState: "pending",
@@ -106,4 +118,9 @@ test("W1-T15100 criterion 2: a failed start check is sandbox_start_failed and re
   assert.equal(inconclusiveLoadLowered(pr, [row("executed_fail")], () => ({ load1: 1 })), false);
   assert.equal(inconclusiveLoadLowered(pr, [row("inconclusive_load", { load: { start: { load1: 20 }, end: { load1: 41 } } })], () => ({ load1: 60 })),
     false, "a load-shaped proof still waits for lower load");
+  // The sweep names the cause it re-reviews for: the start check, never a quieter host.
+  assert.equal(pendingProofRetryCause(pr, [row("sandbox_start_failed")], () => ({ load1: 99 })), "sandbox-start-failed");
+  assert.equal(pendingProofRetryCause(pr, [row("inconclusive_load", { load: { start: { load1: 20 }, end: { load1: 41 } } })], () => ({ load1: 5 })),
+    "inconclusive-load");
+  assert.equal(pendingProofRetryCause(pr, [row("executed_fail")], () => ({ load1: 1 })), undefined);
 });
