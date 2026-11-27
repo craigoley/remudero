@@ -35,6 +35,63 @@ export function infrastructureRefusal(line: Record<string, unknown>): string | u
   return undefined;
 }
 
+/** W1-T12154: the boot sweep's reason on the `handed_off` verdict it writes for a run whose own daemon restarted
+ *  under it (dispatch-claim.ts `ORPHANED_BY_RESTART`); spelled here because this leaf imports nothing. */
+const ORPHANED_BY_RESTART_REASON = "orphaned-by-restart";
+
+/**
+ * W1-T12154: did this run end before any worker was assigned? `runAssigned` is what a reader saw of the run's own
+ * rows: `true` (it wrote a `worker.assignment`) always answers no, `false` (it wrote none) lets the boot sweep's
+ * restart-orphan verdict answer yes, and `undefined` (rows unseen) does not. Otherwise a verdict the run logger
+ * stamped answers by its `worker_assigned` field, and an older unstamped one by {@link infrastructureRefusal}.
+ * MEASURED 2026-11-10: 600 of 1,030 implement runs in the core ledger ended so, and no row said why.
+ */
+export function endedBeforeWorkerAssignment(verdict: Record<string, unknown>, runAssigned?: boolean): boolean {
+  if (runAssigned === true) return false;
+  if (typeof verdict.worker_assigned === "boolean") return !verdict.worker_assigned;
+  if (infrastructureRefusal(verdict) !== undefined) return true;
+  return runAssigned === false && verdict.verdict === "handed_off" && verdict.reason === ORPHANED_BY_RESTART_REASON;
+}
+
+function namedText(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** What one run's ledger writer has seen of its own rows, so its verdict can say no worker was assigned. */
+export interface WorkerAssignmentTracker {
+  /** Called once a row is written: a `worker.assignment` marks the run assigned, a `run.phase` names its stage. */
+  written(step: string, fields: Record<string, unknown>): void;
+  /** The fields a `verdict` row adds: none once a worker was assigned (or the verdict names its assignment). */
+  verdictFields(fields: Record<string, unknown>): Record<string, unknown>;
+}
+
+/**
+ * W1-T12154: the verdict of a run that wrote no `worker.assignment` row records `worker_assigned: false`,
+ * `last_stage` — the verdict's own `stage` unless it is the generic thrown `run.error`, else the last `run.phase`
+ * `waiting_on`, else the last step written, else `none` — and `last_step`, the last row written before it.
+ */
+export function workerAssignmentTracker(): WorkerAssignmentTracker {
+  let assigned = false;
+  let lastPhase: string | undefined;
+  let lastStep: string | undefined;
+  return {
+    written(step, fields) {
+      if (step === "worker.assignment") assigned = true;
+      if (step === "run.phase") lastPhase = namedText(fields.waiting_on) ?? lastPhase;
+      lastStep = step;
+    },
+    verdictFields(fields) {
+      if (assigned || namedText(fields.selection_assignment_id) !== undefined) return {};
+      const stage = namedText(fields.stage);
+      return {
+        worker_assigned: false,
+        last_stage: (stage !== "run.error" ? stage : undefined) ?? lastPhase ?? lastStep ?? "none",
+        last_step: lastStep ?? "none",
+      };
+    },
+  };
+}
+
 export function lifetimeInfrastructureRefusal(line: Record<string, unknown>): string | undefined {
   return infrastructureRefusal(line) ??
     (typeof line.verdict === "string" && LIFETIME_ONLY_REFUSAL_VERDICTS.has(line.verdict) ? line.verdict : undefined);
