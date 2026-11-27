@@ -2865,7 +2865,7 @@ reclaim_dead_review_locks() {
     probe="$(docker exec "${CONTAINER_NAME}" sh -c '[ -e "/proc/$1" ] && echo PRESENT || echo ABSENT' sh "${pid}" 2>/dev/null | head -n 1 || true)"
     if [ "${probe}" = ABSENT ]; then
       move_inflight_lock_aside "${f}" "${host}" "review owner pid ${pid} is absent in the target container (W1-T14947)" \
-        "pid: ${pid}\nreview lock owner is absent from the target container\n" "${identity}"
+        "pid: ${pid}\nreview lock owner is absent from the target container\n" "${identity}" || true
       continue
     fi
     [ "${probe}" = PRESENT ] || continue
@@ -2873,7 +2873,7 @@ reclaim_dead_review_locks() {
     start_epoch="$(container_pid_start_epoch "${pid}")"
     if printf '%s' "${lock_epoch}:${start_epoch}" | grep -Eq '^[0-9]+:[0-9]+$' && [ "$((start_epoch - lock_epoch))" -gt 2 ]; then
       move_inflight_lock_aside "${f}" "${host}" "review owner pid ${pid} was reused after the lock (W1-T14947)" \
-        "pid: ${pid}\nlock epoch: ${lock_epoch}\nprocess start epoch: ${start_epoch}\n" "${identity}"
+        "pid: ${pid}\nlock epoch: ${lock_epoch}\nprocess start epoch: ${start_epoch}\n" "${identity}" || true
     fi
   done
 }

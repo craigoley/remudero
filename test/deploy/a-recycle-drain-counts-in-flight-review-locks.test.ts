@@ -22,7 +22,9 @@ case "$1" in
     fi
     # The container's own pid start-time read: FAKE_PID_START_EPOCH, or nothing when unset.
     if [ "$3" = sh ]; then
-      case "$5" in *'/proc/$1'*'echo PRESENT'*) case " $FAKE_ALIVE_PIDS " in *" $7 "*) echo PRESENT ;; *) echo ABSENT ;; esac; exit 0 ;; esac
+      case "$5" in *'/proc/$1'*'echo PRESENT'*)
+        if [ -n "\${FAKE_REMOVE_REVIEW_LOCK_ON_PROBE:-}" ]; then rm -f "$FAKE_REMOVE_REVIEW_LOCK_ON_PROBE"; fi
+        case " $FAKE_ALIVE_PIDS " in *" $7 "*) echo PRESENT ;; *) echo ABSENT ;; esac; exit 0 ;; esac
       [ -z "\${FAKE_PID_START_EPOCH:-}" ] || echo "$FAKE_PID_START_EPOCH"
       exit 0
     fi
@@ -71,7 +73,7 @@ exit 0
 /** Runs one recycle whose state holds a review lock owned by pid 4242 on `lockHost`; the target container's hostname is
  *  `core-host`. Returns its exit code and output. */
 async function recycleWithReviewLock(
-  t: TestContext, alivePids: string, lockHost = "core-host", pidStartAfterLockS?: number,
+  t: TestContext, alivePids: string, lockHost = "core-host", pidStartAfterLockS?: number, removeLockOnProbe = false,
 ): Promise<{ code: number | null; out: string; root: string }> {
   const owned = ownedFixtureDir(t, "recycle-review-lock");
   const root = owned.dir;
@@ -91,6 +93,7 @@ async function recycleWithReviewLock(
   const env: NodeJS.ProcessEnv = {
     ...process.env, HOME: join(root, "home"), PATH: `${join(root, "bin")}:${process.env.PATH}`,
     FAKE_STORE: store, FAKE_ALIVE_PIDS: alivePids, FAKE_HOSTNAME: "core-host",
+    FAKE_REMOVE_REVIEW_LOCK_ON_PROBE: removeLockOnProbe ? join(root, "core/state/inflight/reviews/review-run-a.lock") : "",
     FAKE_PID_START_EPOCH: pidStartAfterLockS === undefined ? "" : String(lockedAtS + pidStartAfterLockS), RMD_CLAUDE_DIR: join(root, "claude"),
     RMD_CODEX_DIR: join(root, "absent-codex"), RMD_CONTAINER_CONFIG_DIR: join(root, "absent-config"),
     RMD_RECYCLE_FIRST_BOOT: "1", RMD_RECYCLE_POLL_S: "1", RMD_RECYCLE_DOCKERENV_PATH: join(root, "no-marker"),
@@ -142,5 +145,10 @@ describe("test/deploy/a-recycle-drain-counts-in-flight-review-locks.test.ts", { 
     const replaced = await recycleWithReviewLock(t, "4242", "replaced-container-host");
     assert.match(replaced.out, /no in-flight workers — safe to proceed/,
       `a lock another container wrote does not block, even when its pid number is alive here:\n${replaced.out}`);
+
+    const raced = await recycleWithReviewLock(t, "", "core-host", undefined, true);
+    assert.match(raced.out, /no in-flight workers — safe to proceed/,
+      `a review ending between the owner probe and the move does not abort recycling:\n${raced.out}`);
+    assert.equal(raced.code, 0, `a vanished review lock is a settled blocker, not a shell failure:\n${raced.out}`);
   });
 });
