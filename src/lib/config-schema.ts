@@ -586,6 +586,7 @@ export const ENV_REGISTRY: readonly EnvRegistryEntry[] = [
   envEntry("RMD_SERVE_PORT", "Selects the deployment port and overrides serve.port for local serve and Inbox CLI port resolution.", ["src/lib/inbox-cli-serve.ts", "deploy/serve-container.sh", "deploy/host-update.sh"]),
   envEntry("RMD_SERVE_GENS_DIR", "Names the directory holding the serve supervisor's two generation slots and its handoff.off switch.", ["src/lib/serve-supervisor-main.ts"]),
   envEntry("RMD_SERVE_HANDOFF", "Set to off to make the serve supervisor answer a handoff request with today's drain and container restart.", ["src/lib/serve-supervisor.ts"]),
+  envEntry("RMD_SERVE_HOOK_PORT", "The port the serve supervisor's webhook listener thread answers POST /v1/hooks/github on, off every main thread; unset, no listener starts (W1-T14986).", ["src/lib/github-hook-listener.ts"]),
   envEntry("RMD_SERVE_INGEST_TOKEN", "Supplies serve's optional bearer token that is accepted only on the incident ingest route.", ["src/lib/serve.ts"]),
   envEntry("RMD_SERVE_INGEST_TOKEN_FILE", "Names the read-only mounted file holding serve's incident ingest token when RMD_SERVE_INGEST_TOKEN is unset.", ["src/lib/serve.ts"]),
   envEntry("RMD_SERVE_NETWORK", "Declares container-network context for serve wildcard binds.", ["src/lib/serve.ts"]),

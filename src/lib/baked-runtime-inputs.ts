@@ -13,6 +13,9 @@ export const BAKED_RUNTIME_SOURCE_PATHS: readonly string[] = [
   "src/lib/fs-race-safe.ts",
   "src/lib/git-fetch-retry.ts",
   "src/lib/git-lock-reclaim.ts",
+  "src/lib/github-delivery-accept.ts",
+  "src/lib/github-event-wake.ts",
+  "src/lib/github-hook-listener.ts",
   "src/lib/host-identity.ts",
   "src/lib/install-hash.ts",
   "src/lib/instance-registry-selection.ts",
@@ -36,5 +39,6 @@ export const BAKED_RUNTIME_SOURCE_PATHS: readonly string[] = [
   "src/lib/serve-supervisor.ts",
   "src/lib/spawn-helper.ts",
   "src/lib/state-backup-engine-links.ts",
+  "src/lib/thread-names.ts",
   "src/lib/worker-containment.ts",
 ];
