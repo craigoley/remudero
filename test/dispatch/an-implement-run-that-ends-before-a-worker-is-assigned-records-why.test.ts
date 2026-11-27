@@ -107,24 +107,6 @@ test("W1-T12154 criterion 1: a worker.assignment write that threw is no assignme
   assert.equal(verdictOf(rows).last_stage, "run.start", "the throwing row was never written, so it is not the last step");
 });
 
-test("W1-T12154 criterion 1: the run logger run-task.ts builds for every implement run stamps the unassigned verdict", async () => {
-  const { benchmarkRunLedgerLogger } = await import("#src/run-task.js");
-  const unassigned: Row[] = [];
-  const log = benchmarkRunLedgerLogger((step, fields) => unassigned.push({ step, ...fields }));
-  log("run.start", { type: "implement" });
-  log("run.phase", { waiting_on: "implement" });
-  log("verdict", { verdict: "failed", stage: "run.error", reason: "boom" });
-  assert.equal(verdictOf(unassigned).worker_assigned, false);
-  assert.equal(verdictOf(unassigned).last_stage, "implement");
-  // W1-T12154 criterion 4: the same logger leaves an assigned run's verdict without the fields.
-  const assigned: Row[] = [];
-  const assignedLog = benchmarkRunLedgerLogger((step, fields) => assigned.push({ step, ...fields }));
-  assignedLog("run.start", { type: "implement" });
-  assignedLog("worker.assignment", { worker_assignment: ASSIGNMENT });
-  assignedLog("verdict", { verdict: "failed", stage: "run.error", selection_assignment_id: ASSIGNMENT.id });
-  for (const field of ["worker_assigned", "last_stage", "last_step"]) assert.equal(Object.hasOwn(verdictOf(assigned), field), false, field);
-});
-
 test("W1-T12154 criterion 2: a run the boot sweep finds orphaned with no assignment is recorded as ended before one", (t) => {
   const node = instance(t, orphanRunRows());
   node.boot(fakeReserver({ [TASK]: anchorMessage(DEAD_PID, LOCAL, MINT_ISO) }));

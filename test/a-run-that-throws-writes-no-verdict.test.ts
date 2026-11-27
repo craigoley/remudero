@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { runErrorCause, runTask, runTaskBody, type RunTaskContext } from "#src/run-task.js";
+import { benchmarkRunLedgerLogger, runErrorCause, runTask, runTaskBody, type RunTaskContext } from "#src/run-task.js";
 import type { Config } from "#src/lib/config.js";
 import type { ProbeExecResult } from "#src/lib/containment.js";
 import type { ProbeExecResult as IsolationProbeExecResult } from "#src/lib/isolation.js";
@@ -59,6 +59,27 @@ const holdingContainmentExec = (token: string): Promise<ProbeExecResult> =>
 
 const cleanIsolationExec = (): Promise<IsolationProbeExecResult> =>
   Promise.resolve({ transcript: "REPORT\naliases: 0\nfunctions: 0\nalias_names: -\nfunction_names: -", aliasCount: 0, functionCount: 0, functionNames: "-", costUsd: 0 });
+
+test("W1-T12154 criterion 1: benchmarkRunLedgerLogger stamps unassigned verdicts and leaves assigned runs alone", () => {
+  const unassigned: Record<string, unknown>[] = [];
+  const logUnassigned = benchmarkRunLedgerLogger((step, fields) => unassigned.push({ step, ...fields }));
+  logUnassigned("run.start", { type: "implement" });
+  logUnassigned("run.phase", { waiting_on: "implement" });
+  logUnassigned("verdict", { verdict: "failed", stage: "run.error", reason: "boom" });
+  const unassignedVerdict = unassigned.find((row) => row.step === "verdict");
+  assert.ok(unassignedVerdict);
+  assert.equal(unassignedVerdict.worker_assigned, false);
+  assert.equal(unassignedVerdict.last_stage, "implement");
+
+  const assigned: Record<string, unknown>[] = [];
+  const logAssigned = benchmarkRunLedgerLogger((step, fields) => assigned.push({ step, ...fields }));
+  logAssigned("run.start", { type: "implement" });
+  logAssigned("worker.assignment", { worker_assignment: { id: "assignment-1" } });
+  logAssigned("verdict", { verdict: "failed", stage: "run.error", selection_assignment_id: "assignment-1" });
+  const assignedVerdict = assigned.find((row) => row.step === "verdict");
+  assert.ok(assignedVerdict);
+  for (const field of ["worker_assigned", "last_stage", "last_step"]) assert.equal(Object.hasOwn(assignedVerdict, field), false, field);
+});
 
 function workerResult(over: Partial<WorkerResult>): WorkerResult {
   return {
