@@ -2383,17 +2383,24 @@ export const ESCALATION_REPOSITORY_ENV = "RMD_ESCALATION_REPOSITORY";
 
 /** The host's own route, read on each gateway construction: {@link ESCALATION_REPOSITORY_ENV} when set, else the plan
  *  destination its instance config names. A set value that is not `<owner>/<name>` files nowhere, never a fallback. */
-export const hostEscalationDestination: EscalationDestinationRead = () => {
-  const explicit = process.env[ESCALATION_REPOSITORY_ENV];
-  if (explicit !== undefined && explicit !== "") {
-    return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(explicit) && !/(^|\/)\.+(\/|$)/.test(explicit)
-      ? { outcome: "named", repository: explicit }
-      : { outcome: "unfiled", reason: `${ESCALATION_REPOSITORY_ENV} is not <owner>/<name>` };
-  }
-  const named = planDestinationRepository(instanceStateDir());
-  if (named.outcome === "named") return { outcome: "named", repository: `${named.owner}/${named.repo}` };
-  return { outcome: "unfiled", reason: named.outcome === "off" ? "no-private-escalation-repository" : `private-escalation-repository-unreadable: ${named.reason}` };
-};
+export const hostEscalationDestination: EscalationDestinationRead = () => escalationDestinationAt(instanceStateDir())();
+
+/** W1-T14998 — the route a process whose state directory is `stateDir` files in: {@link ESCALATION_REPOSITORY_ENV}
+ *  when set, else the plan destination that directory names. `rmd host-alert` and serve are handed their state
+ *  directory (`--state-root`, the ledger's), which need not be the one this machine's HOME config names. */
+export function escalationDestinationAt(stateDir: string | undefined): EscalationDestinationRead {
+  return () => {
+    const explicit = process.env[ESCALATION_REPOSITORY_ENV];
+    if (explicit !== undefined && explicit !== "") {
+      return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(explicit) && !/(^|\/)\.+(\/|$)/.test(explicit)
+        ? { outcome: "named", repository: explicit }
+        : { outcome: "unfiled", reason: `${ESCALATION_REPOSITORY_ENV} is not <owner>/<name>` };
+    }
+    const named = planDestinationRepository(stateDir);
+    if (named.outcome === "named") return { outcome: "named", repository: `${named.owner}/${named.repo}` };
+    return { outcome: "unfiled", reason: named.outcome === "off" ? "no-private-escalation-repository" : `private-escalation-repository-unreadable: ${named.reason}` };
+  };
+}
 
 function escalationIssueRoute(opts: { destination?: EscalationDestinationRead }): ReturnType<EscalationDestinationRead> {
   // An injected exec is never a route: production producers inject one too (sreOperatorEscalation, the instance
@@ -2410,6 +2417,16 @@ export function escalationIssueRepository(owner: string, repo: string,
   if (route.outcome !== "named") return [owner, repo];
   const [routeOwner, routeRepo] = route.repository.split("/") as [string, string];
   return [routeOwner, routeRepo];
+}
+
+/** W1-T14998 — every repository an escalation issue of `owner/repo` may live in: the route's repository, where new
+ *  ones are filed, then the code repository, whose issues are legacy (filed before the route) and still read and
+ *  answered. One entry when the route names the code repository or names none. */
+export function escalationIssueRepositories(owner: string, repo: string,
+  destination: EscalationDestinationRead = hostEscalationDestination): string[] {
+  const code = `${owner}/${repo}`;
+  const route = destination();
+  return route.outcome === "named" && route.repository.toLowerCase() !== code.toLowerCase() ? [route.repository, code] : [code];
 }
 
 /** W1-T14998 — the `<owner>/<name>` an issue URL names, or undefined when it is not a GitHub issue URL. */

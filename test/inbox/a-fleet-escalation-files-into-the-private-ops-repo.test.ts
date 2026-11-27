@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
-  ESCALATION_REPOSITORY_ENV, escalate, escalationIssueRepository, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, issueGatewayRepository, issueGatewayUnfiled,
+  ESCALATION_REPOSITORY_ENV, escalate, escalationDestinationAt, escalationIssueRepositories, escalationIssueRepository, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, issueGatewayRepository, issueGatewayUnfiled,
   issueUrlRepository, NEEDS_HUMAN_LABEL, tryEscalate, type Escalation, type EscalationDestinationRead,
 } from "#src/lib/escalate.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
@@ -19,6 +19,14 @@ import { sreOperatorEscalation } from "#src/lib/sre-runbooks.js";
 import { productionIssueRevalidationPorts } from "#src/lib/issue-revalidation-garden.js";
 import { attachEscalationConditions } from "#src/lib/tick-read-worker.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
+import { hostAlertIssueGateway } from "#src/lib/launcher-host-alerts.js";
+import { createEscalationConversationReader } from "#src/lib/escalation-conversation.js";
+import { buildEscalationIndexSnapshot } from "#src/lib/escalation-conversation-index.js";
+import { escalationReplySubmissionKey, recordEscalationIntakeOutcome } from "#src/lib/escalation-correspondence.js";
+import { appendThreadMessage, appendThreadReplyOnce, deriveThreadId } from "#src/lib/inbox-thread.js";
+import type { FeedbackEntry } from "#src/lib/feedback.js";
+import { terminalRulePr } from "#src/lib/issue-revalidation-garden.js";
+import { fetchEscalationIssuesRest, ghGateway } from "#src/lib/status.js";
 
 const CODE = { owner: "craigoley", repo: "remudero" };
 const OPS = "craigoley/remudero-ops";
@@ -221,4 +229,80 @@ test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery close
   await ports.pullState?.(20986).catch(() => undefined);
   assert.deepEqual(garden.map((path) => path.split("?")[0]),
     [`repos/${OPS}/issues`, `repos/${OPS}/issues/7/comments`, `repos/${CODE.owner}/${CODE.repo}/pulls/20986`]);
+});
+
+test("W1-T14998 criterion 1: a fleet escalation opens its issue in the private ops repository, posted by the host alert and answered from the Console there", async (t) => {
+  // `rmd host-alert` files where its --state-root routes, even when this machine's HOME config names no destination.
+  const stateDir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14998-state-`));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  writeFileSync(join(stateDir, "plan-destination.json"), JSON.stringify({ repository: OPS, kinds: ["decision"] }));
+  const gh = fakeGh();
+  const [alert, homeRoute] = withHostHome(t, undefined, () => [hostAlertIssueGateway(stateDir, CODE.owner, CODE.repo, gh.exec),
+    ghIssueGateway(CODE.owner, CODE.repo, { exec: gh.exec })] as const);
+  assert.equal(issueGatewayUnfiled(homeRoute), "no-private-escalation-repository", "control: HOME's state names no destination");
+  assert.equal(issueGatewayRepository(alert), OPS, "the host alert files where its own state directory routes");
+  assert.deepEqual(withHostHome(t, undefined, () => escalationDestinationAt(stateDir)()), { outcome: "named", repository: OPS });
+  // Readers take ops-filed issues as this repository's, beside its own legacy ones.
+  const code = `${CODE.owner}/${CODE.repo}`, repositories = escalationIssueRepositories(CODE.owner, CODE.repo, toOps);
+  assert.deepEqual(repositories, [OPS, code]);
+  assert.deepEqual(escalationIssueRepositories(CODE.owner, CODE.repo, nowhere), [code]);
+  const opsIssue = `https://github.com/${OPS}/issues/5`;
+  const read: string[] = [];
+  const readIssue = async (url: string) => { read.push(url); throw new Error("offline"); };
+  const reader = createEscalationConversationReader({ repository: code, issueRepositories: repositories, readIssue });
+  assert.equal((await reader(opsIssue)).state === "unavailable" && (await reader(opsIssue) as { reason: string }).reason, "source_unavailable");
+  assert.deepEqual([...new Set(read)], [opsIssue], "the Console reader reads the ops issue");
+  assert.equal((await reader("https://github.com/someone/else/issues/5") as { reason?: string }).reason, "wrong_repository");
+  assert.equal((await createEscalationConversationReader({ repository: code, readIssue })(opsIssue) as { reason?: string }).reason,
+    "wrong_repository", "control: a reader told only the code repository refuses the ops issue");
+  const board = () => ({ state: "ready" as const, flags: [{ taskId: "W1-T14945", issueUrl: opsIssue, title: "[MANUAL] W1-T14945" }] });
+  const index = buildEscalationIndexSnapshot({ repository: code, issueRepositories: repositories, threadStorePath: join(stateDir, "threads.jsonl"), readBoard: board });
+  assert.deepEqual([index.coverage.conflicts, index.rows.map((row) => row.issueUrl)], [0, [opsIssue]], "the mailbox lists the ops escalation");
+  assert.equal(buildEscalationIndexSnapshot({ repository: code, threadStorePath: join(stateDir, "threads.jsonl"), readBoard: board }).coverage.conflicts, 1,
+    "control: an index told only the code repository counts it a conflict");
+  // The intake receipt answers an ops-filed escalation and its ops-filed follow-up question; the publication stays a code PR.
+  const deps = { threadStorePath: join(stateDir, "threads.jsonl"), repository: code, issueRepositories: repositories, now: () => 1793621400000 };
+  const identity = { taskId: "W1-T14945", class: "MANUAL", cause: "review", prRef: "20986" };
+  const threadId = deriveThreadId(identity);
+  appendThreadMessage(identity, "escalation", "PR #20986 needs clarification", deps);
+  appendThreadReplyOnce(identity, "Re-review it.", "reply-w1-t14998-1", deps, { escalation: { issueUrl: opsIssue, revision: "a".repeat(64) } });
+  const entry: FeedbackEntry = { id: "fb-w1-t14998", ts: "2026-11-27T08:00:00Z", raw: "Re-review it.", attachments: [], origin: "ui", status: "new",
+    proposal_pr: null, thread_id: threadId, submission_key: escalationReplySubmissionKey(threadId, "reply-w1-t14998-1", opsIssue) };
+  const grill = { action: "grill" as const, publicationPr: `https://github.com/${code}/pull/21100`, detail: "Which head?", questionIssueUrl: `https://github.com/${OPS}/issues/6` };
+  assert.equal(recordEscalationIntakeOutcome(entry, grill, { ...deps, issueRepositories: [code] }).state, "unknown", "control: the code repository alone refuses it");
+  assert.equal(recordEscalationIntakeOutcome(entry, grill, deps).state, "recorded");
+  assert.equal(recordEscalationIntakeOutcome(entry, grill, deps).state, "existing", "a replay keeps the one response");
+  assert.equal(recordEscalationIntakeOutcome(entry, { ...grill, publicationPr: `https://github.com/${OPS}/pull/1` }, deps).state, "unknown",
+    "the intake publication is still a pull request on the code repository");
+});
+
+test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery closes it, judged and read against its own repository", async () => {
+  // The garden's terminal-PR close: a clarification escalation filed in ops still names its PR on the code repository.
+  const code = `${CODE.owner}/${CODE.repo}`;
+  const issue = { url: `https://github.com/${OPS}/issues/9`, title: "[MANUAL] W1-T14945",
+    body: `**Task:** W1-T14945\n**Class:** MANUAL\n\nPR ${PR_URL} needs a clarification before it can merge.` };
+  assert.equal(terminalRulePr(issue, code), 20986);
+  assert.equal(terminalRulePr(issue), undefined, "control: compared against the issue's own repository, no PR is found");
+  // The per-command gateway reads an escalation's state on the repository its URL names, not on its own slug.
+  const asked: string[] = [];
+  const github = ghGateway(CODE.owner, CODE.repo, { cwd: tmpdir(), commitTrailerIndex: () => new Map(),
+    exec: (args) => { asked.push(args[1]!); return JSON.stringify({ state: "closed", title: "t" }); } });
+  assert.deepEqual(github.issueByUrl?.(`https://github.com/${OPS}/issues/9`), { state: "closed", title: "t" });
+  assert.deepEqual(asked, [`repos/${OPS}/issues/9`]);
+  // The board lists ops and legacy code-repository issues, each from its own delta: equal numbers never collide.
+  const listed: string[] = [];
+  const row = (repo: string, n: number, updated: string) => ({ number: n, html_url: `https://github.com/${repo}/issues/${n}`, state: "open", title: `${repo}#${n}`, updated_at: updated });
+  const fetch = (args: string[]) => {
+    listed.push(args[1]!.split("?")[0]!);
+    return args[1]!.startsWith(`repos/${OPS}/`) ? [row(OPS, 2, "2026-11-27T02:00:00Z"), row(OPS, 1, "2026-11-27T01:00:00Z")]
+      : [row(code, 3, "2026-11-21T00:00:00Z")];
+  };
+  const known = [{ number: 1, url: `https://github.com/${OPS}/issues/1`, state: "open", updatedAt: "2026-11-27T01:00:00Z" },
+    { number: 1, url: `https://github.com/${code}/issues/1`, state: "closed", updatedAt: "2026-11-20T00:00:00Z" },
+    { number: 3, url: `https://github.com/${code}/issues/3`, state: "open", updatedAt: "2026-11-21T00:00:00Z" }];
+  const fetched = withEnv(OPS, () => fetchEscalationIssuesRest(CODE.owner, CODE.repo, fetch as never, known));
+  assert.deepEqual(listed, [`repos/${OPS}/issues`, `repos/${code}/issues`]);
+  assert.deepEqual(fetched.rows.map((r) => `${r.url} ${r.state}`).sort(), [`https://github.com/${OPS}/issues/1 open`, `https://github.com/${OPS}/issues/2 open`,
+    `https://github.com/${code}/issues/1 closed`, `https://github.com/${code}/issues/3 open`], "each issue once, from its own repository");
+  assert.deepEqual([fetched.mode, fetched.calls, fetched.truncated], ["delta", 2, false]);
 });

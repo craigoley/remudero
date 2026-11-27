@@ -21,7 +21,7 @@ import { readOpsCatalogSnapshotAsync, type OpsCatalogApi, type OpsCatalogOutcome
 import { findTaskInCatalogs } from "./task-lookup.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { NEEDS_HUMAN_LABEL } from "./poll-interval.js";
-import { escalationIssueRepository } from "./escalate.js";
+import { escalationIssueRepositories, issueUrlRepository } from "./escalate.js";
 import { isHolderStale } from "./fs-race-safe.js";
 import { isTestRunner } from "./live-write-guard.js";
 import { boardRefreshRollup, instanceBoardSnapshotCache, type BoardSnapshotCache } from "./board-snapshot-cache.js";
@@ -4808,7 +4808,8 @@ export function ghGateway(
     issueByUrl(url) {
       const n = url.match(/\/issues\/(\d+)/)?.[1];
       if (!n) return null;
-      const view = tryJson<{ state?: string; title?: string }>(["api", `repos/${slug}/issues/${n}`]);
+      // W1-T14998: read the issue where its URL says it lives; an escalation filed privately is not this slug's.
+      const view = tryJson<{ state?: string; title?: string }>(["api", `repos/${issueUrlRepository(url) ?? slug}/issues/${n}`]);
       return view && typeof view.state === "string" ? { state: view.state, title: view.title } : null;
     },
     readFailed() {
@@ -4903,6 +4904,36 @@ export function resetDefaultGhCallPacerForTest(pacer?: GhCallPacer): void {
 // SO THE WALK MOVES TO A SEPARATE OS THREAD, reusing the same exported fetch helpers UNCHANGED. THIS FILE IS
 // LOADED TWICE, `isMainThread`/`workerData` gating the branch; `workerData` is structured-cloned, so an
 // injected exec keeps the sync path.
+/** W1-T14998 — the board's needs-human issues: those where the fleet files them (the private route) and, when that is
+ *  another repository, the legacy ones still on the code repository, which keep their open or closed state there. Each
+ *  repository walks its own delta from the `known` rows whose URL names it, so two repositories' equal issue numbers
+ *  never share one stop test. */
+export function fetchEscalationIssuesRest(owner: string, repo: string, fetch: Parameters<typeof fetchLabelledIssuesRest>[3],
+  known?: readonly BoardIssueRest[]): ReturnType<typeof fetchLabelledIssuesRest> {
+  const rows: BoardIssueRest[] = [];
+  let calls = 0, truncated = false, delta = true;
+  for (const repository of escalationIssueRepositories(owner, repo)) {
+    const lower = repository.toLowerCase();
+    const own = known?.filter((r) => issueUrlRepository(r.url)?.toLowerCase() === lower);
+    const [o, r] = repository.split("/") as [string, string];
+    const fetched = fetchLabelledIssuesRest(o, r, NEEDS_HUMAN_LABEL, fetch, own && own.length > 0 ? new Map(own.map((i) => [i.number, i])) : undefined);
+    rows.push(...fetched.rows);
+    calls += fetched.calls;
+    truncated ||= fetched.truncated;
+    delta &&= fetched.mode === "delta";
+  }
+  return { rows, calls, mode: delta ? "delta" : "full", truncated };
+}
+
+/** W1-T14998 — the rows of the code repository's own issues: the only ones its board snapshot cache, keyed by issue
+ *  number, can hold without one repository's issue overwriting another's. */
+function codeRepositoryIssues(owner: string, repo: string, rows: readonly BoardIssueRest[]): BoardIssueRest[] {
+  const code = `${owner}/${repo}`.toLowerCase();
+  return rows.filter((r) => issueUrlRepository(r.url)?.toLowerCase() === code);
+}
+
+const issueSeedRows = (seed: ReadonlyMap<number, BoardIssueRest> | undefined): BoardIssueRest[] | undefined => seed ? [...seed.values()] : undefined;
+
 const BOARD_PREWARM_WORKER_KIND = "remudero-board-prewarm-walk" as const;
 
 /** What the main thread hands the worker — plain data only, per `workerData`'s structured-clone contract. The
@@ -4917,7 +4948,7 @@ interface PrewarmWorkerRequest {
   fetchMerged: boolean;
   fetchIssues: boolean;
   knownBoardPrs?: Map<number, BoardPrRest>;
-  knownIssues?: Map<number, BoardIssueRest>;
+  knownIssues?: BoardIssueRest[];
   /** Open PRs whose review state the walk refreshes, so a board recompute never shells one per row. */
   reviewRefs?: Array<{ url: string; headRef: string }>;
   /** W1-T12555: the main thread's budget state, so the walk's reads take their share of it. */
@@ -5002,8 +5033,8 @@ function runPrewarmChannelsSync(req: PrewarmWorkerRequest): PrewarmWorkerRespons
   if (req.fetchIssues) {
     const { fetchJson, bytes } = makeFetchJson();
     response.issues = prewarmRunChannel(
-      // W1-T14998: needs-human issues are read where they are filed.
-      () => fetchLabelledIssuesRest(...escalationIssueRepository(req.owner, req.repo), NEEDS_HUMAN_LABEL, fetchJson, req.knownIssues),
+      // W1-T14998: needs-human issues are read where they are filed, and legacy ones where they were.
+      () => fetchEscalationIssuesRest(req.owner, req.repo, fetchJson, req.knownIssues),
       bytes,
     );
   }
@@ -5217,7 +5248,7 @@ export function buildBatchedGithub(
   let knownBoardPrs: Map<number, BoardPrRest> | undefined = snapshotCache?.closedSeed();
   // W1-T2222: the issue fetch's OWN cross-refresh cache, same reasoning and same untouched-on-a-throw
   // discipline — an independent map, the two deltas having independent row shapes and failure modes.
-  let knownIssues: Map<number, BoardIssueRest> | undefined = snapshotCache?.issueSeed();
+  let knownIssues: BoardIssueRest[] | undefined = issueSeedRows(snapshotCache?.issueSeed());
   let instanceSeedDue = snapshotCache === undefined && opts.ttlMs !== 0 && opts.exec === undefined && opts.fetchAll === undefined;
   const seedFromInstance = (): void => {
     if (!instanceSeedDue) return;
@@ -5226,7 +5257,7 @@ export function buildBatchedGithub(
     if (!cache) return;
     snapshotCache = cache;
     knownBoardPrs ??= cache.closedSeed();
-    knownIssues ??= cache.issueSeed();
+    knownIssues ??= issueSeedRows(cache.issueSeed());
   };
   /** W1-T413: per-URL changed-file memo. `null` records a read that FAILED, so one unreachable PR is read once
    *  per gateway rather than once per task. */
@@ -5303,11 +5334,11 @@ export function buildBatchedGithub(
         return JSON.parse(raw);
       };
       seedFromInstance();
-      const fetched = fetchLabelledIssuesRest(...escalationIssueRepository(owner, repo), NEEDS_HUMAN_LABEL, fetchJson, knownIssues);
+      const fetched = fetchEscalationIssuesRest(owner, repo, fetchJson, knownIssues);
       // Reassigned only on a SUCCESSFUL return, exactly like `knownBoardPrs` — a throw skips this line, so a
       // transient failure leaves the previous complete snapshot intact and the NEXT call is still a cheap delta.
-      knownIssues = new Map(fetched.rows.map((r) => [r.number, r]));
-      if (!fetched.truncated) snapshotCache?.commitIssues(fetched.rows);
+      knownIssues = fetched.rows;
+      if (!fetched.truncated) snapshotCache?.commitIssues(codeRepositoryIssues(owner, repo, fetched.rows));
       log("board_gateway.issue_fetch_bytes", {
         bytes,
         restCalls: fetched.calls,
@@ -5362,7 +5393,12 @@ export function buildBatchedGithub(
   // escalate.ts always writes a full URL, but a caller resolving by number should not silently miss.
   const lookupIssue = (ref: string): BatchedIssue | undefined => {
     const idx = issueIndex();
-    return idx.byUrl.get(ref) ?? idx.byNum.get(ref) ?? idx.byNum.get(ref.replace(/^.*\/(\d+)$/, "$1"));
+    const exact = idx.byUrl.get(ref);
+    if (exact) return exact;
+    const byNumber = idx.byNum.get(ref) ?? idx.byNum.get(ref.replace(/^.*\/(\d+)$/, "$1"));
+    // W1-T14998: the index holds two repositories' issues, so a URL's number answers only for its own repository.
+    const named = issueUrlRepository(ref)?.toLowerCase(), held = byNumber && issueUrlRepository(byNumber.url)?.toLowerCase();
+    return named !== undefined && held !== undefined && held !== named ? undefined : byNumber;
   };
 
   interface Index {
@@ -5711,8 +5747,8 @@ export function buildBatchedGithub(
       log("board_gateway.issue_fetch_failed", { reason: outcome.reason, message: outcome.message });
       return;
     }
-    knownIssues = new Map(outcome.rows.map((r) => [r.number, r]));
-    if (!outcome.truncated) snapshotCache?.commitIssues(outcome.rows);
+    knownIssues = outcome.rows;
+    if (!outcome.truncated) snapshotCache?.commitIssues(codeRepositoryIssues(owner, repo, outcome.rows));
     const all: BatchedIssue[] = outcome.rows.map((r) => ({ number: r.number, url: r.url, state: r.state, title: r.title }));
     issueCache = { at: now(), byUrl: new Map(all.map((i) => [i.url, i])), byNum: new Map(all.map((i) => [String(i.number), i])) };
     lastIssueFetchFailed = false;
@@ -6030,7 +6066,7 @@ export function buildBatchedGithub(
       instanceSeedDue = false;
       snapshotCache = cache;
       knownBoardPrs ??= cache.closedSeed();
-      knownIssues ??= cache.issueSeed();
+      knownIssues ??= issueSeedRows(cache.issueSeed());
     },
     // W1-T2219: these accessors no longer force a fetch. Pre-fix, EITHER alone did, so asking "did the read
     // fail" PERFORMED the read and blocked the caller while reporting the PREVIOUS attempt's verdict

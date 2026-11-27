@@ -77,7 +77,7 @@ import {
   DEFAULT_CI_INCIDENT_MAIN_BRANCH,
   type CiIncidentState,
 } from "./ci-incidents.js";
-import { loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
+import { escalationDestinationAt, escalationIssueRepositories, loadEscalationLinkSecret, readEscalationLinkSecret, type EscalationOption, type EscalationOptionRoute } from "./escalate.js";
 import { projectClassifiedHumanGates } from "./ask-classification.js";
 import { CODE_HEALTH_VIEW_NAME, validateCodeHealthRequest } from "./code-health-view.js";
 import { buildReadModelViewRoutes, oldestAsOf, viewKey, viewMode, type ViewAnswerSource, type ViewBodySource, type ViewProbeReader } from "./views.js";
@@ -3243,7 +3243,12 @@ function assembleServeRoutes(
   });
   // W1-T4088: the thread store is wired in production at last — the SAME file the inbox thread
   // routes and the daemon's responder use — so an escalation reply is accepted, not refused.
+  // W1-T14998: the fleet files escalations where this state directory routes them, so the reader, the index and the
+  // reply route take those issues as this repository's alongside its own legacy ones.
+  const escalationIssueRepositoryList = deps.assistantRepository === undefined ? undefined
+    : escalationIssueRepositories(...(deps.assistantRepository.split("/") as [string, string]), escalationDestinationAt(dirname(deps.ledgerPath)));
   const readEscalationConversation = createEscalationConversationReader({ repository: deps.assistantRepository,
+    ...(escalationIssueRepositoryList ? { issueRepositories: escalationIssueRepositoryList } : {}),
     threadStorePath: inboxThreadStorePath(deps.fleetControlRoot), ledgerPath: deps.ledgerPath,
     knownIssue: (url, identity) => {
       const state = deps.boardSnapshotSource?.current();
@@ -3253,6 +3258,7 @@ function assembleServeRoutes(
   // W1-T11110: the mailbox index reads the same saved thread store and the same board snapshot the
   // detail reader's provenance check uses, and projects correspondence through the same function.
   const readEscalationIndex = createEscalationConversationIndexReader({ repository: deps.assistantRepository,
+    ...(escalationIssueRepositoryList ? { issueRepositories: escalationIssueRepositoryList } : {}),
     threadStorePath: inboxThreadStorePath(deps.fleetControlRoot), readBoard: () => boardFlagsOf(deps.boardSnapshotSource?.current()) });
   const fleetControlDeps: PanelActionDeps = {
     root: deps.fleetControlRoot,
@@ -3260,6 +3266,7 @@ function assembleServeRoutes(
     issues: deps.issues,
     threadStorePath: inboxThreadStorePath(deps.fleetControlRoot),
     readEscalationConversation,
+    ...(deps.assistantRepository ? { escalationFeedbackRepository: deps.assistantRepository } : {}),
   };
   const questionDeps: PanelActionDeps = { root: deps.questionsRoot, ledgerPath: deps.ledgerPath, issues: deps.issues };
   const linkRefusals = createLinkRefusalRollup({ ledgerPath: deps.ledgerPath, clock: systemClock });

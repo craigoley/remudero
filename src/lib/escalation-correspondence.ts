@@ -49,10 +49,14 @@ export type EscalationIntakeResult = { state: "recorded" | "existing"; seq: numb
 
 /** Only a published intake result may end an ask. Capture and interpreter success cannot. */
 export function recordEscalationIntakeOutcome(entry: FeedbackEntry, outcome: EscalationIntakeOutcome,
-  deps: ThreadStoreDeps & { repository: string }): EscalationIntakeResult {
+  deps: ThreadStoreDeps & { repository: string; issueRepositories?: readonly string[] }): EscalationIntakeResult {
   if (typeof entry.thread_id !== "string" || typeof entry.submission_key !== "string" || !entry.submission_key.startsWith("escalation-reply:"))
     return { state: "not_applicable", reason: "This intake has no bound escalation answer." };
   const unknown = (reason: string): EscalationIntakeResult => ({ state: "unknown", reason });
+  // W1-T14998: an escalation and its follow-up question are issues where the fleet files them (the private route, or
+  // legacy on the code repository); the intake publication stays a pull request on the code repository.
+  const issueRepositories = (deps.issueRepositories ?? [deps.repository]).map(r => r.toLowerCase());
+  const filedIssue = (url: string): boolean => issueRepositories.includes(issue(url)?.toLowerCase() ?? "");
   const identity = escalationThreadIdentity(entry.thread_id);
   if (!identity || deriveThreadId(identity) !== entry.thread_id || typeof entry.id !== "string" || !/^[A-Za-z0-9_-]{1,256}$/.test(entry.id) || typeof entry.raw !== "string")
     return unknown("The original escalation identity could not be verified.");
@@ -62,13 +66,13 @@ export function recordEscalationIntakeOutcome(entry: FeedbackEntry, outcome: Esc
     && message.extra.escalation && escalationReplySubmissionKey(entry.thread_id!, message.extra.replyId, message.extra.escalation.issueUrl) === entry.submission_key);
   const answer = answers.length === 1 ? answers[0] : undefined;
   if (!answer || answer.body.trim() !== entry.raw.trim() || answer.extra?.escalation === undefined
-    || issue(answer.extra.escalation.issueUrl)?.toLowerCase() !== deps.repository.toLowerCase()
+    || !filedIssue(answer.extra.escalation.issueUrl)
     || !/^[a-f0-9]{64}$/.test(answer.extra.escalation.revision)) return unknown("The intake does not match one exact saved answer.");
   if (outcome.action === "error") return unknown(outcome.reason);
   const publication = /^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/[1-9][0-9]*$/.exec(outcome.publicationPr);
   if (publication?.[1]?.toLowerCase() !== deps.repository.toLowerCase() || !outcome.detail || outcome.detail.length > 16_384 || outcome.detail.includes("\0"))
     return unknown("A bounded, source-matching intake publication is required.");
-  if (outcome.action === "grill" && issue(outcome.questionIssueUrl)?.toLowerCase() !== deps.repository.toLowerCase())
+  if (outcome.action === "grill" && !filedIssue(outcome.questionIssueUrl))
     return unknown("The follow-up question is outside the original repository.");
   const body = outcome.action === "grill"
     ? `I need more information before I can proceed.\n\n${outcome.detail}\n\nQuestion: ${outcome.questionIssueUrl}\nIntake record: ${outcome.publicationPr}`

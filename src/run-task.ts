@@ -747,7 +747,7 @@ import {
   type AsyncIssueGateway,
   type IssueGateway,
   type OpenIssue,
-  type PresenceMode, prReferentFromIssueText, loadEscalationLinkSecret, issueUrlRepository,} from "./lib/escalate.js";
+  type PresenceMode, prReferentFromIssueText, loadEscalationLinkSecret, issueUrlRepository, escalationIssueRepositories,} from "./lib/escalate.js";
 import {
   boardPrsRestArgs,
   checkRunsRestArgs,
@@ -36445,7 +36445,8 @@ async function landTriageStatusOutcome(i: {
         ? i.grillIssueUrl ? { action: "grill" as const, publicationPr: prUrl, detail: decision.detail, questionIssueUrl: i.grillIssueUrl }
           : { action: "error" as const, reason: "The intake question has no verified publication." }
         : { action: decision.action, publicationPr: prUrl, detail: decision.detail };
-    const response = recordEscalationIntakeOutcome(i.entry, outcome, { threadStorePath: i.threadStorePath, repository: i.repository });
+    const response = recordEscalationIntakeOutcome(i.entry, outcome, { threadStorePath: i.threadStorePath, repository: i.repository,
+      issueRepositories: escalationIssueRepositories(...(i.repository.split("/") as [string, string])) });
     log("triage.escalation_response", { feedback_id: feedbackId, ...response, work: "pending" });
   } catch (error) {
     log("triage.escalation_response", { feedback_id: feedbackId, state: "unknown", reason: String((error as Error)?.message ?? error) });
@@ -37081,7 +37082,7 @@ async function triageCommandLocked(
     // Acknowledging intake ends the ask; it does not claim CI, merge or work completion.
     try {
       const response = recordEscalationIntakeOutcome(entry, { action: decision.action, publicationPr: prUrl, detail: decision.detail },
-        { threadStorePath: inboxThreadStorePath(config.root), repository: `${owner}/${repo}` });
+        { threadStorePath: inboxThreadStorePath(config.root), repository: `${owner}/${repo}`, issueRepositories: escalationIssueRepositories(owner, repo) });
       log("triage.escalation_response", { feedback_id: feedbackId, ...response, work: "pending" });
     } catch (error) {
       log("triage.escalation_response", { feedback_id: feedbackId, state: "unknown", reason: String((error as Error)?.message ?? error) });

@@ -83,6 +83,9 @@ export interface PanelActionDeps {
   threadStorePath?: string;
   /** Native source revalidation for a console reply bound to an issue revision. */
   readEscalationConversation?: EscalationConversationReader;
+  /** W1-T14998: the repository an escalation answer's feedback question is read from — the code repository the
+   *  escalation is about. Absent, the repository its issue URL names, which a privately filed issue no longer is. */
+  escalationFeedbackRepository?: string;
   /** Rules {@link buildEscalationReplyRoute} hands `interpretReply` to decide whether a reply is
    *  understood; unset runs its default, always "understood", so unconfigured behavior is unchanged. */
   interpretReplyDeps?: InterpretReplyDeps;
@@ -916,14 +919,14 @@ function feedbackQuestionHasAnotherAnswer(root: string, feedbackId: string, ownI
 }
 
 async function captureBoundEscalationFeedback(root: string, threadId: string, input: EscalationReplyInput,
-  question?: NonNullable<ThreadMessageExtra["escalation"]>["question"]) {
+  question?: NonNullable<ThreadMessageExtra["escalation"]>["question"], feedbackRepository?: string) {
   const submissionKey = escalationReplySubmissionKey(threadId, input.intentId!, input.issueUrl!);
   const id = boundFeedbackId(submissionKey);
   const parentInQueue = question ? readQueuedFeedbackRecords(root).get(feedbackEntryRepoPath(question.feedbackId)) : undefined;
   if (parentInQueue && !["new", "grilling"].includes(parentInQueue.status) && !(parentInQueue.status === "answered" && parentInQueue.answered_by === id))
     throw new Error("The current feedback question already has another answer.");
   const parent = question && parentInQueue?.status !== "answered"
-    ? await readEscalationQuestionFeedback(/^https:\/\/github\.com\/([^/]+\/[^/]+)\//.exec(input.issueUrl!)![1]!, question.feedbackId, true) : undefined;
+    ? await readEscalationQuestionFeedback(feedbackRepository ?? /^https:\/\/github\.com\/([^/]+\/[^/]+)\//.exec(input.issueUrl!)![1]!, question.feedbackId, true) : undefined;
   if (parent && (parent.status !== "grilling" || parent.thread_id !== threadId)) throw new Error("The current feedback question is no longer awaiting this answer.");
   // Recheck after the awaited canonical read, including partially landed answers whose
   // parent status has not caught up. This is the existing feedback reply refusal rule.
@@ -995,7 +998,7 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
           // The durable answer is already authenticated. Recover only its original input,
           // using the same native feedback identity; never append or interpret it again.
           let deliveryDetail: string | undefined;
-          try { if (binding?.inputVersion === 1) await captureBoundEscalationFeedback(deps.root, threadId, input, binding.question); }
+          try { if (binding?.inputVersion === 1) await captureBoundEscalationFeedback(deps.root, threadId, input, binding.question, deps.escalationFeedbackRepository); }
           catch (error) {
             deliveryDetail = "Your answer is saved. Delivery to the fleet remains unverified.";
             ledgerPanelAction(deps, "panel.escalation_input_unverified", input.taskId, bearerTokenId(req),
@@ -1032,7 +1035,7 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
       if (saved?.kind === "conflict") return void sendJson(res, 409, { error: "intent_conflict", detail: "That reply identity already belongs to different text. Your draft was not sent." });
       if (saved?.kind === "existing") {
         let deliveryDetail: string | undefined;
-        try { await captureBoundEscalationFeedback(deps.root, threadId, input, currentQuestion); }
+        try { await captureBoundEscalationFeedback(deps.root, threadId, input, currentQuestion, deps.escalationFeedbackRepository); }
         catch (error) {
           deliveryDetail = "Your answer is saved. Delivery to the fleet remains unverified.";
           ledgerPanelAction(deps, "panel.escalation_input_unverified", input.taskId, bearerTokenId(req),
@@ -1064,7 +1067,7 @@ export function buildEscalationReplyRoute(deps: PanelActionDeps): Route {
 
       const origin = bearerTokenId(req);
       // W1-T5525: serve mounts this route on config.root, the state root the daemon's landing sweep drains.
-      const recovered = input.intentId ? await captureBoundEscalationFeedback(deps.root, threadId, input, currentQuestion) : undefined;
+      const recovered = input.intentId ? await captureBoundEscalationFeedback(deps.root, threadId, input, currentQuestion, deps.escalationFeedbackRepository) : undefined;
       const entry = recovered?.entry ?? captureFeedback(deps.root, { raw: input.text, origin: "ui", threadId, land: { stateRoot: deps.root } });
       const staged = recovered?.staged ?? queueFeedbackRecord(deps.root, feedbackEntryRepoPath(entry.id), deps.root);
       // W1-T4471: the store `operatorVerdictEvidence` (lib/sweep.ts) reads; `input.taskId` is required above.
