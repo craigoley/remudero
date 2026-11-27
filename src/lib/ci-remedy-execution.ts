@@ -171,6 +171,7 @@ const CROSSING_LINE = /^\s*- \S+:\d+\s.*\sgoes red\s/;
 /** The census's own headlines. Only the crossing headline can be inherited: formatReport attributes nothing else. */
 const CENSUS_HEADLINE = /^expiring-fixture-census: (?:BLOCKED|CLEAR|OK) -- /;
 const INHERITABLE_HEADLINE = /^expiring-fixture-census: BLOCKED -- \d+ fixture\(s\) CROSS their threshold within /;
+const CROSSING_COUNT = /^expiring-fixture-census: BLOCKED -- (\d+) fixture\(s\) CROSS their threshold within /;
 /** A population-drop line: formatReport never attributes a drop to the base. */
 const POPULATION_DROP_LINE = /^\s*- \S+: measured \d+ stamp\(s\), recorded \d+ \(/;
 /** A failure the log names that is not a census crossing: a failed test or a type error. */
@@ -199,10 +200,22 @@ function reportLines(logTail: string): { lines: string[]; annotationHeads: strin
 function censusReportIsInherited(logTail: string): boolean {
   const { lines, annotationHeads } = reportLines(logTail);
   const headlines = lines.filter((line) => CENSUS_HEADLINE.test(line));
-  const crossings = lines.filter((line) => CROSSING_LINE.test(line));
+  // The census publishes the same report to stdout and as a workflow annotation; count distinct
+  // report rows so that this duplicate transport does not double the headline's population.
+  const crossings = [...new Set(lines.filter((line) => CROSSING_LINE.test(line)))];
+  const expectedCrossings = headlines.map((line) => Number(CROSSING_COUNT.exec(line)?.[1]));
+  const exitCodes = annotationHeads.filter((head) => /^Process completed with exit code \d+\.?$/.test(head));
+  const censusFooter = /^(?:\s*|\s*\d+ of these(?: \d+)? (?:is|are) ALREADY crossing on the base ref, so this diff did not plant (?:\d+|them)\.|\s*Every open PR is seeing the same (?:one|\d+), and each will pay this diagnosis separately until the|\s*base is repaired -- so fix it THERE, in one change, rather than defusing it per branch\.|\s+confirmed -- \d+\/\d+ pass with Date\.now shifted \+\d+d|\s*\d+ fixture\(s\) exempted by marker, each with its reason on the line:|\s+- \S+:\d+)$/;
+  const recognizedReportLine = (line: string) => CENSUS_HEADLINE.test(line) || CROSSING_LINE.test(line)
+    || censusFooter.test(line);
   return headlines.length > 0 && headlines.every((line) => INHERITABLE_HEADLINE.test(line))
+    && expectedCrossings.every((count) => count > 0 && count === crossings.length)
     && crossings.length > 0 && crossings.every((line) => line.includes(BASE_INHERITED_MARKER))
+    // An aggregate check can carry this report beside another failure with no TAP `not ok` line.
+    // Accept only the census's own emitted lines and the runner's final exit annotation.
+    && lines.every((line) => recognizedReportLine(line) || /^Process completed with exit code \d+\.?$/.test(line))
     && !lines.some((line) => POPULATION_DROP_LINE.test(line) || OTHER_RED.test(line))
+    && exitCodes.length <= 1
     && annotationHeads.every((head) => INHERITABLE_HEADLINE.test(head) || /^Process completed with exit code \d+\.?$/.test(head));
 }
 
@@ -210,28 +223,111 @@ function censusReportIsInherited(logTail: string): boolean {
  *  crossing report, every crossing in it is marked inherited, and it names nothing else: no population drop, no other
  *  census verdict, no failed test, no error annotation but the census's own headline. An empty list, or any doubt,
  *  is not. */
-export function baseInheritedRedSteps(failures: ReadonlyArray<{ name: string; logTail: string }>): { inherited: boolean; steps: string[] } {
+export function baseInheritedRedSteps(failures: ReadonlyArray<{ name: string; logTail: string;
+  annotations?: ReadonlyArray<{ message: string }> }>): { inherited: boolean; steps: string[] } {
   const steps = [...new Set(failures.map((failure) => failure.name))];
-  return { inherited: failures.length > 0 && failures.every((failure) => censusReportIsInherited(failure.logTail)), steps };
+  return { inherited: failures.length > 0 && failures.every((failure) => censusReportIsInherited(
+    [failure.logTail, ...(failure.annotations ?? []).map((annotation) => annotation.message)].join("\n"))), steps };
 }
 
-const ASSERTION_START = /\bassert(?:\.\w+)*\s*\(|\bexpect\s*\(/g;
-
-/** Each assertion call in `text`, whole (its balanced argument list), with whitespace collapsed. */
+/** Each assertion in `text`, including chained expect matchers and referenced expected-value declarations. */
 function assertionCalls(text: string): string[] {
-  const calls: string[] = [];
-  for (const match of text.matchAll(ASSERTION_START)) {
-    let depth = 0, quote: string | undefined, end = -1;
-    for (let i = match.index! + match[0].length - 1; i < text.length; i++) {
-      const c = text[i]!;
-      if (quote) { if (c === "\\") i++; else if (c === quote) quote = undefined; continue; }
-      if (c === "\"" || c === "'" || c === "`") quote = c;
-      else if (c === "(") depth++;
-      else if (c === ")" && --depth === 0) { end = i; break; }
+  type Token = { value: string; start: number; end: number; kind: "word" | "punct" };
+  const tokens: Token[] = [];
+  const word = (c: string) => /[\w$]/.test(c);
+  const canStartRegex = (previous?: Token) => !previous || previous.kind === "punct"
+    && ![")", "]", "}", "++", "--"].includes(previous.value)
+    || previous?.kind === "word" && ["return", "throw", "case", "delete", "void", "typeof", "instanceof", "in", "of", "yield", "await"].includes(previous.value);
+  for (let i = 0; i < text.length;) {
+    const c = text[i]!;
+    if (/\s/.test(c)) { i++; continue; }
+    if (c === "/" && text[i + 1] === "/") { i += 2; while (i < text.length && text[i] !== "\n") i++; continue; }
+    if (c === "/" && text[i + 1] === "*") { i += 2; while (i < text.length && !(text[i] === "*" && text[i + 1] === "/")) i++; i = Math.min(text.length, i + 2); continue; }
+    if (c === "'" || c === '"' || c === "`") {
+      const quote = c, start = i++;
+      while (i < text.length) { if (text[i] === "\\") i += 2; else if (text[i++] === quote) break; }
+      tokens.push({ value: text.slice(start, i), start, end: i, kind: "word" }); continue;
     }
-    calls.push(text.slice(match.index!, end < 0 ? text.length : end + 1).replace(/\s+/g, " "));
+    if (c === "/" && canStartRegex(tokens.at(-1))) {
+      const start = i++; let inClass = false;
+      while (i < text.length) {
+        if (text[i] === "\\") { i += 2; continue; }
+        if (text[i] === "[") inClass = true;
+        else if (text[i] === "]") inClass = false;
+        else if (text[i] === "/" && !inClass) { i++; while (i < text.length && /[A-Za-z]/.test(text[i]!)) i++; break; }
+        else if (text[i] === "\n") break;
+        i++;
+      }
+      tokens.push({ value: text.slice(start, i), start, end: i, kind: "word" }); continue;
+    }
+    if (/[A-Za-z_$]/.test(c)) {
+      const start = i++; while (i < text.length && word(text[i]!)) i++;
+      tokens.push({ value: text.slice(start, i), start, end: i, kind: "word" }); continue;
+    }
+    const start = i++, pair = text.slice(start, start + 2);
+    if (["=>", "?.", "++", "--", "==", "!=", "<=", ">=", "&&", "||", "??", "+=", "-=", "*=", "/="].includes(pair)) i++;
+    tokens.push({ value: text.slice(start, i), start, end: i, kind: "punct" });
   }
-  return calls;
+  const matchParen = (open: number): number => {
+    let depth = 0;
+    for (let i = open; i < tokens.length; i++) {
+      if (tokens[i]!.value === "(") depth++;
+      else if (tokens[i]!.value === ")" && --depth === 0) return i;
+    }
+    return tokens.length - 1;
+  };
+  const declarations = new Map<string, string[]>();
+  for (let i = 0; i < tokens.length - 2; i++) {
+    if (!["const", "let", "var"].includes(tokens[i]!.value) || tokens[i + 1]!.kind !== "word") continue;
+    const name = tokens[i + 1]!.value;
+    if (tokens[i + 2]!.value !== "=") continue;
+    const begin = i + 1, valueStart = i + 3; let depth = 0, end = valueStart;
+    for (; end < tokens.length; end++) {
+      const value = tokens[end]!.value;
+      if (depth === 0 && (value === ";" || value === "," || text.slice(tokens[end - 1]?.end ?? 0, tokens[end]!.start).includes("\n"))) break;
+      if (["(", "[", "{"].includes(value)) depth++;
+      else if ([")", "]", "}"].includes(value)) depth--;
+    }
+    const declaration = text.slice(tokens[begin]!.start, tokens[end - 1]?.end ?? tokens[i + 2]!.end).replace(/\s+/g, " ").trim();
+    const group = declarations.get(name) ?? []; group.push(declaration); declarations.set(name, group);
+  }
+  const assertions: Array<{ start: number; end: number }> = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i]!.value === "assert") {
+      let open = i + 1;
+      while (tokens[open]?.value === "." && tokens[open + 1]?.kind === "word") open += 2;
+      if (tokens[open]?.value !== "(") continue;
+      assertions.push({ start: i, end: matchParen(open) });
+    } else if (tokens[i]!.value === "expect" && tokens[i + 1]?.value === "(") {
+      let end = matchParen(i + 1), cursor = end + 1;
+      while (tokens[cursor]?.value === "." && tokens[cursor + 1]?.kind === "word") {
+        cursor += 2;
+        if (tokens[cursor]?.value === "(") { end = matchParen(cursor); cursor = end + 1; }
+      }
+      assertions.push({ start: i, end });
+    }
+  }
+  const result: string[] = [];
+  for (const assertion of assertions) {
+    const names = new Set(tokens.slice(assertion.start, assertion.end + 1).filter((token) => token.kind === "word").map((token) => token.value));
+    const referencedDeclarations: string[] = [], inspected = new Set<string>();
+    while (names.size) {
+      const name = [...names].sort()[0]!; names.delete(name);
+      if (inspected.has(name)) continue;
+      inspected.add(name);
+      for (const declaration of declarations.get(name) ?? []) {
+        referencedDeclarations.push(declaration);
+        for (const token of tokensFor(declaration)) names.add(token);
+      }
+    }
+    referencedDeclarations.sort();
+    const raw = text.slice(tokens[assertion.start]!.start, tokens[assertion.end]!.end).replace(/\s+/g, " ").trim();
+    result.push(`${raw}${referencedDeclarations.length ? ` | declarations: ${referencedDeclarations.join("; ")}` : ""}`);
+  }
+  function tokensFor(expression: string): string[] {
+    return expression.match(/[A-Za-z_$][\w$]*/g) ?? [];
+  }
+  return result;
 }
 
 /** W1-T15064: the assertions of an existing test file the round's diff removed or changed, per file. */

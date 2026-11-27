@@ -44,7 +44,8 @@ function censusLog(reported: ReturnType<typeof crossing>[], drops: Record<string
   proveNearCrossings(reported, (files: string[], days: number) => new Map(files.map((file) =>
     [file, days > 1 ? { passed: false, pass: 3, tests: 5 } : { passed: true, pass: 5, tests: 5 }])), 0);
   const populationDrop = refusePopulationDrop(drops, Object.fromEntries(Object.keys(drops).map((file) => [file, 9])));
-  const report = formatReport({ population: 9, reported, exempt: [], populationDrop });
+  const exempt = Array.from({ length: 82 }, (_, index) => ({ file: `test/exempt-${index}.test.ts`, line: index + 1 }));
+  const report = formatReport({ population: 9, reported, exempt, populationDrop });
   const lines: string[] = [];
   lines.push(report);
   const blocked = isBlocked({ reported, populationDrop });
@@ -161,6 +162,15 @@ test("W1-T15064 criterion 1: an all-inherited red step dispatches no source edit
   for (const logTail of [stamped(inheritedLog), rendered, reportOnly, `${rendered}\n##[error]Process completed with exit code 1.`]) {
     assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail }]).inherited, true, logTail.slice(0, 200));
   }
+  // The real report has an 82-row exempt footer. The production reader can keep an annotation
+  // headline but slice crossing rows out of the log region.
+  // Its declared count must match all parsed crossing rows before this report can authorize standing down.
+  const incomplete = reportOnly.replace(/  - test\/b\.test\.ts:[^\n]+\n/g, "");
+  assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: incomplete }]).inherited, false);
+  assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: incomplete,
+    annotations: [{ message: reportOnly }] }]).inherited, true, "a complete annotation report survives a clipped job-log region");
+  // A bundled check can carry another gate's ordinary output beside the census report without TAP diagnostics.
+  assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: `${inheritedLog}\nother gate: BLOCKED` }]).inherited, false);
   // Any doubt dispatches as before: a crossing the diff planted, a population drop the base is not charged with,
   // another failure in the log, another error annotation, or no failure at all.
   const planted = censusLog([crossing("test/a.test.ts", 0.4, true), crossing("test/b.test.ts", 0.6, false)]);
@@ -176,6 +186,8 @@ test("W1-T15064 criterion 1: an all-inherited red step dispatches no source edit
   assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: dropOnly.log }]).inherited, false);
   assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: `${inheritedLog}\nnot ok 3 - inbox` }]).inherited, false);
   assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: `${rendered}\n##[error]tsc: 2 errors` }]).inherited, false);
+  assert.equal(baseInheritedRedSteps([{ name: "light-gates",
+    logTail: `${rendered}\n##[error]Process completed with exit code 1.\n##[error]Process completed with exit code 1.` }]).inherited, false);
   assert.equal(baseInheritedRedSteps([{ name: "light-gates", logTail: inheritedLog },
     { name: "unit", logTail: "✖ inbox released asks" }]).inherited, false);
   assert.equal(baseInheritedRedSteps([]).inherited, false);
@@ -206,6 +218,19 @@ test("W1-T15064 criterion 2: a changed test expectation is refused unless its fi
   assert.equal(named.pushes, 1);
   // A new assertion beside the existing ones changes no expectation.
   assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base: EXPECT, head: `${EXPECT}assert.equal(released(() => false), true);\n` }]), []);
+  // Regex literals and comments are syntax-aware; adding them cannot make an existing assertion appear rewritten.
+  const regexBase = `${EXPECT}const note = /can't \(close\)/; // assert.equal(false, true)\n`;
+  assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base: regexBase,
+    head: `${regexBase}const other = /fn\\(/;\n` }]), []);
+  // A changed value in a referenced declaration is still an expectation rewrite.
+  const variableBase = `const expected = false;\nassert.equal(released(undefined), expected);\n`;
+  const variableHead = `const expected = true;\nassert.equal(released(undefined), expected);\n`;
+  assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base: variableBase, head: variableHead }]),
+    [{ path: TEST, changed: ["assert.equal(released(undefined), expected) | declarations: expected = false"] }]);
+  // `expect` comparisons include chained matcher calls, not only the `expect(...)` argument list.
+  assert.deepEqual(rewrittenTestExpectations([{ path: TEST,
+    base: "expect(released(undefined)).toBe(false);\n", head: "expect(released(undefined)).toBe(true);\n" }]),
+  [{ path: TEST, changed: ["expect(released(undefined)).toBe(false)"] }]);
   // A multi-line expectation is compared whole, and a match by file name counts as naming the test.
   const multi = rewrittenTestExpectations([{ path: TEST, base: "assert.deepEqual(rows,\n  [1, 2]);\n", head: "assert.deepEqual(rows,\n  [1]);\n" }]);
   assert.deepEqual(multi, [{ path: TEST, changed: ["assert.deepEqual(rows, [1, 2])"] }]);
