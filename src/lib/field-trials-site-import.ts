@@ -53,9 +53,10 @@ export type SiteImportOutcome =
   | { state: "refused"; by: "exporter" | "site"; reason: string; releaseId?: string }
   | { state: "site-checkout-failed"; reason: string }
   | { state: "site-stage-mode-unavailable"; releaseId: string }
-  | { state: "unchanged"; releaseId: string }
+  | { state: "unchanged"; releaseId: string; verifiedOutcome?: VerifiedOutcomeWrite }
   | { state: "stage-failed"; releaseId: string; reason: string }
-  | { state: "staged"; releaseId: string; pr: "opened" | "updated"; prUrl: string; prNumber: number; files: string[] }
+  | { state: "staged"; releaseId: string; pr: "opened" | "updated"; prUrl: string; prNumber: number; files: string[];
+      verifiedOutcome?: VerifiedOutcomeWrite }
   | { state: "site-grant-missing"; releaseId: string; reason: string; missing: string[]; grant: string }
   | { state: "publish-failed"; releaseId: string; reason: string; grant: string };
 
@@ -67,6 +68,87 @@ export interface SiteImportInput {
   nowIso: string;
   /** Runs the exporter with the site's released windows, so a replacement starts at the last RELEASED end. */
   exportCandidate: (released: readonly SiteRelease[]) => FieldNoteExport;
+  /** W1-T14985: the cohort index and the owner's consent receipts the site's verified-outcome derivation reads. */
+  verifiedOutcome?: SiteVerifiedOutcomeSource;
+}
+
+/** W1-T14985: the site's own derivation of data/model-verified-outcome.json (PORTAL-T65). */
+export const SITE_VERIFIED_OUTCOME_SCRIPT = "scripts/derive-model-verified-outcome.mjs";
+export const SITE_VERIFIED_OUTCOME_FILE = "data/model-verified-outcome.json";
+
+export interface SiteVerifiedOutcomeSource {
+  /** state/benchmark-cohort-index.json. */
+  cohortIndexPath: string;
+  /** Core's live aggregate receipt in state/field-trials/field-trials-consent-v1.json ({@link coreVerifiedOutcomeReceipts}). */
+  receipts: readonly string[];
+}
+
+/** The repository whose ledger the cohort index is built from: only its grant can authorise the verified outcome. */
+export const VERIFIED_OUTCOME_SOURCE_REPO = "craigoley/remudero";
+
+/**
+ * W1-T14985: the receipt that authorises publishing core's cohort index — core's own live aggregate grant, never another
+ * repository's. A revoked, private or absent core grant gives no receipt, so the derivation writes nothing.
+ */
+export function coreVerifiedOutcomeReceipts(repos: readonly { repo: string; rights: string; receipt: string; revoked?: boolean }[]):
+  string[] {
+  return repos.filter((entry) => entry.repo.toLowerCase() === VERIFIED_OUTCOME_SOURCE_REPO && entry.revoked !== true
+    && entry.rights === "aggregate-opt-in").map((entry) => entry.receipt);
+}
+
+/** Whether this pass wrote the verified outcome, or the reason it wrote none. */
+export type VerifiedOutcomeWrite = { state: "written"; consentAt: string } | { state: "not-written"; reason: string };
+
+/**
+ * W1-T14985: the consent instant the site's derivation records, from the owner's receipts (`owner-YYYY-MM-DD-<who>`),
+ * which carry a date and no time. The instant is the END of that UTC day, and never later than now (the site refuses a
+ * consent instant after its own clock): never earlier than the real consent, so no figure reads as consented before it
+ * was. Receipts that name different dates, or none, give a reason and no instant.
+ */
+export function consentAtFromReceipts(receipts: readonly string[], nowIso: string): { at: string } | { reason: string } {
+  if (receipts.length === 0) return { reason: "no-consent-receipt" };
+  const dates = new Set<string>();
+  for (const receipt of receipts) {
+    const day = /^owner-(\d{4}-\d{2}-\d{2})-/.exec(receipt)?.[1];
+    const end = day === undefined ? Number.NaN : Date.parse(`${day}T23:59:59.999Z`);
+    if (day === undefined || !Number.isFinite(end) || fixedClock(end).iso().slice(0, 10) !== day) {
+      return { reason: `consent-receipt-has-no-date: ${receipt}` };
+    }
+    // The site refuses a consent instant after its own clock, and a clamp to now would date the consent before the receipt does.
+    if (day > nowIso.slice(0, 10)) return { reason: `consent-receipt-after-pass: ${receipt}` };
+    dates.add(day);
+  }
+  if (dates.size !== 1) return { reason: `consent-receipts-disagree: ${[...dates].sort().join(", ")}` };
+  const end = Date.parse(`${[...dates][0]}T23:59:59.999Z`);
+  return { at: fixedClock(Math.min(end, Date.parse(nowIso))).iso() };
+}
+
+/** Run the site's own derivation in the site checkout, so core and site can never disagree on the figures. */
+function deriveVerifiedOutcome(spawn: NonNullable<PreflightFastDeps["spawn"]>, siteDir: string,
+  source: SiteVerifiedOutcomeSource, nowIso: string): VerifiedOutcomeWrite {
+  if (source.receipts.length === 0) return { state: "not-written", reason: "no-core-aggregate-consent" };
+  const consent = consentAtFromReceipts(source.receipts, nowIso);
+  if ("reason" in consent) return { state: "not-written", reason: consent.reason };
+  try { readFileSync(join(siteDir, SITE_VERIFIED_OUTCOME_SCRIPT), "utf8"); }
+  catch (error) {
+    return { state: "not-written", reason: `site-derive-script-unreadable: ${(error as NodeJS.ErrnoException).code ?? String(error)}` };
+  }
+  const run = spawn(process.execPath, [SITE_VERIFIED_OUTCOME_SCRIPT, source.cohortIndexPath, consent.at, SITE_VERIFIED_OUTCOME_FILE],
+    { cwd: siteDir });
+  if (run.status !== 0) {
+    // Node prints the throw site and a caret before the error itself; the reason is the error's own message.
+    const lines = run.stderr.trim().split("\n");
+    const said = lines.find((line) => /^(Uncaught )?\w*Error: /.test(line))?.replace(/^(Uncaught )?\w*Error: /, "")
+      ?? lines.find((line) => /\S/.test(line)) ?? "";
+    return { state: "not-written", reason: `site-derive-exit-${run.status}: ${said}` };
+  }
+  return { state: "written", consentAt: consent.at };
+}
+
+function verifiedOutcomeLine(write: VerifiedOutcomeWrite): string {
+  return write.state === "written"
+    ? `- Verified outcome: ${SITE_VERIFIED_OUTCOME_FILE} derived by ${SITE_VERIFIED_OUTCOME_SCRIPT} (consent at ${write.consentAt}).\n`
+    : `- Verified outcome: not written (${write.reason}).\n`;
 }
 
 const defaultStageSpawn: NonNullable<PreflightFastDeps["spawn"]> = (file, args, opts) => {
@@ -243,19 +325,31 @@ export async function syncFieldNoteSiteImport(input: SiteImportInput,
       const reason = `stage-output-not-json: ${String(error)}`;
       if (stage.status === SITE_STAGE_EXIT.staged) return { state: "stage-failed", releaseId, reason };
     }
-    if (stage.status === SITE_STAGE_EXIT.unchanged) return { state: "unchanged", releaseId };
+    const unchanged = stage.status === SITE_STAGE_EXIT.unchanged;
     if (stage.status === SITE_STAGE_EXIT.refused) {
       return { state: "refused", by: "site", releaseId, reason: reported.reason ?? `stage-refused: ${stage.stderr.trim()}` };
     }
-    if (stage.status !== SITE_STAGE_EXIT.staged || reported.outcome !== "staged") {
+    if (!unchanged && (stage.status !== SITE_STAGE_EXIT.staged || reported.outcome !== "staged")) {
       return { state: "stage-failed", releaseId, reason: `stage-exit-${stage.status}: ${stage.stderr.trim() || line}` };
     }
+    if (!unchanged) {
+      const noted = await stagedFiles(siteDir);
+      if (typeof noted === "string") return { state: "stage-failed", releaseId, reason: noted };
+    }
+    // W1-T14985: the verified outcome rides in the same reviewed PR, derived by the site's own script.
+    const verifiedOutcome = input.verifiedOutcome === undefined ? undefined
+      : deriveVerifiedOutcome(spawn, siteDir, input.verifiedOutcome, input.nowIso);
+    const outcomeFields = verifiedOutcome === undefined ? {} : { verifiedOutcome };
+    if (unchanged && verifiedOutcome?.state !== "written") return { state: "unchanged", releaseId, ...outcomeFields };
     const files = await stagedFiles(siteDir);
+    if (unchanged && files === "stage-reported-staged-but-changed-nothing") return { state: "unchanged", releaseId, ...outcomeFields };
     if (typeof files === "string") return { state: "stage-failed", releaseId, reason: files };
-    const summary = readFileSync(summaryPath, "utf8");
+    const staged = unchanged ? `## Daily verified outcome: ${releaseId}\n\n- The field note is unchanged.\n`
+      + "- Review: the owner merge of this PR is the review.\n" : readFileSync(summaryPath, "utf8");
+    const summary = verifiedOutcome === undefined ? staged : `${staged.replace(/\n*$/, "\n")}${verifiedOutcomeLine(verifiedOutcome)}`;
     const proof = await (deps.writeProof ?? appWriteProof())(`${SITE_IMPORT_OWNER}/${SITE_IMPORT_REPO}`);
     if (!proof.ok) return { state: "site-grant-missing", releaseId, reason: proof.reason, missing: proof.missing, grant: SITE_IMPORT_GRANT };
-    try { return await publish(deps.fetch ?? ghJson, siteDir, workDir, releaseId, files, summary); }
+    try { return { ...await publish(deps.fetch ?? ghJson, siteDir, workDir, releaseId, files, summary), ...outcomeFields }; }
     catch (error) {
       const reason = String(error instanceof Error ? error.message : error);
       return { state: "publish-failed", releaseId, reason, grant: SITE_IMPORT_GRANT };

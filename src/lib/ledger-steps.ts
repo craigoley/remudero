@@ -839,6 +839,24 @@ const SEED_ROWS: readonly SeedRow[] = [
     writer: ["proofPhaseRecorder"],
     outcomes: ["converged", "not_converged"],
   },
+  {
+    // W1-T14987: a serve handoff the spacing would have held ran at once, because a merge changed only serve's own code.
+    step: "serve.handoff_spacing_waived",
+    meaning:
+      "The serve supervisor handed serve over inside its handoff spacing window, because the active generation's verdict " +
+      "on its ask (`serveOnly`, classified in the generation, never in the baked supervisor) says the advance from the active " +
+      "build to the ask's target holds a first-parent merge whose code paths all lie in serve's own code (the modules " +
+      "src/run-task.ts reaches only through src/lib/serve.ts, serve-own-code.ts) and none in a module the daemon loads. " +
+      "Fields: `fromSha`, `toSha`, `merge` (the oldest such merge), `paths` (that merge's changed paths) and `waitMs` " +
+      "(the spacing wait it skipped). It is written once per real hand-over, when the waived handoff passes memory " +
+      "admission on `toSha`; a memory deferral writes none and its retry keeps the waived ask and judges it again. " +
+      "A prepare that lands on a newer main, which may hold merges that landed after the ask, is spaced instead, naming " +
+      "both shas in the `waiver` field. The waived handoff runs memory admission and readiness as any other and " +
+      "counts toward the spacing of the next. An unreadable advance writes none and spaces the handoff, naming why in " +
+      "the `waiver` field of its serve.handoff_deferred or serve.handoff_spacing_absorbed row.",
+    writer: ["createServeSupervisor"],
+    outcomes: ["waived"],
+  },
 ];
 
 /** THE REGISTRY — every step this task has decoded so far, `family` derived from `step` (never

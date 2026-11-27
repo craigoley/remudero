@@ -71,9 +71,9 @@ test("W1-T5100: a queued shard merged outside both scan windows prints WINDOW-SH
   assert.equal(result.code, 2);
   assert.equal(result.out, control.out);
   assert.match(result.err, /WINDOW-SHORT.*1 queued shard\(s\)/);
-  assert.ok(result.err.includes(`subjects: last ${cli.MERGE_SUBJECT_SCAN_LIMIT} commits, paths: last ${cli.MERGED_PATHS_SCAN_LIMIT}`));
+  assert.ok(result.err.includes("merge commit carries no (#N) or its changed paths could not be read by sha"));
   assert.ok(result.err.includes(`NOT flipped: ${TASK}`));
-  assert.match(result.err, /or carry no \(#N\).*flip them by hand in a plan-only PR/);
+  assert.match(result.err, /carries no \(#N\).*flip them by hand in a plan-only PR/);
   assert.deepEqual(result.written, []);
   assert.deepEqual(result.logged.at(-1), { step: "plan.reconcile.window_short", extra: { count: 1 } });
 });
@@ -146,8 +146,8 @@ test("W1-T5100: the projection omits windowShort when no candidate is short and 
 });
 
 function realHistory(root: string, outside: boolean): Projection {
-  assert.equal(typeof cli.MERGE_SUBJECT_SCAN_LIMIT, "number");
-  const fillerCount = Math.max(cli.MERGE_SUBJECT_SCAN_LIMIT, cli.MERGED_PATHS_SCAN_LIMIT) + 50;
+  // W1-T15031: more commits than the former 5000-commit subject window and the path window both held.
+  const fillerCount = Math.max(5000, cli.MERGED_PATHS_SCAN_LIMIT) + 50;
   const commit = (message: string, build: boolean) =>
     `commit refs/heads/main\ncommitter ${GIT_REPO_FIXTURE_IDENTITY.name} <${GIT_REPO_FIXTURE_IDENTITY.email}> 1700000000 +0000\ndata ${Buffer.byteLength(message)}\n${message}\n${build ? "M 100644 inline src/example.ts\ndata 6\nbuild\n\n" : ""}\n`;
   const build = commit(`feat(x): build (#5100)\n\nRemudero-Task: ${TASK}\n`, true);
@@ -169,13 +169,13 @@ function realHistory(root: string, outside: boolean): Projection {
     (o, r, p, l, log, gateway) => cli.buildCreditCandidates(o, r, p, l, log, gateway, () => root), github);
 }
 
-test("W1-T5100: the real credit builder over a real git history longer than the subject window reports the task window-short", async () => {
+test("W1-T5100: the real credit builder over a real git history longer than the former windows judges and flips the task (W1-T15031)", async () => {
   const projection = withRoot((root) => realHistory(root, true));
-  assert.deepEqual(projection, { ids: new Set(), windowShort: [TASK] });
+  assert.deepEqual(projection, { ids: new Set([TASK]) });
   const result = await run(["--write"], projection);
-  assert.equal(result.code, 2);
-  assert.match(result.err, /WINDOW-SHORT.*W1-T5100/);
-  assert.deepEqual(result.written, []);
+  assert.equal(result.code, 0);
+  assert.equal(result.err, "");
+  assert.deepEqual(result.written, [{ path: shard(TASK).path, text: shard(TASK).text.replace("status: queued", "status: merged") }]);
 });
 
 test("W1-T5100: the same history inside the window is judged and flipped, the positive control for the real seam", async () => {
