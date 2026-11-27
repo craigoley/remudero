@@ -18,6 +18,9 @@ import { closeSync, constants, copyFileSync, existsSync, fstatSync, lstatSync, m
 import { homedir, hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, resolve, sep as pathSep } from "node:path";
+import { isTestRunner } from "./live-write-guard.js";
+import { boardPlanOnlyFiling, freshPullRowRead, readPullRequestNamedTaskHold, taskHoldRefusal, type PullRequestSnapshot, type PullRequestTaskHold, type TaskHoldReading } from "./task-dispatch-hold.js";
+export { publicTaskHoldDescription, taskHoldReading, taskHoldRefusal, type TaskHoldReading } from "./task-dispatch-hold.js";
 import { classifyFailure } from "./classify.js";
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { isHolderStale, readFileIfExists, reclaimStaleLock, writeAtomic, type IsHolderStaleOpts } from "./fs-race-safe.js";
@@ -39,7 +42,7 @@ import { formatTail } from "./proofExecutor.js";
 import { playwrightCacheRoot } from "./worker-home.js";
 import { makeTempDir } from "./tmp.js";
 import { createProofCache, ProofCacheUnavailableError, type ProofCache, type ProofCacheRelease } from "./proof-cache.js";
-import { defaultTestSlots, lowPriorityCommand, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad } from "./test-slot.js";
+import { acquireProofCpuAdmission, defaultTestSlots, lowPriorityCommand, PROOF_CPU_ADMISSION_WAIT_STEP, readHostLoad, testRunArgv, testRunConcurrency, type BinaryProbe, type HostLoad, type ProofCpuAdmission } from "./test-slot.js";
 import { hashInstallInputs, installHashMarkerPath } from "./install-hash.js";
 import { dependencySeedRootChoice, primeRefusalReceipt, SEED_LOCK_RECLAIMED, type DependencyGenerationRefusalReceipt } from "./dependency-seeds.js";
 import { configPath } from "./config.js";
@@ -62,6 +65,8 @@ import {
 } from "./task-id-reservation.js";
 // @ts-expect-error The shared plain .mjs helper ships under src/ so source-only runtimes can load it.
 import { adjudicateReservationChain, parseReservationHolderLine, parseReservationHolderFields } from "./reservation-chain.mjs";
+import { extractTaskTrailerId, UNFILED_RUN_SENTINEL } from "./untasked-review.js";
+import { ACCEPTANCE_BULLET_RE, type ProofSpan, type ReadCriterion } from "./body-repair.js";
 
 /** JUDGE (MASTER-PLAN §12 rules 4/3B; W1-T1C): after green CI, a fresh read-only REVIEW session
  * judges each stated proof and posts `remudero-review`. {@link judgeReview} is pure (unit-fixture falsifier);
@@ -346,7 +351,7 @@ interface PlanLintRetryIdentity {
 function appendPlanLintRetryRow(
   ledgerPath: string,
   id: PlanLintRetryIdentity,
-  outcome: "admitted" | "refused" | "incomplete" | "published" | "post_failed",
+  outcome: "admitted" | "refused" | "incomplete" | "published" | "held" | "post_failed",
   reason?: string,
 ): void {
   appendLedger(ledgerPath, {
@@ -427,9 +432,14 @@ async function planLintRetryRefusal(
     if (checkoutHead !== retry.headSha) return `the checkout is at ${checkoutHead}, not the requested head`;
     const publisherRefusal = await planLintRetryPublisherRefusal(retry, observed.baseRef);
     if (publisherRefusal !== undefined) return publisherRefusal;
-    const consumed = (await readPlanLintRetryRows(opts.ledgerPath)).some((row) => row.outcome === "admitted" &&
-      row.pr_url === opts.prUrl && row.head_sha === retry.headSha && row.merge_base_sha === retry.mergeBaseSha &&
-      row.review_decision_digest === opts.digest);
+    const rows = await readPlanLintRetryRows(opts.ledgerPath);
+    const spends = (row: Record<string, unknown>) => row.pr_url === opts.prUrl && row.head_sha === retry.headSha &&
+      row.review_decision_digest === opts.digest;
+    // W1-T14902: an attempt a task hold held published no verdict, so it spent nothing: once the operator releases the
+    // hold, a new attempt may still publish the success its lint earns.
+    const held = new Set(rows.filter((row) => row.outcome === "held" && spends(row)).map((row) => row.attempt_id));
+    const consumed = rows.some((row) => row.outcome === "admitted" && spends(row) && row.merge_base_sha === retry.mergeBaseSha &&
+      !held.has(row.attempt_id));
     return consumed ? "this PR, head, base and digest already spent their retry" : undefined;
   } catch (error) {
     return `a retry read failed: ${String(error)}`;
@@ -862,6 +872,8 @@ export interface ReviewVerdict {
   /** W1-T6124: present when this review started a proof child WITHOUT the bwrap sandbox, naming why ({@link
    *  ProofSandboxStatus}). It rides `review.posted`'s `decision_verdict`, so a degraded review is on the record. */
   proofSandboxDegraded?: string;
+  /** W1-T15002: milliseconds this review's proof children waited for host CPU pressure to leave a free core. */
+  proofCpuWaitMs?: number;
   criteria: CriterionVerdict[];
   /** True when the diff adds tests that assert nothing (a global fail signal). */
   testTheater: boolean;
@@ -2770,7 +2782,32 @@ function execFileAsync(
 export type AsyncProofSpawner = (command: string, args: readonly string[], cwd: string, timeoutMs: number) => Promise<string>;
 export type AsyncProofExecutor = (whitelisted: WhitelistedProof, cwd: string) => Promise<ReturnType<ProofExecutor>>;
 
-export const defaultAsyncProofSpawner: AsyncProofSpawner = async (command, args, cwd, timeoutMs) => {
+/** W1-T15002: CPU admission time this process's proof children spent waiting, read off their wait rows. */
+let proofCpuWaitMs = 0;
+
+/** W1-T15002: each wait is ledgered under the review lane's sender, SWEEP, and added to the reviews' wait total. */
+export function recordProofCpuWait(step: string, fields: Record<string, unknown>): void {
+  if (step === PROOF_CPU_ADMISSION_WAIT_STEP && typeof fields.wait_ms === "number") proofCpuWaitMs += fields.wait_ms;
+  try {
+    appendLedger(join(proofStateDir().dir, LEDGER_FILENAME), { run_id: "review-proof-cpu", task_id: "SWEEP", step, ...fields });
+  } catch (error) {
+    console.error(`review: a proof CPU admission wait was not recorded: ${installFailure(error)}`);
+  }
+}
+
+/** The async spawner every review proof runs through; `admit` is the host-wide CPU admission (W1-T15002). */
+export function asyncProofSpawnerWith(admit: () => Promise<ProofCpuAdmission>): AsyncProofSpawner {
+  return async (command, args, cwd, timeoutMs) => {
+    const admission = await admit();
+    try {
+      return await spawnPreparedProofAsync(command, args, cwd, timeoutMs);
+    } finally {
+      admission.release();
+    }
+  };
+}
+
+async function spawnPreparedProofAsync(command: string, args: readonly string[], cwd: string, timeoutMs: number): Promise<string> {
   const child = prepareProofChild(command, args, cwd);
   try {
     if (child.startCheck) await startCheckAsync(child, cwd);
@@ -2783,7 +2820,10 @@ export const defaultAsyncProofSpawner: AsyncProofSpawner = async (command, args,
   } finally {
     child.cleanup();
   }
-};
+}
+
+export const defaultAsyncProofSpawner: AsyncProofSpawner = asyncProofSpawnerWith(() =>
+  acquireProofCpuAdmission({ log: recordProofCpuWait }));
 
 /** W1-T4587: checkouts the reviewer itself created for proof execution (the PR head and base
  *  worktrees). {@link ensureDeps} may replace a partial node_modules only in one of these. */
@@ -6579,7 +6619,7 @@ export function judgeReview(
   // judgeCriterion so that function stays byte-compatible for its audit callers, which must keep spawning per call.
   const proofMemo = evidence.headCheckoutDir
     ? memoizeProofExecutor(evidence.execProof ?? execWhitelistedProof, evidence.sampleLoad) : undefined;
-  const unsandboxedBefore = unsandboxedProofSpawns;
+  const unsandboxedBefore = proofRecordMark();
   const execCtx: ProofExecContext | undefined = evidence.headCheckoutDir
     ? {
         cwd: evidence.headCheckoutDir,
@@ -6878,10 +6918,16 @@ export function judgeReview(
 }
 
 /** W1-T6124: the verdict's degraded-sandbox record when a proof child started unsandboxed since `before`. */
-function proofSandboxRecord(before: number): Pick<ReviewVerdict, "proofSandboxDegraded"> {
-  if (unsandboxedProofSpawns === before) return {};
+function proofSandboxRecord(before: ProofRecordMark): Pick<ReviewVerdict, "proofSandboxDegraded" | "proofCpuWaitMs"> {
+  const waited = proofCpuWaitMs > before.cpuWaitMs ? { proofCpuWaitMs: proofCpuWaitMs - before.cpuWaitMs } : {};
+  if (unsandboxedProofSpawns === before.unsandboxed) return waited;
   const status = proofSandboxStatus();
-  return status.mode === "unsandboxed" ? { proofSandboxDegraded: status.reason } : {};
+  return status.mode === "unsandboxed" ? { ...waited, proofSandboxDegraded: status.reason } : waited;
+}
+
+type ProofRecordMark = { unsandboxed: number; cpuWaitMs: number };
+function proofRecordMark(): ProofRecordMark {
+  return { unsandboxed: unsandboxedProofSpawns, cpuWaitMs: proofCpuWaitMs };
 }
 
 type ProofObservation =
@@ -6998,7 +7044,7 @@ export async function judgeReviewAsync(
   evidence: ReviewEvidence,
 ): Promise<ReviewVerdict> {
   if (!evidence.headCheckoutDir) return judgeReview(criteria, evidence);
-  const unsandboxedBefore = unsandboxedProofSpawns;
+  const unsandboxedBefore = proofRecordMark();
   const observed = new Map<string, ProofObservation>();
   const recorder = proofPhaseRecorder(evidence);
   let basePriming: Promise<void> | undefined;
@@ -7169,9 +7215,7 @@ export interface VerdictStabilityResult {
   suppressed: boolean;
 }
 
-/** W1-T5839 — what `taskIdFromRunBranch` recovers from every `run-unfiled-<epochMs>` head: a branch-shape SENTINEL that
- *  every ad-hoc PR shares, never a task (W1-T3535), so it owns neither supersession nor a review verdict. */
-export const UNFILED_RUN_SENTINEL = "unfiled";
+export { UNFILED_RUN_SENTINEL };
 
 /** W1-T5839 — THE KEY A PR's REVIEW ROWS ARE WRITTEN UNDER: the resolved task id, else `PR-<n>` — and the sentinel is
  *  "else" too. `resolveReviewTaskId` answers `unfiled` or `undefined` for ONE run-unfiled PR depending on that pass's
@@ -9086,10 +9130,50 @@ export function parseReviewerVerdictClauses(text: string, count: number): (strin
 
 // ── Acceptance criteria from a PR body (manual plan/doc PRs) ───────────────
 
-/** Strip a single layer of matching `"..."` or `'...'` quotes, if present. */
+/** Strip a single layer of matching `"..."` or `'...'` quotes, if present. Inside double quotes, `\"` and `\\` unescape
+ *  as a YAML double-quoted scalar's do (W1-T14913), so a body proof carries the same text as its plan record. */
 function stripQuotes(s: string): string {
   const m = s.match(/^(["'])([\s\S]*)\1$/);
-  return m ? m[2] : s;
+  if (!m) return s;
+  return m[1] === '"' ? m[2].replace(/\\(["\\])/g, "$1") : m[2];
+}
+
+/** W1-T14913: a double-quoted body proof whose escapes the parser unescaped, mapped to the text between its quotes as
+ *  written. Before W1-T14913 the renderer wrote a quoted proof's backslashes unescaped (a claim holding `|` quoted both
+ *  sides), so a stored legacy body's `\\` meant two backslashes; {@link bodyProofsAgainstRecord} reads that raw text
+ *  only when the whole body's as-written proof set is its record's. */
+const quotedProofAsWritten = new WeakMap<AcceptanceCriterion, string>();
+
+/** W1-T14913: every body criterion's proof as compared with its record's, index-aligned, under ONE reading for the whole
+ *  body. A legacy body (rendered before W1-T14913, backslashes unescaped inside quotes) is read as written when its
+ *  as-written proof set IS the record's; every other body is read as YAML decodes it. Never row by row: mixing the two
+ *  readings would accept a body that neither complete reading matches (#20963's fourteenth review). */
+export function bodyProofsAgainstRecord(criteria: readonly AcceptanceCriterion[], recordProofs: ReadonlySet<string>): string[] {
+  const asWritten = criteria.map((c) => quotedProofAsWritten.get(c)?.trim() ?? c.proof.trim());
+  const written = new Set(asWritten.filter((p) => p.length > 0));
+  const sameSet = written.size === recordProofs.size && [...written].every((p) => recordProofs.has(p));
+  return sameSet ? asWritten : criteria.map((c) => c.proof.trim());
+}
+
+/** W1-T14913: the proofs only a body's block names and the proofs only its record names, each body proof read by
+ *  {@link bodyProofsAgainstRecord}. THE one body-versus-record proof-set comparison: the author gate's trailer/body
+ *  divergence, run-task's acceptance normalizer and the fix rung's body-coverage check all call it, so a legacy body
+ *  the gate passes is never one a normalizer rewrites. */
+export function bodyProofSetDivergence(bodyCriteria: readonly AcceptanceCriterion[], recordProofs: readonly string[]):
+  { onlyInBody: string[]; onlyInRecord: string[] } {
+  const record = recordProofs.map((p) => p.trim()).filter((p) => p.length > 0);
+  const recordSet = new Set(record);
+  const body = bodyProofsAgainstRecord(bodyCriteria, recordSet).filter((p) => p.length > 0);
+  const bodySet = new Set(body);
+  return { onlyInBody: [...new Set(body.filter((p) => !recordSet.has(p)))], onlyInRecord: [...new Set(record.filter((p) => !bodySet.has(p)))] };
+}
+
+/** The proof a `proof:` value reads as, remembering its as-written text when unescaping changed it. */
+function readQuotedProof(criterion: AcceptanceCriterion, value: string): string {
+  const proof = stripQuotes(value);
+  const raw = value.match(/^"([\s\S]*)"$/)?.[1];
+  if (raw !== undefined && raw !== proof) quotedProofAsWritten.set(criterion, raw);
+  return proof;
 }
 
 /** The Acceptance HEADER line. Extracted as a shared constant so {@link parseAcceptanceBlock} and {@link
@@ -9100,7 +9184,8 @@ export const ACCEPTANCE_HEADER_RE = /^\s*#{0,6}\s*\**\s*acceptance(\s+criteria)?
 
 /** A criterion BULLET. Shared with {@link acceptanceBlockDiagnostics} for the same reason as {@link
  *  ACCEPTANCE_HEADER_RE}. Exported for the same reason {@link ACCEPTANCE_HEADER_RE} is (W1-T2762). */
-export const ACCEPTANCE_BULLET_RE = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/;
+// W1-T14913: lives in body-repair.ts (a leaf review.ts may import) so the body-proof rewriter reads the same bullets.
+export { ACCEPTANCE_BULLET_RE };
 
 /** A CommonMark fence opener — three or more backticks (whose info string holds no backtick) or tildes. Exported so a
  *  fixture can drive both of its arms by name (the negative-reachability ratchet). */
@@ -9241,16 +9326,54 @@ function acceptanceSeparator(item: string): { index: number; width: number } | n
  * house format, #277/#280). Parsing stops at the first line, after the bullets begin, that is neither a new bullet nor
  * a recognised continuation. FAILS CLOSED: `[]` when there is no block, and empty criteria never pass. */
 export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
+  return readAcceptanceBlock(body).criteria;
+}
+
+/** W1-T14913: where the parser read each criterion's proof value, index-aligned with {@link parseAcceptanceBlock}'s
+ *  criteria (`undefined` for a criterion with no proof): its line (split on `\n`), the column range of the value as written
+ *  (quotes included when `quoted`) and the proof read there. A line outside the Acceptance block, a fenced example
+ *  included, is never one, and a claim repeating the proof text lies outside the range. */
+export function acceptanceProofSpans(body: string): (ProofSpan | undefined)[] {
+  return acceptanceCriteriaRead(body).map((criterion) => criterion.span);
+}
+
+/** W1-T14913: every Acceptance criterion's claim and proof as parseAcceptanceBlock reads them, with the span its proof was
+ *  read from. body-repair's rewrites take this, so a rewrite that changes any claim, or any proof but its target, refuses. */
+export function acceptanceCriteriaRead(body: string): ReadCriterion[] {
+  const { criteria, proofSpans } = readAcceptanceBlock(body);
+  return criteria.map((criterion, index) => {
+    const span = proofSpans[index];
+    const proof = criterion.proof ?? "";
+    return { claim: criterion.claim ?? "", proof, span: span === undefined ? undefined : { ...span, proof } };
+  });
+}
+
+type WrittenProofSpan = Omit<ProofSpan, "proof">;
+
+/** The column range of `value` inside `line`, starting the search at `from`; `undefined` when it is not there. */
+function spanOf(line: string, value: string, from: number, at: number, quoted = false): WrittenProofSpan | undefined {
+  const start = line.indexOf(value, from);
+  return start < 0 || value === "" ? undefined : { line: at, start, end: start + value.length, quoted };
+}
+
+function readAcceptanceBlock(body: string): { criteria: AcceptanceCriterion[]; proofSpans: (WrittenProofSpan | undefined)[] } {
   const lines = (body ?? "").split("\n");
   const criteria: AcceptanceCriterion[] = [];
+  const proofSpans: (WrittenProofSpan | undefined)[] = [];
+  /** A `proof:` continuation's value as written, quotes included, so a rewrite replaces exactly that range. */
+  const continuationSpan = (line: string, at: number): WrittenProofSpan | undefined => {
+    const m = line.match(/^(\s*proof\s*:\s*)(.*?)\s*$/i);
+    return m ? spanOf(line, m[2]!, m[1]!.length, at, /^(["'])[\s\S]*\1$/.test(m[2]!)) : undefined;
+  };
   /** Index-aligned with `criteria`: for a `claim:`-labelled bullet nonetheless split at a separator, the claim text as
    *  written BEFORE that split. An indented `proof:` continuation below such a bullet proves the split was a false
    *  positive — the proof lives on that line, so the pipe belonged to the claim — and restores this. */
   const unsplitLabelledClaims: (string | undefined)[] = [];
   // Header: "Acceptance:", "**Acceptance:**", "## Acceptance", "Acceptance criteria:" — never one inside a fence.
   const headerLine = acceptanceHeaderLine(lines);
-  if (headerLine < 0) return criteria;
-  for (const raw of lines.slice(headerLine + 1)) {
+  if (headerLine < 0) return { criteria, proofSpans };
+  for (const [offset, raw] of lines.slice(headerLine + 1).entries()) {
+    const at = headerLine + 1 + offset;
     const line = raw.replace(/\r$/, "");
     const bullet = line.match(ACCEPTANCE_BULLET_RE);
     if (bullet) {
@@ -9266,6 +9389,9 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
       else if (!sep) proof = bareDialectProof(claim);
       if (!claim) continue;
       criteria.push({ claim, proof });
+      // The proof's own range: after the separator for a split bullet (never the claim before it), else inside the item.
+      const itemStart = line.lastIndexOf(bullet[1]);
+      proofSpans[criteria.length - 1] = proof ? spanOf(line, proof, itemStart + (sep ? sep.index + sep.width : 0), at) : undefined;
       const whole = claimLabel && proof ? item.match(/^claim\s*:\s*(.*)$/i) : null;
       unsplitLabelledClaims[criteria.length - 1] = whole ? stripQuotes(whole[1].trim()) : undefined;
       continue;
@@ -9276,7 +9402,8 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
       const proofLabel = line.trim().match(/^proof\s*:\s*(.*)$/i);
       const last = criteria[criteria.length - 1];
       if (proofLabel && !last.proof) {
-        last.proof = stripQuotes(proofLabel[1].trim());
+        last.proof = readQuotedProof(last, proofLabel[1].trim());
+        proofSpans[criteria.length - 1] = continuationSpan(line, at);
         continue;
       }
       // The bullet above was a `claim:` label carrying a separator of its own and THIS line is the proof, so that
@@ -9285,7 +9412,8 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
       const unsplit = proofLabel ? unsplitLabelledClaims[criteria.length - 1] : undefined;
       if (proofLabel && unsplit !== undefined) {
         last.claim = unsplit;
-        last.proof = stripQuotes(proofLabel[1].trim());
+        last.proof = readQuotedProof(last, proofLabel[1].trim());
+        proofSpans[criteria.length - 1] = continuationSpan(line, at);
         unsplitLabelledClaims[criteria.length - 1] = undefined;
         continue;
       }
@@ -9301,7 +9429,7 @@ export function parseAcceptanceBlock(body: string): AcceptanceCriterion[] {
     if (line.trim() === "" && criteria.length === 0) continue;
     break;
   }
-  return criteria;
+  return { criteria, proofSpans };
 }
 
 /** W1-T14627: the refusal a body guard earns when no task record declares it. */
@@ -9315,8 +9443,10 @@ export const BODY_GUARD_UNBACKED = "body-guard-unbacked";
  */
 export function markUnbackedBodyGuards<T extends AcceptanceCriterion>(criteria: readonly T[], bodyCriteria: readonly AcceptanceCriterion[],
   fromBody: boolean): { criteria: T[]; unbacked: string[] } {
-  const bodyGuardList = bodyCriteria.filter((c) => (c as { kind?: unknown }).kind === "guard");
-  const bodyGuards = new Set(bodyGuardList.map((c) => c.proof.trim()));
+  const recordProofs = new Set(criteria.map((c) => c.proof.trim()));
+  const read = bodyProofsAgainstRecord(bodyCriteria, recordProofs);
+  const bodyGuardList = bodyCriteria.flatMap((c, i) => (c as { kind?: unknown }).kind === "guard" ? [{ guard: c, proof: read[i]! }] : []);
+  const bodyGuards = new Set(bodyGuardList.map(({ proof }) => proof));
   // A body guard is backed only by a record criterion that is itself `kind: guard` with the same trimmed proof.
   const backedProofs = new Set(fromBody ? [] : criteria
     .filter((c) => (c as { kind?: unknown }).kind === "guard").map((c) => c.proof.trim()));
@@ -9330,8 +9460,7 @@ export function markUnbackedBodyGuards<T extends AcceptanceCriterion>(criteria: 
   // A body guard whose proof matches NO record criterion has no row to mark: add one the review must refuse, naming
   // the proof, so editing a proof and marking it guard cannot slip past both halves.
   const present = new Set(criteria.map((c) => c.proof.trim()));
-  for (const guard of bodyGuardList) {
-    const proof = guard.proof.trim();
+  for (const { guard, proof } of bodyGuardList) {
     if (present.has(proof) || backedProofs.has(proof)) continue;
     present.add(proof);
     unbacked.push(proof);
@@ -9393,10 +9522,7 @@ export function acceptanceBlockDiagnostics(body: string): AcceptanceBlockDiagnos
  *  construction, appending its stamp at the END of the body. Before this, two callers here each ran their own
  *  anchored-but-first-wins match, disagreeing with run-task.ts's last-wins `reviewTaskIdFromBody` on any body carrying
  *  two anchored trailers. review.ts is the leaf and run-task.ts imports FROM it, so this lives here. */
-export function extractTaskTrailerId(body: string): string | undefined {
-  const matches = [...(body ?? "").matchAll(/^Remudero-Task:\s*(\S+)\s*$/gm)];
-  return matches.length ? matches[matches.length - 1][1] : undefined;
-}
+export { extractTaskTrailerId } from "./untasked-review.js";
 
 /** The four defects {@link acceptanceAuthorTimeCheck} names — design item (iii), W1-T952: "the diagnostic must say
  *  WHICH of the four it is", never a generic refusal. */
@@ -10970,6 +11096,13 @@ export const ENFORCEMENT_DATA_EXCLUSIONS: Readonly<Record<string, string>> = {
  * path look like enforcement data. */
 export function enforcementDataInDiff(diffFiles: string[]): string[] {
   return diffFiles.filter((f) => Object.hasOwn(ENFORCEMENT_DATA, f));
+}
+
+/** The board's `github-files` rule for a pull request's changed files (tick-read-worker classifyPlanFiling): some
+ *  changed path, every one in plan scope, and none of them enforcement data. W1-T14902's hold resolver classifies a
+ *  trailerless run-branch PR by this same rule, so the hold and the board agree on which PRs name no task. */
+export function planFilingFromChangedFiles(paths: readonly string[]): boolean {
+  return paths.length > 0 && paths.every(isInPlanScope) && enforcementDataInDiff([...paths]).length === 0;
 }
 
 const USER_VISIBLE_SURFACE_RE = new RegExp(
@@ -12572,6 +12705,14 @@ export interface PostReviewStatusRetryOpts {
   /** Injectable `gh` invocation — the "gh gateway" a unit test simulates without shelling out. Defaults to the
    *  awaited {@link execGhStatusPostAsync} POST below (W1-T9549). */
   exec?: (args: string[], env: NodeJS.ProcessEnv) => void | Promise<void>;
+  /** W1-T15038: re-mint the ambient installation token after a 401; resolves whether a fresh token was minted.
+   *  Default: {@link refreshReviewPublisherToken} when no reviewer-token override is set and GH_APP_ID is set. */
+  reauth?: () => Promise<boolean>;
+}
+
+/** W1-T15038: a refusal that says the token is no longer accepted. */
+export function isExpiredCredentialRefusal(text: string): boolean {
+  return /Bad credentials|HTTP 401/.test(text);
 }
 
 /** W1-T9549 — the status POST {@link postReviewStatus} and the repair lease make by default, AWAITED over
@@ -12629,12 +12770,23 @@ export async function postReviewStatus(
   const backoffMs = retryOpts.backoffMs ?? ((failedAttempt) => POST_REVIEW_STATUS_BASE_DELAY_MS * 2 ** (failedAttempt - 1));
   const sleep = retryOpts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const exec = retryOpts.exec ?? execGhStatusPostAsync;
+  const reauth = retryOpts.reauth ?? (reviewerToken || !process.env.GH_APP_ID
+    ? undefined : async () => (await refreshReviewPublisherToken()).ok);
+  let reauthed = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       await exec(args, env);
       return;
     } catch (e) {
+      // W1-T15038: an expired token is re-minted once and the post retried; a 401 after that is thrown as before.
+      if (!reauthed && reauth && isExpiredCredentialRefusal(ghErrorText(e))) {
+        reauthed = true;
+        if (await reauth()) {
+          attempt -= 1;
+          continue;
+        }
+      }
       const transient = classifyFailure({ text: ghErrorText(e) }) === "transient";
       if (!transient || attempt >= maxAttempts) throw e; // permanent, or transient-but-exhausted: surface once
       await sleep(backoffMs(attempt));
@@ -13263,6 +13415,10 @@ export interface PostReviewStatusGuardedOpts {
   /** The PR the lock/ledger key off — every real caller already keys its `review.posted` ledger lines by this same id
    * (the task id, or the `dep-review-PR<n>`/`PR-<n>` synthetic ids `run-task.ts` falls back to). */
   taskId: string;
+  /** W1-T14902: the named task's `dispatch_hold`, read at the plan's main. `held` or `unread` turns a success into
+   *  pending. Omitted, {@link readPullRequestNamedTaskHold} reads it for every caller from a fresh read of the live PR
+   *  (never this ledger key, never a body the caller fetched earlier), left out only under the test runner. */
+  taskHold?: TaskHoldReading;
   evidence: ReviewEvidenceStrength;
   ledgerPath: string;
   runId: string;
@@ -13340,6 +13496,8 @@ export interface PostReviewStatusGuardedResult {
   semanticHold?: string;
   /** W1-T14241: present when a capped code success was held as pending because no override certified it. */
   cappedHold?: string;
+  /** W1-T14902: set when a success was held as pending because the named task carries (or may carry) dispatch_hold. */
+  taskHold?: string;
   /** Present only when `posted` is false — either {@link decideReviewStatusPost} refused the write (see
    * `review.post_refused`), or the post itself failed after retries or as a permanent error (`review.post_failed`). */
   reason?: string;
@@ -13410,6 +13568,12 @@ interface PlanLintRetryPublicationRequest {
   observe: PlanLintRetryObserver;
 }
 
+/** W1-T14902 (round 10, C1): a clean lint retry whose success a task hold turned to pending. Its pending write carries no
+ *  decision digest (a hold is no terminal decision), so the retry gate is handed the digest it was admitted under. */
+interface HeldLintRetry {
+  decisionDigest: string;
+}
+
 /** Only a clean lint may publish success, so a retry cannot launder a violation. */
 async function decidePlanLintRetryPublication(
   opts: PostReviewStatusGuardedOpts,
@@ -13417,16 +13581,18 @@ async function decidePlanLintRetryPublication(
   priorDecision: ReviewDecisionTerminal | undefined,
   prior: PostedReviewStatusRecord | undefined,
   lifecycle: PrLifecycleState,
+  heldRetry?: HeldLintRetry,
 ): Promise<{ identity: PlanLintRetryIdentity; refusal?: { outcome: "refused" | "incomplete"; reason: string } }> {
+  const digest = heldRetry?.decisionDigest ?? opts.reviewDecisionDigest;
   const identity: PlanLintRetryIdentity = {
     runId: opts.runId, taskId: opts.taskId, attemptId: retry.attemptId, prUrl: opts.prUrl,
-    headSha: opts.sha, digest: opts.reviewDecisionDigest,
+    headSha: opts.sha, digest,
   };
   const refuse = (reason: string, outcome: "refused" | "incomplete" = "refused") => ({ identity, refusal: { outcome, reason } });
   try {
     const rows = await readPlanLintRetryRows(opts.ledgerPath);
     const admitted = rows.findLastIndex((row) => row.outcome === "admitted" && row.attempt_id === retry.attemptId &&
-      row.pr_url === opts.prUrl && row.head_sha === opts.sha && row.review_decision_digest === opts.reviewDecisionDigest);
+      row.pr_url === opts.prUrl && row.head_sha === opts.sha && row.review_decision_digest === digest);
     if (admitted < 0) return refuse("no admitted lint retry exists for this attempt, head and digest");
     identity.mergeBaseSha = rows[admitted]!.merge_base_sha;
     identity.priorRunId = rows[admitted]!.prior_run_id;
@@ -13434,7 +13600,9 @@ async function decidePlanLintRetryPublication(
     if (!priorDecision || !isPlanLintRetryEligible(priorDecision)) return refuse("the terminal is no longer a lint-plan failure with no summary");
     if (retry.outcome?.ran !== true) return refuse(`the retried lint-plan did not finish: ${retry.outcome?.reason ?? "no lint was run"}`, "incomplete");
     const expected = retry.outcome.violations.length === 0 ? "success" : "failure";
-    if (opts.state !== expected) return refuse(`a retried lint-plan with ${retry.outcome.violations.length} violation(s) cannot publish ${opts.state}`);
+    // W1-T14902: a task hold publishes pending in place of the success a clean retried lint earned.
+    const earned = heldRetry !== undefined && opts.state === "pending" ? "success" : opts.state;
+    if (earned !== expected) return refuse(`a retried lint-plan with ${retry.outcome.violations.length} violation(s) cannot publish ${opts.state}`);
     const guarded = decideReviewStatusPost({ headSha: opts.sha, state: opts.state, evidence: opts.evidence,
       ...(opts.reviewInputDigest !== undefined ? { reviewInputDigest: opts.reviewInputDigest } : {}) }, prior, lifecycle);
     if (!guarded.post) return refuse(guarded.reason);
@@ -13507,6 +13675,11 @@ export async function postReviewStatusGuarded(
       const cappedHold = effectiveVerdict.state === "success"
         ? cappedCertificationRefusal(effectiveVerdict, recordedCappedOverride(opts)) : undefined;
       if (cappedHold !== undefined) return await publishCappedHold(opts, effectiveVerdict, cappedHold);
+      // W1-T14902 (invariant an-unread-hold-holds): a task that awaits the operator is never posted success, and a hold
+      // the caller could not read holds too. A required pending status blocks GitHub auto-merge and wakes no fix lane.
+      const hold = effectiveVerdict.state === "success" ? await guardedTaskHold(opts) : undefined;
+      const taskHold = taskHoldRefusal(hold?.reading);
+      if (taskHold !== undefined) return await publishTaskHold(opts, effectiveVerdict, taskHold, hold?.snapshot);
     }
     const result = await publishReviewStatusLocked(opts);
     return !historyApplied ? result : { ...result, ...(effectiveVerdict ? { effectiveVerdict } : {}),
@@ -13578,6 +13751,76 @@ function recordedCappedOverride(opts: PostReviewStatusGuardedOpts): CappedOverri
 /** W1-T14241 (invariant capped-is-not-green): a capped code success no override certified posts pending — never
  *  success, and never failure (CAPPED IS NOT FAIL) — under the same CAPPED description, so nothing can merge or arm on
  *  it until proof executes or an operator records an override for this head. */
+/** W1-T14902: the hold a success is judged against: the caller's reading, else the one PR task resolver's — the task
+ *  the live PR names, read fresh inside the lock, so a trailer edited after the caller fetched its body (a fix round's
+ *  pre-edit task) is the one judged (W1-T5939's test-runner precedent keeps partial fakes off the live plan and catalog). */
+async function guardedTaskHold(opts: PostReviewStatusGuardedOpts): Promise<PullRequestTaskHold | undefined> {
+  if (opts.taskHold !== undefined) return { reading: opts.taskHold };
+  if (isTestRunner()) return undefined;
+  return readPullRequestNamedTaskHold(opts.prUrl, { stateDir: dirname(opts.ledgerPath) }, freshPullRowRead,
+    boardPlanOnlyFiling(dirname(opts.ledgerPath), planFilingFromChangedFiles));
+}
+
+/** W1-T14902 (round-8 C1): the input digest a hold's pending write carries — that of the head and body the hold was
+ *  judged on, so the subject-freshness rule judges the write against the PR the hold read, not the body the caller's
+ *  verdict started from (a trailer edited since then would otherwise refuse the pending and leave the success). */
+export function taskHoldInputDigest(opts: Pick<PostReviewStatusGuardedOpts, "sha" | "reviewInputDigest" | "reviewEngineRevision">,
+  snapshot: PullRequestSnapshot | undefined): string | undefined {
+  // This head, not the snapshot's: if the PR moved on, the live digest differs and the write is refused, as it must be
+  // for a superseded head (whose status no merge reads); the head the hold read gets its own review and hold.
+  return snapshot === undefined ? opts.reviewInputDigest
+    : reviewInputDigest(opts.sha, snapshot.body, opts.reviewEngineRevision ?? REVIEW_ENGINE_REVISION);
+}
+
+async function publishTaskHold(opts: PostReviewStatusGuardedOpts, verdict: ReviewVerdict,
+  refusal: string, snapshot?: PullRequestSnapshot): Promise<PostReviewStatusGuardedResult> {
+  const description = `remudero-review: pending — ${refusal}; it merges after the operator releases the hold`
+    .slice(0, STATUS_DESC_MAX);
+  const held: ReviewVerdict = { ...verdict, state: "pending", summary: description };
+  const inputDigest = taskHoldInputDigest(opts, snapshot);
+  appendLedger(opts.ledgerPath, { run_id: opts.runId, task_id: opts.taskId, step: "review.dispatch_hold_held",
+    head_sha: opts.sha, attempted_state: "success", reason: refusal, outcome: "pending",
+    ...(inputDigest !== undefined ? { review_input_digest: inputDigest } : {}) });
+  // No decision digest: a hold is not a terminal decision, so the pass cannot replay over it once posted. A held lint
+  // retry still settles through its own gate, under the digest it was admitted for (round 10, C1).
+  const heldRetry = opts.planLintRetry !== undefined && opts.reviewDecisionDigest !== undefined
+    ? { decisionDigest: opts.reviewDecisionDigest } : undefined;
+  const result = await publishReviewStatusLocked({ ...opts, state: "pending", verdict: held, description,
+    reviewDecisionDigest: undefined, reviewInputDigest: inputDigest }, heldRetry);
+  return { ...result, effectiveState: "pending", effectiveVerdict: held, taskHold: refusal, reason: result.reason ?? refusal };
+}
+
+/** W1-T14902 (invariant an-unread-hold-holds): the review could not read the named task's catalog, so its hold is
+ *  unread and whatever stands on this head (an earlier success included) must yield to pending. This path can post
+ *  ONLY pending, whatever the caller hands it, and it does not bypass {@link decideReviewStatusPost}: it runs inside the
+ *  same review-status lock and {@link publishReviewStatusLocked}, so the lifecycle, input-digest and reviewer-freshness
+ *  checks all apply. A hold is not a new verdict — it holds the one already posted here — so it carries that posted
+ *  verdict's evidence class, as {@link publishTaskHold} carries the held success's. The ledger row records what the
+ *  post actually did. */
+export async function postUnreadTaskHoldGuarded(
+  opts: Omit<PostReviewStatusGuardedOpts, "state" | "evidence" | "verdict" | "reviewDecisionDigest"> & { refusal: string },
+): Promise<PostReviewStatusGuardedResult> {
+  const { refusal, ...rest } = opts;
+  const lockPath = join(dirname(rest.ledgerPath), "review-status-locks", `${rest.taskId}.lock`);
+  const handle = await acquireReviewStatusLock(lockPath, rest.lockOpts);
+  try {
+    const lines = readLiveLedgerRecords(rest.ledgerPath);
+    const prior = rest.prUrl !== undefined && rest.reviewInputDigest !== undefined
+      ? lastPostedReviewStatusForInput(lines, rest.taskId, rest.prUrl, rest.sha, rest.reviewInputDigest)
+      : lastPostedReviewStatusFromLedger(lines, rest.taskId);
+    const evidence: ReviewEvidenceStrength = prior?.headSha === rest.sha && prior.evidence === "executed" ? "executed" : "no_evidence";
+    const description = `remudero-review: pending — ${refusal}`.slice(0, STATUS_DESC_MAX);
+    const result = await publishReviewStatusLocked({ ...rest, state: "pending", evidence, description,
+      reviewDecisionDigest: undefined, verdict: undefined });
+    appendLedger(rest.ledgerPath, { run_id: rest.runId, task_id: rest.taskId, step: "review.dispatch_hold_held",
+      head_sha: rest.sha, reason: refusal, evidence, outcome: result.posted ? "pending" : "refused",
+      ...(result.posted ? {} : { post_reason: result.reason ?? null }) });
+    return { ...result, effectiveState: result.posted ? "pending" : result.effectiveState, taskHold: refusal };
+  } finally {
+    handle.release();
+  }
+}
+
 async function publishCappedHold(opts: PostReviewStatusGuardedOpts, verdict: ReviewVerdict,
   refusal: string): Promise<PostReviewStatusGuardedResult> {
   const description = (opts.description ?? verdict.summary).slice(0, STATUS_DESC_MAX);
@@ -13590,7 +13833,7 @@ async function publishCappedHold(opts: PostReviewStatusGuardedOpts, verdict: Rev
   return { ...result, effectiveState: "pending", effectiveVerdict: held, cappedHold: refusal, reason: result.reason ?? refusal };
 }
 
-async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Promise<PostReviewStatusGuardedResult> {
+async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts, heldRetry?: HeldLintRetry): Promise<PostReviewStatusGuardedResult> {
   const post = opts.post ?? postReviewStatus;
   const freshnessRefusal = reviewerCodePublicationRefusal(opts.state, opts.reviewerCodeFreshness);
   if (freshnessRefusal !== undefined) {
@@ -13660,7 +13903,9 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
     };
     let planLintRetryIdentity: PlanLintRetryIdentity | undefined;
     if (opts.planLintRetry !== undefined) {
-      const { identity, refusal } = await decidePlanLintRetryPublication(opts, opts.planLintRetry, priorDecision, prior, lifecycle);
+      const retryDecision = heldRetry === undefined ? priorDecision
+        : opts.prUrl !== undefined ? lastReviewDecisionTerminal(lines, opts.taskId, opts.prUrl, heldRetry.decisionDigest) : undefined;
+      const { identity, refusal } = await decidePlanLintRetryPublication(opts, opts.planLintRetry, retryDecision, prior, lifecycle, heldRetry);
       if (refusal !== undefined) {
         appendPlanLintRetryRow(opts.ledgerPath, identity, refusal.outcome, refusal.reason);
         return withholdReplay(refusal.reason);
@@ -13793,7 +14038,7 @@ async function publishReviewStatusLocked(opts: PostReviewStatusGuardedOpts): Pro
         reason: `posting remudero-review failed and was not applied (see the review.post_failed ledger line): ${message}`,
       };
     }
-    if (planLintRetryIdentity !== undefined) appendPlanLintRetryRow(opts.ledgerPath, planLintRetryIdentity, "published");
+    if (planLintRetryIdentity !== undefined) appendPlanLintRetryRow(opts.ledgerPath, planLintRetryIdentity, heldRetry !== undefined ? "held" : "published");
     if (opts.state === "pending" && opts.description?.startsWith("remudero-review: cannot-evaluate") &&
         !/^remudero-review: cannot-evaluate — promise harvest (?:unavailable:|corpus is unreadable)/.test(opts.description) && opts.prUrl &&
         !lines.some((line) => line.step === "review.cannot_evaluate_escalated" && line.task_id === opts.taskId && line.head_sha === opts.sha)) {

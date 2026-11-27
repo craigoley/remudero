@@ -336,6 +336,7 @@ import {
   isPrMergedNow,
   armAutoMerge,
   armAutoMergeDetailed,
+  armAutoMergeDetailedAsync,
   attemptArm,
   armAutoMergeAtOpen,
   armAutoMergeAtOpenAsync,
@@ -1779,6 +1780,8 @@ import {
   extractTaskTrailerId,
   type AcceptanceAuthorTimeResult,
   parseAcceptanceBlock,
+  acceptanceCriteriaRead,
+  bodyProofSetDivergence,
   parseReviewerVerdictClauses,
   parseReviewerVerdicts,
   postReviewCommentGuarded,
@@ -1853,8 +1856,8 @@ import {
   type FilingDiffFile,
   type PlanFilingDiffAtHead,
 } from "./lib/body-repair.js";
-import { fixRungInputFields, prBodyDigest } from "./lib/sweep.js";
-import { diagnoseBodyDefects } from "./lib/body-repair.js";
+import { prBodyDigest } from "./lib/sweep.js";
+import { diagnoseBodyDefects, rewriteCriterionProofs } from "./lib/body-repair.js";
 import { criterionFieldTampered, filingSelfCreditCheck, missingReviewReuseFact, priorPostedReviewRow, proofChildEnv, proofSandboxArgv, proofSandboxStatus, ProofSandboxUnavailableError } from "./lib/review.js";
 import { inertAcceptanceProofs, PR_BODY_ACCEPTANCE_GRAMMAR } from "./lib/proof-grammar.js";
 import { type BaseProofGrader, diffAnchor, mainRepairAcceptanceFor, withoutStaleRepairProofs } from "./lib/main-repair-acceptance.js";
@@ -3159,6 +3162,7 @@ import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type Inb
 import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
+import { armCliTokenRenewal } from "./lib/cli-token-renewal.js";
 import { withManagedGardenTokenRefresh } from "./lib/managed-garden-token.js";
 import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, planStaleHoldArchive, readDispatchClaimTaskIdsSteps, remoteBranchHeadsSteps, archiveStaleHoldsSteps, staleHoldRestoreCommand, STALE_HOLD_ARCHIVE_CAP, pruneDeletableBranchesSteps, readNamedInSourceSteps, readRemoteBranchTipsSteps, readTipInMainMembershipSteps, remoteBranchNamesSteps, tipInMainFor, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
 // The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
@@ -5540,6 +5544,21 @@ export function withdrawArmIfVerdictRefuses(
  * unenforced: an omitted head still logs the row (never blocks an arm) — it simply stays
  * unjoinable, exactly as it does today.
  */
+/** W1-T14902 — {@link armAndLogOutcome} over the awaited detailed arm: the production default reads the task's hold
+ *  (realArmDepsAsync's reader) before arming, where the synchronous arm fails closed. Same row, same outcome. */
+export async function armAndLogOutcomeAsync(
+  prUrl: string,
+  taskId: string | undefined,
+  log: (step: string, extra?: Record<string, unknown>) => void,
+  arm: (prUrl: string, taskId: string | undefined) => Promise<ArmOutcome | ArmAttemptResult> =
+    (url, id) => armAutoMergeDetailedAsync(url, id, realArmDepsAsync()),
+  lane: ArmLane = "operator",
+  headSha?: string,
+): Promise<ArmOutcome> {
+  const attempt = await arm(prUrl, taskId);
+  return armAndLogOutcome(prUrl, taskId, log, () => attempt, lane, headSha);
+}
+
 export function armAndLogOutcome(
   prUrl: string,
   taskId: string | undefined,
@@ -6275,10 +6294,8 @@ export function rewriteAcceptanceBlockFromPlan(
   // contract trailerBodyProofDivergenceRefusal itself keeps.
   if (bodyCriteria.length === 0) return { kind: "no-block" };
   const planProofs = new Set(planCriteria.map((c) => (c.proof ?? "").trim()).filter((p) => p.length > 0));
-  const bodyProofs = bodyCriteria.map((c) => (c.proof ?? "").trim()).filter((p) => p.length > 0);
-  const bodyProofSet = new Set(bodyProofs);
-  const removedProofs = [...new Set(bodyProofs.filter((p) => !planProofs.has(p)))];
-  const onlyInPlan = [...planProofs].filter((p) => !bodyProofSet.has(p));
+  // W1-T14913: the author gate's own comparison, so a legacy-rendered quoted proof the gate passes is never rewritten here.
+  const { onlyInBody: removedProofs, onlyInRecord: onlyInPlan } = bodyProofSetDivergence(bodyCriteria, [...planProofs]);
   // Identical proof sets (order and claim wording both ignored) — nothing to rewrite.
   if (removedProofs.length === 0 && onlyInPlan.length === 0) return { kind: "healthy" };
 
@@ -6323,16 +6340,16 @@ export function trailerBodyDivergenceRepair(
 /**
  * W1-T5544 — THE DETERMINISTIC CURE FOR `acceptance-author-gate: REFUSED (proof-shape)` WHEN EVERY DEFECT IS A WRAPPED
  * GREP PATTERN: each `grep: "x" in f` / `` grep: `x` in f `` becomes `wrappedGrepPattern(...).bare`. EXACT, never a
- * heuristic: each proof text must occur in the body exactly once, and after the rewrite the block must parse to the same
- * number of criteria, none still wrapped, every one executable — anything else (an unparseable proof, a missing
- * target) returns `undefined` because the cause was not ONLY wrapping.
+ * heuristic: each proof is rewritten on the line the parser read its criterion from (W1-T14913), and after the rewrite
+ * the block must parse to the same number of criteria, none still wrapped, every one executable — anything else (an
+ * unparseable proof, a missing target) returns `undefined` because the cause was not ONLY wrapping.
  */
 export function wrappedGrepBodyRepair(body: string): AcceptanceGateBodyRepair | undefined {
   const criteria = parseAcceptanceBlock(body);
   if (criteria.length === 0) return undefined;
   let repaired = body;
   let unwrapped = 0;
-  for (const criterion of criteria) {
+  for (const [index, criterion] of criteria.entries()) {
     const proof = criterion.proof ?? "";
     const wrapped = wrappedGrepPattern(proof);
     if (wrapped === undefined) continue;
@@ -6340,9 +6357,12 @@ export function wrappedGrepBodyRepair(body: string): AcceptanceGateBodyRepair | 
       /^(\s*grep:\s*)(.+?)(\s+in\s+\S+\s*)$/,
       (_all, head: string, _pattern: string, tail: string) => `${head}${wrapped.bare}${tail}`,
     );
-    const at = repaired.indexOf(proof);
-    if (bareProof === proof || at === -1 || repaired.indexOf(proof, at + 1) !== -1) return undefined;
-    repaired = repaired.slice(0, at) + bareProof + repaired.slice(at + proof.length);
+    // W1-T14913: found by its parsed value in the span the parser read THIS criterion from, so a quoted proof line is
+    // found too, and two criteria sharing one wrapped grep are each unwrapped in turn.
+    const next = bareProof === proof ? undefined
+      : rewriteCriterionProofs(repaired, [{ index, oldProof: proof, newProof: bareProof }], acceptanceCriteriaRead);
+    if (next === undefined) return undefined;
+    repaired = next;
     unwrapped += 1;
   }
   if (unwrapped === 0) return undefined;
@@ -6525,7 +6545,10 @@ export async function runPlanScopedFixRound(input: PlanScopedFixRoundInput): Pro
     for (const defect of defects) {
       if (defect.kind !== "wrapped-proof" || !defect.repair || !defect.criterion) continue;
       const proof = parseAcceptanceBlock(repairedBody)[defect.criterion - 1]?.proof;
-      if (proof) repairedBody = repairedBody.replace(proof, defect.repair);
+      // W1-T14913: the diagnosed criterion's own parser-reported proof span, never a text match, so a proof two criteria share
+      // is repaired on each.
+      if (proof) repairedBody = rewriteCriterionProofs(repairedBody, [{ index: defect.criterion - 1, oldProof: proof,
+        newProof: defect.repair }], acceptanceCriteriaRead) ?? repairedBody;
     }
     if (repairedBody !== metadata.body) {
       const candidate = { ...metadata, body: repairedBody };
@@ -9442,8 +9465,8 @@ export async function dispatchBodyProofRepair(
     });
     if (!validation.ok) return refuse(validation.refusal.reason, validation.refusal.detail);
     const body = await params.fetchPrBody(params.prUrl);
-    const repairedBody = replaceBodyProofs(body, validation.validated.map((e) => ({ oldProof: e.oldProof, newProof: e.newProof })));
-    if (repairedBody === undefined) return refuse("body-drifted", "the live body no longer carries each old proof on exactly one bullet");
+    const repairedBody = replaceBodyProofs(body, validation.validated.map((e) => ({ oldProof: e.oldProof, newProof: e.newProof })), acceptanceCriteriaRead);
+    if (repairedBody === undefined) return refuse("body-drifted", "the live body no longer carries each old proof on exactly one bullet, or rewriting it would change a claim or another proof");
     const unsafe = diagnoseUnrunnableProofs(parseAcceptanceBlock(repairedBody), { execProof: params.execProof });
     if (unsafe.length > 0) return refuse("proof-unsafe-to-push", renderBodyDefects(unsafe));
     await params.updatePrBody(params.prUrl, repairedBody);
@@ -12762,7 +12785,7 @@ export interface DepReviewDeps {
   prDiff?: (prUrl: string) => string;
   config?: Config;
   postStatus?: typeof postReviewStatusGuarded;
-  arm?: (prUrl: string, taskId: string | undefined) => ArmOutcome;
+  arm?: (prUrl: string, taskId: string | undefined) => ArmOutcome | ArmAttemptResult;
   /**
    * impl-FR — used by BOTH escalating call sites.
    *
@@ -13288,6 +13311,8 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
       prUrl: view.url,
       reviewInputDigest: inputDigest,
       reviewEngineRevision: DEP_REVIEW_ENGINE_REVISION,
+      // W1-T14902: `taskId` is this lane's ledger key, never a task. The guarded poster reads the hold for the task the
+      // live PR names (one fresh read of `prUrl`), so a held task's trailer added to a Dependabot PR posts pending.
       fetchLifecycle: () => fetchPrLifecycle(view.url, deps.gh ?? ghJson, DEP_REVIEW_ENGINE_REVISION),
     });
     if (!posted.posted) {
@@ -13318,6 +13343,10 @@ async function depReviewCommand(prArg: string, rest: string[] = [], deps: DepRev
     });
     // W1-T2258: `view.headRefOid` is the SAME head the `review.posted` line just above was keyed
     // to — already in hand, no extra read needed to close the join gap for this lane.
+    // W1-T14902: the production arm is the awaited detailed arm over realArmDepsAsync, whose task-hold gate reads the
+    // live body's task once more right before arming; its refusal and reason reach the row armAndLogOutcome writes.
+    const awaitedArm = deps.arm === undefined ? await armAutoMergeDetailedAsync(view.url, taskId, realArmDepsAsync()) : undefined;
+    if (awaitedArm !== undefined) deps = { ...deps, arm: () => awaitedArm };
     const armOutcome = armAndLogOutcome(view.url, taskId, log, deps.arm, "operator", view.headRefOid);
     // W1-T968: the PR — not merely this call — is what the console line answers about; a
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
@@ -19202,19 +19231,6 @@ export function readInlinePlanRecords(planPath: string): Array<{ taskId: string;
   return out;
 }
 
-/** Read `plan/tasks.d/*.yaml` as `{ taskId, path, text }`, skipping anything without an `- id:`. */
-function readPlanShards(dir: string): Array<{ taskId: string; path: string; text: string }> {
-  const out: Array<{ taskId: string; path: string; text: string }> = [];
-  for (const name of readdirSync(dir)) {
-    if (!name.endsWith(".yaml")) continue;
-    const path = join(dir, name);
-    const text = readFileSync(path, "utf8");
-    const id = text.match(/^- id: (\S+)/m)?.[1];
-    if (id) out.push({ taskId: id, path, text });
-  }
-  return out;
-}
-
 export function windowShortShards(
   shards: ReadonlyArray<{ taskId: string; text: string }>,
   credited: ReadonlySet<string>,
@@ -19268,7 +19284,7 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
   const reportWindowShort = () => {
     if (windowShort.length === 0) return;
     const names = windowShort.slice(0, 20).join(", ") + (windowShort.length > 20 ? ` (+${windowShort.length - 20} more)` : "");
-    console.error(`### rmd plan-reconcile: WINDOW-SHORT — ${windowShort.length} queued shard(s) are merged on origin/main but their merge subject and changed paths are outside the credit scan windows (subjects: last ${MERGE_SUBJECT_SCAN_LIMIT} commits, paths: last ${MERGED_PATHS_SCAN_LIMIT}) or carry no (#N), so they cannot be judged and were NOT flipped: ${names} — flip them by hand in a plan-only PR`);
+    console.error(`### rmd plan-reconcile: WINDOW-SHORT — ${windowShort.length} queued shard(s) are merged on origin/main but their merge commit carries no (#N) or its changed paths could not be read by sha, so they cannot be judged and were NOT flipped: ${names} — flip them by hand in a plan-only PR`);
     (deps.log ?? (() => {}))("plan.reconcile.window_short", { count: windowShort.length });
   };
   try {
@@ -19314,6 +19330,7 @@ export async function planReconcileCommand(rest: string[], deps: PlanReconcileDe
     mode: write ? "write" : "dry-run",
     rewritten: summary.rewritten.length,
     skipped: summary.skipped,
+    ...(summary.sharedShards?.length ? { shared_shards: summary.sharedShards } : {}),
     ...(inline && "queued" in inline ? { inline_queued: inline.queued, inline_creditable: inline.creditable.length } : {}),
   });
   console.log(renderPlanReconcile(summary, write, inline));
@@ -19583,6 +19600,8 @@ export function renderPlanReconcile(summary: ReconcileSummary, write: boolean, i
     `### rmd plan-reconcile${write ? " --write" : " (dry run — nothing written)"}\n` +
     `${summary.rewritten.length} shard(s) ${write ? "reconciled" : "would be reconciled"} to status: merged` +
     (skipped ? `\nskipped: ${skipped}` : "") +
+    // W1-T11183: a file holding several records is read but never rewritten; name its records so none is unaccounted.
+    (summary.sharedShards?.length ? `\nleft as they are (their file holds several records): ${summary.sharedShards.join(" ")}` : "") +
     (summary.rewritten.length > 0 && !write ? reviewHint : "") +
     (inline && "unreadable" in inline ? `\nplan/tasks.yaml: unreadable (${inline.unreadable}), its queued records were not counted` : "") +
     (inline && "queued" in inline && inline.queued > 0
@@ -25251,7 +25270,7 @@ async function retroCommand(
     } catch {
       /* best-effort — see the comment above */
     }
-    const armOutcome = armAndLogOutcome(prUrl, runId, log, undefined, undefined, armHeadSha);
+    const armOutcome = await armAndLogOutcomeAsync(prUrl, runId, log, undefined, undefined, armHeadSha);
     worktreeRemove(repoDir, worktreePath);
     // W1-T968: the PR — not merely this call — is what the console line answers about; a
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
@@ -37101,7 +37120,7 @@ async function triageCommandLocked(
       } catch {
         /* best-effort — see the comment above */
       }
-      const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
+      const armOutcome = await armAndLogOutcomeAsync(prUrl, taskId, log, undefined, undefined, armHeadSha);
       // W1-T968: the PR — not merely this call — is what the console line answers about; a
       // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
       const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
@@ -37822,7 +37841,7 @@ export async function planCommand(
       } catch {
         /* best-effort — see the comment above */
       }
-      const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);
+      const armOutcome = await armAndLogOutcomeAsync(prUrl, taskId, log, undefined, undefined, armHeadSha);
       // W1-T968: the PR — not merely this call — is what the console line answers about; a
       // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
       const priorArm = priorArmOnHead(readLedgerLines(ledgerPath), prUrl, armHeadSha);
@@ -41054,7 +41073,7 @@ export async function approveCommand(
     } catch {
       /* best-effort — see the comment above */
     }
-    const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
+    const armOutcome = await armAndLogOutcomeAsync(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
     removeApproveWorktree();
     // W1-T968: the PR — not merely this call — is what the console line answers about; a
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
@@ -41449,7 +41468,7 @@ async function approveBatchCommand(
     } catch {
       /* best-effort — see the single-path comment above */
     }
-    const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
+    const armOutcome = await armAndLogOutcomeAsync(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);
     removeApproveWorktree();
     // W1-T968: the PR — not merely this call — is what the console line answers about; a
     // review-lane arm already ledgered moments earlier on this SAME head must still read as armed.
@@ -45303,7 +45322,7 @@ function commandSyntax(name: string): string {
 // (test/run-task.test.ts, test/install-symlink-refusal.test.ts, plus this file's own
 // InstallFreshnessDeps consumers below) keeps its import path unchanged. This is a
 // PURE MOVE — the function body and behaviour are byte-identical to the pre-move version.
-import { reconcilePlan, reconcileShardStatus, revertedRequeues, type RevertedRequeue, type ReconcileSummary } from "./lib/plan-reconcile.js";
+import { readPlanShards, reconcilePlan, reconcileShardStatus, revertedRequeues, type RevertedRequeue, type ReconcileSummary } from "./lib/plan-reconcile.js";
 import { PLAN_RECONCILE_LANDING_BODY_BUDGET, PLAN_RECONCILE_LANDING_RECORD_LIMIT, takePlanReconcileBatch } from "./lib/plan-reconcile-batch.js";
 import { managedCheckoutInstallEscalation, stagedInstall, type StagedInstallFailure } from "./lib/staged-install.js";
 import { hashInstallInputs, installHashMarkerPath } from "./lib/install-hash.js";
@@ -45322,7 +45341,7 @@ import {
   escalateRunChildContract, type RunChildContractEscalation, type RunChildModeDecision, type RunChildModeEvidence,
 } from "./lib/run-child-mode.js";
 import type { RunChildSpecOptions } from "./lib/run-child-contract.js";
-import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, MERGE_SUBJECT_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildBehindMainByPrAsync, buildCreditCandidates, buildEscalationReconcileCandidates, buildEscalationReconcileCandidatesAsync, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger, usesUntaskedReviewMetadata } from "./lib/tick-read-worker.js";
+import { type BoardReviewItemsIo, type ClassifiedOpenPrView, type EscalationIntake, MAX_RETAINED_REMEDY_LINES, MERGED_PATHS_SCAN_LIMIT, type PlanFilingClassificationEvent, type PlanFilingClassificationSource, RETAINED_REMEDY_HEADER, REVIEW_CTX, type RawOpenPr, type RollupCheck, type StrikeRegime, type TickReadOptions, UNTASKED_REVIEW_BUDGET_USD, attachPostedGateIds, buildBehindMainByPr, buildBehindMainByPrAsync, buildCreditCandidates, buildEscalationReconcileCandidates, buildEscalationReconcileCandidatesAsync, buildOpenPrViewsAsync, buildStaleGateWorkflowsByPr, createTickReadProducer, creditIsReconcilable, currentStrikeRegimeFor, defaultBoardReviewItems, deriveStrikeHistory, fetchCiFailures, fetchCiFailuresAsync, isPlanOnlyFilingPr, mergeLogEvidenceByRoot, openPrViewSteps, openPrsWithPostedIdsSteps, priorStrikesFor, readQuestionsNdjson, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, syncBoardReviewOpenPrs, unmetFromLedger, usesUntaskedReviewMetadata } from "./lib/tick-read-worker.js";
 export { hashInstallInputs, installHashMarkerPath };
 
 export interface InstallFreshnessDeps {
@@ -46295,11 +46314,11 @@ async function main(
   // cost ~120ms (700/723/734 vs 592/615/592 with GH_TOKEN preset). The mint is AWAITED and carries
   // EXCHANGE_TIMEOUT_MS (20s, src/lib/github-app.ts:66), so on an unreachable network that ceiling
   // stood between the operator and `usage:`.
-  if (!process.env.GH_TOKEN) {
-    await refreshInstallationToken({
-      log: (step, extra) => console.error(`rmd: ${step} ${extra ? JSON.stringify(extra) : ""}`.trim()),
-    });
-  }
+  // W1-T15038: a non-service verb keeps a live token through the shared renewal loop, not a one-hour one-shot mint.
+  await armCliTokenRenewal({
+    cmd, refresh: refreshInstallationToken,
+    log: (step, extra) => console.error(`rmd: ${step} ${extra ? JSON.stringify(extra) : ""}`.trim()),
+  });
   // W1-T79: CLI self-freshness, checked directly after the (mandatory, every-call) help
   // preamble above and BEFORE any command's real dispatch — the #138 incident shape: `rmd
   // correct` existed on origin/main, but the OPERATOR's own invocation was a stale checkout
@@ -46636,7 +46655,6 @@ export {
   MAX_RETAINED_REMEDY_LINES,
   MAX_RETAINED_VERDICT_LINES,
   MERGED_PATHS_SCAN_LIMIT,
-  MERGE_SUBJECT_SCAN_LIMIT,
   RETAINED_POOL_HEADER,
   RETAINED_REMEDY_HEADER,
   RETAINED_RULE_SUITES_HEADER,

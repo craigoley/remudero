@@ -243,7 +243,7 @@ test("the bounded cursor covers a healthy corpus above one hundred without trunc
   const states: string[] = [];
   for (let i = 0; i < 130; i++) { const result = await f.run(); states.push(result.state); if (result.state === "complete") break; }
   const events = f.store().events; assert.equal(events.filter(e => e.receipt.kind === "retire").length, 121);
-  assert.equal(states.includes("pending"), true); assert.equal(states.at(-1), "complete");
+  assert.deepEqual(states, ["complete"], "W1-T14978: one pass sweeps the whole corpus");
   assert.equal(new Set(events.map(e => e.receipt.id)).size, events.length);
   const completed = await f.refresh(); const census = f.source().attentionCensus!;
   const censusBytes = Buffer.byteLength(JSON.stringify({ repository: f.repository, instance: f.instance, contract: "read-write", ...census }));
