@@ -19565,11 +19565,23 @@ export function riskJudgeCodeScanning(
   return async (pr, alerts) => {
     const { input, orchestrator, config } = await planFor(pr, alerts);
     const log = orchestrator.log ?? (() => {});
+    // W1-T14916: a judge a retired daemon withheld answered nothing. runRiskJudge reads its throw as an
+    // unavailable judge, so remember it and rethrow after: the gate then writes no ruling and the head stays due.
+    let withheld: WorkerNotStartedError | undefined;
+    const judge: typeof orchestrator.judge = async (judgeInput) => {
+      try {
+        return await orchestrator.judge(judgeInput);
+      } catch (error) {
+        if (error instanceof WorkerNotStartedError) withheld = error;
+        throw error;
+      }
+    };
     const result = await runRiskJudge(
       input,
-      { ...orchestrator, log: (step, extra) => log(step, { ...extra, code_scanning_pr: pr.prNumber, code_scanning_head: pr.headSha }) },
+      { ...orchestrator, judge, log: (step, extra) => log(step, { ...extra, code_scanning_pr: pr.prNumber, code_scanning_head: pr.headSha }) },
       { ...config, judgeUnavailableAction: "proceed" },
     );
+    if (withheld !== undefined) throw withheld;
     if (result.verdict.availability === "unavailable") {
       return { ruling: "unavailable", reason: result.verdict.reasons.join("; ") || result.action.reason };
     }
@@ -19971,11 +19983,12 @@ async function codeScanningGateForHead(
     return settleFix("pool-cap", `${pool.flights.size} judgments in flight at the cap of ${pool.limit}`);
   }
   let settled: CodeScanningJudgment | undefined;
+  let withheld = false;
   const flight: HandedOffHeadJudgmentFlight = {};
   pool.flights.set(key, flight);
   let cancelBound = () => {};
   const settle = (judgment: CodeScanningJudgment): void => {
-    if (settled !== undefined) return;
+    if (settled !== undefined || withheld) return;
     settled = judgment;
     pool.flights.delete(key);
     cancelBound();
@@ -19989,8 +20002,19 @@ async function codeScanningGateForHead(
     void Promise.resolve().then(() => deps.postCodeScanningRuling?.(pr, body)).catch((error) =>
       log("code_scanning.comment_failed", { pr_number: pr.prNumber, head_sha: pr.headSha, error: String((error as Error)?.message ?? error) }));
   };
-  const threw = (error: unknown): void =>
+  const threw = (error: unknown): void => {
+    if (error instanceof WorkerNotStartedError) {
+      // W1-T14916: a retired daemon withheld the judge. It ruled nothing, so no ruling row is written and the
+      // head stays due for the successor, which judges it afresh.
+      if (settled !== undefined || withheld) return;
+      withheld = true;
+      pool.flights.delete(key);
+      cancelBound();
+      log("code_scanning.judge_withheld", { pr_number: pr.prNumber, head_sha: pr.headSha, not_started: error.notStarted });
+      return;
+    }
     settle({ ruling: "unavailable", reason: `code-scanning judge threw: ${String((error as Error)?.message ?? error)}` });
+  };
   cancelBound = pool.schedule(pool.timeoutMs, () =>
     settle({ ruling: "unavailable", reason: `code-scanning judgment outlived its ${pool.timeoutMs}ms bound` }));
   try {
@@ -19999,6 +20023,9 @@ async function codeScanningGateForHead(
     threw(error); // ruled unavailable and ledgered, exactly as a rejection is
   }
   await new Promise<void>((resolve) => setImmediate(resolve));
+  if (withheld) {
+    return { kind: "hold", reason: `code-scanning judge withheld by a retiring daemon for head ${head} — no ruling; the successor judges it` };
+  }
   if (settled === undefined) {
     return { kind: "hold", reason: `code-scanning judgment in flight for head ${head} — holding the arm; the next pass reads its ruling` };
   }

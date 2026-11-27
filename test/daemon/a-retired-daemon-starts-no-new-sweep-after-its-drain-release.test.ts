@@ -39,7 +39,9 @@ import { proofDebtPopulationPermit, readInboxGardenerStore, stampMechanicalAsk, 
 import { fixedClock } from "#src/lib/clock.js";
 
 // The shared run-task test helper, not a direct src/run-task.ts import (the affected-suite reach ratchet bounds direct importers).
-import { buildSweepEffects, dispatchAlertFixRun, dispatchMainRepairFixRun, mainRepairLaneFor, runFixRung, runReview, type AlertFixDispatchDeps } from "#test/helpers/run-task-test.js";
+import { buildSweepEffects, codeScanningJudgeDeps, dispatchAlertFixRun, dispatchMainRepairFixRun, mainRepairLaneFor, runFixRung, runReview, type AlertFixDispatchDeps } from "#test/helpers/run-task-test.js";
+import { CODE_SCANNING_FIX_STEP, runSweep, type SweepDeps } from "#test/helpers/sweep-test.js";
+import type { Plan, Task } from "#src/lib/plan.js";
 
 type Row = { step: string } & Record<string, unknown>;
 
@@ -751,4 +753,62 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   assert.equal(decision.verdict, "unavailable", JSON.stringify(decision));
   assert.equal("judge_skipped" in decision, false, "no unparseable-twice continue is fabricated");
   assert.equal(asks, 2, "one ask per call: a withheld judge is not asked again");
+});
+
+const CS_N = 49160;
+const CS_HEAD = `${CS_N}cccc`;
+const CS_ALERT = { alertNumber: 77, ruleId: "js/incomplete-sanitization", severity: "high", path: "src/lib/plain.ts", line: 9,
+  message: "This replaces only the first occurrence of ..." };
+function codeScanningPr(over: Partial<OpenPrView> = {}): OpenPrView {
+  return { prNumber: CS_N, prUrl: `https://github.com/acme/remudero/pull/${CS_N}`, taskId: `W1-T${CS_N}`,
+    headRefName: `run-W1-T${CS_N}-1`, reviewState: "success", checksState: "green", unmetCriteria: [], priorStrikes: 0,
+    lastActivityAt: "2026-11-26T11:00:00Z", headSha: CS_HEAD, autoMergeArmed: false,
+    codeqlHeadAlerts: { headSha: CS_HEAD, alerts: [CS_ALERT] }, ...over } as OpenPrView;
+}
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and the daemon's code-scanning judge it withheld throws instead of ruling the head unavailable", async (t: TestContext) => {
+  const root = ownedFixtureDir(t, "retired-code-scanning-judge").dir;
+  const task = { id: `W1-T${CS_N}`, title: "a codeql head", type: "implement", files: [CS_ALERT.path] } as unknown as Task;
+  const plan: Plan = { tasks: [task], byId: new Map([[task.id, task]]) } as unknown as Plan;
+  const config = { claudeBin: "/bin/true", root, installRoot: process.cwd() } as unknown as Parameters<typeof codeScanningJudgeDeps>[2];
+  let spawns = 0;
+  const deps = codeScanningJudgeDeps("acme", "remudero", config, plan, "SWEEP-14916", () => {},
+    async () => { spawns++; return notStartedResult(); }, async () => []);
+  await assert.rejects(deps.judgeCodeScanningAlerts!(codeScanningPr({ prUrl: "not a pr url" }), [CS_ALERT]), isNotStarted);
+  assert.equal(spawns, 1, "a withheld judge is asked once, not retried as unparseable");
+});
+
+test("W1-T14916 criterion 1: after the drain lock is released the retired daemon starts no sweep pass and spawns no worker, " +
+  "and a code-scanning head whose judge it withheld gets no ruling and is judged by the successor", async (t: TestContext) => {
+  const root = ownedFixtureDir(t, "retired-code-scanning-gate").dir;
+  const lines: Array<Record<string, unknown>> = [{ ts: "2026-11-26T11:30:00.000Z", run_id: "REVIEW-14916", task_id: `W1-T${CS_N}`,
+    step: "review.posted", pr_url: codeScanningPr().prUrl, head_sha: CS_HEAD, state: "success", capped: false, plan_only: false }];
+  const armed: string[] = [];
+  const fixes: number[] = [];
+  const sweepDeps = (judge: NonNullable<SweepDeps["judgeCodeScanningAlerts"]>): SweepDeps => ({
+    arm: (p) => { armed.push(`${p.prNumber}@${p.headSha}`); },
+    close: () => {},
+    dispatchFix: (p) => { fixes.push(p.prNumber); },
+    escalate: () => {},
+    ledgerPath: join(root, "ledger.ndjson"),
+    runId: "SWEEP-14916",
+    now: () => Date.parse("2026-11-26T12:00:00.000Z"),
+    readLedger: () => lines,
+    appendLine: (_path, line) => { lines.push(line); },
+    log: (step, extra = {}) => { lines.push({ run_id: "SWEEP-14916", step, ...extra }); },
+    judgeCodeScanningAlerts: judge,
+    postCodeScanningRuling: () => {},
+  } as SweepDeps);
+  await runSweep([codeScanningPr()], sweepDeps(() => Promise.reject(new WorkerNotStartedError("admission-abandoned"))));
+  for (let i = 0; i < 10; i++) await new Promise<void>((r) => setImmediate(r));
+  assert.equal(lines.filter((l) => l.step === CODE_SCANNING_FIX_STEP).length, 0, "no fix ruling is recorded for a withheld judge");
+  assert.equal(fixes.length, 0, "no fix is dispatched");
+  assert.deepEqual(armed, [], "the head is not armed");
+  assert.ok(lines.some((l) => l.step === "code_scanning.judge_withheld" && l.head_sha === CS_HEAD), "the withheld judge is recorded");
+  let judged = 0;
+  await runSweep([codeScanningPr()], sweepDeps(async () => { judged++; return { ruling: "false_positive", reason: "a constant input" }; }));
+  for (let i = 0; i < 10; i++) await new Promise<void>((r) => setImmediate(r));
+  assert.equal(judged, 1, "control: the successor judges the same head");
+  assert.deepEqual(armed, [`${CS_N}@${CS_HEAD}`], "control: the successor's ruling decides the head");
 });

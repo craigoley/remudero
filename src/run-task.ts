@@ -2969,7 +2969,14 @@ export function codeScanningJudgeDeps(
               outPath: join(config.root, "tmp", `risk-judge-settings-${runId}.json`),
             });
             const mount = resolveRiskJudgeRoleMount(loadMounts(mountsPath(repoRoot)));
-            return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn, spend, shadowLog: log })(input);
+            // W1-T14916: a spawn a retired daemon withheld is not an empty answer; throw so the gate writes no ruling.
+            const raw = spawn ?? benchmarkNonDispatchSpawn("risk-judge");
+            const guarded: typeof spawnWorker = async (args) => {
+              const result = await raw(args);
+              if (result.notStarted !== undefined) throw new WorkerNotStartedError(result.notStarted);
+              return result;
+            };
+            return realRiskJudge({ mount, cwd: config.root, settingsFile, spawn: guarded, spend, shadowLog: log })(input);
           },
           escalate: () => "",
         },
