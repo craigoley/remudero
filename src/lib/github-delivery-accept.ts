@@ -74,6 +74,8 @@ export interface GithubDeliveryChecks {
   checkRunCompleted(body: unknown): CheckRunCompletedInfo | undefined;
   /** True when a readable marker is already at `path`. */
   markerPending(path: string): boolean;
+  /** W1-T14809: journals the head sha a check_run, status or pull_request delivery names, before the ack. */
+  journalChangedHead?(markerPath: string, event: string, body: unknown, receivedAtIso: string): Promise<void>;
   /** The durable companion marker for a closed pull request, if this delivery needs one. */
   closedPullRequestWakePath(markerPath: string, record: GithubDeliveryMarker): string | undefined;
   /** W1-T14810: records a `workflow_run:completed` delivery beside the instance's marker, before the marker. */
@@ -197,6 +199,7 @@ export async function acceptGithubDelivery(rawBody: string, headers: IncomingHtt
 
   const actionable = checks.classify(event, action, body);
   if (deps.semanticCheckMode === "enforce" && !actionable) {
+    await checks.journalChangedHead?.(markerPath, event, body, deps.clock.iso());
     await deps.dedup.record(deliveryId);
     return { status: 202, body: { accepted: false, reason: "successful_leaf" }, ...followUp };
   }
@@ -208,6 +211,7 @@ export async function acceptGithubDelivery(rawBody: string, headers: IncomingHtt
     await checks.writeWorkflowRunCompleted(markerPath, { deliveryId, repository: owningRepository, receivedAtIso: record.receivedAtIso });
   }
   await deps.writeMarker(markerPath, record);
+  await checks.journalChangedHead?.(markerPath, event, body, record.receivedAtIso);
   const closedWakePath = checks.closedPullRequestWakePath(markerPath, record);
   if (closedWakePath) await deps.writeMarker(closedWakePath, record);
   await deps.dedup.record(deliveryId);
