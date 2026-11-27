@@ -26,7 +26,7 @@ import { describe, it, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { logWorktreeReapBootSurvey } from "#src/run-task.js";
-import { runLockPath, writeRunLock, type RunLockInfo } from "#src/lib/worker.js";
+import { reapStaleWorktrees, runLockPath, writeRunLock, type RunLockInfo } from "#src/lib/worker.js";
 import type { Config } from "#src/lib/config.js";
 
 const runTaskSrc = readFileSync(fileURLToPath(new URL("../src/cli/commands/run-task-verb.ts", import.meta.url)), "utf8");
@@ -107,6 +107,8 @@ describe("the boot rung closes pruneStaleRuns' three coverage holes (behavioral,
       const lines: Array<[string, Record<string, unknown>]> = [];
       const summary = logWorktreeReapBootSurvey(f.config, (s, fields) => lines.push([s, fields]), {
         policy: () => ({ enabled: true }), // armed — real deletion, not a survey
+        // W1-T15026: the real reaper, told nobody works in the fixtures instead of reading the host's `/proc`.
+        reap: (r, o) => reapStaleWorktrees(r, { ...o, cwdCensus: () => ({ state: "clear", scanned: 0 }) }),
       });
 
       assert.ok(summary, "the real pass must succeed against a real fixture root");
