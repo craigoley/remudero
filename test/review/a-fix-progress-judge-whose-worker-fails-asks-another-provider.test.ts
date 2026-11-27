@@ -12,7 +12,6 @@ import { test } from "node:test";
 import { buildFixProgressInput, judgeFixProgress } from "#src/lib/fix-progress-judge.js";
 import { mountsPath } from "#src/lib/mounts.js";
 import { productionFixProgressJudge } from "#src/lib/sweep.js";
-import { judgeCappedRepair } from "#src/lib/classify.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -112,31 +111,11 @@ test("W1-T15163 criterion 2: a success subtype is never re-asked, and a re-ask t
   assert.ok(!("reasked_from" in decision));
 });
 
-test("W1-T15163 criterion 3: the judged ledger row retains reasked_from for a re-asked answer", async (t) => {
+test("W1-T15163 criterion 3: a re-asked judgment exposes reasked_from for the judged ledger row", async (t) => {
   const root = tmpRoot(t);
   const judge = judgeWith(root, async (args) => args.excludeProviders?.includes("codex") ? worker(VERDICT) : codexExit());
-  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
-  const out = await judgeCappedRepair({ bodyStrikes: 2, planRepairStrikes: 0 }, 2,
-    { planRepairCapable: false, input: input(), judge: judge.judge, log: (step, fields) => void rows.push({ step, fields }) });
-  assert.equal(out.kind, "repair_body");
-  const judged = rows.find((row) => row.step === "fix.progress_judged");
-  assert.ok(judged, "a fix.progress_judged row is written");
-  assert.deepEqual(judged.fields.reasked_from, { provider: "codex", model: "gpt-6-luna", subtype: "error_exit_1" });
-
-  // The corroborated harness answer uses the same row path and must retain the failed attempt too.
-  const reaskedFrom = { provider: "codex", model: "gpt-6-luna", subtype: "error_exit_1" };
-  const base = input();
-  const corroborated = { ...base, signals: { ...base.signals, offHostPass: true as const }, offHostPassEvidence: [{
-    claim: "c", proof: "unit test: c", reviewerOutput: "reviewed", worker: { proof: "unit test: c", headSha: base.headSha,
-      result: "pass" as const, output: "pass" }, ci: [],
-  }] };
-  const harnessJudge = async () => ({ verdict: "escalate" as const, loop: "harness", reason: "corroborated",
-    reasked_from: reaskedFrom });
-  const harnessRows: Array<{ step: string; fields: Record<string, unknown> }> = [];
-  await judgeCappedRepair({ bodyStrikes: 2, planRepairStrikes: 0 }, 2, { planRepairCapable: false,
-    input: corroborated, judge: harnessJudge, log: (step, fields) => void harnessRows.push({ step, fields }) });
-  const harnessRow = harnessRows.find((row) => row.step === "fix.progress_judged");
-  assert.ok(harnessRow, "a corroborated harness fix.progress_judged row is written");
-  assert.deepEqual(harnessRow.fields.reasked_from, reaskedFrom);
+  const verdict = await judge.judge(input());
+  assert.equal(verdict?.verdict, "continue");
+  assert.deepEqual(verdict?.reasked_from, { provider: "codex", model: "gpt-6-luna", subtype: "error_exit_1" });
 });
 

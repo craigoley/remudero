@@ -2727,7 +2727,7 @@ async function askFixProgressJudgeOnce(spawn: (args: SpawnWorkerArgs) => Promise
   Promise<{ result: WorkerResult; reaskedFrom?: FixProgressReaskedFrom } | undefined> {
   let first: WorkerResult | undefined;
   let firstThrew = false;
-  let assigned: { provider: string; model: string } | undefined;
+  let assigned: { provider: WorkerProviderId; model: string } | undefined;
   const firstArgs: SpawnWorkerArgs = { ...args, onSelectionAssignment: (assignment) => {
     assigned = { provider: assignment.selected.provider, model: assignment.selected.model };
     args.onSelectionAssignment?.(assignment);
