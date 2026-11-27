@@ -37,16 +37,45 @@ export function planReconcileRequeueProofTemplate(file: string): string {
 
 /** The template for one landed file: a shard whose landed text reads `status: queued` was re-queued. */
 export function planReconcileProofFor(file: string, landedText: string | undefined): string {
-  // The proof discriminator compares grep hit counts at the landing head and its base. For a
-  // shared file, a merged record may already exist at base, so the pure status line is useful only
-  // when the composed text carries more merged lines than the base. This grep gains one hit per
-  // flipped record while leaving the status line itself pure.
-  if (landedText !== undefined && [...landedText.matchAll(/^  status: merged[ \t]*$/gm)].length > 1) {
-    return `grep: ^  status: merged$ in ${file}`;
-  }
   return landedText !== undefined && /^  status: queued[ \t]*$/m.test(landedText)
     ? planReconcileRequeueProofTemplate(file)
     : planReconcileProofTemplate(file);
+}
+
+/** The statuses a reconcile landing writes: a credited flip, and a W1-T14302 re-queue. */
+const PLAN_RECONCILE_STATUSES = ["merged", "queued"] as const;
+
+/** A repository path the fenced proof below can name as one argv token (no quoting, no shell metacharacter). */
+const PLAN_RECONCILE_COUNT_PROOF_PATH = /^[\w./-]+$/;
+
+/**
+ * W1-T15048: the `  status: <status>` lines of `text` that sit between two newlines. This is
+ * exactly what {@link planReconcileStatusCountProof}'s pattern counts.
+ */
+export function planReconcileStatusLineCount(text: string, status: string): number {
+  const lines = text.split("\n");
+  let count = 0;
+  for (let i = 1; i < lines.length - 1; i++) if (lines[i] === `  status: ${status}`) count++;
+  return count;
+}
+
+/**
+ * W1-T15048: a proof for a pure status flip into a file that already holds that status, where no
+ * line of the landed text is new. Any line grep matches there is also a base line, so no line
+ * proof can fail at base (check-proof --base exits 5, and the plan PR preflight refuses the whole
+ * batch). This proof counts instead. It reads the file as one record (`-z`) and needs the head's
+ * number of status lines, so it passes at head and fails at a base that holds fewer. Undefined
+ * when no status gains a line, or when the path cannot be one argv token.
+ */
+export function planReconcileStatusCountProof(file: string, baseText: string | undefined, headText: string | undefined): string | undefined {
+  if (baseText === undefined || headText === undefined || !PLAN_RECONCILE_COUNT_PROOF_PATH.test(file)) return undefined;
+  for (const status of PLAN_RECONCILE_STATUSES) {
+    const count = planReconcileStatusLineCount(headText, status);
+    if (count > planReconcileStatusLineCount(baseText, status)) {
+      return `\`grep -aPzc "(?:\\n  status: ${status}(?=\\n)[\\s\\S]*?){${count}}" ${file}\``;
+    }
+  }
+  return undefined;
 }
 
 /** The whole landing PR body: the explanation, then one Acceptance bullet per shard. */
