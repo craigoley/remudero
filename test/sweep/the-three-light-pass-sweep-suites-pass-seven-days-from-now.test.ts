@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runSuitesShifted } from "#src/lib/gate-gardener.js";
-import { testRunArgv, unwrapLowPriority } from "#src/lib/test-slot.js";
+import { admitStaticWorkAsync, testRunArgv, unwrapLowPriority } from "#src/lib/test-slot.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 // W1-T15078. The suites' fixture dates derive from Date.now, so their age stays stable when that clock shifts.
@@ -55,12 +55,27 @@ function realClockRun(): Promise<{ code: number | null; tap: string }> {
   });
 }
 
+/** One run of this test (the real-clock child beside the shifted batch, six suites) peaked at 4.5 GiB of process tree
+ *  on Azure (2026-11-27). The flake screen starts twice the runner's cores of copies at once (eight on CI, about 36 GiB)
+ *  and the 16 GiB runner was shut down twice. Each run names its peak in a static admission over a directory every
+ *  copy on the host shares, so a copy waits for memory instead of starting beside the others; the run itself is unchanged. */
+const RUN_PEAK_BYTES = 5 * 1024 ** 3;
+const ADMISSION_DIR = join(tmpdir(), "rmd-w1-t15078-shifted-suite-admission");
+
 // Its own bound, kept by every tier (scripts/test-tier-manifest.mjs): two runs of three suites, beyond a derived 120 s.
 test("W1-T15078 criterion 1: the three light-pass suites pass seven days from now", { timeout: 600_000 }, async () => {
   for (const file of FILES) assert.ok(existsSync(join(REPO_ROOT, file)), `${file} exists — a ghost path would read as a clean pass`);
-  const real = realClockRun();
-  assert.deepEqual(failures(7), [], "every suite passes with Date.now shifted +7 days");
-  const { code, tap } = await real;
+  mkdirSync(ADMISSION_DIR, { recursive: true });
+  const admission = await admitStaticWorkAsync("test:W1-T15078 shifted suites", { memoryBytes: RUN_PEAK_BYTES, dir: ADMISSION_DIR, log: () => {} });
+  let real: Awaited<ReturnType<typeof realClockRun>>;
+  try {
+    const running = realClockRun();
+    assert.deepEqual(failures(7), [], "every suite passes with Date.now shifted +7 days");
+    real = await running;
+  } finally {
+    admission.release();
+  }
+  const { code, tap } = real;
   const count = (name: string) => Number(new RegExp(`^# ${name} (\\d+)$`, "m").exec(tap)?.[1] ?? NaN);
   assert.ok(count("tests") > 0, `the real-clock run reported its tests:\n${tap.slice(-2000)}`);
   assert.deepEqual([code, count("fail"), count("cancelled")], [0, 0, 0], `every suite passes at the real clock:\n${tap.slice(-2000)}`);
