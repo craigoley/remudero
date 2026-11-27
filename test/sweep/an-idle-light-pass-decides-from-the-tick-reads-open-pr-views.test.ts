@@ -28,7 +28,7 @@ let fixtures = 0;
 
 function view(headSha: string): OpenPrView {
   return { prNumber: 7, prUrl: "https://github.com/o/r/pull/7", taskId: "W1-T7", headSha,
-    headRefName: "run-W1-T7-1", lastActivityAt: "2026-11-18T00:00:00Z", reviewState: "none",
+    headRefName: "run-W1-T7-1", lastActivityAt: new Date(Date.now() - 86_400_000).toISOString(), reviewState: "none",
     checksState: "green", unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false, mergeState: "clean",
     changedFiles: ["src/a.ts"], reviewInputDigest: "digest" };
 }
