@@ -1117,10 +1117,25 @@ console.log('RMD_STATE_SNAPSHOT', s.archiveDir.split('/').pop(), s.entries.lengt
   # hard-linked, not copied), plus a margin of 5% and at least 64 MiB. Sizes come from `wc -c`,
   # which reads the same on the host's GNU tools and on BSD.
   state_snapshot_estimate_bytes() {
-    local state="$1" backups="$2" total linked=0 prev="" f name size prior_size margin
+    local state="$1" backups="$2" total linked=0 prev="" f name size prior_size margin engine_glob="" i e
+    for ((i = 0; i < 64; i++)); do engine_glob="${engine_glob}[0-9a-f]"; done
+    # At each engine root (engines/<64 hex>/) snapshotState copies only the evidence: engine.json, the
+    # pin files and node_modules (a link is kept as a link; a real directory is copied). Anything else
+    # there is left out of the archive, so it is left out of the estimate too.
     # An unreadable file is left out rather than failing the rung: the margin covers it.
-    total="$( { find "${state}" -type f ! -path "${state}/status.json" ! -path "${state}/engines/worktrees/*" \
-      ! -path "${state}/daemon-slots/*" -exec wc -c {} + 2>/dev/null || true; } \
+    total="$( {
+      find "${state}" -type f ! -path "${state}/status.json" ! -path "${state}/engines/worktrees/*" \
+        ! -path "${state}/daemon-slots/*" ! -path "${state}/engines/${engine_glob}/*" -exec wc -c {} + 2>/dev/null || true
+      for e in "${state}"/engines/${engine_glob}; do
+        [ -d "${e}" ] || continue
+        for name in engine.json package.json package-lock.json npm-shrinkwrap.json yarn.lock pnpm-lock.yaml; do
+          [ -f "${e}/${name}" ] && { wc -c "${e}/${name}" 2>/dev/null || true; }
+        done
+        if [ -d "${e}/node_modules" ] && [ ! -L "${e}/node_modules" ]; then
+          find "${e}/node_modules" -type f -exec wc -c {} + 2>/dev/null || true
+        fi
+      done
+      true; } \
       | awk '$NF != "total" { s += $1 } END { printf "%d\n", s + 0 }')" || return 1
     prev="$(list_snapshots "${backups}" | tail -n 1)"
     if [ -n "${prev}" ]; then

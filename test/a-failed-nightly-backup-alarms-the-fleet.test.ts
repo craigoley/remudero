@@ -415,3 +415,32 @@ test(`${PROOF}: W1-T14396 criterion 2: with enough free space the snapshot and i
     } finally { rmSync(g.dir, { recursive: true, force: true }); }
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
+
+test(`${PROOF}: W1-T14396 criterion 2: only an engine root's evidence counts toward the estimate, as snapshotState copies only that`, () => {
+  const engine = (root: string) => join(root, "state", "engines", "a".repeat(64));
+  const f = fixture();
+  try {
+    seedArchives(f.root);
+    mkdirSync(engine(f.root), { recursive: true });
+    writeFileSync(join(engine(f.root), "engine.json"), '{"engine":"fixture"}\n');
+    // A large file the snapshot leaves out: counting it would refuse a backup that fits.
+    writeFileSync(join(engine(f.root), "build-cache.bin"), Buffer.alloc(4 * MIB, 98));
+    stubFreeSpace(f.dir, 65 * 1024);
+    const r = f.rung("ok", { RMD_STATE_BACKUP_KEEP: "2" });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(f.read().result, "ok");
+    assert.deepEqual(archivesOf(f.root), [`state-backup.${ARCHIVE_STAMPS[1]}`, "state-backup.2026-10-05T12-00-00-000Z"], "retention runs");
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+  const g = fixture();
+  try {
+    seedArchives(g.root);
+    mkdirSync(engine(g.root), { recursive: true });
+    // The same bytes in an evidence file are copied, so they count.
+    writeFileSync(join(engine(g.root), "package-lock.json"), Buffer.alloc(4 * MIB, 98));
+    stubFreeSpace(g.dir, 65 * 1024);
+    const refused = g.rung("ok", { RMD_STATE_BACKUP_KEEP: "2" });
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.match(g.read().reason!, /not enough free space/);
+    assert.equal(archivesOf(g.root).length, ARCHIVE_STAMPS.length);
+  } finally { rmSync(g.dir, { recursive: true, force: true }); }
+});
