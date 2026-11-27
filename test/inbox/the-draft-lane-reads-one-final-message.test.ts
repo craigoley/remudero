@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from "node:fs";
+import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {test} from "node:test";
-import {runDraftRung, parseDraftedCandidate, type Proposal} from "#src/lib/inbox.js";
+import {inboxDraftExampleFragmentYaml, runDraftRung, parseDraftedCandidate, type Proposal} from "#src/lib/inbox.js";
+import {DRAFT_AUTOFIX_OFF_FILE} from "#src/lib/draft-repair.js";
 import {workerTranscript, type WorkerResult} from "#src/lib/worker.js";
 import {buildInboxDraftSpawnArgs} from "#src/run-task.js";
 import type {Config} from "#src/lib/config.js";
@@ -89,4 +92,22 @@ test("draft rejection telemetry counts the same final message that the parser re
   const {outcome, events} = await draft(worker(malformed));
   assert.equal(outcome?.ok, false);
   assert.equal(events.find(x => x.step === "inbox.draft_error")?.output_chars, malformed.length);
+});
+
+test("the in-spawn draft evaluation judges an answer the repair makes clean as clean, unless the kill switch is set", () => {
+  const root = mkdtempSync(join(tmpdir(), "draft-autofix-evaluate-"));
+  const fixable = inboxDraftExampleFragmentYaml().replace('title: "Tighten', 'title: "NEW-1: Tighten').replace("verify: auto", "verify: manual");
+  const answer = `=== FRAGMENT START ===\n${fixable}\n=== FRAGMENT END ===\nSTAMP: - P9 (tighten the guard) — RATIFIED 2026-01-01 -> NEW-1.`;
+  try {
+    const evaluate = () => buildInboxDraftSpawnArgs({cwd: REPO_ROOT, settingsFile: join(REPO_ROOT, "fixture-settings-not-read.json"),
+      prompt: "fixture only; do not spawn", mount: {model: "sonnet", effort: "medium", maxTurns: 1, contextBudget: 8192},
+      config: {root, claudeBin: "/never-spawned"} as Config, disallowedTools: [], proposalId: "P9", draftRoutingLog: () => {}})
+      .draftRouting?.evaluate(worker(answer));
+    assert.deepEqual(evaluate(), {contractFailed: false, clean: true});
+    mkdirSync(join(root, "state"));
+    writeFileSync(join(root, "state", DRAFT_AUTOFIX_OFF_FILE), "");
+    assert.deepEqual(evaluate(), {contractFailed: false, clean: false});
+  } finally {
+    rmSync(root, {recursive: true, force: true});
+  }
 });

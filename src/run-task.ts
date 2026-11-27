@@ -1127,7 +1127,7 @@ import {
   commitInboxDraftOutcomes,
   readDraftCashResumes,
   parseDraftedCandidate,
-  lintDraftedFragment,
+  lintDraftedFragmentWithRepair,
   stageBundleProposals,
   summarizeInboxPoll,
   updateProposalRegistry,
@@ -1159,6 +1159,7 @@ import {
   writeApprovedSkillFile,
 } from "./lib/inbox.js";
 import { declinedWithReceipts } from "./lib/inbox-verdict-receipts.js";
+import { draftAutofixOff } from "./lib/draft-repair.js";
 import { learnedBakeoffLimit, renderBakeoff, runInboxBakeoff, type BakeoffCandidate } from "./lib/inbox-bakeoff.js";
 import type { DeployedModel, DeploymentBakeoffCandidate, JudgeReplayOutcome } from "./lib/bakeoff-trigger.js";
 import { judgeReplayKey, judgeShadowAutoRoles, judgeShadowReplayCorpus } from "./lib/judge-shadow.js";
@@ -37930,10 +37931,10 @@ export function buildInboxDraftSpawnArgs(args: {
       evaluate: (worker: WorkerResult) => withSelectedRegistryContextSync(selectedRegistryObserverFromIntent(registryIntent, registryRecord), () => {
         const parsed = parseDraftedCandidate(workerTranscript(worker), args.proposal, args.currentPlanText);
         const facts = checkoutRepoFacts(args.cwd);
+        // The rung repairs before it judges, so an answer its repair makes clean is clean here too and buys no fallback.
         return { contractFailed: parsed === null,
-          clean: parsed !== null && (parsed.releaseTaskId !== undefined || lintDraftedFragment(parsed.fragmentYaml,
-            args.proposalId!, parsed.stampLine, undefined, facts.moduleExists, facts.readGrepProofFile,
-            facts.pathIsDirectory, facts.pathExistsAtBase).length === 0) };
+          clean: parsed !== null && (parsed.releaseTaskId !== undefined || lintDraftedFragmentWithRepair(parsed.fragmentYaml,
+            args.proposalId!, parsed.stampLine, facts, !draftAutofixOff(join(args.config.root, "state"))).violations.length === 0) };
       }),
     } } : {}),
   };
@@ -38126,6 +38127,7 @@ export async function draftProposalBatch(
         } : {}),
         cashFit: input => cashDraftFit(config, input),
         cashResumes,
+        draftAutofix: !draftAutofixOff(join(config.root, "state")),
         log,
       },
       runId,

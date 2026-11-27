@@ -2331,6 +2331,37 @@ To turn the reuse off, create `state/CI_JUDGE_REUSE_OFF`; every changed head is 
 The full-floor skip has no switch of its own: a full floor runs everything whatever the judge says.
 `state/CI_JUDGE_OFF` still turns the whole judge off and wins over both.
 
+### The draft rung repairs what a script can fix before it redrafts
+
+When an inbox draft fails its lint, the draft rung (`runDraftRung` in `src/lib/inbox.ts`) first
+makes one repair pass (`src/lib/draft-repair.ts`) and lints again. Only violations the repair
+leaves spend a redraft. The repair changes a draft only where the violation or the checkout
+decides the answer:
+
+- **Placeholder title** (`draft-placeholder-title`): the task's own id and every `NEW-n` come out
+  of the title.
+- **New test path** (`draft-path-missing`, `draft-test-unplaced`): the task's one new test that is
+  not the slug-named test `placeTest` computes is renamed to it, in `files:`, `design` and the
+  criteria. Two such tests, or the computed test already declared, are left to a redraft.
+- **Verify outside the enum** (`shard-shape`): `auto`, or `human` for a task that names a
+  `.github/workflows/` path, which is the one case the draft prompt allows at `verify: human`.
+- **`DECISIONS.md` or a task record at `verify: auto`** (`ruling-verify`, `rule15-filing`):
+  `verify: human` only for a workflow-path task. Elsewhere `draft-human-ask-repeated` refuses
+  `verify: human` too, so the remedy is a split, and that is left to a redraft.
+- **The repairs `rmd approve` makes anyway**: duplicate unit-test proofs, `band_meaning: span`, and
+  risk raised to high for a sizing violation. These run last, so approve's own pass over a
+  repaired draft changes nothing.
+
+A repair that would raise a check the first lint did not is dropped as a whole. A `type: manual`
+task and a design with no invariant declaration still go back to the model. Each repair that
+changed something writes `inbox.draft_autofixed` with `proposal_id`, `attempt`, `repaired` (one
+`<fix>:<task id>` entry per change) and `remaining`, the count of blocking violations left. A
+draft repaired clean is cached as a lint-clean draft is. The in-spawn evaluation that labels a
+cash answer clean or not clean makes the same repair first.
+
+To turn the repair off, create `state/DRAFT_AUTOFIX_OFF`. The rung then lints each draft as the
+model wrote it, and every blocking violation spends a redraft as before.
+
 ### One fleet cash cap across core, site, and console
 
 The shared cash allowance is opt-in and requires a stopped-writer migration. Until it is
