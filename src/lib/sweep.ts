@@ -281,7 +281,10 @@ import type {
 import { DEP_REVIEW_ENGINE_REVISION, depReviewRowEngineRevision, readDepReviewHoldState, isDependabotAuthor, dependabotOwnRedSignal, dependabotReviewArgs, dependabotRefreshVerdict, type DependabotOwnRedSignal, type DependabotRefreshVerdict } from "./dep-review.js";
 import { DEP_REVIEW_REFUSED_ASK_RETIRED_STEP, retireDepReviewRefusedAsk } from "./dep-review.js";
 import { parseLedger } from "./retro.js";
-import { readReviewHostObservation, selectRuntimeReviewWidth } from "./review-capacity.js";
+import { readReviewHostObservation, reviewYieldsReReviews, selectRuntimeReviewWidth } from "./review-capacity.js";
+import {
+  flushLateSharedHostMemoryPass, flushSharedHostMemoryPass, openSharedHostMemoryPass, type SharedHostMemoryPass,
+} from "./lane-governor.js";
 import { yieldingFixClaim } from "./review-precedence.js";
 import {
   capacityDecisionText,
@@ -3730,8 +3733,9 @@ export function buildSweepEffects(deps: BuildSweepEffectsDeps): Pick<
     // each pass supplies its already-read ledger snapshot. Host observation is local, provider
     // capacity comes only from the existing age-bounded status file, and all worker kinds count
     // against the same spawnWorker boundary counter.
-    selectAdaptiveReviewWidth: ({ queueDepth, nowMs, ledgerLines, activeWorkers }) =>
+    selectAdaptiveReviewWidth: ({ queueDepth, nowMs, ledgerLines, activeWorkers, memoryPass }) =>
       selectRuntimeReviewWidth({
+        ...(memoryPass === undefined ? {} : { memoryPass }),
         root: config.root,
         queueDepth,
         activeWorkers: activeWorkers ?? activeWorkerCount(),
@@ -18201,7 +18205,12 @@ export interface SweepDeps {
     ledgerLines: ReadonlyArray<Record<string, unknown>>;
     /** W1-T3202 — already-read process count shared with repair admission. */
     activeWorkers?: number;
+    /** W1-T14903 — the pass's pinned host memory snapshot, which the width reads and records its shared row into. */
+    memoryPass?: SharedHostMemoryPass;
   }) => number;
+  /** W1-T14903 — the host memory snapshot this pass pinned when it started (runSweep and runSweepLightPass pin it);
+   *  every consumer in the pass reads it, and its owner writes the pass's one host_memory.shared row. */
+  sharedMemoryPass?: SharedHostMemoryPass;
   /** W1-T2584 — time-bounded gate for a next review admission; it never interrupts a running reviewer. */
   continueReviewAdmissions?: ((reviewClass?: ReviewLaneClass) => boolean) & {
     restartDecided?: () => boolean;
@@ -23357,13 +23366,16 @@ function effectiveReviewWidth(
   nowMs: number,
   ledgerLines: ReadonlyArray<Record<string, unknown>>,
   activeWorkers?: number,
+  memoryPass: SharedHostMemoryPass | undefined = deps.sharedMemoryPass,
 ): number {
   const min = Math.max(1, Math.trunc(policy.reviewLaneMin));
   const max = Math.max(min, Math.trunc(policy.reviewLaneMax));
   const base = Math.min(max, Math.max(min, Math.trunc(policy.reviewLanes)));
   if (!deps.selectAdaptiveReviewWidth) return base;
   try {
-    const selected = deps.selectAdaptiveReviewWidth({ queueDepth, nowMs, ledgerLines, activeWorkers });
+    const selected = deps.selectAdaptiveReviewWidth({
+      queueDepth, nowMs, ledgerLines, activeWorkers, ...(memoryPass === undefined ? {} : { memoryPass }),
+    });
     if (!Number.isFinite(selected)) throw new Error(`non-finite width ${JSON.stringify(selected)}`);
     return Math.min(max, Math.max(min, Math.trunc(selected)));
   } catch (error) {
@@ -23963,6 +23975,27 @@ export async function runSweep(
   sweepDeps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary> {
+  // W1-T14903: a pass pins ONE host memory snapshot as it starts. Its review width, re-review admission and audit row
+  // all read it, never the live one the dispatch loop re-publishes while this pass awaits a read (readMainRepair).
+  // A pass nested in another (a light pass's per-PR sweep) reads the outer pass's, which the outer pass writes; a
+  // late refill's sweep that re-pinned an expired snapshot after the outer pass wrote its row writes that segment's.
+  // The caller's deps object is passed on as it is (a caller may change a seam on it while the pass runs).
+  const outerPass = sweepDeps.sharedMemoryPass;
+  const memoryPass = outerPass ?? openSharedHostMemoryPass(sweepDeps.now ? sweepDeps.now() : systemClock.now());
+  try {
+    return await runSweepPinned(openPrs, sweepDeps, policy, memoryPass);
+  } finally {
+    if (outerPass === undefined) flushSharedHostMemoryPass(memoryPass, sweepDeps.log);
+    else flushLateSharedHostMemoryPass(outerPass);
+  }
+}
+
+async function runSweepPinned(
+  openPrs: OpenPrView[],
+  sweepDeps: SweepDeps,
+  policy: SweepPolicy,
+  memoryPass: SharedHostMemoryPass,
+): Promise<SweepSummary> {
   const detachedFixes: Promise<unknown>[] = [];
   const detachPassFix: typeof detachSweepAction = (work, action) => detachSweepAction((onPhase) => {
     const started = typeof work === "function" ? work(onPhase) : work;
@@ -23995,6 +24028,7 @@ export async function runSweep(
   // W1-T7096: every round this pass dispatches is judged by the judge this pass was given.
   const deps: SweepDeps = {
     ...sweepDeps,
+    sharedMemoryPass: memoryPass,
     dispatchFix: (pr, evidence, onPhase, control) => {
       const started = performance.now();
       try {
@@ -30251,7 +30285,15 @@ export async function runSweep(
   const orderedReviews = orderPendingReviewsNeedsPersonLast(pendingReviews.filter((job) => !overtakenReviews.has(job.pr.prNumber)), fullNeedsPerson,
     fullQueuedAt);
   type ReviewLane = { jobs: typeof orderedReviews; next: number; stop?: string; cls: ReviewLaneClass };
-  const codeLane: ReviewLane = { jobs: orderedReviews.filter((job) => !reviewsInPlanLane(job.pr)), next: 0, cls: "review" };
+  // W1-T14903: while the pass's pinned snapshot has no room for a build and this review, a re-review of an
+  // already-judged head waits, so the build lane is admitted before it; first reviews are never held here.
+  const yieldReReviews = reviewYieldsReReviews(now, policy.reviewCapacity.workerMemoryReserveMib, memoryPass);
+  const heldReReviews = new Set(yieldReReviews
+    ? orderedReviews.filter((job) => !reviewsInPlanLane(job.pr) && reReviewYieldsForBuild(job.pr, ledgerLines)) : []);
+  for (const job of heldReReviews) memoryPass.heldPrs.add(job.pr.prNumber);
+  const codeLane: ReviewLane = {
+    jobs: orderedReviews.filter((job) => !reviewsInPlanLane(job.pr) && !heldReReviews.has(job)), next: 0, cls: "review",
+  };
   const planLane: ReviewLane = { jobs: orderedReviews.filter((job) => reviewsInPlanLane(job.pr)), next: 0, cls: "plan-review" };
   fullReviews.planned = Math.max(0, fullReviews.planned - overtakenReviews.size);
   const reviewLanes = Math.max(0, (fullReviewLanes ?? effectiveReviewWidth(deps, policy, codeLane.jobs.length, now, ledgerLines)) -
@@ -30578,6 +30620,11 @@ export async function runSweep(
     await finalizeDisposition(job.index, job.pr, "post-review", job.reason, job.question, false, false, undefined,
       "overtaken by a repair queued before it — this review keeps its place in the queue, re-derived next pass",
       undefined, undefined, undefined);
+  }
+  // W1-T14903: a held re-review is never pulled, so it is disposed here like the unstarted tail, or the pass leaves a hole.
+  for (const job of heldReReviews) {
+    await finalizeDisposition(job.index, job.pr, "post-review", job.reason, job.question, false, false, undefined,
+      RE_REVIEW_HELD_FOR_BUILD_REASON, undefined, undefined, undefined);
   }
   for (const [lane, job] of [codeLane, planLane].flatMap((lane) => lane.jobs.slice(lane.next).map((job) => [lane, job] as const))) {
     await finalizeDisposition(
@@ -31810,11 +31857,29 @@ export async function runSweepLightPass(
   deps: SweepDeps,
   policy: SweepPolicy = DEFAULT_SWEEP_POLICY,
 ): Promise<SweepSummary[]> {
+  // W1-T14903: one pinned snapshot for the light pass and every per-PR sweep it fans out to; one row, written here.
+  // The caller's deps object is passed on as it is: a caller may change a seam on it while the pass's refills run.
+  const outerPass = deps.sharedMemoryPass;
+  const memoryPass = outerPass ?? openSharedHostMemoryPass(deps.now ? deps.now() : systemClock.now());
+  try {
+    return await runSweepLightPassPinned(openPrs, deps, policy, memoryPass);
+  } finally {
+    if (outerPass === undefined) flushSharedHostMemoryPass(memoryPass, deps.log);
+    else flushLateSharedHostMemoryPass(outerPass);
+  }
+}
+
+async function runSweepLightPassPinned(
+  openPrs: OpenPrView[],
+  deps: SweepDeps,
+  policy: SweepPolicy,
+  memoryPass: SharedHostMemoryPass,
+): Promise<SweepSummary[]> {
   const passId = randomUUID();
   const passScope = deps.lightPassScope ?? "idle";
   const planMergeReport: LightPassPlanMergeReport = { turns: 0, attempts: 0, merged: 0, spentMs: 0 };
   if (deps.dryRun || !deps.log) {
-    return runSweepLightPassCore(openPrs, deps, policy, passId, passScope, planMergeReport);
+    return runSweepLightPassCore(openPrs, deps, policy, passId, passScope, planMergeReport, memoryPass);
   }
   const tick = deps.lightTickId ? { tick_id: deps.lightTickId } : {};
 
@@ -31837,7 +31902,7 @@ export async function runSweepLightPass(
       }
     },
   };
-  const result = await runSweepLightPassCore(openPrs, measuredDeps, policy, passId, passScope, planMergeReport);
+  const result = await runSweepLightPassCore(openPrs, measuredDeps, policy, passId, passScope, planMergeReport, memoryPass);
   const elapsedMs = performance.now() - startedAtMs;
   if (passRecorded && Number.isFinite(elapsedMs) && elapsedMs >= 0) {
     const aggregate: Record<string, unknown> = {};
@@ -31881,15 +31946,17 @@ async function runSweepLightPassCore(
   passId: string,
   passScope: LightPassScopeName,
   planMergeReport: LightPassPlanMergeReport,
+  memoryPass: SharedHostMemoryPass,
 ): Promise<SweepSummary[]> {
   const memoryHeld = openPrs.filter((pr) => lightPassMemoryWaits.has(lightPassHeadKey(pr)));
   if (memoryHeld.length > 0) {
     const held = memoryHeld.map((pr) => lightPassMemoryWaitSummary(pr, deps, lightPassMemoryWaits.get(lightPassHeadKey(pr))!.sinceMs));
-    return [...held, ...await runSweepLightPassCore(openPrs.filter((pr) => !memoryHeld.includes(pr)), deps, policy, passId, passScope, planMergeReport)];
+    return [...held, ...await runSweepLightPassCore(openPrs.filter((pr) => !memoryHeld.includes(pr)), deps, policy, passId, passScope, planMergeReport,
+      memoryPass)];
   }
   if (openPrs.length === 0) {
     noteIdleReviewDemand(0, 0, deps.now ? deps.now() : systemClock.now());
-    return [await runSweep([], deps, policy)];
+    return [await runSweep([], { ...deps, sharedMemoryPass: memoryPass }, policy)];
   }
   // A light pass fans out into one runSweep per PR; their issue snapshot belongs to this pass.
   const readOpenEscalations = deps.readOpenEscalations;
@@ -31951,14 +32018,21 @@ async function runSweepLightPassCore(
     openPrs.filter((pr) => lightPassReservedHeads.has(lightPassHeadKey(pr))).map(lightPassHeadKey),
   );
   const activeWorkers = (deps.readActiveWorkerCount ?? activeWorkerCount)();
-  const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers);
+  const policySemanticBound = effectiveReviewWidth(deps, policy, queueDepth, now, selectionLedgerLines, activeWorkers, memoryPass);
   const { bound: semanticBound, inFlight: reviewsInFlight } = reviewAdmissionBound(policySemanticBound);
   const unreserved = openPrs.filter((pr) => !lightPassReservedHeads.has(lightPassHeadKey(pr)));
+  // W1-T14903: every admission in this pass yields re-reviews by the pass's ONE pinned snapshot.
+  const yieldReReviews = reviewYieldsReReviews(now, policy.reviewCapacity.workerMemoryReserveMib, memoryPass);
+  if (yieldReReviews) {
+    for (const pr of reviewAdmissionCandidates(unreserved, policy, now, outcomes)) {
+      if (!reviewsInPlanLane(pr) && reReviewYieldsForBuild(pr, selectionLedgerLines)) memoryPass.heldPrs.add(pr.prNumber);
+    }
+  }
   const planBound = planLaneBoundForPass(deps, policy, selectReviewAdmissions(unreserved, policy, now, outcomes, 0, unreserved.length,
-    undefined, queuedAt).planFilings.length, "light");
+    undefined, queuedAt, yieldReReviews, selectionLedgerLines).planFilings.length, "light");
   const needsPerson = needsPersonPredicate(selectionLedgerLines);
   const selected = selectReviewAdmissions(unreserved, policy, now, outcomes, semanticBound, planBound.available, needsPerson,
-    queuedAt);
+    queuedAt, yieldReReviews, selectionLedgerLines);
   recordReviewOrderShadow(deps, selectionLedgerLines, reviewAdmissionCandidates(unreserved, policy, now, outcomes),
     selected.spawning, now, semanticBound);
   const latchHeld = new Set<number>();
@@ -31977,7 +32051,7 @@ async function runSweepLightPassCore(
   // admits the next of them at once (`refillFreedLanes` below) instead of idling until another pass.
   const refillTail = selectReviewAdmissions(
     openPrs.filter((pr) => !spawningHeads.has(pr.prNumber) && !lightPassReservedHeads.has(lightPassHeadKey(pr))),
-    policy, now, outcomes, openPrs.length, undefined, needsPerson, queuedAt,
+    policy, now, outcomes, openPrs.length, undefined, needsPerson, queuedAt, yieldReReviews, selectionLedgerLines,
   ).spawning;
   let refillArmed = false;
   // W1-T2584 parity: provider capacity is account-wide, so a pass whose review met the gh budget
@@ -32141,6 +32215,7 @@ async function runSweepLightPassCore(
         selectedNumbers.has(pr.prNumber) || outcomeDedupedNumbers.has(pr.prNumber)
           ? {
               ...deps,
+              sharedMemoryPass: memoryPass,
               stuckStagePeers: openPrs,
               detachFixWait: true,
               repairAdmissionSurface: "light",
@@ -32150,6 +32225,7 @@ async function runSweepLightPassCore(
             }
           : {
               ...deps,
+              sharedMemoryPass: memoryPass,
               stuckStagePeers: openPrs,
               detachFixWait: true,
               repairAdmissionSurface: "light",
@@ -32294,6 +32370,7 @@ async function runSweepLightPassCore(
   const detachedRefills = new Set<string>();
   const refillDeps = (pr: OpenPrView, release: () => void): SweepDeps => ({
     ...deps,
+    sharedMemoryPass: memoryPass,
     stuckStagePeers: openPrs,
     detachFixWait: true,
     repairAdmissionSurface: "light",
@@ -32334,17 +32411,26 @@ async function runSweepLightPassCore(
     }
     refillViewReadAtMs = deps.now ? deps.now() : systemClock.now();
     const freshViews = fresh.map(pr => completedRefusalRetryView(promiseHarvestRetryView(pr, selectionLedgerLines, deps.sampleLoad), selectionPrior));
+    const refillCandidates = freshViews.filter((pr) => {
+      const key = lightPassHeadKey(pr);
+      if (refilledHeads.has(key) || lightPassReservedHeads.has(key)) return false;
+      const admittedHead = spawningHeads.get(pr.prNumber);
+      if (admittedHead === undefined) return true;
+      // Once the earlier head releases its slot, the normal selector can consider its green successor.
+      return admittedHead !== key && !lightPassReservedHeads.has(admittedHead) &&
+        pr.checksState === "green" && pr.reviewState === "none" && pr.reviewOrphanedByPush === true;
+    });
+    // W1-T14903: the pass's pinned snapshot, re-pinned once it expired (a late refill), decides the yield; the held
+    // re-reviews are recorded on that snapshot's row, exactly as the pass's own admission records them.
+    const refillYields = reviewYieldsReReviews(refillViewReadAtMs, policy.reviewCapacity.workerMemoryReserveMib, memoryPass);
+    if (refillYields) {
+      for (const pr of reviewAdmissionCandidates(refillCandidates, policy, refillViewReadAtMs, outcomes)) {
+        if (!reviewsInPlanLane(pr) && reReviewYieldsForBuild(pr, selectionLedgerLines)) memoryPass.heldPrs.add(pr.prNumber);
+      }
+    }
     refillTail.splice(0, refillTail.length, ...selectReviewAdmissions(
-      freshViews.filter((pr) => {
-        const key = lightPassHeadKey(pr);
-        if (refilledHeads.has(key) || lightPassReservedHeads.has(key)) return false;
-        const admittedHead = spawningHeads.get(pr.prNumber);
-        if (admittedHead === undefined) return true;
-        // Once the earlier head releases its slot, the normal selector can consider its green successor.
-        return admittedHead !== key && !lightPassReservedHeads.has(admittedHead) &&
-          pr.checksState === "green" && pr.reviewState === "none" && pr.reviewOrphanedByPush === true;
-      }),
-      policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson, queuedAt,
+      refillCandidates, policy, refillViewReadAtMs, outcomes, freshViews.length, undefined, needsPerson, queuedAt,
+      refillYields, selectionLedgerLines,
     ).spawning);
   };
   let recycleRefillHeld = false;
@@ -32397,7 +32483,7 @@ async function runSweepLightPassCore(
     // Read the queue only when a lane is actually free, so a refill that admits nothing reads nothing.
     const freeWorkers = (deps.readActiveWorkerCount ?? activeWorkerCount)();
     const freeWidth = effectiveReviewWidth(deps, policy, Math.max(1, refillTail.length), deps.now ? deps.now() : systemClock.now(),
-      selectionLedgerLines, freeWorkers);
+      selectionLedgerLines, freeWorkers, memoryPass);
     const free = reviewAdmissionBound(freeWidth);
     if (free.bound === 0) return holdAtBoundZero(freeWidth, free.inFlight, freeWorkers);
     await refreshRefillTail();
@@ -32405,7 +32491,7 @@ async function runSweepLightPassCore(
     if (refillTail.length === 0) return false;
     const nowMs = deps.now ? deps.now() : systemClock.now();
     const activeWorkers = (deps.readActiveWorkerCount ?? activeWorkerCount)();
-    const width = effectiveReviewWidth(deps, policy, refillTail.length, nowMs, selectionLedgerLines, activeWorkers);
+    const width = effectiveReviewWidth(deps, policy, refillTail.length, nowMs, selectionLedgerLines, activeWorkers, memoryPass);
     const { bound, inFlight } = reviewAdmissionBound(width);
     if (bound === 0) return holdAtBoundZero(width, inFlight, activeWorkers);
     const next = refillTail.shift();
@@ -32486,6 +32572,8 @@ async function runSweepLightPassCore(
       deps.log?.("sweep.review_refill.failed", { error: String((error as Error)?.message ?? error) });
     } finally {
       refillRunning = false;
+      // W1-T14903: a refill chain that ran past the pin's stale bound re-pinned; that late segment writes its own row.
+      flushLateSharedHostMemoryPass(memoryPass);
     }
   };
   // Let completed effects release their capacity before a caller starts the next pass.
@@ -32792,6 +32880,25 @@ export function resetPlanLaneHeadDiffs(): void {
   planOnlyHeadDiffs.clear();
 }
 
+/** W1-T14903 — a review of a head that already carries a review verdict (a re-review, not a first judgment): a
+ *  locally recorded verdict for this head, or GitHub's exact-head remudero-review SUCCESS or FAILURE (W1-T2860 re-runs
+ *  the reviewer on a status that has no local review.posted row; that head was judged all the same). */
+export function reReviewsJudgedHead(pr: Pick<OpenPrView, "reviewedHeadSha" | "headSha" | "reviewState">): boolean {
+  return (pr.reviewedHeadSha !== undefined && pr.reviewedHeadSha === pr.headSha) ||
+    pr.reviewState === "success" || pr.reviewState === "failure";
+}
+
+/** W1-T14903 — a judged head the memory yield holds: one whose admission runs a review. A W1-T11729 status restore
+ *  re-posts the delivered verdict of this exact head and input over a pending status and runs no review, so it spends no
+ *  memory and is never held — held, GitHub's required status would stay pending while memory is short. */
+export function reReviewYieldsForBuild(pr: OpenPrView, lines: ReadonlyArray<Record<string, unknown>>): boolean {
+  return reReviewsJudgedHead(pr) && !("row" in restorableDeliveredVerdict(pr, lines, reviewOutcomeKeyForPr(pr)));
+}
+
+/** W1-T14903 — the stand-down a held re-review is disposed with (`sweep.disposed`), so the pass accounts for it. */
+export const RE_REVIEW_HELD_FOR_BUILD_REASON =
+  "re-review held for a build: the pass's shared host-memory snapshot has no room for a build and this review — re-derived next pass";
+
 /** W1-T2439 — TWO LANES, keyed before the outcome exists: code PRs at the review width, plan-lane PRs at
  *  {@link derivePlanLaneBound}'s width (W1-T11148). FAIL-OPEN: an unresolved classification is SPAWNING. */
 export function selectReviewAdmissions(
@@ -32803,6 +32910,11 @@ export function selectReviewAdmissions(
   planLaneWidth: number = derivePlanLaneBound(undefined, policy, 0).available,
   needsPerson?: (pr: OpenPrView) => boolean,
   queuedAt?: ReviewQueuedAt,
+  /** W1-T14903: true while the host memory snapshot has no room for one more build and a review; when absent, read
+   *  from the live snapshot (a pass passes the answer from its pinned one). */
+  yieldReReviews: boolean = reviewYieldsReReviews(now, policy.reviewCapacity.workerMemoryReserveMib),
+  /** W1-T14903: the ledger a W1-T11729 status restore is read from ({@link reReviewYieldsForBuild}); none: no restore. */
+  ledgerLines: ReadonlyArray<Record<string, unknown>> = [],
 ): { spawning: OpenPrView[]; planFilings: OpenPrView[] } {
   // W1-T2583: selection and execution must agree on outcome-keyed eligibility, so the caller folds
   // both sets once from the same reader `runSweep` uses and filters here before either lane ranks.
@@ -32811,7 +32923,9 @@ export function selectReviewAdmissions(
     isReviewLaneDisposition(deriveDisposition(pr, policy, now).disposition) &&
     !reviewAdmissionOutcomeKnown(pr, outcomes, policy, now));
   const filings = eligible.filter(reviewsInPlanLane);
-  const rest = eligible.filter((pr) => !reviewsInPlanLane(pr));
+  // W1-T14903: when host memory is short, a re-review of a head that already has a verdict waits, so a build is
+  // admitted before it; a first review of a head never waits on memory here.
+  const rest = eligible.filter((pr) => !reviewsInPlanLane(pr) && !(yieldReReviews && reReviewYieldsForBuild(pr, ledgerLines)));
 
   const oldestFirst = (a: OpenPrView, b: OpenPrView): number => {
     // W1-T11153: a PR that needs a person to merge is admitted only after every one that does not.
