@@ -661,6 +661,7 @@ test("every LIFTED field records origin=lifted:<source-site> — the net-new fie
     // constant bounded this persistent set, so its capacity is intentionally net-new policy data.
     "githubEventWake.dedupCapacity",
     "githubEventWake.checkSettleMs",
+    "githubEventWake.headRecheckMs",
     // W1-T14810: the artifact listings were made every sweep; no earlier interval bounded them.
     "githubEventWake.artifactRecheckMs",
     "githubEventWake.semanticCheckMode",

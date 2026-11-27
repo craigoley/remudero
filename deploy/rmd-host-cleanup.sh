@@ -74,6 +74,8 @@
 #   RMD_CLEANUP_STATE_DISK, RMD_SCRATCH_ROOT  the data disks (/mnt/rmd, /mnt/scratch); setting the first selects the host layout
 #   RMD_CLEANUP_{RETAIN_DAYS,RETAIN_ROOTS,PRESERVE_ROOTS,PRESERVE_ROOT,MAX_UNTRACKED_MB,PUBLISHED_REMOTES,DUMP_ROOTS,
 #     DUMP_RESUMABLE_ROOTS,DUMP_MIN_MB,DUMP_RETAIN_DAYS}  the 2026-10-23 phases; their defaults are set below
+#                               (held hand worktrees save to <state disk>/host/preserved-worktrees unless
+#                               PRESERVE_ROOT is set, W1-T14400)
 #   RMD_CLEANUP_ROOT_FS         the filesystem being protected (default /)
 #   RMD_CLEANUP_DF              command taking a path and printing `df -Pk`-shaped output for the
 #                               filesystem holding it (default `df -Pk`)
@@ -218,7 +220,13 @@ DOCKER_CMD="${RMD_CLEANUP_DOCKER:-docker}"
 
 # ── 2026-10-23 phases. Host defaults apply only on the host layout: a fixture never inherits the disks.
 RETAIN_DAYS="${RMD_CLEANUP_RETAIN_DAYS:-7}"
+# W1-T14400: a linked hand worktree held for unsaved work (uncommitted changes, ignored data, unpublished commits)
+# is preserved, then retired, once it has been idle this many days.
+HELD_WORKTREE_DAYS="${RMD_CLEANUP_HELD_WORKTREE_DAYS:-$RETAIN_DAYS}"
 PRESERVE_ROOT="${RMD_CLEANUP_PRESERVE_ROOT:-$SCRATCH_DISK/host-cleanup-preserved}"
+# Held-worktree copies go to the state disk: a deallocate wipes the scratch disk, and the hand tree they came from
+# may live on a persistent one. An explicit RMD_CLEANUP_PRESERVE_ROOT moves both kinds of copy.
+HELD_PRESERVE_ROOT="${RMD_CLEANUP_PRESERVE_ROOT:-$STATE_DISK/host/preserved-worktrees}"
 MAX_UNTRACKED_MB="${RMD_CLEANUP_MAX_UNTRACKED_MB:-50}"
 DUMP_MIN_MB="${RMD_CLEANUP_DUMP_MIN_MB:-5}"
 DUMP_RETAIN_DAYS="${RMD_CLEANUP_DUMP_RETAIN_DAYS:-14}"
@@ -629,6 +637,38 @@ worktree_ignored_safe() {
 worktree_saved() {
   rmd_workspace_published "$1" head "${2:-0}"
 }
+# Retirement is reserved for immediate children of configured hand roots. The separate
+# ~/.claude/worktrees scan is cleanup-only and must never opt an agent worktree into preservation.
+configured_hand_worktree() {
+  local wt="$1" root rest
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    root="${root%/}"
+    case "$wt" in
+      "$root"/*)
+        rest="${wt#"$root"/}"
+        case "$rest" in */*) continue ;; esac
+        [ -n "$rest" ] && return 0
+        ;;
+    esac
+  done < <(printf '%s\n' "$WORKTREE_ROOTS" | tr ':' '\n')
+  return 1
+}
+# The preserve format intentionally omits only root build caches. Never retire a worktree when a
+# nested repository or bundle is present: the tarball excludes Git metadata and cache pruning can
+# otherwise remove the only copy of repository history or a bundle.
+retirement_payload_safe() {
+  local wt="$1" found dir dirs
+  if ! found="$(find "$wt" -mindepth 2 \( -name .git -o -type f -name '*.bundle' \) -print -quit 2>/dev/null)"; then
+    return 1
+  fi
+  [ -z "$found" ] || return 1
+  if ! dirs="$(find "$wt" -mindepth 2 -type d -print 2>/dev/null)"; then return 1; fi
+  while IFS= read -r dir; do
+    if [ -f "$dir/HEAD" ] && [ -d "$dir/objects" ] && [ -d "$dir/refs" ]; then return 1; fi
+  done <<< "$dirs"
+  return 0
+}
 # Every ref of a clone outside refs/remotes, as "<object> <refname>" lines (heads, tags, stash, ...).
 local_refs() {
   local out
@@ -667,7 +707,7 @@ clone_live_worktree() {
 # by exact name, never through a symlink, while Git confirms it is ignored and tracks nothing in it,
 # and never one holding a nested .git or a *.bundle.
 prune_held_worktree() {
-  local wt="$1" reason="$2" name tree found tracked bytes
+  local wt="$1" reason="$2" name tree found tracked bytes root_time
   log "KEEP $wt: $reason"
   is_worktree_idle "$wt" || return 0
   if is_open "$wt" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$wt"; then return 0; fi
@@ -688,11 +728,96 @@ prune_held_worktree() {
     fi
     bytes="$(du_bytes "$tree")"
     log "PRUNE $tree: ${bytes:-unknown} bytes, worktree kept for $reason"
+    root_time="$(mktemp "${wt%/*}/.rmd-cleanup-mtime.XXXXXX" 2>/dev/null)" || {
+      log "KEEP $tree: cannot snapshot the worktree idle timestamp"; continue;
+    }
+    if ! touch -r "$wt" "$root_time" 2>/dev/null; then
+      rm -f -- "$root_time"; log "KEEP $tree: cannot snapshot the worktree idle timestamp"; continue
+    fi
     if act rm -rf -- "$tree"; then
+      # Removing a direct child changes the worktree root mtime. Keep its previous idle
+      # timestamp so pruning an ignored cache cannot restart the retirement retention clock.
+      touch -r "$root_time" "$wt" 2>/dev/null || log "NOTE $wt: could not restore its idle timestamp after pruning $name"
       PRUNED_COUNT=$((PRUNED_COUNT + 1)); PRUNED_BYTES=$((PRUNED_BYTES + ${bytes:-0}))
       tally "prune ${wt%/*}" "$bytes"
     fi
+    rm -f -- "$root_time"
   done
+}
+# W1-T14400: a keep declaration holds a worktree from retirement when it is on the worktree, on any folder above it
+# (its hand root included) or anywhere inside it, as on the Mac. `.rmd-janitor-keep` holds in any form;
+# `.rmd-scratch-keep` holds while keep_marker says it is in force. Status 0 holds and sets KEEP_DECLARED; a scan that
+# fails holds too.
+KEEP_DECLARED=""
+keep_declared() {
+  local wt="$1" dir="$1" found marker
+  while [ -n "$dir" ]; do
+    marker="$dir/.rmd-janitor-keep"
+    if [ -e "$marker" ] || [ -L "$marker" ]; then KEEP_DECLARED="$marker"; return 0; fi
+    if keep_marker "$dir"; then KEEP_DECLARED="$dir/.rmd-scratch-keep"; return 0; fi
+    case "$dir" in */*) dir="${dir%/*}" ;; *) break ;; esac
+  done
+  if ! found="$(find "$wt" -mindepth 2 \( -name .rmd-janitor-keep -o -name .rmd-scratch-keep \) -print 2>/dev/null)"; then
+    KEEP_DECLARED="unknown (marker scan failed)"; return 0
+  fi
+  while IFS= read -r marker; do
+    [ -n "$marker" ] || continue
+    case "$marker" in
+      */.rmd-janitor-keep) KEEP_DECLARED="$marker"; return 0 ;;
+      *) if keep_marker "${marker%/*}"; then KEEP_DECLARED="$marker"; return 0; fi ;;
+    esac
+  done <<< "$found"
+  return 1
+}
+# W1-T14400: retire_held_worktree <linked worktree> <hold reason>. The Mac's preserve-retire on the Azure host: a
+# linked worktree idle HELD_WORKTREE_DAYS, closed and unmounted, gets its uncommitted patch, an unpublished-commit
+# bundle, its untracked files and a MANIFEST written to the state disk's HELD_PRESERVE_ROOT (preserve_repo, the same
+# format as the preserve-then-retire pass), each read back, then leaves through git worktree remove. Its branch stays.
+# INVARIANT nothing-unsaved-is-removed: a failed save or read-back, a locked, open, recent or keep-marked worktree
+# is kept.
+retire_held_worktree() {
+  local wt="$1" reason="$2" gitdir bytes copy
+  local IDLE_MINUTES=$(( HELD_WORKTREE_DAYS * 1440 ))
+  # Shadows the scratch preserve root and its watched mark for the save, room check and read-back below.
+  local PRESERVE_ROOT="$HELD_PRESERVE_ROOT" PRESERVE_MARK_PCT="" PRESERVE_MARK_KB=0
+  if ! configured_hand_worktree "$wt"; then log "KEEP $wt: $reason; outside configured hand worktree roots"; return 0; fi
+  if keep_declared "$wt"; then log "KEEP $wt: $reason; keep marker $KEEP_DECLARED"; return 0; fi
+  if ! retirement_payload_safe "$wt"; then log "KEEP $wt: $reason; nested repository or bundle found, or payload scan failed"; return 0; fi
+  is_worktree_idle "$wt" || return 0
+  git_head_idle "$wt" || return 0
+  if is_open "$wt" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$wt"; then return 0; fi
+  gitdir="$(rgit "$wt" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
+  [ ! -f "$gitdir/locked" ] || return 0
+  if [ -L "$PRESERVE_ROOT" ]; then log "KEEP $wt: $reason; preserve root $PRESERVE_ROOT is a symbolic link"; return 0; fi
+  bytes="$(du_bytes "$wt")"
+  if [ "$DRY_RUN" = 1 ]; then
+    log "DRYRUN would: preserve then retire $wt ($reason; idle ${HELD_WORKTREE_DAYS} days; ${bytes:-unknown} bytes)"
+    tally "held-worktree ${wt%/*}" "$bytes"; return 0
+  fi
+  if ! mkdir -p -- "$PRESERVE_ROOT" 2>/dev/null || ! chmod 700 "$PRESERVE_ROOT" 2>/dev/null; then
+    log "KEEP $wt: $reason; cannot create $PRESERVE_ROOT"; return 0
+  fi
+  preserve_root_mark
+  if ! preserve_root_has_room; then log "KEEP $wt: $reason; preserve root $PRESERVE_ROOT is past its watched mark"; return 0; fi
+  if ! preserve_repo "$wt" "$wt"; then log "KEEP $wt: $reason; save failed: $PRESERVE_REASON"; return 0; fi
+  copy="$PRESERVED_DIR"
+  if [ ! -s "$copy/MANIFEST.txt" ] || [ ! -s "$copy/refs.txt" ] ||
+     { [ -e "$copy/unpublished.bundle" ] && ! rgit "$wt" bundle verify "$copy/unpublished.bundle" >/dev/null 2>&1 </dev/null; } ||
+     { [ -e "$copy/uncommitted.patch" ] && ! rgit "$wt" apply --check --reverse --binary "$copy/uncommitted.patch" >/dev/null 2>&1; } ||
+     { [ -e "$copy/untracked.tar.gz" ] && ! tar -tzf "$copy/untracked.tar.gz" >/dev/null 2>&1; }; then
+    log "KEEP $wt: $reason; the saved copy did not read back (copy kept: $copy)"; return 0
+  fi
+  snapshot_open; snapshot_docker
+  if ! is_worktree_idle "$wt" || is_open "$wt" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$wt" || [ -f "$gitdir/locked" ] ||
+     [ "$(rgit "$wt" rev-parse --verify HEAD 2>/dev/null)" != "$PRESERVED_HEAD" ]; then
+    log "KEEP $wt: changed or active before retire (copy kept: $copy)"; return 0
+  fi
+  # A marker above the worktree changes nothing inside it, so the idle recheck cannot see it.
+  if keep_declared "$wt"; then log "KEEP $wt: keep marker $KEEP_DECLARED before retire (copy kept: $copy)"; return 0; fi
+  if ! audit_writable; then log "KEEP $wt: audit log unwritable ($AUDIT_LOG; copy kept: $copy)"; return 0; fi
+  log "REMOVE $wt: $reason; idle ${HELD_WORKTREE_DAYS} days, preserved then retired (${bytes:-unknown} bytes; copy: $copy)"
+  if rgit "$wt" worktree remove --force -- "$wt" 2>/dev/null; then tally "held-worktree ${wt%/*}" "$bytes"
+  else log "KEEP $wt: git worktree remove failed; no recursive filesystem fallback (copy kept: $copy)"; fi
 }
 sweep_worktree() {
   local wt="$1" gitdir idle_status kind head hosted unsaved orphaned=0 finished=0 seed_reason bytes
@@ -733,18 +858,22 @@ sweep_worktree() {
   worktree_clean "$wt"; idle_status=$?
   case "$idle_status" in
     0) ;;
-    1) prune_held_worktree "$wt" "uncommitted changes"; return ;;
+    1) [ "$kind" = "linked worktree" ] && retire_held_worktree "$wt" "uncommitted changes"
+       [ -d "$wt" ] && prune_held_worktree "$wt" "uncommitted changes"; return ;;
     *) log "KEEP $wt: Git status failed (unknown)"; return ;;
   esac
   worktree_ignored_safe "$wt"; idle_status=$?
   case "$idle_status" in
     0) ;;
-    1) prune_held_worktree "$wt" "ignored data includes paths beyond node_modules/coverage"; return ;;
+    1) [ "$kind" = "linked worktree" ] && retire_held_worktree "$wt" "ignored data includes paths beyond node_modules/coverage"
+       [ -d "$wt" ] && prune_held_worktree "$wt" "ignored data includes paths beyond node_modules/coverage"; return ;;
     *) log "KEEP $wt: ignored-data scan failed (unknown)"; return ;;
   esac
   head="$(rgit "$wt" rev-parse HEAD 2>/dev/null)" || { log "KEEP $wt: HEAD is unreadable"; return; }
   if ! worktree_saved "$wt"; then
-    if [ "$kind" = "linked worktree" ]; then prune_held_worktree "$wt" "$RMD_PUB_REASON HEAD=$head"
+    if [ "$kind" = "linked worktree" ]; then
+      retire_held_worktree "$wt" "$RMD_PUB_REASON HEAD=$head"
+      [ -d "$wt" ] && prune_held_worktree "$wt" "$RMD_PUB_REASON HEAD=$head"
     else log "KEEP $wt: $RMD_PUB_REASON HEAD=$head"; fi
     return
   fi
@@ -974,6 +1103,7 @@ scratch_guard() {
   if ruling_namespace "$p"; then log "KEEP $p: operator ruling 2026-10-23 (retired only by the service-user pass)"; return 1; fi
   # The preserve-then-retire copies sit on the scratch disk; only retention may expire them.
   case "$PRESERVE_ROOT" in "$p"|"$p"/*) log "KEEP $p: holds the janitor's preserve root $PRESERVE_ROOT"; return 1 ;; esac
+  case "$HELD_PRESERVE_ROOT" in "$p"|"$p"/*) log "KEEP $p: holds the janitor's preserve root $HELD_PRESERVE_ROOT"; return 1 ;; esac
   while IFS= read -r parent; do
     [ -n "$parent" ] || continue
     parent="${parent%/}"
@@ -1323,7 +1453,7 @@ state_child_guard() {
     case "$configured" in "$p"|"$p"/*) STATE_REASON="holds janitor path $configured"; return 1 ;; esac
   done < <(printf '%s\n' "$ARCHIVE_ROOT" "$WORKTREE_ARCHIVE_ROOT" "$TMP_ROOTS" "$SCRATCH_ROOTS" \
              "$SCRATCH_PARENTS" "$WORKTREE_ROOTS" "$COVERAGE_LOCK_DIR" "$LOCK_FILE" "$PRESERVE_ROOT" \
-             "$RETAIN_ROOTS" | tr ':' '\n')
+             "$HELD_PRESERVE_ROOT" "$RETAIN_ROOTS" | tr ':' '\n')
 }
 # Fails with STATE_REASON when state parent $1 is the root disk's own directory (disk not mounted).
 state_parent_ok() {
@@ -1439,7 +1569,6 @@ archive_transcript() {
 # ── preserve-then-retire (operator 2026-10-23): the Mac preserve-retire.py design on this janitor's
 # own guards; holds, copy format and restore steps are in deploy/mac/JANITOR.md.
 PRESERVE_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-PRESERVE_SKIP_DIRS="node_modules coverage dist .turbo .next"
 PRESERVE_RETIRED=0; PRESERVE_HELD=0
 owner_uid() { stat -c %u -- "$1" 2>/dev/null || stat -f %u -- "$1" 2>/dev/null; }
 url_without_credentials() { printf '%s\n' "$1" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@#\1#'; }
@@ -1470,8 +1599,8 @@ preserve_skip() {
       "$p") return 0 ;;
       "$p"/*) [ "$(worktree_root_of "$other")" = "$other" ] || return 0 ;;
     esac
-  done < <(printf '%s\n' "$PRESERVE_ROOTS" "$PRESERVE_ROOT" "$ARCHIVE_ROOT" "$WORKTREE_ARCHIVE_ROOT" "$RETAIN_ROOTS" \
-             "$COVERAGE_PATHS" "$LOCK_FILE" | tr ':' '\n')
+  done < <(printf '%s\n' "$PRESERVE_ROOTS" "$PRESERVE_ROOT" "$HELD_PRESERVE_ROOT" "$ARCHIVE_ROOT" "$WORKTREE_ARCHIVE_ROOT" \
+             "$RETAIN_ROOTS" "$COVERAGE_PATHS" "$LOCK_FILE" | tr ':' '\n')
   return 1
 }
 preserve_oversized() {
@@ -1498,8 +1627,8 @@ preserve_exclusions() {
   return 0
 }
 preserve_write() {
-  local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count objects r name url remotes_text="" skip
-  local -a revs=() tar_excludes=()
+  local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count objects r name url path component cache_root tracked remotes_text="" cache_index cache_omit i
+  local -a revs=() tar_excludes=() path_parts=() cache_roots=() cache_decisions=()
   branch="$(rgit "$repo" symbolic-ref -q --short HEAD 2>/dev/null)" || branch="(detached)"
   while IFS= read -r name; do
     [ -n "$name" ] || continue
@@ -1521,17 +1650,50 @@ preserve_write() {
   fi
   rgit "$repo" diff --binary HEAD > "$work/uncommitted.patch" 2>/dev/null || { PRESERVE_REASON="diff-failed"; return 1; }
   [ -s "$work/uncommitted.patch" ] || rm -f -- "$work/uncommitted.patch"
-  for skip in $PRESERVE_SKIP_DIRS; do tar_excludes+=("-x" "$skip"); done
-  rgit "$repo" ls-files -z --others "${tar_excludes[@]}" > "$work/.untracked" 2>/dev/null || { PRESERVE_REASON="untracked-listing-failed"; return 1; }
+  rgit "$repo" ls-files -z --others > "$work/.untracked" 2>/dev/null || { PRESERVE_REASON="untracked-listing-failed"; return 1; }
   if [ -s "$work/.untracked" ]; then
     tar_excludes=(--exclude=.git)
-    for skip in $PRESERVE_SKIP_DIRS; do tar_excludes+=("--exclude=$skip"); done
-    if ! ( cd -- "$repo" && tar -czf "$work/untracked.tar.gz" "${tar_excludes[@]}" --null -T "$work/.untracked" ) </dev/null >/dev/null 2>&1 ||
-       ! tar -tzf "$work/untracked.tar.gz" </dev/null >/dev/null 2>&1; then
+    : > "$work/.untracked-to-archive" || { PRESERVE_REASON="untracked-listing-failed"; return 1; }
+    while IFS= read -r -d '' path; do
+      # Generated directories can occur below any untracked path. Cache Git's decision per
+      # directory, not per file: large node_modules trees commonly contain hundreds of paths.
+      # A familiar directory name alone is never enough to discard payload from the save.
+      IFS='/' read -r -a path_parts <<< "$path"
+      cache_root=""
+      cache_omit=0
+      for component in "${path_parts[@]}"; do
+        [ -n "$cache_root" ] && cache_root="$cache_root/"
+        cache_root="$cache_root$component"
+        case "$component" in node_modules|coverage|dist|.next|.turbo) ;; *) continue ;; esac
+        cache_index=-1
+        for i in "${!cache_roots[@]}"; do
+          if [ "${cache_roots[$i]}" = "$cache_root" ]; then cache_index="$i"; break; fi
+        done
+        if [ "$cache_index" -lt 0 ]; then
+          # A node_modules symlink points at a live dependency tree rather than carrying
+          # worktree payload. Preserve the link target in place, never in the saved tarball.
+          if { [ "$component" = node_modules ] && [ -L "$repo/$cache_root" ]; } ||
+             { rgit "$repo" check-ignore -q -- "$cache_root" 2>/dev/null &&
+               tracked="$(rgit "$repo" ls-files -- "$cache_root" 2>/dev/null)" && [ -z "$tracked" ]; }; then
+            cache_decisions+=(omit)
+          else
+            cache_decisions+=(keep)
+          fi
+          cache_roots+=("$cache_root")
+          cache_index=$((${#cache_roots[@]} - 1))
+        fi
+        if [ "${cache_decisions[$cache_index]}" = omit ]; then cache_omit=1; break; fi
+      done
+      [ "$cache_omit" = 1 ] && continue
+      printf '%s\0' "$path" >> "$work/.untracked-to-archive" || { PRESERVE_REASON="untracked-listing-failed"; return 1; }
+    done < "$work/.untracked"
+    if [ -s "$work/.untracked-to-archive" ] &&
+       { ! ( cd -- "$repo" && tar -czf "$work/untracked.tar.gz" "${tar_excludes[@]}" --null -T "$work/.untracked-to-archive" ) </dev/null >/dev/null 2>&1 ||
+         ! tar -tzf "$work/untracked.tar.gz" </dev/null >/dev/null 2>&1; }; then
       PRESERVE_REASON="untracked-tarball-failed"; return 1
     fi
   fi
-  rm -f -- "$work/.untracked"
+  rm -f -- "$work/.untracked" "$work/.untracked-to-archive"
   {
     printf 'Preserved by the Azure host janitor (deploy/rmd-host-cleanup.sh, preserve-then-retire).\n'
     printf 'path:   %s\nunit:   %s\nhead:   %s  branch: %s\npreserved_at: %s\n' "$repo" "$unit" "$head" "$branch" "$PRESERVE_STAMP"
@@ -2044,17 +2206,21 @@ expire_dated_root() {
   done
 }
 expire_preserved_copies() {
-  local e
-  [ -d "$PRESERVE_ROOT" ] && [ ! -L "$PRESERVE_ROOT" ] || return 0
-  for e in "$PRESERVE_ROOT"/*@[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z "$PRESERVE_ROOT"/.incoming-*; do
-    [ -d "$e" ] && [ ! -L "$e" ] || continue
-    keep_container_path "$e" && continue
-    [ "$(owner_uid "$e")" = "$RUN_UID" ] || continue   # only copies this identity made
-    case "${e##*/}" in
-      .incoming-*)   # an interrupted copy never counted as one; it goes once idle
-        if is_idle "$e" && ! is_open "$e"; then log "REMOVE $e: interrupted preservation"; act rm -rf -- "$e"; fi ;;
-      *) expire_entry "$e" "$RETAIN_DAYS" "retention $PRESERVE_ROOT" "preserved copy older than ${RETAIN_DAYS} days (operator ruling 2026-10-23)" ;;
-    esac
+  local e root
+  local -a roots=("$PRESERVE_ROOT")
+  [ "$HELD_PRESERVE_ROOT" = "$PRESERVE_ROOT" ] || roots+=("$HELD_PRESERVE_ROOT")
+  for root in "${roots[@]}"; do
+    [ -d "$root" ] && [ ! -L "$root" ] || continue
+    for e in "$root"/*@[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z "$root"/.incoming-*; do
+      [ -d "$e" ] && [ ! -L "$e" ] || continue
+      keep_container_path "$e" && continue
+      [ "$(owner_uid "$e")" = "$RUN_UID" ] || continue   # only copies this identity made
+      case "${e##*/}" in
+        .incoming-*)   # an interrupted copy never counted as one; it goes once idle
+          if is_idle "$e" && ! is_open "$e"; then log "REMOVE $e: interrupted preservation"; act rm -rf -- "$e"; fi ;;
+        *) expire_entry "$e" "$RETAIN_DAYS" "retention $root" "preserved copy older than ${RETAIN_DAYS} days (operator ruling 2026-10-23)" ;;
+      esac
+    done
   done
 }
 # Codex rollout logs. On Azure ~/.codex IS $STATE_DISK/agent-codex (one bind mount), so these are

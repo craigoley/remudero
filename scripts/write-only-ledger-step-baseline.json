@@ -1471,6 +1471,10 @@
     "plan.ops_landing_failed": "W1-T14642: a diagnostic for a failed ops landing with its error; the next pass retries the landing, so nothing re-reads the row.",
     "github.delivery": "W1-T14881: GitHub's own record of each webhook delivery's status and duration; it is the evidence for webhook timeouts, and only its own pass reads it back (W1-T14979, to redeliver failed ones).",
     "github.delivery.read_failed": "W1-T14881: a diagnostic that a delivery-log pass could not read a page; the next pass rereads from the same cursor, so nothing re-reads the row.",
-    "github.delivery.redelivered": "W1-T14979: the record that a failed delivery was redelivered once; only its own pass reads it back, to never redeliver twice."
+    "github.delivery.redelivered": "W1-T14979: the record that a failed delivery was redelivered once; only its own pass reads it back, to never redeliver twice.",
+    "host_memory.shared": "W1-T14903: an audit row of the one host memory snapshot both lanes cut from; the widths act on the snapshot itself, and nothing decides on the row.",
+    "ci_judge.skipped": "PR-unfiled ci-judge reuse: an audit row that a full floor was posted without a model call; the posted status carries the verdict, and nothing decides on the row.",
+    "ci_judge.reused": "PR-unfiled ci-judge reuse: an audit row that a prior verdict was reposted for an unchanged patch id; the verdicts file carries the state, and nothing decides on the row.",
+    "ci_judge.verdicts_unreadable": "PR-unfiled ci-judge reuse: a diagnostic that the verdicts file could not be read, so the pass judged afresh; it is rewritten on the same pass, and nothing re-reads the row."
   }
 }

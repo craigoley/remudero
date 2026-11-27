@@ -206,9 +206,10 @@ test("a sandbox that cannot start reads as not_executable, never a pass or a fai
     (e: unknown) => e instanceof ProofSandboxUnavailableError && /uid map/.test(e.sandboxReason));
   const verdict = judgeCriterion({ claim: "the needle is present", proof: "grep: needle in x.txt" },
     new Set(["needle", "present"]), undefined, { cwd: dir, exec: execWhitelistedProof });
-  assert.equal(verdict.proof_exec, "not_executable");
+  // W1-T15100: a failed start check never ran the proof, whatever its kind: it is held and re-run, never the keyword floor.
+  assert.equal(verdict.proof_exec, "sandbox_start_failed");
   assert.equal(verdict.proof_skip, "runner-absent");
-  assert.match(verdict.reason, /proof sandbox could not start/);
+  assert.match(verdict.reason, /proof sandbox's start check failed .*uid map/);
 
   setProofSandboxForTests({ mode: "bwrap", binary: join(dir, "no-such-bwrap") });
   assert.throws(() => defaultProofSpawner("grep", ["needle", "x.txt"], dir, 30_000),

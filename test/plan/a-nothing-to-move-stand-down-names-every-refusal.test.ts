@@ -13,14 +13,14 @@ const ON: PlanTaskMoveSwitch = { move: { outcome: "on", repository: "fixture/ops
 const pin: MovePin = { ops: { repository: "fixture/ops", checkoutDir: "/nonexistent" }, publicRepository: "fixture/remudero", publicCommit: "a".repeat(40), opsCommit: "b".repeat(40), key: "k" };
 
 test("W1-T14870 criterion 1: the mover's none answer lists every refused record and its reason", async t => {
-  // W1-T2 has no reservation, so it cannot move, and W1-T1, which it names, stays with it.
+  // W1-T2 is claimed (W1-T14993: an unreserved id now moves), so it cannot move, and W1-T1, which it names, stays with it.
   const w = moveWorld(t, { "W1-T1": record("W1-T1"), "W1-T2": record("W1-T2", "  depends_on: [W1-T1]\n") });
-  w.pub.origin.git("update-ref", "-d", "refs/rmd-id/W1-T2");
+  w.pub.origin.git("update-ref", "refs/rmd-dispatch/W1-T2", w.main("public")); // W1-T14993: an unreserved id now moves; a dispatch claim keeps W1-T2 on core
   const run = await w.run(false);
   assert.equal(run.out.step, "none", run.lines.join("\n"));
   assert.equal(run.out.refused, 2, "positive control: the count origin/main reports");
   assert.deepEqual([...(run.out.refusals as Array<{ id: string; reason: string }>)].sort((a, b) => a.id.localeCompare(b.id)),
-    [{ id: "W1-T1", reason: "public_dependants" }, { id: "W1-T2", reason: "reservation_absent" }], "THE CLAIM: each refusal is named");
+    [{ id: "W1-T1", reason: "public_dependants" }, { id: "W1-T2", reason: "owned" }], "THE CLAIM: each refusal is named");
 });
 
 test("W1-T14870 criterion 2: the nothing_to_move row carries the refusals, and a changed list writes a new row", async () => {
