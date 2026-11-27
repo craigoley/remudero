@@ -21,6 +21,7 @@
     - src/lib/sweep.ts
     - test/a-posted-gate-check-stays-rerunnable.test.ts
     - test/a-plan-only-pr-requeues-its-cancelled-check.test.ts
+    - test/a-posted-gate-is-read-by-its-posted-name-and-run-scoped-id.test.ts
     - test/sweep/a-posted-gate-that-reads-cancelled-is-folded-into-its-producers-one-retry.test.ts
   # refusal-amendment (W1-T13186, run work-fix-dispatch-W1-T13186-1795699419393-3687@ea231821aad30f68033afa1aa48af61e48081e01, 2026-11-26T13:56:07.226Z): the worker refused criterion 4 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
   #   worker evidence: The merge-base W1-T5802 assertion requires a retry candidate for a posted gate that lacks the producer evidence required by the invariant.
@@ -82,3 +83,7 @@
     W1-T8946 (the reporter, operator-built) depends on this task and is claimed by the operator session, which builds it once this is merged.
     The test folder is the one `rmd test-place` computed on 2026-11-16 (test/sweep/, sweep, high) for a stub importing src/lib/sweep.ts, src/lib/tick-read-worker.ts and src/lib/tmp.ts. The two existing suites are edited where they are.
     OPEN QUESTION, a guess the builder did not measure and this record does not claim: gates of the same job that never started after the cancellation may report `skipped`, which the reporter posts as `success`. If so, a cancelled job would show green gates beside cancelled ones. Read one real cancelled light-gates run before relying on either answer, and file it if it is true.
+    SCOPE 2026-11-26 (operator session): test/a-posted-gate-is-read-by-its-posted-name-and-run-scoped-id.test.ts joins files:.
+    Its W1-T5802 assertion read a lone run-scoped CANCELLED post as a cancellation of its own, which this task's
+    invariant forbids (no check without the exact summary and its producer is read as a cancellation). The build (#20999)
+    replaces it with the bound-to-its-producer reading, and acceptance-author-gate refused the path as out of scope.

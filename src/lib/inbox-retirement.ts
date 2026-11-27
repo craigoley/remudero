@@ -65,7 +65,9 @@ export function stampMechanicalAsk<T extends RetirementProposal>(proposal: T, ta
   if (permit && proofDebtPopulations.get(permit)?.has(taskId)) {
     proposal.automaticRetirement = { producer: "proof-queue-audit-v1", kind: "mechanical-task", taskId,
       criteriaDigest: inboxSemanticDigest(proposal.evidenceAnchors), proposalDigest: inboxMechanicalProposalDigest(proposal), taskDigest: proofDebtPopulations.get(permit)!.get(taskId)! };
-    mechanicalProducerObjects.add(proposal);
+    // W1-T15033: a stamp the registry guard would reject (an id such as NEW-1a) leaves an ordinary ask, never a throw.
+    if (mechanicalAskPurpose(proposal)) mechanicalProducerObjects.add(proposal);
+    else delete proposal.automaticRetirement;
   }
   return proposal;
 }

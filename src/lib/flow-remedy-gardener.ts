@@ -608,7 +608,8 @@ export function draftShard(action: FlowAction, taskId: string, search: OwnerSear
     invariants: { declared: [{ slug: "other-blockers-still-hold",
       statement: `the remedy clears ${flowCauseLabel(action.price.key)} and nothing else; a PR held by any other blocker is still held exactly as before.`,
       claim: `a PR held by a blocker other than ${flowCauseLabel(action.price.key)} is still held after the change`,
-      proof: `grep: test("${taskId}: ${kind.stem}-${stem} leaves other blockers held" in ${testPath}` }] },
+      proof: `grep: test("${taskId}: ${kind.stem}-${stem} leaves other blockers held" in ${testPath}`,
+      guard: true }] }, // W1-T14924: preserves every other blocker's hold
     note: `Filed by ${kind.stem} at rung ${action.rung}; measure the cause's share of PR-hours after the build merges.`,
     rationale: [action.reason, kind.ownerLine(action),
       `Source owner: ${owner?.line ?? files[0]!.file}. Top five PRs by observed hours, with original blocker reasons:`,
