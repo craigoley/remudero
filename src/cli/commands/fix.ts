@@ -5450,6 +5450,23 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       logFixDoneRow(pushedHeadSha, subtype, landing);
       if (pushedHeadSha === roundStartHeadSha || (pushedHeadSha === undefined &&
           (landing === undefined || (!landing.landed && (landing.outcome === "refused" || landing.outcome === "not_on_remote"))))) {
+        // W1-T14138: when the worker owns git, a missing harness landing is not evidence
+        // that it pushed nothing. NEEDS_DESIGN / NEEDS_SCOPE / FLAKE can end this path after
+        // the worker has committed and pushed itself. Only classify no_push when the local
+        // worktree still proves the round's starting head; a moved or unreadable head remains
+        // unresolved until CI can be attributed to the produced commit.
+        if (!fixHarnessOwnsGit) {
+          try {
+            const currentHead = hostWorktreeGit(opts.worktreePath, ["rev-parse", "HEAD"]).trim();
+            if (currentHead !== roundStartHeadSha) {
+              releaseRoundClaim();
+              return;
+            }
+          } catch {
+            releaseRoundClaim();
+            return;
+          }
+        }
         recordFixLearningsOutcome("no_push");
       }
       releaseRoundClaim();

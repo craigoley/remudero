@@ -48,6 +48,7 @@ async function runRound(t: TestContext, options: {
   laterReviews?: ("failure" | "success")[];
   spawnEnd?: "superseded" | "abandoned" | "throws";
   workerHoldsGit?: boolean;
+  workerPushesBeforeHandoff?: boolean;
   mergeRefused?: boolean;
   /** The round's push leaves the branch at the head it started from. */
   unchangedHead?: boolean;
@@ -66,6 +67,11 @@ async function runRound(t: TestContext, options: {
   const head = source.git("rev-parse", "HEAD");
   if (options.staleReview) source.git("commit", "--quiet", "--allow-empty", "-m", "an earlier round's push");
   const startHead = source.git("rev-parse", "HEAD");
+  const workerOrigin = options.workerPushesBeforeHandoff ? gitRepo({ bare: true, scope: t, kind: "fix-learnings-worker-origin" }) : undefined;
+  if (workerOrigin) {
+    source.addRemote("origin", workerOrigin.dir);
+    source.git("push", "--quiet", "origin", `${startHead}:refs/heads/run-${taskId}-1`);
+  }
   let remoteUnread = options.staleReview === "unread";
   const project = join(source.dir, "repos", "fixture", "learnings");
   mkdirSync(project, { recursive: true });
@@ -126,6 +132,11 @@ async function runRound(t: TestContext, options: {
       spawn: async ({ prompt }) => {
         prompts.push(prompt);
         if (options.spawnEnd === "throws") throw new Error("fixture worker died");
+        if (options.workerPushesBeforeHandoff) {
+          source.git("commit", "--quiet", "--allow-empty", "-m", "worker pushed before handoff");
+          source.git("push", "--quiet", "origin", `HEAD:refs/heads/run-${taskId}-1`);
+          return { ...WORKER, text: "REPORT\nFIX_OUTCOME: NEEDS_DESIGN the repair needs design" };
+        }
         return options.spawnEnd ? new Promise<WorkerResult>(() => {}) : WORKER;
       },
       ...(options.spawnEnd === "abandoned" ? { spawnWallClockBoundMs: 20, reclaimWorker: () => {} } : {}),
@@ -166,7 +177,9 @@ async function runRound(t: TestContext, options: {
   if (!options.spawnEnd && !options.mergeRefused) {
     assert.equal(prompts.length, options.staleReview === "superseded" ? 0 : rounds);
   }
-  return { rows, project, prompt: prompts[0]!, pushes, waits, startHead, steps: (step: string) => rows.filter(row => row.step === step) };
+  return { rows, project, prompt: prompts[0]!, pushes, waits, startHead,
+    workerRemoteHead: workerOrigin?.git("rev-parse", `refs/heads/run-${taskId}-1`),
+    steps: (step: string) => rows.filter(row => row.step === step) };
 }
 
 test("W1-T14138 criterion 1: records check and log matches once with a task-keyed arm", async t => {
@@ -312,6 +325,14 @@ test("W1-T14138 criterion 4: a round whose worker is superseded, abandoned or di
     assert.deepEqual(outcomes.map(row => row.outcome), ["no_push"], spawnEnd);
     assert.equal(outcomes[0]?.round_id, result.steps("fix.learnings_shadow")[0]?.round_id, spawnEnd);
   }
+});
+
+test("W1-T14138 criterion 4: a worker-owned push before NEEDS_DESIGN stays unresolved without its CI", async t => {
+  const result = await runRound(t, { workerHoldsGit: true, workerPushesBeforeHandoff: true });
+  assert.equal(result.steps("fix.done").length, 1);
+  assert.equal(result.steps("fix.done")[0]?.pushed_head_sha, undefined);
+  assert.notEqual(result.workerRemoteHead, result.startHead);
+  assert.equal(result.steps("fix.learnings_outcome").length, 0);
 });
 
 test("a worker that holds its own git and may still be running leaves the round unresolved", async t => {
