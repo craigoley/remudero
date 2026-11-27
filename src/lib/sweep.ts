@@ -235,6 +235,7 @@ import {
 } from "./cost-anomaly.js";
 import {
   acceptanceBlockDiagnostics,
+  assessPendingReviewOwner,
   automergeHoldFromLedger,
   describeHoldSetter,
   cappedOverrideFromLedger,
@@ -272,6 +273,8 @@ import type {
   AutomergeHold,
   CriterionVerdict,
   HostLoadSample,
+  PendingReviewOwnerAssessment,
+  PendingReviewStatusRecord,
   PlanCriteriaAtHeadResult,
   ProofExecutor,
   ProofSkipReason,
@@ -7477,23 +7480,46 @@ export function reviewOfHeadRunningHere(pr: Pick<OpenPrView, "prNumber" | "headS
   return false;
 }
 
+/** W1-T15005: POSITIVE liveness of a review claimed by ANOTHER process on the same ledger (an operator `rmd review`, a
+ *  review run child): its claim row's owner identity, judged as the review lifecycle judges it
+ *  ({@link assessPendingReviewOwner}: same host, pid alive, not reused). Another process's mutex is invisible here, so its
+ *  pid is the only evidence this process can read. A claim THIS process wrote is never judged by pid: its own pid is alive
+ *  by definition, so only its mutex key ({@link reviewOfHeadRunningHere}) proves it running. A legacy claim with no owner
+ *  identity, or one from another host, proves nothing either way and is not live by this rule. */
+export function reviewClaimOwnerLiveElsewhere(
+  claim: Record<string, unknown>,
+  assess: (record: PendingReviewStatusRecord) => PendingReviewOwnerAssessment =
+    (record) => assessPendingReviewOwner(record, { isPidAlive: defaultIsPidAlive }),
+  selfPid: number = process.pid,
+): boolean {
+  if (typeof claim.owner_pid !== "number" || claim.owner_pid === selfPid || typeof claim.head_sha !== "string") return false;
+  return assess({
+    headSha: claim.head_sha, runId: typeof claim.run_id === "string" ? claim.run_id : "", postedAt: typeof claim.ts === "string" ? claim.ts : "",
+    ...(Number.isInteger(claim.owner_pid) && claim.owner_pid > 0 ? { ownerPid: claim.owner_pid } : {}),
+    ...(typeof claim.host === "string" && claim.host.length > 0 ? { ownerHost: claim.host } : {}),
+    ...(typeof claim.owner_started_at === "string" ? { ownerStartedAt: claim.owner_started_at } : {}),
+  }) === "active";
+}
+
 /** W1-T15005: the run whose review of `pr`'s current head is in flight, or undefined. In flight needs BOTH a claim on
- *  this head that no row has ended yet, AND positive liveness ({@link reviewOfHeadRunningHere}, or `isLive`). The
- *  liveness half is what makes no-review-no-wait hold: a review that ended by a path writing no ending row (a throw at
- *  publish, an exit this list does not name) has released its key, so the round dispatches. Rows end a claim early:
- *  a settled row ({@link REVIEW_RUN_SETTLED_STEPS}), review.lane_aborted, a held pass ({@link REVIEW_HELD_PASS_STEPS}),
- *  a takeover, the sweep's in-process reclaim of this head, and the run the view proves dead (reviewPendingOwnerDead).
- *  Rows match the PR by url, else by the key the review side writes them under ({@link reviewLedgerKeyFor}: `PR-<n>`
- *  for an untasked PR). */
+ *  this head that no row has ended yet, AND positive liveness: this process's review mutex ({@link reviewOfHeadRunningHere},
+ *  or `isLive`), or, for a claim another process owns, that owner's pid ({@link reviewClaimOwnerLiveElsewhere}, or
+ *  `ownerLive`). The liveness half is what makes no-review-no-wait hold: a review that ended by a path writing no ending
+ *  row (a throw at publish, an exit this list does not name) has released its key, or its process is gone, so the round
+ *  dispatches. Rows end a claim early: a settled row ({@link REVIEW_RUN_SETTLED_STEPS}), review.lane_aborted, a held pass
+ *  ({@link REVIEW_HELD_PASS_STEPS}), a takeover, the sweep's in-process reclaim of this head, and the run the view proves
+ *  dead (reviewPendingOwnerDead). Rows match the PR by url, else by the key the review side writes them under
+ *  ({@link reviewLedgerKeyFor}: `PR-<n>` for an untasked PR). */
 export function reviewInFlightOnHead(
   pr: Pick<OpenPrView, "prNumber" | "headSha" | "prUrl" | "taskId" | "reviewState" | "reviewPendingOwnerDead" | "reviewPendingOwnerRunId" |
     "reviewInputDigest">,
   lines: ReadonlyArray<Record<string, unknown>>,
   isLive: (pr: Parameters<typeof reviewOfHeadRunningHere>[0]) => boolean = reviewOfHeadRunningHere,
+  ownerLive: (claim: Record<string, unknown>) => boolean = (claim) => reviewClaimOwnerLiveElsewhere(claim),
 ): string | undefined {
   if (pr.reviewState !== "pending") return undefined;
   const key = reviewLedgerKeyFor(pr.taskId, pr.prNumber);
-  const live = new Set<string>();
+  const live = new Map<string, Record<string, unknown>>();
   for (const line of lines) {
     if (line.head_sha !== pr.headSha) continue;
     // The reclaim row is the sweep's own, under the sweep's run id, so it names the PR by number.
@@ -7505,15 +7531,17 @@ export function reviewInFlightOnHead(
     if (line.step === "review.pending_posted") {
       if (typeof line.took_over_run_id === "string") live.delete(line.took_over_run_id);
       live.delete(line.run_id);
-      live.add(line.run_id);
+      live.set(line.run_id, line);
     } else if (typeof line.step === "string" && (REVIEW_RUN_SETTLED_STEPS.has(line.step) || line.step === REVIEW_LANE_ABORTED_STEP ||
       REVIEW_HELD_PASS_STEPS.has(line.step))) {
       live.delete(line.run_id);
     }
   }
   if (pr.reviewPendingOwnerDead === true && pr.reviewPendingOwnerRunId !== undefined) live.delete(pr.reviewPendingOwnerRunId);
-  const run = [...live].at(-1);
-  return run !== undefined && isLive(pr) ? run : undefined;
+  const newest = [...live].at(-1);
+  if (newest === undefined) return undefined;
+  const [run, claim] = newest;
+  return isLive(pr) || ownerLive(claim) ? run : undefined;
 }
 
 /** W1-T15005: {@link reviewInFlightOnHead} over the live ledger, read off the loop. A ledger not yet written holds no
@@ -7533,8 +7561,9 @@ export interface ReviewInFlightDecision { headSha: string; reviewRun?: string }
 
 /** W1-T15005: `evidence` carrying the review-in-flight decision for `pr`'s head, made once. A decision already carried for
  *  this head is kept and nothing is read; one for another head (a moved head the dispatch adopted) is made again here.
- *  The liveness half reads THIS process's review mutex, so only the sweep that holds it decides before a fix child is
- *  started: {@link detachFixDispatch} decides before {@link hostFixDispatch} spawns, and the child reuses the decision. */
+ *  The liveness half reads THIS process's review mutex (another process's claim is judged by its owner pid instead), so
+ *  the sweep that holds the mutex decides before a fix child is started: {@link detachFixDispatch} decides before
+ *  {@link hostFixDispatch} spawns, and the child reuses the decision. */
 export async function decideReviewInFlight(
   pr: Parameters<typeof reviewInFlightOnHead>[0],
   evidence: FixDispatchEvidence,

@@ -5,8 +5,10 @@
  * PR's current head, and dispatches as before once that review settles or its owner is proven dead.
  */
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
@@ -326,6 +328,67 @@ test("W1-T15005 criterion 1: a round the sweep starts as a run child waits in th
   assert.deepEqual(freed.envelopes[0]!.evidence.reviewInFlight, { headSha: HEAD }, "the child carries the sweep's decision");
   assert.equal(free.seen.claimKeys, 1, "the child takes its branch claim");
   assert.equal(deferrals([...freed.sweepRows, ...free.rows]).length, 0);
+});
+
+/** A review owned by ANOTHER process on this host, as an operator `rmd review` writes its claim: a real live process whose
+ *  pid, host and start the claim row records (review.ts postReviewPending). Returns the claim's owner fields and its kill. */
+async function otherProcessOwner(t: TestContext) {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1 << 30)"], { stdio: "ignore" });
+  await once(child, "spawn");
+  const owner = { owner_pid: child.pid!, owner_started_at: new Date().toISOString(), host: hostname() };
+  const kill = async () => { if (child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await once(child, "exit"); } };
+  t.after(kill);
+  return { owner, kill };
+}
+
+test("W1-T15005 criterion 1: a fix round waits while a review owned by another live process holds the head", async (t) => {
+  // OBSERVED 2026-11-27 (review of 198c86322): a live `rmd review` in its own process wrote its claim with owner pid
+  // "active", yet the sweep's mutex held no key for it, so a real runSweep on red CI wrote 0 deferrals and took the claim.
+  const { owner, kill } = await otherProcessOwner(t);
+  const ledger = [claim("review-PR15005-op", HEAD, owner)];
+  const d = dispatcher(t, ledger, {}, false);
+  assert.equal(await d.dispatch(), false, "THE CLAIM: the round is not dispatched");
+  assert.deepEqual(deferrals(d.rows).map((row) => [row.pr_number, row.head, row.review_run]), [[15005, HEAD, "review-PR15005-op"]],
+    "THE CLAIM: one row names the other process's review run");
+  assert.equal(d.seen.claimKeys, 0, "no branch claim is taken");
+
+  // The same through one real sweep pass, run-child host on: the sweep defers before any fix child is spawned.
+  const swept = dispatcher(t, ledger, {}, false);
+  const hosted = await hostedPass(t, swept, undefined);
+  assert.deepEqual(hosted.envelopes, [], "THE CLAIM: no fix child is spawned while another process's review is live");
+  assert.deepEqual(deferrals(hosted.sweepRows).map((row) => row.review_run), ["review-PR15005-op"]);
+  assert.equal(swept.seen.claimKeys, 0);
+
+  // Criterion 2: once that owner process is gone, the same claim holds nothing and the round dispatches as today.
+  await kill();
+  const after = dispatcher(t, ledger, {}, false);
+  await after.dispatch();
+  assert.equal(deferrals(after.rows).length, 0, "THE CLAIM: a dead owner ends the wait");
+  assert.equal(after.seen.claimKeys, 1, "the round takes its branch claim as today");
+});
+
+test("W1-T15005 criterion 3: a claim this process wrote is judged by its mutex key, never by its own live pid", async (t) => {
+  // This process's pid is alive by definition: a review it ran that ended with no row must not hold the round.
+  const own = { owner_pid: process.pid, owner_started_at: new Date(Date.now() - 60_000).toISOString(), host: hostname() };
+  const d = dispatcher(t, [claim("review-PR15005-1", HEAD, own)], {}, false);
+  await d.dispatch();
+  assert.equal(deferrals(d.rows).length, 0, "THE CLAIM: an own-process claim with no key defers nothing");
+  assert.equal(d.seen.claimKeys, 1);
+  // The owner rule takes only an "active" assessment; another host or an incomplete identity proves nothing.
+  const view = { prNumber: 15005, headSha: HEAD, prUrl: PR_URL, taskId: TASK, reviewState: "pending" } as const;
+  const foreign = claim("review-PR15005-2", HEAD, { owner_pid: 4242, owner_started_at: "2026-11-26T15:59:00.000Z", host: "elsewhere" });
+  for (const assessed of ["unknown", "dead"] as const) {
+    assert.equal(sweep.reviewInFlightOnHead(view, [foreign], () => false, (row) => sweep.reviewClaimOwnerLiveElsewhere(row, () => assessed)),
+      undefined, `an owner assessed ${assessed} holds nothing`);
+  }
+  assert.equal(sweep.reviewInFlightOnHead(view, [foreign], () => false, (row) => sweep.reviewClaimOwnerLiveElsewhere(row, () => "active")),
+    "review-PR15005-2", "positive control: an active owner in another process holds the head");
+  assert.equal(sweep.reviewClaimOwnerLiveElsewhere({ ...foreign, owner_pid: 4242 }, () => "active", 4242), false,
+    "the same claim read by its own process is not judged by pid");
+  assert.equal(sweep.reviewClaimOwnerLiveElsewhere({ ...foreign, owner_pid: undefined }, () => "active"), false,
+    "a legacy claim with no owner pid is not live by this rule");
+  // An ending row still ends a live other-process claim.
+  assert.equal(sweep.reviewInFlightOnHead(view, [foreign, settled("review-PR15005-2")], () => false, () => true), undefined);
 });
 
 test("W1-T15005 finding 2: a carried decision for the head is used as made, and one for another head is made again", async (t) => {

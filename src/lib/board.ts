@@ -32,6 +32,8 @@ import { bearerTokenId } from "./panel-actions.js";
 import type { LastSeenStore } from "./last-seen.js";
 import { buildRecapEvents, type RecapEvent } from "./recap.js";
 import { computeGlanceSpend, type GlanceSpend } from "./glance.js";
+import { FIX_DEFERRED_REVIEW_IN_FLIGHT_STEP, REVIEW_HELD_PASS_STEPS, REVIEW_RUN_SETTLED_STEPS } from "./sweep.js";
+import { REVIEW_LANE_ABORTED_STEP } from "./ledger.js";
 import { deriveBlockedPrSections, type BlockedPrBlocker, type MergeHeldRow } from "./status-board.js";
 import { liveRunSpendByTask, subscribeStatusStream } from "./status-stream-publisher.js";
 import { serveBoardCatalogs, publicOpsTaskFields, type BoardCatalogContext, type BoardCatalogSummary } from "./serve-plan-reload.js";
@@ -344,12 +346,26 @@ function derivePrQueue(
   const disposedAt = new Map<string, Record<string, unknown>>();
   const wanted = new Set([...unique.values()].flatMap((pr) => (pr.headRefOid ? [`${pr.number}\u0000${pr.headRefOid}`] : [])));
   // W1-T15005: a fix round the sweep deferred for a review of the exact head, shown while that head's review is pending.
+  // A later row ends the wait: the review run's own ending or held-pass row on that head, or a fix round dispatched on it.
   const waitingOn = new Map<string, string>();
+  const endWaits = (headSha: unknown, ends: (prNumber: string, run: string) => boolean) => {
+    if (typeof headSha !== "string") return;
+    for (const [id, run] of waitingOn) {
+      const [prNumber, head] = id.split("\u0000");
+      if (head === headSha && ends(prNumber!, run)) waitingOn.delete(id);
+    }
+  };
   if (wanted.size > 0) {
     for (const line of lines) {
-      if (line.step === "sweep.fix_deferred_review_in_flight" && typeof line.pr_number === "number" &&
+      if (line.step === FIX_DEFERRED_REVIEW_IN_FLIGHT_STEP && typeof line.pr_number === "number" &&
           typeof line.head === "string" && typeof line.review_run === "string") {
         waitingOn.set(`${line.pr_number}\u0000${line.head}`, line.review_run);
+      } else if (waitingOn.size > 0 && typeof line.step === "string") {
+        if (REVIEW_RUN_SETTLED_STEPS.has(line.step) || REVIEW_HELD_PASS_STEPS.has(line.step) || line.step === REVIEW_LANE_ABORTED_STEP) {
+          endWaits(line.head_sha, (_prNumber, run) => run === line.run_id);
+        } else if (line.step === "fix.dispatch") {
+          endWaits(line.head_sha, (prNumber) => typeof line.pr_number !== "number" || String(line.pr_number) === prNumber);
+        }
       }
       if (line.step !== "sweep.disposed" || typeof line.pr_number !== "number" || typeof line.head_sha !== "string") continue;
       const id = `${line.pr_number}\u0000${line.head_sha}`;

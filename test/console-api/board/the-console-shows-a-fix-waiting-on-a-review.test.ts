@@ -30,3 +30,23 @@ test("W1-T15005: the Console PR queue names the review a deferred fix round wait
   assert.equal(snapshot([disposed, deferred("b".repeat(40))]).reason, "CI red", "a deferral at another head says nothing about this one");
   assert.equal(snapshot([disposed, deferred()], "failure").reason, "CI red", "the wait ends once the head's review has a verdict");
 });
+
+test("W1-T15005: the Console drops the wait once that review ends or a fix round dispatches on the head", () => {
+  const run = "review-PR15005-1";
+  const ended = (step: string, extra: Record<string, unknown> = {}) =>
+    ({ step, run_id: run, task_id: "W1-T15005", head_sha: HEAD, ts: "2026-11-26T16:30:00.000Z", ...extra });
+  for (const step of ["review.capped_pass_held", "review.semantic_pass_refused", "review.dispatch_hold_held", "review.posted",
+    "review.stood_down", "review.lane_aborted"]) {
+    assert.equal(snapshot([disposed, deferred(), ended(step)]).reason, "CI red", `THE CLAIM: ${step} by that run ends the wait`);
+  }
+  const fixed = { step: "fix.dispatch", task_id: "W1-T15005", head_sha: HEAD, mode: "ci", ts: "2026-11-26T16:31:00.000Z" };
+  assert.equal(snapshot([disposed, deferred(), fixed]).reason, "CI red", "THE CLAIM: a later fix dispatch on the head ends the wait");
+  assert.equal(snapshot([disposed, deferred(), { ...fixed, pr_number: 15005 }]).reason, "CI red", "one naming this PR ends it too");
+  // Positive controls: rows of another run, another head or another PR end nothing; a deferral after the end shows again.
+  const waiting = "CI red; fix waiting on review review-PR15005-1";
+  assert.equal(snapshot([disposed, deferred(), ended("review.capped_pass_held", { run_id: "review-PR15005-0" })]).reason, waiting);
+  assert.equal(snapshot([disposed, deferred(), ended("review.capped_pass_held", { head_sha: "b".repeat(40) })]).reason, waiting);
+  assert.equal(snapshot([disposed, deferred(), { ...fixed, head_sha: "b".repeat(40) }]).reason, waiting);
+  assert.equal(snapshot([disposed, deferred(), { ...fixed, pr_number: 1 }]).reason, waiting);
+  assert.equal(snapshot([disposed, ended("review.capped_pass_held"), deferred()]).reason, waiting, "an earlier ending row ends nothing later");
+});
