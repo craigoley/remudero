@@ -139,6 +139,20 @@ test("W1-T15005 criterion 3: a PR with no review in flight dispatches as today",
     "a non-pending head never waits, whatever the ledger holds");
 });
 
+test("W1-T15005: legacy rows for an unfiled PR use its PR ledger key", async (t) => {
+  const unfiledClaim: Row = { step: "review.pending_posted", run_id: "review-PR15005-1", task_id: "PR-15005", head_sha: HEAD };
+  const unfiled = { taskId: undefined };
+  const live = dispatcher(t, [unfiledClaim], unfiled);
+  await live.dispatch();
+  assert.deepEqual(deferrals(live.rows).map((row) => row.review_run), ["review-PR15005-1"],
+    "a taskless legacy claim still owns the PR's current head");
+  assert.equal(live.seen.claimKeys, 0);
+
+  const held = { ...unfiledClaim, step: "review.capped_pass_held" };
+  assert.equal(sweep.reviewInFlightOnHead({ prNumber: 15005, headSha: HEAD, prUrl: PR_URL, taskId: undefined,
+    reviewState: "pending" }, [unfiledClaim, held]), undefined, "a taskless held pass ends that claim");
+});
+
 test("a live ledger not yet written holds no review in flight, so the fix round dispatches as before", async (t) => {
   const d = dispatcher(t, "unreadable");
   await d.dispatch();
