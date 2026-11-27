@@ -25,10 +25,12 @@ const BOOT: LightPassScope = { reviewOnly: true, scope: "boot" };
 const ORDINARY_IDLE: LightPassScope = { reviewOnly: false, scope: "idle" };
 const STARTED_AT = 10_000;
 let fixtures = 0;
+/** One stamp for every view, aged from the clock: views are compared whole, so each call must match the last. */
+const ACTIVITY_AT = new Date(Date.now() - 86_400_000).toISOString();
 
 function view(headSha: string): OpenPrView {
   return { prNumber: 7, prUrl: "https://github.com/o/r/pull/7", taskId: "W1-T7", headSha,
-    headRefName: "run-W1-T7-1", lastActivityAt: "2026-11-18T00:00:00Z", reviewState: "none",
+    headRefName: "run-W1-T7-1", lastActivityAt: ACTIVITY_AT, reviewState: "none",
     checksState: "green", unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false, mergeState: "clean",
     changedFiles: ["src/a.ts"], reviewInputDigest: "digest" };
 }
@@ -39,8 +41,8 @@ function hookView(prNumber: number, headSha: string, ready = false): OpenPrView 
     changedFiles: ["src/subject.ts"], reviewInputDigest: reviewInputDigest(headSha, `Remudero-Task: W1-T${prNumber}`) };
 }
 
-/** The PR's dates are aged from the same clock the pass reads (W1-T14786): a fixed literal aged out of
- *  the pass's activity window as the wall clock moved, and the own read then listed nothing. */
+/** The PR's dates are derived from the same clock the pass reads (W1-T14786): a fixed literal aged
+ *  out of the pass's activity window as the wall clock moved, and the list read then listed nothing. */
 function pullRow(prNumber: number, headSha: string, repo: string): Record<string, unknown> {
   const touched = new Date(Date.now() - 86_400_000).toISOString();
   return { number: prNumber, html_url: `https://github.com/o/${repo}/pull/${prNumber}`, state: "open", draft: false,
