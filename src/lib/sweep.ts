@@ -19047,10 +19047,11 @@ export async function postReviewPastPacerGaps(
 const RETRYABLE_REVIEW_THROW_PREFIX = "post-review attempt threw — standing down rather than retrying this head unbounded:";
 
 /** W1-T15030: review refusals that say nothing about the input, so the next pass simply reviews it again. GitHub
- *  refused the run's token twice (`token_unrenewable`): no count, no backoff and no strike cap, as for a
- *  review.post_failed. */
+ *  refused the run's token twice (`token_unrenewable`), or another run took this run's claim over (`claim_lost`: the
+ *  taker owns the input, and the pending-owner rules decide when it is re-admitted, so a taker that dies is): no count,
+ *  no backoff and no strike cap, as for a review.post_failed. */
 export function isUncountedRetryableReviewRefusal(reason: unknown): boolean {
-  return reason === "token_unrenewable";
+  return reason === "token_unrenewable" || reason === "claim_lost";
 }
 
 /** The one classification every reader of a review refusal shares (the sweep's fold, tick-read-worker's

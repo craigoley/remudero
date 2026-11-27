@@ -1,7 +1,7 @@
 // W1-T15030: a review run renews its GitHub App token before it publishes, retries once on HTTP 401, posts only while it
 // holds its claim, and a run that dies leaves no pending status the sweep cannot re-admit.
 import assert from "node:assert/strict";
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -215,8 +215,11 @@ test("W1-T15030 criterion 2: one renew-and-retry on 401, then a named refusal", 
   assert.equal(renewed, 2);
 });
 
-/** A sweep fixture over one green PR whose pending status names `runId`, claimed `ageMin` minutes ago. */
-function orphanFixture(t: TestContext, ageMin: number, owner: { pid?: number; host?: string } = {}) {
+/** A sweep fixture over one green PR whose pending status names `runId`, claimed `ageMin` minutes ago. `takeover`: that
+ *  claim took over `loser`'s, and the loser then wrote its `review.post_refused` row with `reason`, stamped with the
+ *  input digest as a sweep-dispatched run's ledger helper stamps it (cli/commands/review.ts, `log`). */
+function orphanFixture(t: TestContext, ageMin: number, owner: { pid?: number; host?: string } = {},
+  takeover?: { loser: string; reason: string }) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t15030-sweep-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const now = Date.now();
@@ -229,9 +232,21 @@ function orphanFixture(t: TestContext, ageMin: number, owner: { pid?: number; ho
     unmetCriteria: [], priorStrikes: 0, autoMergeArmed: false, lastActivityAt: claimedAt,
     reviewPendingSince: claimedAt, reviewPendingOwnerRunId: runId, reviewPendingStatusRunId: runId,
   };
+  if (takeover !== undefined) {
+    const loserAt = new Date(now - (ageMin + 42) * 60_000).toISOString();
+    appendLedger(ledgerPath, { run_id: takeover.loser, task_id: pr.taskId!, step: "review.pending_posted", pr_url: pr.prUrl,
+      head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, owner_pid: process.pid, owner_started_at: loserAt, ts: loserAt });
+  }
   appendLedger(ledgerPath, { run_id: runId, task_id: pr.taskId!, step: "review.pending_posted", pr_url: pr.prUrl,
     head_sha: pr.headSha, review_input_digest: pr.reviewInputDigest, owner_pid: owner.pid ?? process.pid,
-    owner_started_at: claimedAt, ts: claimedAt, ...(owner.host === undefined ? {} : { host: owner.host }) });
+    owner_started_at: claimedAt, ts: claimedAt, ...(owner.host === undefined ? {} : { host: owner.host }),
+    ...(takeover === undefined ? {} : { took_over_run_id: takeover.loser }) });
+  if (takeover !== undefined) {
+    appendLedger(ledgerPath, { run_id: takeover.loser, task_id: pr.taskId!, step: "review.post_refused", lane: "review",
+      review_attempt_id: `review-PR15030-${randomUUID()}`, review_input_digest: pr.reviewInputDigest, pr_url: pr.prUrl,
+      head_sha: pr.headSha, attempted_state: "failure", reason: takeover.reason, taken_over_by_run_id: runId,
+      ts: new Date(now - (ageMin - 1) * 60_000).toISOString() });
+  }
   const posted: OpenPrView[] = [];
   const deps: SweepDeps = {
     ledgerPath, runId: "sweep-w1-t15030", now: () => now,
@@ -294,6 +309,21 @@ test("W1-T15030 criterion 3: an orphaned pending owner does not block re-admissi
   });
   assert.equal(taken.posted, true, taken.reason);
   assert.match(statuses.at(-1) ?? "", new RegExp(`took over run ${orphan.runId}: owner orphaned`));
+});
+
+test("W1-T15030 criterion 3: a taker that dies after a takeover is re-admitted over the loser's claim_lost row", async (t) => {
+  // OBSERVED (review of 8133d7bbb): the loser's claim_lost row carries the input digest, the sweep folded it into the
+  // durable reviewRefused, and the orphaned taker's input was never reviewed again ("already REFUSED").
+  const lost = orphanFixture(t, 35, {}, { loser: "review-PR15030-loser", reason: "claim_lost" });
+  const { row, posted } = await lost.run();
+  assert.equal(row?.owner_gone_cause, "owner-orphaned", JSON.stringify(row));
+  assert.equal(posted.length, 1, `THE CLAIM: the orphaned taker's input is re-admitted: ${JSON.stringify(row)}`);
+  // Control: the same digest-stamped row with a durable reason keys onto this input and still refuses it.
+  const durable = orphanFixture(t, 35, {}, { loser: "review-PR15030-loser", reason: "a durable refusal" });
+  assert.equal((await durable.run()).posted.length, 0, "control: the row matches this input's key");
+  // The production view builder shares the classification: a claim_lost row is no durable input refusal.
+  assert.equal(await producerRefusesAfter(t, "claim_lost"), false);
+  assert.equal(await producerRefusesAfter(t, "a durable refusal"), true, "control: the producer reads the row");
 });
 
 test("W1-T15030 criterion 4: a run that lost its claim cannot post", async (t) => {
@@ -485,6 +515,15 @@ test("W1-T15030 criterion 2: an input refused token_unrenewable is re-reviewed o
 
   // Exercise the production producer as well as runSweep's ledger fold. The former owns
   // reviewPostRefusedFor, which must share the token_unrenewable classification above.
+  assert.equal(await producerRefusesAfter(t, "token_unrenewable"), false,
+    "the production view builder does not convert a twice-401 credential failure into a durable input refusal");
+});
+
+/** The production view builder's `reviewPostRefused` for its PR once a `review.post_refused` row with `reason`, stamped
+ *  with the input digest it computed, is in the ledger. */
+async function producerRefusesAfter(t: TestContext, reason: string): Promise<boolean | undefined> {
+  const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t15030-producer-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const ledger = join(dir, "producer-ledger.ndjson");
   const pr = { number: 15031, html_url: "https://github.com/o/r/pull/15031", body: "Remudero-Task: W1-T15030",
     updated_at: "2026-11-27T00:00:00Z", head: { ref: "run-W1-T15030-1", sha: "producer-head" } };
@@ -507,11 +546,10 @@ test("W1-T15030 criterion 2: an input refused token_unrenewable is re-reviewed o
   assert.ok(fresh?.reviewInputDigest);
   appendLedger(ledger, { run_id: "review-15031-1", task_id: "W1-T15030", step: "review.post_refused",
     pr_url: pr.html_url, head_sha: "producer-head", review_input_digest: fresh.reviewInputDigest,
-    attempted_state: "pending", reason: "token_unrenewable" });
-  const [afterTokenRefusal] = await produce();
-  assert.equal(afterTokenRefusal.reviewPostRefused, false,
-    "the production view builder does not convert a twice-401 credential failure into a durable input refusal");
-});
+    attempted_state: "pending", reason });
+  const [after] = await produce();
+  return after?.reviewPostRefused;
+}
 
 const EVALUATOR = (sessionId: string) => ({ provider: "codex", requestedModel: "m", servedModel: "m", effort: "high", sessionId });
 
