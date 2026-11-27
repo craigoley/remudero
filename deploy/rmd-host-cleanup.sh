@@ -1590,9 +1590,8 @@ preserve_exclusions() {
   return 0
 }
 preserve_write() {
-  local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count objects r name url path component cache_root tracked remotes_text=""
-  local -a revs=() tar_excludes=() path_parts=()
-  local -A cache_decisions=()
+  local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count objects r name url path component cache_root tracked remotes_text="" cache_index cache_omit i
+  local -a revs=() tar_excludes=() path_parts=() cache_roots=() cache_decisions=()
   branch="$(rgit "$repo" symbolic-ref -q --short HEAD 2>/dev/null)" || branch="(detached)"
   while IFS= read -r name; do
     [ -n "$name" ] || continue
@@ -1624,24 +1623,31 @@ preserve_write() {
       # A familiar directory name alone is never enough to discard payload from the save.
       IFS='/' read -r -a path_parts <<< "$path"
       cache_root=""
+      cache_omit=0
       for component in "${path_parts[@]}"; do
         [ -n "$cache_root" ] && cache_root="$cache_root/"
         cache_root="$cache_root$component"
         case "$component" in node_modules|coverage|dist|.next|.turbo) ;; *) continue ;; esac
-        if [ -z "${cache_decisions[$cache_root]+set}" ]; then
+        cache_index=-1
+        for i in "${!cache_roots[@]}"; do
+          if [ "${cache_roots[$i]}" = "$cache_root" ]; then cache_index="$i"; break; fi
+        done
+        if [ "$cache_index" -lt 0 ]; then
           # A node_modules symlink points at a live dependency tree rather than carrying
           # worktree payload. Preserve the link target in place, never in the saved tarball.
           if { [ "$component" = node_modules ] && [ -L "$repo/$cache_root" ]; } ||
              { rgit "$repo" check-ignore -q -- "$cache_root" 2>/dev/null &&
                tracked="$(rgit "$repo" ls-files -- "$cache_root" 2>/dev/null)" && [ -z "$tracked" ]; }; then
-            cache_decisions[$cache_root]=omit
+            cache_decisions+=(omit)
           else
-            cache_decisions[$cache_root]=keep
+            cache_decisions+=(keep)
           fi
+          cache_roots+=("$cache_root")
+          cache_index=$((${#cache_roots[@]} - 1))
         fi
-        if [ "${cache_decisions[$cache_root]}" = omit ]; then break; fi
+        if [ "${cache_decisions[$cache_index]}" = omit ]; then cache_omit=1; break; fi
       done
-      [ "${cache_decisions[$cache_root]:-keep}" = omit ] && continue
+      [ "$cache_omit" = 1 ] && continue
       printf '%s\0' "$path" >> "$work/.untracked-to-archive" || { PRESERVE_REASON="untracked-listing-failed"; return 1; }
     done < "$work/.untracked"
     if [ -s "$work/.untracked-to-archive" ] &&
