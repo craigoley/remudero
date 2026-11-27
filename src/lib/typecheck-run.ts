@@ -34,8 +34,8 @@ import { appendProducerLedger } from "./ledger.js";
 import { ledgerPathFor } from "./ledger-path.js";
 import { discoverLiveLedgerRoot } from "./live-write-guard.js";
 import {
-  acquireTestSlot, admitStaticWork, probeRecordedPidNamespace, readBootId, readMemoryHeadroom, readPidNamespace, testSlotExecutionAllowed,
-  testSlotProcessFacts, type ReservedTreeProbeHost, type StaticAdmission, type TestSlotLease, type TestSlotOptions,
+  acquireTestSlot, admitStaticWork, probeRecordedPidNamespace, readBootId, readMemoryHeadroom, readPidNamespace, sleepSync,
+  testSlotExecutionAllowed, testSlotProcessFacts, type ReservedTreeProbeHost, type StaticAdmission, type TestSlotLease, type TestSlotOptions,
 } from "./test-slot.js";
 import {
   canonicalBuildInfo,
@@ -96,12 +96,9 @@ export interface WorktreeLockOptions {
   mtimeOf?: (path: string) => number | undefined;
 }
 
-/** How often a check waiting on its worktree's lock looks again. */
+/** How often a check waiting on its worktree's lock looks again. The wait blocks, as its slot admission's does: runTypecheck
+ *  runs only in `npm run typecheck`'s own process (scripts/typecheck.mjs), never on the daemon loop or a serve route. */
 const WORKTREE_LOCK_POLL_MS = 1_000;
-
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
 
 const recorded = (value: unknown): string | undefined => typeof value === "string" && value !== "" ? value : undefined;
 
