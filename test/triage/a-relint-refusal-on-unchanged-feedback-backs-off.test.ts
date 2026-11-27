@@ -32,6 +32,17 @@ test("W1-T14905 repeated relint refusals back off", () => {
   const backoff = triage.failedFireBackoff([refused(0), refused(40)], "fb-old", 30, at(60));
   const decision = triage.decideAutoTriage({ ...inputs(at(60)), backedOffCandidates: new Map([["fb-old", backoff.retryAtMs!]]) });
   assert.equal(decision.fire && decision.feedbackId, "fb-next", "the backed-off entry yields the head of the queue");
+  const thrownFire = [
+    { ...errored(0), run_id: "fire-1" }, { ...errored(0), run_id: "fire-1", error: "private status write failed" },
+    { step: "auto_triage.run_failed", feedback: "fb-old", ts: at(1).toISOString() },
+  ];
+  assert.equal(triage.failedFireBackoff(thrownFire, "fb-old", 30, at(2)).failures, 1,
+    "multiple triage errors and the daemon's trailing failure are one fire");
+  assert.equal(triage.failedFireBackoff([
+    { ...errored(0), run_id: "fire-1" },
+    { step: "auto_triage.run_failed", feedback: "fb-old", ts: at(3).toISOString() },
+  ], "fb-old", 30, at(4)).failures, 2,
+  "a later daemon failure without an immediately preceding triage end remains its own fire");
 });
 
 test("W1-T14905 edited feedback is retried at the floor interval", () => {
@@ -51,7 +62,8 @@ test("W1-T14905 a repeated refusal check yields the entry once", () => {
   assert.equal(triage.repeatedTriageRefusal(two, "fb-old"), undefined, "two refusals are not yet a repeat");
   const three = [...two, refused(80)];
   assert.deepEqual(triage.repeatedTriageRefusal(three, "fb-old"), { check: "design-invariant-proof", since: at(0).toISOString() });
-  const noted = [...three, { step: triage.AUTO_TRIAGE_REFUSAL_REPEATED_STEP, task_id: "daemon", feedback: "fb-old", ts: at(81).toISOString() }];
+  const noted = [...three, { step: triage.AUTO_TRIAGE_REFUSAL_REPEATED_STEP, task_id: "daemon", feedback: "fb-old",
+    check: "design-invariant-proof", ts: at(81).toISOString() }];
   assert.equal(triage.repeatedTriageRefusal(noted, "fb-old"), undefined, "one row per repeated run, not one per pass");
   const mixed = [refused(0), refused(40, ["plan-load"]), refused(80)];
   assert.equal(triage.repeatedTriageRefusal(mixed, "fb-old"), undefined, "three ends with different checks are not one repeat");
@@ -63,4 +75,19 @@ test("W1-T14905 a repeated refusal check yields the entry once", () => {
   assert.equal(triage.repeatedTriageRefusal([...three, refused(120, ["x"], "fb-other")], "fb-other"), undefined);
   assert.ok(triage.AUTO_TRIAGE_FAILURE_STEPS.includes(triage.AUTO_TRIAGE_REFUSAL_REPEATED_STEP),
     "the refusal history the daemon reads carries the repeated row, so it is written once");
+  const privateFailure = (minutes: number, runId: string, error: string) => ({
+    ...errored(minutes), run_id: runId, error,
+  });
+  const multiRowFires = [0, 40, 80].flatMap((m, i) => [
+    privateFailure(m, `fire-${i}`, "private feedback status write failed"),
+    privateFailure(m, `fire-${i}`, "public task write failed or unknown"),
+  ]);
+  assert.deepEqual(triage.repeatedTriageRefusal(multiRowFires, "fb-old")?.check,
+    "triage.error:private feedback status write failed,triage.error:public task write failed or unknown",
+    "multiple terminal error rows from each fire form one stable repeated check");
+  const nine = Array.from({ length: 9 }, (_, i) => refused(i * 40));
+  const namedOnce = [...nine, { step: triage.AUTO_TRIAGE_REFUSAL_REPEATED_STEP, feedback: "fb-old",
+    check: "design-invariant-proof", ts: at(321).toISOString() }];
+  assert.equal(triage.repeatedTriageRefusal(namedOnce, "fb-old"), undefined,
+    "an uninterrupted streak is named once even after another three refusals");
 });

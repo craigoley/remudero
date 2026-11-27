@@ -1634,8 +1634,40 @@ test("W1-T14905 the auto-triage pass backs off a repeatedly refused entry and na
     assert.equal(written().length, 1, "one refusal_repeated row is written");
     assert.equal(written()[0]!.check, "design-invariant-proof");
     assert.equal(written()[0]!.feedback, head);
-    await autoTriageCheck({ ...args, readRefusalRows: () => [...refusals, ...written()] });
+    const refusalHistory = Object.assign(async () => ({ ok: true,
+      rows: [...refusals, ...readFileSync(ledgerPathFor(config), "utf8").split("\n").filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>)], unread: [], archiveCount: 0 }), {
+      lastPass: () => ({ readBytes: 0, parsedLines: 1, seededRotations: 0 }),
+      lastLoad: () => ({ rotations: 0, digestHits: 0, digestMisses: 0 }),
+    }) as never;
+    await autoTriageCheck({ ...args, refusalHistory });
     assert.equal(written().length, 1, "a later pass that reads the row does not write it again");
+    await autoTriageCheck({ ...args, refusalHistory });
+    assert.equal(written().length, 1, "further passes through the production reader keep the same streak named once");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("W1-T14905 the production refusal reader retains daemon repeat markers", async () => {
+  const { readAutoTriageRefusalRowsAsync, AUTO_TRIAGE_REFUSAL_SLICE } = await import("../src/run-task.js");
+  const { mkdtempSync, rmSync, mkdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = mkdtempSync(join(tmpdir(), "rmd-triage-reader-"));
+  mkdirSync(join(root, "state"), { recursive: true });
+  try {
+    const marker = { task_id: "daemon", run_id: "AUTO-TRIAGE", step: "auto_triage.refusal_repeated",
+      feedback: "fb-head", check: "design-invariant-proof", ts: "2026-11-26T00:00:00.000Z" };
+    const rawRows = [marker];
+    const reader = Object.assign(async () => ({ ok: true, rows: rawRows, unread: [], archiveCount: 0 }), {
+      lastPass: () => ({ readBytes: 0, parsedLines: 1, seededRotations: 0 }),
+      lastLoad: () => ({ rotations: 0, digestHits: 0, digestMisses: 0 }),
+    }) as never;
+    const config = { root, claudeBin: "/bin/true" } as unknown as import("../src/lib/config.js").Config;
+    const rows = await readAutoTriageRefusalRowsAsync(config, reader, (() => {}) as never);
+    assert.deepEqual(rows, rawRows, "the real production filter keeps the daemon row with task_id=daemon");
+    assert.ok(AUTO_TRIAGE_REFUSAL_SLICE.steps.includes("auto_triage.refusal_repeated"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

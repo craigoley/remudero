@@ -22106,6 +22106,7 @@ export async function readAutoTriageRefusalRowsAsync(
     { ok: read.ok, rows: read.rows.length, ...sliceReadCost(reader, read, startedMs) }, append);
   return read.ok ? read.rows.filter((row) => row.step === TRIAGE_COMMIT_REFUSED_STEP ||
     row.step === TRIAGE_REFUSAL_CLEARED_STEP || row.step === "auto_triage.run_failed" ||
+    row.step === AUTO_TRIAGE_REFUSAL_REPEATED_STEP ||
     (typeof row.task_id === "string" && row.task_id.startsWith("TRIAGE-"))) : undefined;
 }
 
