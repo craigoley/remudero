@@ -306,16 +306,16 @@ test("SITE run-task's deferred at-verdict arm (the LARGEST dropped population) p
 
 test("SITE retro/triage/plan/approve recover a head sha from the PR that already exists (readHeadShaRest) and thread it into armAndLogOutcome — the 4 lanes with no headSha variable of their own", () => {
   for (const anchor of [
-    "const armOutcome = armAndLogOutcome(prUrl, runId, log, undefined, undefined, armHeadSha);", // retro
-    "const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);", // triage/plan (both, checked below)
-    "const armOutcome = armAndLogOutcome(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);", // approve
+    "const armOutcome = await armAndLogOutcomeAsync(prUrl, runId, log, undefined, undefined, armHeadSha);", // retro
+    "const armOutcome = await armAndLogOutcomeAsync(prUrl, taskId, log, undefined, undefined, armHeadSha);", // triage/plan (both, checked below)
+    "const armOutcome = await armAndLogOutcomeAsync(result.prUrl, `PR-${prNum}`, log, undefined, undefined, armHeadSha);", // approve
   ]) {
     const count = SRC.split(anchor).length - 1;
     assert.ok(count >= 1, `wiring not found (stale test): ${anchor}`);
   }
   // triage AND plan both use the identical taskId-keyed call — confirm both sites, not just one.
   assert.equal(
-    SRC.split("const armOutcome = armAndLogOutcome(prUrl, taskId, log, undefined, undefined, armHeadSha);").length - 1,
+    SRC.split("const armOutcome = await armAndLogOutcomeAsync(prUrl, taskId, log, undefined, undefined, armHeadSha);").length - 1,
     2,
     "triage and plan each recover and thread their own head sha",
   );

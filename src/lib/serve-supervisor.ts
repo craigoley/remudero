@@ -32,6 +32,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { systemClock, type Clock } from "./clock.js";
 import type { GithubHookListenerHandle } from "./github-hook-listener.js";
+import type { ServeOnlyVerdict } from "./serve-own-code.js";
 import { GENERATION_MESSAGES, SERVE_READY_PATH, SERVE_READY_SOCKET_ENV, SERVE_ROLE_ENV, isGithubHookConfig, type GenerationMessage, type GithubHookConfig, type SwapProbeTrigger } from "./serve-generation.js";
 import { SELF_SYNC_GUARD_ENV } from "./self-sync.js";
 
@@ -460,6 +461,8 @@ interface Generation {
   startedAt: number;
   /** It asked for a handoff before it was active; the ask is replayed once it is promoted. */
   asked: boolean;
+  /** W1-T14987: what that early ask said (target and verdict), so its replay keeps it. */
+  askedWith?: HandoffAsk;
   /** It dropped its caches for a handoff that has not yet replaced it. */
   shed?: boolean;
   /** W1-T8873: when it terminated its worker threads for a handoff that has not yet replaced it; absent once restored. */
@@ -471,6 +474,30 @@ interface Generation {
 /** What a handoff ask says about itself. */
 export interface HandoffAsk {
   targetSha?: string;
+  /**
+   * W1-T14987: the active generation's verdict on the advance it asks for (serve.ts classifies `fromSha..toSha` with
+   * serve-own-code.ts). The supervisor runs no classifier, so its baked closure stays as it was; it trusts a verdict
+   * only for its own active sha and the sha prepare lands on.
+   */
+  serveOnly?: ServeOnlyVerdict;
+  /** Why the ask's `serveOnly` field was present but not a verdict. */
+  serveOnlyMalformed?: string;
+}
+
+const isStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === "string");
+
+/** W1-T14987: the `serveOnly` field of a generation's IPC ask, checked for shape. Absent stays absent; anything else
+ *  that is not a verdict is named, so the spacing row says why it was not trusted. */
+export function readServeOnlyVerdict(raw: unknown): Pick<HandoffAsk, "serveOnly" | "serveOnlyMalformed"> {
+  if (raw === undefined) return {};
+  const v = (raw !== null && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const toSha = typeof v.toSha === "string" ? { toSha: v.toSha } : {};
+  if (typeof v.fromSha !== "string") return { serveOnlyMalformed: "the verdict names no fromSha" };
+  if ((v.status === "unreadable" || v.status === "spaced") && typeof v.reason === "string") return { serveOnly: { status: v.status, reason: v.reason, fromSha: v.fromSha, ...toSha } };
+  if (v.status === "serve_only" && typeof v.toSha === "string" && typeof v.merge === "string" && isStrings(v.paths)) {
+    return { serveOnly: { status: "serve_only", merge: v.merge, paths: [...v.paths], fromSha: v.fromSha, toSha: v.toSha } };
+  }
+  return { serveOnlyMalformed: `the verdict's status ${JSON.stringify(v.status)} does not carry its fields` };
 }
 
 export interface ServeSupervisor {
@@ -849,6 +876,12 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
   let previous: PreparedSlot | undefined;
   let inFlight: Promise<void> | undefined;
   let askedAgain = false;
+  /**
+   * W1-T14987: the latest ask that said anything (target, verdict). A re-ask that carries nothing of its own (the memory
+   * retry, a spacing wake, an ask absorbed while one was in flight, an early ask's replay) runs with it, so a waiver is
+   * not lost on the way; the waiver re-checks it against the active sha and the prepared sha every time.
+   */
+  let heldAsk: HandoffAsk | undefined;
   let stopping = false;
   let deferrals = 0;
   let lastWorkerShedAt: number | undefined;
@@ -907,8 +940,12 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
         return;
       }
       if (message.type !== GENERATION_MESSAGES.handoffRequest) return;
-      if (generation === active) void supervisor.requestHandoff(typeof message.targetSha === "string" ? { targetSha: message.targetSha } : undefined);
-      else generation.asked = true;
+      const ask: HandoffAsk = { ...(typeof message.targetSha === "string" ? { targetSha: message.targetSha } : {}), ...readServeOnlyVerdict(message.serveOnly) };
+      if (generation === active) void supervisor.requestHandoff(Object.keys(ask).length > 0 ? ask : undefined);
+      else {
+        generation.asked = true;
+        if (Object.keys(ask).length > 0) generation.askedWith = ask;
+      }
     });
     proc.onExit((code, signal) => {
       if (generation === active && !stopping) void replaceCrashed(generation, code, signal);
@@ -1094,7 +1131,7 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     active = generation;
     if (generation.hookConfig) opts.hookListener?.configure(generation.hookConfig);
     startProbing();
-    if (generation.asked) void supervisor.requestHandoff();
+    if (generation.asked) void supervisor.requestHandoff(generation.askedWith);
   };
 
   /**
@@ -1358,21 +1395,22 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
    * True when this ask must wait out the spacing; the wait re-asks once, however many asks arrive meanwhile.
    * W1-T13534: each ask it absorbs writes `serve.handoff_spacing_absorbed`, so a self-sync held behind main says why.
    */
-  const awaitSpacing = (from: Generation, ask: HandoffAsk | undefined): boolean => {
+  const awaitSpacing = (from: Generation, ask: HandoffAsk | undefined, waiver?: string): boolean => {
     if (spacingBaseMs <= 0 || lastDoneAt === undefined) return false;
     const now = clock.now();
     const level = decayedPressure(pressure, now, spacingHalfLifeMs);
     const spacingMs = handoffSpacingMs(level, spacingBaseMs);
     const waitMs = lastDoneAt + spacingMs - now;
     if (waitMs <= 0) return false;
+    const why = waiver === undefined ? {} : { waiver };
     if (spacingPending) {
       spacingAbsorbed += 1;
-      opts.log("serve.handoff_spacing_absorbed", { sha: ask?.targetSha, remainingMs: Math.max(0, spacingWakeAt - now), absorbed: spacingAbsorbed });
+      opts.log("serve.handoff_spacing_absorbed", { sha: ask?.targetSha, remainingMs: Math.max(0, spacingWakeAt - now), absorbed: spacingAbsorbed, ...why });
       return true;
     }
     spacingPending = true;
     spacingWakeAt = now + waitMs;
-    opts.log("serve.handoff_deferred", { reason: "spacing", waitMs, spacingMs, pressure: Number(level.toFixed(3)), sinceLastMs: now - lastDoneAt, sha: from.slot.sha });
+    opts.log("serve.handoff_deferred", { reason: "spacing", waitMs, spacingMs, pressure: Number(level.toFixed(3)), sinceLastMs: now - lastDoneAt, sha: from.slot.sha, ...why });
     void sleep(waitMs).then(() => {
       spacingPending = false;
       spacingAbsorbed = 0;
@@ -1381,11 +1419,35 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     return true;
   };
 
+  /**
+   * W1-T14987: before the spacing holds an ask (a new wait or one a pending wait absorbs), a generation verdict that the
+   * advance holds a merge changing only serve's own code waives it. Fail-closed: a malformed verdict, an ask with no
+   * target, a verdict for another active sha or target, or an unreadable one returns the reason the spacing row names.
+   * An ask with no verdict, or a readable one with no such merge, returns nothing, so its row is as before.
+   * A waiver covers exactly the classified target: `row` is written only once prepare lands on that sha.
+   */
+  type SpacingWaiver = { waived: false; why?: string } | { waived: true; toSha: string; row: Record<string, unknown> };
+  const spacingWaiver = (from: Generation, ask: HandoffAsk | undefined): SpacingWaiver => {
+    const verdict = ask?.serveOnly;
+    if ((verdict === undefined && ask?.serveOnlyMalformed === undefined) || spacingBaseMs <= 0 || lastDoneAt === undefined) return { waived: false };
+    const waitMs = lastDoneAt + handoffSpacingMs(decayedPressure(pressure, clock.now(), spacingHalfLifeMs), spacingBaseMs) - clock.now();
+    if (waitMs <= 0) return { waived: false };
+    if (verdict === undefined) return { waived: false, why: `malformed verdict: ${ask?.serveOnlyMalformed}` };
+    const toSha = ask?.targetSha;
+    if (toSha === undefined) return { waived: false, why: "the ask names no target sha" };
+    if (verdict.fromSha !== from.slot.sha) return { waived: false, why: `a verdict from ${verdict.fromSha}, not the active ${from.slot.sha}` };
+    if (verdict.status === "unreadable") return { waived: false, why: `unreadable: ${verdict.reason}` };
+    if (verdict.status === "spaced") return { waived: false };
+    if (verdict.toSha !== toSha) return { waived: false, why: `a verdict for ${verdict.toSha}, not the asked ${toSha}` };
+    return { waived: true, toSha, row: { fromSha: from.slot.sha, toSha, merge: verdict.merge, paths: verdict.paths, waitMs } };
+  };
+
   const handoff = async (ask?: HandoffAsk): Promise<void> => {
     if (!handoffEnabled()) return legacyExit("handoff_off");
     const from = active;
     if (!from) return;
-    if (awaitSpacing(from, ask)) return;
+    const waiver = spacingWaiver(from, ask);
+    if (!waiver.waived && awaitSpacing(from, ask, waiver.why)) return;
     const startedAt = clock.now();
     let slot: PreparedSlot;
     try {
@@ -1393,6 +1455,10 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     } catch (err) {
       opts.log("serve.handoff_aborted", { criterion: "prepare", reason: errorText(err), fromSha: from.slot.sha });
       return;
+    }
+    if (waiver.waived) {
+      // prepare checks out the newest main, which may hold merges that landed after the ask: those never ride the waiver.
+      if (slot.sha !== waiver.toSha && awaitSpacing(from, ask, `prepared ${slot.sha}, not the waived target ${waiver.toSha}`)) return;
     }
     const prepMs = clock.now() - startedAt;
     if (slot.sha === from.slot.sha || failed.has(slot.sha)) {
@@ -1431,6 +1497,9 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
     if (!admission.admit) return deferUpgrade(from, slot, { hold: admission.hold, detail: admission.detail, freeBytes: free });
     // needBytes here is the host's need (reserve + candidate); the candidate's own is candidateNeedBytes.
     const { needBytes: candidateNeedBytes, ...evidence } = need(from);
+    // W1-T14987: the waiver is recorded only once the handoff it waived actually proceeds; a memory deferral keeps the
+    // ask (heldAsk) and its retry judges it again.
+    if (waiver.waived && slot.sha === waiver.toSha) opts.log("serve.handoff_spacing_waived", waiver.row);
     opts.log("serve.handoff_admitted", { sha: slot.sha, availableBytes: admission.availableBytes, needBytes: admission.needBytes, peakBasis: admission.peakBasis, candidateNeedBytes, ...evidence, freeBytes: free, deferrals });
     deferrals = 0;
     const overlap = overlapWindow();
@@ -1451,6 +1520,8 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       largestOverlapGeneration = up.generation.id;
     }
     lastDoneAt = clock.now();
+    // The ask this handoff answered is spent; one that arrived meanwhile (a promoted standby's replay) is kept.
+    if (heldAsk === ask) heldAsk = undefined;
     pressure = { value: decayedPressure(pressure, lastDoneAt, spacingHalfLifeMs) + 1, at: lastDoneAt };
     opts.log("serve.handoff_done", {
       fromSha: from.slot.sha, toSha: slot.sha, deps: slot.deps, prepMs, readyMs: up.readyMs, drainMs, peakBytes: largestRss || undefined, pressure: Number(pressure.value.toFixed(3)),
@@ -1528,8 +1599,11 @@ export function createServeSupervisor(input: ServeSupervisorOptions): ServeSuper
       budget.start(() => [process.pid, ...(active?.process.pid === undefined ? [] : [active.process.pid])]);
       await reportAlone(up.generation, up.startedAt, up.readyMs);
     },
-    requestHandoff: (ask) => {
+    requestHandoff: (given) => {
       if (stopping) return Promise.resolve();
+      if (given !== undefined) heldAsk = given;
+      // Only a held verdict travels: a bare re-ask after a target-only ask stays bare, as before W1-T14987.
+      const ask = given ?? (heldAsk?.serveOnly === undefined ? undefined : heldAsk);
       if (inFlight) {
         askedAgain = true;
         return inFlight;
