@@ -103,7 +103,7 @@ test("W1-T15183 criterion 2: the concurrent gate returns the sequential gate's r
   assert.deepEqual(viaConcurrent, viaMain);
 });
 
-test("W1-T15183 criterion 2: base-worktree UNKNOWN results retry alone and cannot pass on a head exit", async () => {
+test("W1-T15183 criterion 2: base-worktree UNKNOWN retries preserve the sequential result", async () => {
   const proofs = ["test/a.test.ts", "test/b.test.ts", "test/c.test.ts"];
   const criteria = proofs.map((path) => ({ claim: path, proof: `unit test: ${path}` }));
   const firstWave = new Set<string>();
@@ -144,12 +144,17 @@ test("W1-T15183 criterion 2: base-worktree UNKNOWN results retry alone and canno
   assert.equal(retryOverlap, false, "unknown-base retries run one at a time after the pool drains");
   assert.deepEqual([...calls.values()], [2, 2, 2], "each unknown result is retried once");
   assert.deepEqual(result.stale.map(({ proof }) => proof), ["unit test: test/b.test.ts"]);
-  assert.deepEqual(result.unreadable.map(({ proof }) => proof), ["unit test: test/a.test.ts", "unit test: test/c.test.ts"]);
+  assert.deepEqual(result.unreadable, [], "the concurrent evaluator does not invent an unreadable result");
   assert.deepEqual(result.judged.map(({ proof }) => proof), proofs.map((path) => `unit test: ${path}`));
-  assert.equal(result.executed, 1, "a persistent UNKNOWN is not counted as an executed discrimination");
+  assert.equal(result.executed, 3, "the retry's returned status is judged just like a sequential result");
+
+  const persistent = await gate.evaluateProofDiscriminationConcurrently(criteria, "fork", async (proof) => unknown(proof),
+    { poolSize: () => 3 });
+  const sequential = gate.evaluateProofDiscrimination(criteria, "fork", (proof) => unknown(proof));
+  assert.deepEqual(persistent, sequential, "persistent UNKNOWN retries keep the sequential evaluator's result");
 
   const written: string[] = [];
-  const code = await gate.mainConcurrent(["--event-path", "event.json", "--result-path", "result.json"], {
+  const deps: Deps = {
     root: REPO_ROOT,
     readPayload: () => ({ readable: true, baseSha: "b", headSha: "h", body: "Remudero-Task: W1-T15183\n", headRefName: "x" }),
     mergeBase: () => ({ ok: true, mergeBase: "fork" }),
@@ -160,10 +165,19 @@ test("W1-T15183 criterion 2: base-worktree UNKNOWN results retry alone and canno
     executorDigests: () => ({ files: [], executor_digest: "e", workflow_digest: "w" }),
     writeResult: (_path: string, text: string) => written.push(text),
     log: { log: () => {}, error: () => {} },
-  });
+  };
+  const code = await gate.mainConcurrent(["--event-path", "event.json", "--result-path", "result.json"], deps);
   const record = JSON.parse(written[0]) as { proofs: Array<{ proof: string; verdict: string }> };
-  assert.equal(code, 1, "persistent base UNKNOWN refuses the command");
-  assert.deepEqual(record.proofs.map(({ verdict }) => verdict), ["unreadable", "unreadable", "unreadable"]);
+  const sequentialWritten: string[] = [];
+  const sequentialCode = gate.main(["--event-path", "event.json", "--result-path", "result.json"], {
+    ...deps,
+    runProof: (proof: string) => unknown(proof),
+    writeResult: (_path: string, text: string) => sequentialWritten.push(text),
+  });
+  assert.equal(code, sequentialCode, "persistent UNKNOWN retries preserve the sequential exit code");
+  assert.deepEqual(record, JSON.parse(sequentialWritten[0]), "published records remain identical");
+  assert.equal(code, 0, "the concurrent command retains check-proof's returned head status");
+  assert.deepEqual(record.proofs.map(({ verdict }) => verdict), ["pass", "pass", "pass"]);
   assert.deepEqual(record.proofs.map(({ proof }) => proof), criteria.map((criterion) => criterion.proof));
 });
 

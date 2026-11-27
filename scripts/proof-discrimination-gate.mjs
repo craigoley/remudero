@@ -244,21 +244,13 @@ export async function evaluateProofDiscriminationConcurrently(criteria, mergeBas
   // creating its own (for example, while a sibling's `commondir` is still being written). In that
   // case check-proof reports `base: UNKNOWN` but keeps the head's exit code, which would make a
   // passing head look discriminating. Retry those proofs only after the pool has drained, in
-  // criterion order, so each base checkout is created alone. A persistent failure is unreadable:
-  // it cannot be counted as evidence that the proof discriminates.
+  // criterion order, so each base checkout is created alone. Keep the retry's result unchanged:
+  // rewriting a persistent UNKNOWN as unreadable would make the concurrent gate disagree with
+  // the sequential evaluator, which judges the check-proof child's returned status as-is.
   const unknownBase = /^base:\s+UNKNOWN\s+— a merge-base worktree at .* could not be created/m;
   for (const index of results.keys()) {
     if (!unknownBase.test(String(results[index]?.stdout ?? ""))) continue;
-    const retried = await runProof(plan.proofs[index], mergeBase);
-    if (unknownBase.test(String(retried?.stdout ?? ""))) {
-      results[index] = {
-        ...retried,
-        status: null,
-        error: `merge-base worktree could not be created after a serial retry${retried.error ? `: ${retried.error}` : ""}`,
-      };
-    } else {
-      results[index] = retried;
-    }
+    results[index] = await runProof(plan.proofs[index], mergeBase);
   }
   return judgeProofDiscrimination(plan, results);
 }
