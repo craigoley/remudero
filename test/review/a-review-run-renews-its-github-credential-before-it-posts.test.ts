@@ -20,7 +20,7 @@ import { holdReviewRunLive, postReviewPending, postReviewStatusGuarded, postUnre
   renewReviewPublisherToken, reviewDecisionDigest, reviewInputDigest, reviewOwnerOrphaned } from "#src/lib/review.js";
 import { tryEscalateAsync } from "#src/lib/escalate.js";
 import { readFileSync } from "node:fs";
-import { buildOpenPrViews } from "#src/run-task.js";
+import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
 import { readLedgerLines } from "#src/lib/status.js";
 import { DEFAULT_SWEEP_POLICY, orphanedOwnerRetryView, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import type { WorkerResult } from "#src/lib/worker.js";
@@ -691,9 +691,10 @@ test("W1-T15030 criterion 2: a pending post refused twice is re-reviewed on the 
         reason: "a durable refusal" });
     }
     const updated = new Date(Date.now() - 60_000).toISOString();
-    const [view] = buildOpenPrViews("o", "r", ledgerPath, {
+    // The daemon's own producer (openPrViewSteps, whose reviewPostRefusedFor read the refusal as durable).
+    const [view] = await buildOpenPrViewsAsync("o", "r", ledgerPath, {
       requiredContexts: () => ["ci-gate"],
-      fetch: (args) => {
+      fetchAsync: async (args) => {
         const path = args.at(-1)!;
         if (path.includes("state=open")) return [{ number: 15032, html_url: prUrl, head: { ref: "run-W1-T15030-1", sha },
           updated_at: updated, body, auto_merge: null, state: "open" }];
