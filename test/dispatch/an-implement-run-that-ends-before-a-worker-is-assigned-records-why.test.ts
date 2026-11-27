@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { buildAnalyticsTimeSeries } from "#src/lib/analytics-timeseries.js";
 import { dispatchClaimRef } from "#src/lib/dispatch-claim.js";
 import { endedBeforeWorkerAssignment } from "#src/lib/non-worker-verdict.js";
-import { benchmarkRunLedgerLogger } from "#src/run-task.js";
+import { assignedRun, benchmarkRunLedgerLogger, runLog } from "#test/dispatch/implement-run-fixtures.js";
 import {
   TASK, RUN_ID, DEAD_PID, LOCAL, MINT_ISO, anchorMessage, fakeReserver, instance, orphanVerdicts,
 } from "#test/helpers/restart-orphan.js";
@@ -28,17 +28,6 @@ const ASSIGNMENT = {
 const NOW = "2026-11-10T12:00:00.000Z";
 const DAY_START = Date.parse("2026-11-10T01:00:00.000Z");
 
-/** One run's rows through the real run logger, each stamped with the run id and a clock a minute apart. */
-function runLog(runId: string, startMs = DAY_START): { log: (step: string, extra?: Row) => void; rows: Row[] } {
-  const rows: Row[] = [];
-  let at = startMs;
-  const log = benchmarkRunLedgerLogger((step, fields) => {
-    rows.push({ ts: new Date(at).toISOString(), run_id: runId, task_id: "W1-T1", step, ...fields });
-    at += 60_000;
-  });
-  return { log, rows };
-}
-
 function verdictOf(rows: Row[]): Row {
   const verdict = rows.find((row) => row.step === "verdict");
   assert.ok(verdict, "the run wrote its verdict");
@@ -50,16 +39,6 @@ function pointOf(rows: Row[], id: string, nowIso = NOW): Row {
   const point = buildAnalyticsTimeSeries(rows, nowIso).find((s) => s.id === id)?.points.find((p) => p.t.startsWith(day));
   assert.ok(point, `the ${id} window holds ${day}`);
   return point as Row;
-}
-
-/** A run that assigned a worker and ended `failed` ten minutes after its start. */
-function assignedRun(runId: string, startMs = DAY_START): Row[] {
-  const { log, rows } = runLog(runId, startMs);
-  log("run.start", { type: "implement" });
-  log("run.phase", { waiting_on: "recon" });
-  log("worker.assignment", { worker_assignment: ASSIGNMENT });
-  log("verdict", { verdict: "failed", stage: "run.error", reason: "boom" });
-  return rows;
 }
 
 test("W1-T12154 criterion 1: a run that wrote no worker.assignment row records no worker was assigned and its last stage", () => {
