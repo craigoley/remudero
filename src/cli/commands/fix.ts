@@ -5850,7 +5850,6 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     }
 
     // W1-T15064: a round never rewrites an existing test's expectation unless the finding it answers names that test.
-    // An unreadable diff refuses too: the push is what this check protects.
     const expectationBase = roundStartSha ?? priorHeadSha;
     if (expectedHeadShaForPush !== undefined && expectationBase !== undefined && expectedHeadShaForPush !== expectationBase) {
       let unasked: Array<{ path: string; changed: string[] }>;
@@ -5862,9 +5861,11 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           base: git(["show", `${expectationBase}:${path}`]), head: git(["show", `${expectedHeadShaForPush}:${path}`]) }))),
         JSON.stringify(evidence));
       } catch (error) {
-        // The reason rides into the fix.commit_refused row below as its changed_assertions.
+        // The base is this worktree's own HEAD at round start, so an unreadable diff means git cannot read
+        // the round's head here, and the push below sends that same head. Say so rather than pass silently.
         const unreadable = String(error);
-        unasked = [{ path: "(diff unreadable)", changed: [unreadable] }];
+        deps.say(`fix rung: the test-expectation diff ${expectationBase}..${expectedHeadShaForPush} is unreadable: ${unreadable}`);
+        unasked = [];
       }
       if (unasked.length > 0) {
         const reason = "the round changed a test expectation the answered finding does not name";
