@@ -2688,7 +2688,9 @@ export function productionFixProgressJudge(opts: {
       ...(mount.provider === undefined ? {} : { mountProvider: mount.provider }) };
     // W1-T15163: a worker that ended without a result (a non-success subtype, or a throw before one) is asked once
     // more at once with its provider excluded. A worker that returned a success subtype is never re-asked here.
-    const { result, reaskedFrom } = await askFixProgressJudgeOnce(spawn, primaryArgs);
+    const attempt = await askFixProgressJudgeOnce(spawn, primaryArgs);
+    if (attempt === undefined) return undefined;
+    const { result, reaskedFrom } = attempt;
     const parsed = result.subtype !== undefined && result.subtype !== "success" ? undefined : parseFixProgressVerdict(result.text);
     const verdict = parsed === undefined || reaskedFrom === undefined ? parsed : { ...parsed, reasked_from: reaskedFrom };
     const shadowKey = `${input.prNumber === undefined ? input.taskId ?? "unknown" : `PR${input.prNumber}`}@${input.headSha}`;
@@ -2722,17 +2724,24 @@ export function productionFixProgressJudge(opts: {
  * result (or rethrows), so the caller sees no verdict exactly as before.
  */
 async function askFixProgressJudgeOnce(spawn: (args: SpawnWorkerArgs) => Promise<WorkerResult>, args: SpawnWorkerArgs):
-  Promise<{ result: WorkerResult; reaskedFrom?: FixProgressReaskedFrom }> {
+  Promise<{ result: WorkerResult; reaskedFrom?: FixProgressReaskedFrom } | undefined> {
   let first: WorkerResult | undefined;
-  try { first = await spawn(args); } catch {
+  let assigned: { provider: string; model: string } | undefined;
+  const firstArgs: SpawnWorkerArgs = { ...args, onSelectionAssignment: (assignment) => {
+    assigned = { provider: assignment.selected.provider, model: assignment.selected.model };
+    args.onSelectionAssignment?.(assignment);
+  } };
+  try { first = await spawn(firstArgs); } catch {
     first = undefined; // a throw before a result is an attempt that ended without one: it is re-asked below
   }
   if (first !== undefined && (first.subtype === undefined || first.subtype === "success")) return { result: first };
-  const provider = first?.provider;
-  const reaskedFrom: FixProgressReaskedFrom = { provider: provider ?? "unknown", model: first?.model || "unknown",
+  const provider = first?.provider ?? assigned?.provider;
+  const reaskedFrom: FixProgressReaskedFrom = { provider: provider ?? "unknown", model: first?.model || assigned?.model || "unknown",
     subtype: first?.subtype ?? "threw" }; // the error text is never copied: a message may carry a secret
   const exclude = provider === undefined ? args.excludeProviders : [...new Set([...(args.excludeProviders ?? []), provider])];
-  const result = await spawn({ ...args, ...(exclude === undefined || exclude.length === 0 ? {} : { excludeProviders: exclude }) });
+  let result: WorkerResult;
+  try { result = await spawn({ ...args, ...(exclude === undefined || exclude.length === 0 ? {} : { excludeProviders: exclude }) }); }
+  catch { return undefined; } // no answer: preserve the caller's existing unparseable/re-ask path
   return { result, reaskedFrom };
 }
 

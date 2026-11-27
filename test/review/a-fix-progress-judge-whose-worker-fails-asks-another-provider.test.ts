@@ -12,6 +12,7 @@ import { test } from "node:test";
 import { buildFixProgressInput, judgeFixProgress } from "#src/lib/fix-progress-judge.js";
 import { mountsPath } from "#src/lib/mounts.js";
 import { productionFixProgressJudge } from "#src/lib/sweep.js";
+import { judgeCappedRepair } from "#src/lib/classify.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import type { SpawnWorkerArgs, WorkerResult } from "#src/lib/worker.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
@@ -57,10 +58,17 @@ test("W1-T15163 criterion 1: a judge worker that ends with error_exit_1 or throw
   assert.equal(exited.spawned.length, 2);
   assert.equal(exited.spawned[0]!.excludeProviders, undefined);
   assert.deepEqual(exited.spawned[1]!.excludeProviders, ["codex"]);
-  // A spawn that throws before any result is re-asked too; with no failed provider known, nothing is excluded.
-  const thrown = judgeWith(root, async (_args, n) => { if (n === 1) throw new Error("spawn failed"); return worker(VERDICT); });
+  // A throw after a worker selection keeps that provider identity and excludes it on the re-ask.
+  const thrown = judgeWith(root, async (args, n) => {
+    if (n === 1) {
+      args.onSelectionAssignment?.({ selected: { provider: "codex", model: "gpt-6-luna" } } as Parameters<NonNullable<SpawnWorkerArgs["onSelectionAssignment"]>>[0]);
+      throw new Error("spawn failed");
+    }
+    return worker(VERDICT);
+  });
   assert.equal((await thrown.judge(input()))?.verdict, "continue");
   assert.equal(thrown.spawned.length, 2);
+  assert.deepEqual(thrown.spawned[1]!.excludeProviders, ["codex"]);
 });
 
 test("W1-T15163 criterion 2: a success subtype is never re-asked, and a re-ask that also fails gives no verdict exactly as before", async (t) => {
@@ -76,11 +84,48 @@ test("W1-T15163 criterion 2: a success subtype is never re-asked, and a re-ask t
   const twice = judgeWith(root, async () => codexExit());
   assert.equal(await twice.judge(input()), undefined);
   assert.equal(twice.spawned.length, 2);
+  // A thrown re-ask is still no answer; it must reach the pass-level re-ask and let the round run.
+  const thrownReask = judgeWith(root, async (_args, n) => {
+    if (n === 1) return codexExit();
+    throw new Error("provider failed before result");
+  });
+  const afterThrow = await judgeFixProgress(input(), thrownReask.judge, { reask: true });
+  assert.equal(afterThrow.verdict, "continue");
+  assert.equal("judge_skipped" in afterThrow ? afterThrow.judge_skipped : undefined, "unparseable-twice");
+  assert.equal(thrownReask.spawned.length, 4);
   const pass = judgeWith(root, async () => codexExit());
   const decision = await judgeFixProgress(input(), pass.judge, { reask: true });
   assert.equal(decision.verdict, "continue");
   assert.equal("judge_skipped" in decision ? decision.judge_skipped : undefined, "unparseable-twice");
   assert.equal(pass.spawned.length, 4);
   assert.ok(!("reasked_from" in decision));
+});
+
+test("W1-T15163 criterion 3: the judged ledger row retains reasked_from for a re-asked answer", async (t) => {
+  const root = tmpRoot(t);
+  const judge = judgeWith(root, async (args) => args.excludeProviders?.includes("codex") ? worker(VERDICT) : codexExit());
+  const rows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  const out = await judgeCappedRepair({ bodyStrikes: 2, planRepairStrikes: 0 }, 2,
+    { planRepairCapable: false, input: input(), judge: judge.judge, log: (step, fields) => void rows.push({ step, fields }) });
+  assert.equal(out.kind, "repair_body");
+  const judged = rows.find((row) => row.step === "fix.progress_judged");
+  assert.ok(judged, "a fix.progress_judged row is written");
+  assert.deepEqual(judged.fields.reasked_from, { provider: "codex", model: "gpt-6-luna", subtype: "error_exit_1" });
+
+  // The corroborated harness answer uses the same row path and must retain the failed attempt too.
+  const reaskedFrom = { provider: "codex", model: "gpt-6-luna", subtype: "error_exit_1" };
+  const base = input();
+  const corroborated = { ...base, signals: { ...base.signals, offHostPass: true as const }, offHostPassEvidence: [{
+    claim: "c", proof: "unit test: c", reviewerOutput: "reviewed", worker: { proof: "unit test: c", headSha: base.headSha,
+      result: "pass" as const, output: "pass" }, ci: [],
+  }] };
+  const harnessJudge = async () => ({ verdict: "escalate" as const, loop: "harness", reason: "corroborated",
+    reasked_from: reaskedFrom });
+  const harnessRows: Array<{ step: string; fields: Record<string, unknown> }> = [];
+  await judgeCappedRepair({ bodyStrikes: 2, planRepairStrikes: 0 }, 2, { planRepairCapable: false,
+    input: corroborated, judge: harnessJudge, log: (step, fields) => void harnessRows.push({ step, fields }) });
+  const harnessRow = harnessRows.find((row) => row.step === "fix.progress_judged");
+  assert.ok(harnessRow, "a corroborated harness fix.progress_judged row is written");
+  assert.deepEqual(harnessRow.fields.reasked_from, reaskedFrom);
 });
 
