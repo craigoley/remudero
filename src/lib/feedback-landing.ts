@@ -121,6 +121,10 @@ const DESTINATION_GATE_CHECK = "ops-gate";
 const DESTINATION_GATE_RULE = "destination-gate";
 const TASK_FILES_LANDING_BRANCH = "task-files-landing";
 const TASK_FILES_LANDING_PR_TITLE = "chore(plan): land pending edits of task files";
+/** W1-T15077: where a failed ops-task review's findings land in the private plan repository, one file per head. */
+export const REVIEW_FINDINGS_REL_DIR = "plan/review-findings";
+const REVIEW_FINDINGS_LANDING_BRANCH = "review-findings-landing";
+const REVIEW_FINDINGS_LANDING_PR_TITLE = "chore(review): land failed ops-task review findings";
 const CI_LEARNING_SLUG_MAX = 72;
 /** The one shared branch every automated CI-learning shard landing call force-pushes to. */
 export const CI_LEARNING_LANDING_BRANCH = "ci-learning-landing";
@@ -141,7 +145,7 @@ export interface LandingRepository {
   repo: string;
 }
 
-type LandingFamily = "feedback" | "decisions" | "ci-learning" | "plan-reconcile" | "task-files";
+type LandingFamily = "feedback" | "decisions" | "ci-learning" | "plan-reconcile" | "task-files" | "review-findings";
 
 export interface LandingIdentityInput {
   family?: LandingFamily;
@@ -480,6 +484,7 @@ const LANDING_BASES: Record<LandingFamily, { branch: string; ownedDir: string; p
     prTitle: PLAN_RECONCILE_LANDING_PR_TITLE,
   },
   "task-files": { branch: TASK_FILES_LANDING_BRANCH, ownedDir: "", prTitle: TASK_FILES_LANDING_PR_TITLE },
+  "review-findings": { branch: REVIEW_FINDINGS_LANDING_BRANCH, ownedDir: REVIEW_FINDINGS_REL_DIR, prTitle: REVIEW_FINDINGS_LANDING_PR_TITLE },
 };
 
 function repoKey(repo: LandingRepository): string {
@@ -525,9 +530,10 @@ const LEGACY_LANDING_REFS = new Set([
   CI_LEARNING_LANDING_BRANCH,
   PLAN_RECONCILE_LANDING_BRANCH,
   TASK_FILES_LANDING_BRANCH,
+  REVIEW_FINDINGS_LANDING_BRANCH,
 ]);
 const SCOPED_LANDING_REF =
-  /^(?:feedback-landing|decisions-landing|ci-learning-landing|task-files-landing)-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[0-9a-f]{12}$/;
+  /^(?:feedback-landing|decisions-landing|ci-learning-landing|task-files-landing|review-findings-landing)-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[0-9a-f]{12}$/;
 
 export function isLandingRef(ref: string): boolean {
   return LEGACY_LANDING_REFS.has(ref) || SCOPED_LANDING_REF.test(ref);
@@ -2065,6 +2071,37 @@ export function recordDecisionAsync(
   const { planPrPreflight: _preflight, ...kindOpts } = at.opts;
   return landContentAsync(at.root, (net) => landingKindSteps(DECISIONS_LANDING_KIND, at.root, kindOpts, net),
     [{ relPath, content: decisionRecordContent(params) }], at.opts);
+}
+
+/** W1-T15077: the private path of one reviewed head's findings. */
+export function reviewFindingsRelPath(prNumber: number, headSha: string): string {
+  return `${REVIEW_FINDINGS_REL_DIR}/pr-${prNumber}/${headSha}.md`;
+}
+
+const REVIEW_FINDINGS_LANDING_KIND: Omit<LandingKind, keyof LandingIdentity> = {
+  family: "review-findings",
+  commitMessage: (files) => [REVIEW_FINDINGS_LANDING_PR_TITLE, "", "Data-only: the reasons and findings of failed",
+    "ops-task reviews, which their public pull requests do not show (W1-T15077).", "", ...files.map((f) => `- ${f}`)].join("\n"),
+  prBody: (files, content) => [`Lands ${files.length} failed ops-task review record(s) (W1-T15077). Data-only.`, "",
+    "## Acceptance", ...files.map((f) => `- ${f} lands as a review record | ${landingProof(f, `grep: . in ${f}`, content)}`)].join("\n"),
+};
+
+/** W1-T15077: land one head's findings in the plan destination's repository, and nowhere else. A host whose
+ *  destination is off or unreadable lands nothing: findings never reach the public repository. Never throws. */
+export async function landReviewFindingsAsync(stateDir: string, input: { prNumber: number; headSha: string; content: string },
+  opts: LandFeedbackAsyncOpts = {}): Promise<LandFeedbackResult> {
+  const named = planDestinationRepository(stateDir);
+  if (named.outcome !== "named") return { landed: false, files: [], error: named.outcome === "unreadable" ? named.reason
+    : "no private plan destination is named, so the findings stay on the host" };
+  if (!existsSync(join(named.checkoutDir, ".git"))) return { landed: false, files: [], error: "the plan destination checkout is not a git checkout" };
+  const at = planDestinationLandingOpts(opts, named);
+  const { planPrPreflight: _preflight, ...kindOpts } = at;
+  try {
+    return await landContentAsync(named.checkoutDir, (net) => landingKindSteps(REVIEW_FINDINGS_LANDING_KIND, named.checkoutDir, kindOpts, net),
+      [{ relPath: reviewFindingsRelPath(input.prNumber, input.headSha), content: input.content }], at);
+  } catch (error) {
+    return { landed: false, files: [], error: boundedLandingError(String((error as Error)?.message ?? error)) };
+  }
 }
 
 /** Everything the decision record currently says, as ONE string for the contradiction check:
