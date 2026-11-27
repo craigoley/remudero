@@ -2,6 +2,7 @@
 // existing test's expectation unless the finding it answers names that test. On core #21035, round 1835b8af3
 // answered inherited expiring-fixture-census crossings by loosening `=== false` to `!== true` in src/lib/inbox.ts.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,11 +11,13 @@ import { test } from "node:test";
 import { emitCiReport, formatReport, isBlocked, proveNearCrossings, refusePopulationDrop } from "#scripts/expiring-fixture-census.mjs";
 import { runFixRung as runFixRungWithHost, type FixCommandHost } from "#src/cli/commands/fix.js";
 import {
-  BASE_INHERITED_MARKER, answeredFindingText, baseInheritedRedSteps, readExpectationRewrites, rewrittenTestExpectations,
+  BASE_INHERITED_MARKER, answeredFindingText, baseInheritedRedSteps, baseInheritedRedStepsFromJobLogs, readExpectationRewrites,
+  rewrittenTestExpectations,
   unaskedExpectationRewrites,
 } from "#src/lib/ci-remedy-execution.js";
 import type { FixSelfCheckRunResult } from "#src/lib/fix-self-check.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
+import { fetchCiFailuresAsync } from "#src/run-task.js";
 import type { Config } from "#src/lib/config.js";
 import type { ReviewVerdict } from "#src/lib/review.js";
 import type { WorkerResult } from "#src/lib/worker.js";
@@ -40,17 +43,25 @@ const crossing = (file: string, daysLeft: number, inherited: boolean) => ({ file
 /** What the census step prints, by its own producers, as census main() runs them with RMD_CI_REPORT set: the report on
  *  stdout, then its `::error` annotation. Near crossings get the shifted-run verdict `confirmed`, so an all-inherited
  *  report still blocks — the case core #21035 hit. */
-function censusLog(reported: ReturnType<typeof crossing>[], drops: Record<string, number> = {}) {
+function censusLog(reported: ReturnType<typeof crossing>[], drops: Record<string, number> = {}, exemptCount = 0,
+  greenWhenShifted: string[] = []) {
   proveNearCrossings(reported, (files: string[], days: number) => new Map(files.map((file) =>
-    [file, days > 1 ? { passed: false, pass: 3, tests: 5 } : { passed: true, pass: 5, tests: 5 }])), 0);
+    [file, days > 1 && !greenWhenShifted.includes(file) ? { passed: false, pass: 3, tests: 5 } : { passed: true, pass: 5, tests: 5 }])), 0);
   const populationDrop = refusePopulationDrop(drops, Object.fromEntries(Object.keys(drops).map((file) => [file, 9])));
-  const report = formatReport({ population: 9, reported, exempt: [], populationDrop });
+  const exempt = Array.from({ length: exemptCount }, (_, i) => ({ file: `test/exempt-${i}.test.ts`, line: i + 1 }));
+  const report = formatReport({ population: 9, reported, exempt, populationDrop });
   const lines: string[] = [];
   lines.push(report);
   const blocked = isBlocked({ reported, populationDrop });
   emitCiReport("expiring-fixture-census", report, { blocked, env: { RMD_CI_REPORT: "1" }, log: (line: string) => lines.push(line) });
-  return { blocked, log: lines.join("\n") };
+  return { blocked, report, log: lines.join("\n") };
 }
+
+/** The census step's job log as GitHub serves it: a step group, the report on stdout, the runner's multi-line
+ *  rendering of the `::error` annotation, the exit line, every line stamped with its time. */
+const jobLog = (report: string) => stamped(["##[group]Run node scripts/expiring-fixture-census.mjs", "##[endgroup]", report,
+  `##[error]${report}`, "##[error]Process completed with exit code 1."].join("\n"));
+const crossingLines = (log: string) => log.split("\n").filter((line) => / goes red /.test(line)).length;
 
 /** The same log as the Actions job log reads it back: every line stamped with its time. */
 const stamped = (log: string) => log.split("\n").map((line) => `2026-11-27T00:00:01.0000000Z ${line}`).join("\n");
@@ -66,6 +77,8 @@ interface RoundOptions {
   selfChecks?: string[];
   /** The worker answers NEEDS_SCOPE for this undeclared path, so the round pushes only its in-scope repair. */
   needsScope?: string;
+  /** The host's complete job-log reader; absent, every read fails, as with no network. */
+  readCiJobLog?: (owner: string, repo: string, jobId: string) => Promise<string>;
 }
 
 /** Every scope-amendment write refuses: the shard is never found, so a NEEDS_SCOPE round escalates. */
@@ -96,7 +109,8 @@ async function round(ciFailures: Array<{ name: string; logTail: string }> | unde
     keywordOnly: false, planOnly: false, headSha: before, reviewerOutcome: "failure",
   };
   const transcripts = [...(options.selfChecks ?? [])];
-  const host: FixCommandHost = { ...fixCommandHost(), ...(options.selfChecks ? {
+  const host: FixCommandHost = { ...fixCommandHost(),
+    readCiJobLog: options.readCiJobLog ?? (async () => { throw new Error("no job log in this fixture"); }), ...(options.selfChecks ? {
     runFixSelfCheck: async (): Promise<FixSelfCheckRunResult> => ({ transcript: transcripts.shift() ?? "" }) } : {}) };
   const outcome = await runFixRungWithHost({
     taskId: "W1-T15064X", runId: "W1-T15064X-run",
@@ -311,4 +325,94 @@ test("W1-T15064 criterion 2: a renamed test is compared with its old path", asyn
   assert.match(repo.git("diff", "--name-status", "-M", base, head), /^R\d+\ttest\/inbox\.test\.ts\ttest\/inbox-released\.test\.ts$/m);
   assert.deepEqual(await readExpectationRewrites(git, base, head),
     [{ path: renamed, changed: ["assert.equal(released(undefined), false)"] }]);
+});
+
+test("W1-T15064 criterion 2: an added test leaves every real test file's expectations unchanged", () => {
+  const files = execFileSync("git", ["-C", REPO_ROOT, "ls-files", "-z", "--", "test/"], { encoding: "utf8" })
+    .split("\0").filter((path) => /\.test\.[cm]?[jt]s$/.test(path));
+  assert.ok(files.length > 1000, `the census saw its corpus: ${files.length} test files`);
+  const appended = "\ntest(\"W1-T15064 appended\", () => {\n  const result = 1;\n  assert.equal(result, 1);\n});\n";
+  const refused = files.filter((path) => {
+    const base = readFileSync(join(REPO_ROOT, path), "utf8");
+    return rewrittenTestExpectations([{ path, base, head: `${base}${appended}` }]).length > 0;
+  });
+  assert.deepEqual(refused, [], `${refused.length} of ${files.length} files read an add-only edit as a rewrite`);
+  // Positive control: the same scan does see a rewrite in a real file.
+  const real = files.find((path) => readFileSync(join(REPO_ROOT, path), "utf8").includes("assert.equal("))!;
+  const text = readFileSync(join(REPO_ROOT, real), "utf8");
+  const at = text.indexOf("assert.equal(");
+  assert.equal(rewrittenTestExpectations([{ path: real, base: text,
+    head: `${text.slice(0, at)}assert.notEqual(${text.slice(at + "assert.equal(".length)}` }]).length, 1);
+});
+
+test("W1-T15064 criterion 2: quotes and parens inside regular expressions and templates are not code", () => {
+  const base = [
+    "assert.match(text, /can't (open/);",
+    "assert.match(text, /fn\\(/);",
+    "const label = `it's ${name} (x`;",
+    "assert.equal(label, `it's a (x`);",
+    "assert.equal(f(\")\"), 1);",
+  ].join("\n");
+  assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base, head: `${base}\nassert.equal(1, 1);\n` }]), []);
+  assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base, head: base.replace("/fn\\(/", "/fn/") }]),
+    [{ path: TEST, changed: ["assert.match(text, /fn\\(/)"] }]);
+});
+
+test("W1-T15064 criterion 2: changing a value an assertion reads changes that expectation", () => {
+  const base = "const expected = false;\nconst rows = [\n  1,\n  2,\n];\nassert.equal(f(), expected);\nassert.deepEqual(g(), rows);\n";
+  assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base, head: base.replace("= false", "= true") }]),
+    [{ path: TEST, changed: ["assert.equal(f(), expected) (reads changed expected)"] }]);
+  assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base, head: base.replace("  2,\n", "") }]),
+    [{ path: TEST, changed: ["assert.deepEqual(g(), rows) (reads changed rows)"] }]);
+  // A destructured fixture constant counts the same way.
+  const destructured = "const { want } = { want: 1 };\nassert.equal(h(), want);\n";
+  assert.equal(rewrittenTestExpectations([{ path: TEST, base: destructured, head: destructured.replace("want: 1", "want: 2") }]).length, 1);
+  // Declaring the same name again in a new test is not a change to the old one.
+  assert.deepEqual(rewrittenTestExpectations([{ path: TEST, base, head: `${base}const expected = true;\nassert.equal(k(), expected);\n` }]), []);
+});
+
+test("W1-T15064 criterion 1: an all-inherited red step dispatches no source edit, read from the complete job log", async (t) => {
+  // This repo's real footer: 82 exempt fixtures, listed after the crossings.
+  const census = censusLog([crossing("test/a.test.ts", 0.4, true), crossing("test/b.test.ts", 0.6, true)], {}, 82);
+  assert.equal(census.blocked, true);
+  const log = jobLog(census.report);
+  const rollup = [{ name: "light-gates", conclusion: "FAILURE", detailsUrl: "https://github.com/acme/remudero/actions/runs/1/job/777" }];
+  for (const annotations of [[], [census.report]]) {
+    const [failure] = await fetchCiFailuresAsync("acme", "remudero", rollup, 60,
+      { fetchAnnotations: async () => annotations, fetchJobLog: async () => log });
+    assert.equal(failure!.jobId, "777");
+    assert.ok(crossingLines(failure!.logTail) < 2 * 2, `the region is cut: ${crossingLines(failure!.logTail)} crossing line(s)`);
+    // The production region alone is unknown, never inherited.
+    if (crossingLines(failure!.logTail) < 2) assert.equal(baseInheritedRedSteps([failure!]).inherited, false);
+    const full = await baseInheritedRedStepsFromJobLogs([failure!], async (jobId) => { assert.equal(jobId, "777"); return log; });
+    assert.equal(full.inherited, true, "the complete log shows every crossing inherited");
+  }
+  const [failure] = await fetchCiFailuresAsync("acme", "remudero", rollup, 60,
+    { fetchAnnotations: async () => [], fetchJobLog: async () => log });
+  assert.equal(crossingLines(failure!.logTail), 0, "the 82-line footer pushes every crossing out of the region");
+  const stood = await round([failure!], loosenAndRewrite, { readCiJobLog: async () => log });
+  t.after(() => stood.repo.cleanup());
+  assert.equal(stood.spawns, 0, "read from the complete log, the inherited red dispatches no source edit");
+  assert.ok(stood.rows.some((row) => row.step === "fix.stood_down" && row.reason === "base_inherited"));
+  // No complete log: the cut region is unknown, so the round dispatches as it always did.
+  const unread = await round([failure!], (dir) => writeFileSync(join(dir, SOURCE), `${GUARDED}// repaired\n`));
+  t.after(() => unread.repo.cleanup());
+  assert.equal(unread.spawns, 1);
+});
+
+test("W1-T15064 criterion 1: a cut report whose lost lines hold a crossing this diff owns never stands down", async () => {
+  // Three crossings, the nearest planted by this diff and green in its shifted run, so the report asks no fix of it
+  // and the step still blocks on the two inherited ones. With no footer the region keeps only those two.
+  const census = censusLog([crossing("test/mine.test.ts", 0.2, false), crossing("test/a.test.ts", 0.4, true),
+    crossing("test/b.test.ts", 0.6, true)], {}, 0, ["test/mine.test.ts"]);
+  assert.equal(census.blocked, true);
+  assert.match(census.report, /BLOCKED -- 3 fixture\(s\) CROSS/);
+  const log = jobLog(census.report);
+  const rollup = [{ name: "light-gates", conclusion: "FAILURE", detailsUrl: "https://github.com/acme/remudero/actions/runs/1/job/778" }];
+  const [failure] = await fetchCiFailuresAsync("acme", "remudero", rollup, 60, { fetchAnnotations: async () => [], fetchJobLog: async () => log });
+  assert.ok(failure!.logTail.includes(BASE_INHERITED_MARKER), "the region keeps inherited crossings");
+  assert.equal(failure!.logTail.includes("test/mine.test.ts"), false, "and cuts the one this diff planted");
+  assert.equal(baseInheritedRedSteps([failure!]).inherited, false, "fewer crossings than the headline states is unknown");
+  assert.equal((await baseInheritedRedStepsFromJobLogs([failure!], async () => log)).inherited, false);
+  assert.equal((await baseInheritedRedStepsFromJobLogs([failure!], async () => { throw new Error("403"); })).inherited, false);
 });

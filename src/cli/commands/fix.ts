@@ -45,7 +45,7 @@ import { observeFeedbackInputs, type AdmissionObserver } from "../../lib/contrib
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
 import { observeAdmissionDisposition } from "../../lib/action-executor.js";
 import { fixLaneBenchmarkWork } from "../../lib/benchmark-run.js";
-import { answeredFindingText, baseInheritedRedSteps, captureCiRemedyComponent, readExpectationRewrites, recordCiRemedyExecution,
+import { answeredFindingText, baseInheritedRedStepsFromJobLogs, captureCiRemedyComponent, readExpectationRewrites, recordCiRemedyExecution,
   unaskedExpectationRewrites, upsertCiRemedyRoundComment, type CiRemedyExecution } from "../../lib/ci-remedy-execution.js";
 import { loadPlan, visibleCriteria, type AcceptanceCriterion, type Plan } from "../../lib/plan.js";
 import { loadMounts, mountsPath, type Mount } from "../../lib/mounts.js";
@@ -77,7 +77,7 @@ import { extractRefusal, refusalExcerptForNeedsDesign, refusalExcerptFromFixRepo
 import type { CriterionRefusalClass } from "../../lib/review.js";
 import { flagValue, unknownArgError } from "../../lib/cli-args.js";
 import { reviewTaskIdFromBody } from "../../lib/report-commands.js";
-import { type RawOpenPr, type StrikeRegime, classifyPlanFiling, currentStrikeRegimeFor, deriveStrikeHistory, fetchCiFailures, isPlanOnlyFilingPr, priorStrikesFor, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, unmetFromLedger } from "../../lib/tick-read-worker.js";
+import { type RawOpenPr, type StrikeRegime, classifyPlanFiling, currentStrikeRegimeFor, defaultCiJobLogFetchAsync, deriveStrikeHistory, fetchCiFailures, isPlanOnlyFilingPr, priorStrikesFor, remedyGeneratorNamedInLog, resolveReviewTaskId, reviewStateFromRollup, reviewSummaryFromLedger, reviewVerdictPostedAtFromRollup, unmetFromLedger } from "../../lib/tick-read-worker.js";
 
 // Functions kept in the entrypoint arrive through this seam, as in DaemonCommandHost.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -145,6 +145,8 @@ export interface FixCommandHost {
   readonly workerCreatedCurrentHead: RunTaskCommandHost["workerCreatedCurrentHead"];
   readonly worktreeHasUncommittedChanges: RunTaskCommandHost["worktreeHasUncommittedChanges"];
   readonly runFixSelfCheck?: (args: FixSelfCheckRunArgs) => Promise<FixSelfCheckRunResult>;
+  /** W1-T15064: a failing check's complete job log; absent, GitHub's job-log endpoint is read. */
+  readonly readCiJobLog?: (owner: string, repo: string, jobId: string) => Promise<string>;
 }
 
 /**
@@ -4640,7 +4642,9 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // round answers is marked base-inherited, no worker edits source for it; #21035's round 1835b8af3 loosened a
     // guard in src/lib/inbox.ts to answer inherited expiring-fixture-census crossings.
     const inheritedRed = fixMode === "ci-log" && !("review" in evidence && evidence.review)
-      ? baseInheritedRedSteps(currentCiFailures ?? []) : undefined;
+      ? await baseInheritedRedStepsFromJobLogs(currentCiFailures ?? [], (jobId) =>
+        (host.readCiJobLog ?? defaultCiJobLogFetchAsync)(opts.reviewBase.owner, opts.reviewBase.repo, jobId)) : undefined;
+    for (const unread of inheritedRed?.unread ?? []) deps.say(`fix rung: the census job log is unreadable, so its region decides: ${unread}`);
     if (inheritedRed?.inherited) {
       const reason = "base_inherited";
       deps.log("fix.stood_down", { site: "rung.strike", strike: strikes + 1, reason, steps: inheritedRed.steps });

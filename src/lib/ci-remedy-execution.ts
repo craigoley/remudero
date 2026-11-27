@@ -1,5 +1,6 @@
 /** Private component execution, separate from whole-fix adoption and causal efficacy. */
 import { createHash, randomUUID } from "node:crypto";
+import { createScanner, SyntaxKind } from "typescript/unstable/ast";
 import { systemClock } from "./clock.js";
 import { captureImportedModule, importedModuleOf, type ImportedModuleEvidence } from "./prevention-source-evidence.js";
 import { fileURLToPath } from "node:url";
@@ -170,7 +171,7 @@ export const BASE_INHERITED_MARKER = "[inherited from the base -- NOT this diff]
 const CROSSING_LINE = /^\s*- \S+:\d+\s.*\sgoes red\s/;
 /** The census's own headlines. Only the crossing headline can be inherited: formatReport attributes nothing else. */
 const CENSUS_HEADLINE = /^expiring-fixture-census: (?:BLOCKED|CLEAR|OK) -- /;
-const INHERITABLE_HEADLINE = /^expiring-fixture-census: BLOCKED -- \d+ fixture\(s\) CROSS their threshold within /;
+const INHERITABLE_HEADLINE = /^expiring-fixture-census: BLOCKED -- (\d+) fixture\(s\) CROSS their threshold within /;
 /** A population-drop line: formatReport never attributes a drop to the base. */
 const POPULATION_DROP_LINE = /^\s*- \S+: measured \d+ stamp\(s\), recorded \d+ \(/;
 /** A failure the log names that is not a census crossing: a failed test or a type error. */
@@ -200,7 +201,12 @@ function censusReportIsInherited(logTail: string): boolean {
   const { lines, annotationHeads } = reportLines(logTail);
   const headlines = lines.filter((line) => CENSUS_HEADLINE.test(line));
   const crossings = lines.filter((line) => CROSSING_LINE.test(line));
+  // The headline states how many crossings the report lists. A log that holds fewer distinct crossing lines was cut
+  // (the CI log region keeps only a few lines before each error), so what it lost is unknown, and unknown is not
+  // inherited.
+  const counts = new Set(headlines.map((line) => Number(INHERITABLE_HEADLINE.exec(line)?.[1])));
   return headlines.length > 0 && headlines.every((line) => INHERITABLE_HEADLINE.test(line))
+    && counts.size === 1 && new Set(crossings.map((line) => line.trim())).size === [...counts][0]
     && crossings.length > 0 && crossings.every((line) => line.includes(BASE_INHERITED_MARKER))
     && !lines.some((line) => POPULATION_DROP_LINE.test(line) || OTHER_RED.test(line))
     && annotationHeads.every((head) => INHERITABLE_HEADLINE.test(head) || /^Process completed with exit code \d+\.?$/.test(head));
@@ -215,35 +221,156 @@ export function baseInheritedRedSteps(failures: ReadonlyArray<{ name: string; lo
   return { inherited: failures.length > 0 && failures.every((failure) => censusReportIsInherited(failure.logTail)), steps };
 }
 
-const ASSERTION_START = /\bassert(?:\.\w+)*\s*\(|\bexpect\s*\(/g;
-
-/** Each assertion call in `text`, whole (its balanced argument list), with whitespace collapsed. */
-function assertionCalls(text: string): string[] {
-  const calls: string[] = [];
-  for (const match of text.matchAll(ASSERTION_START)) {
-    let depth = 0, quote: string | undefined, end = -1;
-    for (let i = match.index! + match[0].length - 1; i < text.length; i++) {
-      const c = text[i]!;
-      if (quote) { if (c === "\\") i++; else if (c === quote) quote = undefined; continue; }
-      if (c === "\"" || c === "'" || c === "`") quote = c;
-      else if (c === "(") depth++;
-      else if (c === ")" && --depth === 0) { end = i; break; }
+/** W1-T15064: {@link baseInheritedRedSteps} over each census step's COMPLETE job log. A failure's `logTail` is the CI
+ *  log region, which keeps only a few lines before each error, so a long census report arrives cut; the full log is
+ *  read by the failure's job id. A log that cannot be read leaves the region, which then reads as unknown. */
+export async function baseInheritedRedStepsFromJobLogs(failures: ReadonlyArray<{ name: string; logTail: string; jobId?: string }>,
+  readJobLog: (jobId: string) => Promise<string>): Promise<{ inherited: boolean; steps: string[]; unread: string[] }> {
+  const unread: string[] = [];
+  const logs: Array<{ name: string; logTail: string }> = [];
+  for (const failure of failures) {
+    let logTail = failure.logTail;
+    if (failure.jobId !== undefined && failure.logTail.includes("expiring-fixture-census:")) {
+      try {
+        logTail = await readJobLog(failure.jobId);
+      } catch (error) {
+        const unreadable = String(error);
+        unread.push(`${failure.name}: ${unreadable}`);
+      }
     }
-    calls.push(text.slice(match.index!, end < 0 ? text.length : end + 1).replace(/\s+/g, " "));
+    logs.push({ name: failure.name, logTail });
   }
-  return calls;
+  return { ...baseInheritedRedSteps(logs), unread };
 }
 
-/** W1-T15064: the assertions of an existing test file the round's diff removed or changed, per file. */
+interface SourceToken { kind: SyntaxKind; text: string; start: number; end: number; lineBreak: boolean }
+
+/** A `/` after one of these opens a regular expression, not a division: the repo's own scanner convention
+ *  (src/lib/source-text-readers.ts), with `;` added for a literal that starts a statement. */
+const REGEX_AFTER = /^(?:=|\(|\[|\{|,|:|\?|;|return|case|=>|!|&&|\|\||\?\?)$/;
+
+/** The file's tokens, read by TypeScript's own scanner: strings, templates, comments and regular expressions are
+ *  single tokens, so a quote or a paren inside one is never read as code. */
+function sourceTokens(text: string): SourceToken[] {
+  const scanner = createScanner(true, undefined, text);
+  const tokens: SourceToken[] = [];
+  const templateDepths: number[] = [];
+  for (let kind = scanner.scan(); kind !== SyntaxKind.EndOfFile; kind = scanner.scan()) {
+    if ((kind === SyntaxKind.SlashToken || kind === SyntaxKind.SlashEqualsToken) && REGEX_AFTER.test(tokens.at(-1)?.text ?? "=")) {
+      kind = scanner.reScanSlashToken();
+    }
+    // A `#` the scanner could not read as a private name scans as an empty token; read it as `#` and move on.
+    if (kind === SyntaxKind.PrivateIdentifier && scanner.getTokenEnd() === scanner.getTokenStart()) kind = scanner.reScanHashToken();
+    if (scanner.getTokenEnd() <= scanner.getTokenStart() && tokens.at(-1)?.start === scanner.getTokenStart()) {
+      throw new Error(`the scanner made no progress at offset ${scanner.getTokenStart()}`);
+    }
+    if (kind === SyntaxKind.TemplateHead) templateDepths.push(0);
+    else if (kind === SyntaxKind.OpenBraceToken && templateDepths.length > 0) templateDepths[templateDepths.length - 1]!++;
+    else if (kind === SyntaxKind.CloseBraceToken && templateDepths.length > 0) {
+      if (templateDepths.at(-1) === 0) {
+        kind = scanner.reScanTemplateToken(false);
+        if (kind === SyntaxKind.TemplateTail) templateDepths.pop();
+      } else templateDepths[templateDepths.length - 1]!--;
+    }
+    tokens.push({ kind, text: scanner.getTokenText(), start: scanner.getTokenStart(), end: scanner.getTokenEnd(),
+      lineBreak: scanner.hasPrecedingLineBreak() });
+  }
+  return tokens;
+}
+
+const OPENERS = new Set(["(", "[", "{"]), CLOSERS = new Set([")", "]", "}"]);
+/** The index of the token closing the bracket opened at `open`, or the last token when the file ends first. */
+function closing(tokens: readonly SourceToken[], open: number): number {
+  let depth = 0;
+  for (let i = open; i < tokens.length; i++) {
+    if (OPENERS.has(tokens[i]!.text)) depth++;
+    else if (CLOSERS.has(tokens[i]!.text) && --depth === 0) return i;
+  }
+  return tokens.length - 1;
+}
+/** A word token: an identifier, or a contextual keyword the scanner names (`assert` scans as AssertKeyword). */
+const isName = (token: SourceToken | undefined) => token !== undefined && /^[A-Za-z_$][\w$]*$/.test(token.text);
+const sliceOf = (text: string, tokens: readonly SourceToken[], from: number, to: number) =>
+  text.slice(tokens[from]!.start, tokens[to]!.end).replace(/\s+/g, " ");
+
+/** Each assertion in the file: `assert(...)`, `assert.x(...)` or `expect(...)` with its chained matchers, whole,
+ *  whitespace collapsed, with the names its arguments read. */
+function assertionsOf(text: string, tokens = sourceTokens(text)): Array<{ call: string; reads: Set<string> }> {
+  const found: Array<{ call: string; reads: Set<string> }> = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const head = tokens[i]!;
+    if (!isName(head) || (head.text !== "assert" && head.text !== "expect") || tokens[i - 1]?.text === ".") continue;
+    let at = i + 1;
+    while (tokens[at]?.text === "." && isName(tokens[at + 1])) at += 2;
+    if (tokens[at]?.text !== "(") continue;
+    let end = closing(tokens, at);
+    while (tokens[end + 1]?.text === "." && isName(tokens[end + 2]) && tokens[end + 3]?.text === "(") end = closing(tokens, end + 3);
+    const reads = new Set<string>();
+    for (let k = at + 1; k < end; k++) if (isName(tokens[k]) && tokens[k - 1]?.text !== ".") reads.add(tokens[k]!.text);
+    found.push({ call: sliceOf(text, tokens, i, end), reads });
+    i = end;
+  }
+  return found;
+}
+
+/** An assertion's own text, without the note naming the declarations it reads. */
+const assertionKey = (changed: string) => changed.replace(/ \(reads changed [^)]*\)$/, "");
+
+/** A line break after one of these continues the statement. */
+const CONTINUES = /^(?:=|,|\?|:|\+|-|\*|\/|%|&&|\|\||\?\?|=>|\.|===|!==|==|!=|<|>|<=|>=|\||&|in|of|instanceof)$/;
+
+/** Each `const`/`let`/`var` declaration in the file, by every name it binds: the whole statement, whitespace collapsed.
+ *  A name declared twice in different scopes keeps both texts. */
+function declarationsOf(text: string, tokens = sourceTokens(text)): Map<string, string[]> {
+  const declarations = new Map<string, string[]>();
+  for (let i = 0; i < tokens.length; i++) {
+    if (!["const", "let", "var"].includes(tokens[i]!.text) || !(isName(tokens[i + 1]) || OPENERS.has(tokens[i + 1]?.text ?? ""))) continue;
+    const names = isName(tokens[i + 1]) ? [tokens[i + 1]!.text]
+      : tokens.slice(i + 2, closing(tokens, i + 1)).filter((token) => isName(token)).map((token) => token.text);
+    let end = i + 1, depth = 0;
+    for (let k = i + 1; k < tokens.length; k++) {
+      const token = tokens[k]!;
+      if (depth === 0 && k > i + 1 && (token.text === ";" || (token.lineBreak && !CONTINUES.test(tokens[k - 1]!.text)
+        && !CONTINUES.test(token.text)))) break;
+      if (OPENERS.has(token.text)) depth++;
+      else if (CLOSERS.has(token.text) && --depth < 0) break;
+      end = k;
+    }
+    const statement = sliceOf(text, tokens, i, end);
+    for (const name of names) declarations.set(name, [...(declarations.get(name) ?? []), statement]);
+  }
+  return declarations;
+}
+
+/** The names whose declarations in `base` are not all still present, word for word, in `head`. */
+function changedDeclarations(base: Map<string, string[]>, head: Map<string, string[]>): Set<string> {
+  const changed = new Set<string>();
+  for (const [name, texts] of base) {
+    const left = [...(head.get(name) ?? [])];
+    for (const text of texts) {
+      const at = left.indexOf(text);
+      if (at < 0) { changed.add(name); break; }
+      left.splice(at, 1);
+    }
+  }
+  return changed;
+}
+
+/** W1-T15064: the assertions of an existing test file the round's diff removed or changed, per file. An assertion
+ *  also counts as changed when a declaration its arguments read changed, such as `const expected = false`. */
 export function rewrittenTestExpectations(changes: ReadonlyArray<{ path: string; base: string; head: string }>):
   Array<{ path: string; changed: string[] }> {
   return changes.flatMap(({ path, base, head }) => {
+    const baseTokens = sourceTokens(base), headTokens = sourceTokens(head);
+    const moved = changedDeclarations(declarationsOf(base, baseTokens), declarationsOf(head, headTokens));
     const left = new Map<string, number>();
-    for (const call of assertionCalls(head)) left.set(call, (left.get(call) ?? 0) + 1);
-    const changed = assertionCalls(base).filter((call) => {
+    for (const { call } of assertionsOf(head, headTokens)) left.set(call, (left.get(call) ?? 0) + 1);
+    const changed = assertionsOf(base, baseTokens).flatMap(({ call, reads }) => {
       const n = left.get(call) ?? 0;
       if (n > 0) left.set(call, n - 1);
-      return n === 0;
+      if (n === 0) return [call];
+      const read = [...reads].filter((name) => moved.has(name)).sort();
+      return read.length > 0 ? [`${call} (reads changed ${read.join(", ")})`] : [];
     });
     return changed.length > 0 ? [{ path, changed }] : [];
   });
@@ -297,11 +424,14 @@ export async function readExpectationRewrites(git: (args: string[]) => Promise<s
       head: await git(["show", `${head}:${path}`]) }]);
     if (!rewrite) continue;
     let changed = rewrite.changed;
+    const headText = await git(["show", `${head}:${path}`]);
     for (const parent of mergedParents) {
       for (const candidate of [...new Set([path, from])]) {
         if ((await git(["ls-tree", "--name-only", parent, "--", candidate])).trim() === "") continue;
-        const kept = new Set(assertionCalls(await git(["show", `${parent}:${candidate}`])));
-        changed = changed.filter((call) => kept.has(call));
+        // Charged only for what the round also changed against the branch it merged.
+        const [againstParent] = rewrittenTestExpectations([{ path, base: await git(["show", `${parent}:${candidate}`]), head: headText }]);
+        const alsoChanged = new Set((againstParent?.changed ?? []).map(assertionKey));
+        changed = changed.filter((call) => alsoChanged.has(assertionKey(call)));
         break;
       }
     }
