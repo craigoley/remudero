@@ -19,6 +19,8 @@ import type { LightPassScope } from "#src/lib/daemon.js";
 import type { OpenPrView } from "#src/lib/sweep.js";
 import type { TickReadFacts } from "#src/lib/tick-read-worker.js";
 
+/** Read from the clock: the list read ages a pull request by `updated_at` against sweep.staleDays. */
+const OPENED_AT = new Date().toISOString();
 const IDLE: LightPassScope = { reviewOnly: true, scope: "idle" };
 const DRAIN: LightPassScope = { reviewOnly: true, scope: "drain" };
 const BOOT: LightPassScope = { reviewOnly: true, scope: "boot" };
@@ -41,8 +43,8 @@ function hookView(prNumber: number, headSha: string, ready = false): OpenPrView 
 
 function pullRow(prNumber: number, headSha: string, repo: string): Record<string, unknown> {
   return { number: prNumber, html_url: `https://github.com/o/${repo}/pull/${prNumber}`, state: "open", draft: false,
-    title: `feat: ${prNumber}`, body: `Remudero-Task: W1-T${prNumber}`, updated_at: "2026-11-14T00:00:00Z",
-    created_at: "2026-11-14T00:00:00Z", head: { ref: `run-W1-T${prNumber}-1`, sha: headSha } };
+    title: `feat: ${prNumber}`, body: `Remudero-Task: W1-T${prNumber}`, updated_at: OPENED_AT,
+    created_at: OPENED_AT, head: { ref: `run-W1-T${prNumber}-1`, sha: headSha } };
 }
 
 function hookFixture(ownPr: OpenPrView) {

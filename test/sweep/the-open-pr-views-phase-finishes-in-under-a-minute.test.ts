@@ -21,6 +21,8 @@ import { ghShim } from "#test/helpers/gh-shim.js";
 import { writeLedger } from "#test/helpers/ledger-fixture.js";
 import { buildSweepLightHook } from "#test/helpers/run-task-test.js";
 
+/** Read from the clock: the list read ages a pull request by `updated_at` against sweep.staleDays. */
+const OPENED_AT = new Date().toISOString();
 const NO_PLAN: Plan = { tasks: [], byId: new Map() };
 const RED = new Set([1, 2, 3]);
 const EVIDENCE: CiFailure[] = [{ name: "ci-gate", logTail: "not ok 1", conclusion: "FAILURE" }];
@@ -36,7 +38,7 @@ function board(opts: { delayMs?: number } = {}) {
   const evidenceReads: string[] = [];
   const row = (n: number) => ({
     number: n, html_url: `https://github.com/o/r/pull/${n}`, state: "open", draft: false, title: `fix: ${n}`,
-    body: `Remudero-Task: W1-T${n}`, updated_at: "2026-11-14T00:00:00Z", created_at: "2026-11-14T00:00:00Z",
+    body: `Remudero-Task: W1-T${n}`, updated_at: OPENED_AT, created_at: OPENED_AT,
     head: { ref: `run-W1-T${n}-1`, sha: heads.get(n) },
   });
   const prOfHead = (path: string) => [...heads].find(([, sha]) => path.includes(`/${sha}/`))?.[0];
@@ -115,7 +117,7 @@ test("W1-T12530 criterion 1: the light pass timing row names the time of each vi
   const oldEnv = keys.map((key) => [key, process.env[key]] as const);
   const pull = {
     number: 1253001, html_url: `https://github.com/o/${repo}/pull/1253001`, state: "open", draft: false, title: "fix: x",
-    body: "Remudero-Task: W1-T1253001", updated_at: "2026-11-14T00:00:00Z", created_at: "2026-11-14T00:00:00Z",
+    body: "Remudero-Task: W1-T1253001", updated_at: OPENED_AT, created_at: OPENED_AT,
     head: { ref: "run-W1-T1253001-1", sha: "head-c1" },
   };
   const gh = ghShim([

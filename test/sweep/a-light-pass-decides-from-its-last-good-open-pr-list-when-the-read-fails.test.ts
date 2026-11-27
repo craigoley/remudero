@@ -33,6 +33,8 @@ import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 import { ghShim, type GhShim } from "#test/helpers/gh-shim.js";
 import { buildSweepLightHook } from "#test/helpers/run-task-test.js";
 
+/** Read from the clock: the list read ages a pull request by `updated_at` against sweep.staleDays. */
+const OPENED_AT = new Date().toISOString();
 const NO_PLAN: Plan = { tasks: [], byId: new Map() };
 const IDLE: LightPassScope = { reviewOnly: false, scope: "idle" };
 const RATE_LIMITED = "gh: API rate limit exceeded for installation ID 1 (HTTP 403)";
@@ -51,8 +53,8 @@ function view(prNumber: number, headSha: string, ready = false): OpenPrView {
 function pullRow(prNumber: number, headSha: string, repo: string): Record<string, unknown> {
   return {
     number: prNumber, html_url: `https://github.com/o/${repo}/pull/${prNumber}`, state: "open", draft: false,
-    title: `feat: ${prNumber}`, body: `Remudero-Task: W1-T${prNumber}`, updated_at: "2026-11-14T00:00:00Z",
-    created_at: "2026-11-14T00:00:00Z", head: { ref: `run-W1-T${prNumber}-1`, sha: headSha },
+    title: `feat: ${prNumber}`, body: `Remudero-Task: W1-T${prNumber}`, updated_at: OPENED_AT,
+    created_at: OPENED_AT, head: { ref: `run-W1-T${prNumber}-1`, sha: headSha },
   };
 }
 
