@@ -190,6 +190,15 @@ test("W1-T15115 criterion 2: a fix handed to the host at its spawn stays charged
   handed.handOff?.();
   handed.release?.();
   assert.equal(loneRows.at(-1)!.pending_reservations, 0, "a second release or hand-off charges nothing back twice");
+
+  // A reading with no live entries to watch for (an injected residency): the hand-off is origin/main's release.
+  const injectedRows: Row[] = [];
+  const injected = controller({ rows: injectedRows, headroomMib: FIX_MIB, residents: () => ({ review: [], fix: [] }) });
+  const plain = injected.claim(pr);
+  assert.equal(plain.admitted, true);
+  if (plain.admitted) plain.handOff?.();
+  assert.equal(injectedRows.at(-1)!.pending_reservations, 0);
+  assert.equal(injectedRows.at(-1)!.fix_admissions_available, 1);
 });
 
 test("W1-T15115 criterion 3: a round waiting on CI, and an entry whose occupancy is released, hold no unrealized charge", (t) => {
