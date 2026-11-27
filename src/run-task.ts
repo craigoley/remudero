@@ -1074,6 +1074,7 @@ import {
   approvePrTitle,
   approveProposal,
   classifyProposal,
+  releasedHumanTaskPredicate,
   SKILL_DRAFT_ID_PREFIX,
   draftsDueOnDaemon,
   indexInboxDraftReceipts,
@@ -3162,6 +3163,7 @@ import { hasThreadEvent, inboxThreadId, readThread, verifiedInboxInput, type Inb
 import { gatherActorEvidence } from "./lib/actor-evidence.js";
 import { readGithubWebhookSecret, resolveGithubWebhookSecretFilePath } from "./lib/github-event-wake.js";
 import { startInstallationTokenRefresh } from "./lib/github-app.js";
+import { armCliTokenRenewal } from "./lib/cli-token-renewal.js";
 import { withManagedGardenTokenRefresh } from "./lib/managed-garden-token.js";
 import { branchCitationPattern, branchNamesFingerprint, decideAutomaticBranchReap, DECLARED_BRANCH_GUARDS, declaredGuardsBlockSpan, DECLARED_BRANCH_GUARDS_FILE, nextMergedHeadCache, nextNoPrHeadCache, parseBranchCitationHits, planReverseBranchDrift, planStaleHoldArchive, readDispatchClaimTaskIdsSteps, remoteBranchHeadsSteps, archiveStaleHoldsSteps, staleHoldRestoreCommand, STALE_HOLD_ARCHIVE_CAP, pruneDeletableBranchesSteps, readNamedInSourceSteps, readRemoteBranchTipsSteps, readTipInMainMembershipSteps, remoteBranchNamesSteps, tipInMainFor, type AutomaticBranchReapState, type BranchReapExec, withholdActiveBranches, type BranchManifestEntry } from "./lib/branch-reaper.js";
 // The repo-location cluster (W1-T2260) MOVED to ./lib/repo-location.ts, together with the
@@ -38837,6 +38839,7 @@ export async function inboxCommand(rest: string[], deps: { config?: Config; gith
       openProposalIds,
       isRatified: (id) => isRatifiedInLedger(ledgerLinesForRatify, id),
       isDeclined: declinedWithReceipts(ledgerLinesForRatify, join(config.root, "state")),
+      isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLinesForRatify),
     }),
   );
   for (const c of classifications) log("inbox.classified", { proposal_id: c.proposalId, state: c.state, reasons: c.reasons });
@@ -38917,6 +38920,7 @@ function loadProposalForRatify(
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
     isDeclined: declinedWithReceipts(ledgerLines, join(inboxRoot, "state")),
+    isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLines),
   };
   const classification = classifyProposal(proposal, drafts[proposal.id], ctx);
   return { proposal, proposals, drafts, draftsPath, classification };
@@ -38959,6 +38963,7 @@ function loadProposalsForRatify(
     openProposalIds: new Set(proposals.map((p) => p.id)),
     isRatified: (id) => isRatifiedInLedger(ledgerLines, id),
     isDeclined: declinedWithReceipts(ledgerLines, join(config.root, "state")),
+    isReleasedHumanTask: releasedHumanTaskPredicate(plan, ledgerLines),
   };
 
   const found: { id: string; proposal: Proposal; classification: InboxClassification }[] = [];
@@ -46313,11 +46318,11 @@ async function main(
   // cost ~120ms (700/723/734 vs 592/615/592 with GH_TOKEN preset). The mint is AWAITED and carries
   // EXCHANGE_TIMEOUT_MS (20s, src/lib/github-app.ts:66), so on an unreachable network that ceiling
   // stood between the operator and `usage:`.
-  if (!process.env.GH_TOKEN) {
-    await refreshInstallationToken({
-      log: (step, extra) => console.error(`rmd: ${step} ${extra ? JSON.stringify(extra) : ""}`.trim()),
-    });
-  }
+  // W1-T15038: a non-service verb keeps a live token through the shared renewal loop, not a one-hour one-shot mint.
+  await armCliTokenRenewal({
+    cmd, refresh: refreshInstallationToken,
+    log: (step, extra) => console.error(`rmd: ${step} ${extra ? JSON.stringify(extra) : ""}`.trim()),
+  });
   // W1-T79: CLI self-freshness, checked directly after the (mandatory, every-call) help
   // preamble above and BEFORE any command's real dispatch — the #138 incident shape: `rmd
   // correct` existed on origin/main, but the OPERATOR's own invocation was a stale checkout

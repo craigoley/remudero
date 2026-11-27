@@ -9,11 +9,14 @@
  * carries may refuse it, and every such change still does.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { PreviewUnknown, selectPlanTaskMigration, type MigrationGraphqlReader, type MigrationSelection } from "#src/lib/plan-task-migration.js";
+import { moveReservation, PreviewUnknown, selectPlanTaskMigration, type MigrationGraphqlReader, type MigrationSelection } from "#src/lib/plan-task-migration.js";
+import { MOVE_RESERVATION_TRAILER } from "#src/lib/plan-task-move.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 import { moveWorld, OPS, PUBLIC, record, shard, type MoveWorld, type Side } from "#test/helpers/plan-move-world.js";
 
 type Json = Record<string, unknown>;
@@ -294,6 +297,124 @@ test("W1-T14447 criterion 4: invariant:a-changed-carried-task-never-moves — a 
       () => landed ? [mergedNode(502, "run-W1-T1-1795000000004", "fix: build it")] : []));
     assert.equal(result.reason, "ownership_changed", "a newly merged run branch of the candidate refuses the selection");
   }
+});
+
+/** W1-T14993: drop an id's refs/rmd-id ref, as the ids filed before reservations (W1-T4190..W1-T4216) never had one. */
+const unreserve = (w: MoveWorld, id: string) => w.pub.origin.git("update-ref", "-d", `refs/rmd-id/${id}`);
+/** W1-T14993: the real scripts/task-id-existence-check.mjs, no stub, over the public tree at `commit` less `removed`. */
+function taskIdExistence(w: MoveWorld, commit: string, removed: string[] = []): { status: number | null; out: string } {
+  const dir = join(w.root, `gate-${commit.slice(0, 12)}-${removed.length}`);
+  w.pub.clone.git("fetch", "--quiet", "origin");
+  w.pub.clone.git("worktree", "add", "--quiet", "--detach", dir, commit);
+  for (const rel of removed) rmSync(join(dir, rel));
+  const baseline = join(w.root, "empty-task-id-baseline.json");
+  writeFileSync(baseline, "[]\n");
+  const run = spawnSync(process.execPath, [join(REPO_ROOT, "scripts", "task-id-existence-check.mjs"), "--cwd", dir, "--baseline", baseline], { encoding: "utf8" });
+  return { status: run.status, out: `${run.stdout}${run.stderr}` };
+}
+
+test("W1-T14993 criterion 1: a record with no refs/rmd-id ref that the public plan holds at the base is selected", async t => {
+  // OBSERVED 2026-11-26: the 14:04:32Z stand_down refused W1-T4210 and W1-T4215 as reservation_absent.
+  const w = moveWorld(t, { "W1-T1": record("W1-T1"), "W1-T2": record("W1-T2") });
+  unreserve(w, "W1-T1");
+  assert.equal(w.reservations().includes("refs/rmd-id/W1-T1"), false, "positive control: W1-T1 has no reservation ref");
+  const result = await select(w, reader(w, 2, () => undefined));
+  assert.equal(result.reason, undefined, String(result.reason));
+  assert.deepEqual(result.selection?.refused.filter(r => r.reason === "reservation_absent"), [], "THE CLAIM: no reservation_absent refusal");
+  assert.deepEqual(batchIds(result.selection), ["W1-T1", "W1-T2"], "THE CLAIM: the unreserved record is selected with the reserved one");
+});
+
+test("W1-T14993 criterion 2: invariant:reservation-still-checked — an id with no ref and absent from the public plan at the base is refused", () => {
+  const refs = new Map([["refs/rmd-id/W1-T2", "a".repeat(40)]]);
+  const base = { commit: "b".repeat(40), ids: new Set(["W1-T1"]) };
+  assert.equal(moveReservation("W1-T3", refs, base), undefined, "THE CLAIM: neither a ref nor the base holds W1-T3, so nothing proves it");
+  assert.equal(moveReservation("W1-T2", refs, base), "a".repeat(40), "a reservation ref is still the evidence when it exists");
+  assert.equal(moveReservation("W1-T1", refs, base), `held-at=remudero@${"b".repeat(40)}`, "positive control: the base holds W1-T1");
+});
+
+test("W1-T14993 criterion 3: an unreserved record is copied and removed with held-at evidence, and its removal completes unchanged", async t => {
+  const w = moveWorld(t, { "W1-T1": record("W1-T1") });
+  unreserve(w, "W1-T1");
+  const publicCommit = w.main("public");
+  const copyRun = await w.run();
+  assert.equal(copyRun.out.step, "copy", copyRun.lines.join("\n"));
+  const copy = w.pulls.at(-1)!;
+  assert.ok(copy.body.split("\n").includes(`${MOVE_RESERVATION_TRAILER} W1-T1 held-at=remudero@${publicCommit}`), `THE CLAIM: the copy names its held-at evidence: ${copy.body}`);
+  w.merge(copy);
+  const removeRun = await w.run();
+  assert.equal(removeRun.out.step, "remove", removeRun.lines.join("\n"));
+  const removal = w.pulls.at(-1)!;
+  assert.match(removal.body, new RegExp(`^${MOVE_RESERVATION_TRAILER} W1-T1 held-at=remudero@[0-9a-f]{40}$`, "m"), `THE CLAIM: the removal names its held-at evidence: ${removal.body}`);
+  w.merge(removal);
+  const done = await w.run();
+  assert.equal(done.out.step, "complete", done.lines.join("\n"));
+  assert.deepEqual((done.out.completed as Array<Record<string, unknown>>).map(row => [row.id, row.reservation, row.reservationUnchanged]), [["W1-T1", null, true]],
+    "THE CLAIM: the removal completes with its id still unreserved");
+  assert.ok(w.holds("ops", "W1-T1") && !w.holds("public", "W1-T1"), "the record moved");
+  const gate = taskIdExistence(w, w.main("public"));
+  assert.equal(gate.status, 0, `THE CLAIM: the real task-id-existence check passes the public tree after the removal: ${gate.out}`);
+});
+
+test("W1-T14993 criterion 3: an unreserved record a public file still cites stays, since the real task-id-existence check refuses its removal", async t => {
+  // OBSERVED 2026-11-26 (review of 42d744ff3): W1-T4210 and W1-T4215 were selected, but public records cite them, so the
+  // real gate refused each REMOVE and converge planned it again on every pass.
+  const w = moveWorld(t, { "W1-T1": record("W1-T1"), "W1-T3": record("W1-T3") });
+  unreserve(w, "W1-T1");
+  unreserve(w, "W1-T3");
+  w.commitTo("public", { "src/cites-w1-t1.ts": "// Follows W1-T1.\nexport {};\n" }, "chore: cite W1-T1");
+  const result = await select(w, reader(w, 1, () => undefined));
+  assert.equal(result.reason, undefined, String(result.reason));
+  assert.deepEqual(result.selection?.refused.filter(r => r.id === "W1-T1"), [{ id: "W1-T1", reason: "citation_unresolved" }],
+    "THE CLAIM: the cited unreserved record is left in place");
+  assert.deepEqual(batchIds(result.selection), ["W1-T3"], "positive control: an unreserved record nothing else cites still moves");
+  const commit = w.main("public");
+  const kept = taskIdExistence(w, commit);
+  assert.equal(kept.status, 0, `positive control: the real check passes while the record stays: ${kept.out}`);
+  const removed = taskIdExistence(w, commit, [shard("W1-T1")]);
+  assert.equal(removed.status, 1, removed.out);
+  assert.match(removed.out, /^ {2}W1-T1$/m, "the real check names W1-T1 unresolved once its shard is gone");
+});
+
+test("W1-T14993 criterion 3: a copied unreserved record cited after its copy is rolled back, and the other copies still move", async t => {
+  // OBSERVED 2026-11-27 (review of 2bd6c9ec9): a citation merged to core after COPY made REMOVE fail the real gate on
+  // every pass, and converge returned that step before any new move.
+  const w = moveWorld(t, { "W1-T1": record("W1-T1"), "W1-T2": record("W1-T2") });
+  unreserve(w, "W1-T1");
+  const copyRun = await w.run();
+  assert.equal(copyRun.out.step, "copy", copyRun.lines.join("\n"));
+  w.merge(w.pulls.at(-1)!);
+  w.commitTo("public", { "src/cites-w1-t1.ts": "// Follows W1-T1.\nexport {};\n" }, "chore: cite W1-T1 after its copy");
+  const rolled = await w.run();
+  assert.equal(rolled.out.step, "rollback", rolled.lines.join("\n"));
+  assert.equal(rolled.out.id, "W1-T1", "THE CLAIM: the cited unreserved copy is rolled back");
+  assert.equal((rolled.out.evidence as Record<string, unknown>).owner, "public_citations", JSON.stringify(rolled.out.evidence));
+  w.merge(w.pulls.at(-1)!);
+  const removal = await w.run();
+  assert.equal(removal.out.step, "remove", removal.lines.join("\n"));
+  assert.equal(removal.out.id, "W1-T2", "THE CLAIM: the uncited copy still moves");
+  w.merge(w.pulls.at(-1)!);
+  assert.ok(w.holds("public", "W1-T1") && !w.holds("ops", "W1-T1") && w.holds("ops", "W1-T2") && !w.holds("public", "W1-T2"), "W1-T1 stays public, W1-T2 moved");
+  const gate = taskIdExistence(w, w.main("public"));
+  assert.equal(gate.status, 0, `the real task-id-existence check passes the public tree: ${gate.out}`);
+});
+
+test("W1-T14993 criterion 3: a stale-proof drop of a citer also drops the unreserved record it cites, and the rest of the copy proceeds", async t => {
+  // OBSERVED 2026-11-27 (review of 2bd6c9ec9): the drop could leave a cited unreserved record copied while its citer stayed public.
+  const citer = record("W1-T2", "  note: |\n    Follows W1-T1.\n").replace("grep: fixture in test/fixture.test.ts", "grep: stale in test/stale.test.ts");
+  const w = moveWorld(t, { "W1-T2": citer, "W1-T3": record("W1-T3") });
+  w.commitTo("public", { [shard("W1-T1")]: record("W1-T1") }, "chore: file W1-T1 after its citer");
+  const staleLine = `shard proof ${JSON.stringify("grep: stale in test/stale.test.ts")} passes at origin/main too`;
+  let calls = 0;
+  const run = await w.run(true, { preflight: async () => (++calls === 1
+    ? { ok: false, failures: [{ check: "proof-discrimination", firstLine: staleLine }], unreadable: [] }
+    : { ok: true, failures: [], unreadable: [] }) });
+  assert.equal(run.out.step, "copy", run.lines.join("\n"));
+  const opened = w.ledger.at(-1) as { outcome?: string; dropped?: Array<{ id: string; proof: string }> };
+  assert.equal(opened.outcome, "opened", JSON.stringify(opened));
+  assert.deepEqual((opened.dropped ?? []).map(d => [d.id, d.proof]).sort(),
+    [["W1-T1", "citation_unresolved"], ["W1-T2", "grep: stale in test/stale.test.ts"]], "THE CLAIM: the cited record leaves the copy with its citer");
+  const copy = w.pulls.at(-1)!;
+  assert.deepEqual(copy.files.sort(), [shard("W1-T3")], "only the uncited record is copied");
 });
 
 test("W1-T14982 criterion 1: an open pull request that only edits code a record's files lists does not own it, and the record moves", async t => {
