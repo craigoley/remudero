@@ -5112,9 +5112,9 @@ export function judgeCriterion(
             proofExec = "not_executable";
             proofSkip = "cwd-missing";
             reason = `${reason} — NOTE: ${e.message}; not executed, keyword floor applied`;
-          } else if (e instanceof ProofSandboxUnavailableError && e.startFailure !== undefined && whitelisted.kind === "test") {
-            // W1-T15100: the start check failed again on its re-run; the proof's code never ran. Not a load verdict. A
-            // `grep:` proof keeps its `not_executable` keyword floor below, as it always has.
+          } else if (e instanceof ProofSandboxUnavailableError && e.startFailure !== undefined) {
+            // W1-T15100: the start check failed again on its re-run; the proof's code never ran, whatever its kind. Not a
+            // load verdict, and never the keyword floor: a `grep:` proof is held and re-run exactly like a `unit test:`.
             proofExec = "sandbox_start_failed";
             proofSkip = "runner-absent";
             startFailure = e.startFailure;
@@ -5127,8 +5127,6 @@ export function judgeCriterion(
               `sandbox_start_failed, not an unmet criterion — the next pass re-runs it`;
           } else if (e instanceof ProofSandboxUnavailableError) {
             proofSkip = "runner-absent";
-            // W1-T15100: a `grep:` proof's failed start check keeps its evidence too, whatever proof_exec it gets.
-            startFailure = e.startFailure;
             if (whitelisted.kind === "test") {
               inconclusiveUnderLoad(`could not start its sandbox (${e.sandboxReason})`);
             } else {

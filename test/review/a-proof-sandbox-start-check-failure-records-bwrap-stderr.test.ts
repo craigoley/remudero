@@ -17,6 +17,7 @@ import { inconclusiveLoadLowered, pendingProofRetryCause, type OpenPrView } from
 // review called each one inconclusive_load and parked its PR pending.
 const PROOF_FILE = "test/start-check.test.ts";
 const criteria = [{ claim: "the behaviour holds", proof: `unit test: ${PROOF_FILE}` }];
+const grepCriteria = [{ claim: "the behaviour holds", proof: "grep: behaviour in src/x.ts" }];
 const checkout = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}sandbox-start-`));
 mkdirSync(join(checkout, "test"), { recursive: true });
 writeFileSync(join(checkout, PROOF_FILE), "import { test } from 'node:test'; test('x', () => {});\n");
@@ -77,10 +78,9 @@ test("W1-T15100 criterion 1: a failed start check records bwrap's stderr, exit c
   const record = opsReviewRecord({ taskId: "W1-T1", prUrl: "https://github.com/o/r/pull/1", headSha: "a".repeat(40), state: "pending",
     decisionDigest: "d", criteria: [criterion!], reasons: [], findings: [] });
   assert.deepEqual(record.criteria[0]!.sandbox_start_failure, { stderr: failure.stderr, exit_code: 1, signal: null, bind_sources: failure.bindSources });
-  // A `grep:` proof keeps its keyword floor, and its failed start check's evidence too.
-  const grepCriteria = [{ claim: "the behaviour holds", proof: "grep: behaviour in src/x.ts" }];
+  // A `grep:` proof's failed start check keeps the same evidence.
   const [grep] = judgeReview(grepCriteria, evidence({ execProof: () => { throw startFailed(); } })).criteria;
-  assert.equal(grep!.proof_exec, "not_executable");
+  assert.equal(grep!.proof_exec, "sandbox_start_failed");
   assert.deepEqual(grep!.sandboxStartFailure, failure);
 });
 
@@ -123,4 +123,15 @@ test("W1-T15100 criterion 2: a failed start check is sandbox_start_failed and re
   assert.equal(pendingProofRetryCause(pr, [row("inconclusive_load", { load: { start: { load1: 20 }, end: { load1: 41 } } })], () => ({ load1: 5 })),
     "inconclusive-load");
   assert.equal(pendingProofRetryCause(pr, [row("executed_fail")], () => ({ load1: 1 })), undefined);
+  // A `grep:` proof is held and re-run the same way, by both judges: never the keyword floor, never unmet.
+  const grepSync = judgeReview(grepCriteria, evidence({ execProof: () => { throw startFailed(); } }));
+  assert.deepEqual([grepSync.criteria[0]!.proof_exec, grepSync.state], ["sandbox_start_failed", "pending"]);
+  assert.deepEqual(unmetReviewCriteria(grepSync.criteria), []);
+  let grepCalls = 0;
+  const grepFlaky = await judgeReviewAsync(grepCriteria, evidence({ asyncExecProof: async () => { grepCalls++; if (grepCalls === 1) throw startFailed(); return "pass"; } }));
+  assert.deepEqual([grepCalls, grepFlaky.criteria[0]!.proof_exec, grepFlaky.state], [2, "executed_pass", "success"]);
+  const grepStuck = await judgeReviewAsync(grepCriteria, evidence({ asyncExecProof: async () => { throw startFailed(); } }));
+  assert.deepEqual([grepStuck.criteria[0]!.proof_exec, grepStuck.state], ["sandbox_start_failed", "pending"]);
+  assert.match(grepStuck.summary, /^remudero-review: sandbox-start-failed — /);
+  assert.equal(pendingProofRetryCause(pr, [row("sandbox_start_failed", { proof: "grep: behaviour in src/x.ts" })], () => ({ load1: 99 })), "sandbox-start-failed");
 });
