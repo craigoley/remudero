@@ -30,6 +30,7 @@ import {
   type GhCallPacer,
   type GhReadCadenceDeps,
 } from "#src/lib/github-transport.js";
+import { startInstallationTokenRefresh } from "#src/lib/github-app.js";
 import { RMD_TMP_PREFIX } from "#src/lib/tmp.js";
 
 const READ = ["api", "repos/o/r/pulls/1"] as const;
@@ -190,6 +191,45 @@ test("W1-T15055 criterion 3: a wait longer than the token's remaining life ends 
     (err: unknown) => err instanceof GhReadWaitOutlivesTokenRefusal,
     "a read riding a minted token with 30 s left refuses a longer wait",
   );
+});
+
+test("W1-T15055 criterion 3: a CLI run's renewed token bounds a gated wait with no deadline passed", async (t) => {
+  const f = fixture(t);
+  recordGhSecondaryLimitRefusal(f.env, f.now());
+  stampGhRead(ghReadCadenceStampPath(f.env)!, "", f.now() - 5_000);
+  // The CLI entry arms the renewal loop (W1-T15038); its held token has 60 s left.
+  Object.assign(f.env, { GH_APP_ID: "1", GH_APP_INSTALLATION_ID: "2", GH_APP_PRIVATE_KEY_PATH: "/nonexistent" });
+  const loop = startInstallationTokenRefresh({
+    log: () => {}, env: f.env, now: f.now, setTimer: () => ({}), clearTimer: () => {},
+    refresh: async (o) => { o.env!.GH_TOKEN = "held-token"; return { ok: true, token: "held-token", expiresAtMs: f.now() + 60_000 }; },
+  });
+  t.after(() => loop.stop?.());
+  await loop.ready;
+  await assert.rejects(applyGhReadCadenceAsync(READ, f.deps),
+    (err: unknown) => err instanceof GhReadWaitOutlivesTokenRefusal && err.reason === "token_life",
+    "the default deps read the held token's expiry");
+  assert.throws(() => applyGhReadCadence(READ, f.deps), (err: unknown) => err instanceof GhReadWaitOutlivesTokenRefusal);
+  assert.ok(slept(f.sleeps) < 60_000, `it never slept past the token: ${JSON.stringify(f.sleeps)}`);
+  // A token the loop does not hold has no known expiry, so the wait runs as before.
+  f.env.GH_TOKEN = "someone-elses-token";
+  applyGhReadCadence(READ, f.deps);
+  assert.ok(slept(f.sleeps) >= FULL_MS - 10_000, `an unheld token is not bounded: ${slept(f.sleeps)} ms`);
+});
+
+test("W1-T15055 criterion 4: a Retry-After only in stdout keeps the refusal backoff doubling", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}gh-backoff-`));
+  const savedHome = process.env.RMD_GH_CACHE_HOME;
+  process.env.RMD_GH_CACHE_HOME = dir;
+  t.after(() => {
+    if (savedHome === undefined) delete process.env.RMD_GH_CACHE_HOME; else process.env.RMD_GH_CACHE_HOME = savedHome;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const sleeps: number[] = [];
+  const pacer: GhCallPacer = { wait: () => {}, recordResult: () => {}, sleepSync: (ms) => { sleeps.push(ms); } };
+  const refusal = () => Object.assign(new Error("HTTP 403"), { status: 403, stdout: "HTTP/2 403\r\nRetry-After: 60\r\n\r\n" });
+  assert.throws(() => paceGhEntry(pacer, () => true, () => { throw refusal(); }, { random: () => 0 }));
+  assert.deepEqual(sleeps, [60_000, 120_000, 240_000], "stdout headers do not flatten the 60/120/240 s backoff");
+  assert.ok(ghErrorIsSecondaryLimit(refusal()), "the same refusal still counts as a secondary-limit refusal");
 });
 
 test("W1-T15055 criterion 4: writes, exempt calls and advisory reads keep their current pacing", (t) => {

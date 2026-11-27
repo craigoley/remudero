@@ -18,7 +18,7 @@ import { clockFromMillisFn, loopAvailableDeadline, systemClock } from "./clock.j
 import { defaultIsPidAlive } from "./drain-lock.js";
 import { RmdError } from "./errors.js";
 import { brokerGhRead, ghBrokerClientSpawn, ghBrokerRouteFor, type GhBrokerClass, type GhBrokerResult } from "./gh-read-broker-client.js";
-import { refreshInstallationToken, type EnsureFreshOutcome, type HeldTokenState } from "./github-app.js";
+import { heldTokenDeadlineMs, refreshInstallationToken, type EnsureFreshOutcome, type HeldTokenState } from "./github-app.js";
 import { createInstallationBudget, installationBudgetForThread, type InstallationBudget, type InstallationBudgetThreadInput, type GithubBudgetThrottledRow } from "./github-installation-budget.js";
 import { ghArgvNeedsNoCredential, githubRepoOfGhArgv, resolveGithubCredential, type GithubCredentialResolution } from "./github-credential.js";
 import {
@@ -1019,8 +1019,11 @@ export const DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS = 4;
 export const DEFAULT_GH_REFUSAL_BACKOFF_JITTER_FRACTION = 0.25;
 
 export function defaultGhRetryAfterSeconds(err: unknown): number | undefined {
-  const e = err as { stdout?: string | Buffer; stderr?: string | Buffer; message?: string } | null | undefined;
-  const text = `${e?.stdout ?? ""}\n${e?.stderr ?? ""}\n${e?.message ?? ""}`;
+  const e = err as { stderr?: string | Buffer; message?: string } | null | undefined;
+  return retryAfterSecondsIn(`${e?.stderr ?? ""}\n${e?.message ?? ""}`);
+}
+
+function retryAfterSecondsIn(text: string): number | undefined {
   const match = /retry-after\s*:?\s*(\d+)/i.exec(text);
   if (!match) return undefined;
   const seconds = Number(match[1]);
@@ -1194,7 +1197,7 @@ export function ghErrorIsSecondaryLimit(err: unknown): boolean {
   if (e === null || e === undefined) return false;
   if (/secondary rate|abuse detection/i.test(`${e.stdout ?? ""}\n${e.stderr ?? ""}\n${e.message ?? ""}`)) return true;
   const shaped = e.status === 403 || e.status === 429 || ghErrorTextLooksRateLimited(err);
-  return shaped && defaultGhRetryAfterSeconds(err) !== undefined;
+  return shaped && retryAfterSecondsIn(`${e.stdout ?? ""}\n${e.stderr ?? ""}\n${e.message ?? ""}`) !== undefined;
 }
 
 /** The `search` limiter — a separate bucket with its own, far lower ceiling. */
@@ -2192,7 +2195,7 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     reportWait,
     assertWaitWithinTokenLife: (waitMs) => {
       if (!waiter || waitMs <= 0) return;
-      const deadline = deps.tokenDeadlineMs?.();
+      const deadline = deps.tokenDeadlineMs ? deps.tokenDeadlineMs() : heldTokenDeadlineMs(env.GH_TOKEN);
       if (deadline === undefined) return;
       const remainingMs = deadline - now();
       if (waitMs >= remainingMs) throw new GhReadWaitOutlivesTokenRefusal(waitMs, remainingMs);
