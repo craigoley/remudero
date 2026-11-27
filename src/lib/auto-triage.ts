@@ -779,7 +779,10 @@ export function repeatedTriageRefusal(
     if (!Number.isFinite(ts) || (Number.isFinite(changedMs) && ts < changedMs)) continue;
     // The daemon writes the repeated row as a producer row, keyed by `feedback`; the triage ends are keyed by task id.
     if (row.step === AUTO_TRIAGE_REFUSAL_REPEATED_STEP && row.feedback === feedbackId && typeof row.check === "string") namedCheck = row.check;
-    if (row.step === "pr.opened" || row.step === "triage.grill_opened" || row.step === "verdict") {
+    // An unrelated entry can be triaged between fires while this entry is yielded from the queue.
+    // Only the target entry's successful progress ends its refusal streak.
+    if (row.task_id === `TRIAGE-${feedbackId}` &&
+      (row.step === "pr.opened" || row.step === "triage.grill_opened" || row.step === "verdict")) {
       run.length = 0;
       namedCheck = undefined;
       continue;

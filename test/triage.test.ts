@@ -1606,7 +1606,7 @@ test("W1-T4203: a refused triage commit is not re-triaged", async () => {
 });
 
 test("W1-T14905 the auto-triage pass backs off a repeatedly refused entry and names its check once", async () => {
-  const { autoTriageCheck } = await import("../src/run-task.js");
+  const { autoTriageCheck, readAutoTriageRefusalRowsAsync } = await import("../src/run-task.js");
   const { loadPolicy, policyPath } = await import("../src/lib/policy.js");
   const { triageCandidateReaders, AUTO_TRIAGE_REFUSAL_REPEATED_STEP } = await import("../src/lib/auto-triage.js");
   const { ledgerPathFor } = await import("../src/lib/ledger-path.js");
@@ -1625,6 +1625,8 @@ test("W1-T14905 the auto-triage pass backs off a repeatedly refused entry and na
     const ago = (minutes: number) => new Date(now.getTime() - minutes * 60_000).toISOString();
     const refusals = [120, 80, 40].map((m) => ({ step: "triage.relint_refused", task_id: `TRIAGE-${head}`, ts: ago(m),
       stop: "exhausted", checks: ["design-invariant-proof"] }));
+    refusals.push({ step: "pr.opened", task_id: "TRIAGE-fb-other", ts: ago(60),
+      stop: "opened" } as typeof refusals[number]);
     const args = { config, policy, now, deferralPending: true, dispatchCount: 1, laneBudget: 1, claimReserver,
       readFeedbackChangedAt: async () => undefined };
     const first = await autoTriageCheck({ ...args, readRefusalRows: () => refusals });
@@ -1640,9 +1642,10 @@ test("W1-T14905 the auto-triage pass backs off a repeatedly refused entry and na
       lastPass: () => ({ readBytes: 0, parsedLines: 1, seededRotations: 0 }),
       lastLoad: () => ({ rotations: 0, digestHits: 0, digestMisses: 0 }),
     }) as never;
-    await autoTriageCheck({ ...args, refusalHistory });
+    const readThroughProductionFilter = () => readAutoTriageRefusalRowsAsync(config, refusalHistory, (() => {}) as never);
+    await autoTriageCheck({ ...args, readRefusalRows: readThroughProductionFilter });
     assert.equal(written().length, 1, "a later pass that reads the row does not write it again");
-    await autoTriageCheck({ ...args, refusalHistory });
+    await autoTriageCheck({ ...args, readRefusalRows: readThroughProductionFilter });
     assert.equal(written().length, 1, "further passes through the production reader keep the same streak named once");
   } finally {
     rmSync(root, { recursive: true, force: true });

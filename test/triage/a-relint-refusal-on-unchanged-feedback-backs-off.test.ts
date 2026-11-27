@@ -72,6 +72,10 @@ test("W1-T14905 a repeated refusal check yields the entry once", () => {
     "triage errors repeat on their text before the first colon, so changing file names do not hide the repeat");
   const ended = [...three, { step: "verdict", task_id: "TRIAGE-fb-old", ts: at(90).toISOString() }];
   assert.equal(triage.repeatedTriageRefusal(ended, "fb-old"), undefined, "a real triage end clears the run");
+  const interleaved = [refused(0), refused(40),
+    { step: "pr.opened", task_id: "TRIAGE-fb-other", ts: at(60).toISOString() }, refused(80)];
+  assert.deepEqual(triage.repeatedTriageRefusal(interleaved, "fb-old")?.check, "design-invariant-proof",
+    "another entry's success between refusals does not break this entry's streak");
   assert.equal(triage.repeatedTriageRefusal([...three, refused(120, ["x"], "fb-other")], "fb-other"), undefined);
   assert.ok(triage.AUTO_TRIAGE_FAILURE_STEPS.includes(triage.AUTO_TRIAGE_REFUSAL_REPEATED_STEP),
     "the refusal history the daemon reads carries the repeated row, so it is written once");
@@ -87,7 +91,9 @@ test("W1-T14905 a repeated refusal check yields the entry once", () => {
     "multiple terminal error rows from each fire form one stable repeated check");
   const nine = Array.from({ length: 9 }, (_, i) => refused(i * 40));
   const namedOnce = [...nine, { step: triage.AUTO_TRIAGE_REFUSAL_REPEATED_STEP, feedback: "fb-old",
-    check: "design-invariant-proof", ts: at(321).toISOString() }];
+    check: "design-invariant-proof", ts: at(321).toISOString() },
+    { step: "pr.opened", task_id: "TRIAGE-fb-other", ts: at(322).toISOString() },
+    refused(360), refused(400), refused(440)];
   assert.equal(triage.repeatedTriageRefusal(namedOnce, "fb-old"), undefined,
-    "an uninterrupted streak is named once even after another three refusals");
+    "an unrelated success cannot restart an already named streak");
 });
