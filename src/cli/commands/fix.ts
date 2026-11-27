@@ -2939,6 +2939,18 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     const failure = roundPushFailure;
     const receipt = roundPushReceipt;
     roundPushFailure = roundPushReceipt = undefined;
+    if (failure?.outcome === "failed" && failure.remoteHead === undefined) {
+      // W1-T14138: a rejected push says nothing about the remote on its own. Read the branch once so the round's
+      // outcome can be attributed: a readable head that is not the round's commit is no push; an unreadable one stays
+      // unresolved. The landing itself stays "failed".
+      const head = await Promise.resolve().then(() => (deps.readRemoteBranchHead ?? lsRemoteBranchHead)(opts.worktreePath, opts.branch))
+        .then((read) => read, (error: unknown) => {
+          deps.log("fix.evidence_head_unread", { head_sha: committed,
+            reason: `failed push remote head could not be read: ${String((error as Error)?.message ?? error).slice(0, 300)}` });
+          return undefined;
+        });
+      return head === undefined ? failure : { ...failure, remoteHead: head };
+    }
     if (failure) return failure;
     const readRemoteBranchHead = deps.readRemoteBranchHead ?? (receipt ? lsRemoteBranchHead : undefined);
     if (!readRemoteBranchHead) return { landed: true }; // a push double that names no head never reached a remote to read
@@ -5466,6 +5478,13 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     // W1-T5955: the round ends here, so its branch claim does too; the CI wait holds none.
     const logFixDone = (pushedHeadSha?: string, subtype?: string, landing?: FixRoundLanding): void => {
       logFixDoneRow(pushedHeadSha, subtype, landing);
+      if (pushedHeadSha === undefined && landing !== undefined && !landing.landed && landing.outcome === "failed") {
+        // W1-T14138: a failed push is no push only when the remote was read after it and does not hold the round's
+        // commit; with no readable remote the round stays unresolved.
+        if (landing.remoteHead !== undefined && landing.remoteHead !== expectedHeadShaForPush) recordFixLearningsOutcome("no_push");
+        releaseRoundClaim();
+        return;
+      }
       if (pushedHeadSha === roundStartHeadSha || (pushedHeadSha === undefined &&
           (landing === undefined || (!landing.landed && (landing.outcome === "refused" || landing.outcome === "not_on_remote"))))) {
         // W1-T14138: when the worker owns git, a missing harness landing is not evidence

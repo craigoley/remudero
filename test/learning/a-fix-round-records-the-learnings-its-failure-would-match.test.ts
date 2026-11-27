@@ -15,7 +15,7 @@ import { CODE_SCANNING_FIX_DISPATCH_STEP, codeScanningHeadSettled } from "#src/l
 import type { WorkerResult } from "#src/lib/worker.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
-import { fixCommandHost, harnessCommitForShellLessWorker, MERGE_UP_TO_DATE_REASON, runFixRung } from "#test/helpers/run-task-test.js";
+import { fixCommandHost, FixRoundPushError, harnessCommitForShellLessWorker, MERGE_UP_TO_DATE_REASON, runFixRung } from "#test/helpers/run-task-test.js";
 
 const TASK = "W1-T14138";
 const OTHER_TASK = "W1-T5";
@@ -68,6 +68,8 @@ async function runRound(t: TestContext, options: {
   staleReview?: "adopted" | "superseded" | "unpublished" | "unread";
   /** The merge-conflict round's merge finds main already in the branch. */
   mergeUpToDate?: boolean;
+  /** The round's push is rejected (no census refusal); the remote then reads as its start head, or cannot be read. */
+  pushRejected?: "remote-readable" | "remote-unreadable";
 } = {}) {
   const taskId = options.taskId ?? TASK;
   const runId = options.runId ?? "shadow-fixture";
@@ -165,8 +167,14 @@ async function runRound(t: TestContext, options: {
       } : {}),
       ...(claimKept ? { branchClaim: { id: () => "claim", release: () => {}, reacquire: () => undefined,
         last: () => { throw new Error("not read"); }, keepForWait: () => ({}) } } : {}),
-      push: () => { pushes++; },
-      readRemoteBranchHead: options.earlyRemoteUnread
+      push: () => {
+        pushes++;
+        if (options.pushRejected) throw new FixRoundPushError("git-push-failed", undefined, "fixture push rejected");
+      },
+      readRemoteBranchHead: options.pushRejected === "remote-unreadable"
+        ? async () => { throw new Error("fixture remote head unavailable"); }
+        : options.pushRejected ? async () => startHead
+        : options.earlyRemoteUnread
         ? async () => { throw new Error("fixture remote head unavailable"); }
         : options.workerPushesThen
         ? async () => workerOrigin!.git("rev-parse", `refs/heads/run-${taskId}-1`) : remoteHead,
@@ -432,6 +440,17 @@ test("a worker that holds its own git and may still be running leaves the round 
     assert.equal(result.steps("fix.learnings_shadow").length, 1, spawnEnd);
     assert.equal(result.steps("fix.learnings_outcome").length, 0, spawnEnd);
   }
+});
+
+test("W1-T14138 criterion 4: a rejected push is no push when the remote is read and lacks the round's commit", async t => {
+  const readable = await runRound(t, { pushRejected: "remote-readable" });
+  assert.equal(readable.pushes, 1);
+  assert.equal(readable.waits, 0);
+  assert.deepEqual(readable.steps("fix.learnings_outcome").map(row => [row.outcome, row.pushed_head_sha]), [["no_push", undefined]]);
+  const unreadable = await runRound(t, { pushRejected: "remote-unreadable" });
+  assert.equal(unreadable.pushes, 1);
+  assert.deepEqual(unreadable.steps("fix.learnings_outcome"), []);
+  assert.ok(unreadable.steps("fix.evidence_head_unread").some(row => String(row.reason).includes("failed push remote head")));
 });
 
 test("W1-T14138 criterion 4: a push that leaves the head unchanged is no push, even with the claim kept", async t => {
