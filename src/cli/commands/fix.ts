@@ -4869,8 +4869,20 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       const readRemote = deps.readRemoteBranchHead ?? lsRemoteBranchHead;
       let remoteHead: string | undefined;
       try { remoteHead = await readRemote(opts.worktreePath, opts.branch); }
-      catch { return; } // an unreadable remote cannot establish either a push or no push
+      catch (error) {
+        deps.log("fix.evidence_head_unread", { round_id: roundId, head_sha: priorHeadSha,
+          reason: `early round outcome remote head could not be read: ${String((error as Error)?.message ?? error)}` });
+        if (fixHarnessOwnsGit) recordFixLearningsOutcome("no_push");
+        return; // an unreadable remote cannot establish a worker-owned push
+      }
       if (remoteHead === undefined || remoteHead === roundStartHeadSha) {
+        recordFixLearningsOutcome("no_push");
+        return;
+      }
+      // A moved branch is attributable to this round only when the worker held git. With
+      // harness-owned git, an external branch update can race either early exit; the harness
+      // has not reached its normal push path, so that head is not this round's push.
+      if (fixHarnessOwnsGit) {
         recordFixLearningsOutcome("no_push");
         return;
       }
@@ -4880,7 +4892,9 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
         if ((state === "green" || state === "red") && ciGateSha(ci) === remoteHead) {
           recordFixLearningsOutcome(state, remoteHead);
         }
-      } catch {
+      } catch (error) {
+        deps.log("fix.ci_failures_fetch_error", { round_id: roundId, head_sha: remoteHead,
+          site: "early_round_outcome", error: String((error as Error)?.message ?? error) });
         // Keep the round unresolved when the CI read fails; a moved remote is not itself a verdict.
       }
     };

@@ -52,6 +52,7 @@ async function runRound(t: TestContext, options: {
   workerHoldsGit?: boolean;
   workerPushesBeforeHandoff?: boolean;
   workerPushesThen?: "plan_filing_refusal" | "recycle_yield";
+  earlyRemoteUnread?: boolean;
   /** The worker leaves HEAD naming a branch with no commit, then hands off. */
   workerLosesHead?: boolean;
   mergeRefused?: boolean;
@@ -162,7 +163,9 @@ async function runRound(t: TestContext, options: {
       ...(claimKept ? { branchClaim: { id: () => "claim", release: () => {}, reacquire: () => undefined,
         last: () => { throw new Error("not read"); }, keepForWait: () => ({}) } } : {}),
       push: () => { pushes++; },
-      readRemoteBranchHead: options.workerPushesThen
+      readRemoteBranchHead: options.earlyRemoteUnread
+        ? async () => { throw new Error("fixture remote head unavailable"); }
+        : options.workerPushesThen
         ? async () => workerOrigin!.git("rev-parse", `refs/heads/run-${taskId}-1`) : remoteHead,
       waitForCiGreen: async () => {
         waits++;
@@ -380,6 +383,33 @@ test("W1-T14138 criterion 4: early plan-filing refusal and recycle yield attribu
   }
 });
 
+test("W1-T14138 criterion 4: early exits do not attribute an external head move to a harness-owned round", async t => {
+  for (const exit of ["plan_filing_refusal", "recycle_yield"] as const) {
+    // The fixture's worker pushes to model an unrelated publisher racing the exit. This round's
+    // harness still owns git, so the moved remote head cannot be attributed to its push.
+    const result = await runRound(t, { workerHoldsGit: false, workerPushesThen: exit });
+    assert.ok(result.workerRemoteHead && result.workerRemoteHead !== result.startHead, exit);
+    const outcomes = result.steps("fix.learnings_outcome");
+    assert.equal(outcomes.length, 1, exit);
+    assert.deepEqual([outcomes[0]?.outcome, outcomes[0]?.pushed_head_sha], ["no_push", undefined], exit);
+    assert.equal(result.waits, 0, exit);
+  }
+});
+
+test("W1-T14138 criterion 4: an unreadable early-exit remote leaves a pushed worker round unresolved with its reason", async t => {
+  const result = await runRound(t, { workerHoldsGit: true, workerPushesThen: "plan_filing_refusal", earlyRemoteUnread: true });
+  assert.ok(result.workerRemoteHead && result.workerRemoteHead !== result.startHead);
+  assert.equal(result.steps("fix.learnings_outcome").length, 0);
+  assert.match(String(result.steps("fix.evidence_head_unread")[0]?.reason), /fixture remote head unavailable/);
+  assert.equal(result.waits, 0);
+
+  const harnessOwned = await runRound(t, { workerHoldsGit: false, workerPushesThen: "recycle_yield", earlyRemoteUnread: true });
+  assert.equal(harnessOwned.steps("fix.learnings_outcome").length, 1);
+  assert.deepEqual([harnessOwned.steps("fix.learnings_outcome")[0]?.outcome,
+    harnessOwned.steps("fix.learnings_outcome")[0]?.pushed_head_sha], ["no_push", undefined]);
+  assert.match(String(harnessOwned.steps("fix.evidence_head_unread")[0]?.reason), /fixture remote head unavailable/);
+});
+
 test("W1-T14138 criterion 4: a worker-owned head that cannot be read leaves the round unresolved", async t => {
   const result = await runRound(t, { workerHoldsGit: true, workerLosesHead: true });
   assert.equal(result.steps("fix.done").length, 1);
@@ -406,7 +436,7 @@ test("W1-T14138 criterion 4: a push that leaves the head unchanged is no push, e
 test("W1-T14138 criterion 4: the measurement rows never change how a code-scanning round's end is read", async t => {
   for (const [name, options, settled] of [
     ["refused commit", { noPush: true }, false],
-    ["unchanged head", { unchangedHead: true }, false],
+    ["unchanged head", { unchangedHead: true, ci: { state: "green", sha: PUSHED_HEAD } }, false],
     ["superseded worker", { spawnEnd: "superseded" }, true],
   ] as const) {
     const result = await runRound(t, options);
