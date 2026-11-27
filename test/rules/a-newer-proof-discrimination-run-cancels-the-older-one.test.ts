@@ -31,12 +31,13 @@ test("W1-T15177 criterion 1: proof-discrimination cancels its own superseded run
     "the literal group expression is in the file, not a parser-normalised equivalent");
 });
 
-test("W1-T15177 criterion 2: invariant:triggers-unchanged — the triggers, job name and bound stay as they were", async () => {
+test("W1-T15177 criterion 2: invariant:triggers-unchanged — the triggers and job name stay, and the bound is 20 minutes", async () => {
   const { doc } = await load();
   assert.deepEqual(doc.on?.pull_request?.types, ["opened", "synchronize", "reopened", "edited"],
     "edited stays: a body-only proof repair needs a fresh result");
   const job = doc.jobs?.["proof-discrimination"];
   assert.ok(job, "the proof-discrimination job is still declared");
   assert.equal(job.name, "proof-discrimination", "ci-gate reads the check by this name");
-  assert.equal(job["timeout-minutes"], 10);
+  // 2026-11-27: #20913's 17 whole-suite proofs, run one at a time, never finished inside 10 minutes on a runner.
+  assert.equal(job["timeout-minutes"], 20);
 });

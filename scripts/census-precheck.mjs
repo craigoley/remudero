@@ -1717,7 +1717,7 @@ export const PRECHECK_PATH_TRIGGERED_SUITES = [
       ".github/workflows/proof-discrimination-gate.yml", "scripts/census-precheck.mjs",
       "test/rules/a-newer-proof-discrimination-run-cancels-the-older-one.test.ts",
     ].includes(p)) && readHead?.("test/rules/a-newer-proof-discrimination-run-cancels-the-older-one.test.ts") != null,
-    remedy: "keep proof-discrimination-gate.yml's per-PR concurrency group with cancel-in-progress and its four pull_request trigger types" },
+    remedy: "keep proof-discrimination-gate.yml's per-PR concurrency group with cancel-in-progress, its four pull_request trigger types and its 20-minute bound" },
   { testFile: "test/rules/the-root-scratch-ignore-stays-root-only.test.ts",
     trigger: ({ changed }) => changed.some((p) => [".gitignore", "scripts/census-precheck.mjs",
       "test/rules/the-root-scratch-ignore-stays-root-only.test.ts"].includes(p)),
