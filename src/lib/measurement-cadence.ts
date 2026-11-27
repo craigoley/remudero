@@ -1,5 +1,5 @@
 import { stampMechanicalAsk } from "./inbox-retirement.js";
-import { reconcilePlan, reconcileShardStatus, requeueRevertedShard, type RevertedRequeue } from "./plan-reconcile.js";
+import { composeRecordStatuses, reconcilePlanByFile, requeueRevertedShard, type RevertedRequeue } from "./plan-reconcile.js";
 import { PLAN_RECONCILE_LANDING_BODY_BUDGET, PLAN_RECONCILE_LANDING_RECORD_LIMIT, takePlanReconcileBatch } from "./plan-reconcile-batch.js";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { setPriority as osSetPriority } from "node:os";
@@ -1507,21 +1507,21 @@ export interface PlanReconcileHeld {
 /** `land` is the sole repository-write seam, called only at or above the threshold. */
 export interface PlanReconcileCadenceOpts {
   /** Every shard's id and current text, exactly as `reconcilePlan` takes them. */
-  shards: ReadonlyArray<{ readonly taskId: string; readonly text: string }>;
+  shards: ReadonlyArray<{ readonly taskId: string; readonly text: string; readonly path?: string }>;
   /** Pass `reconcilePlan`'s credit predicate unchanged: widening it removes real queued work. */
   isCreditedMerged: (taskId: string) => boolean | undefined;
   /** How much drift is worth a plan diff. Below it the cadence reports and lands nothing. */
   threshold: number;
   /** Caller-owned landing bridge; absent = report only. Never dirty the daemon checkout (`checkCliFreshness` refuses it). */
-  land?: (writes: ReadonlyArray<{ taskId: string; text: string }>) => void | { held: PlanReconcileHeld[]; landed: number };
+  land?: (writes: ReadonlyArray<PlanReconcileWrite>) => void | { held: PlanReconcileHeld[]; landed: number };
   /** W1-T14302: merged-to-queued writes from {@link requeueRevertedShard}. Any one lands below the threshold. */
   requeue?: ReadonlyArray<{ taskId: string; text: string }>;
 }
 
 /** Schedule `reconcilePlan` unchanged: report every cycle; land only at or above the threshold. */
 export function planReconcileCadence(opts: PlanReconcileCadenceOpts): PlanReconcileCadenceResult {
-  const { writes } = reconcilePlan(opts.shards, opts.isCreditedMerged);
-  const taskIds = writes.map((w) => w.taskId);
+  const { writes } = reconcilePlanByFile(opts.shards, opts.isCreditedMerged);
+  const taskIds = writes.flatMap((w) => w.taskIds);
   const requeue = (opts.requeue ?? []).filter((r) => !taskIds.includes(r.taskId));
   const requeued = requeue.length > 0 ? { requeued: requeue.map((r) => r.taskId) } : {};
   if (taskIds.length === 0 && requeue.length === 0) {
@@ -1557,7 +1557,9 @@ export interface PlanReconcileCadenceInputOptions {
   lint?: PlanReconcileLint;
 }
 
-type PlanReconcileWrite = { taskId: string; text: string };
+/** W1-T15048: one write per file; `taskIds` names every record it flips. */
+type PlanReconcileWrite = { taskId: string; text: string; taskIds?: readonly string[] };
+const recordsOf = (write: PlanReconcileWrite): readonly string[] => write.taskIds ?? [write.taskId];
 export type PlanReconcileHold = (checkoutRoot: string, records: readonly PlanReconcileShardRecord[], writes: readonly PlanReconcileWrite[]) => { landable: PlanReconcileWrite[]; held: PlanReconcileHeld[] };
 export type PlanReconcileLint = (plan: Plan, only: ReadonlySet<string>, checkoutRoot: string) => Map<string, LintResult>;
 
@@ -1566,8 +1568,9 @@ const lintAsTheShardCensus: PlanReconcileLint = (plan, only, root) => lintPlan(p
 /** W1-T11175: hold each flip whose task newly gains a blocking lint rule, so one bad flip cannot refuse the rest. */
 export function planReconcileLintHold(lint: PlanReconcileLint = lintAsTheShardCensus): PlanReconcileHold {
   return (checkoutRoot, records, writes) => {
-    const ids = new Set(writes.map((w) => w.taskId));
-    const replaced = new Map(writes.map((w) => [w.taskId, w.text]));
+    const ids = new Set(writes.flatMap(recordsOf));
+    const pathOf = new Map(records.map((r) => [r.taskId, r.path]));
+    const replaced = new Map(writes.flatMap((w) => { const path = pathOf.get(w.taskId); return path === undefined ? [] : [[path, w.text] as const]; }));
     const shardDir = records.length > 0 ? dirname(records[0].path) : "";
     const monolith = shardDir !== "" ? join(dirname(shardDir), "tasks.yaml") : "";
     const head = { label: monolith, text: monolith !== "" && existsSync(monolith) ? readFileSync(monolith, "utf8") : "[]\n" };
@@ -1576,18 +1579,23 @@ export function planReconcileLintHold(lint: PlanReconcileLint = lintAsTheShardCe
     const shards = [...new Set([...onDisk, ...byPath.keys()])].map((path) => ({ path, record: byPath.get(path), text: byPath.get(path)?.text ?? readFileSync(path, "utf8") }));
     const cache = new PlanBlobCache();
     const blocking = (flipped: boolean): Map<string, LintResult> => {
-      const blobs = shards.map((s) => ({ label: s.path, text: (flipped && s.record ? replaced.get(s.record.taskId) : undefined) ?? s.text }));
+      const blobs = shards.map((s) => ({ label: s.path, text: (flipped && s.record ? replaced.get(s.path) : undefined) ?? s.text }));
       return lint(mergePlanBlobsQuarantiningDuplicates([head, ...blobs], cache).plan, ids, checkoutRoot);
     };
     const rulesOf = (results: Map<string, LintResult>, id: string) => new Set((results.get(id)?.violations ?? []).filter((v) => v.severity === "block").map((v) => v.check));
     const before = blocking(false);
     const after = blocking(true);
     const held: PlanReconcileHeld[] = [];
+    // W1-T15048: any record's new rule holds its whole file.
     const landable = writes.filter((w) => {
-      const was = rulesOf(before, w.taskId);
-      const gained = [...rulesOf(after, w.taskId)].filter((rule) => !was.has(rule));
-      for (const rule of gained) held.push({ taskId: w.taskId, rule });
-      return gained.length === 0;
+      let clean = true;
+      for (const id of recordsOf(w)) {
+        const was = rulesOf(before, id);
+        const gained = [...rulesOf(after, id)].filter((rule) => !was.has(rule));
+        for (const rule of gained) held.push({ taskId: id, rule });
+        if (gained.length > 0) clean = false;
+      }
+      return clean;
     });
     return { landable, held };
   };
@@ -1607,7 +1615,7 @@ export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOp
   });
   const requeueIds = new Set(requeue.map((r) => r.taskId));
   return {
-    shards: records.map(({ taskId, text }) => ({ taskId, text })),
+    shards: records.map(({ taskId, text, path }) => ({ taskId, text, path })),
     isCreditedMerged: (taskId) => credited.has(taskId),
     // W1-T14827: any drift lands; the landing bounds its own batch (plan-reconcile-batch.ts), so no count is waited for.
     threshold: deps.threshold ?? 1,
@@ -1621,14 +1629,14 @@ export function buildPlanReconcileCadenceInput(deps: PlanReconcileCadenceInputOp
       };
       // W1-T11859: one bounded batch per fire; the next fire reads the merged flips as no longer drifted and takes the next.
       // W1-T13816: the landing applies `edit` to main's current shard text; `content` is only this read's flip.
-      const statusEdit = (taskId: string) => (current: string) => requeueIds.has(taskId)
-        ? requeueRevertedShard(current, taskId, lost.get(taskId)).text
-        : reconcileShardStatus(current, taskId, (id) => credited.has(id)).text;
+      const statusEdit = (write: PlanReconcileWrite) => (current: string) => requeueIds.has(write.taskId)
+        ? requeueRevertedShard(current, write.taskId, lost.get(write.taskId)).text
+        : composeRecordStatuses(current, recordsOf(write), (id) => credited.has(id))?.text;
       // W1-T14485: cut at the plan review's record bound, so each re-queue row and the landed count name only landed records.
       const batch = takePlanReconcileBatch(landable, (write) => relPathOf(write.taskId),
         { files: PLAN_RECONCILE_LANDING_RECORD_LIMIT, bodyChars: PLAN_RECONCILE_LANDING_BODY_BUDGET });
       const inputs = batch.map((write) =>
-        ({ relPath: relPathOf(write.taskId), content: write.text, edit: statusEdit(write.taskId) }));
+        ({ relPath: relPathOf(write.taskId), content: write.text, edit: statusEdit(write) }));
       if (inputs.length > 0) deps.land(inputs);
       for (const write of batch) {
         const r = requeueIds.has(write.taskId) ? lost.get(write.taskId) : undefined;

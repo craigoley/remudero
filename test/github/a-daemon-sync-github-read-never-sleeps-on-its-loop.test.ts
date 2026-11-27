@@ -15,7 +15,7 @@ process.env.RMD_ESCALATION_REPOSITORY ??= "fixture/loop";
 
 function cache() {
   const root = mkdtempSync(join(tmpdir(), "rmd-loop-gh-"));
-  const env = { RMD_GH_CACHE_HOME: root, RMD_GH_TRANSPORT_FLOOR: "advisory", RMD_GH_SHARED_READ_GAP_MS: "100" };
+  const env = { RMD_GH_CACHE_HOME: root, RMD_GH_TRANSPORT_FLOOR: "advisory", RMD_GH_SHARED_READ_GAP_MS: "100", RMD_GH_COOLDOWN_S: "180" }; // W1-T15055
   const stamp = transport.ghReadCadenceStampPath(env, "core")!;
   let now = Date.now();
   transport.stampGhRead(stamp, "advisory\n", now);
@@ -93,7 +93,7 @@ test("W1-T11458 criterion 2: async escalation promotes a real sync gateway to it
     { when: "label", delaySeconds: 0.1 },
     { when: "", exit: 93, delaySeconds: 0.1 },
   ]);
-  const changes = { PATH: `${shim.dir}:${process.env.PATH}`, RMD_GH_CACHE_HOME: join(root, "cache"), RMD_GH_SHARED_READ_GAP_MS: "0", RMD_GH_TRANSPORT_FLOOR: "advisory" };
+  const changes = { PATH: `${shim.dir}:${process.env.PATH}`, RMD_GH_CACHE_HOME: join(root, "cache"), RMD_GH_SHARED_READ_GAP_MS: "0", RMD_GH_TRANSPORT_FLOOR: "advisory", RMD_GH_COOLDOWN_S: "180" }; // W1-T15055
   const previous = Object.fromEntries(Object.keys(changes).map((key) => [key, process.env[key]]));
   Object.assign(process.env, changes);
   const during = new Set<number>();

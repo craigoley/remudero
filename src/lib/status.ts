@@ -214,6 +214,8 @@ export interface PrRef {
   headRefOid?: string;
   /** The PR's raw body text (W1-T2392), riding the SAME batched fetch. Omitted ⇒ title alone. */
   body?: string;
+  /** W1-T15170: the author login off the SAME batched fetch (REST `user.login`). Omitted means unread, never human. */
+  authorLogin?: string;
 }
 
 /** Ledger phases, each mapping to a run-task.ts step (MASTER-PLAN §7/§9, W1-T155). */
@@ -4853,6 +4855,8 @@ export interface BatchedPr {
   autoMergeRequest?: unknown;
   /** The PR's title (W1-T184) — see {@link PrRef.title}; carried verbatim off the same batched fetch. */
   title?: string;
+  /** W1-T15170: see {@link PrRef.authorLogin}; carried verbatim off the same batched fetch. */
+  authorLogin?: string;
 }
 
 /** One issue row from the single batched issue-list fetch backing {@link GitHub.issueByUrl} (W1-T182) — the
@@ -5616,6 +5620,7 @@ export function buildBatchedGithub(
     headRefName: p.headRefName,
     ...(p.headRefOid ? { headRefOid: p.headRefOid } : {}),
     body: p.body,
+    ...(typeof p.authorLogin === "string" ? { authorLogin: p.authorLogin } : {}),
   });
   const mergedBatches = new WeakMap<readonly PrRef[], Index>();
   const proseByIndex = new WeakMap<Index, Map<string, UncreditedBuildWarning[]>>();

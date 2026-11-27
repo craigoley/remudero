@@ -5,7 +5,7 @@ import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createOrReadExclusive, createOrReadPublished, HEX_SECRET_RE, InvalidSecretFileError } from "./fs-race-safe.js";
-import { resolveOwnerRepoAt } from "./owner-repo.js";
+import { OwnerRepoUnresolvableError, resolveOwnerRepoAt } from "./owner-repo.js";
 import { GENERIC_EXIT_CODE, RmdError } from "./errors.js";
 import { appendLedger } from "./ledger.js";
 import { appendThreadMessage } from "./inbox-thread.js";
@@ -2342,19 +2342,18 @@ export function ghIssueGateway(
   repo: string,
   opts: { exec?: (args: string[]) => string; destination?: EscalationDestinationRead } = {},
 ): IssueGateway {
-  const route = escalationIssueRoute(opts);
+  const code = `${owner}/${repo}`;
+  const route = escalationIssueRoute(opts, code);
   if (route.outcome === "unfiled" && route.unrouted !== true) return unfiledIssueGateway(route.reason, "sync") as IssueGateway;
   const run =
     opts.exec ??
     ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   if (route.outcome === "unfiled") {
-    const code = `${owner}/${repo}`;
-    if (isEngineRepository(code)) return unfiledIssueGateway(route.reason, "sync") as IssueGateway;
     const local = issueGatewaySteps(code, run, runStepsSync) as IssueGateway;
     if (opts.exec === undefined) asyncIssueTwins.set(local, ghIssueGatewayAsync(owner, repo, { destination: () => route }));
     return local;
   }
-  const gateway = scopedToCodeRepository(issueGatewaySteps(route.repository, run, runStepsSync), route.repository, `${owner}/${repo}`) as IssueGateway;
+  const gateway = scopedToCodeRepository(issueGatewaySteps(route.repository, run, runStepsSync), route.repository, code) as IssueGateway;
   gatewayRepository.set(gateway, route.repository);
   if (opts.exec === undefined) asyncIssueTwins.set(gateway, ghIssueGatewayAsync(owner, repo, { destination: () => route }));
   return gateway;
@@ -2367,16 +2366,15 @@ export function ghIssueGatewayAsync(
   repo: string,
   opts: { exec?: (args: string[]) => Promise<string>; destination?: EscalationDestinationRead } = {},
 ): AsyncIssueGateway {
-  const route = escalationIssueRoute(opts);
+  const code = `${owner}/${repo}`;
+  const route = escalationIssueRoute(opts, code);
   if (route.outcome === "unfiled" && route.unrouted !== true) return unfiledIssueGateway(route.reason);
   const run = opts.exec ?? ((args: string[]) => ghTextAsync(args));
   if (route.outcome === "unfiled") {
-    const code = `${owner}/${repo}`;
-    if (isEngineRepository(code)) return unfiledIssueGateway(route.reason);
     return issueGatewaySteps(code, run, runStepsAsync);
   }
   const gateway = scopedToCodeRepository(issueGatewaySteps(route.repository, run, runStepsAsync),
-    route.repository, `${owner}/${repo}`);
+    route.repository, code);
   gatewayRepository.set(gateway, route.repository);
   return gateway;
 }
@@ -2387,9 +2385,8 @@ export function ghIssueGatewayAsync(
  * detail stay out of public issues. OBSERVED 2026-11-26: [MANUAL], MAIN-HEALTH and READ-MODEL issues were opened on
  * public core (#21036, #21001, #21006, ...). The issue body still names the code repository's PR by its URL.
  *
- * `named` files in that repository; `unfiled` opens no issue at all — no file (`off`) or a file that cannot be read,
- * which is never read as permission to fall back to the public repository. The code repository is `owner/repo`, which
- * the route no longer files in. AMENDED 2026-11-27: `unrouted` (none named) files in a PRIVATE code repository as before.
+ * `named` files in that repository. With no route configured, managed repositories file in themselves and the engine
+ * repository records the escalation in the ledger. An unreadable destination or required engine origin stops filing.
  * An injected `exec` changes the transport, never the route; a test that files in its
  * own fixture repository names it with `destination` or {@link ESCALATION_REPOSITORY_ENV}.
  */
@@ -2420,10 +2417,18 @@ export function escalationDestinationAt(stateDir: string | undefined): Escalatio
   };
 }
 
-function escalationIssueRoute(opts: { destination?: EscalationDestinationRead }): ReturnType<EscalationDestinationRead> {
+function escalationIssueRoute(opts: { destination?: EscalationDestinationRead }, code: string): ReturnType<EscalationDestinationRead> {
   // An injected exec is never a route: production producers inject one too (sreOperatorEscalation, the instance
   // liveness gateway, `rmd host-alert`, escalation triage), so only an explicit destination names another repository.
-  return (opts.destination ?? hostEscalationDestination)();
+  const route = (opts.destination ?? hostEscalationDestination)();
+  if (route.outcome === "named" || route.unrouted !== true) return route;
+  try {
+    if (engineRepository().toLowerCase() !== code.toLowerCase()) return route;
+    return { outcome: "unfiled", reason: route.reason };
+  } catch (error) {
+    if (!(error instanceof OwnerRepoUnresolvableError)) throw error;
+    return { outcome: "unfiled", reason: "engine-repository-unreadable" };
+  }
 }
 
 
@@ -2559,16 +2564,12 @@ const NO_ESCALATION_ROUTE = "no-private-escalation-repository";
 const engineRepositoryCache: { value?: string } = {};
 
 /** The engine repository is the checkout this installed module came from, independent of which managed target it drains. */
-function engineRepository(): string | undefined {
+function engineRepository(): string {
   if (engineRepositoryCache.value !== undefined) return engineRepositoryCache.value;
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
   const { owner, repo } = resolveOwnerRepoAt(root);
   engineRepositoryCache.value = `${owner}/${repo}`;
   return engineRepositoryCache.value;
-}
-
-function isEngineRepository(repository: string): boolean {
-  return engineRepository()?.toLowerCase() === repository.toLowerCase();
 }
 
 const OPEN_ISSUES_BY_LABEL_QUERY =
@@ -2588,10 +2589,10 @@ export function ghIssueGatewayGraphql(
   codeRepo: string,
   opts: { exec?: (args: string[]) => Promise<string>; destination?: EscalationDestinationRead } = {},
 ): AsyncIssueGateway {
-  const route = escalationIssueRoute(opts);
+  const code = `${codeOwner}/${codeRepo}`;
+  const route = escalationIssueRoute(opts, code);
   if (route.outcome === "unfiled" && route.unrouted !== true) return unfiledIssueGateway(route.reason);
-  const repoArg = route.outcome === "named" ? route.repository : `${codeOwner}/${codeRepo}`;
-  if (route.outcome === "unfiled" && isEngineRepository(repoArg)) return unfiledIssueGateway(route.reason);
+  const repoArg = route.outcome === "named" ? route.repository : code;
   const [owner, repo] = repoArg.split("/") as [string, string];
   const run = opts.exec ?? ((args: string[]) => ghTextAsync(args));
   const graphql = async (query: string, vars: Record<string, string>): Promise<Record<string, unknown>> => {

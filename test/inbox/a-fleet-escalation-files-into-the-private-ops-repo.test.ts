@@ -3,13 +3,13 @@
  *
  * OBSERVED 2026-11-26: the fleet opened [MANUAL], MAIN-HEALTH and READ-MODEL needs-human issues on public core
  * (#21036, #21001, #21006, ...), carrying task ids, PR links and host detail. Every escalation gateway is now built on
- * the host's private plan destination (the ops repository); with none named, a public code repository's escalation is a
- * ledger row only, and a private one's files in itself as before (amended 2026-11-27).
+ * the host's private plan destination (the ops repository). With none named, the engine only records a ledger row
+ * and managed repositories file in themselves.
  */
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
   ESCALATION_REPOSITORY_ENV, escalate, escalationCodeRepository, escalationDestinationAt, escalationListingIsRouted, escalationIssueRepositories, escalationIssueRepository, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, issueGatewayRepository, issueGatewayUnfiled,
@@ -130,6 +130,29 @@ function withHostHome<T>(t: TestContext, destination: Record<string, unknown> | 
   }
 }
 
+test("W1-T14998: an unreadable engine origin leaves unrouted gateways ledger-only", (t) => {
+  const { path, rows } = ledger(t);
+  const gh = fakeGh();
+  const previousPath = process.env.PATH;
+  const asyncExec = async (args: string[]) => gh.exec(args);
+  process.env.PATH = dirname(path);
+  try {
+    const issues = ghIssueGateway(CODE.owner, CODE.repo, { exec: gh.exec, destination: nowhere });
+    const asyncIssues = ghIssueGatewayAsync(CODE.owner, CODE.repo, { exec: asyncExec, destination: nowhere });
+    const graphqlIssues = ghIssueGatewayGraphql(CODE.owner, CODE.repo, { exec: asyncExec, destination: nowhere });
+    for (const gateway of [issues, asyncIssues, graphqlIssues]) {
+      assert.equal(issueGatewayUnfiled(gateway), "engine-repository-unreadable");
+    }
+    assert.equal(escalate(escalation(), { issues, ledgerPath: path, runId: "ORIGIN-UNREADABLE" }), "");
+    assert.equal(rows().find((row) => row.step === "escalation.not_filed")?.reason, "engine-repository-unreadable");
+    assert.deepEqual(gh.calls, []);
+    assert.equal(issueGatewayRepository(ghIssueGateway(CODE.owner, CODE.repo, { destination: toOps })), OPS);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
+});
+
 test("W1-T14998 criterion 1: a fleet escalation opens its issue in the private ops repository", (t) => {
   const gh = fakeGh();
   const { path, rows } = ledger(t);
@@ -168,7 +191,8 @@ test("W1-T14998 criterion 1: a fleet escalation opens its issue in the private o
   assert.equal(issueUrlRepository("https://github.com/craigoley/remudero/pull/12"), undefined);
 });
 
-test("W1-T14998 criterion 2: the engine repository records an unrouted escalation without opening an issue", async (t) => {
+test("W1-T14998 criterion 2: the engine repository records an unrouted escalation without opening an issue" +
+  " (W1-T14998 criterion 2: with no private repository an escalation opens no public issue for core)", async (t) => {
   // Engine identity comes from this checkout. The issue gateway never asks GitHub for visibility.
   const gh = fakeGh({ [`${CODE.owner}/${CODE.repo}`]: false });
   const { path, rows } = ledger(t);
@@ -430,7 +454,8 @@ test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery close
   assert.deepEqual((await ports.listOpenIssues()).map((issue) => issue.number), [4, 6, 7, 8]);
 });
 
-test("W1-T14998 criterion 4: unrouted public and private managed repositories file in themselves", async (t) => {
+test("W1-T14998 criterion 4: unrouted public and private managed repositories file in themselves" +
+  " (W1-T14998 criterion 4: an unrouted managed repository files its escalation in itself)", async (t) => {
   // Site is public, names no escalation route, and visibility is never consulted: it files where it did before.
   const SITE = "craigoley/site";
   const gh = fakeGh({ [SITE]: false, "craigoley/private-site": true });
