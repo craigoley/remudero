@@ -243,7 +243,9 @@ const selected = (title: string) =>
 function runShift(days: number, whole: boolean, title: (suite: Suite) => string) {
   const settled = new Map(DRIFTING.map((suite) => {
     let resolve!: (run: Run) => void;
-    return [suite.file, { promise: new Promise<Run>((r) => { resolve = r; }), resolve, queued: false }] as const;
+    const entry: { promise: Promise<Run>; resolve: (run: Run) => void; queued: boolean } =
+      { promise: new Promise<Run>((r) => { resolve = r; }), resolve: (run) => resolve(run), queued: false };
+    return [suite.file, entry] as const;
   }));
   // Slowest first over one shared pool (longest-processing-time): the wall time is then about the slowest suite alone
   // (~112 s) rather than the quick suites' sum split across two workers (~161 s at 4 cores, W1-T14786 at 2a5f).
@@ -311,6 +313,29 @@ function pinnedTitle(suite: Suite): string {
 function wholeTitle(suite: Suite): string {
   return `W1-T14786 the clock sweep reports no new drift for the fifteen suites: ${sweepId(suite.file)}`;
 }
+/**
+ * Each whole-suite test's title written out in full, so a proof can name one suite: the reviewer finds a proof's file
+ * by a fixed-string search for its title (resolveNameFilteredCandidates in src/lib/review.ts), which never sees a title
+ * a template literal builds, and an unresolved title runs across every test file.
+ */
+const WHOLE_TITLES: readonly string[] = [
+  "W1-T14786 the clock sweep reports no new drift for the fifteen suites: sweep/a-light-pass-with-no-scope-decides-from-the-tick-reads-open-pr-views",
+  "W1-T14786 the clock sweep reports no new drift for the fifteen suites: inbox/a-triage-outcome-that-files-no-task-lands-through-the-feedback-landing",
+  "W1-T14786 the clock sweep reports no new drift for the fifteen suites: daemon/a-paused-instance-says-when-it-has-drained",
+  "W1-T14786 the clock sweep reports no new drift for the fifteen suites: console-api/serve/product-routes",
+  "W1-T14786 the clock sweep reports no new drift for the fifteen suites: fix-lane/rmd-fix-never-reports-a-round-fixed-when-its-progress-judgment-failed",
+  "W1-T14786 the clock sweep reports no new drift for the fifteen suites: sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails",
+  "W1-T14786 the clock sweep reports no new drift for the fifteen suites: sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views",
+  "W1-T14786 the clock sweep reports no new drift for the fifteen suites: dispatch/product-plan-operation",
+  "W1-T14786 the clock sweep reports no new drift for the fifteen suites: daemon/a-worktree-janitor-reports-what-it-would-retire",
+  "W1-T14786 the clock sweep reports no new drift for the fifteen suites: github/every-mac-session-reads-github-through-one-broker",
+  "W1-T14786 the clock sweep reports no new drift for the fifteen suites: sweep/the-sweep-effects-read-terminal-heads-from-the-slice-store",
+  "W1-T14786 the clock sweep reports no new drift for the fifteen suites: expiring-fixture-census",
+  "W1-T14786 the clock sweep reports no new drift for the fifteen suites: ci/coverage/the-live-coverage-flip-requires-a-fresh-nightly-floor",
+  "W1-T14786 the clock sweep reports no new drift for the fifteen suites: daemon/repository-maintenance-escalation-heals-itself",
+  "W1-T14786 the clock sweep reports no new drift for the fifteen suites: deploy/preserve-retire-keep-declarations-hold-every-action",
+];
+assert.deepEqual(DRIFTING.map(wholeTitle), WHOLE_TITLES, "each whole-suite title is written out in DRIFTING's order");
 
 for (const suite of DRIFTING) {
   test(pinnedTitle(suite), async () => {
@@ -338,7 +363,7 @@ test("W1-T14786 the clock sweep reports no new drift for the fifteen suites: the
 });
 
 for (const suite of WHOLE_TEST_ORDER) {
-  test(wholeTitle(suite), async () => {
+  test(WHOLE_TITLES[DRIFTING.indexOf(suite)]!, async () => {
     // The whole suite, as the sweep's report runs it: a pinned run could pass while another test in the file drifts.
     const run = await runOf(SWEEP_SHIFT_DAYS, suite, true);
     // Positive control: a child that never reported its own summary would read as "not failed" to the classifier.
