@@ -232,6 +232,45 @@ test("W1-T14971 criteria 1-3: a unit containing a linked worktree of a live chec
   }
 });
 
+test("W1-T14971 criterion 1: a bare unit's own worktree is archived before the unit is removed", () => {
+  const fx = fixture();
+  const { main } = repos(fx);
+  const bare = bareUnit(fx, main, "bare-with-worktree.Ss1111");
+  const tree = join(bare, "embedded-worktree");
+  git(fx.root, "--git-dir", bare, "worktree", "add", "-b", "embedded", tree, "main");
+  writeFileSync(join(tree, "unsaved.txt"), "preserve this uncommitted work\n");
+  age(bare, 10 * DAY_HOURS);
+
+  const r = run(fx, scratchOnly(fx));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(bare), false, r.stdout);
+  const [copy] = preserved(fx, bare);
+  assert.ok(copy, r.stdout);
+  git(main, "bundle", "verify", join(copy, "all.bundle"));
+  const listing = execFileSync("tar", ["-tzf", join(copy, "unit.tar.gz")], { encoding: "utf8" });
+  assert.match(listing, /bare-with-worktree\.Ss1111\/embedded-worktree\/unsaved\.txt$/m);
+  execFileSync("tar", ["-xzf", join(copy, "unit.tar.gz"), "-C", fx.scratch]);
+  assert.equal(readFileSync(join(bare, "embedded-worktree", "unsaved.txt"), "utf8"), "preserve this uncommitted work\n");
+  rmSync(bare, { recursive: true, force: true });
+});
+
+test("W1-T14971 criterion 1: a checkout using a separate Git directory inside a bare unit keeps it", () => {
+  const fx = fixture();
+  const { main } = repos(fx);
+  const bare = bareUnit(fx, main, "separate-git-dir-unit.Tt1111");
+  const checkout = join(fx.root, "separate-git-dir-checkout");
+  const gitdir = join(bare, "checkout.git");
+  git(fx.root, "clone", "--quiet", "--separate-git-dir", gitdir, main, checkout);
+  age(bare, 10 * DAY_HOURS);
+
+  const r = run(fx, scratchOnly(fx, { RMD_CLEANUP_LIVE_CHECKOUTS: checkout }));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(existsSync(bare), true, r.stdout);
+  assert.match(r.stdout, new RegExp(`KEEP ${bare}: .*separate Git directory used by ${checkout}`));
+  assert.deepEqual(preserved(fx, bare), []);
+  assert.equal(git(checkout, "rev-parse", "HEAD").trim(), git(main, "rev-parse", "HEAD").trim());
+});
+
 test("W1-T14971 criterion 1: an idle bare repository with no refs or a shallow history is tarred whole, then removed", () => {
   const fx = fixture();
   const { main } = repos(fx);

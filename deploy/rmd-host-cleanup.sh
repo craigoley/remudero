@@ -1387,6 +1387,29 @@ held_unit_hosts_nothing() {
   done <<< "$gitfiles"
   return 0
 }
+held_gitdir_unreferenced() {
+  local p="$1" pp root file line gitdir
+  pp="$(cd -P -- "$p" 2>/dev/null && pwd -P)" || pp="$p"
+  while IFS= read -r root; do
+    root="${root%/}"
+    [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] || continue
+    scan_find "$root" -maxdepth 8 -type f -name .git -print || { SCRATCH_REASON="separate Git directory scan failed (unknown)"; return 1; }
+    while IFS= read -r file; do
+      [ -n "$file" ] || continue
+      case "$file" in "$p"/*|"$pp"/*) continue ;; esac
+      IFS= read -r line < "$file" || { SCRATCH_REASON="separate Git directory pointer unreadable ($file)"; return 1; }
+      case "$line" in "gitdir: "*) gitdir="${line#gitdir: }" ;; *) continue ;; esac
+      case "$gitdir" in /*) ;; *) gitdir="${file%/*}/$gitdir" ;; esac
+      gitdir="$(normalize_path "$gitdir")"
+      case "$gitdir" in "$p"|"$p"/*|"$pp"|"$pp"/*)
+        SCRATCH_REASON="separate Git directory used by ${file%/.git}"; return 1 ;;
+      esac
+    done <<< "$SCAN_OUT"
+  done < <({ printf '%s\n' "$SCRATCH_ROOTS" "$SCRATCH_PARENTS" "$WORKTREE_ROOTS" "$LIVE_CHECKOUTS" "$PRESERVE_ROOTS" \
+                     "$AGENT_SCRATCH" "$PROTECTED_WORKTREE_ROOTS" "$STATE_PARENTS" "$TMP_ROOTS" | tr ':' '\n'
+             for root in "$CLEAN_HOME"/*/.claude/worktrees; do [ -d "$root" ] && printf '%s\n' "$root"; done; } | awk 'NF && !seen[$0]++')
+  return 0
+}
 # W1-T14971: consumers can link into any held unit from inside node_modules (per package, Linux readonly links),
 # which snapshot_links prunes. One extra walk of every janitor root, node_modules included, collects those links.
 HELD_SEED_LINKS=""; HELD_SEED_LINKS_OK=1
@@ -1425,8 +1448,8 @@ held_unit_unreferenced() {   # fails with SCRATCH_REASON when a link outside uni
   return 0
 }
 retire_held_scratch_unit() {
-  local p="$1" kind="$2" why="$3" uid bytes found name final work rel bare listed walked unit_is_bare=0
-  local -a excludes=() bares=()
+  local p="$1" kind="$2" why="$3" uid bytes found name final work rel bare listed walked
+  local -a bares=()
   bytes="$(du_bytes "$p")"
   uid="$(owner_uid "$p")"
   if [ "$uid" != "$RUN_UID" ]; then log "KEEP $p: $why; foreign owner (uid ${uid:-unknown}, ${bytes:-unknown} bytes)"; return; fi
@@ -1449,6 +1472,7 @@ retire_held_scratch_unit() {
   if ! link_lender_check "$p"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
   if ! held_unit_hosts_nothing "$p"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
   if ! held_unit_unreferenced "$p" "$kind"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
+  if ! held_gitdir_unreferenced "$p"; then log "KEEP $p: $why; $SCRATCH_REASON"; return; fi
   if [ -L "$PRESERVE_ROOT" ]; then log "KEEP $p: $why; preserve root $PRESERVE_ROOT is a symbolic link"; return; fi
   name="${p#/}"; name="${name//\//__}@$PRESERVE_STAMP"; final="$PRESERVE_ROOT/$name.held"
   if [ "$DRY_RUN" = 1 ]; then
@@ -1473,7 +1497,6 @@ retire_held_scratch_unit() {
         printf 'bare repository tarred whole (no refs or shallow): %s\n' "$bare" >> "$work/MANIFEST.txt"
         continue
       fi
-      if [ -z "$rel" ]; then unit_is_bare=1; else excludes+=("--exclude=${p##*/}/$rel"); fi
       if :; then
         if ! git --git-dir="$bare" bundle create "$work/${rel//\//__}${rel:+.}all.bundle" --all >/dev/null 2>&1 </dev/null ||
            ! git clone --quiet --bare -- "$work/${rel//\//__}${rel:+.}all.bundle" "$work/.verify-clone" >/dev/null 2>&1 </dev/null; then
@@ -1484,24 +1507,22 @@ retire_held_scratch_unit() {
       printf 'bare repository: %s\n' "$bare" >> "$work/MANIFEST.txt"
     done
   fi
-  # A unit that is itself a bare repository is whole in its bundle; anything else is tarred too.
-  if [ "$unit_is_bare" = 1 ]; then :
-  elif ! ( cd -- "${p%/*}" && tar -czf "$work/unit.tar.gz" ${excludes[@]+"${excludes[@]}"} -- "${p##*/}" ) </dev/null >/dev/null 2>&1; then
+  # The bundle preserves refs and history; the tar also preserves worktrees and other files in a
+  # bare unit, including uncommitted changes that a bundle cannot contain.
+  if ! ( cd -- "${p%/*}" && tar -czf "$work/unit.tar.gz" -- "${p##*/}" ) </dev/null >/dev/null 2>&1; then
     rm -rf -- "$work"; log "KEEP $p: $why; tarball failed"; return
   fi
-  if [ "$unit_is_bare" = 1 ]; then :
-  elif ! listed="$(tar -tzf "$work/unit.tar.gz" 2>/dev/null | wc -l | tr -d ' ')"; then
+  if ! listed="$(tar -tzf "$work/unit.tar.gz" 2>/dev/null | wc -l | tr -d ' ')"; then
     rm -rf -- "$work"; log "KEEP $p: $why; tarball unreadable"; return
-  elif [ "${#excludes[@]}" = 0 ]; then
+  else
     walked="$(find "$p" 2>/dev/null | wc -l | tr -d ' ')"
     if [ "$listed" != "$walked" ]; then rm -rf -- "$work"; log "KEEP $p: $why; tarball lists $listed entries, the folder holds $walked"; return; fi
-  elif [ "${listed:-0}" -lt 1 ]; then rm -rf -- "$work"; log "KEEP $p: $why; tarball unreadable"; return
   fi
   {
     printf 'Preserved by the Azure host janitor (deploy/rmd-host-cleanup.sh, W1-T14971 hold expiry).\n'
     printf 'path:   %s\nkind:   %s\nhold:   %s\nbytes:  %s\npreserved_at: %s\n' "$p" "$kind" "$why" "${bytes:-unknown}" "$PRESERVE_STAMP"
     printf 'expires: %s days after preservation (operator ruling 2026-10-23)\n\nRestore:\n' "$RETAIN_DAYS"
-    [ "$unit_is_bare" = 1 ] || printf '  tar -xzf %s/unit.tar.gz -C %s\n' "$final" "${p%/*}"
+    printf '  tar -xzf %s/unit.tar.gz -C %s\n' "$final" "${p%/*}"
     printf '  git clone --bare <bundle> <dir>   # for each *.bundle listed above\n'
   } >> "$work/MANIFEST.txt" || { rm -rf -- "$work"; log "KEEP $p: $why; manifest write failed"; return; }
   mv -- "$work" "$final" || { rm -rf -- "$work"; log "KEEP $p: $why; preserve move failed"; return; }
