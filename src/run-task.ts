@@ -38897,6 +38897,7 @@ function loadProposalForRatify(
   repo: string,
   config: Config,
   inboxRoot = config.root,
+  github?: GitHub,
 ): { proposal: Proposal | undefined; proposals: Proposal[]; drafts: DraftCache; draftsPath: string; classification?: InboxClassification } {
   const registryPath = join(inboxRoot, "state", "inbox-proposals.json");
   const proposals: Proposal[] = parseProposalRegistry(readFileIfExists(registryPath));
@@ -38907,7 +38908,7 @@ function loadProposalForRatify(
 
   if (!proposal) return { proposal: undefined, proposals, drafts, draftsPath };
 
-  const deriveDeps: DeriveDeps = { ledgerPath, github: ghGateway(owner, repo) };
+  const deriveDeps: DeriveDeps = { ledgerPath, github: github ?? ghGateway(owner, repo) };
   const { isMerged, depsUnobservable } = buildDepsReadinessAccessors(plan, deriveDeps);
   // W1-T190: read the ledger ONCE here and cross-check it, never the registry's own copy of
   // "is this ratified" (there isn't one) — a proposal the ledger already carries
@@ -40395,6 +40396,8 @@ export async function approveCommand(
     taskLookup?: TaskLookupOptions;
     /** W1-T15105: how an ask's ops-catalog task is read (default: the board catalog read serve's approve uses). */
     readInboxCatalog?: PanelGraphDeps["readInboxCatalog"];
+    /** Status gateway for the same live facts used to classify the named proposal. */
+    github?: GitHub;
   } = {},
 ): Promise<number> {
   const proposalId = rest[0];
@@ -40494,7 +40497,7 @@ export async function approveCommand(
   const { owner, repo } = proposalPlan.target ?? resolveOwnerRepo();
   const registryIntent = selectedRegistryIntentForConfig(config);
 
-  const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config, inboxRoot);
+  const { proposal, classification } = loadProposalForRatify(proposalId, plan, ledgerPath, owner, repo, config, inboxRoot, deps.github);
   if (!proposal || !classification) {
     console.error(`rmd approve: unknown proposal '${proposalId}' — not in the ACTIVE registry (state/inbox-proposals.json)`);
     return 2;

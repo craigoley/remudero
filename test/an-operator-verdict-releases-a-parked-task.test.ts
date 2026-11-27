@@ -970,7 +970,7 @@ test("W1-T15105 criterion 2: Approve judges an ops-catalog task's ask as the Inb
   const host = hostWithSecondCatalog(t), said = everythingSaid(t);
   const ask = `verify-human:${OPS_ID}`;
   writeAsk(host, ask);
-  assert.equal(await approveCommand([ask], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api } }), 0, said.join("\n"));
+  assert.equal(await approveCommand([ask], { config: host.config, planPath: host.planPath, taskLookup: { api: host.api }, github: fakeGitHub() }), 0, said.join("\n"));
   assert.equal(host.releaseRows(OPS_ID).length, 1, "the ask's ops task is released");
   assert.ok(rowsOf(host).some(row => row.step === "ratify.approved" && row.task_id === ask && row.release_task_id === OPS_ID),
     "and the ask itself is recorded approved");
