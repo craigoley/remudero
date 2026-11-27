@@ -39,6 +39,14 @@ function heldHandTree(fx: Fixture, name: string) {
   writeFileSync(join(wt, "test", "ci", "coverage", "new-test.ts"), "export {};\n");
   mkdirSync(join(wt, "src", "dist"), { recursive: true });
   writeFileSync(join(wt, "src", "dist", "new-source.ts"), "export {};\n");
+  mkdirSync(join(wt, "vendor", "node_modules", "pkg"), { recursive: true });
+  writeFileSync(join(wt, "vendor", "node_modules", "pkg", "generated.js"), "nested cache\n");
+  mkdirSync(join(wt, "build", "dist"), { recursive: true });
+  writeFileSync(join(wt, "build", "dist", "chunk.js"), "build output\n");
+  mkdirSync(join(wt, ".next", "cache"), { recursive: true });
+  writeFileSync(join(wt, ".next", "cache", "render"), "framework cache\n");
+  mkdirSync(join(wt, ".turbo", "cache"), { recursive: true });
+  writeFileSync(join(wt, ".turbo", "cache", "task"), "task cache\n");
   mkdirSync(join(wt, "node_modules"), { recursive: true });
   writeFileSync(join(wt, "node_modules", "generated.js"), "generated cache\n");
   mkdirSync(join(wt, "coverage"), { recursive: true });
@@ -49,7 +57,7 @@ function heldHandTree(fx: Fixture, name: string) {
 test("W1-T14400 criterion 1: an idle hand worktree with uncommitted and unpushed work is saved and then removed, and git worktree add plus the patch restores it", () => {
   const fx = fixture();
   const { main, wt, branch, root } = heldHandTree(fx, "wt-T9001");
-  writeFileSync(join(main, ".git", "info", "exclude"), "/node_modules/\n", { flag: "a" });
+  writeFileSync(join(main, ".git", "info", "exclude"), "node_modules/\ndist/\n.next/\n.turbo/\n", { flag: "a" });
   age(wt, 10 * DAY_HOURS);
 
   const r = run(fx, handOnly(root));
@@ -71,11 +79,37 @@ test("W1-T14400 criterion 1: an idle hand worktree with uncommitted and unpushed
   const extracted = join(fx.root, "untracked-restore");
   mkdirSync(extracted);
   execFileSync("tar", ["-xzf", join(copy, "untracked.tar.gz"), "-C", extracted]);
-  for (const path of ["test/ci/coverage/new-test.ts", "src/dist/new-source.ts"]) {
+  for (const path of ["test/ci/coverage/new-test.ts"]) {
     assert.equal(readFileSync(join(extracted, path), "utf8"), "export {};\n", `${path} survives the skipped-name class`);
   }
   assert.equal(readFileSync(join(extracted, "coverage", "report.json"), "utf8"), "generated report\n", "unignored root coverage is preserved");
   assert.equal(existsSync(join(extracted, "node_modules", "generated.js")), false, "Git-ignored root node_modules stays excluded");
+  const archivedPaths = execFileSync("tar", ["-tzf", join(copy, "untracked.tar.gz")], { encoding: "utf8" });
+  assert.doesNotMatch(archivedPaths, /(^|\/)node_modules\//, "ignored nested node_modules stays excluded");
+  assert.doesNotMatch(archivedPaths, /(^|\/)dist\//, "ignored dist output stays excluded");
+  assert.doesNotMatch(archivedPaths, /(^|\/)\.next\//, "ignored framework cache stays excluded");
+  assert.doesNotMatch(archivedPaths, /(^|\/)\.turbo\//, "ignored task cache stays excluded");
+});
+
+test("W1-T14400 criterion 1: pruning an ignored cache does not restart an idle hand worktree's retirement clock", () => {
+  const fx = fixture();
+  const { main, wt, root } = heldHandTree(fx, "wt-pruned-cache");
+  writeFileSync(join(main, ".git", "info", "exclude"), "/node_modules/\n", { flag: "a" });
+  git(main, "worktree", "lock", wt);
+  age(wt, 10 * DAY_HOURS);
+
+  const prune = run(fx, handOnly(root));
+  assert.equal(prune.status, 0, prune.stderr + prune.stdout);
+  assert.match(prune.stdout, new RegExp(`PRUNE ${wt}/node_modules:`));
+  assert.equal(existsSync(wt), true, "a locked worktree stays while its ignored cache is pruned");
+  assert.equal(existsSync(join(wt, "node_modules")), false, "the ignored cache was removed");
+
+  git(main, "worktree", "unlock", wt);
+  const retire = run(fx, handOnly(root));
+  assert.equal(retire.status, 0, retire.stderr + retire.stdout);
+  assert.match(retire.stdout, new RegExp(`REMOVE ${wt}: .*idle 7 days, preserved then retired`));
+  assert.equal(existsSync(wt), false, "the prior idle timestamp survives pruning");
+  assert.ok(copies(fx, wt)[0], "the unsaved work is preserved before retirement");
 });
 
 test("W1-T14400 criterion 2: invariant:nothing-unsaved-is-removed — a failed save, a held worktree or a recent one is kept", () => {

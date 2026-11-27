@@ -702,7 +702,7 @@ clone_live_worktree() {
 # by exact name, never through a symlink, while Git confirms it is ignored and tracks nothing in it,
 # and never one holding a nested .git or a *.bundle.
 prune_held_worktree() {
-  local wt="$1" reason="$2" name tree found tracked bytes
+  local wt="$1" reason="$2" name tree found tracked bytes root_time
   log "KEEP $wt: $reason"
   is_worktree_idle "$wt" || return 0
   if is_open "$wt" || [ "$DOCKER_OK" != 1 ] || is_docker_mount "$wt"; then return 0; fi
@@ -723,10 +723,20 @@ prune_held_worktree() {
     fi
     bytes="$(du_bytes "$tree")"
     log "PRUNE $tree: ${bytes:-unknown} bytes, worktree kept for $reason"
+    root_time="$(mktemp "${wt%/*}/.rmd-cleanup-mtime.XXXXXX" 2>/dev/null)" || {
+      log "KEEP $tree: cannot snapshot the worktree idle timestamp"; continue;
+    }
+    if ! touch -r "$wt" "$root_time" 2>/dev/null; then
+      rm -f -- "$root_time"; log "KEEP $tree: cannot snapshot the worktree idle timestamp"; continue
+    fi
     if act rm -rf -- "$tree"; then
+      # Removing a direct child changes the worktree root mtime. Keep its previous idle
+      # timestamp so pruning an ignored cache cannot restart the retirement retention clock.
+      touch -r "$root_time" "$wt" 2>/dev/null || log "NOTE $wt: could not restore its idle timestamp after pruning $name"
       PRUNED_COUNT=$((PRUNED_COUNT + 1)); PRUNED_BYTES=$((PRUNED_BYTES + ${bytes:-0}))
       tally "prune ${wt%/*}" "$bytes"
     fi
+    rm -f -- "$root_time"
   done
 }
 # W1-T14400: retire_held_worktree <linked worktree> <hold reason>. The Mac's preserve-retire on the Azure host: a
@@ -1580,8 +1590,9 @@ preserve_exclusions() {
   return 0
 }
 preserve_write() {
-  local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count objects r name url path cache_root tracked remotes_text=""
-  local -a revs=() tar_excludes=()
+  local repo="$1" unit="$2" work="$3" head="$4" final="$5" branch excl count objects r name url path component cache_root tracked remotes_text=""
+  local -a revs=() tar_excludes=() path_parts=()
+  local -A cache_decisions=()
   branch="$(rgit "$repo" symbolic-ref -q --short HEAD 2>/dev/null)" || branch="(detached)"
   while IFS= read -r name; do
     [ -n "$name" ] || continue
@@ -1608,17 +1619,29 @@ preserve_write() {
     tar_excludes=(--exclude=.git)
     : > "$work/.untracked-to-archive" || { PRESERVE_REASON="untracked-listing-failed"; return 1; }
     while IFS= read -r -d '' path; do
-      case "$path" in
-        node_modules|node_modules/*|coverage|coverage/*)
-          cache_root="${path%%/*}"
-          # A cache-shaped name is not proof that the payload is disposable. Omit it only
-          # when Git explicitly ignores the root and has no tracked entries below it.
-          if rgit "$repo" check-ignore -q -- "$cache_root" 2>/dev/null &&
-             tracked="$(rgit "$repo" ls-files -- "$cache_root" 2>/dev/null)" && [ -z "$tracked" ]; then
-            continue
+      # Generated directories can occur below any untracked path. Cache Git's decision per
+      # directory, not per file: large node_modules trees commonly contain hundreds of paths.
+      # A familiar directory name alone is never enough to discard payload from the save.
+      IFS='/' read -r -a path_parts <<< "$path"
+      cache_root=""
+      for component in "${path_parts[@]}"; do
+        [ -n "$cache_root" ] && cache_root="$cache_root/"
+        cache_root="$cache_root$component"
+        case "$component" in node_modules|coverage|dist|.next|.turbo) ;; *) continue ;; esac
+        if [ -z "${cache_decisions[$cache_root]+set}" ]; then
+          # A node_modules symlink points at a live dependency tree rather than carrying
+          # worktree payload. Preserve the link target in place, never in the saved tarball.
+          if { [ "$component" = node_modules ] && [ -L "$repo/$cache_root" ]; } ||
+             { rgit "$repo" check-ignore -q -- "$cache_root" 2>/dev/null &&
+               tracked="$(rgit "$repo" ls-files -- "$cache_root" 2>/dev/null)" && [ -z "$tracked" ]; }; then
+            cache_decisions[$cache_root]=omit
+          else
+            cache_decisions[$cache_root]=keep
           fi
-          ;;
-      esac
+        fi
+        if [ "${cache_decisions[$cache_root]}" = omit ]; then break; fi
+      done
+      [ "${cache_decisions[$cache_root]:-keep}" = omit ] && continue
       printf '%s\0' "$path" >> "$work/.untracked-to-archive" || { PRESERVE_REASON="untracked-listing-failed"; return 1; }
     done < "$work/.untracked"
     if [ -s "$work/.untracked-to-archive" ] &&
