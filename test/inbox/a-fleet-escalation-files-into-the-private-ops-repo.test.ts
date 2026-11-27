@@ -11,8 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
-  ESCALATION_REPOSITORY_ENV, escalate, escalationCodeRepository, escalationDestinationAt, escalationIssueRepositories, escalationIssueRepository, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, issueGatewayRepository, issueGatewayUnfiled,
-  issueUrlRepository, NEEDS_HUMAN_LABEL, tryEscalate, type Escalation, type EscalationDestinationRead,
+  ESCALATION_REPOSITORY_ENV, escalate, escalationCodeRepository, escalationDestinationAt, escalationListingIsRouted, escalationIssueRepositories, escalationIssueRepository, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, issueGatewayRepository, issueGatewayUnfiled,
+  issueUrlRepository, NEEDS_HUMAN_LABEL, tryEscalate, withCodeRepositoryField, type Escalation, type EscalationDestinationRead,
 } from "#src/lib/escalate.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { sreOperatorEscalation } from "#src/lib/sre-runbooks.js";
@@ -356,6 +356,10 @@ test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery close
     { issues: core, ledgerPath: path, runId: "CORE-2" }));
   assert.equal(escalationCodeRepository(gh.issues[2]!.body), code);
   gh.issues.pop();
+  // The field joins any body: after its Host line (keeping CRLF line ends), or first when it has none.
+  assert.equal(withCodeRepositoryField("**Class:** BLOCKED\r\n**Task:** T\r\n**Host:** h\r\n\r\ndetail", code),
+    `**Class:** BLOCKED\r\n**Task:** T\r\n**Host:** h\r\n**Code-Repository:** ${code}\r\n\r\ndetail`);
+  assert.equal(withCodeRepositoryField("**Cause-Key:** k\n\nentry", code), `**Code-Repository:** ${code}\n**Cause-Key:** k\n\nentry`);
   // Site's main goes green: its rung closes its own MAIN-HEALTH issue and leaves core's open.
   const logged: Array<Record<string, unknown>> = [];
   const green = buildMainHealthRung(SITE.owner, SITE.repo, {
@@ -374,25 +378,37 @@ test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery close
   await green();
   assert.deepEqual(logged.filter((row) => row.step === "main.health.resolved").map((row) => row.issue_url), [siteUrl]);
   assert.deepEqual(gh.issues.map((issue) => [issue.url, issue.state]), [[coreUrl, "open"], [siteUrl, "closed"]]);
-  // Core's reconciler, over the ops pool, never takes site's PR-45 ask (or one naming site's PR) for core's PR #45.
+  // Core's reconciler, over the routed ops pool, never takes site's PR-45 ask (or one naming site's PR) for core's PR #45;
+  // a legacy issue recording no repository is judged by the PR it names, as the routed listing judges it.
   const askedPrs: number[] = [];
   const github = { prByRef: (n: number) => (askedPrs.push(n), { number: n, url: `https://github.com/${code}/pull/${n}`, state: "MERGED" }),
     prByTrailer: () => undefined, mergedNewestFirst: () => [] };
   const pool = [
     { number: 3, url: `https://github.com/${OPS}/issues/3`, title: "[BLOCKED] PR-45: stalled", body: `**Code-Repository:** ${site}\n**Class:** BLOCKED\n**Task:** PR-45\n` },
-    { number: 4, url: `https://github.com/${OPS}/issues/4`, title: "[BLOCKED] PR-45: stalled", body: "**Class:** BLOCKED\n**Task:** PR-45\n" },
+    { number: 4, url: `https://github.com/${OPS}/issues/4`, title: "[BLOCKED] PR-44: stalled", body: "**Class:** BLOCKED\n**Task:** PR-44\n" },
     { number: 5, url: `https://github.com/${OPS}/issues/5`, title: "[MANUAL] SITE-T9: review", body: `**Code-Repository:** ${code}\n**Task:** SITE-T9\n\nhttps://github.com/${site}/pull/45` },
     { number: 6, url: `https://github.com/${OPS}/issues/6`, title: "[BLOCKED] PR-46: stalled", body: `**Code-Repository:** ${code}\n**Class:** BLOCKED\n**Task:** PR-46\n` },
     { number: 7, url: `https://github.com/${code}/issues/7`, title: "[BLOCKED] PR-47: stalled", body: "**Class:** BLOCKED\n**Task:** PR-47\n" },
+    { number: 8, url: `https://github.com/${OPS}/issues/8`, title: "[MANUAL] TRIAGE-1: ask", body: `**Task:** TRIAGE-1\n\nPR https://github.com/${code}/pull/48 needs an answer.` },
+    { number: 9, url: `https://github.com/${OPS}/issues/9`, title: "[MANUAL] TRIAGE-2: ask", body: `**Task:** TRIAGE-2\n\nPR https://github.com/${site}/pull/45 needs an answer.` },
   ];
-  const candidates = buildEscalationReconcileCandidates(CODE.owner, CODE.repo, { tasks: [], byId: new Map() }, path, () => {},
-    { issues: { listOpen: () => pool }, github: github as never, evidenceRootFor: () => undefined });
-  assert.deepEqual(candidates.map((c) => [c.issueNumber, c.derived.merged]), [[6, true], [7, true]],
-    "only ops issues recording core, and core's own legacy issues, are judged");
-  assert.deepEqual(askedPrs, [46, 47], "site's PR-45 is never resolved on core");
+  const reconcile = (routed?: boolean) => {
+    askedPrs.length = 0;
+    return buildEscalationReconcileCandidates(CODE.owner, CODE.repo, { tasks: [], byId: new Map() }, path, () => {},
+      { issues: { listOpen: () => pool }, github: github as never, evidenceRootFor: () => undefined, routed })
+      .map((c) => [c.issueNumber, c.derived.merged]);
+  };
+  assert.deepEqual(reconcile(true), [[4, true], [6, true], [7, true], [8, true]],
+    "core judges its own, recorded or legacy, and never one recording or naming site");
+  assert.deepEqual(askedPrs, [44, 46, 47, 48], "site's PR-45 is never resolved on core");
+  assert.deepEqual(reconcile().map(([n]) => n), [3, 4, 5, 6, 7, 8, 9], "control: a listing that is not routed applies no pool rule");
+  // A routed gateway is read as routed; one filing in its own code repository, or a fake, is not.
+  assert.equal(escalationListingIsRouted(CODE.owner, CODE.repo, core), true);
+  assert.equal(escalationListingIsRouted(OPS.split("/")[0]!, OPS.split("/")[1]!, ghIssueGateway("craigoley", "remudero-ops", { exec: gh.exec, destination: toOps })), false);
+  assert.equal(escalationListingIsRouted(CODE.owner, CODE.repo, { listOpen: () => pool }), false);
   // The revalidation garden, which closes what it lists, lists only core's issues out of the ops pool.
   const rest = JSON.stringify(pool.map((issue) => ({ number: issue.number, html_url: issue.url, title: issue.title, body: issue.body })));
   const ports = withEnv(OPS, () => productionIssueRevalidationPorts({ ...CODE, stateDir: tmpdir(), repoRoot: tmpdir(), log: () => {},
     referentVerdicts: async () => new Map(), hasReferent: () => false, judgeText: async () => "", readText: async () => rest } as never));
-  assert.deepEqual((await ports.listOpenIssues()).map((issue) => issue.number), [6, 7]);
+  assert.deepEqual((await ports.listOpenIssues()).map((issue) => issue.number), [4, 6, 7, 8]);
 });

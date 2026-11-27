@@ -1298,7 +1298,7 @@ export function productionIssueRevalidationPorts(opts: ProductionIssueRevalidati
     log: opts.log,
     listOpenIssues: async () => {
       // W1-T14998: the escalation repository is a pool other code repositories file in; this garden judges (and closes)
-      // only the issues that record this code repository and name none of another's PRs.
+      // only the issues that record no other code repository and name none of another's PRs.
       const pooled = `${issueOwner}/${issueRepo}`.toLowerCase() !== repoArg.toLowerCase();
       listed = parseOpenIssuesRest(await readText(openIssuesRestArgs(issueOwner, issueRepo)))
         .filter((issue) => !pooled || pooledIssueIsCodeRepositorys(issue, repoArg));

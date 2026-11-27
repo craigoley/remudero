@@ -2458,16 +2458,21 @@ export function issueIsCodeRepositorys(issue: Pick<OpenIssue, "title" | "body">,
 }
 
 /** W1-T14998 — whether a consumer that resolves an issue's task or PR number on `codeRepository` and may CLOSE it (the
- *  escalation reconciler, the revalidation garden) may judge `issue`. An issue living in the code repository itself is
- *  judged as before. One living elsewhere (the shared escalation pool) must record this code repository, and the PR it
- *  names, in its body or title, must not be another repository's: an unattributable pooled issue is left open. */
-export function pooledIssueIsCodeRepositorys(issue: Pick<OpenIssue, "url" | "title" | "body">, codeRepository: string): boolean {
-  const lives = issueUrlRepository(issue.url);
+ *  escalation reconciler, the revalidation garden) may judge `issue` from a ROUTED listing — one whose escalation
+ *  repository is a pool other code repositories file in too. It must not record another code repository, and the PR
+ *  it names, in its body or title, must not be another repository's. A legacy issue recording none is judged by the
+ *  PR it names, as the routed gateway's listing judges it. A listing that is not routed applies no such rule. */
+export function pooledIssueIsCodeRepositorys(issue: Pick<OpenIssue, "title" | "body">, codeRepository: string): boolean {
   const same = (named: string | undefined) => named === undefined || named.toLowerCase() === codeRepository.toLowerCase();
-  if (lives === undefined || lives.toLowerCase() === codeRepository.toLowerCase()) return true;
-  const recorded = escalationCodeRepository(issue.body);
-  return recorded !== undefined && same(recorded)
+  return same(escalationCodeRepository(issue.body))
     && same(prReferentRepositoryFromIssueText(issue.body)) && same(prReferentRepositoryFromIssueText(issue.title));
+}
+
+/** W1-T14998 — whether `gateway` lists the escalation issues of `owner/repo` from a routed pool: a real gateway
+ *  whose escalation repository is not the code repository. A fake or unfiled gateway is never a pool. */
+export function escalationListingIsRouted(owner: string, repo: string, gateway: object): boolean {
+  const route = gatewayRepository.get(gateway);
+  return route !== undefined && route.toLowerCase() !== `${owner}/${repo}`.toLowerCase();
 }
 
 /** W1-T14998 — `body` with its code repository recorded first in its machine fields, so it is the one
