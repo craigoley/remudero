@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import {
   applyGhReadCadence, applyGhReadCadenceAsync, ghReadCadenceStampPath, GhReadCadenceRefusal,
-  resetGhCadenceAdvisoryForTest, withGhTransportFloorMode,
+  recordGhSecondaryLimitRefusal, resetGhCadenceAdvisoryForTest, withGhTransportFloorMode,
   type GhReadCadenceDeps,
 } from "#src/lib/github-transport.js";
 import { ghShim } from "#test/helpers/gh-shim.js";
@@ -16,7 +16,8 @@ import { gitRepo } from "#test/helpers/git-repo.js";
 function fixture(t: TestContext, cooldown?: string, elapsedMs = 120_000) {
   const dir = mkdtempSync(join(tmpdir(), "rmd-next-id-floor-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const env = { RMD_GH_CACHE_HOME: dir, RMD_GH_TRANSPORT_FLOOR: "wait", RMD_GH_COOLDOWN_S: cooldown };
+  // W1-T15055: these tests pin the full 180 s floor, which an explicit RMD_GH_COOLDOWN_S keeps in wait mode.
+  const env = { RMD_GH_CACHE_HOME: dir, RMD_GH_TRANSPORT_FLOOR: "wait", RMD_GH_COOLDOWN_S: cooldown ?? "180" };
   const path = ghReadCadenceStampPath(env)!;
   let now = 1_000_000;
   let last = now - elapsedMs;
@@ -322,6 +323,8 @@ test("W1-T7957: the transport window reads RMD_GH_COOLDOWN_S like the hook", asy
   ] as const) {
     for (const asyncRead of [false, true]) {
       const f = fixture(t, raw);
+      // W1-T15055: a fresh secondary-limit refusal keeps the default at the full window.
+      recordGhSecondaryLimitRefusal(f.env, 999_000);
       const decision = asyncRead
         ? await applyGhReadCadenceAsync(["api", "repos/o/r/pulls"], f.deps)
         : applyGhReadCadence(["api", "repos/o/r/pulls"], f.deps);
