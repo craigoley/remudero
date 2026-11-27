@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { test } from "node:test";
@@ -11,6 +12,7 @@ import { readPlanShards, reconcileRecordStatus } from "#src/lib/plan-reconcile.j
 import { statusFlipOnlyTaskIds } from "#src/lib/task-linter.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
 import { gitRepo } from "#test/helpers/git-repo.js";
+import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
 /**
  * W1-T15048. A file of plan/tasks.d can hold several records (W1-T9958's file holds W1-T9959 and W1-T9960). The
@@ -82,6 +84,46 @@ test("W1-T15048 criterion 1: every record of a shared shard lands in one compose
   assert.deepEqual(linted[1].only, ["W1-T1", "W1-T5", "W1-T6"], "THE CLAIM: the lint hold checks every record the composed text flips");
   assert.deepEqual(linted[1].status, { "W1-T1": "merged", "W1-T5": "merged", "W1-T6": "merged" }, "THE CLAIM: the lint hold reads the composed text in full");
   assert.deepEqual(linted[0].status, { "W1-T1": "queued", "W1-T5": "queued", "W1-T6": "queued" }, "positive control: before the flips they read queued");
+});
+
+test("W1-T15048: real lint-plan exempts pure shared status flips with old debt", (t) => {
+  const repo = gitRepo({ scope: t, kind: "t15048-lint-plan" });
+  mkdirSync(join(repo.dir, "plan/tasks.d"), { recursive: true });
+  copyFileSync(join(REPO_ROOT, "plan/policy.yaml"), join(repo.dir, "plan/policy.yaml"));
+  writeFileSync(join(repo.dir, "plan/tasks.yaml"), "[]\n");
+  const debtRecord = (id: string, status: string) => [
+    `- id: ${id}`, `  title: "shared lint fixture ${id}"`, "  repo: remudero", "  depends_on: []",
+    "  type: implement", "  design: |", "    NO-INVARIANTS: old lint debt fixture", "  verify: auto",
+    "  priority: 1", "  risk: low", `  status: ${status}`, "  attempts: 0", "  budget_usd: 1",
+    '  origin: "test-fixture:t15048"', "  files: [src/x.ts]", "  acceptance:", '    - claim: "existing debt"',
+    '      proof: "free prose that lint-plan rejects"', "",
+  ].join("\n");
+  const sharedPath = "plan/tasks.d/W1-T7-shared.yaml";
+  writeFileSync(join(repo.dir, sharedPath), debtRecord("W1-T7", "merged") + debtRecord("W1-T8", "queued") + debtRecord("W1-T9", "queued"));
+  repo.git("add", "-A");
+  repo.git("commit", "-qm", "base with pre-existing lint debt");
+  const base = repo.git("rev-parse", "HEAD");
+
+  writeFileSync(join(repo.dir, sharedPath), debtRecord("W1-T7", "merged") + debtRecord("W1-T8", "merged") + debtRecord("W1-T9", "merged"));
+  repo.git("add", sharedPath);
+  repo.git("commit", "-qm", "pure shared status flips");
+  const lint = () => spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"),
+    join(REPO_ROOT, "scripts/lint-plan-offline.mjs"), "--repo-root", repo.dir, "--base", base], {
+    cwd: REPO_ROOT, encoding: "utf8", timeout: 240_000, maxBuffer: 8 * 1024 * 1024,
+    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", LANG: "C", TZ: "UTC" },
+  });
+  const statusOnly = lint();
+  assert.equal(statusOnly.error, undefined, "the real lint-plan child completes");
+  assert.equal(statusOnly.status, 0, `${statusOnly.stdout}${statusOnly.stderr}`);
+  assert.match(`${statusOnly.stdout}${statusOnly.stderr}`, /rmd lint-plan: 0 task\(s\) checked/);
+
+  writeFileSync(join(repo.dir, sharedPath), debtRecord("W1-T7", "merged") + debtRecord("W1-T8", "merged").replace("shared lint fixture W1-T8", "changed shared lint fixture W1-T8") + debtRecord("W1-T9", "merged"));
+  repo.git("add", sharedPath);
+  repo.git("commit", "--no-verify", "-qm", "positive control changes a debt record");
+  const positive = lint();
+  assert.equal(positive.error, undefined, "the positive-control lint child completes");
+  assert.notEqual(positive.status, 0, `${positive.stdout}${positive.stderr}`);
+  assert.match(`${positive.stdout}${positive.stderr}`, /proof-dialect/, `${positive.stdout}${positive.stderr}`);
 });
 
 test("W1-T15048: a blocking rule one record of a shared file gains holds the file's whole write", (t) => {
@@ -160,11 +202,15 @@ for (const credited of [["W1-T9959"], ["W1-T9959", "W1-T9960"]]) {
     assert.equal(results[0].landed, true, results[0].error);
     assert.equal(results[0].refused, undefined, "THE CLAIM: the batch is not refused");
     assert.deepEqual(results[0].files, [T9958]);
+    const baseText = w.origin.git("show", `${w.main}:${T9958}`);
     const landedText = w.origin.git("show", `${BRANCH}:${T9958}`);
     assert.deepEqual(statuses(landedText), { "W1-T9958": "merged", "W1-T9959": "merged", "W1-T9960": credited.length === 2 ? "merged" : "queued" });
     assert.ok(proof !== undefined, "the PR body carries the shared file's proof");
-    assert.equal(proof, "unit test: W1-T15048 criterion 1: every record of a shared shard lands in one composed input",
-      "the merged-record count selects the discriminating composed-landing proof");
+    assert.equal(proof, `grep: ^  status: merged$ in ${T9958}`,
+      "the extra merged-status hit count discriminates this composed landing from its base");
+    const mergedLineCount = (text: string) => [...text.matchAll(/^  status: merged$/gm)].length;
+    assert.equal(mergedLineCount(landedText), mergedLineCount(baseText) + credited.length,
+      "positive control: the composed landing adds one grep hit per credited flip");
   });
 }
 
