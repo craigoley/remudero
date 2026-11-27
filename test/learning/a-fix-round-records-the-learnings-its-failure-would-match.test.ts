@@ -32,6 +32,7 @@ const WORKER: WorkerResult = {
   model: "sonnet", effort: "medium", tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 }, modelUsage: {},
   compactionEvents: [], qualitySuspect: false,
 };
+const NEEDS_DESIGN_WORKER: WorkerResult = { ...WORKER, text: "REPORT\nFIX_OUTCOME: NEEDS_DESIGN the repair needs design" };
 
 type Row = Record<string, unknown> & { step: string };
 
@@ -49,6 +50,8 @@ async function runRound(t: TestContext, options: {
   spawnEnd?: "superseded" | "abandoned" | "throws";
   workerHoldsGit?: boolean;
   workerPushesBeforeHandoff?: boolean;
+  /** The worker leaves HEAD naming a branch with no commit, then hands off. */
+  workerLosesHead?: boolean;
   mergeRefused?: boolean;
   /** The round's push leaves the branch at the head it started from. */
   unchangedHead?: boolean;
@@ -135,7 +138,11 @@ async function runRound(t: TestContext, options: {
         if (options.workerPushesBeforeHandoff) {
           source.git("commit", "--quiet", "--allow-empty", "-m", "worker pushed before handoff");
           source.git("push", "--quiet", "origin", `HEAD:refs/heads/run-${taskId}-1`);
-          return { ...WORKER, text: "REPORT\nFIX_OUTCOME: NEEDS_DESIGN the repair needs design" };
+          return NEEDS_DESIGN_WORKER;
+        }
+        if (options.workerLosesHead) {
+          source.git("symbolic-ref", "HEAD", "refs/heads/unborn");
+          return NEEDS_DESIGN_WORKER;
         }
         return options.spawnEnd ? new Promise<WorkerResult>(() => {}) : WORKER;
       },
@@ -332,6 +339,14 @@ test("W1-T14138 criterion 4: a worker-owned push before NEEDS_DESIGN stays unres
   assert.equal(result.steps("fix.done").length, 1);
   assert.equal(result.steps("fix.done")[0]?.pushed_head_sha, undefined);
   assert.notEqual(result.workerRemoteHead, result.startHead);
+  assert.equal(result.steps("fix.learnings_outcome").length, 0);
+});
+
+test("W1-T14138 criterion 4: a worker-owned head that cannot be read leaves the round unresolved", async t => {
+  const result = await runRound(t, { workerHoldsGit: true, workerLosesHead: true });
+  assert.equal(result.steps("fix.done").length, 1);
+  assert.equal(result.steps("fix.evidence_head_unread").length, 1);
+  assert.equal(result.steps("fix.learnings_shadow").length, 1);
   assert.equal(result.steps("fix.learnings_outcome").length, 0);
 });
 

@@ -5452,23 +5452,17 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           (landing === undefined || (!landing.landed && (landing.outcome === "refused" || landing.outcome === "not_on_remote"))))) {
         // W1-T14138: when the worker owns git, a missing harness landing is not evidence
         // that it pushed nothing. NEEDS_DESIGN / NEEDS_SCOPE / FLAKE can end this path after
-        // the worker has committed and pushed itself. Only classify no_push when the local
-        // worktree still proves the round's starting head; a moved or unreadable head remains
-        // unresolved until CI can be attributed to the produced commit.
-        if (!fixHarnessOwnsGit) {
-          try {
-            const currentHead = hostWorktreeGit(opts.worktreePath, ["rev-parse", "HEAD"]).trim();
-            if (currentHead !== roundStartHeadSha) {
-              releaseRoundClaim();
-              return;
-            }
-          } catch (error) {
+        // the worker has committed and pushed itself. Only classify no_push when the head read
+        // after the worker returned is still the round's starting head; a moved or unreadable
+        // head remains unresolved until CI can be attributed to the produced commit.
+        if (!fixHarnessOwnsGit && expectedHeadShaForPush !== roundStartHeadSha) {
+          if (expectedHeadShaForPush === undefined) {
             deps.log("fix.evidence_head_unread", { round_id: roundId, head_sha: priorHeadSha,
               worktree_head_sha: roundStartHeadSha,
-              reason: `worker-owned worktree HEAD read failed before outcome attribution: ${String(error).slice(0, 500)}` });
-            releaseRoundClaim();
-            return;
+              reason: "worker-owned worktree HEAD was unreadable, so the round's outcome is not attributed" });
           }
+          releaseRoundClaim();
+          return;
         }
         recordFixLearningsOutcome("no_push");
       }
