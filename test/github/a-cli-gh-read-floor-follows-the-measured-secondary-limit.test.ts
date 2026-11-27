@@ -16,13 +16,17 @@ import {
   ghLearnedGatedFloorMs,
   GhReadWaitOutlivesTokenRefusal,
   ghReadCadenceStampPath,
+  ghJson,
+  ghJsonAsync,
   ghSecondaryLimitStatePath,
   paceGhEntry,
   readGhSecondaryLimitRefusals,
+  readGhReadTickets,
   recordGhSecondaryLimitRefusal,
   resetGhCadenceAdvisoryForTest,
   routeInteractiveGhRead,
   stampGhRead,
+  ghTextAsync,
   type GhCallPacer,
   type GhReadCadenceDeps,
 } from "#src/lib/github-transport.js";
@@ -65,6 +69,41 @@ test("W1-T15055 criterion 1: two wait-mode invocations seconds apart are both ad
   assert.ok(slept(f.sleeps) <= GAP_MS, `it waited at most the shared read gap: ${JSON.stringify(f.sleeps)}`);
 });
 
+test("W1-T15055 queue lifetime: a short learned floor cannot reap a waiter sleeping on the full floor", async (t) => {
+  const f = fixture(t);
+  const stamp = ghReadCadenceStampPath(f.env)!;
+  stampGhRead(stamp, "", f.now() - 5_000);
+  let release!: () => void;
+  let entered!: () => void;
+  const enteredSleep = new Promise<void>((resolve) => { entered = resolve; });
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const first = applyGhReadCadenceAsync(READ, {
+    ...f.deps,
+    pid: 80_001,
+    pidAlive: () => true,
+    readSecondaryRefusals: () => [f.now()],
+    sleep: async (ms) => { entered(); await blocked; f.advance(ms); },
+  });
+  await enteredSleep;
+  const firstTicket = readGhReadTickets(stamp).find((ticket) => ticket.pid === 80_001);
+  assert.ok(firstTicket, "the full-floor waiter reserved a queue ticket");
+
+  // A sibling has learned a 90 s floor, and arrives 130 s later while the first wait is still live.
+  f.advance(130_000);
+  const siblingDeps: GhReadCadenceDeps = {
+    ...f.deps,
+    pid: 80_002,
+    pidAlive: () => true,
+    readSecondaryRefusals: () => [f.now() - FULL_MS - 1_000],
+  };
+  assert.throws(() => applyGhReadCadence(READ, siblingDeps), /wait mode|cadence/i,
+    "a synchronous sibling cannot take a wait-mode turn while the async reader owns the loop");
+  assert.ok(readGhReadTickets(stamp).some((ticket) => ticket.id === firstTicket.id),
+    "the sibling uses the ticket's captured full-window lifetime, not its lowered window");
+  release();
+  await first;
+});
+
 test("W1-T15055 criterion 2: a secondary-limit refusal restores the full floor and clean time lowers it again", (t) => {
   const f = fixture(t);
   // The transport's own refusal path records the refusal: a 403 naming the secondary limit, retried once.
@@ -102,6 +141,31 @@ test("W1-T15055 criterion 2: a secondary-limit refusal restores the full floor a
   assert.ok(ghErrorIsSecondaryLimit(Object.assign(new Error("HTTP 429"), { status: 429, stderr: "Retry-After: 60" })), "a 429 with Retry-After counts");
   assert.equal(ghErrorIsSecondaryLimit(Object.assign(new Error("HTTP 403: API rate limit exceeded"), { status: 403 })), false,
     "a plain primary-budget refusal does not");
+});
+
+test("W1-T15055 refusal class: shared CLI read failures learn 403 and Retry-After refusals", async (t) => {
+  const f = fixture(t);
+  const savedHome = process.env.RMD_GH_CACHE_HOME;
+  const savedMode = process.env.RMD_GH_TRANSPORT_FLOOR;
+  process.env.RMD_GH_CACHE_HOME = f.dir;
+  process.env.RMD_GH_TRANSPORT_FLOOR = "wait";
+  t.after(() => {
+    if (savedHome === undefined) delete process.env.RMD_GH_CACHE_HOME; else process.env.RMD_GH_CACHE_HOME = savedHome;
+    if (savedMode === undefined) delete process.env.RMD_GH_TRANSPORT_FLOOR; else process.env.RMD_GH_TRANSPORT_FLOOR = savedMode;
+  });
+  const secondary403 = () => Object.assign(new Error("HTTP 403"), {
+    status: 403, stderr: "You have exceeded a secondary rate limit",
+  });
+  assert.throws(() => ghJson(["api", "repos/o/r/pulls"], undefined, () => { throw secondary403(); }));
+  await assert.rejects(ghJsonAsync(["api", "repos/o/r/pulls"], async () => { throw secondary403(); }));
+  await assert.rejects(ghTextAsync(["api", "repos/o/r/pulls"], {}, async () => { throw secondary403(); }));
+  const retryAfter = Object.assign(new Error("HTTP 429"), {
+    status: 429, stdout: "HTTP/2 429\r\nRetry-After: 60\r\n\r\nslow down",
+  });
+  assert.ok(ghErrorIsSecondaryLimit(retryAfter), "Retry-After in gh's stdout header block classifies as a secondary refusal");
+  assert.throws(() => ghJson(["api", "repos/o/r/issues"], undefined, () => { throw retryAfter; }));
+  const learned = readGhSecondaryLimitRefusals(ghSecondaryLimitStatePath(f.env));
+  assert.equal(learned.length, 4, "each shared CLI read failure records once, including 429 response headers");
 });
 
 test("W1-T15055 criterion 3: a wait longer than the token's remaining life ends with the token-life reason", async (t) => {

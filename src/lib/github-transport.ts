@@ -821,8 +821,10 @@ async function admitInstallationReadAsync(args: readonly string[]): Promise<void
   }
 }
 
+const notedSecondaryLimitRefusals = new WeakSet<object>();
+
 function noteInstallationRefusal(err: unknown): void {
-  const failure = err as { stdout?: string | Buffer; stderr?: string | Buffer } | null | undefined;
+  const failure = err as { stdout?: string | Buffer; stderr?: string | Buffer; status?: number; message?: string } | null | undefined;
   if (failure?.stdout !== undefined) {
     const stdout = String(failure.stdout);
     githubInstallationBudget().record(parseGhRateLimitHeaders(splitGhHeaderBlock(stdout, stdout.startsWith("[")).headers));
@@ -830,6 +832,13 @@ function noteInstallationRefusal(err: unknown): void {
   // The transport cannot import status.ts without a dependency cycle; match its primary-limit signal.
   const text = failure?.stderr === undefined ? (err instanceof Error ? err.message : String(err)) : String(failure.stderr);
   if (/rate limit|quota/i.test(text)) githubInstallationBudget().noteThrottle("refused");
+  // Every real CLI read reaches this shared failure seam, including ghJson/ghExec and the HTTP
+  // transport. Nested wrappers can observe the same Error more than once, so count one refusal.
+  if (err !== null && (typeof err === "object" || typeof err === "function") &&
+    !notedSecondaryLimitRefusals.has(err as object) && ghErrorIsSecondaryLimit(err)) {
+    notedSecondaryLimitRefusals.add(err as object);
+    recordGhSecondaryLimitRefusal();
+  }
 }
 
 export interface GhCallPacer {
@@ -1012,8 +1021,8 @@ export const DEFAULT_GH_REFUSAL_BACKOFF_MAX_ATTEMPTS = 4;
 export const DEFAULT_GH_REFUSAL_BACKOFF_JITTER_FRACTION = 0.25;
 
 export function defaultGhRetryAfterSeconds(err: unknown): number | undefined {
-  const e = err as { stderr?: string | Buffer; message?: string } | null | undefined;
-  const text = `${e?.stderr ?? ""}\n${e?.message ?? ""}`;
+  const e = err as { stdout?: string | Buffer; stderr?: string | Buffer; message?: string } | null | undefined;
+  const text = `${e?.stdout ?? ""}\n${e?.stderr ?? ""}\n${e?.message ?? ""}`;
   const match = /retry-after\s*:?\s*(\d+)/i.exec(text);
   if (!match) return undefined;
   const seconds = Number(match[1]);
@@ -1183,9 +1192,9 @@ export function recordGhSecondaryLimitRefusal(env: NodeJS.ProcessEnv = process.e
 }
 
 export function ghErrorIsSecondaryLimit(err: unknown): boolean {
-  const e = err as { status?: number; stderr?: string | Buffer; message?: string } | null | undefined;
+  const e = err as { status?: number; stdout?: string | Buffer; stderr?: string | Buffer; message?: string } | null | undefined;
   if (e === null || e === undefined) return false;
-  if (/secondary rate|abuse detection/i.test(`${e.stderr ?? ""}\n${e.message ?? ""}`)) return true;
+  if (/secondary rate|abuse detection/i.test(`${e.stdout ?? ""}\n${e.stderr ?? ""}\n${e.message ?? ""}`)) return true;
   const shaped = e.status === 403 || e.status === 429 || ghErrorTextLooksRateLimited(err);
   return shaped && defaultGhRetryAfterSeconds(err) !== undefined;
 }
@@ -1206,9 +1215,9 @@ export interface GhSecondaryLimitRefusal {
 }
 
 function ghErrorTextLooksRateLimited(err: unknown): boolean {
-  const e = err as { status?: number; stderr?: string | Buffer; message?: string } | null | undefined;
+  const e = err as { status?: number; stdout?: string | Buffer; stderr?: string | Buffer; message?: string } | null | undefined;
   if (e === null || e === undefined) return false;
-  const text = `${e.stderr ?? ""}\n${e.message ?? ""}`;
+  const text = `${e.stdout ?? ""}\n${e.stderr ?? ""}\n${e.message ?? ""}`;
   if (/rate limit|too many requests|secondary rate|abuse detection/i.test(text)) return true;
   // A bare 403/429 with no body still reads as pacing; a 404 or 422 never does.
   return e.status === 429;
@@ -1557,6 +1566,8 @@ export interface GhReadTicket {
   host: string;
   createdMs: number;
   refreshedMs: number;
+  /** Maximum stale age is captured at enqueue time so another reader's learned floor cannot reap us. */
+  staleAfterMs?: number;
   /** A reader has already given this ticket its reserved slot; nobody yields to it again. */
   yielded: boolean;
 }
@@ -2022,7 +2033,8 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
     const host = hostname();
     return readGhReadTickets(stampPath).filter((t) => {
       if (t.id === ticket?.id) return true;
-      const dead = nowMs - t.refreshedMs > windowMs + GH_CADENCE_LOCK_STALE_MS || (sameHost(t.host, host) && !pidAlive(t.pid));
+      const dead = nowMs - t.refreshedMs > (t.staleAfterMs ?? DEFAULT_GH_READ_CADENCE_S * 1000 + GH_CADENCE_LOCK_STALE_MS) ||
+        (sameHost(t.host, host) && !pidAlive(t.pid));
       if (dead) removeGhReadTicket(stampPath, t.id);
       return !dead;
     });
@@ -2134,7 +2146,8 @@ function planGhReadCadence(args: readonly string[], deps: GhReadCadenceDeps): Gh
           ? {
             id: `${pid}-${nowMs}-${randomUUID().slice(0, 8)}`, rank: ghReadTicketRank(callerActor()), actor: callerActor(),
             seq: tickets.reduce((max, t) => Math.max(max, t.seq), 0) + 1, pid, host: hostname(),
-            createdMs: nowMs, refreshedMs: nowMs, yielded: false,
+            createdMs: nowMs, refreshedMs: nowMs,
+            staleAfterMs: fullWindowS * 1000 + GH_CADENCE_LOCK_STALE_MS, yielded: false,
           }
           : { ...mine, refreshedMs: nowMs, yielded: onDisk?.yielded ?? mine.yielded };
         writeGhReadTicket(stampPath, ticket);
