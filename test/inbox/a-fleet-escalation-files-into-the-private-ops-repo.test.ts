@@ -3,16 +3,17 @@
  *
  * OBSERVED 2026-11-26: the fleet opened [MANUAL], MAIN-HEALTH and READ-MODEL needs-human issues on public core
  * (#21036, #21001, #21006, ...), carrying task ids, PR links and host detail. Every escalation gateway is now built on
- * the host's private plan destination (the ops repository); with none named, an escalation is a ledger row only.
+ * the host's private plan destination (the ops repository); with none named, a public code repository's escalation is a
+ * ledger row only, and a private one's files in itself as before (amended 2026-11-27).
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import {
   ESCALATION_REPOSITORY_ENV, escalate, escalationCodeRepository, escalationDestinationAt, escalationListingIsRouted, escalationIssueRepositories, escalationIssueRepository, ghIssueGateway, ghIssueGatewayAsync, ghIssueGatewayGraphql, issueGatewayRepository, issueGatewayUnfiled,
-  issueUrlRepository, NEEDS_HUMAN_LABEL, tryEscalate, withCodeRepositoryField, type Escalation, type EscalationDestinationRead,
+  issueUrlRepository, NEEDS_HUMAN_LABEL, renderIssueBody, tryEscalate, withCodeRepositoryField, type Escalation, type EscalationDestinationRead,
 } from "#src/lib/escalate.js";
 import { withLiveWritesAllowed } from "#src/lib/live-write-guard.js";
 import { sreOperatorEscalation } from "#src/lib/sre-runbooks.js";
@@ -30,12 +31,14 @@ import type { FeedbackEntry } from "#src/lib/feedback.js";
 import { terminalRulePr } from "#src/lib/issue-revalidation-garden.js";
 import { buildBatchedGithub, fetchEscalationIssuesRest, ghGateway } from "#src/lib/status.js";
 import { createBoardSnapshotCache } from "#src/lib/board-snapshot-cache.js";
+import { ghEscalationAnswerGateway, readEscalationAnswers } from "#src/lib/escalation-answers.js";
 
 const CODE = { owner: "craigoley", repo: "remudero" };
 const OPS = "craigoley/remudero-ops";
 const PR_URL = "https://github.com/craigoley/remudero/pull/20986";
 const toOps: EscalationDestinationRead = () => ({ outcome: "named", repository: OPS });
-const nowhere: EscalationDestinationRead = () => ({ outcome: "unfiled", reason: "no-private-escalation-repository" });
+const nowhere: EscalationDestinationRead = () => ({ outcome: "unfiled", reason: "no-private-escalation-repository", unrouted: true });
+const isVisibilityRead = (args: string[]) => args[0] === "api" && /^repos\/[^/]+\/[^/]+$/.test(args[1] ?? "");
 
 function escalation(over: Partial<Escalation> = {}): Escalation {
   return {
@@ -49,8 +52,9 @@ function escalation(over: Partial<Escalation> = {}): Escalation {
   };
 }
 
-/** A `gh` stand-in holding issues per repository: create, the REST open-issue listing, close, comment and labels. */
-function fakeGh() {
+/** A `gh` stand-in holding issues per repository: create, the REST open-issue listing, close, comment and labels, and
+ *  each repository's own record (`private`) for the repositories `visibility` names. */
+function fakeGh(visibility: Record<string, boolean | null> = {}) {
   const issues: Array<{ repo: string; number: number; url: string; title: string; body: string; labels: string[]; state: string }> = [];
   const calls: string[][] = [];
   const repoOf = (args: string[]) => args[args.indexOf("--repo") + 1]!;
@@ -72,6 +76,11 @@ function fakeGh() {
       return "";
     }
     if (args[0] === "issue" && args[1] === "comment") return "";
+    if (isVisibilityRead(args)) {
+      const repo = args[1]!.slice("repos/".length);
+      if (!(repo in visibility)) throw new Error(`HTTP 404: Not Found (${args[1]})`);
+      return `${visibility[repo]}\n`;
+    }
     if (args[0] === "api") {
       const [, repo, query] = /^repos\/([^/]+\/[^/]+)\/issues\?(.*)$/.exec(args[1]!) ?? [];
       const label = decodeURIComponent(/labels=([^&]*)/.exec(query ?? "")?.[1] ?? "");
@@ -160,25 +169,36 @@ test("W1-T14998 criterion 1: a fleet escalation opens its issue in the private o
 });
 
 test("W1-T14998 criterion 2: with no private repository an escalation opens no public issue", async (t) => {
-  const gh = fakeGh();
+  // The code repository's own GitHub record says it is public.
+  const gh = fakeGh({ [`${CODE.owner}/${CODE.repo}`]: false });
   const { path, rows } = ledger(t);
   const issues = ghIssueGateway(CODE.owner, CODE.repo, { exec: gh.exec, destination: nowhere });
   assert.equal(issueGatewayRepository(issues), undefined);
-  assert.equal(issueGatewayUnfiled(issues), "no-private-escalation-repository");
   assert.equal(escalate(escalation(), { issues, ledgerPath: path, runId: "RUN-1" }), "");
   assert.equal(tryEscalate(escalation({ class: "BLOCKED" }), { issues, ledgerPath: path, runId: "RUN-1" }), null);
-  assert.deepEqual(gh.calls, [], "no gh call at all");
+  assert.deepEqual(gh.calls, [["api", `repos/${CODE.owner}/${CODE.repo}`, "--jq", ".private"]],
+    "one read of the repository's visibility, then no gh call at all");
   const unfiled = rows().filter((row) => row.step === "escalation.not_filed");
   assert.deepEqual(unfiled.map((row) => [row.task_id, row.class, row.reason]),
     [["W1-T14945", "MANUAL", "no-private-escalation-repository"], ["W1-T14945", "BLOCKED", "no-private-escalation-repository"]]);
   assert.equal(rows().some((row) => row.step === "escalation.issue_opened" || row.step === "escalation.failed"), false);
-  // The async form and its reads open nothing either.
+  // The async form and its reads open nothing either, on the visibility this process already read.
   const quiet = ghIssueGatewayAsync(CODE.owner, CODE.repo, { destination: nowhere });
   assert.deepEqual(await quiet.listOpen?.(NEEDS_HUMAN_LABEL), []);
   await assert.rejects(async () => quiet.create("t", "b", []), /no escalation issue is filed: no-private-escalation-repository/);
-  // The host's real route: no plan-destination file is unfiled, and so is an unreadable one, never public core.
-  assert.equal(withHostHome(t, undefined, () => issueGatewayUnfiled(ghIssueGateway(CODE.owner, CODE.repo))),
-    "no-private-escalation-repository");
+  // The host's real route: no plan-destination file opens nothing on a public repository, and an unreadable one is
+  // unfiled before any visibility is read, never public core.
+  const hostRoute = withHostHome(t, undefined, () => ghIssueGateway(CODE.owner, CODE.repo));
+  assert.deepEqual([hostRoute.listOpen?.(NEEDS_HUMAN_LABEL), hostRoute.ensureLabel?.(NEEDS_HUMAN_LABEL)], [[], false]);
+  assert.throws(() => hostRoute.create("t", "b", []), /no escalation issue is filed: no-private-escalation-repository/);
+  // A repository whose visibility cannot be read fails closed, and is read again on the next escalation.
+  const dark = fakeGh({ "craigoley/unreadable": null });
+  const darkIssues = ghIssueGateway("craigoley", "unreadable", { exec: dark.exec, destination: nowhere });
+  assert.equal(escalate(escalation({ taskId: "W1-T14997" }), { issues: darkIssues, ledgerPath: path, runId: "RUN-1" }), "");
+  assert.equal(escalate(escalation({ taskId: "W1-T14997" }), { issues: darkIssues, ledgerPath: path, runId: "RUN-2" }), "");
+  assert.deepEqual(dark.calls.map((args) => isVisibilityRead(args)), [true, true], "two visibility reads, no issue command");
+  assert.match(String(rows().find((row) => row.task_id === "W1-T14997")?.reason),
+    /^no-private-escalation-repository; code-repository-visibility-unreadable: repos\/craigoley\/unreadable answered no private field$/);
   assert.match(withHostHome(t, { repository: "not a repository", kinds: [] },
     () => issueGatewayUnfiled(ghIssueGateway(CODE.owner, CODE.repo))) ?? "", /^private-escalation-repository-unreadable: /);
   // An exec-injecting producer with no valid route opens nothing either, and records why.
@@ -242,7 +262,7 @@ test("W1-T14998 criterion 1: a fleet escalation opens its issue in the private o
   const gh = fakeGh();
   const [alert, homeRoute] = withHostHome(t, undefined, () => [hostAlertIssueGateway(stateDir, CODE.owner, CODE.repo, gh.exec),
     ghIssueGateway(CODE.owner, CODE.repo, { exec: gh.exec })] as const);
-  assert.equal(issueGatewayUnfiled(homeRoute), "no-private-escalation-repository", "control: HOME's state names no destination");
+  assert.equal(issueGatewayRepository(homeRoute), undefined, "control: HOME's state names no destination");
   assert.equal(issueGatewayRepository(alert), OPS, "the host alert files where its own state directory routes");
   assert.deepEqual(withHostHome(t, undefined, () => escalationDestinationAt(stateDir)()), { outcome: "named", repository: OPS });
   // Readers take ops-filed issues as this repository's, beside its own legacy ones.
@@ -411,4 +431,126 @@ test("W1-T14998 criterion 3: a re-escalation reuses its issue and recovery close
   const ports = withEnv(OPS, () => productionIssueRevalidationPorts({ ...CODE, stateDir: tmpdir(), repoRoot: tmpdir(), log: () => {},
     referentVerdicts: async () => new Map(), hasReferent: () => false, judgeText: async () => "", readText: async () => rest } as never));
   assert.deepEqual((await ports.listOpenIssues()).map((issue) => issue.number), [4, 6, 7, 8]);
+});
+
+test("W1-T14998 criterion 4: an unrouted private repository files its escalation in itself", async (t) => {
+  // Site names no escalation route, and its own GitHub record says it is private: it files where it did before.
+  const SITE = "craigoley/site";
+  const gh = fakeGh({ [SITE]: true });
+  const { path, rows } = ledger(t);
+  const issues = ghIssueGateway("craigoley", "site", { exec: gh.exec, destination: nowhere });
+  const url = withLiveWritesAllowed(() => escalate(escalation(), { issues, ledgerPath: path, runId: "RUN-1" }));
+  assert.match(url, /^https:\/\/github\.com\/craigoley\/site\/issues\/1$/);
+  assert.deepEqual(gh.issues.map((issue) => issue.repo), [SITE], "the one issue is on the private code repository");
+  assert.equal(escalationCodeRepository(gh.issues[0]!.body), undefined, "filed exactly as before: no pool field");
+  assert.equal(rows().find((row) => row.step === "escalation.issue_opened")?.issue_url, url);
+  assert.equal(rows().some((row) => row.step === "escalation.not_filed"), false);
+  // Dedup, the listing and recovery's close work on it as before, and it is never read as a routed pool.
+  assert.equal(withLiveWritesAllowed(() => escalate(escalation(), { issues, ledgerPath: path, runId: "RUN-2" })), url);
+  assert.equal(gh.issues.length, 1);
+  assert.equal(escalationListingIsRouted("craigoley", "site", issues), false);
+  const listedAsync = await ghIssueGatewayAsync("craigoley", "site", { exec: async (args) => gh.exec(args), destination: nowhere })
+    .listOpen?.(NEEDS_HUMAN_LABEL);
+  assert.deepEqual(listedAsync?.map((issue) => issue.url), [url], "the async form lists it on the code repository");
+  const hostRoute = withHostHome(t, undefined, () => ghIssueGateway("craigoley", "site", { exec: gh.exec }));
+  assert.deepEqual(hostRoute.listOpen?.(NEEDS_HUMAN_LABEL).map((issue) => issue.url), [url], "the host's real unrouted route too");
+  issues.closeWithComment!(url, "recovered: the review ran");
+  assert.deepEqual(gh.issues.map((issue) => [issue.repo, issue.state]), [[SITE, "closed"]]);
+  // The visibility is read once per process, from the repository's own record.
+  assert.deepEqual(gh.calls.filter(isVisibilityRead), [["api", `repos/${SITE}`, "--jq", ".private"]]);
+  // The quota notice's GraphQL gateway reads it over GraphQL and lists a private repository's own issues.
+  const graphqlCalls: string[] = [];
+  const graphql = (isPrivate: boolean) => async (args: string[]) => {
+    const query = args.find((arg) => arg.startsWith("query="))!;
+    graphqlCalls.push(query.includes("isPrivate") ? "visibility" : "issues");
+    return JSON.stringify(query.includes("isPrivate") ? { data: { repository: { isPrivate } } }
+      : { data: { repository: { issues: { nodes: [], pageInfo: { hasNextPage: false } } } } });
+  };
+  assert.deepEqual(await ghIssueGatewayGraphql("craigoley", "console", { exec: graphql(true), destination: nowhere }).listOpen?.(NEEDS_HUMAN_LABEL), []);
+  assert.deepEqual(graphqlCalls, ["visibility", "issues"]);
+  graphqlCalls.length = 0;
+  assert.deepEqual(await ghIssueGatewayGraphql("craigoley", "arcade", { exec: graphql(false), destination: nowhere }).listOpen?.(NEEDS_HUMAN_LABEL), []);
+  assert.deepEqual(graphqlCalls, ["visibility"], "control: a public repository's GraphQL gateway lists nothing");
+});
+
+/** An owner-reply reader over `pool`'s open issues: each has one owner comment answering `re-review`. */
+function poolReader(t: TestContext, pool: string, codeRepository: string | undefined, issues: Array<{ number: number; body: string }>) {
+  const root = mkdtempSync(join(tmpdir(), `${RMD_TMP_PREFIX}w1-t14998-answers-`));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const reads: string[] = [];
+  const reacted: number[] = [];
+  const [owner, repo] = pool.split("/") as [string, string];
+  const gateway = ghEscalationAnswerGateway(owner, repo, async (args) => {
+    const at = args[1]!;
+    reads.push(at);
+    if (at.startsWith(`repos/${pool}/issues?`)) {
+      return JSON.stringify(issues.map((issue) => ({ number: issue.number, html_url: `https://github.com/${pool}/issues/${issue.number}`,
+        state: "open", title: `[MANUAL] ${issue.number}`, body: issue.body })));
+    }
+    const comments = new RegExp(`^repos/${pool}/issues/(\\d+)/comments\\?per_page=100$`).exec(at);
+    if (comments) {
+      return JSON.stringify([{ id: Number(comments[1]) * 100, body: "re-review", user: { login: owner, type: "User" },
+        author_association: "OWNER", updated_at: "2026-11-27T08:00:00Z" }]);
+    }
+    if (at.includes("/reactions") || at.includes("/issues/comments?")) return "[]";
+    throw new Error(`unrouted read ${at}`);
+  }, undefined, undefined, ...(codeRepository === undefined ? [] : [codeRepository]));
+  gateway.reactPlusOne = (id) => void reacted.push(id);
+  gateway.reactPlusOneOnIssue = (n) => void reacted.push(n);
+  const ledgerPath = join(root, "state", "ledger.ndjson");
+  const read = async () => {
+    const result = await readEscalationAnswers(root, "RUN-ANSWERS", gateway, { ledgerPath });
+    const questions = join(root, "plan", "questions.ndjson");
+    const lines = (file: string) => (existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : []);
+    const stored = lines(questions) as Array<{ task: string; origin: string }>;
+    const ledgerRows = lines(ledgerPath) as Array<Record<string, unknown>>;
+    return { result, stored: stored.map((row) => [row.task, row.origin]), ignored: ledgerRows.filter((row) => row.step === "escalation_answer.ignored") };
+  };
+  return { read, reads, reacted };
+}
+
+const SITE_PR = "https://github.com/craigoley/site/pull/45";
+const answerable = (taskId: string, over: Partial<Escalation> = {}) => renderIssueBody(escalation({ taskId, ...over }));
+const CORE_REPO = `${CODE.owner}/${CODE.repo}`;
+
+test("W1-T14998 criterion 5: an owner reply on another repository's pooled issue lands nothing here", async (t) => {
+  // Core reads its replies out of the ops pool. Site's issue for the same task id, recorded or named by its PR, is site's.
+  const core = poolReader(t, OPS, CORE_REPO, [
+    { number: 1, body: withCodeRepositoryField(answerable("W1-T15500"), "craigoley/site") },
+    { number: 2, body: answerable("W1-T15500", { summary: `PR ${SITE_PR} needs a review`, detail: `Review of ${SITE_PR} stalled.` }) },
+    { number: 3, body: withCodeRepositoryField(answerable("W1-T15500"), CORE_REPO) },
+  ]);
+  const { result, stored, ignored } = await core.read();
+  assert.deepEqual(stored, [["W1-T15500", "issue#3:comment:300"]], "only core's own issue lands an answer");
+  assert.deepEqual(core.reacted, [300], "and only its reply is acknowledged");
+  assert.equal(result.accepted, 1);
+  assert.deepEqual(ignored, [], "another repository's issue writes no refusal row");
+  assert.equal(core.reads.some((at) => /\/issues\/[12]\//.test(at)), false, "another repository's issue is never read");
+  // The ops daemon reads its own repository, which is also the pool: an issue recording another code repository is skipped.
+  const ops = poolReader(t, OPS, undefined, [
+    { number: 1, body: withCodeRepositoryField(answerable("W1-T15500"), CORE_REPO) },
+    { number: 4, body: answerable("W1-T15502", { summary: "ops plan lint is red", detail: "no PR" }) },
+  ]);
+  const opsRead = await ops.read();
+  assert.deepEqual(opsRead.stored, [["W1-T15502", "issue#4:comment:400"]]);
+  assert.deepEqual([ops.reacted, opsRead.ignored], [[400], []]);
+});
+
+test("W1-T14998 criterion 6: an owner reply on this repository's own issue lands as before", async (t) => {
+  // A routed reader answers its own recorded issue and a legacy one recording none and naming no other repository's PR.
+  const routed = poolReader(t, OPS, CORE_REPO, [
+    { number: 3, body: withCodeRepositoryField(answerable("W1-T15500"), CORE_REPO) },
+    { number: 5, body: answerable("W1-T15501", { summary: "proof runner cannot load test files", detail: "no PR named" }) },
+  ]);
+  const routedRead = await routed.read();
+  assert.deepEqual(routedRead.stored, [["W1-T15500", "issue#3:comment:300"], ["W1-T15501", "issue#5:comment:500"]]);
+  assert.deepEqual([routed.reacted, routedRead.result.accepted], [[300, 500], 2]);
+  // An unrouted reader over its own code repository answers every issue there, legacy and recorded, as origin/main does.
+  const own = poolReader(t, CORE_REPO, undefined, [
+    { number: 6, body: answerable("W1-T15503") },
+    { number: 7, body: withCodeRepositoryField(answerable("W1-T15504"), CORE_REPO) },
+  ]);
+  const ownRead = await own.read();
+  assert.deepEqual(ownRead.stored, [["W1-T15503", "issue#6:comment:600"], ["W1-T15504", "issue#7:comment:700"]]);
+  assert.deepEqual([own.reacted, ownRead.ignored], [[600, 700], []]);
 });

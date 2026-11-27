@@ -3311,7 +3311,7 @@ export async function daemonCommand(
           // W1-T4471: the one real wiring of the owner-reply reader.
           // W1-T14998: replies are read where escalations are filed; with none named, the code repository's legacy issues.
           ghEscalationAnswerGateway(...escalationIssueRepository(target.owner, target.repo), undefined, config.operatorGithubLogins,
-            config.contributorAdmission === undefined ? undefined : { settings: config.contributorAdmission }),
+            config.contributorAdmission === undefined ? undefined : { settings: config.contributorAdmission }, `${target.owner}/${target.repo}`),
           gitCredentialSocket?.socketPath,
           keepLastServe(onePassPerGeneration(() => tickReadGeneration, readTick,
             () => ({ plan: activePlanRef.current, previousProjection: lastProj ? [...lastProj] : undefined }), { log }),

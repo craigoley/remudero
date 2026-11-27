@@ -66,11 +66,13 @@ import { readQueuedFeedbackRecords } from "./feedback-landing.js";
 import {
   ASK_TYPE_LABEL,
   escalationBodyInLegacyOrder,
+  escalationCodeRepository,
   escalationTaskId,
   escalationIssueTitle,
   ghIssueGatewayAsync,
   labelledIssuesRestArgs,
   parseLabelledIssuesRest,
+  pooledIssueIsCodeRepositorys,
   renderIssueBody,
   splitConcatenatedJsonPages,
   tryEscalateAsync,
@@ -204,8 +206,15 @@ export function ghEscalationAnswerGateway(
   readText: (args: string[]) => Promise<string> = (args) => ghTextAsync(args),
   operatorLogins?: readonly string[],
   feedback?: { settings: AdmissionSettings; read?: AdmissionRead },
+  // W1-T14998: the code repository whose replies this reader lands; `owner/repo` is where its escalation issues live.
+  codeRepository = `${owner}/${repo}`,
 ): EscalationAnswerGateway {
   const repoArg = `${owner}/${repo}`;
+  // A pool other code repositories file in too: an issue recording, or naming the PR of, another repository is theirs.
+  // In its own repository, only an issue recording another code repository (filed there for it) is skipped.
+  const own = codeRepository.toLowerCase() === repoArg.toLowerCase()
+    ? (issue: ListedIssue) => (escalationCodeRepository(issue.body) ?? codeRepository).toLowerCase() === codeRepository.toLowerCase()
+    : (issue: ListedIssue) => pooledIssueIsCodeRepositorys(issue, codeRepository);
   const run = (args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   const parents = new Map<number, FeedbackAdmissionSubject>();
   const adminReads = new Map<string, Promise<boolean>>();
@@ -248,7 +257,7 @@ export function ghEscalationAnswerGateway(
         reactions?: { total_count?: unknown } | null;
       }>;
       const counts = new Map(rows.map(item => [item.number, item]));
-      const issues: ListedIssue[] = listed.map(issue => {
+      const issues: ListedIssue[] = listed.filter(own).map(issue => {
         const row = counts.get(issue.number);
         return { ...issue,
           ...(row?.comments === undefined ? {} : { listedComments: row.comments }),

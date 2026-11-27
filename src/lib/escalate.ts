@@ -2010,6 +2010,9 @@ const asyncIssueTwins = new WeakMap<IssueGateway, AsyncIssueGateway>();
 /** W1-T14998: the repository each real gateway files in, and the reason a gateway files nowhere. */
 const gatewayRepository = new WeakMap<object, string>();
 const unfiledGateways = new WeakMap<object, string>();
+/** W1-T14998 amendment: an unrouted gateway's visibility gate — undefined when its code repository is private (it files
+ *  there), else why it files nowhere. */
+const visibilityGates = new WeakMap<object, () => Steps<string | undefined>>();
 
 function driveSynchronousEscalation<T>(drive: () => T): T {
   // Latched producers and SRE feedback can consume an incident after this call. Preserve
@@ -2200,7 +2203,7 @@ function* escalateSteps(e: Escalation, deps: EscalateDeps<AsyncIssueGateway>, al
   const resolved = withExplicitConsequence(refuseUnlessResolvable(e));
   recordThreadMessage(resolved, deps);
   // W1-T14998: with no private escalation repository the escalation is a ledger row only, never a public issue.
-  const unfiled = issueGatewayUnfiled(deps.issues);
+  const unfiled = issueGatewayUnfiled(deps.issues) ?? (yield* unroutedGatewayUnfiled(deps.issues));
   if (unfiled !== undefined) {
     appendLedger(deps.ledgerPath, { run_id: deps.runId, task_id: resolved.taskId, step: "escalation.not_filed",
       class: resolved.class, summary: resolved.summary, reason: unfiled });
@@ -2341,10 +2344,16 @@ export function ghIssueGateway(
   opts: { exec?: (args: string[]) => string; destination?: EscalationDestinationRead } = {},
 ): IssueGateway {
   const route = escalationIssueRoute(opts);
-  if (route.outcome === "unfiled") return unfiledIssueGateway(route.reason, "sync") as IssueGateway;
+  if (route.outcome === "unfiled" && route.unrouted !== true) return unfiledIssueGateway(route.reason, "sync") as IssueGateway;
   const run =
     opts.exec ??
     ((args: string[]) => ghExec(args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+  if (route.outcome === "unfiled") {
+    const code = `${owner}/${repo}`;
+    const unrouted = unroutedGateway(issueGatewaySteps(code, run, runStepsSync), code, restVisibility(code, run), runStepsSync) as IssueGateway;
+    if (opts.exec === undefined) asyncIssueTwins.set(unrouted, ghIssueGatewayAsync(owner, repo, { destination: () => route }));
+    return unrouted;
+  }
   const gateway = scopedToCodeRepository(issueGatewaySteps(route.repository, run, runStepsSync), route.repository, `${owner}/${repo}`) as IssueGateway;
   gatewayRepository.set(gateway, route.repository);
   if (opts.exec === undefined) asyncIssueTwins.set(gateway, ghIssueGatewayAsync(owner, repo, { destination: () => route }));
@@ -2359,8 +2368,13 @@ export function ghIssueGatewayAsync(
   opts: { exec?: (args: string[]) => Promise<string>; destination?: EscalationDestinationRead } = {},
 ): AsyncIssueGateway {
   const route = escalationIssueRoute(opts);
-  if (route.outcome === "unfiled") return unfiledIssueGateway(route.reason);
-  const gateway = scopedToCodeRepository(issueGatewaySteps(route.repository, opts.exec ?? ((args: string[]) => ghTextAsync(args)), runStepsAsync),
+  if (route.outcome === "unfiled" && route.unrouted !== true) return unfiledIssueGateway(route.reason);
+  const run = opts.exec ?? ((args: string[]) => ghTextAsync(args));
+  if (route.outcome === "unfiled") {
+    const code = `${owner}/${repo}`;
+    return unroutedGateway(issueGatewaySteps(code, run, runStepsAsync), code, restVisibility(code, run), runStepsAsync);
+  }
+  const gateway = scopedToCodeRepository(issueGatewaySteps(route.repository, run, runStepsAsync),
     route.repository, `${owner}/${repo}`);
   gatewayRepository.set(gateway, route.repository);
   return gateway;
@@ -2374,10 +2388,12 @@ export function ghIssueGatewayAsync(
  *
  * `named` files in that repository; `unfiled` opens no issue at all — no file (`off`) or a file that cannot be read,
  * which is never read as permission to fall back to the public repository. The code repository is `owner/repo`, which
- * the route no longer files in. An injected `exec` changes the transport, never the route; a test that files in its
+ * the route no longer files in. AMENDED 2026-11-27: an `unfiled` route that is `unrouted` (no route named at all) files
+ * in a PRIVATE code repository as before this task, so site, console and arcade keep their alerts; a public code
+ * repository, or one whose visibility cannot be read, still opens nothing. An injected `exec` changes the transport, never the route; a test that files in its
  * own fixture repository names it with `destination` or {@link ESCALATION_REPOSITORY_ENV}.
  */
-export type EscalationDestinationRead = () => { outcome: "named"; repository: string } | { outcome: "unfiled"; reason: string };
+export type EscalationDestinationRead = () => { outcome: "named"; repository: string } | { outcome: "unfiled"; reason: string; unrouted?: true };
 
 /** W1-T14998 — an operator's explicit escalation repository, `<owner>/<name>`, ahead of the plan destination. */
 export const ESCALATION_REPOSITORY_ENV = "RMD_ESCALATION_REPOSITORY";
@@ -2399,7 +2415,8 @@ export function escalationDestinationAt(stateDir: string | undefined): Escalatio
     }
     const named = planDestinationRepository(stateDir);
     if (named.outcome === "named") return { outcome: "named", repository: `${named.owner}/${named.repo}` };
-    return { outcome: "unfiled", reason: named.outcome === "off" ? "no-private-escalation-repository" : `private-escalation-repository-unreadable: ${named.reason}` };
+    return named.outcome === "off" ? { outcome: "unfiled", reason: NO_ESCALATION_ROUTE, unrouted: true }
+      : { outcome: "unfiled", reason: `private-escalation-repository-unreadable: ${named.reason}` };
   };
 }
 
@@ -2538,6 +2555,56 @@ function unfiledIssueGateway(reason: string, form: "sync" | "async" = "async"): 
   return gateway;
 }
 
+const NO_ESCALATION_ROUTE = "no-private-escalation-repository";
+
+const REPOSITORY_VISIBILITY_QUERY = "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){isPrivate}}";
+
+/** W1-T14998 amendment — each code repository's visibility, read once per process from its own GitHub record. */
+const codeRepositoryPrivate = new Map<string, boolean>();
+
+/** The REST read of `repos/<owner>/<name>`'s `private` field over the gateway's own transport; any other answer throws. */
+function restVisibility(codeRepository: string, run: (args: string[]) => string | Promise<string>): () => Steps<boolean> {
+  return function* () {
+    const answer = String(yield* step(() => run(["api", `repos/${codeRepository}`, "--jq", ".private"]))).trim();
+    if (answer !== "true" && answer !== "false") throw new Error(`repos/${codeRepository} answered no private field`);
+    return answer === "true";
+  };
+}
+
+/** W1-T14998 amendment — `real` (filing in its own code repository, unscoped) behind a visibility gate: a private code
+ *  repository files there as before this task; a public one, or one whose visibility read fails (closed: read again on
+ *  the next use, never memoized), behaves as a gateway that files nowhere. */
+function unroutedGateway(real: AsyncIssueGateway, codeRepository: string, read: () => Steps<boolean>,
+  drive: (steps: Steps<unknown>) => unknown): AsyncIssueGateway {
+  const gate = function* (): Steps<string | undefined> {
+    const key = codeRepository.toLowerCase();
+    let isPrivate = codeRepositoryPrivate.get(key);
+    if (isPrivate === undefined) {
+      try {
+        isPrivate = yield* read();
+      } catch (error) {
+        return `${NO_ESCALATION_ROUTE}; code-repository-visibility-unreadable: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      codeRepositoryPrivate.set(key, isPrivate);
+    }
+    return isPrivate ? undefined : NO_ESCALATION_ROUTE;
+  };
+  const nowhere: Record<string, (why: string) => unknown> = { listOpen: () => [], listCommentsSince: () => [], ensureLabel: () => false };
+  const refuse = (why: string): never => { throw new Error(`no escalation issue is filed: ${why}`); };
+  const gateway = Object.fromEntries(Object.entries(real).map(([name, method]) => [name, (...args: unknown[]) => drive((function* () {
+    const why = yield* gate();
+    return why === undefined ? yield* step(() => (method as (...a: unknown[]) => unknown)(...args)) : (nowhere[name] ?? refuse)(why);
+  })())])) as AsyncIssueGateway;
+  visibilityGates.set(gateway, gate);
+  return gateway;
+}
+
+/** Why an unrouted gateway files nowhere (its visibility read through its own transport), or undefined. */
+function* unroutedGatewayUnfiled(gateway: object): Steps<string | undefined> {
+  const gate = visibilityGates.get(gateway);
+  return gate === undefined ? undefined : yield* gate();
+}
+
 const OPEN_ISSUES_BY_LABEL_QUERY =
   "query($owner:String!,$name:String!,$label:String!,$cursor:String){repository(owner:$owner,name:$name){" +
   "issues(labels:[$label],states:OPEN,first:100,after:$cursor){nodes{number url title body}pageInfo{hasNextPage endCursor}}}}";
@@ -2556,8 +2623,8 @@ export function ghIssueGatewayGraphql(
   opts: { exec?: (args: string[]) => Promise<string>; destination?: EscalationDestinationRead } = {},
 ): AsyncIssueGateway {
   const route = escalationIssueRoute(opts);
-  if (route.outcome === "unfiled") return unfiledIssueGateway(route.reason);
-  const repoArg = route.repository;
+  if (route.outcome === "unfiled" && route.unrouted !== true) return unfiledIssueGateway(route.reason);
+  const repoArg = route.outcome === "named" ? route.repository : `${codeOwner}/${codeRepo}`;
   const [owner, repo] = repoArg.split("/") as [string, string];
   const run = opts.exec ?? ((args: string[]) => ghTextAsync(args));
   const graphql = async (query: string, vars: Record<string, string>): Promise<Record<string, unknown>> => {
@@ -2610,6 +2677,13 @@ export function ghIssueGatewayGraphql(
       return url;
     },
   };
+  if (route.outcome === "unfiled") {
+    return unroutedGateway(gateway, repoArg, function* () {
+      const data = (yield* step(() => graphql(REPOSITORY_VISIBILITY_QUERY, { owner, name: repo }))) as { repository?: { isPrivate?: unknown } | null };
+      if (typeof data.repository?.isPrivate !== "boolean") throw new Error(`GraphQL read of ${repoArg} carried no isPrivate`);
+      return data.repository.isPrivate;
+    }, runStepsAsync);
+  }
   const scoped = scopedToCodeRepository(gateway, repoArg, `${codeOwner}/${codeRepo}`);
   gatewayRepository.set(scoped, repoArg);
   return scoped;
