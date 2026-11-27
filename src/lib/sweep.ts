@@ -7480,6 +7480,21 @@ export function reviewOfHeadRunningHere(pr: Pick<OpenPrView, "prNumber" | "headS
   return false;
 }
 
+/** W1-T15005: let a reviewCommand running in this process share the sweep's existing review mutex.
+ *  The owner pid in its pending row is intentionally not considered: this key is its positive liveness proof. */
+export function holdReviewOfHead(
+  pr: Pick<OpenPrView, "prNumber" | "headSha" | "prUrl" | "taskId" | "reviewInputDigest">,
+): () => void {
+  const key = reviewOutcomeKeyForPr(pr as OpenPrView);
+  inFlightReviewKeys.add(key);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    inFlightReviewKeys.delete(key);
+  };
+}
+
 /** W1-T15005: POSITIVE liveness of a review claimed by ANOTHER process on the same ledger (an operator `rmd review`, a
  *  review run child): its claim row's owner identity, judged as the review lifecycle judges it
  *  ({@link assessPendingReviewOwner}: same host, pid alive, not reused). Another process's mutex is invisible here, so its

@@ -394,6 +394,32 @@ test("W1-T15005 criterion 2: a round the sweep runs in its own process waits on 
   assert.equal(free.seen.claimKeys, 1, "the in-process round takes its branch claim as today");
 });
 
+test("W1-T15005 criterion 1: a daemon review's own live pending claim holds its exact head", async (t) => {
+  const reviewPr = { prNumber: 15005, taskId: TASK, prUrl: PR_URL, headSha: HEAD };
+  const release = sweep.holdReviewOfHead(reviewPr);
+  t.after(release);
+  // reviewCommand and the daemon sweep share a process, so the pending row's owner pid is this PID.
+  // The sweep must use the key reviewCommand registered, not mistake its own PID for a dead/missing owner.
+  const sameProcessClaim = claim("review-PR15005-daemon", HEAD, { owner_pid: process.pid,
+    owner_started_at: new Date().toISOString(), host: hostname() });
+  const exactHead = dispatcher(t, [sameProcessClaim], {}, false);
+  assert.equal(await exactHead.dispatch(), false, "THE CLAIM: the daemon does not dispatch during its review");
+  assert.deepEqual(deferrals(exactHead.rows).map((row) => [row.pr_number, row.head, row.review_run]),
+    [[15005, HEAD, "review-PR15005-daemon"]], "THE CLAIM: one exact-head deferral names the pending owner");
+  assert.equal(exactHead.seen.claimKeys, 0);
+
+  assert.equal(sweep.reviewOfHeadRunningHere({ ...reviewPr, headSha: OTHER }), false,
+    "the process-local key is exact-head scoped");
+  assert.equal(sweep.reviewInFlightOnHead({ ...exactHead.pr, headSha: OTHER }, [sameProcessClaim]), undefined,
+    "a pending claim on another head does not hold this round");
+
+  release();
+  const settled = dispatcher(t, [sameProcessClaim], {}, false);
+  await settled.dispatch();
+  assert.equal(deferrals(settled.rows).length, 0, "once the local review settles, its key releases the round");
+  assert.equal(settled.seen.claimKeys, 1);
+});
+
 test("W1-T15005: a claim another process owns is live only on an active owner assessment", () => {
   // The owner rule takes only an "active" assessment; another host or an incomplete identity proves nothing.
   const view = { prNumber: 15005, headSha: HEAD, prUrl: PR_URL, taskId: TASK, reviewState: "pending" } as const;

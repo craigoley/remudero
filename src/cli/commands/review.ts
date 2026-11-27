@@ -48,7 +48,7 @@ import { REVIEW_CONTEXT, REVIEW_ENGINE_REVISION, settleReviewOutboxEntry, applyV
 import { resolveReviewProviderProvenance, reviewProviderProvenanceLedgerFields } from "../../lib/review-provider-provenance.js";
 import { validateWorkerSettingsFile } from "../../lib/settings.js";
 import { readLedgerLines, readRequiredStatusCheckContextsAsync } from "../../lib/status.js";
-import { isDispatchedRunBranch } from "../../lib/sweep.js";
+import { holdReviewOfHead, isDispatchedRunBranch } from "../../lib/sweep.js";
 import { headLacksOwnTaskRecord, OWN_TASK_RECORD_MISSING_CAUSE } from "../../lib/sweep.js";
 import { readRuntimeImageSha, REVIEW_REQUEUED_STEP, reviewerImageDecisionDigest } from "../../lib/sweep.js";
 import { REVIEW_RUN_SETTLED_STEPS, REVIEWER_START_FAILED_OUTCOME } from "../../lib/sweep.js";
@@ -2667,6 +2667,8 @@ export async function readMoverRemoval(args: {
  * be a brand-new, never-invoked-under-test line this same gate would then flag).
  */
 export interface ReviewCommandDeps {
+  /** W1-T15005: test seam for the claim's process-local liveness key; the outer command releases it in finally. */
+  onReviewClaim?: (release: () => void) => void;
   taskLookup?: TaskLookupOptions;
   /** W1-T14195: the mover-removal read; the real two-repository read by default. */
   readMoverRemoval?: typeof readMoverRemoval;
@@ -2895,7 +2897,15 @@ export async function withMaterializedWorktree<T>(
 }
 
 export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest: string[] = [], deps: ReviewCommandDeps = {}, exit?: ReviewExit): Promise<number> {
-  if (exit === undefined) return reportingReviewExit(rest, (opened) => reviewCommand(host, prArg, rest, deps, opened));
+  if (exit === undefined) {
+    let releaseReview: (() => void) | undefined;
+    try {
+      return await reportingReviewExit(rest, (opened) => reviewCommand(host, prArg, rest,
+        { ...deps, onReviewClaim: (release) => { releaseReview = release; deps.onReviewClaim?.(release); } }, opened));
+    } finally {
+      releaseReview?.();
+    }
+  }
   const { acceptedReviewAttemptId, materializeReviewWorktree, realDeps, reviewPostedDescription } = host;
   // W1-T11261: time every step before the first ledger row; a step that throws still records its elapsed time and error class.
   const commandStartedAt = systemClock.now();
@@ -3442,6 +3452,8 @@ export async function reviewCommand(host: ReviewCommandHost, prArg: string, rest
     exit.as("review-claim-held");
     return 2;
   }
+  if (!shadow) deps.onReviewClaim?.(holdReviewOfHead({ prNumber: view.number, headSha: view.headRefOid, prUrl: view.url,
+    taskId: taskId ?? undefined, reviewInputDigest: inputDigest }));
 
   // W1-T9232: the pending status just posted STANDS — no verdict is judged on a plan that lacks the task's own record.
   // The sweep reads this row, refreshes the branch from main and re-reviews the new head.
