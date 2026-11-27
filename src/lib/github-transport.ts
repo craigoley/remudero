@@ -1195,7 +1195,8 @@ export function recordGhSecondaryLimitRefusal(env: NodeJS.ProcessEnv = process.e
 export function ghErrorIsSecondaryLimit(err: unknown): boolean {
   const e = err as { status?: number; stdout?: string | Buffer; stderr?: string | Buffer; message?: string } | null | undefined;
   if (e === null || e === undefined) return false;
-  const text = `${e.stderr ?? ""}\n${e.message ?? ""}`;
+  const stderr = String(e.stderr ?? "");
+  const text = stderr.trim() === "" ? String(e.message ?? "") : stderr;
   const refusal = ghStdoutRefusal(e.stdout);
   if (/secondary rate|abuse detection/i.test(`${text}\n${refusal?.body ?? ""}`)) return true;
   const shaped = e.status === 403 || e.status === 429 || refusal !== undefined || ghErrorTextLooksRateLimited(err);

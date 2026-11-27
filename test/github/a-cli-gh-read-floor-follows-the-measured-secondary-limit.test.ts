@@ -245,6 +245,15 @@ test("W1-T15055 criterion 2: only a refusal's own headers and body in stdout cou
   assert.ok(ghErrorIsSecondaryLimit(Object.assign(new Error("HTTP 403"), { stdout: refused })), "a 403 refusal's own body still counts");
 });
 
+test("W1-T15055 criterion 2: a failed write whose argv names the secondary limit is not a refusal", () => {
+  const argv = "gh api -X POST repos/o/r/issues/1/comments -f body=we hit the secondary rate limit again; Retry-After: 60";
+  const failure = Object.assign(new Error(`Command failed: ${argv}\nHTTP 422: Validation Failed`), {
+    status: 422, stderr: "HTTP 422: Validation Failed (https://api.github.com/repos/o/r/issues/1/comments)" });
+  assert.equal(ghErrorIsSecondaryLimit(failure), false, "the argv in the message is never read when stderr is present");
+  const refused = Object.assign(new Error(`Command failed: ${argv}`), { status: 403, stderr: "HTTP 403: You have exceeded a secondary rate limit" });
+  assert.ok(ghErrorIsSecondaryLimit(refused), "stderr naming the secondary limit still counts");
+});
+
 test("W1-T15055 criterion 4: a GraphQL failure whose data mentions a rate limit is not classified or retried as one", async () => {
   const failure = Object.assign(new Error("GraphQL: Field 'x' doesn't exist"), {
     stdout: '{"data":{"repository":{"description":"how we handle the rate limit"}},"errors":[{"message":"no field"}]}' });
