@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test, type TestContext } from "node:test";
 
@@ -118,6 +118,17 @@ test("W1-T15077 criterion 1: a host with no private destination lands nothing an
   assert.match(String(thrown[0]!.reason), /push refused/);
 });
 
+test("W1-T15077 criterion 1: refusal of this head is recorded even when an older file landed", async () => {
+  const rows: Array<Record<string, unknown>> = [];
+  const expected = reviewFindingsRelPath(PR, HEAD);
+  const outcome = await publishOpsReviewFindings("/unused", record("failure"), { prNumber: PR, capped: false },
+    (step, extra) => rows.push({ step, ...extra }), async () => ({ landed: true, files: ["plan/review-findings/pr-1/older.md"],
+      refused: [{ path: expected, reason: "head file conflicts with the destination" }] }));
+  assert.equal(outcome, "refused");
+  assert.equal(rows[0]?.step, "review.record_write_failed");
+  assert.equal(rows[0]?.reason, "head file conflicts with the destination");
+});
+
 test("W1-T15077 criterion 2: the public status and comment carry no claim or finding text", async () => {
   const posted: Array<{ state: string; description?: string }> = [];
   const post = catalogReviewPoster("ops", async (options) => { posted.push({ state: options.state, description: options.description }); });
@@ -159,7 +170,7 @@ const host: ReviewCommandHost = {
   reviewSubjectGit: unexpected,
 };
 
-type RunCase = { catalog: "ops" | "public"; reviewer: "PASS" | "FAIL"; proof: string };
+type RunCase = { catalog: "ops" | "public"; reviewer: "PASS" | "FAIL"; proof: string; statusPostThrows?: boolean };
 /** The real runReview of one code PR, its state dir naming the private repository, every GitHub read shimmed. */
 async function runOpsReview(t: TestContext, c: RunCase) {
   const f = instance(t);
@@ -177,6 +188,7 @@ async function runOpsReview(t: TestContext, c: RunCase) {
   writeFileSync(join(root, "settings.json"), "{}");
   const pull = { number: PR, html_url: prUrl, updated_at: "t", body: RUN_REPORT, state: "open", merged: false, head: { ref: "run-t15077", sha: headSha } };
   const shim = ghShim([
+    ...(c.statusPostThrows ? [{ when: `statuses/${headSha} -f context=remudero-review -f state=failure`, stderr: "HTTP 422 invalid status", exit: 1 }] : []),
     { when: "/statuses?", stdout: "[[]]" }, { when: "/reviews?", stdout: "[]" }, { when: "/commits/", stdout: '{"statuses":[]}' },
     { when: "/pulls/", stdout: JSON.stringify(pull) }, { when: "pr view", stdout: '{"state":"OPEN"}' },
     { when: "pr diff", stdout: "diff --git a/x.ts b/x.ts\n+++ b/x.ts\n@@\n+export const x = 1;\n" }, { when: "api ", stdout: "{}" },
@@ -208,7 +220,8 @@ async function runOpsReview(t: TestContext, c: RunCase) {
     const branch = landingIdentity({ family: "review-findings", targetRepository: OPS, sourceRepository: OPS }).branch;
     const page = branches(f.opsOrigin).includes(branch) ? git(f.opsOrigin, "show", `${branch}:${reviewFindingsRelPath(PR, headSha)}`) : undefined;
     const statusPosts = shim.calls().filter((call) => call.includes("context=remudero-review"));
-    return { verdict, page, lines, statusPosts, publicBranches: branches(f.publicOrigin) };
+    const ledgerRows = readFileSync(ledgerPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+    return { verdict, page, lines, statusPosts, publicBranches: branches(f.publicOrigin), ledgerRows };
   } finally {
     process.env.PATH = oldPath;
   }
@@ -228,6 +241,15 @@ test("W1-T15077 criterion 1: the real runReview of an ops task lands the finding
     assert.deepEqual(run.publicBranches, ["main"], "nothing reaches the public repository");
     assert.ok(!run.lines.some((l) => l.step === "review.record_write_failed"), JSON.stringify(run.lines.filter((l) => l.step === "review.record_write_failed")));
   }
+});
+
+test("W1-T15077 criterion 1: an outboxed failed status still lands this head's private findings", async (t) => {
+  const failed = await runOpsReview(t, { catalog: "ops", reviewer: "FAIL", proof: "grep: export const y in x.ts", statusPostThrows: true });
+  assert.equal(failed.verdict.state, "failure", "fixture assumption: the review fails");
+  assert.ok(failed.ledgerRows.some((line) => line.step === "review.post_failed" && line.outboxed === true),
+    `fixture assumption: the failed status post was retained in the outbox: ${JSON.stringify(failed.ledgerRows)}; posts=${failed.statusPosts.join(" | ")}`);
+  assert.ok(failed.page?.includes("State: failure"), `the failed verdict lands despite the status error: ${failed.page}`);
+  assert.deepEqual(failed.publicBranches, ["main"], "the recovery evidence remains private");
 });
 
 test("W1-T15077 criterion 1: a passing ops verdict and a failed public-catalog verdict land no findings", async (t) => {

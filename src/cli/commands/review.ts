@@ -38,7 +38,7 @@ import { observeAdmissionDisposition } from "../../lib/action-executor.js";
 import { listedLedgerFiles, readLedgerUnionRawLinesAsync, readLedgerUnionRecords } from "../../lib/ledger-union.js";
 import { defaultGitRunnerAsync, visibleCriteria, type AcceptanceCriterion, DEFAULT_RISK, type TaskRisk } from "../../lib/plan.js";
 import { planDestinationRepository } from "../../lib/plan-destination.js";
-import { landReviewFindingsAsync, type LandFeedbackResult } from "../../lib/feedback-landing.js";
+import { landReviewFindingsAsync, reviewFindingsRelPath, type LandFeedbackResult } from "../../lib/feedback-landing.js";
 import { defaultOpsCatalogApi, type OpsCatalogApi } from "../../lib/ops-catalog-source.js";
 import { loadMounts, mountsPath, resolveMount, type Mount } from "../../lib/mounts.js";
 import { resolveRiskJudgeMount } from "../../lib/risk-judge.js";
@@ -1062,6 +1062,9 @@ export async function publishOpsReviewFindings(stateDir: string, record: OpsRevi
   if (target.prNumber === undefined) return refuse("the review names no pull request number");
   const landed = await land(stateDir, { prNumber: target.prNumber, headSha: record.head_sha,
     content: opsReviewFindingsMarkdown(record) }).catch((error: unknown): LandFeedbackResult => ({ landed: false, files: [], error: String(error) }));
+  const expectedPath = reviewFindingsRelPath(target.prNumber, record.head_sha);
+  const pathRefusal = landed.refused?.find(refusal => refusal.path === expectedPath);
+  if (pathRefusal !== undefined) return refuse(pathRefusal.reason);
   if (!landed.landed) return refuse(landed.error ?? "the findings landing produced no pull request");
   say?.(`remudero-review: findings for ${record.head_sha.slice(0, 7)} landed privately${landed.prUrl ? ` (${landed.prUrl})` : ""}`);
   return "landed";
@@ -2282,6 +2285,11 @@ export async function runReview(host: ReviewCommandHost, args: {
   } else if (!posted.posted) {
     replayInput = { ...replayInput, publication_refusal: "terminal-publication-refused" };
     recordReplay(classifyReviewOutcome(replayInput));
+    // W1-T15077: terminal status failures are outboxed for retry. Publish this head's private
+    // evidence now as well, so a later drain that posts the status cannot leave it behind.
+    if (task.catalog === "ops" && posted.reason?.startsWith("posting remudero-review failed and was not applied")) {
+      await landFindings(verdict.capped === true);
+    }
     // REFUSED, NOT SWALLOWED: postReviewStatusGuarded already ledgered
     // `review.post_refused` with the full reason; this is the loud console
     // twin so a refusal is as visible as an ordinary posted verdict is.
