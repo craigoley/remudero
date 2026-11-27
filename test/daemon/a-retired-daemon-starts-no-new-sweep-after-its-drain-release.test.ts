@@ -805,7 +805,6 @@ test("W1-T14916 criterion 1: after the drain lock is released the retired daemon
   assert.equal(lines.filter((l) => l.step === CODE_SCANNING_FIX_STEP).length, 0, "no fix ruling is recorded for a withheld judge");
   assert.equal(fixes.length, 0, "no fix is dispatched");
   assert.deepEqual(armed, [], "the head is not armed");
-  assert.ok(lines.some((l) => l.step === "code_scanning.judge_withheld" && l.head_sha === CS_HEAD), "the withheld judge is recorded");
   let judged = 0;
   await runSweep([codeScanningPr()], sweepDeps(async () => { judged++; return { ruling: "false_positive", reason: "a constant input" }; }));
   for (let i = 0; i < 10; i++) await new Promise<void>((r) => setImmediate(r));

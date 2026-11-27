@@ -20010,7 +20010,6 @@ async function codeScanningGateForHead(
       withheld = true;
       pool.flights.delete(key);
       cancelBound();
-      log("code_scanning.judge_withheld", { pr_number: pr.prNumber, head_sha: pr.headSha, not_started: error.notStarted });
       return;
     }
     settle({ ruling: "unavailable", reason: `code-scanning judge threw: ${String((error as Error)?.message ?? error)}` });
