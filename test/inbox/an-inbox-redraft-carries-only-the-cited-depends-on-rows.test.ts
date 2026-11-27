@@ -18,7 +18,7 @@ import type { WorkerResult } from "#src/lib/worker.js";
 // index again: ~278K of a ~287K-char prompt. It now carries only the rows the failed fragment cites and the proposal
 // names; state/DRAFT_RETRY_FULL_INDEX restores the full index.
 
-const CITED_LINE = "This index lists only the tasks your last draft cited and the proposal names; Grep plan/tasks.yaml for any other dependency.";
+const CITED_LINE = "This index lists only the tasks your last draft cited and the proposal names; Grep plan/tasks.yaml and plan/tasks.d/ for any other dependency.";
 
 /** 1,000 tasks with long titles, every one open but W1-T5, the landed task the proposal names. */
 const PLAN = Array.from({ length: 1000 }, (_, i) => [
@@ -68,6 +68,7 @@ const synthesized = (rows: Row[]) => rows.filter((r) => r.step === "inbox.draft_
 
 function assertCited(prompt: string): void {
   assert.ok(prompt.includes(CITED_LINE), "the prompt says the index is cited");
+  assert.ok(prompt.includes("A dependency on a merged or done task is already satisfied, so leave it out of depends_on."), "a cited redraft keeps the satisfied-dependency rule");
   for (const n of [5, 7, 9]) assert.ok(prompt.includes(row(n)), `the cited row W1-T${n} is carried whole`);
   for (const n of [1, 6, 8, 10, 150, 1000]) assert.ok(!prompt.includes(`- id: W1-T${n}\n`), `the uncited row W1-T${n} is left out`);
 }

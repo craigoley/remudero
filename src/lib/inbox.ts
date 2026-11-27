@@ -1814,7 +1814,8 @@ function dependsOnIndexFor(proposal: Proposal, rows: readonly ProjectedPlanRow[]
 /** `state/DRAFT_RETRY_FULL_INDEX`: while present, a redraft carries the full index again, as before the cited one. */
 export const DRAFT_RETRY_FULL_INDEX_FILE = "DRAFT_RETRY_FULL_INDEX";
 
-const CITED_INDEX_LINE = "This index lists only the tasks your last draft cited and the proposal names; Grep plan/tasks.yaml for any other dependency.";
+const CITED_INDEX_LINE = "This index lists only the tasks your last draft cited and the proposal names; Grep plan/tasks.yaml and plan/tasks.d/ for any other dependency.";
+const CITED_LANDED_LINE = "A dependency on a merged or done task is already satisfied, so leave it out of depends_on.";
 
 /** The ids a failed fragment's depends_on names, as a list or a comma string. */
 function fragmentDependsOnIds(fragmentYaml: string): string[] {
@@ -1960,7 +1961,7 @@ export function inboxDraftPrompt(proposal: Proposal, currentPlanText: string, ru
     "depends_on. It is an index, NOT the whole plan: each task shows only id, title, status, type",
     "and depends_on. If you need a task's rationale, design or acceptance, Read plan/tasks.yaml —",
     "you have Read/Grep/Glob and the file is in this worktree. Do not assume a field you cannot see.",
-    ...(planIndex.cited ? [CITED_INDEX_LINE] : planIndex.omitsLanded ? ["This index lists OPEN tasks only, plus any landed task the proposal names:",
+    ...(planIndex.cited ? [CITED_INDEX_LINE, CITED_LANDED_LINE] : planIndex.omitsLanded ? ["This index lists OPEN tasks only, plus any landed task the proposal names:",
       "a dependency on a merged or done task is already satisfied, so leave it out of depends_on."] : []),
     "",
     "=== plan/tasks.yaml INDEX (id, title, status, type, depends_on — for depends_on grounding) ===",
