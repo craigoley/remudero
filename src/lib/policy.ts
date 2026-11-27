@@ -234,6 +234,8 @@ export interface PolicyValues {
     dedupCapacity: number;
     /** W1-T2741: trailing-edge quiet period for high-fanout check/status deliveries. */
     checkSettleMs: number;
+    /** W1-T14809: the freshness floor for a head's kept rollup; a head no delivery named is re-read this often. */
+    headRecheckMs: number;
     /** W1-T14810: the artifact listing's freshness floor when no `workflow_run:completed` arrives. */
     artifactRecheckMs: number;
     semanticCheckMode: "shadow" | "enforce";
@@ -400,6 +402,7 @@ const EXPECTED_ORIGIN_KIND: Record<string, PolicyOriginKind> = {
   "objectReap.maxActiveLanes": "net-new",
   "githubEventWake.dedupCapacity": "net-new",
   "githubEventWake.checkSettleMs": "net-new",
+  "githubEventWake.headRecheckMs": "net-new",
   "githubEventWake.artifactRecheckMs": "net-new",
   "githubEventWake.semanticCheckMode": "net-new",
   "githubEventWake.aggregateCheckNames": "net-new",
@@ -773,6 +776,9 @@ export const DEFAULT_GITHUB_EVENT_WAKE_DEDUP_CAPACITY = 500;
 /** See the shared doc above `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS`. */
 export const DEFAULT_GITHUB_EVENT_WAKE_CHECK_SETTLE_MS = 10_000;
 
+/** See the shared doc above `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS`. Exported: the read plane's own
+ *  fallback when the committed policy cannot be read (W1-T14809). */
+export const DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS = 600_000;
 /** See the shared doc above `DEFAULT_SWEEP_WALL_CLOCK_BOUND_MS`. */
 export const DEFAULT_GITHUB_EVENT_WAKE_ARTIFACT_RECHECK_MS = 900_000;
 
@@ -1006,6 +1012,9 @@ export function validatePolicy(raw: unknown): Policy {
   const githubEventWakeCheckSettleMs = githubEventWakeRaw?.checkSettleMs !== undefined
     ? numberField("githubEventWake.checkSettleMs", githubEventWakeRaw.checkSettleMs, origin, bounds)
     : DEFAULT_GITHUB_EVENT_WAKE_CHECK_SETTLE_MS;
+  const githubEventWakeHeadRecheckMs = githubEventWakeRaw?.headRecheckMs !== undefined
+    ? numberField("githubEventWake.headRecheckMs", githubEventWakeRaw.headRecheckMs, origin, bounds)
+    : DEFAULT_GITHUB_EVENT_WAKE_HEAD_RECHECK_MS;
   const githubEventWakeArtifactRecheckMs = githubEventWakeRaw?.artifactRecheckMs !== undefined
     ? numberField("githubEventWake.artifactRecheckMs", githubEventWakeRaw.artifactRecheckMs, origin, bounds)
     : DEFAULT_GITHUB_EVENT_WAKE_ARTIFACT_RECHECK_MS;
@@ -1104,6 +1113,7 @@ export function validatePolicy(raw: unknown): Policy {
       githubEventWake: {
         dedupCapacity: githubEventWakeDedupCapacity,
         checkSettleMs: githubEventWakeCheckSettleMs,
+        headRecheckMs: githubEventWakeHeadRecheckMs,
         artifactRecheckMs: githubEventWakeArtifactRecheckMs,
         semanticCheckMode: githubEventWakeSemanticCheckMode,
         aggregateCheckNames: githubEventWakeAggregateCheckNames,

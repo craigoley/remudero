@@ -13,19 +13,23 @@
  * Why: docs/forensics/github-event-wake.md#module-header (W1-T2568). */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   watch as fsWatch,
 } from "node:fs";
+import { appendFile } from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import { basename, dirname, join } from "node:path";
 import { clockFromDateFn, type Clock } from "./clock.js";
 import { writeAtomic, writeAtomicAsync } from "./fs-race-safe.js";
+import type { ChangedHeadEntry } from "./open-prs-rest.js";
 import {
   answerGithubDeliveryRequest,
   createCheckRunCompletedQueue,
@@ -526,6 +530,142 @@ export function startWakeSummaryFlush(opts: {
   };
 }
 
+// ── (iv-b) THE CHANGED-HEADS JOURNAL (W1-T14809) — which head shas a delivery named ─────────
+
+const CHANGED_HEADS_FILE = "github-changed-heads.ndjson";
+const ACKNOWLEDGED_HEADS_FILE = "github-changed-heads.acked.ndjson";
+const HEAD_SHA_PATTERN = /^[0-9a-f]{40}$/;
+
+/** `state/github-changed-heads.ndjson`: one `{sha, event, received_at}` line per accepted delivery naming a head. */
+export function githubChangedHeadsPath(root: string): string {
+  return join(root, "state", CHANGED_HEADS_FILE);
+}
+
+/** `state/github-changed-heads.acked.ndjson`: the entries an accepted sweep's acknowledge claimed, for its read plane. */
+export function githubAcknowledgedHeadsPath(root: string): string {
+  return join(root, "state", ACKNOWLEDGED_HEADS_FILE);
+}
+
+/** The head sha a `check_run`, `status` or `pull_request` delivery names; `undefined` for any other event. */
+export function changedHeadShaOf(event: string, body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const record = body as Record<string, unknown>;
+  let sha: unknown;
+  if (event === "check_run") sha = (record.check_run as Record<string, unknown> | undefined)?.head_sha;
+  else if (event === "status") sha = record.sha;
+  else if (event === "pull_request") sha = ((record.pull_request as Record<string, unknown> | undefined)?.head as Record<string, unknown> | undefined)?.sha;
+  return typeof sha === "string" && HEAD_SHA_PATTERN.test(sha) ? sha : undefined;
+}
+
+/** One O_APPEND write of one line, so concurrent deliveries never interleave inside an entry. A failed
+ *  append costs only the skip: the gate re-reads the head at `githubEventWake.headRecheckMs`. */
+async function appendChangedHead(stateDir: string, event: string, body: unknown, receivedAt: Date): Promise<void> {
+  const sha = changedHeadShaOf(event, body);
+  if (sha === undefined) return;
+  const entry: ChangedHeadEntry = { sha, event, received_at: receivedAt.toISOString() };
+  try {
+    await appendFile(join(stateDir, CHANGED_HEADS_FILE), `${JSON.stringify(entry)}\n`);
+  } catch (error) {
+    // CLAIM: collapses "journaled" and "lost" into "no delivery named this head" (stderr only, no ledger step). Safe because
+    // the delivery is still accepted and its marker written, and headRecheckMs re-reads every head within one interval.
+    console.error(`github.wake: changed head not journaled (${String((error as Error)?.message ?? error)})`);
+  }
+}
+
+function claimFile(path: string): string | undefined {
+  const claimed = `${path}.consume-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  try {
+    renameSync(path, claimed);
+    return claimed;
+  } catch {
+    // Nothing to claim: absent, or a racing consumer won the rename. Both mean "no entries".
+    return undefined;
+  }
+}
+
+/** Moves the live journal into the acknowledged file, claim-by-rename, so an entry appended during the
+ *  move stays in the live journal for the next acknowledge. A held daemon never acknowledges, so never loses one. */
+export function acknowledgeChangedHeads(root: string): void {
+  const claimed = claimFile(githubChangedHeadsPath(root));
+  if (claimed === undefined) return;
+  try {
+    appendFileSync(githubAcknowledgedHeadsPath(root), readFileSync(claimed));
+    unlinkSync(claimed);
+  } catch (error) {
+    // CLAIM: collapses "acknowledged" and "stranded" into "no delivery named these heads" (stderr only, no ledger step). Safe
+    // because the claimed file stays beside the journal, and headRecheckMs re-reads every head it named within one interval.
+    console.error(`github.wake: changed heads not acknowledged (${String((error as Error)?.message ?? error)})`);
+  }
+}
+
+function parseChangedHeads(text: string): ChangedHeadEntry[] {
+  const entries: ChangedHeadEntry[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line) as Partial<ChangedHeadEntry>;
+      if (typeof parsed.sha === "string" && typeof parsed.event === "string" && typeof parsed.received_at === "string") {
+        entries.push({ sha: parsed.sha, event: parsed.event, received_at: parsed.received_at });
+      }
+    } catch {
+      // A torn or corrupt line names no head; the recheck interval covers whatever it held.
+      continue;
+    }
+  }
+  return entries;
+}
+
+function readChangedHeads(path: string): ChangedHeadEntry[] {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    // CLAIM: collapses "named" and "unreadable" into "no heads named" (stderr only, no ledger step). Safe because an
+    // unreadable journal names no head a read can trust, and headRecheckMs re-reads every head within one interval.
+    console.error(`github.wake: changed heads unreadable (${String((error as Error)?.message ?? error)})`);
+    return [];
+  }
+  return parseChangedHeads(text);
+}
+
+/**
+ * Every head-read gate's look at the changed heads, before it reads: the acknowledged entries AND the live journal.
+ * NON-DESTRUCTIVE: a standby daemon's pre-lock tick read, the active daemon's read plane and its light-pass reads each
+ * keep their own gate, so a take by one would leave another serving a named head's old rollup until headRecheckMs
+ * (fleet review of #21033). Each gate applies an entry once; only the drain-lock holder prunes
+ * ({@link pruneAcknowledgedChangedHeads}). Both files are read because the daemon produces the tick read an accepted
+ * sweep consumes BEFORE `runGatedSweep` acknowledges (daemon.ts).
+ */
+export function peekChangedHeads(root: string): ChangedHeadEntry[] {
+  return [...readChangedHeads(githubAcknowledgedHeadsPath(root)), ...readChangedHeads(githubChangedHeadsPath(root))];
+}
+
+/**
+ * The drain-lock holder's prune of acknowledged entries received before `keepFromMs` (now - headRecheckMs): any kept
+ * read older than such an entry has already aged out, and any newer one reflects it, so no gate needs it. Claim, keep
+ * the recent lines, append them back: an acknowledge appending meanwhile loses nothing.
+ */
+export function pruneAcknowledgedChangedHeads(
+  root: string,
+  keepFromMs: number,
+  append: (path: string, data: string) => void = appendFileSync,
+): void {
+  const path = githubAcknowledgedHeadsPath(root);
+  const claimed = claimFile(path);
+  if (claimed === undefined) return;
+  const recent = readChangedHeads(claimed).filter((entry) => !(Date.parse(entry.received_at) < keepFromMs));
+  rmSync(claimed, { force: true, recursive: true });
+  if (recent.length === 0) return;
+  try {
+    append(path, recent.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+  } catch (error) {
+    // CLAIM: collapses "kept" and "dropped" for the recent entries (stderr only, no ledger step). Safe because a gate
+    // that misses a dropped entry serves that head's kept rollup at most headRecheckMs, then re-reads it.
+    console.error(`github.wake: acknowledged heads not pruned (${String((error as Error)?.message ?? error)})`);
+  }
+}
+
 // ── (v) THE ROUTE — the self-authenticated POST /v1/hooks/github ───────────────────────────
 
 /** Bytes, bounded BEFORE buffering, never after. 1 MiB is far above any real delivery — a
@@ -670,6 +810,8 @@ export function githubDeliveryChecks(
     semanticSummary: flushSemanticSummary,
     checkRunCompleted: extractCheckRunCompletedInfo,
     markerPending: (path) => readSweepWakeMarker(path) !== undefined,
+    // W1-T14809: the head this delivery names, journaled beside the marker before the 202.
+    journalChangedHead: (markerPath, event, body, receivedAtIso) => appendChangedHead(dirname(markerPath), event, body, new Date(receivedAtIso)),
     // W1-T14893: keep the latest accepted closed pull request alongside the coalesced wake marker.
     closedPullRequestWakePath: (markerPath, record) =>
       isPullRequestClosedWake(record) ? lastClosedWakePath(markerPath) : undefined,
@@ -911,6 +1053,8 @@ export function wireSweepWakeToDaemon(
       // An accepted sweep owns the same reconciliation, so retire and report the collapsed burst.
       finishCheckBurst(false);
       consumeSweepWakeMarker(path);
+      // W1-T14809: the same accepted pass claims the changed heads its read plane will consult.
+      acknowledgeChangedHeads(root);
       const stillPending = readSweepWakeMarker(path);
       observedDeliveryId = stillPending?.deliveryId;
       if (stillPending) scheduleRecord(stillPending);
