@@ -149,8 +149,36 @@ test("the depends_on shortlist holds at most K scored rows plus the named ones, 
 });
 
 test("the depends_on shortlist reads repo paths from the proposal text, never a URL", () => {
-  assert.deepEqual(pathsInText("see `src/lib/inbox.ts`, ./test/inbox/x.test.ts and https://example.com/a/b, and plan/tasks.yaml."),
-    ["src/lib/inbox.ts", "test/inbox/x.test.ts", "plan/tasks.yaml"]);
+  assert.deepEqual(pathsInText("see `.github/workflows/ci.yml`, `src/lib/foo.ts:12`, " +
+    "src/lib/bar.ts#L13-L14, ./test/inbox/x.test.ts, ../plan/tasks.yaml and https://example.com/a/b."),
+  [".github/workflows/ci.yml", "src/lib/foo.ts", "src/lib/bar.ts", "test/inbox/x.test.ts", "plan/tasks.yaml"]);
+});
+
+test("proposal text paths rank exact dot-directory files over a shared directory, and rare line-cited paths over common ones", () => {
+  const dotPathProposal = { ...SHORTLIST_PROPOSAL,
+    summary: "Review `.github/workflows/ci.yml` before changing the workflow." } as Proposal;
+  const dotPathPlan = [
+    "- id: W1-T10", '  title: "the exact workflow file"', "  status: queued", "  type: implement",
+    "  files: [.github/workflows/ci.yml]",
+    "- id: W1-T11", '  title: "a sibling workflow file"', "  status: queued", "  type: implement",
+    "  files: [.github/workflows/release.yml]",
+    "- id: W1-T12", '  title: "an unrelated billing file"', "  status: queued", "  type: implement",
+    "  files: [scripts/billing.mjs]", "",
+  ].join("\n");
+  assert.deepEqual(projectedIds(draftPlanIndex(dotPathProposal, dotPathPlan, "topk", 2).text), ["W1-T10", "W1-T11"],
+    "proposal text keeps the exact .github file and its directory neighbor, not an unrelated row");
+
+  const citedPathProposal = { ...SHORTLIST_PROPOSAL,
+    summary: "See src/lib/rare.ts:12 and src/run-task.ts#L20 for context." } as Proposal;
+  const citedPathPlan = [
+    "- id: W1-T20", '  title: "the rare file with a line citation"', "  status: queued", "  type: implement",
+    "  files: [src/lib/rare.ts]",
+    ...[21, 22, 23].flatMap((id) => [`- id: W1-T${id}`, '  title: "a common runner file"', "  status: queued", "  type: implement",
+      "  files: [src/run-task.ts]"]),
+    "",
+  ].join("\n");
+  assert.deepEqual(projectedIds(draftPlanIndex(citedPathProposal, citedPathPlan, "topk", 1).text), ["W1-T20"],
+    "the :line and #L citations normalize to file paths, and the rare exact path outranks the common one");
 });
 
 test("invariant: with inboxDraftIndex full, or absent, the draft prompt is byte-identical to the current function's output", async () => {

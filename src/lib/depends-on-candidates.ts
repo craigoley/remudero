@@ -133,7 +133,15 @@ export function pathsInText(text: string): string[] {
   const found = new Set<string>();
   for (const raw of text.split(/[\s`'"()[\]{},;<>]+/)) {
     if (raw.includes("://")) continue;
-    const token = raw.replace(/^[./]+/, "").replace(/[.:]+$/, "");
+    // Strip location suffixes before checking the path shape: proposal text often cites
+    // `src/lib/foo.ts:12` or a GitHub `src/lib/foo.ts#L12-L14` anchor. Preserve leading
+    // dot-directories such as `.github`; only dot-slash / dot-dot-slash are prefixes.
+    const token = raw
+      .replace(/#L\d+(?:-L?\d+)?$/i, "")
+      .replace(/:\d+(?::\d+)?(?:-\d+(?::\d+)?)?$/, "")
+      .replace(/^(?:\.\.?\/)+/, "")
+      .replace(/^\/+/, "")
+      .replace(/[.:]+$/, "");
     if (/^[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]+)+$/.test(token)) found.add(token);
   }
   return [...found];
