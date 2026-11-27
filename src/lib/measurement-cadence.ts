@@ -1853,8 +1853,7 @@ export async function verifyHumanCadence(opts: VerifyHumanCadenceOpts): Promise<
     try {
       verdict = await judgeVerifyHumanShard(shard, { judge: opts.judge });
     } catch (error) {
-      // W1-T14916: no verdict row and no proposal for a judge that never started, so the shard
-      // stays due for the successor daemon's cadence.
+      // W1-T14916: an unstarted judge records nothing; the shard stays due for the successor.
       if (error instanceof WorkerNotStartedError) break;
       throw error;
     }
