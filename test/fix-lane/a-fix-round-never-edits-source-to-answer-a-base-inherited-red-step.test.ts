@@ -17,7 +17,7 @@ import {
 } from "#src/lib/ci-remedy-execution.js";
 import type { FixSelfCheckRunResult } from "#src/lib/fix-self-check.js";
 import { hostWorktreeGitAsync } from "#src/lib/worktree-git.js";
-import { fetchCiFailuresAsync } from "#src/run-task.js";
+import { fetchCiFailuresAsync } from "#src/lib/tick-read-worker.js";
 import type { Config } from "#src/lib/config.js";
 import type { ReviewVerdict } from "#src/lib/review.js";
 import type { WorkerResult } from "#src/lib/worker.js";

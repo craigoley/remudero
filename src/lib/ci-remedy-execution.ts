@@ -321,7 +321,7 @@ const CONTINUES = /^(?:=|,|\?|:|\+|-|\*|\/|%|&&|\|\||\?\?|=>|\.|===|!==|==|!=|<|
 
 /** Each `const`/`let`/`var` declaration in the file, by every name it binds: the whole statement, whitespace collapsed.
  *  A name declared twice in different scopes keeps both texts. */
-function declarationsOf(text: string, tokens = sourceTokens(text)): Map<string, string[]> {
+function bindingDeclarationsOf(text: string, tokens = sourceTokens(text)): Map<string, string[]> {
   const declarations = new Map<string, string[]>();
   for (let i = 0; i < tokens.length; i++) {
     if (!["const", "let", "var"].includes(tokens[i]!.text) || !(isName(tokens[i + 1]) || OPENERS.has(tokens[i + 1]?.text ?? ""))) continue;
@@ -362,7 +362,7 @@ export function rewrittenTestExpectations(changes: ReadonlyArray<{ path: string;
   Array<{ path: string; changed: string[] }> {
   return changes.flatMap(({ path, base, head }) => {
     const baseTokens = sourceTokens(base), headTokens = sourceTokens(head);
-    const moved = changedDeclarations(declarationsOf(base, baseTokens), declarationsOf(head, headTokens));
+    const moved = changedDeclarations(bindingDeclarationsOf(base, baseTokens), bindingDeclarationsOf(head, headTokens));
     const left = new Map<string, number>();
     for (const { call } of assertionsOf(head, headTokens)) left.set(call, (left.get(call) ?? 0) + 1);
     const changed = assertionsOf(base, baseTokens).flatMap(({ call, reads }) => {
