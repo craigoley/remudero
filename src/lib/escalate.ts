@@ -2487,8 +2487,8 @@ export function withCodeRepositoryField(body: string, codeRepository: string): s
   const stamped = editEscalationMachineFields(body, (fields) => {
     const host = /^\*\*Host:\*\*.*$/m.exec(fields);
     if (!host) return `${line}\n${fields}`;
-    const crlf = host[0].endsWith("\r");
-    const end = host.index + host[0].length - (crlf ? 1 : 0);
+    const end = host.index + host[0].length; // `.` stops before `\r`, so a CRLF body's `\r` follows the match
+    const crlf = fields[end] === "\r";
     return `${fields.slice(0, end)}${crlf ? "\r\n" : "\n"}${line}${fields.slice(end)}`;
   });
   return stamped.length <= GITHUB_ISSUE_BODY_LIMIT ? stamped : body;
