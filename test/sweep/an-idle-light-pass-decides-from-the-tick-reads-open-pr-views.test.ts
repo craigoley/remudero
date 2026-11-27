@@ -41,8 +41,7 @@ function hookView(prNumber: number, headSha: string, ready = false): OpenPrView 
     changedFiles: ["src/subject.ts"], reviewInputDigest: reviewInputDigest(headSha, `Remudero-Task: W1-T${prNumber}`) };
 }
 
-/** The PR's dates are aged from the same clock the pass reads (W1-T14786): a fixed literal aged out of
- *  the pass's activity window as the wall clock moved, and the own read then listed nothing. */
+/** The PR's dates are derived from the clock the pass reads (W1-T14786). */
 function pullRow(prNumber: number, headSha: string, repo: string): Record<string, unknown> {
   const touched = new Date(Date.now() - 86_400_000).toISOString();
   return { number: prNumber, html_url: `https://github.com/o/${repo}/pull/${prNumber}`, state: "open", draft: false,

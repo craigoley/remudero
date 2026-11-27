@@ -48,8 +48,7 @@ function view(prNumber: number, headSha: string, ready = false): OpenPrView {
   };
 }
 
-/** The PR's dates are aged from the same clock the pass reads (W1-T14786): a fixed literal aged out of
- *  the pass's activity window as the wall clock moved, and the real list read then listed nothing. */
+/** The PR's dates are derived from the clock the pass reads (W1-T14786). */
 function pullRow(prNumber: number, headSha: string, repo: string): Record<string, unknown> {
   const touched = new Date(Date.now() - 86_400_000).toISOString();
   return {

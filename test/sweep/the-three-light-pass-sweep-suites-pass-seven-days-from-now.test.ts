@@ -7,9 +7,7 @@ import { join } from "node:path";
 import { runSuitesShifted } from "#src/lib/gate-gardener.js";
 import { REPO_ROOT } from "#test/helpers/repo-root.js";
 
-// W1-T15078. OBSERVED 2026-11-27: each of these suites held a fixed gh-shim `updated_at` that aged past
-// sweep.staleDays as the wall clock moved, and the expiring-fixture census confirmed two of them red with
-// Date.now shifted +2 days, which blocked every core PR's light-gates. Their fixtures now age from the clock.
+// W1-T15078. The suites' fixture dates derive from Date.now, so their age stays stable when that clock shifts.
 const FILES = [
   "test/sweep/a-light-pass-decides-from-its-last-good-open-pr-list-when-the-read-fails.test.ts",
   "test/sweep/an-idle-light-pass-decides-from-the-tick-reads-open-pr-views.test.ts",
@@ -27,8 +25,7 @@ function failures(shiftDays: number): string[] {
 }
 
 /** The three suites at the real clock, in a child started BEFORE the shifted run and written to a file (never a
- *  pipe the blocked event loop would leave full), so the two runs overlap: in series they outlasted the review's
- *  proof timeout on the loaded host (OBSERVED 2026-11-27, two exec errors at load1 38 and 19). */
+ *  pipe the blocked event loop would leave full). It uses one test worker while the shifted batch runs. */
 function realClockRun(): Promise<{ code: number | null; tap: string }> {
   const dir = mkdtempSync(join(tmpdir(), "rmd-w1-t15078-"));
   const out = join(dir, "real-clock.tap"), fd = openSync(out, "w");
@@ -37,7 +34,7 @@ function realClockRun(): Promise<{ code: number | null; tap: string }> {
   // As the shifted child does: this run is not part of an enclosing coverage measurement.
   env.NODE_OPTIONS = (env.NODE_OPTIONS ?? "").replace(/(^|\s)--experimental-test-coverage(?=\s|$)/g, "$1").trim();
   if (!env.NODE_OPTIONS) delete env.NODE_OPTIONS;
-  const child = spawn(process.execPath, ["--test", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", ...FILES],
+  const child = spawn(process.execPath, ["--test", "--test-concurrency=1", "--test-reporter=tap", "--import", "tsx", "--import", "./test/setup/tmp-hygiene.ts", ...FILES],
     { cwd: REPO_ROOT, env, stdio: ["ignore", fd, fd] });
   closeSync(fd);
   return new Promise((done, fail) => {
