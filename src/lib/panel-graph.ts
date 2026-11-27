@@ -2519,6 +2519,12 @@ export function peekClassifiedInboxStamped(deps: PanelGraphDeps): { result: Clas
 const INBOX_WRITE_CLASSIFICATION_MAX_AGE_MS = 30_000;
 
 function classifyInboxDecision(deps: PanelGraphDeps, proposalId: string, lapseDeclines = true): ClassifiedInbox {
+  return freshInboxDecision(deps, proposalId, lapseDeclines)
+    ?? classifyAllProposals(deps, undefined, proposalId, lapseDeclines);
+}
+
+/** The already-held Inbox result, only when its normal write freshness checks still pass. */
+function freshInboxDecision(deps: PanelGraphDeps, proposalId: string, lapseDeclines = true): ClassifiedInbox | undefined {
   // Terminal verdicts judge the recorded decline, while the read memo can show it as reopened.
   const held = lapseDeclines ? peekClassifiedInboxStamped(deps) : undefined;
   if (held) {
@@ -2531,7 +2537,7 @@ function classifyInboxDecision(deps: PanelGraphDeps, proposalId: string, lapseDe
       return held.result;
     }
   }
-  return classifyAllProposals(deps, undefined, proposalId, lapseDeclines);
+  return undefined;
 }
 
 /** PRIMARY CONTROL on how long one inbox recompute holds the event loop: proposals classified between yields. Each can
@@ -4532,11 +4538,17 @@ export function buildInboxVerbActions(deps: PanelGraphDeps, causalScope?: InboxC
       if (fields.reason !== undefined && typeof fields.reason !== "string") return { error: "reason must be a string" };
       return { ...id, kept: fields.kept !== false, reason: fields.reason as string | undefined };
     }, async (input, actor, respond) => {
-      const plan = (deps.readPlanSnapshot ?? loadPlan)(deps.planPath);
-      const readProposals = inboxProposalReader(deps);
-      const proposalForPlan = readProposals().find(p => p.id === input.proposalId);
-      const classifiedDeps = proposalForPlan ? await askCatalogDeps(deps, plan, proposalForPlan) : deps;
-      const classified = classifyAllProposals(classifiedDeps, () => plan, input.proposalId);
+      // A fresh Inbox pass already classified this proposal against the same public plan and
+      // named ops tasks. Reuse it when available; cold writes still classify through the
+      // task-aware path below.
+      let classified = freshInboxDecision(deps, input.proposalId);
+      if (!classified) {
+        const plan = (deps.readPlanSnapshot ?? loadPlan)(deps.planPath);
+        const readProposals = inboxProposalReader(deps);
+        const proposalForPlan = readProposals().find(p => p.id === input.proposalId);
+        const classifiedDeps = proposalForPlan ? await askCatalogDeps(deps, plan, proposalForPlan) : deps;
+        classified = classifyAllProposals(classifiedDeps, () => plan, input.proposalId);
+      }
       const proposal = classified.proposals.find(p => p.id === input.proposalId);
       if (!proposal) { respond(404, { error: "not_found", detail: `no active proposal "${input.proposalId}"` }); return; }
       const classification = classified.classifications.find(c => c.proposalId === input.proposalId);
