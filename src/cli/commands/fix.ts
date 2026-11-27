@@ -45,8 +45,8 @@ import { observeFeedbackInputs, type AdmissionObserver } from "../../lib/contrib
 import { observeContributorAdmission } from "../../lib/arm-auto-merge.js";
 import { observeAdmissionDisposition } from "../../lib/action-executor.js";
 import { fixLaneBenchmarkWork } from "../../lib/benchmark-run.js";
-import { baseInheritedRedSteps, captureCiRemedyComponent, recordCiRemedyExecution, rewrittenTestExpectations, unaskedExpectationRewrites,
-  upsertCiRemedyRoundComment, type CiRemedyExecution } from "../../lib/ci-remedy-execution.js";
+import { answeredFindingText, baseInheritedRedSteps, captureCiRemedyComponent, readExpectationRewrites, recordCiRemedyExecution,
+  unaskedExpectationRewrites, upsertCiRemedyRoundComment, type CiRemedyExecution } from "../../lib/ci-remedy-execution.js";
 import { loadPlan, visibleCriteria, type AcceptanceCriterion, type Plan } from "../../lib/plan.js";
 import { loadMounts, mountsPath, type Mount } from "../../lib/mounts.js";
 import { codexCapabilityBelow, codexCapabilityForRequestedModel } from "../../lib/worker-provider.js";
@@ -259,6 +259,9 @@ export interface GeneratorFixResult {
  * (`renderEscalationEvidence`, below) must keep meaning "there was truly nothing", never
  * "nothing looked like a diagnostic".
  */
+/** W1-T15064: why a round that rewrote an unnamed test's expectation pushed nothing. */
+const EXPECTATION_REWRITE_REFUSAL = "the round changed a test expectation the answered finding does not name";
+
 export const CI_LOG_LINE_PREFIX_RE = /^[^\t\n]*\t[^\t\n]*\t\S+ ?/;
 
 export const CI_LOG_BANNER_RE = /^(##\[(group|endgroup)\]|-{3,})/;
@@ -5394,6 +5397,29 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
     const unlandedStrikes = () => (strikes === attempt ? attempt - 1 : strikes);
     const notLandedOutcome = (landing: Extract<FixRoundLanding, { landed: false }>): FixRungOutcome => ({ outcome: "stood_down", review,
       strikes: unlandedStrikes(), retriggers, reason: `fix round push did not land (${landing.outcome})`, standDownReason: `fix round push did not land (${landing.outcome}): ${landing.reason}` });
+    // W1-T15064: a round never rewrites an existing test's expectation unless the finding it answers names that test.
+    // True when `head` did, after recording the refusal; the caller pushes nothing.
+    const refusedExpectationRewrite = async (head: string): Promise<boolean> => {
+      const base = roundStartSha ?? priorHeadSha;
+      if (base === undefined || head === base) return false;
+      let unasked: Array<{ path: string; changed: string[] }>;
+      try {
+        unasked = unaskedExpectationRewrites(await readExpectationRewrites((args) => hostWorktreeGitAsync(opts.worktreePath, args),
+          base, head), answeredFindingText(evidence));
+      } catch (error) {
+        // The base is this worktree's own HEAD at round start, so an unreadable diff means git cannot read
+        // the round's head here, and the push sends that same head. Say so rather than pass silently.
+        const unreadable = String(error);
+        deps.say(`fix rung: the test-expectation diff ${base}..${head} is unreadable: ${unreadable}`);
+        return false;
+      }
+      if (unasked.length === 0) return false;
+      deps.log("fix.commit_refused", { round_id: roundId, strike: attempt, round, head_sha: priorHeadSha, round_head_sha: head,
+        reason: EXPECTATION_REWRITE_REFUSAL, tests: unasked.map((rewrite) => rewrite.path),
+        changed_assertions: unasked.flatMap((rewrite) => rewrite.changed) });
+      deps.say(`fix rung: refused — ${EXPECTATION_REWRITE_REFUSAL}: ${unasked.map((rewrite) => rewrite.path).join(", ")}`);
+      return true;
+    };
     const selfCheckBeforePush = async (): Promise<void> => {
       const acceptance = opts.task.acceptance ?? [];
       if (!host.runFixSelfCheck || fixMode !== "reviewer-unmet" || acceptance.length === 0 || expectedHeadShaForPush === undefined ||
@@ -5657,6 +5683,7 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
           if (repair) heldPaths = repair.blocked.filter((path) => !paths.includes(path)).sort();
           partialHead = repair?.head;
           if (partialHead === undefined) return undefined;
+          if (await refusedExpectationRewrite(partialHead)) return undefined;
           expectedHeadShaForPush = partialHead;
           const lease = opts.guardRoundHead && ownedSessionPushGuard === undefined ? roundPushBaseSha : undefined;
           const pushed = await landRoundPush(() => deps.push(opts.worktreePath, opts.branch, partialHead, lease, ownedSessionPushGuard),
@@ -5849,39 +5876,14 @@ export async function runFixRung(opts: FixRungOptions, host: FixCommandHost): Re
       });
     }
 
-    // W1-T15064: a round never rewrites an existing test's expectation unless the finding it answers names that test.
-    const expectationBase = roundStartSha ?? priorHeadSha;
-    if (expectedHeadShaForPush !== undefined && expectationBase !== undefined && expectedHeadShaForPush !== expectationBase) {
-      let unasked: Array<{ path: string; changed: string[] }>;
-      try {
-        const git = (args: string[]) => hostWorktreeGitAsync(opts.worktreePath, args);
-        const head = expectedHeadShaForPush;
-        const paths = (await git(["diff", "--name-only", "-z", "--diff-filter=M", expectationBase, head, "--", "test/"]))
-          .split("\0").filter((path) => /\.test\.[cm]?[jt]s$/.test(path));
-        const changes = [];
-        for (const path of paths) {
-          changes.push({ path, base: await git(["show", `${expectationBase}:${path}`]), head: await git(["show", `${head}:${path}`]) });
-        }
-        unasked = unaskedExpectationRewrites(rewrittenTestExpectations(changes), JSON.stringify(evidence));
-      } catch (error) {
-        // The base is this worktree's own HEAD at round start, so an unreadable diff means git cannot read
-        // the round's head here, and the push below sends that same head. Say so rather than pass silently.
-        const unreadable = String(error);
-        deps.say(`fix rung: the test-expectation diff ${expectationBase}..${expectedHeadShaForPush} is unreadable: ${unreadable}`);
-        unasked = [];
-      }
-      if (unasked.length > 0) {
-        const reason = "the round changed a test expectation the answered finding does not name";
-        deps.log("fix.commit_refused", { round_id: roundId, strike: attempt, round, head_sha: priorHeadSha, reason,
-          tests: unasked.map((rewrite) => rewrite.path), changed_assertions: unasked.flatMap((rewrite) => rewrite.changed) });
-        deps.say(`fix rung: refused — ${reason}: ${unasked.map((rewrite) => rewrite.path).join(", ")}`);
-        logFixDone();
-        return finish({ outcome: "stood_down", review, strikes, retriggers, reason, standDownReason: reason });
-      }
-    }
-
     let roundPush: FixRungOutcome | "refused" | undefined;
     await selfCheckBeforePush();
+    // W1-T15064: the guard reads the head the push sends, after the self-check's last commit.
+    if (expectedHeadShaForPush !== undefined && await refusedExpectationRewrite(expectedHeadShaForPush)) {
+      logFixDone();
+      return finish({ outcome: "stood_down", review, strikes, retriggers, reason: EXPECTATION_REWRITE_REFUSAL,
+        standDownReason: EXPECTATION_REWRITE_REFUSAL });
+    }
     if (expectedHeadShaForPush && fixOutcome?.kind === "FIXED") {
       workerProofResults = await runWorkerAcceptanceProofs({ worktreePath: opts.worktreePath,
         headSha: expectedHeadShaForPush, criteria: unmet }, opts.workerProofIo);

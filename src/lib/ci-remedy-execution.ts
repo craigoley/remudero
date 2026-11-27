@@ -168,20 +168,51 @@ export function ciRemedyExecutionReport(rows: readonly ExecutionRow[], asOf: str
 export const BASE_INHERITED_MARKER = "[inherited from the base -- NOT this diff]";
 /** One census crossing line, as that script prints it: `  - <file>:<line>  ... goes red <day> (...)`. */
 const CROSSING_LINE = /^\s*- \S+:\d+\s.*\sgoes red\s/;
-/** A failure the log names that is not a census crossing: a failed test, a type error, an explicit error annotation. */
-const OTHER_RED = /^\s*not ok \d|^\s*✖ |\berror TS\d+|##\[error\](?!Process completed with exit code)/;
+/** The census's own headlines. Only the crossing headline can be inherited: formatReport attributes nothing else. */
+const CENSUS_HEADLINE = /^expiring-fixture-census: (?:BLOCKED|CLEAR|OK) -- /;
+const INHERITABLE_HEADLINE = /^expiring-fixture-census: BLOCKED -- \d+ fixture\(s\) CROSS their threshold within /;
+/** A population-drop line: formatReport never attributes a drop to the base. */
+const POPULATION_DROP_LINE = /^\s*- \S+: measured \d+ stamp\(s\), recorded \d+ \(/;
+/** A failure the log names that is not a census crossing: a failed test or a type error. */
+const OTHER_RED = /^\s*not ok \d|^\s*✖ |\berror TS\d+/;
+/** The `gh run view --log-failed` prefix (`<job>\t<step>\t<timestamp> `) or a job log's own timestamp. */
+const LOG_PREFIX = /^[^\t\n]*\t[^\t\n]*\t\S+ ?|^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?/;
+/** An error annotation as the runner renders it (`##[error]...`) or as the step wrote it (`::error ...::...`). */
+const ERROR_ANNOTATION = /^(?:##\[error\]|::error(?: [^:]*)?::)(.*)$/;
+const decodeAnnotation = (text: string) => text.replace(/%0D/g, "\r").replace(/%0A/g, "\n").replace(/%25/g, "%");
 
-/** W1-T15064: every red step a round would answer is base-inherited when each failing check's log carries the
- *  inherited marker, marks every crossing it prints, and names no other failure. An empty list, or any doubt, is not. */
+/** A failing check's log as report lines; each error annotation is decoded, and its first line is kept apart. */
+function reportLines(logTail: string): { lines: string[]; annotationHeads: string[] } {
+  const lines: string[] = [], annotationHeads: string[] = [];
+  for (const raw of logTail.split(/\r?\n/)) {
+    const line = raw.replace(LOG_PREFIX, "");
+    const annotation = ERROR_ANNOTATION.exec(line);
+    if (!annotation) { lines.push(line); continue; }
+    const decoded = decodeAnnotation(annotation[1]!).split(/\r?\n/);
+    annotationHeads.push(decoded[0]!);
+    lines.push(...decoded);
+  }
+  return { lines, annotationHeads };
+}
+
+/** True when one failing check's log is the census's crossing report and the base owns every line of it. */
+function censusReportIsInherited(logTail: string): boolean {
+  const { lines, annotationHeads } = reportLines(logTail);
+  const headlines = lines.filter((line) => CENSUS_HEADLINE.test(line));
+  const crossings = lines.filter((line) => CROSSING_LINE.test(line));
+  return headlines.length > 0 && headlines.every((line) => INHERITABLE_HEADLINE.test(line))
+    && crossings.length > 0 && crossings.every((line) => line.includes(BASE_INHERITED_MARKER))
+    && !lines.some((line) => POPULATION_DROP_LINE.test(line) || OTHER_RED.test(line))
+    && annotationHeads.every((head) => INHERITABLE_HEADLINE.test(head) || /^Process completed with exit code \d+\.?$/.test(head));
+}
+
+/** W1-T15064: every red step a round would answer is base-inherited when each failing check's log is the census's
+ *  crossing report, every crossing in it is marked inherited, and it names nothing else: no population drop, no other
+ *  census verdict, no failed test, no error annotation but the census's own headline. An empty list, or any doubt,
+ *  is not. */
 export function baseInheritedRedSteps(failures: ReadonlyArray<{ name: string; logTail: string }>): { inherited: boolean; steps: string[] } {
   const steps = [...new Set(failures.map((failure) => failure.name))];
-  const inherited = failures.length > 0 && failures.every((failure) => {
-    const lines = failure.logTail.split("\n");
-    return lines.some((line) => line.includes(BASE_INHERITED_MARKER))
-      && lines.filter((line) => CROSSING_LINE.test(line)).every((line) => line.includes(BASE_INHERITED_MARKER))
-      && !lines.some((line) => OTHER_RED.test(line));
-  });
-  return { inherited, steps };
+  return { inherited: failures.length > 0 && failures.every((failure) => censusReportIsInherited(failure.logTail)), steps };
 }
 
 const ASSERTION_START = /\bassert(?:\.\w+)*\s*\(|\bexpect\s*\(/g;
@@ -216,6 +247,67 @@ export function rewrittenTestExpectations(changes: ReadonlyArray<{ path: string;
     });
     return changed.length > 0 ? [{ path, changed }] : [];
   });
+}
+
+/** W1-T15064: the evidence a round answers. Met criteria, the review summary and the merge logs are not asked of it. */
+export interface AnsweredEvidence {
+  review?: {
+    unmetCriteria: ReadonlyArray<{ claim: string; proof?: string; reason?: string }>;
+    findings?: ReadonlyArray<{ path: string; line: number; mechanism: string; remedy: string | null }>;
+  };
+  ciFailures?: ReadonlyArray<{ name: string; logTail: string; title?: string; annotations?: ReadonlyArray<{ message: string }> }>;
+  planGateFindings?: ReadonlyArray<{ check: string; firstLine: string }>;
+  actionableGateFailures?: ReadonlyArray<{ reason: string }>;
+  mergeConflict?: { files: ReadonlyArray<{ path: string }> };
+}
+
+/** W1-T15064: the text of what the round answers: unmet criteria, verified review findings, failing-check evidence,
+ *  gate findings and the conflicted paths it resolves. */
+export function answeredFindingText(evidence: AnsweredEvidence): string {
+  return JSON.stringify([
+    (evidence.review?.unmetCriteria ?? []).map(({ claim, proof, reason }) => [claim, proof, reason]),
+    evidence.review?.findings ?? [],
+    (evidence.ciFailures ?? []).map(({ name, logTail, title, annotations }) => [name, title, logTail,
+      (annotations ?? []).map((annotation) => annotation.message)]),
+    evidence.planGateFindings ?? [], evidence.actionableGateFailures ?? [],
+    (evidence.mergeConflict?.files ?? []).map((file) => file.path),
+  ]);
+}
+
+const TEST_FILE = /\.test\.[cm]?[jt]s$/;
+
+/** W1-T15064: the expectations the commits `base..head` rewrote in existing test files, read through `git`. A renamed
+ *  test is compared with its old path. An assertion a merged parent also dropped came from that parent, not from the
+ *  round, so a merge round is charged only for what it changed beyond the branch it merged. */
+export async function readExpectationRewrites(git: (args: string[]) => Promise<string>, base: string, head: string):
+  Promise<Array<{ path: string; changed: string[] }>> {
+  const status = (await git(["diff", "--name-status", "-z", "-M", "--diff-filter=MR", base, head, "--", "test/"])).split("\0");
+  const pairs: Array<{ from: string; path: string }> = [];
+  for (let i = 0; i + 1 < status.length;) {
+    const renamed = status[i]!.startsWith("R");
+    const pair = renamed ? { from: status[i + 1]!, path: status[i + 2]! } : { from: status[i + 1]!, path: status[i + 1]! };
+    i += renamed ? 3 : 2;
+    if (TEST_FILE.test(pair.path)) pairs.push(pair);
+  }
+  const mergedParents = (await git(["rev-list", "--merges", "--parents", `${base}..${head}`]))
+    .split("\n").filter((line) => line.trim() !== "").flatMap((line) => line.trim().split(" ").slice(2));
+  const rewrites: Array<{ path: string; changed: string[] }> = [];
+  for (const { from, path } of pairs) {
+    const [rewrite] = rewrittenTestExpectations([{ path, base: await git(["show", `${base}:${from}`]),
+      head: await git(["show", `${head}:${path}`]) }]);
+    if (!rewrite) continue;
+    let changed = rewrite.changed;
+    for (const parent of mergedParents) {
+      for (const candidate of [...new Set([path, from])]) {
+        if ((await git(["ls-tree", "--name-only", parent, "--", candidate])).trim() === "") continue;
+        const kept = new Set(assertionCalls(await git(["show", `${parent}:${candidate}`])));
+        changed = changed.filter((call) => kept.has(call));
+        break;
+      }
+    }
+    if (changed.length > 0) rewrites.push({ path, changed });
+  }
+  return rewrites;
 }
 
 /** W1-T15064: a rewritten expectation stands only in a test the answered finding names, by path or file name. */
