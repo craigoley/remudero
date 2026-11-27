@@ -580,6 +580,29 @@ export async function unresolvedCitations(root: string, commit: string, id: stri
   return rows.some(row => row.id === id) ? [] : cited;
 }
 
+/** W1-T15047: for each of `ids`, the public files at `commit` that cite it as task-id-existence reads them, in one
+ *  read: {@link unresolvedCitations}'s whole-word match, roots, skipped folders and baseline, with nothing leaving. */
+export async function citingFiles(root: string, commit: string, ids: readonly string[]): Promise<Map<string, string[]>> {
+  const cited = new Map<string, string[]>();
+  if (ids.length === 0) return cited;
+  const git = defaultGitRunnerAsync(root);
+  const grep = ["grep", "-I", "-o", "-w", "-F", ...ids.flatMap(id => ["-e", id]), commit, "--", ...CITATION_ROOTS];
+  const found = await exitOf(git, ["grep", "-q", ...grep.slice(1).filter(arg => arg !== "-o")]);
+  if (found === 1) return cited;
+  if (found !== 0) return unknown("citation_unreadable");
+  const baseline = "scripts/task-id-existence-baseline.json";
+  const exempt = await exitOf(git, ["cat-file", "-e", `${commit}:${baseline}`]) !== 0 ? new Set<unknown>() :
+    new Set((JSON.parse(await git(["show", `${commit}:${baseline}`])) as Array<{ id?: unknown }>).map(row => row.id));
+  for (const line of (await git(grep)).split("\n")) {
+    if (!line.startsWith(`${commit}:`)) continue;
+    const at = line.lastIndexOf(":"), path = line.slice(commit.length + 1, at), id = line.slice(at + 1);
+    if (exempt.has(id) || path.split("/").some(part => CITATION_SKIPPED.has(part))) continue;
+    const paths = cited.get(id) ?? cited.set(id, []).get(id)!;
+    if (!paths.includes(path)) paths.push(path);
+  }
+  return cited;
+}
+
 /** The selection the preview verb prints (W1-T13680 exports it for `rmd move-task`): pinned catalogs, ownership, the
  *  merge-credit search and a stable re-read. It throws {@link PreviewUnknown} on any unread or changed evidence.
  *  W1-T14345: it fills a batch of open tasks, oldest filing first, that the ops catalog has room for; a batch of one is
@@ -613,6 +636,20 @@ export async function selectPlanTaskMigration(
   // The whole group joins one batch or none of it does, so no removal ever leaves a public reference dangling.
   const namers = new Map<string, Task[]>();
   for (const t of pub.plan.tasks) for (const id of publicReferences([t])) (namers.get(id) ?? namers.set(id, []).get(id)!).push(t);
+  // W1-T15047: a record that cites an unreserved record's id in prose names it too, since the id resolves only through
+  // that record's own shard. Only a single-record shard is a citer that can move; any other citing file still refuses.
+  const recordAt = new Map<string, Task>();
+  for (const t of pub.plan.tasks) { const orig = pub.originals.get(t.id)!; if (orig.single && orig.shard) recordAt.set(orig.path, t); }
+  const named = new Set(publicPrerequisites);
+  const unreserved = pub.plan.tasks.filter(t => !publicRefs.has(`refs/rmd-id/${t.id}`)).map(t => t.id);
+  for (const [id, paths] of await citingFiles(o.publicRoot, o.publicCommit, unreserved)) {
+    for (const citer of paths.map(path => recordAt.get(path))) {
+      if (citer === undefined || citer.id === id) continue;
+      const list = namers.get(id) ?? namers.set(id, []).get(id)!;
+      if (!list.includes(citer)) list.push(citer);
+      named.add(id);
+    }
+  }
   const inBatch = new Set<string>(), historyIds = new Set<string>();
   const isHistory = (t: Task) => !OPEN_STATUSES.has(t.status) || t.retirement !== undefined;
   /** Why `t` cannot join a group, or undefined; a history member skips only the open-work rules. */
@@ -650,7 +687,7 @@ export async function selectPlanTaskMigration(
     if (inBatch.has(task.id)) continue;
     const original = pub.originals.get(task.id)!;
     const reason = knownMerged.has(task.id) ? "merged" : task.repo !== o.publicRepo.split("/")[1] ? "target_not_bound" : taskOwned(task.id, [original.path], publicRefs, initial.open) ? "owned" :
-      publicPrerequisites.has(task.id) && groupOf(task) === undefined ? "public_dependants" : !original.single || !original.shard ? "not_single_shard" : alreadyMoved(original) ? "already_moved" : undefined;
+      named.has(task.id) && groupOf(task) === undefined ? "public_dependants" : !original.single || !original.shard ? "not_single_shard" : alreadyMoved(original) ? "already_moved" : undefined;
     if (reason) { refused.push({ id: task.id, reason }); continue; }
     if (task.retirement !== undefined) {
       refused.push({ id: task.id, reason: "retired" });
@@ -665,7 +702,7 @@ export async function selectPlanTaskMigration(
     if (unmovable) { refused.push({ id: task.id, reason: unmovable }); continue; }
     if (!control) return unknown("merge_credit_control_unreadable");
     // W1-T14825: an unnamed record is a group of one, selected exactly as before.
-    const group = publicPrerequisites.has(task.id) ? groupOf(task)! : [task];
+    const group = named.has(task.id) ? groupOf(task)! : [task];
     // W1-T14993: a member with no reservation ref resolves only through its own shard, so it moves only when its removal
     // (with the batch's) leaves no public citation of its id for task-id-existence to refuse.
     const leaving = new Set([...batch.map(m => String(m.sourcePath)), ...group.map(m => pub.originals.get(m.id)!.path)]);
