@@ -1503,13 +1503,10 @@ function incidentField(value: unknown, max = 200): string | undefined {
 }
 
 /**
- * The identity of one observation. Derived only from bounded semantic fields — instance/repository,
- * failure class, scope and the named causal discriminator — never from a title. A missing or ambiguous
- * input yields an UNGROUPABLE identity keyed on the observation's own id, so it stays a card of its own.
- *
- * Release is deliberately not a key part: a resolved incident must be able to regress in a NEWER release,
- * which a release-keyed identity would instead open as an unrelated incident. It rides on the
- * observation and on the resolution, where regression reads it.
+ * Identity uses bounded semantic fields (instance/repository, failure class, scope, discriminator), never title.
+ * Missing or ambiguous input yields an UNGROUPABLE identity keyed by observation id, keeping its own card.
+ * Release is excluded so a resolved incident can regress in a newer release; regression reads release from the
+ * observation and resolution instead.
  */
 export function incidentIdentity(observation: IncidentObservation): IncidentIdentity {
   const own = `ungroupable:${observation.id}`;
@@ -2486,12 +2483,10 @@ function holdInboxResult(state: InboxClassifyState, generation: object, fp: Inbo
 }
 
 /**
- * W1-T4261 — THE READ ROUTES' CLASSIFIER. MEASURED 2026-09-23 on the fleet gateway: every GET /v1/inbox pass
- * reclassified 693 proposals synchronously (81% of the serve process's CPU; /v1/status timed out at 15 s on an idle
- * host). This returns the previous pass's result whenever nothing it reads has changed: the four inbox state files
- * (size, mtime, inode), the plan (the process snapshot's identity, or tasks.yaml and its shards' stamps), the
- * ledger's ratify/decline verdicts, the GitHub-derived projection's merged facts, and origin/main's sha. An
- * unresolvable sha never reuses. {@link classifyAllProposalsSliced} is the same memo with a recompute that yields.
+ * W1-T4261: memoize GET /v1/inbox classification; in 2026-09-23 fleet measurements, 693 proposals used 81% of
+ * serve CPU and made /v1/status time out. Reuse only while inbox state-file stamps, plan identity/shard stamps,
+ * ledger verdicts, GitHub projection facts, and origin/main sha are unchanged. An unresolvable sha never reuses.
+ * {@link classifyAllProposalsSliced} uses the same memo with a yielding recompute.
  */
 export function classifyAllProposalsMemo(deps: PanelGraphDeps, readPlanSnapshot?: () => Plan): ClassifiedInbox {
   const state = inboxClassifyState(deps);
@@ -4425,11 +4420,9 @@ export function buildPanelReadRoutes(deps: PanelGraphDeps, readPlanSnapshot?: ()
 }
 
 /**
- * W1-T13651: the plan an Approve gates on. Approve must never read a torn working tree (W1-T2220 remedy (c)), so it read
- * the plan at HEAD through git: on the Azure host that git read plus a YAML parse of every shard held serve's request loop
- * for about 25 s (2026-11-18 10:53:55Z, and the Console gave up at 25 s). Serve's board already holds a plan read from a
- * committed ref (plan source "loaded", identity "ref:..."), which is never torn either, so Approve uses it when it is;
- * any other source state keeps the git read at HEAD.
+ * W1-T13651: Approve cannot read a torn working tree (W1-T2220(c)). A git read plus parsing all shards once held
+ * serve's request loop for 25 seconds (2026-11-18). Reuse the board's committed-ref snapshot when available;
+ * otherwise read the plan at HEAD through git.
  */
 export function approvePlanReader(deps: Pick<PanelGraphDeps, "root" | "readPlanSnapshot" | "readPlanSource">): (planPath: string) => Plan {
   const source = deps.readPlanSource?.();
