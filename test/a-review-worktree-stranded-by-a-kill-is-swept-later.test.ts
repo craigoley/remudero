@@ -32,9 +32,6 @@ import {
   releaseReviewWorktree,
   sweepStrandedReviewWorktrees,
 } from "../src/lib/review-worktree-reclaim.js";
-import { emptyHostProcessTable } from "./helpers/empty-process-table.js";
-
-emptyHostProcessTable(); // W1-T15026: the reapers here decide removals on an owned process table, not the host's
 
 const GIT_ENV = {
   ...process.env,
