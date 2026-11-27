@@ -19,6 +19,7 @@
 import { readFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { dirname, join } from "node:path";
+import { fixedClock, systemClock } from "./clock.js";
 
 import {
   defaultShadowMemoryPorts,
@@ -45,6 +46,8 @@ export interface LaneMemoryReading {
   containerBasis: string;
   /** Projected MemAvailable after every in-flight claim and margin, before a new lane. Null when unread. */
   hostBaseAvailableMib: number | null;
+  /** W1-T14903 — the kernel MemAvailable that projection was cut from, in the same sample. Absent or null: unread. */
+  hostMeasuredAvailableMib?: number | null;
   hostReserveMib: number;
   /** One more run tree at the learned class tail (p90 peak) of the next build. */
   perLaneMib: number;
@@ -393,6 +396,7 @@ export function readLaneMemory(root: string, overrides: Partial<ShadowMemoryPort
     containerArmCounts: containerArmCounts(inputs.containerLift),
     containerBasis: numbers.containerBasis,
     hostBaseAvailableMib: numbers.projectedAvailableMib,
+    hostMeasuredAvailableMib: numbers.memAvailableMib,
     hostReserveMib: numbers.hostReserveMib,
     perLaneMib,
     ...(perLaneTypicalMib !== undefined ? { perLaneTypicalMib } : {}),
@@ -447,6 +451,257 @@ export function publishLaneCpuClasses(learner: LaneCpuLearnerState): void {
 /** The last published per-lane CPU of `laneClass`, or undefined while unlearned. */
 export function publishedLaneCpuPerLane(laneClass: string): number | undefined {
   return publishedPerLaneCpus[laneClass];
+}
+
+/** W1-T14903 — the audit row each shared host memory snapshot writes once, from the review width pass that reads it:
+ *  the snapshot, each lane's share and which lane yielded. Record-only (scripts/write-only-ledger-step-baseline.json). */
+export const HOST_MEMORY_SHARED_STEP = "host_memory.shared";
+
+/**
+ * W1-T14903 — THE ONE HOST MEMORY SNAPSHOT BOTH LANES CUT FROM. The build lane's reading ({@link readLaneMemory}) is
+ * MemAvailable projected after every in-flight worker's remaining claim, reviews and builds alike; the review width
+ * read raw MemAvailable, so a full review lane could hold builds down while the review lane still saw room. Each
+ * lane-target reading publishes its
+ * snapshot here; review capacity takes the lower of it and its own reading, so neither lane spends memory the other
+ * already counted, and neither width can rise (INVARIANT width-never-grows).
+ */
+export interface SharedHostMemory {
+  atMs: number;
+  /** Projected MemAvailable after every in-flight claim, MiB (the lane governor's host base). */
+  availableMib: number;
+  hostReserveMib: number;
+  /** One more build at its learned typical peak, MiB. */
+  perLaneTypicalMib: number;
+  /** One more build at its learned tail (p90) peak, MiB. */
+  perLaneMib: number;
+  /** The tail the host base already reserves, MiB; a new build's tail competes with it (see {@link laneTarget}). */
+  hostTailMib: number;
+  /** The kernel MemAvailable the projection was cut from, in the same sample, MiB; recorded on the row only. Review
+   *  capacity's legacy ceiling reads a CURRENT kernel sample instead: this one can be minutes old. Absent: unread. */
+  measuredMib?: number;
+}
+
+let publishedSharedHostMemory: SharedHostMemory | null = null;
+
+/** BACKSTOP: a snapshot older than this is not read as it stands. The primary control is the lane-target reading
+ *  itself, re-taken every dispatch poll interval; a pass whose pin outlives this re-pins a fresh one (re-read through
+ *  the governor's reader when none is fresh), and only with no reading at all does each lane keep its own. */
+export const SHARED_HOST_MEMORY_STALE_MS = 10 * 60_000;
+
+/** W1-T14903 — publish one lane memory reading as the shared snapshot; an unread or host-unread reading clears it. */
+export function publishSharedHostMemory(reading: LaneMemoryReading | { unread: string }, atMs: number): void {
+  if ("unread" in reading || reading.hostBaseAvailableMib === null || !Number.isFinite(reading.hostBaseAvailableMib)) {
+    publishedSharedHostMemory = null;
+    return;
+  }
+  publishedSharedHostMemory = {
+    atMs,
+    availableMib: reading.hostBaseAvailableMib,
+    hostReserveMib: reading.hostReserveMib,
+    perLaneTypicalMib: Math.max(1, Math.min(reading.perLaneMib, reading.perLaneTypicalMib ?? reading.perLaneMib)),
+    perLaneMib: Math.max(1, reading.perLaneMib),
+    hostTailMib: Math.max(0, reading.hostTailMib ?? 0),
+    ...(typeof reading.hostMeasuredAvailableMib === "number" && Number.isFinite(reading.hostMeasuredAvailableMib)
+      ? { measuredMib: reading.hostMeasuredAvailableMib } : {}),
+  };
+}
+
+/** The reader the build lane's governor takes its readings through, installed when its ports are built (before any
+ *  read, so a PAUSE-booted daemon has it too); unset, nothing re-reads. */
+let sharedHostMemoryReader: (() => LaneMemoryReading) | undefined;
+
+/** W1-T14903 — the reader {@link refreshSharedHostMemory} re-reads through (the governor's own; tests pass a fake). */
+export function setSharedHostMemoryReader(reader: (() => LaneMemoryReading) | undefined): void {
+  sharedHostMemoryReader = reader;
+}
+
+/**
+ * W1-T14903 — the fresh shared snapshot, re-read through the build lane's own reader when it has expired. The daemon's
+ * dispatch loop publishes a snapshot each poll; while it is paused nothing does, so a review pass that found the
+ * snapshot expired would otherwise fall back to its own reading and write no row. With no reader (no governor in this
+ * process) nothing is re-read.
+ */
+export function refreshSharedHostMemory(nowMs: number, reader = sharedHostMemoryReader): SharedHostMemory | undefined {
+  const fresh = sharedHostMemory(nowMs);
+  if (fresh !== undefined || reader === undefined) return fresh;
+  let reading: LaneMemoryReading | { unread: string };
+  try { reading = reader(); }
+  catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    reading = { unread: reason };
+  }
+  publishSharedHostMemory(reading, nowMs);
+  return sharedHostMemory(nowMs);
+}
+
+type SharedRowLog = (step: string, extra?: Record<string, unknown>) => void;
+
+/**
+ * W1-T14903 — ONE SNAPSHOT PER PASS. A sweep pass pins the shared snapshot once, when it starts, and every consumer in
+ * that pass (the review width, re-review admission, the audit row) reads the pinned snapshot, never the live one the
+ * dispatch loop may re-publish while the pass awaits a read. The pass writes one {@link HOST_MEMORY_SHARED_STEP} row per
+ * pinned snapshot: consumers record into it and its owner flushes it.
+ *
+ * A pin outlives its pass when a refill runs late (a lane freed minutes after the pass read): past the stale bound the
+ * pin no longer describes the host, so the pass RE-PINS from the current shared snapshot (re-read through the build
+ * lane's reader when that has expired too) and the late consumers form a new segment with its own row.
+ */
+export interface SharedHostMemoryPass {
+  /** The pinned snapshot of the current segment; replaced only when it expires ({@link pinnedSharedHostMemory}). */
+  snapshot: SharedHostMemory | undefined;
+  /** When the current segment was pinned: with no snapshot, a re-read is attempted once this is past the bound. */
+  pinnedAtMs: number;
+  width?: { ownMib: number | null; readMib: number | null; width: number; ownWidth: number; yieldedWidth: boolean };
+  heldPrs: Set<number>;
+  /** The current segment's row has been written, unchanged since. */
+  written: boolean;
+  /** The serialized row last written for the current segment. */
+  writtenRow?: string;
+  /** Rows of earlier, re-pinned segments not yet written. */
+  pendingRows: Record<string, unknown>[];
+  /** The reader this pass re-reads an expired snapshot through. */
+  reader?: () => LaneMemoryReading;
+  /** The owner's sink, once it flushed: a segment re-pinned after that writes its own row through it. */
+  log?: SharedRowLog;
+  /** The current segment was re-pinned after the owner flushed (a late refill): it is written on its own. */
+  late: boolean;
+}
+
+/** W1-T14903 — pin this pass's snapshot: the fresh shared one, re-read when expired. */
+export function openSharedHostMemoryPass(nowMs: number, reader = sharedHostMemoryReader): SharedHostMemoryPass {
+  return {
+    snapshot: refreshSharedHostMemory(nowMs, reader), pinnedAtMs: nowMs, heldPrs: new Set(), written: false, pendingRows: [],
+    ...(reader === undefined ? {} : { reader }), late: false,
+  };
+}
+
+/**
+ * W1-T14903 — the pass's pinned snapshot at `nowMs`. Within the stale bound it is the snapshot the pass started on.
+ * Past it (a refill freed late in the pass's chain) the pass re-pins: the current shared snapshot, re-read through the
+ * build lane's reader when that one has expired as well, so the late width and re-review yield read the same fresh
+ * reading the build lane does, never fall back to the review lane's own memory alone.
+ */
+export function pinnedSharedHostMemory(pass: SharedHostMemoryPass, nowMs: number): SharedHostMemory | undefined {
+  const pinnedAt = pass.snapshot?.atMs ?? pass.pinnedAtMs;
+  if (nowMs - pinnedAt <= SHARED_HOST_MEMORY_STALE_MS) return pass.snapshot;
+  repinSharedHostMemoryPass(pass, nowMs);
+  return pass.snapshot;
+}
+
+function sharedPassRow(pass: SharedHostMemoryPass): Record<string, unknown> | undefined {
+  if (pass.snapshot === undefined) return undefined;
+  const width = pass.width;
+  const held = [...pass.heldPrs].sort((a, b) => a - b);
+  return {
+    ...hostMemorySharedPayload(pass.snapshot, {
+      ownMib: width?.ownMib ?? null, readMib: width?.readMib ?? null, width: width?.width ?? null,
+      ...(width === undefined ? {} : { ownWidth: width.ownWidth }),
+      yielded: held.length > 0 ? "re-review" : width?.yieldedWidth === true ? "review-width" : "none",
+      ...(held.length > 0 ? { withheld: held.length } : {}),
+    }),
+    ...(held.length > 0 ? { withheld_prs: held } : {}),
+  };
+}
+
+function repinSharedHostMemoryPass(pass: SharedHostMemoryPass, nowMs: number): void {
+  const row = sharedPassRow(pass);
+  // The expiring segment keeps its own row: unwritten, or a late segment that changed since its last write.
+  if (row !== undefined && (pass.writtenRow === undefined || (pass.late && JSON.stringify(row) !== pass.writtenRow))) {
+    pass.pendingRows.push(row);
+  }
+  pass.snapshot = refreshSharedHostMemory(nowMs, pass.reader ?? sharedHostMemoryReader);
+  pass.pinnedAtMs = nowMs;
+  delete pass.width;
+  pass.heldPrs.clear();
+  pass.written = false;
+  delete pass.writtenRow;
+  pass.late = pass.log !== undefined;
+  if (pass.log !== undefined) writePendingSharedRows(pass, pass.log);
+}
+
+function writePendingSharedRows(pass: SharedHostMemoryPass, log: SharedRowLog): void {
+  for (const row of pass.pendingRows.splice(0)) log(HOST_MEMORY_SHARED_STEP, row);
+}
+
+function writeCurrentSharedRow(pass: SharedHostMemoryPass, log: SharedRowLog): void {
+  const row = sharedPassRow(pass);
+  if (row === undefined) return;
+  const key = JSON.stringify(row);
+  if (pass.writtenRow === key) return;
+  pass.writtenRow = key;
+  pass.written = true;
+  log(HOST_MEMORY_SHARED_STEP, row);
+}
+
+/** W1-T14903 — the owner writes the pass's rows: each re-pinned segment's, then the current one's, once; a segment
+ *  with no snapshot writes none. After this, a segment re-pinned by a late refill writes through the same sink. */
+export function flushSharedHostMemoryPass(pass: SharedHostMemoryPass, log: SharedRowLog | undefined): void {
+  if (log === undefined) return;
+  pass.log ??= log;
+  writePendingSharedRows(pass, log);
+  if (!pass.written) writeCurrentSharedRow(pass, log);
+}
+
+/** W1-T14903 — a consumer that reads the pass after its owner flushed (a late refill's sweep) writes the segment it
+ *  re-pinned, as its own pass; the owner's segment is never re-written. Before the owner flushed: nothing. */
+export function flushLateSharedHostMemoryPass(pass: SharedHostMemoryPass): void {
+  if (pass.log === undefined) return;
+  writePendingSharedRows(pass, pass.log);
+  if (pass.late) writeCurrentSharedRow(pass, pass.log);
+}
+
+/** W1-T14903 — the shared snapshot unless it is older than the stale bound at `nowMs`. A snapshot taken after `nowMs`
+ *  (the dispatch loop re-read it after a pass captured its clock) is the newest reading there is, so it is read. */
+export function sharedHostMemory(nowMs: number): SharedHostMemory | undefined {
+  const snapshot = publishedSharedHostMemory;
+  if (snapshot === null || nowMs - snapshot.atMs > SHARED_HOST_MEMORY_STALE_MS) return undefined;
+  return snapshot;
+}
+
+/** W1-T14903 — the room one more build needs on the host arm, by {@link laneTarget}'s own rule: its typical peak plus
+ *  the part of its tail the host base has not already reserved. */
+export function sharedBuildNeedMib(snapshot: SharedHostMemory): number {
+  return snapshot.perLaneTypicalMib + Math.max(0, snapshot.perLaneMib - snapshot.perLaneTypicalMib - snapshot.hostTailMib);
+}
+
+/** W1-T14903 — short: the build lane's host arm would admit no new build on this snapshot (laneTarget's `fit` rule). */
+export function sharedHostMemoryShort(snapshot: SharedHostMemory | undefined): boolean {
+  if (snapshot === undefined) return false;
+  return snapshot.availableMib - snapshot.hostReserveMib < sharedBuildNeedMib(snapshot);
+}
+
+/**
+ * W1-T14903 — a re-review of an already-judged head yields to a build unless the snapshot holds room for BOTH: one
+ * more build by the build lane's own rule and the review's own memory reserve. Below the build's need nothing starts
+ * and the re-review waits, so freed memory reaches the build first; between the two, the build fits and the re-review
+ * still waits, so the build is admitted before it. No snapshot: nothing yields.
+ */
+export function reReviewYieldsToBuild(snapshot: SharedHostMemory | undefined, reviewNeedMib: number): boolean {
+  if (snapshot === undefined) return false;
+  const need = sharedBuildNeedMib(snapshot) + (Number.isFinite(reviewNeedMib) ? Math.max(0, reviewNeedMib) : 0);
+  return snapshot.availableMib - snapshot.hostReserveMib < need;
+}
+
+/** W1-T14903 — the {@link HOST_MEMORY_SHARED_STEP} row: the snapshot, each lane's share and which lane yielded. */
+export function hostMemorySharedPayload(snapshot: SharedHostMemory, review: {
+  ownMib: number | null; readMib: number | null; width: number | null; ownWidth?: number;
+  yielded: "review-width" | "re-review" | "none";
+  withheld?: number;
+}): Record<string, unknown> {
+  return {
+    snapshot_at: fixedClock(snapshot.atMs).iso(),
+    available_mib: Math.round(snapshot.availableMib),
+    ...(snapshot.measuredMib === undefined ? {} : { measured_mib: Math.round(snapshot.measuredMib) }),
+    host_reserve_mib: Math.round(snapshot.hostReserveMib),
+    build_need_mib: Math.round(sharedBuildNeedMib(snapshot)),
+    review_own_mib: review.ownMib === null ? null : Math.round(review.ownMib),
+    review_read_mib: review.readMib === null ? null : Math.round(review.readMib),
+    review_width: review.width,
+    ...(review.ownWidth === undefined ? {} : { review_own_width: review.ownWidth }),
+    short: sharedHostMemoryShort(snapshot),
+    yielded: review.yielded,
+    ...(review.withheld === undefined ? {} : { withheld_re_reviews: review.withheld }),
+  };
 }
 
 /** W1-T11129 — the daemon publishes the learned CPU lane bound each reading; review capacity reads it as its hold. */
@@ -521,11 +776,23 @@ export function publishedLaneCpuBound(): number | undefined {
   return publishedCpuLaneBound === null ? undefined : publishedCpuLaneBound;
 }
 
-/** The real ports over a daemon state directory (`<root>/state`, the ledger's directory). */
-export function defaultLaneGovernorPorts(stateDir: string): LaneGovernorPorts {
+/** The real ports over a daemon state directory (`<root>/state`, the ledger's directory). `memory` overrides the
+ *  reading's host ports (a test's fixture files); absent, the host itself is read. */
+export function defaultLaneGovernorPorts(stateDir: string, memory: Partial<ShadowMemoryPorts> = {}): LaneGovernorPorts {
   const root = dirname(stateDir);
+  const reread = (): LaneMemoryReading => readLaneMemory(root, memory);
+  // W1-T14903: installed when the ports are BUILT, not on the first read(): a daemon booted under PAUSE never takes a
+  // dispatch reading, yet its review passes must still re-read the shared snapshot and write their rows through it.
+  setSharedHostMemoryReader(reread);
   return {
-    mode: () => loadLaneGovernorMode(), read: () => readLaneMemory(root), cpuCount: () => availableParallelism(),
+    mode: () => loadLaneGovernorMode(),
+    // W1-T14903: every reading is also the shared snapshot review capacity cuts its width from.
+    read: () => {
+      const reading = reread();
+      publishSharedHostMemory(reading, systemClock.now());
+      return reading;
+    },
+    cpuCount: () => availableParallelism(),
     cpuUsageUsec: () => readCgroupCpuUsageUsec(),
   };
 }
