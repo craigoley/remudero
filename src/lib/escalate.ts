@@ -2010,8 +2010,6 @@ const asyncIssueTwins = new WeakMap<IssueGateway, AsyncIssueGateway>();
 /** W1-T14998: the repository each real gateway files in, and the reason a gateway files nowhere. */
 const gatewayRepository = new WeakMap<object, string>();
 const unfiledGateways = new WeakMap<object, string>();
-/** W1-T14998 amendment: an unrouted gateway's visibility gate — undefined when its code repository is private (it files
- *  there), else why it files nowhere. */
 const visibilityGates = new WeakMap<object, () => Steps<string | undefined>>();
 
 function driveSynchronousEscalation<T>(drive: () => T): T {
@@ -2388,9 +2386,8 @@ export function ghIssueGatewayAsync(
  *
  * `named` files in that repository; `unfiled` opens no issue at all — no file (`off`) or a file that cannot be read,
  * which is never read as permission to fall back to the public repository. The code repository is `owner/repo`, which
- * the route no longer files in. AMENDED 2026-11-27: an `unfiled` route that is `unrouted` (no route named at all) files
- * in a PRIVATE code repository as before this task, so site, console and arcade keep their alerts; a public code
- * repository, or one whose visibility cannot be read, still opens nothing. An injected `exec` changes the transport, never the route; a test that files in its
+ * the route no longer files in. AMENDED 2026-11-27: `unrouted` (none named) files in a PRIVATE code repository as before.
+ * An injected `exec` changes the transport, never the route; a test that files in its
  * own fixture repository names it with `destination` or {@link ESCALATION_REPOSITORY_ENV}.
  */
 export type EscalationDestinationRead = () => { outcome: "named"; repository: string } | { outcome: "unfiled"; reason: string; unrouted?: true };
@@ -2559,10 +2556,9 @@ const NO_ESCALATION_ROUTE = "no-private-escalation-repository";
 
 const REPOSITORY_VISIBILITY_QUERY = "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){isPrivate}}";
 
-/** W1-T14998 amendment — each code repository's visibility, read once per process from its own GitHub record. */
+/** Each code repository's visibility, read once per process from its own GitHub record. */
 const codeRepositoryPrivate = new Map<string, boolean>();
 
-/** The REST read of `repos/<owner>/<name>`'s `private` field over the gateway's own transport; any other answer throws. */
 function restVisibility(codeRepository: string, run: (args: string[]) => string | Promise<string>): () => Steps<boolean> {
   return function* () {
     const answer = String(yield* step(() => run(["api", `repos/${codeRepository}`, "--jq", ".private"]))).trim();
@@ -2571,9 +2567,8 @@ function restVisibility(codeRepository: string, run: (args: string[]) => string 
   };
 }
 
-/** W1-T14998 amendment — `real` (filing in its own code repository, unscoped) behind a visibility gate: a private code
- *  repository files there as before this task; a public one, or one whose visibility read fails (closed: read again on
- *  the next use, never memoized), behaves as a gateway that files nowhere. */
+/** W1-T14998 amendment — `real` behind its code repository's visibility: private files there, unscoped; public or
+ *  unreadable (read again next use) files nowhere. */
 function unroutedGateway(real: AsyncIssueGateway, codeRepository: string, read: () => Steps<boolean>,
   drive: (steps: Steps<unknown>) => unknown): AsyncIssueGateway {
   const gate = function* (): Steps<string | undefined> {
@@ -2599,7 +2594,6 @@ function unroutedGateway(real: AsyncIssueGateway, codeRepository: string, read: 
   return gateway;
 }
 
-/** Why an unrouted gateway files nowhere (its visibility read through its own transport), or undefined. */
 function* unroutedGatewayUnfiled(gateway: object): Steps<string | undefined> {
   const gate = visibilityGates.get(gateway);
   return gate === undefined ? undefined : yield* gate();
