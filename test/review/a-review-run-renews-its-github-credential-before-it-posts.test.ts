@@ -19,6 +19,7 @@ import type { AcceptanceCriterion } from "#src/lib/plan.js";
 import { holdReviewRunLive, postReviewPending, postReviewStatusGuarded, refreshReviewPublisherToken, renewReviewPublisherToken,
   reviewDecisionDigest, reviewOwnerOrphaned } from "#src/lib/review.js";
 import { readLedgerLines } from "#src/lib/status.js";
+import { buildOpenPrViewsAsync } from "#src/lib/tick-read-worker.js";
 import { DEFAULT_SWEEP_POLICY, orphanedOwnerRetryView, runSweep, type OpenPrView, type SweepDeps } from "#src/lib/sweep.js";
 import type { WorkerResult } from "#src/lib/worker.js";
 import { withGhShim } from "#test/helpers/gh-shim.js";
@@ -479,6 +480,35 @@ test("W1-T15030 criterion 2: an input refused token_unrenewable is re-reviewed o
   };
   assert.equal(await pass("token_unrenewable"), 1, "THE CLAIM: the next pass re-reviews the refused input");
   assert.equal(await pass("other"), 0, "control: a durable refusal of the same input is not re-reviewed");
+
+  // Exercise the production producer as well as runSweep's ledger fold. The former owns
+  // reviewPostRefusedFor, which must share the token_unrenewable classification above.
+  const ledger = join(dir, "producer-ledger.ndjson");
+  const pr = { number: 15031, html_url: "https://github.com/o/r/pull/15031", body: "Remudero-Task: W1-T15030",
+    updated_at: "2026-11-27T00:00:00Z", head: { ref: "run-W1-T15030-1", sha: "producer-head" } };
+  const base = "repos/o/r";
+  const commit = `${base}/commits/producer-head`;
+  const fetchAsync = async ([, path]: string[]): Promise<unknown> => {
+    if (path === `${base}/pulls?state=open&per_page=100`) return [pr];
+    if (path === `${commit}/check-runs?per_page=100`) return { check_runs: [{ name: "ci-gate", status: "completed", conclusion: "success" }] };
+    if (path === `${commit}/status`) return { statuses: [] };
+    if (path === `${commit}/statuses?per_page=100`) return [];
+    if (path === `${base}/pulls/15031/files?per_page=100`) return [{ filename: "src/lib/review.ts" }];
+    if (path === `${base}/pulls/15031`) return { ...pr, mergeable: true, mergeable_state: "clean" };
+    return [];
+  };
+  const produce = () => buildOpenPrViewsAsync("o", "r", ledger, { fetchAsync,
+    readRequiredContextsAsync: async () => ({ kind: "contexts" as const, contexts: ["ci-gate"] }),
+    readMainPlan: () => ({ tasks: [], byId: new Map() }),
+  });
+  const [fresh] = await produce();
+  assert.ok(fresh?.reviewInputDigest);
+  appendLedger(ledger, { run_id: "review-15031-1", task_id: "W1-T15030", step: "review.post_refused",
+    pr_url: pr.html_url, head_sha: "producer-head", review_input_digest: fresh.reviewInputDigest,
+    attempted_state: "pending", reason: "token_unrenewable" });
+  const [afterTokenRefusal] = await produce();
+  assert.equal(afterTokenRefusal.reviewPostRefused, false,
+    "the production view builder does not convert a twice-401 credential failure into a durable input refusal");
 });
 
 const EVALUATOR = (sessionId: string) => ({ provider: "codex", requestedModel: "m", servedModel: "m", effort: "high", sessionId });

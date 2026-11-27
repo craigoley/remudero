@@ -19050,6 +19050,12 @@ export function isRetryableReviewThrow(reason: unknown): boolean {
   return typeof reason === "string" && reason.startsWith(RETRYABLE_REVIEW_THROW_PREFIX);
 }
 
+/** A publishing credential refusal says nothing about the review input. Shared by the sweep
+ * ledger fold and the production OpenPrView refusal flag. */
+export function isTransientReviewPostRefusal(reason: unknown): boolean {
+  return reason === "token_unrenewable" || isRetryableReviewThrow(reason);
+}
+
 export function isPostReviewDiffCeilingRefusal(reason: unknown): boolean {
   if (!isRetryableReviewThrow(reason)) return false;
   const raw = String(reason);
@@ -20103,7 +20109,7 @@ function priorActionsFromLedger(
                 : {}),
             });
           }
-        } else if (line.reason === "token_unrenewable") {
+        } else if (isTransientReviewPostRefusal(line.reason) && !isPostReviewDiffCeilingRefusal(line.reason)) {
           // W1-T15030: GitHub refused the run's token twice, which says nothing about the input: neither durable nor
           // counted, so the next pass re-reviews it, as a review.post_failed is.
         } else if (!isReopenedClosedLifecycleRefusal(line.reason)) {
