@@ -61,7 +61,7 @@ function fixture(t: TestContext) {
     pidAlive: (pid) => alive.has(pid),
     warn: () => {},
   };
-  const env = (mode: "advisory" | "enforce" | "wait"): NodeJS.ProcessEnv => ({ RMD_GH_CACHE_HOME: dir, RMD_GH_TRANSPORT_FLOOR: mode });
+  const env = (mode: "advisory" | "enforce" | "wait"): NodeJS.ProcessEnv => ({ RMD_GH_CACHE_HOME: dir, RMD_GH_TRANSPORT_FLOOR: mode, RMD_GH_COOLDOWN_S: "180" }); // W1-T15055: pin the full floor
   /** `: >` — what hooks/deny-floor.sh writes for a session's allowed read. */
   const hookStamp = (atMs: number) => files.set(path, { ms: atMs, text: "" });
   /** Another operator process's admitted gated read, as the transport itself would record it. */
