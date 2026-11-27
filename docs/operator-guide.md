@@ -1253,25 +1253,30 @@ The inspection must show the expected source, destination, and `rw=false`. The s
 the file path and presence; it never prints the secret. The daemon and worker containers do not
 receive this mount or `RMD_GITHUB_WEBHOOK_SECRET_FILE`.
 
-One **organization** webhook covers every repository the fleet manages, including any repository
-created or onboarded later (W1-T14806). Serve routes each delivery to the daemon that owns the
+The **remudero-fleet GitHub App's own webhook** (the App webhook) covers every repository the App is
+installed on, including any repository created or onboarded later (W1-T14806). Serve routes each delivery to the daemon that owns the
 payload's repository: core resolves to its own state root, and every other live instance in the
 instance registry resolves to its mounted `state/`, read per delivery so a newly onboarded instance
 is woken with no restart. A repository with no live daemon answers `202 {"error":"unmanaged_repository"}`
-and nothing is written. Retire a repository webhook only after the organization webhook shows
+and nothing is written. Retire a repository webhook only after the App webhook shows
 accepted deliveries for that repository.
 
-In the organization's **Settings → Webhooks** (`https://github.com/organizations/<org>/settings/hooks`),
-add one webhook with:
+In the App's settings (**Settings → Developer settings → GitHub Apps → remudero-fleet**), set its
+webhook to:
 
 - Payload URL: `https://console.remudero.com/v1/hooks/github`
 - Content type: `application/json`
 - Secret: the exact content of the host file
-- Events: **Pull requests**, **Check runs**, **Statuses**, and **Pull request reviews** only
+- Events (the App's **Permissions & events → Subscribe to events**): **Pull request**, **Check run**,
+  **Status**, **Pull request review**, **Issue comment**, and **Workflow run**
 - Active: enabled
 
-Do not select “send me everything.” The accepted review actions are `submitted`, `edited`, and
-`dismissed`; check runs wake only on `completed`.
+Do not subscribe to every event. The accepted review actions are `submitted`, `edited`, and
+`dismissed`; check runs and workflow runs wake only on `completed`. A `check_suite` delivery also
+arrives with the Check run subscription and is answered `202 {"error":"ignored"}`. A completed
+workflow run is also when the sweep lists the fold-debt and mutation-verdict artifacts (W1-T14810):
+without one, it lists them only once its last listing is older than policy
+`githubEventWake.artifactRecheckMs` (15 minutes).
 
 Cloudflare Access currently protects the console root, so GitHub cannot reach this path until a
 more-specific Access application exists for exactly `console.remudero.com/v1/hooks/github` with a

@@ -59,7 +59,7 @@ test("production retro finalization regenerates, calls the real preflight, then 
     'log("pr.opened"',
     "saveMarker(markerPath, nextMarker);",
     "const reviewCode = await reviewCommand(prNum);",
-    "armAndLogOutcome(prUrl, runId",
+    "await armAndLogOutcomeAsync(prUrl, runId",
   ]);
 });
 

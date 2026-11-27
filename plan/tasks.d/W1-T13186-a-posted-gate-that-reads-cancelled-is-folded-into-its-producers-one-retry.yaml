@@ -23,6 +23,9 @@
     - test/a-plan-only-pr-requeues-its-cancelled-check.test.ts
     - test/a-posted-gate-is-read-by-its-posted-name-and-run-scoped-id.test.ts
     - test/sweep/a-posted-gate-that-reads-cancelled-is-folded-into-its-producers-one-retry.test.ts
+  # refusal-amendment (W1-T13186, run work-fix-dispatch-W1-T13186-1795699419393-3687@ea231821aad30f68033afa1aa48af61e48081e01, 2026-11-26T13:56:07.226Z): the worker refused criterion 4 [outside-declared-files] — proposed widen-files: widen `files:` to cover the paths the change needs, or narrow the criteria to the declared files
+  #   worker evidence: The merge-base W1-T5802 assertion requires a retry candidate for a posted gate that lacks the producer evidence required by the invariant.
+  #   this task is held from dispatch until its record changes; an Architect must make the change above
   status: queued
   attempts: 0
   acceptance:

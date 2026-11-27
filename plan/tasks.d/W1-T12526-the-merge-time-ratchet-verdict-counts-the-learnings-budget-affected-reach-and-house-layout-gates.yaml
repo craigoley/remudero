@@ -27,7 +27,7 @@
     - test/gardeners/two-pull-requests-that-cross-a-ceiling-together-are-held-at-merge-time.test.ts
     - test/census-precheck-counts-the-house-layout-ratchet.test.ts
     - test/a-census-this-branch-grows-is-refused-before-the-push.test.ts
-  status: queued
+  status: merged
   attempts: 0
   acceptance:
     - claim: "COUNTED_RATCHET_GATES also holds learnings-budget, affected-reach and house-layout, and UNCOUNTED_RATCHET_GATES no longer names them. Each is counted on the merge-tree of (main tip, pull request head) with the gate's own counter, never a copy"
