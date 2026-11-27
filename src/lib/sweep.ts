@@ -1002,6 +1002,22 @@ export function isFleetOwnedRunBranch(head: string | undefined): boolean {
   return isSyntheticOrchestratorLaneId(owner) || TASK_ID_TRAILER_RE.test(owner);
 }
 
+/** W1-T15170: an operator hand build of a filed task uses the same run-<task>-<ms> head the fleet does, so the head
+ * alone cannot tell them apart. An open PR is fleet-owned only when its head is and its author is the fleet App.
+ * An author the batch did not carry (absent, empty, not a string) counts owned, as an unresolvable head does. */
+export function isFleetOwnedOpenPr(pr: { headRefName?: string; authorLogin?: unknown }): boolean {
+  if (!isFleetOwnedRunBranch(pr.headRefName)) return false;
+  const author = pr.authorLogin;
+  return typeof author !== "string" || author.trim() === "" || isFleetAppAuthor(author);
+}
+
+/** W1-T15170: the queue governor's and the W1-T172 lane budget's owned/foreign split of one open-board batch. */
+export function splitOpenPrOwnership(openPrs: ReadonlyArray<{ number: number; headRefName?: string; authorLogin?: unknown }>):
+  { owned: number; foreign: number; ownedPrNumbers: number[] } {
+  const ownedPrNumbers = openPrs.filter(isFleetOwnedOpenPr).map((pr) => pr.number);
+  return { owned: ownedPrNumbers.length, foreign: openPrs.length - ownedPrNumbers.length, ownedPrNumbers };
+}
+
 /** Fix ownership: plan tasks require their own creditable run branch (`status.ts:ownsBranch`).
  * Synthetic PRs may use descriptive heads, but NEVER another task's run branch: that would
  * amend foreign work under a mis-trailered identity. Disposition eligibility stays unchanged. */
