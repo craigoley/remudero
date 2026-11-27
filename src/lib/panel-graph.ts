@@ -159,6 +159,7 @@ import {
   type InboxClassification,
   type PredicateFailure,
   type Proposal,
+  releasedHumanTaskIds,
 } from "./inbox.js";
 import { skillEvalInboxStatus } from "./skill-eval-gate.js";
 
@@ -2325,16 +2326,6 @@ function projectionDigest(projection: Map<string, StatusProjection>, boardRefere
   return JSON.stringify([parts, [...boardReferents.states].sort(([a], [b]) => a.localeCompare(b))]);
 }
 
-/** Exact task-scoped release receipts, not a verdict inferred from proposal prose. */
-function releasedHumanTaskIds(lines: LedgerLines): Set<string> {
-  const out = new Set<string>();
-  for (const row of lines) {
-    if (row.step === "ratify.approved" && row.released === "verify-human" && typeof row.task_id === "string" && row.task_id) {
-      out.add(row.task_id);
-    }
-  }
-  return out;
-}
 
 /** Every release is already a `ratify.approved` row, so this existing digest also invalidates
  * the inbox memo when one lands; no second scan or release-specific fingerprint is needed. */
