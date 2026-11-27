@@ -832,8 +832,6 @@ function noteInstallationRefusal(err: unknown): void {
   // The transport cannot import status.ts without a dependency cycle; match its primary-limit signal.
   const text = failure?.stderr === undefined ? (err instanceof Error ? err.message : String(err)) : String(failure.stderr);
   if (/rate limit|quota/i.test(text)) githubInstallationBudget().noteThrottle("refused");
-  // Every real CLI read reaches this shared failure seam, including ghJson/ghExec and the HTTP
-  // transport. Nested wrappers can observe the same Error more than once, so count one refusal.
   if (err !== null && (typeof err === "object" || typeof err === "function") &&
     !notedSecondaryLimitRefusals.has(err as object) && ghErrorIsSecondaryLimit(err)) {
     notedSecondaryLimitRefusals.add(err as object);
@@ -1566,7 +1564,6 @@ export interface GhReadTicket {
   host: string;
   createdMs: number;
   refreshedMs: number;
-  /** Maximum stale age is captured at enqueue time so another reader's learned floor cannot reap us. */
   staleAfterMs?: number;
   /** A reader has already given this ticket its reserved slot; nobody yields to it again. */
   yielded: boolean;
